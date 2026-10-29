@@ -26,6 +26,7 @@ from hyperloom.contracts.recipe import (
     PatchRef,
     Recipe,
     RecipeDelta,
+    apply,
 )
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, UnknownRequest, Writer
 from hyperloom_multibranch.contracts.blackboard.peers import IntentLayer, Verdict
@@ -420,12 +421,16 @@ async def test_a_peer_replay_names_the_heads_kernel_its_change_takes_the_place_o
     assert replayed.layer is IntentLayer.KERNEL
 
 
-async def test_a_peer_replay_takes_the_wider_table_and_names_no_loss(tmp_path: Path) -> None:
+@pytest.mark.parametrize("target", ["a8w8", "qkv"])
+async def test_a_peer_replay_takes_the_wider_table_and_names_no_loss(tmp_path: Path, target: str) -> None:
+    """Also for another layer's table on the head's load variable: the service reads one table per variable, so the
+    wider table takes the head's place and the replayed recipe sets the variable once."""
+
     root = tmp_path / "blackboard"
     blackboard = await scripted_session(root, FakeClock())
     toolbox = LocalBlackboard(root, Writer(Role.TOOLBOX, "toolbox"), clock=FakeClock())
     narrow = mint_kernel_artifact(KernelKind.GEMM, "a8w8", ENV, csv_text(SHARED))
-    wide = mint_kernel_artifact(KernelKind.GEMM, "a8w8", ENV, csv_text(SHARED, B09_NEW))
+    wide = mint_kernel_artifact(KernelKind.GEMM, target, ENV, csv_text(SHARED, B09_NEW))
     store = {narrow.sha256: csv_text(SHARED), wide.sha256: csv_text(SHARED, B09_NEW)}
     await toolbox.write_request(request("r7", SPLIT_KV, RecipeDelta(add_kernels=(wide,))))
     head = Recipe("sha256:" + "a" * 64, LaunchConfig("--max-num-seqs 128"), kernels=(narrow,))
@@ -437,6 +442,7 @@ async def test_a_peer_replay_takes_the_wider_table_and_names_no_loss(tmp_path: P
 
     assert replayed.replaces == ()
     assert replayed.delta.add_kernels == (wide,)
+    assert apply(head, replayed.delta).kernels == (wide,)
 
 
 async def test_a_peer_replay_drops_a_kernel_the_heads_wider_table_already_covers(tmp_path: Path) -> None:
@@ -456,14 +462,17 @@ async def test_a_peer_replay_drops_a_kernel_the_heads_wider_table_already_covers
         await briefing.peer_replay("r7")
 
 
-async def _replayed_over(tmp_path: Path, head_data: bytes, peer_data: bytes) -> tuple[PeerReplay, dict[str, bytes]]:
-    """Another branch's table replayed on a head that holds ``head_data`` in the same slot, as the merge stacks it."""
+async def _replayed_over(
+    tmp_path: Path, head_data: bytes, peer_data: bytes, peer_target: str = "a8w8"
+) -> tuple[PeerReplay, dict[str, bytes]]:
+    """Another branch's table, for ``peer_target``, replayed on a head that holds ``head_data`` for ``a8w8`` on the same
+    load variable, as the merge stacks it."""
 
     root = tmp_path / "blackboard"
     blackboard = await scripted_session(root, FakeClock())
     toolbox = LocalBlackboard(root, Writer(Role.TOOLBOX, "toolbox"), clock=FakeClock())
     head_art = mint_kernel_artifact(KernelKind.GEMM, "a8w8", ENV, head_data)
-    peer = mint_kernel_artifact(KernelKind.GEMM, "a8w8", ENV, peer_data)
+    peer = mint_kernel_artifact(KernelKind.GEMM, peer_target, ENV, peer_data)
     store = {head_art.sha256: head_data, peer.sha256: peer_data}
     await toolbox.write_request(request("r7", SPLIT_KV, RecipeDelta(add_kernels=(peer,))))
     head = Recipe("sha256:" + "a" * 64, LaunchConfig("--max-num-seqs 128"), kernels=(head_art,))
@@ -474,14 +483,18 @@ async def _replayed_over(tmp_path: Path, head_data: bytes, peer_data: bytes) -> 
     return await briefing.peer_replay("r7"), store
 
 
-async def test_a_peer_replay_unites_two_tables_each_with_rows_the_other_lacks(tmp_path: Path) -> None:
+@pytest.mark.parametrize("target", ["a8w8", "qkv"])
+async def test_a_peer_replay_unites_two_tables_each_with_rows_the_other_lacks(tmp_path: Path, target: str) -> None:
+    """In the head's slot, also when the peer's table is for another layer on the head's load variable."""
+
     head_data, peer_data = csv_text(SHARED, B01_NEW), csv_text(SHARED[:3], B06_NEW)
 
-    replayed, store = await _replayed_over(tmp_path, head_data, peer_data)
+    replayed, store = await _replayed_over(tmp_path, head_data, peer_data, target)
 
     (united,) = replayed.delta.add_kernels
     expected = union_rows(peer_data, head_data, ENV, configs=install(tmp_path / "expected"))
-    assert replayed.replaces == ()
+    assert replayed.replaces == () and replayed.delta.remove_kernels == ()
+    assert united.slot == mint_kernel_artifact(KernelKind.GEMM, "a8w8", ENV, head_data).slot
     assert (united.sha256, store[united.sha256]) == (hashlib.sha256(expected).hexdigest(), expected)
 
 
