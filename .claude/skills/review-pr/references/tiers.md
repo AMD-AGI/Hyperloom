@@ -88,6 +88,6 @@ whose glob matches it (`*` crosses `/`); a path no row matches is `medium`.
 | high | `*assets/configs/baseline_*` | the baseline benchmark configs every gain is measured against |
 | medium | `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md`, `docs/contributing/*` | the authoring contract agents load |
 | medium | `docs/reference/*` | pages the runtime agent is told to read (`inference_optimizer/SKILL.md`) |
-| medium | `.env.template`, `examples/skills/*` | copied to `.env` at install; federated to amd/skills |
+| medium | `.env.template`, `examples/skills/*`, `examples/*/SKILL.md` | copied to `.env` at install; agent skills amd/skills federates or the wheel installs (`pyproject.toml`) |
 | medium | `src/*` | runtime code, and the prompts and skills agents load at runtime |
 | low | `docs/*`, `examples/*`, `*.md`, `LICENSE*`, `LICENSES/*`, `REUSE.toml`, `.gitignore`, `.editorconfig` | prose and metadata nothing executes |

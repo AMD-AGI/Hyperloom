@@ -61,6 +61,7 @@ def test_each_path_takes_the_risk_tiers_md_gives_it(
         "src/hyperloom/orchestrator/prompts/explore.md": "medium",
         "docs/reference/operations.md": "medium",
         "scripts/code_metrics_baseline.txt": "medium",
+        "examples/hyperloom-qwen3-8b-3h/SKILL.md": "medium",
         "docs/conceptual/optimization-loop.md": "low",
         "README.md": "low",
         "src/kernelforge/cli/tests/test_parse.py": "low",
