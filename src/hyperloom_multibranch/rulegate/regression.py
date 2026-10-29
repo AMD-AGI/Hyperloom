@@ -5,12 +5,14 @@
 
 A reproduction case is the attachments of a repro test: a directory with a ``repro.sh`` at its top, whose verdict on a
 commit is ``reproduced`` (the failure occurs) or ``not_reproduced`` (it ran clean). :class:`ReproRunner` is the one
-place that submits repro tests; :class:`RegressionSet` runs the cases of every fix a commit builds on.
+place that submits repro tests; :class:`RegressionSet` runs the cases of every fix a commit builds on, and the cases
+other sessions on the same image and model registered (:class:`CasePool`) that run clean on the root.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Awaitable, Iterable
 from dataclasses import dataclass
 from typing import Protocol, TypeVar
@@ -26,18 +28,38 @@ from hyperloom.contracts.measurement import (
 )
 from hyperloom.contracts.recipe import RecipeDelta, apply
 from hyperloom_multibranch.contracts.gate import RegressionOutcome, ResultUnverified, ResultVerifier
+from hyperloom_multibranch.contracts.blackboard import NotRecorded
 from hyperloom_multibranch.contracts.blackboard.interfaces import CommitQuery, GateRecords, RecordSearch
 from hyperloom_multibranch.contracts.blackboard.records import RegressionCase, TestRecord
 from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import Backpressure, RequestRejected, Toolbox
+from hyperloom_multibranch.rulegate.fix_case import FIX_CASE_ID
 from hyperloom_multibranch.rulegate.service import Polling
+
+log = logging.getLogger(__name__)
 
 #: Seconds before a repro test the toolbox refused with backpressure is submitted again.
 RESUBMIT_SECONDS = 30.0
 NO_DELTA = RecipeDelta()
 
 T = TypeVar("T")
+
+
+@dataclass(frozen=True)
+class PooledCase:
+    """A case another session registered: ``data`` is the packed case (:func:`~.fix_case.pack_case`), ``case_id`` its
+    sha256, and ``origin`` the session and the fix commit it came from."""
+
+    case_id: str
+    data: bytes
+    origin: str
+
+
+class CasePool(Protocol):
+    """The cases other sessions on this session's image and model registered; none when they cannot be read."""
+
+    async def cases(self) -> tuple[PooledCase, ...]: ...
 
 
 @dataclass(frozen=True)
@@ -95,6 +117,12 @@ class ReproRunner:
             await asyncio.shield(self._toolbox.cancel(request_id))
             raise
 
+    async def store(self, data: bytes) -> tuple[AttachmentRef, ...]:
+        """The attachments a repro test carries to run the packed case ``data``; raises :class:`RequestRejected`
+        when the toolbox refuses to keep it."""
+
+        return (await self._toolbox.put_attachment(FIX_CASE_ID, "dir", data),)
+
     async def _submit(self, request: TestRequest) -> str:
         while True:
             try:
@@ -123,8 +151,9 @@ class ReproRunner:
         return ReproRun(request_id, verdict=result.repro_verdict)
 
 
-class RegressionBlackboard(RecordSearch, CommitQuery, Protocol):
-    """What the regression set reads: the cases of a commit's ancestry and the repro test each case came from."""
+class RegressionBlackboard(RecordSearch, CommitQuery, GateRecords, Protocol):
+    """What the regression set reads, the cases of a commit's ancestry and the repro test each case came from, and
+    where it registers a pooled case of the root."""
 
 
 class RegressionSet:
@@ -133,17 +162,32 @@ class RegressionSet:
 
     A case's verdict on a recipe is kept, keyed by the digest of the recipe ``repo`` and the delta make, so the same
     case on the same recipe is not run again; a case that ran to no verdict runs again next time.
+
+    Given a ``pool``, before its first check the set runs each of the pool's cases on the root once, but for one the
+    root holds already, as a resumed session does. One that runs clean there becomes a case of the root, so every
+    check runs it. One that reproduces there is a defect the root carries, which no merge can be held to, and one that
+    ran to no verdict is left for a later session to try.
     """
 
-    def __init__(self, blackboard: RegressionBlackboard, runner: ReproRunner, repo: ExperimentRepo) -> None:
+    def __init__(
+        self,
+        blackboard: RegressionBlackboard,
+        runner: ReproRunner,
+        repo: ExperimentRepo,
+        *,
+        pool: CasePool | None = None,
+    ) -> None:
         self._blackboard = blackboard
         self._runner = runner
         self._repo = repo
         self._verdicts: dict[tuple[str, str], str] = {}
+        self._pool = pool
+        self._pooling = asyncio.Lock()
 
     async def check(
         self, base_commit: str, candidate_delta: RecipeDelta, *, sources: tuple[str, ...]
     ) -> RegressionOutcome:
+        await self._pooled()
         cases = await self._cases((base_commit, *sources))
         if not cases:
             return RegressionOutcome(True)
@@ -151,6 +195,41 @@ class RegressionSet:
         outcomes = await _gathered(self._outcome(case, base_commit, candidate_delta, digest) for case in cases)
         failed = [f"{case.case_ref}: {outcome}" for case, outcome in zip(cases, outcomes) if outcome != NOT_REPRODUCED]
         return RegressionOutcome(not failed, "; ".join(failed), len(cases))
+
+    async def _pooled(self) -> None:
+        """The pool's cases on the root, once a set; not before the baseline names the root."""
+
+        async with self._pooling:
+            if self._pool is None:
+                return
+            try:
+                root = (await self._blackboard.baseline()).root_commit
+            except NotRecorded:
+                return
+            pool, self._pool = self._pool, None
+            held = await self._held(root)
+            fresh = [case for case in await pool.cases() if case.case_id not in held]
+            await _gathered(self._root_case(case, root) for case in fresh)
+
+    async def _held(self, root: str) -> set[str]:
+        """The sha256 of each attachment of the cases ``root`` holds."""
+
+        found = set()
+        for case in await self._blackboard.regression_cases_for(root):
+            found.update(item.sha256 for item in (await self._blackboard.record(case.request_id)).request.attachments)
+        return found
+
+    async def _root_case(self, case: PooledCase, root: str) -> None:
+        try:
+            attachments = await self._runner.store(case.data)
+        except RequestRejected as error:
+            log.warning("the pooled case of %s was not kept: %s", case.origin, error)
+            return
+        run = await self._runner.run(root, NO_DELTA, attachments, branch=INTEGRATION_BRANCH)
+        if run.verdict != NOT_REPRODUCED:
+            log.info("the pooled case of %s did not run clean on the root %s: %s", case.origin, root, run.outcome)
+            return
+        await register_case(self._blackboard, root, run.request_id, name=f"{FIX_CASE_ID} of {case.origin}")
 
     async def _cases(self, commits: Iterable[str]) -> list[RegressionCase]:
         """Every commit's cases, each once, in the order they are first found."""
@@ -225,8 +304,11 @@ class CaseRegistry(RecordSearch, GateRecords, Protocol):
     """Where a fix's case is registered: the rule gate's handle on the blackboard."""
 
 
-async def register_case(blackboard: CaseRegistry, fix_commit: str, repro_request_id: str) -> RegressionCase:
-    """Register the case of the repro test ``repro_request_id`` as the regression case of ``fix_commit``.
+async def register_case(
+    blackboard: CaseRegistry, fix_commit: str, repro_request_id: str, *, name: str = ""
+) -> RegressionCase:
+    """Register the case of the repro test ``repro_request_id`` as the regression case of ``fix_commit``, named
+    ``name``, else by its attachments.
 
     The test is the fix's candidate run: raises ``ValueError`` unless it is a repro test whose case ran clean.
     """
@@ -235,7 +317,7 @@ async def register_case(blackboard: CaseRegistry, fix_commit: str, repro_request
     clean = record.result is not None and record.result.repro_verdict == NOT_REPRODUCED
     if record.request.kind is not TestKind.REPRO or not clean:
         raise ValueError(f"{repro_request_id} is not a repro test whose case ran clean")
-    case_ref = ", ".join(attachment.id for attachment in record.request.attachments)
+    case_ref = name or ", ".join(attachment.id for attachment in record.request.attachments)
     case = RegressionCase(case_ref, fix_commit, repro_request_id)
     await blackboard.add_regression_case(case)
     return case
@@ -257,9 +339,11 @@ async def _gathered(awaitables: Iterable[Awaitable[T]]) -> list[T]:
 __all__ = [
     "NO_DELTA",
     "RESUBMIT_SECONDS",
+    "CasePool",
     "CaseRegistry",
     "FixNotProven",
     "FixProof",
+    "PooledCase",
     "RegressionBlackboard",
     "RegressionSet",
     "ReproRun",

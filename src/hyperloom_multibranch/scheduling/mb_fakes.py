@@ -39,7 +39,8 @@ def mb_fake_close_knowledge(
     """CLOSE's knowledge steps with the Experiences and the learnings written nowhere: both steps are disabled for
     :data:`MB_FAKE_EXPERIENCE_KB`, whatever the environment configures; the search tree goes to the environment's
     archive as usual, marking the replays of the champions ``cross_image`` names, the collection receipts to the
-    session's reports, and the judge's transcript beside the archive.
+    session's reports, the judge's transcript beside the archive, and the regression cases, read from the session's
+    blob store, to the case pool beside it.
 
     Stands in for publishing to the online Experience KB service; replaced by ``close_knowledge`` on that service
     once a session uses it.
@@ -47,7 +48,11 @@ def mb_fake_close_knowledge(
 
     nowhere = NoOpExperienceKB(MB_FAKE_EXPERIENCE_KB)
     targets = CloseTargets(
-        experience_kb=nowhere, learning_kb=nowhere, receipts=layout.reports, judge_transcript=layout.judge
+        experience_kb=nowhere,
+        learning_kb=nowhere,
+        receipts=layout.reports,
+        judge_transcript=layout.judge,
+        blobs=layout.blobs,
     )
     done = close_knowledge(snapshot, metric, budget_seconds=budget_seconds, targets=targets, cross_image=cross_image)
     return replace(done, experiences=_faked(done.experiences), learnings=_faked(done.learnings))
