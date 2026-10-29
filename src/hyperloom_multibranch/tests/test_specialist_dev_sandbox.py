@@ -221,6 +221,63 @@ async def test_one_lease_a_branch_and_cap_leases_a_session(rig):
     assert rig.toolbox.leased == [(B1, 1)]
 
 
+B3 = "s3"
+
+
+async def test_a_branch_refused_for_capacity_is_told_its_place_and_a_released_lease_is_held_for_the_first(rig):
+    server = rig.build(cap=1).server
+    await server.call("dev_sandbox_lease")
+    assert "1st in line" in await _refused(server.call("dev_sandbox_lease", branch=B2), "cap_reached")
+    assert "2nd in line" in await _refused(server.call("dev_sandbox_lease", branch=B3), "cap_reached")
+    assert "1st in line" in await _refused(server.call("dev_sandbox_lease", branch=B2), "cap_reached")
+    await server.call("dev_sandbox_release")
+    assert any(entry.branch == B2 and "held for you" in entry.content for entry in rig.logs.entries)
+    assert "2nd in line" in await _refused(server.call("dev_sandbox_lease", branch=B3), "cap_reached")
+    rig.clock.now += LIMITS.hold_s - 1
+    await server.call("dev_sandbox_lease", branch=B2)
+    assert rig.toolbox.leased == [(B1, 1), (B2, 1)]
+
+
+async def test_a_held_lease_the_first_in_line_does_not_take_passes_to_the_next(rig):
+    server = rig.build(cap=1).server
+    await server.call("dev_sandbox_lease")
+    await _refused(server.call("dev_sandbox_lease", branch=B2), "cap_reached")
+    await _refused(server.call("dev_sandbox_lease", branch=B3), "cap_reached")
+    await server.call("dev_sandbox_release")
+    rig.clock.now += LIMITS.hold_s + 1
+    await server.call("dev_sandbox_lease", branch=B3)
+    assert rig.toolbox.leased == [(B1, 1), (B3, 1)]
+    assert "1st in line" in await _refused(server.call("dev_sandbox_lease", branch=B2), "cap_reached")
+
+
+async def test_a_stopped_branch_leaves_the_line(rig):
+    built = rig.build(cap=1)
+    await built.server.call("dev_sandbox_lease")
+    await _refused(built.server.call("dev_sandbox_lease", branch=B2), "cap_reached")
+    await _refused(built.server.call("dev_sandbox_lease", branch=B3), "cap_reached")
+    await built.leases.reclaim(B2, "its branch stopped")
+    assert "1st in line" in await _refused(built.server.call("dev_sandbox_lease", branch=B3), "cap_reached")
+    await built.server.call("dev_sandbox_release")
+    await built.server.call("dev_sandbox_lease", branch=B3)
+
+
+async def test_a_branch_the_toolbox_has_no_cards_for_is_put_in_line(rig):
+    server = rig.build(cap=2).server
+    rig.toolbox.refusal = SandboxUnavailable("no card is free")
+    assert "1st in line" in await _refused(server.call("dev_sandbox_lease"), "cards_busy")
+    assert "2nd in line" in await _refused(server.call("dev_sandbox_lease", branch=B2), "cards_busy")
+    rig.toolbox.refusal = None
+    await server.call("dev_sandbox_lease")
+    assert rig.toolbox.leased == [(B1, 1)]
+
+
+async def test_the_lease_tool_tells_a_queued_branch_to_keep_working_and_ask_again(rig):
+    server = rig.build(cap=1).server
+    await server.call("dev_sandbox_lease")
+    refusal = await _refused(server.call("dev_sandbox_lease", branch=B2), "cap_reached")
+    assert "keep working" in refusal and "dev_sandbox_lease again" in refusal
+
+
 async def test_the_toolboxs_refusal_reaches_the_specialist_and_frees_the_slot(rig):
     server = rig.build(cap=1).server
     rig.toolbox.refusal = RequestRejected("too few cards", "lease_leaves_no_measurement")

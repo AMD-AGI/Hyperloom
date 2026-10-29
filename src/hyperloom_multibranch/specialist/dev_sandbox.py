@@ -10,10 +10,12 @@ the model: when it expires, when the branch made no call for :attr:`DevLimits.id
 :attr:`DevLimits.idle_running_s` with something), and once tests have queued for :attr:`DevLimits.queued_s`. A long lease,
 for a tool that runs for hours (Forge), lasts at most :attr:`DevLimits.long_max_s` and is taken back only when it
 expires, or when nothing it started runs and it sat idle. A branch
-whose lease ended leases again only after :attr:`DevLimits.cooldown_s`. The branch's sessions give its lease back when
-a run ends or is stopped, unless it is :meth:`DevLeases.busy` (a long one with a process running, which outlives the
-run), and every lease when the branch stops (:class:`~hyperloom_multibranch.specialist.agent_session.DevLeaseHolder`);
-the toolbox's close releases whatever is left.
+whose lease ended leases again only after :attr:`DevLimits.cooldown_s`. A branch refused for capacity (every lease lent
+out, or no card free) joins a line and is told its place; a lease given back is held for the first in line for
+:attr:`DevLimits.hold_s`, then passes to the next, and a stopped branch leaves the line. The branch's sessions give its
+lease back when a run ends or is stopped, unless it is :meth:`DevLeases.busy` (a long one with a process running,
+which outlives the run), and every lease when the branch stops
+(:class:`~hyperloom_multibranch.specialist.agent_session.DevLeaseHolder`); the toolbox's close releases whatever is left.
 
 Commands run in a :class:`~hyperloom_multibranch.specialist.agent_sandbox.LocalAgentSandbox` on the leased cards, at a
 lower CPU priority, or, on the hosted backend, in the leased ``dev`` sandbox
@@ -77,6 +79,8 @@ LINES = 100
 MINUTE = 60.0
 #: Where, in a branch's directory, the roots of its hosted dev sandboxes are, one per lease.
 DEV_DIR = "dev"
+#: The refusals that put a branch in line: every lease lent out, or no card free (the hosted backend's quota included).
+CAPACITY = frozenset({"cap_reached", "cards_busy"})
 
 
 class LeaseTerm(str, Enum):
@@ -102,6 +106,8 @@ class DevLimits:
     spend_s: float = 60.0
     queued_s: float = 300.0
     cooldown_s: float = 600.0
+    #: How long a lease given back is held for the first branch in line before it passes to the next.
+    hold_s: float = 300.0
     idle_s: float = 600.0
     idle_running_s: float = 900.0
     #: How long a lease call waits for its sandbox before it answers that the sandbox is starting.
@@ -164,7 +170,7 @@ class DevRefused(ToolError):
 
     def __init__(self, code: str, reason: str) -> None:
         super().__init__(f"{code}: {reason}")
-        self.code = code
+        self.code, self.reason = code, reason
 
 
 @dataclass(frozen=True)
@@ -247,6 +253,10 @@ class DevLeases:
         self._starting: dict[str, asyncio.Task[Granted]] = {}
         self._ended: dict[str, float] = {}
         self._reclaimed: dict[str, str] = {}
+        #: The branches refused for capacity, first come first, each until it is granted or stopped; the first as many
+        #: as there are free slots have one held for them, until the time in ``_holds``.
+        self._line: list[str] = []
+        self._holds: dict[str, float] = {}
         self._watch: asyncio.Task[None] | None = None
 
     @property
@@ -263,6 +273,7 @@ class DevLeases:
         if pending is None:
             self._reclaimed.pop(branch, None)
             await self._admit(branch)
+            self._holds.pop(branch, None)
             slot = min(set(range(self._limits.cap)) - set(self._slots.values()))
             self._slots[branch] = slot
             longest = self._limits.long_max_s if term is LeaseTerm.LONG else self._limits.max_s
@@ -274,7 +285,22 @@ class DevLeases:
         if not done:
             return Starting("the sandbox is starting; call dev_sandbox_lease again for it")
         self._starting.pop(branch, None)
-        return pending.result()
+        try:
+            granted = pending.result()
+        except DevRefused as refused:
+            if refused.code not in CAPACITY:
+                self._leave_line(branch)
+                raise
+            if branch not in self._line:
+                self._line.append(branch)
+            raise DevRefused(refused.code, f"{refused.reason}; {self._place(branch)}") from refused
+        except BaseException:
+            self._leave_line(branch)
+            raise
+        finally:
+            await self._offer()
+        self._leave_line(branch)
+        return granted
 
     async def _granted(self, branch: str, cards: int, seconds: float, term: LeaseTerm) -> Granted:
         """Lease ``branch``'s sandbox for ``seconds`` at most, the slot taken; a sandbox the toolbox lets live less
@@ -344,8 +370,10 @@ class DevLeases:
     async def reclaim(self, branch: str, reason: str) -> None:
         """Take back ``branch``'s lease, if it holds one or one is starting."""
         await self._cancel_start(branch)
+        self._leave_line(branch)
         if branch in self._held:
             await self._end(branch, reason)
+        await self._offer()
 
     async def reclaim_unless_busy(self, branch: str, reason: str) -> None:
         """Take back ``branch``'s lease, if it holds one, unless it is :meth:`busy`: that one stays until its own rules
@@ -377,6 +405,7 @@ class DevLeases:
 
     async def sweep(self) -> None:
         """Take back every lease that expired, sat idle, or kept tests waiting for cards too long."""
+        await self._offer()
         if not self._held:
             return
         queued = (await self._toolbox.queue_state()).queued
@@ -421,8 +450,42 @@ class DevLeases:
             raise DevRefused("tests_waiting", "tests are waiting for cards; submit your test instead")
         if branch in self._slots:
             raise DevRefused("lease_exists", "you hold a dev sandbox already; use it or release it")
-        if len(self._slots) >= self._limits.cap:
-            raise DevRefused("cap_reached", f"the session's {self._limits.cap} dev sandbox(es) are all lent out")
+        await self._offer()
+        if branch not in self._holds and len(self._slots) + len(self._holds) >= self._limits.cap:
+            if branch not in self._line:
+                self._line.append(branch)
+            raise DevRefused(
+                "cap_reached",
+                f"the session's {self._limits.cap} dev sandbox(es) are all lent out; {self._place(branch)}",
+            )
+
+    async def _offer(self) -> None:
+        """Pass on the holds that lapsed, and hold each free slot for the next branch in line, telling it so."""
+        now = self._clock()
+        for branch, until in list(self._holds.items()):
+            if now >= until:
+                self._leave_line(branch)
+                await self._note(branch, "the dev sandbox held for you passed to the next in line; ask again to rejoin")
+        free = self._limits.cap - len(self._slots)
+        for branch in [waiting for waiting in self._line if waiting not in self._slots][:free]:
+            if branch not in self._holds:
+                self._holds[branch] = now + self._limits.hold_s
+                await self._note(
+                    branch,
+                    f"a dev sandbox is free and held for you for {self._limits.hold_s / MINUTE:g} min: "
+                    "call dev_sandbox_lease to take it",
+                )
+
+    def _leave_line(self, branch: str) -> None:
+        self._holds.pop(branch, None)
+        if branch in self._line:
+            self._line.remove(branch)
+
+    def _place(self, branch: str) -> str:
+        return (
+            f"you are {_ordinal(self._line.index(branch) + 1)} in line: keep working and call dev_sandbox_lease "
+            f"again later; a lease given back is held for the first in line for {self._limits.hold_s / MINUTE:g} min"
+        )
 
     async def _leased(self, branch: str, cards: int, lifetime_sec: float) -> BranchLease:
         """A dev sandbox takes only cards free now: waiting would hold cards a test is about to need."""
@@ -455,6 +518,7 @@ class DevLeases:
             await held.sandbox.stop()
         finally:
             await self._toolbox.release_branch_sandbox(held.lease.lease_id)
+        await self._offer()
         minutes = (self._clock() - held.granted) / MINUTE
         await self._note(branch, f"dev sandbox ended after {minutes:.1f} min: {reason}")
         await self._charge(branch, held)
@@ -511,6 +575,11 @@ def forge_spend(root: Path) -> tuple[float, TokenCounts] | None:
         cache_write=sum(int(ledger.get("cache_creation_input_tokens", 0)) for ledger in ledgers),
     )
     return sum(float(ledger.get("total_cost_usd", 0.0)) for ledger in ledgers), tokens
+
+
+def _ordinal(place: int) -> str:
+    digits = f"0{place}"
+    return f"{place}{'th' if digits[-2] == '1' else {'1': 'st', '2': 'nd', '3': 'rd'}.get(digits[-1], 'th')}"
 
 
 def _less(total: TokenCounts, before: TokenCounts) -> TokenCounts:
@@ -633,7 +702,8 @@ def _lease_tool(leases: DevLeases) -> _DevTool:
         "Lease cards of your own for a while, to check a change runs and time a kernel before a full test, or, as a "
         "long lease, to run a tool for hours (a Forge fusion or rewrite); refused while tests wait for cards. Its "
         "results never enter the gate. A sandbox may take minutes to start: while this answers starting, call it "
-        "again.",
+        "again. Refused because all are lent out, you are put in line and told your place: keep working and call it "
+        "again; a lease given back is held for the first in line for a few minutes.",
         _schema(
             {
                 "cards": {"type": _INTEGER, "minimum": 1, "description": f"How many cards ({leases.limits.cards})."},
