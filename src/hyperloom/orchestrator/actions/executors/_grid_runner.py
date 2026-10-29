@@ -1926,25 +1926,21 @@ def _build_variant_yaml(
         envs[extra_args_env] = ""
     base_envs = apply_variant_env(envs, variant, base.extra_envs, base.unset_envs)
     pin_mlperf_round_concurrency(envs)
-    # The launcher re-exports these unconditionally, so a value carried here is
-    # one the run never used.
+    # The launcher re-exports these unconditionally, so a value carried here is one the run never used.
     for k in launcher_overwritten_envs(bench) & envs.keys():
         log.warning("grid: dropping %s for variant %s; the recipe overwrites it", k, variant.name)
         envs.pop(k, None)
     # The three AgentX bounds took this rung's CONC through ``variant_conc`` above, not through this merge: raising
     # the client's grace alone would make the round wait inside a cap that did not move with it.
-    _overlay = importable_overlay_dir(variant)
-    if _overlay:
+    if _overlay := importable_overlay_dir(variant):
         prepend_launch_path(envs, "PYTHONPATH", _overlay)
 
     # Attempt runtime override: inject path_prefix/pythonpath_prefix/framework_bin etc. into benchmark.envs so the
     # server subprocess resolves the attempt runtime.
-    _rt_override = getattr(variant, "runtime_override", None) or {}
-    if _rt_override:
+    if _rt_override := getattr(variant, "runtime_override", None):
         apply_runtime_override(envs, _rt_override)
     refuse_unpinned_speculative_change(base_args, base_envs, combined, envs)
-    # ``envs`` is the launch's environment, TP included; the AgentX branch above meets this check in
-    # ``materialize_variant``, where its own launch is composed.
+    # ``envs`` is the launch's environment, TP included; the AgentX branch meets it in ``materialize_variant``.
     speculative_capability.refuse_unrunnable_speculative_stack(
         combined, framework=str(bench.get("framework") or ""), envs=envs, model_path=target.model_path
     )

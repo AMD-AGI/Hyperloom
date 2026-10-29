@@ -357,6 +357,22 @@ def _speculative_capability_reason(
     )
 
 
+def _model_class_flag_reason(args: str, *, model_path: str, is_mla: bool, is_moe: bool) -> str | None:
+    """Why a flag in ``args`` asks for a model class this model is not recognised as, else ``None``."""
+    for flag, required_class in _COMPATIBILITY_FLAG_RULES:
+        if flag not in args:
+            continue
+        # Model-class predicate
+        if (required_class == "mla" and is_mla) or (required_class == "moe" and is_moe):
+            continue
+        return (
+            f"{flag} requires {required_class.upper()} model; "
+            f"MODEL_PATH={model_path!r} not recognised as "
+            f"{required_class.upper()}-class"
+        )
+    return None
+
+
 def apply_compatibility_filter(
     grid: list["GridVariant"],
     *,
@@ -406,18 +422,7 @@ def apply_compatibility_filter(
                 }
             )
             continue
-        for flag, required_class in _COMPATIBILITY_FLAG_RULES:
-            if flag not in args:
-                continue
-            # Model-class predicate
-            class_ok = (required_class == "mla" and is_mla) or (required_class == "moe" and is_moe)
-            if not class_ok:
-                skip_reason = (
-                    f"{flag} requires {required_class.upper()} model; "
-                    f"MODEL_PATH={serving.model_path!r} not recognised as "
-                    f"{required_class.upper()}-class"
-                )
-                break
+        skip_reason = _model_class_flag_reason(args, model_path=serving.model_path, is_mla=is_mla, is_moe=is_moe)
         if skip_reason:
             dropped.append(
                 {
