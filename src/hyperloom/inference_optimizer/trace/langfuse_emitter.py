@@ -41,6 +41,9 @@ from .trace_env import (
 
 log = logging.getLogger(__name__)
 
+#: What a Langfuse SDK call fails with: an argument or method one SDK major version rejects, or the transport refusing.
+_SDK_FAILURES: tuple[type[Exception], ...] = (AttributeError, TypeError, ValueError, RuntimeError, OSError)
+
 _STATUS_CLOCK_BUCKET_SEC = 60
 _STATUS_CLOCK_KEYS = frozenset({"explore_elapsed_s", "session_elapsed_s"})
 _STATUS_CLOCK_DERIVED_KEYS = frozenset({"explore_ratio"})
@@ -505,7 +508,7 @@ class LangfuseEmitter:
             )
             _end_obs(obs, start)
             self._counts["kb_spans_sent"] += 1
-        except Exception:  # isolation boundary: one KB span row
+        except _SDK_FAILURES:
             self._counts["errors"] += 1
             log.debug("langfuse: record_kb_span failed", exc_info=True)
             return False
@@ -585,7 +588,7 @@ class LangfuseEmitter:
         for name, step in steps.items():
             try:
                 step()
-            except Exception:  # isolation boundary: one flush step
+            except _SDK_FAILURES:
                 failed = True
                 self._counts["errors"] += 1
                 log.debug("langfuse: flush step %s failed", name, exc_info=True)
@@ -659,13 +662,13 @@ class LangfuseEmitter:
             )
             _end_obs(obs, None)
             self._counts["session_start_recorded"] = 1
-        except Exception:
+        except _SDK_FAILURES:
             self._counts["errors"] += 1
             log.debug("langfuse: record_session_start failed", exc_info=True)
         finally:
             try:
                 self._client.flush()
-            except Exception:
+            except _SDK_FAILURES:
                 self._counts["errors"] += 1
                 log.debug("langfuse: flush after session_start failed", exc_info=True)
             # Persist the flag so a later process skips re-emitting.
@@ -707,13 +710,13 @@ class LangfuseEmitter:
             )
             _end_obs(obs, None)
             self._counts["breakdown_recorded"] = 1
-        except Exception:
+        except _SDK_FAILURES:
             self._counts["errors"] += 1
             log.debug("langfuse: record_session_breakdown failed", exc_info=True)
         finally:
             try:
                 self._client.flush()
-            except Exception:
+            except _SDK_FAILURES:
                 self._counts["errors"] += 1
                 log.debug("langfuse: flush after breakdown failed", exc_info=True)
             # Persist the flag so a later process skips re-attaching the document.
@@ -761,7 +764,7 @@ class LangfuseEmitter:
             self._counts["status_updates_sent"] += 1
             self._last_status_sig = sig
             self._last_status_ts = now
-        except Exception:
+        except _SDK_FAILURES:
             self._counts["errors"] += 1
             log.debug("langfuse: record_status failed", exc_info=True)
 
@@ -774,7 +777,7 @@ class LangfuseEmitter:
         """End a span; a failure is counted in the receipt's ``errors``."""
         try:
             span.end()
-        except Exception:  # isolation boundary: one span end
+        except _SDK_FAILURES:
             self._counts["errors"] += 1
             log.debug("langfuse: span end failed", exc_info=True)
 

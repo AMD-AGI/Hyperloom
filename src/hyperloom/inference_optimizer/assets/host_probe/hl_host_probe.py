@@ -404,7 +404,7 @@ class HostProbe:
                         nbytes=0,
                         shape_sig=probe._shape_signature(args),
                     )
-                except Exception:
+                except (TypeError, RuntimeError):
                     log.debug("host call record failed for %s", api, exc_info=True)
 
         wrapper._hl_host_probe = True  # type: ignore[attr-defined]
@@ -439,7 +439,7 @@ class HostProbe:
                                 nbytes=int(getattr(self, "nbytes", 0) or 0),
                                 shape_sig=probe._shape_signature((self,)),
                             )
-                        except Exception:
+                        except (TypeError, RuntimeError):
                             log.debug("host call record failed for %s", api, exc_info=True)
                     return result
 
@@ -535,7 +535,7 @@ class HostProbe:
                     if stats.started:
                         stats.wall_s += time.perf_counter() - stats.started
                         stats.started = 0.0
-        except Exception:
+        except RuntimeError:
             log.debug("profile hook failed", exc_info=True)
             return
 
@@ -658,7 +658,7 @@ class HostProbe:
                 f"hl_host_probe_rank{_rank()}_pid{os.getpid()}.json",
                 self.report(),
             )
-        except Exception as exc:
+        except OSError as exc:
             log.warning("could not write host probe report: %s", exc, exc_info=True)
             return ""
 

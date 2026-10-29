@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -96,6 +97,13 @@ class Narration:
     used: bool = False
 
 
+def _narration_failures() -> tuple[type[BaseException], ...]:
+    """What a failed narration call or a malformed reply raises; an SDK not yet imported cannot have raised."""
+    sdk_errors = (("httpx", "HTTPError"), ("openai", "OpenAIError"), ("claude_agent_sdk", "ClaudeSDKError"))
+    loaded = tuple(getattr(sys.modules[mod], name) for mod, name in sdk_errors if mod in sys.modules)
+    return (OSError, RuntimeError, ValueError, TimeoutError, AttributeError, *loaded)
+
+
 def render_session_report(
     breakdown: dict[str, Any],
     *,
@@ -115,7 +123,7 @@ def render_session_report(
             parsed = parse_llm_response(llm_raw)
             exec_summary_llm = parsed["executive_summary"]
             narratives = parsed["section_narratives"]
-        except Exception as exc:  # isolation boundary: the optional LLM narration pass
+        except _narration_failures() as exc:
             log.warning("LLM narration failed: %s", exc, exc_info=True)
             llm_raw = f"<llm_error: {type(exc).__name__}: {exc}>"
 
