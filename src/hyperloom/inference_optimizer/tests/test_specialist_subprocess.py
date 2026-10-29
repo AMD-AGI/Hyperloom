@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import signal
+import sqlite3
 import subprocess
 import sys
 import time
@@ -1276,7 +1277,7 @@ async def test_partial_progress_skips_invalid_payload_and_swallow_callback_error
     valid.write_text('{"summary": "still working"}', encoding="utf-8")
 
     async def _callback_fails(*_args):
-        raise RuntimeError("telemetry sink unavailable")
+        raise sqlite3.OperationalError("database is locked")
 
     newest = await disp._publish_partial_progress(
         partial_files=(valid,),

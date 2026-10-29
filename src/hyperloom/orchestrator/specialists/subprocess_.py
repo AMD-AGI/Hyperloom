@@ -27,6 +27,7 @@ import asyncio
 import json
 import logging
 import os
+import sqlite3
 import subprocess
 import time
 import uuid
@@ -1030,7 +1031,7 @@ class SpecialistSubprocessDispatcher:
             newest = max(newest, mtime)
             try:
                 await progress_cb(payload, elapsed)
-            except Exception:
+            except sqlite3.Error:
                 log.exception("specialist progress callback raised")
             break
         return newest
