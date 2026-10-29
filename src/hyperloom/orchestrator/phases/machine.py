@@ -279,7 +279,7 @@ class MachinePhase(CoordinatorCollaborator):
 
     async def _fire_phase_entry(self, move: Transition) -> None:
         """Run the entered phase's side effects, recording rather than raising a hook's storage failure."""
-        # Phase-entry side effects are additive; their storage failures are logged only. They run on the transition itself,
+        # Phase-entry side effects are additive; storage failures are logged only. They run on the transition itself,
         # which is what callers advancing into CLOSE rely on to see the sequencer's settlement once it returns.
         try:
             await self._on_phase_entered(
