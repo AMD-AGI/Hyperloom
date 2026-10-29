@@ -31,6 +31,8 @@ from hyperloom.measure.sandboxes import DEFAULT_MAX_PARALLEL_TESTS, MEASUREMENT_
 from hyperloom.sandbox.e2b import E2BSandboxProvider, RetryPolicy
 from hyperloom.sandbox.socket import Role, SandboxProvider
 from hyperloom_multibranch.blackboard import LocalBlackboard
+from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind
+from hyperloom_multibranch.contracts.toolbox import BranchLease, LeaseCharge
 from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES
 from hyperloom_multibranch.toolbox.hosted_executor import DEFAULT_TEST_TIMEOUT_SEC, HostedExecutor
 from hyperloom_multibranch.toolbox.hosted_leases import (
@@ -221,6 +223,23 @@ class HostedToolbox(LeasedToolbox):
     backend: HostedMeasurementBackend
     provider: SandboxProvider
     leases: HostedBranchLeases | None
+
+    async def lease_branch_sandbox(
+        self,
+        branch_id: str,
+        cards: int,
+        *,
+        wait_sec: float | None = None,
+        charge: LeaseCharge | None = None,
+        lifetime_sec: float | None = None,
+    ) -> BranchLease:
+        """Take a ``dev`` sandbox for ``branch_id``'s agent, living as long as ``lifetime_sec`` asks
+        (:meth:`HostedBranchLeases.lifetime_sec`)."""
+
+        if self.leases is None:
+            return await super().lease_branch_sandbox(branch_id, cards, wait_sec=wait_sec, charge=charge)
+        charge = charge or LeaseCharge(LeaseKind.DEV, branch_id)
+        return await self.leases.lease(branch_id, cards, charge=charge, wait_sec=wait_sec, lifetime_sec=lifetime_sec)
 
     async def release_branch_sandbox(self, lease_id: str) -> None:
         if self.leases is not None:

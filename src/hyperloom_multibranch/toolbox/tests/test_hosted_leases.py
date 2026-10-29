@@ -39,6 +39,7 @@ from hyperloom_multibranch.contracts.toolbox import LeaseCharge
 from hyperloom_multibranch.contracts.toolbox import REJECTION_CODES, BranchLease, MeasurementCapacity, RequestRejected
 from hyperloom_multibranch.toolbox.hosted_leases import (
     LEASE_PURPOSE,
+    LIFETIME_MARGIN_SEC,
     RUN_ID_KEY,
     DevSession,
     GrantLimits,
@@ -262,16 +263,13 @@ async def test_a_lease_that_would_leave_no_sandbox_for_a_test_is_refused(make: M
     assert refused.value.code == "lease_leaves_no_measurement"
 
 
-async def test_the_sandbox_lives_no_longer_than_the_grants_runtime(make: Make) -> None:
-    hosted = make(tuning=LeaseTuning(lifetime_sec=10_000, first_backoff_sec=0.02))
-    lease = await hosted.leases.lease("b02", 2, charge=LeaseCharge(LeaseKind.DEV, "b02"))
-    box = hosted.standin.plane.lookup(lease.sandbox.sandbox_id)
-    assert box is not None and box.timeout_sec == 600
-    hosted = make(tuning=LeaseTuning(lifetime_sec=120, first_backoff_sec=0.02))
-    box = hosted.standin.plane.lookup(
-        (await hosted.leases.lease("b02", 2, charge=LeaseCharge(LeaseKind.DEV, "b02"))).sandbox.sandbox_id
-    )
-    assert box is not None and box.timeout_sec == 120
+async def test_the_sandbox_lives_as_long_as_its_holder_needs_or_the_grant_lets(make: Make) -> None:
+    hosted = make()
+    short = await hosted.leases.lease("b02", 2, charge=LeaseCharge(LeaseKind.DEV, "b02"), lifetime_sec=100)
+    held = await hosted.leases.lease("b03", 2, charge=LeaseCharge(LeaseKind.AUTONOMOUS, "b03"))
+    lifetimes = [hosted.standin.plane.lookup(lease.sandbox.sandbox_id).timeout_sec for lease in (short, held)]
+    assert lifetimes == [100 + LIFETIME_MARGIN_SEC, 600 - LIFETIME_MARGIN_SEC]
+    assert (short.lifetime_sec, held.lifetime_sec) == tuple(lifetimes)
 
 
 async def test_the_toolbox_is_told_whenever_cards_come_back(make: Make) -> None:
@@ -514,6 +512,13 @@ def test_a_grant_has_something_to_run_on(bad: dict[str, Any]) -> None:
     GrantLimits(**fields)
     with pytest.raises(ValueError, match="at least one sandbox"):
         GrantLimits(**{**fields, **bad})
+
+
+def test_a_sandbox_lives_its_holders_term_and_a_margin_within_the_grants_runtime() -> None:
+    leases = HostedBranchLeases(object(), GrantLimits(4, 8, 10.0, 7200), DevSession("run-1", 2, _BY_CARDS))  # type: ignore[arg-type]
+    assert leases.lifetime_sec(None) == 7200 - LIFETIME_MARGIN_SEC
+    assert leases.lifetime_sec(1799.5) == 1800 + LIFETIME_MARGIN_SEC
+    assert leases.lifetime_sec(6 * 3600) == 7200 - LIFETIME_MARGIN_SEC
 
 
 def test_the_session_needs_a_template_of_its_own_card_count_and_a_run() -> None:

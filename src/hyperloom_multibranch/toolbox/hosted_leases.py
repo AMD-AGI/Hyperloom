@@ -10,7 +10,9 @@ sandbox itself (:class:`HostedBranchLease`): commands and files go through it, s
 specialist never holds it. The application does the accounting per role: a lease's cards count as leased, and the rest
 of the grant's GPUs are what tests may run on, exactly as on the local backend.
 
-A lease is the session's own card count, never another size (a caller picks a template, not a size). A create refused
+A lease is the session's own card count, never another size (a caller picks a template, not a size). Its sandbox lives
+:data:`LIFETIME_MARGIN_SEC` longer than its holder says it needs the cards, or, for a holder that runs until it is
+stopped, that margin less than the grant lets one sandbox live (:meth:`HostedBranchLeases.lifetime_sec`). A create refused
 for the grant's quota (429 ``grant_quota_exceeded``) is back-pressure: it is repeated with a growing wait until the
 quota clears or :data:`~hyperloom_multibranch.toolbox.branch_leases.LEASE_WAIT_SECONDS` has passed. The cards are
 promised from the moment the request is checked, while it waits, so no test is started that they would starve.
@@ -20,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import threading
 import time
 import uuid
@@ -45,7 +48,7 @@ from hyperloom_multibranch.contracts.toolbox import BranchLease, LeaseCharge, Me
 from hyperloom_multibranch.toolbox.branch_leases import LEASE_WAIT_SECONDS, lease_wait, refuse_unfit_cards
 from hyperloom_multibranch.toolbox.lease_ledger import LeaseLedger
 
-__all__ = ["DevSession", "GrantLimits", "HostedBranchLease", "HostedBranchLeases", "LeaseTuning"]
+__all__ = ["LIFETIME_MARGIN_SEC", "DevSession", "GrantLimits", "HostedBranchLease", "HostedBranchLeases", "LeaseTuning"]
 
 log = logging.getLogger(__name__)
 
@@ -53,7 +56,9 @@ DEV_ROLE: Role = "dev"
 #: The value of ``hyperloom.purpose`` on a lease's sandbox, which with the run's id (``hyperloom.run-id``) is how the
 #: sandboxes of this run's leases are found again.
 LEASE_PURPOSE = "dev-lease"
-DEFAULT_LEASE_LIFETIME_SEC = 3600
+#: Between a holder's own end, or the grant's runtime, and the end of its sandbox: the holder's stop, its processes'
+#: grace and the release that ends the sandbox come first.
+LIFETIME_MARGIN_SEC = 300
 _CLOSING = "the toolbox is closing"
 _POLL_SEC = 0.2
 
@@ -106,14 +111,12 @@ class DevSession:
 
 @dataclass(frozen=True)
 class LeaseTuning:
-    """How long a lease's sandbox lives and how long and how fast a refused create is repeated.
+    """How long and how fast a refused create is repeated.
 
-    ``lifetime_sec`` is cut to the grant's ``max_runtime_sec``; ``workdir`` is the directory of the sandbox a branch
-    works in. A ``dev`` sandbox's envd serves files from ``/app``, so ``/app/work`` is where its file API and its
-    processes see the same files.
+    ``workdir`` is the directory of the sandbox a branch works in. A ``dev`` sandbox's envd serves files from ``/app``,
+    so ``/app/work`` is where its file API and its processes see the same files.
     """
 
-    lifetime_sec: int = DEFAULT_LEASE_LIFETIME_SEC
     wait_sec: float = LEASE_WAIT_SECONDS
     first_backoff_sec: float = 0.5
     max_backoff_sec: float = 10.0
@@ -127,10 +130,11 @@ class HostedBranchLease(BranchLease):
     ``gpu_ids`` are the cards' numbers inside the sandbox, ``root`` is the directory the branch works in there (a
     path of the sandbox, not of this machine) and ``env`` is empty: the sandbox has the image's own environment.
     ``sandbox`` runs commands and reads and writes its files; end the lease with ``release_branch_sandbox``, which
-    ends the sandbox and gives its cards back.
+    ends the sandbox and gives its cards back. ``lifetime_sec`` is how long the sandbox lives from its create.
     """
 
     template: str
+    lifetime_sec: int
     sandbox: Sandbox = field(repr=False, compare=False)
 
 
@@ -141,7 +145,7 @@ class HostedBranchLeases:
         provider: The sandbox provider; it must hold the ``dev`` role's key.
         grant: The grant's totals.
         session: The run, the card count and the templates.
-        tuning: Lifetime and waits, see :class:`LeaseTuning`.
+        tuning: Waits and the working directory, see :class:`LeaseTuning`.
 
     All state is guarded by one lock, so a lease and its release may race from any task or thread: a lease's sandbox
     is ended exactly once and its cards go back once. ``on_release`` is called, on the thread that gave them back,
@@ -160,7 +164,6 @@ class HostedBranchLeases:
         self._grant = grant
         self._session = session
         self._tuning = tuning
-        self._lifetime = min(tuning.lifetime_sec, grant.max_runtime_sec)
         self._guard = threading.Lock()
         self._promised: dict[str, int] = {}
         self._granted: dict[str, HostedBranchLease] = {}
@@ -184,17 +187,26 @@ class HostedBranchLeases:
         return max(1, min(by_cards, by_sandboxes))
 
     async def lease(
-        self, branch_id: str, cards: int, *, charge: LeaseCharge, wait_sec: float | None = None
+        self,
+        branch_id: str,
+        cards: int,
+        *,
+        charge: LeaseCharge,
+        wait_sec: float | None = None,
+        lifetime_sec: float | None = None,
     ) -> HostedBranchLease:
         """Create ``branch_id``'s ``dev`` sandbox, waiting while the grant has no room for it.
 
         ``branch_id`` is the holder: a branch, or ``tool:<job id>``. ``charge`` goes into the blackboard's record of the
-        grant, written before the lease is returned; a grant the blackboard did not record ends the sandbox and raises as
+        grant, written before the lease is returned and started when the create was, since the cards are the lease's
+        while its sandbox comes up; a grant the blackboard did not record ends the sandbox and raises as
         :meth:`~hyperloom_multibranch.toolbox.lease_ledger.LeaseLedger.started` does.
 
         ``wait_sec`` bounds that wait (:func:`~hyperloom_multibranch.toolbox.branch_leases.lease_wait`): ``None`` is
         :attr:`LeaseTuning.wait_sec`, ``0`` does not wait out a refusal of the quota. It does not bound the time a
         sandbox the grant has room for takes to come up, which is :attr:`LeaseTuning.wait_sec` at least.
+        ``lifetime_sec`` is how long the holder needs the cards, ``None`` until it is stopped (:meth:`lifetime_sec`): a
+        holder bounded by the session's deadline says how long is left of it, so its sandbox never outlives the run.
 
         Raises:
             RequestRejected: ``invalid_request`` for fewer than one card or a number other than the session's, or a
@@ -211,9 +223,10 @@ class HostedBranchLeases:
         self._promise(branch_id, cards)
         made: Sandbox | None = None
         try:
-            made = await self._create(branch_id, wait)
-            lease = self._grant_lease(branch_id, made)
-            await self._recorded(lease, charge)
+            lifetime, requested_at = self.lifetime_sec(lifetime_sec), self.ledger.clock()
+            made = await self._create(branch_id, wait, lifetime)
+            lease = self._grant_lease(branch_id, made, lifetime)
+            await self._recorded(lease, charge, requested_at)
             return lease
         except BaseException:
             self._forget(branch_id)
@@ -265,6 +278,13 @@ class HostedBranchLeases:
             self._promised.clear()
         self.on_release()
 
+    def lifetime_sec(self, needed_sec: float | None) -> int:
+        """How long a lease's sandbox lives: what its holder needs, ``needed_sec``, or the grant's runtime for a holder
+        that runs until it is stopped (``None``), and a margin; never past the grant's runtime less the margin."""
+
+        longest = max(1, self._grant.max_runtime_sec - LIFETIME_MARGIN_SEC)
+        return longest if needed_sec is None else min(longest, math.ceil(needed_sec) + LIFETIME_MARGIN_SEC)
+
     def _capacity(self) -> MeasurementCapacity:
         total = self._grant.max_gpus
         return MeasurementCapacity(total, total, leased_cards=min(sum(self._promised.values()), total))
@@ -288,7 +308,7 @@ class HostedBranchLeases:
             self._promised.pop(branch_id, None)
         self.on_release()
 
-    async def _recorded(self, lease: HostedBranchLease, charge: LeaseCharge) -> None:
+    async def _recorded(self, lease: HostedBranchLease, charge: LeaseCharge, requested_at: float) -> None:
         """Record ``lease``'s grant; a lease the blackboard did not record is withdrawn, its sandbox left to the caller."""
 
         start = LeaseStart(
@@ -297,7 +317,7 @@ class HostedBranchLeases:
             branch_id=charge.branch,
             kind=charge.kind,
             cards=len(lease.gpu_ids),
-            started_at=self.ledger.clock(),
+            started_at=requested_at,
             tool=charge.tool,
             sandbox_id=lease.sandbox.sandbox_id,
         )
@@ -308,7 +328,7 @@ class HostedBranchLeases:
                 self._granted.pop(lease.lease_id, None)
             raise
 
-    def _grant_lease(self, branch_id: str, sandbox: Sandbox) -> HostedBranchLease:
+    def _grant_lease(self, branch_id: str, sandbox: Sandbox, lifetime: int) -> HostedBranchLease:
         with self._guard:
             if self._closed:
                 raise SandboxUnavailable(_CLOSING)
@@ -320,12 +340,13 @@ class HostedBranchLeases:
                 MappingProxyType({}),
                 self._capacity().measurement_cards,
                 self._session.template,
+                lifetime,
                 sandbox,
             )
             self._granted[lease.lease_id] = lease
         return lease
 
-    async def _create(self, branch_id: str, wait: float) -> Sandbox:
+    async def _create(self, branch_id: str, wait: float, lifetime: int) -> Sandbox:
         """Create the sandbox with one idempotency key for every attempt, repeating a create the quota refused.
 
         The quota's refusals are repeated for ``wait`` seconds, not at all when it is ``0``. A sandbox the grant has
@@ -352,7 +373,7 @@ class HostedBranchLeases:
                     self._provider.create,
                     self._session.template,
                     role=DEV_ROLE,
-                    timeout_sec=self._lifetime,
+                    timeout_sec=lifetime,
                     metadata=metadata,
                     options=options,
                 )

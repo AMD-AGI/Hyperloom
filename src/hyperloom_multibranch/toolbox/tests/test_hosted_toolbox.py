@@ -59,7 +59,13 @@ from hyperloom_multibranch.contracts.blackboard.vocab import LeaseEndReason, Lea
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.contracts.toolbox import MeasurementCapacity, RequestRejected, TestProgress, WorkloadKind
 from hyperloom_multibranch.toolbox import hosted_toolbox
-from hyperloom_multibranch.toolbox.hosted_leases import LEASE_PURPOSE, RUN_ID_KEY, GrantLimits, LeaseTuning
+from hyperloom_multibranch.toolbox.hosted_leases import (
+    LEASE_PURPOSE,
+    LIFETIME_MARGIN_SEC,
+    RUN_ID_KEY,
+    GrantLimits,
+    LeaseTuning,
+)
 from hyperloom_multibranch.toolbox.hosted_toolbox import (
     SOURCE_SHA_ENV,
     HostedOptions,
@@ -736,8 +742,9 @@ async def test_a_lease_is_a_dev_sandbox_and_its_cards_leave_the_measurement_capa
     toolbox = _toolbox(service, tmp_path, tp=2)
     try:
         await toolbox.start()
-        lease = await toolbox.lease_branch_sandbox("b1", 2)
+        lease = await toolbox.lease_branch_sandbox("b1", 2, lifetime_sec=600)
         assert lease.template == _DEVS[1] and lease.sandbox.run("echo hi").stdout == "hi\n"  # type: ignore[attr-defined]
+        assert lease.lifetime_sec == 600 + LIFETIME_MARGIN_SEC  # type: ignore[attr-defined]
         assert (await toolbox.measurement_capacity()) == MeasurementCapacity(8, 8, leased_cards=2)
         assert lease.remaining_cards == 6 and toolbox._parallel_limit() == 3
         (created,) = [c for c in service.creates if c.role == "dev"]

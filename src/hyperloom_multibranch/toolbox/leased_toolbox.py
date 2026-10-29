@@ -87,9 +87,16 @@ class LeasedToolbox(RealToolbox):
         return self.leases.capacity()
 
     async def lease_branch_sandbox(
-        self, branch_id: str, cards: int, *, wait_sec: float | None = None, charge: LeaseCharge | None = None
+        self,
+        branch_id: str,
+        cards: int,
+        *,
+        wait_sec: float | None = None,
+        charge: LeaseCharge | None = None,
+        lifetime_sec: float | None = None,
     ) -> BranchLease:
-        """Take ``cards`` cards for ``branch_id``'s agent, waiting for running tests to give them back."""
+        """Take ``cards`` cards for ``branch_id``'s agent, waiting for running tests to give them back; they stay until
+        released, whatever ``lifetime_sec`` says."""
 
         if self.leases is None:
             return await super().lease_branch_sandbox(branch_id, cards, wait_sec=wait_sec, charge=charge)

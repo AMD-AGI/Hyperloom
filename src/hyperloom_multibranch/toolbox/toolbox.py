@@ -287,7 +287,13 @@ class RealToolbox:
         return MeasurementCapacity.unknown()
 
     async def lease_branch_sandbox(
-        self, branch_id: str, cards: int, *, wait_sec: float | None = None, charge: LeaseCharge | None = None
+        self,
+        branch_id: str,
+        cards: int,
+        *,
+        wait_sec: float | None = None,
+        charge: LeaseCharge | None = None,
+        lifetime_sec: float | None = None,
     ) -> BranchLease:
         """Hold ``cards`` of the toolbox's cards and a working directory of their own for ``branch_id``'s agent.
 
@@ -305,6 +311,9 @@ class RealToolbox:
         when the cards are not free, and on the hosted backend no waiting out a refusal of the grant's quota either), a
         positive value that many seconds at most. ``SandboxUnavailable`` also ends a lease the closing toolbox refused.
         A refused lease holds nothing.
+
+        ``lifetime_sec`` is how long the holder needs the cards, ``None`` until it releases them. A backend whose leases
+        end on their own (the hosted one's sandboxes) keeps them that long; cards of this machine stay until released.
         """
 
         raise RequestRejected("this toolbox's backend has no cards to lease", "unsupported_kind")
