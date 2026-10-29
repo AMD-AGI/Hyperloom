@@ -13,6 +13,7 @@ import re
 import shlex
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Mapping
 
 from hyperloom.common.env import is_truthy
 from hyperloom.common.gpu_identity import is_gfx_arch
@@ -348,10 +349,13 @@ def _unsafe_unified_attn_reason(variant: GridVariant, *, base_server_args: str) 
 
 
 def _speculative_capability_reason(
-    variant: "GridVariant", *, serving: ServingStack, base_server_args: str
+    variant: "GridVariant", *, serving: ServingStack, base_server_args: str, base_envs: Mapping[str, Any]
 ) -> str | None:
     """Why the pinned stack has no kernel for the draft this variant composes: read over the composed arguments,
     since the keys that decide it live inside ``--speculative-config``. ``None`` when the stack has a kernel.
+
+    The launch's environment comes along because a draft inherits the tensor parallel size the engine is launched
+    with, which a recipe may spell only as ``TP``.
     """
     return speculative_capability_reason(
         compose_server_args(
@@ -361,6 +365,8 @@ def _speculative_capability_reason(
             args_mode=variant.args_mode,
         ),
         framework=serving.framework,
+        envs={**base_envs, **(getattr(variant, "extra_envs", None) or {})},
+        model_path=serving.model_path,
     )
 
 
@@ -369,6 +375,7 @@ def apply_compatibility_filter(
     *,
     serving: ServingStack,
     base_server_args: str = "",
+    base_envs: Mapping[str, Any] | None = None,
 ) -> tuple[list["GridVariant"], list[dict]]:
     """Skip variants known to be incompatible with current model/framework."""
     # Cannot detect -> assume compatible.
@@ -394,7 +401,9 @@ def apply_compatibility_filter(
             )
             continue
         # A draft the pinned stack ships no kernel for: not applicable to this stack, not a measurement to spend.
-        skip_reason = _speculative_capability_reason(v, serving=serving, base_server_args=base_server_args)
+        skip_reason = _speculative_capability_reason(
+            v, serving=serving, base_server_args=base_server_args, base_envs=base_envs or {}
+        )
         if skip_reason:
             dropped.append({"name": v.name, "source": CAPABILITY_UNSUPPORTED, "reason": skip_reason})
             continue

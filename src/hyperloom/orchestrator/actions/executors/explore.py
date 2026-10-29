@@ -1012,6 +1012,9 @@ class _ExploreRound:
                 remove_args=self.base_remove_args,
                 args_mode=self.args_mode,
             ),
+            # The recipe's environment under the accepted edits: the same layering the run launches with, so a
+            # TP spelled only there is the TP a draft is judged against.
+            base_envs={**self.yaml_envs, **self.envs},
         )
         # Operator-supplied --skip-variants patterns.
         runnable, skipped = apply_user_skip_list(runnable, skip_spec=resolve_skip_spec(self.params))

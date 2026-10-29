@@ -12,10 +12,8 @@ import pytest
 
 from hyperloom.inference_optimizer.speculative_capability import (
     CAPABILITY_UNSUPPORTED,
-    DraftKernelCapability,
     SpeculativeCapabilityUnsupportedError,
     refuse_unrunnable_speculative_stack,
-    speculative_capability,
     speculative_capability_lines,
     speculative_capability_reason,
     speculative_descriptor,
@@ -116,26 +114,33 @@ def test_drafts_the_pinned_stack_can_run_keep_running(tmp_path, framework, heads
 def test_the_heads_come_from_the_drafter_checkpoint(tmp_path):
     # The checkpoint summary reads a nested text tower as the engine does, so the shape is the decoder's.
     nested = _spec_args(_draft_model(tmp_path / "nested", nested=True))
-    status, _ = speculative_capability(nested, framework="vllm")
-    assert status is DraftKernelCapability.UNSUPPORTED
+    assert speculative_capability_reason(nested, framework="vllm") is not None
 
 
-def test_a_drafter_whose_heads_cannot_be_read_is_refused_rather_than_launched(tmp_path):
-    # An unreadable checkpoint leaves the one shape this gate owns undecided, and undecided is not runnable.
+def test_a_self_drafting_mtp_launch_is_judged_on_the_model_it_drafts_from(tmp_path):
+    # MTP drafts with the target's own heads, so a launch that names no drafter is a shape this gate can read.
+    target = _draft_model(tmp_path / "target")
+    config = {"method": "mtp", "num_speculative_tokens": 2, "kv_cache_dtype": "fp8"}
+    args = "--speculative-config " + json.dumps(config) + " --speculative-config.attention_backend ROCM_AITER_MLA"
+    descriptor = speculative_descriptor(args + f" --model {target}")
+    assert descriptor is not None and descriptor.model == target
+    assert speculative_capability_reason(args + f" --model {target}", framework="vllm") is not None
+    # The serving model the run was given answers for it just as well as an argv one.
+    assert speculative_capability_reason(args, framework="vllm", model_path=target) is not None
+    # A target whose heads the pinned build does carry keeps running.
+    wide = _draft_model(tmp_path / "wide", heads=64)
+    assert speculative_capability_reason(args, framework="vllm", model_path=wide) is None
+
+
+def test_a_drafter_whose_heads_cannot_be_read_is_left_to_the_engine(tmp_path):
+    # No metadata names this shape, so no kernel claim can be made about it: the engine decides, not this gate.
     unreadable = _spec_args(str(tmp_path / "missing"))
-    status, reason = speculative_capability(unreadable, framework="vllm")
-    assert status is DraftKernelCapability.UNKNOWN
-    assert "could not be read from its config" in reason and "TRITON_MLA" in reason
-    with pytest.raises(SpeculativeCapabilityUnsupportedError) as excinfo:
-        refuse_unrunnable_speculative_stack(unreadable, framework="vllm")
-    assert excinfo.value.error_class == CAPABILITY_UNSUPPORTED
-    # The grid refuses it at admission too, so no variant is built from a draft nobody can vouch for.
+    assert speculative_capability_reason(unreadable, framework="vllm") is None
+    refuse_unrunnable_speculative_stack(unreadable, framework="vllm")
+    # Admission keeps it too, so a drafter this gate cannot name is still measured.
     unknown = GridVariant(name="spec_aiter_fp8_k2_unknown", extra_server_args=unreadable)
     kept, dropped = apply_compatibility_filter([unknown], serving=ServingStack("vllm", ""))
-    assert not kept and [d["source"] for d in dropped] == [CAPABILITY_UNSUPPORTED]
-    # Only the combination with no kernel is held to that bar: an unreadable drafter at another K keeps running.
-    other_k = _spec_args(str(tmp_path / "missing"), num_speculative_tokens=5)
-    assert speculative_capability(other_k, framework="vllm")[0] is DraftKernelCapability.SUPPORTED
+    assert [v.name for v in kept] == ["spec_aiter_fp8_k2_unknown"] and not dropped
 
 
 def test_the_sixteen_head_fp8_draft_is_refused_with_the_capability_error_class(tmp_path):
@@ -149,6 +154,27 @@ def test_the_sixteen_head_fp8_draft_is_refused_with_the_capability_error_class(t
     # A runnable draft is not refused at all.
     runnable = _spec_args(_draft_model(tmp_path / "ok"), num_speculative_tokens=5)
     refuse_unrunnable_speculative_stack(runnable, framework="vllm")
+
+
+def test_the_draft_is_judged_at_the_tensor_parallel_size_the_launch_really_carries(tmp_path):
+    # AgentX's launcher spells TP only in the environment and appends --tensor-parallel-size "$TP" itself, so a
+    # launch whose argv says nothing about sharding still reaches the engine sharded.
+    args = _spec_args(_draft_model(tmp_path, heads=128))
+    assert speculative_capability_reason(args, framework="vllm") is None
+    assert speculative_capability_reason(args, framework="vllm", envs={"TP": "8"}) is not None
+    descriptor = speculative_descriptor(args, envs={"TP": "8"})
+    assert descriptor is not None and descriptor.tensor_parallel_size == 8
+    # An argv TP is the one the engine parses last, and the draft's own size outranks both.
+    assert speculative_descriptor(args + " --tp 1", envs={"TP": "8"}).tensor_parallel_size == 1
+    own = _spec_args(_draft_model(tmp_path / "own", heads=128), draft_tensor_parallel_size=8)
+    assert speculative_descriptor(own + " --tp 1", envs={"TP": "2"}).tensor_parallel_size == 8
+    # The grid judges the variant against the environment the run launches with, not against argv alone.
+    variant = GridVariant(name="spec_aiter_fp8_k2_sharded", extra_server_args=args)
+    kept, dropped = apply_compatibility_filter(
+        [variant], serving=ServingStack("vllm", ""), base_envs={"TP": "8", "CONC": "8"}
+    )
+    assert not kept and [d["source"] for d in dropped] == [CAPABILITY_UNSUPPORTED]
+    assert "16 query heads per rank" in dropped[0]["reason"]
 
 
 def test_the_grid_drops_the_unrunnable_draft_before_it_is_launched(tmp_path):

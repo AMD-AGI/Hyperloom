@@ -4,83 +4,40 @@
 """Which speculative-decoding launches the pinned serving stack can actually run.
 
 The keys that decide whether a draft has a kernel at all -- its backend, its KV cache dtype, its draft length -- live
-inside ``--speculative-config``, so a filter reading flag names never sees them. This module merges both spellings of
-that config into one descriptor and states the stack's kernel coverage as data, so the grid can refuse an unrunnable
-draft rather than spend a measurement on it, and the prompt can name the same constraint.
+inside ``--speculative-config``, so a filter reading flag names never sees them. This module reads a composed launch
+with the parser :mod:`hyperloom.inference_optimizer.grid_server_args` owns and states the stack's kernel coverage as
+data, so the grid can refuse an unrunnable draft rather than spend a measurement on it, and the prompt can name the
+same constraint.
 
-Coverage is decided by what is known to be good, so the answer has three values: a shape inside the combination a rule
-owns is supported only when the drafter's own metadata puts it among the shapes that rule ships. A drafter whose heads
-cannot be read is unknown, and unknown is refused -- a launch that may well die in profiling is not a measurement.
+A rule refuses only the shape it knows has no kernel: the draft's query heads per rank, read off the model that does
+the drafting -- the drafter's own checkpoint, or the target's when the method drafts with the target's layers. A
+shape no metadata establishes is left to the engine; what this module answers for is the pairing it can name.
 """
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping
 from dataclasses import dataclass
-from enum import Enum
 from typing import Any
 
-from .grid_server_args import tokenize_server_args_preserving_json
+from .grid_server_args import (
+    SERVED_MODEL_FLAGS,
+    TENSOR_PARALLEL_FLAGS,
+    flag_occurrences,
+    last_alias_value,
+    speculative_config,
+)
 from .model_config_utils import summarize_model_config
 
 CAPABILITY_UNSUPPORTED = "capability_unsupported"
-_SPEC_CONFIG_FLAG = "speculative-config"
-_SPEC_CONFIG_KEY_PREFIX = f"{_SPEC_CONFIG_FLAG}."
-# One destination the engines spell three ways, so they are resolved together rather than one spelling at a time.
-_TP_FLAGS = frozenset({"tensor-parallel-size", "tp", "tp-size"})
+# The launcher exports the engine's tensor parallel size here; ``launch_server.sh`` turns it into the argv flag.
+_TP_ENV = "TP"
 
 
 class SpeculativeCapabilityUnsupportedError(ValueError):
     """The pinned stack ships no kernel for the draft a launch composes."""
 
     error_class = CAPABILITY_UNSUPPORTED
-
-
-class DraftKernelCapability(Enum):
-    """What is known about the kernel a draft needs: that it is there, that it is not, or neither.
-
-    ``UNKNOWN`` is a verdict of its own because only a shape read off the drafter can be matched against the
-    coverage: a draft whose shape the metadata does not establish is not a draft the stack is known to run.
-    """
-
-    SUPPORTED = "supported"
-    UNSUPPORTED = "unsupported"
-    UNKNOWN = "unknown"
-
-
-def _is_flag(token: str) -> bool:
-    """``token`` is a flag rather than a value (``-tp`` counts, ``-1`` does not)."""
-    return token.startswith("-") and not token[1:2].isdigit() and token.strip("-") != ""
-
-
-def flag_occurrences(server_args: str) -> list[tuple[str, str]]:
-    """Every flag a composed argument string spells, in order, as ``(name, value)``; ``""`` for a bare flag."""
-    split = tokenize_server_args_preserving_json(server_args)
-    tokens = split[1] if split is not None else server_args.split()
-    occurrences: list[tuple[str, str]] = []
-    for index, token in enumerate(tokens):
-        if not _is_flag(token):
-            continue
-        name, assigned, value = token.partition("=")
-        if not assigned and index + 1 < len(tokens) and not _is_flag(tokens[index + 1]):
-            value = tokens[index + 1]
-        occurrences.append((name.lstrip("-").lower().replace("_", "-"), value))
-    return occurrences
-
-
-def _last_alias_value(occurrences: list[tuple[str, str]], aliases: frozenset[str]) -> str | None:
-    """The value of the last flag spelling one destination, which is the one the engines' argparse keeps."""
-    return next((value for name, value in reversed(occurrences) if name in aliases), None)
-
-
-def json_object(text: str) -> dict[str, Any]:
-    """``text`` as a JSON object, or ``{}`` when it is neither."""
-    try:
-        parsed = json.loads(text)
-    except ValueError:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
 
 
 def _as_int(value: Any) -> int | None:
@@ -94,6 +51,7 @@ def _as_int(value: Any) -> int | None:
 class SpeculativeDescriptor:
     """What a composed launch asks the engine to draft with, both spellings of the config merged."""
 
+    # The model whose attention the draft runs: the drafter's checkpoint, or the target's when it self-drafts.
     model: str
     method: str
     draft_length: int | None
@@ -112,27 +70,47 @@ class SpeculativeDescriptor:
         return heads // ranks if heads and heads > 0 and not heads % ranks else None
 
 
-def speculative_descriptor(server_args: str) -> SpeculativeDescriptor | None:
-    """The draft a composed argument string spells, or ``None`` when it configures none.
+def _self_drafting(method: str) -> bool:
+    """``method`` drafts with layers that ship inside the target checkpoint (``mtp``, ``deepseek_mtp``, ...)."""
+    return method.endswith("mtp")
 
-    The config arrives as a JSON object and as ``--speculative-config.<key>`` flags, the per-key flags winning.
+
+def _drafting_model(config: Mapping[str, Any], method: str, occurrences: list[tuple[str, str]], model_path: str) -> str:
+    """The model whose attention shape reaches the draft's kernel.
+
+    A self-drafting method names no drafter -- its heads are the target's, so the launch's own ``--model`` (or the
+    model the serving stack was built for) is what the kernel will see.
+    """
+    drafter = str(config.get("model") or config.get("draft_model") or "")
+    if drafter or not _self_drafting(method):
+        return drafter
+    return str(last_alias_value(occurrences, SERVED_MODEL_FLAGS) or model_path or "")
+
+
+def speculative_descriptor(
+    server_args: str, *, envs: Mapping[str, Any] | None = None, model_path: str = ""
+) -> SpeculativeDescriptor | None:
+    """The draft a composed launch spells, or ``None`` when it configures none.
+
+    ``envs`` is the environment that launch carries and ``model_path`` the model being served, for the launches that
+    settle those two outside the argv.
     """
     occurrences = flag_occurrences(server_args)
-    flags = dict(occurrences)
-    config: dict[str, Any] = {}
-    for flag, value in flags.items():
-        if flag == _SPEC_CONFIG_FLAG:
-            config = {**json_object(value), **config}
-        elif flag.startswith(_SPEC_CONFIG_KEY_PREFIX):
-            config[flag.removeprefix(_SPEC_CONFIG_KEY_PREFIX).replace("-", "_")] = value
+    config = speculative_config(occurrences)
     if not config:
         return None
-    # The draft's attention is sharded over its own TP size when it sets one, else over the engine's -- whose three
-    # spellings are one destination, so the last of them wins rather than a fixed order between the aliases.
-    ranks = [config.get("draft_tensor_parallel_size"), _last_alias_value(occurrences, _TP_FLAGS)]
+    method = str(config.get("method") or "").strip().lower()
+    # The draft's attention is sharded over its own TP size when it sets one, else over the engine's: three spellings
+    # of one destination, the last winning, and then ``envs.TP``, which the launcher writes into the argv itself --
+    # before the extra args, so an argv spelling overrides it.
+    ranks = [
+        config.get("draft_tensor_parallel_size"),
+        last_alias_value(occurrences, TENSOR_PARALLEL_FLAGS),
+        (envs or {}).get(_TP_ENV),
+    ]
     return SpeculativeDescriptor(
-        model=str(config.get("model") or config.get("draft_model") or ""),
-        method=str(config.get("method") or ""),
+        model=_drafting_model(config, method, occurrences, model_path),
+        method=method,
         draft_length=_as_int(config.get("num_speculative_tokens")),
         attention_backend=str(config.get("attention_backend") or "").strip().upper(),
         kv_cache_dtype=str(config.get("kv_cache_dtype") or "").strip().lower(),
@@ -150,31 +128,24 @@ class DraftKernelCoverage:
     query_heads_by_draft_length: Mapping[int, frozenset[int]]
     remedy: str
 
-    def capability(self, descriptor: SpeculativeDescriptor, *, framework: str) -> tuple[DraftKernelCapability, str]:
-        """What this coverage knows about ``descriptor``, and the reason when it is not a draft it vouches for.
+    def unsupported_reason(self, descriptor: SpeculativeDescriptor, *, framework: str) -> str | None:
+        """Why this coverage has no kernel for ``descriptor``, or ``None`` when it does not stand in the way.
 
-        A draft outside the combination this coverage owns is ``SUPPORTED``: that is this rule not standing in the
-        way, not a claim about kernels it says nothing about. Inside the combination the shape decides, and a shape
-        the drafter's metadata does not give is ``UNKNOWN`` -- the one case this coverage owns and cannot answer.
+        A draft outside the combination this coverage owns passes: that is this rule saying nothing, not a claim
+        about kernels it does not ship. Inside the combination the shape decides, and a shape no metadata gives is
+        left to the engine rather than guessed at.
         """
         if framework.strip().lower() != self.framework:
-            return DraftKernelCapability.SUPPORTED, ""
+            return None
         if descriptor.attention_backend != self.draft_backend or descriptor.kv_cache_dtype not in self.kv_cache_dtypes:
-            return DraftKernelCapability.SUPPORTED, ""
+            return None
         covered = self.query_heads_by_draft_length.get(descriptor.draft_length or -1)
         if covered is None:
-            return DraftKernelCapability.SUPPORTED, ""
+            return None
         heads = descriptor.draft_query_heads_per_rank()
-        if heads is None:
-            return DraftKernelCapability.UNKNOWN, (
-                f"{self.draft_backend} ships a {descriptor.kv_cache_dtype} kernel for a "
-                f"{descriptor.draft_length}-token draft only at {_head_counts(covered)} query heads per rank, and the "
-                f"query heads of drafter {descriptor.model!r} over {descriptor.tensor_parallel_size} rank(s) could "
-                f"not be read from its config; {self.remedy}"
-            )
-        if heads in covered:
-            return DraftKernelCapability.SUPPORTED, ""
-        return DraftKernelCapability.UNSUPPORTED, (
+        if heads is None or heads in covered:
+            return None
+        return (
             f"{self.draft_backend} has no {descriptor.kv_cache_dtype} kernel for a "
             f"{descriptor.draft_length}-token draft at {heads} query heads per rank "
             f"(the pinned {self.framework} stack ships {_head_counts(covered)}); {self.remedy}"
@@ -210,39 +181,27 @@ PINNED_DRAFT_KERNELS: tuple[DraftKernelCoverage, ...] = (
 )
 
 
-def speculative_capability(server_args: str, *, framework: str) -> tuple[DraftKernelCapability, str]:
-    """What the pinned stack knows about the draft ``server_args`` composes, and the reason when it is not runnable."""
-    descriptor = speculative_descriptor(server_args)
-    if descriptor is None:
-        return DraftKernelCapability.SUPPORTED, ""
-    verdicts = (coverage.capability(descriptor, framework=framework) for coverage in PINNED_DRAFT_KERNELS)
-    unsupported, unknown = [], []
-    for status, reason in verdicts:
-        if status is DraftKernelCapability.UNSUPPORTED:
-            unsupported.append(reason)
-        elif status is DraftKernelCapability.UNKNOWN:
-            unknown.append(reason)
-    if unsupported:
-        return DraftKernelCapability.UNSUPPORTED, unsupported[0]
-    if unknown:
-        return DraftKernelCapability.UNKNOWN, unknown[0]
-    return DraftKernelCapability.SUPPORTED, ""
-
-
-def speculative_capability_reason(server_args: str, *, framework: str) -> str | None:
+def speculative_capability_reason(
+    server_args: str, *, framework: str, envs: Mapping[str, Any] | None = None, model_path: str = ""
+) -> str | None:
     """Why the pinned stack cannot launch the draft ``server_args`` composes, or ``None`` when it can.
 
-    A draft whose shape is unknown is refused with the same voice as one that is known to be unrunnable: the launch
-    this answers for is the one combination AITER has no kernel for, so a shape nobody can establish is not spent as
-    a measurement. Naming a drafter whose config can be read keeps every other draft running.
+    The judgement is on the launch the engine really gets, so it takes the ``envs`` that launch carries -- the
+    tensor parallel size travels there -- and the ``model_path`` it serves, which is the drafter itself when the
+    method drafts with the target's own layers.
     """
-    status, reason = speculative_capability(server_args, framework=framework)
-    return reason if status is not DraftKernelCapability.SUPPORTED else None
+    descriptor = speculative_descriptor(server_args, envs=envs, model_path=model_path)
+    if descriptor is None:
+        return None
+    reasons = (coverage.unsupported_reason(descriptor, framework=framework) for coverage in PINNED_DRAFT_KERNELS)
+    return next((reason for reason in reasons if reason), None)
 
 
-def refuse_unrunnable_speculative_stack(server_args: str, *, framework: str) -> None:
+def refuse_unrunnable_speculative_stack(
+    server_args: str, *, framework: str, envs: Mapping[str, Any] | None = None, model_path: str = ""
+) -> None:
     """Refuse a launch whose draft the pinned stack has no kernel for: it is not applicable, not a measurement."""
-    reason = speculative_capability_reason(server_args, framework=framework)
+    reason = speculative_capability_reason(server_args, framework=framework, envs=envs, model_path=model_path)
     if reason:
         raise SpeculativeCapabilityUnsupportedError(reason)
 
