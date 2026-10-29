@@ -13,10 +13,13 @@ toolbox keeps its journal, archive and landed output under ``MB-toolbox``. A run
 built from it (:func:`runner_cache_pin`), or finds it built, before anything is measured, and pins every runner sandbox
 to that entry's manifest through the toolbox's inputs.
 
-A hosted session lends its specialists no dev sandbox: a dev lease's commands run in a sandbox on this machine's cards
-(:func:`~hyperloom_multibranch.specialist.dev_sandbox.local_dev_sandboxes`), and a hosted lease's cards are in another
-machine. Nor does PRELUDE start a child on this machine's cards: it roots the session on root tests and a profile of the
-root in runner sandboxes (:mod:`~hyperloom_multibranch.scheduling.prelude`).
+A hosted session lends its specialists no dev sandbox and runs no autonomous agent: their commands run in a sandbox on
+this machine's cards (:func:`~hyperloom_multibranch.specialist.dev_sandbox.local_dev_sandboxes`), and a hosted lease's
+cards are in another machine. Nor does PRELUDE start a child on this machine's cards: it roots the session on root tests
+and a profile of the root in runner sandboxes (:mod:`~hyperloom_multibranch.scheduling.prelude`).
+
+The grant is either injected by a host (``hosted run``) or handed to a session started by hand (``run --measurement
+hosted``); a grant without a run id of its own names its sandboxes by the session's id.
 """
 
 from __future__ import annotations
@@ -153,6 +156,7 @@ class PinnedToolboxInputs:
         from hyperloom_multibranch.toolbox.hosted_toolbox import HostedToolboxInputs
 
         given = hosted_toolbox_inputs(self.host, session_dir=layout.toolbox, tp=tp)
+        given["run_id"] = self.host.run_id or layout.session_id
         sha = str(given["source_sha"])
         source = runner_source(layout.runner_source, str(given["source_repo"]), sha)
         pin = runner_cache_pin(source, sha, self.cache_root, runner_wheel_target(os.environ))

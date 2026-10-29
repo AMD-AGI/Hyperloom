@@ -55,6 +55,7 @@ def test_the_session_ends_a_close_grace_and_a_margin_before_the_grant_and_is_sto
     assert deadline.stop_after_sec == 3600 - MB_CLOSE_GRACE_CAP_SECONDS
     assert deadline.session_hours(8.0) == (3600 - MB_CLOSE_GRACE_CAP_SECONDS - GRANT_MARGIN_SECONDS) / 3600
     assert deadline.session_hours(0.5) == 0.5, "a spec asking less than the grant has left keeps its hours"
+    assert deadline.session_hours(0.0) == deadline.session_hours(8.0), "no limit of its own is what the grant leaves"
 
 
 def test_a_grant_that_states_no_runtime_leaves_the_specs_hours_and_stops_nothing(tmp_path: Path) -> None:

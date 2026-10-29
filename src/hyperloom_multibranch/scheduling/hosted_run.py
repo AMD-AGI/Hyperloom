@@ -142,7 +142,7 @@ class GrantDeadline:
 
     def session_hours(self, spec_hours: float) -> float:
         """``spec_hours``, cut so that the session's hard stop -- its deadline and one CLOSE grace -- comes a margin
-        before the grant ends.
+        before the grant ends; ``0``, no limit of its own, is all the grant leaves.
 
         Raises:
             HostedRefused: When the grant has no more time left than a CLOSE grace and the margin.
@@ -156,7 +156,8 @@ class GrantDeadline:
                 f"the grant has {max(self.left_sec, 0.0):.0f} s left, no more than a CLOSE grace of"
                 f" {MB_CLOSE_GRACE_CAP_SECONDS:.0f} s and a margin of {GRANT_MARGIN_SECONDS:.0f} s"
             )
-        return min(spec_hours, usable / MB_SECONDS_PER_HOUR)
+        usable_hours = usable / MB_SECONDS_PER_HOUR
+        return min(spec_hours, usable_hours) if spec_hours else usable_hours
 
 
 def grant_deadline(host: HostInfo, now: datetime) -> GrantDeadline:

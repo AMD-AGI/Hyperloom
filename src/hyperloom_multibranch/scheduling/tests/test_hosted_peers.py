@@ -8,6 +8,7 @@ one machine. The peers built on the service's sandboxes are pinned in ``test_loc
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import os
 import shutil
@@ -213,3 +214,20 @@ def test_a_runner_cache_without_the_commit_fails_the_session_before_it_measures(
         PinnedToolboxInputs(_host(tmp_path, rig.repo, "f" * 40), tmp_path / "runner-cache")(layout, 2)
 
     assert not (tmp_path / "runner-cache" / ("f" * 40)).exists()
+
+
+@pytest.mark.parametrize(("run_id", "named"), [("run-1", "run-1"), (None, "MB-session")])
+def test_a_grant_without_a_run_id_names_its_sandboxes_by_the_session(
+    run_id: str | None, named: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hyperloom_multibranch.scheduling import hosted_peers
+
+    monkeypatch.setattr(hosted_peers, "runner_source", lambda destination, repo, sha: destination)
+    monkeypatch.setattr(hosted_peers, "runner_cache_pin", lambda source, sha, cache_root, target: "e" * 64)
+    monkeypatch.setenv(RUNNER_TARGET_ENV, RUNNER_TAG)
+    host = _host(tmp_path, tmp_path / "repo", "c" * 40)
+    host = dataclasses.replace(host, run_id=run_id)
+
+    inputs = PinnedToolboxInputs(host, tmp_path / "runner-cache")(SessionLayout(tmp_path / "MB-session"), 2)
+
+    assert inputs.run_id == named

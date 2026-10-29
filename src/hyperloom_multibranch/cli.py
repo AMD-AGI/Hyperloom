@@ -58,6 +58,11 @@ projects against this environment as ``HYPERLOOM_IMAGE_CHECK`` says: ``warn`` (t
 error. The manifest records the check's summary and CLOSE writes the whole report to ``MB-reports/image_check.json``.
 A session uses no Experience KB, whatever ``HYPERLOOM_KB_URL`` names (see
 :data:`~hyperloom_multibranch.scheduling.mb_fakes.MB_FAKE_EXPERIENCE_KB`).
+``run --measurement hosted`` measures every test in the sandboxes of a grant handed to the session in the environment
+(:data:`HANDED_GRANT`, read by :mod:`hyperloom.hosted.host_info`) instead of this machine's cards: as many tests run at
+once as the grant has cards and sandboxes for, and the session stops before the grant ends as ``hosted run`` does. Its
+run id is ``HYPERLOOM_RUN_ID`` when set, the session's id otherwise. A missing or malformed grant variable is a usage
+error naming it; so are ``--dev-leases`` and ``--autonomous-agent``, whose commands would run on this machine.
 ``hosted run`` takes no arguments: it runs the session of the campaign spec a host injected, as
 :mod:`~hyperloom_multibranch.scheduling.hosted_run` maps it onto the options of ``run``, measured in the runner
 sandboxes of the host's sandbox service (:mod:`~hyperloom_multibranch.scheduling.hosted_peers`). Started again over a
@@ -98,7 +103,7 @@ from hyperloom.common.env import EnvValueError
 from hyperloom.common.outside_facts.image_check import ImageCheckFailed, mode_from_environment
 from hyperloom.common.perf_metric import agentx_enabled
 from hyperloom.common.workload_defaults import DEFAULT_EP
-from hyperloom.hosted.host_info import HostInfo, take_host_info
+from hyperloom.hosted.host_info import HostGroup, HostInfo, take_host_info
 from hyperloom.hosted.toolbox_inputs import ToolboxInputsError
 from hyperloom.inference_optimizer.session.paths import workspace_root
 from hyperloom.measure.pins import IMAGE_DIGEST_VAR
@@ -114,6 +119,7 @@ from hyperloom_multibranch.scheduling.budget import MB_DEFAULT_MAX_HOURS, MB_MIN
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.hosted_peers import PinnedToolboxInputs, load_hosted_peers
 from hyperloom_multibranch.scheduling.hosted_run import (
+    GrantDeadline,
     HostedExit,
     arm_grant_stop,
     campaign_spec,
@@ -175,6 +181,11 @@ MAGPIE_RUNNER_GPU_TYPES = ("mi300x", "mi355x")
 SEQUENCE_LENGTHS = ("isl", "osl")
 #: The argparse action of an option the user may give more than once, each giving one more value.
 REPEATABLE = "append"
+#: Where ``run`` measures: this machine's cards, or the sandboxes of a grant handed to it.
+LOCAL_MEASUREMENT, HOSTED_MEASUREMENT = "local", "hosted"
+#: What a grant handed to ``run --measurement hosted`` must give: the sandbox service, the measurement key and
+#: templates, the grant's limits and creation time, and the source the runner cache is built from.
+HANDED_GRANT = (HostGroup.SANDBOX, HostGroup.MEASUREMENT_KEY, HostGroup.GRANT, HostGroup.SOURCE)
 
 
 class EnvironmentIncomplete(RuntimeError):
@@ -289,7 +300,7 @@ def _add_concurrency_options(run: argparse.ArgumentParser) -> None:
         "--max-parallel-tests",
         type=int,
         default=None,
-        help="Tests running at once; default as many as the machine's cards run at TP.",
+        help="Tests running at once; default as many as the machine's cards, or the grant, run at TP.",
     )
     run.add_argument("--max-k-per-branch", type=int, default=DEFAULT_MAX_K_PER_BRANCH, help="Highest K of a branch.")
     run.add_argument(
@@ -297,7 +308,18 @@ def _add_concurrency_options(run: argparse.ArgumentParser) -> None:
         type=int,
         default=0,
         metavar="N",
-        help="Dev sandboxes lent to the specialists at once, from the cards tests are measured on; 0 = none.",
+        help="Dev sandboxes lent to the specialists at once, from the cards tests are measured on; 0 = none."
+        " Refused with --measurement hosted.",
+    )
+    run.add_argument(
+        "--measurement",
+        choices=(LOCAL_MEASUREMENT, HOSTED_MEASUREMENT),
+        default=LOCAL_MEASUREMENT,
+        help=(
+            "Where tests run: this machine's cards, or the sandboxes of the grant the environment hands over"
+            " (E2B_API_URL, E2B_SANDBOX_URL, HYPERLOOM_SANDBOX_KEY_MEASUREMENT, HYPERLOOM_SANDBOX_TEMPLATES,"
+            " HYPERLOOM_GRANT_LIMITS, HYPERLOOM_RUN_CREATED_AT, HYPERLOOM_SOURCE_REPO, HYPERLOOM_SOURCE_SHA)."
+        ),
     )
     run.add_argument(
         "--judge-interval-sec", type=float, default=DEFAULT_JUDGE_INTERVAL_SECONDS, help="Seconds between judge calls."
@@ -664,6 +686,24 @@ class ReadySession:
     services: SessionServices
 
 
+def hosted_ready_session(host: HostInfo, workload: Workload) -> ReadySession:
+    """:func:`ready_session` measured in the sandboxes of ``host``'s grant: the one builder of the peers of
+    ``hosted run`` and ``run --measurement hosted``."""
+
+    inputs = PinnedToolboxInputs(host, cache_root(os.environ))
+    return ready_session(workload, partial(load_hosted_peers, inputs=inputs))
+
+
+def grant_tests_that_fit(host: HostInfo) -> Callable[[int], int]:
+    """How many tests of a TP the grant ``host`` holds runs at once; raises ValueError when one does not fit, and
+    ImportError when the ``hosted`` extra is not installed."""
+
+    # hosted_toolbox loads the sandbox SDK, which only the hosted extra installs.
+    from hyperloom_multibranch.toolbox.hosted_toolbox import parallel_tests_for
+
+    return partial(parallel_tests_for, toolbox_grant(host.grant_limits))
+
+
 def ready_session(workload: Workload, load: Callable[[Workload], PeerFactory]) -> ReadySession:
     """The peers ``load`` has for ``workload`` and the services, the Recipe KB and the RSI archive checked first;
     raises :class:`EnvironmentIncomplete` or :class:`PeersUnavailable` naming what is missing. Creates nothing."""
@@ -719,8 +759,7 @@ def _hosted_start(host: HostInfo) -> HostedStart:
     persisted = None if previous is None else persisted_run(previous)
     settings = _hosted_settings(host, deadline.session_hours) if persisted is None else persisted.settings
     require_session_environment(settings, os.environ)
-    inputs = PinnedToolboxInputs(host, cache_root(os.environ))
-    ready = ready_session(settings.workload, partial(load_hosted_peers, inputs=inputs))
+    ready = hosted_ready_session(host, settings.workload)
     if persisted is not None:
         run = partial(final_only, persisted, ready.peer_factory, ready.services)
     else:
@@ -729,11 +768,8 @@ def _hosted_start(host: HostInfo) -> HostedStart:
 
 
 def _hosted_settings(host: HostInfo, session_hours: Callable[[float], float]) -> RunSettings:
-    # hosted_toolbox loads the sandbox SDK, which only the hosted extra installs.
-    from hyperloom_multibranch.toolbox.hosted_toolbox import parallel_tests_for
-
     spec = campaign_spec(host)
-    tests_that_fit = partial(parallel_tests_for, toolbox_grant(host.grant_limits))
+    tests_that_fit = grant_tests_that_fit(host)
     argv = run_argv(spec, session_hours(spec.max_hours), tests_that_fit(spec.tp))
     return settings_from(_parsed_run(argv), tests_that_fit)
 
@@ -763,21 +799,61 @@ def _not_run(state_dir: Path, returncode: int, exc: Exception) -> int:
     return returncode
 
 
+@dataclass(frozen=True)
+class HandedGrant:
+    """The grant ``run --measurement hosted`` measures in, and how much of it is left."""
+
+    host: HostInfo
+    deadline: GrantDeadline
+
+
+def _handed_grant(args: argparse.Namespace) -> HandedGrant:
+    """The grant handed to ``run --measurement hosted``, taken out of the environment; ``args.max_hours`` is cut to
+    what it leaves. Raises ValueError naming what is missing or refused, never a value."""
+
+    if args.dev_leases:
+        raise ValueError(
+            "--dev-leases is refused with --measurement hosted: a dev sandbox's commands run on this machine"
+        )
+    if args.agents:
+        raise ValueError("--autonomous-agent is refused with --measurement hosted: its agent runs on this machine")
+    host = take_host_info(os.environ, require=HANDED_GRANT, require_run=False)
+    deadline = grant_deadline(host, datetime.now(timezone.utc))
+    args.max_hours = deadline.session_hours(args.max_hours)
+    return HandedGrant(host, deadline)
+
+
+def _run_settings(args: argparse.Namespace, grant: HandedGrant | None) -> RunSettings:
+    settings = settings_from(args) if grant is None else settings_from(args, grant_tests_that_fit(grant.host))
+    if args.reuse_prelude is not None:
+        reused = reused_prelude(args.reuse_prelude, settings.workload, _reused_image_digest(os.environ))
+        settings = replace(settings, reuse_prelude=reused)
+    return settings
+
+
+def _start(settings: RunSettings, grant: HandedGrant | None) -> int:
+    if grant is None:
+        ready = ready_session(settings.workload, load_peers)
+    else:
+        ready = hosted_ready_session(grant.host, settings.workload)
+        if grant.deadline.stop_after_sec is not None:
+            arm_grant_stop(max(0.0, grant.deadline.stop_after_sec))
+    return run_session(settings, ready.peer_factory, ready.services)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command == "hosted":
         return hosted_run()
-    persisted = None
+    persisted = grant = None
     try:
         if args.command == "final-only":
             persisted = persisted_run(args.session_dir)
             settings = persisted.settings
         else:
-            settings = settings_from(args)
-            if args.reuse_prelude is not None:
-                reused = reused_prelude(args.reuse_prelude, settings.workload, _reused_image_digest(os.environ))
-                settings = replace(settings, reuse_prelude=reused)
+            grant = _handed_grant(args) if args.measurement == HOSTED_MEASUREMENT else None
+            settings = _run_settings(args, grant)
         require_session_environment(settings, os.environ)
     except ValueError as exc:
         parser.print_usage(sys.stderr)
@@ -785,11 +861,11 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(EXIT_USAGE) from exc
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format=LOG_FORMAT)
     try:
-        ready = ready_session(settings.workload, load_peers)
         if persisted is not None:
+            ready = ready_session(settings.workload, load_peers)
             return final_only(persisted, ready.peer_factory, ready.services)
-        return run_session(settings, ready.peer_factory, ready.services)
-    except (EnvironmentIncomplete, PeersUnavailable, ImageCheckFailed) as exc:
+        return _start(settings, grant)
+    except (EnvironmentIncomplete, PeersUnavailable, ImageCheckFailed, CacheBuildError, ToolboxInputsError) as exc:
         print(f"{PROG}: cannot run a session, {exc}", file=sys.stderr)
         return EXIT_FAILED
 
@@ -800,10 +876,14 @@ __all__ = [
     "RSI_ARCHIVE_DEFAULT",
     "SEQUENCE_LENGTHS",
     "EnvironmentIncomplete",
+    "HANDED_GRANT",
+    "HandedGrant",
     "HostedStart",
     "ReadySession",
     "build_parser",
     "final_only",
+    "grant_tests_that_fit",
+    "hosted_ready_session",
     "hosted_run",
     "main",
     "recipe_kb_from_env",

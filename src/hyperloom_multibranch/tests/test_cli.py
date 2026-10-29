@@ -12,6 +12,10 @@ second recovery while it works.
 ``run`` does, measuring on the grant's cards and ending a CLOSE grace before the grant does; it tells the host in
 ``exit.json`` that the run is over once CLOSE ran or when nothing a restart changes keeps a session from running, and
 leaves the host to start a crashed run again, which then finishes the session the first start began.
+
+``run --measurement hosted`` measures in the sandboxes of a grant handed to it in the environment, without a campaign
+spec, a run id or a state directory, refuses a missing grant variable by name and what would run on this machine, and
+stops before the grant ends as ``hosted run`` does.
 """
 
 from __future__ import annotations
@@ -22,7 +26,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -1258,3 +1262,156 @@ def test_a_restart_over_a_session_that_already_chose_ends_the_run_for_good(
     assert (document["final"], document["returncode"]) == (True, cli.EXIT_USAGE)
     assert "already chose c9" in str(document["error"])
     assert agent_cli == []
+
+
+# -- run --measurement hosted -----------------------------------------------------------------------------------------
+#: A grant handed to a session started by hand: the sandbox group, the measurement key, the limits and the source.
+HANDED = {
+    "E2B_API_URL": "http://service.invalid",
+    "E2B_SANDBOX_URL": "http://sandboxes.invalid",
+    "HYPERLOOM_SANDBOX_KEY_MEASUREMENT": "m-key-0123456789",
+    "HYPERLOOM_SANDBOX_TEMPLATES": json.dumps({"measurement": {"2": "ar-01ja-measurement"}}),
+    "HYPERLOOM_GRANT_LIMITS": json.dumps({**GRANT, "max_gpus": 8, "max_sandboxes": 3}),
+    "HYPERLOOM_SOURCE_REPO": "AMD-AGI/Hyperloom",
+    "HYPERLOOM_SOURCE_SHA": "c" * 40,
+}
+#: What only a Claw host injects, which a session started by hand does not have.
+CLAW_ONLY = (
+    "HYPERLOOM_INPUT_FILE",
+    "HYPERLOOM_RUN_ID",
+    "HYPERLOOM_STATE_DIR",
+    "HYPERLOOM_MCP_PORT",
+    "HYPERLOOM_MCP_TOKEN",
+)
+
+
+@dataclass
+class Started:
+    """The settings and peers of every session the command started, and the delay of every grant stop armed."""
+
+    sessions: list[tuple[RunSettings, PeerFactory]]
+    stops: list[float]
+
+
+@pytest.fixture
+def handed(agent_binaries: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Started:
+    """A grant handed over ten minutes after it was created, no Claw input set, sessions recorded rather than run."""
+
+    for name, value in HANDED.items():
+        monkeypatch.setenv(name, value)
+    for name in CLAW_ONLY:
+        monkeypatch.delenv(name, raising=False)
+    stamp = datetime.now(timezone.utc) - timedelta(seconds=600)
+    monkeypatch.setenv("HYPERLOOM_RUN_CREATED_AT", stamp.isoformat())
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "workspace"))
+    started = Started([], [])
+
+    def run_session(settings: RunSettings, peer_factory: PeerFactory, services: object) -> int:
+        started.sessions.append((settings, peer_factory))
+        return 0
+
+    monkeypatch.setattr(cli, "run_session", run_session)
+    monkeypatch.setattr(cli, "arm_grant_stop", started.stops.append)
+    monkeypatch.setattr(local_peers, "machine_cards", _no_local_cards)
+    return started
+
+
+def test_run_measures_on_local_cards_unless_told_hosted() -> None:
+    parser = cli.build_parser()
+
+    assert parser.parse_args(["run", *WORKLOAD_ARGS]).measurement == "local"
+    assert parser.parse_args(["run", *WORKLOAD_ARGS, "--measurement", "hosted"]).measurement == "hosted"
+    with pytest.raises(SystemExit):
+        parser.parse_args(["run", *WORKLOAD_ARGS, "--measurement", "cloud"])
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_run_measures_in_the_sandboxes_of_the_grant_handed_to_it(handed: Started) -> None:
+    assert cli.main(["run", *WORKLOAD_ARGS, "--measurement", "hosted"]) == 0
+
+    [(settings, peer_factory)] = handed.sessions
+    backend = peer_factory.args[0].backend
+    assert type(backend).__name__ == "HostedSandboxes" and not backend.on_this_machine
+    host = backend.inputs.host
+    assert (host.e2b_api_url, host.run_id, host.input_file, host.state_dir) == (
+        "http://service.invalid",
+        None,
+        None,
+        None,
+    )
+    assert host.sandbox_keys.measurement.reveal() == HANDED["HYPERLOOM_SANDBOX_KEY_MEASUREMENT"]
+    assert settings.caps.max_parallel_tests == 3, "TP=2 on 8 GPUs, at most one test per sandbox"
+    on_three_cards = cli.settings_from(cli.build_parser().parse_args(["run", *WORKLOAD_ARGS]), lambda tp: 3)
+    assert settings == replace(on_three_cards, max_hours=settings.max_hours), "the flags give the workload"
+    assert "HYPERLOOM_SANDBOX_KEY_MEASUREMENT" not in os.environ, "no child process inherits a grant key"
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_run_ends_before_the_grant_and_is_stopped_a_grace_before_it(
+    handed: Started, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stamp = datetime.now(timezone.utc) - timedelta(seconds=GRANT["max_runtime_sec"] - 3600)
+    monkeypatch.setenv("HYPERLOOM_RUN_CREATED_AT", stamp.isoformat())
+
+    assert cli.main(["run", *WORKLOAD_ARGS, "--measurement", "hosted", "--max-hours", "0"]) == 0
+
+    [(settings, _)] = handed.sessions
+    grace = MB_CLOSE_GRACE_CAP_SECONDS
+    assert settings.max_hours == pytest.approx((3600 - grace - GRANT_MARGIN_SECONDS) / 3600, abs=0.01)
+    assert handed.stops == [pytest.approx(3600 - grace, abs=30)]
+
+
+@pytest.mark.parametrize(
+    "variable",
+    [
+        "HYPERLOOM_SANDBOX_KEY_MEASUREMENT",
+        "HYPERLOOM_SANDBOX_TEMPLATES",
+        "HYPERLOOM_GRANT_LIMITS",
+        "HYPERLOOM_RUN_CREATED_AT",
+        "E2B_API_URL",
+        "HYPERLOOM_SOURCE_SHA",
+    ],
+)
+@pytest.mark.usefixtures("ready_environment")
+def test_a_grant_missing_a_variable_is_a_usage_error_naming_it_and_no_secret(
+    variable: str, handed: Started, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv(variable)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["run", *WORKLOAD_ARGS, "--measurement", "hosted"])
+
+    assert exc.value.code == cli.EXIT_USAGE
+    err = capsys.readouterr().err
+    assert variable in err and HANDED["HYPERLOOM_SANDBOX_KEY_MEASUREMENT"] not in err
+    assert handed.sessions == [] and handed.stops == []
+
+
+@pytest.mark.parametrize(
+    ("extra", "option"),
+    [(["--dev-leases", "1"], "--dev-leases"), (["--autonomous-agent", "/agents/a"], "--autonomous-agent")],
+)
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_run_refuses_what_would_run_on_this_machine(
+    extra: list[str], option: str, handed: Started, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["run", *WORKLOAD_ARGS, "--measurement", "hosted", *extra])
+
+    assert exc.value.code == cli.EXIT_USAGE
+    assert f"{option} is refused with --measurement hosted" in capsys.readouterr().err
+    assert handed.sessions == []
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_local_run_ignores_a_grant_in_the_environment_and_measures_on_this_machines_cards(
+    handed: Started, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(local_peers, "machine_cards", lambda: (0, 1))
+
+    assert cli.main(["run", *WORKLOAD_ARGS]) == 0
+
+    [(settings, peer_factory)] = handed.sessions
+    assert peer_factory.args[0].backend == local_peers.LocalCards((0, 1))
+    assert settings == _settings() and handed.stops == []
+    assert os.environ["HYPERLOOM_SANDBOX_KEY_MEASUREMENT"] == HANDED["HYPERLOOM_SANDBOX_KEY_MEASUREMENT"]
