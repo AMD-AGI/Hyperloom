@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 import asyncio
+import hashlib
 import re
 
 import pytest
@@ -21,11 +22,14 @@ from hyperloom_multibranch.contracts.judgement import Verdict
 from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, LineageEvent, RegressionCase
 from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH, Conclusion, LineageKind
+from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.tests.factories import delta, judgement, result
+from hyperloom_multibranch.rulegate.fix_case import FIX_CASE_ID
 from hyperloom_multibranch.rulegate.regression import (
     RESUBMIT_SECONDS,
     FixNotProven,
+    PooledCase,
     RegressionSet,
     ReproRun,
     ReproRunner,
@@ -60,11 +64,38 @@ def _fixed_by_bounds(*, root: ReproAnswer = REPRODUCED):
     return answer
 
 
+class _Toolbox(ReproToolbox):
+    """A repro toolbox that also stores the cases it is given, unless it ``refuses_cases``."""
+
+    refuses_cases = False
+
+    async def put_attachment(self, attachment_id, kind, data):
+        if self.refuses_cases:
+            raise RequestRejected("the archive expands past 64 MiB", "attachment_too_large")
+        return AttachmentRef(attachment_id, kind, hashlib.sha256(data).hexdigest())
+
+
+def _pooled(data: bytes, origin: str) -> PooledCase:
+    return PooledCase(hashlib.sha256(data).hexdigest(), data, origin)
+
+
+class _Pool:
+    """The cases other sessions registered, and how often they were asked for."""
+
+    def __init__(self, *cases: PooledCase) -> None:
+        self.given = cases
+        self.reads = 0
+
+    async def cases(self) -> tuple[PooledCase, ...]:
+        self.reads += 1
+        return self.given
+
+
 class _Rig:
     """A toolbox that runs repro tests, writing to a local blackboard, and a runner reading it as the gate."""
 
     def __init__(self, root, answer=lambda request: NOT_REPRODUCED, verifier=None):
-        self.toolbox = ReproToolbox(LocalBlackboard(root, Writer(Role.TOOLBOX, "toolbox")), answer)
+        self.toolbox = _Toolbox(LocalBlackboard(root, Writer(Role.TOOLBOX, "toolbox")), answer)
         self.blackboard = LocalBlackboard(root, Writer(Role.GATE, "gate"))
         self.verifier = verifier or RecordingVerifier()
         self.sleeps: list[float] = []
@@ -192,15 +223,26 @@ class _Session(_Rig):
         await self.blackboard.add_regression_case(RegressionCase(case[0].id, commit, case_request))
 
     def _answer(self, request):
-        """A case's answer, or what a callable answer makes of the request."""
+        """A case's answer, by the case's content or else its name, or what a callable answer makes of the request."""
 
-        answer = self.answers.get(request.attachments[0].id, NOT_REPRODUCED)
+        (case,) = request.attachments
+        answer = self.answers.get(case.sha256, self.answers.get(case.id, NOT_REPRODUCED))
         return answer(request) if callable(answer) else answer
 
     def runs(self) -> list[TestRequest]:
         """The repro tests run after the session's own two."""
 
         return self.toolbox.submitted[2:]
+
+    def pooled_set(self, *cases: PooledCase, pool: _Pool | None = None) -> RegressionSet:
+        """A regression set of this session over a pool of ``cases``."""
+
+        return RegressionSet(self.blackboard, self.runner, self.repo, pool=pool or _Pool(*cases))
+
+    def seeded(self) -> list[TestRequest]:
+        """The repro tests run on the root unchanged, the pool's cases."""
+
+        return [run for run in self.runs() if (run.parent_commit, run.delta) == (ROOT, NO_DELTA)]
 
     async def prove(self, candidate: TestRequest):
         return await prove_fix(self.runner, self.blackboard, candidate, OOB)
@@ -419,3 +461,55 @@ async def test_only_a_repro_test_whose_case_ran_clean_is_registered(session, ans
 async def test_a_performance_test_is_no_case(session):
     with pytest.raises(ValueError, match="r-s1 is not a repro test"):
         await register_case(session.blackboard, "c1", "r-s1")
+
+
+async def test_before_its_first_check_the_set_runs_the_pools_cases_on_the_root_and_a_clean_one_guards_every_check(
+    session,
+):
+    clean, broken = _pooled(b"clean case", "past-1 c7"), _pooled(b"broken case", "past-2 c9")
+    session.answers[broken.case_id] = REPRODUCED
+
+    outcome = await session.pooled_set(clean, broken).check("c1", MERGE, sources=())
+
+    seeded = session.seeded()
+    assert len(seeded) == 2 and {run.branch_id for run in seeded} == {INTEGRATION_BRANCH}
+    assert {run.attachments for run in seeded} == {
+        (AttachmentRef(FIX_CASE_ID, "dir", case.case_id),) for case in (clean, broken)
+    }
+    # The broken case reproduces on the root: a defect the root carries, which no merge can be held to.
+    on_root = await session.blackboard.regression_cases_for(ROOT)
+    assert [(case.case_ref, case.fix_commit) for case in on_root] == [("repro-case of past-1 c7", ROOT)]
+    # c1 builds on the root, so its own case and the clean pooled one both run on it.
+    assert outcome == RegressionOutcome(True, cases=2)
+
+
+async def test_the_pools_cases_run_on_the_root_once_and_a_case_on_the_root_already_never_runs_there_again(session):
+    pool = _Pool(_pooled(b"clean case", "past-1 c7"))
+
+    first = session.pooled_set(pool=pool)
+    await asyncio.gather(first.check("c1", MERGE, sources=()), first.check("c2", MERGE, sources=()))
+    # A session resumed after a crash builds its regression set again.
+    await session.pooled_set(pool=pool).check("c1", NO_DELTA, sources=())
+
+    assert pool.reads == 2
+    assert len(session.seeded()) == 1
+
+
+@pytest.mark.parametrize("answer", [REPRODUCED, None, ""])
+async def test_a_pooled_case_that_does_not_run_clean_on_the_root_is_no_case_of_it(session, answer):
+    case = _pooled(b"clean case", "past-1 c7")
+    session.answers[case.case_id] = answer
+
+    outcome = await session.pooled_set(case).check("c1", MERGE, sources=())
+
+    assert outcome == RegressionOutcome(True, cases=1)
+    assert await session.blackboard.regression_cases_for(ROOT) == ()
+
+
+async def test_a_pooled_case_the_toolbox_will_not_store_is_left_out_and_the_check_goes_on(session):
+    session.toolbox.refuses_cases = True
+
+    outcome = await session.pooled_set(_pooled(b"clean case", "past-1 c7")).check("c1", MERGE, sources=())
+
+    assert outcome == RegressionOutcome(True, cases=1)
+    assert session.seeded() == [] and await session.blackboard.regression_cases_for(ROOT) == ()
