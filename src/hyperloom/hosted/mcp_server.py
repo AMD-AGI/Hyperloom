@@ -180,16 +180,21 @@ class _TokenRegistry:
         with self._lock:
             return self._cursors.get(_digest(token))
 
-    def move_cursor(self, token: str, was: str | None, now: str) -> None:
-        """Keep ``now`` for a live token whose cursor is still ``was``; a reply that raced a newer one loses."""
+    def move_cursor(self, token: str, was: str | None, now: str | None) -> None:
+        """Keep ``now`` (``None`` for no cursor) for a live token whose cursor is still ``was``; a reply that raced
+        a newer one loses."""
         key = _digest(token)
         with self._lock:
             if key in self._by_digest and self._cursors.get(key) == was:
-                self._cursors[key] = now
+                if now is None:
+                    del self._cursors[key]
+                else:
+                    self._cursors[key] = now
 
 
 class _ReplyNotes:
-    """One request's view of its token's annotation cursor: each reply moves it, and it is kept once they are sent."""
+    """One request's view of its token's annotation cursor: each reply moves it, and it is kept for the replies that
+    are being sent."""
 
     def __init__(self, annotator: ReplyAnnotator, tokens: _TokenRegistry, presented: str) -> None:
         self._annotator, self._tokens, self._presented = annotator, tokens, presented
@@ -223,10 +228,16 @@ class _ReplyNotes:
             return result
         return {**result, "content": [*result["content"], {"type": "text", "text": note.text}]}
 
-    def delivered(self) -> None:
-        """The replies of this request were written to the client: keep the cursor they moved to."""
+    def keep(self) -> None:
+        """Keep the cursor the replies moved to. Called before the first byte is written, so a client that sends its
+        next call the moment it has the reply finds the cursor already moved."""
         if self._now is not None and self._now != self._was:
             self._tokens.move_cursor(self._presented, self._was, self._now)
+
+    def drop(self) -> None:
+        """The write failed, so the client never got the replies: put the cursor back where this request found it."""
+        if self._now is not None and self._now != self._was:
+            self._tokens.move_cursor(self._presented, self._now, self._was)
 
 
 def _nothing_to_keep() -> None:
@@ -235,12 +246,14 @@ def _nothing_to_keep() -> None:
 
 @dataclass(frozen=True)
 class PostReply:
-    """The answer to one POST; call ``delivered`` once ``body`` has been written to the client."""
+    """The answer to one POST; call ``keep`` just before ``body`` is written to the client, and ``drop`` if the
+    write fails."""
 
     status: HTTPStatus
     body: Any
     initialized: bool = False
-    delivered: Callable[[], None] = _nothing_to_keep
+    keep: Callable[[], None] = _nothing_to_keep
+    drop: Callable[[], None] = _nothing_to_keep
 
 
 class McpServer:
@@ -478,10 +491,10 @@ class McpServer:
             notes = _ReplyNotes(self._annotator, self._tokens, presented)
         with self._call_heartbeat(principal):
             reply = asyncio.run(self._answer_all(principal, presented, payload, notes))
-        delivered = notes.delivered if notes is not None else _nothing_to_keep
+        keep, drop = (notes.keep, notes.drop) if notes is not None else (_nothing_to_keep, _nothing_to_keep)
         if reply is None:
-            return PostReply(HTTPStatus.ACCEPTED, None, delivered=delivered)
-        return PostReply(HTTPStatus.OK, reply, _mentions_initialize(payload), delivered)
+            return PostReply(HTTPStatus.ACCEPTED, None, keep=keep, drop=drop)
+        return PostReply(HTTPStatus.OK, reply, _mentions_initialize(payload), keep, drop)
 
     # -- lifecycle ---------------------------------------------------------------------------------------------
 
@@ -579,8 +592,12 @@ def _make_handler(server: McpServer) -> type[BaseHTTPRequestHandler]:
                 return
             reply = server.handle_post(principal, presented, self.rfile.read(length))
             headers = {SESSION_HEADER: uuid.uuid4().hex} if reply.initialized else None
-            self._send(reply.status, reply.body, headers)
-            reply.delivered()
+            reply.keep()
+            try:
+                self._send(reply.status, reply.body, headers)
+            except BaseException:
+                reply.drop()
+                raise
 
     return Handler
 

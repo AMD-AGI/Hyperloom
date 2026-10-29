@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -196,26 +197,6 @@ class TestTokensFromServingLog:
         assert serving_log_evidence._tokens_from_serving_log(_log(tmp_path / "a.log", text)) == "11,22,33"
 
 
-class TestShapeManifestResolution:
-    def test_the_newest_manifest_wins(self, tmp_path):
-        import os
-
-        old = tmp_path / "runs" / "baseline" / "bypass" / "trace_shape_manifest.json"
-        new = tmp_path / "runs" / "explore" / "bypass" / "trace_shape_manifest.json"
-        for path in (old, new):
-            path.parent.mkdir(parents=True)
-            path.write_text("{}", encoding="utf-8")
-        os.utime(old, (1, 1))
-
-        assert forge_shapes._resolve_trace_shape_manifest(_State(), tmp_path) == str(new)
-
-    def test_no_manifest_is_an_empty_string_not_an_error(self, tmp_path):
-        assert forge_shapes._resolve_trace_shape_manifest(_State(), tmp_path) == ""
-
-    def test_a_missing_session_dir_is_survivable(self, tmp_path):
-        assert forge_shapes._resolve_trace_shape_manifest(_State(), tmp_path / "gone") == ""
-
-
 class TestTheWrapperForwardsTheNewInputs:
     @pytest.mark.parametrize(
         "key,flag",
@@ -237,6 +218,33 @@ class TestTheWrapperForwardsTheNewInputs:
 
         cmd = mod.build_command({**base, key: "/tmp/x.json"})
         assert cmd[cmd.index(flag) + 1] == "/tmp/x.json"
+
+
+class TestAPayloadShapesManifestReachesForge:
+    @pytest.mark.asyncio
+    async def test_an_existing_payload_manifest_reaches_the_tune_input(self, tmp_path):
+        manifest = _log(tmp_path / "manifest.json", "{}")
+        untuned_csv = _log(tmp_path / "untuned.csv", "")
+        run = SimpleNamespace(
+            workspace=tmp_path,
+            server_log="",
+            framework="sglang",
+            model_dir="/m",
+            tuning_framework="sglang",
+            precision="bf16",
+            quant_type="",
+            gpu_type="gpu_a",
+            tp=1,
+            conc=1,
+            mp=1,
+            thorough=False,
+        )
+        payload = {"shapes_manifest": str(manifest), "untuned_csv": str(untuned_csv)}
+
+        sources = await forge_gemm_tuning._forge_shape_sources(None, payload, run)
+        tune_input = forge_gemm_tuning._forge_gemm_tune_input(payload, run, sources, 600, 0)
+
+        assert tune_input["shapes_manifest"] == str(manifest)
 
 
 class _StopHere(Exception):

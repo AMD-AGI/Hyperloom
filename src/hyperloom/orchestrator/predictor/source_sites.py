@@ -25,8 +25,7 @@ _EXPECTED_MAJOR = SOURCE_RESOLUTION_SCHEMA_VERSION.split(".")[0]
 
 
 def _artifact(analysis_md_path: str) -> Path | None:
-    # The deterministic route writes the artifact into the run directory and the
-    # report into tracelens/ below it; the bypass route puts the two side by side.
+    # The artifact sits in the run directory; the report may be in tracelens/ below it.
     report = Path(analysis_md_path)
     for directory in (report.parent, report.parent.parent):
         candidate = directory / SOURCE_RESOLUTION_FILENAME

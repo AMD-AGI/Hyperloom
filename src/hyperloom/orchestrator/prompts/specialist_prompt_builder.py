@@ -1722,6 +1722,13 @@ def _section_runtime_findings(inp: SpecialistPromptInputs) -> list[str]:
     ]
 
 
+_ANALYSIS_MD_READ_GUIDE = (
+    "Use the `Read` tool on this path for the full TraceLens report (~10-20 KB). All section headings are stable: "
+    "`## Executive Summary` / `## Top Operations` / `## Compute Kernel Optimizations` / "
+    "`## Kernel Fusion Opportunities` / `## System-Level Optimizations` / `## Recommendations`."
+)
+
+
 def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
     """Render the ROOFLINE EVIDENCE section from ``inp.roofline_evidence``;
     empty evidence renders a heading + ``(none)`` placeholder.
@@ -1790,16 +1797,9 @@ def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
 
     analysis_path = ev.get("analysis_md_path")
     if analysis_path:
-        rows.append(f"**Full analysis.md path:** `{analysis_path}`")
-        rows.append("")
-        rows.append(
-            "Use the `Read` tool on this path for the full TraceLens "
-            "report (~10-20 KB). All section headings are stable: "
-            "`## Executive Summary` / `## Top Operations` / "
-            "`## Compute Kernel Optimizations` / "
-            "`## Kernel Fusion Opportunities` / "
-            "`## System-Level Optimizations` / `## Recommendations`."
-        )
+        is_md = Path(analysis_path).suffix == ".md"
+        guide = _ANALYSIS_MD_READ_GUIDE if is_md else "Use the `Read` tool on this path for the full TraceLens report."
+        rows += [f"**Full {'analysis.md' if is_md else 'TraceLens report'} path:** `{analysis_path}`", "", guide]
     return rows
 
 

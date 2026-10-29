@@ -5,9 +5,11 @@
 
 from __future__ import annotations
 
+import dataclasses
 import http.client
 import json
 import logging
+import select
 import socket
 import struct
 import threading
@@ -532,6 +534,32 @@ def test_a_failed_tool_call_still_gets_the_block_and_moves_the_cursor(noted: Mcp
     assert len(_blocks(client.call(token, "whoami")[2])) == 1
 
 
+def test_the_cursor_is_kept_before_the_reply_is_written_so_the_next_call_cannot_outrun_it(
+    noted: McpServer, feed: Feed
+) -> None:
+    token = noted.issue_token("spec-1", "branch-7")
+    on_the_wire: list[bool] = []
+    answer = noted.handle_post
+    wire = socket.create_connection(("127.0.0.1", noted.port), timeout=10)
+
+    def watch(principal: Any, presented: str, body: bytes) -> Any:
+        reply = answer(principal, presented, body)
+
+        def keep() -> None:
+            on_the_wire.append(bool(select.select([wire], [], [], 0)[0]))
+            reply.keep()
+
+        return dataclasses.replace(reply, keep=keep)
+
+    noted.handle_post = watch  # type: ignore[method-assign]
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "whoami"}}).encode()
+    head = f"POST /mcp HTTP/1.1\r\nHost: x\r\nX-Hyperloom-Token: {token}\r\nContent-Length: {len(body)}\r\n\r\n"
+    wire.sendall(head.encode() + body)
+    assert wire.recv(1, socket.MSG_PEEK)
+    wire.close()
+    assert on_the_wire == [False]
+
+
 def test_a_refused_call_has_no_result_to_carry_the_block_and_leaves_the_cursor(noted: McpServer, feed: Feed) -> None:
     client, token = Client(noted), _primed(noted)
     feed.items.append("one")
@@ -552,6 +580,19 @@ def test_the_cursor_moves_only_once_the_reply_was_sent(noted: McpServer, feed: F
     noted.register("hold", schema={"type": "object"}, handler=hold, scopes={"specialist"})
     token = _primed(noted)
     feed.items.append("one")
+    finished = threading.Event()
+    answer = noted.handle_post
+
+    def watch(principal: Any, presented: str, body: bytes) -> Any:
+        reply = answer(principal, presented, body)
+
+        def drop() -> None:
+            reply.drop()
+            finished.set()
+
+        return dataclasses.replace(reply, drop=drop)
+
+    noted.handle_post = watch  # type: ignore[method-assign]
     body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "hold"}}).encode()
     head = f"POST /mcp HTTP/1.1\r\nHost: x\r\nX-Hyperloom-Token: {token}\r\nContent-Length: {len(body)}\r\n\r\n"
     gone = socket.create_connection(("127.0.0.1", noted.port), timeout=10)
@@ -560,9 +601,7 @@ def test_the_cursor_moves_only_once_the_reply_was_sent(noted: McpServer, feed: F
     gone.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
     gone.close()
     release.set()
-    deadline = time.monotonic() + 10
-    while ("hold", "0") not in feed.seen and time.monotonic() < deadline:
-        time.sleep(0.01)
+    assert finished.wait(10)
     assert ("hold", "0") in feed.seen
     assert _blocks(Client(noted).call(token, "whoami")[2])[1:] == ["one"]
     assert len(_blocks(Client(noted).call(token, "whoami")[2])) == 1

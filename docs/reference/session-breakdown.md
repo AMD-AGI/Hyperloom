@@ -38,8 +38,8 @@ recorded-timeline wire shape:
 ```
 
 6.1 changes three things inside the 6 major, an exception to the compatibility
-rules below: it renames one key, removes keys no producer populated or that
-only carried a constant, and reports two unmeasured figures as null. `throughput_tok_s_per_gpu` in
+rules below: it renames one key, removes keys no producer populated, that
+only carried a constant or whose producer was removed, and reports two unmeasured figures as null. `throughput_tok_s_per_gpu` in
 `outcome.baseline`, `outcome.final` and the `baseline` event's `measurement` is
 now `output_throughput`, and the old key is no longer written. The value is
 unchanged: the whole-server output throughput, not a per-GPU figure. Archived
@@ -74,6 +74,34 @@ Four keys that only ever carried a constant are removed with the disposition
 `baseline` event `ext.actions[].convergence` (always `insufficient_rounds`), and
 `conc_sweep` `budget.raised` (always `false`) and `budget.granted_total_sec`
 (always equal to `budget.declared_total_sec`).
+
+Keys that existed only for the diffusion latency roofline or the `bypass`
+analysis route, both removed in this release, are removed with the disposition
+`removed in 6.1, producer removed`:
+
+- `close.roofline_progress.ceiling_kind`: read `ceiling_available`. `true` was
+  `"throughput"` and `false` was `"none"`; `"latency"` came only from the
+  diffusion latency roofline.
+- `close.roofline_progress.latency_ceiling_ms`, `achieved_latency_ms`,
+  `latency_ceiling_available` and `current_best_pct_of_latency_ceiling`, and
+  `roofline` event `ext.actions[].outcome.snapshot.e2e_mean_ms` and
+  `roofline_ideal_ms`: only the diffusion latency roofline set them; they were
+  null or `false` on every other session.
+- `roofline` event
+  `ext.actions[].kernel_roofline.kernels[].roofline_attainment_pct`: only
+  `bypass` rows carried it.
+- `roofline` event
+  `ext.actions[].profile.runs[].validate.trace_quality.aggregation_scope`: the
+  trace certificate no longer selects a steady window, so its counts cover the
+  whole parsed trace; `truncated` and `truncation_reason` say when they do not.
+- `steady_state.source` and `steady_state.aggregation_scope` in
+  `roofline` event `ext.actions[].analysis.effective_run` and `kernel_agent`
+  `trace_analyze_runs[]`: only the `bypass` route varied them.
+
+The value `bypass` is no longer written either: `route` is `agent` or
+`non-llm` and `tool` is `tracelens`, `metadata.versions.tools` has no `bypass`
+entry, a trace certificate's `usable_by` names only `tracelens`, and the
+warning code `bypass_graph_under_recorded` is now `graph_under_recorded`.
 
 Two figures are null instead of a fabricated default when they were not
 measured or not provided. `outcome.validation.attributed_gain_pct` and
@@ -121,10 +149,7 @@ Compatibility rules:
   the major version. Consumers must tolerate unknown keys.
 * **Renamed, removed, or semantically changed** fields of a result section
   require a major bump; `enablement` is outside that rule, as the stability
-  guarantee below records, and so are the 6.1 changes declared above: the
-  rename of `throughput_tok_s_per_gpu` to `output_throughput`, the removal of
-  keys no producer populated, and the null reporting of unmeasured
-  `attributed_gain_pct`, `unattributed_gain_pct` and run `empty`. Only one
+  guarantee below records, and so are the 6.1 changes declared above. Only one
   version is written per session; there is no parallel write of the previous
   version's file.
 * **Missing data** is always represented as `null`, `[]`, or `{}` —
@@ -666,11 +691,9 @@ The Hyperloom team commits to the following compatibility guarantees.
 1. Never removing or renaming a documented field of a result section within
    a major `schema_version`. Such changes require a major bump, as the `v5.0`
    optimization cutover did, and every removed or renamed field is given a
-   disposition in the section it left. The 6.1 changes (the
-   rename of `throughput_tok_s_per_gpu` to `output_throughput`, the removal of
-   keys no producer populated, and null reporting of unmeasured
-   `attributed_gain_pct`, `unattributed_gain_pct` and run `empty`) are a
-   declared exception to this rule, recorded under Versioning. `enablement` is outside this guarantee:
+   disposition in the section it left. The 6.1 changes recorded under
+   Versioning, each with its disposition, are a declared exception to this
+   rule. `enablement` is outside this guarantee:
    it reports on the runtime a session built rather than on its results, is
    emitted as `{}` whenever no enablement ran, and its fields move with the
    runtime they describe — every field the round ledger replaced is still given

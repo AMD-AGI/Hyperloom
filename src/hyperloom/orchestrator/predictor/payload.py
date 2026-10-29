@@ -17,7 +17,6 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from hyperloom.common.coerce import optional_positive_float, text_or_none, to_float, to_unix
-from hyperloom.orchestrator.predictor import evidence
 from hyperloom.common.predictor_config import PHASE_LABEL
 from hyperloom.orchestrator.predictor.view import SessionView
 
@@ -79,39 +78,29 @@ def _roofline(snapshot: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def _hot_kernels(
-    trace: dict[str, Any], sites: Mapping[str, dict[str, Any]], kernels: Mapping[str, dict[str, Any]]
-) -> list[dict[str, Any]] | None:
-    """Top hot kernels, with the operand args, time and call count read from the report or the kernel stats."""
+def _hot_kernels(trace: dict[str, Any], sites: Mapping[str, dict[str, Any]]) -> list[dict[str, Any]] | None:
+    """Top hot kernels; the operand args are the row's shapes, joined."""
     rows = trace.get("hot_kernels_top15")
     if not isinstance(rows, list) or not rows:
         return None
-    report = str(trace.get("analysis_md_text") or "")
-    p_items = evidence.p_item_index(report) if report else {}
     out: list[dict[str, Any]] = []
     for row in rows[:HOT_KERNEL_TOP_N]:
         if not isinstance(row, dict):
             continue
         keys = (str(row.get("kernel_id") or "").strip(), str(row.get("name") or "").strip())
         site = next((sites[key] for key in keys if key and key in sites), {})
-        stats = next((kernels[key] for key in keys if key and key in kernels), {})
-        p_item = p_items.get(keys[1]) or {}
         kernel = {key: row.get(key) for key in _KERNEL_KEYS}
         kernel.update(
             bound_type=_bound(row.get("bound_type")),
             source_file=site.get("source_file", row.get("source_file")),
             source_line=site.get("source_line", row.get("source_line")),
             source_function=site.get("source_function", row.get("source_function")),
-            time_us=_first(p_item.get("time_us"), stats.get("time_us")),
-            args=p_item.get("args"),
-            call_count=_first(p_item.get("call_count"), stats.get("call_count")),
+            time_us=row.get("duration_us"),
+            args=", ".join(row.get("shapes") or []) or None,
+            call_count=row.get("call_count"),
         )
         out.append(kernel)
     return out or None
-
-
-def _first(*values: Any) -> Any:
-    return next((value for value in values if value is not None), None)
 
 
 def _evidence(state: SessionView, sites: Mapping[str, dict[str, Any]], sidecars: Mapping[str, Any]) -> dict[str, Any]:
@@ -120,15 +109,13 @@ def _evidence(state: SessionView, sites: Mapping[str, dict[str, Any]], sidecars:
     if not (trace.get("analysis_md_text") or trace.get("hot_kernels_top15")):
         return {"profile_available": False}
     snapshot = state.roofline_snapshots[-1] if state.roofline_snapshots else {}
-    report = str(trace.get("analysis_md_text") or "")
     block = {
         "profile_available": True,
         "profile_age_sec": _profile_age_sec(trace),
         "roofline": _roofline(snapshot),
-        # The bypass layout parses into what the predictor was trained on; the TraceLens route's report does not.
-        "window": _first(evidence.parse_window(report) if report else None, sidecars.get("window")),
-        "operators": _first(evidence.parse_operators(report) if report else None, sidecars.get("operators")),
-        "hot_kernels": _hot_kernels(trace, sites, sidecars.get("kernels") or {}),
+        "window": sidecars.get("window"),
+        "operators": sidecars.get("operators"),
+        "hot_kernels": _hot_kernels(trace, sites),
     }
     return {key: value for key, value in block.items() if value is not None}
 

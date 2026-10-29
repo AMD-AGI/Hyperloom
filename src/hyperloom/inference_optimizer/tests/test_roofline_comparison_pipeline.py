@@ -533,7 +533,7 @@ class TestFormatTableRendersCeiling:
             }
         )
         text = "\n".join(lines)
-        assert "Theoretical peak" in text
+        assert "Roofline ceiling" in text
         assert "1000.0 tok/s" in text
         assert "Achieved output_throughput" in text
         assert "527.5 tok/s" in text
@@ -572,7 +572,7 @@ class TestFormatTableRendersCeiling:
         }
         lines = format_roofline_metrics_table(cmp)
         text = "\n".join(lines)
-        assert text.count("Theoretical peak") == 1
+        assert text.count("**Roofline ceiling:**") == 1
         assert "1000.0 tok/s" in text
         assert "527.5 tok/s" in text
         assert "690.9 tok/s" in text
@@ -601,7 +601,7 @@ class TestFormatTableRendersCeiling:
             }
         )
         text = "\n".join(lines)
-        assert "Theoretical peak" not in text
+        assert "Roofline ceiling" not in text
 
 
 class TestRecordTraceAnalyzeStampsCeiling:
