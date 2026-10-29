@@ -584,6 +584,20 @@ def test_what_worked_follows_a_best_config_the_keep_amend_stamped(tmp_path: Path
     assert [r["name"] for r in row["what_worked"]] == ["page32"]
 
 
+def test_close_files_a_local_build_under_its_release(tmp_path: Path) -> None:
+    coord = _make_coordinator(tmp_path)
+    ss = coord.shared_state
+    ss.framework_version = f"{_FWV}+rocm723"
+    _stack_one_keep(ss)
+    ss.cumulative_gain_validated_stack_len = 1
+
+    assert coord.recipe_journal.finalize_recipe_and_journal()["result_type"] == "written"
+
+    assert coord.recipe_journal.workload_canonical_id() == _expected_cid()
+    assert coord.recipe_kb.get_recipe(canonical_id=_expected_cid())["framework_version"] == _FWV
+    assert ss.framework_version == f"{_FWV}+rocm723"
+
+
 def _stack_one_keep(state) -> None:
     state.current_best = {"name": "page32", "extra_server_args": "--page-size 32", "tput": 2200.0}
     state.optimization_stack = [{"action": "explore", "variant_name": "page32", "extra_server_args": "--page-size 32"}]
