@@ -11,8 +11,6 @@ from typing import Any, Mapping
 
 from hyperloom.common.gain_math import gain_pct_or_zero
 from hyperloom.common.perf_metric import with_output_per_gpu
-from hyperloom.inference_optimizer.breakdown.recorder.trace import trace_skip
-
 from ..state.shared_state import resolve_graded_comparison
 from ._current_best_lift import _graded_source
 
@@ -64,31 +62,21 @@ class ValidationMixin:
         self.shared_state.validated_recipe_generation = int(self.shared_state.working_recipe_generation or 0)
         # The breakdown's own total is the sum of its ledger, so without this
         # record there is nothing for it to disagree with.
-        try:
-            from hyperloom.inference_optimizer.breakdown.recorder import stack_event
+        from hyperloom.inference_optimizer.breakdown.recorder import stack_event
 
-            stack_event.record_validation(
-                stack_event.StackValidation(
-                    stack_len=self.shared_state.cumulative_gain_validated_stack_len,
-                    graded=graded,
-                    validated_gain_pct=float(validated_gain),
-                    # The figures grading actually read, not the raw measurement: the caller's resolved output
-                    # throughput is stamped into it, so the axes recorded here are the ones the verdict was reached on.
-                    measurement=graded_source,
-                    source=source,
-                    measurement_basis=measurement_basis,
-                    ts=ts,
-                )
+        stack_event.record_validation(
+            stack_event.StackValidation(
+                stack_len=self.shared_state.cumulative_gain_validated_stack_len,
+                graded=graded,
+                validated_gain_pct=float(validated_gain),
+                # The figures grading actually read, not the raw measurement: the caller's resolved output
+                # throughput is stamped into it, so the axes recorded here are the ones the verdict was reached on.
+                measurement=graded_source,
+                source=source,
+                measurement_basis=measurement_basis,
+                ts=ts,
             )
-        except Exception as exc:
-            log.debug("stack validation record failed", exc_info=True)
-            # Losing this one costs the export its only independent check on
-            # the ledger: with no promoted figure to compare against, the
-            # session total falls back to the sum of the very steps it is
-            # meant to be checking.
-            trace_skip(
-                reason="caller raised before the recorder", section="session_validation", entity=source, error=exc
-            )
+        )
         return True
 
     async def _validate_and_watermark(
