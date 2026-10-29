@@ -415,8 +415,12 @@ class _PhaseStateMixin:
         *,
         default_on: bool,
         specialist_task_id: str = "",
+        source_layer: dict[str, Any] | None = None,
     ) -> bool:
-        """Register accepted framework-rewrite switches as search levers."""
+        """Register accepted framework-rewrite switches as search levers.
+
+        A dormant patch's *source_layer* is kept on its rows, as no stack entry carries it to a resumed tree.
+        """
         if not isinstance(switches, list) or not switches:
             return False
         rows = list(getattr(self, "authored_framework_levers", None) or [])
@@ -427,6 +431,8 @@ class _PhaseStateMixin:
             if not isinstance(entry, dict):
                 continue
             row = _lever_row(entry, bool(default_on), specialist_task_id=str(specialist_task_id or ""), ts=now)
+            if source_layer:
+                row["source_layer"] = dict(source_layer)
             name = row["switch"]
             if not name:
                 continue
@@ -447,6 +453,21 @@ class _PhaseStateMixin:
         if changed:
             self.authored_framework_levers = rows
         return changed
+
+    def dormant_source_layers(self) -> list[dict[str, Any]]:
+        """The source layers of patches admitted dormant, one per patch, shaped as the stack's source-patch entries.
+
+        A lever switched on later by a replay round still runs this code, so its row is not skipped.
+        """
+        layers: dict[str, dict[str, Any]] = {}
+        for row in self.authored_framework_levers or []:
+            layer = row.get("source_layer") if isinstance(row, dict) else None
+            if layer and layer.get("source_snapshot"):
+                layers.setdefault(
+                    str(layer["source_snapshot"]),
+                    {**layer, "scope": "source_patch", "variant_name": row.get("specialist_task_id"), "ts": row["ts"]},
+                )
+        return list(layers.values())
 
     def record_framework_lever_attribution(
         self,

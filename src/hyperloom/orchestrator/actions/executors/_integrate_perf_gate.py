@@ -597,7 +597,9 @@ class PerfGateMixin:
         """
         delta_pct = measured.delta_pct
         switch_manifest = attempt.switch_manifest
-        commit_failure, _ = self._commit_accepted_work(attempt, f"hyperloom KEEP_INERT {attempt.specialist_task_id}")
+        commit_failure, committed = self._commit_accepted_work(
+            attempt, f"hyperloom KEEP_INERT {attempt.specialist_task_id}"
+        )
         if commit_failure:
             return _uncommitted_revert(
                 attempt,
@@ -648,6 +650,7 @@ class PerfGateMixin:
             "framework_levers": switch_manifest,
             "framework_lever_outcome": "registered_off",
             "switch_off_parity": parity,
+            **self._capture_source_layer(attempt, params, committed=committed),
         }
 
 

@@ -349,12 +349,14 @@ class IntegratePromotionMixin:
         levers = result.get("framework_levers")
         if not (isinstance(levers, list) and levers):
             return False
-        lever_outcome = str(result.get("framework_lever_outcome") or "")
+        default_on = str(result.get("framework_lever_outcome") or "") == "default_on"
+        layer = {key: result.get(key) for key in ("source_snapshot", "source_snapshot_complete", "framework_root")}
         recorded = bool(
             self.shared_state.record_authored_framework_levers(
                 levers,
-                default_on=(lever_outcome == "default_on"),
+                default_on=default_on,
                 specialist_task_id=str(result.get("specialist_task_id") or ""),
+                source_layer=None if default_on or not layer["source_snapshot"] else layer,
             )
         )
         if result.get(SCREEN_PARAM) == SCREEN_CYCLE:
