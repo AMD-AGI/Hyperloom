@@ -14,6 +14,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from hyperloom_common.jsonio import read_json_strict
 from hyperloom_common.unified_diff import touched_paths
 
 from kernelforge.utils.git import git_bytes
@@ -193,12 +194,9 @@ class BestResultPublisher:
     @staticmethod
     def _load_json(path: Path, *, label: str) -> dict:
         try:
-            value = json.loads(path.read_text())
-        except Exception as error:
+            return read_json_strict(path, require_dict=True)
+        except (OSError, ValueError) as error:
             raise ValueError(f"invalid {label}: {path}") from error
-        if not isinstance(value, dict):
-            raise ValueError(f"invalid {label}: {path}")
-        return value
 
     def _validate_existing_bundle(
         self,

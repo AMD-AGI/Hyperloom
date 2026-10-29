@@ -40,7 +40,7 @@ from hyperloom.common.perf_metric import (
 )
 from hyperloom_common.timeutil import now_iso
 from hyperloom.plugs import progress as _progress
-from hyperloom.common.jsonio import read_json_strict
+from hyperloom_common.jsonio import read_json_strict
 from hyperloom.common.profile_args import sanitize_profile_server_args
 from hyperloom.inference_optimizer.grading import resolved_grading
 

@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom_common.io import atomic_write_json, atomic_write_text
-from hyperloom.common.jsonio import read_json, read_json_strict
+from hyperloom_common.jsonio import read_json, read_json_strict
 
 from . import collectors
 from .recorder.event_finalize import finalize_events

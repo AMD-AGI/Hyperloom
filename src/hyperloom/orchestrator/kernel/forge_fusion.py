@@ -17,7 +17,7 @@ from typing import Any
 
 from hyperloom.common.codex_session import CodexSessionError
 from hyperloom_common.env import is_truthy
-from hyperloom.common.jsonio import read_json
+from hyperloom_common.jsonio import read_json
 from hyperloom_common.llm.llm_config import AGENT_BACKEND_CHOICES
 
 from ..actions.executors._kernel_agent_tool import _run_subprocess

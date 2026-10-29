@@ -29,7 +29,7 @@ from hyperloom_common.llm.llm_config import (
     build_http_timeout,
     get_async_openai_client,
 )
-from hyperloom.common.jsonio import extract_last_json_matching
+from hyperloom_common.jsonio import extract_last_json_matching
 from hyperloom.inference_optimizer.protocol.intent import (
     IntentValidationError,
     NoIntentEmitted,

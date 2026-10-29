@@ -14,7 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.jsonio import read_json
+from hyperloom_common.jsonio import read_json
 from hyperloom.common.kernel_source_contract import (
     METHOD_UNRESOLVED,
     SOURCE_RESOLUTION_FILENAME,

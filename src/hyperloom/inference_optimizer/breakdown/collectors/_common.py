@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom_common.coerce import to_float
-from hyperloom.common.jsonio import read_jsonl
+from hyperloom_common.jsonio import read_jsonl
 
 
 _FRAMEWORK_PHASES = frozenset({"FRAMEWORK_AGENT", "EXPLORE"})

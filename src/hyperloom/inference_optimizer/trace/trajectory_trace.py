@@ -394,7 +394,7 @@ def trajectory_shards(session_dir: Path) -> list[Path]:
 
 def load_shard(path: Path) -> list[dict[str, Any]]:
     """Read one shard, skipping a torn trailing line from a live writer."""
-    from hyperloom.common.jsonio import read_jsonl
+    from hyperloom_common.jsonio import read_jsonl
 
     return read_jsonl(path)
 

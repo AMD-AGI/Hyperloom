@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Callable, NamedTuple
 
 from hyperloom_common.coerce import to_float
-from hyperloom.common.jsonio import extract_last_json_with_key
+from hyperloom_common.jsonio import extract_last_json_with_key
 from hyperloom_common.llm.llm_config import (
     DEFAULT_CLAUDE_MODEL,
     LLMConfigError,

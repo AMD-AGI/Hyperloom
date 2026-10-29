@@ -35,7 +35,7 @@ from typing import Any, Mapping
 
 from hyperloom_common.coerce import dict_rows, to_mapping as _dict
 from hyperloom_common.fs_utils import relative_posix
-from hyperloom.common.jsonio import read_json
+from hyperloom_common.jsonio import read_json
 
 from ..critic_reviews import normalize_framework_reviews
 from .recorder import recorder_for

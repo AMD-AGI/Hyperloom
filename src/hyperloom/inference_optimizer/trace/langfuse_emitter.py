@@ -218,7 +218,7 @@ def _set_trace_attrs(
 
 def _load_json(path: Path) -> dict[str, Any]:
     """Load a JSON object file."""
-    from hyperloom.common.jsonio import read_json
+    from hyperloom_common.jsonio import read_json
 
     return read_json(path, default={}, require_dict=True)
 
@@ -1108,7 +1108,7 @@ def _stamp_receipt_hash(payload: dict[str, Any]) -> dict[str, Any]:
 
 def read_receipt(session_dir: Path) -> dict[str, Any] | None:
     """Read the persisted ``langfuse_receipt.json`` for ``session_dir``."""
-    from hyperloom.common.jsonio import read_json
+    from hyperloom_common.jsonio import read_json
 
     payload = read_json(_receipt_path(session_dir), default=None, require_dict=True)
     if payload is None:

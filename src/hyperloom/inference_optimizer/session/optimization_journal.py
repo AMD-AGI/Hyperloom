@@ -15,7 +15,7 @@ from typing import Any, Callable
 
 from hyperloom_common.coerce import optional_positive_float, to_int
 from hyperloom_common.io import WriteOptions, atomic_write_text
-from hyperloom.common.jsonio import read_json
+from hyperloom_common.jsonio import read_json
 from hyperloom_common.timeutil import now_iso
 
 
