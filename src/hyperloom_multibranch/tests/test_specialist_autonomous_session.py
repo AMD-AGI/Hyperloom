@@ -26,6 +26,7 @@ from hyperloom.contracts.recipe import (
     apply,
 )
 from hyperloom.measure.compile import LocalBlobStore, kernel_rows_only
+from hyperloom.measure.surface import SurfaceViolation, check_launch_envs
 from hyperloom.sandbox import SandboxGone
 from hyperloom_multibranch.contracts.lifecycle import BranchTask
 from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind
@@ -164,7 +165,7 @@ for number, seqs in enumerate(plan["keeps"], start=1):
             (built / "tables" / name).mkdir(parents=True)
             (built / "tables" / name / "tuned.csv").write_bytes(table)
     (built / "keep.json").write_text(json.dumps(keep))
-    (built / "config.json").write_text(json.dumps({"server_flags": f"--max-num-seqs {seqs}", "server_env": envs}))
+    (built / "config.json").write_text(json.dumps({"server_flags": plan["flags"].format(seqs=seqs), "server_env": envs}))
     outside = [{"link": "vllm/module.so", "target": "/nonexistent/aiter/jit/module.so", "sha256": "0" * 64, "size": 1}]
     (built / "outside.json").write_text(json.dumps(outside))
     built.rename(outbox / f"{number:04d}")
@@ -222,6 +223,9 @@ class Component:
     orphan_notes: bool = True
     latest_each: bool = True
     envs: dict[str, str] = field(default_factory=dict)
+    flags: str = "--max-num-seqs {seqs}"
+    #: The launch the config MB wrote starts the agent with, as Arbor's ``server_flags`` and ``server_env``.
+    started: dict[str, object] | None = None
     table: str = ""
     huge: bool = False
     bad_sha: bool = False
@@ -340,6 +344,10 @@ class Toolbox:
         self.released.append(lease_id)
 
     async def check_test(self, request: TestRequest) -> None:
+        try:
+            check_launch_envs(request.delta.config.envs)
+        except SurfaceViolation as error:
+            raise RequestRejected(str(error), "surface_mismatch") from error
         if self.refused_envs & set(request.delta.config.envs):
             names = ", ".join(sorted(self.refused_envs))
             reason = f"the environment does not compile: the renderer dropped or changed launch variables {names}"
@@ -407,7 +415,12 @@ def _component_manifest(workspace: str, agent: Component) -> str:
             "commit": "c",
             "install": [],
             "config_file": "campaign.json",
-            "config": {"workspace": workspace, "plan": asdict(agent), "component": {"outbox": "snaps"}},
+            "config": {
+                "workspace": workspace,
+                "plan": asdict(agent),
+                "component": {"outbox": "snaps"},
+                **(agent.started or {}),
+            },
             "launch": "python3 component.py",
             "resume": "",
             "keep": None,
@@ -1282,6 +1295,48 @@ async def _imported(rig: Rig) -> TestRequest:
         await asyncio.wait_for(running, 10)
     [request] = rig.toolbox.requests
     return request
+
+
+#: The launch the config MB wrote for Arbor in session MB-20261029T093224Z-658b7c4e (b01): its pack's harness
+#: variables sit next to the server's own.
+ARBOR_FLAGS = "--tp 1 --max-num-seqs 128"
+ARBOR_ENV = {
+    "SGLANG_AITER_KV_CACHE_LAYOUT": "vectorized_5d",
+    "ISL": "1024",
+    "OSL": "1024",
+    "NUM_GPUS": "1",
+    "BENCH_SEED": "1",
+    "GSM8K_LIMIT": "400",
+}
+
+
+async def test_a_snapshot_imports_only_the_launch_changes_made_since_the_start_and_no_workload_variable(
+    tmp_path: Path,
+) -> None:
+    envs = {**ARBOR_ENV, "SGLANG_QWEN3_GATE_UP_PTPC": "1"}
+    started = {"server_flags": ARBOR_FLAGS, "server_env": ARBOR_ENV}
+    agent = Component(keeps=(256,), gap=0.1, flags=ARBOR_FLAGS, envs=envs, started=started)
+    rig = await _rig(tmp_path, agent, start_seconds=0.2)
+
+    request = await _imported(rig)
+
+    assert request.delta.config.envs == {"SGLANG_QWEN3_GATE_UP_PTPC": "1"}
+    assert request.delta.config.server_args == "" and request.delta.config.unset_envs == ()
+    watch = json.loads((tmp_path / BRANCH / "session" / "agent-watch.json").read_text())
+    assert watch["refused_envs"] == {"ISL": "1024", "OSL": "1024"}
+    dropped = [note for note in await rig.notices() if "ISL, OSL" in note]
+    assert len(dropped) == 1 and "keep 1" in dropped[0]
+
+
+async def test_a_snapshot_whose_launch_is_the_one_it_started_with_imports_no_launch_change(tmp_path: Path) -> None:
+    started = {"server_flags": ARBOR_FLAGS, "server_env": ARBOR_ENV}
+    agent = Component(keeps=(256,), gap=0.1, flags=ARBOR_FLAGS, envs=ARBOR_ENV, started=started)
+    rig = await _rig(tmp_path, agent, start_seconds=0.2)
+
+    request = await _imported(rig)
+
+    assert request.delta.config == ConfigDelta()
+    assert "+max_num_seqs = 256" in rig.patch(request)
 
 
 async def test_a_snapshot_after_one_that_was_never_written_carries_both_keeps(tmp_path: Path) -> None:

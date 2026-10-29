@@ -111,6 +111,16 @@ def test_a_keep_reads_the_agent_s_config_through_its_config_source() -> None:
     assert kept == KeptChange(3, "diff\n", "--tp 1 --enable-torch-compile", {"SGLANG_A": "0"}, "fused rmsnorm")
 
 
+def test_a_keep_leaves_out_the_workload_variables_the_measurement_sets_and_names_them() -> None:
+    source = ConfigSource("agent/config.json", "server_flags", "server_env")
+    state = {"server_flags": "--tp 1", "server_env": {"SGLANG_A": "0", "ISL": "1024", "osl": "1024"}}
+
+    kept = read_kept_change(1, "", state, source, "", ROOT.launch)
+
+    assert kept.envs == {"SGLANG_A": "0"}
+    assert kept.dropped == {"ISL": "1024", "osl": "1024"}
+
+
 def test_a_keep_whose_config_the_source_cannot_read_is_refused_naming_the_file() -> None:
     source = ConfigSource("agent/config.json", "server_flags", "server_env")
 

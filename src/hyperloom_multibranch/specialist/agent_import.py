@@ -15,8 +15,8 @@ in the agent's run, so it carries only the agent's rows.
 
 An agent run as a component writes each keep whole instead, as a snapshot directory (:func:`read_snapshot`, the layout
 of Arbor's component mode): ``keep.json`` names the keep before it and the commits it was made on and made, its
-``change.patch`` takes the one to the other, ``config.json`` is its whole launch and ``tables/<VAR>/`` the kernel table
-each variable loads, with the digest ``keep.json`` lists (a table too large to copy is listed with no file). Its source
+``change.patch`` takes the one to the other, ``config.json`` is its whole launch, of which only what differs from the
+launch it was started with goes in, and ``tables/<VAR>/`` the kernel table each variable loads, with the digest ``keep.json`` lists (a table too large to copy is listed with no file). Its source
 is the chain of its patches from the root, so a snapshot made on a commit that no snapshot of the chain made, or on a
 root other than the one MB gave, is refused; one made on the root after another, its ``notes`` saying the earlier commit
 is gone, starts the chain again with ``served.patch``, its whole tree against the root. What the agent's tree links to
@@ -45,6 +45,7 @@ from hyperloom.contracts.recipe import (
 )
 from hyperloom.measure.framework.rows import DEFAULT_TABLE_PLACEHOLDER
 from hyperloom.measure.framework.tables import AITER_VARIABLE_PREFIX
+from hyperloom.measure.surface import measurement_envs
 from hyperloom_multibranch.specialist.agent_manifest import ConfigSource, read_field
 from hyperloom_multibranch.specialist.worktree import Upstream
 
@@ -88,7 +89,9 @@ class KeptChange:
     """The agent's state at its ``seq``-th keep: ``source_patch`` against the root and the whole ``server_args`` and
     ``envs`` it runs with; ``summary`` is the agent's own words for it; ``tables``, the text at the keep of the kernel
     table files of its own a variable of ``envs`` lists, one table by the variable's value; ``uncopied``, the variables
-    whose table the agent did not copy into its snapshot, which then load what the variable names."""
+    whose table the agent did not copy into its snapshot, which then load what the variable names; ``dropped``, the
+    variables the agent runs with that the measurement sets itself (workload, evaluation, request), left out of
+    ``envs``."""
 
     seq: int
     source_patch: str
@@ -97,6 +100,7 @@ class KeptChange:
     summary: str = ""
     tables: Mapping[str, str] = field(default_factory=dict)
     uncopied: tuple[str, ...] = ()
+    dropped: Mapping[str, str] = field(default_factory=dict)
 
 
 def read_kept_change(
@@ -117,8 +121,9 @@ def read_kept_change(
         _assignments(envs, source) if isinstance(envs, str) else {str(name): str(value) for name, value in envs.items()}
     )
     if source.adds:
-        args, named = _with_args(start.server_args, args), {**start.envs, **named}
-    return KeptChange(seq, source_patch, args, named, summary)
+        args, named = _over(start, ("", {}), args, named)
+    named, dropped = _without_measurement(named)
+    return KeptChange(seq, source_patch, args, named, summary, dropped=dropped)
 
 
 def _assignments(words: str, source: ConfigSource) -> dict[str, str]:
@@ -131,13 +136,37 @@ def _assignments(words: str, source: ConfigSource) -> dict[str, str]:
     return {name: value for name, _, value in split}
 
 
-def _with_args(start: str, added: str) -> str:
-    """``start``'s server arguments with each flag of ``added`` set as ``added`` sets it."""
+#: Server arguments and environment as an agent's config holds them, before they are a :class:`LaunchConfig`.
+_Launch = tuple[str, Mapping[str, str]]
 
-    groups = _flag_groups(added)
-    names = {name for name, _ in groups}
-    kept = [words for name, words in _flag_groups(start) if name not in names]
-    return " ".join(word for words in [*kept, *(words for _, words in groups)] for word in words)
+
+def _over(base: LaunchConfig, since: _Launch, args: str, envs: Mapping[str, str]) -> _Launch:
+    """``base`` with what ``args`` and ``envs`` change from ``since``: each flag set otherwise set as ``args`` sets it,
+    each flag and variable of ``since`` they no longer have dropped, each variable set otherwise set."""
+
+    groups, before = _by_flag(args), _by_flag(since[0])
+    changed = {name for name, words in groups.items() if before.get(name) != words}
+    gone = changed | (before.keys() - groups.keys())
+    kept = [words for name, words in _flag_groups(base.server_args) if name not in gone]
+    added = [words for name, words in _flag_groups(args) if name in changed]
+    unset = since[1].keys() - envs.keys()
+    named = {name: value for name, value in base.envs.items() if name not in unset}
+    named.update({name: value for name, value in envs.items() if since[1].get(name) != value})
+    return " ".join(word for words in [*kept, *added] for word in words), named
+
+
+def _by_flag(args: str) -> dict[str, list[list[str]]]:
+    groups: dict[str, list[list[str]]] = {}
+    for name, words in _flag_groups(args):
+        groups.setdefault(name, []).append(words)
+    return groups
+
+
+def _without_measurement(envs: Mapping[str, str]) -> tuple[dict[str, str], dict[str, str]]:
+    """``envs`` without the variables the measurement sets itself, which a test refuses in its launch, and those."""
+
+    owned = set(measurement_envs(envs))
+    return {name: value for name, value in envs.items() if name not in owned}, {name: envs[name] for name in owned}
 
 
 def _flag_groups(args: str) -> list[tuple[str, list[str]]]:
@@ -186,9 +215,13 @@ class _Snapshot:
     rebased: bool
 
 
-def read_snapshot(outbox: Path, number: int, root: str, applied: Applied) -> KeptChange:
+def read_snapshot(
+    outbox: Path, number: int, root: str, applied: Applied, base: LaunchConfig, started: Mapping[str, object]
+) -> KeptChange:
     """The keep ``number`` of the snapshots in ``outbox``: its source is what the patches of the chain of snapshots it
-    was made on make of ``root`` (``applied``), its launch and kernel tables its own.
+    was made on make of ``root`` (``applied``), its kernel tables its own, and its launch ``base`` with what the
+    snapshot's launch changes from the one the config MB wrote, ``started``, starts the agent with (from ``base``
+    when that config names none): the config also carries what the agent's own harness reads.
 
     Raises :class:`KeptChangeError` for a snapshot that cannot be read, or whose chain does not reach ``root``.
     """
@@ -196,14 +229,23 @@ def read_snapshot(outbox: Path, number: int, root: str, applied: Applied) -> Kep
     chain = _chain(outbox, number, root)
     patches = [_patch(outbox / _directory(link.number), SERVED_FILE if link.rebased else CHANGE_FILE) for link in chain]
     directory = outbox / _directory(number)
-    launch = read_json(directory / LAUNCH_FILE)
-    args = launch.get("server_flags") if isinstance(launch, Mapping) else None
-    envs = launch.get("server_env") if isinstance(launch, Mapping) else None
-    if not isinstance(args, str) or not isinstance(envs, Mapping):
+    launch = _component_launch(read_json(directory / LAUNCH_FILE))
+    if launch is None:
         raise KeptChangeError(f"{_directory(number)}/{LAUNCH_FILE} holds no server_flags string or server_env object")
-    named = {str(name): str(value) for name, value in envs.items()}
+    named, dropped = _without_measurement(launch[1])
+    args, named = _over(base, _component_launch(started) or (base.server_args, base.envs), launch[0], named)
     tables, uncopied = _snapshot_tables(directory / TABLES_DIR, chain[-1].tables, named)
-    return KeptChange(number, applied(patches), args, named, chain[-1].summary, tables, uncopied)
+    return KeptChange(number, applied(patches), args, named, chain[-1].summary, tables, uncopied, dropped)
+
+
+def _component_launch(config: object) -> _Launch | None:
+    """The ``server_flags`` and ``server_env`` of a config of Arbor's, ``None`` when it holds no such pair."""
+
+    args = config.get("server_flags") if isinstance(config, Mapping) else None
+    envs = config.get("server_env") if isinstance(config, Mapping) else None
+    if not isinstance(args, str) or not isinstance(envs, Mapping):
+        return None
+    return args, {str(name): str(value) for name, value in envs.items()}
 
 
 def _chain(outbox: Path, number: int, root: str) -> list[_Snapshot]:

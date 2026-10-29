@@ -23,8 +23,9 @@ branch's judge judges the imports as it judges any branch's tests; nothing of it
 what the integration head holds does, through the notes (:mod:`agent_knowledge`) rewritten whenever the head moves,
 and the agent is given until its last import can still be judged in EXPLORE as its time budget. An agent that writes
 a snapshot of each keep (Arbor's component mode) runs to that time as its absolute deadline, against the commit its
-workspace starts on, and has its newest snapshot read whole, chained back to that commit (:func:`read_snapshot`); why it
-ended, from its exit file, goes into the branch log. An agent
+workspace starts on, and has its newest snapshot read whole, chained back to that commit, its launch only as it
+differs from the one MB started it with (:func:`read_snapshot`); a variable the measurement sets itself is left out of
+every keep and noted once; why it ended, from its exit file, goes into the branch log. An agent
 that exits 0 finishes the run once what it kept last settled; one that exits otherwise is a crash the runtime restarts
 it from. A session never ends idle: what the agent keeps, or does not, is its own business, bounded by the session's
 stops. A watch beside the run's poll makes the run a lost session when the running agent writes nothing (no output,
@@ -520,8 +521,18 @@ class AutonomousSession:
                 await self._note(
                     f"keep {seq}: the kernel tables of {names} were not copied, too large; imported as set"
                 )
+            await self._record_dropped(watch, watch.pending)
         await self._learn(manifest.ledger, watch)
         watch.save(self._place.workspace / WATCH_FILE)
+
+    async def _record_dropped(self, watch: KeepWatch, kept: KeptChange) -> None:
+        """Record in ``watch`` the variables of the agent's launch the measurement sets itself, noting each once."""
+
+        new = {name: value for name, value in kept.dropped.items() if watch.refused_envs.get(name) != value}
+        if new:
+            watch.refused_envs.update(new)
+            names = ", ".join(sorted(new))
+            await self._note(f"keep {kept.seq} is imported without {names}: the measurement sets them, not the launch")
 
     async def _learn(self, ledger: LedgerSource | None, watch: KeepWatch) -> None:
         """Append each finding of the agent's ``ledger`` the branch has not learnt as it reads now as the branch's
@@ -705,7 +716,7 @@ class AutonomousSession:
         if manifest.snapshots is not None:
             outbox = self._agent_dir / SOURCE_DIR / manifest.snapshots_outbox
             applied = partial(self._place.worktree.diff_applied, root, component=self._setup.component)
-            return read_snapshot(outbox, seq, root, applied)
+            return read_snapshot(outbox, seq, root, applied, self._root, manifest.config)
         workspace = self._place.worktree.path
         patch = without_file(self._place.worktree.diff_from(root, self._setup.component), manifest)
         source, summary = manifest.config_source, self._summary(manifest)
