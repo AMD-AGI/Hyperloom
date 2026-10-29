@@ -15,7 +15,7 @@ child runs first and the root tests after it. The longest of those tests, start 
 workload takes; it is FINAL's reserve. A gate that asks for none (AgentX, whose test takes over an hour) is given the
 child's own run of the root instead, once the child has ended: its report and per-request export are copied to
 ``MB-prelude/baseline/``, the toolbox reads the copy as it reads a test's round, and that run's wall time is the
-reserve.
+reserve. Its child is leased its cards all the same, so the champion's replay below measures beside it.
 
 A baseline the child cannot establish ends it with the main flow's own baseline stop, and PRELUDE fails naming that
 stop; it never spends the session repairing the combo. Its session is read by
@@ -24,13 +24,14 @@ committed fails PRELUDE, and the session profile is written with the roofline ce
 profile is known before the child starts -- the framework version is the one the child is launched to record -- so the
 Recipe KB's champions for it are read as warm-start leads for the specialists at once, the best of them prepared for
 replay on the root's image and offered to the integrator as the session's champion, which replays it beside the child
-and the root tests, judges it once the baseline is anchored, and EXPLORE opens on it when it beats the baseline; where
-the child runs first, the replay waits for the baseline as well. Their files are in the session's blob store; no
-Recipe KB, or none of its champions in this session's scope, gives none, and a KB that cannot be read is recorded and
-gives none either. Each replay is checked against the toolbox's acceptance on the root, queueing nothing: one it
-refuses stays a lead with the refusal named in place of the replay, unless the champion was built on another image,
-whose launch config alone is checked in its place, and one acceptance has not answered for when
-:data:`PREFLIGHT_SECONDS` run out stays offered, its lead saying it was not checked.
+and the root tests, judges it once the baseline is anchored -- for AgentX, once the child has ended, however early its
+test did -- and EXPLORE opens on it when it beats the baseline; where the child runs first, the replay waits for the
+baseline as well. Their files are in the session's blob store; no Recipe KB, or none of its champions in this
+session's scope, gives none, and a KB that cannot be read is recorded and gives none either. Each replay is checked
+against the toolbox's acceptance on the root, queueing nothing: one it refuses stays a lead with the refusal named in
+place of the replay, unless the champion was built on another image, whose launch config alone is checked in its
+place, and one acceptance has not answered for when :data:`PREFLIGHT_SECONDS` run out stays offered, its lead saying
+it was not checked.
 
 Once the child has ended, the toolbox is asked for the TraceLens report of the child's latest roofline
 profile, so the root has operator shares in the blackboard; PRELUDE does not wait for it, and a child without a profile
@@ -147,7 +148,8 @@ TRACE_ANALYSIS_ROUTE_ENV = "HYPERLOOM_TRACE_ANALYSIS_ROUTE"
 CHILD_TRACE_ANALYSIS_ROUTE = AnalysisRoute.NON_LLM.value
 #: The child's lease is the lineage root's: its card time counts on the integration branch, not as a branch of its own.
 CHILD_LEASE_CHARGE = LeaseCharge(LeaseKind.PRELUDE_CHILD, INTEGRATION_BRANCH)
-#: The lease refusal that leaves the child to run before the root tests: its cards would leave fewer than one test's.
+#: The lease refusal that leaves the child to run before the root tests and the replay: its cards would leave fewer
+#: than one test's.
 LEAVES_NO_MEASUREMENT = "lease_leaves_no_measurement"
 CHILD_FIRST = "child runs before the root tests"
 #: The child reaps the inference servers it started on its own way out, which takes far longer than a kill's grace.
@@ -383,11 +385,11 @@ class Prelude:
         The root is the framework checkout the child is launched on, which it does not change, and the session
         profile's identity is known before it too, so the root is committed and the integration branch opened on it
         before the child starts; the root tests, and the Recipe KB's champion replayed on the root, run beside the
-        child, on the cards a lease holds for it, and the replay is judged once the baseline is anchored. Where that
-        lease would leave fewer cards than one test needs, and for a gate that anchors on the child's own run, the
-        child runs first, then the root tests, then the replay. Any of them failing ends the others; a child that
-        rooted on another recipe fails PRELUDE. Where the toolbox measures elsewhere, no child is started
-        (:meth:`_root_in_sandboxes`).
+        child, on the cards a lease holds for it, and the replay is judged once the baseline is anchored, which for a
+        gate that anchors on the child's own run is once the child has ended. Where that lease would leave fewer cards
+        than one test needs, the child runs first, then the root tests, then the replay. Any of them failing ends the
+        others; a child that rooted on another recipe fails PRELUDE. Where the toolbox measures elsewhere, no child is
+        started (:meth:`_root_in_sandboxes`).
         """
 
         if not self._on_this_machine:
@@ -396,11 +398,11 @@ class Prelude:
         recipe = await self._launched_root(workload.framework, base_image_digest)
         opened = await self._open_root(recipe, workload)
         root_tests = await self._gate.baseline_test_count()
-        cards = await self._child_cards(workload.tp, root_tests)
+        cards = await self._child_cards(workload.tp)
         child = asyncio.ensure_future(self._root_on_child(opened, workload, _ChildRun(hours, hard_stop, cards)))
         if not cards.alongside:
             await child
-        baseline = asyncio.ensure_future(self._measure_baseline(opened.commit, root_tests))
+        baseline = asyncio.ensure_future(self._baseline_beside(child, opened.commit, root_tests))
         if not cards.alongside:
             await baseline
         replayed = asyncio.ensure_future(self._replay(opened, baseline))
@@ -471,11 +473,10 @@ class Prelude:
         model_config = await asyncio.to_thread(summarize_model_config, workload.model)
         return _OpenedRoot(recipe, root, _session_profile(self._layout.session_id, workload, version, model_config))
 
-    async def _child_cards(self, tp: int, root_tests: int) -> _ChildCards:
-        """Lease the child's ``tp`` cards where it runs beside the root tests on cards they measure on."""
+    async def _child_cards(self, tp: int) -> _ChildCards:
+        """Lease the child's ``tp`` cards where it runs beside the root tests and the replay on cards they measure
+        on."""
 
-        if root_tests == 0:
-            return _ChildCards(None, alongside=False)
         try:
             lease = await self._toolbox.lease_branch_sandbox(PRELUDE_BRANCH, tp, charge=CHILD_LEASE_CHARGE)
         except RequestRejected as refused:
@@ -664,6 +665,13 @@ class Prelude:
             raise
         await self._processes.kill_branch(PRELUDE_BRANCH)
         return exit_code
+
+    async def _baseline_beside(self, child: asyncio.Future[_SettledRoot], root: str, count: int) -> float:
+        """:meth:`_measure_baseline` beside ``child``; a gate that anchors on the child's own run waits for it."""
+
+        if count == 0:
+            await asyncio.shield(child)
+        return await self._measure_baseline(root, count)
 
     async def _measure_baseline(self, root: str, count: int) -> float:
         """Measure the baseline on ``root`` with ``count`` root tests through the toolbox and have the rule gate anchor

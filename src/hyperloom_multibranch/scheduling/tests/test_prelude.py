@@ -55,6 +55,7 @@ from hyperloom_multibranch.rulegate.rules import AgentXRule, Rule
 from hyperloom_multibranch.rulegate.service import BASELINE_TESTS, GateService
 from hyperloom_multibranch.scheduling import prelude as prelude_module
 from hyperloom_multibranch.scheduling.prelude import (
+    BASELINE_ESTABLISHED,
     CHILD_CARDS_ENV,
     CHILD_FIRST,
     CHILD_TRACE_ANALYSIS_ROUTE,
@@ -63,6 +64,7 @@ from hyperloom_multibranch.scheduling.prelude import (
     PreludeFailed,
     PreludeResult,
     PreludeServices,
+    ReplayChampion,
     TRACE_ANALYSIS_ROUTE_ENV,
     WarmStartSource,
     prelude_argv,
@@ -70,7 +72,7 @@ from hyperloom_multibranch.scheduling.prelude import (
 )
 from hyperloom_multibranch.scheduling.prelude_reader import MB_FRAMEWORK_REPO_ENV, MB_FRAMEWORK_VERSION_ENV
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry, RegisteredProcess
-from hyperloom_multibranch.scheduling.requests import SessionTests
+from hyperloom_multibranch.scheduling.requests import SessionTests, integration_test_request
 from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, ReusedPrelude, Workload
 from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     BASE_IMAGE_DIGEST,
@@ -201,7 +203,11 @@ def _prelude(
     peers: PreludePeers,
     clock: Clock | None = None,
     recipe_kb: RecipeDownloader | None = None,
+    replay: ReplayChampion | None = None,
 ) -> Prelude:
+    """``replay`` replays the champion in place of the integrator; by default it only notes the replay in
+    ``peers.replays`` and waits for the baseline's anchoring."""
+
     clock = clock or _clock()
     roster = Roster(RosterCaps(1, 1, 1), layout.roster, clock)
     decisions = DecisionLog(layout.decisions, clock)
@@ -231,7 +237,7 @@ def _prelude(
         peers.toolbox,
         peers.on_this_machine,
         open_integration,
-        replay_champion,
+        replay or replay_champion,
         profiler.profile_root,
     )
     return Prelude(context, services, warm_start=warm_start)
@@ -871,20 +877,114 @@ async def test_the_champion_is_replayed_while_the_child_runs_on_the_profile_know
     assert reasons.index("warm start read") < reasons.index("root committed")
 
 
-async def test_an_agentx_champion_is_replayed_once_the_childs_run_anchored_the_baseline(tmp_path: Path) -> None:
+def _measuring_replay(
+    layout: SessionLayout,
+    peers: PreludePeers,
+    processes: MbFakeChildRegistry,
+    events: list[tuple[str, bool]],
+    failure: Exception | None = None,
+) -> ReplayChampion:
+    """A replay that measures as the integrator's does: its test is submitted at once and judged once the baseline is
+    anchored, the test taken back when the replay is cancelled. ``events`` notes ``("measured", child exited)`` once
+    the test has ended, then ``("judged", baseline established)`` or ``("cancelled", child exited)``; ``failure`` is
+    raised in place of the judgement."""
+
+    async def replay(champion: PreparedReplay, root: str, anchored: Awaitable[object]) -> str:
+        peers.replays.append((champion.canonical_id, processes.child_exited()))
+
+        async def judge(request_id: str) -> str:
+            await peers.toolbox.outcome(request_id)
+            events.append(("measured", processes.child_exited()))
+            if failure is not None:
+                raise failure
+            try:
+                await asyncio.shield(anchored)
+            except asyncio.CancelledError:
+                events.append(("cancelled", processes.child_exited()))
+                raise
+            events.append(("judged", BASELINE_ESTABLISHED in [entry["reason"] for entry in _logged(layout)]))
+            return root
+
+        return await peers.tests.judged(integration_test_request(TestKind.TEST, Purpose.INTEGRATION, root), judge)
+
+    return replay
+
+
+def _agentx_replaying(
+    tmp_path: Path, child: Path | None, *, linger: float, exit_code: int = 0, failure: Exception | None = None
+) -> tuple[SessionLayout, PreludePeers, MbFakeChildRegistry, list[tuple[str, bool]], Prelude]:
+    """PRELUDE of an AgentX session with a Recipe KB champion, replayed by :func:`_measuring_replay`, and a child that
+    runs ``linger`` seconds; the toolbox leases the child its cards unless ``lease_refusal`` is set."""
+
+    layout = _layout(tmp_path)
+    peers = _peers(layout, rule=AgentXRule())
+    processes = _registry(layout, child, exit_code=exit_code, linger=linger)
+    events: list[tuple[str, bool]] = []
+    prelude = _prelude(
+        layout,
+        processes,
+        peers,
+        recipe_kb=OneChampionKB(),
+        replay=_measuring_replay(layout, peers, processes, events, failure),
+    )
+    return layout, peers, processes, events, prelude
+
+
+async def test_an_agentx_champion_is_replayed_beside_the_child_and_judged_once_its_run_anchored_the_baseline(
+    tmp_path: Path,
+) -> None:
     child = child_with_patch(tmp_path)
     with_agentx_baseline_run(child)
-    layout, peers, _ = _agentx_prelude(tmp_path, child)
+    layout, peers, processes, events, prelude = _agentx_replaying(tmp_path, child, linger=SHORT_CHILD)
 
-    await _run(
-        _prelude(layout, _registry(layout, child), peers, recipe_kb=OneChampionKB()),
-        SessionBudget.from_hours(2.0, NOW),
-        AGENTX,
-    )
+    await _run(prelude, SessionBudget.from_hours(2.0, NOW), AGENTX)
+
+    assert [exited for _, exited in peers.replays] == [False]
+    assert peers.toolbox.beside_a_lease == [(Purpose.INTEGRATION, True)]
+    assert events == [("measured", False), ("judged", True)]
+    assert peers.toolbox.leased == [("prelude", AGENTX.tp)] and peers.toolbox.released == ["lease-1"]
+    assert processes.env is not None and processes.env[CHILD_CARDS_ENV] == "6"
+    assert CHILD_FIRST not in [entry["reason"] for entry in _logged(layout)]
+
+
+async def test_an_agentx_child_whose_lease_would_leave_no_test_runs_before_the_champion_replay(tmp_path: Path) -> None:
+    child = child_with_patch(tmp_path)
+    with_agentx_baseline_run(child)
+    layout, peers, _, events, prelude = _agentx_replaying(tmp_path, child, linger=0.0)
+    peers.toolbox.lease_refusal = RequestRejected("one test needs both cards", "lease_leaves_no_measurement")
+
+    await _run(prelude, SessionBudget.from_hours(2.0, NOW), AGENTX)
 
     assert [exited for _, exited in peers.replays] == [True]
+    assert peers.toolbox.beside_a_lease == [(Purpose.INTEGRATION, False)]
+    assert events == [("measured", True), ("judged", True)]
     reasons = [entry["reason"] for entry in _logged(layout)]
+    assert CHILD_FIRST in reasons
     assert reasons.index("baseline established") < reasons.index("warm start read")
+
+
+async def test_a_failing_agentx_replay_ends_the_child_running_beside_it(tmp_path: Path) -> None:
+    child = child_with_patch(tmp_path)
+    with_agentx_baseline_run(child)
+    failure = RuntimeError("the integration branch cannot be written")
+    layout, peers, processes, events, prelude = _agentx_replaying(tmp_path, child, linger=LONG_CHILD, failure=failure)
+
+    with pytest.raises(RuntimeError, match="cannot be written"):
+        await asyncio.wait_for(_run(prelude, SessionBudget.from_hours(2.0, NOW), AGENTX), 60)
+
+    assert events == [("measured", False)]
+    assert await processes.leftovers() == () and peers.toolbox.released == ["lease-1"]
+    assert "baseline established" not in [entry["reason"] for entry in _logged(layout)]
+
+
+async def test_a_failing_agentx_child_ends_the_replay_running_beside_it(tmp_path: Path) -> None:
+    _, peers, processes, events, prelude = _agentx_replaying(tmp_path, None, linger=SHORT_CHILD, exit_code=3)
+
+    with pytest.raises(PreludeFailed, match="exited with 3"):
+        await asyncio.wait_for(_run(prelude, SessionBudget.from_hours(2.0, NOW), AGENTX), 60)
+
+    assert events == [("measured", False), ("cancelled", True)]
+    assert await processes.leftovers() == () and peers.toolbox.released == ["lease-1"]
 
 
 def _logged(layout: SessionLayout) -> list[dict[str, Any]]:
@@ -978,7 +1078,7 @@ async def test_an_agentx_baseline_is_the_childs_own_run_and_no_root_test_is_subm
     result = await _run(prelude, SessionBudget.from_hours(2.0, NOW), AGENTX)
 
     reserve = result.longest_root_test
-    assert peers.toolbox.requests == {} and peers.toolbox.leased == []
+    assert peers.toolbox.requests == {} and peers.toolbox.leased == [("prelude", AGENTX.tp)]
     assert reserve == AGENTX_RUN_SECONDS
     copy = layout.prelude / "baseline" / AGENTX_RUN_ID
     assert peers.toolbox.prelude_baselines == [copy]
