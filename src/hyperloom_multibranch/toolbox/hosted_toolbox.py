@@ -24,6 +24,7 @@ from pathlib import Path
 
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.measure.archive import ResultArchive
+from hyperloom.measure.framework.base import SESSION_SNAPSHOT_DIR, framework_envs
 from hyperloom.measure.hosted import HostedConfig, HostedMeasurementBackend
 from hyperloom.measure.hosted_spec import SpecContext
 from hyperloom.measure.runner.cache_layout import MANIFEST_PIN_ENV
@@ -200,7 +201,11 @@ class HostedOptions:
     Without either the check is on with the session model's own set when this host finds it staged
     (``short_prompts.default_short_prompts``), and off, logged, when it does not. The long-context check is found the
     same way from ``acceptance.long_context``, ``HYPERLOOM_LONG_CONTEXT`` and ``long_context.ServedLongContext`` (the model's
-    own set at the context each test's launch serves).
+    own set at the context each test's launch serves). ``framework_configs`` is the directory of aiter's tuned tables
+    every test reads private copies of, snapshotted below ``session_dir/framework`` as the toolbox is built, where the
+    runner sandboxes read it at the same path: the image's when omitted, ``""`` for none. The snapshot is named to every
+    runner sandbox by ``HYPERLOOM_FRAMEWORK_SNAPSHOT`` and ``HYPERLOOM_FRAMEWORK_SESSION_SHA256``, which the runner
+    template must therefore accept; without it a test that adds tuned rows to a default table is refused.
     """
 
     policy: QueuePolicy | None = None
@@ -212,6 +217,7 @@ class HostedOptions:
     retry: RetryPolicy = RetryPolicy()
     lease_tuning: LeaseTuning = LeaseTuning()
     short_prompts: ShortPromptSetup | None = None
+    framework_configs: str | None = None
 
 
 class HostedToolbox(LeasedToolbox):
@@ -434,7 +440,11 @@ def build_hosted_toolbox(
         spec=spec,
         runner_templates={inputs.tp: _runner_template(inputs)},
         rule_pack_digest=rule_pack_identity()["digest"],
-        create_envs={**inputs.create_envs(), **(native.runner_envs if native else {})},
+        create_envs={
+            **inputs.create_envs(),
+            **framework_envs(directory / SESSION_SNAPSHOT_DIR, options.framework_configs),
+            **(native.runner_envs if native else {}),
+        },
         archive=session_archive(options.archive, directory),
         max_parallel_tests=parallel,
         poll_interval_sec=options.poll_interval_sec,

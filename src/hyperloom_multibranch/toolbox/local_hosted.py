@@ -46,7 +46,7 @@ from hyperloom.measure.jit.key import build_surface
 from hyperloom.measure.jit.store import DirJitStore
 from hyperloom.measure.live_log import last_output
 from hyperloom.measure.local import SUPPORTED_KINDS
-from hyperloom.measure.framework.base import DEFAULT_CONFIGS, framework_envs
+from hyperloom.measure.framework.base import DEFAULT_CONFIGS, SESSION_SNAPSHOT_DIR, framework_envs
 from hyperloom.measure.local_templates import image_env, local_runner_template
 from hyperloom.measure.rule_pack_stage import rule_pack_envs
 from hyperloom.measure.runner.jit import JIT_CACHE_ENV
@@ -106,7 +106,6 @@ MAX_CARDS_PER_NODE = 8
 JIT_STORE_ENV = "HYPERLOOM_JIT_STORE"
 _SANDBOXES = "sandboxes"
 _BRANCH_SANDBOXES = "branch-sandboxes"
-_FRAMEWORK = "framework"
 _RULE_PACK = "rule-pack"
 _POLL_INTERVAL_SEC = 2.0
 LEAKED_CARDS_REASON = "sandbox processes not provably gone"
@@ -346,7 +345,7 @@ def _provider(
     """The provider whose runner template also carries the session's framework tables, the card guard and the directories
     of the shared stores that are on: none is part of the environment the branches' own sandboxes get. Its cards are
     handed out, to a test's sandbox and to a lease alike, under the same guard."""
-    framework = framework_envs(Path(session.session_dir) / _FRAMEWORK, options.framework_configs)
+    framework = framework_envs(Path(session.session_dir) / SESSION_SNAPSHOT_DIR, options.framework_configs)
     guard = {CARD_GUARD_ENV: card_guard_of(options).value}
     template = replace(template, envs={**template.envs, **framework, **shared_dirs, **guard})
     provider = LocalSandboxProvider(

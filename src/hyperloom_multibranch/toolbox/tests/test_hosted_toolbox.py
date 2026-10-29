@@ -32,6 +32,7 @@ from hyperloom.contracts.measurement import TestResult, Validity
 from hyperloom.hosted.host_info import read_host_info
 from hyperloom.hosted.toolbox_inputs import hosted_toolbox_inputs
 from hyperloom.measure import signing
+from hyperloom.measure.framework.base import SESSION_SHA_ENV, SNAPSHOT_ENV
 from hyperloom.measure.hosted_log import STATE_SENT
 from hyperloom.measure.runner.cache_layout import MANIFEST_PIN_ENV
 from hyperloom.measure.sandboxes import BRANCH_ID_KEY, DEFAULT_MAX_PARALLEL_TESTS, PURPOSE_KEY
@@ -421,6 +422,27 @@ async def test_the_toolbox_is_built_from_the_inputs(tmp_path: Path) -> None:
     assert toolbox._parallel_limit() == 4 and toolbox._queue.policy.global_concurrency == 4, "8 GPUs, TP=2"
     assert toolbox.analysis_tools == (TRACELENS_TOOL,), "kernel_tune and roofline are the local toolbox's"
     assert not toolbox.single_node
+
+
+def test_every_runner_sandbox_is_named_the_sessions_snapshot_of_the_framework_tables(tmp_path: Path) -> None:
+    """A test that adds tuned rows to a default table needs the snapshot, or the runner refuses it (#156 c4084)."""
+    configs = tmp_path / "aiter-configs"
+    configs.mkdir()
+    (configs / "a8w8_blockscale_tuned_gemm.csv").write_text("M,N,K,us\n1,2,3,4\n")
+    options = HostedOptions(retry=_RETRY, lease_tuning=_FAST, framework_configs=str(configs))
+
+    envs = _toolbox(None, tmp_path, options=options).backend._config.create_envs
+
+    snapshot = tmp_path / "session" / "framework"
+    assert envs[SNAPSHOT_ENV] == str(snapshot) and any(snapshot.rglob("a8w8_blockscale_tuned_gemm.csv"))
+    assert len(envs[SESSION_SHA_ENV]) == 64
+    assert envs[SOURCE_SHA_ENV] == _SOURCE_SHA
+
+
+def test_no_framework_tables_names_no_snapshot(tmp_path: Path) -> None:
+    options = HostedOptions(retry=_RETRY, lease_tuning=_FAST, framework_configs="")
+    envs = _toolbox(None, tmp_path, options=options).backend._config.create_envs
+    assert SNAPSHOT_ENV not in envs and SESSION_SHA_ENV not in envs
 
 
 def test_the_runner_cache_manifest_digest_is_a_create_environment_of_every_runner_sandbox(tmp_path: Path) -> None:
