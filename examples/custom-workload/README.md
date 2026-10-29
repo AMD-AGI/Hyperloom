@@ -85,7 +85,20 @@ Your numbers will differ; the ranking is machine-dependent, which is the point.
 
 ## Run it under Hyperloom
 
+> **Point `--framework-path` somewhere disposable, never at your Hyperloom clone.**
+> It is the tree Hyperloom patches: integrating a patch candidate runs
+> `git stash push -u`, `git reset --hard` and `git clean -fd` against it, and commits
+> KEEPs into it. Aimed at the clone you are reading this in, that discards your own
+> uncommitted work — and `stash -u` takes untracked files too, including any dataset
+> you generated there.
+
+This example has no upstream repository of its own, so copy it out of the clone and run it from
+there:
+
 ```bash
+cp -r examples/custom-workload ~/custom-workload-run
+cd ~/custom-workload-run
+
 export HYPERLOOM_BENCHMARK_BACKEND=bypass
 export HYPERLOOM_BYPASS_SCRIPTS_DIR="$PWD"
 
