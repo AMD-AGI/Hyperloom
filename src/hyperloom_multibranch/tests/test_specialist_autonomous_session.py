@@ -377,6 +377,21 @@ def _agent_repo(tmp_path: Path) -> Path:
     return repo
 
 
+def _given(agent: Agent | Component, prompt: str) -> Agent | Component:
+    """``agent`` with each ``{NAME}`` of its environment the value of ``NAME`` in the spec ``prompt`` gives it, as an
+    agent's own config is derived from that spec."""
+
+    spec = json.loads(prompt[prompt.index("{\n") : prompt.index("\n}\n") + 2])
+    given = {name: value.format_map(spec["envs"]) for name, value in agent.envs.items()}
+    if not isinstance(agent, Component) or agent.started is None:
+        return replace(agent, envs=given)
+    started = {
+        **agent.started,
+        "server_env": {k: v.format_map(spec["envs"]) for k, v in agent.started["server_env"].items()},
+    }
+    return replace(agent, envs=given, started=started)
+
+
 def _manifest(workspace: str, agent: Agent | Component) -> str:
     if isinstance(agent, Component):
         return _component_manifest(workspace, agent)
@@ -471,6 +486,7 @@ async def _rig(
     stall: float = STALL_SECONDS,
     spend: type[AgentSpend] = AgentSpend,
     start_seconds: float = 5.0,
+    aiter: Path | None = None,
 ) -> Rig:
     """A session of the agent on :data:`BRANCH`, opened at the root, or at ``start`` committed onto it the way PRELUDE
     replays a Recipe KB champion."""
@@ -483,7 +499,7 @@ async def _rig(
 
     async def onboard(checkout: Path, prompt: str) -> str:
         sandbox.prompts.append(prompt)
-        return _manifest(str(worktree.path), agent)
+        return _manifest(str(worktree.path), _given(agent, prompt))
 
     def onboarding(agent_sandbox) -> OnboardingSetup:
         return OnboardingSetup(agent_sandbox, onboard, start_seconds=start_seconds, poll_seconds=0.05)
@@ -513,6 +529,8 @@ async def _rig(
         stall_seconds=stall,
         clock=clock,
     )
+    if aiter is not None:
+        setup = replace(setup, aiter_configs=aiter)
     place = BranchPlace(worktree, rig.blackboard, tmp_path / BRANCH / "session")
     start = SessionStart(BRANCH, start_commit, 1, BranchTask(agent=str(_agent_repo(tmp_path)), deadline=deadline))
 
@@ -1425,3 +1443,125 @@ async def test_an_agent_in_component_mode_stopped_by_mb_records_its_sigterm_exit
     await asyncio.wait_for(running, 10)
 
     assert (await rig.notices())[-1] == f"{NOTICE} the agent stopped: sigterm"
+
+
+#: A stand-in for the image's aiter install: one table variable, its default table, a per-model table and the untuned
+#: table its rows' shape key is read from.
+AITER_CORE = """
+import os
+
+AITER_ROOT_DIR = "/unused"
+AITER_CONFIG_GEMM_A8W8 = os.getenv("AITER_CONFIG_GEMM_A8W8", f"{AITER_ROOT_DIR}/aiter/configs/a8w8_tuned_gemm.csv")
+
+
+class AITER_CONFIG:
+    @property
+    def AITER_CONFIG_GEMM_A8W8_FILE(self):
+        return self.get_config_file("AITER_CONFIG_GEMM_A8W8", AITER_CONFIG_GEMM_A8W8, "a8w8_tuned_gemm")
+"""
+TABLE_ENV = "AITER_CONFIG_GEMM_A8W8"
+IMAGE_DEFAULT = "M,N,K,us\n1,5120,5120,9\n64,5120,5120,10\n"
+IMAGE_MODEL = "M,N,K,us\n8192,5120,5120,30\n"
+CHAMPION_ROWS = "M,N,K,us\n64,5120,5120,7\n"
+
+
+def _aiter(tmp_path: Path) -> Path:
+    configs = tmp_path / "image" / "aiter" / "configs"
+    (configs / "model_configs").mkdir(parents=True)
+    (configs.parent / "jit").mkdir()
+    (configs.parent / "jit" / "core.py").write_text(AITER_CORE, encoding="utf-8")
+    (configs / "a8w8_untuned_gemm.csv").write_text("M,N,K\n", encoding="utf-8")
+    (configs / "a8w8_tuned_gemm.csv").write_text(IMAGE_DEFAULT, encoding="utf-8")
+    (configs / "model_configs" / "a8w8_tuned_gemm_qwen.csv").write_text(IMAGE_MODEL, encoding="utf-8")
+    return configs
+
+
+def _replayed(blobs: LocalBlobStore) -> Recipe:
+    """The root with a Recipe KB champion's tuned rows, kept in the session's blob store as a replay keeps them."""
+    sha256 = blobs.put(CHAMPION_ROWS.encode())
+    load = {"load": {"via": "env_file", "env": TABLE_ENV, "rows_only": True}}
+    table = KernelArtifact(KernelKind.GEMM, "gemm_a8w8", f"kernel/gemm/gemm_a8w8/{sha256}.csv", sha256, load)
+    return replace(ROOT, kernels=(table,))
+
+
+def _spec_envs(rig: Rig) -> dict[str, str]:
+    prompt = rig.sandbox.prompts[0]
+    return json.loads(prompt[prompt.index("{\n") : prompt.index("\n}\n") + 2])["envs"]
+
+
+async def test_an_agent_opened_on_a_recipe_kb_champion_runs_with_its_tuned_rows_as_a_test_loads_them(
+    tmp_path: Path,
+) -> None:
+    """Session MB-20261029T093224Z-658b7c4e's b01: the champion's tuned GEMM rows were left out of the agent's launch."""
+
+    configs = _aiter(tmp_path)
+    rig = await _rig(tmp_path, start=_replayed(LocalBlobStore(tmp_path / "blobs")), aiter=configs)
+
+    await rig.session.preflight()
+    await rig.session.stop()
+
+    *defaults, rows = _spec_envs(rig)[TABLE_ENV].split(os.pathsep)
+    assert Path(rows).read_text() == CHAMPION_ROWS
+    assert Path(rows).is_relative_to(tmp_path / BRANCH / "session" / AGENT_DIR)
+    assert [Path(path).read_text() for path in defaults] == ["M,N,K,us\n1,5120,5120,9\n", IMAGE_MODEL]
+    assert (configs / "a8w8_tuned_gemm.csv").read_text() == IMAGE_DEFAULT
+
+
+async def test_a_snapshot_that_leaves_the_start_s_tables_as_they_were_given_imports_no_table_change(
+    tmp_path: Path,
+) -> None:
+    given = {TABLE_ENV: "{%s}" % TABLE_ENV}
+    started = {"server_flags": "--max-num-seqs 128", "server_env": given}
+    agent = Component(keeps=(256,), gap=0.1, flags="--max-num-seqs 128", envs=given, started=started)
+    start = _replayed(LocalBlobStore(tmp_path / "blobs"))
+    rig = await _rig(tmp_path, agent, start=start, start_seconds=0.2, aiter=_aiter(tmp_path))
+
+    request = await _imported(rig)
+
+    assert (request.delta.add_kernels, request.delta.remove_kernels) == ((), ())
+    assert request.delta.config == ConfigDelta()
+
+
+async def test_a_snapshot_that_loads_a_table_of_its_own_imports_its_rows_over_the_start(tmp_path: Path) -> None:
+    agent = Component(keeps=(256,), gap=0.1, table="M,N,K,us\n{seqs},5120,5120,3\n")
+    start = _replayed(LocalBlobStore(tmp_path / "blobs"))
+    rig = await _rig(tmp_path, agent, start=start, start_seconds=0.2, aiter=_aiter(tmp_path))
+
+    request = await _imported(rig)
+
+    [artifact] = request.delta.add_kernels
+    assert kernel_rows_only(artifact) and rig.toolbox.tables[artifact.sha256] == b"M,N,K,us\n256,5120,5120,3\n"
+    assert artifact.target == "gemm_a8w8" and TABLE_ENV not in request.delta.config.envs
+
+
+async def test_rows_an_agent_lists_after_the_start_s_tables_are_imported_with_the_start_s_rows(tmp_path: Path) -> None:
+    own = tmp_path / BRANCH / "agent-workspace" / "tuned.csv"
+    source = {"path": "run/result.json", "root": "checkout", "server_args": "accepted_config.flags",
+              "envs": "accepted_config.env", "adds": True}  # fmt: skip
+    envs = {TABLE_ENV: "{%s}%s%s" % (TABLE_ENV, os.pathsep, own)}
+    agent = Agent(keeps=(256,), args="", envs=envs, table="M,N,K,us\n{seqs},5120,5120,3\n", config_source=source)
+    start = _replayed(LocalBlobStore(tmp_path / "blobs"))
+    rig = await _rig(tmp_path, agent, start=start, aiter=_aiter(tmp_path))
+
+    request = await _imported(rig)
+
+    [artifact] = request.delta.add_kernels
+    table = b"M,N,K,us\n64,5120,5120,7\n256,5120,5120,3\n"
+    assert kernel_rows_only(artifact) and rig.toolbox.tables[artifact.sha256] == table
+    assert artifact.target == "gemm_a8w8"
+    assert request.delta.config == ConfigDelta()
+
+
+async def test_a_keep_that_reports_the_start_s_tables_as_they_were_given_imports_no_table_change(
+    tmp_path: Path,
+) -> None:
+    source = {"path": "run/result.json", "root": "checkout", "server_args": "accepted_config.flags",
+              "envs": "accepted_config.env", "adds": True}  # fmt: skip
+    agent = Agent(keeps=(256,), args="", envs={TABLE_ENV: "{%s}" % TABLE_ENV}, config_source=source)
+    start = _replayed(LocalBlobStore(tmp_path / "blobs"))
+    rig = await _rig(tmp_path, agent, start=start, aiter=_aiter(tmp_path))
+
+    request = await _imported(rig)
+
+    assert (request.delta.add_kernels, request.delta.remove_kernels) == ((), ())
+    assert request.delta.config == ConfigDelta()

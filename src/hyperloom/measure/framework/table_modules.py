@@ -32,7 +32,7 @@ from typing import Any
 from hyperloom.measure.framework.rows import DEFAULT_TABLE_PLACEHOLDER
 from hyperloom.measure.framework.tables import AITER_VARIABLE_PREFIX, TableVariable, read_variables
 
-__all__ = ["TableUse", "file_identity", "named_table_modules", "stale_table_modules", "table_modules"]
+__all__ = ["TableUse", "default_tables", "file_identity", "named_table_modules", "stale_table_modules", "table_modules"]
 
 _TABLE_FILE = re.compile(r"\{AITER_CONFIGS\.(AITER_CONFIG_[A-Za-z0-9_]+)_FILE\}")
 _CONFIGS_FILE = re.compile(r"\{AITER_ROOT_DIR\}/aiter/(configs/[^\s:{}'\"]+)")
@@ -80,6 +80,17 @@ def _use(entry: Any) -> TableUse | None:
     return TableUse(variables, files, unread) if variables or files or unread else None
 
 
+def default_tables(package: Path, variable: TableVariable) -> list[str]:
+    """The files the aiter package at ``package`` reads for ``variable`` when it is unset: its default table, then the
+    per-model tables whose name holds its tuned name."""
+    models = sorted(
+        str(path)
+        for path in (package / _MODEL_CONFIGS).glob(f"*{variable.tuned}*.csv")
+        if path.is_file() and _UNTUNED not in path.name
+    )
+    return [str(package / _CONFIGS_DIR / variable.default), *models]
+
+
 def table_modules(config: Mapping[str, Any]) -> dict[str, TableUse]:
     """The entries of the module config that are generated from a tuned table, with the tables."""
     return {key: use for key, entry in config.items() if (use := _use(entry)) is not None}
@@ -104,14 +115,7 @@ class _Tables:
     def defaults(self, name: str) -> list[str] | None:
         """The files aiter reads for ``name`` when it is unset, ``None`` when the package does not say."""
         variable = self._known().get(name)
-        if variable is None:
-            return None
-        models = sorted(
-            str(path)
-            for path in (self.package / _MODEL_CONFIGS).glob(f"*{variable.tuned}*.csv")
-            if path.is_file() and _UNTUNED not in path.name
-        )
-        return [str(self.package / _CONFIGS_DIR / variable.default), *models]
+        return None if variable is None else default_tables(self.package, variable)
 
     def value(self, name: str) -> str:
         return (self._environment.get(name) or "").strip()

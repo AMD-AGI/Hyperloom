@@ -6,7 +6,9 @@
 The preflight leases the branch's sandbox, its own cards, from the toolbox, makes the agent ready in it
 (:mod:`agent_onboarding`) and keeps the lease and the manifest in the branch's session directory, so a run after a crash
 resumes the agent in the same sandbox without onboarding again, or, when that sandbox ended (a hosted one is gone once
-its lifetime is over), in the sandbox of a new lease with the agent's install run there again; the preflight records
+its lifetime is over), in the sandbox of a new lease with the agent's install run there again. The agent starts with the
+launch of the branch's start commit, its kernel tables laid out under the agent's directory as a test loads them
+(:mod:`start_tables`), and a keep that leaves them as given changes no table. The preflight records
 the manifest in the blackboard for CLOSE's archive, and the lease goes back when the branch stops. A lease asks for the
 time left until the branch's deadline. A run then
 watches the agent's keep signal and reads each keep whole (:mod:`agent_import`) the moment it shows, since the agent
@@ -47,9 +49,10 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from hyperloom.common.outside_facts import SGLANG_IMAGE_AITER_CONFIGS
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import KernelArtifact, KernelKind, LaunchConfig, PatchRef, RecipeDelta, RecipeError
-from hyperloom.measure.compile import COMPONENT_LAYOUTS, locate_installed_package
+from hyperloom.measure.compile import COMPONENT_LAYOUTS, kernel_load_env, locate_installed_package
 from hyperloom.sandbox import SandboxGone
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.blackboard.records import Learning
@@ -89,6 +92,14 @@ from hyperloom_multibranch.specialist.agent_session import BranchPlace
 from hyperloom_multibranch.specialist.agent_spend import AgentSpend, newest_write
 from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.runtime import PreflightFailed, SessionCrashed, SessionFinished, SessionStart
+from hyperloom_multibranch.specialist.start_tables import (
+    StartTable,
+    StartTableError,
+    from_start_tables,
+    lay_start_tables,
+    load_start_tables,
+    save_start_tables,
+)
 from hyperloom_multibranch.specialist.tools import sync_to_head
 from hyperloom_multibranch.specialist.worktree import Upstream, WorktreeError, installed_upstream
 
@@ -112,6 +123,10 @@ STALL_SECONDS = 1800.0
 #: What a run knows of the agent's keeps (:class:`KeepWatch`), so the run after a crash goes on from it.
 WATCH_FILE = "agent-watch.json"
 AGENT_DIR = "agent"
+#: Below the agent's directory, where the start commit's kernel tables are laid out; what each variable is given for
+#: them is kept beside the manifest.
+START_TABLES_DIR = "start-tables"
+START_TABLES_FILE = "agent-start-tables.json"
 #: How long a measured import its judge has not judged yet counts as being judged. The judge polls every few seconds
 #: and follows a gain with its retest and then its commit; an import submitted meanwhile would be on a stale head.
 SETTLE_SECONDS = 120.0
@@ -136,8 +151,9 @@ class AutonomousSetup:
     """What an autonomous branch runs on: how its agent is made ready in a sandbox, the sandbox a lease of the toolbox's
     cards gives, the spec it is given (its cards, the server arguments and environment of the commit it starts on and
     its workspace are filled in at the preflight), the toolbox the sandbox is leased from and imports are submitted to,
-    the repository they are read against, ``component``, the framework the agent edits, and ``spend``, the agent's own LLM
-    spend for the directories it works under, read with the file of what was read."""
+    the repository they are read against, ``component``, the framework the agent edits, ``spend``, the agent's own LLM
+    spend for the directories it works under, read with the file of what was read, and ``aiter_configs``, the image's
+    aiter tables the start commit's rows-only tables are laid over."""
 
     onboarding: Callable[[AgentSandbox], OnboardingSetup]
     sandbox: Callable[[BranchLease], AgentSandbox]
@@ -153,6 +169,7 @@ class AutonomousSetup:
     stall_seconds: float = STALL_SECONDS
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
     clock: Callable[[], float] = time.time
+    aiter_configs: Path = Path(SGLANG_IMAGE_AITER_CONFIGS)
 
 
 @dataclass
@@ -212,6 +229,7 @@ class AutonomousSession:
         self._sandbox: AgentSandbox | None = None
         self._root = LaunchConfig()
         self._root_commit = ""
+        self._start_tables: dict[str, StartTable] = {}
         self._unread = ""
         self._spend_unread = False
         self._spent_at = -math.inf
@@ -222,15 +240,16 @@ class AutonomousSession:
     async def preflight(self) -> None:
         await sync_to_head(self._setup.repo, self._start.branch, self._place.worktree)
         root = self._place.worktree.commit()
-        launch = (await self._setup.repo.read_recipe(self._start.start_commit)).launch
+        recipe = await self._setup.repo.read_recipe(self._start.start_commit)
+        tables = await self._lay_start_tables(recipe.kernels)
         await self._notes.refresh()
         snapshot = await self._place.blackboard.snapshot()
         baseline = snapshot.baseline
         seconds = self._run_seconds()
         spec = replace(
             self._setup.spec,
-            server_args=launch.server_args,
-            envs=dict(launch.envs),
+            server_args=recipe.launch.server_args,
+            envs={**recipe.launch.envs, **{name: table.value for name, table in tables.items()}},
             workspace=str(self._place.worktree.path),
             seconds=seconds,
             baseline=None if baseline is None else baseline.values.get(self._setup.spec.metric),
@@ -253,6 +272,16 @@ class AutonomousSession:
         KeepWatch(root, mark=mark).save(self._place.workspace / WATCH_FILE)
         await self._note(f"the agent {ready.manifest.source} at {ready.manifest.commit} is running")
 
+    async def _lay_start_tables(self, kernels: tuple[KernelArtifact, ...]) -> dict[str, StartTable]:
+        directory, configs = self._agent_dir / START_TABLES_DIR, self._setup.aiter_configs
+        try:
+            tables = await lay_start_tables(self._setup.repo, self._start.start_commit, kernels, directory, configs)
+        except StartTableError as error:
+            raise PreflightFailed([str(error)]) from error
+        self._place.workspace.mkdir(parents=True, exist_ok=True)
+        save_start_tables(tables, self._place.workspace / START_TABLES_FILE)
+        return tables
+
     def _run_seconds(self) -> float:
         """How long the agent may run: until the import of what it keeps last can still be measured and judged in
         EXPLORE, or, when the branch starts later than that, until EXPLORE ends; 0, no end, with no deadline."""
@@ -269,6 +298,7 @@ class AutonomousSession:
         self._root = (await self._setup.repo.read_recipe(self._start.start_commit)).launch
         watch = KeepWatch.load(self._place.workspace / WATCH_FILE)
         self._root_commit = watch.root
+        self._start_tables = load_start_tables(self._place.workspace / START_TABLES_FILE)
         spend = self._setup.spend((self._place.workspace.parent, self._held().root), self._place.workspace / SPEND_FILE)
         self._polled_at = self._heard_at = self._setup.clock()
         poll = asyncio.ensure_future(self._poll(manifest, process, sandbox, watch, spend))
@@ -629,7 +659,8 @@ class AutonomousSession:
         repo, component = self._setup.repo, self._setup.component
         recipe = await repo.read_recipe(head)
         root = await repo.read_recipe(self._start.start_commit)
-        stores = KeepStores(repo.store_patch, self._kernel_artifact, partial(self._increment, head))
+        targets = {kernel_load_env(kernel): kernel.target for kernel in root.kernels}
+        stores = KeepStores(repo.store_patch, partial(self._kernel_artifact, targets), partial(self._increment, head))
         delta = await import_delta(kept, root=root, head=recipe, component=component, stores=stores)
         if delta is None or all(item.component != component for item in delta.components):
             return delta
@@ -646,10 +677,10 @@ class AutonomousSession:
         worktree, component = self._place.worktree, self._setup.component
         return await asyncio.to_thread(worktree.diff_between, self._root_commit, texts, cumulative, component)
 
-    async def _kernel_artifact(self, env: str, table: str, rows_only: bool) -> KernelArtifact:
-        """The table ``env`` loads, kept in the session's blob store under the target the session bound ``env`` to, or
-        under ``env``'s own name when no table was put for it yet: the service reads one file per variable, and the
-        toolbox refuses a second target for it."""
+    async def _kernel_artifact(self, targets: dict[str, str], env: str, table: str, rows_only: bool) -> KernelArtifact:
+        """The table ``env`` loads, kept in the session's blob store under the target the session bound ``env`` to, or,
+        when no table was put for it yet, under the target of the start commit's table for it (``targets``), else
+        ``env``'s own name: the service reads one file per variable, and a table on another target would be a second."""
 
         put = self._setup.toolbox.put_kernel_artifact
         try:
@@ -657,7 +688,7 @@ class AutonomousSession:
         except RequestRejected as error:
             if error.code != TARGET_REQUIRED:
                 raise
-            return await put(KernelKind.GEMM, env.lower(), env, table.encode(), rows_only)
+            return await put(KernelKind.GEMM, targets.get(env, env.lower()), env, table.encode(), rows_only)
 
     async def _submitted(self, kept: KeptChange, head: str, delta: RecipeDelta | None) -> None:
         """Submit ``kept`` against ``head``; raise what the toolbox raises when it takes no request now."""
@@ -716,7 +747,8 @@ class AutonomousSession:
         if manifest.snapshots is not None:
             outbox = self._agent_dir / SOURCE_DIR / manifest.snapshots_outbox
             applied = partial(self._place.worktree.diff_applied, root, component=self._setup.component)
-            return read_snapshot(outbox, seq, root, applied, self._root, manifest.config)
+            kept = read_snapshot(outbox, seq, root, applied, self._root, manifest.config)
+            return from_start_tables(kept, self._start_tables)
         workspace = self._place.worktree.path
         patch = without_file(self._place.worktree.diff_from(root, self._setup.component), manifest)
         source, summary = manifest.config_source, self._summary(manifest)
@@ -724,7 +756,7 @@ class AutonomousSession:
             return KeptChange(seq, patch, self._root.server_args, dict(self._root.envs), summary)
         where = workspace if source.root == WORKSPACE else self._agent_dir / SOURCE_DIR
         kept = read_kept_change(seq, patch, read_json(where / source.path), source, summary, self._root)
-        return with_tables(kept, (workspace, self._agent_dir))
+        return with_tables(from_start_tables(kept, self._start_tables), (workspace, self._agent_dir))
 
     def _summary(self, manifest: AgentManifest) -> str:
         if manifest.keep is None or not manifest.summary_field:
