@@ -63,6 +63,24 @@ def normalize_platform(platform: str) -> str:
     return (platform or "").strip().upper()
 
 
+def tracelens_platform(platform: str) -> str:
+    """TraceLens's own name for ``platform`` (``Radeon_8060S`` for ``radeon8060s``), else its upper-case form.
+
+    TraceLens names a platform by its arch JSON's file name and loads it by that exact name, so a board is matched
+    ignoring case and separators. A file Hyperloom wrote under the upper-case form loses to TraceLens's own spelling.
+    """
+    canonical = normalize_platform(platform)
+    collect = _get_collect_arch_jsons()
+    if collect is None or not canonical:
+        return canonical
+    matches = [name for name in collect() if _platform_key(name) == _platform_key(canonical)]
+    return next((name for name in matches if name != canonical), matches[0] if matches else canonical)
+
+
+def _platform_key(name: str) -> str:
+    return "".join(ch for ch in name.upper() if ch.isalnum())
+
+
 def list_candidate_physical_gpus() -> list[int]:
     """List the physical GPU ids currently visible to this process."""
     for var in _VISIBLE_DEVICE_VARS:
@@ -127,14 +145,8 @@ def resolve_arch_json_path(platform: str) -> Path | None:
     collect = _get_collect_arch_jsons()
     if collect is None:
         return None
-
-    canonical = normalize_platform(platform)
-    if not canonical:
-        return None
-    for name, path in collect().items():
-        if name.upper() == canonical:
-            return Path(path)
-    return None
+    path = collect().get(tracelens_platform(platform))
+    return Path(path) if path else None
 
 
 #: hyperloom achievable-TFLOPS precision tag -> TraceLens
@@ -198,8 +210,7 @@ def write_hyperloom_arch_spec(tracelens_root: Path, platform: str, log: Callable
 
 def default_arch_output_path(tracelens_root: Path, platform: str) -> Path:
     """Return the default arch-spec JSON path for a platform."""
-    canonical = normalize_platform(platform)
-    return tracelens_root / "TraceLens/Agent/Analysis/utils/arch" / f"{canonical}.json"
+    return tracelens_root / "TraceLens/Agent/Analysis/utils/arch" / f"{tracelens_platform(platform)}.json"
 
 
 def _sanitize_measured_arch_spec(

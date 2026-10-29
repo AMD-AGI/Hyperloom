@@ -31,7 +31,7 @@ from hyperloom.inference_optimizer.framework_paths import (
 )
 
 
-from .tracelens_arch_benchmark import internal_extension_arch_json, normalize_platform, populate_gpu_arch_json
+from .tracelens_arch_benchmark import internal_extension_arch_json, populate_gpu_arch_json, tracelens_platform
 from .tracelens_skill_runner import (
     TraceLensSkillRequest,
     TraceLensSkillRunResult,
@@ -701,7 +701,7 @@ def main() -> int:
     args = parser.parse_args()
     route = AnalysisRoute(args.route)
 
-    args.target_platform = normalize_platform(args.target_platform)
+    args.target_platform = tracelens_platform(args.target_platform)
 
     session_id = args.session_id or uuid.uuid4().hex[:12]
     run_id = f"tl-{uuid.uuid4().hex[:8]}"

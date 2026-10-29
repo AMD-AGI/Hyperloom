@@ -420,3 +420,37 @@ def test_sanitize_raises_on_non_positive_bandwidth(tmp_path: Path, mem_bw) -> No
             out_path=tmp_path / "MI355X.json",
             log=lambda _m: None,
         )
+
+
+def _bundled(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *names: str) -> None:
+    arch = {name: str(tmp_path / f"{name}.json") for name in names}
+    monkeypatch.setattr(tab, "_get_collect_arch_jsons", lambda: lambda: arch)
+
+
+@pytest.mark.parametrize(
+    ("platform", "expected"),
+    [("radeon8060s", "Radeon_8060S"), ("RADEON 8060S", "Radeon_8060S"), ("mi300x", "MI300X"), ("r9700", "R9700")],
+)
+def test_a_board_takes_the_name_tracelens_bundles_it_under(monkeypatch, tmp_path, platform, expected) -> None:
+    _bundled(monkeypatch, tmp_path, "MI300X", "MI325X", "Radeon_8060S")
+    assert tab.tracelens_platform(platform) == expected
+
+
+def test_both_readers_resolve_the_8060s_to_its_bundled_spec(monkeypatch, tmp_path) -> None:
+    _bundled(monkeypatch, tmp_path, "MI300X", "Radeon_8060S")
+    assert tab.resolve_arch_json_path("radeon8060s") == tmp_path / "Radeon_8060S.json"
+    root = tmp_path / "TraceLens"
+    assert tab.default_arch_output_path(root, "radeon8060s") == (
+        root / "TraceLens/Agent/Analysis/utils/arch/Radeon_8060S.json"
+    )
+
+
+def test_tracelens_spelling_wins_over_a_file_written_under_the_upper_case_name(monkeypatch, tmp_path) -> None:
+    _bundled(monkeypatch, tmp_path, "RADEON8060S", "Radeon_8060S")
+    assert tab.tracelens_platform("radeon8060s") == "Radeon_8060S"
+
+
+def test_without_tracelens_the_name_is_its_upper_case_form(monkeypatch) -> None:
+    monkeypatch.setattr(tab, "_get_collect_arch_jsons", lambda: None)
+    assert tab.tracelens_platform(" radeon8060s ") == "RADEON8060S"
+    assert tab.resolve_arch_json_path("radeon8060s") is None
