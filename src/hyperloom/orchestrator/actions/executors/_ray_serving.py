@@ -431,10 +431,7 @@ def _serving_actor_body() -> Any:
 
         def __ray_terminate__(self) -> None:  # pragma: no cover - Ray teardown hook
             """Reap the serving process when Ray tears the actor down."""
-            try:
-                self._mgr.stop()
-            except Exception:
-                log.debug("ServingActor: stop during Ray teardown failed", exc_info=True)
+            self._mgr.stop()
 
     return ServingActor
 
