@@ -98,6 +98,8 @@ log = logging.getLogger(__name__)
 _WARMUP_ROUND_DIR = "warmup_round"
 #: A variant whose warm-up setup or warm-up YAML could not be built.
 _WARMUP_YAML_BUILD_ERROR = "warmup_yaml_build_error"
+#: A variant whose composed config named a workload its benchmark cap could not be sized from.
+_BENCHMARK_CAP_ERROR = "benchmark_cap_error"
 
 
 def _validate_magpie_python_override(value: str) -> str:
@@ -979,11 +981,31 @@ async def _variant_yaml_or_abort(
         _abort_variant(at, _VariantFailure(error_class, repr(exc), f"{error_class}: {exc!r}"))
 
 
+def _variant_cap_or_abort(run: _GridRun, at: _VariantSlot, cfg_path: Path) -> float:
+    """Size the hard cap this variant's config is granted, or end the variant on the sizing error.
+
+    The cap is sized from the composed env, so an unreadable workload pin in one
+    variant's config is that variant's failure: the rungs already measured keep their
+    rows and the grid runs on.
+    """
+    try:
+        return composed_benchmark_timeout_sec(cfg_path)
+    except Exception as exc:  # re-raised as _VariantAborted by _abort_variant
+        log.warning(
+            "grid_runner: variant %s aborted: %s: %r",
+            _variant_tag(run, at),
+            _BENCHMARK_CAP_ERROR,
+            exc,
+            exc_info=True,
+        )
+        _abort_variant(at, _VariantFailure(_BENCHMARK_CAP_ERROR, repr(exc), f"{_BENCHMARK_CAP_ERROR}: {exc!r}"))
+
+
 async def _prepare_variant_rounds(run: _GridRun, at: _VariantSlot) -> _VariantRounds:
     cfg_path = await _variant_yaml_or_abort(run, at, into=at.path, lifecycle=run.launch.server_lifecycle)
     mn_effective_args = _resolve_mn_effective_server_args(cfg_path)
     cold = _VariantRounds(
-        cfg_path, {"eligible": False}, False, mn_effective_args, composed_benchmark_timeout_sec(cfg_path)
+        cfg_path, {"eligible": False}, False, mn_effective_args, _variant_cap_or_abort(run, at, cfg_path)
     )
     if not run.auto_warmup_requested:
         return cold
@@ -1012,7 +1034,7 @@ async def _prepare_variant_rounds(run: _GridRun, at: _VariantSlot) -> _VariantRo
         )
         _abort_variant(at, _VariantFailure(_WARMUP_YAML_BUILD_ERROR, repr(exc), f"{_WARMUP_YAML_BUILD_ERROR}: {exc!r}"))
     return _VariantRounds(
-        warmed_cfg_path, lifecycle, True, mn_effective_args, composed_benchmark_timeout_sec(warmed_cfg_path)
+        warmed_cfg_path, lifecycle, True, mn_effective_args, _variant_cap_or_abort(run, at, warmed_cfg_path)
     )
 
 
@@ -1727,6 +1749,7 @@ def _attach_grid_launch_evidence(
         if result.status == "skipped" or result.error_class in {  # skipped or refused: never launched a measurement
             "capability_unsupported",
             "yaml_build_error",
+            _BENCHMARK_CAP_ERROR,
             _WARMUP_YAML_BUILD_ERROR,
             SPECULATIVE_DECODING_PINNED,
             ServerArgvInvalidError.error_class,

@@ -11,6 +11,7 @@ import pytest
 import yaml
 
 from hyperloom.common.agentx_workload import agentx_warmup_requests
+from hyperloom.common.env import EnvValueError
 from hyperloom.orchestrator.actions.executors._grid_runner import (
     GridRecipe,
     GridVariant,
@@ -167,11 +168,22 @@ def test_a_rung_that_clears_an_inherited_concurrency_falls_back_to_the_stock_cap
 def test_a_rung_cannot_grant_itself_time_through_its_config(granted_cap):
     """The override is the operator's, and preflight validates it once against the process env.
 
-    What a rung's config carries under that name went through no such validation, and
-    parsing it here would raise out of the rung and end the whole grid.
+    What a rung's config carries under that name went through no such validation, so the
+    grant ignores it rather than letting a rung buy time nobody granted it.
     """
     variant = GridVariant("capped", extra_envs={"INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC": "two hours"})
     assert granted_cap({"CONC": "28"}, variant) == resolve_benchmark_timeouts(_canonical_env(CONC="28"))[1]
+
+
+def test_a_workload_pin_the_grant_cannot_read_is_refused_rather_than_guessed(granted_cap):
+    """Sizing reads the workload pins as the round will, so it rejects what the round would reject.
+
+    Sizing a grant for a workload the launch is going to refuse would spend a slot on a
+    run that cannot start; the grid runner files the refusal as that variant's failure.
+    """
+    variant = GridVariant("unreadable", extra_envs={"HYPERLOOM_AGENTX": "maybe"})
+    with pytest.raises(EnvValueError, match="HYPERLOOM_AGENTX"):
+        granted_cap({"CONC": "20"}, variant)
 
 
 def test_the_operators_cap_holds_every_rung(granted_cap, monkeypatch):

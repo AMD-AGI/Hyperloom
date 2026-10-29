@@ -992,7 +992,10 @@ is launched with -- whether the `CONC` in it was pinned by the rung, inherited
 from the base config or cleared by the rung -- so the rung that measures more
 lanes is granted more time rather than the ladder sharing one grant. The
 override itself stays the operator's: it is read from the process environment
-that preflight validated, never from a rung's config.
+that preflight validated, never from a rung's config. Sizing reads a rung's
+workload pins as its launch would, so a rung whose config spells one the reader
+refuses (`HYPERLOOM_AGENTX=maybe`) is recorded as failed with error class
+`benchmark_cap_error` and the sweep carries on with the next rung.
 
 Native AgentX profiling shares TraceLens patch and kernel-shape-tool preparation with
 fixed-sequence profiling. Configure capture steps, count, delay and interval through

@@ -261,9 +261,10 @@ def default_benchmark_timeout_sec(env: Mapping[str, str] | None = None) -> float
     baseline at 38%, and reaped a canonical CONC 20 rung 1.3s after its profiling
     phase completed.
 
-    Sizing reads only workload pins -- the backend, the flow, ``CONC`` -- and
-    rejects nothing, so a caller may hand it an env composed from a config
-    without having validated it.
+    Sizing reads only workload pins -- the backend, the flow, ``CONC`` -- but it
+    reads them as the run will: a pin it cannot parse raises
+    :class:`~hyperloom.common.env.EnvValueError` here rather than sizing the
+    grant for a workload the round will refuse to start.
     """
     from hyperloom.common.agentx_workload import (
         canonical_benchmark_timeout_sec,

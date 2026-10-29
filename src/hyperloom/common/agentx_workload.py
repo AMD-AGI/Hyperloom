@@ -55,7 +55,7 @@ MLPERF_TIMEOUT_SAFETY_FACTOR = 2.0
 # ``envs.CONC``, and the shape of the round that answers it belongs to Magpie at
 # the ref native AgentX pins it to (docs/components/magpie.md). Every CANON_
 # number here describes that pin and has to be re-measured when it moves.
-#
+
 # Canonical replay warms up this many requests per lane, plus one probe, before
 # it opens the profiling window: a sweep measured 155, 221 and 309 warmup
 # requests at CONC 14, 20 and 28, so the warmup phase grows with the

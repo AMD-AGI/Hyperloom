@@ -39,7 +39,9 @@ def composed_benchmark_timeout_sec(config_path: Path) -> float:
     Only the size comes from that env. The hard cap's override is the operator's grant,
     read and validated once against the process env; a config's value for that name is
     the workload's own and is never parsed as a grant here. A round whose config clears
-    the override runs on the size its workload needs.
+    the override runs on the size its workload needs. A config that names a workload pin
+    this cannot read raises, as launching that round would: the caller owns the blast
+    radius of one unusable config, and the grid runner ends that variant on it.
     """
     bench = (yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}).get("benchmark") or {}
     envs = dict(os.environ)
