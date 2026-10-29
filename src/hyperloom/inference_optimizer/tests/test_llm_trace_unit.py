@@ -166,16 +166,19 @@ def test_llm_call_failed_is_a_backend_error(tmp_path: Path):
         raise LLMCallFailed("gateway 400")
 
 
-def test_llm_trace_langfuse_mirror_failure_swallowed(tmp_path: Path, monkeypatch):
+def test_llm_trace_langfuse_mirror_defect_raises_after_the_ledger_write(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(_row_utils, "now_iso", lambda **_: "2026-01-01T00:00:00Z")
 
     import hyperloom.inference_optimizer.trace.langfuse_emitter as le
 
     def _boom(_dir):
-        raise RuntimeError("langfuse down")
+        raise RuntimeError("emitter defect")
 
     monkeypatch.setattr(le, "get_emitter", _boom)
 
     record = llm_trace.LLMCallRecord(session_id="s3", component="forge")
-    # Must not raise even though the Langfuse mirror blows up.
-    llm_trace.append_llm_call(session_dir=tmp_path, record=record)
+    with pytest.raises(RuntimeError, match="emitter defect"):
+        llm_trace.append_llm_call(session_dir=tmp_path, record=record)
+
+    rows = (tmp_path / "reports" / "trace" / "llm_calls.jsonl").read_text(encoding="utf-8").splitlines()
+    assert [json.loads(r)["session_id"] for r in rows] == ["s3"]

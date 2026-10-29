@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import threading
 from contextlib import asynccontextmanager, contextmanager, suppress
 from contextvars import ContextVar
@@ -47,7 +48,7 @@ async def report_progress(**note: Any) -> None:
         return
     try:
         await reporter(**note)
-    except Exception as exc:  # outermost heartbeat sink: a heartbeat never breaks its caller
+    except (sqlite3.Error, TypeError, ValueError) as exc:
         log.debug("task progress note dropped: %r", exc, exc_info=True)
 
 
