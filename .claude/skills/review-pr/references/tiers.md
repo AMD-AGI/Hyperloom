@@ -17,7 +17,7 @@ a failure surfaces, not by file size or churn.
 | 2 | `actions/executors/integrate_patch.py` | Patches live framework trees. A failed revert contaminates every later measurement |
 | 2 | `actions/executors/_workload_envs.py` | Single source of the rendered Magpie YAML; `seal_server_argv` settles the arg string. Divergence invalidates the A/B while both runs look healthy |
 | 2 | `actions/executors/_grid_runner.py` | Shared by explore and sweep |
-| 2 | `orchestrator/phases/framework.py`, `phases/kernel.py` | One phase produces nothing or loops |
+| 2 | `orchestrator/phases/framework.py`, `phases/framework_records.py`, `phases/framework_discovery.py`, `phases/kernel.py` | One phase produces nothing or loops |
 | 2 | `protocol/action_surfaces.py` | Consumed by the CLI catalogue, the gate, the phase machine and the dispatcher. An action here but not in the owning role's set is unroutable |
 | 2 | `protocol/intent.py` | Severity/verdict frozensets deliberately duplicated from `agents/critic/runtime/intent_envelope.py`. Change one copy and the emitter produces intents the transport rejects |
 | 2 | `common/llm_config.py`, `common/perf_metric.py` | Gateway env resolution and client construction for every role; `graded_axes_of` is what the phase handlers and writeback grade against |
