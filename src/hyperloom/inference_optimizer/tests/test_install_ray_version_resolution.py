@@ -185,9 +185,62 @@ def test_certified_start_argv_carries_a_value_of_each_option_s_kind() -> None:
 
 def test_ensure_ray_certifies_the_cli_through_ray_s_own_parser() -> None:
     """Resolve the click group Ray publishes and let it parse, rather than read option names."""
-    probe = _extract_shell_function("ensure_ray")
+    probe = _extract_shell_function("ray_cli_probe")
 
     assert "from ray.scripts.scripts import cli" in probe
     assert "make_context(" in probe
     assert "click.UsageError" in probe
     assert "param.opts" not in probe
+
+
+def _run_ensure_ray_with_probe(probe_results: list[int], *, check_only: int = 0) -> subprocess.CompletedProcess[str]:
+    """ensure_ray with pip recorded and the CLI probe answering ``probe_results`` in turn (0 = the CLI starts)."""
+    fn_src = _extract_shell_function("ensure_ray")
+    results = " ".join(str(r) for r in probe_results)
+    stub = f"""
+log() {{ :; }}
+warn() {{ printf 'WARN:%s\\n' "$*"; }}
+resolve_ray_version() {{ :; }}
+run() {{ printf 'ARGS:'; for a in "$@"; do printf '[%s]' "$a"; done; printf '\\n'; }}
+PROBE_RESULTS=({results})
+ray_cli_probe() {{ printf 'PROBE\\n'; local r="${{PROBE_RESULTS[0]}}"; PROBE_RESULTS=("${{PROBE_RESULTS[@]:1}}"); return "$r"; }}
+CHECK_ONLY={check_only}
+DRY_RUN=0
+RAY_VERSION="2.44.1"
+RAY_INSTALL_SPEC="ray[default]==${{RAY_VERSION}}"
+RAY_CLICK_FALLBACK_SPEC="click<8.3"
+"""
+    script = f"set -uo pipefail\n{fn_src}\n{stub}\nensure_ray\n"
+    return subprocess.run(["bash", "-c", script], check=False, capture_output=True, text=True)
+
+
+def test_a_cli_that_starts_keeps_the_click_ray_resolved() -> None:
+    done = _run_ensure_ray_with_probe([0])
+
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.count("PROBE") == 1
+    assert "click" not in done.stdout
+
+
+def test_a_cli_that_fails_to_import_gets_click_held_below_8_3_once_and_is_probed_again() -> None:
+    # Ray 2.44.1's CLI raises "ValueError: <object> is not a valid Sentinel" under click 8.3+.
+    done = _run_ensure_ray_with_probe([1, 0])
+
+    assert done.returncode == 0, done.stderr
+    assert "[click<8.3]" in done.stdout
+    assert done.stdout.count("PROBE") == 2
+    assert "WARN:" in done.stdout
+
+
+def test_a_cli_still_broken_after_the_click_fallback_fails_the_install() -> None:
+    done = _run_ensure_ray_with_probe([1, 1])
+
+    assert done.returncode != 0
+    assert done.stdout.count("[click<8.3]") == 1
+
+
+def test_check_only_reports_a_broken_cli_without_installing_anything() -> None:
+    done = _run_ensure_ray_with_probe([1], check_only=1)
+
+    assert done.returncode != 0
+    assert "ARGS:" not in done.stdout

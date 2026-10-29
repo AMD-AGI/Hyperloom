@@ -437,14 +437,9 @@ resolve_ray_version() {
   RAY_INSTALL_SPEC="ray[default]==${RAY_VERSION}"
 }
 
-ensure_ray() {
-  resolve_ray_version
-  log "ensuring ${RAY_INSTALL_SPEC}"
-  if [ "$CHECK_ONLY" -eq 0 ]; then
-    run python3 -m pip install --quiet --no-cache-dir --break-system-packages "$RAY_INSTALL_SPEC"
-  fi
-  if [ "$DRY_RUN" -eq 0 ]; then
-    RAY_VERSION="$RAY_VERSION" RAY_START_ARGV="$RAY_START_ARGV" python3 - <<'PY'
+# Certify the installed Ray CLI with Ray's own parser (see RAY_START_ARGV above).
+ray_cli_probe() {
+  RAY_VERSION="$RAY_VERSION" RAY_START_ARGV="$RAY_START_ARGV" python3 - <<'PY'
 import os
 import shlex
 
@@ -469,7 +464,26 @@ except Exception as exc:
     raise SystemExit(f"ray CLI has no usable start command: {type(exc).__name__}: {exc}") from exc
 print(f"[kernel-agent] ray version: {ray.__version__}, ray start accepts {' '.join(RAY_START_ARGV)}")
 PY
+}
+
+# Ray 2.44.1's CLI does not import against click 8.3+ (`ValueError: ... is not a
+# valid Sentinel`), and an image or another installed package can bring a newer
+# click. The CLI is still certified by its own parser: only when that probe
+# fails is click held below 8.3, once, and the CLI probed again.
+RAY_CLICK_FALLBACK_SPEC="${RAY_CLICK_FALLBACK_SPEC:-click<8.3}"
+
+ensure_ray() {
+  resolve_ray_version
+  log "ensuring ${RAY_INSTALL_SPEC}"
+  if [ "$CHECK_ONLY" -eq 0 ]; then
+    run python3 -m pip install --quiet --no-cache-dir --break-system-packages "$RAY_INSTALL_SPEC"
   fi
+  [ "$DRY_RUN" -eq 0 ] || return 0
+  ray_cli_probe && return 0
+  [ "$CHECK_ONLY" -eq 0 ] || return 1
+  warn "the ray ${RAY_VERSION} CLI does not start with this environment's click; installing ${RAY_CLICK_FALLBACK_SPEC} and probing again"
+  run python3 -m pip install --quiet --no-cache-dir --break-system-packages "$RAY_CLICK_FALLBACK_SPEC"
+  ray_cli_probe
 }
 
 # Minimum soft `ulimit -n` the Ray raylet needs to stay up (issue #433).
