@@ -102,7 +102,9 @@ sys.exit(config["exit"])
 #: workspace, writing a file of its own at the first, and writes the keep's snapshot to its outbox, run/snaps as the
 #: config MB wrote renames it: ``change.patch`` against its parent, ``served.patch`` against the root, the launch,
 #: ``table`` as the kernel table AITER_CONFIG_GEMM_A8W8 loads after an image default table (listed as too large to copy
-#: with ``huge``, with a wrong digest with ``bad_sha``), and an AITER JIT link outside its tree; LATEST names it at each
+#: with ``huge``, with a wrong digest with ``bad_sha``), and an AITER JIT link outside its tree; with ``parts`` the
+#: variable's given value instead, ``table`` its own rows appended to it or replacing its last part, every file of it
+#: copied in Arbor's multi-part shape; LATEST names it at each
 #: keep or, without ``latest_each``, at the last only. The keep ``skip`` gets no snapshot, as one that failed; ``stray`` says it was made
 #: on a commit MB never gave it; ``orphan`` is made on the root, its earlier snapshot's commit gone, as ``notes`` say.
 #: It removes the last run's exit file as it starts, and ends with ``exit`` after ``tail`` seconds, or 0 on SIGTERM,
@@ -155,7 +157,20 @@ for number, seqs in enumerate(plan["keeps"], start=1):
     if number == plan["orphan"] and plan["orphan_notes"]:
         keep["notes"] = f"the commit of keep {previous} is gone from the workspace; this change is against the root"
     envs = dict(plan["envs"])
-    if plan["table"]:
+    if plan["parts"]:
+        name, own = "AITER_CONFIG_GEMM_A8W8", (session / "own-tuned.csv").resolve()
+        own.write_text(plan["table"].format(seqs=seqs))
+        given = envs[name].split(os.pathsep)
+        parts = {"append": [*given, str(own)], "replace": [*given[:-1], str(own)], "given": given}[plan["parts"]]
+        envs[name], files = os.pathsep.join(parts), []
+        for k, part in enumerate(parts):
+            if os.path.isfile(part):
+                data, file = pathlib.Path(part).read_bytes(), f"tables/{name}/{k}-{os.path.basename(part)}"
+                (built / file).parent.mkdir(parents=True, exist_ok=True)
+                (built / file).write_bytes(data)
+                files.append({"path": part, "file": file, "sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)})
+        keep["tables"][name] = {"path": envs[name], "files": files}
+    elif plan["table"]:
         name, table = "AITER_CONFIG_GEMM_A8W8", plan["table"].format(seqs=seqs).encode()
         envs[name] = LISTED
         digest = "0" * 64 if plan["bad_sha"] else hashlib.sha256(table).hexdigest()
@@ -229,6 +244,8 @@ class Component:
     table: str = ""
     huge: bool = False
     bad_sha: bool = False
+    #: ``append``, ``replace`` or ``given``: what the agent does to the value of AITER_CONFIG_GEMM_A8W8 it was given.
+    parts: str = ""
 
 
 async def _until(condition, what: str, seconds: float = 10.0) -> None:
@@ -1562,6 +1579,48 @@ async def test_a_keep_that_reports_the_start_s_tables_as_they_were_given_imports
     rig = await _rig(tmp_path, agent, start=start, aiter=_aiter(tmp_path))
 
     request = await _imported(rig)
+
+    assert (request.delta.add_kernels, request.delta.remove_kernels) == ((), ())
+    assert request.delta.config == ConfigDelta()
+
+
+async def _multi_part(tmp_path: Path, parts: str) -> tuple[Rig, TestRequest]:
+    given = {TABLE_ENV: "{%s}" % TABLE_ENV}
+    started = {"server_flags": "--max-num-seqs 128", "server_env": given} if parts == "given" else None
+    agent = Component(keeps=(256,), gap=0.1, flags="--max-num-seqs 128", envs=given, started=started,
+                      table="M,N,K,us\n{seqs},5120,5120,3\n", parts=parts)  # fmt: skip
+    start = _replayed(LocalBlobStore(tmp_path / "blobs"))
+    rig = await _rig(tmp_path, agent, start=start, start_seconds=0.2, aiter=_aiter(tmp_path))
+    return rig, await _imported(rig)
+
+
+async def test_a_snapshot_that_appends_its_rows_to_the_start_s_tables_imports_the_start_s_rows_and_its_own(
+    tmp_path: Path,
+) -> None:
+    """Arbor copies every file of a multi-part value; the private default copies carry no rows of the agent's."""
+
+    rig, request = await _multi_part(tmp_path, "append")
+
+    [artifact] = request.delta.add_kernels
+    table = b"M,N,K,us\n64,5120,5120,7\n256,5120,5120,3\n"
+    assert kernel_rows_only(artifact) and rig.toolbox.tables[artifact.sha256] == table
+    assert artifact.target == "gemm_a8w8" and TABLE_ENV not in request.delta.config.envs
+
+
+async def test_a_snapshot_that_replaces_the_start_s_rows_with_its_own_copy_imports_that_copy_s_rows(
+    tmp_path: Path,
+) -> None:
+    rig, request = await _multi_part(tmp_path, "replace")
+
+    [artifact] = request.delta.add_kernels
+    assert kernel_rows_only(artifact) and rig.toolbox.tables[artifact.sha256] == b"M,N,K,us\n256,5120,5120,3\n"
+    assert artifact.target == "gemm_a8w8" and TABLE_ENV not in request.delta.config.envs
+
+
+async def test_a_multi_part_snapshot_of_the_start_s_tables_as_they_were_given_imports_no_table_change(
+    tmp_path: Path,
+) -> None:
+    _, request = await _multi_part(tmp_path, "given")
 
     assert (request.delta.add_kernels, request.delta.remove_kernels) == ((), ())
     assert request.delta.config == ConfigDelta()

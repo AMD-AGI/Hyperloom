@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 import hashlib
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,12 +19,14 @@ from hyperloom.measure.compile import COMPONENT_LAYOUTS, LocalBlobStore, Package
 import pytest
 
 from hyperloom_multibranch.specialist.agent_import import (
+    ComponentStart,
     KeepStores,
     KeptChange,
     KeptChangeError,
     added_at,
     import_delta,
     read_kept_change,
+    read_snapshot,
     with_tables,
 )
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
@@ -267,6 +270,81 @@ def test_a_variable_listing_only_the_image_s_tables_stays_a_launch_value(tmp_pat
     kept = with_tables(_kept(1, "", envs={TABLE_ENV: _listing()}), (tmp_path,))
 
     assert kept.tables == {}
+
+
+ROOT_COMMIT = "a" * 40
+
+
+def _arbor_keep(outbox: Path, value: str, copied: dict[str, bytes], digests: dict[str, str] | None = None) -> None:
+    """Snapshot 1 of ``outbox`` as Arbor writes one whose ``TABLE_ENV`` is the pathsep list ``value``: each part in
+    ``copied`` copied under ``tables/<VAR>/<k>-<basename>`` in list order, the other parts in its path only."""
+
+    directory = outbox / "0001"
+    (directory / "tables" / TABLE_ENV).mkdir(parents=True)
+    files = []
+    for k, part in enumerate(value.split(":")):
+        if part not in copied:
+            continue
+        file = f"tables/{TABLE_ENV}/{k}-{Path(part).name}"
+        (directory / file).write_bytes(copied[part])
+        digest = (digests or {}).get(part, hashlib.sha256(copied[part]).hexdigest())
+        files.append({"path": part, "file": file, "sha256": digest, "bytes": len(copied[part])})
+    keep = {"number": 1, "previous": None, "root": ROOT_COMMIT, "parent": ROOT_COMMIT, "commit": "b" * 40,
+            "change": "own rows", "tables": {TABLE_ENV: {"path": value, "files": files}}}  # fmt: skip
+    (directory / "keep.json").write_text(json.dumps(keep), encoding="utf-8")
+    (directory / "change.patch").write_text("", encoding="utf-8")
+    config = {"server_flags": ROOT.launch.server_args, "server_env": {TABLE_ENV: value}}
+    (directory / "config.json").write_text(json.dumps(config), encoding="utf-8")
+
+
+def _read(outbox: Path, copies: tuple[str, ...]) -> KeptChange:
+    return read_snapshot(outbox, 1, ROOT_COMMIT, "".join, ComponentStart(ROOT.launch, {}, copies))
+
+
+def _start_files(tmp_path: Path) -> tuple[list[Path], Path, Path]:
+    """MB's private copies of the image's default tables, the start's rows and the agent's own rows, on disk."""
+
+    agent = tmp_path / "agent"
+    defaults = [agent / "start-tables" / TABLE_ENV / "a.csv", agent / "start-tables" / TABLE_ENV / "model" / "b.csv"]
+    start, own = agent / "start-tables" / "files" / "rows.csv", agent / "workspace" / "own.csv"
+    texts = ("M,N,K\n1,5120,5120\n", "M,N,K\n2,5120,5120\n", "M,N,K\n64,5120,5120\n", "M,N,K\n256,5120,5120\n")
+    for path, text in zip((*defaults, start, own), texts, strict=True):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    return defaults, start, own
+
+
+def test_a_snapshot_reads_every_file_a_multi_part_aiter_value_lists_as_one_table_over_the_image_s(
+    tmp_path: Path,
+) -> None:
+    defaults, start, own = _start_files(tmp_path)
+    value = ":".join([*map(str, defaults), _listing(start, own)])
+    _arbor_keep(tmp_path / "outbox", value, {str(path): path.read_bytes() for path in (*defaults, start, own)})
+
+    kept = _read(tmp_path / "outbox", tuple(map(str, defaults)))
+
+    on_disk = with_tables(_kept(1, "", envs={TABLE_ENV: _listing(start, own)}), (tmp_path,))
+    assert kept.envs[TABLE_ENV] == value and kept.uncopied == ()
+    assert (
+        kept.tables == {value: on_disk.tables[_listing(start, own)]} == {value: "M,N,K\n64,5120,5120\n256,5120,5120\n"}
+    )
+
+
+def test_a_multi_part_value_whose_copy_does_not_match_its_sha256_or_is_missing_is_refused(tmp_path: Path) -> None:
+    defaults, start, own = _start_files(tmp_path)
+    value = ":".join(map(str, (*defaults, start, own)))
+    copied = {str(path): path.read_bytes() for path in (*defaults, start, own)}
+    _arbor_keep(tmp_path / "bad", value, copied, digests={str(own): "0" * 64})
+    _arbor_keep(tmp_path / "missing", value, copied)
+    (tmp_path / "missing" / "0001" / "tables" / TABLE_ENV / "3-own.csv").unlink()
+    _arbor_keep(tmp_path / "unlisted", value, {str(path): copied[str(path)] for path in (*defaults, own)})
+
+    with pytest.raises(KeptChangeError, match="sha256"):
+        _read(tmp_path / "bad", tuple(map(str, defaults)))
+    with pytest.raises(KeptChangeError, match="cannot be read"):
+        _read(tmp_path / "missing", tuple(map(str, defaults)))
+    with pytest.raises(KeptChangeError, match=str(start)):
+        _read(tmp_path / "unlisted", tuple(map(str, defaults)))
 
 
 #: The installed ``config.py`` the source tests edit: lines far enough apart that git writes a hunk for each.

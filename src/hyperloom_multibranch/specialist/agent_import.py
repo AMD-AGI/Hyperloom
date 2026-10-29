@@ -16,8 +16,10 @@ in the agent's run, so it carries only the agent's rows.
 An agent run as a component writes each keep whole instead, as a snapshot directory (:func:`read_snapshot`, the layout
 of Arbor's component mode): ``keep.json`` names the keep before it and the commits it was made on and made, its
 ``change.patch`` takes the one to the other, ``config.json`` is its whole launch, of which only what differs from the
-launch it was started with goes in, and ``tables/<VAR>/`` the kernel table each variable loads, with the digest ``keep.json`` lists (a table too large to copy is listed with no file). Its source
-is the chain of its patches from the root, so a snapshot made on a commit that no snapshot of the chain made, or on a
+launch it was started with goes in, and ``tables/<VAR>/`` the kernel table each variable loads, with the digest
+``keep.json`` lists (a table too large to copy is listed with no file); for an aiter value that lists several files,
+each of them, of which the image's default tables, MB's private copies of them included, carry no rows. Its source is
+the chain of its patches from the root, so a snapshot made on a commit that no snapshot of the chain made, or on a
 root other than the one MB gave, is refused; one made on the root after another, its ``notes`` saying the earlier commit
 is gone, starts the chain again with ``served.patch``, its whole tree against the root. What the agent's tree links to
 outside itself (``outside.json``) is not read: AITER builds a JIT module it lacks at its first call.
@@ -29,7 +31,7 @@ import hashlib
 import json
 import os
 import shlex
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 
@@ -215,13 +217,22 @@ class _Snapshot:
     rebased: bool
 
 
-def read_snapshot(
-    outbox: Path, number: int, root: str, applied: Applied, base: LaunchConfig, started: Mapping[str, object]
-) -> KeptChange:
+@dataclass(frozen=True)
+class ComponentStart:
+    """What MB started a component agent with: ``launch``, the start commit's; ``config``, the config MB wrote, which
+    also carries what the agent's own harness reads; ``copies``, MB's private copies of the image's default tables the
+    agent's aiter variables list, which read as those tables."""
+
+    launch: LaunchConfig
+    config: Mapping[str, object]
+    copies: Collection[str]
+
+
+def read_snapshot(outbox: Path, number: int, root: str, applied: Applied, start: ComponentStart) -> KeptChange:
     """The keep ``number`` of the snapshots in ``outbox``: its source is what the patches of the chain of snapshots it
-    was made on make of ``root`` (``applied``), its kernel tables its own, and its launch ``base`` with what the
-    snapshot's launch changes from the one the config MB wrote, ``started``, starts the agent with (from ``base``
-    when that config names none): the config also carries what the agent's own harness reads.
+    was made on make of ``root`` (``applied``), its kernel tables its own, and its launch ``start.launch`` with what
+    the snapshot's launch changes from the one ``start.config`` starts the agent with (from ``start.launch`` when that
+    config names none).
 
     Raises :class:`KeptChangeError` for a snapshot that cannot be read, or whose chain does not reach ``root``.
     """
@@ -233,8 +244,9 @@ def read_snapshot(
     if launch is None:
         raise KeptChangeError(f"{_directory(number)}/{LAUNCH_FILE} holds no server_flags string or server_env object")
     named, dropped = _without_measurement(launch[1])
-    args, named = _over(base, _component_launch(started) or (base.server_args, base.envs), launch[0], named)
-    tables, uncopied = _snapshot_tables(directory / TABLES_DIR, chain[-1].tables, named)
+    base = start.launch
+    args, named = _over(base, _component_launch(start.config) or (base.server_args, base.envs), launch[0], named)
+    tables, uncopied = _snapshot_tables(directory / TABLES_DIR, chain[-1].tables, named, start.copies)
     return KeptChange(number, applied(patches), args, named, chain[-1].summary, tables, uncopied, dropped)
 
 
@@ -302,35 +314,75 @@ def _patch(directory: Path, name: str) -> str:
 
 
 def _snapshot_tables(
-    tables: Path, listed: Mapping[str, object], envs: Mapping[str, str]
+    tables: Path, listed: Mapping[str, object], envs: Mapping[str, str], copies: Collection[str]
 ) -> tuple[dict[str, str], tuple[str, ...]]:
-    """The kernel tables of ``envs`` (:func:`_kernel_tables`) the snapshot copied to ``tables``, each checked against
-    the digest ``listed`` gives it; and the variables listed with no file, which were not copied."""
+    """The kernel tables of ``envs`` (:func:`_kernel_tables`) the snapshot copied to ``tables``, each file checked
+    against the digest ``listed`` gives it; and the variables listed with a file not copied. An entry lists one file,
+    or under ``files`` each file of a value that lists several, the image's default tables and ``copies`` among them,
+    which carry no rows."""
 
-    def copied(name: str, _value: str) -> list[str] | None:
+    def copied(name: str, value: str) -> list[str] | None:
         entry = listed.get(name)
-        if not isinstance(entry, Mapping) or entry.get("file") is None:
+        if not isinstance(entry, Mapping) or _uncopied(entry, name, value, copies):
             return None
-        file, digest = entry.get("file"), entry.get("sha256")
-        if not isinstance(file, str) or not isinstance(digest, str):
-            raise KeptChangeError(f"{KEEP_FILE} lists the table {name} loads with no file name and sha256")
-        try:
-            data = (tables / name / PurePosixPath(file).name).read_bytes()
-        except OSError as error:
-            raise KeptChangeError(f"the table {name} loads cannot be read: {error}") from error
-        if hashlib.sha256(data).hexdigest() != digest:
-            raise KeptChangeError(f"the table {name} loads does not match its sha256 {digest}")
-        try:
-            return [data.decode("utf-8")]
-        except UnicodeDecodeError as error:
-            raise KeptChangeError(f"the table {name} loads is no text: {error}") from error
+        if "files" not in entry:
+            return [_copied_text(tables / name, name, entry)]
+        return _copied_parts(tables / name, name, value, entry["files"], copies)
 
     uncopied = tuple(
         name
-        for name in envs
-        if _loads_table(name) and isinstance(entry := listed.get(name), Mapping) and entry.get("file") is None
+        for name, value in envs.items()
+        if _loads_table(name)
+        and isinstance(entry := listed.get(name), Mapping)
+        and _uncopied(entry, name, value, copies)
     )
     return _kernel_tables(envs, copied), uncopied
+
+
+def _copied_parts(directory: Path, name: str, value: str, files: object, copies: Collection[str]) -> list[str]:
+    """The texts of the copies ``files`` lists of the parts of ``value`` that carry rows, in its order; the image's
+    tables are not read."""
+
+    if not isinstance(files, list) or not all(isinstance(item, Mapping) for item in files):
+        raise KeptChangeError(f"{KEEP_FILE} lists the files of the table {name} loads as no list of objects")
+    by_path = {item.get("path"): item for item in files}
+    texts = []
+    for part in _own_parts(name, value, copies):
+        if part not in by_path:
+            raise KeptChangeError(f"{KEEP_FILE} lists no copy of {part}, which {name} loads")
+        texts.append(_copied_text(directory, name, by_path[part]))
+    return texts
+
+
+def _uncopied(entry: Mapping[str, object], name: str, value: str, copies: Collection[str]) -> bool:
+    """Whether the table entry of ``keep.json`` for ``name`` set to ``value`` lists a file that carries rows and was
+    not copied."""
+
+    files = entry.get("files")
+    if not isinstance(files, list):
+        return entry.get("file") is None
+    return any(
+        isinstance(item, Mapping) and item.get("file") is None and item.get("path") in _own_parts(name, value, copies)
+        for item in files
+    )
+
+
+def _copied_text(directory: Path, name: str, entry: Mapping[str, object]) -> str:
+    """The text of the copy under ``directory`` that ``entry`` names, checked against its sha256."""
+
+    file, digest = entry.get("file"), entry.get("sha256")
+    if not isinstance(file, str) or not isinstance(digest, str):
+        raise KeptChangeError(f"{KEEP_FILE} lists the table {name} loads with no file name and sha256")
+    try:
+        data = (directory / PurePosixPath(file).name).read_bytes()
+    except OSError as error:
+        raise KeptChangeError(f"the table {name} loads cannot be read: {error}") from error
+    if hashlib.sha256(data).hexdigest() != digest:
+        raise KeptChangeError(f"the table {name} loads does not match its sha256 {digest}")
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise KeptChangeError(f"the table {name} loads is no text: {error}") from error
 
 
 def _directory(number: int) -> str:
@@ -382,15 +434,29 @@ def _own_tables(name: str, value: str, owned: Sequence[Path]) -> list[Path] | No
     """The files under ``owned`` that ``value`` lists, ``None`` unless it lists one or more and, for an aiter variable,
     nothing else but the image's default tables."""
 
-    listed = value.split(os.pathsep) if _rows_only(name) else [value]
-    paths = [Path(part) for part in listed if part and not (_rows_only(name) and _image_table(part))]
+    paths = [Path(part) for part in _own_parts(name, value)]
     if not paths or not all(_owned(path, owned) for path in paths):
         return None
     return paths
 
 
-def _image_table(part: str) -> bool:
-    return part == DEFAULT_TABLE_PLACEHOLDER or PurePosixPath(os.path.normpath(part)).is_relative_to(_IMAGE_TABLES)
+def _own_parts(name: str, value: str, copies: Collection[str] = ()) -> list[str]:
+    """The files ``value`` lists that carry rows of a table: for an aiter variable, which reads several as one table,
+    those other than the image's default tables (:func:`_image_table`)."""
+
+    if not _rows_only(name):
+        return [value]
+    return [part for part in value.split(os.pathsep) if part and not _image_table(part, copies)]
+
+
+def _image_table(part: str, copies: Collection[str] = ()) -> bool:
+    """Whether ``part`` of an aiter value is one of the image's default tables, ``copies`` being MB's private copies
+    of them."""
+    return (
+        part in copies
+        or part == DEFAULT_TABLE_PLACEHOLDER
+        or PurePosixPath(os.path.normpath(part)).is_relative_to(_IMAGE_TABLES)
+    )
 
 
 def _owned(path: Path, owned: Sequence[Path]) -> bool:
@@ -495,6 +561,7 @@ def _flags(args: str) -> set[str]:
 __all__ = [
     "Applied",
     "CHANGE_FILE",
+    "ComponentStart",
     "KEEP_FILE",
     "LATEST_FILE",
     "LAUNCH_FILE",

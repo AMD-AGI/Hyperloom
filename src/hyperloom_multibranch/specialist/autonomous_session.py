@@ -61,6 +61,7 @@ from hyperloom_multibranch.contracts.blackboard.vocab import LearningKind, Lease
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import Backpressure, BranchLease, LeaseCharge, RequestRejected
 from hyperloom_multibranch.specialist.agent_import import (
+    ComponentStart,
     KeptChange,
     KeptChangeError,
     added_at,
@@ -747,7 +748,8 @@ class AutonomousSession:
         if manifest.snapshots is not None:
             outbox = self._agent_dir / SOURCE_DIR / manifest.snapshots_outbox
             applied = partial(self._place.worktree.diff_applied, root, component=self._setup.component)
-            kept = read_snapshot(outbox, seq, root, applied, self._root, manifest.config)
+            copies = [path for table in self._start_tables.values() for path in table.defaults]
+            kept = read_snapshot(outbox, seq, root, applied, ComponentStart(self._root, manifest.config, copies))
             return from_start_tables(kept, self._start_tables)
         workspace = self._place.worktree.path
         patch = without_file(self._place.worktree.diff_from(root, self._setup.component), manifest)
