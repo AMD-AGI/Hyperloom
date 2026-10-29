@@ -683,7 +683,8 @@ facts:
     kind: names
     project: aiperf (the replay client of an AgentX round, SemiAnalysisAI fork pinned by InferenceX)
     reason: >-
-      InferenceX at the commit Hyperloom pins carries the client as the git submodule utils/aiperf, and its benchmark
+      InferenceX carries the client as the git submodule named utils/aiperf (at utils/aiperf at the commit Hyperloom pins,
+      at inferencex-e2e/utils/aiperf at later commits Magpie pins; the patch finds it by name), and its benchmark
       library installs it editable into an environment made for each job, so the source of that submodule is what a round
       runs. The released client keeps only the input token count of a reply it converts to an error record
       (inference_result_parser.py, the branch of a parsed record that is invalid), and computes only the metrics flagged
