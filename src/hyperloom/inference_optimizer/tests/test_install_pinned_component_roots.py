@@ -9,12 +9,13 @@ Installer-managed tool paths stay out of ``.env``, so a later install cannot rea
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from ._kernel_tools_harness import sourceable_kernel_tools
+from ._kernel_tools_harness import KERNEL_TOOLS_SH, install_sh_function, sourceable_kernel_tools
 
 
 def _source_kernel_tools(tmp_path: Path, exports: dict[str, Path], then: str) -> str:
@@ -112,3 +113,42 @@ def test_tracelens_root_follows_the_pin_unless_the_operator_chose_it(tmp_path: P
     ).split("\n")
 
     assert resolved == str(tmp_path / "cache" / f"TraceLens@{sha}" if stale else root)
+
+
+@pytest.mark.parametrize("stale", [True, False], ids=["checkouts-missing", "checkouts-present"])
+def test_check_only_report_carries_the_kernel_tools_stale_keys(tmp_path: Path, stale: bool) -> None:
+    """The kernel tools run in a subshell, yet the pins they find stale still reach the --check-only report."""
+    ref = "1" * 40
+    cache = tmp_path / "cache"
+    script_dir = tmp_path / "assets"
+    script_dir.mkdir()
+    steps = sourceable_kernel_tools(script_dir)
+    # Only the two steps that judge a pin; the rest install packages.
+    steps.write_text(
+        steps.read_text(encoding="utf-8") + "\ninstall_kernel_tools() { ensure_tracelens; ensure_geak; }\n",
+        encoding="utf-8",
+    )
+    steps.rename(script_dir / "install_kernel_tools.sh")
+    if not stale:
+        tracelens_ref = re.search(r'^TRACELENS_REF="(\w+)"$', KERNEL_TOOLS_SH.read_text(encoding="utf-8"), re.M)
+        (cache / f"TraceLens@{tracelens_ref.group(1)}" / ".git").mkdir(parents=True)
+        (cache / f"GEAK@{ref}" / ".git").mkdir(parents=True)
+    script = "\n".join(
+        [
+            "set -euo pipefail",
+            f"export REPO_ROOT={tmp_path} USER_DATA_PATH={tmp_path} HYPERLOOM_CACHE_DIR={cache} GEAK_REF={ref}",
+            f"_script_dir={script_dir} CHECK_ONLY=1 DRY_RUN=0",
+            "log() { :; }",
+            '_STALE_KEYS=("MAGPIE_REF")',
+            install_sh_function("install_kernel_agent_tools"),
+            "install_kernel_agent_tools",
+            'printf "stale: %s\\n" "${_STALE_KEYS[@]}"',
+        ]
+    )
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("GEAK_", "TRACELENS_"))}
+
+    proc = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, timeout=60)
+
+    assert proc.returncode == 0, proc.stderr
+    reported = [line.removeprefix("stale: ") for line in proc.stdout.splitlines() if line.startswith("stale: ")]
+    assert reported == (["MAGPIE_REF", "TRACELENS_ROOT", "GEAK_ROOT"] if stale else ["MAGPIE_REF"])

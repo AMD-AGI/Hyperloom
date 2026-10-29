@@ -1855,15 +1855,26 @@ install_kernel_agent_tools() {
     return 0
   fi
   log "installing ray + TraceLens + GEAK + LLM gateway env"
-  # A subshell keeps the steps' variables and PATH out of the steps that follow.
+  local stale_keys_file key
+  stale_keys_file="$(mktemp)"
+  # A subshell keeps the steps' variables and PATH out of the steps that follow;
+  # the pins it finds stale come back through a file, as its _STALE_KEYS ends with it.
   (
     export REPO_ROOT MAGPIE_PATH HYPERLOOM_ROOT
     [ -n "${INFERENCEX_PATH:-}" ] && export INFERENCEX_PATH
     [ -n "${TRACELENS_INTERNAL_ROOT:-}" ] && export TRACELENS_INTERNAL_ROOT
+    _STALE_KEYS=()
     # shellcheck source=install_kernel_tools.sh
     . "${_script_dir}/install_kernel_tools.sh"
     install_kernel_tools
+    if [ "${#_STALE_KEYS[@]}" -gt 0 ]; then
+      printf '%s\n' "${_STALE_KEYS[@]}" > "$stale_keys_file"
+    fi
   )
+  while IFS= read -r key; do
+    _STALE_KEYS+=("$key")
+  done < "$stale_keys_file"
+  rm -f "$stale_keys_file"
 }
 
 
