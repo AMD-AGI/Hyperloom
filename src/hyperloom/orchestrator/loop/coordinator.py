@@ -670,6 +670,7 @@ class Coordinator:
                 if skips_reactor_turn(name, self.shared_state) or not self.conversation.admit_turn(name, time.time()):
                     continue
                 await self.await_within_session_bound(lambda n=name: self.reactor_pass(n), stage=f"reactor:{name}")
+            await self.phase_machine.refresh_admission_freeze()
         if not self.stop_requested():
             await self.dispatcher.pump_dispatcher_once()
         if not in_closing:
@@ -683,10 +684,7 @@ class Coordinator:
             await self.enablement_lane.pump_enablement_safely()
         # phase machine advance; runs even in_closing so CLOSE is recorded.
         try:
-            await self.await_within_session_bound(
-                self.phase_machine.advance_phase_if_needed,
-                stage="advance_phase",
-            )
+            await self.await_within_session_bound(self.phase_machine.advance_phase_if_needed, stage="advance_phase")
         except Exception as exc:
             log.exception("phase advance failed")
             self.record_exception(stage="advance_phase", exc=exc)
