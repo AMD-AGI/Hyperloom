@@ -14,6 +14,7 @@ import pytest
 
 from hyperloom.agents.framework.sources.pr_monitor import PRMonitorError
 from hyperloom.common.bringup import BootObservation, Excerpt, LadderStage, TerminalFrame
+from hyperloom.common.deadline import Deadline
 from hyperloom.common.failure_signature import FailureSignature
 from hyperloom.orchestrator.bringup import observation_summary
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
@@ -117,13 +118,13 @@ def test_enablement_discovery_honors_pr_monitor_gate(
     monkeypatch.setattr(sources, "enumerate_candidates", lambda request: seen.append(request) or [])
     fake = _enqueue_self(tmp_path)
     fake.knowledge_plane = types.SimpleNamespace(pr_monitor_enabled=enabled)
-    request = types.SimpleNamespace(max_search_candidates=5)
     plan = types.SimpleNamespace(
         repos=("https://github.com/sgl-project/sglang.git",),
         keywords=("scheduler",),
     )
 
-    assert fake.enablement_params._discover_enablement_candidate_refs(request, plan) == ()
+    deadline = Deadline.after(60)
+    assert fake.enablement_params._discover_enablement_candidate_refs(plan, deadline=deadline) == ()
     assert seen[0].search_modes == expected_modes
 
 
@@ -347,7 +348,7 @@ async def test_enqueue_dispatches_when_baseline_unrunnable(monkeypatch, tmp_path
     rows = await _queued_of_kind(fake, "specialist")
     assert [r.task_id for r in rows] == [tid]
     assert rows[0].params["enablement"] is True
-    assert rows[0].params["enablement_attempt"] == 0
+    assert "RETRY" not in rows[0].params["notes"]
 
 
 @pytest.mark.asyncio
@@ -424,10 +425,8 @@ async def test_enqueue_retries_with_next_attempt_after_revert(monkeypatch, tmp_p
     tid2 = await fake.enablement_lane._maybe_enqueue_enablement_specialist()
     assert tid2 and tid2 != tid1
     second = await fake.tasks.get(tid2)
-    # The settled failed round bumps the dispatch ordinal from 0 -> 1.
-    assert second.params["enablement_attempt"] == 1
-    # Retry mandate flags the prior revert.
-    assert "RETRY" in second.params["notes"]
+    # The settled failed round bumps the dispatch ordinal from 0 -> 1, so the retry mandate flags the prior revert.
+    assert "RETRY (1 prior round(s)" in second.params["notes"]
 
 
 @pytest.mark.asyncio

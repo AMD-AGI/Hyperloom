@@ -316,17 +316,8 @@ class ResolveStageMixin:
             log.warning("integrate_patch: disk preflight raised (%r); continuing", exc)
 
         adapter = get_adapter(action.framework)
-
-        def _provision_and_probe():
-            provisioned = adapter.provision(action, attempt_dir)
-            if provisioned.ok and not adapter.probe(provisioned, action):
-                from ...enablement.runtime.stack_actions import ProvisionResult as _PR
-
-                return _PR(ok=False, log_path=provisioned.log_path, error="adapter probe failed after provision")
-            return provisioned
-
         try:
-            result = await asyncio.to_thread(_provision_and_probe)
+            result = await asyncio.to_thread(adapter.provision, action, attempt_dir)
         except (OSError, subprocess.SubprocessError) as exc:
             log.exception("integrate_patch: attempt-runtime provision raised")
             self._gc_attempt_dir(attempt_dir)
@@ -419,7 +410,6 @@ class ResolveStageMixin:
             build_localization_diff,
             action,
             fetch_pr_patches=lambda slug, num: _gh.pr_patches(slug, num),
-            fetch_raw_file=lambda slug, ref, path: _gh.fetch_raw_file(slug, ref, path),
             scope=adapter.package_path,
         )
         if not verdict.is_localizable:
