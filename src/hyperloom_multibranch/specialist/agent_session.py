@@ -16,7 +16,8 @@ still ends.
 A session that ends as a session should, its CLI exiting or its deadline reached, is followed by a fresh one: a
 branch runs until the scheduler stops it. One that ends within ``min_session_seconds`` while its branch has a test in
 flight ended to wait for it: the next launch starts once that test has its result. One that is lost, exits with an
-error or otherwise ends within ``min_session_seconds`` raises, and the runtime decides whether to restart it. Claude
+error or otherwise ends within ``min_session_seconds`` raises, and the runtime decides whether to restart it; a loss
+while the branch's long dev lease runs a process says so, as the model was waiting on it in silence. Claude
 streams partial messages into its log, so a long reasoning step shows as log growth and is not taken for a lost
 session. The session's process registry adopts every process the socket starts, so the session stop kills it even
 when this stop cannot. The spend of each turn, its logged tokens at the gateway's rates, is written to the branch's
@@ -469,7 +470,8 @@ class AgentSession:
             reason = _describe(status, seconds)
             resumable = failed and await self._keep_for_resume(launch, reason)
             lost = status.state == STATE_LOST
-            raise SessionCrashed(reason, lost=lost, worked=bool(last_end), resumable=resumable)
+            waiting = lost and self._dev_lease_busy()
+            raise SessionCrashed(reason, lost=lost, waiting=waiting, worked=bool(last_end), resumable=resumable)
         return "it reached its deadline" if status.timed_out else "its model finished its turn"
 
     async def _keep_for_resume(self, launch: _Launch, reason: str, *, idle: bool = False) -> bool:

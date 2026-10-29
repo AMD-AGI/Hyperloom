@@ -15,7 +15,9 @@ record names done on the commit a branch starts at: a later head may open it aga
 A branch's first session is made ready once (``preflight``); one that cannot be gives the specialist up with every
 reason in a notice, and a restart does not repeat it. A session that crashes is restarted on its branch, at most
 ``MAX_RESTARTS`` times within ``RESTART_WINDOW_S``, and a lost one at most ``MAX_LOSS_RESTARTS`` times in a row with no
-session working in between: a loss takes the heartbeat timeout, so losses alone never fill the window. Whether the
+session working in between: a loss takes the heartbeat timeout, so losses alone never fill the window. A loss while
+the session waited on its branch's long dev-sandbox process counts toward neither: a model waiting on it is silent,
+not hung, and giving it up would end that process. Whether the
 restart resumes the crashed conversation is the session's to decide; the notice only says which. A session that
 ends idle, its model finding nothing to test, is no crash: the branch gets one more session, which goes on with the
 idle conversation or starts fresh as the session decides, and ``MAX_IDLE_SESSIONS`` idle sessions in a row end it, a
@@ -68,13 +70,22 @@ class RuntimeBlackboard(JudgeBlackboard, ClaimService, Protocol):
 class SessionCrashed(RuntimeError):
     """A run of a branch's specialist ended the way no working session ends.
 
-    ``lost`` says its session lost its heartbeat; ``worked`` says an earlier session of the same run ended well;
-    ``resumable`` says the next run goes on with the crashed session's conversation.
+    ``lost`` says its session lost its heartbeat; ``waiting`` says it was lost while its branch's long dev-sandbox
+    process ran; ``worked`` says an earlier session of the same run ended well; ``resumable`` says the next run goes on
+    with the crashed session's conversation.
     """
 
-    def __init__(self, reason: str, *, lost: bool = False, worked: bool = False, resumable: bool = False) -> None:
+    def __init__(
+        self,
+        reason: str,
+        *,
+        lost: bool = False,
+        waiting: bool = False,
+        worked: bool = False,
+        resumable: bool = False,
+    ) -> None:
         super().__init__(reason)
-        self.lost, self.worked, self.resumable = lost, worked, resumable
+        self.lost, self.waiting, self.worked, self.resumable = lost, waiting, worked, resumable
 
 
 class SessionIdle(RuntimeError):
@@ -191,10 +202,13 @@ class _Restarts:
     losses: int = 0
 
     def give_up(self, error: Exception, now: float) -> str:
-        """Count the crash ``error`` at ``now``: why the specialist is not restarted, or "" when it is."""
+        """Count the crash ``error`` at ``now``: why the specialist is not restarted, or "" when it is. A loss while
+        waiting on a dev-sandbox process is not counted."""
 
         if isinstance(error, SessionCrashed) and error.worked:
             self.losses = 0
+        if isinstance(error, SessionCrashed) and error.lost and error.waiting:
+            return ""
         self.losses += isinstance(error, SessionCrashed) and error.lost
         self.crashes.append(now)
         while now - self.crashes[0] > RESTART_WINDOW_S:

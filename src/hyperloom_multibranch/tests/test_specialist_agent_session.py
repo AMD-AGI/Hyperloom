@@ -1325,6 +1325,22 @@ async def test_a_turn_waiting_on_its_long_dev_lease_s_process_is_not_idle_and_it
     assert dev.toolbox.released == ["lease-1"], "with Forge ended, the run's stop gives the lease back"
 
 
+async def test_a_cli_lost_while_its_long_dev_lease_s_process_runs_was_waiting_and_keeps_the_lease(rig, tmp_path):
+    dev = await _forge_running(rig, tmp_path)
+    first = rig.session(nudge_waits_s=NO_WAITS, dev_leases=dev.leases)
+
+    crash = await _crash_after_a_turn(rig, first, 1, LOST)
+    await first.stop()
+    assert (crash.lost, crash.waiting) == (True, True), "a model waiting on Forge in silence is not hung"
+    assert dev.toolbox.released == [] and dev.forge.alive()
+
+    dev.forge.returncode = 0
+    second = rig.session(nudge_waits_s=NO_WAITS, dev_leases=dev.leases)
+    crash = await _crash_after_a_turn(rig, second, 2, LOST)
+    await second.stop()
+    assert (crash.lost, crash.waiting) == (True, False), "with Forge ended, a loss is a loss again"
+
+
 async def test_a_run_that_ends_keeps_a_long_dev_lease_whose_process_runs_and_its_resume_says_so(rig, tmp_path):
     dev = await _forge_running(rig, tmp_path)
     first = rig.session(dev_leases=dev.leases)

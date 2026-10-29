@@ -346,6 +346,20 @@ async def test_losses_in_a_row_stop_the_restarts_however_far_apart_they_are(sess
     await runtime.stop(BRANCH)
 
 
+async def test_losses_while_waiting_on_a_long_dev_lease_never_give_the_specialist_up(session):
+    waiting = SessionCrashed("the session was lost (heartbeat stale for 601s)", lost=True, waiting=True)
+    runs = _Runs(errors=(*(waiting for _ in range(MAX_LOSS_RESTARTS + 2)), _lost(), _lost()))
+    ticks = itertools.count(step=RESTART_WINDOW_S + 1)
+    runtime = session.runtime(runs, clock=lambda: next(ticks))
+
+    await runtime.start(BRANCH, await session.repo.head(BRANCH))
+    await _until(lambda: _true(len(runs.started) == MAX_LOSS_RESTARTS + 5), "every loss to be restarted")
+
+    assert not any("not restarted" in notice for notice in await session.notices())
+    assert (await runtime.status(BRANCH)).gave_up is False
+    await runtime.stop(BRANCH)
+
+
 async def test_a_session_that_worked_between_losses_counts_them_again_from_its_own(session):
     runs = _Runs(errors=(_lost(), _lost(), _lost(worked=True), _lost()))
     ticks = itertools.count(step=RESTART_WINDOW_S + 1)
