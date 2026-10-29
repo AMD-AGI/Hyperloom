@@ -25,8 +25,10 @@ class RoundAdmissionMixin:
 
     def _time_remaining(self) -> float:
         """Seconds remaining in the budget."""
-        elapsed = time.time() - self.start_time
-        return max(0, self.ic.max_time_hours * 3600 - elapsed)
+        deadline = self.start_time + self.ic.max_time_hours * 3600
+        if self.ic.deadline_unix is not None:
+            deadline = min(deadline, self.ic.deadline_unix)
+        return max(0, deadline - time.time())
 
     def _analysis_deadline_unix(self) -> float:
         """Absolute Analysis deadline preserving iteration/finalization reserve."""
