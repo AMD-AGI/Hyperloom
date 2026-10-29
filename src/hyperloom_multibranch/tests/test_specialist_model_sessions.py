@@ -9,9 +9,15 @@ from types import SimpleNamespace
 import pytest
 
 from hyperloom.measure.compile import PackageBase
+from hyperloom.sandbox import SandboxGone
 from hyperloom_multibranch.contracts.toolbox import BranchLease
 from hyperloom_multibranch.specialist.agent_onboarding import AgentSpec
-from hyperloom_multibranch.specialist.agent_sessions import AgentSessions, with_agents
+from hyperloom_multibranch.specialist.agent_sessions import (
+    AgentSessions,
+    LocalAgentSandboxes,
+    RemoteAgentSandboxes,
+    with_agents,
+)
 from hyperloom_multibranch.specialist.autonomous_session import AutonomousSession
 from hyperloom_multibranch.specialist.gate_client import GateClient
 from hyperloom_multibranch.specialist.agent_session import AgentCommand, AgentSession, AgentSetup, BranchPlace
@@ -20,6 +26,7 @@ from hyperloom_multibranch.specialist.prompts import role_prompt
 from hyperloom_multibranch.contracts.lifecycle import BranchTask
 from hyperloom_multibranch.specialist.runtime import SessionStart
 from hyperloom_multibranch.specialist.worktree import SourceBase
+from hyperloom_multibranch.toolbox.hosted_leases import HostedBranchLease
 
 
 def test_a_branch_s_sessions_and_its_worktree_tools_share_one_worktree_on_one_source_base(tmp_path):
@@ -52,7 +59,7 @@ def test_a_branch_s_sessions_and_its_worktree_tools_share_one_worktree_on_one_so
 def _agent_sessions() -> AgentSessions:
     spec = AgentSpec("/models/m", "vllm", 1, "bf16", "mi355x", {}, "output_throughput", "", {}, "", (), 3600.0, 31100)
     command = AgentCommand("claude", "claude", model="claude-opus-5-5")
-    return AgentSessions(spec, command, {}, object(), object(), object())
+    return AgentSessions(spec, command, {}, object(), object(), LocalAgentSandboxes(object()))
 
 
 def test_a_branch_whose_task_names_an_agent_runs_it_on_ports_of_its_own_in_the_sandbox_it_leases(tmp_path):
@@ -147,3 +154,21 @@ def test_an_agentx_canonical_has_no_client_to_give(tmp_path):
     canonical.write_text("benchmark:\n  model: /models/m\n  envs:\n    CONC: '8'\n", encoding="utf-8")
 
     assert GateClient.read(canonical) is None
+
+
+def test_a_hosted_agent_runs_in_its_lease_s_sandbox_found_again_by_the_lease_alone(tmp_path):
+    sandboxes = RemoteAgentSandboxes()
+    place = BranchPlace(SimpleNamespace(path=tmp_path / "worktree"), object(), tmp_path / "a1" / "session")
+    handle = SimpleNamespace(sandbox_id="sbx-1")
+    hosted = HostedBranchLease("lease-1", "a1", (0, 1), Path("/app/work"), {}, 6, "dev-2", 3600, handle)
+
+    first = sandboxes.sandbox("a1", place, tmp_path / "src", hosted)
+    again = sandboxes.sandbox(
+        "a1", place, tmp_path / "src", BranchLease("lease-1", "a1", (0, 1), Path("/app/work"), {}, 6)
+    )
+
+    assert first.sandbox is again.sandbox is handle and again.root == place.workspace / "sandbox"
+    assert again.cards == 2 and again.python_path == (tmp_path / "src",)
+    assert sandboxes.claude_config(place) == place.workspace / "sandbox" / "home" / ".claude"
+    with pytest.raises(SandboxGone):
+        sandboxes.sandbox("a1", place, tmp_path / "src", BranchLease("lease-2", "a1", (0,), tmp_path, {}, 6))

@@ -5,8 +5,10 @@
 
 The preflight leases the branch's sandbox, its own cards, from the toolbox, makes the agent ready in it
 (:mod:`agent_onboarding`) and keeps the lease and the manifest in the branch's session directory, so a run after a crash
-resumes the agent in the same sandbox without onboarding again, and records the manifest in the blackboard for CLOSE's
-archive; the lease goes back when the branch stops. A run then
+resumes the agent in the same sandbox without onboarding again, or, when that sandbox ended (a hosted one is gone once
+its lifetime is over), in the sandbox of a new lease with the agent's install run there again; the preflight records
+the manifest in the blackboard for CLOSE's archive, and the lease goes back when the branch stops. A lease asks for the
+time left until the branch's deadline. A run then
 watches the agent's keep signal and reads each keep whole (:mod:`agent_import`) the moment it shows, since the agent
 goes on to its next candidate in the same workspace. Keeps are submitted as claimless explore tests against the branch
 head, one at a time: a keep that lands while an import is measured or judged waits, and a later keep replaces it, since
@@ -47,6 +49,7 @@ from typing import TYPE_CHECKING
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import KernelArtifact, KernelKind, LaunchConfig, PatchRef, RecipeDelta, RecipeError
 from hyperloom.measure.compile import COMPONENT_LAYOUTS, locate_installed_package
+from hyperloom.sandbox import SandboxGone
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.blackboard.records import Learning
 from hyperloom_multibranch.contracts.blackboard.records import TestRecord
@@ -74,8 +77,10 @@ from hyperloom_multibranch.specialist.agent_onboarding import (
     ENCODING,
     SOURCE_DIR,
     AgentSpec,
+    AttemptFailed,
     OnboardingSetup,
     agent_env,
+    install,
     make_ready,
     tail,
 )
@@ -396,20 +401,44 @@ class AutonomousSession:
         document = json.loads((self._place.workspace / MANIFEST_FILE).read_text(encoding=ENCODING))
         manifest = AgentManifest.read(document)
         command = manifest.resume or manifest.launch
-        sandbox = self._setup.sandbox(self._held())
-        process = await sandbox.start(command, self._agent_dir / SOURCE_DIR, agent_env(self._agent_dir))
+        checkout, env = self._agent_dir / SOURCE_DIR, agent_env(self._agent_dir)
+        try:
+            sandbox = self._setup.sandbox(self._held())
+            process = await sandbox.start(command, checkout, env)
+        except SandboxGone as gone:
+            sandbox = await self._leased_again(manifest, gone)
+            process = await sandbox.start(command, checkout, env)
         self._manifest, self._process, self._sandbox = manifest, process, sandbox
         await self._note(f"the agent resumed with `{command}`")
         return manifest, process, sandbox
 
+    async def _leased_again(self, manifest: AgentManifest, gone: SandboxGone) -> AgentSandbox:
+        """A sandbox of a new lease in place of the one that ended, with the agent's install run in it again; what the
+        agent wrote is on this host and stays."""
+
+        await self._note(f"the agent's sandbox ended ({gone}): the agent is installed in a new one and resumed")
+        await self.release()
+        sandbox = self._setup.sandbox(await self._lease(self._setup.spec.tp))
+        checkout = self._agent_dir / SOURCE_DIR
+        try:
+            await install(manifest, self._setup.onboarding(sandbox), checkout, agent_env(self._agent_dir))
+        except AttemptFailed as failed:
+            raise SessionCrashed(f"the agent's install in its new sandbox failed: {failed}") from failed
+        return sandbox
+
     async def _lease(self, cards: int) -> BranchLease:
-        """Lease ``cards`` for the branch's sandbox and keep the lease for :meth:`release` and a later run."""
+        """Lease ``cards`` for the branch's sandbox, for as long as is left until the branch's deadline, and keep the
+        lease for :meth:`release` and a later run."""
 
         # The lease is only given back through its file, so the file's directory must exist before the lease does.
         self._place.workspace.mkdir(parents=True, exist_ok=True)
+        deadline = self._start.task.deadline
         try:
             lease = await self._setup.toolbox.lease_branch_sandbox(
-                self._start.branch, cards, charge=LeaseCharge(LeaseKind.AUTONOMOUS, self._start.branch)
+                self._start.branch,
+                cards,
+                charge=LeaseCharge(LeaseKind.AUTONOMOUS, self._start.branch),
+                lifetime_sec=max(deadline - self._setup.clock(), 1.0) if deadline else None,
             )
         except RequestRejected as error:
             raise PreflightFailed([f"the toolbox leased no cards for the agent's sandbox: {error}"]) from error

@@ -26,6 +26,7 @@ from hyperloom.contracts.recipe import (
     apply,
 )
 from hyperloom.measure.compile import LocalBlobStore, kernel_rows_only
+from hyperloom.sandbox import SandboxGone
 from hyperloom_multibranch.contracts.lifecycle import BranchTask
 from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind
 from hyperloom_multibranch.contracts.toolbox import Backpressure, BranchLease, LeaseCharge, RequestRejected
@@ -203,6 +204,7 @@ class Agent:
     table_at: str = ""
     ledger: tuple[tuple[dict[str, str], ...], ...] = ()
     busy: bool = False
+    install: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -265,6 +267,9 @@ class LocalSandbox:
 
     def __init__(self, logs: Path) -> None:
         self._logs, self.started, self.envs, self.leases, self.prompts = logs, [], [], [], []
+        self.ran: list[str] = []
+        #: The leases whose sandbox ended.
+        self.gone: set[str] = set()
         self.usage = _Usage()
         self.watch_said: list[str] = []
 
@@ -272,6 +277,7 @@ class LocalSandbox:
         return self.watch_said.pop(0) if self.watch_said else ""
 
     async def run(self, command: str, cwd: Path, env: Mapping[str, str], timeout: float) -> CommandResult:
+        self.ran.append(command)
         done = subprocess.run(command, shell=True, cwd=cwd, env={**os.environ, **env}, capture_output=True, text=True)
         return CommandResult(done.returncode, done.stdout + done.stderr)
 
@@ -299,6 +305,7 @@ class Toolbox:
         self._blackboard, self.requests, self.refusals = blackboard, [], []
         self.refused_envs: set[str] = set()
         self.leases: list[tuple[str, int]] = []
+        self.lifetimes: list[float | None] = []
         self.charges: list[LeaseCharge | None] = []
         self.released: list[str] = []
         self.cards_left = 1
@@ -313,11 +320,18 @@ class Toolbox:
         return artifact
 
     async def lease_branch_sandbox(
-        self, branch_id: str, cards: int, *, wait_sec: float | None = None, charge: LeaseCharge | None = None
+        self,
+        branch_id: str,
+        cards: int,
+        *,
+        wait_sec: float | None = None,
+        charge: LeaseCharge | None = None,
+        lifetime_sec: float | None = None,
     ) -> BranchLease:
         if self.cards_left < cards:
             raise RequestRejected("leasing would leave no card to measure on", "lease_leaves_no_measurement")
         self.leases.append((branch_id, cards))
+        self.lifetimes.append(lifetime_sec)
         self.charges.append(charge)
         root = self._blackboard.root.parent / "lease"
         return BranchLease(f"L{len(self.leases)}", branch_id, (3,), root, {"HIP_VISIBLE_DEVICES": "3"}, 1)
@@ -363,7 +377,7 @@ def _manifest(workspace: str, agent: Agent | Component) -> str:
         {
             "source": "agent",
             "commit": "c",
-            "install": [],
+            "install": list(agent.install),
             "config_file": "campaign.json",
             "config": {
                 "workspace": workspace,
@@ -462,6 +476,8 @@ async def _rig(
         return OnboardingSetup(agent_sandbox, onboard, start_seconds=start_seconds, poll_seconds=0.05)
 
     def sandbox_for(lease: BranchLease) -> LocalSandbox:
+        if lease.lease_id in sandbox.gone:
+            raise SandboxGone(f"the sandbox of {lease.lease_id} ended")
         sandbox.leases.append(lease)
         return sandbox
 
@@ -633,6 +649,30 @@ async def test_a_keep_waiting_at_a_crash_is_imported_by_the_resumed_run_with_the
     assert rig.sandbox.started[-1] == "sleep 30"
     assert rig.sandbox.envs[-1]["PATH"].startswith(str(tmp_path / BRANCH / "session" / AGENT_DIR / "bin"))
     assert "+max_num_seqs = 512" in rig.patch(rig.toolbox.requests[-1])
+    await resumed.stop()
+    await asyncio.wait_for(running, 10)
+
+
+async def test_an_agent_whose_sandbox_ended_is_installed_in_the_sandbox_of_a_new_lease_and_resumed(
+    tmp_path: Path,
+) -> None:
+    rig = await _rig(
+        tmp_path, Agent(exit=3, resume="sleep 30", install=("true installed",)), deadline=time.time() + 600
+    )
+
+    await rig.session.preflight()
+    with pytest.raises(SessionCrashed):
+        await asyncio.wait_for(rig.session.run(), 10)
+    await rig.session.stop()
+    rig.sandbox.gone.add("L1")
+    resumed = rig.restart()
+    running = asyncio.create_task(resumed.run())
+    await _until(lambda: rig.sandbox.started[-1] == "sleep 30", "the agent resumed")
+
+    assert rig.toolbox.released == ["L1"] and len(rig.toolbox.leases) == 2
+    assert rig.sandbox.ran == ["true installed", "true installed"]
+    assert all(590 < lifetime <= 600 for lifetime in rig.toolbox.lifetimes)
+    assert any("the agent's sandbox ended (the sandbox of L1 ended)" in notice for notice in await rig.notices())
     await resumed.stop()
     await asyncio.wait_for(running, 10)
 

@@ -232,10 +232,7 @@ async def _attempt(
     (checkout / manifest.config_file).parent.mkdir(parents=True, exist_ok=True)
     (checkout / manifest.config_file).write_text(json.dumps(manifest.config, indent=2), encoding=ENCODING)
     env = agent_env(agent_dir)
-    for command in manifest.install:
-        done = await setup.sandbox.run(command, checkout, env, setup.install_seconds)
-        if done.returncode != 0:
-            raise AttemptFailed(f"install `{command}` exited {done.returncode}: {tail(done.output)}")
+    await install(manifest, setup, checkout, env)
     process = await setup.sandbox.start(manifest.launch, checkout, env)
     started = False
     try:
@@ -245,6 +242,16 @@ async def _attempt(
         if not started:
             await process.kill()
     return ReadyAgent(manifest, checkout, process)
+
+
+async def install(manifest: AgentManifest, setup: OnboardingSetup, checkout: Path, env: Mapping[str, str]) -> None:
+    """Run ``manifest``'s install commands in ``setup``'s sandbox, in ``checkout``; raise :class:`AttemptFailed` with
+    the output of the first that fails."""
+
+    for command in manifest.install:
+        done = await setup.sandbox.run(command, checkout, env, setup.install_seconds)
+        if done.returncode != 0:
+            raise AttemptFailed(f"install `{command}` exited {done.returncode}: {tail(done.output)}")
 
 
 def component_config(config: Mapping[str, object], spec: AgentSpec) -> dict[str, object]:
@@ -440,6 +447,7 @@ __all__ = [
     "ReadyAgent",
     "agent_env",
     "component_config",
+    "install",
     "make_ready",
     "onboarding_prompt",
     "split_source",
