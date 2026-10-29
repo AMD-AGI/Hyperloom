@@ -23,8 +23,8 @@ from kernelforge.workflows.forge_loop.roles.contracts import CaseEvidence, Orche
 from kernelforge.workflows.forge_loop.iteration import runner as runner_module
 from kernelforge.workflows.forge_loop.campaign.campaign_config import CampaignConfigStore
 from kernelforge.workflows.forge_loop.campaign.campaign_setup import resolve_campaign
-from kernelforge.tests.workflows.forge_loop.campaign.test_campaign_setup import _base_args, _git_workspace
-from kernelforge.tests.workflows.forge_loop.iteration.test_loop_runner import _make_loop, _unused_supervisor
+from kernelforge.tests.workflows.forge_loop.campaign._campaign_args import _base_args, _git_workspace
+from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import _make_loop, _unused_supervisor
 from kernelforge.workflows.forge_loop.iteration import iteration_types
 
 
@@ -785,11 +785,11 @@ def test_retained_allowlisted_file_reaches_the_next_implementer(tmp_path, monkey
 
 def test_resume_recovery_does_not_delete_an_operators_new_file(tmp_path, monkeypatch):
     """Resume recovery discards, and it runs before the first iteration."""
-    from kernelforge.tests.workflows.forge_loop.iteration.test_campaign_cross_process import (
-        _initialize_workspace,
+    from kernelforge.tests.workflows.forge_loop.iteration._cross_process_campaign import (
         _make_loop as _campaign_loop,
         _successful_iteration,
     )
+    from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import _initialize_workspace
     from kernelforge.workflows.forge_loop.campaign.experiment import ExperimentTracker
 
     workspace, kernel, driver = _initialize_workspace(tmp_path, monkeypatch)

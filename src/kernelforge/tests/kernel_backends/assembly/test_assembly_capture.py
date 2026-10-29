@@ -16,7 +16,7 @@ import pytest
 
 from kernelforge.kernel_backends.assembly import capture
 from kernelforge.kernel_backends.assembly.compiler import AssemblyError
-from kernelforge.tests.kernel_backends.assembly.test_assembly_preparation import ASM
+from kernelforge.tests.kernel_backends.assembly._assembly_sources import ASM
 
 
 @pytest.mark.parametrize(

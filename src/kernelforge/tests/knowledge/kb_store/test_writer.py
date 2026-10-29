@@ -5,9 +5,6 @@
 
 from __future__ import annotations
 
-import dataclasses
-
-import pytest
 
 from kernelforge.config import Config
 from kernelforge.knowledge.kb_store import writer as sink
@@ -19,7 +16,7 @@ from kernelforge.knowledge.kb_store.identity.run import (
     LoopKernel,
     resolve_loop_identity,
 )
-from kernelforge.knowledge.kb_store.writer import RunOutcome
+from kernelforge.tests.knowledge.kb_store._flat_experience import KERNEL_SOURCE, SUMMARY, write_flat_experience
 
 DIFF = """diff --git a/kernel.py b/kernel.py
 --- a/kernel.py
@@ -28,39 +25,9 @@ DIFF = """diff --git a/kernel.py b/kernel.py
 -old
 +new
 """
-KERNEL_SOURCE = "import triton\n\n\n@triton.jit\ndef my_kernel(x):\n    return x\n"
-SUMMARY = {
-    "category": "gemm",
-    "strategy": "vectorize loads",
-    "recipe": "Use vectorized loads.",
-    "lessons": "Alignment matters.",
-}
 #: ``my_kernel`` loses its ``_kernel`` suffix, and a file owned by no framework
 #: package reports ``unknown`` with no installed version.
 IDENTITY = "kernel:forge-loop:my:unknown:unknown:triton:mi300x"
-
-
-@pytest.fixture()
-def workspace(tmp_path):
-    root = tmp_path / "ws"
-    root.mkdir()
-    (root / "kernel.py").write_text(KERNEL_SOURCE, encoding="utf-8")
-    return root
-
-
-@pytest.fixture()
-def config(tmp_path, workspace):
-    knowledge = KnowledgeConfig.from_env({}, mode="local", local_root=tmp_path / "knowledge")
-    return Config.from_env(
-        workspace=str(workspace),
-        gpu_target="gfx942",
-        gpu_type="mi300x",
-        knowledge_config=knowledge,
-        agent_precheck=False,
-    )
-
-
-_LOOP_KERNEL_FIELDS = {field.name for field in dataclasses.fields(LoopKernel)}
 
 
 def _write(config, workspace, **overrides):
@@ -81,16 +48,6 @@ def _write(config, workspace, **overrides):
     }
     kwargs.update(overrides)
     return write_flat_experience(config, kwargs)
-
-
-def write_flat_experience(config, fields: dict) -> dict:
-    """Write one run experience from the flat keyword fields the KB tests spell."""
-    fields = dict(fields)
-    summary_override = fields.pop("summary_override", SUMMARY)
-    kernel = LoopKernel(**{name: fields.pop(name) for name in _LOOP_KERNEL_FIELDS if name in fields})
-    return sink.write_run_experience(
-        config=config, kernel=kernel, outcome=RunOutcome(**fields), summary_override=summary_override
-    )
 
 
 def _records(config, workspace) -> KernelRecipeKB:

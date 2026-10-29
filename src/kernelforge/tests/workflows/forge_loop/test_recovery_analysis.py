@@ -17,13 +17,8 @@ from kernelforge.workflows.forge_loop.roles.analysis import (
     AnalysisSources,
     _case_directory,
 )
-from kernelforge.tests.workflows.forge_loop.roles.test_analysis_agent import (
-    _BundleBackend,
-    _context,
-    _service,
-    _workspace,
-)
-from kernelforge.tests.workflows.forge_loop.iteration.test_loop_runner import _make_loop
+from kernelforge.tests.workflows.forge_loop.roles._analysis_fakes import _BundleBackend, _context, _service, _workspace
+from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import _make_loop
 from kernelforge.workflows.forge_loop.iteration import campaign_runtime
 
 

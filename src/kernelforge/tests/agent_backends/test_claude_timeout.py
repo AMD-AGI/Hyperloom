@@ -3,55 +3,24 @@
 from __future__ import annotations
 
 import asyncio
-import tempfile
-from functools import lru_cache
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from kernelforge.agent_backends import claude as claude_mod
-from kernelforge.agent_backends.base import AgentRunSpec, AgentToolPolicy
+from kernelforge.agent_backends.base import AgentRunSpec
 from kernelforge.agent_backends.claude import ClaudeBackend
-from kernelforge.utils.git import git
 from kernelforge.utils.process_reaping import ReapReport
-from kernelforge.config.edit_policy import FORGE_PROTECTED_PATHS
-
-
-class _FakeOptions:
-    def __init__(self, **kwargs):
-        self.kwargs = kwargs
+from kernelforge.tests.agent_backends._claude_fakes import _FakeOptions, _guarded_workspace
+from kernelforge.tests.agent_backends._claude_fakes import _spec as _implementer_spec
 
 
 def _message(**fields):
     return SimpleNamespace(content=[], **fields)
 
 
-@lru_cache(maxsize=1)
-def _guarded_workspace() -> str:
-    """A real worktree: a writable session is judged against one."""
-    root = Path(tempfile.mkdtemp(prefix="forge-claude-timeout-"))
-    (root / "kernel.py").write_text("VALUE = 0\n")
-    git("init", "--quiet", cwd=root)
-    git("config", "user.email", "t@test", cwd=root)
-    git("config", "user.name", "t", cwd=root)
-    git("add", "-A", cwd=root)
-    git("commit", "-m", "baseline", cwd=root)
-    return str(root)
-
-
 def _spec(**overrides) -> AgentRunSpec:
-    base = dict(
-        system_prompt="implementer system prompt",
-        user_prompt="optimize the kernel",
-        cwd=_guarded_workspace(),
-        model="fake-model",
-        timeout_sec=0.05,
-        tool_policy=AgentToolPolicy(read=True, write=True, shell=True, max_turns=100),
-        protected_path_rules=FORGE_PROTECTED_PATHS,
-    )
-    base.update(overrides)
-    return AgentRunSpec(**base)
+    return _implementer_spec(**{"timeout_sec": 0.05, **overrides})
 
 
 def _hanging_backend(messages, captured):

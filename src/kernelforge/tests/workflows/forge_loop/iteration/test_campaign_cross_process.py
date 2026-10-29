@@ -13,82 +13,17 @@ from pathlib import Path
 import pytest
 
 from kernelforge.tests.workflows.forge_loop._experiment_records import persisted_experiments
-from kernelforge.tests.conftest import SRC_ROOT, silence_jit_rebuild
+from kernelforge.tests.conftest import SRC_ROOT
 
 import kernelforge.workflows.forge_loop.iteration.runner as runner_module
 from kernelforge.workflows.forge_loop.campaign.archive import CandidateArchive
 from kernelforge.workflows.forge_loop.memory.experience import ExperienceLedger
 from kernelforge.workflows.forge_loop.campaign.run_state import LoopStateStore
-from kernelforge.workflows.forge_loop.iteration.runner import IterationConfig, IterationLoop, IterationResult
+from kernelforge.workflows.forge_loop.iteration.runner import IterationLoop, IterationResult
 from kernelforge.workflows.forge_loop.campaign.experiment import ExperimentTracker
 from kernelforge.workflows.forge_loop.iteration import campaign_runtime
-
-
-# The stand-in for "budget is not what this test is about"; it has to clear the
-# round admission guard, which prices a whole round rather than only the reserve.
-_AMPLE_BUDGET_SEC = 12 * 3600.0
-
-
-def _initialize_workspace(tmp_path, monkeypatch):
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    kernel = workspace / "kernel.py"
-    driver = workspace / "driver.py"
-    kernel.write_text("def kernel():\n    return 1\n")
-    driver.write_text("pass\n")
-    subprocess.run(["git", "init"], cwd=workspace, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "config", "user.name", "KernelForge Tests"],
-        cwd=workspace,
-        check=True,
-    )
-    subprocess.run(
-        ["git", "config", "user.email", "tests@example.com"],
-        cwd=workspace,
-        check=True,
-    )
-    subprocess.run(["git", "add", "."], cwd=workspace, check=True)
-    subprocess.run(
-        ["git", "commit", "-m", "initial"],
-        cwd=workspace,
-        check=True,
-        capture_output=True,
-    )
-    silence_jit_rebuild(monkeypatch)
-    return workspace, kernel, driver
-
-
-def _make_loop(workspace, kernel, driver, tracker, *, session_count, resume=False):
-    config = IterationConfig(
-        kernel_file=str(kernel),
-        driver_script=str(driver),
-        baseline_wall_ms=1.0,
-        baseline_case_times={"case": 1.0},
-        max_time_hours=1.0,
-        git_branch="campaign-test",
-        workspace_dir=str(workspace),
-    )
-    loop = IterationLoop(
-        config,
-        tracker,
-        config=object(),
-        resume=resume,
-    )
-    loop._time_remaining = lambda: _AMPLE_BUDGET_SEC if len(loop.results) < session_count else 0.0
-    return loop
-
-
-async def _successful_iteration(self, iteration, plan=""):
-    return IterationResult(
-        iteration=iteration,
-        duration_sec=0.01,
-        validation_passed=True,
-        validation_summary="passed",
-        wall_ms=1.0 - iteration * 0.05,
-        mean_case_speedup=1.0 / (1.0 - iteration * 0.05),
-        snr_db=40.0,
-        kept=True,
-    )
+from kernelforge.tests.workflows.forge_loop.iteration._cross_process_campaign import _make_loop, _successful_iteration
+from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import _initialize_workspace
 
 
 def test_two_sessions_preserve_lineage_history_and_global_ids(tmp_path, monkeypatch):

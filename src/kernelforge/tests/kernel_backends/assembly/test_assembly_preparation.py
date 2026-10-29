@@ -18,16 +18,8 @@ import yaml
 
 from kernelforge.kernel_backends.assembly import prepare
 from kernelforge.evaluation.correctness.pipeline import ValidationReport, ValidationResult
+from kernelforge.tests.kernel_backends.assembly._assembly_sources import ASM
 
-ASM = """.amdgcn_target "amdgcn-amd-amdhsa--gfx950"
-.text
-add:
-    s_endpgm
-.amdhsa_kernel add
-.end_amdhsa_kernel
-.amdgpu_metadata
-.end_amdgpu_metadata
-"""
 SOURCE = "import flydsl.compiler as flyc\ndef build(*args):\n    return flyc.compile(*args)\n"
 
 

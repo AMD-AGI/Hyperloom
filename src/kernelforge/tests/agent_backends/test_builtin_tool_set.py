@@ -17,7 +17,7 @@ import pytest
 
 from kernelforge.agent_backends.base import AgentRole, AgentRunSpec, AgentToolPolicy, StdioMcpServer
 from kernelforge.agent_backends.claude import _builtin_tools
-from kernelforge.tests.agent_backends.test_claude_resume import _backend, _result_message, _spec
+from kernelforge.tests.agent_backends._claude_fakes import _backend, _result_message, _spec
 
 
 def _kwargs(spec: AgentRunSpec) -> dict:

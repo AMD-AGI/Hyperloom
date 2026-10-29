@@ -21,7 +21,7 @@ from kernelforge.knowledge.kb_store.record_store import (
     RewriteRecordError,
 )
 
-from kernelforge.tests.workflows.flydsl_rewrite.test_rewrite_by_flydsl_kb import InMemoryKBStore, _remote_config
+from kernelforge.tests.knowledge.kb_store._in_memory_store import InMemoryKBStore, _remote_config
 from kernelforge.tests.conftest import kb_store_run_config as _remote_config_with_token
 from kernelforge.knowledge.kb_store.identity.run import LoopKernel
 from kernelforge.workflows.forge_loop.memory.knowledge_integration import WarmStartHarness

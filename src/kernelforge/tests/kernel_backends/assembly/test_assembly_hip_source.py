@@ -13,7 +13,7 @@ import pytest
 from kernelforge.kernel_backends.assembly import hip_source
 from kernelforge.kernel_backends.assembly.capture import bind_compile
 from kernelforge.kernel_backends.assembly.compiler import AssemblyError
-from kernelforge.tests.kernel_backends.assembly.test_assembly_preparation import ASM
+from kernelforge.tests.kernel_backends.assembly._assembly_sources import ASM
 
 
 def test_hip_binding_keeps_original_build_arguments():
