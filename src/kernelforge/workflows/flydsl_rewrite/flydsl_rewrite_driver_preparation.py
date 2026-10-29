@@ -558,7 +558,7 @@ class _DriverAuthoring:
                     )
                     turn = _AuthoringTurn(stage, stage_driver, set(evidence), prompt, timeout_sec, [])
                     record = self.audit / f"attempt_{attempt:02d}"
-                    await self._author(turn, record)
+                    authored = await self._author(turn, record)
                     crossed = _restore_write_boundary(stage, stage_driver, evidence)
                     if crossed:
                         self.prior_failure = (
@@ -566,6 +566,8 @@ class _DriverAuthoring:
                             + ", ".join(crossed)
                             + "; modify only the driver"
                         )
+                        continue
+                    if not authored:
                         continue
                     if not stage_driver.is_file() or stage_driver.is_symlink():
                         self.prior_failure = "the previous attempt deleted the required driver"
@@ -626,8 +628,11 @@ class _DriverAuthoring:
         _ensure_agent_git_workspace(stage)
         return evidence
 
-    async def _author(self, turn: _AuthoringTurn, record: Path) -> None:
-        """Run one authoring session, recording its prompt, the driver before and after it, and how the agent ended."""
+    async def _author(self, turn: _AuthoringTurn, record: Path) -> bool:
+        """Run one authoring session, recording its prompt, the driver before and after it, and how the agent ended.
+
+        Returns False when the session raised, with ``prior_failure`` naming the error.
+        """
         _audit_text(record, "prompt.md", turn.prompt)
         _audit_text(record, "system_prompt.md", _SYSTEM_PROMPT)
         _audit_driver(record, "driver_before.py", turn.stage_driver)
@@ -643,9 +648,12 @@ class _DriverAuthoring:
             _audit_json(
                 record, "agent_event.json", {"status": "error", "type": type(error).__name__, "error": str(error)}
             )
+            self.prior_failure = f"the previous authoring session failed: {type(error).__name__}: {error}"
+            return False
         finally:
             _audit_text(record, "agent_progress.txt", "\n".join(turn.progress_log))
             _audit_driver(record, "driver_after_agent.py", turn.stage_driver)
+        return True
 
     def _failure(self, failure_class: str, error: str) -> DriverPreparationResult:
         return DriverPreparationResult(

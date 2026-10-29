@@ -466,6 +466,18 @@ class TestProbeSourceAgainstFakeVllm:
         )
         assert st.missed is False and st.claimable is False
 
+    def test_a_vllm_that_fails_to_import_reports_the_error_and_its_traceback(self, tmp_path):
+        root = self._fake_vllm(tmp_path)
+        (root / "vllm" / "__init__.py").write_text("raise RuntimeError('no ROCm runtime')\n", encoding="utf-8")
+        env = dict(os.environ, PYTHONPATH=str(root))
+        proc = subprocess.run(
+            [sys.executable, "-c", _PROBE_SRC, QK_FLAG], capture_output=True, text=True, env=env, timeout=120
+        )
+        payload = json.loads(proc.stdout.split(_VLLM_PASS_PROBE_MARKER)[-1].strip())
+        assert payload["error"] == "RuntimeError: no ROCm runtime"
+        assert proc.returncode == 1
+        assert proc.stderr.startswith("Traceback (most recent call last):")
+
     def test_absent_flag_reports_absent(self, tmp_path):
         payload = self._probe(self._fake_vllm(tmp_path), flags=("not_a_flag",))
         assert payload["flags"]["not_a_flag"] == {"present": False, "enabled": None, "source": "absent"}
