@@ -91,6 +91,7 @@ class _Kernels:
 
     added: tuple[KernelArtifact, ...]
     united: tuple[UnitedTable, ...]
+    displaced: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -128,7 +129,7 @@ def carry(onto: str, base: Recipe, candidate: Recipe, ours: Recipe, stored: Stor
         config=_config(change),
         components=_components(base, candidate, ours),
         add_kernels=kernels.added,
-        remove_kernels=_removed_kernels(base, candidate, ours),
+        remove_kernels=(*_removed_kernels(base, candidate, ours), *kernels.displaced),
     )
     merged = apply(ours, delta)
     brought = {patch.path for touched in delta.components for patch in touched.add_patches}
@@ -188,22 +189,27 @@ def _component_change(name: str, base: Recipe, candidate: Recipe, ours: Recipe) 
 
 def _added_kernels(base: Recipe, candidate: Recipe, ours: Recipe, stored: Stored) -> _Kernels:
     """Each artifact the candidate added, in the slot it fills: it lands where no other side moved the slot, the wider
-    of two tables when one holds every row of the other, and a union of both tables' rows otherwise."""
-    carried, united = [], []
+    of two tables when one holds every row of the other, and a union of both tables' rows otherwise. The head's table
+    on the variable the artifact loads through fills its slot too, whatever target it serves: the service reads one
+    table per variable, so the two are decided the same way and the head's is ``displaced`` when it loses."""
+    carried, united, displaced = [], [], []
     for artifact in (artifact for artifact in candidate.kernels if artifact not in base.kernels):
-        current = _in_slot(ours, artifact.slot)
-        if current is None or current in (_in_slot(base, artifact.slot), artifact):
+        current = kernel_occupant(ours, artifact)
+        if current is None or current in (kernel_occupant(base, artifact), artifact):
             carried.append(artifact)
             continue
         wider = wider_table(artifact, current, stored.kernel_table)
         if wider is None:
-            union = _united(artifact, current, stored, _in_slot(base, artifact.slot))
+            union = _united(artifact, current, stored, kernel_occupant(base, artifact))
             united.append(union)
             wider = union.table
+        if wider.slot != current.slot:
+            displaced.append(current.ref)
         carried.append(wider)
     return _Kernels(
         tuple(artifact for artifact in carried if artifact not in ours.kernels),
         tuple(union for union in united if union.table not in ours.kernels or union.kept_head_shapes),
+        tuple(displaced),
     )
 
 
@@ -219,6 +225,24 @@ def _removed_kernels(base: Recipe, candidate: Recipe, ours: Recipe) -> tuple[str
 
 def _in_slot(recipe: Recipe, slot: tuple[KernelKind, str]) -> KernelArtifact | None:
     return next((artifact for artifact in recipe.kernels if artifact.slot == slot), None)
+
+
+def kernel_occupant(recipe: Recipe, artifact: KernelArtifact) -> KernelArtifact | None:
+    """The artifact of ``recipe`` that ``artifact`` would replace or meet: the one in its slot, else the one loading
+    through the same variable, which no launch can set twice."""
+
+    in_slot = _in_slot(recipe, artifact.slot)
+    env = _load_env(artifact)
+    if in_slot is not None or env is None:
+        return in_slot
+    return next((current for current in recipe.kernels if _load_env(current) == env), None)
+
+
+def _load_env(artifact: KernelArtifact) -> str | None:
+    try:
+        return kernel_load_env(artifact)
+    except KernelLoadError:
+        return None
 
 
 def wider_table(wanted: KernelArtifact, current: KernelArtifact, table: TableBytes) -> KernelArtifact | None:
@@ -282,9 +306,7 @@ def _united(
     if rows_only == kernel_rows_only(ours) and _rows(data) == _rows(tables[1]):
         return UnitedTable(theirs, ours, ours, kept)
     stored.store_table(data)
-    return UnitedTable(
-        theirs, ours, mint_kernel_artifact(theirs.kind, theirs.target, env, data, rows_only=rows_only), kept
-    )
+    return UnitedTable(theirs, ours, mint_kernel_artifact(ours.kind, ours.target, env, data, rows_only=rows_only), kept)
 
 
 def _union_three_way(
@@ -596,6 +618,7 @@ __all__ = [
     "TableBytes",
     "TableStore",
     "carry",
+    "kernel_occupant",
     "stack_kernel_slot",
     "wider_table",
 ]

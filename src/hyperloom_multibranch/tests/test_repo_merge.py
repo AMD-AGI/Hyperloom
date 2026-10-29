@@ -33,6 +33,7 @@ from hyperloom.measure.compile import (
     PackageBase,
     PatchApplyError,
     apply_patch_stack,
+    kernel_load_env,
     kernel_rows_only,
 )
 from hyperloom_multibranch.contracts.llm import CompletionReply
@@ -388,6 +389,40 @@ def test_rows_only_rows_over_a_whole_table_make_one_whole_table(configs):
     (united,) = merge.delta.add_kernels
     assert not kernel_rows_only(united)
     assert TABLES[united.sha256] == union_rows(csv_text(B06_NEW), TABLES[head.sha256], ENV, configs=configs)
+
+
+def _aiter_for(target: str, data: bytes) -> KernelArtifact:
+    """A table the toolbox put on the same aiter variable as :func:`_aiter`, tuned for another layer's shapes."""
+
+    _keep(data)
+    return mint_kernel_artifact(KernelKind.GEMM, target, ENV, data)
+
+
+def _envs(recipe: Recipe) -> list[str]:
+    return [kernel_load_env(artifact) for artifact in recipe.kernels]
+
+
+def test_tables_for_two_targets_that_load_through_one_variable_unite_into_one_table(configs):
+    """The service reads one table per variable, so a candidate's table for another layer cannot land beside the head's:
+    the two unite, and the merged recipe sets the variable once."""
+
+    head, theirs = _aiter(csv_text(SHARED, B01_NEW)), _aiter_for("qkv", csv_text(SHARED[:3], B06_NEW))
+
+    merge = carry("i1", BASE, _filled(theirs), _filled(head), Stored(_applies, _table, _store, _keep, configs))
+
+    merged = apply(_filled(head), merge.delta)
+    (united,) = merged.kernels
+    data = union_rows(TABLES[theirs.sha256], TABLES[head.sha256], ENV, configs=configs)
+    assert (united.slot, TABLES[united.sha256], _envs(merged)) == (head.slot, data, [ENV])
+    assert merge.united_tables == (UnitedTable(theirs, head, united),)
+
+
+def test_a_wider_table_for_another_target_on_one_variable_replaces_the_head_s(configs):
+    head, wide = _aiter(csv_text(SHARED)), _aiter_for("qkv", csv_text(SHARED, B09_NEW))
+
+    merge = carry("i1", BASE, _filled(wide), _filled(head), Stored(_applies, _table, _store, _keep, configs))
+
+    assert apply(_filled(head), merge.delta).kernels == (wide,)
 
 
 def test_a_replay_stacks_a_kernel_slot_as_the_merge_fills_it(configs):
