@@ -28,7 +28,7 @@ _FORBIDDEN_TOP_LEVEL = frozenset(
 
 def _py_files(package: object) -> list[Path]:
     root = Path(package.__file__).resolve().parent  # type: ignore[attr-defined]
-    return sorted(p for p in root.rglob("*.py") if "tests" not in p.parts)
+    return sorted(p for p in root.rglob("*.py") if "tests" not in p.relative_to(root).parts)
 
 
 def _imported_module_names(path: Path, package_name: str) -> list[str]:
@@ -57,7 +57,7 @@ def test_common_imports_nothing_first_party():
         f"{path.name}: import {module}"
         for path in _py_files(hyperloom_common)
         for module in _imported_module_names(path, "hyperloom_common")
-        if module.split(".")[0] in {"hyperloom", "kernelforge"} | _FORBIDDEN_TOP_LEVEL
+        if module.split(".")[0] in {"hyperloom", "hyperloom_kb", "kernelforge"} | _FORBIDDEN_TOP_LEVEL
     ]
     assert not offenders, f"hyperloom_common must not import first-party packages: {offenders}"
 

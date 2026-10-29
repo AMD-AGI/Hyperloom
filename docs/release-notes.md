@@ -55,6 +55,21 @@ it.
   the CLI working no longer triggers a reinstall or a downgrade.
   `RAY_CLI_CLICK_MAX_VERSION` is removed, superseding the 1.1.4 entry that
   introduced it; `RAY_VERSION` is still honoured verbatim.
+- **Code Hyperloom and KernelForge share lives in the `hyperloom_common`
+  package.** `aiter_jit_cache`, `checkpoint_quant`, `coerce`, `entry_points`,
+  `env`, `fs_utils`, `git_safety`, `gpu_identity`, `io`, `jsonio`,
+  `pr_monitor_urls`, `timeutil` and `unified_diff` move from `hyperloom.common`
+  to `hyperloom_common`; `llm_config`, `llm_headers`, `llm_attribution`,
+  `llm_request_hooks`, `llm_stability_env`, `token_usage`,
+  `reasoning_effort`, `claude_oneshot` and `deepseek_session` to
+  `hyperloom_common.llm`. `kernelforge.utils.durable_io` is removed:
+  `hyperloom_common.io` writes with `options=DURABLE` and provides
+  `fsync_directory`, `fsync_tree` and `fsync_tree_directories`. Code that
+  imports one of these modules must import it from its new place; no aliases
+  are kept. An atomic write that asks for `fsync` or `fsync_dir` now fails
+  when the flush fails instead of continuing without it. KernelForge
+  recognises R9700 (gfx1201) and Radeon 8060S (gfx1151), and keys their
+  experience-KB records under `r9700` and `radeon8060s`.
 
 ## Hyperloom 1.1.5 release
 
@@ -2412,7 +2427,7 @@ Report consumers have to follow these field changes; no aliases are kept:
   spelled as bare literals in the Forge provider registry beside the module that
   defined them, in the Claude allowlist head, in the GEAK model default, in the
   TraceLens Claude path and in the Critic's Codex field. Eight copies of two
-  strings, each free to drift. They now live in `hyperloom_common/llm/llm_config.py`
+  strings, each free to drift. They now live in `hyperloom/common/llm_config.py`
   next to `AGENT_BACKEND_CLAUDE` / `AGENT_BACKEND_CODEX`, which is the pair they
   are keyed by, following the `DEFAULT_REASONING_EFFORT` precedent that both
   packages already import from `common`.

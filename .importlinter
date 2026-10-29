@@ -28,6 +28,7 @@
 root_packages =
     hyperloom
     hyperloom_common
+    hyperloom_kb
     kernelforge
 include_external_packages = False
 exclude_type_checking_imports = True
@@ -124,6 +125,7 @@ type = forbidden
 source_modules = hyperloom_common
 forbidden_modules =
     hyperloom
+    hyperloom_kb
     kernelforge
 ignore_imports =
     hyperloom_common.tests.** -> **
