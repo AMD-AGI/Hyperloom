@@ -1,8 +1,8 @@
 # Re-review
 
 Read from Step 1 of [`../SKILL.md`](../SKILL.md) when `comments.txt` holds an earlier card for this PR: a
-`## PR #<n>` heading in any review or comment it carries. `pr-review-publish.sh` matches that heading alone, so an
-author filter here would skip `prior_verdicts.txt` and the gate would withhold the verdict. Settle that card's
+`## PR #<n>` heading in any review or comment it carries. [`../check-card.sh`](../check-card.sh) matches that heading
+alone, so an author filter here would skip `prior_verdicts.txt` and the gate would withhold the verdict. Settle that card's
 findings first, then review the whole diff anyway: an earlier card, the PR author's own included, can have missed
 anything.
 
@@ -53,4 +53,4 @@ When the latest card's `Head:` is this head, this review is a second, full readi
 `Checked` carries `Prior:`, `prior_verdicts.txt` in order as `<KEY> fixed|holds|moved`, comma-separated (for example
 `Prior: C1 fixed, T2 holds`), or `Prior: none` when the latest card had no finding; a PR with no earlier card writes
 no `Prior`. A `FIXED` finding leaves the card, and `Prior` is where the author reads that it was fixed.
-`pr-review-publish.sh` applies no verdict when `Prior` and `prior_verdicts.txt` disagree.
+[`../check-card.sh`](../check-card.sh) refuses a card whose `Prior` and `prior_verdicts.txt` disagree.

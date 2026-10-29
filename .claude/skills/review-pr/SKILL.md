@@ -1,6 +1,6 @@
 ---
 name: review-pr
-description: "Review a Hyperloom pull request. Invoke with a PR number whenever asked to review, re-review or sanity-check a PR in this repository. Collects the PR into a scratch directory, reads only the rules.md rules the diff can trigger, forces a semantic and core-file risk assessment before any finding is written, refutes every finding twice, and publishes an English card of two parts only — what the PR does, and its blocking issues — plus the code the author can delete in the same PR."
+description: "Review a Hyperloom pull request. Invoke with a PR number whenever asked to review, re-review or sanity-check a PR in this repository. Collects the PR into a scratch directory, reads only the rules.md rules the diff can trigger, forces a semantic and core-file risk assessment before any finding is written, refutes every finding twice, and publishes an English card of two parts only — what the PR does, and its blocking issues — plus the PR's risk, the decisions a person must make, and the code the author can delete in the same PR."
 ---
 
 # Hyperloom PR review
@@ -10,7 +10,8 @@ keep the one `fetch.sh` prints): a step that leaves nothing behind can be skippe
 
 ## Output contract
 
-The card has two parts, what the PR does and its blocking issues, plus Step 6's deletions; nothing else. Non-blocking
+The card has two parts, what the PR does and its blocking issues; beside them stand only the PR's risk, the decisions
+a person must make (Step 3, Step 8) and Step 6's deletions — none of them a finding. Nothing else. Non-blocking
 observations are deleted, not softened into a "note", "FYI", "non-blocking but", "for reference" or a postscript
 under the conclusion: one that survives only by relabelling fails the bar. The bar is two questions: **if this is not
 changed, is the current behaviour wrong?** and **was the reason for the change true, and does the change end the
@@ -60,6 +61,7 @@ as [`references/re-review.md`](references/re-review.md) says.
 | `testfiles.txt`, `docfiles.txt` | changed paths under a `tests/` directory; changed docs, prompts, `.md`/`.rst` — an empty `docfiles.txt` beside a `src/` change is X3's shape |
 | `openprs.txt` | other open PRs touching the same files; a `# PARTIAL:` line names what was never compared, reported as `SKIPPED: V4` |
 | `skill.txt` | this skill's version (its tree hash, `+dirty` with uncommitted edits) and the environment's model; the card's `Skill:` is the version, its `Model:` the model your system prompt names, else this one |
+| `risk.txt` | the PR's risk, graded from its changed paths by `risk.py` with `references/tiers.md` as its data, then one line per path; the floor of the card's `Risk:` |
 
 ## Step 1b — Select the rules
 
@@ -110,6 +112,10 @@ checks. `COVERED`: this PR's tests exercise the blast radius, or the change cann
 it goes on the card. `N/A`: the change cannot reach it. A reason naming nothing this PR changed is worthless — "core
 file, large blast radius" is true of every PR against it. A docs-, CI- or test-only diff writes one
 `NONE -- <reason naming what it does touch>` line.
+
+The card's `Risk:` is `risk.txt`'s level, or higher when the diff does what paths cannot show — deletes or weakens a
+test, changes a default, a persisted shape or a gate, widens what an agent may do — written `(raised from <level>)`.
+Never lower: paths are the floor, and only a person changes what they mean (`references/tiers.md`).
 
 ## Step 4 — Rule checklist
 
@@ -216,6 +222,10 @@ capability, and the route taken>
 Scenario: <Q6's values and order, then what the head does under them. Fix PRs only.>
 Layer: <Q2's two frames: the one this diff changes -> the earliest that could have refused.>
 
+Risk: <low|medium|high>[ (raised from <level>)] -- <the path or change that sets it>
+Decisions for a human:
+- <paths> -- <what changes for an operator or a gate> -- <the question a person answers>
+
 Blocking issues: <N | none>
 
 1. [<RULE-ID|free:slug>] <one-line summary> [verified]
@@ -235,6 +245,10 @@ Checked: <paths and symbols read> | Ran: <commands> | Skill: <skill> | Model: <m
   an error string, a session id, an RSI problem, `Fixes #N` — and only then; that is E2's trigger. "when the config is
   invalid" is not a scenario: if neither the body nor a surviving artifact pins it, write
   `Scenario: [unverified] -- <where you looked>`, E2's finding.
+- `Decisions for a human:` is what a person must accept before merge: every operator-observable change from Q3, and
+  every `high` path in `risk.txt`, named whole or under a directory written with its trailing `/`. A medium card with
+  nothing to decide writes `Decisions for a human: none -- <why>`; a high card names at least one; a low card has
+  none, since anything a person must decide makes it medium. Decisions never count toward `Blocking issues`.
 - The key joins a finding to its `FIRE` in `verdicts.txt` and its blocks in `refutations.txt` and `independent.txt`;
   a finding with no key cannot be cross-checked. A Step 6 free-form finding is `free:<slug>`, held to the same two passes.
 - At most 5 findings, most severe first (severity, then blast radius). A sixth that survived both refutation passes
@@ -246,10 +260,13 @@ Checked: <paths and symbols read> | Ran: <commands> | Skill: <skill> | Model: <m
 - `Prior` is written only on a re-review ([`references/re-review.md`](references/re-review.md)).
 - `[verified]`: you opened the code, followed the chain, and can name the triggering input, configuration or phase;
   for an E1 or E2 evidence gap, naming where you looked — body, artifacts, commits — and what was not there verifies
-  it. `[inferred]` — plausible, not confirmed — is not blocking: verify it or delete it; `pr-review-publish.sh`
+  it. `[inferred]` — plausible, not confirmed — is not blocking: verify it or delete it; `check-card.sh`
   refuses a card whose blocking findings are not all `[verified]`. No `path:line`, or a chain that stops at "likely
   the root cause", keeps a finding off the card.
 - Before quoting `ci.txt` or `meta.txt`'s `mergeable`, read [`references/ci.md`](references/ci.md).
+
+Last, run `bash .claude/skills/review-pr/check-card.sh "$WORK" <PR> <head sha> "$WORK/risk.txt"` and fix the card
+until it prints nothing. CI publishes only a card that passes the same check against a risk it grades from GitHub.
 
 ### SKIPPED protocol
 
@@ -259,17 +276,19 @@ checked; silence is never read as clean, and an unrecorded skip is itself a revi
 
 ## Publishing
 
-Post in English: no Chinese, no emoji, no signature.
+Post `card.md` as `check-card.sh` passed it, in English: no Chinese, no emoji, no signature.
 
 ```bash
 # blocking issues
-gh pr review <n> --request-changes --body "<conclusion>"
+gh pr review <n> --request-changes --body-file "$WORK/card.md"
 # no blocking issues: first dismiss your own earlier CHANGES_REQUESTED review, then
-gh pr comment <n> --body "<conclusion>"$'\n\nLGTM'
+gh pr comment <n> --body "$(cat "$WORK/card.md")"$'\n\nLGTM'
 ```
 
-Never approve and never merge: both belong to the human reviewer the author brings in after LGTM. The clean comment
-is the whole card, `Checked:` line included so the author sees its depth, then `LGTM`.
+Never `gh pr review --approve`, never merge. A local run posts under your account, so an approval would be your
+code-owner approval of a model's verdict; both belong to the human reviewer the author brings in after LGTM. The bot
+never approves either, whatever the risk: `Risk:` and `Decisions for a human:` show that reviewer where to look. The
+clean comment is the whole card, `Checked:` line included so the author sees its depth, then `LGTM`.
 
 ## Verifying a sub-agent's finding
 

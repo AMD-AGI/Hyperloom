@@ -219,6 +219,16 @@ def test_skill_txt_names_the_model_and_the_skill_directory_tree_that_ran(tmp_pat
     assert model == "model: model-under-test"
 
 
+def test_risk_txt_grades_the_changed_paths(tmp_path: Path) -> None:
+    result = _run(tmp_path, _open_prs(3))
+
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "work" / "risk.txt").read_text(encoding="utf-8").splitlines()[:2] == [
+        "risk: medium",
+        f"medium {_CHANGED} -- runtime code, and the prompts and skills agents load at runtime",
+    ]
+
+
 def test_a_skill_directory_git_cannot_name_stops_the_fetch(tmp_path: Path) -> None:
     copy = tmp_path / "skill" / "fetch.sh"
     copy.parent.mkdir()

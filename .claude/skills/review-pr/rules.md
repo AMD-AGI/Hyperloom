@@ -1241,8 +1241,8 @@ the fix must cover is enumerated, and only the tests scoped to the change are ru
 the full suite. The published review has two parts: what the PR does and how, then blocking
 issues only. When there are none, that is stated explicitly, with the head commit, the merge
 base, the cases run and the tests run, so the author sees the depth rather than a bare LGTM.
-Non-blocking observations are not appended in any form; the one list beside the findings is
-Step 6's deletions (`references/subtract.md`), which only ever removes code.
+Non-blocking observations are not appended in any form; beside the findings stand only the
+card's risk, the decisions a person must make, and Step 6's deletions (`references/subtract.md`).
 **Seen in:** PR #2227 -- a shell failure was "reproduced" on a hand-written probe that called `die` directly, concluding the script printed a message and continued; the real block was under `set -euo pipefail` where a bare assignment tripped errexit first, so `die` was dead code and the fetch exited 1 in silence. The wrong conclusion reached a commit message and a code comment. PR #1412 -- the review listed what was verified rather than taking the description
 at face value; PR #1420 ran four cases through the real `_seal_repository` on a repository a
 killed session had left on `forge/controller/dead-1`.

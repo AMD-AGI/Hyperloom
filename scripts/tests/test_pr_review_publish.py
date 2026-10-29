@@ -47,6 +47,8 @@ with open(os.environ["GH_STUB_LOG"], "a", encoding="utf-8") as fh:
     fh.write(json.dumps(sys.argv[1:]) + "\\n")
 if sys.argv[1:3] == ["pr", "view"]:
     print(os.environ["GH_STUB_PR_NOW"])
+elif any(arg.endswith("/files") for arg in sys.argv):
+    sys.stdout.write(os.environ["GH_STUB_FILES"])
 """
 
 pytestmark = pytest.mark.skipif(shutil.which("bash") is None, reason="pr-review-publish.sh needs bash")
@@ -86,6 +88,7 @@ def _card(
     prior: str | None = None,
     head: str = _HEAD,
     trim: str | None = None,
+    risk: str = "Risk: medium -- src/pkg/mod.py is runtime code\nDecisions for a human: none -- no operator-visible change",
 ) -> str:
     verdict = (
         "1\n\n1. [C1] x is still 1 [verified]\n   Problem: x is 1 at src/pkg/mod.py:1\n   Impact: x is wrong\n"
@@ -96,8 +99,8 @@ def _card(
     trims = f"Trim in this PR:\n{trim}\n\n" if trim is not None else ""
     fields = f"Skill: {skill} | Model: {model}" + (f" | Prior: {prior}" if prior is not None else "")
     return (
-        f"## PR #{_PR} -- fix: change mod\n\nWhat it does: changes mod.\n\nBlocking issues: {verdict}\n{trims}"
-        f"Checked: src/pkg/mod.py | Ran: none | {fields} | Base: {_BASE} | Head: {head}\n"
+        f"## PR #{_PR} -- fix: change mod\n\nWhat it does: changes mod.\n\n{risk}\n\nBlocking issues: {verdict}\n"
+        f"{trims}Checked: src/pkg/mod.py | Ran: none | {fields} | Base: {_BASE} | Head: {head}\n"
     )
 
 
@@ -115,9 +118,10 @@ def _publish(
     skill_txt: str | None = _SKILL_TXT,
     comments: str | None = "",
     files: dict[str, str] | None = None,
+    changed: str = "src/pkg/mod.py\n",
 ) -> Published:
     """pr-review-publish.sh on ``card``, beside every artifact a review leaves, ``skill_txt`` and ``comments`` as
-    skill.txt and comments.txt unless they are None, and ``files``."""
+    skill.txt and comments.txt unless they are None, and ``files``; GitHub lists ``changed`` as the PR's files."""
     work = tmp_path / "work"
     work.mkdir()
     for name in _ARTIFACTS:
@@ -140,6 +144,7 @@ def _publish(
         "PATH": f"{stub_dir}{os.pathsep}{os.environ['PATH']}",
         "GH_STUB_LOG": str(log),
         "GH_STUB_PR_NOW": f"OPEN {_HEAD}",
+        "GH_STUB_FILES": changed,
         "REPO": "org/repo",
         "PR": str(_PR),
         "REVIEWED_SHA": _HEAD,
@@ -299,6 +304,21 @@ def test_a_malformed_trim_list_gets_no_verdict(tmp_path: Path, trim: str, reason
 
     assert run.returncode == 1
     assert reason in run.note
+    assert not run.lgtm
+
+
+def test_the_risk_floor_comes_from_the_prs_files_on_github_not_from_the_review_job(tmp_path: Path) -> None:
+    low = "Risk: low -- the paths are prose"
+
+    run = _publish(
+        tmp_path,
+        _card(blocking=False, risk=low),
+        files={"risk.txt": "risk: low\nlow docs/guide.md -- prose\n"},
+        changed=".github/workflows/lint.yml\n",
+    )
+
+    assert run.returncode == 1
+    assert "the card's Risk low is below high" in run.note
     assert not run.lgtm
 
 
