@@ -227,14 +227,16 @@ async def test_a_crash_leaves_no_done_file_for_the_runner_to_find(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_a_hang_reports_a_stale_heartbeat_and_never_wrote_one(tmp_path):
+async def test_a_hang_reports_a_stale_heartbeat_and_its_log_went_silent(tmp_path):
+    from hyperloom.orchestrator.specialists.reap_watch import newest_activity, specialist_activity_paths
+
     scripted = ScriptedSpecialist(steps=(SpecialistStep(outcome=HUNG),))
 
     result = await scripted.run(_spawn("spec-1", tmp_path / "ws"))
 
     assert result.stale_heartbeat
     assert result.exit_code is None
-    assert not (tmp_path / "ws" / "heartbeat.json").exists()
+    assert newest_activity(specialist_activity_paths(tmp_path / "ws")) == 0.0
 
 
 @pytest.mark.asyncio

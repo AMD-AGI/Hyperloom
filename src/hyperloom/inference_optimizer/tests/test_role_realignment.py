@@ -653,7 +653,7 @@ async def test_running_tasks_reader_skips_heartbeat_for_non_specialist(
         # Plant the liveness file the specialist path would have read.
         ws = runs_dir(c.session_dir, "specialist", task.task_id)
         ws.mkdir(parents=True, exist_ok=True)
-        (ws / "heartbeat.json").write_text("{}", encoding="utf-8")
+        (ws / "process.log").write_text("event\n", encoding="utf-8")
 
         out = c.conversation._context_running_tasks_reader()
         assert task.task_id in out

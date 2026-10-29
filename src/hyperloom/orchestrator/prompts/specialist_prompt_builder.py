@@ -243,8 +243,7 @@ def _auto_retry_note_block(inp: SpecialistPromptInputs) -> list[str]:
         + "silent hang), not a rejection of the approach. Scope your "
         + "investigation so you reach a single ``specialist_done`` within "
         + "``max_turns`` this time: prefer fewer, higher-confidence probes, "
-        + "emit heartbeats, and avoid long-running shell that risks the same "
-        + "timeout.",
+        + "and avoid long-running shell that risks the same timeout.",
     ]
 
 
@@ -1347,12 +1346,6 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
         "  emit source-backed ``{what, source, expected_impact, accuracy_risk,",
         "  domain_tags[]}`` records.",
         "- ``residual_questions`` carries to the next specialist round.",
-        "",
-        "**Heartbeat (Channel B only):** When running in subprocess mode,",
-        f"write ``{workspace}/heartbeat.json`` periodically (≤5 min apart)",
-        "via Bash so the dispatcher knows you are still alive. Format:",
-        '``{"ts": "<iso8601>", "status": "running", "note": "<short>"}``.',
-        "Going silent past 5 minutes kills your subprocess.",
         "",
         (f"Hard cap: at most **{inp.max_turns}** LLM turns. Emit specialist_done before the cap."),
     ]

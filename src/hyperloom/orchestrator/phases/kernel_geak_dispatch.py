@@ -354,7 +354,8 @@ class _GeakDispatchMixin:
         ``GEAK_FLUSH_GRACE_S``, inside the kill cap. The launch marks the run, so whatever it left running is
         reaped when it returns, however it detached.
         """
-        from ..actions.executors._subprocess_kill import REAP_MARK_ENV, RoundWatch, run_with_session_kill
+        from hyperloom.common.proctree import REAP_MARK_ENV
+        from ..actions.executors._subprocess_kill import RoundWatch, run_with_session_kill
 
         runner_timeout, kill_timeout, budget_known = timeouts
         cmd = [
