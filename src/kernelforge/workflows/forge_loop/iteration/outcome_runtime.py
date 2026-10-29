@@ -250,7 +250,7 @@ class OutcomeMixin:
             if require_durable:
                 self._require_durable_outcome(result, decision_label)
             return True
-        except Exception as error:
+        except (OSError, subprocess.SubprocessError, ValueError) as error:
             if require_durable:
                 raise RuntimeError(f"failed to finalize iteration {result.iteration} checkpoint") from error
             log.debug("run_state: iteration reduce/save failed", exc_info=True)
@@ -499,48 +499,44 @@ class OutcomeMixin:
                 has_narrative = True
                 print(f"  [lesson] machine-recorded iter {iteration} from gate findings: {len(fallback)} chars")
 
-        try:
-            scope = self._lesson_scope(
-                iteration,
-                session_sink,
-                decision=decision,
-                result=result,
-                agent_narrative=agent_narrative,
-            )
-            if store.append_scope(iteration, scope):
-                print(f"  [lesson] {format_scope_line(scope)}")
-                if scope.carries_negative is not False and not scope.held_fixed:
-                    print(
-                        "  [lesson] no held-fixed constants recorded — "
-                        "negatives from this iteration re-open on the next "
-                        "change"
-                    )
-                if is_claim_disproved(scope.disproof):
-                    print(
-                        "  [lesson] a direction reported unreachable was "
-                        "shown reachable by the experiment run against it — "
-                        "later iterations are told to re-enter it, not to "
-                        "treat this record as closing it"
-                    )
-                elif scope.disproof == UNDISPROVEN_CLAIM:
-                    print(
-                        "  [lesson] a direction was reported unreachable "
-                        "without running the experiment that would falsify "
-                        "that — it stays open for later iterations"
-                    )
-                elif scope.disproof is None and agent_narrative:
-                    print(
-                        "  [lesson] the record answered nothing about "
-                        "unreachable directions — any 'cannot' in it is "
-                        "recorded as unchecked, and closes nothing"
-                    )
-            else:
+        scope = self._lesson_scope(
+            iteration,
+            session_sink,
+            decision=decision,
+            result=result,
+            agent_narrative=agent_narrative,
+        )
+        if store.append_scope(iteration, scope):
+            print(f"  [lesson] {format_scope_line(scope)}")
+            if scope.carries_negative is not False and not scope.held_fixed:
                 print(
-                    f"  [lesson] scope not recorded for iter {iteration}: "
-                    f"the document renders unscoped and closes nothing"
+                    "  [lesson] no held-fixed constants recorded — "
+                    "negatives from this iteration re-open on the next "
+                    "change"
                 )
-        except Exception:  # isolation boundary: one iteration's scope line; the outcome line still records
-            log.debug("lessons: scope append failed", exc_info=True)
+            if is_claim_disproved(scope.disproof):
+                print(
+                    "  [lesson] a direction reported unreachable was "
+                    "shown reachable by the experiment run against it — "
+                    "later iterations are told to re-enter it, not to "
+                    "treat this record as closing it"
+                )
+            elif scope.disproof == UNDISPROVEN_CLAIM:
+                print(
+                    "  [lesson] a direction was reported unreachable "
+                    "without running the experiment that would falsify "
+                    "that — it stays open for later iterations"
+                )
+            elif scope.disproof is None and agent_narrative:
+                print(
+                    "  [lesson] the record answered nothing about "
+                    "unreachable directions — any 'cannot' in it is "
+                    "recorded as unchecked, and closes nothing"
+                )
+        else:
+            print(
+                f"  [lesson] scope not recorded for iter {iteration}: the document renders unscoped and closes nothing"
+            )
 
         turns, failure = (None, "") if has_narrative else (result.turns, summary_failure)
         store.append_outcome(
