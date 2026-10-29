@@ -1484,7 +1484,7 @@ class TestKernelE2EMeasurementPromotion:
         monkeypatch.setattr(request_handlers, "_resolve_integrate_payload", unexpected)
         monkeypatch.setattr(integrate_payload, "repo_relative_manifest", unexpected)
         monkeypatch.setattr(
-            integrate_rebaseline, "apply_kernel_patch", SimpleNamespace(verify_cpp_itfs_rebuilt=unexpected)
+            integrate_rebaseline, "patch_jit_cache", SimpleNamespace(verify_cpp_itfs_rebuilt=unexpected)
         )
         monkeypatch.setattr(integrate_accuracy, "grade_integrate_accuracy", unexpected)
         monkeypatch.setattr(integrate_outcomes, "_maybe_finalize_kernel_patch", unexpected)

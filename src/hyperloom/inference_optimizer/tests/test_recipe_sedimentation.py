@@ -401,10 +401,8 @@ def test_gap_provenance_round_trips_through_serialization(tmp_path):
 
 
 def test_research_hints_suppress_cold_start():
-    from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
-        SpecialistPromptInputs,
-        _is_cold_start,
-    )
+    from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
+    from hyperloom.orchestrator.prompts.specialist_prompt_builder import _is_cold_start
 
     inp = SpecialistPromptInputs(
         domain="serving_specialist",
@@ -414,10 +412,8 @@ def test_research_hints_suppress_cold_start():
 
 
 def test_kb_section_renders_research_hints_when_kb_empty():
-    from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
-        SpecialistPromptInputs,
-        _section_kb_context,
-    )
+    from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
+    from hyperloom.orchestrator.prompts.specialist_prompt_builder import _section_kb_context
 
     inp = SpecialistPromptInputs(
         domain="serving_specialist",
@@ -430,10 +426,8 @@ def test_kb_section_renders_research_hints_when_kb_empty():
 
 
 def test_bare_cold_start_still_uses_domain_focus_fallback():
-    from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
-        SpecialistPromptInputs,
-        _section_kb_context,
-    )
+    from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
+    from hyperloom.orchestrator.prompts.specialist_prompt_builder import _section_kb_context
 
     inp = SpecialistPromptInputs(domain="serving_specialist")
     text = "\n".join(_section_kb_context(inp))
@@ -441,10 +435,8 @@ def test_bare_cold_start_still_uses_domain_focus_fallback():
 
 
 def test_scout_focus_lists_already_proven():
-    from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
-        SpecialistPromptInputs,
-        _focus_research_scout_specialist,
-    )
+    from hyperloom.orchestrator.prompts.specialist_focus import _focus_research_scout_specialist
+    from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
 
     inp = SpecialistPromptInputs(
         domain="research_scout_specialist",

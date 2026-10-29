@@ -23,7 +23,8 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
     default_enabled_actions,
     SessionContext,
 )
-from hyperloom.orchestrator.prompts.specialist_prompt_builder import SpecialistPromptInputs, build_specialist_prompts
+from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
+from hyperloom.orchestrator.prompts.specialist_prompt_builder import build_specialist_prompts
 from hyperloom.orchestrator.specialists.domains import get_domain
 
 _OWNERSHIP = "Magpie own the launch protocol"

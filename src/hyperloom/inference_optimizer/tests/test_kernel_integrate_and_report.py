@@ -2516,3 +2516,22 @@ async def test_report_executor_writes_md_and_json(session_dir, record_alert):
 def tmp_path_helper(session_dir: Path) -> Path:
     """Point ReportExecutor's SqliteConnection at the session's DB."""
     return session_dir / "storage" / "coordinator.db"
+
+
+def test_single_node_cpp_itfs_patch_takes_the_rebuild_verdict_of_its_backup(monkeypatch) -> None:
+    from hyperloom.orchestrator.actions.executors import _multi_node_env
+
+    backup = {"is_cpp_itfs": True, "build_dir": "/aiter/jit/build", "module_names": ["module_custom"]}
+    seen: list[dict] = []
+
+    def verify(cpp_itfs_backup):
+        seen.append(cpp_itfs_backup)
+        return {"verified": False, "status": "stale_cpp_itfs_cache"}
+
+    monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: False)
+    monkeypatch.setattr(integrate_rebaseline.patch_jit_cache, "verify_cpp_itfs_rebuilt", verify)
+
+    result = integrate_rebaseline._cpp_itfs_rebuild_check({"cpp_itfs_cache_backup": backup})
+
+    assert result == {"verified": False, "status": "stale_cpp_itfs_cache"}
+    assert seen == [backup]

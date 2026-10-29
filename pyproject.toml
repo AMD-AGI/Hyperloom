@@ -381,6 +381,8 @@ omit = [
     "src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py",
     "src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py",
     "src/hyperloom/orchestrator/kernel/apply_kernel_patch.py",
+    "src/hyperloom/orchestrator/kernel/patch_jit_cache.py",
+    "src/hyperloom/orchestrator/kernel/patch_rebuild.py",
     # GEAK runner and Ray cluster lifecycle (subprocess submit).
     "src/hyperloom/orchestrator/kernel/geak_runner.py",
     "src/hyperloom/orchestrator/actions/executors/_ray_runtime.py",
