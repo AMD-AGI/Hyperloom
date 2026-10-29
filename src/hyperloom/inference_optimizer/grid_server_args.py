@@ -761,7 +761,7 @@ def inject_sglang_attention_backend(
 
 
 # sglang MoE runner backend: Hyperloom pins none for the baseline or grid
-# variants, the fmoe_ck tuner's validation bench aside (``phases/kernel.py``
+# variants, the fmoe_ck tuner's validation bench aside (``phases/kernel_gemm_tuning.py``
 # serves it with ``--moe-runner-backend aiter``). sglang's own
 # ``--moe-runner-backend auto`` follows ``SGLANG_USE_AITER`` (aiter when the
 # harness pre-shuffles MoE weights for it, triton otherwise) on current

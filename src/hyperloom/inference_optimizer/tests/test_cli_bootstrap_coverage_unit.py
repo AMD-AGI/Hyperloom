@@ -504,21 +504,21 @@ def test_resolve_reference_recipe_branches(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_detect_checkpoint_precision_bf16_from_torch_dtype(tmp_path):
-    from hyperloom.inference_optimizer.cli import _detect_checkpoint_precision
+    from hyperloom.inference_optimizer.cli.launch_shape import _detect_checkpoint_precision
 
     (tmp_path / "config.json").write_text('{"torch_dtype": "bfloat16"}', encoding="utf-8")
     assert _detect_checkpoint_precision(str(tmp_path)) == "bf16"
 
 
 def test_detect_checkpoint_precision_fp8_from_quant_method(tmp_path):
-    from hyperloom.inference_optimizer.cli import _detect_checkpoint_precision
+    from hyperloom.inference_optimizer.cli.launch_shape import _detect_checkpoint_precision
 
     (tmp_path / "config.json").write_text('{"quantization_config": {"quant_method": "fp8"}}', encoding="utf-8")
     assert _detect_checkpoint_precision(str(tmp_path)) == "fp8"
 
 
 def test_detect_checkpoint_precision_fallback_on_missing():
-    from hyperloom.inference_optimizer.cli import _detect_checkpoint_precision
+    from hyperloom.inference_optimizer.cli.launch_shape import _detect_checkpoint_precision
 
     assert _detect_checkpoint_precision("/nonexistent/model/path") == ""
     assert _detect_checkpoint_precision(None) == ""
@@ -528,7 +528,7 @@ def test_detect_checkpoint_precision_propagates_summary_failure(monkeypatch):
     import pytest
 
     from hyperloom.inference_optimizer import model_config_utils
-    from hyperloom.inference_optimizer.cli import _detect_checkpoint_precision
+    from hyperloom.inference_optimizer.cli.launch_shape import _detect_checkpoint_precision
 
     def summary_fails(_path):
         raise RuntimeError("summary bug")
@@ -540,7 +540,7 @@ def test_detect_checkpoint_precision_propagates_summary_failure(monkeypatch):
 
 
 def test_detect_checkpoint_precision_float8_e4m3fn(tmp_path):
-    from hyperloom.inference_optimizer.cli import _detect_checkpoint_precision
+    from hyperloom.inference_optimizer.cli.launch_shape import _detect_checkpoint_precision
 
     (tmp_path / "config.json").write_text('{"torch_dtype": "float8_e4m3fn"}', encoding="utf-8")
     assert _detect_checkpoint_precision(str(tmp_path)) == "fp8"
@@ -549,7 +549,7 @@ def test_detect_checkpoint_precision_float8_e4m3fn(tmp_path):
 def test_resolve_precision_auto_detected(tmp_path, monkeypatch):
     import argparse
 
-    from hyperloom.inference_optimizer.cli import _resolve_precision
+    from hyperloom.inference_optimizer.cli.launch_shape import _resolve_precision
 
     monkeypatch.setenv("PRECISION", "")
     (tmp_path / "config.json").write_text('{"torch_dtype": "bfloat16"}', encoding="utf-8")
@@ -561,7 +561,7 @@ def test_resolve_precision_auto_detected(tmp_path, monkeypatch):
 def test_resolve_precision_explicit_kept_with_warning(tmp_path, capsys):
     import argparse
 
-    from hyperloom.inference_optimizer.cli import _resolve_precision
+    from hyperloom.inference_optimizer.cli.launch_shape import _resolve_precision
 
     (tmp_path / "config.json").write_text('{"torch_dtype": "bfloat16"}', encoding="utf-8")
     args = argparse.Namespace(precision="fp8", model=str(tmp_path), tp=None, ep=None, conc=None)
@@ -575,7 +575,7 @@ def test_resolve_precision_resume_value_wins(tmp_path, monkeypatch):
     import argparse
     from types import SimpleNamespace
 
-    from hyperloom.inference_optimizer.cli import _resolve_precision
+    from hyperloom.inference_optimizer.cli.launch_shape import _resolve_precision
 
     monkeypatch.setenv("PRECISION", "")
     (tmp_path / "config.json").write_text('{"torch_dtype": "bfloat16"}', encoding="utf-8")

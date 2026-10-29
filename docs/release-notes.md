@@ -2412,7 +2412,7 @@ Report consumers have to follow these field changes; no aliases are kept:
   spelled as bare literals in the Forge provider registry beside the module that
   defined them, in the Claude allowlist head, in the GEAK model default, in the
   TraceLens Claude path and in the Critic's Codex field. Eight copies of two
-  strings, each free to drift. They now live in `hyperloom/common/llm_config.py`
+  strings, each free to drift. They now live in `common/llm_config.py`
   next to `AGENT_BACKEND_CLAUDE` / `AGENT_BACKEND_CODEX`, which is the pair they
   are keyed by, following the `DEFAULT_REASONING_EFFORT` precedent that both
   packages already import from `common`.

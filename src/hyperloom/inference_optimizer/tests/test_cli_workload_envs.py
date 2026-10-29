@@ -14,9 +14,9 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from hyperloom.inference_optimizer.cli import (
+from hyperloom.inference_optimizer.cli import _redact_unknown_args
+from hyperloom.inference_optimizer.cli.launch_shape import (
     _export_workload_envs_for_optimize,
-    _redact_unknown_args,
     _resolve_precision,
     _resolve_run_max_model_len,
     _resolve_workload_knobs,
