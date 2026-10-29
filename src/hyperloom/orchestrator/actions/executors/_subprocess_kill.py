@@ -210,6 +210,8 @@ ORCHESTRATOR_CANCELLED_RETURNCODE: int = -917
 _SERVER_READY_MARKERS: tuple[str, ...] = (
     "Application startup complete",
     "Uvicorn running on",
+    # vLLM's Rust frontend (`vllm serve` with VLLM_USE_RUST_FRONTEND=1) runs no uvicorn; this is its ready line.
+    "OpenAI server is ready to accept requests",
     "The server is fired up and ready to roll",
 )
 
