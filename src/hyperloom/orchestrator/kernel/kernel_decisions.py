@@ -11,8 +11,7 @@ import logging
 import os
 from typing import Any, NamedTuple
 
-from kernelforge.knowledge.kb_store.identity.implementation import normalize_operator_name
-from kernelforge.knowledge.kb_store.identity.kernel_recipe import KERNEL_RECIPE_PRODUCERS
+from kernelforge.knowledge import KERNEL_RECIPE_PRODUCERS, normalize_operator_name
 
 from hyperloom.common.coerce import to_float, to_int
 from hyperloom.common.env import env_flag
@@ -563,9 +562,6 @@ def _hot_rows(
     for k in hot:
         if not isinstance(k, dict) or k.get("reusable_native_kernel") is not True:
             continue
-        # Bypass path tags a kernel non-dispatchable when its shape is geometry-only (launch_grid/tile_name).
-        if k.get("shape_dispatchable") is False:
-            continue
         # Vendor-playbook groups (mori's dispatch+combine) are gated on the sum of the group's members, not each
         # member's own share, and may pin a per-playbook floor -- see effective_hot_kernel_gpu_pct's docstring.
         if effective_hot_kernel_gpu_pct(k) < effective_hot_kernel_min_gpu_pct(k, min_gpu_pct):
@@ -595,7 +591,7 @@ def _hot_rows(
 def _rank_hot_rows(rows: list[_HotRow], top_n: int) -> list[_HotRow]:
     """One row per task group, capped to ``top_n`` per ranking.
 
-    Rows TraceLens never ranked (bypass route, injected collectives) follow in emitted order under their own
+    Rows TraceLens never ranked (injected collectives) follow in emitted order under their own
     ``top_n``, so they cannot fall behind TraceLens' cap.
     """
     ranked: list[_HotRow] = []

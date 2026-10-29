@@ -285,23 +285,6 @@ class TestEvalContractFingerprint:
         b = ag.eval_contract_fingerprint(config_path=cfg)
         assert a == b and len(a) == 16
 
-    def test_task_metric_do_not_affect_fingerprint(self, tmp_path):
-        """Result-level task/metric do not change the fingerprint."""
-        cfg = tmp_path / "c.yaml"
-        _write_minimal_bench_yaml(cfg)
-        fp_no_task = ag.eval_contract_fingerprint(config_path=cfg)
-        fp_with_task = ag.eval_contract_fingerprint(config_path=cfg, task="gsm8k", metric="exact_match")
-        fp_other_task = ag.eval_contract_fingerprint(config_path=cfg, task="mmlu", metric="acc")
-        assert fp_no_task == fp_with_task == fp_other_task
-
-    def test_crash_and_success_produce_same_fingerprint(self, tmp_path):
-        """eval crash (no task/metric) and successful eval produce identical fingerprint."""
-        cfg = tmp_path / "c.yaml"
-        _write_minimal_bench_yaml(cfg)
-        fp_crash = ag.eval_contract_fingerprint(config_path=cfg, task=None, metric=None)
-        fp_success = ag.eval_contract_fingerprint(config_path=cfg, task="gsm8k", metric="exact_match,strict-match")
-        assert fp_crash == fp_success
-
     def test_workload_change_changes_fingerprint(self, tmp_path):
         """A change to workload shape (ISL) changes the fingerprint."""
 

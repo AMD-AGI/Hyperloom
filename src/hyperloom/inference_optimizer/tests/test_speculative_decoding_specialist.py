@@ -35,7 +35,6 @@ def _system_prompt(*, model_name: str = _NAME, model_path: str = _PATH, model_in
     assert domain is not None
     system, _ = build_specialist_prompts(
         SpecialistPromptInputs(
-            task_id="t-1",
             domain=domain,
             gap_canonical_id="gap.decode",
             framework="vllm",
@@ -158,7 +157,6 @@ async def test_dispatch_tells_the_specialist_the_session_model(tmp_path, payload
 
     prep = await runner._prepare(
         RunnerContext(task=_StubTask("task-spec", params), lease=None, extra={"shared_state": coord.shared_state}),
-        prompt_inputs=None,
     )
 
     text = _flat(prep.system_prompt)

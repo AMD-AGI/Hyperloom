@@ -28,7 +28,7 @@ from kernelforge.loop.merge_candidates import (
 from kernelforge.loop.run_state import make_event
 from kernelforge.tools.durable_io import atomic_write_json, atomic_write_text
 from kernelforge.tools.git import git
-from kernelforge.workspace.edit_policy import is_protected_path
+from kernelforge.workspace.edit_policy import FORGE_PROTECTED_PATHS
 
 log = logging.getLogger(__name__)
 
@@ -224,7 +224,7 @@ class LaneRuntimeMixin:
         protected = sorted(
             path
             for path in paths
-            if is_protected_path(
+            if FORGE_PROTECTED_PATHS.is_protected(
                 path,
                 workspace=self.ic.workspace_dir,
                 # The campaign driver carries no protected name of its own.

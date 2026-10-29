@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -248,7 +249,8 @@ def test_deep_probe_counts_calls_and_argument_repeats(probe_module, tmp_path):
     try:
         target.run(50)
     finally:
-        probe.uninstall()
+        sys.setprofile(None)
+        threading.setprofile(None)  # type: ignore[arg-type]
 
     report = probe.report()
     by_name = {row["function"].rsplit(":", 1)[-1]: row for row in report["framework_calls"]}
@@ -258,7 +260,6 @@ def test_deep_probe_counts_calls_and_argument_repeats(probe_module, tmp_path):
     assert by_name["invariant"]["strict_repeat_rate"] > 0.9
     # Loop counter: every call is distinct, so neither rate fires.
     assert by_name["varying"]["strict_repeat_rate"] == 0.0
-    assert report["tier2_enabled"] is True
     # Tier 2 timestamps its rows so the aggregator can tell a constructor that runs during model construction from a
     # function that runs every step.
     for row in report["framework_calls"]:
@@ -302,7 +303,8 @@ def test_deep_probe_timestamps_the_first_outermost_call(probe_module, tmp_path):
     try:
         target.run(8)
     finally:
-        probe.uninstall()
+        sys.setprofile(None)
+        threading.setprofile(None)  # type: ignore[arg-type]
 
     written = probe.write_report()
     assert written
@@ -451,13 +453,9 @@ def _report(**overrides: Any) -> dict[str, Any]:
     base: dict[str, Any] = {
         "schema": "hyperloom.host_probe/1",
         "rank": 0,
-        "world_size": 1,
-        "pid": 1,
         "wall_seconds": 100.0,
         "roots": ["/src/hyvideo/"],
         "roots_unset": False,
-        "tier1_enabled": True,
-        "tier2_enabled": False,
         "host_calls": [],
         "framework_calls": [],
         "truncated": {"host_calls": False, "framework_calls": False},

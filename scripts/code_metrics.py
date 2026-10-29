@@ -1,39 +1,36 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""White-box code-metrics gate: thresholds over a ratcheting baseline, plus absolute checks.
+"""White-box code-metrics gate: every unit over a threshold compared with the base, plus absolute checks.
 
 The dimensions, their thresholds (with the reason for each number) and the pinned tool
-versions live in ``pyproject.toml`` under ``[tool.hyperloom.code_metrics]``. Units that
-were already over a threshold when the gate landed are recorded with their current
-value in the baseline file named there, one line per unit. The baseline only goes down.
+versions live in ``pyproject.toml`` under ``[tool.hyperloom.code_metrics]``. Nothing else
+is recorded: the base is the reference, so a unit a merged change improved is the next
+change's limit.
 
-With ``--base-ref``, only files the change touches (the diff of the working tree against
-the merge base with that ref) are judged; the rest of the tree is reported for
-information and never fails an unrelated change. In a touched file:
+With ``--base-ref``, the tree at the merge base with that ref is measured too, with this
+tree's configuration, and only files the change touches (the diff of the working tree
+against the merge base) are judged; the rest of the tree is reported for information and
+never fails an unrelated change. In a touched file:
 
-* a unit that is not in the baseline and is over a threshold fails, unless the same
-  file at the base already had it at this value or worse (the backlog is the base's, as
-  in the style guide's complexity ceiling);
-* a baselined unit whose value got worse than its recorded value and than its value at
-  the base fails;
-* a baselined unit that improved, dropped under the threshold or disappeared fails as
-  *out of date* until the baseline is tightened in the same change, with
-  ``--update-baseline`` (which can only lower or remove entries), unless the change left
-  the unit exactly as the base had it (main improved it; the entry is listed, not failed).
+* a unit over a threshold that the base did not have over it fails as *new*;
+* a unit worse than at the base fails as *worse*;
+* a unit the base already had at that value or worse passes (the backlog is the base's,
+  as in the style guide's complexity ceiling); one the change improved is listed.
 
-Whole-file, not scoped to the touched files: the baseline may only lose entries or lower
-values relative to the baseline on ``--base-ref``, and the thresholds, scope and tool
-parameters may not loosen (the scope is compared by the files each config measures in
-this tree, not by its text). Editing the baseline is not a way to make the gate pass.
+The thresholds, scope and tool parameters may not loosen relative to ``--base-ref`` (the
+scope is compared by the files each config measures in this tree, not by its text).
+Without ``--base-ref`` there is nothing to compare: every unit over a threshold is listed
+and none fails. A push run (``--pushed-sha``) lists them too, so the job summary of each
+merge shows the whole backlog.
 
 The pull-request label ``baseline-raise``, read from the GitHub API at run time
 (``--pr-number``; on a push, ``--pushed-sha`` finds the PR whose merge made the commit;
-``--pull-request-json`` stands in for the API in a local run), turns baseline growth, new
-or worse units and the failing design checks into *waived* findings: still listed in
-full in the log and the report, no longer failing. It waives nothing else.
+``--pull-request-json`` stands in for the API in a local run), turns new or worse units
+and the failing design checks into *waived* findings: still listed in full in the log
+and the report, no longer failing. It waives nothing else.
 
-Next to the ratchet, ``code_metrics_checks`` runs checks that have no baseline: added
+Next to the comparison, ``code_metrics_checks`` runs checks that have no baseline: added
 comment blocks and history in comments, CJK characters (in the tree and, on a pull
 request, in its title, body and commit messages), production imports of test code, and
 added repeated literals; ``code_metrics_design`` runs the diff-only design checks (A1
@@ -47,18 +44,16 @@ does not change the verdict on the same change; the report lists any edit to the
 implementation or its tool pins for a reviewer.
 
 A unit that only moved to another file (same metric, same qualified name, or the same
-file name for a module; value no worse) keeps the baseline entry it left; see
-:func:`match_moves` for the limit.
+file name for a module; value no worse) is compared with the unit it left at the base;
+see :func:`match_moves` for the limit.
 
 Usage::
 
     pip install ruff==0.16.2 complexipy==8.0.1 radon==6.0.1 vulture==2.16
     npm install -g jscpd@5.4.1      # or CODE_METRICS_JSCPD="npx --yes jscpd@5.4.1"
 
-    python scripts/code_metrics.py                         # judge every file
+    python scripts/code_metrics.py                         # list every unit over a threshold
     python scripts/code_metrics.py --base-ref origin/main  # judge the files changed since the merge base
-    python scripts/code_metrics.py --update-baseline       # tighten after an improvement
-    python scripts/code_metrics.py --seed-baseline         # write a missing baseline from the tree
 
 Exit code 0 when the gate passes, 1 when it fails, 2 when it could not run (a tool is
 missing or at another version, a ref does not resolve, the API could not be read).
@@ -70,6 +65,7 @@ import argparse
 import dataclasses
 import os
 import re
+import subprocess
 import sys
 import tempfile
 from collections.abc import Iterable
@@ -106,27 +102,10 @@ from code_metrics_collect import (
     worse,
     worst_per_unit,
 )
-from code_metrics_report import UPDATE_COMMAND, Outcome, render
+from code_metrics_report import Outcome, render
 
 _PYPROJECT = "pyproject.toml"
 _ENCODING = "utf-8"
-#: Metrics a single file determines, so the same file at the base can be measured alone.
-PER_FILE = (
-    "cyclomatic-complexity",
-    "cognitive-complexity",
-    "function-lines",
-    "nested-blocks",
-    "function-args",
-    "module-lines",
-)
-#: A unit's place in a baseline line: ``<path>::<unit>``; a module-level entry is the path alone.
-_UNIT_SEPARATOR = "::"
-_BASELINE_HEADER = f"""\
-# Code-metrics baseline: units already over a threshold in [tool.hyperloom.code_metrics],
-# one per line as "<metric> <path>::<unit> <value>" ("<metric> <path> <value>" for a module).
-# Entries may only be lowered or removed, never added or raised: {UPDATE_COMMAND}
-# A file is judged only when a change touches it; the label baseline-raise waives growth.
-"""
 _TOOL_COMMANDS = {
     "ruff": ["ruff"],
     "complexipy": ["complexipy"],
@@ -162,7 +141,6 @@ _ANY = (0, 1, 128)
 
 @dataclasses.dataclass(frozen=True)
 class Config:
-    baseline: str
     roots: tuple[str, ...]
     exclude: tuple[str, ...]
     thresholds: dict[str, int]
@@ -185,15 +163,13 @@ def parse_config(text: str) -> Config | None:
         raise ToolError(
             f"thresholds must name {sorted(required)} and may add {sorted(PENDING)}, got {sorted(thresholds)}"
         )
-    baseline, contracts = _file_path(table, "baseline"), _file_path(table, "import-contracts")
     return Config(
-        baseline=baseline,
         roots=_scope(table, "roots"),
         exclude=_scope(table, "exclude"),
         thresholds=thresholds,
         tools=dict(table["tools"]),
         params={name: int(table[name]) for name in _NO_RAISE},
-        contracts=contracts,
+        contracts=_file_path(table, "import-contracts"),
         vocabulary_roots=_scope(table, "vocabulary-roots"),
     )
 
@@ -265,40 +241,6 @@ def config_loosening(head: Config, base: Config) -> list[str]:
     return problems
 
 
-def load_baseline(text: str) -> dict[Key, int]:
-    """Parse the one-line-per-entry baseline; a malformed line is an error, not a skip."""
-    entries: dict[Key, int] = {}
-    for number, raw in enumerate(text.splitlines(), 1):
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        key, value = _parse_entry(line, number)
-        if key in entries:
-            raise ToolError(f"baseline line {number} repeats `{line}`")
-        entries[key] = value
-    return entries
-
-
-def _parse_entry(line: str, number: int) -> tuple[Key, int]:
-    metric, _, rest = line.partition(" ")
-    where, _, value = rest.rpartition(" ")
-    if metric not in METRICS or not where or not value.isdigit():
-        # The line itself is not echoed: the error reaches a PR comment.
-        raise ToolError(f"baseline line {number} is not `<metric> <path>[::<unit>] <value>`")
-    path, separator, unit = where.partition(_UNIT_SEPARATOR)
-    return (metric, path, unit if separator else MODULE), int(value)
-
-
-def baseline_line(key: Key, value: int) -> str:
-    metric, path, unit = key
-    where = path if unit == MODULE else f"{path}{_UNIT_SEPARATOR}{unit}"
-    return f"{metric} {where} {value}"
-
-
-def dump_baseline(entries: dict[Key, int]) -> str:
-    return _BASELINE_HEADER + "".join(baseline_line(key, value) + "\n" for key, value in sorted(entries.items()))
-
-
 def move_identity(key: Key) -> tuple[str, str]:
     """What a move keeps: the metric and the qualified name, or the file name for a module."""
     metric, path, unit = key
@@ -332,68 +274,26 @@ def _by_identity(keys: Iterable[Key]) -> dict[tuple[str, str], list[Key]]:
     return groups
 
 
-def compare(findings: dict[Key, Finding], baseline: dict[Key, int], outcome: Outcome) -> None:
-    """Fill ``outcome.new``, ``.worsened`` and ``.stale``; outside ``outcome.touched``, ``.untouched``."""
-    new = {key: f for key, f in findings.items() if key not in baseline}
-    gone = {key: value for key, value in baseline.items() if key not in findings}
-    moves = match_moves(gone, {key: f.value for key, f in new.items()})
-    moved_from = {old: findings[key] for key, old in moves.items()}
-    fresh = [f for key, f in sorted(new.items()) if key not in moves]
-    worsened: list[tuple[Finding, int]] = []
-    stale = [(key, value, moved_from.get(key)) for key, value in sorted(gone.items())]
-    for key, value in sorted(baseline.items()):
-        if key not in findings:
+def compare(findings: dict[Key, Finding], base: dict[Key, Finding], outcome: Outcome) -> None:
+    """Fill ``outcome.new``, ``.worsened`` and ``.improved`` against ``base``; outside ``outcome.touched``, ``.untouched``."""
+    was = {key: f.value for key, f in base.items()}
+    added = {key: f.value for key, f in findings.items() if key not in was}
+    moves = match_moves({key: value for key, value in was.items() if key not in findings}, added)
+    moved = {old: findings[new] for new, old in moves.items()}
+    for key, finding in sorted(findings.items()):
+        before = was.get(key)
+        if key in moves or (before is not None and not worse(finding.metric, finding.value, before)):
             continue
-        finding = findings[key]
-        if worse(finding.metric, finding.value, value):
-            worsened.append((finding, value))
-        elif worse(finding.metric, value, finding.value):
-            stale.append((key, value, finding))
-    for finding in fresh:
-        if outcome.judged(finding.path):
+        if not outcome.judged(finding.path):
+            outcome.untouched.append((key, before, finding))
+        elif before is None:
             outcome.new.append(finding)
         else:
-            outcome.untouched.append((finding.key, None, finding))
-    for finding, was in worsened:
-        if outcome.judged(finding.path):
-            outcome.worsened.append((finding, was))
-        else:
-            outcome.untouched.append((finding.key, was, finding))
-    for entry in stale:
-        if outcome.judged(entry[0][1]):
-            outcome.stale.append(entry)
-        else:
-            outcome.untouched.append(entry)
-
-
-def growth(
-    head: dict[Key, int], base: dict[Key, int], present: Iterable[Key] = ()
-) -> list[tuple[Key, int | None, int]]:
-    """Entries ``head`` adds or raises over ``base``: (key, base value or None, head value).
-
-    An entry ``head`` dropped counts as moved to a same-named added one only when its unit
-    is no longer over the limit (not in ``present``): otherwise the edit swapped an entry
-    for a second violation.
-    """
-    added = {key: value for key, value in head.items() if key not in base}
-    still = set(present)
-    moves = match_moves({key: value for key, value in base.items() if key not in head and key not in still}, added)
-    grown: list[tuple[Key, int | None, int]] = [(key, None, value) for key, value in added.items() if key not in moves]
-    grown += [(key, base[key], value) for key, value in head.items() if key in base and worse(key[0], value, base[key])]
-    return sorted(grown)
-
-
-def tightened(findings: dict[Key, Finding], baseline: dict[Key, int]) -> dict[Key, int]:
-    """The baseline with every entry lowered to the tree's value or dropped; never raised, never grown."""
-    out = {
-        key: (findings[key].value if worse(key[0], value, findings[key].value) else value)
-        for key, value in baseline.items()
-        if key in findings
-    }
-    new = {key: f.value for key, f in findings.items() if key not in baseline}
-    gone = {key: value for key, value in baseline.items() if key not in findings}
-    out.update((key, new[key]) for key in match_moves(gone, new))
-    return out
+            outcome.worsened.append((finding, before))
+    for key, before in sorted(was.items()):
+        now = findings.get(key, moved.get(key))
+        if outcome.judged(key.path) and (now is None or worse(key.metric, before, now.value)):
+            outcome.improved.append((key, before, now))
 
 
 def check_tools(config: Config) -> dict[str, str]:
@@ -409,7 +309,7 @@ def check_tools(config: Config) -> dict[str, str]:
 
 
 def per_file_findings(root: Path, files: list[str], limits: dict[str, int], units: Units) -> list[Finding]:
-    """The :data:`PER_FILE` metrics of ``files``: each file's values depend on that file alone."""
+    """The metrics of ``files`` whose values depend on each file alone."""
     if not files:
         return []
     findings = ruff_findings(root, files, limits, units)
@@ -431,70 +331,29 @@ def measure(root: Path, config: Config, units: Units) -> dict[Key, Finding]:
     return worst_per_unit(findings)
 
 
-def base_values(root: Path, since: str, paths: Iterable[str], config: Config) -> dict[Key, int]:
-    """:data:`PER_FILE` values over the thresholds of ``paths`` as they were at ``since``."""
+def measure_base(root: Path, since: str, config: Config) -> dict[Key, Finding]:
+    """The tree at ``since``, measured with this tree's ``config``: what every judged unit is compared with."""
+    listed = checks.git(root, "ls-tree", "-z", "--name-only", since, "--", *config.roots).stdout
+    roots = [path for path in listed.split("\0") if path]
     with tempfile.TemporaryDirectory() as work:
-        tree = Path(work)
-        present = []
-        for path in sorted(set(paths)):
-            text = checks.show(root, since, path)
-            if text is not None:
-                (tree / path).parent.mkdir(parents=True, exist_ok=True)
-                (tree / path).write_text(text, encoding=_ENCODING)
-                present.append(path)
-        found = worst_per_unit(per_file_findings(tree, present, config.thresholds, Units(tree)))
-    return {key: f.value for key, f in found.items()}
+        if roots:
+            tar = _checked(
+                ["git", "-C", str(root), "--literal-pathspecs", "archive", "--format=tar", since, "--", *roots]
+            )
+            _checked(["tar", "-x", "-C", work], tar)
+        # ``list_files`` reads the scope from git: track every extracted file, so no ignore rule drops one.
+        in_work = ["git", "-C", work]
+        _checked([*in_work, "init", "-q"])
+        _checked([*in_work, "add", "-A", "-f"])
+        return measure(Path(work), config, Units(Path(work)))
 
 
-def base_paths(outcome: Outcome) -> set[str]:
-    """The files of new, worse and out-of-date :data:`PER_FILE` findings, to measure at the base.
-
-    PER_FILE only, in all three directions: :func:`base_values` measures files, and the path of a
-    directory-entries finding is a directory.
-    """
-    paths = {f.path for f in outcome.new if f.metric in PER_FILE}
-    paths |= {f.path for f, _ in outcome.worsened if f.metric in PER_FILE}
-    paths |= {key[1] for key, _was, _now in outcome.stale if key[0] in PER_FILE}
-    return paths
-
-
-def excuse_base_backlog(outcome: Outcome, base: dict[Key, int]) -> None:
-    """Move new or worse units the base already had at that value or worse to ``outcome.base_backlog``.
-
-    This is the complexity ceiling's comparison: the verdict is head against the merge
-    base, so a unit the change did not make worse is backlog even when the baseline
-    missed it (main pushed past the gate) or recorded it lower.
-    """
-
-    def carried(finding: Finding) -> bool:
-        return finding.key in base and not worse(finding.metric, finding.value, base[finding.key])
-
-    outcome.base_backlog = [(f, base[f.key]) for f in outcome.new if carried(f)]
-    outcome.base_backlog += [(f, base[f.key]) for f, _was in outcome.worsened if carried(f)]
-    outcome.new = [f for f in outcome.new if not carried(f)]
-    outcome.worsened = [(f, was) for f, was in outcome.worsened if not carried(f)]
-
-
-def excuse_base_drift(outcome: Outcome, base: dict[Key, int]) -> None:
-    """Move out-of-date entries the base had already outgrown to ``outcome.base_drift``.
-
-    Main can improve a baselined unit without tightening the baseline (a change is judged
-    only on the files it touches), and the next change to touch that file would then fail
-    for main's improvement. An entry is the base's when this change left the unit exactly as
-    the base had it: the same value, or under the limit (or gone) on both sides. A change
-    that moves the value either way still has to tighten the entry, so a unit it made
-    worse than the base cannot hide under a stale allowance. Only :data:`PER_FILE` metrics
-    are measured at the base; an out-of-date duplication or dead-code entry still fails.
-    """
-
-    def drifted(entry: tuple[Key, int, Finding | None]) -> bool:
-        key, _recorded, finding = entry
-        if key[0] not in PER_FILE or (finding is not None and finding.key != key):
-            return False  # a move: the entry carries a unit this tree has elsewhere, not the base's drift
-        return base.get(key) == (None if finding is None else finding.value)
-
-    outcome.base_drift = [(key, was, base.get(key), now) for key, was, now in outcome.stale if drifted((key, was, now))]
-    outcome.stale = [entry for entry in outcome.stale if not drifted(entry)]
+def _checked(argv: list[str], data: bytes | None = None) -> bytes:
+    proc = subprocess.run(argv, input=data, capture_output=True, check=False)
+    if proc.returncode != 0:
+        error = proc.stderr.decode(_ENCODING, errors="replace").strip()[-500:]
+        raise ToolError(f"{' '.join(argv[:5])} exited {proc.returncode}: {error}")
+    return proc.stdout
 
 
 def merge_base(root: Path, ref: str) -> str:
@@ -518,17 +377,12 @@ def git_show(root: Path, ref: str, path: str) -> str | None:
     return shown.stdout if shown.returncode == 0 else None
 
 
-def compare_with_base(root: Path, ref: str, config: Config, outcome: Outcome, present: Iterable[Key] = ()) -> None:
-    """Fill ``outcome.growth`` / ``.loosened`` from the baseline and config on ``ref``."""
+def compare_with_base(root: Path, ref: str, config: Config, outcome: Outcome) -> None:
+    """Fill ``outcome.loosened`` and ``.gate_changes`` from the config on ``ref``."""
     base_config = parse_config(git_show(root, ref, _PYPROJECT) or "")
     if base_config is None:
-        outcome.notes.append(f"`{ref}` has no code-metrics config yet; growth and loosening checks start once it does.")
+        outcome.notes.append(f"`{ref}` has no code-metrics config yet; the loosening check starts once it does.")
         return
-    base_text = git_show(root, ref, base_config.baseline)
-    if base_text is None:
-        raise ToolError(f"{ref} configures the baseline {base_config.baseline} but has no such file")
-    outcome.base_baseline = load_baseline(base_text)
-    outcome.growth = growth(outcome.baseline, outcome.base_baseline, present)
     outcome.loosened = config_loosening(config, base_config) + scope_loss(root, config, base_config)
     outcome.gate_changes = gate_changes(root, ref, config, base_config)
 
@@ -566,35 +420,22 @@ def run(args: argparse.Namespace, outcome: Outcome) -> int:
         raise ToolError(f"{_PYPROJECT} has no [tool.hyperloom.code_metrics] table")
     outcome.thresholds = config.thresholds
     outcome.module_warning = config.params["module-lines-warning"]
-    outcome.baseline_path = config.baseline
     outcome.versions = check_tools(config)
     if Path(__file__).resolve().parent != (root / "scripts").resolve():
         outcome.notes.append(
             f"Verdict computed by the gate scripts in `{Path(__file__).resolve().parent}`, not by this tree's copy."
         )
-    baseline_path = root / config.baseline
-    _read_regular(root, config.baseline)  # refuse a symlinked or escaping baseline before anything reads it
     units = Units(root)
-    findings = measure(root, config, units)
-    if args.seed_baseline:
-        return seed(baseline_path, findings)
-    if baseline_path.is_file():
-        outcome.baseline = load_baseline(baseline_path.read_text(encoding=_ENCODING))
-    else:
-        outcome.notes.append(f"`{config.baseline}` does not exist, so every unit over a threshold counts as new.")
-    if args.update_baseline:
-        return update(baseline_path, findings, outcome.baseline)
+    outcome.findings = measure(root, config, units)
     since = None
     if args.base_ref:
         git_show(root, args.base_ref, _PYPROJECT)
         since = merge_base(root, args.base_ref)
         outcome.touched = checks.touched_files(root, since)
-    compare(findings, outcome.baseline, outcome)
-    if since:
-        at_base = base_values(root, since, base_paths(outcome), config)
-        excuse_base_backlog(outcome, at_base)
-        excuse_base_drift(outcome, at_base)
-        compare_with_base(root, args.base_ref, config, outcome, findings)
+        outcome.base = measure_base(root, since, config)
+        compare(outcome.findings, outcome.base, outcome)
+        compare_with_base(root, args.base_ref, config, outcome)
+    outcome.listed = since is None or bool(args.pushed_sha)
     production, _tests = list_files(root, config.roots, config.exclude)
     outcome.module_warnings = module_warnings(root, filter(outcome.judged, production), config)
     outcome.problems = checks.run_all(root, config.roots, config.exclude, units, since)
@@ -642,27 +483,11 @@ def _read_regular(root: Path, path: str) -> str | None:
     return full.read_text(encoding=_ENCODING) if full.is_file() else None
 
 
-def seed(path: Path, findings: dict[Key, Finding]) -> int:
-    if path.exists():
-        raise ToolError(f"{path} exists; --seed-baseline only creates a missing baseline")
-    path.write_text(dump_baseline({key: f.value for key, f in findings.items()}), encoding=_ENCODING)
-    print(f"wrote {len(findings)} entries to {path}")
-    return 0
-
-
-def update(path: Path, findings: dict[Key, Finding], baseline: dict[Key, int]) -> int:
-    entries = tightened(findings, baseline)
-    path.write_text(dump_baseline(entries), encoding=_ENCODING)
-    lowered = sum(1 for key, value in entries.items() if key in baseline and value != baseline[key])
-    print(f"baseline: {len(baseline)} -> {len(entries)} entries, {lowered} lowered; written to {path}")
-    return 0
-
-
 def parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument(
-        "--base-ref", help="judge only the files changed since the merge base with this ref; refuse baseline growth"
+        "--base-ref", help="judge the files changed since the merge base with this ref against the tree there"
     )
     parser.add_argument("--report", type=Path, help="also write the Markdown report here")
     parser.add_argument("--link-base", default="", help="prefix for file links, e.g. https://github.com/o/r/blob/<sha>")
@@ -670,11 +495,6 @@ def parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
     source.add_argument("--pr-number", type=int, help="read this PR's labels, title, body and commits from the API")
     source.add_argument("--pull-request-json", type=Path, help="a local stand-in for --pr-number (no API call)")
     source.add_argument("--pushed-sha", help="on a push: read the PR whose merge made this commit from the API")
-    mode = parser.add_mutually_exclusive_group()
-    mode.add_argument(
-        "--update-baseline", action="store_true", help="lower or remove baseline entries to match the tree"
-    )
-    mode.add_argument("--seed-baseline", action="store_true", help="create a missing baseline from the current tree")
     return parser.parse_args(None if argv is None else list(argv))
 
 
@@ -686,10 +506,6 @@ def main(argv: Iterable[str] | None = None) -> int:
     except ToolError as exc:
         outcome.error = str(exc)
         code = 2
-    if args.update_baseline or args.seed_baseline:
-        if outcome.error:
-            print(f"code-metrics: {outcome.error}", file=sys.stderr)
-        return code
     if args.report:
         args.report.write_text(render(outcome, args.link_base), encoding=_ENCODING)
     # The log gets every row (the report truncates long sections), waived ones included.

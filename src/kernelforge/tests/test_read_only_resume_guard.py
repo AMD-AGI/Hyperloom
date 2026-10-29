@@ -13,7 +13,7 @@ import pytest
 
 from kernelforge.agent_backends.base import AgentRunSpec, AgentToolPolicy
 from kernelforge.agent_backends.workspace_guard import WorkspaceGuard, WorkspaceSafetyError
-from kernelforge.workspace.edit_policy import FORGE_LOOP_OUTPUT_DIRNAME
+from kernelforge.workspace.edit_policy import FORGE_LOOP_OUTPUT_DIRNAME, FORGE_PROTECTED_PATHS
 
 
 @pytest.fixture
@@ -43,6 +43,7 @@ def resumed(tmp_path: Path) -> AgentRunSpec:
         allow_dirty_targets=True,
         allow_untracked=True,
         tool_policy=AgentToolPolicy(read=True, search=True, write=False, shell=False, max_turns=4),
+        protected_path_rules=FORGE_PROTECTED_PATHS,
         protected_globs=["*"],
     )
 

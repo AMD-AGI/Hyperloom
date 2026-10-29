@@ -511,8 +511,10 @@ class ClosePhase(CoordinatorCollaborator):
         # to final counts and patch_breakdown_langfuse splices it back into session_breakdown.json.
         await self._run_close_step("langfuse_flush", self._do_langfuse_flush())
 
-        # Artifact package: bundle the curated result/report/analysis files into a single zip under ``/workspace``
-        # so the Claw sandbox sync ships it to object storage even when ``$USER_DATA_PATH`` is outside ``/workspace``.
+        # Artifact package: bundle the curated result/report/analysis files into a single zip under
+        # ``HYPERLOOM_SESSION_PACKAGE_DEST`` (``/workspace`` when unset, where the Claw sandbox sync ships it to object
+        # storage even when ``$USER_DATA_PATH`` is outside ``/workspace``).  A hosted run points it at
+        # ``<session dir>/archive`` on the shared storage instead.
         pkg_path: Path | None = None
         try:
             pkg_path = await self._do_artifact_package()

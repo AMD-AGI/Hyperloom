@@ -86,15 +86,6 @@ def test_geak_provenance_resolves_geak_root_env_without_explicit_root(tmp_path: 
     assert meta["version"] == geak_sha
 
 
-def test_the_bypass_reader_reports_this_distribution(tmp_path: Path) -> None:
-    # The bypass trace reader ships inside Hyperloom, so its entry carries this distribution's version.
-    tool_versions.record_tool_version(tmp_path, tool="bypass")
-    out = assemble_parts(tmp_path)
-    entry = out["metadata"]["versions"]["tools"]["bypass"]
-    assert entry["tool"] == "bypass"
-    assert entry["version"] == _distribution_version()
-
-
 def test_tool_version_probe_git_strategies(tmp_path: Path) -> None:
     sha = _init_git_repo(tmp_path)
     # geak -> git short SHA; commit == version.

@@ -658,6 +658,12 @@ from these benchmark limits and retain their existing contracts.
 | `INFERENCE_OPTIMIZER_CLAUDE_TURN_TIMEOUT_SEC` | `1500` | Total wall-clock limit for one Claude Agent SDK call made by the orchestration backend (reactor turns, including the SWEEP cycle-directive handoff), covering every retry and the backoff between them; tearing the CLI down afterwards adds at most 30 s. Unlike the idle bound of `INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC`, the CLI's own API-retry messages do not extend it. Past it the call is cancelled, the CLI and every process it started are killed, and the turn fails as a backend error the loop retries on its next tick. |
 | `INFERENCE_OPTIMIZER_DEEPSEEK_CALL_TIMEOUT_SEC` | `300` | Wall-clock limit for one DeepSeek Harness turn made by the orchestration backend. Past it the harness runtime is closed and the next turn starts a new runtime and a new conversation. |
 
+## TraceLens analysis route
+
+| Variable | Default | Description |
+|---|---|---|
+| `HYPERLOOM_TRACE_ANALYSIS_ROUTE` | `agent` | `agent` runs the TraceLens skill under a model. `non-llm` runs TraceLens without a model and writes `analysis.json` from the TraceLens report; it shares the gates, candidates and reports with `agent` but adds no collective candidates and writes no prose, and the report's trace-quality warnings appear in `trace_health_warnings`. A `trace_analyze` request's `analysis_route` key overrides it. Any other value fails the request. |
+
 ## TraceLens analysis budgets
 
 On the Claude backend, the TraceLens analysis session bounds each wait for the
@@ -776,11 +782,13 @@ Primary switch (default **off**) for live Langfuse trace push.
   `KEY=value`) but is not a complete data loss prevention (DLP) filter — bare keys without a
   recognizable prefix (for example, raw AWS `AKIA…`) can slip through. The artifact
   packager also copies `reports/trace/*.jsonl` and, with the loose mode on by
-  default (`HYPERLOOM_SESSION_PACKAGE_LOOSE`), drops them under `/workspace`
-  for the Claw sync. If a session might contain customer code or secrets, define
-  an explicit retention + access-control policy for both the Langfuse project
-  and the `/workspace` package destination, and consider disabling live push
-  or loose packaging for those runs.
+  default (`HYPERLOOM_SESSION_PACKAGE_LOOSE`), drops them under the package
+  destination `HYPERLOOM_SESSION_PACKAGE_DEST`: `/workspace` for the Claw sync when
+  it is unset, and `<session dir>/archive/` (mode 0700, on the shared storage) in
+  a hosted run, where the entry sets it whatever the host passed. If a session might
+  contain customer code or secrets, define an explicit retention + access-control
+  policy for both the Langfuse project and the package destination, and consider
+  disabling live push or loose packaging for those runs.
 * **`live push` + `backfill_langfuse` overlap**: Both derive the same
   `trace_id` from `claw_session_id`, so running the offline backfill *after* a
   live run re-emits the out-of-process children onto the same trace and can
@@ -1068,7 +1076,7 @@ restart finds the same directory and resumes it when it holds `manifest.json` an
 (`{"final": true, "returncode": N, "stop_reason": ...}` when `optimize` ends for any reason, and `{"final": true, "returncode": 2,
 "error": ...}` when the request is refused). A host restarts the run only when `exit.json` is missing or its `final` is false.
 `HYPERLOOM_IMAGE` is set from the spec's `framework.image`, and the entry needs `USER_DATA_PATH` set to an absolute path. The result
-archive directory of the run is `<session dir>/archive/`, mode 0700, owned by the application user.
+archive directory of the run is `<session dir>/archive/`, mode 0700, owned by the application user; the entry sets `HYPERLOOM_SESSION_PACKAGE_DEST` to it (whatever the host passed), so the session artifact package and its loose copies are written to `archive/hyperloom-session-packages/` on the shared storage, not to the container's `/workspace`.
 
 `src/hyperloom/hosted/app_bootstrap.sh` starts a hosted run in an image without Hyperloom. It installs into the framework Python environment instead of a venv of its own, because a venv made from the image's interpreter cannot see the torch and ROCm stack that `install.sh` requires. The script is baked into the image: a change to it needs a rebuild.
 
@@ -1079,6 +1087,21 @@ archive directory of the run is `<session dir>/archive/`, mode 0700, owned by th
 | `HYPERLOOM_SOURCE_REPO` | Yes | `OWNER/NAME` on GitHub, or a git URL or path, of the Hyperloom source to run. |
 | `HYPERLOOM_SOURCE_SHA` | Yes | Full 40-character commit id of that source. The wheel for it is built once into `$USER_DATA_PATH/.hyperloom/wheels/<sha>/` and only that wheel is installed (`--no-deps --force-reinstall`, so a new commit replaces an old one) into the image's framework Python environment (`/opt/venv` when it exists, else `$PYTHON`, else `python3`, the order `install.sh` uses), which also runs the entry. The runtime dependencies are resolved there by the `install.sh` the entry runs before `optimize`, as in the legacy flow. The environment records the installed commit in `.hyperloom-install`; a container that already holds it installs nothing. |
 | `HYPERLOOM_CODE_REVISION` | Set by the script | The commit id, exported before the entry starts: a wheel has no `.git` to read it from. |
+
+### The host's guarantee about containers, and the resume that relies on it
+
+The host guarantees that one run has at most one application container at a time, and starts a new leg only after it has
+confirmed that the previous container no longer exists. The entry relies on that guarantee when it resumes a session:
+
+* It compares the owner scopes recorded in the session's ownership ledger with the scope of its own container. With no other scope
+  (a restart in the same container) the resume goes through the preflight's own checks, unchanged.
+* Another scope means the previous container is gone. The entry then does what `hyperloom recover --confirm-scope-gone` does for each
+  such scope, with the same code: the executions that scope left running are marked interrupted, their leases are released, their
+  work is redone, and the resume proceeds. A confirmation that the code refuses (for example another owner's live lease) ends the run
+  with `{"final": true, "returncode": 2, "error": ...}`.
+* A host that starts a new container while the previous one is only unreachable breaks the guarantee: two containers would write
+  one session directory. Such a host cannot use this hosting. Supporting one would need an explicit signal, in which the host
+  states at the start of a leg that the previous container no longer exists; the entry does not read one today.
 
 ### Progress events
 

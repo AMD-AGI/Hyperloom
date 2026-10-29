@@ -113,14 +113,14 @@ def _coord(
             "unset_envs": ["OBSOLETE_SETTING"],
             "args_mode": "replace",
             "optimization_stack": [],
-            "measurement": {
-                "tput": 140.0,
-                "resolved_server_launch_flags": "--accepted-flag 1",
-                "benchmark_workspace": str(tmp_path / "accepted_run"),
-            },
+        },
+        current_best_measurement={
+            "tput": 140.0,
+            "resolved_server_launch_flags": "--accepted-flag 1",
+            "benchmark_workspace": str(tmp_path / "accepted_run"),
         },
     )
-    coord.shared_state.current_best["measurement"]["launch_identity"] = coord.writeback.build_env_spec()[
+    coord.shared_state.current_best_measurement["declared_launch_identity"] = coord.writeback.build_env_spec()[
         "launch_identity"
     ]
     if agentx:
@@ -129,7 +129,7 @@ def _coord(
             if framework == "sglang"
             else ["python", "-m", "vllm.entrypoints.openai.api_server", "--model", "/models/accepted"]
         )
-        coord.shared_state.current_best["measurement"]["launch_evidence"] = {
+        coord.shared_state.current_best_measurement["launch_evidence"] = {
             "magpie_server_launch": {
                 "effective_argv": prefix + ["--tensor-parallel-size", "2", "--accepted-flag", "1"],
                 "runtime_environment": {"ACCEPTED_SETTING": "1", "HIP_VISIBLE_DEVICES": "6,7"},
@@ -230,7 +230,7 @@ async def test_native_handoff_uses_verified_launch_without_searching_server_logs
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     coord = _coord(tmp_path)
-    receipt = coord.shared_state.current_best["measurement"]["launch_evidence"]["magpie_server_launch"]
+    receipt = coord.shared_state.current_best_measurement["launch_evidence"]["magpie_server_launch"]
     receipt["effective_argv"] += ["--mem-fraction-static", "0.95", "--trust-remote-code"]
     receipt["runtime_environment"]["AITER_SETTING"] = "enabled"
     handoff = await _handoff(coord, monkeypatch)

@@ -36,6 +36,9 @@ class _FakeKnowledgePlane:
     pr_monitor_enabled = True
     recipe_kb_enabled = True
 
+    def specialist_mcp_url(self) -> str:
+        return ""
+
 
 def _build_args(**overrides) -> argparse.Namespace:
     base = dict(

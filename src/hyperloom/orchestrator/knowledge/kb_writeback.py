@@ -14,11 +14,6 @@ from hyperloom.agents.framework.kb import LESSONS_FILE, framework_optimization_r
 from hyperloom.common.io import JsonLineFormat, append_jsonl
 
 
-def _default_kb_root() -> Path:
-    """Resolve the framework-PR lessons directory."""
-    return framework_optimization_root()
-
-
 #: Allowed ``outcome`` values; keep stable (downstream readers match exact strings).
 OUTCOME_INTEGRATED: str = "integrated"
 OUTCOME_REVERTED_SMOKE_FAIL: str = "reverted_smoke_fail"
@@ -42,11 +37,6 @@ ALLOWED_OUTCOMES: frozenset[str] = frozenset(
 )
 
 
-def _str_list(values: list[str] | tuple[str, ...] | None) -> list[str]:
-    """Normalize an optional string list for JSONL storage."""
-    return [str(v).strip() for v in (values or []) if str(v).strip()]
-
-
 @dataclass(frozen=True)
 class FrameworkOutcome:
     """The fields of one framework-PR outcome record, before normalization."""
@@ -58,17 +48,8 @@ class FrameworkOutcome:
     tps_delta_pct: float
     session_id: str
     framework: str = ""
-    gap_canonical_id: str = ""
-    gap_keywords: list[str] | None = None
-    model_class: str = ""
-    gpu_type: str = ""
-    precision: str = ""
     applicability: str = ""
-    provenance: str = ""
     accuracy_delta_pct: float = 0.0
-    changed_files: list[str] | None = None
-    source_framework: str = ""
-    target_framework: str = ""
 
 
 def _record(fields: FrameworkOutcome) -> dict:
@@ -82,23 +63,14 @@ def _record(fields: FrameworkOutcome) -> dict:
         "outcome": str(fields.outcome or ""),
         "tps_delta_pct": float(fields.tps_delta_pct or 0.0),
         "framework": str(fields.framework or ""),
-        "gap_canonical_id": str(fields.gap_canonical_id or ""),
-        "gap_keywords": _str_list(fields.gap_keywords),
-        "model_class": str(fields.model_class or ""),
-        "gpu_type": str(fields.gpu_type or ""),
-        "precision": str(fields.precision or ""),
         "applicability": str(fields.applicability or ""),
-        "provenance": str(fields.provenance or ""),
         "accuracy_delta_pct": float(fields.accuracy_delta_pct or 0.0),
-        "changed_files": _str_list(fields.changed_files),
-        "source_framework": str(fields.source_framework or ""),
-        "target_framework": str(fields.target_framework or ""),
     }
 
 
 def _append_record_sync(record: dict) -> Path:
     """Append a single JSONL record under the resolved KB root."""
-    path = _default_kb_root() / LESSONS_FILE
+    path = framework_optimization_root() / LESSONS_FILE
     append_jsonl(path, record, make_parents=True, fmt=JsonLineFormat(sort_keys=True))
     return path
 

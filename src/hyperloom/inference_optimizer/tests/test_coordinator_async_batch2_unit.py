@@ -2044,10 +2044,8 @@ async def test_replay_for_resume_rebuilds_undecided_proposals(coord: Coordinator
             "critic", "orchestration", "review_verdict", {"target_proposal_msg_id": p2.msg_id, "verdict": "approve"}
         )
     )
-    out = await coord.writeback.replay_for_resume()
-    assert out["pending_restored"] == 1
-    assert p1.msg_id in coord.state.pending_proposals
-    assert p2.msg_id not in coord.state.pending_proposals
+    await coord.writeback.replay_for_resume()
+    assert list(coord.state.pending_proposals) == [p1.msg_id]
 
 
 @pytest.mark.asyncio
@@ -2062,8 +2060,7 @@ async def test_replay_for_resume_verdict_map_backcompat(coord: Coordinator) -> N
             {"target_proposal_msg_id": p1.msg_id, "verdict_map": {"x": "ok"}},
         )
     )
-    out = await coord.writeback.replay_for_resume()
-    assert out["verdicts_seen"] == 1
+    await coord.writeback.replay_for_resume()
     assert p1.msg_id not in coord.state.pending_proposals
 
 

@@ -49,9 +49,10 @@ def captured_run_spec(monkeypatch):
         monkeypatch.setattr(agent_mod, "create_registered_backend", lambda *a, **k: backend)
         monkeypatch.setattr(agent_mod, "run_session_with_api_resume", fake_resume_driver)
 
+        monkeypatch.setattr(agent_mod, "agent_runtime", lambda _config: runtime)
+
         config = Config()
         config.workspace = ""
-        config.agent_runtime = lambda: runtime
         make_kwargs.setdefault("program_md", "PROGRAM BODY")
         agent_fn = agent_mod.make_agent_fn(
             config,
@@ -74,6 +75,17 @@ def test_run_spec_timeout_comes_from_the_session_budget(tmp_path, captured_run_s
 
     # The campaign-sized budget, not the backend runtime's 1800s default.
     assert spec.timeout_sec == 4321
+
+
+def test_the_implementer_session_carries_forges_protected_path_rules(tmp_path, captured_run_spec):
+    from kernelforge.workspace.edit_policy import FORGE_PROTECTED_PATHS
+
+    kernel = tmp_path / "kernel.py"
+    kernel.write_text("# kernel\n")
+
+    spec = captured_run_spec(session_timeout_sec=600, kernel_path=str(kernel))
+
+    assert spec.protected_path_rules is FORGE_PROTECTED_PATHS
 
 
 def test_prompt_states_the_deadline_and_the_handoff(tmp_path, captured_run_spec):

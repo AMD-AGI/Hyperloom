@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from kernelforge.cli.pr_references import _write_pr_provenance
+from kernelforge.loop.bootstrap.pr_references import _write_pr_provenance
 from kernelforge.knowledge.pr_knowledge import references as pr_monitor_refs
 from kernelforge.knowledge.pr_knowledge.references import refs_dir
 

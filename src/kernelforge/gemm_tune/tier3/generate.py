@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from kernelforge.workspace.edit_policy import FORGE_PROTECTED_PATHS
+
 from .mandate import TunerMandate
 
 log = logging.getLogger(__name__)
@@ -116,8 +118,7 @@ def generate_tuner(
         chosen = select_default_agent_provider(model)
         runtime = resolve_agent_runtime(
             chosen.name,
-            # The model variable is per-provider, so it is only readable once
-            # the provider is settled.
+            # The model variable is per-provider, so it is only readable once the provider is settled.
             model=model or resolve_agent_model(chosen.name),
             settings=AgentRuntimeSettings(timeout_sec=timeout_s, reasoning_effort=resolve_agent_reasoning_effort()),
         )
@@ -141,6 +142,7 @@ def generate_tuner(
         tool_policy=AgentToolPolicy(read=True, search=True, write=True, shell=True, max_turns=MAX_AUTHORING_TURNS),
         target_files=[str(script_path)],
         allow_untracked=True,
+        protected_path_rules=FORGE_PROTECTED_PATHS,
     )
 
     try:
@@ -148,7 +150,11 @@ def generate_tuner(
     except Exception as exc:  # isolation boundary: one Tier3 authoring session, reported in the outcome
         log.warning("tier-3 authoring session failed", exc_info=True)
         return GeneratedTuner(False, None, f"authoring session failed: {exc!r}")
+    return _outcome(backend, result, script_path)
 
+
+def _outcome(backend: Any, result: Any, script_path: Path) -> GeneratedTuner:
+    """What a finished authoring session produced: the script, or why there is none."""
     provider = str(getattr(backend, "name", "") or "")
     session = str(getattr(result, "session_id", "") or "")
     if not script_path.is_file():

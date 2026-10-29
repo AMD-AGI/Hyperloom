@@ -27,7 +27,9 @@ from kernelforge.agent_backends import (
     watchdog_timeout_sec,
 )
 from kernelforge.agent_backends.registry import create_registered_backend
+from kernelforge.agent_backends.runtime import agent_runtime
 from kernelforge.config import Config
+from kernelforge.workspace.edit_policy import FORGE_PROTECTED_PATHS
 from kernelforge.rewrite_by_flydsl import protocol
 from kernelforge.rewrite_by_flydsl.budget import DEFAULT_REWRITE_BUDGET
 from kernelforge.rewrite_by_flydsl.measurement import FlydslMeasurement
@@ -363,7 +365,7 @@ async def _run_agent(
 ) -> tuple[str, str]:
     worktree = turn.worktree
     timeout_sec = turn.timeout_sec
-    runtime = config.agent_runtime()
+    runtime = agent_runtime(config)
     backend = create_registered_backend(
         runtime,
         preflight=False,
@@ -384,6 +386,7 @@ async def _run_agent(
         timeout_sec=timeout_sec,
         additional_directories=[str(brief.reference_path.parent)],
         allow_untracked=True,
+        protected_path_rules=FORGE_PROTECTED_PATHS,
         hooks=_make_applyback_hooks(deadline_monotonic=deadline_monotonic),
         progress_log=turn.progress_log,
         tool_policy=AgentToolPolicy(

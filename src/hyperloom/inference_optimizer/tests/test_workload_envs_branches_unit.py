@@ -718,7 +718,6 @@ def test_the_cli_and_the_orchestrator_read_one_set_of_workload_defaults():
     from hyperloom.inference_optimizer.cli import parser
 
     canonical = (workload_defaults.DEFAULT_ISL, workload_defaults.DEFAULT_OSL, workload_defaults.DEFAULT_CONC)
-    assert we.cli_workload_defaults() == canonical
     assert (parser.DEFAULT_ISL, parser.DEFAULT_OSL, parser.DEFAULT_CONC) == canonical
 
     # The shared module has to stay a leaf, or it cannot break the cycle.

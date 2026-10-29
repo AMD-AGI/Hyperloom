@@ -205,7 +205,7 @@ async def test_forged_task_rejected_before_any_side_effect(tmp_path, monkeypatch
     monkeypatch.setattr(_setup_replay, "run_setup_commands", _spy_setup)
 
     class _SS:
-        phase = "FRAMEWORK_AGENT"
+        phase = "ENABLEMENT"
         enablement = EnablementRound()
 
         def get_specialist_patch_verdict(self, tid):

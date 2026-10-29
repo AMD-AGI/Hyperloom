@@ -29,7 +29,6 @@ from hyperloom.inference_optimizer.breakdown.recorder.conc_sweep_event import (
     STAGE_BOOT_ATTEMPT,
     STAGE_BUDGET_SKIP,
     STAGE_REUSE,
-    STAGE_SERVER_RESTART,
     STRATEGY_REFUSED,
     STRATEGY_SERVER_RESTART,
     STRATEGY_SINGLE_SERVER,
@@ -129,20 +128,14 @@ def _plan(recorder) -> None:
     recorder.record_plan(
         SweepPlan(
             concs_requested=[64, 32],
-            concs_ordered=[64, 32],
+            concs_ordered=[32, 64],
             grid_source=GRID_REQUESTED,
             num_prompts_factor=5,
             variant_timeout_sec=1800,
-            arms_order=[ARM_OPTIMIZED, ARM_BASELINE],
+            arms_order=[ARM_BASELINE, ARM_OPTIMIZED],
         )
     )
-    recorder.record_budget(
-        SweepBudget(
-            declared_total_sec=9000,
-            rung_cost_sec=10800.0,
-            deadline=1780000000.0,
-        )
-    )
+    recorder.record_budget(SweepBudget(declared_total_sec=9000, deadline=1780000000.0))
     recorder.record_environment(
         SweepEnvironment(
             sweep_task_id="conc_sweep_20260907T020304Z",
@@ -219,16 +212,14 @@ def test_the_ladder_says_whether_it_was_chosen_or_handed_over(_bound_session):
     plan = _ext(_bound_session)["plan"]
     assert plan["grid_source"] == GRID_REQUESTED
     assert plan["concs_requested"] == [64, 32]
-    assert plan["concs_ordered"] == [64, 32]
+    assert plan["concs_ordered"] == [32, 64]
     assert plan["num_prompts_factor"] == 5
-    # The optimized arm runs first, which is why a budget that runs out takes
-    # the baseline arm with it rather than the arm being asked about.
-    assert plan["arms_order"] == [ARM_OPTIMIZED, ARM_BASELINE]
+    assert plan["arms_order"] == [ARM_BASELINE, ARM_OPTIMIZED]
 
 
 def test_a_ladder_the_mode_picked_says_so(_bound_session):
     recorder = _recorder()
-    recorder.record_plan(SweepPlan(concs_requested=[1, 4, 8], concs_ordered=[8, 4, 1], grid_source=GRID_MODE_DEFAULT))
+    recorder.record_plan(SweepPlan(concs_requested=[1, 4, 8], concs_ordered=[1, 4, 8], grid_source=GRID_MODE_DEFAULT))
     recorder.finish(_final())
 
     assert _ext(_bound_session)["plan"]["grid_source"] == GRID_MODE_DEFAULT
@@ -266,9 +257,10 @@ def test_the_budget_records_what_was_declared(_bound_session):
     recorder.finish(_final())
 
     budget = _ext(_bound_session)["budget"]
+    # A rung is held to its arm's deadline rather than priced, so the schema's estimate is null.
     assert budget == {
         "declared_total_sec": 9000,
-        "rung_cost_sec": 10800.0,
+        "rung_cost_sec": None,
         "gate_active": True,
         "deadline": 1780000000.0,
     }
@@ -483,88 +475,44 @@ def test_a_rung_the_budget_refused_is_not_a_benchmark_failure(_bound_session):
 
 
 # ---------------------------------------------------------------------------
-# Boot-retry-descend
+# Boot attempts
 # ---------------------------------------------------------------------------
-def test_the_concurrencies_the_server_would_not_boot_at_are_reported(_bound_session):
+def test_the_rungs_the_server_would_not_boot_at_are_reported(_bound_session):
     recorder = _recorder()
     recorder.open_arm(ARM_OPTIMIZED, extra_server_args="--x", extra_envs={})
     recorder.record_variant(
         ARM_OPTIMIZED,
         SweepRung(
             stage=STAGE_BOOT_ATTEMPT,
-            conc=64,
-            point=_point(64, status="failed", error="OOM", error_class="single_server_boot_failed"),
-            committed=False,
+            conc=32,
+            point=_point(32, status="failed", error="OOM", error_class="single_server_boot_failed"),
             wall_duration_sec=61.0,
         ),
     )
-    recorder.record_variant(ARM_OPTIMIZED, SweepRung(stage=STAGE_BOOT, conc=32, point=_point(32)))
-    recorder.commit_variant(
-        ARM_OPTIMIZED,
-        stage=STAGE_BOOT_ATTEMPT,
-        conc=64,
-        point=_point(64, status="failed", error="OOM", error_class="single_server_boot_failed"),
-    )
+    recorder.record_variant(ARM_OPTIMIZED, SweepRung(stage=STAGE_BOOT, conc=64, point=_point(64)))
     recorder.record_arm_boot(
         ARM_OPTIMIZED,
         succeeded=True,
-        booted_conc=32,
-        attempted_concs=[64, 32],
-        failed_concs=[64],
+        booted_conc=64,
+        attempted_concs=[32, 64],
+        failed_concs=[32],
     )
     recorder.finish_arm(ARM_OPTIMIZED, status="degraded")
     recorder.finish(_final())
 
-    boot = _ext(_bound_session)["arms"][ARM_OPTIMIZED]["boot"]
+    arm = _ext(_bound_session)["arms"][ARM_OPTIMIZED]
+    boot = arm["boot"]
     assert boot["succeeded"] is True
-    assert boot["booted_conc"] == 32
-    assert boot["attempted_concs"] == [64, 32]
-    assert boot["failed_concs"] == [64]
+    assert boot["booted_conc"] == 64
+    assert boot["attempted_concs"] == [32, 64]
+    assert boot["failed_concs"] == [32]
     assert [(row["conc"], row["status"], row["committed"]) for row in boot["attempts"]] == [
-        (64, "failed", True),
-        (32, "succeeded", True),
+        (32, "failed", True),
+        (64, "succeeded", True),
     ]
     assert boot["attempts"][0]["error"] == "OOM"
-
-
-def test_a_failed_boot_counts_only_once_a_lower_rung_came_up(_bound_session):
-    recorder = _recorder()
-    recorder.open_arm(ARM_OPTIMIZED, extra_server_args="--x", extra_envs={})
-    for conc in (64, 32):
-        recorder.record_variant(
-            ARM_OPTIMIZED,
-            SweepRung(
-                stage=STAGE_BOOT_ATTEMPT,
-                conc=conc,
-                point=_point(conc, status="failed", error_class="single_server_boot_failed"),
-                committed=False,
-            ),
-        )
-    recorder.record_arm_boot(ARM_OPTIMIZED, succeeded=False, attempted_concs=[64, 32], failed_concs=[64, 32])
-    recorder.record_arm_strategy(
-        ARM_OPTIMIZED,
-        ArmStrategy(
-            strategy=STRATEGY_SERVER_RESTART,
-            reason="all_boot_attempts_failed",
-            lifecycle_eligible=True,
-            lifecycle_reason="supported",
-        ),
-    )
-    recorder.record_variant(ARM_OPTIMIZED, SweepRung(stage=STAGE_SERVER_RESTART, conc=64, point=_point(64)))
-    recorder.record_variant(ARM_OPTIMIZED, SweepRung(stage=STAGE_SERVER_RESTART, conc=32, point=_point(32)))
-    recorder.finish_arm(ARM_OPTIMIZED, status="succeeded")
-    recorder.finish(_final())
-
-    arm = _ext(_bound_session)["arms"][ARM_OPTIMIZED]
-    # The curve is the retry's results, one per concurrency, not four rows.
-    assert [(point["conc"], point["stage"]) for point in arm["points"]] == [
-        (32, STAGE_SERVER_RESTART),
-        (64, STAGE_SERVER_RESTART),
-    ]
-    assert arm["boot"]["succeeded"] is False
-    assert [row["committed"] for row in arm["boot"]["attempts"]] == [False, False]
-    assert arm["strategy"] == STRATEGY_SERVER_RESTART
-    assert arm["strategy_reason"] == "all_boot_attempts_failed"
+    # The failed boot is that rung's point on the curve.
+    assert [(point["conc"], point["status"]) for point in arm["points"]] == [(32, "failed"), (64, "succeeded")]
 
 
 # ---------------------------------------------------------------------------
@@ -953,7 +901,7 @@ def test_every_recorded_block_is_the_block_the_schema_declares(_bound_session):
     recorder.record_arm_boot(ARM_OPTIMIZED, succeeded=True, booted_conc=64, attempted_concs=[64], failed_concs=[])
     recorder.finish_arm(ARM_OPTIMIZED, status="succeeded")
     recorder.open_arm(ARM_BASELINE, extra_server_args="", extra_envs={})
-    recorder.record_arm_refused(ARM_BASELINE, reason="insufficient_remaining_for_variant", remaining_sec=12.0)
+    recorder.record_arm_refused(ARM_BASELINE, reason="first_arm_share_exhausted", remaining_sec=12.0)
     recorder.record_progress(
         comparison=[
             {

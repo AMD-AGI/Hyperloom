@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import logging
 import os
-from pathlib import Path
 from typing import Any
 
 from hyperloom.common.coerce import to_int
@@ -22,11 +21,6 @@ from hyperloom.inference_optimizer.multi_node.state_paths import resolve_state_f
 from hyperloom.inference_optimizer.recipe_snapshot_constants import KbTopology
 
 log = logging.getLogger(__name__)
-
-
-def _state_path() -> Path:
-    """Resolve where the multi_node CLI dropped its state file."""
-    return resolve_state_file()
 
 
 def _read_state() -> dict[str, Any]:
@@ -198,11 +192,6 @@ def infera_ssh_env_from_state() -> dict[str, str]:
     }
 
 
-def rayjob_id_from_state() -> str:
-    """Return the SaFE-allocated RayJob workload id, or ``\"\"`` if absent."""
-    return str(_read_state().get("rayjob_id") or "").strip()
-
-
 def export_ray_address_to_os() -> None:
     """Set ``RAY_ADDRESS`` from multi_node state when running multi-node optimize."""
     if not is_multi_node():
@@ -242,7 +231,7 @@ def magpie_remote_env() -> dict[str, str]:
             "HYPERLOOM_MN_EXT_SERVICE_URL (or _HEAD_IP for rayjob) is set in the "
             "environment `python -m hyperloom optimize` runs in.",
             os.environ.get("INFERENCE_OPTIMIZER_NODES"),
-            _state_path(),
+            resolve_state_file(),
         )
         return {}
 
@@ -290,6 +279,5 @@ __all__ = [
     "log_mn_banner",
     "magpie_remote_env",
     "ray_gcs_address_from_state",
-    "rayjob_id_from_state",
     "resolve_kb_topology",
 ]

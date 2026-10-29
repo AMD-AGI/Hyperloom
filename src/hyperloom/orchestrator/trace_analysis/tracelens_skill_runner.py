@@ -1192,8 +1192,8 @@ def aggregate_by_source_function(candidates: list[dict[str, Any]]) -> list[dict[
     Groups are sorted by aggregate time (descending). Native symbols are
     normalized to their logical function before keying by operation and source,
     so template/shape instances merge but different operators stay separate.
-    Python candidates key on the same versioned ``(kind, source, operation)``
-    identity used by the bypass path. Each group carries ``task_group_id``,
+    Python candidates key on the versioned ``(kind, source, operation)``
+    identity. Each group carries ``task_group_id``,
     ``source_path``, ``definition_line``, ``function_name``, ``kernel_ids``,
     ``primary_kernel_id``, ``rows``, and ``aggregate_*`` fields.
 

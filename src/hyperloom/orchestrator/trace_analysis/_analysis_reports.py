@@ -6,19 +6,15 @@
 from __future__ import annotations
 
 import argparse
-import csv
-import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from hyperloom.common.io import JsonFormat, atomic_write_json
 from hyperloom.common.timeutil import now_iso
-from hyperloom.inference_optimizer import framework_registry
 
 from ._kernel_partition import build_kernel_candidates_document
 from ._kernel_roofline import (
-    _candidate_model_config_paths,
     build_kernel_roofline_payload,
     enrich_candidates_with_runtime_metadata,
     kernel_roofline_path_for_run,
@@ -26,8 +22,6 @@ from ._kernel_roofline import (
 from ._trace_inputs import TraceInputs
 from .tracelens_skill_runner import aggregate_by_source_function
 from hyperloom.inference_optimizer.framework_registry import tracelens_analysis_mode
-
-log = logging.getLogger(__name__)
 
 
 def build_task_groups(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -142,10 +136,10 @@ def build_audit_summary(
 
 @dataclass(frozen=True)
 class OrchestratorOutcome:
-    """What the TraceLens SDK orchestrator left for the report writer.
+    """What the analysis route left for the report writer.
 
     Attributes:
-        report_path: The ``analysis.md`` it produced, if any.
+        report_path: The report it produced (``analysis.md`` or ``analysis.json``), if any.
         health_warnings: Trace-health warnings accumulated before and during the run.
     """
 
@@ -160,9 +154,9 @@ def write_reports(
     args: argparse.Namespace,
     outcome: OrchestratorOutcome = OrchestratorOutcome(),
 ) -> dict[str, str]:
-    """Write Hyperloom-owned sidecar JSONs and surface the upstream ``analysis.md``.
+    """Write Hyperloom-owned sidecar JSONs and surface the report the analysis route produced.
 
-    ``analysis.md`` is owned by the TraceLens SDK orchestrator and not copied/aliased.
+    The report (``analysis.md`` or ``analysis.json``) is owned by the route and not copied/aliased.
 
     Args:
         run_dir: The per-run output directory to write sidecars into.
@@ -177,8 +171,8 @@ def write_reports(
         A mapping of report name to its written/surfaced path.
 
     Raises:
-        RuntimeError: When the orchestrator did not produce ``analysis.md``
-            (rather than fabricating a report).
+        RuntimeError: When the route did not produce its report
+            (rather than fabricating one).
     """
     existing_report_path = outcome.report_path
     tracelens_dir = run_dir / "tracelens"
@@ -273,9 +267,7 @@ def write_reports(
     )
     atomic_write_json(kernel_roofline_path, kernel_roofline_payload, fmt=JsonFormat(trailing_newline=True))
 
-    diffusion_roofline_path = _write_diffusion_roofline(run_dir, tracelens_dir, args)
-
-    artifact_paths = {
+    return {
         "trace_input_manifest": str(run_dir / "trace_input_manifest.json"),
         "kernel_candidates": str(kernel_candidates_path),
         "kernel_roofline": str(kernel_roofline_path),
@@ -284,78 +276,3 @@ def write_reports(
         "trace_report_path": str(existing_report_path) if existing_report_path else "",
         "tracelens_summary": str(summary_path),
     }
-    if diffusion_roofline_path:
-        artifact_paths["diffusion_roofline"] = diffusion_roofline_path
-    return artifact_paths
-
-
-def _write_diffusion_roofline(run_dir: Path, tracelens_dir: Path, args: argparse.Namespace) -> str:
-    """Write the scriptable workload-level roofline sidecar; return its path, or ``""`` when skipped.
-
-    Aggregates the per-kernel roofline into an end-to-end workload roofline.
-    Best-effort sidecar; never blocks the per-kernel report.
-    """
-    diffusion_roofline_path = ""
-    if not framework_registry.is_scriptable(getattr(args, "framework", "")):
-        return diffusion_roofline_path
-    try:
-        from .diffusion_roofline import build_report as _build_diffusion_roofline  # noqa: WPS433
-        from ._denoise_steps import count_profiler_steps, resolve_perstep_divisor  # noqa: WPS433
-
-        # Per-step divisor: an operator-declared count wins over the one
-        # inferred from the trace, matching the bypass route.
-        _num_steps = resolve_perstep_divisor(
-            requested_steps=getattr(args, "num_denoise_steps", 0),
-            inferred_steps=count_profiler_steps(args.trace_input),
-        )
-        _diff_report = _build_diffusion_roofline(tracelens_dir / "perf_report_csvs", _num_steps, top_k=10)
-        # Only for frameworks whose denoiser config Hyperloom can read -- the
-        # trace-derived totals above need no such config and always ship.
-        if framework_registry.has_denoiser_config(getattr(args, "framework", "")):
-            _attach_analytic_ceiling(_diff_report, args, _num_steps)
-        out = run_dir / "diffusion_roofline.json"
-        atomic_write_json(out, _diff_report, fmt=JsonFormat(trailing_newline=True))
-        diffusion_roofline_path = str(out)
-        print(
-            "[diffusion_roofline] "
-            f"kernel_eff={_diff_report['totals']['kernel_roofline_efficiency']:.3f} "
-            f"gpu_busy_ratio={_diff_report.get('gpu_busy_ratio')} "
-            f"-> {out}"
-        )
-    except FileNotFoundError as exc:
-        print(f"[diffusion_roofline] skipped: {exc}")
-    except (OSError, EOFError, ValueError, csv.Error) as exc:
-        log.warning("diffusion roofline sidecar failed: %s", exc)
-        print(f"[diffusion_roofline] skipped: {type(exc).__name__}: {exc}")
-    return diffusion_roofline_path
-
-
-def _attach_analytic_ceiling(diff_report: dict[str, Any], args: argparse.Namespace, num_steps: int | None) -> None:
-    """Add the a-priori analytic compute ceiling (config/safetensors derived) to the workload roofline.
-
-    Gives the workload roofline an absolute ideal-ms floor. Best-effort: a failure is recorded on the report.
-    """
-    try:
-        _model_dir = getattr(args, "model_path", "").strip()
-        if not _model_dir:
-            for _cfg in _candidate_model_config_paths(args.model_name):
-                if Path(_cfg).is_file():
-                    _model_dir = str(Path(_cfg).parent)
-                    break
-        if _model_dir and Path(_model_dir).is_dir():
-            from . import diffusion_flops as _dflops  # noqa: WPS433
-
-            _est = _dflops.analytic_ceiling(
-                _model_dir,
-                gpu_type=args.target_platform or "mi355x",
-                precision=getattr(args, "precision", "").strip() or "bf16",
-                num_steps=num_steps,
-            )
-            if _est:
-                diff_report["analytic_ceiling"] = _est
-                _actual_us = diff_report["totals"]["sigma_actual_kernel_us"]
-                if _est.get("ideal_ms") and _actual_us > 0:
-                    diff_report["analytic_within_pct"] = round(_est["ideal_ms"] / (_actual_us / 1e3) * 100.0, 2)
-    except Exception as _exc:  # isolation boundary: the analytic ceiling, recorded as analytic_ceiling_error
-        log.warning("diffusion analytic ceiling failed: %s", _exc, exc_info=True)
-        diff_report["analytic_ceiling_error"] = f"{type(_exc).__name__}: {_exc}"

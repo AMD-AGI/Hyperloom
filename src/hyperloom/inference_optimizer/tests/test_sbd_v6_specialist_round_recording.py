@@ -62,7 +62,6 @@ def test_a_prelude_round_lands_on_the_action_that_dispatched_it(tmp_path) -> Non
             domain="attention",
             summary="two kernels worth attacking",
             proposals_total=2,
-            empty=False,
             confidence=0.75,
             new_findings=["fa2 is the hot path"],
         )
@@ -76,7 +75,6 @@ def test_a_prelude_round_lands_on_the_action_that_dispatched_it(tmp_path) -> Non
     assert row["domain"] == "attention"
     assert row["summary"] == "two kernels worth attacking"
     assert row["proposals_total"] == 2
-    assert row["empty"] is False
     assert row["confidence"] == pytest.approx(0.75)
     assert row["new_findings"] == ["fa2 is the hot path"]
 
@@ -86,14 +84,11 @@ def test_an_empty_round_says_so_rather_than_going_missing(tmp_path) -> None:
         ActionDispatch(at=PhaseCycle("EXPLORE", 2), action="specialist", task_id="t-2", dispatched_unix=9.0)
     )
     phase_event.record_specialist_round(
-        SpecialistRound(
-            task_id="t-2", proposals_total=0, empty=True, residual_questions=["is the tokenizer the bound?"]
-        )
+        SpecialistRound(task_id="t-2", proposals_total=0, residual_questions=["is the tokenizer the bound?"])
     )
 
     (row,) = _actions("EXPLORE", 2)["rows"]
     assert row["proposals_total"] == 0
-    assert row["empty"] is True
     assert row["residual_questions"] == ["is the tokenizer the bound?"]
 
 

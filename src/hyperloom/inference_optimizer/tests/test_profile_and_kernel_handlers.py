@@ -23,6 +23,7 @@ from hyperloom.orchestrator.kernel import kernel_decisions as kd
 from hyperloom.orchestrator.kernel import request_handlers as krh
 
 from .conftest import seed_integrate_verdict, seed_kernel_keep
+from hyperloom.inference_optimizer.session import paths as session_paths
 from hyperloom.orchestrator.actions.executors import trace_analyze as ta
 from hyperloom.orchestrator.actions.executors.baseline import (
     BaselineExecutor,
@@ -37,11 +38,12 @@ from hyperloom.orchestrator.actions.executors._workload_envs import (
 )
 from hyperloom.orchestrator.actions.executors.profile import (
     ProfileExecutor,
-    _preferred_main_trace_path,
     _sanitize_profile_server_args,
     _trace_rank,
     _trace_files_for_dir,
+    _trace_size_bytes,
 )
+from hyperloom.orchestrator.trace_analysis._trace_rank import select_primary_trace
 from hyperloom.orchestrator.roles import (
     MockBackend,
     ScriptedPlan,
@@ -1106,13 +1108,19 @@ def test_tracelens_patch_status_separates_fine_from_never_tried(tmp_path, monkey
     assert _status(sglang=True, enable_patch="0") == "not_attempted"
 
 
+def _force_sitecustomize_shape_mode(monkeypatch):
+    from hyperloom.orchestrator.actions.executors import _server_patcher
+
+    monkeypatch.setattr(_server_patcher, "resolve_sglang_shape_mode", lambda: "sitecustomize")
+
+
 def test_sitecustomize_profile_records_successful_gc_patch(tmp_path, monkeypatch):
     """Record the graph patch outcome without adding legacy shape-discovery flags."""
     import yaml
 
     _clear_workload_env(monkeypatch)
     counts = _mock_patchers(monkeypatch, vllm=False, sglang=True)
-    monkeypatch.setenv("HYPERLOOM_SGLANG_SHAPE_MODE", "sitecustomize")
+    _force_sitecustomize_shape_mode(monkeypatch)
     src = _profile_yaml(tmp_path, "sglang", {"CONC": 32, "ISL": 256, "OSL": 1024})
     out = materialize_benchmark_config(src, tmp_path)
     envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
@@ -1128,7 +1136,7 @@ def test_sitecustomize_profile_proceeds_when_gc_patch_is_unavailable(tmp_path, m
 
     _clear_workload_env(monkeypatch)
     counts = _mock_patchers(monkeypatch, vllm=False, sglang=False)
-    monkeypatch.setenv("HYPERLOOM_SGLANG_SHAPE_MODE", "sitecustomize")
+    _force_sitecustomize_shape_mode(monkeypatch)
     src = _profile_yaml(tmp_path, "sglang", {"CONC": 32, "ISL": 256, "OSL": 1024})
     caplog.set_level("WARNING")
     out = materialize_benchmark_config(src, tmp_path)
@@ -1147,7 +1155,7 @@ def test_sitecustomize_non_profile_round_does_not_patch_sglang(tmp_path, monkeyp
 
     _clear_workload_env(monkeypatch)
     counts = _mock_patchers(monkeypatch, vllm=False, sglang=True)
-    monkeypatch.setenv("HYPERLOOM_SGLANG_SHAPE_MODE", "sitecustomize")
+    _force_sitecustomize_shape_mode(monkeypatch)
     src = tmp_path / "baseline_sglang.yaml"
     src.write_text(
         yaml.safe_dump(
@@ -1228,13 +1236,13 @@ def test_trace_certificate_stays_out_of_the_resolver_namespace(tmp_path):
     """The certificate must not become a trace candidate for the directory it describes.
 
     ``_trace_candidates`` rglobs the trace dir for anything ending in ``_TRACE_EXTS``, and a bare ``.json`` is in
-    that tuple. A certificate written among the traces used to add a second unranked candidate, which makes
-    ``require_single_rank`` resolve to nothing and lets the certificate win the size fallback over a small trace.
+    that tuple. A certificate written among the traces would add a second unranked candidate and could win the
+    size fallback over a small trace.
     """
     from hyperloom.orchestrator.actions.executors.profile import _write_trace_certificate
-    from hyperloom.orchestrator.trace_analysis._bypass_trace_reader import _trace_candidates, resolve_trace_file
+    from hyperloom.orchestrator.trace_analysis._trace_reader import _trace_candidates, resolve_trace_file
 
-    # A lone unranked trace: the certificate must not become the second candidate that makes this unresolvable.
+    # A lone unranked trace: the certificate must not become a second candidate beside it.
     single = tmp_path / "single" / "torch_trace"
     single.mkdir(parents=True)
     trace = single / "host_1.1700000000.pt.trace.json.gz"
@@ -1247,7 +1255,6 @@ def test_trace_certificate_stays_out_of_the_resolver_namespace(tmp_path):
     # Outside the scanned directory, so no recursive glob of it can pick the certificate up.
     assert Path(path).parent == single.parent
     assert Path(path) not in _trace_candidates(single)
-    assert resolve_trace_file(single, require_single_rank=True) == trace
 
     # A degenerate trace smaller than the certificate: the size fallback must still not prefer the certificate.
     tiny_dir = tmp_path / "tiny" / "torch_trace"
@@ -2433,35 +2440,11 @@ def test_upstream_sglang_capture_directory_passes_health_check(tmp_path):
 
 # kernel_request_handlers — direct unit
 @pytest.mark.asyncio
-async def test_trace_analyze_handler_dry_run_returns_structured_result(session_dir):
-    """The handler surfaces the tool's structured JSON verbatim (status + run_id + session_id)."""
-    fake_trace = session_dir / "fake_trace_dir"
-    fake_trace.mkdir()
-    payload = {
-        "trace_input": str(fake_trace),
-        "session_id": session_dir.name,
-        "model_name": "Qwen3-8B",
-        "framework": "sglang",
-        "top_k": 5,
-        "dry_run": True,
-        "budget_minutes": 1,
-        # Exercise the structured-result plumbing via the explicit bypass route (the default is now the TraceLens
-        # agent route, which needs a real root).
-        "analysis_route": "bypass",
-    }
-    res = await ta.trace_analyze_handler(payload, session_dir=session_dir)
-    # Structured result surfaced verbatim by the bypass backend.
-    assert res["status"] in ("ok", "succeeded", "failed")
-    assert res.get("route") == "bypass"
-    assert res.get("candidates_path") and "artifact_paths" in res
-
-
-@pytest.mark.asyncio
 async def test_trace_analyze_handler_rejects_non_string_analysis_route(session_dir):
     """A non-string route is coerced into a structured validation error."""
     fake_trace = session_dir / "fake_trace_dir"
     fake_trace.mkdir()
-    for bad_route in (True, ["bypass"], {"route": "agent"}, 1):
+    for bad_route in (True, ["non-llm"], {"route": "agent"}, 1):
         payload = {
             "trace_input": str(fake_trace),
             "session_id": session_dir.name,
@@ -2479,11 +2462,11 @@ async def test_trace_analyze_handler_rejects_non_string_analysis_route(session_d
 
 @pytest.mark.asyncio
 async def test_trace_analyze_handler_xdit_defaults_to_tracelens_agent(session_dir, monkeypatch):
-    """With no explicit route, every framework (incl. xDiT) DEFAULTS to the TraceLens ``agent`` route (the shipped default); bypass is an explicit route."""
+    """With no explicit route, every framework (incl. xDiT) DEFAULTS to the TraceLens ``agent`` route (the shipped default); ``non-llm`` is an explicit route."""
     monkeypatch.setattr(sys, "executable", "/task/deps/venv/bin/python")
     monkeypatch.setenv("PATH", "/opt/venv/bin:/usr/bin")
     monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
-    monkeypatch.setattr(ta, "_resolve_tracelens_root", lambda: session_dir)
+    monkeypatch.setattr(session_paths, "tracelens_root", lambda: session_dir)
     monkeypatch.setattr(ta, "_tracelens_root_error", lambda root: None)
     fake_trace = session_dir / "fake_trace_dir"
     fake_trace.mkdir()
@@ -2627,16 +2610,18 @@ async def test_trace_analyze_handler_payload_framework_overrides_serving_state(
 
 
 @pytest.mark.asyncio
-async def test_trace_analyze_handler_env_route_forces_bypass(session_dir, monkeypatch):
-    """HYPERLOOM_TRACE_ANALYSIS_ROUTE=bypass forces the independent backend even for a text-gen framework (explicit env route wins over the default)."""
-    monkeypatch.setenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "bypass")
+async def test_trace_analyze_handler_env_route_selects_non_llm(session_dir, monkeypatch):
+    """HYPERLOOM_TRACE_ANALYSIS_ROUTE=non-llm selects the no-LLM route even for a text-gen framework (explicit env route wins over the default)."""
+    monkeypatch.setenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "non-llm")
+    monkeypatch.setattr(session_paths, "tracelens_root", lambda: session_dir)
+    monkeypatch.setattr(ta, "_tracelens_root_error", lambda root: None)
     fake_trace = session_dir / "fake_trace_dir"
     fake_trace.mkdir()
     captured: dict = {}
 
     async def fake_run_subprocess(cmd, *, timeout_sec, **_kwargs):
         captured["cmd"] = list(cmd)
-        return 0, json.dumps({"status": "ok", "orchestrator_mode": "bypass", "hot_kernels": []}), ""
+        return 0, json.dumps({"status": "ok", "orchestrator_mode": "non-llm", "hot_kernels": []}), ""
 
     monkeypatch.setattr(ta, "_run_subprocess", fake_run_subprocess)
     res = await ta.trace_analyze_handler(
@@ -2650,15 +2635,15 @@ async def test_trace_analyze_handler_env_route_forces_bypass(session_dir, monkey
     )
     assert res["status"] == "ok"
     cmd = captured["cmd"]
-    assert cmd[1:3] == ["-m", ta._BYPASS_TRACE_ANALYSIS_MODULE]
-    assert "--tracelens-root" not in cmd
+    assert cmd[1:3] == ["-m", ta._TRACELENS_ANALYSIS_MODULE]
+    assert cmd[cmd.index("--route") + 1] == "non-llm"
 
 
 @pytest.mark.asyncio
 async def test_trace_analyze_handler_text_gen_defaults_to_tracelens_agent(session_dir, monkeypatch):
     """Text-gen with no explicit route DEFAULTS to the TraceLens ``agent`` route (the shipped default)."""
     monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
-    monkeypatch.setattr(ta, "_resolve_tracelens_root", lambda: session_dir)
+    monkeypatch.setattr(session_paths, "tracelens_root", lambda: session_dir)
     monkeypatch.setattr(ta, "_tracelens_root_error", lambda root: None)
     fake_trace = session_dir / "fake_trace_dir"
     fake_trace.mkdir()
@@ -2681,15 +2666,16 @@ async def test_trace_analyze_handler_text_gen_defaults_to_tracelens_agent(sessio
     assert res["status"] == "ok"
     cmd = captured["cmd"]
     assert cmd[1:3] == ["-m", ta._TRACELENS_ANALYSIS_MODULE]
+    assert cmd[cmd.index("--route") + 1] == "agent"
 
 
 @pytest.mark.parametrize(
     ("payload_route", "env_route", "requested_route"),
     [
-        ("foobar", "bypass", "foobar"),
-        ("deterministic", "bypass", "deterministic"),
-        (False, "bypass", "false"),
-        (0, "bypass", "0"),
+        ("foobar", "non-llm", "foobar"),
+        ("deterministic", "agent", "deterministic"),
+        (False, "non-llm", "false"),
+        (0, "non-llm", "0"),
         (None, "deterministic", "deterministic"),
     ],
 )
@@ -2712,7 +2698,7 @@ async def test_trace_analyze_handler_rejects_invalid_route_before_dispatch(
     async def fail_run_subprocess(cmd, *, timeout_sec, **_kwargs):
         pytest.fail("invalid route must not launch a subprocess")
 
-    monkeypatch.setattr(ta, "_resolve_tracelens_root", fail_resolve_tracelens_root)
+    monkeypatch.setattr(session_paths, "tracelens_root", fail_resolve_tracelens_root)
     monkeypatch.setattr(ta, "_run_subprocess", fail_run_subprocess)
     payload = {
         "trace_input": str(fake_trace),
@@ -2729,15 +2715,15 @@ async def test_trace_analyze_handler_rejects_invalid_route_before_dispatch(
     assert res["status"] == "failed"
     assert res["error_class"] == "invalid_analysis_route"
     assert res["requested_route"] == requested_route
-    assert res["valid_routes"] == ["agent", "bypass"]
+    assert res["valid_routes"] == ["agent", "non-llm"]
     assert "no-LLM" in res["error"]
 
 
 @pytest.mark.asyncio
 async def test_trace_analyze_handler_scriptable_converges_route_params(session_dir, monkeypatch):
-    """Scriptable (xDiT) params converge by route: --steady-state-mode generic is TraceLens-only, while --num-denoise-steps is forwarded to BOTH routes (bypass consumes it)."""
+    """Scriptable (xDiT) params reach the tool on both routes: --steady-state-mode generic."""
     monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
-    monkeypatch.setattr(ta, "_resolve_tracelens_root", lambda: session_dir)
+    monkeypatch.setattr(session_paths, "tracelens_root", lambda: session_dir)
     monkeypatch.setattr(ta, "_tracelens_root_error", lambda root: None)
     fake_trace = session_dir / "fake_trace_dir"
     fake_trace.mkdir()
@@ -2752,29 +2738,21 @@ async def test_trace_analyze_handler_scriptable_converges_route_params(session_d
         "trace_input": str(fake_trace),
         "session_id": session_dir.name,
         "framework": "xdit",
-        "num_denoise_steps": 20,
         "top_k": 5,
     }
-    # Explicit bypass route: no --skip-split, but --num-denoise-steps forwarded.
-    await ta.trace_analyze_handler({**base, "analysis_route": "bypass"}, session_dir=session_dir)
-    cmd = captured["cmd"]
-    assert cmd[1:3] == ["-m", ta._BYPASS_TRACE_ANALYSIS_MODULE]
-    assert "--skip-split" not in cmd
-    assert "--num-denoise-steps" in cmd and "20" in cmd
-    # TraceLens (agent) route: both flags present.
-    await ta.trace_analyze_handler({**base, "analysis_route": "agent"}, session_dir=session_dir)
-    cmd = captured["cmd"]
-    assert cmd[1:3] == ["-m", ta._TRACELENS_ANALYSIS_MODULE]
-    assert "--steady-state-mode" in cmd and cmd[cmd.index("--steady-state-mode") + 1] == "generic"
-    assert "--num-denoise-steps" in cmd
+    for route in ("agent", "non-llm"):
+        await ta.trace_analyze_handler({**base, "analysis_route": route}, session_dir=session_dir)
+        cmd = captured["cmd"]
+        assert cmd[1:3] == ["-m", ta._TRACELENS_ANALYSIS_MODULE]
+        assert cmd[cmd.index("--steady-state-mode") + 1] == "generic"
 
 
 @pytest.mark.asyncio
-async def test_trace_analyze_handler_records_bypass_discovery_success(
+async def test_trace_analyze_handler_records_non_llm_discovery_success(
     session_dir,
     monkeypatch,
 ):
-    """The bypass route surfaces a kernel_journey discovery run labelled source="bypass", carrying the real hot kernels."""
+    """The non-llm route surfaces a kernel_journey discovery run labelled source="tracelens", carrying the real hot kernels."""
     from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts
 
     fake_trace = session_dir / "fake_trace_dir"
@@ -2786,7 +2764,7 @@ async def test_trace_analyze_handler_records_bypass_discovery_success(
         captured["cmd"] = list(cmd)
         payload = {
             "status": "ok",
-            "orchestrator_mode": "bypass",
+            "orchestrator_mode": "non-llm",
             "hot_kernels": [
                 {
                     "kernel_id": "k001",
@@ -2806,22 +2784,21 @@ async def test_trace_analyze_handler_records_bypass_discovery_success(
         {
             "trace_input": str(fake_trace),
             "session_id": session_dir.name,
-            "analysis_route": "bypass",
+            "analysis_route": "non-llm",
             "top_k": 5,
         },
         session_dir=session_dir,
     )
     assert res["status"] == "ok"
-    # The bypass route dispatches its own tool, never TraceLens.
-    assert captured["cmd"][1:3] == ["-m", ta._BYPASS_TRACE_ANALYSIS_MODULE]
+    assert captured["cmd"][captured["cmd"].index("--route") + 1] == "non-llm"
 
     meta = res["analysis_meta"]
-    assert meta["route"] == "bypass"
-    assert meta["tool"] == "bypass"
+    assert meta["route"] == "non-llm"
+    assert meta["tool"] == "tracelens"
     assert {k["name"] for k in res["hot_kernels"]} == {"fused_moe", "rms_norm"}
-    # The build of the reader that produced these kernels is in scope only
+    # The build of the tool that produced these kernels is in scope only
     # here, so the handler records it rather than leaving it to a caller.
-    assert "bypass" in assemble_parts(session_dir)["metadata"]["versions"]["tools"]
+    assert "tracelens" in assemble_parts(session_dir)["metadata"]["versions"]["tools"]
 
 
 @pytest.mark.asyncio
@@ -2843,7 +2820,7 @@ async def test_trace_analyze_handler_omits_top_k_when_not_requested(
         {
             "trace_input": str(fake_trace),
             "session_id": session_dir.name,
-            "analysis_route": "bypass",
+            "analysis_route": "non-llm",
         },
         session_dir=session_dir,
     )
@@ -2870,7 +2847,7 @@ async def test_trace_analyze_handler_does_not_forward_top_k(
         {
             "trace_input": str(fake_trace),
             "session_id": session_dir.name,
-            "analysis_route": "bypass",
+            "analysis_route": "non-llm",
             "top_k": 20,
         },
         session_dir=session_dir,
@@ -2880,11 +2857,11 @@ async def test_trace_analyze_handler_does_not_forward_top_k(
 
 
 @pytest.mark.asyncio
-async def test_trace_analyze_handler_records_bypass_discovery_failed(
+async def test_trace_analyze_handler_records_non_llm_discovery_failed(
     session_dir,
     monkeypatch,
 ):
-    """Fail-loud bypass pipeline -> discovery run status=failed with the error text and an empty hot-kernel list, still labelled source="bypass"."""
+    """A failed non-llm run -> discovery run status=failed with the error text and an empty hot-kernel list, still labelled source="tracelens"."""
     from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts
 
     fake_trace = session_dir / "fake_trace_dir"
@@ -2893,8 +2870,8 @@ async def test_trace_analyze_handler_records_bypass_discovery_failed(
     async def fake_run_subprocess(cmd, *, timeout_sec, **_kwargs):
         payload = {
             "status": "failed",
-            "orchestrator_mode": "bypass",
-            "error": "bypass: trace reader found no GPU kernel events",
+            "orchestrator_mode": "non-llm",
+            "error": "trace has no GPU kernel events",
             "hot_kernels": [],
         }
         return 1, json.dumps(payload), "boom"
@@ -2904,28 +2881,28 @@ async def test_trace_analyze_handler_records_bypass_discovery_failed(
         {
             "trace_input": str(fake_trace),
             "session_id": session_dir.name,
-            "analysis_route": "bypass",
+            "analysis_route": "non-llm",
         },
         session_dir=session_dir,
     )
     assert res["status"] == "failed"
 
     meta = res["analysis_meta"]
-    assert meta["route"] == "bypass"
-    assert meta["tool"] == "bypass"
+    assert meta["route"] == "non-llm"
+    assert meta["tool"] == "tracelens"
     assert not res.get("hot_kernels")
     assert res["error"]
-    # A failed read still identifies the build that failed.
-    assert "bypass" in assemble_parts(session_dir)["metadata"]["versions"]["tools"]
+    # A failed run still identifies the build that failed.
+    assert "tracelens" in assemble_parts(session_dir)["metadata"]["versions"]["tools"]
 
 
 @pytest.mark.asyncio
-async def test_trace_analyze_handler_records_bypass_discovery_high_idle_empty(
+async def test_trace_analyze_handler_records_non_llm_discovery_high_idle_empty(
     session_dir,
     monkeypatch,
 ):
     """High-idle gate suppresses hot kernels but the run still succeeds -> a
-    bypass discovery run with status=ok and hot_kernel_count=0."""
+    non-llm discovery run with status=ok and hot_kernel_count=0."""
 
     fake_trace = session_dir / "fake_trace_dir"
     fake_trace.mkdir()
@@ -2933,7 +2910,7 @@ async def test_trace_analyze_handler_records_bypass_discovery_high_idle_empty(
     async def fake_run_subprocess(cmd, *, timeout_sec, **_kwargs):
         payload = {
             "status": "ok",
-            "orchestrator_mode": "bypass",
+            "orchestrator_mode": "non-llm",
             "hot_kernels": [],
             "trace_health_warnings": [
                 {"code": "high_gpu_idle", "severity": "warning"},
@@ -2946,15 +2923,15 @@ async def test_trace_analyze_handler_records_bypass_discovery_high_idle_empty(
         {
             "trace_input": str(fake_trace),
             "session_id": session_dir.name,
-            "analysis_route": "bypass",
+            "analysis_route": "non-llm",
         },
         session_dir=session_dir,
     )
     assert res["status"] == "ok"
 
     meta = res["analysis_meta"]
-    assert meta["route"] == "bypass"
-    assert meta["tool"] == "bypass"
+    assert meta["route"] == "non-llm"
+    assert meta["tool"] == "tracelens"
     assert not res.get("hot_kernels")
 
 
@@ -2963,7 +2940,7 @@ async def test_trace_analyze_handler_agent_route_stays_tracelens(
     session_dir,
     monkeypatch,
 ):
-    """The LLM/agent route keeps source="tracelens" (regression guard for the bypass relabel), while the scan still names the route the caller asked for."""
+    """The LLM/agent route keeps source="tracelens" (the same tool as the non-llm route), while the scan still names the route the caller asked for."""
     from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts
 
     fake_trace = session_dir / "fake_trace_dir"
@@ -4157,10 +4134,9 @@ def test_agentx_primary_trace_prefers_rank_zero_over_merged(tmp_path):
     rank_zero.write_bytes(b"x" * 100)
     rank_one.write_bytes(b"rank-one")
 
-    selected = _preferred_main_trace_path(
-        trace_dir,
+    selected = select_primary_trace(
         [rank_zero_warmup, merged, rank_one, rank_zero],
-        require_single_rank=True,
+        file_size=_trace_size_bytes,
         tensor_parallel_size=2,
     )
 
@@ -4172,10 +4148,9 @@ def test_agentx_primary_trace_does_not_fall_back_to_multi_rank_merge(tmp_path):
     merged = trace_dir / "merged-177.trace.json.gz"
 
     assert (
-        _preferred_main_trace_path(
-            trace_dir,
+        select_primary_trace(
             [merged],
-            require_single_rank=True,
+            file_size=_trace_size_bytes,
             tensor_parallel_size=8,
         )
         is None
@@ -4187,10 +4162,9 @@ def test_agentx_single_unranked_trace_is_safe_without_tp_environment(tmp_path):
     trace = trace_dir / "worker.pt.trace.json.gz"
 
     assert (
-        _preferred_main_trace_path(
-            trace_dir,
+        select_primary_trace(
             [trace],
-            require_single_rank=True,
+            file_size=_trace_size_bytes,
             tensor_parallel_size=None,
         )
         == trace
@@ -4209,10 +4183,9 @@ def test_agentx_tp8_does_not_substitute_only_non_primary_trace(tmp_path, trace_n
     trace = trace_dir / trace_name
 
     assert (
-        _preferred_main_trace_path(
-            trace_dir,
+        select_primary_trace(
             [trace],
-            require_single_rank=True,
+            file_size=_trace_size_bytes,
             tensor_parallel_size=8,
         )
         is None
@@ -4224,10 +4197,9 @@ def test_agentx_tp1_can_use_single_merged_trace_as_compatibility_fallback(tmp_pa
     merged = trace_dir / "merged-177.trace.json.gz"
 
     assert (
-        _preferred_main_trace_path(
-            trace_dir,
+        select_primary_trace(
             [merged],
-            require_single_rank=True,
+            file_size=_trace_size_bytes,
             tensor_parallel_size=1,
         )
         == merged

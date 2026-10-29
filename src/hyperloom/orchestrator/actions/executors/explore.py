@@ -82,8 +82,6 @@ from ._grid_runner import (
     session_grid_bounds,
 )
 from ._grid_variant_filter import (
-    _MN_BACKENDS_PRIORITY,
-    _MN_PARAMS_PRIORITY,
     ServingStack,
     apply_aiter_moe_pin_filter,
     apply_compatibility_filter,
@@ -1023,7 +1021,7 @@ class _ExploreRound:
                     "detail": dropped.get("reason", ""),
                 }
             )
-        self.runnable = reorder_grid_for_multi_node(runnable, priority_tags=_MN_PARAMS_PRIORITY + _MN_BACKENDS_PRIORITY)
+        self.runnable = reorder_grid_for_multi_node(runnable)
         self._drop_leading_noops()
 
     def _drop_leading_noops(self) -> None:

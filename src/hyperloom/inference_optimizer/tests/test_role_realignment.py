@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
+from hyperloom.orchestrator.mcp_tool_names import qualified_context_tool_name
 from hyperloom.orchestrator.phases.machine_state import PHASE_NAMES
 from hyperloom.common.coerce import to_unix
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
@@ -63,7 +64,8 @@ def test_orchestration_prompt_defers_rescue_moves_to_reference(registry):
     )
 
     assert "kill_task" not in text
-    assert "read_reference('specialist_rescue')" in text
+    read_reference = qualified_context_tool_name("read_reference")
+    assert f"{read_reference}(name='specialist_rescue')" in text
 
 
 def test_orchestration_prompt_no_kernel_marks_kernel_skipped(registry):
@@ -356,6 +358,74 @@ async def test_compose_prompt_keeps_per_tick_values_out_of_the_context(coordinat
 
 
 @pytest.mark.asyncio
+async def test_compose_prompt_keeps_the_session_ledger_out_of_the_context(coordinator_with_mocks):
+    """The ledger moves whenever an action lands, so it must not sit in the cached prefix."""
+    c = coordinator_with_mocks
+    try:
+        before = await c.conversation.compose_prompt("orchestration")
+        c.shared_state.crash_count = int(c.shared_state.crash_count or 0) + 1
+        after = await c.conversation.compose_prompt("orchestration")
+
+        assert after.context == before.context
+        assert after.turn != before.turn
+        assert "=== Shared session state ===" not in after.context
+        assert "target_gap_pct=" not in after.context
+        assert "=== Resource pools ===" in after.context
+        # Stable blocks first, then the per-tick ones, ledger just above the inbox tail.
+        assert after.turn.index("=== Tick ===") < after.turn.index("=== Shared session state ===")
+        assert after.turn.index("=== Shared session state ===") < after.turn.index("=== Inbox for orchestration")
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_compose_prompt_keeps_the_denial_and_proposal_blocks_out_of_the_context(coordinator_with_mocks):
+    """A denial lands and a proposal is benched between two ticks; the cached prefix has to survive both."""
+    from hyperloom.orchestrator.actions.executors._proposal_identity import controls_of, normalize_proposal
+    from hyperloom.orchestrator.phases.machine_state import PHASE_FRAMEWORK_AGENT
+
+    c = coordinator_with_mocks
+    tried = {"name": "proposal-alpha", "extra_args": "--enable-fused-rmsnorm"}
+    waiting = {"name": "proposal-beta", "extra_args": "--chunked-prefill-size 8192"}
+    try:
+        c.shared_state.phase = PHASE_FRAMEWORK_AGENT
+        c.shared_state.macro_cycle = 0
+        c.shared_state.specialist_rounds = [
+            {"cycle": 0, "domain": "serving_specialist", "gap_canonical_id": "", "proposal_set": [tried, waiting]}
+        ]
+        first = await c.conversation.compose_prompt("orchestration")
+        assert "=== Untested proposals (current cycle) ===" in first.turn
+        assert tried["name"] in first.turn
+
+        c.shared_state.record_policy_denial(
+            action_name="explore",
+            rule="phase_gate",
+            hint="wait for the bench slot",
+            intent_type="DISPATCH_TASK",
+        )
+        fields = normalize_proposal(tried)
+        tested_row = {
+            "extra_server_args": fields["extra_args"],
+            "extra_envs": fields["extra_envs"],
+            **controls_of(fields),
+        }
+        c.shared_state.explore_search = {"tested": {"explore-1": dict(tested_row, outcome="REVERT")}}
+        c.shared_state.tick = int(c.shared_state.tick or 0) + 1
+        second = await c.conversation.compose_prompt("orchestration")
+
+        assert second.context == first.context
+        assert "=== Recent policy denials" in second.turn
+        assert "=== Recent policy denials" not in second.context
+        assert "=== Untested proposals (current cycle) ===" not in second.context
+        # The benched proposal left the queue; the prefix above it did not move.
+        queue = second.turn.split("=== Untested proposals (current cycle) ===", 1)[1]
+        assert tried["name"] not in queue
+        assert waiting["name"] in queue
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("cached", [True, False])
 async def test_reactor_turn_hands_a_caching_backend_the_context_as_its_system_prompt(coordinator_with_mocks, cached):
     c = coordinator_with_mocks
@@ -367,7 +437,9 @@ async def test_reactor_turn_hands_a_caching_backend_the_context_as_its_system_pr
         (call,) = backend.calls
 
         assert (composed.context in call["system_prompt"]) is cached
-        assert ("=== Shared session state ===" in call["prompt"]) is not cached
+        # The ledger is a per-tick block, so it rides the prompt and never the cached half.
+        assert "=== Shared session state ===" in call["prompt"]
+        assert "=== Shared session state ===" not in call["system_prompt"]
         assert "=== Phase ===" in call["prompt"]
         assert call["prompt"].endswith("ASK")
     finally:

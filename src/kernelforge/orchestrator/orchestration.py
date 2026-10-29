@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 import time
-from collections.abc import Iterator, Mapping, MutableMapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, MutableMapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -20,7 +20,9 @@ from kernelforge.agent_backends import (
     create_registered_backend,
     watchdog_timeout_sec,
 )
+from kernelforge.agent_backends.runtime import agent_runtime
 from kernelforge.config import Config
+from kernelforge.workspace.edit_policy import FORGE_PROTECTED_PATHS
 from kernelforge.orchestrator.agent_response import (
     AgentResponseIncompleteError,
     AgentResponseInfrastructureError,
@@ -42,6 +44,7 @@ from kernelforge.orchestrator.contracts import (
     SpecialistRound,
 )
 from kernelforge.orchestrator.critic_fallback import render_critic_fallback
+from kernelforge.orchestrator.lane_prompts import lane_prompts, run_lanes_after_the_first_starts
 from kernelforge.orchestrator.specialists import (
     SpecialistAgent,
     SpecialistPool,
@@ -49,6 +52,8 @@ from kernelforge.orchestrator.specialists import (
 )
 from kernelforge.orchestrator.plan_prompts import (
     LANE_SYNTHESIS_SYSTEM_PROMPT,
+    PARTITION_CHALLENGER_BLOCK,
+    PARTITION_SYSTEM_PROMPT,
     REVISION_SYSTEM_PROMPT,
     SYNTHESIS_SYSTEM_PROMPT,
 )
@@ -162,6 +167,8 @@ class _Turn:
     timeout_sec: int | None = None
     tools: bool = True
     max_reasoning_effort: str = ""
+    shared_prompt_prefix: str = ""
+    on_response_started: Callable[[], None] | None = None
 
 
 _DISPATCH_SYSTEM_PROMPT = """\
@@ -171,97 +178,6 @@ Use only the supplied evidence. Do not edit files, run shell commands, alter
 measurement inputs, or present an inference as a profiler fact. Return one JSON
 object containing the specialist assignments. Do not use Markdown fences or add
 text outside the JSON object.
-"""
-
-_PARTITION_SYSTEM_PROMPT = """\
-You are the read-only round planner for an autonomous GPU-kernel optimization
-search. Several Implementers will work this round concurrently, each in its own
-workspace copy, each producing one candidate that is measured on its own.
-
-Divide the round into lanes so that no two lanes would edit the same code. That
-is the only thing this step decides, and it is decided in the terms an edit
-lands in: files, functions, and mechanisms. Do not divide by specialist role.
-The roles are three readings of one kernel, so a lane that owns "the memory
-analysis" owns nothing an editor can stay inside, and two such lanes routinely
-rewrite the same lines.
-
-Every lane's ground must be worth one Implementer session on its own: a
-direction the supplied evidence supports, that one session can finish, and that
-earns a measurement distinguishable from the others. Ground that only repeats
-another lane's change in different words is not a second lane.
-
-A change is one ground however many places it lands. When the strongest move
-the evidence supports rewrites the same shape everywhere it appears -- a
-subexpression several functions each recompute, a layout they all read, a
-launch they all repeat -- that move is one lane's ground, not one lane per
-site. Splitting it does not divide the work, it removes it: each site is
-already the best it can be alone, so every lane reports there was nothing to
-find and the round spends its sessions establishing that, while the change that
-was there goes unattempted.
-
-The launch configuration is not ground of its own. A tile geometry, an unroll
-factor, a staging depth -- anything that changes what one iteration of the loop
-weighs -- invalidates the `num_warps`, `waves_per_eu`, `num_stages` and grid
-shape that were tuned for the old weight, so the lane that changes the body
-owns the configuration that serves it. A lane holding only the launch knobs
-cannot choose them; it is a pass-through for whatever the body lane leaves
-behind. A body lane forbidden to re-tune them is measured at a configuration
-built for code it deleted, and closes an axis that was never tested. Measured
-on this class of kernel: a wider tile read 2.80 ms at the narrow tile's
-configuration and 1.28 ms at its own. Give both to one lane and divide the rest
-around it.
-
-One launch site belongs to exactly one lane, because two lanes editing one
-dispatch is the overlap this division exists to prevent. When two bodies you
-would divide are served by the same launch, name that launch in exactly one
-lane's ground -- every other lane sees it as ground it does not own -- or keep
-both bodies in one lane.
-
-Name the largest move the evidence supports that no single region contains --
-a launch two kernels could share, a buffer that need not round-trip, a dispatch
-that could be deleted -- and say which lane owns it. If no lane does, say so
-and say why. A move worth more than any lane you did divide is this round's
-most important finding whether or not it fits the division, and a round that
-leaves it out of its own answer leaves the next round to rediscover it. That it
-spans two kernels is not a reason to leave it unowned; that is what makes it
-one ground.
-
-Mark a lane `joint` when it claims a body and the configuration that serves it,
-or a move that spans what no other lane would own, and give that lane a
-`fallback`: the smaller, lower-risk change inside the same ground its
-Implementer lands if the main step does not converge. A joint lane returns a
-gain that cannot be split between its parts, so it is worth its width only when
-the session cannot end with nothing measured.
-
-Return fewer lanes than requested when the evidence supports fewer. The
-requested count is a ceiling on how many directions a round may pursue, never a
-number of pieces to cut one direction into. A round of two real directions
-beats a round of three where one was invented to fill a slot, because the
-invented one still costs a full session.
-
-Use only supplied evidence. Do not edit files, run shell commands, alter
-measurement inputs, or present an inference as a profiler fact. Return one JSON
-object containing the lane grounds. Do not use Markdown fences or add text
-outside the JSON object.
-"""
-
-_PARTITION_CHALLENGER_BLOCK = """\
-
-The previous round's critic returned REPLACE: it judged that the route this
-search is on is strategically dominated and that a materially different one
-should be validated instead. Its review is in the payload under
-`last_plan_critic`.
-
-Give exactly one lane to that challenge. Its ground is not a region carved out
-of the current implementation -- it is the alternative the review names, stated
-concretely enough for one session to build and measure the smallest version of
-it that would settle whether the route is worth taking. Say in that lane's
-reason what result would decide it.
-
-The remaining lanes are divided as usual, over ground the challenger does not
-touch. A challenger is allowed to lose: it is measured under the unchanged
-correctness and KEEP gates like any other lane, and one lane is what the round
-is willing to spend to find out.
 """
 
 
@@ -589,41 +505,18 @@ class OrchestrationAgent:
             with _phase_timer(self.phase_durations_sec, "synthesis"):
                 return [await self._synthesize_optimization_plan_result(context, specialists, usage=usage)]
         width = len(grounds)
+        prompts = lane_prompts(context, specialists, grounds)
 
-        async def _lane(index: int) -> SynthesizedPlan | None:
-            payload = {
-                "task": (
-                    "Produce the optimization plan this lane's Implementer "
-                    "should execute on the ground this lane owns. Judge the "
-                    "analyses rather than copying them, and choose a clear "
-                    "implementation sequence."
-                ),
-                "context": context.to_prompt_dict(),
-                "dispatch_plan": specialists.dispatch_plan.to_dict(),
-                "specialist_coverage": dict(specialists.coverage),
-                "lane": {
-                    "ground": grounds[index].ground,
-                    "joint": grounds[index].joint,
-                    "fallback": grounds[index].fallback,
-                    "ground_owned_by_other_lanes": [
-                        other.ground for position, other in enumerate(grounds) if position != index
-                    ],
-                },
-                "specialist_analyses": [
-                    {
-                        "assignment_id": outcome.assignment_id,
-                        "role_id": outcome.role_id,
-                        "analysis": outcome.content,
-                    }
-                    for outcome in analyses
-                ],
-            }
+        async def _lane(index: int, on_response_started: Callable[[], None] | None = None) -> SynthesizedPlan | None:
+            prompt, shared = prompts[index]
             result = await self._run_result(
                 context,
                 _Turn(
                     LANE_SYNTHESIS_SYSTEM_PROMPT,
-                    json.dumps(payload, indent=2, sort_keys=True),
+                    prompt,
                     role=f"orchestration lane {index + 1} synthesis",
+                    shared_prompt_prefix=shared,
+                    on_response_started=on_response_started,
                 ),
                 usage=usage,
             )
@@ -644,9 +537,9 @@ class OrchestrationAgent:
 
         # Each lane is an independent call, so one that fails is one lane lost and not the round.
         with _phase_timer(self.phase_durations_sec, "synthesis"):
-            answers = await asyncio.gather(
-                *(_lane(index) for index in range(width)),
-                return_exceptions=True,
+            capabilities = getattr(self.backend, "capabilities", None)
+            answers = await run_lanes_after_the_first_starts(
+                _lane, width, shared_prompt_cache=getattr(capabilities, "shared_prompt_cache", False)
             )
         plans: list[SynthesizedPlan] = []
         for index, answer in enumerate(answers):
@@ -841,7 +734,7 @@ class OrchestrationAgent:
     ) -> list[LaneGround]:
         """Decide, once and with every analysis in view, what each lane owns."""
         challenged = context.last_critic_verdict == "REPLACE"
-        system_prompt = _PARTITION_SYSTEM_PROMPT + (_PARTITION_CHALLENGER_BLOCK if challenged else "")
+        system_prompt = PARTITION_SYSTEM_PROMPT + (PARTITION_CHALLENGER_BLOCK if challenged else "")
         payload = {
             "task": (
                 f"Divide this round into at most {lanes} lanes that would not "
@@ -1117,7 +1010,10 @@ class OrchestrationAgent:
                 shell=False,
                 max_turns=(self.max_turns if turn.max_turns is None else turn.max_turns),
             ),
+            protected_path_rules=FORGE_PROTECTED_PATHS,
             protected_globs=["*"],
+            shared_prompt_prefix=turn.shared_prompt_prefix,
+            on_response_started=turn.on_response_started,
         )
 
     def _backend_supports_resume(self) -> bool:
@@ -1681,7 +1577,7 @@ def make_orchestration_service(
     resolved_definitions = dict(default_specialist_definitions() if definitions is None else definitions)
     if not resolved_definitions:
         raise ValueError("definitions must not be empty")
-    runtime = config.agent_runtime()
+    runtime = agent_runtime(config)
     orchestration_backend = create_registered_backend(
         runtime,
         probe_cwd=config.workspace,

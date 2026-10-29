@@ -169,8 +169,6 @@ def _rank_of(path: str) -> str:
 def _kernel_roofline_row(entry: Mapping[str, Any]) -> dict[str, Any] | None:
     """Normalize one row of the analyzer's kernel-roofline table.
 
-    The TraceLens and bypass routes agree on the identity and cost fields and
-    diverge in the tail: only bypass rows carry ``roofline_attainment_pct``.
     ``roofline_source`` says whether a row's bound came from a model or is a
     placeholder. A row carrying no kernel identity cannot be joined to anything
     and yields ``None``.
@@ -197,7 +195,6 @@ def _kernel_roofline_row(entry: Mapping[str, Any]) -> dict[str, Any] | None:
         "efficiency_percent": _float_or_none(entry.get("efficiency_percent")),
         "compute_utilization_pct": _float_or_none(entry.get("compute_utilization_pct")),
         "bandwidth_utilization_pct": _float_or_none(entry.get("bandwidth_utilization_pct")),
-        "roofline_attainment_pct": _float_or_none(entry.get("roofline_attainment_pct")),
         "roofline_name": _text_or_none(entry.get("roofline_name")),
         "roofline_source": str(entry.get("roofline_source") or ""),
         "suggestion": _clip(entry.get("suggestion") or ""),
@@ -275,8 +272,6 @@ def _snapshot_row(snapshot: Mapping[str, Any]) -> dict[str, Any]:
         "roofline_mem_ceiling_tok_per_sec": _float_or_none(snapshot.get("roofline_mem_ceiling_tok_per_sec")),
         "roofline_cmp_ceiling_tok_per_sec": _float_or_none(snapshot.get("roofline_cmp_ceiling_tok_per_sec")),
         "roofline_bound_kind": str(snapshot.get("roofline_bound_kind") or ""),
-        "e2e_mean_ms": _float_or_none(snapshot.get("e2e_mean_ms")),
-        "roofline_ideal_ms": _float_or_none(snapshot.get("roofline_ideal_ms")),
         "within_roofline_pct": _float_or_none(snapshot.get("within_roofline_pct")),
         "within_roofline_pct_uncapped": _float_or_none(snapshot.get("within_roofline_pct_uncapped")),
         "gap_to_roofline_pct": _float_or_none(snapshot.get("gap_to_roofline_pct")),
@@ -349,7 +344,7 @@ def _summarize_trace_quality(validate: dict[str, Any]) -> dict[str, Any]:
     The certificate's own tables are per-rank, per-candidate and per-chunk, so their size follows the topology and
     they stay in the file ``certificate_path`` points at. What lands here is the fixed set of numbers a reader
     needs to judge trace quality without opening that file, taken from the rank the probe actually analysed. Every
-    ratio is accompanied by the terms it was computed from and by the scope it was computed over, because a
+    ratio is accompanied by the terms it was computed from and by whether the aggregation was truncated, because a
     coverage figure drawn from a truncated aggregation is a different measurement than one drawn from the whole
     trace.
     """
@@ -365,9 +360,8 @@ def _summarize_trace_quality(validate: dict[str, Any]) -> dict[str, Any]:
     return {
         "rank_count_certified": len(ranks),
         "analyzed_rank": rank.get("rank"),
-        # Parse scope: what the numbers below were computed over.
+        # Parse state: what the numbers below were computed over.
         "event_total": parse.get("event_total"),
-        "aggregation_scope": parse.get("aggregation_scope"),
         "truncated": parse.get("truncated"),
         "truncation_reason": parse.get("truncation_reason"),
         # Attribution, with the terms of every ratio.
@@ -402,7 +396,6 @@ def _summarize_trace_quality(validate: dict[str, Any]) -> dict[str, Any]:
         "production_selected_role": inventory.get("production_selected_role"),
         "production_would_analyze_split_chunk": inventory.get("production_would_analyze_split_chunk"),
         "file_count_by_role": _as_dict(inventory.get("file_count_by_role")),
-        "chunk_count_certified": len(_as_list(validate.get("chunk_level"))),
         "verdict_measures": measures,
     }
 

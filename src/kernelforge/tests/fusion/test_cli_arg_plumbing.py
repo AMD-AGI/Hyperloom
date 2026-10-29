@@ -10,7 +10,7 @@ import dataclasses
 import inspect
 from pathlib import Path
 
-import kernelforge.fusion.command as cli_module
+import kernelforge.fusion.pipeline as cli_module
 
 CLI_SOURCE = Path(inspect.getfile(cli_module))
 

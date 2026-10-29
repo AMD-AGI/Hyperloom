@@ -76,20 +76,18 @@ ROW_PAIR = "pair"
 ARM_BASELINE = "baseline"
 ARM_OPTIMIZED = "optimized"
 
-# How a rung came to run. The sweep prefers to boot one server at the top of
-# the ladder and reuse it down; a framework with no server lifecycle, or a
-# ladder whose every boot failed, restarts per rung instead. ``boot_attempt``
-# is a rung the retry-descend loop could not bring up, kept whether or not it
-# was later committed, because that concurrency is itself the finding.
+# How a rung came to run. An arm boots one server on its first rung and reuses
+# it for the rest; a framework with no server lifecycle restarts per rung
+# instead. ``boot_attempt`` is a rung whose round failed to bring the server up,
+# after which the next rung boots again.
 STAGE_BOOT_ATTEMPT = "boot_attempt"
 STAGE_BOOT = "boot"
 STAGE_REUSE = "reuse"
 STAGE_SERVER_RESTART = "server_restart"
 STAGE_BUDGET_SKIP = "budget_skip"
 
-# How an arm ran its ladder. The restart path is both the fallback for a
-# lifecycle-ineligible framework and the retry after every boot failed, which
-# is why the arm also records the reason.
+# How an arm ran its ladder. The restart path is the one a lifecycle-ineligible
+# framework takes, which is why the arm also records the reason.
 STRATEGY_SINGLE_SERVER = "single_server_reuse"
 STRATEGY_SERVER_RESTART = "server_restart"
 
@@ -224,10 +222,9 @@ class SweepAnchor:
 class SweepPlan:
     """The ladder the sweep resolved and the order it will run it in.
 
-    ``concs_ordered`` is deduplicated and descending, because a single-server
-    arm boots at the most demanding rung so the lower ones need no restart.
-    ``grid_source`` is a ``GRID_*`` value, and ``num_prompts_factor`` turns a
-    rung's CONC into its NUM_PROMPTS.
+    ``concs_ordered`` is deduplicated: the session's own CONC first, then the
+    rest cheapest first. ``grid_source`` is a ``GRID_*`` value, and
+    ``num_prompts_factor`` turns a rung's CONC into its NUM_PROMPTS.
     """
 
     concs_requested: Any = None
@@ -251,23 +248,21 @@ class SweepPlan:
 
 @dataclass(frozen=True)
 class SweepBudget:
-    """The budget the ladder was admitted under.
+    """The budget the ladder ran under.
 
-    ``rung_cost_sec`` is the measured expected duration used for admission, or
-    ``None`` when unknown. ``deadline`` is the sweep's wall-clock budget
-    boundary, not the earlier sweep/session monotonic deadline used by the
-    runner.
+    ``deadline`` is the sweep's wall-clock budget boundary, not the earlier
+    sweep/session monotonic deadline used by the runner.
     """
 
     declared_total_sec: Any = None
-    rung_cost_sec: Any = None
     deadline: Any = None
 
     def block(self) -> dict[str, Any]:
-        """The ``budget`` block this record persists as; the gate is active whenever a total was declared."""
+        """The ``budget`` block this record persists as; the gate is active whenever a total was declared, and
+        ``rung_cost_sec`` is null because a rung is held to its arm's deadline rather than priced."""
         return {
             "declared_total_sec": _int_or_none(self.declared_total_sec),
-            "rung_cost_sec": _float_or_none(self.rung_cost_sec),
+            "rung_cost_sec": None,
             "gate_active": self.declared_total_sec is not None,
             "deadline": _float_or_none(self.deadline),
         }
@@ -345,10 +340,6 @@ class SweepRung:
 
     Attributes:
         stage: A ``STAGE_*`` value.
-        committed: Whether this attempt is part of the published curve. A
-            failed boot is recorded uncommitted and promoted by
-            :meth:`ConcSweepEventRecorder.commit_variant` if a lower rung
-            eventually boots.
         wall_duration_sec: Wall clock, distinct from the benchmark's own
             ``duration_seconds``, which covers only the measured window.
     """
@@ -356,7 +347,6 @@ class SweepRung:
     stage: str
     conc: Any
     point: Mapping[str, Any] | None = None
-    committed: bool = True
     num_prompts: Any = None
     start_time: Any = None
     wall_duration_sec: Any = None
@@ -551,9 +541,8 @@ class ConcSweepEventRecorder:
         attempted_concs: Any = None,
         failed_concs: Any = None,
     ) -> None:
-        """Record how the boot-retry-descend loop resolved. ``attempted_concs``
-        is in the order tried, and ``failed_concs`` is the capacity finding the
-        sweep produces for free and then discards."""
+        """Record how the arm's boot attempts resolved. ``attempted_concs`` is
+        the rungs whose rounds tried to bring the server up, in the order tried."""
         self._record_arm(
             arm,
             {
@@ -623,7 +612,7 @@ class ConcSweepEventRecorder:
         self._variant_ordinal += 1
         measurement = _as_dict(rung.point)
         conc = _int_or_none(rung.conc)
-        if rung.committed and conc is not None:
+        if conc is not None:
             self._points.setdefault(_text(arm), {})[conc] = dict(measurement)
         self._sink.record(
             SECTION_VARIANT,
@@ -633,7 +622,7 @@ class ConcSweepEventRecorder:
                 "conc": conc,
                 "stage": _text(rung.stage),
                 "ordinal": self._variant_ordinal,
-                "committed": bool(rung.committed),
+                "committed": True,
                 "num_prompts": _int_or_none(rung.num_prompts),
                 "start_time": _text(rung.start_time),
                 "end_time": _now_iso(),
@@ -644,20 +633,6 @@ class ConcSweepEventRecorder:
             },
             row_type=ROW_VARIANT,
             natural_ids=(self._action_id, _text(arm), _text(rung.stage), _text(conc)),
-        )
-
-    def commit_variant(self, arm: str, *, stage: str, conc: Any, point: Mapping[str, Any] | None = None) -> None:
-        """Promote an attempt recorded before it was known to count. ``point``
-        is passed so the pair table can explain a rung this attempt is the only
-        record of."""
-        rung = _int_or_none(conc)
-        if rung is not None and point is not None:
-            self._points.setdefault(_text(arm), {})[rung] = dict(_as_dict(point))
-        self._sink.record(
-            SECTION_VARIANT,
-            {"task_id": self._action_id, "committed": True},
-            row_type=ROW_VARIANT,
-            natural_ids=(self._action_id, _text(arm), _text(stage), _text(rung)),
         )
 
     # ---- pairing ---------------------------------------------------------
@@ -870,8 +845,9 @@ def _assemble_arm(
     variants: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
     """Assemble one arm out of its row and its rungs. ``points`` is the curve:
-    the committed attempts, ascending. ``boot.attempts`` is the descend ladder
-    in the order tried, carrying the rungs that never produced a point."""
+    the committed attempts, ascending; an uncommitted row is an older
+    session's boot attempt a later rung superseded. ``boot.attempts`` is the
+    boot rounds in the order tried."""
     points = [
         {
             **_as_dict(rung.get("measurement")),

@@ -17,11 +17,8 @@ from typing import Any
 
 from kernelforge.agent_backends.base import AgentProviderError, AgentRunSpec
 from kernelforge.tools.git import git, git_bytes
-from kernelforge.loop.new_path_allowlist import matches_commit_new_paths, normalize_commit_new_paths
-from kernelforge.workspace.edit_policy import (
-    is_protected_path,
-    protected_path_inventory,
-)
+from kernelforge.tools.new_path_allowlist import matches_commit_new_paths, normalize_commit_new_paths
+from kernelforge.tools.protected_paths import ProtectedPathRules
 
 log = logging.getLogger(__name__)
 
@@ -129,6 +126,16 @@ class WorkspaceGuard:
             explicit.add(Path(self.driver_path).resolve())
         return self.target_paths - explicit
 
+    def _protected_path_rules(self) -> ProtectedPathRules:
+        """The caller's rules for what this session must leave as it is; refused when it supplied none."""
+        rules = self.spec.protected_path_rules
+        if rules is None:
+            raise WorkspaceSafetyError(
+                "a session that can write needs its caller's protected-path rules (AgentRunSpec.protected_path_rules)",
+                rejection=False,
+            )
+        return rules
+
     def _is_protected(self, relative: str) -> bool:
         """Return whether a repository path belongs to the measurement surface."""
         if (self.root / relative).resolve() in self._target_exempt():
@@ -136,7 +143,7 @@ class WorkspaceGuard:
         exact_paths = list(self.spec.protected_paths)
         if self.driver_path is not None:
             exact_paths.append(str(self.driver_path))
-        return is_protected_path(
+        return self._protected_path_rules().is_protected(
             relative,
             workspace=self.root,
             exact_paths=exact_paths,
@@ -144,7 +151,7 @@ class WorkspaceGuard:
         )
 
     def _ignored_protected_paths(self) -> set[Path]:
-        """List the complete protected inventory using the shared policy."""
+        """List the complete protected inventory under the caller's rules."""
 
         exact_paths = list(self.spec.protected_paths)
         if self.driver_path is not None:
@@ -152,7 +159,7 @@ class WorkspaceGuard:
         try:
             return (
                 set(
-                    protected_path_inventory(
+                    self._protected_path_rules().inventory(
                         self.root,
                         exact_paths=exact_paths,
                         extra_globs=self.spec.protected_globs,

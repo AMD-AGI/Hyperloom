@@ -6,14 +6,13 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import sys
 import time
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, AsyncExitStack, ExitStack
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Iterable, Mapping, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
 from hyperloom.common.env import is_truthy
@@ -22,6 +21,7 @@ from hyperloom.common.llm_attribution import gateway_selected as _gateway_select
 from hyperloom.common.llm_attribution import inject_env as _inject_attribution_env
 from hyperloom.common.llm_headers import expand_env_refs, parse_custom_headers
 from hyperloom.common.llm_request_hooks import (
+    AnthropicStream,
     PROTOCOL_ANTHROPIC_MESSAGES,
     PROTOCOL_OPENAI_CHAT,
     RequestObservation,
@@ -331,6 +331,11 @@ DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 # The Anthropic Messages API version, defined once for the whole repository.
 DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
 _ANTHROPIC_MESSAGES_PATH = "/v1/messages"
+_ANTHROPIC_MESSAGES_METHOD = "POST"
+# The OpenAI path re-dials through the SDK (``max_retries``); on the Messages path this module owes the same.
+ANTHROPIC_CONNECT_RETRIES = 2
+# Waited before the second dial and doubled before the third, as the SDK's backoff does.
+_ANTHROPIC_CONNECT_BACKOFF_S = 0.5
 
 
 def _is_dual_protocol_host(url: str | None) -> bool:
@@ -558,6 +563,12 @@ def _httpx_module() -> object:
     except ImportError as exc:
         raise LLMConfigError(_HTTPX_MISSING) from exc
     return httpx
+
+
+def _anthropic_connect_failures() -> tuple[type[BaseException], ...]:
+    """The ``httpx`` failures that mean nothing was sent, so dialling again cannot duplicate a completion."""
+    httpx = _httpx_module()
+    return (httpx.ConnectError, httpx.ConnectTimeout)  # type: ignore[attr-defined]
 
 
 def _anthropic_client_kwargs(*, env: dict[str, str] | None, timeout: object | None) -> dict[str, object]:
@@ -831,72 +842,6 @@ def _anthropic_failure(status: int, body: bytes) -> RuntimeError:
     return RuntimeError(f"anthropic messages status={status} body={body.decode(errors='replace')[:200]}")
 
 
-class _AnthropicStream:
-    """A streamed Messages reply, folded back into the body a whole reply carries.
-
-    A line ends only at CR, LF or CRLF, as server-sent events end it: httpx's ``iter_lines`` also ends one at U+0085,
-    U+2028 and U+2029, which JSON carries unescaped. A last line with no LF yet waits for more bytes, since its CR may
-    be the first half of a CRLF. Bytes that arrive after ``deadline`` (``time.monotonic``) raise ``TimeoutError``.
-    """
-
-    def __init__(self, observation: RequestObservation, deadline: float | None = None) -> None:
-        self._observation = observation
-        self._deadline = deadline
-        self._pending = b""
-        self._data: list[bytes] = []
-        self._body: dict[str, Any] = {}
-        self._stopped = False
-
-    def feed(self, chunk: bytes) -> None:
-        if self._deadline is not None and time.monotonic() > self._deadline:
-            raise TimeoutError("anthropic messages reply outlasted its timeout_s")
-        lines = (self._pending + chunk).splitlines(keepends=True)
-        self._pending = lines.pop() if lines and not lines[-1].endswith(b"\n") else b""
-        for line in lines:
-            self._line(line.rstrip(b"\r\n"))
-
-    def finish(self) -> dict[str, Any]:
-        """Take the last line and return the reply's body; a stream that ended before ``message_stop`` raises."""
-        self._line(self._pending.rstrip(b"\r\n"))
-        self._line(b"")
-        if not self._stopped:
-            raise RuntimeError("anthropic messages stream ended before message_stop")
-        return self._body
-
-    def _line(self, line: bytes) -> None:
-        if line.startswith(b"data:"):
-            self._data.append(line[len(b"data:") :].strip())
-        elif not line and self._data:
-            data, self._data = b"\n".join(self._data), []
-            try:
-                event = json.loads(data)
-            except ValueError as exc:
-                raise RuntimeError(f"anthropic messages stream carried a non-JSON event: {exc!r}") from exc
-            try:
-                self._fold(event)
-            except (KeyError, IndexError, TypeError) as exc:
-                raise RuntimeError(f"anthropic messages stream carried a malformed event: {data[:200]!r}") from exc
-
-    def _fold(self, event: Mapping[str, Any]) -> None:
-        kind = event["type"]
-        if kind == "message_start":
-            self._body = event["message"]
-        elif kind == "content_block_start":
-            self._body["content"].append(event["content_block"])
-        elif kind == "content_block_delta" and event["delta"]["type"] == "text_delta":
-            self._body["content"][event["index"]]["text"] += event["delta"]["text"]
-            self._observation.mark_first_token()
-        elif kind == "message_delta":
-            self._body.update(event["delta"])
-            self._body["usage"] = {**self._body["usage"], **event["usage"]}
-        elif kind == "message_stop":
-            self._stopped = True
-        elif kind == "error":
-            raise RuntimeError(
-                f"anthropic messages stream error: {event['error']['type']}: {event['error']['message']}"
-            )
-
-
 def _anthropic_body_result(body: Mapping[str, object]) -> AnthropicMessageResult:
     return AnthropicMessageResult(
         text=_anthropic_text_from_content(body.get("content")),
@@ -917,6 +862,51 @@ def _observe_anthropic(observation: RequestObservation, body: Mapping[str, objec
     return result
 
 
+def _dial_anthropic_messages(
+    dial: ExitStack, client: object, params: dict[str, object], tag: dict[str, object], deadline: float | None = None
+) -> object:
+    """Open the Messages stream, dialling again while the connection never came up and ``deadline`` is still ahead."""
+    # httpx re-dials only on its unproxied branch, so the re-dial lives here instead, where both routes pass.
+    connect_failures = _anthropic_connect_failures()
+    delay = _ANTHROPIC_CONNECT_BACKOFF_S
+    body = {**params, "stream": True}
+    for _ in range(ANTHROPIC_CONNECT_RETRIES):
+        try:
+            return dial.enter_context(
+                client.stream(_ANTHROPIC_MESSAGES_METHOD, _ANTHROPIC_MESSAGES_PATH, json=body, **tag)  # type: ignore[union-attr]
+            )
+        except connect_failures:
+            # A dial begun at or past the deadline would send a POST the reader is already bound to drop.
+            if deadline is not None and time.monotonic() + delay >= deadline:
+                raise
+            time.sleep(delay)
+            delay *= 2
+    # The last dial speaks for itself: its failure reaches the caller.
+    return dial.enter_context(
+        client.stream(_ANTHROPIC_MESSAGES_METHOD, _ANTHROPIC_MESSAGES_PATH, json=body, **tag)  # type: ignore[union-attr]
+    )
+
+
+async def _adial_anthropic_messages(
+    dial: AsyncExitStack, client: object, params: dict[str, object], tag: dict[str, object]
+) -> object:
+    """Async twin of :func:`_dial_anthropic_messages`."""
+    connect_failures = _anthropic_connect_failures()
+    delay = _ANTHROPIC_CONNECT_BACKOFF_S
+    body = {**params, "stream": True}
+    for _ in range(ANTHROPIC_CONNECT_RETRIES):
+        try:
+            return await dial.enter_async_context(
+                client.stream(_ANTHROPIC_MESSAGES_METHOD, _ANTHROPIC_MESSAGES_PATH, json=body, **tag)  # type: ignore[union-attr]
+            )
+        except connect_failures:
+            await asyncio.sleep(delay)
+            delay *= 2
+    return await dial.enter_async_context(
+        client.stream(_ANTHROPIC_MESSAGES_METHOD, _ANTHROPIC_MESSAGES_PATH, json=body, **tag)  # type: ignore[union-attr]
+    )
+
+
 def anthropic_messages(
     client: object,
     *,
@@ -929,9 +919,12 @@ def anthropic_messages(
     usage. A streamed reply starts while it is written, so a gateway that cuts a request whose reply has not come does
     not cut a long one; ``timeout_s`` bounds the whole reply."""
     tag = _attribution_tag_kwargs(component, operation)
+    # Inside the observation: the re-dials belong to the one request the ledger records.
     with _observed_messages(component, operation, params) as observation:
-        stream = _AnthropicStream(observation, None if timeout_s is None else time.monotonic() + timeout_s)
-        with client.stream("POST", _ANTHROPIC_MESSAGES_PATH, json={**params, "stream": True}, **tag) as resp:  # type: ignore[union-attr]
+        deadline = None if timeout_s is None else time.monotonic() + timeout_s
+        stream = AnthropicStream(observation, deadline)
+        with ExitStack() as dial:
+            resp = _dial_anthropic_messages(dial, client, params, tag, deadline)
             if resp.status_code >= 400:
                 raise _anthropic_failure(resp.status_code, resp.read())
             for chunk in resp.iter_bytes():
@@ -952,8 +945,9 @@ async def aanthropic_messages(
 
     async def read() -> AnthropicMessageResult:
         with _observed_messages(component, operation, params) as observation:
-            stream = _AnthropicStream(observation)
-            async with client.stream("POST", _ANTHROPIC_MESSAGES_PATH, json={**params, "stream": True}, **tag) as resp:  # type: ignore[union-attr]
+            stream = AnthropicStream(observation)
+            async with AsyncExitStack() as dial:
+                resp = await _adial_anthropic_messages(dial, client, params, tag)
                 if resp.status_code >= 400:
                     raise _anthropic_failure(resp.status_code, await resp.aread())
                 async for chunk in resp.aiter_bytes():
@@ -1133,6 +1127,7 @@ __all__ = [
     "AGENT_BACKEND_CODEX",
     "AGENT_BACKEND_DEEPSEEK",
     "AGENT_BACKEND_ENV",
+    "ANTHROPIC_CONNECT_RETRIES",
     "ANTHROPIC_CREDENTIAL_ENV_ORDER",
     "ANTHROPIC_SYNTHESIZABLE_KEY_ENVS",
     "ANTHROPIC_TRANSPORT_HTTP",

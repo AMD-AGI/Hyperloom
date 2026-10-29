@@ -495,10 +495,7 @@ class V6RooflineKernel(TypedDict, total=False):
     the kernel worth optimizing is often a cheap one running at low efficiency,
     which is exactly what a top-N-by-cost cut removes.
 
-    The two analysis routes agree on identity and cost and diverge in the
-    tail: the bypass route reports ``roofline_attainment_pct`` from its
-    analytical model, which TraceLens rows do not carry. ``roofline_source``
-    says whether a row's bound came from a model or is a placeholder."""
+    ``roofline_source`` says whether a row's bound came from a model or is a placeholder."""
 
     kernel_id: str
     name: str
@@ -514,7 +511,6 @@ class V6RooflineKernel(TypedDict, total=False):
     efficiency_percent: float | None
     compute_utilization_pct: float | None
     bandwidth_utilization_pct: float | None
-    roofline_attainment_pct: float | None
     roofline_name: str | None
     roofline_source: str
     suggestion: str
@@ -554,8 +550,6 @@ class V6RooflineEventSnapshot(TypedDict, total=False):
     roofline_mem_ceiling_tok_per_sec: float | None
     roofline_cmp_ceiling_tok_per_sec: float | None
     roofline_bound_kind: str
-    e2e_mean_ms: float | None
-    roofline_ideal_ms: float | None
     within_roofline_pct: float | None
     within_roofline_pct_uncapped: float | None
     gap_to_roofline_pct: float | None
@@ -590,25 +584,14 @@ class V6RooflineProgress(TypedDict, total=False):
     the ceiling comes from the last analysis, the curve from every promotion
     between them, and the streak from the runs that failed.
 
-    ``ceiling_kind`` discriminates two domains that cannot share fields.
-    Token-decoding models are bounded in throughput and report the ``tok/sec``
-    fields; scriptable/diffusion models decode no tokens and are bounded in
-    latency, reporting the ``ms`` fields instead. A reader that ignores
-    ``ceiling_kind`` will read the absent domain's nulls as a failed analysis.
-
     The snapshot history is deliberately absent: each roofline event carries
     its own snapshot in full, and a second copy here would be free to disagree.
     ``latest_snapshot_id`` is the join back to the event that set the ceiling."""
 
-    ceiling_kind: Literal["throughput", "latency", "none"]
     ceiling_tok_per_sec: float | None
     target_tok_per_sec: float | None
     ceiling_ratio_target: float
     ceiling_available: bool
-    latency_ceiling_ms: float | None
-    achieved_latency_ms: float | None
-    latency_ceiling_available: bool
-    current_best_pct_of_latency_ceiling: float | None
     trajectory: list[V6RooflineTrajectoryPoint]
     baseline_tput: float
     current_best_tput: float
@@ -706,10 +689,10 @@ class V6ConcSweepInputAnchor(TypedDict, total=False):
 class V6ConcSweepPlan(TypedDict, total=False):
     """The ladder the sweep resolved and the order it will run it in.
 
-    ``arms_order`` matters to a reader of the budget: the optimized arm runs
-    first as the more informative of the two, so a budget that runs out takes
-    the baseline arm with it. ``concs_ordered`` is descending because a
-    single-server arm boots at the most demanding rung and reuses down."""
+    ``arms_order`` matters to a reader of the budget: past its first rung the
+    first arm may spend half the time left, and the second runs only the rungs
+    it reached, so a budget that runs out drops whole pairs. ``concs_ordered``
+    is the session's own CONC first, then the rest cheapest first."""
 
     grid_source: str | None
     concs_requested: list[int]
@@ -720,10 +703,10 @@ class V6ConcSweepPlan(TypedDict, total=False):
 
 
 class V6ConcSweepBudget(TypedDict, total=False):
-    """The budget the ladder was admitted under.
+    """The budget the ladder ran under.
 
-    ``gate_active`` says whether a total was declared. ``rung_cost_sec`` is the
-    expected duration of one rung used for admission. ``deadline`` is a
+    ``gate_active`` says whether a total was declared. ``rung_cost_sec`` is null:
+    a rung is held to its arm's deadline rather than priced. ``deadline`` is a
     wall-clock epoch."""
 
     declared_total_sec: int | None
@@ -877,10 +860,10 @@ class V6ConcSweepRung(TypedDict, total=False):
 
 
 class V6ConcSweepBootAttempt(TypedDict, total=False):
-    """One rung the boot-retry-descend loop tried.
+    """One rung whose round tried to bring the arm's server up.
 
-    ``committed`` false is a concurrency the server would not come up at --
-    the capacity finding the sweep produces for free and the report discards."""
+    ``committed`` false appears only in older sessions, on an attempt a later
+    rung's boot superseded."""
 
     conc: int | None
     committed: bool
@@ -892,7 +875,7 @@ class V6ConcSweepBootAttempt(TypedDict, total=False):
 
 
 class V6ConcSweepBoot(TypedDict, total=False):
-    """How the boot-retry-descend loop resolved.
+    """How the arm's boot attempts resolved: each rung boots until one brings the server up.
 
     ``attempted_concs`` is in the order tried. Absent on an arm refused before
     it built anything."""
@@ -947,8 +930,8 @@ class V6ConcSweepArm(TypedDict, total=False):
 
     The two arms differ only by the server args and envs they add, so the
     curve is only readable alongside the decisions the ladder was run under.
-    The reuse path boots one server at the most demanding rung and reuses it
-    down; the restart path pays a server start per rung. They fail
+    The reuse path boots one server on its first rung and reuses it for the
+    rest; the restart path pays a server start per rung. They fail
     differently, and which one ran is not recoverable after the fact."""
 
     arm: str

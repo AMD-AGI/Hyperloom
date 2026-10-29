@@ -185,16 +185,17 @@ def test_validate_credentials_exits_2_when_no_key(clean_creds_env, capsys):
         cli_credentials._validate_credentials()
     assert exc_info.value.code == 2
     err = capsys.readouterr().err
-    assert "API key" in err
+    assert "usable endpoint/key pair" in err
 
 
-def test_validate_credentials_lists_both_missing(clean_creds_env, capsys):
+def test_validate_credentials_names_the_missing_pair(clean_creds_env, capsys):
     with pytest.raises(SystemExit):
         cli_credentials._validate_credentials()
     err = capsys.readouterr().err
     missing_line = err.split("Missing required credential(s):")[1].split("\n")[0]
     assert "usable endpoint/key pair" in missing_line
-    assert "API key" in missing_line
+    assert "OPENAI_API_KEY" in missing_line
+    assert "CLAUDE_CODE_OAUTH_TOKEN" in missing_line
 
 
 def test_validate_credentials_no_bypass_paths(clean_creds_env):

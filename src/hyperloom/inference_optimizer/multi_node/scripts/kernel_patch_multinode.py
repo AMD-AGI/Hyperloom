@@ -14,16 +14,11 @@ issues a follow-up revert). Emits one JSON summary on stdout.
 from __future__ import annotations
 
 import argparse
-import base64
-import hashlib
 import json
-import py_compile
-import shutil
 import socket
 import sys
 import time
 from pathlib import Path
-from typing import Any
 
 import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
@@ -32,14 +27,7 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
-from patch_path_safety import (  # noqa: E402
-    atomic_write_bytes,
-    assert_backup_dir_allowed,
-    assert_backup_path_allowed,
-    finalize_patch_records,
-    invalidate_aiter_jit_build,
-    restore_aiter_jit_build,
-)
+from patch_path_safety import apply_patch_on_pod, finalize_patch_records, revert_patch_records  # noqa: E402
 
 
 def _init_ray() -> None:
@@ -62,20 +50,6 @@ def _log(msg: str) -> None:
     sys.stderr.flush()
 
 
-def _safe_name(value: str) -> str:
-    """Sanitize a string for use as a filename component.
-
-    Args:
-        value (str): The raw string to sanitize.
-
-    Returns:
-        str: A filename-safe slug (alnum plus ``._-``), truncated to 80
-        characters; ``"patch"`` if the result would be empty.
-    """
-    cleaned = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in value)
-    return cleaned[:80] or "patch"
-
-
 def _apply_remote(
     target_path: str,
     patch_b64: str,
@@ -83,106 +57,13 @@ def _apply_remote(
     kernel_id: str,
     jit_build_dir: str = "",
 ) -> dict:
-    """Apply a single patch on this pod; raises on any error (surfaced via ``ray.get``).
-
-    Args:
-        target_path: Absolute path of the file to overwrite on the pod.
-        patch_b64: Base64-encoded new file contents.
-        backup_dir: Directory where the pre-patch original is saved.
-        kernel_id: Optional id used to construct the backup filename.
-
-    Returns:
-        dict: Per-host result with the target path, backup path, byte count,
-        and compile status.
-
-    Raises:
-        ValueError: If ``backup_dir`` is outside the kernel backup root,
-            ``patch_b64`` is not valid base64, or a ``.py`` target fails to
-            compile (it is auto-reverted first).
-        FileNotFoundError: If ``target_path`` does not exist on the pod.
-    """
-    host = socket.gethostname()
-    target = Path(target_path)
-    assert_backup_dir_allowed(Path(backup_dir))
-    if not target.is_file():
-        raise FileNotFoundError(f"target_path does not exist on pod {host}: {target}")
-
-    bdir = Path(backup_dir)
-    bdir.mkdir(parents=True, exist_ok=True)
-    path_hash = hashlib.sha256(str(target).encode("utf-8")).hexdigest()[:16]
-    backup_name = f"{_safe_name(kernel_id or target.stem)}_{path_hash}_{host}_{time.time_ns()}.bak"
-    backup_path = bdir / backup_name
-    shutil.copy2(target, backup_path)
-
-    try:
-        data = base64.b64decode(patch_b64.encode("ascii"))
-    except Exception as exc:
-        raise ValueError(f"patch_b64 not valid base64: {exc!r}") from exc
-
-    jit_backup = invalidate_aiter_jit_build(
-        Path(jit_build_dir) if jit_build_dir else None,
-        bdir,
-        f"{_safe_name(kernel_id or target.stem)}_{host}_{int(time.time())}",
-    )
-
-    compile_result: dict[str, Any] = {"status": "skipped", "reason": "non-py target"}
-    try:
-        atomic_write_bytes(target, data)
-        if target.suffix.lower() == ".py":
-            py_compile.compile(str(target), doraise=True)
-            compile_result = {"status": "ok"}
-    except Exception:
-        shutil.copy2(backup_path, target)
-        restore_aiter_jit_build(jit_backup)
-        raise
-
-    return {
-        "host": host,
-        "target_path": str(target),
-        "backup_path": str(backup_path),
-        "wrote_bytes": len(data),
-        "compile": compile_result,
-        "jit_backup": jit_backup,
-    }
+    """Apply a single patch on this pod; raises on any error (surfaced via ``ray.get``)."""
+    return apply_patch_on_pod(Path(target_path), patch_b64, Path(backup_dir), kernel_id, jit_build_dir)
 
 
 def _revert_remote(records: list[dict]) -> dict:
-    """Restore every source and JIT backup recorded for one pod.
-
-    Args:
-        records: Apply records for all files patched on this pod.
-
-    Returns:
-        dict: Per-host result with ``status`` of ``restored`` or
-        ``noop_missing_backup``.
-    """
-    host = socket.gethostname()
-    restored: list[str] = []
-    jit_records: list[dict] = []
-    for record in reversed(records):
-        target = Path(str(record.get("target_path") or ""))
-        backup = Path(str(record.get("backup_path") or ""))
-        if not backup.is_file():
-            raise FileNotFoundError(f"backup missing on {host}: {backup}")
-        assert_backup_path_allowed(backup)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(backup, target)
-        restored.append(str(target))
-        jit_record = record.get("jit_backup")
-        if isinstance(jit_record, dict) and jit_record.get("status") in {"ok", "clean"}:
-            jit_records.append(jit_record)
-    jit_restore = {"status": "skipped", "reason": "no JIT backup"}
-    if jit_records:
-        first = jit_records[0]
-        if any(record != first for record in jit_records[1:]):
-            raise ValueError("conflicting JIT backup records for one pod")
-        jit_restore = restore_aiter_jit_build(first)
-    return {
-        "host": host,
-        "status": "restored",
-        "restored_targets": restored,
-        "jit_restore": jit_restore,
-    }
+    """Restore every source and JIT backup recorded for one pod; raises on any error."""
+    return {"host": socket.gethostname(), **revert_patch_records(records)}
 
 
 def _finalize_remote(records: list[dict]) -> dict:
@@ -190,23 +71,9 @@ def _finalize_remote(records: list[dict]) -> dict:
     return {"host": socket.gethostname(), **finalize_patch_records(records)}
 
 
-def _alive_nodes(min_gpu: int = 0) -> list[dict]:
-    """Return the list of currently-alive Ray nodes.
-
-    Each entry is the full ``ray.nodes()`` row so the caller can pick
-    per-node IDs and addresses for ``NodeAffinitySchedulingStrategy``.
-
-    Args:
-        min_gpu (int): If > 0, only return nodes with at least this many
-            GPUs.
-
-    Returns:
-        list[dict]: The matching alive node rows from ``ray.nodes()``.
-    """
-    nodes = [n for n in ray.nodes() if n.get("Alive")]
-    if min_gpu > 0:
-        nodes = [n for n in nodes if int(n.get("Resources", {}).get("GPU", 0) or 0) >= min_gpu]
-    return nodes
+def _alive_nodes() -> list[dict]:
+    """Return the full ``ray.nodes()`` rows of every alive node, for ``NodeAffinitySchedulingStrategy``."""
+    return [n for n in ray.nodes() if n.get("Alive")]
 
 
 def _do_apply(args: argparse.Namespace) -> int:

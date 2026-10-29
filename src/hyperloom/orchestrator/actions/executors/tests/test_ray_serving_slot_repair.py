@@ -238,17 +238,14 @@ def test_restart_stops_then_starts_with_the_slot_and_reconnects(monkeypatch):
     fake = _FakeRay()
     _install_ray_module(monkeypatch, fake)
     calls: list[Any] = []
-    monkeypatch.setattr(
-        rr, "force_restart_local_cluster", lambda **kw: calls.append(("restart", kw["num_gpus"], kw["reason"]))
-    )
+    monkeypatch.setattr(rr, "force_restart_local_cluster", lambda **kw: calls.append(("restart", kw["num_gpus"])))
     monkeypatch.setattr(rr, "ray_status_ok", lambda: True)
     monkeypatch.setattr(rr, "quiet_ray_init", lambda **kw: calls.append(("init", kw["num_gpus"])))
 
     rr.restart_local_head_with_serving_slot(num_gpus=4)
 
     assert fake.shutdowns == 1
-    assert calls[0][0] == "restart" and calls[0][1] == 4 and "serving_slot" in calls[0][2]
-    assert calls[1] == ("init", 4)
+    assert calls == [("restart", 4), ("init", 4)]
 
 
 def test_force_restart_start_command_declares_the_slot(monkeypatch):
@@ -266,7 +263,7 @@ def test_force_restart_start_command_declares_the_slot(monkeypatch):
     monkeypatch.setattr(rr.subprocess, "run", _run)
     monkeypatch.setattr(rr, "ensure_fd_limit", lambda **_kw: (65536, 65536))
 
-    rr.force_restart_local_cluster(num_gpus=2, reason="test")
+    rr.force_restart_local_cluster(num_gpus=2)
 
     assert len(starts) == 1
     assert "--resources" in starts[0]

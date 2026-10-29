@@ -31,8 +31,8 @@ from kernelforge.kernel_rewrite_controller.worktree import (
     export_patch_from_base,
     operator_workspace,
 )
-from kernelforge.loop.editable_repo import needs_inplace
-from kernelforge.loop.reporting import BestResultPublisher
+from kernelforge.tools.editable_repo import needs_inplace
+from kernelforge.loop.api import BestResultPublisher
 
 log = logging.getLogger(__name__)
 

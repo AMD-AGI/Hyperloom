@@ -166,7 +166,6 @@ async def test_warm_specialist_params_respects_existing_evidence(tmp_path):
 
 def _make_inp(roofline_evidence: dict[str, Any]) -> SpecialistPromptInputs:
     return SpecialistPromptInputs(
-        task_id="t-1",
         domain=get_domain("serving_specialist"),
         gap_canonical_id="gap.x",
         roofline_evidence=roofline_evidence,
@@ -213,6 +212,15 @@ def test_section_renders_none_when_evidence_empty():
     text = "\n".join(section)
     assert "## 4a. ROOFLINE EVIDENCE" in text
     assert "(none" in text
+
+
+@pytest.mark.parametrize(
+    ("report", "label"),
+    [("/sd/analysis.md", "Full analysis.md path"), ("/sd/analysis.json", "Full TraceLens report path")],
+)
+def test_section_labels_the_report_by_its_format(report, label):
+    section = _section_roofline_evidence(_make_inp({"analysis_md_path": report}))
+    assert f"**{label}:** `{report}`" in section
 
 
 def test_build_specialist_prompts_inserts_section_between_kb_and_recipe():

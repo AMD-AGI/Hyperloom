@@ -410,7 +410,6 @@ def test_specialist_dispatch_injects_its_experience_block_and_records_it(tmp_pat
 
     _system, user = build_specialist_prompts(
         SpecialistPromptInputs(
-            task_id="t-1",
             domain=get_domain("kernel_switch_specialist"),
             gap_canonical_id="gap.static_recon.aiter_master",
             experience_kb_block=params["experience_kb_block"],
@@ -441,7 +440,7 @@ def test_specialist_dispatch_reads_only_in_framework_agent_and_fails_open(tmp_pa
     assert state.experience_kb_injections == []
 
     _system, user = build_specialist_prompts(
-        SpecialistPromptInputs(task_id="t-2", domain=get_domain("serving_specialist"), gap_canonical_id="gap.y")
+        SpecialistPromptInputs(domain=get_domain("serving_specialist"), gap_canonical_id="gap.y")
     )
     assert "EXPERIENCE KB" not in user
 

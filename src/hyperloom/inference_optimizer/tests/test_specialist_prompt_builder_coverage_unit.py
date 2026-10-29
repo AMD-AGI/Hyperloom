@@ -32,13 +32,10 @@ def test_build_for_each_domain_and_framework(domain_key, framework):
     assert domain is not None
     sys_p, user_p = build_specialist_prompts(
         SpecialistPromptInputs(
-            task_id="t1",
             domain=domain,
             framework=framework,
             gpu_type="MI300X",
             tp=2,
-            hbm_gb=192.0,
-            peak_tflops=1300.0,
             precision="fp8",
             conc=64,
             isl=1024,
@@ -60,15 +57,12 @@ def test_build_for_each_domain_and_framework(domain_key, framework):
 
 def _rich_inputs(**overrides):
     base = dict(
-        task_id="t1",
         domain=get_domain("serving_specialist"),
         framework="vllm",
         framework_version="0.6.2",
         gpu_type="MI300X",
         allocated_gpu_ids=(0, 1),
         tp=2,
-        hbm_gb=192.0,
-        peak_tflops=1300.0,
         precision="fp8",
         conc=64,
         isl=1024,
@@ -80,7 +74,6 @@ def _rich_inputs(**overrides):
         gap_layer="kernel_agent",
         gap_symptom="slow decode",
         gap_evidence={"step": 1},
-        kb_subgraph={"nodes": [1, 2]},
         roofline_evidence={
             "roofline_snapshot_id": 7,
             "executive_summary": {
@@ -146,7 +139,6 @@ def test_build_rich_user_prompt_sections():
 
 def test_cold_start_directive():
     inp = SpecialistPromptInputs(
-        task_id="t",
         domain=get_domain("serving_specialist"),
     )
     _, user_p = build_specialist_prompts(inp)
@@ -156,7 +148,6 @@ def test_cold_start_directive():
 def test_cold_start_does_not_ask_for_a_field_the_safety_gate_forbids():
     """It used to direct the fallback proposals to carry ``confidence: low`` -- a field in FORBIDDEN_PROPOSAL_FIELDS -- so a compliant specialist tripped the guard on exactly the round where it was the only source of ideas."""
     inp = SpecialistPromptInputs(
-        task_id="t",
         domain=get_domain("serving_specialist"),
     )
     _, user_p = build_specialist_prompts(inp)
@@ -168,7 +159,6 @@ def test_cold_start_does_not_ask_for_a_field_the_safety_gate_forbids():
 
 def test_research_hints_fallback():
     inp = SpecialistPromptInputs(
-        task_id="t",
         domain=get_domain("serving_specialist"),
         research_hints="prior: enable aiter",
     )
@@ -178,7 +168,6 @@ def test_research_hints_fallback():
 
 def test_pr_monitor_unavailable():
     inp = SpecialistPromptInputs(
-        task_id="t",
         domain=get_domain("serving_specialist"),
         pr_monitor_available=False,
     )
@@ -203,7 +192,7 @@ def test_scope_freeform():
 
 
 def test_gpu_autonomy_block_and_auto_retry():
-    inp = _rich_inputs(bench=True, mode="patch", auto_retry_reason="timeout on prior attempt")
+    inp = _rich_inputs(mode="patch", auto_retry_reason="timeout on prior attempt")
     sys_p, _ = build_specialist_prompts(inp)
     assert "On-GPU autonomy" in sys_p
     assert "specialists.rebench" in sys_p
@@ -227,7 +216,6 @@ def test_render_measured_impact_variants():
 
 def test_format_version_note_empty_when_same_or_unknown():
     inp = SpecialistPromptInputs(
-        task_id="t",
         domain=get_domain("serving_specialist"),
         framework="vllm",
         framework_version="1.0",

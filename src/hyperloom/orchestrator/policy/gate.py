@@ -34,6 +34,7 @@ from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_OWNED_KERNEL_REQUEST_KINDS,
     KERNEL_AGENT_OWNED_ACTIONS,
 )
+from ..mcp_tool_names import agent_tool_grant, qualified_context_tool_name
 from .projection import (
     RULE_GPU_EXCEEDS_CAPACITY,
     RULE_GPU_POOL_DISABLED,
@@ -359,6 +360,10 @@ class PolicyGate:
     def allowed_tools_for_agent(self, agent_name: str) -> list[str]:
         """Return the Claude tool list a reactor may use (Codex → []; Claude → emit_intent; orchestration also gets context-pull tools + sandboxed Read + web search).
 
+        The names come from :func:`agent_tool_grant`, so MCP tools carry the
+        ``mcp__<server>__<tool>`` prefix the runtime registers them under (as
+        :data:`PR_MONITOR_TOOL_NAMES` already does).
+
         Args:
             agent_name (str): the name of the agent whose tool list is
                 requested.
@@ -372,14 +377,7 @@ class PolicyGate:
             return []
         if role.no_tools:
             return []
-        tools = ["emit_intent"]
-        if agent_name == "orchestration":
-            from ..roles.mcp_context_tools import CONTEXT_TOOL_NAMES
-
-            tools.extend(CONTEXT_TOOL_NAMES)
-            tools.append("Read")
-            tools.extend(["WebSearch", "WebFetch"])
-        return tools
+        return agent_tool_grant(agent_name)
 
     # Per-intent validators
     def _validate_delegate(self, role: "AgentRole", payload: dict[str, Any]) -> None:
@@ -1155,6 +1153,7 @@ class PolicyGate:
                 positive integer within :data:`EXTEND_LEASE_MAX_SEC`, or no
                 such task was running when the projection was taken.
         """
+        running_tasks = qualified_context_tool_name("get_running_tasks")
         task_id = str(payload.get("task_id", "")).strip()
         if not task_id:
             raise PolicyDenied("extend_lease missing task_id", rule="payload")
@@ -1171,7 +1170,7 @@ class PolicyGate:
                 rule="extend_lease_bounds",
                 hint=(
                     f"Extend at most {EXTEND_LEASE_MAX_SEC}s per call; call again while the task runs to extend "
-                    "further. Re-check get_running_tasks between steps."
+                    f"further. Re-check {running_tasks} between steps."
                 ),
             )
         live = self.resources.live_task_ids
@@ -1180,7 +1179,7 @@ class PolicyGate:
         raise PolicyDenied(
             f"extend_lease: task {task_id!r} was not running when the resource facts were read",
             rule=RULE_LEASE_NOT_LIVE,
-            hint="Re-read get_running_tasks; a finished task's lease cannot be extended.",
+            hint=f"Re-read {running_tasks}; a finished task's lease cannot be extended.",
         )
 
     def _path_under_session(self, value: str) -> bool:

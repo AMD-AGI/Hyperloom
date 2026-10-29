@@ -19,7 +19,7 @@ from .lane_budget import INSUFFICIENT_BUDGET, LANE_GEMM, LaneAllocation
 from .lane_budget import allocate as _allocate_lane_budgets
 
 if TYPE_CHECKING:
-    from kernelforge.gemm_tune.router import RoutingEvidence, RoutingTarget
+    from kernelforge.gemm_tune import RoutingEvidence, RoutingTarget
 
 log = logging.getLogger(__name__)
 
@@ -101,8 +101,7 @@ def _gemm_router_targets(
     returns them already in the execution order the gemm lane ceiling assumes.
     """
     try:
-        from kernelforge.gemm_tune.model_analyzer import analyze_model
-        from kernelforge.gemm_tune.router import select_tuners
+        from kernelforge.gemm_tune import analyze_model, select_tuners
 
         specs = select_tuners(analyze_model(model_path), target, evidence)
     except (OSError, ValueError, TypeError, AttributeError):

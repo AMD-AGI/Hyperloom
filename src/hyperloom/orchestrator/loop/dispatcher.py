@@ -589,7 +589,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         """Take the GPU leases a specialist needs, recording the devices it may use in ``extra_context``."""
         from ..actions.executors._ray_backend import (
             ray_gpu_pending_limit,
-            ray_gpu_specialist_exec_enabled,
+            ray_exec_enabled,
             ray_serving_priority_enabled,
             serving_slot_busy,
         )
@@ -627,7 +627,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             gpu_count = serving_tp
         # Under single-node Ray the physical GPU mutex is Ray's ``num_gpus``, not this SQLite pool, so
         # admission there is a count-based pending limit and several specialists may share one GPU.
-        if ray_gpu_specialist_exec_enabled():
+        if ray_exec_enabled():
             gpu_lease = await gpu_pool.try_acquire_ray_observation(
                 holder_id=task.task_id,
                 task_id=task.task_id,
@@ -1243,6 +1243,11 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             )
         return None
 
+    def admission_cost_minutes(self, action_name: str) -> float:
+        """What a catalogued action is admitted at, priced on this session's measured baseline round once one exists."""
+        measured_sec = measured_baseline_runtime_sec(self.shared_state)
+        return expected_action_cost_minutes(self.action_registry.get(action_name), measured_baseline_sec=measured_sec)
+
     def time_budget_denial_for_action(
         self,
         action_name: str,
@@ -1258,10 +1263,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         keeps the refusal out of the failure ledgers — no task row is created, so
         nothing teaches the KB that the action failed.
 
-        What the action is expected to cost is anchored on this session's own
-        baseline round once one exists, the way PRELUDE's affordability gate
-        already is; see :func:`expected_action_cost_minutes` for why a
-        catalogue-anchored gate admits arms a real model cannot pay for.
+        What the action costs is :meth:`admission_cost_minutes`.
 
         Args:
             action_name: The proposed/delegated action name.
@@ -1279,16 +1281,12 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             return None
         if self.shared_state.stop_reason:
             return None
-        meta = self.action_registry.get(action)
-        if meta is None:
-            if fallback_cost_minutes is None:
-                return None
+        if self.action_registry.get(action) is not None:
+            expected_min = self.admission_cost_minutes(action)
+        elif fallback_cost_minutes is not None:
             expected_min = float(fallback_cost_minutes)
         else:
-            expected_min = expected_action_cost_minutes(
-                meta,
-                measured_baseline_sec=measured_baseline_runtime_sec(self.shared_state),
-            )
+            return None
         if action == "specialist":
             expected_min = max(expected_min, specialist_admission_minutes(self.shared_state, params))
         return time_budget_denial(action, expected_min, self.shared_state)

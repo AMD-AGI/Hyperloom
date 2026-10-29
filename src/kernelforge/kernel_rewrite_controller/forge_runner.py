@@ -12,7 +12,6 @@ import logging
 import os
 import signal
 import subprocess
-import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -25,10 +24,10 @@ from kernelforge.kernel_rewrite_controller.worktree import (
     FORGE_LOOP_OUTPUT_DIRNAME,
     OperatorWorktree,
 )
+from kernelforge.loop.api import forge_loop_command, parse_forge_loop_result
 
 log = logging.getLogger(__name__)
 
-_RESULT_SENTINEL = "__FORGE_RESULT__"
 _TERMINATE_GRACE_SEC = 5.0
 _CHECKPOINT_POLL_SEC = 1.0
 
@@ -109,11 +108,7 @@ def build_forge_loop_invocation(
     remaining_hours = max(0.0, (float(deadline_unix) - time.time()) / 3600.0)
     max_hours = max(1.0, remaining_hours)
     experiment_id = f"controller-{hashlib.sha256(task.operator_id.encode('utf-8')).hexdigest()[:16]}"
-    command = [
-        sys.executable,
-        "-m",
-        "kernelforge.cli",
-        "forge-loop",
+    command = forge_loop_command(
         "--workspace",
         str(worktree.workspace),
         "--kernel",
@@ -144,7 +139,7 @@ def build_forge_loop_invocation(
         task.operator_id,
         "--result-json",
         str(result_json),
-    ]
+    )
     gpu_target = canon_arch(task.identity.gpu)
     if gpu_target:
         command.extend(["--gpu-target", gpu_target])
@@ -181,14 +176,7 @@ def _read_result(path: Path, stdout: str) -> dict[str, Any] | None:
                 return payload
         except (OSError, json.JSONDecodeError):
             pass
-    parts = stdout.split(_RESULT_SENTINEL)
-    if len(parts) >= 3:
-        try:
-            payload = json.loads(parts[-2])
-            return payload if isinstance(payload, dict) else None
-        except json.JSONDecodeError:
-            return None
-    return None
+    return parse_forge_loop_result(stdout)
 
 
 def _notify_checkpoint(callback: Callable[[], None] | None) -> bool:

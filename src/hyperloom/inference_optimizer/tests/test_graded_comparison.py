@@ -532,7 +532,7 @@ async def test_baseline_perf_updates_without_resetting_the_stack(baseline_writer
         "extra_server_args": "--enable-prefix-caching",
         "extra_envs": {"VLLM_USE_V1": "1"},
         "optimization_stack": deepcopy(stack),
-        "measurement": {"tput": 210.0, "launch_identity": "stack-identity"},
+        "measurement": {"tput": 210.0, "declared_launch_identity": "stack-identity"},
     }
     state.optimization_stack = deepcopy(stack)
     state.current_best = deepcopy(current_best)
@@ -546,7 +546,6 @@ async def test_baseline_perf_updates_without_resetting_the_stack(baseline_writer
     await writer._promote_baseline(result, task=None, outcome=outcome)
 
     assert outcome.audit_decision == "promoted"
-    assert outcome.changed
     assert state.baseline_tput == 190.0
     assert state.baseline_config_path == result["materialized_config"]
     assert state.baseline_perf == {
@@ -581,7 +580,7 @@ async def test_rejected_baseline_preserves_the_entire_anchor(baseline_writer, tm
     state.baseline_post_ready_runtime_sec = 20.0
     state.optimization_stack = [{"action": "integrate_patch"}] if stacked else []
     state.current_best = dict(_ANCHOR)
-    state.current_best_measurement = {"launch_identity": "old-identity"}
+    state.current_best_measurement = {"declared_launch_identity": "old-identity"}
     prior_baseline = {key: deepcopy(value) for key, value in vars(state).items() if key.startswith("baseline_")}
     result = {
         **_full_measurement(total=30000.0, output=180.0, intvty=25.0),
@@ -597,7 +596,7 @@ async def test_rejected_baseline_preserves_the_entire_anchor(baseline_writer, tm
     assert outcome.audit_decision == "no_promote"
     assert {key: getattr(state, key) for key in prior_baseline} == prior_baseline
     assert state.current_best == _ANCHOR
-    assert state.current_best_measurement == {"launch_identity": "old-identity"}
+    assert state.current_best_measurement == {"declared_launch_identity": "old-identity"}
 
 
 @pytest.mark.parametrize("stacked", [False, True])
@@ -643,7 +642,10 @@ async def test_accepted_baseline_without_axes_clears_stale_perf(baseline_writer,
     else:
         assert state.current_best["tput"] == 190.0
         assert state.current_best_measurement["benchmark_workspace"] == result["workspace"]
-        assert state.current_best_measurement["launch_identity"] != prior_best["measurement"]["launch_identity"]
+        assert (
+            state.current_best_measurement["declared_launch_identity"]
+            != prior_best["measurement"]["declared_launch_identity"]
+        )
     graded = resolve_graded_comparison(
         state,
         _full_measurement(total=27000.0, output=195.0, intvty=24.0),

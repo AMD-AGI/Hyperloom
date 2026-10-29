@@ -5,9 +5,8 @@ from pathlib import Path
 
 from kernelforge.workspace.edit_policy import (
     FORGE_LOOP_OUTPUT_DIRNAME,
+    FORGE_PROTECTED_PATHS,
     hide_forge_loop_output,
-    is_protected_path,
-    protected_path_inventory,
     tracked_editable_paths,
 )
 
@@ -23,11 +22,11 @@ def _git(root: Path, *args: str) -> None:
 
 
 def test_protected_status_is_independent_of_source_hints(tmp_path: Path):
-    assert is_protected_path("config.yaml", workspace=tmp_path)
-    assert is_protected_path("scripts/task_runner.py", workspace=tmp_path)
-    assert is_protected_path("tests/test_kernel.py", workspace=tmp_path)
-    assert is_protected_path("src/kernel_test.cu", workspace=tmp_path)
-    assert not is_protected_path("src/helper.cu", workspace=tmp_path)
+    assert FORGE_PROTECTED_PATHS.is_protected("config.yaml", workspace=tmp_path)
+    assert FORGE_PROTECTED_PATHS.is_protected("scripts/task_runner.py", workspace=tmp_path)
+    assert FORGE_PROTECTED_PATHS.is_protected("tests/test_kernel.py", workspace=tmp_path)
+    assert FORGE_PROTECTED_PATHS.is_protected("src/kernel_test.cu", workspace=tmp_path)
+    assert not FORGE_PROTECTED_PATHS.is_protected("src/helper.cu", workspace=tmp_path)
 
 
 def test_tracked_editable_paths_are_all_non_protected_files(tmp_path: Path):
@@ -69,7 +68,7 @@ def test_recursive_inventory_uses_the_same_nested_rules(tmp_path: Path):
         path.write_text(path.name)
 
     inventory = set(
-        protected_path_inventory(
+        FORGE_PROTECTED_PATHS.inventory(
             tmp_path,
             extra_globs=["*/references/*.data"],
         )
@@ -79,9 +78,9 @@ def test_recursive_inventory_uses_the_same_nested_rules(tmp_path: Path):
     assert nested_dir in inventory
     assert extra in inventory
     assert editable not in inventory
-    assert is_protected_path(nested_glob, workspace=tmp_path)
-    assert is_protected_path(nested_dir, workspace=tmp_path)
-    assert is_protected_path(
+    assert FORGE_PROTECTED_PATHS.is_protected(nested_glob, workspace=tmp_path)
+    assert FORGE_PROTECTED_PATHS.is_protected(nested_dir, workspace=tmp_path)
+    assert FORGE_PROTECTED_PATHS.is_protected(
         extra,
         workspace=tmp_path,
         extra_globs=["*/references/*.data"],
@@ -100,7 +99,7 @@ def test_recursive_inventory_skips_the_loops_own_output_tree(tmp_path: Path):
     kernel_harness = tmp_path / "src" / "conftest.py"
     kernel_harness.write_text("")
 
-    inventory = set(protected_path_inventory(tmp_path))
+    inventory = set(FORGE_PROTECTED_PATHS.inventory(tmp_path))
 
     assert staged / "conftest.py" not in inventory
     assert staged / "test_oracle.py" not in inventory
@@ -111,7 +110,7 @@ def test_recursive_inventory_skips_the_loops_own_output_tree(tmp_path: Path):
 def test_recursive_inventory_includes_missing_exact_paths(tmp_path: Path):
     exact = tmp_path / "generated" / "source_oracle.py"
 
-    inventory = protected_path_inventory(
+    inventory = FORGE_PROTECTED_PATHS.inventory(
         tmp_path,
         exact_paths=[exact],
     )
