@@ -381,7 +381,7 @@ async def test_a_failed_preflight_gives_up_the_specialist_with_every_reason_and_
     assert len(runs.started) == 1 and runs.started[0].stopped.is_set()
     [notice] = [notice for notice in await session.notices() if "preflight failed" in notice]
     assert all(reason in notice for reason in reasons)
-    assert await runtime.status(BRANCH) == SpecialistStatus(False, 0, 0, True, False)
+    assert await runtime.status(BRANCH) == SpecialistStatus(False, 0, 0, True, False, unready=str(runs.preflight))
     await runtime.stop(BRANCH)
 
 
@@ -414,7 +414,8 @@ async def test_a_session_that_cannot_be_built_or_made_ready_gives_its_specialist
 
     why = "no specialist stands for" if where == "factory" else "no space left"
     assert any(why in notice for notice in await session.notices())
-    assert await runtime.status(BRANCH) == SpecialistStatus(False, 0, 0, True, False)
+    status = await runtime.status(BRANCH)
+    assert (status.gave_up, status.crashes) == (True, 0) and why in status.unready
     await runtime.stop(BRANCH)
 
 

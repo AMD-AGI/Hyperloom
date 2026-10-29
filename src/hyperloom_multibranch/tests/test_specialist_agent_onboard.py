@@ -12,15 +12,21 @@ from hyperloom_multibranch.contracts.llm_prices import TokenCounts, price_of
 from hyperloom_multibranch.contracts.blackboard.records import LlmUsage
 from hyperloom_multibranch.contracts.blackboard.vocab import UsageSource
 from hyperloom_multibranch.specialist.agent_onboard import ALLOWED_TOOLS, TOOLS, cli_onboard, onboard_argv
-from hyperloom_multibranch.specialist.agent_onboarding import AttemptFailed
+from hyperloom_multibranch.specialist.agent_onboarding import AttemptFailed, ModelRefused
 from hyperloom_multibranch.specialist.agent_session import AgentCommand
 
 MODEL = "claude-sonnet-5-5"
 SUB_MODEL = "claude-haiku-5-5"
+TOO_OLD = (
+    "API Error: 400 {'error': 'Claude Code 2.1.273 does not support this model; version 2.1.280 or newer is required'}"
+)
+API_ERRORS = {"api_too_old": (400, TOO_OLD), "api_overloaded": (529, "API Error: 529 overloaded")}
 
 # Stands in for `claude --print --output-format stream-json`: records how it was run, then streams as FAKE_MODE says.
 FAKE_CLI = """#!{python}
 import json, os, sys, time
+
+API_ERRORS = {api_errors!r}
 
 record = {{"argv": sys.argv[1:], "cwd": os.getcwd(), "stdin": sys.stdin.read(), "pid": os.getpid()}}
 with open(os.environ["FAKE_RECORD"], "w") as handle:
@@ -39,6 +45,18 @@ if mode == "hang":
 if mode == "crash":
     print("line one\\nauth failed: no key", file=sys.stderr)
     sys.exit(3)
+if mode.startswith("api_"):
+    # How the CLI streams a model call the gateway refused: a synthetic assistant turn and an error result, exit 1.
+    status, text = API_ERRORS[mode]
+    print(json.dumps({{"type": "system", "subtype": "init", "session_id": "s-1"}}))
+    for line in range(30):
+        print(json.dumps({{"type": "system", "subtype": "status", "line": line}}))
+    message = {{"id": "m0", "model": "<synthetic>", "content": [{{"type": "text", "text": text}}]}}
+    row = {{"type": "assistant", "message": message, "is_api_error_message": True, "api_error_status": status}}
+    print(json.dumps(row))
+    result = {{"type": "result", "is_error": True, "api_error_status": status, "result": text, "session_id": "s-1"}}
+    print(json.dumps(result))
+    sys.exit(1)
 print(json.dumps({{"type": "system", "subtype": "init", "session_id": "s-1"}}))
 for number, (model, usage) in enumerate([
     ("{model}", {{"input_tokens": 10, "output_tokens": 40, "cache_read_input_tokens": 30,
@@ -63,7 +81,10 @@ class _Usage:
 
 def _setup(tmp_path: Path, mode: str = "ok") -> tuple[AgentCommand, dict[str, str], Path, Path]:
     cli = tmp_path / "claude"
-    cli.write_text(FAKE_CLI.format(python=sys.executable, model=MODEL, sub_model=SUB_MODEL), encoding="utf-8")
+    cli.write_text(
+        FAKE_CLI.format(python=sys.executable, model=MODEL, sub_model=SUB_MODEL, api_errors=API_ERRORS),
+        encoding="utf-8",
+    )
     cli.chmod(0o755)
     checkout = tmp_path / "agent" / "src"
     checkout.mkdir(parents=True)
@@ -148,3 +169,22 @@ async def test_a_run_past_its_time_is_killed_with_what_it_started(tmp_path: Path
     for pid in (json.loads(record.read_text(encoding="utf-8"))["pid"], int(child.read_text(encoding="utf-8"))):
         with pytest.raises(ProcessLookupError):
             os.kill(pid, 0)
+
+
+async def test_a_model_call_the_gateway_refuses_ends_the_attempt_naming_the_api_error(tmp_path: Path) -> None:
+    command, env, checkout, _ = _setup(tmp_path, "api_too_old")
+
+    with pytest.raises(ModelRefused) as refused:
+        await cli_onboard(command, env, "b07", _Usage())(checkout, "p")
+
+    assert str(refused.value) == f"the onboarding model's call failed: {TOO_OLD}"
+
+
+async def test_a_model_call_that_failed_for_a_moment_fails_only_its_attempt_naming_it(tmp_path: Path) -> None:
+    command, env, checkout, _ = _setup(tmp_path, "api_overloaded")
+
+    with pytest.raises(AttemptFailed) as failed:
+        await cli_onboard(command, env, "b07", _Usage())(checkout, "p")
+
+    assert not isinstance(failed.value, ModelRefused)
+    assert str(failed.value) == "the onboarding model's call failed: API Error: 529 overloaded"

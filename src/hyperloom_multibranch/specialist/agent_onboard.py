@@ -9,8 +9,10 @@ the checkout holds, nor read its settings, whose hooks would run its code. Each 
 the checkout, which is what its spend is read from (:mod:`llm_usage`, as a specialist launch's is) and what a reader
 goes to when onboarding failed. A run that exits non-zero, outlives its timeout or answers with an error raises
 :class:`~hyperloom_multibranch.specialist.agent_onboarding.AttemptFailed`, so it fails that attempt and the next one
-asks again; its spend is the branch's either way, a run cut short included. Codex has no read-only headless mode this
-module drives, so it is refused.
+asks again; one whose model call the gateway refused says so with the gateway's words, and raises
+:class:`~hyperloom_multibranch.specialist.agent_onboarding.ModelRefused` when asking again cannot help. Its spend is the
+branch's either way, a run cut short included. Codex has no read-only headless mode this module drives, so it is
+refused.
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import signal
 from collections.abc import Mapping
 from pathlib import Path
@@ -26,12 +29,17 @@ from hyperloom.common.llm_config import AGENT_BACKEND_CLAUDE
 from hyperloom_multibranch.contracts.blackboard.interfaces import UsageSink
 from hyperloom_multibranch.contracts.blackboard.records import LlmUsage
 from hyperloom_multibranch.contracts.blackboard.vocab import UsageSource
-from hyperloom_multibranch.specialist.agent_onboarding import ENCODING, AttemptFailed, Onboard, tail
+from hyperloom_multibranch.specialist.agent_onboarding import ENCODING, AttemptFailed, ModelRefused, Onboard, tail
 from hyperloom_multibranch.specialist.agent_watch import MARKER, marked_pids
 from hyperloom_multibranch.specialist.agent_session import AgentCommand
 from hyperloom_multibranch.specialist.llm_usage import launch_cost, launch_usage
 
 ONBOARD_SECONDS = 900.0
+#: The client errors a later call may pass: a timeout, a conflict and a rate limit.
+PASSING_CLIENT_ERRORS = frozenset({408, 409, 429})
+#: What the CLI answers when it is too old for the model, whatever status the gateway gave.
+TOO_OLD = "does not support this model"
+_API_ERROR = re.compile(r"^API Error: (\d{3})")
 LOG_PREFIX = "onboard-"
 #: The built-in tools the CLI has at all; what Bash may run is :data:`ALLOWED_TOOLS`.
 TOOLS = ("Read", "Glob", "Grep", "Bash")
@@ -95,6 +103,8 @@ def cli_onboard(
         finally:
             await _record(log, branch, command.model, usage)
         result = await asyncio.to_thread(final_result, log)
+        if result is not None:
+            _refuse_api_error(result)
         if returncode != 0:
             raise AttemptFailed(f"the onboarding CLI exited {returncode}: {tail(_text(log))}")
         if result is None:
@@ -119,6 +129,25 @@ def final_result(log: Path) -> Mapping[str, object] | None:
         if isinstance(row, dict) and row.get("type") == "result":
             return row
     return None
+
+
+def _refuse_api_error(result: Mapping[str, object]) -> None:
+    """Raise when ``result`` says the model call failed: :class:`ModelRefused` when another call would meet the same
+    refusal, :class:`AttemptFailed` otherwise."""
+
+    text = str(result.get("result") or "").strip()
+    if not result.get("is_error"):
+        return
+    status = result.get("api_error_status")
+    if not isinstance(status, int):
+        found = _API_ERROR.match(text)
+        status = int(found.group(1)) if found else None
+    if status is None and TOO_OLD not in text:
+        return
+    failed = f"the onboarding model's call failed: {tail(text)}"
+    if TOO_OLD in text or status is not None and status // 100 == 4 and status not in PASSING_CLIENT_ERRORS:
+        raise ModelRefused(failed)
+    raise AttemptFailed(failed)
 
 
 async def _record(log: Path, branch: str, model: str, usage: UsageSink) -> None:

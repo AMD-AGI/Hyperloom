@@ -9,7 +9,8 @@ commands in the branch's sandbox and starts it. An attempt fails with one line t
 the step printed last, and the next attempt's prompt carries every earlier line, so the model corrects the manifest
 instead of repeating it; it starts :data:`RETRY_SECONDS` after the failure, so a gateway that failed for a moment does
 not take every attempt with it. After :data:`ATTEMPTS` failures the preflight raises
-:class:`~hyperloom_multibranch.specialist.runtime.PreflightFailed` with every line.
+:class:`~hyperloom_multibranch.specialist.runtime.PreflightFailed` with every line, and at once after a model call
+refused for a reason the next attempt would meet again (:class:`ModelRefused`).
 
 An agent that writes a snapshot of each keep runs as a component of MB, in the mode Arbor's README describes: MB sets
 that mode, its host, the absolute deadline and the commit its keeps are read against in its config itself
@@ -202,6 +203,11 @@ class AttemptFailed(RuntimeError):
     """One onboarding attempt failed; the message says at which step and what the step printed last."""
 
 
+class ModelRefused(AttemptFailed):
+    """The onboarding model's call was refused for a reason no later attempt escapes: a client error of the gateway,
+    or a CLI too old for the model."""
+
+
 async def make_ready(source: str, spec: AgentSpec, agent_dir: Path, setup: OnboardingSetup) -> ReadyAgent:
     """Fetch ``source`` into ``agent_dir``, onboard it for ``spec`` and start it; raise
     :class:`~hyperloom_multibranch.specialist.runtime.PreflightFailed` with one line per failed attempt."""
@@ -210,6 +216,8 @@ async def make_ready(source: str, spec: AgentSpec, agent_dir: Path, setup: Onboa
     for attempt in range(1, setup.attempts + 1):
         try:
             return await _attempt(source, spec, agent_dir, setup, tuple(failures))
+        except ModelRefused as error:
+            raise PreflightFailed([*failures, f"attempt {attempt}: {error}"]) from error
         except (AttemptFailed, OSError) as error:
             failures.append(f"attempt {attempt}: {error}")
         if attempt < setup.attempts:
@@ -443,6 +451,7 @@ __all__ = [
     "AgentSpec",
     "AttemptFailed",
     "CommandResult",
+    "ModelRefused",
     "OnboardingSetup",
     "ReadyAgent",
     "agent_env",

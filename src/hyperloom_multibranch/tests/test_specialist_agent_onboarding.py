@@ -18,6 +18,7 @@ from hyperloom_multibranch.specialist.agent_onboarding import (
     RETRY_SECONDS,
     AgentSpec,
     CommandResult,
+    ModelRefused,
     OnboardingSetup,
     agent_env,
     make_ready,
@@ -168,6 +169,21 @@ async def test_each_failed_attempt_reaches_the_next_prompt_and_three_give_up(tmp
     assert reasons[1].startswith("attempt 2: install `pip install agent` exited 1") and "no matching" in reasons[1]
     assert reasons[2].startswith("attempt 3: `python3 -m agent run` exited 127") and "not found" in reasons[2]
     assert reasons[0] in onboard.prompts[1] and reasons[1] in onboard.prompts[2]
+
+
+async def test_a_model_call_the_gateway_refuses_fails_the_preflight_at_once_naming_it(tmp_path: Path) -> None:
+    refusal = "the onboarding model's call failed: API Error: 400 this CLI does not support this model"
+    asked, waits = [], []
+
+    async def refused(checkout: Path, prompt: str) -> str:
+        asked.append(prompt)
+        raise ModelRefused(refusal)
+
+    with pytest.raises(PreflightFailed) as failed:
+        await make_ready(str(_agent_repo(tmp_path)), SPEC, tmp_path / "agent", _setup(Sandbox([]), refused, waits))
+
+    assert failed.value.reasons == (f"attempt 1: {refusal}",)
+    assert len(asked) == 1 and waits == []
 
 
 # Stands in for the onboarding Claude CLI: its first run ends in a gateway error, every later one answers the manifest.

@@ -179,6 +179,7 @@ class _Branch:
     lost: int = 0
     gave_up: bool = False
     judge_failed: bool = False
+    unready: str = ""
     judge: BranchJudge | None = None
 
 
@@ -261,7 +262,7 @@ class SpecialistRuntime:
         if state is None:
             return None
         running = not state.tasks[0].done()
-        return SpecialistStatus(running, state.crashes, state.lost, state.gave_up, state.judge_failed)
+        return SpecialistStatus(running, state.crashes, state.lost, state.gave_up, state.judge_failed, state.unready)
 
     async def stop(self, branch: str, *, finish_tests: bool = False) -> None:
         """Stop the branch's specialist, at most once whoever asks; a branch already stopped is left alone.
@@ -362,7 +363,7 @@ class SpecialistRuntime:
             state.last = self._sessions(start)
         except Exception as error:
             logger.exception("the session of %s cannot be built", state.name)
-            state.gave_up = True
+            state.gave_up, state.unready = True, f"its session cannot be built ({error})"
             await _notice(state, f"the specialist's session cannot be built ({error}); it is not started")
             return None
         return state.last
@@ -382,7 +383,7 @@ class SpecialistRuntime:
         else:
             return True
         await session.stop()
-        state.session, state.gave_up = None, True
+        state.session, state.gave_up, state.unready = None, True, why
         await _notice(state, f"the specialist's preflight failed ({why}); it is not started")
         return False
 
