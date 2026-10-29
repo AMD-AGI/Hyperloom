@@ -15,7 +15,6 @@ from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom_multibranch.contracts.judgement import ACCURACY_SCORE, AccuracyVerdict, Judgement, Verdict
 from hyperloom_multibranch.rulegate.accuracy import inferencex_accuracy_ok
-from hyperloom_multibranch.rulegate.short_prompts import SHORT_PROMPTS_INCONSISTENT
 
 # With the retest, at a 1% spread and three baselines (simulated): about 6% of no-op candidates get committed and about
 # 75% of real +3% gains are confirmed.
@@ -78,14 +77,12 @@ class DispersionThreshold:
 @dataclass(frozen=True)
 class InferenceXReading:
     """One bench-eval-bench test: its graded throughput, the eval score measured in the same sandbox (``None`` for an
-    explore that skipped the eval), the requests its graded rounds sent but did not complete, whether its
-    short-prompt check was more inconsistent than the baseline's, and whether its long-context check dropped below the
-    root's."""
+    explore that skipped the eval), the requests its graded rounds sent but did not complete, and whether its
+    long-context check dropped below the root's."""
 
     throughput: float
     accuracy: float | None
     dropped: int = 0
-    inconsistent: bool = False
     long_context_dropped: bool = False
 
     def __post_init__(self) -> None:
@@ -99,21 +96,16 @@ class InferenceXReading:
     def defects(self) -> tuple[str, ...]:
         return (
             *((DROPPED_REQUESTS,) if self.dropped else ()),
-            *((SHORT_PROMPTS_INCONSISTENT,) if self.inconsistent else ()),
             *((LONG_CONTEXT_DROPPED,) if self.long_context_dropped else ()),
         )
 
 
 @dataclass(frozen=True)
 class InferenceXBaseline:
-    """What every candidate of a session is held to: the bar on its throughput gain, the baselines' eval score, and the
-    most short-prompt inconsistency they measured (``None`` when none did) over ``short_prompt_processes`` server
-    processes, one a root test."""
+    """What every candidate of a session is held to: the bar on its throughput gain and the baselines' eval score."""
 
     bar_pct: float
     accuracy: float
-    short_prompt_floor: int | None = None
-    short_prompt_processes: int = 0
 
     def __post_init__(self) -> None:
         if not (math.isfinite(self.bar_pct) and self.bar_pct > 0) or finite_score(self.accuracy) is None:
@@ -156,8 +148,7 @@ def confirm(
     eval score the mean of those that ran their eval.
 
     A gain holds when the mean of both measurements clears the bar and the retest is still a gain; one that holds is
-    improved when neither showed a defect (a failed accuracy gate, dropped requests, short prompts answered more
-    inconsistently than the baselines, a long-context drop), blocked when both showed the same one, and inconclusive otherwise. After a first
+    improved when neither showed a defect (a failed accuracy gate, dropped requests, a long-context drop), blocked when both showed the same one, and inconclusive otherwise. After a first
     measurement that skipped its eval, the retest's eval is the only one, so its failure blocks the gain. A blocked judgement names the performance defects both showed; the accuracy gate is
     in ``accuracy``.
     """

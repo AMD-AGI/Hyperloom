@@ -34,7 +34,6 @@ from hyperloom_multibranch.rulegate.readings import (
     inferencex_reading,
     unscored_reading,
 )
-from hyperloom_multibranch.rulegate.short_prompts import exceeds_floor
 
 
 class Rule(Protocol):
@@ -64,8 +63,7 @@ class Rule(Protocol):
 @dataclass(frozen=True)
 class InferenceXRule(Rule):
     """Throughput at the graded concurrency against the PRELUDE bar, the eval score against the baseline's, no request
-    the graded rounds sent left uncompleted, short prompts answered no more inconsistently than the baselines did, and
-    long-context answers no worse than the root's beyond the check's own noise.
+    the graded rounds sent left uncompleted, and long-context answers no worse than the root's beyond the check's own noise.
 
     Only an explore whose accepted request records that the eval was skipped is judged without a score; any other test
     without one is unreadable.
@@ -87,20 +85,19 @@ class InferenceXRule(Rule):
 
     async def first(self, record: TestRecord, parent: Mapping[str, float]) -> Judgement:
         baseline = await read_inferencex_baseline(self.blackboard)
-        return inferencex.compare(self._candidate(record, baseline), baseline, parent, record.request_id)
+        return inferencex.compare(self._candidate(record), baseline, parent, record.request_id)
 
     async def retest(self, first: Judgement, record: TestRecord, parent: Mapping[str, float]) -> Judgement:
         baseline = await read_inferencex_baseline(self.blackboard)
-        return inferencex.confirm(first, self._candidate(record, baseline), baseline, parent, record.request_id)
+        return inferencex.confirm(first, self._candidate(record), baseline, parent, record.request_id)
 
     async def accuracy_passes(self, record: TestRecord) -> bool:
         baseline = await read_inferencex_baseline(self.blackboard)
         return inferencex_accuracy_ok(baseline.accuracy, eval_score(_result(record)))
 
-    def _candidate(self, record: TestRecord, baseline: inferencex.InferenceXBaseline) -> inferencex.InferenceXReading:
+    def _candidate(self, record: TestRecord) -> inferencex.InferenceXReading:
         result = _result(record)
         dropped = dropped_requests(result, self.concurrency)
-        inconsistent = exceeds_floor(result, baseline.short_prompt_floor, baseline.short_prompt_processes)
         long_context = result.long_context
         long_context_dropped = long_context is not None and refuses(long_context, long_context.root)
         skipped = record.request.purpose is Purpose.EXPLORE and not ran_accuracy(record.request, self)
@@ -108,14 +105,12 @@ class InferenceXRule(Rule):
         return replace(
             read(result, self.concurrency),
             dropped=dropped,
-            inconsistent=inconsistent,
             long_context_dropped=long_context_dropped,
         )
 
 
 class AgentXRule(Rule):
-    """P50 interactivity with its guards; the error rate the run reports is its accuracy. Its baseline runs no
-    short-prompt check, so there is no floor and a candidate's check refuses nothing.
+    """P50 interactivity with its guards; the error rate the run reports is its accuracy.
 
     The bar is fixed rather than drawn from the root's spread, so the PRELUDE child's own run of the root anchors the
     parent values and PRELUDE submits no root test: one takes 75 to 90 minutes.
@@ -156,7 +151,7 @@ def repeats(retest: TestRecord, first: TestRecord, rule: Rule) -> bool:
 
 def retest_request(first: TestRecord, rule: Rule) -> TestRequest:
     """The confirming retest of ``first``: the same change and files on the same parent, off the node that measured it,
-    with the short-prompt check ``first`` was forced to run, so a defect it found can be seen twice. One asked before
+    with the short-prompt check ``first`` was forced to run, so both results record it. One asked before
     ``first`` has a result runs on any node."""
     sandbox = first.result.sandbox if first.result is not None else None
     node = sandbox.node_name if sandbox is not None else None

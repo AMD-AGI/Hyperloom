@@ -92,25 +92,14 @@ async def test_the_prelude_baselines_become_the_record_the_gate_judges_by(sessio
     baseline = await read_inferencex_baseline(session.gate)
     assert baseline.bar_pct == pytest.approx(2.0)
     assert baseline.accuracy == pytest.approx(0.90)
-    assert baseline.short_prompt_floor is None, "no root test ran the short-prompt check"
-    assert baseline.short_prompt_processes == 3, "one process a root test"
 
 
-@pytest.mark.parametrize(
-    ("checks", "floor"),
-    [
-        ((short_prompt_check(0, 1, 0, 0, 0, 0), short_prompt_check(0, 0, 2, 0, 0, 0), None), 2),
-        ((short_prompt_check(0, 0, 0, 0, 0, 0), None, short_prompt_check(0, 0, 0, 0, 0, 0)), 0),
-        ((short_prompt_check(0, 3, complete=False), short_prompt_check(1, 0, 0, 0, 0, 0), None), 3),
-        ((short_prompt_check(0, complete=False), None, None), None),
-    ],
-    ids=["largest-of-those-checked", "clean-is-zero", "incomplete-still-counted", "nothing-compared"],
-)
-async def test_the_short_prompt_floor_is_the_largest_inconsistency_a_root_test_measured(session, checks, floor):
+async def test_the_baseline_records_no_short_prompt_floor_since_the_check_refuses_nothing(session):
+    checks = (short_prompt_check(0, 1, 0, 0, 0, 0), short_prompt_check(0, 0, 2, 0, 0, 0), None)
+
     record = await _prelude(session, checks=checks)
 
-    assert record.short_prompt_floor == floor
-    assert (await read_inferencex_baseline(session.gate)).short_prompt_floor == floor
+    assert record.short_prompt_floor is None
 
 
 @pytest.mark.parametrize(

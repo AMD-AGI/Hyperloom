@@ -27,7 +27,6 @@ from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, T
 from hyperloom_multibranch.rulegate.accuracy import baseline_accuracy
 from hyperloom_multibranch.rulegate.inferencex import DispersionThreshold, InferenceXBaseline
 from hyperloom_multibranch.rulegate.readings import UnreadableResult, agentx_reading, inferencex_reading
-from hyperloom_multibranch.rulegate.short_prompts import baseline_floor
 
 # Without these an AgentX comparison is graded on nothing, or found incomparable for every candidate.
 _AGENTX_REQUIRED = (GRADED_INTVTY_P50, GRADED_DURATION, GRADED_ERROR_RATE)
@@ -48,7 +47,6 @@ async def write_inferencex_baseline(
         dispersion_pct={GRADED_OUTPUT: threshold.spread_pct},
         threshold_pct={GRADED_OUTPUT: threshold.threshold_pct},
         request_ids=tuple(record.request_id for record in baselines),
-        short_prompt_floor=baseline_floor(results),
     )
     await store.write_baseline(record)
     return record
@@ -59,8 +57,6 @@ async def read_inferencex_baseline(store: CommitQuery) -> InferenceXBaseline:
     return InferenceXBaseline(
         current.threshold_pct[GRADED_OUTPUT],
         current.values[ACCURACY_SCORE],
-        current.short_prompt_floor,
-        len(current.request_ids),
     )
 
 

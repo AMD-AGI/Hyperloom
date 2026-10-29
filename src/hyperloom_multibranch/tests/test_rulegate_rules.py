@@ -20,7 +20,6 @@ from hyperloom_multibranch.rulegate.decision import Action, decide
 from hyperloom_multibranch.rulegate.inferencex import LONG_CONTEXT_DROPPED
 from hyperloom_multibranch.rulegate.readings import UnreadableResult
 from hyperloom_multibranch.rulegate.rules import AgentXRule, InferenceXRule, retest_request
-from hyperloom_multibranch.rulegate.short_prompts import SHORT_PROMPTS_INCONSISTENT
 from hyperloom_multibranch.tests.short_prompt_checks import short_prompt_check
 
 
@@ -60,16 +59,17 @@ async def test_an_inferencex_test_without_a_score_is_unreadable_unless_it_is_an_
     purpose, accuracy
 ):
     with pytest.raises(UnreadableResult, match="no eval score"):
-        await InferenceXRule(_Baseline(None), 64).first(_unscored(purpose, accuracy), {GRADED_OUTPUT: 1000.0})
+        await InferenceXRule(_Baseline(), 64).first(_unscored(purpose, accuracy), {GRADED_OUTPUT: 1000.0})
 
 
 PARENT = {GRADED_OUTPUT: 1000.0}
 
 
 class _Baseline:
-    """The session's baseline record, holding candidates to ``floor``."""
+    """The session's baseline record; ``floor`` is the short-prompt floor a session before the gate stopped reading it
+    recorded."""
 
-    def __init__(self, floor):
+    def __init__(self, floor=None):
         self.record = BaselineRecord(
             "c0",
             {GRADED_OUTPUT: 1000.0, ACCURACY_SCORE: 0.90},
@@ -118,14 +118,14 @@ def _long_context(passed, *, root=ROOT, sha=SHA, errored=0, n=64) -> LongContext
     ids=["below-the-bar", "at-the-bar", "no-root-reading", "another-prompt-set", "incomplete", "no-check"],
 )
 async def test_an_inferencex_candidate_is_refused_on_a_long_context_drop_beyond_the_checks_noise(check, refused):
-    judgement = await InferenceXRule(_Baseline(None), 64).first(_checked(1000.0, None, long_context=check), PARENT)
+    judgement = await InferenceXRule(_Baseline(), 64).first(_checked(1000.0, None, long_context=check), PARENT)
 
     assert (LONG_CONTEXT_DROPPED in judgement.refused_by) is refused
     assert judgement.verdict is (Verdict.REGRESSED if refused else Verdict.FLAT)
 
 
 async def test_a_gain_with_a_long_context_drop_on_both_measurements_is_blocked():
-    rule = InferenceXRule(_Baseline(None), 64)
+    rule = InferenceXRule(_Baseline(), 64)
     first = await rule.first(_checked(1100.0, None, long_context=_long_context(50)), PARENT)
     assert first.verdict is Verdict.NEEDS_CONFIRM and first.refused_by == (LONG_CONTEXT_DROPPED,)
 
@@ -135,61 +135,37 @@ async def test_a_gain_with_a_long_context_drop_on_both_measurements_is_blocked()
     assert (settled.verdict, decide(settled)) == (Verdict.BLOCKED, Action.DIAGNOSE)
 
 
-@pytest.mark.parametrize(
-    ("floor", "check", "refused"),
-    [
-        (1, short_prompt_check(0, 2, 0), True),
-        (0, short_prompt_check(0, 1, 0), True),
-        (2, short_prompt_check(0, 2, 0), False),
-        (0, short_prompt_check(0, 0, 0), False),
-        (None, short_prompt_check(0, 9, 0), False),
-        (1, None, False),
-        (1, short_prompt_check(0, 9, complete=False), False),
-        (1, short_prompt_check(0, complete=False), False),
-        (1, short_prompt_check(9, 0, 0, 0), False),
-        (1, short_prompt_check(0, 9, 0, 0), True),
-    ],
-    ids=[
-        "above",
-        "above-zero",
-        "at",
-        "clean",
-        "no-floor",
-        "no-check",
-        "incomplete",
-        "nothing-compared",
-        "an-older-process-than-the-floor-reads",
-        "a-larger-pool-read-down-to-the-floor",
-    ],
-)
-async def test_an_inferencex_candidate_is_refused_only_above_the_baseline_short_prompt_floor(floor, check, refused):
-    judgement = await InferenceXRule(_Baseline(floor), 64).first(_checked(1000.0, check), PARENT)
-
-    assert (SHORT_PROMPTS_INCONSISTENT in judgement.refused_by) is refused
-    assert judgement.verdict is (Verdict.REGRESSED if refused else Verdict.FLAT)
+#: What the gate once refused a candidate for; the check is recorded on the test's result and refuses nothing.
+SHORT_PROMPTS_INCONSISTENT = "short_prompts_inconsistent"
 
 
 @pytest.mark.parametrize(
-    ("retest_check", "verdict", "action"),
-    [
-        (short_prompt_check(0, 3, 0), Verdict.BLOCKED, Action.DIAGNOSE),
-        (short_prompt_check(0, 0, 0), Verdict.INCONCLUSIVE, Action.RECORD_ONLY),
-        (None, Verdict.INCONCLUSIVE, Action.RECORD_ONLY),
-    ],
-    ids=["both-inconsistent", "retest-consistent", "retest-unchecked"],
+    "check",
+    [short_prompt_check(0, 41, 0), short_prompt_check(0, 9, 0, 0), short_prompt_check(0, 0, 0), None],
+    ids=["far-above-any-floor", "a-larger-pool", "clean", "no-check"],
 )
-async def test_a_gain_inconsistent_beyond_the_floor_on_both_measurements_is_blocked(retest_check, verdict, action):
-    rule = InferenceXRule(_Baseline(1), 64)
-    first = await rule.first(_checked(1100.0, short_prompt_check(0, 3, 0)), PARENT)
-    assert first.verdict is Verdict.NEEDS_CONFIRM and first.refused_by == (SHORT_PROMPTS_INCONSISTENT,)
+async def test_an_inferencex_candidate_is_never_refused_for_its_short_prompt_check(check):
+    judgement = await InferenceXRule(_Baseline(floor=1), 64).first(_checked(1000.0, check), PARENT)
 
-    settled = await rule.retest(first, _checked(1100.0, retest_check, request_id="r2", retest_of="r1"), PARENT)
-
-    assert (settled.verdict, decide(settled)) == (verdict, action)
-    assert settled.refused_by == (SHORT_PROMPTS_INCONSISTENT,)
+    assert SHORT_PROMPTS_INCONSISTENT not in judgement.refused_by
+    assert judgement.verdict is Verdict.FLAT
 
 
-async def test_an_agentx_candidate_is_refused_nothing_on_its_short_prompt_check_while_no_floor_exists():
+async def test_a_gain_whose_short_prompts_differ_between_processes_on_both_measurements_still_lands():
+    """Run-to-run nondeterministic kernels (atomic split-K GEMMs) make two boots of one recipe answer 30 to 41 of 64
+    prompts differently while every eval passes; a gain must not be held back for it."""
+    rule = InferenceXRule(_Baseline(floor=1), 64)
+    first = await rule.first(_checked(1100.0, short_prompt_check(0, 41, 0)), PARENT)
+    assert first.verdict is Verdict.NEEDS_CONFIRM and first.refused_by == ()
+
+    retest = _checked(1100.0, short_prompt_check(0, 37, 0), request_id="r2", retest_of="r1")
+    settled = await rule.retest(first, retest, PARENT)
+
+    assert (settled.verdict, settled.refused_by) == (Verdict.IMPROVED, ())
+    assert retest.result.short_prompt_consistency.inconsistency == 37, "the check stays on the test's result"
+
+
+async def test_an_agentx_candidate_is_refused_nothing_on_its_short_prompt_check():
     record = _measured({GRADED_ERROR_RATE: 0.0})
     record = replace(record, result=replace(record.result, short_prompt_consistency=short_prompt_check(0, 9, 0)))
 
