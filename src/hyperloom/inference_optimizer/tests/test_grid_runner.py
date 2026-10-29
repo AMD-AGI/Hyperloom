@@ -19,6 +19,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import yaml
 
+from hyperloom.common.deadline import Deadline
 from hyperloom.orchestrator.actions.executors import _grid_runner
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
 from hyperloom.inference_optimizer.grid_server_args import (
@@ -1986,10 +1987,16 @@ class TestEveryRoundCarriesTheStopThatEndedIt:
     """A round the run stopped is a stop whichever round it was."""
 
     @pytest.mark.asyncio
-    async def test_a_warmup_reaped_by_the_budget_is_skipped_not_a_failed_variant(self, tmp_path):
+    @pytest.mark.parametrize(
+        ("phase_sec", "error_class"), [(None, "session_time_exhausted"), (60.0, "phase_time_exhausted")]
+    )
+    async def test_a_warmup_reaped_by_the_budget_is_skipped_not_a_failed_variant(
+        self, tmp_path, phase_sec, error_class
+    ):
         base = tmp_path / "base.yaml"
         _write_baseline_yaml_overrides(base)
         fake_run, launched = _reaping_round(SESSION_TIME_EXHAUSTED_RETURNCODE, slot_name="warmup_round")
+        phase = None if phase_sec is None else Deadline.after(phase_sec)
 
         with (
             patch(
@@ -2006,13 +2013,15 @@ class TestEveryRoundCarriesTheStopThatEndedIt:
                 output_root=tmp_path / "out",
                 recipe=GridRecipe(base_yaml_path=base),
                 launch=GridLaunch(warmup_before_measure=True),
-                stop=GridStop(session_deadline_sec=time.monotonic() + 600.0, variant_expected_sec=30.0),
+                stop=GridStop(
+                    session_deadline_sec=time.monotonic() + 600.0, variant_expected_sec=30.0, phase_deadline=phase
+                ),
             )
 
         assert launched == ["warmup_round"], "the measured round must not run after the warmup was reaped"
         assert [r.status for r in results] == ["skipped"]
-        assert results[0].error_class == "session_time_exhausted"
-        assert _read_marker(tmp_path / "out" / "variant_00_cand0")["error_class"] == "session_time_exhausted"
+        assert results[0].error_class == error_class
+        assert _read_marker(tmp_path / "out" / "variant_00_cand0")["error_class"] == error_class
 
     @pytest.mark.asyncio
     async def test_a_cancelled_warmup_ends_the_grid_instead_of_booting_the_next_variant(self, tmp_path):
@@ -2151,10 +2160,13 @@ class TestSessionBudgetWarmupRounds:
         assert [r.error_class for r in results] == [SESSION_TIME_EXHAUSTED_CLASS]
 
     @pytest.mark.asyncio
-    async def test_warmup_and_measure_keep_the_same_policy_and_session_deadline(self, tmp_path):
+    @pytest.mark.parametrize("phase_sec", [None, 60.0])
+    async def test_warmup_and_measure_keep_the_same_policy_and_the_warmup_stops_first(self, tmp_path, phase_sec):
+        """A phase budget that ends first bounds only the discarded warmup; the measured round keeps the session's."""
         base = tmp_path / "base.yaml"
         _write_baseline_yaml_overrides(base)
         recorded: list[dict] = []
+        phase = None if phase_sec is None else Deadline.after(phase_sec)
 
         with (
             patch(
@@ -2171,17 +2183,18 @@ class TestSessionBudgetWarmupRounds:
                 output_root=tmp_path / "out",
                 recipe=GridRecipe(base_yaml_path=base),
                 launch=GridLaunch(warmup_before_measure=True),
-                stop=GridStop(session_deadline_sec=time.monotonic() + 300.0, variant_expected_sec=60.0),
+                stop=GridStop(
+                    session_deadline_sec=time.monotonic() + 300.0, variant_expected_sec=60.0, phase_deadline=phase
+                ),
             )
 
         by_round = launches_by_round_slot(recorded)
         warmup = next(int(c["timeout"]) for c in recorded if "warmup" in c["round_slot"])
         measure = next(int(c["timeout"]) for c in recorded if "warmup" not in c["round_slot"])
         assert warmup == measure == 7800
-        deadlines = {c["session_deadline_sec"] for c in recorded}
-        assert len(deadlines) == 1
-        deadline = deadlines.pop()
-        assert 0 < deadline - time.monotonic() <= 300.0
+        stop_at = {c["round_slot"]: c["session_deadline_sec"] for c in recorded}
+        assert 0 < stop_at["variant_00_v0"] - time.monotonic() <= 300.0
+        assert stop_at["warmup_round"] == (stop_at["variant_00_v0"] if phase is None else phase.at)
         assert len(by_round) == 2, f"expected a warmup and a measured round, got {list(by_round)}"
 
     @pytest.mark.asyncio

@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING, Any
 from ...enablement.recipe.credentials import detect_credential_channels
 
 if TYPE_CHECKING:
+    from hyperloom.common.deadline import Deadline
+
     from ...enablement.runtime.stack_actions import EnablementStackAction, ProvisionResult
     from ...state.shared_state import SharedState
 
@@ -22,6 +24,7 @@ class IntegrateAttempt:
     """Own the resolved inputs and acquired resources of one executor invocation."""
 
     task_id: str
+    phase_deadline: Deadline | None = None
     specialist_task_id: str = ""
     specialist_workspace: Path | None = None
     shared_state: SharedState | None = None
