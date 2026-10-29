@@ -74,7 +74,7 @@ def _cache_root() -> Path:
         return Path(override)
     base = os.environ.get("XDG_CACHE_HOME", "").strip()
     root = Path(base) if base else Path.home() / ".cache"
-    return root / "kernelforge.workflows.gemm_tune" / "script_probe"
+    return root / "kernelforge.gemm_tune" / "script_probe"
 
 
 def _cache_path(digest: str) -> Path:

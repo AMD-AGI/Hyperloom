@@ -654,7 +654,7 @@ def _persist_forge_gemm_csv_durably(extra_envs: dict, *, model_path: str, sessio
                 rel_paths=rel_paths,
             ),
             dest_dir=Path(session_dir) / "optimization_stack" / "src" / f"forge_gemm_{slug}",
-            provenance="kernelforge.workflows.gemm_tune",
+            provenance="kernelforge.gemm_tune",
             extra={
                 "env_keys": [env_key for env_key, _, _ in pending],
                 "model": slug,
