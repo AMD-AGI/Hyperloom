@@ -25,7 +25,7 @@ from hyperloom.contracts.recipe import (
     RecipeDelta,
     apply,
 )
-from hyperloom.measure.compile import LocalBlobStore
+from hyperloom.measure.compile import LocalBlobStore, kernel_rows_only
 from hyperloom_multibranch.contracts.lifecycle import BranchTask
 from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind
 from hyperloom_multibranch.contracts.toolbox import Backpressure, BranchLease, LeaseCharge, RequestRejected
@@ -62,7 +62,8 @@ ROOT = Recipe(
 
 #: An agent that, every ``gap`` seconds, writes each of ``keeps`` to its workspace's config.py and to the config it
 #: runs with, commits it when ``commits`` is set, as Arbor does, and records and prints the keep; it ends with ``exit``
-#: after ``tail`` more seconds of silence. With ``table`` it also writes that kernel table, for the keep, to its workspace's tuned.csv.
+#: after ``tail`` more seconds of silence. With ``table`` it also writes that kernel table, for the keep, to its workspace's tuned.csv,
+#: or to ``table_at`` in its checkout. It reports ``envs`` as NAME=VALUE words in run/result.json, as GEAK does.
 #: Before each keep it appends that keep's entries of ``ledger`` to its ledger, run/ledger.jsonl, as Arbor does.
 AGENT = """
 import json, pathlib, subprocess, sys, time
@@ -76,7 +77,11 @@ for step, seqs in enumerate(config["keeps"], start=1):
     (workspace / "vllm" / "config.py").write_text(f"max_num_seqs = {seqs}\\n")
     (workspace / "agent-config.json").write_text(json.dumps({"args": config["args"].format(seqs=seqs), "envs": config["envs"]}))
     if config["table"]:
-        (workspace / "tuned.csv").write_text(config["table"].format(seqs=seqs))
+        table = pathlib.Path(config["table_at"]) if config["table_at"] else workspace / "tuned.csv"
+        table.parent.mkdir(parents=True, exist_ok=True)
+        table.write_text(config["table"].format(seqs=seqs))
+    accepted = " ".join(f"{name}={value}" for name, value in config["envs"].items())
+    pathlib.Path("run/result.json").write_text(json.dumps({"accepted_config": {"flags": "", "env": accepted}}))
     if config["commits"]:
         subprocess.run("git add -A && git -c user.name=a -c user.email=a@a commit -qm k", shell=True, cwd=workspace)
     with pathlib.Path("run/ledger.jsonl").open("a") as ledger:
@@ -94,14 +99,15 @@ sys.exit(config["exit"])
 #: An agent in Arbor's component mode, its session in run/: every ``gap`` seconds it commits each of ``keeps`` to its
 #: workspace, writing a file of its own at the first, and writes the keep's snapshot to its outbox, run/snaps as the
 #: config MB wrote renames it: ``change.patch`` against its parent, ``served.patch`` against the root, the launch,
-#: ``table`` as the kernel table AITER_CONFIG_GEMM_A8W8 loads (listed as too large to copy with ``huge``, with a wrong
-#: digest with ``bad_sha``), and an AITER JIT link outside its tree; LATEST names it at each keep or, without
-#: ``latest_each``, at the last only. The keep ``skip`` gets no snapshot, as one that failed; ``stray`` says it was made
+#: ``table`` as the kernel table AITER_CONFIG_GEMM_A8W8 loads after an image default table (listed as too large to copy
+#: with ``huge``, with a wrong digest with ``bad_sha``), and an AITER JIT link outside its tree; LATEST names it at each
+#: keep or, without ``latest_each``, at the last only. The keep ``skip`` gets no snapshot, as one that failed; ``stray`` says it was made
 #: on a commit MB never gave it; ``orphan`` is made on the root, its earlier snapshot's commit gone, as ``notes`` say.
 #: It removes the last run's exit file as it starts, and ends with ``exit`` after ``tail`` seconds, or 0 on SIGTERM,
 #: writing ``reason`` to run/component_exit.json before an exit 0 only; exit 2 says why on stderr.
 COMPONENT_AGENT = """
 import hashlib, json, os, pathlib, signal, subprocess, sys, time
+LISTED = "/sgl-workspace/aiter/aiter/configs/a8w8_tuned_gemm.csv:/arbor/workspace/tuned.csv"
 config = json.loads(pathlib.Path("campaign.json").read_text())
 plan, workspace, root = config["plan"], pathlib.Path(config["workspace"]), config["component"]["root"]
 session = pathlib.Path("run")
@@ -149,7 +155,7 @@ for number, seqs in enumerate(plan["keeps"], start=1):
     envs = dict(plan["envs"])
     if plan["table"]:
         name, table = "AITER_CONFIG_GEMM_A8W8", plan["table"].format(seqs=seqs).encode()
-        envs[name] = "/arbor/workspace/tuned.csv"
+        envs[name] = LISTED
         digest = "0" * 64 if plan["bad_sha"] else hashlib.sha256(table).hexdigest()
         file = None if plan["huge"] else "tuned.csv"
         keep["tables"][name] = {"path": envs[name], "file": file, "sha256": digest, "bytes": len(table)}
@@ -194,6 +200,7 @@ class Agent:
     config_source: object = None
     resume: str = ""
     table: str = ""
+    table_at: str = ""
     ledger: tuple[tuple[dict[str, str], ...], ...] = ()
     busy: bool = False
 
@@ -298,8 +305,10 @@ class Toolbox:
         self.tables: dict[str, bytes] = {}
         self._variables = KernelVariables()
 
-    async def put_kernel_artifact(self, kind: KernelKind, target: str | None, env: str, data: bytes) -> KernelArtifact:
-        artifact = self._variables.put(kind, target, env, data)
+    async def put_kernel_artifact(
+        self, kind: KernelKind, target: str | None, env: str, data: bytes, rows_only: bool = False
+    ) -> KernelArtifact:
+        artifact = self._variables.put(kind, target, env, data, rows_only)
         self.tables[artifact.sha256] = data
         return artifact
 
@@ -362,6 +371,7 @@ def _manifest(workspace: str, agent: Agent | Component) -> str:
                 "args": agent.args,
                 "envs": agent.envs,
                 "table": agent.table,
+                "table_at": agent.table_at,
                 "ledger": [list(entries) for entries in agent.ledger],
                 **plan,
             },
@@ -911,6 +921,39 @@ async def test_a_kernel_table_the_agent_keeps_in_its_workspace_is_imported_as_th
     assert env not in request.delta.config.envs
 
 
+async def test_a_table_an_agent_reports_in_its_result_file_is_imported_as_rows_over_the_image_s(
+    tmp_path: Path,
+) -> None:
+    """Run 28b3e128's b02: the agent keeps its tuned table in its own checkout and reports the variable it
+    accepted in a result file; the keep is that table alone."""
+
+    env = "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE"
+    table = tmp_path / BRANCH / "session" / AGENT_DIR / "src" / "run" / "tuned.csv"
+    source = {
+        "path": "run/result.json",
+        "root": "checkout",
+        "server_args": "accepted_config.flags",
+        "envs": "accepted_config.env",
+        "adds": True,
+    }
+    envs = {env: f"/sgl-workspace/aiter/aiter/configs/a8w8_blockscale_bpreshuffle_tuned_gemm.csv:{table}"}
+    table_text = "M,N,K\n{seqs},5120,5120\n"
+    agent = Agent(keeps=(256,), args="", envs=envs, table=table_text, table_at="run/tuned.csv", config_source=source)
+    rig = await _rig(tmp_path, agent)
+
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    await _until(lambda: rig.toolbox.requests, "the import")
+    await rig.toolbox_blackboard.write_result(result("r1"))
+    with pytest.raises(SessionFinished):
+        await asyncio.wait_for(running, 10)
+
+    [request] = rig.toolbox.requests
+    [artifact] = request.delta.add_kernels
+    assert kernel_rows_only(artifact) and rig.toolbox.tables[artifact.sha256] == b"M,N,K\n256,5120,5120\n"
+    assert request.delta.config == ConfigDelta()
+
+
 def _entry(entry_id: str, kind: str, claim: str) -> dict[str, str]:
     return {"id": entry_id, "type": kind, "claim": claim, "evidence": "eval/x.json"}
 
@@ -1112,7 +1155,7 @@ async def test_the_latest_snapshot_is_imported_with_every_keep_it_is_chained_fro
     assert "module.so" not in patch
     assert request.delta.config.server_args == "--max-num-seqs 512"
     [artifact] = request.delta.add_kernels
-    assert rig.toolbox.tables[artifact.sha256] == b"M,N,K\n512,5120,5120\n"
+    assert rig.toolbox.tables[artifact.sha256] == b"M,N,K\n512,5120,5120\n" and kernel_rows_only(artifact)
     assert env not in request.delta.config.envs
     notices = await rig.notices()
     assert any(note.startswith(f"{NOTICE} keep 2 imported") and "seqs 512" in note for note in notices)
@@ -1206,7 +1249,7 @@ async def test_a_table_too_large_to_copy_is_noted_and_its_variable_imported_as_t
     request = await _imported(rig)
 
     assert request.delta.add_kernels == ()
-    assert request.delta.config.envs["AITER_CONFIG_GEMM_A8W8"] == "/arbor/workspace/tuned.csv"
+    assert request.delta.config.envs["AITER_CONFIG_GEMM_A8W8"].endswith(":/arbor/workspace/tuned.csv")
     assert any("AITER_CONFIG_GEMM_A8W8" in note and "not copied" in note for note in await rig.notices())
 
 

@@ -67,7 +67,7 @@ from hyperloom_multibranch.specialist.agent_import import (
 )
 from hyperloom_multibranch.blackboard.local.blackboard import LEARNING_MAX_CHARS
 from hyperloom_multibranch.specialist.agent_knowledge import NOTES_FILE, IntegrationNotes
-from hyperloom_multibranch.specialist.agent_manifest import AgentManifest, LedgerSource, read_field
+from hyperloom_multibranch.specialist.agent_manifest import WORKSPACE, AgentManifest, LedgerSource, read_field
 from hyperloom_multibranch.specialist.agent_onboarding import (
     AgentProcess,
     AgentSandbox,
@@ -604,18 +604,18 @@ class AutonomousSession:
         worktree, component = self._place.worktree, self._setup.component
         return await asyncio.to_thread(worktree.diff_between, self._root_commit, texts, cumulative, component)
 
-    async def _kernel_artifact(self, env: str, table: str) -> KernelArtifact:
+    async def _kernel_artifact(self, env: str, table: str, rows_only: bool) -> KernelArtifact:
         """The table ``env`` loads, kept in the session's blob store under the target the session bound ``env`` to, or
         under ``env``'s own name when no table was put for it yet: the service reads one file per variable, and the
         toolbox refuses a second target for it."""
 
         put = self._setup.toolbox.put_kernel_artifact
         try:
-            return await put(KernelKind.GEMM, None, env, table.encode())
+            return await put(KernelKind.GEMM, None, env, table.encode(), rows_only)
         except RequestRejected as error:
             if error.code != TARGET_REQUIRED:
                 raise
-            return await put(KernelKind.GEMM, env.lower(), env, table.encode())
+            return await put(KernelKind.GEMM, env.lower(), env, table.encode(), rows_only)
 
     async def _submitted(self, kept: KeptChange, head: str, delta: RecipeDelta | None) -> None:
         """Submit ``kept`` against ``head``; raise what the toolbox raises when it takes no request now."""
@@ -675,12 +675,14 @@ class AutonomousSession:
             outbox = self._agent_dir / SOURCE_DIR / manifest.snapshots_outbox
             applied = partial(self._place.worktree.diff_applied, root, component=self._setup.component)
             return read_snapshot(outbox, seq, root, applied)
+        workspace = self._place.worktree.path
         patch = without_file(self._place.worktree.diff_from(root, self._setup.component), manifest)
         source, summary = manifest.config_source, self._summary(manifest)
         if source is None:
             return KeptChange(seq, patch, self._root.server_args, dict(self._root.envs), summary)
-        kept = read_kept_change(seq, patch, read_json(self._place.worktree.path / source.path), source, summary)
-        return with_tables(kept, self._place.worktree.path)
+        where = workspace if source.root == WORKSPACE else self._agent_dir / SOURCE_DIR
+        kept = read_kept_change(seq, patch, read_json(where / source.path), source, summary, self._root)
+        return with_tables(kept, (workspace, self._agent_dir))
 
     def _summary(self, manifest: AgentManifest) -> str:
         if manifest.keep is None or not manifest.summary_field:
@@ -782,7 +784,7 @@ def _being_judged(record: TestRecord, settled_before: float) -> bool:
 def without_file(patch: str, manifest: AgentManifest) -> str:
     """``patch`` without the sections of the file the agent keeps its config in, which the config delta carries."""
 
-    if manifest.config_source is None:
+    if manifest.config_source is None or manifest.config_source.root != WORKSPACE:
         return patch
     path = manifest.config_source.path
     sections = patch.split("diff --git ")

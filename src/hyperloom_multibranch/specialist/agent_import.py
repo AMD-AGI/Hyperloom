@@ -9,7 +9,9 @@ workspace's patch against the root and the agent's whole config, both cumulative
 the delta against the branch head, which holds only what MB committed. Its source goes in as one more patch on the
 head's, the increment from the state the head's imports make to the keep's, so a commit carries only its own change to
 a merge; a keep the gate rejected is not on the head and comes back inside the next increment. A kernel table the agent
-loads from a file of its workspace goes in as a kernel artifact, the text the file held at the keep.
+loads from files of its own goes in as a kernel artifact, the text the files held at the keep: an aiter variable's
+value may list the image's default tables before them, which the artifact's rows are read over at a test as they were
+in the agent's run, so it carries only the agent's rows.
 
 An agent run as a component writes each keep whole instead, as a snapshot directory (:func:`read_snapshot`, the layout
 of Arbor's component mode): ``keep.json`` names the keep before it and the commits it was made on and made, its
@@ -25,11 +27,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import shlex
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 
-from hyperloom.common.outside_facts import TUNABLEOP_TABLE_ENV
+from hyperloom.common.outside_facts import SGLANG_IMAGE_AITER_CONFIGS, TUNABLEOP_TABLE_ENV
 from hyperloom.contracts.recipe import (
     ComponentChange,
     ConfigDelta,
@@ -39,14 +43,16 @@ from hyperloom.contracts.recipe import (
     Recipe,
     RecipeDelta,
 )
+from hyperloom.measure.framework.rows import DEFAULT_TABLE_PLACEHOLDER
 from hyperloom.measure.framework.tables import AITER_VARIABLE_PREFIX
 from hyperloom_multibranch.specialist.agent_manifest import ConfigSource, read_field
 from hyperloom_multibranch.specialist.worktree import Upstream
 
 #: Stores a component's patch text and returns its reference, as ``ExperimentRepo.store_patch`` does.
 PatchStore = Callable[[str, str], Awaitable[PatchRef]]
-#: Keeps the kernel table text a variable loads and returns its artifact.
-TableStore = Callable[[str, str], Awaitable[KernelArtifact]]
+#: Keeps the kernel table text a variable loads and returns its artifact, rows read over the image's default table when
+#: the flag is set.
+TableStore = Callable[[str, str, bool], Awaitable[KernelArtifact]]
 #: The patch the given patches make, applied in order to the root.
 Applied = Callable[[Sequence[str]], str]
 #: The file of a component's outbox naming its newest snapshot, and the files of one snapshot.
@@ -59,6 +65,8 @@ TABLES_DIR = "tables"
 #: The patch from the state the head's imported patches make, in order, to the state a keep's cumulative patch makes,
 #: both over the root; empty when they are the same.
 SourceIncrement = Callable[[tuple[PatchRef, ...], str], Awaitable[str]]
+
+_IMAGE_TABLES = PurePosixPath(SGLANG_IMAGE_AITER_CONFIGS)
 
 
 @dataclass(frozen=True)
@@ -78,9 +86,9 @@ class KeptChangeError(ValueError):
 @dataclass(frozen=True)
 class KeptChange:
     """The agent's state at its ``seq``-th keep: ``source_patch`` against the root and the whole ``server_args`` and
-    ``envs`` it runs with; ``summary`` is the agent's own words for it; ``tables``, the text at the keep of each kernel
-    table file of its workspace a variable of ``envs`` names, by that path; ``uncopied``, the variables whose table the
-    agent did not copy into its snapshot, which then load what the variable names."""
+    ``envs`` it runs with; ``summary`` is the agent's own words for it; ``tables``, the text at the keep of the kernel
+    table files of its own a variable of ``envs`` lists, one table by the variable's value; ``uncopied``, the variables
+    whose table the agent did not copy into its snapshot, which then load what the variable names."""
 
     seq: int
     source_patch: str
@@ -91,17 +99,59 @@ class KeptChange:
     uncopied: tuple[str, ...] = ()
 
 
-def read_kept_change(seq: int, source_patch: str, state: object, source: ConfigSource, summary: str) -> KeptChange:
-    """The keep ``seq`` of an agent whose workspace differs from the root by ``source_patch`` and whose config file,
-    which ``source`` describes, parsed to ``state``."""
+def read_kept_change(
+    seq: int, source_patch: str, state: object, source: ConfigSource, summary: str, start: LaunchConfig
+) -> KeptChange:
+    """The keep ``seq`` of an agent whose workspace differs from the root by ``source_patch``, whose config file, which
+    ``source`` describes, parsed to ``state``, and which was started with ``start``."""
 
     try:
         args, envs = read_field(state, source.server_args), read_field(state, source.envs)
     except (KeyError, IndexError, ValueError, TypeError) as exc:
         raise KeptChangeError(f"{source.path} holds no {exc}") from exc
-    if not isinstance(args, str) or not isinstance(envs, Mapping):
-        raise KeptChangeError(f"{source.path}: {source.server_args} is not a string or {source.envs} not an object")
-    return KeptChange(seq, source_patch, args, {str(name): str(value) for name, value in envs.items()}, summary)
+    if not isinstance(args, str) or not isinstance(envs, (Mapping, str)):
+        raise KeptChangeError(
+            f"{source.path}: {source.server_args} is not a string or {source.envs} not an environment"
+        )
+    named = (
+        _assignments(envs, source) if isinstance(envs, str) else {str(name): str(value) for name, value in envs.items()}
+    )
+    if source.adds:
+        args, named = _with_args(start.server_args, args), {**start.envs, **named}
+    return KeptChange(seq, source_patch, args, named, summary)
+
+
+def _assignments(words: str, source: ConfigSource) -> dict[str, str]:
+    try:
+        split = [word.partition("=") for word in shlex.split(words)]
+    except ValueError as exc:
+        raise KeptChangeError(f"{source.path}: {source.envs} is not NAME=VALUE words: {exc}") from exc
+    if any(not name or not equals for name, equals, _ in split):
+        raise KeptChangeError(f"{source.path}: {source.envs} is not NAME=VALUE words: {words!r}")
+    return {name: value for name, _, value in split}
+
+
+def _with_args(start: str, added: str) -> str:
+    """``start``'s server arguments with each flag of ``added`` set as ``added`` sets it."""
+
+    groups = _flag_groups(added)
+    names = {name for name, _ in groups}
+    kept = [words for name, words in _flag_groups(start) if name not in names]
+    return " ".join(word for words in [*kept, *(words for _, words in groups)] for word in words)
+
+
+def _flag_groups(args: str) -> list[tuple[str, list[str]]]:
+    """``args`` as each flag with the words up to the next, words before the first flag as one group of no name."""
+
+    groups: list[tuple[str, list[str]]] = []
+    for word in args.split():
+        if word.startswith("--"):
+            groups.append((word.split("=", 1)[0], [word]))
+        elif groups:
+            groups[-1][1].append(word)
+        else:
+            groups.append(("", [word]))
+    return groups
 
 
 def read_json(path: Path) -> object:
@@ -212,20 +262,14 @@ def _patch(directory: Path, name: str) -> str:
 def _snapshot_tables(
     tables: Path, listed: Mapping[str, object], envs: Mapping[str, str]
 ) -> tuple[dict[str, str], tuple[str, ...]]:
-    """The text of the kernel table each variable of ``envs`` that loads one has in ``tables``, by the variable's value,
-    each checked against the digest ``listed`` gives it; and the variables listed with no file, which were not copied.
-    """
+    """The kernel tables of ``envs`` (:func:`_kernel_tables`) the snapshot copied to ``tables``, each checked against
+    the digest ``listed`` gives it; and the variables listed with no file, which were not copied."""
 
-    found: dict[str, str] = {}
-    uncopied: list[str] = []
-    for name, value in envs.items():
+    def copied(name: str, _value: str) -> list[str] | None:
         entry = listed.get(name)
-        if not (_loads_table(name) and isinstance(entry, Mapping)):
-            continue
+        if not isinstance(entry, Mapping) or entry.get("file") is None:
+            return None
         file, digest = entry.get("file"), entry.get("sha256")
-        if file is None:
-            uncopied.append(name)
-            continue
         if not isinstance(file, str) or not isinstance(digest, str):
             raise KeptChangeError(f"{KEEP_FILE} lists the table {name} loads with no file name and sha256")
         try:
@@ -235,10 +279,16 @@ def _snapshot_tables(
         if hashlib.sha256(data).hexdigest() != digest:
             raise KeptChangeError(f"the table {name} loads does not match its sha256 {digest}")
         try:
-            found[value] = data.decode("utf-8")
+            return [data.decode("utf-8")]
         except UnicodeDecodeError as error:
             raise KeptChangeError(f"the table {name} loads is no text: {error}") from error
-    return found, tuple(uncopied)
+
+    uncopied = tuple(
+        name
+        for name in envs
+        if _loads_table(name) and isinstance(entry := listed.get(name), Mapping) and entry.get("file") is None
+    )
+    return _kernel_tables(envs, copied), uncopied
 
 
 def _directory(number: int) -> str:
@@ -249,24 +299,73 @@ def _refused(snapshot: _Snapshot) -> str:
     return f"snapshot {_directory(snapshot.number)} is refused:"
 
 
-def with_tables(kept: KeptChange, owned: Path) -> KeptChange:
-    """``kept`` with the text of each kernel table its variables load from a file under ``owned``, read now: the agent
-    may rewrite the file after the keep, and a path into the branch's workspace loads nowhere else.
+def with_tables(kept: KeptChange, owned: Sequence[Path]) -> KeptChange:
+    """``kept`` with the text of the kernel tables each of its variables loads from files under ``owned``, read now:
+    the agent may rewrite a file after the keep, and a path into the branch's directories loads nowhere else. An aiter
+    variable may list the image's default tables too, and several files of its own, which make one table.
 
-    Raises :class:`KeptChangeError` for such a file that cannot be read.
+    Raises :class:`KeptChangeError` for such a file that cannot be read, or files of one variable under other headers.
     """
 
+    def read(name: str, value: str) -> list[str] | None:
+        paths = _own_tables(name, value, owned)
+        if paths is None:
+            return None
+        texts = []
+        for path in paths:
+            try:
+                texts.append(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError) as exc:
+                raise KeptChangeError(f"the table {path} that {name} loads cannot be read: {exc}") from exc
+        return texts
+
+    return replace(kept, tables=_kernel_tables(kept.envs, read))
+
+
+def _kernel_tables(envs: Mapping[str, str], own_tables: Callable[[str, str], Sequence[str] | None]) -> dict[str, str]:
+    """The kernel table of each variable of ``envs`` that loads one, by the variable's value: the rows of the texts of
+    the agent's own tables ``own_tables`` gives for it, as one table. A variable it gives none for stays as the agent
+    set it; the rest go in as artifacts (:func:`import_delta`), an aiter one as rows read over the image's default table
+    in place of the default paths its value lists."""
+
     tables: dict[str, str] = {}
-    for name, value in kept.envs.items():
-        path = Path(value)
-        owned_file = path.is_absolute() and path.resolve().is_relative_to(owned.resolve()) and path.is_file()
-        if not (_loads_table(name) and owned_file):
-            continue
-        try:
-            tables[value] = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as exc:
-            raise KeptChangeError(f"the table {value} that {name} loads cannot be read: {exc}") from exc
-    return replace(kept, tables=tables)
+    for name, value in envs.items():
+        texts = own_tables(name, value) if _loads_table(name) else None
+        if texts:
+            tables[value] = _joined(texts, name)
+    return tables
+
+
+def _own_tables(name: str, value: str, owned: Sequence[Path]) -> list[Path] | None:
+    """The files under ``owned`` that ``value`` lists, ``None`` unless it lists one or more and, for an aiter variable,
+    nothing else but the image's default tables."""
+
+    listed = value.split(os.pathsep) if _rows_only(name) else [value]
+    paths = [Path(part) for part in listed if part and not (_rows_only(name) and _image_table(part))]
+    if not paths or not all(_owned(path, owned) for path in paths):
+        return None
+    return paths
+
+
+def _image_table(part: str) -> bool:
+    return part == DEFAULT_TABLE_PLACEHOLDER or PurePosixPath(os.path.normpath(part)).is_relative_to(_IMAGE_TABLES)
+
+
+def _owned(path: Path, owned: Sequence[Path]) -> bool:
+    return (
+        path.is_absolute() and path.is_file() and any(path.resolve().is_relative_to(root.resolve()) for root in owned)
+    )
+
+
+def _joined(texts: Sequence[str], name: str) -> str:
+    """One table of the rows of ``texts``, each row once; aiter refuses a shape two of the files set, as it would have
+    in the agent's run."""
+
+    header = {text.splitlines()[0] if text.strip() else "" for text in texts}
+    if len(header) != 1:
+        raise KeptChangeError(f"the tables {name} lists have other headers: {', '.join(sorted(header))}")
+    rows = dict.fromkeys(line for text in texts for line in text.splitlines()[1:] if line.strip())
+    return "".join(f"{line}\n" for line in (*header, *rows))
 
 
 async def import_delta(
@@ -274,10 +373,13 @@ async def import_delta(
 ) -> RecipeDelta | None:
     """The delta that makes ``head`` the agent's state at ``kept`` on the framework ``component``; ``None`` when the
     head already is that state. Each table of :attr:`KeptChange.tables` goes in as the artifact ``stores`` keeps it
-    as, which sets its variable, so the variable is not imported as well."""
+    as, which sets its variable, so the variable is not imported as well; an aiter variable's table is rows read over
+    the image's default table."""
 
     artifacts = {
-        name: await stores.table(name, kept.tables[value]) for name, value in kept.envs.items() if value in kept.tables
+        name: await stores.table(name, kept.tables[value], _rows_only(name))
+        for name, value in kept.envs.items()
+        if value in kept.tables
     }
     imported = tuple(ref for ref in _patches(head, component) if ref not in _patches(root, component))
     change = await _source_change(await stores.increment(imported, kept.source_patch), component, stores.patch)
@@ -324,7 +426,11 @@ def _kernel_change(
 
 
 def _loads_table(name: str) -> bool:
-    return name.startswith(AITER_VARIABLE_PREFIX) or name == TUNABLEOP_TABLE_ENV
+    return _rows_only(name) or name == TUNABLEOP_TABLE_ENV
+
+
+def _rows_only(name: str) -> bool:
+    return name.startswith(AITER_VARIABLE_PREFIX)
 
 
 def _config_change(launch: LaunchConfig, kept: KeptChange) -> ConfigDelta:

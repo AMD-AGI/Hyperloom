@@ -462,14 +462,44 @@ def test_a_union_of_only_the_head_s_rows_carries_no_kernel(configs):
     assert _named(united.kept_head_shapes) == {"M=64 N=34816 K=5120", "M=64 N=5120 K=17408"}
 
 
-def test_a_candidate_s_retune_of_a_row_the_head_left_as_in_base_lands(configs):
+def _untimed(rows: tuple[str, ...]) -> tuple[str, ...]:
+    """``rows`` with no time in their ``us`` cell."""
+    return tuple(",".join(cell if index != 8 else "" for index, cell in enumerate(row.split(","))) for row in rows)
+
+
+def test_a_candidate_s_retune_of_a_row_the_head_left_as_in_base_lands_where_a_row_has_no_time(configs):
     base = _aiter(csv_text(SHARED, B01_HEAD))
-    head, theirs = _aiter(csv_text(SHARED, B01_HEAD, B09_NEW)), _aiter(csv_text(SHARED, B01_SHARED))
+    head, theirs = _aiter(csv_text(SHARED, B01_HEAD, B09_NEW)), _aiter(csv_text(SHARED, _untimed(B01_SHARED)))
 
     merge = carry("i1", _filled(base), _filled(theirs), _filled(head), Stored(_applies, _table, _store, _keep, configs))
 
     (united,) = merge.delta.add_kernels
     assert TABLES[united.sha256] == union_rows(TABLES[theirs.sha256], csv_text(SHARED, B09_NEW), ENV, configs=configs)
+    assert merge.united_tables == (UnitedTable(theirs, head, united),)
+
+
+def test_a_head_row_left_as_in_base_stays_where_the_tuner_timed_it_faster(configs):
+    """``B01_HEAD``'s rows are timed at 20 us, the candidate's retunes of them at 49 and 39."""
+
+    base = _aiter(csv_text(SHARED, B01_HEAD))
+    head, theirs = _aiter(csv_text(SHARED, B01_HEAD, B09_NEW)), _aiter(csv_text(SHARED, B01_SHARED))
+
+    merge = carry("i1", _filled(base), _filled(theirs), _filled(head), Stored(_applies, _table, _store, _keep, configs))
+
+    assert merge.delta.add_kernels == ()
+    (united,) = merge.united_tables
+    assert united.table == head
+    assert _named(united.kept_head_shapes) == {"M=64 N=34816 K=5120", "M=64 N=5120 K=17408"}
+
+
+def test_a_candidate_row_the_tuner_timed_faster_replaces_the_head_s_retune(configs):
+    base = _aiter(csv_text(SHARED, B01_BASE))
+    head, theirs = _aiter(csv_text(SHARED, B01_SHARED)), _aiter(csv_text(SHARED, B01_HEAD))
+
+    merge = carry("i1", _filled(base), _filled(theirs), _filled(head), Stored(_applies, _table, _store, _keep, configs))
+
+    (united,) = merge.delta.add_kernels
+    assert TABLES[united.sha256] == union_rows(TABLES[theirs.sha256], csv_text(SHARED), ENV, configs=configs)
     assert merge.united_tables == (UnitedTable(theirs, head, united),)
 
 

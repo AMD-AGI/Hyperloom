@@ -402,8 +402,14 @@ Answer with one JSON object and nothing else, with exactly these fields:
   number or a list) as the file has it once the first keep is in, or "" when every change of the file is a keep,
   "where": {{field: value}} that a list item must match}}, or null when the agent keeps nothing and only the state its
   workspace ends in counts;
-- "config_source": {{"path": file relative to "workspace" holding the server arguments and environment the agent runs
-  with, "server_args": the field of the arguments string, "envs": the field of the environment object}}, or null;
+- "config_source": where the agent keeps the server arguments and environment of what it kept, {{"path": a JSON file,
+  "root": "workspace" when the path is relative to "workspace", "checkout" when relative to the checkout, "server_args":
+  the dotted field of the arguments string, "envs": the dotted field of the environment, an object or one string of
+  NAME=VALUE words, "adds": true when the two hold only what the agent accepted on top of the "server_args" and "envs"
+  it was started with, false when they are its whole config}}. A tuned kernel table the agent deploys through an
+  environment variable (an AITER_CONFIG_* path) is a change it keeps: when its result file reports the accepted
+  environment (for example accepted_config.env beside accepted_config.flags), name that file here. null only when the
+  agent keeps neither arguments nor environment of its own;
 - "summary_field": dotted path in the keep file to the agent's own words for its latest keep (an integer step indexes
   a list, -1 its last item), "" when none;
 - "needs": what it requires, from "anthropic", "openai", "network", "docker";

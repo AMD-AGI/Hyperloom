@@ -53,7 +53,7 @@ class Store:
         return PatchRef(f"patch/{component}/{sha256}.patch", sha256)
 
 
-async def _no_table(env: str, table: str) -> KernelArtifact:
+async def _no_table(env: str, table: str, rows_only: bool) -> KernelArtifact:
     raise AssertionError(f"no table was expected, got one for {env}")
 
 
@@ -106,7 +106,7 @@ def test_a_keep_reads_the_agent_s_config_through_its_config_source() -> None:
     source = ConfigSource("agent/config.json", "server_flags", "server_env")
     state = {"server_flags": "--tp 1 --enable-torch-compile", "server_env": {"SGLANG_A": "0"}}
 
-    kept = read_kept_change(3, "diff\n", state, source, "fused rmsnorm")
+    kept = read_kept_change(3, "diff\n", state, source, "fused rmsnorm", ROOT.launch)
 
     assert kept == KeptChange(3, "diff\n", "--tp 1 --enable-torch-compile", {"SGLANG_A": "0"}, "fused rmsnorm")
 
@@ -115,7 +115,7 @@ def test_a_keep_whose_config_the_source_cannot_read_is_refused_naming_the_file()
     source = ConfigSource("agent/config.json", "server_flags", "server_env")
 
     with pytest.raises(KeptChangeError, match="agent/config.json"):
-        read_kept_change(1, "diff\n", {"server_flags": "--tp 1"}, source, "")
+        read_kept_change(1, "diff\n", {"server_flags": "--tp 1"}, source, "", ROOT.launch)
 
 
 async def test_a_keep_of_a_component_new_on_the_head_names_the_upstream_its_package_was_built_from() -> None:
@@ -156,14 +156,14 @@ def test_a_keep_carries_the_text_of_each_table_file_of_the_agent_s_own_as_it_was
         "SGLANG_TABLE": str(table),
     }
 
-    kept = with_tables(_kept(1, "", envs=envs), owned)
+    kept = with_tables(_kept(1, "", envs=envs), (owned,))
     table.write_text("rewritten after the keep\n", encoding="utf-8")
 
     assert kept.tables == {str(table): "M,N,K\n64,5120,5120\n"}
 
 
-async def _table(env: str, table: str) -> KernelArtifact:
-    assert env == TABLE_ENV
+async def _table(env: str, table: str, rows_only: bool) -> KernelArtifact:
+    assert env == TABLE_ENV and rows_only
     return _artifact(table)
 
 
@@ -203,6 +203,60 @@ async def test_a_later_table_replaces_the_imported_one_and_a_keep_without_it_dro
     assert replaced is not None and apply(head, replaced).kernels == (_artifact("rows A+B\n"),)
     assert dropped is not None and apply(head, dropped).kernels == ()
     assert same is None
+
+
+def test_a_keep_reads_what_the_agent_accepted_on_top_of_its_start_from_a_result_file() -> None:
+    """An agent that reports only the flags and NAME=VALUE environment it accepted runs with them over its start."""
+
+    source = ConfigSource("result.json", "accepted_config.flags", "accepted_config.env", "checkout", adds=True)
+    state = {"accepted_config": {"flags": "--mem-fraction-static 0.9 --page-size 16", "env": f"{TABLE_ENV}=/t.csv"}}
+
+    kept = read_kept_change(1, "", state, source, "", ROOT.launch)
+
+    assert kept.server_args == "--tp 1 --mem-fraction-static 0.9 --page-size 16"
+    assert kept.envs == {"SGLANG_A": "1", TABLE_ENV: "/t.csv"}
+
+
+def test_an_environment_string_that_is_not_name_value_words_is_refused_naming_the_file() -> None:
+    source = ConfigSource("result.json", "flags", "env", "checkout", adds=True)
+
+    with pytest.raises(KeptChangeError, match="result.json"):
+        read_kept_change(1, "", {"flags": "", "env": "--not-an-assignment"}, source, "", ROOT.launch)
+
+
+def _listing(*paths: object) -> str:
+    image = "/sgl-workspace/aiter/aiter/configs"
+    defaults = [f"{image}/a8w8_blockscale_bpreshuffle_tuned_gemm.csv", f"{image}/model_configs/dsv3.csv"]
+    return ":".join([*defaults, *map(str, paths)])
+
+
+def test_a_variable_listing_the_image_s_tables_before_the_agent_s_own_carries_only_the_agent_s_rows(
+    tmp_path: Path,
+) -> None:
+    own, other = tmp_path / "worktree" / "a.csv", tmp_path / "agent" / "b.csv"
+    for path, rows in ((own, "1,5120,5120\n64,5120,5120\n"), (other, "64,5120,5120\n8192,5120,5120\n")):
+        path.parent.mkdir(parents=True)
+        path.write_text(f"M,N,K\n{rows}", encoding="utf-8")
+    envs = {TABLE_ENV: _listing(own, other), "AITER_CONFIG_GEMM_BF16": _listing(tmp_path / "elsewhere.csv")}
+
+    kept = with_tables(_kept(1, "", envs=envs), (own.parent, other.parent))
+
+    assert kept.tables == {envs[TABLE_ENV]: "M,N,K\n1,5120,5120\n64,5120,5120\n8192,5120,5120\n"}
+
+
+def test_tables_of_one_variable_under_other_headers_are_refused(tmp_path: Path) -> None:
+    (tmp_path / "a.csv").write_text("M,N,K\n1,1,1\n", encoding="utf-8")
+    (tmp_path / "b.csv").write_text("M,N,K,us\n1,1,1,2.0\n", encoding="utf-8")
+    envs = {TABLE_ENV: _listing(tmp_path / "a.csv", tmp_path / "b.csv")}
+
+    with pytest.raises(KeptChangeError, match="headers"):
+        with_tables(_kept(1, "", envs=envs), (tmp_path,))
+
+
+def test_a_variable_listing_only_the_image_s_tables_stays_a_launch_value(tmp_path: Path) -> None:
+    kept = with_tables(_kept(1, "", envs={TABLE_ENV: _listing()}), (tmp_path,))
+
+    assert kept.tables == {}
 
 
 #: The installed ``config.py`` the source tests edit: lines far enough apart that git writes a hunk for each.

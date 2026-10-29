@@ -129,26 +129,48 @@ class KeepSignal:
         return {"path": self.path, "field": self.counter, "where": dict(self.where)}
 
 
+#: Where a config source's file is: the framework checkout the agent edits, or the agent's own checkout.
+WORKSPACE, CHECKOUT = "workspace", "checkout"
+
+
 @dataclass(frozen=True)
 class ConfigSource:
-    """Where the agent keeps what it launches the server with: the JSON file ``path`` in its workspace, with the
-    server arguments as one string under ``server_args`` and the environment as an object under ``envs``."""
+    """Where the agent keeps what it launches the server with: the JSON file ``path`` in its workspace (``root``
+    :data:`WORKSPACE`) or in its own checkout (:data:`CHECKOUT`), with the server arguments as one string under
+    ``server_args`` and the environment under ``envs``, as an object or as one string of ``NAME=VALUE`` words. With
+    ``adds`` the two hold only what the agent accepted on top of the arguments and environment it was started with."""
 
     path: str
     server_args: str
     envs: str
+    root: str = WORKSPACE
+    adds: bool = False
 
     @classmethod
     def read(cls, document: object) -> ConfigSource:
-        fields = _fields(document, "config_source", {_PATH_FIELD, "server_args", "envs"})
+        fields = _fields(document, "config_source", {_PATH_FIELD, "server_args", "envs", "root", "adds"})
+        root = fields.get("root", WORKSPACE)
+        if root not in (WORKSPACE, CHECKOUT):
+            raise ManifestError(f"config_source.root must be {WORKSPACE!r} or {CHECKOUT!r}, got {root!r}")
+        adds = fields.get("adds", False)
+        if not isinstance(adds, bool):
+            raise ManifestError(f"config_source.adds must be true or false, got {adds!r}")
         return cls(
             _relative(fields.get("path"), "config_source.path"),
             _text(fields.get("server_args"), "config_source.server_args"),
             _text(fields.get("envs"), "config_source.envs"),
+            root,
+            adds,
         )
 
     def to_document(self) -> dict[str, object]:
-        return {"path": self.path, "server_args": self.server_args, "envs": self.envs}
+        return {
+            "path": self.path,
+            "server_args": self.server_args,
+            "envs": self.envs,
+            "root": self.root,
+            "adds": self.adds,
+        }
 
 
 @dataclass(frozen=True)
@@ -328,6 +350,8 @@ class AgentManifest:
 
 
 __all__ = [
+    "CHECKOUT",
+    "WORKSPACE",
     "AgentManifest",
     "ConfigSource",
     "KeepSignal",

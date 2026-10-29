@@ -82,6 +82,8 @@ def test_a_null_optional_field_is_empty_not_the_text_none() -> None:
         ({"config_file": "/etc/agent.json"}, "config_file"),
         ({"keep": {"path": "../outside/session.json"}}, "keep.path"),
         ({"config_source": {"path": "c.json", "server_args": "", "envs": "env"}}, "config_source.server_args"),
+        ({"config_source": {"path": "c.json", "server_args": "a", "envs": "e", "root": "home"}}, "config_source.root"),
+        ({"config_source": {"path": "c.json", "server_args": "a", "envs": "e", "adds": "yes"}}, "config_source.adds"),
         ({"surprise": 1}, "surprise"),
         ({"keep": {"path": "s.json", "fields": "lessons"}}, "fields"),
         ({"result_dir": "results"}, "result_dir"),
@@ -90,6 +92,15 @@ def test_a_null_optional_field_is_empty_not_the_text_none() -> None:
 def test_a_manifest_that_breaks_the_schema_is_refused_naming_the_field(overrides: dict[str, Any], names: str) -> None:
     with pytest.raises(ManifestError, match=names):
         AgentManifest.read(_document(**overrides))
+
+
+def test_a_config_source_in_the_agent_s_checkout_that_adds_to_its_start_reads_back() -> None:
+    source = {"path": "r.json", "server_args": "c.flags", "envs": "c.env", "root": "checkout", "adds": True}
+
+    manifest = AgentManifest.read(_document(config_source=source))
+
+    assert manifest.config_source == ConfigSource("r.json", "c.flags", "c.env", "checkout", adds=True)
+    assert AgentManifest.read(manifest.to_document()) == manifest
 
 
 def test_a_keep_counter_counts_the_matching_items_of_its_field() -> None:
