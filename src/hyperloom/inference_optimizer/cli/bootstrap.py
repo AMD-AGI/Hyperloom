@@ -1062,11 +1062,14 @@ def _resolve_reference_recipe(
     if not source:
         return ("", {}, "", {})
 
+    from http.client import HTTPException
+
+    from ..baseline_comparison.inferencex_client import InferenceXFetchError
     from ..reference_script import parse_reference_script
 
     try:
         recipe = parse_reference_script(source, framework=framework)
-    except Exception as exc:
+    except (OSError, ValueError, InferenceXFetchError, HTTPException) as exc:
         print(f"ERROR: --reference-script {source!r} could not be parsed: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
 

@@ -14,7 +14,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from hyperloom_common.io import JsonLineFormat, append_jsonl
+from hyperloom.orchestrator.knowledge.recipe_kb import LocalRecipeStoreError
 from hyperloom.orchestrator.knowledge.recipe_kb_t0 import T0AnchorRequest, run_t0_anchor
+from hyperloom.orchestrator.knowledge.remote_recipe import KBStoreError
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 if TYPE_CHECKING:  # pragma: no cover - type-only import
@@ -165,7 +167,7 @@ def _bootstrap_recipe_kb(
         )
         if kb is None:
             print("Recipe KB       : REMOTE (KB Store current Recipe warm replay)")
-    except Exception as exc:  # isolation boundary: the T0 recipe warm-start anchor
+    except (KBStoreError, LocalRecipeStoreError, OSError, ValueError) as exc:
         log.warning("T0 recipe-snapshot anchor failed mid-flight: %s", exc, exc_info=True)
         print(
             f"WARNING: T0 recipe-snapshot anchor failed mid-flight: {exc}\nContinuing without warm-start.",
