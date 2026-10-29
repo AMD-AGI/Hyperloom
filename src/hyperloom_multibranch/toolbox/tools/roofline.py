@@ -21,6 +21,10 @@ from typing import Any
 from hyperloom.inference_optimizer.framework_registry import is_scriptable
 from hyperloom.orchestrator.actions.executors.trace_analyze import trace_analyze_handler
 from hyperloom.orchestrator.trace_analysis.analysis_route import AnalysisRoute
+from hyperloom.orchestrator.trace_analysis.tracelens_arch_benchmark import (
+    build_hyperloom_arch_spec,
+    resolve_arch_json_path,
+)
 from hyperloom_multibranch.toolbox.tools.base import ToolOutput, ToolRequest
 from hyperloom_multibranch.toolbox.tools.executor_tool import ScratchHandlerTool
 from hyperloom_multibranch.toolbox.tools.op_shares import with_op_shares
@@ -39,6 +43,9 @@ ROOFLINE_ROUTE = AnalysisRoute.NON_LLM.value
 #: The error class of a roofline that answered ``ok`` with no hot kernel.
 ROOFLINE_WITHOUT_KERNELS = "roofline_without_kernels"
 HOT_KERNELS_KEY = "hot_kernels"
+FAILED = "failed"
+#: The error class of a roofline asked for a GPU neither TraceLens nor Hyperloom has peaks for.
+UNKNOWN_GPU_ARCH = "unknown_gpu_arch"
 
 
 class _SharesOps:
@@ -61,7 +68,7 @@ async def roofline_handler(payload: dict, *, session_dir: Path) -> dict:
     route = str(payload.get("analysis_route") or "").strip().lower()
     if route and route != ROOFLINE_ROUTE:
         return {
-            "status": "failed",
+            "status": FAILED,
             "error_class": "invalid_analysis_route",
             "error": f"the roofline runs only the {ROOFLINE_ROUTE!r} route, not {route!r}",
         }
@@ -69,10 +76,27 @@ async def roofline_handler(payload: dict, *, session_dir: Path) -> dict:
     if unusable is not None:
         return unusable
     platform = str(payload.get("target_platform") or "").strip() or DEFAULT_PLATFORM
+    unknown = _unknown_arch(platform)
+    if unknown is not None:
+        return unknown
     result = await trace_analyze_handler(
         {**payload, "analysis_route": ROOFLINE_ROUTE, "target_platform": platform}, session_dir=session_dir
     )
     return _without_kernels(result) or result
+
+
+def _unknown_arch(platform: str) -> dict[str, str] | None:
+    """The failed result of a GPU TraceLens' perf report has no peaks for; ``None`` when it has some. The analysis gives
+    TraceLens the arch TraceLens bundles, else Hyperloom's (built from ``hyperloom.common.gpu_identity.AMD_GPU_BOARDS``):
+    with neither, it would run an arch microbenchmark on the host's GPU or fail inside the report."""
+    if resolve_arch_json_path(platform) is not None or build_hyperloom_arch_spec(platform) is not None:
+        return None
+    return {
+        "status": FAILED,
+        "error_class": UNKNOWN_GPU_ARCH,
+        "error": f"no peak FLOPS or memory bandwidth is known for the GPU {platform!r}: name a GPU TraceLens or Hyperloom "
+        "has peaks for in target_platform",
+    }
 
 
 def _without_kernels(result: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -82,7 +106,7 @@ def _without_kernels(result: Mapping[str, Any]) -> dict[str, Any] | None:
     warnings = [str(w.get("code") or "") for w in result.get("trace_health_warnings") or () if isinstance(w, Mapping)]
     return {
         **result,
-        "status": "failed",
+        "status": FAILED,
         "error_class": ROOFLINE_WITHOUT_KERNELS,
         "error": (
             "the roofline analysis answered ok with no hot kernel, though the trace has GPU kernels: it scanned none of "

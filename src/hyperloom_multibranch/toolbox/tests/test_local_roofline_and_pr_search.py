@@ -24,6 +24,7 @@ from typing import Any
 
 import pytest
 
+from hyperloom.common.gpu_identity import AMD_GPU_BOARDS
 from hyperloom.hosted.mcp_server import McpServer, McpServerConfig
 from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
@@ -38,19 +39,67 @@ from hyperloom_multibranch.toolbox.tests.helpers import PARENT, FakeRepo
 from hyperloom_multibranch.toolbox.tests.test_analysis_route import Stack, _Analysis
 from hyperloom_multibranch.toolbox.tests.test_local_analysis import LOCATION, Local, _toolbox
 from hyperloom_multibranch.toolbox.tools import JobStatus
+from hyperloom_multibranch.toolbox.tools import roofline as roofline_module
 
 SGLANG = "https://github.com/sgl-project/sglang"
 GITHUB_API = "https://api.github.com/"
 _REAL_URLOPEN = urllib.request.urlopen
 HOST_TOKEN = "ghp_host_token_not_for_the_result"
-TRACE = [
-    {"cat": "cpu_op", "name": "aten::paged_attn", "args": {"External id": 100}},
-    {"cat": "cpu_op", "name": "aten::mm", "args": {"External id": 200}},
-    {"cat": "cuda_runtime", "name": "hipLaunchKernel", "args": {"correlation": 5, "External id": 100}},
-    {"cat": "cuda_runtime", "name": "hipLaunchKernel", "args": {"correlation": 7, "External id": 200}},
-    {"cat": "kernel", "ph": "X", "name": "paged_attention_v1", "ts": 1000, "dur": 300, "args": {"correlation": 5}},
-    {"cat": "kernel", "ph": "X", "name": "Cijk_Alik_Bljk_HHS", "ts": 1300, "dur": 200, "args": {"correlation": 7}},
+#: One serving step: TraceLens' perf report links a kernel (on the GPU's pid) to its op through the launch's correlation
+#: and ``External id``.
+STEP = [
+    ("aten::paged_attn", "paged_attention_v1", 300),
+    ("aten::mm", "Cijk_Alik_Bljk_HHS", 200),
 ]
+STEP_US = 540
+#: The vLLM step annotation TraceLens' splitter finds the steady state by (batch 16, decode only).
+STEP_ANNOTATION = "execute_16_context_0(sq0sk0sqsq0sqsk0)_generation_16(sq16sk16000sqsq16sqsk16000)"
+
+
+def _step(index: int) -> list[dict[str, Any]]:
+    start = 1_000_000 + index * STEP_US
+    events: list[dict[str, Any]] = [
+        {"ph": "X", "cat": "user_annotation", "name": STEP_ANNOTATION, "ts": start, "dur": STEP_US, "pid": 1, "tid": 1}
+    ]
+    kernel_ts = start + 20  # back to back: the GPU is busy, so the idle and compute gates keep the kernels
+    for slot, (op, kernel, dur) in enumerate(STEP):
+        ref, host = index * len(STEP) + slot + 1, {"pid": 1, "tid": 1}
+        events += [
+            {
+                "ph": "X",
+                "cat": "cpu_op",
+                "name": op,
+                "ts": start + slot * 5,
+                "dur": 4,
+                **host,
+                "args": {"External id": ref},
+            },
+            {
+                "ph": "X",
+                "cat": "cuda_runtime",
+                "name": "hipLaunchKernel",
+                "ts": start + slot * 5 + 1,
+                "dur": 2,
+                **host,
+                "args": {"correlation": ref, "External id": ref},
+            },
+            {
+                "ph": "X",
+                "cat": "kernel",
+                "name": kernel,
+                "ts": kernel_ts,
+                "dur": dur,
+                "pid": 0,
+                "tid": 7,
+                "args": {"correlation": ref},
+            },
+        ]
+        kernel_ts += dur
+    return events
+
+
+#: Ten serving steps: a trace TraceLens can split to a steady state and report on.
+TRACE = [event for index in range(10) for event in _step(index)]
 CPU_ONLY = [event for event in TRACE if event["cat"] != "kernel"]
 
 
@@ -106,6 +155,11 @@ def _host(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A TraceLens checkout that is only a directory with a ``.git`` (the non-llm analysis does not read it), and a host that
     holds a GitHub token."""
     (tmp_path / "TraceLens" / ".git").mkdir(parents=True)
+    skill = (
+        tmp_path / "TraceLens" / "TraceLens" / "Agent" / "Analysis" / "skills" / "analysis-orchestrator" / "SKILL.md"
+    )
+    skill.parent.mkdir(parents=True)
+    skill.write_text("the agent route's skill; the non-llm route only checks it is there\n", encoding="utf-8")
     monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path / "TraceLens"))
     monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
     monkeypatch.setenv("GITHUB_TOKEN", HOST_TOKEN)
@@ -208,22 +262,51 @@ async def test_a_served_stand_in_is_listed_by_its_name(tmp_path: Path, name: str
 # --- roofline -----------------------------------------------------------------------------------------------------
 
 
+def _analysed_platform(result: dict[str, Any]) -> str:
+    """The platform the analysis ran for, as its TraceLens summary records it."""
+    return json.loads(Path(result["tracelens_summary_path"]).read_text(encoding="utf-8"))["target_platform"]
+
+
+def _arch_used(result: dict[str, Any]) -> dict[str, Any]:
+    return json.loads(Path(result["artifact_paths"]["tracelens_gpu_arch_json"]).read_text(encoding="utf-8"))
+
+
+async def _never(payload: dict, *, session_dir: Path) -> dict:
+    raise AssertionError("the analysis must not start")
+
+
 async def test_a_specialist_gets_the_roofline_of_the_trace_its_profile_test_left(served: Local) -> None:
     status, record = await _roofline(served, TRACE)
     result = record["result"]
     assert status is JobStatus.SUCCEEDED and record["summary"] == "roofline analysed"
-    assert (result["status"], result["route"], result["target_platform"]) == ("ok", "non-llm", "MI355X")
+    assert (result["status"], result["analysis_meta"]["route"], _analysed_platform(result)) == (
+        "ok",
+        "non-llm",
+        "MI355X",
+    )
+    # TraceLens bundles no MI355X: its report read Hyperloom's peaks for the board.
+    assert _arch_used(result)["mem_bw_gbps"] == AMD_GPU_BOARDS["mi355x"].hbm_bw_gbps
     roofline = Path(result["kernel_roofline_path"])
     assert roofline.is_file() and roofline.is_relative_to(
         served.session / "tool-results"
     )  # kept with the job, not in scratch
     kernels = json.loads(roofline.read_text(encoding="utf-8"))["kernels"]
-    assert {kernel["name"]: kernel["gpu_pct"] for kernel in kernels} == {"aten::paged_attn": 60.0, "aten::mm": 40.0}
+    assert [kernel["name"] for kernel in kernels] == ["aten::paged_attn", "aten::mm"]  # 300 us and 200 us of each step
 
 
 async def test_the_platform_of_the_request_is_the_one_analysed_for(served: Local) -> None:
-    _, record = await _roofline(served, TRACE, target_platform="MI300X")
-    assert record["result"]["target_platform"] == "MI300X"
+    status, record = await _roofline(served, TRACE, target_platform="MI300X")
+    assert status is JobStatus.SUCCEEDED and _analysed_platform(record["result"]) == "MI300X"
+    assert _arch_used(record["result"])["name"] == "MI300X"  # the arch TraceLens bundles
+
+
+async def test_a_gpu_no_one_has_peaks_for_fails_the_job_by_name_and_starts_no_analysis(
+    served: Local, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(roofline_module, "trace_analyze_handler", _never)
+    status, record = await _roofline(served, TRACE, target_platform="MI999X")
+    assert status is JobStatus.FAILED and record["result"]["error_class"] == "unknown_gpu_arch"
+    assert "'MI999X'" in record["summary"]
 
 
 async def test_the_roofline_needs_a_profile_test_it_does_not_profile_itself(served: Local) -> None:
@@ -235,12 +318,7 @@ async def test_the_roofline_needs_a_profile_test_it_does_not_profile_itself(serv
 async def test_a_route_other_than_non_llm_fails_the_job_by_name_and_starts_no_analysis(
     served: Local, monkeypatch: pytest.MonkeyPatch, route: str
 ) -> None:
-    from hyperloom_multibranch.toolbox.tools import roofline as module
-
-    async def never(payload: dict, *, session_dir: Path) -> dict:
-        raise AssertionError("the analysis must not start")
-
-    monkeypatch.setattr(module, "trace_analyze_handler", never)
+    monkeypatch.setattr(roofline_module, "trace_analyze_handler", _never)
     status, record = await _roofline(served, TRACE, analysis_route=route)
     assert status is JobStatus.FAILED and f"not {route!r}" in record["summary"]
     assert record["result"]["error_class"] == "invalid_analysis_route"
@@ -251,7 +329,7 @@ async def test_the_route_the_host_environment_names_is_not_the_rooflines(
 ) -> None:
     monkeypatch.setenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "agent")  # an agent route would start a model session
     status, record = await _roofline(served, TRACE)
-    assert status is JobStatus.SUCCEEDED and record["result"]["route"] == "non-llm"
+    assert status is JobStatus.SUCCEEDED and record["result"]["analysis_meta"]["route"] == "non-llm"
 
 
 @pytest.mark.parametrize(
@@ -270,13 +348,12 @@ async def test_an_analysis_that_scanned_none_of_the_traces_kernels_fails_the_job
     served: Local, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """What ``roofline-83e37a2e0267`` answered: ``Events scanned: 0`` over a trace with GPU kernels, and ``ok``."""
-    from hyperloom_multibranch.toolbox.tools import roofline as module
 
     async def scanned_nothing(payload: dict, *, session_dir: Path) -> dict:
         warning = {"code": "bypass_trace_aggregation_truncated", "severity": "warning"}
         return {"status": "ok", "route": "non-llm", "hot_kernels": [], "trace_health_warnings": [warning]}
 
-    monkeypatch.setattr(module, "trace_analyze_handler", scanned_nothing)
+    monkeypatch.setattr(roofline_module, "trace_analyze_handler", scanned_nothing)
     status, record = await _roofline(served, TRACE)
 
     assert status is JobStatus.FAILED and record["result"]["error_class"] == "roofline_without_kernels"
