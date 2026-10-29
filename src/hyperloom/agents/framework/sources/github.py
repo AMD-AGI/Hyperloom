@@ -102,20 +102,4 @@ def pr_patches(repo_slug: str, number: int, *, timeout_sec: float = 30.0) -> str
     return ""
 
 
-def fetch_raw_file(repo_slug: str, ref: str, path: str, *, timeout_sec: float = 30.0) -> str:
-    """Return a single file's raw contents at ``ref``, or ``\"\"`` on failure."""
-    slug = str(repo_slug or "").strip().strip("/")
-    ref_s = str(ref or "").strip().strip("/")
-    path_s = str(path or "").strip().lstrip("/")
-    if not slug or not ref_s or not path_s:
-        return ""
-    url = f"https://raw.githubusercontent.com/{slug}/{ref_s}/{urllib.parse.quote(path_s)}"
-    req = urllib.request.Request(url, headers=_auth_headers("text/plain"))
-    try:
-        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:  # nosec B310 - fixed GitHub HTTPS URL.
-            return resp.read().decode("utf-8", "replace")
-    except (OSError, http.client.HTTPException, ValueError):  # best-effort policy
-        return ""
-
-
-__all__ = ["search_perf_prs", "PERF_TERMS", "pr_patches", "fetch_raw_file"]
+__all__ = ["search_perf_prs", "PERF_TERMS", "pr_patches"]
