@@ -4,6 +4,7 @@
 
 # Build the hosting layer of a hosted Hyperloom run: a directory that any framework image runs as it is,
 # in place of an application image built for Hyperloom (see Dockerfile, which stays for those who want one).
+# Dockerfile.layer turns the directory into a small image an init container copies into the application pod.
 #
 #   scripts/hosted_app_image/build_layer.sh --out /path/to/hosted-layer [--claude-version V] [--ca-file PEM]
 #
@@ -12,8 +13,8 @@
 #   app_bootstrap.sh  the bootstrap start.sh execs
 #   bin/claude        the Claude Code CLI (one self-contained binary; nothing is fetched when a run starts)
 #   ca.pem            an extra CA certificate for the run's TLS (only with --ca-file)
-# and refuses to overwrite a layer that exists. The directory is world-readable: publish it to the
-# shared filesystem the application container mounts.
+# and refuses to overwrite a layer that exists. The directory is world-readable: ship it to the
+# place the application container reads it from.
 
 set -euo pipefail
 
