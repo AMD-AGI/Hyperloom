@@ -159,6 +159,55 @@ async def _noop_finalize() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_failed_close_sequence_fails_the_run_after_releasing_it(session_dir):
+    c = Coordinator(session_dir, backends=_build_backends({}))
+    c._stop.set()
+    finalize_calls = 0
+
+    async def _close(*, reason):
+        raise RuntimeError("close sequence broke")
+
+    async def _finalize():
+        nonlocal finalize_calls
+        finalize_calls += 1
+
+    c.phase_close.ensure_close_sequence = _close
+    c._recipe_kb_t4_hook = _finalize
+    try:
+        with pytest.raises(RuntimeError, match="^close sequence broke$"):
+            await c.run(options=RunOptions(tick_interval_sec=0.0, max_ticks=1))
+        state = json.loads((session_dir / "state.json").read_text(encoding="utf-8"))
+        assert (finalize_calls, state["stop_reason"]) == (1, "signal")
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_pre_reactor_phase_advance_fails_the_tick(session_dir, monkeypatch):
+    c = Coordinator(session_dir, backends=_build_backends({}))
+    turns: list[str] = []
+
+    async def _noop(*args, **kwargs):
+        return None
+
+    async def _advance():
+        raise RuntimeError("phase entry hook broke")
+
+    async def _turn(name, **kwargs):
+        turns.append(name)
+
+    monkeypatch.setattr(c.reconciler, "run", _noop)
+    monkeypatch.setattr(c.phase_machine, "advance_phase_if_needed", _advance)
+    monkeypatch.setattr(c, "reactor_pass", _turn)
+    try:
+        with pytest.raises(RuntimeError, match="^phase entry hook broke$"):
+            await c._tick_once()
+        assert turns == []
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("stop_signal", [signal.SIGINT, signal.SIGTERM, signal.SIGHUP])
 @pytest.mark.parametrize("cancelled", [False, True])
 async def test_stop_signals_follow_the_normal_terminal_path(session_dir, stop_signal, cancelled, monkeypatch):
@@ -389,9 +438,13 @@ async def test_a_tick_while_closing_runs_no_reactor_turn(session_dir):
 @pytest.mark.asyncio
 async def test_a_phase_advance_that_raises_is_recorded_at_the_session_tick(session_dir, monkeypatch):
     c = Coordinator(session_dir, backends=_build_backends({}))
+    calls = 0
 
     async def _raise() -> None:
-        raise RuntimeError("advance broke")
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise RuntimeError("advance broke")
 
     monkeypatch.setattr(c.phase_machine, "advance_phase_if_needed", _raise)
     try:
@@ -2640,14 +2693,13 @@ async def test_run_preserves_prior_stop_reason_when_loop_exits_without_new_reaso
         reason = await c.run(options=RunOptions(max_ticks=5))
         assert reason == "target_reached"
         assert c.shared_state.stop_reason == "target_reached"
-        # Two advance_phase calls per run (pre-reactor hint consume + main) each record a coordinator exception when
-        # the tick body raises.
-        assert c.shared_state.crash_count == 2
-        assert c.shared_state.last_tick_exception["stage"] == "advance_phase"
+        # The pre-reactor advance raising ends the tick, which the tick boundary records once.
+        assert c.shared_state.crash_count == 1
+        assert c.shared_state.last_tick_exception["stage"] == "tick_body"
         assert c.shared_state.last_tick_exception["type"] == "RuntimeError"
         persisted = SharedState.load_or_init(session_dir)
         assert persisted.stop_reason == "target_reached"
-        assert persisted.last_tick_exception["stage"] == "advance_phase"
+        assert persisted.last_tick_exception["stage"] == "tick_body"
     finally:
         await c.stop()
 
