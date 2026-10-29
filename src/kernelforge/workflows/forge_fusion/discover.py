@@ -85,8 +85,7 @@ class DiscoveryPrompting:
 
 @dataclass(frozen=True)
 class DiscoverySession:
-    """One read-only discovery session: model, per-attempt timeout, transcript, working dir, guarded files, and the
-    run's usage accumulator its calls are charged to."""
+    """One read-only discovery session: model, timeout, transcript, working dir, guarded files, usage accumulator."""
 
     model: str = ""
     timeout_s: int = 900

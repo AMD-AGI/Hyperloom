@@ -154,6 +154,18 @@ def _setup_logging(output_dir: Path, verbose: bool = False) -> None:
     root.addHandler(sh)
 
 
+def _open_usage_ledger(output_dir: Path) -> UsageAccumulator:
+    """Start the run's usage ledger, as forge-loop does, and return the accumulator its LLM calls are charged to.
+
+    Each discovery and authoring call lands in ``output_dir/llm_usage.json`` as it is made, beside the ledger the
+    campaign's own forge-loop keeps under ``output_dir``, so a run that stops early still shows what it spent.
+    """
+    usage_ledger = UsageLedgerFile(output_dir)
+    usage = UsageAccumulator(on_update=usage_ledger.publish)
+    usage_ledger.publish(usage.totals())
+    return usage
+
+
 def _verdict_override(
     llm_error: Optional[LlmUnavailableError],
     anchor_report: Optional[AnchorReport],
@@ -445,11 +457,7 @@ def fuse(request: FuseRequest) -> FuseResult:
 
     out = Path(request.output_dir)
     _setup_logging(out, request.verbose)
-    # As forge-loop does: each discovery and authoring call lands in the run's ledger as it is made, beside the ledger
-    # the campaign's own forge-loop keeps under out/, so a run that stops early still shows what it spent.
-    usage_ledger = UsageLedgerFile(out)
-    usage = UsageAccumulator(on_update=usage_ledger.publish)
-    usage_ledger.publish(usage.totals())
+    usage = _open_usage_ledger(out)
 
     log.info("forge-fuse %s | framework=%s model=%s", __version__, framework, model_path)
     backend = _AgentBackendCache(agent)
@@ -482,9 +490,7 @@ def fuse(request: FuseRequest) -> FuseResult:
 
     outcome = RunOutcome()
     if not stages.dry_run and split.top_recipe is not None:
-        author = AuthorAgent(
-            backend=backend, gpu=request.gpu, model=backend.llm_model, max_turns=agent.max_turns, usage=usage
-        )
+        author = AuthorAgent(backend, request.gpu, backend.llm_model, agent.max_turns, usage=usage)
         outcome = _run_fusion_stages(request, discovery.recipes, split, author, publish)
     llm_error = discovery.llm_error
     manifest, path = publish(

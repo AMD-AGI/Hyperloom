@@ -946,8 +946,7 @@ def _write_registered_author_log(
 
 @dataclass(frozen=True)
 class AuthorAgent:
-    """The agent that authors: its backend (or a factory for one), model, device, turn cap, per-attempt timeout, and the
-    run's usage accumulator its calls are charged to."""
+    """The agent that authors: its backend (or a factory for one), model, device, turn cap, timeout, usage accumulator."""
 
     backend: Any
     gpu: str = "0"
