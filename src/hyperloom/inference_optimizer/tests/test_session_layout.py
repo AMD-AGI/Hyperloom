@@ -192,6 +192,30 @@ def test_deps_cache_root_defaults_to_repo_root_cache(tmp_path, monkeypatch):
     assert paths.deps_cache_root() == tmp_path / "repo" / ".cache"
 
 
+def test_deps_cache_root_without_repo_root_is_install_sh_s_root_not_the_working_directory(tmp_path, monkeypatch):
+    # install.sh resolves REPO_ROOT from its own location: the source checkout holding pyproject.toml, else the
+    # directory holding the installed package. A process started from another directory must find the same .cache.
+    monkeypatch.delenv("HYPERLOOM_CACHE_DIR", raising=False)
+    monkeypatch.delenv(paths.ENV_REPO_ROOT, raising=False)
+    monkeypatch.chdir(tmp_path)
+    package_parent = Path(paths.__file__).resolve().parents[3]
+    source_root = package_parent.parent
+    expected = source_root if (source_root / "pyproject.toml").is_file() else package_parent
+    assert paths.deps_cache_root() == expected / ".cache"
+    assert paths.deps_cache_root() != tmp_path / ".cache"
+
+
+def test_deps_cache_root_of_a_packaged_install_is_the_package_parent(tmp_path, monkeypatch):
+    site = tmp_path / "site-packages"
+    fake = site / "hyperloom" / "inference_optimizer" / "session" / "paths.py"
+    fake.parent.mkdir(parents=True)
+    fake.write_text("", encoding="utf-8")
+    monkeypatch.delenv("HYPERLOOM_CACHE_DIR", raising=False)
+    monkeypatch.delenv(paths.ENV_REPO_ROOT, raising=False)
+    monkeypatch.setattr(paths, "__file__", str(fake))
+    assert paths.deps_cache_root() == site / ".cache"
+
+
 def test_deps_cache_root_honours_explicit_override(tmp_path, monkeypatch):
     monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "custom"))
     monkeypatch.delenv("MAGPIE_PATH", raising=False)

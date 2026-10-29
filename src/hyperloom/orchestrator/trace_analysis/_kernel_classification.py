@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import functools
+import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -28,11 +29,8 @@ try:
 except ImportError:
     _triton_def_line = None  # type: ignore[assignment]
 
-try:
-    import aiter.jit.core as _aiter_jit_core  # type: ignore[import-untyped]
-except ImportError:
-    _aiter_jit_core = None
 
+_log = logging.getLogger(__name__)
 
 RUNTIME_API_NAMES = {
     "hipeventsynchronize",
@@ -252,18 +250,26 @@ def _framework_source_roots() -> tuple[str, ...]:
 
 
 @functools.lru_cache(maxsize=1)
+@functools.lru_cache(maxsize=1)
 def _aiter_csrc_root() -> str:
     """Resolve aiter's own device-source root from the installed package.
 
-    Cached once per process.
+    aiter is imported here, not at module import: ``aiter.jit.core`` probes the GPU architecture with ``rocminfo`` when
+    it is imported and raises ``RuntimeError`` on a host with no GPU, such as a hosted run's app container, which imports
+    this module only to build the toolbox. Cached once per process.
 
     Returns:
-        The aiter csrc root (e.g. ``.../aiter_meta/csrc/``), or ``""`` when
-        aiter is not importable.
+        The aiter csrc root (e.g. ``.../aiter_meta/csrc/``), or ``""`` when aiter is not importable or cannot start
+        on this host (logged once).
     """
-    if _aiter_jit_core is None:
+    try:
+        import aiter.jit.core as aiter_jit_core  # type: ignore[import-untyped]
+    except ImportError:
         return ""
-    raw = (getattr(_aiter_jit_core, "AITER_CSRC_DIR", "") or "").replace(os.sep, "/")
+    except RuntimeError as exc:
+        _log.warning("aiter cannot start on this host, so its source root is unknown: %s", exc)
+        return ""
+    raw = (getattr(aiter_jit_core, "AITER_CSRC_DIR", "") or "").replace(os.sep, "/")
     return (raw.rstrip("/") + "/") if raw else ""
 
 
