@@ -395,9 +395,10 @@ class HostedBranchLeases:
             except asyncio.CancelledError:
                 attempt.add_done_callback(_end_when_made)
                 raise
-            except SandboxQuotaExceeded:
+            except SandboxQuotaExceeded as refused:
                 if self._closed or until - time.monotonic() <= delay:
-                    reason = _CLOSING if self._closed else f"no room in the grant within {wait:g} s"
+                    # The service's own words name the limit (e.g. "dev 0/0 gpus"); a wait cannot clear every one.
+                    reason = _CLOSING if self._closed else f"no room in the grant within {wait:g} s ({refused})"
                     raise SandboxUnavailable(f"no dev sandbox for branch {branch_id!r}: {reason}") from None
                 await self._pause(delay)
                 delay = min(delay * 2, tuning.max_backoff_sec)

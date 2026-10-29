@@ -331,6 +331,7 @@ async def test_a_lease_that_the_quota_does_not_clear_for_ends_as_unavailable_and
     with pytest.raises(SandboxUnavailable, match="no room in the grant") as failed:
         await asyncio.wait_for(hosted.leases.lease("b03", 1, charge=LeaseCharge(LeaseKind.DEV, "b03")), 10)
     assert not isinstance(failed.value, SandboxQuotaExceeded)
+    assert "already has 1 sandboxes" in str(failed.value), "the service's refusal names the limit it counted"
     assert hosted.leases.capacity().leased_cards == 1
     await hosted.leases.release(first.lease_id)
     assert (await hosted.leases.lease("b03", 1, charge=LeaseCharge(LeaseKind.DEV, "b03"))).branch_id == "b03"
