@@ -8,8 +8,8 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.common.failure_signature import classify_failure
+from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
-    SpecialistPromptInputs,
     build_specialist_prompts,
     _render_measured_impact,
     _format_version_note,

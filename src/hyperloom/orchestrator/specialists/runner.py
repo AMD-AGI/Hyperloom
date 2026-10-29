@@ -64,6 +64,7 @@ from .subprocess_ import (
 )
 from . import patch_safety as _patch_safety
 from .profile import MODE_PATCH, SpecialistProfile, resolve_specialist_profile
+from .prompt_inputs import SpecialistPromptInputs
 from .tree_snapshot import snapshot_tree
 from hyperloom.inference_optimizer.framework_paths import (
     FrameworkTree,
@@ -71,10 +72,7 @@ from hyperloom.inference_optimizer.framework_paths import (
     resolve_framework_tree,
 )
 from ..loop.sub_agent_runner import RunnerContext
-from ..prompts.specialist_prompt_builder import (
-    SpecialistPromptInputs,
-    build_specialist_prompts,
-)
+from ..prompts.specialist_prompt_builder import build_specialist_prompts
 
 
 log = logging.getLogger(__name__)

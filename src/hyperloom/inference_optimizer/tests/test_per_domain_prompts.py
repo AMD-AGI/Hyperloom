@@ -14,10 +14,10 @@ from hyperloom.orchestrator.specialists.domains import (
     SPECIALIST_DOMAINS,
     get_domain,
 )
+from hyperloom.orchestrator.prompts.specialist_focus import _DOMAIN_FOCUS_TEMPLATES
+from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
-    _DOMAIN_FOCUS_TEMPLATES,
     _THROUGHPUT_AUTHORING_DOMAINS,
-    SpecialistPromptInputs,
     build_specialist_prompts,
 )
 
@@ -506,10 +506,8 @@ from hyperloom.orchestrator.specialists.runner import (
     build_empty_specialist_done,
 )
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
-from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
-    SpecialistPromptInputs,
-    build_specialist_prompts,
-)
+from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
+from hyperloom.orchestrator.prompts.specialist_prompt_builder import build_specialist_prompts
 
 from .conftest import init_git_repo, make_fake_claude
 

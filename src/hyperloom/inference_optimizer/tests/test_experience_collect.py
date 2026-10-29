@@ -289,17 +289,17 @@ def _record_framework_attempts(session_dir: Path, source_status: str = "kept") -
 
 
 def test_recorded_framework_rows_only_carry_declared_fields(session_dir: Path) -> None:
-    from hyperloom.inference_optimizer.breakdown import schema
+    from hyperloom.inference_optimizer.breakdown import schema_framework
 
     ext = _record_framework_attempts(session_dir)[0]["ext"]
 
     for attempt in ext["attempts"]:
-        assert set(attempt) <= set(schema.V6FrameworkAttempt.__annotations__)
-        assert set(attempt["failure"]) <= set(schema.V6FrameworkAttemptFailure.__annotations__)
+        assert set(attempt) <= set(schema_framework.V6FrameworkAttempt.__annotations__)
+        assert set(attempt["failure"]) <= set(schema_framework.V6FrameworkAttemptFailure.__annotations__)
         for patch in attempt.get("patch_material", []):
-            assert set(patch) <= set(schema.V6FrameworkPatch.__annotations__)
+            assert set(patch) <= set(schema_framework.V6FrameworkPatch.__annotations__)
     for proposal in ext["proposals"]:
-        assert set(proposal) <= set(schema.V6FrameworkProposal.__annotations__)
+        assert set(proposal) <= set(schema_framework.V6FrameworkProposal.__annotations__)
 
 
 @pytest.mark.parametrize(
