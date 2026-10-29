@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
+from kernelforge.agent_backends.usage import UsageAccumulator
+from kernelforge.agent_backends.usage_ledger import UsageLedgerFile
 from kernelforge.utils.gpu_arch import canon_arch, detect_arch
 
 from . import __version__
@@ -443,6 +445,11 @@ def fuse(request: FuseRequest) -> FuseResult:
 
     out = Path(request.output_dir)
     _setup_logging(out, request.verbose)
+    # As forge-loop does: each discovery and authoring call lands in the run's ledger as it is made, beside the ledger
+    # the campaign's own forge-loop keeps under out/, so a run that stops early still shows what it spent.
+    usage_ledger = UsageLedgerFile(out)
+    usage = UsageAccumulator(on_update=usage_ledger.publish)
+    usage_ledger.publish(usage.totals())
 
     log.info("forge-fuse %s | framework=%s model=%s", __version__, framework, model_path)
     backend = _AgentBackendCache(agent)
@@ -460,6 +467,7 @@ def fuse(request: FuseRequest) -> FuseResult:
         repo_scope=request.repo_scope,
         out=out,
         agent_factory=backend,
+        usage=usage,
     )
     discovery = _discover(inputs, discover_mode, fuse_kernel, stages.dry_run)
     _log_located_recipes(discovery, dry_run=stages.dry_run)
@@ -474,7 +482,9 @@ def fuse(request: FuseRequest) -> FuseResult:
 
     outcome = RunOutcome()
     if not stages.dry_run and split.top_recipe is not None:
-        author = AuthorAgent(backend=backend, gpu=request.gpu, model=backend.llm_model, max_turns=agent.max_turns)
+        author = AuthorAgent(
+            backend=backend, gpu=request.gpu, model=backend.llm_model, max_turns=agent.max_turns, usage=usage
+        )
         outcome = _run_fusion_stages(request, discovery.recipes, split, author, publish)
     llm_error = discovery.llm_error
     manifest, path = publish(

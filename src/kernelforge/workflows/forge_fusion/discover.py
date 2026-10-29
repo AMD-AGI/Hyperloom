@@ -85,13 +85,15 @@ class DiscoveryPrompting:
 
 @dataclass(frozen=True)
 class DiscoverySession:
-    """One read-only discovery session: model, per-attempt timeout, transcript, working dir and guarded files."""
+    """One read-only discovery session: model, per-attempt timeout, transcript, working dir, guarded files, and the
+    run's usage accumulator its calls are charged to."""
 
     model: str = ""
     timeout_s: int = 900
     log_path: str = ""
     workdir: str = "."
     protected_files: Sequence[str] = ()
+    usage: Any = None
 
 
 @dataclass(frozen=True)
@@ -1222,13 +1224,14 @@ def _run_agent_discovery_once(
     *,
     timeout_s: int,
     protected_files: list[str],
+    usage: Any = None,
 ) -> Any:
     """Run one SDK turn and enforce the provider-neutral source invariant."""
     snapshot = _protected_file_snapshot(protected_files)
 
     async def _run() -> Any:
         return await asyncio.wait_for(
-            backend.run(spec),
+            backend.run(spec, usage=usage),
             timeout=watchdog_timeout_sec(max(1, int(timeout_s))),
         )
 
@@ -1315,6 +1318,7 @@ def registered_agent_llm_fn(
                     spec,
                     timeout_s=timeout_s,
                     protected_files=protected,
+                    usage=session.usage,
                 )
                 text = str(getattr(result, "text", "") or "").strip()
                 end_reason = result.end_reason
