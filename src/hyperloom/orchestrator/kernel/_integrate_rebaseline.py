@@ -353,6 +353,10 @@ async def _multi_node_restart_failure(
 
     if not is_multi_node():
         return None
+    # The sweep runs even when the regular JIT cache is warm: cpp_itfs attention
+    # uses the separate AITER_ROOT_DIR/build tree and can carry a stale baton
+    # from a timed-out Forge driver.
+    _sweep_integrate_aiter_locks(reason="integrate server startup")
     from ..actions.executors._multi_node_server_lifecycle import (
         RoundServer,
         ServerRestartFailed,

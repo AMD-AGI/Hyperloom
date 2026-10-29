@@ -15,7 +15,6 @@ import sys
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from hyperloom_common.coerce import optional_positive_int
 from kernelforge.workflows.gemm_tune import RoutingEvidence, RoutingTarget
 
 from . import forge_gemm_tuning
@@ -36,14 +35,12 @@ from ._forge_lane_budget import (
     _unfunded_lane_skip,
 )
 from ._forge_shapes import (
-    _normalize_forge_shapes_json,
-    _normalize_tokens,
-    _path_is_existing_file,
     _resolve_forge_shapes,
 )
-from ._integrate_payload import _requested_framework, _requested_setting
+from ._integrate_payload import _state_framework, _state_setting
 from .serving_log_evidence import resolve_forge_server_log, _tokens_from_serving_log
 from ._shape_capture import (
+    BLOCK_FP8_PROFILE_CAPTURE,
     SuppliedShapes,
     _capture_vllm_tunableop_shapes,
     _reuse_vllm_block_fp8_roofline_shapes,
@@ -166,45 +163,38 @@ class _ForgeShapeSources(NamedTuple):
     moe_untuned_csv: str
     moe_key_report: dict[str, Any]
     tunableop_input: str
-    shapes_manifest: str
-    demand_json: str
     capture: HandlerResult | None
 
 
-def _requested_existing_file(payload: dict, key: str) -> str:
-    path = str(payload.get(key) or "").strip()
-    return path if _path_is_existing_file(path) else ""
-
-
-def _forge_gemm_run(state: Any, payload: dict, session_dir: Path) -> _ForgeGemmRun:
+def _forge_gemm_run(state: Any, task_id: str, session_dir: Path) -> _ForgeGemmRun:
     from hyperloom.common.model_paths import resolve_local_model_dir, resolve_serving_model_path
     from hyperloom.common.visible_devices import detect_gpu_count
 
-    workspace = _gemm_tuning_workspace(payload, session_dir=session_dir)
+    workspace = _gemm_tuning_workspace(task_id, session_dir=session_dir)
     workspace.mkdir(parents=True, exist_ok=True)
     # Resolve precision from actual runtime, not just session-level state.
-    precision, quant_type = _resolve_forge_precision_and_quant(state, payload)
+    precision, quant_type = _resolve_forge_precision_and_quant(state)
 
     # Bootstrap already walked HL_MODEL_BASE and the hub cache to decide what to
     # serve; probing only the hub cache here would reject a repo id that the
     # running server resolved fine.
-    model_id = _requested_setting(payload, state, "model_path", os.environ.get("MODEL_PATH") or "")
+    model_id = _state_setting(state, "model_path", os.environ.get("MODEL_PATH") or "")
     model_dir = resolve_local_model_dir(resolve_serving_model_path(model_id) or model_id) if model_id else None
 
-    tp = int(payload.get("tp") or state.tp or os.environ.get("TP") or 1)
+    tp = int(state.tp or os.environ.get("TP") or 1)
     # Default mp = all visible GPUs.
     detected_gpus = detect_gpu_count() or tp
-    mp = int(payload.get("mp") or os.environ.get("FORGE_GEMM_TUNE_MP") or detected_gpus)
+    mp = int(os.environ.get("FORGE_GEMM_TUNE_MP") or detected_gpus)
     return _ForgeGemmRun(
         session_dir=session_dir,
         workspace=workspace,
-        framework=_requested_framework(payload, state, "sglang"),
+        framework=_state_framework(state, "sglang"),
         tuning_framework="",
         precision=precision,
         quant_type=quant_type,
-        gpu_type=_requested_setting(payload, state, "gpu_type", os.environ.get("GPU_TYPE") or "mi300x").lower(),
+        gpu_type=_state_setting(state, "gpu_type", os.environ.get("GPU_TYPE") or "mi300x").lower(),
         tp=tp,
-        conc=int(payload.get("conc") or state.conc or os.environ.get("CONC") or 64),
+        conc=int(state.conc or os.environ.get("CONC") or 64),
         mp=mp,
         model_dir=str(model_dir) if model_dir is not None else "",
         model_id=model_id,
@@ -214,22 +204,18 @@ def _forge_gemm_run(state: Any, payload: dict, session_dir: Path) -> _ForgeGemmR
     )
 
 
-async def _forge_shape_sources(state: Any, payload: dict, run: _ForgeGemmRun) -> _ForgeShapeSources:
-    tokens = _normalize_tokens(payload.get("tokens"))
-    if not tokens and run.server_log:
-        tokens = _normalize_tokens(await asyncio.to_thread(_tokens_from_serving_log, run.server_log))
+async def _forge_shape_sources(state: Any, run: _ForgeGemmRun) -> _ForgeShapeSources:
+    tokens = ""
+    if run.server_log:
+        tokens = await asyncio.to_thread(_tokens_from_serving_log, run.server_log)
         if tokens:
             log.info("GEMM: derived --tokens=%s from observed M in %s", tokens, run.server_log)
 
-    moe_untuned_csv = _requested_existing_file(payload, "moe_untuned_csv")
-    moe_key_report: dict[str, Any] = {}
-    if not moe_untuned_csv:
-        moe_untuned_csv, moe_key_report = _write_fmoe_untuned_csv_from_log(run.server_log, tokens, run.workspace)
+    moe_untuned_csv, moe_key_report = _write_fmoe_untuned_csv_from_log(run.server_log, tokens, run.workspace)
 
-    shapes_json = _normalize_forge_shapes_json(payload.get("shapes_json"), run.workspace)
-    untuned_csv = _requested_existing_file(payload, "untuned_csv")
-    if not shapes_json and not untuned_csv and run.framework != "vllm":
-        shapes_json = _resolve_forge_shapes(state, run.session_dir, require_fresh_profile=True, precision=run.precision)
+    shapes_json, untuned_csv = "", ""
+    if run.framework != "vllm":
+        shapes_json = _resolve_forge_shapes(state, precision=run.precision)
         if not shapes_json:
             untuned_csv = _resolve_forge_untuned_csv(run.session_dir, run.precision, run.quant_type, run.model_dir)
 
@@ -239,34 +225,26 @@ async def _forge_shape_sources(state: Any, payload: dict, run: _ForgeGemmRun) ->
         untuned_csv=untuned_csv,
         moe_untuned_csv=moe_untuned_csv,
         moe_key_report=moe_key_report,
-        tunableop_input=str(payload.get("tunableop_input") or "").strip(),
-        shapes_manifest=_requested_existing_file(payload, "shapes_manifest"),
-        demand_json=_requested_existing_file(payload, "demand_json"),
+        tunableop_input="",
         capture=None,
     )
 
 
-def _profiled_block_fp8_shapes(
-    state: Any,
-    payload: dict,
-    run: _ForgeGemmRun,
-    sources: _ForgeShapeSources,
-) -> _ForgeShapeSources:
+def _profiled_block_fp8_shapes(state: Any, run: _ForgeGemmRun, sources: _ForgeShapeSources) -> _ForgeShapeSources:
     if not _vllm_block_fp8_profile_capture_required(
         framework=run.framework,
         precision=run.precision,
         quant_type=run.quant_type,
         supplied=SuppliedShapes(shapes_json=sources.shapes_json, tunableop_input=sources.tunableop_input),
-        dry_run=bool(payload.get("dry_run")),
     ):
         return sources
-    traced_shapes = _resolve_forge_shapes(state, run.session_dir, require_fresh_profile=True, precision=run.precision)
+    traced_shapes = _resolve_forge_shapes(state, precision=run.precision)
     if traced_shapes:
         return sources._replace(shapes_json=traced_shapes, untuned_csv="")
     reused = _reuse_vllm_block_fp8_roofline_shapes(
         state,
         workspace=run.workspace,
-        current_workload=state.current_profile_workload_context(payload),
+        current_workload=state.current_profile_workload_context(),
     )
     if reused is None:
         return sources
@@ -275,19 +253,17 @@ def _profiled_block_fp8_shapes(
 
 async def _captured_forge_shapes(
     state: Any,
-    payload: dict,
     run: _ForgeGemmRun,
     sources: _ForgeShapeSources,
     priced_lane: Any,
 ) -> tuple[_ForgeShapeSources, HandlerResult | None]:
-    sources = _profiled_block_fp8_shapes(state, payload, run, sources)
+    sources = _profiled_block_fp8_shapes(state, run, sources)
     supplied = SuppliedShapes(shapes_json=sources.shapes_json, tunableop_input=sources.tunableop_input)
     block_fp8_capture = _vllm_block_fp8_profile_capture_required(
         framework=run.framework,
         precision=run.precision,
         quant_type=run.quant_type,
         supplied=supplied,
-        dry_run=bool(payload.get("dry_run")),
     )
     # Keyed on the routed framework: a run handed to the AITER tuner family has
     # no use for a TunableOp recording pass, and paying for one costs a full
@@ -297,7 +273,6 @@ async def _captured_forge_shapes(
             framework=run.tuning_framework,
             model_path=run.model_dir,
             supplied=supplied,
-            dry_run=bool(payload.get("dry_run")),
         )
         and not block_fp8_capture
     )
@@ -315,14 +290,11 @@ async def _captured_forge_shapes(
     if lane_after_capture is None:
         return sources, _unfunded_lane_skip(LANE_GEMM)
 
-    capture_payload = dict(payload)
-    if block_fp8_capture:
-        capture_payload["_shape_capture_mode"] = "block_fp8_profile"
     capture = await _capture_vllm_tunableop_shapes(
         state=state,
         session_dir=run.session_dir,
-        payload=capture_payload,
         workspace=run.workspace,
+        capture_mode=BLOCK_FP8_PROFILE_CAPTURE if block_fp8_capture else "",
     )
     if capture.get("status") != "ok":
         return sources, _stamp_forge_gemm_provenance(capture, run)
@@ -340,7 +312,6 @@ async def _captured_forge_shapes(
 
 
 def _forge_gemm_tune_input(
-    payload: dict,
     run: _ForgeGemmRun,
     sources: _ForgeShapeSources,
     timeout: int,
@@ -363,16 +334,12 @@ def _forge_gemm_tune_input(
         "timeout": gemm_per_tuner_timeout_sec(timeout),
         # Bounds the whole session across all tuners.
         "global_timeout": timeout,
-        "skip_gpu_check": True,
         "tokens": sources.tokens,
         "untuned_csv": sources.untuned_csv,
         "moe_untuned_csv": sources.moe_untuned_csv,
         "shapes_json": sources.shapes_json,
-        "shapes_manifest": sources.shapes_manifest,
-        "demand_json": sources.demand_json,
         "tunableop_input": sources.tunableop_input,
         "kernel_signature_log": run.server_log,
-        "tuner": str(payload.get("tuner") or ""),
         # How many routed tuners the lane's share pays for. Omitted when none
         # could be derived, which leaves the producer's own routing intact.
         **({"max_tuners": tuner_ceiling} if tuner_ceiling > 0 else {}),
@@ -487,7 +454,7 @@ async def _run_forge_gemm_tuning(
             "backend": "forge",
         }
 
-    run = _forge_gemm_run(state, payload, session_dir)
+    run = _forge_gemm_run(state, str(payload.get("task_id") or ""), session_dir)
     if not run.model_id:
         return {"status": "failed", "error_class": "model_path_missing", "error": "model_path is required"}
     if not run.model_dir:
@@ -507,16 +474,13 @@ async def _run_forge_gemm_tuning(
     # Off the event loop: this walks runs/ and byte-scans server logs that measure
     # ~17MB apiece on the fleet. Inline, it stalled every other coroutine on this
     # orchestrator -- heartbeats included -- for the duration.
-    server_log = str(payload.get("kernel_signature_log") or "").strip() or await asyncio.to_thread(
-        resolve_forge_server_log, state, session_dir
-    )
+    server_log = await asyncio.to_thread(resolve_forge_server_log, state, session_dir)
     run = run._replace(
         server_log=server_log,
         tuning_framework=_forge_framework_for_vllm(
             framework=run.framework,
             precision=run.precision,
             quant_type=run.quant_type,
-            tunableop_input=str(payload.get("tunableop_input") or "").strip(),
             aiter_routing=_resolve_vllm_aiter_routing(model_path=run.model_dir, server_log=server_log, tp=run.tp),
         ),
     )
@@ -532,8 +496,8 @@ async def _run_forge_gemm_tuning(
         ),
     )
 
-    sources = await _forge_shape_sources(state, payload, run)
-    sources, capture_failure = await _captured_forge_shapes(state, payload, run, sources, priced_gemm_lane)
+    sources = await _forge_shape_sources(state, run)
+    sources, capture_failure = await _captured_forge_shapes(state, run, sources, priced_gemm_lane)
     if capture_failure is not None:
         return capture_failure
 
@@ -541,13 +505,13 @@ async def _run_forge_gemm_tuning(
         evidence=RoutingEvidence(
             kernel_signature_log=run.server_log or None,
             has_untuned_csv=bool(sources.untuned_csv),
-            has_shapes_json=bool(sources.shapes_json or sources.shapes_manifest or sources.demand_json),
+            has_shapes_json=bool(sources.shapes_json),
             has_tunableop_input=bool(sources.tunableop_input),
         )
     )
     if gemm_lane is None:
         return _unfunded_lane_skip(LANE_GEMM)
-    timeout = _gemm_tuning_timeout_sec(payload, lane_budget_sec=gemm_lane.budget_sec)
+    timeout = _gemm_tuning_timeout_sec(lane_budget_sec=gemm_lane.budget_sec)
     shape_alignment: dict[str, Any] | None = None
     if sources.shapes_json:
         aligned_shapes, shape_alignment = _align_forge_shapes_for_aiter(
@@ -559,10 +523,8 @@ async def _run_forge_gemm_tuning(
         )
         sources = sources._replace(shapes_json=aligned_shapes)
 
-    requested_tuners = optional_positive_int(payload.get("max_tuners"), 0)
-    tuner_ceiling = 0 if str(payload.get("tuner") or "").strip() else (requested_tuners or gemm_lane.max_targets)
     result = await _invoke_forge_gemm_tune(
-        _forge_gemm_tune_input(payload, run, sources, timeout, tuner_ceiling), timeout
+        _forge_gemm_tune_input(run, sources, timeout, gemm_lane.max_targets), timeout
     )
     _stamp_forge_gemm_provenance(result, run, tuning_framework=run.tuning_framework)
     _report_forge_shape_provenance(result, sources, shape_alignment)

@@ -46,7 +46,7 @@ _ADMISSION_DROPS: tuple[tuple[str, str], ...] = (
 #: Domains whose focus reads the target's ``config.json`` summary from ``model_info``.
 _MODEL_INFO_DOMAINS: frozenset[str] = frozenset({"static_recon_specialist", "speculative_decoding_specialist"})
 
-#: ``(SharedState field, param key, conversion)`` for the values a specialist is warmed with. The converted value
+#: ``(SharedState attribute, param key, conversion)`` for the values a specialist is warmed with. The converted value
 #: decides: an empty string, an empty container and a zero are not exported, because an absent key is how the
 #: specialist reads "this session has none".
 _STATE_PARAMS: tuple[tuple[str, str, Callable[[Any], Any]], ...] = (
@@ -69,6 +69,7 @@ _STATE_PARAMS: tuple[tuple[str, str, Callable[[Any], Any]], ...] = (
     ("agentx_backend", "agentx_backend", str),
     ("baseline_tput", "baseline_tput", float),
     ("cumulative_gain_validated", "cumulative_gain_validated", float),
+    ("current_best_launch_args", "current_launch_args", lambda launched: launched or ""),
 )
 
 #: Optional round-row fields, taken from the done payload or else the dispatch params; an empty value is not carried.

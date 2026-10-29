@@ -180,7 +180,7 @@ def _settled_patch(decision: str, apply_result: dict, *, caller_owns_durability:
         if decision == "KEEP"
         else _maybe_revert_kernel_patch(apply_result)
     )
-    top_status, patch_cleanup_status, patch_cleanup_action = _cleanup_verdict(
+    top_status, patch_cleanup_action = _cleanup_verdict(
         decision=decision,
         revert_result=revert_result,
         finalize_result=finalize_result,
@@ -189,7 +189,6 @@ def _settled_patch(decision: str, apply_result: dict, *, caller_owns_durability:
     return {
         "status": top_status,
         "decision": decision,
-        "patch_cleanup_status": patch_cleanup_status,
         "patch_cleanup_action": patch_cleanup_action,
         "apply_result": apply_result,
         "revert_result": revert_result,

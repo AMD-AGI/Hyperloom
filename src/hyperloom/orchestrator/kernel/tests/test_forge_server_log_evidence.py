@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
 from hyperloom.orchestrator.kernel import _forge_gemm_tuning as forge_gemm_tuning
-from hyperloom.orchestrator.kernel import _forge_shapes as forge_shapes
 from hyperloom.orchestrator.kernel import serving_log_evidence as serving_log_evidence
+from hyperloom.orchestrator.state.shared_state import SharedState
 
 # A real aiter hit line, copied from a fleet server.log.
 HIT = (
@@ -184,67 +183,15 @@ class TestTokensFromServingLog:
         assert serving_log_evidence._tokens_from_serving_log(tmp_path / "nope.log") == ""
 
     def test_the_result_is_what_forge_accepts(self, tmp_path):
-        # forge parses --tokens as int(t) for t in value.split(","); round-trip through the normaliser must not change
-        # it.
+        # forge parses --tokens as int(t) for t in value.split(",").
         text = "".join(HIT.format(m=m) for m in (7, 4096))
         raw = serving_log_evidence._tokens_from_serving_log(_log(tmp_path / "a.log", text))
-        assert forge_shapes._normalize_tokens(raw) == raw
         assert [int(t) for t in raw.split(",")] == [7, 4096]
 
     def test_m_values_are_read_across_chunk_boundaries(self, tmp_path, monkeypatch):
         monkeypatch.setattr(serving_log_evidence, "_LOG_SCAN_CHUNK", 24)
         text = "".join(HIT.format(m=m) for m in (11, 22, 33))
         assert serving_log_evidence._tokens_from_serving_log(_log(tmp_path / "a.log", text)) == "11,22,33"
-
-
-class TestTheWrapperForwardsTheNewInputs:
-    @pytest.mark.parametrize(
-        "key,flag",
-        [
-            ("shapes_manifest", "--shapes-manifest"),
-            ("demand_json", "--demand"),
-        ],
-    )
-    def test_a_populated_field_reaches_the_forge_cli(self, key, flag):
-        from hyperloom.orchestrator.kernel import forge_gemm_tuning as mod
-
-        base = {
-            "model_path": "/m",
-            "framework": "sglang",
-            "precision": "bf16",
-            "output_dir": "/o",
-        }
-        assert flag not in mod.build_command(base)
-
-        cmd = mod.build_command({**base, key: "/tmp/x.json"})
-        assert cmd[cmd.index(flag) + 1] == "/tmp/x.json"
-
-
-class TestAPayloadShapesManifestReachesForge:
-    @pytest.mark.asyncio
-    async def test_an_existing_payload_manifest_reaches_the_tune_input(self, tmp_path):
-        manifest = _log(tmp_path / "manifest.json", "{}")
-        untuned_csv = _log(tmp_path / "untuned.csv", "")
-        run = SimpleNamespace(
-            workspace=tmp_path,
-            server_log="",
-            framework="sglang",
-            model_dir="/m",
-            tuning_framework="sglang",
-            precision="bf16",
-            quant_type="",
-            gpu_type="gpu_a",
-            tp=1,
-            conc=1,
-            mp=1,
-            thorough=False,
-        )
-        payload = {"shapes_manifest": str(manifest), "untuned_csv": str(untuned_csv)}
-
-        sources = await forge_gemm_tuning._forge_shape_sources(None, payload, run)
-        tune_input = forge_gemm_tuning._forge_gemm_tune_input(payload, run, sources, 600, 0)
-
-        assert tune_input["shapes_manifest"] == str(manifest)
 
 
 class _StopHere(Exception):
@@ -276,49 +223,12 @@ class TestTokensAreDerivedBeforeTheMoeCsvIsBuilt:
         monkeypatch.setattr(forge_gemm_tuning, "_resolve_forge_shapes", lambda *_a, **_k: "")
         monkeypatch.setattr(forge_gemm_tuning, "_resolve_forge_untuned_csv", lambda *_a, **_k: "")
         monkeypatch.setattr(forge_gemm_tuning, "_write_fmoe_untuned_csv_from_log", _writer)
+        monkeypatch.setattr(forge_gemm_tuning, "resolve_forge_server_log", lambda *_a: str(log_path))
+        SharedState(model_path=str(model_dir), framework="sglang").save(tmp_path)
 
-        payload = {
-            "model_path": str(model_dir),
-            "framework": "sglang",
-            "kernel_signature_log": str(log_path),
-        }
         with pytest.raises(_StopHere):
-            await forge_gemm_tuning._run_forge_gemm_tuning(payload, session_dir=tmp_path)
+            await forge_gemm_tuning._run_forge_gemm_tuning({}, session_dir=tmp_path)
 
         assert seen["tokens"] == serving_log_evidence._tokens_from_serving_log(log_path)
         # Not the ``[1]`` fallback, and not a single value of any kind.
         assert len(seen["tokens"].split(",")) > 1
-
-    @pytest.mark.asyncio
-    async def test_an_explicit_payload_tokens_value_still_wins(self, tmp_path, monkeypatch):
-        model_dir = tmp_path / "model"
-        model_dir.mkdir()
-        log_path = _log(tmp_path / "server.log", HIT.format(m=999))
-
-        seen: dict[str, str] = {}
-
-        def _writer(_log_path, tokens, _workspace):
-            seen["tokens"] = tokens
-            raise _StopHere
-
-        from hyperloom.common import model_paths, visible_devices
-
-        monkeypatch.setattr(forge_gemm_tuning, "_forge_gemm_tune_available", lambda: True)
-        monkeypatch.setattr(forge_gemm_tuning, "_resolve_forge_precision_and_quant", lambda *_a, **_k: ("bf16", ""))
-        monkeypatch.setattr(model_paths, "resolve_serving_model_path", lambda p: str(p))
-        monkeypatch.setattr(model_paths, "resolve_local_model_dir", lambda _p: model_dir)
-        monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 8)
-        monkeypatch.setattr(forge_gemm_tuning, "_resolve_forge_shapes", lambda *_a, **_k: "")
-        monkeypatch.setattr(forge_gemm_tuning, "_resolve_forge_untuned_csv", lambda *_a, **_k: "")
-        monkeypatch.setattr(forge_gemm_tuning, "_write_fmoe_untuned_csv_from_log", _writer)
-
-        payload = {
-            "model_path": str(model_dir),
-            "framework": "sglang",
-            "kernel_signature_log": str(log_path),
-            "tokens": "1,2,4",
-        }
-        with pytest.raises(_StopHere):
-            await forge_gemm_tuning._run_forge_gemm_tuning(payload, session_dir=tmp_path)
-
-        assert seen["tokens"] == "1,2,4"

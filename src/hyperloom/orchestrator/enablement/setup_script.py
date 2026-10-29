@@ -297,12 +297,11 @@ def render_setup_script(session_dir: Path, enablement: "EnablementRound") -> str
     return "\n".join(lines) + "\n"
 
 
-def write_setup_script(session_dir: str | Path, enablement: "EnablementRound") -> str:
-    """Write ``enablement_setup.sh`` and its file copies; return its session-relative path."""
+def write_setup_script(session_dir: str | Path, enablement: "EnablementRound") -> None:
+    """Write ``enablement_setup.sh`` and its file copies."""
     root = Path(session_dir)
     out = enablement_dir(root) / SETUP_SCRIPT_NAME
     atomic_write_text(out, render_setup_script(root, enablement), options=WriteOptions(make_parents=True, mode=0o700))
-    return str(out.relative_to(root))
 
 
 def setup_script_record(session_dir: Path, *, sufficient: bool) -> dict[str, Any] | None:

@@ -29,6 +29,9 @@ log = _logging.getLogger(__name__)
 #: stops waiting; discovery then degrades to repos-only.
 ENABLEMENT_PARAMS_BUDGET_SEC: float = 45.0
 
+#: How many ranked bridging candidates a round asks each repo for and keeps.
+_MAX_CANDIDATE_REFS = 5
+
 
 def _enablement_carrier_params(state: Any) -> dict[str, Any]:
     """eval-origin trigger context threaded to specialist/integrate/build tasks.
@@ -103,8 +106,8 @@ def _build_failure_note(enablement: Any) -> str:
         f"PREVIOUS TARGETED-BUILD ATTEMPT: failure_class={fc!r}"
         + (f"; {fs}" if fs else "")
         + "\nIf the build ran out of time (failure_class='timeout' or "
-        "'preflight_budget'), request more build_budget_sec or a smaller "
-        "component scope.  For compile/symbol defects, choose a different "
+        "'preflight_budget'), request a smaller component scope.  For "
+        "compile/symbol defects, choose a different "
         "ref or narrow the build target."
     )
 
@@ -243,7 +246,6 @@ class EnablementParams(CoordinatorCollaborator):
         text = (launch_log or "").strip()
         if not text:
             return None
-        from hyperloom.common.failure_signature import EnablementRequest
         from .mandate import build_search_plan
         from hyperloom.inference_optimizer import framework_registry
 
@@ -266,17 +268,9 @@ class EnablementParams(CoordinatorCollaborator):
                 "ENABLEMENT: routing on a re-derived signature (%s); no boot observation was recorded",
                 loaded.degraded,
             )
-        req = EnablementRequest(
-            framework=framework,
-            model=model or "(target model)",
-            repo_url=repo_url,
-            gpu_type=(getattr(state, "gpu_type", "") or "").strip().lower(),
-        )
         plan = build_search_plan(signature, framework_repo_url=repo_url, model=model)
         candidate_refs = self._discover_enablement_candidate_refs(
-            req,
-            plan,
-            deadline=Deadline.after(ENABLEMENT_PARAMS_BUDGET_SEC),
+            plan, deadline=Deadline.after(ENABLEMENT_PARAMS_BUDGET_SEC)
         )
         # Lead with a different candidate each stalled round (deterministic left-rotation).
         if candidate_refs and attempt:
@@ -292,12 +286,12 @@ class EnablementParams(CoordinatorCollaborator):
         weight_facts = self._derive_checkpoint_weight_facts(text)
         if weight_facts:
             source_context = (weight_facts + "\n\n" + source_context) if source_context else weight_facts
-        # §1b ENABLEMENT PLAYBOOK renders mandate.task_description via _section_enablement_playbook.
+        # §1b ENABLEMENT PLAYBOOK renders the mandate via _section_enablement_playbook.
         # notes carries only per-dispatch dynamic context that §1b cannot provide.
         notes = _mandate_notes(state.enablement, attempt=attempt)
         gap_cid = f"gap.enablement.{signature.kind}"
 
-        params_out: dict[str, Any] = {
+        return {
             "domain": "enablement_specialist",
             "source_phase": "ENABLEMENT",
             "gap_canonical_id": gap_cid,
@@ -306,9 +300,7 @@ class EnablementParams(CoordinatorCollaborator):
             "gap_evidence": {"model": model, "failure_kind": signature.kind},
             "framework": framework,
             "lever_kind": LEVER_ENABLEMENT,
-            "enablement_attempt": attempt,
             "enablement_failure_kind": signature.kind,
-            "enablement_search_repos": list(plan.repos),
             "enablement_candidate_refs": list(candidate_refs),
             # Source lines near the offending site, plus (on a weight-init
             # failure) the checkpoint's per-layer weight inventory. Rendered
@@ -323,10 +315,6 @@ class EnablementParams(CoordinatorCollaborator):
             "notes": notes,
             **_round_carriers(state, signature),
         }
-        last_build_failure = state.enablement.last_build_failure or {}
-        if last_build_failure:
-            params_out["enablement_last_build_failure"] = dict(last_build_failure)
-        return params_out
 
     def _read_enablement_source_context(self, signature: Any, *, window: int = 12) -> str:
         """Best-effort read a small source window near the offending site.
@@ -439,20 +427,14 @@ class EnablementParams(CoordinatorCollaborator):
         )
         return header + "\n" + "\n".join(lines) + "\n" + footer
 
-    def _discover_enablement_candidate_refs(
-        self,
-        req: Any,
-        plan: Any,
-        *,
-        deadline: Deadline | None = None,
-    ) -> tuple[str, ...]:
+    def _discover_enablement_candidate_refs(self, plan: Any, *, deadline: Deadline) -> tuple[str, ...]:
         """Best-effort enumerate + rank bridging PRs for an enablement failure.
 
         Enumerates candidate PRs across every repo in ``plan.repos`` (framework
         + opted-in ROCm/HIP/aiter bridge repos) via the ``sources`` layer, then
         ranks each :class:`hyperloom.agents.framework.models.Candidate` with
         ``score_enablement_title`` (per-Candidate so the ref/html_url is
-        preserved) and returns the top ``req.max_search_candidates`` refs
+        preserved) and returns the top ``_MAX_CANDIDATE_REFS`` refs
         (``html_url`` preferred).
 
         Network + git. Enumeration is guarded per repo, so a repo that fails is
@@ -463,7 +445,6 @@ class EnablementParams(CoordinatorCollaborator):
         between repos and ranks whatever was collected.
 
         Args:
-            req: The :class:`hyperloom.common.failure_signature.EnablementRequest`.
             plan: The :class:`hyperloom.orchestrator.enablement.mandate.EnablementSearchPlan`.
             deadline: When to stop enumerating further repos.
 
@@ -475,7 +456,6 @@ class EnablementParams(CoordinatorCollaborator):
         from hyperloom.agents.framework.sources import enumerate_candidates
         from hyperloom_common.pr_monitor_urls import pr_monitor_base_url
 
-        max_candidates = int(getattr(req, "max_search_candidates", 5) or 5)
         # The PR query service is co-hosted by KB Store.
         plane = self.knowledge_plane
         pr_enabled = bool(plane is not None and getattr(plane, "pr_monitor_enabled", False))
@@ -485,7 +465,7 @@ class EnablementParams(CoordinatorCollaborator):
 
         collected: list[Candidate] = []
         for repo in plan.repos:
-            if deadline is not None and deadline.expired():
+            if deadline.expired():
                 log.info(
                     "enablement: candidate discovery stopped at its deadline with %d collected",
                     len(collected),
@@ -496,7 +476,7 @@ class EnablementParams(CoordinatorCollaborator):
                     repo_url=repo,
                     search_modes=search_modes,
                     keywords=tuple(plan.keywords),
-                    max_search_candidates=max_candidates,
+                    max_search_candidates=_MAX_CANDIDATE_REFS,
                     pr_monitor=pr_monitor,
                 )
                 collected.extend(enumerate_candidates(search))
@@ -522,6 +502,6 @@ class EnablementParams(CoordinatorCollaborator):
             if ref and ref not in seen:
                 seen.add(ref)
                 refs.append(ref)
-            if len(refs) >= max_candidates:
+            if len(refs) >= _MAX_CANDIDATE_REFS:
                 break
         return tuple(refs)

@@ -20,9 +20,8 @@ from hyperloom.inference_optimizer.breakdown.session_package import deliverable
 
 from hyperloom_common.coerce import to_mapping
 
-from .attempts import build_attempt_summary
 from .steps import PATCH_KIND
-from .sufficiency import read_status
+from .sufficiency import not_evaluated
 
 log = logging.getLogger(__name__)
 
@@ -107,11 +106,7 @@ def _recipe_state(state: dict[str, Any]) -> dict[str, Any]:
     return {name: _eg(state, name) for name in _RECIPE_STATE_FIELDS}
 
 
-def _delivered_payloads(
-    out: dict[str, Any],
-    steps: list[dict[str, Any]],
-    session_dir: Path,
-) -> set[tuple[str, str]] | None:
+def _delivered_payloads(out: dict[str, Any], session_dir: Path) -> set[tuple[str, str]] | None:
     """What the session bundle actually hands a consumer of this recipe.
 
     The recipe names the bytes behind its manifests and digests, and the
@@ -121,7 +116,7 @@ def _delivered_payloads(
     """
     from .sufficiency import referenced_payloads
 
-    referenced = referenced_payloads(out, steps)
+    referenced = referenced_payloads(out)
     if not referenced:
         return None
     return deliverable(session_dir, referenced)
@@ -178,11 +173,12 @@ def _collect_recipe(
     unconditionally beside it: its own absence is the one absence that carries
     meaning, and a consumer must read it as insufficient.
     """
-    from . import build_recipe_steps, evaluate_replay_sufficiency
     from .projections import project_launch_evidence
+    from .steps import build_recipe_steps
+    from .sufficiency import evaluate_replay_sufficiency
 
     enablement = _recipe_state(state)
-    steps = build_recipe_steps(enablement, attempt_summary=build_attempt_summary)
+    steps = build_recipe_steps(enablement)
     if steps:
         # Normalized on the way out, never on the way in: ``patch_targets`` and
         # ``patch_roots`` are keyed by the raw path, so rewriting the input makes
@@ -208,7 +204,7 @@ def _collect_recipe(
         enablement,
         steps=steps,
         section=out,
-        delivered_payloads=_delivered_payloads(out, steps, session_dir),
+        delivered_payloads=_delivered_payloads(out, session_dir),
         launch_argv_refused=argv_refused or bool(enablement.get("launch_argv_refused")),
     )
     out["replay_sufficiency"] = decision
@@ -457,7 +453,7 @@ def recipe_for(enablement: Any, *, session_dir: str, mode: str = "") -> dict[str
     except RECORDING_ERRORS as exc:
         note_failure(section="enablement_event", error=exc, detail="enablement event: recipe projection failed")
     if not isinstance(section.get("replay_sufficiency"), Mapping):
-        section["replay_sufficiency"] = read_status({})
+        section["replay_sufficiency"] = not_evaluated()
     try:
         oversize = len(json.dumps(section, default=str).encode("utf-8")) > _MAX_RECIPE_BYTES
     except (TypeError, ValueError):
@@ -468,5 +464,5 @@ def recipe_for(enablement: Any, *, session_dir: str, mode: str = "") -> dict[str
             error=ValueError("recipe exceeds the recorded ceiling"),
             detail="enablement event: recipe too large to record; reporting it as unjudged",
         )
-        return {"replay_sufficiency": read_status({})}
+        return {"replay_sufficiency": not_evaluated()}
     return section

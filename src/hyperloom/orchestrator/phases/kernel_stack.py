@@ -17,8 +17,6 @@ from ..kernel.keep_thresholds import KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT
 from ..kernel.patch_lifecycle import (
     CLEANUP_ACTION_NONE,
     CLEANUP_ACTION_REVERT,
-    CLEANUP_COMPLETE,
-    CLEANUP_RECOVERY_REQUIRED,
     cleanup_verdict,
     lifecycle_complete,
     revert_owed,
@@ -137,7 +135,6 @@ class _StackSettlement(NamedTuple):
     """How a validated stack was left on disk: finalized whole, or reverted whole."""
 
     top_status: str
-    cleanup_status: str
     cleanup_action: str
     revert_result: dict[str, Any]
     finalize_results: list[dict[str, Any]]
@@ -193,29 +190,34 @@ def _settle_kept_stack(apply_results: list[dict[str, Any]]) -> _StackSettlement:
     finalize_results = [_maybe_finalize_kernel_patch(applied) for applied in apply_results]
     all_finalized = all(lifecycle_complete(result) for result in finalize_results)
     revert_result: dict[str, Any] = {"status": "skipped", "reason": "KEEP decision"}
-    top_status, cleanup_status, cleanup_action = cleanup_verdict(
+    top_status, cleanup_action = cleanup_verdict(
         decision="KEEP",
         revert_result=revert_result,
         finalize_result={"status": "ok" if all_finalized else "failed"},
         revert_required=False,
     )
-    return _StackSettlement(top_status, cleanup_status, cleanup_action, revert_result, finalize_results)
+    return _StackSettlement(top_status, cleanup_action, revert_result, finalize_results)
+
+
+def _revert_stack_patches(apply_results: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], bool]:
+    """Revert every applied patch in reverse order; return the results and whether all of them completed."""
+    from ..actions.executors._kernel_agent_tool import _maybe_revert_kernel_patch
+
+    reverts = [_maybe_revert_kernel_patch(applied) for applied in reversed(apply_results)]
+    return reverts, all(lifecycle_complete(result) for result in reverts)
 
 
 def _revert_whole_stack(apply_results: list[dict[str, Any]], decision: str) -> _StackSettlement:
     """Undo every applied patch: a stack cannot be left half-applied."""
-    from ..actions.executors._kernel_agent_tool import _maybe_revert_kernel_patch
-
-    stack_reverts = [_maybe_revert_kernel_patch(applied) for applied in reversed(apply_results)]
-    all_reverted = all(lifecycle_complete(result) for result in stack_reverts)
-    top_status, cleanup_status, cleanup_action = cleanup_verdict(
+    stack_reverts, all_reverted = _revert_stack_patches(apply_results)
+    top_status, cleanup_action = cleanup_verdict(
         decision=decision,
         revert_result={"status": "ok" if all_reverted else "failed"},
         finalize_result={"status": "skipped"},
         revert_required=bool(apply_results),
     )
     revert_result = {"status": "ok" if all_reverted else "failed", "stack_reverts": stack_reverts}
-    return _StackSettlement(top_status, cleanup_status, cleanup_action, revert_result, [])
+    return _StackSettlement(top_status, cleanup_action, revert_result, [])
 
 
 def _stack_validation_record(
@@ -229,7 +231,6 @@ def _stack_validation_record(
     record: dict[str, Any] = {
         "status": settlement.top_status,
         "decision": grade.decision,
-        "patch_cleanup_status": settlement.cleanup_status,
         "patch_cleanup_action": settlement.cleanup_action,
         "kernel_id": stack.stack_id,
         "patch_path": stack.patch_paths,
@@ -268,19 +269,15 @@ def _abandoned_stack_record(
     exc: Exception,
 ) -> dict[str, Any]:
     """The record of a stack whose validation raised: whatever was applied is rolled back."""
-    from ..actions.executors._kernel_agent_tool import _maybe_revert_kernel_patch
-
-    reverts = [_maybe_revert_kernel_patch(applied) for applied in reversed(apply_results)]
-    any_failed = any(str(result.get("status") or "") not in {"ok", "skipped"} for result in reverts)
+    reverts, all_reverted = _revert_stack_patches(apply_results)
     return {
         "status": "failed",
         "decision": "REVERT",
-        "patch_cleanup_status": CLEANUP_RECOVERY_REQUIRED if any_failed else CLEANUP_COMPLETE,
-        "patch_cleanup_action": CLEANUP_ACTION_REVERT if any_failed else CLEANUP_ACTION_NONE,
+        "patch_cleanup_action": CLEANUP_ACTION_NONE if all_reverted else CLEANUP_ACTION_REVERT,
         "kernel_id": stack.stack_id,
         "error": repr(exc),
         "apply_result": {"status": "failed", "stack_apply_results": apply_results},
-        "revert_result": {"status": "failed" if any_failed else "ok", "stack_reverts": reverts},
+        "revert_result": {"status": "ok" if all_reverted else "failed", "stack_reverts": reverts},
         "stack_kernel_ids": stack.kernel_ids,
         "stack_validation": True,
         "stack_member_identities": stack.identities,
@@ -289,10 +286,6 @@ def _abandoned_stack_record(
 
 class KernelStackPhase(CoordinatorCollaborator):
     """KERNEL_STACK phase handler: manages kernel stack revalidation and stack-level decisions."""
-
-    def __init__(self, coordinator) -> None:
-        """Initialise the phase with its own in-flight integrate guard."""
-        super().__init__(coordinator)
 
     def _reject_undispatchable_integrate(self, pending: dict[str, Any]) -> None:
         """Retire a queued integrate whose dispatch raised, so the drain loop cannot deadlock on it."""
@@ -417,13 +410,12 @@ class KernelStackPhase(CoordinatorCollaborator):
         rows = _matching_stack_entries(members, self.shared_state.kernel_integrate_attempts, identities=entries)
         for row in rows:
             row["stack_validation_in_progress"] = True
+        identity = _stack_identity(entries)
         self.shared_state.pending_stack_validation_result = {
             "kernel_id": stack_id,
             "stack_validation": True,
-            "stack_kernel_ids": [entry["kernel_id"] for entry in entries],
-            "stack_member_identities": [
-                {key: entry[key] for key in ("kernel_id", "patch_path", "target_file")} for entry in entries
-            ],
+            "stack_kernel_ids": identity.kernel_ids,
+            "stack_member_identities": identity.identities,
         }
         self.shared_state.pending_stack_validation_apply_results = []
         return rows

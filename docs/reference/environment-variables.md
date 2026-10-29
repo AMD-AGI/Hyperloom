@@ -297,8 +297,8 @@ fusion that already succeeded this session.
 | Variable                       | Default                       | Description                                                                                                                                                                                       |
 |--------------------------------|-------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `HYPERLOOM_SKIP_FUSION`        | Unset (lane enabled)          | Truthy (`1` / `true` / `yes` / `on`) disables the fusion lane outright, before any other gate is evaluated.                                                                                        |
-| `FORGE_FUSION_TIMEOUT`         | `7200` (2h)                   | Wrapper timeout in seconds for one forge-fusion run. A payload `timeout` / `timeout_sec` takes precedence over the env; an unparseable value falls back to the default.                            |
-| `FORGE_FUSION_MAX_TURNS`       | `100`                         | Agent turn cap handed to forge-fusion for one run. A payload `max_turns` takes precedence.                                                                                                         |
+| `FORGE_FUSION_TIMEOUT`         | `7200` (2h)                   | Wrapper timeout in seconds for one forge-fusion run. Unset or unparseable, the fusion lane's share of the KERNEL phase is used, else the default.                                                  |
+| `FORGE_FUSION_MAX_TURNS`       | `100`                         | Agent turn cap handed to forge-fusion for one run.                                                                                                                                                 |
 | `HYPERLOOM_FUSION_KEEP_PCT`    | `1.0`                         | Minimum throughput gain, in percent, that a queued fusion patch must reach to be KEPT when it is integrated. Every nominated patch is queued; the value is recorded on each queued record. A malformed value raises `EnvValueError`. |
 
 ---
@@ -321,8 +321,7 @@ On the `forge` KERNEL path only (`KERNEL_OPT_BACKEND_ORDER=forge`; the default
 `geak` backend hands to SWEEP before reaching any of these):
 
 - **Fusion authors one independent sibling patch per confirmed recipe** rather
-  than a single combined patch. `fuse_all_confirmed` is now the explicit opt-in
-  for the combined shape instead of the default.
+  than a single combined patch.
 - **The fusion lane caps its recipe count** at 3 (`--max-recipes`), funded from
   its share of the phase. A session with no finite remaining time derives no
   share and stays uncapped.

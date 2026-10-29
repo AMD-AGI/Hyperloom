@@ -43,6 +43,7 @@ from hyperloom.plugs import progress as _progress
 from hyperloom_common.jsonio import read_json_strict
 from hyperloom.common.profile_args import sanitize_profile_server_args
 from hyperloom.inference_optimizer.grading import resolved_grading
+from hyperloom.inference_optimizer.grid_server_args import strip_benchmark_harness_flags
 
 from .kernel_decision_settings import _DEFAULT_ATTEMPTS_HISTORY
 from .failure_evidence import tail_excerpt
@@ -1073,6 +1074,18 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
         """Serialize this state to a plain JSON-compatible dict."""
         return asdict(self)
 
+    @property
+    def current_best_launch_args(self) -> str | None:
+        """The complete server args the current best was launched with, as a serving recipe.
+
+        Read from the promoted measurement's launch evidence: what the launch path composed from every layer --
+        reference recipe, operator ``--server-args``, the optimizer's delta -- where ``extra_server_args`` holds the
+        delta alone. ``None`` when that launch was not recorded.
+        """
+        evidence = ((self.current_best or {}).get("measurement") or {}).get("launch_evidence") or {}
+        launched = evidence.get("requested_server_args")
+        return None if launched is None else strip_benchmark_harness_flags(launched)
+
     def save(self, session_dir: Path) -> None:
         """Atomically write ``state.json`` (tmp file + ``os.replace``).
 
@@ -1105,10 +1118,11 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
             if cb:
                 from hyperloom.inference_optimizer import reference_script
 
+                launched = self.current_best_launch_args
                 text = reference_script.render_reference_script(
                     framework=str(self.framework or os.environ.get("FRAMEWORK", "sglang")),
                     launch=reference_script.LaunchSettings(
-                        server_args=str(cb.get("extra_server_args") or ""),
+                        server_args=str(cb.get("extra_server_args") or "") if launched is None else launched,
                         envs=dict(cb.get("extra_envs") or {}),
                         overlay_pythonpath=str(cb.get("final_overlay") or ""),
                         unset_envs=to_str_list(cb.get("unset_envs")),

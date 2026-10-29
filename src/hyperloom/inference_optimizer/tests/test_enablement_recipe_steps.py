@@ -12,14 +12,13 @@ from pathlib import Path
 import pytest
 
 from hyperloom.orchestrator.enablement.recipe.section import collect_enablement
-from hyperloom.orchestrator.enablement.recipe.attempts import build_attempt_summary as _build_attempt_summary
 from hyperloom.orchestrator.enablement.recipe.steps import build_recipe_steps
 
 SPEC_TASK = "spec-final"
 
 
 def _steps(**enablement):
-    return build_recipe_steps(enablement, attempt_summary=_build_attempt_summary)
+    return build_recipe_steps(enablement)
 
 
 def _kinds(steps):
@@ -195,15 +194,11 @@ def test_each_patch_step_names_the_root_it_was_resolved_against():
     assert [s["root_id"] for s in steps] == ["r-vllm", "r-aiter"]
 
 
-def test_recipe_steps_reuses_build_attempt_summary():
-    entry = _attempt(action={"component": "aiter", "max_jobs": 4})
-    steps = _steps(build_manifest=[entry, _sentinel()], last_specialist_task_id=SPEC_TASK)
-    summary = _build_attempt_summary(entry)
-    build = steps[0]
-    assert build["ref"] == summary["ref"]
-    assert build["gpu_arch"] == summary["gpu_arch"]
-    assert build["component"] == summary["component"]
-    assert build["max_jobs"] == summary["max_jobs"]
+@pytest.mark.parametrize("ref_key", ["aiter_ref", "vllm_ref", "sgl_kernel_ref"])
+def test_recipe_steps_build_reads_ref_and_arch_off_the_installed_versions(ref_key):
+    entry = _attempt(installed_versions={ref_key: "v9", "arch": "gfx942"})
+    build = _steps(build_manifest=[entry, _sentinel()], last_specialist_task_id=SPEC_TASK)[0]
+    assert build["ref"] == "v9" and build["gpu_arch"] == "gfx942"
 
 
 def test_recipe_steps_build_nulls_absent_component_and_max_jobs():
@@ -229,14 +224,6 @@ def test_the_build_element_declares_its_contract_keys_and_no_others():
         "build_driver",
         "build_inputs",
     }
-
-
-def test_recipe_steps_build_populates_component_when_present():
-    steps = _steps(
-        build_manifest=[_attempt(action={"component": "vllm", "max_jobs": 12}), _sentinel()],
-        last_specialist_task_id=SPEC_TASK,
-    )
-    assert steps[0]["component"] == "vllm" and steps[0]["max_jobs"] == 12
 
 
 def test_recipe_steps_includes_advanced_round():
@@ -411,7 +398,7 @@ def test_recipe_steps_is_pure_declarative_data():
     steps = _steps(
         setup_commands=["pip install a"],
         kept_patches=["/p/1.patch"],
-        build_manifest=[_attempt(build_inputs={"component": "aiter", "env_keys": ["K"]}), _sentinel()],
+        build_manifest=[_attempt(build_inputs={"component": "aiter", "ambient_keys": ["K"]}), _sentinel()],
         last_specialist_task_id=SPEC_TASK,
         framework_root="/fr",
     )

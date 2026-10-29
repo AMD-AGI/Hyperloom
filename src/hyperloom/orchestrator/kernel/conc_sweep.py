@@ -69,7 +69,6 @@ from ..actions.executors._proposal_identity import controls_of, is_executable, n
 from ._rung_outcomes import (
     _CANCEL_STOP,
     _SWEEP_BUDGET_STOP,
-    _budget_skip_result,
     _deadline_skip_result,
     _raised_result,
 )
@@ -141,10 +140,6 @@ def _workload_ladder(benchmark_mode: Any = "") -> _WorkloadLadder:
 def default_concs_for_mode(benchmark_mode: Any = "") -> list[int]:
     """The ladder a mode sweeps when the operator names none."""
     return list(_workload_ladder(benchmark_mode).default_concs)
-
-
-# Total wall-clock budget (seconds); override via ``--conc-sweep-total-budget-sec``.
-DEFAULT_TOTAL_BUDGET_SEC = 9000
 
 
 @dataclass(frozen=True)
@@ -643,7 +638,7 @@ class _SweepRun:
             reason, remaining_sec = ORCHESTRATOR_CANCELLED_CLASS, 0.0
         elif self.session_closing():
             self.budget.spend_on_session_reserve()
-            skipped = [_budget_skip_result(v) for v in grid]
+            skipped = [_deadline_skip_result(v, _SWEEP_BUDGET_STOP) for v in grid]
             reason, remaining_sec = _SESSION_RESERVE, 0.0
         else:
             return False
@@ -659,7 +654,7 @@ class _SweepRun:
             note = _RungNote(stage=STAGE_BUDGET_SKIP)
         elif self.session_closing():
             self.budget.spend_on_session_reserve()
-            skipped = [_budget_skip_result(v) for v in rest]
+            skipped = [_deadline_skip_result(v, _SWEEP_BUDGET_STOP) for v in rest]
             note = _RungNote(stage=STAGE_BUDGET_SKIP, budget_remaining_sec=0.0)
         else:
             return False
@@ -1126,10 +1121,9 @@ def _decline_before_start(
     if optimized is None:
         return _declined(recorder, "no_optimization_to_compare")
     if optimized.overlay:
-        from hyperloom.common.overlay import is_safe_path_entry
-        from ..kernel.geak_config import geak_overlay_is_loadable
+        from hyperloom.common.overlay import is_safe_path_entry, overlay_is_loadable
 
-        if not is_safe_path_entry(optimized.overlay) or not geak_overlay_is_loadable(optimized.overlay):
+        if not is_safe_path_entry(optimized.overlay) or not overlay_is_loadable(optimized.overlay):
             return _declined(recorder, "optimized_overlay_unavailable", final_overlay=optimized.overlay)
     if not concs:
         return _declined(recorder, "empty_conc_list")
@@ -1219,7 +1213,7 @@ async def run_conc_sweep(
     session_dir: Path,
     *,
     concs: list[int] | None = None,
-    total_budget_sec: int | None = DEFAULT_TOTAL_BUDGET_SEC,
+    total_budget_sec: int | None,
     recorder: Any = None,
 ) -> dict[str, Any]:
     """Run the full conc-sweep SWEEP-phase action end-to-end (always returns a dict; never raises; no files written when skipped).
@@ -1367,7 +1361,6 @@ async def run_conc_sweep(
 __all__ = [
     "AGENTX_DEFAULT_CONCS",
     "DEFAULT_CONCS",
-    "DEFAULT_TOTAL_BUDGET_SEC",
     "SCHEMA_VERSION",
     "_build_arm_grid",
     "_flush_conc_sweep_report",

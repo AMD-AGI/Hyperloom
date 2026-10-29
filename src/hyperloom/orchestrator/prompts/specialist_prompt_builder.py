@@ -473,6 +473,8 @@ def _mandate_run_status(inp: SpecialistPromptInputs) -> list[str]:
         rows.append(f"- baseline: {format_primary_metric(inp.framework, inp.baseline_tput)}")
     if inp.current_tput > 0:
         rows.append(f"- current best: {format_primary_metric(inp.framework, inp.current_tput)}")
+    if inp.current_launch_args:
+        rows.append(f"- current best server args (complete launch, not a delta): {inp.current_launch_args}")
     if inp.cumulative_gain_validated != 0:
         rows.append(f"- validated cumulative gain: {inp.cumulative_gain_validated:+.2f}%")
     if inp.keep_threshold_pct > 0:
@@ -1233,8 +1235,7 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
     if authors_patches:
         patch_fields = [
             "- ``deliverable`` declares what the round produced and is",
-            "  REQUIRED whenever you changed anything: ``{tree_id, targets,",
-            "  patches, artifacts, envs, server_args, setup_commands}``.",
+            "  REQUIRED whenever you changed anything: ``{targets}``.",
             "  ``targets`` lists every file you edited, relative to your",
             "  worktree — the harvest is scoped to it, so a file you changed",
             "  and did not declare is not shipped. Do NOT put hashes in it;",
@@ -1436,24 +1437,19 @@ def _section_enablement_playbook(inp: SpecialistPromptInputs) -> list[str]:
     Returns:
         list[str]: The enablement-playbook section lines.
     """
-    from hyperloom.common.failure_signature import EnablementRequest, FailureSignature
+    from hyperloom.common.failure_signature import FailureSignature
     from hyperloom.orchestrator.enablement.mandate import build_mandate
 
     model = str((inp.gap_evidence or {}).get("model") or "").strip()
-    req = EnablementRequest(
-        framework=(inp.framework or "").strip().lower(),
-        model=model or "(target model)",
-        repo_url="",
-        gpu_type=(inp.gpu_type or "").strip().lower(),
-    )
     mandate = build_mandate(
-        req,
+        (inp.framework or "").strip().lower(),
+        model or "(target model)",
         FailureSignature.from_dict(inp.enablement_failure_signature),
         candidate_refs=inp.enablement_candidate_refs,
         source_context=inp.enablement_source_context,
     )
     rows = ["## 1b. ENABLEMENT PLAYBOOK", ""]
-    rows.extend(mandate.task_description.splitlines())
+    rows.extend(mandate.splitlines())
     acc_cfg = inp.enablement_accepted_config or {}
     acc_envs = {str(k): str(v) for k, v in (acc_cfg.get("extra_envs") or {}).items()}
     acc_args = str(acc_cfg.get("extra_server_args") or "").strip()

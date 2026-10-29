@@ -11,10 +11,10 @@ from types import SimpleNamespace
 from typing import Any
 
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import KernelExit
+from hyperloom.common.overlay import overlay_is_loadable
 from hyperloom.orchestrator.kernel.geak_config import (
     _geak_accepted_kernel_specs,
     _geak_overlay_digest,
-    geak_overlay_is_loadable,
     geak_spec_name,
 )
 from hyperloom.orchestrator.phases.kernel import KernelPhase
@@ -136,7 +136,7 @@ def test_manifest_that_is_not_an_object_is_not_loadable(tmp_path: Path) -> None:
     root.mkdir()
     (root / "sitecustomize.py").write_text("# loads\n")
     (root / "_overlay_manifest.json").write_text(json.dumps(["rebinds"]))
-    assert geak_overlay_is_loadable(str(root)) is False
+    assert overlay_is_loadable(str(root)) is False
 
 
 def test_unparseable_manifest_still_digests_its_bytes(tmp_path: Path) -> None:
