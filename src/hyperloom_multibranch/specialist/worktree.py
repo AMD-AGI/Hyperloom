@@ -291,6 +291,15 @@ class BranchWorktree:
             end = self._tree(commit, (after,), Path(scratch) / "after")
             return _git(self.path, _DIFF, *_PLAIN, start, end, "--", *paths)
 
+    def diff_applied(self, commit: str, patches: Sequence[str], component: str) -> str:
+        """The patch that takes ``component``'s files from ``commit`` to ``commit`` with ``patches`` applied in order,
+        as the patch the toolbox applies; empty when they change nothing. The worktree's files and index are left as
+        they are."""
+        paths = self._paths(component)
+        with tempfile.TemporaryDirectory(prefix="mb-applied-") as scratch:
+            end = self._tree(commit, patches, Path(scratch) / "after")
+            return _git(self.path, _DIFF, *_PLAIN, commit, end, "--", *paths)
+
     def _tree(self, commit: str, patches: Sequence[str], scratch: Path) -> str:
         """The git tree of ``commit`` with ``patches`` applied in order, written through the index under ``scratch``."""
         scratch.mkdir()

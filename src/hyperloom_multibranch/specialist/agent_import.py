@@ -10,11 +10,19 @@ the delta against the branch head, which holds only what MB committed. Its sourc
 head's, the increment from the state the head's imports make to the keep's, so a commit carries only its own change to
 a merge; a keep the gate rejected is not on the head and comes back inside the next increment. A kernel table the agent
 loads from a file of its workspace goes in as a kernel artifact, the text the file held at the keep.
+
+An agent run as a component writes each keep whole instead, as a snapshot directory (:func:`read_snapshot`, the layout
+of Arbor's component mode): ``keep.json`` names the keep before it and the commits it was made on and made, its
+``change.patch`` takes the one to the other, ``config.json`` is its whole launch and ``tables/<VAR>/`` the kernel table
+each variable loads. Its source is the chain of its patches from the root, so a snapshot made on a commit that no
+snapshot of the chain made, or on a root other than the one MB gave, is refused. What the agent's tree links to outside
+itself (``outside.json``) is not read: AITER builds a JIT module it lacks at its first call.
 """
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Mapping
+import json
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -36,6 +44,14 @@ from hyperloom_multibranch.specialist.worktree import Upstream
 PatchStore = Callable[[str, str], Awaitable[PatchRef]]
 #: Keeps the kernel table text a variable loads and returns its artifact.
 TableStore = Callable[[str, str], Awaitable[KernelArtifact]]
+#: The patch the given patches make, applied in order to the root.
+Applied = Callable[[Sequence[str]], str]
+#: The file of a component's outbox naming its newest snapshot, and the files of one snapshot.
+LATEST_FILE = "LATEST"
+KEEP_FILE = "keep.json"
+CHANGE_FILE = "change.patch"
+LAUNCH_FILE = "config.json"
+TABLES_DIR = "tables"
 #: The patch from the state the head's imported patches make, in order, to the state a keep's cumulative patch makes,
 #: both over the root; empty when they are the same.
 SourceIncrement = Callable[[tuple[PatchRef, ...], str], Awaitable[str]]
@@ -80,6 +96,128 @@ def read_kept_change(seq: int, source_patch: str, state: object, source: ConfigS
     if not isinstance(args, str) or not isinstance(envs, Mapping):
         raise KeptChangeError(f"{source.path}: {source.server_args} is not a string or {source.envs} not an object")
     return KeptChange(seq, source_patch, args, {str(name): str(value) for name, value in envs.items()}, summary)
+
+
+def read_json(path: Path) -> object:
+    """The JSON ``path`` holds; raise :class:`KeptChangeError` when it cannot be read."""
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise KeptChangeError(f"{path.name} cannot be read: {error}") from error
+
+
+def latest_snapshot(outbox: Path) -> int | None:
+    """The keep the ``LATEST`` file of ``outbox`` names, ``None`` before the first; raise ``OSError`` when it cannot be
+    read and ``ValueError`` when it names no keep."""
+
+    try:
+        named = (outbox / LATEST_FILE).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    return int(named.strip())
+
+
+@dataclass(frozen=True)
+class _Snapshot:
+    number: int
+    previous: int | None
+    parent: str
+    commit: str
+    summary: str
+
+
+def read_snapshot(outbox: Path, number: int, root: str, applied: Applied) -> KeptChange:
+    """The keep ``number`` of the snapshots in ``outbox``: its source is what the patches of the chain of snapshots it
+    was made on make of ``root`` (``applied``), its launch and kernel tables its own.
+
+    Raises :class:`KeptChangeError` for a snapshot that cannot be read, or whose chain does not reach ``root``.
+    """
+
+    chain = _chain(outbox, number, root)
+    patches = [_patch(outbox / _directory(link.number)) for link in chain]
+    directory = outbox / _directory(number)
+    launch = read_json(directory / LAUNCH_FILE)
+    args = launch.get("server_flags") if isinstance(launch, Mapping) else None
+    envs = launch.get("server_env") if isinstance(launch, Mapping) else None
+    if not isinstance(args, str) or not isinstance(envs, Mapping):
+        raise KeptChangeError(f"{_directory(number)}/{LAUNCH_FILE} holds no server_flags string or server_env object")
+    named = {str(name): str(value) for name, value in envs.items()}
+    kept = KeptChange(number, applied(patches), args, named, chain[-1].summary)
+    return replace(kept, tables=_snapshot_tables(directory / TABLES_DIR, named))
+
+
+def _chain(outbox: Path, number: int, root: str) -> list[_Snapshot]:
+    """The snapshots from the first to ``number``, each made on the commit the one before it made, the first on
+    ``root``."""
+
+    chain = [_snapshot(outbox, number, root)]
+    while (later := chain[-1]).previous is not None:
+        if later.previous >= later.number:
+            raise KeptChangeError(f"{_refused(later)} it names {later.previous} as the keep before it")
+        try:
+            earlier = _snapshot(outbox, later.previous, root)
+        except KeptChangeError as error:
+            raise KeptChangeError(f"{_refused(later)} the snapshot it was made on is unread: {error}") from error
+        if later.parent != earlier.commit:
+            made = f"{_directory(earlier.number)}'s commit {earlier.commit}"
+            raise KeptChangeError(f"{_refused(later)} it was made on {later.parent}, not on {made}")
+        chain.append(earlier)
+    if chain[-1].parent != root:
+        raise KeptChangeError(f"{_refused(chain[-1])} it was made on {chain[-1].parent}, not on the root {root}")
+    return chain[::-1]
+
+
+def _snapshot(outbox: Path, number: int, root: str) -> _Snapshot:
+    keep = read_json(outbox / _directory(number) / KEEP_FILE)
+    if not isinstance(keep, Mapping):
+        raise KeptChangeError(f"{_directory(number)}/{KEEP_FILE} is no object")
+    previous, parent, commit = keep.get("previous"), keep.get("parent"), keep.get("commit")
+    if keep.get("number") != number or not (previous is None or isinstance(previous, int)):
+        raise KeptChangeError(f"{_directory(number)}/{KEEP_FILE} numbers it {keep.get('number')!r}, after {previous!r}")
+    if not isinstance(parent, str) or not isinstance(commit, str):
+        raise KeptChangeError(f"{_directory(number)}/{KEEP_FILE} names no parent and commit")
+    snapshot = _Snapshot(number, previous, parent, commit, _said(keep))
+    if keep.get("root") != root:
+        raise KeptChangeError(f"{_refused(snapshot)} it was made against the root {keep.get('root')}, not {root}")
+    return snapshot
+
+
+def _said(keep: Mapping[str, object]) -> str:
+    """The agent's own words for a keep: its change, else its intent."""
+    return next((said for said in (keep.get("change"), keep.get("intent")) if isinstance(said, str) and said), "")
+
+
+def _patch(directory: Path) -> str:
+    try:
+        return (directory / CHANGE_FILE).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        raise KeptChangeError(f"{directory.name}/{CHANGE_FILE} cannot be read: {error}") from error
+
+
+def _snapshot_tables(tables: Path, envs: Mapping[str, str]) -> dict[str, str]:
+    """The text of the kernel table each variable of ``envs`` that loads one has in ``tables``, by the variable's
+    value."""
+
+    found: dict[str, str] = {}
+    for name, value in envs.items():
+        if not (_loads_table(name) and (tables / name).is_dir()):
+            continue
+        files = sorted((tables / name).iterdir())
+        if len(files) != 1:
+            raise KeptChangeError(f"{TABLES_DIR}/{name} holds {len(files)} files, not the one table {name} loads")
+        try:
+            found[value] = files[0].read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as error:
+            raise KeptChangeError(f"the table {name} loads cannot be read: {error}") from error
+    return found
+
+
+def _directory(number: int) -> str:
+    return f"{number:04d}"
+
+
+def _refused(snapshot: _Snapshot) -> str:
+    return f"snapshot {_directory(snapshot.number)} is refused:"
 
 
 def with_tables(kept: KeptChange, owned: Path) -> KeptChange:
@@ -178,6 +316,12 @@ def _flags(args: str) -> set[str]:
 
 
 __all__ = [
+    "Applied",
+    "CHANGE_FILE",
+    "KEEP_FILE",
+    "LATEST_FILE",
+    "LAUNCH_FILE",
+    "TABLES_DIR",
     "KeepStores",
     "KeptChange",
     "KeptChangeError",
@@ -186,6 +330,9 @@ __all__ = [
     "TableStore",
     "added_at",
     "import_delta",
+    "latest_snapshot",
+    "read_json",
     "read_kept_change",
+    "read_snapshot",
     "with_tables",
 ]

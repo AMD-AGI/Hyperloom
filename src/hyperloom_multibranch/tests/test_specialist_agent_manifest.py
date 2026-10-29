@@ -12,6 +12,7 @@ from hyperloom_multibranch.specialist.agent_manifest import (
     KeepSignal,
     LedgerSource,
     ManifestError,
+    SnapshotSource,
 )
 from hyperloom_multibranch.contracts.blackboard.vocab import LearningKind
 
@@ -97,3 +98,33 @@ def test_a_keep_counter_counts_the_matching_items_of_its_field() -> None:
 
     assert keep.count(state) == 2
     assert KeepSignal("s.json", "keeps").count({"keeps": 5}) == 5
+
+
+SNAPSHOTS = {"outbox": "sessions/b01/keeps", "exit": "sessions/b01/component_exit.json"}
+
+
+def test_an_agent_that_writes_a_snapshot_per_keep_names_where_and_its_exit_file() -> None:
+    manifest = AgentManifest.read(_document(keep=None, config_source=None, snapshots=SNAPSHOTS))
+
+    assert manifest.snapshots == SnapshotSource("sessions/b01/keeps", "sessions/b01/component_exit.json")
+    assert AgentManifest.read(json.loads(json.dumps(manifest.to_document()))) == manifest
+    assert AgentManifest.read(_document()).snapshots is None
+
+
+@pytest.mark.parametrize(
+    ("overrides", "names"),
+    [
+        (
+            {"keep": None, "config_source": None, "snapshots": {**SNAPSHOTS, "outbox": "/runs/keeps"}},
+            "snapshots.outbox",
+        ),
+        ({"config_source": None, "snapshots": SNAPSHOTS}, "keep"),
+        ({"keep": None, "snapshots": SNAPSHOTS}, "config_source"),
+        ({"keep": None, "config_source": None, "snapshots": {"outbox": "keeps", "tables": "t"}}, "tables"),
+    ],
+)
+def test_a_snapshot_source_that_breaks_the_schema_is_refused_naming_the_field(
+    overrides: dict[str, Any], names: str
+) -> None:
+    with pytest.raises(ManifestError, match=names):
+        AgentManifest.read(_document(**overrides))

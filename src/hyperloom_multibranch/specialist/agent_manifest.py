@@ -9,7 +9,8 @@ agent's checkout, and a key the schema does not have is refused, so a misspelt f
 silently meaning nothing. The manifest says how to install and launch the agent, the config it is launched with, how
 a kept change shows (:class:`KeepSignal`), where the agent keeps the server arguments and environment it runs with
 (:class:`ConfigSource`) and what it found (:class:`LedgerSource`); an agent with no keep signal is read once, from its
-workspace.
+workspace. An agent run as a component of its host writes each keep whole, its launch included, as a snapshot
+(:class:`SnapshotSource`), which is then its keep signal and its config source both.
 """
 
 from __future__ import annotations
@@ -186,6 +187,28 @@ class LedgerSource:
         return {"path": self.path, "id": self.id, "kind": self.kind, "text": self.text, "kinds": kinds}
 
 
+@dataclass(frozen=True)
+class SnapshotSource:
+    """Where an agent run as a component writes a snapshot of each keep, as Arbor's component mode does: the directory
+    ``outbox`` of its checkout, holding one directory per keep and ``LATEST``, which names the newest; and ``exit``,
+    the file of its checkout it writes why it ended to, ``""`` when it writes none."""
+
+    outbox: str
+    exit: str = ""
+
+    @classmethod
+    def read(cls, document: object) -> SnapshotSource:
+        fields = _fields(document, "snapshots", {"outbox", "exit"})
+        exit_file = _optional(fields.get("exit"), "snapshots.exit")
+        return cls(
+            _relative(fields.get("outbox"), "snapshots.outbox"),
+            _relative(exit_file, "snapshots.exit") if exit_file else "",
+        )
+
+    def to_document(self) -> dict[str, object]:
+        return {"outbox": self.outbox, "exit": self.exit}
+
+
 _MANIFEST_FIELDS = {
     "source",
     "commit",
@@ -199,6 +222,7 @@ _MANIFEST_FIELDS = {
     "summary_field",
     "needs",
     "ledger",
+    "snapshots",
 }
 
 
@@ -207,7 +231,9 @@ class AgentManifest:
     """How to run one agent: ``install`` once, write ``config`` to ``config_file``, run ``launch`` (``resume`` after a
     crash, ``launch`` again when empty); ``keep`` is ``None`` for an agent collected once, from its workspace;
     ``summary_field`` is where the keep file holds the agent's words for its latest keep; ``needs`` is what
-    the agent requires of its sandbox; ``ledger`` is ``None`` for an agent that writes down no findings."""
+    the agent requires of its sandbox; ``ledger`` is ``None`` for an agent that writes down no findings;
+    ``snapshots`` is ``None`` for an agent that writes no snapshot of its keeps, and replaces ``keep`` and
+    ``config_source`` for one that does."""
 
     source: str
     commit: str
@@ -221,6 +247,12 @@ class AgentManifest:
     summary_field: str = ""
     needs: tuple[str, ...] = ()
     ledger: LedgerSource | None = None
+    snapshots: SnapshotSource | None = None
+
+    @property
+    def signals_keeps(self) -> bool:
+        """Whether the agent says when it keeps a change, rather than having its workspace collected."""
+        return self.keep is not None or self.snapshots is not None
 
     @classmethod
     def read(cls, document: object) -> AgentManifest:
@@ -231,6 +263,11 @@ class AgentManifest:
         if not isinstance(config, Mapping):
             raise ManifestError(f"config must be an object, got {config!r}")
         keep, source, ledger = fields.get("keep"), fields.get("config_source"), fields.get("ledger")
+        snapshots = fields.get("snapshots")
+        if snapshots is not None:
+            given = [name for name, value in (("keep", keep), ("config_source", source)) if value is not None]
+            if given:
+                raise ManifestError(f"{' and '.join(given)} must be null when snapshots carries every keep whole")
         return cls(
             source=_text(fields.get("source"), "source"),
             commit=_text(fields.get("commit"), "commit"),
@@ -244,6 +281,7 @@ class AgentManifest:
             summary_field=_optional(fields.get("summary_field"), "summary_field"),
             needs=_commands(fields.get("needs", []), "needs"),
             ledger=None if ledger is None else LedgerSource.read(ledger),
+            snapshots=None if snapshots is None else SnapshotSource.read(snapshots),
         )
 
     def to_document(self) -> dict[str, object]:
@@ -260,7 +298,16 @@ class AgentManifest:
             "summary_field": self.summary_field,
             "needs": list(self.needs),
             "ledger": None if self.ledger is None else self.ledger.to_document(),
+            "snapshots": None if self.snapshots is None else self.snapshots.to_document(),
         }
 
 
-__all__ = ["AgentManifest", "ConfigSource", "KeepSignal", "LedgerSource", "ManifestError", "read_field"]
+__all__ = [
+    "AgentManifest",
+    "ConfigSource",
+    "KeepSignal",
+    "LedgerSource",
+    "ManifestError",
+    "SnapshotSource",
+    "read_field",
+]

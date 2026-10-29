@@ -11,6 +11,10 @@ instead of repeating it; it starts :data:`RETRY_SECONDS` after the failure, so a
 not take every attempt with it. After :data:`ATTEMPTS` failures the preflight raises
 :class:`~hyperloom_multibranch.specialist.runtime.PreflightFailed` with every line.
 
+An agent that writes a snapshot of each keep runs as a component of MB, in the mode Arbor's README describes: MB sets
+that mode, the absolute deadline and the commit its keeps are read against in its config itself
+(:func:`component_config`), whatever the manifest says of them.
+
 The agent runs commands, not containers: a ``docker`` on its ``PATH`` (:data:`DOCKER_SHIM`) runs ``docker exec`` and
 ``docker cp`` in place, for an agent written to drive a container, and refuses everything else.
 """
@@ -24,7 +28,7 @@ import re
 import shutil
 import time
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
 
@@ -93,7 +97,9 @@ class AgentSpec:
     ``cards``, the GPUs it may use, ``seconds``, how long it may run (0: until MB stops it), ``port``, the first of
     the ports its servers may listen on, ``client``, the command the gate measures a server on ``port`` with (empty when
     the session has none to give), ``baseline``, what the gate measured of the metric on the session's root (``None``
-    before it did), and ``knowledge``, the notes on the integration head the agent reads each iteration."""
+    before it did), ``knowledge``, the notes on the integration head the agent reads each iteration, and, for an agent
+    run as a component, ``deadline``, the clock time it ends by, and ``root``, the commit of ``workspace`` its patches
+    are made against."""
 
     model: str
     framework: str
@@ -111,6 +117,8 @@ class AgentSpec:
     client: str = ""
     baseline: float | None = None
     knowledge: str = ""
+    deadline: float = 0.0
+    root: str = ""
 
     def to_document(self) -> dict[str, object]:
         return {
@@ -130,6 +138,8 @@ class AgentSpec:
             "client": self.client,
             "baseline": self.baseline,
             "knowledge": self.knowledge,
+            "deadline": self.deadline,
+            "root": self.root,
         }
 
 
@@ -217,6 +227,9 @@ async def _attempt(
         manifest = AgentManifest.read(_json_object(answer))
     except (ManifestError, ValueError) as error:
         raise AttemptFailed(f"the manifest: {error}") from error
+    if manifest.snapshots is not None:
+        manifest = replace(manifest, config=component_config(manifest.config, spec))
+        forget_exit(checkout, manifest)
     (checkout / manifest.config_file).parent.mkdir(parents=True, exist_ok=True)
     (checkout / manifest.config_file).write_text(json.dumps(manifest.config, indent=2), encoding=ENCODING)
     env = agent_env(agent_dir)
@@ -233,6 +246,23 @@ async def _attempt(
         if not started:
             await process.kill()
     return ReadyAgent(manifest, checkout, process)
+
+
+def component_config(config: Mapping[str, object], spec: AgentSpec) -> dict[str, object]:
+    """``config`` in Arbor's component mode, ending by ``spec``'s deadline, in whole unix seconds, and making every
+    patch against ``spec``'s root."""
+
+    component = config.get("component")
+    given = dict(component) if isinstance(component, Mapping) else {}
+    return {**config, "mode": "component", "component": {**given, "deadline": int(spec.deadline), "root": spec.root}}
+
+
+def forget_exit(checkout: Path, manifest: AgentManifest) -> None:
+    """Remove the exit file an earlier run of the agent in ``checkout`` left, before it runs again: the file is
+    rewritten at each exit, so one left in place would be read as the next run's."""
+
+    if manifest.snapshots is not None and manifest.snapshots.exit:
+        (checkout / manifest.snapshots.exit).unlink(missing_ok=True)
 
 
 async def _started(process: AgentProcess, manifest: AgentManifest, checkout: Path, setup: OnboardingSetup) -> None:
@@ -350,6 +380,11 @@ The sandbox:
 - the agent edits the framework source in "workspace", in place, and launches its servers from it;
 - "seconds" is how long the agent may run, 0 when MB stops it: then give it a time budget it cannot reach.
 
+If the agent's README describes running it inside a host (Arbor's component mode: an absolute deadline, the commit its
+patches are made against, and a snapshot directory written for each kept change), run it in that mode: MB sets its
+"mode", "component.deadline" ("deadline") and "component.root" ("root") itself; set everything else the README asks of a
+host, give its session a directory in the checkout, and answer "snapshots".
+
 MB judges every change the agent keeps by measuring it with "client", the gate's own benchmark client, against a
 server on "port"; another client sends other prompts and ranks changes otherwise. Unless "client" is empty, make the
 agent measure every A/B, its baseline included, with exactly that command, changing only the port of --base-url to the
@@ -378,7 +413,10 @@ Answer with one JSON object and nothing else, with exactly these fields:
 - "needs": what it requires, from "anthropic", "openai", "network", "docker";
 - "ledger": where the agent writes down what it found, {{"path": JSON-lines file relative to the checkout, "id": the
   field of an entry's id, "kind": the field of its kind, "text": the field of the finding, "kinds": {{each of the
-  agent's kinds that states a measured fact or a dead end: "insight" or "pitfall"}}}}, or null when it writes none.
+  agent's kinds that states a measured fact or a dead end: "insight" or "pitfall"}}}}, or null when it writes none;
+- "snapshots": for an agent run in that mode, {{"outbox": the directory relative to the checkout holding its snapshot
+  directories and LATEST, "exit": the file relative to the checkout it writes why it ended to}}, with "keep" and
+  "config_source" null; null otherwise.
 
 Earlier attempts that failed, to correct rather than repeat:
 {failures}
@@ -400,6 +438,8 @@ __all__ = [
     "OnboardingSetup",
     "ReadyAgent",
     "agent_env",
+    "component_config",
+    "forget_exit",
     "make_ready",
     "onboarding_prompt",
     "split_source",
