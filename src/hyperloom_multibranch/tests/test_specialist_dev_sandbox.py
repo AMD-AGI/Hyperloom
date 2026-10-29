@@ -444,6 +444,49 @@ async def test_reclaim_by_the_runtime_releases_and_is_idempotent(rig):
     assert rig.toolbox.released == ["lease-1"]
 
 
+async def test_a_run_end_keeps_a_long_lease_running_a_process_until_its_own_rules_end_it(rig):
+    built = rig.build()
+    granted = await built.server.call("dev_sandbox_lease", term="long", minutes=6 * 60)
+    await built.server.call("dev_sandbox_start", command="forge-loop")
+    await built.leases.reclaim_unless_busy(B1, "its specialist's run ended")
+    await built.leases.reclaim_unless_busy(B1, "its specialist was stopped")
+    assert rig.toolbox.released == [] and not rig.sandboxes[B1].stopped and built.leases.busy(B1)
+    (kept,) = [entry.content for entry in rig.logs.entries if "kept" in entry.content]
+    assert "its specialist's run ended" in kept and "process 1" in kept and "dev_sandbox_read" in kept
+
+    ledger = Path(granted["root"]) / "loop" / "llm_usage.json"
+    ledger.parent.mkdir()
+    ledger.write_text(json.dumps({"input_tokens": 100, "total_cost_usd": 1.0}))
+    rig.clock.now += LIMITS.spend_s
+    await built.leases.sweep()
+    assert [usage.cost_usd for usage in rig.logs.usage] == [1.0], "the kept lease's Forge spend is still charged"
+
+    rig.sandboxes[B1].processes[0].code = 0
+    assert not built.leases.busy(B1)
+    rig.clock.now += LIMITS.idle_s
+    await built.leases.sweep()
+    assert rig.toolbox.released == ["lease-1"], "once its process ended it sat idle and is taken back"
+
+
+async def test_a_run_end_takes_back_a_short_lease_and_a_long_one_with_nothing_running(rig):
+    built = rig.build(cap=2)
+    await built.server.call("dev_sandbox_lease", branch=B1)
+    await built.server.call("dev_sandbox_start", branch=B1, command="python -m sglang.launch_server")
+    await built.server.call("dev_sandbox_lease", branch=B2, term="long", minutes=60)
+    assert not built.leases.busy(B1) and not built.leases.busy(B2)
+    await built.leases.reclaim_unless_busy(B1, "its specialist's run ended")
+    await built.leases.reclaim_unless_busy(B2, "its specialist's run ended")
+    assert rig.toolbox.released == ["lease-1", "lease-2"] and rig.sandboxes[B1].stopped
+
+
+async def test_a_branch_stop_takes_back_a_long_lease_while_its_process_runs(rig):
+    built = rig.build()
+    await built.server.call("dev_sandbox_lease", term="long", minutes=6 * 60)
+    await built.server.call("dev_sandbox_start", command="forge-loop")
+    await built.leases.reclaim(B1, "its branch stopped")
+    assert rig.toolbox.released == ["lease-1"] and rig.sandboxes[B1].stopped
+
+
 def test_the_role_prompt_is_unchanged_without_dev_leases():
     default = role_prompt(WORKLOAD)
     assert role_prompt(WORKLOAD, dev_leases=0) == default
@@ -519,8 +562,14 @@ class _Held:
     def __init__(self) -> None:
         self.reclaimed: list[tuple[str, str]] = []
 
+    def busy(self, branch: str) -> bool:
+        return False
+
     async def reclaim(self, branch: str, reason: str) -> None:
-        self.reclaimed.append((branch, reason))
+        self.reclaimed.append(("all", branch))
+
+    async def reclaim_unless_busy(self, branch: str, reason: str) -> None:
+        self.reclaimed.append(("unless busy", branch))
 
 
 class _CrashingRunner:
@@ -557,13 +606,13 @@ async def session_rig(tmp_path):
     return SimpleNamespace(session=session, held=held)
 
 
-async def test_a_crashed_session_gives_its_dev_lease_back(session_rig):
+async def test_a_crashed_session_gives_back_its_dev_lease_unless_busy(session_rig):
     with pytest.raises(SessionCrashed):
         await session_rig.session.run()
-    assert [branch for branch, _ in session_rig.held.reclaimed] == [B1]
+    assert session_rig.held.reclaimed == [("unless busy", B1)]
 
 
-async def test_a_stopped_and_a_released_session_give_their_dev_lease_back(session_rig):
+async def test_a_stopped_session_keeps_a_busy_dev_lease_and_a_released_one_gives_back_every_lease(session_rig):
     await session_rig.session.stop()
     await session_rig.session.release()
-    assert [branch for branch, _ in session_rig.held.reclaimed] == [B1, B1]
+    assert session_rig.held.reclaimed == [("unless busy", B1), ("all", B1)]

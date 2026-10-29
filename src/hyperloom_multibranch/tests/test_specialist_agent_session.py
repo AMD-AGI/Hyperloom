@@ -22,7 +22,7 @@ from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.blackboard.records import LlmUsage
 from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH, Conclusion, UsageSource
-from hyperloom_multibranch.contracts.toolbox import SpecialistGrant
+from hyperloom_multibranch.contracts.toolbox import BranchLease, QueueState, SpecialistGrant
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.tests.factories import intent, judgement, request, result
 from hyperloom_multibranch.specialist.agent_session import (
@@ -37,6 +37,7 @@ from hyperloom_multibranch.specialist.agent_session import (
     AgentSetup,
     BranchPlace,
 )
+from hyperloom_multibranch.specialist.dev_sandbox import DevLeases, DevLimits, LeaseTerm
 from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.runtime import SessionCrashed, SessionIdle, SessionStart, restart_notice
 from hyperloom_multibranch.tests.branch_rig import branch_rig
@@ -1260,3 +1261,83 @@ async def test_a_reroot_waits_out_a_judge_notice_that_precedes_its_judgement(rig
     await asyncio.wait_for(running, 1)
 
     assert await rig.repo.head(BRANCH) == branched.onto
+
+
+class _DevToolbox:
+    def __init__(self, root) -> None:
+        self.root, self.released = root, []
+
+    async def queue_state(self) -> QueueState:
+        return QueueState()
+
+    async def lease_branch_sandbox(self, branch_id, cards, *, wait_sec=None, charge=None) -> BranchLease:
+        return BranchLease("lease-1", branch_id, (0,), self.root, {}, 3)
+
+    async def release_branch_sandbox(self, lease_id: str) -> None:
+        self.released.append(lease_id)
+
+
+class _Forge:
+    """A dev sandbox whose one started process runs until the test ends it or the sandbox is stopped."""
+
+    def __init__(self) -> None:
+        self.started, self.returncode = False, None
+
+    async def start(self, command, cwd, env):
+        self.started = True
+        return self
+
+    async def output(self) -> str:
+        return ""
+
+    def alive(self) -> bool:
+        return self.started and self.returncode is None
+
+    async def stop(self) -> None:
+        self.returncode = -15
+
+
+async def _forge_running(rig, tmp_path) -> SimpleNamespace:
+    """The branch's long dev lease, running Forge."""
+    toolbox, forge = _DevToolbox(tmp_path / "lease-1"), _Forge()
+    toolbox.root.mkdir()
+    leases = DevLeases(toolbox, lambda branch, lease: forge, lambda branch: rig.blackboard, limits=DevLimits(cap=1))
+    await leases.lease(BRANCH, 1, 180, LeaseTerm.LONG)
+    await leases.start(BRANCH, "python -m kernelforge.cli forge-loop", None)
+    return SimpleNamespace(leases=leases, toolbox=toolbox, forge=forge)
+
+
+async def test_a_turn_waiting_on_its_long_dev_lease_s_process_is_not_idle_and_its_end_wakes_the_cli(rig, tmp_path):
+    dev = await _forge_running(rig, tmp_path)
+    session = rig.session(nudge_waits_s=NO_WAITS, dev_leases=dev.leases)
+    running = asyncio.create_task(session.run())
+    await _until(lambda: len(rig.runner.specs) == 1, "the launch")
+
+    _end_turn(rig)
+    beats = rig.runner.beats
+    await _until(lambda: rig.runner.sent or rig.runner.beats > beats + 20, "the turn's wait, beating")
+    assert rig.runner.sent == [] and not running.done(), "Forge running in its long lease is the branch's work"
+    dev.forge.returncode = 0
+    await _until(lambda: len(rig.runner.sent) == 1, "a nudge once Forge ended")
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+    assert dev.toolbox.released == ["lease-1"], "with Forge ended, the run's stop gives the lease back"
+
+
+async def test_a_run_that_ends_keeps_a_long_dev_lease_whose_process_runs_and_its_resume_says_so(rig, tmp_path):
+    dev = await _forge_running(rig, tmp_path)
+    first = rig.session(dev_leases=dev.leases)
+    await _crash_after_a_turn(rig, first, 1)
+    await first.stop()
+    assert dev.toolbox.released == [] and dev.forge.alive(), "a run's end is no end of its branch's long lease"
+
+    session, running = await _next_launch(rig, 2, dev_leases=dev.leases)
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+    message = rig.runner.prompts[1]
+    assert "--resume" in rig.runner.specs[1].argv
+    assert "dev sandbox kept" in message and "process 1" in message and "dev_sandbox_read" in message
+    assert message.count("dev sandbox kept") == 1
+
+    await session.release()
+    assert dev.toolbox.released == ["lease-1"] and not dev.forge.alive(), "the branch's stop ends it"

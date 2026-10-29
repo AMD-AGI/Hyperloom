@@ -11,8 +11,9 @@ the model: when it expires, when the branch made no call for :attr:`DevLimits.id
 for a tool that runs for hours (Forge), lasts at most :attr:`DevLimits.long_max_s` and is taken back only when it
 expires, or when nothing it started runs and it sat idle. A branch
 whose lease ended leases again only after :attr:`DevLimits.cooldown_s`. The branch's sessions give its lease back when
-a run ends or is stopped (:class:`~hyperloom_multibranch.specialist.agent_session.DevLeaseHolder`); the toolbox's close
-releases whatever is left.
+a run ends or is stopped, unless it is :meth:`DevLeases.busy` (a long one with a process running, which outlives the
+run), and every lease when the branch stops (:class:`~hyperloom_multibranch.specialist.agent_session.DevLeaseHolder`);
+the toolbox's close releases whatever is left.
 
 Commands run in a :class:`~hyperloom_multibranch.specialist.agent_sandbox.LocalAgentSandbox` on the leased cards,
 importing the branch worktree's source, at a lower CPU priority, with every JIT and kernel cache in the lease's root:
@@ -187,6 +188,12 @@ class _Lease:
     processes: dict[int, AgentProcess] = field(default_factory=dict)
     charged: tuple[float, TokenCounts] = (0.0, TokenCounts())
     charged_at: float = 0.0
+    #: Whether the branch log says the lease outlived a run, since the branch's last call.
+    kept_noted: bool = False
+
+    def busy(self) -> bool:
+        """A long lease with something running: its own rules keep it, its specialist's runs aside."""
+        return self.term is LeaseTerm.LONG and self.sandbox.alive()
 
 
 class DevLeases:
@@ -274,10 +281,32 @@ class DevLeases:
         await self._end(branch, "released by the specialist")
         return Released(self._clock() - held.granted)
 
+    def busy(self, branch: str) -> bool:
+        """Whether ``branch`` holds a long lease with a process running."""
+        held = self._held.get(branch)
+        return held is not None and held.busy()
+
     async def reclaim(self, branch: str, reason: str) -> None:
         """Take back ``branch``'s lease, if it holds one."""
         if branch in self._held:
             await self._end(branch, reason)
+
+    async def reclaim_unless_busy(self, branch: str, reason: str) -> None:
+        """Take back ``branch``'s lease, if it holds one, unless it is :meth:`busy`: that one stays until its own rules
+        end it, and the branch log says so once until the branch calls again, so the next session reads its process."""
+        held = self._held.get(branch)
+        if held is None:
+            return
+        if not held.busy():
+            await self._end(branch, reason)
+        elif not held.kept_noted:
+            held.kept_noted = True
+            running = ", ".join(str(number) for number, process in held.processes.items() if process.returncode is None)
+            what = f"process {running}" if running else "what you started"
+            await self._note(
+                branch,
+                f"dev sandbox kept, though {reason}: its long lease still runs {what}; read it with dev_sandbox_read",
+            )
 
     async def sweep(self) -> None:
         """Take back every lease that expired, sat idle, or kept tests waiting for cards too long."""
@@ -302,8 +331,7 @@ class DevLeases:
         if now >= held.expires:
             return "it expired"
         if held.term is LeaseTerm.LONG:
-            alive = held.sandbox.alive()
-            return "" if alive or quiet < limits.idle_s else f"it sat idle for {quiet / MINUTE:.0f} min"
+            return "" if held.busy() or quiet < limits.idle_s else f"it sat idle for {quiet / MINUTE:.0f} min"
         if held.queued_since is not None and now - held.queued_since >= limits.queued_s:
             return f"tests waited {limits.queued_s / MINUTE:g} min for its cards"
         if quiet >= limits.idle_running_s or quiet >= limits.idle_s and not held.sandbox.alive():
@@ -346,6 +374,7 @@ class DevLeases:
             why = self._reclaimed.pop(branch, "")
             raise DevRefused("no_lease", "you hold no dev sandbox" + (f": it was taken back, {why}" if why else ""))
         held.last_call = self._clock()
+        held.kept_noted = False
         return held
 
     async def _end(self, branch: str, reason: str) -> None:

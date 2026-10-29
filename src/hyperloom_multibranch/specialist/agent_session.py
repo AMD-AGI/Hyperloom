@@ -8,8 +8,8 @@ Every fresh session starts at the branch head, with the worktree synced to it an
 rebuilt at that head when the setup can, and the branch log. A Claude CLI keeps its stdin open and lives across turns:
 when a turn ends, the session waits, keeping its heartbeat, until something arrives for the branch (an inbox item or a
 runtime notice) and sends it to the CLI as the next message, so the model goes on with its whole conversation. A turn
-that ends with no test of the branch in flight (one waiting on its native builds is) waits a patience for something to
-arrive, and is nudged when nothing did;
+that ends with no test of the branch in flight (one waiting on its native builds is) and no process running in its
+long dev lease waits a patience for something to arrive, and is nudged when nothing did;
 ``IDLE_TURNS`` such turns in a row end the session with :class:`SessionIdle`, which is no crash. A turn that called
 tools counts half: a model reading, writing a patch or having a claim refused is working, yet one that never submits
 still ends.
@@ -168,9 +168,13 @@ class Processes(Protocol):
 
 class DevLeaseHolder(Protocol):
     """The session's dev sandboxes (:class:`~hyperloom_multibranch.specialist.dev_sandbox.DevLeases`), as a branch's
-    sessions give back what their branch holds."""
+    sessions give back what their branch holds: a run's end keeps a :meth:`busy` lease, the branch's stop none."""
+
+    def busy(self, branch: str) -> bool: ...
 
     async def reclaim(self, branch: str, reason: str) -> None: ...
+
+    async def reclaim_unless_busy(self, branch: str, reason: str) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -251,7 +255,8 @@ class AgentSetup:
     the brief the branch was started with. ``nudge_waits_s`` are the patiences of idle turns in a row; there are as
     many idle turns as patiences. ``idle_resume_wait_s`` bounds how long the resume of an idle session waits for
     something to arrive. ``dev_leases`` are the session's dev sandboxes, ``None`` when it lends none: a
-    branch's lease is given back when its run ends, however it ended, and when it is stopped.
+    branch's lease is given back when its run ends, however it ended, and when it is stopped, unless it is a long one
+    with a process running, which only the branch's stop gives back.
     """
 
     command: AgentCommand
@@ -304,7 +309,8 @@ class AgentSession:
         """Nothing to prepare: the CLI is the image's and the worktree the session's."""
 
     async def release(self) -> None:
-        await self._give_back_dev_lease("its branch stopped")
+        if self._setup.dev_leases is not None:
+            await self._setup.dev_leases.reclaim(self._start.branch, "its branch stopped")
 
     async def run(self) -> None:
         try:
@@ -330,7 +336,7 @@ class AgentSession:
 
     async def _give_back_dev_lease(self, reason: str) -> None:
         if self._setup.dev_leases is not None:
-            await self._setup.dev_leases.reclaim(self._start.branch, reason)
+            await self._setup.dev_leases.reclaim_unless_busy(self._start.branch, reason)
 
     async def _session(self, grant: SpecialistGrant, last_end: str) -> str:
         """Run one CLI session to its end and say how it ended; raises :class:`SessionCrashed` when it did not work and
@@ -602,7 +608,7 @@ class AgentSession:
                 return wake_message(
                     (*items, *landed), notices, integration=_joined(followed.detail if followed else "", holdings)
                 )
-            if seen.profiles or await self._tests_in_flight():
+            if seen.profiles or await self._tests_in_flight() or self._dev_lease_busy():
                 quiet_since = None
             else:
                 quiet_since = loop.time() if quiet_since is None else quiet_since
@@ -641,6 +647,9 @@ class AgentSession:
             for record in records
             if record.request.branch == branch and record.request.kind is TestKind.TEST
         )
+
+    def _dev_lease_busy(self) -> bool:
+        return self._setup.dev_leases is not None and self._setup.dev_leases.busy(self._start.branch)
 
     async def _tests_in_flight(self) -> bool:
         branch = self._start.branch
