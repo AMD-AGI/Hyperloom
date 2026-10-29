@@ -51,17 +51,13 @@ def _real_action(**kw):
 
 async def _enqueue_and_run(build_coord, executor, *, action, session_dir) -> tuple:
     """Run one build through SubAgentRunner; return (task_row, runner_result)."""
-    from hyperloom.orchestrator.loop.sub_agent_runner import RunnerLinks, SubAgentRunner
+    from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
 
     tid = await build_coord.build_lifecycle.enqueue_targeted_build(action)
     task_obj = await build_coord.tasks.get(tid)
-    runner = SubAgentRunner(
-        locks=build_coord.locks,
-        tasks=build_coord.tasks,
-        executor_registry={"targeted_build": executor},
-        session_dir=Path(session_dir),
-        links=RunnerLinks(shared_state=build_coord.shared_state),
-    )
+    runner = SubAgentRunner(locks=build_coord.locks, tasks=build_coord.tasks, session_dir=Path(session_dir))
+    runner.shared_state = build_coord.shared_state
+    runner.register_executor("targeted_build", executor)
     lease = await build_coord.locks.acquire_many(
         ["build_lane"],
         holder_id=tid,
@@ -512,20 +508,15 @@ def test_targeted_build_params_pass_policy_gate(tmp_path):
 async def test_spawn_failure_marks_row_failed(build_coord, tmp_path, monkeypatch):
     """spawn failure via sub_agent_runner writes failed terminal state and releases lane."""
     from hyperloom.orchestrator.actions.executors.targeted_build_executor import TargetedBuildExecutor
-    from hyperloom.orchestrator.loop.sub_agent_runner import RunnerLinks, SubAgentRunner
+    from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
 
     _drive_with(monkeypatch, ["/nonexistent_compiler_xyz_P1_12"])
     action = _action()
     tid = await build_coord.build_lifecycle.enqueue_targeted_build(action)
     task_obj = await build_coord.tasks.get(tid)
-    executor = TargetedBuildExecutor()
-    runner = SubAgentRunner(
-        locks=build_coord.locks,
-        tasks=build_coord.tasks,
-        executor_registry={"targeted_build": executor},
-        session_dir=tmp_path,
-        links=RunnerLinks(shared_state=build_coord.shared_state),
-    )
+    runner = SubAgentRunner(locks=build_coord.locks, tasks=build_coord.tasks, session_dir=tmp_path)
+    runner.shared_state = build_coord.shared_state
+    runner.register_executor("targeted_build", TargetedBuildExecutor())
     lease = await build_coord.locks.acquire_many(
         ["build_lane"],
         holder_id=tid,
