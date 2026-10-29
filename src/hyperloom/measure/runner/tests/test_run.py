@@ -225,6 +225,24 @@ def test_a_runner_that_failed_for_any_other_os_error_stays_a_runner_error(tmp_pa
     assert _status(tmp_path)["error_class"] == "runner_error"
 
 
+def test_a_runner_error_names_where_it_was_raised(tmp_path, env, monkeypatch):
+    """A recursion names its looping frame: the status message is all the application gets of a runner that failed."""
+
+    def descend(depth):
+        return descend(depth + 1)
+
+    def recursing(call):
+        return descend(0)
+
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", _Backend(recursing))
+
+    assert _go(tmp_path, env, _sheet()) == 1
+    message = _status(tmp_path)["message"]
+    assert message.startswith("RecursionError: maximum recursion depth exceeded")
+    assert "(at test_run.py:" in message and " descend" in message
+    assert message.count(" descend") == 1, "a frame repeated by the recursion is named once"
+
+
 def test_the_cause_the_backend_read_in_the_logs_is_what_the_signed_result_records(tmp_path, env, monkeypatch):
     reason = (
         "serve_flag: launch_server.py: error: ambiguous option: --chunked-prefill could match --chunked-prefill-size"

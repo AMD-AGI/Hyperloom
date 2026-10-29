@@ -11,6 +11,7 @@ import importlib.metadata
 import os
 import subprocess
 import time
+import traceback
 from collections.abc import Mapping, MutableMapping
 from typing import Any
 from dataclasses import dataclass, field
@@ -645,7 +646,25 @@ def run(
             return failure.exit_code
         except Exception as exc:  # noqa: BLE001 - the application reads status.json, not a traceback
             error_class = DISK_FULL if is_disk_full(exc) else "runner_error"
-            write_status(out_dir, state=_FAILED, error_class=error_class, message=f"{type(exc).__name__}: {exc}")
+            message = f"{type(exc).__name__}: {exc} (at {_raised_at(exc)})"
+            write_status(out_dir, state=_FAILED, error_class=error_class, message=message)
             return 1
         write_status(out_dir, state="succeeded", message=join_notes(ctx.notes))
     return 0
+
+
+#: How many of the innermost frames a runner error names: enough to place a crash the result bundle cannot carry,
+#: since a runner that failed writes no bundle and its own log stays in the ended sandbox.
+_RAISED_AT_FRAMES = 4
+
+
+def _raised_at(exc: BaseException) -> str:
+    """Where ``exc`` was raised: its innermost distinct frames, innermost first, as ``file:line function``."""
+    frames: list[str] = []
+    for frame in reversed(traceback.extract_tb(exc.__traceback__)):
+        where = f"{Path(frame.filename).name}:{frame.lineno} {frame.name}"
+        if where not in frames:
+            frames.append(where)
+        if len(frames) == _RAISED_AT_FRAMES:
+            break
+    return " < ".join(frames) or "no frame"
