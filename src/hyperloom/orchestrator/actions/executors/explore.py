@@ -831,11 +831,11 @@ def _sanitized_overrides(params: dict[str, Any]) -> tuple[str | None, str | None
 class _ExploreRound:
     """One explore round: the stack it accumulates, the variants it measures, and the ledgers it writes."""
 
-    def __init__(self, ctx: Any, params: dict[str, Any], output_root: Path) -> None:
+    def __init__(self, ctx: Any, params: dict[str, Any], output_root: Path, session_dir: Path) -> None:
         extra = getattr(ctx, "extra", None) or {}
         self.ctx = ctx
         self.params = params
-        self.output_root = output_root
+        self.output_root, self.session_dir = output_root, session_dir
         self.ss = extra.get("shared_state")
         self.phase_deadline = extra.get("phase_deadline")
         script, self.result_dir = _sanitized_overrides(params)
@@ -1557,8 +1557,10 @@ class _ExploreRound:
     def _record(self, gv: GridVariant, row: dict[str, Any]) -> None:
         self.tested[row["fingerprint"]] = row
         if row["outcome"] != "KEEP":
-            self.rejected.append({**_ledger_view(row, _REJECTED_FIELDS), **_decision_fields(gv)})
+            rejected = {**_ledger_view(row, _REJECTED_FIELDS), **_decision_fields(gv)}
+            self.rejected.append(rejected)
             self.losers.append(_ledger_view(row, _LOSER_FIELDS))
+            self._land_verdict(row, rejected)
             return
         self.winners_history.append(
             {
@@ -1574,6 +1576,18 @@ class _ExploreRound:
                 "ts": row["ts"],
             }
         )
+
+    def _land_verdict(self, row: dict[str, Any], rejected: dict[str, Any]) -> None:
+        """Persist a non-KEEP verdict and its lever attribution before the round ends, which a preemption can prevent.
+
+        A KEEP waits for settlement: on the ledger it reads as measured, so a retry would skip it unadopted."""
+        if self.ss is None:
+            return
+        self.ss.record_explore_verdicts({"tested": {row["fingerprint"]: row}, "rejected": [rejected]})
+        outcome = _outcome_row(row, row["fingerprint"], str(row.get("reason") or ""), str(self.ctx.task.task_id))
+        for lever in _framework_lever_attributions([outcome], self.lever_payload):
+            self.ss.record_framework_lever_attribution(lever["switch"], gain_pct=lever["gain_pct"])
+        self.ss.save(self.session_dir)
 
     def _keep(self, gv: GridVariant, run_gv: GridVariant, r: Any, row: dict[str, Any], meas: dict[str, Any]) -> dict:
         control_fields = controls_of(vars(gv))
@@ -1771,7 +1785,7 @@ class ExploreExecutor:
         if _cycle_bench.CYCLE_ARMS_PARAM in params:
             return await _run_cycle_batch(params, extra.get("shared_state"), output_root)
         try:
-            return await _ExploreRound(ctx, params, output_root).run()
+            return await _ExploreRound(ctx, params, output_root, self.session_dir).run()
         except _RoundRefused as refusal:
             return refusal.result
 

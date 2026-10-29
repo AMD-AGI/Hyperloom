@@ -365,18 +365,10 @@ class _PhaseStateMixin:
         """Merge an ExploreExecutor search update into persistent state; :meth:`record_explore_accepted` is the single writer for the ``accepted`` bucket."""
         if not isinstance(update, dict):
             return
-        prior = self.explore_search if isinstance(self.explore_search, dict) else {}
+        self.record_explore_verdicts(update)
+        prior = self.explore_search
         merged = dict(prior)
         cur_cycle = int(getattr(self, "macro_cycle", 0) or 0)
-        # The executor reports the round it just benched; accumulating it over the
-        # durable ledger is this layer's job, and a re-measured fingerprint replaces
-        # its earlier row because that is what a fresh measurement means.
-        tested = {**(prior.get("tested") or {}), **(update.get("tested") or {})}
-        _stamp_cycle(tested.values(), cur_cycle)
-        merged["tested"] = _cap_tested_ledger(tested)
-        rejected = _merge_rejected(prior.get("rejected"), update.get("rejected"))
-        _stamp_cycle(rejected, cur_cycle)
-        merged["rejected"] = rejected
         # The round ordinal, not the ledger's size: consumers key idempotency and
         # round ids on it, so it has to advance once per benched round.
         merged["cursor"] = int(prior.get("cursor") or 0) + 1
@@ -389,6 +381,22 @@ class _PhaseStateMixin:
         )
         # Preserve accepted bucket from prior runs (record_explore_accepted is its writer).
         merged["accepted"] = list(prior.get("accepted") or [])
+        self.explore_search = merged
+
+    def record_explore_verdicts(self, update: dict[str, Any]) -> None:
+        """Merge an update's ``tested`` and ``rejected`` rows by fingerprint, without closing a round."""
+        prior = self.explore_search if isinstance(self.explore_search, dict) else {}
+        merged = dict(prior)
+        cur_cycle = int(getattr(self, "macro_cycle", 0) or 0)
+        # A re-measured fingerprint replaces its earlier row because that is what a fresh measurement means.
+        tested = {**(prior.get("tested") or {}), **(update.get("tested") or {})}
+        _stamp_cycle(tested.values(), cur_cycle)
+        merged["tested"] = _cap_tested_ledger(tested)
+        rejected = _merge_rejected(prior.get("rejected"), update.get("rejected"))
+        _stamp_cycle(rejected, cur_cycle)
+        merged["rejected"] = rejected
+        # Loading derives a missing cursor from the ledger's size, which a row landed mid-round would inflate.
+        merged.setdefault("cursor", 0)
         self.explore_search = merged
 
     def record_explore_accepted(self, variant: dict[str, Any]) -> None:

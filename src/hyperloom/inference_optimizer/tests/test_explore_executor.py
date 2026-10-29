@@ -4249,6 +4249,101 @@ async def test_a_variant_measured_on_the_same_stack_is_not_measured_again(sub_ag
     assert out["status"] == "failed"
 
 
+class _PodPreempted(BaseException):
+    """The pod dies mid-variant: the task neither returns a result nor settles."""
+
+
+async def _round_preempted_on(sub, tr, tmp_path, *, key: str, params: dict, preempted: str, tput: float) -> None:
+    """Run an explore round whose pod dies while ``preempted`` measures; every variant before it reads ``tput``."""
+
+    def _fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        if slot.name.endswith(f"_{preempted}"):
+            raise _PodPreempted
+        _fake_workspace(slot, tput=tput)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={"config_path": str(base), "output_dir": str(tmp_path / key), **params},
+            idempotency_key=key,
+        ),
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch("hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill", side_effect=_fake_run):
+        await sub.run_task(task)
+
+
+@pytest.mark.asyncio
+async def test_a_verdict_reached_before_the_round_died_is_not_measured_again(sub_agent_runner, tmp_path, monkeypatch):
+    """GLM-5.3: preemption killed a round 18 minutes into v01, and its retry measured v00's 90 minutes again."""
+    _force_cold_decision(monkeypatch)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    sub.shared_state = state
+    grid = [
+        {"name": "v_a", "extra_args": "--max-running-requests 48"},
+        {"name": "v_b", "extra_args": "--max-running-requests 64"},
+    ]
+    with pytest.raises(_PodPreempted):
+        await _round_preempted_on(
+            sub, tr, tmp_path, key="round-1", params={"base_tput": 800.0, "grid": grid}, preempted="v_b", tput=801.0
+        )
+
+    resumed = SharedState.load_or_init(tmp_path)
+    sub.shared_state = resumed
+    retried: list[str] = []
+    out = await _run_explore_round(
+        sub, tr, tmp_path, resumed, key="round-1-retry1", grid=grid, base_args="", bench_calls=retried
+    )
+
+    assert retried == ["variant_00_v_b"]
+    assert [(sd["name"], sd["reason"]) for sd in out["skipped_dup"]] == [("v_a", "already_measured")]
+    ledger = resumed.explore_search
+    assert [(row["name"], row["outcome"]) for row in ledger["tested"].values()] == [
+        ("v_a", "REVERT"),
+        ("v_b", "REVERT"),
+    ]
+    assert [row["name"] for row in ledger["rejected"]] == ["v_a", "v_b"]
+    assert ledger["cursor"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_lever_arm_judged_before_the_round_died_keeps_its_attribution(sub_agent_runner, tmp_path, monkeypatch):
+    """The retry skips the measured arm, so its lever's attribution has to outlive the round as its verdict does."""
+    _force_cold_decision(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
+    sub, tr, _ = sub_agent_runner
+    state = _lever_state()
+    state.baseline_tput = 800.0
+    # No eval result lands in the fake workspace, so the accuracy gate REVERTs the +12.5% arm.
+    state.baseline_accuracy = 0.9
+    sub.shared_state = state
+    with pytest.raises(_PodPreempted):
+        await _round_preempted_on(
+            sub,
+            tr,
+            tmp_path,
+            key="levers",
+            params={"base_tput": 800.0, "grid": []},
+            preempted="fwlever_hl_cache",
+            tput=900.0,
+        )
+
+    resumed = SharedState.load_or_init(tmp_path)
+    assert [(row["name"], row["outcome"], row["reason"]) for row in resumed.explore_search["tested"].values()] == [
+        ("fwlever_hl_hoist", "REVERT", "accuracy_unavailable")
+    ]
+    assert [(row["switch"], row["attributed_gain_pct"]) for row in resumed.authored_framework_levers] == [
+        ("HL_HOIST", 12.5),
+        ("HL_CACHE", None),
+    ]
+
+
 @pytest.mark.asyncio
 async def test_a_budget_stop_after_a_skipped_variant_is_still_reported(sub_agent_runner, tmp_path, monkeypatch):
     """Skipping a measured variant does not hide that the budget stopped the new one before it ran."""
