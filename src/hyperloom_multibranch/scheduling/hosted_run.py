@@ -10,6 +10,8 @@ the legacy entry validated, a multi-branch session needs ``multibranch.workload`
 ``placement.max_parallel_tests`` is ``--max-parallel-tests``, at most what the grant runs at once. The fields ``run``
 has no option for -- ``objective``, ``launch``, ``options``, ``placement.profile`` and
 ``placement.specialist_capacity`` -- are not read, and neither dev sandbox leases nor autonomous agents are given.
+Every test, PRELUDE's included, runs in a measurement sandbox, as PRELUDE starts no child on a hosted session, so the
+application's container needs no card: ``hosted-cpu`` serves as ``hosted-gpu`` does.
 
 The grant bounds the session in time (:func:`grant_deadline`): its budget ends one CLOSE grace and a margin before the
 grant does, and the process is sent SIGTERM one CLOSE grace before the grant ends, which ends FINAL and leaves CLOSE

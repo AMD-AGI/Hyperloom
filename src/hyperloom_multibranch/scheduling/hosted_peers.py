@@ -15,7 +15,8 @@ to that entry's manifest through the toolbox's inputs.
 
 A hosted session lends its specialists no dev sandbox: a dev lease's commands run in a sandbox on this machine's cards
 (:func:`~hyperloom_multibranch.specialist.dev_sandbox.local_dev_sandboxes`), and a hosted lease's cards are in another
-machine.
+machine. Nor does PRELUDE start a child on this machine's cards: it roots the session on root tests and a profile of the
+root in runner sandboxes (:mod:`~hyperloom_multibranch.scheduling.prelude`).
 """
 
 from __future__ import annotations
