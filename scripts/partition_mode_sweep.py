@@ -1056,7 +1056,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (SweepError, PartitionError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
-    except Exception:  # noqa: BLE001 - outermost CLI main: card inspection before any change
+    except (OSError, ValueError):
         # Nothing has been set at this point, so there is no card to restore -- but the exit code still has to mean
         # something. 2 is for a refusal this script decided on, so an unmodelled failure gets its own code rather than
         # borrowing that one.

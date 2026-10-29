@@ -206,7 +206,7 @@ class _ReplyNotes:
             note = self._annotator(call, self._now)
             if inspect.isawaitable(note):
                 note = await note
-        except Exception as exc:  # noqa: BLE001 - isolation boundary: one reply annotation; the cursor stays put
+        except (OSError, ValueError) as exc:  # the annotator's feed is unreadable; the cursor stays put
             # The stack only: the message may carry a token.
             logger.warning(
                 "reply annotator failed: %s\n%s", type(exc).__name__, "".join(traceback.format_tb(exc.__traceback__))
@@ -222,7 +222,7 @@ class _ReplyNotes:
             await self._ask(call)
 
     async def annotate(self, call: ReplyCall, result: dict[str, Any]) -> dict[str, Any]:
-        """``result`` with the annotator's block after its own content; unchanged when the annotator fails."""
+        """``result`` with the annotator's block after its own content; unchanged when its feed is unreadable."""
         note = await self._ask(call)
         if note is None or not note.text:
             return result
@@ -465,7 +465,7 @@ class McpServer:
             while not done.wait(self._heartbeat_seconds):
                 try:
                     hook()
-                except Exception as exc:  # noqa: BLE001 - outermost heartbeat thread: a failing beat must not break the call
+                except OSError as exc:  # a failing beat must not break the call
                     logger.warning(
                         "heartbeat beat failed: %s\n%s",
                         type(exc).__name__,

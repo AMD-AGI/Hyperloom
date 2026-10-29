@@ -112,10 +112,16 @@ def test_the_plug_host_lock_mismatch_event_matches_the_schema():
     _valid(*spy.events[0])
 
 
-def test_an_emit_that_fails_never_reaches_the_caller():
-    with activated(_host(_Raising())):
+def test_a_host_without_an_events_socket_drops_the_event():
+    host = PlugHost(ResolvedManifest("p", {}, ()), builtin_registry(), session_dir=None)
+    host.start()
+    with activated(host):
         progress.warn("c", "m")
-        progress.phase_changed("A", "B", 1)
+
+
+def test_a_failing_events_implementation_reaches_the_caller():
+    with activated(_host(_Raising())), pytest.raises(RuntimeError, match="^sink is broken$"):
+        progress.warn("c", "m")
 
 
 def test_budget_goes_out_at_most_every_five_minutes(monkeypatch):

@@ -839,6 +839,6 @@ class TestExitCodeContract:
 
     def test_an_unexpected_error_before_anything_is_set_does_not_report_a_refusal(self, node, monkeypatch):
         """Exit 2 means this script decided to refuse; a bug is not a decision."""
-        monkeypatch.setattr(pms, "read_device_gib", lambda gpu_id: (_ for _ in ()).throw(KeyError("vram")))
+        monkeypatch.setattr(pms, "read_device_gib", lambda gpu_id: (_ for _ in ()).throw(PermissionError("amd-smi")))
         assert _sweep(node) == 4
         assert node.sets == []
