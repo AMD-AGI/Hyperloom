@@ -55,6 +55,14 @@ it.
   the CLI working no longer triggers a reinstall or a downgrade.
   `RAY_CLI_CLICK_MAX_VERSION` is removed, superseding the 1.1.4 entry that
   introduced it; `RAY_VERSION` is still honoured verbatim.
+- **Ray 2.44.1 installs on images whose `click` is 8.3 or newer.** A fresh
+  `pip install ray[default]==2.44.1` on Python 3.10 resolves `click` 8.5, and Ray's
+  CLI then fails to import (`ValueError: ... is not a valid Sentinel`), which
+  ended the install. Preflight and the kernel-tools installer now hold
+  `click<8.3` once, for that failure on the default 2.44.1 pin only, and certify
+  the CLI again. Every other failure, and any Ray set through `RAY_VERSION`,
+  leaves `click` untouched; this narrows the no-downgrade rule of the entry above
+  and has no setting.
 
 ## Hyperloom 1.1.5 release
 
