@@ -8,7 +8,12 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from hyperloom.inference_optimizer.recipe_snapshot_constants import RecipeIdentity, recipe_canonical_id
+from hyperloom.inference_optimizer.recipe_snapshot_constants import (
+    DEFAULT_FRAMEWORK_VERSION_SLUG,
+    RecipeIdentity,
+    detect_framework_version,
+    recipe_canonical_id,
+)
 
 # One canonical-id segment: a path component safe to join onto a store root.
 SLUG_PART_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
@@ -32,6 +37,24 @@ class InvalidCanonicalIdError(ValueError):
         super().__init__(f"invalid canonical_id {raw!r}: {reason}")
         self.raw = raw
         self.reason = reason
+
+
+def recipe_framework_version(version: str, framework: str = "") -> str:
+    """The framework release a recipe identity is keyed by.
+
+    A blank ``version`` is probed from the installed ``framework`` when one is named, so a recipe is never filed under
+    a blank version. ``0.30.0+rocm723`` and ``v0.30.0`` both name release ``0.30.0``: the build suffix names the image
+    the release was compiled into, which ``framework_version`` in the session state keeps. An unknown version is
+    returned unchanged.
+    """
+    text = str(version or "").strip()
+    if not text and framework:
+        text = detect_framework_version(framework)
+    if not text or text == DEFAULT_FRAMEWORK_VERSION_SLUG:
+        return text
+    from kernelforge.knowledge import canonical_framework_version
+
+    return canonical_framework_version(text)
 
 
 def cid_to_path_components(
@@ -105,4 +128,5 @@ __all__ = [
     "canonical_id_for_path",
     "cid_to_path_components",
     "recipe_canonical_id",
+    "recipe_framework_version",
 ]

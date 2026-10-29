@@ -25,12 +25,12 @@ from hyperloom.orchestrator.knowledge.recipe_kb import (
     RecipeUpsert,
     cid_to_path_components,
     recipe_canonical_id,
+    recipe_framework_version,
 )
 from hyperloom.orchestrator.knowledge.workload_tags import workload_shape_tags
 from hyperloom.inference_optimizer.breakdown.recorder import warm_start_event as _warm_start_event
 from hyperloom.inference_optimizer.recipe_snapshot_constants import (
     RecipeIdentity,
-    detect_framework_version,
     kb_hardware_slug,
 )
 from hyperloom.inference_optimizer.session.session_paths import (
@@ -498,9 +498,9 @@ def _framework_semver(version: str) -> Version | None:
 
 
 def _framework_version_is_compatible(target: str, candidate: str) -> bool:
-    """Accept exact or nearest non-newer PEP 440 version in one release line."""
-    target_value = str(target or "").strip().lower()
-    candidate_value = str(candidate or "").strip().lower()
+    """Accept the same release, or the nearest non-newer PEP 440 release in its line, whichever build each names."""
+    target_value = recipe_framework_version(target)
+    candidate_value = recipe_framework_version(candidate)
     if candidate_value == target_value:
         return bool(target_value)
     target_key = _framework_semver(target_value)
@@ -747,8 +747,7 @@ def _resolve_t0_identity(
         version = _text(fingerprint.get(framework))
         if version == "unknown":
             version = ""
-    if not version and framework:
-        version = detect_framework_version(framework)
+    version = recipe_framework_version(version, framework)
     architectures = getattr(shared_state, "model_architectures", None) or []
     identity: dict[str, Any] = {
         "model": model,
@@ -946,9 +945,9 @@ def run_t0_anchor(
         shared_state, workload=request.workload, hw=request.hw, extra=extra, fingerprint=fingerprint
     )
     cid = str(identity["canonical_id"])
-    # Each is empty only where SharedState already held nothing, and CLOSE/KEEP derives the same cid from them.
+    # CLOSE/KEEP derives the same cid from these. A recorded version is kept with the build suffix the cid drops.
     shared_state.framework = identity["framework_name"]
-    shared_state.framework_version = identity["framework_version"]
+    shared_state.framework_version = shared_state.framework_version or identity["framework_version"]
 
     # Opened before the KB is consulted: the event's open interval is what tells the audit hook which reads were
     # T0's. Only on the anchoring pass -- a resume that re-runs T0 must not reopen a settled event.
