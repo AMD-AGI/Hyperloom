@@ -196,7 +196,8 @@ def _tracelens_knows_arch(arch_json: Path | None, platform: str, out_dir: Path) 
     ``TL_EXTENSION`` packages, so an arch JSON resolved anywhere else (Hyperloom's spec from
     :data:`hyperloom.common.gpu_identity.AMD_GPU_BOARDS`, a microbenchmark) is otherwise never read and a platform
     TraceLens does not bundle fails the run config's check (both routes) and the report. The JSON is served as a ``TL_EXTENSION`` package under ``out_dir``;
-    ``sys.path`` and ``TL_EXTENSION`` are restored on exit.
+    the package root is put on ``sys.path`` and ``PYTHONPATH`` (for child processes); ``sys.path``, ``PYTHONPATH`` and
+    ``TL_EXTENSION`` are restored on exit.
     """
     from TraceLens.Agent.Analysis.utils.arch_utils import list_platforms
 
@@ -209,19 +210,21 @@ def _tracelens_knows_arch(arch_json: Path | None, platform: str, out_dir: Path) 
     arch_dir.mkdir(parents=True, exist_ok=True)
     (root / _ARCH_EXTENSION_PACKAGE / "__init__.py").touch(mode=0o644)
     shutil.copyfile(arch_json, arch_dir / f"{name}.json")
-    saved_path, saved_extension = list(sys.path), os.environ.get("TL_EXTENSION")
+    saved_path = list(sys.path)
+    saved_env = {key: os.environ.get(key) for key in ("TL_EXTENSION", "PYTHONPATH")}
     sys.path.insert(0, str(root))
-    extensions = [e for e in (saved_extension or "").split(":") if e.strip()]
+    # A child process (the agent route) imports the package by name, so it needs the root on PYTHONPATH too.
+    os.environ["PYTHONPATH"] = os.pathsep.join(p for p in (str(root), saved_env["PYTHONPATH"]) if p)
+    extensions = [e for e in (saved_env["TL_EXTENSION"] or "").split(":") if e.strip()]
     os.environ["TL_EXTENSION"] = ":".join([*extensions, _ARCH_EXTENSION_PACKAGE])
     try:
         yield
     finally:
         sys.path[:] = saved_path
         sys.modules.pop(_ARCH_EXTENSION_PACKAGE, None)
-        if saved_extension is None:
-            os.environ.pop("TL_EXTENSION", None)
-        else:
-            os.environ["TL_EXTENSION"] = saved_extension
+        os.environ.update({key: value for key, value in saved_env.items() if value is not None})
+        for key in (key for key, value in saved_env.items() if value is None):
+            os.environ.pop(key, None)
 
 
 def _check_tracelens_checkout(args: argparse.Namespace, log_path: Path) -> _TraceLensCheckout:
