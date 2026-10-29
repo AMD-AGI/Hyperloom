@@ -202,6 +202,42 @@ async def test_stop_signals_follow_the_normal_terminal_path(session_dir, stop_si
         await c.stop()
 
 
+@pytest.mark.asyncio
+async def test_sigterm_stays_captured_until_the_inflight_round_is_cancelled(session_dir, monkeypatch):
+    """A second SIGTERM while the stop tears the round's server down must not kill the process outright."""
+    from hyperloom.orchestrator.loop.signals import SignalDrain
+
+    def _launch_disposition(_signum, _frame):
+        pass
+
+    c = Coordinator(session_dir, backends=_build_backends({}))
+    c._stop.set()
+    seen: list[tuple[str, Any]] = []
+
+    async def _close(*, reason):
+        seen.append(("close_sequence", signal.getsignal(signal.SIGTERM)))
+
+    async def _cancel(*, reason, exempt=frozenset()):
+        seen.append(("cancel_inflight", signal.getsignal(signal.SIGTERM)))
+        return []
+
+    c.phase_close.ensure_close_sequence = _close
+    c._recipe_kb_t4_hook = _noop_finalize
+    monkeypatch.setattr(c.dispatcher, "cancel_inflight_actions", _cancel)
+    previous = signal.signal(signal.SIGTERM, _launch_disposition)
+    try:
+        await c.run(options=RunOptions(tick_interval_sec=0.0, max_ticks=1, install_signal_handlers=True))
+        await c.stop()
+        seen.append(("stopped", signal.getsignal(signal.SIGTERM)))
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+    assert seen == [
+        ("close_sequence", SignalDrain._noop_handler),
+        ("cancel_inflight", SignalDrain._noop_handler),
+        ("stopped", _launch_disposition),
+    ]
+
+
 # MockBackend
 @pytest.mark.asyncio
 async def test_mock_backend_plays_scripted_turns():

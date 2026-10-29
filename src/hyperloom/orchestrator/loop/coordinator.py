@@ -600,6 +600,9 @@ class Coordinator:
             except Exception:
                 log.exception("reactor task raised on shutdown")
         await self.dispatcher.close_db_after_executions()
+        # Held until the round's servers are torn down: a SIGTERM before that must not kill the process outright.
+        if self._signals is not None:
+            self._signals.close()
 
     def _bind_session_deadline(
         self,
@@ -951,10 +954,7 @@ class Coordinator:
 
     async def _close_run(self, stop_reason: str, *, ticks: int, tick_failed: bool, max_minutes: float) -> str:
         """Classify the stop, persist it, and release everything the run still holds."""
-        final_signals: AbstractSet[int] = frozenset()
-        if self._signals is not None:
-            final_signals = self._signals.close()
-            self._signals = None
+        final_signals = frozenset() if self._signals is None else frozenset(self._signals.received)
         stop_reason = self._classify_stop(final_signals, pending=stop_reason)
         self._stop_classification = stop_reason
         self.shared_state.closing_phase = False
