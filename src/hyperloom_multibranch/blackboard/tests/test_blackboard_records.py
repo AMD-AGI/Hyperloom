@@ -777,6 +777,12 @@ async def test_the_latest_baseline_is_in_force(open_as: Open) -> None:
         await open_as(Role.SCHEDULER).write_baseline(updated)
 
 
+def test_a_baselines_bar_is_its_smallest_threshold_and_none_without_one() -> None:
+    two = BaselineRecord("c0", {}, {}, {"output_tps": 1.8, "intvty_p50": 0.9}, ())
+
+    assert two.bar_pct == 0.9 and replace(two, threshold_pct={}).bar_pct is None
+
+
 async def test_merges_that_did_not_land_say_why_in_the_commit_query(open_as: Open, clock: FakeClock) -> None:
     scheduler, gate, integrator = open_as(Role.SCHEDULER), open_as(Role.GATE), open_as(Role.INTEGRATOR)
     await scheduler.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0"))

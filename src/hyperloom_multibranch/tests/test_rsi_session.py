@@ -59,7 +59,7 @@ from hyperloom_multibranch.blackboard.rsi.playbook import (
     replaced,
 )
 from hyperloom_multibranch.blackboard.rsi.session import NO_PLAYBOOK_PLAYED, STOP_AUDIT_REPORT, WRITTEN
-from hyperloom_multibranch.blackboard.tools import MENU_TITLE
+from hyperloom_multibranch.blackboard.tools import CODE_TITLE, SETTINGS_TITLE
 from hyperloom_multibranch.scheduling.explore import PLAYBOOK_FALLBACK_REASON, PLAYBOOK_OPEN_CUT_REASON
 from hyperloom_multibranch.scheduling.judge import GRACE_KEY, HoldReason
 from hyperloom_multibranch.scheduling.judge_prompt import (
@@ -352,7 +352,8 @@ async def test_a_session_that_plays_no_playbook_runs_as_one_without_the_rsi(
     assert (await _stops(stage))["b02"] == f"judge: {INSISTED}"
     assert not any(node.probations for node in (await stage.handle(Role.OBSERVER).lineage()).branches)
     assert not [row for row in _decisions(stage) if row["reason"] == "scheduling playbook"]
-    assert stage.sessions.briefs and not any(MENU_TITLE in brief for brief in stage.sessions.briefs.values())
+    briefs = stage.sessions.briefs.values()
+    assert briefs and not any(title in brief for brief in briefs for title in (SETTINGS_TITLE, CODE_TITLE))
     knowledge = _knowledge(stage)
     assert (knowledge["playbook_trial"]["status"], knowledge["playbook_trial"]["reason"]) == (
         SKIPPED,

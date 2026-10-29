@@ -5,11 +5,11 @@
 
 :func:`specialist_outcomes` counts, at CLOSE, each group's explore tests (the branches shown the menu, and the control
 branches, drawn for none, :func:`~.menu.in_control`): how many committed, the gain their merged commits brought per GPU
-hour, and how many fell on a family the session's model type had tried fewer than :data:`~.menu.EXPLORE_TRIALS` times
-before, the exploring ones, with what those committed. A test whose branch was drawn a menu before it, the control's as
-well, is read against the last one: whether a line among the first :data:`TOP` covers its family and, where a line
-does, the odds it gave beside whether the test committed, the menu's calibration. A control branch's menu was drawn but
-never shown, so how often its tests fall on the top families anyway is what the menu's own share is read against.
+hour, and how many fell on a family the session's model type had tried fewer than :data:`EXPLORE_TRIALS` times before,
+the exploring ones, with what those committed. A test whose branch was drawn a menu before it, the control's as well, is
+read against the last one: whether a line of either list covers its family and, where one does, the odds it gave beside
+whether the test committed, the menu's calibration. A control branch's menu was drawn but never shown, so how often its
+tests fall on a menu line anyway is what the menu's own share is read against.
 
 Each session's outcomes are kept beside the archive (:class:`OutcomePool`), so the studies add them up over sessions.
 """
@@ -31,11 +31,11 @@ from hyperloom_multibranch.blackboard.local.files import encode_json, publish_on
 from hyperloom_multibranch.blackboard.rsi.archive import SearchTree, TreeArchive
 from hyperloom_multibranch.blackboard.rsi.family_stats import family_stats
 from hyperloom_multibranch.blackboard.rsi.history import MODEL_TYPE_LABEL
-from hyperloom_multibranch.blackboard.rsi.menu import EXPLORE_TRIALS, LoggedMenu, explored, in_control, record_family
+from hyperloom_multibranch.blackboard.rsi.menu import LoggedMenu, explored, in_control, record_family
 from hyperloom_multibranch.blackboard.rsi.report import table
 
-#: How many of a menu's first families count as following it.
-TOP = 3
+#: Fewer tests of the session's model type than this make a family one to explore.
+EXPLORE_TRIALS = 2.0
 OUTCOMES_FORMAT = "multibranch.specialist-outcomes"
 OUTCOMES_REPORT = "specialist-outcomes.md"
 MENU_GROUP = "menu"
@@ -48,8 +48,8 @@ _SECONDS_PER_HOUR = 3600.0
 class GroupOutcome:
     """One group's explore tests, every count adding up over sessions: its ``branches``, ``tests`` and ``commits``,
     the GPU seconds all its tests took and the gain its merged commits brought; the exploring tests and their commits;
-    the tests read against a menu drawn before them, those on its first :data:`TOP` families, and those on a family it
-    listed with the odds it gave them summed, what they committed and their squared error."""
+    the tests read against a menu drawn before them, and those on a family one of its lines listed with the odds it
+    gave them summed, what they committed and their squared error."""
 
     branches: int = 0
     tests: int = 0
@@ -59,7 +59,6 @@ class GroupOutcome:
     exploring_tests: int = 0
     exploring_commits: int = 0
     after_menu: int = 0
-    on_top: int = 0
     listed: int = 0
     listed_commits: int = 0
     odds_sum: float = 0.0
@@ -81,7 +80,7 @@ class GroupOutcome:
             _rate(self.merged_gain_pct, hours),
             _rate(self.exploring_tests, self.tests),
             f"{_rate(self.exploring_commits, self.exploring_tests)} / {_rate(*reversed(exploiting))}",
-            _rate(self.on_top, self.after_menu),
+            _rate(self.listed, self.after_menu),
             f"{_rate(self.odds_sum, self.listed)} / {_rate(self.listed_commits, self.listed)}",
             _rate(self.squared_error, self.listed),
         )
@@ -99,7 +98,7 @@ HEADERS = (
     "merged gain % per GPU h",
     "exploring share",
     "commit rate exploring / exploiting",
-    f"on the menu's top {TOP}",
+    "on a menu line",
     "odds given / committed",
     "Brier score",
 )
@@ -120,8 +119,8 @@ class SpecialistOutcomes:
         menu, control = (self.groups.get(name, GroupOutcome()) for name in (MENU_GROUP, CONTROL_GROUP))
         return (
             f"commit rate {_rate(menu.commits, menu.tests)} with the menu, {_rate(control.commits, control.tests)} "
-            f"without; on the menu's top {TOP} {_rate(menu.on_top, menu.after_menu)} against "
-            f"{_rate(control.on_top, control.after_menu)}"
+            f"without; on a menu line {_rate(menu.listed, menu.after_menu)} against "
+            f"{_rate(control.listed, control.after_menu)}"
         )
 
 
@@ -131,8 +130,8 @@ def _last_menu(menus: Sequence[LoggedMenu], branch: str, before: float) -> Logge
 
 def _test(committed: bool, exploring: bool, shown: LoggedMenu | None, family: Family) -> GroupOutcome:
     """One explore test of ``family``, read against the menu ``shown`` before it, if any: a line lists the test when
-    its family covers the test's, as the untried line, a target at one layer with its mechanism open, covers every test
-    of that target at that layer."""
+    one of the families it was logged as covers the test's, as a line of a target with its mechanism open covers every
+    test of that target at its layer."""
 
     found = GroupOutcome(
         tests=1,
@@ -144,7 +143,7 @@ def _test(committed: bool, exploring: bool, shown: LoggedMenu | None, family: Fa
         return found
     lines = [Family.from_label(label) for label in shown.families]
     listing = [index for index, line in enumerate(lines) if line is not None and line.covers(family)]
-    found = dataclasses.replace(found, after_menu=1, on_top=int(any(index < TOP for index in listing)))
+    found = dataclasses.replace(found, after_menu=1)
     if not listing or len(shown.odds) != len(shown.families):
         return found
     odds = shown.odds[listing[0]]
@@ -232,11 +231,11 @@ def pooled(sessions: Sequence[SpecialistOutcomes]) -> SpecialistOutcomes:
 
 __all__ = [
     "CONTROL_GROUP",
+    "EXPLORE_TRIALS",
     "HEADERS",
     "MENU_GROUP",
     "OUTCOMES_FORMAT",
     "OUTCOMES_REPORT",
-    "TOP",
     "GroupOutcome",
     "OutcomePool",
     "SpecialistOutcomes",

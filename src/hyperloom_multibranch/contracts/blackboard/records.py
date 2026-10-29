@@ -235,6 +235,12 @@ class BaselineRecord:
     source: str = ""
     wall_seconds: float | None = None
 
+    @property
+    def bar_pct(self) -> float | None:
+        """The smallest gain the rule gate keeps on any metric; ``None`` without a threshold."""
+
+        return min(self.threshold_pct.values(), default=None)
+
 
 @dataclass(frozen=True)
 class RegressionCase:
@@ -723,9 +729,10 @@ class StartupBrief:
 
     ``op_shares`` are the latest op shares a tool reported on the start commit, or on a commit of the same recipe,
     which bound what speeding each op up can gain; ``None`` while no commit of its recipe was profiled. ``unfinished`` are this session's results worth finishing,
-    on any branch. ``focus`` is the bottleneck the scheduler opened the branch on, empty when it named none. ``menu``
-    is the direction families ranked for the branch, a line each, a family's note indented under its line; none for a
-    branch of the menu's control.
+    on any branch. ``focus`` is the bottleneck the scheduler opened the branch on, empty when it named none.
+    ``settings_menu`` is the settings this session has not tried and ``code_menu`` the source and kernel changes, each
+    ranked for the branch, a line each, the ops it acts on and its family's note indented under it; none for a branch
+    of the menu's control.
     """
 
     start_commit: str
@@ -735,7 +742,8 @@ class StartupBrief:
     op_shares: OpShares | None = None
     unfinished: tuple[UnfinishedLead, ...] = ()
     focus: str = ""
-    menu: tuple[str, ...] = ()
+    settings_menu: tuple[str, ...] = ()
+    code_menu: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

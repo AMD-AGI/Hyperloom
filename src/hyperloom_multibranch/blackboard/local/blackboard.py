@@ -250,7 +250,7 @@ def _holders(answer: DedupAnswer) -> tuple[str, ...]:
 def _bar_pct(state: BlackboardState) -> float | None:
     """The smallest gain the rule gate keeps, from the latest baseline; ``None`` before there is one."""
 
-    return min(state.baselines[-1].threshold_pct.values(), default=None) if state.baselines else None
+    return state.baselines[-1].bar_pct if state.baselines else None
 
 
 def _ceiling_pct(intent: Intent) -> float | None:

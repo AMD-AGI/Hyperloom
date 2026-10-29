@@ -79,7 +79,7 @@ from hyperloom_multibranch.blackboard.learning_search import (
     session_matches,
 )
 from hyperloom_multibranch.blackboard.rsi.analysis import FailureTier, failures_at, repeated_failures
-from hyperloom_multibranch.blackboard.rsi.menu import DirectionMenus
+from hyperloom_multibranch.blackboard.rsi.menu import CODE, SETTINGS, DirectionMenus, MenuItem
 from hyperloom_multibranch.blackboard.tools import render_brief
 
 log = logging.getLogger(__name__)
@@ -204,7 +204,7 @@ class CrossSessionBriefing(StartupBriefProvider):
     completed reads, so a brief built again reads the Experience KB no more. ``champions`` keeps the champions each
     commit read is, by commit, so each commit's recipe is read once a session. ``refused`` keeps, by test, the heads
     :meth:`peer_replay` found its change no longer applies to or already in, which the briefs from them leave out.
-    ``menus`` ranks the direction families for the branch (:mod:`rsi.menu`); without it the brief has no menu.
+    ``menus`` draws the branch's two lists of directions (:mod:`rsi.menu`); without it the brief has neither.
     """
 
     blackboard: Blackboard
@@ -391,22 +391,34 @@ class CrossSessionBriefing(StartupBriefProvider):
         lines = tuple(render_session_learning(record, snapshot) for record in here)
         return Notes(lines, here, (), (True,) * len(here))
 
-    async def _menu(self, snapshot: BlackboardSnapshot, start_commit: str) -> tuple[tuple[str, ...], Notes]:
-        """The branch's menu, each family's best note under its line, and those notes; none without menus or for a
-        branch of the menu's control."""
+    async def _menu(self, snapshot: BlackboardSnapshot, start_commit: str) -> tuple[dict[str, tuple[str, ...]], Notes]:
+        """The branch's two lists, each family's best note under its line, and those notes; none without menus or for
+        a branch of the menu's control."""
 
         menu = self.menus.menu(snapshot, self.branch, start_commit) if self.menus is not None and self.branch else None
         if menu is None or menu.control:
-            return (), Notes()
-        lines: list[str] = []
+            return {}, Notes()
+        lists: dict[str, tuple[str, ...]] = {}
         shown = Notes()
-        for item in menu.items:
-            found = Notes()
-            if self.learnings is not None:
-                found = await asyncio.to_thread(self.learnings.family_note, snapshot, item.family)
-            lines += [item.render(), *(f"{MENU_NOTE}{line[2:]}" for line in found.lines)]
-            shown += found
-        return tuple(lines), shown
+        for name, items in menu.lists.items():
+            lines: list[str] = []
+            for item in items:
+                found = await self._family_note(snapshot, item)
+                lines += [*item.lines(), *(f"{MENU_NOTE}{line[2:]}" for line in found.lines)]
+                shown += found
+            lists[name] = tuple(lines)
+        return lists, shown
+
+    async def _family_note(self, snapshot: BlackboardSnapshot, item: MenuItem) -> Notes:
+        """The best note of a family ``item`` stands for: of the first of a code line's layers that has one."""
+
+        if self.learnings is None:
+            return Notes()
+        for family in item.families:
+            found = await asyncio.to_thread(self.learnings.family_note, snapshot, family)
+            if found.lines:
+                return found
+        return Notes()
 
     async def startup_brief(self, start_commit: str) -> StartupBrief:
         """The brief from ``start_commit``; the recall logs the learnings and the leads it shows."""
@@ -437,7 +449,7 @@ class CrossSessionBriefing(StartupBriefProvider):
             *(_Item(True, text) for text in listed([*recalled.lessons, *kb_lessons])),
         ]
         kept = _fit(ordered, self.max_chars)
-        menu, noted = await self._menu(snapshot, start_commit)
+        lists, noted = await self._menu(snapshot, start_commit)
         if self.learnings is not None:
             shown = tuple(item.lead for item in kept if item.lead is not None)
             logged = notes + noted
@@ -450,7 +462,8 @@ class CrossSessionBriefing(StartupBriefProvider):
             leads=tuple(item.text for item in kept if not item.lesson),
             unfinished=self._unrefused(tried.unfinished, snapshot, start_commit),
             focus=self.focus,
-            menu=menu,
+            settings_menu=lists.get(SETTINGS, ()),
+            code_menu=lists.get(CODE, ()),
         )
 
     async def direction_note(self, intent: Intent, delta: RecipeDelta) -> str:

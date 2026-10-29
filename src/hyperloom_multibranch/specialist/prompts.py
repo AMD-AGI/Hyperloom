@@ -175,10 +175,13 @@ poll_inbox. When start_analysis lists roofline, the same profile test with tool 
 each kernel is from the card's compute or memory bound: a kernel far below its bound is one a kernel change can gain \
 on. When start_analysis lists upstream_pr_search, search with tool "upstream_pr_search" (params repo_url and \
 keywords) before you write a source or kernel change: an upstream PR that already does it is the patch to start from. \
-When the brief lists "Directions to consider", read it before you claim: each line is a family of directions (its \
-target, mechanism and layer) with its odds of a commit, the gain within reach and its tests so far, in this session \
-and past ones; prefer a family it ranks high unless your head's own state says otherwise. A brief without that list: \
-choose as you would without it. A granted claim's reply says what your direction's family came to. \
+When the brief lists "Settings this session has not tried" or "Source and kernel changes", read them before you \
+claim: each line is a family of directions (its target, mechanism and layer) with its odds of a commit and its tests \
+so far, in this session and past ones. A line of the first list is a setting no test of this session tried, with the \
+gain within reach; a line of the second is a source or kernel change, with the operators it acts on, their share of \
+the profile and the ceiling that puts on a commit. Prefer a line ranked high unless your head's own state says \
+otherwise. A brief without those lists: choose as you would without them. A granted claim's reply says what your \
+direction's family came to. \
 Name the direction as an intent: the target (a bottleneck or an operator), the mechanism, and the layer: \
 config for server arguments, environment variables and other settings, kernel when the change adds or replaces a GPU \
 kernel (a Triton, HIP or CK kernel, a fused kernel) or a kernel's tuned table, and source for any other code change. \

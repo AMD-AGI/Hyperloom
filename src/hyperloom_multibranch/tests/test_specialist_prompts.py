@@ -34,7 +34,13 @@ from hyperloom_multibranch.specialist.runtime import SessionStart
 from hyperloom_multibranch.contracts.blackboard.records import WarmReplay
 from hyperloom_multibranch.blackboard.knowledge.warm_start import PATCH_REFERENCE, ReplayReference
 from hyperloom_multibranch.blackboard.rsi.briefing import ON_HEAD
-from hyperloom_multibranch.blackboard.tools import FOCUS_LINE, MENU_TITLE, UNFINISHED_TITLE, render_replay
+from hyperloom_multibranch.blackboard.tools import (
+    CODE_TITLE,
+    FOCUS_LINE,
+    SETTINGS_TITLE,
+    UNFINISHED_TITLE,
+    render_replay,
+)
 from hyperloom_multibranch.toolbox.mcp_tools import REPLY_INBOX_HEADER
 
 WORKLOAD = "qwen3-8b on vllm, TP 1, ISL 1024, OSL 1024, concurrency 64, InferenceX"
@@ -81,11 +87,12 @@ def test_the_role_names_the_workload_every_step_s_tool_and_the_rules():
         role_prompt(" \n")
 
 
-def test_the_role_reads_the_briefs_direction_menu_before_claiming_and_chooses_as_before_without_one():
+def test_the_role_reads_the_briefs_two_direction_lists_before_claiming_and_chooses_as_before_without_them():
     prompt = " ".join(role_prompt(WORKLOAD).split())
+    settings, code = (title.split(" (")[0] for title in (SETTINGS_TITLE, CODE_TITLE))
 
-    assert f'When the brief lists "{MENU_TITLE.split(" (")[0]}", read it before you claim' in prompt
-    assert "A brief without that list: choose as you would without it." in prompt
+    assert f'When the brief lists "{settings}" or "{code}", read them before you claim' in prompt
+    assert "A brief without those lists: choose as you would without them." in prompt
 
 
 def test_the_role_profiles_through_a_profile_test_and_tracelens():
