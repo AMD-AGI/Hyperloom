@@ -1168,6 +1168,7 @@ class RooflineExecutor:
         self.shared_state.last_profile_status = status
         self.shared_state.record_profile_workload(profile.params, arm=analysis.payload["roofline_arm"])
         self.shared_state.record_trace_analyze(analysis.payload, analysis.result)
+        self.shared_state.roofline_runtime_sec = max(self.shared_state.roofline_runtime_sec, time.monotonic() - started)
         cached = self.shared_state.last_trace_analyze or {}
         if recorder is not None:
             recorder.adopt_analysis_run(run_index=analysis.run_index, ta_result=analysis.result, trace_input=trace_path)
@@ -1265,11 +1266,7 @@ class RooflineExecutor:
             requires_lanes=list(parent_task.requires_lanes or []),
             lease_ttl_sec=parent_task.lease_ttl_sec,
         )
-        return RunnerContext(
-            task=sub_task,
-            lease=parent_ctx.lease,
-            extra=dict(parent_ctx.extra or {}),
-        )
+        return RunnerContext(task=sub_task, lease=parent_ctx.lease, extra=dict(parent_ctx.extra or {}))
 
 
 __all__ = [
