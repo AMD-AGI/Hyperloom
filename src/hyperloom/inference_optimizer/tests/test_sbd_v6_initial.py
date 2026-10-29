@@ -841,19 +841,6 @@ def test_mark_pending_install_event_failed_propagates_lookup_failure(monkeypatch
         preflight._mark_pending_install_event_failed(argparse.Namespace(resume_from=None), ValueError("boom"))
 
 
-def test_write_model_gate_event_propagates_write_failure(tmp_path, monkeypatch):
-    from hyperloom.inference_optimizer.cli import model_gate
-    from hyperloom.inference_optimizer.session import sbd_v6
-
-    def write_fails(*_args, **_kwargs):
-        raise OSError("disk unavailable")
-
-    monkeypatch.setattr(sbd_v6, "write_timeline_event_at", write_fails)
-
-    with pytest.raises(OSError):
-        model_gate._write_model_gate_event(tmp_path, {"type": "model_gate"})
-
-
 def test_ir3_unreachable_uses_v6_reason_without_changing_v5_state_reason(tmp_path, monkeypatch):
     from hyperloom.inference_optimizer.cli import preflight
 
@@ -1132,41 +1119,6 @@ def test_missing_pending_install_event_is_exported_as_v6_warning(tmp_path):
 
     breakdown = exporter.build(tmp_path)
     assert any("pending install event is unavailable" in warning for warning in breakdown["metadata"]["warnings"])
-
-
-def test_corrupt_model_gate_event_is_safely_normalized(tmp_path):
-    from hyperloom.inference_optimizer.cli import model_gate
-
-    path = tmp_path / "reports" / "sbd_v6" / "timeline" / "000001-model_gate.json"
-    _write_json(
-        path,
-        {
-            "type": "model_gate",
-            "ext": {
-                "checks": [{"gate_id": "legacy", "order": "invalid", "status": "unknown"}],
-                "degraded": [],
-            },
-        },
-    )
-    args = _gate_args(tmp_path / "model")
-
-    model_gate._record_model_gate_check(
-        args,
-        tmp_path,
-        {
-            "gate_id": "unsupported_model_arch",
-            "order": 1,
-            "status": "passed",
-            "skip_reason": None,
-            "detail": {},
-        },
-    )
-
-    event = read_timeline_event(tmp_path, "model_gate")
-    assert event is not None
-    assert event["status"] == "degraded"
-    assert event["ext"]["checks"][0]["gate_id"] == "unsupported_model_arch"
-    assert event["ext"]["degraded"] == {"active": False, "warnings": []}
 
 
 def test_fresh_model_gate_with_only_soft_skips_succeeds(tmp_path):

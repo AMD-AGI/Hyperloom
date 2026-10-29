@@ -14,7 +14,7 @@ import pytest
 from kernelforge.knowledge.pr_knowledge.client import PRMonitorClient
 from kernelforge.knowledge.pr_knowledge.search import PRLifecycle, PRReference, PRState, SearchOutcome
 from kernelforge.knowledge.pr_knowledge import mcp_server as server
-from kernelforge.tools import mcp_stdio
+from kernelforge.utils import mcp_stdio
 
 from kernelforge.tests.conftest import SRC_ROOT
 

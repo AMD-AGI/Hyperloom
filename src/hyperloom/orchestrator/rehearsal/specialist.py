@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -126,13 +127,10 @@ class ScriptedSpecialist:
         workspace.mkdir(parents=True, exist_ok=True)
         process_log = workspace / "process.log"
         process_log.write_text("\n".join(step.transcript) + ("\n" if step.transcript else ""), encoding="utf-8")
-        # A missing heartbeat is the only difference a liveness consumer can see
-        # between a specialist that is thinking and one that has stopped.
-        if step.outcome != HUNG:
-            (workspace / "heartbeat.json").write_text(
-                json.dumps({"task_id": task_id, "status": "running"}) + "\n",
-                encoding="utf-8",
-            )
+        # A silent log is the only difference a liveness consumer can see between a specialist that is thinking
+        # and one that has stopped.
+        if step.outcome == HUNG:
+            os.utime(process_log, (0, 0))
 
         done_root = worktree if worktree is not None else workspace
         payload: dict[str, Any] | None = None

@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from kernelforge.loop.path_ownership import (
+from kernelforge.workflows.forge_loop.campaign.path_ownership import (
     COPY_FILTER_DIRECTORY_NAMES,
     RUNTIME_DIRECTORY_GLOBS,
     RUNTIME_DIRECTORY_NAMES,

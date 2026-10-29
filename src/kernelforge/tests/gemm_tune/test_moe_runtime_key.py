@@ -9,7 +9,7 @@ import json
 
 import pytest
 
-from kernelforge.gemm_tune import evidence as ev
+from kernelforge.workflows.gemm_tune import evidence as ev
 
 # Verbatim from the production log, for token counts 1 and 512.
 _TUPLE = (
@@ -122,7 +122,7 @@ class TestMissSignal:
 
 class TestUntunedCsv:
     def test_the_header_is_exactly_the_tuple_minus_the_box_properties(self):
-        from kernelforge.gemm_tune.tuners.fmoe_ck import _FMOE_CSV_HEADER
+        from kernelforge.workflows.gemm_tune.tuners.fmoe_ck import _FMOE_CSV_HEADER
 
         assert ",".join(ev.MOE_KEY_FIELDS) == _FMOE_CSV_HEADER
 
@@ -142,7 +142,7 @@ class TestUntunedCsv:
         assert [r.split(",")[0] for r in rows] == ["1", "32"]
 
     def test_the_rendered_csv_passes_the_tuners_own_validator(self, tmp_path):
-        from kernelforge.gemm_tune.tuners.fmoe_ck import _validate_fmoe_csv
+        from kernelforge.workflows.gemm_tune.tuners.fmoe_ck import _validate_fmoe_csv
 
         rep = _log(_DISPATCH.format(tok=1), _MISS.format(tok=512))
         (key,) = ev.moe_dispatch_keys(rep)
@@ -166,8 +166,8 @@ class TestFmoeCkAcceptsIt:
     """The guard must open for a logged key and stay shut for a guessed one."""
 
     def _tuner(self, tmp_path, demand_json):
-        pytest.importorskip("kernelforge.gemm_tune.tuners.fmoe_ck")
-        from kernelforge.gemm_tune.tuners.fmoe_ck import FmoeCKTuner
+        pytest.importorskip("kernelforge.workflows.gemm_tune.tuners.fmoe_ck")
+        from kernelforge.workflows.gemm_tune.tuners.fmoe_ck import FmoeCKTuner
 
         tuner = FmoeCKTuner.__new__(FmoeCKTuner)
         tuner.ctx = type(

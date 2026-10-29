@@ -389,6 +389,14 @@ _MULTI_VALUE_FLAGS = (
     "--cuda-graph-max-bs",
 )
 
+# Canonical flag names (as ``flag_occurrences`` spells them) for the launch settings read in more than one place.
+SPECULATIVE_CONFIG_FLAG = "speculative-config"
+SPECULATIVE_CONFIG_KEY_PREFIX = f"{SPECULATIVE_CONFIG_FLAG}."
+# One argparse destination the engines spell three ways, so the last of them is the tensor parallel size they run.
+TENSOR_PARALLEL_FLAGS = frozenset({"tensor-parallel-size", "tp", "tp-size"})
+# The model being served: vLLM takes ``--model``, SGLang ``--model-path``.
+SERVED_MODEL_FLAGS = frozenset({"model", "model-path"})
+
 # vLLM / atom argparse-style single-value options safe to collapse last-wins. vLLM hard-errors on a duplicate /
 # conflicting flag (e.g. ``--attention-backend``); collapsing to last-wins keeps the variant override.
 _VLLM_SINGLE_VALUE_FLAGS = frozenset(
@@ -462,6 +470,64 @@ def tokenize_server_args_preserving_json(
         if token.startswith(("'", '"')) or token.endswith(("'", '"')):
             return None
     return normalized, tokens
+
+
+def _is_flag(token: str) -> bool:
+    """``token`` names a flag rather than carrying a value (``-tp`` does, ``-1`` does not)."""
+    return token.startswith("-") and not token[1:2].isdigit() and token.strip("-") != ""
+
+
+def flag_occurrences(server_args: str | None) -> list[tuple[str, str]]:
+    """Every flag a composed launch spells, in order, as ``(name, value)``; ``""`` for a bare flag.
+
+    Names come back canonical -- no leading dashes, lowercase, underscores as dashes -- so the spellings the engines
+    accept for one argparse destination meet in one key.
+    """
+    split = tokenize_server_args_preserving_json(server_args)
+    tokens = split[1] if split is not None else str(server_args or "").split()
+    occurrences: list[tuple[str, str]] = []
+    for index, token in enumerate(tokens):
+        if not _is_flag(token):
+            continue
+        name, assigned, value = token.partition("=")
+        if not assigned and index + 1 < len(tokens) and not _is_flag(tokens[index + 1]):
+            value = tokens[index + 1]
+        occurrences.append((name.lstrip("-").lower().replace("_", "-"), value))
+    return occurrences
+
+
+def last_flag_values(server_args: str | None) -> dict[str, str]:
+    """Each flag's value, last occurrence winning like the engines' argparse; ``""`` for a bare flag."""
+    return dict(flag_occurrences(server_args))
+
+
+def last_alias_value(occurrences: list[tuple[str, str]], aliases: frozenset[str]) -> str | None:
+    """The value of the last flag spelling one argparse destination -- the one the engine keeps."""
+    return next((value for name, value in reversed(occurrences) if name in aliases), None)
+
+
+def json_object(text: str) -> dict[str, Any]:
+    """``text`` read as a JSON object, or ``{}`` when it is neither."""
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def speculative_config(occurrences: list[tuple[str, str]]) -> dict[str, Any]:
+    """The speculative config a launch spells, both spellings merged the way vLLM merges them.
+
+    It arrives as a JSON object under ``--speculative-config`` and as ``--speculative-config.<key>`` flags, and the
+    per-key flags win over the object.
+    """
+    config: dict[str, Any] = {}
+    for flag, value in dict(occurrences).items():
+        if flag == SPECULATIVE_CONFIG_FLAG:
+            config = {**json_object(value), **config}
+        elif flag.startswith(SPECULATIVE_CONFIG_KEY_PREFIX):
+            config[flag.removeprefix(SPECULATIVE_CONFIG_KEY_PREFIX).replace("-", "_")] = value
+    return config
 
 
 def dedup_vllm_server_args(
@@ -761,7 +827,7 @@ def inject_sglang_attention_backend(
 
 
 # sglang MoE runner backend: Hyperloom pins none for the baseline or grid
-# variants, the fmoe_ck tuner's validation bench aside (``phases/kernel.py``
+# variants, the fmoe_ck tuner's validation bench aside (``phases/kernel_gemm_tuning.py``
 # serves it with ``--moe-runner-backend aiter``). sglang's own
 # ``--moe-runner-backend auto`` follows ``SGLANG_USE_AITER`` (aiter when the
 # harness pre-shuffles MoE weights for it, triton otherwise) on current

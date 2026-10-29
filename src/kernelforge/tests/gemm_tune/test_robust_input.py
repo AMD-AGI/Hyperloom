@@ -10,17 +10,17 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.gemm_tune.pipeline import _normalize_inline_shapes_json, _safe_is_file
-from kernelforge.gemm_tune.evidence import padded_m
-from kernelforge.gemm_tune.tuners import _aiter_dense_common as ac
-from kernelforge.gemm_tune.tuners._aiter_dense_common import (
+from kernelforge.workflows.gemm_tune.pipeline import _normalize_inline_shapes_json, _safe_is_file
+from kernelforge.workflows.gemm_tune.evidence import padded_m
+from kernelforge.workflows.gemm_tune.tuners import _aiter_dense_common as ac
+from kernelforge.workflows.gemm_tune.tuners._aiter_dense_common import (
     _conform_csv_columns,
     _parse_tuner_stdout,
     _resolve_input_csv,
     validate_dense_tuner_inputs,
 )
-from kernelforge.gemm_tune.tuners.base import TuneContext
-from kernelforge.gemm_tune.model_analyzer import ModelProfile
+from kernelforge.workflows.gemm_tune.tuners.base import TuneContext
+from kernelforge.workflows.gemm_tune.model_analyzer import ModelProfile
 
 
 # The exact production payload: a Python-repr list far longer than NAME_MAX.
@@ -165,7 +165,7 @@ def test_resolve_input_csv_covers_decode_m_for_prefill_only_manifest(tmp_path, m
         out.write_text("M,N,K\n2095,8704,3072\n", encoding="utf-8")
         return out
 
-    monkeypatch.setattr("kernelforge.gemm_tune.shape_manifest.write_manifest_untuned_csv", _fake_manifest_csv)
+    monkeypatch.setattr("kernelforge.workflows.gemm_tune.shape_manifest.write_manifest_untuned_csv", _fake_manifest_csv)
     ctx = _ctx(tmp_path, shapes_manifest=manifest, conc=64, tokens=[16, 512])
     out = _resolve_input_csv(ctx, tmp_path)
     m_values = {int(r.split(",")[0]) for r in out.read_text(encoding="utf-8").strip().splitlines()[1:]}
@@ -400,7 +400,7 @@ def test_manifest_keeps_curated_shapes_in_thorough_mode(tmp_path, monkeypatch):
         out.write_text("M,N,K\n2095,8704,3072\n", encoding="utf-8")
         return out
 
-    monkeypatch.setattr("kernelforge.gemm_tune.shape_manifest.write_manifest_untuned_csv", _fake_manifest_csv)
+    monkeypatch.setattr("kernelforge.workflows.gemm_tune.shape_manifest.write_manifest_untuned_csv", _fake_manifest_csv)
     ctx = _ctx(tmp_path, shapes_manifest=manifest, thorough=True, conc=8, tokens=[1024])
 
     m_values = _group_m(_resolve_input_csv(ctx, tmp_path))[("8704", "3072")]
@@ -525,7 +525,7 @@ def test_a_power_of_two_row_does_not_cover_the_16_multiple_bucket(tmp_path):
 
 
 def test_exact_grid_band_holds_every_graph_batch_size(tmp_path):
-    from kernelforge.gemm_tune.dense_shapes import MGrid
+    from kernelforge.workflows.gemm_tune.dense_shapes import MGrid
 
     csv = tmp_path / "untuned.csv"
     csv.write_text("M,N,K\n2095,5120,17408\n", encoding="utf-8")

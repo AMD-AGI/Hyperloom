@@ -129,7 +129,7 @@ def _aiter_fused_moe_dispatch_keys(server_log: str) -> list[dict[str, Any]]:
     """
     if not server_log:
         return []
-    from kernelforge.gemm_tune import moe_dispatch_keys, parse_log_file
+    from kernelforge.workflows.gemm_tune import moe_dispatch_keys, parse_log_file
 
     return moe_dispatch_keys(parse_log_file(server_log))
 
@@ -160,7 +160,7 @@ def _aiter_ck_moe_tuner_supports(server_log: str) -> bool:
 def _fmoe_token_list(tokens: Any) -> list[int]:
     """Positive token counts to sweep, keyed off whatever the caller sends.
 
-    Accepts forge's comma-separated string (what :func:`_normalize_tokens`
+    Accepts forge's comma-separated string (what :func:`_tokens_from_serving_log`
     produces) or a sequence. Unparseable and non-positive entries are dropped
     rather than raising -- one bad entry is not worth the run -- and ``[1]`` is
     the floor so there is always a token to key on.
@@ -204,7 +204,7 @@ def _write_fmoe_untuned_csv_from_log(
     Problems whose dtype pair aiter's codegen rejects are dropped rather than
     passed through, because one unsupported row aborts the whole tuner run.
     """
-    from kernelforge.gemm_tune import MOE_SHAPE_FIELDS, moe_untuned_csv_text
+    from kernelforge.workflows.gemm_tune import MOE_SHAPE_FIELDS, moe_untuned_csv_text
 
     report: dict[str, Any] = {
         "observed": 0,

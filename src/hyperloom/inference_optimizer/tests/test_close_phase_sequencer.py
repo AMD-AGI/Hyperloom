@@ -504,9 +504,11 @@ def test_an_uncatalogued_step_gets_the_floor_too(coord):
     assert coord.phase_close._close_step_wait_sec(row) == pytest.approx(_CLOSE_STEP_WAIT_FLOOR_SEC)
 
 
-def test_an_extravagantly_priced_step_is_capped(coord):
+def test_an_extravagantly_priced_step_is_capped(coord, monkeypatch):
     """A wedged step must not hold the process open for as long as its action might legitimately run."""
-    coord.action_registry = {"report": SimpleNamespace(typical_runtime_min=1000.0)}
+    from hyperloom.orchestrator.phases import close as close_mod
+
+    monkeypatch.setattr(close_mod, "ACTION_CATALOGUE", {"report": SimpleNamespace(typical_runtime_min=1000.0)})
 
     bound = coord.phase_close._close_step_wait_sec(_running_report_row(coord))
 
@@ -593,7 +595,6 @@ async def test_close_sequencer_runs_all_steps_in_order_happy_path(
         "session_breakdown",
         "langfuse_flush",
         "artifact_package",
-        "ndjson_drain",
         "done",
     ]
     by_step = {r["step"]: r for r in rows}
@@ -609,7 +610,6 @@ async def test_close_sequencer_runs_all_steps_in_order_happy_path(
     assert "status=written" in by_step["fact_finalize"]["detail"]
     assert "backend=local" in by_step["fact_finalize"]["detail"]
     assert by_step["langfuse_flush"]["status"] == "done"
-    assert by_step["ndjson_drain"]["status"] == "skipped"
     assert by_step["done"]["status"] == "done"
     assert coord.shared_state.close_sequence_done is True
     # A normal SWEEP completion's sweep_done reason must be preserved.
@@ -653,7 +653,6 @@ async def test_close_sequencer_records_its_own_verdict_and_artifacts(
         "session_breakdown",
         "langfuse_flush",
         "artifact_package",
-        "ndjson_drain",
         "done",
     ]
     # Named by the artifact_package step from the path it was handed, not
@@ -831,7 +830,6 @@ async def test_close_sequencer_records_the_recipe_publication_under_close(
     assert [(row["attempt"], row["source"], row["status"]) for row in write_back["attempts"]] == [
         (1, "close", "written"),
     ]
-    assert "queue" in write_back
 
 
 @pytest.mark.asyncio
@@ -1065,17 +1063,6 @@ async def test_close_sequencer_report_before_session_breakdown(coord):
     report_idx = insertion.index("internal-report-close_phase_entry")
     bd_idx = insertion.index("internal-session_breakdown-close_phase_entry")
     assert report_idx < bd_idx
-
-
-@pytest.mark.asyncio
-async def test_close_sequencer_skips_recipe_kb_steps_when_no_recipe_kb(coord):
-    """``--degraded-kb`` runs (recipe_kb=None): NDJSON drain recorded 'skipped', not silent."""
-    coord.shared_state.phase_history = [_close_phase_history_row()]
-    await coord.phase_close.on_enter_close(Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}))
-    rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
-    drain_row = next(r for r in rows if r["step"] == "ndjson_drain")
-    assert drain_row["status"] == "skipped"
-    assert coord.shared_state.close_sequence_done is True
 
 
 @pytest.mark.asyncio
@@ -1398,7 +1385,7 @@ async def test_the_sequencer_delivers_the_finished_close_section_in_the_package(
         # The steps recorded after step 2 are the whole point: they are what
         # the bundled copy was missing before the rebuild.
         assert delivered["close_sequence_done"] is True
-        assert {"artifact_package", "ndjson_drain", "done"} <= {step["step"] for step in delivered["steps"]}
+        assert {"artifact_package", "done"} <= {step["step"] for step in delivered["steps"]}
         # Both copies carry a settled verdict. Which one it is depends on the
         # internal tasks, which do not run under mock backends, but it is
         # never ``running``: that would mean the patch never delivered the

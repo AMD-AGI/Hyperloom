@@ -223,7 +223,7 @@ class MachinePhase(CoordinatorCollaborator):
         log.info("phase_machine: holding %s exit (reason=%s) for operator work", state.phase, next_phase[1])
         return None
 
-    def _settle_escalate_hint(self, move: Transition) -> None:
+    def settle_escalate_hint(self, move: Transition) -> None:
         """Consume or discard the pending escalate hint, according to what drove this transition."""
         state = self.shared_state
         if "hint" in move.evidence:
@@ -314,7 +314,7 @@ class MachinePhase(CoordinatorCollaborator):
     async def _commit_transition(self, move: Transition) -> None:
         """Record the phase move and run everything the boundary owes, in order."""
         state = self.shared_state
-        self._settle_escalate_hint(move)
+        self.settle_escalate_hint(move)
         if move.to_phase == _phase_state.PHASE_CLOSE:
             self.set_terminal_stop_reason(state, move.reason)
         self._carry_cycle_facts_across(move)

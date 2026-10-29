@@ -22,27 +22,27 @@ from kernelforge.agent_backends.base import (
 from kernelforge.agent_backends.registry import get_agent_provider, register_agent_provider
 from kernelforge.agent_backends.workspace_guard import WorkspaceGuard, WorkspaceSafetyError
 
-from kernelforge.fusion.discover import DiscoveryRetry, DiscoverySession
-from kernelforge.fusion import discover as discover_module
-from kernelforge.fusion import author as author_module
-from kernelforge.fusion import agent_selection
-from kernelforge.fusion import discovery_stage
-from kernelforge.fusion import pipeline as cli_module
-from kernelforge.fusion import harness_authoring
-from kernelforge.fusion.author import (
+from kernelforge.workflows.forge_fusion.discover import DiscoveryRetry, DiscoverySession
+from kernelforge.workflows.forge_fusion import discover as discover_module
+from kernelforge.workflows.forge_fusion import author as author_module
+from kernelforge.workflows.forge_fusion import agent_selection
+from kernelforge.workflows.forge_fusion import discovery_stage
+from kernelforge.workflows.forge_fusion import pipeline as cli_module
+from kernelforge.workflows.forge_fusion import harness_authoring
+from kernelforge.workflows.forge_fusion.author import (
     AUTHOR_RC_SAFETY,
     AuthorAgent,
     AuthorWorkspace,
     run_author,
 )
-from kernelforge.fusion.agent_selection import _create_agent_backend, _resolve_agent_choice
-from kernelforge.fusion.locate import _framework_repo_root, _package_root
-from kernelforge.fusion.source_snapshot import _reset_fusion_source, _snapshot_fusion_source
+from kernelforge.workflows.forge_fusion.agent_selection import _create_agent_backend, _resolve_agent_choice
+from kernelforge.workflows.forge_fusion.locate import _framework_repo_root, _package_root
+from kernelforge.workflows.forge_fusion.source_snapshot import _reset_fusion_source, _snapshot_fusion_source
 from kernelforge.cli.forge_fuse_command import forge_fuse as main
-from kernelforge.fusion.emit import FusionFiles, export_artifacts
-from kernelforge.fusion.errors import FuseUsageError
-from kernelforge.fusion.llm_failure import AUTH, LlmUnavailableError
-from kernelforge.fusion.locate import resolve_framework_source_file
+from kernelforge.workflows.forge_fusion.emit import FusionFiles, export_artifacts
+from kernelforge.workflows.forge_fusion.errors import FuseUsageError
+from kernelforge.workflows.forge_fusion.llm_failure import AUTH, LlmUnavailableError
+from kernelforge.workflows.forge_fusion.locate import resolve_framework_source_file
 
 
 _AGENT_ENV = (
@@ -601,7 +601,7 @@ def test_framework_transaction_restores_non_target_claude_shell_edits(tmp_path):
 
 def _autoloop_recipe(source: Path):
     """The one recipe the autoloop tests drive a campaign for."""
-    from kernelforge.fusion.models import Recipe
+    from kernelforge.workflows.forge_fusion.models import Recipe
 
     return Recipe(
         pattern_id="residual_add_rmsnorm",
@@ -782,7 +782,7 @@ def test_autoloop_fails_a_recipe_whose_baseline_could_not_be_restored(tmp_path, 
 
     started: list[str] = []
     monkeypatch.setattr(cli_module, "run_recipe_campaign", lambda *a, **k: started.append("campaign"))
-    from kernelforge.fusion.shadow_repo import ShadowRepo
+    from kernelforge.workflows.forge_fusion.shadow_repo import ShadowRepo
 
     monkeypatch.setattr(ShadowRepo, "reset_to_base", lambda _self: False, raising=True)
 
@@ -829,7 +829,7 @@ def test_autoloop_clears_the_loop_state_that_would_reject_the_next_recipe(tmp_pa
 
 def test_autoloop_records_which_forge_loop_run_answered_each_recipe(tmp_path, monkeypatch):
     """A manifest entry with no experiment id cannot be investigated."""
-    from kernelforge.fusion.loop import LoopIteration
+    from kernelforge.workflows.forge_fusion.loop import LoopIteration
 
     model_dir = tmp_path / "models"
     model_dir.mkdir()
@@ -1248,7 +1248,7 @@ class TestCliDryRun:
 
     def test_discovery_targets_the_framework_root_it_was_given(self, tmp_path, monkeypatch):
         """``--framework-root`` pins WHICH install is being optimized."""
-        from kernelforge.fusion import pipeline as cli_module
+        from kernelforge.workflows.forge_fusion import pipeline as cli_module
 
         seen: dict[str, object] = {}
 
@@ -1303,8 +1303,8 @@ class TestCliDryRun:
 
     def test_unreachable_llm_is_not_written_as_no_opportunity(self, tmp_path, monkeypatch):
         """The incident, end to end: launch-bound trace + a dead gateway."""
-        from kernelforge.fusion import pipeline as cli_module
-        from kernelforge.fusion.llm_failure import API_ERROR, LlmUnavailableError
+        from kernelforge.workflows.forge_fusion import pipeline as cli_module
+        from kernelforge.workflows.forge_fusion.llm_failure import API_ERROR, LlmUnavailableError
 
         def dead_agent(_backend, *_args):
             def _fn(_prompt):

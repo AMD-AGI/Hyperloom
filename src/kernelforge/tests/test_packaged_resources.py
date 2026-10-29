@@ -1,6 +1,6 @@
 """Packaging resource smoke tests."""
 
-from kernelforge.resources import resource_path
+from kernelforge.config.resources import resource_path
 
 
 def test_packaged_resource_paths_are_available():

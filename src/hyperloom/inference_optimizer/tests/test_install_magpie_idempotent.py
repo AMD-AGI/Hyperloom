@@ -56,11 +56,15 @@ def _run_ensure_magpie(
     *,
     import_ok: bool,
     explicit_magpie_path: bool = False,
+    explicit_holds_package: bool = True,
 ) -> tuple[str, bool]:
     """Run the extracted ensure_magpie body; return (stdout, pip_called)."""
     installed_root = tmp_path / "site-packages"
     installed_root.mkdir(parents=True)
     magpie_dir = tmp_path / "operator" / "Magpie"
+    if explicit_holds_package:
+        (magpie_dir / "Magpie").mkdir(parents=True)
+        (magpie_dir / "Magpie" / "__init__.py").touch()
     fake_py = _fake_python(tmp_path, import_ok=import_ok, installed_root=installed_root)
     magpie_path_line = (
         f'MAGPIE_PATH="{magpie_dir}"\nMAGPIE_PATH_EXPLICIT=1'
@@ -118,6 +122,13 @@ def test_preserves_explicit_magpie_path(tmp_path: Path) -> None:
     out, pip_called = _run_ensure_magpie(tmp_path, import_ok=True, explicit_magpie_path=True)
     assert not pip_called
     assert "MAGPIE_PATH override preserved" in out
+
+
+def test_explicit_magpie_path_without_the_package_resolves_from_the_install(tmp_path: Path) -> None:
+    """A MAGPIE_PATH an older install left in .env no longer pins Magpie once its tree is gone."""
+    out, _ = _run_ensure_magpie(tmp_path, import_ok=True, explicit_magpie_path=True, explicit_holds_package=False)
+    assert "holds no Magpie package" in out
+    assert "MAGPIE_PATH resolved from installed package" in out
 
 
 # Static guard: the idempotent skip must stay wired in.

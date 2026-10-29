@@ -7,14 +7,14 @@ from __future__ import annotations
 
 import pytest
 
-from kernelforge.gemm_tune.dense_shapes import (
+from kernelforge.workflows.gemm_tune.dense_shapes import (
     DenseGeometry,
     MGrid,
     compute_decode_m_values,
     compute_dense_m_values,
     compute_dense_nk_shapes,
 )
-from kernelforge.gemm_tune.evidence import padded_m
+from kernelforge.workflows.gemm_tune.evidence import padded_m
 
 
 def test_mla_deepseek_v3_matches_recorded_shapes():
@@ -115,7 +115,7 @@ def test_generic_llama_is_unchanged():
 
 
 # ── ISL-derived M-value capping (review: long-context ISL -> giant GEMM) ──────
-from kernelforge.gemm_tune.dense_shapes import compute_dense_m_values
+from kernelforge.workflows.gemm_tune.dense_shapes import compute_dense_m_values
 
 
 class TestDenseMValueIslCap:
@@ -148,7 +148,7 @@ class TestDenseMValueIslCap:
 
 
 # ── decode M band (review: must respect the concurrency cap) ─────────────────
-from kernelforge.gemm_tune.dense_shapes import compute_decode_m_values
+from kernelforge.workflows.gemm_tune.dense_shapes import compute_decode_m_values
 
 
 class TestDecodeMValues:

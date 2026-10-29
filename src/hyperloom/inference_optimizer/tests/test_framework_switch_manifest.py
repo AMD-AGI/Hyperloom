@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from hyperloom.common.env_safety import BLOCKED_EXTERNAL_ENV_NAMES
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 from hyperloom.orchestrator.actions.executors import _framework_switch_manifest as manifest
 
@@ -67,7 +68,7 @@ def test_an_invalid_env_name_is_dropped():
     assert any("valid environment variable" in p for p in problems)
 
 
-@pytest.mark.parametrize("reserved", sorted(manifest.FORBIDDEN_SWITCHES)[:6])
+@pytest.mark.parametrize("reserved", sorted(BLOCKED_EXTERNAL_ENV_NAMES)[:6])
 def test_a_reserved_benchmark_variable_is_dropped(reserved):
     """Claiming e.g. PATH or TP would retarget the benchmark, not toggle a path."""
     switches, problems = manifest.parse_manifest([_entry(reserved)])
@@ -150,7 +151,7 @@ def test_a_dependency_cycle_is_broken_and_reported():
     )
     assert any("cyclic dependency" in p for p in problems)
     for entry in switches:
-        assert manifest.dependency_closure(entry["switch"], switches) <= {"HL_A", "HL_B"}
+        assert manifest.transitive_closure(entry["switch"], switches, "depends_on") <= {"HL_A", "HL_B"}
 
 
 def test_a_switch_with_dependents_is_flagged_as_an_enabler():
@@ -198,19 +199,19 @@ def test_switch_env_can_be_restricted():
 
 def test_dependency_closure_is_transitive():
     """A rewrite two links down the chain needs both links above it."""
-    assert manifest.dependency_closure("HL_DERIVED", _chain()) == {"HL_DERIVED", "HL_CACHE", "HL_HOIST"}
-    assert manifest.dependency_closure("HL_STANDALONE", _chain()) == {"HL_STANDALONE"}
+    assert manifest.transitive_closure("HL_DERIVED", _chain(), "depends_on") == {"HL_DERIVED", "HL_CACHE", "HL_HOIST"}
+    assert manifest.transitive_closure("HL_STANDALONE", _chain(), "depends_on") == {"HL_STANDALONE"}
 
 
 def test_dependents_closure_is_transitive():
     """Turning an enabler off has to turn off everything below it."""
-    assert manifest.dependents_closure("HL_HOIST", _chain()) == {"HL_HOIST", "HL_CACHE", "HL_DERIVED"}
-    assert manifest.dependents_closure("HL_DERIVED", _chain()) == {"HL_DERIVED"}
+    assert manifest.transitive_closure("HL_HOIST", _chain(), "enables") == {"HL_HOIST", "HL_CACHE", "HL_DERIVED"}
+    assert manifest.transitive_closure("HL_DERIVED", _chain(), "enables") == {"HL_DERIVED"}
 
 
 def test_closure_of_an_unknown_switch_is_itself():
     """Callers never have to special-case a name the manifest does not carry."""
-    assert manifest.dependency_closure("HL_ABSENT", _chain()) == {"HL_ABSENT"}
+    assert manifest.transitive_closure("HL_ABSENT", _chain(), "depends_on") == {"HL_ABSENT"}
 
 
 # additive variants

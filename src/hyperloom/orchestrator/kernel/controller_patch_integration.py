@@ -13,7 +13,12 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from kernelforge.kernel_rewrite_controller import load_task, operator_directory_name
+from kernelforge.workflows.rewrite_controller import (
+    ControllerLayout,
+    load_task,
+    operator_directory_name,
+    published_operator_dirs,
+)
 
 from hyperloom.common.io import JsonFormat, atomic_write_json
 from hyperloom.orchestrator.actions.executors._patch_snapshot import (
@@ -28,7 +33,6 @@ from hyperloom.orchestrator.source_snapshot import MANIFEST_NAME, SourceLayer, s
 from .controller_publication import (
     ControllerPatchPublication,
     ControllerPublicationError,
-    discover_controller_patch_dirs,
     load_controller_publication,
 )
 from .patch_conflict_merge import LandingContext, apply_patch_resolving_conflicts
@@ -48,7 +52,6 @@ class PatchIntegrationResult:
     best_commit: str = ""
     repo_root: str = ""
     integration_head_before: str = ""
-    integration_head_after: str = ""
     keep_commit: str = ""
     new_tput: float = 0.0
     gain_pct: float = 0.0
@@ -102,18 +105,16 @@ class KeepSession:
     record_keep: KeepRecorder
 
 
-def _priority_ordered_patch_dirs(patches_root: str | Path) -> tuple[Path, ...]:
+def _priority_ordered_patch_dirs(layout: ControllerLayout) -> tuple[Path, ...]:
     """Order publications by their original Controller task priority."""
-    root = Path(patches_root).resolve()
-    tasks_root = root.parent.parent / "controller" / "tasks"
 
     def key(patch_dir: Path) -> tuple[int, str]:
-        parsed = load_task(tasks_root / patch_dir.name, record_state=False)
+        parsed = load_task(layout.tasks_root / patch_dir.name, record_state=False)
         if parsed.task is None:
             return (2**31 - 1, patch_dir.name)
         return (parsed.task.priority, parsed.task.operator_id)
 
-    return tuple(sorted(discover_controller_patch_dirs(root), key=key))
+    return tuple(sorted(published_operator_dirs(layout), key=key))
 
 
 def _git_output(repo: Path, *args: str) -> str:
@@ -441,7 +442,6 @@ class _ControllerIntegration:
             record_reason + merge.note() + _settle_apply_manifest(validation, kept=True),
             head_before,
             merge_strategy=merge.strategy,
-            integration_head_after=keep_commit,
             keep_commit=keep_commit,
             **_measured(validation),
         )
@@ -469,7 +469,8 @@ async def integrate_controller_patches(
         admit_round: Asked before each patch is applied; a stop leaves the patch
             unapplied and unmeasured, recorded under the stop's class.
     """
-    integration_root = Path(patches_root).resolve().parent.parent / "integration"
+    layout = ControllerLayout(Path(patches_root).resolve().parent.parent)
+    integration_root = layout.output_dir / "integration"
     results_dir = integration_root / "results"
     results_dir.mkdir(parents=True, exist_ok=True)
 
@@ -499,7 +500,7 @@ async def integrate_controller_patches(
         admit_round,
     )
     results: list[PatchIntegrationResult] = []
-    for index, patch_dir in enumerate(_priority_ordered_patch_dirs(patches_root)):
+    for index, patch_dir in enumerate(_priority_ordered_patch_dirs(layout)):
         try:
             publication = load_controller_publication(patch_dir)
         except ControllerPublicationError as error:

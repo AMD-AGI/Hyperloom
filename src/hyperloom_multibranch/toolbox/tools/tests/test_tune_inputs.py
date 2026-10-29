@@ -96,7 +96,7 @@ def test_explicit_shapes_become_one_demand_entry_per_table_ranked_by_how_often_t
 
 
 def test_a_demand_is_written_as_the_document_forge_loads(tmp_path: Path) -> None:
-    from kernelforge.gemm_tune.evidence import demand_for_tuner, demand_shapes, load_demand
+    from kernelforge.workflows.gemm_tune.evidence import demand_for_tuner, demand_shapes, load_demand
 
     (entry,) = demand_from_logs(landed_test(tmp_path, tmp_path / "model"))["demands"]
     path = write_demand_of(entry, tmp_path / "demand.json")

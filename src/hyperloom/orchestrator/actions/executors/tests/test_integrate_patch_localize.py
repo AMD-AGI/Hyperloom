@@ -45,7 +45,6 @@ def _stub_external_operations(monkeypatch):
         pytest.fail("localization fetches must be stubbed by the test")
 
     monkeypatch.setattr(github, "pr_patches", forbidden)
-    monkeypatch.setattr(github, "fetch_raw_file", forbidden)
 
 
 @pytest.fixture()

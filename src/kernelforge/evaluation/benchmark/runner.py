@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Any, Callable
 
-from kernelforge.tools.process_group import kill_process_group
+from kernelforge.utils.process_group import kill_process_group
 
 # Optional bench-mode companion to the driver contract's --warmup/--iters, asking the driver to time ONE declared case
 # instead of its whole suite.

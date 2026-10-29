@@ -164,20 +164,11 @@ class EnablementBuild(CoordinatorCollaborator):
         if not ref:
             from .runtime.build_actions import resolve_build_ref
 
-            _component_hints = {
-                "aiter": ("aiter",),
-                "sgl_kernel": ("sglang", "sgl-kernel", "sgl_kernel"),
-                "vllm_source": ("vllm",),
-            }
-            hints = _component_hints[component]
             for _cand in list(state.enablement.candidate_refs):
                 _repo, _ref, _pr_url = resolve_build_ref(str(_cand), repo_url)
-                if not _ref:
+                if not _ref or not _repo_matches_targeted_build_component(_repo or _cand, component):
                     continue
-                _repo_lower = (_repo or _cand).lower()
-                if not any(h in _repo_lower for h in hints):
-                    continue
-                repo_url = _repo
+                repo_url = _repo or repo_url
                 ref = _ref
                 source_pr_url = _pr_url
                 break
@@ -198,7 +189,6 @@ class EnablementBuild(CoordinatorCollaborator):
             repo_url=repo_url,
             ref=ref,
             gpu_arch=gfx_arch_for_gpu_type(gpu_type) or "",
-            build_budget_sec=0,
             source_pr_url=source_pr_url,
         )
         task_id = await self._enqueue_on_validated_board(action)
@@ -316,7 +306,6 @@ class EnablementBuild(CoordinatorCollaborator):
             repo_url=repo_url,
             ref=ref,
             gpu_arch=gfx_arch_for_gpu_type(gpu_type) or "",
-            build_budget_sec=0,
             source_pr_url=source_pr_url,
         )
 

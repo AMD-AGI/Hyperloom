@@ -15,9 +15,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from kernelforge.loop.bootstrap.errors import InvalidOptionValue
-from kernelforge.loop.bootstrap.run import _load_external_baseline
-from kernelforge.loop import knowledge_integration as integration
+from kernelforge.workflows.forge_loop.bootstrap.errors import InvalidOptionValue
+from kernelforge.workflows.forge_loop.bootstrap.run import _load_external_baseline
+from kernelforge.workflows.forge_loop.memory import knowledge_integration as integration
 from kernelforge.evaluation.benchmark.baseline import (
     BASELINE_DRIFT_TOLERANCE,
     BaselineReferenceError,
@@ -25,11 +25,17 @@ from kernelforge.evaluation.benchmark.baseline import (
     load_reference_case_times,
 )
 from kernelforge.knowledge.kb_store.identity.run import LoopKernel
-from kernelforge.loop.recovery import CallerRecovery, publish_warm_start_recovery
-from kernelforge.loop.run_state import IterationVerdict, LoopStanding, LoopStateStore, RunState, apply_iteration
-from kernelforge.loop import runner as runner_module
-from kernelforge.loop.iteration.iteration_types import _decision_label
-from kernelforge.loop.runner import IterationResult
+from kernelforge.workflows.forge_loop.campaign.recovery import CallerRecovery, publish_warm_start_recovery
+from kernelforge.workflows.forge_loop.campaign.run_state import (
+    IterationVerdict,
+    LoopStanding,
+    LoopStateStore,
+    RunState,
+    apply_iteration,
+)
+from kernelforge.workflows.forge_loop.iteration import runner as runner_module
+from kernelforge.workflows.forge_loop.iteration.iteration_types import _decision_label
+from kernelforge.workflows.forge_loop.iteration.runner import IterationResult
 from kernelforge.evaluation.scoring import (
     KEEP_MEASUREMENT_COUNT,
     KEEP_MIN_MARGIN_FRACTION,
@@ -51,8 +57,8 @@ from kernelforge.tests.test_loop_runner import (
     _no_change_agent,
     _unused_supervisor,
 )
-from kernelforge.loop.iteration import iteration_types
-from kernelforge.loop.iteration import scoring_runtime
+from kernelforge.workflows.forge_loop.iteration import iteration_types
+from kernelforge.workflows.forge_loop.iteration import scoring_runtime
 from kernelforge.tests.conftest import patch_iteration_name
 
 # A modest speedup, well inside anything the loop has ever argued about.

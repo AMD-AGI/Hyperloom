@@ -414,17 +414,6 @@ def classify_failure(log_text: str) -> FailureSignature:
 # --- Request model ---------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class EnablementRequest:
-    """Top-level request describing a non-runnable ``(model, backend)`` combo."""
-
-    framework: str
-    model: str
-    repo_url: str
-    gpu_type: str = ""
-    max_search_candidates: int = 5
-
-
 # --- Runnable gate ---------------------------------------------------------
 
 
@@ -498,7 +487,6 @@ __all__ = [
     "TOKENIZER_ERROR",
     "UNKNOWN",
     "UNSUPPORTED_DTYPE",
-    "EnablementRequest",
     "FailureSignature",
     "classify_failure",
     "is_targeted_build_candidate",

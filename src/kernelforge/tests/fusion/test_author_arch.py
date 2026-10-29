@@ -5,7 +5,12 @@
 
 from __future__ import annotations
 
-from kernelforge.fusion.author import AuthorBrief, _arch_phrase, build_author_prompt, build_multi_author_prompt
+from kernelforge.workflows.forge_fusion.author import (
+    AuthorBrief,
+    _arch_phrase,
+    build_author_prompt,
+    build_multi_author_prompt,
+)
 
 RECIPE = {
     "pattern_id": "residual_add_rmsnorm",

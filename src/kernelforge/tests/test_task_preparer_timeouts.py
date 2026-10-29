@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import os
 
-from kernelforge.loop import task_preparer
-from kernelforge.loop import task_preflight
+from kernelforge.workflows.forge_loop.preparation import task_preparer
+from kernelforge.workflows.forge_loop.preparation import task_preflight
 
 
 # _deadline_timeout clamp

@@ -33,7 +33,7 @@ from hyperloom.orchestrator.bus.resource_lock import (
 )
 from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
 from hyperloom.inference_optimizer.session.paths import make_session_dir
-from hyperloom.orchestrator.bus.storage import SqliteConnection
+from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.bus.message_bus import Message
 
 from .conftest import seed_kernel_keep
@@ -958,12 +958,7 @@ async def test_integrate_retries_once_after_stale_aiter_baton(tmp_path, monkeypa
             {"scanned": 1, "deleted": 1, "errors": 0},
         ]
     )
-    for _module in (krh, integrate_rebaseline):
-        monkeypatch.setattr(
-            _module,
-            "_sweep_integrate_aiter_locks",
-            lambda **_kwargs: next(sweeps),
-        )
+    monkeypatch.setattr(integrate_rebaseline, "_sweep_integrate_aiter_locks", lambda **_kwargs: next(sweeps))
     calls = 0
 
     async def _executor(_ctx):
@@ -1002,12 +997,7 @@ async def test_integrate_does_not_delete_or_retry_live_baton_owner(tmp_path, mon
             },
         ]
     )
-    for _module in (krh, integrate_rebaseline):
-        monkeypatch.setattr(
-            _module,
-            "_sweep_integrate_aiter_locks",
-            lambda **_kwargs: next(sweeps),
-        )
+    monkeypatch.setattr(integrate_rebaseline, "_sweep_integrate_aiter_locks", lambda **_kwargs: next(sweeps))
     calls = 0
 
     async def _executor(_ctx):
@@ -1036,8 +1026,9 @@ async def test_integrate_retries_once_after_aiter_jit_registry_mismatch(tmp_path
         dropped.append({"envs": envs, "backup_dir": backup_dir, "also_modules": also_modules})
         return {"action": "invalidate"}
 
-    for _module in (krh, integrate_rebaseline):
-        monkeypatch.setattr(_module, "_sweep_integrate_aiter_locks", lambda **_kwargs: {"scanned": 0, "deleted": 0})
+    monkeypatch.setattr(
+        integrate_rebaseline, "_sweep_integrate_aiter_locks", lambda **_kwargs: {"scanned": 0, "deleted": 0}
+    )
     monkeypatch.setattr(
         "hyperloom.orchestrator.actions.executors._aiter_jit.drop_serving_so_for_envs",
         _drop,
@@ -1080,8 +1071,9 @@ async def test_integrate_registry_retry_does_not_restamp_unrelated_retry_failure
         encoding="utf-8",
     )
 
-    for _module in (krh, integrate_rebaseline):
-        monkeypatch.setattr(_module, "_sweep_integrate_aiter_locks", lambda **_kwargs: {"scanned": 0, "deleted": 0})
+    monkeypatch.setattr(
+        integrate_rebaseline, "_sweep_integrate_aiter_locks", lambda **_kwargs: {"scanned": 0, "deleted": 0}
+    )
     monkeypatch.setattr(
         "hyperloom.orchestrator.actions.executors._aiter_jit.drop_serving_so_for_envs",
         lambda *args, **kwargs: {"action": "invalidate"},
@@ -2263,8 +2255,7 @@ async def test_integrate_handler_rejects_zero_base_tput(session_dir):
 
 
 def test_integrate_registered_under_two_aliases():
-    assert krh.get_handler("integrate") is not None
-    assert krh.get_handler("integrate") is krh.get_handler("apply_patch")
+    assert krh.KERNEL_REQUEST_HANDLERS["integrate"] is krh.KERNEL_REQUEST_HANDLERS["apply_patch"]
 
 
 # Coordinator wiring of integrate request
@@ -2516,3 +2507,22 @@ async def test_report_executor_writes_md_and_json(session_dir, record_alert):
 def tmp_path_helper(session_dir: Path) -> Path:
     """Point ReportExecutor's SqliteConnection at the session's DB."""
     return session_dir / "storage" / "coordinator.db"
+
+
+def test_single_node_cpp_itfs_patch_takes_the_rebuild_verdict_of_its_backup(monkeypatch) -> None:
+    from hyperloom.orchestrator.actions.executors import _multi_node_env
+
+    backup = {"is_cpp_itfs": True, "build_dir": "/aiter/jit/build", "module_names": ["module_custom"]}
+    seen: list[dict] = []
+
+    def verify(cpp_itfs_backup):
+        seen.append(cpp_itfs_backup)
+        return {"verified": False, "status": "stale_cpp_itfs_cache"}
+
+    monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: False)
+    monkeypatch.setattr(integrate_rebaseline.patch_jit_cache, "verify_cpp_itfs_rebuilt", verify)
+
+    result = integrate_rebaseline._cpp_itfs_rebuild_check({"cpp_itfs_cache_backup": backup})
+
+    assert result == {"verified": False, "status": "stale_cpp_itfs_cache"}
+    assert seen == [backup]

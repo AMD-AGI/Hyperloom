@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.kernel_rewrite_controller import TaskState, TaskStateError, TaskStateStore
+from kernelforge.workflows.rewrite_controller import TaskState, TaskStateError, TaskStateStore
 
 
 def test_task_state_round_trip_and_terminal_transition(task_dir: Path) -> None:

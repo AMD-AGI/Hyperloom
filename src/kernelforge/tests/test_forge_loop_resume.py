@@ -13,26 +13,26 @@ from types import SimpleNamespace
 import pytest
 from click.testing import CliRunner
 
-import kernelforge.loop.bootstrap.reporter as reporter_module
-import kernelforge.loop.bootstrap.run as forge_loop_command
-import kernelforge.loop.bootstrap.warm_start as warm_start_module
-import kernelforge.loop.bootstrap.relay as relay_module
-import kernelforge.loop.recovery as recovery_module
-import kernelforge.orchestrator.agent as agent_module
-import kernelforge.orchestrator.analysis as analysis_module
-import kernelforge.orchestrator.orchestration as orchestration_module
-import kernelforge.orchestrator.supervisor as supervisor_module
+import kernelforge.workflows.forge_loop.bootstrap.reporter as reporter_module
+import kernelforge.workflows.forge_loop.bootstrap.run as forge_loop_command
+import kernelforge.workflows.forge_loop.bootstrap.warm_start as warm_start_module
+import kernelforge.workflows.forge_loop.bootstrap.relay as relay_module
+import kernelforge.workflows.forge_loop.campaign.recovery as recovery_module
+import kernelforge.workflows.forge_loop.roles.agent as agent_module
+import kernelforge.workflows.forge_loop.roles.analysis as analysis_module
+import kernelforge.workflows.forge_loop.roles.orchestration as orchestration_module
+import kernelforge.workflows.forge_loop.roles.supervisor as supervisor_module
 from kernelforge.cli import main
-from kernelforge.loop.bootstrap.session_budget import _forge_session_timeout_sec
+from kernelforge.workflows.forge_loop.bootstrap.session_budget import _forge_session_timeout_sec
 from kernelforge.config import Config
-from kernelforge.loop.campaign_config import (
+from kernelforge.workflows.forge_loop.campaign.campaign_config import (
     CampaignConfigStore,
     CampaignInputs,
     create_campaign_config,
 )
-from kernelforge.loop.experience import ExperienceLedger
-from kernelforge.loop.knowledge_integration import WarmStartRollbackError
-from kernelforge.loop.agent_relay import (
+from kernelforge.workflows.forge_loop.memory.experience import ExperienceLedger
+from kernelforge.workflows.forge_loop.memory.knowledge_integration import WarmStartRollbackError
+from kernelforge.workflows.forge_loop.search.agent_relay import (
     AgentAvailabilitySnapshot,
     AgentProfileSpec,
     AgentRelayPolicy,
@@ -40,13 +40,13 @@ from kernelforge.loop.agent_relay import (
     ProfileAvailability,
     ProviderAvailability,
 )
-from kernelforge.loop.run_state import (
+from kernelforge.workflows.forge_loop.campaign.run_state import (
     SESSION_PAUSED,
     LoopStateStore,
     RunState,
     WorkspaceLockError,
 )
-from kernelforge.loop.runner import IterationConfig, IterationLoop
+from kernelforge.workflows.forge_loop.iteration.runner import IterationConfig, IterationLoop
 
 
 # The forge-loop CLI activates per-workspace aiter cache isolation, which writes AITER_ROOT_DIR / AITER_JIT_DIR (and
@@ -244,8 +244,8 @@ def _install_cli_fakes(monkeypatch, tmp_path):
         "write_experience_to_kb",
         fake_write,
     )
-    monkeypatch.setattr("kernelforge.loop.runner.IterationLoop", FakeLoop)
-    monkeypatch.setattr("kernelforge.tracker.ExperimentTracker", FakeTracker)
+    monkeypatch.setattr("kernelforge.workflows.forge_loop.iteration.runner.IterationLoop", FakeLoop)
+    monkeypatch.setattr("kernelforge.workflows.forge_loop.campaign.experiment.ExperimentTracker", FakeTracker)
 
     def fake_make_agent_fn(config, setup, **kwargs):
         captured["agent_fn_setup"] = setup
@@ -701,7 +701,7 @@ def _fresh_command(workspace, kernel, driver):
 
 @pytest.mark.parametrize("prepare_ok", [True, False])
 def test_assembly_cli_prepares_before_optimizer_and_keeps_original_export_base(tmp_path, monkeypatch, prepare_ok):
-    from kernelforge.assembly import prepare as preparation
+    from kernelforge.kernel_backends.assembly import prepare as preparation
 
     captured = _install_cli_fakes(monkeypatch, tmp_path)
     workspace, kernel, driver = _initialize_workspace(tmp_path)
@@ -1099,7 +1099,7 @@ def test_resume_reuses_persisted_framework_without_inference(
         raise AssertionError("resume must not infer framework")
 
     monkeypatch.setattr(
-        "kernelforge.loop.campaign_config.infer_source_owner_framework",
+        "kernelforge.workflows.forge_loop.campaign.campaign_config.infer_source_owner_framework",
         fail_inference,
     )
     result = CliRunner().invoke(
@@ -1784,8 +1784,8 @@ def test_fresh_campaign_captures_post_prep_driver_digest_and_base(tmp_path, monk
             audit_dir="",
         )
 
-    monkeypatch.setattr("kernelforge.loop.task_preparer.preflight_task", fake_preflight)
-    monkeypatch.setattr("kernelforge.loop.task_preparer.prepare_task_sync", fake_prepare)
+    monkeypatch.setattr("kernelforge.workflows.forge_loop.preparation.task_preparer.preflight_task", fake_preflight)
+    monkeypatch.setattr("kernelforge.workflows.forge_loop.preparation.task_preparer.prepare_task_sync", fake_prepare)
 
     result = CliRunner().invoke(
         main,

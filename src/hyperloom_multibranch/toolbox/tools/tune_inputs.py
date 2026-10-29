@@ -6,7 +6,7 @@ log reports untuned.
 
 The workload (model, framework, precision, TP, concurrency) is the one the test's own point configurations
 (``variant_*/config.yaml``) say, never a caller's word. The shapes are Forge's demand: the keys the server looked up in
-aiter's tuned tables and did not find, which ``kernelforge.gemm_tune.evidence.parse_log`` reads out of the server logs
+aiter's tuned tables and did not find, which ``kernelforge.workflows.gemm_tune.evidence.parse_log`` reads out of the server logs
 (its reader, not a second one here), or a list the caller names. Either way they reach the tuner as a ``--demand``
 document, the shape source every dense Forge tuner ranks first, and only dense GEMM tables are asked for.
 
@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from kernelforge.gemm_tune.evidence import (
+from kernelforge.workflows.gemm_tune.evidence import (
     KEY_FIELDS,
     MOE_TABLE,
     SCHEMA_VERSION,

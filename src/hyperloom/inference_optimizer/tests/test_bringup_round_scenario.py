@@ -12,14 +12,15 @@ from pathlib import Path
 import pytest
 
 from hyperloom.common.bringup import LadderStage
-from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.inference_optimizer.session.session_paths import reports_dir
 from hyperloom.orchestrator.actions.executors import baseline as bl
+from hyperloom.orchestrator.actions.executors.benchmark_run import launch as launch_mod
+from hyperloom.orchestrator.actions.executors.benchmark_run.records import BenchmarkAttempt
 from hyperloom.orchestrator.bringup import load_boot_observation
 from hyperloom.orchestrator.bringup import reconcile
 from hyperloom.orchestrator.bringup.reconcile import ReconcileLinks, Reconciler, ReconcileStores
 from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
-from hyperloom.orchestrator.bus.storage import SqliteConnection
+from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.bus.storage.schema import ensure_schema
 from hyperloom.orchestrator.enablement.build import EnablementBuild
 from hyperloom.orchestrator.enablement.lane import EnablementLane
@@ -88,9 +89,9 @@ def round_slot(tmp_path, monkeypatch):
     session.mkdir()
     slot = tmp_path / "round"
     slot.mkdir()
-    monkeypatch.setattr(bl, "harvest_leaked_artifacts", lambda *a, **k: [])
-    monkeypatch.setattr(bl, "snapshot_workspaces", lambda *a, **k: set())
-    monkeypatch.setattr(bl, "select_run_workspace", lambda *a, **k: None)
+    monkeypatch.setattr(launch_mod, "harvest_leaked_artifacts", lambda *a, **k: [])
+    monkeypatch.setattr(launch_mod, "snapshot_workspaces", lambda *a, **k: set())
+    monkeypatch.setattr(launch_mod, "select_run_workspace", lambda *a, **k: None)
     return session, slot
 
 
@@ -118,7 +119,7 @@ async def _bringup_attempt(session: Path, slot: Path, *, task_id: str) -> dict:
     config = session / "bench.yaml"
     config.write_text("benchmark:\n  framework: vllm\n  model: scripted/Model\n", encoding="utf-8")
     return await executor._run_single_benchmark(
-        bl.BenchmarkAttempt(
+        BenchmarkAttempt(
             timeout_sec=1800,
             override_result_dir=None,
             resolved_model="scripted/Model",
@@ -176,7 +177,6 @@ def _lane(session: Path, tasks: TaskRegistry, rounds: RoundStore, launch_log: st
         run_deadline=None,
         warm_specialist_params=_noop,
         bus=types.SimpleNamespace(record_observation=_noop),
-        action_registry=ACTION_CATALOGUE,
         state=types.SimpleNamespace(pending_proposals={}),
         _read_enablement_source_context=lambda _sig: "",
         _derive_checkpoint_weight_facts=lambda _log: "",

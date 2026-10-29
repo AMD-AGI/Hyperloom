@@ -72,7 +72,6 @@ class SessionLock:
         self.session_dir = Path(session_dir)
         self.path = session_paths.optimizer_lock_path(self.session_dir)
         self._fd: int | None = None
-        self._started_at: str = ""
 
     def acquire(self) -> SessionLock:
         """Acquire the session lock or raise :class:`SessionAlreadyRunning`."""
@@ -102,17 +101,14 @@ class SessionLock:
                 os.close(fd)
                 raise SessionAlreadyRunning(self.session_dir, owner)
         self._fd = fd
-        owner = self._now_owner(started_at=now_iso(timespec="seconds"))
+        owner = {
+            "pid": os.getpid(),
+            "hostname": socket.gethostname(),
+            "started_at": now_iso(timespec="seconds"),
+        }
         self._write_owner(owner)
         self._append_pod_history(owner)
         return self
-
-    def heartbeat(self) -> None:
-        """Refresh ``heartbeat_at`` in the lock body (best-effort, never raises)."""
-        if self._fd is None:
-            return
-        with suppress(OSError):
-            self._write_owner(self._now_owner(started_at=self._started_at))
 
     def release(self) -> None:
         """Release the lock and close the fd. The file body is left in place."""
@@ -124,17 +120,6 @@ class SessionLock:
         with suppress(OSError):
             os.close(self._fd)
         self._fd = None
-
-    def _now_owner(self, *, started_at: str) -> dict[str, Any]:
-        """Build the owner document written into the lock body."""
-        now = now_iso(timespec="seconds")
-        self._started_at = started_at or now
-        return {
-            "pid": os.getpid(),
-            "hostname": socket.gethostname(),
-            "started_at": self._started_at,
-            "heartbeat_at": now,
-        }
 
     def _append_pod_history(self, owner: dict[str, Any]) -> None:
         """Append this acquisition to the pod-ownership ledger (never raises)."""

@@ -120,7 +120,7 @@ def test_search_perf_prs_non_github_returns_empty() -> None:
     assert out == []
 
 
-# pr_patches / fetch_raw_file -------------------------------------------
+# pr_patches -------------------------------------------
 
 
 class _RawResp(io.BytesIO):
@@ -189,23 +189,5 @@ def test_pr_patches_anonymous_when_no_token(monkeypatch):
     assert captured["auth"] is None
 
 
-def test_fetch_raw_file_returns_content(monkeypatch):
-    monkeypatch.setattr(gh.urllib.request, "urlopen", _raw_urlopen_ok("print('hi')\n"))
-    assert gh.fetch_raw_file("ROCm/vllm", "abc123", "vllm/model.py") == "print('hi')\n"
-
-
-def test_fetch_raw_file_network_error_returns_empty(monkeypatch):
-    monkeypatch.setattr(gh.urllib.request, "urlopen", _raw_urlopen_fail)
-    assert gh.fetch_raw_file("o/r", "ref", "p.py") == ""
-
-
-def test_fetch_raw_file_invalid_args(monkeypatch):
-    monkeypatch.setattr(gh.urllib.request, "urlopen", _raw_urlopen_ok("x"))
-    assert gh.fetch_raw_file("", "ref", "p") == ""
-    assert gh.fetch_raw_file("o/r", "", "p") == ""
-    assert gh.fetch_raw_file("o/r", "ref", "") == ""
-
-
 def test_source_patch_exports():
     assert "pr_patches" in gh.__all__
-    assert "fetch_raw_file" in gh.__all__

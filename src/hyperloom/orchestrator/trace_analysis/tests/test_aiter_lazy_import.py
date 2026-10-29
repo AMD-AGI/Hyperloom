@@ -11,7 +11,7 @@ from pathlib import Path
 
 _PROBE = (
     "import hyperloom.orchestrator.trace_analysis._kernel_classification as k\n"
-    "import hyperloom.measure.profile_traces\n"
+    "import hyperloom.orchestrator.trace_analysis.tracelens_analysis\n"
     "print('root=' + k._aiter_csrc_root())\n"
 )
 

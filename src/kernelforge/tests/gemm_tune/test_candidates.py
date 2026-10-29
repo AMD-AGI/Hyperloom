@@ -5,13 +5,13 @@
 
 from __future__ import annotations
 
-from kernelforge.gemm_tune.candidates import (
+from kernelforge.workflows.gemm_tune.candidates import (
     TunerCandidate,
     failed_tuner_records,
     is_candidate,
     per_tuner_candidates,
 )
-from kernelforge.gemm_tune.tuners.base import TuneResult
+from kernelforge.workflows.gemm_tune.tuners.base import TuneResult
 
 
 def _ok(name: str, **kw) -> TuneResult:

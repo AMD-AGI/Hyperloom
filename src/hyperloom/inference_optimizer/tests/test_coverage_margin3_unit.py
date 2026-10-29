@@ -239,17 +239,3 @@ def test_multi_node_state_paths_warn_on_permission_failures(monkeypatch, tmp_pat
     state_paths._ensure_runtime_dir(runtime_dir)
     assert runtime_dir.is_dir()
     assert "could not chmod runtime dir" in messages[-1]
-
-
-def test_llm_prompt_parse_response_edges() -> None:
-    from hyperloom.inference_optimizer.breakdown.reporters.llm_prompt import parse_llm_response
-
-    fenced = """```json
-{"executive_summary": "  ok  ", "section_narratives": {"a": "  first  ", "2": "two"}}
-```"""
-    parsed = parse_llm_response(fenced)
-    assert parsed["executive_summary"] == "ok"
-    assert parsed["section_narratives"] == {"a": "first", "2": "two"}
-
-    assert parse_llm_response("not json") == {"executive_summary": "", "section_narratives": {}}
-    assert parse_llm_response("[]") == {"executive_summary": "", "section_narratives": {}}

@@ -18,9 +18,8 @@ from hyperloom.common.codex_session import (
 )
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.orchestrator.policy.gate import PolicyGate
+from hyperloom.orchestrator.prompts.transport import TRANSPORT_STRUCTURED_OUTPUT, TRANSPORT_TOOLS
 from hyperloom.orchestrator.prompts.prompt_builder import (
-    TRANSPORT_STRUCTURED_OUTPUT,
-    TRANSPORT_TOOLS,
     build_orchestration_prompt,
     default_enabled_actions,
     PromptAssets,

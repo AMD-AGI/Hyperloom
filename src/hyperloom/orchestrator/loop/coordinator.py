@@ -11,9 +11,7 @@ import logging
 import math
 import os
 import time
-from collections.abc import Mapping
 from dataclasses import dataclass, field
-from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, AbstractSet, Any, Awaitable, Callable
 
@@ -29,6 +27,8 @@ MAINTENANCE_INTERVAL_SEC: int = 1800
 DEFAULT_CYCLE_HOURS: float = 24.0
 # Trailing window for the crash-rate emergency stop, in seconds.
 _CRASH_EMERGENCY_WINDOW_SEC: float = 24.0 * 3600.0
+# Coordinator exceptions within the trailing window that end the run as ``emergency``.
+_CRASH_EMERGENCY_THRESHOLD: int = 25
 # Retry delay for an agent whose LLM backend keeps failing, doubling from the base to the ceiling, in seconds. Ints, so
 # the doubling cannot overflow a float however long a streak runs.
 _BACKEND_RETRY_BASE_SEC: int = 2
@@ -40,11 +40,10 @@ _NO_INTENT_STOP_TURNS: int = 50
 from ..phases import machine_state as _phase_state
 from hyperloom.inference_optimizer.session.paths import db_path_for, stop_request_path
 from hyperloom.inference_optimizer.session.session_binding import bind_session
-from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE, ActionMetadata
 from ..roles.agent_role import AgentRole, default_role_registry
 from ..roles.base import Backend, BackendError, BackendTurnResult, LLMCallFailed
 from ..bus.cursor_store import CursorStore
-from ..bus.storage.connection import SqliteConnection, resolve_journal_mode
+from ..bus.storage.connection import SqliteConnection
 from hyperloom.inference_optimizer.protocol.intent import NoIntentEmitted
 from ..bus.message_bus import MessageBus
 from ..state.objective import Objective, TimeOnlyObjective
@@ -179,18 +178,14 @@ class RunOptions:
         max_minutes: Session wall-clock bound; unbounded when ``None``.
         tick_interval_sec: Pause between ticks.
         max_ticks: Stop after this many ticks, when set.
-        stop_when: Custom stop predicate, asked after every tick.
         install_signal_handlers: Whether to arm the stop-signal drain.
-        crash_emergency_threshold: Coordinator exceptions within the trailing 24 hours that end the run as ``emergency``.
         closing_grace_sec: Bound on the closing phase; the default when ``None``.
     """
 
     max_minutes: float | None = None
     tick_interval_sec: float = 0.0
     max_ticks: int | None = None
-    stop_when: Callable[["Coordinator"], Awaitable[bool] | bool] | None = None
     install_signal_handlers: bool = False
-    crash_emergency_threshold: int = 25
     closing_grace_sec: float | None = None
 
 
@@ -216,12 +211,8 @@ class Coordinator:
         self.orch_prompt = OrchestrationPrompt(overrides={})
         # KnowledgePlane facade; pre-warms PR feed + advisory context.
         self.knowledge_plane: Any = advisory.knowledge_plane
-        from ..specialists.dispatch import SpecialistDispatchCollaborator
-
-        self._collaborator(
-            "_specialist_dispatch",
-            partial(SpecialistDispatchCollaborator, proposal_scorer=advisory.proposal_scorer),
-        )
+        # Advisory multi-model specialist-proposal scorer.
+        self.proposal_scorer: Any = advisory.proposal_scorer
         self._model_class_override: str = (settings.model_class or "").strip()
 
         # Validate every reactor has a backend wired.
@@ -236,7 +227,7 @@ class Coordinator:
         # The session directory can sit on a networked filesystem where WAL's
         # shared-memory mapping corrupts the database, so the mode is resolved
         # before the file is opened.
-        self.db = SqliteConnection(db_path, journal_mode=resolve_journal_mode())
+        self.db = SqliteConnection(db_path)
 
         self.bus = MessageBus(self.db)
         self.locks = SqliteLeaseBackend(self.db)
@@ -306,7 +297,6 @@ class Coordinator:
         self.state = CoordinatorState()
         self._stop = asyncio.Event()
         self._stop_classification = ""
-        self._tasks_running: list[asyncio.Task] = []
 
         # Wall-clock stamp of the last maintenance pass (lease reaping + DB retention).
         self._last_maintenance_ts: float = time.monotonic()
@@ -450,7 +440,7 @@ class Coordinator:
 
     @property
     def gap_refresh(self):
-        from ..state.gaps import GapRefreshCollaborator
+        from .gap_refresh import GapRefreshCollaborator
 
         return self._collaborator("_gap_refresh", GapRefreshCollaborator)
 
@@ -577,9 +567,6 @@ class Coordinator:
 
         write_trees(resolve_trees(), session_dir=self.session_dir)
 
-    # Action catalogue mapping action_name -> metadata.
-    action_registry: Mapping[str, ActionMetadata] = ACTION_CATALOGUE
-
     # Lifecycle
     async def stop(self) -> None:
         """Signal shutdown, cancel in-flight work, and close the DB."""
@@ -588,17 +575,6 @@ class Coordinator:
             await self.dispatcher.cancel_inflight_actions(reason="coordinator_stop")
         except Exception:
             log.exception("Coordinator.stop: cancelling in-flight actions raised")
-        for t in self._tasks_running:
-            if not t.done():
-                t.cancel()
-        for t in self._tasks_running:
-            try:
-                await t
-            except asyncio.CancelledError:
-                # Expected: we just cancelled these tasks.
-                pass
-            except Exception:
-                log.exception("reactor task raised on shutdown")
         await self.dispatcher.close_db_after_executions()
 
     def _bind_session_deadline(
@@ -855,7 +831,7 @@ class Coordinator:
 
     # Long-run interface
     async def run(self, *, objective: Objective | None = None, options: RunOptions = RunOptions()) -> str:
-        """Run reactor + dispatcher until a stop condition fires (priority order): signal, a stop_reason the phase machine recorded (a met target closes through SWEEP as one), time_exhausted (via closing phase), emergency, custom, max_ticks. Sets + saves + returns shared_state.stop_reason.
+        """Run reactor + dispatcher until a stop condition fires (priority order): signal, a stop_reason the phase machine recorded (a met target closes through SWEEP as one), time_exhausted (via closing phase), emergency, max_ticks. Sets + saves + returns shared_state.stop_reason.
 
         The whole run is one ``session`` trajectory span, and every trajectory event recorded beneath it inherits this
         session dir and the live phase / tick.
@@ -915,19 +891,14 @@ class Coordinator:
         """Live ``(phase, tick)`` for trajectory events recorded inside :meth:`run`."""
         return (self.shared_state.phase or None), int(self.shared_state.tick or 0)
 
-    async def _budget_stop_reason(self, options: RunOptions, *, ticks: int) -> str:
-        """The reason the crash-rate, tick-count and caller-supplied budgets ask the loop to stop for, or ``""``."""
+    def _budget_stop_reason(self, options: RunOptions, *, ticks: int) -> str:
+        """The reason the crash-rate and tick-count budgets ask the loop to stop for, or ``""``."""
         crashes = self.shared_state.recent_crash_count(window_sec=_CRASH_EMERGENCY_WINDOW_SEC)
-        if crashes >= options.crash_emergency_threshold:
+        if crashes >= _CRASH_EMERGENCY_THRESHOLD:
             return "emergency"
         if options.max_ticks is not None and ticks >= options.max_ticks:
             return "max_ticks"
-        if options.stop_when is None:
-            return ""
-        triggered = options.stop_when(self)
-        if asyncio.iscoroutine(triggered):
-            triggered = await triggered
-        return "custom" if triggered else ""
+        return ""
 
     async def _closing_phase_spent(self, *, grace_sec: float) -> bool:
         """True once the closing report has reached a terminal state or its grace window is gone."""
@@ -1034,7 +1005,7 @@ class Coordinator:
                 if in_closing and await self._closing_phase_spent(grace_sec=grace_sec):
                     stop_reason = "time_exhausted"
                     break
-                stop_reason = await self._budget_stop_reason(options, ticks=ticks)
+                stop_reason = self._budget_stop_reason(options, ticks=ticks)
                 if stop_reason:
                     break
                 wait_sec = (

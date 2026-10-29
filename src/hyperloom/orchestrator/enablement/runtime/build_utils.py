@@ -8,7 +8,7 @@ from __future__ import annotations
 import subprocess
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -28,9 +28,6 @@ class RunResult:
     returncode: int
     stdout_tail: str = ""
     stderr_tail: str = ""
-    timed_out: bool = False
-    command: list[str] = field(default_factory=list)
-    cwd: str = ""
 
 
 def run_argv(
@@ -55,11 +52,9 @@ def run_argv(
             returncode=int(completed.returncode),
             stdout_tail=(completed.stdout or "")[-4000:],
             stderr_tail=(completed.stderr or "")[-4000:],
-            command=list(argv),
-            cwd=str(cwd),
         )
     except subprocess.TimeoutExpired:
-        return RunResult(returncode=-1, timed_out=True, command=list(argv), cwd=str(cwd))
+        return RunResult(returncode=-1)
 
 
 # ROCm constraint file
@@ -98,7 +93,7 @@ def write_rocm_constraints(
     *,
     replacing: str,
     run: _RunCallable = subprocess.run,
-) -> str:
+) -> None:
     """Write a pip constraint file pinning the ROCm stack ``python_exe`` imports.
 
     torch and its companions by name, and every other distribution whose
@@ -127,7 +122,6 @@ def write_rocm_constraints(
     if not any(p.startswith("torch==") for p in pins):
         raise RuntimeError(f"could not determine torch version from {python_exe!r}")
     Path(constraint_path).write_text("\n".join(pins) + "\n", encoding="utf-8")
-    return str(constraint_path)
 
 
 # SGLang's ROCm dependency set
@@ -209,19 +203,6 @@ def check_rocm_toolchain_alignment(
     )
     hipcc_root = (getattr(hipcc_root_res, "stdout", "") or "").strip()
 
-    rocm_path = effective_env.get("ROCM_PATH", "").strip()
-    if rocm_path and hipcc_root:
-        rocm_real_res = run(
-            ["sh", "-c", f"cd {rocm_path!r} 2>/dev/null && pwd"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            env=effective_env,
-        )
-        rocm_real = (getattr(rocm_real_res, "stdout", "") or "").strip()
-        if rocm_real and hipcc_root != rocm_real:
-            pass  # warn-only, not fatal
-
     # hip version from hipcc_root
     hip_header = Path(hipcc_root) / "include" / "hip" / "hip_runtime_api.h" if hipcc_root else None
     if hip_header and hip_header.is_file():
@@ -232,6 +213,32 @@ def check_rocm_toolchain_alignment(
                 "set ROCM_PATH/HIP_PATH/PATH to a ROCm 7.x toolchain before building AITER"
             )
     return True, "ok"
+
+
+# vLLM ROCm platform probe
+
+#: Exits 0 and prints ``vllm_rocm_ok`` only when torch is a ROCm build and vLLM
+#: reports a ROCm platform.
+VLLM_ROCM_PROBE = """\
+import sys, torch
+if not getattr(torch.version, "hip", None):
+    print("torch is not a ROCm build", file=sys.stderr); raise SystemExit(1)
+import vllm
+try:
+    from vllm.platforms import current_platform
+except Exception as exc:
+    print(f"cannot import vllm platform: {exc}", file=sys.stderr); raise SystemExit(1)
+is_rocm = False
+checker = getattr(current_platform, "is_rocm", None)
+if callable(checker):
+    try: is_rocm = bool(checker())
+    except Exception: pass
+if "rocm" in f"{current_platform!r} {current_platform.__class__.__name__}".lower():
+    is_rocm = True
+if not is_rocm:
+    print("vLLM did not report ROCm platform", file=sys.stderr); raise SystemExit(1)
+print("vllm_rocm_ok")
+"""
 
 
 # Torch ABI probe
@@ -285,6 +292,7 @@ def sort_tags_desc(tags: list[str] | tuple[str, ...]) -> list[str]:
 __all__ = [
     "ROCM_CONSTRAINTS_FILE",
     "AbiMismatchError",
+    "VLLM_ROCM_PROBE",
     "RunResult",
     "check_rocm_toolchain_alignment",
     "probe_torch_abi",

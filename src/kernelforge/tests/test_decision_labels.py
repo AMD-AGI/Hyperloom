@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from hyperloom_kb.collect import load_mapping
-from kernelforge.loop.decision_labels import DECISION_LABELS
+from kernelforge.workflows.forge_loop.campaign.decision_labels import DECISION_LABELS
 
 
 def test_the_kernelforge_declaration_accepts_exactly_the_decision_labels() -> None:

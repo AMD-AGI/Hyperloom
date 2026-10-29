@@ -672,7 +672,7 @@ def serving_lease_on_a_ray_double(monkeypatch):
 
 
 def cli_call_sequence(entry: str) -> list[str]:
-    """Every call ``entry`` makes, in source order, descending into this module's own functions.
+    """Every call ``entry`` makes, in source order, descending into the CLI package's own functions.
 
     The optimize driver's phases live in sibling functions rather than in one
     body, so an ordering contract that once read off a single function now spans
@@ -687,9 +687,14 @@ def cli_call_sequence(entry: str) -> list[str]:
     import pathlib
 
     from hyperloom.inference_optimizer import cli
+    from hyperloom.inference_optimizer.cli import launch_shape, model_catalog
 
-    tree = ast.parse(pathlib.Path(cli.__file__).read_text(encoding="utf-8"))
-    functions = {node.name: node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    functions = {}
+    for module in (cli, model_catalog, launch_shape):
+        tree = ast.parse(pathlib.Path(module.__file__).read_text(encoding="utf-8"))
+        functions.update(
+            {node.name: node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        )
 
     def own_calls(node: ast.AST) -> list[str]:
         found = [

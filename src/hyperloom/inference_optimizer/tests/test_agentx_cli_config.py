@@ -8,6 +8,7 @@ import pytest
 from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV, benchmark_config_path
 from hyperloom.common.perf_metric import agentx_enabled
 from hyperloom.inference_optimizer import cli
+from hyperloom.inference_optimizer.cli import launch_shape
 from hyperloom.inference_optimizer.cli.benchmark_config import (
     AgentXWorkload,
     bind_benchmark,
@@ -55,8 +56,8 @@ def isolated_env(monkeypatch):
 def _launch(tmp_path, monkeypatch, *flags):
     args = _build_parser().parse_args(["optimize", "--model", "Qwen/Qwen3-8B", *flags])
     configure_benchmark(args)
-    cli._resolve_run_topology(args)
-    cli._resolve_precision(args)
+    launch_shape._resolve_run_topology(args)
+    launch_shape._resolve_precision(args)
     monkeypatch.setenv("FRAMEWORK", args.framework or "sglang")
     session = tmp_path / "session"
     session.mkdir()
@@ -247,7 +248,7 @@ def test_generated_snapshot_precedes_manifest(tmp_path, monkeypatch):
 
     args = _build_parser().parse_args(["optimize", "--model", "Qwen/Qwen3-8B", "--tp", "2", "--conc", "8"])
     configure_benchmark(args)
-    cli._resolve_run_topology(args)
+    launch_shape._resolve_run_topology(args)
     for name in (
         "_enforce_expected_framework",
         "_apply_operator_supplied_paths",

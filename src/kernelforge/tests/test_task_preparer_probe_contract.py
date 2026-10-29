@@ -6,7 +6,7 @@ import asyncio
 import json
 import os
 
-from kernelforge.loop import task_preflight
+from kernelforge.workflows.forge_loop.preparation import task_preflight
 
 
 class _FakeProc:

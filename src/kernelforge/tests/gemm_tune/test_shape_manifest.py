@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for kernelforge.gemm_tune.shape_manifest (TraceShapeManifest consumer)."""
+"""Unit tests for kernelforge.workflows.gemm_tune.shape_manifest (TraceShapeManifest consumer)."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import json
 
 import pytest
 
-from kernelforge.gemm_tune.shape_manifest import (
+from kernelforge.workflows.gemm_tune.shape_manifest import (
     MANIFEST_KIND,
     load_manifest,
     manifest_to_shapes,

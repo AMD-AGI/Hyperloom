@@ -13,7 +13,7 @@ grouping key and no round index in an element.
 from __future__ import annotations
 
 import hashlib
-from typing import Any, Callable, Mapping
+from typing import Any, Mapping
 
 from .credentials import classify_credential_class, sanitize_command_text
 from .projections import project_build_inputs, select_linked_build
@@ -42,10 +42,7 @@ def command_digest(cmd: str) -> str:
     return hashlib.sha256(str(cmd).encode("utf-8")).hexdigest()
 
 
-def _build_step(
-    enablement: Mapping[str, Any],
-    attempt_summary: Callable[[dict[str, Any]], dict[str, Any]],
-) -> list[dict[str, Any]]:
+def _build_step(enablement: Mapping[str, Any]) -> list[dict[str, Any]]:
     """Project the one build linked to the final round, if any.
 
     The element sits between the setup steps and the patch steps because what it
@@ -60,17 +57,12 @@ def _build_step(
     step["build_task_id"] = str(sentinel.get("task_id") or "").strip() or None
     if row is None:
         return [step]
-    summary = attempt_summary(row)
-    raw_action = row.get("action")
-    action: dict[str, Any] = raw_action if isinstance(raw_action, dict) else {}
-    step["ref"] = summary.get("ref") or None
-    step["gpu_arch"] = summary.get("gpu_arch") or None
-    # The summary defaults these to ""/0; a fabricated zero is indistinguishable
-    # from a real one and would be read as a collected fact.
-    if "component" in action:
-        step["component"] = summary.get("component")
-    if "max_jobs" in action:
-        step["max_jobs"] = summary.get("max_jobs")
+    installed = row.get("installed_versions")
+    installed = installed if isinstance(installed, Mapping) else {}
+    step["ref"] = (
+        str(installed.get("aiter_ref") or installed.get("vllm_ref") or installed.get("sgl_kernel_ref") or "") or None
+    )
+    step["gpu_arch"] = str(installed.get("arch") or "") or None
     step["build_inputs"] = project_build_inputs(row)
     step["build_driver"] = str(row.get("build_driver") or "").strip() or None
     return [step]
@@ -190,20 +182,14 @@ def _patch_steps(enablement: Mapping[str, Any]) -> list[dict[str, Any]]:
     return steps
 
 
-def build_recipe_steps(
-    enablement: Mapping[str, Any],
-    *,
-    attempt_summary: Callable[[dict[str, Any]], dict[str, Any]],
-) -> list[dict[str, Any]]:
+def build_recipe_steps(enablement: Mapping[str, Any]) -> list[dict[str, Any]]:
     """Project one enablement's durable state onto the ordered replay array.
 
     Args:
         enablement: The enablement state, keyed by ``EnablementRound`` field name.
-        attempt_summary: The shipped build-attempt projection, injected so the
-            build step reuses it rather than re-reading the manifest in parallel.
 
     Returns:
         Every applied setup step, then at most one build step, then the patch
         steps. Empty when the enablement contributed nothing.
     """
-    return _setup_steps(enablement) + _build_step(enablement, attempt_summary) + _patch_steps(enablement)
+    return _setup_steps(enablement) + _build_step(enablement) + _patch_steps(enablement)

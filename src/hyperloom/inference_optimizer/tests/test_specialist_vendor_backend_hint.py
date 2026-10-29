@@ -5,8 +5,8 @@
 
 from __future__ import annotations
 
+from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
-    SpecialistPromptInputs,
     _section_roofline_evidence,
     _vendor_substitution_candidates,
 )

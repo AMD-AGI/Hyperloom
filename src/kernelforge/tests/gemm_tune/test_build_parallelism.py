@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from kernelforge.gemm_tune import utils
+from kernelforge.workflows.gemm_tune import utils
 
 GIB = 1024**3
 

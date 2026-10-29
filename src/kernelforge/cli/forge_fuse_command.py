@@ -11,11 +11,11 @@ import click
 
 from hyperloom.common.llm_config import AGENT_BACKEND_CHOICES
 from kernelforge.cli.option_groups import option_group
-from kernelforge.fusion import __version__
-from kernelforge.fusion.errors import FuseError, FuseUsageError
-from kernelforge.fusion.harness_noise import measure_harness_noise
-from kernelforge.fusion.pipeline import fuse
-from kernelforge.fusion.request import (
+from kernelforge.workflows.forge_fusion import __version__
+from kernelforge.workflows.forge_fusion.errors import FuseError, FuseUsageError
+from kernelforge.workflows.forge_fusion.harness_noise import measure_harness_noise
+from kernelforge.workflows.forge_fusion.pipeline import fuse
+from kernelforge.workflows.forge_fusion.request import (
     DecodeSampling,
     DiscoveryChoice,
     FuseAgentOptions,

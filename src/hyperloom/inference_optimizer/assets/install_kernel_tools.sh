@@ -134,6 +134,9 @@ if [ -n "${TRACELENS_ROOT:-}" ]; then
   if [ "$(dirname "${_tracelens_root_canonical}")" = "$(_canonicalize_path "${_open_source_root}")" ] \
      && [[ "$(basename "${_tracelens_root_canonical}")" == TraceLens@* ]]; then
     TRACELENS_ROOT=""
+  elif [ ! -e "${_tracelens_root_canonical}" ]; then
+    warn "TRACELENS_ROOT=${TRACELENS_ROOT} does not exist; using the pinned TraceLens checkout instead"
+    TRACELENS_ROOT=""
   else
     _tracelens_root_was_set=1
   fi
@@ -169,8 +172,16 @@ if [ -n "${GEAK_ROOT:-}" ]; then
   # Re-exported GEAK@* cache paths remain installer-managed across reruns.
   _geak_root_canonical="$(_canonicalize_path "${GEAK_ROOT}")"
   _geak_cache_root="$(_canonicalize_path "${_open_source_root}")"
-  if [ "$(dirname "${_geak_root_canonical}")" != "${_geak_cache_root}" ] \
-     || [[ "$(basename "${_geak_root_canonical}")" != GEAK@* ]]; then
+  if [ "$(dirname "${_geak_root_canonical}")" = "${_geak_cache_root}" ] \
+     && [[ "$(basename "${_geak_root_canonical}")" == GEAK@* ]]; then
+    # As for TraceLens: a cache path re-resolves to the current GEAK_REF, and the runner inside it follows.
+    GEAK_ROOT=""
+    GEAK_E2E_RUNNER=""
+  elif [ ! -e "${_geak_root_canonical}" ]; then
+    warn "GEAK_ROOT=${GEAK_ROOT} does not exist; using the GEAK_REF checkout instead"
+    GEAK_ROOT=""
+    GEAK_E2E_RUNNER=""
+  else
     _geak_root_is_operator_override=1
   fi
 fi
@@ -764,6 +775,7 @@ ensure_tracelens() {
   elif [ ! -d "$TRACELENS_ROOT/.git" ]; then
     if [ "$CHECK_ONLY" -eq 1 ]; then
       warn "TraceLens checkout missing/incomplete at ${TRACELENS_ROOT} (check-only mode, skipping clone)"
+      _STALE_KEYS+=("TRACELENS_ROOT")
     elif [ "$DRY_RUN" -eq 1 ]; then
       [ -e "$TRACELENS_ROOT" ] && log "would: rm -rf ${TRACELENS_ROOT} (incomplete, not a git repo)"
       log "would: git clone --depth 1 ${TRACELENS_REPO} ${TRACELENS_ROOT}"
@@ -1011,14 +1023,19 @@ write_env_file() {
   remove_dotenv_var SAFE_API_KEY
   remove_dotenv_var AMD_LLM_API_KEY
   remove_dotenv_var LLM_GATEWAY_KEY
-  [ -n "${TRACELENS_ROOT:-}" ] && upsert_dotenv_var TRACELENS_ROOT "$TRACELENS_ROOT"
+  # Like MAGPIE_PATH: a pinned cache path written here would read back as an override after the pin moves. The
+  # kernel-agent env file carries it to the runtime; an operator's own path is left as written.
+  [ -z "${_tracelens_root_was_set:-}" ] && remove_dotenv_var TRACELENS_ROOT
   if [ -n "${TRACELENS_INTERNAL_ROOT:-}" ]; then
     upsert_dotenv_var TRACELENS_INTERNAL_ROOT "$TRACELENS_INTERNAL_ROOT"
     upsert_dotenv_var TL_EXTENSION "TraceLens_internal"
   fi
   [ -n "${HYPERLOOM_ROOT:-}" ] && upsert_dotenv_var HYPERLOOM_ROOT "$HYPERLOOM_ROOT"
-  [ -n "${GEAK_E2E_RUNNER}" ] && upsert_dotenv_var GEAK_E2E_RUNNER "$GEAK_E2E_RUNNER"
-  [ -n "${GEAK_ROOT}" ] && upsert_dotenv_var GEAK_ROOT "$GEAK_ROOT"
+  # The runner lives in the GEAK checkout, so it follows GEAK_ROOT out of .env.
+  if [ -z "${_geak_root_is_operator_override:-}" ]; then
+    remove_dotenv_var GEAK_ROOT
+    remove_dotenv_var GEAK_E2E_RUNNER
+  fi
   [ -n "${GEAK_CLAUDE_MODEL_VAL}" ] && upsert_dotenv_var GEAK_CLAUDE_MODEL "$GEAK_CLAUDE_MODEL_VAL"
   [ -n "${_geak_claude_bin}" ] && upsert_dotenv_var GEAK_CLAUDE_BIN "$_geak_claude_bin"
   [ -n "${GEAK_RUN_MODE_VAL}" ] && upsert_dotenv_var GEAK_RUN_MODE "$GEAK_RUN_MODE_VAL"
@@ -1047,6 +1064,9 @@ ensure_geak() {
   elif [ ! -d "${GEAK_ROOT}/.git" ]; then
     if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
       mkdir -p "${GEAK_ROOT}"
+    fi
+    if [ "$CHECK_ONLY" -eq 1 ]; then
+      _STALE_KEYS+=("GEAK_ROOT")
     fi
     if [[ "$GEAK_REF" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
       run git init -q "${GEAK_ROOT}"

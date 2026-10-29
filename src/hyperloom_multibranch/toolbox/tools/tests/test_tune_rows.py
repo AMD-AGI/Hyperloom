@@ -123,8 +123,8 @@ def test_the_bf16_tables_err_ratio_column_is_read_too(tmp_path: Path, configs: P
 
 
 def test_the_limit_is_forges_own_and_a_row_exactly_at_it_passes(tmp_path: Path, configs: Path) -> None:
-    pytest.importorskip("kernelforge.gemm_tune.tuners._row_accuracy")
-    from kernelforge.gemm_tune.tuners import _row_accuracy as forge
+    pytest.importorskip("kernelforge.workflows.gemm_tune.tuners._row_accuracy")
+    from kernelforge.workflows.gemm_tune.tuners import _row_accuracy as forge
 
     assert ERR_RATIO_LIMIT == forge._MAX_ERR_RATIO, "Forge changed the limit it drops rows at: change ERR_RATIO_LIMIT"
     rows = from_artifact(table(tmp_path, row(16, 512, 7168, err=str(ERR_RATIO_LIMIT))), ENV, configs)
@@ -540,7 +540,7 @@ def test_the_rows_read_back_for_a_higher_ratio_are_not_refused_for_the_column_th
 
 
 def test_the_relative_norm_limit_is_forges_own_once_forge_has_one() -> None:
-    forge = pytest.importorskip("kernelforge.gemm_tune.tuners._aiter_dense_common")
+    forge = pytest.importorskip("kernelforge.workflows.gemm_tune.tuners._aiter_dense_common")
     if not hasattr(forge, "_MAX_REL_NORM_ERR"):
         pytest.skip("this Forge has no relative-norm check yet")
 

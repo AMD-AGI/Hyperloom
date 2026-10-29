@@ -9,12 +9,12 @@ from pathlib import Path
 import pytest
 
 from kernelforge.config import Config
-from kernelforge.loop import knowledge_integration as integration
+from kernelforge.workflows.forge_loop.memory import knowledge_integration as integration
 from kernelforge.knowledge.kb_store import writer as sink
 from kernelforge.config import KnowledgeConfig
-from kernelforge.loop import recovery
+from kernelforge.workflows.forge_loop.campaign import recovery
 from kernelforge.knowledge.kb_store.identity.run import LoopKernel
-from kernelforge.loop.knowledge_integration import WarmStartHarness
+from kernelforge.workflows.forge_loop.memory.knowledge_integration import WarmStartHarness
 
 
 PRODUCER_KERNEL_PATH = Path("packages/src/aiter_meta/ops/triton/deterministic_kernel.py")

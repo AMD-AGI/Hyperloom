@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from kernelforge.gemm_tune.router import (
+from kernelforge.workflows.gemm_tune.router import (
     _detect_1stage_from_log,
     _normalize_quant_type,
     _resolve_quant_type,
@@ -13,7 +13,7 @@ from kernelforge.gemm_tune.router import (
     RoutingTarget,
     select_tuners,
 )
-from kernelforge.gemm_tune.model_analyzer import ModelProfile
+from kernelforge.workflows.gemm_tune.model_analyzer import ModelProfile
 
 
 def _profile(is_moe=False, num_experts=0, **kw):

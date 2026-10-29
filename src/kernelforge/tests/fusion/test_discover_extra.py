@@ -8,11 +8,11 @@ from __future__ import annotations
 import inspect
 import json
 
-from kernelforge.fusion.locate import FrameworkInstall
-from kernelforge.fusion.discover import DiscoveryTarget
-from kernelforge.fusion import discover as discover_module
-from kernelforge.fusion.diagnose import TraceProfile, diagnose_from_shares
-from kernelforge.fusion.discover import (
+from kernelforge.workflows.forge_fusion.locate import FrameworkInstall
+from kernelforge.workflows.forge_fusion.discover import DiscoveryTarget
+from kernelforge.workflows.forge_fusion import discover as discover_module
+from kernelforge.workflows.forge_fusion.diagnose import TraceProfile, diagnose_from_shares
+from kernelforge.workflows.forge_fusion.discover import (
     _extract_json_array,
     _salvage_objects,
     discover_recipes,

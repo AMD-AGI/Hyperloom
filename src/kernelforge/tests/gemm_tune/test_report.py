@@ -5,9 +5,9 @@
 
 from pathlib import Path
 
-from kernelforge.gemm_tune.model_analyzer import ModelProfile
-from kernelforge.gemm_tune.tuners.base import TuneContext, TuneResult
-from kernelforge.gemm_tune.report import build_report
+from kernelforge.workflows.gemm_tune.model_analyzer import ModelProfile
+from kernelforge.workflows.gemm_tune.tuners.base import TuneContext, TuneResult
+from kernelforge.workflows.gemm_tune.report import build_report
 
 
 def _tune_ctx(**fields) -> TuneContext:

@@ -12,7 +12,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
 from hyperloom.common.reasoning_effort import DEFAULT_REASONING_EFFORT, REASONING_EFFORT_RANK
-from kernelforge.tools.protected_paths import ProtectedPathRules
+from kernelforge.utils.protected_paths import ProtectedPathRules
 
 
 #: Environment overlay applied to every session started inside the current

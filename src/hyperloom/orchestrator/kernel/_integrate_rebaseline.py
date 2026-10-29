@@ -14,7 +14,7 @@ from typing import Any, Iterator, NamedTuple
 
 from hyperloom.common.coerce import to_str_list
 
-from . import apply_kernel_patch
+from . import patch_jit_cache
 from ..actions.executors._kernel_agent_tool import HandlerResult
 from ._integrate_outcomes import _FRAMEWORK_APPLYBACK_ARTIFACT_KIND, _integrate_failure
 from ._integrate_payload import _is_paired_gemm_measurement
@@ -353,6 +353,10 @@ async def _multi_node_restart_failure(
 
     if not is_multi_node():
         return None
+    # The sweep runs even when the regular JIT cache is warm: cpp_itfs attention
+    # uses the separate AITER_ROOT_DIR/build tree and can carry a stale baton
+    # from a timed-out Forge driver.
+    _sweep_integrate_aiter_locks(reason="integrate server startup")
     from ..actions.executors._multi_node_server_lifecycle import (
         RoundServer,
         ServerRestartFailed,
@@ -386,4 +390,4 @@ def _cpp_itfs_rebuild_check(apply_result: dict) -> HandlerResult:
     cpp_itfs_backup = apply_result.get("cpp_itfs_cache_backup") or {}
     if not cpp_itfs_backup.get("is_cpp_itfs") or is_multi_node():
         return {"verified": True, "status": "skipped"}
-    return apply_kernel_patch.verify_cpp_itfs_rebuilt(cpp_itfs_backup)
+    return patch_jit_cache.verify_cpp_itfs_rebuilt(cpp_itfs_backup)

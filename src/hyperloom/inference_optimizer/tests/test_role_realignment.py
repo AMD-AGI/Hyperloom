@@ -81,9 +81,7 @@ def test_orchestration_prompt_no_framework_agent_marks_skipped_and_context(regis
     text = build_orchestration_prompt(
         action_registry=registry,
         enabled_actions=default_enabled_actions(no_kernel=False),
-        session=SessionContext(
-            framework="sglang", kernel_enabled=True, framework_agent_phase_enabled=False, max_minutes=120
-        ),
+        session=SessionContext(framework="sglang", framework_agent_phase_enabled=False, max_minutes=120),
     )
     assert "(DISABLED: --no-framework-agent — phase skipped)" in text
     assert "optimize_enabled : false" in text
@@ -93,9 +91,7 @@ def test_orchestration_prompt_all_enabled_session_context_true(registry):
     text = build_orchestration_prompt(
         action_registry=registry,
         enabled_actions=default_enabled_actions(no_kernel=False),
-        session=SessionContext(
-            framework="sglang", kernel_enabled=True, framework_agent_phase_enabled=True, max_minutes=120
-        ),
+        session=SessionContext(framework="sglang", framework_agent_phase_enabled=True, max_minutes=120),
     )
     assert "optimize_enabled : true" in text
     assert "kernel_enabled   : true" in text
@@ -657,7 +653,7 @@ async def test_running_tasks_reader_skips_heartbeat_for_non_specialist(
         # Plant the liveness file the specialist path would have read.
         ws = runs_dir(c.session_dir, "specialist", task.task_id)
         ws.mkdir(parents=True, exist_ok=True)
-        (ws / "heartbeat.json").write_text("{}", encoding="utf-8")
+        (ws / "process.log").write_text("event\n", encoding="utf-8")
 
         out = c.conversation._context_running_tasks_reader()
         assert task.task_id in out
@@ -798,10 +794,11 @@ async def test_extend_lease_does_not_regrant_elapsed_time(coordinator_with_mocks
         )
         # Backdate the running mark so the task looks 1000s old.
         started_iso = datetime.fromtimestamp(time.time() - 1000, tz=timezone.utc).isoformat()
-        await c.db.execute(
-            "UPDATE tasks SET updated_at=? WHERE task_id=?",
-            (started_iso, task.task_id),
-        )
+        async with c.db.transaction() as cur:
+            cur.execute(
+                "UPDATE tasks SET updated_at=? WHERE task_id=?",
+                (started_iso, task.task_id),
+            )
 
         await c.router.handle_intent(
             "orchestration",
@@ -842,7 +839,8 @@ async def test_extend_lease_late_grant_keeps_new_increment_for_lanes(coordinator
             ttl_sec=1800,
         )
         started_iso = datetime.fromtimestamp(time.time() - 3000, tz=timezone.utc).isoformat()
-        await c.db.execute("UPDATE tasks SET updated_at=? WHERE task_id=?", (started_iso, task.task_id))
+        async with c.db.transaction() as cur:
+            cur.execute("UPDATE tasks SET updated_at=? WHERE task_id=?", (started_iso, task.task_id))
 
         await c.router.handle_intent(
             "orchestration",

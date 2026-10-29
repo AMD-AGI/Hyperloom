@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 
-from kernelforge.gemm_tune.tuners.vllm_dense_tunableop import (
+from kernelforge.workflows.gemm_tune.tuners.vllm_dense_tunableop import (
     tunableop_untuned_line,
 )
 
@@ -33,7 +33,7 @@ class TestTheRecordFormat:
 
 
 def _demand_file(tmp_path, shapes):
-    from kernelforge.gemm_tune.evidence import SCHEMA_VERSION
+    from kernelforge.workflows.gemm_tune.evidence import SCHEMA_VERSION
 
     path = tmp_path / "demand.json"
     path.write_text(
@@ -59,8 +59,8 @@ def _demand_file(tmp_path, shapes):
 
 
 def _ctx(tmp_path, **overrides):
-    from kernelforge.gemm_tune.model_analyzer import ModelProfile
-    from kernelforge.gemm_tune.tuners.base import TuneContext
+    from kernelforge.workflows.gemm_tune.model_analyzer import ModelProfile
+    from kernelforge.workflows.gemm_tune.tuners.base import TuneContext
 
     base = dict(
         profile=ModelProfile(model_path="/fake", hidden_size=4096),
@@ -84,7 +84,7 @@ def _ctx(tmp_path, **overrides):
 
 class TestDemandBecomesAnInput:
     def _tuner(self, tmp_path, demand=None, precision="bf16"):
-        from kernelforge.gemm_tune.tuners.vllm_dense_tunableop import (
+        from kernelforge.workflows.gemm_tune.tuners.vllm_dense_tunableop import (
             VllmDenseTunableopTuner,
         )
 
@@ -117,7 +117,7 @@ class TestDemandBecomesAnInput:
         assert t._resolve_input() is None
 
     def test_the_shape_count_is_capped(self, tmp_path):
-        from kernelforge.gemm_tune.tuners import vllm_dense_tunableop as vt
+        from kernelforge.workflows.gemm_tune.tuners import vllm_dense_tunableop as vt
 
         many = [(m, 1536, 7168) for m in range(1, 400)]
         t = self._tuner(tmp_path, _demand_file(tmp_path, many))
@@ -128,7 +128,7 @@ class TestDemandBecomesAnInput:
     def test_dense_demand_owned_by_another_tuner_is_still_usable(self, tmp_path):
         # The normal case on a real box: the runtime logs misses against aiter's bf16 table, and TunableOp has no
         # table of its own to miss.
-        from kernelforge.gemm_tune.evidence import SCHEMA_VERSION
+        from kernelforge.workflows.gemm_tune.evidence import SCHEMA_VERSION
 
         path = tmp_path / "demand.json"
         path.write_text(
@@ -162,7 +162,7 @@ class TestDemandBecomesAnInput:
     def test_borrowed_demand_keeps_the_exact_m_the_runtime_asked_for(self, tmp_path):
         # demand_shapes() buckets to the padded M by default, which is right for the aiter tuners only because aiter
         # retries a failed lookup at the padded M.
-        from kernelforge.gemm_tune.evidence import SCHEMA_VERSION
+        from kernelforge.workflows.gemm_tune.evidence import SCHEMA_VERSION
 
         path = tmp_path / "demand.json"
         path.write_text(
@@ -192,7 +192,7 @@ class TestDemandBecomesAnInput:
     def test_moe_demand_is_not_borrowed(self, tmp_path):
         # A MoE miss is not a dense (M, N, K) and tuning it here would be tuning something the runtime never asked
         # this path for.
-        from kernelforge.gemm_tune.evidence import SCHEMA_VERSION
+        from kernelforge.workflows.gemm_tune.evidence import SCHEMA_VERSION
 
         path = tmp_path / "demand.json"
         path.write_text(
@@ -228,9 +228,9 @@ class TestDemandReplacesTheModelConfig:
     """Demand is a *better* shape source, so it must not be gated on a worse one."""
 
     def _tuner(self, tmp_path, **over):
-        from kernelforge.gemm_tune.model_analyzer import ModelProfile
-        from kernelforge.gemm_tune.tuners.base import TuneContext
-        from kernelforge.gemm_tune.tuners.sglang_dense_bf16 import SglangDenseBf16Tuner
+        from kernelforge.workflows.gemm_tune.model_analyzer import ModelProfile
+        from kernelforge.workflows.gemm_tune.tuners.base import TuneContext
+        from kernelforge.workflows.gemm_tune.tuners.sglang_dense_bf16 import SglangDenseBf16Tuner
 
         base = dict(
             profile=ModelProfile(
@@ -256,7 +256,7 @@ class TestDemandReplacesTheModelConfig:
         return SglangDenseBf16Tuner(TuneContext(**base))
 
     def test_a_moe_only_config_is_fine_when_demand_supplies_the_shapes(self, tmp_path, monkeypatch):
-        from kernelforge.gemm_tune.tuners import sglang_dense_bf16 as sd
+        from kernelforge.workflows.gemm_tune.tuners import sglang_dense_bf16 as sd
 
         root = tmp_path / "aiter"
         script = root / "csrc" / "gemm_a16w16" / "gemm_a16w16_tune.py"
@@ -269,7 +269,7 @@ class TestDemandReplacesTheModelConfig:
 
     def test_a_moe_only_config_alone_is_also_fine_on_its_attention_shapes(self, tmp_path, monkeypatch):
         """No demand, but the config still yields the attention projections."""
-        from kernelforge.gemm_tune.tuners import sglang_dense_bf16 as sd
+        from kernelforge.workflows.gemm_tune.tuners import sglang_dense_bf16 as sd
 
         root = tmp_path / "aiter"
         script = root / "csrc" / "gemm_a16w16" / "gemm_a16w16_tune.py"
@@ -281,8 +281,8 @@ class TestDemandReplacesTheModelConfig:
 
     def test_without_any_shape_source_it_still_refuses_and_says_why(self, tmp_path, monkeypatch):
         """Nothing derivable and no demand: refuse, and name the way out."""
-        from kernelforge.gemm_tune.model_analyzer import ModelProfile
-        from kernelforge.gemm_tune.tuners import sglang_dense_bf16 as sd
+        from kernelforge.workflows.gemm_tune.model_analyzer import ModelProfile
+        from kernelforge.workflows.gemm_tune.tuners import sglang_dense_bf16 as sd
 
         root = tmp_path / "aiter"
         script = root / "csrc" / "gemm_a16w16" / "gemm_a16w16_tune.py"
@@ -297,7 +297,7 @@ class TestDemandReplacesTheModelConfig:
 
 class TestTheFailureSaysWhichSourceWasMissing:
     def test_the_error_names_all_three_sources(self, tmp_path):
-        from kernelforge.gemm_tune.tuners.vllm_dense_tunableop import (
+        from kernelforge.workflows.gemm_tune.tuners.vllm_dense_tunableop import (
             VllmDenseTunableopTuner,
         )
 

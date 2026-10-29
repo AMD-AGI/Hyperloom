@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from types import SimpleNamespace
 
-from kernelforge.loop.agent_relay import (
+from kernelforge.workflows.forge_loop.search.agent_relay import (
     AgentAvailabilitySnapshot,
     AgentProfile,
     AgentRelayConfig,
@@ -25,9 +25,9 @@ from kernelforge.loop.agent_relay import (
     select_relay_intervention,
     select_replacement_for_unavailable,
 )
-from kernelforge.loop.run_state import RunState
-from kernelforge.loop.runner import IterationLoop
-from kernelforge.loop.search_actors import SearchActorBundle, SearchActorPool
+from kernelforge.workflows.forge_loop.campaign.run_state import RunState
+from kernelforge.workflows.forge_loop.iteration.runner import IterationLoop
+from kernelforge.workflows.forge_loop.search.search_actors import SearchActorBundle, SearchActorPool
 
 
 def _profiles() -> tuple[AgentProfile, ...]:

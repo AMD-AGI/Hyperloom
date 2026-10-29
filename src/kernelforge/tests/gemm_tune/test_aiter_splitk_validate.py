@@ -14,8 +14,8 @@ from unittest import mock
 
 import pytest
 
-import kernelforge.gemm_tune.aiter_splitk_validate as mod
-from kernelforge.gemm_tune.aiter_splitk_validate import (
+import kernelforge.workflows.gemm_tune.aiter_splitk_validate as mod
+from kernelforge.workflows.gemm_tune.aiter_splitk_validate import (
     make_support_fn,
     max_supported_splitk,
 )

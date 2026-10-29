@@ -16,7 +16,8 @@ import pytest
 from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant, GridRecipe
 from hyperloom.orchestrator.actions.executors._proposal_identity import BaseControls, effective_fingerprint
 from hyperloom.orchestrator.actions.executors._server_lifecycle import GpuHandoff
-from hyperloom.orchestrator.actions.executors._subprocess_kill import REAP_MARK_ENV, run_with_session_kill
+from hyperloom.common.proctree import REAP_MARK_ENV
+from hyperloom.orchestrator.actions.executors._subprocess_kill import run_with_session_kill
 from hyperloom.orchestrator.phases import machine_state as ps
 from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_SKIP_TO_SWEEP
 
@@ -970,7 +971,7 @@ def _stub_geak_runner_call(monkeypatch, outcome) -> list[str]:
             return outcome()
         return await original_to_thread(func, *args, **kwargs)
 
-    monkeypatch.setattr("hyperloom.orchestrator.phases.kernel.asyncio.to_thread", _to_thread)
+    monkeypatch.setattr("hyperloom.orchestrator.phases.kernel_geak_dispatch.asyncio.to_thread", _to_thread)
     return calls
 
 
@@ -1245,7 +1246,7 @@ async def test_invalid_handoff_configuration_never_launches_geak(coordinator, mo
         pytest.fail("Invalid launch configuration must stop before runner invocation")
 
     monkeypatch.setattr(coordinator.writeback, "build_env_spec", invalid_spec)
-    monkeypatch.setattr("hyperloom.orchestrator.phases.kernel.subprocess.Popen", must_not_launch)
+    monkeypatch.setattr("hyperloom.orchestrator.phases.kernel_geak_dispatch.subprocess.Popen", must_not_launch)
     coordinator.shared_state.benchmark_mode = mode
     previous = {"status": "ok", "revalidation_status": "no_promote", "accepted_config": {"flags": "--old"}}
     if settled:

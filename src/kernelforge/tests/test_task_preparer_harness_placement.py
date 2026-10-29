@@ -21,7 +21,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from kernelforge.loop import task_preparer
+from kernelforge.workflows.forge_loop.preparation import task_preparer
 
 
 def _placement_expression(name: str) -> ast.expr:

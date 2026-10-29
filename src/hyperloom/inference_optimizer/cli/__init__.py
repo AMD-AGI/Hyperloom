@@ -20,8 +20,6 @@ from typing import Any
 from hyperloom.common import llm_config
 from hyperloom.common.env import EnvValueError, env_bool
 from hyperloom.common.gpu_partition import PartitionModel
-from hyperloom.common.llm_config import CLAUDE_OAUTH_TOKEN_ENV
-from hyperloom.common.llm_headers import parse_custom_headers
 from .executors import (
     _build_specialist_executor,
     _register_executors,
@@ -36,17 +34,13 @@ from .backends import (
     _build_backends,
     _build_proposal_scorer,
     _orchestration_banner,
-    critic_review_target,
-    critic_on_codex_side,
 )
 from .model_gate import (
-    _load_model_max_position_embeddings,
     _finish_model_gate,
     _preflight_context_window,
     _preflight_model_config_compat,
     _preflight_unsupported_model_arch,
     _record_resumed_model_gate,
-    _resolve_max_model_len,
     _start_model_gate,
 )
 from ..gpu_types import (
@@ -57,15 +51,15 @@ from ..gpu_types import (
     require_runner_framework,
     warn_family_runner,
 )
-from ..model_config_utils import (
-    summarize_model_config,
-)
+from ..model_config_utils import summarize_model_config
 from .bootstrap import (
     LaunchInfo,
+    LaunchPlatform,
     _emit_launch_info,
     constraint_budget_resume_conflict,
     resolve_launch_gpu_power,
     _begin_resume_leg,
+    resolve_research_lane_capacity,
     _resume_budget_lines,
     _print_final_summary,
     _print_session_skeleton,
@@ -87,17 +81,25 @@ from hyperloom.orchestrator.actions.executors._aiter_jit import clean_stale_aite
 from hyperloom.common.perf_metric import agentx_enabled as _agentx_enabled
 
 from .credentials import (
-    _CLAUDE_ALLOWED_MODELS as _CLAUDE_ALLOWED_MODELS,
-    _CODEX_FALLBACK_MODELS as _CODEX_FALLBACK_MODELS,
-    _CATALOG_RETRY_DELAYS_SEC as _CATALOG_RETRY_DELAYS_SEC,
     _CRITIC_AGENT_ROOT_ENV as _CRITIC_AGENT_ROOT_ENV,
     _resolve_agent_root as _resolve_agent_root,
     _validate_agent_runtime as _validate_agent_runtime,
 )
 from .multi_node import (
     _prepare_multi_node_state as _prepare_multi_node_state,
-    _resolve_gpus_per_node,
-    _resolve_mn_backend as _resolve_mn_backend,
+)
+from .model_catalog import (
+    _resolve_critic_choice,
+    _resolve_models_for_run,
+)
+from .launch_shape import (
+    _export_operator_launch_shape,
+    _positive_env_int,
+    _resolve_precision,
+    _resolve_run_max_model_len,
+    _resolve_run_topology,
+    _resolve_workload_knobs,
+    _seed_env_from_resumed_state,
 )
 from .quantization import (
     _run_quantization_prelude as _run_quantization_prelude,
@@ -132,14 +134,6 @@ from ..session.paths import ENV_USER_DATA_PATH, asset_system_prompts_dir, make_s
 
 log = logging.getLogger("hyperloom.inference_optimizer.cli")
 
-from hyperloom.common.workload_defaults import (
-    DEFAULT_ISL,
-    DEFAULT_OSL,
-    DEFAULT_CONC,
-    DEFAULT_TP,
-    DEFAULT_EP,
-    DEFAULT_PRECISION,
-)
 from .gpu_power_apply import gpu_power_restore_guard
 from .custom_specialist import (
     CUSTOM_SPECIALIST_ONLY_ENV,
@@ -150,8 +144,6 @@ from .custom_specialist import (
 from .parser import (
     DEFAULT_MAX_HOURS,
     _build_parser as _build_parser,
-    _positive_int_arg as _positive_int_arg,
-    _redact_unknown_args as _redact_unknown_args,
 )
 from .preflight import (
     _check_gfx_arch_resolvable,
@@ -322,19 +314,12 @@ def _registered_framework_or_exit(requested: str, *, hint: str) -> str:
     return framework
 
 
-def _enforce_expected_framework(
-    framework: str,
-    *,
-    expected: str | None = None,
-) -> None:
+def _enforce_expected_framework(framework: str) -> None:
     """Fail fast when a launcher-pinned expected framework is violated."""
     actual = _normalise_framework_name(framework)
-    expected_raw = (
-        expected
-        if expected is not None
-        else (os.environ.get("INFERENCE_OPTIMIZER_EXPECTED_FRAMEWORK", "") or os.environ.get("EXPECTED_FRAMEWORK", ""))
+    wanted = _normalise_framework_name(
+        os.environ.get("INFERENCE_OPTIMIZER_EXPECTED_FRAMEWORK", "") or os.environ.get("EXPECTED_FRAMEWORK", "")
     )
-    wanted = _normalise_framework_name(expected_raw)
     if not wanted:
         return
     if wanted != actual:
@@ -398,7 +383,6 @@ def _build_orchestration_prompt(
         enabled_actions=enabled,
         session=SessionContext(
             framework=framework,
-            kernel_enabled=not no_kernel,
             framework_agent_phase_enabled=not no_framework_agent,
             objective_kind=kind,
             objective_value=value,
@@ -423,15 +407,6 @@ def _load_critic_prompt() -> str:
     return (asset_system_prompts_dir() / "critic.md").read_text(encoding="utf-8")
 
 
-# Per-attempt read timeout for the gateway /models catalog probe.
-try:
-    _CATALOG_REQUEST_TIMEOUT_SEC = float(
-        os.environ.get("INFERENCE_OPTIMIZER_CATALOG_PROBE_TIMEOUT_SEC", "5.0") or "5.0"
-    )
-except (TypeError, ValueError):
-    _CATALOG_REQUEST_TIMEOUT_SEC = 5.0
-
-
 def _should_remote_probe_gpu(args: argparse.Namespace) -> bool:
     """Return whether the GPU type should be probed on the remote cluster."""
     if int(getattr(args, "nodes", 1) or 1) < 2:
@@ -440,9 +415,8 @@ def _should_remote_probe_gpu(args: argparse.Namespace) -> bool:
     return backend in ("rayjob", "infera")
 
 
-def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
+def _apply_atom_auto_tighten(args: argparse.Namespace) -> None:
     """Validate atom-specific CLI knobs: the ``--nodes>=2`` fail-fast guard (IR-8)."""
-    auto_disabled: list[str] = []
     if int(getattr(args, "nodes", 1) or 1) >= 2:
         print(
             "ERROR: --framework atom does not support multi-node "
@@ -456,7 +430,6 @@ def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
         "profile / roofline / TraceLens all wired for atom); "
         "--nodes>=2 guard active — see SKILL.md IR-8"
     )
-    return auto_disabled
 
 
 # Exit code for "another optimizer already owns this session".
@@ -480,514 +453,6 @@ def _acquire_session_lock_or_exit(session_dir: Path) -> SessionLock:
     return lock
 
 
-# Sentinel returned by _probe_llm_catalog when the gateway has no /models route (HTTP 404/405).
-_CATALOG_NO_MODELS_ENDPOINT: frozenset[str] = frozenset()
-
-
-def _probe_llm_catalog(
-    *,
-    base_url: str,
-    api_key: str,
-) -> set[str] | frozenset[str] | None:
-    """Probe ``<base_url>/models`` with retry (gateway flakes); return set of model ids or None."""
-
-    if not base_url:
-        return None
-
-    try:
-        import httpx  # type: ignore[import-not-found]
-    except ImportError:
-        # httpx should already be installed; return None so the caller decides.
-        print(
-            "Preflight: WARNING — httpx not importable, skipping catalog "
-            "probe. _ensure_python_sdks should have installed it."
-        )
-        return None
-
-    probe_url = base_url.rstrip("/") + "/models"
-    headers = _catalog_probe_headers(base_url=base_url, api_key=api_key)
-
-    delays = (0.0, *_CATALOG_RETRY_DELAYS_SEC)
-    last_err: str = ""
-    for i, delay in enumerate(delays):
-        if delay > 0:
-            time.sleep(delay)
-        try:
-            resp = httpx.get(
-                probe_url,
-                headers=headers,
-                timeout=_CATALOG_REQUEST_TIMEOUT_SEC,
-            )
-        except (httpx.HTTPError, httpx.InvalidURL) as exc:
-            last_err = f"{type(exc).__name__}: {exc}"
-            print(f"Preflight: catalog probe attempt {i + 1}/{len(delays)} failed: {last_err}")
-            continue
-        if resp.status_code in (404, 405):
-            # The endpoint has no /models route; not a transient/auth error, so stop retrying and signal "no catalog
-            # endpoint" distinctly.
-            print(
-                f"Preflight: catalog probe got HTTP {resp.status_code} for "
-                f"{probe_url}; endpoint exposes no /models route"
-            )
-            return _CATALOG_NO_MODELS_ENDPOINT
-        if resp.status_code != 200:
-            last_err = f"HTTP {resp.status_code}: {(resp.text or '')[:200]}"
-            print(f"Preflight: catalog probe attempt {i + 1}/{len(delays)} got {last_err}")
-            continue
-        try:
-            data = resp.json()
-        except ValueError as exc:
-            last_err = f"JSON decode: {exc}"
-            print(f"Preflight: catalog probe attempt {i + 1}/{len(delays)} returned non-JSON: {last_err}")
-            continue
-        ids: set[str] = set()
-        for model in data.get("data") or []:
-            if not isinstance(model, dict) or not isinstance(model.get("id"), str):
-                continue
-            model_id = model["id"]
-            ids.add(model_id)
-            ids.add(_catalog_compare_model_id(model_id))
-        if not ids:
-            last_err = "empty data[]"
-            continue
-        return ids
-
-    print(f"Preflight: catalog probe exhausted {len(delays)} attempts ({last_err}); cannot validate model availability")
-    return None
-
-
-def _catalog_probe_headers(*, base_url: str, api_key: str) -> dict[str, str]:
-    """Build headers for a direct ``<base_url>/models`` probe."""
-    openai_base = (os.environ.get("OPENAI_BASE_URL") or "").strip().rstrip("/")
-    probe = (base_url or "").strip().rstrip("/")
-    probing_openai = bool(openai_base) and (probe == openai_base or probe.startswith(openai_base + "/"))
-    env_name = "OPENAI_CUSTOM_HEADERS" if probing_openai else "ANTHROPIC_CUSTOM_HEADERS"
-    headers = parse_custom_headers(os.environ.get(env_name))
-    if api_key and not any(name.lower() == "authorization" for name in headers):
-        headers["Authorization"] = f"Bearer {api_key}"
-    return headers
-
-
-def _catalog_compare_model_id(model_id: str) -> str:
-    """Normalize catalog IDs for preflight comparison only."""
-    text = str(model_id or "").strip()
-    lowered = text.lower()
-    if text.lower().startswith("claude-"):
-        return lowered.replace(".", "-")
-    return lowered
-
-
-def _same_gateway(anthropic_url: str, openai_url: str) -> bool:
-    """True when both protocol sides are served by one gateway."""
-    if not anthropic_url or not openai_url:
-        return False
-    if anthropic_url == openai_url:
-        return True
-    from urllib.parse import urlsplit
-
-    return urlsplit(anthropic_url).netloc == urlsplit(openai_url).netloc
-
-
-def _codex_model_should_follow_claude() -> bool:
-    """True when the operator supplied only Anthropic config."""
-    return llm_config.is_anthropic_only()
-
-
-def _claude_model_should_follow_codex() -> bool:
-    """True when the operator supplied only OpenAI-compatible config."""
-    return llm_config.is_openai_only()
-
-
-def _catalog_probe_has_no_credential() -> bool:
-    """True when a Claude subscription token is the only credential available."""
-    if not os.environ.get(CLAUDE_OAUTH_TOKEN_ENV, "").strip():
-        return False
-    # Any other Anthropic-side form can authenticate the probe, so the list of what disqualifies "oauth-only" is the
-    # registry minus the token itself, derived rather than restated.
-    bearer_capable = (
-        *(n for n in llm_config.ANTHROPIC_CREDENTIAL_ENV_ORDER if n != CLAUDE_OAUTH_TOKEN_ENV),
-        "OPENAI_API_KEY",
-    )
-    return not any(os.environ.get(name, "").strip() for name in bearer_capable)
-
-
-def _custom_orch_model_allowed() -> bool:
-    """Whether orchestration may use a model outside the AMD Claude allowlist; only an explicit false-token denies."""
-    return env_bool("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", True)
-
-
-def _critic_agent_runtime_needed(critic_choice: str) -> bool:
-    """Whether the selected critic path will actually instantiate critic-agent."""
-    return critic_choice == "agent"
-
-
-def _reject_unusable_claude_model(chosen: str, *, allow_custom: bool) -> None:
-    """Refuse a model id the static allowlist cannot accept, before any gateway is asked."""
-    if not allow_custom and chosen not in _CLAUDE_ALLOWED_MODELS:
-        print(
-            f"ERROR: --claude-model={chosen!r} is not allowed. "
-            f"Orchestration model must be one of "
-            f"{list(_CLAUDE_ALLOWED_MODELS)} (best first). Refusing to start. "
-            f"For a non-AMD gateway, set "
-            f"INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1 to use a custom "
-            f"orchestration model validated against your gateway catalog.",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-    if allow_custom and not chosen:
-        print(
-            "ERROR: --claude-model is empty but "
-            "custom orchestration model support is enabled; pass an explicit "
-            "model id. Refusing to start.",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-
-
-def _catalog_probe_candidates(
-    resolved_urls: tuple[str, str],
-    *,
-    claude_follows_codex: bool,
-) -> list[tuple[str, str]]:
-    """The gateways worth asking for a model catalog, in the order they are asked.
-
-    The Claude catalog must come from the Anthropic side unless the Claude
-    model follows Codex, in which case the OpenAI side is the authority.
-    """
-    anthropic_url = os.environ.get("ANTHROPIC_BASE_URL", "").strip()
-    openai_url = os.environ.get("OPENAI_BASE_URL", "").strip()
-    if not anthropic_url:
-        anthropic_url = resolved_urls[0]
-    if not openai_url:
-        openai_url = resolved_urls[1]
-    anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "") or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
-    # OpenAI-side key only.
-    openai_key = os.environ.get("OPENAI_API_KEY", "")
-    candidates: list[tuple[str, str]] = []
-    if claude_follows_codex:
-        if openai_url:
-            candidates.append((openai_url, openai_key))
-        elif anthropic_url:
-            candidates.append((anthropic_url, anthropic_key))
-        return candidates
-    # A keyless Anthropic candidate can only fail — a subscription token is not a catalog credential — so it
-    # must not consume the one probe slot and leave a configured OpenAI gateway unverified.
-    if anthropic_url and anthropic_key:
-        candidates.append((anthropic_url, anthropic_key))
-    if openai_url and ((anthropic_url and _same_gateway(anthropic_url, openai_url)) or not candidates):
-        # One gateway serving both protocols, or the only side left once a keyless Anthropic side was skipped
-        # above.
-        candidates.append((openai_url, openai_key))
-    return candidates
-
-
-def _probe_claude_catalog(
-    resolved_urls: tuple[str, str],
-    *,
-    chosen: str,
-    claude_follows_codex: bool,
-):
-    """The gateway's model catalog, and whether a probe was made at all.
-
-    ``(None, False)`` means the probe was skipped because the only credential
-    cannot authenticate one -- the static allowlist gate has already run, and
-    it is the only check the probe would have added.
-    """
-    override_url = os.environ.get("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "").strip()
-    if not override_url and _catalog_probe_has_no_credential():
-        print(
-            "Preflight: catalog probe skipped: oauth-only credential "
-            f"(CLAUDE_CODE_OAUTH_TOKEN); cannot verify --claude-model={chosen!r}. Proceeding."
-        )
-        return None, False
-    if override_url:
-        api_key = (
-            os.environ.get("ANTHROPIC_API_KEY", "")
-            or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
-            or os.environ.get("OPENAI_API_KEY", "")
-        )
-        return _probe_llm_catalog(base_url=override_url, api_key=api_key), True
-    catalog_ids: set[str] | frozenset[str] | None = None
-    seen_urls: set[str] = set()
-    for cand_url, cand_key in _catalog_probe_candidates(resolved_urls, claude_follows_codex=claude_follows_codex):
-        if not cand_url or cand_url in seen_urls:
-            continue
-        seen_urls.add(cand_url)
-        catalog_ids = _probe_llm_catalog(base_url=cand_url, api_key=cand_key)
-        # A missing /models route is the only answer worth re-asking on the other side, and only because a
-        # dual-protocol gateway lists its models there.
-        if catalog_ids is not _CATALOG_NO_MODELS_ENDPOINT:
-            break
-    return catalog_ids, True
-
-
-def _validate_and_resolve_claude_model(
-    args: argparse.Namespace,
-    resolved_urls: tuple[str, str],
-    *,
-    claude_follows_codex: bool | None = None,
-) -> set[str] | None:
-    """Gate Claude model selection against the gateway catalog; mutates ``args.claude_model``."""
-    if claude_follows_codex is None:
-        claude_follows_codex = _claude_model_should_follow_codex()
-    chosen = (args.claude_model or "").strip()
-    # Custom orchestration models are enabled by default; the gateway catalog probe below is the sole gate.
-    allow_custom = _custom_orch_model_allowed()
-    _reject_unusable_claude_model(chosen, allow_custom=allow_custom)
-    catalog_ids, probed = _probe_claude_catalog(
-        resolved_urls,
-        chosen=chosen,
-        claude_follows_codex=claude_follows_codex,
-    )
-    if not probed:
-        return None
-
-    if catalog_ids is _CATALOG_NO_MODELS_ENDPOINT:
-        # The gateway has no /models route; the model cannot be verified here, so proceed rather than refuse.
-        print(
-            f"Preflight: WARNING — gateway has no /models route (HTTP 404/405); "
-            f"cannot verify --claude-model={chosen!r}. Proceeding."
-        )
-        return None
-
-    if catalog_ids is None:
-        # Auth/network/server/non-JSON/empty-catalog failure: genuinely unverifiable.
-        if allow_custom:
-            print(
-                f"Preflight: WARNING — gateway catalog unreachable; cannot verify "
-                f"--claude-model={chosen!r}. Proceeding with custom orchestration "
-                f"model support enabled (trusting the operator id)."
-            )
-            return None
-        print(
-            "ERROR: gateway catalog unreachable after retries; cannot "
-            "verify Claude model availability. Refusing to start.",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-
-    if chosen in catalog_ids or _catalog_compare_model_id(chosen) in catalog_ids:
-        print(f"Preflight: Claude model {chosen!r} confirmed in gateway catalog")
-        return catalog_ids
-
-    # For non-allowlisted custom ids the AMD fallback is meaningless; fail clearly on a catalog miss.
-    if allow_custom and chosen not in _CLAUDE_ALLOWED_MODELS:
-        print(
-            f"ERROR: --claude-model={chosen!r} not present in gateway catalog "
-            f"(custom orchestration model support enabled; catalog has "
-            f"{sorted(catalog_ids)[:20]}). Refusing to start.",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-
-    # Walk the allowlist in order so it acts as a real preference ladder: a gateway that carries opus-4-8 but not the
-    # newer default must land on 4-8, not skip two generations down to the last entry.
-    for candidate in _CLAUDE_ALLOWED_MODELS:
-        if candidate == chosen:
-            continue
-        if candidate in catalog_ids:
-            print(f"Preflight: WARNING — {chosen!r} not in gateway catalog; falling back to {candidate!r}")
-            args.claude_model = candidate
-            return catalog_ids
-
-    print(
-        f"ERROR: none of the allowed Claude models {list(_CLAUDE_ALLOWED_MODELS)!r} "
-        f"present in gateway catalog "
-        f"(catalog has {sorted(m for m in catalog_ids if m.startswith('claude-'))}). "
-        f"Refusing to start.",
-        file=sys.stderr,
-    )
-    raise SystemExit(2)
-
-
-def _resolve_models_for_run(
-    args: argparse.Namespace,
-    resolved_urls: tuple[str, str],
-    *,
-    claude_follows_codex: bool | None = None,
-    codex_follows_claude: bool | None = None,
-) -> None:
-    """Resolve both model ids against the gateway before any session work."""
-    if claude_follows_codex is None:
-        claude_follows_codex = _claude_model_should_follow_codex()
-    if codex_follows_claude is None:
-        codex_follows_claude = _codex_model_should_follow_claude()
-
-    if claude_follows_codex:
-        # codex_model is about to become the orchestration model, so it needs the ladder whatever the critic backend
-        # is.
-        _smoke_test_codex_model(args, resolved_urls)
-        args.claude_model = args.codex_model
-
-    # Hard-gate the Claude model (mutates args.claude_model on fallback; sys.exit(2) on failure).
-    _validate_and_resolve_claude_model(args, resolved_urls, claude_follows_codex=claude_follows_codex)
-
-    if codex_follows_claude:
-        args.codex_model = args.claude_model
-
-    _probe_critic_review_model(
-        args, codex_follows_claude=codex_follows_claude, claude_follows_codex=claude_follows_codex
-    )
-
-
-_CRITIC_PROBE_TIMEOUT_SEC = 60.0
-
-
-def _probe_critic_review_model(
-    args: argparse.Namespace, *, codex_follows_claude: bool, claude_follows_codex: bool = False
-) -> None:
-    """Send the critic's model one real request before the session starts; exit rc=2 when it cannot answer.
-
-    A catalog listing only proves a gateway names a model, not that its upstream serves it, and the critic has no
-    fallback model: a review path that fails every call must stop the launch rather than run a session without a
-    critic.
-    """
-    if _resolve_critic_choice(args) != "agent":
-        return
-    try:
-        protocol, model = critic_review_target(
-            args.critic_protocol,
-            orchestration_on_codex=critic_on_codex_side(
-                codex_follows_claude=codex_follows_claude, claude_follows_codex=claude_follows_codex
-            ),
-            claude_model=args.claude_model,
-            codex_model=args.codex_model,
-        )
-    except ValueError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        sys.exit(2)
-
-    messages = [{"role": "user", "content": "Reply with OK."}]
-    last_error: BaseException | None = None
-    for delay in (0.0, *_CATALOG_RETRY_DELAYS_SEC):
-        if delay:
-            time.sleep(delay)
-        try:
-            if protocol == "anthropic":
-                llm_config.anthropic_completion(
-                    request=llm_config.AnthropicCompletionRequest(
-                        model=model, messages=messages, max_tokens=16, timeout_s=_CRITIC_PROBE_TIMEOUT_SEC
-                    ),
-                    component="critic",
-                    operation="preflight",
-                )
-            else:
-                llm_config.chat_completion(
-                    llm_config.get_openai_client(timeout=_CRITIC_PROBE_TIMEOUT_SEC),
-                    component="critic",
-                    operation="preflight",
-                    model=model,
-                    messages=messages,
-                    max_completion_tokens=16,
-                )
-        except Exception as exc:  # any failure means the review path is unusable; exits 2 after the last retry
-            log.warning("critic model %r probe failed over the %s protocol: %s", model, protocol, exc, exc_info=True)
-            last_error = exc
-            continue
-        print(f"Preflight: critic model {model!r} answered over the {protocol} protocol")
-        return
-    print(
-        f"ERROR: critic model {model!r} did not answer over the {protocol} protocol: {last_error!r}\n"
-        f"  The critic reviews with the orchestration model unless --critic-protocol selects the other side "
-        f"(then CLAUDE_MODEL for anthropic, CODEX_MODEL for openai); there is no fallback model.\n"
-        f"  Fix that model or its credential, or pass --critic-mock to run without a critic. Refusing to start.",
-        file=sys.stderr,
-    )
-    sys.exit(2)
-
-
-def _smoke_test_codex_model(
-    args: argparse.Namespace,
-    resolved_urls: tuple[str, str],
-) -> None:
-    """WARN-only catalog check for ``--codex-model`` on an OpenAI-only launch, where it becomes the orchestration model.
-
-    Steps down the ladder before Coordinator starts.
-    """
-    openai_url = os.environ.get("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "").strip()
-    if not openai_url:
-        openai_url = os.environ.get("OPENAI_BASE_URL", "").strip()
-    if not openai_url:
-        openai_url = resolved_urls[1]
-    # OpenAI-side key only.
-    openai_key = os.environ.get("OPENAI_API_KEY", "")
-    catalog_ids = _probe_llm_catalog(base_url=openai_url, api_key=openai_key)
-    if catalog_ids is None:
-        # WARN-only path: don't block startup just because the OpenAI catalog is unreachable (the Claude gate already
-        # validated reachability).
-        print(
-            "Preflight: WARNING — OpenAI-side catalog unreachable; skipping "
-            "--codex-model verification (CodexBackend may fail at first turn)."
-        )
-        return
-
-    chosen = (args.codex_model or "").strip()
-    if chosen in catalog_ids:
-        print(f"Preflight: Codex model {chosen!r} confirmed in gateway catalog")
-        return
-
-    if chosen in _CODEX_FALLBACK_MODELS:
-        for candidate in _CODEX_FALLBACK_MODELS:
-            if candidate == chosen:
-                continue
-            if candidate in catalog_ids:
-                print(
-                    f"Preflight: WARNING — codex model {chosen!r} not in gateway catalog; falling back to {candidate!r}"
-                )
-                args.codex_model = candidate
-                return
-
-    print(
-        f"Preflight: WARNING — codex model {chosen!r} not in gateway catalog "
-        f"({sorted(m for m in catalog_ids if m.startswith('gpt-'))}); "
-        f"CodexBackend will fail at first turn. Pass --codex-model with a "
-        f"value in the catalog (known-good ids, newest first: "
-        f"{list(_CODEX_FALLBACK_MODELS)})."
-    )
-
-
-# Default critic backend; override via env or --critic-mock/--critic-agent.
-DEFAULT_CRITIC_BACKEND = os.environ.get(
-    "INFERENCE_OPTIMIZER_DEFAULT_CRITIC_BACKEND",
-    "agent",
-)
-_VALID_CRITIC_BACKENDS = ("mock", "agent")
-
-
-def _resolve_choice(
-    attr: str,
-    default: str,
-    valid: tuple[str, ...],
-    flag_hint: str,
-    *,
-    args: argparse.Namespace,
-) -> tuple[str, bool]:
-    """Resolve a backend choice from CLI args with validation and fallback to default."""
-    chosen = getattr(args, attr, None)
-    explicit = chosen is not None
-    if chosen is None:
-        chosen = default
-    if chosen not in valid:
-        print(
-            f"ERROR: {attr.replace('_', ' ')} {chosen!r} not in {valid!r} (set by {flag_hint})",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-    return chosen, explicit
-
-
-def _resolve_critic_choice(args: argparse.Namespace) -> str:
-    """Resolve the active critic backend choice (arg → DEFAULT_CRITIC_BACKEND); hard-fails on invalid."""
-    chosen, _ = _resolve_choice(
-        "critic_backend",
-        DEFAULT_CRITIC_BACKEND,
-        _VALID_CRITIC_BACKENDS,
-        "--critic-mock / --critic-agent or INFERENCE_OPTIMIZER_DEFAULT_CRITIC_BACKEND",
-        args=args,
-    )
-    return chosen
-
-
 def _reset_state_file(session_dir: Path, *, framework: str) -> None:
     """Back up ``state.json`` to ``state.json.preReset.<unix_ts>`` and start fresh (Recipe KB untouched).
 
@@ -997,26 +462,14 @@ def _reset_state_file(session_dir: Path, *, framework: str) -> None:
     state_path = session_dir / "state.json"
     if not state_path.exists():
         return
-    import time as _time
-
-    ts = int(_time.time())
-    backup_path = session_dir / f"state.json.preReset.{ts}"
+    backup_path = session_dir / f"state.json.preReset.{int(time.time())}"
     try:
         state_path.replace(backup_path)
     except OSError as exc:
-        import logging as _logging
-
-        _logging.getLogger(__name__).warning(
-            "--reset-state: could not move %s → %s: %s",
-            state_path,
-            backup_path,
-            exc,
-        )
+        log.warning("--reset-state: could not move %s → %s: %s", state_path, backup_path, exc)
         return
     SharedState(framework=framework).save(session_dir)
-    import logging as _logging
-
-    _logging.getLogger(__name__).info(
+    log.info(
         "--reset-state: backed up state.json to %s; session starts blank except for framework=%s.",
         backup_path.name,
         framework,
@@ -1072,43 +525,6 @@ def _apply_agentx_budget_profile(args: argparse.Namespace) -> None:
         )
 
 
-def _resolve_run_max_model_len(args: argparse.Namespace) -> tuple[int, str]:
-    """Resolve planning context; native AgentX serving context remains in its YAML."""
-    if getattr(args, "max_model_len", None):
-        return int(args.max_model_len), "--max-model-len"
-    max_model_len_env = os.environ.get("MAX_MODEL_LEN", "").strip()
-    if max_model_len_env:
-        try:
-            return _positive_int_arg(max_model_len_env), "$MAX_MODEL_LEN"
-        except argparse.ArgumentTypeError as exc:
-            print(
-                f"ERROR: MAX_MODEL_LEN={max_model_len_env!r} is invalid: {exc}",
-                file=sys.stderr,
-            )
-            raise SystemExit(2)
-    # AgentX replays real agentic traces whose lengths come from the corpus, so ISL/OSL are meaningless placeholders
-    # here (they default to 1024/1024) and ``ISL+OSL+headroom`` would pin the server at ~6k against traces reaching
-    # ~1M tokens -- the corpus would then be silently reduced to whatever fits.
-    if _agentx_enabled():
-        native = _load_model_max_position_embeddings(str(args.model or ""))
-        if native:
-            return int(native), "agentx-native-context"
-        # Model not on disk yet (uncached HF id).
-        print(
-            "NOTE: Model context is unavailable locally; using a planning estimate. "
-            "Magpie resolves the AgentX serving context from its workload configuration.",
-            file=sys.stderr,
-        )
-    return (
-        _resolve_max_model_len(
-            args.isl,
-            args.osl,
-            str(args.model or ""),
-        ),
-        "auto",
-    )
-
-
 def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
     """Map ``--*-pct`` CLI flags to a ``phase -> pct`` override dict.
 
@@ -1134,203 +550,6 @@ def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
         if val is not None:
             phase_budget_pct[phase_name] = float(val)
     return phase_budget_pct
-
-
-def _detect_checkpoint_precision(model_path: str | None) -> str:
-    """Detect weight precision from model config.json; returns '' when it names none."""
-    if not model_path:
-        return ""
-    from hyperloom.inference_optimizer.model_config_utils import summarize_model_config
-
-    summary = summarize_model_config(str(model_path))
-    quant = (summary.get("quantization") or "").strip().lower()
-    if quant:
-        if quant.startswith("fp8"):
-            return "fp8"
-        if quant in ("fp4", "mxfp4", "nvfp4"):
-            return "fp4"
-        if quant in ("int8", "w8a8_int8"):
-            return "int8"
-        if quant in ("int4", "awq", "gptq"):
-            return "int4"
-        return quant
-    dtype = (summary.get("torch_dtype") or "").strip().lower()
-    _DTYPE_MAP = {
-        "bfloat16": "bf16",
-        "float16": "fp16",
-        "float32": "fp32",
-        "float8_e4m3fn": "fp8",
-        "float8_e5m2": "fp8",
-    }
-    return _DTYPE_MAP.get(dtype, dtype) if dtype else ""
-
-
-def _positive_env_int(name: str) -> int:
-    """``$name`` as a positive int, or 0 so the caller falls through to the next rung of its ladder."""
-    try:
-        value = int(os.environ.get(name.upper(), "").strip())
-    except ValueError:
-        return 0
-    return value if value > 0 else 0
-
-
-def _seed_env_from_resumed_state(state: Any, pins: dict[str, str]) -> None:
-    """Put the session's recorded workload in the environment, so a resume outranks whatever the shell exported.
-
-    Hyperloom's own repro scripts ``export TP``/``CONC``/``ISL``/``OSL``, and sourcing one before a resume must not
-    silently re-measure the session at another shape. ``pins`` -- this resume's ``--extra-env``, or, when it
-    passes none, the pins persisted from the launch -- is skipped, so changing the workload stays an explicit act.
-    """
-    for name in ("ISL", "OSL", "CONC", "TP", "EP", "MAX_MODEL_LEN"):
-        recorded = getattr(state, name.lower(), 0)
-        if recorded and name not in pins:
-            os.environ[name] = str(recorded)
-
-
-def _resolve_workload_knobs(
-    args: argparse.Namespace,
-    state: Any | None = None,
-) -> None:
-    """Fill the unset numeric workload knobs on ``args``: flag, environment, resumed state, default.
-
-    The environment rung carries the ``--extra-env`` pins :func:`_export_operator_launch_shape` has already written,
-    and on a resume also the recorded workload :func:`_seed_env_from_resumed_state` writes over any shell export -- a
-    resumed value therefore arrives through that rung rather than through ``state``. Precision has its own function
-    because it reads the checkpoint, so it cannot run this early.
-    """
-    int_knobs = (
-        ("isl", DEFAULT_ISL),
-        ("osl", DEFAULT_OSL),
-        ("conc", DEFAULT_CONC),
-        ("tp", DEFAULT_TP),
-        ("ep", DEFAULT_EP),
-    )
-    for name, default in int_knobs:
-        val = getattr(args, name, None)
-        if val is None:
-            from_env = _positive_env_int(name)
-            persisted = int(getattr(state, name, 0) or 0) if state is not None else 0
-            val = from_env or (persisted if persisted > 0 else default)
-        setattr(args, name, int(val))
-
-
-def _resolve_precision(args: argparse.Namespace, state: Any | None = None) -> None:
-    """Fill ``args.precision``: flag, environment, resumed state, checkpoint detection, default.
-
-    Must run after the model is resolved: the detection rung reads the checkpoint's ``config.json``, and finding
-    nothing there settles ``args.precision`` on the default with no later call able to correct it. A ``PRECISION``
-    reaching this function through the environment is treated as an explicit flag, mismatch warning included.
-    """
-    precision = getattr(args, "precision", None)
-    if not precision:
-        precision = os.environ.get("PRECISION", "").strip()
-    if not precision:
-        persisted = (getattr(state, "precision", "") or "").strip() if state is not None else ""
-        if persisted:
-            precision = persisted
-        else:
-            detected = _detect_checkpoint_precision(getattr(args, "model", None))
-            precision = detected or DEFAULT_PRECISION
-    else:
-        detected = _detect_checkpoint_precision(getattr(args, "model", None))
-        if detected and detected != precision:
-            print(
-                f"WARN: --precision={precision!r} but checkpoint dtype is {detected!r}; "
-                "using --precision flag as specified.",
-                file=sys.stderr,
-            )
-    args.precision = precision
-
-
-def _export_workload_envs_for_optimize(
-    args: argparse.Namespace,
-    *,
-    tp_resolved: int,
-    ep_resolved: int,
-) -> None:
-    """Project resolved workload knobs (TP/CONC/EP) into env for downstream Magpie YAMLs."""
-    os.environ["TP"] = str(max(1, int(tp_resolved or 1)))
-    os.environ["CONC"] = str(max(1, int(getattr(args, "conc", DEFAULT_CONC) or DEFAULT_CONC)))
-    os.environ["EP"] = str(max(1, int(ep_resolved or 1)))
-
-
-def _enforce_topology_gates(*, nodes: int, gpus_per_node: int, tp: int, ep: int) -> None:
-    """Fail fast on a TP/EP shape the cluster cannot place, rather than on a cryptic launcher crash mid-cold-start.
-
-    Multi-node only: a single node places whatever its own GPU count allows and the launcher reports that itself.
-    """
-    if nodes < 2:
-        return
-    total_gpus = nodes * gpus_per_node
-    # Gate 1: total cluster GPUs (nodes*gpus_per_node) must hold the model's TP shards.
-    if total_gpus < tp:
-        print(
-            f"ERROR: TP={tp} exceeds total GPU count "
-            f"({nodes} nodes * {gpus_per_node} "
-            f"gpus_per_node = {total_gpus}). Either lower --tp, raise "
-            "--nodes, or use a larger --gpus-per-node pod "
-            "template.",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-    # Gate 2: EP cannot exceed TP (can't place more expert shards than ranks); fail before bootstrap.
-    if ep > tp:
-        print(
-            f"ERROR: EP={ep} > TP={tp}. Expert-parallel "
-            "size must be <= tensor-parallel size. Either lower --ep or "
-            "raise --tp.",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-
-
-def _export_operator_launch_shape(
-    *,
-    server_args: str,
-    extra_env: dict[str, str],
-) -> None:
-    """Project the operator's ``--server-args`` / ``--extra-env`` into env.
-
-    Every pin is exported under its own name, with no exceptions: Hyperloom's control variables are read with a
-    bare ``os.environ.get``, so a pin the JSON blob alone carries is invisible to all of them. The blob is kept
-    because it reaches ``state.json`` and names the previous launch's pins, which a resume dropping one must unset.
-    """
-    from hyperloom.common.env_safety import OPERATOR_EXTRA_ENV_VAR, operator_extra_env
-
-    if server_args:
-        os.environ["INFERENCE_OPTIMIZER_SERVER_ARGS"] = server_args
-    else:
-        os.environ.pop("INFERENCE_OPTIMIZER_SERVER_ARGS", None)
-    # Read before the blob is rewritten: it names what the previous launch exported, which a resume dropping a pin
-    # -- or a second session in the same shell -- has to unset rather than leave behind.
-    for name in operator_extra_env():
-        if name not in extra_env:
-            os.environ.pop(name, None)
-    os.environ.update(extra_env)
-    if extra_env:
-        os.environ[OPERATOR_EXTRA_ENV_VAR] = json.dumps(extra_env)
-    else:
-        os.environ.pop(OPERATOR_EXTRA_ENV_VAR, None)
-
-
-def _export_predictor_settings(args: argparse.Namespace) -> None:
-    """Project ``--primatune-endpoint`` / ``--primatune-mode`` into the env the predictor reads.
-
-    An absent flag leaves the variable alone, so a value exported in the shell
-    still applies. Nothing is persisted: a ``--resume-from`` relaunch needs the
-    flags again unless the shell carries the variables.
-    """
-    from hyperloom.common import predictor_config
-
-    endpoint = str(getattr(args, "primatune_endpoint", "") or "").strip()
-    if endpoint:
-        os.environ[predictor_config.ENV_ENDPOINT] = endpoint
-    mode = str(getattr(args, "primatune_mode", "") or "").strip()
-    if mode:
-        os.environ[predictor_config.ENV_MODE] = mode
-    conf = predictor_config.load()
-    if conf.enabled:
-        print(f"  predictor          : {conf.mode} at {conf.endpoint}")
 
 
 def _partition_fanout_supported(framework: str | None) -> tuple[bool, str]:
@@ -1895,7 +1114,7 @@ def _open_resumed_session(args: argparse.Namespace) -> _SessionStart:
 
     ``--resume-from`` names a subdirectory under the workspace root; USER_DATA_PATH itself stays where it is.
     """
-    from ..session.paths import ENV_CURRENT_SESSION_DIR, _SESSION_SKELETON, is_path_within, workspace_root
+    from ..session.paths import ENV_CURRENT_SESSION_DIR, ensure_session_skeleton, is_path_within, workspace_root
 
     ws = workspace_root()
     session_dir = Path(args.resume_from).expanduser().resolve()
@@ -1914,8 +1133,7 @@ def _open_resumed_session(args: argparse.Namespace) -> _SessionStart:
         sys.exit(2)
     # Pin before Coordinator/SharedState load so paths/subprocesses inherit the resolved location.
     os.environ[ENV_CURRENT_SESSION_DIR] = str(session_dir)
-    for sub in _SESSION_SKELETON:
-        (session_dir / sub).mkdir(parents=True, exist_ok=True)
+    ensure_session_skeleton(session_dir)
 
     # Single-optimizer guard: take the session lock before any state.json / lease access.
     session_lock = _acquire_session_lock_or_exit(session_dir)
@@ -2129,8 +1347,8 @@ def _create_fresh_session(args: argparse.Namespace, *, framework: str, nodes_res
         session_dir,
         args,
         session_id=manifest["session_id"],
-        compute_partition=compute_partition,
-        gpu_power_settings=gpu_power,
+        framework=framework,
+        platform=LaunchPlatform(compute_partition=compute_partition, gpu_power_settings=gpu_power),
     )
     return _SessionStart(session_dir=session_dir, session_lock=session_lock, manifest=manifest)
 
@@ -2206,95 +1424,6 @@ async def _seed_fresh_session(args: argparse.Namespace, *, nodes_resolved: int) 
     return session
 
 
-def _resolve_run_topology(args: argparse.Namespace) -> int:
-    """Settle this run's launch shape, and return the node count the caller gates on.
-
-    Everything else it settles -- the operator's pins, TP/EP, ISL/OSL/CONC, the
-    PD split, ``SKIP_VARIANTS`` -- leaves through ``os.environ``, which is how
-    the subprocess executors that inherit it read these. Only the node count has
-    a caller in this process, so only it is returned. A resume runs its own
-    ladder against the session's recorded values and skips the projection.
-    """
-    # Surface --nodes (CLI flag wins) before _preflight runs.
-    nodes_resolved = max(1, int(args.nodes))
-    # The operator's pins have to be in the environment before the ladder below reads them.
-    _export_operator_launch_shape(
-        server_args=str(getattr(args, "server_args", "") or "").strip(),
-        extra_env=parse_operator_extra_env(args),
-    )
-    # Settle the knobs before the gates, the projection and ``_preflight`` derive from them. A resume runs its own
-    # ladder once the state is loaded.
-    _is_resume = bool(getattr(args, "resume_from", None))
-    if not _is_resume:
-        _resolve_workload_knobs(args)
-    tp_resolved = max(1, int(getattr(args, "tp", 1) or 1))
-    ep_resolved = max(1, int(getattr(args, "ep", 1) or 1))
-    gpus_per_node_resolved = _resolve_gpus_per_node(args)
-
-    # Project before ``_preflight``: ``check_gpu_visibility`` reads ``$TP`` to warn when the run asks for more
-    # shards than rocm-smi can see.
-    if not _is_resume:
-        _export_workload_envs_for_optimize(args, tp_resolved=tp_resolved, ep_resolved=ep_resolved)
-
-    _enforce_topology_gates(
-        nodes=nodes_resolved,
-        gpus_per_node=gpus_per_node_resolved,
-        tp=tp_resolved,
-        ep=ep_resolved,
-    )
-
-    os.environ["INFERENCE_OPTIMIZER_NODES"] = str(nodes_resolved)
-    # Multi-node topology handoff: export the CLI-flag-resolved backend / gpus-per-node so downstream subprocesses
-    # (kernel agent, benchmark, KB topology, state synthesis) read a single stable source.
-    if nodes_resolved >= 2:
-        os.environ["INFERENCE_OPTIMIZER_GPUS_PER_NODE"] = str(gpus_per_node_resolved)
-        os.environ["INFERENCE_OPTIMIZER_MN_BACKEND"] = _resolve_mn_backend(args)
-    _export_predictor_settings(args)
-    # The partition shape is deliberately NOT exported here.
-
-    # User-declared grid skip list; re-export so subprocess executors inherit it (empty clears stale values).
-    # Not pinnable: it is the policy for one run, not part of the session's measurement contract, so a resume takes
-    # it from the flag it was passed rather than from what the original launch pinned.
-    skip_variants_resolved = (getattr(args, "skip_variants", "") or "").strip()
-    os.environ["SKIP_VARIANTS"] = skip_variants_resolved
-    # Surface PD_* knobs for executors; empty means "resolve from state.json", pd_mode always exported.
-    pd_mode = (getattr(args, "pd_mode", "") or "aggregated").lower()
-    if pd_mode == "disaggregated" and nodes_resolved < 2:
-        # PD disaggregation needs >=2 nodes (separate prefill + decode pods); fail at parse time.
-        print(
-            f"ERROR: --pd-mode disaggregated requires --nodes >= 2 "
-            f"(got --nodes {nodes_resolved}). PD splits the cluster "
-            "into prefill + decode groups; a single pod cannot host "
-            "both. Either drop --pd-mode (defaults to aggregated) or "
-            "raise --nodes.",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-    os.environ["PD_MODE"] = pd_mode
-    if pd_mode == "disaggregated":
-        for cli_attr, env_key in (
-            ("pd_prefill_nodes", "PD_PREFILL_NODES"),
-            ("pd_decode_nodes", "PD_DECODE_NODES"),
-            ("pd_prefill_tp", "PD_PREFILL_TP"),
-            ("pd_decode_tp", "PD_DECODE_TP"),
-            ("pd_prefill_ep", "PD_PREFILL_EP"),
-            ("pd_decode_ep", "PD_DECODE_EP"),
-        ):
-            v = int(getattr(args, cli_attr, 0) or 0)
-            if v > 0:
-                os.environ[env_key] = str(v)
-        for cli_attr, env_key in (
-            ("pd_transfer_backend", "PD_TRANSFER_BACKEND"),
-            ("pd_ib_device", "PD_IB_DEVICE"),
-            ("pd_prefill_extra_args", "PD_PREFILL_EXTRA_ARGS"),
-            ("pd_decode_extra_args", "PD_DECODE_EXTRA_ARGS"),
-        ):
-            v = (getattr(args, cli_attr, "") or "").strip()
-            if v:
-                os.environ[env_key] = v
-    return nodes_resolved
-
-
 @dataclass(frozen=True)
 class _AgentLineup:
     """Which phases and which critic this run brings, once the toggles are read."""
@@ -2364,7 +1493,7 @@ def _resolve_agent_lineup(args: argparse.Namespace) -> _AgentLineup:
             file=sys.stderr,
         )
         sys.exit(2)
-    if _critic_agent_runtime_needed(critic_choice):
+    if critic_choice == "agent":
         critic_agent_root = _resolve_agent_root()
         if critic_agent_root is None:
             print(
@@ -2414,7 +1543,7 @@ def _install_system_prompts(
     prompt_context = OrchestrationPromptContext(
         no_kernel=lineup.no_kernel,
         no_framework_agent=lineup.no_framework_agent,
-        framework=os.environ["FRAMEWORK"],
+        framework=state.framework,
         objective=objective,
         max_minutes=int(round(float(args.max_hours) * 60)),
         # The role record always names Claude; the deployment's provider shape is what actually decides, so read the
@@ -2500,13 +1629,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             f"errors={aiter_sweep['errors']}"
         )
 
-    claude_follows_codex = _claude_model_should_follow_codex()
-    if claude_follows_codex:
-        args.claude_model = args.codex_model
-
     # Capture provider intent before _preflight() fills missing endpoints (preflight may populate OPENAI_BASE_URL from
     # ANTHROPIC_BASE_URL).
-    codex_follows_claude = _codex_model_should_follow_claude()
+    claude_follows_codex = llm_config.is_openai_only()
+    codex_follows_claude = llm_config.is_anthropic_only()
     try:
         resolved_urls = _preflight(args)
     except Exception as exc:
@@ -2595,7 +1721,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         CriticSetup(
             choice=lineup.critic_choice,
             agent_root=lineup.critic_agent_root,
-            kb_mode=lineup.critic_kb_mode,
             protocol=args.critic_protocol,
         ),
         session_dir=session_dir,
@@ -2627,7 +1752,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     prompts = _install_system_prompts(coordinator, args, objective, lineup, macro_cycle=_initial_macro_cycle)
     # Build specialist executor only when research_lane capacity > 0 (0 degrades to LLM-direct grid).
     specialist_executor: "Any" = None
-    if args.research_lane_capacity > 0:
+    if resolve_research_lane_capacity(args) > 0:
         specialist_executor = _build_specialist_executor(
             args,
             session_dir=session_dir,

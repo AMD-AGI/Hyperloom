@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.fusion.locate import resolve_framework_source_file
+from kernelforge.workflows.forge_fusion.locate import resolve_framework_source_file
 
 DECODER = "class {prefix}Attention(nn.Module):\n    pass\n\n\nclass {prefix}DecoderLayer(nn.Module):\n    pass\n"
 
@@ -142,7 +142,7 @@ def test_a_pinned_root_outranks_the_installed_vllm_the_registry_names(
     (models / "qwen3.py").write_text(DECODER.format(prefix="Qwen3"), encoding="utf-8")
     model_path = _model_dir(tmp_path, model_type="qwen3", architectures=["Qwen3ForCausalLM"])
     monkeypatch.setattr(
-        "kernelforge.fusion.locate._vllm_registered_source",
+        "kernelforge.workflows.forge_fusion.locate._vllm_registered_source",
         lambda _p: "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/qwen3.py",
     )
 
@@ -159,7 +159,7 @@ def test_the_registry_still_answers_when_no_root_is_pinned(tmp_path: Path, monke
     (installed / "qwen3.py").write_text(DECODER.format(prefix="Qwen3"), encoding="utf-8")
     model_path = _model_dir(tmp_path, model_type="qwen3", architectures=["Qwen3ForCausalLM"])
     monkeypatch.setattr(
-        "kernelforge.fusion.locate._vllm_registered_source",
+        "kernelforge.workflows.forge_fusion.locate._vllm_registered_source",
         lambda _p: str(installed / "qwen3.py"),
     )
 

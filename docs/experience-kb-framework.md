@@ -24,7 +24,7 @@ session_breakdown.timeline[type=framework_agent].ext
 ```
 
 plus the workload identity in `metadata.task_config`. These fields are
-declared in `breakdown/schema.py` (`V6FrameworkAttempt`, `V6FrameworkProposal`).
+declared in `breakdown/schema_framework.py` (`V6FrameworkAttempt`, `V6FrameworkProposal`).
 
 - **Measured-against stack.** Both arms record the exact configuration an
   attempt was judged on, not the session's current configuration.

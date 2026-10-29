@@ -10,30 +10,30 @@ import builtins
 import inspect
 from pathlib import Path
 
-import kernelforge.fusion.agent_selection
-import kernelforge.fusion.author
-import kernelforge.fusion.pipeline
-import kernelforge.fusion.compile_pass_claim
-import kernelforge.fusion.discover
-import kernelforge.fusion.emit
-import kernelforge.fusion.harness_authoring
-import kernelforge.fusion.locate
-import kernelforge.fusion.serving_gate
-import kernelforge.fusion.source_snapshot
-import kernelforge.fusion.validate
+import kernelforge.workflows.forge_fusion.agent_selection
+import kernelforge.workflows.forge_fusion.author
+import kernelforge.workflows.forge_fusion.pipeline
+import kernelforge.workflows.forge_fusion.compile_pass_claim
+import kernelforge.workflows.forge_fusion.discover
+import kernelforge.workflows.forge_fusion.emit
+import kernelforge.workflows.forge_fusion.harness_authoring
+import kernelforge.workflows.forge_fusion.locate
+import kernelforge.workflows.forge_fusion.serving_gate
+import kernelforge.workflows.forge_fusion.source_snapshot
+import kernelforge.workflows.forge_fusion.validate
 
 MODULES = (
-    kernelforge.fusion.agent_selection,
-    kernelforge.fusion.author,
-    kernelforge.fusion.pipeline,
-    kernelforge.fusion.compile_pass_claim,
-    kernelforge.fusion.discover,
-    kernelforge.fusion.emit,
-    kernelforge.fusion.harness_authoring,
-    kernelforge.fusion.locate,
-    kernelforge.fusion.serving_gate,
-    kernelforge.fusion.source_snapshot,
-    kernelforge.fusion.validate,
+    kernelforge.workflows.forge_fusion.agent_selection,
+    kernelforge.workflows.forge_fusion.author,
+    kernelforge.workflows.forge_fusion.pipeline,
+    kernelforge.workflows.forge_fusion.compile_pass_claim,
+    kernelforge.workflows.forge_fusion.discover,
+    kernelforge.workflows.forge_fusion.emit,
+    kernelforge.workflows.forge_fusion.harness_authoring,
+    kernelforge.workflows.forge_fusion.locate,
+    kernelforge.workflows.forge_fusion.serving_gate,
+    kernelforge.workflows.forge_fusion.source_snapshot,
+    kernelforge.workflows.forge_fusion.validate,
 )
 
 

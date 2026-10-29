@@ -19,15 +19,15 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
-from kernelforge.kernel_rewrite_controller import dispatcher
-from kernelforge.kernel_rewrite_controller._collective_names import (
+from kernelforge.workflows.rewrite_controller import dispatcher
+from kernelforge.workflows.rewrite_controller._collective_names import (
     carries_parallelism_suffix,
     looks_like_multi_rank_operator,
 )
-from kernelforge.kernel_rewrite_controller.contracts import TASK_STATUS_SKIPPED, TaskContractError
-from kernelforge.kernel_rewrite_controller.paths import ControllerLayout
-from kernelforge.kernel_rewrite_controller.paths import operator_directory_name
-from kernelforge.kernel_rewrite_controller.task import parse_task_payload
+from kernelforge.workflows.rewrite_controller.contracts import TASK_STATUS_SKIPPED, TaskContractError
+from kernelforge.workflows.rewrite_controller.paths import ControllerLayout
+from kernelforge.workflows.rewrite_controller.paths import operator_directory_name
+from kernelforge.workflows.rewrite_controller.task import parse_task_payload
 from kernelforge.knowledge.kb_store.identity.kernel_recipe import KernelRecipeIdentity, kernel_recipe_canonical_id
 
 BASE_COMMIT = "a" * 40

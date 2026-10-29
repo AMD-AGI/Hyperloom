@@ -24,10 +24,8 @@ from hyperloom.orchestrator.actions.executors._workload_envs import (
     LaunchLayer,
     MaterializeOptions,
 )
-from hyperloom.orchestrator.actions.executors.baseline import (
-    BaselineExecutor,
-    _with_cuda_graph_disabled,
-)
+from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
+from hyperloom.orchestrator.actions.executors.benchmark_run.bringup import _with_cuda_graph_disabled
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 
@@ -175,10 +173,10 @@ def test_materialize_config_with_envs_forces_generic_without_override(tmp_path):
     assert cfg["benchmark"]["benchmark_script"] == "sglang_mi300x.sh"
 
 
-def test_materialize_writes_operator_extra_env_into_vllm_yaml(tmp_path, monkeypatch):
+def test_materialize_writes_operator_extra_env_but_not_its_credentials_into_vllm_yaml(tmp_path, monkeypatch):
     monkeypatch.setenv(
         "INFERENCE_OPTIMIZER_EXTRA_ENV",
-        '{"VLLM_USE_BREAKABLE_CUDAGRAPH": "0"}',
+        '{"VLLM_USE_BREAKABLE_CUDAGRAPH": "0", "KB_STORE_TOKEN": "kb-secret"}',
     )
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
@@ -188,6 +186,7 @@ def test_materialize_writes_operator_extra_env_into_vllm_yaml(tmp_path, monkeypa
         materialize_config_with_envs(base, out, target=BenchmarkTarget(gpu_type="mi355x")).read_text()
     )["benchmark"]["envs"]
     assert envs["VLLM_USE_BREAKABLE_CUDAGRAPH"] == "0"
+    assert "KB_STORE_TOKEN" not in envs
 
 
 def test_kimi_materialize_enables_remote_client_trust(tmp_path):

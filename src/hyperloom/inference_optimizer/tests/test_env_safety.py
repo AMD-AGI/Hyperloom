@@ -116,6 +116,9 @@ def test_scrub_benchmark_process_env_removes_control_plane_credentials():
         "LLM_PROXY_API_KEY": "proxy-secret",
         "OPENAI_API_KEY": "openai-secret",
         "SAFE_API_KEY": "safe-secret",
+        "KB_STORE_TOKEN": "kb-secret",
+        "INFERENCE_OPTIMIZER_EXTRA_ENV": '{"KB_STORE_TOKEN": "kb-secret", "VLLM_ROCM_USE_AITER": "1"}',
+        "VLLM_ROCM_USE_AITER": "1",
         "HF_TOKEN": "model-download-token",
         "PATH": "/bin",
         "RUN_EVAL": "true",
@@ -123,6 +126,7 @@ def test_scrub_benchmark_process_env_removes_control_plane_credentials():
 
     assert common_env_safety.scrub_benchmark_process_env(env) is env
     assert env == {
+        "VLLM_ROCM_USE_AITER": "1",
         "HF_TOKEN": "model-download-token",
         "PATH": "/bin",
         "RUN_EVAL": "true",
@@ -227,7 +231,6 @@ def test_redact_secret_env_values_masks_every_langfuse_marker_and_scrubs_kept_va
 def test_langfuse_redact_env_markers_are_the_shared_list():
     from hyperloom.inference_optimizer.trace import langfuse_mapping
 
-    assert langfuse_mapping._SENSITIVE_ENV_MARKERS is common_env_safety.SENSITIVE_ENV_NAME_MARKERS
     # The Langfuse snapshot keeps its wider substring match.
     assert langfuse_mapping.redact_env({"MAX_NUM_BATCHED_TOKENS": "8192"}) == {
         "MAX_NUM_BATCHED_TOKENS": "***redacted***"
@@ -309,6 +312,12 @@ def test_redact_secret_values_preserves_json_around_authorization():
     out = common_env_safety.redact_secret_values(text)
 
     assert json.loads(out) == {"header": "Authorization: Basic [REDACTED]", "ok": True}
+
+
+def test_redact_secret_values_masks_custom_header_subscription_key():
+    out = common_env_safety.redact_secret_values("ANTHROPIC_CUSTOM_HEADERS=Ocp-Apim-Subscription-Key: deadbeefsecret")
+    assert "deadbeefsecret" not in out
+    assert "[REDACTED]" in out
 
 
 def test_redact_secret_values_spares_unauthorized_status_text():

@@ -14,10 +14,10 @@ from hyperloom.orchestrator.specialists.domains import (
     SPECIALIST_DOMAINS,
     get_domain,
 )
+from hyperloom.orchestrator.prompts.specialist_focus import _DOMAIN_FOCUS_TEMPLATES
+from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
-    _DOMAIN_FOCUS_TEMPLATES,
     _THROUGHPUT_AUTHORING_DOMAINS,
-    SpecialistPromptInputs,
     build_specialist_prompts,
 )
 
@@ -506,10 +506,8 @@ from hyperloom.orchestrator.specialists.runner import (
     build_empty_specialist_done,
 )
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
-from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
-    SpecialistPromptInputs,
-    build_specialist_prompts,
-)
+from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
+from hyperloom.orchestrator.prompts.specialist_prompt_builder import build_specialist_prompts
 
 from .conftest import init_git_repo, make_fake_claude
 
@@ -1104,6 +1102,7 @@ def test_mandate_section_renders_run_status():
         framework="vllm",
         baseline_tput=6232.0,
         current_tput=6848.5,
+        current_launch_args="--moe-backend aiter --kv-cache-dtype fp8_e4m3",
         cumulative_gain_validated=9.89,
         keep_threshold_pct=1.0,
         applied_stack=[{"variant_name": "--kv-cache-dtype fp8_e4m3", "gain_pct": 5.99}],
@@ -1114,6 +1113,7 @@ def test_mandate_section_renders_run_status():
     assert "9.89" in user or "+9.89" in user
     assert "1.00%" in user or "1.0%" in user
     assert "--kv-cache-dtype fp8_e4m3" in user
+    assert "--moe-backend aiter --kv-cache-dtype fp8_e4m3" in user
 
 
 # --------------------------------------------------------------------------- # Stage-3 guard: enablement ladder book

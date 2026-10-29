@@ -18,7 +18,7 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
-from kernelforge.resources import resource_path
+from kernelforge.config.resources import resource_path
 
 
 SCRIPT = resource_path("local_knowledge") / "common_methodology" / "profiling" / "rocpc_profile.py"

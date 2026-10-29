@@ -236,10 +236,19 @@ An exported value still wins. `rocm700` additionally requires Python 3.10 and
 setup fails outright on any other interpreter, because the source install would
 pull a mismatched ROCm 7.2 Triton. Any other ROCm stack derives nothing and takes
 the source install, which is a fallback rather than a validated path.
-Kernel-agent paths `TRACELENS_ROOT` and `GEAK_ROOT` are added later by the
-workload skill's `install.sh`. `MAGPIE_PATH` and `INFERENCEX_PATH` follow their
-pins and reach the runtime through the kernel-agent env file, not `.env`;
-export them in the shell to override them persistently.
+`MAGPIE_PATH`, `INFERENCEX_PATH`, and the kernel-agent paths `TRACELENS_ROOT`,
+`GEAK_ROOT` and `GEAK_E2E_RUNNER` follow their pins and reach the runtime
+through the kernel-agent env file, not `.env`. To override a TraceLens or GEAK
+checkout persistently, write its path into `.env` yourself; the installer
+leaves a path outside its cache as written. A `TRACELENS_ROOT` or `GEAK_ROOT`
+override that does not exist is reported and replaced by the pinned checkout,
+and a `MAGPIE_PATH` that holds no Magpie package is reported and resolved from
+the installed package instead. Export `MAGPIE_PATH` or `INFERENCEX_PATH` in the
+shell to override those.
+After a code update that moves a pin, `install.sh --check-only` exits non-zero
+and names each stale key (`TRACELENS_ROOT`, `GEAK_ROOT`, `MAGPIE_REF`), and the
+optimizer's preflight refuses to start on a `TraceLens@<sha>` checkout that is
+not the pinned one; rerun `install.sh` to update them.
 
 Specialist subprocesses inherit a minimal environment including LLM provider
 credentials (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, AWS Bedrock vars, etc.)

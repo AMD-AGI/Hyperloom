@@ -9,7 +9,7 @@ import subprocess
 
 import pytest
 
-from kernelforge.gemm_tune import script_probe as sp
+from kernelforge.workflows.gemm_tune import script_probe as sp
 
 
 class TestNegativeNumbersAreValuesNotFlags:

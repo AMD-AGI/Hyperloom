@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from kernelforge.tools.durable_io import atomic_write_text
+from kernelforge.utils.durable_io import atomic_write_text
 from kernelforge.knowledge.pr_knowledge.client import (
     PRContractError,
     PRMonitorClient,

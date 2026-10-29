@@ -6,8 +6,8 @@ from __future__ import annotations
 
 import types
 
-import kernelforge.gemm_tune.tuners._aiter_dense_common as ac
-from kernelforge.gemm_tune.tuners.base import TuneContext
+import kernelforge.workflows.gemm_tune.tuners._aiter_dense_common as ac
+from kernelforge.workflows.gemm_tune.tuners.base import TuneContext
 
 _HDR = "gfx,cu_num,M,N,K,libtype,kernelId,splitK,us,kernelName,tflops,bw,errRatio"
 

@@ -18,7 +18,7 @@ def captured_run_spec(monkeypatch):
     stub.HookMatcher = object
     monkeypatch.setitem(sys.modules, "claude_agent_sdk", stub)
 
-    import kernelforge.orchestrator.agent as agent_mod
+    import kernelforge.workflows.forge_loop.roles.agent as agent_mod
     from kernelforge.agent_backends.base import (
         AgentCapabilities,
         AgentRunResult,
@@ -78,7 +78,7 @@ def test_run_spec_timeout_comes_from_the_session_budget(tmp_path, captured_run_s
 
 
 def test_the_implementer_session_carries_forges_protected_path_rules(tmp_path, captured_run_spec):
-    from kernelforge.workspace.edit_policy import FORGE_PROTECTED_PATHS
+    from kernelforge.config.edit_policy import FORGE_PROTECTED_PATHS
 
     kernel = tmp_path / "kernel.py"
     kernel.write_text("# kernel\n")

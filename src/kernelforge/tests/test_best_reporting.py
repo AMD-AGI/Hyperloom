@@ -6,9 +6,9 @@ import json
 
 import pytest
 
-from kernelforge.loop import reporting
-from kernelforge.loop.recovery import load_published_best
-from kernelforge.loop.reporting import BestResultPublisher, KeepBundle, KeepIdentity, KeepScore
+from kernelforge.workflows.forge_loop.campaign import reporting
+from kernelforge.workflows.forge_loop.campaign.recovery import load_published_best
+from kernelforge.workflows.forge_loop.campaign.reporting import BestResultPublisher, KeepBundle, KeepIdentity, KeepScore
 
 
 def _publish(

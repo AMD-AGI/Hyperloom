@@ -19,14 +19,14 @@ from .lane_budget import INSUFFICIENT_BUDGET, LANE_GEMM, LaneAllocation
 from .lane_budget import allocate as _allocate_lane_budgets
 
 if TYPE_CHECKING:
-    from kernelforge.gemm_tune import RoutingEvidence, RoutingTarget
+    from kernelforge.workflows.gemm_tune import RoutingEvidence, RoutingTarget
 
 log = logging.getLogger(__name__)
 
 
 # Outer subprocess cap for the whole GEMM-tuning run (all shapes/tuners) when there is
 # no lane share to take, as in an unbounded session; sized for large models with many
-# GEMM shapes. Override via HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC (or payload timeout_sec).
+# GEMM shapes. Override via HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC.
 _DEFAULT_GEMM_TUNING_TIMEOUT_SEC = 5 * 60 * 60
 
 
@@ -70,18 +70,14 @@ def _lane_remaining_minutes(state: Any) -> float | None:
     return min(float(session), float(phase_sec) / 60.0)
 
 
-def _gemm_tuning_timeout_sec(payload: dict, *, lane_budget_sec: int = 0) -> int:
+def _gemm_tuning_timeout_sec(*, lane_budget_sec: int = 0) -> int:
     """Resolve the GEMM-tuning subprocess timeout in seconds.
 
-    Reads ``payload['timeout_sec']`` then the
-    ``HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC`` env var -- both operator inputs, so both
-    outrank a derived budget -- then the lane's share of the phase, then the module
-    default; the result is floored at 60 seconds.
+    Reads the ``HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC`` env var -- an operator input,
+    so it outranks a derived budget -- then the lane's share of the phase, then the
+    module default; the result is floored at 60 seconds.
     """
-    raw = payload.get("timeout_sec") or os.environ.get(
-        "HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC",
-        "",
-    )
+    raw = os.environ.get("HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC", "")
     try:
         value = int(float(raw))
     except (TypeError, ValueError):
@@ -101,7 +97,7 @@ def _gemm_router_targets(
     returns them already in the execution order the gemm lane ceiling assumes.
     """
     try:
-        from kernelforge.gemm_tune import analyze_model, select_tuners
+        from kernelforge.workflows.gemm_tune import analyze_model, select_tuners
 
         specs = select_tuners(analyze_model(model_path), target, evidence)
     except (OSError, ValueError, TypeError, AttributeError):
@@ -122,26 +118,19 @@ async def _priced_gemm_lane(
     return _lane_budget(state, LANE_GEMM, gemm_target_costs_sec=tuple(cost for _, cost in targets))
 
 
-def _forge_fusion_timeout_sec(payload: dict, *, lane_budget_sec: int = 0) -> int:
+def _forge_fusion_timeout_sec(*, lane_budget_sec: int = 0) -> int:
     """Resolve the forge-fusion subprocess timeout in seconds.
 
     Args:
-        payload (dict): Request payload that may carry ``timeout``/``timeout_sec``.
-        lane_budget_sec (int): The fusion lane's share of the phase. ``0`` means there
+        lane_budget_sec (int): The fusion lane's share of the phase, used when
+            ``FORGE_FUSION_TIMEOUT`` is unset or unparseable. ``0`` means there
             is no share to take, as in an unbounded session, and keeps the module
             default rather than collapsing an unattended lane to a one-second timeout.
 
     Returns:
         int: The resolved timeout in seconds (>= 1).
     """
-    raw = (
-        payload.get("timeout")
-        or payload.get("timeout_sec")
-        or os.environ.get(
-            "FORGE_FUSION_TIMEOUT",
-            "",
-        )
-    )
+    raw = os.environ.get("FORGE_FUSION_TIMEOUT", "")
     try:
         value = int(float(raw))
     except (OverflowError, TypeError, ValueError):
@@ -149,22 +138,17 @@ def _forge_fusion_timeout_sec(payload: dict, *, lane_budget_sec: int = 0) -> int
     return max(1, value)
 
 
-def _fusion_attn_tp_size(state: object, payload: dict, *, tp: int) -> int:
+def _fusion_attn_tp_size(state: object, *, tp: int) -> int:
     """Attention TP shard behind the session's serving ``tp``.
 
     DP-attention splits the ``tp`` ranks into ``dp`` attention groups, so
     forge-fuse cannot infer the attention shard from ``--tp`` alone -- and it
     stamps the harness group/head dims from exactly this number.
     """
-    explicit = optional_positive_int(payload.get("attn_tp"), 0)
-    if explicit:
-        return explicit
     from hyperloom.inference_optimizer.grid_server_args import server_arg_value
     from hyperloom.inference_optimizer.roofline_ceiling import resolve_runtime_workload
 
-    server_args = str(payload.get("extra_server_args") or "").strip()
-    if not server_args:
-        server_args = resolve_runtime_workload(state, arm="current_best").server_args
+    server_args = resolve_runtime_workload(state, arm="current_best").server_args
 
     if "--enable-dp-attention" not in str(server_args).replace("=", " ").split():
         return tp
@@ -178,18 +162,12 @@ def _fusion_attn_tp_size(state: object, payload: dict, *, tp: int) -> int:
     return max(1, tp // dp)
 
 
-def _fusion_session_serve_args(
-    state: object,
-    payload: dict,
-    *,
-    framework: str,
-    model_path: str,
-) -> dict[str, int]:
+def _fusion_session_serve_args(state: object, *, framework: str, model_path: str) -> dict[str, int]:
     """TP / attention TP / KV block size / max-model-len the smoke must match."""
-    tp = optional_positive_int(payload.get("tp") or getattr(state, "tp", 0), 0)
-    max_model_len = optional_positive_int(payload.get("max_model_len") or getattr(state, "max_model_len", 0), 0)
-    block_size = optional_positive_int(payload.get("block_size"), 0)
-    if block_size <= 0 and "vllm" in (framework or "").strip().lower():
+    tp = optional_positive_int(getattr(state, "tp", 0), 0)
+    max_model_len = optional_positive_int(getattr(state, "max_model_len", 0), 0)
+    block_size = 0
+    if "vllm" in (framework or "").strip().lower():
         from hyperloom.inference_optimizer.model_config_utils import (
             _sparse_kv_block_size,
         )
@@ -198,7 +176,7 @@ def _fusion_session_serve_args(
     args: dict[str, int] = {}
     if tp:
         args["tp"] = tp
-        args["attn_tp"] = _fusion_attn_tp_size(state, payload, tp=tp)
+        args["attn_tp"] = _fusion_attn_tp_size(state, tp=tp)
     if block_size:
         args["block_size"] = block_size
     if max_model_len:
@@ -206,17 +184,11 @@ def _fusion_session_serve_args(
     return args
 
 
-def _gemm_tuning_workspace(payload: dict, *, session_dir: Path) -> Path:
+def _gemm_tuning_workspace(task_id: str, *, session_dir: Path) -> Path:
     """Resolve the workspace directory for a GEMM-tuning run.
 
-    Honors an explicit ``payload['workspace_path']``; otherwise builds a path
-    under ``<session_dir>/runs/gemm_tuning/`` keyed by ``task_id`` /
-    ``request_id`` (or a timestamped fallback).
+    Builds a path under ``<session_dir>/runs/gemm_tuning/`` keyed by ``task_id``
+    (or a timestamped fallback).
     """
-    raw = payload.get("workspace_path")
-    if raw:
-        return Path(raw)
-    suffix = str(payload.get("task_id") or payload.get("request_id") or "").strip()
-    if not suffix:
-        suffix = f"request_{int(time.time())}"
+    suffix = str(task_id or "").strip() or f"request_{int(time.time())}"
     return Path(session_dir) / "runs" / "gemm_tuning" / suffix

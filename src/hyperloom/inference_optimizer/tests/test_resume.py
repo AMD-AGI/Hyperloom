@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 
 import pytest
@@ -17,6 +18,7 @@ from hyperloom.orchestrator.roles import (
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.inference_optimizer.cli import preflight as cli_preflight
+from hyperloom.inference_optimizer.cli import preflight_env as cli_preflight_env
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -472,7 +474,7 @@ class TestN24KernelAgentEnvHardFail:
 
     def test_aborts_when_no_user_data_path(self, monkeypatch, capsys):
         with pytest.raises(SystemExit) as excinfo:
-            cli_preflight._load_kernel_agent_env_fallback()
+            cli_preflight_env._load_kernel_agent_env_fallback()
         assert excinfo.value.code == 2
         err = capsys.readouterr().err
         assert "USER_DATA_PATH" in err
@@ -481,7 +483,7 @@ class TestN24KernelAgentEnvHardFail:
     def test_aborts_when_env_file_missing(self, tmp_path, monkeypatch, capsys):
         monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
         with pytest.raises(SystemExit) as excinfo:
-            cli_preflight._load_kernel_agent_env_fallback()
+            cli_preflight_env._load_kernel_agent_env_fallback()
         assert excinfo.value.code == 2
         err = capsys.readouterr().err
         assert "kernel-agent.env.sh" in err
@@ -505,7 +507,7 @@ class TestN24KernelAgentEnvHardFail:
         (runtime / "kernel-agent.env.sh").write_text(contents, encoding="utf-8")
         monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
         with pytest.raises(SystemExit) as excinfo:
-            cli_preflight._load_kernel_agent_env_fallback()
+            cli_preflight_env._load_kernel_agent_env_fallback()
         assert excinfo.value.code == 2
         err = capsys.readouterr().err
         assert "malformed or stale" in err
@@ -519,7 +521,7 @@ class TestN24KernelAgentEnvHardFail:
             encoding="utf-8",
         )
         monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-        cli_preflight._load_kernel_agent_env_fallback()
+        cli_preflight_env._load_kernel_agent_env_fallback()
         import os as _os
 
         assert _os.environ["KERNEL_AGENT_LOG_LEVEL"] == "INFO"
@@ -536,7 +538,7 @@ class TestN24KernelAgentEnvHardFail:
         )
         monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
         monkeypatch.setenv("KERNEL_AGENT_LOG_LEVEL", "DEBUG")
-        cli_preflight._load_kernel_agent_env_fallback()
+        cli_preflight_env._load_kernel_agent_env_fallback()
         import os as _os
 
         assert _os.environ["KERNEL_AGENT_LOG_LEVEL"] == "DEBUG"
@@ -564,7 +566,7 @@ class TestN24KernelAgentEnvHardFail:
         import os as _os
 
         try:
-            cli_preflight._load_kernel_agent_env_fallback()
+            cli_preflight_env._load_kernel_agent_env_fallback()
             loaded_key = _os.environ.get("ANTHROPIC_API_KEY")
         finally:
             # The loader writes straight into os.environ, which monkeypatch cannot roll back; a leaked credential
@@ -586,7 +588,7 @@ class TestN24KernelAgentEnvHardFail:
         )
         monkeypatch.setenv("KERNEL_AGENT_ENV", str(custom))
         monkeypatch.setenv("USER_DATA_PATH", "/nonexistent/should-not-be-used")
-        outcome = cli_preflight._load_kernel_agent_env_fallback()
+        outcome = cli_preflight_env._load_kernel_agent_env_fallback()
 
         assert outcome["detail"]["env_file"] == str(custom)
 
@@ -628,7 +630,7 @@ class TestTracelensRootEnvCorrection:
         monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
         monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path / "ghost" / "TraceLens"))
 
-        outcome = cli_preflight._load_kernel_agent_env_fallback()
+        outcome = cli_preflight_env._load_kernel_agent_env_fallback()
 
         import os as _os
 
@@ -646,7 +648,7 @@ class TestTracelensRootEnvCorrection:
         monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
         monkeypatch.setenv("TRACELENS_ROOT", str(inherited))
 
-        outcome = cli_preflight._load_kernel_agent_env_fallback()
+        outcome = cli_preflight_env._load_kernel_agent_env_fallback()
 
         import os as _os
 
@@ -672,7 +674,7 @@ class TestTracelensRootEnvCorrection:
         monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
         monkeypatch.setenv("MAGPIE_PATH", selected)
 
-        outcome = cli_preflight._load_kernel_agent_env_fallback()
+        outcome = cli_preflight_env._load_kernel_agent_env_fallback()
 
         import os as _os
 
@@ -697,8 +699,8 @@ class TestTracelensRootEnvCorrection:
         monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
         monkeypatch.setenv("PYTHONPATH", "")
 
-        outcome = cli_preflight._load_kernel_agent_env_fallback()
-        cli_preflight._derive_runtime_paths()
+        outcome = cli_preflight_env._load_kernel_agent_env_fallback()
+        cli_preflight_env._derive_runtime_paths()
 
         assert os.environ["MAGPIE_PATH"] == str(magpie_dir)
         assert "MAGPIE_PATH" not in outcome["detail"]["corrected_keys"]
@@ -713,9 +715,9 @@ class TestTracelensRootEnvCorrection:
         assert child.stdout.strip() == "installer-checkout"
 
     def test_placeholder_path_to_your_is_unset(self):
-        assert cli_preflight._is_placeholder_tracelens_path("/path/to/your/TraceLens") is True
-        assert cli_preflight._is_placeholder_tracelens_path("<your-tracelens>") is True
-        assert cli_preflight._is_placeholder_tracelens_path("/tmp/hyperloom/TraceLens") is False
+        assert cli_preflight_env._is_placeholder_tracelens_path("/path/to/your/TraceLens") is True
+        assert cli_preflight_env._is_placeholder_tracelens_path("<your-tracelens>") is True
+        assert cli_preflight_env._is_placeholder_tracelens_path("/tmp/hyperloom/TraceLens") is False
 
     def test_check_root_exits_when_set_but_missing(self, tmp_path, monkeypatch):
         monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path / "ghost"))
@@ -730,6 +732,20 @@ class TestTracelensRootEnvCorrection:
         good.mkdir()
         monkeypatch.setenv("TRACELENS_ROOT", str(good))
         cli_preflight._check_tracelens_root_exists()
+
+    def test_check_root_exits_when_an_installer_checkout_is_behind_the_pin(self, tmp_path, monkeypatch):
+        script = (cli_preflight._ASSETS / "install_kernel_tools.sh").read_text(encoding="utf-8")
+        pin = re.search(r'^TRACELENS_REF="([0-9a-f]{40})"$', script, re.M).group(1)
+        pinned = tmp_path / f"TraceLens@{pin}"
+        stale = tmp_path / "TraceLens@0000000"
+        pinned.mkdir()
+        stale.mkdir()
+        monkeypatch.setenv("TRACELENS_ROOT", str(pinned))
+        cli_preflight._check_tracelens_root_exists()
+        monkeypatch.setenv("TRACELENS_ROOT", str(stale))
+        with pytest.raises(SystemExit) as excinfo:
+            cli_preflight._check_tracelens_root_exists()
+        assert excinfo.value.code == 2
 
 
 @pytest.mark.asyncio

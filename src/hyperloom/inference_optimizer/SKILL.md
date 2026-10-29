@@ -1188,8 +1188,8 @@ below describe the runtime behavior operators observe.
   (`benchmark.envs`). Both backends export that mapping to the server env, and
   bypass additionally launches the server via `python -m` with that
   interpreter. This guarantees the server loads the exact build.
-- **`build_budget_sec`.** Per-build-action wall-clock timeout knob; `0` selects
-  the per-component default.
+- **Build budget.** Each build runs under its component's fixed wall-clock
+  budget.
 
 See `docs/reference/environment-variables.md` "Targeted builds (Rung 5)" for the
 full env-var set, and `docs/reference/session-breakdown.md` for the emitted

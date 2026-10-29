@@ -21,7 +21,7 @@ from hyperloom.hosted.mcp_server import McpServer, McpServerConfig
 from hyperloom.inference_optimizer.session.optimization_journal import Journal, JournalEntry
 from hyperloom.inference_optimizer.session.paths import db_path_for
 from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, LLMCallSite, append_llm_call
-from hyperloom.orchestrator.bus.storage import SqliteConnection
+from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.bus.storage.schema import ensure_schema
 from hyperloom.orchestrator.loop.signals import SignalDrain
 from hyperloom.orchestrator.state.shared_state import SharedState

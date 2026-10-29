@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from kernelforge.orchestrator.structured_output import (
+from kernelforge.workflows.forge_loop.roles.structured_output import (
     build_repair_prompt,
     extract_json_object,
 )

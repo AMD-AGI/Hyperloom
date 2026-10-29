@@ -9,9 +9,9 @@ import json
 import subprocess
 from pathlib import Path
 
-from kernelforge.gemm_tune import aiter_script_map, utils
-from kernelforge.gemm_tune.aiter_script_map import resolve_aiter_csrc, resolve_aiter_root
-from kernelforge.gemm_tune.utils import (
+from kernelforge.workflows.gemm_tune import aiter_script_map, utils
+from kernelforge.workflows.gemm_tune.aiter_script_map import resolve_aiter_csrc, resolve_aiter_root
+from kernelforge.workflows.gemm_tune.utils import (
     check_gpu_status,
     find_tuner_script,
     run_subprocess,
