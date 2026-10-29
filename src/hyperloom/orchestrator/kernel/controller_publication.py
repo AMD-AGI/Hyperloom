@@ -11,9 +11,14 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from kernelforge.workflows.rewrite_controller import operator_directory_name
+from kernelforge.workflows.rewrite_controller import (
+    PATCH_FILENAME,
+    PUBLICATION_FILENAME,
+    PUBLICATION_SCHEMA_VERSION,
+    REPORT_FILENAME,
+    operator_directory_name,
+)
 
-PUBLICATION_SCHEMA_VERSION = 2
 _COMMIT_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _IDENTITY_FIELDS = (
     "producer",
@@ -89,9 +94,9 @@ def load_controller_publication(patch_dir: str | Path) -> ControllerPatchPublica
     root = Path(patch_dir).expanduser()
     if not root.is_dir():
         raise ControllerPublicationError(f"patch directory does not exist: {root}")
-    patch_path = root / "change.patch"
-    report_path = root / "report.md"
-    publication_path = root / "publication.json"
+    patch_path = root / PATCH_FILENAME
+    report_path = root / REPORT_FILENAME
+    publication_path = root / PUBLICATION_FILENAME
     for path in (patch_path, report_path, publication_path):
         if not path.is_file() or path.is_symlink():
             raise ControllerPublicationError(f"publication artifact must be a regular file: {path}")
@@ -142,7 +147,6 @@ def load_controller_publication(patch_dir: str | Path) -> ControllerPatchPublica
 
 
 __all__ = [
-    "PUBLICATION_SCHEMA_VERSION",
     "ControllerPatchPublication",
     "ControllerPublicationError",
     "load_controller_publication",

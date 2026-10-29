@@ -69,7 +69,6 @@ from ..actions.executors._proposal_identity import controls_of, is_executable, n
 from ._rung_outcomes import (
     _CANCEL_STOP,
     _SWEEP_BUDGET_STOP,
-    _budget_skip_result,
     _deadline_skip_result,
     _raised_result,
 )
@@ -639,7 +638,7 @@ class _SweepRun:
             reason, remaining_sec = ORCHESTRATOR_CANCELLED_CLASS, 0.0
         elif self.session_closing():
             self.budget.spend_on_session_reserve()
-            skipped = [_budget_skip_result(v) for v in grid]
+            skipped = [_deadline_skip_result(v, _SWEEP_BUDGET_STOP) for v in grid]
             reason, remaining_sec = _SESSION_RESERVE, 0.0
         else:
             return False
@@ -655,7 +654,7 @@ class _SweepRun:
             note = _RungNote(stage=STAGE_BUDGET_SKIP)
         elif self.session_closing():
             self.budget.spend_on_session_reserve()
-            skipped = [_budget_skip_result(v) for v in rest]
+            skipped = [_deadline_skip_result(v, _SWEEP_BUDGET_STOP) for v in rest]
             note = _RungNote(stage=STAGE_BUDGET_SKIP, budget_remaining_sec=0.0)
         else:
             return False

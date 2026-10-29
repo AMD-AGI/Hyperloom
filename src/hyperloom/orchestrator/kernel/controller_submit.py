@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 from typing import Any, Callable
 
-from kernelforge.kernel_rewrite_controller import ControllerLayout, published_operator_dirs
+from kernelforge.workflows.rewrite_controller import ControllerLayout, published_operator_dirs
 
 from hyperloom.common.llm_attribution import inject_env
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
