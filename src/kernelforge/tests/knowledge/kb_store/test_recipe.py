@@ -25,12 +25,12 @@ from kernelforge.knowledge.kb_store.record_store import KBStoreError, RewriteRec
 from kernelforge.workflows.flydsl_rewrite.measurement import FlydslMeasurement
 from kernelforge.workflows.flydsl_rewrite.spec import RewriteSpec
 
-from kernelforge.tests.test_rewrite_by_flydsl_kb import (
+from kernelforge.tests.knowledge.kb_store._in_memory_store import (
     InMemoryKBStore,
     _remote_config,
-    _spec,
     _use_in_memory_kb_store,
 )
+from kernelforge.tests.workflows.flydsl_rewrite._rewrite_spec import _spec
 from kernelforge.tests.conftest import kb_store_run_config as _remote_config_with_token
 
 VLLM_VERSION = framework_version("vllm")
