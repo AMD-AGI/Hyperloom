@@ -781,36 +781,28 @@ class SpecialistRunner:
             return
         task_id = ctx.task.task_id
         tick, phase = self._ctx_tick_phase(ctx)
-        try:
-            md = metadata or {}
-            has_tokens = any(
-                md.get(k) is not None
-                for k in (
-                    "input_tokens",
-                    "output_tokens",
-                    "cache_creation_input_tokens",
-                    "cache_read_input_tokens",
-                )
+        md = metadata or {}
+        has_tokens = any(
+            md.get(k) is not None
+            for k in (
+                "input_tokens",
+                "output_tokens",
+                "cache_creation_input_tokens",
+                "cache_read_input_tokens",
             )
-            if not has_tokens:
-                return
-            site = LLMCallSite(
-                session_id=self.session_dir.name,
-                component="specialist",
-                task_id=task_id,
-                tick=tick,
-                phase=phase,
-                turn=turn,
-            )
-            record = LLMCallRecord.from_metadata(site, md, latency_ms=latency_ms)
-            append_llm_call(session_dir=self.session_dir, record=record)
-        except Exception:
-            log.debug(
-                "full-trace: specialist llm_call append failed for task_id=%s turn=%s",
-                task_id,
-                turn,
-                exc_info=True,
-            )
+        )
+        if not has_tokens:
+            return
+        site = LLMCallSite(
+            session_id=self.session_dir.name,
+            component="specialist",
+            task_id=task_id,
+            tick=tick,
+            phase=phase,
+            turn=turn,
+        )
+        record = LLMCallRecord.from_metadata(site, md, latency_ms=latency_ms)
+        append_llm_call(session_dir=self.session_dir, record=record)
 
     def _record_specialist_intel(
         self,
