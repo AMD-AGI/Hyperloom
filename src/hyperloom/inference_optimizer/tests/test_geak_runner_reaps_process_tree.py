@@ -17,8 +17,8 @@ from pathlib import Path
 
 import pytest
 
-from common.proctree import running
-from hyperloom.orchestrator.actions.executors._subprocess_kill import REAP_MARK_ENV, RoundWatch, run_with_session_kill
+from common.proctree import REAP_MARK_ENV, running
+from hyperloom.orchestrator.actions.executors._subprocess_kill import RoundWatch, run_with_session_kill
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="procfs is Linux-only")
 

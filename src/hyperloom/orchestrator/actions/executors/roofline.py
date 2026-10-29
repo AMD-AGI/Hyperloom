@@ -644,7 +644,7 @@ async def _fail_on_capture(
     fine) and ``config`` (these server args cannot capture at all) decides who owns the fix, so it is recorded
     rather than acted on here.
     """
-    from .baseline import _classify_cuda_graph_capture_failure
+    from .benchmark_run.bringup import _classify_cuda_graph_capture_failure
 
     # With capture already off, a marker in the log tail says nothing about this run -- the tail can span an earlier
     # boot -- and "does not re-profile with graph capture disabled" would be nonsense to read on such a run.
@@ -1250,7 +1250,7 @@ class RooflineExecutor:
         parent_task = parent_ctx.task
         params = dict(parent_task.params or {})
         if disable_cuda_graph:
-            from .baseline import _with_cuda_graph_disabled
+            from .benchmark_run.bringup import _with_cuda_graph_disabled
 
             params["base_extra_args"] = _with_cuda_graph_disabled(
                 str(params.get("base_extra_args") or ""),

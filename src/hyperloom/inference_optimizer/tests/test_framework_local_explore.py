@@ -600,3 +600,34 @@ def test_only_a_settled_candidate_reaches_the_attempt_ledger(tmp_path: Path):
     assert len(kept) == 1
     assert kept[0]["adopted"] is True
     assert kept[0]["lever_kind"] == LEVER_UPSTREAM_PR
+
+
+def test_a_closed_research_lane_declines_discovery(tmp_path: Path):
+    """A research lane of capacity 0 can run no specialist, so a discovery task would queue forever."""
+    stub = _stub(tmp_path, local_explore=False)
+    stub.shared_state.research_lane_capacity = 0
+
+    assert asyncio.run(stub.phase_framework._maybe_enqueue_candidate_discovery(reason="candidate_pool_empty")) is False
+    assert stub.tasks.created == []
+
+
+def test_a_closed_research_lane_ends_the_phase_as_discovery_exhausted(tmp_path: Path):
+    """The phase closes on the spot instead of waiting on a discovery task that cannot start."""
+    stub = _stub(tmp_path, local_explore=False)
+    stub.shared_state.research_lane_capacity = 0
+
+    asyncio.run(stub.phase_framework._pump_framework_agent_phase())
+
+    assert stub.tasks.created == []
+    assert stub.shared_state.framework_agent_phase_done is True
+
+
+def test_a_closed_research_lane_dispatches_no_local_explore_specialist(tmp_path: Path):
+    """Local exploration also runs on the research lane, so it is skipped rather than queued forever."""
+    stub = _stub(tmp_path, local_explore=True)
+    stub.shared_state.research_lane_capacity = 0
+
+    asyncio.run(stub.phase_framework._pump_framework_agent_phase())
+
+    assert stub.tasks.created == []
+    assert stub.shared_state.framework_agent_phase_done is True

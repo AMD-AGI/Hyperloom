@@ -28,8 +28,8 @@ from hyperloom.orchestrator.actions.executors import trace_analyze as ta
 from hyperloom.orchestrator.actions.executors.baseline import (
     BaselineExecutor,
     BenchmarkRunExecutor,
-    _BenchmarkRound,
 )
+from hyperloom.orchestrator.actions.executors.benchmark_run.records import _BenchmarkRound
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     default_baseline_config,
     materialize_benchmark_config,
@@ -59,7 +59,7 @@ from hyperloom.orchestrator.loop.sub_agent_runner import (
 )
 from hyperloom.inference_optimizer.session.manifest import build_manifest
 from hyperloom.inference_optimizer.session.paths import asset_root, make_session_dir
-from hyperloom.orchestrator.bus.storage import SqliteConnection
+from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.kernel import _integrate_payload as integrate_payload
 
 _PROFILE_SGLANG_CONFIG = asset_root() / "assets" / "configs" / "profile_sglang.yaml"
@@ -101,6 +101,8 @@ def test_mi325x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch
         tmp_path,
         args,
         session_id="mi325x-session",
+        framework="sglang",
+        platform=cli_bootstrap.LaunchPlatform(compute_partition={}, gpu_power_settings={}),
     )
 
     assert manifest["gpu_type"] == "mi325x"
@@ -123,6 +125,8 @@ def test_mi308x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch
         tmp_path,
         args,
         session_id="mi308x-session",
+        framework="sglang",
+        platform=cli_bootstrap.LaunchPlatform(compute_partition={}, gpu_power_settings={}),
     )
 
     assert manifest["gpu_type"] == "mi308x"
@@ -1750,7 +1754,7 @@ def test_profile_server_args_sanitizer_degrades_on_unbalanced_quote():
 
 def test_atom_disables_cuda_graphs_with_its_own_flag():
     """atom's argparse knows ``--enforce-eager``, not sglang's ``--disable-cuda-graph``."""
-    from hyperloom.orchestrator.actions.executors.baseline import _with_cuda_graph_disabled
+    from hyperloom.orchestrator.actions.executors.benchmark_run.bringup import _with_cuda_graph_disabled
 
     assert _with_cuda_graph_disabled("--trust-remote-code", "atom") == "--trust-remote-code --enforce-eager"
 

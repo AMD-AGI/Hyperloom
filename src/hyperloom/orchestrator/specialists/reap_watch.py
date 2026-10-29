@@ -5,14 +5,20 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from common.proctree import boot_unix, descendants, running
+
 from .dsh_launch import dsh_home
 
 PROCESS_LOG_NAME = "process.log"
+
+#: How long before its last output a child may have started and still count as the tool call that output announced.
+_SPAWN_SLACK_SEC: float = 0.5
 
 
 @dataclass(frozen=True)
@@ -40,10 +46,28 @@ class ReapWatch:
 def specialist_activity_paths(workspace: Path) -> tuple[Path, ...]:
     """What shows the specialist in ``workspace`` is still working, for the reaper and the planner alike.
 
-    Its heartbeat, its process log, and the session log ``dsh`` writes every
-    step to while it prints only its final message.
+    Its process log, and the session log ``dsh`` writes every step to while it
+    prints only its final message. Both are written by the agent CLI itself;
+    ``heartbeat.json`` is not one, because the agent can keep it fresh while
+    the CLI is stuck.
     """
-    return (workspace / "heartbeat.json", workspace / PROCESS_LOG_NAME, dsh_home(workspace) / "sessions")
+    return (workspace / PROCESS_LOG_NAME, dsh_home(workspace) / "sessions")
+
+
+def tool_in_flight(cli_pid: int, last_output_unix: float) -> bool:
+    """Whether the CLI has a live process it started after its last output: a tool call it is still waiting on.
+
+    A child older than that output (an idle helper, an earlier call's background job) does not count, and a loop
+    detached into another parent is not below the CLI at all.
+    """
+    try:
+        boot, ticks_per_sec = boot_unix(), os.sysconf("SC_CLK_TCK")
+        return any(
+            boot + ticks / ticks_per_sec > last_output_unix - _SPAWN_SLACK_SEC and running(pid)
+            for pid, ticks in descendants(cli_pid)
+        )
+    except (OSError, ValueError):
+        return False
 
 
 def last_activity(path: Path) -> float | None:

@@ -30,6 +30,7 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
     summarize_change,
 )
 from hyperloom.orchestrator.knowledge.recipe_kb import LocalRecipeStoreError, RecipeUpsert, recipe_canonical_id
+from hyperloom.orchestrator.knowledge.recipe_kb.canonical_id import recipe_framework_version
 from hyperloom.orchestrator.lever import LEVER_CONFIG, lever_kind_for_task
 
 from ..collaborator import CoordinatorCollaborator
@@ -285,13 +286,12 @@ def amended_recipe_extras(live: Mapping[str, Any], overrides: Mapping[str, Any],
 
 
 def _framework_identity(state: Any) -> _FrameworkIdentity:
-    # Probed from the installed framework when the session never recorded a
-    # version, so a recipe is never filed under a blank one.
+    # Probed when the session never recorded a version, so a recipe is never filed under a blank one.
     name = str(state.framework or "")
     version = str(state.framework_version or "")
     if not version and name:
         version = detect_framework_version(name)
-    return _FrameworkIdentity(name=name, version=version, precision=str(state.precision or ""))
+    return _FrameworkIdentity(name, recipe_framework_version(version), str(state.precision or ""))
 
 
 def _result_payload(result: Any) -> dict[str, Any]:

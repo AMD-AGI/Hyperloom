@@ -138,10 +138,8 @@ def _round_entry_extras(
 class SpecialistDispatchCollaborator(CoordinatorCollaborator):
     """Specialist dispatch: warmup, auto-retry, wave fan-out, stalled-domain forcing, and round-entry construction."""
 
-    def __init__(self, coordinator: "Coordinator", proposal_scorer: Any = None) -> None:
+    def __init__(self, coordinator: "Coordinator") -> None:
         super().__init__(coordinator)
-        # Advisory only: scores proposals, never gates them.
-        self._proposal_scorer = proposal_scorer
         # Key of the custom dispatch admission last refused; it is not requested again until the key changes.
         self.refused_custom_key = ""
 
@@ -877,8 +875,9 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                     result={"error_class": error_class, "error": "; ".join(str(d) for d in dropped[:4])},
                 )
         # Advisory multi-model scoring of the proposal_set; informational only, gates nothing.
-        if self._proposal_scorer is not None and round_entry["proposal_set"]:
-            scores = await self._proposal_scorer.score(
+        proposal_scorer = self._coord.proposal_scorer
+        if proposal_scorer is not None and round_entry["proposal_set"]:
+            scores = await proposal_scorer.score(
                 gap={
                     "domain": round_entry["domain"].strip(),
                     "gap_canonical_id": done_payload.get("gap_canonical_id", ""),

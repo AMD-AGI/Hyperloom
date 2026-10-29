@@ -25,6 +25,7 @@ from hyperloom.orchestrator.knowledge.recipe_kb import (
     RecipeUpsert,
     cid_to_path_components,
     recipe_canonical_id,
+    recipe_framework_version,
 )
 from hyperloom.orchestrator.knowledge.workload_tags import workload_shape_tags
 from hyperloom.inference_optimizer.breakdown.recorder import warm_start_event as _warm_start_event
@@ -498,9 +499,9 @@ def _framework_semver(version: str) -> Version | None:
 
 
 def _framework_version_is_compatible(target: str, candidate: str) -> bool:
-    """Accept exact or nearest non-newer PEP 440 version in one release line."""
-    target_value = str(target or "").strip().lower()
-    candidate_value = str(candidate or "").strip().lower()
+    """Accept the same release, or the nearest non-newer PEP 440 release in its line, whichever build each names."""
+    target_value = recipe_framework_version(target)
+    candidate_value = recipe_framework_version(candidate)
     if candidate_value == target_value:
         return bool(target_value)
     target_key = _framework_semver(target_value)
@@ -756,15 +757,17 @@ def _resolve_t0_identity(
         "framework_name": framework,
         "model_type": _text(getattr(shared_state, "model_type", "")),
         "architectures": _architectures_slug(architectures),
-        "framework_version": version,
+        "framework_version": recipe_framework_version(version),
         "precision": _text(getattr(shared_state, "precision", "")),
+        # The resolved version with its build suffix, which the session state keeps.
+        "session_framework_version": version,
     }
     identity["canonical_id"] = recipe_canonical_id(
         RecipeIdentity(
             model=model,
             hardware=hardware,
             framework_name=framework,
-            framework_version=version,
+            framework_version=identity["framework_version"],
             precision=identity["precision"],
             model_type=identity["model_type"],
             architectures=architectures,
@@ -948,7 +951,7 @@ def run_t0_anchor(
     cid = str(identity["canonical_id"])
     # Each is empty only where SharedState already held nothing, and CLOSE/KEEP derives the same cid from them.
     shared_state.framework = identity["framework_name"]
-    shared_state.framework_version = identity["framework_version"]
+    shared_state.framework_version = identity["session_framework_version"]
 
     # Opened before the KB is consulted: the event's open interval is what tells the audit hook which reads were
     # T0's. Only on the anchoring pass -- a resume that re-runs T0 must not reopen a settled event.

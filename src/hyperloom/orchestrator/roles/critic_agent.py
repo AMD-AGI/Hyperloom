@@ -293,7 +293,6 @@ class CriticAgentBackend:
     session_dir: Path
     codex_model: str = DEFAULT_CODEX_MODEL
     codex_client_factory: Callable[[], Any] | None = None
-    kb_mode: Literal["inmemory", "live"] = "inmemory"
     runtime_caller_factory: Callable[[], RuntimeCaller] | None = None
     # Per-action verdict policy enriched onto ``review_constraints.action_verdict_policy`` post prepare-review.
     action_verdict_policy: dict[str, str] = field(default_factory=dict)
@@ -337,8 +336,6 @@ class CriticAgentBackend:
                 f"{self.critic_agent_root!s} — set CRITIC_AGENT_ROOT or "
                 f"check the install"
             )
-        if self.kb_mode not in ("inmemory", "live"):
-            raise BackendError(f"CriticAgentBackend: kb_mode={self.kb_mode!r} not in {{'inmemory','live'}}")
 
         if self.runtime_caller_factory is not None:
             object.__setattr__(
@@ -640,15 +637,10 @@ class CriticAgentBackend:
         memory_dir = self.session_dir / "critic-session-memory"
         memory_dir.mkdir(parents=True, exist_ok=True)
         env.setdefault("CRITIC_SESSION_MEMORY_DIR", str(memory_dir))
-        env["CRITIC_KB_CLIENT_MODE"] = self.kb_mode
 
         # Dead-letter dir under the session so cron replays don't cross sessions.
         dlq_dir = self.session_dir / "critic-kb-dead-letter"
         env.setdefault("KB_DEAD_LETTER_DIR", str(dlq_dir))
-
-        if self.kb_mode == "live":
-            if not env.get("KB_BASE_URL"):
-                raise BackendError("CriticAgentBackend: kb_mode=live but KB_BASE_URL is not set (export KB_BASE_URL)")
         return env
 
     def _mirror_kb_trace_to_langfuse(

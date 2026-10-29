@@ -19,7 +19,6 @@ from typing import Any, Iterator, Mapping
 
 from common.coerce import to_unix
 from common.env import forge_explicitly_enabled
-from hyperloom.common.gpu_partition import published_shape
 from hyperloom.common.gpu_power_settings import SCLK_MAX_MHZ, DeclaredPowerSettings
 from hyperloom.common.perf_metric import agentx_enabled as _agentx_enabled, is_agentx_mode
 from hyperloom.common.timeutil import now_iso
@@ -569,7 +568,6 @@ def resolve_gpu_power_settings(
     declared_settings: DeclaredPowerSettings,
     *,
     nodes: int,
-    read: Any = None,
     just_applied: bool = False,
 ) -> tuple[dict[str, Any], str]:
     """Read the cards' and the node's power settings and check the declared ones; ``(record, error)``.
@@ -598,7 +596,7 @@ def resolve_gpu_power_settings(
     # The node's settings need neither the cards' reading nor the mask, so only a card declaration refuses without them.
     cards_declared = any(declared_settings.card_row().values())
     try:
-        observed = (read or read_gpu_power_settings)()
+        observed = read_gpu_power_settings()
     except GpuPowerSettingsError as exc:
         if cards_declared:
             return {_DECLARED: declared}, f"the declared GPU power settings cannot be checked: {exc}"
@@ -666,29 +664,30 @@ def _custom_specialist_fields(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def resolve_research_lane_capacity(args: argparse.Namespace) -> int:
+    """``--research-lane-capacity`` clamped to ``[0, research_lane_ceiling()]``; 0 disables specialist dispatch."""
+    from hyperloom.orchestrator.policy.gate import research_lane_ceiling
+
+    return max(0, min(research_lane_ceiling(), int(args.research_lane_capacity)))
+
+
+@dataclass(frozen=True)
+class LaunchPlatform:
+    """What a fresh launch settled about the platform before seeding: the partition verdict and GPU power record."""
+
+    compute_partition: dict[str, Any]
+    gpu_power_settings: dict[str, Any]
+
+
 def _seed_shared_state(
     session_dir: Path,
     args: argparse.Namespace,
     *,
     session_id: str,
-    compute_partition: dict[str, Any] | None = None,
-    gpu_power_settings: dict[str, Any] | None = None,
+    framework: str,
+    platform: LaunchPlatform,
 ) -> SharedState:
     """Construct and persist the initial :class:`SharedState` for a run."""
-    # research_lane capacity is locked for the session; clamp to [0, ceiling].
-    from hyperloom.common.visible_devices import detect_gpu_count
-    from hyperloom.orchestrator.policy.gate import research_lane_ceiling
-
-    research_lane_capacity = int(getattr(args, "research_lane_capacity", 1) or 1)
-    research_lane_capacity = max(
-        0,
-        min(research_lane_ceiling(), research_lane_capacity),
-    )
-    # An unset (None) or unparsable capacity falls back to the visible GPU count.
-    try:
-        gpu_specialist_capacity = max(0, int(getattr(args, "gpu_specialist_capacity", None)))
-    except (TypeError, ValueError):
-        gpu_specialist_capacity = detect_gpu_count()
     # Collect plateau threshold overrides; absent keys use defaults at compute time.
     plateau_overrides: dict[str, Any] = {}
     if getattr(args, "plateau_explore_keep_gain", None) is not None:
@@ -704,10 +703,7 @@ def _seed_shared_state(
         val = getattr(args, arg_name, None)
         if val is None:
             return int(default)
-        try:
-            resolved = int(val)
-        except (TypeError, ValueError):
-            return int(default)
+        resolved = int(val)
         return resolved if resolved > 0 else int(default)
 
     # KB architecture tags from config.json; fresh-launch only.
@@ -717,7 +713,7 @@ def _seed_shared_state(
     _kernel_optimizer_record = "forge" if forge_explicitly_enabled() else "geak"
 
     # Reference launch recipe (fresh-launch only, fail-soft): lowest-priority base for the baseline server args.
-    _ref_args, _ref_envs, _ref_model, _ref_controls = _resolve_reference_recipe(args)
+    _ref_args, _ref_envs, _ref_model, _ref_controls = _resolve_reference_recipe(args, framework)
 
     # Canonical model identity (prefers the quantize prelude's pinned source name).
     _model_identity = resolve_model_display_name(args)
@@ -748,11 +744,11 @@ def _seed_shared_state(
         model_type=_cfg_tags.get("model_type", ""),
         # config.json structural summary, persisted for downstream collectors.
         model_info=summarize_model_config(str(args.model)),
-        framework=os.environ.get("FRAMEWORK", "sglang"),
+        framework=framework,
         # The only copy of the budgets. Validated at the CLI, so anything that reaches here is usable, and archived
         # with the session so a resume restores them without a second source to reconcile.
         **constraint_budgets_from_args(args),
-        gpu_power_settings=dict(gpu_power_settings or {}),
+        gpu_power_settings=dict(platform.gpu_power_settings),
         gpu_type=str(getattr(args, "gpu_type", None) or os.environ.get("GPU_TYPE", "")),
         # Workload metadata mirrored from CLI/env.
         tp=_int_arg("tp", DEFAULT_TP),
@@ -783,8 +779,8 @@ def _seed_shared_state(
         framework_repo_path=os.environ.get("FRAMEWORK_REPO_PATH", "").strip(),
         benchmark_backend=os.environ.get("HYPERLOOM_BENCHMARK_BACKEND", "").strip().lower(),
         xdit_model_name=os.environ.get("XDIT_MODEL_NAME", "").strip(),
-        compute_partition=dict(compute_partition if compute_partition is not None else (published_shape() or {})),
-        nodes=max(1, int(getattr(args, _NODES, 1))),
+        compute_partition=dict(platform.compute_partition),
+        nodes=max(1, int(getattr(args, _NODES, 1) or 1)),
         warm_replay_enabled=not bool(getattr(args, "no_warm_replay", False)),
         **(
             {}
@@ -792,8 +788,8 @@ def _seed_shared_state(
             else {"warm_replay_min_confidence": float(args.warm_replay_min_confidence)}
         ),
         max_minutes=int((args.max_hours or 0) * 60),
-        research_lane_capacity=research_lane_capacity,
-        gpu_specialist_capacity=gpu_specialist_capacity,
+        research_lane_capacity=resolve_research_lane_capacity(args),
+        gpu_specialist_capacity=max(0, int(args.gpu_specialist_capacity)),
         plateau_overrides=plateau_overrides,
         enable_roofline=bool(
             getattr(args, "enable_roofline", True),
@@ -818,7 +814,7 @@ def _seed_shared_state(
         benchmark_mode=benchmark_mode,
         agentx_epoch=agentx_epoch,
         agentx_backend=agentx_backend,
-        grading=seed_grading(os.environ.get("FRAMEWORK", "sglang"), benchmark_mode),
+        grading=seed_grading(framework, benchmark_mode),
         conc_sweep_concs=_parse_conc_sweep_concs(args, benchmark_mode),
         conc_sweep_total_budget_sec=int(getattr(args, "conc_sweep_total_budget_sec", 9000)),
     )
@@ -870,7 +866,7 @@ class LaunchInfo:
     model: str
 
 
-def _emit_launch_info(info: LaunchInfo, *, launch_info_file: str | None) -> dict[str, Any]:
+def _emit_launch_info(info: LaunchInfo, *, launch_info_file: str | None) -> None:
     """Print the machine-readable HYPERLOOM_LAUNCH stdout line; optionally JSON-dump to ``launch_info_file``."""
     launch_info: dict[str, Any] = {
         "event": "launch",
@@ -890,7 +886,6 @@ def _emit_launch_info(info: LaunchInfo, *, launch_info_file: str | None) -> dict
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(launch_info, indent=2))
         print(f"Launch info file: {path}")
-    return launch_info
 
 
 def _print_final_summary(
@@ -943,7 +938,7 @@ def _bank_previous_leg_phase_segment(state: SharedState) -> None:
     bank_phase_segment(state, until_unix=stop_unix)
 
 
-def _begin_resume_leg(state: SharedState) -> str:
+def _begin_resume_leg(state: SharedState) -> None:
     """Mark the start of a resumed run leg on ``state`` (caller persists).
 
     Stamps :attr:`SharedState.resumed_ts`, which dates the previous leg's CLOSE
@@ -962,9 +957,6 @@ def _begin_resume_leg(state: SharedState) -> str:
 
     Args:
         state (SharedState): The loaded session state, mutated in place.
-
-    Returns:
-        str: The timestamp stamped as this leg's boundary.
     """
     _bank_previous_leg_phase_segment(state)
     state.resumed_ts = now_iso()
@@ -978,7 +970,6 @@ def _begin_resume_leg(state: SharedState) -> str:
     state.target_reached_at = ""
     state.crash_count = 0
     state.begin_leg()
-    return state.resumed_ts
 
 
 def _resume_budget_lines(state: SharedState, *, extend_hours: float) -> list[str]:
@@ -1064,13 +1055,13 @@ def _read_failure_summary(session_dir: Path) -> dict | None:
 
 def _resolve_reference_recipe(
     args: argparse.Namespace,
+    framework: str,
 ) -> tuple[str, dict[str, str], str, dict[str, Any]]:
     """Resolve the reference launch recipe for a fresh launch."""
     source = (getattr(args, "reference_script", None) or "").strip()
     if not source:
         return ("", {}, "", {})
 
-    framework = (os.environ.get("FRAMEWORK", "") or "sglang").strip().lower()
     from ..reference_script import parse_reference_script
 
     try:

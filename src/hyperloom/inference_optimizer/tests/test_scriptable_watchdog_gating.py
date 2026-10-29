@@ -11,7 +11,7 @@ from pathlib import Path
 import yaml
 
 from hyperloom.orchestrator.actions.executors import _subprocess_kill as sk
-from hyperloom.orchestrator.actions.executors.baseline import (
+from hyperloom.orchestrator.actions.executors.benchmark_run.records import (
     _config_framework,
     _watchdog_server_log_path,
 )

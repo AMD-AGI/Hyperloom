@@ -48,7 +48,7 @@ class _CandidateDiscoveryMixin:
         limit = int(DISCOVER_FAILURE_RETRY_LIMIT)
         empties = int(state.framework_agent_empty_discoveries or 0)
         failures = int(state.framework_agent_discover_failures or 0)
-        if empties >= limit or failures >= limit:
+        if empties >= limit or failures >= limit or int(state.research_lane_capacity or 0) <= 0:
             return False
         if await self._candidate_discovery_inflight():
             return True

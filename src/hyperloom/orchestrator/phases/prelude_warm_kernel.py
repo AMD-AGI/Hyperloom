@@ -13,7 +13,7 @@ from typing import Any, NamedTuple
 
 from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import SKIP_KERNEL_PREPARATION_FAILED
 
-from ..actions.executors.baseline import revert_warm_kernel_patches
+from ..actions.executors.benchmark_run.warm_patches import revert_warm_kernel_patches
 from ..knowledge.remote_recipe.sanitize import HOST_ORIGIN_KEY
 
 log = _logging.getLogger(__name__)

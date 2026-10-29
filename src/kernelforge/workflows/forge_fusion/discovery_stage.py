@@ -62,6 +62,7 @@ class _DiscoveryInputs:
     repo_scope: bool
     out: Path
     agent_factory: Any
+    usage: Any = None
 
     def resolve_source(self) -> tuple[dict[str, Any], str]:
         """The decode shapes and the framework source file the model resolves to."""
@@ -125,6 +126,7 @@ def _discover_anchored(inputs: _DiscoveryInputs, fuse_kernel: str, dry_run: bool
                     # carries that instead.
                     protected_files=[source_file] if source_file else [],
                     log_path=str(out / "discovery_llm.txt"),
+                    usage=inputs.usage,
                 ),
             ),
         )
@@ -169,6 +171,7 @@ def _discover_by_llm(inputs: _DiscoveryInputs) -> _Discovery:
                     workdir=discovery_workdir,
                     protected_files=[source_file] if source_file else [],
                     log_path=str(out / "discovery_llm.txt"),
+                    usage=inputs.usage,
                 ),
             ),
         )

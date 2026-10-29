@@ -36,16 +36,14 @@ from .agentx_context import agentx_session_lines, reference_out_of_mode
 from .transport import TRANSPORTS, TRANSPORT_STRUCTURED_OUTPUT, TRANSPORT_TOOLS
 
 
-# Phase ordering for the catalogue; unknown phases appended at the end.
+# Phase ordering for the catalogue; every action's ``pipeline_phase`` must be listed.
 _PHASE_ORDER: tuple[str, ...] = (
     "prep",
     "measure",
     "analysis",
     "explore",
     "deep",
-    "validate",
     "finalize",
-    "support",
 )
 _PHASE_HEADERS: dict[str, str] = {
     "prep": "Prep — initialise session metadata. Always finishes first.",
@@ -53,9 +51,7 @@ _PHASE_HEADERS: dict[str, str] = {
     "analysis": "Analysis — read-only; produces traces / candidate kernels.",
     "explore": "Explore — propose modifications; one round produces a candidate, not yet validated.",
     "deep": "Deep — kernel_agent-owned. Emit via REQUEST(target_agent='kernel_agent', kind=...).",
-    "validate": "Validate — apply the accumulated optimization_stack and re-bench to get an honest cumulative gain.",
     "finalize": "Finalize — write the final report.",
-    "support": "Support — invoke only when triggered (plateau / crash / re-exploration).",
 }
 
 
@@ -117,7 +113,6 @@ class SessionContext:
 
     Attributes:
         framework: ``sglang`` / ``vllm`` -- printed in SESSION CONTEXT.
-        kernel_enabled: Explicit override; ``None`` derives from the kernel-owned actions.
         framework_agent_phase_enabled: When False (``--no-framework-agent``) the FRAMEWORK_AGENT phase is skipped.
         objective_kind: Objective kind string, printed verbatim.
         objective_value: Objective target value, printed verbatim.
@@ -134,7 +129,6 @@ class SessionContext:
     """
 
     framework: str = "sglang"
-    kernel_enabled: bool | None = None
     framework_agent_phase_enabled: bool = True
     objective_kind: str = "time_only"
     objective_value: float | str | None = None
@@ -182,12 +176,13 @@ class PromptAssets:
     references_dir: Path | None = None
 
 
-def _section_session_context(session: SessionContext) -> list[str]:
+def _section_session_context(session: SessionContext, *, kernel_enabled: bool) -> list[str]:
     """Build the SESSION CONTEXT section lines.
 
     Args:
         session (SessionContext): The session's framework, enabled phases,
             objective, budget, source roots and AgentX workload.
+        kernel_enabled (bool): Whether kernel_agent-owned actions are enabled.
 
     Returns:
         list[str]: Markdown lines describing static session context and phase
@@ -204,7 +199,7 @@ def _section_session_context(session: SessionContext) -> list[str]:
         "## 2. SESSION CONTEXT",
         "",
         f"- framework        : {session.framework}",
-        f"- kernel_enabled   : {'true' if session.kernel_enabled else 'false'}",
+        f"- kernel_enabled   : {'true' if kernel_enabled else 'false'}",
         f"- optimize_enabled : {'true' if session.framework_agent_phase_enabled else 'false'}",
         f"- objective        : {obj}",
         f"- graded_axis      : {graded_metric_key(benchmark_mode=session.benchmark_mode)}",
@@ -325,49 +320,6 @@ def _filter_actions(
     return out
 
 
-def _resolve_prompt_prelude(
-    action_registry: Mapping[str, ActionMetadata],
-    enabled_actions: Iterable[str],
-    framework: str,
-    kernel_enabled: bool | None,
-    rules_fragment_path: Path | None,
-) -> tuple[list[ActionMetadata], bool, str, str]:
-    """Resolve the shared prelude for the orchestration / critic prompt builders.
-
-    Args:
-        action_registry (Mapping[str, ActionMetadata]): The action catalogue.
-        enabled_actions (Iterable[str]): Action names enabled for this run.
-        framework (str): The framework name; normalised to lower-case (default
-            ``sglang``).
-        kernel_enabled (bool | None): Explicit override; ``None`` derives from
-            whether any KERNEL_OWNED action is enabled.
-        rules_fragment_path (Path | None): Path to the rules fragment.
-
-    Returns:
-        tuple[list[ActionMetadata], bool, str, str]: ``(actions, kernel_enabled,
-        framework_norm, rules_md)``.
-    """
-    actions = _filter_actions(action_registry, enabled_actions)
-    if kernel_enabled is None:
-        kernel_enabled = any(a.name in KERNEL_AGENT_OWNED_ACTIONS for a in actions)
-    framework_norm = (framework or "sglang").strip().lower() or "sglang"
-    rules_md = _read_rules_fragment(rules_fragment_path)
-    return actions, kernel_enabled, framework_norm, rules_md
-
-
-def join_sections(sections: list[list[str]]) -> str:
-    """Join prompt sections into the final prompt string (shared epilogue).
-
-    Args:
-        sections (list[list[str]]): Per-section line lists.
-
-    Returns:
-        str: The sections joined (lines by ``\\n``, sections by blank line),
-        right-stripped with a trailing newline.
-    """
-    return "\n\n".join("\n".join(s) for s in sections).rstrip() + "\n"
-
-
 def _phase_eta_summary(actions: list[ActionMetadata]) -> list[tuple[str, float, list[str]]]:
     """Group actions by phase in _PHASE_ORDER; return (phase, eta_min_sum, names).
 
@@ -375,27 +327,18 @@ def _phase_eta_summary(actions: list[ActionMetadata]) -> list[tuple[str, float, 
         actions: The enabled actions to group by pipeline phase.
 
     Returns:
-        A list of ``(phase, eta_min_sum, names)`` tuples ordered by
-        ``_PHASE_ORDER`` with unknown phases appended last.
+        A list of ``(phase, eta_min_sum, names)`` tuples ordered by ``_PHASE_ORDER``.
+
+    Raises:
+        ValueError: When an action's ``pipeline_phase`` is not in ``_PHASE_ORDER``.
     """
     bucket: dict[str, list[ActionMetadata]] = {}
     for a in actions:
         bucket.setdefault(a.pipeline_phase, []).append(a)
-    ordered: list[tuple[str, float, list[str]]] = []
-    seen: set[str] = set()
-    for phase in _PHASE_ORDER:
-        if phase not in bucket:
-            continue
-        items = bucket[phase]
-        eta = sum(max(0.0, a.typical_runtime_min) for a in items)
-        ordered.append((phase, eta, [a.name for a in items]))
-        seen.add(phase)
-    for phase, items in bucket.items():
-        if phase in seen:
-            continue
-        eta = sum(max(0.0, a.typical_runtime_min) for a in items)
-        ordered.append((phase, eta, [a.name for a in items]))
-    return ordered
+    return [
+        (phase, sum(max(0.0, a.typical_runtime_min) for a in bucket[phase]), [a.name for a in bucket[phase]])
+        for phase in sorted(bucket, key=_PHASE_ORDER.index)
+    ]
 
 
 def _section_pipeline_and_budget(
@@ -433,7 +376,7 @@ def _section_pipeline_and_budget(
             "",
             f"Sum of typical phase ETAs: ~{eta_total:.0f} min vs max_minutes={max_minutes}.",
             "If sum >> budget, prefer high-gain/low-cost actions and skip optional",
-            "phases (analysis / support). If sum << budget, do an extra explore round",
+            "phases (analysis). If sum << budget, do an extra explore round",
             "before report.",
         ]
     )
@@ -606,15 +549,13 @@ def _stop_report_step(phase_key: str) -> str:
     return "do not propose `report` (only CLOSE allows it, and the Coordinator routes the run there)"
 
 
-def _section_decision_framework(*, kernel_enabled: bool, phase: str = "", transport: str = "") -> list[str]:
+def _section_decision_framework(*, phase: str = "", transport: str = "") -> list[str]:
     """Build the DECISION FRAMEWORK section lines.
 
     Covers the per-tick selection order, FAILURE RECOVERY, and the
     Config-arm IDEA GENERATION block.
 
     Args:
-        kernel_enabled (bool): Whether kernel_agent-owned actions are enabled for this
-            run.
         phase (str): Normalised current pipeline phase; ``""`` renders every
             phase-scoped block.
         transport (str): One of :data:`TRANSPORTS`; scopes the tool references
@@ -1103,13 +1044,10 @@ def build_orchestration_prompt(
     transport = session.transport
     if transport and transport not in TRANSPORTS:
         raise ValueError(f"unknown prompt transport {transport!r}; expected one of {', '.join(sorted(TRANSPORTS))}")
-    actions, kernel_enabled, framework_norm, rules_md = _resolve_prompt_prelude(
-        action_registry,
-        enabled_actions,
-        session.framework,
-        session.kernel_enabled,
-        assets.rules_fragment_path,
-    )
+    actions = _filter_actions(action_registry, enabled_actions)
+    kernel_enabled = any(a.name in KERNEL_AGENT_OWNED_ACTIONS for a in actions)
+    framework_norm = (session.framework or "sglang").strip().lower() or "sglang"
+    rules_md = _read_rules_fragment(assets.rules_fragment_path)
     phase_norm = (cycle.phase or "").strip().upper()
 
     references_dir = assets.references_dir
@@ -1120,14 +1058,14 @@ def build_orchestration_prompt(
 
     sections: list[list[str]] = [
         _section_mission(),
-        _section_session_context(replace(session, framework=framework_norm, kernel_enabled=kernel_enabled)),
+        _section_session_context(replace(session, framework=framework_norm), kernel_enabled=kernel_enabled),
         _section_pipeline_and_budget(actions, max_minutes=session.max_minutes),
         _section_phase_semantics(
             kernel_enabled=kernel_enabled,
             framework_agent_phase_enabled=session.framework_agent_phase_enabled,
         ),
         _section_action_catalogue(actions),
-        _section_decision_framework(kernel_enabled=kernel_enabled, phase=phase_norm, transport=transport),
+        _section_decision_framework(phase=phase_norm, transport=transport),
         _section_cycle_directive(
             macro_cycle=cycle.macro_cycle, cycle_directive=cycle.cycle_directive, cycle_strategy=cycle.cycle_strategy
         ),
@@ -1150,7 +1088,7 @@ def build_orchestration_prompt(
             sections.append(ref_index)
     sections.append(_section_rules(rules_md, phase=phase_norm, transport=transport))
 
-    return join_sections(sections)
+    return "\n\n".join("\n".join(s) for s in sections).rstrip() + "\n"
 
 
 def default_enabled_actions(
@@ -1183,11 +1121,6 @@ def default_enabled_actions(
 
 
 __all__ = [
-    "FULL_ENABLED_ACTIONS",
-    "KERNEL_AGENT_OWNED_ACTIONS",
-    "NO_KERNEL_AGENT_ENABLED_ACTIONS",
-    "TRANSPORTS",
-    "TRANSPORT_STRUCTURED_OUTPUT",
     "TRANSPORT_TOOLS",
     "PromptAssets",
     "PromptCycle",

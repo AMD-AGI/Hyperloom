@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Callable, NamedTuple
 
 from common.env import env_flag
-from common.proctree import TERM_GRACE_SEC, collect_tree, kill_tree, marked_pids
+from common.proctree import REAP_MARK_ENV, TERM_GRACE_SEC, collect_tree, kill_tree, marked_pids
 
 from .bypass_analysis import parse_server_log_throughput
 
@@ -34,9 +34,6 @@ log = logging.getLogger(__name__)
 
 # How long the reaper waits to collect the SIGKILL'd child before giving up on it.
 _REAP_COLLECT_SECONDS: float = 1.0
-
-#: Set in a run's env, its value marks the run: whatever inherited it is reaped on every exit path, however it detached.
-REAP_MARK_ENV: str = "HYPERLOOM_REAP_MARK"
 
 # How long draining a reaped child's capture threads is given.
 _CAPTURE_DRAIN_SECONDS: float = 2.0

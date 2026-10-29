@@ -24,7 +24,7 @@ from hyperloom.orchestrator.bus.resource_lock import (
     SqliteLeaseBackend,
     drop_round_lane,
 )
-from hyperloom.orchestrator.bus.storage import SqliteConnection
+from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.policy.projection import ResourceFacts
 from hyperloom.orchestrator.state.round_store import (
     OPEN,

@@ -207,7 +207,7 @@ def _make_backend(
     judge_bundle: dict[str, Any],
     fail_phase: str | None = None,
     runtime_calls: list[RuntimeCall] | None = None,
-    kb_mode: str = "inmemory",
+    known_actions: tuple[str, ...] = (),
 ) -> tuple[CriticAgentBackend, FakeOpenAIClient]:
     fake_client = FakeOpenAIClient(codex_replies)
     fake_caller = _make_fake_runtime(
@@ -220,7 +220,6 @@ def _make_backend(
         session_dir=fake_session_dir,
         codex_model="gpt-5.4",
         codex_client_factory=lambda: fake_client,
-        kb_mode=kb_mode,
         runtime_caller_factory=lambda: fake_caller,
     )
     return backend, fake_client
@@ -275,17 +274,6 @@ def test_construct_missing_runtime_cli_raises(tmp_path: Path):
         CriticAgentBackend(
             critic_agent_root=bad_root,
             session_dir=sd,
-            codex_client_factory=lambda: FakeOpenAIClient([]),
-            runtime_caller_factory=lambda: lambda call: None,
-        )
-
-
-def test_construct_invalid_kb_mode(fake_critic_root: Path, fake_session_dir: Path):
-    with pytest.raises(BackendError, match="kb_mode"):
-        CriticAgentBackend(
-            critic_agent_root=fake_critic_root,
-            session_dir=fake_session_dir,
-            kb_mode="bogus",  # type: ignore[arg-type]
             codex_client_factory=lambda: FakeOpenAIClient([]),
             runtime_caller_factory=lambda: lambda call: None,
         )
@@ -494,9 +482,7 @@ async def test_single_proposal_yields_matching_verdict(
     assert critic_rows
     assert critic_rows[0]["reviewed_msg_ids"] == ["abc1"]
 
-    # Default kb_mode injected into the runtime env.
     env = runtime_calls[0].env
-    assert env["CRITIC_KB_CLIENT_MODE"] == "inmemory"
     assert env["CRITIC_SESSION_MEMORY_DIR"].endswith("critic-session-memory")
 
 
@@ -787,7 +773,7 @@ async def test_commit_review_subprocess_failure_raises(
         await backend.run("prompt")
 
 
-# Case 7: kb_mode=live + kb_unreachable -> still emits, surfaces reason
+# Case 7: CRITIC_KB_CLIENT_MODE=live + kb_unreachable -> still emits, surfaces reason
 @pytest.mark.asyncio
 async def test_kb_unreachable_still_emits_verdict(
     fake_critic_root: Path,
@@ -825,6 +811,7 @@ async def test_kb_unreachable_still_emits_verdict(
    "notes": ["KB unreachable"]}
 ]}
 ```"""
+    monkeypatch.setenv("CRITIC_KB_CLIENT_MODE", "live")
     monkeypatch.setenv("KB_BASE_URL", "http://127.0.0.1:1")
     runtime_calls: list[RuntimeCall] = []
     backend, _ = _make_backend(
@@ -833,7 +820,6 @@ async def test_kb_unreachable_still_emits_verdict(
         codex_replies=[reply],
         judge_bundle=judge_bundle,
         runtime_calls=runtime_calls,
-        kb_mode="live",
     )
     res = await backend.run("prompt")
 
@@ -844,25 +830,6 @@ async def test_kb_unreachable_still_emits_verdict(
     env = runtime_calls[0].env
     assert env["CRITIC_KB_CLIENT_MODE"] == "live"
     assert env["KB_BASE_URL"] == "http://127.0.0.1:1"
-
-
-@pytest.mark.asyncio
-async def test_kb_live_without_url_raises(
-    fake_critic_root: Path,
-    fake_session_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    judge_bundle = {"proposals": []}
-    backend, _ = _make_backend(
-        fake_critic_root,
-        fake_session_dir,
-        codex_replies=[],
-        judge_bundle=judge_bundle,
-        kb_mode="live",
-    )
-    monkeypatch.delenv("KB_BASE_URL", raising=False)
-    with pytest.raises(BackendError, match="KB_BASE_URL"):
-        await backend.run("prompt")
 
 
 # Default runtime caller: real subprocess command shape and the operator-matched failure texts
@@ -1449,7 +1416,6 @@ async def test_critic_agent_real_runtime_clears_proposal(
         session_dir=session_dir,
         codex_model="gpt-5.4",
         codex_client_factory=_DeterministicClient,
-        kb_mode="inmemory",
         # No runtime_caller_factory: exercise the real subprocess path.
     )
 
@@ -1535,7 +1501,6 @@ async def test_critic_agent_heartbeat_when_no_proposal(
         session_dir=session_dir,
         codex_model="gpt-5.4",
         codex_client_factory=_DeterministicClient,
-        kb_mode="inmemory",
     )
 
     # Orchestration only heartbeats — no proposal ever surfaces.

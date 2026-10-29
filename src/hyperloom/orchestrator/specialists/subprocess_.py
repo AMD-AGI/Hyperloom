@@ -29,6 +29,7 @@ import logging
 import os
 import subprocess
 import time
+import uuid
 from concurrent.futures import CancelledError
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -60,7 +61,7 @@ from common.fs_utils import (
     write_text_nofollow,
 )
 from hyperloom.common.env_safety import RunAs, RunAsError
-from common.proctree import collect_tree, kill_tree
+from common.proctree import REAP_MARK_ENV, collect_tree, kill_tree, marked_pids, process_uids
 
 from .agent_cli_config import (
     SpecialistAgentUnavailableError,
@@ -71,7 +72,7 @@ from .agent_cli_config import (
 )
 from .launch_env import apply_gpu_env, prepare_demote, resolve_launch_user, stage_mcp_config
 from .dsh_launch import DshLaunchRequest, build_dsh_launch, remove_dsh_profiles, resolve_dsh_executable
-from .reap_watch import PROCESS_LOG_NAME, ReapWatch, newest_activity, specialist_activity_paths
+from .reap_watch import PROCESS_LOG_NAME, ReapWatch, newest_activity, specialist_activity_paths, tool_in_flight
 from .trace_harvest import harvest_agent_trace
 from ..actions.cancel_channel import CancelScope, cancel_scope_listener, current_cancel_scope
 from common.git_safety import app_git, worktree_head
@@ -147,9 +148,12 @@ class SpecialistSubprocessConfig:
     poll_interval_seconds: float = 5.0
     """How often the reaper polls done.json / process exit / heartbeat."""
 
-    heartbeat_stale_seconds: float = 300.0
+    heartbeat_stale_seconds: float = 900.0
     """Liveness window for activity in any of :func:`specialist_activity_paths`.
 
+    Longer than the agent CLI's own API request timeout (600 s for Claude
+    Code), after which it logs a retry, so a CLI waiting on its model still
+    writes within it; a CLI waiting on a tool is covered by :func:`tool_in_flight`.
     A process that never creates any of them is reaped after this window.
     After one has appeared, its mtime can refresh the liveness clock
     for one window before the subsequent stale window expires, yielding about
@@ -369,6 +373,41 @@ def _local_tree_pgid(proc: Any) -> int | None:
     return pid if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 else None
 
 
+#: Prints the pids whose environment holds the entry in ``$1``; exits 3 when ``grep`` cannot read NUL-separated input.
+_LIST_MARKED_SCRIPT = (
+    'grep -qzxF -- x /dev/null; [ "$?" -eq 1 ] || exit 3; '
+    'for p in /proc/[0-9]*; do grep -qzxF -- "$1" "$p/environ" 2>/dev/null && echo "${p#/proc/}"; done; exit 0'
+)
+#: Bounds that scan; walking a few thousand /proc entries takes well under a second.
+_MARK_SCAN_TIMEOUT_SEC: float = 30.0
+
+
+def _marked_pids_as(run_as: RunAs, mark: str) -> list[int]:
+    """The pids carrying ``mark``, read as ``run_as``: the app's uid cannot read a demoted child's environ.
+
+    The scan runs as a shell under that account, because it cannot import Hyperloom from the app's tree. Any
+    process of that account can write into the scan's stdout, so only pids the account owns are believed.
+    """
+    try:
+        cp = subprocess.run(
+            run_as.command(["sh", "-c", _LIST_MARKED_SCRIPT, "sh", f"{REAP_MARK_ENV}={mark}"]),
+            capture_output=True,
+            text=True,
+            timeout=_MARK_SCAN_TIMEOUT_SEC,
+            check=False,
+            env={"PATH": os.defpath},
+            cwd="/",
+            **run_as.popen_kwargs(),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.warning("specialist reap: cannot list marked processes as %s: %s", run_as.user, exc)
+        return []
+    if cp.returncode != 0:
+        log.warning("specialist reap: listing marked processes as %s exited %d", run_as.user, cp.returncode)
+    listed = (int(pid) for pid in cp.stdout.split() if pid.isdigit())
+    return [pid for pid in listed if process_uids(pid) == (run_as.uid, run_as.uid)]
+
+
 @dataclass(frozen=True)
 class SpecialistSpawn:
     """One specialist subprocess to spawn and reap.
@@ -488,6 +527,9 @@ class SpecialistSubprocessDispatcher:
         from common.llm_stability_env import apply_llm_stability_env
 
         apply_llm_stability_env(env)
+        # Unique to this launch, so every process the CLI starts can be found after it detaches.
+        reap_mark = uuid.uuid4().hex
+        env[REAP_MARK_ENV] = reap_mark
         # The child spends against the gateway, so tag it or its spend lands
         # under no component at all. The task tag is what attributes the
         # requests of a child that dies before its result row -- the only
@@ -632,6 +674,7 @@ class SpecialistSubprocessDispatcher:
                 self._confirm_cancel_teardown(request, proc)
                 raise
             finally:
+                await asyncio.to_thread(self._reap_marked, reap_mark, run_as)
                 if log_fh is not None:
                     log_fh.close()
                 try:
@@ -698,6 +741,13 @@ class SpecialistSubprocessDispatcher:
             trace=trace,
             error=outcome["error"],
         )
+
+    @staticmethod
+    def _reap_marked(mark: str, run_as: RunAs | None) -> None:
+        """End every process that inherited this launch's reap mark, including one re-parented after the CLI exited."""
+        pids = marked_pids(REAP_MARK_ENV, mark) if run_as is None else _marked_pids_as(run_as, mark)
+        if pids and not kill_tree(collect_tree(pids)):
+            log.warning("specialist reap: marked processes %s outlived SIGKILL", pids)
 
     def _confirm_cancel_teardown(self, request: SpecialistSpawn, proc: Any) -> None:
         """Tear a cancelled specialist down, raising ``ExecutionCleanupUnconfirmed`` unless teardown is confirmed."""
@@ -953,7 +1003,7 @@ class SpecialistSubprocessDispatcher:
             "--output-format",
             cfg.output_format,
             "--verbose",
-            # Unattended: any mode that prompts stops the Bash heartbeat, and the run is reaped as stale.
+            # Unattended: a permission prompt waits with no output and no tool running, so the run is reaped as stale.
             # Worktrees and the tool denylist scope behaviour but are not filesystem containment.
             "--permission-mode",
             "bypassPermissions",
@@ -1030,8 +1080,8 @@ class SpecialistSubprocessDispatcher:
 
         Each tick checks (in order): a done-file at any candidate path
         (graceful exit with a short grace window), natural process exit,
-        activity staleness (heartbeat.json, process.log, or the dsh session
-        log; see :func:`specialist_activity_paths`), and the hard
+        activity staleness (process.log or the dsh session log, see
+        :func:`specialist_activity_paths`, unless :func:`tool_in_flight`), and the hard
         wall-clock cap. Stale / timed-out
         runs are killed via :meth:`_kill`. Partial checkpoints written along
         the way are forwarded to ``progress_cb`` as they change.
@@ -1101,11 +1151,13 @@ class SpecialistSubprocessDispatcher:
                     progress_cb=watch.progress_cb,
                 )
 
-            # Liveness check: alive if any activity signal changed within the
-            # window. The hard wall-clock cap below still bounds genuinely hung
-            # subprocesses.
+            # Liveness check: alive while the CLI's output changed within the window, or while it waits on a
+            # tool it started after that output. The hard wall-clock cap below still bounds a hung subprocess.
             a_mtime = newest_activity(specialist_activity_paths(watch.workspace))
-            if a_mtime is not None and max(0.0, time.time() - a_mtime) <= cfg.heartbeat_stale_seconds:
+            if a_mtime is not None and (
+                max(0.0, time.time() - a_mtime) <= cfg.heartbeat_stale_seconds
+                or await asyncio.to_thread(tool_in_flight, proc.pid, a_mtime)
+            ):
                 last_heartbeat_seen = now
 
             if (now - last_heartbeat_seen) > cfg.heartbeat_stale_seconds:

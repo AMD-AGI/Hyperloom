@@ -130,7 +130,6 @@ def test_reference_index_present_in_prompt(registry, refs_dir):
             enabled_actions=default_enabled_actions(no_kernel=False),
             session=SessionContext(
                 framework="sglang",
-                kernel_enabled=True,
                 framework_agent_phase_enabled=True,
                 objective_kind="gain_pct",
                 objective_value=15.0,

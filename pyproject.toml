@@ -409,6 +409,7 @@ omit = [
     # Subprocess-heavy benchmark drivers.
     "src/hyperloom/orchestrator/actions/executors/profile.py",
     "src/hyperloom/orchestrator/actions/executors/baseline.py",
+    "src/hyperloom/orchestrator/actions/executors/benchmark_run/*",
     # --- kernelforge (ported verbatim from KernelForge's own omit list) ---
     "*/test_*.py",
     # Shipped sample drivers, reference kernels, and local-wiki assets.
@@ -689,7 +690,7 @@ ignorelist = ["aiter"]
 "src/kernelforge/workflows/forge_loop/campaign/schema.py" = ["DTZ005"]
 "src/kernelforge/agent_backends/usage_ledger.py" = ["DTZ005"]
 "src/hyperloom/orchestrator/actions/executors/bypass_report.py" = ["DTZ005"]
-"src/hyperloom/orchestrator/actions/executors/baseline.py" = ["DTZ001"]
+"src/hyperloom/orchestrator/actions/executors/benchmark_run/bringup.py" = ["DTZ001"]
 "src/hyperloom/orchestrator/rehearsal/scenario.py" = ["DTZ001"]
 # These call the root logger directly; a root-level call configures logging on
 # first use when nothing else has, so moving them to a module logger changes

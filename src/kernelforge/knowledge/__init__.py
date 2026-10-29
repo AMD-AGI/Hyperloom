@@ -6,7 +6,7 @@
 from kernelforge.knowledge.local_wiki.index import build_forge_knowledge
 from kernelforge.knowledge.kb_store.writer import write_run_experience
 from kernelforge.knowledge.kb_store.reader import read_best_solution
-from kernelforge.knowledge.kb_store.identity.implementation import normalize_operator_name
+from kernelforge.knowledge.kb_store.identity.implementation import canonical_framework_version, normalize_operator_name
 from kernelforge.knowledge.kb_store.identity.kernel_recipe import KERNEL_RECIPE_PRODUCERS
 
 __all__ = [
@@ -14,5 +14,6 @@ __all__ = [
     "write_run_experience",
     "read_best_solution",
     "KERNEL_RECIPE_PRODUCERS",
+    "canonical_framework_version",
     "normalize_operator_name",
 ]

@@ -8,7 +8,7 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.orchestrator.bus.resource_lock import BRINGUP_ROUND_LANE, ROUND_LEASE_PID
-from hyperloom.orchestrator.bus.storage import SqliteConnection
+from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.state import round_store as rs
 from hyperloom.orchestrator.state.round_store import (
     ABANDONED,

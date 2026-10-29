@@ -12,12 +12,8 @@ import pytest
 
 import hyperloom.inference_optimizer
 from hyperloom.inference_optimizer.session import paths
-from hyperloom.orchestrator.bus.storage import (
-    SCHEMA_VERSION,
-    SqliteConnection,
-    ensure_schema,
-    open_connection,
-)
+from hyperloom.orchestrator.bus.storage.connection import SqliteConnection, open_connection
+from hyperloom.orchestrator.bus.storage.schema import SCHEMA_VERSION, ensure_schema
 
 
 def test_package_version_matches_metadata():

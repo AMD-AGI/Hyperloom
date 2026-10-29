@@ -8,7 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from hyperloom.common.bringup import LadderStage
-from hyperloom.orchestrator.actions.executors.baseline import read_bringup_log
+from hyperloom.orchestrator.actions.executors.benchmark_run.bringup import read_bringup_log
 from hyperloom.orchestrator.bringup import DEGRADED_UNREADABLE, observe_bringup
 
 #: One line per kernel shape, which is what aiter emits on ROCm.

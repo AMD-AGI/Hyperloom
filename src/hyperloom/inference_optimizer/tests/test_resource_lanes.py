@@ -22,7 +22,7 @@ from hyperloom.orchestrator.bus.resource_lock import (
     LANE_CONFLICTS,
     SqliteLeaseBackend,
 )
-from hyperloom.orchestrator.bus.storage import SqliteConnection
+from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.bus.storage.schema import (
     DEFAULT_LANE_CAPACITIES,
     SCHEMA_VERSION,
@@ -904,7 +904,8 @@ async def test_gpu_owner_keeps_capacity_until_release(conn, ray):
 async def test_unknown_owner_scope_is_not_probed(conn, locks, monkeypatch, scope):
     monkeypatch.setattr("hyperloom.orchestrator.bus.resource_lock.local_owner_scope", lambda: "test-node")
     lease = await locks.acquire_many(["research_lane"], holder_id="old", task_id="old", action="specialist", ttl_sec=-1)
-    await conn.execute("UPDATE leases SET owner_scope=?, pid=12345", (scope,))
+    async with conn.transaction() as cur:
+        cur.execute("UPDATE leases SET owner_scope=?, pid=12345", (scope,))
     monkeypatch.setattr(locks, "_pid_alive", lambda pid: pytest.fail("foreign PID must not be probed"))
     assert await locks.reap_dead_holders() == []
     assert await locks.lane_holders() == {"research_lane": 1}

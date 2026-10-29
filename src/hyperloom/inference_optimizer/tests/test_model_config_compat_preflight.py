@@ -1405,7 +1405,7 @@ def test_run_compat_detector_resolves_repo_id_before_dispatch(tmp_path, monkeypa
         return
 
     spec = cli_model_gate.DetectorSpec("t", _fake_detector, args=("model_path",))
-    cli_model_gate._run_compat_detector(spec, model_path="org/repo", data={}, gpu_type=None)
+    cli_model_gate._run_compat_detector(spec, model_path="org/repo", data={})
     assert seen["model_path"] == str(local_dir)
 
 
@@ -1419,5 +1419,5 @@ def test_run_compat_detector_falls_back_to_raw_when_unresolvable(monkeypatch):
         return
 
     spec = cli_model_gate.DetectorSpec("t", _fake_detector, args=("model_path",))
-    cli_model_gate._run_compat_detector(spec, model_path="/raw/model/path", data={}, gpu_type=None)
+    cli_model_gate._run_compat_detector(spec, model_path="/raw/model/path", data={})
     assert seen["model_path"] == "/raw/model/path"

@@ -13,7 +13,7 @@ import pytest
 from hyperloom.orchestrator.phases import machine_state as ps
 from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_SKIP_TO_SWEEP
 from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
-from hyperloom.orchestrator.bus.storage import SqliteConnection
+from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.bus.storage.schema import ensure_schema
 
 
@@ -33,7 +33,8 @@ async def test_old_running_rows_without_death_evidence_are_retained(conn, ttl):
         TaskSpec(kind="bench", params={}, idempotency_key="old", lease_ttl_sec=ttl)
     )
     await reg.transition(task.task_id, "running")
-    await conn.execute("UPDATE tasks SET updated_at='2020-01-01T00:00:00+00:00'")
+    async with conn.transaction() as cur:
+        cur.execute("UPDATE tasks SET updated_at='2020-01-01T00:00:00+00:00'")
     assert await reg.reclaim_dead_running() == []
     assert (await reg.get(task.task_id)).state == "running"
 
@@ -280,10 +281,11 @@ async def test_pump_reclaims_expired_running_task(tmp_path: Path, monkeypatch):
     )
     await coord.tasks.transition(orphan.task_id, "running")
     stale_ts = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
-    await coord.db.execute(
-        "UPDATE tasks SET updated_at=? WHERE task_id=?",
-        (stale_ts, orphan.task_id),
-    )
+    async with coord.db.transaction() as cur:
+        cur.execute(
+            "UPDATE tasks SET updated_at=? WHERE task_id=?",
+            (stale_ts, orphan.task_id),
+        )
 
     # In-window task: age < ttl.
     live, _ = await coord.tasks.create_or_return_existing(
@@ -329,10 +331,11 @@ async def test_pump_reclaim_idempotent(tmp_path: Path, monkeypatch):
     )
     await coord.tasks.transition(orphan.task_id, "running")
     stale_ts = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
-    await coord.db.execute(
-        "UPDATE tasks SET updated_at=? WHERE task_id=?",
-        (stale_ts, orphan.task_id),
-    )
+    async with coord.db.transaction() as cur:
+        cur.execute(
+            "UPDATE tasks SET updated_at=? WHERE task_id=?",
+            (stale_ts, orphan.task_id),
+        )
 
     await coord.dispatcher.pump_dispatcher_once()
     assert (await coord.tasks.get(orphan.task_id)).state == "running"

@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import sys
+import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -50,15 +51,15 @@ from ..gpu_types import (
     require_runner_framework,
     warn_family_runner,
 )
-from ..model_config_utils import (
-    summarize_model_config,
-)
+from ..model_config_utils import summarize_model_config
 from .bootstrap import (
     LaunchInfo,
+    LaunchPlatform,
     _emit_launch_info,
     constraint_budget_resume_conflict,
     resolve_launch_gpu_power,
     _begin_resume_leg,
+    resolve_research_lane_capacity,
     _resume_budget_lines,
     _print_final_summary,
     _print_session_skeleton,
@@ -88,9 +89,6 @@ from .multi_node import (
     _prepare_multi_node_state as _prepare_multi_node_state,
 )
 from .model_catalog import (
-    _claude_model_should_follow_codex,
-    _codex_model_should_follow_claude,
-    _critic_agent_runtime_needed,
     _resolve_critic_choice,
     _resolve_models_for_run,
 )
@@ -146,7 +144,6 @@ from .custom_specialist import (
 from .parser import (
     DEFAULT_MAX_HOURS,
     _build_parser as _build_parser,
-    _redact_unknown_args as _redact_unknown_args,
 )
 from .preflight import (
     _check_gfx_arch_resolvable,
@@ -317,19 +314,12 @@ def _registered_framework_or_exit(requested: str, *, hint: str) -> str:
     return framework
 
 
-def _enforce_expected_framework(
-    framework: str,
-    *,
-    expected: str | None = None,
-) -> None:
+def _enforce_expected_framework(framework: str) -> None:
     """Fail fast when a launcher-pinned expected framework is violated."""
     actual = _normalise_framework_name(framework)
-    expected_raw = (
-        expected
-        if expected is not None
-        else (os.environ.get("INFERENCE_OPTIMIZER_EXPECTED_FRAMEWORK", "") or os.environ.get("EXPECTED_FRAMEWORK", ""))
+    wanted = _normalise_framework_name(
+        os.environ.get("INFERENCE_OPTIMIZER_EXPECTED_FRAMEWORK", "") or os.environ.get("EXPECTED_FRAMEWORK", "")
     )
-    wanted = _normalise_framework_name(expected_raw)
     if not wanted:
         return
     if wanted != actual:
@@ -393,7 +383,6 @@ def _build_orchestration_prompt(
         enabled_actions=enabled,
         session=SessionContext(
             framework=framework,
-            kernel_enabled=not no_kernel,
             framework_agent_phase_enabled=not no_framework_agent,
             objective_kind=kind,
             objective_value=value,
@@ -426,9 +415,8 @@ def _should_remote_probe_gpu(args: argparse.Namespace) -> bool:
     return backend in ("rayjob", "infera")
 
 
-def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
+def _apply_atom_auto_tighten(args: argparse.Namespace) -> None:
     """Validate atom-specific CLI knobs: the ``--nodes>=2`` fail-fast guard (IR-8)."""
-    auto_disabled: list[str] = []
     if int(getattr(args, "nodes", 1) or 1) >= 2:
         print(
             "ERROR: --framework atom does not support multi-node "
@@ -442,7 +430,6 @@ def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
         "profile / roofline / TraceLens all wired for atom); "
         "--nodes>=2 guard active — see SKILL.md IR-8"
     )
-    return auto_disabled
 
 
 # Exit code for "another optimizer already owns this session".
@@ -475,26 +462,14 @@ def _reset_state_file(session_dir: Path, *, framework: str) -> None:
     state_path = session_dir / "state.json"
     if not state_path.exists():
         return
-    import time as _time
-
-    ts = int(_time.time())
-    backup_path = session_dir / f"state.json.preReset.{ts}"
+    backup_path = session_dir / f"state.json.preReset.{int(time.time())}"
     try:
         state_path.replace(backup_path)
     except OSError as exc:
-        import logging as _logging
-
-        _logging.getLogger(__name__).warning(
-            "--reset-state: could not move %s → %s: %s",
-            state_path,
-            backup_path,
-            exc,
-        )
+        log.warning("--reset-state: could not move %s → %s: %s", state_path, backup_path, exc)
         return
     SharedState(framework=framework).save(session_dir)
-    import logging as _logging
-
-    _logging.getLogger(__name__).info(
+    log.info(
         "--reset-state: backed up state.json to %s; session starts blank except for framework=%s.",
         backup_path.name,
         framework,
@@ -1372,8 +1347,8 @@ def _create_fresh_session(args: argparse.Namespace, *, framework: str, nodes_res
         session_dir,
         args,
         session_id=manifest["session_id"],
-        compute_partition=compute_partition,
-        gpu_power_settings=gpu_power,
+        framework=framework,
+        platform=LaunchPlatform(compute_partition=compute_partition, gpu_power_settings=gpu_power),
     )
     return _SessionStart(session_dir=session_dir, session_lock=session_lock, manifest=manifest)
 
@@ -1518,7 +1493,7 @@ def _resolve_agent_lineup(args: argparse.Namespace) -> _AgentLineup:
             file=sys.stderr,
         )
         sys.exit(2)
-    if _critic_agent_runtime_needed(critic_choice):
+    if critic_choice == "agent":
         critic_agent_root = _resolve_agent_root()
         if critic_agent_root is None:
             print(
@@ -1568,7 +1543,7 @@ def _install_system_prompts(
     prompt_context = OrchestrationPromptContext(
         no_kernel=lineup.no_kernel,
         no_framework_agent=lineup.no_framework_agent,
-        framework=os.environ["FRAMEWORK"],
+        framework=state.framework,
         objective=objective,
         max_minutes=int(round(float(args.max_hours) * 60)),
         # The role record always names Claude; the deployment's provider shape is what actually decides, so read the
@@ -1654,13 +1629,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             f"errors={aiter_sweep['errors']}"
         )
 
-    claude_follows_codex = _claude_model_should_follow_codex()
-    if claude_follows_codex:
-        args.claude_model = args.codex_model
-
     # Capture provider intent before _preflight() fills missing endpoints (preflight may populate OPENAI_BASE_URL from
     # ANTHROPIC_BASE_URL).
-    codex_follows_claude = _codex_model_should_follow_claude()
+    claude_follows_codex = llm_config.is_openai_only()
+    codex_follows_claude = llm_config.is_anthropic_only()
     try:
         resolved_urls = _preflight(args)
     except Exception as exc:
@@ -1749,7 +1721,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         CriticSetup(
             choice=lineup.critic_choice,
             agent_root=lineup.critic_agent_root,
-            kb_mode=lineup.critic_kb_mode,
             protocol=args.critic_protocol,
         ),
         session_dir=session_dir,
@@ -1781,7 +1752,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     prompts = _install_system_prompts(coordinator, args, objective, lineup, macro_cycle=_initial_macro_cycle)
     # Build specialist executor only when research_lane capacity > 0 (0 degrades to LLM-direct grid).
     specialist_executor: "Any" = None
-    if args.research_lane_capacity > 0:
+    if resolve_research_lane_capacity(args) > 0:
         specialist_executor = _build_specialist_executor(
             args,
             session_dir=session_dir,

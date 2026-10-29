@@ -349,7 +349,7 @@ def test_cli_clamps_research_lane_capacity_above_ceiling(tmp_path, monkeypatch):
     """An operator value above the GPU-derived ceiling is clamped down in SharedState."""
     from hyperloom.common import visible_devices
     from hyperloom.inference_optimizer import cli as cli_mod
-    from hyperloom.inference_optimizer.cli.bootstrap import _seed_shared_state
+    from hyperloom.inference_optimizer.cli.bootstrap import LaunchPlatform, _seed_shared_state
     from hyperloom.orchestrator.policy import gate as policy_mod
 
     monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 4)
@@ -362,6 +362,8 @@ def test_cli_clamps_research_lane_capacity_above_ceiling(tmp_path, monkeypatch):
         session_dir=tmp_path,
         args=args,
         session_id="clamp-test",
+        framework="sglang",
+        platform=LaunchPlatform(compute_partition={}, gpu_power_settings={}),
     )
     assert policy_mod.research_lane_ceiling() == 8
     assert state.research_lane_capacity == 8
