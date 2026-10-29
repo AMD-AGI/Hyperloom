@@ -26,12 +26,26 @@ _FMOE_CSV_HEADER = (
     "token,model_dim,inter_dim,expert,topk,act_type,dtype,q_dtype_a,q_dtype_w,q_type,use_g1u1,doweight_stage1"
 )
 _FMOE_CSV_COLUMNS = tuple(_FMOE_CSV_HEADER.split(","))
+_ENCODING = "utf-8"
+
+# MI355X, a4w4 per_1x32: 30 rows (368 candidates each) took 3529s. aiter writes no row until all finish, so a
+# row list past the timeout yields nothing.
+_PER_ROW_COST_S = 118
+_RESERVE_S = 120
+
+
+def _spread(items: list, budget: int) -> list:
+    """``budget`` of ``items`` evenly spaced across the list, the last one always kept."""
+    if budget == 1:
+        return [items[-1]]
+    step = (len(items) - 1) / (budget - 1)
+    return [items[round(i * step)] for i in range(budget)]
 
 
 def _validate_fmoe_csv(path: Path, *, tuned: bool = False) -> str | None:
     """Return why ``path`` is unusable as an fmoe CSV, or None if it is."""
     try:
-        lines = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        lines = [line.strip() for line in path.read_text(encoding=_ENCODING).splitlines() if line.strip()]
     except (OSError, UnicodeError) as exc:
         return f"unreadable ({exc})"
     if not lines:
@@ -134,11 +148,7 @@ class FmoeCKTuner(BaseTuner):
         budget = len(self.ctx.tokens) if self.ctx.tokens else 0
         if budget and len(tokens) > budget:
             observed = len(tokens)
-            if budget == 1:
-                kept = [tokens[-1]]
-            else:
-                step = (observed - 1) / (budget - 1)
-                kept = sorted({tokens[round(i * step)] for i in range(budget)})
+            kept = _spread(tokens, budget)
             log.info(
                 "observed %d MoE token counts, tuning %d spread across the range %d..%d: %s",
                 observed,
@@ -149,7 +159,7 @@ class FmoeCKTuner(BaseTuner):
             )
             tokens = kept
         csv_path = self.work_dir / "untuned_fmoe.csv"
-        csv_path.write_text(moe_untuned_csv_text(key, tokens=tokens), encoding="utf-8")
+        csv_path.write_text(moe_untuned_csv_text(key, tokens=tokens), encoding=_ENCODING)
         log.info(
             "Untuned CSV from runtime-observed MoE key at %s: %d token(s), "
             "model_dim=%s inter_dim=%s expert=%s topk=%s %s/%s",
@@ -171,7 +181,7 @@ class FmoeCKTuner(BaseTuner):
             key = self._demand_key()
             if key is None:
                 raise ValueError(_NO_RUNTIME_KEY)
-            return self._untuned_csv_from_demand(key), "runtime_observed"
+            return self._rows_within_timeout(self._untuned_csv_from_demand(key)), "runtime_observed"
 
         path = Path(external)
         if not path.is_file():
@@ -182,7 +192,26 @@ class FmoeCKTuner(BaseTuner):
             # unreachable at run time.
             raise ValueError(f"unusable moe_untuned_csv {path}: {problem}")
         log.info("Using caller-supplied untuned CSV at %s", path)
-        return path, "runtime_observed"
+        return self._rows_within_timeout(path), "runtime_observed"
+
+    def _rows_within_timeout(self, path: Path) -> Path:
+        """``path``, or a copy holding only the rows ``ctx.timeout_s`` can finish, spread across keys and tokens."""
+        header, *rows = [line for line in path.read_text(encoding=_ENCODING).splitlines() if line.strip()]
+        budget = max(1, (self.ctx.timeout_s - _RESERVE_S) // _PER_ROW_COST_S)
+        if len(rows) <= budget:
+            return path
+        kept = _spread(rows, budget)
+        log.info(
+            "%d MoE rows need ~%ds at ~%ds each but the timeout is %ds; tuning %d of them",
+            len(rows),
+            len(rows) * _PER_ROW_COST_S,
+            _PER_ROW_COST_S,
+            self.ctx.timeout_s,
+            len(kept),
+        )
+        csv_path = self.work_dir / "untuned_fmoe.csv"
+        csv_path.write_text("\n".join([header, *kept]) + "\n", encoding=_ENCODING)
+        return csv_path
 
     def _parse_compare_output(self, stdout: str) -> list[dict[str, Any]]:
         """Parse the compare report from tuner stdout."""

@@ -44,7 +44,7 @@ def _moe_ctx(tmp_path, **overrides) -> TuneContext:
         iters=5,
         warmup=2,
         min_improvement_pct=1.0,
-        timeout_s=60,
+        timeout_s=3600,
     )
     base.update(overrides)
     return TuneContext(**base)
@@ -126,6 +126,41 @@ def test_caller_supplied_csv_is_tuned_verbatim(tmp_path):
     assert _column(resolved, "q_dtype_a") == ["torch.float8_e4m3fn"] * 2
     assert _column(resolved, "q_dtype_w") == ["torch.float4_e2m1fn_x2"] * 2
     assert set(_column(resolved, "inter_dim")) == {"512"}
+
+
+_GLM_KEY_TAIL = (
+    "6144,2048,{expert},{topk},ActivationType.Silu,torch.bfloat16,"
+    "torch.float4_e2m1fn_x2,torch.float4_e2m1fn_x2,QuantType.per_1x32,1,0"
+)
+
+
+def _glm_rows(pairs) -> list[str]:
+    return [f"{token}," + _GLM_KEY_TAIL.format(expert=expert, topk=topk) for expert, topk, token in pairs]
+
+
+def test_rows_the_timeout_cannot_finish_are_thinned_before_tuning(tmp_path, monkeypatch):
+    """aiter writes nothing until every row is tuned, so an unaffordable row list loses all of them."""
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    pow2 = [2**i for i in range(16)]
+    observed = [(64, 7, t) for t in pow2] + [(65, 8, t) for t in pow2 if t not in (2, 4)]
+    external = tmp_path / "untuned_fmoe_from_runtime.csv"
+    external.write_text("\n".join([fm._FMOE_CSV_HEADER, *_glm_rows(observed)]) + "\n", encoding="utf-8")
+    tuner = fm.FmoeCKTuner(_moe_ctx(tmp_path, moe_untuned_csv=external, timeout_s=1546))
+    monkeypatch.setattr(fm, "find_tuner_script", lambda _: Path("/fake/tune.py"))
+    monkeypatch.setattr(fm, "resolve_aiter_root", lambda: None)
+    monkeypatch.setattr(fm._tr, "is_isolation_enabled", lambda: False)
+    tuned = []
+
+    def run(cmd, **kwargs):
+        tuned.append(Path(cmd[cmd.index("-i") + 1]).read_text(encoding="utf-8"))
+        return 0, "", ""
+
+    monkeypatch.setattr(fm, "run_subprocess", run)
+    tuner.run()
+
+    kept = [(64, 7, t) for t in (1, 8, 32, 256, 2048, 8192)] + [(65, 8, t) for t in (1, 16, 128, 1024, 4096, 32768)]
+    assert tuned == ["\n".join([fm._FMOE_CSV_HEADER, *_glm_rows(kept)]) + "\n"]
 
 
 def test_no_runtime_key_is_refused_rather_than_derived_from_the_config(tmp_path):

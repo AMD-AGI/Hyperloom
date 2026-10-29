@@ -178,6 +178,7 @@ class TestFmoeCkAcceptsIt:
                 "moe_untuned_csv": None,
                 "tokens": [],
                 "token_hint": None,
+                "timeout_s": 3600,
             },
         )()
         tuner.work_dir = tmp_path
