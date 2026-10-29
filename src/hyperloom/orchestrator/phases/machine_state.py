@@ -743,8 +743,9 @@ def prelude_affordable_seconds(state: Any) -> tuple[float | None, dict[str, Any]
     subtraction would run negative. A negative is not a quantity of seconds anyone can spend: the
     figure is floored at zero, the same shape :meth:`SharedState.session_budget_usable_sec` keeps, so
     every caller reads one meaning -- zero is "nothing left outside the reserve", not a debt that
-    grows while the phase waits. Reaching zero is a terminal for an idle PRELUDE
-    (:func:`.prelude_exits._prelude_budget_line`), not a number the phase sits on.
+    grows while the phase waits. Reaching zero refuses a baseline retry at admission
+    (:func:`..actions.executors._round_budget._a_retry_past_the_reserve_line`) and is a terminal for an
+    idle PRELUDE (:func:`.prelude_exits._prelude_budget_line`), not a number the phase sits on.
     """
     max_sec = _max_minutes(state) * 60.0
     usable = session_usable_seconds(state)

@@ -1008,7 +1008,11 @@ repeating a recent failing params fingerprint is dropped as a duplicate.
 With enablement admitted (`--enablement all/launch/eval`), the first baseline
 failure routes PRELUDE into the ENABLEMENT phase, which authors patches until
 the combo boots. With `--enablement off`, three consecutive failures stop the
-run with `stop_reason='baseline_failed'`.
+run with `stop_reason='baseline_failed'` — and a retry is only booted while
+PRELUDE still has time outside the optimization reserve (half of `--max-minutes`,
+held for the optimization the session is for). Past that line the baseline
+executor refuses the retry unlaunched and the phase closes the run with
+`stop_reason='prelude_budget_exhausted'`, which can happen on the first failure.
 
 An AgentX baseline whose server ran with the prefix cache off fails with
 `error_class=agentx_baseline_prefix_cache_off` and stops the run with

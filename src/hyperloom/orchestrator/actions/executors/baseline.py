@@ -85,6 +85,8 @@ from ._grid_runner import (
     stopped_by_the_run,
     sync_benchmark_timeout,
 )
+from ._round_budget import RETRY_PAST_THE_RESERVE, _a_retry_past_the_reserve_line
+from ._round_budget import _a_use_must_follow_the_round, _round_headroom_sec
 from ._subprocess_kill import (
     AGENTX_PREFLIGHT_ERROR_CLASS,
     DETOKENIZER_STALL_RETURNCODE,
@@ -640,16 +642,6 @@ def _unlaunched_round_result(
     )
 
 
-def _round_headroom_sec(state: Any) -> tuple[float | None, dict[str, Any]]:
-    """Seconds this round's budget may still spend, and the numbers behind it."""
-    if state is None:
-        return None, {"reason": "no_session_state"}
-    usable_sec = _phase_state.session_usable_seconds(state)
-    if usable_sec is None:
-        return None, {"reason": "unbounded_session_budget"}
-    return usable_sec, {"bound": "session_usable", "affordable_sec": round(usable_sec, 1)}
-
-
 def _cold_anchor_from_warmup(
     warmup_result: dict[str, Any],
     *,
@@ -661,12 +653,6 @@ def _cold_anchor_from_warmup(
         warnings.append(MEASURE_ROUND_DROPPED_WARNING)
     warmup_result["measure_round_dropped"] = dropped
     return warmup_result
-
-
-def _a_use_must_follow_the_round(state: Any) -> bool:
-    """Whether this round is only worth running if something can be measured after it."""
-    phase = str(getattr(state, "phase", "") or "").strip().upper()
-    return phase == _phase_state.PHASE_PRELUDE
 
 
 def _disable_cuda_graph_flag(framework: str) -> str:
@@ -2539,7 +2525,16 @@ class BenchmarkRunExecutor:
             },
         )
         stopped_result["budget_shortfall"] = evidence
-        if evidence.get("one_more_measurement_sec"):
+        if evidence.get("reason") == RETRY_PAST_THE_RESERVE:
+            log.warning(
+                "baseline_executor: the baseline has failed %d time(s) and PRELUDE has spent "
+                "everything outside the %.0fs optimization reserve (%.0fs usable), so no retry "
+                "is booted. The phase closes on this same line.",
+                evidence.get("baseline_failure_streak", 0),
+                evidence.get("optimization_reserve_sec", 0.0),
+                evidence.get("session_usable_sec", 0.0),
+            )
+        elif evidence.get("one_more_measurement_sec"):
             log.warning(
                 "baseline_executor: this round (%.0fs) and one variant to read "
                 "against it (%.0fs) need %.0fs, and %.0fs is left (bound=%s), so "
@@ -2818,6 +2813,9 @@ class BenchmarkRunExecutor:
     ) -> tuple[bool, dict[str, Any]]:
         """Whether the budget holds a whole round *and a use for it*, before anything boots."""
         state = (ctx_extra or {}).get("shared_state") or self.shared_state
+        past_the_line, reserve_evidence = _a_retry_past_the_reserve_line(state)
+        if past_the_line:
+            return False, reserve_evidence
         return self._round_affordable(
             state,
             round_sec=_phase_state.baseline_round_cost_sec(state, double_run=double_run),

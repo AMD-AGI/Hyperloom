@@ -1017,6 +1017,40 @@ async def test_a_queued_or_running_baseline_reads_as_prelude_work(coordinator_wi
 
 
 @pytest.mark.asyncio
+async def test_a_first_failure_with_no_allowance_left_closes_the_session(coordinator_with_mocks):
+    """One owner decides whether PRELUDE may still retry: admission refuses it, the terminal records that.
+
+    The tick that books the first baseline failure finds the allowance already at zero, so there is no
+    retry the Orchestration agent could get launched and nothing is lost by closing here. The enablement
+    lane is off, so no other phase takes the failed baseline over and the budget line is the live one.
+    """
+    from hyperloom.orchestrator.actions.executors import baseline as baseline_executor
+
+    c = coordinator_with_mocks
+    try:
+        c.shared_state.enablement_mode = "off"
+        c.shared_state.max_minutes = 720
+        c.shared_state.baseline_failure_streak = 1
+        c.shared_state.session_budget_usable_sec = lambda: 14_718.5
+
+        refused, shortfall = baseline_executor._a_retry_past_the_reserve_line(c.shared_state)
+        assert refused is True, "a retry past the line must be refused before the machine reads the terminal"
+        assert shortfall["affordable_sec"] == 0.0
+
+        await c.phase_machine.advance_phase_if_needed()
+
+        assert c.shared_state.phase == phase_state.PHASE_CLOSE
+        row = c.shared_state.phase_history[-1]
+        assert row["from_phase"] == "PRELUDE"
+        assert row["reason"] == "prelude_budget_exhausted"
+        assert row["evidence"]["baseline_failure_streak"] == 1
+        assert row["evidence"]["prelude_affordable_sec"] == 0.0
+        assert phase_state.is_valid_stop_reason(row["reason"])
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
 async def test_work_no_phase_owns_is_not_prelude_work(coordinator_with_mocks):
     """Only PRELUDE's own actions hold the phase open; a queued kernel task must not."""
     from hyperloom.orchestrator.state.task_registry import TaskSpec

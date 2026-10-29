@@ -71,12 +71,14 @@ def _cold_anchor_shortfall(baseline: dict[str, Any], pending: dict[str, Any]) ->
 def _prelude_budget_line(baseline: dict[str, Any], pending: dict[str, Any]) -> dict[str, Any] | None:
     """The evidence that PRELUDE is out of its own budget with no baseline and nothing left to dispatch.
 
-    A failed baseline is retried only on a proposal from the Orchestration agent, so once the phase
-    has spent everything outside the optimization reserve it has no arm it can buy by itself: the
-    affordability figure refuses every optional arm and the initial-analysis hold has run out. Holding
-    the phase open there spends the reserve on an idle preparation instead of on the optimization the
-    reserve is held for, and leaves the exit to an LLM escalation. A round still in flight is not idle,
-    so the line is read only once the phase is waiting on nothing of its own.
+    Past this line baseline admission refuses a retry outright
+    (:func:`executors._round_budget._a_retry_past_the_reserve_line` reads the same allowance), so the
+    agent has no arm left to propose: whatever it asks for comes back unlaunched. The terminal records a
+    decision the machine has already made rather than pre-empting one. Holding the phase open there
+    spends the reserve on an idle preparation instead of on the optimization the reserve is held for,
+    and leaves the exit to an LLM escalation. A round admitted while the allowance was still positive
+    may be running, and a terminal would cancel it, so the line is read only once the phase is waiting
+    on nothing of its own.
     """
     streak = int(baseline.get("failure_streak") or 0)
     if streak < 1 or _prelude_work_pending(baseline, pending):
