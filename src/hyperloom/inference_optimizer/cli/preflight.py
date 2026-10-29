@@ -9,6 +9,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -81,6 +82,7 @@ from ..session.paths import (
 )
 
 log = logging.getLogger("hyperloom.inference_optimizer.cli")
+_ASSETS = Path(__file__).resolve().parent.parent / "assets"
 
 _CLONE_INFERENCEX_STEP = "clone_inferencex"
 
@@ -835,20 +837,17 @@ def _check_tracelens_cli() -> dict[str, Any]:
 
 
 def _check_tracelens_root_exists() -> dict[str, Any]:
-    """Hard-gate an explicitly set ``TRACELENS_ROOT`` at preflight."""
+    """Hard-gate a set ``TRACELENS_ROOT`` that is missing, or a ``TraceLens@<sha>`` other than the installer's pin."""
     override = os.environ.get("TRACELENS_ROOT")
-    if not override or Path(override).is_dir():
-        return {
-            "status": "applied",
-            "skip_reason": None,
-            "target": "TRACELENS_ROOT",
-        }
+    pin = re.search(r'^TRACELENS_REF="([0-9a-f]{40})"$', (_ASSETS / "install_kernel_tools.sh").read_text(), re.M)
+    name = Path(override or "").name
+    stale = pin is not None and name.startswith("TraceLens@") and name != f"TraceLens@{pin.group(1)}"
+    if not override or (Path(override).is_dir() and not stale):
+        return {"status": "applied", "skip_reason": None, "target": "TRACELENS_ROOT"}
+    problem = f"is an earlier install's checkout, not TraceLens@{pin.group(1)}" if stale else "does not exist"
     print(
-        f"ERROR: TRACELENS_ROOT={override} does not point at an existing "
-        f"TraceLens checkout. It was likely inherited from a stale shell or an "
-        f"unedited .env template. Re-run src/hyperloom/inference_optimizer/assets/install.sh "
-        f"and source $KERNEL_AGENT_ENV, point TRACELENS_ROOT at a real checkout, "
-        f"or unset it to use the pod-local default. Refusing to start.",
+        f"ERROR: TRACELENS_ROOT={override} {problem} (a stale shell, .env or install). Re-run src/hyperloom/"
+        f"inference_optimizer/assets/install.sh and source $KERNEL_AGENT_ENV, or unset it. Refusing to start.",
         file=sys.stderr,
     )
     sys.exit(2)
@@ -1270,7 +1269,7 @@ def _ensure_magpie(
             print(f"Preflight: benchmark backend is {benchmark_backend!r}; skipping Magpie install/import")
         else:
             magpie_ref = os.environ.get("MAGPIE_REF", "6a1ee26f9053363d3750b43e3d5afb5d1c4ce84e")
-            checker = Path(__file__).resolve().parent.parent / "assets" / "check_magpie.py"
+            checker = _ASSETS / "check_magpie.py"
             check = subprocess.run([magpie_python, str(checker), magpie_ref], capture_output=True)
             if check.returncode != 0 and not os.environ.get("MAGPIE_PATH"):
                 magpie_repo = os.environ.get("MAGPIE_REPO", "https://github.com/AMD-AGI/Magpie.git")
@@ -1717,7 +1716,7 @@ def _run_ir3_preflight(args: argparse.Namespace) -> dict[str, Any]:
 
     user_data = _workspace_root_resolve()
     marker_path = user_data / "runtime" / "recipe_kb" / ".kb_preflight.json"
-    script = Path(__file__).resolve().parent.parent / "assets" / "preflight_kb.sh"
+    script = _ASSETS / "preflight_kb.sh"
     env = os.environ.copy()
     resolved_kb_store_url = kb_store_url(env=env)
     if resolved_kb_store_url:
