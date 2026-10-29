@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from kernelforge.gemm_tune import tune_robustness as tr
+from kernelforge.workflows.gemm_tune import tune_robustness as tr
 
 
 class TestTaskTimeout:

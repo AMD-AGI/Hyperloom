@@ -14,18 +14,18 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.loop.runner import (
+from kernelforge.workflows.forge_loop.iteration.runner import (
     IterationConfig,
     IterationLoop,
     IterationResult,
 )
-from kernelforge.orchestrator.contracts import CaseEvidence, OrchestrationContext
-from kernelforge.loop import runner as runner_module
-from kernelforge.loop.campaign_config import CampaignConfigStore
-from kernelforge.loop.campaign_setup import resolve_campaign
+from kernelforge.workflows.forge_loop.roles.contracts import CaseEvidence, OrchestrationContext
+from kernelforge.workflows.forge_loop.iteration import runner as runner_module
+from kernelforge.workflows.forge_loop.campaign.campaign_config import CampaignConfigStore
+from kernelforge.workflows.forge_loop.campaign.campaign_setup import resolve_campaign
 from kernelforge.tests.test_campaign_setup import _base_args, _git_workspace
 from kernelforge.tests.test_loop_runner import _make_loop, _unused_supervisor
-from kernelforge.loop.iteration import iteration_types
+from kernelforge.workflows.forge_loop.iteration import iteration_types
 
 
 def _coverage_loop(baseline: dict[str, float], unscored: set[str] | None = None):
@@ -658,7 +658,7 @@ def test_forge_loop_offers_the_option_and_prefers_the_campaigns_copy():
     assert "--commit-new-path" in option.opts
     assert option.multiple
 
-    from kernelforge.loop.bootstrap import run as forge_loop_run
+    from kernelforge.workflows.forge_loop.bootstrap import run as forge_loop_run
 
     source = inspect.getsource(forge_loop_run._iteration_config)
     assert re.search(
@@ -724,7 +724,7 @@ def test_campaign_config_missing_a_field_names_it(tmp_path, monkeypatch):
 
 def test_matching_refuses_a_pattern_normalization_would_have_rejected():
     """Unreachable through the entry points, and a silent skip if it were not."""
-    from kernelforge.tools.new_path_allowlist import (
+    from kernelforge.utils.new_path_allowlist import (
         AllowlistPatternError,
         matches_commit_new_paths,
     )
@@ -790,7 +790,7 @@ def test_resume_recovery_does_not_delete_an_operators_new_file(tmp_path, monkeyp
         _make_loop as _campaign_loop,
         _successful_iteration,
     )
-    from kernelforge.tracker import ExperimentTracker
+    from kernelforge.workflows.forge_loop.campaign.experiment import ExperimentTracker
 
     workspace, kernel, driver = _initialize_workspace(tmp_path, monkeypatch)
     (workspace / "configs").mkdir()

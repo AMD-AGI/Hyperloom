@@ -3,8 +3,8 @@
 
 """A precision that only names the quantization toolkit routes on what the serving log and the checkpoint say runs."""
 
-from kernelforge.gemm_tune.model_analyzer import ModelProfile
-from kernelforge.gemm_tune.router import RoutingEvidence, RoutingTarget, select_tuners
+from kernelforge.workflows.gemm_tune.model_analyzer import ModelProfile
+from kernelforge.workflows.gemm_tune.router import RoutingEvidence, RoutingTarget, select_tuners
 
 
 _MXFP4 = {"weight": {"dtype": "fp4", "group_size": 32}}

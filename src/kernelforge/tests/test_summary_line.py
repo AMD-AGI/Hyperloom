@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from kernelforge.orchestrator.summary_line import PLAN_SUMMARY_RULE, SUMMARY_LABEL, read_summary
+from kernelforge.workflows.forge_loop.roles.summary_line import PLAN_SUMMARY_RULE, SUMMARY_LABEL, read_summary
 
 
 @pytest.mark.parametrize(

@@ -8,7 +8,7 @@ from __future__ import annotations
 import pytest
 
 from common.env import EnvValueError
-from kernelforge.gemm_tune import evidence as ev
+from kernelforge.workflows.gemm_tune import evidence as ev
 
 _MISS = (
     "[aiter] shape is M:{m}, N:4096, K:4096 dtype='torch.bfloat16' "

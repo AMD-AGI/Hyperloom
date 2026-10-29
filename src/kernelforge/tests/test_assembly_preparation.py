@@ -16,7 +16,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from kernelforge.assembly import prepare
+from kernelforge.kernel_backends.assembly import prepare
 from kernelforge.evaluation.correctness.pipeline import ValidationReport, ValidationResult
 
 ASM = """.amdgcn_target "amdgcn-amd-amdhsa--gfx950"
@@ -105,7 +105,7 @@ def campaign(tmp_path, monkeypatch):
         latency = 2.0 if "_forge_assembly" in kernel.read_text() else 1.0
         return {"success": True, "median_ms": latency, "case_times": {"one": latency}}
 
-    from kernelforge.orchestrator import agent
+    from kernelforge.workflows.forge_loop.roles import agent
 
     def no_agent(**kwargs):
         raise AssertionError("assembly preparation must never create an LLM agent")
@@ -414,8 +414,8 @@ def test_existing_assembly_and_scope(campaign):
 
 
 def test_no_keep_selects_original_and_can_resume(campaign, monkeypatch):
-    from kernelforge.loop.runner import IterationConfig, IterationLoop
-    from kernelforge.tracker import ExperimentTracker
+    from kernelforge.workflows.forge_loop.iteration.runner import IterationConfig, IterationLoop
+    from kernelforge.workflows.forge_loop.campaign.experiment import ExperimentTracker
 
     root, options = campaign
     record = asyncio.run(prepare.prepare_assembly(**options))

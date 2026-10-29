@@ -7,11 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.gemm_tune import router
-from kernelforge.gemm_tune.model_analyzer import ModelProfile
-from kernelforge.gemm_tune.report import build_report
-from kernelforge.gemm_tune.tuners.base import TuneContext
-from kernelforge.gemm_tune.router import RoutingEvidence, RoutingTarget, select_tuners
+from kernelforge.workflows.gemm_tune import router
+from kernelforge.workflows.gemm_tune.model_analyzer import ModelProfile
+from kernelforge.workflows.gemm_tune.report import build_report
+from kernelforge.workflows.gemm_tune.tuners.base import TuneContext
+from kernelforge.workflows.gemm_tune.router import RoutingEvidence, RoutingTarget, select_tuners
 
 
 def _tune_ctx(**fields) -> TuneContext:

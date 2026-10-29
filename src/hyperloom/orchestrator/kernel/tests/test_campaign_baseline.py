@@ -19,13 +19,13 @@ from hyperloom.orchestrator.kernel.campaign_baseline import (
     seal_campaign_baseline,
     session_branch_name,
 )
-from kernelforge.kernel_rewrite_controller.worktree import (
+from kernelforge.workflows.rewrite_controller.worktree import (
     CAMPAIGN_BRANCH_PREFIX,
     FORGE_LOOP_OUTPUT_DIRNAME,
     record_campaign_baseline,
     untracked_paths,
 )
-from kernelforge.tools import acquire_repo_lock, release_repo_lock
+from kernelforge.utils import acquire_repo_lock, release_repo_lock
 
 _GIT_IDENTITY = {
     "GIT_AUTHOR_NAME": "baseline-test",

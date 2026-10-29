@@ -14,15 +14,15 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.tools import process_reaping
+from kernelforge.utils import process_reaping
 from kernelforge.agent_backends.claude import _reap_workspace_processes
-from kernelforge.tools.process_reaping import (
+from kernelforge.utils.process_reaping import (
     _read_proc,
     _Survey,
     install_child_subreaper,
     processes_under,
 )
-from kernelforge.loop.fanout import _reap_lane_processes
+from kernelforge.workflows.forge_loop.iteration.fanout import _reap_lane_processes
 
 pytestmark = pytest.mark.skipif(
     not os.path.isdir("/proc"),
@@ -45,7 +45,7 @@ _EXITS_WITH_7 = _READY + "raise SystemExit(7)"
 # place ``signal.signal`` refuses.
 _COLLECTS_AN_ORPHAN_OFF_THE_MAIN_THREAD = """
 import os, signal, subprocess, sys, threading, time
-from kernelforge.tools.process_reaping import _read_proc, install_child_subreaper
+from kernelforge.utils.process_reaping import _read_proc, install_child_subreaper
 
 armed = []
 worker = threading.Thread(target=lambda: armed.append(install_child_subreaper()))

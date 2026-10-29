@@ -11,8 +11,8 @@ import sys
 
 import pytest
 
-from kernelforge.tools.process_reaping import install_child_subreaper
-from kernelforge.tools.process_group import communicate_process_group
+from kernelforge.utils.process_reaping import install_child_subreaper
+from kernelforge.utils.process_group import communicate_process_group
 
 
 def _cancel_mid_communicate() -> int:

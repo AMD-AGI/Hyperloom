@@ -50,7 +50,7 @@ adapter contract.
 | FlyDSL with one explicit `flydsl.compiler.compile(...)` call | Automatic capture and replacement, using the original compiled-function ABI. |
 | Existing `.s` with a working launcher | Verify its rebuild path and optimize the selected `.s`. |
 | Triton / Gluon with one direct JIT `kernel[grid](...)` launch | Capture compiler `amdgcn` and rebuild an independent compiled kernel, retaining Triton's argument marshaller and current stream. Resolve autotuning/heuristics first. |
-| HIP device source built through `kernelforge.assembly.hip_source.compile_hip` | Capture HIP compiler ISA and replace its code object at the same build boundary. The existing launcher supplies the symbol, ABI, grid, block and stream. |
+| HIP device source built through `kernelforge.kernel_backends.assembly.hip_source.compile_hip` | Capture HIP compiler ISA and replace its code object at the same build boundary. The existing launcher supplies the symbol, ABI, grid, block and stream. |
 | CK / AITER / hipBLASLt / fusion | Select an actual kernel that meets one of these contracts. This does not automatically extract kernels from arbitrary linked libraries or Python extensions. |
 
 That all these implementations eventually execute machine code does not make
@@ -73,7 +73,7 @@ The host measures and saves the original source, then mechanically wraps only
 the compile call. It captures `*_final_isa.s` from FlyDSL's compiler using private
 dump/cache directories. It does not generate instructions with an LLM. The final
 binding rebuilds that file with ROCm LLVM and replaces the GPU object through
-`kernelforge.assembly.flydsl.with_assembly`. The frontend definitions, host launch
+`kernelforge.kernel_backends.assembly.flydsl.with_assembly`. The frontend definitions, host launch
 logic, call arguments and stream forwarding remain in place. The binding belongs
 at the existing compilation boundary, outside timing and graph capture.
 
@@ -110,7 +110,7 @@ and arbitrary multi-kernel dispatch are outside this adapter's contract.
 For an existing standalone HIP launcher, use one explicit build call:
 
 ```python
-from kernelforge.assembly.hip_source import compile_hip
+from kernelforge.kernel_backends.assembly.hip_source import compile_hip
 
 binary = compile_hip(
     source_path, output_path, gpu_target="gfx950",
@@ -274,7 +274,7 @@ specialization refusal, frozen files, rollback, result selection and resume.
 
 ## Lower-level helpers
 
-`python -m kernelforge.assembly assemble --source kernel.s --output build/kernel.hsaco
+`python -m kernelforge.kernel_backends.assembly assemble --source kernel.s --output build/kernel.hsaco
 --gpu-target gfx950 --toolchain-dir /opt/rocm/llvm/bin` invokes `llvm-mc` and
 `ld.lld`. Supply complete AMDHSA source with descriptors and metadata, not an
 instruction-only disassembly. Preserve target features such as `xnack`/`sramecc`.

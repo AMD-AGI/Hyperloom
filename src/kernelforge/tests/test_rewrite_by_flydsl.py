@@ -6,12 +6,12 @@ import textwrap
 
 import pytest
 
-from kernelforge.rewrite_by_flydsl import ingest, report, seed
-from kernelforge.rewrite_by_flydsl.port_loop import (
+from kernelforge.workflows.flydsl_rewrite import ingest, report, seed
+from kernelforge.workflows.flydsl_rewrite.port_loop import (
     _validation_error_tail,
     check_flydsl_port,
 )
-from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
+from kernelforge.workflows.flydsl_rewrite.spec import RewriteSpec
 
 
 # ── spec ─────────────────────────────────────────────────────────────────────

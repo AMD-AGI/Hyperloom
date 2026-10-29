@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from kernelforge.rewrite_by_flydsl import budget, report
+from kernelforge.workflows.flydsl_rewrite import budget, report
 
 
 def test_search_reserves_applyback_finalization_time():

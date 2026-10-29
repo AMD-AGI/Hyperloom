@@ -10,7 +10,7 @@ import json
 import pytest
 
 from common.env import EnvValueError
-from kernelforge.gemm_tune import pipeline as cli
+from kernelforge.workflows.gemm_tune import pipeline as cli
 
 _MISS = (
     "(EngineCore pid=52995) [aiter] shape is M:{m}, N:6144, K:4096 "
@@ -74,7 +74,7 @@ class TestDerivingDemand:
         # The MoE dispatch key does not live in report["demands"], so gating on dense misses threw it away: a pure-MoE
         # model, or one whose dense tables all hit, got no demand file at all and fmoe_ck then skipped itself for "no
         # runtime-observed MoE dispatch key" -- with the key sitting in the log it had just been handed.
-        from kernelforge.gemm_tune.evidence import moe_dispatch_keys
+        from kernelforge.workflows.gemm_tune.evidence import moe_dispatch_keys
 
         src = _log(tmp_path, [_MOE_MISS.format(tok=16), _HIT])
         out = tmp_path / "out"
@@ -111,12 +111,12 @@ class TestDerivingDemand:
         def _boom(*_a, **_k):
             raise OSError("read-only filesystem")
 
-        monkeypatch.setattr("kernelforge.gemm_tune.evidence.write_demand", _boom)
+        monkeypatch.setattr("kernelforge.workflows.gemm_tune.evidence.write_demand", _boom)
         assert cli._demand_from_serving_log(src, tmp_path) == ""
 
     def test_a_bad_parse_bound_is_not_read_as_a_log_without_demand(self, tmp_path, monkeypatch):
         """An empty return here is indistinguishable from a clean log, and it silently keeps the configured shapes."""
-        from kernelforge.gemm_tune import evidence as ev
+        from kernelforge.workflows.gemm_tune import evidence as ev
 
         src = _log(tmp_path, [_MISS.format(m=512)])
         out = tmp_path / "out"
@@ -129,7 +129,7 @@ class TestDerivingDemand:
 
     def test_the_derived_file_is_what_load_demand_expects(self, tmp_path):
         # It is handed on as if an operator had passed --demand, so it has to round-trip through the same reader.
-        from kernelforge.gemm_tune.evidence import demand_for_tuner, demand_shapes, load_demand
+        from kernelforge.workflows.gemm_tune.evidence import demand_for_tuner, demand_shapes, load_demand
 
         src = _log(tmp_path, [_MISS.format(m=512), _MISS.format(m=1024)])
         out = tmp_path / "out"

@@ -13,7 +13,7 @@ import pytest
 from kernelforge.agent_backends.base import AgentCapabilities, AgentRunResult
 from kernelforge.agent_backends.workspace_guard import WorkspaceGuard, WorkspaceSafetyError
 from kernelforge.config import Config
-from kernelforge.orchestrator import agent
+from kernelforge.workflows.forge_loop.roles import agent
 
 
 @pytest.mark.parametrize(

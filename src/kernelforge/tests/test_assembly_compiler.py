@@ -11,9 +11,9 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.assembly import AssemblyError, assemble
-from kernelforge.assembly import __main__ as cli
-from kernelforge.assembly import compiler
+from kernelforge.kernel_backends.assembly import AssemblyError, assemble
+from kernelforge.kernel_backends.assembly import __main__ as cli
+from kernelforge.kernel_backends.assembly import compiler
 
 _SOURCE = """\t.amdgcn_target "amdgcn-amd-amdhsa--gfx950"
 \t.text
@@ -398,7 +398,7 @@ def test_cli_returns_nonzero_and_no_result_for_failed_candidate(build_paths, fak
 
 def test_module_entry_point_is_available_without_rocm():
     result = subprocess.run(
-        [sys.executable, "-m", "kernelforge.assembly", "assemble", "--help"],
+        [sys.executable, "-m", "kernelforge.kernel_backends.assembly", "assemble", "--help"],
         capture_output=True,
         text=True,
         check=False,

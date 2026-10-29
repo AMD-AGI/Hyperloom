@@ -30,6 +30,7 @@ from hyperloom.orchestrator.kernel import conc_sweep
 from hyperloom.orchestrator.rehearsal import LaunchAttempt, LaunchScenario, ScriptedLaunchBackend, VirtualClock
 from hyperloom.orchestrator.rehearsal.clock import installed_clock
 from hyperloom.orchestrator.state import shared_state
+from hyperloom.orchestrator.state._shared_state import budget as shared_state_budget
 
 
 @pytest.fixture
@@ -41,7 +42,7 @@ def sweep_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launch_backend):
         def now(cls, tz=None):
             return datetime.fromtimestamp(clock.wall(), tz=tz)
 
-    monkeypatch.setattr(shared_state, "datetime", ClockDatetime)
+    monkeypatch.setattr(shared_state_budget, "datetime", ClockDatetime)
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(tmp_path / "leaks"))

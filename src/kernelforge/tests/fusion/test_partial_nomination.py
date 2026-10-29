@@ -15,9 +15,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from kernelforge.fusion.pipeline import _publish_partial_nomination
-from kernelforge.fusion.loop import RecipePatch
-from kernelforge.fusion.report import write_manifest
+from kernelforge.workflows.forge_fusion.pipeline import _publish_partial_nomination
+from kernelforge.workflows.forge_fusion.loop import RecipePatch
+from kernelforge.workflows.forge_fusion.report import write_manifest
 
 
 def _patch(out: Path, name: str, *, speedup: float | None, env_flag: str, source_file: str) -> RecipePatch:

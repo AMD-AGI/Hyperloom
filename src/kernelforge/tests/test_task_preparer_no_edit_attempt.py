@@ -7,9 +7,9 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from kernelforge.loop import task_preparer
-from kernelforge.loop import task_preparer_prompts
-from kernelforge.loop import task_preflight
+from kernelforge.workflows.forge_loop.preparation import task_preparer
+from kernelforge.workflows.forge_loop.preparation import task_preparer_prompts
+from kernelforge.workflows.forge_loop.preparation import task_preflight
 
 
 def _workspace(tmp_path):

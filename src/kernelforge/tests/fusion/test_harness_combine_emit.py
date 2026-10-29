@@ -8,10 +8,10 @@ from __future__ import annotations
 import re
 import subprocess
 
-from kernelforge.fusion.author import AuthorBrief, build_author_prompt, build_multi_author_prompt
-from kernelforge.fusion.pipeline import _combined_recipe, _safe_artifact_id
-from kernelforge.fusion.emit import FusionFiles, export_artifacts, restore_exported_changes
-from kernelforge.fusion.models import Recipe
+from kernelforge.workflows.forge_fusion.author import AuthorBrief, build_author_prompt, build_multi_author_prompt
+from kernelforge.workflows.forge_fusion.pipeline import _combined_recipe, _safe_artifact_id
+from kernelforge.workflows.forge_fusion.emit import FusionFiles, export_artifacts, restore_exported_changes
+from kernelforge.workflows.forge_fusion.models import Recipe
 
 
 def _recipe(pattern_id="residual_add_rmsnorm", env_flag="LFM2_FUSED_RESIDUAL", **over) -> Recipe:
@@ -122,7 +122,7 @@ class TestArtifactId:
                 _recipe(pattern_id="llm:add_rmsnorm_input", env_flag="Q_FUSED_ADD"),
             ]
         )
-        from kernelforge.fusion import campaign as campaign_module
+        from kernelforge.workflows.forge_fusion import campaign as campaign_module
 
         monkeypatch.setattr(
             campaign_module.subprocess,

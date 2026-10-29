@@ -7,7 +7,7 @@ import json
 import pytest
 
 from kernelforge.agent_backends import AgentRunResult
-from kernelforge.orchestrator.contracts import (
+from kernelforge.workflows.forge_loop.roles.contracts import (
     CaseEvidence,
     DispatchPlan,
     LaneDrop,
@@ -16,7 +16,7 @@ from kernelforge.orchestrator.contracts import (
     SpecialistRound,
     SynthesizedPlan,
 )
-from kernelforge.orchestrator.plan_critic import (
+from kernelforge.workflows.forge_loop.roles.plan_critic import (
     PlanCriticAgent,
     build_plan_critic_prompts,
     parse_plan_critic_verdict,
@@ -179,7 +179,7 @@ async def test_critic_infers_revision_and_records_missing_verdict(
 
     with caplog.at_level(
         "WARNING",
-        logger="kernelforge.orchestrator.plan_critic",
+        logger="kernelforge.workflows.forge_loop.roles.plan_critic",
     ):
         outcome = await critic.review(
             context=_context(tmp_path),
@@ -229,7 +229,7 @@ async def test_critic_failure_records_no_verdict_and_still_publishes(
 
     with caplog.at_level(
         "WARNING",
-        logger="kernelforge.orchestrator.plan_critic",
+        logger="kernelforge.workflows.forge_loop.roles.plan_critic",
     ):
         outcome = await critic.review(
             context=_context(tmp_path),
@@ -637,7 +637,7 @@ async def test_a_recovered_width_ruling_is_not_logged_as_a_failure(
 
     with caplog.at_level(
         "INFO",
-        logger="kernelforge.orchestrator.plan_critic",
+        logger="kernelforge.workflows.forge_loop.roles.plan_critic",
     ):
         outcome = await critic.review(
             context=_context(tmp_path),
@@ -668,7 +668,7 @@ async def test_a_width_ruling_nothing_recovered_is_still_a_warning(
 
     with caplog.at_level(
         "WARNING",
-        logger="kernelforge.orchestrator.plan_critic",
+        logger="kernelforge.workflows.forge_loop.roles.plan_critic",
     ):
         outcome = await critic.review(
             context=_context(tmp_path),
@@ -703,7 +703,7 @@ async def test_an_entry_the_block_wasted_is_warned_about_as_that(
 
     with caplog.at_level(
         "WARNING",
-        logger="kernelforge.orchestrator.plan_critic",
+        logger="kernelforge.workflows.forge_loop.roles.plan_critic",
     ):
         outcome = await critic.review(
             context=_context(tmp_path),

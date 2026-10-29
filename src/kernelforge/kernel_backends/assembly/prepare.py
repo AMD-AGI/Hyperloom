@@ -1,0 +1,461 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""Programmatic compiler-output preparation inside a normal Forge campaign."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import os
+import re
+import subprocess
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+import yaml
+
+from kernelforge.kernel_backends.assembly.capture import bind_compile
+from kernelforge.kernel_backends.assembly.compiler import _validate_source
+from kernelforge.utils.durable_io import atomic_write_text
+from kernelforge.evaluation.benchmark.runner import BenchRun, bench_wallclock, calculate_mean_case_speedup
+from kernelforge.evaluation.correctness.canonical import accept_candidate
+from kernelforge.evaluation.correctness.numerical import validate_contract, validate_source_independence
+from kernelforge.evaluation.correctness.pipeline import run_validation_pipeline
+
+if TYPE_CHECKING:
+    from kernelforge.config import Config
+    from kernelforge.workflows.forge_loop.iteration.iteration_types import IterationConfig
+    from kernelforge.evaluation.correctness.canonical import CanonicalCorrectnessResult
+    from kernelforge.evaluation.correctness.pipeline import ValidationReport
+
+
+class AssemblyPreparationError(ValueError):
+    """No verified assembly implementation is available for optimization."""
+
+
+@dataclass(frozen=True)
+class AssemblyTask:
+    """The kernel an assembly campaign prepares, its editable sources, and the driver and threshold that judge it."""
+
+    kernel: str
+    driver: str
+    sources: list[str]
+    threshold: float
+
+
+@dataclass(frozen=True)
+class _Binding:
+    """The workspace, the launcher, the one editable assembly source and the GPU target a campaign binds."""
+
+    workspace: Path
+    kernel: Path
+    assembly: Path
+    target: str
+
+
+@dataclass(frozen=True)
+class _Checkpoint:
+    """The workspace before preparation, put back when a run does not reach a record."""
+
+    binding: _Binding
+    start_commit: str
+    paths: list[str]
+    original: bytes
+    original_assembly: bytes | None
+    manifest: Path
+
+    def restore(self) -> None:
+        """Put back everything preparation touched."""
+        workspace, kernel_path, assembly = self.binding.workspace, self.binding.kernel, self.binding.assembly
+        _git(workspace, "reset", "--soft", self.start_commit)
+        _git(workspace, "reset", self.start_commit, "--", *self.paths)
+        kernel_path.write_bytes(self.original)
+        if self.original_assembly is None:
+            assembly.unlink(missing_ok=True)
+            self.manifest.unlink(missing_ok=True)
+        elif kernel_path != assembly:
+            assembly.write_bytes(self.original_assembly)
+
+
+# The exact key set of ``assembly_preparation/result.json``; resume refuses any other shape.
+_READY_RECORD_FIELDS = frozenset(
+    {
+        "status",
+        "origin",
+        "kernel",
+        "assembly",
+        "gpu_target",
+        "source_base_commit",
+        "preparation_commit",
+        "source_sha256",
+        "launcher_sha256",
+        "initial_assembly_sha256",
+        "binding_manifest",
+        "binding_manifest_sha256",
+        "source_benchmark",
+        "initial_assembly_benchmark",
+        "roundtrip_mean_case_speedup",
+        "correctness",
+        "canonical_correctness",
+        "canonical_unverified_reason",
+        "acceptance_config_sha256",
+        "source_numerical_evidence",
+        "roundtrip_numerical_evidence",
+        "numerical_execution_probe_evidence",
+        "build_failure_probe_passed",
+        "execution_probe_passed",
+    }
+)
+
+
+def _git(workspace: Path, *args: str) -> str:
+    result = subprocess.run(["git", "-C", str(workspace), *args], capture_output=True, text=True, check=True)
+    return result.stdout.strip()
+
+
+def _digest(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _inside(workspace: Path, path: str | Path) -> Path:
+    raw = Path(path)
+    if not raw.is_absolute():
+        raw = workspace / raw
+    resolved = raw.resolve()
+    if raw.is_symlink() or not resolved.is_relative_to(workspace):
+        raise AssemblyPreparationError(f"assembly inputs must be regular files inside the workspace: {raw}")
+    return resolved
+
+
+def assembly_edit_paths(workspace: str | Path, kernel: str, sources: list[str]) -> list[Path]:
+    """Select the explicit assembly surface, never all assembly files in a repository."""
+    root = Path(workspace).resolve()
+    paths = [_inside(root, path) for path in [kernel, *sources] if Path(path).suffix.lower() in {".s", ".asm"}]
+    paths = list(dict.fromkeys(paths))
+    if not paths:
+        paths = [_inside(root, _inside(root, kernel).with_suffix(".s"))]
+    if len(paths) != 1:
+        raise AssemblyPreparationError("assembly campaigns currently require exactly one assembly source")
+    return paths
+
+
+def frozen_paths(workspace: str | Path, editable: list[str | Path]) -> list[str]:
+    """Freeze every tracked file except the campaign's explicitly selected implementation."""
+    root = Path(workspace).resolve()
+    allowed = {_inside(root, path) for path in editable}
+    tracked = _git(root, "ls-files", "-z").split("\0")
+    return [str(root / path) for path in tracked if path and (root / path).resolve() not in allowed]
+
+
+def _timeout(deadline: float, cap: int = 1800) -> int:
+    remaining = deadline - time.time()
+    if remaining < 1:
+        raise AssemblyPreparationError("assembly preparation reached the campaign deadline")
+    return max(1, min(cap, int(remaining)))
+
+
+def _assembly_score(source: dict, initial: dict) -> float:
+    for measurement in (source, initial):
+        for latency in [measurement.get("median_ms"), *measurement.get("case_times", {}).values()]:
+            if not isinstance(latency, (int, float)) or not math.isfinite(latency) or latency <= 0:
+                raise AssemblyPreparationError("assembly preparation needs positive finite benchmark timings")
+    score = calculate_mean_case_speedup(
+        initial["case_times"], source["case_times"], set(source.get("unscored_cases", []))
+    )
+    if score is None:
+        raise AssemblyPreparationError("assembly preparation has no scored cases")
+    return score
+
+
+def seed_source_baseline(iteration_config: IterationConfig, record: dict) -> None:
+    """Keep the source as the incumbent; preparation is never a performance KEEP."""
+    source = record["source_benchmark"]
+    iteration_config.baseline_wall_ms = source["median_ms"]
+    iteration_config.pristine_baseline_wall_ms = source["median_ms"]
+    iteration_config.baseline_case_times = dict(source["case_times"])
+    iteration_config.preloop_baseline_unscored_cases = list(source.get("unscored_cases", []))
+
+
+def select_result(result: dict, record: dict) -> None:
+    """Select the original implementation when the search has no accepted source win."""
+    result["assembly_preparation"] = record
+    if result["improved"]:
+        result["selected_implementation"] = "assembly"
+        return
+    result["selected_implementation"] = "original"
+    result["assembly_search_result"] = {
+        key: result.get(key) for key in ("best_ms", "best_commit", "mean_case_speedup", "best_manifest")
+    }
+    result.update(
+        best_ms=record["source_benchmark"]["median_ms"],
+        best_commit=record["source_base_commit"],
+        best_iteration=0,
+        mean_case_speedup=1.0,
+        total_speedup=1.0,
+        best_manifest="",
+    )
+
+
+async def _validate(driver: str, threshold: float, deadline: float) -> ValidationReport:
+    return await run_validation_pipeline(driver, snr_threshold=threshold, timeout_per_stage=_timeout(deadline))
+
+
+def _no_op_source(text: str) -> str:
+    symbols = re.findall(r"^\s*\.amdhsa_kernel\s+(\S+)\s*$", text, re.MULTILINE)
+    for symbol in symbols:
+        text, count = re.subn(
+            rf"^([ \t]*{re.escape(symbol)}:)[ \t]*(?:(?://|;)[^\n]*)?$",
+            r"\1\n    s_endpgm // FORGE_ASSEMBLY_EXECUTION_PROBE",
+            text,
+            flags=re.MULTILINE,
+        )
+        if count != 1:
+            raise AssemblyPreparationError("cannot locate an assembly entry for the execution-path negative control")
+    if not symbols:
+        raise AssemblyPreparationError("assembly execution probe requires AMDHSA kernel entries")
+    # gfx950 kernarg preloading can skip the function prologue and start at an
+    # aligned LLVM basic block. Stop those entries too, without changing the ABI.
+    return re.sub(
+        r"^([ \t]*\.LBB[\w.$]*:)[ \t]*(?:(?://|;)[^\n]*)?$",
+        r"\1\n    s_endpgm // FORGE_ASSEMBLY_EXECUTION_PROBE",
+        text,
+        flags=re.MULTILINE,
+    )
+
+
+async def verify_assembly(
+    assembly: Path, driver: str, target: str, threshold: float, deadline: float
+) -> ValidationReport:
+    """Require correctness and prove that a fresh driver consumes the editable source."""
+    source = assembly.read_bytes()
+    _validate_source(source.decode("utf-8"), target)
+    correct = await _validate(driver, threshold, deadline)
+    if not correct.results or not correct.all_passed:
+        raise AssemblyPreparationError(correct.failed_output or "assembly correctness failed")
+    marker = "FORGE_ASSEMBLY_BUILD_PROBE"
+    try:
+        assembly.write_bytes(source + f'\n.error "{marker}"\n'.encode())
+        probe = await _validate(driver, threshold, deadline)
+    finally:
+        assembly.write_bytes(source)
+    if probe.all_passed or marker not in probe.failed_output:
+        raise AssemblyPreparationError(
+            "driver did not propagate the deliberate assembly build failure; reject cached binaries or source fallback"
+        )
+    try:
+        assembly.write_text(_no_op_source(source.decode("utf-8")), encoding="utf-8")
+        execution_probe = await _validate(driver, threshold, deadline)
+    finally:
+        assembly.write_bytes(source)
+    if execution_probe.all_passed or not execution_probe.results:
+        raise AssemblyPreparationError(
+            "driver accepted no-op assembly; it must test the returned candidate on fresh outputs"
+        )
+    if execution_probe.failed_outcome != "correctness_failure":
+        raise AssemblyPreparationError(
+            "no-op assembly requires a measured correctness failure (SNR or allclose); "
+            f"{execution_probe.failed_outcome or 'unclassified failure'} does not prove execution: "
+            + execution_probe.failed_output
+        )
+    restored = await _validate(driver, threshold, deadline)
+    if not restored.results or not restored.all_passed:
+        raise AssemblyPreparationError(restored.failed_output or "restored assembly failed correctness")
+    return restored
+
+
+async def _verify_numerical_source(workspace: Path, assembly: Path, baseline: dict, deadline: float) -> dict:
+    source = assembly.read_bytes()
+    try:
+        assembly.write_text(_no_op_source(source.decode("utf-8")), encoding="utf-8")
+        result = await accept_candidate(
+            str(workspace),
+            timeout_cap_sec=_timeout(deadline),
+            candidate_label="assembly numerical execution probe",
+            kernel_backend="assembly",
+        )
+    finally:
+        assembly.write_bytes(source)
+    if result.outcome != "numerical_correctness_failure" or not result.numerical_evidence:
+        raise AssemblyPreparationError(
+            "numerical execution probe requires complete measured candidate failure: " + result.detail
+        )
+    contract = validate_contract(yaml.safe_load((workspace / "config.yaml").read_text())["numerical_validation"])
+    try:
+        validate_source_independence(result.numerical_evidence, baseline, contract)
+    except ValueError as error:
+        raise AssemblyPreparationError(str(error)) from error
+    return result.numerical_evidence
+
+
+def _load_ready(path: Path, binding: _Binding, base_commit: str) -> dict:
+    workspace, kernel, assembly = binding.workspace, binding.kernel, binding.assembly
+    record: dict = json.loads(path.read_text(encoding="utf-8"))
+    if (
+        not isinstance(record, dict)
+        or set(record) != _READY_RECORD_FIELDS
+        or record.get("status") != "ready"
+        or record.get("kernel") != kernel.relative_to(workspace).as_posix()
+        or record.get("assembly") != assembly.relative_to(workspace).as_posix()
+        or record.get("source_base_commit") != base_commit
+        or record.get("gpu_target") != binding.target
+    ):
+        raise AssemblyPreparationError(
+            "assembly preparation record does not match this campaign; prepare a fresh campaign"
+        )
+    if kernel != assembly and record.get("launcher_sha256") != _digest(kernel):
+        raise AssemblyPreparationError("the verified Python launcher changed after preparation")
+    if not record.get("acceptance_config_sha256") or record["acceptance_config_sha256"] != _digest(
+        workspace / "config.yaml"
+    ):
+        raise AssemblyPreparationError(
+            "assembly resume requires the unchanged numerical acceptance contract; start a fresh campaign"
+        )
+    if record.get("source_sha256") != _digest(path.parent / ("source" + kernel.suffix)):
+        raise AssemblyPreparationError("the original source reference changed after preparation")
+    manifest = record.get("binding_manifest")
+    if manifest and record.get("binding_manifest_sha256") != _digest(_inside(workspace, manifest)):
+        raise AssemblyPreparationError("the compiler binding manifest changed after preparation")
+    _git(workspace, "merge-base", "--is-ancestor", record["preparation_commit"], "HEAD")
+    changed = _git(workspace, "diff", "--name-only", "-z", record["preparation_commit"], "--", ".").split("\0")
+    frozen_changes = [name for name in changed if name and name != assembly.relative_to(workspace).as_posix()]
+    if frozen_changes:
+        raise AssemblyPreparationError("frozen assembly inputs changed after preparation: " + ", ".join(frozen_changes))
+    return record
+
+
+async def _require_acceptance(workspace: Path, label: str, deadline: float) -> CanonicalCorrectnessResult:
+    """Canonical acceptance of the workspace as an assembly candidate; anything but a pass refuses preparation."""
+    acceptance = await accept_candidate(
+        str(workspace), timeout_cap_sec=_timeout(deadline), candidate_label=label, kernel_backend="assembly"
+    )
+    if not acceptance.passed:
+        raise AssemblyPreparationError(acceptance.detail)
+    return acceptance
+
+
+async def _measure_source_baseline(workspace: Path, task: AssemblyTask, deadline: float) -> tuple[dict, object]:
+    """Correctness and timing for the original source, which the assembly roundtrip is judged against."""
+    source_report = await _validate(task.driver, task.threshold, deadline)
+    if not source_report.results or not source_report.all_passed:
+        raise AssemblyPreparationError(source_report.failed_output or "original source correctness failed")
+    acceptance = await _require_acceptance(workspace, "assembly source baseline", deadline)
+    source_bench = await bench_wallclock(BenchRun(task.driver), timeout_sec=_timeout(deadline, 600))
+    if not source_bench.get("success") or not source_bench.get("case_times"):
+        raise AssemblyPreparationError("original source benchmark failed")
+    _assembly_score(source_bench, source_bench)
+    return source_bench, acceptance.numerical_evidence
+
+
+async def _verify_roundtrip(
+    binding: _Binding, task: AssemblyTask, deadline: float, source_bench: dict, source_evidence: dict
+) -> dict:
+    """Verify the bound assembly against the original source; the evidence half of the ready record."""
+    report = await verify_assembly(binding.assembly, task.driver, binding.target, task.threshold, deadline)
+    numerical_probe = await _verify_numerical_source(binding.workspace, binding.assembly, source_evidence, deadline)
+    acceptance = await _require_acceptance(binding.workspace, "assembly compiler roundtrip", deadline)
+    initial_bench = await bench_wallclock(BenchRun(task.driver), timeout_sec=_timeout(deadline, 600))
+    if not initial_bench.get("success") or set(initial_bench.get("case_times", {})) != set(source_bench["case_times"]):
+        raise AssemblyPreparationError("assembly benchmark must cover the original source's complete case set")
+    return {
+        "source_benchmark": source_bench,
+        "initial_assembly_benchmark": initial_bench,
+        "roundtrip_mean_case_speedup": _assembly_score(source_bench, initial_bench),
+        "correctness": report.summary(),
+        "canonical_correctness": acceptance.detail,
+        "canonical_unverified_reason": acceptance.unverified_reason,
+        "acceptance_config_sha256": _digest(binding.workspace / "config.yaml"),
+        "source_numerical_evidence": source_evidence,
+        "roundtrip_numerical_evidence": acceptance.numerical_evidence,
+        "numerical_execution_probe_evidence": numerical_probe,
+        "build_failure_probe_passed": True,
+        "execution_probe_passed": True,
+    }
+
+
+async def prepare_assembly(
+    config: Config,
+    task: AssemblyTask,
+    *,
+    base_commit: str,
+    deadline: float,
+    resume: bool = False,
+) -> dict:
+    """Export and bind compiler output, or verify an explicitly bound assembly input."""
+    workspace = Path(config.workspace).resolve()
+    kernel_path = _inside(workspace, task.kernel)
+    assembly = assembly_edit_paths(workspace, task.kernel, task.sources)[0]
+    binding = _Binding(workspace, kernel_path, assembly, config.gpu_target)
+    root = workspace / "forge_experiments" / "assembly_preparation"
+    record_path = root / "result.json"
+    if record_path.is_file():
+        return _load_ready(record_path, binding, base_commit)
+    if resume:
+        raise AssemblyPreparationError("assembly resume requires a verified preparation record; start a fresh campaign")
+    if _git(workspace, "status", "--porcelain"):
+        raise AssemblyPreparationError("commit workspace changes before assembly preparation")
+    start_commit = _git(workspace, "rev-parse", "HEAD")
+    original = kernel_path.read_bytes()
+    capture = not assembly.exists()
+    manifest = _inside(workspace, assembly.with_suffix(assembly.suffix + ".json"))
+    relative_assembly = Path(os.path.relpath(assembly, kernel_path.parent)).as_posix()
+    if capture:
+        if kernel_path.suffix != ".py":
+            raise AssemblyPreparationError("automatic capture requires a Python compile/launch boundary")
+        if manifest.exists():
+            raise AssemblyPreparationError("assembly manifest already exists; start from the original source")
+        export_source = bind_compile(original.decode(), relative_assembly, config.gpu_target, export=True)
+        candidate_source = bind_compile(original.decode(), relative_assembly, config.gpu_target, export=False)
+        original_assembly = None
+        bound = [kernel_path, assembly, manifest]
+    else:
+        original_assembly = assembly.read_bytes()
+        bound = [kernel_path, assembly]
+    root.mkdir(parents=True, exist_ok=True)
+    (root / ("source" + kernel_path.suffix)).write_bytes(original)
+    committed = False
+    paths = list(dict.fromkeys(path.relative_to(workspace).as_posix() for path in bound))
+    checkpoint = _Checkpoint(binding, start_commit, paths, original, original_assembly, manifest)
+    try:
+        source_bench, source_numerical_evidence = await _measure_source_baseline(workspace, task, deadline)
+        if capture:
+            kernel_path.write_text(export_source, encoding="utf-8")
+            export_report = await _validate(task.driver, task.threshold, deadline)
+            if not export_report.results or not export_report.all_passed or not manifest.is_file():
+                raise AssemblyPreparationError(export_report.failed_output or "compiler output was not captured")
+            provenance = json.loads(manifest.read_text(encoding="utf-8"))
+            if provenance["compiler_assembly_sha256"] != _digest(assembly):
+                raise AssemblyPreparationError("initial assembly differs from compiler output")
+            kernel_path.write_text(candidate_source, encoding="utf-8")
+        evidence = await _verify_roundtrip(binding, task, deadline, source_bench, source_numerical_evidence)
+        _git(workspace, "add", "--", *paths)
+        if _git(workspace, "diff", "--cached", "--name-only"):
+            _git(workspace, "commit", "-m", "forge: bind compiler assembly to original launcher")
+        record = {
+            "status": "ready",
+            "origin": provenance["frontend"] + "_compiler" if capture else "existing_assembly",
+            "kernel": paths[0],
+            "assembly": assembly.relative_to(workspace).as_posix(),
+            "gpu_target": config.gpu_target,
+            "source_base_commit": base_commit,
+            "preparation_commit": _git(workspace, "rev-parse", "HEAD"),
+            "source_sha256": hashlib.sha256(original).hexdigest(),
+            "launcher_sha256": _digest(kernel_path),
+            "initial_assembly_sha256": _digest(assembly),
+            "binding_manifest": manifest.relative_to(workspace).as_posix() if capture else "",
+            "binding_manifest_sha256": _digest(manifest) if capture else "",
+            **evidence,
+        }
+        atomic_write_text(record_path, json.dumps(record, indent=2) + "\n")
+        committed = True
+        score = evidence["roundtrip_mean_case_speedup"]
+        print(
+            f"  [assembly prepare] verified assembly roundtrip: {score:.6f}x; original remains the baseline", flush=True
+        )
+        return record
+    finally:
+        if not committed:
+            checkpoint.restore()

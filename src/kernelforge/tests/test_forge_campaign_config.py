@@ -11,7 +11,7 @@ import pytest
 
 from kernelforge.knowledge.kb_store.identity.kernel_recipe import kernel_recipe_canonical_id
 from kernelforge.knowledge.kb_store.identity.run import LoopKernel, resolve_loop_identity
-from kernelforge.loop.campaign_config import (
+from kernelforge.workflows.forge_loop.campaign.campaign_config import (
     CampaignConfig,
     CampaignConfigStore,
     CampaignInputs,
@@ -22,8 +22,8 @@ from kernelforge.loop.campaign_config import (
     resolve_kernel_backend_override,
     validate_pending_campaign_head,
 )
-from kernelforge.loop.agent_relay import AgentProfileSpec, AgentRelayPolicy
-from kernelforge.tools.git import GitError
+from kernelforge.workflows.forge_loop.search.agent_relay import AgentProfileSpec, AgentRelayPolicy
+from kernelforge.utils.git import GitError
 
 
 def _git_workspace(tmp_path, name="workspace"):

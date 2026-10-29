@@ -13,6 +13,7 @@ import re
 import shlex
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Mapping
 
 from common.env import is_truthy
 from hyperloom.common.env_safety import operator_extra_env
@@ -22,6 +23,7 @@ from ._grid_base import (
     GridVariant,
 )
 from hyperloom.inference_optimizer.grid_server_args import compose_server_args
+from hyperloom.inference_optimizer.speculative_capability import CAPABILITY_UNSUPPORTED, speculative_capability_reason
 
 log = logging.getLogger(__name__)
 
@@ -333,22 +335,56 @@ def _unsafe_unified_attn_reason(variant: GridVariant, *, base_server_args: str) 
     return None
 
 
+def _speculative_capability_reason(
+    variant: "GridVariant", *, serving: ServingStack, base_server_args: str, base_envs: Mapping[str, Any]
+) -> str | None:
+    """Why the pinned stack has no kernel for the draft this variant composes: read over the composed arguments,
+    since the keys that decide it live inside ``--speculative-config``. ``None`` when the stack has a kernel.
+
+    The launch's environment comes along because a draft inherits the tensor parallel size the engine is launched
+    with, which a recipe may spell only as ``TP``.
+    """
+    return speculative_capability_reason(
+        compose_server_args(
+            base_extra_args=base_server_args,
+            variant_extra_args=variant.extra_server_args,
+            remove_args=variant.remove_args,
+            args_mode=variant.args_mode,
+        ),
+        framework=serving.framework,
+        envs={**base_envs, **(getattr(variant, "extra_envs", None) or {})},
+        model_path=serving.model_path,
+    )
+
+
+def _model_class_flag_reason(args: str, *, model_path: str, is_mla: bool, is_moe: bool) -> str | None:
+    """Why a flag in ``args`` asks for a model class this model is not recognised as, else ``None``."""
+    for flag, required_class in _COMPATIBILITY_FLAG_RULES:
+        if flag not in args:
+            continue
+        # Model-class predicate
+        if (required_class == "mla" and is_mla) or (required_class == "moe" and is_moe):
+            continue
+        return (
+            f"{flag} requires {required_class.upper()} model; "
+            f"MODEL_PATH={model_path!r} not recognised as "
+            f"{required_class.upper()}-class"
+        )
+    return None
+
+
 def apply_compatibility_filter(
     grid: list["GridVariant"],
     *,
     serving: ServingStack,
     base_server_args: str = "",
+    base_envs: Mapping[str, Any] | None = None,
 ) -> tuple[list["GridVariant"], list[dict]]:
     """Skip variants known to be incompatible with current model/framework."""
-    if serving.model_path:
-        is_mla, is_moe = _detect_model_class(serving.model_path)
-    else:
-        # Cannot detect -> assume compatible.
-        is_mla, is_moe = True, True
+    # Cannot detect -> assume compatible.
+    is_mla, is_moe = _detect_model_class(serving.model_path) if serving.model_path else (True, True)
 
-    fw = serving.framework.strip().lower()
-
-    is_xdit = fw == "xdit"
+    is_xdit = serving.framework.strip().lower() == "xdit"
     unsafe_unified_attn_stack = _matches_unsafe_unified_attn_stack(serving)
 
     kept: list[GridVariant] = []
@@ -367,6 +403,13 @@ def apply_compatibility_filter(
                 }
             )
             continue
+        # A draft the pinned stack ships no kernel for: not applicable to this stack, not a measurement to spend.
+        skip_reason = _speculative_capability_reason(
+            v, serving=serving, base_server_args=base_server_args, base_envs=base_envs or {}
+        )
+        if skip_reason:
+            dropped.append({"name": v.name, "source": CAPABILITY_UNSUPPORTED, "reason": skip_reason})
+            continue
         # xDiT do-not-set blacklist (env-keyed; precision lock + known crashes).
         if is_xdit:
             skip_reason = xdit_blacklist_reason(getattr(v, "extra_envs", None))
@@ -379,18 +422,7 @@ def apply_compatibility_filter(
                 }
             )
             continue
-        for flag, required_class in _COMPATIBILITY_FLAG_RULES:
-            if flag not in args:
-                continue
-            # Model-class predicate
-            class_ok = (required_class == "mla" and is_mla) or (required_class == "moe" and is_moe)
-            if not class_ok:
-                skip_reason = (
-                    f"{flag} requires {required_class.upper()} model; "
-                    f"MODEL_PATH={serving.model_path!r} not recognised as "
-                    f"{required_class.upper()}-class"
-                )
-                break
+        skip_reason = _model_class_flag_reason(args, model_path=serving.model_path, is_mla=is_mla, is_moe=is_moe)
         if skip_reason:
             dropped.append(
                 {

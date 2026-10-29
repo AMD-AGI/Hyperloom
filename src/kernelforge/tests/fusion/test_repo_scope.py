@@ -16,20 +16,20 @@ import os
 import subprocess
 from pathlib import Path
 
-from kernelforge.fusion.locate import FrameworkInstall
-from kernelforge.fusion.discover import DiscoveryTarget
-from kernelforge.fusion.anchor import AnchorReport, Slot, build_anchored_discovery_prompt
-from kernelforge.fusion.campaign import (
+from kernelforge.workflows.forge_fusion.locate import FrameworkInstall
+from kernelforge.workflows.forge_fusion.discover import DiscoveryTarget
+from kernelforge.workflows.forge_fusion.anchor import AnchorReport, Slot, build_anchored_discovery_prompt
+from kernelforge.workflows.forge_fusion.campaign import (
     CampaignBrief,
     CampaignPaths,
     build_campaign_program_md,
     build_forge_loop_command,
 )
-from kernelforge.fusion.discover import parse_discovered_recipes, resolve_repo_file
-from kernelforge.fusion.emit import FusionFiles, export_artifacts
-from kernelforge.fusion.models import Recipe
-from kernelforge.fusion.shadow_repo import ensure_git_workspace
-from kernelforge.fusion.validate import fused_symbol_invocation_evidence
+from kernelforge.workflows.forge_fusion.discover import parse_discovered_recipes, resolve_repo_file
+from kernelforge.workflows.forge_fusion.emit import FusionFiles, export_artifacts
+from kernelforge.workflows.forge_fusion.models import Recipe
+from kernelforge.workflows.forge_fusion.shadow_repo import ensure_git_workspace
+from kernelforge.workflows.forge_fusion.validate import fused_symbol_invocation_evidence
 
 
 def _repo(tmp_path: Path) -> tuple[Path, Path, Path]:

@@ -15,13 +15,13 @@ import pytest
 from kernelforge.tests._experiment_records import persisted_experiments
 from kernelforge.tests.conftest import SRC_ROOT, silence_jit_rebuild
 
-import kernelforge.loop.runner as runner_module
-from kernelforge.loop.archive import CandidateArchive
-from kernelforge.loop.experience import ExperienceLedger
-from kernelforge.loop.run_state import LoopStateStore
-from kernelforge.loop.runner import IterationConfig, IterationLoop, IterationResult
-from kernelforge.tracker import ExperimentTracker
-from kernelforge.loop.iteration import campaign_runtime
+import kernelforge.workflows.forge_loop.iteration.runner as runner_module
+from kernelforge.workflows.forge_loop.campaign.archive import CandidateArchive
+from kernelforge.workflows.forge_loop.memory.experience import ExperienceLedger
+from kernelforge.workflows.forge_loop.campaign.run_state import LoopStateStore
+from kernelforge.workflows.forge_loop.iteration.runner import IterationConfig, IterationLoop, IterationResult
+from kernelforge.workflows.forge_loop.campaign.experiment import ExperimentTracker
+from kernelforge.workflows.forge_loop.iteration import campaign_runtime
 
 
 # The stand-in for "budget is not what this test is about"; it has to clear the
@@ -686,8 +686,8 @@ import asyncio
 import sys
 from pathlib import Path
 
-from kernelforge.loop.runner import IterationConfig, IterationLoop, LoopAgents
-from kernelforge.tracker import ExperimentTracker
+from kernelforge.workflows.forge_loop.iteration.runner import IterationConfig, IterationLoop, LoopAgents
+from kernelforge.workflows.forge_loop.campaign.experiment import ExperimentTracker
 
 
 class FakeUsage:

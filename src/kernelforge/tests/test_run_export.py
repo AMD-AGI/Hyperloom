@@ -23,13 +23,23 @@ from click.testing import CliRunner
 from hyperloom_kb.collect import collect
 from hyperloom_kb.schema import TEXT_MAX_BYTES
 from kernelforge.cli import main
-from kernelforge.loop.experiments_layout import CANDIDATE_META, ROUND_CONTEXT, ExperimentsLayout, lane_plan_name
-from kernelforge.loop.fanout import LANE_ROOT_PREFIX, lane_rationale
-from kernelforge.loop.loop_log import LOOP_BANNER, experiment_line, iteration_header, kb_write_line
-from kernelforge.loop.run_state import ITERATION_RESULT, ITERATION_STARTED
-from kernelforge.orchestrator.critic_fallback import render_critic_fallback
-from kernelforge.orchestrator.gate_tag import gate_outcome_tag
-from kernelforge.run_export.document import normalize
+from kernelforge.workflows.forge_loop.campaign.experiments_layout import (
+    CANDIDATE_META,
+    ROUND_CONTEXT,
+    ExperimentsLayout,
+    lane_plan_name,
+)
+from kernelforge.workflows.forge_loop.iteration.fanout import LANE_ROOT_PREFIX, lane_rationale
+from kernelforge.workflows.forge_loop.campaign.loop_log import (
+    LOOP_BANNER,
+    experiment_line,
+    iteration_header,
+    kb_write_line,
+)
+from kernelforge.workflows.forge_loop.campaign.run_state import ITERATION_RESULT, ITERATION_STARTED
+from kernelforge.workflows.forge_loop.roles.critic_fallback import render_critic_fallback
+from kernelforge.workflows.forge_loop.gate.gate_tag import gate_outcome_tag
+from kernelforge.workflows.forge_loop.export.document import normalize
 
 CAMPAIGN = "5f1c0a9e2b7d4c38a6e0f1b2c3d4e5f6"
 EXPERIMENT = "a1b2c3d4"

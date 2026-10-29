@@ -10,9 +10,9 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.gemm_tune.model_analyzer import ModelProfile
-from kernelforge.gemm_tune.report import TuneReport, build_report, write_report
-from kernelforge.gemm_tune.tuners.base import BaseTuner, TuneContext, TuneResult, micro_metrics
+from kernelforge.workflows.gemm_tune.model_analyzer import ModelProfile
+from kernelforge.workflows.gemm_tune.report import TuneReport, build_report, write_report
+from kernelforge.workflows.gemm_tune.tuners.base import BaseTuner, TuneContext, TuneResult, micro_metrics
 
 
 def _tune_ctx(**fields) -> TuneContext:

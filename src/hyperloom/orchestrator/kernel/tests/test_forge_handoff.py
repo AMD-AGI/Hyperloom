@@ -7,8 +7,8 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 
-from kernelforge.kernel_rewrite_controller.handoff import read_handoff
-from kernelforge.kernel_rewrite_controller.opportunity_agent import (
+from kernelforge.workflows.rewrite_controller.handoff import read_handoff
+from kernelforge.workflows.rewrite_controller.opportunity_agent import (
     _additional_directories,
 )
 
@@ -276,7 +276,7 @@ def test_trace_evidence_tuned_miss_states_without_a_join(tmp_path: Path) -> None
 
 
 def test_opportunity_rules_defer_fallback_paths_and_name_the_bound() -> None:
-    from kernelforge.kernel_rewrite_controller.opportunity_agent import _system_prompt
+    from kernelforge.workflows.rewrite_controller.opportunity_agent import _system_prompt
 
     prompt = _system_prompt()
 

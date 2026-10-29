@@ -7,8 +7,8 @@ import json
 import os
 from pathlib import Path
 
-from kernelforge.kernel_rewrite_controller.paths import ControllerLayout
-from kernelforge.kernel_rewrite_controller.task_publisher import (
+from kernelforge.workflows.rewrite_controller.paths import ControllerLayout
+from kernelforge.workflows.rewrite_controller.task_publisher import (
     pending_rejections,
     publish_complete_staged_tasks,
     publish_staged_task,

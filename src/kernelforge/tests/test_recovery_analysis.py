@@ -8,10 +8,10 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.loop import runner as runner_module
-from kernelforge.loop.run_state import LoopStateStore, RunState, make_event
-from kernelforge.loop.runner import IterationResult
-from kernelforge.orchestrator.analysis import (
+from kernelforge.workflows.forge_loop.iteration import runner as runner_module
+from kernelforge.workflows.forge_loop.campaign.run_state import LoopStateStore, RunState, make_event
+from kernelforge.workflows.forge_loop.iteration.runner import IterationResult
+from kernelforge.workflows.forge_loop.roles.analysis import (
     AnalysisAgentService,
     AnalysisBundleError,
     AnalysisSources,
@@ -19,7 +19,7 @@ from kernelforge.orchestrator.analysis import (
 )
 from kernelforge.tests.test_analysis_agent import _BundleBackend, _context, _service, _workspace
 from kernelforge.tests.test_loop_runner import _make_loop
-from kernelforge.loop.iteration import campaign_runtime
+from kernelforge.workflows.forge_loop.iteration import campaign_runtime
 
 
 def test_resume_recovery_rejects_gap_before_pending_keep(tmp_path, monkeypatch):

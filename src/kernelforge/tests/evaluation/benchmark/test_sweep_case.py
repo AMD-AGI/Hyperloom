@@ -9,7 +9,7 @@ import types
 
 import pytest
 
-from kernelforge.loop import task_preparer_prompts
+from kernelforge.workflows.forge_loop.preparation import task_preparer_prompts
 from kernelforge.evaluation.benchmark.runner import (
     CaseCoverageError,
     EXPLORATORY_KIND,

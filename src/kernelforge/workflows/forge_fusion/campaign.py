@@ -1,0 +1,573 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""Run one forge-loop campaign per fusion recipe."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import os
+import re
+import subprocess
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Sequence
+
+from kernelforge.workflows.forge_fusion.driver_shim import DriverSpec, write_driver
+from kernelforge.workflows.forge_fusion.models import Recipe, ValidationResult
+from kernelforge.workflows.forge_fusion.shadow_repo import SHADOW_BRANCH
+from kernelforge.workflows.forge_fusion.harness_contract import trace_kernels_block
+from kernelforge.workflows.forge_fusion.validate import (
+    DEFAULT_TARGET_SPEEDUP,
+    launch_count,
+    launch_gate_unverified,
+    launch_regression_reason,
+)
+from kernelforge.utils.git import git
+from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.workflows.forge_loop.api import forge_loop_command
+
+log = logging.getLogger("forge_fusion")
+
+# The kernel backend that carries the decode-fusion authoring discipline.
+FUSION_KERNEL_BACKEND = "fusion"
+
+# Knowledge-base producer for records this pipeline authors.
+FUSION_PRODUCER = "fusion"
+
+# Per-recipe wall clock.
+DEFAULT_MAX_HOURS = 2.0
+
+# The loop's campaign config and run state.
+LOOP_CAMPAIGN_STATE = "forge_experiments"
+
+
+def fused_module_path(recipe: Recipe) -> str:
+    """Where the author must write this recipe's fused kernel."""
+    stem = Path(recipe.source_file).stem or "model"
+    tag = re.sub(r"[^A-Za-z0-9]+", "_", recipe.pattern_id).strip("_").lower()[:48]
+    return str(Path(recipe.source_file).parent / f"{stem}_fused_{tag or 'chain'}.py")
+
+
+@dataclass
+class CampaignOutcome:
+    """What one forge-loop campaign produced for a recipe."""
+
+    result: ValidationResult
+    experiment_id: str = ""
+
+
+def _failed_campaign(note: str) -> CampaignOutcome:
+    """A campaign that produced no verdict for the recipe to be judged on."""
+    return CampaignOutcome(
+        result=ValidationResult(
+            correctness_passed=False,
+            max_abs_err=None,
+            rtol=None,
+            kernel_speedup=None,
+            eager_us=None,
+            fused_us=None,
+            kept=False,
+            note=f"CAMPAIGN FAILED: {note}",
+            correctness_measured=False,
+        )
+    )
+
+
+def _read_result_json(result_json: str) -> dict:
+    """Read the campaign result the loop wrote to ``--result-json``."""
+    try:
+        return json.loads(Path(result_json).read_text(encoding="utf-8")) or {}
+    except (OSError, ValueError) as exc:
+        log.error("no usable forge-loop result at %s: %s", result_json, exc)
+        return {}
+
+
+def _read_harness_reports(report_log: str) -> list[dict]:
+    """Every harness report the driver recorded during one campaign, in order."""
+    reports: list[dict] = []
+    try:
+        text = Path(report_log).read_text(encoding="utf-8")
+    except OSError:
+        return reports
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            report = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(report, dict):
+            reports.append(report)
+    return reports
+
+
+def committed_tree_id(workspace: str, commit: str, env: dict[str, str] | None = None) -> str:
+    """Git's name for the tree the loop committed, or ``""`` when it cannot be read."""
+    if not (workspace and commit):
+        return ""
+    shown = git("rev-parse", f"{commit}^{{tree}}", cwd=workspace, check=False, env=env)
+    if shown.returncode != 0:
+        log.warning("cannot read the tree of %s: %s", commit, (shown.stderr or "").strip())
+        return ""
+    return shown.stdout.strip()
+
+
+def _harness_report_for(reports: list[dict], tracked_tree: str) -> dict:
+    """The recorded report that benchmarked exactly this tree."""
+    if not tracked_tree:
+        return {}
+    measured = [
+        r
+        for r in reports
+        if r.get("tracked_tree") == tracked_tree
+        and r.get("compiled")
+        and not r.get("skipped")
+        and isinstance(r.get("fused_us"), (int, float))
+    ]
+    return measured[-1] if measured else {}
+
+
+def _worst_parity(report: dict) -> tuple[float | None, float | None]:
+    """``(max_abs_err, snr_db)`` of the least accurate shape the harness compared."""
+    parity = report.get("parity") or []
+    errs = [p.get("max_abs_err") for p in parity if isinstance(p.get("max_abs_err"), (int, float))]
+    snrs = [p.get("snr_db") for p in parity if isinstance(p.get("snr_db"), (int, float))]
+    return (max(errs) if errs else None, min(snrs) if snrs else None)
+
+
+def _to_validation_result(
+    payload: dict,
+    target_speedup: float,
+    reports: list[dict] | None = None,
+    *,
+    committed_tree: str = "",
+) -> ValidationResult:
+    """Translate the loop's campaign result into the fusion verdict shape."""
+    speedup = payload.get("mean_case_speedup")
+    speedup = float(speedup) if isinstance(speedup, (int, float)) else None
+    committed = bool(str(payload.get("best_commit") or "").strip())
+    report = _harness_report_for(reports or [], committed_tree)
+    measured = bool(report)
+    max_abs_err, snr_db = _worst_parity(report)
+    eager_us = report.get("eager_us")
+    fused_us = report.get("fused_us")
+    # The loop scores on time alone, so a candidate that got faster while issuing
+    # MORE launches can win its campaign. Fusion is bought in launches, and that
+    # verdict is forge-fuse's to make -- the loop keeps the commit either way, and
+    # this decides whether it leaves as a patch.
+    eager_launches = launch_count(report.get("eager_launches"))
+    fused_launches = launch_count(report.get("fused_launches"))
+    regression = launch_regression_reason(eager_launches, fused_launches)
+    verified = committed and measured
+    kept = verified and speedup is not None and speedup >= target_speedup and not regression
+    if not committed:
+        note = "forge-loop produced no validated candidate"
+    elif not measured:
+        log.warning("no harness report benchmarked the committed tree; the recipe stays unverified")
+        note = (
+            f"forge-loop committed {payload.get('best_commit')} but no harness report benchmarked that tree: "
+            "parity and per-arm timings are unavailable"
+        )
+    else:
+        note = (
+            f"forge-loop best iteration {payload.get('best_iteration')}: "
+            f"{payload.get('best_ms')} ms vs {payload.get('baseline_ms')} ms baseline"
+            + (f", worst-shape SNR {snr_db:.2f} dB" if snr_db is not None else "")
+            + (f" — REJECTED: {regression}" if regression else "")
+        )
+    if regression:
+        log.warning("rejecting the loop's keeper: %s", regression)
+    elif committed and measured and launch_gate_unverified(eager_launches, fused_launches):
+        log.warning("harness reported no launch counts; the launch gate is unverified for this candidate")
+    return ValidationResult(
+        correctness_passed=verified,
+        max_abs_err=max_abs_err,
+        # The harness reports SNR and absolute error, never a relative tolerance.
+        rtol=None,
+        kernel_speedup=speedup,
+        eager_us=float(eager_us) if isinstance(eager_us, (int, float)) else None,
+        fused_us=float(fused_us) if isinstance(fused_us, (int, float)) else None,
+        kept=kept,
+        note=note,
+        correctness_measured=measured,
+        eager_launches=eager_launches,
+        fused_launches=fused_launches,
+    )
+
+
+def _safe_artifact_id(value: str, max_length: int = 80) -> str:
+    """Return a bounded, filesystem-safe identifier for run artifacts."""
+    raw = str(value or "")
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", raw).strip("._-") or "recipe"
+    if len(safe) <= max_length:
+        return safe
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+    prefix_length = max(1, max_length - len(digest) - 1)
+    return f"{safe[:prefix_length].rstrip('._-')}_{digest}"
+
+
+@dataclass(frozen=True)
+class CampaignRuntime:
+    """The device a campaign runs on, the arch it writes for, and the agent runtime its loop is told to use."""
+
+    gpu: str = "0"
+    gpu_target: str = ""
+    model: str = ""
+    agent_backend: str = ""
+    agent_sandbox_mode: str = ""
+
+
+@dataclass(frozen=True)
+class CampaignWorkspace:
+    """The checkout a campaign edits, the git environment that reaches its shadow repo, and its artifact dir."""
+
+    root: str
+    output_dir: str
+    git_env: dict[str, str] | None = None
+
+
+@dataclass(frozen=True)
+class CampaignBrief:
+    """What the loop's implementer is told: the harness, prior lessons, the fused module and what is tracked."""
+
+    harness_path: str
+    experience: str = ""
+    fused_module: str = ""
+    repo_scope: bool = False
+    tracked_roots: Sequence[str] = ()
+
+
+@dataclass(frozen=True)
+class CampaignPaths:
+    """The files one forge-loop campaign runs from and writes to."""
+
+    workspace: str
+    driver_path: str
+    experiments_dir: str
+    result_json: str
+    program_md_file: str
+
+
+def build_forge_loop_command(
+    recipe: Recipe,
+    paths: CampaignPaths,
+    runtime: CampaignRuntime = CampaignRuntime(),
+    fused_module: str = "",
+) -> list[str]:
+    """Assemble the forge-loop invocation for one recipe."""
+    # ``recipe.extra_files`` are the further call-site files discovery found, which
+    # widen the fusion beyond a single call-site file when the correct fix
+    # legitimately spans more than one (e.g. a kernel-selector that chooses the
+    # output-dtype template). All are TRACKED by the shadow repo so an edit there is
+    # kept/revertible like the primary file. Deduplicate while preserving order;
+    # never let one displace the primary kernel or fused module.
+    source_files = [recipe.source_file]
+    for extra in recipe.extra_files:
+        if extra and extra not in source_files:
+            source_files.append(extra)
+    if fused_module and fused_module not in source_files:
+        source_files.append(fused_module)
+    cmd = forge_loop_command(
+        "--workspace",
+        paths.workspace,
+        "--kernel",
+        recipe.source_file,
+        "--driver",
+        paths.driver_path,
+        "--experiments-dir",
+        paths.experiments_dir,
+        "--result-json",
+        paths.result_json,
+        "--program-md-file",
+        paths.program_md_file,
+        "--snr-threshold",
+        str(DEFAULT_SNR_THRESHOLD_DB),
+        "--max-hours",
+        str(max(1.0, DEFAULT_MAX_HOURS)),
+        "--kernel-backend",
+        FUSION_KERNEL_BACKEND,
+        # The loop refuses a workspace on an unnamed, main or master branch.
+        "--git-branch",
+        SHADOW_BRANCH,
+        "--task-type",
+        "repository",
+        "--source-files",
+        ",".join(source_files),
+        # Discovery already picked the chain and the harness already exists; the loop's single-path preparer has a
+        # different contract and must not rewrite either.
+        "--no-prepare-task",
+        "--experience-kb",
+        "--producer",
+        FUSION_PRODUCER,
+        "--operator-name",
+        recipe.pattern_id,
+        "--no-kb-warmstart",
+        # A fusion campaign is single-lane, and says so rather than inheriting the loop's default.
+        "--lanes",
+        "1",
+    )
+    if runtime.gpu_target:
+        cmd += ["--gpu-target", runtime.gpu_target]
+    if runtime.model:
+        cmd += ["--model", runtime.model]
+    # The loop resolves its runtime from Config defaults, so a provider or sandbox the caller chose would silently
+    # become `bypass` in the process that actually edits the framework.
+    if runtime.agent_backend:
+        cmd += ["--agent-backend", runtime.agent_backend]
+    if runtime.agent_sandbox_mode:
+        cmd += ["--agent-sandbox-mode", runtime.agent_sandbox_mode]
+    return cmd
+
+
+def run_recipe_campaign(
+    recipe: Recipe,
+    workspace: CampaignWorkspace,
+    brief: CampaignBrief,
+    runtime: CampaignRuntime = CampaignRuntime(),
+    target_speedup: float = DEFAULT_TARGET_SPEEDUP,
+) -> CampaignOutcome:
+    """Author and validate one recipe by running a forge-loop campaign."""
+    root, shadow_env = workspace.root, workspace.git_env
+    harness_path, fused_module = brief.harness_path, brief.fused_module
+    out = Path(workspace.output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    stem = _safe_artifact_id(recipe.pattern_id)
+
+    env_flags = tuple(f for f in (recipe.env_flag or "").split() if f)
+    report_log = str(out / f"harness_reports_{stem}.jsonl")
+    Path(report_log).unlink(missing_ok=True)
+    driver_path = write_driver(
+        out / f"driver_{stem}.py",
+        DriverSpec(
+            harness_path,
+            env_flags,
+            report_log=report_log,
+            case_id=stem,
+            fused_module=fused_module,
+            workspace=root,
+            git_env=shadow_env,
+        ),
+    )
+
+    program_md_file = str(out / f"program_{stem}.md")
+    Path(program_md_file).write_text(build_campaign_program_md(recipe, brief), encoding="utf-8")
+
+    # Removed before the run, not just written after it: a campaign that dies without writing one would otherwise hand
+    # the previous run's KEEP back.
+    result_json = str(out / f"forge_loop_{stem}.json")
+    Path(result_json).unlink(missing_ok=True)
+    cmd = build_forge_loop_command(
+        recipe,
+        CampaignPaths(
+            workspace=root,
+            driver_path=driver_path,
+            experiments_dir=str(out / "forge_experiments"),
+            result_json=result_json,
+            program_md_file=program_md_file,
+        ),
+        runtime,
+        fused_module=fused_module,
+    )
+
+    env = dict(os.environ)
+    env["HIP_VISIBLE_DEVICES"] = runtime.gpu
+    env.update(shadow_env or {})
+    log.info("forge-loop campaign for %s: %s", recipe.pattern_id, " ".join(cmd))
+
+    collected: list[str] = []
+    log_path = out / f"forge_loop_{stem}.log"
+    try:
+        # Same process group: an orchestrator timing this pipeline out signals the group, and a detached campaign
+        # would go on holding the GPU and editing the framework after the parent reported a failure.
+        proc = subprocess.Popen(
+            cmd,
+            cwd=root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            env=env,
+        )
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            collected.append(line)
+            sys.stdout.write(line)
+        returncode = proc.wait()
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.error("forge-loop campaign for %s could not run: %s", recipe.pattern_id, exc)
+        return _failed_campaign(f"{type(exc).__name__}: {exc}")
+
+    log_path.write_text("".join(collected), encoding="utf-8")
+    if returncode != 0:
+        log.error("forge-loop campaign for %s exited %s", recipe.pattern_id, returncode)
+        return _failed_campaign(f"forge-loop exited {returncode}")
+    payload = _read_result_json(result_json)
+    return CampaignOutcome(
+        result=_to_validation_result(
+            payload,
+            target_speedup,
+            _read_harness_reports(report_log),
+            committed_tree=committed_tree_id(
+                root,
+                str(payload.get("best_commit") or "").strip(),
+                env=shadow_env,
+            ),
+        ),
+        experiment_id=str(payload.get("experiment_id") or ""),
+    )
+
+
+def build_campaign_program_md(recipe: Recipe, brief: CampaignBrief) -> str:
+    """The task document handed to the loop's implementer for one recipe."""
+    harness_path, experience, fused_module = brief.harness_path, brief.experience, brief.fused_module
+    repo_scope, tracked_roots = brief.repo_scope, brief.tracked_roots
+    hints = "\n".join(f"  - {h}" for h in recipe.source_hints) or "  (none recorded)"
+    shapes = json.dumps(recipe.shapes or {}, indent=2, sort_keys=True)
+    experience_block = f"\n## What earlier attempts established\n{experience}\n" if experience else ""
+    # Files beyond the single call-site file that are ALSO tracked/keepable, named
+    # because the correct fix legitimately spans them (e.g. the kernel-selector that
+    # picks the output-dtype template). "Tracked" below must reflect them, or the
+    # loop would silently revert an edit the fix depends on.
+    extra_editable = [path for path in recipe.extra_files if path and path != recipe.source_file]
+    if repo_scope:
+        tracked_phrase = "this file and every file under the tracked root(s) named below"
+    elif extra_editable:
+        tracked_phrase = "this file, the framework source file above, and the additional in-scope file(s) listed below"
+    else:
+        tracked_phrase = "this file and the framework source file above"
+    # Under repo scope a new helper may legitimately have to sit somewhere else (a
+    # shared package several call sites can import), so the blanket ban becomes a
+    # default plus the one rule that actually binds: the loop commits new files only
+    # where it was told to look.
+    other_modules_rule = (
+        "You MAY add further helper modules when several call sites need to import "
+        "them; put each one inside a tracked root below, and be aware that a KEEP "
+        "commits a new file only alongside a tracked edit."
+        if repo_scope
+        else "Do NOT create any other new module."
+    )
+    module_block = (
+        f"""
+## Where the fused kernel goes (MANDATORY)
+Write the fused kernel into exactly this file, which already exists and is empty:
+    {fused_module}
+{other_modules_rule} Only {tracked_phrase} are tracked, and the
+loop can neither keep nor revert anything else — a kernel written elsewhere scores
+as a validated candidate that then vanishes.
+
+## Wiring it in is HALF THE DELIVERABLE (MANDATORY)
+A fused module that nothing calls is not a fusion. You are not done when the kernel
+is fast in the harness; you are done when the framework's own forward path runs it.
+So the change you leave behind must be a patch that applies to the framework tree
+and is complete on its own:
+  1. REPLACE the original call site. Find where the framework's forward path issues
+     the chain you fused and make it call your entry point under {recipe.env_flag},
+     falling back to the untouched chain when the flag is off. Edit the framework
+     source above (and the additional in-scope files, if the fix spans them).
+  2. Move EVERY part of the fusion into the framework. If the fusion needs its
+     input produced differently — a GEMM that stops casting its output, a tensor
+     left in its original dtype or layout — that change belongs at the producing
+     call site in the framework, not in the harness and not in a caller's head.
+     Whatever the harness would have to do to set up your kernel is, by definition,
+     part of the fusion you have not delivered yet.
+  3. Leave the flag-off path byte-identical to what it was.
+The loop reverts anything outside the tracked files, so a wiring edit written
+elsewhere disappears along with the score it earned.
+
+## The single entry point (MANDATORY)
+Export exactly ONE public function from the fused module, and have both the
+framework call site and the harness call THAT SAME function. It must take the
+values available at the call site and return what the original chain returned, so
+that wiring it in is a one-line substitution and the harness's fused arm is a
+single call with no preparation around it. If the harness has to run part of your
+fusion before calling you, the entry point is drawn at the wrong boundary: pull
+that work inside it.
+
+Name it in a module-level attribute so the harness can find it:
+    __forge_fused_entry__ = "<name of that function>"
+The harness was written before your module existed and resolves the function
+through this attribute, so a module without it is a module the harness cannot
+call — it will score your fusion as absent.
+"""
+        if fused_module
+        else ""
+    )
+    repo_block = (
+        (
+            "\n## Repo scope: the framework tree is yours to edit (tracked & keepable)\n"
+            "This fusion was NOT localized to one file. The call sites it replaces may\n"
+            "sit in several modules, and you may edit any file under the tracked root(s)\n"
+            "below — edits there are kept and reverted with the fusion like the call-site\n"
+            "file itself. Anything OUTSIDE them is untracked: the loop can neither keep\n"
+            "nor revert it, so an edit there vanishes along with the score it earned.\n"
+            "Tracked root(s):\n"
+            + "\n".join(f"    {root}" for root in tracked_roots)
+            + "\nChange only what the fusion needs, leave the flag-off path byte-identical,\n"
+            "and do not touch unrelated call sites.\n"
+        )
+        if (repo_scope and tracked_roots)
+        else ""
+    )
+    extra_block = (
+        (
+            "\n## Additional in-scope files you MAY edit (tracked & keepable)\n"
+            "The single call-site file is not always enough: a downstream consumer may\n"
+            "derive a property of its result (e.g. its output dtype, layout, or a kernel\n"
+            "instantiation) from the value you feed it, so a change at the call site alone\n"
+            "can LOOK correct in isolation yet shift that downstream property and regress\n"
+            "end-to-end. When that happens, prefer to leave the consumer's contract intact\n"
+            "and change only the producer; touch these files solely to keep the consumer's\n"
+            "observable output identical to eager. They are tracked by the loop, so edits\n"
+            "are kept/reverted with the fusion. Change ONLY what the fusion needs, and do\n"
+            "not alter unrelated call sites:\n" + "\n".join(f"    {e}" for e in extra_editable) + "\n"
+        )
+        if extra_editable
+        else ""
+    )
+    harness_block = (
+        f"""
+## Kernel-validation harness (READ-ONLY)
+The harness already exists at:
+    {harness_path}
+The driver the loop runs executes that harness and reads its JSON output. Do NOT
+modify or recreate it. It matches the glob ``*harness*.py`` and is protected by
+the in-session gate — any attempt to edit it will be rejected.
+"""
+        if harness_path
+        else ""
+    )
+    call_site_line = (
+        f"- Primary call site to edit: {recipe.source_file}"
+        if extra_editable
+        else f"- Framework source file to edit: {recipe.source_file}"
+    )
+    localize_intro = (
+        "Grep these files for the anchors below and fuse the chain they mark:"
+        if extra_editable
+        else "Grep the file for these anchors and fuse the chain they mark:"
+    )
+    return f"""# Fuse the {recipe.pattern_id} chain
+
+## Target
+{call_site_line}
+- Env flag gating the fusion: {recipe.env_flag}
+- {recipe.description}
+{trace_kernels_block(recipe.trace_kernels)}{module_block}{repo_block}{extra_block}{harness_block}
+## What to fuse
+{recipe.fusion_math}
+
+## How to localize it in the source
+{localize_intro}
+{hints}
+
+## Representative decode shapes
+{shapes}
+
+## Correctness reference
+{recipe.eager_reference_hint}
+{experience_block}"""

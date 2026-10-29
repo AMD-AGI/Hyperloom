@@ -36,7 +36,7 @@ def _forge_fusion_available() -> bool:
     because the tool is invoked through ``sys.executable -m``.
     """
     try:
-        return importlib.util.find_spec("kernelforge.fusion") is not None
+        return importlib.util.find_spec("kernelforge.workflows.forge_fusion") is not None
     except (ModuleNotFoundError, ValueError):
         return False
 

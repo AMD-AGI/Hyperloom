@@ -8,8 +8,8 @@ from __future__ import annotations
 import pytest
 
 from common.env import EnvValueError
-from kernelforge.gemm_tune import evidence as ev
-from kernelforge.gemm_tune.router import _detect_1stage_from_log, moe_stage_coverage
+from kernelforge.workflows.gemm_tune import evidence as ev
+from kernelforge.workflows.gemm_tune.router import _detect_1stage_from_log, moe_stage_coverage
 
 _1STAGE = "[aiter] [fused_moe] using 1stage default for (304, {tok}, 4096, 1536, 256, 6)"
 _2STAGE = "[aiter] [fused_moe] using 2stage default for (304, {tok}, 4096, 1536, 256, 6)"

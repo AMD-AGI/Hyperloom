@@ -14,7 +14,7 @@ from kernelforge.knowledge.kb_store.identity.kernel_recipe import (
     KernelRecipeIdentity,
     kernel_recipe_canonical_id,
 )
-from kernelforge.kernel_rewrite_controller.paths import operator_directory_name
+from kernelforge.workflows.rewrite_controller.paths import operator_directory_name
 
 BASE_COMMIT = "a" * 40
 

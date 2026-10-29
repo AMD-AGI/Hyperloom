@@ -10,11 +10,11 @@ from pathlib import Path
 
 import pytest
 
-import kernelforge.gemm_tune.aiter_graph_retime as retime
-import kernelforge.gemm_tune.aiter_splitk_validate as validate
-import kernelforge.gemm_tune.tuners._aiter_dense_common as ac
-import kernelforge.gemm_tune.tuners._row_accuracy as accuracy
-from kernelforge.gemm_tune.tuners.base import TuneContext
+import kernelforge.workflows.gemm_tune.aiter_graph_retime as retime
+import kernelforge.workflows.gemm_tune.aiter_splitk_validate as validate
+import kernelforge.workflows.gemm_tune.tuners._aiter_dense_common as ac
+import kernelforge.workflows.gemm_tune.tuners._row_accuracy as accuracy
+from kernelforge.workflows.gemm_tune.tuners.base import TuneContext
 
 _HDR = ["gfx", "cu_num", "M", "N", "K", "libtype", "kernelId", "splitK", "us", "kernelName", "tflops", "bw", "errRatio"]
 _OP = "a8w8_blockscale_bpreshuffle"

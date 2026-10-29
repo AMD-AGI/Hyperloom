@@ -8,7 +8,7 @@ import shutil
 import time
 from dataclasses import asdict
 
-from kernelforge.loop import task_preflight
+from kernelforge.workflows.forge_loop.preparation import task_preflight
 
 
 def test_preflight_records_total_and_per_stage_seconds(monkeypatch, tmp_path):

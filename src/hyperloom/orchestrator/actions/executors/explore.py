@@ -917,6 +917,12 @@ class _ExploreRound:
             "args_mode": self.args_mode,
         }
 
+    def _composed_args(self, args: str, remove_args: list[str]) -> str:
+        """``args`` as the run launches them: the recipe's inherited args folded in, ``remove_args`` stripped."""
+        return compose_server_args(
+            inherited_args=self.inherited_args, base_extra_args=args, remove_args=remove_args, args_mode=self.args_mode
+        )
+
     def launched_stack(self) -> dict[str, Any]:
         """The stack as it launches: its args with the recipe's inherited ones and the removals applied.
 
@@ -924,12 +930,7 @@ class _ExploreRound:
         the composed args say which settings a KEEP changed.
         """
         stack = stack_of_measured(self.measured_against())
-        stack["extra_server_args"] = compose_server_args(
-            inherited_args=self.inherited_args,
-            base_extra_args=self.args,
-            remove_args=self.remove_args,
-            args_mode=self.args_mode,
-        )
+        stack["extra_server_args"] = self._composed_args(self.args, self.remove_args)
         return stack
 
     def _recipe(self) -> GridRecipe:
@@ -1004,12 +1005,10 @@ class _ExploreRound:
                 gpu_type=self.target.gpu_type or str(getattr(self.ss, "gpu_type", "") or ""),
                 stack_fingerprint=getattr(self.ss, "stack_fingerprint_meta", None),
             ),
-            base_server_args=compose_server_args(
-                inherited_args=self.inherited_args,
-                base_extra_args=self.base_args,
-                remove_args=self.base_remove_args,
-                args_mode=self.args_mode,
-            ),
+            base_server_args=self._composed_args(self.base_args, self.base_remove_args),
+            # The recipe's environment under the accepted edits: the same layering the run launches with, so a
+            # TP spelled only there is the TP a draft is judged against.
+            base_envs={**self.yaml_envs, **self.envs},
         )
         # Operator-supplied --skip-variants patterns.
         runnable, skipped = apply_user_skip_list(runnable, skip_spec=resolve_skip_spec(self.params))

@@ -7,8 +7,8 @@ import json
 import sys
 import types
 
-from kernelforge.gemm_tune.aiter_script_map import resolve_aiter_root
-from kernelforge.gemm_tune.utils import (
+from kernelforge.workflows.gemm_tune.aiter_script_map import resolve_aiter_root
+from kernelforge.workflows.gemm_tune.utils import (
     find_tuner_script,
     emit_result_json,
     RESULT_SENTINEL_BEGIN,

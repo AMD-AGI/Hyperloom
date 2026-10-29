@@ -8,8 +8,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from kernelforge.fusion.models import Recipe
-from kernelforge.fusion.validate import HarnessKernelRunner
+from kernelforge.workflows.forge_fusion.models import Recipe
+from kernelforge.workflows.forge_fusion.validate import HarnessKernelRunner
 
 # Reports the framework root it was given, so the test can assert what reached it.
 HARNESS = """

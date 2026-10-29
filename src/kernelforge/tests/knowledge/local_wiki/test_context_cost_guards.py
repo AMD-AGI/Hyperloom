@@ -15,7 +15,7 @@ from pathlib import Path
 
 from kernelforge.knowledge.local_wiki import index as local_index
 from kernelforge.knowledge.local_wiki.index import _strip_frontmatter, build_forge_knowledge
-from kernelforge.resources import resource_path
+from kernelforge.config.resources import resource_path
 
 
 def test_frontmatter_is_dropped_from_a_knowledge_map() -> None:

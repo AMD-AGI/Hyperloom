@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import dataclasses
 
-from kernelforge.loop.analysis_refresh_policy import decide_analysis_refresh
-from kernelforge.loop.run_state import AnalysisRefreshState
+from kernelforge.workflows.forge_loop.policy.analysis_refresh_policy import decide_analysis_refresh
+from kernelforge.workflows.forge_loop.campaign.run_state import AnalysisRefreshState
 
 _STATE_FIELDS = [field.name for field in dataclasses.fields(AnalysisRefreshState)]
 

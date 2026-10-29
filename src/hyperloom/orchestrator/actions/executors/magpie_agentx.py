@@ -166,6 +166,27 @@ def apply_launch_changes(
     launch["unset_env"] = sorted((set(launch.get("unset_env", [])) | set(changes.unset_env)) - env.keys())
 
 
+def _refuse_unrunnable_speculative_launch(benchmark: Mapping[str, Any], *, model_path: str | None) -> None:
+    """Refuse a composed AgentX launch the pinned stack has no draft kernel for.
+
+    The native path composes its launch here rather than in ``benchmark.envs``, so this is where it meets the same
+    check the env-composed launches get.
+
+    Raises:
+        SpeculativeCapabilityUnsupportedError: When the launch drafts with a kernel the stack does not ship.
+    """
+    from hyperloom.inference_optimizer.speculative_capability import refuse_unrunnable_speculative_stack
+
+    launch = (benchmark.get("agentx") or {}).get("launch_overrides") or {}
+    refuse_unrunnable_speculative_stack(
+        _inherited_server_args(list(launch.get("append_args", []))),
+        framework=str(benchmark.get("framework") or ""),
+        # launch_server.sh reads TP from the launch environment, which Magpie layers over the workload's.
+        envs={**(benchmark.get("envs") or {}), **(launch.get("env") or {})},
+        model_path=model_path or "",
+    )
+
+
 def materialize_agentx(
     config: dict[str, Any],
     output: Path,
@@ -324,7 +345,12 @@ def materialize_variant(
     model_path: str | None,
     base: LaunchChanges,
 ) -> Path:
-    """Compose the accepted launch and candidate, then bind its applied source."""
+    """Compose the accepted launch and candidate, then bind its applied source.
+
+    Raises:
+        SpeculativeCapabilityUnsupportedError: When the composed launch drafts with a kernel the pinned stack
+            does not ship.
+    """
     config = yaml.safe_load(config_path.read_text(encoding=_ENCODING))
     recipe_options = recipe_option_names(config_path)
     apply_launch_changes(config["benchmark"], base, recipe_options=recipe_options)
@@ -339,6 +365,7 @@ def materialize_variant(
         ),
         recipe_options=recipe_options,
     )
+    _refuse_unrunnable_speculative_launch(config["benchmark"], model_path=model_path)
     path = materialize_agentx(config, output / "config.yaml", model_path=model_path)
     bind_source_evidence(path, variant.source_patches)
     apply_native_runtime(path, variant.runtime_override, variant.overlay_pythonpath)

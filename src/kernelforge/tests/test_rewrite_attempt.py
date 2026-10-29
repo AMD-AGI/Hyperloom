@@ -6,8 +6,8 @@ import os
 
 import pytest
 
-from kernelforge.rewrite_by_flydsl import attempt as attempt_module
-from kernelforge.rewrite_by_flydsl.attempt import (
+from kernelforge.workflows.flydsl_rewrite import attempt as attempt_module
+from kernelforge.workflows.flydsl_rewrite.attempt import (
     create_attempt_workspace,
     export_import_path,
 )
@@ -92,8 +92,8 @@ def test_exporting_the_import_path_twice_adds_one_entry(tmp_path, monkeypatch):
 
 
 def test_the_attempt_root_is_a_producer_owned_path(tmp_path):
-    from kernelforge.loop import path_ownership
-    from kernelforge.rewrite_by_flydsl import protocol
+    from kernelforge.workflows.forge_loop.campaign import path_ownership
+    from kernelforge.workflows.flydsl_rewrite import protocol
 
     attempt = create_attempt_workspace(tmp_path)
 

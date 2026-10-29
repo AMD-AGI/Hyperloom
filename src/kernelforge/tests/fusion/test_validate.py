@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import json
 
-from kernelforge.fusion.models import Recipe
-from kernelforge.fusion.validate import (
+from kernelforge.workflows.forge_fusion.models import Recipe
+from kernelforge.workflows.forge_fusion.validate import (
     BenchOutcome,
     CompileOutcome,
     HarnessKernelRunner,
@@ -306,7 +306,7 @@ class TestEagerTraceAlignment:
 
 def test_the_span_marks_the_anchor_occurrence_not_every_matching_name():
     """One kernel can appear twice in a span; only one of them is the anchor."""
-    from kernelforge.fusion.harness_contract import trace_kernels_block
+    from kernelforge.workflows.forge_fusion.harness_contract import trace_kernels_block
 
     block = trace_kernels_block(
         {

@@ -450,7 +450,7 @@ class Coordinator:
 
     @property
     def gap_refresh(self):
-        from ..state.gaps import GapRefreshCollaborator
+        from .gap_refresh import GapRefreshCollaborator
 
         return self._collaborator("_gap_refresh", GapRefreshCollaborator)
 
