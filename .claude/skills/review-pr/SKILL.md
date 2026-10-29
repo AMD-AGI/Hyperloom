@@ -1,6 +1,6 @@
 ---
 name: review-pr
-description: "Review a Hyperloom pull request. Invoke with a PR number whenever asked to review, re-review, or sanity-check a PR in this repository. Collects the PR into a scratch directory, selects from rules.md only the rules this diff can trigger, forces a semantic and core-file risk assessment before any finding is written, refutes every finding twice, and publishes an English conclusion to the PR. The output has two parts only: what the PR does, and blocking issues."
+description: "Review a Hyperloom pull request. Invoke with a PR number whenever asked to review, re-review, or sanity-check a PR in this repository. Collects the PR into a scratch directory, selects from rules.md only the rules this diff can trigger, forces a semantic and core-file risk assessment before any finding is written, refutes every finding twice, and publishes an English conclusion to the PR. The output has two parts only: what the PR does, and blocking issues, plus the code the author can delete in the same PR."
 ---
 
 # Hyperloom PR review
@@ -11,7 +11,7 @@ to `/tmp/hl-review-<PR>` and is printed by `fetch.sh`.
 
 ## Output contract
 
-The published review has exactly two parts: what the PR does, and blocking issues. Nothing else.
+The published review has two parts, what the PR does and blocking issues, and nothing else but Step 6's deletions.
 
 Non-blocking observations are deleted, not softened. Not "note", not "FYI", not "non-blocking
 but", not "for reference", not a postscript under the conclusion. If the only way to keep an
@@ -190,9 +190,10 @@ a diff that reads well hides its defects. One line per check into `$WORK/ai_diag
    reachable, will it ever fire, does it convert a failed measurement, a failed patch apply or a
    failed artifact write into a plausible-looking value? A fail-closed gate that coalesces a
    missing input to a passing default is the blocking shape.
-3. `test-falsifies` — **Test calibrated to pass, not to falsify.** Does the test drive the production entry point or a
-   mock of it? Does it assert behaviour or restate the implementation? Would it fail on the merge
-   base? A regression test that passes on base pins nothing.
+3. `test-falsifies` — **Test calibrated to pass, not to falsify, or not needed.** Does the test drive the production entry
+   point or a mock of it? Does it assert behaviour or restate the implementation? Would it fail on the merge base? A
+   regression test that passes on base pins nothing. A test that repeats another, pins plumbing, or re-pins one contract
+   at each layer below it is a deletion: [`references/subtract.md`](references/subtract.md).
 4. `patch-shape` — **A fix that cannot reach its own cause.** Run on a fix PR as the card contract
    defines one, against Q2's two frames, each shape naming its file:line; elsewhere write `N/A`.
    Any hit is an E4 candidate, and the first two are blocking on their own:
@@ -216,10 +217,12 @@ number compared against one another measurement system produced? This step is wh
 come from; the rule list is a prompt for it, not a substitute.
 
 Append a `BUILD:` line to `$WORK/answers.txt`: **"If none of this code existed, what would you
-build — and does every mechanism this diff adds need to exist?"** Name what you would build, then
-say which of the diff's parts it does not contain. A part that survives only because it is already
-written is what this question exists to catch; where the diff is a refactor it settles under E3 on
-the net line count, otherwise it carries an `AGENTS.md` bullet and an owner module, or stops here.
+build — and does every mechanism this diff adds or patches need to exist?"** Name what you would build, then
+say which of the diff's parts it does not contain. A part that survives only because it is already written is
+what this question exists to catch; on a fix, so is a guard added where deleting or changing existing code removes
+the cause. Where the diff is a refactor it settles under E3 on the net line count, otherwise it carries an
+`AGENTS.md` bullet and an owner module, or stops here. Then append `TRIM:` lines as
+[`references/subtract.md`](references/subtract.md) says.
 
 ## Step 7 — Refutation
 
@@ -278,6 +281,8 @@ Blocking issues: <N | none>
 2. ...
 
 deferred: <key> -- <reason>
+Trim in this PR:
+- path/to/other.py:40-58 -- <what to delete> -- <evidence>
 
 Checked: <paths and symbols read> | Ran: <commands> | Skill: <skill> | Model: <model> | Prior: <KEY status, ...> | Base: <merge-base sha> | Head: <head sha>
 ```
@@ -292,8 +297,8 @@ survived both refutation passes is not dropped in silence — it goes on a `defe
 the only thing that may stand in place of reporting it.
 
 A finding names one shape. Where the diff has it in several places, `Problem:` lists every
-`path:line` and `Action:` covers them all. `Prior` is written only on a re-review, as
-[`references/re-review.md`](references/re-review.md) says.
+`path:line` and `Action:` covers them all, preferring to delete or change existing code over adding
+any. `Prior` is written only on a re-review, as [`references/re-review.md`](references/re-review.md) says.
 
 Use `free:<slug>` as the key for a Step 6 free-form finding; it is held to the same two refutation
 passes as a rule finding.
@@ -337,8 +342,7 @@ gh pr comment <n> --body "<conclusion>"$'\n\nLGTM'
 ```
 
 Never approve and never merge: both belong to the human reviewer the author brings in after LGTM.
-The clean comment still carries the `Checked:` / `Ran:` line so the author sees the depth of the
-review rather than a bare LGTM; it has two parts and the `LGTM` line, and stops there.
+The clean comment is the whole card, `Checked:` line included so the author sees its depth, then `LGTM`.
 
 ## Verifying a sub-agent's finding
 

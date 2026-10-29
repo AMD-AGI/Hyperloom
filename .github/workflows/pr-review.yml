@@ -217,6 +217,9 @@ jobs:
             The final line is exactly \`Checked: ... | Ran: ... | Skill: ... | Model: ... | Prior: ... |
             Base: ... | Head: ${HEAD_SHA}\` on one line, with Skill and Model exactly as skill.txt gives
             them and Prior only on a re-review (references/re-review.md).
+          - An optional \`Trim in this PR:\` list sits between the findings and the Checked line: one
+            \`- <path>:<line>[-<line>] -- <what to delete> -- <evidence>\` line per deletion, at most 5,
+            never counted in the verdict (references/subtract.md). Omit it when Step 6 found none.
           EOF
           )
           # shellcheck disable=SC2016  # $sub is a jq variable, not a shell one

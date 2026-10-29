@@ -81,6 +81,15 @@ done
 if [ "$verdict" = none ]; then
   ! grep -q '^deferred:' "$CARD" || note "a clean card cannot defer a surviving finding"
 fi
+if grep -q '^Trim in this PR:$' "$CARD"; then
+  [ "$(grep -c '^Trim in this PR:$' "$CARD")" = 1 ] || note "the card has more than one 'Trim in this PR:' list"
+  trims=$(awk '/^Trim in this PR:$/ { on = 1; next } on && /^- / { print; next } on { exit }' "$CARD")
+  count=$(grep -c . <<< "$trims" || true)
+  [ "$count" -ge 1 ] && [ "$count" -le 5 ] \
+    || note "the card's 'Trim in this PR:' list holds ${count} line(s); it holds 1 to 5, or is left out"
+  ! grep -qvE '^- [^ ]+:[0-9]+(-[0-9]+)? -- .+ -- .+$' <<< "$trims" \
+    || note "every 'Trim in this PR:' line is '- <path>:<line>[-<line>] -- <what to delete> -- <evidence>'"
+fi
 grep -qE "^Checked: .+ \\| Ran: .+ \\| Base: [0-9a-f]{7,40} \\| Head: ${REVIEWED_SHA}$" "$CARD" \
   || note "the card has no well-formed verification-depth line for the reviewed head"
 [ -s "$WORK/skill.txt" ] || note "the review left no skill.txt"

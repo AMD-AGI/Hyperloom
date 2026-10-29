@@ -79,7 +79,13 @@ class Published:
 
 
 def _card(
-    *, blocking: bool = True, skill: str = _SKILL, model: str = _MODEL, prior: str | None = None, head: str = _HEAD
+    *,
+    blocking: bool = True,
+    skill: str = _SKILL,
+    model: str = _MODEL,
+    prior: str | None = None,
+    head: str = _HEAD,
+    trim: str | None = None,
 ) -> str:
     verdict = (
         "1\n\n1. [C1] x is still 1 [verified]\n   Problem: x is 1 at src/pkg/mod.py:1\n   Impact: x is wrong\n"
@@ -87,11 +93,15 @@ def _card(
         if blocking
         else "none\n"
     )
+    trims = f"Trim in this PR:\n{trim}\n\n" if trim is not None else ""
     fields = f"Skill: {skill} | Model: {model}" + (f" | Prior: {prior}" if prior is not None else "")
     return (
-        f"## PR #{_PR} -- fix: change mod\n\nWhat it does: changes mod.\n\nBlocking issues: {verdict}\n"
+        f"## PR #{_PR} -- fix: change mod\n\nWhat it does: changes mod.\n\nBlocking issues: {verdict}\n{trims}"
         f"Checked: src/pkg/mod.py | Ran: none | {fields} | Base: {_BASE} | Head: {head}\n"
     )
+
+
+_TRIM = "- src/pkg/mod.py:40-58 -- delete the legacy branch -- git grep -n legacy_mode: no reader outside it"
 
 
 #: comments.txt holding a card an earlier review posted on an earlier head.
@@ -254,6 +264,42 @@ def test_a_re_review_that_does_not_settle_the_earlier_card_gets_no_verdict(
     assert run.returncode == 1
     assert reason in run.note
     assert not run.reviewed
+
+
+@pytest.mark.parametrize("blocking", [True, False], ids=["blocking", "clean"])
+def test_a_trim_list_rides_with_the_verdict_without_counting_toward_it(tmp_path: Path, blocking: bool) -> None:
+    trim = "\n".join([_TRIM, "- tests/test_mod.py:12 -- delete the repeat -- tests/test_cli.py::test_x asserts it"])
+
+    run = _publish(tmp_path, _card(blocking=blocking, trim=trim))
+
+    assert run.returncode == 0, run.stderr
+    assert (run.reviewed, run.lgtm) == (blocking, not blocking)
+    if not blocking:
+        assert f"Trim in this PR:\n{trim}\n" in run.comments[0]
+
+
+@pytest.mark.parametrize(
+    ("trim", "reason"),
+    [
+        pytest.param("", "holds 0 line(s)", id="empty"),
+        pytest.param(
+            "\n".join(f"- src/pkg/m{i}.py:{i} -- delete f{i} -- git grep -n f{i}: no caller" for i in range(6)),
+            "holds 6 line(s)",
+            id="six",
+        ),
+        pytest.param(
+            "- src/pkg/mod.py:40 -- delete the legacy branch", "every 'Trim in this PR:' line", id="no-evidence"
+        ),
+        pytest.param("- the legacy branch -- delete it -- no reader", "every 'Trim in this PR:' line", id="no-place"),
+        pytest.param(f"{_TRIM}\n\nTrim in this PR:\n{_TRIM}", "more than one 'Trim in this PR:' list", id="twice"),
+    ],
+)
+def test_a_malformed_trim_list_gets_no_verdict(tmp_path: Path, trim: str, reason: str) -> None:
+    run = _publish(tmp_path, _card(blocking=False, trim=trim))
+
+    assert run.returncode == 1
+    assert reason in run.note
+    assert not run.lgtm
 
 
 def test_a_card_naming_a_prior_on_a_pr_with_no_earlier_card_gets_no_verdict(tmp_path: Path) -> None:
