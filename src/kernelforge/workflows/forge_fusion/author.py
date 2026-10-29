@@ -946,13 +946,14 @@ def _write_registered_author_log(
 
 @dataclass(frozen=True)
 class AuthorAgent:
-    """The agent that authors: its backend (or a factory for one), model, device, turn cap and per-attempt timeout."""
+    """The agent that authors: its backend (or a factory for one), model, device, turn cap, timeout, usage accumulator."""
 
     backend: Any
     gpu: str = "0"
     model: Optional[str] = None
     max_turns: int = 100
     timeout_s: int = 7200
+    usage: Any = None
 
 
 @dataclass(frozen=True)
@@ -1101,7 +1102,9 @@ def _run_author_session(
     previous_gpu = os.environ.get("HIP_VISIBLE_DEVICES")
     os.environ["HIP_VISIBLE_DEVICES"] = agent.gpu
     try:
-        return asyncio.run(asyncio.wait_for(agent.backend.run(spec), timeout=watchdog_timeout_sec(session_timeout)))
+        return asyncio.run(
+            asyncio.wait_for(agent.backend.run(spec, usage=agent.usage), timeout=watchdog_timeout_sec(session_timeout))
+        )
     finally:
         if previous_gpu is None:
             os.environ.pop("HIP_VISIBLE_DEVICES", None)
