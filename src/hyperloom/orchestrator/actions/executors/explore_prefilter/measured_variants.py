@@ -10,10 +10,10 @@ from typing import Any, Iterable, Mapping
 
 from hyperloom.common.coerce import to_str_list
 from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
-from ...policy.gate import PolicyDenied
+from ....policy.gate import PolicyDenied
 
-from ._grid_base import DEFAULT_KEEP_THRESHOLD_PCT
-from ._proposal_identity import (
+from .._grid_base import DEFAULT_KEEP_THRESHOLD_PCT
+from .._proposal_identity import (
     BaseControls,
     content_fingerprint,
     controls_of,

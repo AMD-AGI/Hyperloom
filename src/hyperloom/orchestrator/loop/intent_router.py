@@ -916,7 +916,7 @@ class IntentRouter(CoordinatorCollaborator):
         if action_name != "explore":
             return False
         from ..actions.executors.explore import framework_lever_grid
-        from ..actions.executors.measured_variants import explore_grid_already_covered
+        from ..actions.executors.explore_prefilter.measured_variants import explore_grid_already_covered
 
         if framework_lever_grid(self.shared_state):
             # The executor adds its pending rewrite levers to this grid, so the grid is not all there is to measure.

@@ -64,9 +64,11 @@ from ._accuracy_gate import (
 from . import _framework_switch_manifest as _switch_manifest
 from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
 from ._proposal_identity import BaseControls, controls_of, effective_fingerprint, normalize_proposal
-from .measured_variants import GAIN_BELOW_THRESHOLD, MeasuredOn, measured_verdict, stack_of_measured
+from .explore_prefilter.measured_variants import GAIN_BELOW_THRESHOLD, MeasuredOn, measured_verdict, stack_of_measured
 from ._grid_base import DEFAULT_KEEP_THRESHOLD_PCT, TS_FAILED, TS_SKIPPED_DEDUP
 from .benchmark_result import double_run_requested
+from .explore_prefilter._prefilter import prefilter_round, record_decision_round
+from .explore_prefilter._remeasure import STACK_REVALIDATE_SOURCE, _is_config_replay_variant, is_stack_revalidation
 from ._grid_runner import (
     GridLaunch,
     GridRecipe,
@@ -117,8 +119,6 @@ log = logging.getLogger(__name__)
 
 _now_iso = functools.partial(now_iso, "auto")
 
-STACK_REVALIDATE_SOURCE: str = "stack_revalidate"
-
 # ``skipped_dup`` reason for a variant whose launch the session already measured on the same stack.
 ALREADY_MEASURED: str = "already_measured"
 # ... for one that starts the stack's own server, or a server this round already launched.
@@ -127,10 +127,6 @@ ROUND_DUP: str = "round_dup"
 
 #: The provenance of a grid row that names none: the model proposed it directly.
 _DIRECT_PROVENANCE = "llm_direct"
-
-
-def is_stack_revalidation(params: dict | None) -> bool:
-    return str((params or {}).get("source") or "") == STACK_REVALIDATE_SOURCE
 
 
 # Audit/provenance metadata stashed on a GridVariant that must survive being rebuilt into a derived variant.
@@ -394,14 +390,6 @@ def _xdit_default_grid() -> list[GridVariant]:
     # Confirm the safe attention backend (aiter).
     _add("xdit_attn_aiter", envs={"XDIT_ATTENTION_BACKEND": "aiter"})
     return variants
-
-
-_CONFIG_REPLAY_PROVENANCE = frozenset({"geak_revalidate"})
-
-
-def _is_config_replay_variant(variant: Any) -> bool:
-    """Whether a variant replays an already-validated config verbatim."""
-    return str(getattr(variant, "provenance", "") or "").strip() in _CONFIG_REPLAY_PROVENANCE
 
 
 def observed_launch_from_state(state: Any) -> tuple[dict[str, Any], dict[str, str]]:
@@ -784,6 +772,9 @@ def _sanitized_overrides(params: dict[str, Any]) -> tuple[str | None, str | None
 class _ExploreRound:
     """One explore round: the stack it accumulates, the variants it measures, and the ledgers it writes."""
 
+    projection: dict[str, Any] | None = None
+    prefilter_dropped = 0
+
     def __init__(self, ctx: Any, params: dict[str, Any], output_root: Path) -> None:
         extra = getattr(ctx, "extra", None) or {}
         self.ctx = ctx
@@ -860,10 +851,11 @@ class _ExploreRound:
         self.untested = 0
         self.lease: Any = None
 
-    async def run(self) -> dict[str, Any]:
+    async def run(self, session_dir: Path | None = None) -> dict[str, Any]:
         self._resolve_grid()
         self._shape_runnable()
         self._open_schedule()
+        round_ctx = await prefilter_round(self, session_dir)
         # One Ray serving lease (actor) spans the WHOLE round; every variant reuses it.
         self.lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(self.config_path)) if self.runnable else None
         try:
@@ -880,7 +872,8 @@ class _ExploreRound:
                     if self.run_stop is not None:
                         break
                     if measurement is not None:
-                        self._settle(gv, run_gv, measurement, slot)
+                        row = self._settle(gv, run_gv, measurement, slot)
+                        await record_decision_round(round_ctx, gv, measurement, row)
                 finally:
                     # Reap THIS variant's persistent server on every exit path (idempotent + no-op when reuse was
                     # ineligible).
@@ -1345,7 +1338,7 @@ class _ExploreRound:
 
     # ----- the verdict -----------------------------------------------------
 
-    def _settle(self, gv: GridVariant, run_gv: GridVariant, r: Any, slot: Path) -> None:
+    def _settle(self, gv: GridVariant, run_gv: GridVariant, r: Any, slot: Path) -> dict[str, Any]:
         # Rule on this variant's measurement and fold a KEEP onto the round's stack.
         #
         # A variant KEEPs when it clears the graded verdict and the accuracy gate. The axes and the threshold floor
@@ -1389,6 +1382,7 @@ class _ExploreRound:
         self._record(gv, row)
         if row["outcome"] == "KEEP":
             self.winners.append(self._keep(gv, run_gv, r, row, variant_meas))
+        return row
 
     def _variant_facts(self, gv: GridVariant) -> dict[str, Any]:
         return {
@@ -1633,9 +1627,10 @@ class _ExploreRound:
             )
         best = max(self.winners, key=lambda w: to_float(w.get("gain_pct"), 0.0) or 0.0, default=None)
         best_gain_pct = (to_float(best.get("gain_pct"), 0.0) or 0.0) if best else 0.0
-        # A round whose every variant already had its verdict, or only restated the stack, is answered, as if
-        # measured again.
-        answered = bool(self.runnable) and self.judged_without_measuring == len(self.runnable)
+        # A round whose every variant a pre-filter dropped, already had its verdict, or only restated the stack is
+        # answered, as if measured again.
+        offered = len(self.runnable) + self.prefilter_dropped
+        answered = bool(offered) and self.judged_without_measuring + self.prefilter_dropped == offered
         measured = any(t.get("outcome") in ("KEEP", "REVERT") for t in self.tested.values())
         status = "succeeded" if measured or self.winners or answered else "failed"
         return {
@@ -1665,7 +1660,8 @@ class _ExploreRound:
             "framework": self.framework,
             # gain_pct for the audit trail (best gain of the batch).
             "gain_pct": best_gain_pct,
-            "explore_grid_exhausted": not self.runnable,
+            "explore_grid_exhausted": not self.runnable and not self.prefilter_dropped,
+            "projection": self.projection,
         }
 
     def _budget_error(self, status: str) -> dict[str, Any]:
@@ -1721,7 +1717,7 @@ class ExploreExecutor:
         )
         output_root.mkdir(parents=True, exist_ok=True)
         try:
-            return await _ExploreRound(ctx, params, output_root).run()
+            return await _ExploreRound(ctx, params, output_root).run(self.session_dir)
         except _RoundRefused as refusal:
             return refusal.result
 
