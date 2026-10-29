@@ -857,7 +857,7 @@ def test_get_anthropic_client_raises_clearly_without_httpx(monkeypatch):
 
 
 # ---- anthropic_completion / aanthropic_completion over the HTTP transport ----
-# The streamed reply itself is read in src/hyperloom/common/tests/test_anthropic_messages.py.
+# The streamed reply itself is read in src/common/tests/test_anthropic_messages.py.
 _MESSAGE_BODY = {
     "content": [
         {"type": "text", "text": "hello "},

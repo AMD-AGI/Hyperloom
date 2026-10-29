@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 
+from common import aiter_jit_cache
 from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
 
@@ -1688,7 +1689,7 @@ def _stage_ray_patch_entrypoint(entrypoint, destination):
         "patch_path_safety.py",
         "kernel_patch_multinode.py",
     }
-    core = _repo_root().parent / "common" / "aiter_jit_cache.py"
+    core = Path(aiter_jit_cache.__file__)
     for name, _, source in payloads:
         if name == "aiter_jit_cache.py":
             assert source == core.read_text(encoding="utf-8")

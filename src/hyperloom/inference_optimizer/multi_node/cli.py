@@ -21,6 +21,7 @@ from typing import Any
 
 import httpx
 
+from common import aiter_jit_cache
 from common.env import EnvValueError, env_int
 
 from ._internal import ray_dashboard
@@ -375,7 +376,7 @@ def _read_pod_script(name: str) -> str:
 
 
 _KERNEL_NODE_OPS_DEPS = (
-    Path(__file__).resolve().parents[2] / "common" / "aiter_jit_cache.py",
+    Path(aiter_jit_cache.__file__).resolve(),
     _SCRIPTS_DIR / "patch_path_safety.py",
 )
 _SHAPE_GATE_DEPS = (_SCRIPTS_DIR / "sglang_shape_gate.py",)

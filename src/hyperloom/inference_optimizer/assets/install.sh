@@ -555,7 +555,7 @@ preflight_load_dotenv() {
 # DeepSeek is a dual-protocol gateway, not a third provider: /anthropic speaks
 # the Anthropic API and /v1 speaks OpenAI chat-completions, both with the same
 # key. Endpoint and model derivation matches
-# hyperloom.common.llm_config.deepseek_compat_env.
+# common.llm_config.deepseek_compat_env.
 normalize_legacy_deepseek_env() {
   [ -n "${DEEPSEEK_API_KEY:-}" ] || [ -n "${DEEPSEEK_BASE_URL:-}" ] || return 0
   # Adopt the gateway whole or not at all. Anything already on the Anthropic
