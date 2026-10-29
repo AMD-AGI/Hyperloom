@@ -6,7 +6,7 @@
 import json
 import pytest
 
-from kernelforge.gemm_tune.model_analyzer import analyze_model, _extract_quant_info
+from kernelforge.workflows.gemm_tune.model_analyzer import analyze_model, _extract_quant_info
 
 
 class TestExtractQuantInfo:

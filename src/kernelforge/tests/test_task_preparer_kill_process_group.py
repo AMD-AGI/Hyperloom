@@ -6,7 +6,7 @@ import os
 import signal
 from types import SimpleNamespace
 
-from kernelforge.loop import task_preflight
+from kernelforge.workflows.forge_loop.preparation import task_preflight
 
 
 def _proc(pid):

@@ -11,7 +11,7 @@ import pytest
 from click.testing import CliRunner
 
 from kernelforge.cli.forge_fuse_command import forge_fuse as main
-from kernelforge.fusion.vllm_passes import PassState, TargetRuntime
+from kernelforge.workflows.forge_fusion.vllm_passes import PassState, TargetRuntime
 
 FLAG = "enable_qk_norm_rope_fusion"
 CONFIG_BODY = (
@@ -104,8 +104,8 @@ class Harness:
         )
 
     def install(self, monkeypatch):
-        import kernelforge.fusion.compile_pass_claim as compile_pass_claim
-        import kernelforge.fusion.locate as locate
+        import kernelforge.workflows.forge_fusion.compile_pass_claim as compile_pass_claim
+        import kernelforge.workflows.forge_fusion.locate as locate
 
         rt = TargetRuntime(
             framework="vllm", python="/fake/python", launcher_exe="/fake/vllm", require_root=str(self.root)
@@ -231,7 +231,7 @@ class TestRejectPaths:
         self._assert_rejected(hz, hz.run(), "baseline (pass disabled) arm failed")
 
     def test_exception_mid_run_still_restores(self, hz, monkeypatch):
-        import kernelforge.fusion.compile_pass_claim as compile_pass_claim
+        import kernelforge.workflows.forge_fusion.compile_pass_claim as compile_pass_claim
 
         def boom(*a, **k):
             raise RuntimeError("export exploded")

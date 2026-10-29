@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 import kernelforge.agent_backends.registry as registry
-from kernelforge.loop.bootstrap.relay import (
+from kernelforge.workflows.forge_loop.bootstrap.relay import (
     SearchActorBuildContext,
     build_search_actor_pool,
     probe_agent_profiles,
@@ -16,7 +16,7 @@ from kernelforge.loop.bootstrap.relay import (
     resolve_session_relay,
 )
 from kernelforge.config import Config
-from kernelforge.loop.agent_relay import (
+from kernelforge.workflows.forge_loop.search.agent_relay import (
     AgentAvailabilitySnapshot,
     AgentProfile,
     AgentProfileSpec,
@@ -26,7 +26,7 @@ from kernelforge.loop.agent_relay import (
     StartPreference,
     select_start_profile,
 )
-from kernelforge.loop.search_actors import SearchActorBundle
+from kernelforge.workflows.forge_loop.search.search_actors import SearchActorBundle
 
 
 def _relay_config(primary: str = "claude") -> AgentRelayConfig:
@@ -191,8 +191,8 @@ class _Setup:
 
 
 def _capture_supervisor(monkeypatch) -> dict:
-    from kernelforge.loop.bootstrap import lanes
-    from kernelforge.orchestrator import agent, orchestration, supervisor
+    from kernelforge.workflows.forge_loop.bootstrap import lanes
+    from kernelforge.workflows.forge_loop.roles import agent, orchestration, supervisor
 
     captured: dict = {}
 
@@ -241,7 +241,7 @@ def test_supervisor_backend_flag_is_honoured(monkeypatch, tmp_path, relay, super
 
 
 def test_executable_override_stays_with_the_primary_provider(tmp_path):
-    from kernelforge.loop.bootstrap.relay import config_for_profile
+    from kernelforge.workflows.forge_loop.bootstrap.relay import config_for_profile
 
     config = Config(workspace=str(tmp_path), agent_backend="claude", agent_cli="/opt/claude")
     codex = AgentProfile("codex", "codex", "gpt-6-astra")
@@ -414,7 +414,7 @@ def test_search_actor_pool_starts_on_the_fallback_when_the_primary_cannot_run():
 
 
 def test_switching_the_implementer_provider_drops_the_other_providers_cli_and_options(monkeypatch, tmp_path):
-    from kernelforge.orchestrator import agent as agent_module
+    from kernelforge.workflows.forge_loop.roles import agent as agent_module
 
     captured = {}
 
@@ -438,9 +438,9 @@ def test_switching_the_implementer_provider_drops_the_other_providers_cli_and_op
 
 
 def test_relay_summary_reports_whether_a_switch_is_possible():
-    from kernelforge.loop.bootstrap.relay import agent_relay_summary, relay_switch_possible
-    from kernelforge.loop.agent_relay import AgentAvailabilitySnapshot, ProfileAvailability
-    from kernelforge.loop.run_state import RunState
+    from kernelforge.workflows.forge_loop.bootstrap.relay import agent_relay_summary, relay_switch_possible
+    from kernelforge.workflows.forge_loop.search.agent_relay import AgentAvailabilitySnapshot, ProfileAvailability
+    from kernelforge.workflows.forge_loop.campaign.run_state import RunState
 
     state = RunState()
     state.agent_relay.active_profile_id = "claude"
@@ -473,7 +473,7 @@ def test_relay_summary_reports_whether_a_switch_is_possible():
     ids=["resumed_profile", "primary_down"],
 )
 def test_startup_report_says_why_the_session_is_not_on_the_primary(capsys, claude_up, line):
-    from kernelforge.loop.bootstrap.relay import _report_search_actors
+    from kernelforge.workflows.forge_loop.bootstrap.relay import _report_search_actors
 
     pool = build_search_actor_pool(
         _relay_config("claude"),
@@ -488,7 +488,7 @@ def test_startup_report_says_why_the_session_is_not_on_the_primary(capsys, claud
 
 
 def test_startup_report_explains_a_session_without_relay_and_how_to_enable_it(capsys):
-    from kernelforge.loop.bootstrap.relay import _report_search_actors
+    from kernelforge.workflows.forge_loop.bootstrap.relay import _report_search_actors
 
     pool = build_search_actor_pool(
         _relay_config("claude"),

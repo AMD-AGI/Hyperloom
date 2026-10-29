@@ -20,13 +20,13 @@ from kernelforge.agent_backends.base import (
 from hyperloom.common.llm_stability_env import apply_llm_stability_env
 from kernelforge.agent_backends.claude import ClaudeBackend
 from kernelforge.agent_backends.codex import CodexBackend
-from kernelforge.loop.bootstrap import lanes as cli_lanes
+from kernelforge.workflows.forge_loop.bootstrap import lanes as cli_lanes
 from kernelforge.config import Config
-from kernelforge.orchestrator.agent import ImplementerSetup, ImplementerTask
-from kernelforge.tools import aiter_cache
-from kernelforge.loop.fanout import SERIALIZED_DRIVER_NAME
-from kernelforge.tools.git import git
-from kernelforge.workspace.edit_policy import FORGE_PROTECTED_PATHS
+from kernelforge.workflows.forge_loop.roles.agent import ImplementerSetup, ImplementerTask
+from kernelforge.utils import aiter_cache
+from kernelforge.workflows.forge_loop.iteration.fanout import SERIALIZED_DRIVER_NAME
+from kernelforge.utils.git import git
+from kernelforge.config.edit_policy import FORGE_PROTECTED_PATHS
 
 
 @pytest.fixture(autouse=True)

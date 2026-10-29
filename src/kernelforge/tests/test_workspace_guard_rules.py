@@ -13,7 +13,7 @@ import pytest
 from kernelforge.agent_backends.base import AgentRunSpec, AgentToolPolicy
 from kernelforge.agent_backends.session_resume import is_retryable_api_error
 from kernelforge.agent_backends.workspace_guard import WorkspaceGuard, WorkspaceSafetyError
-from kernelforge.tools.protected_paths import ProtectedPathRules
+from kernelforge.utils.protected_paths import ProtectedPathRules
 
 
 def _git(root: Path, *args: str) -> None:

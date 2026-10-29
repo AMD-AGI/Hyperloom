@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Extra unit tests for the candidate archive (loop/archive.py)."""
+"""Extra unit tests for the candidate archive (workflows/forge_loop/campaign/archive.py)."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.loop.archive import CandidateArchive, CandidateRecord
+from kernelforge.workflows.forge_loop.campaign.archive import CandidateArchive, CandidateRecord
 
 
 # ── numeric helpers ────────────────────────────────────────────────────────────

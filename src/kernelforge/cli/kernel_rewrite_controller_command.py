@@ -9,7 +9,7 @@ from pathlib import Path
 
 import click
 
-from kernelforge.kernel_rewrite_controller.controller import ControllerRunError, run_controller
+from kernelforge.workflows.rewrite_controller.controller import ControllerRunError, run_controller
 
 
 @click.command("kernel-rewrite-controller")

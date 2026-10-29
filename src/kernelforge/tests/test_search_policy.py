@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from kernelforge.loop.run_state import RunState
-from kernelforge.loop.search_policy import (
+from kernelforge.workflows.forge_loop.campaign.run_state import RunState
+from kernelforge.workflows.forge_loop.search.search_policy import (
     MARGINAL_GAIN_FLOOR,
     NO_CHANGES_ESCALATION_THRESHOLD,
     OBJECTIVE_DISCOVER_NEW_MECHANISM,

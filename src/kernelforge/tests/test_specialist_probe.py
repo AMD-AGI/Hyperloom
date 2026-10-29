@@ -10,21 +10,21 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.tools.process_reaping import ReapReport
+from kernelforge.utils.process_reaping import ReapReport
 
 from kernelforge.agent_backends import AgentCapabilities, AgentRunResult
 from kernelforge.config import Config
-from kernelforge.orchestrator import specialist_probe
-from kernelforge.orchestrator import specialist_probe_server as probe_server
-from kernelforge.orchestrator.contracts import (
+from kernelforge.workflows.forge_loop.roles import specialist_probe
+from kernelforge.workflows.forge_loop.roles import specialist_probe_server as probe_server
+from kernelforge.workflows.forge_loop.roles.contracts import (
     CaseEvidence,
     OrchestrationContext,
     SpecialistAssignment,
     SpecialistDefinition,
 )
-from kernelforge.orchestrator import specialists
-from kernelforge.orchestrator.orchestration import _specialist_probe_config
-from kernelforge.orchestrator.specialists import (
+from kernelforge.workflows.forge_loop.roles import specialists
+from kernelforge.workflows.forge_loop.roles.orchestration import _specialist_probe_config
+from kernelforge.workflows.forge_loop.roles.specialists import (
     SpecialistAgent,
     SpecialistProbeConfig,
 )
@@ -898,7 +898,7 @@ async def test_the_probe_child_is_given_the_environment_its_driver_needs(tmp_pat
 @pytest.mark.asyncio
 async def test_a_probe_locks_the_same_device_sentinel_the_fanout_lanes_do(tmp_path, monkeypatch) -> None:
     """One GPU, one sentinel: a probe queues behind a lane and a lane behind it."""
-    from kernelforge.loop.fanout import campaign_device_lock_path
+    from kernelforge.workflows.forge_loop.iteration.fanout import campaign_device_lock_path
 
     _patch_primitive(monkeypatch, _stub_primitive)
     workspace = _workspace(tmp_path)
@@ -921,7 +921,7 @@ async def test_a_probe_locks_the_same_device_sentinel_the_fanout_lanes_do(tmp_pa
 @pytest.mark.asyncio
 async def test_specialist_setup_creates_the_campaign_sentinel(tmp_path, monkeypatch) -> None:
     """Naming the sentinel is not enough; the analysis round has to find it."""
-    from kernelforge.loop.fanout import campaign_device_lock_path
+    from kernelforge.workflows.forge_loop.iteration.fanout import campaign_device_lock_path
 
     _patch_primitive(monkeypatch, _stub_primitive)
     workspace = _workspace(tmp_path)

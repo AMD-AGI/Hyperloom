@@ -21,7 +21,7 @@ from hyperloom.orchestrator.measurement.runtime_findings import (
     load_runtime_findings,
     render_runtime_findings,
 )
-from kernelforge.kernel_rewrite_controller import (
+from kernelforge.workflows.rewrite_controller import (
     SERVING_CONTEXT_FILENAME,
     TRACE_EVIDENCE_FILENAME,
     WORKLOAD_FILENAME,

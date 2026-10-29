@@ -5,8 +5,8 @@
 
 from __future__ import annotations
 
-from kernelforge.fusion.models import Diagnosis
-from kernelforge.fusion.report import LocatedFusions, ManifestSubject, RunOutcome, build_manifest
+from kernelforge.workflows.forge_fusion.models import Diagnosis
+from kernelforge.workflows.forge_fusion.report import LocatedFusions, ManifestSubject, RunOutcome, build_manifest
 
 
 def _diagnosis() -> Diagnosis:

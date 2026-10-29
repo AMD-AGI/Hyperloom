@@ -8,10 +8,10 @@ from __future__ import annotations
 import gzip
 import json
 
-from kernelforge.fusion.locate import FrameworkInstall
-from kernelforge.fusion.discover import DiscoveryEvidence, DiscoveryPrompting, DiscoveryTarget
-from kernelforge.fusion.diagnose import TraceProfile, diagnose_from_shares
-from kernelforge.fusion.discover import (
+from kernelforge.workflows.forge_fusion.locate import FrameworkInstall
+from kernelforge.workflows.forge_fusion.discover import DiscoveryEvidence, DiscoveryPrompting, DiscoveryTarget
+from kernelforge.workflows.forge_fusion.diagnose import TraceProfile, diagnose_from_shares
+from kernelforge.workflows.forge_fusion.discover import (
     build_discovery_prompt,
     discover_recipes,
     existing_operator_hints_from_knowledge,

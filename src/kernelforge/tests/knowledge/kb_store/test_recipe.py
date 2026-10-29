@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from kernelforge.config import Config
-from kernelforge.loop import knowledge_integration as experience_integration
+from kernelforge.workflows.forge_loop.memory import knowledge_integration as experience_integration
 from kernelforge.knowledge.kb_store import writer as experience_sink
 from kernelforge.config import KnowledgeConfig, KnowledgeStoreMode
 from kernelforge.knowledge.kb_store.identity.kernel_recipe import (
@@ -18,12 +18,12 @@ from kernelforge.knowledge.kb_store.identity.kernel_recipe import (
     kernel_recipe_canonical_id,
 )
 from kernelforge.knowledge.kb_store import recipe as agent_kb_module
-from kernelforge.rewrite_by_flydsl import kb as flydsl_kb
+from kernelforge.workflows.flydsl_rewrite import kb as flydsl_kb
 from kernelforge.knowledge.kb_store.recipe import KernelRecipeKB
-from kernelforge.rewrite_by_flydsl.identity import framework_version, resolve_identity
+from kernelforge.workflows.flydsl_rewrite.identity import framework_version, resolve_identity
 from kernelforge.knowledge.kb_store.record_store import KBStoreError, RewriteRecordError
-from kernelforge.rewrite_by_flydsl.measurement import FlydslMeasurement
-from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
+from kernelforge.workflows.flydsl_rewrite.measurement import FlydslMeasurement
+from kernelforge.workflows.flydsl_rewrite.spec import RewriteSpec
 
 from kernelforge.tests.test_rewrite_by_flydsl_kb import (
     InMemoryKBStore,

@@ -754,3 +754,89 @@ def test_t0_anchor_failed_authority_read_leaves_the_live_row_unchanged(
         )
 
     assert kb.local.get_recipe(canonical_id=cid) == before
+
+
+# --- the identity keys on the framework release, not on the build it was compiled into --
+
+
+def test_a_local_build_hits_the_row_its_release_recorded(
+    kb: RecipeKB,
+    session_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``0.4.5+rocm723`` is release ``0.4.5``: an exact hit, and no second row under the build's spelling."""
+    _seed_actionable_row(kb, _expected_cid(_FakeSharedState(), "M", "MI300X"))
+    state = _FakeSharedState(framework_version="0.4.5+rocm723")
+    monkeypatch.delenv("HYPERLOOM_PARTITION_MODE", raising=False)
+
+    run_t0_anchor(
+        kb,
+        state,
+        T0AnchorRequest(workload="M", hw="MI300X", extra_attrs={"framework_name": "sglang"}),
+        session_dir=session_dir,
+    )
+
+    assert (state.warm_start_recipe["tier"], state.warm_start_recipe["confidence"]) == ("exact", 1.0)
+    assert kb.local.get_recipe(canonical_id=_expected_cid(state, "M", "MI300X")) is None
+    assert state.framework_version == "0.4.5+rocm723"
+
+
+def test_a_version_t0_fills_in_keeps_its_build_while_the_row_keys_on_its_release(
+    kb: RecipeKB,
+    session_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A session that recorded no version takes the fingerprint's build string, not the release the cid uses."""
+    state = _FakeSharedState(framework_version="")
+    monkeypatch.delenv("HYPERLOOM_PARTITION_MODE", raising=False)
+
+    run_t0_anchor(
+        kb,
+        state,
+        T0AnchorRequest(
+            workload="M",
+            hw="MI300X",
+            stack_fingerprint={"sglang": "0.4.5+rocm723"},
+            extra_attrs={"framework_name": "sglang"},
+        ),
+        session_dir=session_dir,
+    )
+
+    assert state.framework_version == "0.4.5+rocm723"
+    assert kb.local.get_recipe(canonical_id=_expected_cid(_FakeSharedState(), "M", "MI300X")) is not None
+
+
+def test_a_row_filed_under_a_local_build_is_still_reached_from_its_release(
+    kb: RecipeKB,
+    session_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A row written while the build suffix was part of the identity stays a candidate for the same release."""
+    identity = {"model": "M", "hardware": "MI300X", "framework_name": "sglang", "precision": "fp8"}
+    shape = {"model_type": "qwen3", "architectures": ["Qwen3ForCausalLM"]}
+    kb.put_recipe(
+        RecipeUpsert(
+            canonical_id=recipe_canonical_id(RecipeIdentity(**identity, **shape, framework_version="0.4.5+rocm723")),
+            **identity,
+            framework_version="0.4.5+rocm723",
+            best_config={"extra_server_args": "--page-size 32"},
+            sessions=[{"session_id": "s1", "gain_pct": 12.0}],
+            provenance={"source": "seed", "generator": "ut"},
+        )
+    )
+    state = _FakeSharedState()
+    state.model_type, state.model_architectures = shape["model_type"], shape["architectures"]
+    monkeypatch.delenv("HYPERLOOM_PARTITION_MODE", raising=False)
+
+    run_t0_anchor(
+        kb,
+        state,
+        T0AnchorRequest(workload="M", hw="MI300X", extra_attrs={"framework_name": "sglang"}),
+        session_dir=session_dir,
+    )
+
+    assert (state.warm_start_recipe["tier"], state.warm_start_recipe["confidence"]) == (
+        "compatible_framework_version",
+        0.72,
+    )
+    assert "--page-size 32" in json.dumps(state.warm_start_context)

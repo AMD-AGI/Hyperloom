@@ -17,10 +17,10 @@ from kernelforge.agent_backends.claude import (
     ClaudeBackendError,
     _supports_adaptive_thinking,
 )
-from kernelforge.loop.lessons import SUMMARIZER_ROLE
-from kernelforge.tools.git import git
-from kernelforge.orchestrator.agent import _make_session_summarizer
-from kernelforge.workspace.edit_policy import FORGE_PROTECTED_PATHS
+from kernelforge.workflows.forge_loop.memory.lessons import SUMMARIZER_ROLE
+from kernelforge.utils.git import git
+from kernelforge.workflows.forge_loop.roles.agent import _make_session_summarizer
+from kernelforge.config.edit_policy import FORGE_PROTECTED_PATHS
 
 
 class _FakeOptions:

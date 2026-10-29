@@ -10,7 +10,7 @@ import types
 
 import pytest
 
-from kernelforge.gemm_tune.tier3.dispatch import (
+from kernelforge.workflows.gemm_tune.tier3.dispatch import (
     CORRECTNESS_TRIALS,
     GRAPH_INNER,
     MAX_RELATIVE_ERROR,
@@ -18,7 +18,7 @@ from kernelforge.gemm_tune.tier3.dispatch import (
     parse_config,
     relative_error,
 )
-from kernelforge.gemm_tune.tier3.referee import CaptureFailed
+from kernelforge.workflows.gemm_tune.tier3.referee import CaptureFailed
 
 
 # ── fakes ────────────────────────────────────────────────────────────────────

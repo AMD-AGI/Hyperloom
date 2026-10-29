@@ -9,7 +9,7 @@ import argparse
 import json
 from pathlib import Path
 
-from hyperloom.inference_optimizer.cli import _resolve_run_max_model_len
+from hyperloom.inference_optimizer.cli.launch_shape import _resolve_run_max_model_len
 from hyperloom.inference_optimizer.grid_server_args import (
     WorkloadTokenWindow,
     inject_sglang_context_length,

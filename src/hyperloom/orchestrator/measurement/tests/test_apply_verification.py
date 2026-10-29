@@ -40,7 +40,7 @@ def _log(tmp_path, lines):
 def parser(request, monkeypatch):
     """Run every case against a stand-in parser, and against forge when present."""
     if request.param == "real_forge":
-        pytest.importorskip("kernelforge.gemm_tune", reason="real parser unavailable")
+        pytest.importorskip("kernelforge.workflows.gemm_tune", reason="real parser unavailable")
         return
 
     import re
@@ -67,9 +67,9 @@ def parser(request, monkeypatch):
             "consulted_tables": sorted(consulted),
         }
 
-    fake = types.ModuleType("kernelforge.gemm_tune")
+    fake = types.ModuleType("kernelforge.workflows.gemm_tune")
     fake.parse_log_file = _fake_parse_log_file  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "kernelforge.gemm_tune", fake)
+    monkeypatch.setitem(sys.modules, "kernelforge.workflows.gemm_tune", fake)
     return
 
 
@@ -199,8 +199,10 @@ class TestTheEnvToTableMapDoesNotDrift:
     """The same mapping exists here and in KernelForge, and cannot be shared."""
 
     def test_every_env_var_maps_to_the_same_table_as_kernelforge(self):
-        forge_utils = pytest.importorskip("kernelforge.gemm_tune.utils", reason="KernelForge not installed here")
-        from hyperloom.orchestrator.phases.kernel import _AITER_ENV_TO_TABLE
+        forge_utils = pytest.importorskip(
+            "kernelforge.workflows.gemm_tune.utils", reason="KernelForge not installed here"
+        )
+        from hyperloom.orchestrator.phases.kernel_gemm_tuning import _AITER_ENV_TO_TABLE
 
         forge_env_vars = set(getattr(forge_utils, "TUNER_ENV_VARS", {}).values())
         aiter_only = {v for v in forge_env_vars if v.startswith("AITER_CONFIG")}
@@ -214,7 +216,7 @@ class TestTheEnvToTableMapDoesNotDrift:
 
     def test_the_fp4_key_is_the_one_aiter_actually_reads(self):
         # AITER_CONFIG_GEMM_A4W4, not the "_BLOCKSCALE" variant.
-        from hyperloom.orchestrator.phases.kernel import _AITER_ENV_TO_TABLE
+        from hyperloom.orchestrator.phases.kernel_gemm_tuning import _AITER_ENV_TO_TABLE
 
         assert "AITER_CONFIG_GEMM_A4W4" in _AITER_ENV_TO_TABLE
         assert "AITER_CONFIG_GEMM_A4W4_BLOCKSCALE" not in _AITER_ENV_TO_TABLE

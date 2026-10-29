@@ -18,7 +18,7 @@ class TestFmoeCandidateIsolation:
         stale.write_text("old data")
 
         monkeypatch.setattr(
-            "kernelforge.gemm_tune.tuners.fmoe_ck.Path",
+            "kernelforge.workflows.gemm_tune.tuners.fmoe_ck.Path",
             lambda x: tmp_path / "aiter_compare" if x == "/tmp/aiter_compare" else Path(x),
         )
 
@@ -127,14 +127,14 @@ class TestStemMatches:
     """
 
     def test_exact_stem_matches(self):
-        from kernelforge.gemm_tune.tuners._aiter_dense_common import _stem_matches
+        from kernelforge.workflows.gemm_tune.tuners._aiter_dense_common import _stem_matches
 
         assert _stem_matches("a8w8_blockscale", "tuned_a8w8_blockscale.candidate.csv")
         assert _stem_matches("a8w8", "tuned_a8w8.candidate.csv")
         assert _stem_matches("a4w4_blockscale", "tuned_a4w4_blockscale.candidate.csv")
 
     def test_longer_sibling_is_rejected(self):
-        from kernelforge.gemm_tune.tuners._aiter_dense_common import _stem_matches
+        from kernelforge.workflows.gemm_tune.tuners._aiter_dense_common import _stem_matches
 
         # The core regression: a8w8_blockscale must NOT claim the bpreshuffle CSV.
         assert not _stem_matches("a8w8_blockscale", "tuned_a8w8_blockscale_bpreshuffle.candidate.csv")
@@ -143,7 +143,7 @@ class TestStemMatches:
         assert not _stem_matches("a8w8", "tuned_a8w8_bpreshuffle.candidate.csv")
 
     def test_isolated_per_shape_naming_matches(self):
-        from kernelforge.gemm_tune.tuners._aiter_dense_common import _stem_matches
+        from kernelforge.workflows.gemm_tune.tuners._aiter_dense_common import _stem_matches
 
         # Isolated runner: _iso_tuned_<tuner>_<idx>_tuned... -> stem + "_<digit>".
         assert _stem_matches("a8w8_blockscale", "_iso_tuned_a8w8_blockscale_0_tuned.candidate.csv")

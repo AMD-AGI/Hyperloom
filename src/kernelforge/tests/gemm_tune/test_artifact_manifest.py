@@ -9,14 +9,14 @@ import json
 
 import pytest
 
-from kernelforge.gemm_tune.artifact_manifest import (
+from kernelforge.workflows.gemm_tune.artifact_manifest import (
     TUNING_ARTIFACT_SCHEMA_VERSION,
     build_artifact_manifest,
     write_artifact_manifest,
 )
-from kernelforge.gemm_tune.report import TuneReport
-from kernelforge.gemm_tune.shape_manifest import MANIFEST_KIND
-from kernelforge.gemm_tune.tuners.base import TuneResult
+from kernelforge.workflows.gemm_tune.report import TuneReport
+from kernelforge.workflows.gemm_tune.shape_manifest import MANIFEST_KIND
+from kernelforge.workflows.gemm_tune.tuners.base import TuneResult
 
 
 def _manifest_dict() -> dict:

@@ -10,6 +10,7 @@ from .canonical_id import (
     canonical_id_for_path,
     cid_to_path_components,
     recipe_canonical_id,
+    recipe_framework_version,
 )
 from .dispatcher import RecipeKB
 from .local_store import (
@@ -34,4 +35,5 @@ __all__ = [
     "canonical_id_for_path",
     "cid_to_path_components",
     "recipe_canonical_id",
+    "recipe_framework_version",
 ]

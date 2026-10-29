@@ -6,9 +6,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from kernelforge.kernel_rewrite_controller import ControllerLayout, TaskStateStore
-from kernelforge.kernel_rewrite_controller import scheduler
-from kernelforge.kernel_rewrite_controller.dispatcher import SingleTaskResult
+from kernelforge.workflows.rewrite_controller import ControllerLayout, TaskStateStore
+from kernelforge.workflows.rewrite_controller import scheduler
+from kernelforge.workflows.rewrite_controller.dispatcher import SingleTaskResult
 from kernelforge.knowledge.kb_store.identity.kernel_recipe import (
     KernelRecipeIdentity,
     kernel_recipe_canonical_id,
@@ -211,7 +211,7 @@ def test_a_superseded_duplicate_is_recorded_rather_than_dropped(
 
 def _load_without_directory_identity(task_dir, **kwargs):
     """Let a second directory hold the same identity, which the layout forbids."""
-    from kernelforge.kernel_rewrite_controller import task as task_module
+    from kernelforge.workflows.rewrite_controller import task as task_module
 
     payload = json.loads((Path(task_dir) / "task.json").read_text(encoding="utf-8"))
     parsed = task_module.parse_task_payload(

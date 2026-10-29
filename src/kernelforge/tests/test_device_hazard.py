@@ -7,8 +7,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from kernelforge.tools import process_reaping
-from kernelforge.loop.device_hazard import (
+from kernelforge.utils import process_reaping
+from kernelforge.workflows.forge_loop.iteration.device_hazard import (
     MAX_BLOCKED_ITERATIONS,
     DeviceHazard,
     DeviceHazardLog,

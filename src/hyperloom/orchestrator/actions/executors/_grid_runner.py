@@ -71,7 +71,8 @@ from ._spec_decode_pin import SPECULATIVE_DECODING_PINNED, refuse_unpinned_specu
 from hyperloom.common.agentx_workload import pin_mlperf_round_concurrency
 from hyperloom.common.benchmark_config import is_magpie_agentx
 from hyperloom.common.coerce import to_str_list
-from hyperloom.inference_optimizer.runtime_environment import apply_runtime_override
+from hyperloom.inference_optimizer import speculative_capability
+from hyperloom.inference_optimizer.runtime_environment import apply_runtime_override, prepend_launch_path
 from ._recipe_script import launcher_overwritten_envs
 from ._server_argv import seal_server_argv
 from .magpie_agentx import LaunchChanges, ServerArgvInvalidError, materialize_variant
@@ -945,7 +946,7 @@ def _refuse_unsupported_capability(run: _GridRun, at: _VariantSlot) -> None:
         _variant_tag(run, at),
         reason,
     )
-    _abort_variant(at, _VariantFailure("capability_unsupported", reason))
+    _abort_variant(at, _VariantFailure(speculative_capability.CAPABILITY_UNSUPPORTED, reason))
 
 
 async def _variant_yaml(run: _GridRun, at: _VariantSlot, *, into: Path, lifecycle: dict[str, Any] | None) -> Path:
@@ -1747,7 +1748,7 @@ def _attach_grid_launch_evidence(
         if idx >= len(grid):
             break
         if result.status == "skipped" or result.error_class in {  # skipped or refused: never launched a measurement
-            "capability_unsupported",
+            speculative_capability.CAPABILITY_UNSUPPORTED,
             "yaml_build_error",
             _BENCHMARK_CAP_ERROR,
             _WARMUP_YAML_BUILD_ERROR,
@@ -1924,26 +1925,25 @@ def _build_variant_yaml(
     elif extra_args_env in envs or variant.args_mode == "replace" or base.args_mode == "replace":
         envs[extra_args_env] = ""
     base_envs = apply_variant_env(envs, variant, base.extra_envs, base.unset_envs)
-    from hyperloom.inference_optimizer.runtime_environment import prepend_launch_path
-
     pin_mlperf_round_concurrency(envs)
-    # The launcher re-exports these unconditionally, so a value carried here is
-    # one the run never used.
+    # The launcher re-exports these unconditionally, so a value carried here is one the run never used.
     for k in launcher_overwritten_envs(bench) & envs.keys():
         log.warning("grid: dropping %s for variant %s; the recipe overwrites it", k, variant.name)
         envs.pop(k, None)
     # The three AgentX bounds took this rung's CONC through ``variant_conc`` above, not through this merge: raising
     # the client's grace alone would make the round wait inside a cap that did not move with it.
-    _overlay = importable_overlay_dir(variant)
-    if _overlay:
+    if _overlay := importable_overlay_dir(variant):
         prepend_launch_path(envs, "PYTHONPATH", _overlay)
 
     # Attempt runtime override: inject path_prefix/pythonpath_prefix/framework_bin etc. into benchmark.envs so the
     # server subprocess resolves the attempt runtime.
-    _rt_override = getattr(variant, "runtime_override", None) or {}
-    if _rt_override:
+    if _rt_override := getattr(variant, "runtime_override", None):
         apply_runtime_override(envs, _rt_override)
     refuse_unpinned_speculative_change(base_args, base_envs, combined, envs)
+    # ``envs`` is the launch's environment, TP included; the AgentX branch meets it in ``materialize_variant``.
+    speculative_capability.refuse_unrunnable_speculative_stack(
+        combined, framework=str(bench.get("framework") or ""), envs=envs, model_path=target.model_path
+    )
 
     pin_xdit_tool_path(envs, bench.get("framework"))
 

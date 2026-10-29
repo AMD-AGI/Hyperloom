@@ -981,12 +981,12 @@ PY
 # any more, so there is nothing to install -- only something to verify. The
 # three imports are the ones whose absence used to be found late:
 #   kernelforge.cli      forge-loop's entry point (the 2026-07-28 ModuleNotFoundError)
-#   kernelforge.fusion   forge-fuse, which imports fine only if the tree is complete
+#   kernelforge.workflows.forge_fusion   forge-fuse, which imports fine only if the tree is complete
 #   openai_codex         the agent runtime for an OpenAI-only deployment; without
 #                        it the provider fallback silently becomes a claude run
 #                        that dies at its first turn on "Not logged in"
 _check_kernelforge_ready() {
-  if "$PYTHON" -c "import kernelforge.cli, kernelforge.fusion" >/dev/null 2>&1; then
+  if "$PYTHON" -c "import kernelforge.cli, kernelforge.workflows.forge_fusion" >/dev/null 2>&1; then
     log "kernelforge (built-in kernel-opt agent) OK"
   else
     warn "kernelforge not importable after install; forge kernel attempts will fail"
@@ -1017,7 +1017,7 @@ ensure_forge_gemm_tune() {
   # same lesson against a checkout instead of against a packaged subpackage.)
   local probe='
 import sys
-import kernelforge.gemm_tune.pipeline  # noqa: F401
+import kernelforge.workflows.gemm_tune.pipeline  # noqa: F401
 from kernelforge.cli import main
 sys.exit(0 if "gemm-tune" in getattr(main, "commands", {}) else 1)
 '

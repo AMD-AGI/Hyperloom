@@ -12,17 +12,17 @@ from types import SimpleNamespace
 
 import pytest
 
-from kernelforge.tools.process_reaping import ReapReport
+from kernelforge.utils.process_reaping import ReapReport
 
-from kernelforge.orchestrator import orchestration as orchestration_module
-from kernelforge.orchestrator import lane_prompts as lane_prompts_module
-from kernelforge.orchestrator.lane_prompts import lane_last_prompt
+from kernelforge.workflows.forge_loop.roles import orchestration as orchestration_module
+from kernelforge.workflows.forge_loop.roles import lane_prompts as lane_prompts_module
+from kernelforge.workflows.forge_loop.roles.lane_prompts import lane_last_prompt
 from kernelforge.agent_backends import (
     AgentCapabilities,
     AgentProviderUnavailableError,
     AgentRunResult,
 )
-from kernelforge.orchestrator.contracts import (
+from kernelforge.workflows.forge_loop.roles.contracts import (
     CaseEvidence,
     DispatchPlan,
     EvidenceRef,
@@ -34,21 +34,21 @@ from kernelforge.orchestrator.contracts import (
     SpecialistDefinition,
     SynthesizedPlan,
 )
-from kernelforge.orchestrator.orchestration import (
+from kernelforge.workflows.forge_loop.roles.orchestration import (
     OrchestrationAgent,
     OrchestrationInfrastructureError,
     OrchestrationService,
     make_orchestration_service,
 )
-from kernelforge.orchestrator import specialists as specialists_module
-from kernelforge.orchestrator.specialists import (
+from kernelforge.workflows.forge_loop.roles import specialists as specialists_module
+from kernelforge.workflows.forge_loop.roles.specialists import (
     SpecialistAgent,
     SpecialistPool,
     SpecialistProbeConfig,
     build_specialist_prompts,
 )
-from kernelforge.orchestrator.plan_critic import PlanCriticAgent
-from kernelforge.orchestrator.summary_line import PLAN_SUMMARY_RULE
+from kernelforge.workflows.forge_loop.roles.plan_critic import PlanCriticAgent
+from kernelforge.workflows.forge_loop.roles.summary_line import PLAN_SUMMARY_RULE
 
 
 def _context() -> OrchestrationContext:

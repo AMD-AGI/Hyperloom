@@ -49,7 +49,7 @@ def export_runs(log_roots: tuple[Path, ...], output: Path) -> None:
     Collect the document with `hyperloom-kb-collect --mapping kernelforge-v1 --document <output>`.
     """
 
-    from kernelforge.run_export.document import normalize, write_document
+    from kernelforge.workflows.forge_loop.export.document import normalize, write_document
 
     try:
         document = normalize(log_roots)

@@ -14,9 +14,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import kernelforge.fusion.harness_authoring as harness_authoring
-from kernelforge.fusion.author import AuthorAgent
-from kernelforge.fusion.models import Recipe
+import kernelforge.workflows.forge_fusion.harness_authoring as harness_authoring
+from kernelforge.workflows.forge_fusion.author import AuthorAgent
+from kernelforge.workflows.forge_fusion.models import Recipe
 
 _ANCHOR = "void bf16_to_fp32_copy(int)"
 _AFTER = "void sglang::flash_c4_prefill<512l>(Params)"

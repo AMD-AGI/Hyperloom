@@ -3,7 +3,7 @@
 
 """Tests for shapes module."""
 
-from kernelforge.gemm_tune.shapes import (
+from kernelforge.workflows.gemm_tune.shapes import (
     compute_token_coverage,
     compute_vllm_moe_batch_sizes,
 )

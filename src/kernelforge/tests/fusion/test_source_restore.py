@@ -12,13 +12,17 @@ from types import SimpleNamespace
 import pytest
 from click.testing import CliRunner
 
-from kernelforge.fusion import pipeline as cli
-from kernelforge.fusion import compile_pass_claim
-from kernelforge.fusion.compile_pass_claim import _live_file_restored
-from kernelforge.fusion.source_snapshot import _discard_failed_attempt, _needs_discard, _snapshot_fusion_source
+from kernelforge.workflows.forge_fusion import pipeline as cli
+from kernelforge.workflows.forge_fusion import compile_pass_claim
+from kernelforge.workflows.forge_fusion.compile_pass_claim import _live_file_restored
+from kernelforge.workflows.forge_fusion.source_snapshot import (
+    _discard_failed_attempt,
+    _needs_discard,
+    _snapshot_fusion_source,
+)
 from kernelforge.cli.forge_fuse_command import forge_fuse as cli_main
-from kernelforge.fusion.loop import LoopResult
-from kernelforge.fusion.models import ValidationResult
+from kernelforge.workflows.forge_fusion.loop import LoopResult
+from kernelforge.workflows.forge_fusion.models import ValidationResult
 
 PRISTINE = "import torch\n\n\ndef forward(x):\n    return x\n"
 AUTHORED = "import torch\nfrom .qwen3_fused import fused\n\n\ndef forward(x):\n    return fused(x)\n"
@@ -168,7 +172,7 @@ def test_without_a_recorded_inventory_nothing_is_deleted(tmp_path):
 
 def test_no_inventory_means_nothing_is_claimed_as_author_created(tmp_path):
     """Deleting from site-packages on a guess is not worth risking."""
-    from kernelforge.fusion.source_snapshot import _author_created_modules
+    from kernelforge.workflows.forge_fusion.source_snapshot import _author_created_modules
 
     root = tmp_path / "site-packages"
     models = root / "pkg"

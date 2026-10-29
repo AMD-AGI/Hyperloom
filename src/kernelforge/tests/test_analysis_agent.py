@@ -12,19 +12,19 @@ from types import SimpleNamespace
 import pytest
 
 from kernelforge.agent_backends import AgentRunResult
-from kernelforge.orchestrator.analysis import (
+from kernelforge.workflows.forge_loop.roles.analysis import (
     AnalysisAgentService,
     AnalysisBundleError,
     AnalysisConfigurationError,
     AnalysisSources,
     IncrementalAnalysisInput,
 )
-from kernelforge.orchestrator.analysis_protection import AnalysisProtection
-from kernelforge.orchestrator.analysis_session import (
+from kernelforge.workflows.forge_loop.roles.analysis_protection import AnalysisProtection
+from kernelforge.workflows.forge_loop.roles.analysis_session import (
     AnalysisAttemptLimitError,
     AnalysisSessionJournal,
 )
-from kernelforge.orchestrator.contracts import (
+from kernelforge.workflows.forge_loop.roles.contracts import (
     CaseEvidence,
     OrchestrationContext,
 )

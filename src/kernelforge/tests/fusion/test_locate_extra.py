@@ -14,8 +14,8 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.fusion import locate
-from kernelforge.fusion.locate import (
+from kernelforge.workflows.forge_fusion import locate
+from kernelforge.workflows.forge_fusion.locate import (
     _first_source_file,
     _package_dir,
     _read_source,
@@ -163,7 +163,7 @@ class TestVllmRegisteredSource:
         self._config(monkeypatch, "some", "SomeArch")
         monkeypatch.setattr(locate, "_package_dir", lambda pkg: "")
 
-        with caplog.at_level(logging.WARNING, logger="kernelforge.fusion.locate"):
+        with caplog.at_level(logging.WARNING, logger="kernelforge.workflows.forge_fusion.locate"):
             resolve_framework_source_file("/m", "vllm")
 
         assert [r for r in caplog.records if "SomeArch" in r.getMessage()]

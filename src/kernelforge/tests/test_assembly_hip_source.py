@@ -10,14 +10,14 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.assembly import hip_source
-from kernelforge.assembly.capture import bind_compile
-from kernelforge.assembly.compiler import AssemblyError
+from kernelforge.kernel_backends.assembly import hip_source
+from kernelforge.kernel_backends.assembly.capture import bind_compile
+from kernelforge.kernel_backends.assembly.compiler import AssemblyError
 from kernelforge.tests.test_assembly_preparation import ASM
 
 
 def test_hip_binding_keeps_original_build_arguments():
-    original = 'from kernelforge.assembly.hip_source import compile_hip as build\ndef compile(source, out):\n    return build(source, out, gpu_target="gfx950", flags=("-O3", "-DSIZE=256"))\n'
+    original = 'from kernelforge.kernel_backends.assembly.hip_source import compile_hip as build\ndef compile(source, out):\n    return build(source, out, gpu_target="gfx950", flags=("-O3", "-DSIZE=256"))\n'
     bound = bind_compile(original, "kernel.s", "gfx950", export=True)
     assert "HIPAssembly" in bound
     assert 'return _forge_assembly(source, out, gpu_target="gfx950", flags=("-O3", "-DSIZE=256"))' in bound
