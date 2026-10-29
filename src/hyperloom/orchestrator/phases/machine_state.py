@@ -78,8 +78,10 @@ DEFAULT_PHASE_BUDGET_PCT: dict[str, float] = {
     PHASE_CLOSE: 0.02,
 }
 
-# Share of the session held back for the phases that actually produce a result.
+# Share of the session held back for the phases that actually produce a result, and the reason a round
+# PRELUDE can no longer pay for out of what is left outside it is refused.
 OPTIMIZATION_RESERVE_PCT: float = 0.50
+RETRY_PAST_THE_RESERVE: str = "retry_past_the_optimization_reserve"
 
 # Wall-clock ceiling for an unbounded run (``max_minutes`` == 0): the container lifetime.
 DEFAULT_LONGRUN_MAX_MINUTES: int = 14 * 24 * 60
@@ -739,13 +741,12 @@ def session_usable_seconds(state: Any) -> float | None:
 def prelude_affordable_seconds(state: Any) -> tuple[float | None, dict[str, Any]]:
     """Seconds PRELUDE may still spend, and the numbers the figure is built from.
 
-    The reserve is an absolute share of the session, so once preparation has eaten past it the
-    subtraction would run negative. A negative is not a quantity of seconds anyone can spend: the
-    figure is floored at zero, the same shape :meth:`SharedState.session_budget_usable_sec` keeps, so
-    every caller reads one meaning -- zero is "nothing left outside the reserve", not a debt that
-    grows while the phase waits. Reaching zero refuses a baseline retry at admission
-    (:func:`..actions.executors._round_budget._a_retry_past_the_reserve_line`) and is a terminal for an
-    idle PRELUDE (:func:`.prelude_exits._prelude_budget_line`), not a number the phase sits on.
+    The reserve is an absolute share of the session, so once preparation has eaten past it the subtraction
+    would run negative. A negative is not a quantity of seconds anyone can spend: the figure is floored at
+    zero, the same shape :meth:`SharedState.session_budget_usable_sec` keeps, so every caller reads one
+    meaning -- zero is "nothing left outside the reserve", not a debt that grows while the phase waits.
+    Reaching zero refuses a baseline retry at admission (:func:`a_retry_past_the_reserve_line`) and is a
+    terminal for an idle PRELUDE (:func:`.prelude_exits._prelude_budget_line`), not a number the phase sits on.
     """
     max_sec = _max_minutes(state) * 60.0
     usable = session_usable_seconds(state)
@@ -761,11 +762,7 @@ def prelude_affordable_seconds(state: Any) -> tuple[float | None, dict[str, Any]
     }
 
 
-def prelude_can_afford(
-    state: Any,
-    *,
-    expected_cost_sec: float,
-) -> tuple[bool, dict[str, Any]]:
+def prelude_can_afford(state: Any, *, expected_cost_sec: float) -> tuple[bool, dict[str, Any]]:
     """Decide whether PRELUDE can still buy an optional arm costing ``expected_cost_sec``."""
     cost = max(0.0, float(expected_cost_sec or 0.0))
     affordable_sec, evidence = prelude_affordable_seconds(state)
@@ -773,6 +770,38 @@ def prelude_can_afford(
     if affordable_sec is None:
         return True, priced
     return affordable_sec >= cost, priced
+
+
+def round_headroom_sec(state: Any) -> tuple[float | None, dict[str, Any]]:
+    """Seconds this round's budget may still spend, and the numbers behind it."""
+    if state is None:
+        return None, {"reason": "no_session_state"}
+    usable_sec = session_usable_seconds(state)
+    if usable_sec is None:
+        return None, {"reason": "unbounded_session_budget"}
+    return usable_sec, {"bound": "session_usable", "affordable_sec": round(usable_sec, 1)}
+
+
+def a_use_must_follow_the_round(state: Any) -> bool:
+    """Whether this round is only worth running if something can be measured after it."""
+    return str(getattr(state, "phase", "") or "").strip().upper() == PHASE_PRELUDE
+
+
+def a_retry_past_the_reserve_line(state: Any) -> tuple[bool, dict[str, Any]]:
+    """Whether this is a PRELUDE baseline retry the phase can no longer pay for.
+
+    A retry after a failed baseline comes out of PRELUDE's own allowance, not the reserve the first one is
+    priced against (:func:`prelude_affordable_seconds`), and once that allowance is gone it may not start one.
+    """
+    if not a_use_must_follow_the_round(state):
+        return False, {}
+    streak = int(getattr(state, "baseline_failure_streak", 0) or 0)
+    if streak < 1:
+        return False, {}
+    affordable_sec, evidence = prelude_affordable_seconds(state)
+    if affordable_sec is None or affordable_sec > 0.0:
+        return False, {}
+    return True, {"reason": RETRY_PAST_THE_RESERVE, "baseline_failure_streak": streak, **evidence}
 
 
 def _resolve_plateau_overrides(state: Any) -> dict[str, Any]:

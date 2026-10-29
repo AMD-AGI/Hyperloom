@@ -85,8 +85,6 @@ from ._grid_runner import (
     stopped_by_the_run,
     sync_benchmark_timeout,
 )
-from ._round_budget import RETRY_PAST_THE_RESERVE, _a_retry_past_the_reserve_line
-from ._round_budget import _a_use_must_follow_the_round, _round_headroom_sec
 from ._subprocess_kill import (
     AGENTX_PREFLIGHT_ERROR_CLASS,
     DETOKENIZER_STALL_RETURNCODE,
@@ -2525,7 +2523,7 @@ class BenchmarkRunExecutor:
             },
         )
         stopped_result["budget_shortfall"] = evidence
-        if evidence.get("reason") == RETRY_PAST_THE_RESERVE:
+        if evidence.get("reason") == _phase_state.RETRY_PAST_THE_RESERVE:
             log.warning(
                 "baseline_executor: the baseline has failed %d time(s) and PRELUDE has spent "
                 "everything outside the %.0fs optimization reserve (%.0fs usable), so no retry "
@@ -2813,7 +2811,7 @@ class BenchmarkRunExecutor:
     ) -> tuple[bool, dict[str, Any]]:
         """Whether the budget holds a whole round *and a use for it*, before anything boots."""
         state = (ctx_extra or {}).get("shared_state") or self.shared_state
-        past_the_line, reserve_evidence = _a_retry_past_the_reserve_line(state)
+        past_the_line, reserve_evidence = _phase_state.a_retry_past_the_reserve_line(state)
         if past_the_line:
             return False, reserve_evidence
         return self._round_affordable(
@@ -2828,11 +2826,11 @@ class BenchmarkRunExecutor:
         if cold_sec is None or round_sec is None:
             return True, {"reason": "no_measured_round_to_predict_from"}
         use_sec = 0.0
-        if _a_use_must_follow_the_round(state):
+        if _phase_state.a_use_must_follow_the_round(state):
             # Without the split, a variant is priced at a whole cold round, which is what it is: a boot and a
             # benchmark that pays the compile.
             use_sec = _phase_state.one_more_measurement_sec(state) or cold_sec
-        headroom_sec, evidence = _round_headroom_sec(state)
+        headroom_sec, evidence = _phase_state.round_headroom_sec(state)
         if headroom_sec is None:
             return True, evidence
         cost = round_sec + use_sec
@@ -2853,7 +2851,7 @@ class BenchmarkRunExecutor:
     ) -> tuple[bool, dict[str, Any]]:
         """Whether the budget covers the measured round *and a use for it*."""
         state = (ctx_extra or {}).get("shared_state") or self.shared_state
-        headroom_sec, evidence = _round_headroom_sec(state)
+        headroom_sec, evidence = _phase_state.round_headroom_sec(state)
         if headroom_sec is None:
             return True, evidence
         warmup_sec = optional_positive_float(warmup_runtime_sec)
@@ -2865,7 +2863,7 @@ class BenchmarkRunExecutor:
         if benchmark_sec is None or warmup_sec is None:
             return True, {"reason": "no_measured_benchmark_to_predict_from", **evidence}
         use_sec = 0.0
-        if _a_use_must_follow_the_round(state):
+        if _phase_state.a_use_must_follow_the_round(state):
             use_sec = _phase_state.one_more_measurement_sec(state) or warmup_sec
         cost = benchmark_sec + use_sec
         priced = {

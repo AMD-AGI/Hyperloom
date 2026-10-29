@@ -21,7 +21,6 @@ import yaml
 
 from hyperloom.orchestrator.actions.executors.baseline import (
     MEASURE_ROUND_DROPPED_WARNING,
-    RETRY_PAST_THE_RESERVE,
     BaselineExecutor,
 )
 from hyperloom.orchestrator.actions.executors.profile import (
@@ -44,6 +43,7 @@ from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     stamp_server_ready,
 )
 from hyperloom.orchestrator.actions.stop_attribution import STOPPED_BY_THE_RUN
+from hyperloom.orchestrator.phases.machine_state import RETRY_PAST_THE_RESERVE
 from hyperloom.inference_optimizer.trace.task_progress import progress_scope
 
 from .conftest import (

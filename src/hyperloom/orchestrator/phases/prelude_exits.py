@@ -72,7 +72,7 @@ def _prelude_budget_line(baseline: dict[str, Any], pending: dict[str, Any]) -> d
     """The evidence that PRELUDE is out of its own budget with no baseline and nothing left to dispatch.
 
     Past this line baseline admission refuses a retry outright
-    (:func:`executors._round_budget._a_retry_past_the_reserve_line` reads the same allowance), so the
+    (:func:`.machine_state.a_retry_past_the_reserve_line` reads the same allowance), so the
     agent has no arm left to propose: whatever it asks for comes back unlaunched. The terminal records a
     decision the machine has already made rather than pre-empting one. Holding the phase open there
     spends the reserve on an idle preparation instead of on the optimization the reserve is held for,

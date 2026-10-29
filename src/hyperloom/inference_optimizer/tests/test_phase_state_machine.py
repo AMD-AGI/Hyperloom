@@ -1024,8 +1024,6 @@ async def test_a_first_failure_with_no_allowance_left_closes_the_session(coordin
     retry the Orchestration agent could get launched and nothing is lost by closing here. The enablement
     lane is off, so no other phase takes the failed baseline over and the budget line is the live one.
     """
-    from hyperloom.orchestrator.actions.executors import baseline as baseline_executor
-
     c = coordinator_with_mocks
     try:
         c.shared_state.enablement_mode = "off"
@@ -1033,7 +1031,7 @@ async def test_a_first_failure_with_no_allowance_left_closes_the_session(coordin
         c.shared_state.baseline_failure_streak = 1
         c.shared_state.session_budget_usable_sec = lambda: 14_718.5
 
-        refused, shortfall = baseline_executor._a_retry_past_the_reserve_line(c.shared_state)
+        refused, shortfall = phase_state.a_retry_past_the_reserve_line(c.shared_state)
         assert refused is True, "a retry past the line must be refused before the machine reads the terminal"
         assert shortfall["affordable_sec"] == 0.0
 
