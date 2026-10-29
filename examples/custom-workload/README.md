@@ -93,11 +93,13 @@ Your numbers will differ; the ranking is machine-dependent, which is the point.
 > you generated there.
 
 This example has no upstream repository of its own, so copy it out of the clone and run it from
-there:
+there. The block below works from any directory -- including the one the standalone run above
+leaves you in:
 
 ```bash
-cp -r examples/custom-workload ~/custom-workload-run
-cd ~/custom-workload-run
+export HYPERLOOM=/path/to/your/Hyperloom/clone
+
+cp -r "$HYPERLOOM/examples/custom-workload" ~/custom-workload-run && cd ~/custom-workload-run
 
 export HYPERLOOM_BENCHMARK_BACKEND=bypass
 export HYPERLOOM_BYPASS_SCRIPTS_DIR="$PWD"
