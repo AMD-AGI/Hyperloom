@@ -21,7 +21,7 @@ from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.blackboard.records import BlackboardSnapshot, amdahl_ceiling_pct
 from hyperloom_multibranch.contracts.blackboard.vocab import ClaimStatus
 from hyperloom_multibranch.blackboard.families import OP_FAMILIES, family_of, op_family
-from hyperloom_multibranch.blackboard.rsi.menu import explored, record_family
+from hyperloom_multibranch.blackboard.rsi.menu import explored, profiled_commit, record_family
 from hyperloom_multibranch.blackboard.rsi.playbook import H0, Playbook
 
 #: How many ops the open areas list at most.
@@ -86,10 +86,6 @@ class OpenAreas:
         return "\n".join(lines)
 
 
-def _profiled(snapshot: BlackboardSnapshot, head: str) -> str:
-    return next((commit for commit in (head, *snapshot.lineage.ancestry(head)) if commit in snapshot.op_shares), "")
-
-
 def _covered(snapshot: BlackboardSnapshot) -> dict[str, tuple[str, ...]]:
     """The op families the running specialist branches work on, each with the branches: a claim held, or the last
     explore test."""
@@ -133,7 +129,7 @@ def open_areas(
 
     numbers = playbook.numbers
     integration = next((node for node in snapshot.lineage.branches if node.branch == INTEGRATION_BRANCH), None)
-    profiled = _profiled(snapshot, integration.head_commit) if integration is not None else ""
+    profiled = profiled_commit(snapshot, integration.head_commit) if integration is not None else ""
     covered = _covered(snapshot)
     failed = {family: count for family, count in _failed(snapshot).items() if count >= numbers.failed_op_limit}
     shares = snapshot.op_shares[profiled].largest(len(snapshot.op_shares[profiled].shares)) if profiled else ()

@@ -151,7 +151,7 @@ def test_the_untried_line_offers_a_hot_op_family_at_a_layer_no_test_acted_on_at_
     assert untried.untried and untried.family == Family("moe", Mechanism.OTHER, SOURCE)
     assert (untried.tests, untried.odds) == (0.0, pytest.approx(base_rate(SOURCE)))
     assert untried.gain_pct <= amdahl_ceiling_pct(30.0)
-    assert untried.marks == (f"{UNTOUCHED}; its ops take 30% of this commit's profile",)
+    assert untried.marks == (f"{UNTOUCHED}; its ops take 30% of the profile of c1",)
     assert untried.render().startswith("untried, moe · other · source: commit odds 0.24 over 0.0 tests")
     # norm's 2% is under the bar, so it is not offered at all.
     assert 2.0 < HOT_OP_SHARE_PCT and not any(item.untried for item in menu.items[:-1])
@@ -185,22 +185,20 @@ def test_a_server_on_one_gpu_is_offered_no_parallelism_or_communication_on_any_l
     assert parallel in {item.family for item in on_eight.items}
 
 
-def test_an_op_family_the_commits_profile_shows_no_op_of_is_on_no_line(snapshot: BlackboardSnapshot) -> None:
+def test_an_op_family_the_nearest_profile_shows_no_op_of_is_on_no_line(snapshot: BlackboardSnapshot) -> None:
     moe = Family("moe", Mechanism.KERNEL_TUNING, KERNEL)
     evidence = MenuEvidence({moe: FamilyStat(10.0, 10.0, (50.0,))}, {})
     dense = OpShares("c1", "j1", "p1", {"paged_attention_ll4mi": 40.0, "gemm_a16w16": 30.0})
     sparse = OpShares("c1", "j1", "p1", {**dense.shares, "fused_moe_kernel": 20.0})
+    root = dataclasses.replace(dense, commit_id="c0")
 
-    on_dense = direction_menu(
-        dataclasses.replace(snapshot, op_shares={"c1": dense}), "s1", "c1", evidence, metric=METRIC
-    )
-    on_sparse = direction_menu(
-        dataclasses.replace(snapshot, op_shares={"c1": sparse}), "s1", "c1", evidence, metric=METRIC
-    )
-    unprofiled = direction_menu(snapshot, "s1", "c1", evidence, metric=METRIC)
+    def offered(shares: dict[str, OpShares]) -> set[Family]:
+        menu = direction_menu(dataclasses.replace(snapshot, op_shares=shares), "s1", "c1", evidence, metric=METRIC)
+        return {item.family for item in menu.items}
 
-    assert not any(item.family.target == "moe" for item in on_dense.items)
-    assert moe in {item.family for item in on_sparse.items} and moe in {item.family for item in unprofiled.items}
+    # c1 builds on the root c0, so the root's profile stands for c1's until c1 has one of its own.
+    assert not any(family.target == "moe" for family in offered({"c1": dense}) | offered({"c0": root}))
+    assert moe in offered({"c1": sparse}) and moe in offered({"c0": root, "c1": sparse}) and moe in offered({})
 
 
 def test_the_untried_line_offers_no_warm_start_replay_as_replays_come_from_the_kb(snapshot: BlackboardSnapshot) -> None:

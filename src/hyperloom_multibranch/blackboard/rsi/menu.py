@@ -14,7 +14,8 @@ this session holds evidence of by commit odds times the gain within reach over t
 * the gain within reach is the family's typical gain where it committed, drawn toward the usual gain of any commit as
   if that were :data:`GAIN_PRIOR_COMMITS` more commits, so a gain counts as much as the commits behind it weigh: one
   commit of a session far from this one moves it little; for an op family no more than the Amdahl ceiling of its ops on
-  the commit's profile, for a component no more than the roofline headroom;
+  the commit's profile, the profile of the nearest commit it builds on until it has one of its own
+  (:func:`profiled_commit`), for a component no more than the roofline headroom;
 * the cost of a test is the median GPU seconds of this session's tests of the family's layer, over that of them all.
 
 A line says whether the family was tried on the commit, another branch holds a claim in it, or the integration head
@@ -111,6 +112,13 @@ def explored(record: TestRecord) -> bool:
     )
 
 
+def profiled_commit(snapshot: BlackboardSnapshot, commit: str) -> str:
+    """The commit whose profile stands for ``commit``'s: ``commit`` itself when it was profiled, else the nearest commit
+    it builds on that was; empty when none was."""
+
+    return next((item for item in (commit, *snapshot.lineage.ancestry(commit)) if item in snapshot.op_shares), "")
+
+
 def record_family(snapshot: BlackboardSnapshot, record: TestRecord) -> Family | None:
     """The family of a test of the session, read off its intent and its change; ``None`` without its intent."""
 
@@ -191,8 +199,9 @@ def _within_reach(family: Family, typical: float, shares: OpShares | None, headr
 
 def _applies(family: Family, profile: SessionProfile | None, shares: OpShares | None) -> bool:
     """Whether ``family`` can act on the session's task at all: a server on one GPU runs no collective, so it has no
-    parallelism or communication to change, and an op family none of whose ops the commit's profile shows, such as moe
-    on a dense model, has no op to change; with no profile of the commit, every op family may."""
+    parallelism or communication to change, and an op family none of whose ops the commit's profile ``shares`` shows,
+    such as moe on a dense model, has no op to change; with no profile of the commit or a commit it builds on, every op
+    family may."""
 
     if family.target == Component.PARALLEL.value and profile is not None and profile.tp == 1:
         return False
@@ -214,8 +223,9 @@ def _untouched(shares: OpShares | None, known: Iterable[Family]) -> dict[Family,
         target = op_family(op)
         if target is not None:
             by_target[target] = by_target.get(target, 0.0) + share
+    profiled = shares.commit_id[:12] if shares is not None else ""
     offered = [
-        (target, layer, f"{UNTOUCHED}; its ops take {share:.0f}% of this commit's profile")
+        (target, layer, f"{UNTOUCHED}; its ops take {share:.0f}% of the profile of {profiled}")
         for target, share in by_target.items()
         if share >= HOT_OP_SHARE_PCT
         for layer in OP_LAYERS
@@ -337,7 +347,8 @@ def direction_menu(
     seen = _seen(snapshot, commit)
     gains = [gain for stat in evidence.archived.values() for gain in stat.gains]
     usual = statistics.median([*gains, *(gain for item in seen.values() for gain in item.gains)] or [DEFAULT_GAIN_PCT])
-    shares, headroom = snapshot.op_shares.get(commit), _headroom(snapshot, branch, commit, metric)
+    shares = snapshot.op_shares.get(profiled_commit(snapshot, commit))
+    headroom = _headroom(snapshot, branch, commit, metric)
     costs, marks = _costs(snapshot), _marks(snapshot, branch, commit)
     scoring = _Scoring(draws, usual, shares, headroom, costs)
     scored = [
@@ -532,5 +543,6 @@ __all__ = [
     "direction_note",
     "explored",
     "in_control",
+    "profiled_commit",
     "record_family",
 ]
