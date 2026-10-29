@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, NoReturn
 
-from hyperloom.common.proctree import TERM_GRACE_SEC
+from common.proctree import TERM_GRACE_SEC
 from hyperloom.common.visible_devices import COUNTING_VISIBLE_DEVICE_VARS
 
 from ._subprocess_kill import COOPERATIVE_REAP_BUDGET_SEC
@@ -318,7 +318,7 @@ class ManagedServerProcess:
 
     def stop(self, *, grace_seconds: float = TERM_GRACE_SEC) -> bool:
         """Confirm teardown of the enumerated live tree before dropping its handle."""
-        from hyperloom.common.proctree import collect_tree, kill_tree
+        from common.proctree import collect_tree, kill_tree
         from ._subprocess_kill import kill_my_spawned_server
 
         proc = self._proc

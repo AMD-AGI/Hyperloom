@@ -1561,7 +1561,7 @@ class KvMetricsRecorder:
         try:
             from pathlib import Path
 
-            from hyperloom.common.io import atomic_write_json
+            from common.io import atomic_write_json
 
             atomic_write_json(Path(self._output_path), payload)
         except (OSError, TypeError, ValueError):

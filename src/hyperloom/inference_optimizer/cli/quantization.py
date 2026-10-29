@@ -10,7 +10,7 @@ import os
 import sys
 from pathlib import Path
 
-from hyperloom.common.env import env_bool
+from common.env import env_bool
 
 
 async def _run_quantization_prelude(args: argparse.Namespace) -> None:

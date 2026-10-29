@@ -9,7 +9,7 @@ import dataclasses
 import threading
 from typing import Mapping
 
-from hyperloom.common.entry_points import DISCOVERY_FAILED, iter_entry_point_objects
+from common.entry_points import DISCOVERY_FAILED, iter_entry_point_objects
 from hyperloom.plugs.errors import PlugError
 from hyperloom.plugs.socket import Implementation, Socket
 

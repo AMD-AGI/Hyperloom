@@ -14,9 +14,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Collection, Final, Mapping
 
-from hyperloom.common.coerce import to_float
+from common.coerce import to_float
 
-from hyperloom.common.coerce import first_text, optional_positive_int
+from common.coerce import first_text, optional_positive_int
 from hyperloom.inference_optimizer.grid_server_args import (
     compose_server_args,
     dedupe_extra_server_args,

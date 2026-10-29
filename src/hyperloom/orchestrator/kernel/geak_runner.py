@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 from typing import IO
 
-from hyperloom.common.proctree import signal_group
+from common.proctree import signal_group
 
 _TAIL_CHARS = 4000
 

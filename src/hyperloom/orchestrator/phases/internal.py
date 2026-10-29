@@ -9,7 +9,7 @@ import os
 import re
 from typing import Any
 
-from hyperloom.common.env import env_bool
+from common.env import env_bool
 
 from ..state.task_registry import Task, TaskSpec
 from ..collaborator import CoordinatorCollaborator

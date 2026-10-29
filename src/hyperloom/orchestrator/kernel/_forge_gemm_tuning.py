@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from hyperloom.common.coerce import optional_positive_int
+from common.coerce import optional_positive_int
 from kernelforge.gemm_tune import RoutingEvidence, RoutingTarget
 
 from . import forge_gemm_tuning

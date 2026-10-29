@@ -9,8 +9,8 @@ import logging
 import os
 from typing import Any
 
-from hyperloom.common.coerce import to_int
-from hyperloom.common.env import env_flag
+from common.coerce import to_int
+from common.env import env_flag
 from hyperloom.common.gpu_partition import published_shape
 from hyperloom.inference_optimizer.multi_node._internal.external_state import (
     external_service_url,

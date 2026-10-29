@@ -12,8 +12,8 @@ from datetime import datetime, timezone
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Collection, Mapping, NamedTuple
 
-from hyperloom.common.coerce import first_float, recorded_float, to_float, to_int, to_mapping, to_str_list
-from hyperloom.common.io import JsonLineFormat, append_jsonl
+from common.coerce import first_float, recorded_float, to_float, to_int, to_mapping, to_str_list
+from common.io import JsonLineFormat, append_jsonl
 from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close_out
 from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
     ARM_CONFIG,

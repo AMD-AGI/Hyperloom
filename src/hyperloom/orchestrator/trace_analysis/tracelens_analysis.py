@@ -21,8 +21,8 @@ import uuid
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from hyperloom.common.coerce import first_str
-from hyperloom.common.io import JsonFormat, atomic_write_json
+from common.coerce import first_str
+from common.io import JsonFormat, atomic_write_json
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.framework_paths import (
     FRAMEWORK_SOURCE_PACKAGES as _FRAMEWORK_SOURCE_PACKAGES,

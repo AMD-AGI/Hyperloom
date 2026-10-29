@@ -13,7 +13,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.coerce import first_text, to_float, to_str_list
+from common.coerce import first_text, to_float, to_str_list
 from hyperloom.inference_optimizer import framework_paths
 
 from ...bringup import (

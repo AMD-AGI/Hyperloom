@@ -20,8 +20,8 @@ from typing import Any, Awaitable, Callable
 from urllib.parse import urlsplit
 
 from hyperloom.common.agent_cli import resolve_claude_executable
-from hyperloom.common.llm_config import claude_sdk_env_options
-from hyperloom.common.reasoning_effort import REASONING_EFFORT_RANK
+from common.llm_config import claude_sdk_env_options
+from common.reasoning_effort import REASONING_EFFORT_RANK
 from hyperloom.inference_optimizer.protocol.intent import (
     Intent,
     IntentValidationError,
@@ -30,7 +30,7 @@ from hyperloom.inference_optimizer.protocol.intent import (
 from ..prompts.transport import TRANSPORT_TOOLS
 from hyperloom.inference_optimizer.trace.llm_trace import new_call_id
 from hyperloom.inference_optimizer.trace.trajectory_trace import current_context
-from hyperloom.common.coerce import to_int
+from common.coerce import to_int
 from .base import (
     BackendError,
     BackendTurnResult,

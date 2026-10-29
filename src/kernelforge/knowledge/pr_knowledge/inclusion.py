@@ -50,7 +50,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
-from hyperloom.common.git_safety import safe_directory_args
+from common.git_safety import safe_directory_args
 from kernelforge.tools.git import GitError, git_bytes
 
 # At most three calls run, so a probe ends inside the 60 s the Forge agent gives one pr_monitor tool call.

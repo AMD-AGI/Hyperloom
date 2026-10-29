@@ -8,7 +8,7 @@ import subprocess
 import pytest
 from click.testing import CliRunner
 
-from hyperloom.common.env import EnvValueError
+from common.env import EnvValueError
 from kernelforge.cli import forge_loop
 from kernelforge.loop.bootstrap import run as forge_loop_run
 from kernelforge.loop.bootstrap.relay import SearchActorBuildContext

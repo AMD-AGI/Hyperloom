@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from hyperloom.common.token_usage import anthropic_usage_counts, openai_usage_counts
+from common.token_usage import anthropic_usage_counts, openai_usage_counts
 
 
 def test_openai_input_excludes_both_cache_shares():

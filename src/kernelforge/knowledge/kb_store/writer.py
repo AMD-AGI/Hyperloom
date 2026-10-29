@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.unified_diff import touched_paths
+from common.unified_diff import touched_paths
 
 from kernelforge.knowledge.kb_store.errors import (
     kb_store_secrets,

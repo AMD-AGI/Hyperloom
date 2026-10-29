@@ -25,9 +25,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TypeVar
 
-from hyperloom.common.coerce import first_str, first_text
-from hyperloom.common.fs_utils import append_text_nofollow
-from hyperloom.common.io import JsonFormat, WriteOptions, atomic_write_json
+from common.coerce import first_str, first_text
+from common.fs_utils import append_text_nofollow
+from common.io import JsonFormat, WriteOptions, atomic_write_json
 from hyperloom.common.deadline import Deadline, seconds_until
 from hyperloom.common.env_safety import BENCHMARK_SECRET_ENV_NAMES, redact_secret_values
 from hyperloom.common.timeutil import now_iso

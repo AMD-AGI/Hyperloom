@@ -458,7 +458,7 @@ def test_env_override_changes_absolute_floor(monkeypatch):
 
 
 def test_malformed_env_override_raises(monkeypatch):
-    from hyperloom.common.env import EnvValueError
+    from common.env import EnvValueError
 
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CYCLE_RELOOP_MIN_REMAINING_SEC", "not-a-number")
     with pytest.raises(EnvValueError):

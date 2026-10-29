@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.agentx_workload import is_agentx_client_script
-from hyperloom.common.coerce import first_text
+from common.coerce import first_text
 
 log = logging.getLogger(__name__)
 

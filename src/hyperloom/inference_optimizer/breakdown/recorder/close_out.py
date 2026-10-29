@@ -21,8 +21,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
-from hyperloom.common.coerce import to_float, to_int
-from hyperloom.common.fs_utils import relative_posix
+from common.coerce import to_float, to_int
+from common.fs_utils import relative_posix
 from hyperloom.common.gain_math import gain_pct_or_zero
 from hyperloom.common.timeutil import now_iso
 

@@ -362,7 +362,7 @@ def _server_liveness_probe(session_dir: Path, task_id: str) -> dict[str, Any]:
     process means the engine died instead of being torn down. That run can still have exported a complete trace,
     which is exactly why the result dict alone cannot show it.
     """
-    from hyperloom.common.proctree import running
+    from common.proctree import running
 
     from ._server_lifecycle import _looks_like_server_process
 

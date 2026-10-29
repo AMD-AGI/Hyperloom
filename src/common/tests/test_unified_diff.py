@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for ``hyperloom.common.unified_diff``."""
+"""Unit tests for ``common.unified_diff``."""
 
 from __future__ import annotations
 
-from hyperloom.common.unified_diff import (
+from common.unified_diff import (
     parse_unified_diff,
     strip_diff_path,
     strip_path_components,

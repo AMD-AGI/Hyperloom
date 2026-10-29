@@ -15,7 +15,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
-from hyperloom.common.env import env_bool
+from common.env import env_bool
 
 from .coverage import CoverageGap
 

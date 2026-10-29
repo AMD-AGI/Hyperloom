@@ -178,7 +178,7 @@ def _all_markers_present(path: Path, markers: tuple[str, ...]) -> bool:
 def _safe_directory_args(args: tuple[str, ...], cwd: Path) -> list[str]:
     """Prepend a ``safe.directory`` exception for the checkout at ``cwd``."""
     try:
-        from hyperloom.common.git_safety import safe_directory_args
+        from common.git_safety import safe_directory_args
     except ImportError:
         return list(args)
     return safe_directory_args(list(args), cwd=cwd)

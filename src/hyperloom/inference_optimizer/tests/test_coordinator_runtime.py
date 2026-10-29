@@ -2505,7 +2505,7 @@ async def test_a_registered_run_is_reachable_by_the_wall_clock_defences(tmp_path
 @pytest.mark.asyncio
 async def test_a_registered_run_labels_its_llm_calls_with_the_action(tmp_path):
     """This is the only place ``type`` is published for gateway attribution."""
-    from hyperloom.common.llm_attribution import current_action
+    from common.llm_attribution import current_action
 
     db = SqliteConnection(tmp_path / "x.db")
     locks = SqliteLeaseBackend(db)

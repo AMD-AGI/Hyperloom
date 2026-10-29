@@ -9,8 +9,8 @@ import logging
 import sqlite3
 from typing import Any, Mapping
 
-from hyperloom.common.coerce import to_float
-from hyperloom.common.env import is_truthy
+from common.coerce import to_float
+from common.env import is_truthy
 from hyperloom.common.perf_metric import constraint_fields, stamp_output_per_gpu
 from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name

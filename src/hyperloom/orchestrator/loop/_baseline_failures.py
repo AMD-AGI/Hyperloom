@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Mapping
 
-from hyperloom.common.coerce import to_float
+from common.coerce import to_float
 from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
 from hyperloom.inference_optimizer.breakdown.stop_reasons import AGENTX_PREFLIGHT_STOP_REASON
 

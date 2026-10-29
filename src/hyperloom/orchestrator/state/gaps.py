@@ -11,7 +11,7 @@ from hashlib import sha1
 from typing import TYPE_CHECKING, Any
 
 from ..collaborator import CoordinatorCollaborator
-from hyperloom.common.coerce import first_text
+from common.coerce import first_text
 from hyperloom.common.timeutil import now_iso
 
 from ._shared_state import gap_rows

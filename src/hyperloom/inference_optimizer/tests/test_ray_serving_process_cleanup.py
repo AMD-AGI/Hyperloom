@@ -22,7 +22,7 @@ import sys
 import time
 from pathlib import Path
 
-from hyperloom.common.proctree import group_members, running
+from common.proctree import group_members, running
 from hyperloom.orchestrator.actions.executors._ray_serving import ManagedServerProcess
 
 # Only this isolated harness adopts and reaps its orphaned descendants.

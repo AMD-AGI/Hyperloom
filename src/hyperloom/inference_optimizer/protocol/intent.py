@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-from hyperloom.common.coerce import to_int
+from common.coerce import to_int
 
 
 _ALERT_SEVERITIES: frozenset[str] = frozenset({"low", "medium", "high"})

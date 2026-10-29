@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.coerce import to_float, to_int
+from common.coerce import to_float, to_int
 
 
 def create_workspace(base_dir: Path, framework: str) -> Path:

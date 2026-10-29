@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.env import env_bool
+from common.env import env_bool
 
 log = logging.getLogger(__name__)
 

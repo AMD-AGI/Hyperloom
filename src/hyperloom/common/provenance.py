@@ -16,8 +16,8 @@ from importlib import metadata as _im
 from pathlib import Path
 from typing import Any, Mapping
 
-from hyperloom.common.coerce import to_int
-from hyperloom.common.gpu_identity import gfx_arch_for_gpu_type
+from common.coerce import to_int
+from common.gpu_identity import gfx_arch_for_gpu_type
 
 PROVENANCE_VERSION = 1
 

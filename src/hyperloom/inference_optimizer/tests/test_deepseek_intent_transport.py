@@ -12,8 +12,8 @@ from typing import Any
 
 import pytest
 
-from hyperloom.common import deepseek_session
-from hyperloom.common.deepseek_session import (
+from common import deepseek_session
+from common.deepseek_session import (
     DeepSeekSession,
     DeepSeekSessionError,
     DeepSeekSessionResult,

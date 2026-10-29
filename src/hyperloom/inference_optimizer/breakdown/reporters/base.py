@@ -10,7 +10,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
-from hyperloom.common.coerce import dict_rows, to_float, to_mapping
+from common.coerce import dict_rows, to_float, to_mapping
 
 
 log = logging.getLogger(__name__)

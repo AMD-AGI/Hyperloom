@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.common import claude_oneshot
+from common import claude_oneshot
 
 
 class _FakeOptions:

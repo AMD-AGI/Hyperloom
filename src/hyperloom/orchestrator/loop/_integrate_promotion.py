@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Mapping, NamedTuple
 
-from hyperloom.common.coerce import to_str_list
+from common.coerce import to_str_list
 from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 

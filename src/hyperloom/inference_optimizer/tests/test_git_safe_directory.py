@@ -9,7 +9,7 @@ import subprocess
 
 import pytest
 
-from hyperloom.common import git_safety
+from common import git_safety
 from hyperloom.orchestrator.actions.executors import _git
 
 

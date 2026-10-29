@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from hyperloom.common.coerce import dict_rows, to_mapping
+from common.coerce import dict_rows, to_mapping
 from hyperloom.inference_optimizer.protocol.intent import DEFAULT_IDLE_BODY
 
 from ..base import (

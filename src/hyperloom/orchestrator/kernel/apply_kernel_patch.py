@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Iterable, NamedTuple
 
 from hyperloom.common.timeutil import now_iso
-from hyperloom.common.unified_diff import PatchOp, PatchTarget, repo_relative_manifest
+from common.unified_diff import PatchOp, PatchTarget, repo_relative_manifest
 from hyperloom.inference_optimizer.multi_node.scripts.patch_path_safety import DEFAULT_KERNEL_BACKUP_ROOT
 
 from .patch_jit_cache import (

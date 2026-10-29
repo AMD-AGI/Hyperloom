@@ -21,7 +21,7 @@ from ._kernel_agent_tool import (
     _run_subprocess,
     _shape_tool_result,
 )
-from hyperloom.common.coerce import first_text
+from common.coerce import first_text
 from hyperloom.inference_optimizer.session import paths
 from hyperloom.inference_optimizer.trace.trajectory_trace import inherited_scope_fields
 from hyperloom.orchestrator.trace_analysis.analysis_route import AnalysisRoute

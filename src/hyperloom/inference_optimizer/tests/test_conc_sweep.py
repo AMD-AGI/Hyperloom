@@ -1663,7 +1663,7 @@ def test_flush_conc_sweep_report_is_atomic(session_dir: Path, monkeypatch: pytes
         "optimized": {"points": []},
     }
     # Should not raise even if atomic_write_text itself raises.
-    from hyperloom.common import io as _common_io
+    from common import io as _common_io
 
     monkeypatch.setattr(_common_io, "atomic_write_text", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
     _flush_conc_sweep_report(payload, session_dir)  # must not raise

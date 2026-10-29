@@ -18,8 +18,8 @@ from typing import Any, NamedTuple
 
 import yaml
 
-from hyperloom.common.coerce import to_float, to_int
-from hyperloom.common.env import is_truthy
+from common.coerce import to_float, to_int
+from common.env import is_truthy
 from hyperloom.common.env_safety import build_benchmark_env
 
 from . import bypass_engine

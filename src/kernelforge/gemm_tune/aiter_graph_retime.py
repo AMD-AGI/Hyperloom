@@ -24,7 +24,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from hyperloom.common.aiter_jit_cache import resolve_jit_build_dir, resolve_package_root
+from common.aiter_jit_cache import resolve_jit_build_dir, resolve_package_root
 
 from .aiter_splitk_validate import _operands, _resolve_device
 from .utils import run_subprocess

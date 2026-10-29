@@ -8,7 +8,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from hyperloom.common.coerce import recorded_float, to_unix
+from common.coerce import recorded_float, to_unix
 
 
 def elapsed_sec_of(record: Mapping[str, Any], *, now_unix: float) -> float:

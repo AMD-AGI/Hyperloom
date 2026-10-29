@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.coerce import dict_rows, first_str
+from common.coerce import dict_rows, first_str
 from hyperloom.common.jsonio import read_json
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.inference_optimizer.roofline_ceiling import (

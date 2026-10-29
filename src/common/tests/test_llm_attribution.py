@@ -10,9 +10,9 @@ import json
 
 import pytest
 
-from hyperloom.common import llm_attribution
-from hyperloom.common.llm_attribution import AttributionHeader
-from hyperloom.common.llm_headers import parse_custom_headers
+from common import llm_attribution
+from common.llm_attribution import AttributionHeader
+from common.llm_headers import parse_custom_headers
 
 _ATTR = llm_attribution.ATTRIBUTION_ENV
 _CLAW = llm_attribution.CLAW_SESSION_ID_ENV

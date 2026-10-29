@@ -22,8 +22,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
 
-from hyperloom.common.env import env_flag
-from hyperloom.common.proctree import TERM_GRACE_SEC, collect_tree, kill_tree, marked_pids
+from common.env import env_flag
+from common.proctree import TERM_GRACE_SEC, collect_tree, kill_tree, marked_pids
 
 from .bypass_analysis import parse_server_log_throughput
 
@@ -263,7 +263,7 @@ def default_benchmark_timeout_sec(env: Mapping[str, str] | None = None) -> float
 
     Sizing reads only workload pins -- the backend, the flow, ``CONC`` -- but it
     reads them as the run will: a pin it cannot parse raises
-    :class:`~hyperloom.common.env.EnvValueError` here rather than sizing the
+    :class:`~common.env.EnvValueError` here rather than sizing the
     grant for a workload the round will refuse to start.
     """
     from hyperloom.common.agentx_workload import (

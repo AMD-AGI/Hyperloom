@@ -12,7 +12,7 @@ import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 
-from hyperloom.common.unified_diff import touched_paths
+from common.unified_diff import touched_paths
 from kernelforge.evaluation.jit_rebuild import tracked_source_changes
 from kernelforge.tools.git import git, git_bytes
 from kernelforge.tools.new_path_allowlist import matches_commit_new_paths

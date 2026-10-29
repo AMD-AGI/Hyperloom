@@ -15,7 +15,7 @@ import pytest
 from hyperloom_kb.tests.database_fixtures import new_database, postgres_conninfo  # noqa: F401
 
 import hyperloom
-from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL
+from common.llm_config import DEFAULT_CLAUDE_MODEL
 from hyperloom.inference_optimizer import cli, experience_collect, experience_kb_service
 from hyperloom_kb import (
     GLOBAL_TOKEN_ENV,

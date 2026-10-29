@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.common.env import EnvValueError, env_bool
+from common.env import EnvValueError, env_bool
 from hyperloom.inference_optimizer.cli import parser as cli_parser
 from hyperloom.inference_optimizer.cli import bootstrap as cli_bootstrap
 from hyperloom.inference_optimizer.cli import quantization as cli_quantization

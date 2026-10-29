@@ -17,8 +17,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterator, Mapping
 
-from hyperloom.common.coerce import to_unix
-from hyperloom.common.env import forge_explicitly_enabled
+from common.coerce import to_unix
+from common.env import forge_explicitly_enabled
 from hyperloom.common.gpu_partition import published_shape
 from hyperloom.common.gpu_power_settings import SCLK_MAX_MHZ, DeclaredPowerSettings
 from hyperloom.common.perf_metric import agentx_enabled as _agentx_enabled, is_agentx_mode

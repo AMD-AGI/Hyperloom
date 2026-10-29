@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
 
-from hyperloom.common.unified_diff import parse_unified_diff
+from common.unified_diff import parse_unified_diff
 from hyperloom.inference_optimizer.session import paths
 
 from ._file_lock import best_effort_file_lock

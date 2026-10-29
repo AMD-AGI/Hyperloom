@@ -68,7 +68,7 @@ class _JsonResponse:
 
 
 def test_common_env_readers(monkeypatch: pytest.MonkeyPatch) -> None:
-    from hyperloom.common import env
+    from common import env
 
     monkeypatch.delenv("HL_BOOL", raising=False)
     assert env.env_bool("HL_BOOL", default=True) is True
@@ -90,7 +90,7 @@ def test_common_env_readers(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_env_float_invalid_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    from hyperloom.common.env import EnvValueError, env_float
+    from common.env import EnvValueError, env_float
 
     monkeypatch.setenv("HL_BAD_FLOAT", "not-a-float")
     with pytest.raises(EnvValueError):
@@ -101,7 +101,7 @@ def test_env_float_invalid_raises(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_common_atomic_writes_and_cleanup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from hyperloom.common import io
+    from common import io
 
     text_path = tmp_path / "nested" / "value.txt"
     io.atomic_write_text(text_path, "hello", options=io.WriteOptions(make_parents=True))
@@ -121,7 +121,7 @@ def test_common_atomic_writes_and_cleanup(tmp_path: Path, monkeypatch: pytest.Mo
 
 
 def test_common_io_bytes_and_safe_mtime_edges(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from hyperloom.common import io
+    from common import io
 
     path = tmp_path / "nested" / "payload.bin"
     io.atomic_write_bytes(path, b"abc", options=io.WriteOptions(make_parents=True, fsync=True, mode=0o777))
@@ -160,11 +160,11 @@ def test_gain_math_branches() -> None:
 
 
 def test_llm_config_parse_and_derive_edges() -> None:
-    from hyperloom.common.llm_config import (
+    from common.llm_config import (
         claude_sdk_env_options,
         derive_openai_base_url,
     )
-    from hyperloom.common.llm_headers import parse_custom_headers
+    from common.llm_headers import parse_custom_headers
 
     assert parse_custom_headers(None) == {}
     assert parse_custom_headers("   ") == {}
@@ -965,7 +965,7 @@ def test_infera_install_timeout_failure(monkeypatch: pytest.MonkeyPatch) -> None
 def test_framework_isolation_helpers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.agents.framework import isolation
     from hyperloom.agents.framework.models import Candidate
-    from hyperloom.common.env import EnvValueError
+    from common.env import EnvValueError
 
     repo_url = "https://github.com/sgl-project/sglang.git"
     candidate = Candidate(ref="PR:42")
@@ -1320,7 +1320,7 @@ def test_parse_quality_gate_paths(tmp_path: Path) -> None:
 
 
 def test_env_flag_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
-    from hyperloom.common import env as common_env
+    from common import env as common_env
 
     monkeypatch.setenv("HL_TEST_FLAG", "on")
     assert common_env.env_flag("HL_TEST_FLAG") is True

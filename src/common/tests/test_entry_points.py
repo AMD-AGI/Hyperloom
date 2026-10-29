@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from hyperloom.common import entry_points as ep
+from common import entry_points as ep
 
 
 class _Entry:

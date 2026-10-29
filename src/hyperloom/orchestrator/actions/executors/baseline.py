@@ -28,11 +28,11 @@ from typing import Any, Iterable, Iterator, Mapping, NamedTuple
 
 import yaml
 
-from hyperloom.common.coerce import optional_positive_float
-from hyperloom.common.env import is_truthy
+from common.coerce import optional_positive_float
+from common.env import is_truthy
 from hyperloom.common.gain_math import incremental_gain_pct
 from hyperloom.common.env_safety import redact_secret_values, scrub_benchmark_process_env
-from hyperloom.common.git_safety import safe_directory_args
+from common.git_safety import safe_directory_args
 from hyperloom.common.jsonio import read_json
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.perf_metric import agentx_active, is_agentx_mode, with_output_per_gpu

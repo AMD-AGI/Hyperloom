@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.aiter_jit_cache import (
+from common.aiter_jit_cache import (
     invalidate_jit_cache,
     resolve_jit_build_dir,
     resolve_package_root,

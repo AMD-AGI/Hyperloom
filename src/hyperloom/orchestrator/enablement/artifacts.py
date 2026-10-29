@@ -8,9 +8,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from hyperloom.common.coerce import first_text
-from hyperloom.common.io import WriteOptions, atomic_write_text
-from hyperloom.common.fs_utils import read_bytes_nofollow, regular_files_nofollow
+from common.coerce import first_text
+from common.io import WriteOptions, atomic_write_text
+from common.fs_utils import read_bytes_nofollow, regular_files_nofollow
 from hyperloom.inference_optimizer.grid_server_args import strip_benchmark_harness_flags
 from hyperloom.inference_optimizer.reference_script import ServingTarget
 from hyperloom.inference_optimizer.session.session_paths import (

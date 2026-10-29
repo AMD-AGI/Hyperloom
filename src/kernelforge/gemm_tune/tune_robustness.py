@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.env import env_bool
+from common.env import env_bool
 
 from .utils import check_gpu_status, run_subprocess
 

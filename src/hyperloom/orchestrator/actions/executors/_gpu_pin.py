@@ -10,7 +10,7 @@ import os
 from collections.abc import Mapping
 from typing import Any
 
-from hyperloom.common.env import env_float, env_int
+from common.env import env_float, env_int
 from hyperloom.common.visible_devices import (
     HIP_LEVEL_VARS,
     VISIBLE_DEVICE_VARS,

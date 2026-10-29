@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from hyperloom.common.io import atomic_write_json
+from common.io import atomic_write_json
 from TraceLens.Agent.Analysis.category_analyses.analysis_utils import build_operation_metrics, perf_report_csv_dir
 from TraceLens.Agent.Analysis.post_processing import TASK_SOURCE_COLUMNS, compute_tasks
 from TraceLens.Agent.Analysis.utils.config_utils import SCOPE_STANDALONE, check_config

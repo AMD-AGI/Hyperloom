@@ -14,9 +14,9 @@ import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
-from hyperloom.common.env import is_truthy
+from common.env import is_truthy
 from hyperloom.common.env_safety import operator_extra_env
-from hyperloom.common.gpu_identity import is_gfx_arch
+from common.gpu_identity import is_gfx_arch
 
 from ._grid_base import (
     GridVariant,

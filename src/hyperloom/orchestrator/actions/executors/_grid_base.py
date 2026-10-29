@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.coerce import to_str_list
+from common.coerce import to_str_list
 from hyperloom.common.env_safety import (
     BLOCKED_EXTERNAL_ENV_NAMES,
     filter_untrusted_env_mapping,

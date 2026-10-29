@@ -44,7 +44,7 @@ class _FakeSafe:
 
 
 def test_common_env_readers(monkeypatch: pytest.MonkeyPatch) -> None:
-    from hyperloom.common import env
+    from common import env
 
     monkeypatch.delenv("HL_BOOL", raising=False)
     assert env.env_bool("HL_BOOL", default=True) is True
@@ -66,7 +66,7 @@ def test_common_env_readers(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_common_atomic_writes_and_cleanup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from hyperloom.common import io
+    from common import io
 
     text_path = tmp_path / "nested" / "value.txt"
     io.atomic_write_text(text_path, "hello", options=io.WriteOptions(make_parents=True))

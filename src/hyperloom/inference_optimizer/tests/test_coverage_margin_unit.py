@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.common.env import EnvValueError, env_float
+from common.env import EnvValueError, env_float
 from hyperloom.inference_optimizer.breakdown.reporters._renderers import (
     roofline,
     workload,

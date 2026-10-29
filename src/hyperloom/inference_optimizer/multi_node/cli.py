@@ -21,7 +21,7 @@ from typing import Any
 
 import httpx
 
-from hyperloom.common.env import EnvValueError, env_int
+from common.env import EnvValueError, env_int
 
 from ._internal import ray_dashboard
 from ._internal import ssh_client, ssh_known_hosts

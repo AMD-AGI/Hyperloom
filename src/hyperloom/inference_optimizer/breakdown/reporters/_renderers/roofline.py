@@ -18,7 +18,7 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any
 
-from hyperloom.common.coerce import dict_rows, to_mapping
+from common.coerce import dict_rows, to_mapping
 
 from ..base import (
     RenderedSection,

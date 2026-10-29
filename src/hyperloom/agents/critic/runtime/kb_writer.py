@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from hyperloom.common.env import env_bool, env_float, env_int
+from common.env import env_bool, env_float, env_int
 
 from .dead_letter import DeadLetter
 from .errors import (

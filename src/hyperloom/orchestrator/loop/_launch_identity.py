@@ -13,7 +13,7 @@ import shlex
 from pathlib import Path
 from typing import Any, Mapping
 
-from hyperloom.common.coerce import to_str_list
+from common.coerce import to_str_list
 from hyperloom.common.launch_log_evidence import launch_argv_from_log, observed_server_identity_from_log
 from hyperloom.inference_optimizer.grid_server_args import merge_cumulative_extra_server_args
 

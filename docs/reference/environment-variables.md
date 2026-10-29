@@ -876,7 +876,7 @@ the call ledger for one session.
 Fields with per-call cardinality (a task or kernel id) are deliberately not in
 the tag list: one tag per task would give the rollup as many buckets as there
 are tasks. Supporting another gateway means adding a preset in
-`src/hyperloom/common/llm_attribution.py`, not setting a different string here.
+`src/common/llm_attribution.py`, not setting a different string here.
 
 ---
 

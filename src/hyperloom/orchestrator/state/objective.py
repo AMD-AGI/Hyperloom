@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from hyperloom.common.io import safe_mtime
+from common.io import safe_mtime
 from hyperloom.common.jsonio import read_json as _read_json
 
 from .shared_state import resolve_grading_anchor_tput

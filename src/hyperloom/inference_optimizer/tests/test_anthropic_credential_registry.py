@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.common import llm_config as lc
-from hyperloom.common.llm_config import (
+from common import llm_config as lc
+from common.llm_config import (
     ANTHROPIC_CREDENTIAL_ENV_ORDER,
     ANTHROPIC_SYNTHESIZABLE_KEY_ENVS,
     CLAUDE_GATEWAY_SIGNAL_KEYS,

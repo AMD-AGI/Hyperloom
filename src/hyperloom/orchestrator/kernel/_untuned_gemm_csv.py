@@ -10,7 +10,7 @@ import logging
 import subprocess
 from pathlib import Path
 
-from hyperloom.common.gpu_identity import is_gfx_arch
+from common.gpu_identity import is_gfx_arch
 from hyperloom.inference_optimizer.model_config_utils import config_scopes, load_model_config_dict
 
 log = logging.getLogger(__name__)

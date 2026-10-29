@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 from kernelforge.knowledge import normalize_operator_name
 
-from hyperloom.common.coerce import to_float
+from common.coerce import to_float
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
     EVENT_TYPE as KERNEL_EVENT_TYPE,
     OUTCOME_ADOPTED,

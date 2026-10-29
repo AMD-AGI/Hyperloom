@@ -9,8 +9,8 @@ import shutil
 from pathlib import Path
 from typing import Any, Mapping
 
-from hyperloom.common.coerce import to_str_list
-from hyperloom.common.unified_diff import PatchOp, repo_relative_manifest
+from common.coerce import to_str_list
+from common.unified_diff import PatchOp, repo_relative_manifest
 
 from ..actions.executors._kernel_agent_tool import HandlerResult
 from . import kernel_decisions

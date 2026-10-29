@@ -16,7 +16,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.coerce import dict_rows
+from common.coerce import dict_rows
 from hyperloom.common.jsonio import read_json
 
 from .sections import EVENT_SECTIONS, may_hold_event, section_glob, slug

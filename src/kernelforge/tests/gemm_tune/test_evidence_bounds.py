@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.common.env import EnvValueError
+from common.env import EnvValueError
 from kernelforge.gemm_tune import evidence as ev
 
 _MISS = (

@@ -17,11 +17,11 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common import llm_config
-from hyperloom.common.env import EnvValueError, env_bool
+from common import llm_config
+from common.env import EnvValueError, env_bool
 from hyperloom.common.gpu_partition import PartitionModel
-from hyperloom.common.llm_config import CLAUDE_OAUTH_TOKEN_ENV
-from hyperloom.common.llm_headers import parse_custom_headers
+from common.llm_config import CLAUDE_OAUTH_TOKEN_ENV
+from common.llm_headers import parse_custom_headers
 from .executors import (
     _build_specialist_executor,
     _register_executors,

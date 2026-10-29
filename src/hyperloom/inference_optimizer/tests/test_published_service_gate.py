@@ -15,7 +15,7 @@ from dataclasses import replace
 import httpx
 import pytest
 
-from hyperloom.common.env import EnvValueError
+from common.env import EnvValueError
 from hyperloom.inference_optimizer.multi_node._internal import external_state as ext
 from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle as life
 from hyperloom.orchestrator.actions.executors._multi_node_restart_settings import RestartSettings

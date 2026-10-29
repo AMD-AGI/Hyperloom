@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from hyperloom.common.coerce import dict_rows, to_mapping
+from common.coerce import dict_rows, to_mapping
 from hyperloom.inference_optimizer.breakdown.recorder.framework_event import ARM_CONFIG
 
 from ..base import events_of

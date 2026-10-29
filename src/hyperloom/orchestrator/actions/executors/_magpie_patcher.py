@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
-from hyperloom.common import io as _common_io
+from common import io as _common_io
 
 from ._file_lock import best_effort_file_lock
 

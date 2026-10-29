@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common import kernel_source_contract as _KSC
-from hyperloom.common.io import JsonFormat, atomic_write_json
+from common.io import JsonFormat, atomic_write_json
 
 from ._harness_discovery import find_benchmark_files, find_repo_root
 from ._io_utils import append_log

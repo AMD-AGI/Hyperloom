@@ -14,13 +14,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.llm_config import (
+from common.llm_config import (
     AGENT_BACKEND_DEEPSEEK,
     LLMConfigError,
     resolve_forge_llm_model,
     resolve_openai_client_config,
 )
-from hyperloom.common.reasoning_effort import DEFAULT_REASONING_EFFORT, harness_reasoning_effort
+from common.reasoning_effort import DEFAULT_REASONING_EFFORT, harness_reasoning_effort
 
 #: The route the harness mounts for DeepSeek models in its own default plugin
 #: composition. Naming any other provider needs a composition that mounts an

@@ -473,7 +473,7 @@ class EnablementParams(CoordinatorCollaborator):
         from .mandate import score_enablement_title
         from hyperloom.agents.framework.models import Candidate, CandidateSearchRequest, PRMonitorConfig
         from hyperloom.agents.framework.sources import enumerate_candidates
-        from hyperloom.common.pr_monitor_urls import pr_monitor_base_url
+        from common.pr_monitor_urls import pr_monitor_base_url
 
         max_candidates = int(getattr(req, "max_search_candidates", 5) or 5)
         # The PR query service is co-hosted by KB Store.

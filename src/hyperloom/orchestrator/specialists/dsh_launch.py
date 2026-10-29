@@ -19,8 +19,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from hyperloom.common.deepseek_session import DEEPSEEK_PROVIDER_ROUTE, DeepSeekSessionUnavailableError, gateway_env
-from hyperloom.common.fs_utils import write_text_nofollow
+from common.deepseek_session import DEEPSEEK_PROVIDER_ROUTE, DeepSeekSessionUnavailableError, gateway_env
+from common.fs_utils import write_text_nofollow
 from hyperloom.inference_optimizer.trace.agent_trace import AgentTrace
 from hyperloom.inference_optimizer.trace.parse_dsh_session import parse_dsh_session_trace
 

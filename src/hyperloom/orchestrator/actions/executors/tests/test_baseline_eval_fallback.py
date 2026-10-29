@@ -17,7 +17,7 @@ import pytest
 import yaml
 
 from hyperloom.orchestrator.state.shared_state import SharedState
-from hyperloom.common.env import is_truthy
+from common.env import is_truthy
 from hyperloom.orchestrator.actions.executors.baseline import (
     BaselineExecutor,
 )

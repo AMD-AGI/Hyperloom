@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import Any
 
 
-from hyperloom.common.coerce import to_mapping
+from common.coerce import to_mapping
 
 from ..base import RenderedSection, md_kv_list, register_renderer, stop_target_text, task_config_of
 

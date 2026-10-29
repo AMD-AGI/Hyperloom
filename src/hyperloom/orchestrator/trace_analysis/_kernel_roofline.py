@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.gpu_identity import gfx_arch_for_gpu_type
+from common.gpu_identity import gfx_arch_for_gpu_type
 
 from ._kernel_classification import _FLYDSL_SCAN_BYTES
 

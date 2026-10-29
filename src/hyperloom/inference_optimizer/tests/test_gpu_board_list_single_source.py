@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.common.gpu_identity import (
+from common.gpu_identity import (
     AMD_GPU_BOARDS,
     board_named_in,
     gfx_arch_for_gpu_type,

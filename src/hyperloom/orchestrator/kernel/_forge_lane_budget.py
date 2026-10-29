@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from hyperloom.common.coerce import optional_positive_int
+from common.coerce import optional_positive_int
 
 from ..actions.executors._kernel_agent_tool import HandlerResult
 from .lane_budget import INSUFFICIENT_BUDGET, LANE_GEMM, LaneAllocation

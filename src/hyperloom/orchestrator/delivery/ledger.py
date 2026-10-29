@@ -14,7 +14,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.io import append_jsonl
+from common.io import append_jsonl
 
 log = logging.getLogger(__name__)
 

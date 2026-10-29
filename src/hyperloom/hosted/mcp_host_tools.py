@@ -29,8 +29,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.coerce import to_unix
-from hyperloom.common.io import atomic_write_json
+from common.coerce import to_unix
+from common.io import atomic_write_json
 from hyperloom.hosted.events import segment_name, segment_numbers
 from hyperloom.hosted.mcp_server import HOST_KIND, CallContext, McpServer, ToolError
 from hyperloom.inference_optimizer.session.optimization_journal import read_journal_entries

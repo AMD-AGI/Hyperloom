@@ -19,8 +19,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL
-from hyperloom.common.llm_stability_env import apply_llm_stability_env
+from common.llm_config import DEFAULT_CLAUDE_MODEL
+from common.llm_stability_env import apply_llm_stability_env
 from kernelforge.agent_backends.base import (
     AgentCapabilities,
     AgentHook,
@@ -32,7 +32,7 @@ from kernelforge.agent_backends.base import (
     AgentRuntimeConfig,
 )
 from kernelforge.agent_backends.workspace_guard import WorkspaceGuard
-from hyperloom.common.llm_headers import format_custom_headers
+from common.llm_headers import format_custom_headers
 from kernelforge.agent_backends.gateway import (
     normalize_anthropic_base_url,
     resolve_anthropic_gateway,

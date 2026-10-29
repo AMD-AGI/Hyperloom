@@ -8,7 +8,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-from hyperloom.common.env import env_int
+from common.env import env_int
 from hyperloom.inference_optimizer import multi_node
 
 # Default /health poll timeout; override per-run via HYPERLOOM_MN_HEALTH_WAIT_S.

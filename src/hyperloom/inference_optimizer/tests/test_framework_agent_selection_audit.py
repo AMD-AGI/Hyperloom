@@ -144,7 +144,7 @@ def test_an_already_present_candidate_counts_as_tested() -> None:
 
 def _stub_sanctioned_async_client(monkeypatch, recorder: list[dict] | None = None):
     """Patch ``llm_config``'s async-client contract with a resolving stub."""
-    from hyperloom.common import llm_config
+    from common import llm_config
 
     def _fake(**kwargs):
         kwargs.pop("timeout", None)

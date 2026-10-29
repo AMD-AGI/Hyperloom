@@ -11,11 +11,11 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.deepseek_session import step_usage, turn_end_failure
+from common.deepseek_session import step_usage, turn_end_failure
 from hyperloom.common.env_safety import redact_secret_values
-from hyperloom.common.fs_utils import read_text_below_nofollow
+from common.fs_utils import read_text_below_nofollow
 
-from hyperloom.common.coerce import to_int
+from common.coerce import to_int
 from .agent_trace import AgentTrace
 from .parse_usage import _json_objects, _summarize_tool_input, normalize_usage
 

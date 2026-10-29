@@ -11,7 +11,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
-from hyperloom.common.reasoning_effort import DEFAULT_REASONING_EFFORT, REASONING_EFFORT_RANK
+from common.reasoning_effort import DEFAULT_REASONING_EFFORT, REASONING_EFFORT_RANK
 from kernelforge.tools.protected_paths import ProtectedPathRules
 
 

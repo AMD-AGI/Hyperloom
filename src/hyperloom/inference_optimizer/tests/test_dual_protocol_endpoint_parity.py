@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.common.llm_config import dual_protocol_endpoint_pair
+from common.llm_config import dual_protocol_endpoint_pair
 
 _INSTALL_SH = Path(__file__).resolve().parents[1] / "assets" / "install_baremetal.sh"
 

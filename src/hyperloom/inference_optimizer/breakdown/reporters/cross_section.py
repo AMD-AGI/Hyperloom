@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from hyperloom.common.coerce import to_float, to_int, to_mapping
+from common.coerce import to_float, to_int, to_mapping
 from hyperloom.common.perf_metric import INTVTY_OBJECTIVES
 
 from ..variant_funnel import VARIANT_COUNTS, variants_from_timeline

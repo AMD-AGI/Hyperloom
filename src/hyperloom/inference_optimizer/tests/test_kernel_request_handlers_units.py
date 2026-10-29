@@ -17,19 +17,19 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.common import llm_config
+from common import llm_config
 from hyperloom.common.codex_session import (
     CODEX_SANDBOX_MODE_ENV,
     DEFAULT_CODEX_SANDBOX_MODE,
 )
-from hyperloom.common.env import is_truthy
+from common.env import is_truthy
 from hyperloom.orchestrator.actions.executors import _kernel_agent_tool as tool
 from hyperloom.orchestrator.actions.executors import trace_analyze as ta
 from hyperloom.orchestrator.trace_analysis.analysis_route import AnalysisRoute
 from hyperloom.inference_optimizer.framework_paths import resolve_known_source_prefixes
 from hyperloom.orchestrator.kernel import request_handlers as krh
 from hyperloom.orchestrator.kernel import lane_budget
-from hyperloom.common.llm_config import (
+from common.llm_config import (
     DEFAULT_CLAUDE_MODEL,
     DEFAULT_CODEX_MODEL,
 )

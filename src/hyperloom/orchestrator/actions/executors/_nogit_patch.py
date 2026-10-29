@@ -10,8 +10,8 @@ import re
 import shutil
 import subprocess
 
-from hyperloom.common.git_safety import safe_directory_args
-from hyperloom.common.unified_diff import parse_patch_manifest, strip_path_components
+from common.git_safety import safe_directory_args
+from common.unified_diff import parse_patch_manifest, strip_path_components
 from pathlib import Path
 from typing import Any, NamedTuple
 

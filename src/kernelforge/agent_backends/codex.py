@@ -20,8 +20,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.llm_config import DEFAULT_CODEX_MODEL
-from hyperloom.common.reasoning_effort import (
+from common.llm_config import DEFAULT_CODEX_MODEL
+from common.reasoning_effort import (
     DEFAULT_REASONING_EFFORT,
     REASONING_EFFORT_LEVELS,
     gateway_reasoning_effort,

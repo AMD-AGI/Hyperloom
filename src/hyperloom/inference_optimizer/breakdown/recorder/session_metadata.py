@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 from typing import Any, Mapping
 
-from hyperloom.common.coerce import to_unix
+from common.coerce import to_unix
 from hyperloom.common.env_safety import redact_secret_env_values
 from hyperloom.common.timeutil import iso_z
 

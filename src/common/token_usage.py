@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import overload
 
-from hyperloom.common.coerce import to_int
+from common.coerce import to_int
 
 TOKEN_KEYS: tuple[str, ...] = (
     "input_tokens",

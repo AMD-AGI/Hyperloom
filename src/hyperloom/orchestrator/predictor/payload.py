@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from hyperloom.common.coerce import optional_positive_float, text_or_none, to_float, to_unix
+from common.coerce import optional_positive_float, text_or_none, to_float, to_unix
 from hyperloom.common.predictor_config import PHASE_LABEL
 from hyperloom.orchestrator.predictor.view import SessionView
 

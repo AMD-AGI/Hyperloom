@@ -26,6 +26,7 @@
 
 [importlinter]
 root_packages =
+    common
     hyperloom
     kernelforge
 include_external_packages = False
@@ -103,16 +104,29 @@ ignore_imports =
 unmatched_ignore_imports_alerting = error
 
 
-[importlinter:contract:kf-only-common]
-name = kernelforge may depend on hyperloom.common only
+[importlinter:contract:kf-no-hyperloom]
+name = kernelforge does not depend on hyperloom
 type = forbidden
+# What the two packages share is the `common` package; nothing in the optimizer
+# is KernelForge's to reach for.
 source_modules = kernelforge
-forbidden_modules =
-    hyperloom.cli
-    hyperloom.orchestrator
-    hyperloom.inference_optimizer
-    hyperloom.agents
+forbidden_modules = hyperloom
+allow_indirect_imports = True
 ignore_imports =
+    hyperloom.**.tests.** -> **
+    kernelforge.tests.** -> **
+unmatched_ignore_imports_alerting = none
+
+
+[importlinter:contract:common-is-leaf]
+name = common imports nothing else from the project
+type = forbidden
+source_modules = common
+forbidden_modules =
+    hyperloom
+    kernelforge
+ignore_imports =
+    common.tests.** -> **
     hyperloom.**.tests.** -> **
     kernelforge.tests.** -> **
 unmatched_ignore_imports_alerting = none
@@ -185,8 +199,8 @@ ignore_imports =
 unmatched_ignore_imports_alerting = none
 
 
-[importlinter:contract:common-is-leaf]
-name = hyperloom.common imports nothing else from the project
+[importlinter:contract:hl-common-is-leaf]
+name = hyperloom.common imports nothing from the project but common
 type = forbidden
 source_modules = hyperloom.common
 forbidden_modules =
@@ -296,7 +310,7 @@ ancestors =
 ignore_imports =
     hyperloom.**.tests.** -> **
     kernelforge.tests.** -> **
-    hyperloom.common.llm_config -> hyperloom.common.claude_oneshot
+    common.llm_config -> common.claude_oneshot
     hyperloom.inference_optimizer.breakdown.critic_reviews -> hyperloom.inference_optimizer.breakdown.collectors._common
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._aiter_jit
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._partition_shape

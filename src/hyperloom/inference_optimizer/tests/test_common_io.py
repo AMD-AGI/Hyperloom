@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import stat
 
-from hyperloom.common.io import (
+from common.io import (
     JsonFormat,
     JsonLineFormat,
     WriteOptions,

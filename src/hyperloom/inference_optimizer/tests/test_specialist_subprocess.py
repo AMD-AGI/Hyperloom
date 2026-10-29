@@ -17,7 +17,7 @@ from typing import Any
 import pytest
 
 from hyperloom.common.deadline import Deadline
-from hyperloom.common.git_safety import worktree_head
+from common.git_safety import worktree_head
 from hyperloom.common.env_safety import specialist_run_as
 
 from .conftest import init_git_repo, make_fake_claude

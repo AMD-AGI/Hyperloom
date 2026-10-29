@@ -13,7 +13,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.io import WriteOptions, atomic_write_json
+from common.io import WriteOptions, atomic_write_json
 from hyperloom.inference_optimizer.breakdown.recorder import record_metadata_langfuse
 from hyperloom.inference_optimizer.session.session_paths import (
     BREAKDOWN_FILENAME,

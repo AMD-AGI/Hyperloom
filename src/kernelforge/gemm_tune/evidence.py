@@ -12,8 +12,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.coerce import to_int
-from hyperloom.common.env import EnvValueError, env_bool, env_int
+from common.coerce import to_int
+from common.env import EnvValueError, env_bool, env_int
 
 log = logging.getLogger(__name__)
 

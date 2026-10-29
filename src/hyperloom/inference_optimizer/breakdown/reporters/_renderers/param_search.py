@@ -14,7 +14,7 @@ from __future__ import annotations
 from typing import Any
 
 
-from hyperloom.common.coerce import to_mapping
+from common.coerce import to_mapping
 
 from ..base import RenderedSection, fmt_pct, md_table, register_renderer
 from ._framework import config_attempts, config_tally

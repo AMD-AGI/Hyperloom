@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.common import aiter_jit_cache as cache
+from common import aiter_jit_cache as cache
 
 
 @pytest.fixture()

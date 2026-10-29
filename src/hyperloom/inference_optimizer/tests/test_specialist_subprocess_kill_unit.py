@@ -164,7 +164,7 @@ def test_kill_exited_root_cannot_confirm_descendants(monkeypatch):
 
 @pytest.mark.parametrize("confirmed_dead", [True, False])
 def test_kill_reuses_tree_cleanup_confirmation(monkeypatch, confirmed_dead):
-    from hyperloom.common.proctree import Tree
+    from common.proctree import Tree
 
     proc = Mock(pid=4242)
     proc.poll.return_value = None
@@ -187,7 +187,7 @@ def test_kill_reuses_tree_cleanup_confirmation(monkeypatch, confirmed_dead):
 
 @pytest.mark.parametrize("failure", [OSError("procfs unreadable"), subprocess.TimeoutExpired("specialist", 1)])
 def test_kill_does_not_confirm_failed_collection_or_wait(monkeypatch, failure):
-    from hyperloom.common.proctree import Tree
+    from common.proctree import Tree
 
     proc = Mock(pid=4242)
     proc.poll.return_value = None
@@ -203,7 +203,7 @@ def test_kill_does_not_confirm_failed_collection_or_wait(monkeypatch, failure):
 
 
 def test_kill_missing_process_identity_cannot_confirm_tree(monkeypatch):
-    from hyperloom.common.proctree import Tree
+    from common.proctree import Tree
 
     proc = Mock(pid=4242)
     proc.poll.return_value = None

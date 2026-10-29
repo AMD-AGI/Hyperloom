@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from hyperloom.common.env import is_truthy
+from common.env import is_truthy
 
 if TYPE_CHECKING:
     from .domains import SpecialistDomain

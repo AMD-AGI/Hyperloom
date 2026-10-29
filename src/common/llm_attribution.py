@@ -13,7 +13,7 @@ import re
 from dataclasses import dataclass
 from typing import Callable, Iterator, Mapping, MutableMapping, Sequence
 
-from hyperloom.common.llm_headers import format_custom_headers
+from common.llm_headers import format_custom_headers
 
 #: Selects the gateway whose headers to emit; unset emits nothing.
 ATTRIBUTION_ENV = "HYPERLOOM_LLM_ATTRIBUTION"

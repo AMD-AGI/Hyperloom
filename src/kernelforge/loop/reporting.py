@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from hyperloom.common.unified_diff import touched_paths
+from common.unified_diff import touched_paths
 
 from kernelforge.tools.git import git_bytes
 from kernelforge.evaluation.scoring import aggregate_regression_detail

@@ -58,7 +58,7 @@ from hyperloom.inference_optimizer.session.geak_rebench_verdict import (
     REBENCH_NO_PROMOTE,
     REBENCH_VALIDATED,
 )
-from hyperloom.common.coerce import (
+from common.coerce import (
     text_or_none as _text,
     to_float as _float_or_none,
     to_int as _int_or_none,

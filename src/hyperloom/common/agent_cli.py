@@ -9,7 +9,7 @@ import os
 import shutil
 from pathlib import Path
 
-from hyperloom.common.llm_config import AGENT_BACKEND_CODEX
+from common.llm_config import AGENT_BACKEND_CODEX
 
 _CLI_PATH_ENV: str = "HYPERLOOM_CLAUDE_CLI_PATH"
 # The kernel-agent installer records the Claude CLI it resolved here (``kernel-agent.env.sh``).

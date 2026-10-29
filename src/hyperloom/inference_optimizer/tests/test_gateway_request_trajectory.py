@@ -11,8 +11,8 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from hyperloom.common import llm_config
-from hyperloom.common import llm_request_hooks as hooks
+from common import llm_config
+from common import llm_request_hooks as hooks
 from hyperloom.inference_optimizer.trace import request_events as re_
 from hyperloom.inference_optimizer.trace import trajectory_trace as tt
 

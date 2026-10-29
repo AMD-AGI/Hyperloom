@@ -9,7 +9,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
-from hyperloom.common.coerce import to_int
+from common.coerce import to_int
 
 log = logging.getLogger(__name__)
 

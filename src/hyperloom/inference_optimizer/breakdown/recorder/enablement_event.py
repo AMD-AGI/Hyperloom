@@ -25,7 +25,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from hyperloom.common.coerce import (
+from common.coerce import (
     text_or_none as _text_or_none,
     to_float as _float_or_none,
     to_mapping as _as_dict,

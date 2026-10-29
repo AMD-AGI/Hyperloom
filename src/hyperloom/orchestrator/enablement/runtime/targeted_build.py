@@ -12,7 +12,7 @@ import subprocess
 import sys
 import time
 
-from hyperloom.common.git_safety import safe_directory_args
+from common.git_safety import safe_directory_args
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable

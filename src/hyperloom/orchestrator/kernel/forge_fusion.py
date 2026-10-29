@@ -16,9 +16,9 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.codex_session import CodexSessionError
-from hyperloom.common.env import is_truthy
+from common.env import is_truthy
 from hyperloom.common.jsonio import read_json
-from hyperloom.common.llm_config import AGENT_BACKEND_CHOICES
+from common.llm_config import AGENT_BACKEND_CHOICES
 
 from ..actions.executors._kernel_agent_tool import _run_subprocess
 
@@ -59,7 +59,7 @@ def _author_env(agent_backend: str) -> dict[str, str]:
     if _validated_agent_backend(agent_backend) in {"codex", "deepseek"}:
         return env
 
-    from hyperloom.common import llm_config
+    from common import llm_config
 
     options = llm_config.claude_sdk_env_options(
         env=env,
@@ -76,8 +76,8 @@ def _author_env(agent_backend: str) -> dict[str, str]:
                 env.setdefault(name, value)
     # The authoring child gets this environment, not the resolved copy above, so the tag has to be merged in here or
     # the run arrives at the gateway anonymous.
-    from hyperloom.common.llm_attribution import inject_env
-    from hyperloom.common.llm_stability_env import apply_llm_stability_env
+    from common.llm_attribution import inject_env
+    from common.llm_stability_env import apply_llm_stability_env
 
     inject_env(env, component="forge", operation="author_kernel", source=env)
     # claude's bypassPermissions refuses to start under root unless IS_SANDBOX=1.

@@ -19,8 +19,8 @@ from .backends import CRITIC_PROTOCOL_CHOICES
 from .recover import add_recover_subparser
 from .session_target import add_session_dir_argument
 from hyperloom.common import predictor_config
-from hyperloom.common.gpu_identity import AMD_GPU_BOARDS
-from hyperloom.common.llm_config import is_anthropic_only, is_openai_only, provider_model_defaults
+from common.gpu_identity import AMD_GPU_BOARDS
+from common.llm_config import is_anthropic_only, is_openai_only, provider_model_defaults
 
 # Workload knob fallbacks live in ``hyperloom.common`` so that the orchestrator
 # can read the same numbers without importing this module, which would close a
@@ -32,7 +32,7 @@ from hyperloom.common.workload_defaults import (
     DEFAULT_PRECISION,
     DEFAULT_TP,
 )
-from hyperloom.common.llm_config import (
+from common.llm_config import (
     DEFAULT_CLAUDE_MODEL,
     DEFAULT_CODEX_MODEL,
 )

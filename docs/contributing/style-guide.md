@@ -203,11 +203,12 @@ Imports between packages point one way, and CI enforces it: the `import-linter (
 | Contract | Rule |
 |----------|------|
 | `hl-top-layers` | `hyperloom.cli` > `orchestrator` > `agents` > `inference_optimizer` > `common`: a package imports only from layers below it |
-| `kf-only-common` | `kernelforge` imports nothing from `hyperloom` except `hyperloom.common` |
+| `kf-no-hyperloom` | `kernelforge` imports nothing from `hyperloom`; what the two packages share lives in `common` |
 | `kf-evaluation-foundation` | `kernelforge.evaluation` imports no kernelforge product or entry package |
 | `kf-tools-foundation` | `kernelforge.tools` imports neither `kernelforge.evaluation` nor any kernelforge product or entry package |
 | `kf-mcp-servers-light` | the stdio MCP server modules (`knowledge.pr_knowledge.mcp_server`, `orchestrator.specialist_probe_server`) do not reach `agent_backends`, `cli` or `loop`, so a server starts without the agent runtime |
-| `common-is-leaf` | `hyperloom.common` imports nothing else from the project, `kernelforge` included |
+| `common-is-leaf` | `common` imports nothing else from the project: it is the floor both shipped packages stand on |
+| `hl-common-is-leaf` | `hyperloom.common` imports nothing from the project but `common`, `kernelforge` included |
 | `agents-independent` | `hyperloom.agents.*` packages do not import each other |
 | `kf-backends-independent` | `kernelforge.kernel_backends.*` packages do not import each other |
 | `kf-entry-protected` | `hyperloom.agents`, `inference_optimizer` and `common` do not import `kernelforge` directly; the orchestrator and `hyperloom.cli` are the way in |

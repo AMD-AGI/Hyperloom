@@ -9,9 +9,9 @@ import os
 import sqlite3
 from typing import TYPE_CHECKING, Any
 
-from hyperloom.common.coerce import first_text
-from hyperloom.common.fs_utils import read_text_nofollow
-from hyperloom.common.gpu_identity import gfx_arch_for_gpu_type
+from common.coerce import first_text
+from common.fs_utils import read_text_nofollow
+from common.gpu_identity import gfx_arch_for_gpu_type
 from hyperloom.inference_optimizer.gpu_types import targeted_build_validated
 from hyperloom.orchestrator.lever import LEVER_ENABLEMENT
 

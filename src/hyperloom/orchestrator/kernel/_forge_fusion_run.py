@@ -10,8 +10,9 @@ import os
 from pathlib import Path
 from typing import Any, Mapping
 
-from hyperloom.common import codex_session, llm_config
-from hyperloom.common.coerce import optional_positive_int
+from common import llm_config
+from hyperloom.common import codex_session
+from common.coerce import optional_positive_int
 
 from . import forge_fusion
 from ..actions.executors._kernel_agent_tool import HandlerResult

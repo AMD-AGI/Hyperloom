@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from hyperloom.common.env import env_bool
+from common.env import env_bool
 
 
 log = logging.getLogger(__name__)

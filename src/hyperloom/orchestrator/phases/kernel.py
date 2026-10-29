@@ -25,11 +25,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 from . import geak_rebench as _geak_rebench, machine_state as _phase_state
 from .kernel_round_budget import controller_round_stop, integrate_within_phase, measurement_round_sec, rebench_round_sec
-from hyperloom.common.coerce import first_str, to_float, to_int
-from hyperloom.common.env import env_bool, env_float, env_int
+from common.coerce import first_str, to_float, to_int
+from common.env import env_bool, env_float, env_int
 from hyperloom.common import gain_math
 from hyperloom.inference_optimizer.session.geak_rebench_verdict import REBENCH_FALLBACK_FAILED, REBENCH_NO_PROMOTE
-from hyperloom.common.io import WriteOptions, atomic_write_json
+from common.io import WriteOptions, atomic_write_json
 from hyperloom.common.jsonio import read_json
 from hyperloom.common.launch_log_evidence import recipe_server_launch
 from hyperloom.common.perf_metric import axis_of, graded_axes_of
@@ -1359,7 +1359,7 @@ class KernelPhase(CoordinatorCollaborator):
         runner_env[REAP_MARK_ENV] = uuid.uuid4().hex
         # Only injection point needed for the whole GEAK chain: geak_runner and run_e2e both hand their full
         # environment to the child, so the tag reaches the Claude CLI that actually spends.
-        from hyperloom.common.llm_attribution import inject_env
+        from common.llm_attribution import inject_env
 
         inject_env(runner_env, component="geak", operation="optimize_kernel")
         return await asyncio.to_thread(
@@ -2226,7 +2226,7 @@ class KernelPhase(CoordinatorCollaborator):
         accepted_flags: str,
         parsed_envs: dict[str, str],
     ) -> None:
-        from hyperloom.common.coerce import to_str_list
+        from common.coerce import to_str_list
         from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
         from hyperloom.inference_optimizer.framework_registry import server_args_env_name
         from hyperloom.inference_optimizer.grid_server_args import compose_server_args, remove_server_args

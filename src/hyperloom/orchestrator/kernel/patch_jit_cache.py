@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common import aiter_jit_cache
+from common import aiter_jit_cache
 from hyperloom.common.timeutil import now_iso
 
 
