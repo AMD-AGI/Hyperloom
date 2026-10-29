@@ -688,16 +688,16 @@ class V6ConcSweepInputAnchor(TypedDict, total=False):
 class V6ConcSweepPlan(TypedDict, total=False):
     """The ladder the sweep resolved and the order it will run it in.
 
-    ``arms_order`` matters to a reader of the budget: past its first rung the
-    first arm may spend half the time left, and the second runs only the rungs
-    it reached, so a budget that runs out drops whole pairs. ``concs_ordered``
-    is the session's own CONC first, then the rest cheapest first."""
+    ``arms_order`` matters to a reader of the budget: past its first rung the first arm may
+    spend half the time left, and the second runs only the rungs it reached, so a budget that
+    runs out drops whole pairs. ``concs_ordered`` is the session's own CONC first, then the
+    rest cheapest first. The plan names no benchmark cap: each rung is granted one sized to
+    the workload it runs, and reports it as ``granted_cap_sec``."""
 
     grid_source: str | None
     concs_requested: list[int]
     concs_ordered: list[int]
     num_prompts_factor: int | None
-    variant_timeout_sec: int | None
     arms_order: list[str]
 
 

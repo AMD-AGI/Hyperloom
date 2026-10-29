@@ -224,14 +224,15 @@ class SweepPlan:
 
     ``concs_ordered`` is deduplicated: the session's own CONC first, then the
     rest cheapest first. ``grid_source`` is a ``GRID_*`` value, and
-    ``num_prompts_factor`` turns a rung's CONC into its NUM_PROMPTS.
+    ``num_prompts_factor`` turns a rung's CONC into its NUM_PROMPTS. No
+    benchmark cap is planned here: a rung's cap is sized from the workload that
+    rung runs, and each row carries the one it got as ``granted_cap_sec``.
     """
 
     concs_requested: Any = None
     concs_ordered: Any = None
     grid_source: str = ""
     num_prompts_factor: Any = None
-    variant_timeout_sec: Any = None
     arms_order: Sequence[str] = ()
 
     def block(self) -> dict[str, Any]:
@@ -241,7 +242,6 @@ class SweepPlan:
             "concs_requested": _int_list(self.concs_requested),
             "concs_ordered": _int_list(self.concs_ordered),
             "num_prompts_factor": _int_or_none(self.num_prompts_factor),
-            "variant_timeout_sec": _int_or_none(self.variant_timeout_sec),
             "arms_order": [_text(arm) for arm in self.arms_order],
         }
 
