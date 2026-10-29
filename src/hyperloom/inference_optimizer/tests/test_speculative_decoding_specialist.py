@@ -14,7 +14,8 @@ from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.policy.gate import PolicyGate
 from hyperloom.orchestrator.prompts.speculative_decoding_focus import speculative_decoding_focus
-from hyperloom.orchestrator.prompts.specialist_prompt_builder import SpecialistPromptInputs, build_specialist_prompts
+from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
+from hyperloom.orchestrator.prompts.specialist_prompt_builder import build_specialist_prompts
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.specialists.domains import get_domain, normalize_dispatch_tags
 from hyperloom.orchestrator.specialists.runner import SpecialistRunner, SpecialistSubprocessConfig

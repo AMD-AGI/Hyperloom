@@ -19,10 +19,8 @@ from hyperloom.inference_optimizer.experience_kb import (
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.intent_router import _stamp_kb_exposure
-from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
-    SpecialistPromptInputs,
-    build_specialist_prompts,
-)
+from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
+from hyperloom.orchestrator.prompts.specialist_prompt_builder import build_specialist_prompts
 from hyperloom.orchestrator.specialists.domains import get_domain
 from hyperloom.orchestrator.state.shared_state import _KB_INJECTIONS_CAP, KbInjection, SharedState
 from hyperloom_kb import RemoteClient, RemoteConfig
