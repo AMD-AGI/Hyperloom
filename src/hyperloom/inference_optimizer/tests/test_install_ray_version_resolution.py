@@ -9,9 +9,11 @@ import json
 import re
 import shlex
 import subprocess
+import sys
 from pathlib import Path
 
 INSTALL_SH = Path(__file__).resolve().parents[1] / "assets" / "install_kernel_tools.sh"
+_CLICK_RC = int(re.search(r"^RAY_CLI_PROBE_CLICK_RC=(\d+)$", INSTALL_SH.read_text(encoding="utf-8"), re.M).group(1))
 
 
 def _extract_shell_function(name: str) -> str:
@@ -193,11 +195,69 @@ def test_ensure_ray_certifies_the_cli_through_ray_s_own_parser() -> None:
     assert "param.opts" not in probe
 
 
-def _run_ensure_ray_with_probe(probe_results: list[int], *, check_only: int = 0) -> subprocess.CompletedProcess[str]:
+def _fake_ray_site(tmp_path: Path, *, version: str, scripts_source: str) -> Path:
+    site = tmp_path / "site"
+    (site / "ray" / "scripts").mkdir(parents=True)
+    (site / "ray" / "__init__.py").write_text(f'__version__ = "{version}"\n')
+    (site / "ray" / "scripts" / "__init__.py").write_text("")
+    (site / "ray" / "scripts" / "scripts.py").write_text(scripts_source)
+    return site
+
+
+_SENTINEL_CLI = "raise ValueError('<object object at 0x7f> is not a valid Sentinel')\n"
+_USAGE_CLI = (
+    "import click\n\n@click.group()\ndef cli():\n    pass\n\n"
+    "@cli.command()\n@click.option('--other')\ndef start(**kw):\n    pass\n"
+)
+
+
+def _run_real_probe(site: Path, *, ray_version: str) -> subprocess.CompletedProcess[str]:
+    constants = "\n".join(
+        line
+        for line in INSTALL_SH.read_text(encoding="utf-8").splitlines()
+        if line.startswith(("RAY_CLI_PROBE_CLICK_RC=", "RAY_CLICK_HOLD_VERSION="))
+    )
+    script = f"{constants}\n{_extract_shell_function('ray_cli_probe')}\nray_cli_probe\n"
+    env = {"PATH": f"{Path(sys.executable).parent}:/usr/bin:/bin", "PYTHONPATH": str(site)}
+    env.update(RAY_VERSION=ray_version, RAY_START_ARGV="--head --port=6379")
+    return subprocess.run(["bash", "-c", script], check=False, capture_output=True, text=True, env=env)
+
+
+def test_the_probe_gives_the_sentinel_import_failure_its_own_exit_code(tmp_path: Path) -> None:
+    site = _fake_ray_site(tmp_path, version="2.44.1", scripts_source=_SENTINEL_CLI)
+
+    done = _run_real_probe(site, ray_version="2.44.1")
+
+    assert done.returncode == _CLICK_RC, done.stderr
+    assert "is not a valid Sentinel" in done.stderr
+
+
+def test_the_probe_keeps_exit_1_for_every_other_failure(tmp_path: Path) -> None:
+    sentinel_other_ray = _fake_ray_site(tmp_path / "a", version="2.55.0", scripts_source=_SENTINEL_CLI)
+    usage = _fake_ray_site(tmp_path / "b", version="2.44.1", scripts_source=_USAGE_CLI)
+    plain_import_error = _fake_ray_site(tmp_path / "c", version="2.44.1", scripts_source="raise ImportError('boom')\n")
+    mismatch = _fake_ray_site(tmp_path / "d", version="2.44.1", scripts_source=_SENTINEL_CLI)
+
+    assert _run_real_probe(sentinel_other_ray, ray_version="2.55.0").returncode == 1
+    assert _run_real_probe(usage, ray_version="2.44.1").returncode == 1
+    assert _run_real_probe(plain_import_error, ray_version="2.44.1").returncode == 1
+    assert _run_real_probe(mismatch, ray_version="2.45.0").returncode == 1
+
+
+def _run_ensure_ray_with_probe(
+    probe_results: list[int], *, check_only: int = 0, ray_version: str = "2.44.1"
+) -> subprocess.CompletedProcess[str]:
     """ensure_ray with pip recorded and the CLI probe answering ``probe_results`` in turn (0 = the CLI starts)."""
     fn_src = _extract_shell_function("ensure_ray")
+    constants = "\n".join(
+        line
+        for line in INSTALL_SH.read_text(encoding="utf-8").splitlines()
+        if line.startswith(("RAY_CLI_PROBE_CLICK_RC=", "RAY_CLICK_HOLD_VERSION=", "RAY_CLICK_HOLD_SPEC="))
+    )
     results = " ".join(str(r) for r in probe_results)
     stub = f"""
+{constants}
+set -e
 log() {{ :; }}
 warn() {{ printf 'WARN:%s\\n' "$*"; }}
 resolve_ray_version() {{ :; }}
@@ -206,11 +266,10 @@ PROBE_RESULTS=({results})
 ray_cli_probe() {{ printf 'PROBE\\n'; local r="${{PROBE_RESULTS[0]}}"; PROBE_RESULTS=("${{PROBE_RESULTS[@]:1}}"); return "$r"; }}
 CHECK_ONLY={check_only}
 DRY_RUN=0
-RAY_VERSION="2.44.1"
+RAY_VERSION="{ray_version}"
 RAY_INSTALL_SPEC="ray[default]==${{RAY_VERSION}}"
-RAY_CLICK_FALLBACK_SPEC="click<8.3"
 """
-    script = f"set -uo pipefail\n{fn_src}\n{stub}\nensure_ray\n"
+    script = f"{fn_src}\n{stub}\nensure_ray\n"
     return subprocess.run(["bash", "-c", script], check=False, capture_output=True, text=True)
 
 
@@ -222,25 +281,44 @@ def test_a_cli_that_starts_keeps_the_click_ray_resolved() -> None:
     assert "click" not in done.stdout
 
 
-def test_a_cli_that_fails_to_import_gets_click_held_below_8_3_once_and_is_probed_again() -> None:
-    # Ray 2.44.1's CLI raises "ValueError: <object> is not a valid Sentinel" under click 8.3+.
-    done = _run_ensure_ray_with_probe([1, 0])
+def test_the_sentinel_failure_holds_click_below_8_3_once_and_probes_again() -> None:
+    done = _run_ensure_ray_with_probe([_CLICK_RC, 0])
 
     assert done.returncode == 0, done.stderr
-    assert "[click<8.3]" in done.stdout
+    assert done.stdout.count("[click<8.3]") == 1
     assert done.stdout.count("PROBE") == 2
     assert "WARN:" in done.stdout
 
 
-def test_a_cli_still_broken_after_the_click_fallback_fails_the_install() -> None:
-    done = _run_ensure_ray_with_probe([1, 1])
+def test_a_sentinel_failure_the_hold_does_not_fix_fails_the_install() -> None:
+    done = _run_ensure_ray_with_probe([_CLICK_RC, _CLICK_RC])
 
     assert done.returncode != 0
     assert done.stdout.count("[click<8.3]") == 1
 
 
-def test_check_only_reports_a_broken_cli_without_installing_anything() -> None:
-    done = _run_ensure_ray_with_probe([1], check_only=1)
+def test_any_other_probe_failure_ends_the_install_without_touching_click() -> None:
+    # UsageError / version mismatch / other import error all exit 1 from the probe.
+    done = _run_ensure_ray_with_probe([1])
+
+    assert done.returncode != 0
+    assert done.stdout.count("PROBE") == 1
+    assert "click" not in done.stdout
+
+
+def test_a_sentinel_failure_under_another_ray_version_leaves_click_alone() -> None:
+    done = _run_ensure_ray_with_probe([_CLICK_RC], ray_version="2.55.0")
+
+    assert done.returncode != 0
+    assert "click" not in done.stdout
+
+
+def test_check_only_reports_a_sentinel_failure_without_installing_anything() -> None:
+    done = _run_ensure_ray_with_probe([_CLICK_RC], check_only=1)
 
     assert done.returncode != 0
     assert "ARGS:" not in done.stdout
+
+
+def test_the_click_hold_has_no_environment_knob() -> None:
+    assert "RAY_CLICK_FALLBACK_SPEC" not in INSTALL_SH.read_text(encoding="utf-8")

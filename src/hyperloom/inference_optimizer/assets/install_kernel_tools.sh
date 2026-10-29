@@ -448,11 +448,20 @@ resolve_ray_version() {
   RAY_INSTALL_SPEC="ray[default]==${RAY_VERSION}"
 }
 
+# Exit code of ray_cli_probe for the one failure a click hold can fix: Ray 2.44.1's
+# CLI fails to import under click 8.3+ (`ValueError: ... is not a valid Sentinel`).
+RAY_CLI_PROBE_CLICK_RC=75
+# That hold is fixed, not an operator knob, and only for the default pin.
+RAY_CLICK_HOLD_VERSION="2.44.1"
+RAY_CLICK_HOLD_SPEC="click<8.3"
+
 # Certify the installed Ray CLI with Ray's own parser (see RAY_START_ARGV above).
 ray_cli_probe() {
-  RAY_VERSION="$RAY_VERSION" RAY_START_ARGV="$RAY_START_ARGV" python3 - <<'PY'
+  RAY_VERSION="$RAY_VERSION" RAY_START_ARGV="$RAY_START_ARGV" RAY_CLICK_HOLD_VERSION="$RAY_CLICK_HOLD_VERSION" \
+    RAY_CLI_PROBE_CLICK_RC="$RAY_CLI_PROBE_CLICK_RC" python3 - <<'PY'
 import os
 import shlex
+import sys
 
 import ray
 
@@ -465,7 +474,10 @@ try:
     import click
     from ray.scripts.scripts import cli as _ray_cli  # `main` only wraps this group
 except Exception as exc:
-    raise SystemExit(f"ray CLI import failed: {type(exc).__name__}: {exc}") from exc
+    print(f"ray CLI import failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+    # Only this failure, on the pinned Ray, is one a click hold can fix.
+    sentinel = "is not a valid Sentinel" in str(exc) and ray.__version__ == os.environ["RAY_CLICK_HOLD_VERSION"]
+    raise SystemExit(int(os.environ["RAY_CLI_PROBE_CLICK_RC"]) if sentinel else 1) from exc
 try:
     _ray_start = _ray_cli.commands["start"]
     _ray_start.make_context("start", list(RAY_START_ARGV), resilient_parsing=False).close()
@@ -477,12 +489,6 @@ print(f"[kernel-agent] ray version: {ray.__version__}, ray start accepts {' '.jo
 PY
 }
 
-# Ray 2.44.1's CLI does not import against click 8.3+ (`ValueError: ... is not a
-# valid Sentinel`), and an image or another installed package can bring a newer
-# click. The CLI is still certified by its own parser: only when that probe
-# fails is click held below 8.3, once, and the CLI probed again.
-RAY_CLICK_FALLBACK_SPEC="${RAY_CLICK_FALLBACK_SPEC:-click<8.3}"
-
 ensure_ray() {
   resolve_ray_version
   log "ensuring ${RAY_INSTALL_SPEC}"
@@ -490,11 +496,18 @@ ensure_ray() {
     run python3 -m pip install --quiet --no-cache-dir --break-system-packages "$RAY_INSTALL_SPEC"
   fi
   [ "$DRY_RUN" -eq 0 ] || return 0
-  ray_cli_probe && return 0
-  [ "$CHECK_ONLY" -eq 0 ] || return 1
-  warn "the ray ${RAY_VERSION} CLI does not start with this environment's click; installing ${RAY_CLICK_FALLBACK_SPEC} and probing again"
-  run python3 -m pip install --quiet --no-cache-dir --break-system-packages "$RAY_CLICK_FALLBACK_SPEC"
-  ray_cli_probe
+  local rc=0
+  ray_cli_probe || rc=$?
+  [ "$rc" -ne 0 ] || return 0
+  # Every other failure (version mismatch, other import error, a rejected argv,
+  # a missing start command) ends the install without touching click.
+  if [ "$rc" -eq "$RAY_CLI_PROBE_CLICK_RC" ] && [ "$CHECK_ONLY" -eq 0 ] && [ "$RAY_VERSION" = "$RAY_CLICK_HOLD_VERSION" ]; then
+    warn "the ray ${RAY_VERSION} CLI cannot import under this environment's click (is not a valid Sentinel); holding ${RAY_CLICK_HOLD_SPEC}"
+    run python3 -m pip install --quiet --no-cache-dir --break-system-packages "$RAY_CLICK_HOLD_SPEC"
+    ray_cli_probe
+    return
+  fi
+  return "$rc"
 }
 
 # Minimum soft `ulimit -n` the Ray raylet needs to stay up (issue #433).
