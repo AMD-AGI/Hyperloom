@@ -329,7 +329,9 @@ def _framework_lever_attributions(
         seed = by_name.get(str(row.get("variant_name") or ""))
         if seed is None:
             continue
-        measured = (row.get("metrics") or {}).get("gain_pct")
+        # A REVERT keeps its measured movement in ``graded_gain_pct``; a regressed leave-one-out arm is that case.
+        metrics = row.get("metrics") or {}
+        measured = metrics.get("gain_pct", metrics.get("graded_gain_pct"))
         if not isinstance(measured, (int, float)):
             continue
         source = str(seed.get("framework_lever_source") or "")
@@ -744,7 +746,7 @@ def _seed_grid_payload(params: dict[str, Any], framework: str, yaml_envs: dict[s
 # The numbers a measured variant produced. ``base_tput`` is carried verbatim rather than left to be back-solved
 # from the gain: each KEEP advances the round anchor, so a consumer dividing the gain out of the final throughput
 # reconstructs whichever anchor happens to be current, and a FAILED variant has no gain to divide.
-_VARIANT_METRIC_KEYS: tuple[str, ...] = ("tput", "gain_pct", "base_tput")
+_VARIANT_METRIC_KEYS: tuple[str, ...] = ("tput", "gain_pct", "graded_gain_pct", "base_tput")
 
 # The ledgers' views of the row the round records for a variant.
 _VARIANT_FIELDS: tuple[str, ...] = (
