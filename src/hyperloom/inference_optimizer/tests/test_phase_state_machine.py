@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 
 from hyperloom.orchestrator.phases import machine_state as phase_state
+from hyperloom.orchestrator.actions.stop_reason_explanations import STOP_REASON_EXPLANATIONS
 from hyperloom.inference_optimizer.breakdown.stop_reasons import is_valid_stop_reason
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.policy.gate import (
@@ -165,14 +166,21 @@ def _prelude_state(
     baseline_warm_runtime_sec: float = 0.0,
     baseline_measure_round_dropped: bool = False,
     baseline_failure_streak: int = 0,
+    baseline_failures_this_leg: int | None = None,
     auto_roofline_pending_task_id: str = "",
 ) -> SharedState:
-    """A PRELUDE-phase state with an explicit clock, as the budget policy reads it."""
+    """A PRELUDE-phase state with an explicit clock, as the budget policy reads it.
+
+    The failures belong to the live leg unless ``baseline_failures_this_leg`` says
+    otherwise, which is how a session resumed on an earlier leg's streak is built.
+    """
+    leg_failures = baseline_failure_streak if baseline_failures_this_leg is None else baseline_failures_this_leg
     state = SharedState(
         auto_roofline_pending_task_id=auto_roofline_pending_task_id,
         phase="PRELUDE",
         max_minutes=max_minutes,
         baseline_failure_streak=baseline_failure_streak,
+        baseline_failures_this_leg=leg_failures,
         phase_elapsed_totals={"PRELUDE": spent_sec},
         phase_started_unix=0.0,
         phase_budget_pct={},
@@ -262,6 +270,51 @@ def test_a_prelude_with_budget_of_its_own_keeps_retrying():
     """The same failed baseline, before the reserve line: the phase still has rounds it can pay for."""
     state = _prelude_state(max_minutes=720, spent_sec=6_000.0, usable_sec=30_000.0, baseline_failure_streak=2)
     assert phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(kernel_enabled=True)) is None
+
+
+def test_a_resumed_leg_owes_its_first_baseline_before_the_reserve_line_bites():
+    """The streak an earlier leg left behind is not this leg's retry: the new budget buys one baseline."""
+    state = _prelude_state(
+        max_minutes=720,
+        spent_sec=25_000.0,
+        usable_sec=14_718.5,
+        baseline_failure_streak=1,
+        baseline_failures_this_leg=0,
+    )
+    refused, _ = phase_state.a_retry_past_the_reserve_line(state)
+    assert refused is False, "the baseline the resumed leg was given budget for must still be admitted"
+    assert phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(kernel_enabled=True)) is None
+
+    # That one fails too, and from there the leg is spending the reserve on retries.
+    state.baseline_failure_streak += 1
+    state.baseline_failures_this_leg += 1
+    refused, shortfall = phase_state.a_retry_past_the_reserve_line(state)
+    assert refused is True
+    assert shortfall["baseline_failures_this_leg"] == 1
+    out = phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(kernel_enabled=True))
+    assert out is not None and out[1] == "prelude_budget_exhausted"
+    assert out[2]["baseline_failures_this_leg"] == 1
+    assert out[2]["baseline_failure_streak"] == 2
+
+
+def test_the_remedy_the_glossary_prints_works_at_the_budget_that_stopped_the_run():
+    """``prelude_budget_exhausted`` tells the operator to fix the fault and resume; resuming must buy a baseline."""
+    stopped = _prelude_state(max_minutes=720, spent_sec=25_000.0, usable_sec=14_718.5, baseline_failure_streak=1)
+    out = phase_state.compute_next_phase(stopped, flags=phase_state.PhaseFlags(kernel_enabled=True))
+    assert out is not None and out[1] == "prelude_budget_exhausted"
+
+    # The operator fixes the baseline fault and resumes at the same ``--max-minutes``, which is what the
+    # glossary's remedy asks for: the leg's own failure count starts at zero, so the attempt is granted.
+    resumed = SharedState.from_dict(stopped.to_dict())
+    resumed.begin_leg(now_unix=100_000.0)
+    resumed.session_budget_usable_sec = lambda: 14_718.5
+    assert resumed.baseline_failure_streak == 1
+    refused, _ = phase_state.a_retry_past_the_reserve_line(resumed)
+    assert refused is False
+    assert phase_state.compute_next_phase(resumed, flags=phase_state.PhaseFlags(kernel_enabled=True)) is None
+
+    explanation = STOP_REASON_EXPLANATIONS["prelude_budget_exhausted"]
+    assert "granted one baseline attempt whatever the budget" in explanation
 
 
 def test_a_round_still_in_flight_is_not_an_idle_prelude():
@@ -1029,6 +1082,7 @@ async def test_a_first_failure_with_no_allowance_left_closes_the_session(coordin
         c.shared_state.enablement_mode = "off"
         c.shared_state.max_minutes = 720
         c.shared_state.baseline_failure_streak = 1
+        c.shared_state.baseline_failures_this_leg = 1
         c.shared_state.session_budget_usable_sec = lambda: 14_718.5
 
         refused, shortfall = phase_state.a_retry_past_the_reserve_line(c.shared_state)
@@ -1041,7 +1095,7 @@ async def test_a_first_failure_with_no_allowance_left_closes_the_session(coordin
         row = c.shared_state.phase_history[-1]
         assert row["from_phase"] == "PRELUDE"
         assert row["reason"] == "prelude_budget_exhausted"
-        assert row["evidence"]["baseline_failure_streak"] == 1
+        assert row["evidence"]["baseline_failures_this_leg"] == 1
         assert row["evidence"]["prelude_affordable_sec"] == 0.0
         assert phase_state.is_valid_stop_reason(row["reason"])
     finally:

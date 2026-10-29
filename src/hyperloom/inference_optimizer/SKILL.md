@@ -1013,6 +1013,8 @@ PRELUDE still has time outside the optimization reserve (half of `--max-minutes`
 held for the optimization the session is for). Past that line the baseline
 executor refuses the retry unlaunched and the phase closes the run with
 `stop_reason='prelude_budget_exhausted'`, which can happen on the first failure.
+Only the failures booked by the current leg count, so a session resumed past the
+line still gets the one baseline its new `--max-minutes` was granted for.
 
 An AgentX baseline whose server ran with the prefix cache off fails with
 `error_class=agentx_baseline_prefix_cache_off` and stops the run with

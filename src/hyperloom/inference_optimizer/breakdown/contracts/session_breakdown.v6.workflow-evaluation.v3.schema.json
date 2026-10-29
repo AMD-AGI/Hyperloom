@@ -1345,6 +1345,7 @@
       "type": "object",
       "required": [
         "failure_streak",
+        "failures_this_leg",
         "warm_replay_status",
         "measure_round_dropped",
         "tput",
@@ -1356,6 +1357,10 @@
       ],
       "properties": {
         "failure_streak": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failures_this_leg": {
           "type": "integer",
           "minimum": 0
         },

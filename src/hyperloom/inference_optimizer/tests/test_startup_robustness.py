@@ -12,6 +12,7 @@ import time
 
 import pytest
 
+from hyperloom.common import llm_config
 from hyperloom.inference_optimizer import cli
 from hyperloom.inference_optimizer.cli import credentials as cli_credentials
 from hyperloom.inference_optimizer.cli import model_catalog
@@ -313,29 +314,29 @@ def test_validate_credentials_accepts_dual_entry_with_distinct_keys(clean_creds_
 def test_openai_key_only_makes_claude_follow_codex_before_preflight(clean_creds_env):
     """Key-only official OpenAI must select Codex orchestration before preflight writes OPENAI_BASE_URL."""
     clean_creds_env.setenv("_".join(("OPENAI", "API", "KEY")), "openai-fake-token")
-    assert model_catalog._claude_model_should_follow_codex() is True
+    assert llm_config.is_openai_only() is True
 
 
-def test_anthropic_only_critic_agent_runtime_needed(clean_creds_env):
-    """Official Anthropic-only now keeps the full critic-agent (native Anthropic review path), so its KB prepare/commit runtime IS required."""
-    clean_creds_env.setenv("_".join(("ANTHROPIC", "API", "KEY")), "anthropic-fake-token")
-    anthropic_url, openai_url = cli_credentials._resolve_llm_endpoints()
-    clean_creds_env.setenv("ANTHROPIC_BASE_URL", anthropic_url)
-    if openai_url:
-        clean_creds_env.setenv("OPENAI_BASE_URL", openai_url)
-    assert model_catalog._critic_agent_runtime_needed("agent") is True
-
-
-def test_critic_agent_runtime_always_needed_for_agent_choice(clean_creds_env):
-    """Preflight may add stale/runtime OpenAI env, but the runtime is required either way: there is no longer a degraded critic that skips it."""
+def test_anthropic_only_makes_codex_follow_claude(clean_creds_env):
     clean_creds_env.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
     clean_creds_env.setenv("_".join(("ANTHROPIC", "API", "KEY")), "anthropic-fake-token")
-    assert model_catalog._codex_model_should_follow_claude() is True
+    assert llm_config.is_anthropic_only() is True
 
-    clean_creds_env.setenv("OPENAI_BASE_URL", "https://api.anthropic.com")
-    clean_creds_env.setenv("_".join(("OPENAI", "API", "KEY")), "stale-openai-token")
 
-    assert model_catalog._critic_agent_runtime_needed("agent") is True
+def test_critic_agent_without_a_runtime_root_refuses_to_start(monkeypatch, capsys):
+    """No degraded critic: ``--critic-agent`` with no reachable runtime exits 2 before any backend is built."""
+    monkeypatch.setattr(cli, "_resolve_agent_root", lambda: None)
+    monkeypatch.delenv("CRITIC_KB_CLIENT_MODE", raising=False)
+    args = argparse.Namespace(
+        no_kernel=False,
+        no_framework_agent=False,
+        critic_backend="agent",
+        critic_protocol="auto",
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        cli._resolve_agent_lineup(args)
+    assert exc_info.value.code == 2
+    assert "critic-agent runtime not found" in capsys.readouterr().err
 
 
 def test_build_backends_keeps_anthropic_critic_when_codex_follows_claude(
@@ -379,14 +380,6 @@ def test_build_backends_keeps_anthropic_critic_when_codex_follows_claude(
     assert isinstance(critic, _FakeCriticAgent)
     assert critic.kwargs["protocol"] == "anthropic"
     assert critic.kwargs["claude_model"] == "claude-opus-4-8"
-
-
-def test_openai_only_critic_agent_runtime_needed(clean_creds_env):
-    """Official OpenAI-only keeps the critic-agent path."""
-    clean_creds_env.setenv("_".join(("OPENAI", "API", "KEY")), "openai-fake-token")
-    openai_url = cli_credentials._resolve_llm_endpoints()[1]
-    clean_creds_env.setenv("OPENAI_BASE_URL", openai_url)
-    assert model_catalog._critic_agent_runtime_needed("agent") is True
 
 
 def test_resolve_llm_endpoints_ignores_retired_deepseek_key(clean_creds_env):
@@ -456,7 +449,9 @@ def test_catalog_probe_skips_keyless_anthropic_side_and_uses_the_gateway(clean_c
     probed = _record_probed_urls(clean_creds_env, {"claude-opus-5"})
     args = argparse.Namespace(claude_model="claude-opus-5")
 
-    model_catalog._validate_and_resolve_claude_model(args, ("https://api.anthropic.com", "https://gw.example.com/v1"))
+    model_catalog._validate_and_resolve_claude_model(
+        args, ("https://api.anthropic.com", "https://gw.example.com/v1"), claude_follows_codex=False
+    )
 
     assert probed == ["https://gw.example.com/v1"]
 
@@ -470,7 +465,9 @@ def test_catalog_probe_keeps_anthropic_side_when_it_has_its_own_key(clean_creds_
     probed = _record_probed_urls(clean_creds_env, {"claude-opus-5"})
     args = argparse.Namespace(claude_model="claude-opus-5")
 
-    model_catalog._validate_and_resolve_claude_model(args, ("https://api.anthropic.com", "https://gw.example.com/v1"))
+    model_catalog._validate_and_resolve_claude_model(
+        args, ("https://api.anthropic.com", "https://gw.example.com/v1"), claude_follows_codex=False
+    )
 
     assert probed == ["https://api.anthropic.com"]
 
@@ -519,7 +516,7 @@ def test_resolve_gpu_type_no_inputs_returns_empty():
 def test_emit_launch_info_prints_kv_sentinel(tmp_path, capsys):
     session_dir = tmp_path / "model" / "20260101T000000Z"
     session_dir.mkdir(parents=True)
-    info = cli._emit_launch_info(
+    cli._emit_launch_info(
         cli.LaunchInfo(
             pid=12345,
             session_dir=session_dir,
@@ -542,7 +539,6 @@ def test_emit_launch_info_prints_kv_sentinel(tmp_path, capsys):
     assert parsed["gpu_type"] == "mi355x"
     assert parsed["framework"] == "sglang"
     assert parsed["model"] == "/models/qwen3"
-    assert info["event"] == "launch"
 
 
 def test_emit_launch_info_writes_json_file(tmp_path, capsys):

@@ -481,13 +481,20 @@ def test_a_budget_that_cannot_pay_for_the_measured_round_keeps_the_cold_warmup(t
     )
 
 
-def _a_prelude_that_has_failed_a_baseline(*, usable_sec: float, failure_streak: int) -> SimpleNamespace:
-    """A twelve-hour PRELUDE whose clock has fallen to the optimization reserve."""
+def _a_prelude_that_has_failed_a_baseline(
+    *, usable_sec: float, failure_streak: int, leg_failures: int | None = None
+) -> SimpleNamespace:
+    """A twelve-hour PRELUDE whose clock has fallen to the optimization reserve.
+
+    The failures are the live leg's unless ``leg_failures`` says otherwise, which is
+    how a session resumed on the streak an earlier leg left behind is built.
+    """
     return SimpleNamespace(
         baseline_double_run=True,
         phase="PRELUDE",
         max_minutes=720,
         baseline_failure_streak=failure_streak,
+        baseline_failures_this_leg=failure_streak if leg_failures is None else leg_failures,
         session_budget_usable_sec=lambda: usable_sec,
     )
 
@@ -504,7 +511,7 @@ def test_a_prelude_retry_past_the_reserve_line_is_refused_before_ignition(tmp_pa
     assert result["error_class"] == SESSION_TIME_EXHAUSTED_CLASS
     shortfall = result["budget_shortfall"]
     assert shortfall["reason"] == RETRY_PAST_THE_RESERVE
-    assert shortfall["baseline_failure_streak"] == 1
+    assert shortfall["baseline_failures_this_leg"] == 1
     assert shortfall["affordable_sec"] == 0.0
     assert shortfall["bound"] == "optimization_reserve"
 
@@ -514,6 +521,17 @@ def test_the_first_baseline_is_what_the_optimization_reserve_is_held_for(tmp_pat
     result = _run_double_run_baseline(
         tmp_path,
         _a_prelude_that_has_failed_a_baseline(usable_sec=14_718.5, failure_streak=0),
+    )
+
+    assert result["status"] == "succeeded"
+    assert result["_rounds_run"] == 2
+
+
+def test_a_resumed_leg_still_gets_the_baseline_its_new_budget_was_granted_for(tmp_path):
+    """An earlier leg's streak is not this leg's retry: the first round of the resumed session is booted."""
+    result = _run_double_run_baseline(
+        tmp_path,
+        _a_prelude_that_has_failed_a_baseline(usable_sec=14_718.5, failure_streak=2, leg_failures=0),
     )
 
     assert result["status"] == "succeeded"

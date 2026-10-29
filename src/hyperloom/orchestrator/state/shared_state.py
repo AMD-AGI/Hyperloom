@@ -399,6 +399,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
     baseline_perf: dict[str, Any] = field(default_factory=dict)
     baseline_accuracy: float = 0.0
     baseline_failure_streak: int = 0
+    # The live leg's share of ``baseline_failure_streak``; ``begin_leg`` and every reset of the streak zero it.
+    baseline_failures_this_leg: int = 0
     baseline_arg_error_streak: int = 0
     # Signature of the last failure counted in ``baseline_failure_streak``; two in a row that match end the run.
     baseline_last_failure_signature: str = ""
@@ -537,9 +539,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
     pruned_families: list[str] = field(default_factory=list)
     start_ts: str = field(default_factory=now_iso)
     max_minutes: int = 0
-    # Absolute unix deadline for a bounded session. Stamped once from
-    # ``start_ts + max_minutes`` so a resume cannot reissue a full budget.
-    # ``0.0`` means unset or unbounded.
+    # Session budget: seconds charged by closed legs, plus the wall instant the live leg opened (``0.0`` between legs).
     elapsed_charged_sec: float = 0.0
     leg_anchor_unix: float = 0.0
     # Operator's ``--closing-grace-sec``; ``None`` derives it from max_minutes.

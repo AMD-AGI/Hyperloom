@@ -11,7 +11,7 @@ from types import FunctionType, SimpleNamespace
 import pytest
 
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.orchestrator.bus.storage import SqliteConnection
+from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.policy import gate as gate_module
 from hyperloom.orchestrator.policy import projection as projection_module
 from hyperloom.orchestrator.policy.gate import PolicyDenied, PolicyGate

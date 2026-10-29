@@ -14,7 +14,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.orchestrator.policy.gate import PolicyDenied
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -26,7 +25,7 @@ def _dispatcher(phase: str, *, baseline_tput: float = 800.0) -> DispatcherCollab
     state.phase = phase
     state.baseline_tput = baseline_tput
     no_tasks = SimpleNamespace(queued_context_sync=list, running_context_sync=list)
-    return DispatcherCollaborator(SimpleNamespace(shared_state=state, action_registry=ACTION_CATALOGUE, tasks=no_tasks))
+    return DispatcherCollaborator(SimpleNamespace(shared_state=state, tasks=no_tasks))
 
 
 def test_a_baseline_proposed_in_the_optimisation_phase_is_refused():

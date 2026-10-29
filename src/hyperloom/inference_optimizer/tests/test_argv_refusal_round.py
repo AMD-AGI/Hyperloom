@@ -12,6 +12,7 @@ import pytest
 import yaml
 
 from hyperloom.common.bringup import LadderStage
+from hyperloom.orchestrator.actions.executors import _benchmark_interpreter
 from hyperloom.orchestrator.actions.executors import baseline as bl
 from hyperloom.orchestrator.actions.executors.benchmark_run.records import BenchmarkAttempt
 from hyperloom.orchestrator.bringup import argv_preflight as pf
@@ -53,7 +54,9 @@ def refusing_probe(monkeypatch):
         )
 
     monkeypatch.setattr(pf, "_default_probe", _probe)
-    monkeypatch.setattr(pf, "_resolve_probe_interpreter", lambda _framework: _PROBE_PYTHON)
+    monkeypatch.setattr(
+        _benchmark_interpreter, "_resolve_probe_python", lambda _framework="vllm", *, env=None: _PROBE_PYTHON
+    )
     return calls
 
 
@@ -156,7 +159,9 @@ async def test_an_argv_the_parser_accepts_still_reaches_the_launch(
         )
 
     monkeypatch.setattr(pf, "_default_probe", _probe)
-    monkeypatch.setattr(pf, "_resolve_probe_interpreter", lambda _framework: _PROBE_PYTHON)
+    monkeypatch.setattr(
+        _benchmark_interpreter, "_resolve_probe_python", lambda _framework="vllm", *, env=None: _PROBE_PYTHON
+    )
 
     session, slot = round_slot
     launches = ScriptedLaunchBackend(scenario=LaunchScenario.from_dict(_SCENARIO))
@@ -193,7 +198,9 @@ async def test_the_one_allowed_drop_is_written_back_before_the_launch(
         return subprocess.CompletedProcess(argv, 0, stdout=body + "\n", stderr="")
 
     monkeypatch.setattr(pf, "_default_probe", _probe)
-    monkeypatch.setattr(pf, "_resolve_probe_interpreter", lambda _framework: _PROBE_PYTHON)
+    monkeypatch.setattr(
+        _benchmark_interpreter, "_resolve_probe_python", lambda _framework="vllm", *, env=None: _PROBE_PYTHON
+    )
 
     session, slot = round_slot
     launches = ScriptedLaunchBackend(scenario=LaunchScenario.from_dict(_SCENARIO))
@@ -215,7 +222,7 @@ async def test_an_unavailable_probe_does_not_stop_the_round(
     from hyperloom.orchestrator.actions.executors import _multi_node_env as multi_node
 
     monkeypatch.setattr(multi_node, "is_multi_node", lambda: False)
-    monkeypatch.setattr(pf, "_resolve_probe_interpreter", lambda _framework: "")
+    monkeypatch.setattr(pf, "resolve_serving_interpreter", lambda _framework, _env: "")
 
     session, slot = round_slot
     launches = ScriptedLaunchBackend(scenario=LaunchScenario.from_dict(_SCENARIO))

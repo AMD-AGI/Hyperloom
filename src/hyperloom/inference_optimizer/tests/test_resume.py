@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 
 import pytest
@@ -731,6 +732,20 @@ class TestTracelensRootEnvCorrection:
         good.mkdir()
         monkeypatch.setenv("TRACELENS_ROOT", str(good))
         cli_preflight._check_tracelens_root_exists()
+
+    def test_check_root_exits_when_an_installer_checkout_is_behind_the_pin(self, tmp_path, monkeypatch):
+        script = (cli_preflight._ASSETS / "install_kernel_tools.sh").read_text(encoding="utf-8")
+        pin = re.search(r'^TRACELENS_REF="([0-9a-f]{40})"$', script, re.M).group(1)
+        pinned = tmp_path / f"TraceLens@{pin}"
+        stale = tmp_path / "TraceLens@0000000"
+        pinned.mkdir()
+        stale.mkdir()
+        monkeypatch.setenv("TRACELENS_ROOT", str(pinned))
+        cli_preflight._check_tracelens_root_exists()
+        monkeypatch.setenv("TRACELENS_ROOT", str(stale))
+        with pytest.raises(SystemExit) as excinfo:
+            cli_preflight._check_tracelens_root_exists()
+        assert excinfo.value.code == 2
 
 
 @pytest.mark.asyncio

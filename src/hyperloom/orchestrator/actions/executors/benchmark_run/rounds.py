@@ -27,7 +27,6 @@ from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
 from hyperloom.inference_optimizer.grid_server_args import remove_moe_runner_backend_arg
 from hyperloom.inference_optimizer.trace.task_progress import report_progress
 from ....measurement.integrate_performance import assess_integrate_performance
-from ....phases import machine_state as _phase_state
 from ....state.failure_evidence import (
     MAGPIE_NONZERO_INVALID_MEASUREMENT,
     SUBPROCESS_NONZERO,
@@ -272,12 +271,12 @@ class _BenchmarkRoundsMixin:
             },
         )
         stopped_result["budget_shortfall"] = evidence
-        if evidence.get("reason") == _phase_state.RETRY_PAST_THE_RESERVE:
+        if evidence.get("baseline_failures_this_leg"):
             log.warning(
-                "baseline_executor: the baseline has failed %d time(s) and PRELUDE has spent "
+                "baseline_executor: the baseline has failed %d time(s) this leg and PRELUDE has spent "
                 "everything outside the %.0fs optimization reserve (%.0fs usable), so no retry "
                 "is booted. The phase closes on this same line.",
-                evidence.get("baseline_failure_streak", 0),
+                evidence.get("baseline_failures_this_leg", 0),
                 evidence.get("optimization_reserve_sec", 0.0),
                 evidence.get("session_usable_sec", 0.0),
             )

@@ -28,7 +28,7 @@ STOP_REASON_EXPLANATIONS: dict[str, str] = {
         "window; the best validated result was preserved before exit."
     ),
     "coordinator_exception": "The coordinator loop raised an unhandled exception; the last validated result was preserved.",
-    "custom": "A caller-supplied stop condition (stop_when) fired.",
+    "custom": "A caller-supplied stop condition fired.",
     "unknown": "No specific stop reason was recorded (e.g. a terminal session was resumed); treat as unclassified.",
     "baseline_failed": "Baseline never produced a valid measurement; see the failure summary / server log.",
     "server_argv_invalid": (
@@ -49,10 +49,11 @@ STOP_REASON_EXPLANATIONS: dict[str, str] = {
     ),
     "prelude_budget_exhausted": (
         "Preparation used up everything the session holds outside the reserve kept for optimization, and no "
-        "baseline was ever anchored. With a failed baseline and no arm the machine can buy on its own, staying "
-        "in PRELUDE would have spent the optimization reserve on waiting, so the run stopped with the clock "
-        "still showing time. The phase record shows what preparation spent it on; resume with more budget, or "
-        "with the baseline fault in the failure summary fixed."
+        "baseline was ever anchored. With a baseline this leg had already failed and no arm the machine can buy "
+        "on its own, staying in PRELUDE would have spent the optimization reserve on waiting, so the run stopped "
+        "with the clock still showing time. The phase record shows what preparation spent it on. A resumed "
+        "session is granted one baseline attempt whatever the budget, so fix the fault in the failure summary "
+        "before resuming, and raise the budget for the optimization that attempt is meant to open."
     ),
     "prelude_cold_anchor_low_budget": (
         "The baseline's hot pass was skipped because the clock could not cover it together with one variant to "

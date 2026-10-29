@@ -59,7 +59,7 @@ from hyperloom.orchestrator.loop.sub_agent_runner import (
 )
 from hyperloom.inference_optimizer.session.manifest import build_manifest
 from hyperloom.inference_optimizer.session.paths import asset_root, make_session_dir
-from hyperloom.orchestrator.bus.storage import SqliteConnection
+from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.kernel import _integrate_payload as integrate_payload
 
 _PROFILE_SGLANG_CONFIG = asset_root() / "assets" / "configs" / "profile_sglang.yaml"
@@ -101,6 +101,8 @@ def test_mi325x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch
         tmp_path,
         args,
         session_id="mi325x-session",
+        framework="sglang",
+        platform=cli_bootstrap.LaunchPlatform(compute_partition={}, gpu_power_settings={}),
     )
 
     assert manifest["gpu_type"] == "mi325x"
@@ -123,6 +125,8 @@ def test_mi308x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch
         tmp_path,
         args,
         session_id="mi308x-session",
+        framework="sglang",
+        platform=cli_bootstrap.LaunchPlatform(compute_partition={}, gpu_power_settings={}),
     )
 
     assert manifest["gpu_type"] == "mi308x"

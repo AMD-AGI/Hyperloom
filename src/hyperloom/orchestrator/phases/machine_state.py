@@ -790,18 +790,18 @@ def a_use_must_follow_the_round(state: Any) -> bool:
 def a_retry_past_the_reserve_line(state: Any) -> tuple[bool, dict[str, Any]]:
     """Whether this is a PRELUDE baseline retry the phase can no longer pay for.
 
-    A retry after a failed baseline comes out of PRELUDE's own allowance, not the reserve the first one is
-    priced against (:func:`prelude_affordable_seconds`), and once that allowance is gone it may not start one.
+    Once PRELUDE's own allowance past the reserve (:func:`prelude_affordable_seconds`) is gone, a leg that already
+    failed a baseline may not retry; only this leg's failures count, so a resumed leg still gets its first one.
     """
     if not a_use_must_follow_the_round(state):
         return False, {}
-    streak = int(getattr(state, "baseline_failure_streak", 0) or 0)
-    if streak < 1:
+    leg_failures = int(getattr(state, "baseline_failures_this_leg", 0) or 0)
+    if leg_failures < 1:
         return False, {}
     affordable_sec, evidence = prelude_affordable_seconds(state)
     if affordable_sec is None or affordable_sec > 0.0:
         return False, {}
-    return True, {"reason": RETRY_PAST_THE_RESERVE, "baseline_failure_streak": streak, **evidence}
+    return True, {"reason": RETRY_PAST_THE_RESERVE, "baseline_failures_this_leg": leg_failures, **evidence}
 
 
 def _resolve_plateau_overrides(state: Any) -> dict[str, Any]:
@@ -1013,6 +1013,7 @@ def _prelude_predicate_inputs(state: Any, *, now_unix: float) -> dict[str, Any]:
     warm_status = str(outcome.get("status") or "").strip() if isinstance(outcome, dict) else ""
     return {
         "failure_streak": int(state.baseline_failure_streak or 0),
+        "failures_this_leg": int(state.baseline_failures_this_leg or 0),
         "warm_replay_status": warm_status,
         "measure_round_dropped": bool(state.baseline_measure_round_dropped),
         "tput": to_float(state.baseline_tput) or 0.0,

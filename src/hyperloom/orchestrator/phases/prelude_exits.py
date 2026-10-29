@@ -78,17 +78,19 @@ def _prelude_budget_line(baseline: dict[str, Any], pending: dict[str, Any]) -> d
     spends the reserve on an idle preparation instead of on the optimization the reserve is held for,
     and leaves the exit to an LLM escalation. A round admitted while the allowance was still positive
     may be running, and a terminal would cancel it, so the line is read only once the phase is waiting
-    on nothing of its own.
+    on nothing of its own. Like the admission predicate it counts this leg's baseline failures: a leg
+    resumed past the line is owed the first baseline its new budget was granted for.
     """
-    streak = int(baseline.get("failure_streak") or 0)
-    if streak < 1 or _prelude_work_pending(baseline, pending):
+    leg_failures = int(baseline.get("failures_this_leg") or 0)
+    if leg_failures < 1 or _prelude_work_pending(baseline, pending):
         return None
     affordable = to_float(baseline.get("analysis_affordable_sec"))
     if affordable is None or affordable > 0.0:
         return None
     return {
         "terminal": True,
-        "baseline_failure_streak": streak,
+        "baseline_failures_this_leg": leg_failures,
+        "baseline_failure_streak": int(baseline.get("failure_streak") or 0),
         "prelude_affordable_sec": round(affordable, 1),
         "session_usable_sec": round(to_float(baseline.get("session_usable_sec")) or 0.0, 1),
         "prelude_spent_sec": round(to_float(baseline.get("phase_spent_sec")) or 0.0, 1),

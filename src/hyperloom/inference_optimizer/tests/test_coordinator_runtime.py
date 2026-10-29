@@ -46,7 +46,7 @@ from hyperloom.orchestrator.bus.resource_lock import (
 )
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.inference_optimizer.session.session_paths import target_baseline_json
-from hyperloom.orchestrator.bus.storage import SqliteConnection
+from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from ._dispatch_helpers import pump_until_settled
 
 

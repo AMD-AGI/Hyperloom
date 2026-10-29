@@ -16,8 +16,10 @@ import contextlib
 import json
 import logging
 import os
+import shutil
 import sys
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -179,6 +181,50 @@ class _TraceLensCheckout(NamedTuple):
     root: Path
     internal_root: Path | None
     skill: Path
+
+
+#: The package that carries a resolved arch JSON to TraceLens' arch loader (see :func:`_tracelens_knows_arch`).
+_ARCH_EXTENSION_PACKAGE = "hyperloom_tracelens_arch"
+
+
+@contextlib.contextmanager
+def _tracelens_knows_arch(arch_json: Path | None, platform: str, out_dir: Path) -> Iterator[None]:
+    """While open, TraceLens' arch loader in this process knows ``platform`` with the peaks in ``arch_json``.
+
+    The run config names the platform: TraceLens' analysis steps need the name, and its report refuses a job that names
+    both a platform and ``gpu_arch_json_path``. TraceLens resolves a name only from its bundled arch dir and from the
+    ``TL_EXTENSION`` packages, so an arch JSON resolved anywhere else (Hyperloom's spec from
+    :data:`hyperloom.common.gpu_identity.AMD_GPU_BOARDS`, a microbenchmark) is otherwise never read and a platform
+    TraceLens does not bundle fails the run config's check (both routes) and the report. The JSON is served as a ``TL_EXTENSION`` package under ``out_dir``;
+    the package root is put on ``sys.path`` and ``PYTHONPATH`` (for child processes); ``sys.path``, ``PYTHONPATH`` and
+    ``TL_EXTENSION`` are restored on exit.
+    """
+    from TraceLens.Agent.Analysis.utils.arch_utils import list_platforms
+
+    name = (platform or "").strip()
+    if arch_json is None or not name or name in list_platforms():
+        yield
+        return
+    root = out_dir / "arch_extension"
+    arch_dir = root / _ARCH_EXTENSION_PACKAGE / "Agent" / "Analysis" / "utils" / "arch"
+    arch_dir.mkdir(parents=True, exist_ok=True)
+    (root / _ARCH_EXTENSION_PACKAGE / "__init__.py").touch(mode=0o644)
+    shutil.copyfile(arch_json, arch_dir / f"{name}.json")
+    saved_path = list(sys.path)
+    saved_env = {key: os.environ.get(key) for key in ("TL_EXTENSION", "PYTHONPATH")}
+    sys.path.insert(0, str(root))
+    # A child process (the agent route) imports the package by name, so it needs the root on PYTHONPATH too.
+    os.environ["PYTHONPATH"] = os.pathsep.join(p for p in (str(root), saved_env["PYTHONPATH"]) if p)
+    extensions = [e for e in (saved_env["TL_EXTENSION"] or "").split(":") if e.strip()]
+    os.environ["TL_EXTENSION"] = ":".join([*extensions, _ARCH_EXTENSION_PACKAGE])
+    try:
+        yield
+    finally:
+        sys.path[:] = saved_path
+        sys.modules.pop(_ARCH_EXTENSION_PACKAGE, None)
+        os.environ.update({key: value for key, value in saved_env.items() if value is not None})
+        for key in (key for key, value in saved_env.items() if value is None):
+            os.environ.pop(key, None)
 
 
 def _check_tracelens_checkout(args: argparse.Namespace, log_path: Path) -> _TraceLensCheckout:
@@ -979,35 +1025,33 @@ def main() -> int:
                     exists=False,
                 )
 
-            run_status.write(
-                state="running",
-                current_step="run_trace_analysis",
-            )
-            run_config_path = write_run_config(
-                output_dir=tracelens_dir,
-                trace_path=cli_trace_path,
-                platform=args.target_platform,
-                analysis_mode=tracelens_analysis_mode(args.framework),
-                capture_folder=capture_folder,
-            )
-            if route is AnalysisRoute.AGENT:
-                skill_result = _run_agent_skill(
-                    TraceLensSkillRequest(
-                        skill_path=skill,
-                        output_dir=tracelens_dir,
-                        tracelens_root=tl_root,
-                        tracelens_internal_root=tl_internal_root,
-                        capture_folder=capture_folder,
-                    ),
-                    args,
-                    log_path,
+            run_status.write(state="running", current_step="run_trace_analysis")
+            with _tracelens_knows_arch(gpu_arch_path, args.target_platform, tracelens_dir):
+                run_config_path = write_run_config(
+                    output_dir=tracelens_dir,
+                    trace_path=cli_trace_path,
+                    platform=args.target_platform,
+                    analysis_mode=tracelens_analysis_mode(args.framework),
+                    capture_folder=capture_folder,
                 )
-                artifacts.update(skill_result.artifact_paths)
-                outcome = _agent_route_outcome(skill_result, args, raw_trace_path, trace_health_warnings, log_path)
-            else:
-                outcome = _run_non_llm_route(
-                    run_config_path, args.framework, raw_trace_path, trace_health_warnings, log_path
-                )
+                if route is AnalysisRoute.AGENT:
+                    skill_result = _run_agent_skill(
+                        TraceLensSkillRequest(
+                            skill_path=skill,
+                            output_dir=tracelens_dir,
+                            tracelens_root=tl_root,
+                            tracelens_internal_root=tl_internal_root,
+                            capture_folder=capture_folder,
+                        ),
+                        args,
+                        log_path,
+                    )
+                    artifacts.update(skill_result.artifact_paths)
+                    outcome = _agent_route_outcome(skill_result, args, raw_trace_path, trace_health_warnings, log_path)
+                else:
+                    outcome = _run_non_llm_route(
+                        run_config_path, args.framework, raw_trace_path, trace_health_warnings, log_path
+                    )
             route_report_path = outcome.report_path
             orchestrator_mode = outcome.orchestrator_mode
             route_candidates = []

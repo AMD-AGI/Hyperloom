@@ -149,11 +149,6 @@ class ArgvVerdict:
     dropped: tuple[str, ...] = ()
     repaired_digest: str = ""
 
-    @property
-    def terminal(self) -> bool:
-        """bool: True when this verdict must stop the round rather than launch."""
-        return self.status == INVALID
-
 
 @dataclass(frozen=True)
 class ArgvRepair:
@@ -235,8 +230,6 @@ def run_probe_json(
         Probe: The decoded payload, or the reason there is none.
     """
     probe = target.probe if target.probe is not None else _default_probe
-    if not target.interpreter:
-        return Probe(detail="no interpreter to probe with")
     try:
         completed = probe([target.interpreter, "-c", program, *args], target.env, timeout_sec)
     except subprocess.TimeoutExpired:
@@ -281,15 +274,6 @@ def resolve_serving_interpreter(framework: str, launch_env: Mapping[str, str]) -
             if os.access(sibling, os.X_OK):
                 return sibling
     return shutil.which("python3", path=path) or ""
-
-
-def _resolve_probe_interpreter(framework: str) -> str:
-    """Return the interpreter the capability probes use for ``framework``."""
-    # Deferred: the resolution ladder lives beside the grid runner, whose
-    # package imports the executors this module's callers live in.
-    from hyperloom.orchestrator.actions.executors._benchmark_interpreter import _resolve_probe_python
-
-    return _resolve_probe_python(framework)
 
 
 def _identity(target: ProbeTarget, framework: str) -> tuple[Mapping[str, object] | None, str]:
@@ -373,6 +357,7 @@ def check_server_argv(
     Returns:
         ArgvVerdict: The verdict, and the argv that should now launch.
     """
+    from hyperloom.orchestrator.actions.executors._benchmark_interpreter import _resolve_probe_python
     from hyperloom.orchestrator.framework.adapter_parsers import parser_source_for
 
     name = framework.strip().lower()
@@ -387,7 +372,6 @@ def check_server_argv(
         )
 
     serving = resolve_serving_interpreter(name, launch_env)
-    probe_interpreter = _resolve_probe_interpreter(name)
 
     def _unavailable(reason: str, detail: str) -> ArgvVerdict:
         return ArgvVerdict(
@@ -398,12 +382,12 @@ def check_server_argv(
             text=text,
         )
 
-    if not serving or not probe_interpreter:
-        return _unavailable(INTERPRETER_UNPROVEN, "could not resolve both the probe and the serving interpreter")
+    if not serving:
+        return _unavailable(INTERPRETER_UNPROVEN, "could not resolve the serving interpreter")
     serving_id, serving_why = _identity(ProbeTarget(serving, launch_env), name)
     if serving_id is None:
         return _unavailable(INTERPRETER_UNPROVEN, f"serving interpreter: {serving_why}")
-    probe_target = ProbeTarget(probe_interpreter, launch_env)
+    probe_target = ProbeTarget(_resolve_probe_python(name), launch_env)
     probe_id, probe_why = _identity(probe_target, name)
     if probe_id is None:
         return _unavailable(INTERPRETER_UNPROVEN, f"probe interpreter: {probe_why}")
