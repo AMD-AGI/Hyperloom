@@ -14,9 +14,10 @@
   (:mod:`rsi.ladder`); then the scheduling replay reruns over the archive with this session's tree in it, against the
   champion, and says which of its readings moved since the last CLOSE. Then the specialists' outcomes, the menu's
   branches beside its control, go beside the receipts and the archive (:mod:`rsi.outcomes`), and, given the judge's
-  transcript, its exchanges beside the archive for R2 to ask again (:mod:`rsi.decisions`). A step that cannot be
-  done says why and never stops CLOSE; :meth:`KnowledgeClose.document` is what the breakdown records of the steps
-  (``CloseOutcome.knowledge`` of ``build_breakdown``).
+  transcript, its exchanges beside the archive for R2 to ask again (:mod:`rsi.decisions`). The regression cases the
+  session registered go to the case pool beside the archive, for the sessions after it on the same image and model
+  (:mod:`rsi.cases`). A step that cannot be done says why and never stops CLOSE; :meth:`KnowledgeClose.document` is
+  what the breakdown records of the steps (``CloseOutcome.knowledge`` of ``build_breakdown``).
 * :func:`judge_history` is the stall odds the judge reads every round, as text (:mod:`rsi.history`): how often a
   stalled branch and a new one went on to commit, here and in the archived sessions, and the stop bar they set;
   :func:`judge_open_areas` is where a new branch could open, and whether one should open at all
@@ -39,6 +40,7 @@ from hyperloom_kb import NoOpExperienceKB
 from hyperloom_kb.collect import CollectionTarget, CollectReport
 from hyperloom.common.io import WriteOptions, atomic_write_text
 from hyperloom.common.jsonio import read_jsonl
+from hyperloom.measure.compile import LocalBlobStore
 from hyperloom_multibranch.contracts.blackboard import NotRecorded
 from hyperloom_multibranch.contracts.blackboard.records import BlackboardSnapshot
 from hyperloom_multibranch.blackboard.codec import encode
@@ -53,6 +55,7 @@ from hyperloom_multibranch.blackboard.rsi.archive import (
     archive_session,
     tree_from_snapshot,
 )
+from hyperloom_multibranch.blackboard.rsi.cases import CasePool, image_digest_from_env, pool_cases
 from hyperloom_multibranch.blackboard.rsi.decisions import archive_decisions
 from hyperloom_multibranch.blackboard.rsi.history import MAX_CHARS, session_stall_odds, stall_odds
 from hyperloom_multibranch.blackboard.rsi.lesson_close import publish_lessons, session_standings
@@ -97,6 +100,8 @@ ALREADY_RECORDED = "already_recorded"
 NO_PLAYBOOK_PLAYED = "no_playbook_played"
 NO_TREES = "no_archived_tree"
 NO_TRANSCRIPT = "no_judge_transcript"
+NO_CASE = "no_case_registered"
+NO_BLOBS = "no_blob_store"
 #: What a step raises when its target or its input lets it down; CLOSE records it and goes on.
 STEP_ERRORS = (LookupError, OSError, RuntimeError, ValueError)
 
@@ -120,7 +125,7 @@ class KnowledgeClose:
     blackboard's own declaration holds (``multibranch_experiences``), the learnings into the RSI lesson pool
     (``lessons``), the standing of the pooled lessons the session showed, the stop audit,
     whose counts are the stops and probations by what came of them, the playbook trial, the scheduling replay rerun,
-    and the specialists' outcomes."""
+    the specialists' outcomes, the judge's decisions, and the regression cases into the case pool."""
 
     experiences: CloseStep
     learnings: CloseStep
@@ -133,6 +138,7 @@ class KnowledgeClose:
     scheduling_replay: CloseStep = CloseStep(SKIPPED, NO_REPORTS)
     specialist_outcomes: CloseStep = CloseStep(SKIPPED, NO_REPORTS)
     judge_decisions: CloseStep = CloseStep(SKIPPED, NO_TRANSCRIPT)
+    regression_cases: CloseStep = CloseStep(SKIPPED, NO_CASE)
 
     def steps(self) -> dict[str, CloseStep]:
         """The steps by their names in the breakdown's ``close.knowledge``."""
@@ -149,6 +155,7 @@ class KnowledgeClose:
             "scheduling_replay": self.scheduling_replay,
             "specialist_outcomes": self.specialist_outcomes,
             "judge_decisions": self.judge_decisions,
+            "regression_cases": self.regression_cases,
         }
 
     def document(self) -> dict[str, object]:
@@ -271,6 +278,29 @@ def _decided(snapshot: BlackboardSnapshot, archive: TreeArchive | None, transcri
     return CloseStep(WRITTEN, counts={"calls": kept})
 
 
+def _pooled_cases(snapshot: BlackboardSnapshot, targets: CloseTargets) -> CloseStep:
+    """The regression cases the session registered, read from its blob store, into the case pool beside the archive
+    as cases of the image the environment names (:mod:`rsi.cases`)."""
+
+    if not snapshot.regressions:
+        return CloseStep(SKIPPED, NO_CASE)
+    archive = targets.archive if targets.archive is not None else TreeArchive.from_env()
+    if archive is None:
+        return CloseStep(SKIPPED, NO_ARCHIVE)
+    if targets.blobs is None:
+        return CloseStep(SKIPPED, NO_BLOBS)
+    try:
+        pool = CasePool.beside(archive)
+        pooled = pool_cases(snapshot, LocalBlobStore(targets.blobs), pool, image_digest_from_env())
+    except STEP_ERRORS as exc:
+        return _failed("pool the regression cases", exc)
+    counts = {"written": pooled.written, "skipped": pooled.skipped}
+    reason = "; ".join(pooled.reasons)
+    if pooled.written:
+        return CloseStep(WRITTEN, reason, counts)
+    return CloseStep(FAILED if pooled.skipped else SKIPPED, reason or ALREADY_RECORDED, counts)
+
+
 def _outcomes(snapshot: BlackboardSnapshot, archive: TreeArchive | None, receipts: Path | None) -> CloseStep:
     """The specialists' outcomes, the menu's branches beside its control, read against the menus the session's log
     kept beside the receipts; written there, and kept beside the archive for the studies to add up."""
@@ -330,7 +360,8 @@ class CloseTargets:
     receipts, none without it, where the session's retrieval log lies too. ``multibranch_kb`` takes the Experiences
     under the blackboard's own declaration, and ``lessons`` the lessons, by default the pool beside the archive.
     ``judge_transcript`` is the judge's transcript of the session, whose exchanges go beside the archive
-    (:mod:`rsi.decisions`), none without it."""
+    (:mod:`rsi.decisions`), none without it. ``blobs`` is the session's blob store, which holds the cases of its
+    regression set, none without it."""
 
     experience_kb: CollectionTarget | None = None
     learning_kb: CollectionTarget | None = None
@@ -339,6 +370,7 @@ class CloseTargets:
     multibranch_kb: CollectionTarget | None = None
     lessons: LessonPool | None = None
     judge_transcript: Path | None = None
+    blobs: Path | None = None
 
     def receipt(self, name: str) -> Path | None:
         return self.receipts / name if self.receipts is not None else None
@@ -419,6 +451,7 @@ def close_knowledge(
         scheduling_replay=_replayed(snapshot, targets.archive, targets.receipt(SCHEDULING_REPLAY_REPORT)),
         specialist_outcomes=_outcomes(snapshot, targets.archive, targets.receipts),
         judge_decisions=_decided(snapshot, targets.archive, targets.judge_transcript),
+        regression_cases=_pooled_cases(snapshot, targets),
     )
 
 
@@ -539,6 +572,8 @@ __all__ = [
     "LEARNING_RECEIPT",
     "NO_KB",
     "ALREADY_RECORDED",
+    "NO_BLOBS",
+    "NO_CASE",
     "NO_LESSON_SHOWN",
     "NO_PLAYBOOK_PLAYED",
     "NO_PROFILE",

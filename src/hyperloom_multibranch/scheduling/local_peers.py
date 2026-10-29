@@ -60,6 +60,7 @@ from hyperloom_multibranch.contracts.toolbox import SpecialistTokens
 from hyperloom_multibranch.blackboard import BriefTriggers, LocalBlackboard
 from hyperloom_multibranch.blackboard.learning_search import LEARNINGS_LOG, RetrievalLog
 from hyperloom_multibranch.blackboard.rsi.briefing import SessionBriefs
+from hyperloom_multibranch.blackboard.rsi.cases import session_cases
 from hyperloom_multibranch.blackboard.rsi.lesson_recall import LessonRecall
 from hyperloom_multibranch.blackboard.rsi.lessons import LessonPool
 from hyperloom_multibranch.blackboard.rsi.session import session_menus
@@ -369,7 +370,7 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     )
     mcp.start()
     gate_service = GateService(gate_blackboard, toolbox, rule, toolbox)
-    regression = RegressionSet(gate_blackboard, runner, repo)
+    regression = RegressionSet(gate_blackboard, runner, repo, pool=session_cases(host.image.digest, gate_blackboard))
     image, on_this_machine = host.image.digest, host.backend.on_this_machine
     return Peers(runtime, toolbox, repo, gate_service, mcp, briefs, image, gate, regression, on_this_machine)
 
