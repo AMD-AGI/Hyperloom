@@ -413,3 +413,14 @@ class TestDocumentedSweepHelper:
         monkeypatch.setenv("FORGE_SWEEP_USE_FUSED_EPILOGUE", "0")
         sweep_const("USE_FUSED_EPILOGUE", True)
         assert "sweep_const: USE_FUSED_EPILOGUE 0" in capsys.readouterr().out
+
+
+def test_kernel_backend_prompt_modules_are_importable() -> None:
+    """The dotted prompt-module registry is strings; only an import proves it."""
+    import importlib
+
+    from kernelforge.kernel_backends.constants import KERNEL_BACKEND_PROMPT_MODULES
+
+    for backend, module in KERNEL_BACKEND_PROMPT_MODULES.items():
+        assert module.startswith("kernelforge."), backend
+        importlib.import_module(module)

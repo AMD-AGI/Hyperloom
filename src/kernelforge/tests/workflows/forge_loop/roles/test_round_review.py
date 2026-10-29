@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import replace
+
 import pytest
 
 from kernelforge.agent_backends import AgentRunResult
@@ -16,9 +17,9 @@ from kernelforge.workflows.forge_loop.roles.orchestration import OrchestrationAg
 from kernelforge.workflows.forge_loop.roles.specialists import SpecialistAgent, SpecialistPool
 from kernelforge.workflows.forge_loop.roles.plan_critic import PlanCriticAgent
 from kernelforge.tests.workflows.forge_loop.roles._orchestration_fakes import (
-    _GROUND_A,
-    _GROUND_B,
-    _JOINT_GROUND,
+    GROUND_A,
+    GROUND_B,
+    JOINT_GROUND,
     _QueuedBackend,
     _StaticBackend,
     _context,
@@ -85,7 +86,7 @@ async def test_plan_critic_reviews_a_multi_lane_round_once() -> None:
     orchestration_backend = _QueuedBackend(
         [
             _dispatch_payload(both_roles=True),
-            _partition(_GROUND_A, _GROUND_B),
+            _partition(GROUND_A, GROUND_B),
             "# Lane plan\nMemory route.",
             "# Lane plan\nCompute route.",
             "# Lane plan\nMemory route, revised.",
@@ -134,8 +135,8 @@ async def test_plan_critic_reviews_a_multi_lane_round_once() -> None:
     assert result.plan_critic.verdict == "REVISE"
     payload = json.loads(critic_backend.specs[0].user_prompt)
     assert [lane["lane_id"] for lane in payload["draft_lane_plans"]] == [1, 2]
-    assert payload["draft_lane_plans"][0]["ground"] == _GROUND_A
-    assert payload["draft_lane_plans"][1]["ground"] == _GROUND_B
+    assert payload["draft_lane_plans"][0]["ground"] == GROUND_A
+    assert payload["draft_lane_plans"][1]["ground"] == GROUND_B
     assert "draft_plan" not in payload
     assert "not worth an Implementer session of its own" in (critic_backend.specs[0].system_prompt)
     # The verdict was about the round, so it reached every lane in it.
@@ -180,7 +181,7 @@ async def test_the_round_reports_how_it_was_divided() -> None:
     orchestration_backend = _QueuedBackend(
         [
             _dispatch_payload(both_roles=True),
-            _partition(_GROUND_A, _GROUND_B),
+            _partition(GROUND_A, GROUND_B),
             "# Lane 1 draft",
             "# Lane 2 draft",
         ]
@@ -196,8 +197,8 @@ async def test_the_round_reports_how_it_was_divided() -> None:
     assert partition["status"] == "planned"
     assert partition["challenger_requested"] is False
     assert [ground["ground"] for ground in partition["grounds"]] == [
-        _GROUND_A,
-        _GROUND_B,
+        GROUND_A,
+        GROUND_B,
     ]
     # The earlier snapshot's own entries survive the merge.
     assert "coverage" in result.structured_output_diagnostics
@@ -209,7 +210,7 @@ def _two_lane_round(critic_review: str, *, revisions: list[str] | None = None):
     orchestration_backend = _QueuedBackend(
         [
             _dispatch_payload(both_roles=True),
-            _partition(_GROUND_A, _GROUND_B),
+            _partition(GROUND_A, GROUND_B),
             "# Lane 1 draft",
             "# Lane 2 draft",
             *(revisions or []),
@@ -351,12 +352,12 @@ def _joint_round(joint_lanes: list[int], count: int, critic_review: str):
             _partition_lanes(
                 [
                     _lane(
-                        _JOINT_GROUND,
+                        JOINT_GROUND,
                         joint=True,
                         fallback="re-tune num_warps at the current tile alone",
                     )
                     if lane_id in joint_lanes
-                    else _lane(f"{_GROUND_B} ({lane_id})")
+                    else _lane(f"{GROUND_B} ({lane_id})")
                     for lane_id in range(1, count + 1)
                 ]
             ),
@@ -434,7 +435,7 @@ def _drafts(*joint: bool) -> list:
     return [
         SynthesizedPlan(
             text=f"# Lane {index + 1} draft",
-            ground=_JOINT_GROUND if is_joint else f"{_GROUND_B} ({index + 1})",
+            ground=JOINT_GROUND if is_joint else f"{GROUND_B} ({index + 1})",
             joint=is_joint,
             fallback=("re-tune num_warps at the current tile alone" if is_joint else ""),
         )
@@ -564,7 +565,7 @@ async def test_a_round_narrows_on_a_ruling_its_review_was_asked_twice_for() -> N
     orchestration_backend = _QueuedBackend(
         [
             _dispatch_payload(both_roles=True),
-            _partition(_GROUND_A, _GROUND_B),
+            _partition(GROUND_A, GROUND_B),
             "# Lane 1 draft",
             "# Lane 2 draft",
         ]
@@ -601,7 +602,7 @@ async def test_a_narrowed_round_never_records_that_it_kept_every_lane(
     orchestration_backend = _QueuedBackend(
         [
             _dispatch_payload(both_roles=True),
-            _partition(_GROUND_A, _GROUND_B),
+            _partition(GROUND_A, GROUND_B),
             "# Lane 1 draft",
             "# Lane 2 draft",
         ]
@@ -723,7 +724,7 @@ async def test_a_lane_that_cannot_be_revised_keeps_its_draft() -> None:
     orchestration_backend = _QueuedBackend(
         [
             _dispatch_payload(both_roles=True),
-            _partition(_GROUND_A, _GROUND_B),
+            _partition(GROUND_A, GROUND_B),
             "# Lane 1 draft",
             "# Lane 2 draft",
             AgentRunResult(text="", end_reason="turn_cap"),

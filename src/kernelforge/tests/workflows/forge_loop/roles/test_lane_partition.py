@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+
 import pytest
 
 from kernelforge.workflows.forge_loop.roles import orchestration as orchestration_module
@@ -14,9 +15,9 @@ from kernelforge.agent_backends import AgentProviderUnavailableError, AgentRunRe
 from kernelforge.workflows.forge_loop.roles.contracts import DispatchPlan, SpecialistRound
 from kernelforge.workflows.forge_loop.roles.orchestration import OrchestrationAgent
 from kernelforge.tests.workflows.forge_loop.roles._orchestration_fakes import (
-    _GROUND_A,
-    _GROUND_B,
-    _JOINT_GROUND,
+    GROUND_A,
+    GROUND_B,
+    JOINT_GROUND,
     _PerCallBackend,
     _assignment,
     _compute_and_memory_round,
@@ -34,7 +35,7 @@ async def test_each_lane_is_given_its_ground_and_every_other_lane_s() -> None:
     """Overlapping lanes spend two Implementer sessions on one change."""
     backend = _PerCallBackend(
         [
-            _partition(_GROUND_A, _GROUND_B),
+            _partition(GROUND_A, GROUND_B),
             "# Lane A\nRetime the MFMA.",
             "# Lane B\nStage via LDS.",
         ]
@@ -46,16 +47,16 @@ async def test_each_lane_is_given_its_ground_and_every_other_lane_s() -> None:
 
     assert [result.text for result in results] == ["# Lane A\nRetime the MFMA.", "# Lane B\nStage via LDS."]
     owned = [json.loads(spec.user_prompt)["lane"] for spec in backend.specs[1:]]
-    assert owned[0]["ground"] == _GROUND_A
-    assert owned[0]["ground_owned_by_other_lanes"] == [_GROUND_B]
-    assert owned[1]["ground"] == _GROUND_B
-    assert owned[1]["ground_owned_by_other_lanes"] == [_GROUND_A]
+    assert owned[0]["ground"] == GROUND_A
+    assert owned[0]["ground_owned_by_other_lanes"] == [GROUND_B]
+    assert owned[1]["ground"] == GROUND_B
+    assert owned[1]["ground_owned_by_other_lanes"] == [GROUND_A]
 
 
 @pytest.mark.asyncio
 async def test_every_lane_receives_the_whole_round_s_evidence() -> None:
     """A lane's ground is a slice of the code, not a slice of the reading."""
-    backend = _PerCallBackend([_partition(_GROUND_A, _GROUND_B), "# Lane A", "# Lane B"])
+    backend = _PerCallBackend([_partition(GROUND_A, GROUND_B), "# Lane A", "# Lane B"])
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
     specialists = await _compute_and_memory_round()
 
@@ -70,7 +71,7 @@ async def test_every_lane_receives_the_whole_round_s_evidence() -> None:
 @pytest.mark.asyncio
 async def test_the_partition_reads_every_analysis_before_it_divides() -> None:
     """Where the boundaries fall cannot be answered from a slice."""
-    backend = _PerCallBackend([_partition(_GROUND_A, _GROUND_B), "# Lane A", "# Lane B"])
+    backend = _PerCallBackend([_partition(GROUND_A, GROUND_B), "# Lane A", "# Lane B"])
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
     specialists = await _compute_and_memory_round()
 
@@ -84,7 +85,7 @@ async def test_the_partition_reads_every_analysis_before_it_divides() -> None:
 @pytest.mark.asyncio
 async def test_a_replace_verdict_spends_one_lane_on_the_challenge() -> None:
     """A critic rules on a plan that exists, so REPLACE lands on the next round."""
-    backend = _PerCallBackend([_partition("validate the CK GEMM path", _GROUND_B), "# Lane A", "# Lane B"])
+    backend = _PerCallBackend([_partition("validate the CK GEMM path", GROUND_B), "# Lane A", "# Lane B"])
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
     specialists = await _compute_and_memory_round()
     context = replace(
@@ -104,7 +105,7 @@ async def test_a_replace_verdict_spends_one_lane_on_the_challenge() -> None:
 @pytest.mark.asyncio
 async def test_a_round_nobody_challenged_is_divided_as_usual() -> None:
     """Guards the challenger block from reaching every ordinary round."""
-    backend = _PerCallBackend([_partition(_GROUND_A, _GROUND_B), "# Lane A", "# Lane B"])
+    backend = _PerCallBackend([_partition(GROUND_A, GROUND_B), "# Lane A", "# Lane B"])
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
     specialists = await _compute_and_memory_round()
 
@@ -117,7 +118,7 @@ async def test_a_round_nobody_challenged_is_divided_as_usual() -> None:
 @pytest.mark.asyncio
 async def test_an_accepted_round_raises_no_challenger() -> None:
     """Only REPLACE says the route is wrong; REVISE corrected it in place."""
-    backend = _PerCallBackend([_partition(_GROUND_A, _GROUND_B), "# Lane A", "# Lane B"])
+    backend = _PerCallBackend([_partition(GROUND_A, GROUND_B), "# Lane A", "# Lane B"])
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
     specialists = await _compute_and_memory_round()
     context = replace(
@@ -134,7 +135,7 @@ async def test_an_accepted_round_raises_no_challenger() -> None:
 @pytest.mark.asyncio
 async def test_the_partition_is_told_a_cross_cutting_move_is_one_lane() -> None:
     """The width follows the directions, not the other way around."""
-    backend = _PerCallBackend([_partition(_GROUND_A, _GROUND_B), "# Lane A", "# Lane B"])
+    backend = _PerCallBackend([_partition(GROUND_A, GROUND_B), "# Lane A", "# Lane B"])
     agent = OrchestrationAgent(backend=backend, timeout_sec=1800, max_turns=500)
     specialists = await _compute_and_memory_round()
 
@@ -152,7 +153,7 @@ _CROSS_CUTTING = "fuse the post kernel into the GEMM, deleting one dispatch"
 @pytest.mark.asyncio
 async def test_the_partition_keeps_a_launch_config_with_the_body_it_serves() -> None:
     """A body lane measured at the old body's config closes an untested axis."""
-    backend = _PerCallBackend([_partition(_GROUND_A, _GROUND_B), "# Lane A", "# Lane B"])
+    backend = _PerCallBackend([_partition(GROUND_A, GROUND_B), "# Lane A", "# Lane B"])
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
     specialists = await _compute_and_memory_round()
 
@@ -172,11 +173,11 @@ async def test_a_joint_lane_reaches_its_implementer_time_boxed() -> None:
             _partition_lanes(
                 [
                     _lane(
-                        _JOINT_GROUND,
+                        JOINT_GROUND,
                         joint=True,
                         fallback="re-tune num_warps at the current tile alone",
                     ),
-                    _lane(_GROUND_B),
+                    _lane(GROUND_B),
                 ]
             ),
             "# Lane A",
@@ -204,7 +205,7 @@ async def test_a_joint_lane_with_no_fallback_is_said_out_loud(caplog) -> None:
     """The lane still runs; what it is risking stops being invisible."""
     backend = _PerCallBackend(
         [
-            _partition_lanes([_lane(_JOINT_GROUND, joint=True), _lane(_GROUND_B)]),
+            _partition_lanes([_lane(JOINT_GROUND, joint=True), _lane(GROUND_B)]),
             "# Lane A",
             "# Lane B",
         ]
@@ -228,7 +229,7 @@ async def test_the_round_records_which_lane_owns_its_widest_move() -> None:
     backend = _PerCallBackend(
         [
             _partition_lanes(
-                [_lane(_GROUND_A), _lane(_GROUND_B)],
+                [_lane(GROUND_A), _lane(GROUND_B)],
                 {"move": _CROSS_CUTTING, "lane_id": 2},
             ),
             "# Lane A",
@@ -247,7 +248,7 @@ async def test_the_round_records_which_lane_owns_its_widest_move() -> None:
         "status": "assigned",
         "move": _CROSS_CUTTING,
         "lane_id": 2,
-        "lane_ground": _GROUND_B,
+        "lane_ground": GROUND_B,
     }
 
 
@@ -257,7 +258,7 @@ async def test_an_unowned_widest_move_is_in_the_round_s_output(caplog) -> None:
     backend = _PerCallBackend(
         [
             _partition_lanes(
-                [_lane(_GROUND_A), _lane(_GROUND_B)],
+                [_lane(GROUND_A), _lane(GROUND_B)],
                 {"move": _CROSS_CUTTING, "lane_id": 0},
             ),
             "# Lane A",
@@ -290,7 +291,7 @@ async def test_a_widest_move_naming_a_lane_the_round_lacks_is_unowned(
     backend = _PerCallBackend(
         [
             _partition_lanes(
-                [_lane(_GROUND_A), _lane(_GROUND_B), _lane("scale.py: the epilogue")],
+                [_lane(GROUND_A), _lane(GROUND_B), _lane("scale.py: the epilogue")],
                 {"move": _CROSS_CUTTING, "lane_id": 3, "unassigned_reason": ""},
             ),
             "# Lane A",
@@ -313,7 +314,7 @@ async def test_a_widest_move_naming_a_lane_the_round_lacks_is_unowned(
 @pytest.mark.asyncio
 async def test_a_partition_that_named_no_widest_move_reports_that(caplog) -> None:
     """Named none and left one unowned are different answers."""
-    backend = _PerCallBackend([_partition(_GROUND_A, _GROUND_B), "# Lane A", "# Lane B"])
+    backend = _PerCallBackend([_partition(GROUND_A, GROUND_B), "# Lane A", "# Lane B"])
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
     specialists = await _compute_and_memory_round()
 
@@ -333,7 +334,7 @@ async def test_a_move_named_as_a_plain_string_is_still_a_named_move(
     """The schema shows an object; a model answering it with prose is ordinary."""
     backend = _PerCallBackend(
         [
-            _partition_lanes([_lane(_GROUND_A), _lane(_GROUND_B)], _CROSS_CUTTING),
+            _partition_lanes([_lane(GROUND_A), _lane(GROUND_B)], _CROSS_CUTTING),
             "# Lane A",
             "# Lane B",
         ]
@@ -363,7 +364,7 @@ async def test_a_move_field_of_the_wrong_shape_is_not_reported_as_no_move(
     backend = _PerCallBackend(
         [
             _partition_lanes(
-                [_lane(_GROUND_A), _lane(_GROUND_B)],
+                [_lane(GROUND_A), _lane(GROUND_B)],
                 [{"move": _CROSS_CUTTING}],
             ),
             "# Lane A",
@@ -389,7 +390,7 @@ async def test_an_owned_move_records_the_ground_that_owns_it() -> None:
     backend = _PerCallBackend(
         [
             _partition_lanes(
-                [_lane(_GROUND_A), _lane(_GROUND_B)],
+                [_lane(GROUND_A), _lane(GROUND_B)],
                 {"move": _CROSS_CUTTING, "lane_id": 1},
             ),
             "# Lane A",
@@ -403,7 +404,7 @@ async def test_an_owned_move_records_the_ground_that_owns_it() -> None:
 
     move = agent.structured_output_diagnostics["partition"]["cross_cutting_move"]
     assert move["lane_id"] == 1
-    assert move["lane_ground"] == _GROUND_A
+    assert move["lane_ground"] == GROUND_A
 
 
 @pytest.mark.asyncio
@@ -412,7 +413,7 @@ async def test_a_move_naming_a_lane_that_is_not_a_number_is_unowned() -> None:
     backend = _PerCallBackend(
         [
             _partition_lanes(
-                [_lane(_GROUND_A), _lane(_GROUND_B)],
+                [_lane(GROUND_A), _lane(GROUND_B)],
                 {"move": _CROSS_CUTTING, "lane_id": "lane 2"},
             ),
             "# Lane A",
@@ -434,7 +435,7 @@ async def test_an_unreadable_joint_answer_is_recorded_not_just_narrowed() -> Non
     """Falling back to narrow ground is right; doing it without a word is not."""
     backend = _PerCallBackend(
         [
-            _partition_lanes([_lane(_JOINT_GROUND, joint="partial"), _lane(_GROUND_B)]),
+            _partition_lanes([_lane(JOINT_GROUND, joint="partial"), _lane(GROUND_B)]),
             "# Lane A",
             "# Lane B",
         ]
@@ -456,8 +457,8 @@ async def test_a_lane_that_declined_joint_ground_does_not_get_it() -> None:
         [
             _partition_lanes(
                 [
-                    _lane(_GROUND_A, joint="false"),
-                    _lane(_JOINT_GROUND, joint="true", fallback="re-tune only"),
+                    _lane(GROUND_A, joint="false"),
+                    _lane(JOINT_GROUND, joint="true", fallback="re-tune only"),
                 ]
             ),
             "# Lane A",
@@ -491,7 +492,7 @@ async def test_a_lane_that_answered_joint_with_a_number_keeps_narrow_ground() ->
     """The lane list and the note are read by the same operator."""
     backend = _PerCallBackend(
         [
-            _partition_lanes([_lane(_JOINT_GROUND, joint=1), _lane(_GROUND_B)]),
+            _partition_lanes([_lane(JOINT_GROUND, joint=1), _lane(GROUND_B)]),
             "# Lane A",
             "# Lane B",
         ]
@@ -511,7 +512,7 @@ async def test_a_lane_that_answered_joint_with_a_number_keeps_narrow_ground() ->
 @pytest.mark.asyncio
 async def test_a_launch_site_two_bodies_share_is_owned_by_one_lane() -> None:
     """The exception that widens a lane cannot be handed to every lane."""
-    backend = _PerCallBackend([_partition(_GROUND_A, _GROUND_B), "# Lane A", "# Lane B"])
+    backend = _PerCallBackend([_partition(GROUND_A, GROUND_B), "# Lane A", "# Lane B"])
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
     specialists = await _compute_and_memory_round()
 
@@ -544,7 +545,7 @@ async def test_a_partition_that_could_not_be_bought_claims_no_move() -> None:
 @pytest.mark.asyncio
 async def test_the_partition_divides_what_it_was_given_without_reading_more() -> None:
     """The analyses already name the files and functions they are about."""
-    backend = _PerCallBackend([_partition(_GROUND_A, _GROUND_B), "# Lane A", "# Lane B"])
+    backend = _PerCallBackend([_partition(GROUND_A, GROUND_B), "# Lane A", "# Lane B"])
     agent = OrchestrationAgent(backend=backend, timeout_sec=1800, max_turns=500)
     specialists = await _compute_and_memory_round()
 
@@ -613,7 +614,7 @@ async def test_a_challenge_survives_a_partition_that_could_not_be_bought() -> No
 @pytest.mark.asyncio
 async def test_one_real_direction_is_planned_as_a_single_lane_round() -> None:
     """A slot filled to reach the requested width still costs a whole session."""
-    backend = _PerCallBackend([_partition(_GROUND_A), "# One plan"])
+    backend = _PerCallBackend([_partition(GROUND_A), "# One plan"])
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
     specialists = await _compute_and_memory_round()
 
@@ -636,7 +637,7 @@ class _OneLaneFailsBackend:
         lane = json.loads(spec.user_prompt).get("lane")
         if lane is None:
             return AgentRunResult(
-                text=_partition(_GROUND_A, _GROUND_B),
+                text=_partition(GROUND_A, GROUND_B),
                 end_reason="agent_stopped",
                 stderr_tail="",
             )
@@ -652,7 +653,7 @@ class _OneLaneFailsBackend:
 @pytest.mark.asyncio
 async def test_one_lost_lane_does_not_cost_the_round_its_healthy_plans() -> None:
     """Each lane is its own call, so one failure is one lane, not the round."""
-    backend = _OneLaneFailsBackend(failing_ground=_GROUND_A, answer="# Lane B\nStage via LDS.")
+    backend = _OneLaneFailsBackend(failing_ground=GROUND_A, answer="# Lane B\nStage via LDS.")
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
     specialists = await _compute_and_memory_round()
 
@@ -664,7 +665,7 @@ async def test_one_lost_lane_does_not_cost_the_round_its_healthy_plans() -> None
 @pytest.mark.asyncio
 async def test_a_round_that_loses_every_lane_is_still_a_planning_outage() -> None:
     """Tolerating one loss must not turn a total outage into a silent success."""
-    backend = _OneLaneFailsBackend(failing_ground=_GROUND_B, answer="")
+    backend = _OneLaneFailsBackend(failing_ground=GROUND_B, answer="")
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
     specialists = await _compute_and_memory_round()
 
@@ -677,7 +678,7 @@ async def test_a_round_that_loses_every_lane_is_still_a_planning_outage() -> Non
 @pytest.mark.asyncio
 async def test_a_lane_that_answered_with_nothing_is_reported(caplog) -> None:
     """A round narrowed by an empty answer must not look like a narrower round."""
-    backend = _PerCallBackend([_partition(_GROUND_A, _GROUND_B), "   ", "# Lane B\nStage via LDS."])
+    backend = _PerCallBackend([_partition(GROUND_A, GROUND_B), "   ", "# Lane B\nStage via LDS."])
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
     specialists = await _compute_and_memory_round()
 

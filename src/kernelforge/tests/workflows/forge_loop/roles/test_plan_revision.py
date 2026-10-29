@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+
 import pytest
 
 from kernelforge.agent_backends import AgentCapabilities, AgentRunResult
@@ -20,8 +21,8 @@ from kernelforge.workflows.forge_loop.roles.specialists import SpecialistAgent, 
 from kernelforge.workflows.forge_loop.roles.plan_critic import PlanCriticAgent
 from kernelforge.workflows.forge_loop.roles.summary_line import PLAN_SUMMARY_RULE
 from kernelforge.tests.workflows.forge_loop.roles._orchestration_fakes import (
-    _GROUND_A,
-    _GROUND_B,
+    GROUND_A,
+    GROUND_B,
     _PerCallBackend,
     _QueuedBackend,
     _StaticBackend,
@@ -256,7 +257,7 @@ async def test_a_single_plan_is_asked_to_open_with_its_summary_line() -> None:
 @pytest.mark.asyncio
 async def test_every_lane_plan_opens_with_a_summary_line_and_the_partition_does_not() -> None:
     """Only a step that writes a Markdown plan is asked for the line; the partition answers in JSON."""
-    backend = _PerCallBackend([_partition(_GROUND_A, _GROUND_B), "# Lane A\nRetime the MFMA.", "# Lane B\nStage."])
+    backend = _PerCallBackend([_partition(GROUND_A, GROUND_B), "# Lane A\nRetime the MFMA.", "# Lane B\nStage."])
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
 
     await agent.synthesize_lane_plan_results(_context(), await _compute_and_memory_round(), lanes=2)

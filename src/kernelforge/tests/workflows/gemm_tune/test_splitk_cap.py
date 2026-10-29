@@ -13,7 +13,7 @@ import pytest
 import kernelforge.workflows.gemm_tune.tuners._aiter_dense_common as ac
 from kernelforge.workflows.gemm_tune.tuners._aiter_dense_common import _cap_splitk_to_serve_safe, _SplitKLimit
 
-from .test_aiter_splitk_validate import fake_aiter
+from kernelforge.tests.workflows.gemm_tune._fake_aiter import fake_aiter
 
 _HDR = ["gfx", "cu_num", "M", "N", "K", "libtype", "kernelId", "splitK", "us", "kernelName", "tflops", "bw", "errRatio"]
 

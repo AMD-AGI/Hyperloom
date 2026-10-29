@@ -218,11 +218,11 @@ def _partition(*grounds: str) -> str:
     return json.dumps({"lanes": [{"ground": ground, "reason": "one session's worth"} for ground in grounds]})
 
 
-_GROUND_A = "chunk_intra.py: the MFMA issue schedule"
-_GROUND_B = "chunk.py: the scale stream's staging"
+GROUND_A = "chunk_intra.py: the MFMA issue schedule"
+GROUND_B = "chunk.py: the scale stream's staging"
 
 
-_JOINT_GROUND = "chunk_intra.py: the BLOCK_H tile and the num_warps/waves_per_eu/num_stages the launch passes with it"
+JOINT_GROUND = "chunk_intra.py: the BLOCK_H tile and the num_warps/waves_per_eu/num_stages the launch passes with it"
 
 
 def _partition_lanes(lanes: list[dict], move: object | None = None) -> str:

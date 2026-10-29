@@ -11,6 +11,7 @@ import subprocess
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+
 import pytest
 
 from kernelforge.workflows.forge_loop.roles import analysis_evidence

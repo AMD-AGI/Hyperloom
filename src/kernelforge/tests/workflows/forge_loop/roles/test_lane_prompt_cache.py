@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+
 import pytest
 
 from kernelforge.workflows.forge_loop.roles import lane_prompts as lane_prompts_module
@@ -14,8 +15,8 @@ from kernelforge.workflows.forge_loop.roles.lane_prompts import lane_last_prompt
 from kernelforge.agent_backends import AgentCapabilities, AgentRunResult
 from kernelforge.workflows.forge_loop.roles.orchestration import OrchestrationAgent
 from kernelforge.tests.workflows.forge_loop.roles._orchestration_fakes import (
-    _GROUND_A,
-    _GROUND_B,
+    GROUND_A,
+    GROUND_B,
     _PerCallBackend,
     _compute_and_memory_round,
     _context,
@@ -68,7 +69,7 @@ def test_the_lane_block_comes_last_and_everything_before_it_is_shared() -> None:
 @pytest.mark.asyncio
 async def test_sibling_lanes_start_once_the_first_lane_is_answering() -> None:
     """Started together, every lane writes the round's prefix; started after the first answers, they read it."""
-    backend = _PrefixCachingBackend([_partition(_GROUND_A, _GROUND_B), "# Lane A", "# Lane B"])
+    backend = _PrefixCachingBackend([_partition(GROUND_A, GROUND_B), "# Lane A", "# Lane B"])
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
     specialists = await _compute_and_memory_round()
 
@@ -86,7 +87,7 @@ async def test_sibling_lanes_start_once_the_first_lane_is_answering() -> None:
 
 @pytest.mark.asyncio
 async def test_siblings_still_run_when_the_first_lane_never_answers() -> None:
-    backend = _PrefixCachingBackend([_partition(_GROUND_A, _GROUND_B), "# Lane A", "# Lane B"], lead_answers=False)
+    backend = _PrefixCachingBackend([_partition(GROUND_A, GROUND_B), "# Lane A", "# Lane B"], lead_answers=False)
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
     specialists = await _compute_and_memory_round()
 
@@ -99,7 +100,7 @@ async def test_siblings_still_run_when_the_first_lane_never_answers() -> None:
 async def test_siblings_stop_waiting_for_a_first_lane_that_stays_silent(monkeypatch) -> None:
     """A lead retrying or stuck before its first event must not hold the round for its whole timeout."""
     monkeypatch.setattr(lane_prompts_module, "LEAD_RESPONSE_WAIT_SEC", 0.05)
-    backend = _PrefixCachingBackend([_partition(_GROUND_A, _GROUND_B), "# Lane A", "# Lane B"], lead_silence_sec=0.5)
+    backend = _PrefixCachingBackend([_partition(GROUND_A, GROUND_B), "# Lane A", "# Lane B"], lead_silence_sec=0.5)
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
     specialists = await _compute_and_memory_round()
 
@@ -112,7 +113,7 @@ async def test_siblings_stop_waiting_for_a_first_lane_that_stays_silent(monkeypa
 
 @pytest.mark.asyncio
 async def test_a_backend_without_a_shared_prompt_cache_starts_every_lane_at_once() -> None:
-    backend = _PerCallBackend([_partition(_GROUND_A, _GROUND_B), "# Lane A", "# Lane B"])
+    backend = _PerCallBackend([_partition(GROUND_A, GROUND_B), "# Lane A", "# Lane B"])
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
     specialists = await _compute_and_memory_round()
 

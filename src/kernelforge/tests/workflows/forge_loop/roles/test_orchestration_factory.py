@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from types import SimpleNamespace
+
 import pytest
 
 from kernelforge.workflows.forge_loop.roles import orchestration as orchestration_module
