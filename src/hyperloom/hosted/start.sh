@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 
 # Start a hosted Hyperloom run on any framework image, from the layer directory this script sits in
-# (built by scripts/hosted_app_image/build_layer.sh and published on a shared filesystem), instead
+# (built by scripts/hosted_app_image/build_layer.sh, shipped as the small image of Dockerfile.layer), instead
 # of from an image that was built for Hyperloom. Run it as the application's command:
 #
 #   sh <layer dir>/start.sh
