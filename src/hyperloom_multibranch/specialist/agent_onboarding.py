@@ -293,6 +293,7 @@ def root_profile(shares: OpShares | None, session: Path) -> Path | None:
         "source": "PRELUDE root profile",
         "commit": shares.commit_id,
         "job": shares.job_id,
+        "unit": "percent",
         "shares": dict(shares.shares),
     }
     profile = session / PROFILE_FILE

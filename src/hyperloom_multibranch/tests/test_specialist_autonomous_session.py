@@ -1181,7 +1181,7 @@ async def test_an_agent_in_component_mode_reads_the_root_profile_s_op_shares_fro
     profile = checkout / SNAPSHOTS["session"] / "op_shares.json"
     assert config["component"]["profile"] == str(profile)
     assert json.loads(profile.read_text()) == {
-        "source": "PRELUDE root profile", "commit": root, "job": "job-7", "shares": shares,
+        "source": "PRELUDE root profile", "commit": root, "job": "job-7", "unit": "percent", "shares": shares,
     }  # fmt: skip
 
 
