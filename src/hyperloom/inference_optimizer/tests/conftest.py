@@ -25,24 +25,6 @@ from hyperloom.orchestrator.tests._fixtures import (  # noqa: F401
 
 
 @pytest.fixture(autouse=True)
-def _restore_recording_session_binding():
-    """Undo any recording-session binding a test leaves behind.
-
-    ``Coordinator.__init__`` binds the session and drops the token, so a test
-    that constructs one leaves every later test in the worker running with a
-    session bound. Restoring a token is the only way back -- no public call
-    unbinds to "nothing" -- hence the reach for the module's ContextVar.
-    """
-    from hyperloom.inference_optimizer.session import session_binding
-
-    token = session_binding._CURRENT_SESSION.set(session_binding._CURRENT_SESSION.get())
-    try:
-        yield
-    finally:
-        session_binding._CURRENT_SESSION.reset(token)
-
-
-@pytest.fixture(autouse=True)
 def _kfd_nodes_in_pci_order(monkeypatch):
     """No test reaches a real ``amd-smi list``: card N is the Nth KFD node, so a mask number is its amd-smi index.
 
