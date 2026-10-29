@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import os
 import shutil
@@ -282,8 +281,7 @@ def dispatch_single_task(
         # and the branch still exist, so a recovery that failed for a passing
         # reason gets one more attempt here. Publication is idempotent.
         if worktree is not None and worktree.inplace:
-            with contextlib.suppress(Exception):  # broad-suppress: last-chance recovery; the tree goes either way
-                recover_task_result(layout, task_path, update_state=False)
+            recover_task_result(layout, task_path, update_state=False)
         # After that, never before: the patch is what the campaign was for, and
         # this returns the tree the patch was built in. A private checkout is
         # left standing instead, because the closing sweep does read those.
