@@ -767,7 +767,7 @@ class DownToolbox(RecordingToolbox):
         await super().close()
 
 
-class StuckToolbox(RecordingToolbox):
+class StuckToolbox(LeasingToolbox):
     """A toolbox that never finishes closing, nor cancelling a branch in ``stuck``; a failure double, not a
     placeholder."""
 

@@ -28,6 +28,7 @@ from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import PATCH_ROOT, LaunchConfig, PatchRef, Recipe, RecipeDelta
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
+from hyperloom_multibranch.contracts.blackboard.records import ToolResultPointer
 from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.blackboard import LocalBlackboard
@@ -46,6 +47,7 @@ from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.context import SchedulerContext
 from hyperloom_multibranch.scheduling.roster import Roster, RosterCaps
 from hyperloom_multibranch.scheduling.decisions import DecisionLog
+from hyperloom_multibranch.scheduling.events import PROFILE_UNAVAILABLE, PROFILED, IntegrationProfiler
 from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
 from hyperloom_multibranch.rulegate.inferencex import FLOOR_PCT
@@ -81,6 +83,8 @@ from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     session_gate,
 )
 from hyperloom_multibranch.toolbox.fake_model import Fate, FakeToolboxConfig
+from hyperloom_multibranch.toolbox.analysis import CODE_TOOL_UNAVAILABLE
+from hyperloom_multibranch.toolbox.tools.base import JobStatus
 from hyperloom_multibranch.scheduling.tests.child_sessions import (
     AGENTX_BENCHMARK,
     AGENTX_RUN_ID,
@@ -142,7 +146,8 @@ class PreludePeers:
     """The repository, toolbox and rule gate PRELUDE works with, on the session's blackboard; ``tests`` waits for the
     toolbox's outcomes without real sleeps. ``opened`` holds each commit the integration branch was opened on, with
     whether the child had been started then, and ``replays`` each champion replayed, with whether the child had
-    exited then; ``on_this_machine`` says whether the toolbox leases the child its cards."""
+    exited then; ``on_this_machine`` says whether the toolbox measures on this machine's cards, and so leases the
+    child its cards, or in sandboxes elsewhere, where PRELUDE starts no child."""
 
     repo: GitExperimentRepo
     toolbox: LeasingToolbox
@@ -150,21 +155,26 @@ class PreludePeers:
     gate: GateService
     opened: list[tuple[str, bool]] = field(default_factory=list)
     replays: list[tuple[str, bool]] = field(default_factory=list)
-    on_this_machine: bool = False
+    on_this_machine: bool = True
 
 
 async def _instant(seconds: float) -> None:
     await asyncio.sleep(0)
 
 
-def _peers(layout: SessionLayout, accuracy: float | None = None, rule: Rule | None = None) -> PreludePeers:
+def _peers(
+    layout: SessionLayout,
+    accuracy: float | None = None,
+    rule: Rule | None = None,
+    toolbox_type: type[LeasingToolbox] = LeasingToolbox,
+) -> PreludePeers:
     """``accuracy`` is the eval score every baseline test measures, the fake's own when ``None``; ``rule`` is the
     gate's, InferenceX's when ``None``."""
 
     scores = {} if accuracy is None else {RecipeDelta().fingerprint(): accuracy}
     toolbox_blackboard = LocalBlackboard(layout.blackboard, Writer(Role.TOOLBOX, "toolbox"), clock=_clock().now)
     repo = GitExperimentRepo(layout.repo, LocalBlobStore(layout.blobs))
-    toolbox = LeasingToolbox(toolbox_blackboard, accuracy=scores, conc=WORKLOAD.conc, repo=repo)
+    toolbox = toolbox_type(toolbox_blackboard, accuracy=scores, conc=WORKLOAD.conc, repo=repo)
     toolbox.clock = _clock().now
     tests = SessionTests(toolbox, Clock(now=_clock().now, sleep=_instant))
     gate_blackboard = LocalBlackboard(layout.blackboard, Writer(Role.GATE, "gate"), clock=_clock().now)
@@ -211,8 +221,18 @@ def _prelude(
         await asyncio.shield(anchored)
         return root
 
+    profiler = IntegrationProfiler(
+        peers.toolbox, peers.tests, _blackboard(layout), Clock(now=clock.now, sleep=_instant)
+    )
     services = PreludeServices(
-        peers.repo, peers.gate, peers.tests, peers.toolbox, peers.on_this_machine, open_integration, replay_champion
+        peers.repo,
+        peers.gate,
+        peers.tests,
+        peers.toolbox,
+        peers.on_this_machine,
+        open_integration,
+        replay_champion,
+        profiler.profile_root,
     )
     return Prelude(context, services, warm_start=warm_start)
 
@@ -404,14 +424,18 @@ class MbFakeSlowChildRegistry(MbFakeChildRegistry):
         return spawned
 
 
-async def test_the_child_gpu_time_is_bounded_by_its_wall_time_times_tp_and_recorded(tmp_path: Path) -> None:
+async def test_the_gpu_time_of_a_child_that_held_no_lease_is_bounded_by_its_wall_time_times_tp_and_recorded(
+    tmp_path: Path,
+) -> None:
     layout = _layout(tmp_path)
     times = [NOW]
     processes = MbFakeSlowChildRegistry(layout, child_with_patch(tmp_path), times, 1800.0)
     workload = replace(WORKLOAD, tp=4)
+    peers = _peers(layout)
+    peers.toolbox.lease_refusal = RequestRejected("no card would be left to measure on", "lease_leaves_no_measurement")
 
     budget = SessionBudget.from_hours(2.0, NOW)
-    prelude = _prelude(layout, processes, _peers(layout), clock=_clock(times))
+    prelude = _prelude(layout, processes, peers, clock=_clock(times))
     result = await prelude.root(workload, budget, HardStop(budget, _clock(times)), IMAGE)
 
     assert result.child_gpu_seconds_upper_bound == 1800.0 * 4
@@ -425,7 +449,7 @@ async def test_a_child_on_leased_cards_is_charged_once_by_its_lease_to_the_integ
     times = [NOW]
     processes = MbFakeSlowChildRegistry(layout, child_with_patch(tmp_path), times, 1800.0)
     peers = _peers(layout)
-    peers.on_this_machine, peers.toolbox.clock = True, _clock(times).now
+    peers.toolbox.clock = _clock(times).now
 
     budget = SessionBudget.from_hours(2.0, NOW)
     prelude = _prelude(layout, processes, peers, clock=_clock(times))
@@ -772,7 +796,6 @@ def _submitted_after_the_child(peers: PreludePeers, processes: MbFakeChildRegist
 async def test_the_root_tests_run_while_the_child_runs_on_the_cards_leased_for_it(tmp_path: Path) -> None:
     layout = _layout(tmp_path)
     processes, peers = _registry(layout, child_with_patch(tmp_path), linger=SHORT_CHILD), _peers(layout)
-    peers.on_this_machine = True
     exited = _submitted_after_the_child(peers, processes)
 
     result = await _run(_prelude(layout, processes, peers), SessionBudget.from_hours(2.0, NOW))
@@ -791,7 +814,6 @@ async def test_a_child_whose_lease_would_leave_no_test_its_cards_runs_before_the
     monkeypatch.setenv(TRACE_ANALYSIS_ROUTE_ENV, "report")
     layout = _layout(tmp_path)
     processes, peers = _registry(layout, child_with_patch(tmp_path), linger=SHORT_CHILD), _peers(layout)
-    peers.on_this_machine = True
     peers.toolbox.lease_refusal = RequestRejected("one test needs both cards", "lease_leaves_no_measurement")
     exited = _submitted_after_the_child(peers, processes)
 
@@ -807,7 +829,6 @@ async def test_a_child_whose_lease_would_leave_no_test_its_cards_runs_before_the
 async def test_a_failing_root_test_ends_prelude_without_waiting_for_the_child(tmp_path: Path) -> None:
     layout = _layout(tmp_path)
     processes, peers = _registry(layout, child_with_patch(tmp_path), linger=LONG_CHILD), _peers(layout)
-    peers.on_this_machine = True
     refusal = RequestRejected("the base image moved", code="base_image_mismatch")
     peers.toolbox.reject_if(lambda request: refusal if request.purpose is Purpose.BASELINE else None)
 
@@ -840,7 +861,6 @@ async def test_the_champion_is_replayed_while_the_child_runs_on_the_profile_know
     layout = _layout(tmp_path)
     kb = OneChampionKB()
     processes, peers = _registry(layout, child_with_patch(tmp_path), linger=SHORT_CHILD), _peers(layout)
-    peers.on_this_machine = True
 
     result = await _run(_prelude(layout, processes, peers, recipe_kb=kb), SessionBudget.from_hours(2.0, NOW))
 
@@ -947,7 +967,6 @@ def _agentx_prelude(tmp_path: Path, child: Path) -> tuple[SessionLayout, Prelude
 
     layout = _layout(tmp_path)
     peers = _peers(layout, rule=AgentXRule())
-    peers.on_this_machine = True
     return layout, peers, _prelude(layout, _registry(layout, child), peers)
 
 
@@ -1021,3 +1040,133 @@ async def test_a_reused_prelude_anchors_an_agentx_baseline_on_the_earlier_childs
 
     assert peers.toolbox.requests == {}
     assert (await _blackboard(layout).baseline()).source.startswith(f"prelude-child:{run} ")
+
+
+#: The op shares :class:`AnalysingToolbox`'s TraceLens job finds in every profile.
+ROOT_SHARES = {"gemm": 48.0, "attention": 31.0}
+
+
+class AnalysingToolbox(LeasingToolbox):
+    """The leasing toolbox with a TraceLens route whose job ends at once, leaving :data:`ROOT_SHARES` on the commit the
+    profile test measured, or refused with ``analysis_refusal``; ``analysed`` holds each profile test analysed. A
+    double for a backend that profiles, not a placeholder: the fake has no tool jobs of its own."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.analysed: list[str] = []
+        self.analysis_refusal: RequestRejected | None = None
+
+    async def submit_analysis(
+        self, branch: str, tool: str, params: Mapping[str, Any], profile_request_id: str = ""
+    ) -> str:
+        if self.analysis_refusal is not None:
+            raise self.analysis_refusal
+        self.analysed.append(profile_request_id)
+        job = f"tracelens-{len(self.analysed)}"
+        commit = self.requests[profile_request_id].parent_commit
+        pointer = ToolResultPointer(branch, job, "/analysis", "trace analysed", commit, profile_request_id, ROOT_SHARES)
+        await self.blackboard.notify_tool_result(pointer)
+        return job
+
+    def tool_status(self, job_id: str) -> JobStatus:
+        return JobStatus.SUCCEEDED
+
+
+def _hosted(tmp_path: Path, rule: Rule | None = None) -> tuple[SessionLayout, PreludePeers, MbFakeChildRegistry]:
+    """A session whose toolbox measures in sandboxes elsewhere, with a child that would root it were one started."""
+
+    layout = _layout(tmp_path)
+    peers = _peers(layout, rule=rule, toolbox_type=AnalysingToolbox)
+    peers.on_this_machine = False
+    return layout, peers, _registry(layout, child_with_patch(tmp_path))
+
+
+def _by_purpose(toolbox: LeasingToolbox, purpose: Purpose) -> list[str]:
+    return [request_id for request_id, request in toolbox.requests.items() if request.purpose is purpose]
+
+
+async def test_a_prelude_measuring_in_sandboxes_starts_no_child_and_roots_on_root_tests_and_a_root_profile(
+    tmp_path: Path,
+) -> None:
+    layout, peers, processes = _hosted(tmp_path)
+
+    result = await _run(_prelude(layout, processes, peers), SessionBudget.from_hours(2.0, NOW))
+
+    assert processes.child is None and not layout.prelude_child.exists() and peers.toolbox.leased == []
+    root = result.root_commit
+    assert root == await peers.repo.head(INTEGRATION_BRANCH) and peers.opened == [(root, False)]
+    baseline_tests, [profile] = (
+        _by_purpose(peers.toolbox, Purpose.BASELINE),
+        _by_purpose(peers.toolbox, Purpose.PROFILE),
+    )
+    assert len(baseline_tests) == BASELINE_TESTS and len(peers.toolbox.requests) == BASELINE_TESTS + 1
+    request = peers.toolbox.requests[profile]
+    assert (request.kind, request.branch_id, request.parent_commit) == (TestKind.PROFILE, INTEGRATION_BRANCH, root)
+    assert peers.toolbox.analysed == [profile] and peers.toolbox.root_profiles == []
+    baseline = await _blackboard(layout).baseline()
+    assert (baseline.root_commit, sorted(baseline.request_ids)) == (root, sorted(baseline_tests))
+    assert result.longest_root_test == FakeToolboxConfig().attempt_seconds
+    session_profile = await _blackboard(layout).session_profile()
+    assert session_profile == result.profile and dict(session_profile.roofline_ceiling) == {}
+    shares = await _blackboard(layout).op_shares(root)
+    assert shares is not None and (dict(shares.shares), shares.profile_request_id) == (ROOT_SHARES, profile)
+    assert result.child_gpu_seconds_upper_bound == 0.0
+    [rooted] = [entry["detail"] for entry in _logged(layout) if entry["reason"] == "root committed"]
+    assert rooted == {"root_commit": root}
+    [profiled] = [entry for entry in _logged(layout) if entry["kind"] == "profile"]
+    assert (profiled["reason"], profiled["detail"]["commit"], profiled["detail"]["request_id"]) == (
+        PROFILED,
+        root,
+        profile,
+    )
+
+
+async def test_an_agentx_prelude_measuring_in_sandboxes_anchors_its_baseline_on_one_root_test(tmp_path: Path) -> None:
+    layout, peers, processes = _hosted(tmp_path, AgentXRule())
+
+    result = await _run(_prelude(layout, processes, peers), SessionBudget.from_hours(2.0, NOW), AGENTX)
+
+    assert processes.child is None and peers.toolbox.prelude_baselines == []
+    [root_test], [profile] = _by_purpose(peers.toolbox, Purpose.BASELINE), _by_purpose(peers.toolbox, Purpose.PROFILE)
+    baseline = await _blackboard(layout).baseline()
+    assert (baseline.root_commit, baseline.request_ids, baseline.source) == (result.root_commit, (root_test,), "")
+    assert result.longest_root_test == FakeToolboxConfig().attempt_seconds
+    assert peers.toolbox.analysed == [profile]
+    [established] = [entry for entry in _logged(layout) if entry["reason"] == "baseline established"]
+    assert established["detail"]["request_ids"] == [root_test]
+
+
+async def test_a_prelude_whose_backend_cannot_analyse_the_root_profile_records_it_and_goes_on(tmp_path: Path) -> None:
+    layout, peers, processes = _hosted(tmp_path)
+    assert isinstance(peers.toolbox, AnalysingToolbox)
+    peers.toolbox.analysis_refusal = RequestRejected("no TraceLens on this backend", CODE_TOOL_UNAVAILABLE)
+
+    result = await _run(_prelude(layout, processes, peers), SessionBudget.from_hours(2.0, NOW))
+
+    assert (await _blackboard(layout).baseline()).root_commit == result.root_commit
+    assert await _blackboard(layout).op_shares(result.root_commit) is None
+    [unavailable] = [entry for entry in _logged(layout) if entry["kind"] == "profile"]
+    assert (unavailable["reason"], unavailable["detail"]["code"]) == (PROFILE_UNAVAILABLE, CODE_TOOL_UNAVAILABLE)
+
+
+async def test_root_tests_that_fail_to_measure_fail_a_prelude_measuring_in_sandboxes(
+    tmp_path: Path,
+) -> None:
+    layout, peers, processes = _hosted(tmp_path)
+    peers.toolbox.script(lambda request: request.purpose is Purpose.BASELINE, [Fate.MEASUREMENT])
+
+    with pytest.raises(PreludeFailed, match="the baseline anchors nothing"):
+        await _run(_prelude(layout, processes, peers), SessionBudget.from_hours(2.0, NOW))
+
+    assert processes.child is None
+    assert not [entry for entry in _logged(layout) if entry["reason"] == "baseline established"]
+
+
+async def test_the_prelude_of_a_session_that_started_no_child_cannot_be_reused(tmp_path: Path) -> None:
+    layout, peers, processes = _hosted(tmp_path)
+    budget = SessionBudget.from_hours(2.0, NOW)
+    await _prelude(layout, processes, peers).root(WORKLOAD, budget, HardStop(budget, _clock()), IMAGE)
+    atomic_write_json(layout.manifest, {"settings": {"workload": encode(WORKLOAD)}})
+
+    with pytest.raises(ValueError, match="rooted on no child session"):
+        reused_prelude(layout.root, WORKLOAD, IMAGE)

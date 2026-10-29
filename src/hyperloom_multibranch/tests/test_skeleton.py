@@ -112,7 +112,7 @@ from hyperloom_multibranch.scheduling.budget import (
     explore_gpu_seconds,
 )
 from hyperloom_multibranch.scheduling import branches
-from hyperloom_multibranch.scheduling.events import PROFILE_UNAVAILABLE
+from hyperloom_multibranch.scheduling.events import PROFILE_UNAVAILABLE, PROFILED
 from hyperloom_multibranch.scheduling.explore import (
     EXPLORE_TICK_SECONDS,
     FORK_NOT_LANDED,
@@ -364,7 +364,9 @@ class SilentModel(ScriptedCompletion):
 class Stage:
     """One session on the specialist runtime: ``scripts`` and ``steps`` are what each branch's specialist does,
     ``explored`` what its tests and retests measure and ``measured`` what every other test does, the runtime refuses
-    to stop a branch in ``refusing`` and a run of a branch in ``hanging`` never confirms its stop."""
+    to stop a branch in ``refusing`` and a run of a branch in ``hanging`` never confirms its stop. ``on_this_machine``
+    says whether the toolbox measures on this machine's cards, leasing PRELUDE's child its cards, or in sandboxes
+    elsewhere, where PRELUDE starts no child."""
 
     layout: SessionLayout
     time: VirtualClock
@@ -380,8 +382,8 @@ class Stage:
     runtime_type: type[RefusingRuntime] = RefusingRuntime
     recipe_kb: OneChampionKB | None = None
     stuck: frozenset[str] = frozenset()
-    toolbox_type: type[RecordingToolbox] = RecordingToolbox
-    on_this_machine: bool = False
+    toolbox_type: type[RecordingToolbox] = LeasingToolbox
+    on_this_machine: bool = True
     settings: RunSettings = SETTINGS
     repo_type: type[HeldGitRepo] = HeldGitRepo
     critic: Callable[[UsageSink], FixReviewer] = lambda _usage: NoCritic()
@@ -721,7 +723,6 @@ async def test_an_agentx_session_is_judged_on_p50_interactivity_and_validated_at
     stage = _stage(tmp_path, child=child)
     stage.settings = replace(SETTINGS, workload=AGENTX)
     stage.scripts = SCRIPTS
-    stage.toolbox_type, stage.on_this_machine = LeasingToolbox, True
 
     outcome = await stage.run()
 
@@ -913,7 +914,6 @@ async def test_a_session_on_this_machine_runs_its_root_tests_and_champion_beside
     tmp_path: Path,
 ) -> None:
     stage = _stage(tmp_path, child=child_with_patch(tmp_path), linger=CHILD_BESIDE_SECONDS)
-    stage.toolbox_type, stage.on_this_machine = LeasingToolbox, True
     stage.recipe_kb = OneChampionKB()
     stage.judge = ScriptedCompletion([_reply({"open": 0, "stop_session": {"reason": CONVERGED_REASON}})])
 
@@ -931,6 +931,52 @@ async def test_a_session_on_this_machine_runs_its_root_tests_and_champion_beside
     assert sorted(baseline.request_ids) == sorted(
         request_id for request_id, request in toolbox.requests.items() if request.purpose is Purpose.BASELINE
     )
+
+
+class SandboxToolbox(RecordingToolbox):
+    """The recording toolbox of a backend measuring in sandboxes elsewhere, so it leases no card, with a TraceLens route
+    whose job ends at once with :data:`SANDBOX_SHARES` on the commit its profile test measured; a double for a hosted
+    backend, not a placeholder."""
+
+    async def submit_analysis(
+        self, branch: str, tool: str, params: Mapping[str, Any], profile_request_id: str = ""
+    ) -> str:
+        commit = self.requests[profile_request_id].parent_commit
+        pointer = ToolResultPointer(branch, "tracelens-1", "/a", "trace analysed", commit, profile_request_id)
+        await self.blackboard.notify_tool_result(replace(pointer, op_shares=SANDBOX_SHARES))
+        return pointer.job_id
+
+    def tool_status(self, job_id: str) -> JobStatus:
+        return JobStatus.SUCCEEDED
+
+
+SANDBOX_SHARES = {"moe_gemm": 41.5, "attention": 22.0}
+
+
+async def test_a_session_measuring_in_sandboxes_starts_no_child_and_opens_explore_on_the_roots_own_profile(
+    tmp_path: Path,
+) -> None:
+    stage = _stage(tmp_path, child=None, exit_code=1)
+    stage.toolbox_type, stage.on_this_machine = SandboxToolbox, False
+    stage.judge = ScriptedCompletion([_reply({"open": 1, "branches": [], "stop": []})])
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error, outcome.exit_code) == (SessionStopReason.TIME_EXHAUSTED, "", 0)
+    assert stage.processes.child is None
+    root = await stage.root()
+    prelude = [request for request in stage.toolbox.requests.values() if request.parent_commit == root]
+    purposes = sorted(request.purpose.value for request in prelude if request.purpose is not Purpose.FINAL)
+    assert purposes == sorted([Purpose.BASELINE.value] * BASELINE_TESTS + [Purpose.PROFILE.value])
+    shares = await stage.handle(Role.OBSERVER).op_shares(root)
+    assert shares is not None and dict(shares.shares) == SANDBOX_SHARES
+    rows = _decisions(stage)
+    profiled = next(index for index, row in enumerate(rows) if row["kind"] == "profile")
+    assert rows[profiled]["reason"] == PROFILED and rows[profiled]["detail"]["commit"] == root
+    assert profiled < next(index for index, row in enumerate(rows) if row["kind"] == "judge")
+    [rooted] = [row for row in rows if row["reason"] == "root committed"]
+    assert rooted["detail"] == {"root_commit": root}
+    assert stage.sessions.started == {"b01": root}
 
 
 async def test_an_agentx_champion_replay_asks_for_no_confirm_ahead_of_its_judgement(tmp_path: Path) -> None:
@@ -1402,7 +1448,7 @@ def _slow_final(stage: Stage, *, interrupt: bool = False) -> type[RecordingToolb
     operator stops the session as the first one would end, every one runs as long again, and the integration branch's
     tests are never all withdrawn. A test double for validation that outlasts the budget, not a placeholder."""
 
-    class SlowFinalToolbox(RecordingToolbox):
+    class SlowFinalToolbox(LeasingToolbox):
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             super().__init__(*args, **kwargs)
             measure = self.executor.run
@@ -1462,7 +1508,7 @@ async def test_a_stop_signal_cuts_a_final_past_the_hard_stop_short_and_close_get
     assert final_tests and final_tests <= stage.toolbox.withdrawn.keys()
 
 
-class StuckStopToolbox(RecordingToolbox):
+class StuckStopToolbox(LeasingToolbox):
     """A toolbox whose cancel of ``b01`` never returns, so the end of EXPLORE hangs and the session deadline passes
     before FINAL: the state an operator is left in with a session worth validating and no final selection."""
 
@@ -2163,7 +2209,7 @@ async def test_a_whole_node_quarantine_is_shown_to_the_judge_at_once_and_explore
     assert at <= shown["at"] <= at + EXPLORE_TICK_SECONDS and '"node": "node-0"' in shown["prompt"]
 
 
-class CardsLostToolbox(RecordingToolbox):
+class CardsLostToolbox(LeasingToolbox):
     """The recording toolbox that, once ``lost`` is set, reports every card of its pool lost for good; a double for a
     backend whose cards' processes were not provably gone, not a placeholder."""
 
@@ -2213,7 +2259,7 @@ async def test_a_toolbox_without_cards_for_a_test_ends_explore_as_a_failed_sessi
     assert report["stop_reason"] == SessionStopReason.NO_MEASUREMENT_CARDS.value
 
 
-class AnalysingToolbox(RecordingToolbox):
+class AnalysingToolbox(LeasingToolbox):
     """The recording toolbox with an analysis route whose TraceLens job never ends, noting every test taken back; a
     double for a backend that profiles, not a placeholder."""
 

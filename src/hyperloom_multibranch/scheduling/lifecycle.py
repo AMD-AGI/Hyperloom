@@ -222,6 +222,7 @@ class Session:
         self._stopper = SessionStopper(context, self._branches, peers.toolbox, peers.mcp)
         warm_start = None if services.recipe_kb is None else WarmStartSource(services.recipe_kb, self._blobs)
         self._integrator = self._build_integrator(peers.repo, checks, services)
+        profiler = IntegrationProfiler(peers.toolbox, tests, self._blackboard, self._clock)
         prelude_services = PreludeServices(
             peers.repo,
             peers.gate,
@@ -230,11 +231,11 @@ class Session:
             peers.on_this_machine,
             self._open_integration,
             self._integrator.replay_champion,
+            profiler.profile_root,
         )
         self._prelude = Prelude(context, prelude_services, warm_start=warm_start)
         self._open_llm_roles(services)
         self._similarity = BranchSimilarity(peers.repo, self._roster)
-        profiler = IntegrationProfiler(peers.toolbox, tests, self._blackboard, self._clock)
         self._events = SessionEvents(self._blackboard, self._decisions, profiler, peers.toolbox, settings.workload)
         self._selector = FinalSelector(checks, settings.workload)
         self._signals = StopSignals()
