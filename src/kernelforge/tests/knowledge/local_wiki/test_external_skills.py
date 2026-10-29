@@ -120,6 +120,24 @@ def test_the_skill_files_a_session_opened_are_named_once_in_order(tmp_path: Path
     assert skill_files_opened(calls, []) == []
 
 
+def test_relative_reads_of_skill_files_count(tmp_path: Path) -> None:
+    skill = resolve_external_skill(_skill(tmp_path / "skill"))
+    (skill.root / "gemm").mkdir()
+    (skill.root / "gemm" / "flydsl_gemm_small_m.md").write_text("# small M\n")
+    (skill.root / "cases").mkdir()
+    (skill.root / "cases" / "k3.md").write_text("# case\n")
+    calls = [
+        ("Bash", {"command": f"cd {skill.root}; cat cases/INDEX.md"}),
+        ("Bash", {"command": "sed -n 1,80p gemm/flydsl_gemm_small_m.md; grep -n split src/gemm/kernel.py"}),
+        ("Bash", {"command": f"cat .claude/skills/{skill.root.name}/cases/k3.md"}),
+        ("Read", {"file_path": f"{tmp_path}/elsewhere/gemm/flydsl_gemm_small_m.md"}),
+    ]
+    assert skill_files_opened(calls, [skill]) == [
+        "flydsl-kernel-optimization/gemm/flydsl_gemm_small_m.md",
+        "flydsl-kernel-optimization/cases/k3.md",
+    ]
+
+
 def test_forge_loop_refuses_a_skill_dir_without_skill_md(tmp_path: Path) -> None:
     result = CliRunner().invoke(
         main,
