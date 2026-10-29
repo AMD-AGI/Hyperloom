@@ -399,13 +399,13 @@ class _Recorder:
             raise RuntimeError("boom")
 
 
-def test_fanout_isolates_a_failing_recorder():
+def test_fanout_propagates_a_failing_recorder():
     broken, healthy = _Recorder(fail=True), _Recorder()
     fanout = _subprocess_kill._RecorderFanout([broken, healthy])
-    fanout.note_phase("measured", 0.0)
-    fanout.tick(1.0)
-    fanout.close(aborted=False)
-    assert healthy.calls == ["phase:measured", "tick", "close"]
+    with pytest.raises(RuntimeError, match="^boom$"):
+        fanout.note_phase("measured", 0.0)
+    assert broken.calls == ["phase:measured"]
+    assert healthy.calls == []
 
 
 def test_round_recorders_combine_kv_and_power(monkeypatch, tmp_path):
