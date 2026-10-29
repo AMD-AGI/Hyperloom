@@ -280,7 +280,7 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
         reprofile_task = _covered_step(task_kind, params, idempotency_key=f"internal-analysis-{idempotency_reason}")
         try:
             await self.sub.execute_covered(reprofile_task)
-        except Exception:  # isolation boundary: the kernel-entry reprofile step, recorded as dispatch_failed
+        except (OSError, RuntimeError):  # the kernel-entry reprofile step, recorded as dispatch_failed
             log.exception("kernel-entry reprofile failed; the phase proceeds on the existing snapshot")
             _note_reprofile(
                 KernelReprofile(
@@ -425,7 +425,7 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
             return
         try:
             self._record_gemm_tuner_rows(recorder, result)
-        except Exception:
+        except OSError:
             log.debug("kernel timeline: GEMM tuning record failed", exc_info=True)
 
     def _record_gemm_tuner_rows(self, recorder: Any, result: dict[str, Any]) -> None:

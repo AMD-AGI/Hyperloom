@@ -138,6 +138,12 @@ class _StubRecipeKB:
     def get_authoritative_recipe(self, *, canonical_id: str) -> dict:
         return {}
 
+    def get_recipe(self, *, canonical_id: str) -> None:
+        return None
+
+    def search(self, **_kwargs) -> list:
+        return []
+
 
 class _StubSubResult:
     """Minimal sub-agent run result: only ``.state`` is read by the CLOSE sequencer."""
