@@ -3536,7 +3536,6 @@ class KernelPhase(CoordinatorCollaborator):
 
         env_spec = self._coord.writeback.build_env_spec()
         handoff_dir = write_forge_handoff(
-            self.session_dir,
             self.shared_state,
             env_spec=env_spec,
             handoff_dir=handoff_dir,

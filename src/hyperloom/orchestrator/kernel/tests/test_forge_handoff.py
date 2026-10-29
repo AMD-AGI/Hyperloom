@@ -63,7 +63,6 @@ def _state(**overrides) -> _State:
 
 
 def test_write_forge_handoff_records_context_and_absolute_evidence_paths(tmp_path: Path) -> None:
-    session_dir = tmp_path / "session"
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
     raw_trace = artifacts / "trace.json"
@@ -83,8 +82,8 @@ def test_write_forge_handoff_records_context_and_absolute_evidence_paths(tmp_pat
         },
     )
     handoff_dir = write_forge_handoff(
-        session_dir,
         state,
+        handoff_dir=tmp_path / "handoff",
         env_spec={
             "config": {
                 "server_launch_flags": "--tp 8 --mem-fraction-static 0.9",
@@ -98,7 +97,7 @@ def test_write_forge_handoff_records_context_and_absolute_evidence_paths(tmp_pat
         },
     )
 
-    assert handoff_dir == session_dir / "kernel-agent" / "forge" / "cycle-3" / "handoff"
+    assert handoff_dir == tmp_path / "handoff"
     workload = (handoff_dir / "workload.md").read_text(encoding="utf-8")
     serving = (handoff_dir / "serving-context.md").read_text(encoding="utf-8")
     evidence = (handoff_dir / "trace-evidence.md").read_text(encoding="utf-8")
@@ -295,7 +294,7 @@ def test_write_forge_handoff_survives_missing_trace_artifacts(tmp_path: Path) ->
         },
     )
 
-    handoff_dir = write_forge_handoff(tmp_path / "session", state)
+    handoff_dir = write_forge_handoff(state, handoff_dir=tmp_path / "handoff")
 
     assert (handoff_dir / "workload.md").is_file()
     assert (handoff_dir / "serving-context.md").is_file()
@@ -325,7 +324,7 @@ def test_handoff_exposes_configured_git_source_roots_without_trace(
     )
     state = _state(framework_repo_path=str(framework_repo))
 
-    handoff_dir = write_forge_handoff(tmp_path / "session", state)
+    handoff_dir = write_forge_handoff(state, handoff_dir=tmp_path / "handoff")
 
     serving = (handoff_dir / "serving-context.md").read_text(encoding="utf-8")
     assert serving.count(str(framework_repo.resolve())) == 1
@@ -363,9 +362,7 @@ def test_the_handoff_can_be_written_beside_the_attempt_that_consumes_it(tmp_path
     session = tmp_path / "session"
     attempt = next_forge_attempt_dir(session, 3)
 
-    written = write_forge_handoff(session, _state(), handoff_dir=attempt / "handoff")
+    written = write_forge_handoff(_state(), handoff_dir=attempt / "handoff")
 
     assert written == attempt / "handoff"
     assert (written / "workload.md").is_file()
-    # The per-cycle default location is untouched, so nothing else has to move.
-    assert not (forge_cycle_dir(session, 3) / "handoff").exists()

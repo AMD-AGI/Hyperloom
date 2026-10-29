@@ -1895,7 +1895,7 @@ def _open_resumed_session(args: argparse.Namespace) -> _SessionStart:
 
     ``--resume-from`` names a subdirectory under the workspace root; USER_DATA_PATH itself stays where it is.
     """
-    from ..session.paths import ENV_CURRENT_SESSION_DIR, _SESSION_SKELETON, is_path_within, workspace_root
+    from ..session.paths import ENV_CURRENT_SESSION_DIR, ensure_session_skeleton, is_path_within, workspace_root
 
     ws = workspace_root()
     session_dir = Path(args.resume_from).expanduser().resolve()
@@ -1914,8 +1914,7 @@ def _open_resumed_session(args: argparse.Namespace) -> _SessionStart:
         sys.exit(2)
     # Pin before Coordinator/SharedState load so paths/subprocesses inherit the resolved location.
     os.environ[ENV_CURRENT_SESSION_DIR] = str(session_dir)
-    for sub in _SESSION_SKELETON:
-        (session_dir / sub).mkdir(parents=True, exist_ok=True)
+    ensure_session_skeleton(session_dir)
 
     # Single-optimizer guard: take the session lock before any state.json / lease access.
     session_lock = _acquire_session_lock_or_exit(session_dir)

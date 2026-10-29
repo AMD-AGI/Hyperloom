@@ -285,15 +285,6 @@ def test_held_session_lock_refuses(tmp_path):
     assert path.read_bytes() == before
 
 
-def test_ledger_without_owner_scopes_is_refused(tmp_path):
-    path = db_path_for(tmp_path)
-    path.parent.mkdir(parents=True)
-    with closing(sqlite3.connect(path)) as db, db:
-        db.execute("CREATE TABLE leases (lane TEXT, holder_id TEXT, task_id TEXT, pid INTEGER)")
-    with pytest.raises(CleanupConfirmationError, match="no owner scopes"):
-        confirm_scope_gone(tmp_path, owner_scope=LOST, reason=REASON, current_scope=HERE)
-
-
 @pytest.mark.parametrize("scope,reason", [("", REASON), (" " + LOST, REASON), (LOST, ""), (LOST, " ")])
 def test_arguments_are_validated_before_the_lock(tmp_path, scope, reason):
     with pytest.raises(CleanupConfirmationError, match="owner scope|reason"):

@@ -9,13 +9,12 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.io import JsonFormat, WriteOptions, atomic_write_json
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import (
     agent_mcp_setup_path,
 )
-
-from .conversation_trace import redact_secrets
 
 log = logging.getLogger(__name__)
 
@@ -23,14 +22,14 @@ log = logging.getLogger(__name__)
 def _safe_value(value: Any) -> Any:
     """Recursively redact recognizable credential values in a JSON-compatible structure."""
     if isinstance(value, str):
-        return redact_secrets(value)
+        return redact_secret_values(value)
     if isinstance(value, dict):
         return {str(key): _safe_value(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_safe_value(item) for item in value]
     if value is None or isinstance(value, (bool, int, float)):
         return value
-    return redact_secrets(str(value))
+    return redact_secret_values(str(value))
 
 
 def write_mcp_setup_once(*, session_dir: Path, setup: dict[str, Any]) -> None:

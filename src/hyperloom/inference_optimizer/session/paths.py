@@ -36,19 +36,12 @@ _WARNED_NO_USER_DATA = False
 # Per-session directory skeleton mkdir-ed by make_session_dir().
 _SESSION_SKELETON: tuple[str, ...] = (
     "storage",
-    "personas",
-    "checkpoints",
-    "kb",
-    "findings",
     "reports",
     "agents/orchestration",
     "agents/critic",
     "runs/baseline",
     "runs/profile",
-    "runs/backends",
-    "runs/params",
     "runs/integrate",
-    "runs/kernel_opt",
     "kernel-agent-workspace",
     "kernel-agent",  # tools/<name>.py output root (runs/<session_id>/...)
     "patches",
@@ -162,6 +155,12 @@ def ensure_archive_root(session_dir: Path) -> Path:
     return root
 
 
+def ensure_session_skeleton(session_dir: Path) -> None:
+    """Create ``session_dir`` and its per-session directory skeleton."""
+    for sub in _SESSION_SKELETON:
+        (session_dir / sub).mkdir(parents=True, exist_ok=True)
+
+
 def make_session_dir(model_name: str | os.PathLike[str] | None = None, *, target: Path | None = None) -> Path:
     """Create the session directory + per-session + workspace-shared skeletons.
 
@@ -185,9 +184,7 @@ def make_session_dir(model_name: str | os.PathLike[str] | None = None, *, target
     else:
         sd = ws
 
-    sd.mkdir(parents=True, exist_ok=True)
-    for sub in _SESSION_SKELETON:
-        (sd / sub).mkdir(parents=True, exist_ok=True)
+    ensure_session_skeleton(sd)
     # Pin for downstream callers + subprocesses; the most recent call wins.
     os.environ[ENV_CURRENT_SESSION_DIR] = str(sd)
     return sd
@@ -277,7 +274,10 @@ def is_path_within(path: Path, root: Path) -> bool:
 
 
 def mn_profile_trace_root() -> Path:
-    """``<workspace_root>/profile-traces/`` — multi-node torch profile shared root (``<rayjob_id>/torch_trace/`` per provision)."""
+    """``<workspace_root>/profile-traces/`` — multi-node torch profile shared root.
+
+    A profile run without ``$HYPERLOOM_MN_PROFILE_TRACE_DIR`` writes its traces to ``default-<pid>/torch_trace/`` below it.
+    """
     return workspace_root() / "profile-traces"
 
 
@@ -297,6 +297,7 @@ __all__ = [
     "asset_system_prompts_dir",
     "db_path_for",
     "ensure_archive_root",
+    "ensure_session_skeleton",
     "hosted_session_dir",
     "is_path_within",
     "magpie_dir",
