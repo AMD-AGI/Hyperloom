@@ -266,7 +266,7 @@ TRACELENS_JOB_SEC = 1800
 MIN_TOTAL_SHARE = 50.0  # percent of the GPU time the (at most 50) kept ops must add up to
 #: The per-op shares come from the ``ops_summary.csv`` TraceLens' perf report writes. The ``report`` route (the tool's
 #: default) runs that report with no agent; ``agent`` runs an agent runtime over it, which needs its credentials; the
-#: ``bypass`` route writes none, so ``HL_W13_ANALYSIS_ROUTE=bypass`` shows empty shares.
+#: ``non-llm`` route writes none, so ``HL_W13_ANALYSIS_ROUTE=non-llm`` shows empty shares.
 ANALYSIS_ROUTE = os.environ.get("HL_W13_ANALYSIS_ROUTE", "report")
 
 

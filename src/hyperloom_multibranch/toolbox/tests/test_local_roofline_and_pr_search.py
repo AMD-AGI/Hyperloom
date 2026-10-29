@@ -3,7 +3,7 @@
 
 """``roofline`` and ``upstream_pr_search`` on the toolbox the real local factory builds, over real HTTP (CPU only).
 
-The roofline reads the trace a profile test left, with the orchestrator's own ``bypass`` analysis run for real on a small
+The roofline reads the trace a profile test left, with the orchestrator's own ``non-llm`` analysis run for real on a small
 trace: no card and no model. The PR search runs against a GitHub that answers from a fixture; a failure of that GitHub
 (no network, no quota, a refused token) is the job's failure, not an empty list.
 """
@@ -103,7 +103,7 @@ def _pr(number: int, title: str) -> dict[str, Any]:
 
 @pytest.fixture(autouse=True)
 def _host(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """A TraceLens checkout that is only a directory with a ``.git`` (the bypass analysis does not read it), and a host that
+    """A TraceLens checkout that is only a directory with a ``.git`` (the non-llm analysis does not read it), and a host that
     holds a GitHub token."""
     (tmp_path / "TraceLens" / ".git").mkdir(parents=True)
     monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path / "TraceLens"))
@@ -212,7 +212,7 @@ async def test_a_specialist_gets_the_roofline_of_the_trace_its_profile_test_left
     status, record = await _roofline(served, TRACE)
     result = record["result"]
     assert status is JobStatus.SUCCEEDED and record["summary"] == "roofline analysed"
-    assert (result["status"], result["route"], result["target_platform"]) == ("ok", "bypass", "MI355X")
+    assert (result["status"], result["route"], result["target_platform"]) == ("ok", "non-llm", "MI355X")
     roofline = Path(result["kernel_roofline_path"])
     assert roofline.is_file() and roofline.is_relative_to(
         served.session / "tool-results"
@@ -232,7 +232,7 @@ async def test_the_roofline_needs_a_profile_test_it_does_not_profile_itself(serv
 
 
 @pytest.mark.parametrize("route", ["agent", "report"])
-async def test_a_route_other_than_bypass_fails_the_job_by_name_and_starts_no_analysis(
+async def test_a_route_other_than_non_llm_fails_the_job_by_name_and_starts_no_analysis(
     served: Local, monkeypatch: pytest.MonkeyPatch, route: str
 ) -> None:
     from hyperloom_multibranch.toolbox.tools import roofline as module
@@ -251,7 +251,7 @@ async def test_the_route_the_host_environment_names_is_not_the_rooflines(
 ) -> None:
     monkeypatch.setenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "agent")  # an agent route would start a model session
     status, record = await _roofline(served, TRACE)
-    assert status is JobStatus.SUCCEEDED and record["result"]["route"] == "bypass"
+    assert status is JobStatus.SUCCEEDED and record["result"]["route"] == "non-llm"
 
 
 @pytest.mark.parametrize(
@@ -274,7 +274,7 @@ async def test_an_analysis_that_scanned_none_of_the_traces_kernels_fails_the_job
 
     async def scanned_nothing(payload: dict, *, session_dir: Path) -> dict:
         warning = {"code": "bypass_trace_aggregation_truncated", "severity": "warning"}
-        return {"status": "ok", "route": "bypass", "hot_kernels": [], "trace_health_warnings": [warning]}
+        return {"status": "ok", "route": "non-llm", "hot_kernels": [], "trace_health_warnings": [warning]}
 
     monkeypatch.setattr(module, "trace_analyze_handler", scanned_nothing)
     status, record = await _roofline(served, TRACE)

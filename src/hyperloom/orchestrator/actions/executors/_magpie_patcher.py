@@ -446,7 +446,7 @@ def ensure_lm_eval_install_once(inferencex_dir: Path | str | None = None) -> boo
     benchmark_lib = _resolve_inferencex_benchmark_lib(inferencex_dir)
     if benchmark_lib is None:
         return False
-    with _file_lock(_LOCK_PATH):
+    with best_effort_file_lock(_LOCK_PATH, label="_magpie_patcher"):
         return _apply_lm_eval_install_once_patch_atomic(benchmark_lib)
 
 

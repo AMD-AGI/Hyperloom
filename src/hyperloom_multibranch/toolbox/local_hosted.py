@@ -241,7 +241,7 @@ class LocalOptions:
     runner and the measurement run with. ``timeout_sec`` is the timeout of one attempt, ``max_infra_retries`` the
     infrastructure retries per test before it ends as ``measurement_failed`` and ``poll_interval_sec`` how often the
     backend polls a runner for its result. ``tools`` are the asynchronous tools ``start_analysis`` may reach; ``None``
-    is the local set: TraceLens, the roofline of a profile test's trace (``bypass`` analysis, no card and no model), the
+    is the local set: TraceLens, the roofline of a profile test's trace (``non-llm`` analysis, no card and no model), the
     upstream PR search (GitHub is asked from this process, never from a sandbox) and ``kernel_tune`` when the pool can spare a
     card for it without leaving fewer than one test needs (it leases the card from the pool the branches' sandboxes lease
     from). The orchestrator's own roofline profiles on a host card outside the card leases, so it is not offered.

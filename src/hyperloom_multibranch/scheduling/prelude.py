@@ -68,6 +68,7 @@ from hyperloom.contracts.recipe import Recipe
 from hyperloom.inference_optimizer.model_config_utils import summarize_model_config
 from hyperloom.measure.compile import BlobStore
 from hyperloom.orchestrator.knowledge.remote_recipe.client import KBStoreError
+from hyperloom.orchestrator.trace_analysis.analysis_route import AnalysisRoute
 from hyperloom_multibranch.contracts.gate import NotMeasured, PreludeMeasurement, SessionGate
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.blackboard.records import LineageEvent, SessionProfile
@@ -132,7 +133,7 @@ CHILD_CARDS_ENV = "ROCR_VISIBLE_DEVICES"
 #: and never reads the child's own analysis. Set in the child's environment, it overrides a toolbox route of this
 #: process's environment that the main flow does not accept.
 TRACE_ANALYSIS_ROUTE_ENV = "HYPERLOOM_TRACE_ANALYSIS_ROUTE"
-CHILD_TRACE_ANALYSIS_ROUTE = "bypass"
+CHILD_TRACE_ANALYSIS_ROUTE = AnalysisRoute.NON_LLM.value
 #: The child's lease is the lineage root's: its card time counts on the integration branch, not as a branch of its own.
 CHILD_LEASE_CHARGE = LeaseCharge(LeaseKind.PRELUDE_CHILD, INTEGRATION_BRANCH)
 #: The lease refusal that leaves the child to run before the root tests: its cards would leave fewer than one test's.

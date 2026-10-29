@@ -4,7 +4,7 @@
 """The ``roofline`` tool (the kernel roofline of the trace a profile test left) and the ``tracelens`` tool (analysis of a
 given trace).
 
-Both read a trace that already exists and need no card: ``roofline`` runs the orchestrator's ``bypass`` analysis, which reads
+Both read a trace that already exists and need no card: ``roofline`` runs the orchestrator's ``non-llm`` analysis, which reads
 the trace in memory and writes ``kernel_roofline.json`` (every hot kernel with its category, share of the GPU time and bound),
 with no model session; ``tracelens`` runs TraceLens' report. The roofline of the orchestrator's own flow profiles first, on a
 card, in the process that runs it; a toolbox does not offer that.
@@ -20,6 +20,7 @@ from typing import Any
 
 from hyperloom.inference_optimizer.framework_registry import is_scriptable
 from hyperloom.orchestrator.actions.executors.trace_analyze import trace_analyze_handler
+from hyperloom.orchestrator.trace_analysis.analysis_route import AnalysisRoute
 from hyperloom_multibranch.toolbox.tools.base import ToolOutput, ToolRequest
 from hyperloom_multibranch.toolbox.tools.executor_tool import ScratchHandlerTool
 from hyperloom_multibranch.toolbox.tools.op_shares import with_op_shares
@@ -34,7 +35,7 @@ from hyperloom_multibranch.toolbox.tools.tracelens_report import (
 ROOFLINE_TOOL = "roofline"
 TRACELENS_TOOL = "tracelens"
 #: The only route of the roofline: the orchestrator's analysis with no model session (``agent`` starts one on the host).
-ROOFLINE_ROUTE = "bypass"
+ROOFLINE_ROUTE = AnalysisRoute.NON_LLM.value
 #: The error class of a roofline that answered ``ok`` with no hot kernel.
 ROOFLINE_WITHOUT_KERNELS = "roofline_without_kernels"
 HOT_KERNELS_KEY = "hot_kernels"
@@ -52,7 +53,7 @@ class _TracelensTool(_SharesOps, ScratchHandlerTool):
 
 
 async def roofline_handler(payload: dict, *, session_dir: Path) -> dict:
-    """The kernel roofline of ``payload['trace_input']``: ``bypass`` analysis for the platform the request names (else
+    """The kernel roofline of ``payload['trace_input']``: ``non-llm`` analysis for the platform the request names (else
     :data:`~.tracelens_report.DEFAULT_PLATFORM`). Any other ``analysis_route`` fails the job by name instead of being
     ignored, and the route the host's environment names is not read: it could start a model session. A trace that is missing or
     holds no GPU kernel fails by name: the analysis itself answers ``ok`` with no kernel for both. So does an analysis that
@@ -104,7 +105,7 @@ def roofline_tool() -> ScratchHandlerTool:
 
 async def tracelens_handler(payload: dict, *, session_dir: Path) -> dict:
     """``analysis_route`` (else ``HYPERLOOM_TRACE_ANALYSIS_ROUTE``) picks the analysis: ``report`` is TraceLens' deterministic
-    report with no agent, ``agent`` and ``bypass`` are the orchestrator's own routes. Unnamed, a serving framework gets
+    report with no agent, ``agent`` and ``non-llm`` are the orchestrator's own routes. Unnamed, a serving framework gets
     ``report`` and a scriptable one (xDiT, custom: no steady-state window to split) the orchestrator's default."""
     raw = payload.get("analysis_route")
     route = ("" if raw is None else str(raw).strip()) or os.environ.get("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "").strip()
@@ -118,7 +119,7 @@ async def tracelens_handler(payload: dict, *, session_dir: Path) -> dict:
 
 def tracelens_tool() -> ScratchHandlerTool:
     """Analyse a torch trace that already exists. Params: ``trace_input`` (a trace directory or file), optional
-    ``analysis_route`` (``report`` by default, ``agent``, ``bypass``), ``framework`` and ``model_name`` (the orchestrator's
+    ``analysis_route`` (``report`` by default, ``agent``, ``non-llm``), ``framework`` and ``model_name`` (the orchestrator's
     routes); ``commit_id`` (the commit the trace was profiled on) and, when the trace came from a PROFILE test,
     ``profile_request_id``, which the pointer carries with the op shares."""
     return _TracelensTool(

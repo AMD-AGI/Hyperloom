@@ -313,7 +313,7 @@ async def test_a_hint_is_passed_as_the_splitter_takes_it(
     ("params", "env"),
     [
         ({"analysis_route": "agent"}, None),
-        ({"analysis_route": "bypass"}, None),
+        ({"analysis_route": "non-llm"}, None),
         ({"analysis_route": "AGENT"}, None),
         ({}, "agent"),
         ({"framework": "xdit"}, None),
