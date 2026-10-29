@@ -19,6 +19,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.phase_event import is_phas
 from hyperloom.orchestrator.actions.executors.baseline import restore_warm_kernel_snapshots
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.phases import prelude as prelude_mod
+from hyperloom.orchestrator.phases import prelude_warm_kernel as prelude_warm_kernel_mod
 from hyperloom.orchestrator.phases.prelude import PRELUDE_ARM_DROPPED
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -2045,7 +2046,7 @@ async def test_enqueue_failure_rolls_back_prepared_kernel(tmp_path, monkeypatch)
     rollbacks: list[tuple[list[dict], list[dict]]] = []
     coord.phase_prelude._prepare_warm_kernel_kb = _prepare  # type: ignore[method-assign]
     monkeypatch.setattr(
-        prelude_mod,
+        prelude_warm_kernel_mod,
         "revert_warm_kernel_patches",
         lambda got_applied, got_snapshots=None: (
             rollbacks.append((got_applied, got_snapshots or [])) or {"ok": True, "errors": []}
@@ -2085,7 +2086,7 @@ async def test_enqueue_failure_retains_pending_when_kernel_restore_fails(
 
     coord.phase_prelude._prepare_warm_kernel_kb = _prepare  # type: ignore[method-assign]
     monkeypatch.setattr(
-        prelude_mod,
+        prelude_warm_kernel_mod,
         "revert_warm_kernel_patches",
         lambda *_args: {"ok": False, "errors": ["restore failed"]},
     )
@@ -3248,7 +3249,7 @@ def test_a_kernel_rollback_that_fails_stops_the_run(tmp_path, monkeypatch):
         "kernel_snapshots": [{"path": "b"}],
     }
     monkeypatch.setattr(
-        prelude_mod,
+        prelude_warm_kernel_mod,
         "revert_warm_kernel_patches",
         lambda *_args, **_kwargs: {"ok": False, "errors": ["could not restore kernel.py"]},
     )
@@ -3271,7 +3272,9 @@ def test_a_kernel_rollback_that_succeeds_refuses_without_stopping_the_run(tmp_pa
         "kernel_apply_results": [{"patch": "a"}],
         "kernel_snapshots": [{"path": "b"}],
     }
-    monkeypatch.setattr(prelude_mod, "revert_warm_kernel_patches", lambda *_a, **_k: {"ok": True, "errors": []})
+    monkeypatch.setattr(
+        prelude_warm_kernel_mod, "revert_warm_kernel_patches", lambda *_a, **_k: {"ok": True, "errors": []}
+    )
 
     refused = coord.phase_prelude._refused_dirty_warm_kernel({"status": "error", "reason": "apply left a patched tree"})
 

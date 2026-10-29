@@ -587,7 +587,7 @@ def _persist_forge_gemm_csv_durably(extra_envs: dict, *, model_path: str, sessio
     directory would hand the table to every later server start -- including after
     E2E rejected the candidate, and including servers for other models, since the
     scan does not discriminate by model. Replay does not need the scan: it
-    restores the env var explicitly (see ``prelude._warm_kernel_extra_envs``) and
+    restores the env var explicitly (see ``prelude_warm_kernel._warm_kernel_extra_envs``) and
     defers a GEMM column that has no env at all.
 
     The snapshot lands under ``<session_dir>/optimization_stack/src/`` (the same
