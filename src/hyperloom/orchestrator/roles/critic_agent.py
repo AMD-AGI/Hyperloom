@@ -650,26 +650,23 @@ class CriticAgentBackend:
         kb_priors: dict[str, Any],
     ) -> None:
         """Mirror the per-iteration KB trace into Langfuse (best-effort)."""
-        try:
-            from hyperloom.inference_optimizer.trace.langfuse_emitter import get_emitter
+        from hyperloom.inference_optimizer.trace.langfuse_emitter import get_emitter
 
-            emitter = get_emitter(self.session_dir)
-            if not emitter.enabled:
-                return
-            if kb_priors:
-                emitter.record_kb_span(
-                    name=f"kb_priors:iter_{turn_idx}",
-                    agent="critic",
-                    output=kb_priors,
-                    metadata={
-                        "kind": "kb_priors",
-                        "iter": turn_idx,
-                        "prior_count": kb_priors.get("prior_count") or 0,
-                        "referenced_in_verdict": bool(kb_priors.get("referenced_in_verdict")),
-                    },
-                )
-        except Exception:
-            log.debug("critic_agent: langfuse kb mirror failed", exc_info=True)
+        emitter = get_emitter(self.session_dir)
+        if not emitter.enabled:
+            return
+        if kb_priors:
+            emitter.record_kb_span(
+                name=f"kb_priors:iter_{turn_idx}",
+                agent="critic",
+                output=kb_priors,
+                metadata={
+                    "kind": "kb_priors",
+                    "iter": turn_idx,
+                    "prior_count": kb_priors.get("prior_count") or 0,
+                    "referenced_in_verdict": bool(kb_priors.get("referenced_in_verdict")),
+                },
+            )
 
     def _record_review_evidence(self, iteration: CriticIteration) -> None:
         """Record what each of this turn's rulings was grounded in.
@@ -959,29 +956,23 @@ class CriticAgentBackend:
         call_id: str | None = None,
     ) -> None:
         """Append one ``llm_calls.jsonl`` row for a critic reasoning loop."""
-        try:
-            record = LLMCallRecord(
-                session_id=self.session_dir.name,
-                component="critic",
-                role="critic",
-                call_id=call_id,
-                model=self._review_model,
-                tick=self._trace_tick,
-                phase=self._trace_phase,
-                input_tokens=usage_acc.get("input_tokens"),
-                output_tokens=usage_acc.get("output_tokens"),
-                cache_read_input_tokens=usage_acc.get("cache_read_input_tokens"),
-                cache_creation_input_tokens=usage_acc.get("cache_creation_input_tokens"),
-                reasoning_output_tokens=usage_acc.get("reasoning_output_tokens"),
-                latency_ms=latency_ms,
-                reviewed_msg_ids=self._trace_reviewed_msg_ids,
-            )
-            append_llm_call(session_dir=self.session_dir, record=record)
-        except Exception:
-            log.debug(
-                "full-trace: critic llm_call append failed",
-                exc_info=True,
-            )
+        record = LLMCallRecord(
+            session_id=self.session_dir.name,
+            component="critic",
+            role="critic",
+            call_id=call_id,
+            model=self._review_model,
+            tick=self._trace_tick,
+            phase=self._trace_phase,
+            input_tokens=usage_acc.get("input_tokens"),
+            output_tokens=usage_acc.get("output_tokens"),
+            cache_read_input_tokens=usage_acc.get("cache_read_input_tokens"),
+            cache_creation_input_tokens=usage_acc.get("cache_creation_input_tokens"),
+            reasoning_output_tokens=usage_acc.get("reasoning_output_tokens"),
+            latency_ms=latency_ms,
+            reviewed_msg_ids=self._trace_reviewed_msg_ids,
+        )
+        append_llm_call(session_dir=self.session_dir, record=record)
 
     def _llm_call_failed(
         self,
@@ -1003,23 +994,17 @@ class CriticAgentBackend:
         call_id: str | None = None,
     ) -> None:
         """Append one ``llm_calls.jsonl`` row for a call that never returned."""
-        try:
-            site = LLMCallSite(
-                session_id=self.session_dir.name,
-                component="critic",
-                role="critic",
-                tick=self._trace_tick,
-                phase=self._trace_phase,
-            )
-            record = LLMCallRecord.for_failure(
-                site, error, model=self._review_model, call_id=call_id, latency_ms=latency_ms
-            )
-            append_llm_call(session_dir=self.session_dir, record=record)
-        except Exception:
-            log.debug(
-                "full-trace: critic llm_call failure append failed",
-                exc_info=True,
-            )
+        site = LLMCallSite(
+            session_id=self.session_dir.name,
+            component="critic",
+            role="critic",
+            tick=self._trace_tick,
+            phase=self._trace_phase,
+        )
+        record = LLMCallRecord.for_failure(
+            site, error, model=self._review_model, call_id=call_id, latency_ms=latency_ms
+        )
+        append_llm_call(session_dir=self.session_dir, record=record)
 
     def _record_critic_conversation(
         self,
