@@ -36,12 +36,12 @@ from typing import Any
 
 import yaml
 
+from hyperloom.common.aiter_layout import image_aiter_meta
 from hyperloom.common.benchmark_config import is_magpie_agentx
 from hyperloom.common.outside_facts import AITER_META_DIR_ENV, AITER_META_MARKER_DIR, AITER_META_WHEEL_DIR
 from hyperloom.measure.jit.key import AITER_PACKAGE
 from hyperloom.measure.jit.native.laying import NativeLayError, SheetBuilds
 from hyperloom.measure.jit.native.record import BuildRecord
-from hyperloom.measure.jit.modules import image_aiter_meta
 from hyperloom.measure.spec import EnvEntry, EnvRoot
 from hyperloom.orchestrator.actions.executors.magpie_agentx import apply_native_runtime
 
@@ -52,7 +52,6 @@ __all__ = [
     "NativeModule",
     "build_farm",
     "built_roots",
-    "image_aiter_meta",
     "inherited_environment",
     "locate_package",
     "patched_configs",

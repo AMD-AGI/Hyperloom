@@ -42,13 +42,14 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.aiter_layout import image_aiter_meta
 from hyperloom.common.outside_facts import AITER_META_MARKER_DIR
 from hyperloom.measure.compile import EnvRoot, LocalBlobStore
 from hyperloom.measure.docs import canonical_json
 from hyperloom.measure.farm import FarmError, locate_package
 from hyperloom.measure.framework.table_modules import table_modules
 from hyperloom.measure.jit.key import AITER_PACKAGE
-from hyperloom.measure.jit.modules import config_path, image_aiter_meta, read_config
+from hyperloom.measure.jit.modules import config_path, read_config
 from hyperloom.measure.jit.native.record import READY
 from hyperloom.measure.jit.native.store import BuildInfraError
 from hyperloom.measure.jit.store import BLOBS_DIR

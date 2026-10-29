@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.outside_facts import AITER_META_DIR_ENV
-from hyperloom.measure.jit.modules import image_aiter_meta
+from hyperloom.common.aiter_layout import image_aiter_meta
 from hyperloom.inference_optimizer.framework_paths import (
     resolve_flydsl_source_roots as _resolve_flydsl_source_roots,
     resolve_known_source_prefixes as _resolve_known_source_prefixes,

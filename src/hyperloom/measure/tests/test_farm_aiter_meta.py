@@ -24,11 +24,11 @@ from pathlib import Path
 import pytest
 import yaml
 
+from hyperloom.common.aiter_layout import image_aiter_meta
 from hyperloom.measure.farm import (
     Farm,
     FarmError,
     build_farm,
-    image_aiter_meta,
     inherited_environment,
     place_farm,
     verify_farm,

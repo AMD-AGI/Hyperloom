@@ -36,6 +36,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Literal, NamedTuple, Protocol, TypeVar
 
+from hyperloom.common.aiter_layout import image_aiter_meta
 from hyperloom.common.outside_facts import (
     AITER_META_WHEEL_DIR,
     SGLANG_IMAGE_WORKSPACE,
@@ -72,7 +73,6 @@ from hyperloom.measure.jit.modules import (
     SourceTree,
     Touched,
     config_path,
-    image_aiter_meta,
     prebuilt_names,
     read_config,
     touched_entries,

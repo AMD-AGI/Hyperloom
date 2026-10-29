@@ -20,7 +20,7 @@ from pathlib import Path, PurePosixPath
 
 from hyperloom.common.outside_facts import AITER_META_DIR_ENV
 from hyperloom.measure.compile import ComponentLayout, PackageBase
-from hyperloom.measure.farm import image_aiter_meta
+from hyperloom.common.aiter_layout import image_aiter_meta
 from hyperloom_multibranch.specialist.worktree import BranchWorktree, Changes
 
 #: Importing a framework loads torch and its kernels; more than this is a hang, not a slow import.

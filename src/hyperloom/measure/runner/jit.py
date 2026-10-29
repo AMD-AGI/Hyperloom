@@ -22,12 +22,12 @@ from pathlib import Path, PurePosixPath
 
 import yaml
 
+from hyperloom.common.aiter_layout import image_aiter_meta
 from hyperloom.common.gpu_identity import gfx_arch_for_gpu_type
 from hyperloom.common.outside_facts import AITER_META_DIR_ENV, AITER_META_WHEEL_DIR
 from hyperloom.measure.farm import (
     Farm,
     FarmError,
-    image_aiter_meta,
     locate_package,
     patches_aiter_sources,
     server_environment,

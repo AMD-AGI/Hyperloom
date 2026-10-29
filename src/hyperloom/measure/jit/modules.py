@@ -40,11 +40,8 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.outside_facts import (
-    AITER_DEVELOP_MODE,
-    AITER_INSTALL_MODE_FILE,
     AITER_META_DIR_ENV,
     AITER_META_MARKER_DIR,
-    AITER_META_WHEEL_DIR,
 )
 from hyperloom.measure.jit.key import env_names_in
 
@@ -56,7 +53,6 @@ __all__ = [
     "Touched",
     "build_env_names",
     "config_path",
-    "image_aiter_meta",
     "prebuilt_names",
     "read_config",
     "touched_entries",
@@ -129,20 +125,6 @@ class SourceTree:
             found.update(Path(current, name).relative_to(self.root).as_posix() for name in names)
         found.update(path for path in self.overlay if path.startswith(f"{directory}/"))
         return sorted(path for path in found if self.overlay.get(path, b"") is not None)
-
-
-def image_aiter_meta(package: Path) -> Path:
-    """The meta directory the image's own aiter reads ``csrc`` from, resolved as ``aiter/jit/core.py`` resolves it.
-
-    ``package`` is the aiter package directory the image's interpreter finds. A develop install (what the
-    ``install_mode`` file beside the package says, and what a missing file means) keeps ``csrc`` in the directory around
-    the package; a wheel install keeps it in the ``aiter_meta`` package beside it.
-    """
-    try:
-        develop = (package / AITER_INSTALL_MODE_FILE).read_text(encoding="utf-8").strip() == AITER_DEVELOP_MODE
-    except FileNotFoundError:
-        develop = True
-    return package.parent if develop else package.parent / AITER_META_WHEEL_DIR
 
 
 def config_path(package: Path) -> Path:

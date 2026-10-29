@@ -39,11 +39,12 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.aiter_layout import image_aiter_meta
 from hyperloom.common.outside_facts import AITER_META_DIR_ENV, AITER_META_WHEEL_DIR
 from hyperloom.contracts.recipe import DIGEST_PREFIX
 from hyperloom.measure.compile import BlobStore, EnvRoot
 from hyperloom.measure.docs import canonical_json
-from hyperloom.measure.farm import FarmError, build_farm, image_aiter_meta, locate_package
+from hyperloom.measure.farm import FarmError, build_farm, locate_package
 from hyperloom.measure.jit.key import AITER_PACKAGE, build_surface
 from hyperloom.measure.jit.modules import ESTIMATED_MODULE_SECONDS, build_env_names
 from hyperloom.measure.jit.native.key import BuildInputs
