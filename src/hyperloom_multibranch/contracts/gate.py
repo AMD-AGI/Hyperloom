@@ -4,7 +4,7 @@
 """The rule gate as the scheduler calls it, for the tests the scheduler submits itself.
 
 PRELUDE establishes the baseline from its root tests, or for AgentX from the PRELUDE child's own run of the root
-(:class:`PreludeMeasurement`), the integrator compares a merge test, FINAL checks a candidate. The gate judges them as it judges a specialist's candidate, the confirming retest included, and settles nothing: what
+(:class:`PreludeMeasurement`) where it starts one, the integrator compares a merge test, FINAL checks a candidate. The gate judges them as it judges a specialist's candidate, the confirming retest included, and settles nothing: what
 a judgement leads to is the caller's.
 
 :class:`ResultVerifier` is the other direction: what the gate asks of the toolbox before a decision rests on a result.
@@ -69,7 +69,8 @@ class SessionGate(Protocol):
     """Each call waits for the tests it names; one that ends without a measurement raises :class:`NotMeasured`."""
 
     async def baseline_test_count(self) -> int:
-        """How many root tests PRELUDE submits for the baseline."""
+        """How many root tests PRELUDE submits for the baseline; 0 for a rule that anchors on the PRELUDE child's own
+        run, which takes one root test instead where PRELUDE starts no child."""
 
     async def establish_baseline(self, root_commit: str, request_ids: Sequence[str]) -> BaselineRecord:
         """Write the session's baseline and bar from the root tests that measured; the rule says how many it needs,

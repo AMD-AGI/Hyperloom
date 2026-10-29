@@ -159,6 +159,41 @@ async def test_an_agentx_prelude_asks_for_no_root_test(tmp_path):
     await session.toolbox.close()
 
 
+async def _agentx_root_test(session: _Session, fate: Fate | None = None) -> str:
+    """The one root test a PRELUDE that starts no child submits for an AgentX baseline, measured or failing as ``fate``
+    says."""
+    await session.record_root()
+    request_id = await session.toolbox.submit_test(_request(Purpose.BASELINE))
+    if fate is not None:
+        session.toolbox.script(lambda request: request.request_id == request_id, [fate])
+    await session.toolbox.drain()
+    return request_id
+
+
+async def test_an_agentx_baseline_without_a_child_run_is_one_root_test_and_names_it(tmp_path):
+    session = _Session(tmp_path / "blackboard", agentx=True)
+    request_id = await _agentx_root_test(session)
+
+    record = await session.gate.establish_baseline(ROOT, [request_id])
+
+    measured = (await session.blackboard.record(request_id)).result
+    assert record.request_ids == (request_id,) and (record.source, record.wall_seconds) == ("", None)
+    assert record.values == dict(sorted(measured.rounds[-1].metrics.items()))
+    assert record.threshold_pct == {GRADED_INTVTY_P50: AGENTX_KEEP_P50_THRESHOLD_PCT}
+    assert session.verifier.asked == [request_id]
+    assert await session.blackboard.baseline() == record
+    await session.toolbox.close()
+
+
+async def test_an_agentx_root_test_that_did_not_measure_anchors_nothing(tmp_path):
+    session = _Session(tmp_path / "blackboard", agentx=True)
+    request_id = await _agentx_root_test(session, Fate.MEASUREMENT)
+
+    with pytest.raises(NotMeasured, match="0 of 1 root tests measured; the baseline needs 1"):
+        await session.gate.establish_baseline(ROOT, [request_id])
+    await session.toolbox.close()
+
+
 def _child_run(tmp_path, metrics=AGENTX_RUN, validity=Validity.SUCCEEDED) -> PreludeMeasurement:
     report, export = tmp_path / "benchmark_report.json", tmp_path / "profile_export.jsonl"
     report.write_text('{"scenario": "agentx"}')

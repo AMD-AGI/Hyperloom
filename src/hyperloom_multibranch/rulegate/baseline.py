@@ -60,6 +60,14 @@ async def read_inferencex_baseline(store: CommitQuery) -> InferenceXBaseline:
     )
 
 
+async def write_agentx_baseline(store: GateRecords, root_commit: str, baseline: TestRecord) -> BaselineRecord:
+    """The baseline read from one root test, ``baseline``, where PRELUDE has no child run of the root to read."""
+    reading = agentx_reading(_root_result(baseline, root_commit))
+    record = replace(_agentx_record(root_commit, reading), request_ids=(baseline.request_id,))
+    await store.write_baseline(record)
+    return record
+
+
 async def write_agentx_prelude_baseline(
     store: GateRecords, root_commit: str, result: TestResult, *, source: str, wall_seconds: float
 ) -> BaselineRecord:
@@ -93,6 +101,7 @@ def _root_result(record: TestRecord, root_commit: str) -> TestResult:
 
 __all__ = [
     "read_inferencex_baseline",
+    "write_agentx_baseline",
     "write_agentx_prelude_baseline",
     "write_inferencex_baseline",
 ]

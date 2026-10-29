@@ -23,6 +23,7 @@ from hyperloom_multibranch.rulegate import agentx, inferencex
 from hyperloom_multibranch.rulegate.accuracy import agentx_accuracy_ok, inferencex_accuracy_ok
 from hyperloom_multibranch.rulegate.baseline import (
     read_inferencex_baseline,
+    write_agentx_baseline,
     write_agentx_prelude_baseline,
     write_inferencex_baseline,
 )
@@ -40,7 +41,8 @@ class Rule(Protocol):
     """How the session's workload is judged; ``accuracy_round`` says whether its tests run the eval it reads.
 
     PRELUDE submits ``baseline_tests`` root tests, and the baseline needs ``min_baselines`` of them measured. A rule
-    that asks for none takes the PRELUDE child's own run of the root as the baseline (:meth:`prelude_baseline`).
+    that asks for none takes the PRELUDE child's own run of the root as the baseline (:meth:`prelude_baseline`), and
+    ``min_baselines`` root tests where PRELUDE starts no child.
     """
 
     accuracy_round: bool
@@ -112,16 +114,19 @@ class InferenceXRule(Rule):
 class AgentXRule(Rule):
     """P50 interactivity with its guards; the error rate the run reports is its accuracy.
 
-    The bar is fixed rather than drawn from the root's spread, so the PRELUDE child's own run of the root anchors the
-    parent values and PRELUDE submits no root test: one takes 75 to 90 minutes.
+    The bar is fixed rather than drawn from the root's spread, so one run of the root anchors the parent values: the
+    PRELUDE child's own, and PRELUDE submits no root test beside it, as one takes 75 to 90 minutes; one root test where
+    PRELUDE starts no child.
     """
 
     accuracy_round = False
     baseline_tests = 0
-    min_baselines = 0
+    min_baselines = 1
 
     async def baseline(self, store: GateRecords, root_commit: str, records: Sequence[TestRecord]) -> BaselineRecord:
-        raise ValueError("an AgentX baseline is the PRELUDE child's run of the root, not root tests")
+        if len(records) != self.min_baselines:
+            raise ValueError(f"an AgentX baseline is one run of the root, not {len(records)} root tests")
+        return await write_agentx_baseline(store, root_commit, records[0])
 
     async def prelude_baseline(
         self, store: GateRecords, root_commit: str, result: TestResult, *, source: str, wall_seconds: float
