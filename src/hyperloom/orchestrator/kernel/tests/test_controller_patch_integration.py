@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from kernelforge.kernel_rewrite_controller.paths import operator_directory_name
+from kernelforge.workflows.rewrite_controller.paths import operator_directory_name
 from hyperloom.common.perf_metric import VERDICT_KEEP, GradedComparison
 from hyperloom.inference_optimizer.breakdown.recorder import stack_event
 from hyperloom.inference_optimizer.breakdown.recorder.assembler import event_parts

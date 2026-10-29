@@ -12,7 +12,7 @@ import pytest
 from click.testing import CliRunner
 
 from kernelforge.cli import main
-from kernelforge.rewrite_by_flydsl import protocol
+from kernelforge.workflows.flydsl_rewrite import protocol
 
 from kernelforge.tests.conftest import SRC_ROOT
 
@@ -60,7 +60,7 @@ def test_capabilities_query_needs_no_gpu_llm_or_workspace(monkeypatch):
     def fail(*args, **kwargs):
         raise AssertionError("the capability query must not start a rewrite")
 
-    monkeypatch.setattr("kernelforge.rewrite_by_flydsl.run_rewrite", fail)
+    monkeypatch.setattr("kernelforge.workflows.flydsl_rewrite.run_rewrite", fail)
     result = CliRunner().invoke(main, ["forge-rewrite-by-flydsl", "--capabilities-json"])
 
     assert result.exit_code == 0
@@ -93,7 +93,7 @@ def _invoke_rewrite(monkeypatch, tmp_path, name_flag, extra_args=()):
         return {"success": True}
 
     monkeypatch.setattr(
-        "kernelforge.rewrite_by_flydsl.run_rewrite",
+        "kernelforge.workflows.flydsl_rewrite.run_rewrite",
         fake_run_rewrite,
     )
     source = tmp_path / "softmax.py"
@@ -212,7 +212,7 @@ def test_driver_preparation_options_are_forwarded(monkeypatch, tmp_path):
         return {"success": True}
 
     monkeypatch.setattr(
-        "kernelforge.rewrite_by_flydsl.run_rewrite",
+        "kernelforge.workflows.flydsl_rewrite.run_rewrite",
         capture,
     )
     source = tmp_path / "softmax.py"
@@ -259,7 +259,7 @@ def test_the_roofline_ceiling_is_off_unless_asked_for_and_reaches_the_rewrite(mo
         captured.update(request=request, config=config)
         return {"success": True}
 
-    monkeypatch.setattr("kernelforge.rewrite_by_flydsl.run_rewrite", capture)
+    monkeypatch.setattr("kernelforge.workflows.flydsl_rewrite.run_rewrite", capture)
     source = tmp_path / "softmax.py"
     source.write_text("def softmax(x):\n    return x\n")
     result = CliRunner().invoke(
@@ -307,7 +307,7 @@ def test_a_framework_outside_the_handshake_is_rejected(monkeypatch, tmp_path):
     def fail(*args, **kwargs):
         raise AssertionError("an unsupported framework must not start a rewrite")
 
-    monkeypatch.setattr("kernelforge.rewrite_by_flydsl.run_rewrite", fail)
+    monkeypatch.setattr("kernelforge.workflows.flydsl_rewrite.run_rewrite", fail)
     result = CliRunner().invoke(
         main,
         [
@@ -341,7 +341,7 @@ def test_an_advertised_framework_is_accepted(monkeypatch, tmp_path, framework):
         captured.update(request=request, config=config)
         return {"success": True}
 
-    monkeypatch.setattr("kernelforge.rewrite_by_flydsl.run_rewrite", capture)
+    monkeypatch.setattr("kernelforge.workflows.flydsl_rewrite.run_rewrite", capture)
     source = tmp_path / "softmax.py"
     source.write_text("def softmax(x):\n    return x\n")
     driver = tmp_path / "driver.py"

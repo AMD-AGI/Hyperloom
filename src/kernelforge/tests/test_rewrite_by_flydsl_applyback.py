@@ -13,9 +13,9 @@ import pytest
 
 import kernelforge.agent_backends.registry as agent_registry
 from kernelforge.config import Config
-from kernelforge.rewrite_by_flydsl import applyback, protocol
-from kernelforge.rewrite_by_flydsl.measurement import FlydslMeasurement
-from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
+from kernelforge.workflows.flydsl_rewrite import applyback, protocol
+from kernelforge.workflows.flydsl_rewrite.measurement import FlydslMeasurement
+from kernelforge.workflows.flydsl_rewrite.spec import RewriteSpec
 
 
 @pytest.fixture(autouse=True)

@@ -21,7 +21,7 @@ if not torch.cuda.get_device_properties(torch.cuda.current_device()).gcnArchName
     pytest.skip("vector-add campaign test targets gfx950", allow_module_level=True)
 pytest.importorskip("flydsl.compiler")
 
-from kernelforge.assembly.prepare import AssemblyTask, prepare_assembly
+from kernelforge.kernel_backends.assembly.prepare import AssemblyTask, prepare_assembly
 from kernelforge.config import Config
 from kernelforge.evaluation.benchmark.runner import BenchRun, bench_wallclock
 from kernelforge.evaluation.correctness.pipeline import run_validation_pipeline

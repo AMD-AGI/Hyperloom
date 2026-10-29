@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from kernelforge.kernel_backends.constants import KERNEL_BACKENDS
-from kernelforge.kernel_rewrite_controller import (
+from kernelforge.workflows.rewrite_controller import (
     ControllerLayout,
     TaskStateStore,
     discover_task_dirs,

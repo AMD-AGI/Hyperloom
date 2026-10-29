@@ -27,19 +27,19 @@ from pathlib import Path
 
 import pytest
 
-import kernelforge.loop.insession_gate as gate_module
-from kernelforge.loop.gate_settings import GateMeasurement, GateScope
-import kernelforge.orchestrator.agent as agent_module
+import kernelforge.workflows.forge_loop.gate.insession_gate as gate_module
+from kernelforge.workflows.forge_loop.gate.gate_settings import GateMeasurement, GateScope
+import kernelforge.workflows.forge_loop.roles.agent as agent_module
 from kernelforge.agent_backends.base import (
     AgentCapabilities,
     AgentRunResult,
     AgentRunSpec,
 )
 from kernelforge.agent_backends.registry import AgentProvider, register_agent_provider
-from kernelforge.loop.bootstrap import lanes as cli_lanes
-from kernelforge.loop.bootstrap.errors import ForgeLoopError
+from kernelforge.workflows.forge_loop.bootstrap import lanes as cli_lanes
+from kernelforge.workflows.forge_loop.bootstrap.errors import ForgeLoopError
 from kernelforge.config import Config
-from kernelforge.loop import fanout
+from kernelforge.workflows.forge_loop.iteration import fanout
 from kernelforge.evaluation.scoring import GateScoring
 
 

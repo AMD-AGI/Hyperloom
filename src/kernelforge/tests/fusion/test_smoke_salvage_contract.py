@@ -8,10 +8,10 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
-from kernelforge.fusion import serving_gate
-from kernelforge.fusion.source_snapshot import _snapshot_fusion_source
-from kernelforge.fusion.models import FusionArtifacts, ValidationResult
-from kernelforge.fusion.validate import (
+from kernelforge.workflows.forge_fusion import serving_gate
+from kernelforge.workflows.forge_fusion.source_snapshot import _snapshot_fusion_source
+from kernelforge.workflows.forge_fusion.models import FusionArtifacts, ValidationResult
+from kernelforge.workflows.forge_fusion.validate import (
     KERNEL_KEEP_CHECKPOINT,
     SMOKE_STAGE_DECODE_CRASH,
     SMOKE_STAGE_DECODE_PROBE,

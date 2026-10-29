@@ -9,7 +9,7 @@ import sys
 
 import pytest
 
-from kernelforge.loop import api
+from kernelforge.workflows.forge_loop import api
 
 
 def test_the_command_runs_this_interpreter_and_package():

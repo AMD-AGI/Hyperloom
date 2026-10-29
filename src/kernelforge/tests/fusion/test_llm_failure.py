@@ -9,8 +9,8 @@ import json
 
 import pytest
 
-from kernelforge.fusion.diagnose import TraceProfile, diagnose_from_shares
-from kernelforge.fusion.llm_failure import (
+from kernelforge.workflows.forge_fusion.diagnose import TraceProfile, diagnose_from_shares
+from kernelforge.workflows.forge_fusion.llm_failure import (
     AGENT_SAFETY_REJECTION_ATTR,
     API_ERROR,
     AUTH,
@@ -23,7 +23,7 @@ from kernelforge.fusion.llm_failure import (
     is_agent_timeout_error,
     retry_delay,
 )
-from kernelforge.fusion.report import (
+from kernelforge.workflows.forge_fusion.report import (
     LocatedFusions,
     ManifestSubject,
     RunOutcome,

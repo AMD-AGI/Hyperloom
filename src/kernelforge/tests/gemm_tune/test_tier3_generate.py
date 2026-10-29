@@ -19,13 +19,13 @@ import pytest
 
 from kernelforge.agent_backends import registry as registry_mod
 from kernelforge.agent_backends.base import AgentProviderUnavailableError
-from kernelforge.gemm_tune.tier3.generate import (
+from kernelforge.workflows.gemm_tune.tier3.generate import (
     GeneratedTuner,
     _run,
     _user_prompt,
     generate_tuner,
 )
-from kernelforge.gemm_tune.tier3.mandate import TunerMandate
+from kernelforge.workflows.gemm_tune.tier3.mandate import TunerMandate
 
 
 def _mandate() -> TunerMandate:

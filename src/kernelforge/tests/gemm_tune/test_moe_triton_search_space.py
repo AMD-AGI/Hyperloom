@@ -8,9 +8,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from kernelforge.gemm_tune.model_analyzer import ModelProfile
-from kernelforge.gemm_tune.tuners import vllm_moe_triton as mt
-from kernelforge.gemm_tune.tuners.base import TuneContext
+from kernelforge.workflows.gemm_tune.model_analyzer import ModelProfile
+from kernelforge.workflows.gemm_tune.tuners import vllm_moe_triton as mt
+from kernelforge.workflows.gemm_tune.tuners.base import TuneContext
 
 
 def test_cap_below_the_seed_count_still_keeps_every_seed(monkeypatch):

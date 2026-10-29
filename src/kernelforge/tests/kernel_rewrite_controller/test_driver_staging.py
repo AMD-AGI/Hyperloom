@@ -18,14 +18,14 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.kernel_rewrite_controller.paths import ControllerLayout
-from kernelforge.kernel_rewrite_controller.task import parse_task_payload
-from kernelforge.kernel_rewrite_controller.worktree import (
+from kernelforge.workflows.rewrite_controller.paths import ControllerLayout
+from kernelforge.workflows.rewrite_controller.task import parse_task_payload
+from kernelforge.workflows.rewrite_controller.worktree import (
     DRIVER_STAGE_PREFIX,
     OperatorWorktree,
     stage_operator_driver,
 )
-from kernelforge.loop.path_ownership import is_producer_owned_path
+from kernelforge.workflows.forge_loop.campaign.path_ownership import is_producer_owned_path
 
 BASE_COMMIT = "a" * 40
 
@@ -133,7 +133,7 @@ def test_the_staging_directory_does_not_survive_the_borrow(staged, tmp_path: Pat
     of the campaign's leavings: that scan lists neither directories nor the
     ignored files inside one, and everything here is ignored by design.
     """
-    from kernelforge.kernel_rewrite_controller import worktree as worktree_module
+    from kernelforge.workflows.rewrite_controller import worktree as worktree_module
 
     _task, workspace, driver = staged
     assert driver.is_file()
@@ -145,7 +145,7 @@ def test_the_staging_directory_does_not_survive_the_borrow(staged, tmp_path: Pat
 
 def test_a_driver_left_by_a_killed_run_is_reclaimed(staged) -> None:
     """Cleanup is by prefix, so the next borrower does not inherit the last one's."""
-    from kernelforge.kernel_rewrite_controller import worktree as worktree_module
+    from kernelforge.workflows.rewrite_controller import worktree as worktree_module
 
     _task, workspace, _driver = staged
     abandoned = workspace / f"{DRIVER_STAGE_PREFIX}0123456789abcdef"
@@ -169,7 +169,7 @@ def test_a_handed_back_repository_is_not_reported_as_a_barren_campaign(
     forge-loop best result" about a directory that is gone states a verdict on
     evidence nothing read, and reads as "the campaign produced nothing".
     """
-    from kernelforge.kernel_rewrite_controller import recovery
+    from kernelforge.workflows.rewrite_controller import recovery
 
     task, workspace, _driver = staged
     monkeypatch.setattr(recovery, "needs_inplace", lambda _repo: True)
@@ -182,8 +182,8 @@ def test_a_handed_back_repository_is_not_reported_as_a_barren_campaign(
 
 def test_a_standing_workspace_with_no_result_still_says_so(staged, monkeypatch) -> None:
     """The original verdict survives where it is the true one."""
-    from kernelforge.kernel_rewrite_controller import recovery
-    from kernelforge.kernel_rewrite_controller.worktree import FORGE_LOOP_OUTPUT_DIRNAME
+    from kernelforge.workflows.rewrite_controller import recovery
+    from kernelforge.workflows.rewrite_controller.worktree import FORGE_LOOP_OUTPUT_DIRNAME
 
     task, workspace, _driver = staged
     (workspace / FORGE_LOOP_OUTPUT_DIRNAME).mkdir(parents=True, exist_ok=True)
@@ -194,7 +194,7 @@ def test_a_standing_workspace_with_no_result_still_says_so(staged, monkeypatch) 
 
 def test_a_private_checkout_is_judged_on_its_bundle(staged, monkeypatch) -> None:
     """A private checkout is left standing, so the sweep does read it."""
-    from kernelforge.kernel_rewrite_controller import recovery
+    from kernelforge.workflows.rewrite_controller import recovery
 
     task, workspace, _driver = staged
     monkeypatch.setattr(recovery, "needs_inplace", lambda _repo: False)

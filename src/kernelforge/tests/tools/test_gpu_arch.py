@@ -9,7 +9,7 @@ import subprocess
 
 import pytest
 
-from kernelforge.tools.gpu_arch import canon_arch, canonical_gpu_type, detect_arch, product_arch
+from kernelforge.utils.gpu_arch import canon_arch, canonical_gpu_type, detect_arch, product_arch
 
 
 @pytest.mark.parametrize(

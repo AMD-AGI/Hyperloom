@@ -5,8 +5,8 @@
 
 from __future__ import annotations
 
-from kernelforge.fusion import validate
-from kernelforge.fusion.validate import (
+from kernelforge.workflows.forge_fusion import validate
+from kernelforge.workflows.forge_fusion.validate import (
     SMOKE_STAGE_BOOT_TIMEOUT,
     SMOKE_STAGE_DECODE_BENCH,
     SMOKE_STAGE_DECODE_CRASH,

@@ -7,15 +7,15 @@ import asyncio
 import json
 import pathlib
 
-from kernelforge.loop.gate_settings import GateMeasurement
-from kernelforge.loop.insession_gate import InSessionGate
+from kernelforge.workflows.forge_loop.gate.gate_settings import GateMeasurement
+from kernelforge.workflows.forge_loop.gate.insession_gate import InSessionGate
 from kernelforge.evaluation.scoring import (
     keep_score,
     passes_keep_threshold,
     required_keep_speedup,
 )
 from kernelforge.evaluation.benchmark import runner as bench_module
-from kernelforge.resources import resource_path
+from kernelforge.config.resources import resource_path
 from kernelforge.evaluation.benchmark.runner import (
     BenchRun,
     bench_wallclock,
@@ -164,7 +164,7 @@ def test_gate_measurement_defaults_are_legacy():
 
 def test_warmstart_baseline_uses_the_same_repeat_as_the_loop(tmp_path):
     """A single-shot baseline vs repeat-and-median candidates is a free win."""
-    from kernelforge.loop import knowledge_integration as ei
+    from kernelforge.workflows.forge_loop.memory import knowledge_integration as ei
 
     drv = tmp_path / "drv.py"
     drv.write_text(_ARGV_DRIVER)
@@ -175,7 +175,7 @@ def test_warmstart_baseline_uses_the_same_repeat_as_the_loop(tmp_path):
 
 def test_warmstart_baseline_defaults_to_single_shot(tmp_path):
     """Unchanged for tasks that don't configure repeats."""
-    from kernelforge.loop import knowledge_integration as ei
+    from kernelforge.workflows.forge_loop.memory import knowledge_integration as ei
 
     drv = tmp_path / "drv.py"
     drv.write_text(_ARGV_DRIVER)
@@ -311,8 +311,8 @@ def test_forge_loop_can_actually_call_kb_warmstart():
     import inspect
     import textwrap
 
-    from kernelforge.loop.bootstrap import warm_start
-    from kernelforge.loop.knowledge_integration import kb_warmstart
+    from kernelforge.workflows.forge_loop.bootstrap import warm_start
+    from kernelforge.workflows.forge_loop.memory.knowledge_integration import kb_warmstart
 
     accepted = set(inspect.signature(kb_warmstart).parameters)
     tree = ast.parse(textwrap.dedent(inspect.getsource(warm_start._read_kb_warm_start)))

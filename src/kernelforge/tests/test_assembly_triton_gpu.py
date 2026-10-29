@@ -20,7 +20,7 @@ if not torch.version.hip or not torch.cuda.is_available():
 triton = pytest.importorskip("triton")
 tl = pytest.importorskip("triton.language")
 
-from kernelforge.assembly.prepare import AssemblyPreparationError, AssemblyTask, prepare_assembly
+from kernelforge.kernel_backends.assembly.prepare import AssemblyPreparationError, AssemblyTask, prepare_assembly
 from kernelforge.config import Config
 from kernelforge.evaluation.benchmark.runner import BenchRun, bench_wallclock
 from kernelforge.evaluation.correctness.pipeline import run_validation_pipeline
@@ -146,8 +146,8 @@ extern "C" __global__ void add(const float* a, const float* b, float* c, int n) 
     source = """from pathlib import Path
 import tempfile
 import torch
-from kernelforge.assembly.hip_source import compile_hip
-from kernelforge.assembly.hip import HipKernel
+from kernelforge.kernel_backends.assembly.hip_source import compile_hip
+from kernelforge.kernel_backends.assembly.hip import HipKernel
 N = 4103
 class VectorAdd:
     def __init__(self):
@@ -188,7 +188,7 @@ def _atomic_increment(output):
 
 
 def test_binding_does_not_double_atomic_output(tmp_path):
-    from kernelforge.assembly.triton import TritonAssembly
+    from kernelforge.kernel_backends.assembly.triton import TritonAssembly
 
     target = torch.cuda.get_device_properties(0).gcnArchName.split(":")[0]
     output = torch.zeros(1, dtype=torch.int32, device="cuda")

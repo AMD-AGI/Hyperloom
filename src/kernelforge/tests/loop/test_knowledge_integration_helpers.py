@@ -5,9 +5,9 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from kernelforge.loop import knowledge_integration as integ
+from kernelforge.workflows.forge_loop.memory import knowledge_integration as integ
 from kernelforge.knowledge.kb_store.identity.run import LoopKernel
-from kernelforge.loop.knowledge_integration import ExperiencePublication, WarmStartHarness
+from kernelforge.workflows.forge_loop.memory.knowledge_integration import ExperiencePublication, WarmStartHarness
 import pytest
 
 

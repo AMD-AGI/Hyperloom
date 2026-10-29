@@ -10,9 +10,9 @@ import json
 
 import pytest
 
-from kernelforge.fusion.locate import FrameworkInstall
-from kernelforge.fusion.discover import DiscoveryTarget
-from kernelforge.fusion.anchor import (
+from kernelforge.workflows.forge_fusion.locate import FrameworkInstall
+from kernelforge.workflows.forge_fusion.discover import DiscoveryTarget
+from kernelforge.workflows.forge_fusion.anchor import (
     AnchorResolutionError,
     KernelAnchor,
     build_anchored_discovery_prompt,
@@ -20,7 +20,7 @@ from kernelforge.fusion.anchor import (
     describe_anchor,
     resolve_anchor,
 )
-from kernelforge.fusion.discover import resolve_proposed_source_file
+from kernelforge.workflows.forge_fusion.discover import resolve_proposed_source_file
 
 ANCHOR = (
     "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16tofloat32_copy_kernel_cuda"

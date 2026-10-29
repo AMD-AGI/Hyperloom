@@ -10,9 +10,9 @@ from typing import Any
 
 import pytest
 
-import kernelforge.fusion.pipeline as cli_module
-from kernelforge.fusion.loop import LoopResult
-from kernelforge.fusion.models import CompilePassOutcome, Recipe
+import kernelforge.workflows.forge_fusion.pipeline as cli_module
+from kernelforge.workflows.forge_fusion.loop import LoopResult
+from kernelforge.workflows.forge_fusion.models import CompilePassOutcome, Recipe
 
 
 def _recipe(pattern_id: str) -> Recipe:

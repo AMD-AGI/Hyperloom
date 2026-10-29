@@ -6,9 +6,9 @@ import subprocess
 
 import pytest
 
-from kernelforge.loop.campaign_config import CampaignInputs, parse_list
-from kernelforge.loop.campaign_setup import resolve_campaign
-from kernelforge.loop.campaign_config import CampaignConfigStore
+from kernelforge.workflows.forge_loop.campaign.campaign_config import CampaignInputs, parse_list
+from kernelforge.workflows.forge_loop.campaign.campaign_setup import resolve_campaign
+from kernelforge.workflows.forge_loop.campaign.campaign_config import CampaignConfigStore
 
 
 class TestParseList:

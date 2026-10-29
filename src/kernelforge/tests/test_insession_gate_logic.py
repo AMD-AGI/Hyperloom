@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for the in-session gate decision logic (loop/insession_gate.py)."""
+"""Unit tests for the in-session gate decision logic (workflows/forge_loop/gate/insession_gate.py)."""
 
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ import dataclasses
 import subprocess
 from pathlib import Path
 
-from kernelforge.loop.gate_settings import GateMeasurement, GateScope
-from kernelforge.loop.insession_gate import InSessionGate
+from kernelforge.workflows.forge_loop.gate.gate_settings import GateMeasurement, GateScope
+from kernelforge.workflows.forge_loop.gate.insession_gate import InSessionGate
 
 _MEASUREMENT_FIELDS = [field.name for field in dataclasses.fields(GateMeasurement)]
 _SCOPE_FIELDS = [field.name for field in dataclasses.fields(GateScope)]
@@ -25,7 +25,7 @@ def test_insession_gate_has_no_duplicate_module_defs():
     import ast
     import collections
 
-    from kernelforge.loop import insession_gate
+    from kernelforge.workflows.forge_loop.gate import insession_gate
 
     tree = ast.parse(Path(insession_gate.__file__).read_text())
     names = [n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
@@ -222,7 +222,7 @@ def test_count_target_edits_accepts_absolute_implementation_paths(tmp_path):
 
 # ── Stop hook decisions ────────────────────────────────────────────────────────
 
-import kernelforge.loop.insession_gate as gate_module
+import kernelforge.workflows.forge_loop.gate.insession_gate as gate_module
 
 
 def _patch_canonical(monkeypatch, *, correct=True, wall_ms=0.5):

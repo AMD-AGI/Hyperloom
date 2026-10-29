@@ -7,16 +7,16 @@ from __future__ import annotations
 
 import json
 
-from kernelforge.gemm_tune.model_analyzer import ModelProfile
-from kernelforge.gemm_tune.tuners.base import TuneContext
-from kernelforge.gemm_tune.tuners.vllm_dense_tunableop import VllmDenseTunableopTuner
+from kernelforge.workflows.gemm_tune.model_analyzer import ModelProfile
+from kernelforge.workflows.gemm_tune.tuners.base import TuneContext
+from kernelforge.workflows.gemm_tune.tuners.vllm_dense_tunableop import VllmDenseTunableopTuner
 
 BF16 = "GemmTunableOp_BFloat16_TN"
 FP16 = "GemmTunableOp_Half_TN"
 
 
 def _demand_file(tmp_path, keys):
-    from kernelforge.gemm_tune.evidence import SCHEMA_VERSION
+    from kernelforge.workflows.gemm_tune.evidence import SCHEMA_VERSION
 
     path = tmp_path / "demand.json"
     path.write_text(
@@ -161,7 +161,7 @@ class TestTheBudgetIsAppliedAfterTheDtypeFilter:
         assert all(line.startswith(BF16) for line in lines)
 
     def test_the_budget_still_caps_the_input_file(self, tmp_path):
-        from kernelforge.gemm_tune.tuners.vllm_dense_tunableop import _DEMAND_SHAPE_LIMIT
+        from kernelforge.workflows.gemm_tune.tuners.vllm_dense_tunableop import _DEMAND_SHAPE_LIMIT
 
         keys = [_key(m, 512, 4096, "torch.bfloat16") for m in range(1, _DEMAND_SHAPE_LIMIT + 40)]
         lines = _records(tmp_path, keys)

@@ -14,13 +14,13 @@ from kernelforge.cli.option_groups import option_group
 from kernelforge.cli.options import _gpu_options, _roofline_ceiling_option, _validate_max_hours
 from kernelforge.config import CeilingSwitch, Config, GpuOptions, KnowledgeConfig
 from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
-from kernelforge.rewrite_by_flydsl.optimize import OptimizeOptions
-from kernelforge.rewrite_by_flydsl.request import ApplybackSwitch, RewriteBudget, RewriteWorkspace
+from kernelforge.workflows.flydsl_rewrite.optimize import OptimizeOptions
+from kernelforge.workflows.flydsl_rewrite.request import ApplybackSwitch, RewriteBudget, RewriteWorkspace
 
 
 def _validate_rewrite_framework(_ctx, _param, value):
     """Accept only a framework the capability handshake advertises."""
-    from kernelforge.rewrite_by_flydsl.protocol import SUPPORTED_FRAMEWORKS
+    from kernelforge.workflows.flydsl_rewrite.protocol import SUPPORTED_FRAMEWORKS
 
     cleaned = (value or "").strip().lower()
     if cleaned and cleaned not in SUPPORTED_FRAMEWORKS:
@@ -32,7 +32,7 @@ def _emit_rewrite_capabilities(ctx, _param, value):
     """Answer the capability handshake before any required option is parsed."""
     if not value or ctx.resilient_parsing:
         return
-    from kernelforge.rewrite_by_flydsl.protocol import capabilities
+    from kernelforge.workflows.flydsl_rewrite.protocol import capabilities
 
     click.echo(json.dumps(capabilities(), indent=2, sort_keys=True))
     ctx.exit()
@@ -42,7 +42,7 @@ def _emit_rewrite_applyback_contract(ctx, _param, value):
     """Publish producer-owned example documents for cross-repository checks."""
     if not value or ctx.resilient_parsing:
         return
-    from kernelforge.rewrite_by_flydsl.protocol import applyback_contract_example
+    from kernelforge.workflows.flydsl_rewrite.protocol import applyback_contract_example
 
     click.echo(json.dumps(applyback_contract_example(), indent=2, sort_keys=True))
     ctx.exit()
@@ -336,9 +336,9 @@ def forge_rewrite(request: RewriteRequest):
     if hasattr(os, "geteuid") and os.geteuid() == 0:
         os.environ.setdefault("IS_SANDBOX", "1")
 
-    from kernelforge.rewrite_by_flydsl import run_rewrite
-    from kernelforge.rewrite_by_flydsl.ingest import RewriteSubject
-    from kernelforge.rewrite_by_flydsl.request import DriverSetup, RewriteRun
+    from kernelforge.workflows.flydsl_rewrite import run_rewrite
+    from kernelforge.workflows.flydsl_rewrite.ingest import RewriteSubject
+    from kernelforge.workflows.flydsl_rewrite.request import DriverSetup, RewriteRun
 
     source = request.source
     subject = RewriteSubject(

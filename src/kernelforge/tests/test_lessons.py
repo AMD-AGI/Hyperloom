@@ -6,8 +6,8 @@ import asyncio
 
 import pytest
 
-from kernelforge.resources import resource_path
-from kernelforge.loop.lessons import (
+from kernelforge.config.resources import resource_path
+from kernelforge.workflows.forge_loop.memory.lessons import (
     CLAIM_DISPROVED,
     DEFAULT_RECENT_LESSONS,
     NO_FEASIBILITY_CLAIM,

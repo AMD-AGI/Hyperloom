@@ -11,10 +11,10 @@ import pytest
 import kernelforge.agent_backends.claude as claude_module
 import kernelforge.agent_backends.registry as registry
 from kernelforge.agent_backends.base import AgentRuntimeConfig
-from kernelforge.loop.bootstrap.relay import config_for_profile, probe_agent_profile
+from kernelforge.workflows.forge_loop.bootstrap.relay import config_for_profile, probe_agent_profile
 from kernelforge.config import Config
 from kernelforge.agent_backends.gateway import anthropic_environment_from_openai, openai_gateway_from_anthropic
-from kernelforge.loop.agent_relay import AgentProfile, AgentRelayConfig
+from kernelforge.workflows.forge_loop.search.agent_relay import AgentProfile, AgentRelayConfig
 
 _LINE_ENV = (
     "OPENAI_BASE_URL",

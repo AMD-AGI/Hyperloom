@@ -15,7 +15,7 @@ from kernelforge.kernel_backends.constants import (
     KERNEL_BACKENDS,
     resolve_language_dirs,
 )
-from kernelforge.loop.campaign_config import infer_kernel_backend
+from kernelforge.workflows.forge_loop.campaign.campaign_config import infer_kernel_backend
 
 
 _GPU = "gfx950"

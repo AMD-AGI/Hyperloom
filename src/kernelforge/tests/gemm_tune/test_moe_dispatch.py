@@ -12,8 +12,8 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
-from kernelforge.gemm_tune.evidence import MOE_KEY_FIELDS, MOE_TABLE
-from kernelforge.gemm_tune.tier3 import dispatch as dp
+from kernelforge.workflows.gemm_tune.evidence import MOE_KEY_FIELDS, MOE_TABLE
+from kernelforge.workflows.gemm_tune.tier3 import dispatch as dp
 
 _KEY = {
     "token": "512",

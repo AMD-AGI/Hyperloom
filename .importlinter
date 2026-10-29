@@ -124,18 +124,11 @@ type = forbidden
 source_modules = kernelforge.evaluation
 forbidden_modules =
     kernelforge.agent_backends
-    kernelforge.assembly
     kernelforge.cli
-    kernelforge.fusion
-    kernelforge.gemm_tune
     kernelforge.kernel_backends
-    kernelforge.kernel_rewrite_controller
     kernelforge.knowledge
-    kernelforge.loop
-    kernelforge.orchestrator
-    kernelforge.rewrite_by_flydsl
     kernelforge.roofline_ceiling
-    kernelforge.tracker
+    kernelforge.workflows
 ignore_imports =
     hyperloom.**.tests.** -> **
     kernelforge.tests.** -> **
@@ -143,25 +136,18 @@ unmatched_ignore_imports_alerting = none
 
 
 [importlinter:contract:kf-tools-foundation]
-name = kernelforge tools do not depend on evaluation, product or entry layers
+name = kernelforge utils do not depend on any other kernelforge package
 type = forbidden
-source_modules = kernelforge.tools
+source_modules = kernelforge.utils
 forbidden_modules =
     kernelforge.agent_backends
-    kernelforge.assembly
     kernelforge.cli
+    kernelforge.config
     kernelforge.evaluation
-    kernelforge.fusion
-    kernelforge.gemm_tune
     kernelforge.kernel_backends
-    kernelforge.kernel_rewrite_controller
     kernelforge.knowledge
-    kernelforge.loop
-    kernelforge.orchestrator
-    kernelforge.rewrite_by_flydsl
     kernelforge.roofline_ceiling
-    kernelforge.tracker
-    kernelforge.workspace
+    kernelforge.workflows
 ignore_imports =
     hyperloom.**.tests.** -> **
     kernelforge.tests.** -> **
@@ -174,11 +160,23 @@ type = forbidden
 # An agent session waits on each server's startup. A new MCP server module must be added here.
 source_modules =
     kernelforge.knowledge.pr_knowledge.mcp_server
-    kernelforge.orchestrator.specialist_probe_server
+    kernelforge.workflows.forge_loop.roles.specialist_probe_server
 forbidden_modules =
     kernelforge.agent_backends
     kernelforge.cli
-    kernelforge.loop
+    kernelforge.workflows.forge_loop.api
+    kernelforge.workflows.forge_loop.bootstrap
+    kernelforge.workflows.forge_loop.campaign
+    kernelforge.workflows.forge_loop.export
+    kernelforge.workflows.forge_loop.gate
+    kernelforge.workflows.forge_loop.iteration
+    kernelforge.workflows.forge_loop.memory
+    kernelforge.workflows.forge_loop.policy
+    kernelforge.workflows.forge_loop.preparation
+    kernelforge.workflows.forge_loop.search
+    kernelforge.workflows.forge_loop.roles.agent_extras
+    kernelforge.workflows.forge_loop.roles.analysis_evidence
+    kernelforge.workflows.forge_loop.roles.prompt_view
 ignore_imports =
     hyperloom.**.tests.** -> **
     kernelforge.tests.** -> **
@@ -256,32 +254,27 @@ unmatched_ignore_imports_alerting = none
 name = hyperloom uses kernelforge only through its package interfaces
 type = forbidden
 # What a kernelforge package offers the rest of the project is what its
-# __init__ exports (and kernelforge.loop.api for the loop), so its modules can
-# move without breaking Hyperloom. Top-level modules such as
-# kernelforge.resources are interfaces of their own.
+# __init__ exports (and kernelforge.workflows.forge_loop.api for the loop), so its modules can
+# move without breaking Hyperloom.
 source_modules = hyperloom
 forbidden_modules =
     kernelforge.agent_backends.**
-    kernelforge.assembly.**
     kernelforge.cli.**
+    kernelforge.config.**
     kernelforge.evaluation.**
-    kernelforge.fusion.**
-    kernelforge.gemm_tune.**
     kernelforge.kernel_backends.**
-    kernelforge.kernel_rewrite_controller.**
     kernelforge.knowledge.**
-    kernelforge.loop.**
-    kernelforge.orchestrator.**
-    kernelforge.rewrite_by_flydsl.**
     kernelforge.roofline_ceiling.**
-    kernelforge.run_export.**
-    kernelforge.tools.**
-    kernelforge.tracker.**
-    kernelforge.workspace.**
+    kernelforge.utils.**
+    kernelforge.workflows.flydsl_rewrite.**
+    kernelforge.workflows.forge_fusion.**
+    kernelforge.workflows.forge_loop.**
+    kernelforge.workflows.gemm_tune.**
+    kernelforge.workflows.rewrite_controller.**
 allow_indirect_imports = True
 ignore_imports =
     hyperloom.**.tests.** -> **
-    hyperloom.** -> kernelforge.loop.api
+    hyperloom.** -> kernelforge.workflows.forge_loop.api
 unmatched_ignore_imports_alerting = none
 
 
@@ -425,10 +418,8 @@ ignore_imports =
     hyperloom.orchestrator.state.shared_state -> hyperloom.orchestrator.kernel.kernel_decisions
     hyperloom.orchestrator.state.shared_state -> hyperloom.orchestrator.phases.machine_state
     hyperloom.orchestrator.trace_analysis.tracelens_skill_runner -> hyperloom.orchestrator.roles.claude_requests
-    kernelforge.gemm_tune.dense_shapes -> kernelforge.gemm_tune.tuners._aiter_dense_common
-    kernelforge.kernel_backends.fusion.prompts -> kernelforge.fusion.harness_contract
-    kernelforge.kernel_backends.fusion.prompts -> kernelforge.fusion.validate
-    kernelforge.orchestrator.agent -> kernelforge.loop.insession_gate
-    kernelforge.orchestrator.agent -> kernelforge.loop.lessons
-    kernelforge.orchestrator.specialists -> kernelforge.loop.fanout
+    kernelforge.workflows.gemm_tune.dense_shapes -> kernelforge.workflows.gemm_tune.tuners._aiter_dense_common
+    kernelforge.kernel_backends.fusion.prompts -> kernelforge.workflows.forge_fusion.harness_contract
+    kernelforge.kernel_backends.fusion.prompts -> kernelforge.workflows.forge_fusion.validate
+    kernelforge.workflows.forge_loop.roles.specialists -> kernelforge.workflows.forge_loop.iteration.fanout
 unmatched_ignore_imports_alerting = error

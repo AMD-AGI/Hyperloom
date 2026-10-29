@@ -12,19 +12,19 @@ import pytest
 from click.testing import CliRunner
 
 from kernelforge import cli
-from kernelforge.kernel_rewrite_controller import ControllerRunError, run_controller
-from kernelforge.kernel_rewrite_controller import controller
-from kernelforge.kernel_rewrite_controller.contracts import (
+from kernelforge.workflows.rewrite_controller import ControllerRunError, run_controller
+from kernelforge.workflows.rewrite_controller import controller
+from kernelforge.workflows.rewrite_controller.contracts import (
     SERVING_CONTEXT_FILENAME,
     TRACE_EVIDENCE_FILENAME,
     WORKLOAD_FILENAME,
 )
-from kernelforge.kernel_rewrite_controller.opportunity_agent import (
+from kernelforge.workflows.rewrite_controller.opportunity_agent import (
     ANALYSIS_STATUS_COMPLETED,
     ANALYSIS_STATUS_FAILED,
     OpportunityAnalysisResult,
 )
-from kernelforge.kernel_rewrite_controller.scheduler import ScheduleResult
+from kernelforge.workflows.rewrite_controller.scheduler import ScheduleResult
 
 
 @pytest.fixture(autouse=True)

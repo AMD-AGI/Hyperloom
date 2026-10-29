@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-import kernelforge.kernel_rewrite_controller.opportunity_agent as opportunity_agent_module
+import kernelforge.workflows.rewrite_controller.opportunity_agent as opportunity_agent_module
 from kernelforge.agent_backends.base import (
     AgentCapabilities,
     AgentProviderError,
@@ -20,9 +20,9 @@ from kernelforge.agent_backends.base import (
     AgentRunResult,
     AgentRuntimeConfig,
 )
-from kernelforge.kernel_rewrite_controller import ControllerLayout, read_handoff
-from kernelforge.workspace.edit_policy import FORGE_PROTECTED_PATHS
-from kernelforge.kernel_rewrite_controller.opportunity_agent import (
+from kernelforge.workflows.rewrite_controller import ControllerLayout, read_handoff
+from kernelforge.config.edit_policy import FORGE_PROTECTED_PATHS
+from kernelforge.workflows.rewrite_controller.opportunity_agent import (
     ANALYSIS_STATUS_COMPLETED,
     ANALYSIS_STATUS_FAILED,
     ANALYSIS_STATUS_TIMED_OUT,
@@ -31,7 +31,7 @@ from kernelforge.kernel_rewrite_controller.opportunity_agent import (
     _system_prompt,
     run_opportunity_analysis,
 )
-from kernelforge.kernel_rewrite_controller.task_publisher import REJECTION_FILENAME
+from kernelforge.workflows.rewrite_controller.task_publisher import REJECTION_FILENAME
 from kernelforge.knowledge.kb_store.identity.kernel_recipe import (
     KernelRecipeIdentity,
     kernel_recipe_canonical_id,

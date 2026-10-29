@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from kernelforge.gemm_tune.router import RoutingEvidence, RoutingTarget
+from kernelforge.workflows.gemm_tune.router import RoutingEvidence, RoutingTarget
 
 from hyperloom.orchestrator.kernel import lane_budget
 from hyperloom.orchestrator.actions.executors import _kernel_agent_tool as kernel_agent_tool

@@ -290,7 +290,7 @@ calls only while stuck; bench remains the final gate on every accepted edit.
 ## Example Tasks
 
 Paths below are relative to `src/kernelforge/examples/` in a checkout. From
-an installed wheel, `python -c "from kernelforge.resources import resource_path;
+an installed wheel, `python -c "from kernelforge.config.resources import resource_path;
 print(resource_path('examples'))"` prints the same tree — copy a task out of it
 rather than running in place, because the package directory is not meant to be
 written to.
@@ -361,7 +361,7 @@ Common causes:
 Check the shipped knowledge base for your language — the `*_traps.md` levers collect the ones that have already cost someone a campaign:
 
 ```bash
-python3 -c "import kernelforge.resources as r; print(r.resource_path('local_knowledge'))"
+python3 -c "import kernelforge.config.resources as r; print(r.resource_path('local_knowledge'))"
 less .../local_knowledge/languages/triton/skills/optimize/triton_levers/triton_traps.md
 ```
 

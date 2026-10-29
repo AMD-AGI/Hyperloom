@@ -10,7 +10,10 @@ import pytest
 from kernelforge.config import Config
 from kernelforge.kernel_backends.base import build_single_kernel_backend_prompt
 from kernelforge.kernel_backends.constants import KERNEL_BACKENDS, resolve_language_dirs
-from kernelforge.loop.campaign_config import infer_kernel_backend, resolve_kernel_backend_override
+from kernelforge.workflows.forge_loop.campaign.campaign_config import (
+    infer_kernel_backend,
+    resolve_kernel_backend_override,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -116,7 +119,7 @@ def test_flydsl_prompt_can_reach_assembly_workflow():
 
 
 def test_opportunity_prompt_uses_backend_registry(monkeypatch):
-    from kernelforge.kernel_rewrite_controller import opportunity_agent
+    from kernelforge.workflows.rewrite_controller import opportunity_agent
 
     monkeypatch.setattr(opportunity_agent, "KERNEL_BACKENDS", ["assembly", "test_frontend"])
     prompt = opportunity_agent._system_prompt()

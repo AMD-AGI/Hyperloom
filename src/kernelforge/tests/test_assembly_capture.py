@@ -14,8 +14,8 @@ from types import ModuleType
 
 import pytest
 
-from kernelforge.assembly import capture
-from kernelforge.assembly.compiler import AssemblyError
+from kernelforge.kernel_backends.assembly import capture
+from kernelforge.kernel_backends.assembly.compiler import AssemblyError
 from kernelforge.tests.test_assembly_preparation import ASM
 
 
