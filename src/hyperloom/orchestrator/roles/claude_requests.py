@@ -17,7 +17,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from hyperloom.common.timeutil import elapsed_ms, epoch_iso
+from hyperloom_common.timeutil import elapsed_ms, epoch_iso
 from hyperloom_common.llm.token_usage import TOKEN_KEYS
 from hyperloom.inference_optimizer.trace.context_events import COMPACT_BOUNDARY, compaction_attributes
 from hyperloom.inference_optimizer.trace.tool_events import ToolCall, tool_attributes, tool_status

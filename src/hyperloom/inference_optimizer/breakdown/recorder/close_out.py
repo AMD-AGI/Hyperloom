@@ -24,7 +24,7 @@ from typing import Any, Mapping
 from hyperloom_common.coerce import to_float, to_int
 from hyperloom_common.fs_utils import relative_posix
 from hyperloom.common.gain_math import gain_pct_or_zero
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.timeutil import now_iso
 
 from ..workflow_contract import workflow_contract
 from .recorder import recorder_for

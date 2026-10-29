@@ -15,7 +15,7 @@ from hyperloom_common.io import JsonFormat, JsonLineFormat, WriteOptions
 from hyperloom_common.io import append_jsonl as _common_append_jsonl
 from hyperloom_common.io import atomic_write_json as _common_atomic_write_json
 from hyperloom.common.jsonio import read_json_strict as _common_read_json_strict
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.timeutil import now_iso
 
 from .errors import SessionMemoryError
 from .scope_builder import UNKNOWN_SCOPE_VALUES

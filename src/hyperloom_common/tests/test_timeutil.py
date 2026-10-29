@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import re
 
-from hyperloom.common.timeutil import iso_z, now_iso, utc_now_compact
+from hyperloom_common.timeutil import iso_z, now_iso, utc_now_compact
 
 
 def test_now_iso_z_suffix():

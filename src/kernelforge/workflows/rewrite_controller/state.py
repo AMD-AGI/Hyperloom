@@ -5,10 +5,11 @@
 
 from __future__ import annotations
 
+import functools
 import json
-from datetime import datetime, timezone
 from pathlib import Path
 
+from hyperloom_common.timeutil import now_iso
 from kernelforge.utils.durable_io import atomic_write_text
 from kernelforge.workflows.rewrite_controller.contracts import (
     TASK_STATUS_FAILED,
@@ -37,8 +38,7 @@ _ALLOWED_TRANSITIONS = {
 }
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+_now_iso = functools.partial(now_iso, "auto")
 
 
 class TaskStateStore:

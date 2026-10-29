@@ -25,7 +25,7 @@ from .patch_landing import (
     record_matches_task,
     record_source_path,
 )
-from hyperloom.common.timeutil import now_iso as _now_iso
+from hyperloom_common.timeutil import now_iso as _now_iso
 from ..state.kernel_decision_settings import (
     _DEFAULT_ATTEMPTS_HISTORY,
     _DEFAULT_HOT_KERNEL_GATE_TOP_N,

@@ -40,7 +40,7 @@ from hyperloom.common.provenance import (
     RESOLVED_FRAMEWORK_PYTHON_ENV,
     detect_gfx_arch,
 )
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.timeutil import now_iso
 from hyperloom.common.visible_devices import hip_mask_within_rocr
 from hyperloom.common.model_paths import resolve_serving_model_path
 

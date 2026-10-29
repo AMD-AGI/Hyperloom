@@ -217,7 +217,7 @@ def _record_config_run(coord: Any, *, task: Any, result_dict: Mapping[str, Any])
     recorder = coord._coord.phase_framework.timeline()
     if recorder is None:
         return
-    from hyperloom.common.timeutil import now_iso
+    from hyperloom_common.timeutil import now_iso
     from hyperloom.inference_optimizer.breakdown.recorder.framework_event import ROLE_CONFIG
 
     task_id = str(getattr(task, "task_id", "") or "")

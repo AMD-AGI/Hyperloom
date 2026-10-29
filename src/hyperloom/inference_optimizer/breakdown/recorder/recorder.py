@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Literal, Mapping
 
 from hyperloom_common.io import WriteOptions, atomic_write_text
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.timeutil import now_iso
 
 from .sections import EVENT_SECTIONS, slug
 from .trace import WriteTrace, trace_enabled, trace_write

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import os
-import time
 from pathlib import Path
 from typing import Any
+
+from hyperloom_common.timeutil import now_iso
 from kernelforge.utils.durable_io import atomic_write_text
 
 
@@ -18,8 +20,7 @@ class AnalysisAttemptLimitError(RuntimeError):
     """Raised when one commit has exhausted its Analysis session attempts."""
 
 
-def _utc_now() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+_utc_now = functools.partial(now_iso, "seconds", z_suffix=True)
 
 
 def _sha256(path: Path) -> str:

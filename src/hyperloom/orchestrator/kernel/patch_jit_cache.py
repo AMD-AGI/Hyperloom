@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom_common import aiter_jit_cache
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.timeutil import now_iso
 
 
 _ALLOWED_KERNEL_DEPLOY_PACKAGES = frozenset({"aiter", "aiter_meta", "sglang", "vllm"})

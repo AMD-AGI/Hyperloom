@@ -11,7 +11,7 @@ from typing import Any
 
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom_common.io import JsonFormat, WriteOptions, atomic_write_json
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import (
     agent_mcp_setup_path,
 )

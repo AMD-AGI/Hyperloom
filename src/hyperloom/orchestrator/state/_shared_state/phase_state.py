@@ -9,7 +9,7 @@ from collections.abc import Iterable
 from typing import Any, NamedTuple
 
 from hyperloom_common.coerce import to_str_list
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.timeutil import now_iso
 
 # Long-run bounded-growth caps for append-only telemetry ledgers (tail-trim).
 _INTERVENTION_MIX_CAP = 500

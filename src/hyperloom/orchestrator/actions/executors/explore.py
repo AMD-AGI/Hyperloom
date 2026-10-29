@@ -35,7 +35,7 @@ from hyperloom.common.perf_metric import (
     resolve_grading_anchor_perf,
     stamp_output_per_gpu,
 )
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.timeutil import now_iso
 from hyperloom.inference_optimizer.grading import resolved_grading
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...state.failure_evidence import (

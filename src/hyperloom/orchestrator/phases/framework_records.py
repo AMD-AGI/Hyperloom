@@ -161,7 +161,7 @@ def _record_run(coord: Any, task: "Task | str", *, role: str, status: str, **fie
     recorder = _recorder(coord)
     if recorder is None:
         return
-    from hyperloom.common.timeutil import now_iso
+    from hyperloom_common.timeutil import now_iso
     from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
         ARM_CONFIG,
         ARM_SOURCE,

@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import Any
 
 from hyperloom_common.coerce import text_or_none, to_int
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.timeutil import now_iso
 
 
 def call_key_fields(record: Any) -> dict[str, Any]:

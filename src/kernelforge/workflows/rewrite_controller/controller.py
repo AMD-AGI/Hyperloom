@@ -5,16 +5,17 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import math
 import time
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from hyperloom_common.timeutil import now_iso
 from kernelforge.utils.durable_io import atomic_write_text
 from kernelforge.workflows.rewrite_controller.handoff import read_handoff
 from kernelforge.workflows.rewrite_controller.opportunity_agent import (
@@ -51,8 +52,7 @@ class ControllerRunError(RuntimeError):
     """The controller could not establish or complete its top-level lifecycle."""
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+_now_iso = functools.partial(now_iso, "auto")
 
 
 @dataclass(frozen=True)

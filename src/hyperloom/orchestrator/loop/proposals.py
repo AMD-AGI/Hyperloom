@@ -494,7 +494,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         if not proposal_msg_id or not task_id:
             return
         try:
-            from hyperloom.common.timeutil import now_iso
+            from hyperloom_common.timeutil import now_iso
             from hyperloom_common.io import JsonLineFormat, append_jsonl
             from hyperloom.inference_optimizer.session.session_paths import proposal_task_map_path
 

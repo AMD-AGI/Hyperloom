@@ -12,7 +12,7 @@ from typing import Any, NamedTuple
 
 from hyperloom_common.coerce import optional_positive_float, to_float, to_unix
 from hyperloom_common.env import env_float as _env_float, env_int as _env_int
-from hyperloom.common.timeutil import now_iso as _now_iso
+from hyperloom_common.timeutil import now_iso as _now_iso
 from hyperloom.orchestrator.lever import (
     LEVER_CONFIG,
     LEVER_SOURCE_PATCH,

@@ -23,7 +23,7 @@ from hyperloom_common.llm.llm_config import (
     get_async_openai_client,
 )
 from ..roles.base import parse_call_timeout_env
-from hyperloom.common.timeutil import format_exc_brief
+from hyperloom_common.timeutil import format_exc_brief
 from hyperloom_common.llm.token_usage import openai_usage_counts
 from hyperloom.inference_optimizer.trace.conversation_trace import ConversationRecord, append_conversation
 from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, LLMCallSite, append_llm_call, new_call_id

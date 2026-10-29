@@ -10,7 +10,7 @@ from typing import Any
 
 from hyperloom_common.io import JsonFormat, JsonLineFormat, append_jsonl, atomic_write_json
 from hyperloom.common.jsonio import read_json_strict, read_jsonl
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.timeutil import now_iso
 
 from .session_paths import (
     sbd_v6_timeline_dir,

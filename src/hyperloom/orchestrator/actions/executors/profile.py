@@ -23,7 +23,7 @@ from hyperloom.orchestrator.trace_analysis._trace_rank import (
 )
 from hyperloom_common.io import atomic_write_json, safe_mtime
 from hyperloom.common.profile_args import sanitize_profile_server_args as _sanitize_profile_server_args
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.paths import asset_root, mn_profile_trace_root
 from hyperloom.inference_optimizer import framework_registry
 from ._inferencex_patcher import (
