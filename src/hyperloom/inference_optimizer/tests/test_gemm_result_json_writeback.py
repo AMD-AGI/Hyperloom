@@ -113,7 +113,7 @@ def test_writeback_failure_preserves_the_existing_file(tmp_path: Path, monkeypat
     def _boom(*_a, **_k):
         raise OSError("read-only file system")
 
-    monkeypatch.setattr("hyperloom.orchestrator.phases.kernel.atomic_write_json", _boom)
+    monkeypatch.setattr("hyperloom.orchestrator.phases.kernel_gemm_tuning.atomic_write_json", _boom)
 
     _phase(tmp_path, model)._writeback_gemm_result_json({"workspace": str(ws), "decision": "REVERT"})
 
