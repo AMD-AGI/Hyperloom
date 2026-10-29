@@ -796,13 +796,17 @@ def test_a_half_configured_recipe_kb_fails_loudly_before_creating_anything(
 
 
 @pytest.mark.usefixtures("ready_environment", "agent_cli")
-def test_the_rsi_archive_defaults_to_the_shared_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_an_unset_rsi_archive_is_refused_naming_the_variable_before_anything_is_created(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     monkeypatch.delenv(ARCHIVE_ENV)
 
-    cli.main(["run", *WORKLOAD_ARGS])
+    assert cli.main(["run", *WORKLOAD_ARGS]) == cli.EXIT_FAILED
 
-    assert os.environ[ARCHIVE_ENV] == cli.RSI_ARCHIVE_DEFAULT == "/shared_nfs/hyperloom/rsi-archive/"
+    assert f"{ARCHIVE_ENV} is not set" in capsys.readouterr().err
+    assert ARCHIVE_ENV not in os.environ, "no archive is assumed on the deployment's behalf"
+    assert not any(tmp_path.iterdir())
 
 
 @pytest.mark.usefixtures("ready_environment", "agent_cli")
@@ -1053,6 +1057,7 @@ def host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Host:
         "HYPERLOOM_SOURCE_REPO": "AMD-AGI/Hyperloom",
         "HYPERLOOM_SOURCE_SHA": "c" * 40,
         "USER_DATA_PATH": str(workspace),
+        "HYPERLOOM_RUNNER_CACHE": str(tmp_path / "runner-cache"),
     }.items():
         monkeypatch.setenv(name, value)
     for name in ("HYPERLOOM_MCP_PORT", "HYPERLOOM_MCP_TOKEN", "HYPERLOOM_EVENTS_DIR"):
@@ -1101,6 +1106,38 @@ def test_a_hosted_spec_names_its_gpu_type_in_any_case(
     assert cli.main(["hosted", "run"]) == 0
 
     assert agent_cli == [on_the_command_line]
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "named"),
+    [
+        ("HYPERLOOM_RUNNER_CACHE", None, "HYPERLOOM_RUNNER_CACHE is not set to an absolute path"),
+        ("HYPERLOOM_RUNNER_CACHE", "", "HYPERLOOM_RUNNER_CACHE is not set to an absolute path"),
+        ("HYPERLOOM_RUNNER_CACHE", "runner-cache", "HYPERLOOM_RUNNER_CACHE is not set to an absolute path"),
+        (ARCHIVE_ENV, None, f"{ARCHIVE_ENV} is not set"),
+    ],
+)
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_run_without_its_shared_storage_ends_for_good_naming_the_variable(
+    name: str, value: str | None, named: str, host: Host, agent_cli: list[RunSettings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if value is None:
+        monkeypatch.delenv(name)
+    else:
+        monkeypatch.setenv(name, value)
+
+    assert cli.main(["hosted", "run"]) == cli.EXIT_FAILED
+
+    document = host.exit_document()
+    assert (document["final"], document["returncode"]) == (True, cli.EXIT_FAILED)
+    assert named in str(document["error"])
+    assert agent_cli == [] and not any(host.workspace.iterdir())
+
+
+def test_the_hosted_runner_cache_is_the_directory_the_variable_names() -> None:
+    assert cli.hosted_runner_cache({"HYPERLOOM_RUNNER_CACHE": " /data/hl/runner-cache "}) == Path(
+        "/data/hl/runner-cache"
+    )
 
 
 def _no_local_cards() -> tuple[int, ...]:
@@ -1304,6 +1341,7 @@ def handed(agent_binaries: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     stamp = datetime.now(timezone.utc) - timedelta(seconds=600)
     monkeypatch.setenv("HYPERLOOM_RUN_CREATED_AT", stamp.isoformat())
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "workspace"))
+    monkeypatch.setenv("HYPERLOOM_RUNNER_CACHE", str(tmp_path / "runner-cache"))
     started = Started([], [])
 
     def run_session(settings: RunSettings, peer_factory: PeerFactory, services: object) -> int:

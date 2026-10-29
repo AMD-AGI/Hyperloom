@@ -46,9 +46,9 @@ the session ran its course, its wall-clock, GPU-hour or LLM budget spent include
 ``no_measurement_cards`` included, 2 on a usage error. The environment and the peers a session needs are checked before
 anything is created, so a missing one fails the command without leaving a session directory behind: the Recipe KB that
 PRELUDE reads warm-start leads from and CLOSE writes the final recipe back to is configured by ``KB_STORE_URL`` and
-``KB_STORE_TOKEN``, both or neither, and is not used without them; the RSI archive defaults to
-:data:`RSI_ARCHIVE_DEFAULT`, set in this process's environment for every reader of it, and must be a writable
-directory; the measurement pins must be readable, the image the session runs on named by both
+``KB_STORE_TOKEN``, both or neither, and is not used without them; the RSI archive ``HYPERLOOM_RSI_ARCHIVE``
+names must be set and a writable directory (no path is assumed: each deployment names its own shared folder); a
+session measured in hosted sandboxes also needs ``HYPERLOOM_RUNNER_CACHE``, this host's directory of the runner cache; the measurement pins must be readable, the image the session runs on named by both
 ``HYPERLOOM_ACTIVE_IMAGE_REF`` and ``HYPERLOOM_ACTIVE_IMAGE_DIGEST`` included; the framework's package must be
 installed in the image; and the agent CLI the specialists run must be installed. A canonical measurement that cannot
 be taken, one naming a launcher the InferenceX checkout lacks and Magpie cannot supply included, fails the command the
@@ -92,7 +92,7 @@ import logging
 import math
 import os
 import sys
-from collections.abc import Callable, Mapping, MutableMapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from functools import partial
@@ -108,7 +108,7 @@ from hyperloom.hosted.toolbox_inputs import ToolboxInputsError
 from hyperloom.inference_optimizer.session.paths import workspace_root
 from hyperloom.measure.pins import IMAGE_DIGEST_VAR
 from hyperloom.measure.runner.cache_build import CacheBuildError
-from hyperloom.measure.short_prompts.staging import cache_root
+from hyperloom.measure.short_prompts.staging import CACHE_ENV as RUNNER_CACHE_ENV
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient, RemoteRecipeConfigurationError
 from hyperloom_multibranch.contracts.llm_prices import price_of
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
@@ -172,8 +172,6 @@ DEFAULT_MAX_K_PER_BRANCH = 2
 DEFAULT_JUDGE_INTERVAL_SECONDS = 600.0
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 log = logging.getLogger(__name__)
-#: The shared folder of archived search trees, used when ``HYPERLOOM_RSI_ARCHIVE`` names none.
-RSI_ARCHIVE_DEFAULT = "/shared_nfs/hyperloom/rsi-archive/"
 #: The GPU types Magpie has a benchmark script of their own for. ``hyperloom optimize`` runs mi308x and mi325x on
 #: mi300x's script through a mapping its package keeps private, so a session accepts only these until it is public.
 MAGPIE_RUNNER_GPU_TYPES = ("mi300x", "mi355x")
@@ -554,12 +552,14 @@ def recipe_kb_from_env() -> RemoteRecipeClient | None:
         raise EnvironmentIncomplete(f"the Recipe KB is half configured: {exc}") from exc
 
 
-def require_rsi_archive(env: MutableMapping[str, str]) -> None:
-    """Point ``HYPERLOOM_RSI_ARCHIVE`` at :data:`RSI_ARCHIVE_DEFAULT` when ``env`` names no archive; raise
-    :class:`EnvironmentIncomplete` unless the archive is a writable directory."""
+def require_rsi_archive(env: Mapping[str, str]) -> None:
+    """Raise :class:`EnvironmentIncomplete` naming ``HYPERLOOM_RSI_ARCHIVE`` when ``env`` does not set it, and unless
+    the archive it names is a writable directory. There is no default: the archive is the deployment's shared folder."""
 
     if not env.get(ARCHIVE_ENV, "").strip():
-        env[ARCHIVE_ENV] = RSI_ARCHIVE_DEFAULT
+        raise EnvironmentIncomplete(
+            f"{ARCHIVE_ENV} is not set: name the writable shared directory the session archives its search tree in"
+        )
     archive = Path(env[ARCHIVE_ENV].strip())
     if not (archive.is_dir() and os.access(archive, os.W_OK)):
         raise EnvironmentIncomplete(
@@ -690,8 +690,22 @@ def hosted_ready_session(host: HostInfo, workload: Workload) -> ReadySession:
     """:func:`ready_session` measured in the sandboxes of ``host``'s grant: the one builder of the peers of
     ``hosted run`` and ``run --measurement hosted``."""
 
-    inputs = PinnedToolboxInputs(host, cache_root(os.environ))
+    inputs = PinnedToolboxInputs(host, hosted_runner_cache(os.environ))
     return ready_session(workload, partial(load_hosted_peers, inputs=inputs))
+
+
+def hosted_runner_cache(env: Mapping[str, str]) -> Path:
+    """This host's runner cache directory, which ``HYPERLOOM_RUNNER_CACHE`` must name as an absolute path; raises
+    :class:`EnvironmentIncomplete` naming the variable otherwise. Hosted sessions take no default: a cache built where
+    the measurement sandboxes do not mount it leaves them with no runner, and a sealed sandbox cannot fetch one."""
+
+    value = env.get(RUNNER_CACHE_ENV, "").strip()
+    if not value or not Path(value).is_absolute():
+        raise EnvironmentIncomplete(
+            f"{RUNNER_CACHE_ENV} is not set to an absolute path: name the directory of the runner cache on the shared"
+            " storage the measurement sandboxes mount"
+        )
+    return Path(value)
 
 
 def grant_tests_that_fit(host: HostInfo) -> Callable[[int], int]:
@@ -873,7 +887,6 @@ def main(argv: list[str] | None = None) -> int:
 __all__ = [
     "MAGPIE_RUNNER_GPU_TYPES",
     "PROG",
-    "RSI_ARCHIVE_DEFAULT",
     "SEQUENCE_LENGTHS",
     "EnvironmentIncomplete",
     "HANDED_GRANT",
@@ -884,6 +897,7 @@ __all__ = [
     "final_only",
     "grant_tests_that_fit",
     "hosted_ready_session",
+    "hosted_runner_cache",
     "hosted_run",
     "main",
     "recipe_kb_from_env",

@@ -593,3 +593,13 @@ def test_a_run_whose_server_never_imported_the_patched_aiter_ends_as_an_inert_pa
     assert (patched.outcome.failure_class, patched.outcome.returncode) == ("infra", HOSTED_INFRA_FAILURE_RC)
     assert str(patched.outcome.failure_reason).startswith("inert_patch: no process of the server noted importing aiter")
     assert (run / "scratch" / "test" / "farm" / "site" / "sitecustomize.py").is_file(), "the runner installed the watch"
+
+
+def test_without_the_cache_variable_a_test_builds_cold_even_when_the_store_holds_its_kernels(rig) -> None:
+    first, _, first_run = rig.run("first", _arm(rig))
+    rig.publish(first_run, first)
+    second, status, second_run = rig.run("second", _arm(rig), cache=False)
+
+    assert rig.grid.triton_found == [False], f"{JIT_CACHE_ENV} unset: Triton compiled the kernel itself"
+    assert BUILD_LOG in (second_run / "out" / "files" / "variant_0" / "server.log").read_text(encoding="utf-8")
+    assert second.jit_cache is None and status["message"] == "", "no cache, no note: a cold build is not a failure"
