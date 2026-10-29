@@ -47,7 +47,8 @@ from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import (
 )
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
-from hyperloom.orchestrator.phases.kernel import GeakRunnerFacts, KernelPhase
+from hyperloom.orchestrator.phases.kernel import KernelPhase
+from hyperloom.orchestrator.phases.kernel_geak_promotion import GeakRunnerFacts
 
 
 @pytest.fixture(autouse=True)

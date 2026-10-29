@@ -290,7 +290,7 @@ export_virtualenv_for_python() {
 # packages (_rocm_sdk_core, _rocm_sdk_libraries, _rocm_sdk_devel; which ones
 # are installed depends on the wheel's build profile), with some libraries
 # nested under subdirs the dynamic loader does not search by default. Mirrors
-# _rocm_sdk_wheel_lib_dirs() in cli/preflight.py, which applies this at
+# _rocm_sdk_wheel_lib_dirs() in cli/preflight_env.py, which applies this at
 # actual launch; done here too so this check does not false-negative on a
 # stack that will resolve correctly at runtime. No-ops (prints nothing) on a
 # standard /opt/rocm image, where none of these packages exist.

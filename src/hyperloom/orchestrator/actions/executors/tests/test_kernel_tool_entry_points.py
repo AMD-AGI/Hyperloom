@@ -11,11 +11,11 @@ import importlib.util
 import pytest
 
 from hyperloom.orchestrator.actions.executors import trace_analyze
-from hyperloom.orchestrator.phases import kernel as kernel_phase
+from hyperloom.orchestrator.phases import kernel_geak_dispatch
 
 _TOOL_MODULES = (
     trace_analyze._TRACELENS_ANALYSIS_MODULE,
-    kernel_phase._GEAK_RUNNER_MODULE,
+    kernel_geak_dispatch._GEAK_RUNNER_MODULE,
 )
 
 

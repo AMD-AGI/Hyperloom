@@ -244,20 +244,54 @@ _AGENTX_LOG_RELPATH: str = "aiperf_artifacts/logs/aiperf.log"
 _WARM_REUSE_PROBE_AFTER_SEC: float = 30.0
 
 
+# The operator's two grants. They are the operator's to set, read from the process env and
+# validated there once by preflight, so nothing re-reads them from an env a variant composed.
+BENCHMARK_TIMEOUT_ENV = "INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC"
+BENCHMARK_SILENCE_TIMEOUT_ENV = "INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC"
+
+
+def default_benchmark_timeout_sec(env: Mapping[str, str] | None = None) -> float:
+    """The hard cap the workload this env names needs, before any operator override.
+
+    A grant has to bound the work the invocation was composed to do, so an
+    agentic run's cap is sized to its own workload: an MLPerf run works through a
+    fixed trajectory count rather than a fixed window, and a canonical run warms
+    up one set of requests per lane before it opens its window, so both grow with
+    a size the caller pinned. The stock default reaped a healthy 150-trajectory
+    baseline at 38%, and reaped a canonical CONC 20 rung 1.3s after its profiling
+    phase completed.
+
+    Sizing reads only workload pins -- the backend, the flow, ``CONC`` -- but it
+    reads them as the run will: a pin it cannot parse raises
+    :class:`~hyperloom.common.env.EnvValueError` here rather than sizing the
+    grant for a workload the round will refuse to start.
+    """
+    from hyperloom.common.agentx_workload import (
+        canonical_benchmark_timeout_sec,
+        is_canonical_agentx,
+        is_mlperf_backend,
+        mlperf_benchmark_timeout_sec,
+    )
+
+    source = os.environ if env is None else env
+    stock = 7800.0
+    if is_mlperf_backend(source):
+        return max(stock, mlperf_benchmark_timeout_sec(source))
+    if is_canonical_agentx(source):
+        return max(stock, canonical_benchmark_timeout_sec(source))
+    return stock
+
+
 def resolve_benchmark_timeouts(env: Mapping[str, str] | None = None) -> tuple[float, float]:
     """Resolve the invocation's silence and hard caps, rejecting invalid overrides.
 
-    An MLPerf agentic run works through a fixed trajectory count rather than a
-    fixed window, so its default hard cap is sized to that count; the stock
-    default reaped a healthy 150-trajectory baseline at 38%. An explicit
-    ``INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC`` still wins.
+    The defaults are what the workload needs; an explicit
+    ``INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC`` still wins. Both names are the
+    operator's, so ``env`` has to be an env the operator set: preflight validates
+    the process env once and this rejects what it cannot parse. A per-variant env
+    is sized with ``default_benchmark_timeout_sec`` instead.
     """
-    from hyperloom.common.agentx_workload import is_mlperf_backend, mlperf_benchmark_timeout_sec
-
     source = os.environ if env is None else env
-    hard_default = 7800.0
-    if is_mlperf_backend(source):
-        hard_default = max(hard_default, mlperf_benchmark_timeout_sec(source))
 
     def positive(name: str, default: float) -> float:
         raw = source.get(name, str(default))
@@ -270,8 +304,8 @@ def resolve_benchmark_timeouts(env: Mapping[str, str] | None = None) -> tuple[fl
         return value
 
     return (
-        positive("INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC", 600.0),
-        positive("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", hard_default),
+        positive(BENCHMARK_SILENCE_TIMEOUT_ENV, 600.0),
+        positive(BENCHMARK_TIMEOUT_ENV, default_benchmark_timeout_sec(source)),
     )
 
 
@@ -1094,6 +1128,8 @@ def _communicate_with_watchdog(
 __all__ = [
     "AGENTX_PREFLIGHT_ERROR_CLASS",
     "AGENTX_PREFLIGHT_RETURNCODE",
+    "BENCHMARK_SILENCE_TIMEOUT_ENV",
+    "BENCHMARK_TIMEOUT_ENV",
     "COOPERATIVE_REAP_BUDGET_SEC",
     "DETOKENIZER_STALL_RETURNCODE",
     "EVAL_PROBE_UNPATCHABLE_RETURNCODE",
@@ -1103,6 +1139,7 @@ __all__ = [
     "SESSION_TIME_EXHAUSTED_RETURNCODE",
     "STOP_GATE_POLL_SECONDS",
     "clear_server_ready_stamp",
+    "default_benchmark_timeout_sec",
     "kill_my_spawned_server",
     "post_ready_runtime_sec",
     "resolve_benchmark_timeouts",

@@ -10,7 +10,12 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+import yaml
+
+from hyperloom.common.benchmark_config import is_magpie_agentx
+
 from ._accuracy_gate import materialized_run_eval_disabled
+from ._subprocess_kill import BENCHMARK_TIMEOUT_ENV, default_benchmark_timeout_sec, resolve_benchmark_timeouts
 
 
 @dataclass(frozen=True)
@@ -19,6 +24,39 @@ class PreparationFailure:
 
     returncode: int
     error: str
+
+
+def composed_benchmark_timeout_sec(config_path: Path) -> float:
+    """The hard cap the rounds of one materialized config are granted, sized to the env that config launches with.
+
+    The workload a round has to get through is named by the composed env, not by the
+    variant spec: the pin that sizes it -- a sweep's ``CONC``, an agentic flow -- is as
+    often inherited from the base YAML or from the recipe's base layer as it is set by
+    the variant, and a variant may equally clear one the base pinned. Sizing the grant
+    from the variant's own deltas alone would grant the time some other, usually
+    smaller, run needs, so it is read back off the config the round is launched from.
+
+    Only the size comes from that env. The hard cap's override is the operator's grant,
+    read and validated once against the process env; a config's value for that name is
+    the workload's own and is never parsed as a grant here. A round whose config clears
+    the override runs on the size its workload needs. A config that names a workload pin
+    this cannot read raises, as launching that round would: the caller owns the blast
+    radius of one unusable config, and the grid runner ends that variant on it.
+    """
+    bench = (yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}).get("benchmark") or {}
+    envs = dict(os.environ)
+    envs.update({str(k): str(v) for k, v in (bench.get("envs") or {}).items()})
+    if is_magpie_agentx(bench):
+        # AgentX keeps the variant's deltas in its launch overrides and applies them over the
+        # inherited env when it starts; the same order here, so the cap is sized to the env the
+        # round runs under rather than to the one it inherited.
+        launch = (bench.get("agentx") or {}).get("launch_overrides") or {}
+        for name in launch.get("unset_env") or []:
+            envs.pop(str(name), None)
+        envs.update({str(k): str(v) for k, v in (launch.get("env") or {}).items()})
+    if BENCHMARK_TIMEOUT_ENV in envs and BENCHMARK_TIMEOUT_ENV in os.environ:
+        return resolve_benchmark_timeouts()[1]
+    return default_benchmark_timeout_sec(envs)
 
 
 def prepare_benchmark_runtime(config_path: Path, env: dict[str, str]) -> PreparationFailure | None:
