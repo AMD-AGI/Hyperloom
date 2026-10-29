@@ -10,7 +10,7 @@ import json
 import pytest
 
 from hyperloom.common.env import EnvValueError
-from kernelforge.gemm_tune import cli
+from kernelforge.gemm_tune import pipeline as cli
 
 _MISS = (
     "(EngineCore pid=52995) [aiter] shape is M:{m}, N:6144, K:4096 "

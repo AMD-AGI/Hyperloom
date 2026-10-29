@@ -5,7 +5,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""The one routable/skipped splitter shared by the compute and bypass paths."""
+"""The routable/skipped splitter for hot-kernel candidates."""
 
 from __future__ import annotations
 
@@ -17,12 +17,7 @@ def partition_kernels(
     hot_kernels: list[dict[str, Any]],
     is_routable: Callable[[dict[str, Any]], bool],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Split a hot-kernel list into ``(routable, skipped)`` one way, everywhere.
-
-    The two callers pass different predicates -- compute's coarse
-    ``reusable_native_kernel`` reusability and bypass's stricter routable gate --
-    but the partition itself is one rule, so both import it here.
-    """
+    """Split a hot-kernel list into ``(routable, skipped)`` by ``is_routable``."""
     routable: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     for row in hot_kernels:

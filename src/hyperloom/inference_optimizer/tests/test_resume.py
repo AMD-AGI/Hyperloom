@@ -38,10 +38,7 @@ async def test_fresh_session_is_not_resume(session_dir):
     c = Coordinator(session_dir, backends=_backends_full())
     try:
         info = c.writeback.resumed_from
-        assert info["is_resume"] is False
-        assert info["event_count"] == 0
-        assert info["state_json_present"] is False
-        assert info["rebuilt"] is False
+        assert info == {"is_resume": False, "rebuilt": False}
     finally:
         await c.stop()
 
@@ -52,7 +49,6 @@ async def test_existing_state_json_triggers_resume(session_dir):
     c = Coordinator(session_dir, backends=_backends_full())
     try:
         assert c.writeback.resumed_from["is_resume"] is True
-        assert c.writeback.resumed_from["state_json_present"] is True
     finally:
         await c.stop()
 
@@ -151,7 +147,6 @@ async def test_existing_events_triggers_resume(session_dir):
     c2 = Coordinator(session_dir, backends=_backends_full())
     try:
         assert c2.writeback.resumed_from["is_resume"] is True
-        assert c2.writeback.resumed_from["event_count"] >= 1
     finally:
         await c2.stop()
 
@@ -183,9 +178,8 @@ async def test_replay_rebuilds_undecided_proposals(session_dir):
 
     c2 = Coordinator(session_dir, backends=_backends_full())
     try:
-        stats = await c2.writeback.replay_for_resume()
-        assert stats["pending_restored"] == 1
-        assert original_id in c2.state.pending_proposals
+        await c2.writeback.replay_for_resume()
+        assert list(c2.state.pending_proposals) == [original_id]
         restored = c2.state.pending_proposals[original_id]
         assert restored.action_name == "baseline"
         assert restored.from_agent == "orchestration"
@@ -218,8 +212,7 @@ async def test_replay_skips_approved_proposals(session_dir):
 
     c2 = Coordinator(session_dir, backends=_backends_full())
     try:
-        stats = await c2.writeback.replay_for_resume()
-        assert stats["pending_restored"] == 0
+        await c2.writeback.replay_for_resume()
         assert c2.state.pending_proposals == {}
     finally:
         await c2.stop()
@@ -264,9 +257,8 @@ async def test_replay_skips_rejected_proposals(session_dir):
 
     c2 = Coordinator(session_dir, backends=_backends_full())
     try:
-        stats = await c2.writeback.replay_for_resume()
-        assert stats["pending_restored"] == 0
-        assert stats["verdicts_seen"] >= 1
+        await c2.writeback.replay_for_resume()
+        assert c2.state.pending_proposals == {}
     finally:
         await c2.stop()
 
@@ -331,9 +323,8 @@ async def test_replay_mixed_pending_and_decided(session_dir):
 
     c2 = Coordinator(session_dir, backends=_backends_full())
     try:
-        stats = await c2.writeback.replay_for_resume()
-        assert stats["pending_restored"] == 1
-        restored = next(iter(c2.state.pending_proposals.values()))
+        await c2.writeback.replay_for_resume()
+        [restored] = c2.state.pending_proposals.values()
         assert restored.action_name == "explore"
     finally:
         await c2.stop()

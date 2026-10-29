@@ -15,6 +15,7 @@ from typing import Any, NamedTuple
 from hyperloom.common.checkpoint_quant import WeightDeclaration, weight_declarations
 from hyperloom.common.gpu_identity import AMD_GPU_BOARDS
 from hyperloom.common.model_paths import resolve_local_model_dir
+from hyperloom.inference_optimizer import framework_registry
 from hyperloom.inference_optimizer.grid_server_args import server_arg_value
 from hyperloom.inference_optimizer.model_config_utils import load_model_config_dict, _merge_config_scopes
 
@@ -781,17 +782,14 @@ def _activation_kv_dtype_bytes(meta: ModelMeta) -> float:
 
 def _read_diffusion_num_steps(state: Any) -> int:
     """Read the denoising step count from the baseline yaml."""
-    envs = _benchmark_envs(_read_baseline_yaml_benchmark(state))
-    return _env_int(envs, "XDIT_NUM_STEPS") or _env_int(envs, "CUSTOM_NUM_STEPS")
+    return _env_int(_benchmark_envs(_read_baseline_yaml_benchmark(state)), "XDIT_NUM_STEPS")
 
 
 def _read_diffusion_resolution(state: Any) -> tuple[int, int]:
     """Read the image/frame resolution from the baseline yaml."""
     try:
         envs = _benchmark_envs(_read_baseline_yaml_benchmark(state))
-        height = _env_int(envs, "XDIT_HEIGHT") or _env_int(envs, "CUSTOM_HEIGHT")
-        width = _env_int(envs, "XDIT_WIDTH") or _env_int(envs, "CUSTOM_WIDTH")
-        return height, width
+        return _env_int(envs, "XDIT_HEIGHT"), _env_int(envs, "XDIT_WIDTH")
     except (AttributeError, TypeError, ValueError):
         return 0, 0
 
@@ -967,11 +965,13 @@ def compute_roofline_breakdown_from_state(
     *,
     arm: str | None = None,
 ) -> RooflineBreakdown:
-    """Primary decode ceiling + T_mem/T_cmp side projections."""
+    """The run's ceiling: img/s for xDiT, none for other scriptable workloads, else the decode ceiling + T_mem/T_cmp sides."""
     runtime = resolve_runtime_workload(state, arm=arm)
-    # Diffusion (xDiT) uses a distinct images/sec ceiling.
+    # Diffusion (xDiT) uses a distinct images/sec ceiling; other scriptable workloads have none.
     if (runtime.framework or "").strip().lower() == "xdit":
         return _compute_diffusion_breakdown_from_state(state, runtime)
+    if framework_registry.is_scriptable(runtime.framework):
+        return _EMPTY_BREAKDOWN
     meta = load_model_meta(
         runtime.model_path,
         precision_hint=runtime.precision,

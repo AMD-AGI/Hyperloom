@@ -415,9 +415,10 @@ omit = [
     "src/kernelforge/knowledge/kb_store/remote_client.py",
     # CLI entry points (argument plumbing; exercised via the CLIs themselves).
     "src/kernelforge/cli/*",
-    "src/kernelforge/gemm_tune/cli.py",
-    "src/kernelforge/fusion/command.py",
-    # The forge-fuse stages command.py drives.
+    # The gemm-tune and forge-fuse pipelines and the stages they drive: agent sessions,
+    # tuner subprocesses and serving runs end to end.
+    "src/kernelforge/gemm_tune/pipeline.py",
+    "src/kernelforge/fusion/pipeline.py",
     "src/kernelforge/fusion/agent_selection.py",
     "src/kernelforge/fusion/compile_pass_claim.py",
     "src/kernelforge/fusion/harness_authoring.py",
@@ -493,13 +494,12 @@ total_shards = 6
 
 # White-box code-metrics gate: ``scripts/code_metrics.py``, run by
 # ``.github/workflows/code-metrics.yml``. Each number below carries its reason.
-# Units already over a threshold are recorded in ``baseline`` (one line each) and
-# may only go down; a file is judged only when a change touches it. CI refuses a
-# change that loosens anything in this table relative to the base branch: a
-# raised limit, a new ``exclude`` entry, a dropped root, a raised duplication,
-# dead-code or warning parameter.
+# Each unit over a threshold in a file a change touches is compared with the same
+# unit at the merge base, measured in the same run; it may not be new or worse. CI
+# refuses a change that loosens anything in this table relative to the base
+# branch: a raised limit, a new ``exclude`` entry, a dropped root, a raised
+# duplication, dead-code or warning parameter.
 [tool.hyperloom.code_metrics]
-baseline = "scripts/code_metrics_baseline.txt"
 # Production Python: all of ``src`` (so a new package is in scope by default) and
 # ``scripts``. Plain repository paths only; pathspec magic and globs are refused.
 # Files under a ``tests/`` directory are exempt from every dimension but

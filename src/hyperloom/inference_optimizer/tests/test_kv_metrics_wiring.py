@@ -149,9 +149,11 @@ def test_scrape_interval_is_enforced_on_the_monotonic_clock():
 
 
 def test_unknown_phase_is_ignored_rather_than_raising():
-    rec = KvMetricsRecorder(poller=_StubPoller([]), min_interval_sec=0.0)
+    rec = KvMetricsRecorder(poller=_StubPoller([_sample()]), min_interval_sec=0.0)
     rec.note_phase("nonsense", 1.0)
-    assert rec.phase == "boot"
+    rec.tick(2.0)
+    assert rec.rows()[0]["phase"] == "boot"
+    assert rec.summary()["phase_marks"] == []
 
 
 def test_capacity_is_latched_from_the_first_reading_that_has_it():

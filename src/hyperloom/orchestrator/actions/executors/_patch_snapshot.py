@@ -825,15 +825,8 @@ def _restore_snapshot_row(repo: str, row: dict[str, Any]) -> str:
     return ""
 
 
-def _restore_patch_snapshot(manifest: Any) -> dict[str, Any]:
+def _restore_patch_snapshot(manifest: dict[str, Any]) -> dict[str, Any]:
     """Restore exact touched paths/index entries; never reset unrelated work."""
-    if isinstance(manifest, (str, Path)):
-        try:
-            manifest = json.loads(Path(manifest).read_text(encoding="utf-8"))
-        except (OSError, ValueError, TypeError) as exc:
-            return {"ok": False, "errors": [f"manifest_read:{exc}"]}
-    if not isinstance(manifest, dict):
-        return {"ok": False, "errors": ["missing_manifest"]}
     repo = str(manifest.get("repo_path") or "")
     errors: list[str] = []
     for row in manifest.get("paths") or []:

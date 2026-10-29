@@ -217,9 +217,7 @@ CONTEXT_TOOL_SPECS: tuple[tuple[str, str, dict[str, Any], str], ...] = (
     ),
     (
         "show_analysis_md",
-        "Return the latest TraceLens analysis.md snapshot (executive "
-        "summary, top operations with kernel_ids, recommendations, "
-        "priority markers).",
+        "Return the latest TraceLens report snapshot (analysis.md, or analysis.json on the non-llm route).",
         _NO_ARGS_SCHEMA,
         "analysis_md",
     ),

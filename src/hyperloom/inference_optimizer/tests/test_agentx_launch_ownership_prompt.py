@@ -53,7 +53,6 @@ def _orchestration_prompt(benchmark_mode: str, backend: str) -> str:
 
 def _specialist_prompt(domain: str, benchmark_mode: str, backend: str) -> str:
     inp = SpecialistPromptInputs(
-        task_id="t",
         domain=get_domain(domain),
         benchmark_mode=benchmark_mode,
         agentx_backend=backend,

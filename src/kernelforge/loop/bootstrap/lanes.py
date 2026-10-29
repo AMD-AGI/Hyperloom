@@ -9,9 +9,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterable
 
-import click
-
 from kernelforge.config import Config
+from kernelforge.loop.bootstrap.errors import ForgeLoopError
 
 if TYPE_CHECKING:
     from kernelforge.orchestrator.agent import ImplementerSetup
@@ -124,7 +123,7 @@ def _require_lane_provider_capabilities(provider: str, lanes: int) -> None:
     ]
     if not missing:
         return
-    raise click.ClickException(
+    raise ForgeLoopError(
         f"--lanes {lanes} needs guarantees that agent provider {provider!r} "
         "does not declare: " + "; ".join(missing) + ". Re-run with --lanes 1, "
         "or select a provider that declares them."

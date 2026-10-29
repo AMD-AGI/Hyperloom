@@ -139,8 +139,6 @@
       "target_analysis"
     ],
     "ENABLEMENT": [
-      "integrate_patch",
-      "specialist",
       "target_analysis"
     ],
     "FRAMEWORK_AGENT": [
@@ -167,7 +165,9 @@
   ],
   "coordinator_reserved_actions": {
     "ENABLEMENT": [
-      "baseline"
+      "baseline",
+      "integrate_patch",
+      "specialist"
     ]
   },
   "kernel_lane_task_kinds": [

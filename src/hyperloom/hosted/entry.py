@@ -90,7 +90,7 @@ def main(argv: list[str] | None = None) -> int:
     except Refused as exc:
         print(f"[hosted] refused: {exc}", file=sys.stderr)
         if state_dir is not None:
-            _write_exit(state_dir, final=True, returncode=RETURNCODE_REFUSED, error=str(exc))
+            write_exit(state_dir, final=True, returncode=RETURNCODE_REFUSED, error=str(exc))
         return RETURNCODE_REFUSED
 
 
@@ -122,7 +122,7 @@ def _run() -> int:
     _announce_grant(info)
     if stop_request_path(session_dir).is_file():
         print("[hosted] a stop was requested before this leg started; ending the run", flush=True)
-        _write_exit(info.state_dir, final=True, returncode=0, stop_reason=STOP_REQUEST_REASON)
+        write_exit(info.state_dir, final=True, returncode=0, stop_reason=STOP_REQUEST_REASON)
         return 0
     _put_interpreter_first_on_path()
     _run_installer(info.state_dir)
@@ -373,7 +373,7 @@ def _optimize(argv: list[str], state_dir: Path, session_dir: Path) -> int:
         returncode = _returncode_of(exc)
     reason = _stop_reason(session_dir)
     final = reason != SUPERVISOR_RESTART_REASON  # a watchdog restart ends a leg, not the run
-    _write_exit(state_dir, final=final, returncode=returncode, stop_reason=reason)
+    write_exit(state_dir, final=final, returncode=returncode, stop_reason=reason)
     _announce("hyperloom.campaign_finished" if final else "hyperloom.campaign_leg_ended", {"returncode": returncode})
     return returncode
 
@@ -396,5 +396,6 @@ def _stop_reason(session_dir: Path) -> str | None:
     return reason if isinstance(reason, str) and reason else None
 
 
-def _write_exit(state_dir: Path, *, final: bool, returncode: int, **details: object) -> None:
+def write_exit(state_dir: Path, *, final: bool, returncode: int, **details: object) -> None:
+    """Durably write ``exit.json`` in *state_dir*: ``final`` tells the host whether to start the run again."""
     atomic_write_json(state_dir / EXIT_FILE, {"final": final, "returncode": returncode, **details}, options=_DURABLE)

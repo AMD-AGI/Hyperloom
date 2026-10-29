@@ -25,7 +25,6 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-import click
 import pytest
 
 import kernelforge.loop.insession_gate as gate_module
@@ -37,7 +36,8 @@ from kernelforge.agent_backends.base import (
     AgentRunSpec,
 )
 from kernelforge.agent_backends.registry import AgentProvider, register_agent_provider
-from kernelforge.cli import lanes as cli_lanes
+from kernelforge.loop.bootstrap import lanes as cli_lanes
+from kernelforge.loop.bootstrap.errors import ForgeLoopError
 from kernelforge.config import Config
 from kernelforge.loop import fanout
 from kernelforge.evaluation.scoring import GateScoring
@@ -542,7 +542,7 @@ def test_lanes_are_refused_on_a_provider_that_ignores_the_session_environment():
     """
     _register_provider("sharedenvcli", stop_hooks=True)
 
-    with pytest.raises(click.ClickException) as refusal:
+    with pytest.raises(ForgeLoopError) as refusal:
         cli_lanes._require_lane_provider_capabilities("sharedenvcli", 2)
 
     message = str(refusal.value)
@@ -560,7 +560,7 @@ def test_a_lane_refusal_names_every_missing_guarantee(capsys):
     """
     _register_provider("plaincli")
 
-    with pytest.raises(click.ClickException) as refusal:
+    with pytest.raises(ForgeLoopError) as refusal:
         cli_lanes._require_lane_provider_capabilities("plaincli", 4)
 
     message = str(refusal.value)
@@ -580,7 +580,7 @@ def test_lanes_are_refused_rather_than_quietly_reduced():
     """
     _register_provider("plaincli")
 
-    with pytest.raises(click.ClickException):
+    with pytest.raises(ForgeLoopError):
         cli_lanes._require_lane_provider_capabilities("plaincli", 8)
 
 

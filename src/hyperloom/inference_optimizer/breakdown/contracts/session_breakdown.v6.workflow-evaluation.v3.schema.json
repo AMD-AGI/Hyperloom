@@ -36,7 +36,7 @@
               "const": "hyperloom.workflow_evaluation.v3"
             },
             "contract_digest": {
-              "const": "99096f4d1f172515b3992558971830bca45ee299baac7e5b54fbdb8086840618"
+              "const": "5fa3cef20ed8c141e92df816c132fcb0f44a7b6d578a0883213d5b8554fefad4"
             },
             "run_flags": {
               "type": "object",
@@ -110,8 +110,6 @@
                   "target_analysis"
                 ],
                 "ENABLEMENT": [
-                  "integrate_patch",
-                  "specialist",
                   "target_analysis"
                 ],
                 "FRAMEWORK_AGENT": [
@@ -142,7 +140,9 @@
             "coordinator_reserved_actions": {
               "const": {
                 "ENABLEMENT": [
-                  "baseline"
+                  "baseline",
+                  "integrate_patch",
+                  "specialist"
                 ]
               }
             },

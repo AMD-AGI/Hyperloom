@@ -312,27 +312,6 @@ def _kill_pid_file(pid_file: Path, grace_sec: int, summary: dict[str, list]) -> 
     return pid
 
 
-def _clean_legacy_rayjoin(pid_dir: Path) -> None:
-    """Terminate and remove the legacy rayjoin PID files.
-
-    A file that cannot be read is left in place: it may still name a live
-    process, and removing it would lose the only handle on one.
-    """
-    for pid_file in sorted(pid_dir.glob("rank_*_rayjoin.pid")):
-        try:
-            pid_file.read_text(encoding="utf-8")
-        except OSError:
-            continue
-        pid = _read_pid(pid_file)
-        if pid is not None:
-            try:
-                os.killpg(os.getpgid(pid), signal.SIGTERM)
-            except (ProcessLookupError, PermissionError):
-                # Process already exited; nothing to signal.
-                pass
-        _unlink_quietly(pid_file)
-
-
 def _wait_gpu_reclaim(
     summary: dict[str, list],
     *,
@@ -405,7 +384,6 @@ def _kill_remote(
     gpu_footprint_mb = _gpu_used_mb_for_pgids(pre_pgids)
 
     killed_pids = [pid for pid in (_kill_pid_file(f, grace_sec, summary) for f in pid_files) if pid is not None]
-    _clean_legacy_rayjoin(pid_dir_path)
 
     # Block until the signalled processes truly exit, then until the rendezvous/serving ports drain.
     if killed_pids:
@@ -440,45 +418,14 @@ def main() -> int:
         "--pid-dir", required=True, help="dir containing rank_*.pid files (same value passed to launch_multinode)"
     )
     p.add_argument("--grace-sec", type=int, default=5, help="seconds between SIGTERM and SIGKILL (default 5)")
-    p.add_argument(
-        "--drain-ports",
-        default="",
-        help="comma-separated ports to wait free after kill (default: $RAYJOB_DIST_INIT_PORT|29500,8888,30000,30001)",
-    )
-    p.add_argument(
-        "--death-timeout", type=float, default=30.0, help="max seconds to wait for pids to exit (default 30)"
-    )
-    p.add_argument(
-        "--port-timeout", type=float, default=60.0, help="max seconds to wait for ports to drain (default 60)"
-    )
-    p.add_argument(
-        "--gpu-free-threshold-mb",
-        type=float,
-        default=2048.0,
-        help="per-GPU used-VRAM ceiling (MiB) treated as free (default 2048)",
-    )
-    p.add_argument(
-        "--gpu-free-timeout",
-        type=float,
-        default=120.0,
-        help="max seconds to wait for GPU VRAM reclaim (default 120)",
-    )
     args = p.parse_args()
 
-    if args.drain_ports.strip():
-        drain_ports = [int(x) for x in args.drain_ports.split(",") if x.strip().isdigit()]
-    else:
-        dist_port = int(os.environ.get("RAYJOB_DIST_INIT_PORT", _DEFAULT_DIST_INIT_PORT) or _DEFAULT_DIST_INIT_PORT)
-        # dist-init/TCPStore + aggregated HTTP + PD prefill/decode HTTP.
-        drain_ports = sorted({dist_port, 8888, 30000, 30001})
+    dist_port = int(os.environ.get("RAYJOB_DIST_INIT_PORT", _DEFAULT_DIST_INIT_PORT) or _DEFAULT_DIST_INIT_PORT)
+    # dist-init/TCPStore + aggregated HTTP + PD prefill/decode HTTP.
+    drain_ports = sorted({dist_port, 8888, 30000, 30001})
+    waits = KillWaits()
 
-    _log(
-        f"pid_dir={args.pid_dir} grace={args.grace_sec}s "
-        f"drain_ports={drain_ports} death_timeout={args.death_timeout:.0f}s "
-        f"port_timeout={args.port_timeout:.0f}s "
-        f"gpu_free_threshold_mb={args.gpu_free_threshold_mb:.0f} "
-        f"gpu_free_timeout={args.gpu_free_timeout:.0f}s"
-    )
+    _log(f"pid_dir={args.pid_dir} grace={args.grace_sec}s drain_ports={drain_ports} {waits}")
 
     ray.init(ignore_reinit_error=True, log_to_driver=True)
     nodes = [n for n in ray.nodes() if n.get("Alive")]
@@ -497,14 +444,18 @@ def main() -> int:
             args.pid_dir,
             args.grace_sec,
             drain_ports,
-            KillWaits(args.death_timeout, args.port_timeout, args.gpu_free_threshold_mb, args.gpu_free_timeout),
+            waits,
         )
         refs.append((node_id[:16], ref))
 
     # Actor upper bound: per-pid grace (budgeted for up to _GRACE_PID_BUDGET pid files/node) + death-wait + port-wait
     # + gpu-wait + margin.
     get_timeout = int(
-        args.grace_sec * _GRACE_PID_BUDGET + args.death_timeout + args.port_timeout + args.gpu_free_timeout + 30
+        args.grace_sec * _GRACE_PID_BUDGET
+        + waits.death_timeout_s
+        + waits.port_timeout_s
+        + waits.gpu_free_timeout_s
+        + 30
     )
     out: dict[str, dict] = {}
     for short_id, ref in refs:

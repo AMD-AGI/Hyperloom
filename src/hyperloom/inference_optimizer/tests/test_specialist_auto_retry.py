@@ -59,7 +59,6 @@ def test_classify_is_case_and_whitespace_insensitive():
 # Auto-retry notice block (prompt builder)
 def _freeform_inputs(**kwargs) -> SpecialistPromptInputs:
     base = dict(
-        task_id="spec-1",
         domain=FREEFORM_DOMAIN,
         scope="freeform",
         task_description="Read the scheduler and find why prefill blocks decode.",

@@ -54,7 +54,6 @@ def registered_fake_credential(monkeypatch):
 def test_detection_sites_recognize_a_newly_registered_form(registered_fake_credential):
     """Adding a form to the tuple must be all it takes for detection to follow."""
     assert lc.has_anthropic_credential() is True
-    assert cr._has_explicit_anthropic_key() is True
     # The endpoint resolver keys off the same predicate.
     anthropic_url, _ = cr._resolve_llm_endpoints()
     assert anthropic_url == "https://api.anthropic.com"

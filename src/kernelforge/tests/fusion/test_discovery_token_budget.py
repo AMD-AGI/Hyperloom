@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import inspect
 
-from kernelforge.fusion import command, discover
+from kernelforge.fusion import discover, discovery_stage
 
 
 def test_discovery_requires_an_injected_llm() -> None:
@@ -21,7 +21,7 @@ def test_cli_injects_the_registered_agent_backend() -> None:
     None of them may fall back to a client of its own: the selected backend is
     the one whose model, sandbox mode and prompt log the run reports.
     """
-    for discovery in (command._discover_anchored, command._discover_by_llm):
+    for discovery in (discovery_stage._discover_anchored, discovery_stage._discover_by_llm):
         source = inspect.getsource(discovery)
         assert "registered_agent_llm_fn" in source, discovery.__name__
         assert "llm_fn=registered_agent_llm_fn(" in source, discovery.__name__

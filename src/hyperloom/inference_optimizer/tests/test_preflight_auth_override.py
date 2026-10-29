@@ -45,7 +45,7 @@ def stub_install_steps(monkeypatch, tmp_path):
     monkeypatch.setenv("INFERENCEX_PATH", str(inferencex_dir))
     monkeypatch.setattr(cli_preflight.inferencex_checkout, "clone", lambda dest: str(inferencex_dir))
 
-    def _fake_which(name: str):
+    def _fake_which(name: str, **_kwargs):
         return f"/usr/bin/{name}"
 
     monkeypatch.setattr(cli_preflight.shutil, "which", _fake_which)
@@ -1187,7 +1187,7 @@ def test_ensure_python_sdks_installs_missing_claude_agent_sdk(monkeypatch, capsy
 
 # _ensure_ray
 def test_ensure_ray_skips_when_smoke_passes(monkeypatch, capsys):
-    """Ray/click smoke passes -> no pip install fires (probe uses the interpreter)."""
+    """Ray smoke passes -> no pip install fires (probe uses the interpreter)."""
     runner = _RecordingRun([_Completed(returncode=0)])
     monkeypatch.setattr(cli_preflight.subprocess, "run", runner)
 
@@ -1203,10 +1203,10 @@ def test_ensure_ray_skips_when_smoke_passes(monkeypatch, capsys):
 
 
 def test_ensure_ray_installs_when_smoke_fails(monkeypatch, capsys):
-    """When Ray/click smoke fails, pip install runs with the SAME interpreter."""
+    """When the Ray smoke fails, pip install runs with the SAME interpreter."""
     runner = _RecordingRun(
         [
-            _Completed(returncode=1, stderr="click version incompatible with Ray CLI: 8.4.2 >= 8.3.0"),
+            _Completed(returncode=1, stderr="ray start does not accept --resources"),
             _Completed(returncode=0),
             _Completed(returncode=0),
         ]
@@ -1221,9 +1221,11 @@ def test_ensure_ray_installs_when_smoke_fails(monkeypatch, capsys):
     assert install_call[1:4] == ["-m", "pip", "install"]
     assert "--break-system-packages" in install_call
     assert any(arg.startswith("ray[default]==") for arg in install_call)
-    assert "click<8.3.0" in install_call
+    # Only Ray is repaired: the CLI is certified by what it parses, so no click
+    # release is pinned or downgraded on the way.
+    assert not any("click" in arg for arg in install_call)
     captured = capsys.readouterr().out
-    assert "ray/click invalid" in captured
+    assert "ray unusable (ray start does not accept --resources)" in captured
     assert "ray installed OK" in captured
 
 

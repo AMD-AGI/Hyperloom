@@ -620,8 +620,7 @@ class GeakRevalidation(CoordinatorCollaborator):
         )
 
     async def validate_geak_via_geak_harness(self, *, reason: str) -> dict[str, Any]:
-        from hyperloom.common.perf_metric import is_agentx_mode
-        from ..actions.executors._workload_envs import agentx_enabled
+        from hyperloom.common.perf_metric import agentx_enabled, is_agentx_mode
 
         mode = str(self.shared_state.benchmark_mode or "").strip()
         agentx = is_agentx_mode(mode) if mode else agentx_enabled()
@@ -677,9 +676,6 @@ class GeakRevalidation(CoordinatorCollaborator):
                 isl_osl_configs=[f"{regime.isl}:{regime.osl}"],
                 variant_timeout_sec=env_int("SWEEP_VARIANT_TIMEOUT_SEC", default=2400),
                 repeats=3,
-                # Single-point validated replay pins the headline protocol (num_prompts
-                # etc.) so it is protocol-identical to the reported result.
-                pin_num_prompts=True,
                 # The axis the handoff sent GEAK, so the replay measures what GEAK accepted on.
                 metric_axis=geak_metric_axis(benchmark_mode=mode, grading=self.shared_state.grading or None),
             ),
@@ -779,9 +775,6 @@ class GeakRevalidation(CoordinatorCollaborator):
         )
         fallback_result: dict[str, Any]
         try:
-            # Routed via ``_coord`` so a test / caller that overrides
-            # ``coordinator._validate_geak_via_geak_harness`` still wins
-            # (bare-name delegation resolves it back onto this class).
             fallback_result = await self.validate_geak_via_geak_harness(reason="2b_inconclusive")
         except Exception as exc:  # isolation boundary: one GEAK candidate's harness fallback
             log.exception("geak 2a GEAK-harness fallback failed")

@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 import kernelforge.agent_backends.registry as registry
-from kernelforge.cli.relay import (
+from kernelforge.loop.bootstrap.relay import (
     SearchActorBuildContext,
     build_search_actor_pool,
     probe_agent_profiles,
@@ -191,7 +191,7 @@ class _Setup:
 
 
 def _capture_supervisor(monkeypatch) -> dict:
-    from kernelforge.cli import lanes
+    from kernelforge.loop.bootstrap import lanes
     from kernelforge.orchestrator import agent, orchestration, supervisor
 
     captured: dict = {}
@@ -241,7 +241,7 @@ def test_supervisor_backend_flag_is_honoured(monkeypatch, tmp_path, relay, super
 
 
 def test_executable_override_stays_with_the_primary_provider(tmp_path):
-    from kernelforge.cli.relay import config_for_profile
+    from kernelforge.loop.bootstrap.relay import config_for_profile
 
     config = Config(workspace=str(tmp_path), agent_backend="claude", agent_cli="/opt/claude")
     codex = AgentProfile("codex", "codex", "gpt-6-astra")
@@ -438,7 +438,7 @@ def test_switching_the_implementer_provider_drops_the_other_providers_cli_and_op
 
 
 def test_relay_summary_reports_whether_a_switch_is_possible():
-    from kernelforge.cli.relay import agent_relay_summary, relay_switch_possible
+    from kernelforge.loop.bootstrap.relay import agent_relay_summary, relay_switch_possible
     from kernelforge.loop.agent_relay import AgentAvailabilitySnapshot, ProfileAvailability
     from kernelforge.loop.run_state import RunState
 
@@ -473,7 +473,7 @@ def test_relay_summary_reports_whether_a_switch_is_possible():
     ids=["resumed_profile", "primary_down"],
 )
 def test_startup_report_says_why_the_session_is_not_on_the_primary(capsys, claude_up, line):
-    from kernelforge.cli.relay import _report_search_actors
+    from kernelforge.loop.bootstrap.relay import _report_search_actors
 
     pool = build_search_actor_pool(
         _relay_config("claude"),
@@ -488,7 +488,7 @@ def test_startup_report_says_why_the_session_is_not_on_the_primary(capsys, claud
 
 
 def test_startup_report_explains_a_session_without_relay_and_how_to_enable_it(capsys):
-    from kernelforge.cli.relay import _report_search_actors
+    from kernelforge.loop.bootstrap.relay import _report_search_actors
 
     pool = build_search_actor_pool(
         _relay_config("claude"),

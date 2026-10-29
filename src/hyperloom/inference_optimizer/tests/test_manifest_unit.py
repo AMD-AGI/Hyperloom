@@ -166,7 +166,7 @@ def test_build_manifest_with_args(monkeypatch):
 
 
 def test_build_manifest_shared_provenance_fields(monkeypatch):
-    """Schema v4 carries gfx/EP/graph-mode/server-args from the shared WP-0 provenance builder (kept in lockstep with the TraceShapeManifest)."""
+    """Schema v4 carries gfx/EP/graph-mode/server-args from the shared WP-0 provenance builder."""
     monkeypatch.setattr(mf, "_build_dependencies", dict)
     monkeypatch.setattr(
         mf,

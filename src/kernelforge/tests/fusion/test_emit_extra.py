@@ -83,7 +83,7 @@ def test_export_nongit_sets_repo_root(tmp_path):
 
 def test_snapshot_returns_empty_when_main_source_fails(tmp_path, monkeypatch):
     """#8: if the MAIN source snapshot fails, return "" so export does not treat the edited source as a brand-new file."""
-    from kernelforge.fusion import command as cli
+    from kernelforge.fusion import pipeline as cli
 
     repo, src, out = _nongit_pkg(tmp_path)
 

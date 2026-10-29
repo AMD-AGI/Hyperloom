@@ -6,10 +6,12 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, NamedTuple
 
 from hyperloom.common.env_safety import (
     BLOCKED_EXTERNAL_ENV_NAMES,
+    is_launch_provided_env_name,
     is_secret_shaped_env_name,
     valid_env_key,
 )
@@ -217,6 +219,104 @@ def switch_env(switches: list[dict[str, Any]], *, only: "set[str] | None" = None
     return {entry["switch"]: entry["value"] for entry in switches if wanted is None or entry["switch"] in wanted}
 
 
+# How a patch reads an environment variable: ``os.environ.get`` and
+# ``os.environ[...]``, plus any ``getenv`` call, which covers ``os.getenv``
+# and the C/C++ ``getenv``/``std::getenv`` a kernel-side rewrite uses.
+_ENV_READ_RE = re.compile(r"""(?:environ\s*(?:\.\s*get\s*\(|\[)|\bgetenv\s*\()\s*["']([A-Za-z_][A-Za-z0-9_]*)["']""")
+
+# Falsy defaults, which keep a name in the list. A read with any other literal
+# default -- a tuning value (``os.getenv("X", "/opt/rocm")``) or an on default
+# (``os.environ.get("X", "1") == "1"``, a rewrite shipped enabled) -- runs the
+# same whether or not the name is set, so it is not worth reporting at all.
+_OFF_DEFAULTS: frozenset[str] = frozenset({"", "0", "0.0", "false", "no", "off", "none", "null", "nullptr"})
+
+
+def _read_could_default_off(tail: str) -> bool:
+    """Whether a read whose argument list continues with ``tail`` has no default or a falsy one.
+
+    ``tail`` is the rest of the line after the name. This is a filter on the
+    literal text, not a finding about the patched path: an opt-out switch
+    (``if not os.environ.get("HL_DISABLE_NEW")``), a write
+    (``os.environ["X"] = "1"``) and a plain value read all look like this, and
+    only reading the surrounding code tells them apart.
+    """
+    rest = tail.lstrip()
+    if not rest.startswith(","):
+        return True
+    default = rest[1:].split(",")[0].split(")")[0].strip()
+    if not default:
+        return False
+    if len(default) >= 2 and default[0] in "\"'" and default[-1] == default[0]:
+        default = default[1:-1].strip()
+    return default.lower() in _OFF_DEFAULTS
+
+
+def _env_reads(text: str) -> set[str]:
+    """The env names ``text`` reads with no default or a falsy one."""
+    return {m.group(1).upper() for m in _ENV_READ_RE.finditer(text) if _read_could_default_off(text[m.end() :])}
+
+
+def _patch_env_reads(patch_text: str) -> tuple[set[str], set[str]]:
+    """Split the env reads a diff carries into the ones it adds and the ones already in the file.
+
+    A read on a context or a removed line belongs to the file as it stands, so
+    the patch did not introduce it and it says nothing about this round.
+    """
+    added: set[str] = set()
+    preexisting: set[str] = set()
+    for line in patch_text.splitlines():
+        if line.startswith(("+++", "---", "@@")):
+            continue
+        names = _env_reads(line[1:])
+        if not names:
+            continue
+        if line.startswith("+"):
+            added |= names
+        else:
+            preexisting |= names
+    return added, preexisting
+
+
+def _could_be_a_round_switch(name: str) -> bool:
+    """Whether ``name`` is one a round could set at all, by manifest or ``extra_envs``.
+
+    A name neither route may set — a credential, a key the benchmark owns, or
+    one the launch assigns per process — is read for what it holds, never as a
+    switch of the patch's own, so reporting it would only be noise.
+    """
+    return (
+        name not in FORBIDDEN_SWITCHES and not is_secret_shaped_env_name(name) and not is_launch_provided_env_name(name)
+    )
+
+
+def unarmed_env_reads(patch_texts: list[str], *, armed: "set[str] | frozenset[str] | None" = None) -> list[str]:
+    """Return the env names the patches ADD a read of that nothing in ``armed`` sets.
+
+    This is a lead, never a verdict. Scanning diff lines cannot tell whether a
+    read keeps the patched path off: an opt-out switch
+    (``if not os.getenv("HL_DISABLE_NEW")``) runs the change precisely while
+    the name is unset, and a write or a value read is no switch at all. The
+    names are worth reporting only beside a round that already measured as
+    though its change were absent, where one of them may be the reason.
+
+    Args:
+        patch_texts: The diff text of every patch the round submitted.
+        armed: Every env name the launch will set, manifest switches included.
+
+    Returns:
+        The unset names, sorted.
+    """
+    armed_names = {str(name).strip().upper() for name in (armed or ())}
+    added: set[str] = set()
+    preexisting: set[str] = set()
+    for text in patch_texts:
+        text_added, text_preexisting = _patch_env_reads(text)
+        added |= text_added
+        preexisting |= text_preexisting
+    unarmed = added - preexisting - armed_names
+    return sorted(name for name in unarmed if _could_be_a_round_switch(name))
+
+
 def dependency_closure(name: str, switches: list[dict[str, Any]]) -> set[str]:
     """Return every switch ``name`` transitively depends on, plus ``name``."""
     by_name = {entry["switch"]: entry for entry in switches}
@@ -371,4 +471,5 @@ __all__ = [
     "parse_manifest",
     "summarize",
     "switch_env",
+    "unarmed_env_reads",
 ]

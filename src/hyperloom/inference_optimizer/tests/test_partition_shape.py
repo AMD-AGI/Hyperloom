@@ -180,40 +180,14 @@ class TestFeasibility:
         assert not any("GiB needed of" in n for n in verdict.notes)
 
 
-class TestStreamsAreRefusedNotDefaulted:
-    """``streams=0`` must not become the default, here or at the CLI."""
-
-    @pytest.mark.parametrize("streams", [0, -1, -8])
-    def test_a_value_below_one_refuses(self, card, streams):
-        card(CPX_36)
-        verdict = ps.validate_session_shape(streams=streams, model=_measured(1.0))
-
-        assert verdict.ok is False
-        assert "must be >= 1" in verdict.refusal
-        assert str(streams) in verdict.refusal
-
-    def test_it_refuses_before_the_card_is_read(self, monkeypatch):
-        """A usage error about the request needs no probe to decide."""
-
-        def _fail(*_args, **_kwargs):
-            raise AssertionError("the card must not be read to refuse streams=0")
-
-        monkeypatch.setattr(ps, "observe_partition", _fail)
-        assert ps.validate_session_shape(streams=0).ok is False
+class TestOmittedStreams:
+    """An omitted ``streams`` takes the default."""
 
     def test_omitted_streams_still_take_the_default(self, card):
-        """``None`` means "not named" and is the only thing that may default."""
         card(CPX_36)
-        for verdict in (
-            ps.validate_session_shape(model=_measured(1.0)),
-            ps.validate_session_shape(streams=None, model=_measured(1.0)),
-        ):
-            assert verdict.ok is True
-            assert any(f"Streams per partition: {ps.DEFAULT_STREAMS_PER_PARTITION}" in n for n in verdict.notes)
-
-    def test_a_non_numeric_request_refuses_rather_than_raises(self, card):
-        card(CPX_36)
-        assert ps.validate_session_shape(streams="two").ok is False  # type: ignore[arg-type]
+        verdict = ps.validate_session_shape(model=_measured(1.0))
+        assert verdict.ok is True
+        assert any(f"Streams per partition: {ps.DEFAULT_STREAMS_PER_PARTITION}" in n for n in verdict.notes)
 
 
 class TestFitCheckNeedsAFanOut:

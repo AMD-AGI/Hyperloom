@@ -173,6 +173,60 @@ class KnowledgeConfig:
         )
 
 
+CEILING_ON = "on"
+CEILING_OFF = "off"
+
+
+@dataclass(frozen=True)
+class CeilingSwitch:
+    """Whether a run estimates the roofline ceiling (``on``/``off``)."""
+
+    roofline_ceiling: str
+
+    @property
+    def enabled(self) -> bool:
+        return self.roofline_ceiling == CEILING_ON
+
+
+@dataclass(frozen=True)
+class GpuOptions:
+    """The ROCm compilation architecture and the hardware SKU used in KB identities."""
+
+    gpu_target: str | None
+    gpu_type: str
+
+
+@dataclass(frozen=True)
+class AgentRuntimeOptions:
+    """Provider-neutral Agent runtime overrides a caller passes; ``None`` leaves a setting to ``Config.from_env``."""
+
+    model: str | None
+    agent_backend: str | None
+    agent_cli: str | None
+    agent_timeout_sec: int | None
+    agent_reasoning_effort: str | None
+    agent_sandbox_mode: str | None
+    agent_fallback_provider: str | None
+    agent_precheck: bool | None
+    agent_options: dict | None
+
+
+def agent_runtime_overrides(options: AgentRuntimeOptions) -> dict:
+    """The ``Config.from_env`` overrides ``options`` asks for."""
+    values = {
+        "agent_model": options.model,
+        "agent_backend": options.agent_backend,
+        "agent_cli": options.agent_cli,
+        "agent_timeout_sec": options.agent_timeout_sec,
+        "agent_reasoning_effort": options.agent_reasoning_effort,
+        "agent_sandbox_mode": options.agent_sandbox_mode,
+        "agent_fallback_provider": options.agent_fallback_provider,
+        "agent_precheck": options.agent_precheck,
+        "agent_options": options.agent_options,
+    }
+    return {key: value for key, value in values.items() if value is not None}
+
+
 @dataclass
 class Config:
     """Runtime configuration loaded from environment + optional overrides."""

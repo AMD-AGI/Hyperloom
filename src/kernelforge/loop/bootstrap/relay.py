@@ -14,7 +14,7 @@ from dataclasses import dataclass, replace
 from functools import partial
 from typing import Any
 
-from kernelforge.cli.lanes import LaneBinding
+from kernelforge.loop.bootstrap.lanes import LaneBinding
 from kernelforge.config import Config, resolve_agent_model
 from kernelforge.agent_backends.runtime import agent_runtime, agent_runtime_for
 from kernelforge.agent_backends.gateway import (
@@ -57,7 +57,7 @@ class SearchActorBuildContext:
 
     def build(self, profile: AgentProfile) -> SearchActorBundle:
         """Build and probe all profile-bound planning and implementation services."""
-        from kernelforge.cli.lanes import (
+        from kernelforge.loop.bootstrap.lanes import (
             _make_lane_agent_factory,
             _require_lane_provider_capabilities,
         )

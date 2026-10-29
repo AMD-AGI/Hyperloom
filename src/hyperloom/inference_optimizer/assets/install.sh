@@ -1015,7 +1015,7 @@ ensure_forge_gemm_tune() {
   # same lesson against a checkout instead of against a packaged subpackage.)
   local probe='
 import sys
-import kernelforge.gemm_tune.cli  # noqa: F401
+import kernelforge.gemm_tune.pipeline  # noqa: F401
 from kernelforge.cli import main
 sys.exit(0 if "gemm-tune" in getattr(main, "commands", {}) else 1)
 '

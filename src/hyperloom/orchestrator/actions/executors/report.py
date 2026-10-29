@@ -629,25 +629,12 @@ def _extract_executive_summary(analysis_md_path: str) -> str:
             end = i
             break
     if start is None:
-        return "(analysis.md does not contain a `## Executive Summary` block)"
+        return "(the report does not contain a `## Executive Summary` block)"
     block = "\n".join(lines[start:end]).strip()
     # Cap at ~2KB.
     if len(block) > 2048:
         block = block[:2045] + "..."
     return block
-
-
-_ROOFLINE_PEAK_NOTE = (
-    "_The **Theoretical peak** below is the decode "
-    "memory-roofline ceiling derived from the GPU's HBM "
-    "bandwidth and the model's weight + KV-cache traffic per "
-    "token (see `roofline_ceiling.compute_roofline_breakdown_from_state`). "
-    "It is an upper bound: real `output_throughput` always "
-    "stays under it because of comm overhead, kernel "
-    "efficiency < 100%, and KV-cache fragmentation. **Within "
-    "roofline %** = measured / peak; **Gap to roofline %** = "
-    "100 − Within."
-)
 
 
 def _snapshot_summary_lines(heading: str, snapshot: dict[str, Any]) -> list[str]:
@@ -691,8 +678,6 @@ def _format_roofline_comparison_section(cmp: dict[str, Any]) -> list[str]:
             "for the report._"
         )
         lines.append("")
-        lines.append(f"{_ROOFLINE_PEAK_NOTE}_")
-        lines.append("")
         lines.extend(format_roofline_metrics_table(cmp))
         return lines + _snapshot_summary_lines(f"### Snapshot #{base_id} — Executive Summary", baseline)
 
@@ -702,19 +687,6 @@ def _format_roofline_comparison_section(cmp: dict[str, Any]) -> list[str]:
         "snapshot was captured after a +10% gain watermark refresh "
         "(see `KernelPhase.maybe_enqueue_watermark_roofline`)."
     )
-    lines.append("")
-    # The ceiling is normally a session constant, but a runtime dtype / quantization change moves it — and then the
-    # two sides' Within % have different denominators, which the caveat has to say out loud.
-    anchor_note = (
-        "The ceiling is a session-level constant "
-        "(hardware + model + isl/osl don't change), so baseline and "
-        "latest are compared against the same anchor."
-        if cmp.get("ceilings_comparable", True)
-        else "The two snapshots model different ceilings (the runtime dtype / "
-        "quantization changed), so each Within % is measured against its own "
-        "anchor and the Δ column is withheld."
-    )
-    lines.append(f"{_ROOFLINE_PEAK_NOTE} {anchor_note}_")
     lines.append("")
     lines.extend(format_roofline_metrics_table(cmp))
     lines += _snapshot_summary_lines(f"### Baseline snapshot #{base_id}", baseline)
