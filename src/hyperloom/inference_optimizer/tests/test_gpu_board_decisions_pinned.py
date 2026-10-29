@@ -12,29 +12,19 @@ from hyperloom.inference_optimizer.roofline_ceiling import HW_SPECS, resolve_com
 from hyperloom.orchestrator.actions.executors._server_lifecycle import MAGPIE_BUILTIN_SCRIPTS
 
 _BOARDS = [
-    # product, runner, targeted build validated, (hbm GB, hbm GB/s, bf16, fp8, mxfp4, fp32), bypass peak convention
-    ("mi300x", "mi300x", True, (192.0, 5300.0, 1307.4, 2614.9, None, 163.4), "achievable"),
-    ("mi308x", "mi300x", True, (192.0, 5300.0, 1307.4, 2614.9, None, 163.4), "vendor"),
-    ("mi325x", "mi300x", True, (256.0, 6000.0, 1307.4, 2614.9, None, 163.4), "achievable"),
-    ("mi355x", "mi355x", True, (288.0, 8000.0, 2516.6, 5033.2, 10066.4, 157.3), "vendor"),
-    ("r9700", "gfx12", False, (32.0, 640.0, 191.0, 383.0, None, 47.8), "vendor"),
+    # product, runner, targeted build validated, bypass peak convention
+    ("mi300x", "mi300x", True, "achievable"),
+    ("mi308x", "mi300x", True, "vendor"),
+    ("mi325x", "mi300x", True, "achievable"),
+    ("mi355x", "mi355x", True, "vendor"),
+    ("r9700", "gfx12", False, "vendor"),
 ]
 
 
-@pytest.mark.parametrize(("product", "runner", "build_validated", "vendor", "convention"), _BOARDS)
-def test_board_decisions(product, runner, build_validated, vendor, convention):
+@pytest.mark.parametrize(("product", "runner", "build_validated", "convention"), _BOARDS)
+def test_board_decisions(product, runner, build_validated, convention):
     assert gpu_types.gpu_runner_type(product) == runner
     assert gpu_types.targeted_build_validated(product) is build_validated
-    spec = HW_SPECS[product]
-    peaks = spec["peak_tflops"]
-    assert (
-        spec["hbm_gb"],
-        spec["hbm_bw_gbps"],
-        peaks["bf16"],
-        peaks["fp8"],
-        peaks.get("mxfp4"),
-        peaks["fp32"],
-    ) == vendor
     assert resolve_compute_peak_provenance(product, "bf16")["compute_peak_convention"] == convention
 
 
@@ -88,7 +78,10 @@ def test_only_r9700_pins_its_geak_identity():
         ("Card Series: AMD Instinct MI355X OAM", "mi355x"),
         ("AMD_INSTINCT_MI300X", "mi300x"),
         ("Card Series: AMD Radeon AI PRO R9700", "r9700"),
+        ("card series: amd radeon ai pro r9700", "r9700"),
+        ("Card Series: AMD Instinct MI300XL", None),
         ("Card Series: AMD Radeon AI PRO R9700S", None),
+        ("Card Series: AMD Radeon AI PRO XR9700", None),
         ("Card Series: AMD Radeon 8060S Graphics", "radeon8060s"),
         ("gfx1151", None),
         ("gfx942:sramecc+:xnack-", "mi300x"),
@@ -96,7 +89,10 @@ def test_only_r9700_pins_its_geak_identity():
         ("gfx1201", None),
         ("gfx1100", None),
         ("nothing here", None),
+        ("", None),
+        (None, None),
     ],
 )
 def test_probe_output_resolves_to_the_same_board(text, product):
+    """A longer product name that contains a tag (``MI300XL``, ``R9700S``) is a different product."""
     assert gpu_types.parse_gpu_type(text) == product

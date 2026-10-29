@@ -154,14 +154,12 @@ def build_hyperloom_arch_spec(platform: str) -> dict | None:
     from hyperloom.inference_optimizer.roofline_ceiling import HW_SPECS, HW_SPECS_ACHIEVABLE
 
     key = (platform or "").strip().lower()
-    # Achievable first, vendor theoretical when a GPU has no measured entry: the same order the
-    # model-level ceiling already resolves peaks in.
-    spec = HW_SPECS_ACHIEVABLE.get(key)
-    if not isinstance(spec, dict):
-        spec = HW_SPECS.get(key)
+    spec = HW_SPECS.get(key)
     if not isinstance(spec, dict):
         return None
-    table = spec.get("peak_tflops")
+    # Achievable peaks first, vendor theoretical when a GPU has no measured entry: the same order the model-level
+    # ceiling resolves peaks in. Bandwidth and capacity are the board's either way.
+    table = (HW_SPECS_ACHIEVABLE.get(key) or spec).get("peak_tflops")
     if not isinstance(table, dict):
         return None
     maf: dict[str, float] = {}
