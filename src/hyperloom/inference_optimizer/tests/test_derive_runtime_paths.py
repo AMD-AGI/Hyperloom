@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from hyperloom.inference_optimizer.cli import preflight as cli_preflight
+from hyperloom.inference_optimizer.cli import preflight_env as cli_preflight_env
 
 
 @pytest.fixture(autouse=True)
@@ -37,7 +38,7 @@ def test_other_frameworks_do_not_activate_the_vllm_venv(monkeypatch, framework):
     if framework is not None:
         monkeypatch.setenv("FRAMEWORK", framework)
 
-    cli_preflight._derive_runtime_paths()
+    cli_preflight_env._derive_runtime_paths()
 
     assert str(Path("/unrelated/vllm") / "bin") not in os.environ["PATH"].split(os.pathsep)
     assert os.environ["VLLM_VENV_ROOT"] == "/unrelated/vllm"
@@ -90,8 +91,8 @@ def test_runtime_paths_make_known_source_roots_importable_by_children(monkeypatc
     monkeypatch.setenv("MAGPIE_PATH", str(magpie))
     monkeypatch.setenv("PYTHONPATH", str(tmp_path / "operator-imports"))
 
-    cli_preflight._derive_runtime_paths()
-    cli_preflight._derive_runtime_paths()
+    cli_preflight_env._derive_runtime_paths()
+    cli_preflight_env._derive_runtime_paths()
 
     paths = os.environ["PYTHONPATH"].split(os.pathsep)
     assert paths.count(str(source)) == 1
@@ -154,26 +155,26 @@ def test_runtime_paths_do_not_cross_contaminate_site_packages(monkeypatch, tmp_p
     monkeypatch.setenv("MAGPIE_PATH", str(tmp_path / package_root))
     monkeypatch.setenv("PYTHONPATH", str(tmp_path / "operator-imports"))
 
-    cli_preflight._derive_runtime_paths()
+    cli_preflight_env._derive_runtime_paths()
 
     assert str(tmp_path / package_root) not in os.environ["PYTHONPATH"].split(os.pathsep)
 
 
 def test_prepend_path_adds_and_dedups(monkeypatch):
     monkeypatch.setenv("PATH", os.pathsep.join(("/usr/bin", "/bin")))
-    cli_preflight._prepend_path("PATH", "/opt/x/bin")
+    cli_preflight_env._prepend_path("PATH", "/opt/x/bin")
     assert os.environ["PATH"] == f"/opt/x/bin{os.pathsep}/usr/bin{os.pathsep}/bin"
     # Idempotent: already leading -> unchanged.
-    cli_preflight._prepend_path("PATH", "/opt/x/bin")
+    cli_preflight_env._prepend_path("PATH", "/opt/x/bin")
     assert os.environ["PATH"] == f"/opt/x/bin{os.pathsep}/usr/bin{os.pathsep}/bin"
     # Existing-but-not-leading -> moved to front, not duplicated.
-    cli_preflight._prepend_path("PATH", "/bin")
+    cli_preflight_env._prepend_path("PATH", "/bin")
     assert os.environ["PATH"] == f"/bin{os.pathsep}/opt/x/bin{os.pathsep}/usr/bin"
 
 
 def test_prepend_path_empty_entry_noop(monkeypatch):
     monkeypatch.setenv("PATH", "/usr/bin")
-    cli_preflight._prepend_path("PATH", "")
+    cli_preflight_env._prepend_path("PATH", "")
     assert os.environ["PATH"] == "/usr/bin"
 
 
@@ -184,7 +185,7 @@ def test_derive_runtime_paths_rocm_and_venv(monkeypatch):
     monkeypatch.setenv("ROCM_PATH", "/opt/rocm")
     monkeypatch.delenv("VLLM_VENV_ROOT", raising=False)
 
-    cli_preflight._derive_runtime_paths()
+    cli_preflight_env._derive_runtime_paths()
 
     path_parts = os.environ["PATH"].split(os.pathsep)
     # ROCm prepended last of the two -> leads; venv follows; system last.
@@ -199,7 +200,7 @@ def test_derive_runtime_paths_isolated_vllm_leads(monkeypatch):
     monkeypatch.setenv("VLLM_VENV_ROOT", "/opt/vllm-venv")
     monkeypatch.setenv("FRAMEWORK", "vllm")
 
-    cli_preflight._derive_runtime_paths()
+    cli_preflight_env._derive_runtime_paths()
 
     # vLLM venv prepended last -> must lead PATH.
     assert os.environ["PATH"].split(os.pathsep)[0] == str(Path("/opt/vllm-venv") / "bin")
@@ -212,7 +213,7 @@ def test_derive_runtime_paths_noop_without_roots(monkeypatch):
     monkeypatch.delenv("VLLM_VENV_ROOT", raising=False)
     ld_before = os.environ.get("LD_LIBRARY_PATH")
 
-    cli_preflight._derive_runtime_paths()
+    cli_preflight_env._derive_runtime_paths()
 
     assert os.environ["PATH"] == "/usr/bin"
     # No ROCM_PATH -> LD_LIBRARY_PATH must be untouched.
@@ -239,9 +240,9 @@ def test_rocm_sdk_wheel_lib_dirs_detects_therock_layout(tmp_path, monkeypatch):
         origin = origins.get(name)
         return None if origin is None else SimpleNamespace(origin=str(origin))
 
-    monkeypatch.setattr(cli_preflight.importlib.util, "find_spec", fake_find_spec)
+    monkeypatch.setattr(cli_preflight_env.importlib.util, "find_spec", fake_find_spec)
 
-    dirs = cli_preflight._rocm_sdk_wheel_lib_dirs()
+    dirs = cli_preflight_env._rocm_sdk_wheel_lib_dirs()
 
     assert str(devel_lib) in dirs
     assert str(devel_host_math_lib) in dirs
@@ -269,9 +270,9 @@ def test_rocm_sdk_wheel_lib_dirs_detects_libraries_package(tmp_path, monkeypatch
         origin = origins.get(name)
         return None if origin is None else SimpleNamespace(origin=str(origin))
 
-    monkeypatch.setattr(cli_preflight.importlib.util, "find_spec", fake_find_spec)
+    monkeypatch.setattr(cli_preflight_env.importlib.util, "find_spec", fake_find_spec)
 
-    dirs = cli_preflight._rocm_sdk_wheel_lib_dirs()
+    dirs = cli_preflight_env._rocm_sdk_wheel_lib_dirs()
 
     assert str(core_lib) in dirs
     assert str(libraries_lib) in dirs
@@ -279,9 +280,9 @@ def test_rocm_sdk_wheel_lib_dirs_detects_libraries_package(tmp_path, monkeypatch
 
 def test_rocm_sdk_wheel_lib_dirs_absent_on_standard_rocm_image(monkeypatch):
     # No _rocm_sdk_core/_rocm_sdk_devel packages installed at all.
-    monkeypatch.setattr(cli_preflight.importlib.util, "find_spec", lambda name: None)
+    monkeypatch.setattr(cli_preflight_env.importlib.util, "find_spec", lambda name: None)
 
-    assert cli_preflight._rocm_sdk_wheel_lib_dirs() == []
+    assert cli_preflight_env._rocm_sdk_wheel_lib_dirs() == []
 
 
 def test_derive_runtime_paths_adds_rocm_sdk_wheel_dirs(monkeypatch):
@@ -291,12 +292,12 @@ def test_derive_runtime_paths_adds_rocm_sdk_wheel_dirs(monkeypatch):
     monkeypatch.delenv("VIRTUAL_ENV", raising=False)
     monkeypatch.delenv("VLLM_VENV_ROOT", raising=False)
     monkeypatch.setattr(
-        cli_preflight,
+        cli_preflight_env,
         "_rocm_sdk_wheel_lib_dirs",
         lambda: ["/opt/venv/_rocm_sdk_core/lib", "/opt/venv/_rocm_sdk_devel/lib/host-math/lib"],
     )
 
-    cli_preflight._derive_runtime_paths()
+    cli_preflight_env._derive_runtime_paths()
 
     ld_parts = os.environ["LD_LIBRARY_PATH"].split(os.pathsep)
     assert "/opt/venv/_rocm_sdk_core/lib" in ld_parts
@@ -309,8 +310,8 @@ def test_derive_runtime_paths_noop_when_no_rocm_sdk_wheel(monkeypatch):
     monkeypatch.setenv("PATH", "/usr/bin")
     monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
     monkeypatch.delenv("ROCM_PATH", raising=False)
-    monkeypatch.setattr(cli_preflight, "_rocm_sdk_wheel_lib_dirs", list)
+    monkeypatch.setattr(cli_preflight_env, "_rocm_sdk_wheel_lib_dirs", list)
 
-    cli_preflight._derive_runtime_paths()
+    cli_preflight_env._derive_runtime_paths()
 
     assert os.environ.get("LD_LIBRARY_PATH") is None
