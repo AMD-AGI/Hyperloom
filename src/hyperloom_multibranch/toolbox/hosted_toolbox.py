@@ -254,6 +254,14 @@ class HostedToolbox(LeasedToolbox):
 
         return await asyncio.to_thread(self.backend.live_output, request_id)
 
+    async def start(self) -> None:
+        """End the lease sandboxes an earlier process of this run left behind, then start as :class:`LeasedToolbox`
+        does, which closes their records ``toolbox_lost``."""
+
+        if self.leases is not None:
+            await asyncio.to_thread(self.leases.end_leftovers)
+        await super().start()
+
     async def close(self) -> None:
         """End the tests' bookkeeping, then the lease sandboxes and the measurement sandboxes of this run."""
 

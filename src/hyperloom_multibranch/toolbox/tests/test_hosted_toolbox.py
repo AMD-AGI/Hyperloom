@@ -824,6 +824,25 @@ async def test_close_ends_this_runs_sandboxes_and_no_other_runs(service: Service
         assert service.running(role) == [sandbox.sandbox_id], f"only run-2's {role} sandbox is left"  # type: ignore[arg-type]
 
 
+async def test_start_ends_the_lease_sandboxes_an_earlier_process_of_the_run_left(
+    service: Service, tmp_path: Path
+) -> None:
+    other = service.observer()
+    left = other.create(
+        _DEVS[0], role="dev", timeout_sec=600, metadata={PURPOSE_KEY: LEASE_PURPOSE, RUN_ID_KEY: "run-1"}
+    )
+    elsewhere = other.create(
+        _DEVS[0], role="dev", timeout_sec=600, metadata={PURPOSE_KEY: LEASE_PURPOSE, RUN_ID_KEY: "run-2"}
+    )
+    toolbox = _toolbox(service, tmp_path)
+    try:
+        await toolbox.start()
+        assert service.running("dev") == [elsewhere.sandbox_id], "this run's leftover is ended, run-2's is not"
+        assert left.sandbox_id not in service.running("dev")
+    finally:
+        await toolbox.close()
+
+
 async def test_a_result_of_a_runner_that_read_another_rule_pack_is_refused(
     service: Service,
     tmp_path: Path,

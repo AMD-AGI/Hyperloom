@@ -260,23 +260,35 @@ class HostedBranchLeases:
             self._granted.clear()
         for lease in granted:
             _end(lease.sandbox)
+        self.end_leftovers()
+        with self._guard:
+            self._promised.clear()
+        self.on_release()
+
+    def end_leftovers(self) -> None:
+        """End every sandbox of this run's leases that no lease of this object holds; blocks, so call it from a thread.
+
+        At a start these are the sandboxes an earlier process of the run left behind when it died, whose cards the
+        grant would otherwise count until their own timeout; at a close, creates still in flight when they were
+        cancelled. No other run's sandbox is touched.
+        """
+
         try:
-            leftovers = self._provider.find(
-                {PURPOSE_KEY: LEASE_PURPOSE, RUN_ID_KEY: self._session.run_id}, role=DEV_ROLE
-            )
+            found = self._provider.find({PURPOSE_KEY: LEASE_PURPOSE, RUN_ID_KEY: self._session.run_id}, role=DEV_ROLE)
         except SandboxError:
             log.exception("the dev sandboxes of leases could not be listed")
-            leftovers = []
-        for info in leftovers:
+            return
+        with self._guard:
+            held = {lease.sandbox.sandbox_id for lease in self._granted.values()}
+        for info in found:
+            if info.sandbox_id in held:
+                continue
             try:
                 _end(self._provider.connect(info.sandbox_id, role=DEV_ROLE))
             except SandboxGone:
                 pass
             except SandboxError:
                 log.exception("sandbox %s could not be reached to end it", info.sandbox_id)
-        with self._guard:
-            self._promised.clear()
-        self.on_release()
 
     def lifetime_sec(self, needed_sec: float | None) -> int:
         """How long a lease's sandbox lives: what its holder needs, ``needed_sec``, or the grant's runtime for a holder

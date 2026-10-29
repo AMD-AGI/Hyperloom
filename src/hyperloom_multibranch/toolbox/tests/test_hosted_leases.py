@@ -106,7 +106,7 @@ Make = Callable[..., Hosted]
 
 @pytest.fixture
 def make(tmp_path: Path) -> Iterator[Make]:
-    """``make(gpus=8, tp=2, sandboxes=8, quota=None, tuning=..., templates=..., retry=...)``: leases on a fresh
+    """``make(gpus=8, tp=2, sandboxes=8, quota=None, tuning=..., templates=..., retry=..., runtime=600)``: leases on a fresh
     stand-in whose ``dev`` role holds at most ``quota`` live sandboxes."""
     reason = unavailable_reason(os.environ.get(ENVD_ENV))
     if reason is not None:
@@ -122,6 +122,7 @@ def make(tmp_path: Path) -> Iterator[Make]:
         tuning: LeaseTuning = _FAST,
         templates: Mapping[int, str] | None = None,
         retry: RetryPolicy = _RETRY,
+        runtime: int = 600,
     ) -> Hosted:
         workdir = tmp_path / f"standin-{len(made)}"
         workdir.mkdir()
@@ -132,7 +133,7 @@ def make(tmp_path: Path) -> Iterator[Make]:
             E2BSandboxProvider(standin.keys, api_url=standin.api_url, sandbox_url=standin.sandbox_url, retry=retry)
         )
         session = DevSession("run-1", tp, templates or _BY_CARDS)
-        leases = HostedBranchLeases(provider, GrantLimits(sandboxes, gpus, 400.0, 600), session, tuning)
+        leases = HostedBranchLeases(provider, GrantLimits(sandboxes, gpus, 400.0, runtime), session, tuning)
         made.append(Hosted(standin, provider, leases))
         return made[-1]
 
@@ -264,11 +265,11 @@ async def test_a_lease_that_would_leave_no_sandbox_for_a_test_is_refused(make: M
 
 
 async def test_the_sandbox_lives_as_long_as_its_holder_needs_or_the_grant_lets(make: Make) -> None:
-    hosted = make()
+    hosted = make(runtime=3600)
     short = await hosted.leases.lease("b02", 2, charge=LeaseCharge(LeaseKind.DEV, "b02"), lifetime_sec=100)
     held = await hosted.leases.lease("b03", 2, charge=LeaseCharge(LeaseKind.AUTONOMOUS, "b03"))
     lifetimes = [hosted.standin.plane.lookup(lease.sandbox.sandbox_id).timeout_sec for lease in (short, held)]
-    assert lifetimes == [100 + LIFETIME_MARGIN_SEC, 600 - LIFETIME_MARGIN_SEC]
+    assert lifetimes == [100 + LIFETIME_MARGIN_SEC, 3600 - LIFETIME_MARGIN_SEC]
     assert (short.lifetime_sec, held.lifetime_sec) == tuple(lifetimes)
 
 
@@ -480,6 +481,24 @@ async def test_close_ends_every_lease_and_the_sandboxes_of_this_run_no_lease_hol
     assert hosted.leases.capacity().leased_cards == 0
     with pytest.raises(SandboxUnavailable, match="closing"):
         await hosted.leases.lease("b04", 1, charge=LeaseCharge(LeaseKind.DEV, "b04"))
+
+
+async def test_end_leftovers_ends_this_runs_unheld_sandboxes_and_keeps_its_own_leases(make: Make) -> None:
+    hosted = make(gpus=8, tp=1)
+    held = await hosted.leases.lease("b02", 1, charge=LeaseCharge(LeaseKind.DEV, "b02"))
+    ours = {PURPOSE_KEY: LEASE_PURPOSE, RUN_ID_KEY: "run-1", BRANCH_ID_KEY: "of-a-dead-process"}
+    leftover = hosted.provider.create(_BY_CARDS[1], role="dev", timeout_sec=60, metadata=ours)
+    others = [
+        hosted.provider.create(_BY_CARDS[1], role="dev", timeout_sec=60, metadata=metadata)
+        for metadata in ({**ours, RUN_ID_KEY: "run-2"}, {PURPOSE_KEY: "other", RUN_ID_KEY: "run-1"})
+    ]
+
+    await asyncio.to_thread(hosted.leases.end_leftovers)
+
+    expected = sorted([held.sandbox.sandbox_id, *(other.sandbox_id for other in others)])
+    assert sorted(hosted.running()) == expected, "only the unheld sandbox of this run's leases is ended"
+    assert leftover.sandbox_id not in hosted.running()
+    assert hosted.leases.capacity().leased_cards == 1
 
 
 async def test_a_lease_still_waiting_when_the_toolbox_closes_is_refused(make: Make) -> None:
