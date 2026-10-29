@@ -19,10 +19,8 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from hyperloom.orchestrator.actions.executors.baseline import (
-    MEASURE_ROUND_DROPPED_WARNING,
-    BaselineExecutor,
-)
+from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
+from hyperloom.orchestrator.actions.executors.benchmark_run.records import MEASURE_ROUND_DROPPED_WARNING
 from hyperloom.orchestrator.actions.executors.profile import (
     PROFILE_DEFAULT_TIMEOUT_SEC,
     ProfileExecutor,
@@ -2864,7 +2862,7 @@ class TestTheSessionBudgetReachesTheBaselineRound:
 
 # _classify_subprocess_error unit tests
 
-from hyperloom.orchestrator.actions.executors.baseline import (
+from hyperloom.orchestrator.actions.executors.benchmark_run.bringup import (
     _classify_subprocess_error,
 )
 
