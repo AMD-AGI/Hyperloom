@@ -280,13 +280,15 @@ def dispatch_single_task(
         # exported from is already unreachable. This is the last moment the tree
         # and the branch still exist, so a recovery that failed for a passing
         # reason gets one more attempt here. Publication is idempotent.
-        if worktree is not None and worktree.inplace:
-            recover_task_result(layout, task_path, update_state=False)
-        # After that, never before: the patch is what the campaign was for, and
-        # this returns the tree the patch was built in. A private checkout is
-        # left standing instead, because the closing sweep does read those.
-        _keep_preparation_audit(layout, task, worktree)
-        release_operator_worktree(worktree)
+        try:
+            if worktree is not None and worktree.inplace:
+                recover_task_result(layout, task_path, update_state=False)
+        finally:
+            # After that, never before: the patch is what the campaign was for, and
+            # this returns the tree the patch was built in. A private checkout is
+            # left standing instead, because the closing sweep does read those.
+            _keep_preparation_audit(layout, task, worktree)
+            release_operator_worktree(worktree)
 
 
 __all__ = [
