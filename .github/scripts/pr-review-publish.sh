@@ -41,7 +41,8 @@ fi
 
 graded=$(mktemp -d)
 trap 'rm -rf "$graded"' EXIT
-gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[].filename' > "$graded/files.txt" \
+gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[] | .filename, (.previous_filename // empty)' \
+  > "$graded/files.txt" \
   || note "listing the PR's files failed"
 python3 "$SKILL_DIR/risk.py" "$graded/files.txt" > "$graded/risk.txt" || note "risk.py could not grade the PR's files"
 defect=$(bash "$SKILL_DIR/check-card.sh" "$WORK" "$PR" "$REVIEWED_SHA" "$graded/risk.txt") || note "$defect"

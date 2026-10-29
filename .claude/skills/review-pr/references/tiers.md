@@ -72,7 +72,8 @@ Grep the class name, not just the symbol.
 
 ## Risk of a pull request
 
-[`../risk.py`](../risk.py) grades `files.txt` into `risk.txt`, the floor of the card's `Risk:`. A Tier 1
+[`../risk.py`](../risk.py) grades the changed paths, both ends of a rename, into `risk.txt`, the floor of the card's
+`Risk:`. A Tier 1
 file above is `high`, a Tier 2 file `medium`. A test (under a `tests/` directory, `test_*.py`,
 `conftest.py`) is `low` wherever it sits. Any other path takes the highest risk among the rows below
 whose glob matches it (`*` crosses `/`); a path no row matches is `medium`.

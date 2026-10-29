@@ -130,7 +130,8 @@ awk '
 ' "$WORK/diff.txt" > "$WORK/numstat.txt"
 cut -f3- "$WORK/numstat.txt" > "$WORK/files.txt"
 [ -s "$WORK/files.txt" ] || die "the diff names no changed path"
-python3 "$SKILL_DIR/risk.py" "$WORK/files.txt" > "$WORK/risk.txt" || die "risk.py could not grade files.txt"
+python3 "$SKILL_DIR/risk.py" <(cat "$WORK/files.txt"; sed -n 's/^rename from //p' "$WORK/diff.txt") \
+  > "$WORK/risk.txt" || die "risk.py could not grade the changed paths"
 
 grep -E '(^|/)tests/' "$WORK/files.txt" > "$WORK/testfiles.txt" || : > "$WORK/testfiles.txt"
 
