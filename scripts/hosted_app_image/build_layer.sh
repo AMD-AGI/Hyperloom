@@ -70,12 +70,13 @@ layer="$OUT/${short_sha}-claude${version}"
 mkdir -p "$OUT"
 stage="$(mktemp -d "$OUT/.build.XXXXXX")"
 trap 'rm -rf "$work" "$stage"' EXIT
-mkdir "$stage/bin"
+install -d -m 0755 "$stage/bin"
 install -m 0755 "$installed" "$stage/bin/claude"
 install -m 0755 "$REPO_ROOT/src/hyperloom/hosted/app_bootstrap.sh" "$stage/app_bootstrap.sh"
 install -m 0755 "$REPO_ROOT/src/hyperloom/hosted/start.sh" "$stage/start.sh"
 [ -z "$CA_FILE" ] || install -m 0644 "$CA_FILE" "$stage/ca.pem"
-chmod 0755 "$stage"
+# Whatever the builder's umask, every account (the specialist, uid 2000) reads and runs the layer.
+chmod -R a+rX,go-w "$stage"
 "$stage/bin/claude" --version >/dev/null
 mv -T "$stage" "$layer"
 echo "$layer"
