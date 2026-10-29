@@ -1153,7 +1153,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
             from hyperloom.inference_optimizer.trace.langfuse_emitter import record_status as _lf_record_status
 
             _lf_record_status(session_dir, self._langfuse_status_summary())
-        except Exception:
+        except (TypeError, ValueError):
             log.debug("langfuse status mirror failed", exc_info=True)
 
     def _backfill_scriptable_latency(self) -> None:
