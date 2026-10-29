@@ -9,7 +9,7 @@ import logging as _logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from common.coerce import first_str, first_text, to_float, to_list, to_mapping
+from hyperloom_common.coerce import first_str, first_text, to_float, to_list, to_mapping
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.inference_optimizer.grid_server_args import dedupe_extra_server_args, merge_server_args
 from hyperloom.orchestrator.lever import LEVER_UPSTREAM_PR

@@ -11,9 +11,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
-from common.io import JsonFormat, JsonLineFormat, WriteOptions
-from common.io import append_jsonl as _common_append_jsonl
-from common.io import atomic_write_json as _common_atomic_write_json
+from hyperloom_common.io import JsonFormat, JsonLineFormat, WriteOptions
+from hyperloom_common.io import append_jsonl as _common_append_jsonl
+from hyperloom_common.io import atomic_write_json as _common_atomic_write_json
 from hyperloom.common.jsonio import read_json_strict as _common_read_json_strict
 from hyperloom.common.timeutil import now_iso
 

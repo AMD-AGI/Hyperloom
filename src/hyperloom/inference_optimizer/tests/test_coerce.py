@@ -8,7 +8,7 @@ import time
 
 import pytest
 
-from common.coerce import (
+from hyperloom_common.coerce import (
     dict_rows,
     first_float,
     first_int,

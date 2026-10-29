@@ -24,12 +24,12 @@ _RULES: dict[str, str] = {
 
 _GUIDANCE = (
     "Sanctioned LLM paths:\n"
-    "  * single-shot inference -> common.llm_config: build the client with\n"
+    "  * single-shot inference -> hyperloom_common.llm.llm_config: build the client with\n"
     "    get_openai_client() / get_async_openai_client() and issue the call with\n"
     "    chat_completion() / astream_chat_completion_text().\n"
     "  * agentic work -> an agent runtime: hyperloom.common.codex_session (Codex SDK)\n"
     "    or the Claude Agent SDK backends in hyperloom/orchestrator/roles/.\n"
-    "Provider client construction lives in common/llm_config.py and nowhere else."
+    "Provider client construction lives in hyperloom_common/llm/llm_config.py and nowhere else."
 )
 
 # Top-level packages of provider SDKs.
@@ -91,7 +91,7 @@ _TEST_DIR_NAMES = frozenset({"tests", "test", "testing"})
 _ALLOWLISTED_OWNERS = frozenset(
     {
         # Single-shot inference + the sole home of client construction.
-        "src/common/llm_config.py",
+        "src/hyperloom_common/llm/llm_config.py",
         # Codex agent runtime session wrapper.
         "src/hyperloom/common/codex_session.py",
     }
@@ -322,7 +322,7 @@ def test_no_unsanctioned_llm_provider_access() -> None:
 def test_single_shot_owner_exists() -> None:
     """The allowlist must not rot: the single-shot inference owner has to exist."""
     assert _REPO_ROOT is not None
-    owner = _REPO_ROOT / "src/common/llm_config.py"
+    owner = _REPO_ROOT / "src/hyperloom_common/llm/llm_config.py"
     assert owner.is_file(), f"sanctioned single-shot inference owner is missing: {owner}"
 
 

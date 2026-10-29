@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from common import llm_config
+from hyperloom_common.llm import llm_config
 from hyperloom.inference_optimizer.cli import backends as clib
 
 

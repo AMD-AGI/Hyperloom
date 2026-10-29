@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from common.env import is_truthy
+from hyperloom_common.env import is_truthy
 from hyperloom.common.jsonio import read_json
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.perf_metric import agentx_active

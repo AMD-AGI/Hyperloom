@@ -241,7 +241,7 @@ def test_a_failed_write_is_reported_not_swallowed(tmp_path, monkeypatch, caplog)
     The bug this artifact exists to fix went unnoticed for 101 sessions because
     nothing said anything; a silent writer would repeat exactly that.
     """
-    from common import io as common_io
+    from hyperloom_common import io as common_io
 
     def explode(*_a, **_k):
         raise OSError("read-only workspace")

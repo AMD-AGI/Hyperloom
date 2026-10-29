@@ -20,10 +20,10 @@ from unittest.mock import Mock
 import httpx
 import pytest
 
-from common import claude_oneshot
-from common.env import EnvValueError
-from common.llm_config import AGENT_BACKEND_CHOICES, deepseek_compat_env, resolve_forge_llm_model
-from common.llm_headers import parse_custom_headers
+from hyperloom_common.llm import claude_oneshot
+from hyperloom_common.env import EnvValueError
+from hyperloom_common.llm.llm_config import AGENT_BACKEND_CHOICES, deepseek_compat_env, resolve_forge_llm_model
+from hyperloom_common.llm.llm_headers import parse_custom_headers
 from hyperloom.inference_optimizer import cli
 from hyperloom.inference_optimizer.cli import credentials as cli_credentials
 from hyperloom.inference_optimizer.cli import framework_probe as cli_framework_probe
@@ -2634,7 +2634,7 @@ def test_ir3_preflight_does_not_inject_recipe_kb_url(marker_path, monkeypatch):
 
 
 def test_ir3_unreachable_local_default_disables_pr_monitor(marker_path, monkeypatch):
-    from common.pr_monitor_urls import DEFAULT_KB_STORE_URL
+    from hyperloom_common.pr_monitor_urls import DEFAULT_KB_STORE_URL
 
     monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "local")
     monkeypatch.delenv("KB_STORE_URL", raising=False)
@@ -2666,7 +2666,7 @@ def test_ir3_unreachable_local_default_disables_pr_monitor(marker_path, monkeypa
 
 
 def test_ir3_real_shell_probes_local_default_url(marker_path, tmp_path, monkeypatch):
-    from common.pr_monitor_urls import DEFAULT_KB_STORE_URL
+    from hyperloom_common.pr_monitor_urls import DEFAULT_KB_STORE_URL
 
     monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "local")
     monkeypatch.delenv("KB_STORE_URL", raising=False)

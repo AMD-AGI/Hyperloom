@@ -76,7 +76,7 @@ def classify_closure(paths: list[str]) -> ClosureVerdict:
 
 def parse_diff_paths(diff_text: str) -> list[str]:
     """Return the repo-relative paths a unified diff modifies or adds (first-seen order)."""
-    from common.unified_diff import parse_unified_diff
+    from hyperloom_common.unified_diff import parse_unified_diff
 
     return [c.path for c in parse_unified_diff(diff_text or "") if c.path and not c.is_deleted]
 

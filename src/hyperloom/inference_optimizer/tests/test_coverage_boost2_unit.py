@@ -67,7 +67,7 @@ def test_parse_quality_gate_paths(tmp_path) -> None:
 # --------------------------------------------------------------------------- # inference_optimizer.trace.trace_env.env_flag
 # # --------------------------------------------------------------------------- #
 def test_env_flag_tokens(monkeypatch) -> None:
-    from common import env as common_env
+    from hyperloom_common import env as common_env
 
     monkeypatch.setenv("HL_TEST_FLAG", "on")
     assert common_env.env_flag("HL_TEST_FLAG") is True

@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from common.env import EnvValueError
+from hyperloom_common.env import EnvValueError
 from hyperloom.orchestrator.actions.executors import TargetAnalysisExecutor
 from hyperloom.orchestrator.actions.executors import target_analysis as ta
 from hyperloom.orchestrator.state.task_registry import Task
@@ -457,7 +457,7 @@ async def test_agentx_state_to_external_reference_and_final_report(session_dir, 
             ).encode()
         return json.dumps({"42": {"id": 42, "p90_e2e_norm_intvty": 20.0}}).encode()
 
-    from common import io as common_io
+    from hyperloom_common import io as common_io
     from hyperloom.inference_optimizer.session import session_paths
 
     if competitor_write_failure:

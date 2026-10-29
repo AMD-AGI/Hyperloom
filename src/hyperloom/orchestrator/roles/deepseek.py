@@ -10,14 +10,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
-from common.deepseek_session import (
+from hyperloom_common.llm.deepseek_session import (
     DEEPSEEK_RUNTIME_MAPPING,
     DeepSeekSession,
     DeepSeekSessionError,
     DeepSeekSessionUnavailableError,
 )
 from hyperloom.common.env_safety import redact_secret_values
-from common.llm_config import DEFAULT_DEEPSEEK_HARNESS_MODEL
+from hyperloom_common.llm.llm_config import DEFAULT_DEEPSEEK_HARNESS_MODEL
 from hyperloom.inference_optimizer.protocol.intent import (
     IntentType,
     IntentValidationError,
@@ -28,7 +28,7 @@ from hyperloom.inference_optimizer.protocol.intent import (
 from ..prompts.transport import TRANSPORT_STRUCTURED_OUTPUT
 from hyperloom.inference_optimizer.trace.llm_trace import new_call_id
 from hyperloom.inference_optimizer.trace.trajectory_trace import current_context
-from common.coerce import to_int
+from hyperloom_common.coerce import to_int
 from .base import (
     BackendError,
     BackendTurnResult,

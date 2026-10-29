@@ -15,9 +15,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from .kernel_round_budget import integrate_within_phase
-from common.coerce import to_float
-from common.env import env_int
-from common.io import WriteOptions, atomic_write_json
+from hyperloom_common.coerce import to_float
+from hyperloom_common.env import env_int
+from hyperloom_common.io import WriteOptions, atomic_write_json
 from ..actions.stop_attribution import stopped_by_the_run_class
 from hyperloom.inference_optimizer.session.optimization_journal import KIND_GEMM_TUNING, OUTCOME_KEEP, JournalEntry
 from ..state.shared_state import resolve_graded_comparison

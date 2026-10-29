@@ -38,7 +38,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from common.unified_diff import parse_unified_diff
+from hyperloom_common.unified_diff import parse_unified_diff
 from hyperloom.orchestrator.actions.executors._patch_snapshot import (
     _commit_strip_level,
     _patch_touched_paths,
@@ -330,7 +330,7 @@ def _resolver_backend() -> str:
     reach Codex here, or every overlapping-region lane on that box falls back to
     the dropped patch this module exists to stop.
     """
-    from common.llm_config import (
+    from hyperloom_common.llm.llm_config import (
         AGENT_BACKEND_CODEX,
         anthropic_transport_ready,
         openai_agent_credentialed,
@@ -382,7 +382,7 @@ def _resolver_prompt(query: ConflictQuery) -> str:
 
 def _conflict_resolver() -> ConflictResolver | None:
     """A resolver on whichever backend this deployment runs, or ``None``."""
-    from common.llm_config import AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX
+    from hyperloom_common.llm.llm_config import AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX
 
     backend = _resolver_backend()
     if backend == AGENT_BACKEND_CODEX:
@@ -394,7 +394,7 @@ def _conflict_resolver() -> ConflictResolver | None:
 
 def _anthropic_resolver() -> ConflictResolver:
     async def resolve(query: ConflictQuery) -> str | None:
-        from common.llm_config import (
+        from hyperloom_common.llm.llm_config import (
             AnthropicCompletionRequest,
             aanthropic_completion,
             build_http_timeout,
@@ -421,7 +421,7 @@ def _anthropic_resolver() -> ConflictResolver:
 
 def _codex_resolver() -> ConflictResolver:
     async def resolve(query: ConflictQuery) -> str | None:
-        from common.llm_config import (
+        from hyperloom_common.llm.llm_config import (
             achat_completion,
             apply_reasoning_effort,
             build_http_timeout,

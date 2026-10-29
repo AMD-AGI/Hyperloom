@@ -10,8 +10,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from common import llm_config
-from common.llm_config import ANTHROPIC_CREDENTIAL_ENV_ORDER, _ANTHROPIC_MANAGED_GATEWAY_ENVS
+from hyperloom_common.llm import llm_config
+from hyperloom_common.llm.llm_config import ANTHROPIC_CREDENTIAL_ENV_ORDER, _ANTHROPIC_MANAGED_GATEWAY_ENVS
 from hyperloom.orchestrator.kernel.patch_conflict_merge import (
     STRATEGY_LLM,
     STRATEGY_STRICT,
@@ -22,7 +22,7 @@ from hyperloom.orchestrator.kernel.patch_conflict_merge import (
     _resolver_backend,
     apply_patch_resolving_conflicts,
 )
-from common.llm_config import DEFAULT_CODEX_MODEL
+from hyperloom_common.llm.llm_config import DEFAULT_CODEX_MODEL
 
 _GIT_IDENTITY = {
     "GIT_AUTHOR_NAME": "merge-test",

@@ -15,7 +15,7 @@ try:  # tomllib is stdlib from 3.11; the ``ci`` extra pins tomli for 3.10.
 except ModuleNotFoundError:  # pragma: no cover - exercised on 3.10 only
     import tomli as tomllib  # type: ignore[no-redef]
 
-from common import llm_config
+from hyperloom_common.llm import llm_config
 from hyperloom.common import agent_runtime_requirements
 
 _PYPROJECT = Path(__file__).resolve().parents[4] / "pyproject.toml"

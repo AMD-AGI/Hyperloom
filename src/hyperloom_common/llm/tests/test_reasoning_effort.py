@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from common.reasoning_effort import (
+from hyperloom_common.llm.reasoning_effort import (
     DEFAULT_REASONING_EFFORT,
     gateway_reasoning_effort,
     REASONING_EFFORT_LEVELS,

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from common.llm_config import AGENT_BACKEND_CODEX, AGENT_BACKEND_DEEPSEEK
+from hyperloom_common.llm.llm_config import AGENT_BACKEND_CODEX, AGENT_BACKEND_DEEPSEEK
 from hyperloom.inference_optimizer.trace.agent_trace import AgentTrace
 from hyperloom.inference_optimizer.trace.context_events import record_stream_json_compactions
 from hyperloom.inference_optimizer.trace.parse_usage import (

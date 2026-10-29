@@ -15,11 +15,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, ClassVar
 
-from common.coerce import first_text, to_float, to_int, to_str_list
-from common.env import env_bool
+from hyperloom_common.coerce import first_text, to_float, to_int, to_str_list
+from hyperloom_common.env import env_bool
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.gain_math import gain_pct, gain_pct_or_zero
-from common.io import atomic_write_json
+from hyperloom_common.io import atomic_write_json
 from hyperloom.common.perf_metric import (
     AGENTX_KEEP_P50_THRESHOLD_PCT,
     GRADED_INTVTY,

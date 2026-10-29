@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from common.env import (
+from hyperloom_common.env import (
     EnvValueError,
     env_bool,
     env_flag,

@@ -8,7 +8,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Mapping
-from common.coerce import to_float
+from hyperloom_common.coerce import to_float
 from hyperloom.common.framework_arm import is_upstream_pr_prescreen
 from hyperloom.orchestrator.lever import LEVER_CONFIG
 from hyperloom.inference_optimizer.trace.trajectory_trace import EVENT_PROPOSAL, STATUS_QUEUED, record_event
@@ -495,7 +495,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
             return
         try:
             from hyperloom.common.timeutil import now_iso
-            from common.io import JsonLineFormat, append_jsonl
+            from hyperloom_common.io import JsonLineFormat, append_jsonl
             from hyperloom.inference_optimizer.session.session_paths import proposal_task_map_path
 
             path = proposal_task_map_path(self.session_dir)

@@ -11,7 +11,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from common.env import env_flag
+from hyperloom_common.env import env_flag
 
 from ._io_utils import append_log
 from ._kernel_classification import _aiter_csrc_root

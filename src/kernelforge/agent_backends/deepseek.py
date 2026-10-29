@@ -4,7 +4,7 @@
 """DeepSeek Harness Python SDK backend for Forge implementer sessions.
 
 The runtime layer (SDK loading, gateway environment, handshake, result
-normalization) is :mod:`common.deepseek_session`; this module adds
+normalization) is :mod:`hyperloom_common.llm.deepseek_session`; this module adds
 what Forge needs on top of it: the workspace guard, resumable sessions and a
 cache of live runtimes.
 """
@@ -19,7 +19,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-from common.deepseek_session import (
+from hyperloom_common.llm.deepseek_session import (
     DEEPSEEK_RUNTIME_MAPPING,
     DeepSeekSessionUnavailableError,
     HarnessLaunch,
@@ -29,8 +29,8 @@ from common.deepseek_session import (
     sdk_failures,
     start_harness,
 )
-from common.llm_config import DEFAULT_DEEPSEEK_HARNESS_MODEL
-from common.reasoning_effort import (
+from hyperloom_common.llm.llm_config import DEFAULT_DEEPSEEK_HARNESS_MODEL
+from hyperloom_common.llm.reasoning_effort import (
     DEFAULT_REASONING_EFFORT,
     REASONING_EFFORT_LEVELS,
     harness_reasoning_effort,

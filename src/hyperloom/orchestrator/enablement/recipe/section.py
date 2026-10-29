@@ -14,11 +14,11 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
 
-from common.fs_utils import relative_posix
+from hyperloom_common.fs_utils import relative_posix
 from hyperloom.inference_optimizer.breakdown.recorder.recorder_warnings import RECORDING_ERRORS, note_failure
 from hyperloom.inference_optimizer.breakdown.session_package import deliverable
 
-from common.coerce import to_mapping
+from hyperloom_common.coerce import to_mapping
 
 from .attempts import build_attempt_summary
 from .steps import PATCH_KIND

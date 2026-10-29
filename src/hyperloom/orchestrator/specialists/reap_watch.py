@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from common.proctree import boot_unix, descendants, running
+from hyperloom.common.proctree import boot_unix, descendants, running
 
 from .dsh_launch import dsh_home
 

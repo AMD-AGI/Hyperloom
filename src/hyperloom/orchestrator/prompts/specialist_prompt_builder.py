@@ -20,7 +20,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from common.coerce import first_text
+from hyperloom_common.coerce import first_text
 from hyperloom.common.prompt_safety import defang_prompt_structure
 from hyperloom.inference_optimizer.framework_registry import python_package
 from .agentx_context import corpus_lines, grading_lines, launch_ownership_lines

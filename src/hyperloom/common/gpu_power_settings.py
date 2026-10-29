@@ -25,7 +25,7 @@ import subprocess  # nosec B404 - fixed amd-smi invocations.
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Sequence
 
-from common.env import env_flag
+from hyperloom_common.env import env_flag
 
 __all__ = [
     "GPU_POWER_SAMPLING_ENV",

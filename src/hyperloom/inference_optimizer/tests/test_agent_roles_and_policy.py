@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from common.llm_config import DEFAULT_CLAUDE_MODEL
+from hyperloom_common.llm.llm_config import DEFAULT_CLAUDE_MODEL
 from hyperloom.orchestrator.mcp_tool_names import qualified_context_tool_name
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.inference_optimizer.protocol.intent import (

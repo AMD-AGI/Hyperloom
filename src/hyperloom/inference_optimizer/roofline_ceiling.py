@@ -12,8 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from common.checkpoint_quant import WeightDeclaration, weight_declarations
-from common.gpu_identity import AMD_GPU_BOARDS
+from hyperloom_common.checkpoint_quant import WeightDeclaration, weight_declarations
+from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
 from hyperloom.common.model_paths import resolve_local_model_dir
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.inference_optimizer.grid_server_args import server_arg_value

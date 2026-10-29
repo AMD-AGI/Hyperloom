@@ -9,8 +9,8 @@ import logging
 
 import pytest
 
-from common import llm_config
-from common.llm_attribution import ATTRIBUTION_ENV, CLAW_SESSION_ID_ENV
+from hyperloom_common.llm import llm_config
+from hyperloom_common.llm.llm_attribution import ATTRIBUTION_ENV, CLAW_SESSION_ID_ENV
 
 
 @pytest.fixture(autouse=True)

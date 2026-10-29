@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging as _logging
 from typing import Any, Mapping, NamedTuple
 
-from common.env import env_int
+from hyperloom_common.env import env_int
 from hyperloom.inference_optimizer.session.geak_rebench_verdict import (
     REBENCH_FAILED,
     REBENCH_FALLBACK,

@@ -12,8 +12,8 @@ import struct
 from pathlib import Path
 from typing import Any
 
-from common.checkpoint_quant import QUARK_LAYER_CONFIG_KEYS, checkpoint_format
-from common.coerce import optional_positive_int, to_int
+from hyperloom_common.checkpoint_quant import QUARK_LAYER_CONFIG_KEYS, checkpoint_format
+from hyperloom_common.coerce import optional_positive_int, to_int
 from hyperloom.common.model_paths import resolve_local_model_dir
 
 

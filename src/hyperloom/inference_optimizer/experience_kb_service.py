@@ -15,8 +15,8 @@ import socket
 import sys
 from pathlib import Path
 
-from common.env import EnvValueError, env_bool
-from common.llm_config import DEFAULT_CLAUDE_MODEL
+from hyperloom_common.env import EnvValueError, env_bool
+from hyperloom_common.llm.llm_config import DEFAULT_CLAUDE_MODEL
 from hyperloom.inference_optimizer.session.paths import workspace_root
 from hyperloom_kb import (
     GLOBAL_URL_ENV,

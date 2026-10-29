@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from common import aiter_jit_cache
+from hyperloom_common import aiter_jit_cache
 from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
 
@@ -1139,7 +1139,7 @@ def test_poll_timeout_is_the_env_value_floored_at_one_else_the_callers_default(m
 
 def test_a_malformed_poll_timeout_is_a_config_error_not_a_retry(monkeypatch, capsys):
     """Re-running the subcommand cannot fix a typo, and the typo must not quietly become the default budget."""
-    from common.env import EnvValueError
+    from hyperloom_common.env import EnvValueError
     from hyperloom.inference_optimizer.multi_node import cli as mn_cli
 
     class _Dashboard:

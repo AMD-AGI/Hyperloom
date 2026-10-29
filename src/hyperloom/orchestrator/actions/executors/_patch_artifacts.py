@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from common.coerce import to_float
+from hyperloom_common.coerce import to_float
 from hyperloom.inference_optimizer.framework_paths import resolve_kernel_search_roots
 from hyperloom.inference_optimizer.gpu_types import amd_gpu_board
 

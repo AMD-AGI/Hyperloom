@@ -17,7 +17,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from common.coerce import to_int, to_unix
+from hyperloom_common.coerce import to_int, to_unix
 from hyperloom.common.timeutil import iso_z
 from hyperloom.inference_optimizer.breakdown.collectors._common import (
     _load_jsonl_safe,

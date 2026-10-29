@@ -8,7 +8,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from common.git_safety import safe_directory_args
+from hyperloom_common.git_safety import safe_directory_args
 
 __all__ = ["_git_head_sha", "_run_git", "_run_git_cp"]
 

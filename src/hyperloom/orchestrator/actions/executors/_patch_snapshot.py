@@ -15,8 +15,8 @@ import subprocess
 from pathlib import Path
 from typing import Any, Sequence
 
-from common.git_safety import repo_root, safe_directory_args
-from common.unified_diff import strip_path_components
+from hyperloom_common.git_safety import repo_root, safe_directory_args
+from hyperloom_common.unified_diff import strip_path_components
 
 from ...specialists.patch_safety import patch_file_targets
 from ._git import _run_git_cp

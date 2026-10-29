@@ -9,8 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from common.deepseek_session import DEEPSEEK_PROVIDER_ROUTE
-from common.reasoning_effort import harness_reasoning_effort
+from hyperloom_common.llm.deepseek_session import DEEPSEEK_PROVIDER_ROUTE
+from hyperloom_common.llm.reasoning_effort import harness_reasoning_effort
 from kernelforge.agent_backends.base import (
     AgentRunSpec,
     AgentRuntimeConfig,
@@ -101,7 +101,7 @@ class _FakeHarnessSdk:
 def _install_fake_harness_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
     """Route backend tests through the deterministic SDK transport fake and a configured gateway."""
     _FakeHarness.instances.clear()
-    monkeypatch.setattr("common.deepseek_session.load_harness_sdk", lambda: _FakeHarnessSdk)
+    monkeypatch.setattr("hyperloom_common.llm.deepseek_session.load_harness_sdk", lambda: _FakeHarnessSdk)
     monkeypatch.setattr("kernelforge.agent_backends.deepseek.load_harness_sdk", lambda: _FakeHarnessSdk)
     monkeypatch.setenv("OPENAI_BASE_URL", _GATEWAY_URL)
     monkeypatch.setenv("OPENAI_API_KEY", "fake-key")

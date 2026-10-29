@@ -13,10 +13,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from common.coerce import optional_positive_float
+from hyperloom_common.coerce import optional_positive_float
 from hyperloom.common.perf_metric import INTVTY_OBJECTIVES
 
-from common.coerce import to_mapping
+from hyperloom_common.coerce import to_mapping
 
 from ..base import (
     Decision,

@@ -12,7 +12,7 @@ from typing import Any
 
 from hyperloom.common.env_safety import redact_secret_values
 
-from common.io import JsonLineFormat, append_jsonl
+from hyperloom_common.io import JsonLineFormat, append_jsonl
 from hyperloom.inference_optimizer.session.session_paths import conversations_path
 from ._row_utils import call_key_fields, validate_closed_row
 from .llm_trace import VALID_COMPONENTS

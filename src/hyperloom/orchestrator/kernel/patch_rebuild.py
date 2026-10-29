@@ -12,7 +12,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Iterable
 
-from common import aiter_jit_cache
+from hyperloom_common import aiter_jit_cache
 from hyperloom.inference_optimizer.framework_paths import resolve_flydsl_source_roots
 
 from .patch_jit_cache import (

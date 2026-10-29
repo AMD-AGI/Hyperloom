@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from hashlib import sha1
 from typing import TYPE_CHECKING, Any
 
-from common.coerce import first_text
+from hyperloom_common.coerce import first_text
 
 from ..collaborator import CoordinatorCollaborator
 from ..state.failure_evidence import UNMEASURED_OUTCOMES, failure_from_variant_outcome

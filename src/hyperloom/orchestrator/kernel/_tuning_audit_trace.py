@@ -9,7 +9,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from common.io import JsonLineFormat, append_jsonl
+from hyperloom_common.io import JsonLineFormat, append_jsonl
 
 log = logging.getLogger(__name__)
 

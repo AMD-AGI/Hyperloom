@@ -13,8 +13,8 @@ from typing import Any, NamedTuple
 
 from kernelforge.knowledge import KERNEL_RECIPE_PRODUCERS, normalize_operator_name
 
-from common.coerce import to_float, to_int
-from common.env import env_flag
+from hyperloom_common.coerce import to_float, to_int
+from hyperloom_common.env import env_flag
 
 from .patch_landing import (
     INTEGRATING_STACK_ACTIONS,

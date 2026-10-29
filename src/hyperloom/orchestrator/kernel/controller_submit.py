@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 from typing import Any, Callable
 
-from common.llm_attribution import inject_env
+from hyperloom_common.llm.llm_attribution import inject_env
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     RoundWatch,
     run_with_session_kill,

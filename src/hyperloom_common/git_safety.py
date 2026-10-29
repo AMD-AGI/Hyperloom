@@ -10,7 +10,7 @@ import os
 import stat
 import subprocess
 from pathlib import Path
-from common.fs_utils import read_text_nofollow
+from hyperloom_common.fs_utils import read_text_nofollow
 
 
 _GITFILE = ".git"

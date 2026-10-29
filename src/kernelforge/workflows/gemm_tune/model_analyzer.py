@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from common.checkpoint_quant import (
+from hyperloom_common.checkpoint_quant import (
     WeightDeclaration,
     checkpoint_format,
     most_declared_format,

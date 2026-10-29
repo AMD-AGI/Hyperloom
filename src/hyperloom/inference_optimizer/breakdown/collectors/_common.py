@@ -8,7 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from common.coerce import to_float
+from hyperloom_common.coerce import to_float
 from hyperloom.common.jsonio import read_jsonl
 
 

@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from common import llm_config
+from hyperloom_common.llm import llm_config
 from hyperloom.common import deepseek_task
 from hyperloom.orchestrator.trace_analysis import tracelens_deepseek
 from hyperloom.orchestrator.trace_analysis import tracelens_skill_runner as tlr

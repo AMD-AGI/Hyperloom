@@ -10,7 +10,7 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
-from common import llm_config
+from hyperloom_common.llm import llm_config
 
 log = logging.getLogger(__name__)
 

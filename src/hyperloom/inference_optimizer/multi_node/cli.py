@@ -21,8 +21,8 @@ from typing import Any
 
 import httpx
 
-from common import aiter_jit_cache
-from common.env import EnvValueError, env_int
+from hyperloom_common import aiter_jit_cache
+from hyperloom_common.env import EnvValueError, env_int
 
 from ._internal import ray_dashboard
 from ._internal import ssh_client, ssh_known_hosts

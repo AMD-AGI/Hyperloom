@@ -17,8 +17,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from common import llm_config
-from common.env import EnvValueError, env_bool
+from hyperloom_common.llm import llm_config
+from hyperloom_common.env import EnvValueError, env_bool
 from hyperloom.common.gpu_partition import PartitionModel
 from .executors import (
     _build_specialist_executor,

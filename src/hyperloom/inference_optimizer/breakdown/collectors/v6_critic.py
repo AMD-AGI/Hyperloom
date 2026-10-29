@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from common.coerce import dict_rows, to_mapping
+from hyperloom_common.coerce import dict_rows, to_mapping
 
 
 __all__ = ["collect_v6_critic"]

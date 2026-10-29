@@ -13,8 +13,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from common.env import env_float
-from common.git_safety import safe_directory_args
+from hyperloom_common.env import env_float
+from hyperloom_common.git_safety import safe_directory_args
 
 from .models import Candidate
 

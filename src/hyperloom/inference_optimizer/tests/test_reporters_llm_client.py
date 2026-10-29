@@ -17,8 +17,8 @@ from hyperloom.inference_optimizer.breakdown.reporters.llm_client import (
     build_client_from_env,
 )
 
-_LLM_CONFIG = "common.llm_config"
-_CLAUDE_ONESHOT = "common.claude_oneshot"
+_LLM_CONFIG = "hyperloom_common.llm.llm_config"
+_CLAUDE_ONESHOT = "hyperloom_common.llm.claude_oneshot"
 
 _REPORT_ENV_VARS = (
     "HYPERLOOM_REPORT_LLM_BACKEND",

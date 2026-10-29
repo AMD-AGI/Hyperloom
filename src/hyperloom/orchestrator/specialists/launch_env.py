@@ -8,7 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Sequence
 
-from common.fs_utils import read_bytes_nofollow, write_text_nofollow
+from hyperloom_common.fs_utils import read_bytes_nofollow, write_text_nofollow
 from hyperloom.common.env_safety import (
     RunAs,
     RunAsError,

@@ -12,9 +12,9 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.env_safety import redact_secret_values
-from common.token_usage import TOKEN_KEYS, sdk_field, uncached_input_tokens
+from hyperloom_common.llm.token_usage import TOKEN_KEYS, sdk_field, uncached_input_tokens
 
-from common.coerce import to_int
+from hyperloom_common.coerce import to_int
 
 log = logging.getLogger(__name__)
 

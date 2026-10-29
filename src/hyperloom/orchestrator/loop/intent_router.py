@@ -28,7 +28,7 @@ from .verdicts import (
     verdict_held_to_its_rule,
     verdict_map_entry_held_to_its_rule,
 )
-from common.coerce import to_int, to_unix
+from hyperloom_common.coerce import to_int, to_unix
 from ..bus.message_bus import Message
 from ..policy.gate import (
     PolicyDenied,

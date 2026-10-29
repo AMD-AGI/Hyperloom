@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Callable
 from . import geak_rebench as _geak_rebench, machine_state as _phase_state
 from .kernel_round_budget import rebench_round_sec
-from common.env import env_float, env_int
+from hyperloom_common.env import env_float, env_int
 from hyperloom.common.jsonio import read_json
 from hyperloom.common.launch_log_evidence import recipe_server_launch
 from ..actions.executors._recipe_script import resolve_launch_server_script
@@ -354,7 +354,7 @@ class _GeakDispatchMixin:
         ``GEAK_FLUSH_GRACE_S``, inside the kill cap. The launch marks the run, so whatever it left running is
         reaped when it returns, however it detached.
         """
-        from common.proctree import REAP_MARK_ENV
+        from hyperloom.common.proctree import REAP_MARK_ENV
         from ..actions.executors._subprocess_kill import RoundWatch, run_with_session_kill
 
         runner_timeout, kill_timeout, budget_known = timeouts
@@ -386,7 +386,7 @@ class _GeakDispatchMixin:
         runner_env[REAP_MARK_ENV] = uuid.uuid4().hex
         # Only injection point needed for the whole GEAK chain: geak_runner and run_e2e both hand their full
         # environment to the child, so the tag reaches the Claude CLI that actually spends.
-        from common.llm_attribution import inject_env
+        from hyperloom_common.llm.llm_attribution import inject_env
 
         inject_env(runner_env, component="geak", operation="optimize_kernel")
         return await asyncio.to_thread(

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from common.llm_config import AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX
+from hyperloom_common.llm.llm_config import AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX
 from hyperloom.inference_optimizer.cli import preflight
 
 

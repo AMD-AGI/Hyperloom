@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, NamedTuple
 
-from common.env import env_bool
+from hyperloom_common.env import env_bool
 from hyperloom.orchestrator.trace_analysis._capture_shapes import is_capture_fragment as _shared_is_capture_fragment
 
 from ..actions.executors._kernel_agent_tool import HandlerResult

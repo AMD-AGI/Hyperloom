@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from common.coerce import optional_positive_float
+from hyperloom_common.coerce import optional_positive_float
 from hyperloom.common.perf_metric import GRADED_OUTPUT, is_agentx_mode
 
 log = logging.getLogger(__name__)

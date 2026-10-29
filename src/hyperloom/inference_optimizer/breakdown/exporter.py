@@ -11,7 +11,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from common.io import atomic_write_json, atomic_write_text
+from hyperloom_common.io import atomic_write_json, atomic_write_text
 from hyperloom.common.jsonio import read_json, read_json_strict
 
 from . import collectors

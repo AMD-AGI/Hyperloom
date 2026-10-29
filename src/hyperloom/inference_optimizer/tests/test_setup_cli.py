@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from common.llm_config import deepseek_compat_env
+from hyperloom_common.llm.llm_config import deepseek_compat_env
 from hyperloom.inference_optimizer import setup
 
 

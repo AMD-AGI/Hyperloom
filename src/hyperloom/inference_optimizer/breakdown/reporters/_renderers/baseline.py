@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from common.coerce import optional_positive_float, to_mapping
+from hyperloom_common.coerce import optional_positive_float, to_mapping
 from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
     anchoring_baseline_action,
     quality_ref_actions,

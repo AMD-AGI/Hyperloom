@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from common.gpu_identity import AMD_GPU_BOARDS
+from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
 from hyperloom.orchestrator.actions.executors.targeted_build_executor import TargetedBuildExecutor
 from hyperloom.orchestrator.enablement.runtime.build_actions import TargetedBuildAction, BuildResult, FrameworkRuntime
 from hyperloom.orchestrator.loop.build_lifecycle import BuildLifecycleCollaborator

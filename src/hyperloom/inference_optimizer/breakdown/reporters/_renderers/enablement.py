@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import Any
 
 
-from common.coerce import to_mapping
+from hyperloom_common.coerce import to_mapping
 
 from ..base import RenderedSection, events_of, md_kv_list, md_table, register_renderer
 

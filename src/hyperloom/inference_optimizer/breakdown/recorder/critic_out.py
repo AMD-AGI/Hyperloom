@@ -33,8 +33,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
-from common.coerce import dict_rows, to_mapping as _dict
-from common.fs_utils import relative_posix
+from hyperloom_common.coerce import dict_rows, to_mapping as _dict
+from hyperloom_common.fs_utils import relative_posix
 from hyperloom.common.jsonio import read_json
 
 from ..critic_reviews import normalize_framework_reviews

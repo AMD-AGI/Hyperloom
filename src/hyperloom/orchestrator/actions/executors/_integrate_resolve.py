@@ -13,7 +13,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from common.coerce import to_float
+from hyperloom_common.coerce import to_float
 from hyperloom.inference_optimizer.session.session_paths import enablement_stacks_dir, runs_dir
 
 from ...state.shared_state import inject_stack_base_params

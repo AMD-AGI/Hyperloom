@@ -13,8 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from common.git_safety import repo_root, safe_directory_args
-from common.io import JsonFormat, atomic_write_json
+from hyperloom_common.git_safety import repo_root, safe_directory_args
+from hyperloom_common.io import JsonFormat, atomic_write_json
 from hyperloom.inference_optimizer.session import paths as session_paths
 from hyperloom.inference_optimizer.session import session_paths as session_layout
 from hyperloom.inference_optimizer.session.session_paths import BRINGUP_SEGMENT

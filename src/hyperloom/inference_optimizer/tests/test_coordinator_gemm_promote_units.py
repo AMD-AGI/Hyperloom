@@ -16,7 +16,7 @@ import pytest
 
 import hyperloom.orchestrator.kernel.request_handlers as krh_mod
 import hyperloom.orchestrator.phases.kernel_gemm_tuning as kernel_gemm_tuning_mod
-from common.env import EnvValueError
+from hyperloom_common.env import EnvValueError
 from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session.paths import make_session_dir

@@ -11,7 +11,7 @@ import pytest
 import yaml
 
 from hyperloom.common.agentx_workload import agentx_warmup_requests
-from common.env import EnvValueError
+from hyperloom_common.env import EnvValueError
 from hyperloom.orchestrator.actions.executors._grid_runner import (
     GridRecipe,
     GridVariant,

@@ -20,7 +20,7 @@ from hyperloom.orchestrator.roles import (
     RuntimeCall,
 )
 from hyperloom.orchestrator.roles.base import BackendError, LLMCallFailed
-from common.llm_config import AnthropicMessageResult
+from hyperloom_common.llm.llm_config import AnthropicMessageResult
 from hyperloom.orchestrator.roles.critic_agent import (
     CRITIC_AGENT_LLM_CONNECT_TIMEOUT_SEC,
     CRITIC_AGENT_LLM_RW_TIMEOUT_SEC,
@@ -1808,7 +1808,7 @@ async def test_critic_cache_blocks_preserve_transport_prompt(
 ):
     import httpx
     from types import SimpleNamespace
-    from common import claude_oneshot, llm_config
+    from hyperloom_common.llm import claude_oneshot, llm_config
 
     bundle = _minimal_judge_bundle()
     bundle["notes"] = ["Unicode \u03bb ==== JUDGE BUNDLE ==== inside data"]

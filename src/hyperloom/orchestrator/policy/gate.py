@@ -24,8 +24,8 @@ from hyperloom.inference_optimizer.framework_paths import (
     resolve_session_framework_root,
     resolved_within,
 )
-from common.coerce import first_text
-from common.env import env_bool
+from hyperloom_common.coerce import first_text
+from hyperloom_common.env import env_bool
 from hyperloom.common.framework_arm import verdict_subject
 from hyperloom.common.visible_devices import detect_gpu_count
 from hyperloom.inference_optimizer.protocol.intent import ALLOWED_VERDICTS, EXTEND_LEASE_MAX_SEC, Intent, IntentType

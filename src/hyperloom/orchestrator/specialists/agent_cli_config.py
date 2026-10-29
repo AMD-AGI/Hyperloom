@@ -20,8 +20,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from common.env import env_bool
-from common.fs_utils import write_text_nofollow
+from hyperloom_common.env import env_bool
+from hyperloom_common.fs_utils import write_text_nofollow
 from hyperloom.common.env_safety import BLOCKED_CHILD_ENV_NAMES, scrub_child_process_env, valid_env_key
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 

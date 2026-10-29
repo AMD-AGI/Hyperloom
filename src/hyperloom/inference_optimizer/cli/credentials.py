@@ -11,7 +11,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from common.llm_config import (
+from hyperloom_common.llm.llm_config import (
     ANTHROPIC_SYNTHESIZABLE_KEY_ENVS,
     CLAUDE_OAUTH_TOKEN_ENV,
     DEFAULT_CLAUDE_MODEL,

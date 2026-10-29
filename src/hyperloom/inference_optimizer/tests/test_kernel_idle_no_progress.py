@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from common.env import EnvValueError
+from hyperloom_common.env import EnvValueError
 from hyperloom.orchestrator.phases import machine_state as ms
 from hyperloom.orchestrator.state.shared_state import SharedState
 

@@ -14,7 +14,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal, Mapping
 
-from common.io import WriteOptions, atomic_write_text
+from hyperloom_common.io import WriteOptions, atomic_write_text
 from hyperloom.common.timeutil import now_iso
 
 from .sections import EVENT_SECTIONS, slug

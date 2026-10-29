@@ -20,7 +20,7 @@ from hyperloom.common.env_safety import (
     is_allowed_kernel_agent_env_key,
     is_python_package_root,
 )
-from common.llm_config import (
+from hyperloom_common.llm.llm_config import (
     LEGACY_DEEPSEEK_ENV_KEYS,
     deepseek_compat_env,
     has_anthropic_credential,

@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from common.llm_config import DEFAULT_CLAUDE_MODEL
+from hyperloom_common.llm.llm_config import DEFAULT_CLAUDE_MODEL
 from kernelforge.agent_backends.base import AgentRunSpec, AgentToolPolicy
 from kernelforge.agent_backends.claude import (
     ClaudeBackend,

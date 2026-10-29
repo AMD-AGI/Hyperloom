@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import pytest
 
 import kernelforge.agent_backends.codex as codex_backend
-import common.entry_points as entry_points
+import hyperloom_common.entry_points as entry_points
 import kernelforge.agent_backends.registry as registry
 from kernelforge.agent_backends import (
     AgentCapabilities,

@@ -19,7 +19,7 @@ import yaml
 from hyperloom.common import rocm_smi
 from hyperloom.common.agentx_workload import AGENTX_SERVER_PIDFILE
 from hyperloom.common.env_safety import redact_secret_values
-from common.proctree import TERM_GRACE_SEC, group_members, running, signal_group
+from hyperloom.common.proctree import TERM_GRACE_SEC, group_members, running, signal_group
 from hyperloom.inference_optimizer.gpu_types import magpie_reuse_scripts
 
 from .bypass_engine import lifecycle_meta_file, lifecycle_pid_file

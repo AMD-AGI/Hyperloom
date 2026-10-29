@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from common.llm_config import parse_custom_headers
+from hyperloom_common.llm.llm_config import parse_custom_headers
 
 _ASSETS = Path(__file__).resolve().parents[1] / "assets"
 _LOADER = _ASSETS / "runtime_env.sh"

@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from common.io import JsonFormat, JsonLineFormat, append_jsonl, atomic_write_json
+from hyperloom_common.io import JsonFormat, JsonLineFormat, append_jsonl, atomic_write_json
 from hyperloom.common.jsonio import read_json_strict, read_jsonl
 from hyperloom.common.timeutil import now_iso
 

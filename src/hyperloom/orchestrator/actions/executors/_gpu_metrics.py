@@ -203,7 +203,7 @@ def write_gpu_metrics_from_report(workspace: Path | str, report: Any, *, source:
     payload["source"] = source
     out = root / GPU_ARTIFACT_NAME
     try:
-        from common.io import atomic_write_json
+        from hyperloom_common.io import atomic_write_json
 
         atomic_write_json(out, payload)
     except Exception:

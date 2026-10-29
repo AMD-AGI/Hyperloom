@@ -26,7 +26,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from common.coerce import first_str, to_float
+from hyperloom_common.coerce import first_str, to_float
 
 from ._kernel_source import ResolveResult, resolve_source_verdict
 

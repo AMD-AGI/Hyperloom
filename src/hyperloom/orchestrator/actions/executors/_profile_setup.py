@@ -19,7 +19,7 @@ import subprocess
 from functools import cache
 from typing import Any, Mapping, NamedTuple
 
-from common.env import env_bool, env_flag, is_truthy
+from hyperloom_common.env import env_bool, env_flag, is_truthy
 from hyperloom.common.workload_defaults import DEFAULT_CONC, DEFAULT_OSL
 from hyperloom.inference_optimizer.model_config_utils import model_is_gemma2
 from hyperloom.inference_optimizer.runtime_environment import prepend_launch_path

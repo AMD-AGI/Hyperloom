@@ -13,9 +13,9 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, MutableMapping, Sequence
-from common.env import env_str
-from common.git_safety import trusted_admin_dir
-from common.fs_utils import rewrite_lines_nofollow
+from hyperloom_common.env import env_str
+from hyperloom_common.git_safety import trusted_admin_dir
+from hyperloom_common.fs_utils import rewrite_lines_nofollow
 
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 
@@ -165,7 +165,7 @@ DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "CLAUDE_MODEL",
         "CODEX_MODEL",
         # Retired provider variables, still readable so a pre-migration .env can be normalized by
-        # common.llm_config.deepseek_compat_env.
+        # hyperloom_common.llm.llm_config.deepseek_compat_env.
         "DEEPSEEK_API_KEY",
         "DEEPSEEK_BASE_URL",
         "DEEPSEEK_MODEL",
@@ -577,7 +577,7 @@ def redact_file_in_place(path: os.PathLike[str] | str, *, mode: int = 0o600) -> 
 
     The file sits in a directory a less-privileged account may write, so the
     redacted copy is staged and moved without following any link there
-    (:func:`common.fs_utils.rewrite_lines_nofollow`). A failure
+    (:func:`hyperloom_common.fs_utils.rewrite_lines_nofollow`). A failure
     leaves the file as it was.
     """
     try:

@@ -259,7 +259,7 @@ def test_lock_sweep_reaches_the_readonly_package_home_cache(tmp_path, monkeypatc
 
 def test_lock_sweep_keeps_a_private_cache_without_an_importable_package(tmp_path, monkeypatch, isolated_home):
     """``resolve_serving_context`` has no answer without a package; the sweep still must."""
-    from common.aiter_jit_cache import resolve_serving_context
+    from hyperloom_common.aiter_jit_cache import resolve_serving_context
 
     lock = tmp_path / "private" / "build" / "module_a" / "lock"
     lock.parent.mkdir(parents=True)

@@ -13,7 +13,7 @@ import shlex
 from dataclasses import dataclass
 from typing import Any
 
-from common.coerce import optional_positive_int, to_str_list
+from hyperloom_common.coerce import optional_positive_int, to_str_list
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 
 

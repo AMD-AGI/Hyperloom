@@ -16,7 +16,7 @@ import pytest
 from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant, GridRecipe
 from hyperloom.orchestrator.actions.executors._proposal_identity import BaseControls, effective_fingerprint
 from hyperloom.orchestrator.actions.executors._server_lifecycle import GpuHandoff
-from common.proctree import REAP_MARK_ENV
+from hyperloom.common.proctree import REAP_MARK_ENV
 from hyperloom.orchestrator.actions.executors._subprocess_kill import run_with_session_kill
 from hyperloom.orchestrator.phases import machine_state as ps
 from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_SKIP_TO_SWEEP

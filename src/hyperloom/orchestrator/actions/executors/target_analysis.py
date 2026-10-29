@@ -9,7 +9,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from common.env import env_int, env_str
+from hyperloom_common.env import env_int, env_str
 from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import (
     analyze,
     clear_competitor_target,

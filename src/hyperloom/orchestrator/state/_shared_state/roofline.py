@@ -12,7 +12,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-from common.coerce import to_int
+from hyperloom_common.coerce import to_int
 from hyperloom.common.timeutil import now_iso
 
 log = logging.getLogger(__name__)

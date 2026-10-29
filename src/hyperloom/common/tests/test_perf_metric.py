@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import pytest
 
-from common.env import EnvValueError
+from hyperloom_common.env import EnvValueError
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.perf_metric import (
     GRADED_DURATION,

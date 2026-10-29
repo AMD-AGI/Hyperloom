@@ -1,15 +1,15 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Import-lint guard for the two shared layers, ``common`` and ``hyperloom.common``."""
+"""Import-lint guard for the two shared layers, ``hyperloom_common`` and ``hyperloom.common``."""
 
 from __future__ import annotations
 
 import ast
 from pathlib import Path
 
-import common
 import hyperloom.common
+import hyperloom_common
 
 _FORBIDDEN_TOP_LEVEL = frozenset(
     {
@@ -47,19 +47,19 @@ def _imported_module_names(path: Path, package_name: str) -> list[str]:
 
 
 def test_common_modules_exist():
-    assert _py_files(common), "expected at least common/__init__.py to exist"
+    assert _py_files(hyperloom_common), "expected at least hyperloom_common/__init__.py to exist"
     assert _py_files(hyperloom.common), "expected at least hyperloom/common/__init__.py to exist"
 
 
 def test_common_imports_nothing_first_party():
-    """``common`` is the floor: it may not reach into either shipped package."""
+    """``hyperloom_common`` is the floor: it may not reach into either shipped package."""
     offenders = [
         f"{path.name}: import {module}"
-        for path in _py_files(common)
-        for module in _imported_module_names(path, "common")
+        for path in _py_files(hyperloom_common)
+        for module in _imported_module_names(path, "hyperloom_common")
         if module.split(".")[0] in {"hyperloom", "kernelforge"} | _FORBIDDEN_TOP_LEVEL
     ]
-    assert not offenders, f"common must not import first-party packages: {offenders}"
+    assert not offenders, f"hyperloom_common must not import first-party packages: {offenders}"
 
 
 def test_hyperloom_common_imports_only_common():
@@ -71,7 +71,7 @@ def test_hyperloom_common_imports_only_common():
                 offenders.append(f"{path.name}: import {module}")
             elif top == "hyperloom":
                 parts = module.split(".")
-                # Only hyperloom.common(.*) is allowed; `common` itself is the layer below.
+                # Only hyperloom.common(.*) is allowed; `hyperloom_common` itself is the layer below.
                 if len(parts) >= 2 and parts[1] != "common":
                     offenders.append(f"{path.name}: import {module}")
 

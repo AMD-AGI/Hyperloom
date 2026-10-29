@@ -31,7 +31,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from common.coerce import (
+from hyperloom_common.coerce import (
     text_or_none as _text_or_none,
     to_float as _float_or_none,
     to_int as _int_or_none,

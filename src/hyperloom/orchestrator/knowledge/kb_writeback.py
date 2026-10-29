@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from hyperloom.agents.framework.kb import LESSONS_FILE, framework_optimization_root
-from common.io import JsonLineFormat, append_jsonl
+from hyperloom_common.io import JsonLineFormat, append_jsonl
 
 
 #: Allowed ``outcome`` values; keep stable (downstream readers match exact strings).

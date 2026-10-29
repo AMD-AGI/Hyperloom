@@ -64,7 +64,7 @@ def _specialist_agent_cli_config(args: argparse.Namespace) -> dict[str, Any]:
     Raises:
         RuntimeError: If no runtime is found for the selected agent CLI.
     """
-    from common.llm_config import (
+    from hyperloom_common.llm.llm_config import (
         AGENT_BACKEND_CODEX,
         AGENT_BACKEND_DEEPSEEK,
         resolve_agent_backend,

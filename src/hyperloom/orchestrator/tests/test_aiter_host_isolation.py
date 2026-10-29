@@ -13,7 +13,7 @@ from __future__ import annotations
 import importlib.util
 import os
 
-from common.aiter_jit_cache import resolve_serving_context
+from hyperloom_common.aiter_jit_cache import resolve_serving_context
 from hyperloom.orchestrator.actions.executors import _aiter_jit
 
 

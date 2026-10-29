@@ -14,7 +14,7 @@ import math
 from typing import Any
 
 
-from common.coerce import to_mapping
+from hyperloom_common.coerce import to_mapping
 from hyperloom.common.perf_metric import INTVTY_OBJECTIVES
 
 from ..base import md_kv_list

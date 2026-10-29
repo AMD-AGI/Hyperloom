@@ -17,7 +17,7 @@ from typing import Any, Callable, Mapping
 
 import yaml
 
-from common.coerce import first_text
+from hyperloom_common.coerce import first_text
 from hyperloom.common.env_safety import build_benchmark_env
 from hyperloom.common.jsonio import read_json
 from hyperloom.common.visible_devices import VISIBLE_DEVICE_VARS, effective_mask_tokens, is_rocr_level

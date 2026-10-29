@@ -177,7 +177,7 @@ class TestLayoutFor:
 
     def test_an_uneven_division_raises_rather_than_flooring(self, monkeypatch):
         """A floored CU count matches no device, and reports the wrong cause."""
-        from common import gpu_identity
+        from hyperloom_common import gpu_identity
 
         oddball = gpu_identity.GpuBoard("oddball", "gfx950", 300, 288.0, 8000.0, {})
         monkeypatch.setitem(gpu_identity.AMD_GPU_BOARDS, "oddball", oddball)

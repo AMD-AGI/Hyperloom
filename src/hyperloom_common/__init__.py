@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""``common`` -- the zero-dependency library Hyperloom and KernelForge both build on."""
+"""``hyperloom_common`` -- the zero-dependency library Hyperloom and KernelForge both build on."""
 
 from __future__ import annotations
 

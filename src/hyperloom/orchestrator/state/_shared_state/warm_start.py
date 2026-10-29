@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from common.coerce import to_float
+from hyperloom_common.coerce import to_float
 
 # Pitfall rows rendered in full; the rest are counted.
 _PITFALLS_RENDERED = 5

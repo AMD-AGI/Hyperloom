@@ -8,7 +8,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any, NamedTuple
 
-from common.coerce import to_str_list
+from hyperloom_common.coerce import to_str_list
 from hyperloom.common.timeutil import now_iso
 
 # Long-run bounded-growth caps for append-only telemetry ledgers (tail-trim).

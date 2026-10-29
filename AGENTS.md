@@ -29,7 +29,7 @@ handlers and integrating external components.
 | Before taking up an upstream PR: whether an AMD deployment runs the code it changes, whether your tree has it, and what to do with it | [`.claude/skills/analyze-upstream-pr/`](.claude/skills/analyze-upstream-pr/) |
 
 Ships two packages: `src/hyperloom/` (the optimizer) and `src/kernelforge/` (the Forge
-kernel backend), over the `src/common/` library they both build on. All three are
+kernel backend), over the `src/hyperloom_common/` library they both build on. All three are
 exercised in CI.
 
 ## Common commands
@@ -159,9 +159,9 @@ doc is the authority on where that boundary lives.
   function with modes.
 - **Code shape.** A module is used through the names its owner exports; outside its owning
   package, an `_`-name or an `_internal` package is not an interface. A business-agnostic
-  helper that more than one module needs names no business concept and lives in `common`
+  helper that more than one module needs names no business concept and lives in `hyperloom_common`
   when both shipped packages need it, in `hyperloom.common` when only the optimizer does;
-  `common` imports nothing else from the project, so a helper reaching into `hyperloom` or
+  `hyperloom_common` imports nothing else from the project, so a helper reaching into `hyperloom` or
   `kernelforge` is not one. Ask the owner of a state rather than navigating its collaborators, and keep
   logic beside the state it reads. A per-framework, per-backend or per-arch fact is a
   field on the owner's spec, not a branch at each consumer; a closed vocabulary is one

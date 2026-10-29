@@ -24,7 +24,7 @@ try:
 except ModuleNotFoundError as exc:
     if exc.name != "aiter_jit_cache":
         raise
-    from common import aiter_jit_cache as _jit_cache
+    from hyperloom_common import aiter_jit_cache as _jit_cache
 
 DEFAULT_KERNEL_BACKUP_ROOT = "/var/kernel_patch_backups"
 

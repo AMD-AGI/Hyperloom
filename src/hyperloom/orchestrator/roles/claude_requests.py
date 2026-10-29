@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from hyperloom.common.timeutil import elapsed_ms, epoch_iso
-from common.token_usage import TOKEN_KEYS
+from hyperloom_common.llm.token_usage import TOKEN_KEYS
 from hyperloom.inference_optimizer.trace.context_events import COMPACT_BOUNDARY, compaction_attributes
 from hyperloom.inference_optimizer.trace.tool_events import ToolCall, tool_attributes, tool_status
 from hyperloom.inference_optimizer.trace.trajectory_trace import (
@@ -31,7 +31,7 @@ from hyperloom.inference_optimizer.trace.trajectory_trace import (
     new_span_id,
     record_event,
 )
-from common.coerce import to_int
+from hyperloom_common.coerce import to_int
 
 TIMING_STREAM = "stream_events"
 TIMING_ASSISTANT_MESSAGE = "assistant_message"

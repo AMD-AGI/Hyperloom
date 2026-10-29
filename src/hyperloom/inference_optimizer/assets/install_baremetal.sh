@@ -2354,7 +2354,7 @@ url_authority() {
 # DeepSeek is a dual-protocol gateway, not a third provider: /anthropic speaks
 # the Anthropic API and /v1 speaks OpenAI chat-completions, both authenticated
 # with the same key. Endpoint and model derivation matches
-# common.llm_config.deepseek_compat_env; ANTHROPIC_AUTH_TOKEN is
+# hyperloom_common.llm.llm_config.deepseek_compat_env; ANTHROPIC_AUTH_TOKEN is
 # deliberately not written here because .env only ever persists the API-key
 # spelling (see remove_dotenv_var ANTHROPIC_AUTH_TOKEN below).
 migrate_legacy_deepseek_env() {

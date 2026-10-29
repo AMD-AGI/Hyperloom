@@ -10,8 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic
 
-from common.deepseek_session import DEEPSEEK_RUNTIME_MAPPING, DeepSeekSession, DeepSeekSessionError
-from common.reasoning_effort import DEFAULT_REASONING_EFFORT, harness_reasoning_effort
+from hyperloom_common.llm.deepseek_session import DEEPSEEK_RUNTIME_MAPPING, DeepSeekSession, DeepSeekSessionError
+from hyperloom_common.llm.reasoning_effort import DEFAULT_REASONING_EFFORT, harness_reasoning_effort
 
 _LOG_PREFIX = "[deepseek-harness]"
 
