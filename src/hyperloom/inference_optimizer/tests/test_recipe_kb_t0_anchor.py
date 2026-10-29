@@ -781,6 +781,31 @@ def test_a_local_build_hits_the_row_its_release_recorded(
     assert state.framework_version == "0.4.5+rocm723"
 
 
+def test_a_version_t0_fills_in_keeps_its_build_while_the_row_keys_on_its_release(
+    kb: RecipeKB,
+    session_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A session that recorded no version takes the fingerprint's build string, not the release the cid uses."""
+    state = _FakeSharedState(framework_version="")
+    monkeypatch.delenv("HYPERLOOM_PARTITION_MODE", raising=False)
+
+    run_t0_anchor(
+        kb,
+        state,
+        T0AnchorRequest(
+            workload="M",
+            hw="MI300X",
+            stack_fingerprint={"sglang": "0.4.5+rocm723"},
+            extra_attrs={"framework_name": "sglang"},
+        ),
+        session_dir=session_dir,
+    )
+
+    assert state.framework_version == "0.4.5+rocm723"
+    assert kb.local.get_recipe(canonical_id=_expected_cid(_FakeSharedState(), "M", "MI300X")) is not None
+
+
 def test_a_row_filed_under_a_local_build_is_still_reached_from_its_release(
     kb: RecipeKB,
     session_dir: Path,

@@ -18,7 +18,7 @@ from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close
 from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
     ARM_CONFIG,
 )
-from hyperloom.inference_optimizer.recipe_snapshot_constants import RecipeIdentity
+from hyperloom.inference_optimizer.recipe_snapshot_constants import RecipeIdentity, detect_framework_version
 from hyperloom.inference_optimizer.session.optimization_journal import (
     OUTCOME_KEEP,
     OUTCOME_REVERT,
@@ -286,9 +286,12 @@ def amended_recipe_extras(live: Mapping[str, Any], overrides: Mapping[str, Any],
 
 
 def _framework_identity(state: Any) -> _FrameworkIdentity:
+    # Probed when the session never recorded a version, so a recipe is never filed under a blank one.
     name = str(state.framework or "")
-    version = recipe_framework_version(str(state.framework_version or ""), name)
-    return _FrameworkIdentity(name=name, version=version, precision=str(state.precision or ""))
+    version = str(state.framework_version or "")
+    if not version and name:
+        version = detect_framework_version(name)
+    return _FrameworkIdentity(name, recipe_framework_version(version), str(state.precision or ""))
 
 
 def _result_payload(result: Any) -> dict[str, Any]:

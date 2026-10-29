@@ -221,24 +221,20 @@ def test_detect_framework_version_reads_dunder_version(
     assert detected == "0.6.3+rocm"
 
 
-def _serve_vllm_from_an_isolated_venv(monkeypatch: pytest.MonkeyPatch, tmp_path, version: str) -> None:
+def test_detect_framework_version_reads_the_resolved_serving_interpreter(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """An isolated vLLM venv is not importable here; the KB key must not degrade to ``unknown_version``."""
     site = tmp_path / "vllm-venv" / "lib" / "python3.12" / "site-packages"
-    info = site / f"vllm-{version}.dist-info"
+    info = site / "vllm-0.29.0+rocm100.dist-info"
     info.mkdir(parents=True)
-    (info / "METADATA").write_text(f"Metadata-Version: 2.4\nName: vllm\nVersion: {version}\n")
+    (info / "METADATA").write_text("Metadata-Version: 2.4\nName: vllm\nVersion: 0.29.0+rocm100\n")
     bin_dir = tmp_path / "vllm-venv" / "bin"
     bin_dir.mkdir()
     (bin_dir / "python").symlink_to(sys.executable)
     monkeypatch.setenv("HYPERLOOM_RESOLVED_FRAMEWORK", "vllm")
     monkeypatch.setenv("HYPERLOOM_RESOLVED_FRAMEWORK_PYTHON", str(bin_dir / "python"))
     monkeypatch.setitem(sys.modules, "vllm", None)
-
-
-def test_detect_framework_version_reads_the_resolved_serving_interpreter(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> None:
-    """An isolated vLLM venv is not importable here; the KB key must not degrade to ``unknown_version``."""
-    _serve_vllm_from_an_isolated_venv(monkeypatch, tmp_path, "0.29.0+rocm100")
 
     assert detect_framework_version("vllm") == "0.29.0+rocm100"
 
@@ -258,15 +254,6 @@ def test_detect_framework_version_reads_the_resolved_serving_interpreter(
 )
 def test_recipe_framework_version_keys_on_the_release(version: str, release: str) -> None:
     assert recipe_framework_version(version) == release
-
-
-def test_recipe_framework_version_probes_a_blank_version_and_drops_the_build(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> None:
-    _serve_vllm_from_an_isolated_venv(monkeypatch, tmp_path, "0.29.0+rocm100")
-
-    assert recipe_framework_version("", "vllm") == "0.29.0"
-    assert recipe_framework_version("0.28.1+rocm100", "vllm") == "0.28.1"
 
 
 def test_detect_framework_version_falls_back_to_VERSION_constant(

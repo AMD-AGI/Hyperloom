@@ -11,7 +11,6 @@ from pathlib import Path
 from hyperloom.inference_optimizer.recipe_snapshot_constants import (
     DEFAULT_FRAMEWORK_VERSION_SLUG,
     RecipeIdentity,
-    detect_framework_version,
     recipe_canonical_id,
 )
 
@@ -39,17 +38,14 @@ class InvalidCanonicalIdError(ValueError):
         self.reason = reason
 
 
-def recipe_framework_version(version: str, framework: str = "") -> str:
+def recipe_framework_version(version: str) -> str:
     """The framework release a recipe identity is keyed by.
 
-    A blank ``version`` is probed from the installed ``framework`` when one is named, so a recipe is never filed under
-    a blank version. ``0.30.0+rocm723`` and ``v0.30.0`` both name release ``0.30.0``: the build suffix names the image
-    the release was compiled into, which ``framework_version`` in the session state keeps. An unknown version is
-    returned unchanged.
+    ``0.30.0+rocm723`` and ``v0.30.0`` both name release ``0.30.0``: the build suffix names the image the release was
+    compiled into, which ``framework_version`` in the session state keeps. A blank or unknown version is returned
+    unchanged.
     """
     text = str(version or "").strip()
-    if not text and framework:
-        text = detect_framework_version(framework)
     if not text or text == DEFAULT_FRAMEWORK_VERSION_SLUG:
         return text
     from kernelforge.knowledge import canonical_framework_version
