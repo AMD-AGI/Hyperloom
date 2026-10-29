@@ -240,9 +240,11 @@ the source install, which is a fallback rather than a validated path.
 `GEAK_ROOT` and `GEAK_E2E_RUNNER` follow their pins and reach the runtime
 through the kernel-agent env file, not `.env`. To override a TraceLens or GEAK
 checkout persistently, write its path into `.env` yourself; the installer
-leaves a path outside its cache as written. A TraceLens, GEAK or Magpie
-override that does not exist is reported and replaced by the pinned checkout. Export `MAGPIE_PATH` or
-`INFERENCEX_PATH` in the shell to override those.
+leaves a path outside its cache as written. A `TRACELENS_ROOT` or `GEAK_ROOT`
+override that does not exist is reported and replaced by the pinned checkout,
+and a `MAGPIE_PATH` that holds no Magpie package is reported and resolved from
+the installed package instead. Export `MAGPIE_PATH` or `INFERENCEX_PATH` in the
+shell to override those.
 After a code update that moves a pin, `install.sh --check-only` exits non-zero
 and names each stale key (`TRACELENS_ROOT`, `GEAK_ROOT`, `MAGPIE_REF`), and the
 optimizer's preflight refuses to start on a `TraceLens@<sha>` checkout that is
