@@ -12,7 +12,7 @@ from hyperloom_multibranch.contracts.llm_prices import TokenCounts, price_of
 from hyperloom_multibranch.contracts.blackboard.records import LlmUsage
 from hyperloom_multibranch.contracts.blackboard.vocab import UsageSource
 from hyperloom_multibranch.specialist.agent_onboard import ALLOWED_TOOLS, TOOLS, cli_onboard, onboard_argv
-from hyperloom_multibranch.specialist.agent_onboarding import AttemptFailed, ModelRefused
+from hyperloom_multibranch.specialist.agent_onboarding import AttemptFailed, GatewayDown, ModelRefused
 from hyperloom_multibranch.specialist.agent_session import AgentCommand
 
 MODEL = "claude-sonnet-5-5"
@@ -20,7 +20,12 @@ SUB_MODEL = "claude-haiku-5-5"
 TOO_OLD = (
     "API Error: 400 {'error': 'Claude Code 2.1.273 does not support this model; version 2.1.280 or newer is required'}"
 )
-API_ERRORS = {"api_too_old": (400, TOO_OLD), "api_overloaded": (529, "API Error: 529 overloaded")}
+UNREACHABLE = "API Error: Unable to connect to API (ERR_PROXY_TUNNEL)"
+API_ERRORS = {
+    "api_too_old": (400, TOO_OLD),
+    "api_overloaded": (529, "API Error: 529 overloaded"),
+    "api_unreachable": (None, UNREACHABLE),
+}
 
 # Stands in for `claude --print --output-format stream-json`: records how it was run, then streams as FAKE_MODE says.
 FAKE_CLI = """#!{python}
@@ -45,6 +50,16 @@ if mode == "hang":
 if mode == "crash":
     print("line one\\nauth failed: no key", file=sys.stderr)
     sys.exit(3)
+if mode.startswith("retried"):
+    # A CLI retries a model call that failed to connect; one that died meanwhile prints no result.
+    print(json.dumps({{"type": "system", "subtype": "init", "session_id": "s-1"}}))
+    for attempt in range(1, 4):
+        print(json.dumps({{"type": "system", "subtype": "api_retry", "attempt": attempt, "max_retries": 10}}))
+    if mode == "retried_then_answered":
+        message = {{"id": "m0", "model": "{model}", "content": []}}
+        print(json.dumps({{"type": "assistant", "message": message, "session_id": "s-1"}}))
+    print("killed", file=sys.stderr)
+    sys.exit(1)
 if mode.startswith("api_"):
     # How the CLI streams a model call the gateway refused: a synthetic assistant turn and an error result, exit 1.
     status, text = API_ERRORS[mode]
@@ -186,5 +201,30 @@ async def test_a_model_call_that_failed_for_a_moment_fails_only_its_attempt_nami
     with pytest.raises(AttemptFailed) as failed:
         await cli_onboard(command, env, "b07", _Usage())(checkout, "p")
 
-    assert not isinstance(failed.value, ModelRefused)
+    assert isinstance(failed.value, GatewayDown)
     assert str(failed.value) == "the onboarding model's call failed: API Error: 529 overloaded"
+
+
+async def test_a_model_call_that_could_not_reach_the_gateway_is_the_gateway_s_failure(tmp_path: Path) -> None:
+    command, env, checkout, _ = _setup(tmp_path, "api_unreachable")
+
+    with pytest.raises(GatewayDown) as failed:
+        await cli_onboard(command, env, "b07", _Usage())(checkout, "p")
+
+    assert str(failed.value) == f"the onboarding model's call failed: {UNREACHABLE}"
+
+
+async def test_a_run_that_died_retrying_its_model_call_is_the_gateway_s_failure(tmp_path: Path) -> None:
+    command, env, checkout, _ = _setup(tmp_path, "retried")
+
+    with pytest.raises(GatewayDown, match="exited 1"):
+        await cli_onboard(command, env, "b07", _Usage())(checkout, "p")
+
+
+async def test_a_run_that_died_after_its_retried_call_was_answered_is_its_own_failure(tmp_path: Path) -> None:
+    command, env, checkout, _ = _setup(tmp_path, "retried_then_answered")
+
+    with pytest.raises(AttemptFailed, match="exited 1") as failed:
+        await cli_onboard(command, env, "b07", _Usage())(checkout, "p")
+
+    assert not isinstance(failed.value, GatewayDown)

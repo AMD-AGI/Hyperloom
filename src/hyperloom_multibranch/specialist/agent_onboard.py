@@ -10,7 +10,9 @@ the checkout, which is what its spend is read from (:mod:`llm_usage`, as a speci
 goes to when onboarding failed. A run that exits non-zero, outlives its timeout or answers with an error raises
 :class:`~hyperloom_multibranch.specialist.agent_onboarding.AttemptFailed`, so it fails that attempt and the next one
 asks again; one whose model call the gateway refused says so with the gateway's words, and raises
-:class:`~hyperloom_multibranch.specialist.agent_onboarding.ModelRefused` when asking again cannot help. Its spend is the
+:class:`~hyperloom_multibranch.specialist.agent_onboarding.ModelRefused` when asking again cannot help. One whose call
+could not connect, met a server error or an overload, or that ended while the CLI was still retrying its call, raises
+:class:`~hyperloom_multibranch.specialist.agent_onboarding.GatewayDown`, which the preflight waits out. Its spend is the
 branch's either way, a run cut short included. Codex has no read-only headless mode this module drives, so it is
 refused.
 """
@@ -22,14 +24,21 @@ import json
 import os
 import re
 import signal
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 
 from hyperloom.common.llm_config import AGENT_BACKEND_CLAUDE
 from hyperloom_multibranch.contracts.blackboard.interfaces import UsageSink
 from hyperloom_multibranch.contracts.blackboard.records import LlmUsage
 from hyperloom_multibranch.contracts.blackboard.vocab import UsageSource
-from hyperloom_multibranch.specialist.agent_onboarding import ENCODING, AttemptFailed, ModelRefused, Onboard, tail
+from hyperloom_multibranch.specialist.agent_onboarding import (
+    ENCODING,
+    AttemptFailed,
+    GatewayDown,
+    ModelRefused,
+    Onboard,
+    tail,
+)
 from hyperloom_multibranch.specialist.agent_watch import MARKER, marked_pids
 from hyperloom_multibranch.specialist.agent_session import AgentCommand
 from hyperloom_multibranch.specialist.llm_usage import launch_cost, launch_usage
@@ -40,6 +49,13 @@ PASSING_CLIENT_ERRORS = frozenset({408, 409, 429})
 #: What the CLI answers when it is too old for the model, whatever status the gateway gave.
 TOO_OLD = "does not support this model"
 _API_ERROR = re.compile(r"^API Error: (\d{3})")
+#: How the CLI words a model call that never reached the gateway.
+_UNREACHABLE = re.compile(
+    r"ERR_PROXY_TUNNEL|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|socket hang up|Connection error|Unable to connect|"
+    r"fetch failed|Request timed out"
+)
+#: The model of the assistant turn the CLI makes up for a failed call; a turn of any other came from the model.
+SYNTHETIC_MODEL = "<synthetic>"
 LOG_PREFIX = "onboard-"
 #: The built-in tools the CLI has at all; what Bash may run is :data:`ALLOWED_TOOLS`.
 TOOLS = ("Read", "Glob", "Grep", "Bash")
@@ -99,18 +115,18 @@ def cli_onboard(
         try:
             returncode = await asyncio.wait_for(_run(argv, checkout, env, prompt, log), seconds)
         except asyncio.TimeoutError as error:
-            raise AttemptFailed(f"the onboarding CLI did not answer within {seconds:.0f} s") from error
+            raise _failed(log, f"the onboarding CLI did not answer within {seconds:.0f} s") from error
         finally:
             await _record(log, branch, command.model, usage)
         result = await asyncio.to_thread(final_result, log)
         if result is not None:
             _refuse_api_error(result)
         if returncode != 0:
-            raise AttemptFailed(f"the onboarding CLI exited {returncode}: {tail(_text(log))}")
+            raise _failed(log, f"the onboarding CLI exited {returncode}: {tail(_text(log))}")
         if result is None:
-            raise AttemptFailed(f"the onboarding CLI printed no result: {tail(_text(log))}")
+            raise _failed(log, f"the onboarding CLI printed no result: {tail(_text(log))}")
         if result.get("is_error"):
-            raise AttemptFailed(f"the onboarding CLI ended with an error: {tail(str(result.get('result')))}")
+            raise _failed(log, f"the onboarding CLI ended with an error: {tail(str(result.get('result')))}")
         return str(result.get("result") or "")
 
     return onboard
@@ -119,21 +135,13 @@ def cli_onboard(
 def final_result(log: Path) -> Mapping[str, object] | None:
     """The result event a stream-json ``log`` ends with; ``None`` when the CLI wrote none."""
 
-    for line in reversed(_text(log).splitlines()):
-        if '"type"' not in line:
-            continue
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(row, dict) and row.get("type") == "result":
-            return row
-    return None
+    return next((row for row in _events_backwards(log) if row.get("type") == "result"), None)
 
 
 def _refuse_api_error(result: Mapping[str, object]) -> None:
     """Raise when ``result`` says the model call failed: :class:`ModelRefused` when another call would meet the same
-    refusal, :class:`AttemptFailed` otherwise."""
+    refusal, :class:`GatewayDown` when the call could not connect or met a server error or a passing client error,
+    :class:`AttemptFailed` for any other status."""
 
     text = str(result.get("result") or "").strip()
     if not result.get("is_error"):
@@ -142,12 +150,42 @@ def _refuse_api_error(result: Mapping[str, object]) -> None:
     if not isinstance(status, int):
         found = _API_ERROR.match(text)
         status = int(found.group(1)) if found else None
-    if status is None and TOO_OLD not in text:
+    unreachable = _UNREACHABLE.search(text) is not None
+    if status is None and TOO_OLD not in text and not unreachable:
         return
     failed = f"the onboarding model's call failed: {tail(text)}"
     if TOO_OLD in text or status is not None and status // 100 == 4 and status not in PASSING_CLIENT_ERRORS:
         raise ModelRefused(failed)
+    if unreachable or status in PASSING_CLIENT_ERRORS or status is not None and status // 100 == 5:
+        raise GatewayDown(failed)
     raise AttemptFailed(failed)
+
+
+def _failed(log: Path, message: str) -> AttemptFailed:
+    """The failure of a run that streamed to ``log``: :class:`GatewayDown` when the run ended while the CLI was
+    retrying its model call, the CLI's retries of a call that does not connect outlasting the run."""
+
+    for row in _events_backwards(log):
+        if row.get("subtype") == "api_retry":
+            return GatewayDown(message)
+        turn = row.get("message")
+        if row.get("type") == "assistant" and isinstance(turn, dict) and turn.get("model") != SYNTHETIC_MODEL:
+            break
+    return AttemptFailed(message)
+
+
+def _events_backwards(log: Path) -> Iterator[dict[str, object]]:
+    """The events of the stream-json ``log``, last first."""
+
+    for line in reversed(_text(log).splitlines()):
+        if '"type"' not in line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(row, dict):
+            yield row
 
 
 async def _record(log: Path, branch: str, model: str, usage: UsageSink) -> None:

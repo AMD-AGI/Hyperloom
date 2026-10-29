@@ -7,10 +7,12 @@ The agent's source is fetched once into the branch's directory. Each attempt the
 reads that checkout, for the manifest (:mod:`agent_manifest`), writes the agent's config from it, runs its install
 commands in the branch's sandbox and starts it. An attempt fails with one line that says which step failed and what
 the step printed last, and the next attempt's prompt carries every earlier line, so the model corrects the manifest
-instead of repeating it; it starts :data:`RETRY_SECONDS` after the failure, so a gateway that failed for a moment does
-not take every attempt with it. After :data:`ATTEMPTS` failures the preflight raises
-:class:`~hyperloom_multibranch.specialist.runtime.PreflightFailed` with every line, and at once after a model call
-refused for a reason the next attempt would meet again (:class:`ModelRefused`).
+instead of repeating it; it starts :data:`RETRY_SECONDS` after the failure. An attempt whose model call could not reach
+the gateway or found it overloaded (:class:`GatewayDown`) is no attempt: the next one starts after a pause that doubles
+up to :data:`GATEWAY_PAUSE_SECONDS`, for as long as :func:`gateway_wait` allows, and only a failure past that counts.
+After :data:`ATTEMPTS` failures the preflight raises :class:`~hyperloom_multibranch.specialist.runtime.PreflightFailed`
+with every line, and at once after a model call refused for a reason the next attempt would meet again
+(:class:`ModelRefused`).
 
 An agent that writes a snapshot of each keep runs as a component of MB, in the mode Arbor's README describes: MB sets
 that mode, its host, the absolute deadline and the commit its keeps are read against in its config itself
@@ -39,8 +41,12 @@ from hyperloom_multibranch.specialist.agent_manifest import AgentManifest, Manif
 from hyperloom_multibranch.specialist.runtime import PreflightFailed
 
 ATTEMPTS = 3
-#: How long the next attempt waits after a failed one: about as long as the gateway's own outages last.
+#: How long the next attempt waits after a failed one, and the first pause after one that met the gateway down.
 RETRY_SECONDS = 60.0
+#: The longest pause between attempts that met the gateway down.
+GATEWAY_PAUSE_SECONDS = 600.0
+#: The longest a preflight waits for the gateway: past an outage of an hour and a half.
+GATEWAY_WAIT_SECONDS = 7200.0
 #: How long a started agent has to write its keep file or stay up before its start counts as made.
 START_SECONDS = 300.0
 INSTALL_SECONDS = 1800.0
@@ -213,21 +219,43 @@ class ModelRefused(AttemptFailed):
     or a CLI too old for the model."""
 
 
+class GatewayDown(AttemptFailed):
+    """The onboarding model's call could not reach the gateway or found it overloaded; the agent is not at fault, and
+    a later attempt may pass."""
+
+
 async def make_ready(source: str, spec: AgentSpec, agent_dir: Path, setup: OnboardingSetup) -> ReadyAgent:
     """Fetch ``source`` into ``agent_dir``, onboard it for ``spec`` and start it; raise
-    :class:`~hyperloom_multibranch.specialist.runtime.PreflightFailed` with one line per failed attempt."""
+    :class:`~hyperloom_multibranch.specialist.runtime.PreflightFailed` with one line per failed attempt. An attempt
+    that met the gateway down is made again, not counted, until :func:`gateway_wait` of ``spec`` has passed."""
 
     failures: list[str] = []
-    for attempt in range(1, setup.attempts + 1):
+    attempt, pause = 1, RETRY_SECONDS
+    until = setup.clock() + gateway_wait(spec)
+    while True:
         try:
             return await _attempt(source, spec, agent_dir, setup, tuple(failures))
         except ModelRefused as error:
             raise PreflightFailed([*failures, f"attempt {attempt}: {error}"]) from error
+        except GatewayDown as error:
+            if setup.clock() + pause <= until:
+                await setup.sleep(pause)
+                pause = min(pause * 2, GATEWAY_PAUSE_SECONDS)
+                continue
+            failures.append(f"attempt {attempt}: {error}")
         except (AttemptFailed, OSError) as error:
             failures.append(f"attempt {attempt}: {error}")
-        if attempt < setup.attempts:
-            await setup.sleep(RETRY_SECONDS)
-    raise PreflightFailed(failures)
+        if attempt == setup.attempts:
+            raise PreflightFailed(failures)
+        attempt += 1
+        await setup.sleep(RETRY_SECONDS)
+
+
+def gateway_wait(spec: AgentSpec) -> float:
+    """How long the preflight for ``spec`` waits for a gateway that is down: :data:`GATEWAY_WAIT_SECONDS`, and no more
+    than half of the agent's time, so that it still runs for the other half."""
+
+    return min(GATEWAY_WAIT_SECONDS, spec.seconds / 2) if spec.seconds else GATEWAY_WAIT_SECONDS
 
 
 async def _attempt(
@@ -468,6 +496,8 @@ Earlier attempts that failed, to correct rather than repeat:
 
 __all__ = [
     "ATTEMPTS",
+    "GATEWAY_PAUSE_SECONDS",
+    "GATEWAY_WAIT_SECONDS",
     "RETRY_SECONDS",
     "ENCODING",
     "SOURCE_DIR",
@@ -479,11 +509,13 @@ __all__ = [
     "AgentSpec",
     "AttemptFailed",
     "CommandResult",
+    "GatewayDown",
     "ModelRefused",
     "OnboardingSetup",
     "ReadyAgent",
     "agent_env",
     "component_config",
+    "gateway_wait",
     "install",
     "make_ready",
     "onboarding_prompt",

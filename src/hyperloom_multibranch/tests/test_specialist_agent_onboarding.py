@@ -15,12 +15,15 @@ import pytest
 
 from hyperloom_multibranch.specialist.agent_onboard import cli_onboard
 from hyperloom_multibranch.specialist.agent_onboarding import (
+    ATTEMPTS,
+    GATEWAY_PAUSE_SECONDS,
     RETRY_SECONDS,
     AgentSpec,
     CommandResult,
     ModelRefused,
     OnboardingSetup,
     agent_env,
+    gateway_wait,
     make_ready,
     onboarding_prompt,
     split_source,
@@ -225,6 +228,81 @@ async def test_the_onboarding_cli_failing_once_is_waited_out_and_the_next_attemp
     assert ready.process is process and ready.manifest.launch == "python3 -m agent run"
     assert RETRY_SECONDS in waits
     assert [used.launch for used in usage.recorded] == ["s-0", "s-1"]
+
+
+# Stands in for the onboarding Claude CLI behind a gateway that cannot be reached: its first FAKE_DOWN runs retry their
+# model call ten times and give up on the proxy tunnel, as the CLI does, every later one answers the manifest.
+OUTAGE_CLI = """#!{python}
+import json, os, sys
+sys.stdin.read()
+runs = os.environ["FAKE_RUNS"]
+count = int(open(runs).read()) if os.path.exists(runs) else 0
+open(runs, "w").write(str(count + 1))
+print(json.dumps({{"type": "system", "subtype": "init", "session_id": f"s-{{count}}"}}))
+if count < int(os.environ["FAKE_DOWN"]):
+    for attempt in range(1, 11):
+        retry = {{"type": "system", "subtype": "api_retry", "attempt": attempt, "max_retries": 10, "error_status": None}}
+        print(json.dumps(retry))
+    text = "API Error: Unable to connect to API (ERR_PROXY_TUNNEL)"
+    message = {{"id": "m0", "model": "<synthetic>", "content": [{{"type": "text", "text": text}}]}}
+    print(json.dumps({{"type": "assistant", "message": message, "is_api_error_message": True}}))
+    print(json.dumps({{"type": "result", "is_error": True, "result": text, "session_id": f"s-{{count}}"}}))
+    sys.exit(1)
+message = {{"id": "m1", "model": "claude-sonnet-5-5", "content": []}}
+print(json.dumps({{"type": "assistant", "message": message, "session_id": f"s-{{count}}"}}))
+print(json.dumps({{"type": "result", "is_error": False, "result": {answer!r}, "session_id": f"s-{{count}}"}}))
+"""
+
+
+class _Clock:
+    """A clock that moves only when the preflight sleeps."""
+
+    def __init__(self) -> None:
+        self.now, self.waits = 0.0, []
+
+    def __call__(self) -> float:
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        self.waits.append(seconds)
+        self.now += seconds
+
+
+def _outage(tmp_path: Path, down: int) -> tuple[OnboardingSetup, _Clock, Path, Process]:
+    cli = tmp_path / "claude"
+    cli.write_text(OUTAGE_CLI.format(python=sys.executable, answer=_manifest()), encoding="utf-8")
+    cli.chmod(0o755)
+    runs = tmp_path / "runs"
+    env = {"PATH": os.environ.get("PATH", ""), "FAKE_RUNS": str(runs), "FAKE_DOWN": str(down)}
+    onboard = cli_onboard(AgentCommand("claude", str(cli), "claude-sonnet-5-5"), env, "b01", _Usage())
+    clock, process = _Clock(), Process(None)
+    sandbox = Sandbox([process], keep="run/session.json")
+    return OnboardingSetup(sandbox, onboard, sleep=clock.sleep, clock=clock), clock, runs, process
+
+
+async def test_a_gateway_outage_longer_than_every_attempt_is_waited_out_and_the_agent_onboards(tmp_path: Path) -> None:
+    setup, clock, runs, process = _outage(tmp_path, down=ATTEMPTS + 2)
+
+    ready = await make_ready(str(_agent_repo(tmp_path)), SPEC, tmp_path / "agent", setup)
+
+    assert ready.process is process
+    assert runs.read_text() == str(ATTEMPTS + 3)
+    assert clock.waits == sorted(clock.waits) and clock.waits[0] == RETRY_SECONDS
+
+
+async def test_a_gateway_outage_is_waited_out_for_half_the_branch_s_time_then_spends_the_attempts(
+    tmp_path: Path,
+) -> None:
+    setup, clock, _runs, _process = _outage(tmp_path, down=1000)
+
+    with pytest.raises(PreflightFailed) as failed:
+        await make_ready(str(_agent_repo(tmp_path)), SPEC, tmp_path / "agent", setup)
+
+    assert len(failed.value.reasons) == ATTEMPTS
+    assert all("ERR_PROXY_TUNNEL" in reason for reason in failed.value.reasons)
+    wait = gateway_wait(SPEC)
+    assert wait == SPEC.seconds / 2
+    assert wait - GATEWAY_PAUSE_SECONDS < clock.now <= wait + RETRY_SECONDS * (ATTEMPTS - 1)
 
 
 async def test_an_agent_started_by_a_preflight_that_is_cancelled_is_killed(tmp_path: Path) -> None:
