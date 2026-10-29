@@ -14,6 +14,7 @@ from kernelforge.utils.process_reaping import ReapReport
 
 from kernelforge.agent_backends import AgentCapabilities, AgentRunResult
 from kernelforge.config import Config
+from kernelforge.evaluation.benchmark.runner import BenchRun
 from kernelforge.workflows.forge_loop.roles import specialist_probe
 from kernelforge.workflows.forge_loop.roles import specialist_probe_server as probe_server
 from kernelforge.workflows.forge_loop.roles.contracts import (
@@ -335,9 +336,9 @@ async def test_a_primitive_the_probe_cannot_call_is_reported_not_offered(tmp_pat
         outcome = await agent.run(_assignment(), _context(_workspace(tmp_path)))
 
     assert backend.specs[0].mcp_servers == {}
-    assert "does not accept driver_script" in outcome.content
+    assert "does not accept bench" in outcome.content
     assert "argued, not measured" in outcome.content
-    assert "does not accept driver_script" in caplog.text
+    assert "does not accept bench" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -398,7 +399,7 @@ async def test_an_unreadable_probe_ledger_is_reported_as_partial(tmp_path, monke
 # --- the probe server itself ------------------------------------------------
 
 
-async def _stub_primitive(*, driver_script, case_id, constants, timeout_sec, prefix_constants=True):
+async def _stub_primitive(*, bench, case_id, constants, timeout_sec, prefix_constants=True):
     """Stand in for PR-1's ``sweep_case``, with its result shape."""
     return {
         "success": True,
@@ -411,7 +412,7 @@ async def _stub_primitive(*, driver_script, case_id, constants, timeout_sec, pre
     }
 
 
-async def _failing_primitive(*, driver_script, case_id, constants, timeout_sec, prefix_constants=True):
+async def _failing_primitive(*, bench, case_id, constants, timeout_sec, prefix_constants=True):
     """PR-1 reports a configuration that did not run with no timing at all."""
     return {
         "success": False,
@@ -526,14 +527,16 @@ async def test_server_defaults_to_the_sweep_prefix(tmp_path, monkeypatch) -> Non
         return await _stub_primitive(**kwargs)
 
     _patch_primitive(monkeypatch, _recording_primitive)
+    sandbox = _sandbox(tmp_path)
 
     await specialist_probe.probe_variant(
         {"label": "widen", "driver_script": "driver.py", "case_id": "case-a"},
-        sandbox=_sandbox(tmp_path),
+        sandbox=sandbox,
         budget=specialist_probe.ProbeBudget(),
     )
 
     assert seen["prefix_constants"] is True
+    assert seen["bench"] == BenchRun(str(sandbox.workspace / "driver.py"), warmup_iters=3, bench_iters=20)
 
 
 @pytest.mark.asyncio
@@ -737,7 +740,7 @@ async def test_a_primitive_that_returns_no_timing_is_a_failed_probe(tmp_path, mo
 
 @pytest.mark.asyncio
 async def test_a_probe_that_overruns_its_ceiling_is_a_failed_probe(tmp_path, monkeypatch) -> None:
-    async def _hanging_primitive(*, driver_script, case_id, constants, timeout_sec, prefix_constants=True):
+    async def _hanging_primitive(*, bench, case_id, constants, timeout_sec, prefix_constants=True):
         await asyncio.sleep(30)
 
     _patch_primitive(monkeypatch, _hanging_primitive)

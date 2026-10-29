@@ -31,6 +31,17 @@ class QuantSkillRunResult:
     run_dir: Path | None = None
 
 
+@dataclass(frozen=True)
+class QuantSkillRunOptions:
+    """Operator settings of one :func:`quantize_via_prompt` run."""
+
+    quark_root: str | os.PathLike | None = None
+    interactive: bool | None = None
+    acceptable_eval_gap: float | None = None
+    max_requantize_attempts: int = 1
+    model: str | None = None
+
+
 _RUNS_DIR = "runs"
 
 
@@ -192,11 +203,7 @@ async def quantize_via_prompt(
     prompt: str,
     *,
     workspace: str | os.PathLike,
-    quark_root: str | os.PathLike | None = None,
-    interactive: bool | None = None,
-    acceptable_eval_gap: float | None = None,
-    max_requantize_attempts: int = 1,
-    model: str | None = None,
+    options: QuantSkillRunOptions = QuantSkillRunOptions(),
     runner_fn: RunOneAttemptFn | None = None,
     log: Callable[[str], None] | None = None,
 ) -> QuantSkillRunResult:
@@ -204,8 +211,7 @@ async def quantize_via_prompt(
     workspace_path = Path(workspace).resolve()
     workspace_path.mkdir(parents=True, exist_ok=True)
 
-    if quark_root is None:
-        quark_root = os.environ.get("QUARK_ROOT")
+    quark_root = os.environ.get("QUARK_ROOT") if options.quark_root is None else options.quark_root
     if not quark_root:
         return _build_failed_bootstrap_result(
             workspace_path,
@@ -221,7 +227,8 @@ async def quantize_via_prompt(
             f"(set $QUARK_ROOT or pass quark_root=; clone from {DEFAULT_QUARK_GIT_URL})",
         )
 
-    interactive_resolved = _resolve_interactive(interactive)
+    interactive_resolved = _resolve_interactive(options.interactive)
+    max_attempts = options.max_requantize_attempts
     run_attempt: RunOneAttemptFn = runner_fn or run_one_attempt
     run_dir = _new_run_dir(workspace_path)
 
@@ -236,11 +243,11 @@ async def quantize_via_prompt(
             workspace=run_dir,
             quark_root=quark_root_path,
             attempt_number=attempt_n,
-            acceptable_eval_gap=acceptable_eval_gap,
+            acceptable_eval_gap=options.acceptable_eval_gap,
             interactive=interactive_resolved,
             previous_outcome=last_outcome.value if isinstance(last_outcome, OutcomeId) else None,
         )
-        outcome = await _run_and_classify(attempt, run_attempt, model=model, log=log)
+        outcome = await _run_and_classify(attempt, run_attempt, model=options.model, log=log)
         attempts_list.append(outcome)
         last_outcome = outcome
 
@@ -248,7 +255,7 @@ async def quantize_via_prompt(
             outcome,
             fix_hypothesis=_fix_hypothesis_path(run_dir, attempt_n),
             interactive=interactive_resolved,
-            max_requantize_attempts=max_requantize_attempts,
+            max_requantize_attempts=max_attempts,
             counter=attempt_n - 1,
         )
         if decision.note:
@@ -261,7 +268,7 @@ async def quantize_via_prompt(
             break
 
         if log:
-            log(f"quantization-agent: retrying after outcome={outcome} (retry {attempt_n}/{max_requantize_attempts})")
+            log(f"quantization-agent: retrying after outcome={outcome} (retry {attempt_n}/{max_attempts})")
         attempt_n += 1
 
     artifacts = collect_artifacts(run_dir)
@@ -302,6 +309,7 @@ def _build_failed_bootstrap_result(
 
 
 __all__ = [
+    "QuantSkillRunOptions",
     "QuantSkillRunResult",
     "quantize_via_prompt",
 ]

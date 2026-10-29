@@ -20,7 +20,7 @@ from pathlib import Path
 from kernelforge.agent_backends.base import AgentRunSpec, AgentToolPolicy, watchdog_timeout_sec, with_writable_sandbox
 from kernelforge.agent_backends.registry import create_registered_backend
 from kernelforge.agent_backends.runtime import agent_runtime
-from kernelforge.utils.git import ensure_commit_identity, git, git_head
+from kernelforge.utils.git import ensure_commit_identity, git, git_apply, git_head
 from kernelforge.config import Config
 from kernelforge.config.edit_policy import FORGE_PROTECTED_PATHS
 from kernelforge.workflows.forge_loop.preparation.external_artifacts import (
@@ -163,7 +163,7 @@ def _git_apply_patch(workspace: Path, patch: str) -> None:
     """Re-apply a patch captured by ``_git_diff_patch`` (no-op for an empty patch)."""
     if not patch.strip():
         return
-    git("apply", "--whitespace=nowarn", cwd=workspace, input=patch)
+    git_apply(patch, "--whitespace=nowarn", cwd=workspace)
 
 
 def _git_untracked(workspace: Path) -> set[str]:

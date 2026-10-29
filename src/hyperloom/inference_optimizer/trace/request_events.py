@@ -15,7 +15,7 @@ from typing import Any
 
 from .parse_usage import _claude_result_output_tokens, _claude_stream_model, iter_json_events, normalize_usage
 from .tool_events import TIMING_NONE
-from .trajectory_trace import EVENT_LLM_REQUEST, STATUS_COMPLETED, record_event
+from .trajectory_trace import EVENT_LLM_REQUEST, STATUS_COMPLETED, EventSpan, record_event
 
 
 def stream_json_requests(log_path: str | Path) -> list[dict[str, Any]]:
@@ -68,7 +68,7 @@ def record_stream_json_requests(log_path: str | Path) -> None:
     for request in stream_json_requests(log_path):
         record_event(
             EVENT_LLM_REQUEST,
-            status=STATUS_COMPLETED,
+            span=EventSpan(status=STATUS_COMPLETED),
             attributes={**request, "name": request["model"] or "llm", "timing_source": TIMING_NONE, "complete": True},
         )
 

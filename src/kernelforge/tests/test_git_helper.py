@@ -19,6 +19,7 @@ from kernelforge.utils.git import (
     DEFAULT_TIMEOUT_SEC,
     GitError,
     git,
+    git_apply,
     git_async,
     git_bytes,
     git_checkout_branch,
@@ -82,13 +83,13 @@ def test_the_environment_overlay_extends_rather_than_replaces(tmp_path, monkeypa
     assert result.stdout.strip() == "inherited overlaid"
 
 
-def test_input_reaches_the_command(tmp_path):
+def test_the_patch_reaches_git_apply_on_stdin(tmp_path):
     root = _repo(tmp_path)
     patch = (
         "diff --git a/kernel.py b/kernel.py\n--- a/kernel.py\n+++ b/kernel.py\n@@ -1 +1 @@\n-VALUE = 1\n+VALUE = 2\n"
     )
 
-    git("apply", "-", cwd=root, input=patch)
+    git_apply(patch, "-", cwd=root)
 
     assert (root / "kernel.py").read_text() == "VALUE = 2\n"
 

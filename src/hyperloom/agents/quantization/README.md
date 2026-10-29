@@ -68,16 +68,18 @@ The CLI prints a JSON summary (`status` + `quantized_model_dir` + `run_dir` +
 
 ```python
 import asyncio
-from hyperloom.agents.quantization import quantize_via_prompt
+from hyperloom.agents.quantization import QuantSkillRunOptions, quantize_via_prompt
 
 async def main():
     result = await quantize_via_prompt(
         PROMPT,
         workspace="/scratch/qwen3-8b",
-        quark_root="/path/to/Quark",
-        interactive=False,
-        acceptable_eval_gap=0.05,
-        max_requantize_attempts=1,
+        options=QuantSkillRunOptions(
+            quark_root="/path/to/Quark",
+            interactive=False,
+            acceptable_eval_gap=0.05,
+            max_requantize_attempts=1,
+        ),
     )
     print(result.status)                       # success | partial | failed
     print(result.quantized_model_dir)          # Path | None

@@ -27,6 +27,7 @@ from hyperloom_kb import (
     QueryPlanValidationError,
     QuerySignal,
     RepresentativePolicy,
+    ResultShape,
     RetrievalCapability,
     RetrievalConfiguration,
     WeightedQueryPlan,
@@ -131,8 +132,7 @@ def _configuration(
         provider_refs={
             RetrievalCapability.FUZZY: LEXICAL_FUZZY_PROVIDER_REF,
         },
-        ranking_policy_ref=ranking,
-        representative_policy=representative,
+        shape=ResultShape(ranking_policy_ref=ranking, representative_policy=representative),
     )
 
 

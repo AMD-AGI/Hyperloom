@@ -1100,7 +1100,6 @@ def _run_install_step(
     step_id: str,
     category: str,
     action: Callable[[], Any],
-    success_status: str = "applied",
     **success_fields: Any,
 ) -> Any:
     try:
@@ -1112,7 +1111,7 @@ def _run_install_step(
             log.warning("failed to record SBD V6 install-step failure", exc_info=True)
         raise
     outcome = dict(result) if isinstance(result, dict) else {}
-    status = str(outcome.pop("status", success_status) or success_status)
+    status = str(outcome.pop("status", "applied") or "applied")
     skip_reason = outcome.pop("skip_reason", None)
     message = outcome.pop("message", None)
     fields = {**success_fields, **outcome}
