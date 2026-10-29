@@ -105,6 +105,34 @@ def test_a_token_cache_switch_set_to_a_flag_or_a_count_is_kept():
     assert problems == []
 
 
+_NUMERIC_SWITCH_PATCH = """\
++++ b/python/sglang/srt/environ.py
++    SGLANG_AITER_FUSED_AR_1STAGE_MAX_KB = EnvInt(None)
++    SGLANG_FUSED_AR = EnvBool(False)
++++ b/python/sglang/srt/entrypoints/openai/serving_chat.py
++        workers = int(os.environ.get("SGLANG_CHAT_RENDER_THREADS", "1"))
+"""
+
+
+def test_a_switch_the_patch_reads_as_a_number_needs_an_explicit_value():
+    """GLM-5.3: a KiB cutoff registered as "1" benched a 1 KiB fused-allreduce cutoff, the opposite of the patch."""
+    switches, problems = manifest.parse_manifest(
+        [
+            _entry("SGLANG_AITER_FUSED_AR_1STAGE_MAX_KB"),
+            _entry("SGLANG_FUSED_AR"),
+            _entry("SGLANG_CHAT_RENDER_THREADS", value="4"),
+        ],
+        patch_text=_NUMERIC_SWITCH_PATCH,
+    )
+    assert [(s["switch"], s["value"]) for s in switches] == [
+        ("SGLANG_FUSED_AR", "1"),
+        ("SGLANG_CHAT_RENDER_THREADS", "4"),
+    ]
+    assert problems == [
+        "dropped 'SGLANG_AITER_FUSED_AR_1STAGE_MAX_KB': the patch reads it as a number, so it needs an explicit value"
+    ]
+
+
 def test_a_switch_colliding_with_benchmark_config_is_dropped():
     """A switch already set by the config would be toggled by unrelated config."""
     switches, problems = manifest.parse_manifest(
@@ -692,6 +720,24 @@ async def test_a_rewrite_patch_is_benched_with_its_switches_on(tmp_path, monkeyp
     """An applied rewrite patch is inert, so benching it as-is would measure nothing."""
     _, _, benched_envs, _ = await _run_rewrite_integrate(tmp_path, monkeypatch, delta_pct=8.0)
     assert benched_envs == {"HL_HOIST": "1", "HL_CACHE": "1"}
+
+
+@pytest.mark.asyncio
+async def test_a_numeric_switch_without_a_value_is_not_benched_as_one(tmp_path, monkeypatch):
+    """A count or size switched to "1" benches a value the patch never meant."""
+    patch = _REWRITE_PATCH.replace(
+        "+    return 2\n",
+        '+    max_kb = int(os.environ.get("HL_MAX_KB", "128"))\n+    return 2\n',
+    ).replace("@@ -1,2 +1,2 @@", "@@ -1,2 +1,3 @@")
+    result, _, benched_envs, _ = await _run_rewrite_integrate(
+        tmp_path,
+        monkeypatch,
+        delta_pct=8.0,
+        patch_body=patch,
+        switches=[{"switch": "HL_HOIST"}, {"switch": "HL_MAX_KB"}],
+    )
+    assert benched_envs == {"HL_HOIST": "1"}
+    assert [row["switch"] for row in result["framework_levers"]] == ["HL_HOIST"]
 
 
 @pytest.mark.asyncio

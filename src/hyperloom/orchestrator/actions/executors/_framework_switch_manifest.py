@@ -22,9 +22,15 @@ log = logging.getLogger(__name__)
 # Manifest key on the specialist's done payload / the integrate_patch params.
 MANIFEST_KEY = "framework_switches"
 
-# Default value assigned to a switch whose manifest entry omits one. The
-# rewrites are boolean fast paths, so "on" is the only value that matters.
+# Default value assigned to a boolean switch whose manifest entry omits one.
 DEFAULT_SWITCH_VALUE = "1"
+
+# An env read as a number in an added patch line: sglang ``EnvInt``/``EnvFloat``, ``get_int_env_var``, or a cast.
+_NUMERIC_ENV_READ = re.compile(
+    r"\b([A-Za-z_]\w*)\s*[:=]\s*Env(?:Int|Float)\("
+    r"|\bget_(?:int|float)_env_var\(\s*['\"](\w+)['\"]"
+    r"|\b(?:int|float)\(\s*os\.(?:environ\.get\(|getenv\(|environ\[)\s*['\"](\w+)['\"]"
+)
 
 # Recognised rewrite categories, mirroring ``_framework_rewrite_evidence`` plus the two that are not host-observable
 # and therefore never appear in evidence.
@@ -90,7 +96,17 @@ def _declared_value(entry: dict[str, Any]) -> str:
     return str(value).strip() if value not in (None, "") else DEFAULT_SWITCH_VALUE
 
 
-def _accept_switches(entries: list[dict[str, Any]], reserved: set[str]) -> _AcceptedSwitches:
+def _numeric_switches(patch_text: str) -> set[str]:
+    """Upper-case env names the patch's added lines read as a number."""
+    return {
+        next(name for name in match.groups() if name).upper()
+        for line in patch_text.splitlines()
+        if line.startswith("+")
+        for match in _NUMERIC_ENV_READ.finditer(line)
+    }
+
+
+def _accept_switches(entries: list[dict[str, Any]], reserved: set[str], numeric: set[str]) -> _AcceptedSwitches:
     """Keep the entries that name a usable rewrite switch, reporting why the rest were dropped."""
     problems: list[str] = []
     accepted: dict[str, dict[str, Any]] = {}
@@ -108,6 +124,9 @@ def _accept_switches(entries: list[dict[str, Any]], reserved: set[str]) -> _Acce
             continue
         if is_secret_shaped_env_name(upper) and not _LITERAL_VALUE.fullmatch(_declared_value(entry)):
             problems.append(f"dropped {name!r}: credential-shaped name, not a rewrite switch")
+            continue
+        if upper in numeric and entry.get("value") in (None, ""):
+            problems.append(f"dropped {name!r}: the patch reads it as a number, so it needs an explicit value")
             continue
         if upper in reserved:
             problems.append(
@@ -168,6 +187,7 @@ def parse_manifest(
     raw: Any,
     *,
     reserved_env: "frozenset[str] | set[str] | None" = None,
+    patch_text: str = "",
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Parse and validate a switch manifest."""
     entries = _manifest_entries(raw)
@@ -182,7 +202,7 @@ def parse_manifest(
         entries = entries[:MAX_SWITCHES]
 
     reserved = {str(k).strip().upper() for k in (reserved_env or set())}
-    accepted = _accept_switches(entries, reserved)
+    accepted = _accept_switches(entries, reserved, _numeric_switches(patch_text))
     switches = accepted.by_name
     problems.extend(accepted.problems)
     problems.extend(_resolve_edge_references(switches))
