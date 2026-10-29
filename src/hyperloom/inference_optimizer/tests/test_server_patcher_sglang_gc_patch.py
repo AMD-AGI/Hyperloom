@@ -57,7 +57,6 @@ def _fake_sglang(monkeypatch, pkg: Path, version: str) -> None:
     mod.__version__ = version
     mod.__file__ = str(pkg / "__init__.py")
     monkeypatch.setitem(sys.modules, "sglang", mod)
-    monkeypatch.delenv("HYPERLOOM_SGLANG_SHAPE_MODE", raising=False)
     monkeypatch.delenv("HYPERLOOM_SGLANG_VERSION_PIN", raising=False)
 
 
@@ -142,7 +141,7 @@ def test_missing_gc_tree_fails_soft(tmp_path: Path, monkeypatch):
 
 
 def test_multi_node_controller_without_sglang_defers(monkeypatch):
-    monkeypatch.setenv("HYPERLOOM_SGLANG_SHAPE_MODE", "sitecustomize")
+    monkeypatch.setenv("HYPERLOOM_SGLANG_VERSION_PIN", "0.5.21")
     monkeypatch.setattr(_server_patcher, "_detect_installed_sglang_version", lambda: None)
     monkeypatch.setattr(_server_patcher, "_gc_patch_deferred_to_pods", lambda: True)
 
@@ -150,7 +149,7 @@ def test_multi_node_controller_without_sglang_defers(monkeypatch):
 
 
 def test_local_process_without_sglang_reports_failure(monkeypatch):
-    monkeypatch.setenv("HYPERLOOM_SGLANG_SHAPE_MODE", "sitecustomize")
+    monkeypatch.setenv("HYPERLOOM_SGLANG_VERSION_PIN", "0.5.21")
     monkeypatch.setattr(_server_patcher, "_detect_installed_sglang_version", lambda: None)
     monkeypatch.setattr(_server_patcher, "_gc_patch_deferred_to_pods", lambda: False)
 

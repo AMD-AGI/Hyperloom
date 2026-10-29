@@ -6,11 +6,11 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 
 import click
 
-from kernelforge.option_groups import option_group
+from kernelforge.cli.option_groups import option_group
+from kernelforge.config import CEILING_OFF, CEILING_ON, AgentRuntimeOptions, CeilingSwitch, GpuOptions
 
 
 MIN_MAX_HOURS = 1.0  # a run shorter than this can't complete a productive campaign
@@ -30,29 +30,6 @@ def _normalize_gpu_type(_ctx, _param, value):
     if value is None:
         return "mi355x"
     return str(value).strip().lower()
-
-
-CEILING_ON = "on"
-CEILING_OFF = "off"
-
-
-@dataclass(frozen=True)
-class CeilingSwitch:
-    """The ``--roofline-ceiling`` choice."""
-
-    roofline_ceiling: str
-
-    @property
-    def enabled(self) -> bool:
-        return self.roofline_ceiling == CEILING_ON
-
-
-@dataclass(frozen=True)
-class GpuOptions:
-    """The ROCm compilation architecture and the hardware SKU used in KB identities."""
-
-    gpu_target: str | None
-    gpu_type: str
 
 
 def _gpu_options(gpu_type_help: str):
@@ -93,31 +70,6 @@ def _roofline_ceiling_option(help_text: str):
     )
 
 
-def _validate_roofline_target(target: float, ceiling_enabled: bool) -> float:
-    """Check the attainment target is a fraction, and that a ceiling can reach it.
-
-    A target above one is unreachable by construction -- attainment is bounded
-    by the ceiling it divides by -- and a target without ``--roofline-ceiling
-    on`` is a stop condition that can never fire. Both are refused rather than
-    run, because either one leaves a campaign quietly ignoring the limit its
-    operator thought they had set.
-    """
-    value = float(target or 0.0)
-    if value <= 0:
-        return 0.0
-    if value > 1.0:
-        raise click.BadParameter(
-            f"--roofline-target {value} is a fraction of the ceiling, so it cannot exceed 1.0",
-            param_hint="--roofline-target",
-        )
-    if not ceiling_enabled:
-        raise click.BadParameter(
-            "--roofline-target needs a ceiling to measure against; pass --roofline-ceiling on",
-            param_hint="--roofline-target",
-        )
-    return value
-
-
 def _validate_agent_provider(ctx, param, value):
     """Validate a dynamic built-in or entry-point provider name."""
     if value is None:
@@ -144,19 +96,17 @@ def _validate_optional_agent_provider(ctx, param, value):
     return _validate_agent_provider(ctx, param, value)
 
 
-@dataclass(frozen=True)
-class AgentRuntimeOptions:
-    """Provider-neutral Agent runtime options; ``None`` leaves a setting to ``Config.from_env``."""
-
-    model: str | None
-    agent_backend: str | None
-    agent_cli: str | None
-    agent_timeout_sec: int | None
-    agent_reasoning_effort: str | None
-    agent_sandbox_mode: str | None
-    agent_fallback_provider: str | None
-    agent_precheck: bool | None
-    agent_options_json: str | None
+def _parse_agent_options(ctx, param, value):
+    """Read ``--agent-options-json`` as the JSON object of provider extension options it must be."""
+    if value is None:
+        return None
+    try:
+        provider_options = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise click.BadParameter(f"invalid JSON: {exc}", ctx=ctx, param_hint="--agent-options-json") from exc
+    if not isinstance(provider_options, dict):
+        raise click.BadParameter("must be a JSON object", ctx=ctx, param_hint="--agent-options-json")
+    return provider_options
 
 
 # Provider-neutral Agent runtime options, one ``AgentRuntimeOptions`` per command.
@@ -205,37 +155,9 @@ _agent_runtime_options = option_group(
     ),
     click.option(
         "--agent-options-json",
+        "agent_options",
         default=None,
+        callback=_parse_agent_options,
         help="Provider extension options as a JSON object",
     ),
 )
-
-
-def _agent_runtime_overrides(options: AgentRuntimeOptions) -> dict:
-    """Convert provider-neutral CLI values into Config overrides."""
-    values = {
-        "agent_model": options.model,
-        "agent_backend": options.agent_backend,
-        "agent_cli": options.agent_cli,
-        "agent_timeout_sec": options.agent_timeout_sec,
-        "agent_reasoning_effort": options.agent_reasoning_effort,
-        "agent_sandbox_mode": options.agent_sandbox_mode,
-        "agent_fallback_provider": options.agent_fallback_provider,
-        "agent_precheck": options.agent_precheck,
-    }
-    overrides = {key: value for key, value in values.items() if value is not None}
-    if options.agent_options_json is not None:
-        try:
-            provider_options = json.loads(options.agent_options_json)
-        except json.JSONDecodeError as exc:
-            raise click.BadParameter(
-                f"invalid JSON: {exc}",
-                param_hint="--agent-options-json",
-            ) from exc
-        if not isinstance(provider_options, dict):
-            raise click.BadParameter(
-                "must be a JSON object",
-                param_hint="--agent-options-json",
-            )
-        overrides["agent_options"] = provider_options
-    return overrides

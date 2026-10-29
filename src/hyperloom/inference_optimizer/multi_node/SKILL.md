@@ -34,8 +34,8 @@ re-provisioned cluster rewrites them).
 | Restart server | `restart-server`  | `kubectl exec … sglang.launch_server`     |
 | Kill server    | `kill-inference`  | `pkill -f sglang`                         |
 
-Bypassing loses exit-2 + `MULTI_NODE_FAILURE_SNAPSHOT={…}` failure detection,
-cross-subcommand state, and `BENCHMARK_BASE_URL` plumbing for Magpie.
+Bypassing loses the stable exit codes, cross-subcommand state, and
+`BENCHMARK_BASE_URL` plumbing for Magpie.
 
 ## Backends
 
@@ -241,21 +241,22 @@ in-flight launch (`MULTI_NODE_RESTART_RESUME_RUNNING=1`, default).
 | Code | Meaning | Controller action |
 |-----:|---------|--------------------|
 | 0 | success | continue |
-| 1 | transient (poll timeout / network / unknown) | rerun the SAME subcommand |
-| 2 | cluster unusable (no hand-off, infera without SSH, pods gone) | DO NOT retry; stderr may carry `MULTI_NODE_FAILURE_SNAPSHOT={…}` |
-| 3 | config error (missing env / arg) | fix args/env, then rerun |
+| 1 | transient (poll timeout / network / unknown / Ray job ended FAILED or STOPPED) | rerun the SAME subcommand; read the job logs first when the job itself failed |
+| 2 | usage error (bad arguments, `--pd-mode disaggregated` on one node) | fix the call, then rerun |
+| 3 | config error (missing hand-off env / required state / arg) | fix args/env, then rerun |
 | 130 | SIGINT | user aborted |
 
 ## When Something Looks Wrong
 
-* **Exit 2 "no cluster"** → hand-off env missing. Check
+* **Exit 3 "HYPERLOOM_MN_EXT_SERVICE_URL is unset"** → hand-off env missing. Check
   `HYPERLOOM_MN_EXT_SERVICE_URL` (+ infera `_SSH_KEY` and one `*_IPS`);
   provisioning is upstream of this CLI.
 * **`ModuleNotFoundError: sglang`** + stderr shows `sglang.launch_server` on the
   sandbox → the client-only rule above tripped; fix env propagation.
 * **`restart-server` succeeded then `/health` timed out** → framework early-exit;
-  the driver exits 2 + `MULTI_NODE_FAILURE_SNAPSHOT={kind:"framework_early_exit"}`
-  and the `rank_0.log` tail names the cause.
+  the pod-side launch driver exits 2 and its job logs carry
+  `MULTI_NODE_FAILURE_SNAPSHOT={kind:"framework_early_exit"}`; the CLI reports
+  the failed job as exit 1, and the `rank_0.log` tail names the cause.
 * **Cross-node NCCL/RCCL collective hangs → watchdog abort, weights never load**
   (server GPU mem stays near 0) → the pods lack a usable RDMA device
   (`ibv_devices` empty, no `/dev/infiniband`) while NCCL is forced onto IB

@@ -381,6 +381,8 @@ omit = [
     "src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py",
     "src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py",
     "src/hyperloom/orchestrator/kernel/apply_kernel_patch.py",
+    "src/hyperloom/orchestrator/kernel/patch_jit_cache.py",
+    "src/hyperloom/orchestrator/kernel/patch_rebuild.py",
     # GEAK runner and Ray cluster lifecycle (subprocess submit).
     "src/hyperloom/orchestrator/kernel/geak_runner.py",
     "src/hyperloom/orchestrator/actions/executors/_ray_runtime.py",
@@ -415,9 +417,10 @@ omit = [
     "src/kernelforge/knowledge/kb_store/remote_client.py",
     # CLI entry points (argument plumbing; exercised via the CLIs themselves).
     "src/kernelforge/cli/*",
-    "src/kernelforge/gemm_tune/cli.py",
-    "src/kernelforge/fusion/command.py",
-    # The forge-fuse stages command.py drives.
+    # The gemm-tune and forge-fuse pipelines and the stages they drive: agent sessions,
+    # tuner subprocesses and serving runs end to end.
+    "src/kernelforge/gemm_tune/pipeline.py",
+    "src/kernelforge/fusion/pipeline.py",
     "src/kernelforge/fusion/agent_selection.py",
     "src/kernelforge/fusion/compile_pass_claim.py",
     "src/kernelforge/fusion/harness_authoring.py",

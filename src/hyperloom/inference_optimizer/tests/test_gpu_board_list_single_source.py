@@ -170,13 +170,6 @@ def test_the_roofline_vendor_specs_are_the_board_facts():
             assert spec["peak_tflops"][precision] == peak, (product, precision)
 
 
-def test_the_bypass_roofline_reads_the_same_specs():
-    from hyperloom.inference_optimizer import roofline_ceiling
-    from hyperloom.orchestrator.trace_analysis import _bypass_roofline
-
-    assert _bypass_roofline.HW_SPECS is roofline_ceiling.HW_SPECS
-
-
 def test_server_reuse_covers_the_vllm_script_of_every_reusing_runner():
     from hyperloom.orchestrator.actions.executors._server_lifecycle import MAGPIE_BUILTIN_SCRIPTS
 

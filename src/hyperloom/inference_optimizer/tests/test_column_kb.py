@@ -27,7 +27,7 @@ from hyperloom.orchestrator.knowledge.remote_recipe.values import (
     build_remote_knowledge,
     knowledge_to_warm_recipe,
 )
-from hyperloom.orchestrator.phases.prelude import _merge_named_current_recipe_configs
+from hyperloom.orchestrator.phases.prelude_warm_kernel import _merge_named_current_recipe_configs
 
 
 def _build_knowledge(state, files_dir, *, sections):

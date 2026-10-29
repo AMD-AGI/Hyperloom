@@ -56,6 +56,7 @@ _CANDIDATE_ERROR_CLASSES = frozenset(
 _ENVIRONMENT_ERROR_CLASSES = frozenset({"mn_server_restart_failed"})
 _HARNESS_ERROR_CLASSES = frozenset(
     {
+        "benchmark_cap_error",
         "benchmark_report_invalid_metric",
         "benchmark_report_missing",
         "eval_probe_unpatchable",

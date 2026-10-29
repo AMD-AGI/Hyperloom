@@ -971,7 +971,7 @@ def _stub_geak_runner_call(monkeypatch, outcome) -> list[str]:
             return outcome()
         return await original_to_thread(func, *args, **kwargs)
 
-    monkeypatch.setattr("hyperloom.orchestrator.phases.kernel.asyncio.to_thread", _to_thread)
+    monkeypatch.setattr("hyperloom.orchestrator.phases.kernel_geak_dispatch.asyncio.to_thread", _to_thread)
     return calls
 
 
@@ -1246,7 +1246,7 @@ async def test_invalid_handoff_configuration_never_launches_geak(coordinator, mo
         pytest.fail("Invalid launch configuration must stop before runner invocation")
 
     monkeypatch.setattr(coordinator.writeback, "build_env_spec", invalid_spec)
-    monkeypatch.setattr("hyperloom.orchestrator.phases.kernel.subprocess.Popen", must_not_launch)
+    monkeypatch.setattr("hyperloom.orchestrator.phases.kernel_geak_dispatch.subprocess.Popen", must_not_launch)
     coordinator.shared_state.benchmark_mode = mode
     previous = {"status": "ok", "revalidation_status": "no_promote", "accepted_config": {"flags": "--old"}}
     if settled:

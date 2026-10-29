@@ -15,8 +15,8 @@ from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.specialists.domains import (
     get_domain,
 )
+from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
-    SpecialistPromptInputs,
     _section_roofline_evidence,
     build_specialist_prompts,
 )
@@ -212,6 +212,15 @@ def test_section_renders_none_when_evidence_empty():
     text = "\n".join(section)
     assert "## 4a. ROOFLINE EVIDENCE" in text
     assert "(none" in text
+
+
+@pytest.mark.parametrize(
+    ("report", "label"),
+    [("/sd/analysis.md", "Full analysis.md path"), ("/sd/analysis.json", "Full TraceLens report path")],
+)
+def test_section_labels_the_report_by_its_format(report, label):
+    section = _section_roofline_evidence(_make_inp({"analysis_md_path": report}))
+    assert f"**{label}:** `{report}`" in section
 
 
 def test_build_specialist_prompts_inserts_section_between_kb_and_recipe():

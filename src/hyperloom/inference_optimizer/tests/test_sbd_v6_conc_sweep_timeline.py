@@ -131,7 +131,6 @@ def _plan(recorder) -> None:
             concs_ordered=[32, 64],
             grid_source=GRID_REQUESTED,
             num_prompts_factor=5,
-            variant_timeout_sec=1800,
             arms_order=[ARM_BASELINE, ARM_OPTIMIZED],
         )
     )

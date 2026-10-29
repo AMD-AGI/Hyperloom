@@ -20,7 +20,6 @@ def call_key_fields(record: Any) -> dict[str, Any]:
         "call_id": text_or_none(record.call_id),
         "role": text_or_none(record.role),
         "task_id": text_or_none(record.task_id),
-        "dyn_id": text_or_none(record.dyn_id),
         "tick": to_int(record.tick),
         "phase": text_or_none(record.phase),
         "turn": to_int(record.turn),

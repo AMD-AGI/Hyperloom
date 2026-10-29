@@ -14,6 +14,7 @@ import pytest
 
 from hyperloom.inference_optimizer import cli
 from hyperloom.inference_optimizer.cli import credentials as cli_credentials
+from hyperloom.inference_optimizer.cli import model_catalog
 from hyperloom.inference_optimizer import gpu_types
 from hyperloom.inference_optimizer.cli.parser import _build_parser
 
@@ -185,16 +186,17 @@ def test_validate_credentials_exits_2_when_no_key(clean_creds_env, capsys):
         cli_credentials._validate_credentials()
     assert exc_info.value.code == 2
     err = capsys.readouterr().err
-    assert "API key" in err
+    assert "usable endpoint/key pair" in err
 
 
-def test_validate_credentials_lists_both_missing(clean_creds_env, capsys):
+def test_validate_credentials_names_the_missing_pair(clean_creds_env, capsys):
     with pytest.raises(SystemExit):
         cli_credentials._validate_credentials()
     err = capsys.readouterr().err
     missing_line = err.split("Missing required credential(s):")[1].split("\n")[0]
     assert "usable endpoint/key pair" in missing_line
-    assert "API key" in missing_line
+    assert "OPENAI_API_KEY" in missing_line
+    assert "CLAUDE_CODE_OAUTH_TOKEN" in missing_line
 
 
 def test_validate_credentials_no_bypass_paths(clean_creds_env):
@@ -311,7 +313,7 @@ def test_validate_credentials_accepts_dual_entry_with_distinct_keys(clean_creds_
 def test_openai_key_only_makes_claude_follow_codex_before_preflight(clean_creds_env):
     """Key-only official OpenAI must select Codex orchestration before preflight writes OPENAI_BASE_URL."""
     clean_creds_env.setenv("_".join(("OPENAI", "API", "KEY")), "openai-fake-token")
-    assert cli._claude_model_should_follow_codex() is True
+    assert model_catalog._claude_model_should_follow_codex() is True
 
 
 def test_anthropic_only_critic_agent_runtime_needed(clean_creds_env):
@@ -321,19 +323,19 @@ def test_anthropic_only_critic_agent_runtime_needed(clean_creds_env):
     clean_creds_env.setenv("ANTHROPIC_BASE_URL", anthropic_url)
     if openai_url:
         clean_creds_env.setenv("OPENAI_BASE_URL", openai_url)
-    assert cli._critic_agent_runtime_needed("agent") is True
+    assert model_catalog._critic_agent_runtime_needed("agent") is True
 
 
 def test_critic_agent_runtime_always_needed_for_agent_choice(clean_creds_env):
     """Preflight may add stale/runtime OpenAI env, but the runtime is required either way: there is no longer a degraded critic that skips it."""
     clean_creds_env.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
     clean_creds_env.setenv("_".join(("ANTHROPIC", "API", "KEY")), "anthropic-fake-token")
-    assert cli._codex_model_should_follow_claude() is True
+    assert model_catalog._codex_model_should_follow_claude() is True
 
     clean_creds_env.setenv("OPENAI_BASE_URL", "https://api.anthropic.com")
     clean_creds_env.setenv("_".join(("OPENAI", "API", "KEY")), "stale-openai-token")
 
-    assert cli._critic_agent_runtime_needed("agent") is True
+    assert model_catalog._critic_agent_runtime_needed("agent") is True
 
 
 def test_build_backends_keeps_anthropic_critic_when_codex_follows_claude(
@@ -384,7 +386,7 @@ def test_openai_only_critic_agent_runtime_needed(clean_creds_env):
     clean_creds_env.setenv("_".join(("OPENAI", "API", "KEY")), "openai-fake-token")
     openai_url = cli_credentials._resolve_llm_endpoints()[1]
     clean_creds_env.setenv("OPENAI_BASE_URL", openai_url)
-    assert cli._critic_agent_runtime_needed("agent") is True
+    assert model_catalog._critic_agent_runtime_needed("agent") is True
 
 
 def test_resolve_llm_endpoints_ignores_retired_deepseek_key(clean_creds_env):
@@ -442,7 +444,7 @@ def _record_probed_urls(monkeypatch, catalog: set[str]) -> list[str]:
         probed.append(base_url)
         return catalog if api_key else None
 
-    monkeypatch.setattr(cli, "_probe_llm_catalog", fake_probe)
+    monkeypatch.setattr(model_catalog, "_probe_llm_catalog", fake_probe)
     return probed
 
 
@@ -454,7 +456,7 @@ def test_catalog_probe_skips_keyless_anthropic_side_and_uses_the_gateway(clean_c
     probed = _record_probed_urls(clean_creds_env, {"claude-opus-5"})
     args = argparse.Namespace(claude_model="claude-opus-5")
 
-    cli._validate_and_resolve_claude_model(args, ("https://api.anthropic.com", "https://gw.example.com/v1"))
+    model_catalog._validate_and_resolve_claude_model(args, ("https://api.anthropic.com", "https://gw.example.com/v1"))
 
     assert probed == ["https://gw.example.com/v1"]
 
@@ -468,7 +470,7 @@ def test_catalog_probe_keeps_anthropic_side_when_it_has_its_own_key(clean_creds_
     probed = _record_probed_urls(clean_creds_env, {"claude-opus-5"})
     args = argparse.Namespace(claude_model="claude-opus-5")
 
-    cli._validate_and_resolve_claude_model(args, ("https://api.anthropic.com", "https://gw.example.com/v1"))
+    model_catalog._validate_and_resolve_claude_model(args, ("https://api.anthropic.com", "https://gw.example.com/v1"))
 
     assert probed == ["https://api.anthropic.com"]
 

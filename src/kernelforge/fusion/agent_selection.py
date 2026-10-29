@@ -9,9 +9,8 @@ import logging
 import os
 from typing import Optional
 
-import click
-
 from kernelforge.config import resolve_agent_model, resolve_agent_reasoning_effort
+from kernelforge.fusion.errors import FuseUsageError
 from kernelforge.agent_backends.base import AgentProviderUnavailableError, AgentRuntimeSettings
 from kernelforge.agent_backends.registry import (
     create_registered_backend,
@@ -75,7 +74,7 @@ def _resolve_agent_sandbox_mode(explicit: Optional[str]) -> str:
     )
     if mode not in _AGENT_SANDBOX_MODES:
         choices = ", ".join(sorted(_AGENT_SANDBOX_MODES))
-        raise click.UsageError(f"unsupported agent sandbox mode {mode!r}; choose one of: {choices}")
+        raise FuseUsageError(f"unsupported agent sandbox mode {mode!r}; choose one of: {choices}")
     return mode
 
 
@@ -91,11 +90,11 @@ def _agent_timeout_sec() -> int:
     try:
         value = int(raw)
     except ValueError as exc:
-        raise click.UsageError(
+        raise FuseUsageError(
             f"FORGE_FUSION_AGENT_TIMEOUT_SEC must be an integer number of seconds, got {raw!r}"
         ) from exc
     if value <= 0:
-        raise click.UsageError("FORGE_FUSION_AGENT_TIMEOUT_SEC must be greater than zero")
+        raise FuseUsageError("FORGE_FUSION_AGENT_TIMEOUT_SEC must be greater than zero")
     return value
 
 

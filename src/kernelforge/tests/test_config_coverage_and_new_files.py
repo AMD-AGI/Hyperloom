@@ -658,7 +658,9 @@ def test_forge_loop_offers_the_option_and_prefers_the_campaigns_copy():
     assert "--commit-new-path" in option.opts
     assert option.multiple
 
-    source = inspect.getsource(cli.forge_loop.callback)
+    from kernelforge.loop.bootstrap import run as forge_loop_run
+
+    source = inspect.getsource(forge_loop_run._iteration_config)
     assert re.search(
         r"commit_new_paths\s*=\s*list\(\s*campaign\.commit_new_paths\s*\)",
         source,

@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.hosted.host_info import Var, read_host_info
-from hyperloom.hosted.toolbox_inputs import ToolboxInputsError, hosted_toolbox_inputs
+from hyperloom.hosted.toolbox_inputs import ToolboxInputsError, grant_limits_totals, hosted_toolbox_inputs
 
 _SHA = "0123456789abcdef0123456789abcdef01234567"
 _MEASUREMENT = "sentinel-measurement-key-7731"
@@ -155,3 +155,19 @@ def test_host_info_never_shows_the_keys(env, caplog):
     assert _MEASUREMENT not in shown
     assert _DEV not in shown
     assert "sentinel-mcp-token" not in shown
+
+
+def test_grant_limits_totals_is_public_and_converts_all_four_totals():
+    from hyperloom.hosted.host_info import GrantLimits
+
+    assert grant_limits_totals(None) is None
+    assert (
+        grant_limits_totals(GrantLimits(max_sandboxes=4, max_gpus=16, gpu_hours=2.5, max_runtime_sec=3600)) == _LIMITS
+    )
+
+
+def test_grant_limits_totals_refuses_unstated_totals():
+    from hyperloom.hosted.host_info import GrantLimits
+
+    with pytest.raises(ToolboxInputsError, match="missing gpu_hours, max_runtime_sec"):
+        grant_limits_totals(GrantLimits(max_sandboxes=2, max_gpus=8, gpu_hours=None, max_runtime_sec=None))

@@ -21,7 +21,6 @@ class FrameworkSpec:
     # The image's default checkout of the framework's source; ``None`` when it has none.
     source_root: str | None
     throughput_unit: str
-    has_denoiser_config: bool = False
 
 
 SERVING = "serving"
@@ -65,8 +64,6 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
         python_package="xfuser",
         source_root="/app/xDiT/",
         throughput_unit="img/s",
-        # A diffusers pipeline: transformer/ + vae/ configs are on disk.
-        has_denoiser_config=True,
     ),
     # An operator's own workload.
     "custom": FrameworkSpec(
@@ -111,11 +108,6 @@ def _spec_or_default(framework: str | None) -> FrameworkSpec:
 def is_scriptable(framework: str | None) -> bool:
     """Return whether ``framework`` is a server-less scriptable workload."""
     return _spec_or_default(framework).kind == SCRIPTABLE
-
-
-def has_denoiser_config(framework: str | None) -> bool:
-    """Return whether ``framework``'s model can be read as a diffusers denoiser."""
-    return _spec_or_default(framework).has_denoiser_config
 
 
 def tracelens_analysis_mode(framework: str | None) -> str:

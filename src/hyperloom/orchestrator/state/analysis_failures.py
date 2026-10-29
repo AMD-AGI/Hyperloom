@@ -33,7 +33,6 @@ _ERROR_EXCERPT_CHARS = 500
 #: Payload fields that decide what an analysis of a trace does; a request differing in any of them is a new input.
 _TRACE_REQUEST_FIELDS = (
     "analysis_route",
-    "analysis_mode",
     "steady_state_mode",
     "split_conc",
     "split_osl",
@@ -43,8 +42,6 @@ _TRACE_REQUEST_FIELDS = (
     "graph_capture_path",
     "model_name",
     "target_platform",
-    "precision",
-    "num_denoise_steps",
 )
 #: The analysis budget trace_analyze applies when a request names none.
 _DEFAULT_BUDGET_MINUTES = 60
