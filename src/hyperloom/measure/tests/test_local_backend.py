@@ -1110,6 +1110,43 @@ def test_a_profile_test_on_a_checkout_that_cannot_be_patched_is_refused_before_a
     assert grid.calls == []
 
 
+def _vllm_profile_point(directory: Path) -> Path:
+    """A vLLM profile point rendered on another host whose vLLM took TraceLens's patch (a hosted app container)."""
+    point = _profile_point(directory)
+    config = yaml.safe_load(point.read_text())
+    config["benchmark"]["framework"] = "vllm"
+    config["benchmark"]["envs"]["EXTRA_VLLM_ARGS"] = (
+        "--profiler-config.capture_torch_profiler True --profiler-config.detailed_trace_annotation True"
+    )
+    point.write_text(yaml.safe_dump(config), encoding="utf-8")
+    return point
+
+
+def test_a_profile_asking_for_patched_profiler_fields_patches_this_hosts_vllm_first(grid, tmp_path, monkeypatch):
+    patched = []
+    monkeypatch.setattr(local, "ensure_vllm_patched_for_tracelens", lambda: patched.append(True) or True)
+    _with_trace(grid)
+
+    _run(_call(tmp_path, _vllm_profile_point(tmp_path), kind="profile"))
+
+    assert patched == [True] and grid.calls, "the server's own vLLM is patched before the rounds run"
+
+
+def test_a_profile_asking_for_patched_profiler_fields_on_an_unpatchable_vllm_is_refused(grid, tmp_path, monkeypatch):
+    monkeypatch.setattr(local, "ensure_vllm_patched_for_tracelens", lambda: False)
+
+    with pytest.raises(TestCallRefused, match="only TraceLens's vLLM patch adds"):
+        _run(_call(tmp_path, _vllm_profile_point(tmp_path), kind="profile"))
+    assert grid.calls == []
+
+
+def test_a_profile_without_those_fields_does_not_touch_vllm(grid, tmp_path, monkeypatch):
+    monkeypatch.setattr(local, "ensure_vllm_patched_for_tracelens", lambda: pytest.fail("vLLM was patched"))
+    _with_trace(grid)
+
+    _run(_call(tmp_path, _profile_point(tmp_path), kind="profile"))
+
+
 def test_a_test_that_does_not_profile_leaves_the_checkout_as_upstream_ships_it(grid, tmp_path):
     root = stock_checkout(tmp_path / "ix")
     config = yaml.safe_load(_point(tmp_path, "p").read_text())

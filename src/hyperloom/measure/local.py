@@ -99,6 +99,7 @@ from hyperloom.orchestrator.actions.executors import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     REUSE_PORT_DEFAULT,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
+    VLLM_PATCH_PROFILER_FIELDS,
     GridLaunch,
     GridRecipe,
     GridStop,
@@ -106,6 +107,7 @@ from hyperloom.orchestrator.actions.executors import (
     LaunchLayer,
     VariantResult,
     assign_free_port,
+    ensure_vllm_patched_for_tracelens,
     resolve_lifecycle_params,
     run_grid,
     run_grid_warmup_enabled,
@@ -268,6 +270,7 @@ def _measure(call: TestCall, phases: PhaseRecorder) -> _Run:
         call = private.call
         if call.kind == _PROFILE:
             _patch_profile_client(call)
+            _patch_profile_server(call)
         with _test_environment(call) as unset_envs:
             if resolve_backend().name == "magpie":
                 install_launchers(call.points)
@@ -403,6 +406,24 @@ def _patch_profile_client(call: TestCall) -> None:
         patch_profile_client(root)
     except ProfileClientError as exc:
         raise TestCallRefused(str(exc)) from exc
+
+
+def _patch_profile_server(call: TestCall) -> None:
+    """Patch the vLLM of this host when a point asks its server for a field only TraceLens's patch adds, or refuse.
+
+    The point may have been rendered on another host (a hosted run plans on its app container), whose patch says
+    nothing of the vLLM the server runs here; unpatched, that server refuses its whole command line.
+    """
+    asked = any(
+        f"--profiler-config.{field}" in str(_point_envs(point).get("EXTRA_VLLM_ARGS", ""))
+        for point in call.points
+        for field in VLLM_PATCH_PROFILER_FIELDS
+    )
+    if asked and not ensure_vllm_patched_for_tracelens():
+        raise TestCallRefused(
+            f"the profile asks vLLM for {', '.join(VLLM_PATCH_PROFILER_FIELDS)}, which only TraceLens's vLLM patch "
+            "adds, and the patch cannot be applied to this host's vLLM"
+        )
 
 
 # --- the rebuilt environment --------------------------------------------------------------------------------------

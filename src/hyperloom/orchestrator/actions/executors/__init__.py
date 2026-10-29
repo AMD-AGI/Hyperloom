@@ -18,6 +18,8 @@ from ._workload_envs import (
     materialize_config_with_envs,
 )
 from ._grid_base import GridVariant, VariantResult
+from ._profile_setup import VLLM_PATCH_PROFILER_FIELDS
+from ._server_patcher import ensure_vllm_patched_for_tracelens
 from ._inferencex_patcher import (
     benchmark_serving_path_in,
     ensure_benchmark_lib_patched,
@@ -49,6 +51,8 @@ from ._spec_decode_pin import (
 )
 
 __all__ = [
+    "VLLM_PATCH_PROFILER_FIELDS",
+    "ensure_vllm_patched_for_tracelens",
     "PREFIX_CACHE_OFF_ERROR_CLASS",
     "CONTEXT_COPY_REFUSAL",
     "AGENTX_PREFLIGHT_RETURNCODE",
