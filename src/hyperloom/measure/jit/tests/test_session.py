@@ -491,3 +491,72 @@ def test_a_group_that_names_a_file_outside_the_cache_is_not_contributed_and_the_
     assert session.report(NO_BUILDS).notes == (
         f"jit cache: triton: 1 file not contributed: they name files the cache does not hold ({HASH_DIR}/__grp__kernel.json)",
     )
+
+
+def _touched_session(store, tmp_path, prebuilt: Path, *touched: str) -> JitCacheSession:
+    plan = KindPlan(AITER_JIT, KEY, prebuilt=prebuilt, touched=frozenset(touched))
+    session = _session(store, tmp_path, plans=[plan])
+    session.seed()
+    return session
+
+
+def test_a_module_the_patch_touches_is_not_linked_from_the_image_and_one_it_does_not_is(store, tmp_path) -> None:
+    prebuilt = tmp_path / "image" / "jit"
+    _write(prebuilt, "module_gemm.so", b"image gemm")
+    _write(prebuilt, "module_other.so", b"image other")
+
+    session = _touched_session(store, tmp_path, prebuilt, "module_gemm", "module_not_prebuilt")
+
+    directory = _dirs(session)["AITER_JIT_DIR"]
+    assert not (directory / "module_gemm.so").exists() and (directory / "module_other.so").is_symlink()
+    assert session.touched == {"module_gemm", "module_not_prebuilt"}
+    assert any(
+        "the patch or the tuned tables touch 2 aiter modules, built when first called" in note
+        for note in session.report(NO_BUILDS).notes
+    )
+
+
+def test_a_touched_module_the_server_built_or_the_cache_gave_is_fresh_and_one_it_never_called_is_not_there(
+    store, tmp_path
+) -> None:
+    prebuilt = tmp_path / "image" / "jit"
+    _write(prebuilt, "module_gemm.so", b"image gemm")
+    seed = _session(store, tmp_path, "seed", plans=[KindPlan(AITER_JIT, KEY)])
+    seed.seed()
+    _write(_dirs(seed)["AITER_JIT_DIR"], "module_cached.so", MODULE)
+    seed.collect()
+    _publish(store, seed, tmp_path, "seed")
+
+    session = _touched_session(store, tmp_path, prebuilt, "module_gemm", "module_cached", "module_unused")
+    _write(_dirs(session)["AITER_JIT_DIR"], "module_gemm.so", b"built by the server")
+
+    built = BuildLog({}, frozenset({"module_gemm"}))
+    assert session.stale_modules(built) == [], "built (named by the log), given by the cache, and never called"
+
+
+def test_a_touched_module_that_is_there_as_the_images_link_or_as_a_file_nobody_says_was_built_is_stale(
+    store, tmp_path
+) -> None:
+    prebuilt = tmp_path / "image" / "jit"
+    session = _touched_session(store, tmp_path, prebuilt, "module_linked", "module_unnamed", "module_built")
+    directory = _dirs(session)["AITER_JIT_DIR"]
+    _write(prebuilt, "module_linked.so", b"image")
+    os.symlink(prebuilt / "module_linked.so", directory / "module_linked.so")
+    _write(directory, "module_unnamed.so", b"a file the log does not name")
+    _write(directory, "module_built.so", b"built")
+
+    stale = session.stale_modules(BuildLog({}, frozenset({"module_built"})))
+
+    assert stale == ["module_linked", "module_unnamed"]
+
+
+def test_a_session_whose_patch_touches_nothing_has_no_stale_module_and_links_every_prebuilt_module(
+    store, tmp_path
+) -> None:
+    prebuilt = tmp_path / "image" / "jit"
+    _write(prebuilt, "module_a.so", b"image")
+
+    session = _touched_session(store, tmp_path, prebuilt)
+
+    assert (_dirs(session)["AITER_JIT_DIR"] / "module_a.so").is_symlink()
+    assert session.touched == frozenset() and session.stale_modules(NO_BUILDS) == []

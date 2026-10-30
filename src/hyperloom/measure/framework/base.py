@@ -29,6 +29,7 @@ __all__ = [
     "DEFAULT_CONFIGS",
     "FRAMEWORK_BASE_FILE",
     "SESSION_SHA_ENV",
+    "SESSION_SNAPSHOT_DIR",
     "SNAPSHOT_ENV",
     "FrameworkBaseError",
     "Snapshot",
@@ -50,6 +51,8 @@ DEFAULT_CONFIGS = SGLANG_IMAGE_AITER_CONFIGS
 #: snapshot began on a base that is not the session's).
 SNAPSHOT_ENV = "HYPERLOOM_FRAMEWORK_SNAPSHOT"
 SESSION_SHA_ENV = "HYPERLOOM_FRAMEWORK_SESSION_SHA256"
+#: The directory below a session's directory that holds its snapshot of the framework tables.
+SESSION_SNAPSHOT_DIR = "framework"
 FRAMEWORK_BASE_FILE = "framework_base.json"
 _MANIFEST = "snapshot.json"
 _COPY = "configs"

@@ -29,6 +29,7 @@ from hyperloom.measure.round_marks import (
     boot_parts,
     read_runs,
     round_boundaries,
+    server_log_of,
 )
 
 T0 = 1_000.0
@@ -386,3 +387,73 @@ def test_every_phase_a_round_names_is_a_phase_the_contract_accepts() -> None:
     for shape in (_shape(), _shape(ROLE_WARMUP), _shape(agentx=True)):
         for boundary in round_boundaries(WINDOW, [run], shape):
             PhaseTiming(boundary.name, 0.0, 0.0)
+
+
+#: SGLang's line for the graph capture in a newer release, with a word for what was captured and ``elapsed=`` in place of
+#: ``Time elapsed:``; the load lines are the ones the release prints with a time on each.
+SGLANG_NEW_LOG = """\
+[2026-10-24 06:38:01 TP0] Load weight begin. avail mem=250.00 GB
+[2026-10-24 06:38:03 TP0] Load weight end. elapsed=2.00 s, type=Qwen3ForCausalLM, avail mem=235.00 GB
+[2026-10-24 06:38:08 TP0] Capture target decode CUDA graph begin. This can take up to several minutes. avail mem=52.72 GB
+[2026-10-24 06:38:19 TP0] Capture target decode CUDA graph end. elapsed=11.34 s, mem usage=1.52 GB, avail mem=51.20 GB
+The server is fired up and ready to roll!
+"""
+
+
+def _magpie_run(root: Path, *, log: str, launch: str = "benchmark_sglang_20261024_063800") -> Path:
+    """A run as Magpie leaves it: the ready stamp in the run's directory, the server log one directory deeper."""
+    directory = _run_dir(root, "variant_00_test", warmup=True)
+    _write_run(directory, T0 + 90.0, 80.0)
+    (directory / launch).mkdir()
+    (directory / launch / "server.log").write_text(log, encoding="utf-8")
+    return directory
+
+
+def test_the_graph_capture_of_the_newer_sglang_wording_is_read_and_the_older_wording_still_is(tmp_path: Path) -> None:
+    newer = tmp_path / "newer.log"
+    newer.write_text(SGLANG_NEW_LOG, encoding="utf-8")
+
+    assert boot_parts(newer) == BootParts(weights_load=2.0, compile=None, graph_capture=11.34)
+    older = tmp_path / "older.log"
+    older.write_text(SGLANG_LOG, encoding="utf-8")
+    assert boot_parts(older).graph_capture == 12.40
+
+
+def test_a_capture_that_only_began_or_failed_is_not_a_graph_capture_time(tmp_path: Path) -> None:
+    log = tmp_path / "server.log"
+    log.write_text(
+        "[t TP0] Capture target decode CUDA graph begin. elapsed=5.00 s\n"
+        "Exception: Capture cuda graph failed: HIP error: an illegal memory access was encountered\n",
+        encoding="utf-8",
+    )
+
+    assert boot_parts(log) == BootParts()
+
+
+def test_a_server_log_one_directory_below_the_runs_is_found_and_splits_the_boot(tmp_path: Path) -> None:
+    _magpie_run(tmp_path, log=SGLANG_NEW_LOG)
+    (run,) = read_runs(tmp_path, WINDOW)
+
+    phases = _phases(round_boundaries(WINDOW, [run], _shape(ROLE_WARMUP)))
+
+    assert [name for name, _ in phases[:4]] == [
+        "round_setup",
+        "server_boot.other",
+        "server_boot.weights_load",
+        "server_boot.graph_capture",
+    ]
+    assert [seconds for _, seconds in phases[2:4]] == [2.0, 11.34]
+
+
+def test_of_several_launches_below_a_run_the_last_by_name_is_read_and_a_log_in_the_directory_itself_comes_first(
+    tmp_path: Path,
+) -> None:
+    directory = _magpie_run(tmp_path, log=SGLANG_LOG, launch="benchmark_sglang_20261024_063000")
+    later = directory / "benchmark_sglang_20261024_063800"
+    later.mkdir()
+    (later / "server.log").write_text(SGLANG_NEW_LOG, encoding="utf-8")
+
+    assert boot_parts(server_log_of(directory)).graph_capture == 11.34
+    (directory / "server.log").write_text(VLLM_LOG, encoding="utf-8")
+    assert server_log_of(directory) == directory / "server.log"
+    assert server_log_of(tmp_path / "no_such_run") == tmp_path / "no_such_run" / "server.log"

@@ -46,10 +46,12 @@ from hyperloom.measure.jit.store import (
 
 __all__ = [
     "Contribution",
+    "GivenModules",
     "JitCacheReport",
     "JitCacheSession",
     "KindPlan",
     "KindReport",
+    "link_prebuilt",
 ]
 
 _TMP = ".tmp-"
@@ -63,17 +65,32 @@ _Form = Callable[[bytes], bytes]
 
 
 @dataclass(frozen=True)
+class GivenModules:
+    """aiter modules a CPU build made for this test before it started (#125 stage 2b): their ``names`` and ``lay``,
+    which copies their files, each proven against the signed build, into a directory."""
+
+    names: frozenset[str]
+    lay: Callable[[Path], None]
+
+
+@dataclass(frozen=True)
 class KindPlan:
     """A kind this test uses and the key it is stored under; ``prebuilt`` is a directory of compiled modules the image
     ships, which the test's own directory links to so the redirected cache does not hide them.
 
     ``read_only`` is the reason a test may be given the cache and not add to it: it runs code the key does not cover, and
-    code in the server can write any file into the directory the compiler uses, which no test sharing the key may load."""
+    code in the server can write any file into the directory the compiler uses, which no test sharing the key may load.
+
+    ``touched`` are the modules a patch to aiter's sources, or a tuned table they are generated from, makes stale: the
+    test's directory does not link the image's copy of them, so the server builds each when it first calls it, unless
+    ``given`` (a CPU build of them) puts it there first."""
 
     kind: CacheKind
     key: str
     prebuilt: Path | None = None
     read_only: str | None = None
+    touched: frozenset[str] = frozenset()
+    given: GivenModules | None = None
 
 
 @dataclass(frozen=True)
@@ -134,6 +151,7 @@ class _Seeded:
     snapshot: Snapshot | None = None
     seed_bytes: int = 0
     contribution: Contribution | None = None
+    given: frozenset[str] = frozenset()
 
     @property
     def files(self) -> Mapping[str, StoredFile]:
@@ -163,6 +181,13 @@ class JitCacheSession:
         for plan in plans:
             if plan.read_only is not None:
                 self._notes.problem(f"jit cache: {plan.kind.name} is read only in this test: {plan.read_only}")
+            if plan.touched:
+                self._notes.fact(_touched_note(plan))
+
+    @property
+    def touched(self) -> frozenset[str]:
+        """The aiter modules this test's patch makes stale, which the server builds itself."""
+        return frozenset().union(*(seeded.plan.touched for seeded in self._kinds.values()))
 
     def environment(self) -> dict[str, str]:
         """The variables that point each compiler at this test's own directory for its kind."""
@@ -183,8 +208,10 @@ class JitCacheSession:
             content = self._content(seeded.plan.kind)
             os.makedirs(content, mode=_DIR_MODE, exist_ok=True)
             self._seed_kind(seeded, content)
+            if seeded.plan.given is not None:
+                self._seed_given(seeded, seeded.plan.given, content)
             if seeded.plan.prebuilt is not None:
-                _link_prebuilt(seeded.plan.prebuilt, content)
+                link_prebuilt(seeded.plan.prebuilt, content, seeded.plan.touched)
 
     def _seed_kind(self, seeded: _Seeded, content: Path) -> None:
         kind = seeded.plan.kind
@@ -203,6 +230,26 @@ class JitCacheSession:
             seeded.state = VERIFY_FAILED if fetched.problems else MISS
             return
         seeded.state, seeded.snapshot, seeded.seed_bytes = HIT, fetched.snapshot, fetched.bytes
+
+    def _seed_given(self, seeded: _Seeded, given: GivenModules, content: Path) -> None:
+        """Put each module the CPU build made, that the snapshot did not give already, into the kind's directory."""
+        landing = self._private / f".given-{seeded.plan.kind.name}"
+        try:
+            given.lay(landing)
+            for name in sorted(given.names):
+                target = content / f"{name}{_PREBUILT_SUFFIX}"
+                if not os.path.lexists(target):
+                    os.replace(landing / target.name, target)
+        except (OSError, ValueError) as exc:
+            self._notes.problem(
+                f"jit cache: {seeded.plan.kind.name}: the modules of their CPU build could not be laid "
+                f"({type(exc).__name__}); the server builds them"
+            )
+            return
+        finally:
+            shutil.rmtree(landing, ignore_errors=True)
+        seeded.given = given.names
+        self._notes.fact(_given_note(seeded.plan.kind.name, given.names))
 
     # -- after a successful test ------------------------------------------------------------------------------------
 
@@ -261,6 +308,36 @@ class JitCacheSession:
             os.close(root_fd)
         return new
 
+    def gave(self, module: str) -> bool:
+        """Whether the cache gave this test the compiled ``module``: built under this test's key, which covers the tuned
+        tables the module is generated from."""
+        return any(
+            f"{module}{_PREBUILT_SUFFIX}" in seeded.files or module in seeded.given for seeded in self._kinds.values()
+        )
+
+    def stale_modules(self, built: BuildLog) -> list[str]:
+        """The touched modules the test ran from a stale copy; call it once the server has stopped.
+
+        A touched module has no copy of the image's in the directory, so one the server called is there as a file it built
+        (the log names it), one the cache gave (the snapshot names it) or one its CPU build made (``given``). A module
+        that is there as anything else, or that
+        is there when the log of what was built is not, ran as the image built it, or cannot be told from that: either way
+        its numbers are not the patch's. A module the server never called is not there, and nothing of it was measured.
+        """
+        stale: list[str] = []
+        for seeded in self._kinds.values():
+            content = self._content(seeded.plan.kind)
+            for name in sorted(seeded.plan.touched):
+                path = content / f"{name}.so"
+                if not os.path.lexists(path):
+                    continue
+                fresh = not path.is_symlink() and (
+                    name in built.started or f"{name}.so" in seeded.files or name in seeded.given
+                )
+                if not fresh:
+                    stale.append(name)
+        return stale
+
     # -- the report --------------------------------------------------------------------------------------------------
 
     def report(self, built: BuildLog) -> JitCacheReport:
@@ -286,10 +363,29 @@ def _clear(content: Path) -> None:
     os.makedirs(content, mode=_DIR_MODE, exist_ok=True)
 
 
-def _link_prebuilt(prebuilt: Path, content: Path) -> None:
-    """Link each compiled module the image ships into ``content`` unless the cache already gave one of that name."""
+def _touched_note(plan: KindPlan) -> str:
+    names = sorted(plan.touched)
+    listed = ", ".join(names[:LISTED]) + (f", and {len(names) - LISTED} more" if len(names) > LISTED else "")
+    return (
+        f"jit cache: {plan.kind.name}: the patch or the tuned tables touch {len(names)} aiter modules, "
+        f"built when first called ({listed})"
+    )
+
+
+def _given_note(kind: str, names: frozenset[str]) -> str:
+    listed = ", ".join(sorted(names)[:LISTED]) + (f", and {len(names) - LISTED} more" if len(names) > LISTED else "")
+    return f"jit cache: {kind}: {len(names)} touched aiter modules come from their CPU build ({listed})"
+
+
+def link_prebuilt(prebuilt: Path, content: Path, skip: frozenset[str]) -> None:
+    """Link each compiled module the image ships into ``content`` unless the cache already gave one of that name, or the
+    module is one in ``skip`` (stale: the patch changed what it is built from)."""
     try:
-        names = sorted(path.name for path in Path(prebuilt).iterdir() if path.name.endswith(_PREBUILT_SUFFIX))
+        names = sorted(
+            path.name
+            for path in Path(prebuilt).iterdir()
+            if path.name.endswith(_PREBUILT_SUFFIX) and path.name[: -len(_PREBUILT_SUFFIX)] not in skip
+        )
     except OSError:
         return
     for name in names:

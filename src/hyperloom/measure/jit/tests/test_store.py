@@ -96,6 +96,89 @@ def test_a_blob_whose_bytes_changed_fails_verification_and_leaves_no_file_behind
     assert list((tmp_path / "private").iterdir()) == [], "the file that did verify is taken back too: no half snapshot"
 
 
+def _damage(store: DirJitStore, data: bytes, damage: bytes) -> Path:
+    blob = _blob_of(store, data)
+    blob.chmod(0o644)
+    blob.write_bytes(damage)
+    return blob
+
+
+def _while_verifying(monkeypatch, meanwhile) -> None:
+    """Run ``meanwhile`` after a blob's bytes fail verification and before the reader acts on it: another writer."""
+    verify = jit_store._copy_checked
+
+    def racing(*args, **kwargs):
+        try:
+            verify(*args, **kwargs)
+        except SnapshotInvalid:
+            meanwhile()
+            raise
+
+    monkeypatch.setattr(jit_store, "_copy_checked", racing)
+
+
+def test_a_blob_found_damaged_is_removed_so_the_next_reader_need_not_copy_it_and_a_publisher_stores_it_anew(
+    store, tmp_path
+) -> None:
+    _publish(store, tmp_path, {"module_a.so": MODULE, "module_b.so": b"two"})
+    blob = _damage(store, b"two", b"TWO")
+
+    first = store.fetch(AITER_JIT, KEY, tmp_path / "first")
+    second = store.fetch(AITER_JIT, KEY, tmp_path / "second")
+
+    assert any("module_b.so: the bytes are not the 3 bytes" in problem for problem in first.problems)
+    assert any("module_b.so: the blob is missing from the store" in problem for problem in second.problems)
+    assert list(blob.parent.iterdir()) == [], "nothing is left beside it"
+    assert _blob_of(store, MODULE).read_bytes() == MODULE, "the sound blob of the same snapshot stays"
+    _publish(store, tmp_path, {"module_b.so": b"two"}, name="again")
+    assert blob.read_bytes() == b"two"
+
+
+def test_sound_bytes_a_publisher_put_in_place_of_a_damaged_blob_after_it_was_read_are_kept(
+    store, tmp_path, monkeypatch
+) -> None:
+    _publish(store, tmp_path, {"module_b.so": b"two"})
+    blob = _damage(store, b"two", b"TWO")
+
+    def repaired() -> None:
+        pending = blob.with_name("pending")
+        pending.write_bytes(b"two")
+        os.rename(pending, blob)
+
+    _while_verifying(monkeypatch, repaired)
+    got = store.fetch(AITER_JIT, KEY, tmp_path / "private")
+
+    assert got.snapshot is None and any("the bytes are not the 3 bytes" in problem for problem in got.problems)
+    assert blob.read_bytes() == b"two" and [p.name for p in blob.parent.iterdir()] == [blob.name]
+
+
+def test_a_damaged_blob_another_reader_removed_first_is_no_further_problem(store, tmp_path, monkeypatch) -> None:
+    _publish(store, tmp_path, {"module_b.so": b"two"})
+    blob = _damage(store, b"two", b"TWO")
+    _while_verifying(monkeypatch, blob.unlink)
+
+    got = store.fetch(AITER_JIT, KEY, tmp_path / "private")
+
+    assert got.snapshot is None and any("the bytes are not the 3 bytes" in problem for problem in got.problems)
+    assert list(blob.parent.iterdir()) == []
+
+
+def test_a_damaged_blob_in_a_store_this_reader_cannot_write_stays_and_the_read_still_fails(
+    store, tmp_path, monkeypatch
+) -> None:
+    _publish(store, tmp_path, {"module_b.so": b"two"})
+    blob = _damage(store, b"two", b"TWO")
+
+    def refused(*args, **kwargs):
+        raise PermissionError("read-only")
+
+    monkeypatch.setattr(jit_store.os, "rename", refused)
+    got = store.fetch(AITER_JIT, KEY, tmp_path / "private")
+
+    assert got.snapshot is None and any("the bytes are not the 3 bytes" in problem for problem in got.problems)
+    assert blob.read_bytes() == b"TWO"
+
+
 @pytest.mark.parametrize("damage", [b"two plus more", b"tw", b""])
 def test_a_blob_of_another_length_fails_verification(store, tmp_path, damage) -> None:
     _publish(store, tmp_path, {"module_b.so": b"two"})

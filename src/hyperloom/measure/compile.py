@@ -31,12 +31,19 @@ import stat
 import subprocess
 import tempfile
 import uuid
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from collections.abc import Callable, Collection, Mapping
+from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
-from typing import Literal, Protocol
+from typing import Literal, NamedTuple, Protocol, TypeVar
 
-from hyperloom.common.outside_facts import SGLANG_IMAGE_WORKSPACE, TUNABLEOP_TABLE_ENV
+from hyperloom.common.aiter_layout import image_aiter_meta
+from hyperloom.common.outside_facts import (
+    AITER_META_WHEEL_DIR,
+    SGLANG_IMAGE_WORKSPACE,
+    TUNABLEOP_TABLE_ENV,
+    component_layouts,
+)
+from hyperloom.common.outside_facts.component_layout import META_BASE, PACKAGE_BASE, ComponentLayoutSpec, LayoutSection
 from hyperloom.contracts.measurement import AttachmentRef
 from hyperloom.contracts.recipe import (
     DIGEST_PREFIX,
@@ -48,8 +55,32 @@ from hyperloom.contracts.recipe import (
     RecipeError,
     apply,
 )
+from hyperloom.measure.jit.native.needs import (
+    BuildNeed,
+    BuildNotReady,
+    BuildRef,
+    ModuleBuild,
+    ModulePlan,
+    NativePlan,
+    NativeStack,
+    check_runtime_sources,
+)
 from hyperloom.measure.framework.rows import DEFAULT_TABLE_PLACEHOLDER
+from hyperloom.measure.jit.modules import (
+    CONFIG_FILE,
+    ESTIMATED_MODULE_SECONDS,
+    MAX_REBUILD_SECONDS,
+    SourceTree,
+    Touched,
+    config_path,
+    prebuilt_names,
+    read_config,
+    touched_entries,
+    touched_modules,
+)
+from hyperloom.measure.framework.table_modules import named_table_modules
 from hyperloom.measure.framework.tables import AITER_VARIABLE_PREFIX
+
 
 ATTACH_PLACEHOLDER = "${HL_ATTACH:%s}"
 #: ``KernelArtifact.metadata["load"] = {"via": ..., ...}`` says how the service picks an artifact up. Only one form is supported:
@@ -78,6 +109,7 @@ _MODE_LINE = re.compile(r"^(?:(?:new file|deleted file|old|new) mode|index [0-9a
 _SYMLINK_MODE = "120000"
 _PACKAGE_DIST_DIRS = ("site-packages", "dist-packages")
 _GIT_APPLY_TIMEOUT_SEC = 120
+_UPSERT = "upsert"
 
 
 class CompileError(RecipeError):
@@ -94,6 +126,10 @@ class BaseImageMismatchError(CompileError):
 
 class UnsupportedComponentError(CompileError):
     """A component has no package in the image that a runner could take as the base of its patches."""
+
+
+class TooManyModulesError(CompileError):
+    """A patch stack touches so many of aiter's modules that its first test would spend most of its time compiling."""
 
 
 class BlobError(CompileError):
@@ -152,19 +188,33 @@ class LocalBlobStore:
 
 @dataclass(frozen=True)
 class ComponentLayout:
-    """How a component's upstream repository maps onto the package installed in the image."""
+    """How a component's upstream repository maps onto the package installed in the image.
+
+    ``sections`` are the layout's parts (an upstream prefix, the base it lies over and where in the base it starts); a
+    layout without any is the one package section at ``upstream_prefix``. ``refuse`` are the patterns of the file names
+    whose change this layout cannot measure, and ``generated`` the package directories the runtime writes builds into.
+    The rule pack owns all of it (``component_layout`` entries).
+    """
 
     import_name: str
     #: The package directory's path inside the upstream repository; patches are relative to the repository root.
     upstream_prefix: str
+    sections: tuple[LayoutSection, ...] = ()
+    refuse: tuple[str, ...] = ()
+    generated: tuple[str, ...] = ()
+
+    @classmethod
+    def from_spec(cls, spec: ComponentLayoutSpec) -> ComponentLayout:
+        return cls(spec.import_name, spec.sections[0].prefix, spec.sections, spec.refuse, spec.generated)
+
+    @property
+    def spec(self) -> ComponentLayoutSpec:
+        sections = self.sections or (LayoutSection(self.upstream_prefix),)
+        return ComponentLayoutSpec(self.import_name, sections, self.refuse, self.generated)
 
 
 COMPONENT_LAYOUTS: Mapping[str, ComponentLayout] = {
-    "sglang": ComponentLayout("sglang", "python/sglang"),
-    "vllm": ComponentLayout("vllm", "vllm"),
-    "aiter": ComponentLayout("aiter", "aiter"),
-    "atom": ComponentLayout("atom", "atom"),
-    "xdit": ComponentLayout("xfuser", "xfuser"),
+    name: ComponentLayout.from_spec(spec) for name, spec in component_layouts().items()
 }
 
 
@@ -238,7 +288,7 @@ class EnvEntry:
 
     def to_document(self) -> dict[str, object]:
         document: dict[str, object] = {"path": self.path, "op": self.op}
-        if self.op == "upsert":
+        if self.op == _UPSERT:
             document.update(blob=f"{DIGEST_PREFIX}{self.blob}", mode=self.mode)
         return document
 
@@ -252,7 +302,7 @@ class EnvRoot:
     dist_name: str | None
     dist_version: str | None
     entries: tuple[EnvEntry, ...]
-    kind: Literal["package"] = "package"
+    kind: Literal["package", "runtime"] = "package"
 
     def to_document(self) -> dict[str, object]:
         return {
@@ -276,8 +326,8 @@ class CompiledEnvironment:
 
     ``envs`` are the variables the test YAML must carry so the service loads the kernel artifacts; their values are
     attachment placeholders. ``recipe`` is the recipe after the change, whose ``launch`` the measurement point
-    carries. ``runtime`` roots are not produced yet: how the recipe's snapshot image relates to a runtime snapshot is
-    still open.
+    carries. A ``runtime`` root is a package root whose native outputs come from a build: ``builds`` names the build of
+    each, and the sheet names it only once it is ready (:meth:`with_builds`), by the manifest it was built to.
     """
 
     recipe: Recipe
@@ -286,13 +336,27 @@ class CompiledEnvironment:
     attachments: tuple[AttachmentRef, ...]
     envs: Mapping[str, str]
     blob_root: Path
+    builds: tuple[BuildNeed, ...] = ()
+    build_refs: tuple[BuildRef, ...] = ()
+
+    def with_builds(self, refs: tuple[BuildRef, ...]) -> CompiledEnvironment:
+        """This environment with the ready builds ``refs``, which must be exactly the builds it needs."""
+        wanted = {(need.root_id, need.inputs.key) for need in self.builds}
+        if {(ref.root_id, ref.key) for ref in refs} != wanted or len(refs) != len(wanted):
+            raise BuildNotReady(f"the builds {sorted(wanted)} are not the ready ones {[ref.key for ref in refs]}")
+        return replace(self, build_refs=refs)
 
     def to_document(self) -> dict[str, object]:
-        return {
+        document: dict[str, object] = {
             "roots": [root.to_document() for root in self.roots],
             "runtime": None,
             "blob_root": str(self.blob_root),
         }
+        if self.builds:
+            if len(self.build_refs) != len(self.builds):
+                raise BuildNotReady(f"{len(self.builds)} builds are needed and {len(self.build_refs)} are ready")
+            document["builds"] = [ref.to_document() for ref in self.build_refs]
+        return document
 
     @property
     def is_base(self) -> bool:
@@ -312,21 +376,42 @@ def _image_digest(image: str) -> str:
 
 
 def check_base_image(recipe: Recipe, active_image_digest: str) -> None:
-    """Refuse a recipe built on another image: its patches and kernels were made for different bits."""
+    """Refuse a recipe built on another image: its patches and kernels were made for different bits.
+
+    Only the base image is compared: the runtime is the base image plus signed native builds, which no image digest
+    names, so a ``runtime_snapshot`` is not an image to compare (:func:`check_runtime_sources` refuses it beside native
+    builds)."""
 
     active = _image_digest(active_image_digest)
-    for what, image in (("base image", recipe.base_image_digest), ("runtime snapshot", recipe.runtime_snapshot)):
-        if image is not None and _image_digest(image) != active:
-            raise BaseImageMismatchError(f"the recipe's {what} {image} is not the active framework image {active}")
+    if _image_digest(recipe.base_image_digest) != active:
+        raise BaseImageMismatchError(
+            f"the recipe's base image {recipe.base_image_digest} is not the active framework image {active}"
+        )
 
 
 # --- patches ---------------------------------------------------------------------------------------------------------
 
 
-def _package_path(path: str, prefix: str, patch: str) -> str:
+class PlacedPath(NamedTuple):
+    """A path of a patch placed in the image: ``upstream`` in the component's repository, ``relative`` in the base ``base``."""
+
+    upstream: str
+    base: str
+    relative: str
+
+
+_Placed = TypeVar("_Placed")
+
+
+def _safe_parts(path: str, patch: str) -> tuple[str, ...]:
     parts = PurePosixPath(path).parts
     if path.startswith("/") or ".." in parts:
         raise PatchApplyError(f"{patch}: unsafe path {path!r}")
+    return parts
+
+
+def _package_path(path: str, prefix: str, patch: str) -> str:
+    parts = _safe_parts(path, patch)
     prefix_parts = PurePosixPath(prefix).parts
     if parts[: len(prefix_parts)] != prefix_parts or len(parts) == len(prefix_parts):
         raise PatchApplyError(
@@ -335,14 +420,30 @@ def _package_path(path: str, prefix: str, patch: str) -> str:
     return str(PurePosixPath(*parts[len(prefix_parts) :]))
 
 
-def patch_targets(text: str, prefix: str, patch: str) -> list[str]:
-    """The package-relative files a git patch reads or writes; refuses what cannot be applied faithfully."""
+def _place(path: str, layout: ComponentLayout, patch: str) -> PlacedPath:
+    _safe_parts(path, patch)
+    pattern = layout.spec.refused_by(path)
+    if pattern is not None:
+        raise PatchApplyError(
+            f"{patch}: {path!r} is a native or binary file ({pattern}) of {layout.import_name}; a patch changes its "
+            "Python only, so the compiled code in the image would stay as it is"
+        )
+    placed = layout.spec.place(path)
+    if placed is None:
+        prefixes = ", ".join(f"{section.prefix}/" for section in layout.spec.sections)
+        raise PatchApplyError(
+            f"{patch}: {path!r} is outside the installed package ({prefixes}); a runner cannot apply it to the image"
+        )
+    section, relative = placed
+    return PlacedPath(path, section.base, relative)
 
-    targets: list[str] = []
+
+def _scan_patch(text: str, patch: str, place: Callable[[str], _Placed]) -> list[_Placed]:
+    targets: list[_Placed] = []
     for line in text.splitlines():
         header = _DIFF_HEADER.match(line)
         if header:
-            targets += [_package_path(header["old"], prefix, patch), _package_path(header["new"], prefix, patch)]
+            targets += [place(header["old"]), place(header["new"])]
         elif line.startswith(("GIT binary patch", "Binary files ")):
             raise PatchApplyError(f"{patch}: binary patches are not supported")
         elif line.startswith("diff --git "):
@@ -352,6 +453,19 @@ def patch_targets(text: str, prefix: str, patch: str) -> list[str]:
     if not targets:
         raise PatchApplyError(f"{patch}: not a git patch (no 'diff --git' header)")
     return list(dict.fromkeys(targets))
+
+
+def patch_targets(text: str, prefix: str, patch: str) -> list[str]:
+    """The package-relative files a git patch reads or writes; refuses what cannot be applied faithfully."""
+
+    return _scan_patch(text, patch, lambda path: _package_path(path, prefix, patch))
+
+
+def layout_targets(text: str, layout: ComponentLayout, patch: str) -> list[PlacedPath]:
+    """The files a git patch reads or writes, each placed by ``layout``; refuses a file outside its sections and one it
+    cannot measure, by path."""
+
+    return _scan_patch(text, patch, lambda path: _place(path, layout, patch))
 
 
 def _git_apply(tree: Path, patch_file: Path, strip: int, patch: str) -> None:
@@ -367,36 +481,186 @@ def _git_apply(tree: Path, patch_file: Path, strip: int, patch: str) -> None:
         raise PatchApplyError(f"{patch} does not apply to the installed package: {done.stderr.strip()[:500]}")
 
 
-def _stage(base: Path, tree: Path, rel: str, staged: set[str]) -> None:
-    """Copy a file the next patch touches from the base into the working tree, the first time it is touched."""
+def _installed(bases: Mapping[str, PackageBase], placed: PlacedPath) -> Path:
+    base = bases.get(placed.base)
+    if base is None:
+        raise UnsupportedComponentError(
+            f"{placed.upstream} lies over the {placed.base} of the image, which this compile does not lay yet"
+        )
+    return base.path / placed.relative
 
-    if rel in staged:
+
+def _stage(
+    bases: Mapping[str, PackageBase], tree: Path, placed: PlacedPath, staged: dict[tuple[str, str], str]
+) -> None:
+    """Copy a file the next patch touches from the image into the working tree, at its upstream path, the first time."""
+
+    key = (placed.base, placed.relative)
+    if key in staged:
+        if staged[key] != placed.upstream:
+            raise PatchApplyError(
+                f"{placed.upstream} and {staged[key]} are one file of the image ({placed.relative}); "
+                "a patch stack may name it by one path only"
+            )
         return
-    staged.add(rel)
-    source = base / rel
+    staged[key] = placed.upstream
+    source = _installed(bases, placed)
     if source.is_symlink():
-        raise PatchApplyError(f"{rel} is a symbolic link in the installed package")
+        raise PatchApplyError(f"{placed.relative} is a symbolic link in the installed package")
     if source.is_file():
-        (tree / rel).parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, tree / rel)
+        (tree / placed.upstream).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, tree / placed.upstream)
 
 
 def _mode(path: Path) -> str:
     return "0755" if path.stat().st_mode & stat.S_IXUSR else "0644"
 
 
-def _entries(base: Path, tree: Path, staged: set[str], blobs: BlobStore) -> tuple[EnvEntry, ...]:
-    entries = []
-    for rel in sorted(staged):
-        old, new = base / rel, tree / rel
+def _entries(
+    bases: Mapping[str, PackageBase], tree: Path, staged: dict[tuple[str, str], str], blobs: BlobStore
+) -> dict[str, tuple[EnvEntry, ...]]:
+    """What the patches made different from the image, by base."""
+
+    entries: dict[str, list[EnvEntry]] = {}
+    for (base, rel), upstream in sorted(staged.items()):
+        old, new = _installed(bases, PlacedPath(upstream, base, rel)), tree / upstream
+        found = entries.setdefault(base, [])
         if new.is_file():
             data = new.read_bytes()
             if old.is_file() and old.read_bytes() == data and _mode(old) == _mode(new):
                 continue
-            entries.append(EnvEntry(rel, "upsert", blobs.put(data), _mode(new)))
+            found.append(EnvEntry(rel, _UPSERT, blobs.put(data), _mode(new)))
         elif old.is_file():
-            entries.append(EnvEntry(rel, "delete"))
-    return tuple(entries)
+            found.append(EnvEntry(rel, "delete"))
+    return {base: tuple(found) for base, found in entries.items()}
+
+
+def _apply_stack(
+    component: ComponentPatches, layout: ComponentLayout, bases: Mapping[str, PackageBase], blobs: BlobStore
+) -> dict[str, tuple[EnvEntry, ...]]:
+    """Apply the component's patches, each to the upstream paths it names, over copies of the files they touch."""
+
+    with tempfile.TemporaryDirectory(prefix="hl-compile-") as scratch:
+        tree = Path(scratch) / "tree"
+        tree.mkdir()
+        staged: dict[tuple[str, str], str] = {}
+        for ref in component.patches:
+            data = blobs.get(ref.sha256)
+            for placed in layout_targets(_decode(data, ref.path), layout, ref.path):
+                _stage(bases, tree, placed, staged)
+            patch_file = Path(scratch) / "current.patch"
+            patch_file.write_bytes(data)
+            _git_apply(tree, patch_file, 1, ref.path)
+        return _entries(bases, tree, staged, blobs)
+
+
+#: The id suffix of a root over a base other than the package: ``aiter.meta`` is the root of aiter's meta directory.
+_ROOT_SUFFIX = {META_BASE: ".meta"}
+
+
+def apply_component_stack(
+    component: ComponentPatches, layout: ComponentLayout, bases: Mapping[str, PackageBase], blobs: BlobStore
+) -> tuple[EnvRoot, ...]:
+    """Lay the component's patches over copies of the files they touch; each root is what ended up different in one base.
+
+    The package root comes first and is always there; a root over another base is there when a patch changed it.
+    """
+
+    entries = _apply_stack(component, layout, bases, blobs)
+    package = bases[PACKAGE_BASE]
+    package_entries = entries.get(PACKAGE_BASE, ())
+    roots = [
+        EnvRoot(component.component, package.import_name, package.dist_name, package.dist_version, package_entries)
+    ]
+    for base, changed in entries.items():
+        if base != PACKAGE_BASE and changed:
+            other = bases[base]
+            root_id = f"{component.component}{_ROOT_SUFFIX[base]}"
+            roots.append(EnvRoot(root_id, other.import_name, other.dist_name, other.dist_version, changed))
+    return tuple(roots)
+
+
+def _patched_config(entries: tuple[EnvEntry, ...], blobs: BlobStore) -> dict | None:
+    """The module config the stack leaves, when it changes it; ``ValueError`` when it deletes or breaks it."""
+    for entry in entries:
+        if entry.path == f"jit/{CONFIG_FILE}":
+            if entry.op != _UPSERT:
+                raise ValueError("the patch deletes the module config")
+            return read_config(blobs.get(entry.blob or ""))
+    return None
+
+
+@dataclass(frozen=True)
+class _AiterTouch:
+    """What a stack of aiter touches: the module config it leaves, the touched modules, and those whose tuned tables a
+    variable the test sets names (``tabled``), which only its server can build from them."""
+
+    config: dict
+    found: Touched
+    tabled: frozenset[str]
+
+
+def _aiter_touch(
+    roots: tuple[EnvRoot, ...], bases: Mapping[str, PackageBase], blobs: BlobStore, table_variables: Collection[str]
+) -> _AiterTouch | None:
+    package, meta = bases[PACKAGE_BASE], bases[META_BASE]
+    by_id = {root.import_name: root for root in roots}
+    meta_entries = by_id[meta.import_name].entries if meta.import_name in by_id else ()
+    package_entries = by_id[package.import_name].entries if package.import_name in by_id else ()
+    try:
+        before = read_config(config_path(package.path))
+        after = _patched_config(package_entries, blobs) or before
+    except (OSError, ValueError) as exc:
+        raise PatchApplyError(f"cannot tell which of aiter's modules the patch touches: {exc}") from exc
+    tables = named_table_modules(after, package.path, table_variables, [entry.path for entry in package_entries])
+    if not meta_entries and after == before and not tables:
+        return None
+    overlay = {entry.path: blobs.get(entry.blob or "") if entry.op == _UPSERT else None for entry in meta_entries}
+    prebuilt = prebuilt_names(package.path)
+    found = touched_modules(before, after, SourceTree(meta.path, overlay), overlay, prebuilt) | touched_entries(
+        tables, after, prebuilt
+    )
+    tabled = named_table_modules(after, package.path, table_variables, ()) if table_variables else frozenset()
+    return _AiterTouch(after, found, tabled)
+
+
+def refuse_costly_rebuild(
+    roots: tuple[EnvRoot, ...],
+    bases: Mapping[str, PackageBase],
+    blobs: BlobStore,
+    table_variables: Collection[str] = (),
+    modules: ModulePlan | None = None,
+) -> ModuleBuild | None:
+    """Refuse a stack that touches so many of aiter's modules that their first build would not fit the time given to it.
+
+    The modules are the prebuilt ones the patch leaves stale (:func:`~hyperloom.measure.jit.modules.touched_modules`),
+    with the ones generated from a tuned table that the patch (below ``configs``) or one of ``table_variables`` (the
+    ``AITER_CONFIG_*`` the test sets) may change; the first test of the stack builds them on its card, when its server
+    calls them. With ``modules`` (a host that builds natively, #125 stage 2b) a CPU build makes the ones it can before the
+    test, and only the rest are built on the card; that build, returned, is refused when it would not fit its own time.
+    A module generated from a table the test's variables name is left to the card: only its server reads those tables.
+    """
+    touch = _aiter_touch(roots, bases, blobs, table_variables)
+    if touch is None:
+        return None
+    candidates = touch.found.rebuilt - touch.tabled
+    built = modules(roots, touch.config, candidates) if modules is not None and candidates else None
+    on_cpu = frozenset() if built is None else built.modules
+    _refuse_slow_build(sorted(touch.found.rebuilt - on_cpu), ESTIMATED_MODULE_SECONDS * 1.0, "on the first test's card")
+    if modules is not None and on_cpu:
+        _refuse_slow_build(sorted(on_cpu), modules.seconds(on_cpu) / len(on_cpu), "on a CPU build runner")
+    return built
+
+
+def _refuse_slow_build(names: list[str], each: float, where: str) -> None:
+    seconds = round(len(names) * each)
+    if seconds > MAX_REBUILD_SECONDS:
+        examples = ", ".join(names[:5])
+        raise TooManyModulesError(
+            f"the patch touches {len(names)} of aiter's prebuilt modules (for example {examples}), which take about "
+            f"{seconds} s to build again {where}; more than {MAX_REBUILD_SECONDS} s is refused. "
+            "Change fewer modules at a time: a header that many modules include touches all of them"
+        )
 
 
 def apply_patch_stack(
@@ -404,21 +668,7 @@ def apply_patch_stack(
 ) -> EnvRoot:
     """Lay the component's patches over a copy of the files they touch; the root is what ended up different."""
 
-    prefix_depth = 1 + len(PurePosixPath(layout.upstream_prefix).parts)
-    with tempfile.TemporaryDirectory(prefix="hl-compile-") as scratch:
-        tree = Path(scratch) / "tree"
-        tree.mkdir()
-        staged: set[str] = set()
-        for ref in component.patches:
-            data = blobs.get(ref.sha256)
-            text = _decode(data, ref.path)
-            for rel in patch_targets(text, layout.upstream_prefix, ref.path):
-                _stage(base.path, tree, rel, staged)
-            patch_file = Path(scratch) / "current.patch"
-            patch_file.write_bytes(data)
-            _git_apply(tree, patch_file, prefix_depth, ref.path)
-        entries = _entries(base.path, tree, staged, blobs)
-    return EnvRoot(component.component, base.import_name, base.dist_name, base.dist_version, entries)
+    return apply_component_stack(component, layout, {PACKAGE_BASE: base}, blobs)[0]
 
 
 def _decode(data: bytes, name: str) -> str:
@@ -515,6 +765,10 @@ class EnvironmentCompiler:
     active_image_digest: str
     locator: PackageLocator = locate_installed_package
     layouts: Mapping[str, ComponentLayout] = field(default_factory=lambda: COMPONENT_LAYOUTS)
+    #: The native builds a stack needs; without one a stack that changes a native source is refused by its layout.
+    native: NativePlan | None = None
+    #: The CPU build of aiter's touched modules; without one the test's server builds them on its card.
+    modules: ModulePlan | None = None
     _cache: dict[tuple[str, str], CompiledEnvironment] = field(default_factory=dict, init=False, repr=False)
 
     def compile(self, recipe: Recipe, action: RecipeDelta) -> CompiledEnvironment:
@@ -526,24 +780,69 @@ class EnvironmentCompiler:
     def _compile(self, recipe: Recipe, action: RecipeDelta) -> CompiledEnvironment:
         check_base_image(recipe, self.active_image_digest)
         target = apply(recipe, action)
-        roots = tuple(self._root(component) for component in target.components if component.patches)
         attachments, envs = kernel_attachments(target.kernels, target.launch.envs, self.blobs)
+        tables = sorted(
+            name
+            for name, value in {**target.launch.envs, **envs}.items()
+            if name.startswith(AITER_VARIABLE_PREFIX) and str(value).strip()
+        )
+        roots: list[EnvRoot] = []
+        builds: list[BuildNeed] = []
+        for component in (component for component in target.components if component.patches):
+            native = self.native(component) if self.native is not None else None
+            if native is None:
+                component_roots, needs = self._roots(component, tables)
+                roots.extend(component_roots)
+                builds.extend(needs)
+            else:
+                roots.append(self._runtime_root(component, native))
+                builds.append(BuildNeed(component.component, native.inputs))
+        check_runtime_sources(target, tuple(builds))
         return CompiledEnvironment(
             recipe=target,
             base_image_digest=target.base_image_digest,
-            roots=roots,
+            roots=tuple(roots),
             attachments=attachments,
             envs=envs,
             blob_root=self.blobs.root,
+            builds=tuple(builds),
         )
 
-    def _root(self, component: ComponentPatches) -> EnvRoot:
+    def _runtime_root(self, component: ComponentPatches, native: NativeStack) -> EnvRoot:
+        """The package root of a native stack: the stack's own package files, its native outputs to come from a build."""
+        layout = self.layouts.get(component.component)
+        if layout is None:
+            raise UnsupportedComponentError(f"{component.component} has no package layout; its build cannot be laid")
+        package = self.locator(layout)
+        return EnvRoot(
+            component.component,
+            package.import_name,
+            package.dist_name,
+            package.dist_version,
+            native.entries,
+            kind="runtime",
+        )
+
+    def _roots(
+        self, component: ComponentPatches, table_variables: Collection[str] = ()
+    ) -> tuple[tuple[EnvRoot, ...], tuple[BuildNeed, ...]]:
+        """The component's roots, and the CPU build of the aiter modules they touch when one makes any."""
         layout = self.layouts.get(component.component)
         if layout is None:
             raise UnsupportedComponentError(
                 f"{component.component} has no package layout; its patches cannot be applied"
             )
-        return apply_patch_stack(component, layout, self.locator(layout), self.blobs)
+        package = self.locator(layout)
+        bases = {PACKAGE_BASE: package}
+        if any(section.base == META_BASE for section in layout.spec.sections):
+            bases[META_BASE] = PackageBase(
+                AITER_META_WHEEL_DIR, image_aiter_meta(package.path), package.dist_name, package.dist_version
+            )
+        roots = apply_component_stack(component, layout, bases, self.blobs)
+        if META_BASE not in bases:
+            return roots, ()
+        built = refuse_costly_rebuild(roots, bases, self.blobs, table_variables, self.modules)
+        return roots, () if built is None else (BuildNeed(component.component, built.inputs),)
 
 
 def compile_environment(
@@ -575,7 +874,9 @@ __all__ = [
     "LocalBlobStore",
     "PackageBase",
     "PatchApplyError",
+    "TooManyModulesError",
     "UnsupportedComponentError",
+    "apply_component_stack",
     "apply_patch_stack",
     "attachment_placeholder",
     "check_base_image",
