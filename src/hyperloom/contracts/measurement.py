@@ -4,7 +4,7 @@
 """The test request a multi-branch module hands to the toolbox, and the test result it gets back.
 
 Like the recipe contract, every type is a frozen dataclass that validates on construction and round-trips through
-``to_document()`` and ``from_document()``; the notebook stores the document form. A request is what the multi-branch
+``to_document()`` and ``from_document()``; the blackboard stores the document form. A request is what the multi-branch
 modules see: the toolbox turns it into a hosted or local test call. ``request_id`` is the toolbox's: it is generated
 when the request is accepted, so a request a module builds has none and the accepted copy carries it.
 
@@ -14,20 +14,56 @@ are its :class:`Attempt` records, never separate results.
 
 from __future__ import annotations
 
-import math
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from enum import Enum
-from pathlib import PurePosixPath
-from typing import Literal, TypeVar
+from typing import Literal
 
+from hyperloom.contracts._validate import (
+    MeasurementError,
+    _bool,
+    _enum,
+    _int,
+    _items,
+    _mapping,
+    _number,
+    _optional_bool,
+    _optional_int,
+    _optional_number,
+    _optional_sha256,
+    _optional_text,
+    _relative_dir,
+    _sha256,
+    _strings,
+    _text,
+)
+from hyperloom.contracts.consistency import (
+    COMPARED_BY,
+    SHORT_PROMPTS_COMPLETE,
+    SHORT_PROMPTS_INCOMPLETE,
+    SHORT_PROMPTS_STATUSES,
+    OutputCounts,
+    OutputDifference,
+    ShortPromptConsistency,
+)
+from hyperloom.contracts.long_context import (
+    LONG_CONTEXT_COMPLETE,
+    LONG_CONTEXT_INCOMPLETE,
+    LONG_CONTEXT_STATUSES,
+    PROMPT_ERROR,
+    PROMPT_NOT_RUN,
+    PROMPT_OK,
+    PROMPT_STATUSES,
+    LongContextPrompt,
+    LongContextResult,
+    LongContextTask,
+)
 from hyperloom.contracts.recipe import RecipeDelta, RecipeError
 
 PRIORITY_HIGHEST = 0
 PRIORITY_LOWEST = 4
 
-_SHA256 = re.compile(r"[0-9a-f]{64}")
 #: A phase name is lowercase words joined by ``_``; one ``.`` ties a part to the phase it splits
 #: (``server_boot.weights_load``). A runner signs the names, so they stay plain tokens readers can group by.
 _PHASE_NAME = re.compile(r"[a-z][a-z0-9_]{0,47}(\.[a-z][a-z0-9_]{0,47})?")
@@ -36,7 +72,6 @@ _PHASE_NAME = re.compile(r"[a-z][a-z0-9_]{0,47}(\.[a-z][a-z0-9_]{0,47})?")
 MAX_PHASE_SECONDS = 366.0 * 24 * 3600
 _MAX_CARDS = 1024
 _MAX_UNIX_TIME = 1.0e11
-_E = TypeVar("_E", bound=Enum)
 
 
 _ACCURACY = "accuracy"
@@ -48,6 +83,13 @@ REPRO_VERDICTS = (REPRODUCED, NOT_REPRODUCED)
 #: What a test's server did with one kernel table the test loaded: some of its rows were hit, none was although hits
 #: were logged, or the logs cannot say. "Not exercised" and "not observable" are different findings: the first says the
 #: table changed nothing the test ran, the second says nothing about it.
+CARD_CLEAN = "clean"
+CARD_UNKNOWN = "unknown"
+CARD_FOREIGN = "foreign"
+#: The runner's view of the machine (a container shown only some GPUs) refused it the kernel's list for its cards, so
+#: nobody could look; kept only where the runner records such a result instead of refusing it.
+CARD_UNOBSERVABLE = "unobservable"
+CARD_OCCUPANCY_STATES = (CARD_CLEAN, CARD_UNKNOWN, CARD_FOREIGN, CARD_UNOBSERVABLE)
 TABLE_EXERCISED = "exercised"
 TABLE_NOT_EXERCISED = "not_exercised"
 TABLE_NOT_OBSERVABLE = "not_observable"
@@ -61,10 +103,6 @@ _REQUEST_COUNTS = (
     "failed_empty",
     "failed_short",
 )
-
-
-class MeasurementError(ValueError):
-    """A test request, a test result or one of their documents breaks the contract."""
 
 
 class TestKind(str, Enum):
@@ -94,7 +132,7 @@ class Purpose(str, Enum):
 
 
 class Validity(str, Enum):
-    """Whether a test measured the candidate; ``SUCCESS`` and ``CANDIDATE_FAILURE`` are the notebook's older names."""
+    """Whether a test measured the candidate; ``SUCCESS`` and ``CANDIDATE_FAILURE`` are the blackboard's older names."""
 
     SUCCEEDED = "succeeded"
     CANDIDATE_FAILED = "candidate_failed"
@@ -110,78 +148,6 @@ class FailureClass(str, Enum):
 
 
 # --- validation --------------------------------------------------------------------------------------------------
-
-
-def _enum(kind: type[_E], value: object, what: str) -> _E:
-    try:
-        return kind(value)
-    except ValueError as exc:
-        raise MeasurementError(f"{what} must be one of {sorted({m.value for m in kind})}, got {value!r}") from exc
-
-
-def _text(value: object, what: str) -> str:
-    if not isinstance(value, str) or not value.strip() or value != value.strip():
-        raise MeasurementError(f"{what} must be a non-empty string without surrounding whitespace, got {value!r}")
-    return value
-
-
-def _optional_text(value: object, what: str) -> str | None:
-    return None if value is None else _text(value, what)
-
-
-def _sha256(value: object, what: str) -> str:
-    if not isinstance(value, str) or not _SHA256.fullmatch(value):
-        raise MeasurementError(f"{what} must be a lowercase hex sha256, got {value!r}")
-    return value
-
-
-def _optional_sha256(value: object, what: str) -> str | None:
-    return None if value is None else _sha256(value, what)
-
-
-def _int(value: object, what: str, *, minimum: int) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
-        raise MeasurementError(f"{what} must be an integer of at least {minimum}, got {value!r}")
-    return value
-
-
-def _optional_int(value: object, what: str, *, minimum: int = 0) -> int | None:
-    return None if value is None else _int(value, what, minimum=minimum)
-
-
-def _number(value: object, what: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
-        raise MeasurementError(f"{what} must be a finite number, got {value!r}")
-    return float(value)
-
-
-def _optional_number(value: object, what: str) -> float | None:
-    return None if value is None else _number(value, what)
-
-
-def _mapping(value: object, what: str) -> Mapping[str, object]:
-    if not isinstance(value, Mapping):
-        raise MeasurementError(f"{what} must be an object, got {value!r}")
-    return value
-
-
-def _items(value: object, what: str) -> tuple[object, ...]:
-    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
-        raise MeasurementError(f"{what} must be a list, got {value!r}")
-    return tuple(value)
-
-
-def _strings(value: object, what: str) -> None:
-    if not isinstance(value, tuple) or not all(isinstance(item, str) for item in value):
-        raise MeasurementError(f"{what} must be a tuple of strings, got {value!r}")
-
-
-def _relative_dir(value: object, what: str) -> str:
-    text = _text(value, what) if value != "" else ""
-    path = PurePosixPath(text)
-    if path.is_absolute() or ".." in path.parts or "\\" in text:
-        raise MeasurementError(f"{what} must be a relative path inside the session directory, got {value!r}")
-    return text
 
 
 def _delta(value: object) -> RecipeDelta:
@@ -223,7 +189,7 @@ class TestRequest:
 
     ``request_id`` is empty until the toolbox accepts the request; :meth:`accepted` returns the accepted copy.
     ``priority`` of ``None`` lets the toolbox pick the default of ``purpose``. ``concurrency`` empty means the active
-    main operating point. ``diff_ref`` points at the stored diff the notebook shows for the request.
+    main operating point. ``diff_ref`` points at the stored diff the blackboard shows for the request.
     """
 
     __test__ = False
@@ -242,6 +208,8 @@ class TestRequest:
     attachments: tuple[AttachmentRef, ...] = ()
     request_id: str | None = None
     diff_ref: str = ""
+    consistency_check: bool | None = None
+    long_context_check: bool | None = None
 
     def __post_init__(self) -> None:
         _enum(TestKind, self.kind, "kind")
@@ -253,6 +221,10 @@ class TestRequest:
         _optional_text(self.retest_of, "retest_of")
         if not isinstance(self.delta, RecipeDelta):
             raise MeasurementError(f"delta must be a RecipeDelta, got {self.delta!r}")
+        if self.consistency_check is not None:
+            _bool(self.consistency_check, "consistency_check")
+        if self.long_context_check is not None:
+            _bool(self.long_context_check, "long_context_check")
         self._check_priority()
         self._check_lists()
         self._check_combinations()
@@ -287,14 +259,28 @@ class TestRequest:
             raise MeasurementError(f"several concurrency values are only for 'test' requests, not {self.kind.value!r}")
 
     @property
+    def forces_consistency_check(self) -> bool:
+        """Whether the caller asks for the short-prompt consistency check: ``True`` forces it; ``None`` and ``False`` leave
+        it to the toolbox's rule, because a caller may add the check but never remove one the rule demands."""
+
+        return self.consistency_check is True
+
+    @property
+    def forces_long_context_check(self) -> bool:
+        """Whether the caller asks for the long-context check: ``True`` forces it; ``None`` and ``False`` leave it to the
+        toolbox's rule, because a caller may add the check but never remove one the rule demands."""
+
+        return self.long_context_check is True
+
+    @property
     def branch(self) -> str:
-        """The notebook's name for ``branch_id``."""
+        """The blackboard's name for ``branch_id``."""
 
         return self.branch_id
 
     @property
     def accuracy_rounds(self) -> bool:
-        """The notebook's name for ``accuracy``."""
+        """The blackboard's name for ``accuracy``."""
 
         return self.accuracy
 
@@ -308,7 +294,7 @@ class TestRequest:
         return replace(self, request_id=request_id)
 
     def to_document(self) -> dict[str, object]:
-        return {
+        document: dict[str, object] = {
             "kind": self.kind.value,
             "purpose": self.purpose.value,
             "branch_id": self.branch_id,
@@ -324,6 +310,11 @@ class TestRequest:
             "request_id": self.request_id,
             "diff_ref": self.diff_ref,
         }
+        if self.consistency_check is not None:
+            document["consistency_check"] = self.consistency_check
+        if self.long_context_check is not None:
+            document["long_context_check"] = self.long_context_check
+        return document
 
     @classmethod
     def from_document(cls, document: object) -> TestRequest:
@@ -343,13 +334,9 @@ class TestRequest:
             attachments=tuple(map(AttachmentRef.from_document, _items(f.get("attachments", ()), "attachments"))),
             request_id=f.get("request_id"),
             diff_ref=f.get("diff_ref", ""),
+            consistency_check=_optional_bool(f.get("consistency_check"), "consistency_check"),
+            long_context_check=_optional_bool(f.get("long_context_check"), "long_context_check"),
         )
-
-
-def _bool(value: object, what: str) -> bool:
-    if not isinstance(value, bool):
-        raise MeasurementError(f"{what} must be true or false, got {value!r}")
-    return value
 
 
 # --- the result --------------------------------------------------------------------------------------------------
@@ -357,7 +344,15 @@ def _bool(value: object, what: str) -> bool:
 
 @dataclass(frozen=True)
 class SandboxFacts:
-    """Where one attempt ran; ``backend`` tells local measurement on one host from hosted measurement."""
+    """Where one attempt ran; ``backend`` tells local measurement on one host from hosted measurement.
+
+    ``card_occupancy`` is what the runner's signed result says of who else used the attempt's cards: ``clean`` when every
+    look at them found no process outside the test, ``foreign`` (with ``card_occupancy_reason`` naming the process, the card
+    and when) when one was seen and the card guard only observes, ``unknown`` (with its reason) when it could not look,
+    ``unobservable`` (with its reason) when its view of the machine refused it the look, and empty when the attempt did not say (an attempt that failed before a result, a sandbox with no card, a runner that
+    predates it). It is never ``clean`` for a result nobody looked at. ``card_occupancy_method`` says how the runner told a
+    process outside the test from the test's own (empty when it did not say).
+    """
 
     sandbox_id: str
     node_name: str | None = None
@@ -369,6 +364,9 @@ class SandboxFacts:
     same_node: bool = False
     gpu_ids: tuple[int, ...] = ()
     backend: str = ""
+    card_occupancy: str = ""
+    card_occupancy_reason: str = ""
+    card_occupancy_method: str = ""
 
     def __post_init__(self) -> None:
         _text(self.sandbox_id, "a sandbox id")
@@ -383,16 +381,29 @@ class SandboxFacts:
             _int(gpu, "a gpu id", minimum=0)
         if not isinstance(self.backend, str):
             raise MeasurementError(f"backend must be a string, got {self.backend!r}")
+        self._check_card_occupancy()
+
+    def _check_card_occupancy(self) -> None:
+        if self.card_occupancy not in ("", *CARD_OCCUPANCY_STATES):
+            raise MeasurementError(
+                f"card_occupancy must be '' or one of {CARD_OCCUPANCY_STATES}, got {self.card_occupancy!r}"
+            )
+        if not isinstance(self.card_occupancy_reason, str):
+            raise MeasurementError(f"card_occupancy_reason must be a string, got {self.card_occupancy_reason!r}")
+        if not isinstance(self.card_occupancy_method, str):
+            raise MeasurementError(f"card_occupancy_method must be a string, got {self.card_occupancy_method!r}")
+        if (self.card_occupancy not in ("", CARD_CLEAN)) != bool(self.card_occupancy_reason):
+            raise MeasurementError("a card_occupancy that is not 'clean' needs its reason, and 'clean' has none")
 
     @property
     def node(self) -> str | None:
-        """The notebook's name for ``node_name``."""
+        """The blackboard's name for ``node_name``."""
 
         return self.node_name
 
     @property
     def power_cap_watts(self) -> float | None:
-        """The notebook's name for ``power_cap_w``."""
+        """The blackboard's name for ``power_cap_w``."""
 
         return self.power_cap_w
 
@@ -408,6 +419,9 @@ class SandboxFacts:
             "same_node": self.same_node,
             "gpu_ids": list(self.gpu_ids),
             "backend": self.backend,
+            "card_occupancy": self.card_occupancy,
+            "card_occupancy_reason": self.card_occupancy_reason,
+            "card_occupancy_method": self.card_occupancy_method,
         }
 
     @classmethod
@@ -424,6 +438,9 @@ class SandboxFacts:
             same_node=f.get("same_node", False),
             gpu_ids=tuple(_items(f.get("gpu_ids", ()), "gpu_ids")),
             backend=f.get("backend", ""),
+            card_occupancy=f.get("card_occupancy", ""),
+            card_occupancy_reason=f.get("card_occupancy_reason", ""),
+            card_occupancy_method=f.get("card_occupancy_method", ""),
         )
 
 
@@ -531,7 +548,7 @@ class Attempt:
 
     @property
     def failure(self) -> FailureClass | None:
-        """The notebook's name for ``failure_class``."""
+        """The blackboard's name for ``failure_class``."""
 
         return self.failure_class
 
@@ -778,6 +795,55 @@ class PhaseTiming:
         )
 
 
+class BuildPayment(str, Enum):
+    """Who pays a native build: the request whose submission started it, or one that reused it."""
+
+    PAID = "paid"
+    REUSED = "reused"
+
+
+@dataclass(frozen=True)
+class BuildCharge:
+    """One native build a test needed, as the blackboard sums build time: by its ``key`` and ``component``.
+
+    ``build_seconds`` is the build's CPU seconds on :attr:`BuildPayment.PAID` (the request that started it) and ``0.0``
+    on :attr:`BuildPayment.REUSED`, so summing over every result counts each build once.
+    """
+
+    key: str
+    component: str
+    build_seconds: float
+    payment: BuildPayment
+
+    def __post_init__(self) -> None:
+        _text(self.key, "a build's key")
+        _text(self.component, "a build's component")
+        _enum(BuildPayment, self.payment, "a build's payment")
+        seconds = _number(self.build_seconds, "a build's build_seconds")
+        if seconds < 0:
+            raise MeasurementError(f"a build's build_seconds cannot be negative, got {seconds}")
+        if self.payment is BuildPayment.REUSED and seconds:
+            raise MeasurementError(f"a reused build is charged no build_seconds, got {seconds}")
+
+    def to_document(self) -> dict[str, object]:
+        return {
+            "key": self.key,
+            "component": self.component,
+            "build_seconds": self.build_seconds,
+            "payment": self.payment.value,
+        }
+
+    @classmethod
+    def from_document(cls, document: object) -> BuildCharge:
+        f = _mapping(document, "a build charge")
+        return cls(
+            key=f.get("key"),
+            component=f.get("component"),
+            build_seconds=f.get("build_seconds"),
+            payment=_enum(BuildPayment, f.get("payment"), "a build's payment"),
+        )
+
+
 def _check_phases(phases: object, unaccounted: object) -> None:
     if not isinstance(phases, tuple) or not all(isinstance(phase, PhaseTiming) for phase in phases):
         raise MeasurementError(f"phases must be a tuple of PhaseTiming, got {phases!r}")
@@ -791,7 +857,7 @@ class TestResult:
     """The final outcome of one request; ``failure_class`` is the last attempt's class and empty on success.
 
     ``output_dir`` is relative to the session directory. The four fingerprints come from the signed result manifest.
-    The timing, cost and profile fields are what the notebook asks of the toolbox beyond the measurement itself.
+    The timing, cost and profile fields are what the blackboard asks of the toolbox beyond the measurement itself.
     ``cold_start_seconds`` is how long the test's server took from its spawn to be ready, measured by the sandbox that
     ran it; ``None`` when the test booted none or nothing recorded it.
     ``repro_verdict`` is the one outcome of a ``repro`` test: ``""`` for any other test, ``"reproduced"`` or
@@ -808,6 +874,15 @@ class TestResult:
     time. It is negative when the phases outrun the wall time, as the runner phases of a test this process re-attached
     to do, and it is ``None`` exactly when the result has no phases (a document written before they existed, a result
     no measurement made).
+    ``short_prompt_consistency`` is the check of a test the toolbox asked it for (``None`` for any other test): a frozen set
+    of short prompts answered by the test's own server, compared with the other tests' of its recipe, as counts and
+    positions only.
+    ``long_context`` is the check of a test the toolbox asked it for (``None`` for any other test): a frozen set of long
+    synthetic prompts answered by the candidate's own server and graded by substring match, as per-task and total scores,
+    per-prompt outcomes and, when it did not answer every prompt, the reason it is ``incomplete``; a candidate's carries
+    the root's reading it is judged after (``LongContextResult.root``).
+    ``builds`` has one charge for each native build the test's stack needed (none for a stack that needs none, and none in
+    a document written before builds existed); ``gpu_seconds`` and ``queued_at`` never include build time.
     A document written while the greedy decode pass existed may carry ``decode_outputs`` and ``decode_identity``; they
     mean nothing now and ``from_document`` leaves them out, so such a document still loads.
     """
@@ -840,6 +915,9 @@ class TestResult:
     request_classes: tuple[RequestClasses, ...] = ()
     phases: tuple[PhaseTiming, ...] = ()
     unaccounted_seconds: float | None = None
+    short_prompt_consistency: ShortPromptConsistency | None = None
+    long_context: LongContextResult | None = None
+    builds: tuple[BuildCharge, ...] = ()
 
     def __post_init__(self) -> None:
         _text(self.request_id, "request_id")
@@ -871,6 +949,13 @@ class TestResult:
         ):
             raise MeasurementError(f"request_classes must be a tuple of RequestClasses, got {self.request_classes!r}")
         _check_phases(self.phases, self.unaccounted_seconds)
+        consistency = self.short_prompt_consistency
+        if consistency is not None and not isinstance(consistency, ShortPromptConsistency):
+            raise MeasurementError(f"short_prompt_consistency must be a ShortPromptConsistency, got {consistency!r}")
+        if self.long_context is not None and not isinstance(self.long_context, LongContextResult):
+            raise MeasurementError(f"long_context must be a LongContextResult, got {self.long_context!r}")
+        if not isinstance(self.builds, tuple) or not all(isinstance(b, BuildCharge) for b in self.builds):
+            raise MeasurementError(f"builds must be a tuple of BuildCharge, got {self.builds!r}")
 
     def _check_repro_verdict(self) -> None:
         if self.repro_verdict not in ("", *REPRO_VERDICTS):
@@ -892,12 +977,12 @@ class TestResult:
 
     @property
     def failure(self) -> FailureClass | None:
-        """The notebook's name for ``failure_class``."""
+        """The blackboard's name for ``failure_class``."""
 
         return self.failure_class
 
     def to_document(self) -> dict[str, object]:
-        return {
+        document: dict[str, object] = {
             "request_id": self.request_id,
             "validity": self.validity.value,
             "failure_class": None if self.failure_class is None else self.failure_class.value,
@@ -925,11 +1010,19 @@ class TestResult:
             "phases": [value.to_document() for value in self.phases],
             "unaccounted_seconds": self.unaccounted_seconds,
         }
+        if self.short_prompt_consistency is not None:
+            document["short_prompt_consistency"] = self.short_prompt_consistency.to_document()
+        if self.long_context is not None:
+            document["long_context"] = self.long_context.to_document()
+        if self.builds:
+            document["builds"] = [value.to_document() for value in self.builds]
+        return document
 
     @classmethod
     def from_document(cls, document: object) -> TestResult:
         f = _mapping(document, "a test result")
-        sandbox, failure = f.get("sandbox"), f.get("failure_class")
+        sandbox, failure, consistency = f.get("sandbox"), f.get("failure_class"), f.get("short_prompt_consistency")
+        long_context = f.get("long_context")
         return cls(
             request_id=f.get("request_id"),
             validity=_enum(Validity, f.get("validity"), "validity"),
@@ -959,10 +1052,18 @@ class TestResult:
             ),
             phases=tuple(map(PhaseTiming.from_document, _items(f.get("phases", ()), "phases"))),
             unaccounted_seconds=f.get("unaccounted_seconds"),
+            short_prompt_consistency=None if consistency is None else ShortPromptConsistency.from_document(consistency),
+            long_context=None if long_context is None else LongContextResult.from_document(long_context),
+            builds=tuple(map(BuildCharge.from_document, _items(f.get("builds", ()), "builds"))),
         )
 
 
 __all__ = [
+    "CARD_CLEAN",
+    "CARD_FOREIGN",
+    "CARD_OCCUPANCY_STATES",
+    "CARD_UNKNOWN",
+    "CARD_UNOBSERVABLE",
     "NOT_REPRODUCED",
     "PRIORITY_HIGHEST",
     "PRIORITY_LOWEST",
@@ -972,17 +1073,36 @@ __all__ = [
     "TABLE_NOT_EXERCISED",
     "TABLE_NOT_OBSERVABLE",
     "TABLE_STATUSES",
+    "COMPARED_BY",
+    "LONG_CONTEXT_COMPLETE",
+    "LONG_CONTEXT_INCOMPLETE",
+    "LONG_CONTEXT_STATUSES",
+    "PROMPT_ERROR",
+    "PROMPT_NOT_RUN",
+    "PROMPT_OK",
+    "PROMPT_STATUSES",
+    "SHORT_PROMPTS_COMPLETE",
+    "SHORT_PROMPTS_INCOMPLETE",
+    "SHORT_PROMPTS_STATUSES",
     "AccuracyValue",
     "AttachmentRef",
     "Attempt",
+    "BuildCharge",
+    "BuildPayment",
     "FailureClass",
+    "LongContextPrompt",
+    "LongContextResult",
+    "LongContextTask",
     "MAX_PHASE_SECONDS",
     "MeasurementError",
+    "OutputCounts",
+    "OutputDifference",
     "PhaseTiming",
     "Purpose",
     "RequestClasses",
     "RoundValue",
     "SandboxFacts",
+    "ShortPromptConsistency",
     "TableHits",
     "TestKind",
     "TestRequest",

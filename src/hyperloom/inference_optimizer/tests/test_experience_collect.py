@@ -22,12 +22,12 @@ from hyperloom_kb.tests.database_fixtures import new_database, postgres_conninfo
 import hyperloom_kb.collect as kb_collect
 from hyperloom.inference_optimizer import experience_collect, experience_kb_service
 from hyperloom.inference_optimizer.breakdown import exporter
-from hyperloom.inference_optimizer.breakdown.schema import SCHEMA_VERSION_V6
+from hyperloom.inference_optimizer.session.sbd_v6 import SCHEMA_VERSION_V6
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
 from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
-from hyperloom.orchestrator.phases.framework import _patch_material
+from hyperloom.orchestrator.phases.framework_records import _patch_material
 from hyperloom.orchestrator.phases.machine import Transition
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.roles.mock_backend import MockBackend, MockTurn, ScriptedPlan
@@ -289,17 +289,17 @@ def _record_framework_attempts(session_dir: Path, source_status: str = "kept") -
 
 
 def test_recorded_framework_rows_only_carry_declared_fields(session_dir: Path) -> None:
-    from hyperloom.inference_optimizer.breakdown import schema
+    from hyperloom.inference_optimizer.breakdown import schema_framework
 
     ext = _record_framework_attempts(session_dir)[0]["ext"]
 
     for attempt in ext["attempts"]:
-        assert set(attempt) <= set(schema.V6FrameworkAttempt.__annotations__)
-        assert set(attempt["failure"]) <= set(schema.V6FrameworkAttemptFailure.__annotations__)
+        assert set(attempt) <= set(schema_framework.V6FrameworkAttempt.__annotations__)
+        assert set(attempt["failure"]) <= set(schema_framework.V6FrameworkAttemptFailure.__annotations__)
         for patch in attempt.get("patch_material", []):
-            assert set(patch) <= set(schema.V6FrameworkPatch.__annotations__)
+            assert set(patch) <= set(schema_framework.V6FrameworkPatch.__annotations__)
     for proposal in ext["proposals"]:
-        assert set(proposal) <= set(schema.V6FrameworkProposal.__annotations__)
+        assert set(proposal) <= set(schema_framework.V6FrameworkProposal.__annotations__)
 
 
 @pytest.mark.parametrize(

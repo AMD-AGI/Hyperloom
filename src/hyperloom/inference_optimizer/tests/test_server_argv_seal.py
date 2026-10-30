@@ -12,7 +12,7 @@ import pytest
 import yaml
 
 from hyperloom.inference_optimizer.framework_registry import names, server_args_env_name
-from hyperloom.orchestrator.actions.executors import _grid_runner, _workload_envs
+from hyperloom.orchestrator.actions.executors import _grid_runner, _profile_setup, _workload_envs
 from hyperloom.orchestrator.actions.executors._grid_base import GridVariant
 from hyperloom.orchestrator.actions.executors._server_argv import (
     ServerArgv,
@@ -22,7 +22,7 @@ from hyperloom.orchestrator.actions.executors._server_argv import (
     reseal_config_argv,
     seal_server_argv,
 )
-from hyperloom.orchestrator.actions.executors._workload_envs import materialize_config_with_envs
+from hyperloom.orchestrator.actions.executors._workload_envs import materialize_config_with_envs, LaunchLayer
 
 #: The name every composer ends on.
 SEAL = "seal_server_argv"
@@ -46,8 +46,6 @@ _COMPOSERS = (
 #: the env itself, the seal, and the re-seal a repair is written back through.
 _WRITERS = frozenset(
     {
-        "_bound_vllm_profiler_capture",
-        "_publish_profile_request_body",
         "_seed_reference_launch",
         "_merge_caller_overrides",
         "_settle_merged_server_args",
@@ -58,6 +56,9 @@ _WRITERS = frozenset(
         "_build_variant_yaml",
         "seal_server_argv",
         "reseal_config_argv",
+        "_apply_vllm_profile",
+        "_apply_sglang_profile",
+        "apply_atom_profile_caps",
     }
 )
 
@@ -166,6 +167,45 @@ def test_every_write_inside_a_composer_happens_above_the_seal(module, name):
     assert not late, f"{name} writes the argument env after the seal at line {seal_line}, at line(s) {late}"
 
 
+def test_profile_argument_writers_only_run_through_the_sealed_composer():
+    """Every profile argument mutation reaches the fixed-sequence final seal."""
+    owners = {
+        "_apply_vllm_profile": (_profile_setup, "_apply_framework_profile"),
+        "_apply_sglang_profile": (_profile_setup, "_apply_framework_profile"),
+        "_apply_framework_profile": (_profile_setup, "prepare_profile"),
+        "prepare_profile": (_workload_envs, "_shape_request_window"),
+        "apply_atom_profile_caps": (_workload_envs, "_restate_profile_capture"),
+        "fit_capture_to_speculative": (_workload_envs, "_restate_profile_capture"),
+    }
+    calls = {name: [] for name in owners}
+    for path in sorted(_PACKAGE.rglob("*.py")):
+        if "/tests/" in str(path):
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            for call in ast.walk(node):
+                if not isinstance(call, ast.Call):
+                    continue
+                name = call.func.id if isinstance(call.func, ast.Name) else getattr(call.func, "attr", "")
+                if name in calls:
+                    calls[name].append((path, node.name, call.lineno))
+    composer = _function(_workload_envs, "materialize_config_with_envs")
+    seal_line = _seal_call(composer.body)[1].lineno
+    phase_lines = {
+        call.func.id: call.lineno
+        for call in ast.walk(composer)
+        if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+    }
+    for name, (module, function) in owners.items():
+        assert calls[name], f"{name} is no longer composed"
+        for path, caller, line in calls[name]:
+            assert (path, caller) == (Path(module.__file__), function), f"unsealed call to {name}: {path}:{line}"
+            if module is _workload_envs:
+                assert phase_lines[function] < seal_line, f"{function} runs after the seal"
+
+
 def test_the_census_sees_a_writer_that_renames_everything_it_touches():
     """The check is dataflow, not convention, so renaming does not hide a write."""
     plant = (
@@ -201,10 +241,12 @@ def test_what_the_preflight_reads_back_is_what_the_launch_exports(tmp_path):
     out = tmp_path / "out"
     out.mkdir()
 
-    config = materialize_config_with_envs(source, out, extra_server_args="--attention-backend aiter")
+    config = materialize_config_with_envs(
+        source, out, launch=LaunchLayer(extra_server_args="--attention-backend aiter")
+    )
 
     sealed = config_server_argv(config)
-    exported = config_launch_env(config, {})[sealed.env_name]
+    exported = config_launch_env(config, {})[server_args_env_name("sglang")]
     assert sealed.text == exported
     assert sealed.argv == tuple(exported.split())
     assert "--attention-backend" in sealed.argv
@@ -214,9 +256,7 @@ def test_an_injection_never_overwrites_a_flag_the_caller_pinned():
     """The one way to add a flag leaves an operator's own spelling standing."""
     envs = {"EXTRA_VLLM_ARGS": "--block-size 128"}
 
-    assert (
-        add_server_arg_unless_pinned(envs, "vllm", "--block-size 16", pinned_by=("block-size", "block_size")) is False
-    )
+    add_server_arg_unless_pinned(envs, "vllm", "--block-size 16", pinned_by=("--block-size", "--block_size"))
     assert envs["EXTRA_VLLM_ARGS"] == "--block-size 128"
 
 
@@ -224,7 +264,7 @@ def test_an_injection_merges_onto_what_is_already_composed():
     """An unpinned flag joins the string rightmost, where last-wins reads it."""
     envs = {"EXTRA_SGLANG_ARGS": "--tp 8"}
 
-    assert add_server_arg_unless_pinned(envs, "sglang", "--trust-remote-code", pinned_by=("trust-remote-code",)) is True
+    add_server_arg_unless_pinned(envs, "sglang", "--trust-remote-code", pinned_by=("--trust-remote-code",))
     assert envs["EXTRA_SGLANG_ARGS"] == "--tp 8 --trust-remote-code"
 
 
@@ -232,7 +272,7 @@ def test_an_injection_into_an_empty_env_is_the_whole_string():
     """The first flag composed needs no separate spelling of "nothing yet"."""
     envs: dict[str, str] = {}
 
-    assert add_server_arg_unless_pinned(envs, "sglang", "--tp 8", pinned_by=("tp",)) is True
+    add_server_arg_unless_pinned(envs, "sglang", "--tp 8", pinned_by=("--tp",))
     assert envs["EXTRA_SGLANG_ARGS"] == "--tp 8"
 
 
@@ -368,7 +408,11 @@ def test_a_replacing_grid_variant_keeps_the_expert_parallel_flag(tmp_path, varia
     variant = GridVariant(name="v", extra_server_args="--max-num-seqs 64", args_mode=variant_mode)
 
     config = _grid_runner._build_variant_yaml(
-        base, "--max-num-seqs 32", variant, output_subdir=tmp_path / "v", base_args_mode=base_mode
+        _grid_runner.GridRecipe(
+            base_yaml_path=base, base=LaunchLayer(extra_server_args="--max-num-seqs 32", args_mode=base_mode)
+        ),
+        variant,
+        output_subdir=tmp_path / "v",
     )
 
     argv = config_server_argv(config).argv
@@ -413,7 +457,9 @@ def test_a_grid_variant_ep_that_does_not_divide_tp_adds_no_flag(tmp_path, caplog
     variant = GridVariant(name="v", extra_envs={"EP": "3"})
 
     with caplog.at_level("WARNING"):
-        config = _grid_runner._build_variant_yaml(base, "", variant, output_subdir=tmp_path / "v")
+        config = _grid_runner._build_variant_yaml(
+            _grid_runner.GridRecipe(base_yaml_path=base), variant, output_subdir=tmp_path / "v"
+        )
 
     assert "--ep-size" not in config_server_argv(config).argv
     assert "EP=3 does not divide the launched TP=8" in caplog.text

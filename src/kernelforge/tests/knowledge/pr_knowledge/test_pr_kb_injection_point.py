@@ -31,7 +31,7 @@ def build_agent_fn(monkeypatch):
     stub.HookMatcher = object
     monkeypatch.setitem(sys.modules, "claude_agent_sdk", stub)
 
-    import kernelforge.orchestrator.agent as agent_mod
+    import kernelforge.workflows.forge_loop.roles.agent as agent_mod
     from kernelforge.agent_backends.base import (
         AgentCapabilities,
         AgentRuntimeConfig,
@@ -54,7 +54,7 @@ def build_agent_fn(monkeypatch):
         agent_mod.create_registered_backend = lambda *a, **k: backend
         try:
             config = Config()
-            config.agent_runtime = lambda: runtime
+            monkeypatch.setattr(agent_mod, "agent_runtime", lambda _config: runtime)
             kwargs.setdefault("program_md", "PROGRAM BODY")
             agent_fn = agent_mod.make_agent_fn(config, agent_mod.ImplementerSetup(agent_mod.ImplementerTask(**kwargs)))
         finally:
@@ -125,7 +125,7 @@ def system_prompt_for(monkeypatch):
     stub.HookMatcher = object
     monkeypatch.setitem(sys.modules, "claude_agent_sdk", stub)
 
-    import kernelforge.orchestrator.agent as agent_mod
+    import kernelforge.workflows.forge_loop.roles.agent as agent_mod
     from kernelforge.agent_backends.base import (
         AgentCapabilities,
         AgentRuntimeConfig,
@@ -148,7 +148,7 @@ def system_prompt_for(monkeypatch):
         agent_mod.create_registered_backend = lambda *a, **k: backend
         try:
             config = Config()
-            config.agent_runtime = lambda: runtime
+            monkeypatch.setattr(agent_mod, "agent_runtime", lambda _config: runtime)
             agent_fn = agent_mod.make_agent_fn(
                 config,
                 agent_mod.ImplementerSetup(

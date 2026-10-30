@@ -18,21 +18,15 @@ from typing import Any, Mapping
 from hyperloom.common.env_safety import is_secret_shaped_env_name
 from hyperloom.orchestrator.enablement.runtime import targeted_build
 
-from .credentials import (
-    classify_credential_class,
-    classify_credential_value,
-    detect_credential_channels,
-    strip_url_userinfo,
-)
+from .credentials import classify_credential_value, detect_credential_channels, strip_url_userinfo
 
 BUILTIN_PLAN_DRIVER = "builtin_plan"
-CUSTOM_COMMAND_DRIVER = "custom_command"
 
 #: Names a component's own driver overwrites in the merge without first reading
 #: them: the inherited value never reaches the build, and the value that does is
-#: already carried by ``env_digest``, ``gpu_arch`` and ``max_jobs``. The split is
-#: per driver because the merges differ -- ``PYTORCH_ROCM_ARCH`` is inherited on
-#: the sgl-kernel path and overwritten on the other two.
+#: already carried by ``gpu_arch`` and ``max_jobs``. The split is per driver
+#: because the merges differ -- ``PYTORCH_ROCM_ARCH`` is inherited on the
+#: sgl-kernel path and overwritten on the other two.
 _DRIVER_OVERWRITTEN_ENV: dict[str, frozenset[str]] = {
     "aiter": frozenset(
         {
@@ -45,7 +39,7 @@ _DRIVER_OVERWRITTEN_ENV: dict[str, frozenset[str]] = {
         }
     ),
     "sgl_kernel": frozenset({"AMDGPU_TARGET", "MAX_JOBS"}),
-    "vllm": frozenset({"PYTORCH_ROCM_ARCH", "MAX_JOBS"}),
+    "vllm_source": frozenset({"PYTORCH_ROCM_ARCH", "MAX_JOBS"}),
 }
 
 #: Terminal, tty, display, locale-presentation and shell-session names. They
@@ -100,33 +94,12 @@ def ambient_closure(env: Mapping[str, str], *, component: str) -> dict[str, str]
     reads its own environment, so a name the driver never mentions can still
     decide which compiler, index or library path the build used.
     """
-    overwritten = _DRIVER_OVERWRITTEN_ENV.get(component, frozenset())
+    driver = "aiter" if component == "framework_ext" else component
+    overwritten = _DRIVER_OVERWRITTEN_ENV.get(driver, frozenset())
     return {
         str(key): str(value)
         for key, value in env.items()
         if str(key) not in overwritten and not _is_irrelevant(str(key))
-    }
-
-
-def _build_command_identity(argv: tuple[str, ...] | list[str]) -> dict[str, Any] | None:
-    """Export a specialist-supplied argv as an identity, never as text.
-
-    The platform spawns it unread, so it may carry a credentialed URL nothing has
-    parsed; only the program name, a digest and the credential class travel.
-    """
-    tokens = [str(a) for a in argv or ()]
-    if not tokens:
-        return None
-    credential_class = None
-    for token in tokens[1:]:
-        # A ``-c`` operand is a command line in its own right, so the credential
-        # inside it sits under an option no argv-level scan reaches.
-        found = (classify_credential_class(token) if " " in token else None) or classify_credential_value(token)
-        credential_class = credential_class or found
-    return {
-        "argv0": tokens[0],
-        "digest": f"sha256:{hashlib.sha256(chr(0).join(tokens).encode('utf-8')).hexdigest()}",
-        "credential_class": credential_class,
     }
 
 
@@ -155,18 +128,13 @@ def build_input_record(
     raw_repo = str(getattr(action, "repo_url", "") or "").strip() or default_repo
     versions = dict(installed_versions or {})
     ambient = ambient_closure(ambient_env, component=component)
-    envs = {str(k): str(v) for k, v in dict(getattr(action, "envs", {}) or {}).items()}
     return {
         "component": component,
         "repo_url": strip_url_userinfo(raw_repo),
         "ref": str(getattr(action, "ref", "") or ""),
         "resolved_sha": _resolved_sha(versions),
         "gpu_arch": str(getattr(action, "gpu_arch", "") or "") or versions.get("arch", ""),
-        "max_jobs": int(getattr(action, "max_jobs", 0) or default_jobs),
-        "torch_constraint_mode": str(getattr(action, "torch_constraint_mode", "") or ""),
-        "build_command": _build_command_identity(getattr(action, "build_command", ())),
-        "env_keys": _visible_keys(envs),
-        "env_digest": _digest_pairs(envs),
+        "max_jobs": default_jobs,
         "ambient_keys": _visible_keys(ambient),
         "ambient_digest": _digest_pairs(ambient),
         "credential_class": classify_credential_value(raw_repo),
@@ -181,13 +149,3 @@ def _resolved_sha(versions: Mapping[str, str]) -> str:
         if value:
             return value
     return ""
-
-
-def build_driver_for(action: Any) -> str:
-    """Name which of the two build paths ran.
-
-    An empty ``build_command`` is not a missing input: it selects the built-in
-    path, where the action's own state *is* the plan the driver is spawned
-    against.
-    """
-    return CUSTOM_COMMAND_DRIVER if getattr(action, "build_command", ()) else BUILTIN_PLAN_DRIVER

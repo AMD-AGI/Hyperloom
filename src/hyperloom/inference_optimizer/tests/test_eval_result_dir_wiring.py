@@ -21,7 +21,8 @@ from hyperloom.orchestrator.actions.executors._accuracy_gate import (
     accuracy_passed,
     parse_eval_results,
 )
-from hyperloom.orchestrator.actions.executors._grid_runner import _run_magpie
+from hyperloom.orchestrator.actions.executors._grid_runner import _run_magpie, MagpieRound
+from hyperloom.orchestrator.actions.executors._inferencex_patcher import BENCH_SEED_ENV
 from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
 
 _GSM8K_RESULTS = {
@@ -71,7 +72,7 @@ def test_run_magpie_exports_eval_result_dir_under_result_dir(tmp_path, monkeypat
     def fake_run(cmd, *args, **kwargs):
         captured["env"] = dict(kwargs.get("env") or {})
         config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-        assert config["benchmark"]["timeout_seconds"] == kwargs["timeout"] == 5
+        assert config["benchmark"]["timeout_seconds"] == kwargs["watch"].timeout == 5
         assert config["benchmark"]["envs"]["PYTHONUNBUFFERED"] == "1"
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
@@ -80,11 +81,13 @@ def test_run_magpie_exports_eval_result_dir_under_result_dir(tmp_path, monkeypat
         side_effect=fake_run,
     ):
         _run_magpie(
-            magpie_python="/opt/venv/bin/python",
-            config_path=config_path,
-            output_dir=tmp_path / "slot",
-            timeout_sec=5,
-            cwd=str(tmp_path),
+            MagpieRound(
+                magpie_python="/opt/venv/bin/python",
+                config_path=config_path,
+                output_dir=tmp_path / "slot",
+                timeout_sec=5,
+                cwd=str(tmp_path),
+            )
         )
     assert captured["env"]["RESULT_DIR"] == str(tmp_path / "slot")
     assert captured["env"]["EVAL_RESULT_DIR"] == str(tmp_path / "slot" / "eval_output")
@@ -106,12 +109,14 @@ def test_run_magpie_eval_result_dir_follows_result_dir_override(tmp_path, monkey
         side_effect=fake_run,
     ):
         _run_magpie(
-            magpie_python="/opt/venv/bin/python",
-            config_path=config_path,
-            output_dir=tmp_path / "slot",
-            timeout_sec=5,
-            cwd=str(tmp_path),
-            result_dir=str(result_dir),
+            MagpieRound(
+                magpie_python="/opt/venv/bin/python",
+                config_path=config_path,
+                output_dir=tmp_path / "slot",
+                timeout_sec=5,
+                cwd=str(tmp_path),
+                result_dir=str(result_dir),
+            )
         )
     assert captured["env"]["RESULT_DIR"] == str(result_dir)
     assert captured["env"]["EVAL_RESULT_DIR"] == str(result_dir / "eval_output")
@@ -140,11 +145,13 @@ def test_run_magpie_keeps_magpie_traces_when_eval_output_is_cleaned(tmp_path, mo
         side_effect=fake_run,
     ):
         _run_magpie(
-            magpie_python="/opt/venv/bin/python",
-            config_path=config_path,
-            output_dir=output_dir,
-            timeout_sec=5,
-            cwd=str(tmp_path),
+            MagpieRound(
+                magpie_python="/opt/venv/bin/python",
+                config_path=config_path,
+                output_dir=output_dir,
+                timeout_sec=5,
+                cwd=str(tmp_path),
+            )
         )
 
     assert trace_file.exists()
@@ -419,6 +426,8 @@ def test_baseline_mn_warmup_eval_result_dir_is_discarded(tmp_path, monkeypatch):
     assert calls[0][1]["RESULT_DIR"] == str(output_dir / "mn_warmup")
     assert calls[0][1]["EVAL_RESULT_DIR"] == str(output_dir / "mn_warmup" / "eval_output")
     assert calls[1][1]["EVAL_RESULT_DIR"] == str(output_dir / "eval_output")
+    # The pass warms the server the measured pass reuses, so it must not send the measured prompts.
+    assert [env.get(BENCH_SEED_ENV) for _slot, env in calls] == ["1", None]
     # The warmup keeps its eval output in its OWN slot (asserted above) so a measured round never grades against it by
     # accident.
     assert result.get("accuracy") == pytest.approx(0.83)

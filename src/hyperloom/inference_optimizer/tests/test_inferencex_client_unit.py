@@ -19,9 +19,9 @@ from hyperloom.inference_optimizer.baseline_comparison.types import BaselineQuer
 # ---- env resolvers --------------------------------------------------------
 def test_base_url_default_and_override(monkeypatch):
     monkeypatch.delenv("INFERENCEX_BASE_URL", raising=False)
-    assert ix._base_url() == ix.DEFAULT_BASE_URL
+    assert ix.base_url() == ix.DEFAULT_BASE_URL
     monkeypatch.setenv("INFERENCEX_BASE_URL", "http://local/api")
-    assert ix._base_url() == "http://local/api"
+    assert ix.base_url() == "http://local/api"
 
 
 def test_timeout_sec_variants(monkeypatch):

@@ -48,8 +48,8 @@ def _load(entry: object, name: str, group: str) -> EntryPointObject:
     try:
         loaded = entry.load()  # type: ignore[attr-defined]
         value = loaded() if callable(loaded) else loaded
-    except Exception as exc:  # noqa: BLE001 - isolate broken third-party plugins
-        log.warning("failed to load entry point %s of group %s: %s", name, group, exc)
+    except Exception as exc:  # isolation boundary: one third-party entry point
+        log.warning("failed to load entry point %s of group %s: %s", name, group, exc, exc_info=True)
         return EntryPointObject(name=name, group=group, error=f"{type(exc).__name__}: {exc}", origin=origin)
     return EntryPointObject(name=name, group=group, value=value, origin=origin)
 
@@ -66,7 +66,7 @@ def iter_entry_point_objects(group: str) -> Iterator[EntryPointObject]:
     """
     try:
         entries = list(metadata.entry_points().select(group=group))
-    except Exception as exc:  # noqa: BLE001 - plugin discovery is optional
+    except (OSError, ValueError, TypeError) as exc:
         log.warning("entry-point discovery of group %s failed: %s", group, exc)
         yield EntryPointObject(name=DISCOVERY_FAILED, group=group, error=f"{type(exc).__name__}: {exc}")
         return

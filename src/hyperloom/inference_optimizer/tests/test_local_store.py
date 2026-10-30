@@ -5,32 +5,26 @@
 
 from __future__ import annotations
 
+import json
 import threading
 
 import pytest
 
-from hyperloom.inference_optimizer.recipe_snapshot_constants import recipe_canonical_id
+from hyperloom.inference_optimizer.recipe_snapshot_constants import RecipeIdentity, recipe_canonical_id
+from hyperloom.orchestrator.knowledge.recipe_kb import cid_to_path_components
 from hyperloom.orchestrator.knowledge.recipe_kb import local_store as ls
 
 
 def _cid(model="m", hardware="mi300", framework_name="sglang", framework_version="v1", precision="fp8") -> str:
     return recipe_canonical_id(
-        model=model,
-        hardware=hardware,
-        framework_name=framework_name,
-        framework_version=framework_version,
-        precision=precision,
+        RecipeIdentity(
+            model=model,
+            hardware=hardware,
+            framework_name=framework_name,
+            framework_version=framework_version,
+            precision=precision,
+        )
     )
-
-
-class _ToDictItem:
-    """Item exposing to_dict() to exercise the coerce path."""
-
-    def __init__(self, payload):
-        self._p = payload
-
-    def to_dict(self):
-        return self._p
 
 
 # ---- _CidLock ----
@@ -81,56 +75,31 @@ def test_cid_lock_serialises_threads_on_the_same_path(tmp_path):
     assert entered.is_set()
 
 
-# ---- _coerce_dict ----
+# ---- normalisation ----
 
 
-def test_coerce_dict_variants():
-    assert ls._coerce_dict(None) is None
-    assert ls._coerce_dict("x") is None
-    assert ls._coerce_dict({"a": 1}) == {"a": 1}
-    assert ls._coerce_dict(_ToDictItem({"k": 1})) == {"k": 1}
-    assert ls._coerce_dict(_ToDictItem("not a dict")) is None
-
-
-# ---- normalisation helpers ----
-
-
-def test_coerce_dicts_keeps_row_shaped_entries_only():
-    # Experience rows reach ``Recipe.from_dict`` unprojected, so this step only has to make them dicts: a mapping and
-    # an object that can render itself as one both survive, and an entry that is not row-shaped at all is dropped.
-    assert ls._coerce_dicts([{"name": "d", "gain_pct": 1.0}, "skip"]) == [{"name": "d", "gain_pct": 1.0}]
-    assert ls._coerce_dicts([_ToDictItem({"name": "d", "gain_pct": 1.0})]) == [{"name": "d", "gain_pct": 1.0}]
-    assert ls._coerce_dicts(None) == []
-
-
-def test_normalise_gaps_pitfalls_lessons():
-    assert ls._normalise_str_dicts([{"description": "d", "metrics": "m"}], ("description", "metrics")) == [
-        {"description": "d", "metrics": "m"},
-    ]
-    assert ls._normalise_str_dicts([{"description": "d", "severity": "high"}], ("description", "severity")) == [
-        {"description": "d", "severity": "high"},
-    ]
-    out = ls._normalise_lessons([{"statement": "s", "measured_impact": {"x": 1}}])
-    assert out[0]["measured_impact"] == {"x": 1}
-
-
-def test_normalise_sessions_coercion():
-    out = ls._normalise_sessions(
-        [
-            {
-                "date": "d",
-                "throughput_before": "10",
-                "throughput_after": "bad",
-                "gain_pct": "x",
-                "stack_len": "5",
-                "actions_taken": ["a"],
-            },
-        ]
+def test_put_recipe_normalises_list_fields(tmp_path):
+    store = ls.LocalRecipeStore(root=tmp_path)
+    cid = _cid()
+    store.put_recipe(
+        ls.RecipeUpsert(
+            canonical_id=cid,
+            model="m",
+            what_worked=[{"name": "w", "gain_pct": 1.0}, "skip", None],
+            what_failed=[["x"], {"name": "f"}],
+            remaining_gaps=[{"description": "d", "metrics": "m", "extra": 1}, "x"],
+            pitfalls=[{"description": "d", "severity": "high"}, None],
+            lessons=[{"statement": "s", "measured_impact": {"x": 1}}, "x"],
+            sessions=[{"date": "d", "throughput_before": 1.0}, "x"],
+        )
     )
-    assert out[0]["throughput_before"] == 10.0
-    assert out[0]["throughput_after"] == 0.0
-    assert out[0]["gain_pct"] == 0.0
-    assert out[0]["stack_len"] == 5
+    row = store.get_recipe(canonical_id=cid)
+    assert row["what_worked"] == [{"name": "w", "gain_pct": 1.0}]
+    assert row["what_failed"] == [{"name": "f"}]
+    assert row["remaining_gaps"] == [{"description": "d", "metrics": "m"}]
+    assert row["pitfalls"] == [{"description": "d", "severity": "high"}]
+    assert row["lessons"] == [{"statement": "s", "measured_impact": {"x": 1}}]
+    assert [s["throughput_before"] for s in row["sessions"]] == [1.0]
 
 
 # ---- put / get / history with full payload ----
@@ -140,29 +109,32 @@ def test_put_get_history_roundtrip(tmp_path):
     store = ls.LocalRecipeStore(root=str(tmp_path))
     cid = _cid()
     r1 = store.put_recipe(
-        canonical_id=cid,
-        model="m",
-        best_throughput=100.0,
-        what_worked=[{"description": "w", "measured_impact": "i"}],
-        sessions=[{"date": "d", "throughput_before": 1.0}],
-        extras={"task": "pretrain"},
-        provenance={"who": "test"},
+        ls.RecipeUpsert(
+            canonical_id=cid,
+            model="m",
+            best_throughput=100.0,
+            what_worked=[{"description": "w", "measured_impact": "i"}],
+            sessions=[{"date": "d", "throughput_before": 1.0}],
+            provenance={"who": "test"},
+            extras={"task": "pretrain"},
+        )
     )
     assert r1["version"] == 1
     assert r1["created"] is True
-    r2 = store.put_recipe(canonical_id=cid, model="m", best_throughput=200.0)
+    r2 = store.put_recipe(ls.RecipeUpsert(canonical_id=cid, model="m", best_throughput=200.0))
     assert r2["version"] == 2
     assert r2["created"] is False
 
     live = store.get_recipe(canonical_id=cid)
     assert live["version"] == 2
+    assert live["best_throughput"] == 200.0
 
-    assert store.get_recipe(canonical_id=cid, version=2)["version"] == 2
-    archived = store.get_recipe(canonical_id=cid, version=1)
+    history = tmp_path.joinpath(*cid_to_path_components(cid), "history")
+    assert sorted(p.name for p in history.iterdir()) == ["v1.json"]
+    archived = json.loads((history / "v1.json").read_text(encoding="utf-8"))["snapshot"]
     assert archived["version"] == 1
-    assert store.get_recipe(canonical_id=cid, version=99) is None
-
-    assert store.get_recipe(canonical_id=cid, version=1)["version"] == 1
+    assert archived["best_throughput"] == 100.0
+    assert archived["sessions"][0]["throughput_before"] == 1.0
 
 
 def test_get_recipe_missing(tmp_path):
@@ -173,38 +145,21 @@ def test_get_recipe_missing(tmp_path):
 # ---- search ----
 
 
-def test_search_filters(tmp_path):
+def test_search_filters_by_label_newest_first_and_truncates_to_limit(tmp_path):
     store = ls.LocalRecipeStore(root=tmp_path)
-    store.put_recipe(canonical_id=_cid(model="a"), model="a", best_throughput=100.0)
-    store.put_recipe(canonical_id=_cid(model="b"), model="b", best_throughput=300.0)
+    for model in ("a", "b", "c"):
+        store.put_recipe(ls.RecipeUpsert(canonical_id=_cid(model=model), model=model, best_throughput=100.0))
+    live = tmp_path.joinpath(*cid_to_path_components(_cid(model="c")), "recipe.json")
+    row = json.loads(live.read_text(encoding="utf-8"))
+    del row["updated_at"]
+    live.write_text(json.dumps(row), encoding="utf-8")
 
-    # label match
-    res = store.search(label_match={"model": "a"})
-    assert len(res) == 1
-    # metric filter shorthand alias 'throughput'
-    res = store.search(filters=ls.RecipeFilters(metric_filters={"throughput": {"min": 200.0}}))
-    assert len(res) == 1
-    assert res[0]["model"] == "b"
-    # metric scalar shorthand
-    res = store.search(filters=ls.RecipeFilters(metric_filters={"best_throughput": {"max": 150.0}}))
-    assert len(res) == 1
-    # updated_since far future -> none
-    assert store.search(filters=ls.RecipeFilters(updated_since="9999-01-01T00:00:00")) == []
-    assert len(store.search(limit=10)) == 2
+    assert [r["model"] for r in store.search(label_match={"model": "a"})] == ["a"]
+    assert [r["model"] for r in store.search(limit=10)] == ["b", "a", "c"]
+    assert [r["model"] for r in store.search(limit=2)] == ["b", "a"]
 
 
 # ---- low-level helpers ----
-
-
-def test_matches_metrics_missing_key():
-    assert ls._matches_metrics({}, {"best_throughput": {"min": 1}}) is False
-    assert ls._matches_metrics({"best_throughput": "x"}, {"best_throughput": {"min": 1}}) is False
-
-
-def test_coerce_sort_value():
-    assert ls._coerce_sort_value("3", "version") == 3
-    assert ls._coerce_sort_value("bad", "version") == 0
-    assert ls._coerce_sort_value(None, "updated_at") == ""
 
 
 def test_read_json_bad(tmp_path):
@@ -212,42 +167,3 @@ def test_read_json_bad(tmp_path):
     p.write_text("{bad", encoding="utf-8")
     with pytest.raises(ls.LocalRecipeStoreError):
         ls._read_json(p)
-
-
-def test_coerce_dict_dataclass():
-    from dataclasses import dataclass
-
-    @dataclass
-    class _D:
-        a: int = 1
-
-    assert ls._coerce_dict(_D()) == {"a": 1}
-
-
-def test_normalisers_skip_uncoercible():
-    assert ls._normalise_str_dicts(["x", None], ("description", "reason")) == []
-    assert ls._normalise_str_dicts(["x"], ("description", "metrics")) == []
-    assert ls._normalise_str_dicts(["x"], ("description", "severity")) == []
-    assert ls._normalise_lessons([None]) == []
-    assert ls._normalise_sessions(["x"]) == []
-
-
-def test_matches_metrics_scalar_shorthand_and_bad_bound():
-    # scalar shorthand -> lo == hi == bounds
-    assert ls._matches_metrics({"best_throughput": 100.0}, {"throughput": 100.0}) is True
-    assert ls._matches_metrics({"best_throughput": 100.0}, {"throughput": 50.0}) is False
-    # bad bound type -> False
-    assert (
-        ls._matches_metrics(
-            {"best_throughput": 100.0},
-            {"throughput": {"min": "bad"}},
-        )
-        is False
-    )
-    assert (
-        ls._matches_metrics(
-            {"best_throughput": 100.0},
-            {"throughput": {"max": "bad"}},
-        )
-        is False
-    )

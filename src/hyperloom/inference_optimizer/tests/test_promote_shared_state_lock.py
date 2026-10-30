@@ -33,7 +33,7 @@ from hyperloom.orchestrator.knowledge.remote_recipe._vendor.kb_store_client impo
 from hyperloom.orchestrator.knowledge.remote_recipe.values import has_new_keep
 from hyperloom.orchestrator.state._shared_state.attempt_audit import _AUDIT_ACTIONS
 from hyperloom.inference_optimizer.session.paths import make_session_dir
-from hyperloom.orchestrator.state.task_registry import Task
+from hyperloom.orchestrator.state.task_registry import Task, TaskSpec
 
 
 @pytest.fixture
@@ -91,14 +91,13 @@ def _task(kind: str, *, task_id: str = "t1", params: dict | None = None) -> Task
 
 
 def _count_record_attempt(coord: Coordinator, monkeypatch) -> list[dict]:
-    """Spy that records every record_action_attempt call's kwargs, forwarding to the real impl."""
+    """Spy that records every record_action_attempt call's arguments, forwarding to the real impl."""
     calls: list[dict] = []
     real = coord.shared_state.record_action_attempt
 
-    def spy(*args, **kwargs):
-        # record_action_attempt is called as (action=..., ...) keyword in prod code.
-        calls.append(dict(kwargs))
-        return real(*args, **kwargs)
+    def spy(action, attempt):
+        calls.append({"action": action, "attempt": attempt})
+        return real(action, attempt)
 
     monkeypatch.setattr(coord.shared_state, "record_action_attempt", spy)
     return calls
@@ -1289,7 +1288,7 @@ async def test_keep_kb_hook_runs_only_after_authoritative_save(session_dir, tmp_
     monkeypatch.setattr(
         coord.writeback,
         "_stage_agent_keep",
-        lambda **_kwargs: events.append("stage") or True,
+        lambda _row: events.append("stage") or True,
     )
 
     await coord.writeback.promote_to_shared_state(
@@ -1326,7 +1325,7 @@ def test_outbox_drain_acknowledges_only_confirmed_success(
     monkeypatch.setattr(
         coord.writeback,
         "_stage_agent_keep",
-        lambda **_kwargs: False,
+        lambda _row: False,
     )
 
     coord.writeback._drain_agent_keep_outbox()
@@ -1415,7 +1414,7 @@ async def test_resume_settles_state_before_draining_kb_outbox(
     def _save(_session_dir):
         events.append("save")
 
-    def _stage(**_kwargs):
+    def _stage(_row):
         events.append("stage")
         staged.append(dict(coord.shared_state.current_best))
         return True
@@ -1917,14 +1916,20 @@ async def test_drain_cancels_queued_baselines_but_spares_revalidation(session_di
     coord = _coord(session_dir)
     coord.shared_state.baseline_tput = 2195.86
 
-    stale_a = await coord.tasks.create(kind="baseline", params={}, idempotency_key="bl-a")
-    stale_b = await coord.tasks.create(kind="baseline", params={"tag": "x"}, idempotency_key="bl-b")
-    reval = await coord.tasks.create(
-        kind="baseline",
-        params={"reason": ENABLEMENT_REVALIDATION_REASON},
-        idempotency_key="bl-reval",
+    stale_a, _ = await coord.tasks.create_or_return_existing(
+        TaskSpec(kind="baseline", params={}, idempotency_key="bl-a")
     )
-    other = await coord.tasks.create(kind="explore", params={}, idempotency_key="ex-a")
+    stale_b, _ = await coord.tasks.create_or_return_existing(
+        TaskSpec(kind="baseline", params={"tag": "x"}, idempotency_key="bl-b")
+    )
+    reval, _ = await coord.tasks.create_or_return_existing(
+        TaskSpec(
+            kind="baseline",
+            params={"reason": ENABLEMENT_REVALIDATION_REASON},
+            idempotency_key="bl-reval",
+        ),
+    )
+    other, _ = await coord.tasks.create_or_return_existing(TaskSpec(kind="explore", params={}, idempotency_key="ex-a"))
 
     cancelled = await coord.writeback.drain_queued_baselines(reason="baseline_established")
 
@@ -1939,7 +1944,9 @@ async def test_drain_spares_the_tracked_revalidation_task_id(session_dir):
     """The tracked id is honoured even when params carry no revalidation reason."""
     coord = _coord(session_dir)
     coord.shared_state.baseline_tput = 1000.0
-    reval = await coord.tasks.create(kind="baseline", params={}, idempotency_key="bl-tracked")
+    reval, _ = await coord.tasks.create_or_return_existing(
+        TaskSpec(kind="baseline", params={}, idempotency_key="bl-tracked")
+    )
     coord.shared_state.enablement.revalidation_task_id = reval.task_id
 
     assert await coord.writeback.drain_queued_baselines(reason="baseline_established") == []
@@ -1950,7 +1957,9 @@ async def test_drain_spares_the_tracked_revalidation_task_id(session_dir):
 async def test_promote_baseline_drains_the_backlog(session_dir):
     """The drain is wired into promotion, not just available as a helper."""
     coord = _coord(session_dir)
-    stale = await coord.tasks.create(kind="baseline", params={}, idempotency_key="bl-stale")
+    stale, _ = await coord.tasks.create_or_return_existing(
+        TaskSpec(kind="baseline", params={}, idempotency_key="bl-stale")
+    )
 
     await coord.writeback.promote_to_shared_state(
         "baseline",
@@ -2213,7 +2222,7 @@ class TestWritebackRequiredAxes:
         else:
             await coord.writeback._promote_explore(
                 {
-                    "winners": [candidate],
+                    "winners": [{**candidate, "fingerprint": "fp-next"}],
                     "best_variant": candidate,
                     "output_throughput": 150.0,
                     "round_id": "r-local-win",
@@ -2325,8 +2334,8 @@ class TestWritebackRequiredAxes:
         assert state.validated_recipe_generation == state.working_recipe_generation == 1
         assert not state.optimization_stack_has_unvalidated_keeps()
         record.assert_called_once()
-        assert record.call_args.kwargs["baseline_tput"] == 100.0
-        assert record.call_args.kwargs["validated_tput"] == 150.0
+        assert record.call_args.args[0].graded.reference == 100.0
+        assert record.call_args.args[0].graded.candidate == 150.0
 
 
 def test_lift_does_not_double_append_same_fingerprint(session_dir):

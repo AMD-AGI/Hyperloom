@@ -19,10 +19,8 @@ from hyperloom.agents.framework.sources._shared import GitHubPr
 class _FakeResp:
     """Minimal urllib response stand-in usable as a context manager."""
 
-    def __init__(self, status: int, body: bytes, content_type: str = "application/json"):
-        self.status = status
+    def __init__(self, body: bytes):
         self._body = body
-        self.headers = {"Content-Type": content_type}
 
     def __enter__(self):
         return self
@@ -54,7 +52,7 @@ def test_list_perf_prs_parses_items_list(monkeypatch) -> None:
             ]
         }
     ).encode("utf-8")
-    _install_urlopen(monkeypatch, lambda req: _FakeResp(200, body))
+    _install_urlopen(monkeypatch, lambda req: _FakeResp(body))
     prs = pc.list_perf_prs(
         "https://github.com/sgl-project/sglang.git", monitor=PRMonitorConfig(base_url="http://x"), limit=2
     )
@@ -69,7 +67,7 @@ def test_base_url_may_include_v1_suffix(monkeypatch) -> None:
 
     def handler(req):
         seen["url"] = req.get_full_url()
-        return _FakeResp(200, body)
+        return _FakeResp(body)
 
     _install_urlopen(monkeypatch, handler)
     pc.list_perf_prs(
@@ -79,6 +77,7 @@ def test_base_url_may_include_v1_suffix(monkeypatch) -> None:
     )
     assert "/v1/v1/" not in seen["url"]
     assert seen["url"].startswith("https://pr-monitor.example.com/knowledge-base/pr-monitor/v1/repos/")
+    assert "state=all" in seen["url"]
 
 
 def test_search_prs_unwraps_summary_match_records(monkeypatch) -> None:
@@ -98,12 +97,17 @@ def test_search_prs_unwraps_summary_match_records(monkeypatch) -> None:
             }
         ]
     ).encode("utf-8")
-    _install_urlopen(monkeypatch, lambda req: _FakeResp(200, body))
+    seen: dict[str, str] = {}
+
+    def handler(req):
+        seen["url"] = req.get_full_url()
+        return _FakeResp(body)
+
+    _install_urlopen(monkeypatch, handler)
     prs = pc.search_perf_prs_via_pr_monitor_search(
         "https://github.com/ROCm/vllm.git",
         monitor=PRMonitorConfig(base_url="http://x"),
         query="dsv4",
-        state="all",
         limit=5,
     )
     assert prs == [
@@ -113,6 +117,7 @@ def test_search_prs_unwraps_summary_match_records(monkeypatch) -> None:
             html_url="https://github.com/ROCm/vllm/pull/1057",
         )
     ]
+    assert "state=all" in seen["url"]
 
 
 def test_list_perf_prs_hard_fails_on_http_error(monkeypatch) -> None:
@@ -128,7 +133,7 @@ def test_list_perf_prs_hard_fails_on_http_error(monkeypatch) -> None:
 
 def test_list_perf_prs_hard_fails_on_bad_json(monkeypatch) -> None:
     """Non-JSON body propagates as PRMonitorError."""
-    _install_urlopen(monkeypatch, lambda req: _FakeResp(200, b"<html>not json"))
+    _install_urlopen(monkeypatch, lambda req: _FakeResp(b"<html>not json"))
     with pytest.raises(pc.PRMonitorError, match="non-JSON"):
         pc.list_perf_prs("https://github.com/sgl-project/sglang.git", monitor=PRMonitorConfig(base_url="http://x"))
 

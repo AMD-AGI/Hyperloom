@@ -25,17 +25,22 @@ _POLL_SEC: float = 0.05
 
 _PROC = Path("/proc")
 
+#: Set in a run's env, its value marks the run: whatever inherited it is reaped on every exit path, however it detached.
+REAP_MARK_ENV: str = "HYPERLOOM_REAP_MARK"
+
 __all__ = [
+    "REAP_MARK_ENV",
     "TERM_GRACE_SEC",
     "ProcessId",
+    "boot_unix",
     "Tree",
     "collect_tree",
     "descendants",
-    "group_alive",
     "group_members",
     "kill_tree",
     "marked_pids",
     "proc_identity",
+    "process_uids",
     "running",
     "signal_group",
     "signal_processes",
@@ -66,6 +71,25 @@ def proc_identity(pid: int) -> tuple[int, int] | None:
         fields = _stat_fields(pid)
         return int(fields[1]), int(fields[19])
     except (OSError, ValueError, IndexError):
+        return None
+
+
+def boot_unix() -> float:
+    """Wall-clock time the host booted: the origin the start times in ``/proc/<pid>/stat`` count clock ticks from.
+
+    Raises:
+        OSError: When ``/proc/uptime`` cannot be read.
+    """
+    return time.time() - float((_PROC / "uptime").read_text(encoding="ascii").split()[0])
+
+
+def process_uids(pid: int) -> tuple[int, int] | None:
+    """Read ``(real uid, effective uid)`` for one pid from ``/proc/<pid>/status``; ``None`` when it is gone."""
+    try:
+        status = (_PROC / str(pid) / "status").read_text(encoding="utf-8", errors="replace")
+        uids = next(line.split()[1:3] for line in status.splitlines() if line.startswith("Uid:"))
+        return int(uids[0]), int(uids[1])
+    except (OSError, StopIteration, ValueError, IndexError):
         return None
 
 
@@ -144,29 +168,6 @@ def running(pid: int) -> bool:
         # No procfs reading to refine the signal with; the signal stands.
         return True
     return bool(fields) and fields[0] != "Z"
-
-
-def group_alive(pgid: int) -> bool:
-    """Whether a process group still has at least one member.
-
-    Args:
-        pgid: The process-group id to probe.
-
-    Returns:
-        bool: True while the group has a member or its liveness cannot be read
-        (a sandbox may refuse the probe), False once it is empty or on
-        non-POSIX.
-    """
-    if os.name != "posix":
-        return False
-    try:
-        os.killpg(pgid, 0)
-    except ProcessLookupError:
-        return False
-    except OSError:
-        # An indeterminate reading is not an empty group.
-        return True
-    return True
 
 
 def signal_group(pgid: int, sig: int, *, what: str = "process group") -> bool | None:

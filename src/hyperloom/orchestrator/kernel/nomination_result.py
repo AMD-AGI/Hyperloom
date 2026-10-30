@@ -5,8 +5,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import logging
+from dataclasses import dataclass
 from typing import Any
+
+
+log = logging.getLogger(__name__)
 
 #: Dropping an entry is a contract problem worth surfacing, so every drop
 #: carries one of these instead of vanishing into a log line.
@@ -28,7 +32,6 @@ class NominatedPatch:
     snapshot_dir: str = ""
     base_commit: str = ""
     micro_speedup: float = 0.0
-    write_paths: tuple[str, ...] = ()
     #: Space-joined env flag(s) that gate the fused path. An authored fusion is
     #: env-gated: unset, the patched code is bit-for-bit the eager path, so the
     #: flag has to reach the e2e re-baseline or integrate measures the un-fused
@@ -42,7 +45,6 @@ class DroppedPatch:
 
     reason: str
     kernel_name: str = ""
-    raw: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -51,9 +53,6 @@ class NominationOutcome:
 
     patches: tuple[NominatedPatch, ...] = ()
     dropped: tuple[DroppedPatch, ...] = ()
-    candidates_seen: int = 0
-    resolved: int = 0
-    selected: int = 0
     #: Why the envelope itself could not be trusted, empty when it could. An
     #: envelope that is unreadable is not a nomination that selected nothing.
     schema_error: str = ""
@@ -62,6 +61,25 @@ class NominationOutcome:
     def is_empty(self) -> bool:
         """No usable patch. A valid outcome, and not the same as a failure."""
         return not self.patches
+
+
+def summarize_dropped_patches(dropped: Any) -> dict[str, int]:
+    """Count dropped patch entries by reason, logging each one as it is counted.
+
+    ``parse_outcome`` names why every unusable entry was refused, but a reason
+    nobody reports is indistinguishable from forge never having offered the
+    entry at all.
+    """
+    counts: dict[str, int] = {}
+    for entry in dropped or ():
+        reason = str(getattr(entry, "reason", "") or "unknown")
+        counts[reason] = counts.get(reason, 0) + 1
+        log.warning(
+            "nomination landing: refused patch kernel=%s reason=%s",
+            str(getattr(entry, "kernel_name", "") or "<unnamed>"),
+            reason,
+        )
+    return counts
 
 
 def parse_outcome(payload: Any) -> NominationOutcome:
@@ -73,17 +91,15 @@ def parse_outcome(payload: Any) -> NominationOutcome:
         return NominationOutcome(schema_error="result envelope carries no patches array")
     if not isinstance(entries, list):
         return NominationOutcome(schema_error=f"patches is {type(entries).__name__}, not an array")
-    rows = entries
     kept: dict[str, NominatedPatch] = {}
     dropped: list[DroppedPatch] = []
-    for row in rows:
+    for row in entries:
         patch, reason = _read_entry(row)
         if patch is None:
             dropped.append(
                 DroppedPatch(
                     reason=reason,
                     kernel_name=str(row.get("kernel_name") or "") if isinstance(row, dict) else "",
-                    raw=row if isinstance(row, dict) else {},
                 )
             )
             continue
@@ -95,25 +111,16 @@ def parse_outcome(payload: Any) -> NominationOutcome:
         weaker = patch if patch.micro_speedup <= incumbent.micro_speedup else incumbent
         stronger = incumbent if weaker is patch else patch
         kept[patch.kernel_name] = stronger
-        dropped.append(
-            DroppedPatch(
-                reason=DROP_DUPLICATE_KERNEL_NAME,
-                kernel_name=weaker.kernel_name,
-                raw={"patch_path": weaker.patch_path},
-            )
-        )
-    summary = payload.get("nomination")
-    summary = summary if isinstance(summary, dict) else {}
+        dropped.append(DroppedPatch(reason=DROP_DUPLICATE_KERNEL_NAME, kernel_name=weaker.kernel_name))
     ordered = sorted(kept.values(), key=lambda patch: patch.micro_speedup, reverse=True)
     # Offered patches of which none survived: forge believed it nominated, so this is a contract disagreement rather
     # than a round that selected nothing.
-    schema_error = f"every one of the {len(rows)} offered patch entries was refused" if rows and not ordered else ""
+    schema_error = (
+        f"every one of the {len(entries)} offered patch entries was refused" if entries and not ordered else ""
+    )
     return NominationOutcome(
         patches=tuple(ordered),
         dropped=tuple(dropped),
-        candidates_seen=_int_or_zero(summary.get("candidates_seen")),
-        resolved=_int_or_zero(summary.get("resolved")),
-        selected=_int_or_zero(summary.get("selected")),
         schema_error=schema_error,
     )
 
@@ -128,8 +135,7 @@ def _read_entry(row: Any) -> tuple[NominatedPatch | None, str]:
     patch_path = str(row.get("patch_path") or "").strip()
     if not patch_path:
         return None, DROP_MISSING_PATCH_PATH
-    # Interchangeable on the return path: integrate reads whichever is set.
-    target_file = str(row.get("target_file") or row.get("source_file") or "").strip()
+    target_file = str(row.get("target_file") or "").strip()
     if not target_file:
         return None, DROP_MISSING_TARGET_FILE
     return (
@@ -137,11 +143,10 @@ def _read_entry(row: Any) -> tuple[NominatedPatch | None, str]:
             kernel_name=kernel_name,
             patch_path=patch_path,
             target_file=target_file,
-            kernel_repo=str(row.get("kernel_repo") or row.get("repo_root") or "").strip(),
+            kernel_repo=str(row.get("kernel_repo") or "").strip(),
             snapshot_dir=str(row.get("snapshot_dir") or "").strip(),
             base_commit=str(row.get("base_commit") or "").strip(),
             micro_speedup=_finite_float(row.get("micro_speedup")),
-            write_paths=_string_tuple(row.get("write_paths")),
             env_flag=str(row.get("env_flag") or "").strip(),
         ),
         "",
@@ -156,18 +161,3 @@ def _finite_float(value: Any) -> float:
         return 0.0
     number = float(value)
     return number if math.isfinite(number) else 0.0
-
-
-def _int_or_zero(value: Any) -> int:
-    """A missing or unparsable count reports zero; counts are advisory."""
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return 0
-
-
-def _string_tuple(value: Any) -> tuple[str, ...]:
-    """Keep non-empty strings only; the import-confirmation gate reads these."""
-    if not isinstance(value, list):
-        return ()
-    return tuple(str(item).strip() for item in value if str(item or "").strip())

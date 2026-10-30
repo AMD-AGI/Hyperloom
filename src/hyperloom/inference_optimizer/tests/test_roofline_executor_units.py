@@ -25,7 +25,6 @@ from hyperloom.orchestrator.actions.executors.roofline import (
     _profile_err_text,
     _profile_server_log_tail,
     _server_liveness_probe,
-    make_roofline_executor,
 )
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
@@ -624,7 +623,7 @@ async def test_lifecycle_end_emit_bug_propagates(tmp_path, monkeypatch):
 
     def flaky_evt(*args, **kwargs):
         calls["n"] += 1
-        if kwargs.get("status") == "END":
+        if args[1].status == "END":
             raise RuntimeError("lifecycle END boom")
         return real_evt(*args, **kwargs)
 
@@ -665,14 +664,6 @@ def test_resolve_framework_falls_back_to_shared_state(monkeypatch):
     exe = RooflineExecutor(shared_state=state)
     ctx = _ctx(params={"base_extra_args": ""})
     assert exe._resolve_framework(ctx) == "atom"
-
-
-def test_make_roofline_executor_returns_instance():
-    state = _state()
-    exe = make_roofline_executor(shared_state=state)
-    assert isinstance(exe, RooflineExecutor)
-    assert exe.shared_state is state
-    assert rf.RooflineExecutor is RooflineExecutor
 
 
 async def test_orphan_reap_failure_propagates(monkeypatch, tmp_path):

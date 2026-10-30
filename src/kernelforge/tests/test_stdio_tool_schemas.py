@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 from kernelforge.knowledge.pr_knowledge import mcp_server as pr_server
-from kernelforge.orchestrator import specialist_probe_server
+from kernelforge.workflows.forge_loop.roles import specialist_probe_server
 
 
 @pytest.mark.parametrize(

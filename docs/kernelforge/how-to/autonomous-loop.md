@@ -145,6 +145,24 @@ Framework writes a minimal plan that points to the current Analysis artifacts
 and asks the Implementer to plan directly. Only deterministic plan-persistence or
 workspace failures produce `ORCHESTRATION_ERROR`.
 
+Every plan leaves a short account of itself. A plan's first line, before any
+heading, is a `Summary:` line: one to three plain sentences stating the problem
+the plan addresses and what it changes to address it. The Implementer session
+does not write that takeaway. After the session ends, a separate lesson turn
+records what the session explored, including the directions it kept or dropped,
+on the lines `HELD-FIXED`, `NEGATIVES`, and `DISPROOF`. The loop then appends
+the scope and outcome lines. That file is `lessons/iter_NNN.md`, and it is the
+only reasoning record. A lane takes that turn at the end of its round, while
+its copy of the workspace still exists, and `lane_queue.json` carries the record,
+or the reason there is none, to whichever iteration measures the lane. When the loop
+starts it hides `forge_experiments/` from git with a `forge_experiments/.gitignore`
+holding `*`, so nothing written there is committed or rejected by the workspace
+guard as a new file, whatever the workspace itself ignores.
+`kernelforge export-runs` turns the plan's `Summary:` line, the whole lesson,
+and the `report.md` of the Analysis bundle the round planned on into the
+Experiences of a run; see
+{doc}`the CLI reference </kernelforge/reference/cli>`.
+
 After a KEEP, the previous Analysis bundle remains available and is marked
 stale. The loop refreshes it only after the canonical mean-case score has
 improved by the code-level 5% threshold from the evidence score, or
@@ -276,11 +294,16 @@ exception summary. Apply decisions remain separate in `reference_reason`.
 ## Model relay
 
 Every new campaign relays its search between Agent profiles: one profile per
-registered provider (`claude` runs Claude Code, `codex` runs Codex), the
-`--agent-backend` provider first as the primary. The campaign records only the
+auto-selectable provider (`claude` runs Claude Code, `codex` runs Codex), the
+`--agent-backend` provider first as the primary. `deepseek` (the DeepSeek
+Harness) is not auto-selectable: it joins the relay only as the primary, when
+the campaign starts on it through `--agent-backend deepseek`,
+`FORGE_AGENT_BACKEND=deepseek` or `INFERENCE_OPTIMIZER_AGENT_BACKEND=deepseek`
+(the last is how a Hyperloom run selects it). The campaign records only the
 members, the primary and the blockage threshold. Each session resolves every
 member's model: the primary takes `--model`; every member without one takes its
-provider's `CLAUDE_MODEL` / `CODEX_MODEL`, else the provider's default model.
+provider's `CLAUDE_MODEL` / `CODEX_MODEL` / `DSH_MODEL`, else the provider's
+default model.
 `--model`, `--agent-reasoning-effort` and the model variables therefore apply on
 `--resume` as well. An `--agent-backend` (or `FORGE_AGENT_BACKEND`) that differs
 from the campaign's primary is refused on resume; leave it unset to keep the

@@ -16,9 +16,10 @@ import pytest
 from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 from hyperloom.inference_optimizer.breakdown.recorder.phase_event import is_phase_transition_row
-from hyperloom.orchestrator.actions.executors.baseline import restore_warm_kernel_snapshots
+from hyperloom.orchestrator.actions.executors.benchmark_run.warm_patches import restore_warm_kernel_snapshots
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.phases import prelude as prelude_mod
+from hyperloom.orchestrator.phases import prelude_warm_kernel as prelude_warm_kernel_mod
 from hyperloom.orchestrator.phases.prelude import PRELUDE_ARM_DROPPED
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -72,25 +73,18 @@ class _StubTaskRegistry:
     def __init__(self):
         self.calls: list[dict] = []
 
-    async def create_or_return_existing(
-        self,
-        *,
-        kind,
-        params,
-        idempotency_key,
-        **kwargs,
-    ):
+    async def create_or_return_existing(self, spec):
         self.calls.append(
             {
-                "kind": kind,
-                "params": dict(params),
-                "idempotency_key": idempotency_key,
+                "kind": spec.kind,
+                "params": dict(spec.params),
+                "idempotency_key": spec.idempotency_key,
             }
         )
         task = _StubTask(
-            task_id=f"task-{idempotency_key}",
-            kind=kind,
-            params=dict(params),
+            task_id=f"task-{spec.idempotency_key}",
+            kind=spec.kind,
+            params=dict(spec.params),
         )
         return task, False
 
@@ -768,6 +762,35 @@ async def test_warm_replay_skips_a_recipe_that_restates_the_baseline(tmp_path):
     assert (outcome["status"], outcome["reason"]) == ("skipped", "restates_baseline")
     persisted = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
     assert persisted["warm_replay_attempted"] is True
+
+
+@pytest.mark.asyncio
+async def test_warm_replay_skips_a_recipe_an_agentx_baseline_already_launches_with(tmp_path):
+    """AgentX carries the baseline's server args in its launch overrides, not in ``benchmark.envs``."""
+    recipe = _warm_recipe_t1(extra_server_args="--kv-cache-dtype fp8", extra_envs={"SGLANG_TEST": "1"})
+    coord = _make_coord(tmp_path, warm_start_recipe=recipe)
+    config = tmp_path / "baseline_config.with_envs.yaml"
+    launch = {"version": 1, "append_args": ["--kv-cache-dtype", "fp8"], "env": {"SGLANG_TEST": "1"}}
+    config.write_text(
+        json.dumps(
+            {
+                "benchmark": {
+                    "framework": "sglang",
+                    "model": "Qwen/Qwen3-0.6B",
+                    "agentx": {"enabled": True, "mode": "canonical", "launch_overrides": launch},
+                    "envs": {"TP": "1", "EP_SIZE": "1", "CONC": "8"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    coord.shared_state.baseline_config_path = str(config)
+
+    assert await coord.phase_prelude.maybe_enqueue_warm_replay(baseline_tput=600.0) is None
+
+    assert coord.tasks.calls == []
+    outcome = coord.shared_state.warm_replay_outcome
+    assert (outcome["status"], outcome["reason"]) == ("skipped", "restates_baseline")
 
 
 @pytest.mark.asyncio
@@ -2017,13 +2040,13 @@ async def test_enqueue_failure_rolls_back_prepared_kernel(tmp_path, monkeypatch)
             "snapshots": snapshots,
         }
 
-    async def _raise(**_kwargs):
+    async def _raise(_spec):
         raise RuntimeError("registry unavailable")
 
     rollbacks: list[tuple[list[dict], list[dict]]] = []
     coord.phase_prelude._prepare_warm_kernel_kb = _prepare  # type: ignore[method-assign]
     monkeypatch.setattr(
-        prelude_mod,
+        prelude_warm_kernel_mod,
         "revert_warm_kernel_patches",
         lambda got_applied, got_snapshots=None: (
             rollbacks.append((got_applied, got_snapshots or [])) or {"ok": True, "errors": []}
@@ -2058,12 +2081,12 @@ async def test_enqueue_failure_retains_pending_when_kernel_restore_fails(
             "snapshots": [{"target": "/tmp/kernel.py"}],
         }
 
-    async def _raise(**_kwargs):
+    async def _raise(_spec):
         raise RuntimeError("registry unavailable")
 
     coord.phase_prelude._prepare_warm_kernel_kb = _prepare  # type: ignore[method-assign]
     monkeypatch.setattr(
-        prelude_mod,
+        prelude_warm_kernel_mod,
         "revert_warm_kernel_patches",
         lambda *_args: {"ok": False, "errors": ["restore failed"]},
     )
@@ -2086,10 +2109,10 @@ def test_combined_replay_revert_rolls_back_recipe_and_kernel(tmp_path, monkeypat
     recipe_rollbacks: list[tuple[str, str]] = []
     kernel_rollbacks: list[list[dict]] = []
 
-    import hyperloom.orchestrator.actions.executors.baseline as baseline_module
+    import hyperloom.orchestrator.actions.executors.benchmark_run.warm_patches as warm_patches_module
 
     monkeypatch.setattr(
-        baseline_module,
+        warm_patches_module,
         "_revert_patches",
         lambda target, sha, manifest=None: recipe_rollbacks.append((target, sha)) or {"ok": True, "errors": []},
     )
@@ -2420,10 +2443,10 @@ def test_checkout_promotion_failure_rejects_keep_and_rolls_kernel(tmp_path, monk
         "revert_warm_kernel_patches",
         lambda applied, snapshots=None: kernel_rollbacks.append(applied) or {"ok": True, "errors": []},
     )
-    import hyperloom.orchestrator.actions.executors.baseline as baseline_module
+    import hyperloom.orchestrator.actions.executors.benchmark_run.warm_patches as warm_patches_module
 
     monkeypatch.setattr(
-        baseline_module,
+        warm_patches_module,
         "_revert_patches",
         lambda *_args: {"ok": True, "errors": []},
     )
@@ -2603,9 +2626,11 @@ def test_one_tree_failing_validation_rejects_the_whole_promotion(tmp_path):
 
 def test_rollback_restores_a_nogit_tree_from_its_backups(tmp_path, monkeypatch):
     """A pip-installed framework has no manifest; its backups are the way back."""
+    from hyperloom.orchestrator.phases import warm_replay_stack
+
     restored: list[list] = []
     monkeypatch.setattr(
-        prelude_mod,
+        warm_replay_stack,
         "_revert_warm_patch_state",
         lambda root, *, pre_sha="", snapshot_manifest=None, nogit_backups=None: (
             restored.append(nogit_backups) or {"ok": True, "errors": []}
@@ -2699,11 +2724,11 @@ def test_an_unmutated_tree_promotes_because_it_already_carries_the_overlay(tmp_p
 
 def test_rollback_restores_every_tree_the_replay_patched(tmp_path, monkeypatch):
     """Leaving one tree patched would bank a mutation from a rejected replay."""
-    import hyperloom.orchestrator.actions.executors.baseline as baseline_module
+    import hyperloom.orchestrator.actions.executors.benchmark_run.warm_patches as warm_patches_module
 
     reverted: list[str] = []
     monkeypatch.setattr(
-        baseline_module,
+        warm_patches_module,
         "_revert_patches",
         lambda root, *_args: reverted.append(root) or {"ok": True, "errors": []},
     )
@@ -3224,7 +3249,7 @@ def test_a_kernel_rollback_that_fails_stops_the_run(tmp_path, monkeypatch):
         "kernel_snapshots": [{"path": "b"}],
     }
     monkeypatch.setattr(
-        prelude_mod,
+        prelude_warm_kernel_mod,
         "revert_warm_kernel_patches",
         lambda *_args, **_kwargs: {"ok": False, "errors": ["could not restore kernel.py"]},
     )
@@ -3247,7 +3272,9 @@ def test_a_kernel_rollback_that_succeeds_refuses_without_stopping_the_run(tmp_pa
         "kernel_apply_results": [{"patch": "a"}],
         "kernel_snapshots": [{"path": "b"}],
     }
-    monkeypatch.setattr(prelude_mod, "revert_warm_kernel_patches", lambda *_a, **_k: {"ok": True, "errors": []})
+    monkeypatch.setattr(
+        prelude_warm_kernel_mod, "revert_warm_kernel_patches", lambda *_a, **_k: {"ok": True, "errors": []}
+    )
 
     refused = coord.phase_prelude._refused_dirty_warm_kernel({"status": "error", "reason": "apply left a patched tree"})
 
@@ -3284,7 +3311,10 @@ def _stock_sglang_tree(root: Path) -> Path:
 
 def _replayed_on_a_git_tree(tmp_path: Path) -> tuple[Coordinator, Path, dict, dict]:
     """A warm replay that applied the PPE overlay to a real SGLang checkout, measured and ready to promote."""
-    from hyperloom.orchestrator.actions.executors.baseline import _apply_warm_patches, _stamp_warm_patch_outcome
+    from hyperloom.orchestrator.actions.executors.benchmark_run.warm_patches import (
+        _apply_warm_patches,
+        _stamp_warm_patch_outcome,
+    )
 
     tree = _stock_sglang_tree(tmp_path / "sglang")
     params = {
@@ -3303,7 +3333,7 @@ def _replayed_on_a_git_tree(tmp_path: Path) -> tuple[Coordinator, Path, dict, di
     workspace = tmp_path / "runs" / "replay_warm_recipe" / "warm"
     workspace.mkdir(parents=True)
     result = {"status": "succeeded", "output_throughput": 612.0, "workspace": str(workspace)}
-    _stamp_warm_patch_outcome(result, _apply_warm_patches(params, str(tree), workspace), params)
+    _stamp_warm_patch_outcome(result, _apply_warm_patches(params, workspace), params)
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     coord.shared_state.baseline_tput = 600.0
     coord.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
@@ -3380,7 +3410,10 @@ def test_a_warm_replay_whose_overlays_cannot_be_committed_is_not_adopted(tmp_pat
 
 
 def test_a_commit_failing_on_one_tree_leaves_every_tree_stock(tmp_path):
-    from hyperloom.orchestrator.actions.executors.baseline import _apply_warm_patches, _stamp_warm_patch_outcome
+    from hyperloom.orchestrator.actions.executors.benchmark_run.warm_patches import (
+        _apply_warm_patches,
+        _stamp_warm_patch_outcome,
+    )
 
     trees = [_stock_sglang_tree(tmp_path / name) for name in ("sglang", "tuning")]
     stock_heads = [_tree_git(tree, "rev-parse", "HEAD").strip() for tree in trees]
@@ -3397,7 +3430,7 @@ def test_a_commit_failing_on_one_tree_leaves_every_tree_stock(tmp_path):
     workspace = tmp_path / "runs" / "replay_warm_recipe" / "warm"
     workspace.mkdir(parents=True)
     result = {"status": "succeeded", "output_throughput": 612.0, "workspace": str(workspace)}
-    _stamp_warm_patch_outcome(result, _apply_warm_patches(params, "", workspace), params)
+    _stamp_warm_patch_outcome(result, _apply_warm_patches(params, workspace), params)
     hook = trees[1] / ".git" / "hooks" / "pre-commit"
     hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
     hook.chmod(0o755)
@@ -3430,7 +3463,10 @@ def test_a_resume_rolls_back_a_replay_that_died_after_committing_its_overlays(tm
 
 
 def test_a_refused_replay_leaves_an_overlay_the_tree_already_held_uncommitted(tmp_path):
-    from hyperloom.orchestrator.actions.executors.baseline import _apply_warm_patches, _stamp_warm_patch_outcome
+    from hyperloom.orchestrator.actions.executors.benchmark_run.warm_patches import (
+        _apply_warm_patches,
+        _stamp_warm_patch_outcome,
+    )
 
     tree = _stock_sglang_tree(tmp_path / "sglang")
     stock_head = _tree_git(tree, "rev-parse", "HEAD").strip()
@@ -3450,7 +3486,7 @@ def test_a_refused_replay_leaves_an_overlay_the_tree_already_held_uncommitted(tm
     workspace = tmp_path / "runs" / "replay_warm_recipe" / "warm"
     workspace.mkdir(parents=True)
     result = {"status": "succeeded", "output_throughput": 612.0, "workspace": str(workspace)}
-    _stamp_warm_patch_outcome(result, _apply_warm_patches(params, str(tree), workspace), params)
+    _stamp_warm_patch_outcome(result, _apply_warm_patches(params, workspace), params)
     assert [p["status"] for p in result["warm_patch_result"]["patches"]] == ["present_in_dirty_worktree"]
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     coord.shared_state.baseline_tput = 600.0
@@ -3462,3 +3498,76 @@ def test_a_refused_replay_leaves_an_overlay_the_tree_already_held_uncommitted(tm
     assert verdict is Verdict.REVERTED
     assert _tree_git(tree, "rev-parse", "HEAD").strip() == stock_head
     assert _tree_git(tree, "status", "--porcelain") == held
+
+
+def test_a_promotion_commit_that_cannot_be_undone_fails_the_rollback(tmp_path, monkeypatch):
+    """A tree the replay did not write to skips the restore, so a failed undo has nothing else to catch it."""
+    from hyperloom.orchestrator.actions.executors.benchmark_run.warm_patches import (
+        _apply_warm_patches,
+        _stamp_warm_patch_outcome,
+    )
+    from hyperloom.orchestrator.phases import warm_replay_stack
+
+    tree = _stock_sglang_tree(tmp_path / "sglang")
+    overlay = tmp_path / "ppe.patch"
+    overlay.write_text(_PPE_OVERLAY, encoding="utf-8")
+    _tree_git(tree, "apply", str(overlay))
+    params = {
+        "baseline_tput_anchor": 600.0,
+        "required_patch_timeline": True,
+        "patches": [
+            {"patch_file": "patch/overlays/000001/00.patch", "patch_content": _PPE_OVERLAY, "framework_root": str(tree)}
+        ],
+        "extra_server_args": "--recipe",
+        "extra_envs": {},
+    }
+    workspace = tmp_path / "runs" / "replay_warm_recipe" / "warm"
+    workspace.mkdir(parents=True)
+    result = {"status": "succeeded", "output_throughput": 612.0, "workspace": str(workspace)}
+    _stamp_warm_patch_outcome(result, _apply_warm_patches(params, workspace), params)
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.baseline_tput = 600.0
+    coord.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
+    coord.shared_state.current_best = {"action": "explore", "tput": 800.0, "extra_server_args": "", "extra_envs": {}}
+    run_git = warm_replay_stack._run_git_cp
+
+    def _index_locked(args, **kwargs):
+        if "reset" in args:
+            (tree / ".git" / "index.lock").write_text("", encoding="utf-8")
+        return run_git(args, **kwargs)
+
+    monkeypatch.setattr(warm_replay_stack, "_run_git_cp", _index_locked)
+
+    verdict = coord.phase_prelude.promote_warm_replay(result, task=_StubTask(params=params))
+
+    assert verdict is Verdict.FAILED
+    assert coord.shared_state.warm_replay_outcome["status"] == "rollback_failed"
+
+
+@pytest.mark.parametrize("failure", ["head", "parent"])
+def test_an_unreadable_promotion_commit_fails_the_rollback(tmp_path, monkeypatch, failure):
+    from hyperloom.orchestrator.phases import warm_replay_stack
+
+    tree = _stock_sglang_tree(tmp_path / "sglang")
+    pre_sha = _tree_git(tree, "rev-parse", "HEAD").strip()
+    _tree_git(
+        tree,
+        "-c",
+        "user.name=Hyperloom Tests",
+        "-c",
+        "user.email=tests@hyperloom.invalid",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "promote overlays",
+    )
+    pending = {"recipe_overlays_committed": True}
+
+    if failure == "head":
+        monkeypatch.setattr(warm_replay_stack, "_git_head_sha", lambda _root: "")
+    else:
+        monkeypatch.setattr(warm_replay_stack, "_run_git_cp", lambda *_args, **_kwargs: None)
+
+    error = warm_replay_stack.uncommit_promoted_overlays(pending, str(tree), pre_sha)
+
+    assert "promotion_commit_state_unreadable" in error

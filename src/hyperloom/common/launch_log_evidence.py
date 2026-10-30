@@ -308,7 +308,7 @@ def _names_a_model(tail: str) -> bool:
     return bool(_operand_for(tokens, _MODEL_OPERAND_FLAGS) or _serve_subcommand_operand(tokens))
 
 
-def _digest(value: str) -> str:
+def operand_digest(value: str) -> str:
     """Digest a model operand: it compares, while the path could not travel."""
     text = str(value or "").strip()
     return f"sha256:{hashlib.sha256(text.encode('utf-8')).hexdigest()}" if text else ""
@@ -319,9 +319,9 @@ def _binding_from_tokens(tokens: list[str]) -> dict[str, Any]:
     if not model:
         return {}
     return {
-        "model_digest": _digest(model),
-        "tokenizer_digest": _digest(_operand_for(tokens, _TOKENIZER_OPERAND_FLAGS)),
-        "served_model_digest": _digest(_operand_for(tokens, _SERVED_NAME_FLAGS)),
+        "model_digest": operand_digest(model),
+        "tokenizer_digest": operand_digest(_operand_for(tokens, _TOKENIZER_OPERAND_FLAGS)),
+        "served_model_digest": operand_digest(_operand_for(tokens, _SERVED_NAME_FLAGS)),
         "tp": _operand_for(tokens, _TP_FLAGS),
         "dp": _operand_for(tokens, _DP_FLAGS),
         "pp": _operand_for(tokens, _PP_FLAGS),
@@ -447,6 +447,8 @@ _LAUNCH_RECORDS: dict[str, _LaunchRecord] = {
         identity_rejects_unreadable_values=False,
     ),
 }
+#: Frameworks whose launch record the readers here parse.
+LAUNCH_RECORD_FRAMEWORKS = frozenset(_LAUNCH_RECORDS)
 
 
 def _is_inside_string_literal(text: str, index: int) -> bool:
@@ -700,11 +702,6 @@ def settings_the_engine_rewrote(config: Mapping[str, Any], adjusted: Mapping[str
     if config.get("enable_dp_attention") is True:
         names.update(key for key in config if str(key).startswith(_SGLANG_DERIVED_UNDER_DP_ATTENTION))
     return frozenset(names)
-
-
-def observed_sglang_server_identity_from_log(path: str) -> dict[str, Any]:
-    """Parse allowlisted identity from a capped SGLang ``server_args`` record."""
-    return observed_server_identity_from_log(path, "sglang")
 
 
 def _read_launch_record(path: str, spec: _LaunchRecord) -> str:

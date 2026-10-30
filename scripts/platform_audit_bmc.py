@@ -441,6 +441,46 @@ def build_rows(bios: dict) -> list[dict]:
     return rows
 
 
+def _usable_host(args: argparse.Namespace, ctx: ssl.SSLContext) -> str:
+    """The BMC address to audit, or ``""`` after printing why the audit cannot start."""
+    # The README calls minting "a deliberate choice"; this is what makes it one.
+    mints_account = not args.bmc_user
+    if mints_account and not args.allow_account_creation:
+        print(
+            "Auditing without --bmc-user mints a temporary ADMINISTRATOR account on "
+            "the BMC. Pass --bmc-user with an existing (ideally read-only) account, "
+            "or --allow-account-creation to accept that.",
+            file=sys.stderr,
+        )
+        return ""
+
+    # ipmitool is needed to mint an account, not only to discover the address, so --bmc-host does not excuse it on the
+    # minting path.
+    if (mints_account or not args.bmc_host) and not ipmitool_present():
+        print(
+            "ipmitool is not on PATH, so "
+            + (
+                "the temporary account cannot be minted. Pass --bmc-user to audit with an existing account."
+                if mints_account
+                else "the BMC address cannot be discovered. Pass --bmc-host explicitly."
+            ),
+            file=sys.stderr,
+        )
+        return ""
+
+    host = args.bmc_host or bmc_ip()
+    if not host:
+        print("No BMC address found over KCS. Pass --bmc-host.", file=sys.stderr)
+        return ""
+
+    # Settle reachability and TLS before creating any credential.
+    err = probe_reachable(host, ctx)
+    if err:
+        print(f"BMC {host} is not usable: {err}", file=sys.stderr)
+        return ""
+    return host
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="Audit BIOS-only EPYC knobs over Redfish (creates a temporary BMC account)",
@@ -467,41 +507,8 @@ def main() -> int:
 
     install_signal_handlers()
     ctx = tls_context(args.ca_cert, args.insecure)
-
-    # The README calls minting "a deliberate choice"; this is what makes it one.
-    mints_account = not args.bmc_user
-    if mints_account and not args.allow_account_creation:
-        print(
-            "Auditing without --bmc-user mints a temporary ADMINISTRATOR account on "
-            "the BMC. Pass --bmc-user with an existing (ideally read-only) account, "
-            "or --allow-account-creation to accept that.",
-            file=sys.stderr,
-        )
-        return EXIT_UNKNOWN
-
-    # ipmitool is needed to mint an account, not only to discover the address, so --bmc-host does not excuse it on the
-    # minting path.
-    if (mints_account or not args.bmc_host) and not ipmitool_present():
-        print(
-            "ipmitool is not on PATH, so "
-            + (
-                "the temporary account cannot be minted. Pass --bmc-user to audit with an existing account."
-                if mints_account
-                else "the BMC address cannot be discovered. Pass --bmc-host explicitly."
-            ),
-            file=sys.stderr,
-        )
-        return EXIT_UNKNOWN
-
-    host = args.bmc_host or bmc_ip()
+    host = _usable_host(args, ctx)
     if not host:
-        print("No BMC address found over KCS. Pass --bmc-host.", file=sys.stderr)
-        return EXIT_UNKNOWN
-
-    # Settle reachability and TLS before creating any credential.
-    err = probe_reachable(host, ctx)
-    if err:
-        print(f"BMC {host} is not usable: {err}", file=sys.stderr)
         return EXIT_UNKNOWN
 
     acct: TempBmcAccount | None = None
@@ -525,8 +532,8 @@ def main() -> int:
             # Bound outside the `with` on purpose.
             acct = TempBmcAccount()
             with acct:
-                if acct.slot is None or not acct.password:
-                    no_access = acct.note or "no slot"
+                if not acct.password:
+                    no_access = acct.note
                 else:
                     if acct.mint_errors:
                         print(f"Note: {'; '.join(acct.mint_errors)}", file=sys.stderr)

@@ -84,6 +84,11 @@ def _mock_state(
         max_minutes=150,
         last_trace_analyze=last_trace_analyze or {},
         roofline_snapshots=list(roofline_snapshots or []),
+        pending_kernel_integrations={},
+        kernel_integrate_attempts={},
+        rejected_kernel_ids=[],
+        kernel_rewrite_controller_result={},
+        optimization_stack_has_unvalidated_keeps=lambda: False,
     )
 
 
@@ -528,7 +533,7 @@ class TestFormatTableRendersCeiling:
             }
         )
         text = "\n".join(lines)
-        assert "Theoretical peak" in text
+        assert "Roofline ceiling" in text
         assert "1000.0 tok/s" in text
         assert "Achieved output_throughput" in text
         assert "527.5 tok/s" in text
@@ -567,7 +572,7 @@ class TestFormatTableRendersCeiling:
         }
         lines = format_roofline_metrics_table(cmp)
         text = "\n".join(lines)
-        assert text.count("Theoretical peak") == 1
+        assert text.count("**Roofline ceiling:**") == 1
         assert "1000.0 tok/s" in text
         assert "527.5 tok/s" in text
         assert "690.9 tok/s" in text
@@ -596,7 +601,7 @@ class TestFormatTableRendersCeiling:
             }
         )
         text = "\n".join(lines)
-        assert "Theoretical peak" not in text
+        assert "Roofline ceiling" not in text
 
 
 class TestRecordTraceAnalyzeStampsCeiling:
@@ -1024,7 +1029,15 @@ class TestRecordTraceAnalyzeStampsTwoSidedRoofline:
             peak=7900.0,
             kind="memory",
         )
-        monkeypatch.setattr(roofline_ceiling, "load_model_meta", lambda *a, **kw: object())
+        meta = roofline_ceiling.ModelMeta(
+            weight_bytes=1,
+            num_layers=1,
+            num_kv_heads=1,
+            head_dim=1,
+            weight_dtype_bytes=2.0,
+            expert_weight_dtype_bytes=2.0,
+        )
+        monkeypatch.setattr(roofline_ceiling, "load_model_meta", lambda *a, **kw: meta)
         monkeypatch.setattr(
             roofline_ceiling,
             "compute_roofline_from_perfmodel",

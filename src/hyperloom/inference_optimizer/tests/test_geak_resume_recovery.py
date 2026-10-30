@@ -23,24 +23,13 @@ class _TaskRegistry:
     def __init__(self) -> None:
         self.created: list[Task] = []
 
-    async def create_or_return_existing(
-        self,
-        *,
-        kind: str,
-        params: dict,
-        idempotency_key: str,
-        requires_lanes: list | None = None,
-        allowed_tools: list | None = None,
-        side_effects: list | None = None,
-        lease_ttl_sec: int = 0,
-        task_id: str | None = None,
-    ) -> tuple[Task, bool]:
+    async def create_or_return_existing(self, spec) -> tuple[Task, bool]:
         task = Task(
-            task_id=task_id or f"task-{len(self.created)}",
-            kind=kind,
+            task_id=spec.task_id or f"task-{len(self.created)}",
+            kind=spec.kind,
             state="queued",
-            params=dict(params),
-            idempotency_key=idempotency_key,
+            params=dict(spec.params),
+            idempotency_key=spec.idempotency_key,
         )
         self.created.append(task)
         return task, False
@@ -187,7 +176,7 @@ async def test_a_baseline_reproduction_failure_keeps_the_absent_backends(
     )
     coord._run_deadline = None
     coord.phase_kernel._record_geak_kernel_journey = lambda _result: None
-    monkeypatch.setattr("hyperloom.orchestrator.phases.kernel._GEAK_RUNNER_MODULE", runner.stem)
+    monkeypatch.setattr("hyperloom.orchestrator.phases.kernel_geak_dispatch._GEAK_RUNNER_MODULE", runner.stem)
     monkeypatch.setenv("PYTHONPATH", os.pathsep.join(filter(None, [str(tmp_path), os.environ.get("PYTHONPATH")])))
     monkeypatch.setattr(
         "hyperloom.orchestrator.actions.executors._server_lifecycle.free_gpus_for_handoff",

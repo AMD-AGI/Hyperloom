@@ -45,18 +45,7 @@ def _phase(tmp_path: Path, model_path: str, tp: int) -> KernelPhase:
 
 def _fmoe_ck_result(csv_path: str) -> dict:
     """A forge run whose fmoe_ck tuner produced a usable candidate."""
-    return {
-        "tuners_run": [
-            {
-                "tuner": "fmoe_ck",
-                "status": "ok",
-                "candidate": True,
-                "env_var": "AITER_CONFIG_FMOE_CK",
-                "env_value": csv_path,
-                "best_micro_speedup": 1.4,
-            }
-        ]
-    }
+    return {"candidates": [{"tuner": "fmoe_ck", "env": {"AITER_CONFIG_FMOE_CK": csv_path}, "best_micro_speedup": 1.4}]}
 
 
 @pytest.fixture
@@ -120,7 +109,7 @@ async def test_gate_only_applies_to_fmoe_ck(tmp_path: Path, integrate_spy, tuned
     """A different tuner on the same unservable shape is unaffected."""
     model = _qwen3_moe_model(tmp_path / "Qwen3-30B-A3B")
     result = _fmoe_ck_result(tuned_csv)
-    result["tuners_run"][0]["tuner"] = "fmoe_asm"
+    result["candidates"][0]["tuner"] = "fmoe_asm"
 
     await _phase(tmp_path, model, tp=8)._validate_gemm_tuning_e2e(result)
 

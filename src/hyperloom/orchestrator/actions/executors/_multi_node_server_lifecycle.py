@@ -12,13 +12,14 @@ import logging
 import os
 import shlex
 import subprocess
-import tempfile
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator, Mapping
 
 from hyperloom.common.timeutil import format_exc_brief
 from hyperloom.common.env import EnvValueError, env_flag
+from hyperloom.inference_optimizer import multi_node
 from hyperloom.inference_optimizer.multi_node._internal.env_safety import filter_forward_env
 from hyperloom.inference_optimizer.multi_node._internal.server_args_safety import (
     ServerArgsRejected,
@@ -195,22 +196,39 @@ def _resolve_pd_args(*, tp_int: int) -> dict:
     return out
 
 
-def _resolve_round_args(
-    framework: str | None,
-    model_path: str | None,
-    tp: int | None,
-    ep: int | None = None,
-) -> tuple[str, str, int, int]:
+@dataclass(frozen=True)
+class RoundServer:
+    """The server one multi-node round restarts; unset identity fields fall back to state.json, then env."""
+
+    extra_server_args: str = ""
+    framework: str | None = None
+    model_path: str | None = None
+    tp: int | None = None
+    ep: int | None = None
+
+    @classmethod
+    def from_env(cls, extra_server_args: str, model_path: str | None) -> RoundServer:
+        """This round's args and model on the framework, TP and EP the launch environment names."""
+        return cls(
+            extra_server_args,
+            framework=os.environ.get("FRAMEWORK") or None,
+            model_path=model_path,
+            tp=int(os.environ.get("TP") or 0) or None,
+            ep=int(os.environ.get("EP") or 0) or None,
+        )
+
+
+def _resolve_round_args(server: RoundServer) -> tuple[str, str, int, int]:
     """Resolve (framework, model, tp, ep) for the restart, with state fallback."""
     state = _read_state()
-    fw = (framework or _state_or_env(state, "last_restart_framework", "FRAMEWORK", "sglang")).strip().lower()
-    mdl = (model_path or _state_or_env(state, "last_restart_model", "MODEL_PATH")).strip()
+    fw = (server.framework or _state_or_env(state, "last_restart_framework", "FRAMEWORK", "sglang")).strip().lower()
+    mdl = (server.model_path or _state_or_env(state, "last_restart_model", "MODEL_PATH")).strip()
     try:
-        tp_int = int(tp if tp is not None else _state_or_env(state, "last_restart_tp", "TP", "0"))
+        tp_int = int(server.tp if server.tp is not None else _state_or_env(state, "last_restart_tp", "TP", "0"))
     except (TypeError, ValueError):
         tp_int = 0
     try:
-        ep_int = int(ep if ep is not None else _state_or_env(state, "last_restart_ep", "EP", "1"))
+        ep_int = int(server.ep if server.ep is not None else _state_or_env(state, "last_restart_ep", "EP", "1"))
     except (TypeError, ValueError):
         ep_int = 1
     if ep_int < 1:
@@ -264,11 +282,7 @@ def _uses_aiter(
 # Per-variant env overrides -> forwarded to the SSH-launched sglang via
 # ``multi_node/commands/infera.py::_collect_forward_env`` (reads these control envs).
 def _restart_env_scope(extra_env: dict[str, str] | None, unset_env, torch_profiler_dir: str):
-    forwarded = (
-        json.dumps(filter_forward_env({str(k): str(v) for k, v in extra_env.items()}, warn_on_drop=True))
-        if extra_env
-        else None
-    )
+    forwarded = json.dumps(filter_forward_env({str(k): str(v) for k, v in extra_env.items()})) if extra_env else None
     unset_keys = [str(k).strip() for k in (unset_env or []) if str(k).strip()]
     return _scoped_env(
         {
@@ -282,13 +296,15 @@ def _restart_env_scope(extra_env: dict[str, str] | None, unset_env, torch_profil
 # Multi-node TraceLens SGLang patch fan-out (fail-soft). The patch set (roofline vs sglang_gc_patch) follows
 # this controller's shape mode; sglang_gc_patch only matters while capturing, so it waits for a profiling round.
 async def _apply_tracelens_patch_fanout(patch_set: str, torch_profiler_dir: str, poll_timeout_s: int) -> None:
-    from ._workload_envs import _tracelens_patch_enabled
+    from ._profile_setup import _tracelens_patch_enabled
 
     if patch_set == "graph-capture" and not torch_profiler_dir:
         log.info("restart_server_for_round: not a profiling round; skipping sglang_gc_patch fan-out")
         return
     if not _tracelens_patch_enabled() or not os.environ.get("TRACELENS_ROOT", "").strip():
         return
+    import httpx
+
     try:
         from hyperloom.inference_optimizer.multi_node.cli import cmd_apply_tracelens_patch
 
@@ -309,7 +325,7 @@ async def _apply_tracelens_patch_fanout(patch_set: str, torch_profiler_dir: str,
                 ">= 0.5.18, until patches succeed)",
                 patch_rc,
             )
-    except Exception as exc:  # noqa: BLE001 - fail-soft envelope
+    except (RuntimeError, ValueError, OSError, KeyError, httpx.HTTPError, httpx.InvalidURL) as exc:
         log.warning(
             "restart_server_for_round: TraceLens patch fan-out raised (%s); proceeding with restart (fail-soft)",
             exc,
@@ -383,15 +399,11 @@ def _restart_namespace(
 
 
 async def restart_server_for_round(
+    server: RoundServer,
     *,
-    extra_server_args: str = "",
     extra_env: dict[str, str] | None = None,
     unset_env: list[str] | tuple[str, ...] | set[str] | None = None,
     torch_profiler_dir: str = "",
-    framework: str | None = None,
-    model_path: str | None = None,
-    tp: int | None = None,
-    ep: int | None = None,
     force_full_restart: bool = False,
 ) -> None:
     """Restart the multi-node inference server for the next Magpie round."""
@@ -411,7 +423,7 @@ async def restart_server_for_round(
         )
         return
 
-    round_args = _resolve_round_args(framework, model_path, tp, ep)
+    round_args = _resolve_round_args(server)
     fw, mdl, tp_int, ep_int = round_args
     pd = _resolve_pd_args(tp_int=tp_int)
 
@@ -425,8 +437,7 @@ async def restart_server_for_round(
         )
 
     # Apply Magpie's sglang DEFAULT_ARGS only for sglang (vllm has its own).
-    if fw == "sglang":
-        extra_server_args = _merge_sglang_defaults(extra_server_args)
+    extra_server_args = _merge_sglang_defaults(server.extra_server_args) if fw == "sglang" else server.extra_server_args
 
     # Compute-bound profile override (multi-node only; already gated by the is_multi_node() no-op above).
     if os.environ.get(_COMPUTE_BOUND_PROFILE_ENV, "").strip() == "1":
@@ -536,11 +547,13 @@ async def restart_server_for_round(
                     "best-effort remote kill-inference + one retry",
                     first_exc,
                 )
+                import httpx
+
                 try:
                     from hyperloom.inference_optimizer.multi_node.cli import kill_inference_for_kernel_agent_best_effort
 
                     await asyncio.to_thread(kill_inference_for_kernel_agent_best_effort)
-                except Exception as reclaim_exc:  # noqa: BLE001 - reclaim is best-effort
+                except (ValueError, KeyError, httpx.HTTPError, httpx.InvalidURL) as reclaim_exc:
                     log.warning(
                         "restart_server_for_round: remote kill-inference reclaim raised (%s); retrying restart anyway",
                         reclaim_exc,
@@ -630,8 +643,6 @@ async def _probe_completion_tokens(
 ) -> tuple[int, str]:
     import httpx as _httpx
 
-    from hyperloom.inference_optimizer.multi_node._internal.serving_probe import generated_tokens
-
     model_id = str(models[0].get("id") or "") if isinstance(models[0], dict) else ""
     if not model_id:
         return -1, "completion_probe: no model id"
@@ -652,7 +663,7 @@ async def _probe_completion_tokens(
     if resp.status_code != 200:
         return -1, f"completion_probe_http={resp.status_code}"
     try:
-        return generated_tokens(resp.json()), ""
+        return multi_node.generated_tokens(resp.json()), ""
     except ValueError:
         return 0, ""
 
@@ -676,34 +687,18 @@ def _models_empty_too_long(
     return (elapsed - health_ok_at) > grace_s
 
 
-def _worker_log_tail(shared_dir: str, ip: str) -> str:
-    if not shared_dir:
-        return ""
-    log_path = Path(shared_dir) / ("mn_infera_server_" + str(ip) + "_r0.log")
-    try:
-        with log_path.open("rb") as f:
-            f.seek(0, 2)
-            size = f.tell()
-            f.seek(max(0, size - 65536))
-            return f.read().decode("utf-8", "replace")
-    except OSError:
-        return ""
-
-
-def _worker_detokenizer_wedged(shared_dir: str, ip: str) -> bool:
-    """Best-effort: True when worker ``ip``'s server log shows a persistent detokenizer wedge -- weights are loaded but the detokenizer never heartbeats, so the engine's /health never flips and the HTTP port never binds."""
+def _worker_detokenizer_wedged(tail: str) -> bool:
+    """Best-effort: True when a worker's server-log ``tail`` shows a persistent detokenizer wedge -- weights are loaded but the detokenizer never heartbeats, so the engine's /health never flips and the HTTP port never binds."""
     import re as _re
 
     # >=15 recent markers ~= 30s+ of continuous stall (marker ~every 2s).
-    tail = _worker_log_tail(shared_dir, ip)
     return len(_re.findall(r"Health check failed.*detokenizer", tail, _re.IGNORECASE)) >= 15
 
 
-def _worker_startup_crashed(shared_dir: str, ip: str) -> str | None:
-    """Best-effort: return a short reason when worker ``ip``'s server log shows a NON-RECOVERABLE startup failure (so /health will never flip), else None."""
+def _worker_startup_crashed(tail: str) -> str | None:
+    """Best-effort: return a short reason when a worker's server-log ``tail`` shows a NON-RECOVERABLE startup failure (so /health will never flip), else None."""
     import re as _re
 
-    tail = _worker_log_tail(shared_dir, ip)
     patterns = (
         r"error: unrecognized arguments:.*",
         r"[A-Za-z0-9_./-]*: error: .*",  # argparse "<prog>: error: ..."
@@ -743,12 +738,14 @@ def _worker_health_targets(state: dict) -> list[tuple[str, str, str]]:
 def _worker_fastfail_reason(
     pending: list[str], *, elapsed: int, crash_grace: int, wedge_grace: int, timeout_s: int
 ) -> str | None:
-    shared = _shared_server_log_dir()
-    if not shared:
+    if elapsed <= min(crash_grace, wedge_grace):
         return None
+    # 64 KiB keeps the wedge rule about recent markers and keeps an earlier launch's crash, appended to the same log,
+    # out of the window.
+    tails = {ip: (_shared_worker_log_tail(ip, max_bytes=65536) or "").partition("\n")[2] for ip in pending}
     if elapsed > crash_grace:
-        for ip in pending:
-            crashed = _worker_startup_crashed(shared, ip)
+        for ip, tail in tails.items():
+            crashed = _worker_startup_crashed(tail)
             if crashed:
                 return (
                     "worker " + ip + " server crashed on startup "
@@ -761,7 +758,7 @@ def _worker_fastfail_reason(
                     + "s gate"
                 )
     if elapsed > wedge_grace:
-        wedged = [ip for ip in pending if _worker_detokenizer_wedged(shared, ip)]
+        wedged = [ip for ip, tail in tails.items() if _worker_detokenizer_wedged(tail)]
         if wedged:
             return (
                 "worker(s) detokenizer-wedged (weights loaded but "
@@ -881,6 +878,8 @@ def _collect_worker_server_logs(state: dict, reason: str) -> None:
     """Best-effort: capture each prefill/decode pod sglang server log into ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR/server_logs`` when a restart fails its health/serving probe, so a 503 / KV handoff / cold-JIT failure leaves a post-mortem after the pods are torn down."""
     import time as _t
 
+    from hyperloom.inference_optimizer.multi_node import INFERA_POD_LOG_FILE
+
     sess = (
         os.environ.get("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR")
         or os.environ.get("INFERENCE_OPTIMIZER_SESSION_DIR")
@@ -896,7 +895,7 @@ def _collect_worker_server_logs(state: dict, reason: str) -> None:
         return
     key_path = state.get("ssh_key_path")
     known_hosts = state.get("ssh_known_hosts")
-    remote = os.environ.get("HYPERLOOM_MN_SERVER_LOG_PATH", str(Path(tempfile.gettempdir()) / "mn_infera_server.log"))
+    remote = os.environ.get("HYPERLOOM_MN_SERVER_LOG_PATH", INFERA_POD_LOG_FILE)
     default_port = int(state.get("ssh_port") or 2233)
     for role in ("prefill", "decode", "worker"):
         for pod in state.get(role + "_pods") or []:
@@ -1173,6 +1172,7 @@ async def _wait_for_published_service_ready_async(settings: RestartSettings) -> 
 
 
 __all__ = [
+    "RoundServer",
     "ServerRestartFailed",
     "_merge_sglang_defaults",
     "restart_server_for_round",

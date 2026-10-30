@@ -11,11 +11,6 @@ from enum import Enum
 from pathlib import Path
 from typing import Mapping
 
-from hyperloom.common.pr_monitor_urls import (
-    kb_store_url as resolve_kb_service_url,
-    pr_monitor_enabled as resolve_pr_monitor_enabled,
-)
-
 
 class KnowledgeStoreMode(str, Enum):
     """The selected knowledge backend."""
@@ -43,9 +38,6 @@ class KnowledgeConfig:
 
     mode: KnowledgeStoreMode
     local_root: str
-    kb_store_url: str = ""
-    kb_store_token: str = ""
-    pr_monitor_enabled: bool = True
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "KnowledgeConfig":
@@ -62,34 +54,11 @@ class KnowledgeConfig:
         local_root = (
             _expanded(str(explicit_root).strip()) if explicit_root not in (None, "") else _default_local_root(source)
         )
-        kb_store_url = str(source.get("KB_STORE_URL") or "").strip()
-        kb_store_token = str(source.get("KB_STORE_TOKEN") or "").strip()
         if mode is KnowledgeStoreMode.REMOTE:
-            missing = [
-                name
-                for name, value in (
-                    ("KB_STORE_URL", kb_store_url),
-                    ("KB_STORE_TOKEN", kb_store_token),
-                )
-                if not value
-            ]
+            missing = [name for name in ("KB_STORE_URL", "KB_STORE_TOKEN") if not str(source.get(name) or "").strip()]
             if missing:
                 raise ValueError("KNOWLEDGE_STORE_MODE=remote requires " + " and ".join(missing))
-        return cls(
-            mode=mode,
-            local_root=local_root,
-            # The URL also hosts PR Monitor and is therefore useful in local Recipe mode; only the Recipe bearer token
-            # is mode-specific.
-            kb_store_url=(kb_store_url if mode is KnowledgeStoreMode.REMOTE else resolve_kb_service_url(env=source)),
-            kb_store_token=kb_store_token if mode is KnowledgeStoreMode.REMOTE else "",
-            pr_monitor_enabled=resolve_pr_monitor_enabled(source),
-        )
-
-    @property
-    def backend(self) -> str:
-        """Stable audit backend label."""
-
-        return "kb-store" if self.mode is KnowledgeStoreMode.REMOTE else "local-json"
+        return cls(mode=mode, local_root=local_root)
 
 
 __all__ = [

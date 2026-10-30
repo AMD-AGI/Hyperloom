@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
+from dataclasses import dataclass
 from typing import Final
 
 from hyperloom.common.provenance import framework_distribution_version
@@ -46,29 +47,32 @@ def _architectures_slug(value: "str | list[str]") -> str:
     return _slug(str(value), DEFAULT_ARCHITECTURES_SLUG)
 
 
-def recipe_canonical_id(
-    *,
-    model: str,
-    hardware: str,
-    framework_name: str,
-    model_type: str = "",
-    architectures: "str | list[str]" = "",
-    framework_version: str,
-    precision: str,
-    scheme: str = "inference",
-) -> str:
+@dataclass(frozen=True, kw_only=True)
+class RecipeIdentity:
+    """The seven serving dimensions a recipe is keyed by."""
+
+    model: str
+    hardware: str
+    framework_name: str
+    model_type: str = ""
+    architectures: "str | list[str]" = ""
+    framework_version: str
+    precision: str
+
+
+def recipe_canonical_id(identity: RecipeIdentity, scheme: str = "inference") -> str:
     """Build a recipe id as ``{scheme}:{seven serving dimensions}``."""
     if scheme not in {"inference", "agentx"}:
         raise ValueError(f"unsupported recipe identity scheme: {scheme!r}")
     return (
         f"{scheme}:"
-        f"{_slug(model, DEFAULT_MODEL_SLUG)}:"
-        f"{_slug(hardware, DEFAULT_HARDWARE_SLUG)}:"
-        f"{_slug(framework_name, DEFAULT_FRAMEWORK_SLUG)}:"
-        f"{_slug(model_type, DEFAULT_MODEL_TYPE_SLUG)}:"
-        f"{_architectures_slug(architectures)}:"
-        f"{_slug(framework_version, DEFAULT_FRAMEWORK_VERSION_SLUG)}:"
-        f"{_slug(precision, DEFAULT_PRECISION_SLUG)}"
+        f"{_slug(identity.model, DEFAULT_MODEL_SLUG)}:"
+        f"{_slug(identity.hardware, DEFAULT_HARDWARE_SLUG)}:"
+        f"{_slug(identity.framework_name, DEFAULT_FRAMEWORK_SLUG)}:"
+        f"{_slug(identity.model_type, DEFAULT_MODEL_TYPE_SLUG)}:"
+        f"{_architectures_slug(identity.architectures)}:"
+        f"{_slug(identity.framework_version, DEFAULT_FRAMEWORK_VERSION_SLUG)}:"
+        f"{_slug(identity.precision, DEFAULT_PRECISION_SLUG)}"
     )
 
 
@@ -85,19 +89,22 @@ def _partition_mode_slug(mode: str) -> str:
     return canonical.lower() if MODE_PARTITION_COUNTS.get(canonical, 1) > 1 else ""
 
 
-def kb_hardware_slug(
-    gpu_type: str,
-    *,
-    nodes: int = 1,
-    gpus_per_node: int = 8,
-    pd_mode: str = "aggregated",
-    pd_prefill_nodes: int = 0,
-    pd_decode_nodes: int = 0,
-    tp: int = 0,
-    ep: int = 0,
-    partition_mode: str = "",
-    backend: str = "",
-) -> str:
+@dataclass(frozen=True)
+class KbTopology:
+    """The serving topology a recipe's hardware dimension encodes."""
+
+    nodes: int = 1
+    gpus_per_node: int = 8
+    pd_mode: str = "aggregated"
+    pd_prefill_nodes: int = 0
+    pd_decode_nodes: int = 0
+    tp: int = 0
+    ep: int = 0
+    partition_mode: str = ""
+    backend: str = ""
+
+
+def kb_hardware_slug(gpu_type: str, topology: KbTopology = KbTopology()) -> str:
     """Topology-aware hardware dimension for the recipe ``canonical_id``.
 
     ``ep`` and ``partition_mode`` suffix at any node count, because neither is decided by the node count: a card
@@ -111,12 +118,12 @@ def kb_hardware_slug(
     """
     base = (gpu_type or "").strip()
     try:
-        ep_i = int(ep)
+        ep_i = int(topology.ep)
     except (TypeError, ValueError):
         ep_i = 0
-    part = _partition_mode_slug(partition_mode)
+    part = _partition_mode_slug(topology.partition_mode)
     try:
-        n = int(nodes)
+        n = int(topology.nodes)
     except (TypeError, ValueError):
         return base
     if n < 2:
@@ -126,22 +133,22 @@ def kb_hardware_slug(
         slug = f"{base}_ep{ep_i}" if ep_i > 1 else base
         return f"{slug}_{part}" if part else slug
     try:
-        ws = n * int(gpus_per_node)
+        ws = n * int(topology.gpus_per_node)
     except (TypeError, ValueError):
         return base
     if ws <= 0:
         return base
     slug = f"{base}_ws{ws}"
-    if str(pd_mode or "").strip().lower() == "disaggregated":
+    if str(topology.pd_mode or "").strip().lower() == "disaggregated":
         try:
-            pn = int(pd_prefill_nodes)
-            dn = int(pd_decode_nodes)
+            pn = int(topology.pd_prefill_nodes)
+            dn = int(topology.pd_decode_nodes)
         except (TypeError, ValueError):
             pn = dn = 0
         if pn > 0 and dn > 0:
             slug = f"{slug}_pd{pn}p{dn}d"
     try:
-        tp_i = int(tp)
+        tp_i = int(topology.tp)
     except (TypeError, ValueError):
         tp_i = 0
     if tp_i > 0:
@@ -150,7 +157,7 @@ def kb_hardware_slug(
         slug = f"{slug}_ep{ep_i}"
     if part:
         slug = f"{slug}_{part}"
-    be = _slug(backend, "")
+    be = _slug(topology.backend, "")
     if be:
         slug = f"{slug}_{be}"
     return slug
@@ -204,7 +211,9 @@ __all__ = [
     "DEFAULT_FRAMEWORK_SLUG",
     "DEFAULT_FRAMEWORK_VERSION_SLUG",
     "DEFAULT_PRECISION_SLUG",
+    "RecipeIdentity",
     "recipe_canonical_id",
+    "KbTopology",
     "kb_hardware_slug",
     "detect_framework_version",
 ]

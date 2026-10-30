@@ -18,7 +18,7 @@ from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close
 from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
     ARM_CONFIG,
 )
-from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_framework_version
+from hyperloom.inference_optimizer.recipe_snapshot_constants import RecipeIdentity, detect_framework_version
 from hyperloom.inference_optimizer.session.optimization_journal import (
     OUTCOME_KEEP,
     OUTCOME_REVERT,
@@ -29,7 +29,8 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
     derive_journal_outcome,
     summarize_change,
 )
-from hyperloom.orchestrator.knowledge.recipe_kb import LocalRecipeStoreError, recipe_canonical_id
+from hyperloom.orchestrator.knowledge.recipe_kb import LocalRecipeStoreError, RecipeUpsert, recipe_canonical_id
+from hyperloom.orchestrator.knowledge.recipe_kb.canonical_id import recipe_framework_version
 from hyperloom.orchestrator.lever import LEVER_CONFIG, lever_kind_for_task
 
 from ..collaborator import CoordinatorCollaborator
@@ -54,7 +55,6 @@ _SEVERITY_REGRESS: str = "regress"
 # Use an exact lookup so a reason token cannot collide with the same text inside
 # an exception name or explanatory message.
 _REMOTE_RESULT_TYPES: dict[str, str] = {
-    "KB_STORE_URL/TOKEN not configured": _close_out.RESULT_KB_DISABLED,
     "no_new_keep_or_pure_warm_replay": _close_out.RESULT_NO_NEW_KEEP,
     "nonfinite_optimized_throughput": _close_out.RESULT_INVALID_THROUGHPUT,
     "missing_optimized_throughput": _close_out.RESULT_MISSING_THROUGHPUT,
@@ -241,16 +241,12 @@ def _record_config_run(coord: Any, *, task: Any, result_dict: Mapping[str, Any])
     )
 
 
-def rows_not_superseded(live_rows: Any, superseding: Any, key: str) -> list[dict[str, Any]]:
-    claimed = {str(row.get(key) or "") for row in superseding or [] if isinstance(row, dict)}
-    kept: list[dict[str, Any]] = []
-    for row in live_rows or []:
-        if not isinstance(row, dict):
-            continue
-        if str(row.get(key) or "") in claimed:
-            continue
-        kept.append(dict(row))
-    return kept
+def rows_not_superseded(live_rows: Any, superseding: Any, *keys: str) -> list[dict[str, Any]]:
+    def identity(row: Mapping[str, Any]) -> tuple[str, ...]:
+        return tuple(str(row.get(key) or "") for key in keys)
+
+    claimed = {identity(row) for row in superseding or [] if isinstance(row, dict)}
+    return [dict(row) for row in live_rows or [] if isinstance(row, dict) and identity(row) not in claimed]
 
 
 def appended(live_facts: Any, addition: Mapping[str, Any] | None) -> list[Any]:
@@ -290,13 +286,12 @@ def amended_recipe_extras(live: Mapping[str, Any], overrides: Mapping[str, Any],
 
 
 def _framework_identity(state: Any) -> _FrameworkIdentity:
-    # Probed from the installed framework when the session never recorded a
-    # version, so a recipe is never filed under a blank one.
+    # Probed when the session never recorded a version, so a recipe is never filed under a blank one.
     name = str(state.framework or "")
     version = str(state.framework_version or "")
     if not version and name:
         version = detect_framework_version(name)
-    return _FrameworkIdentity(name=name, version=version, precision=str(state.precision or ""))
+    return _FrameworkIdentity(name, recipe_framework_version(version), str(state.precision or ""))
 
 
 def _result_payload(result: Any) -> dict[str, Any]:
@@ -845,7 +840,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                 "attempt": attempts,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }
-        except Exception as exc:
+        except Exception as exc:  # isolation boundary: one Recipe finalize attempt, settled as transport_failed
             log.exception("Recipe finalize raised")
             outcome = {
                 "status": "error",
@@ -997,11 +992,11 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         state = self.shared_state
         session_id = str(state.recipe_kb_session_id or state.session_id or self.session_dir.name)
         canonical_id = ""
-        from ..knowledge.remote_recipe import HyperloomRemoteKB, KBStoreError
+        from ..knowledge.remote_recipe import KBStoreError, RemoteRecipeClient, write_final_remote_recipe
 
         try:
             canonical_id = self.workload_canonical_id()
-            written = HyperloomRemoteKB.from_env().write(canonical_id, state, session_id=session_id)
+            written = write_final_remote_recipe(state, canonical_id, session_id, client=RemoteRecipeClient.from_env())
         except (KBStoreError, OSError, ValueError) as exc:
             self._record_remote_recipe_audit(
                 source,
@@ -1057,22 +1052,22 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         }
 
     def _final_recipe_overrides(self) -> dict[str, Any]:
-        # Read-modify-write under the cid flock, so two finalises of the same
-        # session leave one row rather than tearing the lists they both append to.
+        # Sessions and failures merge with the live row: a row this session
+        # reports again replaces the live copy, and every other live row stays.
         state = self.shared_state
         attrs = recipe_attrs_from_state(state, self.session_dir.name)
         live = self.recipe_kb.get_authoritative_recipe(canonical_id=self.workload_canonical_id()) or {}
         my_sessions = list(attrs["sessions"] or [])
+        my_failures = list({(row["name"], row["reason"]): row for row in attrs["what_failed"]}.values())
         extras = dict(attrs.get("workload") or {})
         overrides: dict[str, Any] = {
-            "what_worked": attrs["what_worked"],
-            "what_failed": attrs["what_failed"],
+            "what_failed": rows_not_superseded(live.get("what_failed"), my_failures, "name", "reason") + my_failures,
             "last_profiled": attrs["last_profiled"],
             "sessions": rows_not_superseded(live.get("sessions"), my_sessions, "session_id") + my_sessions,
             "extras": extras,
         }
-        # The row's own figures survive a session that never validated a win,
-        # or whose win does not beat what the row already advertises.
+        # The row's figures, and the what_worked rows that explain its best_config, survive a session that
+        # never validated a win, or whose win does not beat what the row already advertises.
         my_throughput = float(attrs.get("best_throughput") or 0.0)
         won = bool(state.optimization_stack or float(state.cumulative_gain_validated or 0.0) > 0.0)
         won = won or bool(str(state.current_best.get("extra_server_args") or "").strip())
@@ -1127,7 +1122,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         from hyperloom.inference_optimizer.recipe_snapshot_constants import kb_hardware_slug
 
         ss = self.shared_state
-        return kb_hardware_slug(ss.gpu_type or "unknown_gpu", **resolve_kb_topology())
+        return kb_hardware_slug(ss.gpu_type or "unknown_gpu", resolve_kb_topology())
 
     def workload_canonical_id(self) -> str:
         """Return the workload's canonical seven-dimension Recipe identity."""
@@ -1135,7 +1130,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         identity = _framework_identity(state)
         from hyperloom.common.perf_metric import agentx_active
 
-        return recipe_canonical_id(
+        rid = RecipeIdentity(
             model=state.model_name or "unknown_model",
             hardware=self._kb_hardware_slug(),
             framework_name=identity.name,
@@ -1143,8 +1138,8 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             precision=identity.precision,
             model_type=str(state.model_type or ""),
             architectures=state.model_architectures or [],
-            scheme=("agentx" if agentx_active(benchmark_mode=state.benchmark_mode) else "inference"),
         )
+        return recipe_canonical_id(rid, "agentx" if agentx_active(benchmark_mode=state.benchmark_mode) else "inference")
 
     def read_local_recipe_row(self) -> dict[str, Any]:
         """Load the selected store's exact authority row for writes."""
@@ -1227,9 +1222,9 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
     ) -> None:
         """Read-modify-write the local recipe row: append the fact, merge the overrides, write it back.
 
-        Read or write failures propagate. A lesson or pitfall is appended
-        without dedup, and a field the caller did not override keeps the value
-        the live row carries.
+        Read or write failures propagate. A lesson or pitfall is appended without
+        dedup. An overridden best_config brings this session's what_worked with it;
+        any other field the caller did not override keeps the live row's value.
         """
         config = getattr(self.knowledge_plane, "config", None)
         mode = getattr(getattr(config, "mode", None), "value", None)
@@ -1244,25 +1239,27 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         identity = _framework_identity(state)
         live = self.recipe_kb.get_authoritative_recipe(canonical_id=canonical_id) or {}
         overrides = dict(recipe_overrides or {})
-        put_kwargs: dict[str, Any] = {
-            "canonical_id": canonical_id,
-            "model": state.model_name or "unknown_model",
-            "hardware": self._kb_hardware_slug(),
-            "framework_name": identity.name,
-            "framework_version": identity.version,
-            "precision": identity.precision,
-            "pitfalls": appended(live.get("pitfalls"), append_pitfall),
-            "lessons": appended(live.get("lessons"), append_lesson),
-            "extras": amended_recipe_extras(live, overrides, state),
-            "provenance": {
+        if "best_config" in overrides:
+            overrides["what_worked"] = recipe_attrs_from_state(state, self.session_dir.name)["what_worked"]
+        upsert = RecipeUpsert(
+            canonical_id=canonical_id,
+            model=state.model_name or "unknown_model",
+            hardware=self._kb_hardware_slug(),
+            framework_name=identity.name,
+            framework_version=identity.version,
+            precision=identity.precision,
+            pitfalls=appended(live.get("pitfalls"), append_pitfall),
+            lessons=appended(live.get("lessons"), append_lesson),
+            extras=amended_recipe_extras(live, overrides, state),
+            provenance={
                 "source": "hyperloom-inference-optimizer",
                 "generator": "coordinator",
                 "generated_at": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
                 "details": dict(provenance_details or {}),
             },
             **amended_recipe_fields(live, overrides),
-        }
-        self.recipe_kb.put_recipe(**put_kwargs)
+        )
+        self.recipe_kb.put_recipe(upsert)
         self._local_recipe_cache = None
 
 

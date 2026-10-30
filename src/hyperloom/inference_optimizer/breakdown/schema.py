@@ -7,13 +7,6 @@ from __future__ import annotations
 
 from typing import Any, Literal, TypedDict
 
-from ..session.sbd_v6 import SCHEMA_VERSION_V6
-
-
-#: Current breakdown schema version (v6.1). ``enablement`` carries its
-#: ledger-sourced round fields inside this version without reshaping the document.
-SCHEMA_VERSION = SCHEMA_VERSION_V6
-
 
 class V6ToolVersion(TypedDict, total=False):
     """One external tool's recorded provenance."""
@@ -490,7 +483,6 @@ class V6KBWriteBackExt(TypedDict, total=False):
     optimized_throughput: float | None
     validated_gain_pct: float | None
     attempts: list[dict[str, Any]]
-    queue: dict[str, Any]
     failure: dict[str, Any]
 
 
@@ -502,10 +494,7 @@ class V6RooflineKernel(TypedDict, total=False):
     the kernel worth optimizing is often a cheap one running at low efficiency,
     which is exactly what a top-N-by-cost cut removes.
 
-    The two analysis routes agree on identity and cost and diverge in the
-    tail: the bypass route reports ``roofline_attainment_pct`` from its
-    analytical model, which TraceLens rows do not carry. ``roofline_source``
-    says whether a row's bound came from a model or is a placeholder."""
+    ``roofline_source`` says whether a row's bound came from a model or is a placeholder."""
 
     kernel_id: str
     name: str
@@ -521,7 +510,6 @@ class V6RooflineKernel(TypedDict, total=False):
     efficiency_percent: float | None
     compute_utilization_pct: float | None
     bandwidth_utilization_pct: float | None
-    roofline_attainment_pct: float | None
     roofline_name: str | None
     roofline_source: str
     suggestion: str
@@ -561,8 +549,6 @@ class V6RooflineEventSnapshot(TypedDict, total=False):
     roofline_mem_ceiling_tok_per_sec: float | None
     roofline_cmp_ceiling_tok_per_sec: float | None
     roofline_bound_kind: str
-    e2e_mean_ms: float | None
-    roofline_ideal_ms: float | None
     within_roofline_pct: float | None
     within_roofline_pct_uncapped: float | None
     gap_to_roofline_pct: float | None
@@ -597,25 +583,14 @@ class V6RooflineProgress(TypedDict, total=False):
     the ceiling comes from the last analysis, the curve from every promotion
     between them, and the streak from the runs that failed.
 
-    ``ceiling_kind`` discriminates two domains that cannot share fields.
-    Token-decoding models are bounded in throughput and report the ``tok/sec``
-    fields; scriptable/diffusion models decode no tokens and are bounded in
-    latency, reporting the ``ms`` fields instead. A reader that ignores
-    ``ceiling_kind`` will read the absent domain's nulls as a failed analysis.
-
     The snapshot history is deliberately absent: each roofline event carries
     its own snapshot in full, and a second copy here would be free to disagree.
     ``latest_snapshot_id`` is the join back to the event that set the ceiling."""
 
-    ceiling_kind: Literal["throughput", "latency", "none"]
     ceiling_tok_per_sec: float | None
     target_tok_per_sec: float | None
     ceiling_ratio_target: float
     ceiling_available: bool
-    latency_ceiling_ms: float | None
-    achieved_latency_ms: float | None
-    latency_ceiling_available: bool
-    current_best_pct_of_latency_ceiling: float | None
     trajectory: list[V6RooflineTrajectoryPoint]
     baseline_tput: float
     current_best_tput: float
@@ -713,35 +688,30 @@ class V6ConcSweepInputAnchor(TypedDict, total=False):
 class V6ConcSweepPlan(TypedDict, total=False):
     """The ladder the sweep resolved and the order it will run it in.
 
-    ``arms_order`` matters to a reader of the budget: the optimized arm runs
-    first as the more informative of the two, so a budget that runs out takes
-    the baseline arm with it. ``concs_ordered`` is descending because a
-    single-server arm boots at the most demanding rung and reuses down."""
+    ``arms_order`` matters to a reader of the budget: past its first rung the first arm may
+    spend half the time left, and the second runs only the rungs it reached, so a budget that
+    runs out drops whole pairs. ``concs_ordered`` is the session's own CONC first, then the
+    rest cheapest first. The plan names no benchmark cap: each rung is granted one sized to
+    the workload it runs, and reports it as ``granted_cap_sec``."""
 
     grid_source: str | None
     concs_requested: list[int]
     concs_ordered: list[int]
     num_prompts_factor: int | None
-    variant_timeout_sec: int | None
     arms_order: list[str]
 
 
 class V6ConcSweepBudget(TypedDict, total=False):
-    """The budget the ladder was admitted under.
+    """The budget the ladder ran under.
 
-    Both totals are kept because they disagree: the sweep raises its own
-    default when that default cannot fund even one rung at the cap the grid
-    runner will actually grant. ``rung_cost_sec`` is that granted cap rather
-    than the declared timeout, since pricing at the smaller admits a rung the
-    budget cannot pay for. ``deadline`` is a wall-clock epoch."""
+    ``gate_active`` says whether a total was declared. ``rung_cost_sec`` is null:
+    a rung is held to its arm's deadline rather than priced. ``deadline`` is a
+    wall-clock epoch."""
 
     declared_total_sec: int | None
-    granted_total_sec: int | None
     rung_cost_sec: float | None
-    raised: bool
     gate_active: bool
     deadline: float | None
-    session_soft_deadline_sec: float | None
 
 
 class V6ConcSweepEnvironment(TypedDict, total=False):
@@ -889,10 +859,10 @@ class V6ConcSweepRung(TypedDict, total=False):
 
 
 class V6ConcSweepBootAttempt(TypedDict, total=False):
-    """One rung the boot-retry-descend loop tried.
+    """One rung whose round tried to bring the arm's server up.
 
-    ``committed`` false is a concurrency the server would not come up at --
-    the capacity finding the sweep produces for free and the report discards."""
+    ``committed`` false appears only in older sessions, on an attempt a later
+    rung's boot superseded."""
 
     conc: int | None
     committed: bool
@@ -904,7 +874,7 @@ class V6ConcSweepBootAttempt(TypedDict, total=False):
 
 
 class V6ConcSweepBoot(TypedDict, total=False):
-    """How the boot-retry-descend loop resolved.
+    """How the arm's boot attempts resolved: each rung boots until one brings the server up.
 
     ``attempted_concs`` is in the order tried. Absent on an arm refused before
     it built anything."""
@@ -959,8 +929,8 @@ class V6ConcSweepArm(TypedDict, total=False):
 
     The two arms differ only by the server args and envs they add, so the
     curve is only readable alongside the decisions the ladder was run under.
-    The reuse path boots one server at the most demanding rung and reuses it
-    down; the restart path pays a server start per rung. They fail
+    The reuse path boots one server on its first rung and reuses it for the
+    rest; the restart path pays a server start per rung. They fail
     differently, and which one ran is not recoverable after the fact."""
 
     arm: str
@@ -1078,16 +1048,17 @@ class V6EnablementAttempt(TypedDict, total=False):
     ``launch_log`` for the whole lane and every advance overwrote it, so the
     export published the newest gap as the reason the lane had opened.
 
-    ``files`` and ``accepted_config_path`` are session-relative and name only
-    copies the round's archive took, which is a weaker claim than "fetchable":
+    ``files`` paths are session-relative and name only copies the round's
+    archive took, which is a weaker claim than "fetchable":
     ``reports/enablement/**`` is packaged outside ``RESERVED_PATHS``, so a
     session that hit the file or byte cap ships a truncated package and a
     consumer must tolerate a miss. ``patches_applied`` and
     ``artifacts_applied[].target`` are the workspace originals the round
     reported, which are never packaged -- they are identity, not a way to
-    fetch. Note the asymmetry with ``V6EnablementResult.accepted_config_path``,
-    which stays absolute because the revalidation baseline opens that one
-    directly."""
+    fetch. The round's accepted config is its ``files`` entry with role
+    ``launch_config``; note the asymmetry with
+    ``V6EnablementResult.accepted_config_path``, which stays absolute because
+    the revalidation baseline opens that one directly."""
 
     attempt: int
     task_id: str
@@ -1109,7 +1080,6 @@ class V6EnablementAttempt(TypedDict, total=False):
     patches_span_multiple_roots: bool
     framework_root: str | None
     files: list[V6ArchivedFile]
-    accepted_config_path: str | None
     effective_config: dict[str, Any] | None
     stack_action: dict[str, Any] | None
     runtime: dict[str, Any] | None
@@ -1433,58 +1403,6 @@ class V6StackExt(TypedDict, total=False):
     guards: dict[str, int]
 
 
-class V6CriticReviewVariant(TypedDict, total=False):
-    """One variant's ruling from a grid the Critic reviewed per variant.
-
-    A rejected variant never reaches a bench, so there is no attempt row for
-    its ruling to live on and this is the only record that it was judged. The
-    map is kept per variant rather than collapsed because the collapse is
-    deliberately lossy: a grid proceeds on its approved subset, and the
-    proposal's summary verdict does not say which variants that was."""
-
-    variant_name: str
-    verdict: str
-    effective_verdict: str
-    held_to_rule: str
-    reason: str
-    failure_reason_code: str
-
-
-class V6CriticReview(TypedDict, total=False):
-    """The Critic's ruling on one proposal, recorded on the proposal itself.
-
-    The review is a sub-structure of its subject rather than a stream of its
-    own. On the bus a proposal and its verdict are two messages about one
-    thing, and the Critic reviews proposals raised by every phase -- so a
-    ruling attached to the proposal follows it wherever it was raised, needs no
-    per-phase home, and leaves nothing to reconcile between a review list and a
-    proposal list.
-
-    Both verdicts are kept. A reject the loop held to a rule that only declared
-    ``advise`` is two facts, and reporting either alone misreads the round: the
-    authored verdict alone says a proposal was refused that in fact ran, the
-    effective verdict alone says one was approved that the Critic refused."""
-
-    verdict: str
-    effective_verdict: str
-    held_to_rule: str
-    reviewer: str
-    reason: str
-    confidence: float | None
-    failure_reason_code: str
-    concerns: list[str]
-    reviewed_at: str
-    required_evidence: list[Any]
-    risks: list[Any]
-    notes: list[Any]
-    kb_evidence: list[Any]
-    packet_evidence: list[Any]
-    advice_text: str
-    alternative_action: str
-    variants: list[V6CriticReviewVariant]
-    outcome: dict[str, Any]
-
-
 class CriticIteration(TypedDict, total=False):
     """One critic-agent review pass over a proposed change.
 
@@ -1560,978 +1478,6 @@ class V6Close(TypedDict, total=False):
     final_recipe: V6FinalRecipe
 
 
-# V6 FRAMEWORK_AGENT timeline event
-class V6FrameworkPolicyConfigArm(TypedDict, total=False):
-    """The configuration arm's own thresholds."""
-
-    keep_gain_threshold_pct: float | None
-    empty_streak_threshold: int | None
-    lookback: int | None
-
-
-class V6FrameworkPolicySourceArm(TypedDict, total=False):
-    """The source arm's own thresholds."""
-
-    no_keep_streak_threshold: int | None
-    discovery_retry_limit: int | None
-    authoring_enabled: bool | None
-
-
-class V6FrameworkPolicy(TypedDict, total=False):
-    """The thresholds one entry ran under, as it resolved them.
-
-    Recorded rather than cited, because a threshold read back at export is the
-    one the session ended on and not the one this entry acted under."""
-
-    keep_threshold_pct: float | None
-    config: V6FrameworkPolicyConfigArm
-    source: V6FrameworkPolicySourceArm
-
-
-class V6FrameworkPlateauReading(TypedDict, total=False):
-    """One plateau evaluation, beside the values it ruled on.
-
-    Appended rather than keyed: two readings that agree are still two readings.
-    ``path`` names the reader -- the advisory asks whether to switch arms and
-    the exit whether the phase may leave -- and ``triggered`` of ``None`` is a
-    reading that could not rule, which the phase treats as a live arm."""
-
-    arm: str
-    path: str
-    evaluated_at: str
-    triggered: bool | None
-    inputs: dict[str, Any]
-    thresholds: dict[str, Any]
-
-
-class V6FrameworkRun(TypedDict, total=False):
-    """One dispatch this entry made, and what it came back with.
-
-    ``role`` is not derivable from ``arm``: the source arm dispatches twice per
-    candidate, once to discover candidates and once to author a patch from one.
-    ``produced_ids`` is projected at assembly from the proposals naming this
-    run, since a run's own row does not know what it yielded."""
-
-    run_id: str
-    role: str
-    arm: str
-    status: str
-    domain: str
-    scope: str
-    gap_canonical_id: str
-    reason: str
-    dispatched_at: str
-    completed_at: str
-    worktree: str
-    summary: str
-    tags: list[str]
-    transcripts: list[str]
-    new_findings: list[str]
-    residual_questions: list[str]
-    notes: list[str]
-    parallelism: int | None
-    proposals_total: int | None
-    empty: bool | None
-    confidence: float | None
-    confidence_avg: float | None
-    ensemble_scores: dict[str, Any]
-    produced_ids: list[str]
-
-
-class V6FrameworkCriticVariantRuling(TypedDict, total=False):
-    """The Critic's ruling on one variant of a grid reviewed as a whole.
-
-    A rejected variant reaches no bench, so no attempt row carries its
-    ruling and this is the only place it is readable."""
-
-    variant_name: str
-    verdict: str
-    effective_verdict: str
-    held_to_rule: str
-    reason: str
-    failure_reason_code: str
-
-
-class V6FrameworkCriticReviewOutcome(TypedDict, total=False):
-    """What the loop did with a ruling.
-
-    An ``advise`` that materialised and an ``advise`` held at the patch gate
-    are the same ruling with opposite outcomes. ``patch_verdict_key`` is the
-    subject the patch gate consults the ruling under, which connects a blocked
-    ``integrate_patch`` back to the review that blocked it."""
-
-    materialized: bool
-    denied: bool
-    reauthored: bool
-    patch_verdict_key: str
-
-
-class V6FrameworkCriticReview(TypedDict, total=False):
-    """The Critic's ruling on one proposal, inline on the proposal.
-
-    Both verdicts are kept: a reject the loop held to a rule that only declared
-    ``advise`` is two facts, and either alone misreads the round. ``reviewer``
-    separates a ruling the Critic authored from one it never got to make.
-    The Critic's advisory keys are merged in as authored, so a consumer may
-    meet fields beyond the ones named here."""
-
-    verdict: str
-    effective_verdict: str
-    held_to_rule: str
-    reviewer: str
-    reason: str
-    confidence: float | None
-    failure_reason_code: str
-    concerns: list[str]
-    reviewed_at: str
-    variants: list[V6FrameworkCriticVariantRuling]
-    outcome: V6FrameworkCriticReviewOutcome
-    artifacts: dict[str, Any]
-    kb: dict[str, Any]
-
-
-class V6FrameworkProposalTerminal(TypedDict, total=False):
-    """Where a proposal ended up.
-
-    ``dropped`` covers every way it never reached a measurement and ``reason``
-    says which; ``pending`` is one the phase never resolved, the honest reading
-    of a session killed mid-review."""
-
-    disposition: str
-    reason: str
-    settled_at: str
-
-
-class V6FrameworkLifecycleStep(TypedDict, total=False):
-    """One step a proposal moved through, recorded as it happened.
-
-    Recorded rather than derived from counters, so a candidate re-authored
-    twice and then retried once reads as three steps."""
-
-    step: str
-    ts: str
-    run_ref: str
-    outcome: str
-    reason: str
-
-
-class V6FrameworkRenderedRef(TypedDict, total=False):
-    """One Experience a KB read placed in the prompt that raised a proposal.
-
-    Exposure, not evidence of use: the read rendered it, which says nothing
-    about whether the model relied on it."""
-
-    id: str
-    purpose: str
-
-
-class V6FrameworkPatch(TypedDict, total=False):
-    """One session-local patch an authored attempt applied or reverted, verbatim."""
-
-    path: str
-    sha256: str
-    content: str
-
-
-class V6ExperienceCitation(TypedDict, total=False):
-    """An Experience the deciding agent was shown and says shaped this attempt.
-
-    ``stance`` is ``adopt``, ``adapt``, ``avoid``, or ``contrast``; ``claim`` is its reason, as it wrote it."""
-
-    id: str
-    stance: str
-    claim: str
-
-
-class V6FrameworkProposal(TypedDict, total=False):
-    """One thing this entry pursued, whichever producer raised it.
-
-    ``run_ref`` is absent rather than empty on a proposal with no dispatch
-    behind it, which is the load-bearing fact for the producers that have no
-    parent run at all: the orchestration agent and the seed grid.
-    ``attempt_refs`` is projected at assembly from the attempts naming this
-    proposal, because a second stored copy of the link is a second thing that
-    can disagree."""
-
-    proposal_id: str
-    arm: str
-    producer: str
-    producer_ref: str
-    run_ref: str
-    domain: str
-    scope: str
-    lever_kind: str
-    gap_canonical_id: str
-    source_ref: str
-    repo: str
-    title: str
-    verdict: str
-    route: str
-    changed_files: list[str]
-    confidence: float | None
-    reasoning: str
-    kb_read_id: str
-    rendered_refs: list[V6FrameworkRenderedRef]
-    critic_review: V6FrameworkCriticReview
-    terminal: V6FrameworkProposalTerminal
-    lifecycle: list[V6FrameworkLifecycleStep]
-    attempt_refs: list[str]
-
-
-class V6FrameworkStack(TypedDict, total=False):
-    """The configuration an attempt was measured on top of.
-
-    Recorded rather than referenced: every KEEP advances the session's stack,
-    so what the session serves now is not what this attempt was judged
-    against. Both arms have one -- a source patch sits on whatever is being
-    served, exactly as a config variant does."""
-
-    throughput: float | None
-    accuracy: float | None
-    extra_server_args: str
-    extra_envs: dict[str, Any]
-    remove_args: list[str]
-    unset_envs: list[str]
-    args_mode: str | None
-
-
-class V6FrameworkConfigDelta(TypedDict, total=False):
-    """What one configuration variant changed about the serving command."""
-
-    extra_server_args: str
-    extra_envs: dict[str, Any]
-    remove_args: list[str]
-    unset_envs: list[str]
-    args_mode: str | None
-
-
-class V6FrameworkMeasurement(TypedDict, total=False):
-    """Both ends of the throughput pair, and the runtime that produced them.
-
-    The pair rather than the percentage alone, because the anchor advances on
-    every KEEP and a gain without its denominator adds to nothing."""
-
-    before_tput: float | None
-    after_tput: float | None
-    gain_pct: float | None
-    runtime_sec: float | None
-    estimated_output_throughput: float | None
-
-
-class V6FrameworkAccuracy(TypedDict, total=False):
-    """The accuracy gate's inputs and verdict.
-
-    ``required`` of ``None`` is a gate that never ran, which is not the same as
-    one that ran and failed."""
-
-    required: bool | None
-    reference: float | None
-    value: float | None
-    passed: bool | None
-
-
-class V6FrameworkAttemptFailure(TypedDict, total=False):
-    """Why one attempt yielded no measurement to judge."""
-
-    error_class: str
-    error_excerpt: str
-    attribution: str
-
-
-class V6FrameworkArtifacts(TypedDict, total=False):
-    """Where one attempt's evidence was written."""
-
-    workspace: str
-    server_log_path: str
-    raw_result_path: str
-
-
-class V6FrameworkGate(TypedDict, total=False):
-    """One gate's verdict on one attempt, as it was evaluated.
-
-    A gate never reached writes no row, which is how a reader tells "did not
-    pass" from "did not apply". ``passed`` of ``None`` is a gate that ran and
-    could not rule. Order is the order of evaluation, not of the clock: a whole
-    gating sequence fits inside one tick."""
-
-    gate: str
-    passed: bool | None
-    reason: str
-    observed: float | None
-    threshold: float | None
-    ts: str
-
-
-class V6FrameworkAttempt(TypedDict, total=False):
-    """One measured attempt, from either arm.
-
-    One uniform row per thing measured, discriminated by ``arm``, so the
-    adoption ledger walks both arms with one reader. Which fields carry
-    still follows the arm -- a variant has a ``fingerprint`` and a
-    ``config_delta``, an authored patch has a ``patch_path`` and the files it
-    touched, and an authored deliverable of server args or envs has those as
-    its ``config_delta`` -- but the lifecycle and the verdict are the same shape for both.
-    ``blocked_by`` is projected at assembly as the first gate that did not
-    pass."""
-
-    attempt_id: str
-    arm: str
-    ts: str
-    round_id: str
-    task_id: str
-    proposal_ref: str
-    provenance: str
-    outcome: str
-    reason: str
-    stage: str
-    decision: str
-    adopted: bool | None
-    #: Whether the attempt reached the bench, whatever came of it; absent on a
-    #: row recorded before the field existed.
-    benched: bool | None
-    attribution_eligible: bool | None
-    validation_basis: str
-    fingerprint: str
-    variant_name: str
-    candidate_id: str
-    source_ref: str
-    route: str
-    patch_source: str
-    patch_path: str
-    patches_applied: list[str]
-    patches_reverted: list[str]
-    patch_material: list[V6FrameworkPatch]
-    reasoning: str
-    reasoning_origin: str
-    experience_citations: list[V6ExperienceCitation]
-    target_files: list[str]
-    measured_against: V6FrameworkStack
-    config_delta: V6FrameworkConfigDelta
-    measurement: V6FrameworkMeasurement
-    accuracy: V6FrameworkAccuracy
-    failure: V6FrameworkAttemptFailure
-    artifacts: V6FrameworkArtifacts
-    gates: list[V6FrameworkGate]
-    blocked_by: str | None
-
-
-class V6FrameworkExit(TypedDict, total=False):
-    """Why the entry left. Not a failure -- every entry that closes has one."""
-
-    reason: str
-    trigger: str
-    hint: str
-    switch_bottleneck: bool | None
-
-
-class V6FrameworkExt(TypedDict, total=False):
-    """``ext`` of the V6 ``framework_agent`` timeline event.
-
-    Both OPTIMIZE arms in one event: the configuration arm searches server args
-    and env vars, the source arm lands upstream patches, and the phase leaves
-    only when both have run dry. The shape follows the progression a proposal
-    moves along rather than the arm it belongs to -- ``proposals`` is the main
-    line, ``runs`` holds the dispatch facts those rows reference, and
-    ``attempts`` is one uniform row per thing measured -- because the arms
-    differ in content and not in lifecycle. ``plateau`` sits off that
-    progression.
-
-    ``failure`` is absent on an entry that did not fail as a whole, which is
-    not the same as one that failed at nothing: a failed attempt is on its
-    attempt row, and a failed dispatch on its run row."""
-
-    macro_cycle: int
-    duration_sec: float | None
-    policy: V6FrameworkPolicy
-    plateau: list[V6FrameworkPlateauReading]
-    runs: list[V6FrameworkRun]
-    proposals: list[V6FrameworkProposal]
-    attempts: list[V6FrameworkAttempt]
-    exit: V6FrameworkExit
-    failure: V6Failure | None
-
-
-# V6 KERNEL timeline event
-class V6KernelEntry(TypedDict, total=False):
-    """What the KERNEL entry hook decided and what it inherited."""
-
-    route: str
-    route_reason: str
-    resumed: bool
-    stack_depth_in: int | None
-    roofline_snapshot_id: int | None
-    roofline_snapshot_ts: str | None
-    roofline_baseline_gain_at_snapshot: float | None
-    #: ``"absent"`` when the entry inherited no analysis snapshot, ``"fresh"`` otherwise.
-    snapshot_staleness: str | None
-
-
-class V6KernelReprofile(TypedDict, total=False):
-    """The entry re-profile that decides whether cached analysis is stale."""
-
-    ran: bool
-    task_kind: str | None
-    trigger: str | None
-    skipped_reason: str | None
-    idempotency_reason: str | None
-    snapshot_landed: bool
-    snapshot_id_before: int | None
-    snapshot_id_after: int | None
-
-
-class V6KernelAnalysisArtifacts(TypedDict, total=False):
-    """Paths one trace-analysis run produced."""
-
-    trace_report_path: str
-    analysis_report_path: str
-    candidates_path: str
-    kernel_roofline_path: str
-    tracelens_summary_path: str
-    cli_log_path: str
-
-
-class V6KernelAnalysisDetail(TypedDict, total=False):
-    """Trace-analysis metadata shared by the roofline and kernel events."""
-
-    route: str
-    tool: str
-    tool_run_id: str
-    steady_state: dict[str, Any]
-    preflight: dict[str, Any]
-    split: dict[str, Any]
-    selection: dict[str, Any]
-    steps: Any
-    route_ext: dict[str, Any]
-    hot_kernels: dict[str, Any]
-    warnings: list[dict[str, Any]]
-    artifacts: V6KernelAnalysisArtifacts
-
-
-class V6KernelTraceAnalyzeRun(V6KernelAnalysisDetail, total=False):
-    """One analysis the KERNEL phase requested for itself."""
-
-    run_id: str
-    trigger: str | None
-    requested_by: str | None
-    request_msg_id: str | None
-    ts: str
-    status: str
-    cache_hit: bool
-    trace_input: str | None
-    top_k: int | None
-    roofline_snapshot_id: int | None
-    roofline_baseline_gain_at_snapshot: float | None
-    steady_state_trace: str | None
-    analysis_md_path: str | None
-    reusable_native_kernel_ids: list[str]
-
-
-class V6KernelRewriteE2E(TypedDict, total=False):
-    """End-to-end integration sub-result of one kernel rewrite.
-
-    Derived at assembly from the event's ``integrate`` rows (and a GEAK
-    candidate's rebench), never accepted from a caller. ``e2e_gain_pct`` is
-    Hyperloom-measured; GEAK's own figure is ``self_reported_e2e_gain_pct``.
-    """
-
-    integrated: bool
-    e2e_gain_pct: float | None
-    self_reported_e2e_gain_pct: float | None
-    validated: bool | None
-    decision: str | None
-    patch_path: str | None
-    target_file: str | None
-    graded_objective: str | None
-
-
-class V6KernelRebenchEngagement(TypedDict, total=False):
-    """Whether the configuration under test actually took effect."""
-
-    config_matched: bool | None
-    overlay_loaded: bool | None
-    expected_cfg_hash: str | None
-    observed_cfg_hash: str | None
-    expected_overlay_digest: str | None
-    observed_overlay_digest: str | None
-
-
-class V6KernelRebenchAttempt(TypedDict, total=False):
-    """One end-to-end re-measurement of a candidate."""
-
-    attempt_id: str
-    source_kind: str
-    source_ref: str | None
-    idempotency_key: str | None
-    task_id: str | None
-    dispatched_at: str | None
-    settled_at: str | None
-    base_tput: float | None
-    measured_tput: float | None
-    decision: str | None
-    decision_reason: str | None
-    status: str | None
-    engagement: V6KernelRebenchEngagement
-
-
-class V6KernelDiscoveredKernel(TypedDict, total=False):
-    """One kernel the trace attributed, with profiling fields the summary drops."""
-
-    kernel_id: str
-    name: str
-    snapshot_id: int | None
-    provenance: str
-    gpu_pct: float | None
-    duration_us: float | None
-    call_count: int | None
-    kernel_category: str
-    bottleneck: str | None
-    bound_type: str | None
-    arithmetic_intensity: float | None
-    flops_per_byte: float | None
-    efficiency_percent: float | None
-    bandwidth_util_pct: float | None
-    compute_util_pct: float | None
-    source_file: str | None
-    optimization_notes: str
-    recommended_backends: list[str]
-    recommended_actions: list[str]
-    reusable_native_kernel: bool
-    selected: bool
-
-
-class V6KernelForge(TypedDict, total=False):
-    """What is peculiar to the forge route for one visit.
-
-    The candidates forge produced are not here: they are on ``ext.attempts``
-    beside GEAK's, under one set of names. What remains is the work only forge
-    does -- the re-profile it can run on entry, and the trace analysis that
-    nominates its targets."""
-
-    engaged: bool
-    reprofile: V6KernelReprofile | None
-    trace_analyze_runs: list[V6KernelTraceAnalyzeRun]
-    discovered_kernels: list[V6KernelDiscoveredKernel]
-    recommended_kernels: list[V6KernelDiscoveredKernel]
-
-
-class V6KernelGeakHandoff(TypedDict, total=False):
-    """The conditions GEAK was asked to work under."""
-
-    schema_version: int | None
-    model_path: str | None
-    framework: str | None
-    gpu_type: str | None
-    tp: int | None
-    workload: dict[str, Any]
-    baseline_flags: str | None
-    baseline_envs: str | dict[str, Any] | None
-    baseline_env_spec_present: bool
-    launch_recipe: str | None
-    raw_baseline_tput: float | None
-    orchestrator_best_tput_same_config: float | None
-    max_model_len: int | None
-    mem_fraction: float | None
-    bench_client: str | None
-    e2e_metric: str | None
-    bench_protocol_present: bool
-    gpu_ids: str | None
-    exp_root: str | None
-    eval_dir: str | None
-
-
-class V6KernelGeakDelegation(TypedDict, total=False):
-    """How the delegated GEAK runner process itself ended."""
-
-    runner_status: str
-    started_at: str | None
-    ended_at: str | None
-    duration_sec: float | None
-    error_class: str | None
-    error: str | None
-    returncode: int | None
-    runner_timeout_sec: int | None
-    kill_timeout_sec: int | None
-    exp_root: str | None
-    eval_dir: str | None
-    report_path: str | None
-    versions: dict[str, Any]
-    recovered_from_disk: bool
-    stages_reached: list[str]
-
-
-class V6KernelGeakDiscoveryRun(TypedDict, total=False):
-    """One hot-kernel discovery run GEAK performed for itself."""
-
-    source: str | None
-    status: str | None
-    hot_kernel_count: int
-    scan: dict[str, Any]
-
-
-class V6KernelGeakBackendResult(TypedDict, total=False):
-    """What one backend measured for one kernel GEAK attempted."""
-
-    backend: str | None
-    status: str | None
-    speedup: float | None
-    baseline_us: float | None
-    candidate_us: float | None
-    compile_status: str | None
-    correctness: bool | None
-    artifact_path: str | None
-    error_class: str | None
-
-
-class V6KernelGeakAttempt(TypedDict, total=False):
-    """One kernel GEAK considered, replayed from its conclusion file.
-
-    GEAK's ``kernel_journey.json`` names every kernel it considered, which
-    backends it dispatched and what each measured, not just the acceptances
-    that survived. These rows are shaped like forge's because the orchestrator
-    replays them through the same field helpers, which is exactly why they are
-    stored under GEAK and tagged with their producer rather than merged into
-    the forge lane the superseded projection appended them to."""
-
-    kernel_id: str
-    name: str
-    op_kind: str | None
-    gpu_pct: float | None
-    micro_speedup: float | None
-    dispatched: bool
-    backends: list[str]
-    skip_reason: str | None
-    task_group: str | None
-    backend_result: V6KernelGeakBackendResult | None
-    e2e: V6KernelRewriteE2E | None
-
-
-class V6KernelGeakAuthoredKernel(TypedDict, total=False):
-    """One kernel GEAK authored and accepted.
-
-    GEAK routes an acceptance to its kernel queue or its head queue purely by
-    which queue proposed it, and both lanes carry the same parity-checked
-    ``e2e_delta_pct``; reading only the first drops most of the campaign."""
-
-    short_name: str | None
-    kernel_id: str | None
-    cand_tag: str | None
-    name_source: str
-    op_kind: str | None
-    lane: str | None
-    e2e_delta_pct: float | None
-    alias_collapsed: bool
-    aliases: list[str]
-
-
-class V6KernelGeakEnvSelection(TypedDict, total=False):
-    """One environment / flag selection GEAK accepted."""
-
-    selection: str
-    op_kind: str | None
-    lane: str | None
-    e2e_delta_pct: float | None
-
-
-class V6KernelGeakClaim(TypedDict, total=False):
-    """What GEAK reported about itself, before any re-measurement.
-
-    Every number here is the optimizer's own account of its run. ``verified``
-    is a constant ``False`` so a consumer cannot mistake this block for a
-    conclusion: nothing in it has been re-measured by the orchestrator's own
-    harness, and the adoption verdict rests solely on the rebench."""
-
-    verified: bool
-    self_reported_tput: float | None
-    self_reported_speedup: float | None
-    self_reported_gain_pct: float | None
-    self_reported_basis: str | None
-    geak_status: str | None
-    baseline_alignment_status: str | None
-    authored_kernels: list[V6KernelGeakAuthoredKernel]
-    env_selections: list[V6KernelGeakEnvSelection]
-    kernels_optimized: int
-    accepted_heads_count: int
-    validated_regimes: list[Any]
-    metric_basis: str | None
-    bench_client: str | None
-    ttft_mean_ms: float | None
-    tpot_mean_ms: float | None
-    output_parity: Any
-
-
-class V6KernelGeakProduct(TypedDict, total=False):
-    """The reproducible configuration GEAK handed back."""
-
-    accepted_flags: str | list[str] | None
-    accepted_envs: dict[str, Any]
-    accepted_config: dict[str, Any]
-    final_overlay: str | None
-    final_launch_script: str | None
-    bench_script: str | None
-    final_patch: str | None
-
-
-class V6KernelGeakRebench(TypedDict, total=False):
-    """How GEAK's re-measurement campaign was bounded, and how it ended.
-
-    The attempts themselves are on ``ext.rebench``, which the settled attempts
-    point at by id. What stays here is what only GEAK's campaign has: the
-    per-cycle ceiling it ran under, which attempt the acceptances were settled
-    against, and the terminal error when it never reached one."""
-
-    required: bool
-    max_attempts: int | None
-    attempts_used: int
-    settled_against: str
-    final_status: str | None
-    final_error_class: str | None
-    final_error: str | None
-    conflicting_decisions: list[str]
-
-
-class V6KernelGeak(TypedDict, total=False):
-    """What is peculiar to the GEAK route for one visit, in causal order.
-
-    The kernels GEAK tried are not here: they are on ``ext.attempts`` beside
-    forge's. What remains is the delegation itself -- the conditions GEAK was
-    given, how its runner ended, what it claimed and what configuration it
-    handed back."""
-
-    engaged: bool
-    handoff: V6KernelGeakHandoff | None
-    delegation: V6KernelGeakDelegation | None
-    discovery_runs: list[V6KernelGeakDiscoveryRun]
-    claim: V6KernelGeakClaim | None
-    product: V6KernelGeakProduct | None
-    rebench: V6KernelGeakRebench
-
-
-class V6KernelAttempt(TypedDict, total=False):
-    """One candidate, from either route, in the shape both routes fill.
-
-    The two routes run different machinery and their producers name the same
-    facts differently -- a status lives on the row for forge and inside a
-    backend block for GEAK. Normalizing at assembly is what lets one reader
-    replay the whole visit in order without knowing which producer wrote a
-    given row.
-
-    ``accepted`` is the producer's own verdict on its candidate: whether the
-    lane kept it, or GEAK named it in its acceptances. ``outcome`` is what the
-    instrument then ruled, and ``settled_by`` names which one ruled it --
-    ``rebench`` for a GEAK candidate re-benched end to end, ``integrate`` for
-    a patch the gate had already measured by the time this visit closed,
-    ``lane`` for a forge candidate on the timing of the lane that produced it.
-    A reader who cannot see which one spoke cannot tell an unsettled candidate
-    from one whose evidence simply lives elsewhere.
-
-    ``gain_pct`` is that instrument's measurement, normalized to a percentage
-    from the ratio a forge lane reports and the delta a rebench computes. It
-    is the number the visit's verdict is read off, and it is ``None`` when the
-    candidate was kept without anything measuring it.
-
-    ``rebench_ref`` and ``integrate_ref`` are the two evidence pointers, and
-    they are symmetric: whichever instrument ruled, the row names the record
-    that holds the measurement. Forge fills the second, GEAK the first.
-
-    ``detail`` carries what is specific to the producing lane and has no
-    counterpart on the other route: a fusion pattern, a GEMM shape count,
-    GEAK's GPU share."""
-
-    attempt_id: str
-    route: str
-    source_kind: str
-    kernel_id: str
-    name: str
-    status: str
-    dispatched: bool
-    skip_reason: str
-    started_at: str
-    ended_at: str
-    duration_sec: float | None
-    backend: str
-    backends_tried: list[str]
-    speedup: float | None
-    gain_pct: float | None
-    gain_axis: str | None  # kernel_micro, output_throughput or the gate's graded axis
-    compile_status: str
-    correctness: bool | None
-    artifact_path: str
-    error_class: str
-    failure_reason: str
-    micro_decision: str
-    accepted: bool
-    rebench_ref: str
-    integrate_ref: str
-    e2e: V6KernelRewriteE2E | None
-    outcome: str
-    settled_by: str
-    unsettled_reason: str
-    detail: dict[str, Any]
-
-
-class V6KernelDeliveredRow(TypedDict, total=False):
-    """One candidate this visit handed to the optimization stack.
-
-    A row here says the candidate was kept, not that it improved the model:
-    ``gain_pct`` is ``None`` when nothing measured it, and ``settled_by`` says
-    which instrument is behind the number when there is one."""
-
-    route: str
-    source_kind: str
-    ref: str
-    kernel_id: str
-    gain_pct: float | None
-    gain_axis: str | None
-    settled_by: str
-
-
-class V6KernelStackDelta(TypedDict, total=False):
-    """Optimization-stack entries this visit added and removed."""
-
-    added: list[dict[str, Any]]
-    removed: list[dict[str, Any]]
-
-
-class V6Throughput(TypedDict, total=False):
-    """The throughput anchors a stage is judged against, and the gains they yield.
-
-    Three anchors, because a result means different things depending on what it
-    is read against: ``before`` is where the stage started -- the running best
-    when it was entered -- ``after`` is where it left off, and
-    ``session_baseline`` is the session's first measurement, which no stage
-    moves. A flat ``tput_before`` beside a bare ``net_gain_pct`` left the
-    denominator to be inferred, and left the baseline anchor recorded with
-    nothing ever read against it.
-
-    Each gain names the pair it came from: ``gain_pct`` is what this stage
-    moved, ``session_gain_pct`` is where the session stands after it. So a
-    further comparison is one field here, derived from the anchors already
-    beside it, rather than another pair threaded through every outcome.
-
-    Every gain here is arithmetic over those anchors, not an independent
-    measurement. A stage's own numbers can outrun what the ledger will
-    validate; ``cumulative_gain_validated_out`` on the outcome is the
-    validated figure, and the two are meant to be comparable.
-    """
-
-    before: float | None
-    after: float | None
-    session_baseline: float | None
-    gain_pct: float | None
-    session_gain_pct: float | None
-
-
-class V6KernelOutcome(TypedDict, total=False):
-    """How the visit ran, in one vocabulary both routes reach.
-
-    ``verdict`` is derived from the settled attempts rather than stated by the
-    phase, so it cannot contradict the instruments that ruled on them. It is
-    one of ``improved`` (a candidate was kept and something measured a gain on
-    it), ``no_improvement`` (the visit ran and nothing measured a gain) or
-    ``failed`` (the visit raised, or every attempt failed before it could be
-    judged). It is empty on a visit that never concluded -- one rebuilt from
-    the rows a killed session left behind -- because the rows may add up to a
-    gain nobody ever concluded, and the event's ``interrupted`` status is the
-    only statement such a visit supports.
-
-    The subject is the visit, not the eventual fate of what it produced. A
-    forge patch is gated end to end after this visit exits, and that verdict
-    lands on the event of the cycle that ran the gate, so a verdict waiting on
-    it could never be stated here at all. Follow ``delivered`` into a later
-    event's ``integrate`` rows for that.
-
-    ``reason`` says why whenever the verdict is not an improvement.
-    ``error_class`` and ``failed_stage`` name a fault the visit hit, which is
-    not the same as the verdict: a raising tick is filed against the session's
-    crash count and the loop carries on, so a visit can fault somewhere and
-    still deliver a measured candidate. Read together they separate a clean
-    empty-handed visit from one that blew up, and a clean win from one that
-    was not come by cleanly.
-
-    ``throughput`` carries every anchor the visit is read against and the gain
-    against each. ``cumulative_gain_validated_out`` stays outside it because it
-    is a different kind of number: the validated ledger's figure for the whole
-    stack, stated by the phase rather than derived from this visit's anchors,
-    and ``stack_depth_out`` is the stack length it was measured at."""
-
-    route: str
-    verdict: str
-    reason: str
-    error_class: str
-    failed_stage: str
-    exit_reason: str | None
-    throughput: V6Throughput
-    cumulative_gain_validated_out: float | None
-    stack_depth_out: int | None
-    delivered: list[V6KernelDeliveredRow]
-    stack_delta: V6KernelStackDelta
-
-
-class V6KernelIntegrateRun(TypedDict, total=False):
-    """One end-to-end integrate gate verdict on one queued patch.
-
-    The gate is the orchestrator's, not a lane's. A KERNEL visit hands a KEEP
-    to a queue and exits; a later step drains the queue, measures the patch end
-    to end and rules on it. So this is a sibling of the two routes rather than
-    a field inside either, and it can settle in a later cycle than the visit
-    that produced the patch -- which ``settled_in_macro_cycle`` states, because
-    the event this row is attached to is the one that ran the gate.
-
-    ``decision`` and ``rejected_reason`` answer different questions.
-    ``REVERT`` is a verdict on the patch; a ``rejected_reason`` is an
-    exhausted budget, which drops a patch without ever having ruled against
-    it. ``fault_count`` is the same distinction counted: an integration fault
-    never measured the patch fairly."""
-
-    integration_id: str
-    kernel_id: str
-    decision: str
-    status: str
-    attempt_count: int | None
-    fault_count: int | None
-    gain_pct: float | None
-    accuracy_pass: bool | None
-    validation_tier: str
-    patch_path: str
-    target_file: str
-    error_class: str
-    rejected_reason: str
-    retryable: bool
-    settled_at: str
-    settled_in_macro_cycle: int | None
-    extra_server_args: str
-    basis: str
-    alignment_status: str
-    gain_attributed: bool | None
-
-
-class V6KernelExt(TypedDict, total=False):
-    """``ext`` of the V6 ``kernel`` timeline event.
-
-    Three layers, and which layer a fact belongs in is decided by what kind of
-    fact it is rather than by which route produced it. ``attempts`` holds every
-    candidate; ``rebench``, ``integrate`` and ``measurements`` hold the evidence
-    that ruled on them; ``forge`` and ``geak`` hold only what is peculiar to one
-    route; ``outcome`` states what the visit delivered.
-
-    ``geak`` and ``forge`` are mutually exclusive by construction: the entry
-    hook picks one of three routes, so the block that did not run stays absent
-    rather than being emitted empty."""
-
-    macro_cycle: int
-    in_flight_stage: str | None
-    duration_sec: float | None
-    entry: V6KernelEntry
-    failure: dict[str, Any] | None
-    attempts: list[V6KernelAttempt]
-    rebench: list[V6KernelRebenchAttempt]
-    integrate: list[V6KernelIntegrateRun]
-    measurements: list[dict[str, Any]]
-    geak: V6KernelGeak | None
-    forge: V6KernelForge | None
-    outcome: V6KernelOutcome
-
-
 class SessionBreakdown(TypedDict, total=False):
     """Top-level wire shape of ``session_breakdown.json``.
 
@@ -2554,8 +1500,6 @@ class SessionBreakdown(TypedDict, total=False):
 
 __all__ = [
     "CriticIteration",
-    "SCHEMA_VERSION",
-    "SCHEMA_VERSION_V6",
     "SessionBreakdown",
     "V6ArchivedFile",
     "V6BaselineExt",
@@ -2583,69 +1527,16 @@ __all__ = [
     "V6ConcSweepRuntime",
     "V6ConcSweepWorkload",
     "V6Critic",
-    "V6CriticReview",
-    "V6CriticReviewVariant",
     "V6EnablementAttempt",
     "V6EnablementBuild",
     "V6EnablementExt",
     "V6EnablementRevalidation",
     "V6Failure",
-    "V6FrameworkAccuracy",
-    "V6FrameworkArtifacts",
-    "V6FrameworkAttempt",
-    "V6FrameworkAttemptFailure",
-    "V6FrameworkConfigDelta",
-    "V6FrameworkCriticReview",
-    "V6FrameworkCriticReviewOutcome",
-    "V6FrameworkCriticVariantRuling",
-    "V6FrameworkExit",
-    "V6FrameworkExt",
-    "V6FrameworkGate",
-    "V6FrameworkLifecycleStep",
-    "V6FrameworkMeasurement",
-    "V6ExperienceCitation",
-    "V6FrameworkPatch",
-    "V6FrameworkPlateauReading",
-    "V6FrameworkPolicy",
-    "V6FrameworkPolicyConfigArm",
-    "V6FrameworkPolicySourceArm",
-    "V6FrameworkProposal",
-    "V6FrameworkProposalTerminal",
-    "V6FrameworkRenderedRef",
-    "V6FrameworkRun",
-    "V6FrameworkStack",
     "V6GeakCandidate",
     "V6GradedAxes",
     "V6Grading",
     "V6GradingTputGuard",
     "V6KBWriteBackExt",
-    "V6KernelAnalysisArtifacts",
-    "V6KernelAnalysisDetail",
-    "V6KernelAttempt",
-    "V6KernelDeliveredRow",
-    "V6KernelDiscoveredKernel",
-    "V6KernelEntry",
-    "V6KernelExt",
-    "V6KernelForge",
-    "V6KernelGeak",
-    "V6KernelGeakAttempt",
-    "V6KernelGeakAuthoredKernel",
-    "V6KernelGeakBackendResult",
-    "V6KernelGeakClaim",
-    "V6KernelGeakDelegation",
-    "V6KernelGeakDiscoveryRun",
-    "V6KernelGeakEnvSelection",
-    "V6KernelGeakHandoff",
-    "V6KernelGeakProduct",
-    "V6KernelGeakRebench",
-    "V6KernelIntegrateRun",
-    "V6KernelOutcome",
-    "V6KernelRebenchAttempt",
-    "V6KernelRebenchEngagement",
-    "V6KernelReprofile",
-    "V6KernelRewriteE2E",
-    "V6KernelStackDelta",
-    "V6KernelTraceAnalyzeRun",
     "V6Metadata",
     "V6MetadataLangfuse",
     "V6MetadataRecovery",
@@ -2676,7 +1567,6 @@ __all__ = [
     "V6StackExt",
     "V6StackValidation",
     "V6TaskConfig",
-    "V6Throughput",
     "V6TimelineEvent",
     "V6ToolVersion",
     "V6WarmReplayExt",

@@ -15,7 +15,7 @@ import yaml
 
 from hyperloom.common.launch_log_evidence import observed_server_config_from_log
 from hyperloom.orchestrator.actions.executors import _agentx_prefix_cache as pc
-from hyperloom.orchestrator.actions.executors._launch_evidence import build_launch_evidence
+from hyperloom.orchestrator.actions.executors._launch_evidence import RequestedLaunch, build_launch_evidence
 from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -117,7 +117,7 @@ def test_atom_reads_the_server_args_the_materialized_config_launches_with(tmp_pa
         ),
         encoding="utf-8",
     )
-    evidence = build_launch_evidence(config_path=config, actual_server_log=None, framework="atom", slot=tmp_path)
+    evidence = build_launch_evidence(RequestedLaunch(config, "atom"), actual_server_log=None, slot=tmp_path)
     measured = {"status": "succeeded", "server_log_path": "", "launch_evidence": evidence}
     assert bool(pc.prefix_cache_off_evidence(measured)) is refused
 
@@ -219,8 +219,8 @@ async def test_writeback_refuses_to_anchor_and_stops_without_opening_enablement(
 
     from .conftest import make_coordinator
 
-    triggers: list[dict[str, Any]] = []
-    monkeypatch.setattr(enablement_event, "record_trigger", lambda **kw: triggers.append(kw))
+    triggers: list[enablement_event.LaneTrigger] = []
+    monkeypatch.setattr(enablement_event, "record_trigger", lambda trigger: triggers.append(trigger))
     coord = make_coordinator(
         session_dir,
         shared_state_overrides={"enablement_mode": "all", "benchmark_mode": "agentx", "baseline_tput": anchor_tput},

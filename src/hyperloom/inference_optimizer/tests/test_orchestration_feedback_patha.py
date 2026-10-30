@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
+from hyperloom.orchestrator.mcp_tool_names import CONTEXT_TOOL_NAMES, qualified_context_tool_name
 from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.roles.mcp_context_tools import (
-    CONTEXT_TOOL_NAMES,
     CONTEXT_TOOL_SPECS,
     ContextProvider,
 )
@@ -116,15 +116,19 @@ def test_get_recent_outcomes_tool_is_registered():
     assert spec_methods["get_recent_outcomes"] == "recent_outcomes"
 
 
-def test_context_provider_recent_outcomes_not_wired_message():
-    provider = ContextProvider(shared_state=object())
-    assert "not wired" in provider.recent_outcomes()
+def test_context_tool_names_match_the_mounted_specs():
+    """The names other modules read must stay the names this server mounts."""
+    assert tuple(spec[0] for spec in CONTEXT_TOOL_SPECS) == CONTEXT_TOOL_NAMES
 
 
 def test_context_provider_recent_outcomes_delegates_to_reader():
     provider = ContextProvider(
         shared_state=object(),
+        inbox_reader=lambda since_seq: "",
+        analysis_reader=lambda: "",
         recent_outcomes_reader=lambda k: f"outcomes(top_k={k})",
+        running_tasks_reader=lambda: "",
+        reference_reader=lambda name: "",
     )
     assert provider.recent_outcomes(5) == "outcomes(top_k=5)"
 
@@ -227,7 +231,9 @@ def test_format_inbox_event_caps_failure_rows_and_shows_more_hint():
     lines = rendered.split("\n")
     failure_lines = [l for l in lines if "failure:" in l]
     assert len(failure_lines) == 3
-    assert any("+2 more" in l for l in lines)
+    # The hint has to name the tool the way the runtime registers it, or the agent cannot call it.
+    pull = qualified_context_tool_name("get_variant_failures")
+    assert any("+2 more" in l and pull in l for l in lines)
 
 
 def test_inbox_injection_does_not_forge_section_headers():

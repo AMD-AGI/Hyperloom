@@ -20,36 +20,18 @@ from typing import Any
 
 from .. import framework_registry
 from .. import gpu_types as _gpu_types
+from ...common.model_paths import resolve_local_model_dir
+from ..session import sbd_v6
 from ...common.timeutil import now_iso
 from ..model_config_utils import (
     GEMMA2_ARCHITECTURES as _GEMMA2_ARCHITECTURES,
     _MAXPOS_CONFIG_KEYS,
-    _MX_FP4_GROUP_SIZE,
-    _NATIVE_MOE_RUNNER_QUANT_METHODS,
     _config_architectures,
-    _is_quark_mx_fp4_entry,
-    _load_model_config_dict,
+    config_scopes,
+    load_model_config_dict,
     _load_model_max_position_embeddings,
-    _model_declared_quant_method,
     _model_has_dual_chunk_attention,
-    _model_moe_runner_requires_aiter,
-    resolve_local_model_dir,
 )
-
-# Re-exported from model_config_utils for callers/tests.
-__all__ = [
-    "_GEMMA2_ARCHITECTURES",
-    "_MAXPOS_CONFIG_KEYS",
-    "_MX_FP4_GROUP_SIZE",
-    "_NATIVE_MOE_RUNNER_QUANT_METHODS",
-    "_config_architectures",
-    "_is_quark_mx_fp4_entry",
-    "_load_model_config_dict",
-    "_load_model_max_position_embeddings",
-    "_model_declared_quant_method",
-    "_model_has_dual_chunk_attention",
-    "_model_moe_runner_requires_aiter",
-]
 
 log = logging.getLogger(__name__)
 
@@ -337,7 +319,7 @@ def _load_model_arch(
 
 def _load_model_config_tags(model_path: str) -> dict:
     """Best-effort loader for KB architecture-identity tags (``architectures`` + ``model_type``) from config.json."""
-    data = _load_model_config_dict(model_path)
+    data = load_model_config_dict(model_path)
     if data is None:
         return {}
     out: dict = {}
@@ -402,7 +384,7 @@ def _unsupported_hit(architecture: str, model_type: str, signal: str, verdict: s
 
 def _detect_unsupported_model(model_path: str) -> dict | None:
     """Best-effort classify a model's text-serving viability."""
-    config = _load_model_config_dict(model_path)
+    config = load_model_config_dict(model_path)
     if config is None:
         return None
     nested = config.get("text_config")
@@ -461,7 +443,7 @@ def _detect_amd_unsupported_quant(model_path: str) -> str | None:
     """Return a reason when the model ships a quant format unsupported on ROCm."""
     if not model_path:
         return None
-    cfg = _load_model_config_dict(model_path) or {}
+    cfg = load_model_config_dict(model_path) or {}
     qc = cfg.get("quantization_config")
     if isinstance(qc, dict):
         method = str(qc.get("quant_method") or "").strip().lower()
@@ -627,11 +609,7 @@ def _detect_gemma2_missing_hidden_act(data: dict) -> str | None:
     arches = {a.lower() for a in _config_architectures(data)}
     if model_type != "gemma2" and not (arches & _GEMMA2_ARCHITECTURES):
         return None
-    scopes = [data]
-    nested = data.get("text_config")
-    if isinstance(nested, dict):
-        scopes.append(nested)
-    if any(s.get("hidden_act") for s in scopes):
+    if any(s.get("hidden_act") for s in config_scopes(data)):
         return None
     return (
         "config.json is a Gemma2 model but lacks hidden_act (only "
@@ -668,11 +646,7 @@ def _detect_diffusers_pipeline_model(model_path: str) -> str | None:
 
 def _detect_null_strict_bool_config(data: dict) -> str | None:
     """Return a reason for config fields that strict HF validators require bool."""
-    scopes = [("config", data)]
-    nested = data.get("text_config")
-    if isinstance(nested, dict):
-        scopes.append(("text_config", nested))
-    for scope_name, scope in scopes:
+    for scope_name, scope in zip(("config", "text_config"), config_scopes(data)):
         for key in _STRICT_BOOL_CONFIG_KEYS:
             if key in scope and scope.get(key) is None:
                 return (
@@ -696,15 +670,11 @@ _TOKENIZER_ARTIFACT_FILES = (
 
 def _detect_unrecognized_architecture(data: dict) -> str | None:
     """Return a reason when the architecture is unknown to Transformers/sglang."""
-    scopes = [(data, False)]
-    nested = data.get("text_config")
-    if isinstance(nested, dict):
-        scopes.append((nested, True))
-    for scope, is_nested in scopes:
+    for depth, scope in enumerate(config_scopes(data)):
         model_type = str(scope.get("model_type") or "").strip().lower()
         arches = {a.lower() for a in _config_architectures(scope)}
         unrecognized_types = _UNRECOGNIZED_MODEL_TYPES
-        if is_nested:
+        if depth:
             unrecognized_types = _UNRECOGNIZED_MODEL_TYPES | _NESTED_ONLY_UNRECOGNIZED_MODEL_TYPES
         if model_type in unrecognized_types or arches & _UNRECOGNIZED_ARCHITECTURES:
             label = model_type or (next(iter(arches), "") if arches else "?")
@@ -916,10 +886,7 @@ def _detect_amd_unsupported_architecture(data: dict) -> str | None:
 
 def _detect_rope_without_max_position(data: dict) -> str | None:
     """Return a reason when a RoPE block ships with no max-position field."""
-    scopes = [data]
-    nested = data.get("text_config")
-    if isinstance(nested, dict):
-        scopes.append(nested)
+    scopes = config_scopes(data)
     has_rope = any(s.get(k) for s in scopes for k in _ROPE_CONFIG_KEYS)
     has_maxpos = any(
         isinstance(s.get(k), int) and not isinstance(s.get(k), bool) and s.get(k) > 0
@@ -979,13 +946,12 @@ def _run_compat_detector(
     *,
     model_path: str,
     data: dict,
-    gpu_type: str | None,
 ) -> str | None:
     """Invoke a spec's detector sub-chain, returning the first non-None reason."""
     # Resolve a HF repo-id to its local cache dir ONCE so every disk-reading detector (hf_quant_config.json,
     # safetensors shards, tokenizer files, PEFT adapters, ...) sees a real directory.
     resolved_mp = str(resolve_local_model_dir(model_path) or model_path)
-    available = {"model_path": resolved_mp, "data": data, "gpu_type": gpu_type}
+    available = {"model_path": resolved_mp, "data": data}
     call_args = tuple(available[name] for name in spec.args)
     fns = spec.fn if isinstance(spec.fn, tuple) else (spec.fn,)
     for fn in fns:
@@ -1091,7 +1057,7 @@ def _detect_incompatible_model_config(
     cfg_path = (resolve_local_model_dir(model_path) or Path(model_path)) / "config.json"
     if not cfg_path.is_file():
         return None
-    data = _load_model_config_dict(model_path)
+    data = load_model_config_dict(model_path)
     if data is None:
         return (
             f"config.json at {cfg_path} is present but unparseable "
@@ -1109,7 +1075,6 @@ def _detect_incompatible_model_config(
             spec,
             model_path=model_path,
             data=data,
-            gpu_type=gpu_type,
         )
         if reason is not None:
             return reason
@@ -1128,7 +1093,6 @@ _MODEL_GATE_ORDER = (
     "model_config_compat",
     "context_window",
 )
-_MODEL_GATE_EVENT_ATTR = "_sbd_v6_model_gate_event"
 
 
 def _model_gate_workload(args: argparse.Namespace) -> dict[str, Any]:
@@ -1166,73 +1130,26 @@ def _new_model_gate_event(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _load_model_gate_event(args: argparse.Namespace, session_dir: Path) -> dict[str, Any]:
-    from ..session.sbd_v6 import read_timeline_event_for_update
-
-    event = getattr(args, _MODEL_GATE_EVENT_ATTR, None)
-    if not isinstance(event, dict):
-        event = read_timeline_event_for_update(session_dir, "model_gate")
-    if event is None or str(event.get("type") or "") != "model_gate":
-        event = _new_model_gate_event(args)
-    setattr(args, _MODEL_GATE_EVENT_ATTR, event)
-    event.setdefault("kind", "model_gate")
-    event.setdefault("status", "succeeded")
-    event.setdefault("start_time", now_iso(timespec="seconds"))
-    event.setdefault("end_time", "")
-    ext = event.get("ext")
-    if not isinstance(ext, dict):
-        ext = {}
-        event["ext"] = ext
-    ext.setdefault("run_kind", "fresh")
-    ext.setdefault("skip_reason", None)
-    ext.setdefault("failed_gate_id", None)
-    ext["workload"] = _model_gate_workload(args)
-    checks = ext.get("checks")
-    ext["checks"] = [row for row in checks if isinstance(row, dict)] if isinstance(checks, list) else []
-    degraded = ext.get("degraded")
-    if not isinstance(degraded, dict):
-        degraded = {}
-        ext["degraded"] = degraded
-    degraded["active"] = bool(degraded.get("active"))
-    warnings = degraded.get("warnings")
-    degraded["warnings"] = [row for row in warnings if isinstance(row, dict)] if isinstance(warnings, list) else []
-    return event
-
-
-def _write_model_gate_event(session_dir: Path, event: dict[str, Any]) -> bool:
-    from ..session.sbd_v6 import write_timeline_event_at
-
-    write_timeline_event_at(session_dir, event)
-    return True
+    return sbd_v6.read_timeline_event_for_update(session_dir, "model_gate") or _new_model_gate_event(args)
 
 
 def _record_model_gate_warning(session_dir: Path, *, component: str, exc: BaseException) -> None:
     """Best-effort retain a model-gate observability failure for export."""
-    from ..session.sbd_v6 import record_write_warning
-
-    if not record_write_warning(session_dir, component=component, exc=exc):
+    if not sbd_v6.record_write_warning(session_dir, component=component, exc=exc):
         log.debug("failed to persist SBD V6 model-gate warning", exc_info=exc)
 
 
-def _model_gate_status(
-    checks: list[dict[str, Any]],
-    *,
-    skip_reason: str | None = None,
-) -> str:
+def _model_gate_status(checks: list[dict[str, Any]]) -> str:
     statuses = {str(check.get("status") or "") for check in checks}
     if "failed" in statuses:
         return "failed"
     if "warned" in statuses or "unknown" in statuses:
         return "degraded"
-    if skip_reason:
-        return "skipped"
     return "succeeded"
 
 
 def _model_gate_check_order(check: dict[str, Any]) -> int:
-    try:
-        return int(check.get("order") or 0)
-    except (TypeError, ValueError):
-        return len(_MODEL_GATE_ORDER) + 1
+    return int(check["order"])
 
 
 def _record_model_gate_check(
@@ -1274,12 +1191,9 @@ def _record_model_gate_check(
             degraded["active"] = True
             degraded.setdefault("warnings", []).append(degraded_warning)
         ext["checks"] = checks
-        event["status"] = _model_gate_status(
-            checks,
-            skip_reason=str(ext.get("skip_reason") or "") or None,
-        )
-        _write_model_gate_event(session_dir, event)
-    except Exception as exc:
+        event["status"] = _model_gate_status(checks)
+        sbd_v6.write_timeline_event_at(session_dir, event)
+    except (OSError, ValueError, TypeError) as exc:
         log.warning("failed to record SBD V6 model-gate check", exc_info=True)
         _record_model_gate_warning(session_dir, component="model_gate.check", exc=exc)
 
@@ -1287,10 +1201,8 @@ def _record_model_gate_check(
 def _start_model_gate(args: argparse.Namespace, session_dir: Path) -> None:
     """Create the model-gate event before the first check executes."""
     try:
-        event = _new_model_gate_event(args)
-        setattr(args, _MODEL_GATE_EVENT_ATTR, event)
-        _write_model_gate_event(session_dir, event)
-    except Exception as exc:
+        sbd_v6.write_timeline_event_at(session_dir, _new_model_gate_event(args))
+    except (OSError, ValueError, TypeError) as exc:
         log.warning("failed to initialize SBD V6 model-gate event", exc_info=True)
         _record_model_gate_warning(session_dir, component="model_gate.start", exc=exc)
 
@@ -1299,14 +1211,10 @@ def _finish_model_gate(args: argparse.Namespace, session_dir: Path) -> None:
     """Finalize a successfully completed three-check model-gate chain."""
     try:
         event = _load_model_gate_event(args, session_dir)
-        ext = event["ext"]
-        event["status"] = _model_gate_status(
-            ext["checks"],
-            skip_reason=str(ext.get("skip_reason") or "") or None,
-        )
+        event["status"] = _model_gate_status(event["ext"]["checks"])
         event["end_time"] = now_iso(timespec="seconds")
-        _write_model_gate_event(session_dir, event)
-    except Exception as exc:
+        sbd_v6.write_timeline_event_at(session_dir, event)
+    except (OSError, ValueError, TypeError) as exc:
         log.warning("failed to finalize SBD V6 model-gate event", exc_info=True)
         _record_model_gate_warning(session_dir, component="model_gate.finish", exc=exc)
 
@@ -1338,9 +1246,8 @@ def _record_resumed_model_gate(
             }
             for order, gate_id in enumerate(_MODEL_GATE_ORDER, start=1)
         ]
-        setattr(args, _MODEL_GATE_EVENT_ATTR, event)
-        _write_model_gate_event(session_dir, event)
-    except Exception as exc:
+        sbd_v6.write_timeline_event_at(session_dir, event)
+    except (OSError, ValueError, TypeError) as exc:
         log.warning("failed to record resumed SBD V6 model-gate event", exc_info=True)
         _record_model_gate_warning(session_dir, component="model_gate.resume", exc=exc)
 
@@ -1355,7 +1262,8 @@ def _write_model_gate_breakdown(
         from ..breakdown import write_breakdown_json
 
         write_breakdown_json(session_dir)
-    except Exception as exc:  # noqa: BLE001 — never mask the gate failure
+    except Exception as exc:  # isolation boundary: the fail-fast session_breakdown.json
+        log.warning("session_breakdown.json write failed on %s fail-fast", failure_label, exc_info=True)
         print(
             f"WARNING: failed to write session_breakdown.json on {failure_label} fail-fast: {exc!r}",
             file=sys.stderr,
@@ -1396,7 +1304,8 @@ def _emit_breakdown_to_langfuse(session_dir: Path) -> None:
         flush_session(session_dir)
         patch_breakdown_langfuse(session_dir)
         record_session_breakdown(session_dir)
-    except Exception as exc:  # noqa: BLE001 — best-effort; never mask the reason
+    except Exception as exc:  # outermost telemetry sink: never masks the gate failure
+        log.warning("session_breakdown Langfuse push failed on fail-fast", exc_info=True)
         print(
             f"WARNING: failed to emit session_breakdown to Langfuse on fail-fast: {exc!r}",
             file=sys.stderr,
@@ -1420,7 +1329,8 @@ def _persist_gate_stop_report(session_dir: Path, *, stop_reason: str, reason: st
         state.closing_phase = True
         state.save(session_dir)
         write_stop_report(session_dir, state, stop_detail=reason)
-    except Exception as exc:  # noqa: BLE001 — don't mask the reason on a writer bug
+    except Exception as exc:  # isolation boundary: the gate stop report
+        log.warning("%s stop report persist failed", warning_label, exc_info=True)
         print(
             f"WARNING: failed to persist {warning_label} stop report: {exc!r}",
             file=sys.stderr,
@@ -1734,7 +1644,7 @@ def _preflight_unsupported_model_arch(
     model = str(getattr(args, "model", "") or "")
     hit = _detect_unsupported_model(model)
     if hit is None:
-        config = _load_model_config_dict(model)
+        config = load_model_config_dict(model)
         passed = config is not None
         architectures = _config_architectures(config) if passed else []
         _record_model_gate_check(

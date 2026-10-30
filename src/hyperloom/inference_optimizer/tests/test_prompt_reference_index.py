@@ -49,7 +49,14 @@ def file_reader(refs_dir):
             return f"(not found: {name!r}; available: {available})"
         return candidate.read_text(encoding="utf-8")
 
-    return ContextProvider(shared_state=None, reference_reader=_read)
+    return ContextProvider(
+        shared_state=None,
+        inbox_reader=lambda since_seq: "",
+        analysis_reader=lambda: "",
+        recent_outcomes_reader=lambda top_k: "",
+        running_tasks_reader=lambda: "",
+        reference_reader=_read,
+    )
 
 
 # Reference directory contract
@@ -123,7 +130,6 @@ def test_reference_index_present_in_prompt(registry, refs_dir):
             enabled_actions=default_enabled_actions(no_kernel=False),
             session=SessionContext(
                 framework="sglang",
-                kernel_enabled=True,
                 framework_agent_phase_enabled=True,
                 objective_kind="gain_pct",
                 objective_value=15.0,
@@ -145,8 +151,11 @@ def test_read_reference_in_context_tool_names():
 
 def test_read_reference_granted_to_orchestration():
     """PolicyGate must list read_reference in orchestration's allowed tools."""
+    from hyperloom.orchestrator.roles.mcp_context_tools import qualified_context_tool_name
+
     gate = PolicyGate(role_registry=default_role_registry())
-    assert "read_reference" in gate.allowed_tools_for_agent("orchestration")
+    # Under the registered name: that is what the SDK mounts and the prompt names.
+    assert qualified_context_tool_name("read_reference") in gate.allowed_tools_for_agent("orchestration")
 
 
 def test_read_reference_returns_doc(refs_dir, file_reader):
@@ -173,9 +182,3 @@ def test_read_reference_unknown_name_returns_available_list(file_reader):
     result = file_reader.read_reference("nonexistent_reference_xyz")
     assert "not found" in result
     assert "available" in result
-
-
-def test_read_reference_not_wired_returns_marker():
-    """A ContextProvider with no reference_reader returns a clear marker string."""
-    provider = ContextProvider(shared_state=None)
-    assert "not wired" in provider.read_reference("anything")

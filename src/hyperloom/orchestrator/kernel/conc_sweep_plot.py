@@ -5,28 +5,21 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from hyperloom.common.coerce import optional_positive_float
 from hyperloom.common.perf_metric import GRADED_OUTPUT, is_agentx_mode
 
 log = logging.getLogger(__name__)
 
 
-def _positive(value: Any) -> float | None:
-    """Coerce to a strictly positive float, else None."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    return float(value) if value > 0 else None
-
-
 def _agentx_xy(point: Mapping[str, Any], tp_eff: float) -> tuple[float, float] | None:
     """p90 interactivity against token throughput per chip."""
-    intvty = _positive(point.get("e2e_norm_intvty_p90"))
-    total = _positive(point.get("total_token_throughput"))
+    intvty = optional_positive_float(point.get("e2e_norm_intvty_p90"))
+    total = optional_positive_float(point.get("total_token_throughput"))
     if intvty is None or total is None:
         return None
     return intvty, total / tp_eff
@@ -34,8 +27,8 @@ def _agentx_xy(point: Mapping[str, Any], tp_eff: float) -> tuple[float, float] |
 
 def _synthetic_xy(point: Mapping[str, Any], tp_eff: float) -> tuple[float, float] | None:
     """Output throughput per user against output throughput per GPU."""
-    tput = _positive(point.get("output_throughput"))
-    conc = _positive(point.get("conc"))
+    tput = optional_positive_float(point.get("output_throughput"))
+    conc = optional_positive_float(point.get("conc"))
     if tput is None or conc is None:
         return None
     return tput / conc, tput / tp_eff
@@ -78,9 +71,8 @@ class ConcCurveOptions:
         model_label: Model name in the chart title.
         gpu_label: GPU name in the chart title.
         tp: Tensor-parallel size the per-chip axes divide by.
-        isl: Input sequence length the roofline ceiling is computed for.
-        osl: Output sequence length the roofline ceiling is computed for.
-        draw_ceiling: Whether to draw the roofline ceiling.
+        isl: Input sequence length in the chart title.
+        osl: Output sequence length in the chart title.
     """
 
     model_label: str = ""
@@ -88,11 +80,10 @@ class ConcCurveOptions:
     tp: int = 1
     isl: int = 0
     osl: int = 0
-    draw_ceiling: bool = False
 
 
 def render_conc_sweep_curve(
-    payload: dict[str, Any] | str | Path,
+    payload: dict[str, Any],
     out_path: str | Path,
     options: ConcCurveOptions = ConcCurveOptions(),
 ) -> Path | None:
@@ -102,13 +93,6 @@ def render_conc_sweep_curve(
     except (ImportError, OSError):
         log.debug("conc_sweep_plot: render failed", exc_info=True)
         return None
-
-
-def _load_payload(payload: dict[str, Any] | str | Path) -> dict[str, Any]:
-    if isinstance(payload, dict):
-        return payload
-    path = Path(payload)
-    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _arm_series(
@@ -125,7 +109,7 @@ def _arm_series(
     for pt in points:
         xy = axes.point_xy(pt, tp_eff)
         if xy is not None:
-            rows.append((_positive(pt.get("conc")), xy[0], xy[1]))
+            rows.append((optional_positive_float(pt.get("conc")), xy[0], xy[1]))
     rows.sort(key=lambda r: (r[0] is None, r[0] or 0.0, r[1]))
     return [r[1] for r in rows], [r[2] for r in rows], [r[0] for r in rows]
 
@@ -186,34 +170,6 @@ def _draw_arm(ax: Any, arm: _Arm, other_concs: list[float | None], bg: str) -> b
     return any(single)
 
 
-def _ceiling_series(
-    ceiling_data: dict[str, Any],
-    tp_eff: float,
-) -> tuple[list[float], list[float]]:
-    """Extract ceiling (x, y) from ``roofline_ceiling`` payload rows."""
-    rows = ceiling_data.get("rows") or []
-    pairs: list[tuple[float, float]] = []
-    for row in rows:
-        conc = row.get("conc")
-        peak = row.get("t_peak_tok_s")
-        if conc is None or peak is None:
-            continue
-        try:
-            conc_f = float(conc)
-            peak_f = float(peak)
-        except (TypeError, ValueError):
-            continue
-        if conc_f <= 0 or peak_f <= 0:
-            continue
-        x = peak_f / conc_f  # interactivity at ceiling
-        y = peak_f / tp_eff  # efficiency at ceiling
-        pairs.append((x, y))
-    pairs.sort(key=lambda p: p[0])
-    if not pairs:
-        return [], []
-    return [p[0] for p in pairs], [p[1] for p in pairs]
-
-
 def _chart_title(options: ConcCurveOptions, agentic: bool) -> str:
     parts = [options.model_label or "Model"]
     if options.gpu_label:
@@ -227,13 +183,12 @@ def _chart_title(options: ConcCurveOptions, agentic: bool) -> str:
     return "Concurrency Sweep — Throughput vs Interactivity\n" + " | ".join(parts)
 
 
-def _render(payload: dict[str, Any] | str | Path, out_path: Path, options: ConcCurveOptions) -> Path | None:
+def _render(data: dict[str, Any], out_path: Path, options: ConcCurveOptions) -> Path | None:
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    data = _load_payload(payload)
     tp_eff = float(max(options.tp, 1))
     # Two independent facts the payload records separately: the axis the sweep was graded on, which an operator can
     # pin against the workload's default, and whether the workload was an agentic replay at all.
@@ -255,18 +210,10 @@ def _render(payload: dict[str, Any] | str | Path, out_path: Path, options: ConcC
     grid_c = "#3A3A3A"
     baseline_c = "#FF4C4C"
     optimized_c = "#FF8C00"
-    ceiling_c = "#888888"
 
     fig, ax = plt.subplots(figsize=(10, 6))
     fig.patch.set_facecolor(bg)
     ax.set_facecolor(bg)
-
-    # The roofline is a decode-only output_throughput bound computed from the session's ISL/OSL, and
-    # ``_ceiling_series`` returns it in that axis pair's units.
-    if options.draw_ceiling and not agentic and metric == GRADED_OUTPUT:
-        cx, cy = _ceiling_series(data.get("roofline_ceiling") or {}, tp_eff)
-        if cx:
-            ax.plot(cx, cy, "--", color=ceiling_c, linewidth=1.2, label="Theoretical peak (roofline)")
 
     single_arm_note = False
     for arm, other_concs in (

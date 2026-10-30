@@ -15,7 +15,8 @@ from typing import Any
 
 from hyperloom.common.timeutil import now_iso
 
-from ..bus.resource_lock import BRINGUP_ROUND_LANE, ResourceLockManager
+from ..bus.db_maintenance import DECIDED_PROPOSAL_IDS_SQL
+from ..bus.resource_lock import BRINGUP_ROUND_LANE, SqliteLeaseBackend
 from ..state.round_store import (
     EXPIRED_REAPED,
     Round,
@@ -23,7 +24,12 @@ from ..state.round_store import (
     RoundStore,
 )
 from ..state.task_registry import TERMINAL_STATES, Task, TaskNotFound, TaskRegistry
-from hyperloom.inference_optimizer.trace.trajectory_trace import EVENT_PROPOSAL, STATUS_CANCELLED, record_event
+from hyperloom.inference_optimizer.trace.trajectory_trace import (
+    EVENT_PROPOSAL,
+    STATUS_CANCELLED,
+    EventSpan,
+    record_event,
+)
 from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
 
 log = logging.getLogger(__name__)
@@ -39,26 +45,13 @@ REVIEW_TTL_SEC: float = 1800.0
 #: The verdict a timeout writes.
 TIMEOUT_VERDICT = "reject"
 
-#: Evidence key ``TaskRegistry.reclaim_dead_running`` writes when it proved a pid
-#: dead, and the key its lease watchdog writes when it only timed a lease out.
-_EVIDENCE_DEAD_PID = "dead_pid"
-_EVIDENCE_LEASE_TTL = "lease_ttl_sec"
-
-#: Proposals with no verdict against them. The inner SELECT must exclude NULL and
-#: empty targets: ``msg_id NOT IN (.., NULL)`` is NULL for every row, so one
-#: malformed verdict would make every proposal look decided.
-_UNDECIDED_PROPOSALS_SQL = """
+#: Proposals with no verdict against them.
+_UNDECIDED_PROPOSALS_SQL = f"""
     SELECT msg_id, from_agent, ts FROM events
     WHERE topic = 'proposal'
-      AND msg_id NOT IN (
-        SELECT json_extract(payload, '$.target_proposal_msg_id')
-        FROM events
-        WHERE topic = 'review_verdict'
-          AND json_extract(payload, '$.target_proposal_msg_id') IS NOT NULL
-          AND json_extract(payload, '$.target_proposal_msg_id') != ''
-      )
+      AND msg_id NOT IN ({DECIDED_PROPOSAL_IDS_SQL})
     ORDER BY seq ASC
-"""
+"""  # nosec B608 - interpolates a constant SQL fragment only.
 
 #: The timeout deny, written only if no verdict targets the proposal at the
 #: instant of the write. The guard is in the statement rather than in a read
@@ -75,7 +68,6 @@ _TIMEOUT_DENY_SQL = """
 
 __all__ = [
     "TIMEOUT_VERDICT",
-    "ReconcileLimits",
     "ReconcileLinks",
     "ReconcileReport",
     "ReconcileStores",
@@ -90,48 +82,34 @@ class ReconcileStores:
     Attributes:
         rounds: The durable round store.
         tasks: The task registry.
-        locks: The lease manager; this pass is its only sweeper.
+        locks: The lane lease store; this pass is its only sweeper.
     """
 
     rounds: RoundStore
     tasks: TaskRegistry
-    locks: ResourceLockManager
+    locks: SqliteLeaseBackend
 
 
 @dataclass(frozen=True)
 class ReconcileLinks:
-    """The running loop's state the pass reads and writes, each optional.
+    """The running loop's state the pass reads and writes.
 
     Attributes:
-        resources: The gate's resource facts; ``None`` skips the update.
+        resources: The gate's resource facts.
         proposals: Returns the in-memory pending proposals, so a durable
             timeout deny also reaches the copy the loop consults.
         drop_proposal: Settles a timed-out pending proposal as dropped on the
             framework timeline, as a Critic reject would.
         session_dir: Where SharedState is saved after a terminal is set.
         result_pending: Whether a terminal task's result is still to be
-            booked by the dispatcher; ``None`` treats every terminal row
-            as booked.
+            booked by the dispatcher.
     """
 
-    resources: Any = None
-    proposals: Callable[[], Mapping[str, Any]] | None = None
-    drop_proposal: Callable[[Any, str], None] | None = None
-    session_dir: Any = None
-    result_pending: Callable[[str], bool] | None = None
-
-
-@dataclass(frozen=True)
-class ReconcileLimits:
-    """How long the pass waits before it settles a round or denies a review.
-
-    Attributes:
-        terminal_holder_cap_sec: Cap for a round whose holder went terminal.
-        review_ttl_sec: TTL for an undecided review.
-    """
-
-    terminal_holder_cap_sec: float = TERMINAL_HOLDER_CAP_SEC
-    review_ttl_sec: float = REVIEW_TTL_SEC
+    resources: Any
+    proposals: Callable[[], Mapping[str, Any]]
+    drop_proposal: Callable[[Any, str], None]
+    session_dir: Any
+    result_pending: Callable[[str], bool]
 
 
 @dataclass
@@ -141,11 +119,13 @@ class ReconcileReport:
     Attributes:
         leases_reaped: Lease rows the pass swept.
         leases_unverifiable: Lane rows still held after the sweep by a holder
-            that ended without confirming its cleanup. Nothing decides these:
-            no probe here can tell a lane in use from one merely abandoned, so
-            they are retained by contract rather than left over by accident.
-            Not a failure count -- but the number an operator needs to see
-            climb, and the maintenance summary carries it out of here.
+            that ended. A holder releases its lanes where it writes its
+            terminal row, so each row here is one that release never reached:
+            the coordinator died in between, or the task was failed from the
+            outside. Nothing decides these: no probe here can tell a lane in
+            use from one merely abandoned. Not a failure count -- but the
+            number an operator needs to see climb, and the maintenance summary
+            carries it out of here.
         settled: ``(round_id, outcome)`` for every round this pass ended.
         handed_off: Rounds moved onto the successor that owes their result.
         failed_tasks: Task ids marked failed on proof their process is gone.
@@ -171,9 +151,6 @@ class Reconciler:
     """The unconditional repair pass, and the projection rebuild that ends it.
 
     Attributes:
-        terminal_holder_cap_sec (float): How long a round waits after its
-            holder went terminal with no successor.
-        review_ttl_sec (float): How long a proposal may sit undecided.
         last_report (ReconcileReport): What the most recent pass did; read by
             the maintenance tick, which leaves lease sweeping to this pass.
     """
@@ -183,8 +160,7 @@ class Reconciler:
         stores: ReconcileStores,
         shared_state: Any,
         *,
-        links: ReconcileLinks = ReconcileLinks(),
-        limits: ReconcileLimits = ReconcileLimits(),
+        links: ReconcileLinks,
     ):
         """Initialise the reconciler.
 
@@ -193,7 +169,6 @@ class Reconciler:
             shared_state: SharedState, read for the projection and written when
                 an unreaped round stops the session.
             links: The running loop's state the pass reads and writes.
-            limits: How long a round or a review may wait.
         """
         self._rounds = stores.rounds
         # One connection serves the whole session; a second would have to be
@@ -207,8 +182,6 @@ class Reconciler:
         self._drop_proposal = links.drop_proposal
         self._session_dir = links.session_dir
         self._result_pending = links.result_pending
-        self.terminal_holder_cap_sec = max(0.0, float(limits.terminal_holder_cap_sec))
-        self.review_ttl_sec = max(0.0, float(limits.review_ttl_sec))
         self.last_report = ReconcileReport()
 
     async def run(self, now_unix: float) -> ReconcileReport:
@@ -231,7 +204,7 @@ class Reconciler:
         ):
             try:
                 await rule(now_unix, report)
-            except Exception:
+            except Exception:  # isolation boundary: one reconcile rule of the pass
                 log.exception("reconcile: rule %s raised", rule.__name__)
                 report.failures.append(rule.__name__)
         self.last_report = report
@@ -254,7 +227,7 @@ class Reconciler:
         rows = await self._db.fetchall(_UNDECIDED_PROPOSALS_SQL, ())
         for row in rows:
             age = float(now_unix) - _unix_of(row["ts"])
-            if age < self.review_ttl_sec:
+            if age < REVIEW_TTL_SEC:
                 continue
             await self._author_timeout_deny(str(row["msg_id"]), str(row["from_agent"]), age=age, now_unix=now_unix)
 
@@ -265,7 +238,7 @@ class Reconciler:
                 "target_proposal_msg_id": msg_id,
                 "verdict": TIMEOUT_VERDICT,
                 "reasoning": (
-                    f"no review verdict arrived within {self.review_ttl_sec:.0f}s "
+                    f"no review verdict arrived within {REVIEW_TTL_SEC:.0f}s "
                     f"(waited {age:.0f}s); denied by the coordinator so the round "
                     "it holds can end. A patch nobody reviewed is not an accepted layer."
                 ),
@@ -282,9 +255,9 @@ class Reconciler:
         if not applied:
             return
         log.warning("RECONCILE: review timeout denied proposal %s after %.0fs", msg_id, age)
-        pending = self._proposals().pop(msg_id, None) if self._proposals is not None else None
+        pending = self._proposals().pop(msg_id, None)
         self._record_timeout_terminal(msg_id, pending, age=age)
-        if pending is not None and self._drop_proposal is not None:
+        if pending is not None:
             self._drop_proposal(pending, "review_timeout")
 
     def _record_timeout_terminal(self, msg_id: str, pending: Any, *, age: float) -> None:
@@ -292,8 +265,7 @@ class Reconciler:
         action_name = str(getattr(pending, "action_name", "") or "") or None
         record_event(
             EVENT_PROPOSAL,
-            status=STATUS_CANCELLED,
-            span_id=msg_id,
+            span=EventSpan(span_id=msg_id, status=STATUS_CANCELLED),
             attributes={
                 "name": action_name,
                 "action_name": action_name,
@@ -318,7 +290,7 @@ class Reconciler:
         succeeds although the baseline it was waiting for passed.
         """
         state = self._shared_state
-        if state is None or not bool(state.enablement.validation_pending):
+        if not bool(state.enablement.validation_pending):
             return
         tracked = str(state.enablement.revalidation_task_id or "").strip()
         if not tracked:
@@ -326,30 +298,16 @@ class Reconciler:
         row = await self._task(tracked)
         if row is not None and row.state not in TERMINAL_STATES:
             return
-        if self._result_pending is not None and self._result_pending(tracked):
+        if self._result_pending(tracked):
             return
         enablement_event.record_revalidation_cleared(
             generation=int(state.enablement.revalidation_generation or 0), task_id=tracked
         )
         state.enablement.validation_pending = False
         state.enablement.revalidation_task_id = ""
-        self._save_state()
+        state.save(self._session_dir)
         report.closed_windows.append(tracked)
         log.info("RECONCILE: closed revalidation window held by terminal task %s", tracked)
-
-    async def cleanup_confirmation_rate(self) -> tuple[int, int]:
-        """How often an ended task confirmed its teardown, this session.
-
-        Exposed here rather than leaving the caller to reach into ``_locks``:
-        the maintenance summary carries this next to ``leases_unverifiable``,
-        and a rename of a private attribute should not be able to silently drop
-        the one ratio that says whether retained lanes are routine.
-
-        Returns:
-            tuple[int, int]: Ended tasks whose cleanup was not confirmed, and
-            ended tasks in total.
-        """
-        return await self._locks.cleanup_confirmation_rate()
 
     async def _reap_leases(self, now_unix: float, report: ReconcileReport) -> None:
         """Release confirmed-dead local owners, then lanes nothing is using.
@@ -358,21 +316,22 @@ class Reconciler:
         work without releasing -- the pid on the lane row is this process.
         2026-09-21: six lanes were held that way for two hours, starving 19
         queued tasks, by holders that had already ended and whose processes had
-        gone with them. The same thing would happen under this code, and is
-        meant to: nothing here decides that a lane is free. What changed is that
-        it announces itself within a tick, naming the lane and the statement
-        that clears it, instead of taking an hour of py-spy and sqlite to find.
+        gone with them. Nothing here would decide those lanes were free either;
+        what keeps them from getting this far is that a holder now releases its
+        lanes where it writes its terminal row. Whatever still arrives announces
+        itself within a tick, naming the lane and the statement that clears it,
+        instead of taking an hour of py-spy and sqlite to find.
 
-        A holder that ended with its cleanup unconfirmed keeps its lane, and
-        nothing here takes it back. Seven rounds of review each proposed a
-        cheaper proof that the lane was free -- the holder is terminal, its
-        recorded process group is empty, no pidfile names a live server -- and
-        each was shown by probe to be a proxy a real process can slip out of. A
+        What arrives is the residue: a lane whose release never ran at all, the
+        coordinator having died between the row and the release, or the task
+        having been failed from the outside. Nothing here takes those back.
+        Every cheaper proof that such a lane is free -- the holder is terminal,
+        its recorded process group is empty, no pidfile names a live server --
+        was shown by probe to be a proxy a real process can slip out of. A
         served process is setsid'd by design, its pidfile appears only after it
         answers, and a cmdline is a guess. Releasing a lane wrongly puts two
-        rounds on the same cards, which corrupts quietly; holding one wrongly
-        stalls a queue until an operator spends 90 seconds. The asymmetry
-        decides it.
+        rounds on the same cards, which corrupts quietly, so these are counted
+        and handed to an operator instead.
 
         So this pass reclaims only what liveness alone settles
         (:meth:`reap_dead_holders`), and everything else is counted and handed
@@ -410,7 +369,7 @@ class Reconciler:
             return
         if self._review_owes_a_verdict(round_row.holder_task_id):
             return
-        if float(now_unix) - _unix_of(holder.updated_at) < self.terminal_holder_cap_sec:
+        if float(now_unix) - _unix_of(holder.updated_at) < TERMINAL_HOLDER_CAP_SEC:
             return
         await self._expire(round_row, now_unix, report, why="holder_terminal_without_result")
 
@@ -439,16 +398,8 @@ class Reconciler:
         )
         return row is not None
 
-    def _save_state(self) -> None:
-        """Persist SharedState after a terminal, if there is somewhere to put it."""
-        if self._session_dir is None or self._shared_state is None:
-            return
-        self._shared_state.save(self._session_dir)
-
     async def _rebuild_projection(self, now_unix: float, report: ReconcileReport) -> None:
         """Re-read the facts the gate's resource rules judge against."""
-        if self._resources is None:
-            return
         self._resources.update(
             self._shared_state,
             rounds=await self._rounds.excluding(now_unix),
@@ -471,8 +422,6 @@ class Reconciler:
 
     def _review_owes_a_verdict(self, holder_task_id: str) -> bool:
         """Whether an undecided proposal still stands on the holder's work."""
-        if self._proposals is None:
-            return False
         for pending in self._proposals().values():
             params = pending.payload.get("params", {})
             if str(params.get("specialist_task_id", "")) == holder_task_id:
@@ -495,9 +444,7 @@ def _terminal_by_observation(task: Task) -> bool:
             continue
         if not isinstance(evidence, dict):
             return True
-        if _EVIDENCE_DEAD_PID in evidence:
-            return True
-        return _EVIDENCE_LEASE_TTL not in evidence and evidence.get("reason") != "cancelled_in_flight"
+        return evidence.get("reason") != "cancelled_in_flight"
     return True
 
 

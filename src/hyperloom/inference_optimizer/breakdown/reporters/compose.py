@@ -115,8 +115,8 @@ def render_session_report(
             parsed = parse_llm_response(llm_raw)
             exec_summary_llm = parsed["executive_summary"]
             narratives = parsed["section_narratives"]
-        except Exception as exc:  # noqa: BLE001
-            log.warning("LLM narration failed: %s", exc)
+        except Exception as exc:  # isolation boundary: the optional LLM narration pass
+            log.warning("LLM narration failed: %s", exc, exc_info=True)
             llm_raw = f"<llm_error: {type(exc).__name__}: {exc}>"
 
     used_llm = llm_client is not None and not str(llm_raw).startswith("<llm_error")
@@ -223,13 +223,7 @@ def _deterministic_exec_summary(g: GlobalFacts) -> str:
     else:
         out.append(f"- No measurable gain recorded ({g.attribution_method}).")
     out.append(f"- Variants: {_variant_funnel_text(g)}.")
-    funnel = g.kernel_pipeline_funnel
-    out.append(
-        f"- Kernel pipeline: detected={funnel['detected']} → "
-        f"recommended={funnel['recommended']} → attempted={funnel['attempted']} → "
-        f"adopted={funnel['adopted']} (reverted={funnel['reverted']}, "
-        f"rejected={funnel['rejected']}, partial={funnel['partial']})."
-    )
+    out.append(f"- Kernel pipeline: {_kernel_funnel_text(g)}.")
     if g.capabilities_not_attempted:
         out.append("- Capabilities never invoked: " + ", ".join(f"`{c}`" for c in g.capabilities_not_attempted) + ".")
     out.extend(_data_quality_flag_lines(g))
@@ -261,6 +255,16 @@ def _variant_funnel_text(g: GlobalFacts) -> str:
     return f"{text} → {', '.join(shipped)}" if shipped else text
 
 
+def _kernel_funnel_text(g: GlobalFacts) -> str:
+    """The kernel pipeline funnel as one line, shared by the executive summary and the key facts."""
+    funnel = g.kernel_pipeline_funnel
+    return (
+        f"detected={funnel['detected']} → recommended={funnel['recommended']} → "
+        f"attempted={funnel['attempted']} → adopted={funnel['adopted']} "
+        f"(reverted={funnel['reverted']}, rejected={funnel['rejected']}, partial={funnel['partial']})"
+    )
+
+
 def _count(n: int, noun: str) -> str:
     """``n`` followed by ``noun``, pluralised unless ``n`` is one."""
     return f"{n} {noun}{'' if n == 1 else 's'}"
@@ -277,7 +281,6 @@ def _data_quality_flag_lines(g: GlobalFacts) -> list[str]:
 
 def _render_global_facts_block(g: GlobalFacts) -> str:
     """Render :class:`GlobalFacts` as a compact key-value block for cross-checking the report."""
-    funnel = g.kernel_pipeline_funnel
     out: list[str] = []
     out.append(f"- **Headline**: {g.headline}")
     out.append(
@@ -287,12 +290,7 @@ def _render_global_facts_block(g: GlobalFacts) -> str:
     )
     out.append(f"- **Workload**: {g.workload_summary}")
     out.append(f"- **Variants**: {_variant_funnel_text(g)}")
-    out.append(
-        f"- **Kernel pipeline**: detected={funnel['detected']} → "
-        f"recommended={funnel['recommended']} → attempted={funnel['attempted']} → "
-        f"adopted={funnel['adopted']} (partial={funnel['partial']}, "
-        f"reverted={funnel['reverted']}, rejected={funnel['rejected']})"
-    )
+    out.append(f"- **Kernel pipeline**: {_kernel_funnel_text(g)}")
     out.append("- **Capabilities kept**: " + (", ".join(f"`{c}`" for c in g.capabilities_kept) or "none"))
     out.append(
         "- **Capabilities not attempted**: " + (", ".join(f"`{c}`" for c in g.capabilities_not_attempted) or "none")

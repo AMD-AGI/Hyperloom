@@ -7,19 +7,28 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import subprocess
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.coerce import to_float, to_str_list
+from hyperloom.common.coerce import first_text, to_float, to_str_list
 from hyperloom.inference_optimizer import framework_paths
-from hyperloom.orchestrator.lever import LEVER_UPSTREAM_PR
 
-from ...bringup import load_boot_observation, observation_summary, verdict_of
+from ...bringup import (
+    load_boot_observation,
+    observation_summary,
+    round_advanced,
+    round_outcome_unchanged,
+    verdict_of,
+)
+from ...bringup.persist import LoadedObservation
 from ...enablement.recipe import keep_probe, keep_records
 from ...enablement.recipe.projections import project_launch_evidence
+from . import _framework_switch_manifest as _switch_manifest
 from ._accuracy_gate import enablement_correctness
+from ._enablement_config import _FRAMEWORK_KB_PROVENANCE_PREFIX
 from ._git import _git_head_sha
 from ._integrate_attempt import IntegrateAttempt
 from ._integrate_results import _KbLesson, _PatchBench
@@ -27,11 +36,54 @@ from ._nogit_patch import _is_git_tree
 from ._patch_git import _uncommitted_revert
 from ._patch_snapshot import _git_commit_kept, _patch_touched_paths
 from ._integrate_vocabulary import PATCH_SOURCE_UPSTREAM_PR, resolve_patch_source
-from ._patch_sources import _declared_stack_ops, _patch_stack_by_root
+from ._patch_sources import _declared_stack_ops, _patch_stack_by_root, _read_patch_texts
 from ._server_argv import ConfigUnreadable
 from ._workload_envs import FrameworkScriptMismatchError
 
 log = logging.getLogger(__name__)
+
+
+def _attach_attempt_evidence(verdict: dict[str, Any], attempt: IntegrateAttempt) -> None:
+    """Add to a verdict what the applied attempt holds and the gate itself cannot see."""
+    if attempt.dropped_env_overrides:
+        verdict["dropped_env_overrides"] = attempt.dropped_env_overrides
+
+
+def _inert_round_evidence(
+    attempt: IntegrateAttempt,
+    *,
+    served: bool,
+    before: LoadedObservation,
+    after: LoadedObservation,
+) -> dict[str, Any]:
+    """The env names an inert round's diff reads that nothing armed for its boot.
+
+    A round is inert only on the one outcome that shows its patch changed
+    nothing the boot did: it never served, and the boot stopped at the wall the
+    boot before it stopped at, with the same failure. A revert that served and
+    failed minimal correctness, or that died at another wall, says nothing about
+    whether the patched path was reached, so it carries no such lead and this
+    answers ``{}``.
+
+    One of the names may be a switch nothing turns on, so they ride along as a
+    lead for the next round's mandate. A read is not proof of a gate (an opt-out
+    switch, a write and a plain value read read the same), which is why this is
+    evidence beside a boot that already happened and not a refusal.
+    """
+    if served or not round_outcome_unchanged(before.observation, after.observation):
+        return {}
+    armed = {*attempt.extra_envs_applied, *os.environ}
+    names = _switch_manifest.unarmed_env_reads(_read_patch_texts(attempt.applied), armed=armed)
+    return {"inert_round_env_reads": names} if names else {}
+
+
+def _observation_evidence(half: str, loaded: LoadedObservation) -> dict[str, Any]:
+    """The ``<half>_observation`` summary, path and degraded reason of one loaded boot observation."""
+    return {
+        f"{half}_observation": observation_summary(loaded.observation) if loaded.observation is not None else None,
+        f"{half}_observation_path": loaded.path,
+        f"{half}_observation_degraded": loaded.degraded,
+    }
 
 
 class EnablementGateMixin:
@@ -41,7 +93,6 @@ class EnablementGateMixin:
         self,
         attempt: IntegrateAttempt,
         params: dict[str, Any],
-        extra: dict[str, Any],
     ) -> dict[str, Any]:
         """Bench + enablement/perf KEEP/REVERT gate.
 
@@ -93,7 +144,6 @@ class EnablementGateMixin:
             verdict = await self._gate_enablement(
                 attempt=attempt,
                 params=params,
-                extra=extra,
                 bench_result=bench_result,
                 gate_evidence=gate_evidence,
             )
@@ -101,12 +151,10 @@ class EnablementGateMixin:
             verdict = await self._gate_perf(
                 attempt=attempt,
                 params=params,
-                extra=extra,
                 bench_result=bench_result,
                 gate_evidence=gate_evidence,
             )
-        if attempt.dropped_env_overrides:
-            verdict["dropped_env_overrides"] = attempt.dropped_env_overrides
+        _attach_attempt_evidence(verdict, attempt)
         return verdict
 
     async def _gate_enablement(
@@ -114,7 +162,6 @@ class EnablementGateMixin:
         *,
         attempt: IntegrateAttempt,
         params: dict[str, Any],
-        extra: dict[str, Any],
         bench_result: dict[str, Any],
         gate_evidence: dict[str, Any],
     ) -> dict[str, Any]:
@@ -163,7 +210,6 @@ class EnablementGateMixin:
 
         from hyperloom.common.failure_signature import runnable_decision
 
-        from ...bringup import round_advanced
         from .benchmark_result import is_valid_measurement
 
         new_tput = bench_result.get("output_throughput")
@@ -174,16 +220,8 @@ class EnablementGateMixin:
         after_loaded = load_boot_observation(bench_result.get("boot_observation_path"))
         before_loaded = load_boot_observation(params.get("enablement_before_observation_path"))
         evidence = {
-            "before_observation": (
-                observation_summary(before_loaded.observation) if before_loaded.observation is not None else None
-            ),
-            "before_observation_path": before_loaded.path,
-            "before_observation_degraded": before_loaded.degraded,
-            "after_observation": (
-                observation_summary(after_loaded.observation) if after_loaded.observation is not None else None
-            ),
-            "after_observation_path": after_loaded.path,
-            "after_observation_degraded": after_loaded.degraded,
+            **_observation_evidence("before", before_loaded),
+            **_observation_evidence("after", after_loaded),
             **eval_provenance,
         }
 
@@ -195,7 +233,7 @@ class EnablementGateMixin:
         advanced = not runs and not served and round_advanced(before_loaded.observation, after_loaded.observation)
         if not runs and not advanced:
             await self._maybe_write_framework_kb_record(
-                _KbLesson("reverted_smoke_fail", 0.0), done_payload=done_payload, params=params, extra=extra
+                _KbLesson("reverted_smoke_fail", 0.0), attempt=attempt, params=params
             )
             return {
                 "status": "reverted",
@@ -213,6 +251,10 @@ class EnablementGateMixin:
                 "bench_result": bench_result,
                 "workspace": str(output_root),
                 **evidence,
+                # Only an inert round -- one whose boot stopped exactly where the
+                # boot before it did -- hands the next mandate the env names its
+                # diff read; every other revert leaves this out.
+                **_inert_round_evidence(attempt, served=served, before=before_loaded, after=after_loaded),
             }
 
         # Accepted: the boot either runs or reached a deeper wall. Both keep the
@@ -230,15 +272,11 @@ class EnablementGateMixin:
             )
 
         if advanced:
-            await self._maybe_write_framework_kb_record(
-                _KbLesson("integrated", 0.0), done_payload=done_payload, params=params, extra=extra
-            )
-            wall = None
-            signature = None
-            if after_loaded.observation is not None:
-                wall = after_loaded.observation.stage_failed
-                verdict = verdict_of(after_loaded.observation)
-                signature = verdict.signature if verdict is not None else None
+            await self._maybe_write_framework_kb_record(_KbLesson("integrated", 0.0), attempt=attempt, params=params)
+            # round_advanced is only true for a recorded after-observation.
+            assert after_loaded.observation is not None
+            wall = after_loaded.observation.stage_failed
+            signature = verdict_of(after_loaded.observation).signature
             return {
                 "status": "advanced",
                 "specialist_task_id": specialist_task_id,
@@ -269,7 +307,7 @@ class EnablementGateMixin:
                     f"to a new gap ({wall.name if wall is not None else 'no wall recorded'})"
                 ),
                 "setup_commands_applied": attempt.setup_commands_applied,
-                "after_signature": signature.to_dict() if signature is not None else {},
+                "after_signature": signature.to_dict(),
                 "enablement_launch_log": str(bench_result.get("error") or ""),
                 # The wall this round advanced to, for the next round's before half.
                 "enablement_observation_path": after_loaded.path,
@@ -283,9 +321,7 @@ class EnablementGateMixin:
         reason = f"enablement runnable: {run_reason}"
         if provisional:
             reason += " (provisional: served but eval produced no accuracy; correctness not verified)"
-        await self._maybe_write_framework_kb_record(
-            _KbLesson("integrated", 0.0), done_payload=done_payload, params=params, extra=extra
-        )
+        await self._maybe_write_framework_kb_record(_KbLesson("integrated", 0.0), attempt=attempt, params=params)
         kept_result: dict[str, Any] = {
             "status": "kept",
             "specialist_task_id": specialist_task_id,
@@ -386,12 +422,7 @@ class EnablementGateMixin:
                     continue
                 patch_targets[patch_path] = ops
                 targets.setdefault(patch_root, {}).update(ops)
-        for declared_root, ops in keep_records.declared_targets(
-            framework_root=root,
-            upserted=(),
-            deleted=(),
-            artifacts=stack_artifacts,
-        ).items():
+        for declared_root, ops in keep_records.declared_targets(framework_root=root, artifacts=stack_artifacts).items():
             targets.setdefault(declared_root, {}).update(ops)
         snapshots = keep_records.capture_root_snapshots(
             records=records,
@@ -492,14 +523,16 @@ class EnablementGateMixin:
             return {}
         action = attempt.localization_action
         try:
-            from ...source_snapshot import snapshot_source_layer
+            from ...source_snapshot import SourceLayer, snapshot_source_layer
 
             base_sha = _git_head_sha(framework_root)
             dest = self.session_dir / "optimization_stack" / "localization" / (specialist_task_id or "keep")
             snap = snapshot_source_layer(
-                framework_root=framework_root,
-                base_sha=base_sha,
-                rel_paths=touched,
+                SourceLayer(
+                    framework_root=framework_root,
+                    base_sha=base_sha,
+                    rel_paths=touched,
+                ),
                 dest_dir=dest,
                 provenance="localization",
                 extra={
@@ -526,8 +559,6 @@ class EnablementGateMixin:
         Args:
             done_payload: The parsed ``specialist_done.json`` payload, or
                 ``None``.
-            params: Task params; the upstream-PR lane's PR identity lives on
-                ``params['candidate']`` rather than in a specialist proposal.
 
         Returns:
             The matching framework proposal dict, or ``None`` when absent.
@@ -541,7 +572,7 @@ class EnablementGateMixin:
             if not isinstance(proposal, dict):
                 continue
             provenance = str(proposal.get("provenance") or "")
-            if provenance.startswith("specialist:serving:framework"):
+            if provenance.startswith(_FRAMEWORK_KB_PROVENANCE_PREFIX):
                 return proposal
         return None
 
@@ -573,31 +604,22 @@ class EnablementGateMixin:
             "fa_pr_url": pr_url,
             "fa_pr_sha": pr_sha,
             "framework": candidate.get("framework") or "",
-            "gap_canonical_id": candidate.get("gap_canonical_id") or "",
-            "gap_keywords": candidate.get("gap_keywords") or [],
-            "changed_files": candidate.get("changed_files") or [],
             "applicability": candidate.get("applicability") or "",
-            # Names the lever, matching ``lever_kind``. No ledger reader filters
-            # on provenance; it is audit metadata.
-            "provenance": LEVER_UPSTREAM_PR,
-            "source_framework": candidate.get("source_framework") or "",
-            "target_framework": candidate.get("target_framework") or "",
         }
 
     async def _maybe_write_framework_kb_record(
         self,
         lesson: _KbLesson,
         *,
-        done_payload: dict[str, Any] | None,
+        attempt: IntegrateAttempt,
         params: Mapping[str, Any] | None = None,
-        extra: dict[str, Any],
     ) -> None:
         """Record this attempt's outcome against the patch's upstream PR identity.
 
         A patch with no such identity leaves no lesson: the ledger files every
         lesson under a PR URL or head SHA.
         """
-        proposal = self._find_framework_proposal(done_payload)
+        proposal = self._find_framework_proposal(attempt.done_payload)
         if proposal is None:
             # The upstream-PR lane carries the PR identity on the candidate
             # rather than in a specialist's ``fa_*`` markers.
@@ -607,15 +629,15 @@ class EnablementGateMixin:
         # Never the payload's: a payload-level ``fa_pr_*`` belongs to whichever
         # proposal put it there, so standing it in for one this proposal omits
         # would file the lesson under another patch's PR.
-        pr_url = str(proposal.get("fa_pr_url") or "").strip()
-        pr_sha = str(proposal.get("fa_pr_sha") or "").strip()
+        pr_url = first_text(proposal.get("fa_pr_url"))
+        pr_sha = first_text(proposal.get("fa_pr_sha"))
         if not pr_url and not pr_sha:
             log.warning("integrate_patch: framework proposal lacks both fa_pr_url and fa_pr_sha; KB writeback skipped")
             return
         # The ``if v`` filter is what makes the merge mean "the proposal's value,
         # or the payload's where the proposal left it empty".
-        fields = {**(done_payload or {}), **{k: v for k, v in proposal.items() if v}}
-        shared_state = extra.get("shared_state") or extra.get("state")
+        fields = {**(attempt.done_payload or {}), **{k: v for k, v in proposal.items() if v}}
+        shared_state = attempt.shared_state
         patches_written = to_str_list(proposal.get("patches_written"))
         accuracy_delta_pct = lesson.accuracy_delta_pct
         if accuracy_delta_pct is None:
@@ -631,18 +653,9 @@ class EnablementGateMixin:
                     outcome=lesson.outcome,
                     tps_delta_pct=float(lesson.tps_delta_pct),
                     session_id=str(getattr(shared_state, "recipe_kb_session_id", "") or ""),
-                    framework=str(fields.get("framework") or "").strip().lower(),
-                    gap_canonical_id=str(fields.get("gap_canonical_id") or "").strip(),
-                    gap_keywords=[keyword.lower() for keyword in to_str_list(fields.get("gap_keywords"))],
-                    model_class=str(getattr(shared_state, "model_class", "") or "").strip(),
-                    gpu_type=str(getattr(shared_state, "gpu_type", "") or "").strip(),
-                    precision=str(getattr(shared_state, "precision", "") or "").strip(),
-                    applicability=lesson.config_fingerprint or str(fields.get("applicability") or "").strip(),
-                    provenance=str(fields.get("provenance") or "").strip(),
+                    framework=first_text(fields.get("framework")).lower(),
+                    applicability=lesson.config_fingerprint or first_text(fields.get("applicability")),
                     accuracy_delta_pct=accuracy_delta_pct,
-                    changed_files=to_str_list(fields.get("changed_files")),
-                    source_framework=str(fields.get("source_framework") or "").strip().lower(),
-                    target_framework=str(fields.get("target_framework") or "").strip().lower(),
                 )
             )
         except (OSError, ValueError, TypeError) as exc:

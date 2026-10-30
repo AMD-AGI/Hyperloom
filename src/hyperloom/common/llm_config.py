@@ -5,27 +5,30 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import sys
+import time
+from contextlib import AbstractContextManager, AsyncExitStack, ExitStack
 from dataclasses import dataclass
 from typing import Iterable, Mapping, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
-from hyperloom.common.coerce import to_int as _to_int
 from hyperloom.common.env import is_truthy
 from hyperloom.common.llm_attribution import call_headers as _attribution_headers
 from hyperloom.common.llm_attribution import gateway_selected as _gateway_selected
 from hyperloom.common.llm_attribution import inject_env as _inject_attribution_env
 from hyperloom.common.llm_headers import expand_env_refs, parse_custom_headers
 from hyperloom.common.llm_request_hooks import (
+    AnthropicStream,
     PROTOCOL_ANTHROPIC_MESSAGES,
     PROTOCOL_OPENAI_CHAT,
     RequestObservation,
     observed_request,
 )
 from hyperloom.common.reasoning_effort import gateway_reasoning_effort
-from hyperloom.common.token_usage import uncached_input_tokens
+from hyperloom.common.token_usage import anthropic_usage_counts, openai_usage_counts, sdk_field
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +47,8 @@ class OpenAIClientConfig:
     api_key: str
     base_url: str | None
     default_headers: dict[str, str]
+    # The variable ``default_headers`` was parsed from.
+    headers_env: str
 
     def as_kwargs(self) -> dict[str, object]:
         """Return kwargs accepted by ``openai.AsyncOpenAI``."""
@@ -326,6 +331,11 @@ DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 # The Anthropic Messages API version, defined once for the whole repository.
 DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
 _ANTHROPIC_MESSAGES_PATH = "/v1/messages"
+_ANTHROPIC_MESSAGES_METHOD = "POST"
+# The OpenAI path re-dials through the SDK (``max_retries``); on the Messages path this module owes the same.
+ANTHROPIC_CONNECT_RETRIES = 2
+# Waited before the second dial and doubled before the third, as the SDK's backoff does.
+_ANTHROPIC_CONNECT_BACKOFF_S = 0.5
 
 
 def _is_dual_protocol_host(url: str | None) -> bool:
@@ -454,40 +464,28 @@ def derive_openai_base_url(anthropic_base_url: str | None) -> str | None:
     return base
 
 
-def resolve_openai_client_config(
-    *,
-    api_key_env: str = "OPENAI_API_KEY",
-    base_url_env: str = "OPENAI_BASE_URL",
-    env: dict[str, str] | None = None,
-) -> OpenAIClientConfig:
+def resolve_openai_client_config(*, env: dict[str, str] | None = None) -> OpenAIClientConfig:
     """Resolve OpenAI-compatible client config from one or more LLM env sets."""
     source = env if env is not None else os.environ
-    candidates = tuple(dict.fromkeys((api_key_env, *_OPENAI_CLIENT_KEY_ENV_ORDER)))
-    api_key = _first_set_value(candidates, source)
+    api_key = _first_set_value(_OPENAI_CLIENT_KEY_ENV_ORDER, source)
     if not api_key:
-        raise LLMConfigError(f"{' / '.join(candidates)} not set in env (OpenAI-compatible client cannot auth)")
+        raise LLMConfigError(
+            f"{' / '.join(_OPENAI_CLIENT_KEY_ENV_ORDER)} not set in env (OpenAI-compatible client cannot auth)"
+        )
 
-    explicit_base_url = (source.get(base_url_env) or "").strip() or (source.get("OPENAI_BASE_URL") or "").strip()
+    explicit_base_url = (source.get("OPENAI_BASE_URL") or "").strip()
     derived_base_url = (derive_openai_base_url(source.get("ANTHROPIC_BASE_URL")) or "").strip()
     base_url = explicit_base_url or derived_base_url or None
 
     # Gateway headers are operator-supplied, and they belong to an endpoint rather than to a protocol: AMD's gateway
     # rejects a call without its subscription header, and that header is only ever written to
     # ANTHROPIC_CUSTOM_HEADERS.
-    headers = parse_custom_headers(source.get("OPENAI_CUSTOM_HEADERS"), env=source)
+    headers_env = "OPENAI_CUSTOM_HEADERS"
+    headers = parse_custom_headers(source.get(headers_env), env=source)
     if not headers and not explicit_base_url and derived_base_url:
-        headers = parse_custom_headers(source.get("ANTHROPIC_CUSTOM_HEADERS"), env=source)
-    return OpenAIClientConfig(api_key=api_key, base_url=base_url, default_headers=headers)
-
-
-def openai_client_kwargs(
-    *,
-    api_key_env: str = "OPENAI_API_KEY",
-    base_url_env: str = "OPENAI_BASE_URL",
-    env: dict[str, str] | None = None,
-) -> dict[str, object]:
-    """Return kwargs accepted by ``openai.AsyncOpenAI``."""
-    return resolve_openai_client_config(api_key_env=api_key_env, base_url_env=base_url_env, env=env).as_kwargs()
+        headers_env = "ANTHROPIC_CUSTOM_HEADERS"
+        headers = parse_custom_headers(source.get(headers_env), env=source)
+    return OpenAIClientConfig(api_key=api_key, base_url=base_url, default_headers=headers, headers_env=headers_env)
 
 
 def build_http_timeout(
@@ -520,15 +518,9 @@ def _openai_sdk_client_class(class_name: str) -> object:
     return getattr(openai, class_name)
 
 
-def _openai_sdk_kwargs(
-    *,
-    api_key_env: str,
-    base_url_env: str,
-    env: dict[str, str] | None,
-    timeout: object | None,
-) -> dict[str, object]:
+def _openai_sdk_kwargs(*, env: dict[str, str] | None, timeout: object | None) -> dict[str, object]:
     """Resolve credentials and fold in an optional per-caller ``timeout``."""
-    kwargs = openai_client_kwargs(api_key_env=api_key_env, base_url_env=base_url_env, env=env)
+    kwargs = resolve_openai_client_config(env=env).as_kwargs()
     if timeout is not None:
         kwargs["timeout"] = timeout
     return kwargs
@@ -536,8 +528,6 @@ def _openai_sdk_kwargs(
 
 def get_openai_client(
     *,
-    api_key_env: str = "OPENAI_API_KEY",
-    base_url_env: str = "OPENAI_BASE_URL",
     env: dict[str, str] | None = None,
     timeout: object | None = None,
 ) -> object:
@@ -545,8 +535,6 @@ def get_openai_client(
     factory = _openai_sdk_client_class("OpenAI")
     return factory(  # type: ignore[operator]
         **_openai_sdk_kwargs(
-            api_key_env=api_key_env,
-            base_url_env=base_url_env,
             env=env,
             timeout=timeout,
         )
@@ -555,8 +543,6 @@ def get_openai_client(
 
 def get_async_openai_client(
     *,
-    api_key_env: str = "OPENAI_API_KEY",
-    base_url_env: str = "OPENAI_BASE_URL",
     env: dict[str, str] | None = None,
     timeout: object | None = None,
 ) -> object:
@@ -564,8 +550,6 @@ def get_async_openai_client(
     factory = _openai_sdk_client_class("AsyncOpenAI")
     return factory(  # type: ignore[operator]
         **_openai_sdk_kwargs(
-            api_key_env=api_key_env,
-            base_url_env=base_url_env,
             env=env,
             timeout=timeout,
         )
@@ -581,29 +565,22 @@ def _httpx_module() -> object:
     return httpx
 
 
-def _anthropic_client_kwargs(
-    *,
-    api_key_env: str,
-    base_url_env: str,
-    env: dict[str, str] | None,
-    timeout: object | None,
-) -> dict[str, object]:
+def _anthropic_connect_failures() -> tuple[type[BaseException], ...]:
+    """The ``httpx`` failures that mean nothing was sent, so dialling again cannot duplicate a completion."""
+    httpx = _httpx_module()
+    return (httpx.ConnectError, httpx.ConnectTimeout)  # type: ignore[attr-defined]
+
+
+def _anthropic_client_kwargs(*, env: dict[str, str] | None, timeout: object | None) -> dict[str, object]:
     """Resolve base URL, auth and gateway headers for an Anthropic HTTP client."""
     source = env if env is not None else os.environ
-    api_key = (
-        (source.get(api_key_env) or "").strip()
-        or (source.get("ANTHROPIC_API_KEY") or "").strip()
-        or (source.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
-    )
+    api_key = _first_set_value(ANTHROPIC_SYNTHESIZABLE_KEY_ENVS, source)
     if not api_key:
-        key_names = " / ".join(dict.fromkeys([api_key_env, "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"]))
-        raise LLMConfigError(f"{key_names} not set in env (Anthropic client cannot auth)")
+        raise LLMConfigError(
+            f"{' / '.join(ANTHROPIC_SYNTHESIZABLE_KEY_ENVS)} not set in env (Anthropic client cannot auth)"
+        )
 
-    base_url = (
-        (source.get(base_url_env) or "").strip()
-        or (source.get("ANTHROPIC_BASE_URL") or "").strip()
-        or DEFAULT_ANTHROPIC_BASE_URL
-    ).rstrip("/")
+    base_url = ((source.get("ANTHROPIC_BASE_URL") or "").strip() or DEFAULT_ANTHROPIC_BASE_URL).rstrip("/")
     headers = {
         "x-api-key": api_key,
         "anthropic-version": DEFAULT_ANTHROPIC_VERSION,
@@ -619,8 +596,6 @@ def _anthropic_client_kwargs(
 
 def get_anthropic_client(
     *,
-    api_key_env: str = "ANTHROPIC_API_KEY",
-    base_url_env: str = "ANTHROPIC_BASE_URL",
     env: dict[str, str] | None = None,
     timeout: object | None = None,
 ) -> object:
@@ -628,8 +603,6 @@ def get_anthropic_client(
     httpx = _httpx_module()
     return httpx.Client(  # type: ignore[attr-defined]
         **_anthropic_client_kwargs(
-            api_key_env=api_key_env,
-            base_url_env=base_url_env,
             env=env,
             timeout=timeout,
         )
@@ -638,8 +611,6 @@ def get_anthropic_client(
 
 def get_async_anthropic_client(
     *,
-    api_key_env: str = "ANTHROPIC_API_KEY",
-    base_url_env: str = "ANTHROPIC_BASE_URL",
     env: dict[str, str] | None = None,
     timeout: object | None = None,
 ) -> object:
@@ -647,8 +618,6 @@ def get_async_anthropic_client(
     httpx = _httpx_module()
     return httpx.AsyncClient(  # type: ignore[attr-defined]
         **_anthropic_client_kwargs(
-            api_key_env=api_key_env,
-            base_url_env=base_url_env,
             env=env,
             timeout=timeout,
         )
@@ -769,10 +738,10 @@ def _observe_chat(observation: RequestObservation, resp: object) -> ChatCompleti
     """Fold one chat-completions response onto ``observation``, then flatten it."""
     result = _chat_completion_result(resp)
     observation.update(
-        response_id=_sdk_field(resp, "id"),
-        model=_sdk_field(resp, "model"),
+        response_id=sdk_field(resp, "id"),
+        model=sdk_field(resp, "model"),
         stop_reason=result.finish_reason,
-        usage=_openai_usage_counts(result.usage),
+        usage=openai_usage_counts(result.usage),
     )
     return result
 
@@ -807,44 +776,6 @@ async def achat_completion(
         return _observe_chat(observation, resp)
 
 
-def _sdk_field(obj: object, key: str) -> object:
-    """Read ``key`` off a dict or an attribute-carrying object."""
-    if isinstance(obj, dict):
-        return obj.get(key)
-    return getattr(obj, key, None)
-
-
-def _sdk_token_count(usage: object, key: str) -> int:
-    """Read one ``usage`` counter as a non-negative int; ``0`` when absent, not numeric, or negative."""
-    raw = _sdk_field(usage, key)
-    parsed = _to_int(raw, default=0)
-    return max(0, parsed)  # type: ignore[type-var]
-
-
-def _openai_usage_counts(usage: object) -> dict[str, int]:
-    """An OpenAI ``usage`` as Hyperloom's four counters; ``prompt_tokens`` already includes both cache shares."""
-    if usage is None:
-        return {}
-    cached = _sdk_token_count(_sdk_field(usage, "prompt_tokens_details") or {}, "cached_tokens")
-    created = _sdk_token_count(usage, "cache_creation_input_tokens")
-    return {
-        "input_tokens": uncached_input_tokens(_sdk_token_count(usage, "prompt_tokens"), cached + created),
-        "output_tokens": _sdk_token_count(usage, "completion_tokens"),
-        "cache_read_input_tokens": cached,
-        "cache_creation_input_tokens": created,
-    }
-
-
-def _anthropic_usage_counts(usage: object) -> dict[str, int]:
-    """An Anthropic ``usage``, whose ``input_tokens`` is already the uncached share."""
-    if usage is None:
-        return {}
-    return {
-        key: _sdk_token_count(usage, key)
-        for key in ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
-    }
-
-
 def _anthropic_text_from_content(content: object) -> str:
     """Concatenate the ``text`` blocks of an Anthropic Messages ``content`` array."""
     if not isinstance(content, list):
@@ -866,14 +797,14 @@ class AnthropicMessageResult:
 class AnthropicCompletionRequest:
     """One single-shot Anthropic completion: the Messages body and the time budget it may take.
 
-    ``timeout`` is the HTTP client timeout (``timeout_s`` when unset); the Claude CLI transport uses ``timeout_s``.
+    ``timeout_s`` bounds the whole call on both transports. ``timeout`` is the HTTP client's (``timeout_s`` when unset):
+    it bounds connecting and each wait for the next event of the streamed reply, not the reply as a whole.
     """
 
     model: str
     messages: Sequence[Mapping[str, object]]
     max_tokens: int
     system: str | None = None
-    temperature: float | None = None
     timeout: object | None = None
     timeout_s: float | None = None
 
@@ -886,30 +817,29 @@ class AnthropicCompletionRequest:
         }
         if self.system:
             params["system"] = self.system
-        if self.temperature is not None:
-            params["temperature"] = float(self.temperature)
         return params
 
 
 def _attribution_tag_kwargs(component: str, operation: str = "") -> dict[str, object]:
-    """Build the ``post`` keyword carrying the attribution header, if any."""
+    """Build the request keyword carrying the attribution header, if any."""
     headers = _headers_for(component, operation)
     return {"headers": headers} if headers else {}
 
 
-def _anthropic_message_body(resp: object) -> dict[str, object]:
-    """Check one Messages response for failure and return its JSON object."""
-    status = int(getattr(resp, "status_code", 200) or 200)
-    if status >= 400:
-        detail = str(getattr(resp, "text", ""))[:200]
-        raise RuntimeError(f"anthropic messages status={status} body={detail}")
-    try:
-        body = resp.json()  # type: ignore[attr-defined]
-    except ValueError as exc:
-        raise RuntimeError(f"anthropic messages returned a non-JSON body: {exc!r}") from exc
-    if not isinstance(body, dict):
-        raise RuntimeError(f"anthropic messages returned a non-object JSON body: {type(body).__name__}")
-    return body
+def _observed_messages(
+    component: str, operation: str, params: Mapping[str, object]
+) -> AbstractContextManager[RequestObservation]:
+    return observed_request(
+        protocol=PROTOCOL_ANTHROPIC_MESSAGES,
+        component=component,
+        operation=operation,
+        model=params.get("model"),
+        streamed=True,
+    )
+
+
+def _anthropic_failure(status: int, body: bytes) -> RuntimeError:
+    return RuntimeError(f"anthropic messages status={status} body={body.decode(errors='replace')[:200]}")
 
 
 def _anthropic_body_result(body: Mapping[str, object]) -> AnthropicMessageResult:
@@ -920,17 +850,61 @@ def _anthropic_body_result(body: Mapping[str, object]) -> AnthropicMessageResult
     )
 
 
-def _observe_anthropic(observation: RequestObservation, resp: object) -> AnthropicMessageResult:
-    """Fold one Messages response onto ``observation``, then flatten it."""
-    body = _anthropic_message_body(resp)
+def _observe_anthropic(observation: RequestObservation, body: Mapping[str, object]) -> AnthropicMessageResult:
+    """Fold one Messages reply body onto ``observation``, then flatten it."""
     result = _anthropic_body_result(body)
     observation.update(
         response_id=body.get("id"),
         model=body.get("model"),
         stop_reason=result.stop_reason,
-        usage=_anthropic_usage_counts(result.usage),
+        usage=anthropic_usage_counts(result.usage),
     )
     return result
+
+
+def _dial_anthropic_messages(
+    dial: ExitStack, client: object, params: dict[str, object], tag: dict[str, object], deadline: float | None = None
+) -> object:
+    """Open the Messages stream, dialling again while the connection never came up and ``deadline`` is still ahead."""
+    # httpx re-dials only on its unproxied branch, so the re-dial lives here instead, where both routes pass.
+    connect_failures = _anthropic_connect_failures()
+    delay = _ANTHROPIC_CONNECT_BACKOFF_S
+    body = {**params, "stream": True}
+    for _ in range(ANTHROPIC_CONNECT_RETRIES):
+        try:
+            return dial.enter_context(
+                client.stream(_ANTHROPIC_MESSAGES_METHOD, _ANTHROPIC_MESSAGES_PATH, json=body, **tag)  # type: ignore[union-attr]
+            )
+        except connect_failures:
+            # A dial begun at or past the deadline would send a POST the reader is already bound to drop.
+            if deadline is not None and time.monotonic() + delay >= deadline:
+                raise
+            time.sleep(delay)
+            delay *= 2
+    # The last dial speaks for itself: its failure reaches the caller.
+    return dial.enter_context(
+        client.stream(_ANTHROPIC_MESSAGES_METHOD, _ANTHROPIC_MESSAGES_PATH, json=body, **tag)  # type: ignore[union-attr]
+    )
+
+
+async def _adial_anthropic_messages(
+    dial: AsyncExitStack, client: object, params: dict[str, object], tag: dict[str, object]
+) -> object:
+    """Async twin of :func:`_dial_anthropic_messages`."""
+    connect_failures = _anthropic_connect_failures()
+    delay = _ANTHROPIC_CONNECT_BACKOFF_S
+    body = {**params, "stream": True}
+    for _ in range(ANTHROPIC_CONNECT_RETRIES):
+        try:
+            return await dial.enter_async_context(
+                client.stream(_ANTHROPIC_MESSAGES_METHOD, _ANTHROPIC_MESSAGES_PATH, json=body, **tag)  # type: ignore[union-attr]
+            )
+        except connect_failures:
+            await asyncio.sleep(delay)
+            delay *= 2
+    return await dial.enter_async_context(
+        client.stream(_ANTHROPIC_MESSAGES_METHOD, _ANTHROPIC_MESSAGES_PATH, json=body, **tag)  # type: ignore[union-attr]
+    )
 
 
 def anthropic_messages(
@@ -938,15 +912,24 @@ def anthropic_messages(
     *,
     component: str = "",
     operation: str = "",
+    timeout_s: float | None = None,
     **params: object,
 ) -> AnthropicMessageResult:
-    """POST one Anthropic Messages request; returns text, stop_reason and usage."""
+    """POST one Anthropic Messages request and read its reply as server-sent events; returns text, stop_reason and
+    usage. A streamed reply starts while it is written, so a gateway that cuts a request whose reply has not come does
+    not cut a long one; ``timeout_s`` bounds the whole reply."""
     tag = _attribution_tag_kwargs(component, operation)
-    with observed_request(
-        protocol=PROTOCOL_ANTHROPIC_MESSAGES, component=component, operation=operation, model=params.get("model")
-    ) as observation:
-        resp = client.post(_ANTHROPIC_MESSAGES_PATH, json=params, **tag)  # type: ignore[union-attr]
-        return _observe_anthropic(observation, resp)
+    # Inside the observation: the re-dials belong to the one request the ledger records.
+    with _observed_messages(component, operation, params) as observation:
+        deadline = None if timeout_s is None else time.monotonic() + timeout_s
+        stream = AnthropicStream(observation, deadline)
+        with ExitStack() as dial:
+            resp = _dial_anthropic_messages(dial, client, params, tag, deadline)
+            if resp.status_code >= 400:
+                raise _anthropic_failure(resp.status_code, resp.read())
+            for chunk in resp.iter_bytes():
+                stream.feed(chunk)
+        return _observe_anthropic(observation, stream.finish())
 
 
 async def aanthropic_messages(
@@ -954,15 +937,24 @@ async def aanthropic_messages(
     *,
     component: str = "",
     operation: str = "",
+    timeout_s: float | None = None,
     **params: object,
 ) -> AnthropicMessageResult:
     """Async twin of :func:`anthropic_messages`; see it for the full contract."""
     tag = _attribution_tag_kwargs(component, operation)
-    with observed_request(
-        protocol=PROTOCOL_ANTHROPIC_MESSAGES, component=component, operation=operation, model=params.get("model")
-    ) as observation:
-        resp = await client.post(_ANTHROPIC_MESSAGES_PATH, json=params, **tag)  # type: ignore[union-attr]
-        return _observe_anthropic(observation, resp)
+
+    async def read() -> AnthropicMessageResult:
+        with _observed_messages(component, operation, params) as observation:
+            stream = AnthropicStream(observation)
+            async with AsyncExitStack() as dial:
+                resp = await _adial_anthropic_messages(dial, client, params, tag)
+                if resp.status_code >= 400:
+                    raise _anthropic_failure(resp.status_code, await resp.aread())
+                async for chunk in resp.aiter_bytes():
+                    stream.feed(chunk)
+            return _observe_anthropic(observation, stream.finish())
+
+    return await asyncio.wait_for(read(), timeout_s)
 
 
 # Single-shot Anthropic transports. "http" is the Messages API; "sdk" drives the Claude CLI, the only channel that
@@ -1042,7 +1034,13 @@ def anthropic_completion(
         env=dict(env) if env is not None else None, timeout=request.timeout or request.timeout_s
     )
     with http_client:  # type: ignore[attr-defined]
-        return anthropic_messages(http_client, component=component, operation=operation, **request.http_params())
+        return anthropic_messages(
+            http_client,
+            component=component,
+            operation=operation,
+            timeout_s=request.timeout_s,
+            **request.http_params(),
+        )
 
 
 async def aanthropic_completion(
@@ -1068,7 +1066,13 @@ async def aanthropic_completion(
         env=dict(env) if env is not None else None, timeout=request.timeout or request.timeout_s
     )
     async with http_client:  # type: ignore[attr-defined]
-        return await aanthropic_messages(http_client, component=component, operation=operation, **request.http_params())
+        return await aanthropic_messages(
+            http_client,
+            component=component,
+            operation=operation,
+            timeout_s=request.timeout_s,
+            **request.http_params(),
+        )
 
 
 async def astream_chat_completion_text(
@@ -1099,21 +1103,21 @@ async def astream_chat_completion_text(
                 delta = chunk.choices[0].delta
                 if delta is not None and delta.content:
                     parts.append(delta.content)
-        observation.update(usage=_openai_usage_counts(usage_obj))
+        observation.update(usage=openai_usage_counts(usage_obj))
     return "".join(parts), usage_obj
 
 
 def _observe_stream_chunk(observation: RequestObservation, chunk: object) -> None:
     """Fold one streamed chunk's id, model, first content token and finish reason onto ``observation``."""
-    choices = _sdk_field(chunk, "choices") or []
+    choices = sdk_field(chunk, "choices") or []
     choice = choices[0] if isinstance(choices, list) and choices else None
-    delta = _sdk_field(choice, "delta") if choice is not None else None
-    if delta is not None and _sdk_field(delta, "content"):
+    delta = sdk_field(choice, "delta") if choice is not None else None
+    if delta is not None and sdk_field(delta, "content"):
         observation.mark_first_token()
     observation.update(
-        response_id=_sdk_field(chunk, "id"),
-        model=_sdk_field(chunk, "model"),
-        stop_reason=_sdk_field(choice, "finish_reason") if choice is not None else None,
+        response_id=sdk_field(chunk, "id"),
+        model=sdk_field(chunk, "model"),
+        stop_reason=sdk_field(choice, "finish_reason") if choice is not None else None,
     )
 
 
@@ -1123,6 +1127,7 @@ __all__ = [
     "AGENT_BACKEND_CODEX",
     "AGENT_BACKEND_DEEPSEEK",
     "AGENT_BACKEND_ENV",
+    "ANTHROPIC_CONNECT_RETRIES",
     "ANTHROPIC_CREDENTIAL_ENV_ORDER",
     "ANTHROPIC_SYNTHESIZABLE_KEY_ENVS",
     "ANTHROPIC_TRANSPORT_HTTP",
@@ -1173,7 +1178,6 @@ __all__ = [
     "is_anthropic_only",
     "is_openai_only",
     "openai_agent_credentialed",
-    "openai_client_kwargs",
     "preferred_agent_backend",
     "provider_model_defaults",
     "explicit_agent_backend",

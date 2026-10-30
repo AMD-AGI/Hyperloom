@@ -182,54 +182,6 @@ class StackFingerprint:
 
 
 @dataclass
-class KernelOptimization:
-    """One KEEP'd kernel-optimization outcome — micro result + E2E verdict."""
-
-    kernel_id: str = ""
-    source_file: str = ""
-    artifact_path: str = ""
-    micro_speedup: float = 0.0
-    decision: str = ""
-    e2e_gain_pct: float = 0.0
-    e2e_tput: float = 0.0
-    # Integrate-layer verdict (KEEP / REVERT / NEEDS_REVIEW); ``decision`` above stays the micro-layer KEEP.
-    e2e_decision: str = ""
-    integrated: bool = False
-    ts: str = ""
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialise the kernel-optimization record to a plain dict."""
-        return {
-            "kernel_id": str(self.kernel_id),
-            "source_file": str(self.source_file),
-            "artifact_path": str(self.artifact_path),
-            "micro_speedup": float(self.micro_speedup),
-            "decision": str(self.decision),
-            "e2e_gain_pct": float(self.e2e_gain_pct),
-            "e2e_tput": float(self.e2e_tput),
-            "e2e_decision": str(self.e2e_decision),
-            "integrated": bool(self.integrated),
-            "ts": str(self.ts),
-        }
-
-    @classmethod
-    def from_dict(cls, d: Mapping[str, Any]) -> KernelOptimization:
-        """Build a kernel-optimization record from a dict."""
-        return cls(
-            kernel_id=_text(d, "kernel_id"),
-            source_file=_text(d, "source_file"),
-            artifact_path=_text(d, "artifact_path"),
-            micro_speedup=float(d.get("micro_speedup") or 0.0),
-            decision=_text(d, "decision"),
-            e2e_gain_pct=float(d.get("e2e_gain_pct") or 0.0),
-            e2e_tput=float(d.get("e2e_tput") or 0.0),
-            e2e_decision=_text(d, "e2e_decision"),
-            integrated=bool(d.get("integrated") or False),
-            ts=_text(d, "ts"),
-        )
-
-
-@dataclass
 class SessionSummary:
     """One optimisation-session entry — one row per CLOSE."""
 
@@ -285,9 +237,6 @@ class Recipe:
     stack_fingerprint: StackFingerprint = field(default_factory=StackFingerprint)
     sessions: list[SessionSummary] = field(default_factory=list)
 
-    # ----- hyperloom superset: KEEP'd kernel optimizations ----- Kernel-level wins + their E2E verification outcome.
-    kernel_optimizations: list[KernelOptimization] = field(default_factory=list)
-
     # ----- v2 audit / wire-compat fields -----
     authority: str = "EXPERIENTIAL"
     confidence: float = 0.85
@@ -330,7 +279,6 @@ class Recipe:
                 }
                 for s in self.sessions
             ],
-            "kernel_optimizations": [k.to_dict() for k in self.kernel_optimizations],
             "authority": str(self.authority),
             "confidence": float(self.confidence),
             "evidence_refs": list(self.evidence_refs),
@@ -369,7 +317,6 @@ class Recipe:
             "last_profiled",
             "stack_fingerprint",
             "sessions",
-            "kernel_optimizations",
             "authority",
             "confidence",
             "evidence_refs",
@@ -403,7 +350,6 @@ class Recipe:
                 d.get("stack_fingerprint") or {},
             ),
             sessions=_rows(d, "sessions", SessionSummary.from_dict),
-            kernel_optimizations=_rows(d, "kernel_optimizations", KernelOptimization.from_dict),
             authority=_text(d, "authority") or "EXPERIENTIAL",
             confidence=float(d.get("confidence") or 0.85),
             evidence_refs=list(d.get("evidence_refs") or []),
@@ -414,7 +360,6 @@ class Recipe:
 
 __all__ = [
     "Gap",
-    "KernelOptimization",
     "Lesson",
     "Pitfall",
     "Recipe",

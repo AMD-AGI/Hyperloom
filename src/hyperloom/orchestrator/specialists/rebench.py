@@ -19,8 +19,11 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.perf_metric import constraint_fields
-from ..actions.executors._grid_runner import GridVariant, run_grid
+from ..actions.executors._grid_runner import GridLaunch, GridRecipe, GridStop, GridVariant, run_grid
 from ..actions.executors._workload_envs import (
+    BenchmarkTarget,
+    LaunchLayer,
+    MaterializeOptions,
     default_baseline_config,
 )
 
@@ -91,13 +94,16 @@ async def run_specialist_rebench(
     resolved_port = _resolve_port(server.port)
 
     base_config = Path(benchmark.config_path) if benchmark.config_path else Path(default_baseline_config())
-    materialized = prepare_grid_benchmark_config(
-        base_config,
-        out_root,
+    target = BenchmarkTarget(
         model_path=benchmark.model_path or None,
         gpu_type=benchmark.gpu_type or None,
         benchmark_script=benchmark.benchmark_script or None,
-        out_name="specialist_rebench.with_envs.yaml",
+    )
+    materialized = prepare_grid_benchmark_config(
+        base_config,
+        out_root,
+        target=target,
+        options=MaterializeOptions(out_name="specialist_rebench.with_envs.yaml"),
     )
 
     variant = GridVariant(
@@ -119,19 +125,18 @@ async def run_specialist_rebench(
     warnings: list[str] = []
     try:
         results = await run_grid(
-            base_yaml_path=materialized,
-            base_extra_args=(server.base_extra_args or "").strip(),
             grid=[variant],
             output_root=out_root,
-            keep_going_on_failure=False,
-            model_path=benchmark.model_path or None,
-            gpu_type=benchmark.gpu_type or None,
-            benchmark_script=benchmark.benchmark_script or None,
-            magpie_python=benchmark.magpie_python or None,
-            server_lifecycle=server_lifecycle,
+            recipe=GridRecipe(
+                base_yaml_path=materialized,
+                base=LaunchLayer(extra_server_args=(server.base_extra_args or "").strip()),
+                target=target,
+            ),
+            launch=GridLaunch(magpie_python=benchmark.magpie_python or None, server_lifecycle=server_lifecycle),
+            stop=GridStop(keep_going_on_failure=False),
         )
-    except Exception as exc:  # noqa: BLE001 — surface as a structured failure
-        log.warning("specialist rebench failed: %s", exc)
+    except Exception as exc:  # outermost CLI command: the failure is printed as an ok=false result
+        log.warning("specialist rebench failed: %s", exc, exc_info=True)
         return {
             "ok": False,
             "error": repr(exc),

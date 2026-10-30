@@ -13,7 +13,6 @@ from importlib.resources import files
 from typing import Any, Mapping
 
 _CONTRACT_PACKAGE = "hyperloom.inference_optimizer.breakdown"
-CURRENT_WORKFLOW_CONTRACT_VERSION = "hyperloom.workflow_evaluation.v3"
 _CONTRACT_PATH = "contracts/workflow_contract.v3.json"
 _SCHEMA_PATH = "contracts/session_breakdown.v6.workflow-evaluation.v3.schema.json"
 
@@ -29,15 +28,10 @@ def workflow_contract() -> dict[str, Any]:
     return deepcopy(_load_workflow_contract())
 
 
-def canonical_contract_bytes(contract: Mapping[str, Any] | None = None) -> bytes:
-    """Serialize a contract with the documented digest canonicalization."""
-    payload = dict(_load_workflow_contract() if contract is None else contract)
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-
-
 def workflow_contract_digest() -> str:
-    """Return the SHA-256 hex identity of the packaged contract."""
-    return hashlib.sha256(canonical_contract_bytes()).hexdigest()
+    """Return the SHA-256 hex identity of the packaged contract, over its documented canonicalization."""
+    canonical = json.dumps(_load_workflow_contract(), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def workflow_metadata(run_flags: Mapping[str, Any]) -> dict[str, Any]:
@@ -90,8 +84,6 @@ def event_semantics(event_type: str, status: str, ext: Mapping[str, Any] | None)
 
 
 __all__ = [
-    "CURRENT_WORKFLOW_CONTRACT_VERSION",
-    "canonical_contract_bytes",
     "event_semantics",
     "workflow_contract",
     "workflow_contract_digest",

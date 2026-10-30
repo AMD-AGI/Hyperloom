@@ -10,10 +10,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import KernelExit
+from hyperloom.common.overlay import overlay_is_loadable
 from hyperloom.orchestrator.kernel.geak_config import (
     _geak_accepted_kernel_specs,
     _geak_overlay_digest,
-    geak_overlay_is_loadable,
     geak_spec_name,
 )
 from hyperloom.orchestrator.phases.kernel import KernelPhase
@@ -135,7 +136,7 @@ def test_manifest_that_is_not_an_object_is_not_loadable(tmp_path: Path) -> None:
     root.mkdir()
     (root / "sitecustomize.py").write_text("# loads\n")
     (root / "_overlay_manifest.json").write_text(json.dumps(["rebinds"]))
-    assert geak_overlay_is_loadable(str(root)) is False
+    assert overlay_is_loadable(str(root)) is False
 
 
 def test_unparseable_manifest_still_digests_its_bytes(tmp_path: Path) -> None:
@@ -184,8 +185,6 @@ def test_single_kernel_with_a_loaded_overlay_is_attributable() -> None:
     entry = phase.shared_state.kernel_integrate_attempts["_mxfp8_linear_kernel"]
     assert entry["validated"] is True
     assert entry["best_gain_pct"] == 20.0  # orchestrator rebench, not GEAK's 13.87
-    assert entry["geak_same_config_delta_pct"] == 13.87
-    assert entry["geak_isolated_speedup"] == 2.39
     assert entry["source"] == "geak_e2e"
     assert entry["basis"] == "cold"
     assert entry["alignment_status"] == "aligned"
@@ -245,7 +244,7 @@ def test_a_second_promotion_appends_rather_than_replaces() -> None:
 
 
 def test_best_gain_is_the_max_over_attempts_not_the_last_one() -> None:
-    # ``_kernel_decisions.py`` writes ``best_gain_pct`` as a max; this writer must agree.
+    # ``kernel_decisions.py`` writes ``best_gain_pct`` as a max; this writer must agree.
     phase = _phase()
     result = {"accepted_kernels": [_spec("k", 5.0)]}
     _record(phase, result, measured_tput=150.0)  # +50%
@@ -290,7 +289,7 @@ def test_a_geak_adoption_reaches_the_kernel_events_integrate_ledger(tmp_path: Pa
         recorder = make_kernel_recorder(macro_cycle=3, route=ROUTE_GEAK)
         assert recorder is not None
         recorder.begin(tput_before=100.0)
-        recorder.finish(tput_after=120.0)
+        recorder.finish(KernelExit(tput_after=120.0))
 
         _record(
             _phase(),
@@ -325,7 +324,7 @@ def test_an_unattributable_geak_adoption_says_so_on_the_timeline(tmp_path: Path)
         recorder = make_kernel_recorder(macro_cycle=3, route=ROUTE_GEAK)
         assert recorder is not None
         recorder.begin(tput_before=100.0)
-        recorder.finish(tput_after=120.0)
+        recorder.finish(KernelExit(tput_after=120.0))
 
         _record(
             _phase(),

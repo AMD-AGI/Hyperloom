@@ -13,6 +13,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable
 
+from hyperloom.common.coerce import optional_positive_float, to_int
 from hyperloom.common.io import WriteOptions, atomic_write_text
 from hyperloom.common.jsonio import read_json
 from hyperloom.common.timeutil import now_iso
@@ -74,29 +75,6 @@ KIND_GEMM_TUNING: str = "gemm_tuning"  # adopted GEMM-tuning run (GEAK / forge)
 KIND_OTHER: str = "other"
 
 
-def _optional_int(value: Any) -> int | None:
-    """Coerce a value to int, or ``None`` on absence / bad type."""
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _measured_float(value: Any) -> float | None:
-    """Coerce a measurement to float, or ``None`` when nothing was measured.
-
-    A non-positive throughput is the sentinel of an unanchored run, so it reads
-    as absent rather than as a reading a consumer can divide by.
-    """
-    try:
-        measured = float(value)
-    except (TypeError, ValueError):
-        return None
-    return measured if measured > 0 else None
-
-
 @dataclass
 class JournalEntry:
     """One settled decision row (``None`` distinguishes "not measured" from "measured zero")."""
@@ -155,7 +133,7 @@ class JournalEntry:
             scope=str(d.get("scope", "")),
             fingerprint=str(d.get("fingerprint", "")),
             metrics=dict(d.get("metrics") or {}),
-            tick=_optional_int(d.get("tick")),
+            tick=to_int(d.get("tick")),
             lever_kind=str(d.get("lever_kind", "")),
         )
 
@@ -204,8 +182,8 @@ class Journal:
             model=str(blob.get("model") or fresh.model),
             hardware=str(blob.get("hardware") or fresh.hardware),
             framework=str(blob.get("framework") or fresh.framework),
-            baseline_throughput=_measured_float(blob.get("baseline_throughput"))
-            or _measured_float(fresh.baseline_throughput),
+            baseline_throughput=optional_positive_float(blob.get("baseline_throughput"))
+            or optional_positive_float(fresh.baseline_throughput),
             final_throughput=blob.get("final_throughput"),
             total_gain_pct=blob.get("total_gain_pct"),
             entries=_entries_of(blob),
@@ -240,7 +218,7 @@ class Journal:
 
     def update_baseline(self, baseline_throughput: float | None) -> None:
         """Late-binding setter for the baseline measurement (no-op when nothing was measured, so an unanchored run cannot erase a real value)."""
-        measured = _measured_float(baseline_throughput)
+        measured = optional_positive_float(baseline_throughput)
         if measured is not None:
             self.baseline_throughput = measured
             self._flush()

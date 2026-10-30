@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
 import sys
 from concurrent.futures import CancelledError
@@ -150,6 +151,115 @@ async def test_specialist_scope_cancel_stops_before_harvest(monkeypatch, tmp_pat
         if run is not None:
             run.cancel()
             await asyncio.gather(run, return_exceptions=True)
+
+
+class _SameUidRunAs:
+    """A demoted launch whose account is the test's own uid, so no privilege is needed to run it."""
+
+    user = "specialist"
+    uid = os.getuid()
+
+    def command(self, cmd):
+        return list(cmd)
+
+    def popen_kwargs(self):
+        return {}
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="procfs is Linux-only")
+@pytest.mark.skipif(os.getuid() == 0, reason="pid 1 has to belong to another uid")
+def test_demoted_reap_signals_only_pids_the_specialist_account_owns(monkeypatch):
+    """The account can write into the scan's stdout, so a pid it prints is believed only if that account owns it."""
+    from hyperloom.common.proctree import Tree
+
+    own = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    roots: list[list[int]] = []
+    monkeypatch.setattr(ss, "_LIST_MARKED_SCRIPT", f"echo 1; echo {own.pid}")
+    monkeypatch.setattr(ss, "collect_tree", lambda pids: roots.append(list(pids)) or Tree((), (), frozenset()))
+    monkeypatch.setattr(ss, "kill_tree", lambda tree: True)
+    try:
+        SpecialistSubprocessDispatcher._reap_marked("mark", _SameUidRunAs())
+    finally:
+        own.kill()
+        own.wait(timeout=5)
+    assert roots == [[own.pid]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform == "win32", reason="procfs is Linux-only")
+@pytest.mark.parametrize("demoted", [False, True], ids=["app_user", "demoted"])
+async def test_natural_exit_reaps_detached_descendant(monkeypatch, tmp_path, demoted):
+    """A heartbeat loop detached before the CLI exits does not outlive the specialist; another run's loop does."""
+    import os
+    import signal
+    import time
+    from hyperloom.common.proctree import running
+
+    pid_path = tmp_path / "heartbeat.pid"
+    child_code = (
+        "import pathlib, subprocess, sys\n"
+        f"pathlib.Path({str(pid_path)!r}).write_text(subprocess.run("
+        "['sh','-c','setsid nohup \"$0\" -c \"$1\" </dev/null >/dev/null 2>&1 & echo $!',"
+        "sys.executable,'import time; time.sleep(300)'],"
+        "capture_output=True,text=True,check=True).stdout.strip())\n"
+    )
+    real_popen = ss.subprocess.Popen
+
+    def spawn(cmd, *args, **kwargs):
+        if cmd != ["unused"]:
+            return real_popen(cmd, *args, **kwargs)
+        child = real_popen(
+            [sys.executable, "-c", child_code],
+            env=kwargs["env"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        child.wait(timeout=5)
+        return child
+
+    monkeypatch.setattr(ss.subprocess, "Popen", spawn)
+    if demoted:
+        monkeypatch.setattr(ss, "resolve_launch_user", lambda lease: _SameUidRunAs())
+        monkeypatch.setattr(ss, "prepare_demote", lambda *args: {})
+        # The app's uid cannot read a demoted child's environ.
+        monkeypatch.setattr(ss, "marked_pids", lambda key, value: [])
+    dispatcher = SpecialistSubprocessDispatcher(
+        ss.SpecialistSubprocessConfig(agent_backend="claude", poll_interval_seconds=0.05)
+    )
+    monkeypatch.setattr(dispatcher, "_build_claude_cmd", lambda **kw: ["unused"])
+    monkeypatch.setattr(dispatcher, "_collect_patches", lambda *args, **kwargs: ([], {}))
+    bystander = real_popen(
+        [sys.executable, "-c", "import time; time.sleep(300)"],
+        env={**os.environ, "HYPERLOOM_REAP_MARK": "another-run"},
+        start_new_session=True,
+    )
+    heartbeat_pid = 0
+    try:
+        result = await dispatcher.run(
+            SpecialistSpawn(
+                task_id="detached-heartbeat",
+                workspace=tmp_path,
+                worktree=None,
+                worktree_base=None,
+                system_prompt="system",
+                user_prompt="user",
+                max_turns=1,
+            )
+        )
+        deadline = time.monotonic() + 5
+        while not pid_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        heartbeat_pid = int(pid_path.read_text())
+        assert result.exit_code == 0
+        assert running(heartbeat_pid) is False
+        assert running(bystander.pid) is True
+    finally:
+        if heartbeat_pid and running(heartbeat_pid):
+            os.kill(heartbeat_pid, signal.SIGKILL)
+        bystander.kill()
+        bystander.wait(timeout=5)
 
 
 def test_kill_exited_root_cannot_confirm_descendants(monkeypatch):
