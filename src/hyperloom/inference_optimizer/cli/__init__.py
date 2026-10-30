@@ -1728,8 +1728,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # Expose active session_dir to in-process executors via the canonical pin env var; reinforced here for resume
     # paths.
     os.environ["INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR"] = str(session_dir)
-    # Production: enable strict PolicyGate path-containment (escaping intents land as policy_denied).
-    os.environ["INFERENCE_OPTIMIZER_STRICT_PATHS"] = "1"
     # --reset-state backs up state.json and starts blank, before Coordinator is constructed.
     if getattr(args, "reset_state", False):
         _reset_state_file(session_dir, framework=state.framework)

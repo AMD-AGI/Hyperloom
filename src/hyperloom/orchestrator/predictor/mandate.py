@@ -44,13 +44,11 @@ def find_mandate(state: SessionView, mandate_id: Any) -> str:
     return str(rounds[-1].get("mandate") or "") if rounds else ""
 
 
-def mark_mandate_consumed(state: SessionView, mandate_id: Any, task_id: str) -> bool:
+def mark_mandate_consumed(state: SessionView, mandate_id: Any, task_id: str) -> None:
     """Stop offering a mandate once a specialist task exists for it; the first task keeps the credit."""
-    rounds = _rounds_citing(state, mandate_id)
-    for entry in rounds:
+    for entry in _rounds_citing(state, mandate_id):
         if not entry.get("mandate_consumed_by"):
             entry["mandate_consumed_by"] = str(task_id)
-    return bool(rounds)
 
 
 def open_mandate(state: SessionView) -> dict[str, str]:

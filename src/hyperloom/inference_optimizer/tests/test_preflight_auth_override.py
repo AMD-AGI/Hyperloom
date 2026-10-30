@@ -1199,9 +1199,7 @@ def test_ensure_ray_skips_when_smoke_passes(monkeypatch, capsys):
     assert len(runner.calls) == 1
     probe = runner.calls[0]
     # Probe validates Ray with the SAME interpreter, not shutil.which on PATH.
-    assert probe[0:2] == ["/opt/venv/bin/python", "-c"]
-    assert "ray.__version__" in probe[2]
-    assert "ray.scripts.scripts" in probe[2]
+    assert probe[0:2] == ["/opt/venv/bin/python", str(cli_preflight._RAY_SMOKE_SCRIPT)]
     assert "ray OK" in capsys.readouterr().out
 
 

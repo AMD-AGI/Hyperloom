@@ -24,7 +24,12 @@ from ..state.round_store import (
     RoundStore,
 )
 from ..state.task_registry import TERMINAL_STATES, Task, TaskNotFound, TaskRegistry
-from hyperloom.inference_optimizer.trace.trajectory_trace import EVENT_PROPOSAL, STATUS_CANCELLED, record_event
+from hyperloom.inference_optimizer.trace.trajectory_trace import (
+    EVENT_PROPOSAL,
+    STATUS_CANCELLED,
+    EventSpan,
+    record_event,
+)
 from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
 
 log = logging.getLogger(__name__)
@@ -260,8 +265,7 @@ class Reconciler:
         action_name = str(getattr(pending, "action_name", "") or "") or None
         record_event(
             EVENT_PROPOSAL,
-            status=STATUS_CANCELLED,
-            span_id=msg_id,
+            span=EventSpan(span_id=msg_id, status=STATUS_CANCELLED),
             attributes={
                 "name": action_name,
                 "action_name": action_name,

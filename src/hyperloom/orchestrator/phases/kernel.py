@@ -544,7 +544,7 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
     async def on_enter_kernel(self, tr: "Transition") -> None:
         """Open the KERNEL timeline and enqueue the ``kernel_agent`` task that carries the phase's work."""
         state = self.shared_state
-        if not self._coord.phase_machine.kernel_enabled():
+        if not state.kernel_enabled:
             log.info(
                 "KERNEL entry hook fired with kernel_enabled=False (from=%s)",
                 tr.from_phase or "<unknown>",

@@ -84,6 +84,16 @@ def _schema_ref(value: Any) -> str:
 
 
 @dataclass(frozen=True)
+class ResultShape:
+    """How a read ranks the groups it recalled, which member stands for each, and how many and how much it renders."""
+
+    ranking_policy_ref: str = "group-key@v1"
+    representative_policy: RepresentativePolicy = RepresentativePolicy.MATCHED_FIRST
+    max_groups: int = 20
+    render_budget_chars: int | None = 4_000
+
+
+@dataclass(frozen=True)
 class RetrievalConfiguration:
     configuration_id: str
     schema_ref: str
@@ -143,14 +153,11 @@ class RetrievalConfiguration:
         schema_ref: str,
         policy_version: str,
         *,
-        capabilities: tuple[RetrievalCapability, ...] = tuple(RetrievalCapability),
         limits: Mapping[RetrievalCapability, int] | None = None,
         provider_refs: Mapping[RetrievalCapability, str] | None = None,
-        ranking_policy_ref: str = "group-key@v1",
-        representative_policy: RepresentativePolicy = RepresentativePolicy.MATCHED_FIRST,
-        max_groups: int = 20,
-        render_budget_chars: int | None = 4_000,
+        shape: ResultShape = ResultShape(),
     ) -> RetrievalConfiguration:
+        capabilities = tuple(RetrievalCapability)
         normalized_limits = dict(limits or dict.fromkeys(RetrievalCapability, 20))
         normalized_providers = dict(provider_refs or {})
         manifest: dict[str, JsonValue] = {
@@ -172,10 +179,10 @@ class RetrievalConfiguration:
                     key=lambda item: item[0].value,
                 )
             },
-            "ranking_policy_ref": ranking_policy_ref,
-            "representative_policy": representative_policy.value,
-            "max_groups": max_groups,
-            "render_budget_chars": render_budget_chars,
+            "ranking_policy_ref": shape.ranking_policy_ref,
+            "representative_policy": shape.representative_policy.value,
+            "max_groups": shape.max_groups,
+            "render_budget_chars": shape.render_budget_chars,
         }
         return cls(
             configuration_id=_config_id(manifest),
@@ -184,10 +191,10 @@ class RetrievalConfiguration:
             capabilities=capabilities,
             limits=normalized_limits,
             provider_refs=normalized_providers,
-            ranking_policy_ref=ranking_policy_ref,
-            representative_policy=representative_policy,
-            max_groups=max_groups,
-            render_budget_chars=render_budget_chars,
+            ranking_policy_ref=shape.ranking_policy_ref,
+            representative_policy=shape.representative_policy,
+            max_groups=shape.max_groups,
+            render_budget_chars=shape.render_budget_chars,
         )
 
     def to_manifest(self) -> dict[str, JsonValue]:
@@ -444,6 +451,7 @@ __all__ = [
     "RETRIEVAL_POLICY_VERSION",
     "LexicalFuzzyProvider",
     "RepresentativePolicy",
+    "ResultShape",
     "RetrievalConfiguration",
     "RetrievalPolicyError",
 ]

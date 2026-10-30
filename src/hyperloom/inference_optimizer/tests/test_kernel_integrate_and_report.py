@@ -570,7 +570,7 @@ async def test_gemm_paired_materializes_each_frozen_recipe_controls(
     )
 
     assert verdict is not None
-    assert verdict.pairs == [(100.0, 110.0), (100.0, 110.0)]
+    assert verdict.median_delta_pct == 10.0 and verdict.reason == "candidate_faster"
     assert len(payloads) == len(benchmarks) == 4
     for idx, (payload, benchmark) in enumerate(zip(payloads, benchmarks)):
         recipe = reference if idx % 2 == 0 else candidate

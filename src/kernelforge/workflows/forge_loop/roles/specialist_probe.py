@@ -18,6 +18,7 @@ from pathlib import Path
 import time
 from typing import Any, Awaitable, Callable
 
+from kernelforge.evaluation.benchmark.runner import SWEEP_BENCH_ITERS, SWEEP_WARMUP_ITERS, BenchRun
 from kernelforge.utils.file_lock import locked_json_state, release_lock, try_lock_exclusive
 
 log = logging.getLogger(__name__)
@@ -43,7 +44,7 @@ PRIMITIVE_ATTR = "sweep_case"
 PRIMITIVE_PATH = f"{PRIMITIVE_MODULE}.{PRIMITIVE_ATTR}"
 # The keywords the probe calls the primitive with.
 PRIMITIVE_KEYWORDS = (
-    "driver_script",
+    "bench",
     "case_id",
     "constants",
     "timeout_sec",
@@ -393,7 +394,7 @@ async def probe_variant(
     base["driver_script"] = str(driver)
     run = partial(
         primitive,
-        driver_script=str(driver),
+        bench=BenchRun(str(driver), warmup_iters=SWEEP_WARMUP_ITERS, bench_iters=SWEEP_BENCH_ITERS),
         case_id=case_id,
         constants=dict(constants),
         prefix_constants=prefix_constants,

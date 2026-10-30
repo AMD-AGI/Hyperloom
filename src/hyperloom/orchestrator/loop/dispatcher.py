@@ -36,9 +36,9 @@ from ..actions.executors._subprocess_kill import (
 from ..phases import dispatch_order, machine_state as _phase_state
 from ..bus.message_bus import Message
 from ..kernel.request_handlers import KERNEL_REQUEST_HANDLERS
+from ..policy.denial import PolicyDenied
 from ..policy.gate import (
     INTEGRATE_PATCH_PERMISSIVE_VERDICTS,
-    PolicyDenied,
     SPECIALIST_FROM_AGENT_PREFIX,
 )
 from ..policy.projection import serving_tp_for_policy

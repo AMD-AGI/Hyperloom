@@ -19,10 +19,10 @@ from hyperloom.inference_optimizer.protocol.intent import (
 )
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_OWNED_KERNEL_REQUEST_KINDS,
-)
-from hyperloom.orchestrator.policy.gate import (
     KERNEL_AGENT_OWNED_ACTIONS,
-    PolicyDenied,
+)
+from hyperloom.orchestrator.policy.denial import PolicyDenied
+from hyperloom.orchestrator.policy.gate import (
     PolicyGate,
     REQUEST_ROUTING,
     REVIEW_VERDICT_SOURCE_ALLOWLIST,

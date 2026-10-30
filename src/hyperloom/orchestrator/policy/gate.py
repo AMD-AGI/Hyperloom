@@ -25,14 +25,12 @@ from hyperloom.inference_optimizer.framework_paths import (
     resolved_within,
 )
 from hyperloom_common.coerce import first_text
-from hyperloom_common.env import env_bool
 from hyperloom.common.framework_arm import verdict_subject
 from hyperloom.common.visible_devices import detect_gpu_count
 from hyperloom.inference_optimizer.protocol.intent import ALLOWED_VERDICTS, EXTEND_LEASE_MAX_SEC, Intent, IntentType
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
     COORDINATOR_OWNED_KERNEL_REQUEST_KINDS,
-    KERNEL_AGENT_OWNED_ACTIONS,
 )
 from ..mcp_tool_names import agent_tool_grant, qualified_context_tool_name
 from .projection import (
@@ -124,9 +122,9 @@ SPECIALIST_FREEFORM_TASK_DESC_MAX_CHARS: int = 8000
 SPECIALIST_FROM_AGENT_PREFIX: str = "specialist:"
 
 
-# R5 — external tool whitelist registry (single source of truth for PolicyGate + SpecialistRunner).
+# R5 — external tool names no gated role may invoke as an action name.
 
-#: PR Monitor *readonly* surfaces. R5 same role gating.
+#: PR Monitor *readonly* surfaces.
 PR_MONITOR_TOOL_NAMES: frozenset[str] = frozenset(
     {
         "mcp__pr_monitor__pr_repos_list",
@@ -144,22 +142,9 @@ PR_MONITOR_TOOL_NAMES: frozenset[str] = frozenset(
     }
 )
 
-#: Web tools. R5 — specialist-only in this map (other roles get ``tool_whitelist_role``);
-#: usable in any phase. Note :meth:`PolicyGate.allowed_tools_for_agent` separately grants
-#: ``WebSearch`` / ``WebFetch`` to the orchestration agent.
+#: Web tools. :meth:`PolicyGate.allowed_tools_for_agent` grants them to the
+#: orchestration agent as tools, never as action names.
 WEB_TOOL_NAMES: frozenset[str] = frozenset({"WebSearch", "WebFetch"})
-
-#: Role→allowed-toolset map (R5). Only the specialist sub-agent may invoke PR Monitor / web
-#: tools as an action name.
-TOOL_WHITELIST_BY_ROLE: dict[str, frozenset[str]] = {
-    "specialist": (WEB_TOOL_NAMES | PR_MONITOR_TOOL_NAMES),
-    # Empty sets listed explicitly so a role-name typo is a key error, not a silent allow.
-    "orchestration": frozenset(),
-    "critic": frozenset(),
-}
-
-#: Convenience superset of every known external tool name (R5 collision check).
-ALL_KNOWN_EXTERNAL_TOOL_NAMES: frozenset[str] = PR_MONITOR_TOOL_NAMES | WEB_TOOL_NAMES
 
 
 # REQUEST routing matrix: source role → allowed target_agents (only orchestration→kernel).
@@ -249,22 +234,15 @@ TRACE_PATH_LIKE_FIELDS: frozenset[str] = frozenset(
 class PolicyGate:
     """Validate every intent emitted by an agent reactor.
 
-    ``strict_paths`` (or ``$INFERENCE_OPTIMIZER_STRICT_PATHS=1``) requires
-    PATH_LIKE_FIELDS to resolve under session_dir.
+    With a ``session_dir``, PATH_LIKE_FIELDS must resolve under it.
     """
 
     role_registry: dict[str, "AgentRole"]
     session_dir: Path | None = None
-    strict_paths: bool = False
     shared_state: Any | None = None
     # Default-constructed, the three resource rules refuse nothing and every
     # attempt goes straight to its acquire.
     resources: ResourceFacts = field(default_factory=ResourceFacts)
-
-    def __post_init__(self) -> None:
-        """Apply the ``INFERENCE_OPTIMIZER_STRICT_PATHS`` override."""
-        if not self.strict_paths and env_bool("INFERENCE_OPTIMIZER_STRICT_PATHS"):
-            self.strict_paths = True
 
     # Public API
     def validate_intent(self, from_agent: str, intent: Intent) -> None:
@@ -355,7 +333,7 @@ class PolicyGate:
         # Coordinator-dispatched internal actions get path checks only.
         if kind in COORDINATOR_INTERNAL_ACTIONS:
             return
-        self._validate_delegate_body(role, payload, check_source=False, task_id=task_id)
+        self._validate_delegate(role, payload, check_source=False, task_id=task_id)
 
     def allowed_tools_for_agent(self, agent_name: str) -> list[str]:
         """Return the Claude tool list a reactor may use (Codex → []; Claude → emit_intent; orchestration also gets context-pull tools + sandboxed Read + web search).
@@ -380,31 +358,7 @@ class PolicyGate:
         return agent_tool_grant(agent_name)
 
     # Per-intent validators
-    def _validate_delegate(self, role: "AgentRole", payload: dict[str, Any]) -> None:
-        """Validate a ``DELEGATE`` intent against the full delegate rule set.
-
-        Enforces, in order: the role's ``can_delegate_side_effects``
-        capability, presence of ``action_name``, the
-        kernel_agent-owned-action guard, the per-action specialised paths
-        (``specialist`` / ``integrate_patch`` / ``sweep``), the GEMM-tuning
-        ownership gate, per-action source and required-payload guards,
-        and the external-tool collision guard (R5).
-
-        Args:
-            role (AgentRole): the resolved role of the emitting agent.
-            payload (dict[str, Any]): the delegate intent payload, expected
-                to carry ``action_name`` and optional ``params``.
-
-        Returns:
-            None: returns silently when the delegate is permitted.
-
-        Raises:
-            PolicyDenied: if any delegate rule fails; the ``rule``
-                attribute identifies which guard fired.
-        """
-        self._validate_delegate_body(role, payload)
-
-    def _validate_delegate_body(
+    def _validate_delegate(
         self,
         role: "AgentRole",
         payload: dict[str, Any],
@@ -433,7 +387,7 @@ class PolicyGate:
         if not action_name:
             raise PolicyDenied("delegate intent missing action_name", rule="payload")
         if check_source:
-            deny_search_under_custom_only(getattr(self, "shared_state", None), action_name)
+            deny_search_under_custom_only(self.shared_state, action_name)
         # ``specialist`` bypasses the catalogue; ``_validate_specialist_dispatch`` owns its contract.
         if action_name == SPECIALIST_ACTION_NAME:
             params = payload.get("params")
@@ -453,11 +407,7 @@ class PolicyGate:
         if check_source:
             self._validate_coordinator_managed_action(action_name, intent_kind="delegate")
         # R5 — block a delegate whose action_name invokes an external tool.
-        self._validate_tool_whitelist_collision(
-            role.name,
-            action_name,
-            intent_kind="delegate",
-        )
+        self._validate_tool_whitelist_collision(role.name, action_name)
 
     def _validate_propose_action(self, role: "AgentRole", payload: dict[str, Any]) -> None:
         """Validate a ``PROPOSE_ACTION`` intent (the advisory channel).
@@ -482,16 +432,12 @@ class PolicyGate:
         action_name = str(payload.get("action_name", "")).strip()
         if not action_name:
             raise PolicyDenied("propose_action missing action_name", rule="payload")
-        deny_search_under_custom_only(getattr(self, "shared_state", None), action_name)
+        deny_search_under_custom_only(self.shared_state, action_name)
         self._validate_coordinator_managed_action(action_name, intent_kind="propose_action")
         self._validate_baseline_not_mid_round(action_name)
         self._validate_gemm_tuning_action(action_name, intent_kind="propose_action")
         # R5 — defense in depth on propose_action.
-        self._validate_tool_whitelist_collision(
-            role.name,
-            action_name,
-            intent_kind="propose_action",
-        )
+        self._validate_tool_whitelist_collision(role.name, action_name)
 
     def _validate_coordinator_managed_action(self, action_name: str, *, intent_kind: str) -> None:
         """Deny an agent-initiated copy of an action the Coordinator dispatches itself.
@@ -598,11 +544,7 @@ class PolicyGate:
             )
         self._validate_gemm_tuning_action(kind, intent_kind="request")
         # R5 — a REQUEST.kind cannot smuggle an external tool either.
-        self._validate_tool_whitelist_collision(
-            role.name,
-            kind,
-            intent_kind="request",
-        )
+        self._validate_tool_whitelist_collision(role.name, kind)
 
     def _validate_review_verdict(self, role: "AgentRole", payload: dict[str, Any]) -> None:
         """Validate a ``REVIEW_VERDICT`` intent (Critic-only).
@@ -713,32 +655,18 @@ class PolicyGate:
         )
 
     # R5 — tool_whitelist_role
-    def _validate_tool_whitelist_collision(
-        self,
-        role_name: str,
-        action_name: str,
-        *,
-        intent_kind: str,
-    ) -> None:
-        """Reject an external tool name not on the caller's role whitelist (:data:`TOOL_WHITELIST_BY_ROLE` grants PR Monitor + web tools to ``specialist`` only).
+    def _validate_tool_whitelist_collision(self, role_name: str, action_name: str) -> None:
+        """Reject an action name that names an external tool; no gated role may invoke one as an action.
 
         Args:
             role_name (str): the name of the emitting role.
             action_name (str): the action name (or REQUEST ``kind``) being
                 checked.
-            intent_kind (str): the channel the action arrived on, used in the
-                error message.
 
         Raises:
-            PolicyDenied: when the name is a known external tool not whitelisted
-                for the role.
+            PolicyDenied: when the name is a PR Monitor or web tool.
         """
-        if not action_name:
-            return
-        if action_name not in ALL_KNOWN_EXTERNAL_TOOL_NAMES:
-            return
-        allowed_for_role = TOOL_WHITELIST_BY_ROLE.get(role_name, frozenset())
-        if action_name in allowed_for_role:
+        if action_name not in PR_MONITOR_TOOL_NAMES | WEB_TOOL_NAMES:
             return
         raise PolicyDenied(
             f"role={role_name!r} cannot invoke tool {action_name!r}",
@@ -797,14 +725,8 @@ class PolicyGate:
                     "pre-screened upstream-PR candidate."
                 ),
             )
-        ss = getattr(self, "shared_state", None)
-        verdict = ""
-        if ss is not None:
-            try:
-                verdict = ss.get_specialist_patch_verdict(sid)
-            except AttributeError:
-                # Guards a null specialist_patch_verdicts deserialized from state.json.
-                verdict = ""
+        ss = self.shared_state
+        verdict = ss.get_specialist_patch_verdict(sid) if ss is not None else ""
         if not verdict:
             raise PolicyDenied(
                 f"integrate_patch: no Critic verdict on record for subject={sid!r}",
@@ -981,10 +903,7 @@ class PolicyGate:
             raise PolicyDenied(
                 "delegate{action='specialist'}: needs_gpu=true but the GPU specialist pool is disabled",
                 rule=RULE_GPU_POOL_DISABLED,
-                hint=(
-                    "Start the session with --gpu-specialist-capacity > 0 or set "
-                    "INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY before dispatching GPU specialists."
-                ),
+                hint=("Start the session with --gpu-specialist-capacity > 0 before dispatching GPU specialists."),
             )
         pool_size = facts.whole_machine_pool if whole_machine else facts.gpu_specialist_pool
         pool_desc = "whole-machine GPU pool" if whole_machine else "serving-disjoint GPU specialist pool"
@@ -1026,7 +945,7 @@ class PolicyGate:
         Returns:
             str: the chosen canonical gap id, or ``""`` when no gap matches.
         """
-        state = getattr(self, "shared_state", None)
+        state = self.shared_state
         gaps = list(getattr(state, "gaps", None) or []) if state is not None else []
         if not gaps:
             return ""
@@ -1189,12 +1108,9 @@ class PolicyGate:
             value (str): the path string to test.
 
         Returns:
-            bool: True when :attr:`session_dir` is unset (check disabled),
-                or when ``value`` resolves to or under the session
+            bool: True when ``value`` resolves to or under the session
                 directory; False if it escapes or cannot be resolved.
         """
-        if self.session_dir is None:
-            return True
         try:
             sd = self.session_dir.resolve()
             v = Path(str(value)).resolve()
@@ -1216,8 +1132,6 @@ class PolicyGate:
 
     def _remote_recipe_files_root(self) -> Path | None:
         """Return the session-owned root containing downloaded KB artifacts."""
-        if self.session_dir is None:
-            return None
         try:
             return self.session_dir.resolve().joinpath(*_REMOTE_RECIPE_FILES_PARTS)
         except (OSError, RuntimeError):
@@ -1287,7 +1201,7 @@ class PolicyGate:
         realpaths are the only out-of-session ``target_file`` values accepted by
         the generic recursive path guard.
         """
-        if self.session_dir is None or not self.strict_paths:
+        if self.session_dir is None:
             return frozenset()
         plan = params.get("warm_kernel_plan") or []
         if not isinstance(plan, list):
@@ -1360,7 +1274,7 @@ class PolicyGate:
         *,
         trusted_framework_targets: frozenset[str] = frozenset(),
     ) -> None:
-        """Walk payload (recursively); reject path-like values escaping session_dir. No-op when session_dir is None or strict_paths is False.
+        """Walk payload (recursively); reject path-like values escaping session_dir. No-op when session_dir is None.
 
         Args:
             role (AgentRole): the resolved role of the emitting agent, used in
@@ -1373,7 +1287,7 @@ class PolicyGate:
             PolicyDenied: when a path-like value escapes session_dir and the
                 trace allowlist that a trace field may also resolve under.
         """
-        if self.session_dir is None or not self.strict_paths:
+        if self.session_dir is None:
             return
 
         def visit(node: Any, path_keys: tuple[str, ...]) -> None:
@@ -1548,7 +1462,6 @@ def validate_freeform_wave_task(task: Any, *, index: int) -> str:
 
 __all__ = [
     "INTEGRATE_PATCH_PERMISSIVE_VERDICTS",
-    "KERNEL_AGENT_OWNED_ACTIONS",
     "PATH_LIKE_FIELDS",
     "PRUNE_BRANCH_ALLOWED_SCOPES",
     "PRUNE_BRANCH_SCOPE_FAMILY",

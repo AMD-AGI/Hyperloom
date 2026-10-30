@@ -11,6 +11,7 @@ which is what lets a source-change answer name a location.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -57,17 +58,26 @@ def load_source_sites(analysis_md_path: Any) -> dict[str, dict[str, Any]]:
     doc = read_json(path, require_dict=True) if path else None
     if not isinstance(doc, dict) or str(doc.get("schema_version") or "").split(".")[0] != _EXPECTED_MAJOR:
         return {}
+    entries = [entry for entry in doc.get("entries") or [] if isinstance(entry, dict)]
+    return index_by_id_and_name((entry, _site(entry)) for entry in entries)
+
+
+def index_by_id_and_name(
+    pairs: Iterable[tuple[dict[str, Any], dict[str, Any] | None]],
+) -> dict[str, dict[str, Any]]:
+    """Key each value by its row's ``kernel_id`` and by its row's ``name``; a ``None`` value is skipped.
+
+    The first row of a name keeps it, and an id beats a different row that happens to be named like that id.
+    """
     by_name: dict[str, dict[str, Any]] = {}
     by_id: dict[str, dict[str, Any]] = {}
-    for entry in doc.get("entries") or []:
-        site = _site(entry) if isinstance(entry, dict) else None
-        if site is None:
+    for row, value in pairs:
+        if value is None:
             continue
-        name = str(entry.get("name") or "").strip()
+        name = str(row.get("name") or "").strip()
         if name:
-            by_name.setdefault(name, site)
-        kernel_id = str(entry.get("kernel_id") or "").strip()
+            by_name.setdefault(name, value)
+        kernel_id = str(row.get("kernel_id") or "").strip()
         if kernel_id:
-            by_id[kernel_id] = site
-    # An id beats a different row that happens to be named like that id.
+            by_id[kernel_id] = value
     return {**by_name, **by_id}

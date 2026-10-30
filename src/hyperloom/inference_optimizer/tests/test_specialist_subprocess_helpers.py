@@ -219,7 +219,7 @@ def test_collect_patches_excludes_work_artifacts_from_mixed_source_harvest(tmp_p
     assert roots == {patches[0]: str(base)}
     assert set(ps.parse_patch_targets(patch_text).all) == set(installable)
     assert "__pycache__/" not in patch_text
-    assert ps.ground_patch_text(patch_text, base_checkout=base, explicit_root=base).verdict == ps.GROUND_APPLIES
+    assert ps._git_apply_check(base, patch_text) is True
     for rel, content in artifacts.items():
         assert (wt / rel).read_bytes() == content
 
@@ -265,7 +265,7 @@ def test_collect_patches_fallback_cannot_deliver_work_artifact_patch(tmp_path: P
     manual = wt / "patches" / "probe.patch"
     manual.parent.mkdir()
     manual.write_text(diff, encoding="utf-8")
-    assert ps.ground_patch_text(diff, base_checkout=base, explicit_root=base).verdict == ps.GROUND_APPLIES
+    assert ps._git_apply_check(base, diff) is True
 
     patches, roots = SpecialistSubprocessDispatcher._collect_patches(wt, tmp_path / "ws", worktree_base=base)
     kept, _dropped, _grounding, _spans_roots = ps.vet_patches(patches, base_checkout=base, explicit_root=base)
@@ -310,7 +310,7 @@ def test_harvest_off_an_installed_package_snapshot_applies_to_the_package(tmp_pa
     assert roots == {patches[0]: str(package)}
     patch_text = Path(patches[0]).read_text(encoding="utf-8")
     assert set(ps.parse_patch_targets(patch_text).all) == {"envs.py", "model_executor/models/qwen3.py"}
-    assert ps.ground_patch_text(patch_text, base_checkout=None, explicit_root=package).verdict == ps.GROUND_APPLIES
+    assert ps._git_apply_check(package, patch_text) is True
     assert not (package / ".git").exists()
     assert (package / "model_executor" / "models" / "qwen3.py").read_text(encoding="utf-8") == "BLOCK = 64\n"
 
@@ -378,7 +378,7 @@ def test_collect_patches_keeps_create_only_runtime_changes(tmp_path: Path, targe
     assert targets.existing == ()
     assert targets.created == (target,)
     assert roots == {patches[0]: str(base)}
-    assert ps.ground_patch_text(patch_text, base_checkout=base, explicit_root=base).verdict == ps.GROUND_APPLIES
+    assert ps._git_apply_check(base, patch_text) is True
     kept, dropped, grounding, _spans_roots = ps.vet_patches(patches, base_checkout=base, explicit_root=base)
     assert kept == patches
     assert dropped == []

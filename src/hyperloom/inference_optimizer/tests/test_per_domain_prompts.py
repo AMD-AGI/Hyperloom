@@ -484,8 +484,8 @@ import pytest
 
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
+from hyperloom.orchestrator.policy.denial import PolicyDenied
 from hyperloom.orchestrator.policy.gate import (
-    PolicyDenied,
     PolicyGate,
 )
 from hyperloom.orchestrator.bus.resource_lock import (

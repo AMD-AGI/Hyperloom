@@ -22,7 +22,7 @@ from typing import Any
 
 from kernelforge.config.edit_policy import FORGE_PROTECTED_PATHS
 from kernelforge.workflows.forge_loop.campaign.workspace_files import tracked_editable_paths
-from kernelforge.utils.git import git, git_bytes, git_head
+from kernelforge.utils.git import git, git_apply, git_bytes, git_head
 from kernelforge.knowledge.kb_store import warmstart_policy
 from kernelforge.knowledge.kb_store.identity.run import LoopKernel
 from kernelforge.knowledge.kb_store.identity.implementation import (
@@ -238,17 +238,7 @@ def _git_apply(
 
     def _run(extra: list[str]) -> bool:
         # A depth that does not apply is the question being asked, not a failure.
-        return (
-            git(
-                "apply",
-                *extra,
-                "-",
-                cwd=workspace_dir,
-                input=patch,
-                check=False,
-            ).returncode
-            == 0
-        )
+        return git_apply(patch, *extra, "-", cwd=workspace_dir, check=False).returncode == 0
 
     depths = _GIT_APPLY_STRIP_DEPTHS
     if target is not None:

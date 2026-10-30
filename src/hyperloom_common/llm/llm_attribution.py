@@ -227,12 +227,14 @@ def call_headers(
     *,
     component: str,
     operation: str = "",
-    phase: str | None = None,
     env: Mapping[str, str] | None = None,
     base: Mapping[str, str] | None = None,
     **extra: str,
 ) -> dict[str, str]:
-    """Render the selected gateway's attribution headers for a request."""
+    """Render the selected gateway's attribution headers for a request.
+
+    ``extra`` overrides any field, ``phase`` included (unset: the published phase).
+    """
     source = env if env is not None else os.environ
     headers = _configured_headers(source)
     if not headers:
@@ -240,15 +242,12 @@ def call_headers(
     context = attribution_context(
         component=component,
         operation=operation,
-        phase=phase,
         env=source,
         **extra,
     )
     if base:
         inherited = dict(base)
-        if phase is not None and not _sanitize(phase):
-            inherited.pop("phase", None)
-        # An explicitly empty field suppresses an inherited one the way an empty ``phase`` does.
+        # An explicitly empty field suppresses an inherited one.
         for name, value in extra.items():
             if not _sanitize(value):
                 inherited.pop(name, None)
@@ -334,7 +333,6 @@ def inject_env(
     *,
     component: str,
     operation: str = "",
-    phase: str | None = None,
     source: Mapping[str, str] | None = None,
     **extra: str,
 ) -> None:
@@ -351,7 +349,6 @@ def inject_env(
     headers = call_headers(
         component=component,
         operation=operation,
-        phase=phase,
         env=configuration,
         base=inherited,
         **extra,
@@ -366,12 +363,11 @@ def sdk_env_overlay(
     *,
     component: str,
     operation: str = "",
-    phase: str | None = None,
     **extra: str,
 ) -> dict[str, str]:
     """Return the header variables an agent-SDK child needs overlaid on its env."""
     merged = dict(os.environ)
-    inject_env(merged, component=component, operation=operation, phase=phase, **extra)
+    inject_env(merged, component=component, operation=operation, **extra)
     return {
         variable: merged[variable]
         for variable in (ANTHROPIC_CUSTOM_HEADERS_ENV, OPENAI_CUSTOM_HEADERS_ENV)

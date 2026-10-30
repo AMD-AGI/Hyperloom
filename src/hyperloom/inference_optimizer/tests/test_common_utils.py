@@ -1045,21 +1045,6 @@ def test_baseline_objective_progress_zero_ref(tmp_path: Path) -> None:
     assert obj.progress(state) == 0.0
 
 
-# orchestrator.phases.quantization_schemes — quantization prompt
-
-
-def test_quantization_join_and_prompt() -> None:
-    from hyperloom.orchestrator.phases import quantization_schemes as qs
-
-    assert qs._join_clauses([]) == ""
-    assert qs._join_clauses(["a"]) == "a"
-    assert qs._join_clauses(["a", "b", "c"]) == "a, b and c"
-
-    cfg = qs.QuantizationConfig(global_scheme="fp8")
-    prompt = qs.build_quantization_prompt(cfg)
-    assert "Quantization strategy" in prompt
-
-
 # orchestrator.actions.executors._file_lock
 
 

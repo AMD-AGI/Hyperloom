@@ -5,8 +5,8 @@ description: >
   from a natural-language prompt. Produces a HuggingFace-format quantized
   model directory plus a structured assessment of every artifact that the
   Quark workflow + validator + llm-eval skills emit. Single public entry:
-  `quantize_via_prompt(prompt, *, workspace, quark_root=None,
-  interactive=None, acceptable_eval_gap=None, max_requantize_attempts=1)`.
+  `quantize_via_prompt(prompt, *, workspace, options=QuantSkillRunOptions(),
+  runner_fn=None, log=None)`.
 layer: hyperloom-subagent
 primary_artifact: quantized_model_dir
 delegates_to:
