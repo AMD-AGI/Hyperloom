@@ -42,7 +42,8 @@ from ._literal_utils import LITERAL_EVAL_ERRORS as _LITERAL_EVAL_ERRORS
 from ._literal_utils import safe_literal_eval as _safe_literal_eval
 from ._task_group_contract import (
     build_operator_identity,
-    build_task_group_shape_cases,
+    finalize_task_groups,
+    is_native_source,
     legacy_operator_identity_keys,
     operator_identity_key,
 )
@@ -217,54 +218,6 @@ class _InFlight:
                 self.tasks.discard(task_id)
 
 
-# Upstream TraceLens category enum (orchestrator_prepare.py CATEGORY_SKILL_MAP) → GEAK labels.
-UPSTREAM_CATEGORY_TO_GEAK: dict[str, str] = {
-    "cpu_idle": "Other",
-    "gemm": "GEMM",
-    "groupedgemm_fwd": "GEMM",
-    "groupedgemm_bwd": "GEMM",
-    "moe_fused": "MoE",
-    "moe_unfused": "MoE",
-    "moe_aux": "MoE",
-    "sdpa_fwd": "SDPA",
-    "sdpa_bwd": "SDPA",
-    "inferenceattention": "SDPA",
-    "elementwise": "Elementwise",
-    "reduce": "Reduction",
-    "triton": "Triton",
-    "flydsl": "FlyDSL",
-    "norm": "LayerNorm",
-    "norm_fwd": "LayerNorm",
-    "norm_bwd": "LayerNorm",
-    "rmsnorm": "LayerNorm",
-    "convolution": "Convolution",
-    "conv_fwd": "Convolution",
-    "conv_bwd": "Convolution",
-    "customcollective": "Communication",
-    "other": "Other",
-}
-
-
-def normalize_upstream_category(raw: str) -> str:
-    """Normalize a TraceLens category string to a GEAK-facing label.
-
-    The raw value is lower-cased and its separators collapsed to underscores
-    before lookup in :data:`UPSTREAM_CATEGORY_TO_GEAK`.
-
-    Args:
-        raw (str): The upstream TraceLens category string.
-
-    Returns:
-        str: The mapped GEAK-facing label, ``"unknown"`` when ``raw`` is empty,
-            or the original ``raw`` value when no mapping exists.
-    """
-
-    if not raw:
-        return "unknown"
-    key = raw.strip().lower().replace(" ", "_").replace("-", "_").replace("/", "_")
-    return UPSTREAM_CATEGORY_TO_GEAK.get(key, raw)
-
-
 @dataclass
 class TraceLensSkillRunResult:
     """Artifacts produced by one TraceLens skill run (``report_path`` names the ``analysis.md``; the ``analysis.json`` rendered beside it is the candidate source of truth)."""
@@ -276,19 +229,6 @@ class TraceLensSkillRunResult:
     # to declare itself fails at construction instead of mislabelling its output.
     runner: str
     artifact_paths: dict[str, str] = field(default_factory=dict)
-    raw_text: str = ""
-
-
-def shell_quote(path: Path | str) -> str:
-    """Shell-quote a path for safe inclusion in a command string.
-
-    Args:
-        path (Path | str): The path to quote.
-
-    Returns:
-        str: The string form of ``path`` quoted for POSIX shells.
-    """
-    return shlex.quote(str(path))
 
 
 def write_local_cmd_prefix(output_dir: Path, tracelens_root: Path) -> Path:
@@ -310,7 +250,7 @@ def write_local_cmd_prefix(output_dir: Path, tracelens_root: Path) -> Path:
     cache_dir.mkdir(parents=True, exist_ok=True)
     prefix_path = cache_dir / "cmd_prefix.txt"
     prefix_path.write_text(
-        f"cd {shell_quote(tracelens_root)} && {{CMD}}\n",
+        f"cd {shlex.quote(str(tracelens_root))} && {{CMD}}\n",
         encoding="utf-8",
     )
     return prefix_path
@@ -590,11 +530,10 @@ async def _drive_sdk_stream(
     stream: Any,
     bounds: _StreamIdleBounds,
     *,
-    chunks: list[str],
     observe: Callable[[Any], None],
     log: Callable[[str], None] | None,
 ) -> str:
-    """Consume the SDK stream, appending its text to ``chunks``; return the SDK error, ``""`` when there was none.
+    """Consume the SDK stream, logging its text; return the SDK error, ``""`` when there was none.
 
     Each next message is bounded by an idle timeout (inactivity, not a total budget), widened while a tool call or a
     background task is in flight because the SDK emits nothing between its launch and its result.
@@ -635,9 +574,8 @@ async def _drive_sdk_stream(
                 break
             observe(message)
             in_flight.observe(message)
-            for text in _iter_message_text(message):
-                chunks.append(text)
-                if log:
+            if log:
+                for text in _iter_message_text(message):
                     log(f"[claude-sdk] {text[:1000]}")
     except Exception as exc:  # noqa: BLE001 - isolation boundary: the SDK stream, returned as sdk_error
         # SDK may error after writing artifacts; treat artifact presence as truth.
@@ -699,10 +637,10 @@ async def _run_tracelens_skill_codex(
         codex_error = f"{type(exc).__name__}: {exc}"
         if run.log:
             run.log(f"[codex-sdk] WARNING: {codex_error}")
-    return _skill_result(run, runner="codex", label="Codex", raw_text=result.text, error=codex_error or result.error)
+    return _skill_result(run, runner="codex", label="Codex", error=codex_error or result.error)
 
 
-def _skill_result(run: _SkillRun, *, runner: str, label: str, raw_text: str, error: str) -> TraceLensSkillRunResult:
+def _skill_result(run: _SkillRun, *, runner: str, label: str, error: str) -> TraceLensSkillRunResult:
     """The run's artifacts once ``analysis.md`` exists; an agent error after it landed is metadata.
 
     Raises:
@@ -720,7 +658,6 @@ def _skill_result(run: _SkillRun, *, runner: str, label: str, raw_text: str, err
         output_dir=run.request.output_dir,
         report_path=report_path,
         runner=runner,
-        raw_text=raw_text,
         artifact_paths=artifact_paths,
     )
 
@@ -814,7 +751,7 @@ async def run_tracelens_skill(
             timeout_sec=timeout_sec,
         )
         result = await drive_tracelens_skill(session, output_dir / "analysis.md")
-        return _skill_result(run, runner="deepseek", label="DeepSeek", raw_text=result.text, error=result.error)
+        return _skill_result(run, runner="deepseek", label="DeepSeek", error=result.error)
 
     if runner == llm_config.AGENT_BACKEND_CODEX and (sdk.codex_turn_runner is not None or no_injected_sdk):
         codex_model = resolved_model or (os.environ.get("CODEX_MODEL") or "").strip() or DEFAULT_CODEX_MODEL
@@ -844,7 +781,6 @@ async def run_tracelens_skill(
         # Older SDK builds lack cwd; absolute paths make retrying without it safe.
         kwargs.pop("cwd", None)
         options = sdk_options_cls(**kwargs)
-    chunks: list[str] = []
     if log:
         log(f"TraceLens SDK runner: prefix cache={prefix_path}")
     # Drive the SDK stream manually so each next message is bounded by a
@@ -854,12 +790,11 @@ async def run_tracelens_skill(
         sdk_error = await _drive_sdk_stream(
             sdk_query_factory(prompt=prompt, options=options),
             bounds,
-            chunks=chunks,
             observe=trajectory.observe,
             log=log,
         )
         trajectory.finish(sdk_error)
-    return _skill_result(run, runner="claude_agent_sdk", label="SDK", raw_text="\n".join(chunks), error=sdk_error)
+    return _skill_result(run, runner="claude_agent_sdk", label="SDK", error=sdk_error)
 
 
 _IDLE_PCT_TABLE_RE = re.compile(
@@ -1008,12 +943,12 @@ def _parse_launcher_path(kernel_path: str) -> tuple[str, int | None, str | None]
     """Parse a TraceLens kernel-path into its components.
 
     Accepts ``<path>(<line>): <func>``, ``<path>#L<line>``, or a bare path.
-    Also accepts the newer TraceLens launcher *dict* (or its stringified repr)
+    Also accepts the stringified TraceLens launcher dict
     ``{'entry_point': '<frame>', 'wrappers': "[...]"}``, from which the first
     real source frame is extracted before parsing.
 
     Args:
-        kernel_path: The kernel-path string (or launcher dict) to parse.
+        kernel_path: The kernel-path string to parse.
 
     Returns:
         A ``(path, line, function_name)`` tuple; placeholders and empty input
@@ -1021,24 +956,17 @@ def _parse_launcher_path(kernel_path: str) -> tuple[str, int | None, str | None]
     """
     if not kernel_path:
         return "", None, None
-    # TraceLens may hand us the launcher as a dict (or stringified dict) whose
-    # real frame lives under entry_point/wrappers; reduce it to that frame first.
-    if isinstance(kernel_path, dict):
-        frame = _launcher_frame_from_dict(kernel_path)
+    # A stringified launcher dict keeps its real frame under entry_point/wrappers; reduce it to that frame first.
+    stripped = kernel_path.strip()
+    if stripped.startswith("{") and stripped.endswith("}") and "entry_point" in stripped:
+        try:
+            parsed_obj = _safe_literal_eval(stripped)
+        except _LITERAL_EVAL_ERRORS:
+            parsed_obj = None
+        frame = _launcher_frame_from_dict(parsed_obj) if isinstance(parsed_obj, dict) else None
         if not frame:
             return "", None, None
         kernel_path = frame
-    elif isinstance(kernel_path, str):
-        stripped = kernel_path.strip()
-        if stripped.startswith("{") and stripped.endswith("}") and "entry_point" in stripped:
-            try:
-                parsed_obj = _safe_literal_eval(stripped)
-            except _LITERAL_EVAL_ERRORS:
-                parsed_obj = None
-            frame = _launcher_frame_from_dict(parsed_obj) if isinstance(parsed_obj, dict) else None
-            if not frame:
-                return "", None, None
-            kernel_path = frame
     text = kernel_path.strip()
     if text.lower() in _LAUNCHER_PATH_PLACEHOLDERS:
         return "", None, None
@@ -1099,14 +1027,9 @@ def _resolve_source_target(candidate: dict[str, Any]) -> dict[str, Any] | None:
             "source_path": str(source_path),
             "definition_line": source_line,
             "function_name": str(candidate.get("source_function") or source_path.stem),
-            "reported_path": source_file,
-            "reported_line": source_line,
-            "reported_func": str(candidate.get("source_function") or "") or None,
             "ast_resolved": False,
         }
-    kernel_path = str(
-        candidate.get("kernel_launcher_path") or candidate.get("source_file") or candidate.get("kernel_path") or ""
-    )
+    kernel_path = str(candidate.get("kernel_launcher_path") or source_file)
     raw_path, reported_line, reported_func = _parse_launcher_path(kernel_path)
     if not raw_path:
         return None
@@ -1121,9 +1044,6 @@ def _resolve_source_target(candidate: dict[str, Any]) -> dict[str, Any] | None:
         "source_path": str(source_path),
         "definition_line": definition_line,
         "function_name": function_name,
-        "reported_path": raw_path,
-        "reported_line": reported_line,
-        "reported_func": reported_func,
         "ast_resolved": bool(
             reported_func
             and source_path.exists()
@@ -1131,59 +1051,6 @@ def _resolve_source_target(candidate: dict[str, Any]) -> dict[str, Any] | None:
             and reported_line != definition_line
         ),
     }
-
-
-_NATIVE_SOURCE_SUFFIXES = (
-    ".cu",
-    ".cuh",
-    ".hip",
-    ".cpp",
-    ".cc",
-    ".cxx",
-    ".hpp",
-    ".hh",
-    ".h",
-    ".c",
-)
-
-
-def _is_native_source(path: str) -> bool:
-    """True for C/C++/HIP/CUDA source files.
-
-    Native sources have no Python AST to resolve a stable ``def`` line, so
-    TraceLens reports the per-call call-site ``#L<line>``. Callers therefore
-    drop the line/function key components for these files.
-
-    Args:
-        path: The source file path to classify.
-
-    Returns:
-        ``True`` for C/C++/HIP/CUDA source files.
-    """
-    return str(path).lower().endswith(_NATIVE_SOURCE_SUFFIXES)
-
-
-def _pitem_prose(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Return one prose entry per TraceLens P-item ``(rank, title)`` named by ``rows``, P1 first.
-
-    The first row naming a P-item supplies its prose, so ``build_prompt`` renders every P-item once; an entry with
-    no rank and no prose is dropped.
-    """
-    entries: dict[tuple[int, str], dict[str, Any]] = {}
-    for row in rows:
-        rank = int(row.get("tracelens_pitem_rank") or 0)
-        title = str(row.get("tracelens_pitem_title") or "")
-        if (rank, title) in entries:
-            continue
-        entries[rank, title] = {
-            "rank": rank,
-            "title": title,
-            "identification": str(row.get("identification") or "").strip(),
-            "reasoning_for_slowdown": str(row.get("reasoning_for_slowdown") or "").strip(),
-            "resolution": str(row.get("resolution") or "").strip(),
-        }
-    ordered = sorted(entries.values(), key=lambda e: (e["rank"], e["title"]))
-    return [e for e in ordered if e["rank"] or e["identification"] or e["reasoning_for_slowdown"] or e["resolution"]]
 
 
 def aggregate_by_source_function(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1212,7 +1079,7 @@ def aggregate_by_source_function(candidates: list[dict[str, Any]]) -> list[dict[
         operation = str(cand.get("name") or "").strip()
         reported_source = os.path.normpath(str(target["source_path"]))
         identity_args = {
-            "source_kind": "native" if _is_native_source(reported_source) else "py",
+            "source_kind": "native" if is_native_source(reported_source) else "py",
             "source_path": reported_source,
             "operation": operation,
             "function_name": str(target["function_name"]),
@@ -1234,14 +1101,12 @@ def aggregate_by_source_function(candidates: list[dict[str, Any]]) -> list[dict[
                 "definition_line": target["definition_line"],
                 "function_name": target["function_name"],
                 "ast_resolved": bool(target.get("ast_resolved")),
-                "reported_path": target["reported_path"],
                 "kernel_ids": [],
                 "primary_kernel_id": "",
                 "rows": [],
                 "aggregate_duration_us": 0.0,
                 "aggregate_call_count": 0,
                 "aggregate_gpu_pct": 0.0,
-                "all_pitem_prose": [],
             }
         else:
             bucket["legacy_task_group_keys"] = list(dict.fromkeys([*bucket["legacy_task_group_keys"], *legacy_keys]))
@@ -1253,18 +1118,7 @@ def aggregate_by_source_function(candidates: list[dict[str, Any]]) -> list[dict[
         bucket["aggregate_call_count"] += int(cand.get("call_count") or 0)
         bucket["aggregate_gpu_pct"] += float(cand.get("gpu_pct") or 0.0)
 
-    ordered = sorted(groups.values(), key=lambda g: g["aggregate_duration_us"], reverse=True)
-    for idx, group in enumerate(ordered, start=1):
-        group["task_group_id"] = f"tg{idx:03d}"
-        # Prose takes rows in arrival order (first row per P-item wins); the duration sort then picks the primary.
-        group["all_pitem_prose"] = _pitem_prose(group["rows"])
-        group["rows"].sort(key=lambda r: float(r.get("duration_us") or 0.0), reverse=True)
-        primary = group["rows"][0]
-        group["primary_kernel_id"] = str(primary.get("kernel_id") or primary.get("name") or "")
-        group["aggregate_duration_us"] = round(group["aggregate_duration_us"], 3)
-        group["aggregate_gpu_pct"] = round(group["aggregate_gpu_pct"], 3)
-        group["shape_cases"] = build_task_group_shape_cases(group)
-    return ordered
+    return finalize_task_groups(groups.values())
 
 
 __all__ = [
@@ -1272,7 +1126,6 @@ __all__ = [
     "SdkEntryPoints",
     "TraceLensSkillRequest",
     "TraceLensSkillRunResult",
-    "UPSTREAM_CATEGORY_TO_GEAK",
     "_function_line_from_ast",
     "_parse_launcher_path",
     "aggregate_by_source_function",
@@ -1281,7 +1134,6 @@ __all__ = [
     "extract_compute_pct_from_analysis_md",
     "extract_exposed_comm_pct_from_analysis_md",
     "extract_idle_pct_from_analysis_md",
-    "normalize_upstream_category",
     "run_tracelens_skill",
     "write_local_cmd_prefix",
     "write_run_config",

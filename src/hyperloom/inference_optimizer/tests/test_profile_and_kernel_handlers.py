@@ -2837,7 +2837,7 @@ async def test_trace_analyze_handler_does_not_forward_top_k(
     session_dir,
     monkeypatch,
 ):
-    """``top_k`` is not a tool flag; the live dial is ``HYPERLOOM_KERNEL_CANDIDATES_TOP_K``."""
+    """``top_k`` is not a tool flag."""
     fake_trace = session_dir / "fake_trace_dir"
     fake_trace.mkdir()
     captured: dict = {}

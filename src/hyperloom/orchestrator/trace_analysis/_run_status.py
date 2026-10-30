@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The status file one tracelens_analysis run keeps current."""
+"""What one trace-analysis run records: its status file and the ``run_meta`` step ladder it returns."""
 
 from __future__ import annotations
 
@@ -80,3 +80,42 @@ class RunStatus:
         if error:
             payload["error"] = error
         atomic_write_json(self.status_path, payload, fmt=JsonFormat(trailing_newline=True))
+
+
+def new_run_meta() -> dict[str, Any]:
+    """The ``run_meta`` block both trace tools return: what the run saw and decided, and its step ladder.
+
+    The caller records it on the SBD V6 roofline event, so both routes share this one shape.
+    """
+    return {"preflight": {}, "split": {}, "selection": {}, "steps": [], "route_ext": {}}
+
+
+def note_step(
+    run_meta: dict[str, Any],
+    step_id: str,
+    *,
+    category: str,
+    status: str,
+    **detail: Any,
+) -> None:
+    """Append one step to the run's ladder.
+
+    Args:
+        run_meta: The run's ``run_meta`` block.
+        step_id: Stable step name.
+        category: Ladder phase (``preflight`` / ``install`` / ``split`` /
+            ``select`` / ``analyze`` / ``emit``).
+        status: ``ok`` / ``failed`` / ``skipped``.
+        **detail: Measured values for the step; ``skip_reason`` names why a skipped step did not run.
+    """
+    skip_reason = detail.pop("skip_reason", None)
+    run_meta["steps"].append(
+        {
+            "step_id": step_id,
+            "order": len(run_meta["steps"]) + 1,
+            "category": category,
+            "status": status,
+            "skip_reason": skip_reason,
+            "detail": detail,
+        }
+    )

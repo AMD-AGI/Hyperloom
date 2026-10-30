@@ -8,13 +8,21 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 
 _SHAPE_RE = re.compile(r"\(([\d,\s]*)\)")
 _NAMED_DIMENSIONS = ("M", "N", "K", "E", "TOPK")
 CASE_SELECTOR_KEY = "CASE_ID"
 OPERATOR_IDENTITY_VERSION = 3
+
+# Native device-code extensions; these sources key a task group as ``native``.
+NATIVE_SOURCE_SUFFIXES = (".cu", ".cuh", ".hip", ".cpp", ".cc", ".cxx", ".hpp", ".hh", ".h", ".c")
+
+
+def is_native_source(path: str) -> bool:
+    """True for C/C++/HIP/CUDA source files."""
+    return str(path).lower().endswith(NATIVE_SOURCE_SUFFIXES)
 
 
 def _strip_dispatch_decoration(operation: str) -> str:
@@ -423,3 +431,17 @@ def build_task_group_shape_cases(group: dict[str, Any]) -> list[dict[str, Any]]:
         case["case_id"] = case_id
         case["selector"] = {CASE_SELECTOR_KEY: case_id, **dimensions}
     return cases
+
+
+def finalize_task_groups(groups: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Number task groups by descending aggregate time, then pick each group's primary row and build its cases."""
+    ordered = sorted(groups, key=lambda g: g["aggregate_duration_us"], reverse=True)
+    for idx, group in enumerate(ordered, start=1):
+        group["task_group_id"] = f"tg{idx:03d}"
+        group["rows"].sort(key=lambda r: float(r.get("duration_us") or 0.0), reverse=True)
+        primary = group["rows"][0]
+        group["primary_kernel_id"] = str(primary.get("kernel_id") or primary.get("name") or "")
+        group["aggregate_duration_us"] = round(group["aggregate_duration_us"], 3)
+        group["aggregate_gpu_pct"] = round(group["aggregate_gpu_pct"], 3)
+        group["shape_cases"] = build_task_group_shape_cases(group)
+    return ordered

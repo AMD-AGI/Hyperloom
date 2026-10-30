@@ -157,18 +157,22 @@ def _dtypes_from_shapes(shapes: Any) -> list[str]:
 # op-name match (or fused-MoE marker match).
 _FUSED_MOE_KERNEL_MARKER = "invoke_fused_moe_kernel"
 
-# torch ``Input type`` token → compact dtype suffix used by TraceLens shape
-# strings. Unmapped/empty types emit a bare shape.
-_TRACE_DTYPE_SUFFIX = {
+# torch ``Input type`` token -> compact dtype suffix for the shape-string contract (e.g. ``(15360,2048) bf16``);
+# unmapped/empty types emit a bare shape.
+_FP16 = "fp16"
+_FP32 = "fp32"
+_DTYPE_SUFFIX: dict[str, str] = {
+    # Suffixes MUST match the shared harness dtype_map + roofline peak table; a compact "f16"/"f32" makes the harness
+    # emit an invalid ``torch.f16``.
     "c10::bfloat16": "bf16",
     "bfloat16": "bf16",
-    "c10::half": "f16",
-    "half": "f16",
-    "float16": "f16",
-    "float": "f32",
-    "float32": "f32",
-    "double": "f64",
-    "float64": "f64",
+    "c10::half": _FP16,
+    "half": _FP16,
+    "float16": _FP16,
+    "float": _FP32,
+    "float32": _FP32,
+    "double": "fp64",
+    "float64": "fp64",
     "int": "i32",
     "int32": "i32",
     "long": "i64",
@@ -182,16 +186,8 @@ _TRACE_DTYPE_SUFFIX = {
 }
 
 
-def _format_trace_shape(dims: Any, dtype: Any) -> str | None:
-    """Render one operand as a TraceLens-style ``(d0,d1,...) <dtype>`` string.
-
-    Args:
-        dims: The operand dimensions (list/tuple of ints).
-        dtype: The operand dtype token.
-
-    Returns:
-        The formatted shape string, or ``None`` for scalar/empty operands.
-    """
+def format_operand_shape(dims: Any, dtype: Any) -> str | None:
+    """Render one operand as a ``(d0,d1,...) <dtype>`` string, or ``None`` for scalar/empty operands."""
     if not isinstance(dims, (list, tuple)) or not dims:
         return None
     try:
@@ -199,7 +195,7 @@ def _format_trace_shape(dims: Any, dtype: Any) -> str | None:
     except (TypeError, ValueError):
         return None
     shape = f"({body},)" if len(dims) == 1 else f"({body})"
-    suffix = _TRACE_DTYPE_SUFFIX.get(str(dtype or "").strip().lower())
+    suffix = _DTYPE_SUFFIX.get(str(dtype or "").strip().lower())
     return f"{shape} {suffix}" if suffix else shape
 
 
@@ -244,7 +240,7 @@ def _resolve_shapes_from_ops_unique_args_csv(
                     dtypes = ()
                 for i, operand in enumerate(dims):
                     dtype = dtypes[i] if i < len(dtypes) else ""
-                    s = _format_trace_shape(operand, dtype)
+                    s = format_operand_shape(operand, dtype)
                     if s and s not in seen:
                         seen.add(s)
                         shapes.append(s)
@@ -272,7 +268,7 @@ def _invocation_case_from_csv_row(row: dict[str, str]) -> dict[str, Any] | None:
     tensor_dtypes: list[str] = []
     for index, operand in enumerate(dims):
         dtype = dtypes[index] if index < len(dtypes) else ""
-        rendered = _format_trace_shape(operand, dtype)
+        rendered = format_operand_shape(operand, dtype)
         if rendered:
             operands.append(rendered)
             tensor_dtypes.append(str(dtype or ""))

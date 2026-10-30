@@ -117,24 +117,6 @@ _TRACELENS_REPO_DEFAULT = "https://github.com/AMD-AGI/TraceLens.git"
 _TRACELENS_REF_DEFAULT = "cf0221e3b1b1915d5272a10e2f5237d2d9c5f0cb"
 
 
-def _default_tracelens_root() -> Path:
-    """Installer-managed default checkout path (mirrors install.sh /
-    hyperloom.inference_optimizer.session.paths.deps_cache_root)."""
-    from hyperloom.inference_optimizer.session.paths import deps_cache_root
-
-    return deps_cache_root() / "TraceLens"
-
-
-def _is_default_tracelens_root(tl_root: Path) -> bool:
-    """True when tl_root is the installer-managed default (not an operator
-    override). Only the default path is self-healed; an explicit
-    --tracelens-root / TRACELENS_ROOT is operator-maintained and fails fast."""
-    try:
-        return Path(tl_root).resolve() == _default_tracelens_root().resolve()
-    except OSError:
-        return False
-
-
 def _tracelens_checkout_complete(tl_root: Path) -> bool:
     """A checkout is usable when it has TraceLens metadata or the skill tree.
 

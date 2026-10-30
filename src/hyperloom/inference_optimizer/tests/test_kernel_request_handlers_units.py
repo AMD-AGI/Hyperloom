@@ -3773,7 +3773,7 @@ class TestRunGemmTuningHandler:
             ("fp8", "fp8_e4m3"),
             ("fp8", "e4m3fnuz"),
             ("fp8", "torch.float8_e4m3fn"),
-            ("fp16", "f16"),  # what this repo's _TRACE_DTYPE_SUFFIX emits
+            ("fp16", "f16"),  # the compact spelling kernel_candidates.json from earlier runs carries
             ("bf16", "b16"),
             ("mxfp4", "fp4x2"),
             ("fp4", "mxfp4"),

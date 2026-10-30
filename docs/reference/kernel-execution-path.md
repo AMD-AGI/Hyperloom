@@ -268,7 +268,6 @@ All kernel tool output lands under
 
 ```
 runs/<session_id>/
-  session_state.json
   kernel_candidates.json
   tracelens/
     analysis.md                 # TraceLens canonical report (not copied by Hyperloom)
