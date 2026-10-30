@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
-from hyperloom.orchestrator.policy.gate import PolicyDenied
+from hyperloom.orchestrator.policy.denial import PolicyDenied
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 

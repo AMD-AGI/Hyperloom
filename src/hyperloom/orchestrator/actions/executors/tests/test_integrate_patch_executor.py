@@ -139,7 +139,6 @@ def _stub_external_integrate_operations(monkeypatch):
     monkeypatch.setattr(integrate_bench, "run_grid", forbidden)
     monkeypatch.setattr(integrate_resolve, "materialize_candidate_patches", forbidden)
     monkeypatch.setattr(github, "pr_patches", forbidden)
-    monkeypatch.setattr(github, "fetch_raw_file", forbidden)
     monkeypatch.setattr(
         adapters,
         "get_adapter",

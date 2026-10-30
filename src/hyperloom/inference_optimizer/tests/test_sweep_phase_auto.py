@@ -278,7 +278,6 @@ async def test_stack_validation_partial_revert_becomes_failed(
     assert result["decision"] == "REVERT"
     # partial -> failed at the aggregate level: patch still live on remote pod
     assert result["status"] == "failed"
-    assert result["patch_cleanup_status"] == "recovery_required"
     assert result["patch_cleanup_action"] == "revert"
     assert all(r["status"] == "partial" for r in result["revert_result"]["stack_reverts"])
 
@@ -553,7 +552,7 @@ async def test_stack_validation_preserves_actual_measurement(
     assert result["new_tput"] == (output if valid else 0.0)
     assert result["gain_pct"] == pytest.approx(output - 100.0 if valid else -100.0)
     assert result["stack_kernel_ids"] == ["k001", "k004"]
-    assert result["patch_cleanup_status"] == "complete"
+    assert result["patch_cleanup_action"] == ""
     expected_source = optimized_source if decision == "KEEP" else original_source
     assert all(Path(entry["target_file"]).read_text(encoding="utf-8") == expected_source for entry in stack)
     assert result["bench_result"] == original_measurement
@@ -985,7 +984,7 @@ async def test_enqueue_conc_sweep_declines_when_clamp_leaves_no_time(coord):
     # 1 minute left, minus the 120 s CLOSE reserve, is a negative budget.
     coord.shared_state.remaining_minutes = lambda: 1.0
 
-    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task()
 
     assert task is None
     assert coord.tasks._tasks == {}
@@ -1002,13 +1001,13 @@ async def test_enqueue_conc_sweep_declines_a_grant_that_cannot_fit_one_pair(coor
     coord.shared_state.baseline_runtime_sec = 40.0
 
     coord.shared_state.conc_sweep_total_budget_sec = 79
-    assert await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry") is None
+    assert await coord.phase_sweep._enqueue_internal_conc_sweep_task() is None
     assert coord.tasks._tasks == {}
     assert coord.shared_state.last_conc_sweep["skip_reason"] == "grant_cannot_fit_one_pair"
 
     coord.shared_state.last_conc_sweep = {}
     coord.shared_state.conc_sweep_total_budget_sec = 80
-    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task()
     assert task is not None and task.params["total_budget_sec"] == 80
 
 
@@ -1021,7 +1020,7 @@ async def test_conc_sweep_lease_follows_the_clamped_budget(coord):
     coord.shared_state.conc_sweep_total_budget_sec = 0
     coord.shared_state.remaining_minutes = lambda: 300.0  # 5 h
 
-    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task()
 
     expected_budget = 300 * 60 - 120
     assert task.params["total_budget_sec"] == expected_budget
@@ -1036,7 +1035,7 @@ async def test_conc_sweep_unbounded_budget_opts_out_of_the_lease(coord):
     ]
     coord.shared_state.conc_sweep_total_budget_sec = 0
 
-    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task()
 
     assert task.params["total_budget_sec"] is None
     assert coord.tasks.last_lease_ttl_sec == 0
@@ -1050,7 +1049,7 @@ async def test_enqueue_conc_sweep_unbounded_budget_is_none(coord):
     ]
     coord.shared_state.conc_sweep_total_budget_sec = 0
 
-    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task()
 
     assert task is not None
     assert task.params["total_budget_sec"] is None
@@ -1065,7 +1064,7 @@ async def test_enqueue_conc_sweep_clamps_to_remaining_session_time(coord):
     coord.shared_state.conc_sweep_total_budget_sec = 9000
     coord.shared_state.remaining_minutes = lambda: 5.0
 
-    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task()
 
     assert task is not None
     assert task.params["total_budget_sec"] == 180  # 5 min - 120 s reserve
@@ -1366,7 +1365,6 @@ async def test_stack_validation_failed_revert_sets_status_failed(
 
     assert result["decision"] == "REVERT"
     assert result["status"] == "failed"
-    assert result["patch_cleanup_status"] == "recovery_required"
     assert result["patch_cleanup_action"] == "revert"
     assert result.get("error_class") == "patch_revert_incomplete"
     assert all(r["status"] == "failed" for r in result["revert_result"]["stack_reverts"])
@@ -1405,7 +1403,7 @@ async def test_stack_validation_keep_calls_finalize(
 
     assert result["decision"] == "KEEP"
     assert result["status"] == "ok"
-    assert result["patch_cleanup_status"] == "complete"
+    assert result["patch_cleanup_action"] == ""
     # One finalize call per patch in the two-entry stack.
     assert len(finalize_calls) == 2
 
@@ -1441,7 +1439,6 @@ async def test_stack_validation_keep_partial_finalize_requires_recovery(
 
     assert result["decision"] == "KEEP"
     assert result["status"] == "ok"
-    assert result["patch_cleanup_status"] == "recovery_required"
     assert result["patch_cleanup_action"] == "finalize"
 
 
@@ -1538,7 +1535,6 @@ async def test_integrate_handler_revert_partial_becomes_failed(
 
     assert result["decision"] == "REVERT"
     assert result["status"] == "failed"
-    assert result["patch_cleanup_status"] == "recovery_required"
     assert result["patch_cleanup_action"] == "revert"
     assert result.get("error_class") == "patch_revert_incomplete"
 
@@ -1554,7 +1550,7 @@ async def test_conc_sweep_task_carries_catalogue_lanes(coord):
     ]
     coord.shared_state.remaining_minutes = lambda: 300.0
 
-    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task()
 
     assert task is not None
     expected_lanes = sorted(ACTION_CATALOGUE["conc_sweep"].requires_lanes)
@@ -2392,14 +2388,14 @@ async def test_enqueue_conc_sweep_grants_the_phase_its_budget_and_lease(coord):
     coord.shared_state.remaining_minutes = lambda: 62.4
     coord.shared_state._now_unix = lambda: 1_800_000_000.0
 
-    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task()
 
     assert task.params["total_budget_sec"] == 3624
     assert coord.shared_state.conc_sweep_granted_until_unix == 1_800_000_000.0 + 3624 + 600
 
     # A re-entry that finds the task already queued does not move the grant.
     coord.shared_state._now_unix = lambda: 1_800_000_100.0
-    await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+    await coord.phase_sweep._enqueue_internal_conc_sweep_task()
     assert coord.shared_state.conc_sweep_granted_until_unix == 1_800_000_000.0 + 3624 + 600
 
 
@@ -2411,6 +2407,6 @@ async def test_enqueue_unbounded_conc_sweep_grants_nothing(coord):
     ]
     coord.shared_state.conc_sweep_total_budget_sec = 0
 
-    await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+    await coord.phase_sweep._enqueue_internal_conc_sweep_task()
 
     assert coord.shared_state.conc_sweep_granted_until_unix == 0.0

@@ -25,7 +25,7 @@ from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     sync_agentx_phase_wait,
 )
 from hyperloom.orchestrator.actions.executors._workload_envs import LaunchLayer
-from hyperloom.orchestrator.kernel._rung_outcomes import _budget_skip_result
+from hyperloom.orchestrator.kernel._rung_outcomes import _SWEEP_BUDGET_STOP, _deadline_skip_result
 
 
 @pytest.mark.parametrize("declared", [1800, 2400, 36000])
@@ -206,7 +206,7 @@ def test_a_rung_that_never_ran_publishes_no_grant(monkeypatch):
     """
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     variant = GridVariant("optimized_conc20", extra_envs={"CONC": "20", "NUM_PROMPTS": "100"})
-    assert _budget_skip_result(variant).granted_cap_sec is None
+    assert _deadline_skip_result(variant, _SWEEP_BUDGET_STOP).granted_cap_sec is None
 
 
 def test_the_client_phase_wait_is_exported_at_the_rungs_own_cap():

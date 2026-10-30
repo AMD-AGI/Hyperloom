@@ -18,11 +18,12 @@ from typing import Awaitable, Callable
 
 from ..actions.executors._kernel_agent_tool import HandlerResult
 from ..actions.executors.trace_analyze import trace_analyze_handler
-from ._forge_fusion_run import _run_forge_fusion
+from ._forge_fusion_run import run_fusion_handler
 from ._forge_gemm_tuning import _run_forge_gemm_tuning
 from .integrate_accuracy import _integrate_accuracy_verdict
 from ._integrate_outcomes import (
     _applied_patch_result,
+    _FailureVerdict,
     _integrate_failure,
     _integrate_request_refusal,
     _integrate_result,
@@ -44,7 +45,6 @@ from ._integrate_rebaseline import (
     _integrate_rebaseline,
     _multi_node_restart_failure,
     _run_integrate_rebaseline_with_lock_retry,
-    _sweep_integrate_aiter_locks,
 )
 from ._source_import import _confirm_source_import
 from ._tuning_audit_trace import _trace_gemm_tuning_run
@@ -72,21 +72,6 @@ async def run_gemm_tuning_handler(
     result.setdefault("macro_cycle", payload.get("macro_cycle"))
     _trace_gemm_tuning_run(result, session_dir=session_dir)
     return result
-
-
-async def run_fusion_handler(payload: dict, *, session_dir: Path) -> HandlerResult:
-    """Run autonomous kernel fusion via forge-fusion (serving-validated).
-
-    Registered as the ``run_fusion`` kernel request. Authors serving-safe fused
-    kernels and returns a source patch + env flags for the integrate gate.
-    """
-    return await _run_forge_fusion(payload, session_dir=session_dir)
-
-
-# TraceLens picks its steady-state window by writing split chunks and selecting
-# one file; the TraceLens-free reader picks a window in memory and never writes
-# chunks. Both answer "is the window this analysis rests on trustworthy", so the
-# event normalizes them onto one shape and keeps the raw form under ``selected``.
 
 
 log = logging.getLogger(__name__)
@@ -165,10 +150,6 @@ async def integrate_handler(
     }
     rebaseline = _integrate_rebaseline(payload, state, session_dir=session_dir, performance_policy=performance_policy)
     with _forced_cpp_itfs_rebuild(apply_result):
-        # The sweep runs even when the regular JIT cache is warm: cpp_itfs attention
-        # uses the separate AITER_ROOT_DIR/build tree and can carry a stale baton
-        # from a timed-out Forge driver.
-        _sweep_integrate_aiter_locks(reason="integrate server startup")
         restart_failure = await _multi_node_restart_failure(rebaseline, payload, apply_result)
         if restart_failure is not None:
             return restart_failure
@@ -182,7 +163,7 @@ async def integrate_handler(
         except Exception as exc:  # isolation boundary: one integrate rebaseline, recorded as a REVERT
             log.warning("integrate_handler: rebaseline failed: %s", exc, exc_info=True)
             return _integrate_failure(
-                payload, apply_result, error_class="rebaseline_exception", error=repr(exc), decision="REVERT"
+                payload, apply_result, _FailureVerdict("rebaseline_exception", repr(exc), "REVERT")
             )
     if not is_valid_measurement(bench_result):
         return _unmeasured_integration_failure(payload, apply_result=apply_result, bench_result=bench_result)
@@ -192,11 +173,11 @@ async def integrate_handler(
         return _integrate_failure(
             payload,
             apply_result,
-            error_class="cpp_itfs_rebuild_not_verified",
-            error=(
-                "re-baseline did not produce a freshly-built cpp_itfs lib.so; refusing to score a possibly-stale binary"
+            _FailureVerdict(
+                "cpp_itfs_rebuild_not_verified",
+                "re-baseline did not produce a freshly-built cpp_itfs lib.so; refusing to score a possibly-stale binary",
+                "NEEDS_REVIEW",
             ),
-            decision="NEEDS_REVIEW",
             rebuild_check=rebuild_check,
         )
 
@@ -225,9 +206,7 @@ async def integrate_handler(
         return _integrate_failure(
             payload,
             apply_result,
-            error_class=EVAL_KIND_CONTEXT_TOO_SMALL,
-            error=accuracy_gate["reason"],
-            decision="NEEDS_REVIEW",
+            _FailureVerdict(EVAL_KIND_CONTEXT_TOO_SMALL, accuracy_gate["reason"], "NEEDS_REVIEW"),
             gain_pct=performance.gain_pct,
             accuracy_gate=accuracy_gate,
         )
@@ -261,22 +240,9 @@ KERNEL_REQUEST_HANDLERS: dict[str, HandlerFn] = {
 }
 
 
-def get_handler(kind: str) -> HandlerFn | None:
-    """Look up the programmatic handler registered for a request kind.
-
-    Args:
-        kind (str): The kernel request ``kind`` to resolve.
-
-    Returns:
-        HandlerFn | None: The registered handler coroutine function, or
-            ``None`` when no handler is registered for ``kind``.
-    """
-    return KERNEL_REQUEST_HANDLERS.get(kind)
-
-
 __all__ = [
     "KERNEL_REQUEST_HANDLERS",
-    "get_handler",
     "integrate_handler",
+    "run_fusion_handler",
     "run_gemm_tuning_handler",
 ]

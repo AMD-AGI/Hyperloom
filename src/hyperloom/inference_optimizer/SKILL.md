@@ -551,7 +551,7 @@ of `src/hyperloom/inference_optimizer/assets/install.sh`):
 
 | Component | Provided by |
 |---|---|
-| `ray==2.44.1`, or the lowest published version above it that has a wheel for this interpreter; `RAY_VERSION` is honoured verbatim. No `click` pin: the install is certified by Ray's own parser accepting the `ray start` argv Hyperloom passes (`RAY_START_ARGV`) | pip |
+| `ray==2.44.1`, or the lowest published version above it that has a wheel for this interpreter; `RAY_VERSION` is honoured verbatim. The install is certified by Ray's own parser accepting the `ray start` argv Hyperloom passes (`RAY_START_ARGV`). `click` changes in one case only: when Ray 2.44.1's CLI fails to import under `click` 8.3+ (`is not a valid Sentinel`), the installer and preflight hold `click<8.3` once and certify again; nothing else changes `click` | pip |
 | TraceLens public (editable install) | `ensure_tracelens` (`pip install -e` at `$TRACELENS_ROOT`; skills, patches, CLI, analysis orchestrator) |
 | TraceLens-internal (editable install, **optional**) | `ensure_tracelens` (`pip install -e` at `$TRACELENS_INTERNAL_ROOT` only when set; mirrors read-only checkout to `${HYPERLOOM_ROOT}/TraceLens-internal`; rehydration module). Unset => open-source-only. |
 | GEAKv4 Claude Code workflow checkout + SDK deps | `ensure_geak` |
@@ -757,7 +757,8 @@ and the operator's stated value is lost:
 | Model path | `--model` | required |
 | Framework | `--framework` | `sglang` (default) / `vllm` / `atom` / `xdit` / `custom` — atom is single-node-only; xdit is scriptable diffusion (`img/s`, no serving server); `custom` is an operator-supplied workload and **additionally requires `--framework-path` and `--benchmark-scripts-dir`** (see below) |
 | Custom source tree | `--framework-path` | **Required for `--framework custom`.** The workload's own checkout; patches are authored against it. |
-| Custom bench scripts | `--benchmark-scripts-dir` | **Required for `--framework custom`.** Holds the entrypoint, looked up as `custom_<gpu-type>.sh`. Every knob it reads must be forwarded as `--extra-env`; the throughput unit is whatever its report declares. |
+| Custom bench scripts | `--benchmark-scripts-dir` | **Required for `--framework custom`.** Holds the entrypoint, looked up as `custom_<gpu-type>.sh`. Every knob it reads must be forwarded as `--extra-env`; the throughput unit is whatever its report declares. May also hold `levers.json` — the adapter's declared explore grid (see below). |
+| Declared levers (`custom`) | `<benchmark-scripts-dir>/levers.json` | Optional. A JSON **list** of explore variants the adapter declares for itself — `{"name": ..., "extra_envs": {...}}` (an object), or any of `extra_args` / `remove_args` / `unset_envs` / `args_mode: "replace"`. `custom` has no framework source to infer knobs from, so without this its seed grid is empty and EXPLORE has nothing to sweep until the model guesses. Declarations seed **ahead of** model proposals (a model variant of the same name wins) and are not re-seeded once their name appears in the explore ledger's `tested` rows. A malformed file — or one whose variant normalizes to nothing a restart could apply — fails the launch with exit 2; it never degrades to an empty grid. |
 | xDiT model name | `--xdit-model-name` | **Required for `--framework xdit`.** The xDiT model registry name (e.g., `FLUX.2-dev` or `black-forest-labs/FLUX.2-dev`). xDiT uses this to select the correct diffusion pipeline class; unlike vLLM/SGLang, it cannot infer the pipeline from the model path alone. |
 | GPU type | `--gpu-type` | rocm-smi auto-detect when unset |
 | Model class | `--model-class` | categorical key for the deterministic consumers (atom seed grid, framework-agent gap search token, recipe key, prompt label); when unset, Coordinator boot infers and persists it from model metadata or model-path family keywords. For richer advisory model context see Step 1.5 (`model_arch.json`) |
@@ -1194,8 +1195,8 @@ below describe the runtime behavior operators observe.
   (`benchmark.envs`). Both backends export that mapping to the server env, and
   bypass additionally launches the server via `python -m` with that
   interpreter. This guarantees the server loads the exact build.
-- **`build_budget_sec`.** Per-build-action wall-clock timeout knob; `0` selects
-  the per-component default.
+- **Build budget.** Each build runs under its component's fixed wall-clock
+  budget.
 
 See `docs/reference/environment-variables.md` "Targeted builds (Rung 5)" for the
 full env-var set, and `docs/reference/session-breakdown.md` for the emitted

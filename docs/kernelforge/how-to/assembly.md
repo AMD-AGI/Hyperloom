@@ -262,9 +262,9 @@ Gluon and a standalone HIP build through the same preparation gates, then replay
 each patch in a fresh checkout. These tests require their respective compilers.
 
 ```bash
-pytest -q src/kernelforge/tests/test_assembly_campaign_gpu.py \
-  src/kernelforge/tests/test_assembly_flydsl_gpu.py \
-  src/kernelforge/tests/test_assembly_triton_gpu.py
+pytest -q src/kernelforge/tests/kernel_backends/assembly/test_assembly_campaign_gpu.py \
+  src/kernelforge/tests/kernel_backends/assembly/test_assembly_flydsl_gpu.py \
+  src/kernelforge/tests/kernel_backends/assembly/test_assembly_triton_gpu.py
 ```
 
 These optional tests require ROCm PyTorch, FlyDSL and a compatible GPU. They verify

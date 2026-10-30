@@ -570,7 +570,7 @@ async def test_gemm_paired_materializes_each_frozen_recipe_controls(
     )
 
     assert verdict is not None
-    assert verdict.pairs == [(100.0, 110.0), (100.0, 110.0)]
+    assert verdict.median_delta_pct == 10.0 and verdict.reason == "candidate_faster"
     assert len(payloads) == len(benchmarks) == 4
     for idx, (payload, benchmark) in enumerate(zip(payloads, benchmarks)):
         recipe = reference if idx % 2 == 0 else candidate
@@ -958,12 +958,7 @@ async def test_integrate_retries_once_after_stale_aiter_baton(tmp_path, monkeypa
             {"scanned": 1, "deleted": 1, "errors": 0},
         ]
     )
-    for _module in (krh, integrate_rebaseline):
-        monkeypatch.setattr(
-            _module,
-            "_sweep_integrate_aiter_locks",
-            lambda **_kwargs: next(sweeps),
-        )
+    monkeypatch.setattr(integrate_rebaseline, "_sweep_integrate_aiter_locks", lambda **_kwargs: next(sweeps))
     calls = 0
 
     async def _executor(_ctx):
@@ -1002,12 +997,7 @@ async def test_integrate_does_not_delete_or_retry_live_baton_owner(tmp_path, mon
             },
         ]
     )
-    for _module in (krh, integrate_rebaseline):
-        monkeypatch.setattr(
-            _module,
-            "_sweep_integrate_aiter_locks",
-            lambda **_kwargs: next(sweeps),
-        )
+    monkeypatch.setattr(integrate_rebaseline, "_sweep_integrate_aiter_locks", lambda **_kwargs: next(sweeps))
     calls = 0
 
     async def _executor(_ctx):
@@ -1036,8 +1026,9 @@ async def test_integrate_retries_once_after_aiter_jit_registry_mismatch(tmp_path
         dropped.append({"envs": envs, "backup_dir": backup_dir, "also_modules": also_modules})
         return {"action": "invalidate"}
 
-    for _module in (krh, integrate_rebaseline):
-        monkeypatch.setattr(_module, "_sweep_integrate_aiter_locks", lambda **_kwargs: {"scanned": 0, "deleted": 0})
+    monkeypatch.setattr(
+        integrate_rebaseline, "_sweep_integrate_aiter_locks", lambda **_kwargs: {"scanned": 0, "deleted": 0}
+    )
     monkeypatch.setattr(
         "hyperloom.orchestrator.actions.executors._aiter_jit.drop_serving_so_for_envs",
         _drop,
@@ -1080,8 +1071,9 @@ async def test_integrate_registry_retry_does_not_restamp_unrelated_retry_failure
         encoding="utf-8",
     )
 
-    for _module in (krh, integrate_rebaseline):
-        monkeypatch.setattr(_module, "_sweep_integrate_aiter_locks", lambda **_kwargs: {"scanned": 0, "deleted": 0})
+    monkeypatch.setattr(
+        integrate_rebaseline, "_sweep_integrate_aiter_locks", lambda **_kwargs: {"scanned": 0, "deleted": 0}
+    )
     monkeypatch.setattr(
         "hyperloom.orchestrator.actions.executors._aiter_jit.drop_serving_so_for_envs",
         lambda *args, **kwargs: {"action": "invalidate"},
@@ -2263,8 +2255,7 @@ async def test_integrate_handler_rejects_zero_base_tput(session_dir):
 
 
 def test_integrate_registered_under_two_aliases():
-    assert krh.get_handler("integrate") is not None
-    assert krh.get_handler("integrate") is krh.get_handler("apply_patch")
+    assert krh.KERNEL_REQUEST_HANDLERS["integrate"] is krh.KERNEL_REQUEST_HANDLERS["apply_patch"]
 
 
 # Coordinator wiring of integrate request

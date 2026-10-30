@@ -19,7 +19,8 @@ from hyperloom.common.checkpoint_quant import checkpoint_format
 from hyperloom.common.env import is_truthy
 from hyperloom.inference_optimizer.model_config_utils import load_model_config_dict
 
-from ._integrate_payload import _normalize_precision, _requested_framework, _requested_setting
+from . import forge_gemm_tuning
+from ._integrate_payload import _normalize_precision, _state_framework, _state_setting
 from ._untuned_gemm_csv import _resolve_fp8_quant_type
 
 log = logging.getLogger(__name__)
@@ -77,27 +78,22 @@ def _derive_gemm_skip_reason(tuners_skipped: Any) -> str:
 _FORGE_GEMM_PREFLIGHT_TIMEOUT_SEC = 30
 
 
-def _forge_gemm_tune_probe_cmd() -> list[str]:
-    """Return the exact interpreter and CLI prefix used by GEMM tuning."""
-    return [sys.executable, "-m", "kernelforge.cli", "gemm-tune", "--help"]
-
-
 def _forge_gemm_tune_available() -> bool:
-    """Check exactly what ``_build_cmd`` will run, in the interpreter it runs in.
+    """Check exactly what ``forge_gemm_tuning.build_command`` will run, in the interpreter it runs in.
 
     The tuner is a subpackage of the ``kernelforge`` that ships in this
     distribution, invoked as ``sys.executable -m kernelforge.cli gemm-tune run``.
     Vendoring forge in-tree removes the cross-checkout failures this probe was
     built for, but not the reason it is a subprocess: ``find_spec`` proves the
     module is importable and says nothing about whether ``gemm-tune`` is
-    registered on the CLI, which is the thing ``_build_cmd`` actually needs. So
+    registered on the CLI, which is the thing ``build_command`` actually needs. So
     ask the subcommand itself -- in a subprocess, so a heavy CLI import cannot
     land in the orchestrator's own process. ``--help`` exits 0 only if
     ``kernelforge.cli`` imported and ``gemm-tune`` is registered on it.
     """
     try:
         proc = subprocess.run(
-            _forge_gemm_tune_probe_cmd(),
+            forge_gemm_tuning.gemm_tune_argv("--help"),
             capture_output=True,
             text=True,
             timeout=_FORGE_GEMM_PREFLIGHT_TIMEOUT_SEC,
@@ -152,27 +148,20 @@ def _resolve_aiter_root_for_forge() -> str:
     return ""
 
 
-def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
+def _resolve_forge_precision_and_quant(state) -> tuple[str, str]:
     """Resolve the actual runtime precision and quant_type for forge tuning.
 
     Priority:
-    1. Explicit payload override
-    2. --quantization from current_best server args (actual runtime)
-    3. state.precision (session-level, may be stale)
-    4. Default: bf16
+    1. --quantization from current_best server args (actual runtime)
+    2. state.precision (session-level, may be stale)
+    3. Default: bf16
 
     Returns (precision, quant_type) tuple.
     """
     from hyperloom.inference_optimizer.grid_server_args import server_arg_value
     from hyperloom.inference_optimizer.roofline_ceiling import resolve_runtime_workload
 
-    quant_type = str(payload.get("quant_type") or "auto").strip()
-
-    if payload.get("precision"):
-        precision = _normalize_precision(payload["precision"])
-        if precision == "fp8" and quant_type.lower() == "auto":
-            quant_type = _requested_fp8_quant_type(state, payload)
-        return precision, quant_type
+    quant_type = "auto"
 
     # Resolve from actual server args (baseline yaml + current_best overlay).
     current_best = getattr(state, "current_best", None) or {}
@@ -192,7 +181,7 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
         if per_token_signal:
             quant_type = "per_token"
         else:
-            quant_type = _requested_fp8_quant_type(state, payload)
+            quant_type = _state_fp8_quant_type(state)
         return precision, quant_type
 
     if quantization_arg in ("fp4", "mxfp4"):
@@ -202,21 +191,21 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
     # is one label for layers the checkpoint can store differently (MXFP4 experts, fp8 attention), and forge can tell
     # them apart only when it is left to route each lane itself.
     precision = _normalize_precision(state.precision)
-    model_path = _requested_setting(payload, state, "model_path")
+    model_path = _state_setting(state, "model_path")
     if precision and precision == checkpoint_format(
         (load_model_config_dict(model_path) or {}).get("quantization_config")
     ):
         return "auto", quant_type
     if not precision:
         precision = "bf16"
-    if precision == "fp8" and quant_type.lower() == "auto":
-        quant_type = _requested_fp8_quant_type(state, payload)
+    if precision == "fp8":
+        quant_type = _state_fp8_quant_type(state)
     return precision, quant_type
 
 
-def _requested_fp8_quant_type(state, payload: dict) -> str:
+def _state_fp8_quant_type(state) -> str:
     return _resolve_fp8_quant_type(
-        _requested_setting(payload, state, "model_path"),
-        _requested_setting(payload, state, "gpu_type"),
-        _requested_framework(payload, state),
+        _state_setting(state, "model_path"),
+        _state_setting(state, "gpu_type"),
+        _state_framework(state),
     )

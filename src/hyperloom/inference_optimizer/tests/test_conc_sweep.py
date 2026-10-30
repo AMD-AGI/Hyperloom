@@ -27,7 +27,6 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
 from hyperloom.orchestrator.kernel import conc_sweep as conc_sweep_module, kernel_decisions
 from hyperloom.orchestrator.kernel.conc_sweep import (
     DEFAULT_CONCS,
-    DEFAULT_TOTAL_BUDGET_SEC,
     _Arm,
     _build_arm_grid,
     _flush_conc_sweep_report,
@@ -221,7 +220,7 @@ def test_conc_sweep_preserves_retained_launch_controls(
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=launch_children),
         patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_fake_materialize),
     ):
-        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[1, 2]))
+        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[1, 2], total_budget_sec=9000))
     assert payload["status"] == "succeeded"
     assert len(children) == 4
     for name, (args, env) in children:
@@ -288,7 +287,7 @@ def test_conc_sweep_loads_retained_overlay_only_in_optimized_arm(
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_child_run_grid),
         patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_fake_materialize),
     ):
-        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[1, 2]))
+        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[1, 2], total_budget_sec=9000))
     assert payload["status"] == "succeeded"
     assert len(child_results) == 4
     for name, loaded in child_results:
@@ -315,7 +314,7 @@ def test_conc_sweep_does_not_benchmark_without_retained_overlay(
         current_best={"extra_server_args": "--max-running-requests 64", "final_overlay": overlay_path},
     )
     with patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid") as grid:
-        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[1]))
+        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[1], total_budget_sec=9000))
     grid.assert_not_called()
     assert payload["status"] == "skipped"
     assert payload["skip_reason"] == "optimized_overlay_unavailable"
@@ -412,7 +411,7 @@ def test_run_conc_sweep_skip_short_circuits(
     with patch(
         "hyperloom.orchestrator.kernel.conc_sweep.run_grid",
     ) as mock_run_grid:
-        payload = asyncio.run(run_conc_sweep(state, session_dir))
+        payload = asyncio.run(run_conc_sweep(state, session_dir, total_budget_sec=9000))
 
     assert payload["status"] == "skipped"
     assert payload["skip_reason"] == reason
@@ -428,7 +427,7 @@ def test_run_conc_sweep_skip_empty_conc_list(
     with patch(
         "hyperloom.orchestrator.kernel.conc_sweep.run_grid",
     ) as mock_run_grid:
-        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[]))
+        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[], total_budget_sec=9000))
     assert payload["status"] == "skipped"
     assert payload["skip_reason"] == "no_optimization_to_compare" or payload["skip_reason"] == "empty_conc_list"
     # has_opt passes, so empty list is the reason.
@@ -446,7 +445,7 @@ def test_run_conc_sweep_skip_missing_config(
     with patch(
         "hyperloom.orchestrator.kernel.conc_sweep.run_grid",
     ) as mock_run_grid:
-        payload = asyncio.run(run_conc_sweep(state, session_dir))
+        payload = asyncio.run(run_conc_sweep(state, session_dir, total_budget_sec=9000))
     assert payload["status"] == "skipped"
     assert payload["skip_reason"] == "baseline_config_missing"
     mock_run_grid.assert_not_called()
@@ -532,6 +531,7 @@ def test_run_conc_sweep_happy_path_writes_reports(
                 state,
                 session_dir,
                 concs=[1, 4, 16],
+                total_budget_sec=9000,
             )
         )
 
@@ -602,7 +602,7 @@ def test_run_conc_sweep_canonicalizes_gpu_type_to_runner(
             side_effect=_fake_materialize,
         ),
     ):
-        asyncio.run(run_conc_sweep(state, session_dir, concs=[1]))
+        asyncio.run(run_conc_sweep(state, session_dir, concs=[1], total_budget_sec=9000))
 
     assert seen["materialize_gpu"] == "mi300x"
     assert seen["run_grid_gpu"] == "mi300x"
@@ -715,6 +715,7 @@ def test_run_conc_sweep_optimized_oom_yields_failed_pair(
                 state,
                 session_dir,
                 concs=[1, 4, 16],
+                total_budget_sec=9000,
             )
         )
 
@@ -758,6 +759,7 @@ def test_run_conc_sweep_args_only_optimization_triggers_run(
                 state,
                 session_dir,
                 concs=[1, 4],
+                total_budget_sec=9000,
             )
         )
 
@@ -798,6 +800,7 @@ def test_run_conc_sweep_envs_only_optimization_triggers_run(
                 state,
                 session_dir,
                 concs=[1],
+                total_budget_sec=9000,
             )
         )
 
@@ -832,6 +835,7 @@ def test_run_conc_sweep_does_not_touch_final_json(
                 state,
                 session_dir,
                 concs=[1],
+                total_budget_sec=9000,
             )
         )
 
@@ -856,7 +860,7 @@ def test_default_concs_is_powers_of_two():
 
 def test_default_total_budget_is_two_and_half_hours():
     """Doc-pin: default total wall-clock budget is 2.5h."""
-    assert DEFAULT_TOTAL_BUDGET_SEC == 9000
+    assert SharedState().conc_sweep_total_budget_sec == 9000
 
 
 # Total wall-clock budget
@@ -1315,7 +1319,7 @@ def test_each_rung_sends_the_request_window_the_session_measures_with(session_di
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
         patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_fake_materialize),
     ):
-        asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16]))
+        asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16], total_budget_sec=9000))
 
     assert sent == {f"{arm}_conc{conc}": conc * 3 for arm in ("baseline", "optimized") for conc in (4, 16)}
 
@@ -1358,7 +1362,7 @@ def test_each_arm_runs_the_anchor_first_then_cheapest_first(
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
         patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_fake_materialize),
     ):
-        asyncio.run(run_conc_sweep(state, session_dir, concs=[1, 4, 16]))
+        asyncio.run(run_conc_sweep(state, session_dir, concs=[1, 4, 16], total_budget_sec=9000))
 
     assert call_log == [f"{arm}_conc{conc}" for arm in ("baseline", "optimized") for conc in (4, 1, 16)]
 
@@ -1736,7 +1740,7 @@ def test_mid_sweep_summary_keeps_the_requested_conc_order(
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
         patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_fake_materialize),
     ):
-        asyncio.run(run_conc_sweep(state, session_dir, concs=[1, 8, 4]))
+        asyncio.run(run_conc_sweep(state, session_dir, concs=[1, 8, 4], total_budget_sec=9000))
 
     assert len(writes) > 1
     assert [write["concs_requested"] for write in writes] == [[1, 8, 4]] * len(writes)
@@ -1816,21 +1820,6 @@ def test_render_conc_sweep_curve_writes_png(tmp_path: Path):
     assert result == out_path
     assert out_path.exists()
     assert out_path.stat().st_size > 0
-
-
-def test_render_conc_sweep_curve_from_file(tmp_path: Path):
-    pytest.importorskip("matplotlib")
-    from hyperloom.orchestrator.kernel.conc_sweep_plot import ConcCurveOptions, render_conc_sweep_curve
-
-    payload = {
-        "baseline": {"points": [{"conc": 8, "output_throughput": 800.0}]},
-        "optimized": {"points": []},
-    }
-    json_file = tmp_path / "summary.json"
-    json_file.write_text(json.dumps(payload))
-    result = render_conc_sweep_curve(json_file, tmp_path / "out.png", ConcCurveOptions(tp=1))
-    assert result is not None
-    assert result.exists()
 
 
 class TestTheChartFollowsTheGradedAxis:
@@ -2012,46 +2001,6 @@ class TestTheCurveFollowsTheLadder:
         assert plot._unpaired([4.0, 8.0], [8.0]) == [True, False]
 
 
-class TestTheRooflineNeedsBothItsAxisAndARealShape:
-    """``_ceiling_series`` returns a decode-only output-throughput bound, in the output pair's units, computed from the session's ISL/OSL."""
-
-    def _payload(self, mode: str, metric: str) -> dict[str, Any]:
-        return {
-            "benchmark_mode": mode,
-            "summary": {"metric": metric},
-            "roofline_ceiling": {"rows": [{"conc": 8, "t_peak_tok_s": 4000.0}]},
-            "baseline": {
-                "points": [
-                    {
-                        "conc": 8,
-                        "output_throughput": 183.44,
-                        "total_token_throughput": 25984.8,
-                        "e2e_norm_intvty_p90": 447.2,
-                    }
-                ]
-            },
-            "optimized": {"points": []},
-        }
-
-    def _drew_it(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, payload: dict[str, Any]) -> bool:
-        from hyperloom.orchestrator.kernel.conc_sweep_plot import ConcCurveOptions, render_conc_sweep_curve
-
-        calls = _install_fake_matplotlib(monkeypatch)
-        out_path = tmp_path / "curve.png"
-        assert render_conc_sweep_curve(payload, out_path, ConcCurveOptions(tp=8, draw_ceiling=True)) == out_path
-        return any("roofline" in str(kwargs.get("label", "")).lower() for _args, kwargs in calls["plots"])
-
-    def test_a_synthetic_output_chart_draws_it(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-        """Positive control: without it the two denials below prove nothing."""
-        assert self._drew_it(tmp_path, monkeypatch, self._payload("synthetic", "output_throughput")) is True
-
-    def test_a_total_y_axis_is_not_the_bounds_axis(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-        assert self._drew_it(tmp_path, monkeypatch, self._payload("synthetic", "total_token_throughput")) is False
-
-    def test_an_agentic_replay_has_no_real_isl_to_bound(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-        assert self._drew_it(tmp_path, monkeypatch, self._payload("agentx", "output_throughput")) is False
-
-
 def test_render_conc_sweep_curve_missing_matplotlib_returns_none(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2096,22 +2045,6 @@ def test_conc_sweep_plot_series_helpers_filter_and_sort_points_by_conc():
     assert ys == [150.0, 400.0]
     assert concs == [2.0, 4.0]
     assert conc_sweep_plot._arm_series([{"conc": 0, "output_throughput": 0}], 1.0, axes) == ([], [], [])
-
-    cx, cy = conc_sweep_plot._ceiling_series(
-        {
-            "rows": [
-                {"conc": 4, "t_peak_tok_s": 1000},
-                {"conc": 2, "t_peak_tok_s": "600"},
-                {"conc": None, "t_peak_tok_s": 1},
-                {"conc": "bad", "t_peak_tok_s": 1},
-                {"conc": 1, "t_peak_tok_s": -1},
-            ]
-        },
-        tp_eff=4.0,
-    )
-    assert cx == [250.0, 300.0]
-    assert cy == [250.0, 150.0]
-    assert conc_sweep_plot._ceiling_series({"rows": [{"conc": 0, "t_peak_tok_s": 0}]}, 1.0) == ([], [])
 
 
 def _install_fake_matplotlib(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
@@ -2193,19 +2126,18 @@ def test_render_conc_sweep_curve_with_fake_matplotlib(tmp_path: Path, monkeypatc
     payload = {
         "baseline": {"points": [{"conc": 4, "output_throughput": 800.0}]},
         "optimized": {"points": [{"conc": 4, "output_throughput": 1200.0}]},
-        "roofline_ceiling": {"rows": [{"conc": 4, "t_peak_tok_s": 1600.0}]},
     }
     out_path = tmp_path / "plots" / "curve.png"
     result = render_conc_sweep_curve(
         payload,
         out_path,
-        ConcCurveOptions(model_label="M", gpu_label="MI300X", tp=4, isl=1024, osl=512, draw_ceiling=True),
+        ConcCurveOptions(model_label="M", gpu_label="MI300X", tp=4, isl=1024, osl=512),
     )
 
     assert result == out_path
     assert out_path.read_bytes() == b"fake-png"
     assert calls["backend"] == "Agg"
-    assert len(calls["plots"]) == 3
+    assert len(calls["plots"]) == 2
     assert len(calls["annotations"]) == 2
     assert "ISL=1024 OSL=512" in calls["titles"][0][0]
     assert calls["closed"] is True
@@ -2272,7 +2204,7 @@ def test_single_server_boots_on_the_first_rung_and_reuses(
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
         patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_fake_materialize),
     ):
-        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16, 64]))
+        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16, 64], total_budget_sec=9000))
 
     assert payload["status"] == "succeeded"
     # 2 arms × 3 concs = 6 run_grid calls.
@@ -2347,7 +2279,7 @@ def test_single_server_boot_only_is_measured_by_reuse_round(
 
     monkeypatch.setattr("hyperloom.orchestrator.kernel.conc_sweep.run_grid", _fake_run_grid)
 
-    payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[32, 16]))
+    payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[32, 16], total_budget_sec=9000))
 
     assert [call["name"] for call in calls[:3]] == [
         "baseline_conc16",
@@ -2382,7 +2314,7 @@ def test_a_session_closing_during_a_boot_only_round_measures_nothing_on_it(
         return [booted]
 
     monkeypatch.setattr("hyperloom.orchestrator.kernel.conc_sweep.run_grid", _fake_run_grid)
-    payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16]))
+    payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16], total_budget_sec=9000))
 
     assert calls == ["baseline_conc4"]
     assert payload["budget_skip_reason"] == "session_deadline_reserve"
@@ -2416,7 +2348,7 @@ def test_single_server_boot_that_failed_is_retried_by_the_next_rung(
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
         patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_fake_materialize),
     ):
-        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[16, 64]))
+        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[16, 64], total_budget_sec=9000))
 
     # The optimized arm still measures the rung the baseline failed at, so the failure is attributed.
     assert boot_attempts == ["baseline_conc16", "baseline_conc64", "optimized_conc16"]
@@ -2452,7 +2384,7 @@ def test_single_server_not_eligible_restarts_the_server_per_rung(
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
         patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_fake_materialize),
     ):
-        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16]))
+        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16], total_budget_sec=9000))
 
     assert payload["status"] == "succeeded"
     # Option B: no server_lifecycle kwarg on any call.
@@ -2480,7 +2412,7 @@ def test_single_server_reuse_loop_stops_on_closing_phase(
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
         patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_fake_materialize),
     ):
-        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16, 64]))
+        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16, 64], total_budget_sec=9000))
 
     all_points = payload["baseline"]["points"] + payload["optimized"]["points"]
     skipped = [p for p in all_points if p["status"] == "skipped"]
@@ -2509,7 +2441,7 @@ def test_single_server_reuse_exception_recorded_as_failed(
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
         patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_fake_materialize),
     ):
-        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16]))
+        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16], total_budget_sec=9000))
 
     all_points = payload["baseline"]["points"] + payload["optimized"]["points"]
     failed = [p for p in all_points if p["status"] == "failed"]
@@ -2542,7 +2474,7 @@ def test_single_server_boot_exception_is_the_rungs_failure(
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
         patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_fake_materialize),
     ):
-        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[16, 64]))
+        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[16, 64], total_budget_sec=9000))
 
     all_points = payload["baseline"]["points"] + payload["optimized"]["points"]
     # conc16 boot exception → recorded as failed; conc64 boots and succeeds.
@@ -2573,7 +2505,7 @@ def test_single_server_pre_arm_skip_on_closing_phase(
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
         patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_fake_materialize),
     ):
-        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16]))
+        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16], total_budget_sec=9000))
 
     # No run_grid calls; all variants skipped before any arm starts.
     assert ran == []
@@ -2624,9 +2556,9 @@ def test_a_cancelled_sweep_stops_the_ladder_and_is_not_failed(
 
     if scope_published:
         with use_cancel_scope(scope):
-            payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[2, 4, 8]))
+            payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[2, 4, 8], total_budget_sec=9000))
     else:
-        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[2, 4, 8]))
+        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[2, 4, 8], total_budget_sec=9000))
 
     assert calls == ["baseline_conc2"], f"the ladder kept going after the cancel: {calls}"
     assert payload["status"] == "cancelled"

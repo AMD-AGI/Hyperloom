@@ -91,11 +91,6 @@ class PatchMergeOutcome:
     #: to git failing to write a patch that had already passed ``--check``.
     conflicted: bool = False
 
-    @property
-    def reconstructed(self) -> bool:
-        """Whether the worktree holds a merge rather than the patch verbatim."""
-        return self.applied and self.strategy not in ("", STRATEGY_STRICT)
-
     def note(self) -> str:
         """The steps taken, as a suffix for the integration result's reason."""
         return " (" + "; ".join(self.steps) + ")" if self.steps else ""

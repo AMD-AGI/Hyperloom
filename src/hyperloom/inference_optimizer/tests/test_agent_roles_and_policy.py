@@ -19,10 +19,10 @@ from hyperloom.inference_optimizer.protocol.intent import (
 )
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_OWNED_KERNEL_REQUEST_KINDS,
-)
-from hyperloom.orchestrator.policy.gate import (
     KERNEL_AGENT_OWNED_ACTIONS,
-    PolicyDenied,
+)
+from hyperloom.orchestrator.policy.denial import PolicyDenied
+from hyperloom.orchestrator.policy.gate import (
     PolicyGate,
     REQUEST_ROUTING,
     REVIEW_VERDICT_SOURCE_ALLOWLIST,
@@ -200,9 +200,9 @@ def test_gate_refuses_a_model_requested_gemm_tuning_run(precision, kernel_optimi
 
 def test_a_model_requested_kernel_optimization_has_no_handler_to_reach():
     """Source rewrite is the controller's, so the kind is unregistered."""
-    from hyperloom.orchestrator.kernel.request_handlers import get_handler
+    from hyperloom.orchestrator.kernel.request_handlers import KERNEL_REQUEST_HANDLERS
 
-    assert get_handler("run_optimization") is None
+    assert "run_optimization" not in KERNEL_REQUEST_HANDLERS
     assert "run_optimization" not in COORDINATOR_OWNED_KERNEL_REQUEST_KINDS
 
 

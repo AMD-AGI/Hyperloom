@@ -295,13 +295,6 @@ def test_source_session_id_prefers_recipe_kb(coord: Coordinator) -> None:
     assert coord.recipe_journal._source_session_id() == coord.session_dir.name
 
 
-def test_kernel_enabled(coord: Coordinator) -> None:
-    coord.shared_state.kernel_enabled = True
-    assert coord.phase_machine.kernel_enabled() is True
-    coord.shared_state.kernel_enabled = False
-    assert coord.phase_machine.kernel_enabled() is False
-
-
 def test_internal_analysis_kind(coord: Coordinator) -> None:
     coord.shared_state.enable_roofline = True
     assert coord.phase_prelude.internal_analysis_kind() == "roofline"

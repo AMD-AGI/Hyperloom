@@ -22,10 +22,8 @@ from hyperloom.inference_optimizer.session.geak_rebench_verdict import (
 from hyperloom.common.io import atomic_write_json
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from hyperloom.orchestrator.bus.message_bus import Message
-from hyperloom.orchestrator.kernel.geak_config import (
-    geak_overlay_is_loadable,
-    geak_spec_is_env,
-)
+from hyperloom.common.overlay import overlay_is_loadable
+from hyperloom.orchestrator.kernel.geak_config import geak_spec_is_env
 from hyperloom.orchestrator.state.task_registry import Task
 from .geak_rebench import source_digest, overlay_source_files, verify_source_artifacts
 
@@ -86,7 +84,7 @@ def prepare_source_revalidation(
     session_dir: Path, result: dict[str, Any], params: dict[str, Any], *, overlay: str
 ) -> dict[str, Any] | None:
     """Stage declared source patches; refuse incomplete products instead of dropping a layer."""
-    if overlay and not geak_overlay_is_loadable(overlay):
+    if overlay and not overlay_is_loadable(overlay):
         raise ValueError("GEAK source candidate declares an unloadable overlay")
     patches = _patch_sources(result, overlay=overlay)
     if not patches:

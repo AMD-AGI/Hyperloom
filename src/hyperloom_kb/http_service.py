@@ -63,6 +63,7 @@ from hyperloom_kb.retrieval import LocalRetrievalService, render_complete_experi
 from hyperloom_kb.retrieval_policy import (
     LEXICAL_FUZZY_PROVIDER_REF,
     LexicalFuzzyProvider,
+    ResultShape,
     RetrievalConfiguration,
 )
 from hyperloom_kb.records import RecordFiles
@@ -722,9 +723,7 @@ class ExperienceHTTPService:
             READ_POLICY_VERSION,
             limits=dict.fromkeys(RetrievalCapability, eligible_count),
             provider_refs=provider_refs,
-            ranking_policy_ref="weighted-signal-sum@v1",
-            max_groups=limit,
-            render_budget_chars=render_budget_chars,
+            shape=ResultShape("weighted-signal-sum@v1", max_groups=limit, render_budget_chars=render_budget_chars),
         )
         executor = QueryExecutor(
             LocalRetrievalService(

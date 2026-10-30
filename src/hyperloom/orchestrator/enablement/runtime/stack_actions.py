@@ -21,10 +21,7 @@ class FrameworkRuntime:
     python_path: str = ""
     venv_root: str = ""
     pythonpath_prefix: str = ""
-    server_args: str = ""
-    envs: Mapping[str, str] = field(default_factory=dict)
     pythonpath_prefixes: tuple[str, ...] = ()
-    ld_library_path_prefix: tuple[str, ...] = ()
     runtime_env: Mapping[str, str] = field(default_factory=dict)
     entrypoint_bin_dir: str = ""
     runtime_python_exe: str = ""
@@ -46,8 +43,6 @@ class FrameworkRuntime:
             out["framework_venv_root"] = self.venv_root
         if self.pythonpath_prefixes:
             out["pythonpath_prefixes"] = list(self.pythonpath_prefixes)
-        if self.ld_library_path_prefix:
-            out["ld_library_path_prefix"] = list(self.ld_library_path_prefix)
         if self.runtime_env:
             out["runtime_env"] = dict(self.runtime_env)
         if self.entrypoint_bin_dir:
@@ -63,10 +58,7 @@ class FrameworkRuntime:
             "python_path": self.python_path,
             "venv_root": self.venv_root,
             "pythonpath_prefix": self.pythonpath_prefix,
-            "server_args": self.server_args,
-            "envs": dict(self.envs),
             "pythonpath_prefixes": list(self.pythonpath_prefixes),
-            "ld_library_path_prefix": list(self.ld_library_path_prefix),
             "runtime_env": dict(self.runtime_env),
             "entrypoint_bin_dir": self.entrypoint_bin_dir,
             "runtime_python_exe": self.runtime_python_exe,
@@ -92,10 +84,7 @@ class FrameworkRuntime:
             python_path=str(d.get("python_path") or ""),
             venv_root=str(d.get("venv_root") or ""),
             pythonpath_prefix=str(d.get("pythonpath_prefix") or ""),
-            server_args=str(d.get("server_args") or ""),
-            envs=_str_map("envs"),
             pythonpath_prefixes=_str_tuple("pythonpath_prefixes"),
-            ld_library_path_prefix=_str_tuple("ld_library_path_prefix"),
             runtime_env=_str_map("runtime_env"),
             entrypoint_bin_dir=str(d.get("entrypoint_bin_dir") or ""),
             runtime_python_exe=str(d.get("runtime_python_exe") or ""),
@@ -155,13 +144,8 @@ class EnablementStackAction:
     ref: str = ""
     index_url: str = ""
     packages: tuple[str, ...] = ()
-    expected_symbols: tuple[str, ...] = ()
-    expected_files: tuple[str, ...] = ()
-    server_args: str = ""
-    envs: Mapping[str, str] = field(default_factory=dict)
     attempt_venv_root: str = ""
     pr_number: int = 0
-    localized_paths: tuple[str, ...] = ()
 
     def to_state(self) -> dict[str, Any]:
         """Serialize to a plain dict for task params / shared state."""
@@ -176,26 +160,16 @@ class EnablementStackAction:
             "ref": self.ref,
             "index_url": self.index_url,
             "packages": list(self.packages),
-            "expected_symbols": list(self.expected_symbols),
-            "expected_files": list(self.expected_files),
-            "server_args": self.server_args,
-            "envs": dict(self.envs),
             "attempt_venv_root": self.attempt_venv_root,
             "pr_number": self.pr_number,
-            "localized_paths": list(self.localized_paths),
         }
 
     @classmethod
     def from_state(cls, d: Mapping[str, Any] | None) -> "EnablementStackAction":
         """Rehydrate from a plain dict; missing keys default sensibly."""
         d = d or {}
-        raw_envs = d.get("envs")
-        envs = {str(k): str(v) for k, v in raw_envs.items()} if isinstance(raw_envs, dict) else {}
-
-        def _tuple(key: str) -> tuple[str, ...]:
-            raw = d.get(key)
-            return tuple(str(x) for x in raw) if isinstance(raw, (list, tuple)) else ()
-
+        raw_packages = d.get("packages")
+        packages = tuple(str(x) for x in raw_packages) if isinstance(raw_packages, (list, tuple)) else ()
         method = str(d.get("acquisition_method") or "none")
         if method not in _ACQUISITION_METHODS:
             method = "none"
@@ -213,14 +187,9 @@ class EnablementStackAction:
             repo_url=str(d.get("repo_url") or ""),
             ref=str(d.get("ref") or ""),
             index_url=str(d.get("index_url") or ""),
-            packages=_tuple("packages"),
-            expected_symbols=_tuple("expected_symbols"),
-            expected_files=_tuple("expected_files"),
-            server_args=str(d.get("server_args") or ""),
-            envs=envs,
+            packages=packages,
             attempt_venv_root=str(d.get("attempt_venv_root") or ""),
             pr_number=pr_number,
-            localized_paths=_tuple("localized_paths"),
         )
 
 
@@ -255,35 +224,6 @@ class ProvisionResult:
             "resolved_ref": self.resolved_ref,
             "resolved_packages": {k: dict(v) for k, v in self.resolved_packages.items()},
         }
-
-    @classmethod
-    def from_state(cls, d: Mapping[str, Any] | None) -> "ProvisionResult":
-        """Rehydrate from a plain dict."""
-        d = d or {}
-        raw_versions = d.get("installed_versions")
-        versions = {str(k): str(v) for k, v in raw_versions.items()} if isinstance(raw_versions, dict) else {}
-        # Restored, not re-derived: these two ARE the acquisition's identity, and
-        # a round trip that drops them hands the recipe a pinned runtime it can
-        # no longer tell from an unpinned one. ``to_state`` writes both.
-        raw_packages = d.get("resolved_packages")
-        packages = (
-            {
-                str(k): {str(vk): str(vv) for vk, vv in v.items()}
-                for k, v in raw_packages.items()
-                if isinstance(v, Mapping)
-            }
-            if isinstance(raw_packages, Mapping)
-            else {}
-        )
-        return cls(
-            ok=bool(d.get("ok")),
-            runtime=FrameworkRuntime.from_state(d.get("runtime")),
-            installed_versions=versions,
-            log_path=str(d.get("log_path") or ""),
-            error=str(d.get("error") or ""),
-            resolved_ref=str(d.get("resolved_ref") or ""),
-            resolved_packages=packages,
-        )
 
 
 __all__ = [

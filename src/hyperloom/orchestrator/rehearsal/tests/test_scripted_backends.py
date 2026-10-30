@@ -135,7 +135,7 @@ def test_a_session_deadline_the_attempt_runs_past_stops_the_round(tmp_path):
     backend = _backend(LaunchAttempt(outcome=READY, duration_sec=600.0))
 
     with installed_clock(backend.clock):
-        done = _play(backend, tmp_path, session_deadline_sec=backend.clock.deadline_in(60.0))
+        done = _play(backend, tmp_path, session_deadline_sec=backend.clock.monotonic() + 60.0)
 
     assert done.returncode == SESSION_TIME_EXHAUSTED_RETURNCODE
     assert backend.clock.elapsed == pytest.approx(60.0)
@@ -170,7 +170,7 @@ def test_a_hang_that_outlives_the_budget_stops_for_the_budget_in_both_backends(t
             backend,
             tmp_path,
             timeout=hard_timeout,
-            session_deadline_sec=backend.clock.deadline_in(hard_timeout),
+            session_deadline_sec=backend.clock.monotonic() + hard_timeout,
         )
 
     assert produced.returncode == SESSION_TIME_EXHAUSTED_RETURNCODE
@@ -180,18 +180,6 @@ def test_a_hang_that_outlives_the_budget_stops_for_the_budget_in_both_backends(t
 def test_a_scenario_that_names_neither_spelling_is_rejected():
     with pytest.raises(ScenarioError):
         LaunchScenario.from_dict({"name": "empty"})
-
-
-def test_a_scenario_file_round_trips(tmp_path):
-    import json
-
-    path = tmp_path / "round.json"
-    path.write_text(json.dumps({"name": "f", "blockers": ["import"]}), encoding="utf-8")
-
-    scenario = LaunchScenario.from_file(path)
-
-    assert scenario.name == "f"
-    assert [a.outcome for a in scenario.attempts] == [STAGE_FAILED, READY]
 
 
 @pytest.mark.asyncio
@@ -227,14 +215,16 @@ async def test_a_crash_leaves_no_done_file_for_the_runner_to_find(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_a_hang_reports_a_stale_heartbeat_and_never_wrote_one(tmp_path):
+async def test_a_hang_reports_a_stale_heartbeat_and_its_log_went_silent(tmp_path):
+    from hyperloom.orchestrator.specialists.reap_watch import newest_activity, specialist_activity_paths
+
     scripted = ScriptedSpecialist(steps=(SpecialistStep(outcome=HUNG),))
 
     result = await scripted.run(_spawn("spec-1", tmp_path / "ws"))
 
     assert result.stale_heartbeat
     assert result.exit_code is None
-    assert not (tmp_path / "ws" / "heartbeat.json").exists()
+    assert newest_activity(specialist_activity_paths(tmp_path / "ws")) == 0.0
 
 
 @pytest.mark.asyncio
@@ -245,7 +235,6 @@ async def test_a_retry_under_a_new_task_id_is_visible_as_a_retry(tmp_path):
     await scripted.run(_spawn("spec-2", tmp_path / "spec-2"))
 
     assert scripted.task_ids == ["spec-1", "spec-2"]
-    assert scripted.retried
 
 
 def test_the_virtual_clock_moves_only_when_something_charges_it():
@@ -254,14 +243,12 @@ def test_the_virtual_clock_moves_only_when_something_charges_it():
     start_wall = clock.wall()
 
     clock.advance(120.0)
-    clock.mark("boot")
     clock.advance(-5.0)
 
     # Both readings move by the same amount, so a watchdog arming on monotonic
     # time and an artifact stamped with wall time agree about the same step.
     assert clock.monotonic() - start_monotonic == pytest.approx(120.0)
     assert clock.wall() - start_wall == pytest.approx(120.0)
-    assert clock.marks == ((120.0, "boot"),)
 
 
 def test_the_scripted_specialist_takes_the_dispatch_the_real_dispatcher_takes():

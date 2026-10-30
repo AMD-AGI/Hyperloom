@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any, NamedTuple
 
 from hyperloom.common.coerce import optional_positive_float, to_float, to_unix
@@ -28,14 +28,11 @@ from ..state.shared_state import (
 )
 from .phase_chain import (
     LIFECYCLE_STATUS_ENTER,
-    LIFECYCLE_STEP_LABELS,
     PHASE_ALLOWED_ACTIONS,
     PHASE_CLOSE,
     PHASE_COORDINATOR_RESERVED,
     PHASE_ENABLEMENT,
     PHASE_FRAMEWORK_AGENT,
-    PHASE_HUMAN_LABELS,
-    PHASE_INDEX,
     PHASE_KERNEL_AGENT,
     PHASE_NAMES,
     PHASE_PRELUDE,
@@ -733,11 +730,6 @@ def append_phase_evidence_row(history: Any, *, key: str, row: dict[str, Any]) ->
     return True
 
 
-def session_usable_seconds(state: Any) -> float | None:
-    """Seconds a unit of work may still claim, from the session's own accounting."""
-    return state.session_budget_usable_sec()
-
-
 def prelude_affordable_seconds(state: Any) -> tuple[float | None, dict[str, Any]]:
     """Seconds PRELUDE may still spend, and the numbers the figure is built from.
 
@@ -749,7 +741,7 @@ def prelude_affordable_seconds(state: Any) -> tuple[float | None, dict[str, Any]
     terminal for an idle PRELUDE (:func:`.prelude_exits._prelude_budget_line`), not a number the phase sits on.
     """
     max_sec = _max_minutes(state) * 60.0
-    usable = session_usable_seconds(state)
+    usable = state.session_budget_usable_sec()
     if max_sec <= 0.0 or usable is None:
         return None, {"reason": "unbounded_budget"}
     reserve_sec = max_sec * OPTIMIZATION_RESERVE_PCT
@@ -776,7 +768,7 @@ def round_headroom_sec(state: Any) -> tuple[float | None, dict[str, Any]]:
     """Seconds this round's budget may still spend, and the numbers behind it."""
     if state is None:
         return None, {"reason": "no_session_state"}
-    usable_sec = session_usable_seconds(state)
+    usable_sec = state.session_budget_usable_sec()
     if usable_sec is None:
         return None, {"reason": "unbounded_session_budget"}
     return usable_sec, {"bound": "session_usable", "affordable_sec": round(usable_sec, 1)}
@@ -858,8 +850,8 @@ def _fold_config_rounds(attempts: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return rounds
 
 
-def _config_lever_dry(state: Any, overrides: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
-    """Whether the config lever has stopped paying.
+def _config_lever_evidence(state: Any, overrides: dict[str, Any]) -> dict[str, Any]:
+    """The facts the config lever's plateau verdict is judged on.
 
     Judged per benched round, not per variant. Two conditions, both required:
     the recent adopted gain is below the floor, and a run of rounds has produced
@@ -872,7 +864,7 @@ def _config_lever_dry(state: Any, overrides: dict[str, Any]) -> tuple[bool, dict
     rounds = _fold_config_rounds(_lever_attempts(state, LEVER_CONFIG))
     recent_gain = sum(float(r.get("gain_pct") or 0.0) for r in rounds[-lookback:] if r.get("adopted"))
     streak = _trailing_no_keep(rounds)
-    return (recent_gain < gain_floor and streak >= streak_floor), {
+    return {
         "recent_keep_gain_pct": round(recent_gain, 4),
         "keep_gain_threshold_pct": gain_floor,
         "empty_streak": streak,
@@ -881,8 +873,8 @@ def _config_lever_dry(state: Any, overrides: dict[str, Any]) -> tuple[bool, dict
     }
 
 
-def _patch_lever_dry(state: Any, overrides: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
-    """Whether the patch levers have stopped paying.
+def _patch_lever_evidence(state: Any, overrides: dict[str, Any]) -> dict[str, Any]:
+    """The facts the patch levers' plateau verdict is judged on.
 
     Source patches and upstream PRs share a supply — the discovery and authoring
     ladder — so they are judged together: a trailing run of resolved candidates
@@ -895,7 +887,7 @@ def _patch_lever_dry(state: Any, overrides: dict[str, Any]) -> tuple[bool, dict[
     )
     streak = _trailing_no_keep(_lever_attempts(state, LEVER_SOURCE_PATCH, LEVER_UPSTREAM_PR))
     exhausted = bool(state.framework_agent_phase_done)
-    return (streak >= streak_floor or exhausted), {
+    return {
         "source_consecutive_no_keep": streak,
         "source_threshold": streak_floor,
         "source_candidates_exhausted": exhausted,
@@ -909,15 +901,10 @@ def per_lever_dryness(state: Any) -> tuple[bool, dict[str, Any]]:
     steers elsewhere; the phase advances only once none of them is paying.
     """
     overrides = _resolve_plateau_overrides(state)
-    config_dry, config_ev = _config_lever_dry(state, overrides)
-    patch_dry, patch_ev = _patch_lever_dry(state, overrides)
-    return (config_dry and patch_dry), {
-        **config_ev,
-        **patch_ev,
-        "config_arm_plateaued": config_dry,
-        "source_arm_plateaued": patch_dry,
-        "switch_bottleneck": bool(config_dry or patch_dry),
-    }
+    plateau = _framework_plateau(
+        {**_config_lever_evidence(state, overrides), **_patch_lever_evidence(state, overrides)},
+    )
+    return (plateau.config_dry and plateau.source_dry), plateau.arms
 
 
 _STOP_TIME_EXHAUSTED = "time_exhausted"
@@ -1018,7 +1005,7 @@ def _prelude_predicate_inputs(state: Any, *, now_unix: float) -> dict[str, Any]:
         "measure_round_dropped": bool(state.baseline_measure_round_dropped),
         "tput": to_float(state.baseline_tput) or 0.0,
         **_initial_analysis_inputs(state),
-        "session_usable_sec": session_usable_seconds(state),
+        "session_usable_sec": state.session_budget_usable_sec(),
         "phase_spent_sec": phase_cumulative_seconds(state, phase=PHASE_PRELUDE, now_unix=now_unix),
         "runtime_sec": optional_positive_float(state.baseline_runtime_sec),
         "post_ready_runtime_sec": optional_positive_float(state.baseline_post_ready_runtime_sec),
@@ -1139,8 +1126,7 @@ def _extend_budget_to_sweep_grant(budget: dict[str, Any], state: Any, *, now_uni
     remaining = to_float(budget.get("remaining_sec"))
     if remaining is not None and remaining < grant_left:
         budget["remaining_sec"] = grant_left
-        if "current_balance" in budget:
-            budget["current_balance"] = grant_left
+        budget["current_balance"] = grant_left
 
 
 def workflow_predicate_inputs(
@@ -1403,9 +1389,14 @@ def _reloop_decision(inputs: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
 def cycle_reloop_decision(state: Any, *, now_unix: float | None = None) -> tuple[bool, dict[str, Any]]:
     """Whether another macro-cycle can open from here, with the evidence the decision rests on."""
     frozen_now = float(now_unix if now_unix is not None else _now_unix(state))
-    inputs = workflow_predicate_inputs(state, now_unix=frozen_now)
-    inputs["sweep_result"], _ = _sweep_predicate_inputs(state, now_unix=frozen_now)
-    reloop, evidence = _reloop_decision(inputs)
+    sweep_result, _ = _sweep_predicate_inputs(state, now_unix=frozen_now)
+    reloop, evidence = _reloop_decision(
+        {
+            "macro_cycle": state.macro_cycle,
+            "global": {"target_reached_at": str(state.target_reached_at or "")},
+            "sweep_result": sweep_result,
+        }
+    )
     return reloop and state.framework_agent_phase_enabled, evidence
 
 
@@ -1791,15 +1782,8 @@ def append_phase_history_event(
     *,
     reason: str,
     evidence: dict[str, Any] | None = None,
-    ts: str | None = None,
-    ts_unix: float | None = None,
 ) -> dict[str, Any]:
     """Append a non-transition marker row for the current phase."""
-    from datetime import datetime as _dt, timezone as _tz
-    import time as _time
-
-    now_ts = ts or _dt.now(_tz.utc).isoformat(timespec="seconds")
-    now_unix = float(ts_unix if ts_unix is not None else _time.time())
     phase = (state.phase or "").strip().upper()
     row = make_history_row(
         HistoryEntry(
@@ -1807,8 +1791,8 @@ def append_phase_history_event(
             to_phase=phase,
             reason=(reason or "").strip(),
             evidence=evidence,
-            ts=now_ts,
-            ts_unix=now_unix,
+            ts=_now_iso(timespec="seconds"),
+            ts_unix=time.time(),
             cycle=state.macro_cycle,
         )
     )
@@ -1832,16 +1816,17 @@ def append_phase_history_event(
     return row
 
 
-def record_lifecycle_event(state, mark: LifecycleMark, *, ts: str | None = None) -> dict[str, Any]:
-    """Append a structured lifecycle event marking a phase/step boundary; an unset phase is the current one."""
+def record_lifecycle_event(state, mark: LifecycleMark) -> dict[str, Any]:
+    """Append a structured lifecycle event marking a step boundary of the current phase."""
     events = state.lifecycle
     if events is None:
         events = state.lifecycle = []
     next_seq = (int(events[-1].get("seq", -1)) + 1) if events else 0
     event = make_lifecycle_event(
-        mark if mark.phase is not None else replace(mark, phase=state.phase or ""),
+        mark,
+        phase=state.phase or "",
         seq=next_seq,
-        ts=ts or _now_iso(),
+        ts=_now_iso(),
     )
     # Append in place, trim only when over the cap (O(1) common path).
     events.append(event)
@@ -1857,15 +1842,12 @@ __all__ = [
     "DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT",
     "DEFAULT_PLATEAU_EXPLORE_LOOKBACK",
     "LIFECYCLE_STATUS_ENTER",
-    "LIFECYCLE_STEP_LABELS",
     "ENABLEMENT_MAX_ATTEMPTS",
     "PHASE_ALLOWED_ACTIONS",
     "PHASE_CLOSE",
     "PHASE_COORDINATOR_RESERVED",
     "PHASE_ENABLEMENT",
     "PHASE_FRAMEWORK_AGENT",
-    "PHASE_HUMAN_LABELS",
-    "PHASE_INDEX",
     "PHASE_KERNEL_AGENT",
     "PHASE_NAMES",
     "PHASE_PRELUDE",
@@ -1898,7 +1880,6 @@ __all__ = [
     "one_more_measurement_sec",
     "prelude_affordable_seconds",
     "prelude_can_afford",
-    "session_usable_seconds",
     "render_phase_action_bullets",
     "compute_kernel_progress_fingerprint",
     "kernel_work_pending",

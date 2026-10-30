@@ -16,7 +16,7 @@ from hyperloom.common.coerce import to_str_list
 
 from . import patch_jit_cache
 from ..actions.executors._kernel_agent_tool import HandlerResult
-from ._integrate_outcomes import _FRAMEWORK_APPLYBACK_ARTIFACT_KIND, _integrate_failure
+from ._integrate_outcomes import _FRAMEWORK_APPLYBACK_ARTIFACT_KIND, _FailureVerdict, _integrate_failure
 from ._integrate_payload import _is_paired_gemm_measurement
 from .kernel_decisions import _honest_flag
 
@@ -353,6 +353,10 @@ async def _multi_node_restart_failure(
 
     if not is_multi_node():
         return None
+    # The sweep runs even when the regular JIT cache is warm: cpp_itfs attention
+    # uses the separate AITER_ROOT_DIR/build tree and can carry a stale baton
+    # from a timed-out Forge driver.
+    _sweep_integrate_aiter_locks(reason="integrate server startup")
     from ..actions.executors._multi_node_server_lifecycle import (
         RoundServer,
         ServerRestartFailed,
@@ -369,11 +373,7 @@ async def _multi_node_restart_failure(
         )
     except ServerRestartFailed as exc:
         return _integrate_failure(
-            payload,
-            apply_result,
-            error_class="mn_server_restart_failed_post_patch",
-            error=str(exc),
-            decision="REVERT",
+            payload, apply_result, _FailureVerdict("mn_server_restart_failed_post_patch", str(exc), "REVERT")
         )
     ctx = rebaseline.ctx
     ctx.extra = {**(getattr(ctx, "extra", None) or {}), "mn_round_restarted": True}

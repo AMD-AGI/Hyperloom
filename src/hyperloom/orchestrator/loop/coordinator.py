@@ -72,6 +72,7 @@ from hyperloom.inference_optimizer.trace.trajectory_trace import (
     EVENT_SESSION,
     STATUS_CANCELLED,
     TERMINAL_STATUSES,
+    EventSpan,
     llm_call_summary,
     load_events,
     record_event,
@@ -268,7 +269,6 @@ class Coordinator:
             _set_lane_capacity(self.db.raw, "research_lane", cap)
         # gpu_research_lane stays capacity-1 (strictly serial GPU specialists);
         # the GPU pool partitions physical cards within that one lease.
-        # `strict_paths` defers to the env flag.
         # The durable bring-up mutex. The gate never reads it; ``open`` decides.
         self.rounds = RoundStore(self.db)
         self.policy = PolicyGate(
@@ -874,8 +874,7 @@ class Coordinator:
                     continue
                 record_event(
                     EVENT_PROPOSAL,
-                    status=STATUS_CANCELLED,
-                    span_id=pending.proposal_msg_id,
+                    span=EventSpan(span_id=pending.proposal_msg_id, status=STATUS_CANCELLED),
                     attributes={
                         "name": pending.action_name,
                         "action_name": pending.action_name,

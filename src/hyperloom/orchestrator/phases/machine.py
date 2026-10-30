@@ -80,8 +80,8 @@ class MachinePhase(CoordinatorCollaborator):
         if budget_pct or not state.phase_budget_pct:
             state.phase_budget_pct = _phase_state.redistribute_budget_pct(
                 _phase_state.normalize_budget_pct(budget_pct),
-                optimize_enabled=self.optimize_enabled(),
-                kernel_enabled=self.kernel_enabled(),
+                optimize_enabled=state.framework_agent_phase_enabled,
+                kernel_enabled=state.kernel_enabled,
                 sweep_enabled=state.conc_sweep_enabled,
             )
         current = (state.phase or "").strip().upper()
@@ -106,11 +106,7 @@ class MachinePhase(CoordinatorCollaborator):
                     "predicate_inputs": _phase_state.initial_workflow_predicate_inputs(
                         state,
                         current_phase="",
-                        flags=_phase_state.PhaseFlags(
-                            kernel_enabled=self.kernel_enabled(),
-                            optimize_enabled=self.optimize_enabled(),
-                            enablement_enabled=self._coord.enablement_lane.enablement_admitted(),
-                        ),
+                        flags=self.phase_flags(),
                     ),
                 },
             )
@@ -136,11 +132,7 @@ class MachinePhase(CoordinatorCollaborator):
                 "predicate_inputs": _phase_state.initial_workflow_predicate_inputs(
                     state,
                     current_phase=_phase_state.PHASE_CLOSE,
-                    flags=_phase_state.PhaseFlags(
-                        kernel_enabled=self.kernel_enabled(),
-                        optimize_enabled=self.optimize_enabled(),
-                        enablement_enabled=self._coord.enablement_lane.enablement_admitted(),
-                    ),
+                    flags=self.phase_flags(),
                 ),
             },
         )
@@ -185,38 +177,31 @@ class MachinePhase(CoordinatorCollaborator):
                 hw,
             )
 
-    def kernel_enabled(self) -> bool:
-        """Whether kernel optimization is enabled for this run."""
-        return bool(self.shared_state.kernel_enabled)
+    def phase_flags(self) -> _phase_state.PhaseFlags:
+        """The run's phase toggles, as the transition predicates read them."""
+        state = self.shared_state
+        return _phase_state.PhaseFlags(
+            kernel_enabled=state.kernel_enabled,
+            optimize_enabled=state.framework_agent_phase_enabled,
+            enablement_enabled=self._coord.enablement_lane.enablement_admitted(),
+        )
 
-    def optimize_enabled(self) -> bool:
-        """Whether the optimisation phase is enabled for this run."""
-        return bool(self.shared_state.framework_agent_phase_enabled)
-
-    def set_terminal_stop_reason(self, state: Any, reason: str) -> None:
+    def set_terminal_stop_reason(self, reason: str) -> None:
         """Derive the stop reason for a CLOSE transition. The first reason recorded wins.
 
         Must run before CLOSE writes the session breakdown: the collector derives the stop reason from ``state.json``.
         """
+        state = self.shared_state
         if not state.stop_reason:
             state.set_stop_reason(_BUDGET_EXIT_STOP_REASONS.get(reason, reason), strict=True)
 
-    async def _next_phase(
-        self,
-        *,
-        optimize_enabled: bool,
-        in_flight: _phase_state.WorkInFlight,
-    ) -> tuple[str, str, dict[str, Any]] | None:
+    async def _next_phase(self, *, in_flight: _phase_state.WorkInFlight) -> tuple[str, str, dict[str, Any]] | None:
         """The transition the predicates ask for, held while the operator-defined specialist's work is pending."""
         state = self.shared_state
         next_phase = _phase_state.compute_next_phase(
             state,
             in_flight=in_flight,
-            flags=_phase_state.PhaseFlags(
-                kernel_enabled=self.kernel_enabled(),
-                optimize_enabled=optimize_enabled,
-                enablement_enabled=self._coord.enablement_lane.enablement_admitted(),
-            ),
+            flags=self.phase_flags(),
         )
         if next_phase is None or str(state.phase or "").upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
             return next_phase
@@ -318,7 +303,7 @@ class MachinePhase(CoordinatorCollaborator):
         state = self.shared_state
         self.settle_escalate_hint(move)
         if move.to_phase == _phase_state.PHASE_CLOSE:
-            self.set_terminal_stop_reason(state, move.reason)
+            self.set_terminal_stop_reason(move.reason)
         self._carry_cycle_facts_across(move)
         is_loopback = bool(move.evidence.get("loopback"))
         prior_cycle = state.macro_cycle
@@ -337,7 +322,6 @@ class MachinePhase(CoordinatorCollaborator):
             _phase_state.LifecycleMark(
                 step=move.to_phase,
                 status=_phase_state.LIFECYCLE_STATUS_ENTER,
-                phase=move.to_phase,
                 detail=f"reason={move.reason}" if move.reason else "",
             ),
         )
@@ -383,7 +367,6 @@ class MachinePhase(CoordinatorCollaborator):
         in_prelude = str(state.phase or "").upper() == _phase_state.PHASE_PRELUDE
         await self._release_holds_no_task_will_settle()
         next_phase = await self._next_phase(
-            optimize_enabled=self.optimize_enabled(),
             in_flight=_phase_state.WorkInFlight(
                 enablement=in_enablement and await self._coord.enablement_lane.enablement_in_flight(),
                 kernel=kernel_facts.agent_in_flight,

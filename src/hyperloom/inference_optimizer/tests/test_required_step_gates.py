@@ -18,7 +18,7 @@ from hyperloom.orchestrator.roles import (
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.orchestrator.policy.gate import PolicyDenied
+from hyperloom.orchestrator.policy.denial import PolicyDenied
 
 from .conftest import seed_kernel_keep
 from hyperloom.inference_optimizer.session.paths import make_session_dir
@@ -280,17 +280,15 @@ def test_trace_analyze_request_itself_passes(session_dir):
 
 
 def test_legacy_select_kernels_request_kind_no_longer_recognised(session_dir):
-    """The pre-M4 ``select_kernels`` request kind was removed; ``get_handler`` returns None."""
+    """The pre-M4 ``select_kernels`` request kind was removed; no handler is registered for it."""
     coord = Coordinator(session_dir, backends=_backends_full())
     s = coord.shared_state
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"
-    from hyperloom.orchestrator.kernel.request_handlers import (
-        get_handler,
-    )
+    from hyperloom.orchestrator.kernel.request_handlers import KERNEL_REQUEST_HANDLERS
 
-    assert get_handler("select_kernels") is None
-    assert get_handler("trace_analyze") is not None
+    assert "select_kernels" not in KERNEL_REQUEST_HANDLERS
+    assert "trace_analyze" in KERNEL_REQUEST_HANDLERS
 
 
 def test_trace_analyze_gate_clears_run_opt_request_when_cache_fresh(session_dir):

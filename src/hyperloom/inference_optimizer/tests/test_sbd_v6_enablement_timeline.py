@@ -929,12 +929,9 @@ def test_an_uncapturable_stack_closes_the_lane_as_insufficient(_bound_session):
 def test_a_lane_closed_without_its_state_records_no_recipe_rather_than_an_empty_one(_bound_session):
     """A caller that passes no state judged nothing, and says so by absence.
 
-    ``read_status`` reads an absent decision as ``not_evaluated`` /
-    insufficient, so the null is the fail-closed answer. What it must never be
-    is a *present* verdict synthesised over a state nobody supplied.
+    What it must never be is a *present* verdict synthesised over a state
+    nobody supplied.
     """
-    from hyperloom.orchestrator.enablement.recipe.sufficiency import read_status
-
     _boot_trigger()
     enablement_event.finish(
         enablement_event.LaneTerminal(outcome=enablement_event.OUTCOME_STALLED, reason="cap reached")
@@ -942,7 +939,6 @@ def test_a_lane_closed_without_its_state_records_no_recipe_rather_than_an_empty_
 
     recipe = _ext(_bound_session)["recipe"]
     assert recipe is None
-    assert read_status(recipe or {})["status"] == "insufficient"
 
 
 def test_a_recipe_too_large_to_record_is_reported_as_unjudged(_bound_session, monkeypatch):
