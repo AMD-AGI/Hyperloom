@@ -180,7 +180,7 @@ MAGPIE_REPO="${MAGPIE_REPO:-https://github.com/AMD-AGI/Magpie.git}"
 # copies benchmark scripts via ``_copy_benchmark_script_atomic``.
 # ``ensure_magpie()`` checks the installed revision unless the operator supplies a source tree.
 # tree on disk is NOT upgraded to this ref — only fresh installs and explicit reinstalls are.
-MAGPIE_REF="${MAGPIE_REF:-6a1ee26f9053363d3750b43e3d5afb5d1c4ce84e}"
+MAGPIE_REF="${MAGPIE_REF:-06b7cf6e185fdd49483a512e350cb3964ba3bf68}"
 MAGPIE_PACKAGE_SPEC="${MAGPIE_PACKAGE_SPEC:-magpie-eval @ git+${MAGPIE_REPO}@${MAGPIE_REF}}"
 
 # MAGPIE_PATH points install.sh AND the Python optimizer (cli.py /
