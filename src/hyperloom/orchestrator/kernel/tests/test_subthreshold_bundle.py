@@ -294,7 +294,10 @@ async def test_kernel_entry_measures_the_bundle_once_and_reverts_every_member(tm
 
     union = {**_FMOE_ENVS, **_A8W8_ENVS}
     assert [
-        {key: payload[key] for key in ("kernel_id", "mode", "extra_envs", "extra_server_args", "base_tput")}
+        {
+            key: payload[key]
+            for key in ("kernel_id", "mode", "extra_envs", "extra_server_args", "base_tput", "preapplied_patches")
+        }
         for payload in calls
     ] == [
         {
@@ -303,6 +306,7 @@ async def test_kernel_entry_measures_the_bundle_once_and_reverts_every_member(tm
             "extra_envs": union,
             "extra_server_args": "--moe-runner-backend aiter",
             "base_tput": 104.0,
+            "preapplied_patches": [str(patch_dir / "change.patch")],
         }
     ]
     assert seen_on_disk == ["VALUE = 2\n"]
@@ -422,3 +426,23 @@ async def test_a_bundle_that_cannot_be_measured_is_cleared_without_a_round(tmp_p
     assert state.kernel_bundle_pending == []
     assert SharedState.load_or_init(session_dir).kernel_bundle_pending == []
     assert (repo / "mqa.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+
+
+def test_an_env_only_round_over_preapplied_patches_is_not_refused_for_carrying_no_envs() -> None:
+    from hyperloom.orchestrator.kernel._integrate_outcomes import _integrate_request_refusal
+
+    bare = {"base_tput": 100.0, "mode": "env_only", "extra_envs": {}, "extra_server_args": ""}
+
+    assert [
+        _integrate_request_refusal(bare, requested_controls=False),
+        _integrate_request_refusal(
+            {**bare, "preapplied_patches": ["/attempt/mqa/change.patch"]}, requested_controls=False
+        ),
+    ] == [
+        {
+            "status": "failed",
+            "error_class": "env_only_missing_envs",
+            "error": "env_only integrate requires runtime configuration or an explicit paired reference",
+        },
+        None,
+    ]

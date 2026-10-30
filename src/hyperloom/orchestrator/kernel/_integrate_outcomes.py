@@ -129,6 +129,7 @@ def _integrate_request_refusal(payload: dict, *, requested_controls: bool) -> Ha
         or str(payload.get("extra_server_args") or "").strip()
         or requested_controls
         or paired_measurement
+        or payload.get("preapplied_patches")
     ):
         return None
     return {
