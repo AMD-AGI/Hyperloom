@@ -76,10 +76,9 @@ unless the step's arguments name another.
 from __future__ import annotations
 
 import json
-import posixpath
 import re
 import shlex
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from hyperloom.measure.runner import cache_layout
@@ -102,8 +101,6 @@ _NAME = "hyperloom-runner-bootstrap"
 #: never comes ends the sandbox no later than that, and the application deletes a sandbox it gave up on anyway.
 TEMPLATE_SPEC_WAIT_SEC = 1800
 _SPEC_WAIT_ARG = "--spec-wait-sec"
-#: Where a template step's runner writes its output: next to the scratch directory, never inside the runner's own.
-_BOOT_LOG = "runner-boot.log"
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 _SCRIPT = r"""#!/bin/sh
@@ -269,19 +266,18 @@ def runner_template_step(
     *runner_args: str,
     pre: str = "",
     env: Mapping[str, str] | None = None,
-    in_dir: str = "/in",
-    out_dir: str = "/out",
-    scratch_dir: str = "/scratch",
+    dirs: Sequence[str] = ("/in", "/out", "/scratch"),
+    boot_log: str = "/runner-boot.log",
 ) -> str:
     """The one-line start step of a measurement template; it starts the runner in the background and returns at once.
 
-    The line makes ``in_dir``, ``out_dir`` and ``scratch_dir`` (the template's ``HYPERLOOM_IN_DIR``, ``HYPERLOOM_OUT_DIR``
-    and ``HYPERLOOM_SCRATCH_DIR``, whose defaults the script's are), runs ``pre`` (the template's own preparation, one
-    line of ``sh``, run in the foreground and only when the directories were made), then starts
-    :func:`runner_start_shell_line` with ``runner_args`` under ``nohup`` in the background, with ``env`` set for it alone
-    and its output in ``runner-boot.log`` in the parent of ``scratch_dir``. A step that never returned would keep the
-    sandbox from ever turning ready (see the module's documentation). ``runner_args`` get ``--spec-wait-sec``
-    :data:`TEMPLATE_SPEC_WAIT_SEC` unless they name it.
+    The line makes ``dirs`` (the template's ``HYPERLOOM_IN_DIR``, ``HYPERLOOM_OUT_DIR`` and ``HYPERLOOM_SCRATCH_DIR``,
+    whose defaults the script's are), runs ``pre`` (the template's own preparation, one line of ``sh``, run in the
+    foreground and only when the directories were made), then starts :func:`runner_start_shell_line` with
+    ``runner_args`` under ``nohup`` in the background, with ``env`` set for it alone and its output in ``boot_log``
+    (``runner-boot.log`` next to the scratch directory, never inside the runner's own). A step that never returned
+    would keep the sandbox from ever turning ready (see the module's documentation). ``runner_args`` get
+    ``--spec-wait-sec`` :data:`TEMPLATE_SPEC_WAIT_SEC` unless they name it.
 
     Raises:
         ValueError: ``pre`` spans lines, or a name in ``env`` is not a shell variable name.
@@ -292,8 +288,7 @@ def runner_template_step(
     if bad:
         raise ValueError(f"not shell variable names: {', '.join(map(repr, bad))}")
     assignments = "".join(f"{name}={shlex.quote(value)} " for name, value in (env or {}).items())
-    log = posixpath.join(posixpath.dirname(scratch_dir.rstrip("/")) or "/", _BOOT_LOG)
     start = shlex.quote(runner_start_shell_line(*_with_spec_wait(runner_args)))
-    background = f"({assignments}nohup sh -c {start} >{shlex.quote(log)} 2>&1 &)"
-    made = "mkdir -p " + " ".join(shlex.quote(directory) for directory in (in_dir, out_dir, scratch_dir))
+    background = f"({assignments}nohup sh -c {start} >{shlex.quote(boot_log)} 2>&1 &)"
+    made = "mkdir -p " + " ".join(shlex.quote(directory) for directory in dirs)
     return " && ".join(part for part in (made, pre, background) if part)
