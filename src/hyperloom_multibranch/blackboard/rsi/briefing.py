@@ -79,6 +79,7 @@ from hyperloom_multibranch.blackboard.learning_search import (
     session_matches,
 )
 from hyperloom_multibranch.blackboard.rsi.analysis import FailureTier, failures_at, repeated_failures
+from hyperloom_multibranch.blackboard.rsi.cases import CasePool, known_defects
 from hyperloom_multibranch.blackboard.rsi.menu import CODE, SETTINGS, DirectionMenus, MenuItem
 from hyperloom_multibranch.blackboard.tools import render_brief
 
@@ -92,6 +93,8 @@ LEARNINGS = 5
 MENU_NOTE = "  note "
 #: What a brief says, before the champion, of one its start commit is already or builds on.
 ON_HEAD = "already on your head, nothing to replay"
+#: What a brief says, before a past session and its fix, of a pooled case that reproduced on the root.
+KNOWN_DEFECT = "known defect of the root, a case from"
 
 
 class RecipeReads(Protocol):
@@ -205,6 +208,8 @@ class CrossSessionBriefing(StartupBriefProvider):
     commit read is, by commit, so each commit's recipe is read once a session. ``refused`` keeps, by test, the heads
     :meth:`peer_replay` found its change no longer applies to or already in, which the briefs from them leave out.
     ``menus`` draws the branch's two lists of directions (:mod:`rsi.menu`); without it the brief has neither.
+    ``cases`` is the case pool (:mod:`rsi.cases`): a pooled case that reproduced on the root is a defect the root
+    carries, which the brief names first among its lessons.
     """
 
     blackboard: Blackboard
@@ -223,6 +228,7 @@ class CrossSessionBriefing(StartupBriefProvider):
     stack_slot: StackSlot | None = None
     refused: dict[str, set[str]] | None = None
     menus: DirectionMenus | None = None
+    cases: CasePool | None = None
 
     def __post_init__(self) -> None:
         if self.identities is None and self.experiences is not None:
@@ -420,6 +426,16 @@ class CrossSessionBriefing(StartupBriefProvider):
                 return found
         return Notes()
 
+    async def _known_defects(self, snapshot: BlackboardSnapshot) -> list[_Item]:
+        """A lesson for each defect the root carries: each pooled case that reproduced on it, by its diagnosis."""
+
+        if self.cases is None:
+            return []
+        found = await asyncio.to_thread(known_defects, snapshot, self.cases)
+        return [
+            _Item(True, f"{KNOWN_DEFECT} {item.origin}: {item.diagnosis.strip().splitlines()[0]}") for item in found
+        ]
+
     async def startup_brief(self, start_commit: str) -> StartupBrief:
         """The brief from ``start_commit``; the recall logs the learnings and the leads it shows."""
 
@@ -440,6 +456,7 @@ class CrossSessionBriefing(StartupBriefProvider):
             f"{lead.canonical_id}: {text}" for lead in self.warm for text in (*lead.pitfalls, *lead.what_failed)
         ]
         ordered = [
+            *await self._known_defects(snapshot),
             *(_Item(True, f"{ON_HEAD}: recipe {lead.summary()}") for lead in self.warm if lead.canonical_id in on_head),
             *(_Item(True, text) for text in listed(repeated)),
             *(_Item(True, text) for text in learnt),
@@ -493,6 +510,7 @@ class SessionBriefs:
     repo: RecipeReads | None = None
     stack_slot: StackSlot | None = None
     menus: DirectionMenus | None = None
+    cases: CasePool | None = None
     _identities: IdentityIndex | None = field(init=False, default=None)
     _recalls: RecallCache = field(init=False, default_factory=RecallCache)
     _champions: dict[str, frozenset[str]] = field(init=False, default_factory=dict)
@@ -524,6 +542,7 @@ class SessionBriefs:
             stack_slot=self.stack_slot,
             refused=self._refused,
             menus=self.menus,
+            cases=self.cases,
         )
 
     async def text(self, branch: str, commit: str, focus: str | None = None) -> str:
@@ -532,4 +551,12 @@ class SessionBriefs:
         return render_brief(await self.for_branch(branch, focus).startup_brief(commit))
 
 
-__all__ = ["DEFAULT_MAX_CHARS", "ON_HEAD", "CrossSessionBriefing", "RecallCache", "RecipeReads", "SessionBriefs"]
+__all__ = [
+    "DEFAULT_MAX_CHARS",
+    "KNOWN_DEFECT",
+    "ON_HEAD",
+    "CrossSessionBriefing",
+    "RecallCache",
+    "RecipeReads",
+    "SessionBriefs",
+]

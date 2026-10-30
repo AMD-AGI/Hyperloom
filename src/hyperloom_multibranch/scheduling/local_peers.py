@@ -60,7 +60,7 @@ from hyperloom_multibranch.contracts.toolbox import SpecialistTokens
 from hyperloom_multibranch.blackboard import BriefTriggers, LocalBlackboard
 from hyperloom_multibranch.blackboard.learning_search import LEARNINGS_LOG, RetrievalLog
 from hyperloom_multibranch.blackboard.rsi.briefing import SessionBriefs
-from hyperloom_multibranch.blackboard.rsi.cases import session_cases
+from hyperloom_multibranch.blackboard.rsi.cases import CasePool, session_cases
 from hyperloom_multibranch.blackboard.rsi.lesson_recall import LessonRecall
 from hyperloom_multibranch.blackboard.rsi.lessons import LessonPool
 from hyperloom_multibranch.blackboard.rsi.session import session_menus
@@ -419,6 +419,7 @@ def _specialist_briefs(setup: PeerSetup, repo: GitExperimentRepo) -> SessionBrie
         repo=repo,
         stack_slot=repo.stack_kernel_slot,
         menus=session_menus(setup.workload.metric, setup.layout.reports),
+        cases=CasePool.from_env(),
     )
 
 
