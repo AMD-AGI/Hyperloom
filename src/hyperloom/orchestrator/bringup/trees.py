@@ -20,13 +20,6 @@ from hyperloom.inference_optimizer.session import session_paths as session_layou
 from hyperloom.inference_optimizer.session.session_paths import BRINGUP_SEGMENT
 from hyperloom.inference_optimizer.framework_paths import resolve_kernel_search_roots
 
-#: ``vcs`` value for a tree whose directory is itself a git working tree.
-VCS_GIT = "git_checkout"
-
-#: ``vcs`` value for a tree with no version control of its own -- an installed
-#: wheel, whose files carry no history to diff a patch against.
-VCS_NONE = "none"
-
 #: Seconds allowed for the commit probe run against a candidate tree.
 _GIT_TIMEOUT_SEC = 10.0
 
@@ -39,32 +32,19 @@ class TreeIdentity:
         tree_id: Stable identifier derived from ``root``, the same across
             sessions on one host.
         root: Absolute root of the tree.
-        package_dirs: Absolute package directories covered by ``root``.
-        vcs: :data:`VCS_GIT` or :data:`VCS_NONE`. Delivery dispatches on this:
-            a git tree diffs through its own objects, one without through a
-            recorded content manifest.
-        head_commit: For a git tree, the commit ``root`` was pinned at; ``""``
-            otherwise.
+        head_commit: When ``root`` is itself a git work tree, the commit it was
+            pinned at; ``""`` otherwise.
     """
 
     tree_id: str
     root: str
-    package_dirs: tuple[str, ...]
-    vcs: str
     head_commit: str = ""
 
-    @property
-    def is_git(self) -> bool:
-        """Whether this tree's root is itself a git work tree."""
-        return self.vcs == VCS_GIT
-
     def to_dict(self) -> dict[str, Any]:
-        """Serialize to a JSON-safe dict, with ``package_dirs`` as a list."""
+        """Serialize to a JSON-safe dict."""
         return {
             "tree_id": self.tree_id,
             "root": self.root,
-            "package_dirs": list(self.package_dirs),
-            "vcs": self.vcs,
             "head_commit": self.head_commit,
         }
 
@@ -78,8 +58,6 @@ class TreeIdentity:
         return cls(
             tree_id=str(raw["tree_id"]),
             root=str(raw["root"]),
-            package_dirs=tuple(str(d) for d in raw["package_dirs"]),
-            vcs=str(raw["vcs"]),
             head_commit=str(raw["head_commit"]),
         )
 
@@ -97,11 +75,6 @@ def path_slug(path: str, *, fallback: str = "tree") -> str:
     digest = hashlib.sha256(path.encode("utf-8", "replace")).hexdigest()[:8]
     name = path.rstrip("/").rsplit("/", 1)[-1] or fallback
     return f"{name}-{digest}"
-
-
-def tree_id_for(root: str) -> str:
-    """Return the identity a tree is pinned, recorded and compared under."""
-    return path_slug(root)
 
 
 def head_commit(root: str | Path) -> str:
@@ -129,11 +102,11 @@ def head_commit(root: str | Path) -> str:
     return proc.stdout.strip() if proc.returncode == 0 else ""
 
 
-def tree_kind(directory: Path | str) -> str:
-    """Return :data:`VCS_GIT` or :data:`VCS_NONE` for a directory used as a root."""
-    path = Path(directory).expanduser().resolve()
+def _is_own_git_root(directory: Path) -> bool:
+    """Whether ``directory`` is itself a git work-tree root, not inside an unrelated checkout."""
+    path = directory.expanduser().resolve()
     root = repo_root(path)
-    return VCS_GIT if root is not None and Path(root) == path else VCS_NONE
+    return root is not None and Path(root) == path
 
 
 def resolve_trees(roots: Sequence[str] | None = None) -> tuple[TreeIdentity, ...]:
@@ -161,34 +134,30 @@ def resolve_trees(roots: Sequence[str] | None = None) -> tuple[TreeIdentity, ...
         if root in seen:
             continue
         seen.add(root)
-        vcs = tree_kind(package_dir)
         pinned.append(
             TreeIdentity(
-                tree_id=tree_id_for(root),
+                tree_id=path_slug(root),
                 root=root,
-                package_dirs=(root,),
-                vcs=vcs,
-                head_commit=head_commit(root) if vcs == VCS_GIT else "",
+                head_commit=head_commit(root) if _is_own_git_root(package_dir) else "",
             )
         )
     return tuple(pinned)
 
 
 def tree_roots(trees: Sequence[TreeIdentity]) -> tuple[str, ...]:
-    """Return every root and package directory the trees cover.
+    """Return every root the trees cover.
 
     Returns:
         tuple[str, ...]: De-duplicated absolute directories, longest first so a
-        nested package directory wins over its enclosing root.
+        nested root wins over its enclosing one.
     """
     seen: set[str] = set()
     out: list[str] = []
     for tree in trees:
-        for value in (tree.root, *tree.package_dirs):
-            text = value.strip().rstrip("/")
-            if text and text not in seen:
-                seen.add(text)
-                out.append(text)
+        text = tree.root.strip().rstrip("/")
+        if text and text not in seen:
+            seen.add(text)
+            out.append(text)
     return tuple(sorted(out, key=len, reverse=True))
 
 
@@ -234,15 +203,11 @@ def read_trees(session_dir: Path | None = None) -> tuple[TreeIdentity, ...]:
 
 
 __all__ = [
-    "VCS_GIT",
-    "VCS_NONE",
     "TreeIdentity",
     "head_commit",
     "read_trees",
     "resolve_trees",
     "path_slug",
-    "tree_id_for",
-    "tree_kind",
     "tree_roots",
     "write_trees",
 ]

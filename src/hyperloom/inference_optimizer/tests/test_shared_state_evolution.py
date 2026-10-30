@@ -10,6 +10,7 @@ import json
 
 import pytest
 
+from hyperloom.orchestrator.kernel import kernel_decisions as kd
 from hyperloom.orchestrator.state.shared_state import (
     LATEST_STATE_SCHEMA_VERSION,
     SharedState,
@@ -337,7 +338,7 @@ def _record_applyback_keep(state, **overrides):
 def test_serving_accuracy_settles_the_pending_applyback_verdict():
     state = SharedState()
     _record_applyback_keep(state)
-    pending = state.pending_kernel_integration_records()[0]
+    pending = kd.pending_kernel_integration_records(state)[0]
 
     state.record_kernel_integrate_result(
         {
@@ -371,7 +372,7 @@ def test_a_plain_integrated_keep_records_no_applyback_verdict():
         integration_validation_status="",
         framework_applyback={},
     )
-    pending = state.pending_kernel_integration_records()[0]
+    pending = kd.pending_kernel_integration_records(state)[0]
 
     state.record_kernel_integrate_result(
         {

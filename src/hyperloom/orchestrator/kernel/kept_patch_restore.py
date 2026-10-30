@@ -21,8 +21,8 @@ from .apply_kernel_patch import (
     _is_multi_node,
     _pod_backup_dir,
     _PodFanout,
-    _target_uses_aiter_jit,
 )
+from .patch_jit_cache import _target_uses_aiter_jit
 
 log = logging.getLogger(__name__)
 

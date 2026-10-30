@@ -34,10 +34,9 @@ _TOOL_META_CACHE: dict[str, dict[str, Any]] = {}
 #   * ("dist", names)-> importlib.metadata version of the first matching dist
 _TOOL_PROVENANCE: dict[str, dict[str, Any]] = {
     "tracelens": {"root_env": "TRACELENS_ROOT", "version": "git_describe"},
-    # bypass, forge and the kernel-agent tools ship inside this distribution:
+    # forge and the kernel-agent tools ship inside this distribution:
     # no checkout to ``git rev-parse``, so their version is Hyperloom's own.
     # The keys stay even so -- downstream provenance JSON reads them by name.
-    "bypass": {"root_env": "", "version": ("dist", ("hyperloom-inference_optimizer",))},
     "geak": {"root_env": "GEAK_ROOT", "version": "git_short"},
     "forge": {"root_env": "", "version": ("dist", ("hyperloom-inference_optimizer",))},
     "claude": {"root_env": "", "version": ("cmd", ("claude", "--version"))},
@@ -59,7 +58,7 @@ def _run_first_line(argv: list[str]) -> str:
             timeout=3,
             check=False,
         )
-    except (OSError, TimeoutError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError):
         return ""
     if out.returncode != 0:
         return ""
@@ -83,10 +82,8 @@ def _git_describe(root: Path) -> str:
 
 def _dist_version(names: tuple[str, ...]) -> str:
     """First resolvable ``importlib.metadata`` version among ``names`` ("" if none)."""
-    try:
-        from importlib.metadata import PackageNotFoundError, version as _dist_ver
-    except ImportError:
-        return ""
+    from importlib.metadata import PackageNotFoundError, version as _dist_ver
+
     for name in names:
         try:
             v = str(_dist_ver(name) or "").strip()
@@ -117,23 +114,20 @@ def _tool_metadata(
     tool: str,
     *,
     root: str | None = None,
-    root_env: str | None = None,
     version: str | None = None,
 ) -> dict[str, Any]:
     """Resolve ``{tool, root_dir, commit, version}`` for an external tool.
 
-    Root resolution: explicit ``root`` > caller ``root_env`` > the tool's
-    registered ``root_env``. ``commit`` is a cached ``git rev-parse`` of the
-    root, and ``version`` is the caller's value, else a cached ``_TOOL_PROVENANCE``
-    probe. Best-effort: never raises into the optimizer.
+    Root resolution: explicit ``root`` > the tool's registered ``root_env``.
+    ``commit`` is a cached ``git rev-parse`` of the root, and ``version`` is
+    the caller's value, else a cached ``_TOOL_PROVENANCE`` probe. Best-effort:
+    never raises into the optimizer.
     """
     import os
 
     key = str(tool or "").lower()
     hint = _TOOL_PROVENANCE.get(key, {})
-    root_dir = str(
-        root or os.environ.get(root_env or "", "") or os.environ.get(str(hint.get("root_env") or ""), "")
-    ).strip()
+    root_dir = str(root or os.environ.get(str(hint.get("root_env") or ""), "")).strip()
     cache_key = f"{key}:{root_dir}"
     cached = _TOOL_META_CACHE.get(cache_key)
     if cached is None:
@@ -166,9 +160,7 @@ def record_tool_version(
     *,
     tool: str,
     root: str | None = None,
-    root_env: str | None = None,
     version: str | None = None,
-    producer: str = PRODUCER_KERNEL_AGENT,
 ) -> None:
     """Record one external tool's resolved provenance under ``metadata.versions.tools``.
 
@@ -180,8 +172,8 @@ def record_tool_version(
     if not session_dir or not name:
         trace_skip(reason="no session_dir" if not session_dir else "no tool", section=SECTION)
         return
-    meta = _tool_metadata(name, root=root, root_env=root_env, version=version)
-    recorder_for(session_dir, producer=producer).record_item(SECTION, meta, key=name)
+    meta = _tool_metadata(name, root=root, version=version)
+    recorder_for(session_dir, producer=PRODUCER_KERNEL_AGENT).record_item(SECTION, meta, key=name)
 
 
 __all__ = ["record_tool_version"]

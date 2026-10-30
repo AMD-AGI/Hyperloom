@@ -76,6 +76,16 @@ def test_merge_candidate_contains_base():
     assert out == "--a 1 --b 2"
 
 
+def test_merge_keeps_base_flag_that_prefixes_candidate_flag():
+    out = _merge("--disable-cuda-graph", "--disable-cuda-graph-padding", "")
+    assert out == "--disable-cuda-graph --disable-cuda-graph-padding"
+
+
+def test_merge_candidate_containing_untokenizable_base_is_not_doubled():
+    base = '--a 1 --chat-template "x y"'
+    assert _merge(base, f"{base} --b 2", "") == f"{base} --b 2"
+
+
 def test_merge_candidate_only():
     assert _merge("", "--b 2", "") == "--b 2"
 

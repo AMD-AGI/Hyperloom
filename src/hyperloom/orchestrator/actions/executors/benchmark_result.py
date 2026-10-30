@@ -155,10 +155,8 @@ def _env_derived_leak_roots() -> list[Path]:
     return out
 
 
-def _resolve_leak_roots(leak_root: Path | None) -> tuple[Path, ...]:
+def _resolve_leak_roots() -> tuple[Path, ...]:
     """Return the directory roots to scan for wrapper-side leak files."""
-    if leak_root is not None:
-        return (leak_root,)
     env_raw = os.environ.get("INFERENCE_OPTIMIZER_LEAK_ROOTS", "").strip()
     if env_raw:
         parts = [Path(p.strip()) for p in env_raw.split(":") if p.strip()]
@@ -188,12 +186,10 @@ def harvest_leaked_artifacts(
     destination: Path,
     *,
     subprocess_started_unix: float | None = None,
-    leak_root: Path | None = None,
-    extra_globs: tuple[str, ...] = (),
 ) -> list[tuple[Path, Path]]:
     """Copy known Magpie/InferenceX leak artifacts into ``destination``."""
     harvested: list[tuple[Path, Path]] = []
-    leak_roots = _resolve_leak_roots(leak_root)
+    leak_roots = _resolve_leak_roots()
     try:
         destination.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
@@ -208,7 +204,6 @@ def harvest_leaked_artifacts(
     except OSError:
         return harvested
 
-    globs = tuple(_DEFAULT_LEAK_ARTIFACT_GLOBS) + tuple(extra_globs)
     seen: set[Path] = set()
     for root in leak_roots:
         try:
@@ -216,7 +211,7 @@ def harvest_leaked_artifacts(
                 continue
         except OSError:
             continue
-        for pattern in globs:
+        for pattern in _DEFAULT_LEAK_ARTIFACT_GLOBS:
             try:
                 matches = sorted(root.glob(pattern))
             except OSError:
@@ -902,19 +897,12 @@ def double_run_requested(params: dict | None) -> bool:
 
 
 __all__ = [
-    "LATENCY_DERIVED",
-    "LATENCY_FROM_RAW",
-    "LATENCY_FROM_REPORT",
-    "LATENCY_FROM_RESCUED_RAW",
-    "LATENCY_UNAVAILABLE",
-    "harvest_mn_gpu_metrics",
     "extract_benchmark_measurement",
     "harvest_leaked_artifacts",
     "double_run_requested",
     "is_valid_measurement",
     "round_succeeded",
     "served_complete_protocol",
-    "_materialize_rescue_into_workspace",
 ]
 
 

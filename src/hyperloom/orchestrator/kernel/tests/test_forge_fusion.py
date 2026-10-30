@@ -14,9 +14,6 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.common.codex_session import (
-    CODEX_SANDBOX_MODE_ENV,
-)
 from hyperloom.orchestrator.kernel import forge_fusion
 from hyperloom.orchestrator.kernel.nomination_result import parse_outcome
 
@@ -76,21 +73,8 @@ def test_build_cmd_maps_core_options(tmp_path):
     assert "--llm-model" not in cmd
     assert cmd[cmd.index("--agent-sandbox-mode") + 1] == "workspace-write"
     assert cmd[cmd.index("--max-turns") + 1] == "7"
-    # Multi-patch (one independent sibling per recipe) is now the default; the combine escape hatch must be requested
-    # explicitly, so the flag is absent unless a caller opts in.
-    assert "--fuse-all-confirmed" not in cmd
     assert "--tp" not in cmd
     assert "--block-size" not in cmd
-
-
-def test_build_cmd_combine_escape_hatch_is_opt_in(tmp_path):
-    """``fuse_all_confirmed=True`` still forces the single combined patch."""
-    payload = _payload(tmp_path)
-    payload["fuse_all_confirmed"] = True
-
-    cmd = forge_fusion._build_cmd(payload)
-
-    assert "--fuse-all-confirmed" in cmd
 
 
 def test_build_cmd_forwards_session_serve_args(tmp_path):
@@ -162,14 +146,6 @@ def test_author_env_leaves_codex_environment_untouched(monkeypatch):
     assert forge_fusion._author_env("codex") == dict(os.environ)
 
 
-def test_build_cmd_rejects_invalid_agent_backend(tmp_path):
-    payload = _payload(tmp_path)
-    payload["agent_backend"] = "anthropic"
-
-    with pytest.raises(ValueError, match="agent_backend"):
-        forge_fusion._build_cmd(payload)
-
-
 def test_build_cmd_forwards_read_only_agent_sandbox(tmp_path):
     payload = _payload(tmp_path)
     payload["agent_backend"] = "codex"
@@ -178,38 +154,6 @@ def test_build_cmd_forwards_read_only_agent_sandbox(tmp_path):
     cmd = forge_fusion._build_cmd(payload)
 
     assert cmd[cmd.index("--agent-sandbox-mode") + 1] == "read-only"
-
-
-def test_build_cmd_forwards_bypass_agent_sandbox(tmp_path, monkeypatch):
-    monkeypatch.setenv(CODEX_SANDBOX_MODE_ENV, "bypass")
-    payload = _payload(tmp_path)
-    payload["agent_backend"] = "codex"
-    payload["agent_sandbox_mode"] = "bypass"
-
-    cmd = forge_fusion._build_cmd(payload)
-
-    assert cmd[cmd.index("--agent-sandbox-mode") + 1] == "bypass"
-
-
-def test_build_cmd_forwards_bypass_without_retired_external_sandbox_env(tmp_path, monkeypatch):
-    """forge-fusion bypass must not require HYPERLOOM_CODEX_EXTERNAL_SANDBOX."""
-    monkeypatch.setenv(CODEX_SANDBOX_MODE_ENV, "bypass")
-    monkeypatch.delenv("HYPERLOOM_CODEX_EXTERNAL_SANDBOX", raising=False)
-    payload = _payload(tmp_path)
-    payload["agent_backend"] = "codex"
-    payload["agent_sandbox_mode"] = "bypass"
-
-    cmd = forge_fusion._build_cmd(payload)
-
-    assert cmd[cmd.index("--agent-sandbox-mode") + 1] == "bypass"
-
-
-def test_build_cmd_rejects_invalid_agent_sandbox_mode(tmp_path):
-    payload = _payload(tmp_path)
-    payload["agent_sandbox_mode"] = "unconfined"
-
-    with pytest.raises(RuntimeError, match="unknown Codex sandbox mode"):
-        forge_fusion._build_cmd(payload)
 
 
 def test_run_passes_timeout_and_author_env_to_the_subprocess(tmp_path, monkeypatch):
@@ -241,12 +185,6 @@ def test_run_passes_timeout_and_author_env_to_the_subprocess(tmp_path, monkeypat
     assert result["kept"] is False
 
 
-def test_timeout_sec_invalid_value_falls_back_to_default(monkeypatch):
-    monkeypatch.setenv("FORGE_FUSION_TIMEOUT", "not-an-int")
-
-    assert forge_fusion._timeout_sec({}) == forge_fusion.DEFAULT_TIMEOUT_SEC
-
-
 def test_run_timeout_returns_revert_result(tmp_path, monkeypatch):
     output_dir = tmp_path / "out"
     output_dir.mkdir()
@@ -263,22 +201,14 @@ def test_run_timeout_returns_revert_result(tmp_path, monkeypatch):
 def test_run_timeout_salvages_micro_keep_and_patch(tmp_path, monkeypatch):
     output_dir = tmp_path / "out"
     output_dir.mkdir()
-    patch = output_dir / "fusion.patch"
+    patch = output_dir / "fusion_llm_qwen.patch"
 
     async def fake_run(cmd, *, timeout_sec, env, label):
-        (output_dir / "kernel_keep_checkpoint.json").write_text(
-            json.dumps(
-                {
-                    "kept": True,
-                    "kernel_speedup": 2.69,
-                    "env_flag": "QWEN_FUSED",
-                    "source_file": "/fw/model.py",
-                    "repo_root": "/fw",
-                }
-            ),
-            encoding="utf-8",
-        )
         patch.write_text("diff --git a/model.py b/model.py\n", encoding="utf-8")
+        (output_dir / "forge_loop_llm_qwen.json").write_text(
+            json.dumps(_campaign_loop_result(total_speedup=2.69)), encoding="utf-8"
+        )
+        _campaign_driver(output_dir, "llm_qwen", "QWEN_FUSED")
         raise subprocess.TimeoutExpired(cmd, timeout_sec, output="", stderr="")
 
     result = _run(monkeypatch, _payload(output_dir), fake_run)
@@ -289,19 +219,18 @@ def test_run_timeout_salvages_micro_keep_and_patch(tmp_path, monkeypatch):
     assert result["salvaged"] is True
     assert result["patch"] == str(patch)
     assert result["kernel_speedup"] == 2.69
+    assert result["env_flags"] == {"QWEN_FUSED": "1"}
 
 
 def test_run_timeout_does_not_salvage_stale_previous_run(tmp_path, monkeypatch):
     output_dir = tmp_path / "out"
     output_dir.mkdir()
-    (output_dir / "kernel_keep_checkpoint.json").write_text(
+    (output_dir / "fusion_manifest.json").write_text(
         json.dumps(
             {
-                "kept": True,
-                "kernel_speedup": 9.99,
-                "env_flag": "STALE_FUSED",
-                "source_file": "/fw/stale.py",
-                "repo_root": "/fw",
+                "fusion_loop": {"kept": True, "best": {"kernel_speedup": 9.99}, "best_env_flag": "STALE_FUSED"},
+                "fusion": {"source_file": "/fw/stale.py"},
+                "artifacts": {"repo_root": "/fw"},
             }
         ),
         encoding="utf-8",
@@ -944,7 +873,7 @@ def test_run_reports_the_outage_despite_a_non_zero_exit(tmp_path, monkeypatch):
             ),
             encoding="utf-8",
         )
-        return 3, "", ""  # kernelforge.fusion.command.EXIT_LLM_UNAVAILABLE
+        return 3, "", ""  # kernelforge.workflows.forge_fusion.pipeline.EXIT_LLM_UNAVAILABLE
 
     result = _run(monkeypatch, _payload(output_dir), fake_run)
 
@@ -1082,8 +1011,6 @@ def test_build_cmd_optional_and_disabled_flags(tmp_path):
             "ab_isl": 64,
             "ab_osl": 128,
             "framework_root": "/fw",
-            "verbose": True,
-            "fuse_all_confirmed": False,
         }
     )
 
@@ -1093,8 +1020,6 @@ def test_build_cmd_optional_and_disabled_flags(tmp_path):
     assert "--ab-isl" in cmd
     assert "--ab-osl" in cmd
     assert "--framework-root" in cmd
-    assert "--verbose" in cmd
-    assert "--fuse-all-confirmed" not in cmd
 
 
 def test_build_cmd_never_disables_authoring_or_validation(tmp_path):
@@ -1106,22 +1031,6 @@ def test_build_cmd_never_disables_authoring_or_validation(tmp_path):
 
     assert "--no-author" not in cmd
     assert "--no-validate" not in cmd
-
-
-def test_timeout_sec_prefers_timeout_sec_key():
-    assert forge_fusion._timeout_sec({"timeout_sec": 42}) == 42
-
-
-def test_timeout_sec_accepts_float_strings(monkeypatch):
-    monkeypatch.setenv("FORGE_FUSION_TIMEOUT", "42.9")
-
-    assert forge_fusion._timeout_sec({}) == 42
-
-
-def test_timeout_sec_infinite_value_falls_back_to_default(monkeypatch):
-    monkeypatch.setenv("FORGE_FUSION_TIMEOUT", "inf")
-
-    assert forge_fusion._timeout_sec({}) == forge_fusion.DEFAULT_TIMEOUT_SEC
 
 
 def test_build_cmd_forwards_the_recipe_ceiling(tmp_path):

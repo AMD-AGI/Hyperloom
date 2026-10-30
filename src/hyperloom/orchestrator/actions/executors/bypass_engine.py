@@ -159,6 +159,8 @@ class ClientRun:
     num_warmups: int | None = None
     profile: bool = False
     trust_remote_code: bool = False
+    # Prompt-sampling seed; ``None`` keeps the client's own default.
+    seed: int | None = None
 
 
 def build_client_command(run: ClientRun) -> list[str]:
@@ -207,6 +209,8 @@ def build_client_command(run: ClientRun) -> list[str]:
         cmd.append("--profile")
     if run.trust_remote_code:
         cmd.append("--trust-remote-code")
+    if run.seed is not None:
+        cmd += ["--seed", str(run.seed)]
     return cmd
 
 
@@ -250,14 +254,14 @@ def build_eval_command(run: EvalRun) -> list[str]:
     return cmd
 
 
-@dataclass(frozen=True)
-class HealthPoll:
-    """How the readiness wait polls: its interval, probe and clock (injected by tests)."""
+# Interval between readiness probes.
+_HEALTH_POLL_S = 2.0
 
-    poll_s: float = 2.0
-    probe: Callable[[str], int] | None = None
-    sleep: Callable[[float], None] = time.sleep
-    now: Callable[[], float] = time.monotonic
+
+def _probe_health(url: str) -> int:
+    """Return the HTTP status ``url`` answers with."""
+    with urllib.request.urlopen(url, timeout=5) as resp:  # nosec B310 - fixed local health probe
+        return int(getattr(resp, "status", 0) or resp.getcode())
 
 
 def wait_for_server_ready(
@@ -265,21 +269,13 @@ def wait_for_server_ready(
     *,
     timeout_s: float,
     server_exited: Callable[[], bool],
-    poll: HealthPoll = HealthPoll(),
 ) -> bool:
     """Poll ``<base_url>/health`` until ready or timeout."""
     health_url = f"{base_url.rstrip('/')}/health"
-
-    def _default_probe(url: str) -> int:
-        with urllib.request.urlopen(url, timeout=5) as resp:  # nosec B310 - fixed local health probe
-            return int(getattr(resp, "status", 0) or resp.getcode())
-
-    do_probe = poll.probe or _default_probe
-    now = poll.now
-    deadline = now() + timeout_s
-    while now() < deadline:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
         try:
-            if do_probe(health_url) == 200:
+            if _probe_health(health_url) == 200:
                 return True
         except (OSError, http.client.HTTPException, ValueError):
             pass  # not answering yet; keep polling until the deadline
@@ -287,22 +283,17 @@ def wait_for_server_ready(
         # same breath is still credited with having come up.
         if server_exited():
             return False
-        poll.sleep(poll.poll_s)
+        time.sleep(_HEALTH_POLL_S)
     return False
 
 
-# --- server_lifecycle pid/meta helpers ------------------------------------- Filenames match Hyperloom's
-# teardown_lifecycle_server convention so a persistent bypass server can be reused across processes and torn down by
-# either side: <pid_dir>/<framework>_<port>.pid ("<pid> <pgid>") + .json meta.
-
-
-def lifecycle_pid_file(pid_dir: str, framework: str, port: int) -> Path:
-    """Return the pid file path for a persistent server."""
+def lifecycle_pid_file(pid_dir: Path | str, framework: str, port: int) -> Path:
+    """Return the pid file Magpie's reuse protocol keeps for a persistent server."""
     return Path(pid_dir) / f"{framework}_{port}.pid"
 
 
-def lifecycle_meta_file(pid_dir: str, framework: str, port: int) -> Path:
-    """Return the meta file path for a persistent server."""
+def lifecycle_meta_file(pid_dir: Path | str, framework: str, port: int) -> Path:
+    """Return the meta file Magpie's reuse protocol keeps for a persistent server."""
     return Path(pid_dir) / f"{framework}_{port}.json"
 
 
@@ -347,16 +338,9 @@ def write_lifecycle_files(pid_dir: str, record: LifecycleRecord) -> None:
     )
 
 
-def server_health_ok(base_url: str, *, probe: Callable[[str], int] | None = None) -> bool:
+def server_health_ok(base_url: str) -> bool:
     """One-shot health probe (no polling); True iff /health returns 200."""
-    health_url = f"{base_url.rstrip('/')}/health"
-
-    def _default_probe(url: str) -> int:
-        with urllib.request.urlopen(url, timeout=5) as resp:  # nosec B310 - fixed local health probe
-            return int(getattr(resp, "status", 0) or resp.getcode())
-
-    do_probe = probe or _default_probe
     try:
-        return do_probe(health_url) == 200
+        return _probe_health(f"{base_url.rstrip('/')}/health") == 200
     except (OSError, http.client.HTTPException, ValueError):
         return False

@@ -67,7 +67,7 @@ def test_flags_parse_and_reject_an_unknown_mode():
 
 
 def test_flags_are_exported_and_an_absent_flag_keeps_the_shell_value(monkeypatch, capsys):
-    from hyperloom.inference_optimizer.cli import _export_predictor_settings
+    from hyperloom.inference_optimizer.cli.launch_shape import _export_predictor_settings
 
     monkeypatch.setenv(config.ENV_MODE, "active")
     _export_predictor_settings(_optimize_args("--primatune-endpoint", "http://p:8973"))

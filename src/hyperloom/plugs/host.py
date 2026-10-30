@@ -119,9 +119,9 @@ class PlugHost:
                     continue
                 try:
                     closer()
-                except Exception as exc:  # noqa: BLE001 - one failed close must not strand the others
+                except Exception as exc:  # isolation boundary: one plug implementation close
                     self._close_errors[socket] = f"{type(exc).__name__}: {exc}"
-                    log.warning("closing plug %s failed: %s", socket, exc)
+                    log.warning("closing plug %s failed: %s", socket, exc, exc_info=True)
 
     def close_errors(self) -> Mapping[str, str]:
         """Why each implementation that failed to close did."""

@@ -15,6 +15,7 @@ from hyperloom.orchestrator.roles import (
     ScriptedPlan,
 )
 from hyperloom.orchestrator.actions.executors import report_executor
+from hyperloom.orchestrator.loop import coordinator as coordinator_mod
 from hyperloom.orchestrator.loop.coordinator import Coordinator, RunOptions
 from hyperloom.orchestrator.state.shared_state import effective_closing_grace_sec
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
@@ -456,8 +457,9 @@ async def test_run_repeated_tick_exceptions_stop_as_emergency(
         raise RuntimeError("persistent dispatcher boom")
 
     monkeypatch.setattr(c.dispatcher, "pump_dispatcher_once", broken_dispatcher_once)
+    monkeypatch.setattr(coordinator_mod, "_CRASH_EMERGENCY_THRESHOLD", 2)
     try:
-        reason = await c.run(options=RunOptions(max_ticks=10, crash_emergency_threshold=2))
+        reason = await c.run(options=RunOptions(max_ticks=10))
         assert reason == "emergency"
         assert c.shared_state.crash_count == 2
         assert c.shared_state.stop_reason == "emergency"
@@ -476,13 +478,14 @@ async def test_run_finally_labels_residual_escape_as_coordinator_exception(
     async def broken_dispatcher_once() -> None:
         raise RuntimeError("recorded tick failure")
 
-    def broken_stop_when(_c) -> bool:
-        raise ValueError("stop callback failed")
+    class _BrokenObjective(TimeOnlyObjective):
+        def reached(self, state: SharedState) -> bool:
+            raise ValueError("objective check failed")
 
     monkeypatch.setattr(c.dispatcher, "pump_dispatcher_once", broken_dispatcher_once)
     try:
-        with pytest.raises(ValueError, match="stop callback failed"):
-            await c.run(options=RunOptions(max_ticks=10, stop_when=broken_stop_when))
+        with pytest.raises(ValueError, match="objective check failed"):
+            await c.run(objective=_BrokenObjective(), options=RunOptions(max_ticks=10))
         persisted = SharedState.load_or_init(session_dir)
         assert persisted.stop_reason == "coordinator_exception"
         assert persisted.last_tick_exception["type"] == "RuntimeError"
@@ -492,30 +495,14 @@ async def test_run_finally_labels_residual_escape_as_coordinator_exception(
 
 
 @pytest.mark.asyncio
-async def test_run_emergency_threshold_can_be_lowered_per_call(session_dir):
+async def test_run_stops_as_emergency_once_recent_crashes_reach_the_threshold(session_dir, monkeypatch):
+    monkeypatch.setattr(coordinator_mod, "_CRASH_EMERGENCY_THRESHOLD", 3)
     c = Coordinator(session_dir, backends=_backends_silent())
     try:
         for _ in range(4):
             c.shared_state.increment_crash_count()
-        reason = await c.run(options=RunOptions(max_ticks=10, crash_emergency_threshold=3))
+        reason = await c.run(options=RunOptions(max_ticks=10))
         assert reason == "emergency"
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_run_stops_on_custom_stop_when(session_dir):
-    c = Coordinator(session_dir, backends=_backends_silent())
-    try:
-        ticks = {"n": 0}
-
-        def custom_stop(_c) -> bool:
-            ticks["n"] += 1
-            return ticks["n"] >= 2
-
-        reason = await c.run(options=RunOptions(max_ticks=20, stop_when=custom_stop))
-        assert reason == "custom"
-        assert ticks["n"] == 2
     finally:
         await c.stop()
 
@@ -539,21 +526,6 @@ async def test_run_persists_max_minutes_to_state(session_dir):
     finally:
         await c.stop()
     assert c.shared_state.max_minutes == 42
-
-
-@pytest.mark.asyncio
-async def test_run_async_stop_when_callback(session_dir):
-    """stop_when can be an async function too."""
-    c = Coordinator(session_dir, backends=_backends_silent())
-    try:
-
-        async def acb(_c):
-            return True
-
-        reason = await c.run(options=RunOptions(max_ticks=10, stop_when=acb))
-        assert reason == "custom"
-    finally:
-        await c.stop()
 
 
 # --- the roofline target ---

@@ -202,6 +202,8 @@ INFERENCEX_DEFAULT_DIR="${INFERENCEX_DEFAULT_DIR:-${_open_source_root}/Inference
 
 DRY_RUN=0
 CHECK_ONLY=0
+# Keys --check-only finds behind the pins this checkout installs; a non-empty list fails the check.
+_STALE_KEYS=()
 
 usage() {
   cat <<'EOF'
@@ -317,9 +319,32 @@ print(f"{version}\t{match.group(1)}\t{Path(dist.locate_file('vllm')).resolve()}"
 PY
 }
 
+# Commit the tree staged in ``index_tmp`` on ``parent`` with a fixed identity and date, then pin HEAD to it.
+commit_image_baseline() {
+  local root="$1" parent="$2" index_tmp="$3" subject="$4"
+  local git_dir tree commit_date
+  tree="$(GIT_INDEX_FILE="$index_tmp" git -C "$root" write-tree)" ||
+    { rm -f "$index_tmp"; die "failed to write the image baseline tree in ${root}"; return 1; }
+  commit_date="$(git -C "$root" show -s --format=%cI "$parent")"
+  IMAGE_BASELINE_SHA="$(
+    printf '%s\n' "$subject" |
+      GIT_AUTHOR_NAME=Hyperloom GIT_AUTHOR_EMAIL=hyperloom@amd.com GIT_AUTHOR_DATE="$commit_date" \
+      GIT_COMMITTER_NAME=Hyperloom GIT_COMMITTER_EMAIL=hyperloom@amd.com GIT_COMMITTER_DATE="$commit_date" \
+      git -C "$root" commit-tree "$tree" -p "$parent"
+  )" || { rm -f "$index_tmp"; die "failed to commit the image baseline tree in ${root}"; return 1; }
+  git_dir="$(git -C "$root" rev-parse --absolute-git-dir)"
+  mv "$index_tmp" "$git_dir/index"
+  git -C "$root" update-ref refs/hyperloom/upstream "$parent" &&
+    git -C "$root" update-ref refs/hyperloom/image-baseline "$IMAGE_BASELINE_SHA" &&
+    git -C "$root" update-ref --no-deref HEAD "$IMAGE_BASELINE_SHA" ||
+    { die "failed to pin the image baseline in ${root}"; return 1; }
+  git -C "$root" diff-index --quiet --ignore-submodules=dirty "$IMAGE_BASELINE_SHA" -- ||
+    { die "the image baseline in ${root} changed after pinning"; return 1; }
+}
+
 prepare_vllm_image_git_tree() {
   local root="$1" origin="" head="" parent="" subject="" baseline_ref="" upstream_ref=""
-  local index_tmp git_dir tree baseline commit_date
+  local index_tmp
   [[ "$VLLM_IMAGE_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] ||
     { die "VLLM image source commit must be a full SHA"; return 1; }
   if git -C "$root" rev-parse --git-dir >/dev/null 2>&1; then
@@ -363,25 +388,10 @@ prepare_vllm_image_git_tree() {
      ! GIT_INDEX_FILE="$index_tmp" git -C "$root" add -u -- .; then
     rm -f "$index_tmp"; die "failed to capture vLLM image tracked deltas"; return 1
   fi
-  tree="$(GIT_INDEX_FILE="$index_tmp" git -C "$root" write-tree)" ||
-    { rm -f "$index_tmp"; die "failed to write vLLM image baseline tree"; return 1; }
-  commit_date="$(git -C "$root" show -s --format=%cI "$VLLM_IMAGE_SOURCE_COMMIT")"
-  baseline="$(
-    printf '%s\n' "Hyperloom prebuilt vLLM image baseline" |
-      GIT_AUTHOR_NAME=Hyperloom GIT_AUTHOR_EMAIL=hyperloom@amd.com GIT_AUTHOR_DATE="$commit_date" \
-      GIT_COMMITTER_NAME=Hyperloom GIT_COMMITTER_EMAIL=hyperloom@amd.com GIT_COMMITTER_DATE="$commit_date" \
-      git -C "$root" commit-tree "$tree" -p "$VLLM_IMAGE_SOURCE_COMMIT"
-  )" || { rm -f "$index_tmp"; die "failed to commit vLLM image baseline tree"; return 1; }
-  git_dir="$(git -C "$root" rev-parse --absolute-git-dir)"
-  mv "$index_tmp" "$git_dir/index"
-  git -C "$root" update-ref refs/hyperloom/upstream "$VLLM_IMAGE_SOURCE_COMMIT" &&
-    git -C "$root" update-ref refs/hyperloom/image-baseline "$baseline" &&
-    git -C "$root" update-ref --no-deref HEAD "$baseline" ||
-    { die "failed to pin vLLM image source HEAD"; return 1; }
-  git -C "$root" diff-index --quiet "$baseline" -- ||
-    { die "vLLM image source verification changed after pinning"; return 1; }
+  commit_image_baseline "$root" "$VLLM_IMAGE_SOURCE_COMMIT" "$index_tmp" "Hyperloom prebuilt vLLM image baseline" ||
+    return 1
   export VLLM_IMAGE_UPSTREAM_SHA="$VLLM_IMAGE_SOURCE_COMMIT"
-  export VLLM_IMAGE_BASELINE_SHA="$baseline"
+  export VLLM_IMAGE_BASELINE_SHA="$IMAGE_BASELINE_SHA"
 }
 
 copy_missing_vllm_wheel_artifacts() {
@@ -971,12 +981,12 @@ PY
 # any more, so there is nothing to install -- only something to verify. The
 # three imports are the ones whose absence used to be found late:
 #   kernelforge.cli      forge-loop's entry point (the 2026-07-28 ModuleNotFoundError)
-#   kernelforge.fusion   forge-fuse, which imports fine only if the tree is complete
+#   kernelforge.workflows.forge_fusion   forge-fuse, which imports fine only if the tree is complete
 #   openai_codex         the agent runtime for an OpenAI-only deployment; without
 #                        it the provider fallback silently becomes a claude run
 #                        that dies at its first turn on "Not logged in"
 _check_kernelforge_ready() {
-  if "$PYTHON" -c "import kernelforge.cli, kernelforge.fusion" >/dev/null 2>&1; then
+  if "$PYTHON" -c "import kernelforge.cli, kernelforge.workflows.forge_fusion" >/dev/null 2>&1; then
     log "kernelforge (built-in kernel-opt agent) OK"
   else
     warn "kernelforge not importable after install; forge kernel attempts will fail"
@@ -1007,7 +1017,7 @@ ensure_forge_gemm_tune() {
   # same lesson against a checkout instead of against a packaged subpackage.)
   local probe='
 import sys
-import kernelforge.gemm_tune.cli  # noqa: F401
+import kernelforge.workflows.gemm_tune.pipeline  # noqa: F401
 from kernelforge.cli import main
 sys.exit(0 if "gemm-tune" in getattr(main, "commands", {}) else 1)
 '
@@ -1437,11 +1447,19 @@ for spec in specs:
 # root after import.
 ensure_magpie() {
   log "ensuring Magpie package ${MAGPIE_PACKAGE_SPEC}"
+  # An older install wrote MAGPIE_PATH into .env; one that no longer holds the package is not an override to keep.
+  if [ "$MAGPIE_PATH_EXPLICIT" -eq 1 ] && [ ! -f "${MAGPIE_PATH}/Magpie/__init__.py" ]; then
+    warn "MAGPIE_PATH=${MAGPIE_PATH} holds no Magpie package; resolving it from the installed package instead"
+    MAGPIE_PATH_EXPLICIT=0
+  fi
   if [ "$CHECK_ONLY" -eq 1 ]; then
     if "$PYTHON" -c "import Magpie" >/dev/null 2>&1; then
       log "Magpie importable"
     else
       warn "Magpie not importable (check-only mode, skipping pip install)"
+    fi
+    if [ "$MAGPIE_PATH_EXPLICIT" -eq 0 ] && ! "$PYTHON" "${_script_dir}/check_magpie.py" "$MAGPIE_REF" >/dev/null 2>&1; then
+      _STALE_KEYS+=("MAGPIE_REF")
     fi
     return 0
   fi
@@ -1837,15 +1855,26 @@ install_kernel_agent_tools() {
     return 0
   fi
   log "installing ray + TraceLens + GEAK + LLM gateway env"
-  # A subshell keeps the steps' variables and PATH out of the steps that follow.
+  local stale_keys_file key
+  stale_keys_file="$(mktemp)"
+  # A subshell keeps the steps' variables and PATH out of the steps that follow;
+  # the pins it finds stale come back through a file, as its _STALE_KEYS ends with it.
   (
     export REPO_ROOT MAGPIE_PATH HYPERLOOM_ROOT
     [ -n "${INFERENCEX_PATH:-}" ] && export INFERENCEX_PATH
     [ -n "${TRACELENS_INTERNAL_ROOT:-}" ] && export TRACELENS_INTERNAL_ROOT
+    _STALE_KEYS=()
     # shellcheck source=install_kernel_tools.sh
     . "${_script_dir}/install_kernel_tools.sh"
     install_kernel_tools
+    if [ "${#_STALE_KEYS[@]}" -gt 0 ]; then
+      printf '%s\n' "${_STALE_KEYS[@]}" > "$stale_keys_file"
+    fi
   )
+  while IFS= read -r key; do
+    _STALE_KEYS+=("$key")
+  done < "$stale_keys_file"
+  rm -f "$stale_keys_file"
 }
 
 
@@ -1912,6 +1941,58 @@ _write_specialist_secret_env_opt_in() {
   fi
 }
 
+# Runtime caches a framework checkout writes into itself without ignoring them.
+IMAGE_BASELINE_RUNTIME_CACHES=("aiter/jit/flydsl_cache/")
+IMAGE_BASELINE_UNTRACKED_LIMIT_BYTES=$((256 * 1024 * 1024))
+
+_image_baseline_exclude_runtime_caches() {
+  local top="$1" relative entry exclude
+  exclude="$(git -C "$top" rev-parse --path-format=absolute --git-path info/exclude)"
+  mkdir -p "$(dirname "$exclude")"
+  for relative in "${IMAGE_BASELINE_RUNTIME_CACHES[@]}"; do
+    entry="/${relative}"
+    [ ! -d "$top/$relative" ] || grep -qxF "$entry" "$exclude" 2>/dev/null || printf '%s\n' "$entry" >> "$exclude"
+  done
+}
+
+# Commit a checkout's served state, uncommitted changes included, so HEAD is the code the baseline runs.
+pin_image_baseline() {
+  local top="$1" head index_tmp bytes
+  if git -C "$top" rev-parse --verify --quiet refs/hyperloom/image-baseline >/dev/null; then
+    log "image baseline already pinned: ${top}"; return 0
+  fi
+  if [ "$DRY_RUN" -eq 1 ] || [ "$CHECK_ONLY" -eq 1 ]; then
+    log "would pin the image baseline of ${top}"; return 0
+  fi
+  _image_baseline_exclude_runtime_caches "$top"
+  [ -n "$(git -C "$top" status --porcelain --ignore-submodules=dirty)" ] || return 0
+  [ -z "$(git -C "$top" ls-files --unmerged)" ] ||
+    { die "cannot pin the image baseline of ${top}: it has unmerged paths"; return 1; }
+  bytes="$(git -C "$top" ls-files --others --exclude-standard -z |
+    (cd "$top" && xargs -0 -r stat -c '%s') | awk '{ total += $1 } END { print total + 0 }')"
+  [ "$bytes" -le "$IMAGE_BASELINE_UNTRACKED_LIMIT_BYTES" ] ||
+    { die "cannot pin the image baseline of ${top}: ${bytes} bytes untracked; exclude the build products"; return 1; }
+  head="$(git -C "$top" rev-parse HEAD)"
+  index_tmp="$(mktemp)"
+  if ! GIT_INDEX_FILE="$index_tmp" git -C "$top" read-tree "$head" ||
+     ! GIT_INDEX_FILE="$index_tmp" git -C "$top" add -A -- .; then
+    rm -f "$index_tmp"; die "failed to capture the served state of ${top}"; return 1
+  fi
+  commit_image_baseline "$top" "$head" "$index_tmp" "Hyperloom image baseline" || return 1
+  log "pinned the image baseline of ${top} at ${IMAGE_BASELINE_SHA}"
+}
+
+pin_framework_image_baselines() {
+  local root top
+  while IFS= read -r root; do
+    [ -d "$root" ] || continue
+    top="$(git -C "$root" rev-parse --show-toplevel 2>/dev/null)" || continue
+    pin_image_baseline "$top" || return 1
+  done < <(printf '%s\n' "$FRAMEWORK_SOURCE_ROOTS" | tr ':' '\n')
+}
+
+FRAMEWORK_SOURCE_ROOTS=""
+
 _probe_framework_source_roots() {
   log "probing framework source roots for INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS"
   local roots
@@ -1925,6 +2006,7 @@ PY
     return 0
   fi
   log "discovered framework roots: $roots"
+  FRAMEWORK_SOURCE_ROOTS="$roots"
   # Emit a framework-bucketed one-liner so operators (and the
   # preflight grep) can tell at a glance whether atom was picked up.
   local roots_summary
@@ -1955,8 +2037,12 @@ PY
 
 _write_specialist_secret_env_opt_in
 _probe_framework_source_roots
+pin_framework_image_baselines
 
 _prune_dep_cache "InferenceX" "Magpie"
+if [ "${#_STALE_KEYS[@]}" -gt 0 ]; then
+  die "behind the pinned revisions: ${_STALE_KEYS[*]}. Rerun install.sh without --check-only to update them."
+fi
 log "install complete"
 log "kernel-agent env file written: ${KERNEL_AGENT_ENV}"
 log ""

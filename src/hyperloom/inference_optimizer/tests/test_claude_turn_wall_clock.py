@@ -107,7 +107,7 @@ def _backend(sdk: _StallingSdk, *, turn_timeout_s: float, call_timeout_s: float 
     return ClaudeBackend(
         sdk_query_factory=sdk,
         sdk_options_cls=_Options,
-        enable_mcp_emit_intent=False,
+        mcp_server_factory=lambda *a, **k: None,
         call_timeout_s=call_timeout_s,
         turn_timeout_s=turn_timeout_s,
         retry_policy=RetryPolicy(max_attempts=3, base_delay_s=0.0, jitter_s=0.0),

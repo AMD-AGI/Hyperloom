@@ -15,11 +15,10 @@ from hyperloom.common.gpu_identity import gfx_arch_for_gpu_type
 
 from ._kernel_classification import _FLYDSL_SCAN_BYTES
 
-# Canonical roofline_source provenance enum, shared with the bypass route so both
-# emit the field from one vocabulary (see _roofline_source for the value ladder).
+# Canonical roofline_source provenance enum (see _roofline_source for the value ladder).
 from ._roofline_source import ANALYTICAL as _RL_ANALYTICAL, PLACEHOLDER as _RL_PLACEHOLDER
 from ._trace_shapes import _dtypes_from_shapes, _shape_call_entries
-from .tracelens_skill_runner import tracelens_analysis_mode
+from hyperloom.inference_optimizer.framework_registry import tracelens_analysis_mode
 
 
 def default_roofline_fields(candidates: list[dict[str, Any]]) -> None:
@@ -346,22 +345,17 @@ def enrich_candidates_with_runtime_metadata(
         args (argparse.Namespace): Parsed CLI args carrying framework, model
             name, target platform, and runtime flags.
     """
-    framework = str(getattr(args, "framework", "") or "").strip()
-    model_params = load_model_kernel_params(str(getattr(args, "model_name", "") or ""))
-    target_platform = str(getattr(args, "target_platform", "") or "")
-    runtime_flags = {
-        "analysis_mode": tracelens_analysis_mode(framework),
-        "target_platform": target_platform,
-    }
+    framework = args.framework.strip()
+    model_params = load_model_kernel_params(args.model_name)
+    target_platform = args.target_platform
+    analysis_mode = tracelens_analysis_mode(framework)
     for item in candidates:
-        if not isinstance(item, dict):
-            continue
         if framework:
             item.setdefault("framework", framework)
             item.setdefault("backend", framework)
         if "input_shapes" not in item:
             item["input_shapes"] = _shape_call_entries(
-                item.get("shapes", []) or [],
+                item.get("shapes"),
                 item.get("call_count"),
             )
             item["_input_shapes_synthetic"] = True
@@ -370,23 +364,20 @@ def enrich_candidates_with_runtime_metadata(
         # ("(64,5120) bf16"); surface them as a clean, positionally-aligned list so
         # the GEAK harness allocates the correct-dtype tensors (fp8 weight vs bf16
         # activation). Falls back to any explicit ``dtypes`` field, then ``[]``.
-        existing_dtypes = item.get("input_dtypes") or item.get("dtypes") or []
+        existing_dtypes = item.get("input_dtypes") or item.get("dtypes")
         if not existing_dtypes:
-            existing_dtypes = _dtypes_from_shapes(item.get("shapes", []) or [])
+            existing_dtypes = _dtypes_from_shapes(item.get("shapes"))
         item["input_dtypes"] = existing_dtypes
         item.setdefault("output_dtypes", [])
         item.setdefault("runtime_args", {})
         item.setdefault("env_vars", {})
-        item.setdefault("kernel_params", {})
-        if model_params:
-            params = item["kernel_params"]
-            if isinstance(params, dict):
-                for key, value in model_params.items():
-                    params.setdefault(key, value)
+        params = item.setdefault("kernel_params", {})
+        for key, value in model_params.items():
+            params.setdefault(key, value)
         if item.get("source_type") == "flydsl":
             # FlyDSL pseudo-ops carry no real source_file; inject the FlyDSL MoE kernel source.
             _sf2 = str(item.get("source_file") or "").strip()
-            if (not _sf2) or (not os.path.isfile(_sf2)):
+            if not os.path.isfile(_sf2):
                 fb = _resolve_flydsl_source_fallback()
                 if fb:
                     item["source_file"] = fb
@@ -394,17 +385,12 @@ def enrich_candidates_with_runtime_metadata(
                 str(item.get("source_file") or ""),
                 target_platform,
             )
-            params = item["kernel_params"]
-            if isinstance(params, dict):
-                for key, value in flydsl_params.items():
-                    params.setdefault(key, value)
-        flags = item.get("runtime_flags")
-        if not isinstance(flags, dict):
-            flags = {}
-            item["runtime_flags"] = flags
-        for key, value in runtime_flags.items():
-            if value not in (None, ""):
-                flags.setdefault(key, value)
+            for key, value in flydsl_params.items():
+                params.setdefault(key, value)
+        flags = item.setdefault("runtime_flags", {})
+        flags.setdefault("analysis_mode", analysis_mode)
+        if target_platform:
+            flags.setdefault("target_platform", target_platform)
         flags.setdefault("is_multigpu", bool(item.get("is_multigpu")))
         flags.setdefault("num_gpus_recommended", item.get("num_gpus_recommended"))
         # Kernel-class CONTRACT enrichment so GEAK's harness is faithful for
@@ -445,7 +431,7 @@ def _enrich_kernel_contract(item: dict[str, Any], model_params: dict[str, Any]) 
     These are advisory metadata; absent fields are simply not set.
     """
     name = str(item.get("name") or "").lower()
-    contract = item.get("kernel_contract") or {}
+    contract = item.get("kernel_contract", {})
     # --- collectives ---
     collective_op = next((op for tag, op in _COLLECTIVE_OPS.items() if tag in name), None)
     if item.get("is_multigpu") or collective_op:
@@ -475,12 +461,20 @@ def _enrich_kernel_contract(item: dict[str, Any], model_params: dict[str, Any]) 
         contract.setdefault("kv_layout", "unknown")  # to be confirmed from trace; flag for reviewer
         contract["seqlen_regime"] = next((regime for regime in ("prefill", "decode") if regime in name), "mixed")
         contract["reference"] = "torch.nn.functional.scaled_dot_product_attention"
-    # E2E-TRANSFER honesty flag: warn when a kernel-level win is unlikely to move
-    # serving E2E so neither the pipeline nor a reviewer over-trusts a micro-speedup.
-    #  - sealed-ASM launchers: asm_*.cu dispatches a prebuilt .co HSACO; only the
-    #    host-side launcher is editable, so wins are tiny (observed E2E #1: 1.09x
-    #    kernel -> 1.0008x E2E).
-    #  - collectives on a 1-GPU GEAK slot: cannot reproduce inter-GPU traffic.
+    _mark_e2e_transferability(item, contract)
+    if contract:
+        item["kernel_contract"] = contract
+
+
+def _mark_e2e_transferability(item: dict[str, Any], contract: dict[str, Any]) -> None:
+    """Flag a kernel whose kernel-level win is unlikely to move serving E2E.
+
+    Keeps neither the pipeline nor a reviewer over-trusting a micro-speedup:
+     - sealed-ASM launchers: asm_*.cu dispatches a prebuilt .co HSACO; only the
+       host-side launcher is editable, so wins are tiny (observed E2E #1: 1.09x
+       kernel -> 1.0008x E2E).
+     - collectives on a 1-GPU GEAK slot: cannot reproduce inter-GPU traffic.
+    """
     src = str(item.get("source_file") or "").lower()
     reasons = []
     if "/py_itfs_cu/asm_" in src or (os.path.basename(src).startswith("asm_") and src.endswith(".cu")):
@@ -492,5 +486,3 @@ def _enrich_kernel_contract(item: dict[str, Any], model_params: dict[str, Any]) 
         item["e2e_transfer_note"] = "; ".join(reasons)
     else:
         item.setdefault("e2e_transferable", True)
-    if contract:
-        item["kernel_contract"] = contract

@@ -17,9 +17,7 @@ import pytest
 import yaml
 
 from hyperloom.orchestrator.kernel import request_handlers as krh
-from hyperloom.orchestrator.actions.executors import (
-    ReportExecutor,
-)
+from hyperloom.orchestrator.actions.executors.report import ReportExecutor
 from hyperloom.orchestrator.roles import (
     MockBackend,
     ScriptedPlan,
@@ -31,15 +29,17 @@ from hyperloom.orchestrator.loop.sub_agent_runner import (
     SubAgentRunner,
 )
 from hyperloom.orchestrator.bus.resource_lock import (
-    ResourceLockManager,
     SqliteLeaseBackend,
 )
-from hyperloom.orchestrator.state.task_registry import TaskRegistry
+from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
 from hyperloom.inference_optimizer.session.paths import make_session_dir
-from hyperloom.orchestrator.bus.storage import SqliteConnection
+from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.bus.message_bus import Message
 
 from .conftest import seed_kernel_keep
+from hyperloom.orchestrator.kernel import _integrate_payload as integrate_payload
+from hyperloom.orchestrator.kernel import _integrate_rebaseline as integrate_rebaseline
+from hyperloom.orchestrator.kernel import _integrate_outcomes as integrate_outcomes
 
 
 # fixtures
@@ -53,7 +53,7 @@ def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setattr(
         _benchmark_interpreter,
         "_resolve_magpie_python",
-        lambda: "/usr/bin/python3",
+        lambda _env=None: "/usr/bin/python3",
     )
     return make_session_dir()
 
@@ -266,7 +266,7 @@ async def test_integrate_handler_materializes_persisted_agentx_mode(
         "accuracy_metric": "exact_match,strict-match",
     }
 
-    async def _measure(executor, *, config_path, output_dir, **_kwargs):
+    async def _measure(executor, _attempt, *, config_path, output_dir, **_kwargs):
         seen["shared_state"] = executor.shared_state
         seen["benchmark"] = yaml.safe_load(config_path.read_text(encoding="utf-8"))["benchmark"]
         workspace = output_dir / "benchmark_sglang_e2e"
@@ -355,7 +355,7 @@ def integrate_recipe_case(session_dir, tmp_path, monkeypatch):
     state.save(session_dir)
     benchmarks = []
 
-    async def _measure(executor, *, config_path, output_dir, **_kwargs):
+    async def _measure(executor, _attempt, *, config_path, output_dir, **_kwargs):
         benchmark = yaml.safe_load(config_path.read_text(encoding="utf-8"))["benchmark"]
         benchmarks.append(benchmark)
         tput = 100.0 if benchmark["envs"].get("LEG") == "A" else 110.0
@@ -567,11 +567,10 @@ async def test_gemm_paired_materializes_each_frozen_recipe_controls(
         reference,
         candidate,
         config_path=str(base_yaml),
-        budget_minutes=1,
     )
 
     assert verdict is not None
-    assert verdict.pairs == [(100.0, 110.0), (100.0, 110.0)]
+    assert verdict.median_delta_pct == 10.0 and verdict.reason == "candidate_faster"
     assert len(payloads) == len(benchmarks) == 4
     for idx, (payload, benchmark) in enumerate(zip(payloads, benchmarks)):
         recipe = reference if idx % 2 == 0 else candidate
@@ -615,7 +614,7 @@ async def test_gemm_paired_materializes_each_frozen_recipe_controls(
 async def test_integrate_handler_double_run_schedules_accuracy_on_graded_keep(
     session_dir, tmp_path, monkeypatch, output, total, intvty, stack, accuracy_outcome, decision
 ):
-    from hyperloom.orchestrator.actions.executors import _server_lifecycle
+    from hyperloom.orchestrator.actions.executors import benchmark_backend
     from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
 
     monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
@@ -628,9 +627,9 @@ async def test_integrate_handler_double_run_schedules_accuracy_on_graded_keep(
     # AgentX currently falls back to one round; admit its script only in this
     # test to exercise deferred double-run scheduling, not enable AgentX reuse.
     monkeypatch.setattr(
-        _server_lifecycle,
+        benchmark_backend,
         "MAGPIE_BUILTIN_SCRIPTS",
-        _server_lifecycle.MAGPIE_BUILTIN_SCRIPTS | {"aiperf_client.sh"},
+        benchmark_backend.MAGPIE_BUILTIN_SCRIPTS | {"aiperf_client.sh"},
     )
     base_yaml = tmp_path / "base.yaml"
     _write_baseline_yaml(base_yaml)
@@ -663,7 +662,7 @@ async def test_integrate_handler_double_run_schedules_accuracy_on_graded_keep(
     rounds = []
     measured = {}
 
-    async def _benchmark(executor, *, config_path, output_dir, **_kwargs):
+    async def _benchmark(executor, _attempt, *, config_path, output_dir, **_kwargs):
         assert target.read_text(encoding="utf-8") == patch_file.read_text(encoding="utf-8")
         bench = yaml.safe_load(config_path.read_text(encoding="utf-8"))["benchmark"]
         rounds.append((output_dir.name, bench))
@@ -959,11 +958,7 @@ async def test_integrate_retries_once_after_stale_aiter_baton(tmp_path, monkeypa
             {"scanned": 1, "deleted": 1, "errors": 0},
         ]
     )
-    monkeypatch.setattr(
-        krh,
-        "_sweep_integrate_aiter_locks",
-        lambda **_kwargs: next(sweeps),
-    )
+    monkeypatch.setattr(integrate_rebaseline, "_sweep_integrate_aiter_locks", lambda **_kwargs: next(sweeps))
     calls = 0
 
     async def _executor(_ctx):
@@ -973,7 +968,7 @@ async def test_integrate_retries_once_after_stale_aiter_baton(tmp_path, monkeypa
             return {"status": "failed", "error_class": "timeout"}
         return {"status": "succeeded", "output_throughput": 100.0}
 
-    result = await krh._run_integrate_rebaseline_with_lock_retry(
+    result = await integrate_rebaseline._run_integrate_rebaseline_with_lock_retry(
         _executor,
         object(),
         workspace=tmp_path,
@@ -1002,11 +997,7 @@ async def test_integrate_does_not_delete_or_retry_live_baton_owner(tmp_path, mon
             },
         ]
     )
-    monkeypatch.setattr(
-        krh,
-        "_sweep_integrate_aiter_locks",
-        lambda **_kwargs: next(sweeps),
-    )
+    monkeypatch.setattr(integrate_rebaseline, "_sweep_integrate_aiter_locks", lambda **_kwargs: next(sweeps))
     calls = 0
 
     async def _executor(_ctx):
@@ -1014,7 +1005,7 @@ async def test_integrate_does_not_delete_or_retry_live_baton_owner(tmp_path, mon
         calls += 1
         return {"status": "failed", "error_class": "timeout"}
 
-    result = await krh._run_integrate_rebaseline_with_lock_retry(
+    result = await integrate_rebaseline._run_integrate_rebaseline_with_lock_retry(
         _executor,
         object(),
         workspace=tmp_path,
@@ -1035,7 +1026,9 @@ async def test_integrate_retries_once_after_aiter_jit_registry_mismatch(tmp_path
         dropped.append({"envs": envs, "backup_dir": backup_dir, "also_modules": also_modules})
         return {"action": "invalidate"}
 
-    monkeypatch.setattr(krh, "_sweep_integrate_aiter_locks", lambda **_kwargs: {"scanned": 0, "deleted": 0})
+    monkeypatch.setattr(
+        integrate_rebaseline, "_sweep_integrate_aiter_locks", lambda **_kwargs: {"scanned": 0, "deleted": 0}
+    )
     monkeypatch.setattr(
         "hyperloom.orchestrator.actions.executors._aiter_jit.drop_serving_so_for_envs",
         _drop,
@@ -1057,7 +1050,7 @@ async def test_integrate_retries_once_after_aiter_jit_registry_mismatch(tmp_path
         extra={},
         task=types.SimpleNamespace(params={"extra_envs": extra_envs}),
     )
-    result = await krh._run_integrate_rebaseline_with_lock_retry(
+    result = await integrate_rebaseline._run_integrate_rebaseline_with_lock_retry(
         _executor,
         ctx,
         workspace=tmp_path,
@@ -1078,7 +1071,9 @@ async def test_integrate_registry_retry_does_not_restamp_unrelated_retry_failure
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(krh, "_sweep_integrate_aiter_locks", lambda **_kwargs: {"scanned": 0, "deleted": 0})
+    monkeypatch.setattr(
+        integrate_rebaseline, "_sweep_integrate_aiter_locks", lambda **_kwargs: {"scanned": 0, "deleted": 0}
+    )
     monkeypatch.setattr(
         "hyperloom.orchestrator.actions.executors._aiter_jit.drop_serving_so_for_envs",
         lambda *args, **kwargs: {"action": "invalidate"},
@@ -1100,7 +1095,7 @@ async def test_integrate_registry_retry_does_not_restamp_unrelated_retry_failure
         )
         return {"status": "failed", "error_class": "oom", "error": "HIP out of memory"}
 
-    result = await krh._run_integrate_rebaseline_with_lock_retry(
+    result = await integrate_rebaseline._run_integrate_rebaseline_with_lock_retry(
         _executor,
         types.SimpleNamespace(
             extra={},
@@ -1129,10 +1124,10 @@ def test_resolve_integrate_payload_fills_source_when_patch_path_present(
     seed_kernel_keep(state, "k001", source_file=str(source_path), artifact=str(patch_path))
     state.save(session_dir)
 
-    payload = krh._fill_integrate_defaults_from_state(
+    payload = integrate_payload._fill_integrate_defaults_from_state(
         {"kernel_id": "k001", "patch_path": str(patch_path)}, session_dir=session_dir
     )
-    resolved, err = krh._resolve_integrate_payload(payload, session_dir=session_dir)
+    resolved, err = integrate_payload._resolve_integrate_payload(payload, session_dir=session_dir)
 
     assert err is None
     assert resolved["patch_path"] == str(patch_path)
@@ -2072,7 +2067,7 @@ async def test_integrate_handler_accepts_runtime_jit_deferred_apply(
     }
     with (
         patch.object(
-            krh,
+            integrate_outcomes,
             "_maybe_apply_kernel_patch",
             return_value=apply_result,
         ),
@@ -2260,8 +2255,7 @@ async def test_integrate_handler_rejects_zero_base_tput(session_dir):
 
 
 def test_integrate_registered_under_two_aliases():
-    assert krh.get_handler("integrate") is not None
-    assert krh.get_handler("integrate") is krh.get_handler("apply_patch")
+    assert krh.KERNEL_REQUEST_HANDLERS["integrate"] is krh.KERNEL_REQUEST_HANDLERS["apply_patch"]
 
 
 # Coordinator wiring of integrate request
@@ -2471,15 +2465,17 @@ async def test_report_executor_writes_md_and_json(session_dir, record_alert):
         await c.stop()
 
     db = SqliteConnection(tmp_path_helper(session_dir))
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
-    sub = SubAgentRunner(locks, tr)
+    sub = SubAgentRunner(locks, tr, session_dir=session_dir)
     sub.register_executor("report", ReportExecutor())
 
-    task = await tr.create(
-        kind="report",
-        params={"session_dir": str(session_dir)},
-        idempotency_key="rep-1",
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="report",
+            params={},
+            idempotency_key="rep-1",
+        ),
     )
     res = await sub.run_task(task)
     db.close()
@@ -2513,22 +2509,20 @@ def tmp_path_helper(session_dir: Path) -> Path:
     return session_dir / "storage" / "coordinator.db"
 
 
-@pytest.mark.asyncio
-async def test_report_executor_failed_when_session_dir_unresolvable(tmp_path, monkeypatch):
-    """An unresolvable session_dir yields a structured failure, not a crash."""
-    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "noses"))
-    db = SqliteConnection(tmp_path / "x.db")
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
-    tr = TaskRegistry(db)
-    sub = SubAgentRunner(locks, tr)
-    sub.register_executor("report", ReportExecutor())
-    task = await tr.create(
-        kind="report",
-        params={},
-        idempotency_key="rep-fail-1",
-    )
-    res = await sub.run_task(task)
-    db.close()
-    assert res.state == "succeeded"
-    assert res.result["status"] == "failed"
-    assert "session_dir" in res.result.get("error", "")
+def test_single_node_cpp_itfs_patch_takes_the_rebuild_verdict_of_its_backup(monkeypatch) -> None:
+    from hyperloom.orchestrator.actions.executors import _multi_node_env
+
+    backup = {"is_cpp_itfs": True, "build_dir": "/aiter/jit/build", "module_names": ["module_custom"]}
+    seen: list[dict] = []
+
+    def verify(cpp_itfs_backup):
+        seen.append(cpp_itfs_backup)
+        return {"verified": False, "status": "stale_cpp_itfs_cache"}
+
+    monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: False)
+    monkeypatch.setattr(integrate_rebaseline.patch_jit_cache, "verify_cpp_itfs_rebuilt", verify)
+
+    result = integrate_rebaseline._cpp_itfs_rebuild_check({"cpp_itfs_cache_backup": backup})
+
+    assert result == {"verified": False, "status": "stale_cpp_itfs_cache"}
+    assert seen == [backup]

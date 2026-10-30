@@ -14,7 +14,7 @@ from collections import Counter
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from kernelforge.knowledge.kb_store.identity.implementation import normalize_operator_name
+from kernelforge.knowledge import normalize_operator_name
 
 from hyperloom.common.coerce import to_float
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
@@ -28,7 +28,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import SOURCE_GEMM_TUNING
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 
-from ._kernel_decisions import _canonical_kernel_recipe_operator
+from .kernel_decisions import _canonical_kernel_recipe_operator
 
 if TYPE_CHECKING:
     from ..state.shared_state import SharedState

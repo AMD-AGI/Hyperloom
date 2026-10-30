@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from hyperloom.common.coerce import to_str_list
-from hyperloom.common.launch_log_evidence import launch_argv_from_log, observed_sglang_server_identity_from_log
+from hyperloom.common.launch_log_evidence import launch_argv_from_log, observed_server_identity_from_log
 from hyperloom.inference_optimizer.grid_server_args import merge_cumulative_extra_server_args
 
 from ..kernel.geak_config import _geak_overlay_digest
@@ -102,9 +102,7 @@ class LaunchIdentityMixin:
         """
         if str(launch_evidence.get("framework") or "").strip().lower() != "sglang":
             return {}
-        raw_args = str(
-            launch_evidence.get("requested_server_args") or launch_evidence.get("requested_server_flags") or ""
-        ).strip()
+        raw_args = str(launch_evidence.get("requested_server_args") or "").strip()
         model_path = str(launch_evidence.get("model_path") or "").strip()
         try:
             from sglang.srt.server_args import ServerArgs
@@ -115,7 +113,7 @@ class LaunchIdentityMixin:
             if model_path and not any(token == "--model-path" or token.startswith("--model-path=") for token in tokens):
                 tokens = ["--model-path", model_path, *tokens]
             namespace, _unknown = parser.parse_known_args(tokens)
-        except (Exception, SystemExit):  # noqa: BLE001 - optional declared-only evidence
+        except (ImportError, OSError, ValueError, SystemExit):  # optional declared-only evidence
             return {}
         fields = (
             "model_path",
@@ -160,7 +158,7 @@ class LaunchIdentityMixin:
             str((evidence or {}).get("actual_server_log_path") if isinstance(evidence, Mapping) else ""),
         ):
             if path:
-                identity = observed_sglang_server_identity_from_log(path)
+                identity = observed_server_identity_from_log(path, "sglang")
                 if identity:
                     return identity
         return {}
@@ -192,7 +190,7 @@ class LaunchIdentityMixin:
         measurement: Mapping[str, Any],
     ) -> str:
         """Classify whether identity rests on observed or declared evidence."""
-        declared_identity = str(measurement.get("declared_launch_identity") or measurement.get("launch_identity") or "")
+        declared_identity = str(measurement.get("declared_launch_identity") or "")
         if not expected_identity or declared_identity != expected_identity:
             return "unverified"
         evidence = measurement.get("launch_evidence")
@@ -242,7 +240,6 @@ class LaunchIdentityMixin:
                 server_launch_flags=measurement["resolved_server_launch_flags"],
             )["launch_identity"]
         )
-        measurement["launch_identity"] = declared_identity  # Legacy alias.
         measurement["declared_launch_identity"] = declared_identity
         measurement["observed_launch_identity"] = self._observed_launch_identity(
             declared_identity,
@@ -318,9 +315,7 @@ class LaunchIdentityMixin:
         # Full engine flags must come from the same promoted measurement, not a
         # search over historical benchmarks with a similar throughput.
         if not isinstance(measurement, Mapping):
-            stored = self.shared_state.current_best_measurement
-            promoted = stored if isinstance(stored, Mapping) and stored else cb.get("measurement")
-            measurement = promoted if isinstance(promoted, Mapping) else {}
+            measurement = self.shared_state.current_best_measurement
         if server_launch_flags is None:
             server_launch_flags = self._measurement_launch_flags(measurement)
         recipe_path = str(self.shared_state.baseline_config_path or "")
@@ -352,9 +347,7 @@ class LaunchIdentityMixin:
             # launch from a declaration resolved without a new CLI line.
             "measurement_evidence": dict(measurement.get("launch_evidence") or {}),
             "measurement_identity": {
-                "declared_launch_identity": str(
-                    measurement.get("declared_launch_identity") or measurement.get("launch_identity") or ""
-                ),
+                "declared_launch_identity": str(measurement.get("declared_launch_identity") or ""),
                 "observed_launch_identity": str(measurement.get("observed_launch_identity") or ""),
                 "verification_status": str(measurement.get("identity_verification_status") or "unverified"),
                 "observed_server_identity": dict(measurement.get("observed_server_identity") or {}),

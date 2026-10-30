@@ -15,6 +15,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from hyperloom.inference_optimizer import cli
+from hyperloom.inference_optimizer.cli import launch_shape
 from hyperloom.common.model_paths import resolve_serving_model_path
 from hyperloom.inference_optimizer.cli import preflight
 from hyperloom.inference_optimizer.cli.bootstrap import parse_operator_extra_env
@@ -195,8 +196,8 @@ def test_resume_limit_inputs_match_restoration(tmp_path, monkeypatch, recorded_a
         assert vars(args) == original_args
         effective = captured.call_args.args[0]
         pins = parse_operator_extra_env(args) or recorded_pins
-        cli._export_operator_launch_shape(server_args=args.server_args or recorded_args, extra_env=pins)
-        cli._seed_env_from_resumed_state(SimpleNamespace(**state), pins)
+        launch_shape._export_operator_launch_shape(server_args=args.server_args or recorded_args, extra_env=pins)
+        launch_shape._seed_env_from_resumed_state(SimpleNamespace(**state), pins)
         assert str(effective.max_model_len) == os.environ["MAX_MODEL_LEN"]
         assert effective.server_args == os.environ.get("INFERENCE_OPTIMIZER_SERVER_ARGS", "")
         assert captured.call_args.args[1] == resolve_serving_model_path(state["model_path"])

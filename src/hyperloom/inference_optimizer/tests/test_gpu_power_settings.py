@@ -50,6 +50,17 @@ def _fake_run(cmd, **_kwargs):
     return subprocess.CompletedProcess(cmd, 0, json.dumps(payload), "")
 
 
+@pytest.fixture
+def amd_smi(monkeypatch):
+    """Answer every ``amd-smi`` command with *run*, :func:`_fake_run` until a test installs another."""
+
+    def _install(run=_fake_run):
+        monkeypatch.setattr(gpu_power_settings.subprocess, "run", run)
+
+    _install()
+    return _install
+
+
 def _node_reader(status="ENABLED", limit=8000):
     return lambda: _parse_node_power(_node_payload(status, limit))
 
@@ -58,24 +69,25 @@ def _no_node_command():
     raise GpuPowerSettingsError("amd-smi node --power-management exited 2: invalid choice: 'node'")
 
 
-def test_the_settings_are_read_from_amd_smi_json():
-    settings = read_gpu_power_settings(run=_fake_run)
+def test_the_settings_are_read_from_amd_smi_json(amd_smi):
+    settings = read_gpu_power_settings()
     assert settings == {
         0: {"power_cap_w": 1400.0, "perf_level": "auto", "sclk_max_mhz": None},
         1: {"power_cap_w": 1000.0, "perf_level": "determinism", "sclk_max_mhz": None},
     }
 
 
-def test_a_failing_amd_smi_is_an_error_not_an_empty_reading():
+def test_a_failing_amd_smi_is_an_error_not_an_empty_reading(amd_smi):
     def _fail(cmd, **_kwargs):
         return subprocess.CompletedProcess(cmd, 2, "", "permission denied")
 
+    amd_smi(_fail)
     with pytest.raises(GpuPowerSettingsError):
-        read_gpu_power_settings(run=_fail)
+        read_gpu_power_settings()
 
 
-def test_declared_settings_are_checked_per_card():
-    settings = read_gpu_power_settings(run=_fake_run)
+def test_declared_settings_are_checked_per_card(amd_smi):
+    settings = read_gpu_power_settings()
     assert declared_setting_problems(settings, DeclaredPowerSettings(power_cap_w=1000.0), gpus={1}) == []
     problems = declared_setting_problems(settings, DeclaredPowerSettings(power_cap_w=1000.0, perf_level="determinism"))
     assert problems == [
@@ -90,14 +102,11 @@ def test_the_node_settings_are_read_from_amd_smi_json():
     assert _parse_node_power(_node_payload()[0]) == {"npm": "enabled", "node_power_limit_w": 8000.0}
 
 
-def test_an_amd_smi_without_the_node_command_is_an_error_not_a_disabled_node(monkeypatch):
-    from hyperloom.common import gpu_power_settings
-
+def test_an_amd_smi_without_the_node_command_is_an_error_not_a_disabled_node(amd_smi):
     def _old_amd_smi(cmd, **_kwargs):
         return subprocess.CompletedProcess(cmd, 2, "", "invalid choice: 'node'")
 
-    monkeypatch.setattr(gpu_power_settings.shutil, "which", lambda _name: "/usr/bin/amd-smi")
-    monkeypatch.setattr(gpu_power_settings.subprocess, "run", _old_amd_smi)
+    amd_smi(_old_amd_smi)
     with pytest.raises(GpuPowerSettingsError, match="invalid choice"):
         read_node_power_settings()
 
@@ -138,9 +147,10 @@ class TestSclkLimit:
 
         return _run
 
-    def test_the_limit_is_read_from_the_filled_xcd_slots(self):
+    def test_the_limit_is_read_from_the_filled_xcd_slots(self, amd_smi):
         clocks = [{"gpu": 0, "clock": _clock(2100, filled=1)}, {"gpu": 1, "clock": _clock(2400)}]
-        settings = read_gpu_power_settings(run=self._run(clocks))
+        amd_smi(self._run(clocks))
+        settings = read_gpu_power_settings()
         assert (settings[0]["sclk_max_mhz"], settings[1]["sclk_max_mhz"]) == (2100.0, 2400.0)
 
     def test_a_declared_limit_is_checked_per_card(self):
@@ -167,9 +177,8 @@ class TestSclkLimit:
         monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
         monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
         cards = {0: {"power_cap_w": 1400.0, "perf_level": "auto", "sclk_max_mhz": 2400.0}}
-        record, error = resolve_gpu_power_settings(
-            DeclaredPowerSettings(sclk_max_mhz=2400), nodes=1, read=lambda: cards
-        )
+        monkeypatch.setattr(gpu_power_settings, "read_gpu_power_settings", lambda: cards)
+        record, error = resolve_gpu_power_settings(DeclaredPowerSettings(sclk_max_mhz=2400), nodes=1)
         assert (error, record["declared"]) == ("", {"sclk_max_mhz": 2400})
 
     def test_a_limit_mismatch_after_an_apply_is_not_blamed_on_the_apply(self, monkeypatch):
@@ -180,7 +189,8 @@ class TestSclkLimit:
         monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
         cards = {0: {"power_cap_w": 1400.0, "perf_level": "auto", "sclk_max_mhz": 2400.0}}
         declared = DeclaredPowerSettings(power_cap_w=1000.0, sclk_max_mhz=1500)
-        _, error = resolve_gpu_power_settings(declared, nodes=1, read=lambda: cards, just_applied=True)
+        monkeypatch.setattr(gpu_power_settings, "read_gpu_power_settings", lambda: cards)
+        _, error = resolve_gpu_power_settings(declared, nodes=1, just_applied=True)
         assert error == (
             "the GPUs did not take the power settings just applied: GPU 0 power cap is 1400.0 W, declared 1000 W; "
             "the GPUs are not at the declared power settings (set them with amd-smi before launch): "
@@ -231,9 +241,9 @@ class TestResolve:
         monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
         monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
         kw.setdefault("nodes", 1)
-        kw.setdefault("read", lambda: read_gpu_power_settings(run=_fake_run))
-        from hyperloom.common import gpu_power_settings
-
+        monkeypatch.setattr(gpu_power_settings.subprocess, "run", _fake_run)
+        if "read" in kw:
+            monkeypatch.setattr(gpu_power_settings, "read_gpu_power_settings", kw.pop("read"))
         monkeypatch.setattr(gpu_power_settings, "read_node_power_settings", kw.pop("read_node", None) or _node_reader())
         fields = ("power_cap_w", "perf_level", "sclk_max_mhz", "npm", "node_power_limit_w")
         declared = DeclaredPowerSettings(**{key: value for key in fields if (value := kw.pop(key, None)) is not None})
@@ -309,30 +319,25 @@ class TestResolve:
         _, error = self._resolve(monkeypatch, power_cap_w=1000.0)
         assert "GPU 0 power cap is 1400.0 W" in error
 
-    def test_only_the_cards_the_session_uses_are_checked(self, monkeypatch):
+    def test_only_the_cards_the_session_uses_are_checked(self, monkeypatch, amd_smi):
         from hyperloom.inference_optimizer.cli.bootstrap import resolve_gpu_power_settings
 
         monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "1")
         record, error = resolve_gpu_power_settings(
-            DeclaredPowerSettings(power_cap_w=1000.0, perf_level="determinism"),
-            nodes=1,
-            read=lambda: read_gpu_power_settings(run=_fake_run),
+            DeclaredPowerSettings(power_cap_w=1000.0, perf_level="determinism"), nodes=1
         )
         assert error == ""
         assert list(record["observed"]) == ["1"]
 
-    def test_a_setting_that_did_not_take_after_an_apply_says_so(self, monkeypatch):
+    def test_a_setting_that_did_not_take_after_an_apply_says_so(self, monkeypatch, amd_smi):
         """The operator did not set these; telling them to set them by hand would send them the wrong way."""
         from hyperloom.inference_optimizer.cli.bootstrap import resolve_gpu_power_settings
 
         monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
         monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
-        read = lambda: read_gpu_power_settings(run=_fake_run)  # noqa: E731
-        _, error = resolve_gpu_power_settings(
-            DeclaredPowerSettings(power_cap_w=1000.0), nodes=1, read=read, just_applied=True
-        )
+        _, error = resolve_gpu_power_settings(DeclaredPowerSettings(power_cap_w=1000.0), nodes=1, just_applied=True)
         assert error.startswith("the GPUs did not take the power settings just applied: GPU 0 power cap is 1400.0 W")
-        _, error = resolve_gpu_power_settings(DeclaredPowerSettings(power_cap_w=1000.0), nodes=1, read=read)
+        _, error = resolve_gpu_power_settings(DeclaredPowerSettings(power_cap_w=1000.0), nodes=1)
         assert "(set them with amd-smi before launch)" in error
 
     def test_a_declaration_that_cannot_be_read_refuses(self, monkeypatch):
@@ -439,7 +444,6 @@ class TestVisibleCards:
         listed = {
             "gpu_data": [{"gpu": gpu, "bdf": "0000:00:00.0", "node_id": node} for gpu, node in _MI355X_NODES.items()]
         }
-        monkeypatch.setattr(gpu_power_settings.shutil, "which", lambda name: "/usr/bin/amd-smi")
         monkeypatch.setattr(
             gpu_power_settings.subprocess,
             "run",
@@ -455,9 +459,8 @@ class TestVisibleCards:
 
         monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0")
         cards = {gpu: {"power_cap_w": 1000.0 if gpu == 3 else 1400.0, "perf_level": "auto"} for gpu in range(8)}
-        record, error = resolve_gpu_power_settings(
-            DeclaredPowerSettings(power_cap_w=1000.0), nodes=1, read=lambda: cards
-        )
+        monkeypatch.setattr(gpu_power_settings, "read_gpu_power_settings", lambda: cards)
+        record, error = resolve_gpu_power_settings(DeclaredPowerSettings(power_cap_w=1000.0), nodes=1)
         assert (error, list(record["observed"])) == ("", ["3"])
 
     def test_a_declaration_whose_cards_cannot_be_named_refuses(self, monkeypatch):
@@ -465,7 +468,8 @@ class TestVisibleCards:
 
         monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "GPU-745a0e162570d044")
         cards = {0: {"power_cap_w": 1000.0, "perf_level": "auto"}}
-        _, error = resolve_gpu_power_settings(DeclaredPowerSettings(power_cap_w=1000.0), nodes=1, read=lambda: cards)
+        monkeypatch.setattr(gpu_power_settings, "read_gpu_power_settings", lambda: cards)
+        _, error = resolve_gpu_power_settings(DeclaredPowerSettings(power_cap_w=1000.0), nodes=1)
         assert "cannot be checked" in error and "device numbers" in error
 
     def test_the_sampler_samples_the_cards_the_mask_names(self, tmp_path, monkeypatch):
@@ -610,7 +614,7 @@ class TestSharedNpmNode:
         assert _build_parser().parse_args([*argv, "--allow-shared-npm-node"]).allow_shared_npm_node is True
 
 
-def test_a_resume_re_asserts_the_archived_npm_declaration(monkeypatch):
+def test_a_resume_re_asserts_the_archived_npm_declaration(monkeypatch, amd_smi):
     """A resume that omits the flag still holds the node to the state the session was measured under."""
     from types import SimpleNamespace
 
@@ -620,7 +624,6 @@ def test_a_resume_re_asserts_the_archived_npm_declaration(monkeypatch):
     monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
     monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
     monkeypatch.setattr(gpu_power_apply, "warn_about_orphaned_cards", lambda: None)
-    monkeypatch.setattr(gpu_power_settings, "read_gpu_power_settings", lambda: read_gpu_power_settings(run=_fake_run))
     monkeypatch.setattr(gpu_power_settings, "read_node_power_settings", _node_reader("DISABLED", 0))
     state = SimpleNamespace(gpu_power_settings={"declared": {"npm": "enabled"}}, nodes=1, session_id="s")
     args = SimpleNamespace(gpu_power_cap_w=None, gpu_perf_level=None, node_power_management=None, nodes=1)

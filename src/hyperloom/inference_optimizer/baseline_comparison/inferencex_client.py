@@ -17,7 +17,8 @@ import zlib
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 
-from hyperloom.common.url_safety import require_http_url as _base_require_http_url
+from hyperloom.common.coerce import to_int
+from hyperloom.common.url_safety import require_http_url
 
 from .types import BaselineQuery
 
@@ -34,11 +35,7 @@ class InferenceXFetchError(Exception):
     """Raised on any InferenceX fetch failure (unsupported URL scheme, non-200 status, network or transport error)."""
 
 
-def _require_http_url(url: str) -> None:
-    _base_require_http_url(url, error=InferenceXFetchError)
-
-
-def _base_url() -> str:
+def base_url() -> str:
     """Resolve the API base URL from the environment."""
     return os.environ.get("INFERENCEX_BASE_URL", "").strip() or DEFAULT_BASE_URL
 
@@ -67,7 +64,7 @@ def _max_attempts() -> int:
 
 def _fetch_raw(url: str) -> bytes:
     """Single HTTP GET with gzip support."""
-    _require_http_url(url)
+    require_http_url(url, error=InferenceXFetchError)
     req = urllib.request.Request(
         url,
         headers={
@@ -94,25 +91,12 @@ def _fetch_raw(url: str) -> bytes:
         raise InferenceXFetchError(f"transport error: {exc}") from exc
 
 
-def base_url() -> str:
-    """Public accessor for the resolved API base URL (honours env override)."""
-    return _base_url()
-
-
-def _to_int(value: object) -> int | None:
-    """Best-effort integer coercion used by dimension filtering."""
-    try:
-        return int(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return None
-
-
 def fetch_rows(model_api_name: str) -> list[dict] | None:
     """Fetch InferenceX benchmark rows for a model. Never raises."""
     name = str(model_api_name or "").strip()
     if not name:
         return None
-    url = f"{_base_url()}/benchmarks?model={quote(name)}"
+    url = f"{base_url()}/benchmarks?model={quote(name)}"
     attempts = _max_attempts()
     last_exc: Exception | None = None
     for _ in range(attempts):
@@ -165,7 +149,7 @@ def fetch_agentic_interactivity(benchmark_ids: list[str | int]) -> dict[str, flo
     attempts = _max_attempts()
     for start in range(0, len(ids), _DERIVED_BATCH_SIZE):
         batch = ids[start : start + _DERIVED_BATCH_SIZE]
-        url = f"{_base_url()}/derived-agentic-metrics?ids={','.join(batch)}"
+        url = f"{base_url()}/derived-agentic-metrics?ids={','.join(batch)}"
         for attempt in range(attempts):
             try:
                 body = _fetch_raw(url)
@@ -204,7 +188,7 @@ def fetch_agentic_interactivity(benchmark_ids: list[str | int]) -> dict[str, flo
 def find_reference_rows(rows: list[dict], query: BaselineQuery) -> list[dict]:
     """Filter single-node rows matching ``query`` without treating agentic lengths as fixed shapes."""
     isl, osl = query.isl, query.osl
-    hw = str(query.gpu or "").strip().casefold()
+    hw = query.gpu.strip().casefold()
     matched = [
         r
         for r in rows
@@ -221,10 +205,10 @@ def find_reference_rows(rows: list[dict], query: BaselineQuery) -> list[dict]:
             for r in matched
             if isl is not None
             and osl is not None
-            and _to_int(r.get("isl")) == int(isl)
-            and _to_int(r.get("osl")) == int(osl)
+            and to_int(r.get("isl")) == int(isl)
+            and to_int(r.get("osl")) == int(osl)
         ]
-    prec = str(query.precision or "").strip().casefold()
+    prec = query.precision.strip().casefold()
     if prec:
         matched = [r for r in matched if str(r.get("precision") or "").strip().casefold() == prec]
     return matched

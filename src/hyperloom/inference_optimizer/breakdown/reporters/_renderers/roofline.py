@@ -18,10 +18,10 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any
 
+from hyperloom.common.coerce import dict_rows, to_mapping
+
 from ..base import (
     RenderedSection,
-    as_dict,
-    dict_rows,
     events_of,
     fmt_pct,
     md_kv_list,
@@ -43,8 +43,8 @@ def _snapshots(breakdown: dict[str, Any]) -> list[dict[str, Any]]:
     """
     out: list[dict[str, Any]] = []
     for event in events_of(breakdown, "roofline"):
-        for action in dict_rows(as_dict(event.get("ext")).get("actions")):
-            snapshot = as_dict(action.get("outcome")).get("snapshot")
+        for action in dict_rows(to_mapping(event.get("ext")).get("actions")):
+            snapshot = to_mapping(action.get("outcome")).get("snapshot")
             if isinstance(snapshot, dict) and snapshot:
                 out.append(snapshot)
     return out
@@ -62,10 +62,12 @@ def _failed_runs_note(breakdown: dict[str, Any]) -> str:
     actions = [
         action
         for event in events_of(breakdown, "roofline")
-        for action in dict_rows(as_dict(event.get("ext")).get("actions"))
+        for action in dict_rows(to_mapping(event.get("ext")).get("actions"))
     ]
     failures = Counter(
-        str(as_dict(action["failure"]).get("error_class") or "unknown") for action in actions if action.get("failure")
+        str(to_mapping(action["failure"]).get("error_class") or "unknown")
+        for action in actions
+        if action.get("failure")
     )
     if not failures:
         return ""
@@ -78,7 +80,7 @@ def _snapshot_kv(label: str, snap: dict[str, Any] | None) -> str:
     """Render one roofline snapshot as a labelled key-value block."""
     if not isinstance(snap, dict) or not snap:
         return ""
-    tk = as_dict(snap.get("top_kernel"))
+    tk = to_mapping(snap.get("top_kernel"))
     items = [
         ("snapshot_id", snap.get("snapshot_id")),
         ("ts", snap.get("ts")),
@@ -101,10 +103,7 @@ def _delta_block(delta: dict[str, Any] | None) -> str:
     """Render the roofline ``delta`` mapping as a two-column table."""
     if not isinstance(delta, dict) or not delta:
         return ""
-    rows = [[key, value] for key, value in delta.items()]
-    if not rows:
-        return ""
-    return "**Delta**\n\n" + md_table(["field", "value"], rows)
+    return "**Delta**\n\n" + md_table(["field", "value"], [[key, value] for key, value in delta.items()])
 
 
 @register_renderer("roofline")
@@ -137,10 +136,10 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     # disagree with the analysis it is reporting on.
     from hyperloom.inference_optimizer.roofline_snapshot import build_roofline_comparison_from_history
 
-    comparison = as_dict(build_roofline_comparison_from_history(snapshots))
-    baseline = as_dict(comparison.get("baseline"))
-    latest = as_dict(comparison.get("latest"))
-    mode = str(comparison.get("mode") or "single_snapshot")
+    comparison = to_mapping(build_roofline_comparison_from_history(snapshots))
+    baseline = to_mapping(comparison.get("baseline"))
+    latest = to_mapping(comparison.get("latest"))
+    mode = str(comparison["mode"])
 
     facts: list[str] = [f"Roofline snapshots recorded: {len(snapshots)} (comparison mode: {mode})."]
     parts: list[str] = []
@@ -149,7 +148,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         if block:
             parts.append(block)
             parts.append("")
-    delta_md = _delta_block(as_dict(comparison.get("delta")))
+    delta_md = _delta_block(to_mapping(comparison.get("delta")))
     if delta_md:
         parts.append(delta_md)
         parts.append("")
@@ -159,7 +158,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             "saturation deltas are withheld: across a moved ceiling they would "
             "report a denominator change as a saturation change."
         )
-    tk = as_dict(baseline.get("top_kernel"))
+    tk = to_mapping(baseline.get("top_kernel"))
     facts.append(
         f"Baseline top kernel: {tk.get('name') or '(none)'} @ "
         f"{fmt_pct(tk.get('gpu_pct'))} GPU, efficiency "

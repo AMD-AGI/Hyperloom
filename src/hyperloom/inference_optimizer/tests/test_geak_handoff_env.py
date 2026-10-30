@@ -65,7 +65,8 @@ def capture_handoff(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             model_path="/models/example",
             baseline_config_path=str(recipe),
             last_baseline={"extras": {"materialized_config": str(recipe)}},
-            current_best={**current, "measurement": {"resolved_server_launch_flags": observed_flags}},
+            current_best=current,
+            current_best_measurement={"resolved_server_launch_flags": observed_flags},
         )
         coord._record_geak_kernel_journey = lambda _result: None
         monkeypatch.setenv("FRAMEWORK", framework)

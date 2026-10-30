@@ -9,7 +9,6 @@ import logging
 import os
 import re
 import tempfile
-from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
@@ -17,13 +16,9 @@ from typing import Iterator
 from hyperloom.common import io as _common_io
 
 from ._file_lock import best_effort_file_lock
-from ._patch_sentinel import file_contains_sentinel
 
 log = logging.getLogger(__name__)
 
-
-_REMOTE_TRUST_SENTINEL = "MAGPIE_TRUST_REMOTE_CODE"
-_EVAL_CONC_SENTINEL = "HYPERLOOM_EVAL_CONCURRENCY_FIX"
 
 # Magpie's remote-server SGLang client path bypasses the local run_benchmark helper, so the trust gate for
 # --trust-remote-code (custom tokenizer models) must be injected into the remote-direct path here.
@@ -111,16 +106,6 @@ _RUN_LM_EVAL_MERGED_CATCHALL_RE = re.compile(
 # Header of the InferenceX ``run_lm_eval`` shell function; used to scope the merged-case parser patch and the
 # tolerance check to that function's body.
 _RUN_LM_EVAL_FN_MARKER = "run_lm_eval()"
-
-# InferenceX benchmark_lib.sh::run_lm_eval reads concurrency from env (EVAL_CONCURRENT_REQUESTS, fallback CONC).
-_RUN_EVAL_LEGACY_BLOCK = '        run_eval --framework lm-eval --port "$PORT" --concurrent-requests $CONC || exit $?\n'
-_RUN_EVAL_PATCHED_BLOCK = (
-    "        # HYPERLOOM_EVAL_CONCURRENCY_FIX: benchmark_lib.sh resolves eval\n"
-    "        # concurrency from EVAL_CONCURRENT_REQUESTS (fallback CONC).\n"
-    '        EVAL_CONCURRENT_REQUESTS="${EVAL_CONCURRENT_REQUESTS:-$CONC}" '
-    'run_eval --framework lm-eval --port "$PORT" || exit $?\n'
-)
-
 
 # System-wide lock.
 _LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_magpie_benchmarker_patcher.lock")
@@ -343,12 +328,7 @@ def _apply_eval_concurrency_fixes(
     return ok
 
 
-def client_tokenizer_hook_installed(
-    script_name: str,
-    *,
-    magpie_dir: Path | str | None = None,
-    inferencex_dir: Path | str | None = None,
-) -> bool:
+def client_tokenizer_hook_installed(script_name: str, *, inferencex_dir: Path | str | None) -> bool:
     """Whether the client script this round will run carries the tokenizer-mode hook.
 
     Deliberately NOT folded into the eval-concurrency result: that one is
@@ -360,7 +340,7 @@ def client_tokenizer_hook_installed(
     carry the same ``--result-dir`` marker with a different client call and no
     hook -- must not veto a workload whose own script is fine.
     """
-    for script in _client_scripts(magpie_dir, inferencex_dir):
+    for script in _client_scripts(None, inferencex_dir):
         if script.name == script_name and not _is_client_tokenizer_mode_patched(script):
             return False
     # A named script that exists nowhere is not this check's to judge -- the
@@ -407,7 +387,7 @@ def ensure_eval_concurrency_compat(
     inferencex_dir: Path | str | None = None,
 ) -> bool:
     """Public, run-time-safe entry point for the eval-concurrency fixes."""
-    with _file_lock(_LOCK_PATH):
+    with best_effort_file_lock(_LOCK_PATH, label="_magpie_patcher"):
         applied_ok = _apply_eval_concurrency_fixes(magpie_dir, inferencex_dir)
         return _eval_concurrency_unblocked(applied_ok, magpie_dir, inferencex_dir)
 
@@ -443,13 +423,6 @@ def _eval_concurrency_unblocked(
     return True
 
 
-@contextmanager
-def _file_lock(lock_path: str) -> Iterator[None]:
-    """Best-effort cross-process mutex via ``fcntl.flock``."""
-    with best_effort_file_lock(lock_path, label="_magpie_patcher"):
-        yield
-
-
 def atomic_write_text(src: Path, content: str, *, log_prefix: str) -> bool:
     """Atomically replace ``src`` with ``content``, keeping its permission bits; log and return False on OSError."""
     try:
@@ -457,67 +430,6 @@ def atomic_write_text(src: Path, content: str, *, log_prefix: str) -> bool:
     except OSError as e:
         log.warning("%s: cannot write %s: %s", log_prefix, src, e)
         return False
-    return True
-
-
-def _is_remote_trust_patched(src: Path) -> bool:
-    """Return whether SGLang compatibility sentinels are already present."""
-    return file_contains_sentinel(src, _REMOTE_TRUST_SENTINEL, log, "_magpie_patcher") and file_contains_sentinel(
-        src,
-        _EVAL_CONC_SENTINEL,
-        log,
-        "_magpie_patcher",
-    )
-
-
-def _apply_remote_trust_patch_atomic(src: Path) -> bool:
-    """Patch ``sglang_mi300x.sh`` for Hyperloom compatibility."""
-    try:
-        original = src.read_text(encoding="utf-8")
-    except OSError as e:
-        log.warning("_magpie_patcher: cannot read %s: %s", src, e)
-        return False
-
-    patched = original
-
-    if _REMOTE_TRUST_SENTINEL not in patched:
-        if _REMOTE_DIRECT_LEGACY_BLOCK not in patched:
-            log.warning(
-                "_magpie_patcher: remote benchmark direct-call block not found in "
-                "%s; Magpie custom-tokenizer trust patch could not be applied",
-                src,
-            )
-            return False
-        patched = patched.replace(
-            _REMOTE_DIRECT_LEGACY_BLOCK,
-            _REMOTE_DIRECT_PATCHED_BLOCK,
-            1,
-        )
-
-    if _EVAL_CONC_SENTINEL not in patched:
-        if _RUN_EVAL_LEGACY_BLOCK not in patched:
-            log.warning(
-                "_magpie_patcher: run_eval concurrency block not found in %s; "
-                "eval concurrency compatibility patch could not be applied",
-                src,
-            )
-            return False
-        patched = patched.replace(
-            _RUN_EVAL_LEGACY_BLOCK,
-            _RUN_EVAL_PATCHED_BLOCK,
-            1,
-        )
-
-    if patched == original:
-        return True
-
-    if not atomic_write_text(src, patched, log_prefix="_magpie_patcher"):
-        return False
-
-    log.info(
-        "_magpie_patcher: applied SGLang script compatibility patches to %s",
-        src,
-    )
     return True
 
 
@@ -602,7 +514,7 @@ def ensure_client_trust_compat(magpie_dir: Path | str | None = None) -> bool:
             "_magpie_patcher: no SGLang MI300X/MI355X script resolved — skipping client trust patches (not applicable)",
         )
         return True
-    with _file_lock(_LOCK_PATH):
+    with best_effort_file_lock(_LOCK_PATH, label="_magpie_patcher"):
         # Materialized, not short-circuited: every script must be attempted so one drifted file cannot leave a healthy
         # sibling unpatched.
         results = [_is_sglang_client_trust_patched(s) or _apply_sglang_client_trust_patch_atomic(s) for s in scripts]
@@ -636,7 +548,7 @@ def magpie_scripts_patch_status(
     inferencex_dir: Path | str | None = None,
 ) -> MagpiePatchStatus:
     """Apply and report SGLang trust and eval-concurrency compatibility patches."""
-    with _file_lock(_LOCK_PATH):
+    with best_effort_file_lock(_LOCK_PATH, label="_magpie_patcher"):
         if next(_script_dirs(magpie_dir, inferencex_dir), None) is None:
             log.warning(
                 "_magpie_patcher: no Magpie scripts/benchmarks directory resolved "
@@ -648,15 +560,10 @@ def magpie_scripts_patch_status(
         sglang_mi300x_script = _resolve_sglang_mi300x_script_path(magpie_dir)
         sglang_mi355x_script = _resolve_sglang_mi355x_script_path(magpie_dir)
         sglang_scripts = [s for s in (sglang_mi300x_script, sglang_mi355x_script) if s is not None]
-        trust_results: list[bool] = []
-        if sglang_mi300x_script is not None:
-            trust_results.append(
-                _is_remote_trust_patched(sglang_mi300x_script) or _apply_remote_trust_patch_atomic(sglang_mi300x_script)
-            )
-        for script in sglang_scripts:
-            trust_results.append(
-                _is_sglang_client_trust_patched(script) or _apply_sglang_client_trust_patch_atomic(script)
-            )
+        trust_results = [
+            _is_sglang_client_trust_patched(script) or _apply_sglang_client_trust_patch_atomic(script)
+            for script in sglang_scripts
+        ]
         if not trust_results:
             log.info(
                 "_magpie_patcher: SGLang MI300X/MI355X scripts missing — "

@@ -112,7 +112,7 @@ def build_graph_under_recorded_warning(
     """Build the ``trace_health_warnings[]`` entry for a graph under-recorded trace."""
     idle_note = f" (computed idle% {idle_pct:.2f}% is unreliable here)" if isinstance(idle_pct, (int, float)) else ""
     return {
-        "code": "bypass_graph_under_recorded",
+        "code": "graph_under_recorded",
         "severity": "warning",
         "graph_launch_count": graph_launch_count,
         "message": (

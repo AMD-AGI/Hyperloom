@@ -89,7 +89,7 @@ def materialized_run_eval_disabled(config_path: Path | str) -> bool:
     return not is_truthy(envs.get("RUN_EVAL"), default=True)
 
 
-def request_baseline_accuracy_stop(shared_state: Any, *, context: str, cause: str = "") -> bool:
+def request_baseline_accuracy_stop(shared_state: Any, *, context: str, cause: str = "") -> None:
     """Halt the run when the baseline accuracy test produced no result.
 
     ``cause`` names what actually went wrong, for the callers that can establish it.
@@ -97,18 +97,12 @@ def request_baseline_accuracy_stop(shared_state: Any, *, context: str, cause: st
     nobody can explain *is* a broken baseline setup -- but asserting that next to an
     identified cause would tell the operator the opposite of what the caller just found.
     """
-    if shared_state is None:
-        return False
-    setter = getattr(shared_state, "set_stop_reason", None)
-    if not callable(setter):
-        return False
     log.warning(
         "baseline accuracy test produced no result (%s); stopping run (%s)",
         context,
         cause or "broken baseline setup",
     )
-    setter(BASELINE_ACCURACY_STOP_REASON)
-    return True
+    shared_state.set_stop_reason(BASELINE_ACCURACY_STOP_REASON)
 
 
 def require_kernel_accuracy_default() -> bool:
@@ -212,8 +206,6 @@ def eval_contract_fingerprint(
     config_path: str | Path | None,
     framework: str | None = None,
     model: str | None = None,
-    task: str | None = None,
-    metric: str | None = None,
 ) -> str:
     """Short stable digest of the eval contract (workload + eval definition)."""
     contract = _extract_eval_contract_fields(config_path)
@@ -524,6 +516,27 @@ def parse_eval_results(
                     }
 
     return {"accuracy": None, "error": f"no recognized metric in {latest}"}
+
+
+def post_ready_sec_without_eval(round_result: dict[str, Any]) -> Any:
+    """A round's post-ready time less its accuracy eval, which a hot pass rendered with RUN_EVAL off does not run.
+
+    The eval time is lm-eval's own clock, so it comes off only when the post-ready interval strictly encloses it.
+    """
+    post_ready = round_result.get("post_ready_runtime_sec")
+    eval_sec = _evaluation_seconds(round_result.get("accuracy_source"))
+    if isinstance(post_ready, (int, float)) and eval_sec is not None and eval_sec < post_ready:
+        return post_ready - eval_sec
+    return post_ready
+
+
+def _evaluation_seconds(results_file: Any) -> float | None:
+    """lm-eval's recorded wall-clock in ``results_file``, or ``None`` when there is no finite positive one."""
+    try:
+        seconds = float(json.loads(Path(results_file).read_text(encoding="utf-8")).get("total_evaluation_time_seconds"))
+    except (TypeError, ValueError, OSError, AttributeError):
+        return None
+    return seconds if math.isfinite(seconds) and seconds > 0.0 else None
 
 
 def read_eval_probe(workspace: Path | str) -> dict[str, Any] | None:

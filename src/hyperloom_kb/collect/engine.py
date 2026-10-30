@@ -331,7 +331,9 @@ def _screen(mapping: CollectMapping, projected: _Projected) -> None:
     for category in DECLARED_CATEGORIES:
         for name, value in getattr(experience, category).items():
             path = f"{category}.{name}"
-            prose = any(path == item or path.startswith(f"{item}.") for item in free_text)
+            prose = path in mapping.code_fields or any(
+                path == item or path.startswith(f"{item}.") for item in free_text
+            )
             for ref in value if isinstance(value, tuple) else (value,):
                 if isinstance(ref, FileRef):
                     finding = find_sensitive_in_file(projected.files[ref.sha256], free_text=prose)

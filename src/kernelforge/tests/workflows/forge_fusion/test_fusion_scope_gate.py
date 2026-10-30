@@ -1,0 +1,119 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""The scope gate: a discovered fusion must fit inside ONE framework file."""
+
+from __future__ import annotations
+
+import json
+
+from kernelforge.workflows.forge_fusion.locate import FrameworkInstall
+from kernelforge.workflows.forge_fusion.discover import DiscoveryTarget
+from kernelforge.workflows.forge_fusion.discover import parse_discovered_recipes
+from kernelforge.workflows.forge_fusion.locate import out_of_scope_terms
+
+# The shape that matters: a model file that norms and applies RoPE, imports its MLP from a sibling module, and never
+# touches the KV cache (the attention backend does that, several frames below).
+_MODEL_SOURCE = """
+from .other_model import OtherMLP as MyMLP
+
+
+class MyAttention(nn.Module):
+    def forward(self, positions, hidden_states):
+        qkv, _ = self.qkv_proj(hidden_states)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        q = self.q_norm(q)
+        k = self.k_norm(k)
+        q, k = self.rotary_emb(positions, q, k)
+        return self.o_proj(self.attn(q, k, v))[0]
+
+
+class MyDecoderLayer(nn.Module):
+    def __init__(self):
+        self.input_layernorm = RMSNorm(hidden_size, eps=eps)
+        self.mlp = MyMLP()
+"""
+
+
+def _proposal(name: str, ops: list[str], traits: list[str]) -> dict:
+    """One discovery JSON object, minimal but complete enough to parse."""
+    return {
+        "name": name,
+        "ops": ops,
+        "traits": traits,
+        "op_chain": name,
+        "fusion_math": name,
+        "eager_reference": "MyAttention.forward",
+        "source_anchors": ["MyAttention.forward"],
+        "priority": 0.9,
+    }
+
+
+def _survivors(tmp_path, *proposals) -> list[str]:
+    """Run proposals through the real parser against a written-out source file."""
+    source = tmp_path / "my_model.py"
+    source.write_text(_MODEL_SOURCE, encoding="utf-8")
+    recipes = parse_discovered_recipes(
+        json.dumps(list(proposals)),
+        DiscoveryTarget(
+            model_type="my_model", install=FrameworkInstall(framework="vllm"), source_file=str(source), shapes={}
+        ),
+        category_shares=None,
+    )
+    return [r.pattern_id for r in recipes]
+
+
+def test_a_fusion_folding_in_the_kv_cache_write_is_dropped(tmp_path):
+    """The recipe that won the real run, and could not be wired anywhere."""
+    survivors = _survivors(
+        tmp_path,
+        _proposal("qknorm_rope_kvcache", ["copy", "rmsnorm", "rope"], ["qk_norm", "kvcache"]),
+    )
+    assert survivors == []
+
+
+def test_a_fusion_reaching_into_an_imported_module_is_dropped(tmp_path):
+    """``MyMLP`` is imported, so its activation chain is not this file's to replace."""
+    survivors = _survivors(
+        tmp_path,
+        _proposal("act_mul_quant", ["activation", "mul"], ["fp8", "quant"]),
+    )
+    assert survivors == []
+
+
+def test_a_chain_wholly_inside_the_shown_file_survives(tmp_path):
+    """QK-norm + RoPE is right there in ``MyAttention.forward`` -- keep it."""
+    survivors = _survivors(
+        tmp_path,
+        _proposal("qk_norm_rope", ["rmsnorm", "rope"], ["qk_norm"]),
+    )
+    assert survivors == ["llm:qk_norm_rope"]
+
+
+def test_two_wireable_chains_stay_two_separate_recipes(tmp_path):
+    """Two modules that each fuse internally give two patches, never one."""
+    survivors = _survivors(
+        tmp_path,
+        _proposal("qk_norm_rope", ["rmsnorm", "rope"], ["qk_norm"]),
+        _proposal("attn_out_oproj", ["copy", "mul"], []),
+    )
+    assert survivors == ["llm:qk_norm_rope", "llm:attn_out_oproj"]
+
+
+def test_an_unreadable_source_is_not_judged():
+    """No source is no evidence: the gate fails open like every other check."""
+    assert out_of_scope_terms("", ["kvcache", "activation"]) == []
+
+
+def test_a_term_with_no_unambiguous_spelling_is_not_judged():
+    """``add`` / ``mul`` / ``copy`` / ``reduce`` take too many source shapes."""
+    assert out_of_scope_terms(_MODEL_SOURCE, ["add", "mul", "copy", "reduce"]) == []
+
+
+def test_the_gate_reports_every_term_that_is_out_of_scope():
+    """The log line names all of them, so the drop is diagnosable from one line."""
+    assert out_of_scope_terms(_MODEL_SOURCE, ["rope", "kvcache", "activation", "moe"]) == [
+        "kvcache",
+        "activation",
+        "moe",
+    ]

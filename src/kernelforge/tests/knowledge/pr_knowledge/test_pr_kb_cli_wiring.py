@@ -10,9 +10,10 @@ from click.testing import CliRunner
 
 from hyperloom.common.env import EnvValueError
 from kernelforge.cli import forge_loop
-from kernelforge.cli.relay import SearchActorBuildContext
+from kernelforge.workflows.forge_loop.bootstrap import run as forge_loop_run
+from kernelforge.workflows.forge_loop.bootstrap.relay import SearchActorBuildContext
 from kernelforge.knowledge.pr_knowledge.context import PrReferenceQuery
-from kernelforge.cli.pr_references import (
+from kernelforge.workflows.forge_loop.bootstrap.pr_references import (
     _collect_pr_references,
     _git_remote_url,
     _pr_kb_enabled,
@@ -76,11 +77,11 @@ def test_switch_is_independent_of_the_experience_kb_flag():
 
 def test_pr_context_is_wired_only_to_the_implementer():
     """Keep external PR text out of measured Analysis and planning evidence."""
-    source = inspect.getsource(forge_loop.callback)
-    implementer = source[
-        source.index("implementer_setup = ImplementerSetup(") : source.index("effective_implementer =")
+    implementer = inspect.getsource(forge_loop_run._implementer_setup)
+    search = inspect.getsource(forge_loop_run._search)
+    analysis = search[
+        search.index("analysis_service = make_analysis_agent_service(") : search.index('print("  Analysis Agent: "')
     ]
-    analysis = source[source.index("analysis_service = make_analysis_agent_service(") : source.index("analysis_mode =")]
     # Each Agent profile builds its own planning chain and supervisor; only its implementer receives the setup.
     actor_source = inspect.getsource(SearchActorBuildContext.build)
     orchestration = actor_source[
@@ -163,7 +164,7 @@ def test_position_a_never_writes_events_itself(tmp_path):
 
 def test_loop_appends_the_event_only_after_the_campaign_guard():
     """Append the event only after campaign initialization."""
-    from kernelforge.loop.runner import IterationConfig, IterationLoop
+    from kernelforge.workflows.forge_loop.iteration.runner import IterationConfig, IterationLoop
 
     assert "pr_kb_event" in set(IterationConfig.__dataclass_fields__)
     assert "already contains a campaign" in inspect.getsource(IterationLoop._restore_or_begin_campaign)
@@ -249,7 +250,7 @@ def test_an_unexpected_failure_is_not_swallowed(monkeypatch, tmp_path):
 
 def test_the_event_append_cannot_abort_the_campaign():
     """A failed observability write may only print, never propagate."""
-    from kernelforge.loop.runner import IterationLoop
+    from kernelforge.workflows.forge_loop.iteration.runner import IterationLoop
 
     source = inspect.getsource(IterationLoop._persist_pr_knowledge)
     append = source.index("pr_refs_refreshed")
@@ -260,9 +261,9 @@ def test_the_event_append_cannot_abort_the_campaign():
 
 
 def test_result_is_emitted_before_provenance_is_written():
-    source = inspect.getsource(forge_loop.callback)
-    result = source.rindex("result = _build_result")
-    emitted = source.index('click.echo(f"__FORGE_RESULT__', result)
+    source = inspect.getsource(forge_loop_run._publish)
+    result = source.index("result = reporter.build_result(")
+    emitted = source.index("run.publish_result(result)", result)
     provenance = source.index("_write_pr_provenance(", emitted)
 
     assert emitted < provenance

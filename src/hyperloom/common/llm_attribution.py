@@ -13,6 +13,8 @@ import re
 from dataclasses import dataclass
 from typing import Callable, Iterator, Mapping, MutableMapping, Sequence
 
+from hyperloom.common.llm_headers import format_custom_headers
+
 #: Selects the gateway whose headers to emit; unset emits nothing.
 ATTRIBUTION_ENV = "HYPERLOOM_LLM_ATTRIBUTION"
 #: PrimusClaw session id, already exported by the session bootstrap.
@@ -123,18 +125,11 @@ def _render_raw(fields: Sequence[str], context: Mapping[str, str]) -> str:
     return next((context[field] for field in fields if context.get(field)), "")
 
 
-def _render_json(fields: Sequence[str], context: Mapping[str, str]) -> str:
-    """Emit the selected fields as a compact JSON object."""
-    selected = {field: context[field] for field in fields if context.get(field)}
-    return json.dumps(selected, separators=(",", ":")) if selected else ""
-
-
 #: Value shape by name. This is the whole of the gateway-specific knowledge;
 #: everything else a preset states is which header carries which fields.
 _RENDERERS: dict[str, Callable[[Sequence[str], Mapping[str, str]], str]] = {
     "combined": _render_combined,
     "raw": _render_raw,
-    "json": _render_json,
 }
 
 
@@ -153,22 +148,10 @@ def _parse_raw(fields: Sequence[str], value: str) -> dict[str, str]:
     return {fields[0]: value.strip()} if len(fields) == 1 and value.strip() else {}
 
 
-def _parse_json(fields: Sequence[str], value: str) -> dict[str, str]:
-    """Recover the declared fields from a JSON object value."""
-    try:
-        parsed = json.loads(value)
-    except json.JSONDecodeError:
-        return {}
-    if not isinstance(parsed, dict):
-        return {}
-    return {key: str(item).strip() for key, item in parsed.items() if key in fields and str(item).strip()}
-
-
 #: Reverse of :data:`_RENDERERS`, for reading a tag a parent already wrote.
 _PARSERS: dict[str, Callable[[Sequence[str], str], dict[str, str]]] = {
     "combined": _parse_combined,
     "raw": _parse_raw,
-    "json": _parse_json,
 }
 
 #: Fields a child may take from the tag its parent wrote. They describe *where*
@@ -244,12 +227,14 @@ def call_headers(
     *,
     component: str,
     operation: str = "",
-    phase: str | None = None,
     env: Mapping[str, str] | None = None,
     base: Mapping[str, str] | None = None,
     **extra: str,
 ) -> dict[str, str]:
-    """Render the selected gateway's attribution headers for a request."""
+    """Render the selected gateway's attribution headers for a request.
+
+    ``extra`` overrides any field, ``phase`` included (unset: the published phase).
+    """
     source = env if env is not None else os.environ
     headers = _configured_headers(source)
     if not headers:
@@ -257,15 +242,12 @@ def call_headers(
     context = attribution_context(
         component=component,
         operation=operation,
-        phase=phase,
         env=source,
         **extra,
     )
     if base:
         inherited = dict(base)
-        if phase is not None and not _sanitize(phase):
-            inherited.pop("phase", None)
-        # An explicitly empty field suppresses an inherited one the way an empty ``phase`` does.
+        # An explicitly empty field suppresses an inherited one.
         for name, value in extra.items():
             if not _sanitize(value):
                 inherited.pop(name, None)
@@ -311,7 +293,7 @@ def _merge_raw(raw: str | None, headers: Mapping[str, str]) -> str:
     lines = [
         line for line in text.splitlines() if line.strip() and line.partition(":")[0].strip().lower() not in replaced
     ]
-    lines.extend(f"{name}: {value}" for name, value in headers.items())
+    lines.append(format_custom_headers(headers))
     return "\n".join(lines)
 
 
@@ -351,7 +333,6 @@ def inject_env(
     *,
     component: str,
     operation: str = "",
-    phase: str | None = None,
     source: Mapping[str, str] | None = None,
     **extra: str,
 ) -> None:
@@ -368,7 +349,6 @@ def inject_env(
     headers = call_headers(
         component=component,
         operation=operation,
-        phase=phase,
         env=configuration,
         base=inherited,
         **extra,
@@ -383,12 +363,11 @@ def sdk_env_overlay(
     *,
     component: str,
     operation: str = "",
-    phase: str | None = None,
     **extra: str,
 ) -> dict[str, str]:
     """Return the header variables an agent-SDK child needs overlaid on its env."""
     merged = dict(os.environ)
-    inject_env(merged, component=component, operation=operation, phase=phase, **extra)
+    inject_env(merged, component=component, operation=operation, **extra)
     return {
         variable: merged[variable]
         for variable in (ANTHROPIC_CUSTOM_HEADERS_ENV, OPENAI_CUSTOM_HEADERS_ENV)

@@ -28,7 +28,6 @@ no session bound and want no event.
 from __future__ import annotations
 
 import logging
-from contextlib import ExitStack, suppress
 from pathlib import Path
 from typing import Any
 
@@ -51,20 +50,11 @@ class ConcSweepExecutor:
             ctx: Action context; ``ctx.extra['session_dir']`` is required.
 
         Returns:
-            A result dict with a ``status`` field (and error metadata on
-            failure, such as a missing ``session_dir``).
+            A result dict with a ``status`` field.
         """
-        from hyperloom.inference_optimizer.session.session_binding import bound_session_or_none, session_scope
+        from hyperloom.inference_optimizer.session.session_binding import named_session_scope
 
-        # Only a context that names its session binds one: writing a session's
-        # timeline into whatever directory the process happens to be in is
-        # worse than not recording.
-        named = (getattr(ctx, "extra", None) or {}).get("session_dir")
-        with ExitStack() as stack:
-            with suppress(OSError, RuntimeError):
-                session = Path(named).resolve() if named else None
-                if session is not None and bound_session_or_none() != session:
-                    stack.enter_context(session_scope(session))
+        with named_session_scope(ctx.extra["session_dir"]):
             return await self._run(ctx)
 
     async def _run(self, ctx) -> dict[str, Any]:
@@ -74,18 +64,9 @@ class ConcSweepExecutor:
             ctx: Action context; ``ctx.extra['session_dir']`` is required.
 
         Returns:
-            A result dict with a ``status`` field (and error metadata on
-            failure, such as a missing ``session_dir``).
+            A result dict with a ``status`` field.
         """
-        extra = getattr(ctx, "extra", None) or {}
-        session_dir_str = str(extra.get("session_dir") or "").strip()
-        if not session_dir_str:
-            return {
-                "status": "failed",
-                "error_class": "missing_session_dir",
-                "error": "conc_sweep: ctx.extra['session_dir'] missing",
-            }
-        session_dir = Path(session_dir_str)
+        session_dir = Path(ctx.extra["session_dir"])
         state = SharedState.load_or_init(session_dir)
 
         params = ctx.task.params or {}
@@ -139,7 +120,7 @@ class ConcSweepExecutor:
             conc_sweep_event_id,
             make_conc_sweep_recorder,
         )
-        from hyperloom.inference_optimizer.breakdown.recorder.event_sink import make_sink
+        from hyperloom.inference_optimizer.breakdown.recorder.event_sink import EventSink
         from hyperloom.inference_optimizer.session.session_binding import session_is_bound
 
         params = ctx.task.params or {}
@@ -154,7 +135,7 @@ class ConcSweepExecutor:
             phase=str(getattr(state, "phase", "") or "unphased"),
             macro_cycle=int(getattr(state, "macro_cycle", 0) or 0),
         )
-        sink = make_sink(event, producer=_RECORDER_PRODUCER)
+        sink = EventSink(event, producer=_RECORDER_PRODUCER)
         return make_conc_sweep_recorder(
             sink,
             task_id=str(getattr(ctx.task, "task_id", "") or ""),

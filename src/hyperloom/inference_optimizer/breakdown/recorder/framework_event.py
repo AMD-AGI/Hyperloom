@@ -31,22 +31,27 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from hyperloom.common.coerce import (
+    text_or_none as _text_or_none,
+    to_float as _float_or_none,
+    to_int as _int_or_none,
+    to_mapping as _as_dict,
+)
+
 from .event_fields import (
-    as_dict as _as_dict,
     bool_or_none as _bool_or_none,
     failure_row as _failure_row,
-    float_or_none as _float_or_none,
-    int_or_none as _int_or_none,
     now_iso_micros as _now_precise,
     now_iso_seconds as _now,
     text as _text,
-    text_or_none as _text_or_none,
     worst_status as _worst_status,
 )
 from .event_ids import event_id
-from .event_rows import group_rows, rows_for_event, sort_rows, wire_rows
-from .event_sink import RecordSink, make_sink
+from .construct import event_header
+from .event_rows import blocking_gate, group_rows, rows_for_event, sort_rows, wire_rows
+from .event_sink import EventSink, bound_sink
 from .event_timeline import EventHeader, finish_event, open_event
+from .sections import FRAMEWORK_EVENT_SECTIONS
 
 log = logging.getLogger(__name__)
 
@@ -114,7 +119,6 @@ STEP_DROPPED = "dropped"
 #: never reached a measurement; the row's ``reason`` says which.
 DISPOSITION_ATTEMPTED = "attempted"
 DISPOSITION_DROPPED = "dropped"
-DISPOSITION_PENDING = "pending"
 
 #: Who authored a review. A proposal blocked because the Critic had no manifest
 #: to read must not be reported as one the Critic examined and refused.
@@ -126,7 +130,6 @@ __all__ = [
     "ARM_SOURCE",
     "DISPOSITION_ATTEMPTED",
     "DISPOSITION_DROPPED",
-    "DISPOSITION_PENDING",
     "EVENT_COMPONENT",
     "EVENT_KIND",
     "EVENT_PHASE",
@@ -157,6 +160,7 @@ __all__ = [
     "STEP_REAUTHORED",
     "STEP_REVIEWED",
     "STEP_ROUTED",
+    "CriticReview",
     "FrameworkEventRecorder",
     "GateVerdict",
     "assemble_framework_ext",
@@ -294,6 +298,21 @@ class GateVerdict:
     threshold: Any = None
 
 
+@dataclass(frozen=True)
+class CriticReview:
+    """The Critic's ruling on one proposal, both as authored and as the loop committed it."""
+
+    verdict: str
+    effective_verdict: str = ""
+    held_to_rule: str = ""
+    reviewer: str = REVIEWER_CRITIC
+    reason: str = ""
+    confidence: Any = None
+    failure_reason_code: str = ""
+    advisory: Mapping[str, Any] | None = None
+    variants: Iterable[Mapping[str, Any]] | None = None
+
+
 class FrameworkEventRecorder:
     """Records one FRAMEWORK_AGENT entry's facts, one fragment per row.
 
@@ -302,7 +321,7 @@ class FrameworkEventRecorder:
     fragments and not from anything remembered, so an entry recorded across a
     resume assembles from both halves."""
 
-    def __init__(self, sink: RecordSink, *, macro_cycle: int = 0):
+    def __init__(self, sink: EventSink, *, macro_cycle: int = 0):
         """Bind a recorder to the event of one phase entry. ``macro_cycle`` is
         recorded on the event as well as being a segment of its id, because a
         consumer reading the assembled event does not parse the id."""
@@ -351,9 +370,6 @@ class FrameworkEventRecorder:
                     ARM_SOURCE: {
                         "no_keep_streak_threshold": _int_or_none(source.get("no_keep_streak_threshold")),
                         "discovery_retry_limit": _int_or_none(source.get("discovery_retry_limit")),
-                        "authoring_enabled": None
-                        if source.get("authoring_enabled") is None
-                        else bool(source.get("authoring_enabled")),
                     },
                 },
             },
@@ -486,21 +502,7 @@ class FrameworkEventRecorder:
             row["confidence"] = _float_or_none(fields.get("confidence"))
         self._sink.record(SECTION_PROPOSAL, row, row_type=ROW_PROPOSAL, natural_ids=_key(key))
 
-    def record_proposal_review(
-        self,
-        proposal_id: str,
-        *,
-        verdict: str,
-        effective_verdict: str = "",
-        held_to_rule: str = "",
-        reviewer: str = REVIEWER_CRITIC,
-        reason: str = "",
-        confidence: Any = None,
-        failure_reason_code: str = "",
-        concerns: Any = None,
-        advisory: Mapping[str, Any] | None = None,
-        variants: Iterable[Mapping[str, Any]] | None = None,
-    ) -> None:
+    def record_proposal_review(self, proposal_id: str, review: CriticReview) -> None:
         """Record the Critic's ruling on one proposal, inline on its row.
 
         The review lives on the proposal so that it follows the proposal
@@ -508,49 +510,34 @@ class FrameworkEventRecorder:
         to a rule that only declared ``advise`` is two facts, and reporting
         either alone misreads the round.
 
-        Args:
-            advisory: Recorded as given, since the vocabulary is the Critic's
-                own and a re-spelling here would drift from what it emitted.
-            variants: Per-variant rulings for a grid reviewed by
-                ``verdict_map``; a rejected variant reaches no bench, so no
-                attempt row carries its ruling.
+        ``review.advisory`` is recorded as given, since the vocabulary is the
+        Critic's own and a re-spelling here would drift from what it emitted.
+        ``review.variants`` holds the per-variant rulings for a grid reviewed by
+        ``verdict_map``; a rejected variant reaches no bench, so no attempt row
+        carries its ruling.
         """
         key = str(proposal_id or "")
         if not key:
             return
-        authored = str(verdict or "")
-        review: dict[str, Any] = {
-            "verdict": authored,
-            "effective_verdict": str(effective_verdict or "") or authored,
-            "held_to_rule": str(held_to_rule or ""),
-            "reviewer": str(reviewer or ""),
-            "reason": str(reason or ""),
-            "confidence": _float_or_none(confidence),
-            "failure_reason_code": str(failure_reason_code or ""),
-            "concerns": [str(item) for item in (concerns or []) if str(item or "")],
+        ruling: dict[str, Any] = {
+            "verdict": review.verdict,
+            "effective_verdict": review.effective_verdict or review.verdict,
+            "held_to_rule": review.held_to_rule,
+            "reviewer": review.reviewer,
+            "reason": review.reason,
+            "confidence": _float_or_none(review.confidence),
+            "failure_reason_code": review.failure_reason_code,
+            "concerns": [],
             "reviewed_at": _now(),
         }
-        for field, value in _as_dict(advisory).items():
-            name = str(field or "")
-            if name and name not in review:
-                review[name] = value
-        rows = [
-            {
-                "variant_name": str(row.get("variant_name") or ""),
-                "verdict": str(row.get("verdict") or ""),
-                "effective_verdict": str(row.get("effective_verdict") or "") or str(row.get("verdict") or ""),
-                "held_to_rule": str(row.get("held_to_rule") or ""),
-                "reason": str(row.get("reason") or ""),
-                "failure_reason_code": str(row.get("failure_reason_code") or ""),
-            }
-            for row in (variants or [])
-            if str(row.get("variant_name") or "")
-        ]
-        if rows:
-            review["variants"] = rows
+        for name, value in _as_dict(review.advisory).items():
+            ruling.setdefault(name, value)
+        variants = [dict(row) for row in review.variants or []]
+        if variants:
+            ruling["variants"] = variants
         self._sink.record(
             SECTION_PROPOSAL,
-            {"proposal_id": key, "critic_review": review},
+            {"proposal_id": key, "critic_review": ruling},
             row_type=ROW_PROPOSAL,
             natural_ids=_key(key),
         )
@@ -630,8 +617,7 @@ class FrameworkEventRecorder:
         reason: str = "",
     ) -> None:
         """Record where a proposal ended up. ``disposition`` is a
-        ``DISPOSITION_*`` value; ``pending`` is one the phase never resolved,
-        the honest reading of a session killed mid-review."""
+        ``DISPOSITION_*`` value."""
         key = str(proposal_id or "")
         if not key:
             return
@@ -756,40 +742,9 @@ class FrameworkEventRecorder:
     ) -> None:
         """Close the event on the phase's own exit evidence.
 
-        Takes no failure of its own: a task that failed is on its run row, a
-        fault the entry survived came through :meth:`record_fault`, and an
-        entry that raised out closes through :meth:`finish_crashed`.
+        Takes no failure of its own: a task that failed is on its run row, and
+        a fault the entry survived came through :meth:`record_fault`.
         """
-        self._close(
-            status="",
-            payload={
-                "exit": {
-                    "reason": str(exit_reason or ""),
-                    "trigger": str(trigger or ""),
-                    "hint": str(hint or ""),
-                    "switch_bottleneck": None if switch_bottleneck is None else bool(switch_bottleneck),
-                },
-            },
-        )
-
-    def finish_crashed(self, exc: BaseException) -> None:
-        """Close an event whose phase raised instead of exiting."""
-        if self._closed:
-            return
-        self._close(
-            status="failed",
-            payload={
-                "failure": _failure_row(
-                    stage=EVENT_TYPE,
-                    error_class=type(exc).__name__,
-                    message=f"framework agent phase raised: {exc!r}",
-                )
-            },
-        )
-
-    def _close(self, *, status: str, payload: Mapping[str, Any]) -> None:
-        """Record the terminal facts and close the event. ``status`` is used
-        only when assembly derives nothing of its own."""
         if self._closed:
             return
         self._closed = True
@@ -797,20 +752,27 @@ class FrameworkEventRecorder:
         self._sink.record(
             SECTION_EVENT,
             {
-                **payload,
+                "exit": {
+                    "reason": str(exit_reason or ""),
+                    "trigger": str(trigger or ""),
+                    "hint": str(hint or ""),
+                    "switch_bottleneck": None if switch_bottleneck is None else bool(switch_bottleneck),
+                },
                 "end_time": end_time,
                 "duration_sec": round(time.monotonic() - self._t0, 3),
             },
         )
-        from .assembler import framework_event_parts
+        from .assembler import event_parts
         from .recorder_warnings import RECORDING_ERRORS, note_failure
 
         try:
-            ext, derived = assemble_framework_ext(framework_event_parts(self.event_id), event=self.event_id)
+            ext, derived = assemble_framework_ext(
+                event_parts(FRAMEWORK_EVENT_SECTIONS, event=self.event_id), event=self.event_id
+            )
             finish_event(
                 EventHeader(EVENT_TYPE, self.event_id, EVENT_KIND, self._start_time),
                 sequence=self._sequence,
-                status=derived or status or "succeeded",
+                status=derived or "succeeded",
                 ext=ext,
                 end_time=end_time,
             )
@@ -827,38 +789,32 @@ def assemble_framework_ext(
     rows, out of the sections read back from the spool. Rows of every other
     event are ignored, and the status is empty when the event holds no work,
     which leaves the caller's own reading standing."""
-    event_rows = rows_for_event(parts.get(SECTION_EVENT) or [], event)
-    header = event_rows[0] if event_rows else {}
+    header = event_header(parts, SECTION_EVENT, event)
 
     plateau = wire_rows(
-        sort_rows(rows_for_event(parts.get(SECTION_PLATEAU) or [], event), keys=("evaluated_at", "arm")),
-        drop=("event_id",),
+        sort_rows(rows_for_event(parts[SECTION_PLATEAU], event), keys=("evaluated_at", "arm")), drop=("event_id",)
     )
     runs = wire_rows(
-        sort_rows(rows_for_event(parts.get(SECTION_RUN) or [], event), keys=("dispatched_at", "run_id")),
-        drop=("event_id",),
+        sort_rows(rows_for_event(parts[SECTION_RUN], event), keys=("dispatched_at", "run_id")), drop=("event_id",)
     )
-    attempt_rows = sort_rows(rows_for_event(parts.get(SECTION_ATTEMPT) or [], event), keys=("ts", "attempt_id"))
+    attempt_rows = sort_rows(rows_for_event(parts[SECTION_ATTEMPT], event), keys=("ts", "attempt_id"))
     gates_by_attempt = group_rows(
-        sort_rows(rows_for_event(parts.get(SECTION_ATTEMPT_GATE) or [], event), keys=("ordinal", "ts", "gate")),
-        "attempt_id",
+        sort_rows(rows_for_event(parts[SECTION_ATTEMPT_GATE], event), keys=("ordinal", "ts", "gate")), "attempt_id"
     )
     attempts: list[dict[str, Any]] = []
     for row in wire_rows(attempt_rows, drop=("event_id",)):
         key = str(row.get("attempt_id") or "")
         row["gates"] = wire_rows(gates_by_attempt.get(key, []), drop=("event_id", "attempt_id", "ordinal"))
-        row["blocked_by"] = _text_or_none(_blocking_gate(row["gates"]))
+        row["blocked_by"] = _text_or_none(blocking_gate(row["gates"]))
         attempts.append(row)
 
     steps_by_proposal = group_rows(
-        sort_rows(rows_for_event(parts.get(SECTION_PROPOSAL_STEP) or [], event), keys=("ts", "step")),
-        "proposal_id",
+        sort_rows(rows_for_event(parts[SECTION_PROPOSAL_STEP], event), keys=("ts", "step")), "proposal_id"
     )
     attempts_by_proposal = group_rows(attempts, "proposal_ref")
     proposals: list[dict[str, Any]] = []
     for row in wire_rows(
-        sort_rows(rows_for_event(parts.get(SECTION_PROPOSAL) or [], event), keys=("proposal_id",)),
-        drop=("event_id",),
+        sort_rows(rows_for_event(parts[SECTION_PROPOSAL], event), keys=("proposal_id",)), drop=("event_id",)
     ):
         key = str(row.get("proposal_id") or "")
         row["lifecycle"] = wire_rows(steps_by_proposal.get(key, []), drop=("event_id", "proposal_id"))
@@ -918,20 +874,6 @@ def _derived_status(
     return _worst_status(row.get("status") for row in runs)
 
 
-def _blocking_gate(gates: list[dict[str, Any]]) -> str:
-    """Name the first gate that did not pass, or ``""`` when all of them did. A
-    gate that ruled ``None`` blocks only if nothing after it failed outright,
-    so an attempt rejected on the keep threshold reports that threshold."""
-    unresolved = ""
-    for row in gates:
-        passed = row.get("passed")
-        if passed is False:
-            return str(row.get("gate") or "")
-        if passed is None and not unresolved:
-            unresolved = str(row.get("gate") or "")
-    return unresolved
-
-
 def record_review_evidence(
     *,
     macro_cycle: Any,
@@ -955,11 +897,10 @@ def record_review_evidence(
         evidence["kb"] = dict(kb)
     if not key or not evidence:
         return
-    from ...session.session_binding import session_is_bound
-
-    if not session_is_bound():
+    sink = bound_sink(framework_event_id(macro_cycle), producer=PRODUCER)
+    if sink is None:
         return
-    make_sink(framework_event_id(macro_cycle), producer=PRODUCER).record(
+    sink.record(
         SECTION_PROPOSAL,
         {"proposal_id": key, "critic_review": evidence},
         row_type=ROW_PROPOSAL,
@@ -974,7 +915,7 @@ def make_framework_recorder(*, macro_cycle: Any = 0) -> FrameworkEventRecorder |
     if decline_unbound("framework"):
         return None
     recorder = FrameworkEventRecorder(
-        make_sink(framework_event_id(macro_cycle), producer=PRODUCER),
+        EventSink(framework_event_id(macro_cycle), producer=PRODUCER),
         macro_cycle=int(macro_cycle or 0),
     )
     recorder.begin()

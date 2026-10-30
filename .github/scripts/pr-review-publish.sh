@@ -4,16 +4,19 @@
 #
 # Publish the review-pr card produced by pr-review.yml.
 #
-# The verdict is applied only when the card parses strictly and still describes the open PR head:
+# The verdict is applied only when the card passes the skill's check-card.sh, held to a risk graded here from the PR's
+# files on GitHub rather than from anything the review job wrote; names the clean skill version and the model this
+# run recorded in skill.txt; and still describes the open PR head:
 #   Blocking issues: N     -> request-changes review (blocks the merge)
 #   Blocking issues: none  -> dismiss this bot's CHANGES_REQUESTED reviews, then an LGTM comment
-# Anything else posts a note (with the card, if any) and exits 1. The bot never approves.
+# Anything else posts a note (with the card, if any) and exits 1. The bot never approves, whatever the risk.
 #
 # env: REPO, PR, REVIEWED_SHA, CARD, RUN_URL, REVIEW_RESULT (result of the review job)
 
 set -euo pipefail
 
 BOT_LOGIN='github-actions[bot]'
+SKILL_DIR="$(dirname "${BASH_SOURCE[0]}")/../../.claude/skills/review-pr"
 
 note() {
   local body="Automated review: no verdict applied -- $1. Comment \`/review\` to retry. Run: ${RUN_URL}"
@@ -26,39 +29,25 @@ note() {
 }
 
 [ "$REVIEW_RESULT" = success ] || note "the review job ended with result '${REVIEW_RESULT}'"
-[ -s "$CARD" ] || note "the review produced no card"
 
 WORK=$(dirname "$CARD")
-required=(rules.txt answers.txt core_files.txt verdicts.txt ai_diagnostic.txt refutations.txt independent.txt)
-for artifact in "${required[@]}"; do
-  [ -s "$WORK/$artifact" ] || note "the review did not produce non-empty ${artifact}"
-done
-
-first=$(head -1 "$CARD")
-[[ "$first" =~ ^##\ PR\ \#$PR\ --\ .+ ]] || note "the card has no well-formed PR heading"
-[ "$(grep -cE '^What it does: .+' "$CARD" || true)" = 1 ] \
-  || note "the card has no single well-formed 'What it does:' line"
-strict=$(grep -cE '^Blocking issues: (none|[1-5])$' "$CARD" || true)
-loose=$(grep -ciE '^[#*[:space:]]*blocking issues' "$CARD" || true)
-[ "$strict" = 1 ] && [ "$loose" = 1 ] \
-  || note "the card has no single well-formed 'Blocking issues:' line"
-
-verdict=$(sed -nE 's/^Blocking issues: (none|[1-5])$/\1/p' "$CARD")
-findings=$(grep -cE '^[0-9]+\. \[' "$CARD" || true)
-if [ "$verdict" = none ]; then expected=0; else expected=$verdict; fi
-[ "$findings" = "$expected" ] \
-  || note "the card states 'Blocking issues: ${verdict}' but lists ${findings} numbered finding(s)"
-verified=$(grep -cE '^[0-9]+\. \[[^]]+\] .+ \[verified\]$' "$CARD" || true)
-[ "$verified" = "$expected" ] || note "every blocking finding must be marked [verified]"
-for field in Problem Impact Action; do
-  [ "$(grep -cE "^   ${field}: .+" "$CARD" || true)" = "$expected" ] \
-    || note "every blocking finding must carry ${field}"
-done
-if [ "$verdict" = none ]; then
-  ! grep -q '^deferred:' "$CARD" || note "a clean card cannot defer a surviving finding"
+[ -s "$WORK/skill.txt" ] || note "the review left no skill.txt"
+skill=$(sed -n 's/^skill: //p' "$WORK/skill.txt")
+model=$(sed -n 's/^model: //p' "$WORK/skill.txt")
+[[ "$skill" =~ ^[0-9a-f]{12,40}$ ]] || note "skill.txt names no clean skill version: '${skill}'"
+if [ -z "$model" ] || [ "$model" = unknown ]; then
+  note "skill.txt names no model"
 fi
-grep -qE "^Checked: .+ \\| Ran: .+ \\| Base: [0-9a-f]{7,40} \\| Head: ${REVIEWED_SHA}$" "$CARD" \
-  || note "the card has no well-formed verification-depth line for the reviewed head"
+
+graded=$(mktemp -d)
+trap 'rm -rf "$graded"' EXIT
+gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[] | .filename, (.previous_filename // empty)' \
+  > "$graded/files.txt" \
+  || note "listing the PR's files failed"
+python3 "$SKILL_DIR/risk.py" "$graded/files.txt" > "$graded/risk.txt" || note "risk.py could not grade the PR's files"
+defect=$(bash "$SKILL_DIR/check-card.sh" "$WORK" "$PR" "$REVIEWED_SHA" "$graded/risk.txt") || note "$defect"
+grep -qF " | Skill: ${skill} | Model: ${model} | " "$CARD" \
+  || note "the card's Checked line does not name this run's Skill: ${skill} and Model: ${model}"
 
 pr_now=$(gh pr view "$PR" --repo "$REPO" --json state,headRefOid --jq '"\(.state) \(.headRefOid)"') \
   || note "reading the PR state failed"
@@ -66,7 +55,7 @@ read -r state head <<< "$pr_now"
 [ "$state" = OPEN ] || note "the PR is ${state}"
 [ "$head" = "$REVIEWED_SHA" ] || note "the PR head moved from ${REVIEWED_SHA} to ${head} during the review"
 
-if [ "$verdict" != none ]; then
+if ! grep -q '^Blocking issues: none$' "$CARD"; then
   gh pr review "$PR" --repo "$REPO" --request-changes --body-file "$CARD" \
     || note "submitting the request-changes review failed"
   exit 0

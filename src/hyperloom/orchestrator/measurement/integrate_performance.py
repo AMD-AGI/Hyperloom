@@ -9,7 +9,13 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from hyperloom.common.gain_math import gain_pct_or_zero, incremental_gain_pct
-from hyperloom.common.perf_metric import VERDICT_KEEP, GradedComparison, constraint_veto_reason, graded_axes_of
+from hyperloom.common.perf_metric import (
+    CONSTRAINT_FIELDS,
+    VERDICT_KEEP,
+    GradedComparison,
+    constraint_veto_reason,
+    graded_axes_of,
+)
 from ..state.shared_state import resolve_graded_comparison
 
 
@@ -38,25 +44,21 @@ def assess_integrate_performance(
     # graded the gain itself would promote points those guards reject.
     graded = resolve_graded_comparison(state, measurement, keep_threshold_pct=keep_threshold_pct)
     new_tput = float(measurement.get("output_throughput") or 0.0)
-    gain_pct = (
-        gain_pct_or_zero(graded.candidate, graded.reference)
-        if graded.graded_on_intvty
-        else gain_pct_or_zero(new_tput, base_tput)
-    )
     current_best = getattr(state, "current_best", None) or {}
     current_best_tput = float(current_best.get("tput") or 0.0)
-    stack_incremental_gain_pct = (
-        incremental_gain_pct(graded.candidate, graded.reference)
-        if graded.graded_on_intvty
-        else incremental_gain_pct(new_tput, current_best_tput)
-    )
+    if graded.graded_on_intvty:
+        gain_pct = gain_pct_or_zero(graded.candidate, graded.reference)
+        stack_incremental_gain_pct = incremental_gain_pct(graded.candidate, graded.reference)
+    else:
+        gain_pct = gain_pct_or_zero(new_tput, base_tput)
+        stack_incremental_gain_pct = incremental_gain_pct(new_tput, current_best_tput)
     # The lowered stack threshold is an output-axis concession. On the interactivity axis the verdict already owns
     # the KEEP, so honouring it here would let a stacked layer clear a bar the frontier rule rejected.
     stack_positive_keep = (
         graded.comparable
         and not graded.graded_on_intvty
         and bool(getattr(state, "optimization_stack", None))
-        and str(current_best.get("action") or "") == "integrate"
+        and current_best.get("action") == "integrate"
         and stack_incremental_gain_pct is not None
         and stack_incremental_gain_pct >= stack_incremental_keep_threshold_pct
     )
@@ -94,9 +96,7 @@ def integrate_measurement_fields(measurement: Mapping[str, Any]) -> dict[str, An
             key: measurement[key]
             for key in (
                 "ttft_mean_ms",
-                "e2el_mean_ms",
-                "gpu_power_avg_w",
-                "gpu_power_by_gpu_w",
+                *CONSTRAINT_FIELDS,
                 "tpot_mean_ms",
                 "workspace",
                 "raw_result_path",

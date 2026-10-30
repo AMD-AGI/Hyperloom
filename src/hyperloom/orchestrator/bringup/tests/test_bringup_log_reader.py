@@ -8,7 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from hyperloom.common.bringup import LadderStage
-from hyperloom.orchestrator.actions.executors.baseline import read_bringup_log
+from hyperloom.orchestrator.actions.executors.benchmark_run.bringup import read_bringup_log
 from hyperloom.orchestrator.bringup import DEGRADED_UNREADABLE, observe_bringup
 
 #: One line per kernel shape, which is what aiter emits on ROCm.
@@ -34,7 +34,7 @@ def test_readiness_deep_in_the_log_still_reads_as_booted(tmp_path: Path) -> None
 
     observation = observe_bringup(server_log=read_bringup_log(log).text).observation
     assert observation.stage_reached is LadderStage.HTTP_READY
-    assert observation.booted is True
+    assert observation.stage_failed is None
 
 
 def test_the_tail_wall_still_wins_over_a_middle_milestone(tmp_path: Path) -> None:
@@ -49,7 +49,6 @@ def test_the_tail_wall_still_wins_over_a_middle_milestone(tmp_path: Path) -> Non
         )
 
     observation = observe_bringup(server_log=read_bringup_log(log).text).observation
-    assert observation.booted is False
     assert observation.stage_failed is not None
 
 

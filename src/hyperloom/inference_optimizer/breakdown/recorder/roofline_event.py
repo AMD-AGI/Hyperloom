@@ -13,22 +13,26 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.coerce import (
+    text_or_none as _text_or_none,
+    to_float as _float_or_none,
+    to_int as _int_or_none,
+    to_mapping as _as_dict,
+    to_list as _as_list,
+)
+
 from .event_fields import (
     analysis_detail as _analysis_detail,
-    as_dict as _as_dict,
-    as_list as _as_list,
     clip as _clip,
     failure_row as _failure_row,
-    float_or_none as _float_or_none,
-    int_or_none as _int_or_none,
     now_iso_seconds as _now_iso,
-    text_or_none as _text_or_none,
     worst_status as _worst_status,
 )
 from .event_ids import event_id
 from .event_rows import group_rows, rows_for_event, sort_rows, wire_rows
-from .event_sink import RecordSink
+from .event_sink import EventSink
 from .event_timeline import EventHeader, finish_event, open_event
+from .sections import ROOFLINE_EVENT_SECTIONS
 
 log = logging.getLogger(__name__)
 
@@ -128,6 +132,7 @@ __all__ = [
     "assemble_roofline_ext",
     "make_roofline_recorder",
     "read_kernel_roofline",
+    "roofline_arm",
     "roofline_event_id",
 ]
 
@@ -139,6 +144,11 @@ def roofline_event_id(phase: str, macro_cycle: Any) -> str:
         ValueError: If either segment is malformed.
     """
     return event_id(phase, macro_cycle, EVENT_COMPONENT)
+
+
+def roofline_arm(reason: str) -> str:
+    """The configuration a roofline dispatched for ``reason`` measures."""
+    return "baseline" if reason == "prelude_initial" else "current_best"
 
 
 def _rank_of(path: str) -> str:
@@ -159,8 +169,6 @@ def _rank_of(path: str) -> str:
 def _kernel_roofline_row(entry: Mapping[str, Any]) -> dict[str, Any] | None:
     """Normalize one row of the analyzer's kernel-roofline table.
 
-    The TraceLens and bypass routes agree on the identity and cost fields and
-    diverge in the tail: only bypass rows carry ``roofline_attainment_pct``.
     ``roofline_source`` says whether a row's bound came from a model or is a
     placeholder. A row carrying no kernel identity cannot be joined to anything
     and yields ``None``.
@@ -187,7 +195,6 @@ def _kernel_roofline_row(entry: Mapping[str, Any]) -> dict[str, Any] | None:
         "efficiency_percent": _float_or_none(entry.get("efficiency_percent")),
         "compute_utilization_pct": _float_or_none(entry.get("compute_utilization_pct")),
         "bandwidth_utilization_pct": _float_or_none(entry.get("bandwidth_utilization_pct")),
-        "roofline_attainment_pct": _float_or_none(entry.get("roofline_attainment_pct")),
         "roofline_name": _text_or_none(entry.get("roofline_name")),
         "roofline_source": str(entry.get("roofline_source") or ""),
         "suggestion": _clip(entry.get("suggestion") or ""),
@@ -265,8 +272,6 @@ def _snapshot_row(snapshot: Mapping[str, Any]) -> dict[str, Any]:
         "roofline_mem_ceiling_tok_per_sec": _float_or_none(snapshot.get("roofline_mem_ceiling_tok_per_sec")),
         "roofline_cmp_ceiling_tok_per_sec": _float_or_none(snapshot.get("roofline_cmp_ceiling_tok_per_sec")),
         "roofline_bound_kind": str(snapshot.get("roofline_bound_kind") or ""),
-        "e2e_mean_ms": _float_or_none(snapshot.get("e2e_mean_ms")),
-        "roofline_ideal_ms": _float_or_none(snapshot.get("roofline_ideal_ms")),
         "within_roofline_pct": _float_or_none(snapshot.get("within_roofline_pct")),
         "within_roofline_pct_uncapped": _float_or_none(snapshot.get("within_roofline_pct_uncapped")),
         "gap_to_roofline_pct": _float_or_none(snapshot.get("gap_to_roofline_pct")),
@@ -339,7 +344,7 @@ def _summarize_trace_quality(validate: dict[str, Any]) -> dict[str, Any]:
     The certificate's own tables are per-rank, per-candidate and per-chunk, so their size follows the topology and
     they stay in the file ``certificate_path`` points at. What lands here is the fixed set of numbers a reader
     needs to judge trace quality without opening that file, taken from the rank the probe actually analysed. Every
-    ratio is accompanied by the terms it was computed from and by the scope it was computed over, because a
+    ratio is accompanied by the terms it was computed from and by whether the aggregation was truncated, because a
     coverage figure drawn from a truncated aggregation is a different measurement than one drawn from the whole
     trace.
     """
@@ -355,9 +360,8 @@ def _summarize_trace_quality(validate: dict[str, Any]) -> dict[str, Any]:
     return {
         "rank_count_certified": len(ranks),
         "analyzed_rank": rank.get("rank"),
-        # Parse scope: what the numbers below were computed over.
+        # Parse state: what the numbers below were computed over.
         "event_total": parse.get("event_total"),
-        "aggregation_scope": parse.get("aggregation_scope"),
         "truncated": parse.get("truncated"),
         "truncation_reason": parse.get("truncation_reason"),
         # Attribution, with the terms of every ratio.
@@ -392,7 +396,6 @@ def _summarize_trace_quality(validate: dict[str, Any]) -> dict[str, Any]:
         "production_selected_role": inventory.get("production_selected_role"),
         "production_would_analyze_split_chunk": inventory.get("production_would_analyze_split_chunk"),
         "file_count_by_role": _as_dict(inventory.get("file_count_by_role")),
-        "chunk_count_certified": len(_as_list(validate.get("chunk_level"))),
         "verdict_measures": measures,
     }
 
@@ -449,11 +452,7 @@ class RooflineRequest:
         params = _as_dict(self.params)
         # ``arm`` names the configuration the run measured, which only a roofline dispatch does.
         kind = str(self.task_kind or "")
-        arm = (
-            ""
-            if kind not in ("", EVENT_TYPE)
-            else ("baseline" if str(self.reason or "") == "prelude_initial" else "current_best")
-        )
+        arm = "" if kind not in ("", EVENT_TYPE) else roofline_arm(str(self.reason or ""))
         return {
             "task_id": str(self.task_id or ""),
             "task_kind": kind,
@@ -520,7 +519,7 @@ class RooflineConclusion:
 class RooflineEventRecorder:
     """Records one roofline action's facts into whichever event owns it."""
 
-    def __init__(self, sink: RecordSink, request: RooflineRequest, *, owns_event: bool = True):
+    def __init__(self, sink: EventSink, request: RooflineRequest, *, owns_event: bool = True):
         """Bind a recorder to one action inside one event."""
         self._sink = sink
         self._t0 = time.monotonic()
@@ -559,15 +558,10 @@ class RooflineEventRecorder:
         """str: The task id separating this action from others in its event."""
         return self._task_id
 
-    def _record_action(self, payload: Mapping[str, Any]) -> None:
-        """Update this action's own row."""
-        self._sink.record(SECTION_ACTION, payload, row_type=ROW_ACTION, natural_ids=self._action_id)
-
     # ---- lifecycle -------------------------------------------------------
 
-    def begin(self, *, max_profile_attempts: int) -> None:
-        """Record the profile budget and, when this action owns the event, open it."""
-        self._record_action({"max_profile_attempts": int(max_profile_attempts)})
+    def begin(self) -> None:
+        """Open the event when this action owns it."""
         if not self._owns_event:
             return
         self._sequence = open_event(
@@ -576,6 +570,10 @@ class RooflineEventRecorder:
             producer=PRODUCER,
             ext={"in_flight_substep": self._substep},
         )
+
+    def _record_action(self, payload: Mapping[str, Any]) -> None:
+        """Update this action's own row."""
+        self._sink.record(SECTION_ACTION, payload, row_type=ROW_ACTION, natural_ids=self._action_id)
 
     def record_preflight(self, payload: Mapping[str, Any]) -> None:
         """Record the conditions the action found before it profiled anything.
@@ -828,11 +826,13 @@ class RooflineEventRecorder:
         )
         if not self._owns_event:
             return
-        from .assembler import roofline_event_parts
+        from .assembler import event_parts
         from .recorder_warnings import RECORDING_ERRORS, note_failure
 
         try:
-            ext, derived = assemble_roofline_ext(roofline_event_parts(self.event_id), event=self.event_id)
+            ext, derived = assemble_roofline_ext(
+                event_parts(ROOFLINE_EVENT_SECTIONS, event=self.event_id), event=self.event_id
+            )
             finish_event(
                 EventHeader(EVENT_TYPE, self.event_id, EVENT_KIND, self._start_time),
                 sequence=self._sequence,
@@ -902,7 +902,6 @@ def assemble_roofline_actions(
                 "preflight": _as_dict(row.get("preflight")),
                 "profile": {
                     "attempt_count": len(profile_runs),
-                    "max_attempts": _int_or_none(row.get("max_profile_attempts")) or 0,
                     "effective_run_index": profile_index,
                     "recovered": bool(row.get("recovered")),
                     "graph_capture_disabled": bool(row.get("graph_capture_disabled")),
@@ -968,7 +967,7 @@ def _mark_effective(runs: list[dict[str, Any]], effective_index: int | None) -> 
 
 
 def make_roofline_recorder(
-    sink: RecordSink | None,
+    sink: EventSink | None,
     request: RooflineRequest,
     *,
     owns_event: bool = True,
