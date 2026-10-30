@@ -112,7 +112,7 @@ def test_a_session_past_the_champion_writes_its_recipe_files_and_lessons(
     provenance = knowledge["provenance"]
     assert (provenance["commit_id"], provenance["recipe_digest"]) == ("i1", final.recipe.digest())
     assert provenance["rule_pack"] == RULE_PACK
-    assert "warmup_round_seed" not in provenance and "synthesized_patches" not in provenance
+    assert not {"warmup_round_seed", "synthesized_patches", "outputs_checked"} & provenance.keys()
     replayed = from_recipe_kb_value(knowledge["value"], base_image_digest=provenance["base_image_digest"])
     assert replayed == final.recipe
     warm = knowledge_to_warm_recipe({"knowledge": knowledge, "session_id": "sess-1"})
@@ -284,6 +284,8 @@ def test_an_agentx_session_writes_its_interactivity_gain_as_the_main_flow_does(
     metrics = ("candidate_interactivity", "baseline_interactivity", GRADED_TOTAL, "baseline_total_throughput")
     assert [knowledge[key] for key in metrics] == [11.0, 10.0, 2100.0, 2000.0]
     assert KB_METRIC not in knowledge and knowledge["workload_shape"] == {"tp": 8, "conc": 64}
+    assert knowledge["provenance"]["outputs_checked"] is False
+    assert knowledge["what_worked"][0] == "merge of c1 on c0: +4.10%, merged as i1, outputs not checked"
     warm = knowledge_to_warm_recipe({"knowledge": knowledge, "session_id": "sess-1"})
     assert warm["validated_gain_pct"] == pytest.approx(10.0)
 
