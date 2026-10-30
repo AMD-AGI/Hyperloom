@@ -25,6 +25,7 @@ from hyperloom.common.outside_facts import (
     HIP_NO_KERNEL_IMAGE,
     HIP_UNDEFINED_SYMBOL,
     HSA_STATUS_ERROR,
+    HUB_RATE_LIMITED,
     PY_IMPORT_ERROR,
     PY_MODULE_NOT_FOUND_ERROR,
 )
@@ -76,6 +77,7 @@ _WATCHDOG_TIMEOUT = re.compile(r"watchdog timeout", re.IGNORECASE)
 #: A ``git`` command the benchmark client ran to fetch its own dependencies (Magpie's per-test ``submodule update`` of
 #: the replay client) that timed out: ``subprocess.TimeoutExpired: Command ['git', ...] timed out after N seconds``.
 _GIT_FETCH_TIMEOUT = re.compile(r"TimeoutExpired: Command \[['\"]git['\"],.*\] timed out after")
+_HUB_RATE_LIMITED = re.compile(HUB_RATE_LIMITED)
 #: A frame of aiter's JIT build in a stack dumped at the watchdog: py-spy writes ``build_module (aiter/jit/core.py:N)``, a
 #: Python traceback ``File ".../aiter/jit/core.py", line N, in build_module``.
 _JIT_BUILD_FRAME = re.compile(r"\bbuild_module\b.*\baiter[/.]jit[/.]core\b|\baiter[/.]jit[/.]core\b.*\bbuild_module\b")
@@ -161,3 +163,9 @@ def jit_build_timeout(text: str) -> str | None:
     if not _JIT_BUILD_FRAME.search(text):
         return None
     return _last_matching(text, lambda line: bool(_WATCHDOG_TIMEOUT.search(line)))
+
+
+def hub_rate_limited(text: str) -> str | None:
+    """The line that says the Hugging Face Hub refused a download for the rate limit, once the client's retries were spent:
+    a limit of the egress address, which no candidate can cause."""
+    return _last_matching(text, lambda line: bool(_HUB_RATE_LIMITED.search(line)))

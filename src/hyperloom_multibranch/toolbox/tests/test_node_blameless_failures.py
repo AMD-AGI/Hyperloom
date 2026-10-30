@@ -20,6 +20,7 @@ from hyperloom_multibranch.toolbox.tests.helpers import Rig, ScriptedExecutor, b
 from hyperloom_multibranch.toolbox.tests.test_attempts import (
     CACHE_REASON,
     CREATE_FAILED_REASON,
+    HUB_REFUSED_REASON,
     KEY_READ_ONLY_REASON,
     LOST_REASON,
 )
@@ -59,8 +60,8 @@ async def _restarted_quarantine(tmp_path: Path) -> frozenset[str]:
 
 @pytest.mark.parametrize(
     "reason",
-    [KEY_READ_ONLY_REASON, CACHE_REASON, LOST_REASON, CREATE_FAILED_REASON],
-    ids=["signing_key", "runner_cache", "runner_lost", "sandbox_create_failed"],
+    [KEY_READ_ONLY_REASON, CACHE_REASON, LOST_REASON, CREATE_FAILED_REASON, HUB_REFUSED_REASON],
+    ids=["signing_key", "runner_cache", "runner_lost", "sandbox_create_failed", "hub_rate_limited"],
 )
 async def test_a_runner_that_could_not_start_or_was_lost_does_not_quarantine_its_node(
     tmp_path: Path, reason: str

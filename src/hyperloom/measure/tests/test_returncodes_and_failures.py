@@ -120,6 +120,45 @@ def test_a_git_fetch_of_the_benchmarks_own_dependencies_that_timed_out_is_an_inf
     assert verdict.failure_reason.startswith(f"{failures.GIT_FETCH_TIMEOUT}: subprocess.TimeoutExpired: Command ['git'")
 
 
+#: What the replay client of an AgentX round printed when the Hub refused its trace dataset (board #161), in the words
+#: huggingface_hub raises once its retries are spent; the warning before each retry comes first.
+HUB_REFUSAL = "429 Too Many Requests: you have reached your 'api' rate limit."
+HUB_REFUSED_CLIENT_LOG = (
+    "Loading traces via aiperf public-dataset: semianalysis_cc_traces_weka_062126 (semianalysisai/cc-traces-weka-062126)\n"
+    "HTTP Error 429 thrown while requesting GET https://huggingface.co/api/datasets/semianalysisai/cc-traces-weka-062126"
+    "/revision/main\n"
+    "Error: Hugging Face Hub request failed.\n"
+    f"{HUB_REFUSAL}\n"
+    "Retry after 212 seconds (0/1000 requests remaining in current 300s window).\n"
+    "Failed to load tokenizer deepseek-ai/DeepSeek-V4-Flash\n"
+)
+
+
+def test_a_download_the_hub_refused_for_its_rate_limit_is_an_infrastructure_failure() -> None:
+    verdict = _classify(
+        returncode=1, logs=["AgentX benchmark client failed with exit code 1"], client_logs=[HUB_REFUSED_CLIENT_LOG]
+    )
+
+    assert (verdict.failure_class, verdict.failure_reason) == (
+        FailureClass.INFRA,
+        f"{failures.HUB_RATE_LIMITED}: {HUB_REFUSAL}",
+    )
+
+
+def test_a_client_log_is_not_read_for_a_candidates_signature_nor_a_retried_429() -> None:
+    retried = "HTTP Error 429 thrown while requesting HEAD https://huggingface.co/datasets/x/resolve/main/README.md\n"
+    tokenizer = "Failed to load tokenizer deepseek-ai/DeepSeek-V4-Flash\n"
+
+    verdict = _classify(
+        returncode=1, logs=["AgentX benchmark client failed with exit code 1"], client_logs=[retried + tokenizer]
+    )
+
+    assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.UNCLEAR, failures.NO_KNOWN_SIGNATURE_REASON)
+    assert _classify(returncode=1, logs=[tokenizer]).failure_class is FailureClass.CANDIDATE, (
+        "the same line, from the server"
+    )
+
+
 def test_a_timeout_of_any_other_command_stays_unclear() -> None:
     other = "subprocess.TimeoutExpired: Command ['python3', 'bench.py'] timed out after 300 seconds\n"
 

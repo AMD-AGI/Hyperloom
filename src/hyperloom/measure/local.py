@@ -38,7 +38,13 @@ import yaml
 from hyperloom.common.benchmark_config import is_magpie_agentx
 from hyperloom.common.env import is_truthy
 from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
-from hyperloom.common.outside_facts import ENV_CONC, ENV_NUM_PROMPTS, ENV_RUN_EVAL, ROCR_VISIBLE_DEVICES_ENV
+from hyperloom.common.outside_facts import (
+    ENV_CONC,
+    ENV_NUM_PROMPTS,
+    ENV_RUN_EVAL,
+    MAGPIE_AGENTX_CLIENT_LOG,
+    ROCR_VISIBLE_DEVICES_ENV,
+)
 from hyperloom.contracts.measurement import PhaseTiming, SandboxFacts
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.measure.attachments import AttachmentError, place_attachments, substitute
@@ -1108,6 +1114,18 @@ def _failure_logs(failing: list[VariantResult]) -> list[str]:
     return logs
 
 
+def _client_logs(failing: list[VariantResult]) -> list[str]:
+    """The tails of the AgentX replay client's own log beside the server log of every result with a failed round.
+
+    Magpie records only the client's exit code as the round's error; what the client was refused is in this log alone.
+    """
+    return [
+        _read_tail(str(Path(result.server_log_path).parent / MAGPIE_AGENTX_CLIENT_LOG))
+        for result in failing
+        if result.server_log_path
+    ]
+
+
 def _boot_timeout_detail(run: _Run, failing: list[VariantResult]) -> str:
     """What the boot guard saw when it ended the test, or ``""`` when it did not: the limit, and where the log stopped."""
     if run.boot is None or run.boot.expired_after is None or run.stopped_rc != ORCHESTRATOR_CANCELLED_RETURNCODE:
@@ -1148,7 +1166,7 @@ def _ended(run: _Run) -> _Ended:
     returncode = failed[0].returncode if failed else _clean_returncode(run)
     stderr = "\n".join([*(result.error for _, result in run.results if result.error), *notes])
     logs = [stderr, *_failure_logs(failing)]
-    verdict = classify_test_failure(returncode=returncode, logs=logs, detail=detail)
+    verdict = classify_test_failure(returncode=returncode, logs=logs, client_logs=_client_logs(failing), detail=detail)
     return _Ended(rounds, returncode, stderr, verdict)
 
 

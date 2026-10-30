@@ -20,7 +20,7 @@
 # reads a name another entry holds. A fact with no check is reported unverifiable by the image check.
 # Every entry names its project, says why the fact exists and carries examples. A pack that fails its own examples, or
 # lacks an entry the code reads, is refused when it is loaded; nothing falls back to a default.
-version: "16"
+version: "17"
 facts:
   aiter_merged_view:
     kind: names
@@ -712,6 +712,40 @@ facts:
                 [submodule "inferencex-e2e/utils/srt-slurm"]
                     path = inferencex-e2e/utils/srt-slurm
                     url = https://github.com/NVIDIA/srt-slurm.git
+
+  magpie_agentx_client_log:
+    kind: names
+    project: Magpie (native AgentX runtime at the commit Hyperloom pins)
+    reason: >-
+      A native AgentX round boots its server and then runs the InferenceX replay client with its output written to this
+      file in the round's workspace, beside server.log (agentx_runtime.py, _execute_local). The client's own failures (a
+      Hugging Face download refused, say) are only in this file: Magpie records the client's exit code as the round's
+      error and keeps the client's words out of benchmark_stderr.log.
+    names:
+      file: agentx_client.log
+    examples:
+      - "hyperloom.measure.local: a failed round's client log is read from this file beside its server.log, for the infrastructure causes the client states"
+
+  hub_rate_limited:
+    kind: log_regex
+    project: huggingface_hub (the Hub client InferenceX's replay client and its hf CLI download with)
+    reason: >-
+      The Hub answers 429 once an IP address or account has spent its requests in the current window; anonymous requests
+      share the limit of the egress address they leave from. huggingface_hub retries a 429 and, once its retries are
+      spent, raises HfHubHTTPError whose message states the refusal in one of two forms (utils/_http.py,
+      hf_raise_for_status): the limit it ran out of when the rate-limit headers say so, else the URL it was refused. The
+      warning it logs before each retry ("HTTP Error 429 thrown while requesting ...") is not the refusal: the call may
+      still succeed, so it does not match.
+    pattern: >-
+      429 Too Many Requests(?:: you have reached your '[^']+' rate limit| for url: https://huggingface\.co/)
+    examples:
+      match:
+        - "429 Too Many Requests: you have reached your 'api' rate limit."
+        - "huggingface_hub.errors.HfHubHTTPError: 429 Too Many Requests for url: https://huggingface.co/api/datasets/semianalysisai/cc-traces-weka-062126/revision/main."
+      no_match:
+        - "HTTP Error 429 thrown while requesting HEAD https://huggingface.co/datasets/semianalysisai/cc-traces-weka-062126/resolve/main/README.md"
+        - 'INFO:     127.0.0.1:41234 - "POST /v1/chat/completions HTTP/1.1" 429 Too Many Requests'
+        - "429 Too Many Requests for url: https://api.github.com/repos/SemiAnalysisAI/aiperf"
 
   short_prompt_check:
     kind: names

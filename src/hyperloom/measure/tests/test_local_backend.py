@@ -1478,6 +1478,19 @@ def test_a_failed_round_is_classified_from_the_flag_error_in_its_server_log(grid
     assert outcome.failure_reason == f"serve_flag: {flag_error}"
 
 
+def test_a_round_whose_replay_client_the_hub_refused_is_an_infrastructure_failure(grid, tmp_path):
+    """Board #161: Magpie records only the client's exit code; the Hub's 429 is in agentx_client.log beside server.log."""
+    refusal = "429 Too Many Requests: you have reached your 'api' rate limit."
+    result = _failed_round_with_logs(grid, tmp_path, server_log="INFO waiting for the server to be ready\n")
+    client_log = Path(result.server_log_path).parent / "agentx_client.log"
+    client_log.write_text(f"Fetching 9 files\nhuggingface_hub.errors.HfHubHTTPError: \n\n{refusal}\n", encoding="utf-8")
+    grid.answers["test"] = result
+
+    outcome = _run(_call(tmp_path))
+
+    assert (outcome.failure_class, outcome.failure_reason) == ("infra", f"hub_rate_limited: {refusal}")
+
+
 def test_a_failed_round_is_classified_from_the_refused_request_in_its_benchmark_stderr(grid, tmp_path):
     refusal = 'API request failed with error message: {"message":"maximum context length is 5120 tokens","code":400}'
     grid.answers["test"] = _failed_round_with_logs(

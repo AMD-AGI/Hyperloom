@@ -11,8 +11,8 @@ attempts into the request's single result:
   repeats (:data:`UNRETRIED_INFRA_REASONS`) ends as ``measurement_failed`` at once, and its node is not reported; one it
   likely repeats (:data:`ONCE_RETRIED_INFRA_REASONS`: an aiter build past the watchdog, a sandbox that failed before it
   ran) is retried once, and its node is not reported either. One that says nothing about the node
-  (:data:`NODE_BLAMELESS_INFRA_REASONS`: a runner that could not start, a runner lost) is retried like any other, and its
-  node is not reported.
+  (:data:`NODE_BLAMELESS_INFRA_REASONS`: a runner that could not start, a runner lost, a Hub download refused for its
+  rate limit) is retried like any other, and its node is not reported.
 * ``candidate`` failure (a known failure signature): ``candidate_failed`` at once.
 * ``unclear`` failure: one rerun away from the first node. A second failure is ``candidate_failed``; a success is the
   result, and the first attempt is re-labelled an infrastructure failure of its node and reported as a failure that
@@ -30,7 +30,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from typing import NamedTuple, Protocol
 
-from hyperloom.measure.failures import JIT_BUILD_TIMEOUT
+from hyperloom.measure.failures import HUB_RATE_LIMITED, JIT_BUILD_TIMEOUT
 from hyperloom.measure.runner.import_outcome import INERT_PATCH
 from hyperloom.contracts.measurement import (
     Attempt,
@@ -66,7 +66,10 @@ RUNNER_LOST = "runner_lost"
 #: taking its sandbox back when the node's allocation ended, which the toolbox cannot tell from a node that died; a node
 #: that is sick shows it in the failures that stay held against it (the card guard, GPU and node faults). A sandbox that
 #: failed before it ran failed on its template or what the platform mounted, and was never placed on a node it could blame.
-NODE_BLAMELESS_INFRA_REASONS: frozenset[str] = frozenset({RUNNER_START_FAILED, RUNNER_LOST, SANDBOX_CREATE_FAILED})
+#: A download the Hugging Face Hub refused for its rate limit is refused for the egress address every node shares.
+NODE_BLAMELESS_INFRA_REASONS: frozenset[str] = frozenset(
+    {RUNNER_START_FAILED, RUNNER_LOST, SANDBOX_CREATE_FAILED, HUB_RATE_LIMITED}
+)
 #: Infrastructure failures whose node is not reported.
 _UNREPORTED_INFRA_REASONS = ONCE_RETRIED_INFRA_REASONS | NODE_BLAMELESS_INFRA_REASONS
 #: The kinds whose result holds no measured round: a profile names its traces, a repro its verdict.

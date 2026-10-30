@@ -281,6 +281,9 @@ AIPERF_SUBMODULE = _aiperf_source["submodule"]
 AIPERF_PARSER_FILE = _aiperf_source["parser_file"]
 AIPERF_OUTPUT_LENGTH_FILE = _aiperf_source["output_length_file"]
 
+MAGPIE_AGENTX_CLIENT_LOG = _PACK.names("magpie_agentx_client_log", "file")["file"]
+HUB_RATE_LIMITED = _PACK.pattern("hub_rate_limited")
+
 
 def spaced(phrase: str) -> str:
     """Regular-expression source for ``phrase`` in which each run of whitespace matches any run of whitespace."""

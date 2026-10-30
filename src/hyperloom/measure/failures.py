@@ -81,6 +81,10 @@ RUNNER_EXITED = "runner_exited"
 JIT_BUILD_TIMEOUT = "jit_build_timeout"
 #: A ``git`` fetch the benchmark client runs for its own dependencies timed out; the reason is ``<this>: <the line>``.
 GIT_FETCH_TIMEOUT = "git_fetch_timeout"
+#: The Hugging Face Hub refused a download of the benchmark client (its trace dataset, say) for the rate limit of the
+#: address the sandbox reaches it from, after the client's own retries; the reason is ``<this>: <the line>``. No candidate
+#: causes it and the node has no part in it (``hyperloom_multibranch.toolbox.attempts`` does not report it against one).
+HUB_RATE_LIMITED = "hub_rate_limited"
 
 #: ``error_class`` values a runner, the hosted backend or the platform reports that are not about the candidate.
 INFRA_ERROR_CLASSES: frozenset[str] = frozenset(
@@ -199,13 +203,16 @@ def classify_test_failure(
     timed_out: bool = False,
     error_class: str | None = None,
     logs: Iterable[str] = (),
+    client_logs: Iterable[str] = (),
     detail: str = "",
 ) -> FailureClassification:
     """Classify how one test ended.
 
     ``error_class`` is what the runner's ``status.json`` or the hosted backend reports; ``logs`` are the texts a known
     failure signature may be found in (stdout and stderr tails, the tails of ``server.log`` and of the benchmark's
-    stderr); ``detail`` is what the caller observed of a boot timeout, which the return code alone does not say.
+    stderr); ``client_logs`` are the benchmark client's own output, read only for the infrastructure cause it states (a
+    Hub download refused), never for a candidate's signature, since a client that failed on its own says nothing of the
+    server; ``detail`` is what the caller observed of a boot timeout, which the return code alone does not say.
     """
     if error_class is not None:
         return _from_error_class(error_class)
@@ -220,6 +227,10 @@ def classify_test_failure(
     if returncode == 0:
         return FailureClassification(Disposition.SUCCEEDED)
     text = "\n".join(_bounded(part) for part in logs if part)
+    refused = log_causes.hub_rate_limited("\n".join([text, *(_bounded(part) for part in client_logs if part)]))
+    if refused:
+        # Before the signatures: the client that was refused may then fail to load a tokenizer, which reads as one.
+        return _infra(f"{HUB_RATE_LIMITED}: {refused}")
     named = _named_by_logs(text)
     if named is not None:
         return named
