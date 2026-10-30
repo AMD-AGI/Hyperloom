@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.inference_optimizer.breakdown import schema
+from hyperloom.inference_optimizer.breakdown import schema, schema_framework, schema_kernel
 
 _RECORDER_DIR = Path(__file__).resolve().parents[1] / "breakdown" / "recorder"
 
@@ -27,8 +27,8 @@ _EXT_CONTRACTS: dict[str, type] = {
     "assemble_baseline_ext": schema.V6BaselineExt,
     "assemble_conc_sweep_ext": schema.V6ConcSweepExt,
     "assemble_enablement_ext": schema.V6EnablementExt,
-    "assemble_framework_ext": schema.V6FrameworkExt,
-    "assemble_kernel_ext": schema.V6KernelExt,
+    "assemble_framework_ext": schema_framework.V6FrameworkExt,
+    "assemble_kernel_ext": schema_kernel.V6KernelExt,
     "assemble_phase_ext": schema.V6PhaseExt,
     "assemble_roofline_ext": schema.V6RooflineExt,
     "assemble_stack_ext": schema.V6StackExt,

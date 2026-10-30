@@ -20,20 +20,15 @@ from __future__ import annotations
 
 from typing import Any
 
+from hyperloom.common.coerce import dict_rows, to_mapping
 from hyperloom.inference_optimizer.breakdown.recorder.framework_event import ARM_CONFIG
 
-from ..base import as_dict, dict_rows, events_of
+from ..base import events_of
 
 __all__ = ["FrameworkTally", "config_attempts", "config_tally", "specialist_tally"]
 
 #: The per-variant outcome the executor reports for a variant it promoted.
 _KEEP = "KEEP"
-
-#: Reachable only for a session recorded before the per-KEEP confirmation round
-#: was removed: a variant that won its round and was withheld when the
-#: confirmation did not reproduce it. Counted apart from a plain revert, which
-#: is a variant that lost on measurement.
-_KEEP_UNSTABLE = "KEEP_UNSTABLE"
 
 #: The producer label a specialist-proposed attempt carries on its proposal.
 _PRODUCER_SPECIALIST = "specialist"
@@ -46,7 +41,6 @@ class FrameworkTally:
         """Start an empty tally."""
         self.tested = 0
         self.keeps = 0
-        self.keep_unstable = 0
         self.best_gain_pct: float | None = None
         self.rounds: set[str] = set()
 
@@ -58,15 +52,12 @@ class FrameworkTally:
                 ``framework_agent`` event.
         """
         self.tested += 1
-        outcome = str(attempt.get("outcome") or "").upper()
-        if outcome == _KEEP:
+        if str(attempt.get("outcome") or "").upper() == _KEEP:
             self.keeps += 1
-        elif outcome == _KEEP_UNSTABLE:
-            self.keep_unstable += 1
         round_id = str(attempt.get("round_id") or "")
         if round_id:
             self.rounds.add(round_id)
-        gain = as_dict(attempt.get("measurement")).get("gain_pct")
+        gain = to_mapping(attempt.get("measurement")).get("gain_pct")
         if isinstance(gain, (int, float)) and (self.best_gain_pct is None or gain > self.best_gain_pct):
             self.best_gain_pct = float(gain)
 
@@ -88,14 +79,14 @@ def config_attempts(breakdown: dict[str, Any]) -> list[tuple[dict[str, Any], dic
     """
     pairs: list[tuple[dict[str, Any], dict[str, Any]]] = []
     for event in events_of(breakdown, "framework_agent"):
-        ext = as_dict(event.get("ext"))
+        ext = to_mapping(event.get("ext"))
         proposals = {
             str(row.get("proposal_id") or ""): row for row in dict_rows(ext.get("proposals")) if row.get("proposal_id")
         }
         for attempt in dict_rows(ext.get("attempts")):
             if str(attempt.get("arm") or "") != ARM_CONFIG:
                 continue
-            pairs.append((attempt, as_dict(proposals.get(str(attempt.get("proposal_ref") or "")))))
+            pairs.append((attempt, to_mapping(proposals.get(str(attempt.get("proposal_ref") or "")))))
     return pairs
 
 
@@ -134,7 +125,7 @@ def specialist_tally(breakdown: dict[str, Any]) -> tuple[FrameworkTally, int]:
     dispatched: set[str] = set()
     unkeyed = 0
     for event in events_of(breakdown, "phase"):
-        for row in dict_rows(as_dict(as_dict(event.get("ext")).get("actions")).get("rows")):
+        for row in dict_rows(to_mapping(to_mapping(event.get("ext")).get("actions")).get("rows")):
             if str(row.get("action") or "") == "specialist":
                 task_id = str(row.get("task_id") or "")
                 if task_id:
@@ -142,7 +133,7 @@ def specialist_tally(breakdown: dict[str, Any]) -> tuple[FrameworkTally, int]:
                 else:
                     unkeyed += 1
     for event in events_of(breakdown, "framework_agent"):
-        for row in dict_rows(as_dict(event.get("ext")).get("runs")):
+        for row in dict_rows(to_mapping(event.get("ext")).get("runs")):
             if str(row.get("role") or "") in {"discovery", "authoring"}:
                 run_id = str(row.get("run_id") or "")
                 if run_id:

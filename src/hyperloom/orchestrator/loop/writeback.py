@@ -8,8 +8,9 @@ import logging as _logging
 import time
 from ..actions.executors._agentx_prefix_cache import PREFIX_CACHE_OFF_ERROR_CLASS
 from ..actions.executors.benchmark_result import is_valid_measurement
-from ..phases.machine_state import record_lifecycle_event
+from ..phases.machine_state import LifecycleMark, record_lifecycle_event
 from ..state._shared_state.attempt_audit import _AUDIT_ACTIONS
+from ..state.shared_state import ActionAttempt
 from ..state.task_registry import Task
 from ._baseline_failures import BaselineFailureMixin
 from ._baseline_promotion import BaselinePromotionMixin
@@ -81,11 +82,13 @@ class WritebackCollaborator(
         """
         record_lifecycle_event(
             self.shared_state,
-            step=step,
-            status=status,
-            artifacts=artifacts,
-            detail=detail,
-            duration_s=duration_s,
+            LifecycleMark(
+                step=step,
+                status=status,
+                artifacts=artifacts,
+                detail=detail,
+                duration_s=duration_s,
+            ),
         )
         terminal = status in ("END", "ERROR")
         now = time.monotonic()
@@ -153,24 +156,12 @@ class WritebackCollaborator(
         adopted = verdict is Verdict.ADOPTED
         kind = (task.kind or "").strip()
         if kind == "explore":
-            best = result.get("best_variant")
-            delta_pct = best.get("gain_pct") if adopted and isinstance(best, dict) else None
-            self.shared_state.record_intervention(
-                change_type="config" if adopted else "config_attempt",
-                action="explore",
-                task_id=task.task_id,
-                delta_pct=delta_pct if isinstance(delta_pct, (int, float)) else None,
-            )
+            self.shared_state.record_intervention(change_type="config" if adopted else "config_attempt")
             return
         if kind == "integrate_patch":
             if not str(result.get("status") or "").strip():
                 return
-            self.shared_state.record_intervention(
-                change_type="code_patch" if adopted else "code_patch_attempt",
-                action="integrate_patch",
-                task_id=task.task_id,
-                delta_pct=result.get("delta_pct"),
-            )
+            self.shared_state.record_intervention(change_type="code_patch" if adopted else "code_patch_attempt")
 
     async def promote_to_shared_state(
         self,
@@ -216,11 +207,13 @@ class WritebackCollaborator(
         if outcome.audit_decision is not None and task_kind in _AUDIT_ACTIONS:
             self.shared_state.record_action_attempt(
                 action=task_kind,
-                task_id=getattr(task, "task_id", "") if task is not None else "",
-                status="succeeded",
-                decision=outcome.audit_decision,
-                result=result,
-                extras=outcome.audit_extras,
+                attempt=ActionAttempt(
+                    task_id=getattr(task, "task_id", "") if task is not None else "",
+                    status="succeeded",
+                    decision=outcome.audit_decision,
+                    result=result,
+                    extras=outcome.audit_extras,
+                ),
             )
             outcome.changed = True
         if outcome.changed:

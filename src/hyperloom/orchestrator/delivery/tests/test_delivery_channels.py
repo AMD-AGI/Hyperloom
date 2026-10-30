@@ -16,10 +16,8 @@ from hyperloom.orchestrator.actions.executors._nogit_patch import (
     _reverse_applies_cleanly,
 )
 from hyperloom.orchestrator.delivery import file_digest, ledger
-from hyperloom.orchestrator.specialists.subprocess_ import (
-    SpecialistSubprocessDispatcher,
-    _declared_targets,
-)
+from hyperloom.orchestrator.delivery.deliverable import declared_targets
+from hyperloom.orchestrator.specialists.subprocess_ import SpecialistSubprocessDispatcher
 
 
 def _git(cwd: Path, *args: str) -> None:
@@ -38,19 +36,24 @@ def test_declared_targets_scope_the_harvest_pathspec() -> None:
 
 
 def test_the_round_declaration_scopes_the_harvest() -> None:
-    assert _declared_targets({"deliverable": {"tree_id": "t", "targets": ["pkg/wide.py"]}}) == ("pkg/wide.py",)
-    assert _declared_targets({}) == ()
+    assert declared_targets({"deliverable": {"tree_id": "t", "targets": ["pkg/wide.py"]}}) == ("pkg/wide.py",)
+    assert declared_targets({"targets": ["pkg/a.py", " pkg/a.py ", "", "pkg/b.py"]}) == ("pkg/a.py", "pkg/b.py")
+    assert declared_targets({"deliverable": {}, "targets": ["pkg/flat.py"]}) == ()
+    assert declared_targets({}) == ()
+    assert declared_targets(None) == ()
 
 
 def test_an_uncommitted_worktree_edit_is_still_harvested(tmp_path: Path) -> None:
-    worktree = tmp_path / "wt"
-    (worktree / "pkg").mkdir(parents=True)
-    (worktree / "pkg" / "mod.py").write_text("base\n", encoding="utf-8")
-    _git(worktree, "init", "-q")
-    _git(worktree, "config", "user.email", "t@example.invalid")
-    _git(worktree, "config", "user.name", "t")
-    _git(worktree, "add", "-A")
-    _git(worktree, "commit", "-qm", "base")
+    repo = tmp_path / "repo"
+    worktree = tmp_path / "wt"  # a linked worktree, as the dispatcher makes it
+    (repo / "pkg").mkdir(parents=True)
+    (repo / "pkg" / "mod.py").write_text("base\n", encoding="utf-8")
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "t@example.invalid")
+    _git(repo, "config", "user.name", "t")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "base")
+    _git(repo, "worktree", "add", "-q", "-b", "sp", str(worktree))
     base = subprocess.run(
         ["git", "-C", str(worktree), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
     ).stdout.strip()
@@ -134,8 +137,7 @@ def test_a_revert_that_leaves_a_patched_file_behind_is_named(tmp_path: Path) -> 
         {
             "target": str(target),
             "existed": True,
-            "backup_path": str(backup),
-            "revert_action": "restore",
+            "backup": str(backup),
             "pre_image_sha256": file_digest(target),
         },
     )

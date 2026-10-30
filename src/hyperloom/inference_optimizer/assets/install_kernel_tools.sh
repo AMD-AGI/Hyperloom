@@ -93,14 +93,13 @@ INFERENCEX_PATH="${INFERENCEX_PATH:-}"
 # (env / .env); leave it unset for the base-only report. No separate toggle.
 TRACELENS_REPO="https://github.com/AMD-AGI/TraceLens.git"
 # TraceLens SHA.
-TRACELENS_REF="614c597bc0c66cabf6a15152037324acc7386090"
-# Operator override iff TRACELENS_ROOT points OUTSIDE the pod-local default.
-# The persistent kernel-agent env re-exports the resolved default path, so a
-# presence-only check (${VAR:+1}) would misclassify it as an override and skip
-# the managed clone/realign, leaving a missing/stale default un-self-healed
-# across reruns (#722). Compare against the default path, not env presence.
+TRACELENS_REF="cf0221e3b1b1915d5272a10e2f5237d2d9c5f0cb"
+# Operator override iff TRACELENS_ROOT is not a TraceLens@<sha> checkout in the
+# cache root. Installs re-export that path (kernel-agent env, .env), so a
+# presence-only check would freeze a rerun on the old checkout instead of
+# cloning/realigning to the current TRACELENS_REF (#722).
 # Canonicalize a path (resolve symlinks/.. , strip trailing slash) so the
-# default-vs-override comparison matches the Python side's Path.resolve();
+# override comparison matches the Python side's Path.resolve();
 # unresolvable paths fall back to the trimmed literal so a not-yet-cloned
 # default still compares correctly (#722 / PR#789).
 # Keep in lockstep with Python-side path canonicalization helpers.
@@ -129,11 +128,18 @@ _home_dir() {
   printf '%s' "${h:-/}"
 }
 _TRACELENS_SHA="$(_resolve_ref_sha "$TRACELENS_REPO" "$TRACELENS_REF")"
-_tracelens_default_root="$(_canonicalize_path "${_open_source_root}/TraceLens@${_TRACELENS_SHA}")"
 _tracelens_root_was_set=""
-if [ -n "${TRACELENS_ROOT:-}" ] \
-   && [ "$(_canonicalize_path "${TRACELENS_ROOT}")" != "${_tracelens_default_root}" ]; then
-  _tracelens_root_was_set=1
+if [ -n "${TRACELENS_ROOT:-}" ]; then
+  _tracelens_root_canonical="$(_canonicalize_path "${TRACELENS_ROOT}")"
+  if [ "$(dirname "${_tracelens_root_canonical}")" = "$(_canonicalize_path "${_open_source_root}")" ] \
+     && [[ "$(basename "${_tracelens_root_canonical}")" == TraceLens@* ]]; then
+    TRACELENS_ROOT=""
+  elif [ ! -e "${_tracelens_root_canonical}" ]; then
+    warn "TRACELENS_ROOT=${TRACELENS_ROOT} does not exist; using the pinned TraceLens checkout instead"
+    TRACELENS_ROOT=""
+  else
+    _tracelens_root_was_set=1
+  fi
 fi
 TRACELENS_ROOT="${TRACELENS_ROOT:-${_open_source_root}/TraceLens@${_TRACELENS_SHA}}"
 TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-}"
@@ -166,8 +172,16 @@ if [ -n "${GEAK_ROOT:-}" ]; then
   # Re-exported GEAK@* cache paths remain installer-managed across reruns.
   _geak_root_canonical="$(_canonicalize_path "${GEAK_ROOT}")"
   _geak_cache_root="$(_canonicalize_path "${_open_source_root}")"
-  if [ "$(dirname "${_geak_root_canonical}")" != "${_geak_cache_root}" ] \
-     || [[ "$(basename "${_geak_root_canonical}")" != GEAK@* ]]; then
+  if [ "$(dirname "${_geak_root_canonical}")" = "${_geak_cache_root}" ] \
+     && [[ "$(basename "${_geak_root_canonical}")" == GEAK@* ]]; then
+    # As for TraceLens: a cache path re-resolves to the current GEAK_REF, and the runner inside it follows.
+    GEAK_ROOT=""
+    GEAK_E2E_RUNNER=""
+  elif [ ! -e "${_geak_root_canonical}" ]; then
+    warn "GEAK_ROOT=${GEAK_ROOT} does not exist; using the GEAK_REF checkout instead"
+    GEAK_ROOT=""
+    GEAK_E2E_RUNNER=""
+  else
     _geak_root_is_operator_override=1
   fi
 fi
@@ -365,12 +379,15 @@ ensure_moreutils() {
 }
 
 _RAY_VERSION_WAS_SET="${RAY_VERSION+x}"
-_RAY_CLI_CLICK_MAX_VERSION_WAS_SET="${RAY_CLI_CLICK_MAX_VERSION+x}"
 RAY_VERSION="${RAY_VERSION:-2.44.1}"
-# Ray 2.44.1's CLI currently fails during import with click >= 8.3.0.
-RAY_CLI_CLICK_MAX_VERSION="${RAY_CLI_CLICK_MAX_VERSION:-8.3.0}"
 RAY_INSTALL_SPEC="ray[default]==${RAY_VERSION}"
-CLICK_INSTALL_SPEC="click<${RAY_CLI_CLICK_MAX_VERSION}"
+# A representative `ray start` argv of the one this script runs on the head below:
+# every option, with values of its kind (probed ports, the node's GPU count, the
+# head's custom resources). ensure_ray certifies the CLI by handing this argv to
+# Ray's own parser rather than by checking the version of click it is built on, so
+# a click release that leaves the CLI working is never a reason to refuse or
+# downgrade the install. Quoted the way a shell quotes it: the probe uses shlex.
+RAY_START_ARGV="--head --disable-usage-stats --port=6379 --ray-client-server-port=10001 --num-gpus=1 --include-dashboard=false --resources='{\"serving_slot\": 1}'"
 
 # The default Ray pin predates newer CPython ABIs (no cp314 wheels before
 # 2.55.0), so on such interpreters the exact pin cannot resolve at all. Print
@@ -429,53 +446,68 @@ resolve_ray_version() {
   warn "ray ${RAY_VERSION} has no wheel for this interpreter ($(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null)); using ray ${resolved} instead"
   RAY_VERSION="$resolved"
   RAY_INSTALL_SPEC="ray[default]==${RAY_VERSION}"
-  # The click ceiling exists for 2.44.1's CLI import bug; past that version it
-  # would pin click below what the newer Ray itself ships against.
-  if [ -z "$_RAY_CLI_CLICK_MAX_VERSION_WAS_SET" ]; then
-    RAY_CLI_CLICK_MAX_VERSION=""
-    CLICK_INSTALL_SPEC=""
-  fi
 }
 
-ensure_ray() {
-  resolve_ray_version
-  log "ensuring ${RAY_INSTALL_SPEC}${CLICK_INSTALL_SPEC:+ and ${CLICK_INSTALL_SPEC}}"
-  if [ "$CHECK_ONLY" -eq 0 ]; then
-    if [ -n "$CLICK_INSTALL_SPEC" ]; then
-      run python3 -m pip install --quiet --no-cache-dir --break-system-packages "$CLICK_INSTALL_SPEC" "$RAY_INSTALL_SPEC"
-    else
-      run python3 -m pip install --quiet --no-cache-dir --break-system-packages "$RAY_INSTALL_SPEC"
-    fi
-  fi
-  if [ "$DRY_RUN" -eq 0 ]; then
-    RAY_VERSION="$RAY_VERSION" RAY_CLI_CLICK_MAX_VERSION="$RAY_CLI_CLICK_MAX_VERSION" python3 - <<'PY'
-import importlib.metadata as md
+# Exit code of ray_cli_probe for the one failure a click hold can fix: Ray 2.44.1's
+# CLI fails to import under click 8.3+ (`ValueError: ... is not a valid Sentinel`).
+RAY_CLI_PROBE_CLICK_RC=75
+# That hold is fixed, not an operator knob, and only for the default pin.
+RAY_CLICK_HOLD_VERSION="2.44.1"
+RAY_CLICK_HOLD_SPEC="click<8.3"
+
+# Certify the installed Ray CLI with Ray's own parser (see RAY_START_ARGV above).
+ray_cli_probe() {
+  RAY_VERSION="$RAY_VERSION" RAY_START_ARGV="$RAY_START_ARGV" RAY_CLICK_HOLD_VERSION="$RAY_CLICK_HOLD_VERSION" \
+    RAY_CLI_PROBE_CLICK_RC="$RAY_CLI_PROBE_CLICK_RC" python3 - <<'PY'
 import os
-import re
+import shlex
 import sys
 
 import ray
 
 RAY_VERSION = os.environ["RAY_VERSION"]
-RAY_CLI_CLICK_MAX_VERSION = os.environ["RAY_CLI_CLICK_MAX_VERSION"]
-
-def _version_tuple(version: str) -> tuple[int, int, int]:
-    parts = [int(p) for p in re.findall(r"\d+", version)[:3]]
-    parts.extend([0] * (3 - len(parts)))
-    return tuple(parts[:3])
+RAY_START_ARGV = shlex.split(os.environ["RAY_START_ARGV"])
 
 if ray.__version__ != RAY_VERSION:
     raise SystemExit(f"ray version mismatch: {ray.__version__} != {RAY_VERSION}")
-click_version = md.version("click")
-if RAY_CLI_CLICK_MAX_VERSION and _version_tuple(click_version) >= _version_tuple(RAY_CLI_CLICK_MAX_VERSION):
-    raise SystemExit(f"click version incompatible with Ray CLI: {click_version} >= {RAY_CLI_CLICK_MAX_VERSION}")
 try:
-    from ray.scripts.scripts import main as _ray_cli_main  # noqa: F401
+    import click
+    from ray.scripts.scripts import cli as _ray_cli  # `main` only wraps this group
 except Exception as exc:
-    raise SystemExit(f"ray CLI import failed: {type(exc).__name__}: {exc}") from exc
-print(f"[kernel-agent] ray version: {ray.__version__}, click version: {click_version}")
+    print(f"ray CLI import failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+    # Only this failure, on the pinned Ray, is one a click hold can fix.
+    sentinel = "is not a valid Sentinel" in str(exc) and ray.__version__ == os.environ["RAY_CLICK_HOLD_VERSION"]
+    raise SystemExit(int(os.environ["RAY_CLI_PROBE_CLICK_RC"]) if sentinel else 1) from exc
+try:
+    _ray_start = _ray_cli.commands["start"]
+    _ray_start.make_context("start", list(RAY_START_ARGV), resilient_parsing=False).close()
+except click.UsageError as exc:
+    raise SystemExit(f"ray start does not accept {' '.join(RAY_START_ARGV)}: {exc.format_message()}") from exc
+except Exception as exc:
+    raise SystemExit(f"ray CLI has no usable start command: {type(exc).__name__}: {exc}") from exc
+print(f"[kernel-agent] ray version: {ray.__version__}, ray start accepts {' '.join(RAY_START_ARGV)}")
 PY
+}
+
+ensure_ray() {
+  resolve_ray_version
+  log "ensuring ${RAY_INSTALL_SPEC}"
+  if [ "$CHECK_ONLY" -eq 0 ]; then
+    run python3 -m pip install --quiet --no-cache-dir --break-system-packages "$RAY_INSTALL_SPEC"
   fi
+  [ "$DRY_RUN" -eq 0 ] || return 0
+  local rc=0
+  ray_cli_probe || rc=$?
+  [ "$rc" -ne 0 ] || return 0
+  # Every other failure (version mismatch, other import error, a rejected argv,
+  # a missing start command) ends the install without touching click.
+  if [ "$rc" -eq "$RAY_CLI_PROBE_CLICK_RC" ] && [ "$CHECK_ONLY" -eq 0 ] && [ "$RAY_VERSION" = "$RAY_CLICK_HOLD_VERSION" ]; then
+    warn "the ray ${RAY_VERSION} CLI cannot import under this environment's click (is not a valid Sentinel); holding ${RAY_CLICK_HOLD_SPEC}"
+    run python3 -m pip install --quiet --no-cache-dir --break-system-packages "$RAY_CLICK_HOLD_SPEC"
+    ray_cli_probe
+    return
+  fi
+  return "$rc"
 }
 
 # Minimum soft `ulimit -n` the Ray raylet needs to stay up (issue #433).
@@ -756,6 +788,7 @@ ensure_tracelens() {
   elif [ ! -d "$TRACELENS_ROOT/.git" ]; then
     if [ "$CHECK_ONLY" -eq 1 ]; then
       warn "TraceLens checkout missing/incomplete at ${TRACELENS_ROOT} (check-only mode, skipping clone)"
+      _STALE_KEYS+=("TRACELENS_ROOT")
     elif [ "$DRY_RUN" -eq 1 ]; then
       [ -e "$TRACELENS_ROOT" ] && log "would: rm -rf ${TRACELENS_ROOT} (incomplete, not a git repo)"
       log "would: git clone --depth 1 ${TRACELENS_REPO} ${TRACELENS_ROOT}"
@@ -966,10 +999,11 @@ write_env_file() {
   [ -n "${USER_DATA_PATH:-}" ] && upsert_dotenv_var USER_DATA_PATH "$USER_DATA_PATH"
   [ -n "${HYPERLOOM_RUNTIME_DIR:-}" ] && upsert_dotenv_var HYPERLOOM_RUNTIME_DIR "$HYPERLOOM_RUNTIME_DIR"
   [ -n "${KERNEL_AGENT_ENV:-}" ] && upsert_dotenv_var KERNEL_AGENT_ENV "$KERNEL_AGENT_ENV"
-  [ -n "${MAGPIE_PATH:-}" ] && upsert_dotenv_var MAGPIE_PATH "$MAGPIE_PATH"
+  # Derived from the MAGPIE_REF / INFERENCEX_REF pins; a .env copy would read back as an override that skips them.
+  remove_dotenv_var MAGPIE_PATH
   [ -n "${MAGPIE_PYTHON:-}" ] && upsert_dotenv_var MAGPIE_PYTHON "$MAGPIE_PYTHON"
   [ -n "${PYTHONPATH:-}" ] && upsert_dotenv_var PYTHONPATH "$PYTHONPATH"
-  [ -n "${INFERENCEX_PATH:-}" ] && upsert_dotenv_var INFERENCEX_PATH "$INFERENCEX_PATH"
+  remove_dotenv_var INFERENCEX_PATH
   # Persist each provider's own canonical vars (write when present, clear when
   # absent) so an operator's .env creds survive a re-install. Never cross-write
   # and never persist gateway aliases, so the two providers stay separated.
@@ -1002,14 +1036,19 @@ write_env_file() {
   remove_dotenv_var SAFE_API_KEY
   remove_dotenv_var AMD_LLM_API_KEY
   remove_dotenv_var LLM_GATEWAY_KEY
-  [ -n "${TRACELENS_ROOT:-}" ] && upsert_dotenv_var TRACELENS_ROOT "$TRACELENS_ROOT"
+  # Like MAGPIE_PATH: a pinned cache path written here would read back as an override after the pin moves. The
+  # kernel-agent env file carries it to the runtime; an operator's own path is left as written.
+  [ -z "${_tracelens_root_was_set:-}" ] && remove_dotenv_var TRACELENS_ROOT
   if [ -n "${TRACELENS_INTERNAL_ROOT:-}" ]; then
     upsert_dotenv_var TRACELENS_INTERNAL_ROOT "$TRACELENS_INTERNAL_ROOT"
     upsert_dotenv_var TL_EXTENSION "TraceLens_internal"
   fi
   [ -n "${HYPERLOOM_ROOT:-}" ] && upsert_dotenv_var HYPERLOOM_ROOT "$HYPERLOOM_ROOT"
-  [ -n "${GEAK_E2E_RUNNER}" ] && upsert_dotenv_var GEAK_E2E_RUNNER "$GEAK_E2E_RUNNER"
-  [ -n "${GEAK_ROOT}" ] && upsert_dotenv_var GEAK_ROOT "$GEAK_ROOT"
+  # The runner lives in the GEAK checkout, so it follows GEAK_ROOT out of .env.
+  if [ -z "${_geak_root_is_operator_override:-}" ]; then
+    remove_dotenv_var GEAK_ROOT
+    remove_dotenv_var GEAK_E2E_RUNNER
+  fi
   [ -n "${GEAK_CLAUDE_MODEL_VAL}" ] && upsert_dotenv_var GEAK_CLAUDE_MODEL "$GEAK_CLAUDE_MODEL_VAL"
   [ -n "${_geak_claude_bin}" ] && upsert_dotenv_var GEAK_CLAUDE_BIN "$_geak_claude_bin"
   [ -n "${GEAK_RUN_MODE_VAL}" ] && upsert_dotenv_var GEAK_RUN_MODE "$GEAK_RUN_MODE_VAL"
@@ -1038,6 +1077,9 @@ ensure_geak() {
   elif [ ! -d "${GEAK_ROOT}/.git" ]; then
     if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
       mkdir -p "${GEAK_ROOT}"
+    fi
+    if [ "$CHECK_ONLY" -eq 1 ]; then
+      _STALE_KEYS+=("GEAK_ROOT")
     fi
     if [[ "$GEAK_REF" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
       run git init -q "${GEAK_ROOT}"

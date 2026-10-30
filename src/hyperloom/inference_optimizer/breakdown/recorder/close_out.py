@@ -22,9 +22,11 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from hyperloom.common.coerce import to_float, to_int
+from hyperloom.common.fs_utils import relative_posix
 from hyperloom.common.gain_math import gain_pct_or_zero
 from hyperloom.common.timeutil import now_iso
 
+from ..workflow_contract import workflow_contract
 from .recorder import recorder_for
 from .recorder_warnings import RECORDING_ERRORS, note_failure
 from .trace import trace_skip
@@ -34,6 +36,7 @@ STEP_SECTION = "close_step"
 WRITE_BACK_SECTION = "close_write_back"
 WRITE_BACK_ATTEMPT_SECTION = "close_write_back_attempt"
 PRODUCER = "coordinator"
+_SEQUENCE_SCHEMA_VERSION = workflow_contract()["close_sequence"]["sequence_schema_version"]
 
 #: Stable ``result_type`` codes for the Recipe KB publication, set by the
 #: publisher at each exit so no reader substring-matches a free-text reason.
@@ -97,7 +100,7 @@ def record_close_opened(session_dir: Path | str | None, *, ts: str = "") -> None
     _write(
         session_dir,
         {
-            "sequence_schema_version": "hyperloom.close.v1",
+            "sequence_schema_version": _SEQUENCE_SCHEMA_VERSION,
             "source": "normal_close",
             "status": "running",
             "start_time": _stamp(ts),
@@ -119,7 +122,7 @@ def record_close_safety_net(session_dir: Path | str | None) -> None:
     except RECORDING_ERRORS as exc:
         note_failure(section=SECTION, error=exc, detail="safety-net source readback failed")
         return
-    _write(session_dir, {"source": "safety_net", "sequence_schema_version": "hyperloom.close.v1"})
+    _write(session_dir, {"source": "safety_net", "sequence_schema_version": _SEQUENCE_SCHEMA_VERSION})
 
 
 @dataclass(frozen=True)
@@ -195,7 +198,7 @@ def record_close_artifacts(
         ("artifact_package_path", artifact_package_path),
     ):
         if value is not None:
-            artifacts[key] = _rel(Path(value), root)
+            artifacts[key] = relative_posix(Path(value), root)
     if not artifacts:
         trace_skip(reason="empty payload", section=SECTION)
         return
@@ -315,9 +318,6 @@ def record_roofline_progress(session_dir: Path | str | None, progress: RooflineP
     The close-out is the first moment the ceiling, the trajectory and the
     streak are all final.
     """
-    if not session_dir:
-        trace_skip(reason="no session_dir", section=SECTION)
-        return
     baseline = to_float(progress.baseline_tput) or 0.0
     trajectory = _trajectory(baseline, progress.baseline_ts, progress.optimization_stack)
     snapshot = dict(progress.latest_snapshot or {})
@@ -325,46 +325,27 @@ def record_roofline_progress(session_dir: Path | str | None, progress: RooflineP
     ceiling = to_float(snapshot.get("theoretical_peak_tok_per_sec"))
     ceiling_available = ceiling is not None and ceiling > 0
     target = round(ceiling * ROOFLINE_TARGET_RATIO, 4) if ceiling_available else None
-    best = to_float(trajectory[-1]["tput"]) if trajectory else 0.0
+    best = trajectory[-1]["tput"] if trajectory else 0.0
 
     payload: dict[str, Any] = {
-        "ceiling_kind": "throughput" if ceiling_available else "none",
         "ceiling_tok_per_sec": ceiling,
         "target_tok_per_sec": target,
         "ceiling_ratio_target": ROOFLINE_TARGET_RATIO,
         "ceiling_available": ceiling_available,
-        "latency_ceiling_ms": None,
-        "achieved_latency_ms": None,
-        "latency_ceiling_available": False,
-        "current_best_pct_of_latency_ceiling": None,
         "trajectory": trajectory,
         "baseline_tput": baseline,
         "current_best_tput": best,
         "cumulative_gain_pct": round(to_float(progress.cumulative_gain_pct) or 0.0, 4),
         "current_best_pct_of_ceiling": (round(best / ceiling * 100.0, 4) if ceiling_available and best > 0 else None),
-        "current_best_pct_of_target": (round(best / target * 100.0, 4) if target and target > 0 and best > 0 else None),
-        "roofline_failure_streak": to_int(progress.failure_streak) or 0,
+        "current_best_pct_of_target": (round(best / target * 100.0, 4) if target and best > 0 else None),
+        "roofline_failure_streak": to_int(progress.failure_streak, 0),
         "latest_snapshot_id": to_int(snapshot.get("snapshot_id")) or None,
     }
 
-    # Diffusion (xDiT) image models decode no tokens: their roofline is the
-    # ideal per-image compute floor against measured latency. ``ceiling_kind``
-    # keeps a reader from taking the null tok/s fields for a failed analysis.
-    if not ceiling_available:
-        ideal_ms = to_float(snapshot.get("roofline_ideal_ms"))
-        measured_ms = to_float(snapshot.get("e2e_mean_ms"))
-        if ideal_ms and ideal_ms > 0 and measured_ms and measured_ms > 0:
-            payload["ceiling_kind"] = "latency"
-            payload["latency_ceiling_ms"] = round(ideal_ms, 4)
-            payload["achieved_latency_ms"] = round(measured_ms, 4)
-            payload["latency_ceiling_available"] = True
-            # Ideal over measured: higher is nearer the floor.
-            payload["current_best_pct_of_latency_ceiling"] = round(ideal_ms / measured_ms * 100.0, 4)
-
     # A tail disagreeing with the session's own best means a promotion never
     # made it onto the stack, as when a resume interrupted a mid-promote.
-    declared = to_float(progress.current_best_tput)
-    if declared and declared > 0 and best > 0 and abs(declared - best) / max(declared, 1.0) > 0.001:
+    declared = to_float(progress.current_best_tput, 0.0)
+    if declared > 0 and best > 0 and abs(declared - best) / max(declared, 1.0) > 0.001:
         payload["trajectory_incomplete"] = True
         payload["current_best_tput_declared"] = declared
     else:
@@ -516,7 +497,6 @@ def record_write_back_settled(session_dir: Path | str | None, settlement: WriteB
     arc: dict[str, Any] = {
         "status": verdict,
         "end_time": settled,
-        "queue": _queue_depth(session_dir),
     }
     for key, value in (
         ("result_type", code),
@@ -560,35 +540,6 @@ def _write_attempt(session_dir: Path | str | None, *, attempt: int, row: Mapping
     )
 
 
-def _queue_depth(session_dir: Path | str) -> dict[str, int]:
-    """Line counts of the local KB write queues, as of this settlement.
-
-    Snapshotted here because the queues keep moving: a depth read at export
-    describes when the export ran, not when the publication settled.
-    """
-    from ...session.session_paths import (
-        recipe_kb_dead_letter_ndjson,
-        recipe_kb_flushed_ndjson,
-        recipe_kb_pending_ndjson,
-    )
-
-    root = Path(session_dir)
-    return {
-        "pending_lines": _count_lines(recipe_kb_pending_ndjson(root)),
-        "flushed_bookmarks": _count_lines(recipe_kb_flushed_ndjson(root)),
-        "dead_letter_lines": _count_lines(recipe_kb_dead_letter_ndjson(root)),
-    }
-
-
-def _count_lines(path: Path) -> int:
-    """Non-blank line count for ``path``, or ``0`` when it cannot be read."""
-    try:
-        with path.open("r", encoding="utf-8") as handle:
-            return sum(1 for line in handle if line.strip())
-    except OSError:
-        return 0
-
-
 def _any_step_failed(session_dir: Path | str) -> bool | None:
     """Whether any close step this session recorded reported a failure.
 
@@ -603,14 +554,6 @@ def _any_step_failed(session_dir: Path | str) -> bool | None:
     except RECORDING_ERRORS as exc:
         note_failure(section="close", error=exc, detail="close verdict: step readback failed")
         return None
-
-
-def _rel(path: Path, session_dir: Path) -> str:
-    """Express ``path`` relative to the session, or absolute when outside it."""
-    try:
-        return path.resolve().relative_to(session_dir.resolve()).as_posix()
-    except (ValueError, OSError):
-        return str(path)
 
 
 __all__ = [

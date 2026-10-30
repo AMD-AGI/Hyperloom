@@ -17,10 +17,10 @@ import json
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.coerce import to_int, to_unix
 from hyperloom.common.timeutil import iso_z
 from hyperloom.inference_optimizer.breakdown.collectors._common import (
     _load_jsonl_safe,
-    _parse_iso_unix,
     _to_float,
     phase_at,
 )
@@ -32,40 +32,14 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
     proposer_for,
     read_journal_entries,
 )
-from hyperloom.inference_optimizer.session.session_paths import decision_trace_path
+from hyperloom.inference_optimizer.session.session_paths import (
+    decision_trace_path,
+    llm_calls_path,
+    proposal_task_map_path,
+    state_path,
+)
 
-
-_TOKEN_IN_KEY = "input_tokens"
-
-
-_TOKEN_OUT_KEY = "output_tokens"
-
-
-_TOKEN_CACHE_CREATE_KEY = "cache_creation_input_tokens"
-
-
-_TOKEN_CACHE_READ_KEY = "cache_read_input_tokens"
-
-
-# Hidden reasoning output.
-_TOKEN_REASONING_KEY = "reasoning_output_tokens"
-
-
-# Terminal-status key and the one value that counts a call as successful.
-_STATUS_KEY = "status"
-
-
-_STATUS_OK = "ok"
-
-
-def _coerce_token(value: Any) -> int:
-    """Coerce a token counter to int, treating ``None`` / bad as 0."""
-    if value is None:
-        return 0
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return 0
+from .llm_trace import LLM_STATUS_OK
 
 
 def _empty_token_bucket() -> dict[str, int]:
@@ -82,11 +56,11 @@ def _empty_token_bucket() -> dict[str, int]:
 
 def _fold_call_into_bucket(bucket: dict[str, int], call: dict[str, Any]) -> None:
     """Add one call's token counts into a rollup bucket in place."""
-    bucket["total_in"] += _coerce_token(call.get(_TOKEN_IN_KEY))
-    bucket["total_out"] += _coerce_token(call.get(_TOKEN_OUT_KEY))
-    bucket["total_cache_creation"] += _coerce_token(call.get(_TOKEN_CACHE_CREATE_KEY))
-    bucket["total_cache_read"] += _coerce_token(call.get(_TOKEN_CACHE_READ_KEY))
-    bucket["total_reasoning_out"] += _coerce_token(call.get(_TOKEN_REASONING_KEY))
+    bucket["total_in"] += to_int(call.get("input_tokens"), 0)
+    bucket["total_out"] += to_int(call.get("output_tokens"), 0)
+    bucket["total_cache_creation"] += to_int(call.get("cache_creation_input_tokens"), 0)
+    bucket["total_cache_read"] += to_int(call.get("cache_read_input_tokens"), 0)
+    bucket["total_reasoning_out"] += to_int(call.get("reasoning_output_tokens"), 0)
     bucket["calls"] += 1
 
 
@@ -94,20 +68,12 @@ def _load_llm_calls(
     session_dir: Path,
     warnings: list[str],
 ) -> list[dict[str, Any]]:
-    """Read every *successful* LLM-call row from the trace ledger and ext shards."""
-    trace_root = session_dir / "reports" / "trace"
-    rows: list[dict[str, Any]] = list(_load_jsonl_safe(trace_root / "llm_calls.jsonl", warnings))
-    ext_dir = trace_root / "ext"
-    if ext_dir.is_dir():
-        try:
-            shards = sorted(ext_dir.glob("*.jsonl"))
-        except OSError as exc:
-            warnings.append(f"decision_trace: failed to scan {ext_dir}: {exc!r}")
-            shards = []
-        for shard in shards:
-            rows.extend(_load_jsonl_safe(shard, warnings))
+    """Read every *successful* LLM-call row from the trace ledger."""
+    rows = _load_jsonl_safe(llm_calls_path(session_dir), warnings)
     return [
-        r for r in rows if isinstance(r, dict) and str(r.get(_STATUS_KEY) or _STATUS_OK).strip().lower() == _STATUS_OK
+        r
+        for r in rows
+        if isinstance(r, dict) and str(r.get("status") or LLM_STATUS_OK).strip().lower() == LLM_STATUS_OK
     ]
 
 
@@ -116,10 +82,7 @@ def _load_proposal_task_map(
     warnings: list[str],
 ) -> dict[str, str]:
     """Read ``reports/trace/proposal_task_map.jsonl`` into ``{msg_id: task_id}``."""
-    rows = _load_jsonl_safe(
-        session_dir / "reports" / "trace" / "proposal_task_map.jsonl",
-        warnings,
-    )
+    rows = _load_jsonl_safe(proposal_task_map_path(session_dir), warnings)
     out: dict[str, str] = {}
     for r in rows:
         if not isinstance(r, dict):
@@ -154,30 +117,6 @@ def _attribute_critic_calls(
             call["task_id"] = next(iter(resolved))
 
 
-def _load_dispatch_history_all(
-    session_dir: Path,
-    warnings: list[str],
-) -> list[dict[str, Any]]:
-    """Read every dynamic_action ``dispatch_history.jsonl`` row."""
-    root = session_dir / "agents" / "orchestration" / "dynamic_actions"
-    if not root.is_dir():
-        return []
-    out: list[dict[str, Any]] = []
-    try:
-        dyn_dirs = sorted(p for p in root.iterdir() if p.is_dir())
-    except OSError as exc:
-        warnings.append(f"decision_trace: failed to scan {root}: {exc!r}")
-        return []
-    for dyn_dir in dyn_dirs:
-        rows = _load_jsonl_safe(dyn_dir / "dispatch_history.jsonl", warnings)
-        for row in rows:
-            if isinstance(row, dict):
-                row = dict(row)
-                row.setdefault("dyn_id", dyn_dir.name)
-                out.append(row)
-    return out
-
-
 def _build_phase_windows(
     state: dict[str, Any],
 ) -> list[tuple[float, str]]:
@@ -194,7 +133,7 @@ def _build_phase_windows(
         to_phase = str(row.get("to_phase") or "").strip()
         ts_unix = row.get("ts_unix")
         if ts_unix is None:
-            ts_unix = _parse_iso_unix(row.get("ts"))
+            ts_unix = to_unix(row.get("ts"))
         if ts_unix is None:
             continue
         windows.append((float(ts_unix), to_phase))
@@ -204,17 +143,14 @@ def _build_phase_windows(
 
 def _phase_at(ts: Any, windows: list[tuple[float, str]]) -> str:
     """Return the phase active at ISO-or-numeric ``ts`` per ``windows``."""
-    unix = _parse_iso_unix(ts)
+    unix = to_unix(ts)
     if unix is None or not windows:
         return ""
     return phase_at(unix, windows)
 
 
-def _decision_key(task_id: str, dyn_id: str) -> str | None:
-    """Canonical join key for a decision / call: ``dyn_id`` wins over ``task_id`` (a dynamic_action dispatch owns both)."""
-    d = (dyn_id or "").strip()
-    if d:
-        return f"dyn:{d}"
+def _decision_key(task_id: str) -> str | None:
+    """Canonical join key for a decision / call: its ``task_id``."""
     t = (task_id or "").strip()
     if t:
         return f"task:{t}"
@@ -285,34 +221,11 @@ def _keep_revert_decision(
         decision["proposal_scores"] = scored
     return {
         "decision_id": _decision_id("keep_revert", *entry.dedupe_key()),
-        "key": _decision_key(entry.task_id, ""),
+        "key": _decision_key(entry.task_id),
         "phase": entry.phase.strip() or _phase_at(ts, phase_windows),
         "tick": entry.tick,
         "ts": ts,
         "decision": decision,
-    }
-
-
-def _dynamic_action_decision(row: dict[str, Any], phase_windows: list[tuple[float, str]]) -> dict[str, Any]:
-    """The trace row for one dynamic_action dispatch, still carrying its call-join ``key``."""
-    dyn_id = str(row.get("dyn_id") or "")
-    ts = iso_z(row.get("ts"))
-    event = str(row.get("event") or "")
-    return {
-        "decision_id": _decision_id("dynamic_action", dyn_id, event, ts),
-        "key": _decision_key(str(row.get("task_id") or ""), dyn_id),
-        "phase": _phase_at(ts, phase_windows),
-        "tick": row.get("tick"),
-        "ts": ts,
-        "decision": {
-            "component": "dynamic_action",
-            "operation_kind": "dynamic_action",
-            "event": event,
-            "dyn_id": dyn_id,
-            "verdict": row.get("verdict"),
-            "outcome": str(row.get("integrate_status") or row.get("terminal_state") or ""),
-            "gain_pct": _to_float(row.get("delta_pct")),
-        },
     }
 
 
@@ -324,14 +237,11 @@ def write_decision_trace(
     """Join the token ledger to the decision streams and write the timeline.
 
     Reads the per-call token rows (``reports/trace/llm_calls.jsonl``) and the
-    decision rows (``optimization_journal.json`` KEEP/REVERT entries + every
-    dynamic_action ``dispatch_history.jsonl``), then attaches each decision's
-    LLM calls by the shared ``task_id`` / ``dyn_id`` key, with a ``ts``-window
-    phase fallback for calls that carry neither.
+    decision rows (``optimization_journal.json`` KEEP/REVERT entries), then
+    attaches each decision's LLM calls by the shared ``task_id`` key.
 
     Every row carries a ``decision_id`` that stays the same across rewrites:
-    the journal entry's ``dedupe_key`` for a KEEP/REVERT row, the dispatch's
-    ``dyn_id`` / ``event`` / ``ts`` for a dynamic_action row.
+    the journal entry's ``dedupe_key``.
 
     Writes an empty file when no trace files exist, so a session that ran before
     the trace subsystem landed degrades cleanly. Best-effort: an OSError lands
@@ -343,10 +253,10 @@ def write_decision_trace(
 
     _attribute_critic_calls(calls, _load_proposal_task_map(session_dir, warnings))
 
-    # A call carrying neither key anchors to no decision row, so it contributes nothing to the timeline.
+    # A call without a task_id anchors to no decision row, so it contributes nothing to the timeline.
     calls_by_key: dict[str, list[dict[str, Any]]] = {}
     for call in calls:
-        key = _decision_key(str(call.get("task_id") or ""), str(call.get("dyn_id") or ""))
+        key = _decision_key(str(call.get("task_id") or ""))
         if key is not None:
             calls_by_key.setdefault(key, []).append(call)
 
@@ -355,9 +265,6 @@ def write_decision_trace(
         session_dir, on_error=lambda exc: warnings.append(f"failed to parse {journal_file}: {exc!r}")
     )
     decisions = [_keep_revert_decision(e, phase_windows, scores_by_variant) for e in entries]
-    decisions += [
-        _dynamic_action_decision(row, phase_windows) for row in _load_dispatch_history_all(session_dir, warnings)
-    ]
 
     # Sorted by time, the first decision that names a key takes that key's calls.
     decisions.sort(key=lambda d: d["ts"])
@@ -416,7 +323,7 @@ def write_session_decision_trace(session_dir: Path | str) -> list[str]:
     warnings: list[str] = []
     sd = Path(session_dir).resolve()
     state: dict[str, Any] = {}
-    path = sd / "state.json"
+    path = state_path(sd)
     if path.exists():
         try:
             state = json.loads(path.read_text(encoding="utf-8"))

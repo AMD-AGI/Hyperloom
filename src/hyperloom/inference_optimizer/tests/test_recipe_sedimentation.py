@@ -16,7 +16,7 @@ from hyperloom.orchestrator.roles.mock_backend import (
     ScriptedPlan,
 )
 from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
-from hyperloom.orchestrator.knowledge.recipe_kb import LocalRecipeStore, RecipeKB
+from hyperloom.orchestrator.knowledge.recipe_kb import LocalRecipeStore, RecipeKB, RecipeUpsert
 from hyperloom.orchestrator.knowledge.recipe_journal import (
     attempt_provenance,
     recipe_attrs_from_state,
@@ -219,21 +219,23 @@ def test_experience_rows_survive_the_kb_round_trip(tmp_path):
     store = LocalRecipeStore(root=tmp_path / "kb2")
     cid = "inference:m:h:f:text:a:1:fp4"
     store.put_recipe(
-        canonical_id=cid,
-        model="m",
-        hardware="h",
-        framework_name="f",
-        # Exactly what recipe_journal.recipe_attrs_from_state emits.
-        what_worked=[
-            {
-                "name": "mtp_on",
-                "extra_server_args": "--speculative-num-steps 3",
-                "extra_envs": {"VLLM_MTP": "1"},
-                "gain_pct": 4.2,
-                "source": "https://pr/123",
-            }
-        ],
-        what_failed=[{"name": "bad_flag", "reason": "reverted", "gain_pct": -1.0}],
+        RecipeUpsert(
+            canonical_id=cid,
+            model="m",
+            hardware="h",
+            framework_name="f",
+            # Exactly what recipe_journal.recipe_attrs_from_state emits.
+            what_worked=[
+                {
+                    "name": "mtp_on",
+                    "extra_server_args": "--speculative-num-steps 3",
+                    "extra_envs": {"VLLM_MTP": "1"},
+                    "gain_pct": 4.2,
+                    "source": "https://pr/123",
+                }
+            ],
+            what_failed=[{"name": "bad_flag", "reason": "reverted", "gain_pct": -1.0}],
+        ),
     )
     row = store.get_recipe(canonical_id=cid) or {}
 
@@ -262,12 +264,14 @@ def test_an_experience_row_that_stored_a_description_still_names_its_variant(tmp
     store = LocalRecipeStore(root=tmp_path / "kb_legacy")
     cid = "inference:m:h:f:text:a:1:fp4"
     store.put_recipe(
-        canonical_id=cid,
-        model="m",
-        hardware="h",
-        framework_name="f",
-        what_worked=[{"description": "mtp_on", "measured_impact": "+4.2%"}],
-        what_failed=[{"description": "", "reason": "OOM"}],
+        RecipeUpsert(
+            canonical_id=cid,
+            model="m",
+            hardware="h",
+            framework_name="f",
+            what_worked=[{"description": "mtp_on", "measured_impact": "+4.2%"}],
+            what_failed=[{"description": "", "reason": "OOM"}],
+        )
     )
     row = store.get_recipe(canonical_id=cid) or {}
     assert (row.get("what_worked") or [])[0].get("name") == "mtp_on"
@@ -279,12 +283,14 @@ def test_an_experience_row_keeps_a_key_this_module_never_heard_of(tmp_path):
     store = LocalRecipeStore(root=tmp_path / "kb_forward")
     cid = "inference:m:h:f:text:a:1:fp4"
     store.put_recipe(
-        canonical_id=cid,
-        model="m",
-        hardware="h",
-        framework_name="f",
-        what_worked=[{"name": "mtp_on", "gain_pct": 4.2, "fingerprint": "abc123"}],
-        what_failed=[{"name": "bad_flag", "reason": "reverted", "error_class": "OOMError"}],
+        RecipeUpsert(
+            canonical_id=cid,
+            model="m",
+            hardware="h",
+            framework_name="f",
+            what_worked=[{"name": "mtp_on", "gain_pct": 4.2, "fingerprint": "abc123"}],
+            what_failed=[{"name": "bad_flag", "reason": "reverted", "error_class": "OOMError"}],
+        )
     )
     row = store.get_recipe(canonical_id=cid) or {}
     assert (row.get("what_worked") or [])[0] == {"name": "mtp_on", "gain_pct": 4.2, "fingerprint": "abc123"}
@@ -341,11 +347,13 @@ def test_a_malformed_experience_row_fails_at_the_boundary(tmp_path, bad_row):
     store = LocalRecipeStore(root=tmp_path / "kb_bad")
     with pytest.raises(TypeError):
         store.put_recipe(
-            canonical_id="inference:m:h:f:text:a:1:fp4",
-            model="m",
-            hardware="h",
-            framework_name="f",
-            what_worked=[bad_row],
+            RecipeUpsert(
+                canonical_id="inference:m:h:f:text:a:1:fp4",
+                model="m",
+                hardware="h",
+                framework_name="f",
+                what_worked=[bad_row],
+            )
         )
 
 
@@ -355,14 +363,16 @@ def test_proven_items_reach_the_scout_through_a_stored_recipe(tmp_path):
     store = LocalRecipeStore(root=tmp_path / "kb3")
     cid = "inference:m:h:f:text:a:1:fp4"
     store.put_recipe(
-        canonical_id=cid,
-        model="m",
-        hardware="h",
-        framework_name="f",
-        what_worked=[
-            {"name": "mtp_on", "source": "https://pr/123"},
-            {"name": "fp8_kv"},
-        ],
+        RecipeUpsert(
+            canonical_id=cid,
+            model="m",
+            hardware="h",
+            framework_name="f",
+            what_worked=[
+                {"name": "mtp_on", "source": "https://pr/123"},
+                {"name": "fp8_kv"},
+            ],
+        )
     )
     # The shape recipe_kb_t0 hands to SharedState on a hit.
     coord.shared_state.warm_start_recipe = {
@@ -391,13 +401,10 @@ def test_gap_provenance_round_trips_through_serialization(tmp_path):
 
 
 def test_research_hints_suppress_cold_start():
-    from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
-        SpecialistPromptInputs,
-        _is_cold_start,
-    )
+    from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
+    from hyperloom.orchestrator.prompts.specialist_prompt_builder import _is_cold_start
 
     inp = SpecialistPromptInputs(
-        task_id="t",
         domain="serving_specialist",
         research_hints="- enable MTP (source=https://pr/1)",
     )
@@ -405,41 +412,33 @@ def test_research_hints_suppress_cold_start():
 
 
 def test_kb_section_renders_research_hints_when_kb_empty():
-    from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
-        SpecialistPromptInputs,
-        _section_kb_subgraph,
-    )
+    from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
+    from hyperloom.orchestrator.prompts.specialist_prompt_builder import _section_kb_context
 
     inp = SpecialistPromptInputs(
-        task_id="t",
         domain="serving_specialist",
         research_hints="- enable MTP (source=https://pr/1)",
     )
-    text = "\n".join(_section_kb_subgraph(inp))
+    text = "\n".join(_section_kb_context(inp))
     assert "research scout collected source-backed priors" in text
     assert "enable MTP" in text
     assert "COLD-START MODE" not in text
 
 
 def test_bare_cold_start_still_uses_domain_focus_fallback():
-    from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
-        SpecialistPromptInputs,
-        _section_kb_subgraph,
-    )
+    from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
+    from hyperloom.orchestrator.prompts.specialist_prompt_builder import _section_kb_context
 
-    inp = SpecialistPromptInputs(task_id="t", domain="serving_specialist")
-    text = "\n".join(_section_kb_subgraph(inp))
+    inp = SpecialistPromptInputs(domain="serving_specialist")
+    text = "\n".join(_section_kb_context(inp))
     assert "COLD-START MODE" in text
 
 
 def test_scout_focus_lists_already_proven():
-    from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
-        SpecialistPromptInputs,
-        _focus_research_scout_specialist,
-    )
+    from hyperloom.orchestrator.prompts.specialist_focus import _focus_research_scout_specialist
+    from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
 
     inp = SpecialistPromptInputs(
-        task_id="t",
         domain="research_scout_specialist",
         already_proven=[{"name": "mtp_on", "source": "https://pr/1"}],
     )

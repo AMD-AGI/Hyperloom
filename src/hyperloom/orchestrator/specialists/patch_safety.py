@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from hyperloom.common.fs_utils import read_bytes_nofollow
 from hyperloom.common.env_safety import ungrounded_env_file_reason
 from hyperloom.common.unified_diff import strip_diff_path, strip_path_components
 
@@ -394,6 +395,16 @@ def resolve_patch_apply_root(
         if any(patch_targets_missing(text, resolved_explicit) for text in texts):
             return PatchRootResolution(None, "explicit_root_target_mismatch")
         return PatchRootResolution(resolved_explicit)
+    return _match_candidate_root(texts, parsed, candidate_roots, default_root)
+
+
+def _match_candidate_root(
+    texts: tuple[str, ...],
+    parsed: list[ParsedPatchTargets],
+    candidate_roots: Sequence[Path],
+    default_root: Path | None,
+) -> PatchRootResolution:
+    """Single out the candidate checkout holding every pre-image, or ``default_root`` for a create-only set."""
     roots = tuple(dict.fromkeys(root for root in map(_resolved_dir, candidate_roots) if root is not None))
     resolved_default = _resolved_dir(default_root) if default_root is not None else None
     if not any(targets.existing for targets in parsed):
@@ -980,7 +991,7 @@ def vet_patches(
     readable: list[tuple[str, str]] = []
     for path in patch_paths:
         try:
-            text = Path(path).read_text(encoding="utf-8", errors="replace")
+            text = read_bytes_nofollow(path).decode("utf-8", errors="replace")
         except OSError as exc:
             ungrounded.append({"path": path, "verdict": "unreadable", "detail": repr(exc)})
             continue

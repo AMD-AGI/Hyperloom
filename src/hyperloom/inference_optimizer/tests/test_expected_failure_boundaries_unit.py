@@ -16,7 +16,7 @@ import httpx
 import pytest
 
 import hyperloom.inference_optimizer as io_pkg
-from hyperloom.inference_optimizer import cli as io_cli
+from hyperloom.inference_optimizer.cli import model_catalog
 from hyperloom.inference_optimizer.recipe_snapshot_constants import (
     DEFAULT_FRAMEWORK_VERSION_SLUG,
     detect_framework_version,
@@ -62,8 +62,10 @@ def break_import(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
-    for name in ("HYPERLOOM_SGLANG_SHAPE_MODE", "HYPERLOOM_RESOLVED_FRAMEWORK", "HYPERLOOM_RESOLVED_FRAMEWORK_PYTHON"):
+    for name in ("HYPERLOOM_RESOLVED_FRAMEWORK", "HYPERLOOM_RESOLVED_FRAMEWORK_PYTHON"):
         monkeypatch.delenv(name, raising=False)
+    # The pod scripts import their shipped siblings by name.
+    monkeypatch.syspath_prepend(str(_SCRIPTS))
 
 
 def _patcher(function: str, *args):
@@ -112,7 +114,7 @@ def test_apply_reports_a_failing_sglang_import(tmp_path, break_import, error, me
     break_import("sglang", error)
 
     result = _load_script("apply_tracelens_patch_multinode")._apply_on_pod(
-        tracelens_root=str(tmp_path), tracelens_internal_root=str(tmp_path), sglang_version_pin=None
+        tracelens_root=str(tmp_path), sglang_version_pin=None
     )
 
     assert (result["status"], result["error"]) == ("failed", message)
@@ -153,14 +155,14 @@ def _raising_not_installed(name):
 
 @pytest.fixture
 def catalog_probe(monkeypatch):
-    monkeypatch.setattr(io_cli, "_CATALOG_RETRY_DELAYS_SEC", ())
+    monkeypatch.setattr(model_catalog, "_CATALOG_RETRY_DELAYS_SEC", ())
 
     def _probe(failure):
         def fake_get(*_args, **_kwargs):
             raise failure
 
         monkeypatch.setattr(httpx, "get", fake_get)
-        return io_cli._probe_llm_catalog(base_url="http://gateway", api_key="k")
+        return model_catalog._probe_llm_catalog(base_url="http://gateway", api_key="k")
 
     return _probe
 

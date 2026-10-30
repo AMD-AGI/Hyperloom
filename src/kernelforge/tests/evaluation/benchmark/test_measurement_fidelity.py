@@ -7,15 +7,15 @@ import asyncio
 import json
 import pathlib
 
-from kernelforge.loop.gate_settings import GateMeasurement
-from kernelforge.loop.insession_gate import InSessionGate
+from kernelforge.workflows.forge_loop.gate.gate_settings import GateMeasurement
+from kernelforge.workflows.forge_loop.gate.insession_gate import InSessionGate
 from kernelforge.evaluation.scoring import (
     keep_score,
     passes_keep_threshold,
     required_keep_speedup,
 )
 from kernelforge.evaluation.benchmark import runner as bench_module
-from kernelforge.resources import resource_path
+from kernelforge.config.resources import resource_path
 from kernelforge.evaluation.benchmark.runner import (
     BenchRun,
     bench_wallclock,
@@ -164,7 +164,7 @@ def test_gate_measurement_defaults_are_legacy():
 
 def test_warmstart_baseline_uses_the_same_repeat_as_the_loop(tmp_path):
     """A single-shot baseline vs repeat-and-median candidates is a free win."""
-    from kernelforge.loop import knowledge_integration as ei
+    from kernelforge.workflows.forge_loop.memory import knowledge_integration as ei
 
     drv = tmp_path / "drv.py"
     drv.write_text(_ARGV_DRIVER)
@@ -175,7 +175,7 @@ def test_warmstart_baseline_uses_the_same_repeat_as_the_loop(tmp_path):
 
 def test_warmstart_baseline_defaults_to_single_shot(tmp_path):
     """Unchanged for tasks that don't configure repeats."""
-    from kernelforge.loop import knowledge_integration as ei
+    from kernelforge.workflows.forge_loop.memory import knowledge_integration as ei
 
     drv = tmp_path / "drv.py"
     drv.write_text(_ARGV_DRIVER)
@@ -198,6 +198,7 @@ def _load_driver_module():
     stub.float16 = "float16"
     stub.float32 = "float32"
     stub.tensor = lambda *a, **k: types.SimpleNamespace(element_size=lambda: 2)
+    stub.cuda = types.SimpleNamespace(device_count=lambda: 0)
     dist = types.ModuleType("torch.distributed")
     stub.distributed = dist
     saved = {k: sys.modules.get(k) for k in ("torch", "torch.distributed")}
@@ -305,22 +306,22 @@ def test_driver_aggregates_repeats_by_median():
     assert "_reduce_max" not in round_calls, "worker must not reduce a case median again"
 
 
-def test_cli_can_actually_call_kb_warmstart():
-    """The CLI's call site must match the function it calls."""
+def test_forge_loop_can_actually_call_kb_warmstart():
+    """The forge-loop call site must match the function it calls."""
     import inspect
     import textwrap
 
-    from kernelforge.cli import forge_loop_command
-    from kernelforge.loop.knowledge_integration import kb_warmstart
+    from kernelforge.workflows.forge_loop.bootstrap import warm_start
+    from kernelforge.workflows.forge_loop.memory.knowledge_integration import kb_warmstart
 
     accepted = set(inspect.signature(kb_warmstart).parameters)
-    tree = ast.parse(textwrap.dedent(inspect.getsource(forge_loop_command._read_kb_warm_start)))
+    tree = ast.parse(textwrap.dedent(inspect.getsource(warm_start._read_kb_warm_start)))
     calls = [
         node
         for node in ast.walk(tree)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "kb_warmstart"
     ]
     passed = {keyword.arg for call in calls for keyword in call.keywords}
-    assert passed, "could not read the CLI call site"
+    assert passed, "could not read the forge-loop call site"
     unknown = passed - accepted
-    assert not unknown, f"CLI passes keywords kb_warmstart rejects: {sorted(unknown)}"
+    assert not unknown, f"forge-loop passes keywords kb_warmstart rejects: {sorted(unknown)}"

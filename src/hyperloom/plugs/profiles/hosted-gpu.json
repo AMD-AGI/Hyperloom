@@ -2,9 +2,6 @@
   "schema": "hyperloom.plugs/v1",
   "profile": "hosted-gpu",
   "sockets": {
-    "measurement": {"impl": "local"},
-    "agent_runner": {"impl": "local"},
-    "events": {"impl": "hosted", "config": {"dir": "${HYPERLOOM_EVENTS_DIR}"}},
-    "gpu_token": {"impl": "local"}
+    "events": {"impl": "hosted"}
   }
 }

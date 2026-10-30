@@ -5,8 +5,10 @@
 
 from __future__ import annotations
 import logging as _logging
+import sqlite3
 from typing import TYPE_CHECKING, Any
-from ..state.task_registry import TERMINAL_STATES, Task
+from ..kernel import kernel_decisions
+from ..state.task_registry import TERMINAL_STATES, Task, TaskSpec
 from ..state.orchestration_memory import CYCLE_DIRECTIVE_REQUEST, build_cycle_memory
 from ..collaborator import CoordinatorCollaborator
 from . import machine_state as _phase_state
@@ -81,7 +83,7 @@ class SweepPhase(CoordinatorCollaborator):
         # anything on top; the recovery halts the session if it cannot.
         await self._coord.phase_kernel_stack.recover_interrupted_stack_validation()
         # Drain pending KEEP integrates so sweep measures full current_best.
-        if state.has_keep_pending_integrate:
+        if kernel_decisions.has_keep_pending_integrate(state):
             await self._coord.phase_kernel_stack.drain_pending_keep_integrates()
         # Validate the stack for positive NEEDS_REVIEW kernels.
         await self._coord.phase_kernel_stack.maybe_validate_positive_needs_review_stack()
@@ -126,7 +128,7 @@ class SweepPhase(CoordinatorCollaborator):
             task = await self._enqueue_internal_conc_sweep_task(
                 reason="phase_entry",
             )
-        except Exception as exc:
+        except (sqlite3.Error, TypeError, ValueError) as exc:
             log.exception(
                 "SWEEP entry hook: failed to enqueue auto-conc-sweep: %r",
                 exc,
@@ -169,19 +171,22 @@ class SweepPhase(CoordinatorCollaborator):
         clamped_budget: int | None
         if session_rem is not None:
             session_rem_sec = int(max(0.0, session_rem * 60.0) - _CLOSE_RESERVE_SEC)
-            if session_rem_sec <= 0:
-                log.info(
-                    "conc_sweep: session clock leaves %ds after the %ds CLOSE reserve; not enqueueing.",
-                    session_rem_sec,
-                    _CLOSE_RESERVE_SEC,
-                )
-                self.record_session_budget_conc_sweep_skip(
-                    denied=f"remaining_after_close_reserve={session_rem_sec}s",
-                )
-                return None
             clamped_budget = min(configured_budget, session_rem_sec) if configured_budget > 0 else session_rem_sec
         else:
             clamped_budget = configured_budget if configured_budget > 0 else None
+        admission_sec = 60.0 * self._coord.dispatcher.admission_cost_minutes("conc_sweep")
+        if clamped_budget is not None and clamped_budget < admission_sec:
+            log.info(
+                "conc_sweep: a %ds grant cannot fit the %.0fs one pair costs; not enqueueing.",
+                clamped_budget,
+                admission_sec,
+            )
+            self._record_terminal_conc_sweep_skip(
+                skip_reason="grant_cannot_fit_one_pair",
+                auto_conc_sweep_skipped="grant_cannot_fit_one_pair",
+                auto_conc_sweep_denied=f"granted={clamped_budget}s one_pair={admission_sec:.0f}s",
+            )
+            return None
         params: dict[str, Any] = {
             "source": "coordinator_internal",
             "reason": str(reason),
@@ -225,12 +230,14 @@ class SweepPhase(CoordinatorCollaborator):
         attempt = 0
         while True:
             task, was_existing = await self.tasks.create_or_return_existing(
-                kind="conc_sweep",
-                params=params,
-                requires_lanes=lanes,
-                idempotency_key=base_key if attempt == 0 else f"{base_key}-r{attempt}",
-                lease_ttl_sec=_conc_sweep_lease_ttl_sec(budget),
-                dispatch_class="coordinator",
+                TaskSpec(
+                    kind="conc_sweep",
+                    params=params,
+                    requires_lanes=lanes,
+                    idempotency_key=base_key if attempt == 0 else f"{base_key}-r{attempt}",
+                    lease_ttl_sec=_conc_sweep_lease_ttl_sec(budget),
+                    dispatch_class="coordinator",
+                )
             )
             if not (was_existing and task.state in TERMINAL_STATES):
                 return task, was_existing

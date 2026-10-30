@@ -26,7 +26,7 @@ import subprocess
 from dataclasses import dataclass
 from typing import Any
 
-from kernelforge.fusion.gpu_arch import canon_arch, detect_arch
+from kernelforge.utils.gpu_arch import canon_arch, detect_arch
 
 _MARKETING_RE = re.compile(r"^\s*Marketing Name:\s*(AMD Instinct\s+\S+)", re.MULTILINE)
 _COMPUTE_PARTITION_RE = re.compile(r"Compute Partition:\s*(\S+)")

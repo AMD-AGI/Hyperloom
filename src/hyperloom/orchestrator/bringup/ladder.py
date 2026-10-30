@@ -69,6 +69,7 @@ _KIND_STAGE: Mapping[str, LadderStage] = {
     rules.NOT_IMPLEMENTED: LadderStage.ENGINE_INIT,
     rules.CAPABILITY_DISABLED: LadderStage.ENGINE_INIT,
     rules.HIP_KERNEL_MISSING: LadderStage.ENGINE_INIT,
+    rules.HIP_RUNTIME_ERROR: LadderStage.ENGINE_INIT,
     rules.RESOURCE_CONSTRAINT: LadderStage.ENGINE_INIT,
     rules.KERNEL_RESOURCE_LIMIT: LadderStage.ENGINE_INIT,
     rules.ACCURACY_BELOW_FLOOR: LadderStage.ACCURACY_OK,
@@ -112,15 +113,6 @@ def _next_stage(stage: LadderStage) -> LadderStage:
     """Return the milestone above ``stage``, or ``stage`` when it is the last."""
     index = _LADDER.index(stage)
     return _LADDER[min(index + 1, len(_LADDER) - 1)]
-
-
-def _roots_of(trees: Sequence[TreeIdentity] | Sequence[str] | None) -> tuple[str, ...]:
-    """Return the directories frames are normalised against, longest first."""
-    if not trees:
-        return ()
-    if isinstance(trees[0], TreeIdentity):
-        return tree_roots([t for t in trees if isinstance(t, TreeIdentity)])
-    return tuple(sorted((str(t).rstrip("/") for t in trees if str(t).strip()), key=len, reverse=True))
 
 
 def _witness_progress(text: str) -> tuple[LadderStage | None, dict[str, str]]:
@@ -314,7 +306,7 @@ def classify(
     streams: BootStreams,
     *,
     server_elapsed_sec: float,
-    trees: Sequence[TreeIdentity] | Sequence[str] | None = None,
+    trees: Sequence[TreeIdentity] = (),
     session_root: str = "",
 ) -> BootObservation:
     """Classify one bring-up attempt into a :class:`BootObservation`.
@@ -323,14 +315,14 @@ def classify(
         streams: The server log and the launcher's fallback streams.
         server_elapsed_sec: Seconds from server start to this observation, on
             the server child's clock.
-        trees: Pinned trees (or roots) frames are normalised against.
+        trees: Pinned trees frames are normalised against.
         session_root: Absolute session root redacted out of the excerpt.
 
     Returns:
         BootObservation: The typed observation. ``stage_failed`` is ``None``
         only when no stream carries a failure.
     """
-    roots = _roots_of(trees)
+    roots = tree_roots(trees)
     redact_roots = (session_root,) if session_root.strip() else ()
     classified = _classified_streams(streams)
 

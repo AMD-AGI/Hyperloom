@@ -29,23 +29,3 @@ def test_read_last_lines_limit(tmp_path):
     log = tmp_path / "run.log"
     log.write_text("\n".join(str(i) for i in range(10)), encoding="utf-8")
     assert io.read_last_lines(log, limit=3) == ["7", "8", "9"]
-
-
-def test_safe_float_variants():
-    assert io.safe_float(None) == 0.0
-    assert io.safe_float("") == 0.0
-    assert io.safe_float(True, default=None) is None
-    assert io.safe_float("1.5") == 1.5
-    assert io.safe_float(3) == 3.0
-    assert io.safe_float("bad", default=-1.0) == -1.0
-
-
-# Byte-consistency contract: the kernel-agent ``_io_utils`` mirror must stay behaviourally aligned with
-# ``hyperloom.common`` for the primitives it duplicates.
-
-
-def test_safe_float_matches_common_coerce_for_shared_cases():
-    from hyperloom.common.coerce import to_float
-
-    for value in ("1.5", 3, "bad", None, "", True):
-        assert io.safe_float(value, default=0.0) == to_float(value, default=0.0)

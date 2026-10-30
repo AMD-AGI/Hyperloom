@@ -21,10 +21,6 @@ from .._internal.log import info, warn, err
 from .._internal.server_args_safety import ServerArgsRejected, validate_server_args
 from .._internal.ssh_client import RemoteScript
 
-import logging
-
-log = logging.getLogger(__name__)
-
 
 class _MnCliProxy:
     """Lazy proxy preserving ``inf._mn_cli`` monkeypatch compatibility."""
@@ -38,19 +34,10 @@ class _MnCliProxy:
 _mn_cli = _MnCliProxy()
 
 
-EXIT_CONFIG_ERROR = 3
-EXIT_TRANSIENT = 1
-
-
-def _infera_all_gpu_targets(state: dict[str, Any]) -> list[dict[str, Any]]:
-    """Every GPU pod SSH target (PD => prefill+decode, else worker)."""
-    return infera_support.gpu_ssh_targets_from_state(state)
-
-
 def _infera_target_for_host(state: dict[str, Any], ip: str) -> dict[str, Any]:
     """Resolve a legacy host IP to a full SSH target (with per-role port)."""
     ip = str(ip or "").strip()
-    for t in _infera_all_gpu_targets(state):
+    for t in infera_support.gpu_ssh_targets_from_state(state):
         if str(t.get("podIP") or "").strip() == ip:
             return dict(t)
     return {"podIP": ip, "sshPort": _mn_cli._infera_default_ssh_port(state), "podId": ""}
@@ -64,7 +51,7 @@ def _infera_require_state() -> dict[str, Any]:
             "state backend is not 'infera'; the platform selects the backend, check "
             "INFERENCE_OPTIMIZER_MN_BACKEND and the HYPERLOOM_MN_EXT_* hand-off"
         )
-    has_gpu_pods = bool(_infera_all_gpu_targets(state))
+    has_gpu_pods = bool(infera_support.gpu_ssh_targets_from_state(state))
     if not has_gpu_pods:
         raise _mn_cli.ConfigurationError(
             f"no GPU pod IPs in state for pd_mode={state.get('pd_mode')!r}. That mode reads "
@@ -97,7 +84,6 @@ def _collect_forward_env() -> dict[str, str]:
     for _shape_key in (
         "TRACELENS_ROOT",
         "TRACELENS_SHAPE_DISCOVERY",
-        "HYPERLOOM_SGLANG_SHAPE_MODE",
         "HYPERLOOM_SGLANG_VERSION_PIN",
     ):
         _shape_val = os.environ.get(_shape_key, "").strip()
@@ -125,7 +111,7 @@ def _collect_forward_env() -> dict[str, str]:
     aiter_rebuild = os.environ.get("AITER_REBUILD", "").strip()
     if aiter_rebuild:
         fwd["AITER_REBUILD"] = aiter_rebuild
-    return filter_forward_env(fwd, warn_on_drop=True)
+    return filter_forward_env(fwd)
 
 
 @dataclass(frozen=True)
@@ -153,9 +139,7 @@ def _infera_fanout_launch(
     results: list[dict] = []
     rc_total = 0
     for target in targets:
-        ip = str(target.get("podIP") or "").strip()
-        if not ip:
-            continue
+        ip = target["podIP"]
         port = int(target.get("sshPort") or _mn_cli._infera_default_ssh_port(state))
         info(f"{label}: ssh -> {ip}:{port}")
         try:
@@ -186,7 +170,7 @@ def _infera_fanout_launch(
 
 # Pod-side one-liner: is the recorded server PID still alive?
 _INFERA_PID_PROBE = (
-    'pid="$(cat /tmp/mn_infera_server.pid 2>/dev/null || true)"; '
+    f'pid="$(cat {shlex.quote(infera_support.INFERA_POD_PID_FILE)} 2>/dev/null || true)"; '
     'if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then echo MN_ALIVE; else echo MN_DEAD; fi'
 )
 
@@ -227,6 +211,18 @@ def _resolve_pd_node_counts(
     return pn, dn
 
 
+# Per-role PD overrides a PD launch records as ``last_restart_<name>``, with the value that leaves the role on the
+# shared --tp / --ep / --extra-args.
+_PD_ROLE_OVERRIDES = {
+    "pd_prefill_tp": 0,
+    "pd_decode_tp": 0,
+    "pd_prefill_ep": 0,
+    "pd_decode_ep": 0,
+    "pd_prefill_extra_args": "",
+    "pd_decode_extra_args": "",
+}
+
+
 def _infera_restart_config_matches(
     state: dict[str, Any],
     args: argparse.Namespace,
@@ -235,12 +231,10 @@ def _infera_restart_config_matches(
     kv_transfer_backend: str = "",
 ) -> bool:
     """Whether the requested restart matches the last successful Infera launch."""
-    if not state.get("last_restart_framework"):
-        return False
     base_match = (
-        str(state.get("last_restart_framework") or "") == framework
-        and str(state.get("last_restart_model") or "") == str(args.model)
-        and int(state.get("last_restart_tp") or 0) == int(args.tp)
+        state.get("last_restart_framework") == framework
+        and state.get("last_restart_model") == args.model
+        and state.get("last_restart_tp") == int(args.tp)
         and int(state.get("last_restart_ep") or 1) == int(getattr(args, "ep", 1) or 1)
         and str(state.get("last_restart_pd_mode") or "aggregated") == pd_mode
         and _mn_cli._normalize_extra_args(state.get("last_restart_extra_args"))
@@ -253,22 +247,16 @@ def _infera_restart_config_matches(
         return False
     if pd_mode != "disaggregated":
         return True
+    for name, unset in _PD_ROLE_OVERRIDES.items():
+        if (state.get(f"last_restart_{name}") or unset) != getattr(args, name):
+            return False
     # Compare effective PD topology (CLI explicit > pod-list inference), not raw CLI zeros left unset by the operator.
     prefill_n, decode_n = _pd_role_pod_counts(state)
     args_pn, args_dn = _resolve_pd_node_counts(args, state)
-    state_pn = int(state.get("last_restart_pd_prefill_nodes") or 0) or prefill_n
-    state_dn = int(state.get("last_restart_pd_decode_nodes") or 0) or decode_n
     return (
-        args_pn == state_pn
-        and args_dn == state_dn
-        and (state.get("last_restart_pd_transfer_backend") or "").strip() == (kv_transfer_backend or "").strip()
-        and int(state.get("last_restart_pd_prefill_tp") or 0) == int(getattr(args, "pd_prefill_tp", 0) or 0)
-        and int(state.get("last_restart_pd_decode_tp") or 0) == int(getattr(args, "pd_decode_tp", 0) or 0)
-        and int(state.get("last_restart_pd_prefill_ep") or 0) == int(getattr(args, "pd_prefill_ep", 0) or 0)
-        and int(state.get("last_restart_pd_decode_ep") or 0) == int(getattr(args, "pd_decode_ep", 0) or 0)
-        and (state.get("last_restart_pd_prefill_extra_args") or "")
-        == (getattr(args, "pd_prefill_extra_args", "") or "")
-        and (state.get("last_restart_pd_decode_extra_args") or "") == (getattr(args, "pd_decode_extra_args", "") or "")
+        args_pn == (state.get("last_restart_pd_prefill_nodes") or prefill_n)
+        and args_dn == (state.get("last_restart_pd_decode_nodes") or decode_n)
+        and kv_transfer_backend.strip() == (state.get("last_restart_pd_transfer_backend") or "").strip()
     )
 
 
@@ -282,9 +270,7 @@ def _infera_servers_alive(
     if not targets:
         return False
     for target in targets:
-        ip = str(target.get("podIP") or "").strip()
-        if not ip:
-            return False
+        ip = target["podIP"]
         port = int(target.get("sshPort") or _mn_cli._infera_default_ssh_port(state))
         try:
             cp = _mn_cli._infera_ssh_bash_with_env(state, ip, _INFERA_PID_PROBE, timeout=timeout, port=port)
@@ -349,15 +335,11 @@ def _infera_launch_pd_groups(
     state["pd_decode_nodes"] = dn
     state["last_restart_pd_prefill_nodes"] = pn
     state["last_restart_pd_decode_nodes"] = dn
-    state["last_restart_pd_prefill_tp"] = int(getattr(args, "pd_prefill_tp", 0) or 0)
-    state["last_restart_pd_decode_tp"] = int(getattr(args, "pd_decode_tp", 0) or 0)
     # The orchestrator's PD arg resolution reads this key as its fallback tier between an explicit argument and
     # $PD_TRANSFER_BACKEND.
     state["last_restart_pd_transfer_backend"] = kv
-    state["last_restart_pd_prefill_ep"] = int(getattr(args, "pd_prefill_ep", 0) or 0)
-    state["last_restart_pd_decode_ep"] = int(getattr(args, "pd_decode_ep", 0) or 0)
-    state["last_restart_pd_prefill_extra_args"] = getattr(args, "pd_prefill_extra_args", "") or ""
-    state["last_restart_pd_decode_extra_args"] = getattr(args, "pd_decode_extra_args", "") or ""
+    for name in _PD_ROLE_OVERRIDES:
+        state[f"last_restart_{name}"] = getattr(args, name)
     return rc_total, all_results
 
 
@@ -398,7 +380,7 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
             )
     except ServerArgsRejected as exc:
         err(str(exc))
-        return EXIT_CONFIG_ERROR
+        return _mn_cli.EXIT_CONFIG_ERROR
     # Topology is fixed at create time, so state.pd_mode is authoritative: a PD deployment must restart in PD mode
     # even if --pd-mode defaulted otherwise.
     pd_mode = (
@@ -422,7 +404,7 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
     )
     if resume_enabled and _infera_restart_config_matches(state, args, framework, pd_mode, kv):
         probe_timeout = min(30, max(10, int(fanout.poll_timeout)))
-        if _infera_servers_alive(state, _infera_all_gpu_targets(state), timeout=probe_timeout):
+        if _infera_servers_alive(state, infera_support.gpu_ssh_targets_from_state(state), timeout=probe_timeout):
             info(
                 f"infera resume: same config (framework={framework} model={args.model} "
                 f"tp={args.tp} pd_mode={pd_mode}) and all pods alive; skipping kill+launch"
@@ -447,7 +429,6 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
     state["last_restart_pd_mode"] = pd_mode
     state["last_restart_extra_args"] = _mn_cli._normalize_extra_args(getattr(args, "extra_args", ""))
     state["last_restart_forward_env"] = _mn_cli.per_round_forward_overrides()
-    state["last_restart_results"] = all_results
     _mn_cli._save_state(state)
     print(
         json.dumps(
@@ -466,7 +447,7 @@ def _infera_kill_inference(args: argparse.Namespace) -> int:
     """Infera kill: SSH fan-out launch_infera_node.py --kill-only to every GPU pod."""
     state = _infera_require_state()
     framework = (state.get("last_restart_framework") or state.get("framework") or "sglang").lower()
-    gpu_targets = _infera_all_gpu_targets(state)
+    gpu_targets = infera_support.gpu_ssh_targets_from_state(state)
     launch_args = infera_support.build_node_kill_args(framework)
     info(f"infera kill-inference: framework={framework} pods={len(gpu_targets)}")
     rc, results = _infera_fanout_launch(
@@ -476,8 +457,6 @@ def _infera_kill_inference(args: argparse.Namespace) -> int:
         label="kill",
         options=_FanoutOptions(_mn_cli._poll_timeout_from_args(args), getattr(args, "print_logs", False)),
     )
-    state["last_kill_results"] = results
-    _mn_cli._save_state(state)
     print(
         json.dumps(
             {"backend": "infera", "action": "kill", "rc": rc, "results": results},
@@ -495,7 +474,7 @@ def _infera_ssh_node_op(
     timeout: int,
 ) -> tuple[dict | None, dict]:
     """Ship kernel_node_ops.py to one pod over SSH and run one subcommand."""
-    ip = str(target.get("podIP") or "").strip()
+    ip = target["podIP"]
     port = int(target.get("sshPort") or _mn_cli._infera_default_ssh_port(state))
     script = _mn_cli._read_bundled_pod_python_script("kernel_node_ops.py", _mn_cli._KERNEL_NODE_OPS_DEPS)
     try:
@@ -525,17 +504,13 @@ def _infera_apply_tracelens_patch(args: argparse.Namespace) -> int:
             "apply-tracelens-patch (infera) requires --tracelens-root or "
             "$TRACELENS_ROOT (an NFS path visible from every GPU pod)"
         )
-        return EXIT_CONFIG_ERROR
-    gpu_targets = _infera_all_gpu_targets(state)
-    if not gpu_targets:
-        err("apply-tracelens-patch (infera): no GPU pod IPs in state")
-        return EXIT_CONFIG_ERROR
-    script = _mn_cli._read_pod_script("apply_tracelens_patch_multinode.py")
-    pin = getattr(args, "sglang_version_pin", None) or ""
+        return _mn_cli.EXIT_CONFIG_ERROR
+    gpu_targets = infera_support.gpu_ssh_targets_from_state(state)
+    script = _mn_cli._read_bundled_pod_python_script("apply_tracelens_patch_multinode.py", _mn_cli._SHAPE_GATE_DEPS)
     op_args = f"--local --tracelens-root {shlex.quote(str(tracelens_root))}"
-    if pin:
-        op_args += f" --sglang-version-pin {shlex.quote(str(pin))}"
-    patch_set = getattr(args, "patch_set", None) or ""
+    if args.sglang_version_pin:
+        op_args += f" --sglang-version-pin {shlex.quote(str(args.sglang_version_pin))}"
+    patch_set = getattr(args, "patch_set", None)
     if patch_set:
         op_args += f" --patch-set {shlex.quote(str(patch_set))}"
     timeout = _mn_cli._poll_timeout_from_args(args)
@@ -545,7 +520,7 @@ def _infera_apply_tracelens_patch(args: argparse.Namespace) -> int:
     # lacks sglang so _apply_on_pod's `import sglang` fails with "No module named 'sglang'".
     pod_python = os.environ.get("HYPERLOOM_MN_POD_PYTHON", "/opt/venv/bin/python")
     for target in gpu_targets:
-        ip = str(target.get("podIP") or "").strip()
+        ip = target["podIP"]
         port = int(target.get("sshPort") or _mn_cli._infera_default_ssh_port(state))
         info(f"apply-tracelens-patch (infera): ssh -> {ip}:{port}")
         try:
@@ -559,9 +534,9 @@ def _infera_apply_tracelens_patch(args: argparse.Namespace) -> int:
         except subprocess.TimeoutExpired:
             failures.append({"host": ip, "sshPort": port, "error": f"timeout after {timeout}s"})
             continue
-        parsed = _mn_cli._extract_pod_json(cp.stdout or "")
-        pods = (parsed or {}).get("per_pod") or []
-        if parsed and str(parsed.get("status")) in ("applied", "skipped") and pods:
+        parsed = _mn_cli._extract_pod_json(cp.stdout) or {}
+        pods = parsed.get("per_pod")
+        if str(parsed.get("status")) in ("applied", "skipped") and pods:
             for r in pods:
                 r["host"] = ip
                 per_pod.append(r)
@@ -570,12 +545,12 @@ def _infera_apply_tracelens_patch(args: argparse.Namespace) -> int:
                 {
                     "host": ip,
                     "sshPort": port,
-                    "error": (parsed or {}).get("error") or (cp.stderr or "")[-800:] or "unknown",
+                    "error": parsed.get("error") or cp.stderr[-800:] or "unknown",
                     "rc": cp.returncode,
                 }
             )
     overall = "applied" if not failures else "failed"
-    if overall == "applied" and per_pod and all(r.get("status") == "skipped" for r in per_pod):
+    if overall == "applied" and all(r.get("status") == "skipped" for r in per_pod):
         overall = "skipped"
     print(
         json.dumps(
@@ -599,9 +574,9 @@ def _infera_apply_patch(args: argparse.Namespace) -> int:
     patch_path = Path(args.patch_file)
     if not patch_path.is_file():
         err(f"patch_file does not exist: {patch_path}")
-        return EXIT_CONFIG_ERROR
+        return _mn_cli.EXIT_CONFIG_ERROR
     patch_b64 = base64.b64encode(patch_path.read_bytes()).decode("ascii")
-    gpu_targets = _infera_all_gpu_targets(state)
+    gpu_targets = infera_support.gpu_ssh_targets_from_state(state)
     op_args = (
         f"apply --target-path {shlex.quote(str(args.target_path))} "
         f"--patch-b64 {shlex.quote(str(patch_b64))} "
@@ -613,7 +588,7 @@ def _infera_apply_patch(args: argparse.Namespace) -> int:
     per_node: list[dict] = []
     failures: list[dict] = []
     for target in gpu_targets:
-        ip = str(target.get("podIP") or "").strip()
+        ip = target["podIP"]
         port = int(target.get("sshPort") or _mn_cli._infera_default_ssh_port(state))
         info(f"apply-patch (infera): ssh -> {ip}:{port}")
         parsed, tx = _infera_ssh_node_op(state, target, op_args, timeout=args.timeout_sec)
@@ -665,10 +640,10 @@ def _infera_revert_patch(args: argparse.Namespace) -> int:
         backup_map = json.loads(args.backup_map_json or "{}")
     except json.JSONDecodeError as exc:
         err(f"--backup-map-json not valid JSON: {exc}")
-        return EXIT_CONFIG_ERROR
+        return _mn_cli.EXIT_CONFIG_ERROR
     if not records_by_host and not backup_map:
         err("revert requires non-empty records or backup map")
-        return EXIT_CONFIG_ERROR
+        return _mn_cli.EXIT_CONFIG_ERROR
     if not records_by_host:
         records_by_host = {
             host: [
@@ -687,7 +662,7 @@ def _infera_revert_patch(args: argparse.Namespace) -> int:
         info(f"revert-patch (infera): ssh -> {ip}:{port}")
         op_args = f"revert --records-json {shlex.quote(json.dumps(records, sort_keys=True))}"
         parsed, tx = _infera_ssh_node_op(state, target, op_args, timeout=args.timeout_sec)
-        if parsed and str(parsed.get("status")) in ("restored", "noop_missing_backup"):
+        if parsed and str(parsed.get("status")) == "restored":
             per_node.append({"host": ip, **parsed})
         else:
             failures.append({"host": ip, "error": (parsed or {}).get("error") or tx.get("stderr") or "unknown", **tx})
@@ -709,7 +684,7 @@ def _infera_finalize_patch(args: argparse.Namespace) -> int:
         records_by_host = json.loads(args.records_json or "{}")
     except json.JSONDecodeError as exc:
         err(f"--records-json not valid JSON: {exc}")
-        return EXIT_CONFIG_ERROR
+        return _mn_cli.EXIT_CONFIG_ERROR
     per_node, failures = [], []
     for ip, records in records_by_host.items():
         target = _infera_target_for_host(state, str(ip))
@@ -767,14 +742,14 @@ def cmd_install_geak(args: argparse.Namespace) -> int:
     geak_src = _resolve_geak_src(getattr(args, "geak_src", None))
     if not geak_src:
         err("install-geak: cannot resolve GEAK source dir; pass --geak-src or set $HYPERLOOM_ROOT / $USER_DATA_PATH")
-        return EXIT_CONFIG_ERROR
+        return _mn_cli.EXIT_CONFIG_ERROR
     script = _mn_cli._read_pod_script("install_geak_node.sh")
-    gpu_targets = _infera_all_gpu_targets(state)
+    gpu_targets = infera_support.gpu_ssh_targets_from_state(state)
     info(f"install-geak (infera): geak_src={geak_src} pods={len(gpu_targets)}")
     results: list[dict] = []
     rc_total = 0
     for target in gpu_targets:
-        ip = str(target.get("podIP") or "").strip()
+        ip = target["podIP"]
         port = int(target.get("sshPort") or _mn_cli._infera_default_ssh_port(state))
         info(f"install-geak: ssh -> {ip}:{port}")
         try:

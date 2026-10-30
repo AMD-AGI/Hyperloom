@@ -5,25 +5,28 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import inspect
 import json
 from pathlib import Path
 from types import SimpleNamespace
 
-import click
 import pytest
+from click.testing import CliRunner
 
 from kernelforge import cli as cli_module
-from kernelforge.cli.forge_loop_command import _make_ceiling_estimator
-from kernelforge.cli.options import _validate_roofline_target
 from kernelforge.agent_backends.base import AgentProviderUnavailableError
+from kernelforge.workflows.forge_loop.bootstrap.errors import InvalidOptionValue
+from kernelforge.workflows.forge_loop.bootstrap.request import validate_roofline_target
+from kernelforge.workflows.forge_loop.bootstrap.run import _make_ceiling_estimator
 from kernelforge.roofline_ceiling.analyst import AnalystSession, CeilingAnalysisError
-from kernelforge.roofline_ceiling.command import AnalystAgent
+from kernelforge.roofline_ceiling import standalone
+from kernelforge.roofline_ceiling.standalone import AnalystAgent, CeilingError
 from kernelforge.roofline_ceiling.contract import load_report
 from kernelforge.roofline_ceiling.estimate import estimate_ceiling as real_estimate_ceiling
 from kernelforge.roofline_ceiling.report import REPORT_FILENAME, WORKSPACE_SUBDIR
-from kernelforge.loop.run_state import RunState
-from kernelforge.loop.runner import IterationConfig, IterationLoop
+from kernelforge.workflows.forge_loop.campaign.run_state import RunState
+from kernelforge.workflows.forge_loop.iteration.runner import IterationConfig, IterationLoop
 
 
 def _report(cases=(("decode-t1", 12.8),)):
@@ -127,10 +130,17 @@ def test_the_ceiling_never_reaches_the_keep_decision():
 
 def test_one_reader_loads_the_ceiling_for_the_whole_loop():
     """One loader means one thing to audit if the invariant above ever bends."""
-    from kernelforge.loop import runner as runner_module
+    import importlib
 
-    source = inspect.getsource(runner_module)
-    assert source.count("from kernelforge.roofline_ceiling.report import read_report") == 1
+    from kernelforge.workflows.forge_loop import iteration
+
+    loaders = sum(
+        inspect.getsource(importlib.import_module(f"kernelforge.workflows.forge_loop.iteration.{name}")).count(
+            "from kernelforge.roofline_ceiling.report import read_report"
+        )
+        for name in iteration.ITERATION_MODULES
+    )
+    assert loaders == 1, "the loop reads the ceiling through one loader"
     assert "read_report" in inspect.getsource(IterationLoop._ceiling)
     # Every other user goes through that loader rather than the filesystem.
     for method in (
@@ -143,7 +153,7 @@ def test_one_reader_loads_the_ceiling_for_the_whole_loop():
 
 
 def _planning_context(*case_ids):
-    from kernelforge.orchestrator.contracts import CaseEvidence, OrchestrationContext
+    from kernelforge.workflows.forge_loop.roles.contracts import CaseEvidence, OrchestrationContext
 
     return OrchestrationContext(
         analysis_commit="abc123",
@@ -291,13 +301,15 @@ def test_the_attainment_target_is_off_unless_an_operator_asks_for_it():
 
 
 def test_a_target_above_one_is_refused_because_attainment_cannot_exceed_the_ceiling():
-    with pytest.raises(click.BadParameter, match="cannot exceed 1.0"):
-        _validate_roofline_target(86.0, True)
+    with pytest.raises(InvalidOptionValue, match="cannot exceed 1.0") as refused:
+        validate_roofline_target(86.0, True)
+    assert refused.value.param_hint == "--roofline-target"
 
 
 def test_a_target_without_a_ceiling_is_refused_rather_than_never_firing():
-    with pytest.raises(click.BadParameter, match="pass --roofline-ceiling on"):
-        _validate_roofline_target(0.86, False)
+    with pytest.raises(InvalidOptionValue, match="pass --roofline-ceiling on") as refused:
+        validate_roofline_target(0.86, False)
+    assert refused.value.param_hint == "--roofline-target"
 
 
 def test_the_estimator_calls_estimate_ceiling_with_arguments_it_accepts(monkeypatch):
@@ -320,7 +332,7 @@ def test_the_estimator_calls_estimate_ceiling_with_arguments_it_accepts(monkeypa
         return SimpleNamespace()
 
     monkeypatch.setattr("kernelforge.roofline_ceiling.estimate.estimate_ceiling", _estimate)
-    monkeypatch.setattr("kernelforge.roofline_ceiling.command.resolve_analyst_backend", _resolve)
+    monkeypatch.setattr("kernelforge.roofline_ceiling.standalone.resolve_analyst_backend", _resolve)
 
     estimator = _make_ceiling_estimator(
         workspace_dir=".",
@@ -341,7 +353,7 @@ def test_the_estimator_calls_estimate_ceiling_with_arguments_it_accepts(monkeypa
 @pytest.mark.parametrize(("deployment", "analyst"), [("bypass", "bypass"), ("read-only", "workspace-write")])
 def test_the_analyst_runs_in_the_deployments_sandbox_widened_only_to_write(monkeypatch, deployment, analyst):
     """Every session honours the deployment's sandbox; the analyst writes its answer, so read-only is widened once."""
-    from kernelforge.roofline_ceiling import command as command_module
+    from kernelforge.roofline_ceiling import standalone as command_module
 
     built = {}
     monkeypatch.setattr(command_module, "create_registered_backend", lambda runtime: built.setdefault("rt", runtime))
@@ -447,7 +459,7 @@ def test_a_ceiling_with_no_usable_case_logs_that_instead_of_a_figure(tmp_path):
 
 def test_the_progress_is_logged_with_each_iteration_header():
     source = inspect.getsource(IterationLoop._open_iteration)
-    header_at = source.index('f"--- Iteration {iteration} "')
+    header_at = source.index("print(iteration_header(")
 
     assert header_at < source.index("self._render_roofline_progress()")
 
@@ -616,3 +628,49 @@ def test_off_leaves_a_report_sitting_in_the_workspace_unread(tmp_path):
 
 def test_the_ceiling_command_is_registered():
     assert "roofline-ceiling" in cli_module.main.commands
+
+
+def test_the_ceiling_command_announces_the_collection_before_it_starts(monkeypatch, tmp_path):
+    """Collecting evidence takes minutes, so its announcement has to be out before it, not after."""
+    # ``kernelforge.cli`` exports the command under its module's name, so the module is imported by path.
+    ceiling_command = importlib.import_module("kernelforge.cli.roofline_ceiling_command")
+    monkeypatch.setattr(ceiling_command, "prepare_workspace_ceiling", lambda request: request)
+
+    def estimate(_prepared):
+        raise CeilingError("estimate reached")
+
+    monkeypatch.setattr(ceiling_command, "estimate_workspace_ceiling", estimate)
+
+    result = CliRunner().invoke(cli_module.main, ["roofline-ceiling", "--workspace", str(tmp_path)])
+
+    assert result.exit_code == 1
+    assert result.output.index("[ceiling] collecting evidence") < result.output.index("estimate reached")
+
+
+def test_inputs_that_do_not_resolve_are_refused_before_the_collection_is_announced(tmp_path):
+    result = CliRunner().invoke(cli_module.main, ["roofline-ceiling", "--workspace", str(tmp_path / "absent")])
+
+    assert result.exit_code == 1
+    assert "workspace is not a directory" in result.output
+    assert "collecting evidence" not in result.output
+
+
+def test_the_library_estimate_writes_nothing_to_stdout(monkeypatch, capsys, tmp_path):
+    """What the run prints is the command's to decide; the library only returns the outcome."""
+
+    async def fake_estimate(*_args):
+        return "outcome"
+
+    monkeypatch.setattr(standalone, "estimate_ceiling", fake_estimate)
+    monkeypatch.setattr(standalone, "resolve_analyst_backend", lambda _agent: object())
+    request = standalone.CeilingRequest(
+        inputs=standalone.CeilingInputs(str(tmp_path), (), "driver.py", "", ""),
+        output_dir="",
+        arch="gfx942",
+        analyst=standalone.AnalystOptions("claude", "", 60, None),
+        run_timeout_sec=60,
+    )
+    prepared = standalone.PreparedCeiling(request, tmp_path, {}, ["true"], [], "workspace-write")
+
+    assert standalone.estimate_workspace_ceiling(prepared) == "outcome"
+    assert capsys.readouterr().out == ""

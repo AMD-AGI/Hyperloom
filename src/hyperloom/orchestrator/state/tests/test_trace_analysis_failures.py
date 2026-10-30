@@ -63,7 +63,7 @@ def test_a_request_naming_no_budget_runs_under_the_default_budget():
 
 @pytest.mark.parametrize(
     "changed",
-    [{"analysis_route": "bypass"}, {"split_conc": 32}, {"steady_state_mode": "decode_only"}],
+    [{"analysis_route": "non-llm"}, {"split_conc": 32}, {"steady_state_mode": "decode_only"}],
     ids=["route", "split", "steady-state-mode"],
 )
 def test_a_request_that_asks_for_a_different_analysis_of_the_same_trace_runs(changed):

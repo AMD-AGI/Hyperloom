@@ -18,7 +18,7 @@ from hyperloom.hosted import host_info
 from hyperloom.hosted.host_info import HostGroup, HostInfoError, Var, read_host_info, take_host_info
 
 # Distinct, recognisable values, so a leak anywhere is found by a plain substring search.
-_SECRETS = {name: f"sentinel-{index}-{index}{index}{index}" for index, name in enumerate(host_info.SECRET_VARS)}
+_SECRETS = {name: f"sentinel-secret-{index}-{index}{index}{index}" for index, name in enumerate(host_info.SECRET_VARS)}
 _ALL_GROUPS = tuple(HostGroup)
 
 
@@ -31,6 +31,7 @@ def env(tmp_path):
         Var.RUN_ID: "run-1",
         Var.RUN_CREATED_AT: "2026-10-01T12:30:00Z",
         Var.STATE_DIR: str(tmp_path / "state"),
+        Var.MCP_HOST: "0.0.0.0",
         Var.MCP_PORT: "8765",
         Var.MCP_PUBLIC_URL: "https://app.example.test:8765",
         Var.SANDBOX_TEMPLATES: json.dumps({"runner": {"1": "r1", "8": "r8"}, "dev": "d"}),
@@ -39,6 +40,8 @@ def env(tmp_path):
         Var.RESULT_ARCHIVE: "s3://results-bucket/hl/runs",
         Var.ARCHIVE_ENDPOINT_URL: "https://s3.example.test",
         Var.ARCHIVE_REGION: "us-east-1",
+        Var.SOURCE_REPO: "AMD-AGI/Hyperloom",
+        Var.SOURCE_SHA: "0123456789abcdef0123456789abcdef01234567",
         Var.NODE_NAME: "node-3",
         Var.CLAW_SESSION_ID: "sess-9",
         **_SECRETS,
@@ -57,6 +60,7 @@ def test_a_complete_environment_reads_into_typed_fields(env, tmp_path):
     assert info.sandbox_keys.subrun.reveal() == _SECRETS[Var.SANDBOX_KEY_SUBRUN]
     assert info.archive_credentials.session_token.reveal() == _SECRETS[Var.AWS_SESSION_TOKEN]
     assert (info.node_name, info.claw_session_id) == ("node-3", "sess-9")
+    assert (info.source_repo, info.source_sha) == ("AMD-AGI/Hyperloom", "0123456789abcdef0123456789abcdef01234567")
 
 
 def test_events_dir_defaults_under_the_state_dir_and_an_explicit_one_wins(env, tmp_path):
@@ -200,6 +204,10 @@ def test_missing_and_malformed_inputs_are_reported_together(env):
         (Var.INPUT_FILE, "/nonexistent/campaign.json", "not an existing file"),
         (Var.STATE_DIR, "/nonexistent/state", "not an existing directory"),
         (Var.MCP_TOKEN, "two words", "whitespace or control"),
+        (Var.MCP_TOKEN, "x" * 15, "at least 16 characters"),
+        (Var.SOURCE_SHA, "0123abc", "40-hex"),
+        (Var.SOURCE_SHA, "0123456789ABCDEF0123456789abcdef01234567", "40-hex"),
+        (Var.SOURCE_REPO, "two words", "whitespace or control"),
     ],
 )
 def test_a_malformed_input_is_refused_with_its_reason(env, name, value, reason):
@@ -255,6 +263,7 @@ def test_take_removes_every_host_only_input_and_keeps_the_ones_others_read(env):
     }
     assert info.mcp_token.reveal() == _SECRETS[Var.MCP_TOKEN]
     assert info.run_id == "run-1"
+    assert info.mcp_host == "0.0.0.0"
     assert set(host_info.SECRET_VARS) <= set(host_info.HOST_ONLY_VARS)
 
 
@@ -346,3 +355,45 @@ def test_the_archive_region_is_optional_read_when_set_and_removed_from_the_envir
 
     assert take_host_info(env).archive_region == "us-east-1"
     assert Var.ARCHIVE_REGION not in env
+
+
+# -- the granted totals ------------------------------------------------------------------------------------------
+_GRANT = {"max_sandboxes": 9, "max_gpus": 16, "gpu_hours": 12.5, "max_runtime_sec": 36000}
+
+
+def test_the_grant_limits_are_optional_and_read_when_set(env):
+    assert read_host_info(env).grant_limits is None
+
+    env[Var.GRANT_LIMITS] = json.dumps(_GRANT)
+    assert dataclasses.asdict(read_host_info(env).grant_limits) == _GRANT
+
+
+def test_a_total_the_host_did_not_state_is_none_and_an_unknown_key_is_ignored(env):
+    env[Var.GRANT_LIMITS] = json.dumps({"max_gpus": 8, "roles": {"dev": 1}})
+    limits = read_host_info(env).grant_limits
+    assert (limits.max_gpus, limits.max_sandboxes, limits.gpu_hours, limits.max_runtime_sec) == (8, None, None, None)
+
+
+@pytest.mark.parametrize(
+    ("value", "reason"),
+    [
+        ("not json", "is not valid JSON"),
+        ("[1, 2]", "must be a JSON object"),
+        ('{"max_gpus": -1}', "max_gpus must be a number >= 0"),
+        ('{"gpu_hours": "12"}', "gpu_hours must be a number >= 0"),
+        ('{"max_sandboxes": true}', "max_sandboxes must be a number >= 0"),
+        ('{"max_runtime_sec": 1.5}', "max_runtime_sec must be a whole number"),
+    ],
+)
+def test_malformed_grant_limits_are_refused_with_the_reason(env, value, reason):
+    env[Var.GRANT_LIMITS] = value
+    with pytest.raises(HostInfoError) as raised:
+        read_host_info(env)
+    assert reason in raised.value.invalid[Var.GRANT_LIMITS]
+
+
+def test_take_removes_the_grant_limits_from_the_environment(env):
+    env[Var.GRANT_LIMITS] = json.dumps(_GRANT)
+    info = take_host_info(env)
+    assert Var.GRANT_LIMITS not in env and Var.GRANT_LIMITS in host_info.HOST_ONLY_VARS
+    assert info.grant_limits.gpu_hours == 12.5

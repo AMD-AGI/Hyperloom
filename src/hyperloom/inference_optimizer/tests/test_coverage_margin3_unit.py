@@ -33,7 +33,6 @@ def test_llm_config_parse_and_derive_edges() -> None:
     from hyperloom.common.llm_config import (
         claude_sdk_env_options,
         derive_openai_base_url,
-        resolve_openai_client_config,
     )
     from hyperloom.common.llm_headers import parse_custom_headers
 
@@ -47,20 +46,6 @@ def test_llm_config_parse_and_derive_edges() -> None:
     assert derive_openai_base_url("https://gw.example/Unified") == "https://gw.example/Unified/v1"
     assert derive_openai_base_url("https://gw.example/custom") == "https://gw.example/custom"
 
-    cfg = resolve_openai_client_config(
-        api_key_env="CUSTOM_KEY",
-        base_url_env="CUSTOM_BASE",
-        env={
-            "CUSTOM_KEY": " key ",
-            "CUSTOM_BASE": " https://base.example/v1 ",
-            "OPENAI_CUSTOM_HEADERS": '{"X-Trace": " 1 "}',
-        },
-    )
-    assert cfg.as_kwargs() == {
-        "api_key": "key",
-        "base_url": "https://base.example/v1",
-        "default_headers": {"X-Trace": "1"},
-    }
     assert claude_sdk_env_options(env={}) == {}
 
 
@@ -254,17 +239,3 @@ def test_multi_node_state_paths_warn_on_permission_failures(monkeypatch, tmp_pat
     state_paths._ensure_runtime_dir(runtime_dir)
     assert runtime_dir.is_dir()
     assert "could not chmod runtime dir" in messages[-1]
-
-
-def test_llm_prompt_parse_response_edges() -> None:
-    from hyperloom.inference_optimizer.breakdown.reporters.llm_prompt import parse_llm_response
-
-    fenced = """```json
-{"executive_summary": "  ok  ", "section_narratives": {"a": "  first  ", "2": "two"}}
-```"""
-    parsed = parse_llm_response(fenced)
-    assert parsed["executive_summary"] == "ok"
-    assert parsed["section_narratives"] == {"a": "first", "2": "two"}
-
-    assert parse_llm_response("not json") == {"executive_summary": "", "section_narratives": {}}
-    assert parse_llm_response("[]") == {"executive_summary": "", "section_narratives": {}}

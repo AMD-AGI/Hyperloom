@@ -13,6 +13,8 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
+from hyperloom.common.kernel_source_contract import is_finite_number
+
 _DEVICE_SOURCE_SUFFIXES = (".cuh", ".cu", ".hip", ".h", ".hpp", ".cpp")
 _MAX_SCANNED_FILES = 4000
 
@@ -110,12 +112,7 @@ def _prorated_totals(
     total_count: int,
 ) -> "OrderedDict[str, tuple[float, int, int]]":
     """Prorate summary totals by sampled kernel duration."""
-    if (
-        isinstance(total_time_ms, bool)
-        or not isinstance(total_time_ms, (int, float))
-        or not math.isfinite(float(total_time_ms))
-        or total_time_ms <= 0
-    ):
+    if not is_finite_number(total_time_ms) or total_time_ms <= 0:
         raise ValueError("nccl_summary.total_time_ms must be finite and positive")
     if isinstance(total_count, bool) or not isinstance(total_count, int) or total_count <= 0:
         raise ValueError("nccl_summary.total_count must be a positive integer")
@@ -131,9 +128,7 @@ def _prorated_totals(
         duration_raw = op.get("duration_us")
         stream_raw = op.get("stream", 0)
         if (
-            isinstance(duration_raw, bool)
-            or not isinstance(duration_raw, (int, float))
-            or not math.isfinite(float(duration_raw))
+            not is_finite_number(duration_raw)
             or duration_raw < 0
             or isinstance(stream_raw, bool)
             or not isinstance(stream_raw, int)

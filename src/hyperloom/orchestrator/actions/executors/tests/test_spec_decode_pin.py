@@ -13,7 +13,8 @@ import yaml
 
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
 from hyperloom.orchestrator.actions.executors._grid_base import GridVariant
-from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml, run_grid
+from hyperloom.orchestrator.actions.executors._grid_runner import GridRecipe, _build_variant_yaml, run_grid
+from hyperloom.orchestrator.actions.executors._workload_envs import LaunchLayer
 from hyperloom.orchestrator.actions.executors._spec_decode_pin import (
     SPECULATIVE_DECODING_PINNED,
     SpeculativeDecodingPinnedError,
@@ -252,10 +253,8 @@ def _no_launcher_checkout(monkeypatch):
     monkeypatch.delenv("INFERENCE_OPTIMIZER_SERVER_ARGS", raising=False)
 
 
-def _build(tmp_path: Path, base: Path, variant: GridVariant, **base_layers) -> dict:
-    out = _build_variant_yaml(
-        base, base_layers.pop("base_extra_args", ""), variant, output_subdir=tmp_path / "v", **base_layers
-    )
+def _build(tmp_path: Path, base: Path, variant: GridVariant, stack: LaunchLayer = LaunchLayer()) -> dict:
+    out = _build_variant_yaml(GridRecipe(base_yaml_path=base, base=stack), variant, output_subdir=tmp_path / "v")
     return yaml.safe_load(out.read_text(encoding="utf-8"))["benchmark"]["envs"]
 
 
@@ -286,14 +285,14 @@ def test_building_a_variant_keeps_other_knobs_open_on_a_synthetic_base(tmp_path)
 
 def test_building_a_variant_pins_the_draft_a_replacing_stack_carries(tmp_path):
     base = _base_yaml(tmp_path, "vllm", "", {})
-    stack = {"base_extra_args": VLLM_SYNTHETIC, "base_args_mode": "replace"}
-    _build(tmp_path, base, GridVariant("ok", extra_server_args="--max-num-seqs 256", args_mode="replace"), **stack)
+    stack = LaunchLayer(extra_server_args=VLLM_SYNTHETIC, args_mode="replace")
+    _build(tmp_path, base, GridVariant("ok", extra_server_args="--max-num-seqs 256", args_mode="replace"), stack)
     with pytest.raises(SpeculativeDecodingPinnedError):
         _build(
             tmp_path,
             base,
             GridVariant("v", extra_server_args=_spec_config(synthetic_acceptance_length=3.0), args_mode="replace"),
-            **stack,
+            stack,
         )
 
 
@@ -319,16 +318,15 @@ def test_building_a_variant_leaves_a_real_draft_base_open(tmp_path):
 
 @pytest.mark.asyncio
 async def test_run_grid_records_the_refusal_without_launching(tmp_path, monkeypatch):
-    def _never_launched(**_kwargs):
+    def _never_launched(_bench_round, **_kwargs):
         raise AssertionError("a refused variant must not reach Magpie")
 
     monkeypatch.setattr(gr, "_run_magpie", _never_launched)
     base = _base_yaml(tmp_path, "vllm", VLLM_SYNTHETIC, {})
     results = await run_grid(
-        base_yaml_path=base,
-        base_extra_args="",
         grid=[GridVariant("more-draft", extra_server_args=_spec_config(num_speculative_tokens=5))],
         output_root=tmp_path / "out",
+        recipe=GridRecipe(base_yaml_path=base),
     )
     assert [(r.status, r.error_class) for r in results] == [("failed", SPECULATIVE_DECODING_PINNED)]
     assert "num_speculative_tokens" in results[0].error

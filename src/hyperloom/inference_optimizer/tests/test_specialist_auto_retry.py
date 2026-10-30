@@ -14,10 +14,8 @@ from hyperloom.orchestrator.specialists.runner import (
     SpecialistFailureType,
     classify_specialist_failure,
 )
-from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
-    SpecialistPromptInputs,
-    build_specialist_prompts,
-)
+from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
+from hyperloom.orchestrator.prompts.specialist_prompt_builder import build_specialist_prompts
 
 from .conftest import make_coordinator
 
@@ -59,7 +57,6 @@ def test_classify_is_case_and_whitespace_insensitive():
 # Auto-retry notice block (prompt builder)
 def _freeform_inputs(**kwargs) -> SpecialistPromptInputs:
     base = dict(
-        task_id="spec-1",
         domain=FREEFORM_DOMAIN,
         scope="freeform",
         task_description="Read the scheduler and find why prefill blocks decode.",
@@ -107,20 +104,12 @@ def _make_explore_phase_stub(tmp_path, registry_lanes, registry_ttl, gpu_ttl, ca
     fake_task = MagicMock()
     fake_task.task_id = "retry-task-1"
 
-    async def _fake_create(
-        kind,
-        params,
-        idempotency_key,
-        requires_lanes,
-        lease_ttl_sec,
-        dispatch_class=None,
-        dispatch_origin=None,
-    ):
+    async def _fake_create(spec):
         captured_tasks.append(
             {
-                "kind": kind,
-                "requires_lanes": list(requires_lanes or []),
-                "lease_ttl_sec": lease_ttl_sec,
+                "kind": spec.kind,
+                "requires_lanes": list(spec.requires_lanes or []),
+                "lease_ttl_sec": spec.lease_ttl_sec,
             }
         )
         return fake_task, False

@@ -87,17 +87,39 @@ These flags are rejected with `unrecognized arguments`:
 * `kernelforge forge-loop --return-after-read-kb`, and the TraceLens kernel tool's
   `--skip-split` / `--source-root` (with `TRACELENS_SOURCE_ROOT`): drop them.
 * `hyperloom multi-node kernel-bench` is removed; nothing in the optimizer calls it.
+* The TraceLens kernel tool's `--use-llm-orchestrator` / `--no-llm-orchestrator`:
+  use `--route {agent,non-llm}`. Its `--num-denoise-steps`, `--model-path` and
+  `--precision` fed the removed diffusion latency roofline: drop them.
+* `python -m hyperloom.orchestrator.trace_analysis.bypass_trace_analysis` is
+  removed and fails with `No module named`; use `tracelens_analysis --route non-llm`.
+
+### Required: the `bypass` trace-analysis route is replaced by `non-llm`
+
+`HYPERLOOM_TRACE_ANALYSIS_ROUTE=bypass`, or `analysis_route: bypass` in a
+`trace_analyze` request, now fails the request with `invalid_analysis_route`.
+Set `non-llm` instead; it needs a TraceLens checkout and writes `analysis.json`
+rather than `analysis.md`.
+
+These are no longer read and are silently ignored, so drop them:
+
+* `HYPERLOOM_BYPASS_STEADY_STATE`, `HYPERLOOM_BYPASS_CORR_WARN_PCT`,
+  `HYPERLOOM_BYPASS_OTHERS_WARN_PCT`, `HYPERLOOM_TRACE_SHAPE_MANIFEST` and
+  `HYPERLOOM_TRACE_SHAPE_MANIFEST_MAX_CAPTURES` (the bypass route).
+* `HYPERLOOM_NUM_DENOISE_STEPS` and the `trace_analyze` keys `num_denoise_steps`,
+  `model_path`, `precision` and `analysis_mode`.
+* `KERNEL_AGENT_USE_LLM_ORCHESTRATOR`; the agent route always runs unless
+  `--route non-llm` is given.
 
 ### Required: sessions created before this release do not resume
 
-Every session's `storage/coordinator.db` now records schema version 7, and
+Every session's `storage/coordinator.db` now records schema version 8, and
 there are no in-place migrations. `optimize --resume-from` on a session whose
 database records an older version, which is every session started by 1.1.4 or
 earlier, exits 2 at resume admission, before `state.json` or the database is
 touched:
 
 ```text
-ERROR: --resume-from coordinator.db is at schema version 6, older than this build's 7:
+ERROR: --resume-from coordinator.db is at schema version 6, older than this build's 8:
 sessions created before this release cannot be resumed. Finish the session under the
 build that started it, or start a new session.
 ```
@@ -114,6 +136,13 @@ before upgrading.
 The top-level `robustness` key, `close.robustness` and the
 `robustness_escalated` stop reason are gone; they were always empty since the
 robustness agent was retired. Consumers that read them should stop.
+
+### Required: `session_breakdown.json` drops the latency roofline and `bypass` keys
+
+The schema stays `v6.1` but drops the keys only the diffusion latency roofline
+or the `bypass` route produced; read `ceiling_available` instead of
+`close.roofline_progress.ceiling_kind`. Each key and its disposition is under
+Versioning in [`session_breakdown.json` integration in Hyperloom](session-breakdown.md).
 
 ### Required: quantization failure exits 4
 
@@ -136,7 +165,7 @@ only the optimizer-family commands moved under `hyperloom`):
 | `hyperloom-kb` / `python -m hyperloom_kb.cli` | Operate an Experience KB service: health, labels, restore, exclusions, list, export |
 | `python -m hyperloom.inference_optimizer.experience_kb_service {init-env,ensure,...}` | Per-workspace Experience KB sidecar, with every `hyperloom-kb` command (setup skill, optimizer SKILL) |
 | `python -m hyperloom.agents.critic.runtime.cli {prepare-review,commit-review,replay-dead-letter}` | Critic backend subprocess (not operator-facing) |
-| Kernel agent tool modules (`tracelens_analysis`, `bypass_trace_analysis`, …) | Orchestrator subprocess scripts with their own `__main__` |
+| Kernel agent tool modules (`tracelens_analysis`, …) | Orchestrator subprocess scripts with their own `__main__` |
 | `multi_node/scripts/*.py` on remote pods | Payload scripts SSH'd by `hyperloom multi-node`, not local `-m` entry points |
 
 There is no `hyperloom kb` subcommand in 1.1.x; keep using
@@ -262,8 +291,8 @@ controlled by the CLI flag `--enable-roofline`, which defaults **on**. Pass
 three things inside the 6 major, a declared exception to the major-bump rule: it
 renames `throughput_tok_s_per_gpu` in `outcome.baseline`, `outcome.final` and
 the `baseline` event's `measurement` to `output_throughput` (the old key is no
-longer written), removes keys no producer populated or that only carried a
-constant, and reports two unmeasured figures as null. Archived 6.0 documents and documents exported by 1.1.x keep
+longer written), removes keys no producer populated, that only carried a
+constant or whose producer was removed, and reports two unmeasured figures as null. Archived 6.0 documents and documents exported by 1.1.x keep
 the old key, so readers must accept both keys or migrate.
 Re-exporting a 6.0 session directory emits a null
 `outcome.baseline.output_throughput` and the `contract_digest` recorded at

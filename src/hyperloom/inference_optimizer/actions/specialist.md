@@ -59,7 +59,7 @@ write source patches. The new contract is:
 
 ## When to delegate
 
-Specialist is available in `FRAMEWORK_AGENT` and `ENABLEMENT`.
+Specialist is available in `FRAMEWORK_AGENT`.
 Inside FRAMEWORK_AGENT the Orchestration LLM should dispatch
 specialists as the **primary** entry into a round:
 
@@ -157,12 +157,16 @@ Each specialist subprocess sees:
   `Task` is limited to `subagent_type="hyperloom-leaf"`: leaves inherit the
   parent specialist's visible devices and their tool set omits `Task`, so
   fan-out is single-layer and stays within the parent's lane/GPU lease.
-* A 60s heartbeat protocol — the subprocess writes
-  `runs/specialist/<task_id>/heartbeat.json`; SpecialistRunner reaps an agent
-  after approximately 5 minutes if neither heartbeat nor process-log activity
-  ever appears. Once either activity file has appeared, it reaps the agent
-  after approximately 10 minutes of subsequent silence. The staleness
-  threshold is currently fixed and has no operator override.
+* Liveness is read from the agent CLI, never asked of the agent: SpecialistRunner
+  reaps an agent after approximately 15 minutes if no activity ever appears in
+  the process log or (for a `dsh` specialist, which prints only its final
+  message) the session log under `.dsh/sessions`. Once one of them has
+  appeared, it reaps the agent after approximately 30 minutes of subsequent
+  silence in both, except while the CLI has a live process it started after
+  its last output (a tool call it is waiting on). The runner writes
+  `runs/specialist/<task_id>/heartbeat.json` with its own lifecycle status;
+  it is not a liveness signal. The staleness threshold is currently fixed and
+  has no operator override.
 * The exit contract:
   - one `specialist_done` intent (the SpecialistRunner harvests it from
     stdout's stream-json transcript) with payload schema

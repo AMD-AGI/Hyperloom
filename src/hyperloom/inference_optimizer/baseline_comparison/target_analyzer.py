@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
@@ -150,11 +150,11 @@ def _format_report_md(summary: BaselineSummary) -> str:
     return "\n".join(lines) + "\n"
 
 
-def persist_summary(
+def _persist_summary(
     summary: BaselineSummary,
     *,
     session_dir: Path,
-) -> tuple[Path, Path]:
+) -> None:
     """Write JSON + MD into ``<session_dir>/target_analysis/``."""
     from ..session.session_paths import (
         target_analysis_dir,
@@ -164,14 +164,11 @@ def persist_summary(
 
     out_dir = target_analysis_dir(session_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    json_path = target_baseline_json(session_dir)
-    md_path = target_analysis_report_md(session_dir)
-    json_path.write_text(
-        json.dumps(summary.to_dict(), indent=2, sort_keys=True),
+    target_baseline_json(session_dir).write_text(
+        json.dumps(asdict(summary), indent=2, sort_keys=True),
         encoding="utf-8",
     )
-    md_path.write_text(_format_report_md(summary), encoding="utf-8")
-    return json_path, md_path
+    target_analysis_report_md(session_dir).write_text(_format_report_md(summary), encoding="utf-8")
 
 
 def _row_to_point(row: dict[str, Any]) -> BaselinePoint | None:
@@ -338,7 +335,7 @@ def analyze(*, session_dir: Path, request: TargetAnalysisRequest) -> BaselineSum
             warning=warning,
             source=source,
         )
-        persist_summary(summary, session_dir=session_dir)
+        _persist_summary(summary, session_dir=session_dir)
         clear_competitor_target(session_dir)
         return summary
 
@@ -385,7 +382,7 @@ def analyze(*, session_dir: Path, request: TargetAnalysisRequest) -> BaselineSum
         warning="; ".join(warnings),
         source=source,
     )
-    persist_summary(summary, session_dir=session_dir)
+    _persist_summary(summary, session_dir=session_dir)
     if not _write_measured_competitor_target(Path(session_dir), query, all_points, source):
         clear_competitor_target(session_dir)
     return summary
@@ -394,6 +391,5 @@ def analyze(*, session_dir: Path, request: TargetAnalysisRequest) -> BaselineSum
 __all__ = [
     "analyze",
     "clear_competitor_target",
-    "persist_summary",
     "to_inferencex_name",
 ]

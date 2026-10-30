@@ -1,12 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Regression tests for fmoe_ck E2E coverage and apply verification (#101821/#101810)."""
+"""Regression tests for fmoe_ck E2E coverage (#101821/#101810)."""
 
 from __future__ import annotations
 
-import sys
-import types
 from pathlib import Path
 
 import pytest
@@ -129,37 +127,6 @@ def _envs(csv_path: Path) -> dict[str, str]:
     return {"AITER_CONFIG_FMOE": str(csv_path), "AITER_LOG_TUNED_CONFIG": "1"}
 
 
-@pytest.fixture
-def stub_forge_parser(monkeypatch):
-    """Minimal forge parser so apply verification runs without forge installed."""
-
-    def _fake_parse_log_file(path):
-        text = Path(path).read_text(encoding="utf-8", errors="replace")
-        hits = misses = 0
-        merged: list[str] = []
-        consulted: set[str] = set()
-        for line in text.splitlines():
-            if "merge tuned file" in line:
-                merged.extend(p for p in line.split()[-1].split(":") if p)
-            elif "not found tuned config in" in line:
-                misses += 1
-                consulted.add(line.split("not found tuned config in")[1].split(",")[0].strip())
-            elif "found padded_M" in line:
-                hits += 1
-        return {
-            "apply_verdict": {"hit": hits, "miss": misses},
-            "merged_tables": sorted(set(merged)),
-            "consulted_tables": sorted(consulted),
-        }
-
-    fake = types.ModuleType("kernelforge.gemm_tune")
-    fake_ev = types.ModuleType("kernelforge.gemm_tune.evidence")
-    fake_ev.parse_log_file = _fake_parse_log_file  # type: ignore[attr-defined]
-    fake.evidence = fake_ev  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "kernelforge.gemm_tune", fake)
-    monkeypatch.setitem(sys.modules, "kernelforge.gemm_tune.evidence", fake_ev)
-
-
 class TestFmoeCoverageGate:
     def test_dense_bf16_miss_does_not_trigger_table_not_consulted(self, tmp_path):
         _integrate_log(tmp_path, "\n".join([AITER_BF16_MISS, SYNTHETIC_SERVED]))
@@ -182,6 +149,7 @@ class TestFmoeCoverageGate:
         assert report is not None
         assert report["artifact_applied"] is False
         assert report["not_applied_reason"] == "runtime_default_config"
+        assert report["conclusive"] is True
 
     def test_glm_descriptor_parses_but_bare_candidate_mismatch_blocks(self, tmp_path):
         _integrate_log(tmp_path, GLM_KERNEL_DESCRIPTOR)
@@ -232,6 +200,7 @@ class TestFmoeCoverageGate:
         assert report is not None
         assert report["artifact_applied"] is False
         assert report.get("not_applied_reason") == "no_fused_moe_dispatch"
+        assert report["conclusive"] is True
 
     def test_missing_server_log_stays_inconclusive(self, tmp_path):
         csv_path = _candidate_csv(tmp_path)
@@ -274,16 +243,22 @@ class TestFmoeCoverageGate:
         assert report["artifact_applied"] is True
         assert report["candidate_csv"] == str(bare)
 
-    def test_fused_moe_marker_without_parse_is_inconclusive(self, tmp_path):
-        _integrate_log(tmp_path, UNPARSEABLE_FMOE_MARKER)
-        csv_path = _candidate_csv(tmp_path)
-        phase = _phase(tmp_path)
+    @pytest.mark.parametrize(
+        ("log", "hit_logging", "reason"),
+        [
+            (UNPARSEABLE_FMOE_MARKER, "1", "fused_moe_parse_inconclusive"),
+            (AITER_BF16_MISS, "0", "fused_moe_logging_disabled"),
+        ],
+    )
+    def test_an_unreadable_dispatch_is_inconclusive(self, tmp_path, log, hit_logging, reason):
+        _integrate_log(tmp_path, log)
+        envs = {**_envs(_candidate_csv(tmp_path)), "AITER_LOG_TUNED_CONFIG": hit_logging}
 
-        report = phase._gemm_tuned_config_coverage("fmoe_ck", _envs(csv_path))
+        report = _phase(tmp_path)._gemm_tuned_config_coverage("fmoe_ck", envs)
 
         assert report is not None
         assert report["artifact_applied"] is False
-        assert report["not_applied_reason"] == "fused_moe_parse_inconclusive"
+        assert report["not_applied_reason"] == reason
         assert report.get("conclusive") is False
 
     def test_minimax_default_embedded_replay_blocks(self, tmp_path):
@@ -305,81 +280,10 @@ class TestFmoeCoverageGate:
 
 
 class TestFmoeApplyVerdict:
-    def test_dense_consulted_tables_do_not_block_fmoe(self, tmp_path, stub_forge_parser):
+    def test_fmoe_ck_has_no_dense_apply_verdict(self, tmp_path):
         _integrate_log(tmp_path, "\n".join([AITER_BF16_MISS, SYNTHETIC_SERVED]))
-        csv_path = _candidate_csv(tmp_path)
-        phase = _phase(tmp_path)
 
-        verdict = phase._gemm_apply_verdict("fmoe_ck", _envs(csv_path))
-
-        assert verdict is not None
-        assert verdict.get("blocks_keep") is False
-        assert verdict.get("verdict") == "served"
-
-    def test_minimax_default_blocks_keep(self, tmp_path, stub_forge_parser):
-        _integrate_log(tmp_path, MINIMAX_DEFAULT)
-        env = _merged_env(tmp_path, candidate_row=_CANDIDATE_ROW, merged_row=_MINIMAX_SHAPE_ROW)
-        phase = _phase(tmp_path)
-
-        verdict = phase._gemm_apply_verdict("fmoe_ck", env)
-
-        assert verdict is not None
-        assert verdict.get("blocks_keep") is True
-        assert verdict.get("verdict") == "runtime_default_config"
-
-    def test_no_fused_moe_dispatch_blocks_apply(self, tmp_path, stub_forge_parser):
-        _integrate_log(tmp_path, AITER_BF16_MISS)
-        csv_path = _candidate_csv(tmp_path)
-        phase = _phase(tmp_path)
-
-        verdict = phase._gemm_apply_verdict("fmoe_ck", _envs(csv_path))
-
-        assert verdict is not None
-        assert verdict.get("blocks_keep") is True
-        assert verdict.get("verdict") == "no_fused_moe_dispatch"
-
-    def test_merged_without_bare_candidate_does_not_block_keep(self, tmp_path):
-        _integrate_log(tmp_path, SYNTHETIC_SERVED)
-        merged = tmp_path / "merged_candidate_fmoe.csv"
-        merged.write_text(_FMOE_HEADER + _CANDIDATE_ROW, encoding="utf-8")
-        phase = _phase(tmp_path)
-
-        verdict = phase._gemm_apply_verdict(
-            "fmoe_ck",
-            {"AITER_CONFIG_FMOE": str(merged), "AITER_LOG_TUNED_CONFIG": "1"},
-        )
-
-        assert verdict is not None
-        assert verdict.get("blocks_keep") is False
-        assert verdict.get("conclusive") is False
-        assert verdict.get("verdict") == "candidate_csv_missing"
-
-    def test_fused_moe_marker_without_parse_does_not_block_keep(self, tmp_path):
-        _integrate_log(tmp_path, UNPARSEABLE_FMOE_MARKER)
-        csv_path = _candidate_csv(tmp_path)
-        phase = _phase(tmp_path)
-
-        verdict = phase._gemm_apply_verdict("fmoe_ck", _envs(csv_path))
-
-        assert verdict is not None
-        assert verdict.get("blocks_keep") is False
-        assert verdict.get("conclusive") is False
-        assert verdict.get("verdict") == "fused_moe_parse_inconclusive"
-
-    def test_logging_disabled_without_dispatch_is_inconclusive(self, tmp_path):
-        _integrate_log(tmp_path, AITER_BF16_MISS)
-        csv_path = _candidate_csv(tmp_path)
-        phase = _phase(tmp_path)
-
-        verdict = phase._gemm_apply_verdict(
-            "fmoe_ck",
-            {"AITER_CONFIG_FMOE": str(csv_path), "AITER_LOG_TUNED_CONFIG": "0"},
-        )
-
-        assert verdict is not None
-        assert verdict.get("blocks_keep") is False
-        assert verdict.get("conclusive") is False
-        assert verdict.get("verdict") == "fused_moe_logging_disabled"
+        assert _phase(tmp_path)._gemm_apply_verdict("fmoe_ck", _envs(_candidate_csv(tmp_path))) is None
 
 
 class TestFmoeEmbeddedReplay:

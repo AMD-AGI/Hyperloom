@@ -13,10 +13,10 @@ from typing import Any
 
 from hyperloom.common.env_safety import (
     BENCHMARK_SECRET_ENV_NAMES,
-    GPU_MASK_ENV_NAMES,
     redact_secret_values,
     valid_env_key,
 )
+from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 
 _DROP = object()
 
@@ -67,6 +67,19 @@ PUBLISH_ENV_PREFIX_ALLOWLIST: tuple[str, ...] = (
 )
 
 
+_CREDENTIAL_MARKERS: tuple[str, ...] = (
+    "authorization",
+    "password",
+    "passwd",
+    "secret",
+    "apikey",
+    "privatekey",
+    "accesskey",
+    "sshkey",
+    "credential",
+)
+
+
 def _key_parts(value: str) -> tuple[list[str], str]:
     snake_case = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", value)
     parts = [part for part in re.split(r"[^a-z0-9]+", snake_case.lower()) if part]
@@ -78,38 +91,12 @@ def _is_secret_key(value: str) -> bool:
     if upper in BENCHMARK_SECRET_ENV_NAMES:
         return True
     parts, normalized = _key_parts(value)
-    return "token" in parts or any(
-        marker in normalized
-        for marker in (
-            "authorization",
-            "password",
-            "passwd",
-            "secret",
-            "apikey",
-            "privatekey",
-            "accesskey",
-            "sshkey",
-            "credential",
-        )
-    )
+    return "token" in parts or any(marker in normalized for marker in _CREDENTIAL_MARKERS)
 
 
 def _is_secret_option(value: str) -> bool:
     parts, normalized = _key_parts(value)
-    if any(
-        marker in normalized
-        for marker in (
-            "authorization",
-            "password",
-            "passwd",
-            "secret",
-            "apikey",
-            "privatekey",
-            "accesskey",
-            "sshkey",
-            "credential",
-        )
-    ):
+    if any(marker in normalized for marker in _CREDENTIAL_MARKERS):
         return True
     if not parts or "token" not in parts:
         return False
@@ -136,12 +123,7 @@ def _redact_embedded_paths(value: str) -> str:
 
 def _is_publish_env_key(value: str) -> bool:
     upper = str(value or "").strip().upper()
-    if (
-        not valid_env_key(upper)
-        or _is_secret_key(upper)
-        or upper in BENCHMARK_SECRET_ENV_NAMES
-        or upper in GPU_MASK_ENV_NAMES
-    ):
+    if not valid_env_key(upper) or _is_secret_key(upper) or upper in GPU_MASK_ENV_NAMES:
         return False
     return upper in PUBLISH_ENV_EXACT_ALLOWLIST or any(
         upper.startswith(prefix) for prefix in PUBLISH_ENV_PREFIX_ALLOWLIST
@@ -168,7 +150,13 @@ def sanitize_publish_env_mapping(
 
 
 def sanitize_publish_server_args(value: str) -> str:
-    """Remove credential options and host-local path operands from argv text."""
+    """Remove credential options, host-local path operands and the flags the launch guards add from argv text.
+
+    The launch guards size ``INJECTED_LAUNCH_FLAGS`` for the run they launch and add them again to any later run that
+    leaves them out, so a shared recipe that kept them would hand one run's context cap to every replay.
+    """
+    from hyperloom.inference_optimizer.grid_server_args import INJECTED_LAUNCH_FLAGS
+
     try:
         tokens = shlex.split(str(value or ""))
     except ValueError as exc:
@@ -181,16 +169,15 @@ def sanitize_publish_server_args(value: str) -> str:
             continue
         option, separator, operand = token.partition("=")
         normalized_option = option.lstrip("-")
-        if _is_secret_option(normalized_option):
+        if _is_secret_option(normalized_option) or option in INJECTED_LAUNCH_FLAGS:
             skip_value = not separator
             continue
         path_operand = operand if separator else token
-        if _is_absolute_path_text(path_operand):
-            if not separator and safe and safe[-1].startswith("-") and "=" not in safe[-1]:
-                safe.pop()
-            continue
-        redacted = redact_secret_values(token)
-        if redacted != token or "[LOCAL_PATH]" in _redact_embedded_paths(token):
+        if (
+            _is_absolute_path_text(path_operand)
+            or redact_secret_values(token) != token
+            or "[LOCAL_PATH]" in _redact_embedded_paths(token)
+        ):
             if not separator and safe and safe[-1].startswith("-") and "=" not in safe[-1]:
                 safe.pop()
             continue

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for the session manifest writer (provenance helpers, image detection, objective derivation, and the atomic write/load round-trip)."""
+"""Unit tests for the session manifest writer (provenance helpers, objective derivation, and the atomic write/load round-trip)."""
 
 from __future__ import annotations
 
@@ -33,7 +33,6 @@ def test_utc_now_compact_and_session_id():
 def test_git_revision_at_success(monkeypatch):
     monkeypatch.setattr(mf.subprocess, "run", lambda *a, **k: _Proc(0, "abc1234\n"))
     assert mf._git_revision_at(Path("/repo")) == "abc1234"
-    assert mf._git_revision() == "abc1234"
 
 
 def test_git_revision_at_nonzero_and_error(monkeypatch):
@@ -116,103 +115,6 @@ def test_build_dependencies(monkeypatch):
     assert set(deps) == {"magpie", "inferencex"}
 
 
-# ---- _detect_image --------------------------------------------------------
-def test_detect_image_env(monkeypatch):
-    monkeypatch.setenv("HYPERLOOM_IMAGE", "myimage:tag")
-    assert mf._detect_image() == "myimage:tag"
-
-
-def test_detect_image_marker(monkeypatch, tmp_path):
-    for v in ("HYPERLOOM_IMAGE", "CONTAINER_IMAGE", "IMAGE"):
-        monkeypatch.delenv(v, raising=False)
-    marker = tmp_path / "image"
-    marker.write_text("frommarker:1\n", encoding="utf-8")
-    monkeypatch.setattr(mf, "Path", Path)  # keep real Path
-    import hyperloom.inference_optimizer.session.manifest as mod
-
-    real_path = mod.Path
-
-    def _fake_path(arg):
-        if arg == "/etc/podinfo/image":
-            return marker
-        return real_path(arg)
-
-    monkeypatch.setattr(mod, "Path", _fake_path)
-    assert mf._detect_image() == "frommarker:1"
-
-
-def test_detect_image_cgroup(monkeypatch):
-    for v in ("HYPERLOOM_IMAGE", "CONTAINER_IMAGE", "IMAGE"):
-        monkeypatch.delenv(v, raising=False)
-    import hyperloom.inference_optimizer.session.manifest as mod
-
-    cgroup_text = "12:devices:/docker/0123456789abcdef0123\n7:cpu:/other\n"
-
-    class _Cgroup:
-        def exists(self):
-            return True
-
-        def read_text(self, **k):
-            return cgroup_text
-
-    class _NoMarker:
-        def exists(self):
-            return False
-
-    def _fake_path(arg):
-        if str(arg) == "/proc/1/cgroup":
-            return _Cgroup()
-        return _NoMarker()
-
-    monkeypatch.setattr(mod, "Path", _fake_path)
-    assert mf._detect_image() == "unknown@0123456789ab"
-
-
-def test_detect_image_marker_oserror(monkeypatch):
-    for v in ("HYPERLOOM_IMAGE", "CONTAINER_IMAGE", "IMAGE"):
-        monkeypatch.delenv(v, raising=False)
-    import hyperloom.inference_optimizer.session.manifest as mod
-
-    class _BadMarker:
-        def exists(self):
-            return True
-
-        def read_text(self, **k):
-            raise OSError("denied")
-
-    class _NoCgroup:
-        def exists(self):
-            return False
-
-    def _fake_path(arg):
-        if str(arg).startswith("/etc/"):
-            return _BadMarker()
-        return _NoCgroup()
-
-    monkeypatch.setattr(mod, "Path", _fake_path)
-    assert mf._detect_image() is None
-
-
-def test_detect_image_none(monkeypatch):
-    for v in ("HYPERLOOM_IMAGE", "CONTAINER_IMAGE", "IMAGE"):
-        monkeypatch.delenv(v, raising=False)
-    import hyperloom.inference_optimizer.session.manifest as mod
-
-    real_path = mod.Path
-
-    class _Missing:
-        def exists(self):
-            return False
-
-    def _fake_path(arg):
-        if str(arg).startswith("/etc/") or str(arg) == "/proc/1/cgroup":
-            return _Missing()
-        return real_path(arg)
-
-    monkeypatch.setattr(mod, "Path", _fake_path)
-    assert mf._detect_image() is None
-
-
 # ---- _objective_summary ---------------------------------------------------
 def test_objective_summary_variants():
     assert mf._objective_summary(SimpleNamespace(target_gain=10))["kind"] == "gain_pct"
@@ -229,9 +131,7 @@ def test_objective_summary_variants():
 
 # ---- build / write / load -------------------------------------------------
 def test_build_manifest_without_args(monkeypatch):
-    monkeypatch.setattr(mf, "_git_revision", lambda: "rev1")
     monkeypatch.setattr(mf, "_build_dependencies", dict)
-    monkeypatch.setattr(mf, "_detect_image", lambda: None)
     m = mf.build_manifest(Path("/tmp/sd"))
     assert m["schema_version"] == mf.SCHEMA_VERSION
     assert m["framework"] == "sglang"
@@ -239,9 +139,7 @@ def test_build_manifest_without_args(monkeypatch):
 
 
 def test_build_manifest_with_args(monkeypatch):
-    monkeypatch.setattr(mf, "_git_revision", lambda: "rev1")
     monkeypatch.setattr(mf, "_build_dependencies", dict)
-    monkeypatch.setattr(mf, "_detect_image", lambda: None)
     for v in ("ISL", "OSL", "CONC", "TP", "MAX_MODEL_LEN"):
         monkeypatch.delenv(v, raising=False)
     args = argparse.Namespace(
@@ -255,8 +153,6 @@ def test_build_manifest_with_args(monkeypatch):
         target_tput=None,
         target_baseline_dir=None,
         max_hours=2,
-        research_lane_capacity=3,
-        gpu_specialist_capacity=2,
         kb_degraded_reason=None,
         pr_degraded_reason=None,
     )
@@ -267,14 +163,11 @@ def test_build_manifest_with_args(monkeypatch):
     assert m["workload"]["isl"] == 128
     assert m["objective"]["kind"] == "gain_pct"
     assert m["max_minutes"] == 120
-    assert m["research_lane_capacity"] == 3
 
 
 def test_build_manifest_shared_provenance_fields(monkeypatch):
-    """Schema v4 carries gfx/EP/graph-mode/server-args from the shared WP-0 provenance builder (kept in lockstep with the TraceShapeManifest)."""
-    monkeypatch.setattr(mf, "_git_revision", lambda: "rev1")
+    """Schema v4 carries gfx/EP/graph-mode/server-args from the shared WP-0 provenance builder."""
     monkeypatch.setattr(mf, "_build_dependencies", dict)
-    monkeypatch.setattr(mf, "_detect_image", lambda: None)
     monkeypatch.setattr(
         mf,
         "build_provenance",
@@ -284,6 +177,8 @@ def test_build_manifest_shared_provenance_fields(monkeypatch):
             "graph_mode": "graph_capture",
             "server_args": ["--tp", "1"],
             "server_args_hash": "abc123",
+            "code_revision": "rev1",
+            "image": "img:tag",
         },
     )
     m = mf.build_manifest(Path("/tmp/sd"))
@@ -293,13 +188,12 @@ def test_build_manifest_shared_provenance_fields(monkeypatch):
     assert m["graph_mode"] == "graph_capture"
     assert m["server_args"] == ["--tp", "1"]
     assert m["server_args_hash"] == "abc123"
+    assert (m["code_revision"], m["image"]) == ("rev1", "img:tag")
 
 
 def test_manifest_versions_a_framework_installed_in_its_own_venv(monkeypatch, tmp_path):
     """``--framework-env isolated`` is the default for vLLM, so the framework is installed where the orchestrator's interpreter cannot see it."""
-    monkeypatch.setattr(mf, "_git_revision", lambda: "rev1")
     monkeypatch.setattr(mf, "_build_dependencies", dict)
-    monkeypatch.setattr(mf, "_detect_image", lambda: None)
     venv_root = tmp_path / "vllm-venv"
     info = venv_root / "lib" / "python3.12" / "site-packages" / "vllm-0.27.1+rocm723.dist-info"
     info.mkdir(parents=True)
@@ -312,18 +206,14 @@ def test_manifest_versions_a_framework_installed_in_its_own_venv(monkeypatch, tm
 
 
 def test_build_manifest_snapshots_user_data_path_from_env(monkeypatch, tmp_path):
-    monkeypatch.setattr(mf, "_git_revision", lambda: "rev1")
     monkeypatch.setattr(mf, "_build_dependencies", dict)
-    monkeypatch.setattr(mf, "_detect_image", lambda: None)
     monkeypatch.setenv(mf._paths.ENV_USER_DATA_PATH, str(tmp_path / "ud"))
     m = mf.build_manifest(tmp_path / "ud" / "sess")
     assert m["user_data_path"] == str(tmp_path / "ud")
 
 
 def test_build_manifest_user_data_path_falls_back_to_workspace_root(monkeypatch):
-    monkeypatch.setattr(mf, "_git_revision", lambda: "rev1")
     monkeypatch.setattr(mf, "_build_dependencies", dict)
-    monkeypatch.setattr(mf, "_detect_image", lambda: None)
     monkeypatch.delenv(mf._paths.ENV_USER_DATA_PATH, raising=False)
     m = mf.build_manifest(Path("/tmp/sd"))
     assert m["user_data_path"] == str(mf._paths.workspace_root())
@@ -331,9 +221,7 @@ def test_build_manifest_user_data_path_falls_back_to_workspace_root(monkeypatch)
 
 
 def test_write_and_load_manifest_roundtrip(monkeypatch, tmp_path):
-    monkeypatch.setattr(mf, "_git_revision", lambda: "rev1")
     monkeypatch.setattr(mf, "_build_dependencies", dict)
-    monkeypatch.setattr(mf, "_detect_image", lambda: None)
     written = mf.write_manifest(tmp_path, session_id="sid-x")
     loaded = mf.load_manifest(tmp_path)
     assert loaded["session_id"] == "sid-x"

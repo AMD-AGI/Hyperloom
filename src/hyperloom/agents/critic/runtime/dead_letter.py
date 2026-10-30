@@ -120,8 +120,8 @@ class DeadLetter:
                 try:
                     dispatcher(endpoint, payload)
                     summary.succeeded += 1
-                except Exception as exc:  # noqa: BLE001
-                    log.warning("dead-letter replay failed for %s:%d: %s", path, lineno, exc)
+                except Exception as exc:  # isolation boundary: one dead-letter record
+                    log.warning("dead-letter replay failed for %s:%d: %s", path, lineno, exc, exc_info=True)
                     summary.failed += 1
                     summary.failed_details.append(
                         {

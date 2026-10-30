@@ -64,7 +64,6 @@ async def _gate(
     return await IntegratePatchExecutor(session_dir=tmp_path / "session")._gate_perf(
         attempt=attempt,
         params={"base_tput": 1000.0, "keep_threshold_pct": 1.0},
-        extra={"shared_state": state},
         bench_result={
             "output_throughput": tput,
             "launch_evidence_path": _slot(tmp_path, "after", after_log),

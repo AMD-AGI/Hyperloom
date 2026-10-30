@@ -28,8 +28,8 @@ from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.phases.dispatch_order import in_dispatch_order
 from hyperloom.orchestrator.policy.gate import PolicyDenied, PolicyGate
+from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
-    SpecialistPromptInputs,
     _section_execution_budget,
     _section_gap,
     _section_hardware,
@@ -58,7 +58,6 @@ def _custom_domain():
 
 def _inputs(domain, **kw: Any) -> SpecialistPromptInputs:
     return SpecialistPromptInputs(
-        task_id="t",
         domain=domain,
         gap_canonical_id="gap.x",
         gap_symptom="s",
@@ -174,9 +173,7 @@ async def test_runner_prepare_reads_the_custom_definition_from_shared_state(tmp_
         params={"domain": "custom_specialist", "gap_canonical_id": "gap.x", "mode": "research"},
     )
 
-    prep = await runner._prepare(
-        RunnerContext(task=task, lease=None, extra={"shared_state": state}), prompt_inputs=None
-    )
+    prep = await runner._prepare(RunnerContext(task=task, lease=None, extra={"shared_state": state}))
 
     assert prep.domain.description == _DESCRIPTION
     assert f"Description: {_DESCRIPTION}\n" in prep.system_prompt
@@ -218,7 +215,6 @@ async def test_custom_specialist_prompt_shows_the_experience_kb_block_its_warmup
     runner = SpecialistRunner(subprocess_config=SpecialistSubprocessConfig(), session_dir=tmp_path)
     prep = await runner._prepare(
         RunnerContext(task=_StubTask("task-custom", params), lease=None, extra={"shared_state": coord.shared_state}),
-        prompt_inputs=None,
     )
 
     assert [r["read_id"] for r in coord.shared_state.experience_kb_injections] == ["read-1"]
@@ -674,9 +670,9 @@ class _BenchTasks:
     async def running(self):
         return self._running
 
-    async def create_or_return_existing(self, **kwargs):
-        existing = any(c["idempotency_key"] == kwargs["idempotency_key"] for c in self.created)
-        self.created.append(kwargs)
+    async def create_or_return_existing(self, spec):
+        existing = any(c["idempotency_key"] == spec.idempotency_key for c in self.created)
+        self.created.append(vars(spec))
         return SimpleNamespace(task_id=f"t-{len(self.created)}"), existing
 
     async def find_by_idempotency_key(self, key):
@@ -977,7 +973,7 @@ async def test_only_mode_tick_runs_the_custom_work_alone(monkeypatch, only, expe
     monkeypatch.setattr(FrameworkPhase, "_pump_framework_agent_phase", _rec("framework"))
     monkeypatch.setattr(FrameworkPhase, "_maybe_bench_untested_proposals", _rec("bench"))
     monkeypatch.setattr(FrameworkPhase, "_maybe_finish_custom_only_cycle", _rec("finish"))
-    monkeypatch.setattr(FrameworkPhase, "_pump_predictor", _rec("predictor"))
+    monkeypatch.setattr(FrameworkPhase, "_predictor_pump", lambda self: SimpleNamespace(step=_rec("predictor")))
     monkeypatch.setattr(FrameworkPhase, "_record_advisory_plateau", lambda self: None)
     state = SharedState(custom_specialist_prompt=_PROMPT, custom_specialist_only=only)
     coord = SimpleNamespace(

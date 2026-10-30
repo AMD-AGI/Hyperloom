@@ -33,21 +33,9 @@ log = logging.getLogger(__name__)
 #: to, and a root at ``NOTSET`` enables everything.
 _enabled = False
 
-#: Fields that carry a v4 entity's stable identity, most specific first, so a
+#: Fields that carry an entity's stable identity, most specific first, so a
 #: nested entity is named by its own id rather than its parent's.
-_ID_FIELDS = (
-    "measurement_id",
-    "adoption_id",
-    "operation_id",
-    "subject_id",
-    "artifact_id",
-    "attempt_id",
-    "substep_id",
-    "gate_id",
-    "decision_id",
-    "relation_id",
-    "kernel_id",
-)
+_ID_FIELDS = ("attempt_id", "gate_id", "decision_id", "kernel_id")
 
 #: Frames inside this directory are the SDK itself, not the caller of it.
 _SDK_DIR = str(Path(__file__).resolve().parent)
@@ -147,7 +135,7 @@ def _call_site() -> str:
     return f"via={via or '?'} from=?"
 
 
-def _emit(section: str, fields: list[str]) -> None:
+def _emit(fields: list[str]) -> None:
     """Mask one assembled trace line and log it."""
     log.log(TRACE, "breakdown %s", redact_secret_values(" ".join(fields)))
 
@@ -193,7 +181,7 @@ def trace_write(write: WriteTrace) -> None:
         fields.append(_call_site())
         if write.error is not None:
             fields.append(f"error={type(write.error).__name__}:{_short(write.error)}")
-        _emit(section, fields)
+        _emit(fields)
     except Exception:
         log.log(TRACE, "breakdown trace failed for section=%s", section, exc_info=True)
 
@@ -222,7 +210,7 @@ def trace_skip(
         fields.append(_call_site())
         if error is not None:
             fields.append(f"error={type(error).__name__}:{_short(error)}")
-        _emit(section, fields)
+        _emit(fields)
     except Exception:
         log.log(TRACE, "breakdown trace failed for section=%s", section, exc_info=True)
 

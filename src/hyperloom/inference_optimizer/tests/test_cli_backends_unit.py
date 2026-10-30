@@ -68,7 +68,6 @@ def _build(**over):
     critic = clib.CriticSetup(
         choice=kwargs.pop("critic_choice"),
         agent_root=kwargs.pop("critic_agent_root", None),
-        kb_mode=kwargs.pop("critic_kb_mode", "inmemory"),
         protocol=kwargs.pop("critic_protocol", "auto"),
     )
     session_dir = kwargs.pop("session_dir")
@@ -97,16 +96,6 @@ def test_build_backends_mock_defaults() -> None:
     assert "kernel_agent" not in b
 
 
-def test_build_backends_invalid_critic_choice() -> None:
-    with pytest.raises(ValueError, match="critic_choice"):
-        _build(critic_choice="bogus")
-
-
-def test_build_backends_critic_agent_requires_root() -> None:
-    with pytest.raises(ValueError, match="critic_agent_root"):
-        _build(critic_choice="agent")
-
-
 def test_build_backends_critic_agent_with_root() -> None:
     b = _build(critic_choice="agent", critic_agent_root=Path("/tmp/critic"))
     assert b["critic"][0] == "critic_agent"
@@ -126,15 +115,6 @@ def test_build_backends_anthropic_only_uses_native_critic_agent(monkeypatch) -> 
     assert b["critic"][1]["protocol"] == "anthropic"
     assert b["critic"][1]["claude_model"] == "claude-x"
     assert "kernel_agent" not in b
-
-
-def test_build_backends_anthropic_only_refuses_to_degrade_without_root(monkeypatch) -> None:
-    """Silently swapping the critic for bare tool-use would drop KB priors and session memory with no signal, so a missing root is now an error."""
-    _clear_provider_env(monkeypatch)
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
-    with pytest.raises(ValueError, match="critic_agent_root"):
-        _build(critic_choice="agent", critic_agent_root=None)
 
 
 def test_build_backends_oauth_only_uses_anthropic_critic_protocol(monkeypatch) -> None:
@@ -229,17 +209,6 @@ def test_build_backends_forced_openai_protocol_rejects_a_bare_anthropic_bearer(m
             critic_choice="agent",
             critic_agent_root=Path("/tmp/critic"),
             critic_protocol="openai",
-        )
-
-
-def test_build_backends_rejects_unknown_critic_protocol(monkeypatch) -> None:
-    _clear_provider_env(monkeypatch)
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
-    with pytest.raises(ValueError, match="critic_protocol"):
-        _build(
-            critic_choice="agent",
-            critic_agent_root=Path("/tmp/critic"),
-            critic_protocol="bogus",
         )
 
 
@@ -388,13 +357,16 @@ def test_proposal_scorer_empty_models_returns_none(monkeypatch) -> None:
 
 
 def test_proposal_scorer_default_models(monkeypatch) -> None:
+    from hyperloom.inference_optimizer.cli.parser import _build_parser
+    from hyperloom.orchestrator.scoring.proposal_scorer import DEFAULT_SCORER_MODELS
+
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
     monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     monkeypatch.setattr(clib, "ProposalScorer", lambda **kw: ("scorer", kw))
-    args = argparse.Namespace(proposal_scoring=True)
+    args = _build_parser().parse_args(["optimize", "--model", "x", "--proposal-scoring"])
     out = clib._build_proposal_scorer(args)
     assert out[0] == "scorer"
-    assert len(out[1]["models"]) >= 1
+    assert out[1]["models"] == tuple(DEFAULT_SCORER_MODELS)
 
 
 def test_proposal_scorer_explicit_models(monkeypatch) -> None:

@@ -13,7 +13,7 @@ from typing import Any
 
 from hyperloom.common.coerce import to_float
 from hyperloom.inference_optimizer.framework_paths import resolve_kernel_search_roots
-from hyperloom.inference_optimizer.gpu_types import amd_gpu_dispatch_identity
+from hyperloom.inference_optimizer.gpu_types import amd_gpu_board
 
 from ._nogit_patch import _is_within
 
@@ -212,10 +212,10 @@ def _validate_aiter_gemm_artifacts(
     an artifact must not enter E2E promotion because benchmark variance could
     otherwise attribute an unrelated gain to it.
     """
-    identity = amd_gpu_dispatch_identity(gpu_type)
-    if identity is None:
+    board = amd_gpu_board(gpu_type)
+    if board is None:
         return []
-    expected_gfx, expected_cu_num = identity
+    expected_gfx, expected_cu_num = board.gfx, board.compute_units
     errors: list[dict[str, str]] = []
     required_columns = {"gfx", "cu_num", "us", "kernelName"}
 
