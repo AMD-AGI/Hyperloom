@@ -16,7 +16,7 @@ from typing import Any
 
 import yaml
 
-from hyperloom.common.coerce import to_float, to_int, to_str_list
+from hyperloom_common.coerce import to_float, to_int, to_str_list
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.launch_log_evidence import settings_the_engine_rewrote
 from hyperloom.common.model_paths import resolve_session_model_path
@@ -35,7 +35,7 @@ from hyperloom.common.perf_metric import (
     resolve_grading_anchor_perf,
     stamp_output_per_gpu,
 )
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.timeutil import now_iso
 from hyperloom.inference_optimizer.grading import resolved_grading
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...state.failure_evidence import (

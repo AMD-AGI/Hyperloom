@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.common.token_usage import openai_usage_counts, uncached_input_tokens
+from hyperloom_common.llm.token_usage import openai_usage_counts, uncached_input_tokens
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.loop.coordinator import Coordinator, RunOptions
 from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan

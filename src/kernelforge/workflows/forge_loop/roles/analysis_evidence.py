@@ -16,7 +16,7 @@ from kernelforge.utils.git import git
 from kernelforge.kernel_backends.constants import resolve_language_dirs
 from kernelforge.workflows.forge_loop.roles.contracts import CaseEvidence, EvidenceRef, OrchestrationContext
 from kernelforge.workflows.forge_loop.roles.supervisor import latest_supervisor_ruling_path
-from kernelforge.utils.durable_io import atomic_write_text
+from hyperloom_common.io import DURABLE, atomic_write_text
 
 
 log = logging.getLogger(__name__)
@@ -93,7 +93,7 @@ class AnalysisEvidenceMixin:
             log.warning(message)
             return result
         try:
-            atomic_write_text(path, completed.stdout)
+            atomic_write_text(path, completed.stdout, options=DURABLE)
         except OSError as error:
             message = f"could not persist cumulative Analysis diff for {evidence_commit}..{canonical_commit}: {error}"
             self.persistence_degraded = True

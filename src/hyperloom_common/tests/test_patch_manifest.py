@@ -5,7 +5,7 @@
 
 import pytest
 
-from hyperloom.common.unified_diff import PatchOp, PatchTarget, parse_patch_manifest
+from hyperloom_common.unified_diff import PatchOp, PatchTarget, parse_patch_manifest
 
 WRITE = PatchOp.WRITE
 DELETE = PatchOp.DELETE

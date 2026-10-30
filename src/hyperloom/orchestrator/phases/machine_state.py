@@ -10,9 +10,9 @@ import time
 from dataclasses import dataclass
 from typing import Any, NamedTuple
 
-from hyperloom.common.coerce import optional_positive_float, to_float, to_unix
-from hyperloom.common.env import env_float as _env_float, env_int as _env_int
-from hyperloom.common.timeutil import now_iso as _now_iso
+from hyperloom_common.coerce import optional_positive_float, to_float, to_unix
+from hyperloom_common.env import env_float as _env_float, env_int as _env_int
+from hyperloom_common.timeutil import now_iso as _now_iso
 from hyperloom.orchestrator.lever import (
     LEVER_CONFIG,
     LEVER_SOURCE_PATCH,
@@ -1677,7 +1677,7 @@ def _publish_phase_boundary(boundary: _PhaseBoundary) -> None:
     """Mirror a recorded phase move into LLM attribution and the session timeline."""
     # Publish the phase for LLM attribution: the spawn sites that tag outbound calls sit in specialists and kernel
     # tools and cannot reach SharedState.
-    from hyperloom.common.llm_attribution import set_current_phase
+    from hyperloom_common.llm.llm_attribution import set_current_phase
 
     set_current_phase(boundary.to_phase)
     from hyperloom.inference_optimizer.trace.trajectory_trace import EVENT_PHASE, record_event

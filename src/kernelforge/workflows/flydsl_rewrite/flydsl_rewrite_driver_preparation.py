@@ -31,7 +31,7 @@ from kernelforge.config.edit_policy import FORGE_PROTECTED_PATHS
 from kernelforge.workflows.flydsl_rewrite import driver_contract, protocol
 from kernelforge.workflows.flydsl_rewrite.budget import DEFAULT_REWRITE_BUDGET
 from kernelforge.workflows.flydsl_rewrite.spec import RewriteSpec
-from kernelforge.utils.durable_io import atomic_write_bytes
+from hyperloom_common.io import DURABLE, atomic_write_bytes
 from kernelforge.agent_backends.usage import UsageAccumulator
 
 log = logging.getLogger(__name__)
@@ -427,7 +427,7 @@ def _restore_driver(path: Path, original: bytes | None) -> None:
     if original is None:
         path.unlink(missing_ok=True)
         return
-    atomic_write_bytes(path, original)
+    atomic_write_bytes(path, original, options=DURABLE)
 
 
 def _build_prompt(
@@ -578,7 +578,7 @@ class _DriverAuthoring:
                         self.prior_failure = f"the generated driver is not valid Python: {error}"
                         continue
 
-                    atomic_write_bytes(self.destination, candidate_bytes)
+                    atomic_write_bytes(self.destination, candidate_bytes, options=DURABLE)
                     try:
                         self.last_preflight = preflight_rewrite_driver(
                             self.spec, str(self.destination), deadline_unix=deadline_unix

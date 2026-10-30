@@ -13,7 +13,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from kernelforge.workflows.forge_loop.campaign.experiments_layout import ExperimentsLayout, tagged_iteration
-from kernelforge.utils.durable_io import atomic_write_text
+from hyperloom_common.io import DURABLE, atomic_write_text
 
 log = logging.getLogger(__name__)
 
@@ -785,7 +785,7 @@ class LessonStore:
             return None
         destination = self.path(iteration)
         try:
-            atomic_write_text(destination, text + "\n")
+            atomic_write_text(destination, text + "\n", options=DURABLE)
         except OSError as error:
             self.degraded = True
             log.debug("lessons: could not write iter %s: %s", iteration, error)

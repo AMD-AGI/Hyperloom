@@ -570,7 +570,7 @@ def test_warm_start_post_commit_point_failures_are_degraded(
         )
     if failure_stage == "result_json":
 
-        def fail_result_write(_path, _payload):
+        def fail_result_write(_path, _payload, **_kwargs):
             raise OSError("result unavailable")
 
         monkeypatch.setattr(

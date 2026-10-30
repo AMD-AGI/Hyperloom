@@ -56,11 +56,17 @@ AMD_GPU_BOARDS: dict[str, GpuBoard] = {
     board.product: board
     for board in (
         # product, gfx, CUs, HBM GB, HBM GB/s, vendor peak TFLOPS
-        GpuBoard("mi300x", "gfx942", 304, 192.0, 5300.0, _MI300X_PEAKS),
-        GpuBoard("mi308x", "gfx942", 304, 192.0, 5300.0, _MI300X_PEAKS),
-        GpuBoard("mi325x", "gfx942", 304, 256.0, 6000.0, _MI300X_PEAKS),
+        GpuBoard("mi300x", "gfx942", 304, 192.0, 5300.0, _MI300X_PEAKS, aliases=("AMD Instinct MI300X",)),
+        GpuBoard("mi308x", "gfx942", 304, 192.0, 5300.0, _MI300X_PEAKS, aliases=("AMD Instinct MI308X",)),
+        GpuBoard("mi325x", "gfx942", 304, 256.0, 6000.0, _MI300X_PEAKS, aliases=("AMD Instinct MI325X",)),
         GpuBoard(
-            "mi355x", "gfx950", 256, 288.0, 8000.0, _matrix_peaks(bf16=2516.6, fp8=5033.2, fp4=10066.4, fp32=157.3)
+            "mi355x",
+            "gfx950",
+            256,
+            288.0,
+            8000.0,
+            _matrix_peaks(bf16=2516.6, fp8=5033.2, fp4=10066.4, fp32=157.3),
+            aliases=("AMD Instinct MI355X",),
         ),
         # https://www.amd.com/en/products/graphics/workstations/radeon-ai-pro/ai-9000-series/amd-radeon-ai-pro-r9700.html
         GpuBoard("r9700", "gfx1201", 64, 32.0, 640.0, _matrix_peaks(bf16=191.0, fp8=383.0, fp32=47.8)),

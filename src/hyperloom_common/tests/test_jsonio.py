@@ -8,7 +8,7 @@ import re
 
 import pytest
 
-from hyperloom.common.jsonio import (
+from hyperloom_common.jsonio import (
     extract_last_json_matching,
     extract_last_json_with_key,
     read_json,

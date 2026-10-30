@@ -14,9 +14,9 @@ from typing import Any
 import httpx
 import pytest
 
-from hyperloom.common import llm_config, llm_request_hooks
-from hyperloom.common.llm_config import AnthropicCompletionRequest, aanthropic_messages, anthropic_messages
-from hyperloom.common.llm_request_hooks import LLMRequestRecord, add_llm_request_observer
+from hyperloom_common.llm import llm_config, llm_request_hooks
+from hyperloom_common.llm.llm_config import AnthropicCompletionRequest, aanthropic_messages, anthropic_messages
+from hyperloom_common.llm.llm_request_hooks import LLMRequestRecord, add_llm_request_observer
 
 #: A reply as the Messages API streams it: a thinking block, a ping, a text block in two deltas, then the stop.
 REPLY: tuple[dict[str, Any], ...] = (

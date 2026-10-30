@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from hyperloom.common.coerce import to_int
+from hyperloom_common.coerce import to_int
 from hyperloom.common.prompt_safety import flatten_for_prompt
 from hyperloom.orchestrator.predictor.client import Prediction
 from hyperloom.orchestrator.predictor.view import SessionView

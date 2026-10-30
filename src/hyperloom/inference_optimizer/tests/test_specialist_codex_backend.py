@@ -14,7 +14,8 @@ from typing import Any
 
 import pytest
 
-from hyperloom.common import agent_cli, llm_config
+from hyperloom_common.llm import llm_config
+from hyperloom.common import agent_cli
 from hyperloom.common.deadline import Deadline
 
 import hyperloom.orchestrator.specialists.agent_cli_config as agent_cli_config

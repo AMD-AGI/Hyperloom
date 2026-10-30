@@ -1,7 +1,7 @@
 import pytest
 
-from hyperloom.common.env import EnvValueError
-from hyperloom.common.pr_monitor_urls import (
+from hyperloom_common.env import EnvValueError
+from hyperloom_common.pr_monitor_urls import (
     DEFAULT_KB_STORE_URL,
     pr_monitor_base_url,
     pr_monitor_enabled,

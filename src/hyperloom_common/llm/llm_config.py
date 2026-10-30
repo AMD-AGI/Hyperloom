@@ -15,20 +15,20 @@ from dataclasses import dataclass
 from typing import Iterable, Mapping, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
-from hyperloom.common.env import is_truthy
-from hyperloom.common.llm_attribution import call_headers as _attribution_headers
-from hyperloom.common.llm_attribution import gateway_selected as _gateway_selected
-from hyperloom.common.llm_attribution import inject_env as _inject_attribution_env
-from hyperloom.common.llm_headers import expand_env_refs, parse_custom_headers
-from hyperloom.common.llm_request_hooks import (
+from hyperloom_common.env import is_truthy
+from hyperloom_common.llm.llm_attribution import call_headers as _attribution_headers
+from hyperloom_common.llm.llm_attribution import gateway_selected as _gateway_selected
+from hyperloom_common.llm.llm_attribution import inject_env as _inject_attribution_env
+from hyperloom_common.llm.llm_headers import expand_env_refs, parse_custom_headers
+from hyperloom_common.llm.llm_request_hooks import (
     AnthropicStream,
     PROTOCOL_ANTHROPIC_MESSAGES,
     PROTOCOL_OPENAI_CHAT,
     RequestObservation,
     observed_request,
 )
-from hyperloom.common.reasoning_effort import gateway_reasoning_effort
-from hyperloom.common.token_usage import anthropic_usage_counts, openai_usage_counts, sdk_field
+from hyperloom_common.llm.reasoning_effort import gateway_reasoning_effort
+from hyperloom_common.llm.token_usage import anthropic_usage_counts, openai_usage_counts, sdk_field
 
 log = logging.getLogger(__name__)
 

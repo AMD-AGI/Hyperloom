@@ -9,7 +9,7 @@ import logging
 
 import pytest
 
-from hyperloom.common.llm_headers import (
+from hyperloom_common.llm.llm_headers import (
     expand_env_refs,
     format_custom_headers,
     parse_custom_headers,
