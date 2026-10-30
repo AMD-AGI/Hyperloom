@@ -84,8 +84,9 @@ class CloseArtifact(NamedTuple):
 class ClosePhase(CoordinatorCollaborator):
     """CLOSE phase sequencer: runs the fixed 7-step shutdown sequence and marks close_sequence_done."""
 
-    # Hard cap on the post-opt roofline; on timeout the optimized snapshot is skipped so report/breakdown still run.
+    # Floor on the post-opt roofline; the bound scales to the slowest roofline this session already ran.
     CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC: float = 600.0
+    _POST_OPT_ROOFLINE_HEADROOM: float = 1.25
     # Floor on the full-stack revalidation wait; the bound scales to two baseline runtimes and explore's session-deadline
     # check keeps it inside the run's budget.
     CLOSE_STACK_REVALIDATION_TIMEOUT_SEC: float = 600.0
@@ -101,6 +102,17 @@ class ClosePhase(CoordinatorCollaborator):
             if isinstance(entry, dict) and str(entry.get("action") or "") in self._POST_OPT_ROOFLINE_ACTIONS:
                 return True
         return False
+
+    async def _post_opt_roofline_timeout_sec(self, step: str) -> float | None:
+        """The slowest roofline this session ran, with headroom; ``None``, recorded as skipped, when it cannot fit."""
+        slowest_sec = float(self.shared_state.roofline_runtime_sec or 0.0)
+        timeout_sec = max(self.CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC, slowest_sec * self._POST_OPT_ROOFLINE_HEADROOM)
+        deadline = self.shared_state.session_deadline()
+        if deadline is None or deadline.remaining() >= timeout_sec:
+            return timeout_sec
+        detail = f"insufficient_session_time remaining={max(0.0, deadline.remaining()):.0f}s needed={timeout_sec:.0f}s"
+        await self._record_close_step(step, status="skipped", detail=detail)
+        return None
 
     async def _maybe_run_close_post_opt_roofline(self) -> None:
         """Best-effort: run one final post-opt roofline at CLOSE when a kernel/source patch was integrated."""
@@ -119,24 +131,23 @@ class ClosePhase(CoordinatorCollaborator):
         if self._coord.phase_prelude.internal_analysis_kind() != "roofline":
             await self._record_close_step(step, status="skipped", detail="roofline_disabled")
             return
+        timeout_sec = await self._post_opt_roofline_timeout_sec(step)
+        if timeout_sec is None:
+            return
         task = await self._coord.phase_prelude.enqueue_internal_analysis_task(reason="close_post_opt")
         if task is None:
             await self._record_close_step(step, status="skipped", detail="task_not_enqueued")
             return
-        log.info(
-            "CLOSE step 0: running post-opt roofline task=%s (timeout=%.0fs)",
-            task.task_id,
-            self.CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC,
-        )
+        log.info("CLOSE step 0: running post-opt roofline task=%s (timeout=%.0fs)", task.task_id, timeout_sec)
         try:
             result = await asyncio.wait_for(
                 self._coord.dispatcher.run_task_registered(task),
-                timeout=self.CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC,
+                timeout=timeout_sec,
             )
         except asyncio.TimeoutError:
             log.warning(
                 "CLOSE step 0: post-opt roofline timed out after %.0fs; skipping (no post-opt snapshot)",
-                self.CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC,
+                timeout_sec,
             )
             await self._abandon_close_task(task, reason="close_post_opt_roofline_timeout")
             await self._record_close_step(step, status="failed", task_id=task.task_id, detail="timeout")

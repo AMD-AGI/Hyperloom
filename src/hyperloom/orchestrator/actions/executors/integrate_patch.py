@@ -59,9 +59,9 @@ class IntegratePatchExecutor(
 
     async def __call__(self, ctx) -> dict[str, Any]:
         """Apply a specialist's patches/config changes and benchmark them."""
-        attempt = IntegrateAttempt(task_id=ctx.task.task_id)
         params = dict(ctx.task.params or {})
         extra = getattr(ctx, "extra", None) or {}
+        attempt = IntegrateAttempt(task_id=ctx.task.task_id, phase_deadline=extra.get("phase_deadline"))
 
         early = await self._stage_resolve(attempt, params, extra)
         if early is not None:

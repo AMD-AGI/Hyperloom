@@ -187,10 +187,7 @@ class BenchStageMixin:
         base_config = Path(params.get("config_path") or self.default_config_path or default_baseline_config())
         if not base_config.exists():
             raise RuntimeError(f"integrate_patch bench: config not found at {base_config}")
-        model_path = resolve_session_model_path(
-            params=params,
-            state_model_path=bench_leg.state_model_path,
-        )
+        model_path = resolve_session_model_path(params=params, state_model_path=bench_leg.state_model_path)
         gpu_type = str(params.get("gpu_type") or "").strip().lower() or os.environ.get("GPU_TYPE", "").strip().lower()
         benchmark_script = sanitize_script_name(params.get("benchmark_script"))
         result_dir = sanitize_result_dir(params.get("result_dir"))
@@ -277,6 +274,7 @@ class BenchStageMixin:
                     session_deadline_sec=bench_leg.session_deadline_sec,
                     variant_expected_sec=bench_leg.variant_expected_sec,
                     keep_going_on_failure=False,
+                    phase_deadline=bench_leg.phase_deadline,
                 ),
             )
         finally:
