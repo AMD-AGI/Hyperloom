@@ -28,7 +28,7 @@ _HOSTED = (
     "hyperloom_multibranch",
 )
 # Packages that exist only on the multibranch development branch; main must stay self-contained.
-_DEV_ONLY = ("hyperloom.hosted", "hyperloom_multibranch")
+_DEV_ONLY = ("hyperloom_multibranch",)
 _E2B_OWNER = "hyperloom/sandbox/e2b.py"
 
 

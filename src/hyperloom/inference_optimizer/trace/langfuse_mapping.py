@@ -19,6 +19,8 @@ from hyperloom.common.env_safety import (
     redact_secret_values,
 )
 
+from .llm_trace import LLM_STATUS_OK
+
 UNPHASED = "(unphased)"
 UNKNOWN_AGENT = "(unknown)"
 
@@ -26,12 +28,6 @@ UNKNOWN_AGENT = "(unknown)"
 LEVEL_DEFAULT = "DEFAULT"
 LEVEL_ERROR = "ERROR"
 
-# ``llm_trace.LLM_STATUS_OK``, re-declared rather than imported: this module is a pure projection layer that
-# ``llm_trace`` reaches back into via the emitter, so importing it here would close an import cycle.
-_STATUS_OK = "ok"
-
-# Env-var name fragments whose value is redacted before the environment snapshot is attached to session_start.
-_SENSITIVE_ENV_MARKERS: tuple[str, ...] = SENSITIVE_ENV_NAME_MARKERS
 _REDACTED = "***redacted***"
 
 # Vars whose value is a JSON object of NAME -> value (the CLI serializes ``--extra-env`` pins into this one). Neither
@@ -41,21 +37,12 @@ _JSON_ENV_MAP_NAMES: frozenset[str] = frozenset({"INFERENCE_OPTIMIZER_EXTRA_ENV"
 
 
 def correlation_seed(manifest: dict[str, Any], fallback: str) -> str:
-    """Pick the Langfuse correlation seed for a session."""
+    """Pick the Langfuse correlation seed for a session: its ``session_id`` grouping value, hashed into the trace id."""
     claw = str(manifest.get("claw_session_id") or "").strip()
     if claw:
         return claw
     sid = str(manifest.get("session_id") or "").strip()
     return sid or str(fallback)
-
-
-langfuse_session_id = correlation_seed
-"""The value for Langfuse's ``session_id`` grouping dimension.
-
-Same precedence as :func:`correlation_seed` (claw id wins) -- this is the
-human-facing session grouping in the Langfuse UI, whereas the trace_id is its
-hashed form.
-"""
 
 
 def agent_of(row: dict[str, Any]) -> str:
@@ -125,7 +112,6 @@ def pair_key(row: dict[str, Any]) -> tuple:
     return (
         str(row.get("component") or ""),
         row.get("task_id"),
-        row.get("dyn_id"),
         row.get("tick"),
         row.get("turn"),
         str(row.get("role") or ""),
@@ -153,8 +139,8 @@ def generation_name(row: dict[str, Any]) -> str:
 
 def generation_level(row: dict[str, Any]) -> str:
     """Map a row's terminal status onto a Langfuse observation level."""
-    status = str(row.get("status") or _STATUS_OK).strip().lower()
-    return LEVEL_DEFAULT if status == _STATUS_OK else LEVEL_ERROR
+    status = str(row.get("status") or LLM_STATUS_OK).strip().lower()
+    return LEVEL_DEFAULT if status == LLM_STATUS_OK else LEVEL_ERROR
 
 
 def generation_status_message(row: dict[str, Any]) -> str | None:
@@ -178,13 +164,12 @@ def generation_metadata(
         "turn": row.get("turn"),
         "call_id": row.get("call_id"),
         "task_id": row.get("task_id"),
-        "dyn_id": row.get("dyn_id"),
         "role": row.get("role"),
         "component": row.get("component"),
         "has_text": has_text,
         "latency_ms": row.get("latency_ms"),
         "reviewed_msg_ids": row.get("reviewed_msg_ids"),
-        "status": row.get("status") or _STATUS_OK,
+        "status": row.get("status") or LLM_STATUS_OK,
         "error_type": row.get("error_type"),
     }
 
@@ -215,7 +200,7 @@ def redact_env(environ: Mapping[str, str]) -> dict[str, str]:
         if (
             upper in BENCHMARK_SECRET_ENV_NAMES
             or is_secret_shaped_env_name(upper)
-            or any(marker in upper for marker in _SENSITIVE_ENV_MARKERS)
+            or any(marker in upper for marker in SENSITIVE_ENV_NAME_MARKERS)
         ):
             out[key] = _REDACTED
         elif upper in _JSON_ENV_MAP_NAMES and value:
@@ -391,7 +376,6 @@ __all__ = [
     "generation_metadata",
     "generation_name",
     "generation_start",
-    "langfuse_session_id",
     "pair_key",
     "parse_ts",
     "phase_of",

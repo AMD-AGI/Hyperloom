@@ -250,6 +250,22 @@ def _present_fields(item: dict[str, Any], *keys: str) -> dict[str, Any]:
     return {key: item[key] for key in keys if key in item}
 
 
+def _sdk_tool_call(item: dict[str, Any], normalized_type: str) -> tuple[str, dict[str, Any]] | None:
+    """The tool call one SDK item reports, or None when the item is not a tool call."""
+    if normalized_type == "commandexecution":
+        return str(item.get("command") or item["type"]), _present_fields(item, "exitCode", "status")
+    if normalized_type == "mcptoolcall":
+        server = str(item.get("server") or "mcp")
+        tool = str(item.get("tool") or "tool")
+        return f"{server}.{tool}", _present_fields(item, "status", "error")
+    if normalized_type in {"collabagenttoolcall", "collabtoolcall"}:
+        metadata = _present_fields(item, "status", "senderThreadId", "receiverThreadIds")
+        return str(item.get("tool") or "collab_agent"), metadata
+    if normalized_type == "subagentactivity":
+        return str(item.get("kind") or "subagent"), {"agentThreadId": item.get("agentThreadId", "")}
+    return None
+
+
 def _normalize_sdk_result(result: Any, session_id: str) -> AgentRunResult:
     """Normalize one completed SDK turn into the shared backend result."""
     text = str(getattr(result, "final_response", "") or "").strip()
@@ -258,21 +274,11 @@ def _normalize_sdk_result(result: Any, session_id: str) -> AgentRunResult:
     edit_count = 0
     for raw_item in getattr(result, "items", ()) or ():
         item = _sdk_item_dict(raw_item)
-        item_type = str(item.get("type") or "")
-        normalized_type = item_type.replace("_", "").lower()
+        normalized_type = str(item.get("type")).replace("_", "").lower()
         if normalized_type == "agentmessage" and not text and isinstance(item.get("text"), str):
             text = item["text"].strip()
-        elif normalized_type == "commandexecution":
-            tool_calls.append((str(item.get("command") or item_type), _present_fields(item, "exitCode", "status")))
-        elif normalized_type == "mcptoolcall":
-            server = str(item.get("server") or "mcp")
-            tool = str(item.get("tool") or "tool")
-            tool_calls.append((f"{server}.{tool}", _present_fields(item, "status", "error")))
-        elif normalized_type in {"collabagenttoolcall", "collabtoolcall"}:
-            metadata = _present_fields(item, "status", "senderThreadId", "receiverThreadIds")
-            tool_calls.append((str(item.get("tool") or "collab_agent"), metadata))
-        elif normalized_type == "subagentactivity":
-            tool_calls.append((str(item.get("kind") or "subagent"), {"agentThreadId": item.get("agentThreadId", "")}))
+        elif (tool_call := _sdk_tool_call(item, normalized_type)) is not None:
+            tool_calls.append(tool_call)
         elif normalized_type == "filechange" and any(
             isinstance(change, dict) and isinstance(change.get("path"), str) for change in item.get("changes", ())
         ):

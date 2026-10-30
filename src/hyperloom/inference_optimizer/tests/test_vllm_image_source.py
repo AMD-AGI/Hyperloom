@@ -80,7 +80,7 @@ VLLM_IMAGE_REPO="{upstream}"; VLLM_IMAGE_SOURCE_COMMIT="{commit}"; PYTHON="{os.s
 prepare_vllm_image_git_tree "{source}"
 copy_missing_vllm_wheel_artifacts "{source}" "{wheel}"; prepare_vllm_image_git_tree "{source}"
 """
-    result = _bash(("prepare_vllm_image_git_tree", "copy_missing_vllm_wheel_artifacts"), body)
+    result = _bash(("commit_image_baseline", "prepare_vllm_image_git_tree", "copy_missing_vllm_wheel_artifacts"), body)
 
     assert result.returncode == 0, result.stderr
     head = _git("rev-parse", "HEAD", cwd=source)
@@ -124,7 +124,7 @@ prepare_vllm_image_git_tree "{source}"
 printf 'user change\\n' > "{tracked}"
 prepare_vllm_image_git_tree "{source}"
 """
-    result = _bash(("prepare_vllm_image_git_tree",), body)
+    result = _bash(("commit_image_baseline", "prepare_vllm_image_git_tree"), body)
 
     assert result.returncode != 0
     assert tracked.read_text() == "user change\n"

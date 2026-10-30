@@ -7,9 +7,6 @@ from __future__ import annotations
 
 from typing import Any
 
-CLEANUP_COMPLETE = "complete"
-CLEANUP_RECOVERY_REQUIRED = "recovery_required"
-
 CLEANUP_ACTION_NONE = ""
 CLEANUP_ACTION_FINALIZE = "finalize"
 CLEANUP_ACTION_REVERT = "revert"
@@ -36,14 +33,14 @@ def cleanup_verdict(
     revert_result: dict[str, Any],
     finalize_result: dict[str, Any],
     revert_required: bool,
-) -> tuple[str, str, str]:
-    """Return (top_status, patch_cleanup_status, patch_cleanup_action)."""
+) -> tuple[str, str]:
+    """Return (top_status, patch_cleanup_action); an empty action means nothing is owed."""
     if decision == "KEEP":
         if lifecycle_complete(finalize_result):
-            return "ok", CLEANUP_COMPLETE, CLEANUP_ACTION_NONE
-        return "ok", CLEANUP_RECOVERY_REQUIRED, CLEANUP_ACTION_FINALIZE
+            return "ok", CLEANUP_ACTION_NONE
+        return "ok", CLEANUP_ACTION_FINALIZE
 
     if not revert_required or lifecycle_complete(revert_result):
-        return "ok", CLEANUP_COMPLETE, CLEANUP_ACTION_NONE
+        return "ok", CLEANUP_ACTION_NONE
 
-    return "failed", CLEANUP_RECOVERY_REQUIRED, CLEANUP_ACTION_REVERT
+    return "failed", CLEANUP_ACTION_REVERT

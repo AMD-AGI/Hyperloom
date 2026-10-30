@@ -19,6 +19,8 @@ from hyperloom.inference_optimizer.roofline_snapshot import BOTTLENECK_DOMAIN_HI
 _EXHAUSTED_MIN_ATTEMPTS: int = 2
 #: Marginal gain (%) below which a non-promoting cluster is treated as a dead end.
 _EXHAUSTED_MAX_GAIN_PCT: float = 1.0
+#: Exhausted directions listed in the digest, most-attempted first.
+_MAX_EXHAUSTED_DIRECTIONS: int = 5
 
 
 def _exhausted_clusters(entries: list[Any]) -> list[dict[str, Any]]:
@@ -64,8 +66,6 @@ def _stalled_cycle_count(shared_state: Any) -> int:
 def build_trajectory_digest(
     session_dir: str | Path,
     shared_state: Any,
-    *,
-    max_directions: int = 5,
 ) -> str:
     """Render the advisory trajectory-review block; ``\"\"`` when nothing to report."""
     entries = read_journal_entries(Path(session_dir))
@@ -84,7 +84,7 @@ def build_trajectory_digest(
 
     if dead:
         lines.append("exhausted_directions (avoid re-proposing):")
-        for row in dead[:max_directions]:
+        for row in dead[:_MAX_EXHAUSTED_DIRECTIONS]:
             gain = row["max_gain"]
             gain_str = f"max_gain {gain:.2f}%" if isinstance(gain, (int, float)) else "no positive gain"
             change = row["change"] or "(unspecified)"

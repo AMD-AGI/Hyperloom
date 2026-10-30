@@ -10,8 +10,11 @@ It runs on a machine with egress, in the application that starts a campaign, bef
 ``--out`` defaults to ``$HYPERLOOM_RUNNER_CACHE``. A build that fails fails the campaign: nothing falls back to
 installing over the network inside a sandbox. The wheels are downloaded for the interpreter and platform of the
 *framework image*, which is not the builder's own unless it is told: ``--python-version 3.10 --implementation cp
---abi cp310 --platform manylinux_2_28_x86_64`` for a CPython 3.10 image, and ``--index-url`` (or ``--find-links`` with
-``--no-index``) for where they come from. The lock's hashes are those of the files the index serves. A pin that the index
+--abi cp310 --abi abi3 --abi none`` and one ``--platform`` for every platform tag the image accepts
+(``manylinux_2_28_x86_64``, ``manylinux_2_17_x86_64``, ``manylinux2014_x86_64`` and so on down to ``manylinux1_x86_64``)
+for a CPython 3.10 image on glibc 2.28, and ``--index-url`` (or ``--find-links`` with ``--no-index``) for where they come
+from. pip does not widen a ``--platform`` to the older tags it covers, so naming only the newest one turns every pin
+published as ``manylinux2014`` into a source build. The lock's hashes are those of the files the index serves. A pin that the index
 serves only as a source distribution is built here into a wheel (the sdist's hash must be one the lock lists, and the
 manifest records it); that wheel must be pure Python, because a platform wheel built on the builder is not a wheel for
 the image, and the build is refused otherwise. Reading or building a source distribution runs its code on the builder, so
@@ -28,15 +31,29 @@ distribution's own build requirements name is never fetched. The lock must there
 - An entry that is already there is used when it is complete and still what a build would write (same commit tree, same
   wheel target, source and wheels intact); one that differs is never overwritten, the build refuses and names the
   difference. An entry with no manifest is the remains of a build that did not finish; it is removed and built again.
+- ``<entry>/bootstrap.sh`` is this builder's start-up script (:data:`~hyperloom.measure.runner.bootstrap.BOOTSTRAP_SCRIPT`,
+  mode 0755), not the commit's, and the manifest records its SHA-256. An entry that is otherwise what a build would write
+  but whose manifest records another script (a builder of another version made it) or none (it predates the script)
+  gets this builder's script and a manifest that records it, each replaced in one rename, under the lock; the result's
+  ``manifest_sha256`` is that new manifest's. A ``bootstrap.sh`` that does not match the hash its manifest records is
+  a difference like any other, and the build refuses.
 
 The cache must stay readable by the account the sandbox runs as: run the builder with a ``umask`` that leaves new files
 readable by others (``022``).
+
+Before the entry is renamed into place, the builder asks pip whether the requirements the sandbox installs
+(``runner-wheels.lock``) resolve for the wheel target from the entry's wheels alone (``pip install --dry-run --no-index
+--only-binary=:all:``, the sandbox's own flags), so a cache the runner could not install is refused here instead of
+failing in the sandbox. A hosted session names the runner's interpreter in ``$HYPERLOOM_RUNNER_WHEEL_TARGET``
+(:func:`runner_wheel_target`); it never builds for its own.
 """
 
 from __future__ import annotations
 
 import argparse
+import re
 import fcntl
+import hashlib
 import json
 import os
 import secrets
@@ -47,11 +64,13 @@ import tempfile
 import time
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from hyperloom.measure.runner.bootstrap import BOOTSTRAP_SCRIPT
 from hyperloom.measure.runner.cache_layout import (
+    BOOTSTRAP_NAME,
     CACHE_ENV,
     LOCK_FILE,
     MANIFEST_NAME,
@@ -68,28 +87,42 @@ from hyperloom.measure.runner.cache_layout import (
     manifest_to_json,
     parse_lock,
     requirement_line,
+    requirements_text,
     tree_digest,
 )
 
 __all__ = [
     "BuildOptions",
+    "RUNNER_TARGET_ENV",
     "CacheBuildError",
     "CacheConflict",
     "CacheEntry",
     "WheelSource",
     "WheelTarget",
     "ensure_runner_cache",
+    "exclusive",
     "main",
+    "runner_wheel_target",
 ]
 
 DEFAULT_LOCK_TIMEOUT_SEC = 1800.0
 _LOCK_POLL_SEC = 0.1
 _TAIL = 2000
 _UTF8 = "utf-8"
+#: ``bootstrap.sh`` is run with ``sh`` and may be run directly: readable and executable by the sandbox's account.
+_SCRIPT_MODE = 0o755
+_BOOTSTRAP_SHA256 = hashlib.sha256(BOOTSTRAP_SCRIPT.encode(_UTF8)).hexdigest()
 _BUILD_TOOLS = ("setuptools", "wheel")
 _NO_INDEX, _FIND_LINKS, _NO_DEPS = "--no-index", "--find-links", "--no-deps"
+_ISOLATED, _ONLY_BINARY, _REQUIRE_HASHES = "--isolated", "--only-binary=:all:", "--require-hashes"
 #: pip never asks a question and never checks for a newer pip.
 _PIP_QUIET = ("--disable-pip-version-check", "--no-input")
+#: The runner's interpreter and newest platform tag as one wheel tag, e.g. ``cp310-manylinux_2_28_x86_64``.
+RUNNER_TARGET_ENV = "HYPERLOOM_RUNNER_WHEEL_TARGET"
+_TARGET_TAG = re.compile(r"cp(?P<major>3)(?P<minor>[0-9]+)-manylinux_2_(?P<glibc>[0-9]+)_(?P<arch>x86_64|aarch64)")
+#: The legacy manylinux names of a glibc 2 minor version; pip accepts both spellings and downloads only what it is told.
+_LEGACY_MANYLINUX = {17: "manylinux2014", 12: "manylinux2010", 5: "manylinux1"}
+_OLDEST_GLIBC_MINOR = 5
 
 
 class CacheBuildError(CacheError):
@@ -124,6 +157,31 @@ class WheelTarget:
         for flag, values in (("--abi", self.abis), ("--platform", self.platforms)):
             args += [part for value in values for part in (flag, value)]
         return args
+
+
+def runner_wheel_target(environ: Mapping[str, str]) -> WheelTarget:
+    """The wheel target ``$HYPERLOOM_RUNNER_WHEEL_TARGET`` names: CPython ``X.Y`` (ABIs ``cpXY``, ``abi3``, ``none``) on
+    glibc ``2.N`` of one architecture, with every platform tag that glibc accepts, newest first.
+
+    Raises:
+        CacheBuildError: When the variable is unset or not of the form ``cp310-manylinux_2_28_x86_64``: the builder's
+            own interpreter is not the runner's, so nothing defaults to it.
+    """
+    value = environ.get(RUNNER_TARGET_ENV, "").strip()
+    match = _TARGET_TAG.fullmatch(value)
+    if match is None:
+        raise CacheBuildError(
+            f"${RUNNER_TARGET_ENV} must name the runner's interpreter as cpXY-manylinux_2_N_ARCH, "
+            f"e.g. cp310-manylinux_2_28_x86_64 (got {value[:80]!r})"
+        )
+    major, minor, arch = match["major"], match["minor"], match["arch"]
+    platforms: list[str] = []
+    for glibc in range(int(match["glibc"]), _OLDEST_GLIBC_MINOR - 1, -1):
+        platforms.append(f"manylinux_2_{glibc}_{arch}")
+        if glibc in _LEGACY_MANYLINUX:
+            platforms.append(f"{_LEGACY_MANYLINUX[glibc]}_{arch}")
+    platforms += [f"linux_{arch}", "any"]
+    return WheelTarget(f"{major}.{minor}", "cp", (f"cp{major}{minor}", "abi3", "none"), tuple(platforms))
 
 
 @dataclass(frozen=True)
@@ -194,7 +252,7 @@ def _pip(*args: str, python: Path | None = None) -> list[str]:
 
 def _pip_download(requirements: Path, dest: Path, extra: Sequence[str], what: str, python: Path | None = None) -> None:
     dest.mkdir()
-    command = _pip("download", _NO_DEPS, "--require-hashes", *_PIP_QUIET, python=python)
+    command = _pip("download", _NO_DEPS, _REQUIRE_HASHES, *_PIP_QUIET, python=python)
     _run([*command, "--dest", str(dest), "-r", str(requirements), *extra], what)
 
 
@@ -207,12 +265,12 @@ def _build_environment(pins: list[LockPin], options: BuildOptions, scratch: Path
         raise CacheBuildError("the lock pins no setuptools, so a source distribution in it cannot be built")
     pinned = scratch / "build-tools.lock"
     pinned.write_text("".join(requirement_line(pin.name, pin.version, sorted(pin.hashes)) for pin in tools), _UTF8)
-    downloads = [*options.source.pip_args(), "--only-binary=:all:"]
+    downloads = [*options.source.pip_args(), _ONLY_BINARY]
     _pip_download(pinned, scratch / "tools", downloads, "pip download of the build tools the lock pins")
     _run([sys.executable, "-m", "venv", "--without-pip", str(scratch / "env")], "creating the build environment")
     python = scratch / "env" / "bin" / "python"
-    install = ["--isolated", "install", _NO_INDEX, _FIND_LINKS, str(scratch / "tools"), "--only-binary=:all:"]
-    install += ["--require-hashes", _NO_DEPS, *_PIP_QUIET, "-r", str(pinned)]
+    install = [_ISOLATED, "install", _NO_INDEX, _FIND_LINKS, str(scratch / "tools"), _ONLY_BINARY]
+    install += [_REQUIRE_HASHES, _NO_DEPS, *_PIP_QUIET, "-r", str(pinned)]
     _run(_pip(*install, python=python), "installing the build tools the lock pins")
     return python
 
@@ -221,7 +279,7 @@ def _wheel_from_sdist(python: Path, sdist: Path, wheels: Path) -> str:
     """Build the pure-Python wheel of ``sdist`` into ``wheels`` with ``python``'s tools, remove the source distribution
     and return the wheel's file name."""
     with tempfile.TemporaryDirectory(dir=wheels.parent, prefix=".wheel-build-") as scratch:
-        build = ["--isolated", "wheel", "--no-build-isolation", _NO_INDEX, _NO_DEPS, "--no-cache-dir", *_PIP_QUIET]
+        build = [_ISOLATED, "wheel", "--no-build-isolation", _NO_INDEX, _NO_DEPS, "--no-cache-dir", *_PIP_QUIET]
         build += ["-w", scratch, str(sdist)]
         _run(_pip(*build, python=python), f"building a wheel from {sdist.name}")
         made = sorted(path.name for path in Path(scratch).iterdir())
@@ -279,6 +337,46 @@ def _wheel_entries(wheels: Path, pins: list[LockPin], built: Mapping[str, str]) 
     return tuple(entries.values())
 
 
+def _check_installable(entry: Path, manifest: Manifest, target: WheelTarget) -> None:
+    """Refuse an entry whose wheels alone do not satisfy what the sandbox installs, for the target's interpreter."""
+    with tempfile.TemporaryDirectory(dir=entry, prefix=".resolve-") as scratch:
+        requirements = Path(scratch) / "runner-wheels.lock"
+        requirements.write_text(requirements_text(manifest), encoding=_UTF8)
+        install = [_ISOLATED, "install", "--dry-run", "--target", str(Path(scratch) / "site"), _NO_INDEX]
+        install += [_FIND_LINKS, str(entry / WHEELS_DIR), _ONLY_BINARY, _REQUIRE_HASHES, _NO_DEPS]
+        install += [*_PIP_QUIET, *target.pip_args(), "-r", str(requirements)]
+        interpreter = f"Python {target.python_version}" if target.python_version else "the builder's interpreter"
+        _run(_pip(*install), f"checking that the runner ({interpreter}) can install the entry's wheels")
+
+
+def _replace_file(path: Path, text: str, mode: int | None = None) -> None:
+    """Write ``text`` to ``path`` in one rename, so a reader sees the old file or the new one."""
+    pending = path.with_name(f".{path.name}.tmp-{os.getpid()}-{secrets.token_hex(4)}")
+    try:
+        pending.write_text(text, encoding=_UTF8)
+        if mode is not None:
+            pending.chmod(mode)
+        os.replace(pending, path)
+    except BaseException:
+        pending.unlink(missing_ok=True)
+        raise
+
+
+def _write_bootstrap(entry: Path) -> str:
+    """Write this builder's start-up script as ``entry/bootstrap.sh`` and return its SHA-256."""
+    _replace_file(entry / BOOTSTRAP_NAME, BOOTSTRAP_SCRIPT, _SCRIPT_MODE)
+    return file_sha256(entry / BOOTSTRAP_NAME)
+
+
+def _with_this_bootstrap(entry: Path, manifest: Manifest) -> None:
+    """Give a finished entry whose manifest records another script, or none, this builder's script and a manifest
+    that records it; the script first, so the manifest never pins a script that is not there."""
+    if manifest.bootstrap_sha256 == _BOOTSTRAP_SHA256:
+        return
+    refreshed = replace(manifest, bootstrap_sha256=_write_bootstrap(entry))
+    _replace_file(entry / MANIFEST_NAME, manifest_to_json(refreshed))
+
+
 def _build(repo: Path, sha: str, tree: str, final: Path, options: BuildOptions) -> CacheEntry:
     """Make the entry beside ``final`` and rename it into place; the manifest is the last file written."""
     pending = final.parent / f".{sha}.tmp-{os.getpid()}-{secrets.token_hex(4)}"
@@ -290,7 +388,9 @@ def _build(repo: Path, sha: str, tree: str, final: Path, options: BuildOptions) 
         wheels = pending / WHEELS_DIR
         pins = parse_lock(lock.read_text(encoding=_UTF8))
         entries = _wheel_entries(wheels, pins, _download_wheels(lock, wheels, pins, options))
-        manifest = Manifest(sha, tree, tree_digest(source), entries, options.target.manifest_form())
+        bootstrap = _write_bootstrap(pending)
+        manifest = Manifest(sha, tree, tree_digest(source), entries, options.target.manifest_form(), bootstrap)
+        _check_installable(pending, manifest, options.target)
         (pending / MANIFEST_NAME).write_text(manifest_to_json(manifest), encoding=_UTF8)
         problems = check_entry(pending, sha, verify_hash=True)
         if problems:
@@ -333,6 +433,7 @@ def _use_or_clear(final: Path, sha: str, tree: str, options: BuildOptions) -> Ca
         raise CacheConflict(
             f"{final} is not what a build of {sha} writes, so it is left alone: {'; '.join(problems[:3])}"
         )
+    _with_this_bootstrap(final, manifest_from_json((final / MANIFEST_NAME).read_bytes()))
     return CacheEntry(final, file_sha256(final / MANIFEST_NAME), reused=True)
 
 
@@ -413,6 +514,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     print(json.dumps({"path": str(entry.path), "manifest_sha256": entry.manifest_sha256, "reused": entry.reused}))
     return 0
+
+
+#: Public name of the per-key ``flock`` the native build service (``hyperloom.measure.runner.native``) coalesces with.
+exclusive = _exclusive
 
 
 if __name__ == "__main__":

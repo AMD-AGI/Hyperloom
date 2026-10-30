@@ -118,7 +118,6 @@ def test_materialize_explicit_patches_are_used_verbatim(tmp_path: Path):
         params={"patches": [str(patch)]},
         framework_root=tmp_path,
         dest=tmp_path / "s.patch",
-        diff_fetch_timeout_sec=5.0,
     )
     assert out.failure is None
     assert out.mode == "explicit"
@@ -132,7 +131,6 @@ def test_materialize_refuses_to_bench_when_every_explicit_patch_is_missing(tmp_p
         params={"patches": [str(tmp_path / "gone.patch")]},
         framework_root=tmp_path,
         dest=tmp_path / "s.patch",
-        diff_fetch_timeout_sec=5.0,
     )
     assert out.patches == []
     assert out.failure is not None
@@ -162,8 +160,6 @@ def test_fetch_diff_to_path_passes_max_filesize(tmp_path: Path, monkeypatch):
 
 
 def test_materialize_reports_no_patch_when_candidate_carries_no_source(tmp_path: Path):
-    out = materialize_candidate_patches(
-        candidate={}, params={}, framework_root=tmp_path, dest=tmp_path / "s.patch", diff_fetch_timeout_sec=5.0
-    )
+    out = materialize_candidate_patches(candidate={}, params={}, framework_root=tmp_path, dest=tmp_path / "s.patch")
     assert out.failure is not None
     assert out.failure["status"] == "no_patch"

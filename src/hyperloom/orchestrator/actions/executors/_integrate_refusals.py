@@ -9,7 +9,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.coerce import to_str_list
+from hyperloom.common.coerce import to_float, to_str_list
+from hyperloom.common.gain_math import incremental_gain_pct
 from hyperloom.common.perf_metric import (
     GRADED_INTVTY,
     GRADED_OUTPUT,
@@ -26,6 +27,7 @@ from hyperloom.orchestrator.measurement.runtime_findings import (
     load_runtime_findings,
 )
 
+from ...enablement.lane import takes_enablement_round
 from ...policy.gate import INTEGRATE_PATCH_PERMISSIVE_VERDICTS
 from ...specialists.patch_safety import patch_targets_missing
 
@@ -49,14 +51,11 @@ def _accuracy_delta_pct(measured: Any, baseline: Any) -> float | None:
     Returns ``None`` when either side is missing or the baseline is not
     positive, so callers fall back to their existing value.
     """
-    try:
-        m = float(measured)
-        b = float(baseline)
-    except (TypeError, ValueError):
+    m = to_float(measured)
+    b = to_float(baseline)
+    if m is None or b is None:
         return None
-    if b <= 0.0:
-        return None
-    return (m - b) / b * 100.0
+    return incremental_gain_pct(m, b)
 
 
 def _measured_against(params: Mapping[str, Any], *, base_tput: float) -> dict[str, Any]:
@@ -210,6 +209,13 @@ def _enforce_critic_gate(
             ),
         }
     return None
+
+
+def _enablement_lane_closed_skip(params: Mapping[str, Any], shared_state: Any) -> "dict[str, Any] | None":
+    """The skip for an enablement round the lane no longer takes; ``None`` for any other integrate."""
+    if not params.get("enablement") or shared_state is None or takes_enablement_round(shared_state):
+        return None
+    return {"status": "skipped", "reason": f"enablement lane takes no rounds in phase {shared_state.phase}"}
 
 
 def _gate_failure_reasons(

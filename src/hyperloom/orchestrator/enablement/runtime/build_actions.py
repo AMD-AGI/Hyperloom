@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re as _re
 from dataclasses import dataclass, field
-from typing import Any, Literal, Mapping
+from typing import Any, Mapping
 
 from .stack_actions import FrameworkRuntime
 
@@ -48,14 +48,7 @@ class TargetedBuildAction:
     reason: str = ""
     repo_url: str = ""
     ref: str = ""
-    autoselect_tag_glob: str = "v*"
     gpu_arch: str = ""
-    max_jobs: int = 0
-    build_command: tuple[str, ...] = ()
-    torch_constraint_mode: Literal["constraint_file", "wheel_index_pin"] = "constraint_file"
-    build_budget_sec: int = 0
-    server_args: str = ""
-    envs: Mapping[str, str] = field(default_factory=dict)
     attempt_root: str = ""
     source_pr_url: str = ""
 
@@ -69,14 +62,7 @@ class TargetedBuildAction:
             "reason": self.reason,
             "repo_url": self.repo_url,
             "ref": self.ref,
-            "autoselect_tag_glob": self.autoselect_tag_glob,
             "gpu_arch": self.gpu_arch,
-            "max_jobs": self.max_jobs,
-            "build_command": list(self.build_command),
-            "torch_constraint_mode": self.torch_constraint_mode,
-            "build_budget_sec": self.build_budget_sec,
-            "server_args": self.server_args,
-            "envs": dict(self.envs),
             "attempt_root": self.attempt_root,
             "source_pr_url": self.source_pr_url,
         }
@@ -85,27 +71,9 @@ class TargetedBuildAction:
     def from_state(cls, d: Mapping[str, Any] | None) -> "TargetedBuildAction":
         """Rehydrate from a plain dict; missing keys default sensibly."""
         d = d or {}
-
-        def _tuple(key: str) -> tuple[str, ...]:
-            raw = d.get(key)
-            return tuple(str(x) for x in raw) if isinstance(raw, (list, tuple)) else ()
-
-        raw_envs = d.get("envs")
-        envs = {str(k): str(v) for k, v in raw_envs.items()} if isinstance(raw_envs, dict) else {}
-
         component = str(d.get("component") or "")
         if component not in _COMPONENTS:
             component = "aiter"
-        mode = str(d.get("torch_constraint_mode") or "constraint_file")
-        if mode not in ("constraint_file", "wheel_index_pin"):
-            mode = "constraint_file"
-
-        def _int(key: str) -> int:
-            try:
-                return int(d.get(key) or 0)
-            except (TypeError, ValueError):
-                return 0
-
         return cls(
             gap_id=str(d.get("gap_id") or ""),
             framework=str(d.get("framework") or "").strip().lower(),
@@ -114,14 +82,7 @@ class TargetedBuildAction:
             reason=str(d.get("reason") or ""),
             repo_url=str(d.get("repo_url") or ""),
             ref=str(d.get("ref") or ""),
-            autoselect_tag_glob=str(d.get("autoselect_tag_glob") or "v*"),
             gpu_arch=str(d.get("gpu_arch") or ""),
-            max_jobs=_int("max_jobs"),
-            build_command=_tuple("build_command"),
-            torch_constraint_mode=mode,  # type: ignore[arg-type]
-            build_budget_sec=_int("build_budget_sec"),
-            server_args=str(d.get("server_args") or ""),
-            envs=envs,
             attempt_root=str(d.get("attempt_root") or ""),
             source_pr_url=str(d.get("source_pr_url") or ""),
         )
@@ -137,7 +98,6 @@ class BuildResult:
     build_probes: tuple[str, ...] = ()
     installed_versions: Mapping[str, str] = field(default_factory=dict)
     build_log_path: str = ""
-    verify_log_path: str = ""
     error: str = ""
     failure_class: str = "ok"
     failure_summary: str = ""
@@ -151,7 +111,6 @@ class BuildResult:
             "build_probes": list(self.build_probes),
             "installed_versions": dict(self.installed_versions),
             "build_log_path": self.build_log_path,
-            "verify_log_path": self.verify_log_path,
             "error": self.error,
             "failure_class": self.failure_class,
             "failure_summary": self.failure_summary,
@@ -172,26 +131,16 @@ class BuildResult:
             build_probes=probes,
             installed_versions=versions,
             build_log_path=str(d.get("build_log_path") or ""),
-            verify_log_path=str(d.get("verify_log_path") or ""),
             error=str(d.get("error") or ""),
             failure_class=normalize_failure_class(d.get("failure_class")),
             failure_summary=str(d.get("failure_summary") or ""),
         )
 
 
-def build_novelty_key(
-    action: TargetedBuildAction,
-) -> tuple[str, str, str, str, str, tuple[str, ...]]:
+def build_novelty_key(action: TargetedBuildAction) -> tuple[str, str, str, str, str]:
     """Repeat-vs-novel identity for the stall gate."""
     repo_url = action.repo_url.strip().rstrip("/").removesuffix(".git").lower()
-    return (
-        action.component,
-        repo_url,
-        action.capability,
-        action.ref,
-        action.gpu_arch,
-        tuple(action.build_command),
-    )
+    return (action.component, repo_url, action.capability, action.ref, action.gpu_arch)
 
 
 _GITHUB_PR_RE = _re.compile(r"https?://github\.com/([^/]+/[^/]+)/pull/(\d+)", _re.IGNORECASE)

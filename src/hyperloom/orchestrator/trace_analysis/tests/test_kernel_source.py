@@ -7,7 +7,7 @@
 
 """Contract tests for the shared source-resolution helper.
 
-``_kernel_source`` is the one seam both the compute and bypass routes call.
+``_kernel_source`` is the one seam source resolution goes through.
 :func:`resolve_source_verdict` forwards the symbol and its launcher to TraceLens
 and returns the ``ResolveResult`` straight through; TraceLens owns the
 native-vs-Triton routing decision. These tests pin that forwarding contract. The

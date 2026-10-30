@@ -9,6 +9,7 @@ import os
 from dataclasses import dataclass
 
 from hyperloom.common.env import env_int
+from hyperloom.inference_optimizer import multi_node
 
 # Default /health poll timeout; override per-run via HYPERLOOM_MN_HEALTH_WAIT_S.
 DEFAULT_HEALTH_TIMEOUT_S = 900  # 15 min.
@@ -51,8 +52,8 @@ class RestartSettings:
             worker_wedge_grace_s=env_int("HYPERLOOM_MN_WORKER_WEDGE_GRACE_S", 420),
             worker_crash_grace_s=env_int("HYPERLOOM_MN_WORKER_CRASH_GRACE_S", 45),
             completion_probe_count=env_int("HYPERLOOM_MN_COMPLETION_PROBE_COUNT", 2),
-            completion_probe_tokens=env_int("HYPERLOOM_MN_COMPLETION_PROBE_TOKENS", 8),
-            completion_probe_min_tokens=env_int("HYPERLOOM_MN_COMPLETION_PROBE_MIN_TOKENS", 2),
+            completion_probe_tokens=multi_node.completion_probe_tokens(),
+            completion_probe_min_tokens=multi_node.completion_probe_min_tokens(),
             models_empty_grace_s=env_int("HYPERLOOM_MN_MODELS_EMPTY_GRACE_S", 600),
             completions_grace_s=env_int("HYPERLOOM_MN_COMPLETIONS_GRACE_S", 480),
             published_ready_s=env_int("HYPERLOOM_MN_PUBLISHED_READY_S", 300),

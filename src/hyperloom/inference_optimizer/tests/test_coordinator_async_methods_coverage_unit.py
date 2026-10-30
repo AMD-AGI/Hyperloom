@@ -288,6 +288,7 @@ async def test_unpromotable_baseline_mixed_classes_stop_after_three_total(
             idempotency_key="bl-mixed",
         )
 
+    coord.shared_state.enablement_mode = "off"
     # Two different outputs: the identical-failure rule must not be what stops the third call.
     subproc_a = _nonzero_result("RuntimeError: HIP out of memory")
     subproc_b = _nonzero_result("ConnectionError: port refused")
@@ -376,7 +377,7 @@ async def test_promote_explore_with_winner(coord: Coordinator) -> None:
     await coord.writeback.promote_to_shared_state(
         "explore",
         {
-            "winners": [{"name": "v0", "extra_server_args": "--tp 1", "tput": 900.0}],
+            "winners": [{"name": "v0", "fingerprint": "fp-v0", "extra_server_args": "--tp 1", "tput": 900.0}],
             "best_variant": {"name": "v0", "extra_server_args": "--tp 1", "tput": 900.0},
             "output_throughput": 900.0,
             "round_id": "r1",
@@ -419,7 +420,9 @@ async def test_compose_prompt_kernel(coord: Coordinator) -> None:
 
 #: ``(heading, owner, producer)`` for every advisory the orchestration prompt carries, in the order it carries
 #: them. A heading of ``None`` is a block the prompt emits without one. Section order is prompt content: the
-#: model reads these in this sequence, so a reordering is a change to what it was asked.
+#: model reads these in this sequence, so a reordering is a change to what it was asked. The session-stable
+#: advisories lead, in the cached context; the plateau advisory moves with the session, so it is rendered per
+#: tick and lands last.
 _ORCHESTRATION_ADVISORIES = (
     ("=== Warm start (Recipe KB T0) ===", "shared_state", "to_warm_start_summary"),
     ("=== Current gaps ===", "shared_state", "to_gaps_summary"),
@@ -428,10 +431,10 @@ _ORCHESTRATION_ADVISORIES = (
     ("=== Specialist proposal scores (advisory) ===", "shared_state", "to_proposal_scores_summary"),
     ("=== Priors-match (advisory ordering) ===", "conversation", "_priors_match_advisory_block"),
     ("=== Intervention mix (telemetry) ===", "shared_state", "to_intervention_mix_summary"),
-    ("=== Plateau advisory ===", "conversation", "plateau_advisory_block"),
     ("=== Bottleneck redirect (advisory) ===", "conversation", "_bottleneck_redirect_advisory_block"),
     ("=== Acceptance threshold (advisory) ===", "conversation", "_acceptance_threshold_advisory_block"),
     ("=== Discarded escalation hint (advisory) ===", "conversation", "_discarded_escalate_hint_advisory_block"),
+    ("=== Plateau advisory ===", "conversation", "plateau_advisory_block"),
 )
 
 
@@ -519,14 +522,17 @@ async def test_trajectory_reviewer_task_is_seeded_without_a_digest_when_the_dige
 
     created: list[dict] = []
 
-    async def _create_or_return_existing(**kwargs):
-        created.append(kwargs["params"])
+    async def _create_or_return_existing(spec):
+        created.append(spec.params)
         return SimpleNamespace(task_id="t-1"), False
 
     async def _warm(_params):
         return None
 
-    monkeypatch.setattr(trajectory_reviewer, "build_trajectory_digest", _unreadable("journal unreadable"))
+    def _undecodable_journal(*_a, **_k):
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "journal unreadable")
+
+    monkeypatch.setattr(trajectory_reviewer, "build_trajectory_digest", _undecodable_journal)
     monkeypatch.setattr(coord.conversation, "plateau_advisory_block", lambda: "plateau")
     monkeypatch.setattr(coord.specialist_dispatch, "warm_specialist_params", _warm)
     monkeypatch.setattr(coord.gpu_lanes, "framework_authoring_lanes_ttl", lambda params, *, base_ttl_sec: ([], 60))
@@ -551,9 +557,7 @@ def test_primary_gap_lookup_failure_propagates(coord: Coordinator, monkeypatch) 
 
 
 @pytest.mark.parametrize("failing", ["load_hints", "load_competitor_target"])
-def test_priors_match_advisory_logs_one_failure_and_yields_no_block(
-    coord: Coordinator, monkeypatch, caplog, failing: str
-) -> None:
+def test_priors_match_advisory_failure_propagates(coord: Coordinator, monkeypatch, failing: str) -> None:
     from hyperloom.inference_optimizer.baseline_comparison import research_hints as rh
 
     monkeypatch.setattr(coord.conversation, "_recent_proposed_variants", lambda: [{"name": "v"}])
@@ -562,11 +566,8 @@ def test_priors_match_advisory_logs_one_failure_and_yields_no_block(
     monkeypatch.setattr(rh, failing, _unreadable("hints unreadable"))
     coord.shared_state.target_advisory_enabled = True
 
-    with caplog.at_level("ERROR"):
-        block = coord.conversation._priors_match_advisory_block()
-
-    assert block == ""
-    assert _error_messages(caplog) == ["Coordinator: priors-match advisory failed"]
+    with pytest.raises(RuntimeError, match="hints unreadable"):
+        coord.conversation._priors_match_advisory_block()
 
 
 # -- advisory blocks -------------------------------------------------------
@@ -619,10 +620,11 @@ def _escalate(hint: str) -> Intent:
 
 
 @pytest.mark.asyncio
-async def test_escalate_invalid_hint_broadcasts_only(coord: Coordinator) -> None:
-    await coord.router._handle_escalate_strategy_change("orchestration", _escalate("bogus"))
-    # A bogus hint must not be pending (it was neither consumed nor stored).
-    assert coord.shared_state.pending_escalate_hint != "bogus"
+@pytest.mark.parametrize("hint", ["bogus", "skip_to_close"])
+async def test_escalate_hint_outside_the_vocab_is_denied(coord: Coordinator, hint: str) -> None:
+    await coord.router._handle_escalate_strategy_change("orchestration", _escalate(hint))
+    assert coord.shared_state.pending_escalate_hint == ""
+    assert coord.shared_state.policy_denial_history[-1]["rule"] == "escalate_hint_not_in_vocab"
 
 
 @pytest.mark.asyncio
@@ -656,18 +658,6 @@ async def test_escalate_skip_to_kernel_outside_framework_agent_is_dropped(coord:
         _escalate("skip_to_kernel"),
     )
     assert coord.shared_state.pending_escalate_hint == ""
-
-
-@pytest.mark.asyncio
-async def test_escalate_skip_to_close_sets_pending_hint(coord: Coordinator) -> None:
-    """skip_to_close reaches pending_escalate_hint (no suppression guard any more)."""
-    coord.shared_state.phase = "FRAMEWORK_AGENT"
-    coord.shared_state.baseline_tput = 1234.0
-    await coord.router._handle_escalate_strategy_change(
-        "orchestration",
-        _escalate("skip_to_close"),
-    )
-    assert coord.shared_state.pending_escalate_hint == "skip_to_close"
 
 
 # -- maybe_autosubmit_specialist_patches ----------------------------------
@@ -1118,14 +1108,13 @@ async def test_fan_out_wave_rejects_invalid_entries(coord: Coordinator, monkeypa
 # -- warm_specialist_params -----------------------------------------------
 @pytest.mark.asyncio
 async def test_warm_specialist_params_always_writes_the_unconditional_keys(coord: Coordinator) -> None:
-    """Three keys are written whatever the session holds, so a specialist can read them without a presence test."""
+    """Two keys are written whatever the session holds, so a specialist can read them without a presence test."""
     coord.shared_state.gpu_type = "mi300x"
     params: dict = {"domain": "kernel_agent"}
 
     await coord.specialist_dispatch.warm_specialist_params(params)
 
     assert params["gpu_type"] == "mi300x"
-    assert params["kb_subgraph"] == {}
     assert "keep_threshold_pct" in params
 
     empty: dict = {"domain": "kernel_agent"}
@@ -1255,7 +1244,7 @@ def test_record_fact_per_variant_keep_revert_skip(coord: Coordinator) -> None:
 
 def _nonzero_result(output: str) -> dict:
     """A ``subprocess_nonzero`` baseline result shaped the way the baseline executor builds one."""
-    from hyperloom.orchestrator.actions.executors.baseline import nonzero_output_signature
+    from hyperloom.orchestrator.state.failure_evidence import nonzero_output_signature
 
     return {
         "status": "failed",
@@ -1278,6 +1267,7 @@ def _baseline_task(task_id: str) -> Task:
 @pytest.mark.asyncio
 async def test_unpromotable_baseline_same_failure_twice_stops_at_two(coord: Coordinator) -> None:
     """Two subprocess_nonzero baselines that printed the same thing (modulo numbers) end the run at two."""
+    coord.shared_state.enablement_mode = "off"
     first = _nonzero_result("RuntimeError: worker 1234 died at t=17")
     second = _nonzero_result("RuntimeError: worker 98 died at t=4")
 
@@ -1291,6 +1281,7 @@ async def test_unpromotable_baseline_same_failure_twice_stops_at_two(coord: Coor
 @pytest.mark.asyncio
 async def test_unpromotable_baseline_different_failures_keep_three_strikes(coord: Coordinator) -> None:
     """Two different failures are not evidence of a third: the three-strike budget still applies."""
+    coord.shared_state.enablement_mode = "off"
     a = _nonzero_result("RuntimeError: HIP out of memory")
     b = _nonzero_result("ConnectionError: port refused")
 
@@ -1361,6 +1352,21 @@ async def test_unpromotable_baseline_same_failure_in_enablement_does_not_stop_ea
     assert coord.shared_state.stop_reason != "baseline_failed"
 
 
+@pytest.mark.asyncio
+async def test_unpromotable_baseline_same_failure_in_prelude_with_enablement_admitted_does_not_stop_early(
+    coord: Coordinator,
+) -> None:
+    """A retry that settles before the PRELUDE->ENABLEMENT transition is still enablement's input."""
+    from hyperloom.orchestrator.phases.machine_state import PHASE_PRELUDE
+
+    coord.shared_state.phase = PHASE_PRELUDE
+    result = _nonzero_result("ImportError: no module named foo")
+
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-pre-1"), result)
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-pre-2"), result)
+    assert coord.shared_state.stop_reason != "baseline_failed"
+
+
 _SHARED_TAIL = (
     "Traceback (most recent call last):\n"
     + "  File engine.py, in run_engine_core\n    engine.step()\n" * 60
@@ -1375,6 +1381,8 @@ async def _executor_nonzero_result(
     import types
 
     from hyperloom.orchestrator.actions.executors import baseline as bl
+    from hyperloom.orchestrator.actions.executors.benchmark_run import launch as launch_mod
+    from hyperloom.orchestrator.actions.executors.benchmark_run.records import BenchmarkAttempt
     from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 
     session = tmp_path / "session"
@@ -1384,9 +1392,9 @@ async def _executor_nonzero_result(
     run_workspace = out / "benchmark_vllm_1" if workspace else None
     if run_workspace is not None:
         run_workspace.mkdir()
-    monkeypatch.setattr(bl, "harvest_leaked_artifacts", lambda *a, **k: [])
-    monkeypatch.setattr(bl, "snapshot_workspaces", lambda *a, **k: set())
-    monkeypatch.setattr(bl, "select_run_workspace", lambda *a, **k: run_workspace)
+    monkeypatch.setattr(launch_mod, "harvest_leaked_artifacts", lambda *a, **k: [])
+    monkeypatch.setattr(launch_mod, "snapshot_workspaces", lambda *a, **k: set())
+    monkeypatch.setattr(launch_mod, "select_run_workspace", lambda *a, **k: run_workspace)
     monkeypatch.setattr(
         bl, "run_with_session_kill", lambda cmd, **kw: types.SimpleNamespace(returncode=1, stdout=stdout, stderr=stderr)
     )
@@ -1394,16 +1402,18 @@ async def _executor_nonzero_result(
     cfg.write_text("benchmark:\n  framework: vllm\n  model: /tmp/m\n", encoding="utf-8")
     ex = bl.BaselineExecutor(session_dir=session, magpie_python="/usr/bin/python3")
     return await ex._run_single_benchmark(
+        BenchmarkAttempt(
+            timeout_sec=30,
+            override_result_dir=None,
+            resolved_model="/tmp/m",
+            materialized_config_path=cfg,
+            inferencex_path="",
+            effective_extra_server_args="",
+            params={"framework": "vllm"},
+            ctx=RunnerContext(task=_baseline_task(name), lease=None, extra={}),
+        ),
         config_path=cfg,
         output_dir=out,
-        timeout_sec=30,
-        override_result_dir=None,
-        resolved_model="/tmp/m",
-        materialized_config_path=cfg,
-        inferencex_path="",
-        effective_extra_server_args="",
-        params={"framework": "vllm"},
-        ctx=RunnerContext(task=_baseline_task(name), lease=None, extra={}),
     )
 
 
@@ -1445,6 +1455,7 @@ async def test_baseline_executor_same_output_modulo_numbers_stops_at_two(
 
     assert first["output_signature"] == second["output_signature"] != ""
 
+    coord.shared_state.enablement_mode = "off"
     await coord.writeback.handle_unpromotable_result(_baseline_task("bl-same-1"), first)
     assert coord.shared_state.stop_reason != "baseline_failed"
     await coord.writeback.handle_unpromotable_result(_baseline_task("bl-same-2"), second)

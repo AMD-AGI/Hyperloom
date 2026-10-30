@@ -16,7 +16,13 @@ from jsonschema import Draft202012Validator
 from hyperloom.contracts.measurement import PhaseTiming
 from hyperloom.measure import signing
 from hyperloom.measure.docs import DocumentError
-from hyperloom.measure.manifest import ResultManifest, RulePackFacts, encode_manifest, manifest_sha256
+from hyperloom.measure.manifest import (
+    CardOccupancyFacts,
+    ResultManifest,
+    RulePackFacts,
+    encode_manifest,
+    manifest_sha256,
+)
 from hyperloom.measure.phases import PhaseRecorder, manifest_document as phases_document
 
 SCHEMA = json.loads(resources.files("hyperloom.contracts").joinpath("measurement_result.v1.schema.json").read_text())
@@ -50,6 +56,50 @@ def test_a_manifest_states_the_rule_pack_its_runner_read_and_one_from_an_older_r
     assert ResultManifest.from_document(stated).runner.rule_pack == RulePackFacts("2-test", PACK_DIGEST)
     assert "rule_pack" not in _document()["runner"]
     assert ResultManifest.from_document(_document()).runner.rule_pack is None
+
+
+@pytest.mark.parametrize(
+    ("stated", "expected"),
+    [
+        ({"state": "clean", "reason": None, "checks": 7}, CardOccupancyFacts("clean", None, 7)),
+        ({"state": "clean", "checks": 3}, CardOccupancyFacts("clean", None, 3)),
+        (
+            {"state": "unknown", "reason": "no AMD GPU driver is loaded", "checks": 0},
+            CardOccupancyFacts("unknown", "no AMD GPU driver is loaded", 0),
+        ),
+        (
+            {"state": "foreign", "reason": "1 held the test's cards: pid 9 on card 0", "checks": 4},
+            CardOccupancyFacts("foreign", "1 held the test's cards: pid 9 on card 0", 4),
+        ),
+        (
+            {"state": "clean", "reason": None, "checks": 9, "method": "census+fdinfo"},
+            CardOccupancyFacts("clean", None, 9, "census+fdinfo"),
+        ),
+        (
+            {"state": "unknown", "reason": "no driver", "checks": 0, "method": None},
+            CardOccupancyFacts("unknown", "no driver", 0),
+        ),
+        (
+            {"state": "unobservable", "reason": "every GPU node is refused to this view", "checks": 0, "method": None},
+            CardOccupancyFacts("unobservable", "every GPU node is refused to this view", 0),
+        ),
+    ],
+)
+def test_a_manifest_states_whether_its_cards_were_free_of_other_processes_and_why_not_when_it_could_not_say(
+    stated: dict[str, Any], expected: CardOccupancyFacts
+) -> None:
+    document = _edit(lambda d: d["runner"].update(card_occupancy=stated))
+
+    assert list(VALIDATOR.iter_errors(document)) == []
+    assert ResultManifest.from_document(document).runner.card_occupancy == expected
+
+
+def test_a_manifest_of_an_older_runner_or_of_a_runner_with_no_card_states_no_occupancy() -> None:
+    assert "card_occupancy" not in _document()["runner"]
+    assert ResultManifest.from_document(_document()).runner.card_occupancy is None
+    null = _edit(lambda d: d["runner"].update(card_occupancy=None))
+    assert list(VALIDATOR.iter_errors(null)) == []
+    assert ResultManifest.from_document(null).runner.card_occupancy is None
 
 
 def _timed(phases: list[dict[str, Any]]) -> dict[str, Any]:
@@ -141,6 +191,27 @@ NEGATIVES: dict[str, Callable[[dict[str, Any]], None]] = {
     "rule pack with an unknown key": lambda d: d["runner"].update(
         rule_pack={"version": "1", "digest": PACK_DIGEST, "path": "/x"}
     ),
+    "card occupancy that is another state": lambda d: d["runner"].update(
+        card_occupancy={"state": "other", "reason": None, "checks": 1}
+    ),
+    "card occupancy foreign with no process named": lambda d: d["runner"].update(
+        card_occupancy={"state": "foreign", "reason": None, "checks": 1}
+    ),
+    "card occupancy unknown with no reason": lambda d: d["runner"].update(
+        card_occupancy={"state": "unknown", "reason": None, "checks": 0}
+    ),
+    "card occupancy unobservable with no reason": lambda d: d["runner"].update(
+        card_occupancy={"state": "unobservable", "reason": None, "checks": 0}
+    ),
+    "card occupancy clean with a reason": lambda d: d["runner"].update(
+        card_occupancy={"state": "clean", "reason": "all is well", "checks": 2}
+    ),
+    "card occupancy with a negative count of looks": lambda d: d["runner"].update(
+        card_occupancy={"state": "clean", "reason": None, "checks": -1}
+    ),
+    "card occupancy with an unknown key": lambda d: d["runner"].update(
+        card_occupancy={"state": "clean", "reason": None, "checks": 1, "holders": []}
+    ),
 }
 
 
@@ -155,6 +226,10 @@ def test_a_manifest_that_breaks_the_contract_is_refused_by_the_reader_and_the_sc
         "class without reason",
         "file under a file",
         "duplicate file",
+        "card occupancy unknown with no reason",
+        "card occupancy unobservable with no reason",
+        "card occupancy foreign with no process named",
+        "card occupancy clean with a reason",
     }
     if name not in cross_field:
         assert list(VALIDATOR.iter_errors(document)) != [], "the schema accepts what the reader refuses"

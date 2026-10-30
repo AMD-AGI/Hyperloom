@@ -5,11 +5,14 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping
 from typing import Any
 
-from hyperloom.inference_optimizer.grid_server_args import tokenize_server_args_preserving_json
+from hyperloom.inference_optimizer.grid_server_args import (
+    SPECULATIVE_CONFIG_FLAG,
+    flag_occurrences,
+    speculative_config,
+)
 
 SPECULATIVE_DECODING_PINNED = "speculative_decoding_pinned"
 
@@ -30,8 +33,6 @@ _PINNED_FLAGS = frozenset(
     }
 )
 _ACCEPTANCE_FLAG_PREFIXES = ("spec-decode-acceptance", "speculative-acceptance")
-_SPEC_CONFIG_FLAG = "speculative-config"
-_SPEC_CONFIG_KEY_PREFIX = f"{_SPEC_CONFIG_FLAG}."
 _PINNED_SPEC_CONFIG_KEYS = frozenset(
     {
         "method",
@@ -44,37 +45,14 @@ _PINNED_SPEC_CONFIG_KEYS = frozenset(
 )
 _ACCEPTANCE_ENV_PREFIX = "SGLANG_SIMULATE_ACC_"
 _SIMULATED_LENGTH_ENV = "SGLANG_SIMULATE_ACC_LEN"
-_SYNTHETIC_REJECTION = f"--{_SPEC_CONFIG_FLAG}.rejection_sample_method"
-_SYNTHETIC_LENGTH = f"--{_SPEC_CONFIG_FLAG}.synthetic_acceptance_length"
+_SYNTHETIC_REJECTION = f"--{SPECULATIVE_CONFIG_FLAG}.rejection_sample_method"
+_SYNTHETIC_LENGTH = f"--{SPECULATIVE_CONFIG_FLAG}.synthetic_acceptance_length"
 
 
 class SpeculativeDecodingPinnedError(ValueError):
     """A candidate changes the draft or the simulated acceptance its base launch pins."""
 
     error_class = SPECULATIVE_DECODING_PINNED
-
-
-def _last_flag_values(server_args: str) -> dict[str, str]:
-    """Each ``--flag``'s value, last occurrence winning like the engines' argparse; ``""`` for a bare flag."""
-    split = tokenize_server_args_preserving_json(server_args)
-    tokens = split[1] if split is not None else server_args.split()
-    values: dict[str, str] = {}
-    for index, token in enumerate(tokens):
-        if not token.startswith("--"):
-            continue
-        name, assigned, value = token.partition("=")
-        if not assigned and index + 1 < len(tokens) and not tokens[index + 1].startswith("--"):
-            value = tokens[index + 1]
-        values[name.lstrip("-").lower().replace("_", "-")] = value
-    return values
-
-
-def _json_object(text: str) -> dict[str, Any]:
-    try:
-        parsed = json.loads(text)
-    except ValueError:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
 
 
 def _canonical(value: Any) -> str:
@@ -89,20 +67,20 @@ def _canonical(value: Any) -> str:
 def _speculative_identity(server_args: str, envs: Mapping[str, Any]) -> dict[str, str]:
     """The pinned settings a launch carries, keyed by flag, ``--speculative-config`` key or env name.
 
-    vLLM also takes a ``--speculative-config.<key>`` per key, merged over the JSON object, so both spellings land in
-    the same keys.
+    vLLM also takes a ``--speculative-config.<key>`` per key, merged over the JSON object by
+    :func:`speculative_config`, so both spellings land in the same keys.
     """
     identity = {str(k): _canonical(v) for k, v in envs.items() if str(k).startswith(_ACCEPTANCE_ENV_PREFIX)}
-    config: dict[str, Any] = {}
-    for flag, value in _last_flag_values(server_args).items():
-        if flag == _SPEC_CONFIG_FLAG:
-            config = {**_json_object(value), **config}
-        elif flag.startswith(_SPEC_CONFIG_KEY_PREFIX):
-            config[flag.removeprefix(_SPEC_CONFIG_KEY_PREFIX).replace("-", "_")] = value
-        elif flag in _PINNED_FLAGS or flag.startswith(_ACCEPTANCE_FLAG_PREFIXES):
+    occurrences = flag_occurrences(server_args)
+    config = speculative_config(occurrences)
+    for flag, value in dict(occurrences).items():
+        if flag in _PINNED_FLAGS or flag.startswith(_ACCEPTANCE_FLAG_PREFIXES):
             identity[f"--{flag}"] = _canonical(value)
     identity.update(
-        {f"--{_SPEC_CONFIG_FLAG}.{key}": _canonical(config[key]) for key in _PINNED_SPEC_CONFIG_KEYS & config.keys()}
+        {
+            f"--{SPECULATIVE_CONFIG_FLAG}.{key}": _canonical(config[key])
+            for key in _PINNED_SPEC_CONFIG_KEYS & config.keys()
+        }
     )
     return identity
 
@@ -154,7 +132,7 @@ def refuse_unpinned_speculative_change(
         raise SpeculativeDecodingPinnedError(
             f"{SPECULATIVE_DECODING_PINNED}: the base launch simulates speculative-decoding acceptance, which is "
             f"only valid for the draft it was set for, so the draft and its simulated acceptance are pinned; this "
-            f"candidate changes {changes}. Keep them as the base sets them (a --{_SPEC_CONFIG_FLAG} must restate "
+            f"candidate changes {changes}. Keep them as the base sets them (a --{SPECULATIVE_CONFIG_FLAG} must restate "
             "its pinned keys) and vary other knobs."
         )
 

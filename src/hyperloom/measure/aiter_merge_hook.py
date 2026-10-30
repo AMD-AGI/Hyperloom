@@ -125,15 +125,16 @@ class _AiterCoreFinder:
 
 
 def _chain() -> None:
-    """Run the ``sitecustomize`` this file shadows (the distribution's, for one), as Python would have run it.
+    """Run the ``sitecustomize`` this file shadows (the distribution's, for one), as Python would have run it: the first
+    one on ``sys.path`` after the directory of this one, so two hooks that both chain never run each other in a loop.
 
     Its failure is noted and raised again: ``site`` reports a failing ``sitecustomize`` and goes on, as it would for the
     original.
     """
-    for entry in sys.path:
-        folder = os.path.realpath(entry) if entry else ""
+    folders = [os.path.realpath(entry) for entry in sys.path if entry]
+    for folder in folders[folders.index(_HERE) + 1 :] if _HERE in folders else folders:
         candidate = os.path.join(folder, "sitecustomize.py")
-        if folder and folder != _HERE and os.path.isfile(candidate):
+        if os.path.isfile(candidate):
             try:
                 with open(candidate, "rb") as handle:
                     exec(

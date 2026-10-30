@@ -25,8 +25,11 @@ import socket
 import subprocess
 import sys
 import time
+import traceback
 from pathlib import Path
 from typing import Any
+
+from sglang_shape_gate import SGLANG_SITECUSTOMIZE_MIN_VERSION
 
 # NOTE: ``ray`` is imported lazily inside ``_fanout_to_all_nodes`` only.
 
@@ -52,7 +55,6 @@ _PATCH_TREE_REL = (
     "inference_analysis",
     "sglang_roofline_patches",
 )
-_SGLANG_GC_MIN_VERSION: tuple[int, ...] = (0, 5, 18)
 _GC_PATCH_TREE_REL = (
     "examples",
     "custom_workflows",
@@ -108,14 +110,9 @@ def _numeric_version_prefix(version: str) -> tuple[int, ...] | None:
 
 
 def _uses_gc_patch(version: str) -> bool:
-    """Fallback when no ``--patch-set`` is given: mirror the SGLang shape gate from the pod's own env and version."""
-    override = os.environ.get("HYPERLOOM_SGLANG_SHAPE_MODE", "auto").strip().lower()
-    if override in {"patch", "patched"}:
-        return False
-    if override == "sitecustomize":
-        return True
+    """Fallback when no ``--patch-set`` is given: mirror the SGLang shape gate from the pod's own version."""
     running = _numeric_version_prefix(version)
-    return running is not None and running >= _SGLANG_GC_MIN_VERSION
+    return running is not None and running >= SGLANG_SITECUSTOMIZE_MIN_VERSION
 
 
 def _resolve_gc_patches_dir(patches_root: Path, version: str) -> Path | None:
@@ -324,7 +321,6 @@ def _sglang_apply_layout(sglang: Any) -> tuple[tuple[Path, int] | None, str]:
 def _apply_on_pod(
     *,
     tracelens_root: str,
-    tracelens_internal_root: str,
     sglang_version_pin: str | None,
     patch_set: str | None = None,
 ) -> dict[str, Any]:
@@ -391,7 +387,7 @@ def _apply_on_pod(
     except Exception as e:  # noqa: BLE001 - actor must never raise
         result["status"] = "failed"
         result["error"] = f"unexpected: {type(e).__name__}: {e}"
-        _log(result["error"])
+        _log(f"{result['error']}\n{traceback.format_exc().rstrip()}")
         return result
     finally:
         result["elapsed_sec"] = round(time.time() - started, 3)
@@ -401,7 +397,6 @@ def _apply_on_pod(
 def _fanout_to_all_nodes(
     *,
     tracelens_root: str,
-    tracelens_internal_root: str,
     sglang_version_pin: str | None,
     patch_set: str | None = None,
 ) -> list[dict[str, Any]]:
@@ -428,7 +423,6 @@ def _fanout_to_all_nodes(
         actors.append(
             opts.remote(
                 tracelens_root=tracelens_root,
-                tracelens_internal_root=tracelens_internal_root,
                 sglang_version_pin=sglang_version_pin,
                 patch_set=patch_set,
             )
@@ -444,12 +438,6 @@ def main() -> int:
         "--tracelens-root",
         default=os.environ.get("TRACELENS_ROOT", ""),
         help="path to public TraceLens checkout (default: $TRACELENS_ROOT)",
-    )
-    parser.add_argument(
-        "--tracelens-internal-root",
-        default=os.environ.get("TRACELENS_INTERNAL_ROOT", ""),
-        help="path to TraceLens-internal checkout (default: $TRACELENS_INTERNAL_ROOT). "
-        "Reserved for future use; not consumed by current patch logic.",
     )
     parser.add_argument(
         "--sglang-version-pin",
@@ -501,7 +489,6 @@ def main() -> int:
     if args.local:
         r = _apply_on_pod(
             tracelens_root=args.tracelens_root,
-            tracelens_internal_root=args.tracelens_internal_root,
             sglang_version_pin=args.sglang_version_pin or None,
             patch_set=args.patch_set,
         )
@@ -512,11 +499,11 @@ def main() -> int:
     try:
         per_pod = _fanout_to_all_nodes(
             tracelens_root=args.tracelens_root,
-            tracelens_internal_root=args.tracelens_internal_root,
             sglang_version_pin=args.sglang_version_pin or None,
             patch_set=args.patch_set,
         )
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001 - outermost CLI main: the Ray fan-out, reported as failed JSON
+        _log(f"ray fan-out aborted:\n{traceback.format_exc().rstrip()}")
         print(
             json.dumps(
                 {

@@ -11,7 +11,7 @@ from pathlib import Path
 import yaml
 
 from hyperloom.orchestrator.actions.executors import _subprocess_kill as sk
-from hyperloom.orchestrator.actions.executors.baseline import (
+from hyperloom.orchestrator.actions.executors.benchmark_run.records import (
     _config_framework,
     _watchdog_server_log_path,
 )
@@ -55,7 +55,8 @@ def test_no_server_log_leaves_both_watchdogs_disarmed(monkeypatch):
     calls = _count_scans(monkeypatch)
 
     proc = sk.run_with_session_kill(
-        [sys.executable, "-c", "import time; time.sleep(1.2)"], timeout=30, server_log_path=None
+        [sys.executable, "-c", "import time; time.sleep(1.2)"],
+        watch=sk.RoundWatch(timeout=30, server_log_path=None),
     )
 
     assert proc.returncode == 0
@@ -67,8 +68,7 @@ def test_server_log_is_scanned(monkeypatch, tmp_path: Path):
 
     proc = sk.run_with_session_kill(
         [sys.executable, "-c", "import time; time.sleep(1.2)"],
-        timeout=30,
-        server_log_path=str(tmp_path / "server.log"),
+        watch=sk.RoundWatch(timeout=30, server_log_path=str(tmp_path / "server.log")),
     )
 
     assert proc.returncode == 0

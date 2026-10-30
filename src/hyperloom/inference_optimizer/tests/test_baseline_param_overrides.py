@@ -20,11 +20,12 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
 )
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     materialize_config_with_envs,
+    BenchmarkTarget,
+    LaunchLayer,
+    MaterializeOptions,
 )
-from hyperloom.orchestrator.actions.executors.baseline import (
-    BaselineExecutor,
-    _with_cuda_graph_disabled,
-)
+from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
+from hyperloom.orchestrator.actions.executors.benchmark_run.bringup import _with_cuda_graph_disabled
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 
@@ -145,9 +146,9 @@ def test_materialize_config_with_envs_pins_benchmark_script_after_gpu_pop(
     materialized = materialize_config_with_envs(
         base,
         out,
-        model_path="/path/models/DeepSeek-R1",
-        gpu_type="mi300x",
-        benchmark_script="sglang_mi300x.sh",
+        target=BenchmarkTarget(
+            model_path="/path/models/DeepSeek-R1", gpu_type="mi300x", benchmark_script="sglang_mi300x.sh"
+        ),
     )
     cfg = yaml.safe_load(materialized.read_text())
     # Override re-pins benchmark_script after the gpu_type pop.
@@ -165,24 +166,27 @@ def test_materialize_config_with_envs_forces_generic_without_override(tmp_path):
     materialized = materialize_config_with_envs(
         base,
         out,
-        gpu_type="mi300x",
+        target=BenchmarkTarget(gpu_type="mi300x"),
     )
     cfg = yaml.safe_load(materialized.read_text())
     # framework in the _write_yaml fixture is "sglang".
     assert cfg["benchmark"]["benchmark_script"] == "sglang_mi300x.sh"
 
 
-def test_materialize_writes_operator_extra_env_into_vllm_yaml(tmp_path, monkeypatch):
+def test_materialize_writes_operator_extra_env_but_not_its_credentials_into_vllm_yaml(tmp_path, monkeypatch):
     monkeypatch.setenv(
         "INFERENCE_OPTIMIZER_EXTRA_ENV",
-        '{"VLLM_USE_BREAKABLE_CUDAGRAPH": "0"}',
+        '{"VLLM_USE_BREAKABLE_CUDAGRAPH": "0", "KB_STORE_TOKEN": "kb-secret"}',
     )
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     out = tmp_path / "out"
     out.mkdir()
-    envs = yaml.safe_load(materialize_config_with_envs(base, out, gpu_type="mi355x").read_text())["benchmark"]["envs"]
+    envs = yaml.safe_load(
+        materialize_config_with_envs(base, out, target=BenchmarkTarget(gpu_type="mi355x")).read_text()
+    )["benchmark"]["envs"]
     assert envs["VLLM_USE_BREAKABLE_CUDAGRAPH"] == "0"
+    assert "KB_STORE_TOKEN" not in envs
 
 
 def test_kimi_materialize_enables_remote_client_trust(tmp_path):
@@ -195,8 +199,7 @@ def test_kimi_materialize_enables_remote_client_trust(tmp_path):
         materialized = materialize_config_with_envs(
             base,
             out,
-            model_path="/path/models/moonshotai-Kimi-K2.6",
-            gpu_type="mi300x",
+            target=BenchmarkTarget(model_path="/path/models/moonshotai-Kimi-K2.6", gpu_type="mi300x"),
         )
     envs = yaml.safe_load(materialized.read_text())["benchmark"]["envs"]
 
@@ -227,8 +230,7 @@ def test_custom_tokenizer_auto_map_enables_client_and_server_trust(tmp_path):
         materialized = materialize_config_with_envs(
             base,
             out,
-            model_path=str(model),
-            gpu_type="mi300x",
+            target=BenchmarkTarget(model_path=str(model), gpu_type="mi300x"),
         )
     envs = yaml.safe_load(materialized.read_text())["benchmark"]["envs"]
 
@@ -252,8 +254,7 @@ def test_qwen36_materialize_enables_client_and_server_trust(tmp_path):
         materialized = materialize_config_with_envs(
             base,
             out,
-            model_path="/path/models/Qwen-Qwen3.6-35B-A3B",
-            gpu_type="mi300x",
+            target=BenchmarkTarget(model_path="/path/models/Qwen-Qwen3.6-35B-A3B", gpu_type="mi300x"),
         )
     envs = yaml.safe_load(materialized.read_text())["benchmark"]["envs"]
 
@@ -310,9 +311,8 @@ def test_materialize_dedups_duplicate_vllm_attention_backend(tmp_path):
     materialized = materialize_config_with_envs(
         base,
         out,
-        model_path="/path/models/Qwen-Qwen3-8B",
-        gpu_type="mi300x",
-        extra_server_args="--attention-backend ROCM_FLASH",
+        launch=LaunchLayer(extra_server_args="--attention-backend ROCM_FLASH"),
+        target=BenchmarkTarget(model_path="/path/models/Qwen-Qwen3-8B", gpu_type="mi300x"),
     )
     vllm_args = yaml.safe_load(materialized.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
 
@@ -337,9 +337,8 @@ def test_materialize_keeps_sglang_repeated_attention_backend(tmp_path):
     materialized = materialize_config_with_envs(
         base,
         out,
-        model_path="/path/models/Qwen-Qwen3-8B",
-        gpu_type="mi300x",
-        extra_server_args="--attention-backend triton",
+        launch=LaunchLayer(extra_server_args="--attention-backend triton"),
+        target=BenchmarkTarget(model_path="/path/models/Qwen-Qwen3-8B", gpu_type="mi300x"),
     )
     sglang_args = yaml.safe_load(materialized.read_text())["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"]
 
@@ -570,6 +569,23 @@ def test_baseline_eager_fallback_records_effective_task_args(tmp_path):
     assert result["status"] == "succeeded"
     assert "--compilation-config.cudagraph_mode NONE" in ctx.task.params["extra_server_args"]
     assert shared_state.baseline_eager_fallback is False
+
+
+def test_baseline_eager_fallback_save_failure_is_not_reported_as_unarmed(tmp_path, monkeypatch):
+    shared_state = SharedState(baseline_eager_fallback=True, model_path="/models/qwen")
+
+    def _disk_full(session_dir):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(shared_state, "save", _disk_full)
+    executor = BaselineExecutor(
+        magpie_python="/opt/venv/bin/python",
+        default_config_path=tmp_path / "base.yaml",
+        session_dir=tmp_path,
+        shared_state=shared_state,
+    )
+    with pytest.raises(OSError, match="No space left on device"):
+        executor._consume_eager_fallback(shared_state)
 
 
 def test_baseline_executor_falls_back_to_shared_state_model_path(tmp_path, monkeypatch):
@@ -823,8 +839,7 @@ def test_reference_base_seeds_lowest_priority(tmp_path, monkeypatch):
     materialized = materialize_config_with_envs(
         base,
         out,
-        model_path="/path/models/X",
-        gpu_type="mi300x",
+        target=BenchmarkTarget(model_path="/path/models/X", gpu_type="mi300x"),
     )
     args = _fw_args(materialized)
     assert "--block-size 128" in args
@@ -847,9 +862,8 @@ def test_reference_base_reaches_a_caller_that_renders_its_own_yaml(tmp_path, mon
     materialized = materialize_config_with_envs(
         base,
         out,
-        model_path="/path/models/X",
-        gpu_type="mi300x",
-        out_name="explore_base.with_envs.yaml",
+        target=BenchmarkTarget(model_path="/path/models/X", gpu_type="mi300x"),
+        options=MaterializeOptions(out_name="explore_base.with_envs.yaml"),
     )
 
     assert "--enable-prefix-caching" in _fw_args(materialized)
@@ -868,9 +882,8 @@ def test_reference_base_extra_args_override_wins(tmp_path, monkeypatch):
     materialized = materialize_config_with_envs(
         base,
         out,
-        model_path="/path/models/X",
-        gpu_type="mi300x",
-        extra_server_args="--attention-backend ROCM_FLASH",
+        launch=LaunchLayer(extra_server_args="--attention-backend ROCM_FLASH"),
+        target=BenchmarkTarget(model_path="/path/models/X", gpu_type="mi300x"),
     )
     args = _fw_args(materialized)
     # reference-only flag survives
@@ -892,9 +905,8 @@ def test_reference_and_extra_single_value_flag_deduped_recipe_wins(tmp_path, mon
     materialized = materialize_config_with_envs(
         base,
         out,
-        model_path="/path/models/X",
-        gpu_type="mi300x",
-        extra_server_args="--kv-cache-dtype fp8 --gpu-memory-utilization 0.97",
+        launch=LaunchLayer(extra_server_args="--kv-cache-dtype fp8 --gpu-memory-utilization 0.97"),
+        target=BenchmarkTarget(model_path="/path/models/X", gpu_type="mi300x"),
     )
     args = _fw_args(materialized)
     assert args.count("--gpu-memory-utilization") == 1
@@ -912,9 +924,8 @@ def test_reference_envs_do_not_clobber_existing(tmp_path, monkeypatch):
     materialized = materialize_config_with_envs(
         base,
         out,
-        model_path="/path/models/X",
-        gpu_type="mi300x",
-        extra_envs={"VLLM_ROCM_USE_AITER": "1"},
+        launch=LaunchLayer(extra_envs={"VLLM_ROCM_USE_AITER": "1"}),
+        target=BenchmarkTarget(model_path="/path/models/X", gpu_type="mi300x"),
     )
     envs = yaml.safe_load(materialized.read_text())["benchmark"]["envs"]
     # extra_envs (CLI) wins over reference; the new reference key still lands.
@@ -933,9 +944,8 @@ def test_no_reference_recipe_is_a_no_op(tmp_path, monkeypatch):
     materialized = materialize_config_with_envs(
         base,
         out,
-        model_path="/path/models/X",
-        gpu_type="mi300x",
-        out_name="x.yaml",
+        target=BenchmarkTarget(model_path="/path/models/X", gpu_type="mi300x"),
+        options=MaterializeOptions(out_name="x.yaml"),
     )
 
     assert _fw_args(materialized) == ""

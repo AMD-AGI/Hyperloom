@@ -12,7 +12,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.inference_optimizer.cli import executors as cli_executors
 from hyperloom.inference_optimizer.protocol.action_surfaces import KERNEL_AGENT_OWNED_ACTIONS
 from hyperloom.inference_optimizer.cli.executors import (
     _build_specialist_executor,
@@ -59,7 +58,7 @@ def test_build_specialist_executor_subprocess_uses_the_recorded_claude(monkeypat
     monkeypatch.setattr(shutil, "which", lambda _n: "")
     monkeypatch.delenv("HYPERLOOM_CLAUDE_CLI_PATH", raising=False)
     monkeypatch.setenv("GEAK_CLAUDE_BIN", str(recorded))
-    with caplog.at_level(logging.WARNING, logger=cli_executors.log.name):
+    with caplog.at_level(logging.WARNING):
         executor = _build_specialist_executor(
             _spec_args(),
             session_dir=tmp_path,
@@ -83,20 +82,6 @@ def test_build_specialist_executor_subprocess_with_knowledge_plane(monkeypatch, 
         _spec_args(),
         session_dir=tmp_path,
         knowledge_plane=_KP(),
-    )
-    assert callable(executor)
-
-
-def test_build_specialist_executor_subprocess_kp_missing_methods(monkeypatch, tmp_path):
-    """subprocess path tolerates a KnowledgePlane lacking the MCP-url methods."""
-    import shutil
-
-    monkeypatch.setattr(shutil, "which", lambda _n: "/usr/bin/claude")
-
-    executor = _build_specialist_executor(
-        _spec_args(),
-        session_dir=tmp_path,
-        knowledge_plane=object(),
     )
     assert callable(executor)
 
@@ -152,11 +137,10 @@ def test_register_executors_covers_every_phase_allowed_action():
     assert not missing, f"phase-allowed actions with no executor: {missing}"
 
 
-def test_register_executors_never_wires_kernel_owned_actions(caplog):
+def test_register_executors_never_wires_kernel_owned_actions():
     """Kernel-owned actions are REQUEST-only, so they get no executor at all."""
     coord = _fake_coordinator()
-    with caplog.at_level(logging.DEBUG, logger=cli_executors.log.name):
-        _register_executors(coord, session_dir=None)
+    _register_executors(coord, session_dir=None)
     reg = coord.sub.executor_registry
     assert "roofline" in reg
     assert not (set(reg) & KERNEL_AGENT_OWNED_ACTIONS)
@@ -198,12 +182,12 @@ def test_no_executor_is_registered_under_an_unknown_action_name():
     """The reverse direction: a stale key left behind by a rename."""
     from hyperloom.inference_optimizer.protocol.action_surfaces import (
         ACTION_CATALOGUE,
-        INTERNAL_ONLY_ACTION_NAMES,
+        COORDINATOR_INTERNAL_ACTIONS,
     )
 
     registry = _fully_wired_registry()
     catalogue = {meta.name for meta in ACTION_CATALOGUE.values()}
-    uncatalogued_by_design = INTERNAL_ONLY_ACTION_NAMES - catalogue
+    uncatalogued_by_design = COORDINATOR_INTERNAL_ACTIONS - catalogue
 
     phantom = sorted(set(registry) - catalogue - uncatalogued_by_design)
     assert not phantom, f"executor keys absent from ACTION_CATALOGUE: {phantom}"

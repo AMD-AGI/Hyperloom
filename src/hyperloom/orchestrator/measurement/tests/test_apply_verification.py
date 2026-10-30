@@ -5,9 +5,6 @@
 
 from __future__ import annotations
 
-import sys
-import types
-
 import pytest
 
 from hyperloom.orchestrator.measurement import apply_verification as av
@@ -36,49 +33,8 @@ def _log(tmp_path, lines):
     return p
 
 
-@pytest.fixture(params=["stub_parser", "real_forge"])
-def parser(request, monkeypatch):
-    """Run every case against a stand-in parser, and against forge when present."""
-    if request.param == "real_forge":
-        # Skip on the submodule production actually imports, not the top-level package.
-        pytest.importorskip("kernelforge.gemm_tune.evidence", reason="real parser unavailable")
-        return
-
-    import re
-
-    def _fake_parse_log_file(path):
-        text = __import__("pathlib").Path(path).read_text(encoding="utf-8", errors="replace")
-        hits = misses = 0
-        merged: list[str] = []
-        consulted: set[str] = set()
-        for line in text.splitlines():
-            if "merge tuned file" in line:
-                merged.extend(p for p in line.split()[-1].split(":") if p)
-            elif "not found tuned config in" in line:
-                misses += 1
-                consulted.add(line.split("not found tuned config in")[1].split(",")[0].strip())
-            elif "found padded_M" in line:
-                hits += 1
-                m = re.search(r"is tuned on cu_num\s*=\s*\d+\s+in\s+([^,]+)", line)
-                if m:
-                    consulted.add(m.group(1).strip())
-        return {
-            "apply_verdict": {"hit": hits, "miss": misses},
-            "merged_tables": sorted(set(merged)),
-            "consulted_tables": sorted(consulted),
-        }
-
-    fake = types.ModuleType("kernelforge.gemm_tune")
-    fake_ev = types.ModuleType("kernelforge.gemm_tune.evidence")
-    fake_ev.parse_log_file = _fake_parse_log_file  # type: ignore[attr-defined]
-    fake.evidence = fake_ev  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "kernelforge.gemm_tune", fake)
-    monkeypatch.setitem(sys.modules, "kernelforge.gemm_tune.evidence", fake_ev)
-    return
-
-
 class TestServed:
-    def test_hits_mean_served(self, tmp_path, parser):
+    def test_hits_mean_served(self, tmp_path):
         p = _log(tmp_path, [_MERGE, _HIT.format(m=16), _MISS.format(m=15)])
         v = verify_applied(p, ["/work/bf16_tuned_gemm.csv"], runtime_table_names=_BF16)
         assert v.verdict == "served"
@@ -87,7 +43,7 @@ class TestServed:
 
 
 class TestArtifactArrival:
-    def test_an_override_run_prints_no_merge_line_and_still_counts_as_arrived(self, tmp_path, parser):
+    def test_an_override_run_prints_no_merge_line_and_still_counts_as_arrived(self, tmp_path):
         # Setting AITER_CONFIG_* makes aiter skip the merge step: no merge line at all, and the lookups name our own
         # file.
         ours = "/work/run/merged_tuned_dense_bf16.csv"
@@ -100,13 +56,13 @@ class TestArtifactArrival:
         v = verify_applied(p, [ours], runtime_table_names=_BF16)
         assert v.verdict != "not_merged"
 
-    def test_the_runtime_table_name_is_accepted_too(self, tmp_path, parser):
+    def test_the_runtime_table_name_is_accepted_too(self, tmp_path):
         # The deployed file is named after the candidate; the server resolves it under the canonical table name.
         p = _log(tmp_path, [_MERGE, _HIT.format(m=16)])
         v = verify_applied(p, ["/work/run/merged_tuned_dense_bf16.csv"], runtime_table_names=_BF16)
         assert v.verdict == "served"
 
-    def test_a_genuinely_absent_artifact_still_blocks(self, tmp_path, parser):
+    def test_a_genuinely_absent_artifact_still_blocks(self, tmp_path):
         # Nothing the runtime touched resembles what we deployed.
         p = _log(tmp_path, [_MERGE, _MISS.format(m=15)])
         v = verify_applied(
@@ -117,14 +73,14 @@ class TestArtifactArrival:
         assert v.verdict == "not_merged" and v.blocks_keep
         assert v.unmerged_artifacts == ["/work/a8w8_blockscale_tuned_gemm.csv"]
 
-    def test_match_is_by_basename(self, tmp_path, parser):
+    def test_match_is_by_basename(self, tmp_path):
         p = _log(tmp_path, [_MERGE, _HIT.format(m=16)])
         v = verify_applied(p, ["/some/other/dir/bf16_tuned_gemm.csv"], runtime_table_names=_BF16)
         assert v.verdict == "served"
 
 
 class TestHitLoggingTrap:
-    def test_misses_without_hit_logging_is_not_a_failure(self, tmp_path, parser):
+    def test_misses_without_hit_logging_is_not_a_failure(self, tmp_path):
         # No hit lines because the flag was off -- must NOT block.
         p = _log(tmp_path, [_MERGE, _MISS.format(m=15), _MISS.format(m=17)])
         v = verify_applied(
@@ -138,14 +94,13 @@ class TestHitLoggingTrap:
         assert not v.conclusive
         assert "AITER_LOG_TUNED_CONFIG" in v.detail
 
-    def test_unknown_hit_logging_stays_inconclusive(self, tmp_path, parser):
+    def test_unknown_hit_logging_stays_inconclusive(self, tmp_path):
         p = _log(tmp_path, [_MERGE, _MISS.format(m=15)])
         v = verify_applied(p, ["/work/bf16_tuned_gemm.csv"], runtime_table_names=_BF16)
         assert v.verdict == "inconclusive_no_hit_logging" and not v.blocks_keep
 
-    def test_zero_hits_with_logging_on_is_a_real_failure(self, tmp_path, parser):
-        # This is the verdict the gate exists for, and it was unreachable: the parser answers "inconclusive" for
-        # hits==0 whatever the flag, so the branch was dead.
+    def test_zero_hits_with_logging_on_is_a_real_failure(self, tmp_path):
+        # This is the verdict the gate exists for.
         p = _log(tmp_path, [_MERGE, _MISS.format(m=15), _MISS.format(m=17)])
         v = verify_applied(
             p,
@@ -157,7 +112,7 @@ class TestHitLoggingTrap:
         assert v.blocks_keep and v.conclusive
         assert v.misses == 2
 
-    def test_every_blocking_verdict_is_reachable(self, tmp_path, parser):
+    def test_every_blocking_verdict_is_reachable(self, tmp_path):
         """A verdict listed as blocking that nothing can return is not a gate."""
         reached = set()
         p = _log(tmp_path, [_MERGE, _MISS.format(m=15)])
@@ -180,20 +135,20 @@ class TestHitLoggingTrap:
 
 
 class TestDegraded:
-    def test_missing_log(self, tmp_path, parser):
+    def test_missing_log(self, tmp_path):
         v = verify_applied(tmp_path / "nope.log", ["/work/x.csv"])
         assert v.verdict == "unknown" and not v.blocks_keep
 
-    def test_no_lookups_at_all(self, tmp_path, parser):
+    def test_no_lookups_at_all(self, tmp_path):
         p = _log(tmp_path, ["server started", "ready"])
         v = verify_applied(p, [])
         assert v.verdict == "no_lookups" and not v.blocks_keep
 
-    def test_no_artifacts_supplied_skips_the_arrival_check(self, tmp_path, parser):
+    def test_no_artifacts_supplied_skips_the_arrival_check(self, tmp_path):
         p = _log(tmp_path, [_MERGE, _HIT.format(m=16)])
         assert verify_applied(p, None).verdict == "served"
 
-    def test_to_dict_is_serialisable(self, tmp_path, parser):
+    def test_to_dict_is_serialisable(self, tmp_path):
         p = _log(tmp_path, [_MERGE, _HIT.format(m=16)])
         d = verify_applied(p, ["/work/bf16_tuned_gemm.csv"], runtime_table_names=_BF16).to_dict()
         assert d["verdict"] == "served" and d["blocks_keep"] is False
@@ -203,8 +158,10 @@ class TestTheEnvToTableMapDoesNotDrift:
     """The same mapping exists here and in KernelForge, and cannot be shared."""
 
     def test_every_env_var_maps_to_the_same_table_as_kernelforge(self):
-        forge_utils = pytest.importorskip("kernelforge.gemm_tune.utils", reason="KernelForge not installed here")
-        from hyperloom.orchestrator.phases.kernel import _AITER_ENV_TO_TABLE
+        forge_utils = pytest.importorskip(
+            "kernelforge.workflows.gemm_tune.utils", reason="KernelForge not installed here"
+        )
+        from hyperloom.orchestrator.phases.kernel_gemm_tuning import _AITER_ENV_TO_TABLE
 
         forge_env_vars = set(getattr(forge_utils, "TUNER_ENV_VARS", {}).values())
         aiter_only = {v for v in forge_env_vars if v.startswith("AITER_CONFIG")}
@@ -218,7 +175,7 @@ class TestTheEnvToTableMapDoesNotDrift:
 
     def test_the_fp4_key_is_the_one_aiter_actually_reads(self):
         # AITER_CONFIG_GEMM_A4W4, not the "_BLOCKSCALE" variant.
-        from hyperloom.orchestrator.phases.kernel import _AITER_ENV_TO_TABLE
+        from hyperloom.orchestrator.phases.kernel_gemm_tuning import _AITER_ENV_TO_TABLE
 
         assert "AITER_CONFIG_GEMM_A4W4" in _AITER_ENV_TO_TABLE
         assert "AITER_CONFIG_GEMM_A4W4_BLOCKSCALE" not in _AITER_ENV_TO_TABLE

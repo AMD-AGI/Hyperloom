@@ -238,11 +238,7 @@ class QueryView:
             or not isinstance(visible, list)
         ):
             raise QueryViewError("Query View contains invalid structures")
-        ref = QueryViewRef(
-            schema_ref=str(value.get("schema_ref") or ""),
-            local_page_sequence=int(value.get("local_page_sequence", -1)),
-            view_id=str(value.get("view_id") or ""),
-        )
+        ref = QueryViewRef.from_dict(value)
         view = cls(
             version=int(value.get("version", 0)),
             ref=ref,

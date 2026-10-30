@@ -14,7 +14,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..base import Decision, RenderedSection, as_dict, fmt_pct, md_table, register_renderer, validation_of
+
+from hyperloom.common.coerce import to_mapping
+
+from ..base import Decision, RenderedSection, fmt_pct, md_table, register_renderer, validation_of
 
 
 @register_renderer("optimizations")
@@ -31,7 +34,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             ``attribution.available``.
     """
     validation = validation_of(breakdown)
-    attribution = as_dict(validation.get("attribution"))
+    attribution = to_mapping(validation.get("attribution"))
 
     if not attribution.get("available"):
         # Rendering nothing here is what let a session with no records pass for
@@ -48,8 +51,8 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
 
     rows: list[list[Any]] = []
     decisions: list[Decision] = []
-    for source, bucket in as_dict(attribution.get("by_source")).items():
-        bucket = as_dict(bucket)
+    for source, bucket in to_mapping(attribution.get("by_source")).items():
+        bucket = to_mapping(bucket)
         keeps = int(bucket.get("keep_count") or 0)
         gain = bucket.get("total_gain_pct")
         unmeasured = int(bucket.get("unmeasured_keep_count") or 0)

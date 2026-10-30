@@ -32,6 +32,7 @@ from hyperloom_kb import (
     ReadRequest,
     ReadStatus,
     ReadTrace,
+    ResultShape,
     RetrievalCapability,
     RetrievalConfiguration,
     WeightedQueryPlan,
@@ -169,7 +170,7 @@ def _stack():
         provider_refs={
             RetrievalCapability.FUZZY: LEXICAL_FUZZY_PROVIDER_REF,
         },
-        ranking_policy_ref="max-hit-score@v1",
+        shape=ResultShape(ranking_policy_ref="max-hit-score@v1"),
     )
     return (
         schema,

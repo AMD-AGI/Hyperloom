@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -19,16 +20,11 @@ from hyperloom.common.launch_log_evidence import (
     observed_model_binding_from_log,
     observed_server_config_from_log,
     observed_server_identity_from_log,
+    operand_digest,
 )
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 
 log = logging.getLogger(__name__)
-
-
-def _digest_operand(value: str) -> str:
-    """Digest a model operand: two digests compare, the paths could not travel."""
-    text = str(value or "").strip()
-    return f"sha256:{hashlib.sha256(text.encode('utf-8')).hexdigest()}" if text else ""
 
 
 def _binding_from_vllm_identity(identity: dict[str, Any]) -> dict[str, Any]:
@@ -45,9 +41,9 @@ def _binding_from_vllm_identity(identity: dict[str, Any]) -> dict[str, Any]:
     if not model:
         return {}
     return {
-        "model_digest": _digest_operand(model),
-        "tokenizer_digest": _digest_operand(str(identity.get("tokenizer") or "")),
-        "served_model_digest": _digest_operand(str(identity.get("served_model_name") or "")),
+        "model_digest": operand_digest(model),
+        "tokenizer_digest": operand_digest(str(identity.get("tokenizer") or "")),
+        "served_model_digest": operand_digest(str(identity.get("served_model_name") or "")),
         "tp": str(identity.get("tensor_parallel_size", 1)),
         "dp": str(identity.get("data_parallel_size", 1)),
         "pp": str(identity.get("pipeline_parallel_size", 1)),
@@ -60,9 +56,9 @@ def _binding_from_identity(identity: dict[str, Any]) -> dict[str, Any]:
     if not model:
         return {}
     return {
-        "model_digest": _digest_operand(model),
-        "tokenizer_digest": _digest_operand(str(identity.get("tokenizer_path") or "")),
-        "served_model_digest": _digest_operand(str(identity.get("served_model_name") or "")),
+        "model_digest": operand_digest(model),
+        "tokenizer_digest": operand_digest(str(identity.get("tokenizer_path") or "")),
+        "served_model_digest": operand_digest(str(identity.get("served_model_name") or "")),
         "tp": str(identity.get("tp_size") or ""),
         "dp": str(identity.get("dp_size") or ""),
         "pp": "",
@@ -150,43 +146,48 @@ def _warm_reuse_record(actual_server_log: str | None, slot: Path, caller_reused_
     }
 
 
+@dataclass(frozen=True)
+class RequestedLaunch:
+    """The launch a measurement requested: its materialized config and any caller overrides of it."""
+
+    config_path: Path
+    framework: str
+    server_args: str | None = None
+    server_env: dict[str, str] | None = None
+    model_path: str | None = None
+
+
 def build_launch_evidence(
+    requested: RequestedLaunch,
     *,
-    config_path: Path,
     actual_server_log: str | None,
-    framework: str,
     slot: Path,
     caller_reused_ready_server: bool = False,
-    requested_server_args: str | None = None,
-    requested_server_env: dict[str, str] | None = None,
-    model_path: str | None = None,
 ) -> dict[str, Any]:
     """Build declared and observed evidence for one measured server launch."""
-    recipe = _read_config_recipe(config_path)
+    recipe = _read_config_recipe(requested.config_path)
     benchmark = recipe.benchmark
 
-    resolved_framework = str(benchmark.get("framework") or framework or "sglang").strip().lower()
+    resolved_framework = str(benchmark.get("framework") or requested.framework or "sglang").strip().lower()
     args_env = server_args_env_name(resolved_framework)
     envs = benchmark.get("envs") if isinstance(benchmark.get("envs"), dict) else {}
     declared_env = {str(key): str(value) for key, value in envs.items() if str(key) != args_env}
     declared_args = str(envs.get(args_env) or "").strip()
-    requested_env = requested_server_env if requested_server_env is not None else declared_env
-    requested_args = str(requested_server_args).strip() if requested_server_args is not None else declared_args
-    requested_model = str(model_path if model_path is not None else benchmark.get("model") or "")
+    requested_env = requested.server_env if requested.server_env is not None else declared_env
+    requested_args = str(requested.server_args).strip() if requested.server_args is not None else declared_args
+    requested_model = str(requested.model_path if requested.model_path is not None else benchmark.get("model") or "")
 
     return {
         "schema_version": 1,
-        "materialized_config_path": str(config_path) if recipe.raw else "",
+        "materialized_config_path": str(requested.config_path) if recipe.raw else "",
         "recipe_digest": f"sha256:{hashlib.sha256(recipe.raw).hexdigest()}" if recipe.raw else "",
         "framework": resolved_framework,
         "model_path": requested_model,
         "requested_server_args": requested_args,
-        "requested_server_flags": requested_args,
         "requested_server_env": requested_env,
         "actual_server_log_path": actual_server_log or "",
-        "observed_server_env": dict(requested_env),
         **_observed_launch_from_log(actual_server_log, resolved_framework),
-        "requested_model_digest": _digest_operand(requested_model),
+        "requested_model_digest": operand_digest(requested_model),
         "warm_reuse": _warm_reuse_record(actual_server_log, slot, caller_reused_ready_server),
     }
 

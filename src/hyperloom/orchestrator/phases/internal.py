@@ -11,7 +11,7 @@ from typing import Any
 
 from hyperloom.common.env import env_bool
 
-from ..state.task_registry import Task
+from ..state.task_registry import Task, TaskSpec
 from ..collaborator import CoordinatorCollaborator
 from . import machine_state as _phase_state
 
@@ -126,32 +126,29 @@ class InternalTasksPhase(CoordinatorCollaborator):
         *,
         reason: str,
         round_id: int,
-    ) -> "Task | None":
-        """Enqueue a Coordinator-owned read-only research-scout specialist task; idempotency keyed by round, returns None when the scout is disabled."""
-        if not bool(self.shared_state.research_scout_enabled):
-            return None
+    ) -> "Task":
+        """Enqueue a Coordinator-owned read-only research-scout specialist task; idempotency keyed by round."""
         params = self._research_scout_params(reason=reason, round_id=round_id)
         await self._coord.specialist_dispatch.warm_specialist_params(params)
         lanes, ttl = self._coord.gpu_lanes.framework_authoring_lanes_ttl(params, base_ttl_sec=1800)
         task, was_existing = await self.tasks.create_or_return_existing(
-            kind="specialist",
-            params=params,
-            idempotency_key=f"internal-research-scout-round{int(round_id)}",
-            requires_lanes=lanes,
-            side_effects=["writes_results"],
-            lease_ttl_sec=ttl,
-            dispatch_class="coordinator",
+            TaskSpec(
+                kind="specialist",
+                params=params,
+                idempotency_key=f"internal-research-scout-round{int(round_id)}",
+                requires_lanes=lanes,
+                lease_ttl_sec=ttl,
+                dispatch_class="coordinator",
+            )
         )
         if not was_existing:
-            self.shared_state.bump_research_scout_runs()
             self.shared_state.research_scout_last_round = int(round_id)
             self.shared_state.save(self.session_dir)
             log.info(
-                "research-scout dispatched: task_id=%s round=%d reason=%s runs=%d",
+                "research-scout dispatched: task_id=%s round=%d reason=%s",
                 task.task_id,
                 int(round_id),
                 reason,
-                self.shared_state.research_scout_runs,
             )
         return task
 
@@ -191,11 +188,9 @@ class InternalTasksPhase(CoordinatorCollaborator):
         *,
         reason: str,
         slug: str,
-    ) -> "Task | None":
+    ) -> "Task":
         """Enqueue the Coordinator-owned read-only static-recon specialist task; ``slug`` scopes the idempotency key so a later pass is not deduplicated against the first."""
         state = self.shared_state
-        if not bool(state.static_recon_enabled):
-            return None
         idempotency_key = f"internal-static-recon-{slug}"
         params: dict[str, Any] = {
             "domain": "static_recon_specialist",
@@ -217,7 +212,6 @@ class InternalTasksPhase(CoordinatorCollaborator):
         from ..knowledge import static_recon_checklist as _src_recon
 
         _entries = _src_recon.entries_for(
-            model_class=str(state.model_class or ""),
             gpu_type=str(state.gpu_type or ""),
             precision=_src_recon.workload_precision(state),
         )
@@ -225,26 +219,19 @@ class InternalTasksPhase(CoordinatorCollaborator):
         _rendered = _src_recon.render_checklist_for_prompt(_entries)
         if _rendered:
             params["static_recon_checklist"] = _rendered
-        _dicts = _src_recon.checklist_as_dicts(_entries)
-        if _dicts:
-            params["static_recon_checklist_entries"] = _dicts
         await self._coord.specialist_dispatch.warm_specialist_params(params)
         lanes, ttl = self._coord.gpu_lanes.framework_authoring_lanes_ttl(params, base_ttl_sec=1800)
         task, was_existing = await self.tasks.create_or_return_existing(
-            kind="specialist",
-            params=params,
-            idempotency_key=idempotency_key,
-            requires_lanes=lanes,
-            side_effects=["writes_results"],
-            lease_ttl_sec=ttl,
-            dispatch_class="coordinator",
+            TaskSpec(
+                kind="specialist",
+                params=params,
+                idempotency_key=idempotency_key,
+                requires_lanes=lanes,
+                lease_ttl_sec=ttl,
+                dispatch_class="coordinator",
+            )
         )
         if not was_existing:
-            try:
-                state.static_recon_runs = int(state.static_recon_runs or 0) + 1
-                self.shared_state.save(self.session_dir)
-            except OSError:
-                log.exception("static-recon: bookkeeping save failed")
             log.info(
                 "static-recon dispatched: task_id=%s reason=%s",
                 task.task_id,
@@ -290,16 +277,7 @@ class InternalTasksPhase(CoordinatorCollaborator):
         if not plateau_active:
             return
         cycle = int(state.macro_cycle or 0)
-        try:
-            from ..knowledge import trajectory_reviewer as _trajectory_reviewer
-
-            digest = _trajectory_reviewer.build_trajectory_digest(
-                self.session_dir,
-                state,
-            )
-        except Exception:
-            log.exception("Coordinator: trajectory review digest failed")
-            digest = ""
+        digest = self._coord.conversation.trajectory_digest()
         direction, _pct = self._coord.conversation.dominant_roofline_direction()
         from hyperloom.inference_optimizer.roofline_snapshot import BOTTLENECK_DOMAIN_HINTS
 
@@ -325,13 +303,14 @@ class InternalTasksPhase(CoordinatorCollaborator):
         await self._coord.specialist_dispatch.warm_specialist_params(params)
         lanes, ttl = self._coord.gpu_lanes.framework_authoring_lanes_ttl(params, base_ttl_sec=1800)
         task, was_existing = await self.tasks.create_or_return_existing(
-            kind="specialist",
-            params=params,
-            idempotency_key=f"internal-trajectory-review-cycle{cycle}",
-            requires_lanes=lanes,
-            side_effects=["writes_results"],
-            lease_ttl_sec=ttl,
-            dispatch_class="coordinator",
+            TaskSpec(
+                kind="specialist",
+                params=params,
+                idempotency_key=f"internal-trajectory-review-cycle{cycle}",
+                requires_lanes=lanes,
+                lease_ttl_sec=ttl,
+                dispatch_class="coordinator",
+            )
         )
         if not was_existing:
             log.info(

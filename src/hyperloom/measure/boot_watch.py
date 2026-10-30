@@ -8,6 +8,22 @@ gets ready (a boot that tunes kernels for an hour) is therefore ended by the rou
 candidate repeats it on the rerun. The guard here ends such a round at a share of that cap: it watches for the stamp the
 launcher writes beside a round's server log the moment the banner appears and, when none has come within the limit,
 cancels the scope the launcher's watchdog listens to, which reaps the whole process tree.
+
+The guard watches a round's server boot only, so a test that hangs anywhere else before ready (a runner that stopped
+making progress, a round that never launched its server) waited out the whole ``timeout_sec``. :class:`PreReadySilence`
+bounds, on the application's side, how long a hosted test may go without output before its server is ready. Measured: one integration test sat 60 minutes with an empty attempt directory, holding the session's only integration
+lane, and a second one 54 minutes until it was cancelled by hand.
+
+The application reads the runner's ``progress.json`` on every poll. Each change of what it says the test did (its phase,
+the last output it saw, the newest live log's write time or last line) is activity; once the runner says a round's server
+is ready (:data:`SERVER_READY_KEY`), or the test is past running, the bound no longer applies. A test with no activity
+for :data:`PRE_READY_SILENCE_SEC` before that ends as ``hung_before_ready``, an infrastructure failure a new sandbox
+retries.
+
+The limit comes from the server logs of 1857 test rounds (1711 reached ready): the longest stretch before ready with
+no output line, timestamped or carrying a progress figure, was 262 s, an aiter JIT build that reported ``cost 273``
+seconds itself; the 99.9th percentile was 144 s, and the slowest phase before a server starts (``env_rebuild``) took
+at most 27 s in 599 tests. 900 s is over three times the longest legitimate silence and ends a hang 45 minutes sooner.
 """
 
 from __future__ import annotations
@@ -17,6 +33,7 @@ import math
 import threading
 import time
 from collections.abc import Iterator, Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -25,10 +42,15 @@ from hyperloom.orchestrator.actions.cancel_channel import CancelScope
 __all__ = [
     "BOOT_CANCEL_REASON",
     "BOOT_SHARE",
+    "HUNG_BEFORE_READY",
+    "PRE_READY_SILENCE_SEC",
+    "SERVER_READY_KEY",
     "BootGuard",
+    "PreReadySilence",
     "boot_limit_sec",
     "boot_seconds",
     "read_ready_stamp",
+    "server_ready",
 ]
 
 #: The ``reason`` the guard cancels the scope with.
@@ -125,6 +147,15 @@ def boot_seconds(directory: Path) -> float | None:
     return max(booted, default=None)
 
 
+def server_ready(directory: Path) -> bool:
+    """Whether a round below ``directory`` stamped its server ready; a stamp that cannot be read is not ready."""
+    try:
+        stamps = list(directory.rglob(_READY_STAMP))
+    except OSError:
+        return False
+    return any(_stamped_at(stamp) > 0.0 for stamp in stamps)
+
+
 def read_ready_stamp(directory: Path) -> tuple[float, float] | None:
     """The ``(ready_unix, boot_seconds)`` the stamp beside a round's server log records, or ``None`` when the round left
     none or it cannot be read; ``boot_seconds`` is 0 for a round that found its server ready."""
@@ -140,3 +171,60 @@ def _booted_in(stamp: Path) -> float:
     except (OSError, ValueError, IndexError):
         return 0.0
     return seconds if math.isfinite(seconds) else 0.0
+
+
+#: The ``progress.json`` key the runner sets once a round's server has reported ready.
+SERVER_READY_KEY = "server_ready"
+#: The ``error_class`` of a test that went silent before its server was ready.
+HUNG_BEFORE_READY = "hung_before_ready"
+PRE_READY_SILENCE_SEC = 900.0
+#: The runner's phase once the measurement has ended; nothing after it is bounded here.
+_COLLECTING = "collecting"
+#: A log written within this many seconds of the last write seen is the same write, seen again through the clock jitter
+#: of ``updated_unix - last_log_age_sec``.
+_WRITE_RESOLUTION_SEC = 1.0
+
+
+def _log_written_at(progress: Mapping[str, Any]) -> float | None:
+    updated, age = progress.get("updated_unix"), progress.get("last_log_age_sec")
+    if isinstance(updated, (int, float)) and isinstance(age, (int, float)):
+        return float(updated) - float(age)
+    return None
+
+
+@dataclass
+class PreReadySilence:
+    """Watches one attempt's progress, on the application's clock, from ``started``."""
+
+    started: float
+    limit_sec: float = PRE_READY_SILENCE_SEC
+    _active_at: float = field(init=False)
+    _seen: tuple[object, ...] | None = field(default=None, init=False)
+    _written_at: float | None = field(default=None, init=False)
+    _armed: bool = field(default=True, init=False)
+
+    def __post_init__(self) -> None:
+        self._active_at = self.started
+
+    def observe(self, progress: Mapping[str, Any] | None, now: float) -> None:
+        """Take one reading of ``progress.json``; ``None`` for one that could not be read, which shows no activity."""
+        if not self._armed or progress is None:
+            return
+        if progress.get(SERVER_READY_KEY) is True or progress.get("phase") == _COLLECTING:
+            self._armed = False
+            return
+        seen = (progress.get("phase"), progress.get("last_output_unix"), progress.get("last_line"))
+        written = _log_written_at(progress)
+        rewritten = written is not None and (
+            self._written_at is None or written > self._written_at + _WRITE_RESOLUTION_SEC
+        )
+        if seen != self._seen or rewritten:
+            self._active_at = now
+        self._seen = seen
+        if rewritten:
+            self._written_at = written
+
+    def silent_for(self, now: float) -> float | None:
+        """Seconds without activity once that is over the limit before ready; ``None`` while it is not."""
+        silent = now - self._active_at
+        return silent if self._armed and silent >= self.limit_sec else None

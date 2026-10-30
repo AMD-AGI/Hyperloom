@@ -8,7 +8,7 @@ from kernelforge.evaluation.correctness.pipeline import ValidationResult, run_va
 
 
 def test_full_suite_timeout_default_matches_cold_jit_budget():
-    from kernelforge.loop.runner import IterationConfig
+    from kernelforge.workflows.forge_loop.iteration.runner import IterationConfig
 
     config = IterationConfig(kernel_file="kernel.py", driver_script="driver.py")
     assert config.validate_stage_timeout_sec == 1800

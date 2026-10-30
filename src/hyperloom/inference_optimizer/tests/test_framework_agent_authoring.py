@@ -52,12 +52,12 @@ class _TasksStub:
     async def running(self) -> list[Any]:
         return list(self._running)
 
-    async def create_or_return_existing(self, **kwargs: Any) -> Any:
-        self.created.append(kwargs)
+    async def create_or_return_existing(self, spec) -> Any:
+        self.created.append(vars(spec))
         t = SimpleNamespace(
-            kind=kwargs.get("kind"),
+            kind=spec.kind,
             task_id=f"t-{len(self.created)}",
-            params=kwargs.get("params") or {},
+            params=spec.params or {},
             state="queued",
         )
         self._queued.append(t)
@@ -522,11 +522,11 @@ async def test_enqueue_authoring_stamps_recovery_failed_when_unrecoverable(tmp_p
         "batch_id": "b0",
     }
 
-    async def _create_or_return_existing(**kwargs: Any) -> Any:
+    async def _create_or_return_existing(spec) -> Any:
         terminal = SimpleNamespace(
-            kind=kwargs.get("kind"),
+            kind=spec.kind,
             task_id="specialist-terminal",
-            params=kwargs.get("params") or {},
+            params=spec.params or {},
             state="succeeded",
         )
         return terminal, True
@@ -724,7 +724,7 @@ def test_empty_outcome_skips_when_patches_written_present(tmp_path: Path):
 
 def test_config_levers_helper_extracts_from_proposal_set():
     """Proposal args and envs retain separate channels; patches take precedence."""
-    from hyperloom.orchestrator.phases.framework import (
+    from hyperloom.orchestrator.phases.framework_records import (
         _framework_config_levers_from_done,
     )
 

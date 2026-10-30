@@ -12,6 +12,8 @@ from hyperloom.contracts.measurement import (
     AccuracyValue,
     AttachmentRef,
     Attempt,
+    BuildCharge,
+    BuildPayment,
     FailureClass,
     MeasurementError,
     NOT_REPRODUCED,
@@ -50,6 +52,54 @@ def _request(**overrides: object) -> TestRequest:
 def _sandbox(**overrides: object) -> SandboxFacts:
     fields: dict[str, object] = {"sandbox_id": "sb-1", "node_name": "n1", "gpu_model": "mi355x", "gpu_count": 2}
     return SandboxFacts(**{**fields, **overrides})
+
+
+def test_sandbox_facts_state_whether_the_cards_were_free_of_other_processes_and_round_trip() -> None:
+    clean = _roundtrip(_sandbox(card_occupancy="clean"))
+    unknown = _roundtrip(_sandbox(card_occupancy="unknown", card_occupancy_reason="no AMD GPU driver is loaded"))
+    foreign = _roundtrip(
+        _sandbox(card_occupancy="foreign", card_occupancy_reason="1 held the test's cards: pid 9 on card 0")
+    )
+    unobservable = _roundtrip(
+        _sandbox(card_occupancy="unobservable", card_occupancy_reason="every GPU node is refused")
+    )
+    older = SandboxFacts.from_document({"sandbox_id": "sb-1"})
+
+    assert (unobservable.card_occupancy, unobservable.card_occupancy_reason) == (
+        "unobservable",
+        "every GPU node is refused",
+    )
+    assert (clean.card_occupancy, clean.card_occupancy_reason) == ("clean", "")
+    assert (unknown.card_occupancy, unknown.card_occupancy_reason) == ("unknown", "no AMD GPU driver is loaded")
+    assert (foreign.card_occupancy, foreign.card_occupancy_reason) == (
+        "foreign",
+        "1 held the test's cards: pid 9 on card 0",
+    )
+    assert (older.card_occupancy, older.card_occupancy_reason) == ("", ""), "an attempt that did not say, says nothing"
+    assert older.card_occupancy_method == ""
+    assert _roundtrip(
+        _sandbox(card_occupancy="clean", card_occupancy_method="census+fdinfo")
+    ).card_occupancy_method == ("census+fdinfo")
+
+
+@pytest.mark.parametrize(
+    ("fields", "why"),
+    [
+        ({"card_occupancy": "other"}, "card_occupancy must be"),
+        ({"card_occupancy": "unknown"}, "needs its reason"),
+        ({"card_occupancy": "foreign"}, "needs its reason"),
+        ({"card_occupancy": "unobservable"}, "needs its reason"),
+        ({"card_occupancy": "clean", "card_occupancy_reason": "why?"}, "needs its reason"),
+        ({"card_occupancy_reason": "a reason with no state"}, "needs its reason"),
+        ({"card_occupancy": "unknown", "card_occupancy_reason": 7}, "must be a string"),
+        ({"card_occupancy": "clean", "card_occupancy_method": 7}, "card_occupancy_method must be a string"),
+    ],
+)
+def test_sandbox_facts_refuse_a_card_occupancy_that_is_not_one_of_the_states_or_lacks_its_reason(
+    fields: dict[str, object], why: str
+) -> None:
+    with pytest.raises(MeasurementError, match=why):
+        _sandbox(**fields)
 
 
 def _result(**overrides: object) -> TestResult:
@@ -212,24 +262,24 @@ def test_test_classes_are_not_collected_by_pytest() -> None:
     assert TestKind.__test__ is False
 
 
-# --- compatibility with the notebook's names ---------------------------------------------------------------------
+# --- compatibility with the blackboard's names ---------------------------------------------------------------------
 
 
-def test_request_answers_to_the_notebooks_names() -> None:
+def test_request_answers_to_the_blackboards_names() -> None:
     request = _request(accuracy=True)
     assert request.branch == "b1"
     assert request.accuracy_rounds is True
     assert request.action_fingerprint == DELTA.fingerprint()
 
 
-def test_enums_keep_the_notebooks_member_names() -> None:
+def test_enums_keep_the_blackboards_member_names() -> None:
     assert Validity.SUCCESS is Validity.SUCCEEDED
     assert Validity.CANDIDATE_FAILURE is Validity.CANDIDATE_FAILED
     assert TestKind.SWEEP.value == "sweep"
     assert Purpose.EXPLORE == "explore"
 
 
-def test_result_answers_to_the_notebooks_names() -> None:
+def test_result_answers_to_the_blackboards_names() -> None:
     result = _result(validity=Validity.CANDIDATE_FAILED, failure_class=FailureClass.CANDIDATE)
     assert result.failure is FailureClass.CANDIDATE
     assert result.sandbox.node == "n1"
@@ -679,3 +729,38 @@ def test_request_classes_must_be_a_tuple_of_request_classes(bad: object) -> None
         _result(request_classes=bad)
     with pytest.raises(MeasurementError, match="request_classes must be a list"):
         TestResult.from_document({**_result().to_document(), "request_classes": "oops"})
+
+
+# --- result: native build charges ---------------------------------------------------------------------------------
+
+PAID = BuildCharge("k" * 64, "sgl_kernel", 812.5, BuildPayment.PAID)
+REUSED = BuildCharge("j" * 64, "vllm", 0.0, BuildPayment.REUSED)
+
+
+def test_build_charges_round_trip_and_a_result_without_builds_writes_none() -> None:
+    again = _roundtrip(_result(builds=(PAID, REUSED)))
+    assert again.builds == (PAID, REUSED)
+    assert again.to_document()["builds"][0] == {
+        "key": "k" * 64,
+        "component": "sgl_kernel",
+        "build_seconds": 812.5,
+        "payment": "paid",
+    }
+    assert "builds" not in _result().to_document()
+
+
+def test_a_document_written_before_builds_loads_with_none() -> None:
+    document = _result().to_document()
+    document.pop("builds", None)
+    assert TestResult.from_document(document).builds == ()
+
+
+def test_a_reused_build_is_charged_no_seconds_and_no_build_is_charged_negative_seconds() -> None:
+    with pytest.raises(MeasurementError, match="a reused build is charged no build_seconds, got 3.0"):
+        BuildCharge("k", "sgl_kernel", 3.0, BuildPayment.REUSED)
+    with pytest.raises(MeasurementError, match="build_seconds cannot be negative"):
+        BuildCharge("k", "sgl_kernel", -1.0, BuildPayment.PAID)
+    with pytest.raises(MeasurementError, match="payment must be one of"):
+        BuildCharge.from_document({"key": "k", "component": "c", "build_seconds": 0.0, "payment": "free"})
+    with pytest.raises(MeasurementError, match="builds must be a tuple of BuildCharge"):
+        _result(builds=[PAID])

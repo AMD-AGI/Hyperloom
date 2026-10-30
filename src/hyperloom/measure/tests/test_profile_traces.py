@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.measure.profile_traces import collect_traces, has_traces, is_trace_file
+from hyperloom.measure.profile_traces import collect_traces, has_step_traces, has_traces, is_trace_file
 
 
 def _file(path: Path, data: bytes = b"x") -> Path:
@@ -29,6 +29,31 @@ def test_only_json_traces_are_traces(name: str, expected: bool) -> None:
 def test_a_directory_without_a_trace_file_has_no_traces(tmp_path: Path) -> None:
     _file(tmp_path / "torch_trace" / "notes.txt")
     assert not has_traces(tmp_path / "torch_trace") and not has_traces(tmp_path / "missing")
+
+
+@pytest.mark.parametrize(
+    ("files", "steps"),
+    [
+        # What a NEXTN head's profile held: the boot's graph captures, no rank trace.
+        (("torch_trace/graph_capture_profile/DecodeCudaGraphRunner_bs_10_rank0.json.gz",), False),
+        (("capture_traces/bs_1_rank0.json",), False),
+        (("torch_trace/cuda_graph_capture_bs_8.json",), False),
+        (
+            (
+                "torch_trace/graph_capture_profile/DecodeCudaGraphRunner_bs_10_rank0.json.gz",
+                "torch_trace/1792918450.3630219-TP-0.trace.json.gz",
+            ),
+            True,
+        ),
+    ],
+)
+def test_only_a_trace_that_is_not_a_graph_capture_sidecar_records_serving_steps(
+    tmp_path: Path, files: tuple[str, ...], steps: bool
+) -> None:
+    for name in files:
+        _file(tmp_path / "profile" / name)
+    assert has_traces(tmp_path / "profile")
+    assert has_step_traces(tmp_path / "profile") is steps
 
 
 def test_trace_directories_are_moved_with_their_names_and_nothing_is_left_behind(tmp_path: Path) -> None:

@@ -6,12 +6,12 @@
 from __future__ import annotations
 
 import dis
-from types import FunctionType
+from types import FunctionType, SimpleNamespace
 
 import pytest
 
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.orchestrator.bus.storage import SqliteConnection
+from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.policy import gate as gate_module
 from hyperloom.orchestrator.policy import projection as projection_module
 from hyperloom.orchestrator.policy.gate import PolicyDenied, PolicyGate
@@ -60,7 +60,7 @@ def _baseline() -> Intent:
 
 async def _reread(store: RoundStore, facts: ResourceFacts, now: float) -> None:
     """Re-read the facts, as the repair pass does at the top of a tick."""
-    facts.update(None, rounds=await store.excluding(now))
+    facts.update(SimpleNamespace(tp=0), rounds=await store.excluding(now))
 
 
 @pytest.mark.asyncio
@@ -317,7 +317,7 @@ def test_the_resource_rules_refuse_nothing_until_the_facts_are_read():
 
     # Once read, the same request is judged against what was found.
     facts = ResourceFacts()
-    facts.update(None)
+    facts.update(SimpleNamespace(tp=0))
     with pytest.raises(PolicyDenied) as denied:
         _gate(facts)._validate_specialist_gpu_request(request)
     assert denied.value.rule == RULE_GPU_POOL_DISABLED

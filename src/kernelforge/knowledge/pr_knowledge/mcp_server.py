@@ -17,7 +17,7 @@ from kernelforge.knowledge.pr_knowledge.client import PRMonitorClient
 from kernelforge.knowledge.pr_knowledge.inclusion import probe_inclusion
 from kernelforge.knowledge.pr_knowledge.search import PRLifecycle, discover
 from kernelforge.knowledge.pr_knowledge.context import PRQueryContext
-from kernelforge.tools import mcp_stdio
+from kernelforge.utils import mcp_stdio
 
 #: Re-exported so the two servers stay one import away from the shared wire
 #: format; both spellings name the same objects.

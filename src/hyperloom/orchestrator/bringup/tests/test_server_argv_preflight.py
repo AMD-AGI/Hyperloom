@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.orchestrator.actions.executors import _benchmark_interpreter
 from hyperloom.orchestrator.bringup import argv_preflight as pf
 
 #: The argument surface of the "installed" sglang, in the shape the adapter
@@ -49,7 +50,9 @@ def _install_sglang(root: Path, version: str) -> Path:
 def serving(tmp_path, monkeypatch):
     """A launch env whose sglang is the one the probe interpreter also sees."""
     site = _install_sglang(tmp_path / "serve", "0.5.1")
-    monkeypatch.setattr(pf, "_resolve_probe_interpreter", lambda _framework: sys.executable)
+    monkeypatch.setattr(
+        _benchmark_interpreter, "_resolve_probe_python", lambda _framework="vllm", *, env=None: sys.executable
+    )
     return {
         "PATH": os.environ.get("PATH", ""),
         "PYTHONPATH": str(site),
@@ -95,7 +98,9 @@ def atom_serving(tmp_path, monkeypatch, request):
     if parser_source is not None:
         # ``None`` models an installation predating the native parser module.
         (atom / "utils" / "arg_parser.py").write_text(parser_source, encoding="utf-8")
-    monkeypatch.setattr(pf, "_resolve_probe_interpreter", lambda _framework: sys.executable)
+    monkeypatch.setattr(
+        _benchmark_interpreter, "_resolve_probe_python", lambda _framework="vllm", *, env=None: sys.executable
+    )
     return {
         "PATH": os.environ.get("PATH", ""),
         "PYTHONPATH": str(site),
@@ -110,7 +115,9 @@ def test_atom_kv_cache_dtype_spellings_are_preserved(atom_serving, flag, equals,
     """A valid FP8 request must not be repaired into the BF16 default."""
     argv = (f"{flag}=fp8",) if equals else (flag, "fp8")
     text = " ".join(argv)
-    verdict = pf.check_server_argv(framework="atom", argv=argv, text=text, launch_env=atom_serving, digest=digest)
+    verdict = pf.check_server_argv(
+        framework="atom", argv=argv, text=text, launch_env=atom_serving, repair=pf.ArgvRepair(digest=digest)
+    )
     assert verdict.status == pf.OK
     assert verdict.argv == argv
     assert verdict.text == text
@@ -126,7 +133,7 @@ def test_atom_invalid_kv_cache_dtype_is_never_repaired(atom_serving, flag, equal
     argv = (f"{flag}=invalid",) if equals else (flag, "invalid")
     text = " ".join(argv)
     verdict = pf.check_server_argv(
-        framework="atom", argv=argv, text=text, launch_env=atom_serving, digest="atom-invalid"
+        framework="atom", argv=argv, text=text, launch_env=atom_serving, repair=pf.ArgvRepair(digest="atom-invalid")
     )
     assert verdict.status == pf.INVALID
     assert verdict.reason == pf.VALUE_REJECTED
@@ -145,7 +152,7 @@ def test_atom_unknown_flag_is_dropped_once_without_losing_kv_cache_dtype(atom_se
     argv = (*kv_argv, "--unknown-option", "value")
     text = " ".join(argv)
     verdict = pf.check_server_argv(
-        framework="atom", argv=argv, text=text, launch_env=atom_serving, digest="atom-unknown"
+        framework="atom", argv=argv, text=text, launch_env=atom_serving, repair=pf.ArgvRepair(digest="atom-unknown")
     )
     assert verdict.status == pf.OK
     assert verdict.reason == pf.PARSED_AFTER_DROP
@@ -159,8 +166,7 @@ def test_atom_unknown_flag_is_dropped_once_without_losing_kv_cache_dtype(atom_se
         argv=argv,
         text=text,
         launch_env=atom_serving,
-        digest="atom-unknown",
-        repaired=(verdict.repaired_digest,),
+        repair=pf.ArgvRepair(digest="atom-unknown", spent=(verdict.repaired_digest,)),
     )
     assert repeated.status == pf.INVALID
     assert repeated.reason == pf.REPAIR_SPENT
@@ -217,7 +223,11 @@ def test_atom_broken_native_parser_is_unavailable_not_legacy(atom_serving, detai
     argv = ("--kv_cache_dtype", "fp8")
     text = " ".join(argv)
     verdict = pf.check_server_argv(
-        framework="atom", argv=argv, text=text, launch_env=atom_serving, digest="atom-parser-error"
+        framework="atom",
+        argv=argv,
+        text=text,
+        launch_env=atom_serving,
+        repair=pf.ArgvRepair(digest="atom-parser-error"),
     )
     assert verdict.status == pf.UNAVAILABLE
     assert verdict.reason == pf.PROBE_FAILED
@@ -258,7 +268,11 @@ def test_atom_engine_args_errors_are_unavailable(atom_serving, engine_source, de
     argv = ("--kv_cache_dtype", "fp8")
     text = " ".join(argv)
     verdict = pf.check_server_argv(
-        framework="atom", argv=argv, text=text, launch_env=atom_serving, digest="atom-engine-error"
+        framework="atom",
+        argv=argv,
+        text=text,
+        launch_env=atom_serving,
+        repair=pf.ArgvRepair(digest="atom-engine-error"),
     )
     assert verdict.status == pf.UNAVAILABLE
     assert verdict.reason == pf.PROBE_FAILED
@@ -292,7 +306,7 @@ def test_an_argv_the_installed_parser_accepts_is_ok(serving):
 )
 def test_the_parser_refuses_an_argument_it_does_not_have(serving, argv, flag):
     """Both failures are named by the installed parser, with no rule added here."""
-    verdict = _check(argv, serving, digest="")
+    verdict = _check(argv, serving, repair=pf.ArgvRepair(digest=""))
     assert verdict.status == pf.INVALID
     assert verdict.dropped == (flag,)
     assert flag in verdict.detail
@@ -300,7 +314,7 @@ def test_the_parser_refuses_an_argument_it_does_not_have(serving, argv, flag):
 
 def test_one_unrecognised_flag_is_dropped_and_the_argv_revalidated(serving):
     """The single allowed repair removes the flag and asks the parser again."""
-    verdict = _check(["--tp", "8", "--moe-backend", "triton"], serving, digest="argv-1")
+    verdict = _check(["--tp", "8", "--moe-backend", "triton"], serving, repair=pf.ArgvRepair(digest="argv-1"))
     assert verdict.status == pf.OK
     assert verdict.reason == pf.PARSED_AFTER_DROP
     assert verdict.dropped == ("--moe-backend",)
@@ -311,7 +325,9 @@ def test_one_unrecognised_flag_is_dropped_and_the_argv_revalidated(serving):
 
 def test_the_same_argv_does_not_get_a_second_repair(serving):
     """A recomposed argv that failed once has spent its repair; it is terminal."""
-    verdict = _check(["--tp", "8", "--moe-backend", "triton"], serving, digest="argv-1", repaired=("argv-1",))
+    verdict = _check(
+        ["--tp", "8", "--moe-backend", "triton"], serving, repair=pf.ArgvRepair(digest="argv-1", spent=("argv-1",))
+    )
     assert verdict.status == pf.INVALID
     assert verdict.reason == pf.REPAIR_SPENT
     assert verdict.repaired_digest == ""
@@ -319,7 +335,7 @@ def test_the_same_argv_does_not_get_a_second_repair(serving):
 
 def test_a_rejected_value_is_terminal_and_never_rewritten(serving):
     """The harness does not know what value the framework meant, so it does not guess."""
-    verdict = _check(["--attention-backend", "fa4"], serving, digest="argv-2")
+    verdict = _check(["--attention-backend", "fa4"], serving, repair=pf.ArgvRepair(digest="argv-2"))
     assert verdict.status == pf.INVALID
     assert verdict.reason == pf.VALUE_REJECTED
     assert verdict.dropped == ()
@@ -328,7 +344,9 @@ def test_a_rejected_value_is_terminal_and_never_rewritten(serving):
 
 def test_a_drop_that_does_not_fix_the_argv_is_terminal(serving):
     """Two walls behind one flag is not a repair; it is a second guess."""
-    verdict = _check(["--moe-backend", "triton", "--attention-backend", "fa4"], serving, digest="argv-3")
+    verdict = _check(
+        ["--moe-backend", "triton", "--attention-backend", "fa4"], serving, repair=pf.ArgvRepair(digest="argv-3")
+    )
     assert verdict.status == pf.INVALID
     assert verdict.reason in (pf.REPAIR_FAILED, pf.VALUE_REJECTED)
 
@@ -348,7 +366,9 @@ def test_a_probe_interpreter_holding_another_version_yields_unavailable(tmp_path
         encoding="utf-8",
     )
     shim.chmod(shim.stat().st_mode | stat.S_IEXEC)
-    monkeypatch.setattr(pf, "_resolve_probe_interpreter", lambda _framework: str(shim))
+    monkeypatch.setattr(
+        _benchmark_interpreter, "_resolve_probe_python", lambda _framework="vllm", *, env=None: str(shim)
+    )
     env = {
         "PATH": os.environ.get("PATH", ""),
         "PYTHONPATH": str(serve_site),
@@ -362,7 +382,9 @@ def test_a_probe_interpreter_holding_another_version_yields_unavailable(tmp_path
 
 def test_an_unreachable_framework_is_unavailable_not_invalid(tmp_path, monkeypatch):
     """Nothing importable means nothing was checked; the launch stays the only verdict."""
-    monkeypatch.setattr(pf, "_resolve_probe_interpreter", lambda _framework: sys.executable)
+    monkeypatch.setattr(
+        _benchmark_interpreter, "_resolve_probe_python", lambda _framework="vllm", *, env=None: sys.executable
+    )
     env = {"PATH": os.environ.get("PATH", ""), "PYTHONPATH": str(tmp_path), pf.SERVING_PYTHON_ENV: sys.executable}
     verdict = _check(["--tp", "8"], env)
     assert verdict.status == pf.UNAVAILABLE

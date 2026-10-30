@@ -16,6 +16,8 @@ from hyperloom.inference_optimizer import gpu_types
 from hyperloom.inference_optimizer.model_config_utils import _fp8_is_per_channel_per_token
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     materialize_config_with_envs,
+    BenchmarkTarget,
+    LaunchLayer,
 )
 
 _AMD = "mi300x"
@@ -218,9 +220,8 @@ def _materialize_envs(
     materialized = materialize_config_with_envs(
         base,
         out,
-        model_path=model,
-        gpu_type=gpu_type,
-        extra_envs=extra_envs,
+        launch=LaunchLayer(extra_envs=extra_envs),
+        target=BenchmarkTarget(model_path=model, gpu_type=gpu_type),
     )
     return yaml.safe_load(materialized.read_text())["benchmark"]["envs"]
 

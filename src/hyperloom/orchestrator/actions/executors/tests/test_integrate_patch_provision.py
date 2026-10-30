@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import types
 from pathlib import Path
 
@@ -13,7 +14,7 @@ import yaml
 
 from hyperloom.common.failure_signature import classify_failure
 from hyperloom.orchestrator.actions.executors import integrate_patch as ip
-from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant, _build_variant_yaml
+from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant, _build_variant_yaml, GridRecipe
 from hyperloom.inference_optimizer.runtime_environment import apply_runtime_override
 from hyperloom.orchestrator.enablement.runtime.stack_actions import (
     EnablementStackAction,
@@ -67,11 +68,10 @@ def _candidate(framework: str = "vllm") -> dict:
 
 
 class _FakeAdapter:
-    """Adapter double whose provision/probe outcomes are programmable."""
+    """Adapter double whose provision outcome is programmable."""
 
-    def __init__(self, result: ProvisionResult, probe_ok: bool = True):
+    def __init__(self, result: ProvisionResult):
         self._result = result
-        self._probe_ok = probe_ok
         self.provision_calls = 0
 
     def provision(self, action, attempt_dir):
@@ -80,9 +80,6 @@ class _FakeAdapter:
         (attempt_dir / "venv" / "bin").mkdir(parents=True, exist_ok=True)
         (attempt_dir / "provision.log").write_text("$ pip install\nrc=1\n", encoding="utf-8")
         return self._result
-
-    def probe(self, result, action):
-        return self._probe_ok
 
     def build_stack_action(self, request):
         return EnablementStackAction.from_state(_candidate())
@@ -121,7 +118,6 @@ def _neutralize_disk_preflight(monkeypatch):
         kwargs["run"] = forbidden
         adapter = real_get_adapter(framework, **kwargs)
         monkeypatch.setattr(adapter, "provision", forbidden)
-        monkeypatch.setattr(adapter, "probe", forbidden)
         return adapter
 
     monkeypatch.setattr(adapters, "get_adapter", metadata_adapter)
@@ -260,17 +256,6 @@ async def test_provision_fail_returns_reverted_and_gcs_the_venv_but_keeps_its_lo
     assert (attempt / "provision.log").read_text(encoding="utf-8").startswith("$ pip install")
 
 
-async def test_probe_fail_returns_reverted(_executor, monkeypatch):
-    venv = str(_executor.session_dir / "enablement" / "stacks" / "vllm" / "t-1" / "venv")
-    adapter = _FakeAdapter(_ok_result(venv), probe_ok=False)
-    monkeypatch.setattr("hyperloom.orchestrator.enablement.runtime.adapters.get_adapter", lambda _fw: adapter)
-    attempt = _attempt(kept=_candidate())
-    out = await _executor._stage_provision_attempt_runtime(attempt, _params(), "t-1")
-    assert out is not None
-    assert out["status"] == "reverted"
-    assert "probe" in out["error"]
-
-
 async def test_disk_preflight_failure_returns_reverted(_executor, monkeypatch):
     import hyperloom.agents.framework.isolation as iso
 
@@ -382,17 +367,14 @@ def test_provisioned_runtime_lands_in_yaml_not_process_env(tmp_path, monkeypatch
     variant.runtime_override = runtime.to_runtime_override()
 
     env_before = dict(os.environ)
-    out_yaml = _build_variant_yaml(
-        base_yaml_path=base, base_extra_args="", variant=variant, output_subdir=tmp_path / "out"
-    )
+    out_yaml = _build_variant_yaml(GridRecipe(base_yaml_path=base), variant, output_subdir=tmp_path / "out")
     assert dict(os.environ) == env_before  # os.environ untouched
 
     materialized = yaml.safe_load(out_yaml.read_text(encoding="utf-8"))
     envs = materialized["benchmark"]["envs"]
     # the server binary resolves the attempt runtime, proven via YAML.
     assert f"{venv}/bin" in envs["PATH"]
-    assert envs["HYPERLOOM_FRAMEWORK_BIN"] == f"{venv}/bin"
-    assert envs["HYPERLOOM_FRAMEWORK_VENV_ROOT"] == venv
+    assert envs["HYPERLOOM_FRAMEWORK_PYTHON"] == f"{venv}/bin/python"
 
 
 def test_opt_venv_path_never_replaced(tmp_path):
@@ -408,10 +390,19 @@ def test_opt_venv_path_never_replaced(tmp_path):
 def test_accepted_runtime_records_only_when_provision_succeeded(tmp_path):
     """Kept and advanced verdicts share this payload; nothing is recorded without a successful provision."""
     action = EnablementStackAction.from_state(_candidate())
-    attempt = ip.IntegrateAttempt(task_id="t", stack_action=action, provision_result=_ok_result(str(tmp_path / "venv")))
+    provisioned = dataclasses.replace(
+        _ok_result(str(tmp_path / "venv")),
+        resolved_ref="c" * 40,
+        resolved_packages={"vllm": {"version": "0.21.0", "artifact_digest": "sha256:ab"}},
+    )
+    attempt = ip.IntegrateAttempt(task_id="t", stack_action=action, provision_result=provisioned)
     records = attempt.accepted_runtime_records()
     assert records["enablement_active_runtime"]["venv_root"] == str(tmp_path / "venv")
     assert records["enablement_kept_stack_action"]["packages"] == ["vllm"]
+    assert records["enablement_kept_stack_action"]["resolved_ref"] == "c" * 40
+    assert records["enablement_kept_stack_action"]["resolved_packages"] == {
+        "vllm": {"version": "0.21.0", "artifact_digest": "sha256:ab"}
+    }
     attempt.provision_result = ProvisionResult(ok=False)
     assert attempt.accepted_runtime_records() == {}
 

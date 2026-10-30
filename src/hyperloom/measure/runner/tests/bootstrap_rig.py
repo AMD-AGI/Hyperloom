@@ -231,9 +231,14 @@ def tripwire() -> Iterator[Tripwire]:
 
 
 def build_wheel(
-    directory: Path, name: str, version: str, module_source: str, requires: str | None = None
+    directory: Path,
+    name: str,
+    version: str,
+    module_source: str,
+    requires: str | None = None,
+    tag: str = "py3-none-any",
 ) -> tuple[Path, str]:
-    """A pure-Python wheel of one module ``name`` and its SHA-256 (what ``--hash`` names).
+    """A wheel of one module ``name`` tagged ``tag`` (pure Python unless told) and its SHA-256 (what ``--hash`` names).
 
     ``requires`` is a ``Requires-Dist`` the wheel declares, one the lock does not pin.
     """
@@ -242,14 +247,14 @@ def build_wheel(
     files = {
         f"{name}.py": module_source,
         f"{dist_info}/METADATA": f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n{declared}",
-        f"{dist_info}/WHEEL": "Wheel-Version: 1.0\nGenerator: rig\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+        f"{dist_info}/WHEEL": "Wheel-Version: 1.0\nGenerator: rig\nRoot-Is-Purelib: true\nTag: {tag}\n",
     }
     record = []
     for path, text in files.items():
         digest = base64.urlsafe_b64encode(hashlib.sha256(text.encode()).digest()).rstrip(b"=").decode()
         record.append(f"{path},sha256={digest},{len(text.encode())}")
     files[f"{dist_info}/RECORD"] = "\n".join([*record, f"{dist_info}/RECORD,,"]) + "\n"
-    wheel = directory / f"{name}-{version}-py3-none-any.whl"
+    wheel = directory / f"{name}-{version}-{tag}.whl"
     with zipfile.ZipFile(wheel, "w") as archive:
         for path, text in files.items():
             archive.writestr(path, text)

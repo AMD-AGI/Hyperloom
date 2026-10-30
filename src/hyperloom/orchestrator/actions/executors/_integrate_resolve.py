@@ -16,13 +16,12 @@ from typing import Any
 from hyperloom.common.coerce import to_float
 from hyperloom.inference_optimizer.session.session_paths import enablement_stacks_dir, runs_dir
 
-from ...enablement.lane import bind_integrate_to_lane
 from ...state.shared_state import inject_stack_base_params
 from ._enablement_config import _enablement_gap, _stamp_framework_kb_provenance
 from ._integrate_attempt import IntegrateAttempt
-from ._integrate_refusals import _enforce_critic_gate
+from ._integrate_refusals import _enablement_lane_closed_skip, _enforce_critic_gate
 from ._patch_git import _detect_p_level
-from ._patch_source_pr import DEFAULT_DIFF_FETCH_TIMEOUT_SEC, _candidate_slug, materialize_candidate_patches
+from ._patch_source_pr import _candidate_slug, materialize_candidate_patches
 from ._integrate_vocabulary import PATCH_SOURCE_UPSTREAM_PR, resolve_patch_source
 from ._patch_sources import (
     _acquiring_round,
@@ -84,7 +83,7 @@ class ResolveStageMixin:
         """
         from ._multi_node_env import is_multi_node
 
-        shared_state = extra.get("shared_state") or extra.get("state")
+        shared_state = extra.get("shared_state")
         if is_multi_node():
             return {
                 "status": "skipped",
@@ -112,8 +111,8 @@ class ResolveStageMixin:
                 "error_class": "integrate_restore_incomplete",
                 "error": "previous integration still requires recovery",
             }
-        if shared_state is not None:
-            bind_integrate_to_lane(params, shared_state, session_dir=Path(self.session_dir))
+        if (skipped := _enablement_lane_closed_skip(params, shared_state)) is not None:
+            return skipped
         if shared_state is not None and not params.get("accuracy_baseline"):
             base_acc = to_float(getattr(shared_state, "baseline_accuracy", 0.0), 0.0)
             if base_acc > 0:
@@ -238,7 +237,6 @@ class ResolveStageMixin:
             params=params,
             framework_root=framework_root,
             dest=scratch / f"{_candidate_slug(candidate)}.patch",
-            diff_fetch_timeout_sec=DEFAULT_DIFF_FETCH_TIMEOUT_SEC,
         )
         if materialized.failure is not None:
             return {
@@ -318,17 +316,8 @@ class ResolveStageMixin:
             log.warning("integrate_patch: disk preflight raised (%r); continuing", exc)
 
         adapter = get_adapter(action.framework)
-
-        def _provision_and_probe():
-            provisioned = adapter.provision(action, attempt_dir)
-            if provisioned.ok and not adapter.probe(provisioned, action):
-                from ...enablement.runtime.stack_actions import ProvisionResult as _PR
-
-                return _PR(ok=False, log_path=provisioned.log_path, error="adapter probe failed after provision")
-            return provisioned
-
         try:
-            result = await asyncio.to_thread(_provision_and_probe)
+            result = await asyncio.to_thread(adapter.provision, action, attempt_dir)
         except (OSError, subprocess.SubprocessError) as exc:
             log.exception("integrate_patch: attempt-runtime provision raised")
             self._gc_attempt_dir(attempt_dir)
@@ -421,7 +410,6 @@ class ResolveStageMixin:
             build_localization_diff,
             action,
             fetch_pr_patches=lambda slug, num: _gh.pr_patches(slug, num),
-            fetch_raw_file=lambda slug, ref, path: _gh.fetch_raw_file(slug, ref, path),
             scope=adapter.package_path,
         )
         if not verdict.is_localizable:

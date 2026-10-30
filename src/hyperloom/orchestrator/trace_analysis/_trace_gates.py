@@ -8,11 +8,10 @@ from __future__ import annotations
 import csv
 import os
 import zlib
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-# Trace-health gate thresholds + warnings (high idle, low compute): shared single
-# source of truth so the TraceLens and bypass routes gate on identical semantics.
 from ._idle_gate import (
     build_graph_under_recorded_warning as _build_graph_under_recorded_warning,
     build_high_idle_warning as _build_high_idle_warning,
@@ -20,6 +19,16 @@ from ._idle_gate import (
     resolve_idle_pct_threshold,
     resolve_min_compute_pct_threshold,
 )
+from ._trace_reader import analyze_trace
+
+
+@dataclass(frozen=True)
+class WorkloadShares:
+    """The wall-clock shares the gates read; ``None`` when the report did not expose one."""
+
+    idle_pct: float | None
+    compute_pct: float | None
+    exposed_communication_pct: float | None
 
 
 def _evaluate_high_idle_gate(idle_pct: float | None, report_path: Path) -> tuple[float, dict[str, Any] | None]:
@@ -40,31 +49,21 @@ def _evaluate_high_idle_gate(idle_pct: float | None, report_path: Path) -> tuple
 
 
 def _graph_coverage_from_raw_trace(trace_path: str | Path | None) -> dict[str, Any]:
-    """Return the bypass reader's ``graph_coverage`` for the raw trace, or ``{}``.
+    """Return the trace reader's ``graph_coverage`` for the raw trace, or ``{}``.
 
-    Reuses the tested ``_bypass_trace_reader.analyze_trace`` graph-launch
+    Reuses the tested ``_trace_reader.analyze_trace`` graph-launch
     detection so the TraceLens route can tell a cuda/HIP-graph under-recorded
     capture (profiler activity-buffer overflow → only ~1 of N replays recorded →
     inflated idle%) apart from a genuinely idle/launch-bound workload. An
     unreadable trace returns ``{}`` so the caller falls back to the plain idle gate.
-
-    ``graph_coverage`` is derived from the launch/kernel correlation scan and is
-    independent of the returned aggregation lists, so we pass ``emit_launches=
-    False`` and ``top_k=1`` to avoid materializing the per-launch rows and full
-    top-N lists on large raw traces.
     """
     if not trace_path:
         return {}
     try:
-        from . import _bypass_trace_reader as _reader
-
-        analyze = _reader.analyze_trace(str(trace_path), _reader.TraceAnalysisOptions(top_k=1, emit_launches=False))
-        if analyze.get("truncated"):
-            return {}
-        cov = analyze.get("graph_coverage") if isinstance(analyze, dict) else None
-        return cov if isinstance(cov, dict) else {}
+        analysis = analyze_trace(Path(trace_path))
     except (OSError, zlib.error):
         return {}
+    return {} if analysis["truncated"] else analysis["graph_coverage"]
 
 
 def _evaluate_idle_gate_with_graph_guard(
@@ -76,11 +75,10 @@ def _evaluate_idle_gate_with_graph_guard(
 
     A cuda/HIP-graph trace that under-records replays reports an unreliable
     (inflated) idle%, so gating candidates on it wrongly suppresses the whole
-    hot-kernel list on a workload that is actually compute-bound (the exact
-    failure the bypass route already guards against via
-    ``bypass_graph_under_recorded``). When under-recording is detected we skip
-    the high-idle suppression and surface the graph-under-recorded warning
-    instead; otherwise the plain idle gate applies unchanged.
+    hot-kernel list on a workload that is actually compute-bound. When
+    under-recording is detected we skip the high-idle suppression and surface
+    the ``graph_under_recorded`` warning instead; otherwise the plain idle gate
+    applies unchanged.
 
     Returns:
         ``(threshold, high_idle_warning, graph_under_recorded_warning)`` where at
@@ -142,10 +140,10 @@ def _evaluate_low_compute_gate(
 _DEFAULT_CHUNK_QUALITY_MIN_BUSY_RATIO = 0.05  # 5%
 
 # Alternate must beat the requested mode by this margin to avoid thrashing.
-_CHUNK_QUALITY_ALTERNATE_MARGIN = 0.10  # 10 ppt
+CHUNK_QUALITY_ALTERNATE_MARGIN = 0.10  # 10 ppt
 
 
-def _resolve_min_busy_ratio() -> float:
+def resolve_min_busy_ratio() -> float:
     """Return the minimum chunk busy-ratio threshold for the N36 quality gate.
 
     Reads ``INFERENCE_OPTIMIZER_CHUNK_QUALITY_MIN_BUSY_RATIO`` and falls back
@@ -245,7 +243,7 @@ def _check_chunk_quality(
         return None
     if sel_ratio is None:
         sel_ratio = 0.0
-    threshold = _resolve_min_busy_ratio()
+    threshold = resolve_min_busy_ratio()
     if sel_ratio >= threshold:
         return None
 
@@ -263,7 +261,7 @@ def _check_chunk_quality(
         if sel_events == 0:
             if oth_ratio > 0.0:
                 alternates.append((other_mode, oth_ratio))
-        elif oth_ratio >= threshold and (oth_ratio - sel_ratio) >= _CHUNK_QUALITY_ALTERNATE_MARGIN:
+        elif oth_ratio >= threshold and (oth_ratio - sel_ratio) >= CHUNK_QUALITY_ALTERNATE_MARGIN:
             alternates.append((other_mode, oth_ratio))
     if not alternates and sel_events > 0:
         return None  # No better mode exists; let roofline_failure_streak path handle.

@@ -20,7 +20,7 @@ import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence
 
-from ...source_snapshot import snapshot_source_layer
+from ...source_snapshot import SourceLayer, snapshot_source_layer
 from .projections import root_id_for, select_linked_build
 
 if TYPE_CHECKING:
@@ -134,22 +134,13 @@ def collect_contributions(
 def declared_targets(
     *,
     framework_root: str,
-    upserted: Sequence[str],
-    deleted: Sequence[str],
     artifacts: Sequence[Mapping[str, Any]],
 ) -> dict[str, dict[str, str]]:
-    """Return ``{root: {rel: expected_op}}`` for the accepted stack's targets.
+    """Return ``{root: {rel: "upsert"}}`` for the accepted stack's artifact targets.
 
-    Every target is matched against the operation it was *declared* with:
-    requiring an upsert everywhere would fail every correctly captured deletion,
-    while a presence test would pass a KEEP that ran with its mutation inputs
-    stripped and captured the base file.
+    An artifact that names no root installs into ``framework_root``.
     """
     targets: dict[str, dict[str, str]] = {}
-    for rel in upserted:
-        targets.setdefault(framework_root, {})[str(rel)] = "upsert"
-    for rel in deleted:
-        targets.setdefault(framework_root, {})[str(rel)] = "delete"
     for artifact in artifacts or ():
         if not isinstance(artifact, Mapping) or not artifact.get("rel_target"):
             continue
@@ -164,7 +155,6 @@ def capture_root_snapshots(
     targets: Mapping[str, Mapping[str, str]],
     dest_root: Path,
     session_dir: Path,
-    import_root: str = "",
 ) -> list[dict[str, Any]]:
     """Capture each contributing root's declared targets, one snapshot per root.
 
@@ -187,13 +177,14 @@ def capture_root_snapshots(
         # target no longer in the accepted stack.
         shutil.rmtree(dest, ignore_errors=True)
         manifest = snapshot_source_layer(
-            framework_root=root,
-            base_sha=str(record.get("base_sha") or ""),
-            rel_paths=sorted(declared),
+            SourceLayer(
+                framework_root=root,
+                base_sha=str(record.get("base_sha") or ""),
+                rel_paths=sorted(declared),
+                declared_ops=declared,
+            ),
             dest_dir=dest,
             provenance="enablement_keep",
-            declared_ops=declared,
-            import_root=import_root,
         )
         if not manifest:
             continue

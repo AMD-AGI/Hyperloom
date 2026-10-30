@@ -22,7 +22,7 @@ from hyperloom.orchestrator.actions.executors.baseline import (
     BaselineExecutor,
 )
 
-_BASELINE_LOGGER = "hyperloom.orchestrator.actions.executors.baseline"
+_ACCURACY_LOGGER = "hyperloom.orchestrator.actions.executors.benchmark_run.accuracy"
 
 
 @pytest.fixture(autouse=True)
@@ -718,7 +718,7 @@ def test_the_double_run_handoff_is_not_reported_as_a_recovery(tmp_path, caplog):
     executor = BaselineExecutor()
     rec = SharedState(enablement_mode="off")
     result = {"status": "succeeded", "run_eval_disabled": False, "output_dir": str(deciding)}
-    with caplog.at_level(logging.INFO, logger=_BASELINE_LOGGER):
+    with caplog.at_level(logging.INFO, logger=_ACCURACY_LOGGER):
         executor._maybe_stop_on_missing_baseline_accuracy(_stop_ctx("vllm", rec), result)
 
     assert rec.stop_reason == ""
@@ -738,7 +738,7 @@ def test_an_unexpected_gap_is_still_reported_as_a_salvage(tmp_path, caplog):
     executor = BaselineExecutor()
     rec = SharedState(enablement_mode="off")
     result = {"status": "succeeded", "run_eval_disabled": False, "output_dir": str(deciding)}
-    with caplog.at_level(logging.INFO, logger=_BASELINE_LOGGER):
+    with caplog.at_level(logging.INFO, logger=_ACCURACY_LOGGER):
         executor._maybe_stop_on_missing_baseline_accuracy(_stop_ctx("vllm", rec), result)
 
     assert any(r.levelno == logging.WARNING and "salvaged" in r.getMessage() for r in caplog.records)

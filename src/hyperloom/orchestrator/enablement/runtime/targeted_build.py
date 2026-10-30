@@ -10,7 +10,6 @@ import os
 import signal
 import subprocess
 import sys
-import time
 
 from hyperloom.common.git_safety import safe_directory_args
 from dataclasses import dataclass
@@ -18,7 +17,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .build_actions import BuildResult, FrameworkRuntime, TargetedBuildAction
-from .build_utils import ROCM_CONSTRAINTS_FILE, sglang_rocm_install_target
+from .build_utils import ROCM_CONSTRAINTS_FILE, VLLM_ROCM_PROBE, sglang_rocm_install_target
 
 log = logging.getLogger(__name__)
 
@@ -55,33 +54,20 @@ class BuildHandle:
         """Project onto the ``pending_targeted_build`` sentinel dict."""
         return {
             "task_id": task_id,
-            "pid": self.pid,
             "pgid": self.pgid,
             "attempt_root": self.attempt_root,
             "aiter_jit_dir": self.aiter_jit_dir,
-            "action": self.action.to_state(),
-            "build_log_path": self.build_log_path,
-            "ts": time.time(),
         }
-
-
-def _resolve_budget_sec(action: TargetedBuildAction) -> int:
-    budget = int(action.build_budget_sec or 0)
-    return budget if budget > 0 else default_budget_sec(action.component)
 
 
 def spawn_build(
     action: TargetedBuildAction,
     *,
     attempt_root: str,
-    command: list[str] | None = None,
+    command: list[str],
     run: Callable[..., Any] = subprocess.Popen,
 ) -> BuildHandle:
     """Spawn a targeted build as a detached process group."""
-    argv = command if command is not None else list(action.build_command)
-    if not argv:
-        raise ValueError("targeted_build: build_command must be a non-empty argv (or pass command=)")
-
     root = Path(attempt_root)
     root.mkdir(parents=True, exist_ok=True)
     jit_dir = root / "aiter_jit"
@@ -90,13 +76,11 @@ def spawn_build(
 
     env = dict(os.environ)
     env["INFERENCE_OPTIMIZER_AITER_JIT_DIR"] = str(jit_dir)
-    for k, v in dict(action.envs).items():
-        env[str(k)] = str(v)
 
     log_fh = build_log.open("w", encoding="utf-8")
     try:
         proc = run(
-            argv,
+            command,
             stdout=log_fh,
             stderr=subprocess.STDOUT,
             env=env,
@@ -118,7 +102,7 @@ def spawn_build(
         action.component,
         pid,
         pgid,
-        _resolve_budget_sec(action),
+        default_budget_sec(action.component),
         attempt_root,
     )
     return BuildHandle(
@@ -143,39 +127,19 @@ def kill_build_pgroup(pgid: int, *, sig: int = signal.SIGTERM) -> None:
         pass
 
 
-def _build_runtime(handle: BuildHandle) -> FrameworkRuntime:
-    """The runtime a KEEP would promote."""
-    return FrameworkRuntime(
-        source_root=handle.attempt_root,
-        attempt_root=handle.attempt_root,
-        runtime_env={"INFERENCE_OPTIMIZER_AITER_JIT_DIR": handle.aiter_jit_dir},
-    )
-
-
-def _finalize(handle: BuildHandle, *, ok: bool, failure_class: str, summary: str) -> BuildResult:
-    return BuildResult(
-        ok=ok,
-        attempt_root=handle.attempt_root,
-        runtime=_build_runtime(handle) if ok else FrameworkRuntime(),
-        build_log_path=handle.build_log_path,
-        failure_class="ok" if ok else failure_class,
-        failure_summary=summary,
-        error="" if ok else summary,
-    )
-
-
 def classify_build_exit(handle: BuildHandle, rc: int) -> BuildResult:
-    """Turn an exited build into a :class:`BuildResult`."""
+    """Turn an exited build into a :class:`BuildResult`; the driver writes ``result.json`` before it exits 0."""
     rich = _load_result_json(handle.attempt_root)
     if rich is not None:
         return rich
-    if int(rc) == 0:
-        return _finalize(handle, ok=True, failure_class="ok", summary="")
-    return _finalize(
-        handle,
+    summary = f"build command exited {int(rc)}"
+    return BuildResult(
         ok=False,
+        attempt_root=handle.attempt_root,
+        build_log_path=handle.build_log_path,
         failure_class="compile_error",
-        summary=f"build command exited {int(rc)}",
+        failure_summary=summary,
+        error=summary,
     )
 
 
@@ -237,34 +201,12 @@ def _read_build_system_requires(worktree_dir: Any) -> list[str]:
 _AITER_DEFAULT_REPO = "https://github.com/ROCm/aiter"
 # Headroom for a full AITER compile + build cache (GB).
 _AITER_DISK_PER_CANDIDATE_GB = 6.0
-# Default max parallel compile jobs; can be overridden by action.max_jobs.
+# Max parallel compile jobs.
 _AITER_DEFAULT_MAX_JOBS = 8
 
 _VLLM_DEFAULT_REPO = "https://github.com/ROCm/vllm"
 _VLLM_DISK_PER_CANDIDATE_GB = 20.0  # raised headroom for the full vLLM build cache
 _VLLM_DEFAULT_MAX_JOBS = 8
-
-# Inline verify_vllm_rocm probe.
-_VERIFY_VLLM_ROCM_SCRIPT = """\
-import sys, torch
-if not getattr(torch.version, "hip", None):
-    print("torch is not a ROCm build", file=sys.stderr); raise SystemExit(1)
-import vllm
-try:
-    from vllm.platforms import current_platform
-except Exception as exc:
-    print(f"cannot import vllm platform: {exc}", file=sys.stderr); raise SystemExit(1)
-is_rocm = False
-checker = getattr(current_platform, "is_rocm", None)
-if callable(checker):
-    try: is_rocm = bool(checker())
-    except Exception: pass
-if "rocm" in f"{current_platform!r} {current_platform.__class__.__name__}".lower():
-    is_rocm = True
-if not is_rocm:
-    print("vLLM did not report ROCm platform", file=sys.stderr); raise SystemExit(1)
-print("vllm_rocm_ok")
-"""
 
 
 class _TargetedRecipe:
@@ -275,7 +217,6 @@ class _TargetedRecipe:
     default_max_jobs: int
     replacing: str
     gpu_arch_error: str | None
-    run_timeout: int = 3600
 
     def __init__(
         self,
@@ -303,7 +244,7 @@ class _TargetedRecipe:
         self.root = Path(attempt_root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.build_log = self.root / "build.log"
-        self._run_raw = run
+        self._run = run
         self._git = git
         self._disk_preflight_fn = disk_preflight_fn
         self.abi: dict[str, Any] = {}
@@ -312,12 +253,6 @@ class _TargetedRecipe:
         self.attempt_py = ""
         self.repo_url = ""
         self.ref = ""
-
-    def _run(self, argv: Any, **kw: Any) -> Any:
-        kw.setdefault("capture_output", True)
-        kw.setdefault("text", True)
-        kw.setdefault("timeout", self.run_timeout)
-        return self._run_raw(argv, **kw)
 
     def _run_argv(self, argv: Any, **kw: Any) -> Any:
         return self._run_argv_impl(argv, run=self._run, **kw)
@@ -369,11 +304,10 @@ class _TargetedRecipe:
         self.repo_url = str(self.action.repo_url or self.default_repo).strip() or self.default_repo
         self.ref = str(self.action.ref or "").strip()
         try:
-            from hyperloom.agents.framework.isolation import prepare_candidate_workspace, prepare_repo_cache
+            from hyperloom.agents.framework.isolation import prepare_candidate_workspace
             from hyperloom.agents.framework.models import Candidate
 
-            prepare_repo_cache(self.repo_url, self.root)
-            candidate = Candidate(ref=self.ref or "HEAD", repo=self.repo_url)
+            candidate = Candidate(ref=self.ref or "HEAD")
             ws = prepare_candidate_workspace(candidate, repo_url=self.repo_url, work_dir=self.root, index=0)
             self.worktree_dir = ws.worktree_dir
             self.venv_dir = ws.venv_dir
@@ -437,7 +371,7 @@ class _AiterBuild(_TargetedRecipe):
             "HOME": str(self.aiter_home),
             "INFERENCE_OPTIMIZER_AITER_JIT_DIR": str(self.jit_dir),
             "AITER_REBUILD": "1",
-            "MAX_JOBS": str(self.action.max_jobs or self.default_max_jobs),
+            "MAX_JOBS": str(self.default_max_jobs),
         }
         if gpu_arch:
             env["PYTORCH_ROCM_ARCH"] = gpu_arch
@@ -562,7 +496,7 @@ class _SglKernelBuild(_TargetedRecipe):
         install_env = {
             **os.environ,
             "AMDGPU_TARGET": self.gpu_arch,
-            "MAX_JOBS": str(self.action.max_jobs or self.default_max_jobs),
+            "MAX_JOBS": str(self.default_max_jobs),
         }
         kernel_build = self._run_argv(
             [self.attempt_py, "setup_rocm.py", "install"],
@@ -643,7 +577,6 @@ class _VllmBuild(_TargetedRecipe):
     default_max_jobs = _VLLM_DEFAULT_MAX_JOBS
     replacing = "vllm"
     gpu_arch_error = "gpu_arch must be set explicitly for vLLM source (L6)"
-    run_timeout = 5400
 
     def run(self) -> BuildResult:
         failed = self.preflight()
@@ -654,9 +587,7 @@ class _VllmBuild(_TargetedRecipe):
         host_pyver = f"{sys.version_info.major}.{sys.version_info.minor}"
         abi_pyver = str(self.abi.get("python_version") or "").strip()
         if abi_pyver and not abi_pyver.startswith(host_pyver):
-            import logging as _log
-
-            _log.getLogger(__name__).info(
+            log.info(
                 "vLLM source build: torch ABI python %s != host %s; "
                 "runtime_python_exe will be set to the attempt venv interpreter",
                 abi_pyver,
@@ -677,7 +608,7 @@ class _VllmBuild(_TargetedRecipe):
         env = {
             **os.environ,
             "PYTORCH_ROCM_ARCH": gpu_arch,
-            "MAX_JOBS": str(self.action.max_jobs or self.default_max_jobs),
+            "MAX_JOBS": str(self.default_max_jobs),
             "CUDA_HOME": rocm_root,
             "ROCM_HOME": rocm_root,
             "ROCM_PATH": rocm_root,
@@ -695,9 +626,7 @@ class _VllmBuild(_TargetedRecipe):
                     timeout_sec=1800,
                 )
         except OSError:
-            import logging as _logmod
-
-            _logmod.getLogger(__name__).debug("vLLM source build: build-requires pre-install skipped", exc_info=True)
+            log.debug("vLLM source build: build-requires pre-install skipped", exc_info=True)
 
         # pip install -e triggers CMake build_ext.
         pip_cmd = [
@@ -726,7 +655,7 @@ class _VllmBuild(_TargetedRecipe):
         probe_env = {**os.environ, "PYTHONPATH": pythonpath}
 
         vllm_verify = self._run_argv(
-            [self.attempt_py, "-c", _VERIFY_VLLM_ROCM_SCRIPT],
+            [self.attempt_py, "-c", VLLM_ROCM_PROBE],
             cwd=str(self.root),
             env=probe_env,
             timeout_sec=120,
@@ -786,7 +715,7 @@ def run_vllm_source_build(
 
 
 def _driver_main(argv: list[str] | None = None) -> int:
-    """Driver subprocess entry: load plan.json, call run_aiter_build, write result.json."""
+    """Driver subprocess entry: load plan.json, run the component's recipe, write result.json."""
     import argparse
     import json
 
@@ -800,8 +729,8 @@ def _driver_main(argv: list[str] | None = None) -> int:
 
     try:
         action = TargetedBuildAction.from_state(json.loads(plan_path.read_text(encoding="utf-8")))
-    except Exception as exc:  # noqa: BLE001
-        log.warning("targeted build driver: failed to load plan.json: %s", exc)
+    except Exception as exc:  # outermost process entry: the failure is written to result.json
+        log.warning("targeted build driver: failed to load plan.json: %s", exc, exc_info=True)
         result_path.write_text(
             json.dumps(
                 BuildResult(
@@ -822,26 +751,11 @@ def _driver_main(argv: list[str] | None = None) -> int:
         "sgl_kernel": run_sgl_kernel_build,
         "vllm_source": run_vllm_source_build,
     }
-    recipe = dispatcher.get(action.component)
-    if recipe is None:
-        result_path.write_text(
-            json.dumps(
-                BuildResult(
-                    ok=False,
-                    attempt_root=str(root),
-                    failure_class="compile_error",
-                    failure_summary=f"unknown component: {action.component!r}",
-                    error=f"no recipe for component {action.component!r}",
-                ).to_state()
-            ),
-            encoding="utf-8",
-        )
-        return 1
-
+    recipe = dispatcher[action.component]
     try:
         result = recipe(action, str(root))
-    except Exception as exc:  # noqa: BLE001
-        log.warning("targeted build driver: recipe raised: %s", exc)
+    except Exception as exc:  # outermost process entry: the failure is written to result.json
+        log.warning("targeted build driver: recipe raised: %s", exc, exc_info=True)
         result = BuildResult(
             ok=False,
             attempt_root=str(root),

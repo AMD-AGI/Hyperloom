@@ -17,6 +17,15 @@ spent (``SandboxGone``). A 429 whose error message names ``grant_quota_exceeded`
 (``SandboxQuotaExceeded``, a ``SandboxUnavailable``). The SDK keeps only the ``message`` of a 429 body, so the service
 must put that reason code in ``message``, as it does for the 503 reasons ``pending_timeout`` and ``no_capacity``; a 503
 stays a plain ``SandboxUnavailable``.
+
+A server error is replayed only while it says nothing about the sandbox: a gateway that cut a create still pending, say,
+where the replay with the same key finds that sandbox. A failure whose message names ``sandbox_create_failed`` or a
+workload in the ``Failed`` phase says the platform made the sandbox and it failed before it ran. Replaying that key finds
+only the failed sandbox (the platform reports the key spent, or makes a new sandbox that fails the same way), so it is
+final at once (``SandboxCreateFailed``): a new attempt, with a new key, is the caller's to decide. A replay of the key
+after a cut is answered with a 410 ``idempotency_key_spent`` when the sandbox the first send made has failed meanwhile
+(the service never makes a second sandbox for a key, nor repeats the 500), so a 410 to a create's own replay is
+``SandboxCreateFailed`` too; only a 410 to the first send means a key spent before this create.
 """
 
 from __future__ import annotations
@@ -24,6 +33,7 @@ from __future__ import annotations
 import contextlib
 import enum
 import json
+import re
 import time
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
@@ -41,6 +51,7 @@ from hyperloom.sandbox.socket import (
     Role,
     RunSettings,
     Sandbox,
+    SandboxCreateFailed,
     SandboxDenied,
     SandboxGone,
     SandboxInfo,
@@ -77,6 +88,9 @@ _REFUSAL_PREFIXES = ("Code.PERMISSION_DENIED", "permission_denied")
 #: The reason a 429 carries when a create is over the session grant's quota (and not a plain rate limit).
 _QUOTA_REASON = "grant_quota_exceeded"
 
+#: How the service says a create's sandbox failed before it ran: its reason code, or the terminal phase of its workload.
+_CREATE_FAILED = re.compile(r"\bsandbox_create_failed\b|\bphase Failed\b")
+
 #: Statuses that mean the request was not processed and may succeed if repeated; a 503 means the service has no room
 #: and is not retried on create. A 501 or 505 will not change on a retry.
 _SERVER_ERROR = 500
@@ -104,6 +118,7 @@ class RetryPolicy:
 
 
 class _Failure(enum.Enum):
+    CREATE_FAILED = "create failed"
     GONE = "gone"
     UNAVAILABLE = "unavailable"
     OVER_QUOTA = "over quota"
@@ -129,6 +144,7 @@ _UNAVAILABLE = (
 )
 
 _ERROR_OF = {
+    _Failure.CREATE_FAILED: SandboxCreateFailed,
     _Failure.GONE: SandboxGone,
     _Failure.UNAVAILABLE: SandboxUnavailable,
     _Failure.OVER_QUOTA: SandboxQuotaExceeded,
@@ -149,6 +165,8 @@ def _classify(exc: Exception) -> _Failure | None:
     """Which socket failure an SDK exception is, or None when the socket has no word for it."""
     if isinstance(exc, e2b.FileNotFoundException):
         return _Failure.NO_FILE
+    if _CREATE_FAILED.search(str(exc)):
+        return _Failure.CREATE_FAILED
     if isinstance(exc, (e2b.SandboxNotFoundException, e2b.SandboxNotRunningException)):
         return _Failure.GONE
     if isinstance(exc, e2b.SandboxUnreachableException):
@@ -172,6 +190,8 @@ def _classify(exc: Exception) -> _Failure | None:
 def _is_transient(exc: Exception, *, capacity: bool) -> bool:
     """Whether the same call may succeed if repeated; ``capacity`` also counts a rate limit or a 503."""
     if isinstance(exc, (e2b.SandboxNotRunningException, e2b.SandboxUnreachableException)):
+        return False
+    if _CREATE_FAILED.search(str(exc)):
         return False
     if isinstance(exc, (httpx.TransportError, json.JSONDecodeError, e2b.TimeoutException)):
         return True
@@ -330,7 +350,12 @@ class E2BSandboxProvider:
         Raises:
             ValueError: When ``timeout_sec`` is not positive.
             SandboxDenied: No key for ``role``, or the service refused the key, template, environment or metadata.
-            SandboxGone: The idempotency key's sandbox has ended (410); the key is spent, a new key makes a new one.
+            SandboxGone: The idempotency key's sandbox had ended before this create first sent the key (410); the key
+                is spent, a new key makes a new one.
+            SandboxCreateFailed: The platform made the sandbox and it failed before it ran (``sandbox_create_failed``,
+                a workload in the ``Failed`` phase); the create is not replayed. Also a 410 answering this create's
+                own replay: the service binds the key to the sandbox it made first and, once that sandbox failed,
+                answers every replay with ``idempotency_key_spent`` and the same id.
             SandboxQuotaExceeded: The session's quota is full (429 ``grant_quota_exceeded``); it clears when a running
                 sandbox ends.
             SandboxUnavailable: No capacity (503), or the sandbox was not running within ``wait_sec``.
@@ -341,7 +366,11 @@ class E2BSandboxProvider:
         deadline = time.monotonic() + options.wait_sec
         envs = dict(options.envs) if options.envs else None
 
+        sends = 0
+
         def attempt() -> e2b.Sandbox:
+            nonlocal sends
+            sends += 1
             return e2b.Sandbox.create(
                 template=template,
                 timeout=timeout_sec,
@@ -351,7 +380,13 @@ class E2BSandboxProvider:
             )
 
         retry = _Retry.SERVER_ERROR if IDEMPOTENCY_KEY in metadata else _Retry.NEVER
-        return _E2BSandbox(control.call(attempt, retry=retry, until=deadline), control)
+        try:
+            created = control.call(attempt, retry=retry, until=deadline)
+        except SandboxGone as exc:
+            if sends > 1:  # this create's own sandbox ended or failed while the request was cut
+                raise SandboxCreateFailed(f"the sandbox of this create did not run: {exc}") from exc
+            raise
+        return _E2BSandbox(created, control)
 
     def connect(self, sandbox_id: str, *, role: Role) -> Sandbox:
         """Return a handle on the live sandbox ``role`` created.

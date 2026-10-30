@@ -69,6 +69,16 @@ _MISSING_KERNEL = re.compile(
 #: The exception a failed HIP call raised (``torch.AcceleratorError: HIP error: an illegal memory access was
 #: encountered``, ``RuntimeError: HIP runtime error: operation failed ...``), which states the fault in words. The
 #: ``HIP warning:`` a stream prints for the same fault is not it.
+#: A write the file system refused for want of room: ``ENOSPC`` (errno 28) or ``EDQUOT`` (errno 122), as Python and the C
+#: library print them.
+_DISK_FULL = re.compile(r"\[Errno (?:28|122)\]|No space left on device|Disk quota exceeded", re.IGNORECASE)
+_WATCHDOG_TIMEOUT = re.compile(r"watchdog timeout", re.IGNORECASE)
+#: A ``git`` command the benchmark client ran to fetch its own dependencies (Magpie's per-test ``submodule update`` of
+#: the replay client) that timed out: ``subprocess.TimeoutExpired: Command ['git', ...] timed out after N seconds``.
+_GIT_FETCH_TIMEOUT = re.compile(r"TimeoutExpired: Command \[['\"]git['\"],.*\] timed out after")
+#: A frame of aiter's JIT build in a stack dumped at the watchdog: py-spy writes ``build_module (aiter/jit/core.py:N)``, a
+#: Python traceback ``File ".../aiter/jit/core.py", line N, in build_module``.
+_JIT_BUILD_FRAME = re.compile(r"\bbuild_module\b.*\baiter[/.]jit[/.]core\b|\baiter[/.]jit[/.]core\b.*\bbuild_module\b")
 _HIP_EXCEPTION = re.compile(r"\bHIP (?:runtime )?error: ")
 #: The name of the failed call, on its own line when the exception text was cut (``Search for `hipErrorIllegalAddress'``).
 _HIP_ERROR_TOKEN = re.compile(HIP_ERROR_PREFIX + r"[A-Za-z]+")
@@ -122,6 +132,17 @@ def python_exception(text: str) -> str | None:
     return _last_matching(text, lambda line: bool(_EXCEPTION_WITH_MESSAGE.search(line) or _EXCEPTION_ALONE.match(line)))
 
 
+def git_fetch_timeout(text: str) -> str | None:
+    """The line that says a ``git`` command of the benchmark's own set-up timed out, a stall of the network or of the
+    remote that no candidate can cause."""
+    return _last_matching(text, lambda line: bool(_GIT_FETCH_TIMEOUT.search(line)))
+
+
+def disk_full(text: str) -> str | None:
+    """The line that says a write failed because the disk or the quota was full."""
+    return _last_matching(text, lambda line: bool(_DISK_FULL.search(line)))
+
+
 def missing_hip_kernel(text: str) -> str | None:
     """The line that says a compiled kernel or a symbol of it is absent (an undefined symbol, no image for this GPU)."""
     return _last_matching(text, lambda line: bool(_MISSING_KERNEL.search(line)))
@@ -132,3 +153,11 @@ def hip_error(text: str) -> str | None:
     return _last_matching(text, lambda line: bool(_HIP_EXCEPTION.search(line))) or _last_matching(
         text, lambda line: bool(_HIP_ERROR_TOKEN.search(line))
     )
+
+
+def jit_build_timeout(text: str) -> str | None:
+    """The watchdog's line when a server's scheduler watchdog fired while a stack it dumped was still in aiter's JIT build
+    (a module rebuilt at the first prefill, past the watchdog); ``None`` when either is missing."""
+    if not _JIT_BUILD_FRAME.search(text):
+        return None
+    return _last_matching(text, lambda line: bool(_WATCHDOG_TIMEOUT.search(line)))

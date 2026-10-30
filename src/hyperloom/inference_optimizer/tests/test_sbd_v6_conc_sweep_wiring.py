@@ -12,6 +12,7 @@ looks exactly like a sweep that never ran.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -33,10 +34,11 @@ from hyperloom.inference_optimizer.breakdown.recorder.conc_sweep_event import (
     conc_sweep_event_id,
     make_conc_sweep_recorder,
 )
-from hyperloom.inference_optimizer.breakdown.recorder.event_sink import make_sink
+from hyperloom.inference_optimizer.breakdown.recorder.event_sink import EventSink
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
-from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant, VariantResult
+from hyperloom.orchestrator.actions.executors._grid_runner import GridStop, GridVariant, VariantResult
+from hyperloom.orchestrator.actions.executors._subprocess_kill import resolve_benchmark_timeouts
 from hyperloom.orchestrator.kernel.conc_sweep import run_conc_sweep
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -78,11 +80,18 @@ def _state(baseline_yaml: Path, **overrides: Any) -> SharedState:
     return state
 
 
-def _variant(name: str, *, throughput: float | None, status: str = "succeeded", envs: dict[str, str]) -> VariantResult:
+def _variant(
+    variant: GridVariant,
+    *,
+    throughput: float | None,
+    status: str = "succeeded",
+    granted_cap_sec: float | None = 7800.0,
+) -> VariantResult:
+    name = variant.name
     return VariantResult(
         name=name,
         extra_server_args="",
-        extra_envs=dict(envs),
+        extra_envs=dict(variant.extra_envs),
         status=status,
         output_throughput=throughput,
         request_throughput=throughput,
@@ -94,6 +103,10 @@ def _variant(name: str, *, throughput: float | None, status: str = "succeeded", 
         error=None if status == "succeeded" else "boom",
         error_class="" if status == "succeeded" else "magpie_timeout",
         killed_overtime=False,
+        # The runner grants each slot its cap once it has composed the rung's config, and publishes
+        # it on the row it returns; a double that left it out would stand in for a runner that never
+        # told anyone what it enforced.
+        granted_cap_sec=granted_cap_sec,
     )
 
 
@@ -105,7 +118,7 @@ def _materialize(src, out_dir, **_kw):
 
 def _recorder():
     recorder = make_conc_sweep_recorder(
-        make_sink(conc_sweep_event_id(phase="SWEEP", macro_cycle=2), producer=PRODUCER),
+        EventSink(conc_sweep_event_id(phase="SWEEP", macro_cycle=2), producer=PRODUCER),
         task_id="cs-1",
         task_kind="conc_sweep",
         reason="phase_entry",
@@ -132,6 +145,7 @@ def _run(state: SharedState, session_dir: Path, *, recorder: Any, run_grid: Any,
                 session_dir,
                 concs=[4, 16] if concs is None else concs,
                 recorder=recorder,
+                total_budget_sec=9000,
             )
         )
 
@@ -139,9 +153,8 @@ def _run(state: SharedState, session_dir: Path, *, recorder: Any, run_grid: Any,
 async def _all_succeed(*, grid: list[GridVariant], **_kw):
     return [
         _variant(
-            variant.name,
+            variant,
             throughput=(130.0 if variant.name.startswith("optimized_") else 100.0) * int(variant.extra_envs["CONC"]),
-            envs=variant.extra_envs,
         )
         for variant in grid
     ]
@@ -195,10 +208,9 @@ def test_the_sweep_records_the_plan_it_resolved(session_dir: Path, baseline_yaml
 
     assert ext["plan"]["grid_source"] == GRID_REQUESTED
     assert ext["plan"]["concs_requested"] == [4, 16]
-    # The ladder runs descending so a single-server arm boots at its most
-    # demanding rung.
-    assert ext["plan"]["concs_ordered"] == [16, 4]
-    assert ext["plan"]["arms_order"] == [ARM_OPTIMIZED, ARM_BASELINE]
+    # No anchor CONC is in this ladder, so it runs cheapest first.
+    assert ext["plan"]["concs_ordered"] == [4, 16]
+    assert ext["plan"]["arms_order"] == [ARM_BASELINE, ARM_OPTIMIZED]
     assert ext["workload"] == {
         "session_id": session_dir.name,
         "isl": 1024,
@@ -221,12 +233,48 @@ def test_each_rung_carries_the_load_and_the_cap_it_ran_under(session_dir: Path, 
 
     arm = ext["arms"][ARM_OPTIMIZED]
     # NUM_PROMPTS is CONC times the factor, and was never written down before.
-    assert [(rung["conc"], rung["num_prompts"]) for rung in arm["grid"]] == [(16, 80), (4, 20)]
+    assert [(rung["conc"], rung["num_prompts"]) for rung in arm["grid"]] == [(4, 20), (16, 80)]
     for point in arm["points"]:
         assert point["num_prompts"] == point["conc"] * 5
         assert point["granted_cap_sec"] == 7800.0
         assert point["start_time"]
         assert point["wall_duration_sec"] is not None
+
+
+_OPERATOR_CAP = "INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC"
+
+
+async def _rungs_that_cleared_the_operator_cap(*, grid: list[GridVariant], **_kw):
+    """A runner whose rungs clear the operator's cap, so each one ran under the cap its own workload asks for."""
+    return [
+        _variant(
+            replace(variant, unset_envs=[_OPERATOR_CAP]),
+            throughput=100.0,
+            granted_cap_sec=resolve_benchmark_timeouts(
+                {"HYPERLOOM_AGENTX": "1", "CONC": str(variant.extra_envs["CONC"])}
+            )[1],
+        )
+        for variant in grid
+    ]
+
+
+def test_a_rung_is_recorded_under_the_cap_its_runner_granted_it(session_dir: Path, baseline_yaml: Path, monkeypatch):
+    """The runner grants the cap, so the record follows the row, not a second derivation from its envs.
+
+    These rungs cleared the operator's override before running, which no reader
+    of their pinned envs can see: one deriving the cap again finds the override
+    and writes down 60s for rungs that were held to hours.
+    """
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv(_OPERATOR_CAP, "60")
+    state = _state(baseline_yaml)
+    with session_scope(session_dir):
+        _run(state, session_dir, recorder=_recorder(), run_grid=_rungs_that_cleared_the_operator_cap)
+        ext = _sweep_event(session_dir)["ext"]
+
+    points = ext["arms"][ARM_OPTIMIZED]["points"]
+    # Canonical replay warms up per lane, so the CONC 16 rung was granted more than the stock 7800s.
+    assert [(point["conc"], point["granted_cap_sec"]) for point in points] == [(4, 7800.0), (16, 9280.0)]
 
 
 def test_the_arm_says_which_execution_strategy_ran_the_ladder(session_dir: Path, baseline_yaml: Path):
@@ -258,26 +306,25 @@ def test_a_lifecycle_capable_arm_boots_once_and_reuses(session_dir: Path, baseli
     arm = ext["arms"][ARM_OPTIMIZED]
     assert arm["strategy"] == STRATEGY_SINGLE_SERVER
     assert arm["lifecycle"] == {"eligible": True, "reason": "supported", "port": 8888, "framework": "sglang"}
-    # Booted at the top of the ladder, reused down it.
+    # Booted on its first rung, reused for the rest.
     assert [(point["conc"], point["stage"]) for point in arm["points"]] == [
-        (4, STAGE_REUSE),
-        (16, STAGE_BOOT),
+        (4, STAGE_BOOT),
+        (16, STAGE_REUSE),
     ]
     assert arm["boot"]["succeeded"] is True
-    assert arm["boot"]["booted_conc"] == 16
+    assert arm["boot"]["booted_conc"] == 4
     assert arm["boot"]["failed_concs"] == []
 
 
 def test_the_concurrency_the_server_would_not_boot_at_is_recorded(session_dir: Path, baseline_yaml: Path):
     state = _state(baseline_yaml)
 
-    async def _top_rung_will_not_boot(*, grid: list[GridVariant], **_kw):
+    async def _first_rung_will_not_boot(*, grid: list[GridVariant], **_kw):
         return [
             _variant(
-                variant.name,
-                throughput=None if int(variant.extra_envs["CONC"]) == 16 else 400.0,
-                status="failed" if int(variant.extra_envs["CONC"]) == 16 else "succeeded",
-                envs=variant.extra_envs,
+                variant,
+                throughput=None if int(variant.extra_envs["CONC"]) == 4 else 400.0,
+                status="failed" if int(variant.extra_envs["CONC"]) == 4 else "succeeded",
             )
             for variant in grid
         ]
@@ -289,17 +336,18 @@ def test_the_concurrency_the_server_would_not_boot_at_is_recorded(session_dir: P
             return_value={"eligible": True, "reason": "supported", "port": 8888, "framework": "sglang"},
         ),
     ):
-        _run(state, session_dir, recorder=_recorder(), run_grid=_top_rung_will_not_boot)
+        _run(state, session_dir, recorder=_recorder(), run_grid=_first_rung_will_not_boot)
         ext = _sweep_event(session_dir)["ext"]
 
-    boot = ext["arms"][ARM_OPTIMIZED]["boot"]
-    assert boot["succeeded"] is True
-    assert boot["booted_conc"] == 4
-    assert boot["failed_concs"] == [16]
-    assert [(row["conc"], row["status"]) for row in boot["attempts"]] == [(16, "failed"), (4, "succeeded")]
-    # The failed boot counts toward the curve, since a lower rung did come up.
-    stages = {point["conc"]: point["stage"] for point in ext["arms"][ARM_OPTIMIZED]["points"]}
-    assert stages == {4: STAGE_BOOT, 16: STAGE_BOOT_ATTEMPT}
+    for arm in (ARM_BASELINE, ARM_OPTIMIZED):
+        boot = ext["arms"][arm]["boot"]
+        assert boot["succeeded"] is True
+        assert boot["booted_conc"] == 16
+        assert boot["failed_concs"] == [4]
+        assert [(row["conc"], row["status"]) for row in boot["attempts"]] == [(4, "failed"), (16, "succeeded")]
+        # The failed boot is that rung's point, and the next rung boots again.
+        stages = {point["conc"]: point["stage"] for point in ext["arms"][arm]["points"]}
+        assert stages == {4: STAGE_BOOT_ATTEMPT, 16: STAGE_BOOT}
 
 
 def test_a_budget_that_refuses_an_arm_records_the_gate(session_dir: Path, baseline_yaml: Path):
@@ -319,26 +367,24 @@ def test_a_rung_the_budget_refused_mid_ladder_is_recorded_as_such(session_dir: P
     calls = []
     clock = {"now": 100.0}
 
-    async def _refuse_reuse(
-        *, grid: list[GridVariant], session_deadline_sec, variant_expected_sec, deadline_stop, **_kw
-    ):
-        calls.append((session_deadline_sec, variant_expected_sec, deadline_stop.error_class))
+    async def _first_arm_overruns_its_half(*, grid: list[GridVariant], stop: GridStop, **_kw):
+        calls.append((grid[0].name, stop.session_deadline_sec, stop.variant_expected_sec, stop.deadline_stop))
+        if len(calls) == 2:
+            assert stop.session_deadline_sec < clock["now"]
+            return [
+                VariantResult(
+                    name=variant.name,
+                    extra_server_args=variant.extra_server_args,
+                    extra_envs=dict(variant.extra_envs),
+                    status="skipped",
+                    error=stop.deadline_stop.never_started,
+                    error_class=stop.deadline_stop.error_class,
+                )
+                for variant in grid
+            ]
         if len(calls) == 1:
-            clock["now"] += 6.0
-            return await _all_succeed(grid=grid)
-        assert len(calls) == 2
-        assert 0 < session_deadline_sec - clock["now"] < variant_expected_sec
-        return [
-            VariantResult(
-                name=variant.name,
-                extra_server_args=variant.extra_server_args,
-                extra_envs=dict(variant.extra_envs),
-                status="skipped",
-                error=deadline_stop.never_started,
-                error_class=deadline_stop.error_class,
-            )
-            for variant in grid
-        ]
+            clock["now"] += 12.0
+        return await _all_succeed(grid=grid)
 
     with (
         session_scope(session_dir),
@@ -347,32 +393,38 @@ def test_a_rung_the_budget_refused_mid_ladder_is_recorded_as_such(session_dir: P
             return_value={"eligible": True, "reason": "supported", "port": 8888, "framework": "sglang"},
         ),
         patch("hyperloom.orchestrator.kernel.conc_sweep.time.monotonic", side_effect=lambda: clock["now"]),
-        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_refuse_reuse),
+        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_first_arm_overruns_its_half),
         patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_materialize),
     ):
-        asyncio.run(
+        payload = asyncio.run(
             run_conc_sweep(
                 state,
                 session_dir,
                 concs=[4, 16],
-                total_budget_sec=10,
+                total_budget_sec=20,
                 recorder=_recorder(),
             )
         )
         ext = _sweep_event(session_dir)["ext"]
 
-    assert calls == [(110.0, 5.0, "budget_exhausted")] * 2
-    # The optimized arm booted at 16 and was cut off before 4.
-    stages = {point["conc"]: point["stage"] for point in ext["arms"][ARM_OPTIMIZED]["points"]}
-    assert stages == {16: STAGE_BOOT, 4: STAGE_BUDGET_SKIP}
-    refused = [point for point in ext["arms"][ARM_OPTIMIZED]["points"] if point["conc"] == 4][0]
-    assert refused["status"] == "skipped"
-    assert refused["error_class"] == "budget_exhausted"
-    assert refused["budget_remaining_sec"] == 4.0
-    assert refused["output_throughput"] is None
-    # The arm that never got to start says so at the arm level instead.
-    assert ext["arms"][ARM_BASELINE]["refused"]["reason"] == "insufficient_remaining_for_variant"
-    assert ext["runtime"]["budget_skip_reason"] == "insufficient_remaining_for_variant"
+    # The baseline's first rung may use all 20s, its later rungs half; the optimized arm runs to the sweep's end.
+    assert [(name, deadline, expected) for name, deadline, expected, _ in calls] == [
+        ("baseline_conc4", 120.0, None),
+        ("baseline_conc16", 110.0, None),
+        ("optimized_conc4", 120.0, None),
+    ]
+    assert {stop.error_class for *_, stop in calls} == {"budget_exhausted"}
+    for arm in (ARM_BASELINE, ARM_OPTIMIZED):
+        stages = {point["conc"]: point["stage"] for point in ext["arms"][arm]["points"]}
+        assert stages == {4: STAGE_BOOT, 16: STAGE_BUDGET_SKIP}
+        refused = [point for point in ext["arms"][arm]["points"] if point["conc"] == 16][0]
+        assert refused["status"] == "skipped"
+        assert refused["error_class"] == "budget_exhausted"
+        assert refused["output_throughput"] is None
+        # No config was composed for this rung and no round of it ran, so it was granted no time.
+        assert refused["granted_cap_sec"] is None
+    assert ext["runtime"]["budget_skip_reason"] == "first_arm_share_exhausted"
+    assert payload["summary"]["successful_pairs"] == 1
 
 
 @pytest.mark.parametrize(
@@ -554,8 +606,8 @@ def test_a_lifecycle_that_would_not_resolve_is_recorded_rather_than_read_as_unsu
 
     # Both arms fall back to a server per rung, and each says why it had to.
     assert [fault["stage"] for fault in ext["faults"]] == [
-        f"resolve_lifecycle_params:{ARM_OPTIMIZED}",
         f"resolve_lifecycle_params:{ARM_BASELINE}",
+        f"resolve_lifecycle_params:{ARM_OPTIMIZED}",
     ]
     assert {fault["error_class"] for fault in ext["faults"]} == {"RuntimeError"}
     for arm in (ARM_BASELINE, ARM_OPTIMIZED):
@@ -569,14 +621,14 @@ def test_a_sweep_whose_arm_lost_a_rung_does_not_read_as_whole(session_dir: Path,
     async def _one_bad_rung(*, grid: list[GridVariant], **_kw):
         calls["n"] += 1
         if calls["n"] == 1:
-            return [_variant(v.name, throughput=None, status="failed", envs=v.extra_envs) for v in grid]
+            return [_variant(v, throughput=None, status="failed") for v in grid]
         return await _all_succeed(grid=grid)
 
     with session_scope(session_dir):
         _run(state, session_dir, recorder=_recorder(), run_grid=_one_bad_rung)
         event = _sweep_event(session_dir)
 
-    assert event["ext"]["arms"][ARM_OPTIMIZED]["status"] == "degraded"
+    assert event["ext"]["arms"][ARM_BASELINE]["status"] == "degraded"
     assert event["status"] == "degraded"
     # Nothing raised, so nothing claims a failure.
     assert event["ext"]["failure"] is None
@@ -605,7 +657,7 @@ def _cancelled_arm(session_dir: Path, baseline_yaml: Path, *, rungs: int, lifecy
     ):
         asyncio.run(ConcSweepExecutor()(ctx))
 
-    return _sweep_event(session_dir)["ext"]["arms"][ARM_OPTIMIZED]
+    return _sweep_event(session_dir)["ext"]["arms"][ARM_BASELINE]
 
 
 @pytest.mark.parametrize("rungs, status", [(1, "degraded"), (0, "failed")])
@@ -634,7 +686,7 @@ def test_a_reuse_ladder_cancelled_mid_way_does_not_report_the_rungs_it_reached_a
     assert arm["strategy"] == STRATEGY_SINGLE_SERVER
     assert arm["status"] == "degraded"
     assert arm["failure"]["error_class"] == "CancelledError"
-    assert [point["conc"] for point in arm["points"]] == [16]
+    assert [point["conc"] for point in arm["points"]] == [4]
 
 
 def test_a_dispatch_with_no_session_records_nothing_and_still_runs(session_dir: Path, baseline_yaml: Path):

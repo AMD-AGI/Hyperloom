@@ -18,6 +18,11 @@ from hyperloom.common.env_safety import (
     is_allowed_external_env_key,
     is_allowed_variant_env_key,
 )
+from hyperloom.inference_optimizer.session.geak_rebench_verdict import (
+    REBENCH_FALLBACK,
+    REBENCH_NO_PROMOTE,
+    REBENCH_VALIDATED,
+)
 
 log = logging.getLogger(__name__)
 
@@ -100,27 +105,31 @@ def _accepted_config_controls(cfg: Any, *, inherited_remove_args: Any = None) ->
     return controls
 
 
+# Minimum over-baseline gain a same-harness revalidation must show to count as "engaged"; detects a collapse back to
+# ~baseline.
+_MIN_KERNEL_ENGAGED_GAIN_PCT: float = 2.0
+
+
 def _geak_revalidation_decision(
     *,
     measured: Any,
     baseline: Any,
     got_hash: str,
     expected_hash: str,
-    min_engaged_gain_pct: float,
     current_best: Any = None,
 ) -> str:
     """Decide a geak same-harness (2b) rebench outcome."""
     measured_ok = isinstance(measured, (int, float)) and measured > 0
     baseline_ok = isinstance(baseline, (int, float)) and baseline > 0
     if not (measured_ok and baseline_ok):
-        return "fallback"
+        return REBENCH_FALLBACK
     cfg_ok = (not expected_hash) or (str(got_hash or "") == str(expected_hash))
-    engaged = float(measured) >= float(baseline) * (1.0 + float(min_engaged_gain_pct) / 100.0)
+    engaged = float(measured) >= float(baseline) * (1.0 + float(_MIN_KERNEL_ENGAGED_GAIN_PCT) / 100.0)
     if not (cfg_ok and engaged):
-        return "fallback"
+        return REBENCH_FALLBACK
     if isinstance(current_best, (int, float)) and current_best > 0 and float(measured) <= float(current_best):
-        return "no_promote"
-    return "validated"
+        return REBENCH_NO_PROMOTE
+    return REBENCH_VALIDATED
 
 
 def _geak_result_has_artifact(result: dict[str, Any]) -> bool:
@@ -190,59 +199,63 @@ def geak_spec_is_env(spec: Any) -> bool:
     return geak_spec_kind(spec) == "env"
 
 
-def _geak_accepted_kernel_specs(result: Any) -> list[dict[str, Any]]:
-    """Return the authored kernels a GEAK result accepted, both lanes, deduped.
+def geak_acceptance_specs(result: Any) -> list[dict[str, Any]]:
+    """Return every GEAK acceptance of both lanes, tagged with its ``lane`` and deduped.
 
     GEAK's own ``e2e_delta_pct`` never decides whether a kernel counts: the rebench
     measures it. The delta is read only as twin evidence -- a slot tag and the symbol
-    it produced report the same number -- and an absent or unreadable one is none.
+    it produced report the same number, and the tag collapses onto the symbol, which
+    lists it in ``aliases``. An exact duplicate name drops; an absent or unreadable
+    delta never collapses; ``env`` selections are kept as they are.
     """
     if not isinstance(result, dict):
         return []
+    lanes = [
+        *(("kernelQueue", row) for row in result.get("accepted_kernels") or []),
+        *(("headQueue", row) for row in result.get("accepted_heads") or []),
+    ]
     out: list[dict[str, Any]] = []
     index: dict[tuple[str, str], int] = {}
-    lanes = (result.get("accepted_kernels") or []) + (result.get("accepted_heads") or [])
-    for k in lanes:
-        if not isinstance(k, dict):
+    for lane, raw in lanes:
+        name = geak_spec_name(raw)
+        if not isinstance(raw, dict) or not name:
             continue
-        if geak_spec_is_env(k):
-            continue
-        name = geak_spec_name(k)
-        if not name:
+        row = {**raw, "lane": lane, "alias_collapsed": False}
+        if geak_spec_is_env(raw):
+            out.append({**row, "kind": "env"})
             continue
         try:
-            delta = float(k.get("e2e_delta_pct"))
+            twin = (str(raw.get("op_kind") or ""), f"{float(raw.get('e2e_delta_pct')):.4f}")
         except (TypeError, ValueError):
-            out.append(k)
+            out.append(row)
             continue
-        twin = (str(k.get("op_kind") or ""), f"{delta:.4f}")
-        pos = index.get(twin)
-        if pos is None:
-            index[twin] = len(out)
-            out.append(k)
+        pos = index.setdefault(twin, len(out))
+        if pos == len(out):
+            out.append(row)
             continue
-        existing_name = geak_spec_name(out[pos])
-        if _GEAK_CAND_TAG_RE.match(existing_name) and not _GEAK_CAND_TAG_RE.match(name):
-            out[pos] = k
+        kept = out[pos]
+        kept_name = geak_spec_name(kept)
+        if name == kept_name:
             continue
-        if _GEAK_CAND_TAG_RE.match(name) and not _GEAK_CAND_TAG_RE.match(existing_name):
+        if geak_is_cand_tag(kept_name) == geak_is_cand_tag(name):
+            out.append(row)
             continue
-        if name == existing_name:
-            continue
-        out.append(k)
+        survivor = row if geak_is_cand_tag(kept_name) else kept
+        out[pos] = survivor
+        survivor["alias_collapsed"] = True
+        aliases = {*(survivor.get("aliases") or []), kept_name, name} - {geak_spec_name(survivor)}
+        survivor["aliases"] = sorted(aliases)
     return out
+
+
+def _geak_accepted_kernel_specs(result: Any) -> list[dict[str, Any]]:
+    """Return the authored kernels a GEAK result accepted: its acceptances without the ``env`` selections."""
+    return [spec for spec in geak_acceptance_specs(result) if not geak_spec_is_env(spec)]
 
 
 def _geak_has_accepted_kernel(result: Any) -> bool:
     """Report whether a GEAK result names an authored kernel for the rebench to measure."""
     return bool(_geak_accepted_kernel_specs(result))
-
-
-def geak_overlay_is_loadable(overlay: str) -> bool:
-    """Report whether an overlay dir can actually install an authored kernel."""
-    from hyperloom.common.overlay import overlay_is_loadable
-
-    return overlay_is_loadable(overlay)
 
 
 def _geak_overlay_digest(overlay: str) -> str:

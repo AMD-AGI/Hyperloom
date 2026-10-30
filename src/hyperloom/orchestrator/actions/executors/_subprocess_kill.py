@@ -22,12 +22,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
 
-# ``TERM_GRACE_SECONDS`` is this module's name for the shared SIGTERM-to-SIGKILL
-# grace: a driver-side teardown of a server a round left behind waits for the
-# same thing on the same signal, so it waits exactly as long.
 from hyperloom.common.env import env_flag
-from hyperloom.common.proctree import TERM_GRACE_SEC as TERM_GRACE_SECONDS
-from hyperloom.common.proctree import collect_tree, kill_tree, marked_pids, signal_group
+from hyperloom.common.proctree import REAP_MARK_ENV, TERM_GRACE_SEC, collect_tree, kill_tree, marked_pids
 
 from .bypass_analysis import parse_server_log_throughput
 
@@ -39,9 +35,6 @@ log = logging.getLogger(__name__)
 # How long the reaper waits to collect the SIGKILL'd child before giving up on it.
 _REAP_COLLECT_SECONDS: float = 1.0
 
-#: Set in a run's env, its value marks the run: whatever inherited it is reaped on every exit path, however it detached.
-REAP_MARK_ENV: str = "HYPERLOOM_REAP_MARK"
-
 # How long draining a reaped child's capture threads is given.
 _CAPTURE_DRAIN_SECONDS: float = 2.0
 
@@ -52,31 +45,14 @@ STOP_GATE_POLL_SECONDS: float = 0.5
 # What stopping a running round costs, end to end, from the moment something asks it to: noticing at the poll,
 # SIGTERM'ing the tree, waiting out the grace before SIGKILL, collecting the child, and draining its pipes.
 COOPERATIVE_REAP_BUDGET_SEC: float = (
-    STOP_GATE_POLL_SECONDS + TERM_GRACE_SECONDS + _REAP_COLLECT_SECONDS + _CAPTURE_DRAIN_SECONDS
+    STOP_GATE_POLL_SECONDS + TERM_GRACE_SEC + _REAP_COLLECT_SECONDS + _CAPTURE_DRAIN_SECONDS
 )
-
-
-def new_session_kwargs() -> dict:
-    """``Popen`` kwargs so the child gets its own POSIX session (killable via ``os.killpg``)."""
-    if os.name == "posix":
-        return {"start_new_session": True}
-    return {}
-
-
-def _signal_group(pgid: int, sig: int) -> None:
-    """Send ``sig`` to every member of ``pgid``; swallow ``ESRCH``.
-
-    Args:
-        pgid (int): The POSIX process-group id to signal.
-        sig (int): The signal number to send.
-    """
-    signal_group(pgid, sig, what="_subprocess_kill")
 
 
 def kill_my_spawned_server(
     proc: subprocess.Popen | None,
     *,
-    grace_seconds: float = TERM_GRACE_SECONDS,
+    grace_seconds: float = TERM_GRACE_SEC,
     mark: str = "",
 ) -> None:
     """Tear down the entire process tree rooted at ``proc``, and every process carrying ``mark`` in its environment."""
@@ -151,12 +127,6 @@ def kill_my_spawned_server(
         pass
 
 
-# Sentinel ``returncode`` allocation.
-
-# Sentinel ``returncode`` when the server-liveness watchdog reaps a child whose engine/worker bootstrap died but whose
-# parent ``vllm serve`` / ``sglang.launch_server`` process hung instead of exiting.
-SERVER_DEAD_RETURNCODE: int = -910
-
 # Fatal server-init markers: once any appears in ``server.log`` the engine is unrecoverable within the same Magpie
 # subprocess.
 _SERVER_DEAD_MARKERS: tuple[str, ...] = (
@@ -176,9 +146,7 @@ _SERVER_DEAD_MARKERS: tuple[str, ...] = (
 )
 
 #: Engine deaths that happen *after* the server reported ready and began
-#: serving. Kept out of :data:`_SERVER_DEAD_MARKERS` on purpose: that tuple also
-#: drives the live readiness waiter, and widening it would change when a running
-#: server is torn down. These are read only when building a diagnostic excerpt.
+#: serving. These are read only when building a diagnostic excerpt.
 _FATAL_ENGINE_MARKERS: tuple[str, ...] = (
     "EngineCore encountered a fatal error",
     "EngineCore encountered an issue",
@@ -273,20 +241,54 @@ _AGENTX_LOG_RELPATH: str = "aiperf_artifacts/logs/aiperf.log"
 _WARM_REUSE_PROBE_AFTER_SEC: float = 30.0
 
 
+# The operator's two grants. They are the operator's to set, read from the process env and
+# validated there once by preflight, so nothing re-reads them from an env a variant composed.
+BENCHMARK_TIMEOUT_ENV = "INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC"
+BENCHMARK_SILENCE_TIMEOUT_ENV = "INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC"
+
+
+def default_benchmark_timeout_sec(env: Mapping[str, str] | None = None) -> float:
+    """The hard cap the workload this env names needs, before any operator override.
+
+    A grant has to bound the work the invocation was composed to do, so an
+    agentic run's cap is sized to its own workload: an MLPerf run works through a
+    fixed trajectory count rather than a fixed window, and a canonical run warms
+    up one set of requests per lane before it opens its window, so both grow with
+    a size the caller pinned. The stock default reaped a healthy 150-trajectory
+    baseline at 38%, and reaped a canonical CONC 20 rung 1.3s after its profiling
+    phase completed.
+
+    Sizing reads only workload pins -- the backend, the flow, ``CONC`` -- but it
+    reads them as the run will: a pin it cannot parse raises
+    :class:`~hyperloom.common.env.EnvValueError` here rather than sizing the
+    grant for a workload the round will refuse to start.
+    """
+    from hyperloom.common.agentx_workload import (
+        canonical_benchmark_timeout_sec,
+        is_canonical_agentx,
+        is_mlperf_backend,
+        mlperf_benchmark_timeout_sec,
+    )
+
+    source = os.environ if env is None else env
+    stock = 7800.0
+    if is_mlperf_backend(source):
+        return max(stock, mlperf_benchmark_timeout_sec(source))
+    if is_canonical_agentx(source):
+        return max(stock, canonical_benchmark_timeout_sec(source))
+    return stock
+
+
 def resolve_benchmark_timeouts(env: Mapping[str, str] | None = None) -> tuple[float, float]:
     """Resolve the invocation's silence and hard caps, rejecting invalid overrides.
 
-    An MLPerf agentic run works through a fixed trajectory count rather than a
-    fixed window, so its default hard cap is sized to that count; the stock
-    default reaped a healthy 150-trajectory baseline at 38%. An explicit
-    ``INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC`` still wins.
+    The defaults are what the workload needs; an explicit
+    ``INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC`` still wins. Both names are the
+    operator's, so ``env`` has to be an env the operator set: preflight validates
+    the process env once and this rejects what it cannot parse. A per-variant env
+    is sized with ``default_benchmark_timeout_sec`` instead.
     """
-    from hyperloom.common.agentx_workload import is_mlperf_backend, mlperf_benchmark_timeout_sec
-
     source = os.environ if env is None else env
-    hard_default = 7800.0
-    if is_mlperf_backend(source):
-        hard_default = max(hard_default, mlperf_benchmark_timeout_sec(source))
 
     def positive(name: str, default: float) -> float:
         raw = source.get(name, str(default))
@@ -299,8 +301,8 @@ def resolve_benchmark_timeouts(env: Mapping[str, str] | None = None) -> tuple[fl
         return value
 
     return (
-        positive("INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC", 600.0),
-        positive("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", hard_default),
+        positive(BENCHMARK_SILENCE_TIMEOUT_ENV, 600.0),
+        positive(BENCHMARK_TIMEOUT_ENV, default_benchmark_timeout_sec(source)),
     )
 
 
@@ -317,15 +319,13 @@ class _StreamCapture:
         self,
         proc: subprocess.Popen,
         *,
-        text: bool,
         on_output: Callable[[], None] | None = None,
     ) -> None:
         """Set up capture/mirror threads for a child's stdout and stderr."""
-        self._text = text
         self._on_output = on_output
         self.last_activity_at: float | None = None
-        self._stdout_chunks: list[str | bytes] = []
-        self._stderr_chunks: list[str | bytes] = []
+        self._stdout_chunks: list[str] = []
+        self._stderr_chunks: list[str] = []
         self._threads: list[threading.Thread] = []
         if proc.stdout is not None:
             self._threads.append(
@@ -349,15 +349,11 @@ class _StreamCapture:
         for thread in self._threads:
             thread.start()
 
-    def finish(self, timeout: float = 2.0) -> tuple[str | bytes, str | bytes]:
+    def finish(self) -> tuple[str, str]:
         """Join the capture threads and return the captured output."""
         for thread in self._threads:
-            thread.join(timeout=timeout)
-        empty: str | bytes = "" if self._text else b""
-        return (
-            self._join(self._stdout_chunks) if self._stdout_chunks else empty,
-            self._join(self._stderr_chunks) if self._stderr_chunks else empty,
-        )
+            thread.join(timeout=_CAPTURE_DRAIN_SECONDS)
+        return "".join(self._stdout_chunks), "".join(self._stderr_chunks)
 
     def note_output(self) -> None:
         """Report one unit of child output to the caller's liveness callback."""
@@ -365,14 +361,10 @@ class _StreamCapture:
             return
         try:
             self._on_output()
-        except Exception as exc:  # noqa: BLE001 - liveness reporting never breaks capture
-            log.debug("_subprocess_kill: liveness callback failed: %s", exc)
+        except Exception as exc:  # outermost liveness sink: reporting never breaks capture
+            log.debug("_subprocess_kill: liveness callback failed: %s", exc, exc_info=True)
 
-    def _join(self, chunks: list[str | bytes]) -> str | bytes:
-        """Concatenate captured chunks using the appropriate empty separator."""
-        return "".join(chunks) if self._text else b"".join(chunks)  # type: ignore[arg-type,return-value]
-
-    def _pump(self, pipe, chunks: list[str | bytes], mirror) -> None:
+    def _pump(self, pipe, chunks: list[str], mirror) -> None:
         """Read available bytes without waiting for a newline or a complete codepoint."""
         decoder = io.IncrementalNewlineDecoder(codecs.getincrementaldecoder("utf-8")(errors="replace"), True)
         raw = getattr(pipe, "buffer", pipe)
@@ -383,29 +375,24 @@ class _StreamCapture:
                     break
                 self.last_activity_at = time.monotonic()
                 self.note_output()
-                chunk = decoder.decode(data) if self._text else data
+                chunk = decoder.decode(data)
                 if chunk:
                     chunks.append(chunk)
                     self._mirror(chunk, mirror)
-            if self._text:
-                final = decoder.decode(b"", final=True)
-                if final:
-                    chunks.append(final)
-                    self._mirror(final, mirror)
+            final = decoder.decode(b"", final=True)
+            if final:
+                chunks.append(final)
+                self._mirror(final, mirror)
         finally:
             try:
                 pipe.close()
             except OSError:
                 pass
 
-    def _mirror(self, chunk: str | bytes, mirror) -> None:
+    def _mirror(self, chunk: str, mirror) -> None:
         """Echo a captured chunk to the parent stream, ignoring errors."""
         try:
-            if isinstance(chunk, bytes):
-                stream = getattr(mirror, "buffer", mirror)
-                stream.write(chunk)
-            else:
-                mirror.write(chunk)
+            mirror.write(chunk)
             mirror.flush()
         except (OSError, ValueError):
             pass  # a closed or broken mirror stream must not stop the capture
@@ -580,12 +567,6 @@ def _read_ready_stamp(server_log_path: str) -> tuple[float, float] | None:
     except (OSError, ValueError, IndexError):
         return None
     return (ready_unix, max(0.0, boot_sec)) if ready_unix > 0.0 else None
-
-
-def server_ready_unix(server_log_path: str) -> float | None:
-    """Return when the server reported ready, or ``None`` when nothing recorded it."""
-    stamp = _read_ready_stamp(server_log_path)
-    return None if stamp is None else stamp[0]
 
 
 def post_ready_runtime_sec(
@@ -817,7 +798,7 @@ def _build_kv_recorder(server_log_path: str | None, env: dict[str, str] | None) 
     if not env_flag(_KV_METRICS_ENV, default=True):
         return None
     try:
-        from ._kv_metrics import KV_ARTIFACT_NAME, AiperfProgressPoller, KvMetricsPoller, KvMetricsRecorder
+        from ._kv_metrics import KV_ARTIFACT_NAME, AiperfProgressPoller, KvMetricsPoller, KvMetricsRecorder, KvRound
 
         workspace = Path(server_log_path).parent
         return KvMetricsRecorder(
@@ -827,15 +808,17 @@ def _build_kv_recorder(server_log_path: str | None, env: dict[str, str] | None) 
             # Authoritative phase boundaries when this round is an AgentX one; a no-op otherwise, since no other client
             # publishes a progress address and the poller then never resolves a URL.
             progress=AiperfProgressPoller(workspace),
-            output_path=str(workspace / KV_ARTIFACT_NAME),
-            scope={
-                "server_log_path": str(server_log_path),
-                "workspace": workspace.name,
-                "run_path": _run_relative_path(workspace),
-                "session": os.path.basename(
-                    os.environ.get("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", "").rstrip("/\\")
-                ),
-            },
+            kv_round=KvRound(
+                output_path=str(workspace / KV_ARTIFACT_NAME),
+                scope={
+                    "server_log_path": str(server_log_path),
+                    "workspace": workspace.name,
+                    "run_path": _run_relative_path(workspace),
+                    "session": os.path.basename(
+                        os.environ.get("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", "").rstrip("/\\")
+                    ),
+                },
+            ),
         )
     except Exception:
         log.warning("kv_metrics: recorder could not be built; this round collects nothing", exc_info=True)
@@ -903,28 +886,32 @@ def _run_relative_path(workspace: Path) -> str:
     return workspace.name
 
 
+@dataclass(frozen=True)
+class RoundWatch:
+    """The stop gates the watchdog enforces on one round and the server log it watches."""
+
+    timeout: int | float | None = None
+    server_log_path: str | None = None
+    silence_timeout_sec: float | None = None
+    server_already_ready: bool = False
+    session_deadline_sec: float | None = None
+
+
 def run_with_session_kill(
     cmd: list[str],
     *,
     env: dict[str, str] | None = None,
     cwd: str | None = None,
-    timeout: int | float | None = None,
-    text: bool = True,
-    server_log_path: str | None = None,
-    silence_timeout_sec: float | None = None,
-    server_already_ready: bool = False,
+    watch: RoundWatch = RoundWatch(),
     on_output: Callable[[], None] | None = None,
-    session_deadline_sec: float | None = None,
 ) -> subprocess.CompletedProcess:
     """Run a subprocess in its own session and reap descendants, and what carries ``REAP_MARK_ENV``, on every exit path."""
     child_env = dict(os.environ if env is None else env)
     mark = child_env.get(REAP_MARK_ENV, "")
-    if silence_timeout_sec is not None:
+    if watch.silence_timeout_sec is not None:
         child_env["PYTHONUNBUFFERED"] = "1"
-    scan_offsets = _stale_scan_log_sizes(server_log_path) if server_log_path else {}
+    scan_offsets = _stale_scan_log_sizes(watch.server_log_path) if watch.server_log_path else {}
     proc: subprocess.Popen | None = None
-    capture: _StreamCapture | None = None
-    empty: str | bytes = "" if text else b""
     try:
         with cancel_scope_listener() as cancel_scope:
             started_at = time.monotonic()
@@ -935,33 +922,25 @@ def run_with_session_kill(
                 text=False,
                 env=child_env,
                 cwd=cwd,
-                **new_session_kwargs(),
+                start_new_session=True,
             )
-            capture = _StreamCapture(proc, text=text, on_output=on_output)
+            capture = _StreamCapture(proc, on_output=on_output)
             capture.start()
             try:
                 stdout, stderr = _communicate_with_watchdog(
                     proc,
-                    _WatchedRound(
-                        hard_timeout=timeout,
-                        server_log_path=server_log_path,
-                        silence_timeout_sec=silence_timeout_sec,
-                        server_already_ready=server_already_ready,
-                        session_deadline_sec=session_deadline_sec,
-                        started_at=started_at,
-                        scan_offsets=scan_offsets,
-                    ),
+                    _WatchedRound(watch, started_at=started_at, scan_offsets=scan_offsets),
                     capture=capture,
                     cancel_scope=cancel_scope,
-                    recorders=_build_round_recorders(server_log_path, child_env),
+                    recorders=_build_round_recorders(watch.server_log_path, child_env),
                 )
             except subprocess.TimeoutExpired as exc:
                 kill_my_spawned_server(proc, mark=mark)
-                exc.output, exc.stderr = _finish_capture(capture, text=text)
+                exc.output, exc.stderr = capture.finish()
                 raise
             except _ReapedByWatchdog as exc:
                 kill_my_spawned_server(proc, mark=mark)
-                stdout, stderr = _finish_capture(capture, text=text)
+                stdout, stderr = capture.finish()
                 log.log(
                     exc.log_level,
                     "_subprocess_kill: %s; reaped the tree with sentinel returncode=%d.",
@@ -974,26 +953,9 @@ def run_with_session_kill(
                     stdout=stdout,
                     stderr=stderr,
                 )
-            return subprocess.CompletedProcess(
-                args=cmd,
-                returncode=proc.returncode,
-                stdout=stdout if stdout is not None else empty,
-                stderr=stderr if stderr is not None else empty,
-            )
+            return subprocess.CompletedProcess(args=cmd, returncode=proc.returncode, stdout=stdout, stderr=stderr)
     finally:
         kill_my_spawned_server(proc, mark=mark)
-
-
-def _finish_capture(capture: _StreamCapture | None, *, text: bool) -> tuple[str | bytes, str | bytes]:
-    """Drain the capture threads of a reaped child, never returning ``None``."""
-    empty: str | bytes = "" if text else b""
-    if capture is None:
-        return empty, empty
-    stdout, stderr = capture.finish(timeout=_CAPTURE_DRAIN_SECONDS)
-    return (
-        stdout if stdout is not None else empty,
-        stderr if stderr is not None else empty,
-    )
 
 
 class _ReapedByWatchdog(Exception):
@@ -1013,8 +975,6 @@ class _SessionDeadlineExceeded(_ReapedByWatchdog):
         super().__init__(
             f"the session wall-clock budget was exhausted {overrun_sec:.1f}s ago (round elapsed={elapsed_sec:.1f}s)"
         )
-        self.overrun_sec = float(overrun_sec)
-        self.elapsed_sec = float(elapsed_sec)
 
 
 class _OrchestratorCancelled(_ReapedByWatchdog):
@@ -1027,8 +987,6 @@ class _OrchestratorCancelled(_ReapedByWatchdog):
         super().__init__(
             f"the orchestrator cancelled this action ({reason or 'no reason given'}; round elapsed={elapsed_sec:.1f}s)"
         )
-        self.reason = str(reason)
-        self.elapsed_sec = float(elapsed_sec)
 
 
 class _ServerStalledDetected(_ReapedByWatchdog):
@@ -1048,38 +1006,32 @@ class _ServerStalledDetected(_ReapedByWatchdog):
             f"{grace_sec:.1f}s (silence timeout; "
             f"elapsed={elapsed_sec:.1f}s)"
         )
-        self.grace_sec = float(grace_sec)
-        self.elapsed_sec = float(elapsed_sec)
 
 
 @dataclass(frozen=True)
 class _WatchedRound:
-    """The stop gates the watchdog enforces on one round and the log baseline it scans from.
+    """One round's watch and the log baseline it scans from.
 
     ``started_at`` defaults to the moment the watch begins and ``scan_offsets`` to reading every log from its start.
     """
 
-    hard_timeout: int | float | None
-    server_log_path: str | None = None
-    silence_timeout_sec: float | None = None
-    server_already_ready: bool = False
-    session_deadline_sec: float | None = None
+    watch: RoundWatch
     started_at: float | None = None
     scan_offsets: dict[str, int] | None = None
 
     def enforce_stop_gates(self, proc: subprocess.Popen, scope: CancelScope | None, now: float, elapsed: float) -> None:
         """Raise as soon as the session budget, an orchestrator cancellation or the round cap is spent."""
-        if self.session_deadline_sec is not None and now >= self.session_deadline_sec:
-            raise _SessionDeadlineExceeded(overrun_sec=now - self.session_deadline_sec, elapsed_sec=elapsed)
+        if self.watch.session_deadline_sec is not None and now >= self.watch.session_deadline_sec:
+            raise _SessionDeadlineExceeded(overrun_sec=now - self.watch.session_deadline_sec, elapsed_sec=elapsed)
         if scope is not None and scope.cancelled:
             raise _OrchestratorCancelled(reason=scope.reason, elapsed_sec=elapsed)
-        if self.hard_timeout is not None and elapsed >= self.hard_timeout:
-            raise subprocess.TimeoutExpired(proc.args, self.hard_timeout)
+        if self.watch.timeout is not None and elapsed >= self.watch.timeout:
+            raise subprocess.TimeoutExpired(proc.args, self.watch.timeout)
 
     def poll_slice_sec(self, now: float, elapsed: float, silence_remaining: float | None) -> float:
         """How long to wait on the child before the nearest armed gate has to be re-checked."""
-        hard = None if self.hard_timeout is None else self.hard_timeout - elapsed
-        session = None if self.session_deadline_sec is None else self.session_deadline_sec - now
+        hard = None if self.watch.timeout is None else self.watch.timeout - elapsed
+        session = None if self.watch.session_deadline_sec is None else self.watch.session_deadline_sec - now
         return min(sec for sec in (STOP_GATE_POLL_SECONDS, hard, session, silence_remaining) if sec is not None)
 
 
@@ -1093,7 +1045,7 @@ class _RoundActivity:
     ready: bool = False
 
     def note_log_progress(
-        self, server_log_path: str | None, recorders: _RecorderFanout, capture: _StreamCapture | None, now: float
+        self, server_log_path: str | None, recorders: _RecorderFanout, capture: _StreamCapture, now: float
     ) -> None:
         """Advance the ready and last-output marks from the bytes the watched logs gained since the previous poll."""
         if server_log_path:
@@ -1105,9 +1057,9 @@ class _RoundActivity:
             if scan.grew:
                 self.last_activity_at = now
             recorders.note_client_phases(scan, now)
-            if capture is not None and (scan.saw_progress or scan.child_spoke):
+            if scan.saw_progress or scan.child_spoke:
                 capture.note_output()
-        if capture is not None and capture.last_activity_at is not None:
+        if capture.last_activity_at is not None:
             self.last_activity_at = max(self.last_activity_at, capture.last_activity_at)
 
     def reusing_warm_server(self, server_log_path: str | None, elapsed: float) -> bool:
@@ -1127,17 +1079,17 @@ def _communicate_with_watchdog(
     watched: _WatchedRound,
     *,
     recorders: _RecorderFanout,
-    capture: _StreamCapture | None = None,
+    capture: _StreamCapture,
     cancel_scope: CancelScope | None = None,
-) -> tuple[str | bytes, str | bytes]:
+) -> tuple[str, str]:
     """Wait for exit, enforcing cancellation, session budget and explicit round caps."""
-    server_log_path = watched.server_log_path
-    silence_timeout_sec = watched.silence_timeout_sec
+    server_log_path = watched.watch.server_log_path
+    silence_timeout_sec = watched.watch.silence_timeout_sec
     start = time.monotonic() if watched.started_at is None else watched.started_at
     cursor = _LogCursor(watched.scan_offsets if watched.scan_offsets is not None else {})
     activity = _RoundActivity(started_at=start, cursor=cursor, last_activity_at=start)
     completed = False
-    if watched.server_already_ready:
+    if watched.watch.server_already_ready:
         recorders.note_phase(_READY_PHASE, start)
         if server_log_path:
             stamp_server_ready(server_log_path, 0.0)
@@ -1145,26 +1097,23 @@ def _communicate_with_watchdog(
         while True:
             # An exit already observed belongs to the child, not to an expired gate.
             if proc.poll() is not None:
-                result = proc.communicate() if capture is None else capture.finish()
+                result = capture.finish()
                 completed = True
                 return result
             now = time.monotonic()
             elapsed = now - start
             watched.enforce_stop_gates(proc, cancel_scope, now, elapsed)
             activity.note_log_progress(server_log_path, recorders, capture, now)
-            server_is_live = activity.ready or watched.server_already_ready
+            server_is_live = activity.ready or watched.watch.server_already_ready
             if server_is_live or activity.reusing_warm_server(server_log_path, elapsed):
                 recorders.tick(now)
             silence_remaining = activity.silence_remaining_sec(silence_timeout_sec, now)
             if silence_remaining is not None and silence_remaining <= 0:
-                raise _ServerStalledDetected(grace_sec=watched.silence_timeout_sec, elapsed_sec=elapsed)
+                raise _ServerStalledDetected(grace_sec=watched.watch.silence_timeout_sec, elapsed_sec=elapsed)
             slice_sec = watched.poll_slice_sec(now, elapsed, silence_remaining)
             try:
-                if capture is None:
-                    result = proc.communicate(timeout=max(0.0, slice_sec))
-                else:
-                    proc.wait(timeout=max(0.0, slice_sec))
-                    result = capture.finish()
+                proc.wait(timeout=max(0.0, slice_sec))
+                result = capture.finish()
                 completed = True
                 return result
             except subprocess.TimeoutExpired:
@@ -1176,23 +1125,23 @@ def _communicate_with_watchdog(
 __all__ = [
     "AGENTX_PREFLIGHT_ERROR_CLASS",
     "AGENTX_PREFLIGHT_RETURNCODE",
+    "BENCHMARK_SILENCE_TIMEOUT_ENV",
+    "BENCHMARK_TIMEOUT_ENV",
     "COOPERATIVE_REAP_BUDGET_SEC",
     "DETOKENIZER_STALL_RETURNCODE",
     "EVAL_PROBE_UNPATCHABLE_RETURNCODE",
     "INFERENCEX_CHECKOUT_INVALID_RETURNCODE",
     "ORCHESTRATOR_CANCELLED_RETURNCODE",
-    "SERVER_DEAD_RETURNCODE",
+    "RoundWatch",
     "SESSION_TIME_EXHAUSTED_RETURNCODE",
     "STOP_GATE_POLL_SECONDS",
-    "TERM_GRACE_SECONDS",
     "clear_server_ready_stamp",
+    "default_benchmark_timeout_sec",
     "kill_my_spawned_server",
-    "new_session_kwargs",
     "post_ready_runtime_sec",
     "resolve_benchmark_timeouts",
     "run_with_session_kill",
     "server_log_death_excerpt",
-    "server_ready_unix",
     "session_deadline_to_remaining_sec",
     "session_remaining_to_deadline_sec",
     "stamp_server_ready",

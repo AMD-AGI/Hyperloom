@@ -173,7 +173,6 @@ def _resumed_prelude_state() -> SharedState:
     state.max_minutes = RESUMED_SESSION_MINUTES
     state.phase = ps.PHASE_PRELUDE
     state.phase_started_unix = T0
-    state.phase_started_ts = T0_ISO
     state.resumed_ts = _iso(RESUME_UNIX)
     state.phase_budget_pct = ps.normalize_budget_pct(None)
     return state
@@ -244,7 +243,6 @@ def test_budget_exit_evidence_reports_the_time_it_judged_on():
     state.phase_elapsed_totals = {ps.PHASE_KERNEL_AGENT: 2 * ENTRY_SEC}
     state.phase = ps.PHASE_KERNEL_AGENT
     state.phase_started_unix = T0
-    state.phase_started_ts = T0_ISO
 
     out = ps.compute_next_phase(state, now_unix=T0 + ENTRY_SEC)
 

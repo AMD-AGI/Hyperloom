@@ -150,20 +150,20 @@ class MessageBus:
         self,
         n: int = 200,
         *,
-        after_seq: int = 0,
         to_agent: str | None = None,
         topic: str | None = None,
     ) -> list[Message]:
         """Return the most recent messages matching the given filters."""
-        clauses = ["seq > ?"]
-        params: list[Any] = [after_seq]
+        clauses: list[str] = []
+        params: list[Any] = []
         if to_agent is not None:
             clauses.append("(to_agent = ? OR to_agent = '*')")
             params.append(to_agent)
         if topic is not None:
             clauses.append("topic = ?")
             params.append(topic)
-        sql = f"SELECT * FROM events WHERE {' AND '.join(clauses)} ORDER BY seq DESC LIMIT ?"  # nosec B608 - clauses are selected from fixed templates.
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        sql = f"SELECT * FROM events{where} ORDER BY seq DESC LIMIT ?"  # nosec B608 - clauses are selected from fixed templates.
         params.append(n)
         rows = await self.db.fetchall(sql, params)
         return [Message.from_row(r) for r in rows]
