@@ -2653,7 +2653,7 @@ async def test_recipe_kb_finalize_amends_recipe(coord: Coordinator, monkeypatch)
 # -- handle_intent routing -------------------------------------------------
 @pytest.mark.asyncio
 async def test_handle_intent_policy_denied(coord: Coordinator, monkeypatch) -> None:
-    from hyperloom.orchestrator.policy.gate import PolicyDenied
+    from hyperloom.orchestrator.policy.denial import PolicyDenied
 
     recorded: list = []
 
@@ -3016,7 +3016,7 @@ async def test_handle_delegate_pruned_advisory(coord: Coordinator, monkeypatch) 
 
 @pytest.mark.asyncio
 async def test_handle_delegate_sequence_denied(coord: Coordinator, monkeypatch) -> None:
-    from hyperloom.orchestrator.policy.gate import PolicyDenied
+    from hyperloom.orchestrator.policy.denial import PolicyDenied
 
     coord.shared_state.phase = "FRAMEWORK_AGENT"
     monkeypatch.setattr(

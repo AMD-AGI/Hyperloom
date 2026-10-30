@@ -12,10 +12,8 @@ from typing import Any
 
 
 from hyperloom.common.llm_config import CLAUDE_GATEWAY_SIGNAL_KEYS, LEGACY_DEEPSEEK_ENV_KEYS
-from hyperloom.orchestrator.roles import (
-    ClaudeBackend,
-    EMIT_INTENT_TOOL_NAME,
-)
+from hyperloom.orchestrator.roles import ClaudeBackend
+from hyperloom.orchestrator.roles.mcp_emit_intent import EMIT_INTENT_TOOL_NAME
 
 
 @dataclass

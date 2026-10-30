@@ -102,21 +102,6 @@ def test_framework_registry_surface() -> None:
     assert fr.is_scriptable("unknown") is False
 
 
-# --------------------------------------------------------------------------- #
-# orchestrator.phases.quantization_schemes #
-# --------------------------------------------------------------------------- #
-def test_quantization_join_and_prompt() -> None:
-    from hyperloom.orchestrator.phases import quantization_schemes as qs
-
-    assert qs._join_clauses([]) == ""
-    assert qs._join_clauses(["a"]) == "a"
-    assert qs._join_clauses(["a", "b", "c"]) == "a, b and c"
-
-    cfg = qs.QuantizationConfig(global_scheme="fp8")
-    prompt = qs.build_quantization_prompt(cfg)
-    assert "Quantization strategy" in prompt
-
-
 # --------------------------------------------------------------------------- # orchestrator.state.objective #
 # --------------------------------------------------------------------------- #
 def test_tput_objective_progress_zero() -> None:
