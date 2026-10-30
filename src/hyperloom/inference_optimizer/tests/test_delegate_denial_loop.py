@@ -49,10 +49,12 @@ async def test_delegate_terminal_collision_appends_retry_suffix(session_dir):
     c = _silent_coordinator(session_dir)
     try:
         first, _ = await c.tasks.create_or_return_existing(
-            kind="target_analysis",
-            params={"x": 1},
-            idempotency_key="dup-key-1",
-            dispatch_class="llm",
+            TaskSpec(
+                kind="target_analysis",
+                params={"x": 1},
+                idempotency_key="dup-key-1",
+                dispatch_class="llm",
+            ),
         )
         await c.tasks.transition(first.task_id, "running", evidence={})
         await c.tasks.transition(first.task_id, "succeeded", evidence={})
@@ -70,10 +72,12 @@ async def test_delegate_running_collision_denies_without_new_task(session_dir):
     c = _silent_coordinator(session_dir)
     try:
         await c.tasks.create_or_return_existing(
-            kind="target_analysis",
-            params={"x": 1},
-            idempotency_key="dup-key-run",
-            dispatch_class="llm",
+            TaskSpec(
+                kind="target_analysis",
+                params={"x": 1},
+                idempotency_key="dup-key-run",
+                dispatch_class="llm",
+            ),
         )
         before = len(await c.tasks.by_state("queued"))
         await c.router.handle_delegate("orchestration", _delegate(key="dup-key-run"))
@@ -295,9 +299,8 @@ from hyperloom.orchestrator.phases.machine_state import (
 from hyperloom.orchestrator.policy.gate import (
     PolicyGate,
 )
-from hyperloom.orchestrator.prompts.prompt_builder import (
-    FULL_ENABLED_ACTIONS,
-)
+from hyperloom.inference_optimizer.protocol.action_surfaces import FULL_ENABLED_ACTIONS
+from hyperloom.orchestrator.state.task_registry import TaskSpec
 
 
 @pytest.fixture

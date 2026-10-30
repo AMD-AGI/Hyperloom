@@ -46,7 +46,7 @@ from hyperloom.common.perf_metric import (
     INTVTY_V1,
 )
 from hyperloom.orchestrator.actions.executors import _geak_sweep
-from hyperloom.orchestrator.actions.executors._geak_sweep import sweep_via_geak
+from hyperloom.orchestrator.actions.executors._geak_sweep import GeakSweepSpec, sweep_via_geak
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     GEAK_METRIC_INTVTY,
     GEAK_METRIC_OUTPUT,
@@ -137,9 +137,7 @@ def test_the_interactivity_handoff_carries_the_rule_the_rebench_keeps_on():
 )
 def test_the_workload_spec_publishes_the_rule_with_the_sessions_own_band(backend_env, objective, rule_expected):
     """The guards' band is the one the session was seeded with, not this process's default."""
-    spec = build_agentx_workload_spec(
-        {}, {}, model_path="/models/GLM-5.2-MXFP4", env=backend_env, grading={"objective": objective, "noise_pct": 7.5}
-    )
+    spec = build_agentx_workload_spec({}, env=backend_env, grading={"objective": objective, "noise_pct": 7.5})
     if rule_expected:
         assert spec["acceptance"] == geak_acceptance(spec["metric_basis"], 7.5)
     else:
@@ -180,12 +178,10 @@ def _sweep_with_summary(
                 "validated_regimes": [{"num_warmups": 1, "seed": 1, "num_prompts": 8}],
                 "accepted_config": {"flags": "", "env": ""},
             },
-            conc_values=[1],
-            isl_osl_configs=["16:16"],
+            spec=GeakSweepSpec(
+                conc_values=[1], isl_osl_configs=["16:16"], variant_timeout_sec=30, repeats=1, metric_axis=metric_axis
+            ),
             output_root=tmp_path / "sweep",
-            variant_timeout_sec=30,
-            repeats=1,
-            metric_axis=metric_axis,
         )
 
     return _go, launched

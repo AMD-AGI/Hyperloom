@@ -3,29 +3,24 @@
 from __future__ import annotations
 
 import os
+import secrets
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from .assessment import (
-    ASK_RETRYABLE,
-    AUTO_FAIL,
-    AUTO_RECOVER,
-    Assessment,
-    build_assessment,
-    classify_attempt,
-    derive_status,
-)
-from .outcomes import OutcomeId, SUCCESS_TAGS, UNCLASSIFIED_FAILURE
-from .result_collector import CollectedArtifacts, collect_artifacts
-from .runner import AttemptContext, RunOneAttemptFn, run_one_attempt
+from .assessment import Assessment, build_assessment, classify_attempt, classify_unfinished_attempt, derive_status
+from .outcomes import ASK_RETRYABLE, AUTO_FAIL, AUTO_RECOVER, OutcomeId, SUCCESS_TAGS
+from .result_collector import ATTEMPT_MARKER_FILES, collect_artifacts
+from .runner import AttemptContext, RunOneAttemptFn, attempt_ended, run_one_attempt
 
-
-_COUNTER_FILE = "requantize_attempts.txt"
 
 # Upstream git URL for the Quark repo; quoted in the quark_root_missing error so operators know where to clone from.
 DEFAULT_QUARK_GIT_URL = "https://github.com/amd/Quark.git"
+_QUARK_ROOT_HINT = (
+    f"set $QUARK_ROOT or pass options=QuantSkillRunOptions(quark_root=...); clone from {DEFAULT_QUARK_GIT_URL}"
+)
 
 
 @dataclass(frozen=True)
@@ -35,27 +30,77 @@ class QuantSkillRunResult:
     status: str  # "success" | "partial" | "failed"
     quantized_model_dir: Path | None
     assessment: Assessment
+    # The directory this run's attempts wrote into; None when the run failed before it started.
+    run_dir: Path | None = None
 
 
-# counter file
+@dataclass(frozen=True)
+class QuantSkillRunOptions:
+    """Operator settings of one :func:`quantize_via_prompt` run."""
+
+    quark_root: str | os.PathLike | None = None
+    interactive: bool | None = None
+    acceptable_eval_gap: float | None = None
+    max_requantize_attempts: int = 1
+    model: str | None = None
 
 
-def _read_counter(workspace: Path) -> int:
-    """Read the persisted requantize-attempt counter."""
-    f = workspace / _COUNTER_FILE
-    if not f.is_file():
-        return 0
-    try:
-        return int(f.read_text(encoding="utf-8").strip() or "0")
-    except (OSError, ValueError):
-        return 0
+_RUNS_DIR = "runs"
 
 
-def _bump_counter(workspace: Path) -> int:
-    """Increment and persist the requantize-attempt counter."""
-    n = _read_counter(workspace) + 1
-    (workspace / _COUNTER_FILE).write_text(str(n), encoding="utf-8")
-    return n
+def _new_run_dir(workspace: Path) -> Path:
+    """Create ``<workspace>/runs/<utc-timestamp>-<random>`` for one run, never reusing an existing one.
+
+    Every file a run writes, the exported model included, has to outlive the run without another run of the
+    same model reading or overwriting it, so each run gets a directory of its own.
+    """
+    runs = workspace / _RUNS_DIR
+    runs.mkdir(parents=True, exist_ok=True)
+    while True:
+        run_id = f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{secrets.token_hex(3)}"
+        try:
+            (runs / run_id).mkdir()
+        except FileExistsError:
+            continue
+        return runs / run_id
+
+
+_ARCHIVE_INFIX = ".attempt_"
+
+
+def _archive_earlier_end(workspace: Path) -> None:
+    """Rename the markers an earlier attempt of this run left to the next free ``.attempt_<k>``.
+
+    Archiving is what lets the next attempt be judged on its own files.
+    """
+    present = [name for name in ATTEMPT_MARKER_FILES if (workspace / name).is_file()]
+    archived = [
+        int(suffix)
+        for name in ATTEMPT_MARKER_FILES
+        for path in workspace.glob(f"{name}{_ARCHIVE_INFIX}*")
+        if (suffix := path.name.removeprefix(f"{name}{_ARCHIVE_INFIX}")).isdigit()
+    ]
+    index = max(archived, default=0) + 1
+    for name in present:
+        (workspace / name).replace(workspace / f"{name}{_ARCHIVE_INFIX}{index}")
+
+
+async def _run_and_classify(
+    attempt: AttemptContext, run_attempt: RunOneAttemptFn, *, model: str | None, log: Callable[[str], None] | None
+) -> OutcomeId | None:
+    """Run one attempt and classify it on the files it wrote itself.
+
+    An attempt has to write an end of its own: without one, an earlier attempt's
+    model and reports would pass as its result, and an attempt that wrote
+    nothing would read as a clean success.
+    """
+    workspace = attempt.workspace
+    _archive_earlier_end(workspace)
+    sdk_error = (await run_attempt(attempt, model=model, log=log)).sdk_error or None
+    artifacts = collect_artifacts(workspace)
+    if not attempt_ended(artifacts):
+        return classify_unfinished_attempt(sdk_error, phase=artifacts.last_phase)
+    return classify_attempt(artifacts, sdk_error=sdk_error, acceptable_eval_gap=attempt.acceptable_eval_gap)
 
 
 # interactive prompt
@@ -135,8 +180,8 @@ def _decide_next_step(
             )
         return _RetryDecision(retry=False, note="eval_gap_exceeded_rejected")
 
-    # Only ASK_RETRYABLE + UNCLASSIFIED_FAILURE increment the counter.
-    if outcome in ASK_RETRYABLE or outcome == UNCLASSIFIED_FAILURE:
+    # Only ASK_RETRYABLE + unclassified_failure increment the counter.
+    if outcome in ASK_RETRYABLE or outcome == OutcomeId.unclassified_failure:
         if counter >= max_requantize_attempts:
             return _RetryDecision(
                 retry=False,
@@ -161,11 +206,7 @@ async def quantize_via_prompt(
     prompt: str,
     *,
     workspace: str | os.PathLike,
-    quark_root: str | os.PathLike | None = None,
-    interactive: bool | None = None,
-    acceptable_eval_gap: float | None = None,
-    max_requantize_attempts: int = 1,
-    model: str | None = None,
+    options: QuantSkillRunOptions = QuantSkillRunOptions(),
     runner_fn: RunOneAttemptFn | None = None,
     log: Callable[[str], None] | None = None,
 ) -> QuantSkillRunResult:
@@ -173,62 +214,51 @@ async def quantize_via_prompt(
     workspace_path = Path(workspace).resolve()
     workspace_path.mkdir(parents=True, exist_ok=True)
 
-    if quark_root is None:
-        quark_root = os.environ.get("QUARK_ROOT")
+    quark_root = os.environ.get("QUARK_ROOT") if options.quark_root is None else options.quark_root
     if not quark_root:
         return _build_failed_bootstrap_result(
             workspace_path,
             OutcomeId.quark_root_missing,
-            f"quark_root is not configured; set $QUARK_ROOT or pass quark_root= (clone from {DEFAULT_QUARK_GIT_URL})",
+            f"quark_root is not configured ({_QUARK_ROOT_HINT})",
         )
     quark_root_path = Path(quark_root).expanduser()
     if not quark_root_path.is_dir():
         return _build_failed_bootstrap_result(
             workspace_path,
             OutcomeId.quark_root_missing,
-            f"quark_root path does not exist or is not a directory: {quark_root_path} "
-            f"(set $QUARK_ROOT or pass quark_root=; clone from {DEFAULT_QUARK_GIT_URL})",
+            f"quark_root path does not exist or is not a directory: {quark_root_path} ({_QUARK_ROOT_HINT})",
         )
 
-    interactive_resolved = _resolve_interactive(interactive)
+    interactive_resolved = _resolve_interactive(options.interactive)
+    max_attempts = options.max_requantize_attempts
     run_attempt: RunOneAttemptFn = runner_fn or run_one_attempt
+    run_dir = _new_run_dir(workspace_path)
 
     attempts_list: list[OutcomeId | None] = []
     notes: list[str] = []
     last_outcome: OutcomeId | None = None
-    artifacts: CollectedArtifacts | None = None
 
     attempt_n = 1
     while True:
         attempt = AttemptContext(
             user_prompt=prompt,
-            workspace=workspace_path,
+            workspace=run_dir,
             quark_root=quark_root_path,
             attempt_number=attempt_n,
-            acceptable_eval_gap=acceptable_eval_gap,
+            acceptable_eval_gap=options.acceptable_eval_gap,
             interactive=interactive_resolved,
             previous_outcome=last_outcome.value if isinstance(last_outcome, OutcomeId) else None,
         )
-        attempt_result = await run_attempt(attempt, model=model, log=log)
-
-        artifacts = collect_artifacts(workspace_path)
-        outcome = classify_attempt(
-            workspace_path,
-            sdk_error=attempt_result.sdk_error or None,
-            last_phase=artifacts.last_phase,
-            acceptable_eval_gap=acceptable_eval_gap,
-            artifacts=artifacts,
-        )
+        outcome = await _run_and_classify(attempt, run_attempt, model=options.model, log=log)
         attempts_list.append(outcome)
         last_outcome = outcome
 
-        counter = _read_counter(workspace_path)
         decision = _decide_next_step(
             outcome,
-            fix_hypothesis=_fix_hypothesis_path(workspace_path, attempt_n),
+            fix_hypothesis=_fix_hypothesis_path(run_dir, attempt_n),
             interactive=interactive_resolved,
-            max_requantize_attempts=max_requantize_attempts,
-            counter=counter,
+            max_requantize_attempts=max_attempts,
+            counter=attempt_n - 1,
         )
         if decision.note:
             notes.append(decision.note)
@@ -239,26 +269,24 @@ async def quantize_via_prompt(
         if not decision.retry:
             break
 
-        new_counter = _bump_counter(workspace_path)
         if log:
-            log(
-                f"quantization-agent: retrying after outcome={outcome} "
-                f"(counter={new_counter}/{max_requantize_attempts})"
-            )
+            log(f"quantization-agent: retrying after outcome={outcome} (retry {attempt_n}/{max_attempts})")
         attempt_n += 1
 
-    assessment = build_assessment(attempts_list, workspace=workspace_path, artifacts=artifacts, notes=tuple(notes))
+    artifacts = collect_artifacts(run_dir)
+    assessment = build_assessment(attempts_list, artifacts=artifacts, notes=tuple(notes))
 
-    status = derive_status(assessment, artifacts)  # type: ignore[arg-type]
+    status = derive_status(assessment, artifacts)
     quantized_model_dir = (
         artifacts.quantized_model_dir
-        if artifacts and status != "failed" and artifacts.quantized_model_dir and artifacts.has_weights
+        if status != "failed" and artifacts.quantized_model_dir and artifacts.has_weights
         else None
     )
     return QuantSkillRunResult(
         status=status,
         quantized_model_dir=quantized_model_dir,
         assessment=assessment,
+        run_dir=run_dir,
     )
 
 
@@ -283,6 +311,7 @@ def _build_failed_bootstrap_result(
 
 
 __all__ = [
+    "QuantSkillRunOptions",
     "QuantSkillRunResult",
     "quantize_via_prompt",
 ]

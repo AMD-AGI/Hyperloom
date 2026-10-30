@@ -12,7 +12,6 @@ import logging
 import os
 import shutil
 import time
-from contextlib import ExitStack, suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,7 +19,7 @@ from typing import Any, Awaitable, Callable, Sequence
 
 from hyperloom.common.provenance import detect_kineto_backend
 from hyperloom.common.timeutil import now_iso
-from ...phases.machine_state import record_lifecycle_event
+from ...phases.machine_state import LifecycleMark, record_lifecycle_event
 from ...loop.sub_agent_runner import RunnerContext
 from ...state.analysis_failures import remember_roofline_failure, remember_trace_failure
 from hyperloom.inference_optimizer.trace.task_progress import report_progress
@@ -39,6 +38,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.roofline_event import (
     RooflineConclusion,
     RooflineRequest,
     make_roofline_recorder,
+    roofline_arm,
     roofline_event_id,
 )
 
@@ -68,7 +68,6 @@ _PREFLIGHT_STALE_TRACE_LIMIT = 20
 _TERMINAL_PROFILE_ERRORS = frozenset(
     {
         ORCHESTRATOR_CANCELLED_CLASS,
-        "agentx_multi_node_profile_unsupported",
         "primary_rank_trace_missing",
     }
 )
@@ -89,11 +88,7 @@ async def _reap_session_orphans(session_dir: Path | str) -> list[int]:
     """Reap this session's own orphaned serving processes."""
     from ._server_lifecycle import reap_orphaned_servers
 
-    resolved = Path(session_dir)
-    if resolved == Path("."):
-        log.debug("roofline: no session_dir resolved; skipping orphan reap")
-        return []
-    return await asyncio.to_thread(reap_orphaned_servers, resolved)
+    return await asyncio.to_thread(reap_orphaned_servers, Path(session_dir))
 
 
 def _gpu_trace_unsupported_reason(profile_result: dict[str, Any]) -> str:
@@ -367,7 +362,9 @@ def _server_liveness_probe(session_dir: Path, task_id: str) -> dict[str, Any]:
     process means the engine died instead of being torn down. That run can still have exported a complete trace,
     which is exactly why the result dict alone cannot show it.
     """
-    from ._server_lifecycle import _looks_like_server_process, _pid_alive_simple
+    from hyperloom.common.proctree import running
+
+    from ._server_lifecycle import _looks_like_server_process
 
     runs_dir = session_dir / "runs"
     if not runs_dir.is_dir():
@@ -384,7 +381,7 @@ def _server_liveness_probe(session_dir: Path, task_id: str) -> dict[str, Any]:
             pid = int(pid_file.read_text(encoding="utf-8").split()[0])
         except (OSError, IndexError, ValueError):
             continue
-        alive = _pid_alive_simple(pid)
+        alive = running(pid)
         entries.append(
             {
                 "pid_file": str(pid_file.relative_to(session_dir)),
@@ -647,7 +644,7 @@ async def _fail_on_capture(
     fine) and ``config`` (these server args cannot capture at all) decides who owns the fix, so it is recorded
     rather than acted on here.
     """
-    from .baseline import _classify_cuda_graph_capture_failure
+    from .benchmark_run.bringup import _classify_cuda_graph_capture_failure
 
     # With capture already off, a marker in the log tail says nothing about this run -- the tail can span an earlier
     # boot -- and "does not re-profile with graph capture disabled" would be nonsense to read on such a run.
@@ -779,15 +776,14 @@ def _analysis_payload(task_params: dict[str, Any], *, trace_path: str, framework
     """Build the trace_analyze request for the adopted trace.
 
     The arm is named explicitly so neither the snapshot's ceiling precision nor the recorded workload relies on a
-    transient current_best inference: PRELUDE measures the baseline arm, every other reason current_best. Each
-    roofline writes its own report so the PRELUDE baseline snapshot is never overwritten: prelude keeps the default
-    file, close_post_opt writes the "after" file, every other reason a rolling current one.
+    transient current_best inference. Each roofline writes its own report so the PRELUDE baseline snapshot is never
+    overwritten: prelude keeps the default file, close_post_opt the "after" file, every other reason a rolling one.
     """
     reason = str(task_params.get("reason") or "")
     payload: dict[str, Any] = {"trace_input": str(trace_path), "framework": framework}
     if task_params.get("workspace_path") not in (None, ""):
         payload["workspace_path"] = task_params["workspace_path"]
-    payload["roofline_arm"] = "baseline" if reason == "prelude_initial" else "current_best"
+    payload["roofline_arm"] = roofline_arm(reason)
     output_name = {"prelude_initial": "", "close_post_opt": "kernel_roofline_opt.json"}.get(
         reason, "kernel_roofline_current.json"
     )
@@ -850,22 +846,15 @@ class RooflineExecutor:
         if shared_state is None:
             raise ValueError(
                 "RooflineExecutor requires a SharedState reference; "
-                "construct via make_roofline_executor(shared_state=...) "
-                "from cli._register_executors"
+                "construct RooflineExecutor(shared_state=...) from cli._register_executors"
             )
         self.shared_state = shared_state
 
     async def __call__(self, ctx: RunnerContext) -> dict[str, Any]:
         """Run the roofline action, closing its timeline event either way."""
-        from hyperloom.inference_optimizer.session.session_binding import bound_session_or_none, session_scope
+        from hyperloom.inference_optimizer.session.session_binding import named_session_scope
 
-        # Only a context that names its session binds one.
-        named = (ctx.extra or {}).get("session_dir")
-        with ExitStack() as stack:
-            with suppress(OSError, RuntimeError):
-                session = Path(named).resolve() if named else None
-                if session is not None and bound_session_or_none() != session:
-                    stack.enter_context(session_scope(session))
+        with named_session_scope(ctx.extra["session_dir"]):
             return await self._run_recorded(ctx)
 
     async def _run_recorded(self, ctx: RunnerContext) -> dict[str, Any]:
@@ -893,7 +882,7 @@ class RooflineExecutor:
 
     def _resolve_sink(self, ctx: RunnerContext) -> Any:
         """Decide which event this run's rows belong to."""
-        from hyperloom.inference_optimizer.breakdown.recorder.event_sink import make_sink
+        from hyperloom.inference_optimizer.breakdown.recorder.event_sink import EventSink
         from hyperloom.inference_optimizer.session.session_binding import session_is_bound
 
         params = ctx.task.params or {}
@@ -909,16 +898,16 @@ class RooflineExecutor:
             str(getattr(self.shared_state, "phase", "") or "unphased"),
             int(getattr(self.shared_state, "macro_cycle", 0) or 0),
         )
-        return make_sink(event, producer=_RECORDER_PRODUCER)
+        return EventSink(event, producer=_RECORDER_PRODUCER)
 
     async def _execute(self, ctx: RunnerContext, *, recorder: Any) -> dict[str, Any]:
         """Run the roofline action for the given context."""
-        session_dir = self._resolve_session_dir(ctx)
+        session_dir = Path(ctx.extra["session_dir"])
         started = time.monotonic()
         self._record_lifecycle(session_dir, status="START", detail="auto-roofline: profile + TraceLens")
         arm = _ProfileArm.resolve(self._resolve_framework(ctx))
         if recorder is not None:
-            recorder.begin(max_profile_attempts=1)
+            recorder.begin()
         await _preflight(recorder, session_dir)
 
         profiled = await self._profile_until_usable(ctx, recorder, arm)
@@ -946,13 +935,14 @@ class RooflineExecutor:
         """
         from .profile import profile_executor
 
-        session_dir = self._resolve_session_dir(ctx)
+        session_dir = Path(ctx.extra["session_dir"])
         run = recorder.begin_profile_run(attempt_reason=PROFILE_ATTEMPT_INITIAL) if recorder is not None else 0
         profile_ctx = self._wrap_profile_ctx(ctx, disable_cuda_graph=arm.disable_cuda_graph, framework=arm.framework)
         returned: Any = None
         try:
             returned = await _reported("profile", lambda: profile_executor(profile_ctx))
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # isolation boundary: one profile sub-executor run
+            log.warning("roofline: profile_executor raised", exc_info=True)
             unusable = _raised(exc)
         else:
             unusable = _classify_profile(returned)
@@ -1043,13 +1033,7 @@ class RooflineExecutor:
                 else (f", warning={warning_code}" if warning_code else "")
             ),
         )
-        # The two markers guard against retry loops.
-        retry_payload = {
-            **payload,
-            "steady_state_mode": retry_mode,
-            "_n26_auto_retry": True,
-            "_n26_retry_from_mode": from_mode,
-        }
+        retry_payload = {**payload, "steady_state_mode": retry_mode}
         attempt = _AnalysisAttempt(
             "trace_analyze_n26_retry", ANALYSIS_ATTEMPT_N26_RETRY, context=f" on N26 auto-retry (mode={retry_mode})"
         )
@@ -1082,11 +1066,12 @@ class RooflineExecutor:
         """
         from .trace_analyze import trace_analyze_handler
 
-        session_dir = self._resolve_session_dir(ctx)
+        session_dir = Path(ctx.extra["session_dir"])
         run_index = recorder.begin_analysis_run(attempt_reason=attempt.attempt_reason) if recorder is not None else 0
         try:
             result = await _reported(attempt.label, lambda: trace_analyze_handler(payload, session_dir=session_dir))
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # isolation boundary: one trace analysis run
+            log.warning("roofline: trace_analyze_handler raised%s", attempt.context, exc_info=True)
             error_class, message = type(exc).__name__, f"trace_analyze_handler raised{attempt.context}: {exc!r}"
         else:
             if isinstance(result, dict):
@@ -1124,9 +1109,9 @@ class RooflineExecutor:
         with _scoped_env({_COMPUTE_BOUND_PROFILE_ENV: "1"}):
             try:
                 adopted, outcome = await self._compute_bound_attempt(ctx, recorder, arm, analysis.payload)
-            except Exception as exc:  # noqa: BLE001 — fail-soft
+            except Exception as exc:  # isolation boundary: one optional compute-bound re-profile
                 outcome = f"re-profile raised: {exc!r}"
-                log.warning("roofline: compute-bound re-profile failed (%s); keeping original", exc)
+                log.warning("roofline: compute-bound re-profile failed (%s); keeping original", exc, exc_info=True)
             finally:
                 if recorder is not None:
                     recorder.record_compute_bound_reprofile(attempted=True, adopted=adopted is not None, reason=outcome)
@@ -1136,7 +1121,7 @@ class RooflineExecutor:
         self, ctx: RunnerContext, recorder: Any, arm: _ProfileArm, payload: dict[str, Any]
     ) -> tuple[_AnalysedProfile | None, str]:
         """Profile and analyse once under the compute-bound override; return the pair to adopt and why."""
-        session_dir = self._resolve_session_dir(ctx)
+        session_dir = Path(ctx.extra["session_dir"])
         cb_ctx = self._wrap_profile_ctx(ctx, disable_cuda_graph=arm.disable_cuda_graph, framework=arm.framework)
         profile_run, cb_profile = await _compute_bound_profile(recorder, session_dir, arm, cb_ctx)
         cb_trace = _extract_trace_path(cb_profile)
@@ -1187,7 +1172,7 @@ class RooflineExecutor:
         if recorder is not None:
             recorder.adopt_analysis_run(run_index=analysis.run_index, ta_result=analysis.result, trace_input=trace_path)
         self._record_lifecycle(
-            self._resolve_session_dir(ctx),
+            Path(ctx.extra["session_dir"]),
             status="END",
             artifacts={
                 "trace_input": trace_path,
@@ -1234,19 +1219,13 @@ class RooflineExecutor:
         The auto-roofline path bypasses Coordinator._handle_request, so the action emits its own START / END pair.
         """
         try:
-            record_lifecycle_event(self.shared_state, step="roofline", **event)
+            record_lifecycle_event(self.shared_state, LifecycleMark(step="roofline", **event))
             if session_dir.name and session_dir.is_dir() and (session_dir / "state.json").exists():
                 self.shared_state.save(session_dir)
         except OSError:
             log.debug("roofline: lifecycle %s emit failed", event.get("status"), exc_info=True)
 
     # Helpers (instance methods so tests can subclass / monkeypatch)
-    @staticmethod
-    def _resolve_session_dir(ctx: RunnerContext) -> Path:
-        """Resolve the session directory from the runner context."""
-        sd = ctx.extra.get("session_dir") if ctx.extra else None
-        return Path(sd) if sd else Path(".")
-
     def _resolve_framework(self, ctx: RunnerContext) -> str:
         """Resolve the active framework: task params > FRAMEWORK env > shared_state.framework."""
         params = ctx.task.params or {}
@@ -1271,7 +1250,7 @@ class RooflineExecutor:
         parent_task = parent_ctx.task
         params = dict(parent_task.params or {})
         if disable_cuda_graph:
-            from .baseline import _with_cuda_graph_disabled
+            from .benchmark_run.bringup import _with_cuda_graph_disabled
 
             params["base_extra_args"] = _with_cuda_graph_disabled(
                 str(params.get("base_extra_args") or ""),
@@ -1284,7 +1263,6 @@ class RooflineExecutor:
             params=params,
             idempotency_key=f"{parent_task.idempotency_key}-profile",
             requires_lanes=list(parent_task.requires_lanes or []),
-            side_effects=list(parent_task.side_effects or []),
             lease_ttl_sec=parent_task.lease_ttl_sec,
         )
         return RunnerContext(
@@ -1294,12 +1272,6 @@ class RooflineExecutor:
         )
 
 
-def make_roofline_executor(*, shared_state: Any) -> RooflineExecutor:
-    """Production factory used by `cli._register_executors`."""
-    return RooflineExecutor(shared_state=shared_state)
-
-
 __all__ = [
     "RooflineExecutor",
-    "make_roofline_executor",
 ]

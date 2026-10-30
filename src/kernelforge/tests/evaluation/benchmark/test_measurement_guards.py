@@ -13,11 +13,11 @@ import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
-import click
 import pytest
 
-from kernelforge.cli.forge_loop_command import _load_external_baseline
-from kernelforge.loop import knowledge_integration as integration
+from kernelforge.workflows.forge_loop.bootstrap.errors import InvalidOptionValue
+from kernelforge.workflows.forge_loop.bootstrap.run import _load_external_baseline
+from kernelforge.workflows.forge_loop.memory import knowledge_integration as integration
 from kernelforge.evaluation.benchmark.baseline import (
     BASELINE_DRIFT_TOLERANCE,
     BaselineReferenceError,
@@ -25,10 +25,17 @@ from kernelforge.evaluation.benchmark.baseline import (
     load_reference_case_times,
 )
 from kernelforge.knowledge.kb_store.identity.run import LoopKernel
-from kernelforge.loop.recovery import CallerRecovery, publish_warm_start_recovery
-from kernelforge.loop.run_state import IterationVerdict, LoopStanding, LoopStateStore, RunState, apply_iteration
-from kernelforge.loop import runner as runner_module
-from kernelforge.loop.runner import IterationResult, _decision_label
+from kernelforge.workflows.forge_loop.campaign.recovery import CallerRecovery, publish_warm_start_recovery
+from kernelforge.workflows.forge_loop.campaign.run_state import (
+    IterationVerdict,
+    LoopStanding,
+    LoopStateStore,
+    RunState,
+    apply_iteration,
+)
+from kernelforge.workflows.forge_loop.iteration import runner as runner_module
+from kernelforge.workflows.forge_loop.iteration.iteration_types import _decision_label
+from kernelforge.workflows.forge_loop.iteration.runner import IterationResult
 from kernelforge.evaluation.scoring import (
     KEEP_MEASUREMENT_COUNT,
     KEEP_MIN_MARGIN_FRACTION,
@@ -44,12 +51,15 @@ from kernelforge.evaluation.scoring import (
     rescaled_sigma,
     warm_start_improvement_flags,
 )
-from kernelforge.tests.test_loop_runner import (
+from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import (
     _make_loop,
     _measurement_loop,
     _no_change_agent,
     _unused_supervisor,
 )
+from kernelforge.workflows.forge_loop.iteration import iteration_types
+from kernelforge.workflows.forge_loop.iteration import scoring_runtime
+from kernelforge.tests.conftest import patch_iteration_name
 
 # A modest speedup, well inside anything the loop has ever argued about.
 MODEST_SPEEDUP = 5.72
@@ -1006,7 +1016,7 @@ def _attributed_loop(monkeypatch, baseline, runs, extra_rounds=()):
             return _bench(runs)
         return _bench(rounds[min(len(calls) - 2, len(rounds) - 1)])
 
-    monkeypatch.setattr(runner_module, "measure_wallclock", fake_benchmark)
+    patch_iteration_name(monkeypatch, "measure_wallclock", fake_benchmark)
     return loop, calls
 
 
@@ -1118,7 +1128,7 @@ def test_a_re_measure_bench_that_failed_is_reported_as_bought_not_as_measured(mo
             return _bench(runs)
         return {"success": False, "message": "driver aborted", "measurements": []}
 
-    monkeypatch.setattr(runner_module, "measure_wallclock", fake_benchmark)
+    patch_iteration_name(monkeypatch, "measure_wallclock", fake_benchmark)
 
     asyncio.run(loop.run_one_iteration(1))
     line = _bench_line(capsys)
@@ -1135,19 +1145,19 @@ def test_a_re_measure_bench_that_failed_is_reported_as_bought_not_as_measured(mo
 def test_the_extra_benches_are_charged_to_the_round_that_bought_them(monkeypatch):
     """Round admission prices the next round from what this one spent measuring."""
     clock = [1000.0]
-    monkeypatch.setattr(runner_module, "time", SimpleNamespace(time=lambda: clock[0]))
+    patch_iteration_name(monkeypatch, "time", SimpleNamespace(time=lambda: clock[0]))
 
     def charged(baseline, runs, extra_rounds=(), *, incumbent=None):
         loop, calls = _attributed_loop(monkeypatch, baseline, runs, extra_rounds)
         if incumbent is not None:
             loop.best_mean_case_speedup = incumbent
-        inner = runner_module.measure_wallclock
+        inner = scoring_runtime.measure_wallclock
 
         async def metered(run, **kwargs):
             clock[0] += 100.0
             return await inner(run, **kwargs)
 
-        monkeypatch.setattr(runner_module, "measure_wallclock", metered)
+        patch_iteration_name(monkeypatch, "measure_wallclock", metered)
         loop._round_started_at = clock[0]
         loop._round_measurement_sec = 0.0
         asyncio.run(loop.run_one_iteration(1))
@@ -1408,7 +1418,7 @@ def _pin_after(runs: list[dict[str, float]], incumbent: dict[str, float]) -> lis
         state,
         iteration=21,
         decision_label="REVERT_PERF",
-        evidence=runner_module.DirectionEvidence(
+        evidence=iteration_types.DirectionEvidence(
             mean_case_speedup=0.995,
             best_mean_case_speedup=1.0,
             bench_detail=_revert_result(21, runs).bench_detail,
@@ -1460,7 +1470,7 @@ def test_a_candidate_with_no_per_case_detail_falls_back_to_the_aggregate_test():
         state,
         iteration=21,
         decision_label="REVERT_PERF",
-        evidence=runner_module.DirectionEvidence(mean_case_speedup=0.995, best_mean_case_speedup=1.0),
+        evidence=iteration_types.DirectionEvidence(mean_case_speedup=0.995, best_mean_case_speedup=1.0),
     )
 
     assert state.pinned_iterations == []
@@ -1534,7 +1544,7 @@ def test_the_loop_anchors_on_its_own_first_bench_by_default(tmp_path, monkeypatc
     loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times={})
     _attach_state(loop, workspace)
     loop.ic.baseline_wall_ms = None
-    monkeypatch.setattr(runner_module, "measure_wallclock", _port_bench({"a": 5.0, "b": 50.0}))
+    patch_iteration_name(monkeypatch, "measure_wallclock", _port_bench({"a": 5.0, "b": 50.0}))
 
     asyncio.run(loop._measure_baseline())
 
@@ -1548,7 +1558,7 @@ def test_an_injected_anchor_keeps_the_denominator_the_caller_supplied(tmp_path, 
     loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=source_case_ms)
     _attach_state(loop, workspace)
     loop.ic.baseline_wall_ms = None
-    monkeypatch.setattr(runner_module, "measure_wallclock", _port_bench({"a": 5.0, "b": 50.0}))
+    patch_iteration_name(monkeypatch, "measure_wallclock", _port_bench({"a": 5.0, "b": 50.0}))
 
     asyncio.run(loop._measure_baseline())
 
@@ -1564,7 +1574,7 @@ def test_an_injected_anchor_starts_the_keep_bar_at_the_search_start(tmp_path, mo
     loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times={"a": 10.0, "b": 100.0})
     _attach_state(loop, workspace)
     loop.ic.baseline_wall_ms = None
-    monkeypatch.setattr(runner_module, "measure_wallclock", _port_bench({"a": 5.0, "b": 50.0}))
+    patch_iteration_name(monkeypatch, "measure_wallclock", _port_bench({"a": 5.0, "b": 50.0}))
     monkeypatch.setattr(loop, "_seed_and_hydrate_run_state", lambda: None)
 
     asyncio.run(loop._measure_baseline())
@@ -1603,12 +1613,12 @@ def test_a_usable_anchor_file_is_read_whole(tmp_path):
 )
 def test_an_anchor_that_cannot_divide_a_speedup_is_refused(tmp_path, payload):
     """Every number the run publishes divides by this file, so a bad entry must cost an exit code, not a ratio."""
-    with pytest.raises(click.BadParameter):
+    with pytest.raises(InvalidOptionValue):
         _load_external_baseline(_anchor_file(tmp_path, payload))
 
 
 def test_a_missing_anchor_file_is_refused(tmp_path):
-    with pytest.raises(click.BadParameter):
+    with pytest.raises(InvalidOptionValue):
         _load_external_baseline(str(tmp_path / "absent.json"))
 
 
@@ -1617,7 +1627,7 @@ def test_the_keep_bar_is_read_off_the_incumbent_not_assumed(tmp_path, monkeypatc
     loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times={"a": 10.0, "b": 100.0})
     _attach_state(loop, workspace)
     loop.ic.baseline_wall_ms = None
-    monkeypatch.setattr(runner_module, "measure_wallclock", _port_bench({"a": 5.0, "b": 50.0}))
+    patch_iteration_name(monkeypatch, "measure_wallclock", _port_bench({"a": 5.0, "b": 50.0}))
 
     asyncio.run(loop._measure_baseline())
 
@@ -1630,7 +1640,7 @@ def test_a_resume_restores_the_bar_a_caller_anchor_put_it_at(tmp_path, monkeypat
     loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=source_case_ms)
     _attach_state(loop, workspace)
     loop.ic.baseline_wall_ms = None
-    monkeypatch.setattr(runner_module, "measure_wallclock", _port_bench({"a": 5.0, "b": 50.0}))
+    patch_iteration_name(monkeypatch, "measure_wallclock", _port_bench({"a": 5.0, "b": 50.0}))
 
     asyncio.run(loop._measure_baseline())
 

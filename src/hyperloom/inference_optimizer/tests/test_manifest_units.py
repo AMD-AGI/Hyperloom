@@ -1,13 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for ``hyperloom.inference_optimizer.session.manifest`` helpers (objective summary, dependency provenance, image detection)."""
+"""Unit tests for ``hyperloom.inference_optimizer.session.manifest`` helpers (objective summary, dependency provenance)."""
 
 from __future__ import annotations
 
 import argparse
 import os
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -88,45 +87,6 @@ class TestDescribeDep:
         monkeypatch.setenv("DEP_FALLBACK", str(tmp_path / "fallback"))
         out = mf._describe_dep("DEP_PRIMARY", "DEP_FALLBACK")
         assert out["path"] == str(tmp_path / "fallback")
-
-
-# _detect_image
-
-
-class TestDetectImage:
-    def test_returns_env_when_set(self, monkeypatch):
-        monkeypatch.setenv("HYPERLOOM_IMAGE", "registry/x:tag")
-        assert mf._detect_image() == "registry/x:tag"
-
-    def test_falls_back_to_marker_file(self, tmp_path, monkeypatch):
-        for var in ("HYPERLOOM_IMAGE", "CONTAINER_IMAGE", "IMAGE"):
-            monkeypatch.delenv(var, raising=False)
-
-        marker = tmp_path / "marker_image"
-        marker.write_text("custom/image:1\n")
-
-        original_exists = Path.exists
-
-        def fake_exists(self):
-            if str(self) in ("/etc/podinfo/image", "/etc/hyperloom-image"):
-                return True
-            return original_exists(self)
-
-        def fake_read_text(self, *args, **kwargs):
-            if str(self) == "/etc/podinfo/image":
-                return "custom/image:1"
-            return Path.read_text(self, *args, **kwargs)
-
-        monkeypatch.setattr(Path, "exists", fake_exists)
-        monkeypatch.setattr(Path, "read_text", fake_read_text)
-        assert mf._detect_image() == "custom/image:1"
-
-    def test_returns_none_when_no_signal(self, monkeypatch):
-        for var in ("HYPERLOOM_IMAGE", "CONTAINER_IMAGE", "IMAGE"):
-            monkeypatch.delenv(var, raising=False)
-
-        monkeypatch.setattr(Path, "exists", lambda self: False)
-        assert mf._detect_image() is None
 
 
 # build_manifest end-to-end

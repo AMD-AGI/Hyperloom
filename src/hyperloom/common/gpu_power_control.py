@@ -21,7 +21,6 @@ import json
 import os
 import socket
 import stat
-import subprocess  # nosec B404 - fixed amd-smi invocations.
 import time
 from pathlib import Path
 from typing import Any, Mapping, TypeGuard
@@ -30,9 +29,11 @@ from hyperloom.common.gpu_power_settings import (
     PERF_LEVEL,
     POWER_CAP_W,
     GpuPowerSettingsError,
-    _gpu_rows,
-    _value,
+    gpu_rows,
+    metric_value,
     normalize_perf_level,
+    read_amd_smi_json,
+    run_amd_smi,
 )
 
 __all__ = [
@@ -53,7 +54,6 @@ GPU_POWER_LEDGER_DIR = Path("/var/tmp/hyperloom/gpu_power_settings")  # nosec B1
 _LEDGER_DIR_MODE = 0o755
 
 _BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
-_READ_TIMEOUT_SEC = 30.0
 #: How long a lease waits for a shared lock a launch without the flag holds while it reads a record for its warning.
 _LOCK_WAIT_SEC = 1.0
 _SET_TIMEOUT_SEC = 60.0
@@ -70,30 +70,13 @@ def current_boot_id() -> str:
         return ""
 
 
-def _run_amd_smi(args: list[str], timeout: float) -> str:
-    try:
-        done = subprocess.run(["amd-smi", *args], capture_output=True, text=True, timeout=timeout, check=False)  # nosec B603 B607
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise GpuPowerSettingsError(f"amd-smi {' '.join(args)} could not run: {exc}") from exc
-    if done.returncode != 0:
-        # amd-smi prints a traceback on failure; its last line is the one that says why.
-        lines = [line.strip() for line in (done.stderr or done.stdout or "").splitlines() if line.strip()]
-        detail = (lines[-1] if lines else "")[:200]
-        raise GpuPowerSettingsError(f"amd-smi {' '.join(args)} exited {done.returncode}: {detail}")
-    return str(done.stdout or "")
-
-
 def read_resident_vram_mb() -> dict[int, float]:
     """``{gpu: used VRAM in MB}``; how a launch tells a card someone else has a model resident on."""
-    try:
-        payload = json.loads(_run_amd_smi(["metric", "--mem-usage", "--json"], _READ_TIMEOUT_SEC))
-    except ValueError as exc:
-        raise GpuPowerSettingsError("amd-smi metric --mem-usage printed no JSON") from exc
     out: dict[int, float] = {}
-    for row in _gpu_rows(payload):
+    for row in gpu_rows(read_amd_smi_json("metric", "--mem-usage")):
         mem_usage = row.get("mem_usage")
         mem = mem_usage if isinstance(mem_usage, dict) else {}
-        used = _value(mem.get("used_vram"))
+        used = metric_value(mem.get("used_vram"))
         if used is not None:
             out[row["gpu"]] = used
     return out
@@ -128,7 +111,7 @@ def restore_gpu_power_settings(originals: Mapping[int, Mapping[str, Any]]) -> li
     problems: list[str] = []
     for args in _set_commands(originals):
         try:
-            _run_amd_smi(args, _SET_TIMEOUT_SEC)
+            run_amd_smi(args, _SET_TIMEOUT_SEC)
         except GpuPowerSettingsError as exc:
             problems.append(str(exc))
     return problems
@@ -141,7 +124,7 @@ def apply_gpu_power_settings(settings: Mapping[int, Mapping[str, Any]]) -> None:
         GpuPowerSettingsError: a set failed (typically not privileged). The caller restores from its record.
     """
     for args in _set_commands(settings):
-        _run_amd_smi(args, _SET_TIMEOUT_SEC)
+        run_amd_smi(args, _SET_TIMEOUT_SEC)
 
 
 def _check_trusted(path: Path, st: os.stat_result) -> None:

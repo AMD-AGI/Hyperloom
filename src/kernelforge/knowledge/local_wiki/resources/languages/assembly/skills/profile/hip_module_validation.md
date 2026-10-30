@@ -30,7 +30,7 @@ load a standalone HIP module; inspect its actual call path.
 | Numerical stability | Use the task's frozen contract and fresh source-before/candidate/source-after evidence. Oracle error and repeat-output error are separate; use synchronized CPU-owned snapshots. |
 
 The minimal workflow example is `examples/flydsl2asm-vector-add/`.
-The optional `src/kernelforge/tests/test_assembly_aiter_moe_gpu.py` exercises an
+The optional `src/kernelforge/tests/kernel_backends/assembly/test_assembly_aiter_moe_gpu.py` exercises an
 installed W4A16 kernel, argument rebinding and a deliberately wrong SiLU edit.
 These validate integration; they are not performance-success cases or permission
 to change a campaign's tolerance.

@@ -33,7 +33,7 @@ def _args(**overrides):
         target_tput=None,
         max_hours=30,
         research_lane_capacity=999,
-        gpu_specialist_capacity="bad",
+        gpu_specialist_capacity=8,
         plateau_explore_keep_gain=1.5,
         plateau_explore_empty_streak=2,
         plateau_explore_lookback=4,
@@ -52,79 +52,6 @@ def _args(**overrides):
     return argparse.Namespace(**base)
 
 
-def test_seed_shared_state_populates_geak_and_cli_overrides(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge, geak")
-    monkeypatch.setenv("CLAW_SESSION_ID", "claw-1")
-    monkeypatch.setenv("SANDBOX_USER_ID", "user-1")
-    monkeypatch.setenv("FRAMEWORK", "vllm")
-    monkeypatch.setenv("FRAMEWORK_VERSION", "0.21.0")
-    monkeypatch.setenv("GPU_TYPE", "mi300x")
-    monkeypatch.setattr(
-        cb,
-        "_load_model_config_tags",
-        lambda _p: {
-            "architectures": ["KimiK2ForCausalLM"],
-            "model_type": "kimi_k25",
-        },
-    )
-    monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {"layers": 61})
-    monkeypatch.setattr(
-        cb,
-        "_resolve_reference_recipe",
-        lambda _args: ("--block-size 64", {"ENV_A": "1"}, "Kimi-K2.6", {}),
-    )
-
-    from hyperloom.common import visible_devices
-    from hyperloom.orchestrator.policy import gate as policy
-
-    monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 8)
-    monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 16)
-
-    state = cb._seed_shared_state(tmp_path, _args(), session_id="session-1")
-
-    assert state.session_id == "session-1"
-    assert state.claw_session_id == "claw-1"
-    assert state.sandbox_user_id == "user-1"
-    assert state.model_name == "moonshotai-Kimi-K2.6"
-    assert state.model_arch == {"layers": 61}
-    assert state.model_architectures == ["KimiK2ForCausalLM"]
-    assert state.model_type == "kimi_k25"
-    assert state.framework == "vllm"
-    assert state.framework_version == "0.21.0"
-    assert state.tp == 8
-    assert state.conc == 64
-    assert state.isl == 8192
-    assert state.osl == 1024
-    assert state.max_model_len == 13312
-    assert state.kernel_optimizer == "geak"
-    assert state.research_lane_capacity == 16
-    assert state.gpu_specialist_capacity == 8
-    assert state.plateau_overrides["explore_keep_gain_pct"] == 1.5
-    # One switch for the one phase.
-    assert state.framework_agent_phase_enabled is False
-    assert state.conc_sweep_concs == [1, 4, 8]
-    assert state.conc_sweep_total_budget_sec == 120
-    assert state.reference_server_args == "--block-size 64"
-    assert json.loads((tmp_path / "state.json").read_text())["session_id"] == "session-1"
-
-
-def test_seed_shared_state_exact_forge_records_the_forge_kernel_optimizer(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
-    monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
-    monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
-    monkeypatch.setattr(cb, "_resolve_reference_recipe", lambda _args: ("", {}, "", {}))
-
-    state = cb._seed_shared_state(tmp_path, _args(), session_id="session-forge")
-
-    assert state.kernel_optimizer == "forge"
-
-
 def _stub_seed_deps(monkeypatch, tmp_path):
     """Common monkeypatches so ``_seed_shared_state`` runs without real I/O."""
     monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
@@ -132,7 +59,7 @@ def _stub_seed_deps(monkeypatch, tmp_path):
     monkeypatch.setattr(
         cb,
         "_resolve_reference_recipe",
-        lambda _args: ("", {}, "", {}),
+        lambda _args, _framework: ("", {}, "", {}),
     )
     from hyperloom.common import visible_devices
     from hyperloom.orchestrator.policy import gate as policy
@@ -155,6 +82,8 @@ def test_seed_uses_explicit_workload_flags_over_defaults(
         tmp_path,
         _args(model="/models/Qwen2.5-7B", isl=512, osl=512, conc=64, tp=1, ep=1),
         session_id="s-explicit",
+        framework="vllm",
+        platform=cb.LaunchPlatform(compute_partition={}, gpu_power_settings={}),
     )
 
     assert state.isl == 512
@@ -184,6 +113,8 @@ def test_seed_applies_new_workload_defaults_when_unset(
             ep=None,
         ),
         session_id="s-default",
+        framework="vllm",
+        platform=cb.LaunchPlatform(compute_partition={}, gpu_power_settings={}),
     )
 
     assert state.isl == 1024
@@ -191,66 +122,6 @@ def test_seed_applies_new_workload_defaults_when_unset(
     assert state.conc == 64
     assert state.tp == 1
     assert state.ep == 1
-
-
-def test_seed_shared_state_preserves_quantized_model_identity(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    """Regression: after the quantize prelude pins ``args.model_display_name``, ``SharedState.model_name`` must use it
-    rather than the collapsed ``<...>/quantized`` path basename.
-    """
-    monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
-    monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
-    monkeypatch.setattr(
-        cb,
-        "_resolve_reference_recipe",
-        lambda _args: ("", {}, "", {}),
-    )
-
-    from hyperloom.common import visible_devices
-    from hyperloom.orchestrator.policy import gate as policy
-
-    monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 8)
-    monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 16)
-
-    quant_dir = tmp_path / "quantization" / "google-gemma-4-26B-A4B-it" / "quantized"
-    quant_dir.mkdir(parents=True)
-    args = _args(
-        model=str(quant_dir),
-        model_display_name="google-gemma-4-26B-A4B-it-quantized",
-    )
-    state = cb._seed_shared_state(tmp_path, args, session_id="s-q")
-
-    assert state.model_name == "google-gemma-4-26B-A4B-it-quantized"
-    assert state.model_name != "quantized"
-
-
-def test_seed_shared_state_falls_back_to_path_basename(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    """Without a pinned display name (the common, non-quantized path) the model name is still the plain model-path basename."""
-    monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
-    monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
-    monkeypatch.setattr(
-        cb,
-        "_resolve_reference_recipe",
-        lambda _args: ("", {}, "", {}),
-    )
-
-    from hyperloom.common import visible_devices
-    from hyperloom.orchestrator.policy import gate as policy
-
-    monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 8)
-    monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 16)
-
-    state = cb._seed_shared_state(
-        tmp_path,
-        _args(model="/models/Qwen3-32B"),
-        session_id="s-plain",
-    )
-    assert state.model_name == "Qwen3-32B"
 
 
 def test_seed_passes_raw_model_path_to_model_arch_guard(
@@ -269,7 +140,7 @@ def test_seed_passes_raw_model_path_to_model_arch_guard(
     monkeypatch.setattr(
         cb,
         "_resolve_reference_recipe",
-        lambda _args: ("", {}, "", {}),
+        lambda _args, _framework: ("", {}, "", {}),
     )
     from hyperloom.common import visible_devices
     from hyperloom.orchestrator.policy import gate as policy
@@ -281,7 +152,13 @@ def test_seed_passes_raw_model_path_to_model_arch_guard(
         "/root/.cache/huggingface/hub/models--Qwen--Qwen2.5-7B-Instruct/"
         "snapshots/a09a35458c702b33eeacc393d103063234e8bc28"
     )
-    cb._seed_shared_state(tmp_path, _args(model=raw), session_id="s-raw")
+    cb._seed_shared_state(
+        tmp_path,
+        _args(model=raw),
+        session_id="s-raw",
+        framework="vllm",
+        platform=cb.LaunchPlatform(compute_partition={}, gpu_power_settings={}),
+    )
 
     assert captured["args"][2] == raw
 
@@ -387,46 +264,6 @@ def test_read_failure_summary_and_final_summary_output(tmp_path: Path, capsys) -
     assert "never validated" in capsys.readouterr().out
 
 
-def test_resolve_reference_recipe_branches_and_final_summary(tmp_path: Path, monkeypatch, capsys) -> None:
-    import pytest
-    from hyperloom.inference_optimizer import reference_script
-
-    assert cb._resolve_reference_recipe(_args(reference_script="")) == ("", {}, "", {})
-
-    monkeypatch.setattr(
-        reference_script,
-        "parse_reference_script",
-        lambda source, framework: SimpleNamespace(
-            server_args="--tp 8",
-            envs={"A": "1"},
-            model="kimi",
-        ),
-    )
-    assert cb._resolve_reference_recipe(_args(reference_script="usable.sh")) == (
-        "--tp 8",
-        {"A": "1"},
-        "kimi",
-        {},
-    )
-
-    # Unreadable path raises SystemExit(2) instead of falling back to discovery.
-    monkeypatch.setattr(
-        reference_script,
-        "parse_reference_script",
-        lambda source, framework: (_ for _ in ()).throw(OSError("not found")),
-    )
-    with pytest.raises(SystemExit) as exc_info:
-        cb._resolve_reference_recipe(_args(reference_script="empty.sh"))
-    assert exc_info.value.code == 2
-
-    cb._print_final_summary(
-        SharedState(session_id="s2", model_name="m2", baseline_tput=0.0),
-        "done",
-        tmp_path,
-    )
-    assert "never validated" in capsys.readouterr().out
-
-
 def test_snapshot_skeleton_and_session_dir_helpers(
     tmp_path: Path,
     monkeypatch,
@@ -471,7 +308,7 @@ def test_resolve_reference_recipe_branches(tmp_path: Path, monkeypatch) -> None:
     from hyperloom.inference_optimizer import reference_script
 
     args = _args(model="/models/kimi", reference_script="")
-    assert cb._resolve_reference_recipe(args) == ("", {}, "", {})
+    assert cb._resolve_reference_recipe(args, "vllm") == ("", {}, "", {})
 
     monkeypatch.setattr(
         reference_script,
@@ -482,7 +319,7 @@ def test_resolve_reference_recipe_branches(tmp_path: Path, monkeypatch) -> None:
             model="kimi",
         ),
     )
-    assert cb._resolve_reference_recipe(_args(reference_script="usable.sh")) == (
+    assert cb._resolve_reference_recipe(_args(reference_script="usable.sh"), "vllm") == (
         "--tp 8",
         {"A": "1"},
         "kimi",
@@ -496,7 +333,7 @@ def test_resolve_reference_recipe_branches(tmp_path: Path, monkeypatch) -> None:
         lambda source, framework: (_ for _ in ()).throw(OSError("not found")),
     )
     with pytest.raises(SystemExit) as exc_info:
-        cb._resolve_reference_recipe(_args(reference_script="empty.sh"))
+        cb._resolve_reference_recipe(_args(reference_script="empty.sh"), "vllm")
     assert exc_info.value.code == 2
 
 
@@ -504,21 +341,21 @@ def test_resolve_reference_recipe_branches(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_detect_checkpoint_precision_bf16_from_torch_dtype(tmp_path):
-    from hyperloom.inference_optimizer.cli import _detect_checkpoint_precision
+    from hyperloom.inference_optimizer.cli.launch_shape import _detect_checkpoint_precision
 
     (tmp_path / "config.json").write_text('{"torch_dtype": "bfloat16"}', encoding="utf-8")
     assert _detect_checkpoint_precision(str(tmp_path)) == "bf16"
 
 
 def test_detect_checkpoint_precision_fp8_from_quant_method(tmp_path):
-    from hyperloom.inference_optimizer.cli import _detect_checkpoint_precision
+    from hyperloom.inference_optimizer.cli.launch_shape import _detect_checkpoint_precision
 
     (tmp_path / "config.json").write_text('{"quantization_config": {"quant_method": "fp8"}}', encoding="utf-8")
     assert _detect_checkpoint_precision(str(tmp_path)) == "fp8"
 
 
 def test_detect_checkpoint_precision_fallback_on_missing():
-    from hyperloom.inference_optimizer.cli import _detect_checkpoint_precision
+    from hyperloom.inference_optimizer.cli.launch_shape import _detect_checkpoint_precision
 
     assert _detect_checkpoint_precision("/nonexistent/model/path") == ""
     assert _detect_checkpoint_precision(None) == ""
@@ -528,7 +365,7 @@ def test_detect_checkpoint_precision_propagates_summary_failure(monkeypatch):
     import pytest
 
     from hyperloom.inference_optimizer import model_config_utils
-    from hyperloom.inference_optimizer.cli import _detect_checkpoint_precision
+    from hyperloom.inference_optimizer.cli.launch_shape import _detect_checkpoint_precision
 
     def summary_fails(_path):
         raise RuntimeError("summary bug")
@@ -540,7 +377,7 @@ def test_detect_checkpoint_precision_propagates_summary_failure(monkeypatch):
 
 
 def test_detect_checkpoint_precision_float8_e4m3fn(tmp_path):
-    from hyperloom.inference_optimizer.cli import _detect_checkpoint_precision
+    from hyperloom.inference_optimizer.cli.launch_shape import _detect_checkpoint_precision
 
     (tmp_path / "config.json").write_text('{"torch_dtype": "float8_e4m3fn"}', encoding="utf-8")
     assert _detect_checkpoint_precision(str(tmp_path)) == "fp8"
@@ -549,7 +386,7 @@ def test_detect_checkpoint_precision_float8_e4m3fn(tmp_path):
 def test_resolve_precision_auto_detected(tmp_path, monkeypatch):
     import argparse
 
-    from hyperloom.inference_optimizer.cli import _resolve_precision
+    from hyperloom.inference_optimizer.cli.launch_shape import _resolve_precision
 
     monkeypatch.setenv("PRECISION", "")
     (tmp_path / "config.json").write_text('{"torch_dtype": "bfloat16"}', encoding="utf-8")
@@ -561,7 +398,7 @@ def test_resolve_precision_auto_detected(tmp_path, monkeypatch):
 def test_resolve_precision_explicit_kept_with_warning(tmp_path, capsys):
     import argparse
 
-    from hyperloom.inference_optimizer.cli import _resolve_precision
+    from hyperloom.inference_optimizer.cli.launch_shape import _resolve_precision
 
     (tmp_path / "config.json").write_text('{"torch_dtype": "bfloat16"}', encoding="utf-8")
     args = argparse.Namespace(precision="fp8", model=str(tmp_path), tp=None, ep=None, conc=None)
@@ -575,7 +412,7 @@ def test_resolve_precision_resume_value_wins(tmp_path, monkeypatch):
     import argparse
     from types import SimpleNamespace
 
-    from hyperloom.inference_optimizer.cli import _resolve_precision
+    from hyperloom.inference_optimizer.cli.launch_shape import _resolve_precision
 
     monkeypatch.setenv("PRECISION", "")
     (tmp_path / "config.json").write_text('{"torch_dtype": "bfloat16"}', encoding="utf-8")

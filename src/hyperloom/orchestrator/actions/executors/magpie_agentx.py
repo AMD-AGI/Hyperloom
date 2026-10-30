@@ -128,7 +128,11 @@ def apply_launch_changes(
     Raises:
         ServerArgvInvalidError: When the composed args cannot become an argv intact.
     """
-    from hyperloom.inference_optimizer.grid_server_args import compose_server_args, dedupe_extra_server_args
+    from hyperloom.inference_optimizer.grid_server_args import (
+        compose_server_args,
+        dedupe_extra_server_args,
+        removal_option_names,
+    )
 
     agentx = benchmark["agentx"]
     if not isinstance(agentx, dict):
@@ -148,9 +152,12 @@ def apply_launch_changes(
         changes.args,
     )
     launch["replace_args"] = changes.replace_args or launch.get("replace_args", False)
-    # Magpie matches removals against the recipe, before appending our options. A local-only ablation must not
-    # become a second removal there; options present in both layers must still be removed from both.
-    recipe_removals = set(changes.remove_args) - (appended_options - recipe_options)
+    # Magpie matches removals against the recipe, before appending our options, and takes one bare long option
+    # name per entry -- so the value a spec is scoped to is dropped here, at the boundary that asks for it, and
+    # never upstream: compose_server_args above still needs the scope to keep an option the variant re-adds.
+    # A local-only ablation must not become a second removal there; options present in both layers must still
+    # be removed from both.
+    recipe_removals = set(removal_option_names(changes.remove_args)) - (appended_options - recipe_options)
     launch["remove_args"] = sorted(set(launch.get("remove_args", [])) | recipe_removals)
     env = launch.setdefault("env", {})
     for name in changes.unset_env:
@@ -159,12 +166,32 @@ def apply_launch_changes(
     launch["unset_env"] = sorted((set(launch.get("unset_env", [])) | set(changes.unset_env)) - env.keys())
 
 
+def _refuse_unrunnable_speculative_launch(benchmark: Mapping[str, Any], *, model_path: str | None) -> None:
+    """Refuse a composed AgentX launch the pinned stack has no draft kernel for.
+
+    The native path composes its launch here rather than in ``benchmark.envs``, so this is where it meets the same
+    check the env-composed launches get.
+
+    Raises:
+        SpeculativeCapabilityUnsupportedError: When the launch drafts with a kernel the stack does not ship.
+    """
+    from hyperloom.inference_optimizer.speculative_capability import refuse_unrunnable_speculative_stack
+
+    launch = (benchmark.get("agentx") or {}).get("launch_overrides") or {}
+    refuse_unrunnable_speculative_stack(
+        _inherited_server_args(list(launch.get("append_args", []))),
+        framework=str(benchmark.get("framework") or ""),
+        # launch_server.sh reads TP from the launch environment, which Magpie layers over the workload's.
+        envs={**(benchmark.get("envs") or {}), **(launch.get("env") or {})},
+        model_path=model_path or "",
+    )
+
+
 def materialize_agentx(
     config: dict[str, Any],
     output: Path,
     *,
     model_path: str | None = None,
-    inferencex_path: str | None = None,
 ) -> Path:
     """Keep the workload YAML intact while changing only the server candidate."""
     config = copy.deepcopy(config)
@@ -172,8 +199,6 @@ def materialize_agentx(
     envs = bench.setdefault("envs", {})
     if model_path and Path(model_path).is_dir():
         envs["MODEL_PATH"] = model_path
-    if inferencex_path:
-        bench["inferencex_path"] = inferencex_path
     envs["RUN_EVAL"] = "false"
     bench.pop("server_lifecycle", None)
     bench.pop("benchmark_script", None)
@@ -212,10 +237,48 @@ def bind_source_evidence(config_path: Path, patches: list[dict[str, Any]]) -> No
 
 
 def enable_profile(config_path: Path) -> None:
-    """Derive the diagnostic run without modifying the accepted YAML."""
+    """Prepare TraceLens instrumentation and fill any missing AgentX capture settings.
+
+    An explicit ``num_steps``, ``num_profiles``, ``start_seconds``,
+    ``interval_seconds``, or ``detailed_annotations`` already present in the
+    profile copy is left unchanged. A missing ``detailed_annotations`` follows the patch
+    outcome, as the fixed-sequence request body does: Magpie probes the server whenever the
+    field is true and raises when the server lacks it, so claiming it on a runtime the patch
+    did not reach ends the round before the server starts.
+    """
+    from ._profile_setup import (
+        annotations_supported,
+        apply_sglang_shape_tool,
+        patch_for_profile,
+        shape_discovery_enabled,
+    )
+
     config = yaml.safe_load(config_path.read_text(encoding=_ENCODING))
-    profile = config["benchmark"].setdefault("profiler", {}).setdefault("torch_profiler", {})
-    profile["enabled"] = True
+    bench = config["benchmark"]
+    framework = str(bench["framework"]).lower()
+    _, sitecustomize = patch_for_profile(bench.setdefault("envs", {}), framework)
+    apply_launch_changes(bench, LaunchChanges())
+    launch = bench["agentx"]["launch_overrides"]
+    server_env = launch["env"]
+    profile_env: dict[str, str] = {}
+    if sitecustomize:
+        if "PYTHONPATH" in server_env:
+            profile_env["PYTHONPATH"] = str(server_env["PYTHONPATH"])
+        if "PYTHONPATH" in launch["unset_env"]:
+            profile_env["PYTHONPATH"] = ""
+        apply_sglang_shape_tool(profile_env, shape_discovery=shape_discovery_enabled(bench))
+    if framework == "vllm":
+        name = "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS"
+        inherited = "1200" if name in launch["unset_env"] else os.environ.get(name, "1200")
+        profile_env[name] = str(max(1200, int(server_env.get(name, inherited))))
+    apply_launch_changes(bench, LaunchChanges(env=profile_env))
+    torch_profiler = bench.setdefault("profiler", {}).setdefault("torch_profiler", {})
+    torch_profiler["enabled"] = True
+    torch_profiler.setdefault("num_steps", 256)
+    torch_profiler.setdefault("num_profiles", 1)
+    torch_profiler.setdefault("start_seconds", 300)
+    torch_profiler.setdefault("interval_seconds", 900)
+    torch_profiler.setdefault("detailed_annotations", annotations_supported(bench["envs"]))
     config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_ENCODING)
 
 
@@ -282,7 +345,12 @@ def materialize_variant(
     model_path: str | None,
     base: LaunchChanges,
 ) -> Path:
-    """Compose the accepted launch and candidate, then bind its applied source."""
+    """Compose the accepted launch and candidate, then bind its applied source.
+
+    Raises:
+        SpeculativeCapabilityUnsupportedError: When the composed launch drafts with a kernel the pinned stack
+            does not ship.
+    """
     config = yaml.safe_load(config_path.read_text(encoding=_ENCODING))
     recipe_options = recipe_option_names(config_path)
     apply_launch_changes(config["benchmark"], base, recipe_options=recipe_options)
@@ -297,6 +365,7 @@ def materialize_variant(
         ),
         recipe_options=recipe_options,
     )
+    _refuse_unrunnable_speculative_launch(config["benchmark"], model_path=model_path)
     path = materialize_agentx(config, output / "config.yaml", model_path=model_path)
     bind_source_evidence(path, variant.source_patches)
     apply_native_runtime(path, variant.runtime_override, variant.overlay_pythonpath)

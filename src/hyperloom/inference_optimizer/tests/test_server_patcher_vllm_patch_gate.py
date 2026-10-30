@@ -24,21 +24,21 @@ def _write_graph_capture(tmp_path, *, markers=sp._VLLM_GRAPH_CAPTURE_MARKERS):
     return path
 
 
-def _fake_tracelens(tmp_path, versions):
-    """A TraceLens root carrying patch files for ``versions``."""
+def _fake_tracelens(monkeypatch, tmp_path, versions):
+    """Point ``$TRACELENS_ROOT`` at a root carrying patch files for ``versions``."""
     root = tmp_path / "tracelens"
     patches = sp._patch_tree(root, "vllm_patches")
     patches.mkdir(parents=True)
     for v in versions:
         (patches / f"config_vllm_v{v}.patch").write_text("dummy\n", encoding="utf-8")
-    return root
+    monkeypatch.setenv("TRACELENS_ROOT", str(root))
 
 
 def _stub_patch_path(monkeypatch, *, applied=True):
     """Route the patch path through a stub, recording the reused probe."""
     seen: dict[str, object] = {}
 
-    def _plan(arg, *, install=None):
+    def _plan(*, install):
         seen["install"] = install
         return "plan"
 
@@ -50,7 +50,7 @@ def _stub_patch_path(monkeypatch, *, applied=True):
 def test_native_version_still_takes_the_patch_path(tmp_path, monkeypatch):
     _fake_install(monkeypatch, tmp_path, "0.26.0")
     seen = _stub_patch_path(monkeypatch)
-    assert sp.ensure_vllm_patched_for_tracelens(tmp_path / "tracelens") is True
+    assert sp.ensure_vllm_patched_for_tracelens() is True
     # The probe is reused rather than repeated.
     assert seen["install"] == ("0.26.0", tmp_path)
 
@@ -58,27 +58,27 @@ def test_native_version_still_takes_the_patch_path(tmp_path, monkeypatch):
 def test_native_local_build_still_takes_the_patch_path(tmp_path, monkeypatch):
     _fake_install(monkeypatch, tmp_path, "0.27.1rc1.dev12+g23d65ff98.rocm722")
     seen = _stub_patch_path(monkeypatch)
-    assert sp.ensure_vllm_patched_for_tracelens(tmp_path / "tracelens") is True
+    assert sp.ensure_vllm_patched_for_tracelens() is True
     assert seen["install"][0] == "0.27.1rc1.dev12+g23d65ff98.rocm722"
 
 
 def test_pre_native_version_still_takes_the_patch_path(tmp_path, monkeypatch):
     _fake_install(monkeypatch, tmp_path, "0.25.0")
     seen = _stub_patch_path(monkeypatch)
-    assert sp.ensure_vllm_patched_for_tracelens(tmp_path / "tracelens") is True
+    assert sp.ensure_vllm_patched_for_tracelens() is True
     assert seen["install"] == ("0.25.0", tmp_path)
 
 
 def test_failed_apply_fails_soft(tmp_path, monkeypatch):
     _fake_install(monkeypatch, tmp_path, "0.26.0")
     _stub_patch_path(monkeypatch, applied=False)
-    assert sp.ensure_vllm_patched_for_tracelens(tmp_path / "tracelens") is False
+    assert sp.ensure_vllm_patched_for_tracelens() is False
 
 
 def test_absent_plan_fails_soft(tmp_path, monkeypatch):
     _fake_install(monkeypatch, tmp_path, "0.26.0")
-    monkeypatch.setattr(sp, "_discover_vllm_plan", lambda arg, *, install=None: None)
-    assert sp.ensure_vllm_patched_for_tracelens(tmp_path / "tracelens") is False
+    monkeypatch.setattr(sp, "_discover_vllm_plan", lambda *, install: None)
+    assert sp.ensure_vllm_patched_for_tracelens() is False
 
 
 def test_undiscoverable_vllm_fails_soft(monkeypatch):
@@ -87,9 +87,9 @@ def test_undiscoverable_vllm_fails_soft(monkeypatch):
     monkeypatch.setattr(
         sp,
         "_discover_vllm_plan",
-        lambda arg, *, install=None: calls.append("plan"),
+        lambda *, install: calls.append("plan"),
     )
-    assert sp.ensure_vllm_patched_for_tracelens(None) is False
+    assert sp.ensure_vllm_patched_for_tracelens() is False
     assert calls == []
 
 
@@ -97,8 +97,8 @@ def test_stock_native_install_is_not_mistaken_for_patched(tmp_path, monkeypatch)
     # The regression: a stock 0.28 carries both config markers natively, so the base sentinel alone says "already
     # patched" and the patch gets skipped.
     _fake_install(monkeypatch, tmp_path, "0.28.1")
-    root = _fake_tracelens(tmp_path, ["0.25.0", "0.28.0"])
-    plan = sp._discover_vllm_plan(root, install=("0.28.1", tmp_path))
+    _fake_tracelens(monkeypatch, tmp_path, ["0.25.0", "0.28.0"])
+    plan = sp._discover_vllm_plan(install=("0.28.1", tmp_path))
     assert plan is not None
     assert sp._markers_present(plan.sentinel_file, plan.sentinel_text) is True
     assert plan.extra_sentinels != ()
@@ -108,8 +108,8 @@ def test_stock_native_install_is_not_mistaken_for_patched(tmp_path, monkeypatch)
 def test_patched_native_install_is_detected(tmp_path, monkeypatch):
     _fake_install(monkeypatch, tmp_path, "0.28.1")
     _write_graph_capture(tmp_path)
-    root = _fake_tracelens(tmp_path, ["0.28.0"])
-    plan = sp._discover_vllm_plan(root, install=("0.28.1", tmp_path))
+    _fake_tracelens(monkeypatch, tmp_path, ["0.28.0"])
+    plan = sp._discover_vllm_plan(install=("0.28.1", tmp_path))
     assert plan is not None
     assert sp._is_patched(plan) is True
 
@@ -118,8 +118,8 @@ def test_partial_graph_capture_module_is_not_patched(tmp_path, monkeypatch):
     # A module present but missing a marker is an incomplete apply, not a patch.
     _fake_install(monkeypatch, tmp_path, "0.28.1")
     _write_graph_capture(tmp_path, markers=("graph_capture_profiler",))
-    root = _fake_tracelens(tmp_path, ["0.28.0"])
-    plan = sp._discover_vllm_plan(root, install=("0.28.1", tmp_path))
+    _fake_tracelens(monkeypatch, tmp_path, ["0.28.0"])
+    plan = sp._discover_vllm_plan(install=("0.28.1", tmp_path))
     assert plan is not None
     assert sp._is_patched(plan) is False
 
@@ -128,8 +128,8 @@ def test_pre_native_plan_keeps_the_config_fields_as_proof(tmp_path, monkeypatch)
     # Below 0.26 the patch writes the config fields, so they do prove it landed and no graph-capture module is
     # expected.
     _fake_install(monkeypatch, tmp_path, "0.25.0")
-    root = _fake_tracelens(tmp_path, ["0.25.0"])
-    plan = sp._discover_vllm_plan(root, install=("0.25.0", tmp_path))
+    _fake_tracelens(monkeypatch, tmp_path, ["0.25.0"])
+    plan = sp._discover_vllm_plan(install=("0.25.0", tmp_path))
     assert plan is not None
     assert plan.extra_sentinels == ()
     assert sp._is_patched(plan) is True

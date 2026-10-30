@@ -124,15 +124,13 @@ def _summary_line(breakdown: dict) -> str:
         str: Single-line summary with session id, stop reason, validated gain,
         the shape of the session's record, and how it closed.
     """
-    sess = (breakdown.get("metadata") or {}).get("session") or {}
-    outcome = breakdown.get("outcome") or {}
+    metadata = breakdown["metadata"]
+    sess = metadata.get("session") or {}
+    outcome = breakdown["outcome"]
     final = outcome.get("final") or {}
     validation = outcome.get("validation") or {}
     by_source = (validation.get("attribution") or {}).get("by_source") or {}
     geak_n = int((((by_source.get("kernel") or {}).get("by_backend") or {}).get("geak") or {}).get("keep_count") or 0)
-    timeline = breakdown.get("timeline") or []
-    close = breakdown.get("close") or {}
-    warnings = (breakdown.get("metadata") or {}).get("warnings") or []
     gain = final.get("gain_pct")
     gain_text = f"{gain:.2f}%" if isinstance(gain, (int, float)) and not math.isnan(gain) else "n/a"
     return (
@@ -142,9 +140,9 @@ def _summary_line(breakdown: dict) -> str:
         f"gain_validated={gain_text}  "
         f"geak={geak_n}  "
         f"adopted={int(validation.get('adoption_count') or 0)}  "
-        f"events={len(timeline)}  "
-        f"close={close.get('status') or '?'}  "
-        f"warnings={len(warnings)}"
+        f"events={len(breakdown['timeline'])}  "
+        f"close={breakdown['close'].get('status') or '?'}  "
+        f"warnings={len(metadata['warnings'])}"
     )
 
 

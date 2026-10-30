@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.inference_optimizer import roofline_ceiling as rc
+from hyperloom.inference_optimizer import roofline_snapshot as rs
 
 
 def _model(tmp_path: Path, *, transformer: dict | None = None, vae: dict | None = None) -> str:
@@ -190,7 +191,7 @@ def test_diffusion_compute_ceiling_sums_linear_and_attention_flops():
     )
     linear = 2.0 * kw["dit_params"] * kw["latent_tokens"]
     attn = 4.0 * kw["num_layers"] * kw["latent_tokens"] ** 2 * kw["hidden_size"]
-    peak = rc._resolve_achievable_tflops("mi300x", "bf16") * 1e12
+    peak = rc._compute_peak("mi300x", "bf16")[0] * 1e12
     assert _diffusion_compute_img_per_sec(**kw) == pytest.approx(peak / (kw["num_steps"] * (linear + attn)))
 
 
@@ -286,21 +287,16 @@ def test_diffusion_step_count_and_resolution_come_from_the_baseline_envs(tmp_pat
     assert rc._read_diffusion_resolution(st) == (1024, 1024)
 
 
-def test_diffusion_geometry_accepts_the_custom_workload_aliases(tmp_path):
-    """An operator-supplied diffusion workload feeds the same ceiling."""
-    import yaml
-    from types import SimpleNamespace
-
-    cfg = tmp_path / "b.yaml"
-    cfg.write_text(
-        yaml.safe_dump(
-            {"benchmark": {"envs": {"CUSTOM_NUM_STEPS": "30", "CUSTOM_HEIGHT": "512", "CUSTOM_WIDTH": "768"}}}
-        ),
-        encoding="utf-8",
-    )
-    st = SimpleNamespace(baseline_config_path=str(cfg))
-    assert rc._read_diffusion_num_steps(st) == 30
-    assert rc._read_diffusion_resolution(st) == (512, 768)
+def test_custom_workload_gets_no_ceiling(tmp_path):
+    """Only xDiT has a ceiling model; another scriptable workload must not borrow the LLM one."""
+    st = _xdit_state(tmp_path, _flux_like(tmp_path))
+    st.framework = "custom"
+    cfg = Path(st.baseline_config_path)
+    cfg.write_text(cfg.read_text(encoding="utf-8").replace("framework: xdit", "framework: custom"), encoding="utf-8")
+    assert rc.compute_roofline_breakdown_from_state(st) == rc._EMPTY_BREAKDOWN
+    snap = {}
+    rs.attach_perfmodel_breakdown(snap, st, arm="baseline")
+    assert snap == {}
 
 
 def test_diffusion_breakdown_binds_on_the_slower_of_its_two_ceilings(tmp_path):

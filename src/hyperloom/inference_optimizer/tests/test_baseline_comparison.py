@@ -17,7 +17,7 @@ from hyperloom.inference_optimizer.baseline_comparison.types import TargetAnalys
 def test_shared_helpers_are_exported():
     from hyperloom.inference_optimizer.baseline_comparison import inferencex_client, target_analyzer
 
-    assert {"persist_summary", "clear_competitor_target", "to_inferencex_name"} <= set(target_analyzer.__all__)
+    assert {"clear_competitor_target", "to_inferencex_name"} <= set(target_analyzer.__all__)
     assert "normalize_benchmark_id" in inferencex_client.__all__
     assert target_analyzer.normalize_benchmark_id is inferencex_client.normalize_benchmark_id
 
@@ -132,7 +132,7 @@ def _patch_fetch_rows(monkeypatch, rows: list[dict[str, Any]] | None) -> None:
 def test_analyze_happy_path_writes_files(tmp_path: Path, monkeypatch):
     _patch_fetch_rows(monkeypatch, _make_rows())
 
-    from hyperloom.inference_optimizer.baseline_comparison import analyze
+    from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import analyze
 
     summary = analyze(
         session_dir=tmp_path,
@@ -187,7 +187,7 @@ def test_analyze_excludes_disagg_and_multinode_from_best(tmp_path: Path, monkeyp
     rows.append(disagg)
     _patch_fetch_rows(monkeypatch, rows)
 
-    from hyperloom.inference_optimizer.baseline_comparison import analyze
+    from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import analyze
 
     summary = analyze(
         session_dir=tmp_path,
@@ -204,7 +204,7 @@ def test_analyze_writes_measured_advisory_target(tmp_path: Path, monkeypatch):
     """On success, a measured ``competitor_target.json`` (source = API URL) is written so the EXPLORE advisory gap is driven by real InferenceX data."""
     _patch_fetch_rows(monkeypatch, _make_rows())
 
-    from hyperloom.inference_optimizer.baseline_comparison import analyze
+    from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import analyze
     from hyperloom.inference_optimizer.baseline_comparison import research_hints
 
     summary = analyze(
@@ -228,7 +228,7 @@ def test_analyze_writes_measured_advisory_target(tmp_path: Path, monkeypatch):
 def test_analyze_mapping_miss_writes_skipped_summary(tmp_path, monkeypatch):
     _patch_fetch_rows(monkeypatch, _make_rows())
 
-    from hyperloom.inference_optimizer.baseline_comparison import analyze
+    from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import analyze
 
     summary = analyze(
         session_dir=tmp_path,
@@ -253,7 +253,7 @@ def test_analyze_mapping_miss_writes_skipped_summary(tmp_path, monkeypatch):
 
 def test_analyze_no_target_gpu_writes_marker(tmp_path):
     """``compare_against_gpu=""`` short-circuits and persists a marker JSON."""
-    from hyperloom.inference_optimizer.baseline_comparison import analyze
+    from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import analyze
 
     summary = analyze(
         session_dir=tmp_path,
@@ -273,7 +273,7 @@ def test_analyze_unsupported_target_gpu(tmp_path, monkeypatch):
     """A GPU InferenceX has no data for → ``no_match`` / ``unsupported_target_gpu``."""
     _patch_fetch_rows(monkeypatch, _make_rows())
 
-    from hyperloom.inference_optimizer.baseline_comparison import analyze
+    from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import analyze
 
     summary = analyze(
         session_dir=tmp_path,
@@ -295,7 +295,7 @@ def test_analyze_dimension_mismatch(tmp_path, monkeypatch):
     """GPU present but no row matches the run's isl/osl → ``dimension_mismatch``."""
     _patch_fetch_rows(monkeypatch, _make_rows())
 
-    from hyperloom.inference_optimizer.baseline_comparison import analyze
+    from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import analyze
 
     summary = analyze(
         session_dir=tmp_path,
@@ -314,7 +314,7 @@ def test_analyze_precision_mismatch(tmp_path, monkeypatch):
     # this shape.
     _patch_fetch_rows(monkeypatch, _make_rows())
 
-    from hyperloom.inference_optimizer.baseline_comparison import analyze
+    from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import analyze
 
     summary = analyze(
         session_dir=tmp_path,
@@ -336,7 +336,7 @@ def test_analyze_fetch_error(tmp_path, monkeypatch):
     """API fetch failure (``fetch_rows`` returns ``None``) → ``fetch_error``."""
     _patch_fetch_rows(monkeypatch, None)
 
-    from hyperloom.inference_optimizer.baseline_comparison import analyze
+    from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import analyze
 
     summary = analyze(
         session_dir=tmp_path,
@@ -369,7 +369,7 @@ def test_analyze_no_match_clears_stale_competitor_target(tmp_path, monkeypatch):
     assert session_paths.competitor_target_json(tmp_path).exists()
 
     _patch_fetch_rows(monkeypatch, None)  # force fetch_error / no_match
-    from hyperloom.inference_optimizer.baseline_comparison import analyze
+    from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import analyze
 
     summary = analyze(
         session_dir=tmp_path,
@@ -403,7 +403,7 @@ def test_analyze_ok_write_failure_clears_stale_competitor_target(tmp_path, monke
         lambda *_args, **_kwargs: False,
     )
 
-    from hyperloom.inference_optimizer.baseline_comparison import analyze
+    from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import analyze
 
     summary = analyze(
         session_dir=tmp_path,
@@ -420,7 +420,7 @@ def test_analyze_no_inferencex_data(tmp_path, monkeypatch):
     """Empty API result (``fetch_rows`` returns ``[]``) → ``no_inferencex_data``."""
     _patch_fetch_rows(monkeypatch, [])
 
-    from hyperloom.inference_optimizer.baseline_comparison import analyze
+    from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import analyze
 
     summary = analyze(
         session_dir=tmp_path,
@@ -470,7 +470,7 @@ def _agentic_row(benchmark_id, *, tput=2643.69293, conc=1, **overrides):
 
 
 def _analyze_agentx(tmp_path, **kwargs):
-    from hyperloom.inference_optimizer.baseline_comparison import analyze
+    from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import analyze
 
     request = {
         "model_path": "GLM-5.2",

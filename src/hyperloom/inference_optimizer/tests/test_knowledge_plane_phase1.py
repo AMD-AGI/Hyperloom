@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import argparse
 from pathlib import Path
 
 import pytest
@@ -22,15 +21,10 @@ from hyperloom.orchestrator.knowledge.recipe_kb import (
 )
 
 
-def _args(**kwargs) -> argparse.Namespace:
-    return argparse.Namespace(degraded_kb=False, **kwargs)
-
-
 def test_config_defaults_local_under_user_data_path() -> None:
     config = KnowledgeConfig.from_env({"USER_DATA_PATH": "/data/user"})
     assert config.mode is KnowledgeStoreMode.LOCAL
     assert config.local_root == "/data/user/knowledge"
-    assert config.backend == "local-json"
 
 
 @pytest.mark.parametrize("mode", ["REMOTE", "hybrid"])
@@ -77,7 +71,7 @@ def test_old_gbrain_credentials_do_not_satisfy_recipe_remote() -> None:
         )
 
 
-def test_remote_config_uses_kb_store_backend_and_keeps_optional_gbrain() -> None:
+def test_remote_config_accepts_kb_store_credentials_and_keeps_optional_gbrain() -> None:
     config = KnowledgeConfig.from_env(
         {
             "KNOWLEDGE_STORE_MODE": "remote",
@@ -87,8 +81,7 @@ def test_remote_config_uses_kb_store_backend_and_keeps_optional_gbrain() -> None
             "GBRAIN_TOKEN": "gbrain-token",
         }
     )
-    assert config.backend == "kb-store"
-    assert config.kb_store_url == "https://kb.test"
+    assert config.mode is KnowledgeStoreMode.REMOTE
 
 
 def test_local_dispatcher_ignores_ambient_remote_credentials(
@@ -99,9 +92,10 @@ def test_local_dispatcher_ignores_ambient_remote_credentials(
     monkeypatch.setenv("KNOWLEDGE_LOCAL_ROOT", str(tmp_path / "knowledge"))
     monkeypatch.setenv("KB_STORE_URL", "https://ambient.invalid")
     monkeypatch.setenv("KB_STORE_TOKEN", "ambient-token")
-    recipe_kb = cli_kb._build_recipe_kb_dispatcher(_args())
+    recipe_kb = cli_kb._build_recipe_kb_dispatcher()
     assert isinstance(recipe_kb.local, LocalRecipeStore)
     assert recipe_kb.mode == "local"
+    assert recipe_kb.backend_name == "local-json"
 
 
 def test_remote_dispatcher_is_none_without_creating_local_root(
@@ -113,7 +107,7 @@ def test_remote_dispatcher_is_none_without_creating_local_root(
     monkeypatch.setenv("KNOWLEDGE_LOCAL_ROOT", str(root))
     monkeypatch.setenv("KB_STORE_URL", "https://kb.test")
     monkeypatch.setenv("KB_STORE_TOKEN", "token")
-    assert cli_kb._build_recipe_kb_dispatcher(_args()) is None
+    assert cli_kb._build_recipe_kb_dispatcher() is None
     assert not root.exists()
 
 

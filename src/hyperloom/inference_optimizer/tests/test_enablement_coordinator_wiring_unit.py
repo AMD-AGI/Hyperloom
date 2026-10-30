@@ -14,6 +14,7 @@ import pytest
 
 from hyperloom.agents.framework.sources.pr_monitor import PRMonitorError
 from hyperloom.common.bringup import BootObservation, Excerpt, LadderStage, TerminalFrame
+from hyperloom.common.deadline import Deadline
 from hyperloom.common.failure_signature import FailureSignature
 from hyperloom.orchestrator.bringup import observation_summary
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
@@ -27,7 +28,6 @@ from hyperloom.orchestrator.actions.stop_attribution import SESSION_TIME_EXHAUST
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.proposals import PendingProposal
 from hyperloom.orchestrator.loop._baseline_failures import _authorable_launch_log
-from hyperloom.orchestrator.enablement.lane import bind_integrate_to_lane
 from hyperloom.orchestrator.enablement.params import EnablementParams
 
 from .conftest import make_coordinator
@@ -118,13 +118,13 @@ def test_enablement_discovery_honors_pr_monitor_gate(
     monkeypatch.setattr(sources, "enumerate_candidates", lambda request: seen.append(request) or [])
     fake = _enqueue_self(tmp_path)
     fake.knowledge_plane = types.SimpleNamespace(pr_monitor_enabled=enabled)
-    request = types.SimpleNamespace(max_search_candidates=5)
     plan = types.SimpleNamespace(
         repos=("https://github.com/sgl-project/sglang.git",),
         keywords=("scheduler",),
     )
 
-    assert fake.enablement_params._discover_enablement_candidate_refs(request, plan) == ()
+    deadline = Deadline.after(60)
+    assert fake.enablement_params._discover_enablement_candidate_refs(plan, deadline=deadline) == ()
     assert seen[0].search_modes == expected_modes
 
 
@@ -190,10 +190,9 @@ def test_build_params_feeds_ranked_candidate_refs_into_mandate(monkeypatch, tmp_
     from hyperloom.agents.framework.models import Candidate
 
     cands = [
-        Candidate(ref="PR:1", repo="r", title="minor perf tweak", html_url="http://x/1"),
+        Candidate(ref="PR:1", title="minor perf tweak", html_url="http://x/1"),
         Candidate(
             ref="PR:2",
-            repo="r",
             title="Add support to enable GLM architecture on ROCm",
             html_url="http://x/2",
         ),
@@ -349,7 +348,7 @@ async def test_enqueue_dispatches_when_baseline_unrunnable(monkeypatch, tmp_path
     rows = await _queued_of_kind(fake, "specialist")
     assert [r.task_id for r in rows] == [tid]
     assert rows[0].params["enablement"] is True
-    assert rows[0].params["enablement_attempt"] == 0
+    assert "RETRY" not in rows[0].params["notes"]
 
 
 @pytest.mark.asyncio
@@ -407,8 +406,8 @@ async def test_enqueue_retries_with_next_attempt_after_revert(monkeypatch, tmp_p
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
     cands = [
-        Candidate(ref="PR:1", repo="r", title="enable GLM arch on ROCm", html_url="http://x/1"),
-        Candidate(ref="PR:2", repo="r", title="add GLM support fix", html_url="http://x/2"),
+        Candidate(ref="PR:1", title="enable GLM arch on ROCm", html_url="http://x/1"),
+        Candidate(ref="PR:2", title="add GLM support fix", html_url="http://x/2"),
     ]
     _stub_enumerate(monkeypatch, cands)
     fake = _enqueue_self(tmp_path)
@@ -426,10 +425,8 @@ async def test_enqueue_retries_with_next_attempt_after_revert(monkeypatch, tmp_p
     tid2 = await fake.enablement_lane._maybe_enqueue_enablement_specialist()
     assert tid2 and tid2 != tid1
     second = await fake.tasks.get(tid2)
-    # The settled failed round bumps the dispatch ordinal from 0 -> 1.
-    assert second.params["enablement_attempt"] == 1
-    # Retry mandate flags the prior revert.
-    assert "RETRY" in second.params["notes"]
+    # The settled failed round bumps the dispatch ordinal from 0 -> 1, so the retry mandate flags the prior revert.
+    assert "RETRY (1 prior round(s)" in second.params["notes"]
 
 
 @pytest.mark.asyncio
@@ -460,22 +457,12 @@ async def test_the_repair_pass_ends_a_round_whose_holder_finished_silently(monke
     """
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
-    from hyperloom.orchestrator.bringup.reconcile import ReconcileLinks, Reconciler, ReconcileStores
-    from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager, SqliteLeaseBackend
-
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
     _stub_enumerate(monkeypatch, [])
     fake = _enqueue_self(tmp_path)
     await _hold_round(fake, "spec-stuck", holder_state="succeeded")
-    reconciler = Reconciler(
-        ReconcileStores(
-            rounds=fake.rounds, tasks=fake.tasks, locks=ResourceLockManager(SqliteLeaseBackend(fake.rounds.db))
-        ),
-        fake.shared_state,
-        links=ReconcileLinks(proposals=lambda: fake.state.pending_proposals),
-    )
 
-    await reconciler.run(time.time() + 3600.0)
+    await fake.reconciler.run(time.time() + 3600.0)
 
     settled = await fake.rounds.get("enablement-spec-stuck")
     assert settled.state == "settled"
@@ -769,6 +756,24 @@ async def test_rearm_records_the_refused_setup_commands_of_the_round_that_failed
 
 
 @pytest.mark.asyncio
+async def test_rearm_records_the_env_reads_an_inert_round_left_unset(tmp_path):
+    """The round benched as though its patch were absent; the names are where to look next."""
+    fake = _enqueue_self(tmp_path, enablement_origin="eval")
+    await _hold_round(fake, "spec-1")
+    await fake.enablement_lane.maybe_rearm_enablement(
+        {
+            "status": "reverted",
+            "enablement": True,
+            "specialist_task_id": "spec-1",
+            "runnable": False,
+            "inert_round_env_reads": ["HL_FUSE_RMSNORM"],
+        }
+    )
+    assert fake.shared_state.enablement.last_inert_round_env_reads == ["HL_FUSE_RMSNORM"]
+    assert fake.shared_state.enablement.succeeded is False
+
+
+@pytest.mark.asyncio
 async def test_rearm_kept_replaces_the_observations_a_probe_could_not_make(tmp_path):
     """A KEEP that observed nothing must not inherit the previous KEEP's map.
 
@@ -958,30 +963,6 @@ async def test_a_late_failure_from_an_ended_round_does_not_charge_the_next_one(t
     assert held is not None and held.round_id == "enablement-spec-new"
 
 
-def _bind(fake, **params):
-    bind_integrate_to_lane(params, fake.shared_state, session_dir=Path(fake.session_dir))
-    return params
-
-
-def test_an_integrate_executing_in_enablement_is_graded_as_the_round(tmp_path):
-    """An integrate the lane did not dispatch still carries the round's context.
-
-    Without it the executor grades the patch on a throughput ENABLEMENT never
-    measured and reverts a boot that advanced.
-    """
-    fake = _enqueue_self(tmp_path)
-    fake.shared_state.enablement.launch_observation_path = "/s/reports/bringup/round-abc-000.json"
-    fake.shared_state.enablement.setup_commands = ["pip install deep_gemm==2.1"]
-
-    params = _bind(fake, specialist_task_id="spec-llm", extra_envs={"SGLANG_X": "1"})
-
-    assert params["enablement"] is True
-    assert params["enablement_before_observation_path"] == "/s/reports/bringup/round-abc-000.json"
-    assert params["enablement_setup_commands"] == ["pip install deep_gemm==2.1"]
-    assert FailureSignature.from_dict(params["enablement_failure_signature"]).kind == "missing_model_arch"
-    assert params["extra_envs"] == {"SGLANG_X": "1"}
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("origin", "ends_lane"), [("", True), ("eval", False)], ids=["boot", "eval"])
 async def test_an_anchor_reached_by_another_route_ends_a_boot_lane(monkeypatch, tmp_path, origin, ends_lane):
@@ -1002,41 +983,6 @@ async def test_an_anchor_reached_by_another_route_ends_a_boot_lane(monkeypatch, 
     assert fake.shared_state.baseline_tput == 2245.0
     assert fake.shared_state.enablement.succeeded is ends_lane
     assert (await fake.rounds.held() is None) is ends_lane
-    assert ("enablement" in _bind(fake, specialist_task_id="spec-perf")) is not ends_lane
-
-
-def test_the_lanes_own_integrate_keeps_the_context_its_specialist_carried(tmp_path):
-    fake = _enqueue_self(tmp_path)
-    fake.shared_state.enablement.launch_observation_path = "/s/reports/bringup/round-new.json"
-
-    params = _bind(fake, enablement=True, enablement_before_observation_path="/s/reports/bringup/round-old.json")
-
-    assert params["enablement_before_observation_path"] == "/s/reports/bringup/round-old.json"
-    assert "enablement_failure_signature" not in params
-
-
-def test_an_integrate_outside_enablement_is_not_an_enablement_round(tmp_path):
-    fake = _enqueue_self(tmp_path, phase="FRAMEWORK_AGENT", baseline_tput=100.0)
-
-    assert "enablement" not in _bind(fake, specialist_task_id="spec-llm")
-
-
-@pytest.mark.parametrize("closed", ["enablement_succeeded", "enablement_validation_pending"])
-def test_a_closed_lane_takes_no_round_from_an_integrate_that_was_tagged_earlier(tmp_path, closed):
-    """The round was admitted when the lane was open; it executes after the lane moved on."""
-    fake = _enqueue_self(tmp_path, **{closed: True})
-
-    params = _bind(
-        fake,
-        specialist_task_id="spec-late",
-        enablement=True,
-        enablement_failure_signature={"kind": "missing_model_arch"},
-        enablement_before_observation_path="/s/reports/bringup/round-old.json",
-        enablement_setup_commands=["pip install x"],
-        extra_envs={"A": "1"},
-    )
-
-    assert params == {"specialist_task_id": "spec-late", "extra_envs": {"A": "1"}}
 
 
 @pytest.mark.asyncio
@@ -1151,6 +1097,34 @@ def test_build_params_tells_the_next_round_which_setup_commands_were_refused(mon
     assert params is not None
     assert "SETUP COMMAND REFUSED" in params["notes"]
     assert "ln -sf /a /b" in params["notes"]
+
+
+def test_build_params_hands_the_next_round_the_env_reads_of_the_inert_one(monkeypatch, tmp_path):
+    """Without the names the next round repeats the patch and hits the same wall."""
+    _stub_enumerate(monkeypatch, [])
+    fake = _enqueue_self(tmp_path)
+    fake.shared_state.enablement.last_inert_round_env_reads = ["HL_FUSE_RMSNORM"]
+    params = fake.enablement_params.build_enablement_specialist_params(_MISSING_ARCH_LOG)
+    assert params is not None
+    assert "POSSIBLE CAUSE OF THE UNCHANGED BOOT" in params["notes"]
+    assert "HL_FUSE_RMSNORM" in params["notes"]
+    assert "not a finding" in params["notes"]
+
+
+def test_the_inert_lead_claims_only_what_the_gate_observed(monkeypatch, tmp_path):
+    """The gate never measures a throughput for a boot that did not serve.
+
+    The note carries the gate's own observation -- no serving, the same wall as
+    the boot before it -- so the next round is not sent after a measurement
+    that was never taken.
+    """
+    _stub_enumerate(monkeypatch, [])
+    fake = _enqueue_self(tmp_path)
+    fake.shared_state.enablement.last_inert_round_env_reads = ["HL_FUSE_RMSNORM"]
+    params = fake.enablement_params.build_enablement_specialist_params(_MISSING_ARCH_LOG)
+    assert params is not None
+    assert "same throughput as the baseline" not in params["notes"]
+    assert "same wall with the same failure" in params["notes"]
 
 
 def test_build_params_notes_prior_patches_for_mandate(monkeypatch, tmp_path):

@@ -47,12 +47,7 @@ _PROBE_SCRIPT = (
 )
 
 
-def resolve_keep_interpreter(
-    override: Mapping[str, Any] | None,
-    *,
-    backend_name: str,
-    backend_interpreter: str = "",
-) -> str:
+def resolve_keep_interpreter(override: Mapping[str, Any] | None, *, backend_interpreter: str = "") -> str:
     """Return the interpreter the graded server ran, or ``""``.
 
     Within the override the priority is ``runtime_python_exe`` then
@@ -65,8 +60,6 @@ def resolve_keep_interpreter(
 
     Args:
         override: The runtime override launch bound, if any.
-        backend_name: The active benchmark backend, retained so a backend that
-            cannot name an interpreter resolves to ``""`` rather than guessing.
         backend_interpreter: The interpreter that launched the graded server
             when the override names none. The caller resolves it -- the serving
             framework's interpreter, which on a split-venv host is not the
@@ -76,7 +69,7 @@ def resolve_keep_interpreter(
     resolved = resolved or str((override or {}).get("framework_python") or "").strip()
     if resolved:
         return resolved
-    return str(backend_interpreter or "").strip() if str(backend_name or "").strip() else ""
+    return str(backend_interpreter or "").strip()
 
 
 def keep_assertion_packages(
@@ -290,11 +283,7 @@ def probe_keep_environment(
         fallback = resolve_benchmark_interpreter()
     else:
         fallback = _resolve_probe_python(framework, env=graded_env)
-    interpreter = resolve_keep_interpreter(
-        override,
-        backend_name=backend,
-        backend_interpreter=fallback,
-    )
+    interpreter = resolve_keep_interpreter(override, backend_interpreter=fallback)
     provision_versions = (
         None if provision_result is None else getattr(provision_result, "installed_versions", None) or {}
     )

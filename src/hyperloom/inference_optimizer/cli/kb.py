@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
 import sys
@@ -15,11 +14,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from hyperloom.common.io import JsonLineFormat, append_jsonl
-from hyperloom.orchestrator.knowledge.recipe_kb_t0 import run_t0_anchor
+from hyperloom.orchestrator.knowledge.recipe_kb_t0 import T0AnchorRequest, run_t0_anchor
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 if TYPE_CHECKING:  # pragma: no cover - type-only import
     from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
+    from hyperloom.orchestrator.knowledge.recipe_kb import RecipeKB
 
 
 log = logging.getLogger(__name__)
@@ -33,14 +33,8 @@ def _publish_section_dirs(session_dir: Path, warm_start_dir: Path) -> None:
     os.environ["KB_WARM_START_DIR"] = str(warm_start_dir)
 
 
-def _attach_recipe_audit_hook(kb: Any, session_dir: Path | None) -> None:
+def _attach_recipe_audit_hook(kb: "RecipeKB", session_dir: Path) -> None:
     """Wire ``RecipeKB.audit_hook`` to append local Recipe trace events."""
-    if session_dir is None:
-        return
-    target = getattr(kb, "_inner", kb)
-    if not hasattr(target, "audit_hook"):
-        return
-
     from datetime import datetime, timezone
 
     from ..breakdown.recorder import warm_start_event
@@ -63,30 +57,21 @@ def _attach_recipe_audit_hook(kb: Any, session_dir: Path | None) -> None:
         # above so a failed audit write does not cost the event its row.
         warm_start_event.record_read(session_dir, event)
 
-    target.audit_hook = _hook
+    kb.audit_hook = _hook
 
 
-def _build_recipe_kb_dispatcher(
-    args: argparse.Namespace,
-) -> Any:
+def _build_recipe_kb_dispatcher() -> Any:
     """Build the local RecipeKB dispatcher, or validate remote mode."""
     from hyperloom.orchestrator.knowledge.config import KnowledgeConfig, KnowledgeStoreMode
     from hyperloom.orchestrator.knowledge.recipe_kb import LocalRecipeStore, RecipeKB
 
-    if bool(getattr(args, "degraded_kb", False)):
-        return None
     config = KnowledgeConfig.from_env()
 
     if config.mode is KnowledgeStoreMode.REMOTE:
         return None
 
     # No remote client is constructed in local mode, even when ambient KB Store or GBrain credentials are present.
-    store: Any = LocalRecipeStore(root=Path(config.local_root))
-    kb = RecipeKB(
-        local=store,
-        mode=config.mode.value,
-        backend_name=config.backend,
-    )
+    kb = RecipeKB(local=LocalRecipeStore(root=Path(config.local_root)))
     kb.knowledge_config = config
     return kb
 
@@ -121,7 +106,7 @@ def _bootstrap_recipe_kb(
         print("Recipe KB       : DISABLED (--degraded-kb)")
         return None
 
-    kb = _build_recipe_kb_dispatcher(args)
+    kb = _build_recipe_kb_dispatcher()
     state = SharedState.load_or_init(session_dir)
     workload = (
         state.model_name
@@ -143,8 +128,8 @@ def _bootstrap_recipe_kb(
     try:
         if kb is None:
             from hyperloom.orchestrator.knowledge.remote_recipe import (
-                HyperloomRemoteKB,
                 RecipeScope,
+                RemoteRecipeClient,
                 RemoteRecipeValidationError,
                 RemoteWarmRecipeAdapter,
             )
@@ -159,7 +144,7 @@ def _bootstrap_recipe_kb(
                 )
                 args.kb_degraded_reason = getattr(args, "kb_degraded_reason", None) or "recipe_scope_invalid"
                 return kb
-            t0_kb = RemoteWarmRecipeAdapter(HyperloomRemoteKB.from_env(), warm_start_dir, recipe_scope)
+            t0_kb = RemoteWarmRecipeAdapter(RemoteRecipeClient.from_env(), warm_start_dir, recipe_scope)
             _publish_section_dirs(session_dir, warm_start_dir)
         else:
             _attach_recipe_audit_hook(kb, session_dir)
@@ -167,19 +152,20 @@ def _bootstrap_recipe_kb(
         run_t0_anchor(
             t0_kb,
             state,
-            workload=workload,
-            hw=hw,
-            image_digest=image_digest,
-            stack_fingerprint=stack_fp,
-            extra_attrs=extra_attrs,
-            resume=resume,
+            T0AnchorRequest(
+                workload=workload,
+                hw=hw,
+                image_digest=image_digest,
+                stack_fingerprint=stack_fp,
+                extra_attrs=extra_attrs,
+                resume=resume,
+            ),
             on_status=print,
             session_dir=session_dir,
-            save_state=True,
         )
         if kb is None:
             print("Recipe KB       : REMOTE (KB Store current Recipe warm replay)")
-    except Exception as exc:
+    except Exception as exc:  # isolation boundary: the T0 recipe warm-start anchor
         log.warning("T0 recipe-snapshot anchor failed mid-flight: %s", exc, exc_info=True)
         print(
             f"WARNING: T0 recipe-snapshot anchor failed mid-flight: {exc}\nContinuing without warm-start.",
@@ -193,56 +179,21 @@ def _bootstrap_knowledge_plane(
     args: argparse.Namespace,
     *,
     recipe_kb_client: Any = None,
-    session_dir: Path | None = None,
 ) -> "KnowledgePlane":
     """Construct the :class:`KnowledgePlane` facade."""
     from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
     from hyperloom.common.pr_monitor_urls import pr_monitor_mcp_url
-    from hyperloom.orchestrator.knowledge.pr_monitor import PRMonitorClient
 
     pr_enabled = bool(getattr(args, "pr_monitor_enabled", True))
     pr_mcp_url = pr_monitor_mcp_url() if pr_enabled else ""
 
-    pr_client = PRMonitorClient.from_args(enabled=pr_enabled)
     if not pr_enabled:
         reason = getattr(args, "pr_degraded_reason", None) or "explicit_flag"
-        status_text = f"disabled ({reason})"
         print(f"PR Monitor       : DISABLED ({reason})")
-        pr_reachable = False
     elif not pr_mcp_url:
-        status_text = "disabled (no_mcp_url)"
         print("PR Monitor       : DISABLED (no MCP URL configured)")
-        pr_reachable = False
-        pr_client.enabled = False
     else:
-        status_text = f"MCP {pr_mcp_url}"
         print(f"PR Monitor       : {pr_mcp_url}")
-        pr_reachable = True
-
-    # One-shot status marker so breakdown.warnings can surface pr_monitor:* without scraping logs.
-    if session_dir is not None:
-        try:
-            from ..session.session_paths import pr_monitor_status_json
-
-            marker = pr_monitor_status_json(session_dir)
-            marker.parent.mkdir(parents=True, exist_ok=True)
-            marker.write_text(
-                json.dumps(
-                    {
-                        "enabled": bool(pr_enabled),
-                        "reachable": bool(pr_reachable),
-                        "mcp_url": pr_mcp_url if pr_enabled else "",
-                        "status_text": status_text,
-                    },
-                    sort_keys=True,
-                    indent=2,
-                )
-            )
-        except OSError as exc:
-            log.warning(
-                "pr_monitor_status marker write failed: %r (breakdown.warnings will miss pr_monitor row)",
-                exc,
-            )
 
     from hyperloom.orchestrator.knowledge.config import KnowledgeConfig
 
@@ -255,7 +206,7 @@ def _bootstrap_knowledge_plane(
     else:
         config = getattr(recipe_kb_client, "knowledge_config", None) or KnowledgeConfig.from_env()
     return KnowledgePlane.from_clients(
-        pr_monitor=pr_client,
+        pr_monitor_enabled=bool(pr_mcp_url),
         pr_monitor_mcp_url=pr_mcp_url,
         recipe_kb=recipe_kb_client,
         config=config,

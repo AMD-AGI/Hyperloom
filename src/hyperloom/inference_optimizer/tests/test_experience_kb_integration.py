@@ -19,10 +19,8 @@ from hyperloom.inference_optimizer.experience_kb import (
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.intent_router import _stamp_kb_exposure
-from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
-    SpecialistPromptInputs,
-    build_specialist_prompts,
-)
+from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
+from hyperloom.orchestrator.prompts.specialist_prompt_builder import build_specialist_prompts
 from hyperloom.orchestrator.specialists.domains import get_domain
 from hyperloom.orchestrator.state.shared_state import _KB_INJECTIONS_CAP, KbInjection, SharedState
 from hyperloom_kb import RemoteClient, RemoteConfig
@@ -410,7 +408,6 @@ def test_specialist_dispatch_injects_its_experience_block_and_records_it(tmp_pat
 
     _system, user = build_specialist_prompts(
         SpecialistPromptInputs(
-            task_id="t-1",
             domain=get_domain("kernel_switch_specialist"),
             gap_canonical_id="gap.static_recon.aiter_master",
             experience_kb_block=params["experience_kb_block"],
@@ -441,7 +438,7 @@ def test_specialist_dispatch_reads_only_in_framework_agent_and_fails_open(tmp_pa
     assert state.experience_kb_injections == []
 
     _system, user = build_specialist_prompts(
-        SpecialistPromptInputs(task_id="t-2", domain=get_domain("serving_specialist"), gap_canonical_id="gap.y")
+        SpecialistPromptInputs(domain=get_domain("serving_specialist"), gap_canonical_id="gap.y")
     )
     assert "EXPERIENCE KB" not in user
 

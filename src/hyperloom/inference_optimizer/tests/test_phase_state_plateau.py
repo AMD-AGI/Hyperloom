@@ -9,11 +9,11 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.inference_optimizer.breakdown.stop_reasons import STOP_REASON_VOCAB, is_valid_stop_reason
+from hyperloom.orchestrator.kernel import kernel_decisions
 from hyperloom.orchestrator.lever import LEVER_CONFIG
 from hyperloom.orchestrator.phases.machine_state import (
     DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK,
     DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT,
-    PHASE_CLOSE,
     PHASE_KERNEL_AGENT,
     PHASE_SWEEP,
     _config_lever_dry,
@@ -23,7 +23,6 @@ from hyperloom.orchestrator.phases.machine_state import (
 )
 from hyperloom.orchestrator.state import shared_state
 from hyperloom.orchestrator.state.shared_state import (
-    ESCALATE_HINT_SKIP_TO_CLOSE,
     ESCALATE_HINT_SKIP_TO_KERNEL,
     ESCALATE_HINT_SKIP_TO_SWEEP,
     ESCALATE_HINT_VOCAB,
@@ -37,7 +36,6 @@ def test_escalate_hint_vocab_closed():
         {
             "skip_to_kernel",
             "skip_to_sweep",
-            "skip_to_close",
         }
     )
 
@@ -276,30 +274,6 @@ def test_kernel_does_not_exit_on_plateau():
     assert compute_next_phase(state) is None
 
 
-def test_compute_next_phase_skip_to_close_routes_to_close():
-    state = SharedState(
-        phase="FRAMEWORK_AGENT",
-        phase_started_unix=0.0,
-        max_minutes=0,
-        phase_budget_pct={},
-        explore_search={},
-        specialist_rounds=[],
-        params_no_promote_streak=0,
-        optimization_stack=[],
-        pending_escalate_hint=ESCALATE_HINT_SKIP_TO_CLOSE,
-        stop_reason="",
-        baseline_tput=1000.0,
-        plateau_overrides={},
-    )
-    out = compute_next_phase(state, flags=PhaseFlags(kernel_enabled=True))
-    assert out is not None
-    target, reason, evidence = out
-    assert target == PHASE_CLOSE
-    assert reason == "global_converged"
-    assert evidence.get("terminal") is True
-    assert evidence.get("hint") == ESCALATE_HINT_SKIP_TO_CLOSE
-
-
 def _hot(kernel_id: str, source_file: str, gpu_pct: float = 20.0) -> dict:
     return {
         "kernel_id": kernel_id,
@@ -367,9 +341,9 @@ def test_kernel_holds_while_work_pending_keep():
     assert compute_next_phase(state, flags=PhaseFlags(kernel_enabled=True)) is None
 
 
-def test_kernel_holds_while_work_pending_untried_hot_kernel():
+def test_kernel_holds_while_work_pending_untried_hot_kernel(monkeypatch):
     state = _skip_to_sweep_state("KERNEL_AGENT")
-    state.untried_hot_reusable_kernels = lambda: ["k017"]
+    monkeypatch.setattr(kernel_decisions, "untried_hot_reusable_kernels", lambda state: ["k017"])
 
     assert kernel_work_pending(state) is True
     assert compute_next_phase(state, flags=PhaseFlags(kernel_enabled=True)) is None
@@ -400,11 +374,11 @@ def test_a_hot_kernel_a_backend_patched_stops_holding_kernel():
 
 
 @pytest.mark.parametrize("status", ["no_gain", "timeout"])
-def test_geak_terminal_exits_kernel_ignoring_per_kernel_pending_work(status):
+def test_geak_terminal_exits_kernel_ignoring_per_kernel_pending_work(status, monkeypatch):
     state = _skip_to_sweep_state("KERNEL_AGENT")
     state.kernel_optimizer = "geak"
     state.geak_result = {"status": status}
-    state.untried_hot_reusable_kernels = lambda: ["k017"]
+    monkeypatch.setattr(kernel_decisions, "untried_hot_reusable_kernels", lambda state: ["k017"])
 
     assert kernel_work_pending(state) is False
     out = compute_next_phase(state, flags=PhaseFlags(kernel_enabled=True))

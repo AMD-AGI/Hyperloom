@@ -8,6 +8,7 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.orchestrator.actions.executors._proposal_identity import (
+    BaseControls,
     controls_of,
     effective_fingerprint,
     normalize_proposal,
@@ -52,9 +53,9 @@ def _ledger_row(proposal) -> dict:
     }
 
 
-def _fingerprint(proposal, **base) -> str:
+def _fingerprint(proposal, base: BaseControls = BaseControls()) -> str:
     fields = normalize_proposal(proposal)
-    return effective_fingerprint(fields["extra_args"], fields["extra_envs"], controls=controls_of(fields), **base)
+    return effective_fingerprint(fields["extra_args"], fields["extra_envs"], controls=controls_of(fields), base=base)
 
 
 def _round(proposals, *, cycle: int = 0, domain: str = "serving_specialist", gap: str = "") -> dict:
@@ -101,7 +102,7 @@ def test_a_keep_that_changes_the_stack_does_not_resurrect_benched_proposals():
     """The ledger key is stack-relative; matching on it would miss after a KEEP."""
     proposal = {"name": "with-removal", "extra_args": "--a 1", "remove_args": ["--v"]}
     round_start = _fingerprint(proposal)
-    after_keep = _fingerprint(proposal, base_remove_args=["--b"], base_args_mode="replace")
+    after_keep = _fingerprint(proposal, BaseControls(remove_args=["--b"], args_mode="replace"))
     assert round_start != after_keep
 
     state = _state(
@@ -194,7 +195,7 @@ def test_a_pruned_gap_sorts_last_but_is_not_dropped():
 
 def test_overflow_is_truncated_and_counted():
     proposals = [{"name": f"v{i}", "extra_args": f"--flag {i}"} for i in range(20)]
-    out = _state([_round(proposals)]).to_untested_proposals_summary(max_entries=12)
+    out = _state([_round(proposals)]).to_untested_proposals_summary()
     assert out.count("•") == 12
     assert "(+8 more not shown)" in out
 

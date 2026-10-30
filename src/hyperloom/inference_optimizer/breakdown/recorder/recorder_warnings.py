@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from hyperloom.plugs import progress as _progress
 
 from ...session.session_binding import SessionNotBoundError
 from .trace import trace_skip
@@ -50,12 +51,6 @@ _seen_lock = threading.Lock()
 #: Set while a note is being parked, so a failure inside the note is logged
 #: rather than noted, which would fail again in the same way forever.
 _parking = threading.local()
-
-
-def reset_for_tests() -> None:
-    """Forget which failures were already noted."""
-    with _seen_lock:
-        _seen.clear()
 
 
 def _first_time(section: str, error_class: str) -> bool:
@@ -100,6 +95,7 @@ def note_failure(
         f" while {detail}" if detail else "",
     )
 
+    _progress.warn("recorder_write_failed", f"{section} could not be recorded ({type(error).__name__})")
     _parking.active = True
     try:
         from ...session.sbd_v6 import record_write_warning
@@ -116,4 +112,4 @@ def note_failure(
         _parking.active = False
 
 
-__all__ = ["RECORDING_ERRORS", "note_failure", "reset_for_tests"]
+__all__ = ["RECORDING_ERRORS", "note_failure"]

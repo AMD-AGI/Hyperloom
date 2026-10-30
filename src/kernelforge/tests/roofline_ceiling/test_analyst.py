@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from kernelforge.agent_backends.workspace_guard import WorkspaceGuard, WorkspaceSafetyError
-from kernelforge.workspace.edit_policy import TOOL_OWNED_UNTRACKED_GLOBS
+from kernelforge.config.edit_policy import TOOL_OWNED_UNTRACKED_GLOBS
 from kernelforge.roofline_ceiling import analyst as analyst_module
 from kernelforge.roofline_ceiling.analyst import (
     AnalystSession,

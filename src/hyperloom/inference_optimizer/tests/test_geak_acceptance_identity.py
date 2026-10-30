@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import Any
 
 from hyperloom.orchestrator.kernel.geak_config import (
-    _geak_accepted_kernel_specs,
+    geak_acceptance_specs,
     geak_is_cand_tag,
     geak_spec_is_env,
     geak_spec_kind,
@@ -24,23 +24,16 @@ def _spec(name: str, delta: float, **extra: Any) -> dict[str, Any]:
 # B2 — the alias twin collapses onto the resolved symbol
 
 
-def test_specs_keeps_two_distinct_kernels_that_share_op_kind_and_gain() -> None:
+def test_acceptance_specs_keep_two_distinct_kernels_that_share_op_kind_and_gain() -> None:
     result = {
         "accepted_kernels": [
             _spec("kernel_a", 12.31, op_kind="prefill_attn"),
             _spec("kernel_b", 12.31, op_kind="prefill_attn"),
         ]
     }
-    assert [geak_spec_name(s) for s in _geak_accepted_kernel_specs(result)] == [
-        "kernel_a",
-        "kernel_b",
-    ]
-
-
-def _acceptance_specs(result: dict[str, Any]) -> list[dict[str, Any]]:
-    from hyperloom.orchestrator.phases.kernel import KernelPhase
-
-    return KernelPhase._geak_acceptance_specs(result)
+    out = geak_acceptance_specs(result)
+    assert [geak_spec_name(row) for row in out] == ["kernel_a", "kernel_b"]
+    assert not any(row["alias_collapsed"] for row in out)
 
 
 def test_acceptance_specs_collapse_the_alias_twin_onto_the_kernel_symbol() -> None:
@@ -48,7 +41,7 @@ def test_acceptance_specs_collapse_the_alias_twin_onto_the_kernel_symbol() -> No
         "accepted_kernels": [_spec("c0_triton", 12.31, op_kind="prefill_attn")],
         "accepted_heads": [_spec("_dsa_prefill_kernel", 12.31, op_kind="prefill_attn")],
     }
-    out = _acceptance_specs(result)
+    out = geak_acceptance_specs(result)
     assert [geak_spec_name(row) for row in out] == ["_dsa_prefill_kernel"]
     assert out[0]["alias_collapsed"] is True
 
@@ -59,7 +52,7 @@ def test_acceptance_specs_keep_the_collapsed_twins_name_as_an_alias() -> None:
         "accepted_kernels": [_spec("c0_triton", 12.31, op_kind="prefill_attn")],
         "accepted_heads": [_spec("_dsa_prefill_kernel", 12.31, op_kind="prefill_attn")],
     }
-    out = _acceptance_specs(result)
+    out = geak_acceptance_specs(result)
     assert out[0]["aliases"] == ["c0_triton"]
 
 
@@ -69,7 +62,7 @@ def test_acceptance_specs_do_not_alias_a_row_to_its_own_name() -> None:
         "accepted_kernels": [_spec("_dsa_prefill_kernel", 12.31, op_kind="prefill_attn")],
         "accepted_heads": [_spec("c0_triton", 12.31, op_kind="prefill_attn")],
     }
-    out = _acceptance_specs(result)
+    out = geak_acceptance_specs(result)
     assert geak_spec_name(out[0]) == "_dsa_prefill_kernel"
     assert out[0]["aliases"] == ["c0_triton"]
 
@@ -82,7 +75,7 @@ def test_acceptance_specs_keep_two_rows_that_merely_both_lack_a_delta() -> None:
             {"short_name": "hipblaslt_gemm", "kind": "env", "op_kind": "gemm"},
         ]
     }
-    assert sorted(geak_spec_name(row) for row in _acceptance_specs(result)) == [
+    assert sorted(geak_spec_name(row) for row in geak_acceptance_specs(result)) == [
         "ck_gemm_a8w8",
         "hipblaslt_gemm",
     ]
@@ -91,7 +84,7 @@ def test_acceptance_specs_keep_two_rows_that_merely_both_lack_a_delta() -> None:
 def test_acceptance_specs_keep_a_row_whose_delta_is_not_a_number() -> None:
     """An unreadable delta is a row with no delta, not an absent acceptance."""
     result = {"accepted_heads": [_spec("odd_kernel", "n/a", op_kind="gemm")]}  # type: ignore[arg-type]
-    out = _acceptance_specs(result)
+    out = geak_acceptance_specs(result)
     assert [geak_spec_name(row) for row in out] == ["odd_kernel"]
 
 
@@ -102,7 +95,7 @@ def test_acceptance_specs_still_distinguish_a_measured_zero_from_an_absent_delta
             {"short_name": "no_delta", "op_kind": "gemm"},
         ]
     }
-    assert len(_acceptance_specs(result)) == 2
+    assert len(geak_acceptance_specs(result)) == 2
 
 
 def test_cand_tag_recognises_slot_tags_only() -> None:

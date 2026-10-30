@@ -7,52 +7,30 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+
+from ._framework_rewrite_evidence import (
+    CATEGORY_DEVICE_RESIDENT,
+    CATEGORY_FUSE_COLLECTIVES,
+    CATEGORY_HOIST,
+    CATEGORY_HOST_ROUND_TRIP,
+    CATEGORY_HOST_SYNC,
+    CATEGORY_MEMOIZE,
+)
 
 
 log = logging.getLogger(__name__)
 
 
-# Only the hottest kernels are scanned; the breakdown is time-sorted.
-_MAX_KERNELS_SCANNED = 5
-
-
-# Op-name substring -> canonical bottleneck keyword; first match wins.
-_OP_TO_KEYWORD: tuple[tuple[str, str], ...] = (
-    ("attention", "attention"),
-    ("attn", "attention"),
-    ("flash", "attention"),
-    ("moe", "moe"),
-    ("expert", "moe"),
-    ("router", "moe"),
-    ("gemm", "gemm"),
-    ("matmul", "gemm"),
-    ("rmsnorm", "norm"),
-    ("layernorm", "norm"),
-    ("rope", "rope"),
-    ("kvcache", "kv_cache"),
-    ("kv_cache", "kv_cache"),
-    ("sampler", "sampling"),
-    ("allreduce", "comm"),
-    ("nccl", "comm"),
-    ("rccl", "comm"),
-    ("quant", "quant"),
-    ("fp8", "fp8"),
-    ("int8", "int8"),
-)
-
-
 # Rewrite-evidence category -> canonical gap keyword.
-_CATEGORY_TO_KEYWORD: tuple[tuple[str, str], ...] = (
-    ("eliminate_host_round_trip", "collective_rendezvous"),
-    ("eliminate_host_sync", "host_sync"),
-    ("fuse_collectives", "collective_fusion"),
-    ("keep_device_resident", "host_to_device"),
-    ("memoize_invariant", "recomputation"),
-    ("hoist_loop_invariant", "loop_invariant"),
-)
+_CATEGORY_TO_KEYWORD: dict[str, str] = {
+    CATEGORY_HOST_ROUND_TRIP: "collective_rendezvous",
+    CATEGORY_HOST_SYNC: "host_sync",
+    CATEGORY_FUSE_COLLECTIVES: "collective_fusion",
+    CATEGORY_DEVICE_RESIDENT: "host_to_device",
+    CATEGORY_MEMOIZE: "recomputation",
+    CATEGORY_HOIST: "loop_invariant",
+}
 
 
 def _extract_bottleneck_from_rewrite_evidence(evidence_path: str | Path | None) -> str:
@@ -77,56 +55,9 @@ def _extract_bottleneck_from_rewrite_evidence(evidence_path: str | Path | None) 
     for item in candidates:
         if not isinstance(item, dict):
             continue
-        category = str(item.get("category") or "").strip().lower()
-        for needle, keyword in _CATEGORY_TO_KEYWORD:
-            if category == needle:
-                return keyword
-    return ""
-
-
-def _kernel_row_name(row: Any) -> str:
-    """The lowercase kernel name one breakdown row carries, or ``""`` when it names none."""
-    if isinstance(row, dict):
-        return str(row.get("name") or row.get("kernel") or "").strip().lower()
-    if isinstance(row, str):
-        return row.strip().lower()
-    return ""
-
-
-def _hottest_kernel_names(raw: Any) -> list[str]:
-    """The lowercase names of the hottest kernels a breakdown payload lists, time-sorted as it stored them."""
-    if isinstance(raw, dict):
-        rows = raw.get("top_kernels") or raw.get("kernels") or raw.get("rows") or []
-    elif isinstance(raw, list):
-        rows = raw
-    else:
-        return []
-    if not isinstance(rows, list):
-        return []
-    names = (_kernel_row_name(row) for row in rows[:_MAX_KERNELS_SCANNED])
-    return [name for name in names if name]
-
-
-def _extract_bottleneck_from_breakdown(breakdown_path: str | Path | None) -> str:
-    """Read the kernel breakdown JSON and return one canonical bottleneck keyword."""
-    if not breakdown_path:
-        return ""
-    p = Path(str(breakdown_path))
-    if not p.is_file():
-        return ""
-    try:
-        raw = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        log.warning(
-            "_framework_gap_composer: could not read kernel breakdown %s: %s",
-            p,
-            exc,
-        )
-        return ""
-    for name in _hottest_kernel_names(raw):
-        for needle, keyword in _OP_TO_KEYWORD:
-            if needle in name:
-                return keyword
+        keyword = _CATEGORY_TO_KEYWORD.get(str(item.get("category") or "").strip().lower())
+        if keyword:
+            return keyword
     return ""
 
 
@@ -150,29 +81,20 @@ def _model_class_to_search_token(model_class: str) -> str:
     return mc
 
 
-@dataclass(frozen=True)
-class GapEvidence:
-    """The profile artifacts a gap's bottleneck tokens are read from; an absent path contributes none."""
-
-    profile_kernel_breakdown_path: str | Path | None = None
-    rewrite_evidence_path: str | Path | None = None
-
-
 def compose_gap(
     *,
     framework: str = "",
     gpu_type: str = "",
     model_class: str = "",
     precision: str = "",
-    evidence: GapEvidence = GapEvidence(),
+    rewrite_evidence_path: str | Path | None = None,
 ) -> tuple[str, list[str]]:
-    """Build ``(gap_description, keywords)`` for the framework arm."""
+    """Build ``(gap_description, keywords)`` for the framework arm; an absent evidence path contributes no token."""
     fw = (framework or "").strip().lower()
     gpu = (gpu_type or "").strip().lower()
     arch = _model_class_to_search_token(model_class)
     prec = (precision or "").strip().lower()
-    bottleneck = _extract_bottleneck_from_breakdown(evidence.profile_kernel_breakdown_path)
-    host_bottleneck = _extract_bottleneck_from_rewrite_evidence(evidence.rewrite_evidence_path)
+    host_bottleneck = _extract_bottleneck_from_rewrite_evidence(rewrite_evidence_path)
 
     # Gap text mirrors the SKILL.md template.
     parts: list[str] = ["improve"]
@@ -182,9 +104,8 @@ def compose_gap(
         parts.append(prec)
     if arch:
         parts.append(arch)
-    for token in (bottleneck, host_bottleneck):
-        if token and token not in parts:
-            parts.append(token)
+    if host_bottleneck and host_bottleneck not in parts:
+        parts.append(host_bottleneck)
     parts.append("throughput")
     if gpu:
         parts.extend(["on", gpu])
@@ -192,7 +113,7 @@ def compose_gap(
 
     # Keywords: dedup + sort, lowercase; passed as the ``keywords`` override.
     kw_pool: list[str] = []
-    for tok in (fw, gpu, arch, prec, bottleneck, host_bottleneck):
+    for tok in (fw, gpu, arch, prec, host_bottleneck):
         if tok and tok not in kw_pool:
             kw_pool.append(tok)
     keywords = sorted(kw_pool)
@@ -200,4 +121,4 @@ def compose_gap(
     return gap, keywords
 
 
-__all__ = ["GapEvidence", "compose_gap"]
+__all__ = ["compose_gap"]

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.tools import durable_io
+from kernelforge.utils import durable_io
 from kernelforge.knowledge.kb_store import record_store
 
 CANONICAL_ID = "kernel:flydsl:softmax:vllm:1.0:flydsl:mi355x"

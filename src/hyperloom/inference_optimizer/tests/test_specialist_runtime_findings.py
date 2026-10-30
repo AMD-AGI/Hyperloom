@@ -12,8 +12,8 @@ import pytest
 
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.measurement.runtime_findings import persist_runtime_findings, scan_server_log
+from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
-    SpecialistPromptInputs,
     _section_runtime_findings,
     build_specialist_prompts,
 )
@@ -31,7 +31,6 @@ def _make_coord(tmp_path: Path, *, state: SharedState) -> Coordinator:
 
 def _make_inp(runtime_findings: str) -> SpecialistPromptInputs:
     return SpecialistPromptInputs(
-        task_id="t-1",
         domain=get_domain("serving_specialist"),
         gap_canonical_id="gap.x",
         runtime_findings=runtime_findings,

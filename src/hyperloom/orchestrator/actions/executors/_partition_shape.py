@@ -17,6 +17,7 @@ from hyperloom.common.gpu_partition import (
     PARTITION_STREAMS_ENV,
     PARTITION_TOTAL_STREAMS_ENV,
     PartitionLayout,
+    PartitionModel,
     fits_in_partition,
     observe_partition,
 )
@@ -105,33 +106,15 @@ def per_stream_footprint_gib(
 def validate_session_shape(
     *,
     declared_mode: str = "",
-    streams: int | None = None,
+    streams: int = DEFAULT_STREAMS_PER_PARTITION,
     gpu_type: str | None = None,
-    params: dict[str, Any] | None = None,
-    shared_state: Any = None,
-    gpu_id: int | None = None,
+    model: PartitionModel = PartitionModel(),
     fanout_expected: bool = True,
 ) -> ShapeVerdict:
     """Check, at launch, that this session can run in the shape it was given."""
     warnings: list[str] = []
     notes: list[str] = []
-    try:
-        requested_streams = DEFAULT_STREAMS_PER_PARTITION if streams is None else int(streams)
-    except (TypeError, ValueError):
-        requested_streams = 0
-    if requested_streams < 1:
-        # Refused rather than defaulted, and refused before the card is touched: this is a usage error about the
-        # request, not a fact about the hardware, so it needs no probe to decide and must not differ from the CLI's
-        # own verdict on the same value.
-        return ShapeVerdict(
-            refusal=(
-                f"streams per partition must be >= 1, got {streams!r}. One stream per "
-                f"partition is the floor: a partition with no stream on it measures nothing, "
-                f"and a mode is only worth setting at two."
-            ),
-        )
-    streams = requested_streams
-    gpu = partition_gpu_id() if gpu_id is None else gpu_id
+    gpu = partition_gpu_id()
 
     layout = observe_partition(gpu, gpu_type=gpu_type)
     if layout is None:
@@ -184,7 +167,9 @@ def validate_session_shape(
 
     notes.append(f"Streams per partition: {streams} ({streams * layout.partitions} total)")
 
-    footprint_gib, source = per_stream_footprint_gib(params, shared_state)
+    footprint_gib, source = per_stream_footprint_gib(
+        {"model_path": str(model.model_path or ""), "precision": str(model.precision or "")}, model.shared_state
+    )
     if footprint_gib <= 0:
         warnings.append(
             f"Cannot size this workload against a {layout.mode} partition: the checkpoint's "

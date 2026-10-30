@@ -11,6 +11,7 @@ import pytest
 
 from hyperloom.orchestrator.phases import machine_state as ps
 from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.state.task_registry import TaskSpec
 
 
 @pytest.fixture
@@ -47,7 +48,6 @@ def _arm_kernel_phase(st):
     """Park the session mid-KERNEL with plenty of budget and session time left."""
     now = datetime.now(timezone.utc)
     st.phase = ps.PHASE_KERNEL_AGENT
-    st.phase_started_ts = (now - timedelta(minutes=20)).isoformat()
     st.phase_started_unix = (now - timedelta(minutes=20)).timestamp()
     st.start_ts = (now - timedelta(minutes=30)).isoformat()
     st.max_minutes = 96 * 60
@@ -113,10 +113,12 @@ async def test_running_kernel_task_never_winds_down(kernel_coordinator):
     _arm_kernel_phase(st)
     _owe_hot_kernels(st)
 
-    build = await c.tasks.create(
-        kind="kernel_agent",
-        params={"from_phase": ps.PHASE_FRAMEWORK_AGENT},
-        idempotency_key="long-running-build",
+    build, _ = await c.tasks.create_or_return_existing(
+        TaskSpec(
+            kind="kernel_agent",
+            params={"from_phase": ps.PHASE_FRAMEWORK_AGENT},
+            idempotency_key="long-running-build",
+        ),
     )
     await c.tasks.transition(build.task_id, "running")
 
@@ -179,10 +181,12 @@ async def test_queued_kernel_task_never_winds_down(kernel_coordinator):
     _arm_kernel_phase(st)
     _owe_hot_kernels(st)
 
-    await c.tasks.create(
-        kind="integrate",
-        params={"kernel_id": "k001"},
-        idempotency_key="queued-integrate",
+    await c.tasks.create_or_return_existing(
+        TaskSpec(
+            kind="integrate",
+            params={"kernel_id": "k001"},
+            idempotency_key="queued-integrate",
+        ),
     )
 
     for _ in range(ps._kernel_idle_max_ticks() * 20):
@@ -271,7 +275,9 @@ def test_fingerprint_tracks_inflight_task_ids():
 async def test_exit_facts_report_a_queued_kernel_agent_only_inside_kernel(kernel_coordinator):
     c = kernel_coordinator
     st = c.shared_state
-    await c.tasks.create(kind="kernel_agent", params={}, idempotency_key="kernel-agent-queued")
+    await c.tasks.create_or_return_existing(
+        TaskSpec(kind="kernel_agent", params={}, idempotency_key="kernel-agent-queued")
+    )
 
     st.phase = ps.PHASE_FRAMEWORK_AGENT
     assert (await c.phase_kernel.exit_facts()).agent_in_flight is False

@@ -23,7 +23,7 @@ DEFAULT_LANE_CAPACITIES: dict[str, int] = {
 
 
 _DDL = [
-    # leases — Resource Lock Manager. Composite PK (lane, holder_id).
+    # leases — lane ownership. Composite PK (lane, holder_id).
     """
     CREATE TABLE IF NOT EXISTS leases (
         lane          TEXT    NOT NULL,
@@ -34,12 +34,9 @@ _DDL = [
         owner_scope   TEXT    NOT NULL DEFAULT '',
         acquired_at   TEXT    NOT NULL,
         expires_at    TEXT    NOT NULL,
-        heartbeat_at  TEXT    NOT NULL,
         PRIMARY KEY (lane, holder_id)
     )
     """,
-    "CREATE INDEX IF NOT EXISTS idx_leases_expires ON leases(expires_at)",
-    "CREATE INDEX IF NOT EXISTS idx_leases_lane ON leases(lane)",
     # lane_capacity — per-lane concurrency cap
     """
     CREATE TABLE IF NOT EXISTS lane_capacity (
@@ -65,10 +62,8 @@ _DDL = [
     # cursors — idempotent message processing
     """
     CREATE TABLE IF NOT EXISTS cursors (
-        agent                 TEXT PRIMARY KEY,
-        last_processed_seq    INTEGER NOT NULL,
-        last_processed_msg_id TEXT    NOT NULL,
-        processed_at          TEXT    NOT NULL
+        agent              TEXT PRIMARY KEY,
+        last_processed_seq INTEGER NOT NULL
     )
     """,
     # tasks — DelegatedTask state machine
@@ -82,7 +77,6 @@ _DDL = [
         params           TEXT NOT NULL,
         idempotency_key  TEXT NOT NULL UNIQUE,
         requires_lanes   TEXT NOT NULL DEFAULT '[]',
-        side_effects     TEXT NOT NULL DEFAULT '[]',
         lease_ttl_sec    INTEGER NOT NULL DEFAULT 0,
         history          TEXT NOT NULL DEFAULT '[]',
         created_at       TEXT NOT NULL,
@@ -90,19 +84,14 @@ _DDL = [
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_tasks_state ON tasks(state, updated_at)",
-    "CREATE INDEX IF NOT EXISTS idx_tasks_idem ON tasks(idempotency_key)",
     # gpu_leases — specialist GPU pool (separate from serving lanes)
     """
     CREATE TABLE IF NOT EXISTS gpu_leases (
-        gpu_id       INTEGER PRIMARY KEY,
-        holder_id    TEXT    NOT NULL,
-        task_id      TEXT    NOT NULL,
-        acquired_at  TEXT    NOT NULL,
-        expires_at   TEXT    NOT NULL,
-        heartbeat_at TEXT    NOT NULL
+        gpu_id    INTEGER PRIMARY KEY,
+        holder_id TEXT    NOT NULL,
+        task_id   TEXT    NOT NULL
     )
     """,
-    "CREATE INDEX IF NOT EXISTS idx_gpu_leases_expires ON gpu_leases(expires_at)",
     # bringup_rounds — the durable mutex deciding whether another round may
     # start. Only explicit settlement ends exclusion; timestamps describe budgets.
     """
@@ -178,7 +167,7 @@ def set_lane_capacity(
         cur.close()
 
 
-def ensure_schema(conn: sqlite3.Connection) -> int:
+def ensure_schema(conn: sqlite3.Connection) -> None:
     """Idempotently create all tables, seed lane_capacity defaults, and record the schema version."""
     cur = conn.cursor()
     try:
@@ -191,10 +180,7 @@ def ensure_schema(conn: sqlite3.Connection) -> int:
             "INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES (?, datetime('now'))",
             (SCHEMA_VERSION,),
         )
-        cur.execute("SELECT MAX(version) FROM schema_version")
-        (current,) = cur.fetchone()
         conn.commit()
-        return int(current or 0)
     except Exception:
         conn.rollback()
         raise

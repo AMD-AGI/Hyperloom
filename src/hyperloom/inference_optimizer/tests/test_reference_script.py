@@ -13,7 +13,7 @@ import pytest
 from pathlib import Path
 from types import SimpleNamespace
 
-from hyperloom.common.env_safety import GPU_MASK_ENV_NAMES
+from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 from hyperloom.inference_optimizer.reference_script import (
     LaunchSettings,
     ServingTarget,
@@ -439,37 +439,33 @@ def test_render_round_trip_with_enablement_params(tmp_path):
 # --- bootstrap._resolve_reference_recipe tests ---
 
 
-def test_resolve_no_flag_returns_empty(monkeypatch):
+def test_resolve_no_flag_returns_empty():
     """No --reference-script → empty tuple, nothing attempted."""
-    monkeypatch.setenv("FRAMEWORK", "vllm")
     args = SimpleNamespace(reference_script=None)
-    assert _resolve_reference_recipe(args) == ("", {}, "", {})
+    assert _resolve_reference_recipe(args, "vllm") == ("", {}, "", {})
 
 
-def test_resolve_valid_flag_is_used(tmp_path, monkeypatch):
-    monkeypatch.setenv("FRAMEWORK", "vllm")
+def test_resolve_valid_flag_is_used(tmp_path):
     src = _write(tmp_path, _M3_RECIPE, "explicit.sh")
     args = SimpleNamespace(reference_script=src)
-    server_args, envs, model, controls = _resolve_reference_recipe(args)
+    server_args, envs, model, controls = _resolve_reference_recipe(args, "vllm")
     assert "--block-size 128" in server_args
 
 
-def test_resolve_unreadable_flag_raises_system_exit(monkeypatch):
+def test_resolve_unreadable_flag_raises_system_exit():
     """Given but unreadable path → SystemExit(2)."""
-    monkeypatch.setenv("FRAMEWORK", "vllm")
     args = SimpleNamespace(reference_script="/no/such/recipe.sh")
     with pytest.raises(SystemExit) as exc_info:
-        _resolve_reference_recipe(args)
+        _resolve_reference_recipe(args, "vllm")
     assert exc_info.value.code == 2
 
 
-def test_resolve_script_with_no_flags_raises_system_exit(tmp_path, monkeypatch):
+def test_resolve_script_with_no_flags_raises_system_exit(tmp_path):
     """A readable script that yields no server flags and no envs → SystemExit(2)."""
-    monkeypatch.setenv("FRAMEWORK", "vllm")
     empty = _write(tmp_path, "#!/usr/bin/env bash\necho hello\n")
     args = SimpleNamespace(reference_script=empty)
     with pytest.raises(SystemExit) as exc_info:
-        _resolve_reference_recipe(args)
+        _resolve_reference_recipe(args, "vllm")
     assert exc_info.value.code == 2
 
 

@@ -8,12 +8,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import math
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
 
+from hyperloom.common.coerce import to_float
+from hyperloom.common.jsonio import extract_last_json_with_key
 from hyperloom.common.llm_config import (
     DEFAULT_CLAUDE_MODEL,
     LLMConfigError,
@@ -23,6 +24,7 @@ from hyperloom.common.llm_config import (
 )
 from ..roles.base import parse_call_timeout_env
 from hyperloom.common.timeutil import format_exc_brief
+from hyperloom.common.token_usage import openai_usage_counts
 from hyperloom.inference_optimizer.trace.conversation_trace import ConversationRecord, append_conversation
 from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, LLMCallSite, append_llm_call, new_call_id
 from hyperloom.inference_optimizer.trace.parse_usage import reasoning_output_tokens
@@ -61,13 +63,6 @@ Rules:
 - "reason" MUST be <= 15 words. Keep it terse to keep the reply short.
 - Do not add keys other than "score" and "reason".
 """.strip()
-
-
-def _extract_scores_json(text: str) -> dict[str, Any] | None:
-    """Pull the last valid ``{"scores": {...}}`` object out of a reply."""
-    from hyperloom.common.jsonio import extract_last_json_with_key
-
-    return extract_last_json_with_key(text, "scores")
 
 
 @dataclass(frozen=True)
@@ -114,15 +109,8 @@ def _clip(value: Any, *, limit: int = _MAX_FIELD_CHARS) -> str:
 
 def _coerce_score(raw: Any) -> float | None:
     """Coerce a model-emitted score into a clamped [0, 10] float."""
-    if isinstance(raw, bool):
-        return None
-    try:
-        val = float(raw)
-    except (TypeError, ValueError):
-        return None
-    if math.isnan(val):
-        return None
-    return max(0.0, min(10.0, val))
+    val = to_float(raw)
+    return None if val is None else max(0.0, min(10.0, val))
 
 
 def _normalise_model_scores(
@@ -164,9 +152,6 @@ class ProposalScorer:
     """Score proposals without ranking or selecting them."""
 
     models: tuple[str, ...] = DEFAULT_SCORER_MODELS
-    # Scorer talks the OpenAI protocol, so prefer the OpenAI-side key/URL.
-    api_key_env: str = "OPENAI_API_KEY"
-    base_url_env: str = "OPENAI_BASE_URL"
     # Large cap so reasoning raters can finish reasoning and still emit the scores JSON.
     max_completion_tokens: int = 4096
     call_timeout_s: float = field(
@@ -200,10 +185,7 @@ class ProposalScorer:
         if self._client is not None:
             return self._client
         try:
-            self._client = get_async_openai_client(
-                api_key_env=self.api_key_env,
-                base_url_env=self.base_url_env,
-            )
+            self._client = get_async_openai_client()
         except LLMConfigError as exc:
             raise RuntimeError(str(exc).replace("OpenAI-compatible client", "ProposalScorer")) from exc
         return self._client
@@ -290,7 +272,7 @@ class ProposalScorer:
         self._trace_scorer_llm_call(model, usage, keys, latency_ms=latency_ms, call_id=call_id)
         # Persist the full (redacted) prompt + reply alongside the token row.
         self._record_scorer_conversation(model, full_prompt, text, keys, call_id=call_id)
-        parsed = _extract_scores_json(text)
+        parsed = extract_last_json_with_key(text, "scores")
         if parsed is None:
             raise RuntimeError(f"no parseable scores JSON (reply_chars={len(text)})")
         return _normalise_model_scores(parsed, scoring_entries=scoring_entries)
@@ -308,13 +290,7 @@ class ProposalScorer:
         if self.session_dir is None:
             return
         try:
-            input_tokens = None
-            output_tokens = None
-            if usage is not None:
-                pt = getattr(usage, "prompt_tokens", None)
-                ct = getattr(usage, "completion_tokens", None)
-                input_tokens = int(pt) if pt is not None else None
-                output_tokens = int(ct) if ct is not None else None
+            counts = openai_usage_counts(usage)
             record = LLMCallRecord(
                 session_id=self.session_dir.name,
                 component="proposal_scorer",
@@ -324,8 +300,10 @@ class ProposalScorer:
                 task_id=keys.task_id,
                 tick=keys.tick,
                 phase=keys.phase,
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
+                input_tokens=counts.get("input_tokens"),
+                output_tokens=counts.get("output_tokens"),
+                cache_read_input_tokens=counts.get("cache_read_input_tokens"),
+                cache_creation_input_tokens=counts.get("cache_creation_input_tokens"),
                 # A scoring model with a reasoning split bills it separately; reading it here keeps the ledger
                 # consistent with the backends that report it on their turn metadata.
                 reasoning_output_tokens=reasoning_output_tokens(usage),
@@ -448,4 +426,4 @@ class ProposalScorer:
         return {"scale": "0-10", "models": models_out, "errors": errors}
 
 
-__all__ = ["ProposalScorer", "DEFAULT_SCORER_MODELS", "_extract_scores_json"]
+__all__ = ["ProposalScorer", "DEFAULT_SCORER_MODELS"]

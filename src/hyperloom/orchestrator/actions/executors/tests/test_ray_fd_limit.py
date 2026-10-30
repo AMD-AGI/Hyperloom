@@ -354,11 +354,8 @@ def _install_failing_ray_start(monkeypatch, stdout: str, stderr: str):
     monkeypatch.setattr(ray_runtime.subprocess, "run", _fake_run)
 
 
-def test_failed_ray_start_without_a_log_sink_carries_its_output(monkeypatch):
-    """Without a log path the output is the only evidence, so it must reach the error.
-
-    Discarding it leaves the caller with 'see None' and nothing to diagnose from.
-    """
+def test_failed_ray_start_carries_its_output(monkeypatch):
+    """The captured ``ray start`` output is the only evidence of a failure, so it must reach the error."""
     fake = _FakeResource(soft=1048576, hard=1048576, events=[])
     monkeypatch.setattr(ray_runtime, "resource", fake, raising=False)
     _install_failing_ray_start(
@@ -371,21 +368,7 @@ def test_failed_ray_start_without_a_log_sink_carries_its_output(monkeypatch):
         ray_runtime.ensure_ray_cluster(num_gpus=1)
 
     message = str(excinfo.value)
-    assert "ModuleNotFoundError: No module named 'ray.thirdparty_files'" in message, message
-    assert "see None" not in message, message
-
-
-def test_failed_ray_start_with_a_log_sink_names_the_file(monkeypatch, tmp_path):
-    """With a log path the output is already on disk, so the error names it."""
-    fake = _FakeResource(soft=1048576, hard=1048576, events=[])
-    monkeypatch.setattr(ray_runtime, "resource", fake, raising=False)
-    _install_failing_ray_start(monkeypatch, stdout="", stderr="boom")
-    log_path = tmp_path / "ray.log"
-
-    with pytest.raises(RuntimeError) as excinfo:
-        ray_runtime.ensure_ray_cluster(num_gpus=1, log_path=log_path)
-
-    assert f"see {log_path}" in str(excinfo.value)
+    assert "ray start output: ModuleNotFoundError: No module named 'ray.thirdparty_files'" in message, message
 
 
 def test_force_restart_local_cluster_declares_serving_slot(monkeypatch):

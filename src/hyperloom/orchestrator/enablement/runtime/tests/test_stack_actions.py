@@ -24,9 +24,6 @@ def test_stack_action_round_trip():
         acquisition_method="wheel",
         index_url="https://rocm.index/whl",
         packages=("vllm",),
-        expected_symbols=("deepseek_v4",),
-        server_args="--tokenizer-mode deepseek_v4",
-        envs={"VLLM_ROCM_USE_AITER": "1"},
         attempt_venv_root="/s/venv",
     )
     d = a.to_state()
@@ -40,7 +37,6 @@ def test_stack_action_from_state_defaults():
     assert b.kind == "runtime_candidate"
     assert b.acquisition_method == "none"
     assert b.packages == ()
-    assert b.envs == {}
 
 
 def test_stack_action_from_state_invalid_method_coerced():
@@ -95,13 +91,11 @@ def test_runtime_override_lands_in_yaml():
     envs: dict[str, str] = {}
     apply_runtime_override(envs, rt.to_runtime_override())
     assert "/attempt/bin" in envs["PATH"]
-    assert envs["HYPERLOOM_FRAMEWORK_BIN"] == "/attempt/bin"
     assert envs["HYPERLOOM_FRAMEWORK_PYTHON"] == "/attempt/bin/python"
-    assert envs["HYPERLOOM_FRAMEWORK_VENV_ROOT"] == "/attempt"
 
 
 def test_runtime_round_trip():
-    rt = FrameworkRuntime(bin_path="/b", python_path="/b/py", venv_root="/v", server_args="-x", envs={"A": "1"})
+    rt = FrameworkRuntime(bin_path="/b", python_path="/b/py", venv_root="/v")
     assert FrameworkRuntime.from_state(rt.to_state()) == rt
 
 
@@ -112,7 +106,6 @@ def test_runtime_extended_round_trip():
     rt = FrameworkRuntime(
         bin_path="/b",
         pythonpath_prefixes=("/a/pkg", "/b/pkg"),
-        ld_library_path_prefix=("/a/lib",),
         runtime_env={"INFERENCE_OPTIMIZER_AITER_JIT_DIR": "/j"},
         entrypoint_bin_dir="/a/bin",
         source_root="/src",
@@ -124,13 +117,11 @@ def test_runtime_extended_round_trip():
 def test_runtime_extended_override_keys():
     rt = FrameworkRuntime(
         pythonpath_prefixes=("/a/pkg", "/b/pkg"),
-        ld_library_path_prefix=("/a/lib",),
         runtime_env={"AITER_REBUILD": "1"},
         entrypoint_bin_dir="/a/bin",
     )
     ov = rt.to_runtime_override()
     assert ov["pythonpath_prefixes"] == ["/a/pkg", "/b/pkg"]
-    assert ov["ld_library_path_prefix"] == ["/a/lib"]
     assert ov["runtime_env"] == {"AITER_REBUILD": "1"}
     assert ov["entrypoint_bin_dir"] == "/a/bin"
 
@@ -141,7 +132,6 @@ def test_runtime_extended_override_omitted_when_empty():
     ov = rt.to_runtime_override()
     for key in (
         "pythonpath_prefixes",
-        "ld_library_path_prefix",
         "runtime_env",
         "entrypoint_bin_dir",
         "runtime_python_exe",
@@ -187,15 +177,3 @@ def test_provision_result_ok_false_propagation():
     d = r.to_state()
     assert d["ok"] is False
     assert d["error"] == "boom"
-    r2 = ProvisionResult.from_state(d)
-    assert r2.ok is False
-    assert r2.error == "boom"
-
-
-def test_provision_result_ok_round_trip():
-    rt = FrameworkRuntime(bin_path="/b", venv_root="/v")
-    r = ProvisionResult(ok=True, runtime=rt, installed_versions={"vllm": "0.21"}, log_path="/l")
-    r2 = ProvisionResult.from_state(r.to_state())
-    assert r2.ok is True
-    assert r2.runtime.venv_root == "/v"
-    assert r2.installed_versions == {"vllm": "0.21"}

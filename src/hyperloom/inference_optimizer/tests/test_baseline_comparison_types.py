@@ -3,6 +3,7 @@
 
 """Stable comparison schemas for synthetic and agentic reference data."""
 
+from dataclasses import asdict
 from typing import get_args, get_type_hints
 
 from hyperloom.inference_optimizer.baseline_comparison.types import BaselinePoint, BaselineQuery, BaselineSummary
@@ -27,7 +28,7 @@ def test_reason_annotation_covers_all_summary_outcomes():
 
 def test_query_defaults_preserve_synthetic_dimensions():
     query = BaselineQuery("MiniMax-M2.5", "b300", "vllm", "fp8", 1024, 2048)
-    assert query.to_dict() == {
+    assert asdict(query) == {
         "model": "MiniMax-M2.5",
         "gpu": "b300",
         "framework": "vllm",
@@ -40,14 +41,15 @@ def test_query_defaults_preserve_synthetic_dimensions():
 
 def test_agentx_query_serializes_variable_lengths():
     query = BaselineQuery("GLM-5.2", "b300", isl=None, osl=None, benchmark_mode="agentx")
-    assert query.to_dict()["benchmark_mode"] == "agentx"
-    assert query.to_dict()["isl"] is None
-    assert query.to_dict()["osl"] is None
+    data = asdict(query)
+    assert data["benchmark_mode"] == "agentx"
+    assert data["isl"] is None
+    assert data["osl"] is None
 
 
 def test_point_defaults_do_not_reconstruct_p90_from_mean_tpot():
     point = BaselinePoint(100.0, 10.0, 4, 8, 1.0, 10.0, 100.0)
-    data = point.to_dict()
+    data = asdict(point)
     assert data["tput_per_gpu"] == 100.0
     assert data["mean_tpot_ms"] == 10.0
     assert data["e2e_norm_intvty_p90"] is None
@@ -68,7 +70,7 @@ def test_summary_preserves_reference_id_and_exact_p90_without_renormalizing():
         e2e_norm_intvty_p90=12.345,
     )
     summary = BaselineSummary(query, "2026-09-10T00:00:00Z", 1, point, [point])
-    data = summary.to_dict()
+    data = asdict(summary)
     assert data["best"]["benchmark_id"] == "439985"
     assert data["best"]["e2e_norm_intvty_p90"] == 12.345
     assert data["best"]["tput_per_gpu"] == 2643.69293
