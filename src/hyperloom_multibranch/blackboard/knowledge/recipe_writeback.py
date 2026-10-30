@@ -13,7 +13,9 @@ its pinned hash, so the KB stores exactly what was measured.
 InferenceX sessions compare ``optimized_throughput`` with the champion of their partition. An AgentX session compares,
 as the main flow's AgentX records do, its gain in P50 interactivity over its own baseline (``interactivity_gain_pct``,
 objective ``agentx_keep``), and carries both interactivities beside it, with both total throughputs when the gate
-recorded them. When the blackboard recorded the final commit's recipe digest, a recipe with another digest is skipped
+recorded them, and its provenance says ``outputs_checked: false``: that gate reads speed and the request error rate, so
+a change to what the model says is kept all the same (#162). When the blackboard recorded the final commit's recipe
+digest, a recipe with another digest is skipped
 (``recipe_digest_mismatch``): CLOSE was handed some other commit's recipe. A recipe that names anything as unexpressed
 does not rebuild what was measured, so it is skipped as well (``incomplete_recipe``).
 
@@ -186,6 +188,7 @@ def knowledge_document(
                 "rule_pack": dict(rule_pack),
                 **_warmup_seed(snapshot, final.commit_id),
                 **_synthesized(snapshot, final.recipe),
+                **_outputs(scope),
             },
         }
     )
@@ -210,6 +213,12 @@ def _synthesized(snapshot: BlackboardSnapshot, recipe: Recipe) -> dict[str, list
         if patch.sha256 in written
     ]
     return {"synthesized_patches": found} if found else {}
+
+
+def _outputs(scope: RecipeScope) -> dict[str, bool]:
+    """``outputs_checked: false`` for an AgentX record; nothing for an InferenceX one, whose gate runs its eval."""
+
+    return {"outputs_checked": False} if scope.identity_scheme == AGENTX else {}
 
 
 def stage_files(recipe: Recipe, files_root: Path, staging: Path, blobs: BlobStore | None = None) -> list[Artifact]:
