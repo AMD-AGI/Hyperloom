@@ -28,17 +28,19 @@
 root_packages =
     hyperloom
     kernelforge
+    hyperloom_multibranch
 include_external_packages = False
 exclude_type_checking_imports = True
 
 
 [importlinter:contract:hl-top-layers]
-name = hyperloom top-level layers (cli > orchestrator > agents > inference_optimizer > common)
+name = hyperloom top-level layers (cli > orchestrator > agents > contracts > inference_optimizer > common)
 type = layers
 layers =
     hyperloom.cli
     hyperloom.orchestrator
     hyperloom.agents
+    hyperloom.contracts
     hyperloom.inference_optimizer
     hyperloom.common
 # Baseline: hyperloom.inference_optimizer.cli is an entry point that lives
@@ -250,6 +252,31 @@ ignore_imports =
 unmatched_ignore_imports_alerting = none
 
 
+[importlinter:contract:mb-not-imported]
+name = hyperloom and kernelforge do not import hyperloom_multibranch
+type = forbidden
+# The multi-branch package builds on hyperloom as its toolbox; the dependency points one way.
+source_modules =
+    hyperloom
+    kernelforge
+forbidden_modules = hyperloom_multibranch
+ignore_imports =
+    hyperloom.**.tests.** -> **
+    kernelforge.tests.** -> **
+    kernelforge.**.tests.** -> **
+    kernelforge.conftest -> **
+unmatched_ignore_imports_alerting = none
+
+
+[importlinter:contract:mb-layers]
+name = the multi-branch modules build on its contracts, never the reverse
+type = layers
+# Each module implements the protocols contracts declares for its peers, so the contracts sit below all of them.
+layers =
+    hyperloom_multibranch.cli : hyperloom_multibranch.scheduling : hyperloom_multibranch.specialist : hyperloom_multibranch.blackboard : hyperloom_multibranch.rulegate : hyperloom_multibranch.repo : hyperloom_multibranch.toolbox
+    hyperloom_multibranch.contracts
+
+
 [importlinter:contract:kf-public-interfaces]
 name = hyperloom uses kernelforge only through its package interfaces
 type = forbidden
@@ -284,11 +311,13 @@ type = acyclic_siblings
 ancestors =
     hyperloom
     kernelforge
+    hyperloom_multibranch
 # Baseline: the exact imports import-linter nominates as cycle breakers on
 # main today. Removing one of these imports means deleting its line here.
 ignore_imports =
     hyperloom.**.tests.** -> **
     kernelforge.tests.** -> **
+    hyperloom_multibranch.**.tests.** -> **
     hyperloom.common.llm_config -> hyperloom.common.claude_oneshot
     hyperloom.inference_optimizer.breakdown.critic_reviews -> hyperloom.inference_optimizer.breakdown.collectors._common
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._aiter_jit

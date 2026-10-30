@@ -6,11 +6,14 @@
 from __future__ import annotations
 
 import functools
+import importlib.util
 import logging
 import os
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.outside_facts import AITER_META_DIR_ENV
+from hyperloom.common.aiter_layout import image_aiter_meta
 from hyperloom.inference_optimizer.framework_paths import (
     resolve_flydsl_source_roots as _resolve_flydsl_source_roots,
     resolve_known_source_prefixes as _resolve_known_source_prefixes,
@@ -31,6 +34,8 @@ except ImportError:
 
 
 _log = logging.getLogger(__name__)
+#: The directory of aiter's meta directory that holds its device sources.
+_AITER_CSRC = "csrc"
 
 RUNTIME_API_NAMES = {
     "hipeventsynchronize",
@@ -250,27 +255,26 @@ def _framework_source_roots() -> tuple[str, ...]:
 
 
 @functools.lru_cache(maxsize=1)
-@functools.lru_cache(maxsize=1)
 def _aiter_csrc_root() -> str:
-    """Resolve aiter's own device-source root from the installed package.
+    """Resolve aiter's own device-source root from the installed package, where ``aiter/jit/core.py`` resolves it.
 
-    aiter is imported here, not at module import: ``aiter.jit.core`` probes the GPU architecture with ``rocminfo`` when
-    it is imported and raises ``RuntimeError`` on a host with no GPU, such as a hosted run's app container, which imports
-    this module only to build the toolbox. Cached once per process.
+    aiter is found, not imported: importing ``aiter.jit.core`` probes the GPU with ``rocminfo``, opens every card the
+    process can see (which a card census then reads as a foreign holder on other leases' cards) and raises on a host
+    with none. Cached once per process.
 
     Returns:
-        The aiter csrc root (e.g. ``.../aiter_meta/csrc/``), or ``""`` when aiter is not importable or cannot start
-        on this host (logged once).
+        The aiter csrc root (e.g. ``.../aiter_meta/csrc/``), or ``""`` when aiter is not installed or has no ``csrc``.
     """
-    try:
-        import aiter.jit.core as aiter_jit_core  # type: ignore[import-untyped]
-    except ImportError:
+    spec = importlib.util.find_spec("aiter")
+    if spec is None or not spec.submodule_search_locations:
         return ""
-    except RuntimeError as exc:
-        _log.warning("aiter cannot start on this host, so its source root is unknown: %s", exc)
-        return ""
-    raw = (getattr(aiter_jit_core, "AITER_CSRC_DIR", "") or "").replace(os.sep, "/")
-    return (raw.rstrip("/") + "/") if raw else ""
+    package = Path(next(iter(spec.submodule_search_locations)))
+    override = os.environ.get(AITER_META_DIR_ENV)
+    meta = Path(override) if override else image_aiter_meta(package)
+    if not (meta / _AITER_CSRC).is_dir():
+        meta = package.parent
+    csrc = meta / _AITER_CSRC
+    return f"{csrc.resolve().as_posix()}/" if csrc.is_dir() else ""
 
 
 def _flydsl_reusable_roots() -> tuple[str, ...]:

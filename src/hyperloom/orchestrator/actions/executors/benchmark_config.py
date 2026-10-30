@@ -63,6 +63,7 @@ def prepare_benchmark_runtime(config_path: Path, env: dict[str, str]) -> Prepara
     """Prepare synthetic or MLPerf dependencies; native AgentX is owned by Magpie."""
     from hyperloom.inference_optimizer import inferencex_checkout
 
+    from ._magpie_patcher import ensure_lm_eval_install_once
     from ._subprocess_kill import (
         AGENTX_PREFLIGHT_RETURNCODE,
         EVAL_PROBE_UNPATCHABLE_RETURNCODE,
@@ -93,6 +94,8 @@ def prepare_benchmark_runtime(config_path: Path, env: dict[str, str]) -> Prepara
         # Baseline patches its own checkout, but explore / sweep never pass through that hook: re-assert here so a
         # resumed session or a re-cloned checkout still emits the eval-start marker.
         ensure_benchmark_lib_eval_start_patched(Path(inferencex_path))
+        # The measurement runner checks out its own clean InferenceX, so the session checkout's patch never reaches it.
+        ensure_lm_eval_install_once(Path(inferencex_path))
 
     # The generation bounds + pathology probe are asserted whether or not ``$INFERENCEX_PATH`` is set: unset falls
     # back to the same env discovery the baseline arm uses ($MAGPIE_PATH/InferenceX).

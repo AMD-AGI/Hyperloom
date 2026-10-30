@@ -1,0 +1,19 @@
+{
+  "source": "AMD LLM Gateway, https://llm.amd.com/models, read 2026-10-18 (gpt-6-astra 2026-10-24 from /api/models, which lists input and output only; its cache rates take gpt-6-1-sol's ratios); USD per 1M tokens",
+  "models": {
+    "claude-opus-5-5": {"input": 4, "output": 20, "cache_read": 0.2, "cache_write": 5, "cache_write_1h": 8},
+    "claude-sonnet-5-5": {"input": 2, "output": 10, "cache_read": 0.1, "cache_write": 2.5, "cache_write_1h": 4},
+    "claude-haiku-5-5": {"input": 0.1, "output": 0.5, "cache_read": 0.01, "cache_write": 0.125, "cache_write_1h": 0.2},
+    "claude-opus-5": {"input": 5, "output": 25, "cache_read": 0.5, "cache_write": 6.25, "cache_write_1h": 10},
+    "claude-opus-4-8": {"input": 5, "output": 25, "cache_read": 0.5, "cache_write": 6.25, "cache_write_1h": 10},
+    "claude-sonnet-5": {"input": 2, "output": 10, "cache_read": 0.2, "cache_write": 2.5, "cache_write_1h": 4},
+    "gpt-5-6-sol": {"input": 2.72, "output": 13.6, "cache_read": 0.272, "cache_write": 3.4},
+    "gpt-5-6-terra": {"input": 1.36, "output": 8.16, "cache_read": 0.136, "cache_write": 1.7},
+    "gpt-5-6-luna": {"input": 0.136, "output": 0.816, "cache_read": 0.0136, "cache_write": 0.17},
+    "gpt-6-astra": {"input": 6.8, "output": 34, "cache_read": 0.34, "cache_write": 8.5},
+    "gpt-6-1-sol": {"input": 1.36, "output": 6.8, "cache_read": 0.068, "cache_write": 1.7},
+    "deepseek-v4-pro": {"input": 1.183, "output": 2.366, "cache_read": 0.0986},
+    "deepseek-v4-flash": {"input": 0.2992, "output": 0.8976, "cache_read": 0.00952},
+    "deepseek-v4-1-flash": {"input": 0.255, "output": 1.02, "cache_read": 0.00544}
+  }
+}

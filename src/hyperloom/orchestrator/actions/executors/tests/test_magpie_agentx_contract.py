@@ -29,8 +29,13 @@ from hyperloom.orchestrator.actions.executors.benchmark_result import (
 from hyperloom.orchestrator.actions.executors.magpie_agentx import bind_source_evidence, enable_profile, load_benchmark
 
 
+#: The scheduler watchdog every sglang AgentX launch gets unless its recipe or candidate sets one.
+WATCHDOG = ["--watchdog-timeout", "1800"]
+
+
 @pytest.fixture
 def source(tmp_path, monkeypatch):
+    monkeypatch.delenv("SGLANG_WATCHDOG_TIMEOUT", raising=False)
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
     monkeypatch.delenv("HYPERLOOM_AGENTIC_BACKEND", raising=False)
     monkeypatch.setenv(BENCHMARK_CONFIG_ENV, "")
@@ -87,7 +92,7 @@ def test_materializer_does_not_turn_native_workload_into_synthetic(source, tmp_p
     assert "benchmark_script" not in bench
     assert bench["envs"] == {"TP": "1", "EP_SIZE": "1", "CONC": "8", "RUN_EVAL": "false"}
     launch = bench["agentx"]["launch_overrides"]
-    assert launch["append_args"] == ["--disable-cuda-graph"]
+    assert launch["append_args"] == ["--disable-cuda-graph", *WATCHDOG]
     assert launch["env"] == {"SGLANG_TEST": "1"}
 
 
@@ -100,7 +105,7 @@ def test_grid_composes_accepted_launch_then_candidate(source, tmp_path):
     variant = GridVariant("candidate", "--chunked-prefill-size 2048", {"SGLANG_NEXT": "1"}, unset_envs=["SGLANG_TEST"])
     candidate = _build_variant_yaml(GridRecipe(base_yaml_path=base), variant, output_subdir=tmp_path / "candidate")
     launch = load_benchmark(candidate)["agentx"]["launch_overrides"]
-    assert launch["append_args"] == ["--chunked-prefill-size", "2048"]
+    assert launch["append_args"] == ["--chunked-prefill-size", "2048", *WATCHDOG]
     assert launch["env"] == {"SGLANG_NEXT": "1"}
     assert launch["unset_env"] == ["SGLANG_TEST"]
     assert load_benchmark(base)["agentx"]["launch_overrides"]["env"] == {"SGLANG_TEST": "1"}
@@ -122,7 +127,7 @@ def test_grid_ablation_removes_the_option_from_its_owning_layers(source, tmp_pat
         output_subdir=tmp_path / "candidate",
     )
     overrides = load_benchmark(candidate)["agentx"]["launch_overrides"]
-    assert overrides["append_args"] == ["--mem-fraction-static", "0.85"]
+    assert overrides["append_args"] == [*WATCHDOG, "--mem-fraction-static", "0.85"]
     assert overrides["remove_args"] == ([option] if recipe else [])
 
 
@@ -138,7 +143,7 @@ def test_recipe_removal_survives_readding_and_ablating_an_override(source, tmp_p
         output_subdir=tmp_path / "candidate",
     )
     overrides = load_benchmark(candidate)["agentx"]["launch_overrides"]
-    assert overrides["append_args"] == []
+    assert overrides["append_args"] == WATCHDOG
     assert overrides["remove_args"] == ["--cuda-graph-max-bs"]
 
 
@@ -356,7 +361,7 @@ def test_native_baseline_runs_through_the_real_executor(source, tmp_path, monkey
     assert result["status"] == "succeeded", result
     assert result["valid_measurement"] is True
     assert result["launch_evidence"]["magpie_server_launch"] == report["agentx_metrics"]["server_launch"]
-    assert observed["agentx"]["launch_overrides"]["append_args"] == ["--disable-cuda-graph"]
+    assert observed["agentx"]["launch_overrides"]["append_args"] == ["--disable-cuda-graph", *WATCHDOG]
     assert "PROFILE" not in observed["envs"]
 
 
@@ -769,3 +774,75 @@ def test_vllm_attempt_uses_python_for_magpies_module_entrypoint(source, tmp_path
     rendered = materialize_benchmark_config(source, tmp_path / "candidate")
     apply_native_runtime(rendered, {"framework_bin": str(bin_dir / "vllm")})
     assert load_benchmark(rendered)["agentx"]["launch_overrides"]["executable"] == str(bin_dir / "python")
+
+
+def _watchdog(path):
+    args = load_benchmark(path)["agentx"]["launch_overrides"]["append_args"]
+    return [value for flag, value in zip(args, args[1:]) if flag == "--watchdog-timeout"]
+
+
+def test_an_sglang_launch_gets_the_watchdog_the_inferencex_launch_gets(source, tmp_path):
+    base = materialize_benchmark_config(source, tmp_path / "base")
+    candidate = _build_variant_yaml(
+        GridRecipe(base_yaml_path=base),
+        GridVariant("c", "--chunked-prefill-size 2048", {}),
+        output_subdir=tmp_path / "c",
+    )
+
+    assert _watchdog(base) == _watchdog(candidate) == ["1800"]
+
+
+def test_a_launch_that_sets_the_watchdog_keeps_its_own(source, tmp_path):
+    base = materialize_benchmark_config(
+        source, tmp_path / "base", launch=LaunchLayer(extra_server_args="--watchdog-timeout 600")
+    )
+
+    assert _watchdog(base) == ["600"]
+
+
+def test_a_recipe_that_sets_the_watchdog_gets_none_appended(source, tmp_path, report):
+    from hyperloom.inference_optimizer.agentx.report import native_launch_evidence
+    from hyperloom.orchestrator.actions.executors._launch_evidence import persist_launch_evidence
+
+    base = materialize_benchmark_config(
+        source, tmp_path / "base", launch=LaunchLayer(extra_server_args="--watchdog-timeout 3600")
+    )
+    receipt = report["agentx_metrics"]["server_launch"]
+    receipt["base_argv"] = [*receipt["effective_argv"], "--watchdog-timeout", "3600"]
+    persist_launch_evidence(native_launch_evidence(extract_benchmark_measurement(report), base), slot=base.parent)
+    candidate = _build_variant_yaml(
+        GridRecipe(base_yaml_path=base, base=LaunchLayer()),
+        GridVariant("c", "--chunked-prefill-size 2048", {}, args_mode="replace"),
+        output_subdir=tmp_path / "c",
+    )
+
+    assert _watchdog(candidate) == []
+
+
+def test_a_vllm_launch_gets_no_sglang_watchdog(vllm_source, tmp_path):
+    assert _watchdog(materialize_benchmark_config(vllm_source, tmp_path / "base")) == []
+
+
+def _step_timeout(path):
+    return load_benchmark(path)["agentx"]["launch_overrides"]["env"].get("VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS")
+
+
+def test_a_vllm_launch_gets_the_step_timeout_the_inferencex_launch_gets(vllm_source, tmp_path):
+    base = materialize_benchmark_config(vllm_source, tmp_path / "base")
+    candidate = _build_variant_yaml(
+        GridRecipe(base_yaml_path=base), GridVariant("c", "--max-num-seqs 32", {}), output_subdir=tmp_path / "c"
+    )
+
+    assert _step_timeout(base) == _step_timeout(candidate) == "1200"
+
+
+def test_a_vllm_launch_that_sets_or_unsets_the_step_timeout_keeps_its_choice(vllm_source, tmp_path):
+    named = LaunchLayer(extra_envs={"VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS": "600"})
+    unset = LaunchLayer(unset_envs=["VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS"])
+
+    assert _step_timeout(materialize_benchmark_config(vllm_source, tmp_path / "named", launch=named)) == "600"
+    assert _step_timeout(materialize_benchmark_config(vllm_source, tmp_path / "unset", launch=unset)) is None
+
+
+def test_an_sglang_launch_gets_no_vllm_step_timeout(source, tmp_path):
+    assert _step_timeout(materialize_benchmark_config(source, tmp_path / "base")) is None

@@ -1,0 +1,259 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""Closed vocabularies of the experiment blackboard, and which role writes which part of it."""
+
+from __future__ import annotations
+
+from enum import Enum
+
+#: The branch the integrator owns; every other branch is a specialist's.
+INTEGRATION_BRANCH = "integration"
+_NOT_STACKABLE = "not_stackable"
+
+
+class Role(str, Enum):
+    """Who a blackboard handle acts as. Each state has one writer role; reads are open to all."""
+
+    TOOLBOX = "toolbox"
+    GATE = "gate"
+    INTEGRATOR = "integrator"
+    SCHEDULER = "scheduler"
+    SPECIALIST_RUNTIME = "specialist_runtime"
+    OBSERVER = "observer"
+
+
+class ClaimStatus(str, Enum):
+    """A claim is held until its test result arrives, its holder lets it go, or nobody renews it in time."""
+
+    HELD = "held"
+    COMPLETED = "completed"
+    RELEASED = "released"
+    EXPIRED = "expired"
+
+
+class DedupStatus(str, Enum):
+    """What the blackboard knows about an intent on a state (a parent commit); ``testing_elsewhere``: another branch holds
+    a claim on it, or has a test of it in flight, on another state, or has a test of the same change in flight on this
+    one."""
+
+    FREE = "free"
+    IN_PROGRESS = "in_progress"
+    TESTED = "tested"
+    SUSPECTED = "suspected"
+    TESTING_ELSEWHERE = "testing_elsewhere"
+
+
+class Conclusion(str, Enum):
+    """What came of a tested candidate: the rule gate's action on a specialist branch, or the integrator's merge.
+
+    ``DIAGNOSIS_PENDING`` is a blocked gain waiting for its specialist to send it for repair or decline it.
+    ``UNVERIFIED``: a result the decision rested on did not re-verify against its signed bundle, so nothing was landed
+    or requested; the blackboard counts the test as not measured.
+    """
+
+    COMMITTED = "committed"
+    COMMITTED_WITH_REPRO = "committed_with_repro"
+    SPLIT_REQUESTED = "split_requested"
+    SPLIT_PENDING = "split_pending"
+    SPLIT_COMMITTED = "split_committed"
+    DIAGNOSIS_PENDING = "diagnosis_pending"
+    REPAIR_REQUESTED = "repair_requested"
+    RECORDED_ONLY = "recorded_only"
+    ACCURACY_FAILED = "accuracy_failed"
+    UNVERIFIED = "unverified"
+    MERGED = "merged"
+    NOT_STACKABLE = _NOT_STACKABLE
+
+
+#: Conclusions that put a commit on a specialist branch.
+COMMITTING = frozenset({Conclusion.COMMITTED, Conclusion.COMMITTED_WITH_REPRO, Conclusion.SPLIT_COMMITTED})
+#: Conclusions only the integrator reaches, on the integration branch.
+INTEGRATION_CONCLUSIONS = frozenset({Conclusion.MERGED, Conclusion.NOT_STACKABLE})
+
+
+class LineageKind(str, Enum):
+    """Events that shape the branch tree; commits and merges come from judgements and merge attempts instead."""
+
+    ROOT = "root"
+    OPEN = "open"
+    SPLIT = "split"
+    STOP = "stop"
+    REROOT = "reroot"
+    PROBATION = "probation"
+
+
+#: The events that start a branch, once each.
+LINEAGE_STARTS = frozenset({LineageKind.ROOT, LineageKind.OPEN, LineageKind.SPLIT})
+
+#: The one role that records each lineage event.
+LINEAGE_WRITERS: dict[LineageKind, Role] = {
+    LineageKind.ROOT: Role.SCHEDULER,
+    LineageKind.OPEN: Role.SCHEDULER,
+    LineageKind.SPLIT: Role.GATE,
+    LineageKind.STOP: Role.SCHEDULER,
+    LineageKind.REROOT: Role.SPECIALIST_RUNTIME,
+    LineageKind.PROBATION: Role.SCHEDULER,
+}
+
+
+class BranchDriver(str, Enum):
+    """Who drives a branch: its specialist, whom the judge steers, or a third-party agent the user named, which runs
+    the branch end to end by its own logic."""
+
+    SPECIALIST = "specialist"
+    AUTONOMOUS = "autonomous"
+
+
+class CommitOrigin(str, Enum):
+    """How a commit came to exist."""
+
+    ROOT = "root"
+    COMMIT = "commit"
+    SPLIT = "split"
+    MERGE = "merge"
+
+
+class MergeOutcome(str, Enum):
+    """Where a merge attempt stands: tested and merged or not, untested because it conflicted or because its change is
+    already on the integration head, or still testing."""
+
+    MERGED = "merged"
+    NOT_STACKABLE = _NOT_STACKABLE
+    CONFLICT_SKIPPED = "conflict_skipped"
+    ALREADY_ON_HEAD = "already_on_head"
+    PENDING = "pending"
+
+
+#: The merge outcomes that did not carry their commits onto integration: skipped untested because they conflicted, or
+#: tested and not stackable, the candidate failing its merge test included.
+FAILED_MERGES = frozenset({MergeOutcome.CONFLICT_SKIPPED, MergeOutcome.NOT_STACKABLE})
+
+
+class InboxKind(str, Enum):
+    """What an inbox item points at; a ``brief`` item points at the branch's head and asks for its brief again, a
+    ``peer_outcome`` item at another branch's test that refused the branch's claim, once that test ended, and a
+    ``build`` item at the branch's test waiting on a build that became ready, or failed and will be retried."""
+
+    RESULT = "result"
+    JUDGEMENT = "judgement"
+    TOOL_RESULT = "tool_result"
+    LINEAGE = "lineage"
+    BRIEF = "brief"
+    PEER_OUTCOME = "peer_outcome"
+    BUILD = "build"
+
+
+class BuildOutcome(str, Enum):
+    """What came of a build a waiting test needs: it is ready, or it failed for the infrastructure and is retried."""
+
+    READY = "ready"
+    FAILED = "failed"
+
+
+class UsageSource(str, Enum):
+    """Whose LLM spent the money: a branch's specialist, or the scheduler's judge, resolver, the rule gate's fix
+    critic, the LLM that authors a change to the scheduling playbook at CLOSE, or the one that curates the RSI lesson
+    pool there. The author's spend is stored as ``scorer``, the value every blackboard holds it under."""
+
+    SPECIALIST = "specialist"
+    JUDGE = "judge"
+    RESOLVER = "resolver"
+    CRITIC = "critic"
+    AUTHOR = "scorer"
+    CURATOR = "curator"
+
+
+class QuarantineAction(str, Enum):
+    QUARANTINE = "quarantine"
+    LIFT = "lift"
+
+
+class LeaseKind(str, Enum):
+    """What holds a lease's cards outside the tests: an autonomous branch, a dev sandbox, a tool's job, which names its
+    tool, or PRELUDE's single-lineage child, whose lease the integration branch is charged."""
+
+    AUTONOMOUS = "autonomous"
+    DEV = "dev"
+    TOOL_JOB = "tool_job"
+    PRELUDE_CHILD = "prelude_child"
+
+
+class LeaseEndReason(str, Enum):
+    """Why a lease's cards went back to the pool: their holder gave them back, the session's close ended the lease, or
+    the toolbox that granted it was lost and a later one closed it."""
+
+    RELEASED = "released"
+    SESSION_CLOSE = "session_close"
+    TOOLBOX_LOST = "toolbox_lost"
+
+
+class LearningKind(str, Enum):
+    """What a specialist's learning is: a way to fail, how the system behaves here, how a tool or setting behaves, what
+    a hypothesis came to, or something else."""
+
+    PITFALL = "pitfall"
+    INSIGHT = "insight"
+    TOOLING = "tooling"
+    HYPOTHESIS = "hypothesis"
+    OTHER = "other"
+
+
+class FrontierBasis(str, Enum):
+    """What a frontier score rests on, so its reader knows how far to trust it.
+
+    ``trend`` is the branch's own recent gain; ``observing`` the floor of a branch whose kernel-layer direction may
+    still pay off; ``new`` the floor of a branch too young to have a trend; ``repair`` the gain of the blocked
+    candidate a young repair branch was opened to repair; ``pending`` the gain of a measured candidate waiting for its
+    confirm; ``headroom`` the roofline bound that capped any of them; ``amdahl`` the most that speeding up the head's
+    largest op could gain, which capped any of them. ``prior`` and ``custom`` decode older sessions' scores, which
+    rested on what similar archived branches still gained and on a formula other than the built-in one; no score
+    rests on them now.
+    """
+
+    TREND = "trend"
+    PRIOR = "prior"
+    OBSERVING = "observing"
+    NEW = "new"
+    REPAIR = "repair"
+    PENDING = "pending"
+    HEADROOM = "headroom"
+    AMDAHL = "amdahl"
+    CUSTOM = "custom"
+
+
+class UnfinishedReason(str, Enum):
+    """Why a result of the session is worth finishing: a commit of a stopped branch whose merge onto the integration
+    head was not stackable, an explore that kept accuracy and fell just short of its bar, a blocked candidate whose
+    repair never finished, or an explore withdrawn before its result."""
+
+    NOT_STACKABLE = _NOT_STACKABLE
+    NEAR_BAR = "near_bar"
+    REPAIR_UNFINISHED = "repair_unfinished"
+    WITHDRAWN = "withdrawn"
+
+
+__all__ = [
+    "COMMITTING",
+    "FAILED_MERGES",
+    "INTEGRATION_BRANCH",
+    "INTEGRATION_CONCLUSIONS",
+    "LINEAGE_STARTS",
+    "LINEAGE_WRITERS",
+    "BuildOutcome",
+    "ClaimStatus",
+    "CommitOrigin",
+    "Conclusion",
+    "DedupStatus",
+    "FrontierBasis",
+    "InboxKind",
+    "LearningKind",
+    "LeaseEndReason",
+    "LeaseKind",
+    "LineageKind",
+    "MergeOutcome",
+    "QuarantineAction",
+    "Role",
+    "UnfinishedReason",
+    "UsageSource",
+]

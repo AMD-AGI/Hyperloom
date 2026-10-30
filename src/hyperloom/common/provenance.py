@@ -18,6 +18,7 @@ from typing import Any, Mapping
 
 from hyperloom.common.coerce import to_int
 from hyperloom.common.gpu_identity import gfx_arch_for_gpu_type
+from hyperloom.common.outside_facts import ENV_CONC, ENV_EP, ENV_ISL, ENV_MAX_MODEL_LEN, ENV_OSL, ENV_TP
 
 PROVENANCE_VERSION = 1
 
@@ -364,15 +365,15 @@ def build_provenance(
         # hardware / parallelism / graph
         "gpu_type": gpu_type,
         "gfx_arch": detect_gfx_arch(env, gpu_type=gpu_type, probe=probe),
-        "tp": to_int(_arg_first(args, "tp") or _env_first(env, "TP")),
-        "ep": to_int(_arg_first(args, "ep") or _env_first(env, "EP")),
+        "tp": to_int(_arg_first(args, "tp") or _env_first(env, ENV_TP)),
+        "ep": to_int(_arg_first(args, "ep") or _env_first(env, ENV_EP)),
         "graph_mode": (_arg_first(args, "graph_mode") or detect_graph_mode(env)),
         # dtype / workload
         "dtype": (_arg_first(args, "precision", "dtype") or _env_first(env, "PRECISION")),
-        "concurrency": to_int(_arg_first(args, "conc", "concurrency") or _env_first(env, "CONC", "CONCURRENCY")),
-        "isl": to_int(_arg_first(args, "isl") or _env_first(env, "ISL")),
-        "osl": to_int(_arg_first(args, "osl") or _env_first(env, "OSL")),
-        "max_model_len": to_int(_arg_first(args, "max_model_len") or _env_first(env, "MAX_MODEL_LEN")),
+        "concurrency": to_int(_arg_first(args, "conc", "concurrency") or _env_first(env, ENV_CONC, "CONCURRENCY")),
+        "isl": to_int(_arg_first(args, "isl") or _env_first(env, ENV_ISL)),
+        "osl": to_int(_arg_first(args, "osl") or _env_first(env, ENV_OSL)),
+        "max_model_len": to_int(_arg_first(args, "max_model_len") or _env_first(env, ENV_MAX_MODEL_LEN)),
         # full server args + fingerprint
         "server_args": server_args,
         "server_args_hash": server_args_hash(server_args),

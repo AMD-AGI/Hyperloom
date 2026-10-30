@@ -1,0 +1,30 @@
+benchmark:
+  framework: sglang
+  model: /shared_nfs/models/GLM-5.3-Quark-MXFP4-AttnFP8
+  precision: fp4
+  run_mode: local
+  agentx:
+    enabled: true
+    mode: canonical
+    launch_overrides:
+      version: 1
+      append_args: []
+      replace_args: false
+      remove_args: []
+      env: {}
+      unset_env: []
+      source_files: {}
+      absent_source_files: []
+  envs:
+    TP: 4
+    EP_SIZE: 4
+    CONC: 10
+    MODEL_PATH: /shared_nfs/models/GLM-5.3-Quark-MXFP4-AttnFP8
+    RUN_EVAL: 'false'
+    PYTHONUNBUFFERED: '1'
+  profiler:
+    torch_profiler:
+      enabled: false
+  runner_type: mi355x
+  docker_image: harbor.global.primus-safe.amd.com/sync/lmsysorg/sglang-rocm:v0.5.22-rocm10-mi35x-20261025
+  timeout_seconds: 7800.0

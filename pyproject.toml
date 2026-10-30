@@ -101,8 +101,30 @@ forge-profiling = [
     "textual-fspicker>=0.4.3",
     "tqdm",
 ]
+# What only a hosted run needs, on top of ``runtime``. Hosted measurement: Ed25519 signing (cryptography), the E2B
+# sandbox SDK and the S3 result archive, each imported lazily, only by the hosted-measurement modules. ``e2b`` 2.53 is the first SDK whose ``connect``
+# sends the ``E2b-Sandbox-Id`` header the data-plane router needs and whose errors carry a ``status_code``.
+hosted = [
+    "cryptography>=42",
+    "e2b>=2.53.1,<3",
+    "boto3>=1.28",
+]
+# The measurement runner inside a sealed sandbox: it reads the YAML config and signs its result manifest. The sealed
+# runner installs ``requirements/runner.lock``, this list compiled with hashes, and never resolves this list itself.
+# The framework stack (torch, triton, sglang, aiter) is the framework image's and must not be listed here.
+#
+# ``lm_eval[api]`` is the accuracy pass's client: 0.4.13, the release that the ref ``inference_optimizer/cli/preflight.py``
+# pins (``_LM_EVAL_PINNED_REF``). It comes from PyPI, not as that ref's GitHub archive, because GitHub does not keep an
+# archive's checksum stable and a hash lock must not depend on one. ``tenacity`` is what its ``api`` models import.
+runner = [
+    "PyYAML>=6.0",
+    "cryptography>=42",
+    "lm_eval[api]==0.4.13",
+    "tenacity",
+]
 test = [
     "hyperloom-inference_optimizer[runtime]",
+    "hyperloom-inference_optimizer[hosted]",
     "hyperloom-inference_optimizer[ci]",
     # The Experience KB tests run on PostgreSQL too when HYPERLOOM_KB_TEST_DATABASE_URL names a server.
     "hyperloom-inference_optimizer[kb-service]",
@@ -158,6 +180,7 @@ kernelforge = "kernelforge.cli:main"
 hyperloom-kb = "hyperloom_kb.cli:main"
 hyperloom-kb-serve = "hyperloom_kb.http_service:main"
 hyperloom-kb-collect = "hyperloom_kb.collect.cli:main"
+hyperloom-multibranch = "hyperloom_multibranch.cli:main"
 
 [tool.setuptools]
 # setuptools defaults this to true for pyproject-based config, which makes
@@ -246,6 +269,10 @@ hyperloom = [
     "hosted/*.sh",
     "orchestrator/prompts/*.md",
     "orchestrator/prompts/references/*.md",
+    # JSON Schemas of the hosted-measurement contracts (measurement spec and result manifest).
+    "contracts/*.schema.json",
+    # The reference rule pack a session reads when HYPERLOOM_RULE_PACK names no other; importing outside_facts fails without it.
+    "common/outside_facts/packs/*.yaml",
 ]
 "hyperloom.inference_optimizer" = [
     "SKILL.md",
@@ -321,6 +348,11 @@ hyperloom_kb = [
     "declarations/*.yaml",
     "mappings/*.yaml",
 ]
+hyperloom_multibranch = [
+    "contracts/llm_prices.json",
+    "blackboard/knowledge/declarations/*.yaml",
+    "blackboard/knowledge/mappings/*.yaml",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -337,6 +369,7 @@ testpaths = [
 pythonpath = ["src", ".", "scripts"]
 markers = [
     "targeted_build_e2e: end-to-end tests that run a real AITER compile on a ROCm host; skip with '-m \"not targeted_build_e2e\"' in CI.",
+    "claw_policy: a sandbox contract test of the Claw sandbox service's own policy (sealed paths, signing identity, platform metadata, avoid-nodes); it runs against the local provider and a real Claw service, not against the E2B stand-in.",
 ]
 
 [tool.coverage.run]
@@ -348,6 +381,7 @@ source = [
     "src/hyperloom",
     "src/kernelforge",
     "src/hyperloom_kb",
+    "src/hyperloom_multibranch",
     "OOB",  # optional component; not always present in a clone
 ]
 # Omitted: tests / package boilerplate, CLI drivers, subprocess wrappers, and

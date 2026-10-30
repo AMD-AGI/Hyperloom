@@ -56,7 +56,7 @@ def agentx_measurement(report: dict[str, Any]) -> dict[str, Any]:
         "total_token_throughput": throughput.get("total_tokens_per_second"),
         "total_throughput": throughput.get("total_tokens_per_second"),
         "completed_requests": requests.get("successful"),
-        "requested_requests": requests.get("total"),
+        "requested_requests": requests.get("profiled_total"),
         "duration_seconds": throughput.get("duration_seconds"),
         "request_error_rate": None if requests.get("error_rate") is None else requests["error_rate"] * 100,
         "e2e_norm_intvty_p50": intvty.get("p50"),

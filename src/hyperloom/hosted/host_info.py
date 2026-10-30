@@ -12,8 +12,10 @@ or its first archive upload, fails before it starts instead.
 
 Which variables a run needs depends on what it hosts, so :func:`read_host_info`
 takes the groups to require (:class:`HostGroup`).  The run, state and input
-variables are always required.  A group that is not required may still be set;
-it is then checked like a required one and read into its field.
+variables are required unless the reader is told the run has no host
+(``require_run=False``): a session started by hand on a grant handed to it.  A
+variable that is not required may still be set; it is then checked like a
+required one and read into its field.
 
 Credentials (sandbox keys, the MCP token, archive credentials) are held in
 :class:`Secret`, whose ``repr``, ``str`` and format output never contain the
@@ -101,9 +103,11 @@ class HostGroup(str, Enum):
     MEASUREMENT_KEY = "measurement-key"
     SUBRUN_KEY = "subrun-key"
     DEV_KEY = "dev-key"
+    GRANT = "grant"
+    SOURCE = "source"
 
 
-_ALWAYS_REQUIRED: tuple[str, ...] = (Var.INPUT_FILE, Var.RUN_ID, Var.RUN_CREATED_AT, Var.STATE_DIR)
+_RUN_INPUTS: tuple[str, ...] = (Var.INPUT_FILE, Var.RUN_ID, Var.RUN_CREATED_AT, Var.STATE_DIR)
 
 _GROUP_VARS: Mapping[HostGroup, tuple[str, ...]] = {
     HostGroup.MCP: (Var.MCP_PORT, Var.MCP_TOKEN),
@@ -112,6 +116,9 @@ _GROUP_VARS: Mapping[HostGroup, tuple[str, ...]] = {
     HostGroup.MEASUREMENT_KEY: (Var.SANDBOX_KEY_MEASUREMENT,),
     HostGroup.SUBRUN_KEY: (Var.SANDBOX_KEY_SUBRUN,),
     HostGroup.DEV_KEY: (Var.SANDBOX_KEY_DEV,),
+    # The grant's runtime counts from the run's creation, so its limits are of no use without that time.
+    HostGroup.GRANT: (Var.GRANT_LIMITS, Var.RUN_CREATED_AT),
+    HostGroup.SOURCE: (Var.SOURCE_REPO, Var.SOURCE_SHA),
 }
 
 #: Required by default: the shape of the first hosted profile (run, state, input and the MCP server).
@@ -204,7 +211,8 @@ class GrantLimits:
 
 @dataclass(frozen=True)
 class HostInfo:
-    """Everything the host injected, typed.  Optional fields are ``None`` when the host did not set them."""
+    """Everything the host injected, typed.  Optional fields are ``None`` when the host did not set them; so are the
+    run, state and input fields, and ``events_dir`` with them, of a read with ``require_run=False`` that lacks them."""
 
     input_file: Path
     run_id: str
@@ -430,8 +438,8 @@ def _archive_location(value: str) -> ArchiveLocation:
     return ArchiveLocation(bucket=parts.netloc, prefix=raw)
 
 
-def _needed_names(require: Collection[HostGroup]) -> frozenset[str]:
-    names = set(_ALWAYS_REQUIRED)
+def _needed_names(require: Collection[HostGroup], require_run: bool) -> frozenset[str]:
+    names = set(_RUN_INPUTS if require_run else ())
     for group in require:
         names.update(_GROUP_VARS[HostGroup(group)])
     return frozenset(names)
@@ -487,30 +495,34 @@ def _build(reader: _Reader) -> HostInfo:
     )
 
 
-def read_host_info(env: Mapping[str, str], *, require: Collection[HostGroup] = DEFAULT_REQUIRE) -> HostInfo:
+def read_host_info(
+    env: Mapping[str, str], *, require: Collection[HostGroup] = DEFAULT_REQUIRE, require_run: bool = True
+) -> HostInfo:
     """Read and check the host-injected inputs from *env*.
 
-    The run, state and input variables are always required; *require* adds the
-    groups the run hosts (sandbox variables when the measurement or sandbox plug
-    is hosted, the archive when results are archived, and so on).  Every missing
-    or malformed variable is reported in one :class:`HostInfoError`.  *env* is
-    not modified.
+    The run, state and input variables are required unless *require_run* is
+    false; *require* adds the groups the run hosts (sandbox variables when the
+    measurement or sandbox plug is hosted, the archive when results are
+    archived, and so on).  Every missing or malformed variable is reported in
+    one :class:`HostInfoError`.  *env* is not modified.
     """
-    reader = _Reader(env, _needed_names(require))
+    reader = _Reader(env, _needed_names(require, require_run))
     info = _build(reader)
     if reader.missing or reader.invalid:
         raise HostInfoError(reader.missing, reader.invalid)
     return info
 
 
-def take_host_info(environ: MutableMapping[str, str], *, require: Collection[HostGroup] = DEFAULT_REQUIRE) -> HostInfo:
+def take_host_info(
+    environ: MutableMapping[str, str], *, require: Collection[HostGroup] = DEFAULT_REQUIRE, require_run: bool = True
+) -> HostInfo:
     """:func:`read_host_info`, then remove every host-only input from *environ* (:data:`HOST_ONLY_VARS`).
 
     ``NODE_NAME`` and ``CLAW_SESSION_ID`` stay: other code reads them.
 
     Nothing is removed when the read fails, so the caller can still report on the environment it was given.
     """
-    info = read_host_info(environ, require=require)
+    info = read_host_info(environ, require=require, require_run=require_run)
     for name in HOST_ONLY_VARS:
         environ.pop(name, None)
     return info
