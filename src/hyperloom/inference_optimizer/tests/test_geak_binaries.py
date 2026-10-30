@@ -19,6 +19,15 @@ def _no_pinned_binaries(monkeypatch):
     monkeypatch.setenv("GEAK_AGENT_BACKEND", "codex")
 
 
+@pytest.fixture(autouse=True)
+def _geak_commands_on_path(tmp_path, monkeypatch):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for command in ("node", "codex"):
+        _executable(bin_dir, command)
+    monkeypatch.setenv("PATH", str(bin_dir))
+
+
 def _executable(tmp_path, name):
     path = tmp_path / name
     path.write_text("#!/bin/sh\n", encoding="utf-8")
