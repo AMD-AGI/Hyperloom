@@ -5,7 +5,8 @@
 
 Each finished test yields at most one lesson:
 
-* ``worked``: a committed or merged improvement.
+* ``worked``: a committed or merged improvement. An AgentX session's says its outputs were not checked: that gate reads
+  speed and the request error rate, so a change to what the model says is kept all the same (#162).
 * ``failed``: a regression or a flat result, which no one should repeat on the same state.
 * ``pitfall``: a candidate that failed to run, or ran faster but failed the accuracy check or was blocked.
 
@@ -25,6 +26,7 @@ from hyperloom_multibranch.contracts.blackboard.vocab import COMMITTING, Conclus
 
 MAX_ITEMS = 20
 MAX_ITEM_CHARS = 300
+UNCHECKED_OUTPUTS = ", outputs not checked"
 _WORKED = COMMITTING | {Conclusion.MERGED}
 _SETTLED = frozenset({HypothesisStatus.CONFIRMED, HypothesisStatus.FALSIFIED})
 _NO_LESSON = frozenset({Verdict.IMPROVED, Verdict.NEEDS_CONFIRM, Verdict.INCONCLUSIVE})
@@ -98,13 +100,20 @@ def lesson_of(record: TestRecord, snapshot: BlackboardSnapshot) -> Lesson | None
     if record.conclusion is Conclusion.ACCURACY_FAILED:
         return lesson(LessonKind.PITFALL, f"{gain} but failed the accuracy check", judged.gain_pct)
     if record.conclusion in _WORKED:
-        return lesson(LessonKind.WORKED, f"{gain}, {record.conclusion.value} as {record.commit_id}", judged.gain_pct)
+        kept = f"{gain}, {record.conclusion.value} as {record.commit_id}{_unchecked(snapshot.profile)}"
+        return lesson(LessonKind.WORKED, kept, judged.gain_pct)
     if judged.verdict is Verdict.BLOCKED:
         held_back_by = ", ".join(judged.refused_by) or "the accuracy check"
         return lesson(LessonKind.PITFALL, f"{gain} but held back by {held_back_by}", judged.gain_pct)
     if judged.verdict in _NO_LESSON:
         return None
     return lesson(LessonKind.FAILED, f"{judged.verdict.value} at {gain}", judged.gain_pct)
+
+
+def _unchecked(profile: SessionProfile | None) -> str:
+    """What an AgentX session's worked lesson adds; an AgentX trace replay has no input length."""
+
+    return UNCHECKED_OUTPUTS if profile is not None and profile.isl is None else ""
 
 
 def per_test_lessons(snapshot: BlackboardSnapshot) -> tuple[Lesson, ...]:
@@ -172,6 +181,7 @@ def listed(texts: Iterable[str]) -> tuple[str, ...]:
 __all__ = [
     "MAX_ITEMS",
     "MAX_ITEM_CHARS",
+    "UNCHECKED_OUTPUTS",
     "Lesson",
     "LessonKind",
     "SessionLessons",

@@ -63,6 +63,17 @@ def test_the_session_lists_put_the_best_and_the_worst_first(snapshot: Blackboard
     assert session_lessons(snapshot).gaps == ()
 
 
+def test_an_agentx_session_says_what_worked_did_not_have_its_outputs_checked(snapshot: BlackboardSnapshot) -> None:
+    agentx = session_lessons(dataclasses.replace(snapshot, profile=profile(isl=None, osl=None)), "i1")
+    inferencex = session_lessons(snapshot, "i1")
+
+    assert agentx.worked == (
+        "merge of c1 on c0: +4.10%, merged as i1, outputs not checked",
+        "moe gemm / tuned kernel on c0: +4.00%, committed as c1, outputs not checked",
+    )
+    assert (agentx.failed, agentx.pitfalls) == (inferencex.failed, inferencex.pitfalls)
+
+
 def test_a_test_in_flight_unmeasured_unverified_or_improved_without_a_commit_teaches_nothing(
     snapshot: BlackboardSnapshot,
 ) -> None:
