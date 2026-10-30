@@ -49,12 +49,19 @@ _runtime_env_read_quoted_value() {
   done
 }
 
+# Paths install.sh derives from USER_DATA_PATH. A checkout's .env is shared by
+# every session that runs from it, so a copy there belongs to whichever
+# workspace wrote it last: when the caller names its own USER_DATA_PATH these
+# come from that root, never from .env.
+RUNTIME_ENV_WORKSPACE_DERIVED_KEYS="HYPERLOOM_RUNTIME_DIR KERNEL_AGENT_ENV HYPERLOOM_ROOT"
+
 load_dotenv_no_clobber() {
   DOTENV_LOADED_COUNT=0
   [ -f "$REPO_ROOT/.env" ] || return 0
-  local loaded=0 authoritative=0 readonly_root=0
+  local loaded=0 authoritative=0 readonly_root=0 caller_root=0
   setup_dotenv_is_authoritative && authoritative=1
   runtime_env_var_is_readonly USER_DATA_PATH && readonly_root=1
+  [ -n "${USER_DATA_PATH:-}" ] && caller_root=1
   local pass raw key value REPLY
   # Resolve the caller/file mode before any Python key, regardless of line order.
   for pass in mode values; do
@@ -86,6 +93,9 @@ load_dotenv_no_clobber() {
         if [ "${HYPERLOOM_RUN_MODE:-}" = docker ]; then
           case "$key" in PYTHON|VIRTUAL_ENV|INFERENCE_OPTIMIZER_FORCE_PYTHON) continue ;; esac
         fi
+      fi
+      if [ "$caller_root" -eq 1 ] && [[ " $RUNTIME_ENV_WORKSPACE_DERIVED_KEYS " == *" $key "* ]]; then
+        continue
       fi
       if [ "$key" = USER_DATA_PATH ] && [ "$readonly_root" -eq 1 ]; then
         if [ "${USER_DATA_PATH:-}" != "$value" ] &&

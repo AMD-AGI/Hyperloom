@@ -152,6 +152,11 @@ def _is_placeholder_tracelens_path(value: str) -> bool:
 
 _HOST_PYTHON_ENV_KEYS = frozenset({"PYTHON", "VIRTUAL_ENV", "INFERENCE_OPTIMIZER_FORCE_PYTHON"})
 
+# Paths install.sh derives from USER_DATA_PATH. The checkout's .env is shared by every session run from it, so when the
+# caller names its own workspace these come from that root, not from whichever workspace last wrote .env (mirrors
+# RUNTIME_ENV_WORKSPACE_DERIVED_KEYS in assets/runtime_env.sh).
+_WORKSPACE_DERIVED_ENV_KEYS = frozenset({"HYPERLOOM_RUNTIME_DIR", "KERNEL_AGENT_ENV", "HYPERLOOM_ROOT"})
+
 
 def _load_missing_env_vars(file_vars: dict[str, str]) -> int:
     """Fill gaps without importing host Python choices into an explicit Docker run."""
@@ -187,6 +192,8 @@ def _load_dotenv_fallback() -> dict[str, Any]:
     )
     for key in dropped_vars:
         print(f"Preflight: WARNING — ignoring unsupported .env key {key} from {env_file}", file=sys.stderr)
+    if os.environ.get("USER_DATA_PATH", "").strip():
+        safe_vars = {key: value for key, value in safe_vars.items() if key not in _WORKSPACE_DERIVED_ENV_KEYS}
     loaded = _load_missing_env_vars(safe_vars)
     if loaded:
         print(f"Preflight: loaded {loaded} missing var(s) from {env_file} (env wins)")
