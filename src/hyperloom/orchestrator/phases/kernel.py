@@ -3451,6 +3451,7 @@ class KernelPhase(CoordinatorCollaborator):
     async def _validate_gemm_tuning_e2e(self, result: dict[str, Any]) -> None:
         """Sequentially E2E-validate each tuning candidate's env independently."""
         from ..actions.executors._aiter_jit import drop_serving_so_for_envs
+        from ..kernel.subthreshold_bundle import defer_env_win
 
         candidates = self._gemm_canonical_candidates(result)
         if not candidates:
@@ -3510,6 +3511,9 @@ class KernelPhase(CoordinatorCollaborator):
             if blockers:
                 # Distinguish no gain from a tuned artifact the runtime never reached.
                 reason = f"tuned_config_never_applied[{'+'.join(blockers)}] ({reason})"
+            else:
+                server_args = self._gemm_candidate_server_args(tuner_name)
+                defer_env_win(self.shared_state, verdict, tuner=tuner_name, envs=env, server_args=server_args)
             reverted.append({**cand, "reason": reason})
             await asyncio.to_thread(drop_serving_so_for_envs, test_envs, backup_dir=jit_backup_dir)
 
@@ -3618,16 +3622,19 @@ class KernelPhase(CoordinatorCollaborator):
             }
             return
         from ..kernel.controller_patch_integration import KeepSession, integrate_controller_patches
+        from ..kernel.subthreshold_bundle import defer_patch_win
 
+        session = KeepSession(
+            session_dir=self.session_dir,
+            shared_state=self.shared_state,
+            record_keep=self._coord.writeback.record_integrate_keep,
+        )
         try:
             integration = await integrate_controller_patches(
                 patches_root=str(result.get("patches_root") or output_dir / "result" / "patches"),
-                session=KeepSession(
-                    session_dir=self.session_dir,
-                    shared_state=self.shared_state,
-                    record_keep=self._coord.writeback.record_integrate_keep,
-                ),
+                session=session,
                 admit_round=lambda rounds_run: controller_round_stop(self.shared_state, rounds_run),
+                on_unkept=lambda publication, validation: defer_patch_win(session, publication, validation),
             )
             result["integration"] = integration.to_dict()
         except Exception as error:  # isolation boundary: the Controller patch integration step, recorded as failed

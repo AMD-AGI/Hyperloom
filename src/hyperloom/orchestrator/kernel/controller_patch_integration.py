@@ -86,6 +86,9 @@ KeepRecorder = Callable[[dict[str, Any]], Awaitable[None]]
 #: Given how many E2E rounds already ran, says why the next one cannot start, or ``None`` to start it.
 RoundAdmission = Callable[[int], StoppedByTheRun | None]
 
+#: Told of each measured publication the E2E did not KEEP, before its patch is reverted.
+UnkeptRecorder = Callable[[ControllerPatchPublication, dict[str, Any]], None]
+
 
 @dataclass(frozen=True)
 class KeepSession:
@@ -338,10 +341,12 @@ class _ControllerIntegration:
         validate: PatchValidator,
         persist_keep: Callable[[ControllerPatchPublication, dict[str, Any], str], Awaitable[str]],
         admit_round: RoundAdmission,
+        on_unkept: UnkeptRecorder,
     ) -> None:
         self._validate = validate
         self._persist_keep = persist_keep
         self._admit_round = admit_round
+        self._on_unkept = on_unkept
         # One base commit, the head it was pinned against and the pin's error per
         # repository, rather than one repository per run.
         self._pins: dict[Path, tuple[str, str, str]] = {}
@@ -422,6 +427,7 @@ class _ControllerIntegration:
             str(validation.get("status") or "ok").lower() == "ok" and str(validation.get("decision")).upper() == "KEEP"
         )
         if not kept:
+            self._on_unkept(publication, validation)
             reason = str(validation.get("error") or validation.get("decision_reason") or "E2E did not KEEP")
             return _refusal(
                 publication,
@@ -469,6 +475,7 @@ async def integrate_controller_patches(
     session: KeepSession,
     validator: PatchValidator | None = None,
     admit_round: RoundAdmission = lambda _rounds_run: None,
+    on_unkept: UnkeptRecorder = lambda _publication, _validation: None,
 ) -> ControllerIntegrationSummary:
     """Apply and E2E-validate complete Controller patches in task-priority order.
 
@@ -479,6 +486,7 @@ async def integrate_controller_patches(
             optimizer's own integrate handler.
         admit_round: Asked before each patch is applied; a stop leaves the patch
             unapplied and unmeasured, recorded under the stop's class.
+        on_unkept: Given every measured verdict that did not KEEP, while its patch is still applied.
     """
     integration_root = Path(patches_root).resolve().parent.parent / "integration"
     results_dir = integration_root / "results"
@@ -508,6 +516,7 @@ async def integrate_controller_patches(
         validator or (lambda publication: _default_validator(publication, session_dir=Path(session.session_dir))),
         persist_keep,
         admit_round,
+        on_unkept,
     )
     results: list[PatchIntegrationResult] = []
     for index, patch_dir in enumerate(_measurement_ordered_patch_dirs(patches_root)):
