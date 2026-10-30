@@ -12,11 +12,14 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.contracts.measurement import AttachmentRef, Purpose, TestKind, TestRequest
+from hyperloom.contracts.measurement import REPRODUCED, AttachmentRef, Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom.measure.compile import LocalBlobStore
+from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.blackboard.records import BlackboardSnapshot, RegressionCase, TestRecord
+from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.rsi.archive import TreeArchive
+from hyperloom_multibranch.blackboard.rsi.briefing import KNOWN_DEFECT, CrossSessionBriefing
 from hyperloom_multibranch.blackboard.rsi.cases import (
     IMAGE_DIGEST_ENV,
     NO_IMAGE_DIGEST,
@@ -26,7 +29,7 @@ from hyperloom_multibranch.blackboard.rsi.cases import (
     session_cases,
 )
 from hyperloom_multibranch.blackboard.rsi.session import NO_CASE, WRITTEN, CloseTargets, close_knowledge
-from hyperloom_multibranch.blackboard.tests.factories import FakeClock
+from hyperloom_multibranch.blackboard.tests.factories import FakeClock, result
 from hyperloom_multibranch.blackboard.tests.sessions import METRIC, scripted_session
 from hyperloom_multibranch.rulegate.fix_case import FIX_CASE_ID, pack_case
 
@@ -150,3 +153,27 @@ async def test_a_session_is_handed_other_sessions_cases_of_its_image_and_model_a
     assert case.origin == "past-1 c1"
     assert await SessionCases(pool, OTHER_IMAGE, blackboard).cases() == ()
     assert session_cases("", blackboard, archive) is None
+
+
+async def test_a_brief_names_a_pooled_case_that_reproduced_on_the_root_as_a_defect_the_root_carries(
+    tmp_path: Path,
+) -> None:
+    blackboard = await scripted_session(tmp_path / "blackboard", FakeClock())
+    snapshot = await blackboard.snapshot()
+    blobs, pool = LocalBlobStore(tmp_path / "blobs"), CasePool(tmp_path / "cases")
+    pool_cases(_registered(_of_session(snapshot, "past-1"), blobs, "p1"), blobs, pool, IMAGE)
+    (entry,) = pool.entries()
+    # The regression set ran the pooled case on the root c0, where it reproduced.
+    toolbox = LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
+    case = (AttachmentRef(FIX_CASE_ID, "dir", entry.case_id),)
+    repro = TestRequest(
+        TestKind.REPRO, Purpose.REPRO, INTEGRATION_BRANCH, "c0", RecipeDelta(), attachments=case, request_id="p9"
+    )
+    await toolbox.write_request(repro)
+    await toolbox.write_result(dataclasses.replace(result("p9"), repro_verdict=REPRODUCED))
+
+    brief = await CrossSessionBriefing(blackboard, cases=pool).startup_brief("c1")
+    without = await CrossSessionBriefing(blackboard).startup_brief("c1")
+
+    assert brief.lessons[0] == f"{KNOWN_DEFECT} past-1 c1: {DIAGNOSIS}"
+    assert not any(line.startswith(KNOWN_DEFECT) for line in without.lessons)
