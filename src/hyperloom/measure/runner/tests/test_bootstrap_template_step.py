@@ -45,7 +45,7 @@ _MEASURED_STEP = (
 #: The SHA-256 of that step as the run's file held it, with its final newline.
 _MEASURED_SHA256 = "a9f37e7ea9b19f7c5ae6c2d79d9c1a0a27872dd1b96bb75ab1bf7b03c8edf36c"
 _KEY_COPY = '(umask 077 && cp "$HYPERLOOM_SIGNING_KEY_FILE" /app/work/hl-sign.pem)'
-_APP_DIRS = {"in_dir": "/app/in", "out_dir": "/app/out", "scratch_dir": "/app/work/scratch"}
+_APP_PATHS = {"dirs": ("/app/in", "/app/out", "/app/work/scratch"), "boot_log": "/app/work/runner-boot.log"}
 #: How long the step may take to return: it makes three directories and forks; the runner's start is not waited for.
 _RETURNS_WITHIN_SEC = 3.0
 #: How long the background runner may take to reach the point where it waits for the spec (a venv and a pip install).
@@ -60,7 +60,7 @@ def test_the_step_is_the_one_the_joint_run_measured() -> None:
         "1800",
         pre=_KEY_COPY,
         env={"HYPERLOOM_SIGNING_KEY_FILE": "/app/work/hl-sign.pem"},
-        **_APP_DIRS,
+        **_APP_PATHS,
     )
     assert step == _MEASURED_STEP
     subprocess.run(["/bin/sh", "-n", "-c", step], check=True)
@@ -128,7 +128,11 @@ def test_the_step_returns_while_the_runner_goes_on_in_the_background(
     }
     began = time.monotonic()
     shell = subprocess.Popen(
-        ["/bin/sh", "-c", runner_template_step(pre="true", **dirs)],
+        [
+            "/bin/sh",
+            "-c",
+            runner_template_step(pre="true", dirs=tuple(dirs.values()), boot_log=str(work / "runner-boot.log")),
+        ],
         env=env,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
