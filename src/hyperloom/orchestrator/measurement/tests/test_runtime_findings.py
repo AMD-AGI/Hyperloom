@@ -366,7 +366,6 @@ def test_unlisted_rules_cannot_justify_a_correctness_fix():
 
 def test_persist_writes_slot_file(tmp_path):
     report = scan_server_log(None, "custom")
-    path = persist_runtime_findings(report, slot=tmp_path / "variant_00_x")
+    persist_runtime_findings(report, slot=tmp_path / "variant_00_x")
 
-    assert path == str(tmp_path / "variant_00_x" / "runtime_findings.json")
-    assert Path(path).read_text(encoding="utf-8").startswith("{")
+    assert (tmp_path / "variant_00_x" / "runtime_findings.json").read_text(encoding="utf-8").startswith("{")

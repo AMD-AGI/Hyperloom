@@ -140,10 +140,14 @@ pip install --quiet 'ray[default]>=2.44.1'
 ray --version
 ```
 
-Where the interpreter's `click` is newer than the pinned Ray's CLI accepts, set
-`RAY_VERSION` to a Ray release built against it: Hyperloom honours it verbatim
-and installs no `click` of its own. Downgrading `click` under a Ray whose CLI
-works is what preflight no longer does, and no longer asks of an operator.
+Hyperloom changes `click` in one case only: Ray 2.44.1 (the default pin) fails to
+import its CLI under `click` 8.3+ with `ValueError: ... is not a valid Sentinel`
+(a fresh `pip install ray[default]==2.44.1` on Python 3.10 resolves `click` 8.5).
+Preflight and the kernel-tools installer then install `click<8.3` once and certify
+the CLI again. Every other failure (a rejected `ray start` argv, a version
+mismatch, another import error, any Ray set through `RAY_VERSION`) leaves
+`click` alone and ends the install; for a `click` that breaks another Ray, set
+`RAY_VERSION` to a release built against it. There is no setting for the hold.
 
 ---
 

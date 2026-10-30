@@ -473,6 +473,8 @@ def _mandate_run_status(inp: SpecialistPromptInputs) -> list[str]:
         rows.append(f"- baseline: {format_primary_metric(inp.framework, inp.baseline_tput)}")
     if inp.current_tput > 0:
         rows.append(f"- current best: {format_primary_metric(inp.framework, inp.current_tput)}")
+    if inp.current_launch_args:
+        rows.append(f"- current best server args (complete launch, not a delta): {inp.current_launch_args}")
     if inp.cumulative_gain_validated != 0:
         rows.append(f"- validated cumulative gain: {inp.cumulative_gain_validated:+.2f}%")
     if inp.keep_threshold_pct > 0:

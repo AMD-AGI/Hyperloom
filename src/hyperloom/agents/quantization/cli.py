@@ -8,7 +8,7 @@ import json
 import sys
 from typing import Any
 
-from .driver.retry import quantize_via_prompt
+from .driver.retry import QuantSkillRunOptions, quantize_via_prompt
 
 
 def _interactive_value(raw: str) -> bool | None:
@@ -90,11 +90,13 @@ async def _run(args: argparse.Namespace) -> int:
     result = await quantize_via_prompt(
         args.prompt,
         workspace=args.workspace,
-        quark_root=args.quark_root,
-        interactive=args.interactive,
-        acceptable_eval_gap=args.acceptable_eval_gap,
-        max_requantize_attempts=args.max_requantize_attempts,
-        model=args.model_id,
+        options=QuantSkillRunOptions(
+            quark_root=args.quark_root,
+            interactive=args.interactive,
+            acceptable_eval_gap=args.acceptable_eval_gap,
+            max_requantize_attempts=args.max_requantize_attempts,
+            model=args.model_id,
+        ),
         log=log,
     )
 

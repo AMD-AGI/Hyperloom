@@ -38,16 +38,6 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-# Every ``tasks`` row is dispatched and awaited by the Coordinator's
-# orchestration loop, and the table carries no requester column, so a heartbeat
-# can only ever attest to this one agent. Widening that — letting any running
-# task vouch for whoever happens to be quiet — is what allowed a single busy
-# task to silence stall detection for the whole session.
-# Only work that becomes a row is covered here; inline kernel requests are kept
-# visible by a bus heartbeat around the handler instead.
-PROGRESS_OWNER_AGENT = "orchestration"
-
-
 @dataclass
 class RunnerContext:
     """Per-task context handed to an :data:`ExecutorFn`.
@@ -150,20 +140,6 @@ def _cancel_ambient_scope(reason: str) -> None:
         scope.cancel(reason=reason)
 
 
-@dataclass(frozen=True)
-class RunnerLinks:
-    """The live session objects a runner consults.
-
-    Attributes:
-        shared_state: Live session state forwarded to executors via ``ctx.extra``.
-        policy: Optional gate replayed at dispatch time for defense against
-            forged queued task rows.
-    """
-
-    shared_state: object | None = None
-    policy: PolicyGate | None = None
-
-
 class SubAgentRunner:
     """Routes ``delegate`` work to the matching ActionRunner, and releases its lease.
 
@@ -176,9 +152,7 @@ class SubAgentRunner:
         locks: SqliteLeaseBackend,
         tasks: TaskRegistry,
         *,
-        executor_registry: dict[str, ExecutorFn] | None = None,
         session_dir: Path | None = None,
-        links: RunnerLinks = RunnerLinks(),
     ):
         """Initialise the runner with its lease store + task registry.
 
@@ -187,20 +161,17 @@ class SubAgentRunner:
                 task execution.
             tasks (TaskRegistry): Registry the runner transitions task
                 state through.
-            executor_registry (dict[str, ExecutorFn] | None): Optional
-                initial map of ``task.kind`` to executor function (copied).
             session_dir (Path | None): Session root used to pre-create
                 per-action workspaces; None disables workspace pre-mkdir.
-            links (RunnerLinks): Live session state and the dispatch-time gate.
         """
         self.locks = locks
         self.tasks = tasks
-        self.executor_registry: dict[str, ExecutorFn] = dict(executor_registry or {})
+        self.executor_registry: dict[str, ExecutorFn] = {}
         self.session_dir = Path(session_dir) if session_dir else None
         # Live SharedState threaded into each executor's ctx.extra so gain-computing
         # executors can recover a baseline anchor when params['base_tput'] is absent.
-        self.shared_state = links.shared_state
-        self.policy = links.policy
+        self.shared_state: object | None = None
+        self.policy: PolicyGate | None = None
 
     def register_executor(self, kind: str, fn: ExecutorFn) -> None:
         """Register (or replace) the executor for a task kind.
@@ -492,8 +463,7 @@ class SubAgentRunner:
         Composite actions call :func:`~...trace.task_progress.report_progress`
         as each internal unit lands, which reaches this sink and lands on the
         task row as a heartbeat instead of the row going dark for the whole
-        run. Each note is stamped with :data:`PROGRESS_OWNER_AGENT` so a
-        consumer can tell whose silence the heartbeat actually excuses.
+        run.
 
         Args:
             task_id (str): Task the returned sink reports for.
@@ -503,7 +473,6 @@ class SubAgentRunner:
         """
 
         async def sink(**note: Any) -> None:
-            note.setdefault("agent", PROGRESS_OWNER_AGENT)
             log.info("task_progress: task=%s %s", task_id, _format_progress(note))
             await self.tasks.record_progress(task_id, note)
 
@@ -528,7 +497,6 @@ def _format_progress(note: dict[str, Any]) -> str:
 
 
 __all__ = [
-    "PROGRESS_OWNER_AGENT",
     "RunnerContext",
     "ExecutorFn",
     "SubAgentResult",

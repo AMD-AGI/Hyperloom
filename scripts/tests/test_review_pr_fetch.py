@@ -30,6 +30,7 @@ _PR = 500
 _HEAD = "a" * 40
 _BASE = "b" * 40
 _CHANGED = "src/pkg/mod.py"
+_DIFF = f"diff --git a/{_CHANGED} b/{_CHANGED}\n--- a/{_CHANGED}\n+++ b/{_CHANGED}\n@@ -1 +1 @@\n-x = 1\n+x = 2\n"
 
 _STUB_GH = """#!{python}
 import json
@@ -117,10 +118,11 @@ def _run(
     lists: dict[str, list[dict[str, object]]] | None = None,
     env: dict[str, str] | None = None,
     fetch: Path = _FETCH,
+    diff: str = _DIFF,
 ) -> subprocess.CompletedProcess[str]:
     """``fetch`` (the skill's fetch.sh by default) for the PR under review, into ``tmp_path / "work"``; ``count`` is
-    how the open-PR count replies, ``lists`` what the paginated endpoints it names list, and ``env`` adds to
-    fetch.sh's environment."""
+    how the open-PR count replies, ``lists`` what the paginated endpoints it names list, ``env`` adds to
+    fetch.sh's environment, and ``diff`` is the PR's diff."""
     world = tmp_path / "world.json"
     world.write_text(
         json.dumps(
@@ -136,8 +138,7 @@ def _run(
                     "total_commits": 1,
                     "commits": [{"commit": {"message": "fix: change mod"}}],
                 },
-                "diff": f"diff --git a/{_CHANGED} b/{_CHANGED}\n--- a/{_CHANGED}\n+++ b/{_CHANGED}\n"
-                "@@ -1 +1 @@\n-x = 1\n+x = 2\n",
+                "diff": diff,
                 "open_prs": open_prs,
                 "closed_prs": 40,
                 "count": count,
@@ -217,6 +218,30 @@ def test_skill_txt_names_the_model_and_the_skill_directory_tree_that_ran(tmp_pat
     ).stdout.strip()
     assert skill in (f"skill: {tree}", f"skill: {tree}+dirty")
     assert model == "model: model-under-test"
+
+
+def test_risk_txt_grades_the_changed_paths(tmp_path: Path) -> None:
+    result = _run(tmp_path, _open_prs(3))
+
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "work" / "risk.txt").read_text(encoding="utf-8").splitlines()[:2] == [
+        "risk: medium",
+        f"medium {_CHANGED} -- runtime code, and the prompts and skills agents load at runtime",
+    ]
+
+
+def test_risk_txt_grades_a_renamed_file_by_its_old_path_too(tmp_path: Path) -> None:
+    moved = (
+        "diff --git a/.github/workflows/lint.yml b/docs/lint.yml\nsimilarity index 100%\n"
+        "rename from .github/workflows/lint.yml\nrename to docs/lint.yml\n"
+    )
+
+    result = _run(tmp_path, _open_prs(3), diff=moved)
+
+    assert result.returncode == 0, result.stderr
+    graded = (tmp_path / "work" / "risk.txt").read_text(encoding="utf-8").splitlines()
+    assert graded[0] == "risk: high"
+    assert graded[1].startswith("high .github/workflows/lint.yml -- ")
 
 
 def test_a_skill_directory_git_cannot_name_stops_the_fetch(tmp_path: Path) -> None:

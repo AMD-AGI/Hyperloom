@@ -20,7 +20,6 @@ from hyperloom.inference_optimizer.session import paths
 from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.loop.sub_agent_runner import (
-    PROGRESS_OWNER_AGENT,
     ExecutionCleanupUnconfirmed,
     SubAgentRunner,
     _format_progress,
@@ -100,25 +99,6 @@ async def test_a_task_that_reports_units_leaves_a_trail_on_its_own_row(tmp_path,
     assert res.state == "succeeded"
     done = await sub.tasks.get(task.task_id)
     assert [note["label"] for note in _progress_notes(done)] == ["v1", "v2", "v3"]
-
-
-@pytest.mark.asyncio
-async def test_every_note_names_the_agent_it_vouches_for(tmp_path, monkeypatch):
-    """Without an owner the heartbeat would excuse whichever agent is quiet."""
-    sub = _runner(tmp_path, monkeypatch)
-
-    async def _grid(_ctx) -> dict:
-        await report_progress(unit="variant", label="v1")
-        return {"status": "ok"}
-
-    sub.register_executor("explore", _grid)
-    task, _ = await sub.tasks.create_or_return_existing(
-        TaskSpec(kind="explore", params={}, idempotency_key="grid-owner")
-    )
-    await sub.run_task(task)
-
-    done = await sub.tasks.get(task.task_id)
-    assert [note["agent"] for note in _progress_notes(done)] == [PROGRESS_OWNER_AGENT]
 
 
 @pytest.mark.asyncio
