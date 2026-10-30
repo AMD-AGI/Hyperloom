@@ -259,6 +259,30 @@ remove_dotenv_var() {
   mv "$tmp" "$DOTENV"
   chmod 600 "$DOTENV" 2>/dev/null || true
 }
+
+# Remove $1 from .env when its value ends in $2, the shape install.sh derives
+# from a USER_DATA_PATH; an operator's value of any other shape is kept.
+remove_derived_dotenv_path() {
+  local key="$1" suffix="$2" line stripped value
+  [ -f "$DOTENV" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    stripped="${line#"${line%%[![:space:]]*}"}"
+    stripped="${stripped#export }"
+    case "$stripped" in
+      "${key}="*)
+        value="${stripped#*=}"
+        value="${value%$'\r'}"
+        value="${value%\"}"; value="${value#\"}"
+        value="${value%\'}"; value="${value#\'}"
+        value="${value%/}"
+        case "$value" in
+          *"$suffix") remove_dotenv_var "$key"; return 0 ;;
+        esac
+        ;;
+    esac
+  done < "$DOTENV"
+}
+
 # In --check-only mode, downgrade post-install verification failures to a
 # warning so report_status can still enumerate what's missing. The caller
 # explicitly asked us NOT to install; failing on the first missing piece
@@ -996,9 +1020,17 @@ write_env_file() {
   chmod 600 "$env_file"
   log "wrote ${env_file} (source it before running kernel-agent tools)"
 
+  # .env is shared by every session run from this checkout, so it keeps only the
+  # workspace root: a later run without USER_DATA_PATH in its shell still finds
+  # this workspace, and the paths below derive from that root again. They are not
+  # persisted (the env file above carries them to this workspace's runtime), and
+  # a copy an earlier install wrote is purged, or it would pair another
+  # workspace's runtime dir with this root. A value of another shape is an
+  # operator's own and stays.
   [ -n "${USER_DATA_PATH:-}" ] && upsert_dotenv_var USER_DATA_PATH "$USER_DATA_PATH"
-  [ -n "${HYPERLOOM_RUNTIME_DIR:-}" ] && upsert_dotenv_var HYPERLOOM_RUNTIME_DIR "$HYPERLOOM_RUNTIME_DIR"
-  [ -n "${KERNEL_AGENT_ENV:-}" ] && upsert_dotenv_var KERNEL_AGENT_ENV "$KERNEL_AGENT_ENV"
+  remove_derived_dotenv_path HYPERLOOM_RUNTIME_DIR /runtime
+  remove_derived_dotenv_path KERNEL_AGENT_ENV /runtime/kernel-agent.env.sh
+  remove_derived_dotenv_path HYPERLOOM_ROOT /runtime/source-mirrors
   # Derived from the MAGPIE_REF / INFERENCEX_REF pins; a .env copy would read back as an override that skips them.
   remove_dotenv_var MAGPIE_PATH
   [ -n "${MAGPIE_PYTHON:-}" ] && upsert_dotenv_var MAGPIE_PYTHON "$MAGPIE_PYTHON"
@@ -1043,7 +1075,6 @@ write_env_file() {
     upsert_dotenv_var TRACELENS_INTERNAL_ROOT "$TRACELENS_INTERNAL_ROOT"
     upsert_dotenv_var TL_EXTENSION "TraceLens_internal"
   fi
-  [ -n "${HYPERLOOM_ROOT:-}" ] && upsert_dotenv_var HYPERLOOM_ROOT "$HYPERLOOM_ROOT"
   # The runner lives in the GEAK checkout, so it follows GEAK_ROOT out of .env.
   if [ -z "${_geak_root_is_operator_override:-}" ]; then
     remove_dotenv_var GEAK_ROOT
