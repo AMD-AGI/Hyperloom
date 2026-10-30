@@ -15,11 +15,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, ClassVar
 
-from hyperloom.common.coerce import first_text, to_float, to_int, to_str_list
-from hyperloom.common.env import env_bool
+from hyperloom_common.coerce import first_text, to_float, to_int, to_str_list
+from hyperloom_common.env import env_bool
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.gain_math import gain_pct, gain_pct_or_zero
-from hyperloom.common.io import atomic_write_json
+from hyperloom_common.io import atomic_write_json
 from hyperloom.common.perf_metric import (
     AGENTX_KEEP_P50_THRESHOLD_PCT,
     GRADED_INTVTY,
@@ -38,9 +38,9 @@ from hyperloom.common.perf_metric import (
     resolve_grading_anchor_perf,
     total_tput_of,
 )
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.timeutil import now_iso
 from hyperloom.plugs import progress as _progress
-from hyperloom.common.jsonio import read_json_strict
+from hyperloom_common.jsonio import read_json_strict
 from hyperloom.common.profile_args import sanitize_profile_server_args
 from hyperloom.inference_optimizer.grading import resolved_grading
 from hyperloom.inference_optimizer.grid_server_args import strip_benchmark_harness_flags

@@ -8,9 +8,9 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
+from hyperloom.orchestrator.policy.denial import PolicyDenied
 from hyperloom.orchestrator.policy.gate import (
     KNOWLEDGE_DOMAIN_TAG_SET,
-    PolicyDenied,
     PolicyGate,
     SPECIALIST_FREEFORM_TASK_DESC_MAX_CHARS,
     SPECIALIST_FREEFORM_WAVE_MAX,

@@ -9,7 +9,7 @@ CLI subprocess scoped via ``--add-dir``, and a ``specialist_done.json``
 :class:`SpecialistRunResult`.
 
 Three agent CLIs can drive that contract, and the deployment picks one
-(:func:`hyperloom.common.llm_config.resolve_agent_backend`):
+(:func:`hyperloom_common.llm.llm_config.resolve_agent_backend`):
 ``claude --print --output-format stream-json`` authenticates against the
 Anthropic side, ``codex exec --json`` against the OpenAI side and
 ``dsh --profile headless`` through the DeepSeek Harness. An OpenAI-only deployment has no
@@ -43,8 +43,8 @@ from hyperloom.common.codex_session import (
     resolve_codex_sandbox_mode,
 )
 from hyperloom.common.deadline import Deadline
-from hyperloom.common.llm_attribution import inject_env as inject_attribution_env
-from hyperloom.common.llm_config import (
+from hyperloom_common.llm.llm_attribution import inject_env as inject_attribution_env
+from hyperloom_common.llm.llm_config import (
     AGENT_BACKEND_CLAUDE,
     AGENT_BACKEND_CODEX,
     AGENT_BACKEND_DEEPSEEK,
@@ -54,7 +54,7 @@ from hyperloom.common.llm_config import (
 from hyperloom.common.env_safety import (
     redact_file_in_place,
 )
-from hyperloom.common.fs_utils import (
+from hyperloom_common.fs_utils import (
     create_nofollow,
     read_text_nofollow,
     regular_files_nofollow,
@@ -75,7 +75,7 @@ from .dsh_launch import DshLaunchRequest, build_dsh_launch, remove_dsh_profiles,
 from .reap_watch import PROCESS_LOG_NAME, ReapWatch, newest_activity, specialist_activity_paths, tool_in_flight
 from .trace_harvest import harvest_agent_trace
 from ..actions.cancel_channel import CancelScope, cancel_scope_listener, current_cancel_scope
-from hyperloom.common.git_safety import app_git, worktree_head
+from hyperloom_common.git_safety import app_git, worktree_head
 from ..delivery.deliverable import declared_targets
 from ..loop.sub_agent_runner import ExecutionCleanupUnconfirmed
 from .wall_budget import clear_wall_budget_extension, wall_budget_extension
@@ -516,7 +516,7 @@ class SpecialistSubprocessDispatcher:
         # via env; set HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=0 to disable.
         env = _build_specialist_env()
         # Keep the spawned CLI off its non-essential traffic and auto-updater.
-        from hyperloom.common.llm_stability_env import apply_llm_stability_env
+        from hyperloom_common.llm.llm_stability_env import apply_llm_stability_env
 
         apply_llm_stability_env(env)
         # Unique to this launch, so every process the CLI starts can be found after it detaches.

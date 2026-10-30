@@ -22,7 +22,7 @@ from typing import Any, NoReturn
 
 from hyperloom.common.agent_runtime_requirements import agent_runtime_requirements
 from hyperloom.common.agent_cli import resolve_claude_executable, resolve_codex_executable
-from hyperloom.common.llm_config import (
+from hyperloom_common.llm.llm_config import (
     AGENT_BACKEND_CODEX,
     CLAUDE_OAUTH_TOKEN_ENV,
     DEFAULT_CLAUDE_MODEL,
@@ -30,17 +30,17 @@ from hyperloom.common.llm_config import (
     preferred_agent_backend,
     with_synthesized_anthropic_keys,
 )
-from hyperloom.common.fs_utils import is_network_fs
-from hyperloom.common.llm_headers import expand_env_refs
-from hyperloom.common.gpu_identity import AMD_GPU_BOARDS
+from hyperloom_common.fs_utils import is_network_fs
+from hyperloom_common.llm.llm_headers import expand_env_refs
+from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
 from hyperloom.common.platform_probe import probe_cpu_platform
-from hyperloom.common.pr_monitor_urls import kb_store_url
+from hyperloom_common.pr_monitor_urls import kb_store_url
 from hyperloom.common.provenance import (
     RESOLVED_FRAMEWORK_ENV,
     RESOLVED_FRAMEWORK_PYTHON_ENV,
     detect_gfx_arch,
 )
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.timeutil import now_iso
 from hyperloom.common.visible_devices import hip_mask_within_rocr
 from hyperloom.common.model_paths import resolve_serving_model_path
 

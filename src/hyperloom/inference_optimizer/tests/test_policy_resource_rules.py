@@ -14,7 +14,8 @@ from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.policy import gate as gate_module
 from hyperloom.orchestrator.policy import projection as projection_module
-from hyperloom.orchestrator.policy.gate import PolicyDenied, PolicyGate
+from hyperloom.orchestrator.policy.denial import PolicyDenied
+from hyperloom.orchestrator.policy.gate import PolicyGate
 from hyperloom.orchestrator.policy.projection import (
     RULE_GPU_POOL_DISABLED,
     RULE_ROUND_IN_FLIGHT,

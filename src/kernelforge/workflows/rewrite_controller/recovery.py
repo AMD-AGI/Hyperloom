@@ -5,13 +5,13 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from hyperloom_common.jsonio import read_json
 from kernelforge.workflows.rewrite_controller.contracts import KernelRewriteTask
 from kernelforge.workflows.rewrite_controller.paths import ControllerLayout
 from kernelforge.workflows.rewrite_controller.publisher import (
@@ -48,17 +48,9 @@ class RecoveryResult:
     reason: str = ""
 
 
-def _load_json(path: Path) -> dict[str, Any] | None:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    return value if isinstance(value, dict) else None
-
-
 def _trusted_manifest(workspace: Path, repo_root: Path) -> dict[str, Any] | None:
     publisher = BestResultPublisher(str(workspace))
-    manifest = _load_json(publisher.manifest_path)
+    manifest = read_json(publisher.manifest_path, require_dict=True)
     if not manifest:
         return None
     # An in-place campaign shares its experiments directory with every other task in
@@ -88,7 +80,7 @@ def _trusted_manifest(workspace: Path, repo_root: Path) -> dict[str, Any] | None
 
 
 def _trusted_result_sidecar(task_dir: Path) -> dict[str, Any] | None:
-    result = _load_json(task_dir / "forge-result.json")
+    result = read_json(task_dir / "forge-result.json", require_dict=True)
     if not result or result.get("improved") is not True:
         return None
     best_commit = str(result.get("best_commit") or "").strip()
@@ -153,7 +145,7 @@ def _nothing_to_recover_reason(task: KernelRewriteTask, workspace: Path) -> str:
 
 
 def _already_published(layout: ControllerLayout, operator_id: str, best_commit: str) -> bool:
-    metadata = _load_json(layout.patch_dir(operator_id) / PUBLICATION_FILENAME)
+    metadata = read_json(layout.patch_dir(operator_id) / PUBLICATION_FILENAME, require_dict=True)
     return bool(metadata and str(metadata.get("best_commit") or "") == best_commit)
 
 

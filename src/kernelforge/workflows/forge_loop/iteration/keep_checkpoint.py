@@ -24,7 +24,7 @@ from kernelforge.workflows.forge_loop.campaign.run_state import (
     RunState,
     SESSION_COMPLETED,
 )
-from kernelforge.utils.durable_io import atomic_write_text
+from hyperloom_common.io import DURABLE, atomic_write_text
 
 log = logging.getLogger(__name__)
 
@@ -131,6 +131,7 @@ class KeepCheckpointMixin:
         atomic_write_text(
             self._pending_keep_path,
             json.dumps(pending, indent=2, sort_keys=True, default=str) + "\n",
+            options=DURABLE,
         )
 
     def _load_pending_keep(self) -> dict | None:

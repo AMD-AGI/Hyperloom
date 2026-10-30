@@ -9,6 +9,7 @@ import subprocess
 
 import pytest
 
+from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
 from kernelforge.utils.gpu_arch import canon_arch, canonical_gpu_type, detect_arch, product_arch
 
 
@@ -23,6 +24,9 @@ from kernelforge.utils.gpu_arch import canon_arch, canonical_gpu_type, detect_ar
         ("mi355x", "gfx950"),
         ("AMD Instinct MI355X", "gfx950"),
         ("amd_instinct_mi300x", "gfx942"),
+        ("AMD Instinct MI325X", "gfx942"),
+        ("R9700", "gfx1201"),
+        ("Radeon 8060S", "gfx1151"),
     ],
 )
 def test_canon_arch_folds_product_names_onto_their_gfx_target(value, expected):
@@ -40,6 +44,9 @@ def test_canon_arch_names_no_target_rather_than_a_wrong_one(value):
         ("gfx942", "mi300x"),
         ("MI325X", "mi300x"),
         ("amd instinct mi355x", "mi355x"),
+        ("amd_instinct_mi325x", "mi300x"),
+        ("gfx1201", "r9700"),
+        ("Radeon 8060S", "radeon8060s"),
         ("gfx1100", "gfx1100"),
         ("MI250-X", "mi250_x"),
     ],
@@ -66,6 +73,7 @@ def test_canonical_gpu_type_keeps_a_spelling_that_only_contains_a_known_name(val
         ("mi300x", "gfx942"),
         (" MI355X ", "gfx950"),
         ("amd_instinct_mi300x", "gfx942"),
+        ("r9700", "gfx1201"),
         ("mi300x_vf", ""),
         ("amd instinct mi300x", ""),
         ("gfx942", ""),
@@ -73,6 +81,14 @@ def test_canonical_gpu_type_keeps_a_spelling_that_only_contains_a_known_name(val
 )
 def test_product_arch_maps_only_an_exact_product_name(value, expected):
     assert product_arch(value) == expected
+
+
+@pytest.mark.parametrize("board", AMD_GPU_BOARDS.values(), ids=lambda board: board.product)
+def test_every_board_the_shared_table_knows_is_recorded_under_a_board_of_its_own_target(board):
+    recorded = canonical_gpu_type(board.gfx)
+
+    assert canonical_gpu_type(board.product) == recorded
+    assert AMD_GPU_BOARDS[recorded].gfx == board.gfx
 
 
 def _rocminfo(monkeypatch, *, returncode=0, stdout=""):

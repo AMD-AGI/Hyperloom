@@ -345,6 +345,7 @@ branch = false
 # combine into consistent totals.
 relative_files = true
 source = [
+    "src/hyperloom_common",
     "src/hyperloom",
     "src/kernelforge",
     "src/hyperloom_kb",
@@ -706,7 +707,7 @@ exclude = ["**/*.md", "**/*.rst"]
 
 [tool.mypy]
 python_version = "3.10"
-files = ["src/hyperloom"]
+files = ["src/hyperloom_common", "src/hyperloom"]
 exclude = [
     ".*/tests/.*",
     "build",

@@ -24,7 +24,7 @@ from kernelforge.workflows.forge_loop.campaign.schema import (
     ExperimentSubject,
     Iteration,
 )
-from kernelforge.utils.durable_io import atomic_write_text
+from hyperloom_common.io import DURABLE, atomic_write_text
 
 
 class ExperimentTracker:
@@ -109,6 +109,7 @@ class ExperimentTracker:
         atomic_write_text(
             self._path(experiment.experiment_id),
             json.dumps(experiment.to_dict(), indent=2),
+            options=DURABLE,
         )
 
     def _load(self, experiment_id: str) -> Experiment:

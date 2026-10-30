@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.timeutil import now_iso
 
 from ..bus.db_maintenance import DECIDED_PROPOSAL_IDS_SQL
 from ..bus.resource_lock import BRINGUP_ROUND_LANE, SqliteLeaseBackend

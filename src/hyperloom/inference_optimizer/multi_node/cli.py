@@ -21,7 +21,8 @@ from typing import Any
 
 import httpx
 
-from hyperloom.common.env import EnvValueError, env_int
+from hyperloom_common import aiter_jit_cache
+from hyperloom_common.env import EnvValueError, env_int
 
 from ._internal import ray_dashboard
 from ._internal import ssh_client, ssh_known_hosts
@@ -374,10 +375,7 @@ def _read_pod_script(name: str) -> str:
     return p.read_text(encoding="utf-8")
 
 
-_KERNEL_NODE_OPS_DEPS = (
-    Path(__file__).resolve().parents[2] / "common" / "aiter_jit_cache.py",
-    _SCRIPTS_DIR / "patch_path_safety.py",
-)
+_KERNEL_NODE_OPS_DEPS = (Path(aiter_jit_cache.__file__).resolve(), _SCRIPTS_DIR / "patch_path_safety.py")
 _SHAPE_GATE_DEPS = (_SCRIPTS_DIR / "sglang_shape_gate.py",)
 _LAUNCHER_DEPS = (Path(__file__).parent / "_internal" / "server_args_safety.py", *_SHAPE_GATE_DEPS)
 

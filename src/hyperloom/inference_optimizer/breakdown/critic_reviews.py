@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from hyperloom.common.coerce import dict_rows, to_mapping
+from hyperloom_common.coerce import dict_rows, to_mapping
 
 from .collectors._common import (
     _AUTHORING_TASK_KINDS,

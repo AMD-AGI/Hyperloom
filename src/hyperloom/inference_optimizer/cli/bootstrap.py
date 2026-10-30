@@ -17,11 +17,11 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterator, Mapping
 
-from hyperloom.common.coerce import to_unix
-from hyperloom.common.env import forge_explicitly_enabled
+from hyperloom_common.coerce import to_unix
+from hyperloom_common.env import forge_explicitly_enabled
 from hyperloom.common.gpu_power_settings import SCLK_MAX_MHZ, DeclaredPowerSettings
 from hyperloom.common.perf_metric import agentx_enabled as _agentx_enabled, is_agentx_mode
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.timeutil import now_iso
 from hyperloom.plugs import (
     ManifestSources,
     PlugError,

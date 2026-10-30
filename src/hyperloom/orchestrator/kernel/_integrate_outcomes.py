@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, NamedTuple
 
-from hyperloom.common.coerce import to_str_list
+from hyperloom_common.coerce import to_str_list
 
 from ..actions.executors._kernel_agent_tool import (
     HandlerResult,

@@ -35,7 +35,7 @@ from kernelforge.agent_backends.session_resume import (
 )
 from kernelforge.config import Config
 from kernelforge.config.edit_policy import FORGE_PROTECTED_PATHS
-from kernelforge.utils.durable_io import atomic_write_text
+from hyperloom_common.io import DURABLE, atomic_write_text
 from kernelforge.kernel_backends.constants import KERNEL_BACKENDS
 from kernelforge.workflows.rewrite_controller.contracts import HandoffBundle
 from kernelforge.workflows.rewrite_controller.paths import ControllerLayout
@@ -525,6 +525,7 @@ def _write_analysis_result(layout: ControllerLayout, result: OpportunityAnalysis
     atomic_write_text(
         layout.agent_root / "analysis-result.json",
         json.dumps(asdict(result), indent=2, sort_keys=True) + "\n",
+        options=DURABLE,
     )
 
 
@@ -622,7 +623,9 @@ class OpportunityAnalysisAgent:
             # strand a task finished moments before the deadline -- the case incremental publication exists for.
             publications.update(_by_draft(publish_complete_staged_tasks(layout, quiescent_sec=0.0, refused=refused)))
             if spec.progress_log:
-                atomic_write_text(layout.agent_root / "progress.log", "\n".join(spec.progress_log) + "\n")
+                atomic_write_text(
+                    layout.agent_root / "progress.log", "\n".join(spec.progress_log) + "\n", options=DURABLE
+                )
 
         outcome = self._outcome(status, reason, publications, usage, started)
         _write_analysis_result(layout, outcome)
