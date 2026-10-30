@@ -27,7 +27,7 @@ from hyperloom.inference_optimizer.trace.trajectory_trace import (
     EVENT_TOOL,
     STATUS_COMPLETED,
     STATUS_FAILED,
-    EventWindow,
+    EventSpan,
     new_span_id,
     record_event,
 )
@@ -222,18 +222,22 @@ class ClaudeRequestTracker:
             model = record["model"] or fallback_model
             record_event(
                 EVENT_LLM_REQUEST,
-                status=STATUS_COMPLETED if record["complete"] else STATUS_FAILED,
-                span_id=request.span_id,
-                window=EventWindow(start_ts=epoch_iso(start), ts=epoch_iso(end if end is not None else now)),
+                span=EventSpan(
+                    span_id=request.span_id,
+                    status=STATUS_COMPLETED if record["complete"] else STATUS_FAILED,
+                    start_ts=epoch_iso(start),
+                    ts=epoch_iso(end if end is not None else now),
+                ),
                 attributes={**record, "name": model, "model": model, "attempt": attempt},
             )
         for tool in self._tools.values():
             context = {} if tool.request is None else {"parent_span_id": tool.request.span_id}
             record_event(
                 EVENT_TOOL,
-                status=tool_status(result_seen=tool.end is not None, is_error=tool.is_error),
-                window=EventWindow(
-                    start_ts=epoch_iso(tool.start), ts=epoch_iso(tool.end if tool.end is not None else now)
+                span=EventSpan(
+                    status=tool_status(result_seen=tool.end is not None, is_error=tool.is_error),
+                    start_ts=epoch_iso(tool.start),
+                    ts=epoch_iso(tool.end if tool.end is not None else now),
                 ),
                 attributes=tool_attributes(
                     ToolCall(
@@ -253,7 +257,7 @@ class ClaudeRequestTracker:
         for at, data in self._compactions:
             record_event(
                 EVENT_CONTEXT_COMPACTION,
-                window=EventWindow(ts=epoch_iso(at)),
+                span=EventSpan(ts=epoch_iso(at)),
                 attributes={**compaction_attributes(data), "attempt": attempt},
             )
 

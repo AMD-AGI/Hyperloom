@@ -588,8 +588,9 @@ function-lines = 50
 nested-blocks = 4
 # pylint R0913 default: past five, a call site no longer reads as a sentence and the
 # values travel together anyway -- pass the object they come from, or name them in a
-# dataclass. ``self``/``cls`` and ``*args``/``**kwargs`` do not count; keyword-only
-# parameters do.
+# dataclass. A first parameter named ``self``/``cls`` does not count; every other
+# named parameter does (keyword-only and ``_``-named too), and ``*args`` and
+# ``**kwargs`` count one each.
 function-args = 5
 # Fails above 1200 physical lines: half again the review trigger of 800, the
 # size at which a module almost always holds more than one job.

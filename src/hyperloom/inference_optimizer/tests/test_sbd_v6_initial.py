@@ -233,6 +233,27 @@ def test_an_invalid_v6_event_is_reported_without_disturbing_the_rest(tmp_path):
     assert after["timeline"] == []
 
 
+def test_an_install_step_that_reports_no_status_is_recorded_applied():
+    from hyperloom.inference_optimizer.cli import preflight
+
+    event = preflight._begin_install_event(argparse.Namespace(resume_from=None, no_kernel=True, enable_roofline=False))
+    preflight._run_install_step(
+        event, step_id="validate_credentials", category="check", action=lambda: None, detail={"exit_code": 0}
+    )
+    preflight._run_install_step(event, step_id="check_gpu_visibility", category="check", action=lambda: {"status": ""})
+
+    assert event["ext"]["steps"] == [
+        {
+            "step_id": "validate_credentials",
+            "category": "check",
+            "status": "applied",
+            "skip_reason": None,
+            "detail": {"exit_code": 0},
+        },
+        {"step_id": "check_gpu_visibility", "category": "check", "status": "applied", "skip_reason": None},
+    ]
+
+
 def test_install_event_stays_pending_until_session_creation(tmp_path):
     from hyperloom.inference_optimizer.cli import preflight
 

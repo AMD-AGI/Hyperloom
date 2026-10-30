@@ -7,9 +7,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Callable, TypeVar
+from typing import Callable, TypeVar
 
-from hyperloom.common.deadline import Deadline, seconds_until
+from hyperloom.common.deadline import Deadline
 
 log = logging.getLogger(__name__)
 
@@ -17,36 +17,25 @@ __all__ = [
     "offload",
 ]
 
-#: Longest an offloaded call may hold its awaiter when no deadline bounds it.
-OFFLOAD_UNBOUNDED_CAP_SEC: float = 120.0
-
 T = TypeVar("T")
 
 
-async def offload(
-    work: Callable[[], T],
-    *,
-    deadline: Deadline | None,
-    label: str,
-    default: Any = None,
-) -> T | Any:
-    """Run ``work`` on a thread, returning ``default`` if it outlasts ``deadline``; its exceptions propagate.
+async def offload(work: Callable[[], T], *, deadline: Deadline, label: str) -> T | None:
+    """Run ``work`` on a thread, returning ``None`` if it outlasts ``deadline``; its exceptions propagate.
 
     Args:
         work: The blocking callable. Must bound its own I/O; it keeps running
             after a timeout here and nothing can stop it.
-        deadline: When the caller stops waiting. ``None`` waits up to
-            :data:`OFFLOAD_UNBOUNDED_CAP_SEC`.
+        deadline: When the caller stops waiting.
         label: Short name for the work, used in the timeout warning.
-        default: Returned when the wait ends first.
 
     Returns:
-        The call's result, or ``default`` if it timed out.
+        The call's result, or ``None`` if it timed out.
     """
-    budget = seconds_until(deadline, unbounded_cap=OFFLOAD_UNBOUNDED_CAP_SEC)
+    budget = deadline.remaining()
     if budget <= 0.0:
         log.info("offload: skipping %s; its deadline had already passed", label)
-        return default
+        return None
     try:
         return await asyncio.wait_for(asyncio.to_thread(work), timeout=budget)
     except asyncio.TimeoutError:
@@ -55,4 +44,4 @@ async def offload(
             label,
             budget,
         )
-        return default
+        return None

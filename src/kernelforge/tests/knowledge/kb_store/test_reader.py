@@ -23,37 +23,16 @@ from kernelforge.knowledge.kb_store.identity.run import LoopKernel
 from kernelforge.config import KnowledgeConfig, KnowledgeStoreMode
 from kernelforge.knowledge.kb_store.identity import run as run_identity
 from kernelforge.knowledge.kb_store import record_store
-from kernelforge.tests.knowledge.kb_store.test_writer import write_flat_experience
-from kernelforge.tests.test_rewrite_by_flydsl_kb import InMemoryKBStore
+from kernelforge.tests.knowledge.kb_store._flat_experience import KERNEL_SOURCE, write_flat_experience
+from kernelforge.tests.knowledge.kb_store._in_memory_store import InMemoryKBStore
 
 DIFF = "diff --git a/kernel.py b/kernel.py\n--- a/kernel.py\n+++ b/kernel.py\n@@ -1 +1 @@\n-old\n+new\n"
-KERNEL_SOURCE = "import triton\n\n\n@triton.jit\ndef my_kernel(x):\n    return x\n"
 SUMMARY = {
     "category": "gemm",
     "strategy": "tile",
     "recipe": "step",
     "lessons": "ok",
 }
-
-
-@pytest.fixture()
-def workspace(tmp_path):
-    root = tmp_path / "ws"
-    root.mkdir()
-    (root / "kernel.py").write_text(KERNEL_SOURCE, encoding="utf-8")
-    return root
-
-
-@pytest.fixture()
-def config(tmp_path, workspace):
-    knowledge = KnowledgeConfig.from_env({}, mode="local", local_root=tmp_path / "knowledge")
-    return Config.from_env(
-        workspace=str(workspace),
-        gpu_target="gfx942",
-        gpu_type="mi300x",
-        knowledge_config=knowledge,
-        agent_precheck=False,
-    )
 
 
 def _seed(config, workspace, **overrides):

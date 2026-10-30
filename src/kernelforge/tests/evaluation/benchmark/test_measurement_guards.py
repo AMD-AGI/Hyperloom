@@ -51,7 +51,7 @@ from kernelforge.evaluation.scoring import (
     rescaled_sigma,
     warm_start_improvement_flags,
 )
-from kernelforge.tests.test_loop_runner import (
+from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import (
     _make_loop,
     _measurement_loop,
     _no_change_agent,

@@ -161,7 +161,7 @@ opened for stays live.
 
 **Severity:** blocking
 **Fires when:** `body.txt` or `title.txt` gives a measurement or a causal claim as the reason for the change: a function over a complexity, length or parameter ceiling; a run truncated by a cap, budget or timeout; a named session's duration or termination reason; a percentage, count or a unit's value at the base.
-**The rule:** the premise is reproduced with the repo's own tool at `base.txt` before the implementation is judged, and *the repo's own tool* is the binding half. Cyclomatic complexity is `radon cc` at the version `scripts/code_metrics.py` pins, never Ruff's `C901`: the two disagree by a factor on the same function, because radon counts every `and`, `or`, ternary, comprehension and `assert` and mccabe does not. Parameter count is `ruff --select PLR0913`. Read either against `pyproject.toml`'s `[tool.hyperloom.code_metrics.thresholds]` and against the same unit at `base.txt`, or let `scripts/code_metrics.py --base-ref $(cat "$WORK/base.txt")` do both. A claim resting on one run is read out of that run's artifacts or logs -- its real elapsed time and its real termination reason -- not out of the prose. A premise that does not reproduce makes the whole change unmotivated, however correct its implementation: report it against the premise, not against the code.
+**The rule:** the premise is reproduced with the repo's own tool at `base.txt` before the implementation is judged, and *the repo's own tool* is the binding half. Cyclomatic complexity is `radon cc` at the version `scripts/code_metrics.py` pins, never Ruff's `C901`: the two disagree by a factor on the same function, because radon counts every `and`, `or`, ternary, comprehension and `assert` and mccabe does not. Parameter count is the count in `scripts/code_metrics.py`, never Ruff's `PLR0913`, which leaves out `*args`, `**kwargs`, `_`-named parameters and `@overload`/`@override` signatures. Read either against `pyproject.toml`'s `[tool.hyperloom.code_metrics.thresholds]` and against the same unit at `base.txt`, or let `scripts/code_metrics.py --base-ref $(cat "$WORK/base.txt")` do both. A claim resting on one run is read out of that run's artifacts or logs -- its real elapsed time and its real termination reason -- not out of the prose. A premise that does not reproduce makes the whole change unmotivated, however correct its implementation: report it against the premise, not against the code.
 **Seen in:** PR #1981 -- the cap was raised because a round was said to hit it, while the three profile attempts in the named session ran about 128 s each and ended `orchestrator_cancelled` against a 7200 s cap; the PR was closed. The inverse, and the reason this rule names its tool: reviewing PR #2009 and PR #2046 with `ruff --select C901` put `_validate_restore_record` at 8 and `load_controller_publication` at 18, both far under the ceiling, and made two correctly-motivated refactors look unmotivated -- `radon cc`, which the gate pins, puts the same two functions at 23 and 30, and #2046's body had said 30 all along. A premise checked with the wrong tool is worse than one not checked at all, because it arrives with a number attached.
 **Not a finding when:** the premise reproduces, or it rests on state no artifact retained and the body says so -- then the figure is `[unverified]` and E2 decides on the mechanism instead. Never when your own measurement came from a tool the gate does not run.
 **Evidence:** the tool invocation and its output at `base.txt`, quoted with the threshold it is read against; `$WORK/body.txt` for the claim.
@@ -1028,21 +1028,18 @@ resolves this shape -- reuse it`
 diff adds a `def` or `async def` under `src/` outside a `tests/` directory, or adds a parameter to
 an existing one. Without that label the job already fails this limit on the files the PR touches,
 so the rule stays silent; it fired on none of 9 adjudications in the recorded reviews.
-**The rule:** measure, do not estimate. `self`/`cls` and `*args`/`**kwargs` do not count,
-keyword-only parameters do. Run the limit against the changed files at the head, then against the
-same paths at `base.txt`, and match per function name:
+**The rule:** measure, do not estimate. A first parameter named `self`/`cls` does not count; every
+other named parameter does, keyword-only and `_`-named ones included, and `*args` and `**kwargs`
+count one each, none of which Ruff's `PLR0913` matches. Measure
+with the gate script, which counts the head and the same paths at `base.txt` in one run and matches
+per function name:
 
 ```bash
-ruff check --select PLR0913 --config "lint.pylint.max-args=5" --force-exclude \
-  --output-format concise $(cut -f3 "$WORK/numstat.txt" | grep '^src/.*\.py$' | grep -v '/tests/')
-
-git show "$(cat "$WORK/base.txt")":<path> > "$WORK/base-<name>.py"
-ruff check --select PLR0913 --config "lint.pylint.max-args=5" --isolated \
-  --output-format concise "$WORK/base-<name>.py"
+python scripts/code_metrics.py --base-ref "$(cat "$WORK/base.txt")"
 ```
 
-Present at head and absent at base, or a higher number at head than at base, fires; the same number
-on both sides is backlog and is silent (the two switches do what D12's paragraph says they do). The
+Its `Parameter count` rows give both numbers: present at head and absent at base, or a higher
+number at head than at base, fires; the same number on both sides is backlog and is silent. The
 fix is not a shorter name: the values that travel together become one frozen keyword-only dataclass
 built where they are resolved, or the callee takes the object its callers unpack, and
 A6 when the long list is a caller's local variable table threaded into an extracted slice. The
@@ -1054,12 +1051,12 @@ was introduced, which is the backlog the comparison exists to keep out of the fi
 26-keyword `_run_multi_patch_nomination` and PR #1660's 28-parameter
 `_sweep_one_arm_single_server` are what that backlog looks like.
 **Not a finding when:** the base number equals the head number (the signature was already over and
-this diff did not widen it); the file is a test, or sits in `extend-exclude`, which
-`--force-exclude` already settles; the parameters are a typed parameter object; the function is a
+this diff did not widen it); the file is a test, or sits in the gate's `exclude`, which the
+script already settles; the parameters are a typed parameter object; the function is a
 CLI entry point whose parameters are the operator's flags, or its signature is fixed by a
 `Protocol`, a callback or a sibling implementation of one interface, which this rule counts but
 does not overrule.
-**Evidence:** both Ruff invocations above, with the head and base numbers quoted; `$WORK/diff.txt`
+**Evidence:** the gate's `Parameter count` rows, with the head and base numbers quoted; `$WORK/diff.txt`
 for the parameters the diff added.
 **Report as:** `D14 <file>:<line> -- <fn> takes <head> parameters (base: <base|absent>), over the
 limit of 5; pass <object> or group <names> into <Type>`
@@ -1241,7 +1238,8 @@ the fix must cover is enumerated, and only the tests scoped to the change are ru
 the full suite. The published review has two parts: what the PR does and how, then blocking
 issues only. When there are none, that is stated explicitly, with the head commit, the merge
 base, the cases run and the tests run, so the author sees the depth rather than a bare LGTM.
-Non-blocking observations are not appended in any form.
+Non-blocking observations are not appended in any form; beside the findings stand only the
+card's risk, the decisions a person must make, and Step 6's deletions (`references/subtract.md`).
 **Seen in:** PR #2227 -- a shell failure was "reproduced" on a hand-written probe that called `die` directly, concluding the script printed a message and continued; the real block was under `set -euo pipefail` where a bare assignment tripped errexit first, so `die` was dead code and the fetch exited 1 in silence. The wrong conclusion reached a commit message and a code comment. PR #1412 -- the review listed what was verified rather than taking the description
 at face value; PR #1420 ran four cases through the real `_seal_repository` on a repository a
 killed session had left on `forge/controller/dead-1`.

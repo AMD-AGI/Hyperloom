@@ -72,6 +72,7 @@ from hyperloom.inference_optimizer.trace.trajectory_trace import (
     EVENT_SESSION,
     STATUS_CANCELLED,
     TERMINAL_STATUSES,
+    EventSpan,
     llm_call_summary,
     load_events,
     record_event,
@@ -874,8 +875,7 @@ class Coordinator:
                     continue
                 record_event(
                     EVENT_PROPOSAL,
-                    status=STATUS_CANCELLED,
-                    span_id=pending.proposal_msg_id,
+                    span=EventSpan(span_id=pending.proposal_msg_id, status=STATUS_CANCELLED),
                     attributes={
                         "name": pending.action_name,
                         "action_name": pending.action_name,

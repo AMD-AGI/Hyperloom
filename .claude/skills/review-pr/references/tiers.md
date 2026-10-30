@@ -23,7 +23,7 @@ a failure surfaces, not by file size or churn.
 | 2 | `common/llm_config.py`, `common/perf_metric.py` | Gateway env resolution and client construction for every role; `graded_axes_of` is what the phase handlers and writeback grade against |
 | 2 | `breakdown/schema.py`, `schema_framework.py`, `schema_kernel.py` | Typed shape of the persisted `session_breakdown.json`. Zero import fan-in, so nothing catches writer/reader drift |
 | 2 | `inference_optimizer/framework_paths.py` | Three non-interchangeable resolvers. Patches land in the wrong tree, or the session optimizes a tree it is not measuring |
-| 2 | `kernelforge/cli/`, `kernelforge/config.py` | Dispatched as `python -m kernelforge.cli` — a subprocess contract |
+| 2 | `kernelforge/cli/`, `kernelforge/config/` | Dispatched as `python -m kernelforge.cli` — a subprocess contract |
 | 3 | everything else | one phase handler, one executor helper, one agent tool, one KB view |
 
 ## Tiering a file not in the table
@@ -69,3 +69,25 @@ tool, one KB view).
 Q1b is the one that bites here. `Coordinator` exposes 23 collaborator properties. A renamed
 collaborator class or wrong factory argument fails hours into a session when that phase is entered.
 Grep the class name, not just the symbol.
+
+## Risk of a pull request
+
+[`../risk.py`](../risk.py) grades the changed paths, both ends of a rename, into `risk.txt`, the floor of the card's
+`Risk:`. A Tier 1
+file above is `high`, a Tier 2 file `medium`. A test (under a `tests/` directory, `test_*.py`,
+`conftest.py`) is `low` wherever it sits. Any other path takes the highest risk among the rows below
+whose glob matches it (`*` crosses `/`); a path no row matches is `medium`.
+
+| Risk | Globs | Why |
+|---|---|---|
+| high | `.github/*` | CI workflows, CODEOWNERS and the review bot: the checks every later PR is judged by |
+| high | `.claude/*` | the reviewer's own instructions and its sibling skills |
+| high | `scripts/code_metrics*.py`, `scripts/pr_hygiene.py`, `scripts/ci_code_changed.py`, `.importlinter`, `.pre-commit-config.yaml`, `.gitleaks.toml` | the gates, and what decides which of them run |
+| high | `pyproject.toml`, `docs/compatibility.rst` | dependency pins and gate limits (rule X7) |
+| high | `*install*.sh`, `*local_setup.sh`, `*.sbatch` | install and launch scripts: they run only on GPU hosts, and pr-hygiene sizes them at zero |
+| high | `*assets/configs/baseline_*` | the baseline benchmark configs every gain is measured against |
+| medium | `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md`, `docs/contributing/*` | the authoring contract agents load |
+| medium | `docs/reference/*` | pages the runtime agent is told to read (`inference_optimizer/SKILL.md`) |
+| medium | `.env.template`, `examples/skills/*`, `examples/*/SKILL.md` | copied to `.env` at install; agent skills amd/skills federates or the wheel installs (`pyproject.toml`) |
+| medium | `src/*` | runtime code, and the prompts and skills agents load at runtime |
+| low | `docs/*`, `examples/*`, `*.md`, `LICENSE*`, `LICENSES/*`, `REUSE.toml`, `.gitignore`, `.editorconfig` | prose and metadata nothing executes |

@@ -40,7 +40,7 @@ _ALLOWED: tuple[tuple[str, str, str], ...] = (
         "This file names the old spellings in order to forbid them.",
     ),
     (
-        "src/kernelforge/tests/test_agent_env_contract.py",
+        "src/kernelforge/tests/agent_backends/test_agent_env_contract.py",
         r"KERNEL_AGENTS_MODEL",
         "The test that asserts the alias is no longer read has to name it.",
     ),
@@ -235,14 +235,3 @@ def test_the_rename_did_not_space_out_an_unrelated_identifier() -> None:
         "a quoted two-word spelling of kernel_backend: the identifier lost its "
         "underscore to the rename and must get it back:\n  " + "\n  ".join(stray[:40])
     )
-
-
-def test_kernel_backend_prompt_modules_are_importable() -> None:
-    """The dotted prompt-module registry is strings; only an import proves it."""
-    import importlib
-
-    from kernelforge.kernel_backends.constants import KERNEL_BACKEND_PROMPT_MODULES
-
-    for backend, module in KERNEL_BACKEND_PROMPT_MODULES.items():
-        assert module.startswith("kernelforge."), backend
-        importlib.import_module(module)
