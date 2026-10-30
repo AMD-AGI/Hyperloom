@@ -57,6 +57,7 @@ _HTTP_ENDPOINT_RULES: tuple[tuple[str, str], ...] = (
 # First-party source trees.
 _SCAN_ROOTS: tuple[str, ...] = (
     "src/hyperloom",
+    "src/hyperloom_common",
     "scripts",
     "docs",
     "examples",
@@ -319,11 +320,14 @@ def test_no_unsanctioned_llm_provider_access() -> None:
         )
 
 
-def test_single_shot_owner_exists() -> None:
-    """The allowlist must not rot: the single-shot inference owner has to exist."""
+def test_allowlisted_owners_are_scannable_paths() -> None:
+    """The allowlist must not rot: an owner that is missing, or outside every scan root, exempts nothing."""
     assert _REPO_ROOT is not None
-    owner = _REPO_ROOT / "src/hyperloom_common/llm/llm_config.py"
-    assert owner.is_file(), f"sanctioned single-shot inference owner is missing: {owner}"
+    for path in sorted(_ALLOWLISTED_OWNERS):
+        assert (_REPO_ROOT / path).is_file(), f"sanctioned LLM owner is missing: {path}"
+        assert any(path.startswith(f"{root}/") for root in _SCAN_ROOTS), (
+            f"sanctioned LLM owner {path} is outside _SCAN_ROOTS, so the scan never reaches its package"
+        )
 
 
 def test_pinned_violations_are_scannable_paths() -> None:
