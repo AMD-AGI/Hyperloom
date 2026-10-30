@@ -6,21 +6,16 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.common.gpu_identity import (
+    AMD_GPU_BOARDS,
     AMD_GPU_DEVICE_IDS,
-    AMD_GPU_DISPATCH_IDENTITIES,
     gpu_type_for_device_id,
     normalise_device_id,
 )
 
 
-#: Boards with a dispatch identity and no device ids on purpose: 0x7551 is the R9700 and also the R9700S and the R9600D,
-#: which is another board, so it names no single board and the caller falls back to the gfx target and the name.
-_NAME_ONLY = frozenset({"r9700"})
-
-
-def test_every_board_with_a_dispatch_identity_has_device_ids_and_the_other_way_round():
-    assert set(AMD_GPU_DEVICE_IDS) == set(AMD_GPU_DISPATCH_IDENTITIES) - _NAME_ONLY
-    assert all(ids for ids in AMD_GPU_DEVICE_IDS.values())
+def test_every_board_has_its_device_ids_listed_and_the_other_way_round():
+    assert set(AMD_GPU_DEVICE_IDS) == set(AMD_GPU_BOARDS)
+    assert {board for board, ids in AMD_GPU_DEVICE_IDS.items() if not ids} == {"r9700", "radeon8060s"}
 
 
 def test_a_device_id_belongs_to_one_board():
@@ -36,7 +31,7 @@ def test_the_boards_the_measured_nodes_report(device_id, board):
     assert gpu_type_for_device_id(device_id) == board
 
 
-@pytest.mark.parametrize("device_id", [None, "", "0x", "not-an-id", "0x0000", True, "0x74a2", "0x74b6"])
+@pytest.mark.parametrize("device_id", [None, "", "0x", "not-an-id", "0x0000", True, "0x74a2", "0x74b6", "0x7551"])
 def test_an_unknown_ambiguous_or_unreadable_id_names_no_board(device_id):
     assert gpu_type_for_device_id(device_id) is None
 
