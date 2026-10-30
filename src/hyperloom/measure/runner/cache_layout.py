@@ -9,8 +9,10 @@ the start-up script (:mod:`hyperloom.measure.runner.bootstrap`) installs from it
 
     <cache>/<sha>/source/      the repository tree at that commit (``git archive``), runner.lock included
     <cache>/<sha>/wheels/      one wheel per pin of ``source/requirements/runner.lock``
-    <cache>/<sha>/manifest     JSON, written last: the commit and its tree, the digest of ``source`` and, for each wheel,
-                               its pin, file, size and SHA-256 (see :class:`WheelEntry`)
+    <cache>/<sha>/bootstrap.sh the start-up script (``BOOTSTRAP_SCRIPT``) of the builder that made or last refreshed
+                               the entry, mode 0755; a template step runs it with ``sh``
+    <cache>/<sha>/manifest     JSON, written last: the commit and its tree, the digest of ``source``, the SHA-256 of
+                               ``bootstrap.sh`` and, for each wheel, its pin, file, size and SHA-256 (see :class:`WheelEntry`)
 
 The sandbox installs exactly the wheels the manifest lists, each pinned to the hash the manifest records
 (:func:`requirements_text`); the builder has checked every one of them against the lock. An entry without a manifest is
@@ -35,6 +37,7 @@ from pathlib import Path
 from typing import Any
 
 __all__ = [
+    "BOOTSTRAP_NAME",
     "CACHE_ENV",
     "DEFAULT_CACHE_DIR",
     "LOCK_FILE",
@@ -68,6 +71,8 @@ DEFAULT_CACHE_DIR = "/runner-cache"
 #: Optional: the SHA-256 of the manifest file the host got from the builder. When set, the runner accepts only that one.
 MANIFEST_PIN_ENV = "HYPERLOOM_RUNNER_CACHE_MANIFEST_SHA256"
 MANIFEST_NAME = "manifest"
+#: The start-up script in an entry, which the manifest pins by its SHA-256.
+BOOTSTRAP_NAME = "bootstrap.sh"
 #: The hash-pinned requirements the sandbox installs from, written below its scratch directory.
 REQUIREMENTS_FILE = "runner-wheels.lock"
 SOURCE_DIR = "source"
@@ -123,13 +128,15 @@ class WheelEntry:
 
 @dataclass(frozen=True)
 class Manifest:
-    """What a finished build records. ``git_tree`` is the commit's tree object, ``target`` what the wheels are for."""
+    """What a finished build records. ``git_tree`` is the commit's tree object, ``target`` what the wheels are for and
+    ``bootstrap_sha256`` the hash of the entry's ``bootstrap.sh`` (empty in a manifest written before entries had one)."""
 
     sha: str
     git_tree: str
     source: TreeDigest
     wheels: tuple[WheelEntry, ...]
     target: dict[str, Any]
+    bootstrap_sha256: str = ""
 
 
 def canonical_name(name: str) -> str:
@@ -228,6 +235,7 @@ def manifest_from_json(text: str | bytes) -> Manifest:
             TreeDigest(**data["source"]),
             tuple(WheelEntry(**wheel) for wheel in data["wheels"]),
             dict(data["target"]),
+            str(data.get("bootstrap_sha256", "")),
         )
     except (ValueError, KeyError, TypeError) as exc:
         raise CacheError(f"the manifest cannot be read: {type(exc).__name__}: {exc}") from exc
@@ -269,6 +277,15 @@ def _wheels_problems(wheels: Path, manifest: Manifest, pins: list[LockPin], veri
     return problems + [f"the manifest lists {name}=={version}, which the lock does not pin" for name, version in listed]
 
 
+def _bootstrap_problems(entry: Path, manifest: Manifest) -> list[str]:
+    script = entry / BOOTSTRAP_NAME
+    if not manifest.bootstrap_sha256:
+        return []
+    if not script.is_file() or file_sha256(script) != manifest.bootstrap_sha256:
+        return [f"{script} is missing or does not match the hash in the manifest"]
+    return []
+
+
 def _entry_problems(entry: Path, sha: str, manifest: Manifest, verify_hash: bool) -> list[str]:
     if manifest.sha != sha:
         return [f"the manifest of {entry} is for commit {manifest.sha}, not {sha}"]
@@ -279,7 +296,8 @@ def _entry_problems(entry: Path, sha: str, manifest: Manifest, verify_hash: bool
     if not lock.is_file():
         return [f"the source in {source} has no {LOCK_FILE}"]
     pins = parse_lock(lock.read_text(encoding=_UTF8))
-    return _source_problems(source, manifest) + _wheels_problems(wheels, manifest, pins, verify_hash)
+    problems = _source_problems(source, manifest) + _wheels_problems(wheels, manifest, pins, verify_hash)
+    return problems + (_bootstrap_problems(entry, manifest) if verify_hash else [])
 
 
 def check_entry(entry: Path, sha: str, manifest_pin: str = "", verify_hash: bool = False) -> list[str]:
@@ -287,7 +305,9 @@ def check_entry(entry: Path, sha: str, manifest_pin: str = "", verify_hash: bool
 
     Every wheel the lock pins must be there with its recorded size, the source must be the tree the manifest recorded and
     the lock the one the wheels were chosen from. The wheels' content is not read unless ``verify_hash``: ``pip`` checks
-    the hash of each wheel it installs against the lock, and the builder reads them all.
+    the hash of each wheel it installs against the lock, and the builder reads them all. ``bootstrap.sh`` too is read
+    only with ``verify_hash``: the script that runs this check cannot vouch for itself (see
+    :mod:`hyperloom.measure.runner.bootstrap`).
     """
     manifest_file = entry / MANIFEST_NAME
     if not manifest_file.is_file():

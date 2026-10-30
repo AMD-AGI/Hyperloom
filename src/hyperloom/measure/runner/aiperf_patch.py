@@ -83,7 +83,12 @@ class ErrorOutputSequenceLengthMetric(OutputSequenceLengthMetric):
     console_group = MetricConsoleGroup.NONE
 '''
 _METRIC_MARK = f'tag = "{AIPERF_ERROR_OUTPUT_LENGTH_METRIC}"'
-_SUBMODULE_DECLARED = re.compile(rf"^\s*path\s*=\s*{re.escape(AIPERF_SUBMODULE)}\s*$", re.MULTILINE)
+# The client's submodule is found by its name: InferenceX moved its path (utils/aiperf, then inferencex-e2e/utils/aiperf)
+# and kept the name.
+_SUBMODULE_SECTION = re.compile(
+    rf'^\[submodule\s+"{re.escape(AIPERF_SUBMODULE)}"\]\s*$(?P<body>(?:\n(?!\s*\[).*)*)', re.MULTILINE
+)
+_SUBMODULE_PATH = re.compile(r"^\s*path\s*=\s*(?P<path>\S+)\s*$", re.MULTILINE)
 
 
 class ReplayClientPatchError(Exception):
@@ -129,11 +134,21 @@ def _metric_text(path: Path, text: str) -> str | None:
     return text.rstrip("\n") + "\n" + _METRIC_NEW
 
 
-def _init_submodule(root: Path) -> None:
+def _declared_path(root: Path) -> str | None:
+    """Where the checkout's ``.gitmodules`` puts the client's submodule; ``None`` when it declares none."""
+    declaration = root / ".gitmodules"
+    if not declaration.is_file():
+        return None
+    section = _SUBMODULE_SECTION.search(_read(declaration))
+    path = _SUBMODULE_PATH.search(section["body"]) if section else None
+    return path["path"] if path else None
+
+
+def _init_submodule(root: Path, path: str) -> None:
     """Fetch the client's submodule the way Magpie does before a native AgentX run, so it can be patched first."""
     try:
         done = subprocess.run(
-            ["git", "-C", str(root), "submodule", "update", "--init", "--recursive", "--", AIPERF_SUBMODULE],
+            ["git", "-C", str(root), "submodule", "update", "--init", "--recursive", "--", path],
             capture_output=True,
             text=True,
             timeout=_SUBMODULE_TIMEOUT_SEC,
@@ -147,12 +162,12 @@ def _init_submodule(root: Path) -> None:
 
 def _client_dir(root: Path) -> Path:
     """The replay client's source below an InferenceX checkout, fetched when the checkout declares it and has none."""
-    client = root / AIPERF_SUBMODULE
+    declared = _declared_path(root)
+    client = root / (declared or AIPERF_SUBMODULE)
     if not (client / _PROJECT_FILE).is_file():
-        declaration = root / ".gitmodules"
-        if not declaration.is_file() or not _SUBMODULE_DECLARED.search(_read(declaration)):
+        if declared is None:
             raise ReplayClientPatchError(f"the InferenceX checkout has no {AIPERF_SUBMODULE} submodule")
-        _init_submodule(root)
+        _init_submodule(root, declared)
     if not (client / _PROJECT_FILE).is_file():
         raise ReplayClientPatchError(f"the {AIPERF_SUBMODULE} submodule holds no {_PROJECT_FILE}")
     return client

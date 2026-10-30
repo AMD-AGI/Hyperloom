@@ -102,10 +102,12 @@ def _git(cwd: Path, *args: str) -> None:
     assert done.returncode == 0, done.stderr
 
 
+@pytest.mark.parametrize("where", ["utils/aiperf", "inferencex-e2e/utils/aiperf"])
 def test_a_checkout_that_declares_the_client_as_a_submodule_gets_it_fetched_before_it_is_patched(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, where: str
 ) -> None:
-    """The way a runner's checkout is: the commit names the client, nothing has fetched it yet."""
+    """The way a runner's checkout is: the commit names the client, nothing has fetched it yet. The submodule is found by
+    its name, ``utils/aiperf``, wherever the checkout puts it (InferenceX moved it under ``inferencex-e2e/``)."""
     for key, value in (
         ("GIT_CONFIG_COUNT", "1"),
         ("GIT_CONFIG_KEY_0", "protocol.file.allow"),
@@ -128,15 +130,15 @@ def test_a_checkout_that_declares_the_client_as_a_submodule_gets_it_fetched_befo
     full = tmp_path / "full"
     full.mkdir()
     _git(full, "init", "-q")
-    _git(full, "submodule", "add", "-q", str(upstream), "utils/aiperf")
+    _git(full, "submodule", "add", "-q", "--name", "utils/aiperf", str(upstream), where)
     _git(full, "commit", "-q", "-m", "inferencex")
     runner = tmp_path / "runner"
     _git(tmp_path, "clone", "-q", str(full), str(runner))
-    assert not (runner / "utils" / "aiperf" / "pyproject.toml").exists(), "the clone has not fetched the submodule"
+    assert not (runner / where / "pyproject.toml").exists(), "the clone has not fetched the submodule"
 
     patch_replay_client(runner)
 
-    assert "token_counts=record.token_counts or TokenCounts()," in (runner / "utils/aiperf" / PARSER).read_text()
+    assert "token_counts=record.token_counts or TokenCounts()," in (runner / where / PARSER).read_text()
 
 
 # --- against the real client ----------------------------------------------------------------------------------------
