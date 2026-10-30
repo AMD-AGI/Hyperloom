@@ -12,10 +12,17 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from hyperloom.contracts.measurement import MAX_PHASE_SECONDS, MeasurementError, PhaseTiming
+from hyperloom.contracts.measurement import (
+    CARD_CLEAN,
+    CARD_OCCUPANCY_STATES,
+    MAX_PHASE_SECONDS,
+    MeasurementError,
+    PhaseTiming,
+)
 from hyperloom.measure.jit_kinds import STATES as JIT_STATES
 from hyperloom.measure.docs import (
     PREFIXED_SHA256_RE,
@@ -32,6 +39,8 @@ FAILURE_CLASSES = ("infra", "unclear", "candidate")
 #: Names the bundle itself owns; a manifest never lists them as result files.
 RESERVED_NAMES = ("manifest.json", "manifest.sig")
 _FINGERPRINT_RE = re.compile(r"[0-9a-f]{16}")
+#: How many of the runner's notes a manifest carries, and how long each may be.
+MAX_NOTES, MAX_NOTE_CHARS = 64, 2000
 
 
 @dataclass(frozen=True)
@@ -64,8 +73,32 @@ class RulePackFacts:
 
 
 @dataclass(frozen=True)
+class CardOccupancyFacts:
+    """What the runner says of who else used its cards: ``clean``, ``foreign`` with the process it saw (the guard only
+    observed it) or ``unknown`` with the reason it could not look, how many looks read the list, and ``method``, how a
+    look told a holder from the test's own (absent from a manifest an older runner signed)."""
+
+    state: str
+    reason: str | None
+    checks: int
+    method: str | None = None
+
+    @classmethod
+    def parse(cls, value: Any, path: str) -> "CardOccupancyFacts":
+        r = Reader(value, path)
+        state = r.choice("state", CARD_OCCUPANCY_STATES) or ""
+        reason = r.text("reason", optional=True)
+        facts = cls(state, reason, r.integer("checks", minimum=0) or 0, r.text("method", optional=True))
+        r.done()
+        if (state != CARD_CLEAN) != (reason is not None):
+            raise DocumentError(f"{path}: a card occupancy that is not clean states why, and a clean one has no reason")
+        return facts
+
+
+@dataclass(frozen=True)
 class RunnerFacts:
-    """What the runner states about itself. ``rule_pack`` is absent from a manifest an older runner signed."""
+    """What the runner states about itself. ``rule_pack`` and ``card_occupancy`` are absent from a manifest an older runner
+    signed, and ``card_occupancy`` from one a runner without a card signed."""
 
     sandbox_id: str
     signing_key_fingerprint: str
@@ -80,12 +113,14 @@ class RunnerFacts:
     gpu_ids: tuple[int, ...]
     ecc_delta: EccDelta | None
     rule_pack: RulePackFacts | None = None
+    card_occupancy: CardOccupancyFacts | None = None
 
     @classmethod
     def parse(cls, value: Any, path: str) -> "RunnerFacts":
         r = Reader(value, path)
         ecc = r.optional("ecc_delta")
         pack = r.optional("rule_pack")
+        occupancy = r.optional("card_occupancy")
         facts = cls(
             sandbox_id=r.text("sandbox_id") or "",
             signing_key_fingerprint=r.text("signing_key_fingerprint", pattern=PREFIXED_SHA256_RE) or "",
@@ -100,6 +135,7 @@ class RunnerFacts:
             gpu_ids=r.sequence("gpu_ids", _gpu_id),
             ecc_delta=None if ecc is None else EccDelta.parse(ecc, r.at("ecc_delta")),
             rule_pack=None if pack is None else RulePackFacts.parse(pack, r.at("rule_pack")),
+            card_occupancy=None if occupancy is None else CardOccupancyFacts.parse(occupancy, r.at("card_occupancy")),
         )
         r.done()
         return facts
@@ -307,6 +343,9 @@ class ResultManifest:
     timing: Timing
     files: tuple[ManifestFile, ...]
     jit_cache: JitCacheFacts | None = None
+    #: What the runner noted of the test that the rest of the result does not say (a check it could not make, a CPU build
+    #: of aiter's modules it used or why not), in its order; none in a manifest an older runner signed.
+    notes: tuple[str, ...] = ()
 
     @classmethod
     def from_document(cls, document: Any) -> "ResultManifest":
@@ -324,6 +363,7 @@ class ResultManifest:
             timing=r.section("timing", Timing.parse),
             files=r.sequence("files", ManifestFile.parse),
             jit_cache=_optional(r, "jit_cache", JitCacheFacts.parse),
+            notes=_optional(r, "notes", _notes) or (),
         )
         r.done()
         paths = [entry.path for entry in manifest.files]
@@ -343,6 +383,20 @@ class ResultManifest:
 def _optional(reader: Reader, key: str, parse: Any) -> Any:
     value = reader.optional(key)
     return None if value is None else parse(value, reader.at(key))
+
+
+def manifest_notes(notes: Sequence[str]) -> list[str]:
+    """The runner's notes as its manifest carries them: the first :data:`MAX_NOTES`, each cut to :data:`MAX_NOTE_CHARS`."""
+    return [note[:MAX_NOTE_CHARS] for note in notes[:MAX_NOTES] if note]
+
+
+def _notes(value: Any, path: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or len(value) > MAX_NOTES:
+        raise DocumentError(f"{path}: expected an array of at most {MAX_NOTES} notes")
+    notes = tuple(_name(item, f"{path}[{index}]") for index, item in enumerate(value))
+    if any(len(note) > MAX_NOTE_CHARS for note in notes):
+        raise DocumentError(f"{path}: a note is longer than {MAX_NOTE_CHARS} characters")
+    return notes
 
 
 def _name(value: Any, path: str) -> str:

@@ -20,6 +20,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from hyperloom.contracts.measurement import Purpose
+from hyperloom.measure.long_context.plan import LongContextPlan
+from hyperloom.measure.short_prompts.plan import ShortPromptPlan
 from hyperloom.measure.surface import POINT_ENV_KEYS, REQUEST_ENV_KEYS
 from hyperloom.measure.docs import (
     PREFIXED_SHA256_RE,
@@ -37,7 +39,11 @@ SPEC_SCHEMA = "hyperloom.measurement-spec/v1"
 _KIND = "kind"
 _UPSERT = "upsert"
 _RUNTIME = "runtime"
+_BUILDS = "builds"
+_MANIFEST_SHA256 = "manifest_sha256"
 _ACCURACY = "accuracy"
+_SHORT_PROMPTS = "short_prompts"
+_LONG_CONTEXT = "long_context"
 _RESULT_DIR = "result_dir"
 #: A key the sheet of a test that ran a greedy decode pass carried. The pass is gone and the key means nothing, but the
 #: journal keeps those sheets and a result is verified again from them, so the key is read and dropped.
@@ -193,13 +199,13 @@ class Attachment:
             id=r.text("id", pattern=_ID_RE) or "",
             kind=r.choice(_KIND, ("file", "dir")) or "",
             blob=r.text("blob", pattern=PREFIXED_SHA256_RE) or "",
-            manifest_sha256=r.text("manifest_sha256", pattern=SHA256_RE) or "",
+            manifest_sha256=r.text(_MANIFEST_SHA256, pattern=SHA256_RE) or "",
         )
         r.done()
         return attachment
 
     def to_document(self) -> dict[str, Any]:
-        return {"id": self.id, _KIND: self.kind, "blob": self.blob, "manifest_sha256": self.manifest_sha256}
+        return {"id": self.id, _KIND: self.kind, "blob": self.blob, _MANIFEST_SHA256: self.manifest_sha256}
 
 
 @dataclass(frozen=True)
@@ -307,44 +313,96 @@ class RuntimeSnapshot:
     def parse(cls, value: Any, path: str) -> "RuntimeSnapshot":
         r = Reader(value, path)
         runtime = cls(
-            snapshot=r.text("snapshot") or "", manifest_sha256=r.text("manifest_sha256", pattern=SHA256_RE) or ""
+            snapshot=r.text("snapshot") or "", manifest_sha256=r.text(_MANIFEST_SHA256, pattern=SHA256_RE) or ""
         )
         r.done()
         return runtime
 
     def to_document(self) -> dict[str, Any]:
-        return {"snapshot": self.snapshot, "manifest_sha256": self.manifest_sha256}
+        return {"snapshot": self.snapshot, _MANIFEST_SHA256: self.manifest_sha256}
+
+
+@dataclass(frozen=True)
+class BuildRef:
+    """The ready native build a ``runtime`` root's outputs come from: its key in the build store and the SHA-256 of the
+    signed manifest it was built to."""
+
+    root_id: str
+    key: str
+    manifest_sha256: str
+
+    @classmethod
+    def parse(cls, value: Any, path: str) -> "BuildRef":
+        r = Reader(value, path)
+        ref = cls(
+            root_id=r.text("root_id", pattern=_ID_RE) or "",
+            key=r.text("key", pattern=SHA256_RE) or "",
+            manifest_sha256=r.text(_MANIFEST_SHA256, pattern=SHA256_RE) or "",
+        )
+        r.done()
+        return ref
+
+    def to_document(self) -> dict[str, Any]:
+        return {"root_id": self.root_id, "key": self.key, _MANIFEST_SHA256: self.manifest_sha256}
 
 
 @dataclass(frozen=True)
 class Environment:
+    """The overlay a runner rebuilds. ``builds`` name the ready native build of each ``runtime`` root, one each, and of
+    a package root whose JIT modules a CPU build made (aiter's, #125 stage 2b); a sheet with none leaves the key out, so a
+    runner that does not know it reads every other sheet as before and refuses one that has builds."""
+
     roots: tuple[EnvRoot, ...] = ()
     runtime: RuntimeSnapshot | None = None
     blob_root: str = ""
+    builds: tuple[BuildRef, ...] = ()
 
     @classmethod
     def parse(cls, value: Any, path: str) -> "Environment":
         r = Reader(value, path)
         runtime_raw = r.optional(_RUNTIME)
+        builds_raw = r.optional(_BUILDS)
         environment = cls(
             roots=r.sequence("roots", EnvRoot.parse),
             runtime=None if runtime_raw is None else RuntimeSnapshot.parse(runtime_raw, r.at(_RUNTIME)),
             blob_root=r.text("blob_root") or "",
+            builds=() if builds_raw is None else r.sequence(_BUILDS, BuildRef.parse),
         )
         r.done()
+        if builds_raw is not None and not environment.builds:
+            raise DocumentError(f"{path}.builds: an empty list; a sheet with no build leaves the key out")
         ids = [root.id for root in environment.roots]
         if len(set(ids)) != len(ids):
             raise DocumentError(f"{path}.roots: an id appears twice")
-        if environment.runtime is None and any(root.kind == _RUNTIME for root in environment.roots):
-            raise DocumentError(f"{path}.runtime: a runtime root needs a runtime snapshot")
+        kinds = {root.id: root.kind for root in environment.roots}
+        runtime_ids = sorted(root_id for root_id, kind in kinds.items() if kind == _RUNTIME)
+        built = [ref.root_id for ref in environment.builds]
+        if len(set(built)) != len(built) or not set(runtime_ids) <= set(built) <= set(kinds):
+            raise DocumentError(
+                f"{path}.builds: each runtime root needs exactly one build, a package root may have one (of the "
+                f"modules its JIT builds), and each build names a root (runtime roots {runtime_ids}, builds {built})"
+            )
         return environment
 
     def to_document(self) -> dict[str, Any]:
-        return {
+        document: dict[str, Any] = {
             "roots": [root.to_document() for root in self.roots],
             _RUNTIME: None if self.runtime is None else self.runtime.to_document(),
             "blob_root": self.blob_root,
         }
+        if self.builds:
+            document[_BUILDS] = [ref.to_document() for ref in self.builds]
+        return document
+
+
+def _short_prompts(value: Any, path: str) -> ShortPromptPlan | None:
+    """The sheet's short-prompt check, absent from a sheet that asks for none."""
+    return None if value is None else ShortPromptPlan.parse(value, path)
+
+
+def _long_context(value: Any, path: str) -> LongContextPlan | None:
+    """The sheet's long-context check, absent from a sheet that asks for none."""
+    return None if value is None else LongContextPlan.parse(value, path)
 
 
 @dataclass(frozen=True)
@@ -357,6 +415,8 @@ class Procedure:
     timeout_sec: float
     silence_timeout_sec: float
     deadline_unix: float
+    short_prompts: ShortPromptPlan | None = None
+    long_context: LongContextPlan | None = None
 
     @classmethod
     def parse(cls, value: Any, path: str) -> "Procedure":
@@ -373,13 +433,15 @@ class Procedure:
             timeout_sec=r.number("timeout_sec", minimum=1) or 1.0,
             silence_timeout_sec=r.number("silence_timeout_sec", minimum=1) or 1.0,
             deadline_unix=r.number("deadline_unix", minimum=0) or 0.0,
+            short_prompts=_short_prompts(r.optional(_SHORT_PROMPTS), r.at(_SHORT_PROMPTS)),
+            long_context=_long_context(r.optional(_LONG_CONTEXT), r.at(_LONG_CONTEXT)),
         )
         r.optional(_REMOVED_DECODE_PASS)
         r.done()
         return procedure
 
     def to_document(self) -> dict[str, Any]:
-        return {
+        document: dict[str, Any] = {
             "prep": self.prep,
             "benchmark_backend": self.benchmark_backend,
             "rounds": {"warmup": self.warmup_rounds, "measure": self.measure_rounds},
@@ -388,6 +450,11 @@ class Procedure:
             "silence_timeout_sec": self.silence_timeout_sec,
             "deadline_unix": self.deadline_unix,
         }
+        if self.short_prompts is not None:
+            document[_SHORT_PROMPTS] = self.short_prompts.to_document()
+        if self.long_context is not None:
+            document[_LONG_CONTEXT] = self.long_context.to_document()
+        return document
 
 
 @dataclass(frozen=True)

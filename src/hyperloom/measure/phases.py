@@ -36,6 +36,7 @@ __all__ = [
     "JIT_CACHE",
     "KERNEL_TABLES",
     "LANDED",
+    "LONG_CONTEXT",
     "MEASURED",
     "OTHER",
     "PHASE_ORDER",
@@ -55,6 +56,7 @@ __all__ = [
     "SANDBOX_START",
     "SERVER_BOOT",
     "SHEET_WAIT",
+    "SHORT_PROMPTS",
     "TEARDOWN",
     "WARMUP",
     "Accounted",
@@ -95,6 +97,10 @@ MEASURED = "measured"
 ROUND_COLLECT = "round_collect"
 TEARDOWN = "teardown"
 REPRO_CASE = "repro_case"
+#: The short-prompt consistency check's questions to a server it has just booted (the boots are ``server_boot`` as always).
+SHORT_PROMPTS = "short_prompts"
+#: The long-context check's questions to a server it has just booted (the boot is ``server_boot`` as always).
+LONG_CONTEXT = "long_context"
 #: A round whose marks cannot say where its parts began, and time between stamped phases that nothing stamps.
 ROUND = "round"
 OTHER = "other"
@@ -116,6 +122,8 @@ PHASE_ORDER = (
     ACCURACY_EVAL,
     MEASURED,
     REPRO_CASE,
+    SHORT_PROMPTS,
+    LONG_CONTEXT,
     ROUND_COLLECT,
     TEARDOWN,
     ROUND,

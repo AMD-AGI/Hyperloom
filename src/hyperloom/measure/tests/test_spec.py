@@ -103,13 +103,66 @@ def test_a_config_whose_hash_does_not_match_its_text_is_refused() -> None:
         MeasurementSpec.from_document(document)
 
 
-def test_a_runtime_root_needs_a_runtime_snapshot() -> None:
-    def change(d: dict[str, Any]) -> None:
-        d["environment"]["roots"][0]["kind"] = "runtime"
-        d["environment"]["runtime"] = None
+_KEY, _MANIFEST = "1" * 64, "2" * 64
 
-    with pytest.raises(DocumentError, match="runtime snapshot"):
-        MeasurementSpec.from_document(_edit(change))
+
+def _built(d: dict[str, Any]) -> None:
+    d["environment"]["roots"][0]["kind"] = "runtime"
+    d["environment"]["runtime"] = None
+    d["environment"]["builds"] = [
+        {"root_id": d["environment"]["roots"][0]["id"], "key": _KEY, "manifest_sha256": _MANIFEST}
+    ]
+
+
+def test_a_runtime_root_names_its_ready_build_and_the_build_is_in_the_fingerprint() -> None:
+    document = _edit(_built)
+    spec = MeasurementSpec.from_document(document)
+
+    assert [(b.key, b.manifest_sha256) for b in spec.environment.builds] == [(_KEY, _MANIFEST)]
+    assert MeasurementSpec.from_bytes(spec.to_bytes()) == spec
+    assert list(VALIDATOR.iter_errors(document)) == []
+    other = _edit(lambda d: (_built(d), d["environment"]["builds"][0].update(manifest_sha256="3" * 64)))
+    assert _fp(document) != _fp(other), "another manifest is another measurement"
+    assert canonical_for_fingerprint(spec)["environment"]["builds"][0]["key"] == _KEY
+
+
+def test_a_sheet_with_no_build_leaves_the_key_out_so_its_bytes_and_fingerprint_are_unchanged() -> None:
+    spec = MeasurementSpec.from_document(spec_document())
+
+    assert "builds" not in spec.to_document()["environment"]
+    assert spec.to_document()["environment"] == spec_document()["environment"]
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        (lambda d: (_built(d), d["environment"].pop("builds")), "each runtime root needs exactly one build"),
+        (lambda d: (_built(d), d["environment"]["builds"][0].update(root_id="nowhere")), "each build names a root"),
+        (
+            lambda d: (_built(d), d["environment"]["builds"].append(dict(d["environment"]["builds"][0]))),
+            "each runtime root needs exactly one build",
+        ),
+        (lambda d: (_built(d), d["environment"]["builds"][0].update(key="k")), "builds"),
+        (lambda d: d["environment"].update(builds=[]), "an empty list"),
+        (lambda d: (_built(d), d["environment"]["builds"][0].update(extra=1)), "extra"),
+    ],
+    ids=["runtime-root-without-build", "build-of-no-root", "two-builds", "bad-key", "empty", "unknown-field"],
+)
+def test_a_build_that_does_not_name_exactly_one_runtime_root_is_refused(change: Any, reason: str) -> None:
+    document = _edit(change)
+
+    with pytest.raises(DocumentError, match=reason):
+        MeasurementSpec.from_document(document)
+
+
+def test_a_package_root_may_name_the_build_of_its_jit_modules() -> None:
+    """#125 stage 2b: aiter's package root names the CPU build of the modules its patch touches; which package may have
+    one is the runner's to say."""
+    document = _edit(lambda d: (_built(d), d["environment"]["roots"][0].update(kind="package")))
+
+    spec = MeasurementSpec.from_document(document)
+
+    assert [b.root_id for b in spec.environment.builds] == [spec.environment.roots[0].id]
 
 
 def test_duplicate_json_keys_and_non_finite_numbers_are_refused() -> None:
@@ -270,3 +323,123 @@ def test_a_sheet_written_while_the_decode_pass_existed_still_parses_and_the_flag
     assert "decode_pass" not in spec.to_document()["procedure"]
     assert spec.to_document() == MeasurementSpec.from_document(spec_document()).to_document()
     assert not hasattr(spec.procedure, "decode_pass")
+
+
+def _short_prompts(**changes: Any) -> dict[str, Any]:
+    plan = {
+        "prompt_set": "short-prompts-0123456789abcdef",
+        "prompts_sha256": "a" * 64,
+        "max_new_tokens": 32,
+        "phase_cap_sec": 1200.0,
+        "trigger": ["purpose final", "arg --attention-backend aiter"],
+        "recipe": "sha256:" + "1" * 64,
+        "parent_recipe": "sha256:" + "2" * 64,
+    }
+    return {**plan, **changes}
+
+
+def test_a_sheet_that_asks_for_the_short_prompt_check_carries_the_plan_and_the_schema_allows_it() -> None:
+    document = _edit(lambda d: d["procedure"].update(short_prompts=_short_prompts()))
+
+    spec = MeasurementSpec.from_document(document)
+
+    assert spec.procedure.short_prompts is not None and spec.procedure.short_prompts.max_new_tokens == 32
+    assert list(VALIDATOR.iter_errors(document)) == []
+    assert MeasurementSpec.from_bytes(spec.to_bytes()) == spec
+
+
+def test_a_sheet_that_asks_for_none_has_no_such_key_so_its_bytes_and_hash_are_unchanged() -> None:
+    spec = MeasurementSpec.from_document(spec_document())
+
+    assert spec.procedure.short_prompts is None and "short_prompts" not in spec.to_document()["procedure"]
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ({"max_new_tokens": 0}, "must be at least 1"),
+        ({"processes": 6}, "unknown key 'processes'"),
+        ({"prompts_sha256": "nope"}, "does not match"),
+        ({"prompt_set": "Bad Key"}, "does not match"),
+        ({"phase_cap_sec": "slow"}, "expected a number"),
+        ({"trigger": [""]}, "non-empty string"),
+        ({"extra": 1}, "unknown key 'extra'"),
+    ],
+)
+def test_a_short_prompt_plan_that_breaks_its_contract_is_refused_by_the_reader_and_the_schema(change, message) -> None:
+    document = _edit(lambda d: d["procedure"].update(short_prompts=_short_prompts(**change)))
+
+    with pytest.raises(DocumentError, match=message):
+        MeasurementSpec.from_document(document)
+    assert list(VALIDATOR.iter_errors(document)) != []
+
+
+def test_the_fingerprint_changes_with_the_short_prompt_plan_because_the_measurement_then_is_another() -> None:
+    base = _fp(spec_document())
+
+    assert _fp(_edit(lambda d: d["procedure"].update(short_prompts=_short_prompts()))) != base
+
+
+def _long_context(**changes: Any) -> dict[str, Any]:
+    plan = {
+        "prompt_set": "long-context-0123456789abcdef",
+        "prompts_sha256": "a" * 64,
+        "length": 131072,
+        "max_new_tokens": 128,
+        "concurrency": 4,
+        "phase_cap_sec": 2400.0,
+        "trigger": ["request long_context_check"],
+    }
+    return {**plan, **changes}
+
+
+def test_a_sheet_that_asks_for_the_long_context_check_carries_the_plan_and_the_schema_allows_it() -> None:
+    document = _edit(lambda d: d["procedure"].update(long_context=_long_context()))
+
+    spec = MeasurementSpec.from_document(document)
+
+    assert spec.procedure.long_context is not None and spec.procedure.long_context.length == 131072
+    assert spec.procedure.short_prompts is None
+    assert list(VALIDATOR.iter_errors(document)) == []
+    assert MeasurementSpec.from_bytes(spec.to_bytes()) == spec
+
+
+def test_a_sheet_that_asks_for_no_long_context_check_has_no_such_key_so_its_bytes_and_hash_are_unchanged() -> None:
+    spec = MeasurementSpec.from_document(spec_document())
+
+    assert spec.procedure.long_context is None and "long_context" not in spec.to_document()["procedure"]
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ({"length": 10}, "must be at least 1024"),
+        ({"max_new_tokens": 0}, "must be at least 1"),
+        ({"concurrency": 0}, "must be at least 1"),
+        ({"prompts_sha256": "nope"}, "does not match"),
+        ({"prompt_set": "Bad Key"}, "does not match"),
+        ({"phase_cap_sec": "slow"}, "expected a number"),
+        ({"trigger": [""]}, "non-empty string"),
+        ({"extra": 1}, "unknown key 'extra'"),
+    ],
+)
+def test_a_long_context_plan_that_breaks_its_contract_is_refused_by_the_reader_and_the_schema(change, message) -> None:
+    document = _edit(lambda d: d["procedure"].update(long_context=_long_context(**change)))
+
+    with pytest.raises(DocumentError, match=message):
+        MeasurementSpec.from_document(document)
+    assert list(VALIDATOR.iter_errors(document)) != []
+
+
+def test_a_max_new_tokens_beyond_what_the_headroom_covers_is_refused_by_the_schema_too() -> None:
+    document = _edit(lambda d: d["procedure"].update(long_context=_long_context(max_new_tokens=129)))
+
+    assert list(VALIDATOR.iter_errors(document)) != []
+    with pytest.raises(DocumentError, match="max_new_tokens must be 1 to 128"):
+        MeasurementSpec.from_document(document)
+
+
+def test_the_fingerprint_changes_with_the_long_context_plan_because_the_measurement_then_is_another() -> None:
+    base = _fp(spec_document())
+
+    assert _fp(_edit(lambda d: d["procedure"].update(long_context=_long_context()))) != base

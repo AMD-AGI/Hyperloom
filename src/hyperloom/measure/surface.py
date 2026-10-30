@@ -164,11 +164,17 @@ def point_values(config: Mapping[str, Any]) -> dict[str, str | None]:
     return {key: _text(envs.get(key)) for key in POINT_ENV_KEYS}
 
 
+def measurement_envs(names: Iterable[str]) -> list[str]:
+    """The names among ``names`` a launch environment may not set: workload, evaluation and request-decided ones."""
+
+    guarded = {*SURFACE_ENV_KEYS, *POINT_ENV_KEYS, *REQUEST_ENV_KEYS}
+    return sorted(name for name in names if name.upper() in guarded)
+
+
 def check_launch_envs(names: Iterable[str]) -> None:
     """Refuse a launch environment that sets a workload, evaluation or request-decided variable."""
 
-    guarded = {*SURFACE_ENV_KEYS, *POINT_ENV_KEYS, *REQUEST_ENV_KEYS}
-    offending = sorted(name for name in names if name.upper() in guarded)
+    offending = measurement_envs(names)
     if offending:
         raise SurfaceViolation(
             f"the launch environment sets {', '.join(offending)}: workload and evaluation settings belong to the "
@@ -218,5 +224,6 @@ __all__ = [
     "check_surface",
     "extract_surface",
     "hash_model_files",
+    "measurement_envs",
     "point_values",
 ]
