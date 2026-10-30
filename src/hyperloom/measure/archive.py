@@ -42,14 +42,12 @@ class ArchiveError(Exception):
 class ResultArchive(Protocol):
     def put_bundle(self, request_id: str, manifest_sha256: str, staging_dir: Path) -> str:
         """Store the bundle in ``staging_dir`` and return where it is stored; storing it again is a success."""
-        ...
 
     def bundle_path(self, request_id: str, manifest_sha256: str) -> Path:
         """A readable directory holding the stored bundle, laid out as it was staged.
 
         Raises :class:`ArchiveError` when nothing is stored under the key or the archive cannot be reached.
         """
-        ...
 
 
 class DirResultArchive:

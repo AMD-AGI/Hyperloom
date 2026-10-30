@@ -9,6 +9,9 @@ package are laid like a package root's, and its native outputs come from a build
 (:class:`BuildNeed`); the build is made while the test waits without a card, and the sheet names it once it is ready, by
 its key and the SHA-256 of its signed manifest (:class:`BuildRef`, ``environment.builds``).
 
+The compiled overlay's roots (:class:`EnvRoot`) and their entries (:class:`EnvEntry`) are defined here, below
+:mod:`hyperloom.measure.compile`, because the builds named here are made from them.
+
 aiter's touched modules (#125 stage 2b) are built the same way but stay a package root's: :class:`ModulePlan` says which
 of them a CPU build makes (:class:`ModuleBuild`), and the sheet names that build on aiter's package root.
 """
@@ -17,18 +20,19 @@ from __future__ import annotations
 
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
-from hyperloom.contracts.recipe import ComponentPatches, Recipe, RecipeError
+from hyperloom.contracts.recipe import DIGEST_PREFIX, ComponentPatches, Recipe, RecipeError
 
 if TYPE_CHECKING:
-    from hyperloom.measure.compile import EnvEntry, EnvRoot
     from hyperloom.measure.jit.native.key import BuildInputs
 
 __all__ = [
     "BuildNeed",
     "BuildNotReady",
     "BuildRef",
+    "EnvEntry",
+    "EnvRoot",
     "ModuleBuild",
     "ModulePlan",
     "NativePlan",
@@ -36,6 +40,43 @@ __all__ = [
     "RuntimeSourcesConflict",
     "check_runtime_sources",
 ]
+
+
+@dataclass(frozen=True)
+class EnvEntry:
+    """One file of a root that differs from the base: laid over it (``upsert``) or removed (``delete``)."""
+
+    path: str
+    op: Literal["upsert", "delete"]
+    blob: str | None = None
+    mode: str | None = None
+
+    def to_document(self) -> dict[str, object]:
+        document: dict[str, object] = {"path": self.path, "op": self.op}
+        if self.op == "upsert":
+            document.update(blob=f"{DIGEST_PREFIX}{self.blob}", mode=self.mode)
+        return document
+
+
+@dataclass(frozen=True)
+class EnvRoot:
+    """A package in the image and everything that differs from it."""
+
+    id: str
+    import_name: str
+    dist_name: str | None
+    dist_version: str | None
+    entries: tuple[EnvEntry, ...]
+    kind: Literal["package", "runtime"] = "package"
+
+    def to_document(self) -> dict[str, object]:
+        return {
+            "id": self.id,
+            "kind": self.kind,
+            "import_name": self.import_name,
+            "dist": {"name": self.dist_name, "version": self.dist_version},
+            "entries": [entry.to_document() for entry in self.entries],
+        }
 
 
 @dataclass(frozen=True)
@@ -51,7 +92,8 @@ class NativePlan(Protocol):
     """The native build ``component``'s stack needs; ``None`` when it changes no native source (or the component has no
     native recipe), and a :class:`CompileError` when it changes one that cannot be built."""
 
-    def __call__(self, component: ComponentPatches) -> NativeStack | None: ...
+    def __call__(self, component: ComponentPatches) -> NativeStack | None:
+        """The native build ``component``'s stack needs, if any."""
 
 
 @dataclass(frozen=True)
@@ -69,9 +111,11 @@ class ModulePlan(Protocol):
 
     def __call__(
         self, roots: tuple[EnvRoot, ...], config: Mapping[str, Any], candidates: Collection[str]
-    ) -> ModuleBuild | None: ...
+    ) -> ModuleBuild | None:
+        """The CPU build of the ``candidates`` it makes, if any."""
 
-    def seconds(self, modules: Collection[str]) -> float: ...
+    def seconds(self, modules: Collection[str]) -> float:
+        """How long building ``modules`` on CPU takes, in seconds."""
 
 
 @dataclass(frozen=True)
