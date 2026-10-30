@@ -17,6 +17,10 @@ file that is copied into a sandbox and runs there with the standard library only
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from types import MappingProxyType
+
+from hyperloom.common.outside_facts.component_layout import ComponentLayoutSpec
 from hyperloom.common.outside_facts.rule_pack import default_pack
 
 __all__ = [
@@ -33,13 +37,24 @@ __all__ = [
     "AIPERF_PHASE_KEY",
     "AIPERF_PROFILING_PHASE",
     "AIPERF_SUBMODULE",
+    "AITER_DEVELOP_MODE",
+    "AITER_INSTALL_MODE_FILE",
     "AITER_LOG_TUNED_CONFIG_ENV",
     "AITER_MERGED_VIEW_DIR",
+    "AITER_META_DIR_ENV",
+    "AITER_META_MARKER_DIR",
+    "AITER_META_WHEEL_DIR",
     "AITER_TUNED_HIT",
     "AITER_TUNED_HIT_MARKER",
     "ARGPARSE_INVALID_CHOICE",
     "ARGPARSE_UNRECOGNIZED_ARGUMENTS_RE",
+    "ASM_LIBTYPE",
     "CONTEXT_LENGTH_FLAGS",
+    "DRM_CLIENT_ID_KEY",
+    "DRM_FDINFO_DIR",
+    "DRM_FD_DIR",
+    "DRM_RENDER_NODE_PREFIX",
+    "DRM_VRAM_KEY",
     "ENV_CONC",
     "ENV_EP",
     "ENV_ISL",
@@ -53,6 +68,7 @@ __all__ = [
     "ENV_RANDOM_RANGE_RATIO",
     "ENV_RUN_EVAL",
     "ENV_TP",
+    "FORGE_REL_NORM_ERR_COLUMN",
     "HIP_ERROR_PREFIX",
     "HIP_GRAPH_PACKET_CAPTURE_ENV",
     "HIP_GRAPH_PACKET_CAPTURE_NODE_BY_NODE",
@@ -60,27 +76,86 @@ __all__ = [
     "HIP_NO_KERNEL_IMAGE",
     "HIP_UNDEFINED_SYMBOL",
     "HSA_STATUS_ERROR",
+    "INITIAL_PID_NAMESPACE",
+    "KFD_NODES",
+    "KFD_NODE_GPU_ID",
+    "KFD_NODE_PROPERTIES",
+    "KFD_PROCESSES",
+    "KFD_QUEUES",
+    "KFD_QUEUE_GPU_ID",
+    "KFD_RENDER_MINOR_KEY",
+    "KFD_ROOT",
+    "KFD_VRAM_PREFIX",
+    "PID_NAMESPACE_LINK",
     "PY_IMPORT_ERROR",
     "PY_MODULE_NOT_FOUND_ERROR",
     "ROCR_VISIBLE_DEVICES_ENV",
+    "SGLANG_CUDA_GRAPH_CAPTURE_END",
+    "SGLANG_CUDA_GRAPH_DECODE_BS",
     "SGLANG_IMAGE_AITER_CONFIGS",
     "SGLANG_IMAGE_WORKSPACE",
+    "SHORT_PROMPT_CHECK",
+    "SHORT_PROMPT_TOUCH",
     "TRANSFORMERS_DOES_NOT_RECOGNIZE",
     "TRANSFORMERS_UNKNOWN_ARCHITECTURE",
     "TUNABLEOP_ENABLED_ENV",
     "TUNABLEOP_TABLE_ENV",
     "TUNABLEOP_TUNING_ENV",
+    "TUNED_LIBTYPE_COLUMN",
+    "TUNED_SPLITK_COLUMN",
+    "UPSTREAM_PR_REPOS",
+    "component_layouts",
     "spaced",
 ]
 
 _PACK = default_pack()
 
+
+def component_layouts() -> Mapping[str, ComponentLayoutSpec]:
+    """The layout of every component the pack describes, by the name a recipe calls the component."""
+    return MappingProxyType(
+        {
+            "sglang": _PACK.component_layout("component_layout_sglang"),
+            "vllm": _PACK.component_layout("component_layout_vllm"),
+            "aiter": _PACK.component_layout("component_layout_aiter"),
+            "atom": _PACK.component_layout("component_layout_atom"),
+            "xdit": _PACK.component_layout("component_layout_xdit"),
+            "triton": _PACK.component_layout("component_layout_triton"),
+            "torch": _PACK.component_layout("component_layout_torch"),
+            "sgl_kernel": _PACK.component_layout("component_layout_sgl_kernel"),
+            "flydsl": _PACK.component_layout("component_layout_flydsl"),
+        }
+    )
+
+
 _aiter = _PACK.names("aiter_merged_view", "dir")
 AITER_MERGED_VIEW_DIR = _aiter["dir"]
+
+_meta = _PACK.names("aiter_meta_dir", "variable", "wheel_dir", "marker_dir", "install_mode_file", "develop_mode")
+AITER_META_DIR_ENV = _meta["variable"]
+AITER_META_WHEEL_DIR = _meta["wheel_dir"]
+AITER_META_MARKER_DIR = _meta["marker_dir"]
+AITER_INSTALL_MODE_FILE = _meta["install_mode_file"]
+AITER_DEVELOP_MODE = _meta["develop_mode"]
+
+_tuned = _PACK.names("aiter_tuned_row_columns", "libtype_column", "splitk_column", "asm_libtype")
+TUNED_LIBTYPE_COLUMN = _tuned["libtype_column"]
+TUNED_SPLITK_COLUMN = _tuned["splitk_column"]
+ASM_LIBTYPE = _tuned["asm_libtype"]
+
+UPSTREAM_PR_REPOS = tuple(_PACK.names("upstream_pr_repos", "sglang", "vllm", "aiter", "pytorch").values())
+
+FORGE_REL_NORM_ERR_COLUMN = _PACK.names("forge_rel_norm_err", "column")["column"]
 
 AITER_LOG_TUNED_CONFIG_ENV = _PACK.names("aiter_log_tuned_config", "env")["env"]
 AITER_TUNED_HIT = _PACK.pattern("aiter_tuned_hit")
 AITER_TUNED_HIT_MARKER = _PACK.pattern("aiter_tuned_hit_marker")
+
+SGLANG_CUDA_GRAPH_CAPTURE_END = _PACK.pattern("sglang_cuda_graph_capture_end")
+SGLANG_CUDA_GRAPH_DECODE_BS = _PACK.pattern("sglang_cuda_graph_decode_bs")
+
+SHORT_PROMPT_CHECK = _PACK.names("short_prompt_check", "max_new_tokens", "phase_cap_sec", "always_purposes")
+SHORT_PROMPT_TOUCH = _PACK.pattern("short_prompt_touch")
 
 _image = _PACK.names("sglang_image_layout", "workspace", "aiter_configs")
 SGLANG_IMAGE_WORKSPACE = _image["workspace"]
@@ -108,6 +183,39 @@ HIP_GRAPH_PACKET_CAPTURE_ENV = _graph_replay.name
 HIP_GRAPH_PACKET_CAPTURE_NODE_BY_NODE = _graph_replay.value
 
 ROCR_VISIBLE_DEVICES_ENV = _PACK.names("rocr_visible_devices", "env")["env"]
+
+_kfd = _PACK.names(
+    "kfd_process_listing",
+    "root",
+    "processes",
+    "nodes",
+    "node_gpu_id",
+    "queues",
+    "queue_gpu_id",
+    "vram_prefix",
+    "node_properties",
+    "render_minor_key",
+)
+KFD_ROOT = _kfd["root"]
+KFD_PROCESSES = _kfd["processes"]
+KFD_NODES = _kfd["nodes"]
+KFD_NODE_GPU_ID = _kfd["node_gpu_id"]
+KFD_QUEUES = _kfd["queues"]
+KFD_QUEUE_GPU_ID = _kfd["queue_gpu_id"]
+KFD_VRAM_PREFIX = _kfd["vram_prefix"]
+KFD_NODE_PROPERTIES = _kfd["node_properties"]
+KFD_RENDER_MINOR_KEY = _kfd["render_minor_key"]
+
+_drm = _PACK.names("drm_fdinfo", "fd_dir", "fdinfo_dir", "render_node_prefix", "client_id_key", "vram_key")
+DRM_FD_DIR = _drm["fd_dir"]
+DRM_FDINFO_DIR = _drm["fdinfo_dir"]
+DRM_RENDER_NODE_PREFIX = _drm["render_node_prefix"]
+DRM_CLIENT_ID_KEY = _drm["client_id_key"]
+DRM_VRAM_KEY = _drm["vram_key"]
+
+_pid_namespace = _PACK.names("linux_pid_namespace", "link", "initial")
+PID_NAMESPACE_LINK = _pid_namespace["link"]
+INITIAL_PID_NAMESPACE = _pid_namespace["initial"]
 
 _tunableop = _PACK.names("pytorch_tunableop_env", "enabled", "tuning", "table")
 TUNABLEOP_ENABLED_ENV = _tunableop["enabled"]
