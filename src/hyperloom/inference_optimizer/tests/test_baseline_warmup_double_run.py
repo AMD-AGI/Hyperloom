@@ -1132,22 +1132,37 @@ def deferred_accuracy_keep_policy(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "output_tput,total_tput,intvty,stack,run_accuracy,gain_pct",
+    "output_tput,total_tput,intvty,stack,run_accuracy,gain_pct,refused_by",
     [
-        pytest.param(90.0, 1100.0, 110.0, False, False, 10.0, id="output-guard-breach"),
-        pytest.param(100.1, 1507.5, 150.75, True, False, 0.5, id="stack-median-just-above-flat"),
-        pytest.param(100.1, 1507.35, 152.985, True, False, 1.99, id="stack-median-below-the-bar"),
-        pytest.param(100.1, 1500.0, 154.5, True, True, 3.0, id="stack-median-at-the-bar"),
-        pytest.param(110.0, 1010.0, 101.0, False, False, 1.0, id="median-below-the-bar"),
-        pytest.param(110.0, 1030.0, 103.0, False, True, 3.0, id="median-at-the-bar"),
-        pytest.param(90.0, 950.0, 102.0, False, False, 2.0, id="median-below-bar-and-output-breach"),
-        pytest.param(110.0, 949.9, 110.0, False, True, 10.0, id="total-no-longer-participates"),
-        pytest.param(110.0, 1100.0, 90.0, False, False, -10.0, id="median-regresses"),
-        pytest.param(110.0, 990.0, 100.0, False, False, 0.0, id="median-flat"),
+        pytest.param(90.0, 1100.0, 110.0, False, False, 10.0, "output_regressed", id="output-guard-breach"),
+        pytest.param(
+            100.1, 1507.5, 150.75, True, False, 0.5, "p50_gain_below_threshold", id="stack-median-just-above-flat"
+        ),
+        pytest.param(
+            100.1, 1507.35, 152.985, True, False, 1.99, "p50_gain_below_threshold", id="stack-median-below-the-bar"
+        ),
+        pytest.param(100.1, 1500.0, 154.5, True, True, 3.0, "", id="stack-median-at-the-bar"),
+        pytest.param(110.0, 1010.0, 101.0, False, False, 1.0, "p50_gain_below_threshold", id="median-below-the-bar"),
+        pytest.param(110.0, 1030.0, 103.0, False, True, 3.0, "", id="median-at-the-bar"),
+        pytest.param(
+            90.0,
+            950.0,
+            102.0,
+            False,
+            False,
+            2.0,
+            "p50_gain_below_threshold,output_regressed",
+            id="median-below-bar-and-output-breach",
+        ),
+        pytest.param(110.0, 949.9, 110.0, False, True, 10.0, "", id="total-no-longer-participates"),
+        pytest.param(
+            110.0, 1100.0, 90.0, False, False, -10.0, "p50_gain_below_threshold,p90_regressed", id="median-regresses"
+        ),
+        pytest.param(110.0, 990.0, 100.0, False, False, 0.0, "p50_gain_below_threshold", id="median-flat"),
     ],
 )
 def test_deferred_accuracy_keep_policy_uses_graded_performance(
-    deferred_accuracy_keep_policy, output_tput, total_tput, intvty, stack, run_accuracy, gain_pct
+    deferred_accuracy_keep_policy, output_tput, total_tput, intvty, stack, run_accuracy, gain_pct, refused_by
 ):
     case = deferred_accuracy_keep_policy
     case.measurement.update(
@@ -1196,8 +1211,7 @@ def test_deferred_accuracy_keep_policy_uses_graded_performance(
     else:
         assert result.get("accuracy") is None
         assert stage["status"] == "skipped"
-        # Every non-KEEP on the graded axis is a revert now, so the skip always names the objective.
-        assert stage["reason"] == "intvty_regression"
+        assert (stage["reason"], stage["refused_by"], stage["veto_reason"]) == (refused_by, refused_by, "")
         assert stage["graded_objective"] == "e2e_norm_intvty_p50"
         assert stage["candidate"] == pytest.approx(intvty)
         assert stage["reference"] == pytest.approx(reference)

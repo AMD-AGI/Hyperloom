@@ -2815,9 +2815,13 @@ class BenchmarkRunExecutor:
             skipped = {
                 "status": "skipped",
                 "reason": (
-                    "intvty_regression"
-                    if graded.graded_on_intvty and graded.verdict == "REVERT"
-                    else "performance_keep_not_eligible"
+                    graded.veto_reason
+                    or graded.refused_by
+                    or (
+                        "intvty_regression"
+                        if graded.graded_on_intvty and graded.verdict == "REVERT"
+                        else "performance_keep_not_eligible"
+                    )
                 ),
                 "graded_objective": graded.objective,
                 "candidate": graded.candidate,
@@ -2826,6 +2830,8 @@ class BenchmarkRunExecutor:
                 "gain_pct": performance.gain_pct,
                 "stack_incremental_gain_pct": performance.stack_incremental_gain_pct,
                 "degrade_reason": graded.degrade_reason,
+                "refused_by": graded.refused_by,
+                "veto_reason": graded.veto_reason,
             }
         if not run_accuracy:
             result["accuracy_stage"] = skipped

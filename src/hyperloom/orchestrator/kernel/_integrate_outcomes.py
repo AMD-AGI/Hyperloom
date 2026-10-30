@@ -236,11 +236,25 @@ def _integrate_result(verdict: _IntegrateVerdict) -> HandlerResult:
     return result
 
 
+def subthreshold_win(result: Mapping[str, Any]) -> bool:
+    """Whether an integrate REVERT was a positive gain refused only by the P50 threshold."""
+    return (
+        str(result.get("decision", "")).upper() == "REVERT"
+        and float(result.get("gain_pct") or 0) > 0
+        and result.get("refused_by") == "p50_gain_below_threshold"
+        and not result.get("veto_reason")
+    )
+
+
 def _explain_integrate_decision(result: HandlerResult, verdict: _IntegrateVerdict) -> None:
     performance = verdict.performance
     graded = performance.graded
     source_import = verdict.source_import
-    if graded.graded_on_intvty and graded.verdict == "REVERT":
+    result["refused_by"] = graded.refused_by
+    result["veto_reason"] = graded.veto_reason
+    if graded.veto_reason or graded.refused_by:
+        result["decision_reason"] = graded.veto_reason or graded.refused_by
+    elif graded.graded_on_intvty and graded.verdict == "REVERT":
         result["decision_reason"] = "intvty_regression"
     keep_threshold_pct = float(verdict.payload.get("keep_threshold_pct", 1.0))
     if performance.stack_positive_keep and performance.gain_pct <= keep_threshold_pct:

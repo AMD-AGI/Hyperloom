@@ -42,6 +42,9 @@ from .conftest import seed_kernel_keep
 from hyperloom.orchestrator.kernel import _integrate_payload as integrate_payload
 from hyperloom.orchestrator.kernel import _integrate_rebaseline as integrate_rebaseline
 from hyperloom.orchestrator.kernel import _integrate_outcomes as integrate_outcomes
+from hyperloom.orchestrator.kernel._source_import import _SourceImport
+from hyperloom.orchestrator.measurement.integrate_performance import IntegratePerformance
+from hyperloom.common.perf_metric import GRADED_INTVTY_P50, GradedComparison
 
 
 # fixtures
@@ -761,19 +764,19 @@ async def test_integrate_handler_double_run_schedules_accuracy_on_graded_keep(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("agentx_env", [True, False], ids=["env", "persisted-mode"])
 @pytest.mark.parametrize(
-    "output,total,intvty,decision",
+    "output,total,intvty,decision,refused_by",
     [
-        pytest.param(110.0, 900.0, 90.0, "REVERT", id="median-regresses"),
-        pytest.param(110.0, 1100.0, 100.0, "REVERT", id="median-flat"),
-        pytest.param(110.0, 1100.0, 102.99, "REVERT", id="median-just-below-the-bar"),
-        pytest.param(110.0, 1100.0, 103.0, "KEEP", id="median-exactly-at-the-bar"),
-        pytest.param(110.0, 1000.0, 110.0, "KEEP", id="median-clears-the-bar"),
-        pytest.param(90.0, 1000.0, 110.0, "REVERT", id="output-guard-breach"),
-        pytest.param(110.0, 949.9, 110.0, "KEEP", id="total-no-longer-participates"),
+        pytest.param(110.0, 900.0, 90.0, "REVERT", "p50_gain_below_threshold,p90_regressed", id="median-regresses"),
+        pytest.param(110.0, 1100.0, 100.0, "REVERT", "p50_gain_below_threshold", id="median-flat"),
+        pytest.param(110.0, 1100.0, 102.99, "REVERT", "p50_gain_below_threshold", id="median-just-below-the-bar"),
+        pytest.param(110.0, 1100.0, 103.0, "KEEP", "", id="median-exactly-at-the-bar"),
+        pytest.param(110.0, 1000.0, 110.0, "KEEP", "", id="median-clears-the-bar"),
+        pytest.param(90.0, 1000.0, 110.0, "REVERT", "output_regressed", id="output-guard-breach"),
+        pytest.param(110.0, 949.9, 110.0, "KEEP", "", id="total-no-longer-participates"),
     ],
 )
 async def test_integrate_handler_grades_full_e2e_measurement(
-    session_dir, graded_integrate_case, monkeypatch, agentx_env, output, total, intvty, decision
+    session_dir, graded_integrate_case, monkeypatch, agentx_env, output, total, intvty, decision, refused_by
 ):
     _, payload, measurement, target = graded_integrate_case
     if not agentx_env:
@@ -792,8 +795,11 @@ async def test_integrate_handler_grades_full_e2e_measurement(
     assert result["graded_objective"] == "e2e_norm_intvty_p50"
     assert result["gain_pct"] == pytest.approx(intvty - 100.0)
     assert ("accuracy_gate" in result) is (decision == "KEEP")
-    if decision == "REVERT":
-        assert result["decision_reason"] == "intvty_regression"
+    assert (result.get("decision_reason"), result["refused_by"], result["veto_reason"]) == (
+        refused_by or None,
+        refused_by,
+        "",
+    )
     assert result["base_tput"] == 100.0
     assert result["new_tput"] == output
     assert result["bench_result"] == measurement
@@ -802,6 +808,107 @@ async def test_integrate_handler_grades_full_e2e_measurement(
         expected_source = "def kernel():\n    return 'original'\n"
         assert result["revert_result"]["status"] == "ok"
     assert target.read_text(encoding="utf-8") == expected_source
+
+
+@pytest.mark.parametrize(
+    "candidate,refused_by,veto_reason,expected",
+    [
+        pytest.param(
+            105.5,
+            "",
+            "agentx_workload_mismatch",
+            ("agentx_workload_mismatch", "", "agentx_workload_mismatch"),
+            id="veto",
+        ),
+        pytest.param(
+            102.0,
+            "p50_gain_below_threshold",
+            "",
+            ("p50_gain_below_threshold", "p50_gain_below_threshold", ""),
+            id="below-threshold",
+        ),
+        pytest.param(105.0, "p90_regressed", "", ("p90_regressed", "p90_regressed", ""), id="p90-regressed"),
+    ],
+)
+def test_integrate_revert_records_the_refusing_gate(candidate, refused_by, veto_reason, expected):
+    graded = GradedComparison(
+        objective=GRADED_INTVTY_P50,
+        candidate=candidate,
+        reference=100.0,
+        verdict="REVERT",
+        veto_reason=veto_reason,
+        refused_by=refused_by,
+    )
+    verdict = integrate_outcomes._IntegrateVerdict(
+        payload={},
+        bench_result={},
+        performance=IntegratePerformance(
+            graded=graded,
+            gain_pct=candidate - 100.0,
+            stack_incremental_gain_pct=None,
+            stack_positive_keep=False,
+            decision="REVERT",
+        ),
+        cleanup={},
+        accuracy_gate=None,
+        source_import=_SourceImport(confirmed=None, evidence={}, decision="REVERT", downgraded=False),
+        rebuild_check={},
+        server_args="",
+    )
+    result: dict = {"decision": "REVERT"}
+
+    integrate_outcomes._explain_integrate_decision(result, verdict)
+
+    assert (result["decision_reason"], result["refused_by"], result["veto_reason"]) == expected
+
+
+@pytest.mark.parametrize(
+    "result,expected",
+    [
+        pytest.param(
+            {"decision": "REVERT", "gain_pct": 2.0, "refused_by": "p50_gain_below_threshold", "veto_reason": ""},
+            True,
+            id="positive-below-threshold",
+        ),
+        pytest.param(
+            {"decision": "revert", "gain_pct": 0.5, "refused_by": "p50_gain_below_threshold"},
+            True,
+            id="lowercase-decision-without-veto-key",
+        ),
+        pytest.param(
+            {"decision": "REVERT", "gain_pct": 0.0, "refused_by": "p50_gain_below_threshold", "veto_reason": ""},
+            False,
+            id="flat",
+        ),
+        pytest.param(
+            {"decision": "REVERT", "gain_pct": None, "refused_by": "p50_gain_below_threshold", "veto_reason": ""},
+            False,
+            id="no-gain",
+        ),
+        pytest.param(
+            {
+                "decision": "REVERT",
+                "gain_pct": 2.0,
+                "refused_by": "p50_gain_below_threshold,p90_regressed",
+                "veto_reason": "",
+            },
+            False,
+            id="also-p90-regressed",
+        ),
+        pytest.param(
+            {"decision": "REVERT", "gain_pct": 5.5, "refused_by": "", "veto_reason": "agentx_workload_mismatch"},
+            False,
+            id="vetoed",
+        ),
+        pytest.param(
+            {"decision": "KEEP", "gain_pct": 2.0, "refused_by": "p50_gain_below_threshold", "veto_reason": ""},
+            False,
+            id="kept",
+        ),
+    ],
+)
+def test_subthreshold_win(result, expected):
+    assert integrate_outcomes.subthreshold_win(result) is expected
 
 
 @pytest.mark.asyncio
