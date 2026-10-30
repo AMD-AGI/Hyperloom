@@ -75,7 +75,7 @@ cognitive-complexity src/hyperloom/orchestrator/actions/executors/explore.py::Ex
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._bench_patch 33
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._enablement_keep_records 38
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._gate_enablement 31
-cognitive-complexity src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._gate_perf 101
+cognitive-complexity src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._gate_perf 93
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._stage_apply 131
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/integrate_patch.py::_resolve_patch_paths 36
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/integrate_patch.py::restore_pending_integrate 83
@@ -306,7 +306,7 @@ cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/baseline.py::
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/baseline.py::_apply_warm_patches 52
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/benchmark_result.py::harvest_mn_gpu_metrics 30
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/explore.py::ExploreExecutor.__call__ 76
-cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._gate_perf 29
+cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._gate_perf 28
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._stage_apply 53
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/integrate_patch.py::restore_pending_integrate 25
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/profile.py::ProfileExecutor.__call__ 66
@@ -591,7 +591,7 @@ function-lines src/hyperloom/orchestrator/actions/executors/explore.py::filter_b
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._bench_patch 263
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._enablement_keep_records 211
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._gate_enablement 267
-function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._gate_perf 445
+function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._gate_perf 439
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._keep_inert_switches 111
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._maybe_write_framework_kb_record 114
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._stage_apply 513
