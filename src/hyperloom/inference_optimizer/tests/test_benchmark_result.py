@@ -531,6 +531,25 @@ def test_harvest_reads_env_leak_roots(tmp_path, monkeypatch):
     assert (destination / "gpu_metrics.csv").read_text() == "from-b"
 
 
+def test_harvest_named_leak_root_is_the_only_root_scanned(tmp_path, monkeypatch):
+    """A caller that names its own work directory as ``leak_root`` gets only what is under it: what another test left
+    in the env-selected or default roots is not copied into its output."""
+    own = tmp_path / "own_work"
+    elsewhere = tmp_path / "other_test"
+    result_dir = tmp_path / "session" / "runs"
+    destination = tmp_path / "task"
+    _touch(own / "server.log", "mine")
+    _touch(elsewhere / "gpu_metrics.csv", "another test's")
+    _touch(result_dir / "inferencex_result.json", '{"output_throughput": 1.0}')
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(elsewhere))
+    monkeypatch.setenv("RESULT_DIR", str(result_dir))
+
+    harvested = harvest_leaked_artifacts(destination, subprocess_started_unix=None, leak_root=own)
+
+    assert [(src.name, dst.read_text()) for src, dst in harvested] == [("server.log", "mine")]
+    assert sorted(path.name for path in destination.iterdir()) == ["server.log"]
+
+
 def test_harvest_default_roots_include_inferencex_and_result_dir(tmp_path, monkeypatch):
     """Without an env override, the default scan roots also cover ``$INFERENCEX_PATH`` (eval ``mv ./`` lands in the checkout) and ``$RESULT_DIR``, not just ``/workspace``."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", raising=False)
