@@ -25,6 +25,7 @@ from hyperloom_common.kernel_backend import AVE_BACKEND
 from .kernel_round_budget import controller_round_stop, measurement_round_sec
 from hyperloom_common.coerce import first_str, to_int
 from hyperloom_common.env import env_bool, env_float
+from hyperloom.common.perf_metric import VERDICT_KEEP
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 from hyperloom.inference_optimizer.session.geak_rebench_verdict import REBENCH_NO_PROMOTE
 from hyperloom.inference_optimizer.breakdown.recorder import tool_versions
@@ -60,6 +61,8 @@ if TYPE_CHECKING:
     from .machine import Transition
 
 log = _logging.getLogger(__name__)
+
+_ENCODING = "utf-8"
 
 # What the phase, not the Controller subprocess, decides about a rewrite-controller attempt.
 _CONTROLLER_ATTEMPT_FACTS = ("macro_cycle", "handoff_dir", "budget_minutes", "hard_timeout_sec")
@@ -215,7 +218,7 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
             },
             sort_keys=True,
             separators=(",", ":"),
-        ).encode("utf-8")
+        ).encode(_ENCODING)
         stack_len = int(self.shared_state.cumulative_gain_validated_stack_len or 0)
         return f"kernel_entry_g{stack_len}_{hashlib.sha256(identity).hexdigest()[:12]}"
 
@@ -382,7 +385,7 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
                 continue
             status = first_str(row.get("status"), "unknown").lower()
             if status == "kept":
-                decision = "KEEP"
+                decision = VERDICT_KEEP
             elif status.startswith("reverted"):
                 decision = "REVERT"
             elif status.startswith("skipped") or stopped_by_the_run_class(status):
@@ -410,7 +413,7 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
                     kernel_id=kernel_id,
                     kernel_name=kernel_id.split(":")[2] if len(kernel_id.split(":")) > 2 else "",
                     backends_tried=["forge"],
-                    adopted_backend="forge" if decision == "KEEP" else "",
+                    adopted_backend="forge" if decision == VERDICT_KEEP else "",
                     speedup=speedup or None,
                 )
             )
@@ -783,7 +786,7 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
         )
 
         context = run.result_json.parent / "run.json"
-        context.write_text(json.dumps(asdict(run), default=str), encoding="utf-8")
+        context.write_text(json.dumps(asdict(run), default=str), encoding=_ENCODING)
         command = [sys.executable, "-m", AVE_BACKEND, "optimize", str(context)]
         env = {name: value for name, value in os.environ.items() if name not in GPU_MASK_ENV_NAMES}
         env.update(
@@ -803,7 +806,7 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
         except subprocess.TimeoutExpired as error:
             completed = subprocess.CompletedProcess(command, -9, error.stdout, error.stderr)
         (run.result_json.parent / "console.log").write_text(
-            (completed.stdout or "") + (completed.stderr or ""), encoding="utf-8"
+            (completed.stdout or "") + (completed.stderr or ""), encoding=_ENCODING
         )
         if completed.returncode == ORCHESTRATOR_CANCELLED_RETURNCODE:
             raise FuturesCancelledError("Ave optimization was cancelled by Hyperloom")
@@ -863,7 +866,7 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
                 integration = {**params, **await integrate_handler(params, session_dir=session_dir)}
                 result["integration"] = integration
                 state.record_kernel_integrate_result(integration)
-                if integration.get("decision") == "KEEP":
+                if integration.get("decision") == VERDICT_KEEP:
                     await self._coord.writeback.record_integrate_keep(integration)
         except (OSError, ValueError, SyntaxError, RuntimeError, subprocess.SubprocessError) as error:
             result.update(status="failed", reason=str(error))

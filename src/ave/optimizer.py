@@ -30,6 +30,7 @@ from hyperloom_common.llm.llm_config import DEFAULT_CLAUDE_MODEL
 MAX_SESSION_SEC = 3600
 MIN_SESSION_SEC = 30
 STEP_ATTEMPTS = 3
+RUNNING = "running"
 FAILED = "failed"
 TIMED_OUT = "timed_out"
 GIT_DIFF = ("diff", "--no-ext-diff", "--no-textconv")
@@ -115,7 +116,7 @@ async def optimize(
         result = json.loads(run.result_json.read_text())
         if returncode == -9:
             result.update(status=TIMED_OUT, reason="Ave subprocess exceeded its time budget")
-        elif result["status"] == "running":
+        elif result["status"] == RUNNING:
             result.update(status=FAILED, reason=f"Ave subprocess exited before completion (rc={returncode})")
         atomic_write_json(run.result_json, result)
         response = {"result_json": str(run.result_json), "returncode": returncode, "optimization": result}
@@ -225,7 +226,7 @@ class AveLoop:
             record.update(step_id=step.id, attempt=attempt)
             self.result["attempts"].append(record)
             atomic_write_json(directory / "result.json", record)
-            self.checkpoint("running")
+            self.checkpoint(RUNNING)
             if record["status"] == "passed":
                 return True
         return False
@@ -241,7 +242,7 @@ class AveLoop:
                 final_case_ms=baseline.case_ms,
                 correctness_passed=True,
             )
-            self.checkpoint("running")
+            self.checkpoint(RUNNING)
             for index, step in enumerate(self.run.steps, start=1):
                 if not await self.execute_step(step, index, reserve):
                     return self.checkpoint(FAILED, f"step {step.id} failed after {STEP_ATTEMPTS} attempts")
