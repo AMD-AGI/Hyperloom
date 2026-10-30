@@ -211,3 +211,214 @@ async def test_controller_integration_defers_only_patches_the_p50_threshold_alon
     assert coordinator.shared_state.kernel_bundle_pending == expected
     assert SharedState.load_or_init(session_dir).kernel_bundle_pending == expected
     assert [(repo / f"{name}.py").read_text(encoding="utf-8") for name in dirs] == ["VALUE = 1\n"] * 3
+
+
+_FMOE_ENVS = {"AITER_CONFIG_FMOE": "/session/merged_fmoe.csv"}
+_A8W8_ENVS = {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": "/session/merged_a8w8.csv"}
+
+
+def _env_entry(tuner: str, envs: dict, server_args: str, cycle: int = 2) -> dict:
+    return {
+        "kind": "env",
+        "id": f"gemm_tune_{tuner}",
+        "envs": envs,
+        "server_args": server_args,
+        "gain_pct": 2.9,
+        "macro_cycle": cycle,
+    }
+
+
+def _patch_entry(patch_dir: Path, repo: Path, name: str, cycle: int = 2) -> dict:
+    return {
+        "kind": "patch",
+        "id": f"kernel:forge-loop:{name}:standalone:unknown:triton:mi355x",
+        "repo_root": str(repo),
+        "patch_path": str(patch_dir / "change.patch"),
+        "kernel_path": f"{name}.py",
+        "operator_name": name,
+        "gain_pct": 2.7,
+        "macro_cycle": cycle,
+    }
+
+
+def _jit_calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict]]:
+    from hyperloom.orchestrator.actions.executors import _aiter_jit
+
+    calls: list[tuple[str, dict]] = []
+    monkeypatch.setattr(_aiter_jit, "prepare_serving_so_for_csvs", lambda envs, **_kw: calls.append(("prepare", envs)))
+    monkeypatch.setattr(_aiter_jit, "drop_serving_so_for_envs", lambda envs, **_kw: calls.append(("drop", envs)))
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_kernel_entry_measures_the_bundle_once_and_reverts_every_member(tmp_path, monkeypatch) -> None:
+    from hyperloom.orchestrator.kernel import campaign_baseline, forge_handoff
+    from hyperloom.orchestrator.phases import machine_state
+
+    monkeypatch.setattr(machine_state, "phase_budget_remaining_seconds", lambda _state, **_kw: 3600.0)
+    repo, base = _repo(tmp_path, ("mqa.py",))
+    patch_dir = _publish(tmp_path / "attempt" / "result" / "patches", repo, base, "mqa")
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    coordinator = _coordinator(session_dir, repo)
+    state = coordinator.shared_state
+    state.current_best = {"action": "gemm_tuning", "tput": 104.0}
+    state.baseline_runtime_sec = 600.0
+    state.kernel_bundle_pending = [
+        _env_entry("fmoe_ck", _FMOE_ENVS, "--moe-runner-backend aiter"),
+        _env_entry("a8w8_blockscale_bpreshuffle", _A8W8_ENVS, ""),
+        _patch_entry(patch_dir, repo, "mqa"),
+    ]
+    seen_on_disk: list[str] = []
+
+    async def _integrate(payload, *, session_dir, **_kwargs):
+        calls.append(payload)
+        seen_on_disk.append((repo / "mqa.py").read_text(encoding="utf-8"))
+        return _revert(2.2, "p90_regressed")
+
+    calls: list[dict] = []
+    monkeypatch.setattr("hyperloom.orchestrator.kernel.request_handlers.integrate_handler", _integrate)
+    jit = _jit_calls(monkeypatch)
+    phase = coordinator.phase_kernel
+
+    async def _nothing(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(KernelPhase, "_maybe_reprofile_for_kernel", _nothing)
+    monkeypatch.setattr(KernelPhase, "_maybe_run_forge_fusion_before_kernel_opt", _nothing)
+    monkeypatch.setattr(KernelPhase, "_run_kernel_rewrite_controller", _nothing)
+    monkeypatch.setattr(campaign_baseline, "seal_campaign_baseline", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(forge_handoff, "write_forge_handoff", lambda *_args, handoff_dir, **_kwargs: handoff_dir)
+
+    await phase._finish_kernel_entry()
+
+    union = {**_FMOE_ENVS, **_A8W8_ENVS}
+    assert [
+        {key: payload[key] for key in ("kernel_id", "mode", "extra_envs", "extra_server_args", "base_tput")}
+        for payload in calls
+    ] == [
+        {
+            "kernel_id": "kernel_bundle_c2",
+            "mode": "env_only",
+            "extra_envs": union,
+            "extra_server_args": "--moe-runner-backend aiter",
+            "base_tput": 104.0,
+        }
+    ]
+    assert seen_on_disk == ["VALUE = 2\n"]
+    assert jit == [("prepare", union), ("drop", union)]
+    assert (repo / "mqa.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert _git(repo, "status", "--porcelain", "--untracked-files=no") == ""
+    assert _git(repo, "rev-parse", "HEAD") == base
+    assert state.optimization_stack == []
+    assert SharedState.load_or_init(session_dir).kernel_bundle_pending == []
+
+
+@pytest.mark.asyncio
+async def test_a_kept_bundle_lands_as_one_stack_entry_with_its_envs_args_and_source_layer(
+    tmp_path, monkeypatch
+) -> None:
+    from hyperloom.orchestrator.kernel.controller_patch_integration import KeepSession
+    from hyperloom.orchestrator.kernel.subthreshold_bundle import validate_subthreshold_bundle
+
+    repo, base = _repo(tmp_path, ("mqa.py",))
+    patch_dir = _publish(tmp_path / "attempt" / "result" / "patches", repo, base, "mqa")
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    coordinator = _coordinator(session_dir, repo)
+    state = coordinator.shared_state
+    patch_member = _patch_entry(patch_dir, repo, "mqa")
+    state.kernel_bundle_pending = [_env_entry("fmoe_ck", _FMOE_ENVS, "--moe-runner-backend aiter"), patch_member]
+    jit = _jit_calls(monkeypatch)
+
+    async def _measure(_payload):
+        return {
+            "status": "ok",
+            "decision": "KEEP",
+            "base_tput": 100.0,
+            "new_tput": 113.0,
+            "gain_pct": 13.1,
+            "extra_server_args": "--moe-runner-backend aiter",
+            "extra_envs": _FMOE_ENVS,
+            "bench_result": {"output_throughput": 113.0},
+        }
+
+    await validate_subthreshold_bundle(
+        KeepSession(session_dir, state, coordinator.writeback.record_integrate_keep),
+        measure=_measure,
+        round_stop=lambda: None,
+    )
+
+    head = _git(repo, "rev-parse", "HEAD")
+    keys = (
+        "action",
+        "variant_name",
+        "kernel_id",
+        "candidate_extra_server_args",
+        "extra_envs",
+        "stack_kernel_ids",
+        "scope",
+        "base_sha",
+        "keep_commit",
+        "framework_root",
+        "target_files",
+        "gain_pct",
+    )
+    assert [{key: entry.get(key) for key in keys} for entry in state.optimization_stack] == [
+        {
+            "action": "integrate",
+            "variant_name": "kernel_bundle_c2",
+            "kernel_id": "kernel_bundle_c2",
+            "candidate_extra_server_args": "--moe-runner-backend aiter",
+            "extra_envs": _FMOE_ENVS,
+            "stack_kernel_ids": ["gemm_tune_fmoe_ck", patch_member["id"]],
+            "scope": "source_patch",
+            "base_sha": base,
+            "keep_commit": head,
+            "framework_root": str(repo),
+            "target_files": ["mqa.py"],
+            "gain_pct": 13.1,
+        }
+    ]
+    assert Path(state.optimization_stack[0]["source_snapshot"]).is_dir()
+    assert state.current_best["tput"] == 113.0
+    assert _git(repo, "log", "-1", "--format=%P") == base
+    assert (repo / "mqa.py").read_text(encoding="utf-8") == "VALUE = 2\n"
+    assert jit == [("prepare", _FMOE_ENVS)]
+    assert SharedState.load_or_init(session_dir).kernel_bundle_pending == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["one_member_this_cycle", "no_round_fits"])
+async def test_a_bundle_that_cannot_be_measured_is_cleared_without_a_round(tmp_path, monkeypatch, case) -> None:
+    from hyperloom.orchestrator.actions.stop_attribution import PHASE_TIME_EXHAUSTED_CLASS, STOPPED_BY_THE_RUN
+    from hyperloom.orchestrator.kernel.controller_patch_integration import KeepSession
+    from hyperloom.orchestrator.kernel.subthreshold_bundle import validate_subthreshold_bundle
+
+    repo, base = _repo(tmp_path, ("mqa.py",))
+    patch_dir = _publish(tmp_path / "attempt" / "result" / "patches", repo, base, "mqa")
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    state = _coordinator(session_dir, repo).shared_state
+    stale_cycle = 1 if case == "one_member_this_cycle" else 2
+    state.kernel_bundle_pending = [
+        _env_entry("fmoe_ck", _FMOE_ENVS, "--moe-runner-backend aiter"),
+        _patch_entry(patch_dir, repo, "mqa", cycle=stale_cycle),
+    ]
+    jit = _jit_calls(monkeypatch)
+    calls: list[dict] = []
+
+    async def _measure(payload):
+        calls.append(payload)
+        return {}
+
+    stop = STOPPED_BY_THE_RUN[PHASE_TIME_EXHAUSTED_CLASS] if case == "no_round_fits" else None
+    await validate_subthreshold_bundle(
+        KeepSession(session_dir, state, lambda _result: None), measure=_measure, round_stop=lambda: stop
+    )
+
+    assert calls == []
+    assert jit == []
+    assert state.kernel_bundle_pending == []
+    assert SharedState.load_or_init(session_dir).kernel_bundle_pending == []
+    assert (repo / "mqa.py").read_text(encoding="utf-8") == "VALUE = 1\n"

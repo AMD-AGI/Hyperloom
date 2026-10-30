@@ -24,7 +24,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 from . import geak_rebench as _geak_rebench, machine_state as _phase_state
-from .kernel_round_budget import controller_round_stop, integrate_within_phase, measurement_round_sec, rebench_round_sec
+from .kernel_round_budget import (
+    controller_round_stop,
+    integrate_within_phase,
+    measurement_round_sec,
+    rebench_round_sec,
+    round_stop,
+)
 from hyperloom.common.coerce import first_str, to_float, to_int
 from hyperloom.common.env import env_bool, env_float, env_int
 from hyperloom.common import gain_math
@@ -3575,6 +3581,16 @@ class KernelPhase(CoordinatorCollaborator):
         )
         log.info("KERNEL entry: wrote Forge handoff to %s", handoff_dir)
         await self._run_kernel_rewrite_controller(handoff_dir, attempt_dir, baselines)
+        from ..kernel.controller_patch_integration import KeepSession
+        from ..kernel.subthreshold_bundle import validate_subthreshold_bundle
+
+        await validate_subthreshold_bundle(
+            KeepSession(self.session_dir, self.shared_state, self._coord.writeback.record_integrate_keep),
+            measure=lambda payload: integrate_within_phase(
+                payload, state=self.shared_state, session_dir=self.session_dir
+            ),
+            round_stop=lambda: round_stop(self.shared_state),
+        )
 
     async def _controller_attempt_result(self, handoff_dir: Path, output_dir: Path) -> dict[str, Any]:
         from ..kernel.controller_submit import run_controller_subprocess
