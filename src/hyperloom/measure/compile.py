@@ -34,7 +34,7 @@ import uuid
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
-from typing import Literal, NamedTuple, Protocol, TypeVar
+from typing import NamedTuple, Protocol, TypeVar
 
 from hyperloom.common.aiter_layout import image_aiter_meta
 from hyperloom.common.outside_facts import (
@@ -59,6 +59,8 @@ from hyperloom.measure.jit.native.needs import (
     BuildNeed,
     BuildNotReady,
     BuildRef,
+    EnvEntry,
+    EnvRoot,
     ModuleBuild,
     ModulePlan,
     NativePlan,
@@ -148,9 +150,11 @@ class BlobStore(Protocol):
 
     root: Path
 
-    def put(self, data: bytes) -> str: ...
+    def put(self, data: bytes) -> str:
+        """Store ``data`` and return its address."""
 
-    def get(self, sha256: str) -> bytes: ...
+    def get(self, sha256: str) -> bytes:
+        """The bytes stored at ``sha256``; a :class:`BlobError` when they are missing or do not hash to it."""
 
 
 class LocalBlobStore:
@@ -275,43 +279,6 @@ def locate_installed_package(layout: ComponentLayout, image_roots: tuple[str, ..
 
 
 # --- the compiled overlay --------------------------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class EnvEntry:
-    """One file of a root that differs from the base: laid over it (``upsert``) or removed (``delete``)."""
-
-    path: str
-    op: Literal["upsert", "delete"]
-    blob: str | None = None
-    mode: str | None = None
-
-    def to_document(self) -> dict[str, object]:
-        document: dict[str, object] = {"path": self.path, "op": self.op}
-        if self.op == _UPSERT:
-            document.update(blob=f"{DIGEST_PREFIX}{self.blob}", mode=self.mode)
-        return document
-
-
-@dataclass(frozen=True)
-class EnvRoot:
-    """A package in the image and everything that differs from it."""
-
-    id: str
-    import_name: str
-    dist_name: str | None
-    dist_version: str | None
-    entries: tuple[EnvEntry, ...]
-    kind: Literal["package", "runtime"] = "package"
-
-    def to_document(self) -> dict[str, object]:
-        return {
-            "id": self.id,
-            "kind": self.kind,
-            "import_name": self.import_name,
-            "dist": {"name": self.dist_name, "version": self.dist_version},
-            "entries": [entry.to_document() for entry in self.entries],
-        }
 
 
 def attachment_placeholder(attachment: AttachmentRef) -> str:

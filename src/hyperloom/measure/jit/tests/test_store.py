@@ -439,12 +439,12 @@ def test_concurrent_publishers_of_overlapping_snapshots_leave_every_one_readable
     for number in range(8):
         files = {"module_shared.so": MODULE, f"module_{number}.so": f"own-{number}".encode()}
         contributions.append(_stage(tmp_path / f"c{number}", files))
-    failures: list[BaseException] = []
+    failures: list[Exception] = []
 
     def publish(staged: Path, snapshot: Snapshot) -> None:
         try:
             store.publish(staged, snapshot.sha256())
-        except BaseException as exc:  # noqa: BLE001 - the test reports whatever a publisher raised
+        except Exception as exc:  # noqa: BLE001 - the test reports whatever error a publisher raised
             failures.append(exc)
 
     threads = [threading.Thread(target=publish, args=pair) for pair in contributions]

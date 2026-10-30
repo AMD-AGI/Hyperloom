@@ -83,7 +83,7 @@ class BuildInputs:
 
 
 class ChangedFile(Protocol):
-    """One file a patch stack leaves different (:class:`hyperloom.measure.compile.EnvEntry`)."""
+    """One file a patch stack leaves different (:class:`hyperloom.measure.jit.native.needs.EnvEntry`)."""
 
     path: str
     blob: str | None
