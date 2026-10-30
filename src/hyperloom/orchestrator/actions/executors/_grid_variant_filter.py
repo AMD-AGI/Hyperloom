@@ -11,15 +11,19 @@ import logging
 import os
 import re
 import shlex
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Mapping
 
 from hyperloom.common.env import is_truthy
+from hyperloom.common.env_safety import operator_extra_env
 from hyperloom.common.gpu_identity import is_gfx_arch
 
 from ._grid_base import (
     GridVariant,
 )
 from hyperloom.inference_optimizer.grid_server_args import compose_server_args
+from hyperloom.inference_optimizer.speculative_capability import CAPABILITY_UNSUPPORTED, speculative_capability_reason
 
 log = logging.getLogger(__name__)
 
@@ -54,8 +58,8 @@ def _parse_skip_spec(spec: str) -> list[str]:
 # Matches ``--cuda-graph-max-bs 64`` and ``--cuda_graph_max_bs=64``; captures the integer value.
 _RE_CUDA_GRAPH_MAX_BS = re.compile(r"--cuda[-_]graph[-_]max[-_]bs[= ]+(\d+)")
 
-# Multi-node grid prioritisation + invalid-variant filtering.
-_MN_PARAMS_PRIORITY: tuple[str, ...] = (
+# Multi-node grid prioritisation + invalid-variant filtering: params tags first, then backend tiers.
+_MN_PRIORITY_TAGS: tuple[str, ...] = (
     "cuda_graph_max_bs",
     "max_running_requests",
     "chunked_prefill",
@@ -63,9 +67,6 @@ _MN_PARAMS_PRIORITY: tuple[str, ...] = (
     "decode_steps",
     "torch_compile",
     "mem_fraction",
-)
-
-_MN_BACKENDS_PRIORITY: tuple[str, ...] = (
     "tier1",
     "tier2",
     "tier3",
@@ -76,27 +77,23 @@ _MN_BACKENDS_PRIORITY: tuple[str, ...] = (
 )
 
 
-def _mn_priority_index(variant: "GridVariant", priority_tags: "tuple[str, ...] | list[str]") -> int:
-    """Return the rank of ``variant`` against ``priority_tags`` (lower = first)."""
+def _mn_priority_index(variant: "GridVariant") -> int:
+    """Return the rank of ``variant`` against ``_MN_PRIORITY_TAGS`` (lower = first)."""
     haystack = variant.note or variant.name or ""
-    for idx, tag in enumerate(priority_tags):
-        if tag and tag in haystack:
+    for idx, tag in enumerate(_MN_PRIORITY_TAGS):
+        if tag in haystack:
             return idx
-    return len(priority_tags)
+    return len(_MN_PRIORITY_TAGS)
 
 
-def reorder_grid_for_multi_node(
-    grid: list["GridVariant"],
-    *,
-    priority_tags: "tuple[str, ...] | list[str]",
-) -> list["GridVariant"]:
+def reorder_grid_for_multi_node(grid: list["GridVariant"]) -> list["GridVariant"]:
     """Stable-sort ``grid`` so likely multi-node winners run first."""
     from ._multi_node_env import is_multi_node
 
     if not is_multi_node():
         return grid
     # ``sorted`` is stable, so ties keep input order.
-    return sorted(grid, key=lambda v: _mn_priority_index(v, priority_tags))
+    return sorted(grid, key=_mn_priority_index)
 
 
 def apply_multi_node_invalid_variants(
@@ -135,18 +132,11 @@ def apply_multi_node_invalid_variants(
 _RE_AITER_MOE_RUNNER = re.compile(r"--moe[-_]runner[-_]backend[= ]+aiter\b")
 
 
-def _operator_pinned_envs() -> dict[str, str]:
-    """Return the operator's ``--extra-env`` pins from the CLI handoff env."""
-    from hyperloom.common.env_safety import operator_extra_env
-
-    return operator_extra_env()
-
-
 def apply_aiter_moe_pin_filter(
     grid: list["GridVariant"],
 ) -> tuple[list["GridVariant"], list[dict]]:
     """Drop variants that re-enable the aiter MoE runner when it is pinned off."""
-    pins = _operator_pinned_envs()
+    pins = operator_extra_env()
     aiter_pinned_off = "SGLANG_USE_AITER" in pins and not is_truthy(pins["SGLANG_USE_AITER"], default=True)
     if not aiter_pinned_off:
         return list(grid), []
@@ -267,22 +257,26 @@ def _fingerprint_component_matches(actual: str, expected: str) -> bool:
     return found is not None and expected.startswith(found.group(1))
 
 
-def _matches_unsafe_unified_attn_stack(
-    *,
-    framework: str,
-    model_path: str,
-    gpu_type: str,
-    stack_fingerprint: dict | None,
-) -> bool:
-    if framework.strip().lower() != "sglang" or not is_gfx_arch(gpu_type, "gfx950"):
+@dataclass(frozen=True)
+class ServingStack:
+    """The framework, model, GPU and component versions a grid's variants are served on."""
+
+    framework: str
+    model_path: str
+    gpu_type: str = ""
+    stack_fingerprint: dict | None = None
+
+
+def _matches_unsafe_unified_attn_stack(serving: ServingStack) -> bool:
+    if serving.framework.strip().lower() != "sglang" or not is_gfx_arch(serving.gpu_type, "gfx950"):
         return False
-    stack = stack_fingerprint if isinstance(stack_fingerprint, dict) else {}
+    stack = serving.stack_fingerprint if isinstance(serving.stack_fingerprint, dict) else {}
     if any(
         not _fingerprint_component_matches(str(stack.get(key) or ""), value)
         for key, value in _UNSAFE_UNIFIED_ATTN_STACK.items()
     ):
         return False
-    model_dir = Path(model_path)
+    model_dir = Path(serving.model_path)
     if "14b" not in model_dir.name.lower() or "fp8" not in model_dir.name.lower():
         return False
     try:
@@ -341,31 +335,57 @@ def _unsafe_unified_attn_reason(variant: GridVariant, *, base_server_args: str) 
     return None
 
 
+def _speculative_capability_reason(
+    variant: "GridVariant", *, serving: ServingStack, base_server_args: str, base_envs: Mapping[str, Any]
+) -> str | None:
+    """Why the pinned stack has no kernel for the draft this variant composes: read over the composed arguments,
+    since the keys that decide it live inside ``--speculative-config``. ``None`` when the stack has a kernel.
+
+    The launch's environment comes along because a draft inherits the tensor parallel size the engine is launched
+    with, which a recipe may spell only as ``TP``.
+    """
+    return speculative_capability_reason(
+        compose_server_args(
+            base_extra_args=base_server_args,
+            variant_extra_args=variant.extra_server_args,
+            remove_args=variant.remove_args,
+            args_mode=variant.args_mode,
+        ),
+        framework=serving.framework,
+        envs={**base_envs, **(getattr(variant, "extra_envs", None) or {})},
+        model_path=serving.model_path,
+    )
+
+
+def _model_class_flag_reason(args: str, *, model_path: str, is_mla: bool, is_moe: bool) -> str | None:
+    """Why a flag in ``args`` asks for a model class this model is not recognised as, else ``None``."""
+    for flag, required_class in _COMPATIBILITY_FLAG_RULES:
+        if flag not in args:
+            continue
+        # Model-class predicate
+        if (required_class == "mla" and is_mla) or (required_class == "moe" and is_moe):
+            continue
+        return (
+            f"{flag} requires {required_class.upper()} model; "
+            f"MODEL_PATH={model_path!r} not recognised as "
+            f"{required_class.upper()}-class"
+        )
+    return None
+
+
 def apply_compatibility_filter(
     grid: list["GridVariant"],
     *,
-    framework: str,
-    model_path: str,
-    gpu_type: str = "",
-    stack_fingerprint: dict | None = None,
+    serving: ServingStack,
     base_server_args: str = "",
+    base_envs: Mapping[str, Any] | None = None,
 ) -> tuple[list["GridVariant"], list[dict]]:
     """Skip variants known to be incompatible with current model/framework."""
-    if model_path:
-        is_mla, is_moe = _detect_model_class(model_path)
-    else:
-        # Cannot detect -> assume compatible.
-        is_mla, is_moe = True, True
+    # Cannot detect -> assume compatible.
+    is_mla, is_moe = _detect_model_class(serving.model_path) if serving.model_path else (True, True)
 
-    fw = framework.strip().lower()
-
-    is_xdit = fw == "xdit"
-    unsafe_unified_attn_stack = _matches_unsafe_unified_attn_stack(
-        framework=fw,
-        model_path=model_path,
-        gpu_type=gpu_type,
-        stack_fingerprint=stack_fingerprint,
-    )
+    is_xdit = serving.framework.strip().lower() == "xdit"
+    unsafe_unified_attn_stack = _matches_unsafe_unified_attn_stack(serving)
 
     kept: list[GridVariant] = []
     dropped: list[dict] = []
@@ -383,6 +403,13 @@ def apply_compatibility_filter(
                 }
             )
             continue
+        # A draft the pinned stack ships no kernel for: not applicable to this stack, not a measurement to spend.
+        skip_reason = _speculative_capability_reason(
+            v, serving=serving, base_server_args=base_server_args, base_envs=base_envs or {}
+        )
+        if skip_reason:
+            dropped.append({"name": v.name, "source": CAPABILITY_UNSUPPORTED, "reason": skip_reason})
+            continue
         # xDiT do-not-set blacklist (env-keyed; precision lock + known crashes).
         if is_xdit:
             skip_reason = xdit_blacklist_reason(getattr(v, "extra_envs", None))
@@ -395,18 +422,7 @@ def apply_compatibility_filter(
                 }
             )
             continue
-        for flag, required_class in _COMPATIBILITY_FLAG_RULES:
-            if flag not in args:
-                continue
-            # Model-class predicate
-            class_ok = (required_class == "mla" and is_mla) or (required_class == "moe" and is_moe)
-            if not class_ok:
-                skip_reason = (
-                    f"{flag} requires {required_class.upper()} model; "
-                    f"MODEL_PATH={model_path!r} not recognised as "
-                    f"{required_class.upper()}-class"
-                )
-                break
+        skip_reason = _model_class_flag_reason(args, model_path=serving.model_path, is_mla=is_mla, is_moe=is_moe)
         if skip_reason:
             dropped.append(
                 {

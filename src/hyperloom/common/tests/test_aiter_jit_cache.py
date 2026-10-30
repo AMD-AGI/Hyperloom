@@ -76,7 +76,7 @@ def test_missing_cache_still_records_requested_scope(tmp_path, scope):
     assert record["status"] == "clean"
     assert record["module_names"] == []
     assert record["module_scope"] == (None if scope is None else list(scope))
-    assert set(record) == {"src", "status", "build_existed", "module_scope", "module_names", "moved_at"}
+    assert set(record) == {"src", "status", "build_existed", "module_scope", "module_names"}
     assert not build.parent.exists()
 
 
@@ -439,12 +439,6 @@ def test_trusted_path_resolution_failure_is_false(jit, monkeypatch):
 
     monkeypatch.setattr(Path, "resolve", fail_resolve)
     assert not cache.trusted_jit_build_dir(jit, jit)
-
-
-def test_restore_without_backup_root_retains_legacy_api(jit, tmp_path):
-    record = cache.invalidate_jit_cache(jit, tmp_path / "backups", ())
-    assert cache.restore_jit_cache(record, jit, None)["status"] == "ok"
-    assert (jit / "baseline.o").read_bytes() == b"baseline build"
 
 
 def test_core_loads_as_standalone_stdlib_file(tmp_path):

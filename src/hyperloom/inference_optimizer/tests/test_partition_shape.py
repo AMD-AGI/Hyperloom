@@ -5,9 +5,11 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
-from hyperloom.common.gpu_partition import PartitionLayout, layout_for
+from hyperloom.common.gpu_partition import PartitionLayout, PartitionModel, layout_for
 from hyperloom.orchestrator.actions.executors import _partition_shape as ps
 
 
@@ -46,6 +48,11 @@ def _layout(mode, cu, gib=None, probed=True):
         gib_per_partition=derived.gib_per_partition,
         probed=False,
     )
+
+
+def _measured(gib):
+    """A model whose session state carries a measured per-stream peak of ``gib``."""
+    return PartitionModel(shared_state=SimpleNamespace(current_best={"peak_gib_per_stream": gib}))
 
 
 CPX_36 = _layout("CPX", 32, 36.0)
@@ -88,12 +95,12 @@ class TestDeclaredMode:
 
     def test_a_match_proceeds(self, card):
         card(CPX_36)
-        verdict = ps.validate_session_shape(declared_mode="CPX", params={"peak_gib_per_stream": 4.0})
+        verdict = ps.validate_session_shape(declared_mode="CPX", model=_measured(4.0))
         assert verdict.ok is True
 
     def test_no_declaration_accepts_whatever_the_card_is_in(self, card):
         card(CPX_36)
-        verdict = ps.validate_session_shape(params={"peak_gib_per_stream": 4.0})
+        verdict = ps.validate_session_shape(model=_measured(4.0))
         assert verdict.ok is True
         assert verdict.layout is not None
         assert verdict.layout.mode == "CPX"
@@ -103,7 +110,7 @@ class TestUnpartitionedCard:
     def test_spx_needs_no_feasibility_check(self, card):
         """One partition is the whole card, which every session already assumes."""
         card(SPX_288)
-        verdict = ps.validate_session_shape(params={"peak_gib_per_stream": 200.0}, streams=4)
+        verdict = ps.validate_session_shape(model=_measured(200.0), streams=4)
 
         assert verdict.ok is True
         assert not any("Streams per partition" in note for note in verdict.notes)
@@ -118,7 +125,7 @@ class TestFeasibility:
     def test_the_measured_mi355x_case_is_refused_at_launch(self, card):
         """20.7 GiB per stream, two streams, a 36 GiB CPX partition."""
         card(CPX_36)
-        verdict = ps.validate_session_shape(streams=2, params={"peak_gib_per_stream": 20.7})
+        verdict = ps.validate_session_shape(streams=2, model=_measured(20.7))
 
         assert verdict.ok is False
         assert "2 x 20.7 GiB = 41.4 GiB needed per partition" in verdict.refusal
@@ -127,17 +134,17 @@ class TestFeasibility:
     def test_a_measured_refusal_says_it_was_measured(self, card):
         """Measured and weights-only call for different responses from an operator."""
         card(CPX_36)
-        verdict = ps.validate_session_shape(streams=2, params={"peak_gib_per_stream": 20.7})
+        verdict = ps.validate_session_shape(streams=2, model=_measured(20.7))
         assert "a measured per-stream peak" in verdict.refusal
 
     def test_the_same_workload_at_one_stream_is_allowed(self, card):
         card(CPX_36)
-        verdict = ps.validate_session_shape(streams=1, params={"peak_gib_per_stream": 20.7})
+        verdict = ps.validate_session_shape(streams=1, model=_measured(20.7))
         assert verdict.ok is True
 
     def test_a_fit_reports_the_headroom_it_checked(self, card):
         card(CPX_36)
-        verdict = ps.validate_session_shape(streams=2, params={"peak_gib_per_stream": 10.0})
+        verdict = ps.validate_session_shape(streams=2, model=_measured(10.0))
 
         assert verdict.ok is True
         assert any("20.0 GiB needed of 36.0 GiB" in note for note in verdict.notes)
@@ -145,8 +152,8 @@ class TestFeasibility:
     def test_streams_are_multiplied_in_not_ignored(self, card):
         """Each stream holds its own copy, so the one-stream figure is the trap."""
         card(CPX_36)
-        assert ps.validate_session_shape(streams=2, params={"peak_gib_per_stream": 17.0}).ok is True
-        assert ps.validate_session_shape(streams=3, params={"peak_gib_per_stream": 17.0}).ok is False
+        assert ps.validate_session_shape(streams=2, model=_measured(17.0)).ok is True
+        assert ps.validate_session_shape(streams=3, model=_measured(17.0)).ok is False
 
     def test_an_unknown_footprint_warns_and_runs(self, card):
         """Refusing here would ground every session that cannot be sized."""
@@ -158,7 +165,7 @@ class TestFeasibility:
 
     def test_unreported_partition_memory_warns_and_runs(self, card):
         card(_layout("CPX", 32, gib=None))
-        verdict = ps.validate_session_shape(streams=2, params={"peak_gib_per_stream": 20.7})
+        verdict = ps.validate_session_shape(streams=2, model=_measured(20.7))
 
         assert verdict.ok is True
         assert any("reported no usable per-partition memory" in w for w in verdict.warnings)
@@ -166,47 +173,21 @@ class TestFeasibility:
     def test_a_zero_capacity_is_unknown_rather_than_a_limit_that_refuses_everything(self, card):
         """The guard here and the one in ``fits_in_partition`` must not disagree."""
         card(_layout("CPX", 32, gib=0.0))
-        verdict = ps.validate_session_shape(streams=2, params={"peak_gib_per_stream": 20.7})
+        verdict = ps.validate_session_shape(streams=2, model=_measured(20.7))
 
         assert verdict.ok is True
         assert any("reported no usable per-partition memory" in w for w in verdict.warnings)
         assert not any("GiB needed of" in n for n in verdict.notes)
 
 
-class TestStreamsAreRefusedNotDefaulted:
-    """``streams=0`` must not become the default, here or at the CLI."""
-
-    @pytest.mark.parametrize("streams", [0, -1, -8])
-    def test_a_value_below_one_refuses(self, card, streams):
-        card(CPX_36)
-        verdict = ps.validate_session_shape(streams=streams, params={"peak_gib_per_stream": 1.0})
-
-        assert verdict.ok is False
-        assert "must be >= 1" in verdict.refusal
-        assert str(streams) in verdict.refusal
-
-    def test_it_refuses_before_the_card_is_read(self, monkeypatch):
-        """A usage error about the request needs no probe to decide."""
-
-        def _fail(*_args, **_kwargs):
-            raise AssertionError("the card must not be read to refuse streams=0")
-
-        monkeypatch.setattr(ps, "observe_partition", _fail)
-        assert ps.validate_session_shape(streams=0).ok is False
+class TestOmittedStreams:
+    """An omitted ``streams`` takes the default."""
 
     def test_omitted_streams_still_take_the_default(self, card):
-        """``None`` means "not named" and is the only thing that may default."""
         card(CPX_36)
-        for verdict in (
-            ps.validate_session_shape(params={"peak_gib_per_stream": 1.0}),
-            ps.validate_session_shape(streams=None, params={"peak_gib_per_stream": 1.0}),
-        ):
-            assert verdict.ok is True
-            assert any(f"Streams per partition: {ps.DEFAULT_STREAMS_PER_PARTITION}" in n for n in verdict.notes)
-
-    def test_a_non_numeric_request_refuses_rather_than_raises(self, card):
-        card(CPX_36)
-        assert ps.validate_session_shape(streams="two").ok is False  # type: ignore[arg-type]
+        verdict = ps.validate_session_shape(model=_measured(1.0))
+        assert verdict.ok is True
+        assert any(f"Streams per partition: {ps.DEFAULT_STREAMS_PER_PARTITION}" in n for n in verdict.notes)
 
 
 class TestFitCheckNeedsAFanOut:
@@ -216,7 +197,7 @@ class TestFitCheckNeedsAFanOut:
         card(CPX_36)
         verdict = ps.validate_session_shape(
             streams=2,
-            params={"peak_gib_per_stream": 20.7},
+            model=_measured(20.7),
             fanout_expected=False,
         )
         assert verdict.ok is True
@@ -254,14 +235,14 @@ class TestFitCheckNeedsAFanOut:
 class TestTableFallbackIsSurfaced:
     def test_a_derived_cu_count_warns_because_selection_matches_on_it(self, card):
         card(_layout("DPX", 152, 144.0, probed=False))
-        verdict = ps.validate_session_shape(params={"peak_gib_per_stream": 4.0})
+        verdict = ps.validate_session_shape(model=_measured(4.0))
 
         assert verdict.ok is True
         assert any("built-in board table" in w for w in verdict.warnings)
 
     def test_a_probed_count_warns_about_nothing(self, card):
         card(CPX_36)
-        verdict = ps.validate_session_shape(params={"peak_gib_per_stream": 4.0})
+        verdict = ps.validate_session_shape(model=_measured(4.0))
         assert verdict.warnings == ()
 
 

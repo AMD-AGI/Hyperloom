@@ -19,19 +19,19 @@ import logging as _logging
 from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close_out
 from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
 from hyperloom.inference_optimizer.breakdown.workflow_contract import workflow_contract
+from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 
 from . import machine_state as _phase_state
 from .machine import Transition
 from ..bus.message_bus import Message
-from ..state.shared_state import ESCALATE_HINT_SKIP_TO_CLOSE
-from ..state.task_registry import IllegalTransition, Task, TaskNotFound
+from ..state.task_registry import TERMINAL_STATES, IllegalTransition, Task, TaskNotFound, TaskSpec
 from ..collaborator import CoordinatorCollaborator
 
 log = _logging.getLogger(__name__)
 
 # Terminal task states, split by what the CLOSE sequencer can still do with a task in one.
 _TASK_STATE_DONE: str = "succeeded"
-_DEAD_TASK_STATES: frozenset[str] = frozenset({"cancelled", "failed"})
+_DEAD_TASK_STATES: frozenset[str] = TERMINAL_STATES - {_TASK_STATE_DONE}
 # A row the wall-clock deadline path already dispatched.
 _TASK_STATE_RUNNING: str = "running"
 # Appended to a close step's idempotency key when its first row is dead, so ``create_or_return_existing`` mints a new
@@ -138,25 +138,7 @@ class ClosePhase(CoordinatorCollaborator):
                 "CLOSE step 0: post-opt roofline timed out after %.0fs; skipping (no post-opt snapshot)",
                 self.CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC,
             )
-            try:
-                current = await self.tasks.get(task.task_id)
-                if current.state == "queued":
-                    await self.tasks.transition(
-                        task.task_id,
-                        "cancelled",
-                        {"reason": "close_post_opt_roofline_timeout"},
-                    )
-                elif current.state == "running":
-                    await self.tasks.transition(
-                        task.task_id,
-                        "failed",
-                        {"reason": "close_post_opt_roofline_timeout"},
-                    )
-            except (sqlite3.Error, TaskNotFound, IllegalTransition):
-                log.debug(
-                    "CLOSE step 0: failed to mark timed-out post-opt roofline task",
-                    exc_info=True,
-                )
+            await self._abandon_close_task(task, reason="close_post_opt_roofline_timeout")
             await self._record_close_step(step, status="failed", task_id=task.task_id, detail="timeout")
             return
         state = getattr(result, "state", None)
@@ -180,7 +162,7 @@ class ClosePhase(CoordinatorCollaborator):
                 await self.tasks.transition(task.task_id, "cancelled", {"reason": reason})
             elif current.state == "running":
                 await self.tasks.transition(task.task_id, "failed", {"reason": reason})
-        except (TaskNotFound, IllegalTransition):
+        except (sqlite3.Error, TaskNotFound, IllegalTransition):
             log.debug("CLOSE: failed to settle abandoned task %s", task.task_id, exc_info=True)
 
     async def _revalidate_stack_for_close(self) -> None:
@@ -341,17 +323,9 @@ class ClosePhase(CoordinatorCollaborator):
         """
         try:
             await coro
-        except Exception as exc:
+        except Exception as exc:  # isolation boundary: one CLOSE step of the sequence
             log.exception("CLOSE step %r failed", step_name)
             await self._record_close_step(step_name, status="failed", detail=repr(exc)[:240])
-
-    async def _do_stack_revalidation(self) -> None:
-        """Validate the optimization stack before any close-section records."""
-        await self._revalidate_stack_for_close()
-
-    async def _do_post_opt_roofline(self) -> None:
-        """Profile the final optimized service for the before/after roofline chart."""
-        await self._maybe_run_close_post_opt_roofline()
 
     async def _do_fact_finalize(self) -> None:
         """Recipe KB commit: publishes the terminal outcome before telemetry steps."""
@@ -373,7 +347,7 @@ class ClosePhase(CoordinatorCollaborator):
         try:
             report_task = await self._enqueue_internal_report_task(reason="close_phase_entry")
             terminal_state = await self._run_close_task(report_task, step="1 (report)")
-            if terminal_state in {"succeeded", None}:
+            if terminal_state == _TASK_STATE_DONE:
                 from hyperloom.inference_optimizer.session.session_paths import reports_dir as _reports_dir
 
                 _rd = _reports_dir(self.session_dir)
@@ -412,7 +386,7 @@ class ClosePhase(CoordinatorCollaborator):
         """Enqueue and await the session breakdown task."""
         bd_task = await self._enqueue_internal_session_breakdown_task(reason="close_phase_entry")
         terminal_state = await self._run_close_task(bd_task, step="2 (session_breakdown)")
-        if terminal_state in {"succeeded", None}:
+        if terminal_state == _TASK_STATE_DONE:
             await self._record_close_step(
                 "session_breakdown",
                 status="done",
@@ -472,7 +446,7 @@ class ClosePhase(CoordinatorCollaborator):
         return pkg_path
 
     async def on_enter_close(self, tr: Transition) -> None:
-        """CLOSE sequencer (fixed order): stack revalidation → post-opt roofline → fact_finalize → report → session_breakdown → langfuse flush → artifact_package → ndjson_drain (no-op) → mark close_sequence_done. Best-effort steps; final done step always runs. The ``CLOSE step N`` log labels are non-contiguous for historical reasons."""
+        """CLOSE sequencer (fixed order): stack revalidation → post-opt roofline → fact_finalize → report → session_breakdown → langfuse flush → artifact_package → mark close_sequence_done. Best-effort steps; final done step always runs. The ``CLOSE step N`` log labels are non-contiguous for historical reasons."""
         from_phase = tr.from_phase
         log.info("CLOSE entered (from=%s); starting 7-step close sequence", from_phase or "<unknown>")
         # Opened before anything can record a step into it. It stands at
@@ -483,11 +457,11 @@ class ClosePhase(CoordinatorCollaborator):
 
         # Ahead of the roofline and every close-section record, so they all
         # describe the stack after its last validation settled.
-        await self._run_close_step("stack_revalidation", self._do_stack_revalidation())
+        await self._run_close_step("stack_revalidation", self._revalidate_stack_for_close())
 
         # Post-optimization roofline (best-effort): profile the final optimized service once so the before/after
         # kernel roofline chart has its "after" column.
-        await self._run_close_step("post_opt_roofline", self._do_post_opt_roofline())
+        await self._run_close_step("post_opt_roofline", self._maybe_run_close_post_opt_roofline())
 
         # Recorded here rather than derived by the exporter: this is the first
         # moment each of these is final, and the snapshot history the exporter
@@ -512,17 +486,16 @@ class ClosePhase(CoordinatorCollaborator):
         # to final counts and patch_breakdown_langfuse splices it back into session_breakdown.json.
         await self._run_close_step("langfuse_flush", self._do_langfuse_flush())
 
-        # Artifact package: bundle the curated result/report/analysis files into a single zip under ``/workspace``
-        # so the Claw sandbox sync ships it to object storage even when ``$USER_DATA_PATH`` is outside ``/workspace``.
+        # Artifact package: bundle the curated result/report/analysis files into a single zip under
+        # ``HYPERLOOM_SESSION_PACKAGE_DEST`` (``/workspace`` when unset, where the Claw sandbox sync ships it to object
+        # storage even when ``$USER_DATA_PATH`` is outside ``/workspace``).  A hosted run points it at
+        # ``<session dir>/archive`` on the shared storage instead.
         pkg_path: Path | None = None
         try:
             pkg_path = await self._do_artifact_package()
-        except Exception as exc:
+        except Exception as exc:  # isolation boundary: the artifact_package CLOSE step
             log.exception("CLOSE step %r failed", "artifact_package")
             await self._record_close_step("artifact_package", status="failed", detail=repr(exc)[:240])
-
-        # Record a skipped ``ndjson_drain`` close-step for ledger consumers (RecipeKB is local-only).
-        await self._record_close_step("ndjson_drain", status="skipped")
 
         # Mark done.
         self.shared_state.close_sequence_done = True
@@ -544,9 +517,9 @@ class ClosePhase(CoordinatorCollaborator):
 
         # Refresh the breakdown's ``close`` key now that the sequence is on
         # disk: step 2 wrote the breakdown, so the copy it produced describes
-        # only the close-out up to itself. Splices one key; best-effort and
-        # last, after stop_reason and close_sequence_done are settled, so it
-        # cannot affect the run.
+        # only the close-out up to itself. Splices one key, last, after stop_reason
+        # and close_sequence_done are settled; an unreadable breakdown is logged below,
+        # any other failure leaves the close entry.
         #
         # Re-package when that changed something: ``session_breakdown.json`` is
         # bundled into the zip and the package is what external sync ships. The
@@ -594,13 +567,14 @@ class ClosePhase(CoordinatorCollaborator):
         task: Task | None = None
         for key in (idempotency_key, f"{idempotency_key}-{_RETRY_KEY_SUFFIX}"):
             task, was_existing = await self.tasks.create_or_return_existing(
-                kind=kind,
-                params=params,
-                idempotency_key=key,
-                requires_lanes=[],
-                side_effects=["writes_results"],
-                lease_ttl_sec=120,
-                dispatch_class="coordinator",
+                TaskSpec(
+                    kind=kind,
+                    params=params,
+                    idempotency_key=key,
+                    requires_lanes=[],
+                    lease_ttl_sec=120,
+                    dispatch_class="coordinator",
+                )
             )
             if not was_existing:
                 return task
@@ -697,7 +671,7 @@ class ClosePhase(CoordinatorCollaborator):
         """How long CLOSE waits for a close-step task to reach a terminal state."""
         from ..loop.time_budget import expected_action_cost_minutes
 
-        meta = self.action_registry.get(task.kind)
+        meta = ACTION_CATALOGUE.get(task.kind)
         typical_sec = expected_action_cost_minutes(meta) * 60.0
         return min(_CLOSE_STEP_WAIT_CEILING_SEC, max(_CLOSE_STEP_WAIT_FLOOR_SEC, typical_sec))
 
@@ -738,7 +712,7 @@ class ClosePhase(CoordinatorCollaborator):
                 return state
             await asyncio.sleep(min(poll_sec, remaining))
 
-    async def _run_close_task(self, task: Task, *, step: str) -> str | None:
+    async def _run_close_task(self, task: Task, *, step: str) -> str:
         """Run one close-step task and return the state it ended in."""
         state = str(getattr(task, "state", "") or "")
         if state == _TASK_STATE_DONE:
@@ -869,17 +843,18 @@ class ClosePhase(CoordinatorCollaborator):
         )
         assert decision is not None and decision[0] == _phase_state.PHASE_CLOSE
         target, reason, evidence = decision
+        move = Transition(from_phase=prior, to_phase=target, reason=reason, evidence=evidence)
         machine.set_terminal_stop_reason(state, reason)
-        if state.pending_escalate_hint == ESCALATE_HINT_SKIP_TO_CLOSE:
-            state.consume_pending_escalate_hint()
-        elif state.pending_escalate_hint:
-            state.discard_pending_escalate_hint()
+        machine.settle_escalate_hint(move)
         _phase_state.record_phase_transition(
             state, to_phase=target, reason=reason, evidence=evidence, at=_phase_state.PhaseClock(ts_unix=now)
         )
-        machine.fire_phase_exit(Transition(from_phase=prior, to_phase=target, reason=reason, evidence=evidence))
+        machine.fire_phase_exit(move)
         _phase_state.record_lifecycle_event(
-            state, step=target, status=_phase_state.LIFECYCLE_STATUS_ENTER, phase=target, detail=f"reason={reason}"
+            state,
+            _phase_state.LifecycleMark(
+                step=target, status=_phase_state.LIFECYCLE_STATUS_ENTER, phase=target, detail=f"reason={reason}"
+            ),
         )
         state.save(self.session_dir)
         return prior
@@ -923,16 +898,17 @@ class ClosePhase(CoordinatorCollaborator):
         idempotency_key = f"closing-report-{int(closing_started)}-{uuid.uuid4().hex[:6]}"
         task_id = ""
         task, _existing = await self.tasks.create_or_return_existing(
-            kind="report",
-            params={
-                "session_dir": str(self.session_dir),
-                "max_highlights": 50,
-            },
-            idempotency_key=idempotency_key,
-            requires_lanes=[],
-            side_effects=["writes_results"],
-            lease_ttl_sec=120,
-            dispatch_class="coordinator",
+            TaskSpec(
+                kind="report",
+                params={
+                    "session_dir": str(self.session_dir),
+                    "max_highlights": 50,
+                },
+                idempotency_key=idempotency_key,
+                requires_lanes=[],
+                lease_ttl_sec=120,
+                dispatch_class="coordinator",
+            )
         )
         task_id = task.task_id
         self.shared_state.closing_report_task_id = task_id
@@ -1001,8 +977,4 @@ class ClosePhase(CoordinatorCollaborator):
             task = await self.tasks.get(task_id)
         except TaskNotFound:
             return True
-        return task.state in {
-            "succeeded",
-            "failed",
-            "cancelled",
-        }
+        return task.state in TERMINAL_STATES

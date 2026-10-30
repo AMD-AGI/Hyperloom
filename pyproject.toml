@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hyperloom-inference_optimizer"
-version = "1.1.4"
+version = "1.1.5"
 description = "Inference Optimizer — two-role (Orchestration/Critic) autonomous LLM inference optimization runtime for AMD GPU platforms. Kernel optimization is handled by programmatic Python handlers."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -242,6 +242,8 @@ exclude = [
 [tool.setuptools.package-data]
 hyperloom = [
     "plugs/profiles/*.json",
+    "contracts/*.json",
+    "hosted/*.sh",
     "orchestrator/prompts/*.md",
     "orchestrator/prompts/references/*.md",
     # The reference rule pack a session reads when HYPERLOOM_RULE_PACK names no other; importing outside_facts fails without it.
@@ -305,7 +307,7 @@ hyperloom = [
     "*.sh",
 ]
 # KernelForge's read-only resources live with their owning features and are
-# resolved through ``kernelforge.resources.resource_path``. The globs are
+# resolved through ``kernelforge.config.resources.resource_path``. The globs are
 # deliberately type-agnostic because the trees hold several asset types.
 kernelforge = [
     "examples/**/*",
@@ -381,6 +383,8 @@ omit = [
     "src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py",
     "src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py",
     "src/hyperloom/orchestrator/kernel/apply_kernel_patch.py",
+    "src/hyperloom/orchestrator/kernel/patch_jit_cache.py",
+    "src/hyperloom/orchestrator/kernel/patch_rebuild.py",
     # GEAK runner and Ray cluster lifecycle (subprocess submit).
     "src/hyperloom/orchestrator/kernel/geak_runner.py",
     "src/hyperloom/orchestrator/actions/executors/_ray_runtime.py",
@@ -406,6 +410,7 @@ omit = [
     # Subprocess-heavy benchmark drivers.
     "src/hyperloom/orchestrator/actions/executors/profile.py",
     "src/hyperloom/orchestrator/actions/executors/baseline.py",
+    "src/hyperloom/orchestrator/actions/executors/benchmark_run/*",
     # --- kernelforge (ported verbatim from KernelForge's own omit list) ---
     "*/test_*.py",
     # Shipped sample drivers, reference kernels, and local-wiki assets.
@@ -415,33 +420,52 @@ omit = [
     "src/kernelforge/knowledge/kb_store/remote_client.py",
     # CLI entry points (argument plumbing; exercised via the CLIs themselves).
     "src/kernelforge/cli/*",
-    "src/kernelforge/gemm_tune/cli.py",
-    "src/kernelforge/fusion/command.py",
-    # The forge-fuse stages command.py drives.
-    "src/kernelforge/fusion/agent_selection.py",
-    "src/kernelforge/fusion/compile_pass_claim.py",
-    "src/kernelforge/fusion/harness_authoring.py",
-    "src/kernelforge/fusion/serving_gate.py",
-    "src/kernelforge/fusion/source_snapshot.py",
+    # The gemm-tune and forge-fuse pipelines and the stages they drive: agent sessions,
+    # tuner subprocesses and serving runs end to end.
+    "src/kernelforge/workflows/gemm_tune/pipeline.py",
+    "src/kernelforge/workflows/forge_fusion/pipeline.py",
+    "src/kernelforge/workflows/forge_fusion/agent_selection.py",
+    "src/kernelforge/workflows/forge_fusion/compile_pass_claim.py",
+    "src/kernelforge/workflows/forge_fusion/harness_authoring.py",
+    "src/kernelforge/workflows/forge_fusion/serving_gate.py",
+    "src/kernelforge/workflows/forge_fusion/source_snapshot.py",
     # GPU toolchain + profilers: shell out to rocprofv3 / rocprof-compute /
     # ninja / the build system and require real hardware.
     "src/kernelforge/evaluation/benchmark/runner.py",
     "src/kernelforge/evaluation/profiling/registers.py",
-    "src/kernelforge/loop/runner.py",
+    "src/kernelforge/workflows/forge_loop/iteration/runner.py",
+    # ... and the per-job modules it was split into, which answer to the same hardware.
+    "src/kernelforge/workflows/forge_loop/iteration/attempt_verdict.py",
+    "src/kernelforge/workflows/forge_loop/iteration/best_publication.py",
+    "src/kernelforge/workflows/forge_loop/iteration/campaign_report.py",
+    "src/kernelforge/workflows/forge_loop/iteration/campaign_runtime.py",
+    "src/kernelforge/workflows/forge_loop/iteration/case_coverage.py",
+    "src/kernelforge/workflows/forge_loop/iteration/ceiling_runtime.py",
+    "src/kernelforge/workflows/forge_loop/iteration/iteration_phases.py",
+    "src/kernelforge/workflows/forge_loop/iteration/iteration_types.py",
+    "src/kernelforge/workflows/forge_loop/iteration/keep_checkpoint.py",
+    "src/kernelforge/workflows/forge_loop/iteration/lane_runtime.py",
+    "src/kernelforge/workflows/forge_loop/iteration/locked_run.py",
+    "src/kernelforge/workflows/forge_loop/iteration/outcome_runtime.py",
+    "src/kernelforge/workflows/forge_loop/iteration/resume_recovery.py",
+    "src/kernelforge/workflows/forge_loop/iteration/round_admission.py",
+    "src/kernelforge/workflows/forge_loop/iteration/scoring_runtime.py",
+    "src/kernelforge/workflows/forge_loop/iteration/supervisor_review.py",
+    "src/kernelforge/workflows/forge_loop/iteration/workspace_git.py",
     # Claude Agent SDK transport (spawns the agent CLI, network).
-    "src/kernelforge/orchestrator/agent.py",
+    "src/kernelforge/workflows/forge_loop/roles/agent.py",
     # Filesystem index walker over the curated knowledge tree.
     "src/kernelforge/knowledge/local_wiki/index.py",
     # gemm-tune hardware tuners (drive vendor GEMM libraries on-device).
-    "src/kernelforge/gemm_tune/tuners/sglang_dense_bf16.py",
-    "src/kernelforge/gemm_tune/tuners/vllm_moe_triton.py",
-    "src/kernelforge/gemm_tune/tuners/fmoe_ck.py",
-    "src/kernelforge/gemm_tune/tuners/a4w4_blockscale.py",
-    "src/kernelforge/gemm_tune/tuners/a8w8.py",
-    "src/kernelforge/gemm_tune/tuners/a8w8_blockscale.py",
-    "src/kernelforge/gemm_tune/tuners/a8w8_bpreshuffle.py",
-    "src/kernelforge/gemm_tune/tuners/vllm_dense_tunableop.py",
-    "src/kernelforge/gemm_tune/tuners/_aiter_dense_common.py",
+    "src/kernelforge/workflows/gemm_tune/tuners/sglang_dense_bf16.py",
+    "src/kernelforge/workflows/gemm_tune/tuners/vllm_moe_triton.py",
+    "src/kernelforge/workflows/gemm_tune/tuners/fmoe_ck.py",
+    "src/kernelforge/workflows/gemm_tune/tuners/a4w4_blockscale.py",
+    "src/kernelforge/workflows/gemm_tune/tuners/a8w8.py",
+    "src/kernelforge/workflows/gemm_tune/tuners/a8w8_blockscale.py",
+    "src/kernelforge/workflows/gemm_tune/tuners/a8w8_bpreshuffle.py",
+    "src/kernelforge/workflows/gemm_tune/tuners/vllm_dense_tunableop.py",
+    "src/kernelforge/workflows/gemm_tune/tuners/_aiter_dense_common.py",
 ]
 
 [tool.coverage.report]
@@ -475,13 +499,12 @@ total_shards = 6
 
 # White-box code-metrics gate: ``scripts/code_metrics.py``, run by
 # ``.github/workflows/code-metrics.yml``. Each number below carries its reason.
-# Units already over a threshold are recorded in ``baseline`` (one line each) and
-# may only go down; a file is judged only when a change touches it. CI refuses a
-# change that loosens anything in this table relative to the base branch: a
-# raised limit, a new ``exclude`` entry, a dropped root, a raised duplication,
-# dead-code or warning parameter.
+# Each unit over a threshold in a file a change touches is compared with the same
+# unit at the merge base, measured in the same run; it may not be new or worse. CI
+# refuses a change that loosens anything in this table relative to the base
+# branch: a raised limit, a new ``exclude`` entry, a dropped root, a raised
+# duplication, dead-code or warning parameter.
 [tool.hyperloom.code_metrics]
-baseline = "scripts/code_metrics_baseline.txt"
 # Production Python: all of ``src`` (so a new package is in scope by default) and
 # ``scripts``. Plain repository paths only; pathspec magic and globs are refused.
 # Files under a ``tests/`` directory are exempt from every dimension but
@@ -533,8 +556,9 @@ function-lines = 50
 nested-blocks = 4
 # pylint R0913 default: past five, a call site no longer reads as a sentence and the
 # values travel together anyway -- pass the object they come from, or name them in a
-# dataclass. ``self``/``cls`` and ``*args``/``**kwargs`` do not count; keyword-only
-# parameters do.
+# dataclass. A first parameter named ``self``/``cls`` does not count; every other
+# named parameter does (keyword-only and ``_``-named too), and ``*args`` and
+# ``**kwargs`` count one each.
 function-args = 5
 # Fails above 1200 physical lines: half again the review trigger of 800, the
 # size at which a module almost always holds more than one job.
@@ -553,6 +577,7 @@ directory-entries = 50
 [tool.hyperloom.code_metrics.tools]
 ruff = "0.16.2"
 complexipy = "8.0.1"
+radon = "6.0.1"
 vulture = "2.16"
 jscpd = "5.4.1"
 
@@ -627,14 +652,10 @@ extend-select = [
 # the builtin ``aiter`` (async iterator) is never used in this tree.
 ignorelist = ["aiter"]
 
-# C901 (mccabe) is the complexity trigger in the style guide's "Size and
-# complexity" table. It stays off rather than on-and-ignored: the tree carries a
-# backlog above the default max of 10, so selecting it would red the tree instead
-# of gating new code. The code-metrics gate above measures it at 20 on the files a
-# change touches. Measure on demand -- no config edit needed:
-#   ruff check --select C901 --config "lint.mccabe.max-complexity=10" src/hyperloom src/kernelforge
-# [tool.ruff.lint.mccabe]
-# max-complexity = 10
+# C901 (mccabe) stays off: the style guide's complexity trigger (10) and the
+# code-metrics gate's ceiling (20) are counted with radon, which also counts every
+# and / or, ternary, comprehension and assert. Measure on demand:
+#   radon cc -s -n C src/hyperloom src/kernelforge
 
 [tool.ruff.lint.per-file-ignores]
 # Tests re-import inside function bodies (E402), redefine fixtures (F811), and
@@ -655,23 +676,23 @@ ignorelist = ["aiter"]
 "src/hyperloom/agents/critic/runtime/decision_reviewer.py" = ["E402"]
 # The import sits under the comment block explaining why the attribute name is
 # shared with kernelforge.agent_backends rather than redeclared here.
-"src/kernelforge/fusion/llm_failure.py" = ["E402"]
+"src/kernelforge/workflows/forge_fusion/llm_failure.py" = ["E402"]
 # Sphinx reads the module-level name ``copyright``.
 "docs/conf.py" = ["A001"]
 # Keyword names that mirror a stdlib signature callers already use:
 # ``subprocess.run(input=...)`` and ``BaseHTTPRequestHandler.log_message(format, ...)``.
 # Renaming them would break keyword callers / the override.
 "src/hyperloom/orchestrator/actions/executors/_git.py" = ["A002"]
-"src/kernelforge/tools/git.py" = ["A002"]
+"src/kernelforge/utils/git.py" = ["A002"]
 "src/hyperloom_kb/http_service.py" = ["A002"]
 # Naive local-time timestamps are part of these files' on-disk / directory-name
 # formats (persisted ``isoformat()`` strings, log-clock parsing); making them
 # timezone-aware would change what existing readers parse and compare.
-"src/kernelforge/tracker/experiment.py" = ["DTZ005"]
-"src/kernelforge/tracker/schema.py" = ["DTZ005"]
-"src/kernelforge/tracker/usage_ledger.py" = ["DTZ005"]
+"src/kernelforge/workflows/forge_loop/campaign/experiment.py" = ["DTZ005"]
+"src/kernelforge/workflows/forge_loop/campaign/schema.py" = ["DTZ005"]
+"src/kernelforge/agent_backends/usage_ledger.py" = ["DTZ005"]
 "src/hyperloom/orchestrator/actions/executors/bypass_report.py" = ["DTZ005"]
-"src/hyperloom/orchestrator/actions/executors/baseline.py" = ["DTZ001"]
+"src/hyperloom/orchestrator/actions/executors/benchmark_run/bringup.py" = ["DTZ001"]
 "src/hyperloom/orchestrator/rehearsal/scenario.py" = ["DTZ001"]
 # These call the root logger directly; a root-level call configures logging on
 # first use when nothing else has, so moving them to a module logger changes

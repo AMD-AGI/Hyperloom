@@ -1,17 +1,19 @@
 # SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Code-localization logic: closure gate + diff synthesis."""
+"""Code-localization logic: closure gate + PR diff scoping."""
 
 from __future__ import annotations
 
-import difflib
 import re
 from dataclasses import dataclass
 from pathlib import PurePosixPath
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 from hyperloom.common.github_urls import repo_slug
+
+if TYPE_CHECKING:
+    from .stack_actions import EnablementStackAction
 
 
 # A closure that touches any of these is a compiled / build-backend change and must defer to a targeted build, never
@@ -92,38 +94,6 @@ def _section_path(section: str) -> str:
     return header.rsplit(" b/", 1)[-1].strip()
 
 
-def synthesize_vendor_diff(files: list[tuple[str, str, str]]) -> str:
-    """Build a ``git apply``-ready unified diff from raw file contents."""
-    out: list[str] = []
-    for rel, old, new in files or []:
-        rel_s = str(rel or "").strip().lstrip("/")
-        if not rel_s:
-            continue
-        old_s = old or ""
-        new_s = new or ""
-        if old_s == new_s:
-            continue
-        old_lines = old_s.splitlines(keepends=True)
-        new_lines = new_s.splitlines(keepends=True)
-        is_add = not old_s
-        is_del = not new_s
-        from_label = "/dev/null" if is_add else f"a/{rel_s}"
-        to_label = "/dev/null" if is_del else f"b/{rel_s}"
-        body = difflib.unified_diff(old_lines, new_lines, fromfile=from_label, tofile=to_label, lineterm="\n")
-        hunk = "".join(body)
-        if not hunk:
-            continue
-        out.append(f"diff --git a/{rel_s} b/{rel_s}")
-        if is_add:
-            out.append("new file mode 100644")
-        elif is_del:
-            out.append("deleted file mode 100644")
-        out.append(hunk.rstrip("\n"))
-    if not out:
-        return ""
-    return "\n".join(out) + "\n"
-
-
 def _closure_bytes(diff_text: str) -> int:
     """Byte size of the localization payload (added content proxy)."""
     return len((diff_text or "").encode("utf-8", "replace"))
@@ -145,13 +115,12 @@ def _classify_pr_diff(diff_text: str, scope: str) -> tuple[str, list[str], Closu
 
 
 def build_localization_diff(
-    action: object,
+    action: EnablementStackAction,
     *,
     fetch_pr_patches: Callable[[str, int], str],
-    fetch_raw_file: Callable[[str, str, str], str],
     scope: str,
 ) -> tuple[str, list[str], ClosureVerdict]:
-    """Fetch/synthesize the localization diff and classify its closure.
+    """Fetch the localization diff and classify its closure.
 
     A compiled or build file anywhere in a PR makes it a compiled gap; of the
     rest, only the files under ``scope`` (the package the server imports) are
@@ -159,37 +128,17 @@ def build_localization_diff(
 
     Blocking (synchronous HTTP); call via ``asyncio.to_thread``.
     """
-    kind = str(getattr(action, "kind", "") or "")
-    repo_url = str(getattr(action, "repo_url", "") or "")
-    slug = _repo_slug_safe(repo_url)
+    kind = action.kind
+    slug = _repo_slug_safe(action.repo_url)
 
     if kind == "pr_backport":
-        pr_number = int(getattr(action, "pr_number", 0) or 0)
+        pr_number = action.pr_number
         if not slug or pr_number <= 0:
             return "", [], ClosureVerdict(kind=EMPTY, reason="pr_backport missing repo_url/pr_number")
         diff_text = fetch_pr_patches(slug, pr_number) or ""
         if not diff_text.strip():
             return "", [], ClosureVerdict(kind=EMPTY, reason="empty PR diff (fetch failed?)")
         return _classify_pr_diff(diff_text, scope)
-
-    if kind == "vendor_files":
-        ref = str(getattr(action, "ref", "") or "")
-        rels = [str(p) for p in (getattr(action, "localized_paths", ()) or [])]
-        if not slug or not ref or not rels:
-            return "", [], ClosureVerdict(kind=EMPTY, reason="vendor_files missing repo_url/ref/paths")
-        verdict = classify_closure(rels)
-        if not verdict.is_localizable:
-            return "", rels, verdict
-        triples: list[tuple[str, str, str]] = []
-        for rel in rels:
-            new_text = fetch_raw_file(slug, ref, rel) or ""
-            if not new_text:
-                return "", rels, ClosureVerdict(kind=EMPTY, reason=f"raw fetch failed for {rel}")
-            triples.append((rel, "", new_text))
-        diff_text = synthesize_vendor_diff(triples)
-        if _closure_bytes(diff_text) > _MAX_VENDOR_BYTES:
-            return "", rels, ClosureVerdict(kind=OVERSIZE, reason="vendored bytes exceed cap")
-        return diff_text, rels, verdict
 
     return "", [], ClosureVerdict(kind=EMPTY, reason=f"unsupported localization kind {kind!r}")
 
@@ -211,5 +160,4 @@ __all__ = [
     "build_localization_diff",
     "classify_closure",
     "parse_diff_paths",
-    "synthesize_vendor_diff",
 ]

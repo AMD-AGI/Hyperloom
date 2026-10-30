@@ -40,7 +40,7 @@ provider-side combinations and what each one enables.
 | `OPENAI`<br>`_CUSTOM_HEADERS` | No | —    | Extra request headers for the OpenAI side. Same shape as `ANTHROPIC_CUSTOM_HEADERS`; set it whenever you set `OPENAI_BASE_URL` against a gateway that authenticates on its own header. |
 | `CLAUDE_MODEL`         | No       | Derived from `ANTHROPIC_BASE_URL` | Orchestration model id on the Anthropic side. Falls back to the endpoint default, then the project-wide `DEFAULT_CLAUDE_MODEL`. `GEAK_CLAUDE_MODEL` inherits from it, and Forge reads it directly for its Claude backend.                                                                    |
 | `CODEX_MODEL`          | No       | Derived from `OPENAI_BASE_URL`    | Model id on the OpenAI side, used by the Codex backend, including Forge running on it. Model settings are never borrowed across providers.                                                                    |
-| `INFERENCE_OPTIMIZER`<br>`_AGENT_BACKEND` | No | Ranked by credentials | Names the agent CLI for the agentic roles: `claude`, `codex` or `deepseek`. An explicit `claude` or `codex` pins the role to that CLI instead of the credential-ranked choice. The choice applies to orchestration, Forge and TraceLens; quantization honours only `deepseek`. `deepseek` (the DeepSeek Harness) is reachable only through this variable, needs the `deepseek` extra, and uses the `OPENAI_BASE_URL` / `OPENAI_API_KEY` gateway. |
+| `INFERENCE_OPTIMIZER`<br>`_AGENT_BACKEND` | No | Ranked by credentials | Names the agent CLI for the agentic roles: `claude`, `codex` or `deepseek`. An explicit `claude` or `codex` pins the role to that CLI instead of the credential-ranked choice. The choice applies to orchestration, specialists, Forge and TraceLens; quantization honours only `deepseek`. `deepseek` (the DeepSeek Harness) is never picked by the credential ranking: Hyperloom's roles reach it only through this variable, and Forge also takes `--agent-backend deepseek` / `FORGE_AGENT_BACKEND=deepseek`. It needs the `deepseek` extra, and uses the `OPENAI_BASE_URL` / `OPENAI_API_KEY` gateway. With `deepseek`, specialists run on the `dsh` CLI with `DSH_PERMISSION_MODE=danger-full-access`, so dsh applies no sandbox of its own, and a run with specialists enabled (`--research-lane-capacity` above 0) refuses to boot when no `dsh` is found. |
 | `DSH_MODEL`            | No       | `deepseek-v4-flash`               | Model id the DeepSeek Harness runs, for every role that selects it. |
 | `GEAK_API_KEY`         | No       | —    | Internal alias, never derived from either side. GEAK runs on the Anthropic side (`ANTHROPIC_*` + `GEAK_CLAUDE_MODEL`); set this only to point GEAK elsewhere.                                                                                                                              |
 | `GEAK_BASE_URL`        | No       | —    | Internal alias, never derived from either side. Set it only to point GEAK at a different endpoint than the Anthropic side.                                                                                                                          |
@@ -297,8 +297,8 @@ fusion that already succeeded this session.
 | Variable                       | Default                       | Description                                                                                                                                                                                       |
 |--------------------------------|-------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `HYPERLOOM_SKIP_FUSION`        | Unset (lane enabled)          | Truthy (`1` / `true` / `yes` / `on`) disables the fusion lane outright, before any other gate is evaluated.                                                                                        |
-| `FORGE_FUSION_TIMEOUT`         | `7200` (2h)                   | Wrapper timeout in seconds for one forge-fusion run. A payload `timeout` / `timeout_sec` takes precedence over the env; an unparseable value falls back to the default.                            |
-| `FORGE_FUSION_MAX_TURNS`       | `100`                         | Agent turn cap handed to forge-fusion for one run. A payload `max_turns` takes precedence.                                                                                                         |
+| `FORGE_FUSION_TIMEOUT`         | `7200` (2h)                   | Wrapper timeout in seconds for one forge-fusion run. Unset or unparseable, the fusion lane's share of the KERNEL phase is used, else the default.                                                  |
+| `FORGE_FUSION_MAX_TURNS`       | `100`                         | Agent turn cap handed to forge-fusion for one run.                                                                                                                                                 |
 | `HYPERLOOM_FUSION_KEEP_PCT`    | `1.0`                         | Minimum throughput gain, in percent, that a queued fusion patch must reach to be KEPT when it is integrated. Every nominated patch is queued; the value is recorded on each queued record. A malformed value raises `EnvValueError`. |
 
 ---
@@ -321,8 +321,7 @@ On the `forge` KERNEL path only (`KERNEL_OPT_BACKEND_ORDER=forge`; the default
 `geak` backend hands to SWEEP before reaching any of these):
 
 - **Fusion authors one independent sibling patch per confirmed recipe** rather
-  than a single combined patch. `fuse_all_confirmed` is now the explicit opt-in
-  for the combined shape instead of the default.
+  than a single combined patch.
 - **The fusion lane caps its recipe count** at 3 (`--max-recipes`), funded from
   its share of the phase. A session with no finite remaining time derives no
   share and stays uncapped.
@@ -368,7 +367,7 @@ require no configuration.
 
 Every run writes `kernel_source_resolution.json` next to the candidate report.
 It answers one question per hot kernel — which file defines it, and which tier
-decided that — in a versioned schema (`schema_version`, currently `1.0.0`), so
+decided that — in a versioned schema (`schema_version`, currently `1.2.0`), so
 consumers and triage read a contract rather than candidate internals.
 
 ---
@@ -557,11 +556,25 @@ over through the variables below; without a hand-off `--nodes >= 2` exits 2.
 
 ### Cluster hand-off variables
 
-`HYPERLOOM_MN_EXT_SERVICE_URL` is the only variable that tells the optimizer a
-cluster is ready; the rest describe how to reach it.
+`TOPOLOGY_HANDOFF_FILE` is read first. The file carries `backend` (`rayjob` or
+`infera`), `nodes`, `gpus_per_node`, `service_url`, and the block of that
+backend: `ray` (`head_ip`, `dashboard_token_file`) or `infera` (`ssh_key_file`,
+`ssh_port_base`, `known_hosts_file`, `prefill_ips`, `decode_ips`, `worker_ips`).
+Credentials are file paths; the Ray Dashboard token is read from its file. A set
+variable naming a file that is unreadable, not valid JSON, of an unsupported
+schema major, or missing a required field is an error that names the file and
+the problem; Hyperloom does not fall back to the legacy variables. If legacy
+variables are also set and differ from the file, the file wins and a warning
+names the differing fields. The exceptions are `--nodes`, `--gpus-per-node` and
+`--mn-backend`: a launch flag always wins over the file, so a `--nodes 1` run is
+single-node and a `--nodes 3` run is stored as three nodes whatever the file says.
+
+Without `TOPOLOGY_HANDOFF_FILE`, `HYPERLOOM_MN_EXT_SERVICE_URL` is the only variable
+that tells the optimizer a cluster is ready; the rest describe how to reach it.
 
 | Variable | Backend | Required | Description |
 |----------|---------|----------|-------------|
+| `TOPOLOGY_HANDOFF_FILE` | both | No | Path to a TopologyHandoff v1 JSON file (`"schema": "topology-handoff/v1"`) the platform wrote. When set (non-empty) it is the hand-off and the `HYPERLOOM_MN_EXT_*` and `INFERENCE_OPTIMIZER_MN_BACKEND` variables are not read for the fields it carries. The launch flags win over it: `--mn-backend` over `backend`, `--gpus-per-node` over `gpus_per_node`, and `--nodes` over `nodes` (`optimize` exports `INFERENCE_OPTIMIZER_NODES` and `INFERENCE_OPTIMIZER_GPUS_PER_NODE` from the flags, and a value set there is never replaced by the file's); the file fills in `backend` and `gpus_per_node` when their flag is omitted. When unset, the variables below apply unchanged. |
 | `HYPERLOOM_MN_EXT_SERVICE_URL` | both | **yes** | Benchmark frontend URL (`http(s)://…`; infera frontend typically `:8000`). Its presence triggers external mode. |
 | `HYPERLOOM_MN_EXT_SSH_KEY` | infera | **yes** | Private SSH key already authorized on the pods (the platform installs the public half at create time). |
 | `HYPERLOOM_MN_EXT_PREFILL_IPS` / `_DECODE_IPS` | infera | PD | Prefill / decode pod IPs (comma-separated) for PD-disaggregated runs. |
@@ -616,7 +629,7 @@ including baseline, explore, sweep, and rebench measurements:
 
 | Variable | Default | Description |
 |---|---|---|
-| `INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC` | `7800`; under `HYPERLOOM_AGENTIC_BACKEND=mlperf`, sized to the trajectory count (see [MLPerf agentic backend](#mlperf-agentic-backend)) | Hard wall-clock seconds per actual spawn, including server boot and accuracy evaluation. Output cannot extend it. An explicit value always wins. |
+| `INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC` | `7800`; under `HYPERLOOM_AGENTIC_BACKEND=mlperf`, sized to the trajectory count, and under native AgentX sized to the round's `CONC` (see [MLPerf agentic backend](#mlperf-agentic-backend)) | Hard wall-clock seconds per actual spawn, including server boot and accuracy evaluation. Output cannot extend it. An explicit value always wins. |
 | `INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC` | `600` | Output-silence seconds after real server readiness. Not armed before readiness or for server-less scriptable workloads. |
 
 Session `--max-hours` and cancellation apply independently of benchmark limits.
@@ -643,6 +656,12 @@ from these benchmark limits and retain their existing contracts.
 | `INFERENCE_OPTIMIZER_REACTOR_TURN_TIMEOUT_SEC` | `1800` | Total wall-clock limit for each reactor stage, including backend startup, streamed output, retries, backoff, and cleanup. This is independent of backend `*_CALL_TIMEOUT_SEC` settings: for streamed Claude turns those settings bound idle time between SDK messages, and activity resets that idle timer. Reaching this total limit cancels the stage and records a crash; a shorter remaining session bound still ends the stage without recording a crash. A malformed value raises `EnvValueError`; a non-positive or non-finite value falls back to the default. |
 | `INFERENCE_OPTIMIZER_CLAUDE_TURN_TIMEOUT_SEC` | `1500` | Total wall-clock limit for one Claude Agent SDK call made by the orchestration backend (reactor turns, including the SWEEP cycle-directive handoff), covering every retry and the backoff between them; tearing the CLI down afterwards adds at most 30 s. Unlike the idle bound of `INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC`, the CLI's own API-retry messages do not extend it. Past it the call is cancelled, the CLI and every process it started are killed, and the turn fails as a backend error the loop retries on its next tick. |
 | `INFERENCE_OPTIMIZER_DEEPSEEK_CALL_TIMEOUT_SEC` | `300` | Wall-clock limit for one DeepSeek Harness turn made by the orchestration backend. Past it the harness runtime is closed and the next turn starts a new runtime and a new conversation. |
+
+## TraceLens analysis route
+
+| Variable | Default | Description |
+|---|---|---|
+| `HYPERLOOM_TRACE_ANALYSIS_ROUTE` | `agent` | `agent` runs the TraceLens skill under a model. `non-llm` runs TraceLens without a model and writes `analysis.json` from the TraceLens report; it shares the gates, candidates and reports with `agent` but adds no collective candidates and writes no prose, and the report's trace-quality warnings appear in `trace_health_warnings`. A `trace_analyze` request's `analysis_route` key overrides it. Any other value fails the request. |
 
 ## TraceLens analysis budgets
 
@@ -701,6 +720,7 @@ deployments.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV` | Unset (`1`) | Specialist subprocesses inherit the limited provider credential set by default: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_CUSTOM_HEADERS`, `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`, `OPENAI_CUSTOM_HEADERS`, and AWS Bedrock credential/config vars. Set to `0` only when the `claude` CLI is authenticated through its own config and env credentials must be suppressed. Unrelated secrets such as GitHub and KB tokens remain blocked. |
+| `HYPERLOOM_SPECIALIST_USER` | Unset (no change) | Account name to run legacy-flow specialist subprocesses as (the `claude`, `codex` and `dsh` CLIs), so they cannot read the app's files, `/proc/<pid>/environ` or key files. Needs a Hyperloom process that can start a child as another user and later stop it: root, or all of `CAP_SETUID`, `CAP_SETGID` and `CAP_KILL` (`CAP_KILL` is what lets the deadline, stale-heartbeat, done-file and cancel reaps signal the child; without it none of them could be confirmed). The launch fails with a clear error, and no specialist runs, if one of those is missing, the account does not exist, is uid 0, is the app's own user, or belongs to group 0; so does a GPU specialist on the Ray actor path, which cannot be demoted. The child gets that account's `HOME`, `USER` and `LOGNAME`, supplementary groups, and `umask 007` (group full access, others none); the Hyperloom process's own umask is left alone, and each launch re-shares the workspace and worktree, so files the app rebuilt in between become group-writable again. The child starts through `setpriv` (util-linux, required), which clears its inheritable and ambient capabilities and sets `no_new_privs`, so a non-root app that holds `CAP_SETUID` as an ambient capability does not hand it to the child. Each task's workspace and worktree stay owned by the app but get the account's group with group read-write (setgid directories); the app must be root or a member of that group to do so, and the account must be able to traverse every parent directory of the session directory (the app never changes the modes of those parents), read the checkout the worktree is branched from, and execute the agent CLI. The worktree's `.git` file and its admin directory under the repository's `.git/worktrees` are shared read-only (git inside the worktree works for status, diff and log, not for writes), and a copy of the `--mcp-config` file is staged in the workspace. The app reads and writes the paths the child can rewrite (`specialist_done.json`, `patches/`, the harvested patch, the Codex config, `prompt.md`, `process.log` and its redaction copy, the `dsh` home and session logs) without following symlinks. Does not apply to the multi-branch specialist path. |
 | `HL_ALLOW_DANGEROUS_AGENT_PERMISSIONS` | Unset (`0`) | Slurm carrier only. Set to `1` only in dedicated internal containers to re-enable legacy Claude/Codex approval and sandbox bypass flags. |
 
 ---
@@ -740,7 +760,7 @@ package to populate `session_breakdown.json` for downstream consumers.
 Primary switch (default **off**) for live Langfuse trace push.
 
 - **SDK install**: when this flag is on, `src/hyperloom/inference_optimizer/assets/install.sh` auto-installs the optional `langfuse` SDK on demand and skips it entirely when off — no separate `pip install '...[trace]'` is required.
-- **Live push**: when set to `1/true/yes/on` and the three `LANGFUSE_*` credentials are present, every in-process LLM call is mirrored into Langfuse while the run is live. A session-end flush backfills out-of-process children (geak, forge, specialist) and KEEP/REVERT decision Scores.
+- **Live push**: when set to `1/true/yes/on` and the three `LANGFUSE_*` credentials are present, every in-process LLM call is mirrored into Langfuse while the run is live. A session-end flush backfills calls still missing their token or text half, the recipe-KB, specialist-intel, Forge-step, GEMM-tuning and trajectory logs, and KEEP/REVERT decision Scores.
 - **Local ledger**: `reports/trace/*.jsonl` is always written regardless of this flag. If the SDK is unavailable, live push degrades to a no-op.
 - **Correlation**: the Langfuse trace ID and `session_id` grouping are derived from `claw_session_id` (env `CLAW_SESSION_ID`), falling back to the internal session ID for standalone runs. Live push and the offline `backfill_langfuse` CLI collapse onto one trace per Primus-Claw session.
 - **Span layout**: `trace → phase span (PRELUDE/ENABLEMENT/FRAMEWORK_AGENT/KERNEL_AGENT/SWEEP/…) → agent span (component: orchestration/kernel/specialist/critic/geak/forge/…) → Generation`. Each KEEP/REVERT/`gain_pct` Score attaches to the agent span that produced the decision, with a trace-level fallback when no matching span exists.
@@ -756,23 +776,25 @@ Primary switch (default **off**) for live Langfuse trace push.
 ### Langfuse and artifact-package — security and known limitations
 
 * **Sensitive data surface**: When live push is on, `conversations.jsonl`
-  (and Langfuse Generations) carry full prompt/response text. `redact_secrets`
+  (and Langfuse Generations) carry full prompt/response text. `redact_secret_values`
   scrubs common token shapes (Bearer, `sk-`/`pk-`, GitHub tokens, some
   `KEY=value`) but is not a complete data loss prevention (DLP) filter — bare keys without a
   recognizable prefix (for example, raw AWS `AKIA…`) can slip through. The artifact
   packager also copies `reports/trace/*.jsonl` and, with the loose mode on by
-  default (`HYPERLOOM_SESSION_PACKAGE_LOOSE`), drops them under `/workspace`
-  for the Claw sync. If a session might contain customer code or secrets, define
-  an explicit retention + access-control policy for both the Langfuse project
-  and the `/workspace` package destination, and consider disabling live push
-  or loose packaging for those runs.
+  default (`HYPERLOOM_SESSION_PACKAGE_LOOSE`), drops them under the package
+  destination `HYPERLOOM_SESSION_PACKAGE_DEST`: `/workspace` for the Claw sync when
+  it is unset, and `<session dir>/archive/` (mode 0700, on the shared storage) in
+  a hosted run, where the entry sets it whatever the host passed. If a session might
+  contain customer code or secrets, define an explicit retention + access-control
+  policy for both the Langfuse project and the package destination, and consider
+  disabling live push or loose packaging for those runs.
 * **`live push` + `backfill_langfuse` overlap**: Both derive the same
   `trace_id` from `claw_session_id`, so running the offline backfill *after* a
-  live run re-emits the out-of-process children onto the same trace and can
+  live run re-emits the generations and decision scores onto the same trace and can
   duplicate observations. Use one path per session, or treat backfill as a
   recovery tool only when live push did not run.
 * **`flush_session` is idempotent, and retries only what failed**: the
-  session-end reconcile runs as named steps (leftover halves, `ext/` shards,
+  session-end reconcile runs as named steps (leftover halves,
   recipe-KB audit, specialist intel, forge steps, GEMM tuning, trajectory,
   decision scores, span close, final SDK flush). Every call runs every step,
   and each step sends only what is still owed, so a duplicated CLOSE step
@@ -784,13 +806,12 @@ Primary switch (default **off**) for live Langfuse trace push.
   (a crash plus a `--resume`, or two shutdown paths racing) reports into the
   same trace. `rows_sent` maps each
   append-only log, by its path under the session directory, to how many of its
-  rows were sent: the `ext/*.jsonl` and `trajectory/*.jsonl` shards, the
+  rows were sent: the `trajectory/*.jsonl` shards, the
   recipe-KB audit, specialist intel, forge steps and GEMM tuning logs. A call
   sends only the rows past that count, advancing it one row at a time and
   stopping at the first row it could not send, so that row is retried by the
-  next call or the next leg. A receipt written by v1.0.0 through v1.1.3 carries
-  the ext shard counts as `ext_rows_sent`, and a v1.1.3 receipt also carries the
-  trajectory shard counts as `trajectory_rows_sent`; both are still read. `decision_trace.jsonl` is rewritten ts-sorted on
+  next call or the next leg. A v1.1.3 receipt carries the trajectory shard
+  counts as `trajectory_rows_sent`, which is still read. `decision_trace.jsonl` is rewritten ts-sorted on
   every export, so decision scores are tracked by the `decision_id` its writer
   stamps on each row instead (`decisions_sent`). Both record what was handed to
   the Langfuse SDK: its flush does not report a failed export, so a row lost in
@@ -960,11 +981,38 @@ With `HYPERLOOM_AGENTX=1`, Hyperloom generates and archives the native Magpie YA
 from its ordinary workload flags. `--docker-image` supplies an explicit serving
 image identity, required for custom models.
 
-Native AgentX profiling is configured in the Magpie YAML's
-`benchmark.profiler.torch_profiler` mapping: `num_steps`, `num_profiles`,
-`interval_seconds` (default 200), `start_seconds`, and `detailed_annotations`.
-Magpie starts after the replay reaches measurement and owns the capture/flush
-lifecycle. Each time window remains a separate trace input to TraceLens.
+Canonical replay warms up 11 requests per lane plus one probe before it opens its
+fixed profiling window, so its round grows with the concurrency being measured
+while the window does not. That shape is Magpie's, at the ref native AgentX pins
+it to (see [Magpie](../components/magpie.md)); Hyperloom composes only `CONC`, and
+the numbers below have to be re-measured when the pin moves. With
+`INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC` unset and a `CONC` pinned, the cap
+defaults to `(11 × CONC + 1) × 20 s + 3640 s + 300 s + 1800 s` (20 s per warmup
+request, sized to the slowest rung of one 8×MI355X sweep -- 18.8 s at `CONC` 20 --
+with about 6% over it, plus the `metric_window_s` window, metrics finalisation and
+boot), and never below the stock 7800 s: about 10,200 s at `CONC` 20. A
+concurrency sweep sizes this per rung from the environment the rung's own config
+is launched with -- whether the `CONC` in it was pinned by the rung, inherited
+from the base config or cleared by the rung -- so the rung that measures more
+lanes is granted more time rather than the ladder sharing one grant. The
+override itself stays the operator's: it is read from the process environment
+that preflight validated, never from a rung's config. Sizing reads a rung's
+workload pins as its launch would, so a rung whose config spells one the reader
+refuses (`HYPERLOOM_AGENTX=maybe`) is recorded as failed with error class
+`benchmark_cap_error` and the sweep carries on with the next rung.
+
+Native AgentX profiling shares TraceLens patch and kernel-shape-tool preparation with
+fixed-sequence profiling. Configure capture steps, count, delay and interval through
+`benchmark.profiler.torch_profiler` (`num_steps`, `num_profiles`, `start_seconds`,
+`interval_seconds`). The diagnostic copy preserves those settings and explicit
+`detailed_annotations`. When profiling is enabled, a missing capture setting becomes
+one capture of 256 steps, starting 300 seconds after measurement, with a 900-second
+interval. A missing `detailed_annotations` becomes true, and false when the TraceLens
+runtime patch was attempted and did not apply: Magpie probes the server whenever the field
+is true and refuses to launch when the server lacks it.
+Hyperloom adds the shape-tool environment through `agentx.launch_overrides` while
+preserving the server's runtime paths. Magpie owns profiling flags, starts after replay
+reaches measurement, and manages capture/flush. Each window remains a separate TraceLens input.
 Profile reports are diagnostic only and cannot supply KEEP evidence.
 See [Optimize an AgentX workload](../how-to/optimize.md#optimize-an-agentx-workload).
 
@@ -1014,20 +1062,87 @@ and input variables are always required, and a variable that is set is checked e
 | `HYPERLOOM_RUN_ID` | Always | Run identifier, no whitespace. |
 | `HYPERLOOM_RUN_CREATED_AT` | Always | Run creation time, ISO 8601 with a UTC offset or `Z`. |
 | `HYPERLOOM_STATE_DIR` | Always | Absolute path of the run's state directory on shared storage; must exist. |
-| `HYPERLOOM_EVENTS_DIR` | No | Directory of the progress-event segments. Default `$HYPERLOOM_STATE_DIR/events`. |
-| `HYPERLOOM_MCP_PORT`<br>`HYPERLOOM_MCP_TOKEN` | When the MCP server runs (default) | Port (1 to 65535) of the run's MCP server and the token the host presents. The token is a credential. |
+| `HYPERLOOM_EVENTS_DIR` | No | Directory of the progress-event segments (see "Progress events" below). Default `$HYPERLOOM_STATE_DIR/events`. |
+| `HYPERLOOM_MCP_PORT`<br>`HYPERLOOM_MCP_TOKEN` | When the MCP server runs (default) | Port (1 to 65535) of the run's MCP server and the token the host presents. The token is a credential and must be at least 16 characters; a shorter one refuses the run. |
+| `HYPERLOOM_MCP_HOST` | No | Address the run's MCP server binds to, no whitespace. Default `127.0.0.1`; a hosted run is given `0.0.0.0`. |
 | `HYPERLOOM_MCP_PUBLIC_URL` | When sub-runs call back into the run | `http(s)` URL under which sub-runs reach the run's MCP server. No credentials, query or fragment. |
 | `HYPERLOOM_SANDBOX_TEMPLATES` | When a sandbox is hosted | JSON object of template names, for example `{"runner": {"1": "t1", "8": "t8"}, "dev": "t"}`. |
 | `E2B_API_URL`<br>`E2B_SANDBOX_URL` | When a sandbox is hosted | Control-plane and data-plane `http(s)` URLs of the sandbox service, without credentials, query or fragment. |
 | `HYPERLOOM_SANDBOX_KEY_MEASUREMENT`<br>`HYPERLOOM_SANDBOX_KEY_SUBRUN`<br>`HYPERLOOM_SANDBOX_KEY_DEV` | Per hosted role | The sandbox API key of each role. Credentials. |
 | `HYPERLOOM_RESULT_ARCHIVE` | No | Unset means results are archived on the shared storage, in a directory the application chooses. Otherwise `s3://<bucket>/<prefix>`; the prefix may be empty and has no empty, `.` or `..` segment. A local path (`/x`, `file://...`) is refused: local means unset. |
 | `AWS_ACCESS_KEY_ID`<br>`AWS_SECRET_ACCESS_KEY` | When `HYPERLOOM_RESULT_ARCHIVE` is `s3://`, and always as a pair | Archive credentials. `AWS_SESSION_TOKEN`, `AWS_ENDPOINT_URL_S3` (an `http(s)` URL) and `AWS_REGION` (not a credential) are optional. |
+| `HYPERLOOM_GRANT_LIMITS` | No | JSON object of the totals the host granted the run: `max_sandboxes`, `max_gpus`, `max_runtime_sec` (whole numbers) and `gpu_hours` (a number), each at least 0 and each optional; other keys are ignored. The legacy `optimize` flow only logs it. Removed from the environment once read. |
+| `HYPERLOOM_SOURCE_REPO`<br>`HYPERLOOM_SOURCE_SHA` | When the run starts measurement sandboxes (the application bootstrap always needs them) | The repository (`OWNER/NAME` or a git URL, no whitespace) and the full lowercase 40-hex commit id of the version the run executes; the sandbox runners fetch the same version. Checked when set; removed from the environment once read (the bootstrap script has already used them). |
 | `NODE_NAME`<br>`CLAW_SESSION_ID` | No | Physical node name and session id, read when set. |
 
 Once read, every host-only input above is removed from the process environment (`take_host_info`), so a child process started
 without an explicit `env=` does not inherit it; `HostInfo` holds the values and code passes them on. `NODE_NAME` and `CLAW_SESSION_ID`
 stay, because other code reads them. The sandbox keys, the MCP token and the archive credentials are held in an object that prints as
 `Secret(<redacted>)`, and are also on the credential list in `hyperloom.common.env_safety`.
+
+### The hosted entry and its bootstrap
+
+`hyperloom hosted run` (`src/hyperloom/hosted/entry.py`) reads the variables above and the campaign spec in
+`HYPERLOOM_INPUT_FILE` (`hyperloom.campaign-spec/v1`, schema `src/hyperloom/contracts/campaign_spec.v1.schema.json`), runs the
+packaged `src/hyperloom/inference_optimizer/assets/install.sh` (no flags; the installer of the legacy launchers, from the same
+wheel as the running code; it provisions TraceLens, GEAK, ray and `runtime/kernel-agent.env.sh`) on every leg, fresh or resumed, into the interpreter that runs the entry (`PYTHON`, `VIRTUAL_ENV` and `INFERENCE_OPTIMIZER_FORCE_PYTHON=1` are set for it, and that interpreter's `bin` directory leads `PATH` for the installer and `optimize`), with its
+output in `$HYPERLOOM_STATE_DIR/install.log`, then runs `optimize` in the same process. An installer that exits non-zero ends the run
+with `{"final": true, "returncode": 2, "error": ...}` naming `install.sh` and the log. The session directory is
+`$USER_DATA_PATH/<model directory name>/<HYPERLOOM_RUN_CREATED_AT as YYYYMMDDTHHMMSSZ>-<first 8 hex of sha256(HYPERLOOM_RUN_ID)>`; a
+restart finds the same directory and resumes it when it holds `manifest.json` and `state.json`. The entry writes two files in
+`$HYPERLOOM_STATE_DIR`: `session.json` (`{"session_dir": ...}`, as soon as the directory exists) and `exit.json`
+(`{"final": true, "returncode": N, "stop_reason": ...}` when `optimize` ends for any reason, and `{"final": true, "returncode": 2,
+"error": ...}` when the request is refused). A host restarts the run only when `exit.json` is missing or its `final` is false.
+`HYPERLOOM_IMAGE` is set from the spec's `framework.image`, and the entry needs `USER_DATA_PATH` set to an absolute path. The result
+archive directory of the run is `<session dir>/archive/`, mode 0700, owned by the application user; the entry sets `HYPERLOOM_SESSION_PACKAGE_DEST` to it (whatever the host passed), so the session artifact package and its loose copies are written to `archive/hyperloom-session-packages/` on the shared storage, not to the container's `/workspace`.
+
+`src/hyperloom/hosted/app_bootstrap.sh` starts a hosted run in an image without Hyperloom. It installs into the framework Python environment instead of a venv of its own, because a venv made from the image's interpreter cannot see the torch and ROCm stack that `install.sh` requires. The script is baked into the image: a change to it needs a rebuild.
+
+`scripts/hosted_app_image/build.sh --tag <ref> [--base <image>] [--claude-version V] [--push]` builds that image: a framework base image (`--base`), the script as the image's command, the `hl-specialist` account for `HYPERLOOM_SPECIALIST_USER`, and the claude CLI that specialists spawn (`/usr/local/bin/claude` -> `/opt/claude-code`). The CLI's version is `--claude-version`; when it is not passed the build takes `latest`, so two builds of one tag can carry different CLI versions. Pass a version to pin it. The codex CLI is not installed separately: it comes with the wheel (`openai-codex-cli-bin`).
+
+The image is not required. `scripts/hosted_app_image/build_layer.sh --out <dir> [--claude-version V] [--ca-file PEM]` builds a layer directory `<dir>/<short sha>-claude<version>/` (`start.sh`, `app_bootstrap.sh`, `bin/claude`, and `ca.pem` with `--ca-file`), and `scripts/hosted_app_image/Dockerfile.layer` makes it a small image (the directory is its build context; the content is under `/layer`). An application pod copies `/layer` into a volume with an init container (`cp -a /layer/. /opt/hyperloom-host/` into an `emptyDir`), and the main container runs `sh /opt/hyperloom-host/start.sh` on any framework image, unchanged. `start.sh` runs as the container's root and reads only its own directory (the layer may be mounted read-only): it creates `hl-specialist` (uid/gid 2000) when missing, puts `bin/claude` on `PATH`, writes a CA bundle (the image's plus `ca.pem`) to `${TMPDIR:-/tmp}/hyperloom-host/ca-bundle.pem` (directory 0755, file 0644, local to the container; nothing goes to the state dir) for `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS` and `GIT_SSL_CAINFO`, and execs `app_bootstrap.sh`. The image must already have `git`, `setpriv` and `bash`; `start.sh` refuses by name when one is missing and installs nothing. uid 2000 must not belong to another account.
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `HYPERLOOM_SOURCE_REPO` | Yes | `OWNER/NAME` on GitHub, or a git URL or path, of the Hyperloom source to run. |
+| `HYPERLOOM_SOURCE_SHA` | Yes | Full 40-character commit id of that source. The wheel for it is built once into `$USER_DATA_PATH/.hyperloom/wheels/<sha>/` and only that wheel is installed (`--no-deps --force-reinstall`, so a new commit replaces an old one) into the image's framework Python environment (`/opt/venv` when it exists, else `$PYTHON`, else `python3`, the order `install.sh` uses), which also runs the entry. The runtime dependencies are resolved there by the `install.sh` the entry runs before `optimize`, as in the legacy flow. The environment records the installed commit in `.hyperloom-install`; a container that already holds it installs nothing. |
+| `HYPERLOOM_CODE_REVISION` | Set by the script | The commit id, exported before the entry starts: a wheel has no `.git` to read it from. |
+
+### The host's guarantee about containers, and the resume that relies on it
+
+The host guarantees that one run has at most one application container at a time, and starts a new leg only after it has
+confirmed that the previous container no longer exists. The entry relies on that guarantee when it resumes a session:
+
+* It compares the owner scopes recorded in the session's ownership ledger with the scope of its own container. With no other scope
+  (a restart in the same container) the resume goes through the preflight's own checks, unchanged.
+* Another scope means the previous container is gone. The entry then does what `hyperloom recover --confirm-scope-gone` does for each
+  such scope, with the same code: the executions that scope left running are marked interrupted, their leases are released, their
+  work is redone, and the resume proceeds. A confirmation that the code refuses (for example another owner's live lease) ends the run
+  with `{"final": true, "returncode": 2, "error": ...}`.
+* A host that starts a new container while the previous one is only unreachable breaks the guarantee: two containers would write
+  one session directory. Such a host cannot use this hosting. Supporting one would need an explicit signal, in which the host
+  states at the start of a leg that the previous container no longer exists; the entry does not read one today.
+
+### Progress events
+
+With the hosted `events` implementation (`src/hyperloom/hosted/events.py`, selected by the `hosted-*` plug profiles) the run writes
+CloudEvents 1.0 structured JSON, one event per line, to `<events dir>/<10-digit segment>.jsonl`; a new segment starts before the
+current one would pass 4 MiB. The directory and the run id (`source` is `hyperloom/<run id>`) come from `HostInfo`, never from the
+environment, so a child process started by the run has no events directory and never emits.
+
+* `id` is a decimal string that strictly increases within the run. After a restart it continues from the last complete line of the
+  last segment; a half-written last line is cut off first.
+* Every line ends with a newline and is written whole, so a line without one is an unfinished write, not an event. A reader that
+  tails by byte offset takes only complete lines.
+* One event is at most 16 KiB; a larger one is sent with `data` replaced by `{"oversized": true, "bytes": N, "keys": [...]}` and a
+  warning is logged. Put large content in a file and send its path.
+* `fsync` runs at most once a second, and on `flush()` and close. Emitting never raises into the run: a failure is logged.
+
+Types (v1): `hyperloom.campaign_started`, `plugs_lock_mismatch`, `phase_changed`, `measurement_started`, `measurement_finished`,
+`node_quarantined`, `candidate_settled`, `best_updated`, `budget`, `warning`, `campaign_finished`, `campaign_failed`. The `data`
+schema of each is `src/hyperloom/contracts/hyperloom_events.v1.schema.json`; a test keeps the emitters consistent with it.
+`hyperloom.budget` is sent after a state save, at most every 5 minutes; its `tokens` and `gpu_sec` are null in the legacy flow.
+With the local implementation (the default) an event is only a debug log line.
 
 ## Variables intentionally not exposed
 

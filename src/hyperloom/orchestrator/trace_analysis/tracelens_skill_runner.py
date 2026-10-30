@@ -37,10 +37,7 @@ from hyperloom.common import llm_config
 from hyperloom.common.deepseek_task import DeepSeekTaskRequest
 from hyperloom.common.llm_config import claude_sdk_env_options
 from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL
-from hyperloom.inference_optimizer import framework_registry
-
 from ._capture_shapes import is_capture_dir_name
-from ._io_utils import safe_float
 from ._literal_utils import LITERAL_EVAL_ERRORS as _LITERAL_EVAL_ERRORS
 from ._literal_utils import safe_literal_eval as _safe_literal_eval
 from ._task_group_contract import (
@@ -319,21 +316,6 @@ def write_local_cmd_prefix(output_dir: Path, tracelens_root: Path) -> Path:
     return prefix_path
 
 
-def tracelens_analysis_mode(framework: str) -> str:
-    """Return the TraceLens analysis mode for ``framework``.
-
-    Serving frameworks (vllm/sglang/atom) produce inference-shaped traces;
-    scriptable workloads are analysed in the default mode.
-
-    Args:
-        framework (str): The framework that produced the trace.
-
-    Returns:
-        str: ``"default"`` for scriptable frameworks, else ``"inference"``.
-    """
-    return "default" if framework_registry.is_scriptable(framework) else "inference"
-
-
 def write_run_config(
     *,
     output_dir: Path,
@@ -575,7 +557,7 @@ class _TrajectoryCall:
         """Feed one SDK stream message to the per-request tracker; a tracing fault never reaches the run."""
         try:
             self._tracker.observe(message)
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 - outermost telemetry sink: per-request trajectory tracker
             _log.debug("tracelens trajectory: request tracker rejected a message", exc_info=True)
         usage = getattr(message, "usage", None)
         if type(message).__name__ == "ResultMessage" and isinstance(usage, dict):
@@ -599,7 +581,7 @@ class _TrajectoryCall:
         # Requests are written while the call span is still the ambient parent.
         try:
             self._tracker.record_trajectory(attempt=1, fallback_model=self._model)
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 - outermost telemetry sink: trajectory request rows on span exit
             _log.debug("tracelens trajectory: request rows were not recorded", exc_info=True)
         return self._span_cm.__exit__(*exc_info)
 
@@ -648,7 +630,7 @@ async def _drive_sdk_stream(
                 if aclose is not None:
                     try:
                         await asyncio.wait_for(aclose(), timeout=10.0)
-                    except (asyncio.TimeoutError, Exception):  # noqa: BLE001
+                    except (asyncio.TimeoutError, Exception):  # noqa: BLE001 - outermost finalizer: aclose after idle abort
                         _log.debug("tracelens: stream aclose failed", exc_info=True)
                 break
             observe(message)
@@ -657,10 +639,10 @@ async def _drive_sdk_stream(
                 chunks.append(text)
                 if log:
                     log(f"[claude-sdk] {text[:1000]}")
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - isolation boundary: the SDK stream, returned as sdk_error
         # SDK may error after writing artifacts; treat artifact presence as truth.
         sdk_error = f"{type(exc).__name__}: {exc}"
-        _log.warning("tracelens: claude SDK stream failed: %s", sdk_error)
+        _log.warning("tracelens: claude SDK stream failed: %s", sdk_error, exc_info=True)
         if log:
             log(f"[claude-sdk] WARNING: {sdk_error}")
     return sdk_error
@@ -1199,8 +1181,6 @@ def _pitem_prose(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "identification": str(row.get("identification") or "").strip(),
             "reasoning_for_slowdown": str(row.get("reasoning_for_slowdown") or "").strip(),
             "resolution": str(row.get("resolution") or "").strip(),
-            "impact_low_e2e_pct": safe_float(row.get("impact_low_e2e_pct")),
-            "impact_high_e2e_pct": safe_float(row.get("impact_high_e2e_pct")),
         }
     ordered = sorted(entries.values(), key=lambda e: (e["rank"], e["title"]))
     return [e for e in ordered if e["rank"] or e["identification"] or e["reasoning_for_slowdown"] or e["resolution"]]
@@ -1212,8 +1192,8 @@ def aggregate_by_source_function(candidates: list[dict[str, Any]]) -> list[dict[
     Groups are sorted by aggregate time (descending). Native symbols are
     normalized to their logical function before keying by operation and source,
     so template/shape instances merge but different operators stay separate.
-    Python candidates key on the same versioned ``(kind, source, operation)``
-    identity used by the bypass path. Each group carries ``task_group_id``,
+    Python candidates key on the versioned ``(kind, source, operation)``
+    identity. Each group carries ``task_group_id``,
     ``source_path``, ``definition_line``, ``function_name``, ``kernel_ids``,
     ``primary_kernel_id``, ``rows``, and ``aggregate_*`` fields.
 
@@ -1303,7 +1283,6 @@ __all__ = [
     "extract_idle_pct_from_analysis_md",
     "normalize_upstream_category",
     "run_tracelens_skill",
-    "tracelens_analysis_mode",
     "write_local_cmd_prefix",
     "write_run_config",
 ]

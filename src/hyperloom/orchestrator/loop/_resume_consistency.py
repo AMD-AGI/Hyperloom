@@ -16,6 +16,7 @@ from hyperloom.inference_optimizer.inferencex_checkout import has_benchmark_lib
 from ..actions.executors.explore import STACK_REVALIDATE_SOURCE
 from ._promote_outcome import IntegrateRecoveryIncomplete
 from .resume_source_layers import install_kept_source_layers
+from ..state.task_registry import TaskSpec
 
 log = logging.getLogger(__name__)
 
@@ -99,7 +100,7 @@ class ResumeConsistencyMixin:
         await self._compensate_validation_watermark(report)
         try:
             state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.exception("Coordinator: resume consistency save failed")
         await self.bus.record_observation("coordinator", "observation", {"kind": "resume_consistency", **report})
         return report
@@ -171,12 +172,14 @@ class ResumeConsistencyMixin:
         lanes, ttl = self._coord.dispatcher.registry_lanes_ttl("explore")
         self._coord.proposals.inject_explore_runtime_params(params)
         task, existing = await self.tasks.create_or_return_existing(
-            kind="explore",
-            params=params,
-            idempotency_key=idempotency_key,
-            requires_lanes=lanes,
-            lease_ttl_sec=ttl,
-            dispatch_class="coordinator",
+            TaskSpec(
+                kind="explore",
+                params=params,
+                idempotency_key=idempotency_key,
+                requires_lanes=lanes,
+                lease_ttl_sec=ttl,
+                dispatch_class="coordinator",
+            )
         )
         return {"task_id": task.task_id, "existing": bool(existing)}
 

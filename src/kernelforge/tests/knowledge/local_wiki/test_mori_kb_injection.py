@@ -6,7 +6,7 @@ from __future__ import annotations
 from kernelforge.config import Config
 from kernelforge.kernel_backends.base import build_single_kernel_backend_prompt
 from kernelforge.knowledge.local_wiki.index import build_forge_knowledge
-from kernelforge.resources import resource_path
+from kernelforge.config.resources import resource_path
 
 
 def _mori_prompt(config: Config) -> str:

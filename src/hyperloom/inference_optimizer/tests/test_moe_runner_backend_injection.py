@@ -22,9 +22,12 @@ import yaml
 
 from hyperloom.inference_optimizer import model_config_utils
 from hyperloom.inference_optimizer import gpu_types
-from hyperloom.inference_optimizer.cli import model_gate as cli_model_gate
 from hyperloom.inference_optimizer.grid_server_args import remove_moe_runner_backend_arg
-from hyperloom.orchestrator.actions.executors._workload_envs import materialize_config_with_envs
+from hyperloom.orchestrator.actions.executors._workload_envs import (
+    materialize_config_with_envs,
+    LaunchLayer,
+    MaterializeOptions,
+)
 
 _AMD = "mi300x"
 
@@ -172,7 +175,7 @@ def test_moe_runner_requires_aiter_true(tmp_path, quant_config):
         tmp_path / "m",
         {"num_experts": 128, "quantization_config": quant_config},
     )
-    assert cli_model_gate._model_moe_runner_requires_aiter(path) is True
+    assert model_config_utils._model_moe_runner_requires_aiter(path) is True
 
 
 @pytest.mark.parametrize(
@@ -205,7 +208,7 @@ def test_moe_runner_requires_aiter_false(tmp_path, quant_config):
     if quant_config is not None:
         config["quantization_config"] = quant_config
     path = _write_model_config(tmp_path / "m", config)
-    assert cli_model_gate._model_moe_runner_requires_aiter(path) is False
+    assert model_config_utils._model_moe_runner_requires_aiter(path) is False
 
 
 def test_moe_runner_requires_aiter_reads_nested_text_config(tmp_path):
@@ -218,11 +221,11 @@ def test_moe_runner_requires_aiter_reads_nested_text_config(tmp_path):
             }
         },
     )
-    assert cli_model_gate._model_moe_runner_requires_aiter(path) is True
+    assert model_config_utils._model_moe_runner_requires_aiter(path) is True
 
 
 def test_moe_runner_requires_aiter_missing_config_is_false(tmp_path):
-    assert cli_model_gate._model_moe_runner_requires_aiter(str(tmp_path / "nope")) is False
+    assert model_config_utils._model_moe_runner_requires_aiter(str(tmp_path / "nope")) is False
 
 
 # materialize_config_with_envs (the production choke point)
@@ -262,8 +265,8 @@ def _materialize_envs(
     materialized = materialize_config_with_envs(
         base,
         out,
-        extra_server_args=extra_server_args,
-        drop_moe_runner_backend=drop_moe_runner_backend,
+        launch=LaunchLayer(extra_server_args=extra_server_args),
+        options=MaterializeOptions(drop_moe_runner_backend=drop_moe_runner_backend),
     )
     return yaml.safe_load(materialized.read_text())["benchmark"]["envs"]
 

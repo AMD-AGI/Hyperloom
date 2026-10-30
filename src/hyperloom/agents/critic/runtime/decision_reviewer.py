@@ -209,6 +209,16 @@ def _review_verdict(item: dict[str, Any], target: str, verdict: str, advice_text
     )
 
 
+def _advice_by_target(advice: list[dict[str, Any]]) -> dict[str, list[str]]:
+    """The ``body_md`` of each advisory, grouped by the proposal it targets; untargeted ones are left out."""
+    by_target: dict[str, list[str]] = {}
+    for advisory in advice:
+        advice_target = advisory.get("target_proposal_msg_id")
+        if isinstance(advice_target, str) and advice_target:
+            by_target.setdefault(advice_target, []).append(advisory["body_md"])
+    return by_target
+
+
 class DecisionReviewer:
     """Orchestrator for the Critic prepare/commit lifecycle."""
 
@@ -280,7 +290,7 @@ class DecisionReviewer:
         bundle.kb_priors_trace = {
             "configured": True,
             "mode": "per_proposal",
-            "client_mode": os.environ.get("CRITIC_KB_CLIENT_MODE", ""),
+            "client_mode": os.environ.get("CRITIC_KB_CLIENT_MODE", "inmemory").lower(),
             "scope_filter": dict(scope_filter),
             "limit": prior_limit,
             "requests": priors_requests,
@@ -377,15 +387,12 @@ class DecisionReviewer:
             raise ReviewValidationError("coordinator_inbox commit expects review.review_verdicts to be a list")
 
         advice = [a for a in review.get("advice") or [] if isinstance(a, dict) and a.get("body_md")]
-        advice_by_target: dict[str, list[str]] = {}
-        for advisory in advice:
-            advice_target = advisory.get("target_proposal_msg_id")
-            if isinstance(advice_target, str) and advice_target:
-                advice_by_target.setdefault(advice_target, []).append(advisory["body_md"])
+        advice_by_target = _advice_by_target(advice)
 
         # Every verdict is validated before any of them is committed.
         seen_targets: set[str] = set()
         intents: list[Intent] = []
+        reviews: list[ReviewVerdict] = []
         for i, item in enumerate(verdicts_raw):
             if not isinstance(item, dict):
                 raise ReviewValidationError(f"review.review_verdicts[{i}] must be an object")
@@ -406,13 +413,15 @@ class DecisionReviewer:
                 if isinstance(part, str) and part.strip()
             ]
             advice_text = "\n\n".join(advice_parts)
+            verdict_review = _review_verdict(item, target, verdict, advice_text)
+            reviews.append(verdict_review)
             try:
-                intents.append(build_review_verdict_intent(_review_verdict(item, target, verdict, advice_text)))
+                intents.append(build_review_verdict_intent(verdict_review))
             except IntentEnvelopeValidationError as exc:
                 raise ReviewValidationError(str(exc)) from exc
 
-        for item in verdicts_raw:
-            target, verdict = item["target_proposal_msg_id"], item["verdict"]
+        for item, verdict_review in zip(verdicts_raw, reviews):
+            target, verdict = verdict_review.target_proposal_msg_id, verdict_review.verdict
             self.session_memory.mark_reviewed(req.session_id, target, verdict, decision_id=req.decision_id)
             self.session_memory.append_decision(
                 req.session_id,
@@ -420,9 +429,9 @@ class DecisionReviewer:
                     "target_proposal_msg_id": target,
                     "verdict": verdict,
                     "reasoning": item.get("reasoning"),
-                    "source": item.get("source", "critic"),
-                    "failure_reason_code": str(item.get("failure_reason_code") or ""),
-                    "kb_evidence": item.get("kb_evidence") or [],
+                    "source": verdict_review.source,
+                    "failure_reason_code": verdict_review.failure_reason_code,
+                    "kb_evidence": verdict_review.kb_evidence,
                 },
             )
             self._maybe_write_kb_for_verdict(item, req, session_ctx, outcome)

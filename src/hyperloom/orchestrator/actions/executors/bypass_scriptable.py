@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.env_safety import build_benchmark_env
-from hyperloom.inference_optimizer.session.paths import asset_root
 
 
 def _scriptable_script_name(framework: str, runner_type: str) -> str:
@@ -45,9 +44,6 @@ def scriptable_script_candidates(
     override = os.environ.get("HYPERLOOM_BYPASS_SCRIPTS_DIR", "").strip()
     if override:
         _add(Path(override) / name)
-    # Bundled entrypoints are version-matched to this checkout, so they must be reachable by name too: any rebuild
-    # path that re-pins the bare {framework}_{runner}.sh would otherwise resolve to nothing.
-    _add(asset_root() / "assets" / "benchmark_scripts" / name)
     magpie_path = os.environ.get("MAGPIE_PATH", "").strip()
     if magpie_path:
         _add(Path(magpie_path, "Magpie", "scripts", "benchmark", name))
@@ -126,7 +122,7 @@ def run_scriptable(
         tried = "\n".join(f"  - {path}" for path in candidates) or "  (none)"
         error = f"scriptable benchmark script not found for {name}"
         # Pre-spawn miss never opens Popen, so there is no child stderr.
-        _write_logs(workspace, "", f"{error}\ntried:\n{tried}\n")
+        _write_stderr_log(workspace, f"{error}\ntried:\n{tried}\n")
         return 2, error
     env = build_scriptable_env(bench, runner_type, workspace, profile=profile, profile_dir=profile_dir)
     cmd = ["bash", str(script)]
@@ -146,12 +142,7 @@ def run_scriptable(
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
-            _write_logs(
-                workspace,
-                "",
-                f"scriptable benchmark timed out after {timeout_s}s",
-                append=True,
-            )
+            _write_stderr_log(workspace, f"scriptable benchmark timed out after {timeout_s}s", append=True)
             return 124, None
     return proc.returncode, None
 
@@ -165,16 +156,11 @@ def _open_log_sink(workspace: Path, name: str):
         return nullcontext(subprocess.DEVNULL)
 
 
-def _write_logs(workspace: Path, stdout: str, stderr: str, *, append: bool = False) -> None:
-    """Persist scriptable subprocess logs (best-effort)."""
-    mode = "a" if append else "w"
+def _write_stderr_log(workspace: Path, text: str, *, append: bool = False) -> None:
+    """Persist a scriptable failure message to ``scriptable_stderr.log`` (best-effort)."""
     try:
         workspace.mkdir(parents=True, exist_ok=True)
-        if stdout:
-            with (workspace / "scriptable_stdout.log").open(mode, encoding="utf-8") as fh:
-                fh.write(stdout)
-        if stderr:
-            with (workspace / "scriptable_stderr.log").open(mode, encoding="utf-8") as fh:
-                fh.write(stderr)
+        with (workspace / "scriptable_stderr.log").open("a" if append else "w", encoding="utf-8") as fh:
+            fh.write(text)
     except OSError:
         pass

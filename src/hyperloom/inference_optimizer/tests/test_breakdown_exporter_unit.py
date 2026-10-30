@@ -133,6 +133,18 @@ def test_breakdown_is_still_written_when_the_decision_trace_fails(monkeypatch, t
     assert target.is_file()
 
 
+def test_decision_trace_failure_is_recorded_in_the_breakdown_warnings(monkeypatch, tmp_path):
+    def explode(_session_dir):
+        raise RuntimeError("join failed")
+
+    monkeypatch.setattr(decision_trace, "write_session_decision_trace", explode)
+
+    target = ex.write_breakdown_json(tmp_path)
+
+    warnings = json.loads(target.read_text(encoding="utf-8"))["metadata"]["warnings"]
+    assert warnings[-1] == "decision_trace failed: RuntimeError: join failed"
+
+
 def test_write_breakdown_json_custom_output(tmp_path):
     out = tmp_path / "sub" / "bd.json"
     target = ex.write_breakdown_json(tmp_path, output_path=out)
@@ -145,6 +157,17 @@ def test_write_breakdown_json_custom_output(tmp_path):
 
 def test_patch_breakdown_langfuse_no_breakdown(tmp_path):
     assert ex.patch_breakdown_langfuse(tmp_path) is False
+
+
+@pytest.mark.parametrize("patch", [ex.patch_breakdown_langfuse, ex.patch_breakdown_close])
+def test_patch_breakdown_raises_on_an_unreadable_breakdown(tmp_path, patch):
+    target = tmp_path / ex.BREAKDOWN_FILENAME
+    target.write_text("{bad", encoding="utf-8")
+
+    with pytest.raises(json.JSONDecodeError, match="Expecting property name"):
+        patch(tmp_path)
+
+    assert target.read_text(encoding="utf-8") == "{bad"
 
 
 # ---- write_minimal_final_report ----
@@ -207,7 +230,6 @@ def test_fallback_never_replaces_a_complete_report(tmp_path):
 def test_historical_stop_reasons_do_not_depend_on_supervisor_runtime():
     from hyperloom.inference_optimizer.breakdown import stop_reasons
 
-    assert stop_reasons.SUPERVISOR_RESTART_REASON == "supervisor_restart_requested"
     assert stop_reasons.outcome_status("supervisor_coordinator_died", 1.0) == "aborted"
     assert stop_reasons.outcome_status("supervisor_tick_stalled", 1.0) == "aborted"
     assert stop_reasons.outcome_status("target_reached", 1.0) == "completed"
@@ -388,13 +410,6 @@ def _snapshot_session_row(tmp_path, **state_attrs) -> dict:
     return assemble_parts(tmp_path, warnings=[])["session"]
 
 
-def test_a_budget_nobody_set_is_left_off_the_snapshot(tmp_path):
-    """Writing it as 0 is what forced the export to guess, and guess wrong."""
-    row = _snapshot_session_row(tmp_path)
-    assert "max_minutes" not in row
-    assert "tick_count" not in row
-
-
 def test_a_session_that_really_ran_zero_ticks_records_the_zero(tmp_path):
     row = _snapshot_session_row(tmp_path, max_minutes=0, tick=0)
     assert row["max_minutes"] == 0
@@ -468,9 +483,9 @@ def test_the_human_report_reads_the_same_elapsed_time_as_the_machine_field(tmp_p
     assert 119.0 <= bd["metadata"]["session"]["elapsed_minutes"] <= 121.0
 
 
-def test_the_recorder_path_keeps_the_fields_only_the_collector_can_resolve(tmp_path, monkeypatch):
-    """The image comes from the manifest / environment, which the live state never sees."""
-    monkeypatch.setenv("HYPERLOOM_IMAGE", "registry.example/hyperloom:test")
+def test_the_recorder_path_keeps_the_fields_only_the_collector_can_resolve(tmp_path):
+    """The image is the one the manifest recorded, which the live state never sees."""
+    (tmp_path / "manifest.json").write_text(json.dumps({"image": "registry.example/hyperloom:test"}), encoding="utf-8")
     _stopped_session(tmp_path, ran_for=timedelta(minutes=5))
 
     bd = ex.build(tmp_path)

@@ -18,7 +18,8 @@ After both sub-steps succeed, `SharedState` carries:
 * `last_trace_analyze.steady_state_trace` — the steady-state chunk selected by
   TraceLens after its normal mode selection / retry policy
 * `last_trace_analyze.analysis_md_path` — path to TraceLens's
-  human-readable Markdown report
+  human-readable Markdown report, or to `analysis.json` when the session
+  analyses traces without an LLM
 * `last_trace_analyze.analysis_md_text` — full text of the report
   (cached for prompt injection)
 * `last_trace_analyze.roofline_snapshot_id` — monotonically increasing

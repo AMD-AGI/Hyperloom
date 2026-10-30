@@ -22,15 +22,14 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.coerce import text_or_none, to_int
 from hyperloom.common.io import JsonLineFormat, append_jsonl
 from hyperloom.common.llm_request_hooks import LLMRequestRecord, add_llm_request_observer
-from hyperloom.common.timeutil import now_iso
+from hyperloom.common.timeutil import elapsed_ms, epoch_iso, now_iso
 from hyperloom.inference_optimizer.session.session_paths import trajectory_dir
-from ._row_utils import coerce_optional_int, coerce_optional_str
 from .llm_trace import VALID_COMPONENTS as _LLM_COMPONENTS
 
 log = logging.getLogger(__name__)
@@ -199,7 +198,7 @@ def _resolved_phase_tick(ctx: TrajectoryContext) -> tuple[str | None, int | None
         live_phase, live_tick = ctx.phase_tick_source()
         phase = live_phase if phase is None else phase
         tick = live_tick if tick is None else tick
-    return coerce_optional_str(phase), coerce_optional_int(tick)
+    return text_or_none(phase), to_int(tick)
 
 
 def inherited_scope_fields() -> dict[str, Any]:
@@ -242,9 +241,12 @@ def _validate_row(row: dict[str, Any]) -> None:
 
 
 @dataclass(frozen=True)
-class EventWindow:
-    """When an event happened: ``ts`` (now when unset) and, for a span's terminal row, the ``start_ts`` it opened at."""
+class EventSpan:
+    """Where a row sits in its span: which span (minted when unset), the status it records, ``ts`` (now when unset)
+    and, for a span's terminal row, the ``start_ts`` it opened at."""
 
+    span_id: str | None = None
+    status: str = STATUS_POINT
     start_ts: str | None = None
     ts: str | None = None
 
@@ -252,42 +254,40 @@ class EventWindow:
 def record_event(
     event_type: str,
     *,
-    status: str = STATUS_POINT,
-    span_id: str | None = None,
-    window: EventWindow = EventWindow(),
+    span: EventSpan = EventSpan(),
     attributes: dict[str, Any] | None = None,
     **context: Any,
 ) -> str | None:
     """Append one event to this process's trajectory shard.
 
-    Pass ``window`` when the event is written after it happened. ``context`` overrides
-    :class:`TrajectoryContext` fields for this row only. A no-op (returning ``None``) when no ``session_dir`` is in
-    scope; otherwise returns the row's ``span_id``, minted when not given.
+    Pass ``span`` to give the row a status, put it in a known span, or date an event written after it happened.
+    ``context`` overrides :class:`TrajectoryContext` fields for this row only. A no-op (returning ``None``) when no
+    ``session_dir`` is in scope; otherwise returns the row's ``span_id``, minted when not given.
     """
     ctx = _overlay(_CONTEXT.get(), context)
     if ctx.session_dir is None:
         return None
-    span_id = span_id or new_span_id()
+    span_id = span.span_id or new_span_id()
     with _WRITER.lock:
         phase, tick = _resolved_phase_tick(ctx)
         row = {
             "schema_version": SCHEMA_VERSION,
             "event_id": uuid.uuid4().hex,
             "event_type": event_type,
-            "status": status,
-            "ts": window.ts or now_iso(),
-            "start_ts": coerce_optional_str(window.start_ts),
+            "status": span.status,
+            "ts": span.ts or now_iso(),
+            "start_ts": text_or_none(span.start_ts),
             "writer": _WRITER.writer,
             "seq": _WRITER.next_seq(),
             "session_id": ctx.session_dir.name,
             "span_id": span_id,
-            "parent_span_id": coerce_optional_str(ctx.parent_span_id),
-            "component": coerce_optional_str(ctx.component),
-            "agent": coerce_optional_str(ctx.agent),
+            "parent_span_id": text_or_none(ctx.parent_span_id),
+            "component": text_or_none(ctx.component),
+            "agent": text_or_none(ctx.agent),
             "phase": phase,
             "tick": tick,
-            "task_id": coerce_optional_str(ctx.task_id),
-            "call_id": coerce_optional_str(ctx.call_id),
+            "task_id": text_or_none(ctx.task_id),
+            "call_id": text_or_none(ctx.call_id),
             "attributes": _jsonable_attributes(attributes),
         }
         _validate_row(row)
@@ -362,7 +362,9 @@ def trajectory_span(
     """
     span = TrajectorySpan(span_id or new_span_id())
     start_ts = now_iso()
-    record_event(event_type, status=STATUS_STARTED, span_id=span.span_id, attributes=attributes, **context)
+    record_event(
+        event_type, span=EventSpan(span_id=span.span_id, status=STATUS_STARTED), attributes=attributes, **context
+    )
     status = STATUS_FAILED
     error: dict[str, Any] = {}
     try:
@@ -377,9 +379,9 @@ def trajectory_span(
     finally:
         record_event(
             event_type,
-            status=status if error else (span.status or STATUS_COMPLETED),
-            span_id=span.span_id,
-            window=EventWindow(start_ts=start_ts),
+            span=EventSpan(
+                span_id=span.span_id, status=status if error else (span.status or STATUS_COMPLETED), start_ts=start_ts
+            ),
             attributes={**span.attributes, **error},
             **context,
         )
@@ -397,7 +399,7 @@ def load_shard(path: Path) -> list[dict[str, Any]]:
     """Read one shard, skipping a torn trailing line from a live writer."""
     from hyperloom.common.jsonio import read_jsonl
 
-    return read_jsonl(path, require_dict=True, skip_malformed=True, skip_non_dict=True)
+    return read_jsonl(path)
 
 
 def load_events(session_dir: Path) -> list[dict[str, Any]]:
@@ -408,14 +410,6 @@ def load_events(session_dir: Path) -> list[dict[str, Any]]:
 
 TIMING_HTTP_RESPONSE = "http_response"
 TIMING_HTTP_STREAM = "http_stream"
-
-
-def _epoch_iso(epoch_s: float) -> str:
-    return datetime.fromtimestamp(epoch_s, timezone.utc).isoformat(timespec="microseconds")
-
-
-def _elapsed_ms(start: float, end: float | None) -> int | None:
-    return None if end is None else max(0, int((end - start) * 1000))
 
 
 def record_gateway_request(record: LLMRequestRecord) -> None:
@@ -436,8 +430,8 @@ def record_gateway_request(record: LLMRequestRecord) -> None:
         "operation": record.operation or None,
         "timing_source": TIMING_HTTP_STREAM if record.streamed else TIMING_HTTP_RESPONSE,
         "complete": not failed,
-        "latency_ms": _elapsed_ms(record.start, record.end),
-        "ttft_ms": _elapsed_ms(record.start, record.first_token),
+        "latency_ms": elapsed_ms(record.start, record.end),
+        "ttft_ms": elapsed_ms(record.start, record.first_token),
         "stop_reason": record.stop_reason,
         **record.usage,
     }
@@ -446,8 +440,11 @@ def record_gateway_request(record: LLMRequestRecord) -> None:
         attributes["error_message"] = record.error_message
     record_event(
         EVENT_LLM_REQUEST,
-        status=STATUS_FAILED if failed else STATUS_COMPLETED,
-        window=EventWindow(start_ts=_epoch_iso(record.start), ts=_epoch_iso(record.end)),
+        span=EventSpan(
+            status=STATUS_FAILED if failed else STATUS_COMPLETED,
+            start_ts=epoch_iso(record.start),
+            ts=epoch_iso(record.end),
+        ),
         attributes=attributes,
         **context,
     )
@@ -468,7 +465,7 @@ __all__ = [
     "EVENT_TASK",
     "EVENT_TASK_RETRY",
     "EVENT_TOOL",
-    "EventWindow",
+    "EventSpan",
     "OPEN_STATUSES",
     "SCHEMA_VERSION",
     "STATUS_CANCELLED",

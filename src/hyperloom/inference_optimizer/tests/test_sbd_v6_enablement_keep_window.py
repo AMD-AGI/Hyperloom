@@ -17,7 +17,8 @@ from typing import Any
 import pytest
 
 from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
-from hyperloom.inference_optimizer.breakdown.recorder.assembler import enablement_event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.assembler import event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.sections import ENABLEMENT_EVENT_SECTIONS
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
 
 from .conftest import make_coordinator
@@ -43,7 +44,7 @@ def coord(tmp_path: Path):
 
 def _counts() -> dict[str, Any]:
     ext, _status = enablement_event.assemble_enablement_ext(
-        enablement_event_parts(), event=enablement_event.enablement_event_id()
+        event_parts(ENABLEMENT_EVENT_SECTIONS), event=enablement_event.enablement_event_id()
     )
     attempts = ext["attempts"]
     return {

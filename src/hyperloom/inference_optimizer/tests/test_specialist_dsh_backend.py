@@ -272,6 +272,38 @@ async def test_a_deepseek_selection_runs_the_specialist_on_the_dsh_cli(
     assert (workspace / ".dsh" / "sessions").is_dir()
 
 
+_SILENT_DSH = """#!{python}
+import json, os, sys, time
+from pathlib import Path
+
+log = Path(os.environ["DSH_HOME"]) / "sessions" / "ws" / "session-0" / "session.v3.jsonl"
+log.parent.mkdir(parents=True, exist_ok=True)
+for step in range(6):
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({{"step": step}}) + "\\n")
+    time.sleep(0.4)
+Path(os.getcwd(), "specialist_done.json").write_text(json.dumps({done}), encoding="utf-8")
+"""
+
+
+@pytest.mark.asyncio
+async def test_a_dsh_run_that_writes_only_its_session_log_is_not_reaped_as_stale(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """dsh prints only its final message, so its step records are the only sign it is working."""
+    _pin_provider_env(monkeypatch, _OPENAI_ENV)
+    dsh = tmp_path / "bin" / "dsh"
+    dsh.parent.mkdir(parents=True)
+    dsh.write_text(_SILENT_DSH.format(python=sys.executable, done=repr(_DONE_PAYLOAD)), encoding="utf-8")
+    dsh.chmod(dsh.stat().st_mode | stat.S_IEXEC)
+
+    result = await _run(_dispatcher(dsh, heartbeat_stale_seconds=1.0), tmp_path)
+
+    assert result.error == "", result.error
+    assert result.done_payload is not None
+
+
 @pytest.mark.asyncio
 async def test_a_failed_dsh_turn_reaches_the_task_error(
     tmp_path: Path,

@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.orchestrator.phases import framework as _phase_framework
+from hyperloom.orchestrator.phases import framework_discovery
 from hyperloom.orchestrator.phases import machine_state as _phase_state
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import TaskNotFound
@@ -65,16 +65,16 @@ class _Tasks:
     async def running(self) -> list[Any]:
         return list(self._running)
 
-    async def create_or_return_existing(self, **kwargs: Any) -> tuple[Any, bool]:
-        self.created.append(kwargs)
-        key = str(kwargs.get("idempotency_key") or "")
+    async def create_or_return_existing(self, spec) -> tuple[Any, bool]:
+        self.created.append(vars(spec))
+        key = str(spec.idempotency_key or "")
         existing = self._by_idem.get(key)
         if existing is not None:
             return existing, True
         task = SimpleNamespace(
-            kind=kwargs.get("kind"),
+            kind=spec.kind,
             task_id=f"t-{len(self.created)}",
-            params=kwargs.get("params") or {},
+            params=spec.params or {},
             state="queued",
         )
         self._queued.append(task)
@@ -110,17 +110,6 @@ def _stub(tmp_path: Path, *, local_explore: bool = True) -> Coordinator:
 
 
 # --------------------------------------------------------------------------- # 3.
-def test_arm_disabled_dispatch_is_noop(tmp_path: Path):
-    """When the arm flag is off the local-explore dispatch returns empty."""
-    disabled_arm = _stub(tmp_path, local_explore=False)
-    assert disabled_arm.phase_framework._framework_local_explore_arm_enabled() is False
-
-
-def test_arm_enabled_when_flag_on(tmp_path: Path):
-    stub = _stub(tmp_path, local_explore=True)
-    assert stub.phase_framework._framework_local_explore_arm_enabled() is True
-
-
 def test_gap_compose_includes_framework_and_gpu(tmp_path: Path):
     """_compose_framework_local_explore_gap returns a gap string and keywords."""
     stub = _stub(tmp_path, local_explore=True)
@@ -134,7 +123,7 @@ def test_gap_compose_includes_framework_and_gpu(tmp_path: Path):
 def test_local_explore_direct_dispatch_disabled_arm_creates_nothing(tmp_path: Path):
     """When the arm is off the pump falls through to phase_done without dispatching."""
     stub = _stub(tmp_path, local_explore=False)
-    stub.shared_state.framework_agent_empty_discoveries = _phase_framework.DISCOVER_FAILURE_RETRY_LIMIT
+    stub.shared_state.framework_agent_empty_discoveries = framework_discovery.DISCOVER_FAILURE_RETRY_LIMIT
     asyncio.run(stub.phase_framework._pump_framework_agent_phase())
     assert stub.tasks.created == []
     assert stub.shared_state.framework_agent_phase_done is True
@@ -143,7 +132,7 @@ def test_local_explore_direct_dispatch_disabled_arm_creates_nothing(tmp_path: Pa
 def test_local_explore_direct_dispatch_creates_specialist(tmp_path: Path):
     """The pump dispatches a local-explore specialist directly, without a pseudo-candidate."""
     stub = _stub(tmp_path, local_explore=True)
-    stub.shared_state.framework_agent_empty_discoveries = _phase_framework.DISCOVER_FAILURE_RETRY_LIMIT
+    stub.shared_state.framework_agent_empty_discoveries = framework_discovery.DISCOVER_FAILURE_RETRY_LIMIT
     asyncio.run(stub.phase_framework._pump_framework_agent_phase())
     assert len(stub.tasks.created) == 1
     created = stub.tasks.created[0]
@@ -163,7 +152,7 @@ def test_local_explore_direct_dispatch_creates_specialist(tmp_path: Path):
 def test_a_failed_local_explore_specialist_is_retried(tmp_path: Path):
     """One interrupted run must not retire the candidate; the loop picks :r1."""
     stub = _stub(tmp_path, local_explore=True)
-    stub.shared_state.framework_agent_empty_discoveries = _phase_framework.DISCOVER_FAILURE_RETRY_LIMIT
+    stub.shared_state.framework_agent_empty_discoveries = framework_discovery.DISCOVER_FAILURE_RETRY_LIMIT
     asyncio.run(stub.phase_framework._pump_framework_agent_phase())
     first_task = stub.tasks._queued[-1]
     first_key = stub.tasks.created[-1]["idempotency_key"]
@@ -186,7 +175,7 @@ def test_a_repeatedly_failing_local_explore_specialist_stops(tmp_path: Path):
     from hyperloom.orchestrator.phases.framework import _LOCAL_EXPLORE_MAX_ATTEMPTS
 
     stub = _stub(tmp_path, local_explore=True)
-    stub.shared_state.framework_agent_empty_discoveries = _phase_framework.DISCOVER_FAILURE_RETRY_LIMIT
+    stub.shared_state.framework_agent_empty_discoveries = framework_discovery.DISCOVER_FAILURE_RETRY_LIMIT
     for _ in range(_LOCAL_EXPLORE_MAX_ATTEMPTS):
         stub.shared_state.framework_agent_specialist_candidate_map = {}
         asyncio.run(stub.phase_framework._pump_framework_agent_phase())
@@ -209,9 +198,9 @@ def test_a_repeatedly_failing_local_explore_specialist_stops(tmp_path: Path):
         (0, True, "candidate_discovery"),
         (0, False, "candidate_discovery"),
         # Discovery spent its retries. The arm takes over...
-        (_phase_framework.DISCOVER_FAILURE_RETRY_LIMIT, True, "framework_local_explore"),
+        (framework_discovery.DISCOVER_FAILURE_RETRY_LIMIT, True, "framework_local_explore"),
         # ...and with the arm off there is nothing left, so the source arm reports itself dry instead of idling.
-        (_phase_framework.DISCOVER_FAILURE_RETRY_LIMIT, False, "phase_done"),
+        (framework_discovery.DISCOVER_FAILURE_RETRY_LIMIT, False, "phase_done"),
     ],
 )
 def test_an_empty_pool_walks_discovery_then_the_arm_then_done(
@@ -236,7 +225,7 @@ def test_an_empty_pool_walks_discovery_then_the_arm_then_done(
 
 def test_pump_pivots_to_local_explore_on_discovery_failure(tmp_path: Path):
     stub = _stub(tmp_path, local_explore=True)
-    stub.shared_state.framework_agent_empty_discoveries = _phase_framework.DISCOVER_FAILURE_RETRY_LIMIT
+    stub.shared_state.framework_agent_empty_discoveries = framework_discovery.DISCOVER_FAILURE_RETRY_LIMIT
     asyncio.run(stub.phase_framework._pump_framework_agent_phase())
     # The phase did NOT give up; a local-exploration specialist was dispatched.
     assert stub.shared_state.framework_agent_phase_done is False
@@ -251,7 +240,7 @@ def test_the_arm_stops_once_its_rounds_run_the_source_lever_dry(tmp_path: Path):
 
     stub = _stub(tmp_path, local_explore=True)
     state = stub.shared_state
-    state.framework_agent_empty_discoveries = _phase_framework.DISCOVER_FAILURE_RETRY_LIMIT
+    state.framework_agent_empty_discoveries = framework_discovery.DISCOVER_FAILURE_RETRY_LIMIT
     state.attempts = [
         {"lever_kind": LEVER_SOURCE_PATCH, "outcome": "author_empty", "adopted": False, "cycle": state.macro_cycle}
     ] * _phase_state.DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK
@@ -265,7 +254,7 @@ def test_the_arm_stops_once_its_rounds_run_the_source_lever_dry(tmp_path: Path):
 def test_pump_falls_back_to_exit_when_arm_disabled(tmp_path: Path):
     """No candidates, no discovery to be had, arm off -> the source arm is dry."""
     stub = _stub(tmp_path, local_explore=False)
-    stub.shared_state.framework_agent_empty_discoveries = _phase_framework.DISCOVER_FAILURE_RETRY_LIMIT
+    stub.shared_state.framework_agent_empty_discoveries = framework_discovery.DISCOVER_FAILURE_RETRY_LIMIT
     asyncio.run(stub.phase_framework._pump_framework_agent_phase())
     assert stub.tasks.created == []
     assert stub.shared_state.framework_agent_phase_done is True
@@ -318,12 +307,22 @@ def test_dispatched_verdict_reaches_the_integrate_task():
     assert gap.kind == "missing_model_arch"
 
 
+def test_a_resource_constraint_verdict_acquires_no_code():
+    """An OOM is the host being too small, so the integrate task has no gap to acquire code for."""
+    from hyperloom.common.failure_signature import RESOURCE_CONSTRAINT, classify_failure
+    from hyperloom.orchestrator.actions.executors._enablement_config import _enablement_gap
+
+    signature = classify_failure("RuntimeError: Out of memory on GPU. Tried to allocate 80 GiB")
+    assert signature.kind == RESOURCE_CONSTRAINT
+    assert _enablement_gap({"enablement": True, "enablement_failure_signature": signature.to_dict()}) is None
+
+
 # --------------------------------------------------------------------------- # Stage-3 guard: local_explore gap is
 # registered and has a real canonical id --------------------------------------------------------------------------- #
 def test_local_explore_gap_canonical_id_is_not_literal_local_explore(tmp_path: Path):
     """The dispatched specialist must carry a per-candidate gap id."""
     stub = _stub(tmp_path, local_explore=True)
-    stub.shared_state.framework_agent_empty_discoveries = _phase_framework.DISCOVER_FAILURE_RETRY_LIMIT
+    stub.shared_state.framework_agent_empty_discoveries = framework_discovery.DISCOVER_FAILURE_RETRY_LIMIT
     asyncio.run(stub.phase_framework._pump_framework_agent_phase())
     assert len(stub.tasks.created) == 1
     params = stub.tasks.created[0]["params"]
@@ -366,7 +365,7 @@ def test_each_discovery_retry_takes_a_fresh_idempotency_key(tmp_path: Path):
     """Retries must not collide on one key, or the streak can never advance."""
     stub = _stub(tmp_path, local_explore=False)
     keys = []
-    for empties in range(_phase_framework.DISCOVER_FAILURE_RETRY_LIMIT):
+    for empties in range(framework_discovery.DISCOVER_FAILURE_RETRY_LIMIT):
         stub.shared_state.framework_agent_empty_discoveries = empties
         assert (
             asyncio.run(stub.phase_framework._maybe_enqueue_candidate_discovery(reason="candidate_pool_empty")) is True
@@ -378,7 +377,7 @@ def test_each_discovery_retry_takes_a_fresh_idempotency_key(tmp_path: Path):
     assert len(set(keys)) == len(keys)
 
     # Budget spent: the lane declines so the rungs below it are reachable.
-    stub.shared_state.framework_agent_empty_discoveries = _phase_framework.DISCOVER_FAILURE_RETRY_LIMIT
+    stub.shared_state.framework_agent_empty_discoveries = framework_discovery.DISCOVER_FAILURE_RETRY_LIMIT
     assert asyncio.run(stub.phase_framework._maybe_enqueue_candidate_discovery(reason="candidate_pool_empty")) is False
 
 
@@ -443,7 +442,7 @@ def test_a_lane_that_cannot_run_retires_on_its_own_budget(tmp_path: Path):
     task = SimpleNamespace(task_id="t1", params={"candidate_discovery": True})
     keys = []
 
-    for _ in range(_phase_framework.DISCOVER_FAILURE_RETRY_LIMIT):
+    for _ in range(framework_discovery.DISCOVER_FAILURE_RETRY_LIMIT):
         assert (
             asyncio.run(stub.phase_framework._maybe_enqueue_candidate_discovery(reason="candidate_pool_empty")) is True
         )
@@ -601,3 +600,34 @@ def test_only_a_settled_candidate_reaches_the_attempt_ledger(tmp_path: Path):
     assert len(kept) == 1
     assert kept[0]["adopted"] is True
     assert kept[0]["lever_kind"] == LEVER_UPSTREAM_PR
+
+
+def test_a_closed_research_lane_declines_discovery(tmp_path: Path):
+    """A research lane of capacity 0 can run no specialist, so a discovery task would queue forever."""
+    stub = _stub(tmp_path, local_explore=False)
+    stub.shared_state.research_lane_capacity = 0
+
+    assert asyncio.run(stub.phase_framework._maybe_enqueue_candidate_discovery(reason="candidate_pool_empty")) is False
+    assert stub.tasks.created == []
+
+
+def test_a_closed_research_lane_ends_the_phase_as_discovery_exhausted(tmp_path: Path):
+    """The phase closes on the spot instead of waiting on a discovery task that cannot start."""
+    stub = _stub(tmp_path, local_explore=False)
+    stub.shared_state.research_lane_capacity = 0
+
+    asyncio.run(stub.phase_framework._pump_framework_agent_phase())
+
+    assert stub.tasks.created == []
+    assert stub.shared_state.framework_agent_phase_done is True
+
+
+def test_a_closed_research_lane_dispatches_no_local_explore_specialist(tmp_path: Path):
+    """Local exploration also runs on the research lane, so it is skipped rather than queued forever."""
+    stub = _stub(tmp_path, local_explore=True)
+    stub.shared_state.research_lane_capacity = 0
+
+    asyncio.run(stub.phase_framework._pump_framework_agent_phase())
+
+    assert stub.tasks.created == []
+    assert stub.shared_state.framework_agent_phase_done is True

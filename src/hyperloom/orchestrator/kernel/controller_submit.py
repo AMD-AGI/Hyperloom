@@ -12,8 +12,11 @@ import sys
 from pathlib import Path
 from typing import Any, Callable
 
+from kernelforge.workflows.rewrite_controller import ControllerLayout, published_operator_dirs
+
 from hyperloom.common.llm_attribution import inject_env
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
+    RoundWatch,
     run_with_session_kill,
 )
 
@@ -69,21 +72,6 @@ def _read_json(path: Path) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def _published_patch_count(output_dir: Path) -> int:
-    root = Path(output_dir) / "result" / "patches"
-    if not root.is_dir():
-        return 0
-    return sum(
-        1
-        for entry in root.iterdir()
-        if not entry.name.startswith(".")
-        and entry.is_dir()
-        and (entry / "change.patch").is_file()
-        and (entry / "report.md").is_file()
-        and (entry / "publication.json").is_file()
-    )
-
-
 def read_controller_result(
     *,
     output_dir: Path,
@@ -92,10 +80,9 @@ def read_controller_result(
     stderr: str = "",
 ) -> dict[str, Any]:
     """Normalize durable Controller state after normal exit or hard timeout."""
-    output = Path(output_dir).resolve()
-    state_path = output / "controller" / "state.json"
-    result = _read_json(state_path)
-    patch_count = _published_patch_count(output)
+    layout = ControllerLayout(output_dir)
+    result = _read_json(layout.controller_state)
+    patch_count = len(published_operator_dirs(layout))
     status = str(result.get("status") or "").strip().lower()
     if status not in _TERMINAL_STATUSES:
         status = "partial" if patch_count else "failed"
@@ -104,12 +91,11 @@ def read_controller_result(
         "status": status,
         "returncode": int(returncode),
         "timed_out": bool(timed_out),
-        "killed_by_hyperloom": bool(timed_out),
         "patch_count": patch_count,
-        "output_dir": str(output),
-        "controller_state_path": str(state_path),
-        "summary_path": str(output / "result" / "summary.md"),
-        "patches_root": str(output / "result" / "patches"),
+        "output_dir": str(layout.output_dir),
+        "controller_state_path": str(layout.controller_state),
+        "summary_path": str(layout.summary_md),
+        "patches_root": str(layout.patches_root),
     }
     if stderr:
         normalized["stderr_tail"] = stderr[-2000:]
@@ -175,8 +161,7 @@ def run_controller_subprocess(
         completed = run_with_session_kill(
             command,
             env=_controller_environment(),
-            timeout=max(1, int(hard_timeout_sec)),
-            text=True,
+            watch=RoundWatch(timeout=max(1, int(hard_timeout_sec))),
             on_output=on_output,
         )
         returncode = int(completed.returncode)

@@ -26,7 +26,7 @@ from ..bus.resource_lock import (
     CLEANUP_CONFIRMED_KEY,
     CLEANUP_TREE_PGID_KEY,
     Lease,
-    ResourceLockManager,
+    SqliteLeaseBackend,
 )
 from ..policy.gate import PolicyDenied
 from ..state.task_registry import IllegalTransition, Task, TaskRegistry
@@ -36,16 +36,6 @@ if TYPE_CHECKING:
     from ..policy.gate import PolicyGate
 
 log = logging.getLogger(__name__)
-
-
-# Every ``tasks`` row is dispatched and awaited by the Coordinator's
-# orchestration loop, and the table carries no requester column, so a heartbeat
-# can only ever attest to this one agent. Widening that — letting any running
-# task vouch for whoever happens to be quiet — is what allowed a single busy
-# task to silence stall detection for the whole session.
-# Only work that becomes a row is covered here; inline kernel requests are kept
-# visible by a bus heartbeat around the handler instead.
-PROGRESS_OWNER_AGENT = "orchestration"
 
 
 @dataclass
@@ -114,12 +104,13 @@ class SubAgentResult:
 
 class ExecutionCleanupUnconfirmed(RuntimeError):
     """Physical cleanup did not acknowledge release of an execution's resources.
-    Recorded on the terminal row as a LEAD FOR AN OPERATOR, not as something a
-    reaper acts on. Nothing probes it: a served process is setsid'd by design,
-    so it leaves the group its spawn created, and three attempts to prove a lane
-    free from identities like this one were refuted in review. What it is still
-    good for is telling a human where to start looking when a lane is reported
-    held -- see :func:`~hyperloom.orchestrator.bus.resource_lock._report_unverifiable`,
+    Recorded on the terminal row as a LEAD FOR AN OPERATOR, and raised so the
+    caller can act on it; it is not expressed as retained admission capacity.
+    Nothing probes it: a served process is setsid'd by design, so it leaves the
+    group its spawn created, and three attempts to prove a lane free from
+    identities like this one were refuted in review. What it is still good for
+    is telling a human where to start looking when a process is suspected alive
+    -- see :func:`~hyperloom.orchestrator.bus.resource_lock._report_unverifiable`,
     which prints it with exactly that caveat.
 
     Attributes:
@@ -149,20 +140,6 @@ def _cancel_ambient_scope(reason: str) -> None:
         scope.cancel(reason=reason)
 
 
-@dataclass(frozen=True)
-class RunnerLinks:
-    """The live session objects a runner consults.
-
-    Attributes:
-        shared_state: Live session state forwarded to executors via ``ctx.extra``.
-        policy: Optional gate replayed at dispatch time for defense against
-            forged queued task rows.
-    """
-
-    shared_state: object | None = None
-    policy: PolicyGate | None = None
-
-
 class SubAgentRunner:
     """Routes ``delegate`` work to the matching ActionRunner, and releases its lease.
 
@@ -172,34 +149,29 @@ class SubAgentRunner:
 
     def __init__(
         self,
-        locks: ResourceLockManager,
+        locks: SqliteLeaseBackend,
         tasks: TaskRegistry,
         *,
-        executor_registry: dict[str, ExecutorFn] | None = None,
         session_dir: Path | None = None,
-        links: RunnerLinks = RunnerLinks(),
     ):
-        """Initialise the runner with its lock manager + task registry.
+        """Initialise the runner with its lease store + task registry.
 
         Args:
-            locks (ResourceLockManager): Lane lease manager used to gate
+            locks (SqliteLeaseBackend): Lane lease store used to gate
                 task execution.
             tasks (TaskRegistry): Registry the runner transitions task
                 state through.
-            executor_registry (dict[str, ExecutorFn] | None): Optional
-                initial map of ``task.kind`` to executor function (copied).
             session_dir (Path | None): Session root used to pre-create
                 per-action workspaces; None disables workspace pre-mkdir.
-            links (RunnerLinks): Live session state and the dispatch-time gate.
         """
         self.locks = locks
         self.tasks = tasks
-        self.executor_registry: dict[str, ExecutorFn] = dict(executor_registry or {})
+        self.executor_registry: dict[str, ExecutorFn] = {}
         self.session_dir = Path(session_dir) if session_dir else None
         # Live SharedState threaded into each executor's ctx.extra so gain-computing
         # executors can recover a baseline anchor when params['base_tput'] is absent.
-        self.shared_state = links.shared_state
-        self.policy = links.policy
+        self.shared_state: object | None = None
+        self.policy: PolicyGate | None = None
 
     def register_executor(self, kind: str, fn: ExecutorFn) -> None:
         """Register (or replace) the executor for a task kind.
@@ -331,7 +303,8 @@ class SubAgentRunner:
                 error_class="cancelled",
             )
             return outcome, {"reason": str(exc)}
-        except Exception as exc:  # noqa: BLE001 — surface to task.history
+        except Exception as exc:  # surface to task.history
+            log.warning("sub_agent_runner: task=%s (%s) failed: %s", task.task_id, task.kind, exc, exc_info=True)
             outcome = SubAgentResult(
                 task_id=task.task_id,
                 state="failed",
@@ -352,7 +325,12 @@ class SubAgentRunner:
         lease: Lease | None,
         release_resources: Callable[[], Awaitable[bool]] | None,
     ) -> None:
-        """Release what the execution held and record its terminal row."""
+        """Record the execution's terminal row and release what it held.
+
+        Every path that writes a terminal row gives the lanes back: the row is
+        the end of the task, so nothing is left to use them. Whether physical
+        cleanup confirmed is recorded on that row and raised to the caller.
+        """
         execution_error = sys.exc_info()[1]
         # Cancellation of an await does not establish that its worker stopped.
         if isinstance(execution_error, asyncio.CancelledError):
@@ -364,8 +342,6 @@ class SubAgentRunner:
             if cleanup_error is None:
                 try:
                     released = release_resources is None or await release_resources() is True
-                    if released and lease is not None:
-                        await self.locks.release(lease)
                 except BaseException as exc:
                     cleanup_error = exc
                     raise
@@ -375,11 +351,9 @@ class SubAgentRunner:
                 evidence.update({"outcome": asdict(outcome), CLEANUP_CONFIRMED_KEY: confirmed})
                 if not confirmed:
                     evidence["cleanup_error"] = repr(cleanup_error) if cleanup_error else "physical cleanup unconfirmed"
-                    # The lane this path deliberately retains is not taken back by
-                    # anything: no reaper inspects this number, because a served process
-                    # setsid's out of the group it names. It is recorded so the operator
-                    # who has to clear that lane by hand has somewhere to start -- as a
-                    # number, rather than left to be dug back out of the repr above.
+                    # The group whose teardown went unconfirmed, recorded for the
+                    # operator who has to look for it by hand -- as a number, rather
+                    # than left to be dug back out of the repr above.
                     if pgid := getattr(cleanup_error, "tree_pgid", None):
                         evidence[CLEANUP_TREE_PGID_KEY] = pgid
                 await self._write_terminal(
@@ -388,10 +362,18 @@ class SubAgentRunner:
                     evidence=evidence,
                     context=outcome.error_class or "executor_success",
                 )
+            # A terminal row has no transition left that could use these lanes, so
+            # the path that writes one gives them back -- after the row, so the
+            # admission they free is never ahead of the record. An unconfirmed
+            # cleanup is evidence on that row and the raise below, not held
+            # capacity. A row left running (no outcome) keeps its lanes unless
+            # cleanup confirmed, because it may still be executing.
+            if lease is not None and (outcome is not None or confirmed):
+                await self.locks.release(lease)
             # Hand an unconfirmed physical cleanup to the caller that can act on it.
             if isinstance(cleanup_error, asyncio.CancelledError):
                 _cancel_ambient_scope("execution_cleanup_cancelled")
-                log.warning("sub_agent_runner: task=%s cleanup cancelled; retaining unconfirmed capacity", task.task_id)
+                log.warning("sub_agent_runner: task=%s cleanup cancelled; capacity released unconfirmed", task.task_id)
             elif isinstance(cleanup_error, ExecutionCleanupUnconfirmed):
                 cleanup_error.result = outcome
             elif not confirmed:
@@ -409,9 +391,10 @@ class SubAgentRunner:
     ) -> SubAgentResult:
         """Claim the row, execute it, record the outcome.
 
-        Normal completion records a terminal state and releases resources.
-        A hard-cancelled await is not proof its worker ended, so that path keeps
-        the running row and ownership for explicit cleanup.
+        Recording a terminal state releases resources, whether or not physical
+        cleanup confirmed. A hard-cancelled await is not proof its worker ended
+        and writes no terminal row, so that path keeps the running row and
+        ownership for explicit cleanup.
 
         Args:
             task: The task to execute.
@@ -419,7 +402,9 @@ class SubAgentRunner:
                 released here. ``None`` only for a task that needs no lanes.
             extra_context: Optional extra values merged into the
                 :class:`RunnerContext`.
-            release_resources: Confirm worker cleanup before releasing lanes.
+            release_resources: Return the execution's other capacity and report
+                whether worker cleanup confirmed; its answer is evidence on the
+                terminal row, not a condition for releasing the lanes.
 
         Returns:
             The :class:`SubAgentResult` capturing terminal state and payload.
@@ -478,8 +463,7 @@ class SubAgentRunner:
         Composite actions call :func:`~...trace.task_progress.report_progress`
         as each internal unit lands, which reaches this sink and lands on the
         task row as a heartbeat instead of the row going dark for the whole
-        run. Each note is stamped with :data:`PROGRESS_OWNER_AGENT` so a
-        consumer can tell whose silence the heartbeat actually excuses.
+        run.
 
         Args:
             task_id (str): Task the returned sink reports for.
@@ -489,7 +473,6 @@ class SubAgentRunner:
         """
 
         async def sink(**note: Any) -> None:
-            note.setdefault("agent", PROGRESS_OWNER_AGENT)
             log.info("task_progress: task=%s %s", task_id, _format_progress(note))
             await self.tasks.record_progress(task_id, note)
 
@@ -514,7 +497,6 @@ def _format_progress(note: dict[str, Any]) -> str:
 
 
 __all__ = [
-    "PROGRESS_OWNER_AGENT",
     "RunnerContext",
     "ExecutorFn",
     "SubAgentResult",

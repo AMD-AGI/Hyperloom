@@ -150,8 +150,8 @@ def test_deployed_map_mlperf_cli(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "path", list(sys.path))
     monkeypatch.delitem(sys.modules, "agentx_mapping", raising=False)
     monkeypatch.setenv("AGENTIC_DATASET_PATH", "/data/agentic_combined_v6.jsonl")
-    deployed = deploy_agentx_assets(tmp_path / "benchmarks")
-    mapper = next(path for path in deployed if path.name == "map_mlperf.py")
+    deploy_agentx_assets(tmp_path / "benchmarks")
+    mapper = tmp_path / "benchmarks" / "map_mlperf.py"
     dst = tmp_path / "inferencex_result.json"
     from importlib.machinery import SourceFileLoader
 

@@ -8,10 +8,15 @@ import pytest
 from hyperloom.common.env import EnvValueError
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.perf_metric import (
+    GRADED_DURATION,
+    GRADED_ERROR_RATE,
     GRADED_INTVTY,
+    GRADED_REQUESTS_TOTAL,
     GRADED_TOTAL,
+    GRADED_UNSERVED_REQUESTS,
     INTVTY_V1,
     holds_within_band,
+    incomparability_reason,
     intvty_grading_enabled,
     intvty_of,
     intvty_serving_grading_enabled,
@@ -71,6 +76,14 @@ def test_agentx_active_uses_workload_identity_not_grading_override(monkeypatch, 
     monkeypatch.setenv("HYPERLOOM_AGENTX", env)
     monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
     assert agentx_active(benchmark_mode=mode) is expected
+
+
+def test_agentx_active_reads_the_bound_benchmark_config(monkeypatch, native_benchmark):
+    from hyperloom.common.perf_metric import agentx_active
+
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(native_benchmark))
+    assert agentx_active() is True
 
 
 def test_snapshot_carries_both_graded_axes():
@@ -402,3 +415,39 @@ def test_baseline_on_axis_is_none_when_the_axis_was_not_measured():
 
     assert baseline_on_axis(SimpleNamespace(baseline_tput=183.44, baseline_perf={}), GRADED_INTVTY_P50) is None
     assert baseline_on_axis(SimpleNamespace(baseline_tput=0.0, baseline_perf={}), GRADED_OUTPUT) is None
+
+
+# --- the extra-failed-requests guard ---
+
+_WINDOW = {GRADED_DURATION: 3600.0}
+# 1000 requests, 2 of them unserved and 18 short: the client counted 20 failed.
+_COUNTED = {**_WINDOW, GRADED_ERROR_RATE: 2.0, GRADED_UNSERVED_REQUESTS: 2.0, GRADED_REQUESTS_TOTAL: 1000.0}
+_UNCOUNTED = {**_WINDOW, GRADED_ERROR_RATE: 30.0}
+
+
+def test_the_guard_compares_unserved_rates_not_counts():
+    """A round that sent twice the requests may leave twice as many unserved at the same rate."""
+    candidate = {**_COUNTED, GRADED_UNSERVED_REQUESTS: 4.0, GRADED_REQUESTS_TOTAL: 2000.0}
+    assert incomparability_reason(candidate, _COUNTED) == ""
+    assert incomparability_reason({**candidate, GRADED_REQUESTS_TOTAL: 500.0}, _COUNTED) == "extra_failed_requests"
+
+
+def test_a_side_that_did_not_count_is_judged_on_every_failed_request():
+    """An uncounted side may have left all its failures unserved, so it is never read as having left none."""
+    assert incomparability_reason(_UNCOUNTED, _COUNTED) == "extra_failed_requests"
+    assert incomparability_reason(_COUNTED, _UNCOUNTED) == ""
+
+
+def test_a_pair_reporting_no_failures_at_all_is_not_comparable():
+    assert incomparability_reason(_WINDOW, _COUNTED) == "comparability_inputs_missing"
+    assert incomparability_reason(_COUNTED, _WINDOW) == "comparability_inputs_missing"
+
+
+def test_the_request_counts_survive_both_projections():
+    """The KEEP decision reads the snapshot, and the next anchor is the record ``graded_axes_of`` stamps."""
+    from hyperloom.common.perf_metric import graded_axes_of
+
+    source = {**_BASELINE, **_COUNTED, GRADED_UNSERVED_REQUESTS: 0.0}
+    for projected in (perf_snapshot_from_mapping(source), graded_axes_of(source)):
+        assert projected[GRADED_UNSERVED_REQUESTS] == 0.0
+        assert projected[GRADED_REQUESTS_TOTAL] == 1000.0

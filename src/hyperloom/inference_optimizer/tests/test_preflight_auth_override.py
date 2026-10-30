@@ -22,11 +22,14 @@ import pytest
 
 from hyperloom.common import claude_oneshot
 from hyperloom.common.env import EnvValueError
-from hyperloom.common.llm_config import deepseek_compat_env
+from hyperloom.common.llm_config import AGENT_BACKEND_CHOICES, deepseek_compat_env, resolve_forge_llm_model
 from hyperloom.common.llm_headers import parse_custom_headers
 from hyperloom.inference_optimizer import cli
 from hyperloom.inference_optimizer.cli import credentials as cli_credentials
+from hyperloom.inference_optimizer.cli import framework_probe as cli_framework_probe
+from hyperloom.inference_optimizer.cli import model_catalog
 from hyperloom.inference_optimizer.cli import preflight as cli_preflight
+from hyperloom.inference_optimizer.cli import preflight_env as cli_preflight_env
 from hyperloom.inference_optimizer.cli.parser import _build_parser
 
 
@@ -45,7 +48,7 @@ def stub_install_steps(monkeypatch, tmp_path):
     monkeypatch.setenv("INFERENCEX_PATH", str(inferencex_dir))
     monkeypatch.setattr(cli_preflight.inferencex_checkout, "clone", lambda dest: str(inferencex_dir))
 
-    def _fake_which(name: str):
+    def _fake_which(name: str, **_kwargs):
         return f"/usr/bin/{name}"
 
     monkeypatch.setattr(cli_preflight.shutil, "which", _fake_which)
@@ -118,7 +121,7 @@ _RUNTIME_PYTHON_KEYS = ("PYTHON", "VIRTUAL_ENV", "INFERENCE_OPTIMIZER_FORCE_PYTH
 def test_env_loaders_respect_explicit_mode_and_python_pins(monkeypatch, tmp_path, loader, shell_mode, file_mode, pin):
     marker = tmp_path / ".dockerenv"
     marker.touch()
-    monkeypatch.setattr(cli_preflight, "_CONTAINER_MARKER_FILES", (str(marker),))
+    monkeypatch.setattr(cli_framework_probe, "_CONTAINER_MARKER_FILES", (str(marker),))
     monkeypatch.setenv("REPO_ROOT", str(tmp_path))
     monkeypatch.delenv("HYPERLOOM_RUN_MODE", raising=False)
     if shell_mode is not None:
@@ -136,9 +139,9 @@ def test_env_loaders_respect_explicit_mode_and_python_pins(monkeypatch, tmp_path
     monkeypatch.setenv("KERNEL_AGENT_ENV", str(env_file))
 
     if loader == "dotenv":
-        cli_preflight._load_dotenv_fallback()
+        cli_preflight_env._load_dotenv_fallback()
     else:
-        cli_preflight._load_kernel_agent_env_fallback()
+        cli_preflight_env._load_kernel_agent_env_fallback()
 
     expected_mode = shell_mode or file_mode
     assert os.environ["HYPERLOOM_RUN_MODE"] == expected_mode
@@ -174,7 +177,7 @@ def test_runtime_loader_fills_missing_values_and_corrects_only_invalid_paths(mon
     monkeypatch.delenv("PYTHONPATH", raising=False)
     path_before = os.environ.get("PATH")
 
-    cli_preflight._load_kernel_agent_env_fallback()
+    cli_preflight_env._load_kernel_agent_env_fallback()
 
     assert os.environ["MAGPIE_PATH"] == "/installed/Magpie"
     assert os.environ["KERNEL_AGENT_LOG_LEVEL"] == "DEBUG"
@@ -195,9 +198,26 @@ def test_runtime_loader_rejects_a_missing_env_file(monkeypatch, tmp_path):
     monkeypatch.setenv("KERNEL_AGENT_ENV", str(tmp_path / "missing.env.sh"))
 
     with pytest.raises(SystemExit) as failure:
-        cli_preflight._load_kernel_agent_env_fallback()
+        cli_preflight_env._load_kernel_agent_env_fallback()
 
     assert failure.value.code == 2
+
+
+_BACKEND_MODEL_KEYS = {"claude": "CLAUDE_MODEL", "codex": "CODEX_MODEL", "deepseek": "DSH_MODEL"}
+
+
+@pytest.mark.parametrize("backend", AGENT_BACKEND_CHOICES)
+def test_dotenv_model_reaches_every_backend(monkeypatch, tmp_path, backend):
+    (tmp_path / ".env").write_text(
+        "".join(f"{key}=dotenv-{name}\n" for name, key in _BACKEND_MODEL_KEYS.items()), encoding="utf-8"
+    )
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    for key in _BACKEND_MODEL_KEYS.values():
+        monkeypatch.delenv(key, raising=False)
+
+    cli_preflight_env._load_dotenv_fallback()
+
+    assert resolve_forge_llm_model(backend) == f"dotenv-{backend}"
 
 
 @pytest.fixture
@@ -269,7 +289,7 @@ def test_runtime_multiline_headers_from_real_emitter_survive_loading(
     if operator_value is not None:
         monkeypatch.setenv(key, operator_value)
 
-    cli_preflight._load_kernel_agent_env_fallback()
+    cli_preflight_env._load_kernel_agent_env_fallback()
 
     expected = headers if operator_value is None else operator_value
     assert os.environ[key] == expected
@@ -293,9 +313,9 @@ def test_env_loaders_preserve_quoted_multiline_headers(monkeypatch, tmp_path, lo
     monkeypatch.delenv(key, raising=False)
 
     if loader == "dotenv":
-        cli_preflight._load_dotenv_fallback()
+        cli_preflight_env._load_dotenv_fallback()
     else:
-        cli_preflight._load_kernel_agent_env_fallback()
+        cli_preflight_env._load_kernel_agent_env_fallback()
 
     assert os.environ[key] == headers
     assert parse_custom_headers(os.environ[key]) == {
@@ -329,9 +349,9 @@ def test_env_loaders_decode_escaped_json_quotes_without_executing_substitutions(
 
     monkeypatch.setattr(cli_preflight.subprocess, "run", no_command)
     if loader == "dotenv":
-        cli_preflight._load_dotenv_fallback()
+        cli_preflight_env._load_dotenv_fallback()
     else:
-        cli_preflight._load_kernel_agent_env_fallback()
+        cli_preflight_env._load_kernel_agent_env_fallback()
 
     assert os.environ["ANTHROPIC_CUSTOM_HEADERS"] == headers
     assert parse_custom_headers(os.environ["ANTHROPIC_CUSTOM_HEADERS"])["Ocp-Apim-Subscription-Key"] == "test-value"
@@ -357,19 +377,19 @@ def test_env_loaders_reject_unclosed_quoted_values_without_partial_exports(monke
 
     with pytest.raises(ValueError, match="ANTHROPIC_CUSTOM_HEADERS"):
         if loader == "dotenv":
-            cli_preflight._load_dotenv_fallback()
+            cli_preflight_env._load_dotenv_fallback()
         else:
-            cli_preflight._load_kernel_agent_env_fallback()
+            cli_preflight_env._load_kernel_agent_env_fallback()
 
     assert "ANTHROPIC_CUSTOM_HEADERS" not in os.environ
     assert "HYPERLOOM_RUN_MODE" not in os.environ
 
 
 def test_parse_env_assignments_keeps_internal_but_not_external_whitespace():
-    assert cli_preflight._parse_env_assignments('OPENAI_CUSTOM_HEADERS="X-Name:  a  "  \n') == {
+    assert cli_preflight_env._parse_env_assignments('OPENAI_CUSTOM_HEADERS="X-Name:  a  "  \n') == {
         "OPENAI_CUSTOM_HEADERS": "X-Name:  a  "
     }
-    assert cli_preflight._parse_env_assignments("OPENAI_CUSTOM_HEADERS=X-Name:  a b\n") == {
+    assert cli_preflight_env._parse_env_assignments("OPENAI_CUSTOM_HEADERS=X-Name:  a b\n") == {
         "OPENAI_CUSTOM_HEADERS": "X-Name:  a b"
     }
 
@@ -378,7 +398,7 @@ def test_parse_env_assignments_preserves_first_assignment_and_single_quote_escap
     text = "export OPENAI_CUSTOM_HEADERS='X-Name: it'\\''s literal\\value'\n"
     text += "OPENAI_CUSTOM_HEADERS=duplicate\n"
 
-    assert cli_preflight._parse_env_assignments(text) == {"OPENAI_CUSTOM_HEADERS": "X-Name: it's literal\\value"}
+    assert cli_preflight_env._parse_env_assignments(text) == {"OPENAI_CUSTOM_HEADERS": "X-Name: it's literal\\value"}
 
 
 def test_dotenv_fallback_ignores_arbitrary_cwd_dotenv(tmp_path, monkeypatch):
@@ -389,7 +409,7 @@ def test_dotenv_fallback_ignores_arbitrary_cwd_dotenv(tmp_path, monkeypatch):
         "LD_PRELOAD=/tmp/evil.so\nOPENAI_BASE_URL=https://evil.example/v1\n",
         encoding="utf-8",
     )
-    cli_preflight._load_dotenv_fallback()
+    cli_preflight_env._load_dotenv_fallback()
     assert "LD_PRELOAD" not in os.environ
     assert os.environ.get("OPENAI_BASE_URL") != "https://evil.example/v1"
 
@@ -402,7 +422,7 @@ def test_dotenv_fallback_filters_explicit_repo_env(tmp_path, monkeypatch):
         "LD_PRELOAD=/tmp/evil.so\nPYTHONSTARTUP=/tmp/pwn.py\nOPENAI_BASE_URL=https://gateway.example/v1\n",
         encoding="utf-8",
     )
-    cli_preflight._load_dotenv_fallback()
+    cli_preflight_env._load_dotenv_fallback()
     assert "LD_PRELOAD" not in os.environ
     assert "PYTHONSTARTUP" not in os.environ
     assert os.environ["OPENAI_BASE_URL"] == "https://gateway.example/v1"
@@ -424,7 +444,7 @@ def test_dotenv_fallback_parses_safe_lines_and_preserves_env_wins(tmp_path, monk
         encoding="utf-8",
     )
 
-    cli_preflight._load_dotenv_fallback()
+    cli_preflight_env._load_dotenv_fallback()
 
     assert os.environ["HYPERLOOM_RUNTIME_DIR"] == "/runtime from env"
     assert os.environ["OPENAI_BASE_URL"] == "https://operator.example/v1"
@@ -446,7 +466,7 @@ def test_dotenv_fallback_loads_gateway_custom_headers(tmp_path, monkeypatch):
         encoding="utf-8",
     )
 
-    cli_preflight._load_dotenv_fallback()
+    cli_preflight_env._load_dotenv_fallback()
 
     assert os.environ["ANTHROPIC_CUSTOM_HEADERS"] == f"Ocp-Apim-Subscription-Key: ${{{anthropic_key_var}}}"
     assert os.environ["OPENAI_CUSTOM_HEADERS"] == "X-Tenant: acme"
@@ -924,8 +944,8 @@ def test_preflight_keeps_official_anthropic_endpoint_despite_leftover_deepseek_k
 def test_provider_fallback_keys_strip_retired_deepseek_vars_in_either_mode():
     """A stale .env must not hand a single-provider run the other side."""
     for key in ("DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL", "DEEPSEEK_MODEL"):
-        assert key in cli_preflight._PROVIDER_FALLBACK_KEYS, key
-        assert key in cli_preflight._ANTHROPIC_FALLBACK_KEYS, key
+        assert key in cli_preflight_env._PROVIDER_FALLBACK_KEYS, key
+        assert key in cli_preflight_env._ANTHROPIC_FALLBACK_KEYS, key
 
 
 def test_is_stale_proxy_url_matches_legacy_only():
@@ -1170,7 +1190,7 @@ def test_ensure_python_sdks_installs_missing_claude_agent_sdk(monkeypatch, capsy
 
 # _ensure_ray
 def test_ensure_ray_skips_when_smoke_passes(monkeypatch, capsys):
-    """Ray/click smoke passes -> no pip install fires (probe uses the interpreter)."""
+    """Ray smoke passes -> no pip install fires (probe uses the interpreter)."""
     runner = _RecordingRun([_Completed(returncode=0)])
     monkeypatch.setattr(cli_preflight.subprocess, "run", runner)
 
@@ -1179,17 +1199,15 @@ def test_ensure_ray_skips_when_smoke_passes(monkeypatch, capsys):
     assert len(runner.calls) == 1
     probe = runner.calls[0]
     # Probe validates Ray with the SAME interpreter, not shutil.which on PATH.
-    assert probe[0:2] == ["/opt/venv/bin/python", "-c"]
-    assert "ray.__version__" in probe[2]
-    assert "ray.scripts.scripts" in probe[2]
+    assert probe[0:2] == ["/opt/venv/bin/python", str(cli_preflight._RAY_SMOKE_SCRIPT)]
     assert "ray OK" in capsys.readouterr().out
 
 
 def test_ensure_ray_installs_when_smoke_fails(monkeypatch, capsys):
-    """When Ray/click smoke fails, pip install runs with the SAME interpreter."""
+    """When the Ray smoke fails, pip install runs with the SAME interpreter."""
     runner = _RecordingRun(
         [
-            _Completed(returncode=1, stderr="click version incompatible with Ray CLI: 8.4.2 >= 8.3.0"),
+            _Completed(returncode=1, stderr="ray start does not accept --resources"),
             _Completed(returncode=0),
             _Completed(returncode=0),
         ]
@@ -1204,9 +1222,11 @@ def test_ensure_ray_installs_when_smoke_fails(monkeypatch, capsys):
     assert install_call[1:4] == ["-m", "pip", "install"]
     assert "--break-system-packages" in install_call
     assert any(arg.startswith("ray[default]==") for arg in install_call)
-    assert "click<8.3.0" in install_call
+    # Only Ray is repaired: the CLI is certified by what it parses, so no click
+    # release is pinned or downgraded on the way.
+    assert not any("click" in arg for arg in install_call)
     captured = capsys.readouterr().out
-    assert "ray/click invalid" in captured
+    assert "ray unusable (ray start does not accept --resources)" in captured
     assert "ray installed OK" in captured
 
 
@@ -1323,11 +1343,11 @@ def test_validate_claude_model_rejects_unsupported_arg(monkeypatch, capsys):
         probe_calls.append(kwargs.get("base_url", ""))
         raise AssertionError("probe should not be reached on static-gate fail")
 
-    monkeypatch.setattr(cli, "_probe_llm_catalog", _no_probe)
+    monkeypatch.setattr(model_catalog, "_probe_llm_catalog", _no_probe)
 
     args = _make_args(claude_model="claude-opus-4-5")
     with pytest.raises(SystemExit) as exc_info:
-        cli._validate_and_resolve_claude_model(args, ("", ""))
+        model_catalog._validate_and_resolve_claude_model(args, ("", ""), claude_follows_codex=False)
     assert exc_info.value.code == 2
     assert probe_calls == []
     err = capsys.readouterr().err
@@ -1342,15 +1362,14 @@ def test_validate_claude_model_custom_allowed_when_optout_set(monkeypatch, capsy
     # Pin a probe URL so the stubbed catalog probe runs.
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://gw.example/v1")
     monkeypatch.setattr(
-        cli,
+        model_catalog,
         "_probe_llm_catalog",
         lambda **kw: {"my-org/custom-claude", "gpt-5.4"},
     )
     args = _make_args(claude_model="my-org/custom-claude")
-    catalog = cli._validate_and_resolve_claude_model(args, ("", ""))
+    model_catalog._validate_and_resolve_claude_model(args, ("", ""), claude_follows_codex=False)
 
     assert args.claude_model == "my-org/custom-claude"
-    assert "my-org/custom-claude" in catalog
     out = capsys.readouterr().out
     assert "confirmed in gateway catalog" in out
 
@@ -1360,13 +1379,13 @@ def test_validate_claude_model_custom_optout_no_amd_fallback(monkeypatch, capsys
     monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "1")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://gw.example/v1")
     monkeypatch.setattr(
-        cli,
+        model_catalog,
         "_probe_llm_catalog",
         lambda **kw: {"claude-opus-4-6", "gpt-5.4"},
     )
     args = _make_args(claude_model="my-org/custom-claude")
     with pytest.raises(SystemExit) as exc_info:
-        cli._validate_and_resolve_claude_model(args, ("", ""))
+        model_catalog._validate_and_resolve_claude_model(args, ("", ""), claude_follows_codex=False)
     assert exc_info.value.code == 2
     assert args.claude_model == "my-org/custom-claude"
     err = capsys.readouterr().err
@@ -1380,10 +1399,10 @@ def test_validate_claude_model_custom_optout_rejects_empty(monkeypatch, capsys):
     def _no_probe(**kwargs):
         raise AssertionError("probe should not run on empty-model abort")
 
-    monkeypatch.setattr(cli, "_probe_llm_catalog", _no_probe)
+    monkeypatch.setattr(model_catalog, "_probe_llm_catalog", _no_probe)
     args = _make_args(claude_model="")
     with pytest.raises(SystemExit) as exc_info:
-        cli._validate_and_resolve_claude_model(args, ("", ""))
+        model_catalog._validate_and_resolve_claude_model(args, ("", ""), claude_follows_codex=False)
     assert exc_info.value.code == 2
     assert "is empty" in capsys.readouterr().err
 
@@ -1393,15 +1412,14 @@ def test_validate_claude_model_custom_allowed_by_default(monkeypatch, capsys):
     monkeypatch.delenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", raising=False)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://gw.example/v1")
     monkeypatch.setattr(
-        cli,
+        model_catalog,
         "_probe_llm_catalog",
         lambda **kw: {"my-org/custom-claude", "gpt-5.4"},
     )
     args = _make_args(claude_model="my-org/custom-claude")
-    catalog = cli._validate_and_resolve_claude_model(args, ("", ""))
+    model_catalog._validate_and_resolve_claude_model(args, ("", ""), claude_follows_codex=False)
 
     assert args.claude_model == "my-org/custom-claude"
-    assert "my-org/custom-claude" in catalog
     assert "confirmed in gateway catalog" in capsys.readouterr().out
 
 
@@ -1410,15 +1428,14 @@ def test_validate_claude_model_deepseek_allowed_by_default(monkeypatch, capsys):
     monkeypatch.delenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", raising=False)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://api.deepseek.com/anthropic")
     monkeypatch.setattr(
-        cli,
+        model_catalog,
         "_probe_llm_catalog",
         lambda **kw: {"deepseek-v4-pro"},
     )
     args = _make_args(claude_model="deepseek-v4-pro")
-    catalog = cli._validate_and_resolve_claude_model(args, ("", ""))
+    model_catalog._validate_and_resolve_claude_model(args, ("", ""), claude_follows_codex=False)
 
     assert args.claude_model == "deepseek-v4-pro"
-    assert "deepseek-v4-pro" in catalog
     assert "confirmed in gateway catalog" in capsys.readouterr().out
 
 
@@ -1426,14 +1443,14 @@ def test_an_unreadable_custom_model_switch_is_not_read_as_permission(monkeypatch
     """A gate on which model orchestrates the run must not be opened by a token nobody can read."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "ture")
     with pytest.raises(EnvValueError, match="INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL"):
-        cli._custom_orch_model_allowed()
+        model_catalog._custom_orch_model_allowed()
 
 
 def test_a_blank_custom_model_switch_denies_like_every_other_blank_boolean(monkeypatch):
     """Blank is a false token in the module's vocabulary, so this variable reads it the way the other booleans do."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "  ")
 
-    assert cli._custom_orch_model_allowed() is False
+    assert model_catalog._custom_orch_model_allowed() is False
 
 
 def test_validate_claude_model_custom_explicitly_disabled_still_hard_gates(monkeypatch, capsys):
@@ -1443,10 +1460,10 @@ def test_validate_claude_model_custom_explicitly_disabled_still_hard_gates(monke
     def _no_probe(**kwargs):
         raise AssertionError("probe should not run on static-gate fail")
 
-    monkeypatch.setattr(cli, "_probe_llm_catalog", _no_probe)
+    monkeypatch.setattr(model_catalog, "_probe_llm_catalog", _no_probe)
     args = _make_args(claude_model="my-org/custom-claude")
     with pytest.raises(SystemExit) as exc_info:
-        cli._validate_and_resolve_claude_model(args, ("", ""))
+        model_catalog._validate_and_resolve_claude_model(args, ("", ""), claude_follows_codex=False)
     assert exc_info.value.code == 2
     err = capsys.readouterr().err
     assert "INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1" in err
@@ -1455,15 +1472,15 @@ def test_validate_claude_model_custom_explicitly_disabled_still_hard_gates(monke
 def test_validate_claude_model_opus_5_in_catalog_keeps_choice(monkeypatch, capsys):
     """The new default passes the gateway gate; the gateway spelling also resolves."""
     # The AMD gateway lists it as "Claude-Opus-5"; the probe folds that form.
-    assert cli._catalog_compare_model_id("Claude-Opus-5") == "claude-opus-5"
+    assert model_catalog._catalog_compare_model_id("Claude-Opus-5") == "claude-opus-5"
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://gw.example/v1")
     monkeypatch.setattr(
-        cli,
+        model_catalog,
         "_probe_llm_catalog",
         lambda **kw: {"claude-opus-5", "claude-opus-4-6", "gpt-5.4"},
     )
     args = _make_args(claude_model="claude-opus-5")
-    cli._validate_and_resolve_claude_model(args, ("", ""))
+    model_catalog._validate_and_resolve_claude_model(args, ("", ""), claude_follows_codex=False)
 
     assert args.claude_model == "claude-opus-5"
     assert "confirmed in gateway catalog" in capsys.readouterr().out
@@ -1472,15 +1489,15 @@ def test_validate_claude_model_opus_5_in_catalog_keeps_choice(monkeypatch, capsy
 def test_validate_claude_model_4_7_in_catalog_keeps_choice(monkeypatch, capsys):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://gw.example/v1")
     monkeypatch.setattr(
-        cli,
+        model_catalog,
         "_probe_llm_catalog",
         lambda **kw: {"claude-opus-4-7", "claude-opus-4-6", "gpt-5.4"},
     )
     args = _make_args(claude_model="claude-opus-4-7")
-    catalog = cli._validate_and_resolve_claude_model(args, ("", ""))
+    model_catalog._validate_and_resolve_claude_model(args, ("", ""), claude_follows_codex=False)
 
     assert args.claude_model == "claude-opus-4-7"
-    assert "claude-opus-4-7" in catalog
+    assert "confirmed in gateway catalog" in capsys.readouterr().out
 
 
 def test_validate_claude_model_probes_anthropic_url_in_dual_entry(monkeypatch):
@@ -1498,9 +1515,9 @@ def test_validate_claude_model_probes_anthropic_url_in_dual_entry(monkeypatch):
         seen["api_key"] = kw.get("api_key", "")
         return {"claude-opus-4-7", "gpt-5.4"}
 
-    monkeypatch.setattr(cli, "_probe_llm_catalog", _capture)
+    monkeypatch.setattr(model_catalog, "_probe_llm_catalog", _capture)
     args = _make_args(claude_model="claude-opus-4-7")
-    cli._validate_and_resolve_claude_model(args, ("", ""))
+    model_catalog._validate_and_resolve_claude_model(args, ("", ""), claude_follows_codex=False)
 
     assert seen["base_url"] == "https://api.anthropic.com"
     assert seen["api_key"] == "anthropic-user-token"
@@ -1522,9 +1539,9 @@ def test_validate_claude_model_falls_back_to_openai_url_single_gateway(monkeypat
         seen["api_key"] = kw.get("api_key", "")
         return {"claude-opus-4-7", "gpt-5.4"}
 
-    monkeypatch.setattr(cli, "_probe_llm_catalog", _capture)
+    monkeypatch.setattr(model_catalog, "_probe_llm_catalog", _capture)
     args = _make_args(claude_model="claude-opus-4-7")
-    cli._validate_and_resolve_claude_model(args, ("", ""))
+    model_catalog._validate_and_resolve_claude_model(args, ("", ""), claude_follows_codex=False)
 
     assert seen["base_url"] == "https://gateway.example/v1"
     assert seen["api_key"] == "gateway-key"
@@ -1547,11 +1564,10 @@ def test_validate_claude_model_skips_probe_for_oauth_only(monkeypatch, capsys):
     def _no_probe(**kw):
         raise AssertionError("catalog probe should not run without a bearer credential")
 
-    monkeypatch.setattr(cli, "_probe_llm_catalog", _no_probe)
+    monkeypatch.setattr(model_catalog, "_probe_llm_catalog", _no_probe)
     args = _make_args(claude_model="claude-opus-5")
-    result = cli._validate_and_resolve_claude_model(args, ("", ""))
+    model_catalog._validate_and_resolve_claude_model(args, ("", ""), claude_follows_codex=False)
 
-    assert result is None
     assert args.claude_model == "claude-opus-5"
     out = capsys.readouterr().out
     assert "catalog probe skipped: oauth-only credential" in out
@@ -1600,11 +1616,11 @@ def test_provider_only_mode_reads_a_subscription_token_as_anthropic_only(monkeyp
     """Without this the token yields no provider-only mode, so a stale OpenAI side from the kernel-agent env file is never suppressed."""
     _oauth_only_env(monkeypatch, base_url="")
 
-    assert cli_preflight._provider_only_mode() == "anthropic"
+    assert cli_preflight_env._provider_only_mode() == "anthropic"
     # Nothing else in this shell carries the verdict: drop the token and the mode collapses, which is what the
     # pre-registry code returned all along.
     monkeypatch.delenv("_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN")))
-    assert cli_preflight._provider_only_mode() == ""
+    assert cli_preflight_env._provider_only_mode() == ""
 
 
 def test_claude_config_json_is_left_alone_in_subscription_mode(monkeypatch, tmp_path, capsys):
@@ -1647,9 +1663,9 @@ def test_validate_claude_model_still_probes_when_oauth_accompanies_an_api_key(mo
         seen["api_key"] = kw.get("api_key", "")
         return {"claude-opus-5"}
 
-    monkeypatch.setattr(cli, "_probe_llm_catalog", _capture)
+    monkeypatch.setattr(model_catalog, "_probe_llm_catalog", _capture)
     args = _make_args(claude_model="claude-opus-5")
-    cli._validate_and_resolve_claude_model(args, ("", ""))
+    model_catalog._validate_and_resolve_claude_model(args, ("", ""), claude_follows_codex=False)
 
     assert seen["api_key"] == "anthropic-user-token"
 
@@ -1669,16 +1685,15 @@ def test_validate_claude_model_split_entry_no_models_route_proceeds(monkeypatch,
         url = kw.get("base_url", "")
         probed.append(url)
         if "anthropic" in url or "deepseek" in url:
-            return cli._CATALOG_NO_MODELS_ENDPOINT
+            return model_catalog._CATALOG_NO_MODELS_ENDPOINT
         return {"gpt-5.4"}
 
-    monkeypatch.setattr(cli, "_probe_llm_catalog", _probe)
+    monkeypatch.setattr(model_catalog, "_probe_llm_catalog", _probe)
     args = _make_args(claude_model="claude-opus-4-7")
-    result = cli._validate_and_resolve_claude_model(args, ("", ""))
+    model_catalog._validate_and_resolve_claude_model(args, ("", ""), claude_follows_codex=False)
 
     # Only the Anthropic side is probed.
     assert probed == ["https://api.deepseek.com/anthropic"]
-    assert result is None
     assert args.claude_model == "claude-opus-4-7"
     assert "no /models route" in capsys.readouterr().out.lower()
 
@@ -1693,10 +1708,10 @@ def test_validate_claude_model_split_entry_auth_error_refuses(monkeypatch):
     monkeypatch.setenv("_".join(("OPENAI", "API", "KEY")), "openai-user-token")
 
     # None models a 401/403/network/5xx failure, not "no route".
-    monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: None)
+    monkeypatch.setattr(model_catalog, "_probe_llm_catalog", lambda **kw: None)
     args = _make_args(claude_model="claude-opus-4-7")
     with pytest.raises(SystemExit) as exc:
-        cli._validate_and_resolve_claude_model(args, ("", ""))
+        model_catalog._validate_and_resolve_claude_model(args, ("", ""), claude_follows_codex=False)
     assert exc.value.code == 2
 
 
@@ -1714,16 +1729,15 @@ def test_catalog_probe_retries_the_other_side_only_when_a_route_is_missing(monke
     def _probe(*, base_url, api_key):
         probed.append(base_url)
         if base_url.endswith("/anthropic"):
-            return cli._CATALOG_NO_MODELS_ENDPOINT
+            return model_catalog._CATALOG_NO_MODELS_ENDPOINT
         return {"deepseek-v4-pro", "deepseek-v4-flash"}
 
-    monkeypatch.setattr(cli, "_probe_llm_catalog", _probe)
+    monkeypatch.setattr(model_catalog, "_probe_llm_catalog", _probe)
     args = _make_args(claude_model="deepseek-v4-pro")
 
-    catalog = cli._validate_and_resolve_claude_model(args, ("", ""))
+    model_catalog._validate_and_resolve_claude_model(args, ("", ""), claude_follows_codex=False)
 
     assert probed == ["https://api.deepseek.com/anthropic", "https://api.deepseek.com/v1"]
-    assert catalog == {"deepseek-v4-pro", "deepseek-v4-flash"}
     assert args.claude_model == "deepseek-v4-pro"
     # Confirmed against a real catalog rather than waved through with a warning.
     out = capsys.readouterr().out.lower()
@@ -1748,10 +1762,10 @@ def test_catalog_probe_does_not_retry_the_other_side_when_a_gateway_is_flaky(mon
             return None
         return {"gpt-5.6-sol"}
 
-    monkeypatch.setattr(cli, "_probe_llm_catalog", _probe)
+    monkeypatch.setattr(model_catalog, "_probe_llm_catalog", _probe)
     args = _make_args(claude_model="claude-opus-5")
 
-    assert cli._validate_and_resolve_claude_model(args, ("", "")) is None
+    model_catalog._validate_and_resolve_claude_model(args, ("", ""), claude_follows_codex=False)
     assert probed == ["https://llm.amd.example/Anthropic"]
     assert args.claude_model == "claude-opus-5"
     assert "cannot verify" in capsys.readouterr().out.lower()
@@ -1763,12 +1777,11 @@ def test_validate_claude_model_custom_model_warns_when_catalog_unreachable(monke
     monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "1")
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-    monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: None)
+    monkeypatch.setattr(model_catalog, "_probe_llm_catalog", lambda **kw: None)
 
     args = _make_args(claude_model="my-org/custom-claude")
-    result = cli._validate_and_resolve_claude_model(args, ("", ""))
+    model_catalog._validate_and_resolve_claude_model(args, ("", ""), claude_follows_codex=False)
 
-    assert result is None
     assert args.claude_model == "my-org/custom-claude"
     out = capsys.readouterr().out
     assert "WARNING" in out
@@ -1779,12 +1792,12 @@ def test_validate_claude_model_4_7_missing_falls_back_to_4_6(monkeypatch, capsys
     """Catalog has 4-6 only → arg rewritten with a WARN."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://gw.example/v1")
     monkeypatch.setattr(
-        cli,
+        model_catalog,
         "_probe_llm_catalog",
         lambda **kw: {"claude-opus-4-6", "claude-opus-4-5", "gpt-5.4"},
     )
     args = _make_args(claude_model="claude-opus-4-7")
-    cli._validate_and_resolve_claude_model(args, ("", ""))
+    model_catalog._validate_and_resolve_claude_model(args, ("", ""), claude_follows_codex=False)
 
     assert args.claude_model == "claude-opus-4-6"
     out = capsys.readouterr().out
@@ -1797,12 +1810,12 @@ def test_validate_claude_model_opus_5_missing_falls_back_to_next_rung(monkeypatc
     """A gateway that predates opus-5 must land on 4-8, not skip to the last rung."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://gw.example/v1")
     monkeypatch.setattr(
-        cli,
+        model_catalog,
         "_probe_llm_catalog",
         lambda **kw: {"claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "gpt-5.4"},
     )
     args = _make_args(claude_model="claude-opus-5")
-    cli._validate_and_resolve_claude_model(args, ("", ""))
+    model_catalog._validate_and_resolve_claude_model(args, ("", ""), claude_follows_codex=False)
 
     assert args.claude_model == "claude-opus-4-8"
     out = capsys.readouterr().out
@@ -1814,12 +1827,12 @@ def test_validate_claude_model_fallback_walks_the_allowlist_order(monkeypatch, c
     """The ladder skips rungs the gateway lacks and stops at the first it serves."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://gw.example/v1")
     monkeypatch.setattr(
-        cli,
+        model_catalog,
         "_probe_llm_catalog",
         lambda **kw: {"claude-opus-4-7", "claude-opus-4-6", "gpt-5.4"},
     )
     args = _make_args(claude_model="claude-opus-5")
-    cli._validate_and_resolve_claude_model(args, ("", ""))
+    model_catalog._validate_and_resolve_claude_model(args, ("", ""), claude_follows_codex=False)
 
     assert args.claude_model == "claude-opus-4-7"
 
@@ -1828,14 +1841,14 @@ def test_validate_claude_model_neither_in_catalog_aborts(monkeypatch, capsys):
     """Catalog missing all allowed Claude models -> sys.exit(2)."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://gw.example/v1")
     monkeypatch.setattr(
-        cli,
+        model_catalog,
         "_probe_llm_catalog",
         lambda **kw: {"claude-opus-4-5", "claude-haiku-4-5-20251001", "gpt-5.4"},
     )
     args = _make_args(claude_model="claude-opus-4-7")
 
     with pytest.raises(SystemExit) as exc_info:
-        cli._validate_and_resolve_claude_model(args, ("", ""))
+        model_catalog._validate_and_resolve_claude_model(args, ("", ""), claude_follows_codex=False)
     assert exc_info.value.code == 2
     err = capsys.readouterr().err
     assert "claude-opus-5" in err
@@ -1848,11 +1861,11 @@ def test_validate_claude_model_neither_in_catalog_aborts(monkeypatch, capsys):
 def test_validate_claude_model_aborts_when_catalog_unreachable(monkeypatch, capsys):
     """With custom models explicitly disabled, catalog probe returned None → sys.exit(2)."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "0")
-    monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: None)
+    monkeypatch.setattr(model_catalog, "_probe_llm_catalog", lambda **kw: None)
     args = _make_args(claude_model="claude-opus-4-7")
 
     with pytest.raises(SystemExit) as exc_info:
-        cli._validate_and_resolve_claude_model(args, ("", ""))
+        model_catalog._validate_and_resolve_claude_model(args, ("", ""), claude_follows_codex=False)
     assert exc_info.value.code == 2
     err = capsys.readouterr().err
     assert "gateway catalog unreachable" in err
@@ -1890,13 +1903,13 @@ def test_probe_llm_catalog_retries_on_transient_error_then_succeeds(monkeypatch)
     )
     monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
 
-    ids = cli._probe_llm_catalog(
+    ids = model_catalog._probe_llm_catalog(
         base_url="https://gateway/v1",
         api_key="test-token",
     )
     assert ids == {"claude-opus-4-7"}
     assert attempt[0] == 3
-    assert sleeps[:2] == list(cli._CATALOG_RETRY_DELAYS_SEC[:2])
+    assert sleeps[:2] == list(model_catalog._CATALOG_RETRY_DELAYS_SEC[:2])
 
 
 def test_probe_llm_catalog_passes_anthropic_custom_headers(monkeypatch):
@@ -1913,7 +1926,7 @@ def test_probe_llm_catalog_passes_anthropic_custom_headers(monkeypatch):
     fake_httpx = type("FakeHttpx", (), {"get": staticmethod(_get)})
     monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
 
-    ids = cli._probe_llm_catalog(
+    ids = model_catalog._probe_llm_catalog(
         base_url="https://llm.example.invalid/anthropic",
         api_key="dummy",
     )
@@ -1938,7 +1951,7 @@ def test_probe_llm_catalog_uses_openai_custom_headers_for_openai_side(monkeypatc
     fake_httpx = type("FakeHttpx", (), {"get": staticmethod(_get)})
     monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
 
-    ids = cli._probe_llm_catalog(base_url="https://llm.example.invalid/Unified/v1", api_key="dummy")
+    ids = model_catalog._probe_llm_catalog(base_url="https://llm.example.invalid/Unified/v1", api_key="dummy")
     assert ids == {"gpt-5.4"}
     assert seen["headers"]["Ocp-Apim-Subscription-Key"] == "openai-key"
 
@@ -1953,7 +1966,7 @@ def test_probe_llm_catalog_normalizes_claude_catalog_ids(monkeypatch):
     fake_httpx = type("FakeHttpx", (), {"get": staticmethod(_get)})
     monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
 
-    ids = cli._probe_llm_catalog(base_url="https://llm.example.invalid/anthropic", api_key="dummy")
+    ids = model_catalog._probe_llm_catalog(base_url="https://llm.example.invalid/anthropic", api_key="dummy")
 
     assert "Claude-Opus-4.6" in ids
     assert "claude-opus-4-6" in ids
@@ -1969,20 +1982,20 @@ def test_probe_llm_catalog_returns_none_when_all_attempts_fail(monkeypatch, caps
     fake_httpx = type("FakeHttpx", (), {"get": staticmethod(_always_500)})
     monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
 
-    ids = cli._probe_llm_catalog(
+    ids = model_catalog._probe_llm_catalog(
         base_url="https://gateway/v1",
         api_key="test-token",
     )
     assert ids is None
     out = capsys.readouterr().out
-    expected_attempts = 1 + len(cli._CATALOG_RETRY_DELAYS_SEC)
+    expected_attempts = 1 + len(model_catalog._CATALOG_RETRY_DELAYS_SEC)
     assert out.count("catalog probe attempt") == expected_attempts
     assert "exhausted" in out
 
 
 def test_probe_llm_catalog_returns_none_for_empty_base_url(monkeypatch):
     monkeypatch.setattr("time.sleep", lambda s: None)
-    assert cli._probe_llm_catalog(base_url="", api_key="test-token") is None
+    assert model_catalog._probe_llm_catalog(base_url="", api_key="test-token") is None
 
 
 def test_probe_llm_catalog_returns_sentinel_on_404_without_retry(monkeypatch):
@@ -1997,8 +2010,8 @@ def test_probe_llm_catalog_returns_sentinel_on_404_without_retry(monkeypatch):
     fake_httpx = type("FakeHttpx", (), {"get": staticmethod(_get_404)})
     monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
 
-    result = cli._probe_llm_catalog(base_url="https://api.deepseek.com/anthropic", api_key="test-token")
-    assert result is cli._CATALOG_NO_MODELS_ENDPOINT
+    result = model_catalog._probe_llm_catalog(base_url="https://api.deepseek.com/anthropic", api_key="test-token")
+    assert result is model_catalog._CATALOG_NO_MODELS_ENDPOINT
     assert attempt[0] == 1
 
 
@@ -2012,14 +2025,14 @@ def test_probe_llm_catalog_returns_none_on_401(monkeypatch):
     fake_httpx = type("FakeHttpx", (), {"get": staticmethod(_get_401)})
     monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
 
-    result = cli._probe_llm_catalog(base_url="https://gateway/v1", api_key="bad-key")
+    result = model_catalog._probe_llm_catalog(base_url="https://gateway/v1", api_key="bad-key")
     assert result is None
 
 
 def test_smoke_test_codex_model_warns_when_missing(monkeypatch, capsys):
     args = _make_args(codex_model="gpt-99.9", critic_mock=False)
-    monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: {"claude-opus-4-7", "gpt-5.4", "gpt-4.1"})
-    cli._smoke_test_codex_model(args, ("https://anthropic", "https://openai/v1"))
+    monkeypatch.setattr(model_catalog, "_probe_llm_catalog", lambda **kw: {"claude-opus-4-7", "gpt-5.4", "gpt-4.1"})
+    model_catalog._smoke_test_codex_model(args, ("https://anthropic", "https://openai/v1"))
     out = capsys.readouterr().out
     assert "WARNING" in out
 
@@ -2034,16 +2047,16 @@ def test_smoke_test_codex_model_probes_openai_side(monkeypatch, capsys):
         seen["base_url"] = kw.get("base_url", "")
         return {"gpt-5.4"}
 
-    monkeypatch.setattr(cli, "_probe_llm_catalog", _capture)
+    monkeypatch.setattr(model_catalog, "_probe_llm_catalog", _capture)
     args = _make_args(codex_model="gpt-5.4", critic_mock=False)
-    cli._smoke_test_codex_model(args, ("https://api.anthropic.com", "https://api.openai.com/v1"))
+    model_catalog._smoke_test_codex_model(args, ("https://api.anthropic.com", "https://api.openai.com/v1"))
     assert seen["base_url"] == "https://api.openai.com/v1"
 
 
 def test_smoke_test_codex_model_confirms_when_present(monkeypatch, capsys):
-    monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: {"claude-opus-4-7", "gpt-5.4"})
+    monkeypatch.setattr(model_catalog, "_probe_llm_catalog", lambda **kw: {"claude-opus-4-7", "gpt-5.4"})
     args = _make_args(codex_model="gpt-5.4", critic_mock=False)
-    cli._smoke_test_codex_model(args, ("https://anthropic", "https://openai/v1"))
+    model_catalog._smoke_test_codex_model(args, ("https://anthropic", "https://openai/v1"))
     out = capsys.readouterr().out
     assert "confirmed in gateway catalog" in out
     assert "WARNING" not in out
@@ -2051,9 +2064,9 @@ def test_smoke_test_codex_model_confirms_when_present(monkeypatch, capsys):
 
 def test_smoke_test_codex_model_falls_back_to_next_rung(monkeypatch, capsys):
     """A gateway that predates the default Codex model degrades at preflight."""
-    monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: {"gpt-5.5", "gpt-5.4"})
+    monkeypatch.setattr(model_catalog, "_probe_llm_catalog", lambda **kw: {"gpt-5.5", "gpt-5.4"})
     args = _make_args(codex_model="gpt-5.6-sol", critic_mock=False)
-    cli._smoke_test_codex_model(args, ("https://anthropic", "https://openai/v1"))
+    model_catalog._smoke_test_codex_model(args, ("https://anthropic", "https://openai/v1"))
 
     assert args.codex_model == "gpt-5.5"
     out = capsys.readouterr().out
@@ -2062,26 +2075,26 @@ def test_smoke_test_codex_model_falls_back_to_next_rung(monkeypatch, capsys):
 
 
 def test_smoke_test_codex_model_falls_back_from_the_default_to_the_previous_default(monkeypatch, capsys):
-    monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: {"gpt-5.6-sol", "gpt-5.5"})
+    monkeypatch.setattr(model_catalog, "_probe_llm_catalog", lambda **kw: {"gpt-5.6-sol", "gpt-5.5"})
     args = _make_args(codex_model="gpt-6-astra", critic_mock=False)
-    cli._smoke_test_codex_model(args, ("https://anthropic", "https://openai/v1"))
+    model_catalog._smoke_test_codex_model(args, ("https://anthropic", "https://openai/v1"))
 
     assert args.codex_model == "gpt-5.6-sol"
 
 
 def test_smoke_test_codex_model_ladder_skips_missing_rungs(monkeypatch, capsys):
-    monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: {"gpt-5.4", "gpt-4.1"})
+    monkeypatch.setattr(model_catalog, "_probe_llm_catalog", lambda **kw: {"gpt-5.4", "gpt-4.1"})
     args = _make_args(codex_model="gpt-5.6-sol", critic_mock=False)
-    cli._smoke_test_codex_model(args, ("https://anthropic", "https://openai/v1"))
+    model_catalog._smoke_test_codex_model(args, ("https://anthropic", "https://openai/v1"))
 
     assert args.codex_model == "gpt-5.4"
 
 
 def test_smoke_test_codex_model_leaves_custom_ids_alone(monkeypatch, capsys):
     """An operator-chosen id outside the ladder is reported, never rewritten."""
-    monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: {"gpt-5.5", "gpt-5.4"})
+    monkeypatch.setattr(model_catalog, "_probe_llm_catalog", lambda **kw: {"gpt-5.5", "gpt-5.4"})
     args = _make_args(codex_model="my-org/custom-gpt", critic_mock=False)
-    cli._smoke_test_codex_model(args, ("https://anthropic", "https://openai/v1"))
+    model_catalog._smoke_test_codex_model(args, ("https://anthropic", "https://openai/v1"))
 
     assert args.codex_model == "my-org/custom-gpt"
     out = capsys.readouterr().out
@@ -2104,11 +2117,11 @@ def test_openai_only_deploy_walks_the_codex_ladder_before_deriving_claude(monkey
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://gw.example/v1")
     # A gateway that has not picked up the new default yet.
-    monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: {"gpt-5.5", "gpt-5.4"})
+    monkeypatch.setattr(model_catalog, "_probe_llm_catalog", lambda **kw: {"gpt-5.5", "gpt-5.4"})
 
-    assert cli._claude_model_should_follow_codex() is True
+    assert cli.llm_config.is_openai_only() is True
     args = _make_args(codex_model="gpt-5.6-sol", critic_mock=True)
-    cli._resolve_models_for_run(args, ("", ""))
+    model_catalog._resolve_models_for_run(args, ("", ""), claude_follows_codex=True, codex_follows_claude=False)
 
     assert args.codex_model == "gpt-5.5"
     assert args.claude_model == "gpt-5.5"
@@ -2127,10 +2140,10 @@ def test_openai_only_ladder_runs_even_with_a_mock_critic(monkeypatch, capsys):
     ):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://gw.example/v1")
-    monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: {"gpt-5.4"})
+    monkeypatch.setattr(model_catalog, "_probe_llm_catalog", lambda **kw: {"gpt-5.4"})
 
     args = _make_args(codex_model="gpt-5.6-sol", critic_mock=True)
-    cli._resolve_models_for_run(args, ("", ""))
+    model_catalog._resolve_models_for_run(args, ("", ""), claude_follows_codex=True, codex_follows_claude=False)
 
     assert args.codex_model == "gpt-5.4"
     assert args.claude_model == "gpt-5.4"
@@ -2138,9 +2151,9 @@ def test_openai_only_ladder_runs_even_with_a_mock_critic(monkeypatch, capsys):
 
 def test_smoke_test_codex_model_warns_on_probe_failure(monkeypatch, capsys):
     """OpenAI-side catalog unreachable → WARN-only (does not block startup)."""
-    monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: None)
+    monkeypatch.setattr(model_catalog, "_probe_llm_catalog", lambda **kw: None)
     args = _make_args(codex_model="gpt-5.4", critic_mock=False)
-    cli._smoke_test_codex_model(args, ("https://anthropic", "https://openai/v1"))
+    model_catalog._smoke_test_codex_model(args, ("https://anthropic", "https://openai/v1"))
     out = capsys.readouterr().out
     assert "WARNING" in out
     assert "unreachable" in out
@@ -2170,10 +2183,10 @@ def _record_critic_probes(monkeypatch, *, fail: bool = False) -> list[tuple[str,
 def test_critic_reviews_with_the_orchestration_model_by_default(monkeypatch, capsys):
     """A launch that sets CODEX_MODEL still reviews with the Claude-side model orchestration runs on."""
     sent = _record_critic_probes(monkeypatch)
-    monkeypatch.setattr(cli, "critic_on_codex_side", lambda **kw: False)
+    monkeypatch.setattr(model_catalog, "critic_on_codex_side", lambda **kw: False)
     args = _make_args(claude_model="glm-5-3", codex_model="gpt-5.4", critic_mock=False, critic_protocol="auto")
 
-    cli._probe_critic_review_model(args, codex_follows_claude=False)
+    model_catalog._probe_critic_review_model(args, codex_follows_claude=False)
 
     assert sent == [("anthropic", "glm-5-3")]
     assert "critic model 'glm-5-3' answered" in capsys.readouterr().out
@@ -2181,38 +2194,38 @@ def test_critic_reviews_with_the_orchestration_model_by_default(monkeypatch, cap
 
 def test_critic_follows_an_orchestration_that_runs_on_codex(monkeypatch):
     sent = _record_critic_probes(monkeypatch)
-    monkeypatch.setattr(cli, "critic_on_codex_side", lambda **kw: True)
+    monkeypatch.setattr(model_catalog, "critic_on_codex_side", lambda **kw: True)
     args = _make_args(claude_model="gpt-5.5", codex_model="gpt-5.5", critic_mock=False, critic_protocol="auto")
 
-    cli._probe_critic_review_model(args, codex_follows_claude=False)
+    model_catalog._probe_critic_review_model(args, codex_follows_claude=False)
 
     assert sent == [("openai", "gpt-5.5")]
 
 
 def test_an_explicit_critic_protocol_reviews_with_that_sides_model(monkeypatch):
     sent = _record_critic_probes(monkeypatch)
-    monkeypatch.setattr(cli, "critic_on_codex_side", lambda **kw: False)
+    monkeypatch.setattr(model_catalog, "critic_on_codex_side", lambda **kw: False)
     monkeypatch.setenv("OPENAI_BASE_URL", "https://gw.example/v1")
     monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
     args = _make_args(claude_model="glm-5-3", codex_model="gpt-5.6-sol", critic_mock=False, critic_protocol="openai")
 
-    cli._probe_critic_review_model(args, codex_follows_claude=False)
+    model_catalog._probe_critic_review_model(args, codex_follows_claude=False)
 
     assert sent == [("openai", "gpt-5.6-sol")]
 
 
 def test_a_critic_model_that_cannot_answer_stops_the_launch_without_a_fallback(monkeypatch, capsys):
     sent = _record_critic_probes(monkeypatch, fail=True)
-    monkeypatch.setattr(cli, "critic_on_codex_side", lambda **kw: False)
+    monkeypatch.setattr(model_catalog, "critic_on_codex_side", lambda **kw: False)
     args = _make_args(claude_model="glm-5-3", codex_model="gpt-5.4", critic_mock=False, critic_protocol="auto")
 
     with pytest.raises(SystemExit) as exc_info:
-        cli._probe_critic_review_model(args, codex_follows_claude=False)
+        model_catalog._probe_critic_review_model(args, codex_follows_claude=False)
 
     assert exc_info.value.code == 2
     # Transient errors get the catalog retries, but every attempt asks the one configured model.
     assert set(sent) == {("anthropic", "glm-5-3")}
-    assert len(sent) == 1 + len(cli._CATALOG_RETRY_DELAYS_SEC)
+    assert len(sent) == 1 + len(model_catalog._CATALOG_RETRY_DELAYS_SEC)
     assert args.claude_model == "glm-5-3"
     assert args.codex_model == "gpt-5.4"
     err = capsys.readouterr().err
@@ -2224,7 +2237,7 @@ def test_a_mock_critic_sends_no_probe(monkeypatch):
     sent = _record_critic_probes(monkeypatch)
     args = _make_args(critic_mock=True, critic_protocol="auto")
 
-    cli._probe_critic_review_model(args, codex_follows_claude=False)
+    model_catalog._probe_critic_review_model(args, codex_follows_claude=False)
 
     assert sent == []
 
@@ -2241,7 +2254,7 @@ def test_parser_anthropic_only_empty_codex_model_uses_claude_model(monkeypatch):
 
     assert args.claude_model == "claude-opus-4-6"
     assert args.codex_model == "claude-opus-4-6"
-    assert cli._codex_model_should_follow_claude() is True
+    assert cli.llm_config.is_anthropic_only() is True
 
 
 def test_parser_dual_protocol_gateway_empty_codex_model_uses_gateway_model(monkeypatch):
@@ -2265,7 +2278,7 @@ def test_parser_dual_protocol_gateway_empty_codex_model_uses_gateway_model(monke
     assert args.claude_model == "deepseek-v4-pro"
     assert args.codex_model == "deepseek-v4-pro"
     # Both protocol sides now resolve, so Codex no longer has to follow Claude.
-    assert cli._codex_model_should_follow_claude() is False
+    assert cli.llm_config.is_anthropic_only() is False
 
 
 def test_parser_retired_deepseek_key_only_defaults_to_gateway_model(monkeypatch):
@@ -2323,7 +2336,7 @@ def test_parser_standard_dual_protocol_config_defaults_to_gateway_model(monkeypa
 )
 def test_same_gateway_recognizes_one_host_serving_both_protocols(anthropic_url, openai_url, expected):
     """The catalog probe may retry the OpenAI side only within one gateway."""
-    assert cli._same_gateway(anthropic_url, openai_url) is expected
+    assert model_catalog._same_gateway(anthropic_url, openai_url) is expected
 
 
 def test_parser_anthropic_only_generated_codex_default_uses_claude_model(monkeypatch):
@@ -2362,14 +2375,14 @@ def test_preflight_does_not_clear_cached_anthropic_only_codex_follow(
         ]
     )
 
-    codex_follows_before = cli._codex_model_should_follow_claude()
+    codex_follows_before = cli.llm_config.is_anthropic_only()
     resolved = cli._preflight(argparse.Namespace())
     if codex_follows_before:
         args.codex_model = args.claude_model
 
     # The OpenAI/Codex side stays unset, so Codex follows the Claude model.
     assert resolved == ("https://llm.example.invalid/anthropic", "")
-    assert cli._codex_model_should_follow_claude() is True
+    assert cli.llm_config.is_anthropic_only() is True
     assert args.codex_model == "claude-sonnet-5"
 
 
@@ -2387,7 +2400,7 @@ def test_parser_openai_only_empty_claude_model_uses_codex_model(monkeypatch):
 
     assert args.claude_model == "GPT-5.4"
     assert args.codex_model == "GPT-5.4"
-    assert cli._claude_model_should_follow_codex() is True
+    assert cli.llm_config.is_openai_only() is True
 
 
 def test_validate_claude_model_openai_only_accepts_codex_model(monkeypatch):
@@ -2407,10 +2420,12 @@ def test_validate_claude_model_openai_only_accepts_codex_model(monkeypatch):
         seen["api_key"] = kw.get("api_key", "")
         return {"GPT-5.4"}
 
-    monkeypatch.setattr(cli, "_probe_llm_catalog", _capture)
+    monkeypatch.setattr(model_catalog, "_probe_llm_catalog", _capture)
     args = _build_parser().parse_args(["optimize", "--model", "/m", "--framework", "vllm"])
-    cli._validate_and_resolve_claude_model(
-        args, ("https://llm.example.invalid/Unified", "https://llm.example.invalid/Unified/v1")
+    model_catalog._validate_and_resolve_claude_model(
+        args,
+        ("https://llm.example.invalid/Unified", "https://llm.example.invalid/Unified/v1"),
+        claude_follows_codex=True,
     )
 
     assert seen == {"base_url": "https://llm.example.invalid/Unified/v1", "api_key": "openai-token"}
@@ -2768,8 +2783,8 @@ def test_model_preflight_runs_off_the_event_loop_so_a_subscription_token_can_ans
         raise PreflightDone
 
     monkeypatch.setattr(cli, "clean_stale_aiter_locks", lambda: {"dir": ""})
-    monkeypatch.setattr(cli, "_claude_model_should_follow_codex", lambda: False)
-    monkeypatch.setattr(cli, "_codex_model_should_follow_claude", lambda: False)
+    monkeypatch.setattr(cli.llm_config, "is_openai_only", lambda: False)
+    monkeypatch.setattr(cli.llm_config, "is_anthropic_only", lambda: False)
     monkeypatch.setattr(cli, "_preflight", Mock(return_value={}))
     monkeypatch.setattr(cli, "_resolve_models_for_run", _resolve)
     args = cli._build_parser().parse_args(["optimize", "--model", "/models/m"])

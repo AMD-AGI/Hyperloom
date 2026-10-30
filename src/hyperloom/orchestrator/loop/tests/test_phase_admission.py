@@ -14,7 +14,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.orchestrator.policy.gate import PolicyDenied
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -26,7 +25,7 @@ def _dispatcher(phase: str, *, baseline_tput: float = 800.0) -> DispatcherCollab
     state.phase = phase
     state.baseline_tput = baseline_tput
     no_tasks = SimpleNamespace(queued_context_sync=list, running_context_sync=list)
-    return DispatcherCollaborator(SimpleNamespace(shared_state=state, action_registry=ACTION_CATALOGUE, tasks=no_tasks))
+    return DispatcherCollaborator(SimpleNamespace(shared_state=state, tasks=no_tasks))
 
 
 def test_a_baseline_proposed_in_the_optimisation_phase_is_refused():
@@ -44,6 +43,8 @@ def test_a_baseline_proposed_in_the_optimisation_phase_is_refused():
         ("PRELUDE", "explore"),
         ("PRELUDE", "specialist"),
         ("ENABLEMENT", "explore"),
+        ("ENABLEMENT", "specialist"),
+        ("ENABLEMENT", "integrate_patch"),
         ("FRAMEWORK_AGENT", "target_analysis"),
         ("FRAMEWORK_AGENT", "report"),
         ("KERNEL_AGENT", "explore"),
@@ -70,8 +71,6 @@ def test_a_phase_that_proposes_nothing_says_so():
         ("FRAMEWORK_AGENT", "explore"),
         ("FRAMEWORK_AGENT", "integrate_patch"),
         ("FRAMEWORK_AGENT", "specialist"),
-        ("ENABLEMENT", "specialist"),
-        ("ENABLEMENT", "integrate_patch"),
         ("ENABLEMENT", "target_analysis"),
         ("KERNEL_AGENT", "integrate"),
         ("CLOSE", "report"),
@@ -91,7 +90,7 @@ def test_enablement_keeps_its_baseline_for_the_coordinator():
     denied = _dispatcher("ENABLEMENT").admission_denial_for_action("baseline")
 
     assert denied is not None and denied.rule == "phase_incompatible"
-    assert denied.hint == "ENABLEMENT proposes: integrate_patch, specialist, target_analysis"
+    assert denied.hint == "ENABLEMENT proposes: target_analysis"
 
 
 @pytest.mark.parametrize("action", ["baseline", "explore", "specialist"])

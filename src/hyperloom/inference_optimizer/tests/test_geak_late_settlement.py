@@ -17,7 +17,7 @@ from hyperloom.inference_optimizer.tests.test_geak_promotion_retention import (
     promotion as promotion,
 )
 from hyperloom.orchestrator.phases.geak_rebench import geak_candidate_is_adjudicated
-from hyperloom.orchestrator.phases.kernel import GeakRunnerFacts
+from hyperloom.orchestrator.phases.kernel_geak_promotion import GeakRunnerFacts
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 

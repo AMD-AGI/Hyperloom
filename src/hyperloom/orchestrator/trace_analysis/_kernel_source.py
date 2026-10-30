@@ -5,20 +5,17 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Source resolution shared by the compute and bypass analysis paths.
+"""Source resolution for the analysis routes.
 
-TraceLens owns path-finding: :func:`resolve_source_verdict` is the one call both
+TraceLens owns path-finding: :func:`resolve_source_verdict` is the one call the
 routes make, wrapping TraceLens' ``resolve_kernel_source`` and returning its
 ``ResolveResult`` straight through. TraceLens also owns the native-vs-Triton
 routing decision; HL just forwards the symbol and its launcher and lets
 TraceLens classify.
 
 TraceLens' ``kernel_source`` is an independent path-identifier (source path
-mapping only, not TraceLens' analysis layer). Both routes resolve source through
-it, bypass included, so importing this module imports TraceLens: an importable
-TraceLens is a hard requirement here. The bypass analysis layer is otherwise
-TraceLens-free (it reads raw Kineto and builds its own rows) and leans on
-TraceLens solely for this source path mapping.
+mapping only, not TraceLens' analysis layer). Importing this module imports
+TraceLens: an importable TraceLens is a hard requirement here.
 """
 
 from __future__ import annotations

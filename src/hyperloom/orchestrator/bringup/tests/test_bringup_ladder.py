@@ -19,6 +19,12 @@ from hyperloom.common.bringup import (
 )
 from hyperloom.orchestrator.bringup import ladder, trees
 
+
+def _trees(*roots: str) -> tuple[trees.TreeIdentity, ...]:
+    """Pinned trees rooted at ``roots``."""
+    return tuple(trees.TreeIdentity(tree_id=trees.path_slug(root), root=root) for root in roots)
+
+
 # --- digest stability ------------------------------------------------------
 
 
@@ -38,7 +44,7 @@ def _observe(*, root: str, pid: int, stamp: str, line: int) -> BootObservation:
     return ladder.classify(
         ladder.BootStreams(_crash_log(root=root, pid=pid, stamp=stamp, line=line)),
         server_elapsed_sec=float(pid % 7),
-        trees=[root],
+        trees=_trees(root),
     )
 
 
@@ -60,7 +66,7 @@ def test_failure_digest_separates_different_failures() -> None:
             "KeyError: 'model.layers.0.mlp.down_proj.weight'\n"
         ),
         server_elapsed_sec=1.0,
-        trees=["/sgl-workspace/vllm"],
+        trees=_trees("/sgl-workspace/vllm"),
     )
     assert failure_digest(base) != failure_digest(other)
 
@@ -73,7 +79,7 @@ def test_unmatched_failure_still_digests() -> None:
             "ZeroDivisionError: division by zero\n"
         ),
         server_elapsed_sec=2.0,
-        trees=["/sgl-workspace/vllm"],
+        trees=_trees("/sgl-workspace/vllm"),
     )
     assert observation.matched_marker == ""
     assert observation.stage_failed is not None
@@ -97,10 +103,12 @@ def _engine_core_crash(root_error: str) -> str:
 
 
 def test_a_child_process_root_error_keys_the_failure_not_the_parent_reraise() -> None:
-    from hyperloom.orchestrator.bringup.observe import round_advanced
+    from hyperloom.orchestrator.bringup.observe import round_advanced, round_outcome_unchanged
 
     before, after = (
-        ladder.classify(ladder.BootStreams(_engine_core_crash(error)), server_elapsed_sec=1.0, trees=["/opt/vllm"])
+        ladder.classify(
+            ladder.BootStreams(_engine_core_crash(error)), server_elapsed_sec=1.0, trees=_trees("/opt/vllm")
+        )
         for error in ("RuntimeError: cancelled", "AttributeError: 'MambaSpec' object has no attribute 'x'")
     )
 
@@ -109,6 +117,26 @@ def test_a_child_process_root_error_keys_the_failure_not_the_parent_reraise() ->
     )
     assert failure_digest(before) != failure_digest(after)
     assert round_advanced(before, after)
+    assert not round_outcome_unchanged(before, after)
+
+
+def test_only_two_observed_boots_at_one_wall_read_as_unchanged() -> None:
+    """The one outcome that shows a patch moved the boot nowhere.
+
+    A half that was never observed is not that outcome: without the boot before
+    it, nothing says where this one would have stopped unpatched.
+    """
+    from hyperloom.orchestrator.bringup.observe import round_outcome_unchanged
+
+    crash = _engine_core_crash("AttributeError: 'MambaSpec' object has no attribute 'x'")
+    before, after = (
+        ladder.classify(ladder.BootStreams(crash), server_elapsed_sec=elapsed, trees=_trees("/opt/vllm"))
+        for elapsed in (1.0, 2.0)
+    )
+
+    assert round_outcome_unchanged(before, after)
+    assert not round_outcome_unchanged(None, after)
+    assert not round_outcome_unchanged(before, None)
 
 
 def test_a_traceback_logged_below_error_does_not_key_the_failure() -> None:
@@ -121,7 +149,7 @@ def test_a_traceback_logged_below_error_does_not_key_the_failure() -> None:
     )
     before, after = (
         ladder.classify(
-            ladder.BootStreams(warmup + _engine_core_crash(error)), server_elapsed_sec=1.0, trees=["/opt/vllm"]
+            ladder.BootStreams(warmup + _engine_core_crash(error)), server_elapsed_sec=1.0, trees=_trees("/opt/vllm")
         )
         for error in (
             "AttributeError: 'MambaSpec' object has no attribute 'x'",
@@ -141,7 +169,7 @@ def test_the_digest_keys_on_the_failure_line_not_the_log_printed_before_it() -> 
         crash = _engine_core_crash(error)
         head, tail = crash.split("\n", 1)
         return ladder.classify(
-            ladder.BootStreams(f"{head}\n{interleaved}{tail}"), server_elapsed_sec=1.0, trees=["/opt/vllm"]
+            ladder.BootStreams(f"{head}\n{interleaved}{tail}"), server_elapsed_sec=1.0, trees=_trees("/opt/vllm")
         )
 
     quiet = boot("")
@@ -163,7 +191,7 @@ def test_a_traceback_whose_header_was_cut_off_still_keys_the_failure() -> None:
             "RuntimeError: Engine core initialization failed.\n"
         ),
         server_elapsed_sec=1.0,
-        trees=["/opt/vllm"],
+        trees=_trees("/opt/vllm"),
     )
     assert observation.terminal_frame is not None
     assert observation.terminal_frame.file_rel == "model_executor/layers/mla.py"
@@ -299,7 +327,6 @@ def test_clean_boot_has_no_failed_stage() -> None:
     )
     assert observation.stage_failed is None
     assert observation.stage_reached is LadderStage.HTTP_READY
-    assert observation.booted
 
 
 def test_observation_round_trips_through_json_types() -> None:
@@ -364,7 +391,6 @@ def test_resolve_trees_marks_a_git_checkout(tmp_path: Path) -> None:
     resolved = trees.resolve_trees([str(checkout)])
 
     assert len(resolved) == 1
-    assert resolved[0].vcs == trees.VCS_GIT
     assert Path(resolved[0].root) == checkout.resolve()
     assert resolved[0].tree_id.startswith("vllm-")
 
@@ -378,9 +404,7 @@ def test_resolve_trees_does_not_borrow_an_enclosing_repo(tmp_path: Path) -> None
     resolved = trees.resolve_trees([str(package)])
 
     assert len(resolved) == 1
-    assert resolved[0].vcs == trees.VCS_NONE
     assert Path(resolved[0].root) == package
-    assert resolved[0].package_dirs == (str(package),)
 
 
 def test_resolve_trees_skips_absent_roots_and_groups_by_root(tmp_path: Path) -> None:
@@ -390,7 +414,7 @@ def test_resolve_trees_skips_absent_roots_and_groups_by_root(tmp_path: Path) -> 
     resolved = trees.resolve_trees([str(package), str(package) + "/", str(tmp_path / "absent")])
 
     assert len(resolved) == 1
-    assert resolved[0].package_dirs == (str(package),)
+    assert resolved[0].root == str(package)
 
 
 def test_trees_round_trip_through_the_session_artifact(tmp_path: Path) -> None:
@@ -405,10 +429,4 @@ def test_trees_round_trip_through_the_session_artifact(tmp_path: Path) -> None:
 
 
 def test_tree_roots_orders_longest_first(tmp_path: Path) -> None:
-    identity = trees.TreeIdentity(
-        tree_id="t",
-        root="/a",
-        package_dirs=("/a/pkg/deeper", "/a/pkg"),
-        vcs=trees.VCS_NONE,
-    )
-    assert trees.tree_roots([identity]) == ("/a/pkg/deeper", "/a/pkg", "/a")
+    assert trees.tree_roots(_trees("/a", "/a/pkg/deeper", "/a/pkg/", "/a/pkg")) == ("/a/pkg/deeper", "/a/pkg", "/a")

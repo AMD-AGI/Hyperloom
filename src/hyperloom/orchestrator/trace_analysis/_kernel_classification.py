@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import functools
+import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -28,11 +29,8 @@ try:
 except ImportError:
     _triton_def_line = None  # type: ignore[assignment]
 
-try:
-    import aiter.jit.core as _aiter_jit_core  # type: ignore[import-untyped]
-except ImportError:
-    _aiter_jit_core = None
 
+_log = logging.getLogger(__name__)
 
 RUNTIME_API_NAMES = {
     "hipeventsynchronize",
@@ -252,18 +250,26 @@ def _framework_source_roots() -> tuple[str, ...]:
 
 
 @functools.lru_cache(maxsize=1)
+@functools.lru_cache(maxsize=1)
 def _aiter_csrc_root() -> str:
     """Resolve aiter's own device-source root from the installed package.
 
-    Cached once per process.
+    aiter is imported here, not at module import: ``aiter.jit.core`` probes the GPU architecture with ``rocminfo`` when
+    it is imported and raises ``RuntimeError`` on a host with no GPU, such as a hosted run's app container, which imports
+    this module only to build the toolbox. Cached once per process.
 
     Returns:
-        The aiter csrc root (e.g. ``.../aiter_meta/csrc/``), or ``""`` when
-        aiter is not importable.
+        The aiter csrc root (e.g. ``.../aiter_meta/csrc/``), or ``""`` when aiter is not importable or cannot start
+        on this host (logged once).
     """
-    if _aiter_jit_core is None:
+    try:
+        import aiter.jit.core as aiter_jit_core  # type: ignore[import-untyped]
+    except ImportError:
         return ""
-    raw = (getattr(_aiter_jit_core, "AITER_CSRC_DIR", "") or "").replace(os.sep, "/")
+    except RuntimeError as exc:
+        _log.warning("aiter cannot start on this host, so its source root is unknown: %s", exc)
+        return ""
+    raw = (getattr(aiter_jit_core, "AITER_CSRC_DIR", "") or "").replace(os.sep, "/")
     return (raw.rstrip("/") + "/") if raw else ""
 
 
@@ -409,19 +415,9 @@ def classify_patchability(candidate: dict[str, Any]) -> tuple[bool, str]:
     source_file = str(candidate.get("source_file") or "")
     name = str(candidate.get("name") or "")
     lower_name = name.lower()
-    # TraceLens' resolver verdict is ground truth: a patchable entry skips the heuristics below, and a non-patchable
-    # one (Tensile, MIOpen, inductor-Triton, a Composable Kernel template) reports its kind as the reason.
-    if candidate.get("source_resolution_method") in _RESOLVER_VERDICT_METHODS:
-        patchable = candidate.get("op_to_source_patchable")
-        if patchable is True and source_file:
-            return True, ""
-        if patchable is False:
-            reason = (
-                str(candidate.get("op_to_source_reason") or "").strip()
-                or str(candidate.get("kernel_kind") or "").strip()
-                or "non-rewritable"
-            )
-            return False, f"source: {reason}"
+    verdict = _resolver_verdict(candidate, source_file)
+    if verdict is not None:
+        return verdict
     # A vendor operator with a validated KernelForge task bundle is tuned through launch knobs, never rewritten,
     # so it passes before the source-file and vendor-binary rejections below.
     if match_vendor_operator_playbook(candidate) is not None:
@@ -435,8 +431,6 @@ def classify_patchability(candidate: dict[str, Any]) -> tuple[bool, str]:
         return False, "source file not resolved"
     if candidate.get("source_type") == "vendor_binary":
         return False, "vendor binary (no rewritable source)"
-    if candidate.get("vendor_dispatch_wrapper"):
-        return False, f"vendor dispatch wrapper at {source_file}"
     if is_torch_dispatch_shim_source(source_file):
         return False, (f"torch dispatch shim (no rewritable kernel body): {source_file}")
     for marker in _NON_PATCHABLE_NAME_MARKERS:
@@ -455,6 +449,32 @@ def classify_patchability(candidate: dict[str, Any]) -> tuple[bool, str]:
         )
     if is_runtime_generated_kernel(name, source_file):
         return False, (f"runtime-generated (torch.compile / Inductor cache): {source_file}")
+    return _source_location_verdict(source_file, candidate.get("source_type"))
+
+
+def _resolver_verdict(candidate: dict[str, Any], source_file: str) -> tuple[bool, str] | None:
+    """Return TraceLens' resolver verdict as ``(reusable, skip_reason)``, or ``None`` when it carries none.
+
+    The verdict is ground truth: a patchable entry skips the heuristics, and a non-patchable one (Tensile, MIOpen,
+    inductor-Triton, a Composable Kernel template) reports its kind as the reason.
+    """
+    if candidate.get("source_resolution_method") not in _RESOLVER_VERDICT_METHODS:
+        return None
+    patchable = candidate.get("op_to_source_patchable")
+    if patchable is True and source_file:
+        return True, ""
+    if patchable is False:
+        reason = (
+            str(candidate.get("op_to_source_reason") or "").strip()
+            or str(candidate.get("kernel_kind") or "").strip()
+            or "non-rewritable"
+        )
+        return False, f"source: {reason}"
+    return None
+
+
+def _source_location_verdict(source_file: str, source_type: Any) -> tuple[bool, str]:
+    """Gate a resolved, non-vendor source on its framework root, file kind and ``source_type``."""
     lower_file = source_file.lower()
     if not any(root in lower_file for root in _reusable_roots()):
         return False, (f"source not under a reusable framework root: {source_file}")
@@ -467,7 +487,6 @@ def classify_patchability(candidate: dict[str, Any]) -> tuple[bool, str]:
     # JIT-compiles each op and forge edits it in place.
     if "/aiter/" in lower_file and lower_file.endswith((".cu", ".cuh", ".hip")):
         return True, ""
-    source_type = candidate.get("source_type")
     if source_type not in {"hip_cpp", "triton", "python", "flydsl"}:
         return False, (f"source_type={source_type!r} not in {{hip_cpp, triton, python, flydsl}}")
     return True, ""

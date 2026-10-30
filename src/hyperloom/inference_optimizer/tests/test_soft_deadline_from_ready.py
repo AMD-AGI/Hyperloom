@@ -12,10 +12,10 @@ import pytest
 
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     DETOKENIZER_STALL_RETURNCODE,
+    RoundWatch,
     clear_server_ready_stamp,
     post_ready_runtime_sec,
     run_with_session_kill,
-    server_ready_unix,
 )
 
 
@@ -35,9 +35,7 @@ def test_from_ready_excludes_pre_ready_phase(tmp_path):
     start = time.monotonic()
     cp = run_with_session_kill(
         [sys.executable, "-c", script, str(log_path)],
-        timeout=30,
-        silence_timeout_sec=2.0,
-        server_log_path=str(log_path),
+        watch=RoundWatch(timeout=30, server_log_path=str(log_path), silence_timeout_sec=2.0),
     )
     elapsed = time.monotonic() - start
     # Post-ready (~1s) < 2.0s deadline -> not killed despite ~4s wall-clock.
@@ -59,9 +57,7 @@ def test_from_ready_fires_after_ready(tmp_path):
     start = time.monotonic()
     cp = run_with_session_kill(
         [sys.executable, "-c", script, str(log_path)],
-        timeout=60,
-        silence_timeout_sec=1.0,
-        server_log_path=str(log_path),
+        watch=RoundWatch(timeout=60, server_log_path=str(log_path), silence_timeout_sec=1.0),
     )
     elapsed = time.monotonic() - start
     assert cp.returncode == DETOKENIZER_STALL_RETURNCODE
@@ -72,8 +68,7 @@ def test_from_ready_fires_after_ready(tmp_path):
 def test_scriptable_silence_is_disarmed():
     cp = run_with_session_kill(
         [sys.executable, "-c", "import time; time.sleep(.3)"],
-        timeout=5,
-        silence_timeout_sec=0.1,
+        watch=RoundWatch(timeout=5, silence_timeout_sec=0.1),
     )
     assert cp.returncode == 0
 
@@ -96,8 +91,7 @@ class TestARoundIsPricedByItsTwoParts:
         started_unix = time.time()
         cp = run_with_session_kill(
             [sys.executable, "-c", script, str(log_path)],
-            timeout=30,
-            server_log_path=str(log_path),
+            watch=RoundWatch(timeout=30, server_log_path=str(log_path)),
         )
         runtime_sec = time.time() - started_unix
         assert cp.returncode == 0
@@ -132,8 +126,7 @@ class TestARoundIsPricedByItsTwoParts:
         started_unix = time.time()
         cp = run_with_session_kill(
             [sys.executable, "-c", script, str(log_path)],
-            timeout=30,
-            server_log_path=str(log_path),
+            watch=RoundWatch(timeout=30, server_log_path=str(log_path)),
         )
         runtime_sec = time.time() - started_unix
         assert cp.returncode == 0
@@ -163,12 +156,10 @@ class TestARoundIsPricedByItsTwoParts:
         )
         cp = run_with_session_kill(
             [sys.executable, "-c", script, str(log_path)],
-            timeout=30,
-            server_log_path=str(log_path),
-            session_deadline_sec=time.monotonic() + 30.0,
+            watch=RoundWatch(timeout=30, server_log_path=str(log_path), session_deadline_sec=time.monotonic() + 30.0),
         )
         assert cp.returncode == 0
-        assert server_ready_unix(str(log_path)) is not None, (
+        assert post_ready_runtime_sec(str(log_path), started_unix=0.0, runtime_sec=1.0) is not None, (
             "the boot/benchmark split was withdrawn along with the stall watchdog"
         )
 
@@ -187,8 +178,7 @@ class TestARoundIsPricedByItsTwoParts:
         started_unix = time.time()
         cp = run_with_session_kill(
             [sys.executable, "-c", script, str(log_path)],
-            timeout=30,
-            server_log_path=str(log_path),
+            watch=RoundWatch(timeout=30, server_log_path=str(log_path)),
         )
         runtime_sec = time.time() - started_unix
         assert cp.returncode == 0
@@ -220,10 +210,9 @@ class TestARoundIsPricedByItsTwoParts:
         started_unix = time.time()
         run_with_session_kill(
             [sys.executable, "-c", script, str(log_path)],
-            timeout=30,
-            server_log_path=str(log_path),
+            watch=RoundWatch(timeout=30, server_log_path=str(log_path)),
         )
-        assert server_ready_unix(str(log_path)) is None
+        assert post_ready_runtime_sec(str(log_path), started_unix=0.0, runtime_sec=1.0) is None
         assert (
             post_ready_runtime_sec(
                 str(log_path),
@@ -254,12 +243,12 @@ class TestARoundIsPricedByItsTwoParts:
         log_path = tmp_path / "server.log"
         stamp = tmp_path / "server_ready_at"
         stamp.write_text(f"{time.time():.3f} 30.000\n", encoding="utf-8")
-        assert server_ready_unix(str(log_path)) is not None
+        assert post_ready_runtime_sec(str(log_path), started_unix=0.0, runtime_sec=1.0) is not None
 
         clear_server_ready_stamp(str(log_path))
 
         assert not stamp.exists()
-        assert server_ready_unix(str(log_path)) is None
+        assert post_ready_runtime_sec(str(log_path), started_unix=0.0, runtime_sec=1.0) is None
         # Idempotent: a round whose dir never had one must not fail to start.
         clear_server_ready_stamp(str(log_path))
 

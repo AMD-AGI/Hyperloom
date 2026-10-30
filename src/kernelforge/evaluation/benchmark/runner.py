@@ -18,11 +18,15 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Any, Callable
 
-from kernelforge.tools.process_group import kill_process_group
+from kernelforge.utils.process_group import kill_process_group
 
 # Optional bench-mode companion to the driver contract's --warmup/--iters, asking the driver to time ONE declared case
 # instead of its whole suite.
 SWEEP_CASE_FLAG = "--bench-case"
+
+# Warmup and timed iterations of one sweep point unless the operator asks for others.
+SWEEP_WARMUP_ITERS = 3
+SWEEP_BENCH_ITERS = 20
 
 # How case selection actually resolved for one sweep point.
 SELECTION_NARROWED = "narrowed"
@@ -155,6 +159,11 @@ def parse_case_timings(text: str) -> tuple[dict[str, float], list[str], set[str]
     return case_times, unscored, duplicates
 
 
+def _wall_ms_samples(output: str) -> list[float]:
+    """The per-iteration ``wall_ms:`` times a driver printed."""
+    return [float(m) for m in re.findall(r"wall_ms:\s*([\d.]+)", output)]
+
+
 def _case_milliseconds(case_times: dict) -> dict[str, float]:
     """Each case's time as a float; raises ValueError naming the first case whose time is not finite and positive."""
     times: dict[str, float] = {}
@@ -198,7 +207,7 @@ def aggregate_benchmark_measurements(measurements: list[dict]) -> dict:
         expected_cases = case_ids
         if not case_ids:
             return _aggregate_refusal(measurements, "MEASUREMENT REPORTED NO CASE TIMINGS")
-        unscored = {str(case_id) for case_id in measurement.get("unscored_cases") or []}
+        unscored = set(measurement.get("unscored_cases") or [])
         if index > 1 and unscored != expected_unscored:
             mismatch = f"expected={sorted(expected_unscored)}, got={sorted(unscored)}"
             return _aggregate_refusal(measurements, f"MEASUREMENT UNSCORED CASE MISMATCH: {mismatch}")
@@ -351,8 +360,7 @@ async def bench_wallclock(
             "output": full_output[-2000:],
         }
 
-    # Parse individual wall_ms values
-    times = [float(m) for m in re.findall(r"wall_ms:\s*([\d.]+)", full_output)]
+    times = _wall_ms_samples(full_output)
 
     # Or parse a single pre-aggregated summary line.
     agg_match = re.search(r"(median_ms|mean_ms):\s*([\d.]+)", full_output)
@@ -580,17 +588,15 @@ def _sweep_caveats(whole_suite: str, consumption: dict[str, str], samples: list[
 
 async def sweep_case(
     *,
-    driver_script: str,
+    bench: BenchRun,
     case_id: str,
     constants: dict[str, Any] | None = None,
-    warmup_iters: int = 3,
-    bench_iters: int = 20,
     timeout_sec: int = 120,
     prefix_constants: bool = True,
 ) -> dict:
     """Time ONE declared case at ONE point in the dispatch-constant space."""
     case = str(case_id).strip()
-    if not case or len(case.split()) != 1:
+    if len(case.split()) != 1:
         return _sweep_failure(f"INVALID CASE ID {case_id!r}")
     try:
         env, exported = _sweep_environment(constants, prefix_constants=prefix_constants)
@@ -599,7 +605,7 @@ async def sweep_case(
     described = ", ".join(f"{k}={v}" for k, v in exported.items()) or "no overrides"
     point_failure = partial(_sweep_failure, case_id=case, constants=exported)
 
-    base_cmd = bench_command(BenchRun(driver_script, warmup_iters=warmup_iters, bench_iters=bench_iters))
+    base_cmd = bench_command(bench)
     memo_key = _case_flag_memo_key(base_cmd)
     rejected_before = _CASE_FLAG_REJECTED.get(memo_key, False)
     cmd = list(base_cmd) if rejected_before else base_cmd + [SWEEP_CASE_FLAG, case]
@@ -634,7 +640,7 @@ async def sweep_case(
     narrowed = set(seen) == {case}
     selected = narrowed and not rejected_before and flag_exit is None
     whole_suite = "" if selected else _whole_suite_note(flag_exit, rejected_before, seen)
-    samples = [float(m) for m in re.findall(r"wall_ms:\s*([\d.]+)", full_output)]
+    samples = _wall_ms_samples(full_output)
     spread = narrowed and bool(samples)
     return {
         "success": True,
@@ -645,8 +651,8 @@ async def sweep_case(
         "narrowed": narrowed,
         "case_selection": SELECTION_NARROWED if selected else SELECTION_WHOLE_SUITE,
         "override_consumption": consumption,
-        "warmup_iters": warmup_iters,
-        "bench_iters": bench_iters,
+        "warmup_iters": bench.warmup_iters,
+        "bench_iters": bench.bench_iters,
         **(
             {"n_samples": len(samples), "wall_min_ms": round(min(samples), 6), "wall_max_ms": round(max(samples), 6)}
             if spread
@@ -691,8 +697,8 @@ def _sweep_cli(argv: list[str] | None = None) -> int:
             "HIP_VISIBLE_DEVICES, ...) is refused"
         ),
     )
-    parser.add_argument("--warmup", type=int, default=3)
-    parser.add_argument("--iters", type=int, default=20)
+    parser.add_argument("--warmup", type=int, default=SWEEP_WARMUP_ITERS)
+    parser.add_argument("--iters", type=int, default=SWEEP_BENCH_ITERS)
     parser.add_argument("--timeout", type=int, default=120)
     args = parser.parse_args(argv)
 
@@ -706,11 +712,9 @@ def _sweep_cli(argv: list[str] | None = None) -> int:
 
     result = asyncio.run(
         sweep_case(
-            driver_script=args.driver,
+            bench=BenchRun(args.driver, warmup_iters=args.warmup, bench_iters=args.iters),
             case_id=args.case,
             constants=constants,
-            warmup_iters=args.warmup,
-            bench_iters=args.iters,
             timeout_sec=args.timeout,
             prefix_constants=not args.verbatim_names,
         )

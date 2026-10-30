@@ -1,11 +1,16 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""What an AgentX run drives: its client script, backend, and MLPerf workload size.
+"""What an AgentX run drives: its client script, backend, and workload size.
 
 Lives outside the ``agentx`` package because the default benchmark path is
 pinned not to import it, and that path still has to recognise a client script
 and size the benchmark cap.
+
+Both backends size that cap from the work the run was composed to do: an MLPerf
+run from its trajectory count, a canonical (Magpie/aiperf) run from the
+concurrency it measures, because its warmup phase is one set of requests per
+lane.
 """
 
 from __future__ import annotations
@@ -40,12 +45,42 @@ MLPERF_SERVED_MODEL = "kimi-k3"
 # either way, so the workload scales linearly in trajectory count.
 MLPERF_SECONDS_PER_TRAJECTORY = 26
 
-# Server boot, aiter JIT rebuild and drain sit outside the measured window.
-MLPERF_BOOT_ALLOWANCE_SEC = 1800
+# Server boot, aiter JIT rebuild and drain sit outside the measured window, for
+# either backend.
+AGENTX_BOOT_ALLOWANCE_SEC = 1800
 
 # A first, cold round runs materially slower than the steady state (measured:
 # 15 req/min against 48 once warm), so the cap is sized for the cold case.
 MLPERF_TIMEOUT_SAFETY_FACTOR = 2.0
+
+# The canonical phases below are Magpie's, not ours: Hyperloom composes only
+# ``envs.CONC``, and the shape of the round that answers it belongs to Magpie at
+# the ref native AgentX pins it to (docs/components/magpie.md). Every CANON_
+# number here describes that pin and has to be re-measured when it moves.
+
+# Canonical replay warms up this many requests per lane, plus one probe, before
+# it opens the profiling window: a sweep measured 155, 221 and 309 warmup
+# requests at CONC 14, 20 and 28, so the warmup phase grows with the
+# concurrency being measured while the window that follows it does not.
+CANON_WARMUP_PER_LANE = 11
+CANON_WARMUP_PROBE_REQUESTS = 1
+
+# Wall-clock one warmup request costs, sized to the slowest rung measured with
+# about 6% over it. Measured across the rungs of one sweep on 8xMI355X: 6.0s at
+# CONC 14, 18.8s at CONC 20 and 15.6s at CONC 28, so the cost does not fall off
+# with concurrency and the slowest rung sets the rate. Three rungs on one host
+# are a thin sample, and warmup is the cold part of the round: a slower rung
+# than any of these moves this number.
+CANON_SECONDS_PER_WARMUP_REQUEST = 20.0
+
+# The profiling window canonical mode owns: ``duration_s`` 3600 inside a
+# ``metric_window_s`` of 3640. It is a fixed window, independent of CONC.
+CANON_PROFILING_WINDOW_SEC = 3640.0
+
+# Writing the window's metrics out happens after it closes, and is part of the
+# measurement: a round reaped 1.3s past a completed profiling phase threw away a
+# finished measurement.
+CANON_FINALISATION_SEC = 300.0
 
 
 def agentic_backend(env: Mapping[str, str] | None = None) -> str:
@@ -100,4 +135,44 @@ def mlperf_trajectories(env: Mapping[str, str] | None = None) -> int:
 def mlperf_benchmark_timeout_sec(env: Mapping[str, str] | None = None) -> float:
     """Benchmark cap a run of this many trajectories needs, boot included."""
     derived = mlperf_trajectories(env) * MLPERF_SECONDS_PER_TRAJECTORY * MLPERF_TIMEOUT_SAFETY_FACTOR
-    return derived + MLPERF_BOOT_ALLOWANCE_SEC
+    return derived + AGENTX_BOOT_ALLOWANCE_SEC
+
+
+def is_canonical_agentx(env: Mapping[str, str] | None = None) -> bool:
+    """True for an AgentX run Magpie replays itself, rather than the MLPerf client."""
+    from hyperloom.common.env import env_bool
+
+    runtime = os.environ if env is None else env
+    return env_bool("HYPERLOOM_AGENTX", env=runtime) and not is_mlperf_backend(runtime)
+
+
+def agentx_concurrency(env: Mapping[str, str] | None = None) -> int:
+    """The concurrency this invocation was composed for, or 0 when it pins none.
+
+    ``CONC`` is the only workload size Hyperloom composes for a canonical run --
+    the window and the per-lane warmup are the mode's own -- so an invocation
+    without one carries no workload this layer can size a cap from.
+    """
+    runtime = os.environ if env is None else env
+    raw = str(runtime.get("CONC") or "").strip()
+    return int(raw) if raw.isdigit() and int(raw) > 0 else 0
+
+
+def agentx_warmup_requests(conc: int) -> int:
+    """Requests canonical replay issues before it opens the profiling window."""
+    return CANON_WARMUP_PER_LANE * conc + CANON_WARMUP_PROBE_REQUESTS
+
+
+def canonical_benchmark_timeout_sec(env: Mapping[str, str] | None = None) -> float:
+    """Benchmark cap a canonical AgentX round at this concurrency needs.
+
+    The phases the grant has to cover are boot, a warmup that is linear in
+    ``CONC``, the fixed profiling window and the finalisation that writes it out.
+    Returns 0.0 for an invocation that pins no concurrency, which names no
+    workload to size: the caller keeps its stock default.
+    """
+    conc = agentx_concurrency(env)
+    if conc <= 0:
+        return 0.0
+    warmup = agentx_warmup_requests(conc) * CANON_SECONDS_PER_WARMUP_REQUEST
+    return AGENTX_BOOT_ALLOWANCE_SEC + warmup + CANON_PROFILING_WINDOW_SEC + CANON_FINALISATION_SEC

@@ -96,7 +96,7 @@ booked. A phase budget never cancels running work -- the last action in
 flight, such as a GEAK rebench, completes and settles its result. Running
 work is cancelled only when the run is already over: a terminal transition to
 CLOSE (a recorded stop reason such as an unhealthy backend, a failed baseline,
-convergence or `skip_to_close`), an exhausted session budget, a shutdown or an
+convergence), an exhausted session budget, a shutdown or an
 operator interrupt. Each
 phase therefore starts on quiet GPUs, and its entry hook runs on the
 transition itself.
@@ -139,6 +139,9 @@ throughput. The phase exits normally when `baseline_tput > 0`, the
 revalidation window is closed, and all in-flight enablement work is drained.
 It exits terminally on `server_argv_invalid`, `environment_fault`, or
 `enablement_attempts_exhausted` (eight consecutive failed rounds).
+
+Only the enablement lane authors rounds here; the LLM proposes `target_analysis`.
+A round that reaches its executor after the lane stopped taking rounds is skipped.
 
 A KEEP or an advance ends the held round whoever authored it, since the wall
 that round was aimed at is behind the boot. A specialist still queued under that
@@ -281,6 +284,24 @@ serving card power throttled for at least 10% of the phase is listed in
 `power_throttled_gpus`, and the round logs a warning naming each such card's
 throttled share and mean clock: its throughput was set by the power cap, not by
 its clock limit. This is only reported; nothing changes the cards.
+
+Node Power Management (MI350 series) holds the node to its own limit by
+lowering every card's power, and the cards' throttle accumulators do not count
+that: on an MI350X node held to 2600 W, every card ran near 430 W against a
+1000 W cap with a `power_throttle_fraction` under 1%. So while NPM is enabled,
+each sample also reads the node's power and the limit firmware enforces on it
+(`board/node_power` and `board/cur_node_power_limit` in sysfs; amdgpu publishes
+them on one card of an XGMI hive, so on one card of an MI350 node, and on every
+card of a node without a hive), and `gpu_power.json` carries a `node` block: `limit_w`
+(unread when the limit changed during the phase), `avg_power_w`, `max_power_w`,
+`samples` and `limited_fraction`, the share of samples at 99% of the limit or
+above. A held node reads at its limit, or above it once every card is down at
+its minimum power. When that share is at least 10%, the round logs a warning
+naming the limit and the share. The block is `null` on a node without NPM or
+with it disabled. Failed reads, and a reading that reports NPM enabled with no
+limit, are counted in `node_query_errors`. Where
+the node limit equals the sum of the cards' caps (8000 W against eight 1000 W
+caps), both limits are reached together and both are reported.
 
 The optimizer never changes power settings during a session. The power cap, the
 DPM performance level and the graphics clock's maximum (sclk) decide how much of
@@ -611,6 +632,19 @@ native Magpie AgentX, concurrency is fixed for the session and
 CONC. The independent MLPerf backend keeps its optional sweep, disabled by
 default. See the [AgentX workflow](../how-to/optimize.md#optimize-an-agentx-workload)
 for supported workload controls.
+
+Each arm runs the session's own CONC first, then the rest of the ladder
+cheapest first: low to high for a synthetic workload, whose rungs send requests
+in proportion to CONC, and high to low for an agentic one, whose rungs replay a
+fixed set of trajectories on more lanes the higher CONC goes.
+A pair needs both arms, so the baseline arm runs first: its first rung may use
+the whole budget, and each later rung must fit in half of what was left when
+the arm started. The optimized arm then runs only the concurrencies the
+baseline reached. A budget that runs out therefore drops whole pairs, and the
+anchor pair is the last one it drops. A rung is not started once the time left
+is shorter than the last benchmark measured after the anchor, since none past
+it runs faster. SWEEP dispatches the sweep only when the time it can grant holds
+one pair: two of the session's measured baseline rounds.
 
 Results update `last_conc_sweep` and feed the final report and breakdown.
 A ladder that fails closes the phase as `sweep_failed`; one that finishes

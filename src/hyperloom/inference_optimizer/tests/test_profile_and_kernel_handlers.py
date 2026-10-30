@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import sys
 import asyncio
 import json
 import os
@@ -18,34 +19,39 @@ import pytest
 from hyperloom.inference_optimizer.cli import bootstrap as cli_bootstrap
 from hyperloom.inference_optimizer import gpu_types
 from hyperloom.inference_optimizer.cli import parser as cli_parser
+from hyperloom.orchestrator.kernel import kernel_decisions as kd
 from hyperloom.orchestrator.kernel import request_handlers as krh
 
 from .conftest import seed_integrate_verdict, seed_kernel_keep
+from hyperloom.inference_optimizer.session import paths as session_paths
 from hyperloom.orchestrator.actions.executors import trace_analyze as ta
 from hyperloom.orchestrator.actions.executors.baseline import (
     BaselineExecutor,
     BenchmarkRunExecutor,
 )
+from hyperloom.orchestrator.actions.executors.benchmark_run.records import _BenchmarkRound
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     default_baseline_config,
     materialize_benchmark_config,
+    BenchmarkTarget,
+    LaunchLayer,
 )
 from hyperloom.orchestrator.actions.executors.profile import (
     ProfileExecutor,
-    _preferred_main_trace_path,
     _sanitize_profile_server_args,
     _trace_rank,
     _trace_files_for_dir,
+    _trace_size_bytes,
 )
+from hyperloom.orchestrator.trace_analysis._trace_rank import select_primary_trace
 from hyperloom.orchestrator.roles import (
     MockBackend,
     ScriptedPlan,
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.orchestrator.state.task_registry import TaskRegistry
+from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
 from hyperloom.orchestrator.bus.resource_lock import (
-    ResourceLockManager,
     SqliteLeaseBackend,
 )
 from hyperloom.orchestrator.loop.sub_agent_runner import (
@@ -53,7 +59,8 @@ from hyperloom.orchestrator.loop.sub_agent_runner import (
 )
 from hyperloom.inference_optimizer.session.manifest import build_manifest
 from hyperloom.inference_optimizer.session.paths import asset_root, make_session_dir
-from hyperloom.orchestrator.bus.storage import SqliteConnection
+from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
+from hyperloom.orchestrator.kernel import _integrate_payload as integrate_payload
 
 _PROFILE_SGLANG_CONFIG = asset_root() / "assets" / "configs" / "profile_sglang.yaml"
 _PROFILE_VLLM_CONFIG = asset_root() / "assets" / "configs" / "profile_vllm.yaml"
@@ -88,12 +95,14 @@ def test_mi325x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch
     )
 
     assert gpu_types.gpu_runner_type("mi325x") == "mi300x"
-    assert gpu_types._GFX_TO_RUNNER.get("gfx1100") is None
+    assert gpu_types.reference_gpu_type_for_gfx("gfx1100") is None
     manifest = build_manifest(tmp_path, args=args, session_id="mi325x-session")
     state = cli_bootstrap._seed_shared_state(
         tmp_path,
         args,
         session_id="mi325x-session",
+        framework="sglang",
+        platform=cli_bootstrap.LaunchPlatform(compute_partition={}, gpu_power_settings={}),
     )
 
     assert manifest["gpu_type"] == "mi325x"
@@ -116,6 +125,8 @@ def test_mi308x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch
         tmp_path,
         args,
         session_id="mi308x-session",
+        framework="sglang",
+        platform=cli_bootstrap.LaunchPlatform(compute_partition={}, gpu_power_settings={}),
     )
 
     assert manifest["gpu_type"] == "mi308x"
@@ -162,7 +173,7 @@ def test_materialize_config_injects_model_path(tmp_path):
     out = materialize_benchmark_config(
         _PROFILE_SGLANG_CONFIG,
         tmp_path,
-        model_path="/path/models/DeepSeek-R1-0528",
+        target=BenchmarkTarget(model_path="/path/models/DeepSeek-R1-0528"),
     )
     with out.open() as f:
         rendered = yaml.safe_load(f)
@@ -189,8 +200,8 @@ def test_materialize_config_injects_model_with_other_overrides(tmp_path):
     out = materialize_benchmark_config(
         _PROFILE_SGLANG_CONFIG,
         tmp_path,
-        extra_envs={"BENCH_FOO": "bar"},
-        model_path="/some/model",
+        launch=LaunchLayer(extra_envs={"BENCH_FOO": "bar"}),
+        target=BenchmarkTarget(model_path="/some/model"),
     )
     with out.open() as f:
         rendered = yaml.safe_load(f)
@@ -205,7 +216,7 @@ def test_materialize_config_injects_runner_type(tmp_path):
     out = materialize_benchmark_config(
         _PROFILE_SGLANG_CONFIG,
         tmp_path,
-        gpu_type="mi355x",
+        target=BenchmarkTarget(gpu_type="mi355x"),
     )
     with out.open() as f:
         rendered = yaml.safe_load(f)
@@ -220,7 +231,7 @@ def test_r9700_baseline_and_profile_use_vllm_gfx12_runner(tmp_path, monkeypatch)
         out = materialize_benchmark_config(
             config_path,
             tmp_path / config_path.stem,
-            gpu_type="r9700",
+            target=BenchmarkTarget(gpu_type="r9700"),
         )
         rendered = yaml.safe_load(out.read_text())["benchmark"]
         assert rendered["runner_type"] == "gfx12"
@@ -248,7 +259,7 @@ def test_materialize_config_forces_generic_benchmark_script(tmp_path):
     out = materialize_benchmark_config(
         src_yaml,
         out_dir,
-        gpu_type="mi355x",
+        target=BenchmarkTarget(gpu_type="mi355x"),
     )
     with out.open() as f:
         rendered = yaml.safe_load(f)
@@ -281,7 +292,7 @@ def test_materialize_config_forces_generic_when_source_yaml_has_no_script(
     out = materialize_benchmark_config(
         src_yaml,
         out_dir,
-        gpu_type="mi300x",
+        target=BenchmarkTarget(gpu_type="mi300x"),
     )
     with out.open() as f:
         rendered = yaml.safe_load(f)
@@ -528,8 +539,7 @@ def test_materialize_profile_bounds_survive_a_replacing_candidate(
     out = materialize_benchmark_config(
         src,
         tmp_path,
-        extra_server_args=candidate,
-        args_mode="replace",
+        launch=LaunchLayer(extra_server_args=candidate, args_mode="replace"),
     )
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     assert "--profiler-config.delay_iterations 6080" in extra, extra
@@ -557,7 +567,7 @@ def test_materialize_profile_bounds_survive_an_extra_envs_override(
     out = materialize_benchmark_config(
         src,
         tmp_path,
-        extra_envs={"EXTRA_VLLM_ARGS": "--quantization fp8"},
+        launch=LaunchLayer(extra_envs={"EXTRA_VLLM_ARGS": "--quantization fp8"}),
     )
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     assert "--profiler-config.delay_iterations 6080" in extra, extra
@@ -697,8 +707,7 @@ def test_materialize_profile_restore_rejects_a_zero_max_iterations(
     out = materialize_benchmark_config(
         src,
         tmp_path,
-        extra_server_args="--profiler-config.max_iterations 0",
-        args_mode="replace",
+        launch=LaunchLayer(extra_server_args="--profiler-config.max_iterations 0", args_mode="replace"),
     )
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     assert "--profiler-config.max_iterations 128" in extra, extra
@@ -719,8 +728,7 @@ def test_materialize_profile_restore_rejects_a_max_iterations_above_the_cap(
     out = materialize_benchmark_config(
         src,
         tmp_path,
-        extra_server_args="--profiler-config.max_iterations 100000",
-        args_mode="replace",
+        launch=LaunchLayer(extra_server_args="--profiler-config.max_iterations 100000", args_mode="replace"),
     )
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     assert extra.rindex("max_iterations 128") > extra.rindex("max_iterations 100000"), extra
@@ -741,8 +749,7 @@ def test_materialize_profile_restore_rejects_ignore_frontend_false(
     out = materialize_benchmark_config(
         src,
         tmp_path,
-        extra_server_args="--profiler-config.ignore_frontend False",
-        args_mode="replace",
+        launch=LaunchLayer(extra_server_args="--profiler-config.ignore_frontend False", args_mode="replace"),
     )
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     assert "--profiler-config.ignore_frontend True" in extra, extra
@@ -764,8 +771,9 @@ def test_materialize_profile_disables_the_summary_table_even_when_a_candidate_re
     out = materialize_benchmark_config(
         src,
         tmp_path,
-        extra_server_args="--profiler-config.torch_profiler_dump_cuda_time_total True",
-        args_mode="replace",
+        launch=LaunchLayer(
+            extra_server_args="--profiler-config.torch_profiler_dump_cuda_time_total True", args_mode="replace"
+        ),
     )
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     flag = "--profiler-config.torch_profiler_dump_cuda_time_total"
@@ -787,18 +795,20 @@ def test_materialize_profile_restore_accepts_a_bound_that_already_holds(
     out = materialize_benchmark_config(
         src,
         tmp_path,
-        extra_envs={
-            "EXTRA_VLLM_ARGS": (
-                "--profiler-config.profiler torch "
-                "--profiler-config.torch_profiler_dir /tmp/already-set "
-                "--profiler-config.delay_iterations 6080 "
-                "--profiler-config.max_iterations 64 "
-                "--profiler-config.ignore_frontend True "
-                "--profiler-config.capture_torch_profiler True "
-                "--profiler-config.detailed_trace_annotation True "
-                "--profiler-config.torch_profiler_dump_cuda_time_total False"
-            ),
-        },
+        launch=LaunchLayer(
+            extra_envs={
+                "EXTRA_VLLM_ARGS": (
+                    "--profiler-config.profiler torch "
+                    "--profiler-config.torch_profiler_dir /tmp/already-set "
+                    "--profiler-config.delay_iterations 6080 "
+                    "--profiler-config.max_iterations 64 "
+                    "--profiler-config.ignore_frontend True "
+                    "--profiler-config.capture_torch_profiler True "
+                    "--profiler-config.detailed_trace_annotation True "
+                    "--profiler-config.torch_profiler_dump_cuda_time_total False"
+                ),
+            }
+        ),
     )
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     assert extra.count("--profiler-config.max_iterations") == 1, extra
@@ -821,9 +831,11 @@ def test_materialize_profile_bounds_outlive_remove_args(
     out = materialize_benchmark_config(
         src,
         tmp_path,
-        extra_server_args="--no-enable-prefix-caching",
-        args_mode="replace",
-        remove_args=["--profiler-config.max_iterations"],
+        launch=LaunchLayer(
+            extra_server_args="--no-enable-prefix-caching",
+            args_mode="replace",
+            remove_args=["--profiler-config.max_iterations"],
+        ),
     )
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     assert "--profiler-config.max_iterations 128" in extra, extra
@@ -843,8 +855,7 @@ def test_materialize_profile_restores_max_iterations_even_when_delay_survives(
     out = materialize_benchmark_config(
         src,
         tmp_path,
-        extra_server_args="--profiler-config.delay_iterations 0",
-        args_mode="replace",
+        launch=LaunchLayer(extra_server_args="--profiler-config.delay_iterations 0", args_mode="replace"),
     )
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     assert "--profiler-config.max_iterations 128" in extra, extra
@@ -868,9 +879,11 @@ def test_materialize_profile_restore_does_not_duplicate_surviving_flags(
     out = materialize_benchmark_config(
         src,
         tmp_path,
-        extra_envs={
-            "EXTRA_VLLM_ARGS": "--profiler-config.ignore_frontend True --quantization fp8",
-        },
+        launch=LaunchLayer(
+            extra_envs={
+                "EXTRA_VLLM_ARGS": "--profiler-config.ignore_frontend True --quantization fp8",
+            }
+        ),
     )
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     assert extra.count("--profiler-config.ignore_frontend True") == 1, extra
@@ -1018,8 +1031,8 @@ def test_materialize_non_profile_keeps_legacy_seq_cost_factor(
 
 
 def _mock_patchers(monkeypatch, *, vllm: bool, sglang: bool) -> dict[str, int]:
-    """Replace the two patcher symbols on `_workload_envs` with stubs that record invocation counts for per-framework dispatch asserts."""
-    from hyperloom.orchestrator.actions.executors import _workload_envs
+    """Replace the two patchers with stubs that record which framework a profile tried to patch."""
+    from hyperloom.orchestrator.actions.executors import _server_patcher
 
     counts = {"vllm": 0, "sglang": 0}
 
@@ -1031,16 +1044,8 @@ def _mock_patchers(monkeypatch, *, vllm: bool, sglang: bool) -> dict[str, int]:
         counts["sglang"] += 1
         return sglang
 
-    monkeypatch.setattr(
-        _workload_envs,
-        "ensure_vllm_patched_for_tracelens",
-        _vllm_stub,
-    )
-    monkeypatch.setattr(
-        _workload_envs,
-        "ensure_sglang_patched_for_tracelens",
-        _sglang_stub,
-    )
+    monkeypatch.setattr(_server_patcher, "ensure_vllm_patched_for_tracelens", _vllm_stub)
+    monkeypatch.setattr(_server_patcher, "ensure_sglang_patched_for_tracelens", _sglang_stub)
     return counts
 
 
@@ -1107,19 +1112,26 @@ def test_tracelens_patch_status_separates_fine_from_never_tried(tmp_path, monkey
     assert _status(sglang=True, enable_patch="0") == "not_attempted"
 
 
-def test_sitecustomize_profile_applies_gc_patch_without_touching_patch_status(tmp_path, monkeypatch):
-    """sglang_gc_patch is applied on a profile round, and the roofline patch status stays ``not_attempted``."""
+def _force_sitecustomize_shape_mode(monkeypatch):
+    from hyperloom.orchestrator.actions.executors import _server_patcher
+
+    monkeypatch.setattr(_server_patcher, "resolve_sglang_shape_mode", lambda: "sitecustomize")
+
+
+def test_sitecustomize_profile_records_successful_gc_patch(tmp_path, monkeypatch):
+    """Record the graph patch outcome without adding legacy shape-discovery flags."""
     import yaml
 
     _clear_workload_env(monkeypatch)
     counts = _mock_patchers(monkeypatch, vllm=False, sglang=True)
-    monkeypatch.setenv("HYPERLOOM_SGLANG_SHAPE_MODE", "sitecustomize")
+    _force_sitecustomize_shape_mode(monkeypatch)
     src = _profile_yaml(tmp_path, "sglang", {"CONC": 32, "ISL": 256, "OSL": 1024})
     out = materialize_benchmark_config(src, tmp_path)
     envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
 
     assert counts == {"vllm": 0, "sglang": 1}, counts
-    assert envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] == "not_attempted"
+    assert envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] == "ok"
+    assert "--enable-shape-discovery-for-cuda-graph-profile" not in envs.get("EXTRA_SGLANG_ARGS", "")
 
 
 def test_sitecustomize_profile_proceeds_when_gc_patch_is_unavailable(tmp_path, monkeypatch, caplog):
@@ -1128,15 +1140,16 @@ def test_sitecustomize_profile_proceeds_when_gc_patch_is_unavailable(tmp_path, m
 
     _clear_workload_env(monkeypatch)
     counts = _mock_patchers(monkeypatch, vllm=False, sglang=False)
-    monkeypatch.setenv("HYPERLOOM_SGLANG_SHAPE_MODE", "sitecustomize")
+    _force_sitecustomize_shape_mode(monkeypatch)
     src = _profile_yaml(tmp_path, "sglang", {"CONC": 32, "ISL": 256, "OSL": 1024})
     caplog.set_level("WARNING")
     out = materialize_benchmark_config(src, tmp_path)
     envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
 
     assert counts == {"vllm": 0, "sglang": 1}, counts
-    assert envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] == "not_attempted"
+    assert envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] == "unavailable"
     assert "HYPERLOOM_PROFILE_DEGRADED_REASON" not in envs
+    assert "--enable-shape-discovery-for-cuda-graph-profile" not in envs.get("EXTRA_SGLANG_ARGS", "")
     assert "profiling continues" in caplog.text
 
 
@@ -1146,7 +1159,7 @@ def test_sitecustomize_non_profile_round_does_not_patch_sglang(tmp_path, monkeyp
 
     _clear_workload_env(monkeypatch)
     counts = _mock_patchers(monkeypatch, vllm=False, sglang=True)
-    monkeypatch.setenv("HYPERLOOM_SGLANG_SHAPE_MODE", "sitecustomize")
+    _force_sitecustomize_shape_mode(monkeypatch)
     src = tmp_path / "baseline_sglang.yaml"
     src.write_text(
         yaml.safe_dump(
@@ -1227,13 +1240,13 @@ def test_trace_certificate_stays_out_of_the_resolver_namespace(tmp_path):
     """The certificate must not become a trace candidate for the directory it describes.
 
     ``_trace_candidates`` rglobs the trace dir for anything ending in ``_TRACE_EXTS``, and a bare ``.json`` is in
-    that tuple. A certificate written among the traces used to add a second unranked candidate, which makes
-    ``require_single_rank`` resolve to nothing and lets the certificate win the size fallback over a small trace.
+    that tuple. A certificate written among the traces would add a second unranked candidate and could win the
+    size fallback over a small trace.
     """
     from hyperloom.orchestrator.actions.executors.profile import _write_trace_certificate
-    from hyperloom.orchestrator.trace_analysis._bypass_trace_reader import _trace_candidates, resolve_trace_file
+    from hyperloom.orchestrator.trace_analysis._trace_reader import _trace_candidates, resolve_trace_file
 
-    # A lone unranked trace: the certificate must not become the second candidate that makes this unresolvable.
+    # A lone unranked trace: the certificate must not become a second candidate beside it.
     single = tmp_path / "single" / "torch_trace"
     single.mkdir(parents=True)
     trace = single / "host_1.1700000000.pt.trace.json.gz"
@@ -1246,7 +1259,6 @@ def test_trace_certificate_stays_out_of_the_resolver_namespace(tmp_path):
     # Outside the scanned directory, so no recursive glob of it can pick the certificate up.
     assert Path(path).parent == single.parent
     assert Path(path) not in _trace_candidates(single)
-    assert resolve_trace_file(single, require_single_rank=True) == trace
 
     # A degenerate trace smaller than the certificate: the size fallback must still not prefer the certificate.
     tiny_dir = tmp_path / "tiny" / "torch_trace"
@@ -1374,7 +1386,7 @@ def test_materialize_profile_sglang_drops_graph_capture_flag_when_eager(
         "sglang",
         {"CONC": 32, "ISL": 256, "OSL": 1024, "EXTRA_SGLANG_ARGS": "--enable-profile-cuda-graph"},
     )
-    out = materialize_benchmark_config(src, tmp_path, extra_server_args="--disable-cuda-graph")
+    out = materialize_benchmark_config(src, tmp_path, launch=LaunchLayer(extra_server_args="--disable-cuda-graph"))
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"]
     assert "--disable-cuda-graph" in extra.split(), extra
     assert "--enable-profile-cuda-graph" not in extra.split(), extra
@@ -1742,16 +1754,14 @@ def test_profile_server_args_sanitizer_degrades_on_unbalanced_quote():
 
 def test_atom_disables_cuda_graphs_with_its_own_flag():
     """atom's argparse knows ``--enforce-eager``, not sglang's ``--disable-cuda-graph``."""
-    from hyperloom.orchestrator.actions.executors.baseline import _with_cuda_graph_disabled
+    from hyperloom.orchestrator.actions.executors.benchmark_run.bringup import _with_cuda_graph_disabled
 
     assert _with_cuda_graph_disabled("--trust-remote-code", "atom") == "--trust-remote-code --enforce-eager"
 
 
 def test_server_args_env_name_atom():
     """atom maps to EXTRA_ATOM_ARGS (the atom branch sits before vllm to avoid substring collisions)."""
-    from hyperloom.orchestrator.actions.executors._grid_runner import (
-        server_args_env_name,
-    )
+    from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 
     assert server_args_env_name("atom") == "EXTRA_ATOM_ARGS"
     assert server_args_env_name("ATOM") == "EXTRA_ATOM_ARGS"
@@ -1819,14 +1829,27 @@ def test_profile_argv_preflight_includes_inferencex_vllm_profiler_args(tmp_path,
     state = SimpleNamespace(enablement=SimpleNamespace(argv_repairs=[]))
     executor = BaselineExecutor(session_dir=tmp_path, shared_state=state)
 
-    result = executor._preflight_server_argv(
+    round_ = _BenchmarkRound(
         config_path=config_path,
-        framework="vllm",
-        launch_env={},
+        materialized_config_path=config_path,
         output_dir=tmp_path / "round",
-        attempt=1,
+        result_dir=tmp_path / "round",
+        ctx=None,
+        ctx_extra={},
+        cmd=[],
+        env={},
+        framework="vllm",
+        watchdog_server_log=None,
         capture_meta={},
+        timeout_sec=0,
+        silence_timeout_sec=None,
+        session_deadline_sec=None,
+        serving_lease=None,
+        server_already_ready=False,
+        run_eval_disabled=False,
     )
+
+    result = executor._preflight_server_argv(round_, 1)
 
     assert result is None
     assert seen["argv"][:4] == (
@@ -1964,7 +1987,7 @@ def test_profile_executor_merges_current_best_envs(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_roofline_executor_skips_when_framework_atom(monkeypatch):
+async def test_roofline_executor_skips_when_framework_atom(monkeypatch, tmp_path):
     """FRAMEWORK=atom attempts the normal roofline profile sub-step."""
     from hyperloom.orchestrator.actions.executors.roofline import (
         RooflineExecutor,
@@ -1986,10 +2009,9 @@ async def test_roofline_executor_skips_when_framework_atom(monkeypatch):
         task_id="t-atom-roofline",
         idempotency_key="t-atom-roofline",
         requires_lanes=[],
-        side_effects=[],
         lease_ttl_sec=0,
     )
-    ctx = SimpleNamespace(task=task, lease=None, extra=None)
+    ctx = SimpleNamespace(task=task, lease=None, extra={"session_dir": str(tmp_path)})
 
     result = await rexec(ctx)
     assert result["status"] == "failed"
@@ -2001,7 +2023,7 @@ async def test_roofline_executor_skips_when_framework_atom(monkeypatch):
 async def test_baseline_executor_fails_on_nonzero_rc_despite_valid_measurement(tmp_path):
     """A parseable measurement must not launder a non-zero process exit into success."""
     db = SqliteConnection(tmp_path / "baseline.db")
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
     sub = SubAgentRunner(locks, tr)
 
@@ -2031,10 +2053,12 @@ async def test_baseline_executor_fails_on_nonzero_rc_despite_valid_measurement(t
         (ws / "benchmark_report.json").write_text(report_body)
         return subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="cleanup failed")
 
-    task = await tr.create(
-        kind="baseline",
-        params={"output_dir": str(output_dir), "config_path": str(_PROFILE_SGLANG_CONFIG)},
-        idempotency_key="baseline-valid-warning",
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="baseline",
+            params={"output_dir": str(output_dir), "config_path": str(_PROFILE_SGLANG_CONFIG)},
+            idempotency_key="baseline-valid-warning",
+        ),
     )
     sub.register_executor("baseline", BaselineExecutor(session_dir=tmp_path))
     with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=fake_run):
@@ -2134,7 +2158,7 @@ async def test_coordinator_promotes_valid_baseline_even_with_failed_status(sessi
 async def test_profile_executor_extracts_trace_dir(tmp_path):
     """When the workspace has torch_trace/*.trace.json.gz, the runner surfaces them in the result."""
     db = SqliteConnection(tmp_path / "x.db")
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
     sub = SubAgentRunner(locks, tr)
 
@@ -2179,10 +2203,12 @@ async def test_profile_executor_extracts_trace_dir(tmp_path):
         }
 
     pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
-    task = await tr.create(
-        kind="profile",
-        params={"output_dir": str(output_dir), "config_path": str(_PROFILE_SGLANG_CONFIG)},
-        idempotency_key="prof-1",
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="profile",
+            params={"output_dir": str(output_dir), "config_path": str(_PROFILE_SGLANG_CONFIG)},
+            idempotency_key="prof-1",
+        ),
     )
     sub.register_executor("profile", pe)
     with patch.object(BenchmarkRunExecutor, "__call__", _fake_baseline):
@@ -2220,7 +2246,7 @@ async def test_profile_executor_patches_configured_inferencex_path(
     monkeypatch.setenv("INFERENCEX_PATH", str(fake_ix))
 
     db = SqliteConnection(tmp_path / "x.db")
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
     sub = SubAgentRunner(locks, tr)
 
@@ -2250,10 +2276,12 @@ async def test_profile_executor_patches_configured_inferencex_path(
         return subprocess.CompletedProcess(args=[], returncode=0, stdout="ok", stderr="")
 
     pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
-    task = await tr.create(
-        kind="profile",
-        params={"output_dir": str(output_dir), "config_path": str(_PROFILE_SGLANG_CONFIG)},
-        idempotency_key="prof-inferencex-path",
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="profile",
+            params={"output_dir": str(output_dir), "config_path": str(_PROFILE_SGLANG_CONFIG)},
+            idempotency_key="prof-inferencex-path",
+        ),
     )
     sub.register_executor("profile", pe)
     with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run_ix):
@@ -2271,7 +2299,7 @@ async def test_profile_executor_patches_configured_inferencex_path(
 @pytest.mark.asyncio
 async def test_profile_executor_prefers_workspace_trace_over_capture_sidecar(tmp_path):
     db = SqliteConnection(tmp_path / "x.db")
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
     sub = SubAgentRunner(locks, tr)
 
@@ -2307,10 +2335,12 @@ async def test_profile_executor_prefers_workspace_trace_over_capture_sidecar(tmp
         return subprocess.CompletedProcess(args=[], returncode=0, stdout="ok", stderr="")
 
     pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
-    task = await tr.create(
-        kind="profile",
-        params={"output_dir": str(output_dir), "config_path": str(_PROFILE_SGLANG_CONFIG)},
-        idempotency_key="prof-capture",
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="profile",
+            params={"output_dir": str(output_dir), "config_path": str(_PROFILE_SGLANG_CONFIG)},
+            idempotency_key="prof-capture",
+        ),
     )
     sub.register_executor("profile", pe)
     with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
@@ -2414,35 +2444,11 @@ def test_upstream_sglang_capture_directory_passes_health_check(tmp_path):
 
 # kernel_request_handlers — direct unit
 @pytest.mark.asyncio
-async def test_trace_analyze_handler_dry_run_returns_structured_result(session_dir):
-    """The handler surfaces the tool's structured JSON verbatim (status + run_id + session_id)."""
-    fake_trace = session_dir / "fake_trace_dir"
-    fake_trace.mkdir()
-    payload = {
-        "trace_input": str(fake_trace),
-        "session_id": session_dir.name,
-        "model_name": "Qwen3-8B",
-        "framework": "sglang",
-        "top_k": 5,
-        "dry_run": True,
-        "budget_minutes": 1,
-        # Exercise the structured-result plumbing via the explicit bypass route (the default is now the TraceLens
-        # agent route, which needs a real root).
-        "analysis_route": "bypass",
-    }
-    res = await ta.trace_analyze_handler(payload, session_dir=session_dir)
-    # Structured result surfaced verbatim by the bypass backend.
-    assert res["status"] in ("ok", "succeeded", "failed")
-    assert res.get("route") == "bypass"
-    assert res.get("candidates_path") and "artifact_paths" in res
-
-
-@pytest.mark.asyncio
 async def test_trace_analyze_handler_rejects_non_string_analysis_route(session_dir):
     """A non-string route is coerced into a structured validation error."""
     fake_trace = session_dir / "fake_trace_dir"
     fake_trace.mkdir()
-    for bad_route in (True, ["bypass"], {"route": "agent"}, 1):
+    for bad_route in (True, ["non-llm"], {"route": "agent"}, 1):
         payload = {
             "trace_input": str(fake_trace),
             "session_id": session_dir.name,
@@ -2460,11 +2466,11 @@ async def test_trace_analyze_handler_rejects_non_string_analysis_route(session_d
 
 @pytest.mark.asyncio
 async def test_trace_analyze_handler_xdit_defaults_to_tracelens_agent(session_dir, monkeypatch):
-    """With no explicit route, every framework (incl. xDiT) DEFAULTS to the TraceLens ``agent`` route (the shipped default); bypass is an explicit route."""
-    monkeypatch.setattr(krh.sys, "executable", "/task/deps/venv/bin/python")
+    """With no explicit route, every framework (incl. xDiT) DEFAULTS to the TraceLens ``agent`` route (the shipped default); ``non-llm`` is an explicit route."""
+    monkeypatch.setattr(sys, "executable", "/task/deps/venv/bin/python")
     monkeypatch.setenv("PATH", "/opt/venv/bin:/usr/bin")
     monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
-    monkeypatch.setattr(ta, "_resolve_tracelens_root", lambda: session_dir)
+    monkeypatch.setattr(session_paths, "tracelens_root", lambda: session_dir)
     monkeypatch.setattr(ta, "_tracelens_root_error", lambda root: None)
     fake_trace = session_dir / "fake_trace_dir"
     fake_trace.mkdir()
@@ -2608,16 +2614,18 @@ async def test_trace_analyze_handler_payload_framework_overrides_serving_state(
 
 
 @pytest.mark.asyncio
-async def test_trace_analyze_handler_env_route_forces_bypass(session_dir, monkeypatch):
-    """HYPERLOOM_TRACE_ANALYSIS_ROUTE=bypass forces the independent backend even for a text-gen framework (explicit env route wins over the default)."""
-    monkeypatch.setenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "bypass")
+async def test_trace_analyze_handler_env_route_selects_non_llm(session_dir, monkeypatch):
+    """HYPERLOOM_TRACE_ANALYSIS_ROUTE=non-llm selects the no-LLM route even for a text-gen framework (explicit env route wins over the default)."""
+    monkeypatch.setenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "non-llm")
+    monkeypatch.setattr(session_paths, "tracelens_root", lambda: session_dir)
+    monkeypatch.setattr(ta, "_tracelens_root_error", lambda root: None)
     fake_trace = session_dir / "fake_trace_dir"
     fake_trace.mkdir()
     captured: dict = {}
 
     async def fake_run_subprocess(cmd, *, timeout_sec, **_kwargs):
         captured["cmd"] = list(cmd)
-        return 0, json.dumps({"status": "ok", "orchestrator_mode": "bypass", "hot_kernels": []}), ""
+        return 0, json.dumps({"status": "ok", "orchestrator_mode": "non-llm", "hot_kernels": []}), ""
 
     monkeypatch.setattr(ta, "_run_subprocess", fake_run_subprocess)
     res = await ta.trace_analyze_handler(
@@ -2631,15 +2639,15 @@ async def test_trace_analyze_handler_env_route_forces_bypass(session_dir, monkey
     )
     assert res["status"] == "ok"
     cmd = captured["cmd"]
-    assert cmd[1:3] == ["-m", ta._BYPASS_TRACE_ANALYSIS_MODULE]
-    assert "--tracelens-root" not in cmd
+    assert cmd[1:3] == ["-m", ta._TRACELENS_ANALYSIS_MODULE]
+    assert cmd[cmd.index("--route") + 1] == "non-llm"
 
 
 @pytest.mark.asyncio
 async def test_trace_analyze_handler_text_gen_defaults_to_tracelens_agent(session_dir, monkeypatch):
     """Text-gen with no explicit route DEFAULTS to the TraceLens ``agent`` route (the shipped default)."""
     monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
-    monkeypatch.setattr(ta, "_resolve_tracelens_root", lambda: session_dir)
+    monkeypatch.setattr(session_paths, "tracelens_root", lambda: session_dir)
     monkeypatch.setattr(ta, "_tracelens_root_error", lambda root: None)
     fake_trace = session_dir / "fake_trace_dir"
     fake_trace.mkdir()
@@ -2662,15 +2670,16 @@ async def test_trace_analyze_handler_text_gen_defaults_to_tracelens_agent(sessio
     assert res["status"] == "ok"
     cmd = captured["cmd"]
     assert cmd[1:3] == ["-m", ta._TRACELENS_ANALYSIS_MODULE]
+    assert cmd[cmd.index("--route") + 1] == "agent"
 
 
 @pytest.mark.parametrize(
     ("payload_route", "env_route", "requested_route"),
     [
-        ("foobar", "bypass", "foobar"),
-        ("deterministic", "bypass", "deterministic"),
-        (False, "bypass", "false"),
-        (0, "bypass", "0"),
+        ("foobar", "non-llm", "foobar"),
+        ("deterministic", "agent", "deterministic"),
+        (False, "non-llm", "false"),
+        (0, "non-llm", "0"),
         (None, "deterministic", "deterministic"),
     ],
 )
@@ -2693,7 +2702,7 @@ async def test_trace_analyze_handler_rejects_invalid_route_before_dispatch(
     async def fail_run_subprocess(cmd, *, timeout_sec, **_kwargs):
         pytest.fail("invalid route must not launch a subprocess")
 
-    monkeypatch.setattr(ta, "_resolve_tracelens_root", fail_resolve_tracelens_root)
+    monkeypatch.setattr(session_paths, "tracelens_root", fail_resolve_tracelens_root)
     monkeypatch.setattr(ta, "_run_subprocess", fail_run_subprocess)
     payload = {
         "trace_input": str(fake_trace),
@@ -2710,15 +2719,15 @@ async def test_trace_analyze_handler_rejects_invalid_route_before_dispatch(
     assert res["status"] == "failed"
     assert res["error_class"] == "invalid_analysis_route"
     assert res["requested_route"] == requested_route
-    assert res["valid_routes"] == ["agent", "bypass"]
+    assert res["valid_routes"] == ["agent", "non-llm"]
     assert "no-LLM" in res["error"]
 
 
 @pytest.mark.asyncio
 async def test_trace_analyze_handler_scriptable_converges_route_params(session_dir, monkeypatch):
-    """Scriptable (xDiT) params converge by route: --steady-state-mode generic is TraceLens-only, while --num-denoise-steps is forwarded to BOTH routes (bypass consumes it)."""
+    """Scriptable (xDiT) params reach the tool on both routes: --steady-state-mode generic."""
     monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
-    monkeypatch.setattr(ta, "_resolve_tracelens_root", lambda: session_dir)
+    monkeypatch.setattr(session_paths, "tracelens_root", lambda: session_dir)
     monkeypatch.setattr(ta, "_tracelens_root_error", lambda root: None)
     fake_trace = session_dir / "fake_trace_dir"
     fake_trace.mkdir()
@@ -2733,29 +2742,21 @@ async def test_trace_analyze_handler_scriptable_converges_route_params(session_d
         "trace_input": str(fake_trace),
         "session_id": session_dir.name,
         "framework": "xdit",
-        "num_denoise_steps": 20,
         "top_k": 5,
     }
-    # Explicit bypass route: no --skip-split, but --num-denoise-steps forwarded.
-    await ta.trace_analyze_handler({**base, "analysis_route": "bypass"}, session_dir=session_dir)
-    cmd = captured["cmd"]
-    assert cmd[1:3] == ["-m", ta._BYPASS_TRACE_ANALYSIS_MODULE]
-    assert "--skip-split" not in cmd
-    assert "--num-denoise-steps" in cmd and "20" in cmd
-    # TraceLens (agent) route: both flags present.
-    await ta.trace_analyze_handler({**base, "analysis_route": "agent"}, session_dir=session_dir)
-    cmd = captured["cmd"]
-    assert cmd[1:3] == ["-m", ta._TRACELENS_ANALYSIS_MODULE]
-    assert "--steady-state-mode" in cmd and cmd[cmd.index("--steady-state-mode") + 1] == "generic"
-    assert "--num-denoise-steps" in cmd
+    for route in ("agent", "non-llm"):
+        await ta.trace_analyze_handler({**base, "analysis_route": route}, session_dir=session_dir)
+        cmd = captured["cmd"]
+        assert cmd[1:3] == ["-m", ta._TRACELENS_ANALYSIS_MODULE]
+        assert cmd[cmd.index("--steady-state-mode") + 1] == "generic"
 
 
 @pytest.mark.asyncio
-async def test_trace_analyze_handler_records_bypass_discovery_success(
+async def test_trace_analyze_handler_records_non_llm_discovery_success(
     session_dir,
     monkeypatch,
 ):
-    """The bypass route surfaces a kernel_journey discovery run labelled source="bypass", carrying the real hot kernels."""
+    """The non-llm route surfaces a kernel_journey discovery run labelled source="tracelens", carrying the real hot kernels."""
     from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts
 
     fake_trace = session_dir / "fake_trace_dir"
@@ -2767,7 +2768,7 @@ async def test_trace_analyze_handler_records_bypass_discovery_success(
         captured["cmd"] = list(cmd)
         payload = {
             "status": "ok",
-            "orchestrator_mode": "bypass",
+            "orchestrator_mode": "non-llm",
             "hot_kernels": [
                 {
                     "kernel_id": "k001",
@@ -2787,22 +2788,21 @@ async def test_trace_analyze_handler_records_bypass_discovery_success(
         {
             "trace_input": str(fake_trace),
             "session_id": session_dir.name,
-            "analysis_route": "bypass",
+            "analysis_route": "non-llm",
             "top_k": 5,
         },
         session_dir=session_dir,
     )
     assert res["status"] == "ok"
-    # The bypass route dispatches its own tool, never TraceLens.
-    assert captured["cmd"][1:3] == ["-m", ta._BYPASS_TRACE_ANALYSIS_MODULE]
+    assert captured["cmd"][captured["cmd"].index("--route") + 1] == "non-llm"
 
     meta = res["analysis_meta"]
-    assert meta["route"] == "bypass"
-    assert meta["tool"] == "bypass"
+    assert meta["route"] == "non-llm"
+    assert meta["tool"] == "tracelens"
     assert {k["name"] for k in res["hot_kernels"]} == {"fused_moe", "rms_norm"}
-    # The build of the reader that produced these kernels is in scope only
+    # The build of the tool that produced these kernels is in scope only
     # here, so the handler records it rather than leaving it to a caller.
-    assert "bypass" in assemble_parts(session_dir)["metadata"]["versions"]["tools"]
+    assert "tracelens" in assemble_parts(session_dir)["metadata"]["versions"]["tools"]
 
 
 @pytest.mark.asyncio
@@ -2824,7 +2824,7 @@ async def test_trace_analyze_handler_omits_top_k_when_not_requested(
         {
             "trace_input": str(fake_trace),
             "session_id": session_dir.name,
-            "analysis_route": "bypass",
+            "analysis_route": "non-llm",
         },
         session_dir=session_dir,
     )
@@ -2851,7 +2851,7 @@ async def test_trace_analyze_handler_does_not_forward_top_k(
         {
             "trace_input": str(fake_trace),
             "session_id": session_dir.name,
-            "analysis_route": "bypass",
+            "analysis_route": "non-llm",
             "top_k": 20,
         },
         session_dir=session_dir,
@@ -2861,11 +2861,11 @@ async def test_trace_analyze_handler_does_not_forward_top_k(
 
 
 @pytest.mark.asyncio
-async def test_trace_analyze_handler_records_bypass_discovery_failed(
+async def test_trace_analyze_handler_records_non_llm_discovery_failed(
     session_dir,
     monkeypatch,
 ):
-    """Fail-loud bypass pipeline -> discovery run status=failed with the error text and an empty hot-kernel list, still labelled source="bypass"."""
+    """A failed non-llm run -> discovery run status=failed with the error text and an empty hot-kernel list, still labelled source="tracelens"."""
     from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts
 
     fake_trace = session_dir / "fake_trace_dir"
@@ -2874,8 +2874,8 @@ async def test_trace_analyze_handler_records_bypass_discovery_failed(
     async def fake_run_subprocess(cmd, *, timeout_sec, **_kwargs):
         payload = {
             "status": "failed",
-            "orchestrator_mode": "bypass",
-            "error": "bypass: trace reader found no GPU kernel events",
+            "orchestrator_mode": "non-llm",
+            "error": "trace has no GPU kernel events",
             "hot_kernels": [],
         }
         return 1, json.dumps(payload), "boom"
@@ -2885,28 +2885,28 @@ async def test_trace_analyze_handler_records_bypass_discovery_failed(
         {
             "trace_input": str(fake_trace),
             "session_id": session_dir.name,
-            "analysis_route": "bypass",
+            "analysis_route": "non-llm",
         },
         session_dir=session_dir,
     )
     assert res["status"] == "failed"
 
     meta = res["analysis_meta"]
-    assert meta["route"] == "bypass"
-    assert meta["tool"] == "bypass"
+    assert meta["route"] == "non-llm"
+    assert meta["tool"] == "tracelens"
     assert not res.get("hot_kernels")
     assert res["error"]
-    # A failed read still identifies the build that failed.
-    assert "bypass" in assemble_parts(session_dir)["metadata"]["versions"]["tools"]
+    # A failed run still identifies the build that failed.
+    assert "tracelens" in assemble_parts(session_dir)["metadata"]["versions"]["tools"]
 
 
 @pytest.mark.asyncio
-async def test_trace_analyze_handler_records_bypass_discovery_high_idle_empty(
+async def test_trace_analyze_handler_records_non_llm_discovery_high_idle_empty(
     session_dir,
     monkeypatch,
 ):
     """High-idle gate suppresses hot kernels but the run still succeeds -> a
-    bypass discovery run with status=ok and hot_kernel_count=0."""
+    non-llm discovery run with status=ok and hot_kernel_count=0."""
 
     fake_trace = session_dir / "fake_trace_dir"
     fake_trace.mkdir()
@@ -2914,7 +2914,7 @@ async def test_trace_analyze_handler_records_bypass_discovery_high_idle_empty(
     async def fake_run_subprocess(cmd, *, timeout_sec, **_kwargs):
         payload = {
             "status": "ok",
-            "orchestrator_mode": "bypass",
+            "orchestrator_mode": "non-llm",
             "hot_kernels": [],
             "trace_health_warnings": [
                 {"code": "high_gpu_idle", "severity": "warning"},
@@ -2927,15 +2927,15 @@ async def test_trace_analyze_handler_records_bypass_discovery_high_idle_empty(
         {
             "trace_input": str(fake_trace),
             "session_id": session_dir.name,
-            "analysis_route": "bypass",
+            "analysis_route": "non-llm",
         },
         session_dir=session_dir,
     )
     assert res["status"] == "ok"
 
     meta = res["analysis_meta"]
-    assert meta["route"] == "bypass"
-    assert meta["tool"] == "bypass"
+    assert meta["route"] == "non-llm"
+    assert meta["tool"] == "tracelens"
     assert not res.get("hot_kernels")
 
 
@@ -2944,7 +2944,7 @@ async def test_trace_analyze_handler_agent_route_stays_tracelens(
     session_dir,
     monkeypatch,
 ):
-    """The LLM/agent route keeps source="tracelens" (regression guard for the bypass relabel), while the scan still names the route the caller asked for."""
+    """The LLM/agent route keeps source="tracelens" (the same tool as the non-llm route), while the scan still names the route the caller asked for."""
     from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts
 
     fake_trace = session_dir / "fake_trace_dir"
@@ -3494,7 +3494,7 @@ def test_record_trace_analyze_persists_task_groups(session_dir):
         artifact="/tmp/k004.py",
         task_group_key="k004",
     )
-    assert state.untried_hot_reusable_kernels() == [], (
+    assert kd.untried_hot_reusable_kernels(state) == [], (
         "k001/k003 must be filtered out because their groups have an attempted member (k002 / k004 respectively)"
     )
 
@@ -3776,10 +3776,10 @@ async def test_trace_analyze_handler_t4_failure_appends_to_existing_warnings(
 
 def test_handlers_dispatch_table():
     """Dispatch table includes trace_analyze, not the Coordinator-owned lanes or unknown kinds."""
-    assert krh.get_handler("trace_analyze") is not None
-    assert krh.get_handler("run_gemm_tuning") is None
-    assert krh.get_handler("run_optimization") is None
-    assert krh.get_handler("totally_unknown_kind") is None
+    assert "trace_analyze" in krh.KERNEL_REQUEST_HANDLERS
+    assert "run_gemm_tuning" not in krh.KERNEL_REQUEST_HANDLERS
+    assert "run_optimization" not in krh.KERNEL_REQUEST_HANDLERS
+    assert "totally_unknown_kind" not in krh.KERNEL_REQUEST_HANDLERS
 
 
 # _batch_kernel_candidates collapses task_group members.
@@ -4060,10 +4060,10 @@ def test_an_integrate_naming_only_a_kernel_id_resolves_any_queued_keep(session_d
     seed_kernel_keep(state, "k001", micro=2.0, source_file="/p/moe_op.py", artifact="/tmp/k001.py")
     state.save(session_dir)
 
-    payload = krh._fill_integrate_defaults_from_state(
+    payload = integrate_payload._fill_integrate_defaults_from_state(
         {"kernel_id": "k001", "base_tput": 4500.0}, session_dir=session_dir
     )
-    resolved, missing = krh._resolve_integrate_payload(payload, session_dir=session_dir)
+    resolved, missing = integrate_payload._resolve_integrate_payload(payload, session_dir=session_dir)
 
     assert missing is None, missing
     assert resolved.get("patch_path") == "/tmp/k001.py"
@@ -4138,10 +4138,9 @@ def test_agentx_primary_trace_prefers_rank_zero_over_merged(tmp_path):
     rank_zero.write_bytes(b"x" * 100)
     rank_one.write_bytes(b"rank-one")
 
-    selected = _preferred_main_trace_path(
-        trace_dir,
+    selected = select_primary_trace(
         [rank_zero_warmup, merged, rank_one, rank_zero],
-        require_single_rank=True,
+        file_size=_trace_size_bytes,
         tensor_parallel_size=2,
     )
 
@@ -4153,10 +4152,9 @@ def test_agentx_primary_trace_does_not_fall_back_to_multi_rank_merge(tmp_path):
     merged = trace_dir / "merged-177.trace.json.gz"
 
     assert (
-        _preferred_main_trace_path(
-            trace_dir,
+        select_primary_trace(
             [merged],
-            require_single_rank=True,
+            file_size=_trace_size_bytes,
             tensor_parallel_size=8,
         )
         is None
@@ -4168,10 +4166,9 @@ def test_agentx_single_unranked_trace_is_safe_without_tp_environment(tmp_path):
     trace = trace_dir / "worker.pt.trace.json.gz"
 
     assert (
-        _preferred_main_trace_path(
-            trace_dir,
+        select_primary_trace(
             [trace],
-            require_single_rank=True,
+            file_size=_trace_size_bytes,
             tensor_parallel_size=None,
         )
         == trace
@@ -4190,10 +4187,9 @@ def test_agentx_tp8_does_not_substitute_only_non_primary_trace(tmp_path, trace_n
     trace = trace_dir / trace_name
 
     assert (
-        _preferred_main_trace_path(
-            trace_dir,
+        select_primary_trace(
             [trace],
-            require_single_rank=True,
+            file_size=_trace_size_bytes,
             tensor_parallel_size=8,
         )
         is None
@@ -4205,10 +4201,9 @@ def test_agentx_tp1_can_use_single_merged_trace_as_compatibility_fallback(tmp_pa
     merged = trace_dir / "merged-177.trace.json.gz"
 
     assert (
-        _preferred_main_trace_path(
-            trace_dir,
+        select_primary_trace(
             [merged],
-            require_single_rank=True,
+            file_size=_trace_size_bytes,
             tensor_parallel_size=1,
         )
         == merged

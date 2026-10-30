@@ -22,7 +22,7 @@ from hyperloom.orchestrator.roles import (
     MockCriticBackend,
 )
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
-from hyperloom.orchestrator.scoring.proposal_scorer import DEFAULT_SCORER_MODELS, ProposalScorer
+from hyperloom.orchestrator.scoring.proposal_scorer import ProposalScorer
 
 CRITIC_PROTOCOL_CHOICES: tuple[str, ...] = ("auto", "openai", "anthropic")
 
@@ -72,9 +72,6 @@ def critic_on_codex_side(*, codex_follows_claude: bool, claude_follows_codex: bo
 
 def _resolve_critic_protocol(requested: str, *, orchestration_on_codex: bool) -> str:
     """Pick the critic's review protocol and verify that side is configured."""
-    if requested not in CRITIC_PROTOCOL_CHOICES:
-        raise ValueError(f"_build_backends: critic_protocol={requested!r} not in {set(CRITIC_PROTOCOL_CHOICES)}")
-
     if requested == "auto":
         # The critic reviews on the side the orchestration model was validated on, so a launch configures one model
         # and every role uses it.
@@ -137,11 +134,10 @@ class ModelRouting:
 
 @dataclass(frozen=True)
 class CriticSetup:
-    """Which critic the run uses (``mock`` or ``agent``), its runtime root and KB mode, and the review protocol."""
+    """Which critic the run uses (``mock`` or ``agent``), its runtime root, and the review protocol."""
 
     choice: str
     agent_root: Path | None = None
-    kb_mode: str = "inmemory"
     protocol: str = "auto"
 
 
@@ -166,11 +162,9 @@ def _build_orchestration_backend(models: ModelRouting, *, session_dir: Path) -> 
         )
     # Orchestration is stateless: every tick opens a fresh session and
     # carries the full state projection, so it needs the agentic turn
-    # budget and the orchestration effort tier.
+    # budget.
     return ClaudeBackend(
         model=models.claude_model,
-        effort_role=_ORCHESTRATION_ROLE,
-        capture_turn_diagnostics=True,
         allowed_intents=allowed_intents,
     )
 
@@ -179,9 +173,6 @@ def _build_backends(models: ModelRouting, critic: CriticSetup, *, session_dir: P
     """Construct all per-role backends."""
     critic_choice, critic_agent_root = critic.choice, critic.agent_root
     claude_model, codex_model = models.claude_model, models.codex_model
-    if critic_choice not in ("mock", "agent"):
-        raise ValueError(f"_build_backends: critic_choice={critic_choice!r} not in {{'mock','agent'}}")
-
     # The critic reviews on the side the orchestration backend runs on.
     orchestration_on_codex = critic_on_codex_side(
         codex_follows_claude=models.codex_follows_claude, claude_follows_codex=models.claude_follows_codex
@@ -190,10 +181,6 @@ def _build_backends(models: ModelRouting, critic: CriticSetup, *, session_dir: P
     if critic_choice == "mock":
         critic_backend: Any = MockCriticBackend()
     else:  # "agent"
-        # No degraded critic: dropping the runtime would silently discard KB priors, session memory and
-        # reviewed_msg_ids dedupe.
-        if critic_agent_root is None:
-            raise ValueError("_build_backends: critic_choice='agent' requires critic_agent_root")
         protocol = _resolve_critic_protocol(
             critic.protocol,
             orchestration_on_codex=orchestration_on_codex,
@@ -206,7 +193,6 @@ def _build_backends(models: ModelRouting, critic: CriticSetup, *, session_dir: P
                 protocol="anthropic",
                 claude_model=claude_model,
                 codex_model=codex_model,
-                kb_mode=critic.kb_mode,
                 action_verdict_policy=_policy,
             )
         else:
@@ -215,7 +201,6 @@ def _build_backends(models: ModelRouting, critic: CriticSetup, *, session_dir: P
                 session_dir=session_dir,
                 protocol="openai",
                 codex_model=codex_model,
-                kb_mode=critic.kb_mode,
                 action_verdict_policy=_policy,
             )
 
@@ -247,11 +232,7 @@ def _build_proposal_scorer(
     if llm_config.is_anthropic_only():
         # ProposalScorer is OpenAI-compatible only.
         return None
-    raw = getattr(args, "proposal_scorer_models", None)
-    if raw is None:
-        models = tuple(DEFAULT_SCORER_MODELS)
-    else:
-        models = tuple(m for m in (s.strip() for s in str(raw).split(",")) if m)
+    models = tuple(m for m in (s.strip() for s in str(args.proposal_scorer_models).split(",")) if m)
     if not models:
         return None
     return ProposalScorer(models=models, session_dir=session_dir)

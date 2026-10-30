@@ -265,7 +265,6 @@ def materialize_candidate_patches(
     params: dict[str, Any],
     framework_root: Path,
     dest: Path,
-    diff_fetch_timeout_sec: float,
 ) -> PrMaterialization:
     """Resolve an upstream-PR candidate into local patch files; a fetched diff is written to ``dest``."""
     explicit = _materialize_explicit_patches(params)
@@ -289,13 +288,13 @@ def materialize_candidate_patches(
             framework_root,
             candidate,
             dest,
-            timeout_sec=diff_fetch_timeout_sec * 4.0,
+            timeout_sec=DEFAULT_DIFF_FETCH_TIMEOUT_SEC * 4.0,
         )
         if not ok and diff_url:
             # A worktree/fetch hiccup must not strand a candidate that would apply.
             log.warning("upstream_pr: checkout-head failed (%s); falling back to diff_url", err)
             mode = "diff_url_fallback"
-            ok, err = _fetch_diff_to_path(diff_url, dest, timeout_sec=diff_fetch_timeout_sec)
+            ok, err = _fetch_diff_to_path(diff_url, dest, timeout_sec=DEFAULT_DIFF_FETCH_TIMEOUT_SEC)
         if not ok:
             return PrMaterialization(
                 mode=mode,
@@ -308,7 +307,7 @@ def materialize_candidate_patches(
             )
         return PrMaterialization(patches=[dest.resolve()], mode=mode)
 
-    ok, err = _fetch_diff_to_path(diff_url, dest, timeout_sec=diff_fetch_timeout_sec)
+    ok, err = _fetch_diff_to_path(diff_url, dest, timeout_sec=DEFAULT_DIFF_FETCH_TIMEOUT_SEC)
     if not ok:
         return PrMaterialization(
             mode="diff_url",

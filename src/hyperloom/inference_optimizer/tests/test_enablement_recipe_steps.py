@@ -12,14 +12,13 @@ from pathlib import Path
 import pytest
 
 from hyperloom.orchestrator.enablement.recipe.section import collect_enablement
-from hyperloom.orchestrator.enablement.recipe.attempts import build_attempt_summary as _build_attempt_summary
 from hyperloom.orchestrator.enablement.recipe.steps import build_recipe_steps
 
 SPEC_TASK = "spec-final"
 
 
 def _steps(**enablement):
-    return build_recipe_steps(enablement, attempt_summary=_build_attempt_summary)
+    return build_recipe_steps(enablement)
 
 
 def _kinds(steps):
@@ -195,15 +194,11 @@ def test_each_patch_step_names_the_root_it_was_resolved_against():
     assert [s["root_id"] for s in steps] == ["r-vllm", "r-aiter"]
 
 
-def test_recipe_steps_reuses_build_attempt_summary():
-    entry = _attempt(action={"component": "aiter", "max_jobs": 4})
-    steps = _steps(build_manifest=[entry, _sentinel()], last_specialist_task_id=SPEC_TASK)
-    summary = _build_attempt_summary(entry)
-    build = steps[0]
-    assert build["ref"] == summary["ref"]
-    assert build["gpu_arch"] == summary["gpu_arch"]
-    assert build["component"] == summary["component"]
-    assert build["max_jobs"] == summary["max_jobs"]
+@pytest.mark.parametrize("ref_key", ["aiter_ref", "vllm_ref", "sgl_kernel_ref"])
+def test_recipe_steps_build_reads_ref_and_arch_off_the_installed_versions(ref_key):
+    entry = _attempt(installed_versions={ref_key: "v9", "arch": "gfx942"})
+    build = _steps(build_manifest=[entry, _sentinel()], last_specialist_task_id=SPEC_TASK)[0]
+    assert build["ref"] == "v9" and build["gpu_arch"] == "gfx942"
 
 
 def test_recipe_steps_build_nulls_absent_component_and_max_jobs():
@@ -229,14 +224,6 @@ def test_the_build_element_declares_its_contract_keys_and_no_others():
         "build_driver",
         "build_inputs",
     }
-
-
-def test_recipe_steps_build_populates_component_when_present():
-    steps = _steps(
-        build_manifest=[_attempt(action={"component": "vllm", "max_jobs": 12}), _sentinel()],
-        last_specialist_task_id=SPEC_TASK,
-    )
-    assert steps[0]["component"] == "vllm" and steps[0]["max_jobs"] == 12
 
 
 def test_recipe_steps_includes_advanced_round():
@@ -272,12 +259,7 @@ def test_recipe_steps_artifact_selection_includes_advanced_round():
     artifact = {"target": "/fr/srt/a.py", "rel_target": "srt/a.py"}
     out = collect_enablement(
         Path("/tmp/sess"),
-        {
-            "enablement_attempts": 1,
-            "enablement_kept_rounds": [{"patches": [], "artifacts": [artifact]}],
-            "enablement_kept_artifacts": [artifact],
-        },
-        [],
+        {"enablement": {"kept_rounds": [{"patches": [], "artifacts": [artifact]}], "kept_artifacts": [artifact]}},
     )
     # The portable pair, not the install path: nothing reads ``target`` and it
     # names a directory on the machine that produced the recipe.
@@ -292,15 +274,15 @@ def test_recipe_steps_artifact_selection_excludes_superseded_target():
     out = collect_enablement(
         Path("/tmp/sess"),
         {
-            "enablement_attempts": 1,
-            "enablement_kept_rounds": [
-                {"patches": ["/p/1.patch"], "artifacts": [early]},
-                {"patches": [], "artifacts": [late]},
-            ],
-            "enablement_kept_artifacts": [late],
-            "enablement_kept_patches": ["/p/1.patch"],
+            "enablement": {
+                "kept_rounds": [
+                    {"patches": ["/p/1.patch"], "artifacts": [early]},
+                    {"patches": [], "artifacts": [late]},
+                ],
+                "kept_artifacts": [late],
+                "kept_patches": ["/p/1.patch"],
+            }
         },
-        [],
     )
     assert [a["kind"] for a in out["kept_artifacts"]] == ["late"]
 
@@ -312,15 +294,16 @@ def test_a_kept_artifact_carries_the_root_its_own_resolution_returned():
     out = collect_enablement(
         Path("/tmp/sess"),
         {
-            "enablement_attempts": 1,
-            "enablement_kept_artifacts": [artifact],
-            "enablement_framework_root": "/fr",
-            "enablement_roots": [
-                {"id": "r1", "path": "/fr"},
-                {"id": "r2", "path": "/pkg"},
-            ],
+            "enablement": {
+                "last_specialist_task_id": SPEC_TASK,
+                "kept_artifacts": [artifact],
+                "framework_root": "/fr",
+                "roots": [
+                    {"id": "r1", "path": "/fr"},
+                    {"id": "r2", "path": "/pkg"},
+                ],
+            }
         },
-        [],
     )
     assert [a["root_id"] for a in out["kept_artifacts"]] == ["r2"]
 
@@ -329,11 +312,12 @@ def test_a_kept_artifact_bound_to_no_recorded_root_carries_a_null_root_id():
     out = collect_enablement(
         Path("/tmp/sess"),
         {
-            "enablement_attempts": 1,
-            "enablement_kept_artifacts": [{"target": "/x/a.py", "rel_target": "a.py", "root": "/x"}],
-            "enablement_roots": [{"id": "r1", "path": "/fr"}],
+            "enablement": {
+                "last_specialist_task_id": SPEC_TASK,
+                "kept_artifacts": [{"target": "/x/a.py", "rel_target": "a.py", "root": "/x"}],
+                "roots": [{"id": "r1", "path": "/fr"}],
+            }
         },
-        [],
     )
     assert out["kept_artifacts"][0]["root_id"] is None
 
@@ -414,7 +398,7 @@ def test_recipe_steps_is_pure_declarative_data():
     steps = _steps(
         setup_commands=["pip install a"],
         kept_patches=["/p/1.patch"],
-        build_manifest=[_attempt(build_inputs={"component": "aiter", "env_keys": ["K"]}), _sentinel()],
+        build_manifest=[_attempt(build_inputs={"component": "aiter", "ambient_keys": ["K"]}), _sentinel()],
         last_specialist_task_id=SPEC_TASK,
         framework_root="/fr",
     )
@@ -429,8 +413,9 @@ def test_recipe_steps_is_pure_declarative_data():
 
 
 def test_recipe_steps_absent_for_empty_enablement():
-    assert collect_enablement(Path("/tmp"), {}, []) == {}
-    engaged = collect_enablement(Path("/tmp"), {"enablement_attempts": 1}, [])
+    assert collect_enablement(Path("/tmp"), {}) == {}
+    engaged = collect_enablement(Path("/tmp"), {"enablement": {"last_specialist_task_id": SPEC_TASK}})
+    assert engaged
     assert "recipe_steps" not in engaged
 
 
@@ -461,7 +446,7 @@ def test_remote_recipe_unaffected_by_recipe_steps():
 
 
 # --------------------------------------------------------------------------
-# The lane-status keys the export carries, and what each is read off.
+# The gate that decides whether the section is emitted at all.
 # --------------------------------------------------------------------------
 
 
@@ -471,58 +456,25 @@ def test_a_trigger_observation_is_not_evidence_that_a_round_ran():
     round is dispatched. Reading it as dispatch evidence reports a lane that
     never opened a round as one that did."""
     state = {"enablement": {"launch_observation_path": "/s/reports/bringup/round-abc-000.json"}}
-    section = collect_enablement(Path("/tmp"), state, [])
-    assert section == {} or section["dispatched"] is False
+    assert collect_enablement(Path("/tmp"), state) == {}
 
 
-def test_the_specialist_a_round_settled_onto_is_dispatch_evidence():
+def test_the_specialist_a_round_settled_onto_opens_the_section():
     state = {"enablement": {"last_specialist_task_id": "spec-1"}}
-    assert collect_enablement(Path("/tmp"), state, [])["dispatched"] is True
+    assert "replay_sufficiency" in collect_enablement(Path("/tmp"), state)
 
 
-def test_a_setup_row_a_round_stamped_its_id_onto_is_dispatch_evidence():
-    """The post-rework case the task-id fields alone cannot see: a round that
-    ran setup and was killed before it settled."""
-    state = {"enablement": {"setup_executions": [{"seq": 1, "round_task_id": "spec-1"}]}}
-    assert collect_enablement(Path("/tmp"), state, [])["dispatched"] is True
-
-
-def test_an_unattributed_setup_row_is_not_dispatch_evidence():
-    state = {"enablement": {"setup_executions": [{"seq": 1, "round_task_id": ""}]}}
-    section = collect_enablement(Path("/tmp"), state, [])
-    assert section["dispatched"] is False
-
-
-def test_the_accepted_config_path_reaches_the_export(tmp_path):
-    """A consumer replaying needs the config the accepted bench launched with;
-    the section is where it is named."""
-    state = {"enablement": {"last_specialist_task_id": "spec-1", "accepted_config_path": str(tmp_path / "a.yaml")}}
-    assert collect_enablement(tmp_path, state, [])["accepted_config_path"] == "a.yaml"
-
-
-def test_a_setting_script_that_is_a_directory_is_named_nowhere(tmp_path):
-    """``is_file()``, not ``exists()``: a directory is not a script a consumer
-    can source, and naming it offers a replay input that cannot be replayed."""
-    (tmp_path / "reports" / "enablement" / "enablement_setting.sh").mkdir(parents=True)
-    state = {"enablement": {"last_specialist_task_id": "spec-1"}}
-    assert "setting_script" not in collect_enablement(tmp_path, state, [])
-
-
-def test_a_setting_script_that_is_a_file_is_named(tmp_path):
-    script = tmp_path / "reports" / "enablement" / "enablement_setting.sh"
-    script.parent.mkdir(parents=True)
-    script.write_text("#!/bin/sh\n", encoding="utf-8")
-    state = {"enablement": {"last_specialist_task_id": "spec-1"}}
-    section = collect_enablement(tmp_path, state, [])
-    assert section["setting_script"] == "reports/enablement/enablement_setting.sh"
+def test_a_lane_turned_off_still_emits_the_section():
+    assert "replay_sufficiency" in collect_enablement(Path("/tmp"), {"enablement": {}, "enablement_mode": "off"})
 
 
 def _collected_codes(value, *, present=True):
     """Run real recipe collection and return its replay_sufficiency codes."""
-    state = {"enablement_attempts": 1, "enablement_kept_rounds": [{"patches": [], "artifacts": []}]}
+    enablement = {"kept_rounds": [{"patches": [], "artifacts": []}]}
     if present:
-        state["enablement_build_extensions_not_carried"] = value
-    out = collect_enablement(Path("/tmp/sess"), state, [])
+        enablement["build_extensions_not_carried"] = value
+    state = {"enablement": enablement}
+    out = collect_enablement(Path("/tmp/sess"), state)
     return [r["code"] for r in (out.get("replay_sufficiency") or {}).get("reasons") or []]
 
 
@@ -556,10 +508,11 @@ def test_a_session_predating_the_observation_names_neither():
 
 
 def _collected_lever_codes(value, *, present=True):
-    state = {"enablement_attempts": 1, "enablement_kept_rounds": [{"patches": [], "artifacts": []}]}
+    enablement = {"kept_rounds": [{"patches": [], "artifacts": []}]}
     if present:
-        state["enablement_levers_without_readers"] = value
-    out = collect_enablement(Path("/tmp/sess"), state, [])
+        enablement["levers_without_readers"] = value
+    state = {"enablement": enablement}
+    out = collect_enablement(Path("/tmp/sess"), state)
     return [r["code"] for r in (out.get("replay_sufficiency") or {}).get("reasons") or []]
 
 

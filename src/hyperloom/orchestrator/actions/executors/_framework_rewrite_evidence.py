@@ -421,13 +421,11 @@ def _candidate(
 def _host_call_candidates(
     merged: dict[tuple[str, str], dict[str, Any]],
     wall_seconds: float,
-    hot_loop_start: float | None = None,
+    hot_loop_start: float | None,
 ) -> list[dict[str, Any]]:
     """Classify merged host-API rows into rewrite candidates."""
     out: list[dict[str, Any]] = []
     denom = wall_seconds if wall_seconds > 0 else 0.0
-    if hot_loop_start is None:
-        hot_loop_start = _hot_loop_start(merged)
     for entry in merged.values():
         api = str(entry["api"])
         count = int(entry["count_per_rank"])
@@ -483,7 +481,7 @@ def _host_call_candidates(
 def _fusion_candidates(
     merged: dict[tuple[str, str], dict[str, Any]],
     wall_seconds: float,
-    hot_loop_start: float | None = None,
+    hot_loop_start: float | None,
 ) -> list[dict[str, Any]]:
     """Find tensor collectives issued from several adjacent same-shape sites."""
     out: list[dict[str, Any]] = []
@@ -538,13 +536,11 @@ def _fusion_candidates(
 def _framework_call_candidates(
     merged: dict[str, dict[str, Any]],
     wall_seconds: float,
-    hot_loop_start: float | None = None,
+    hot_loop_start: float | None,
 ) -> list[dict[str, Any]]:
     """Classify merged framework-function rows into rewrite candidates."""
     out: list[dict[str, Any]] = []
     denom = wall_seconds if wall_seconds > 0 else 0.0
-    if hot_loop_start is None:
-        hot_loop_start = _hot_loop_start(merged)
     for entry in merged.values():
         count = int(entry["count_per_rank"])
         if count < MIN_FRAMEWORK_CALLS or int(entry["arg_samples"]) <= 0:

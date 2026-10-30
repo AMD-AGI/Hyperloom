@@ -266,7 +266,7 @@ def _maybe_revert_kernel_patch(apply_result: HandlerResult) -> HandlerResult:
         return {"status": "skipped", "reason": "no applied patch manifest"}
     try:
         return apply_kernel_patch.revert_kernel_patch(apply_result["manifest_path"])
-    except Exception as exc:  # noqa: BLE001
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, RuntimeError) as exc:
         return {
             "status": "failed",
             "error_class": "patch_revert_exception",
@@ -288,7 +288,7 @@ def _maybe_finalize_kernel_patch(
         return {"status": "skipped", "reason": "no applied patch manifest"}
     try:
         return apply_kernel_patch.finalize_kernel_patch(apply_result["manifest_path"])
-    except Exception as exc:  # noqa: BLE001
+    except (OSError, ValueError, TypeError, AttributeError, RuntimeError, subprocess.TimeoutExpired) as exc:
         return {
             "status": "failed",
             "error_class": "patch_finalize_exception",
@@ -364,7 +364,7 @@ async def _run_subprocess(
             ray_gcs_address_from_state,
             infera_ssh_env_from_state,
         )
-        from ._subprocess_kill import run_with_session_kill
+        from ._subprocess_kill import RoundWatch, run_with_session_kill
 
         if is_multi_node():
             # Infera backend: route GEAK GPU work to a pod over SSH (no Ray).
@@ -385,8 +385,7 @@ async def _run_subprocess(
         cp = run_with_session_kill(
             cmd,
             env=child_env,
-            timeout=timeout_sec,
-            text=True,
+            watch=RoundWatch(timeout=timeout_sec),
             on_output=on_output,
         )
         return cp.returncode, cp.stdout or "", cp.stderr or ""

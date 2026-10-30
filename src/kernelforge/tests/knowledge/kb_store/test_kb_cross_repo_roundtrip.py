@@ -11,7 +11,7 @@ from kernelforge.config import Config
 from kernelforge.knowledge.kb_store.reader import read_top_solutions
 from kernelforge.knowledge.kb_store.writer import RunOutcome, write_run_experience
 from kernelforge.knowledge.kb_store.identity.run import LoopKernel
-from kernelforge.knowledge.kb_store.config import KnowledgeConfig
+from kernelforge.config import KnowledgeConfig
 
 TRITON_SRC = "import triton\n@triton.jit\ndef fused_moe_kernel(x):\n    return x\n"
 DIFF = """diff --git a/vllm/model_executor/fused_moe.py b/vllm/model_executor/fused_moe.py

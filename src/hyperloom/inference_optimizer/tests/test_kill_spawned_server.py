@@ -24,10 +24,10 @@ from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     DETOKENIZER_STALL_RETURNCODE,
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
+    RoundWatch,
     _LogCursor,
     _scan_server_log_increment,
     kill_my_spawned_server,
-    new_session_kwargs,
     run_with_session_kill,
     server_log_death_excerpt,
     session_deadline_to_remaining_sec,
@@ -35,8 +35,22 @@ from hyperloom.orchestrator.actions.executors._subprocess_kill import (
 )
 
 
-@pytest.mark.parametrize("text", [True, False])
-def test_capture_partial_utf8_records_bytes_before_newline(text):
+class _FakeCapture:
+    """A capture whose child wrote ``out`` and ``err`` and nothing the watchdog could see arrive."""
+
+    last_activity_at = None
+
+    def __init__(self, out: str = "", err: str = "") -> None:
+        self._captured = (out, err)
+
+    def note_output(self) -> None:
+        pass
+
+    def finish(self) -> tuple[str, str]:
+        return self._captured
+
+
+def test_capture_partial_utf8_records_bytes_before_newline():
     from hyperloom.orchestrator.actions.executors import _subprocess_kill as sk
 
     proc = subprocess.Popen(
@@ -48,7 +62,7 @@ def test_capture_partial_utf8_records_bytes_before_newline(text):
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    capture = sk._StreamCapture(proc, text=text)
+    capture = sk._StreamCapture(proc)
     capture.start()
     try:
         deadline = time.monotonic() + 0.35
@@ -58,8 +72,8 @@ def test_capture_partial_utf8_records_bytes_before_newline(text):
         assert proc.poll() is None
         proc.wait(timeout=5)
         stdout, stderr = capture.finish()
-        assert stdout == ("€" if text else b"\xe2\x82\xac")
-        assert stderr == ("" if text else b"")
+        assert stdout == "€"
+        assert stderr == ""
     finally:
         if proc.poll() is None:
             proc.kill()
@@ -102,10 +116,7 @@ def test_reused_server_with_buffered_client_needs_current_ready_evidence(tmp_pat
     )
     cp = run_with_session_kill(
         [sys.executable, "-c", wrapper, client],
-        server_log_path=str(watched),
-        server_already_ready=True,
-        silence_timeout_sec=0.4,
-        timeout=8,
+        watch=RoundWatch(timeout=8, server_log_path=str(watched), silence_timeout_sec=0.4, server_already_ready=True),
     )
     assert cp.returncode == 0
     assert cp.stdout.splitlines() == ["progress"] * 8
@@ -120,10 +131,9 @@ def test_ready_server_quiet_log_active_partial_pipe_survives(tmp_path, stream):
     )
     cp = run_with_session_kill(
         [sys.executable, "-c", script, str(tmp_path / "server.log")],
-        server_log_path=str(tmp_path / "server.log"),
-        server_already_ready=True,
-        silence_timeout_sec=0.5,
-        timeout=5,
+        watch=RoundWatch(
+            timeout=5, server_log_path=str(tmp_path / "server.log"), silence_timeout_sec=0.5, server_already_ready=True
+        ),
     )
     assert cp.returncode == 0
 
@@ -132,8 +142,7 @@ def test_benchmark_launch_forces_python_unbuffered():
     cp = run_with_session_kill(
         [sys.executable, "-c", "import os; print(os.environ['PYTHONUNBUFFERED'])"],
         env={**os.environ, "PYTHONUNBUFFERED": "0"},
-        silence_timeout_sec=600,
-        timeout=5,
+        watch=RoundWatch(timeout=5, silence_timeout_sec=600),
     )
     assert cp.stdout.strip() == "1"
 
@@ -155,7 +164,7 @@ def test_watchdog_clock_boundaries(monkeypatch, tmp_path, reused, ready, log, no
         def poll(self):
             return None
 
-        def communicate(self, timeout=None):
+        def wait(self, timeout=None):
             waited.append(now[0])
             now[0] += timeout
             raise subprocess.TimeoutExpired(self.args, timeout)
@@ -167,12 +176,15 @@ def test_watchdog_clock_boundaries(monkeypatch, tmp_path, reused, ready, log, no
         sk._communicate_with_watchdog(
             Proc(),
             sk._WatchedRound(
-                hard_timeout=7800,
-                server_log_path=str(tmp_path / "server.log") if log else None,
-                silence_timeout_sec=600,
-                server_already_ready=reused,
+                sk.RoundWatch(
+                    timeout=7800,
+                    server_log_path=str(tmp_path / "server.log") if log else None,
+                    silence_timeout_sec=600,
+                    server_already_ready=reused,
+                ),
             ),
             recorders=sk._RecorderFanout([]),
+            capture=_FakeCapture(),
         )
     assert now[0] == expected
     assert 599.0 in waited
@@ -194,7 +206,7 @@ def test_unobserved_reuse_keeps_other_stop_gates_and_telemetry(monkeypatch, tmp_
         def poll(self):
             return None
 
-        def communicate(self, timeout=None):
+        def wait(self, timeout=None):
             now[0] += timeout
             if gate == "cancel" and now[0] >= 4:
                 scope.cancel(reason="test")
@@ -211,14 +223,17 @@ def test_unobserved_reuse_keeps_other_stop_gates_and_telemetry(monkeypatch, tmp_
         sk._communicate_with_watchdog(
             Proc(),
             sk._WatchedRound(
-                hard_timeout=10,
-                server_log_path=str(tmp_path / "server.log"),
-                silence_timeout_sec=1,
-                server_already_ready=True,
-                session_deadline_sec=3 if gate == "session" else None,
+                sk.RoundWatch(
+                    timeout=10,
+                    server_log_path=str(tmp_path / "server.log"),
+                    silence_timeout_sec=1,
+                    server_already_ready=True,
+                    session_deadline_sec=3 if gate == "session" else None,
+                ),
             ),
             cancel_scope=scope,
             recorders=sk._RecorderFanout([recorder]),
+            capture=_FakeCapture(),
         )
     assert now[0] == {"hard": 10, "session": 3, "cancel": 4}[gate]
     recorder.note_phase.assert_called_once_with("measured", 0)
@@ -232,11 +247,11 @@ def test_exited_process_wins_over_expired_gates(monkeypatch):
         def poll(self):
             return 7
 
-        def communicate(self):
-            return "finished", ""
-
     out = sk._communicate_with_watchdog(
-        Proc(), sk._WatchedRound(hard_timeout=0, session_deadline_sec=-1), recorders=sk._RecorderFanout([])
+        Proc(),
+        sk._WatchedRound(sk.RoundWatch(timeout=0, session_deadline_sec=-1)),
+        recorders=sk._RecorderFanout([]),
+        capture=_FakeCapture("finished"),
     )
     assert out == ("finished", "")
 
@@ -264,7 +279,7 @@ def test_hard_timeout_preserves_partial_captured_output():
     with pytest.raises(subprocess.TimeoutExpired) as error:
         run_with_session_kill(
             [sys.executable, "-c", "import os,time; os.write(1,b'partial'); os.write(2,b'error'); time.sleep(20)"],
-            timeout=0.4,
+            watch=RoundWatch(timeout=0.4),
         )
     assert error.value.stdout == "partial"
     assert error.value.stderr == "error"
@@ -285,10 +300,12 @@ def test_previous_nested_server_cannot_keep_new_round_alive(tmp_path):
         )
         cp = run_with_session_kill(
             [sys.executable, "-c", script, str(tmp_path / "server.log")],
-            timeout=5,
-            server_log_path=str(tmp_path / "server.log"),
-            server_already_ready=True,
-            silence_timeout_sec=0.4,
+            watch=RoundWatch(
+                timeout=5,
+                server_log_path=str(tmp_path / "server.log"),
+                silence_timeout_sec=0.4,
+                server_already_ready=True,
+            ),
         )
         assert cp.returncode == DETOKENIZER_STALL_RETURNCODE
     finally:
@@ -306,7 +323,7 @@ def test_kill_my_spawned_server_handles_already_exited():
         [sys.executable, "-c", "import sys; sys.exit(0)"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        **new_session_kwargs(),
+        start_new_session=True,
     )
     proc.wait(timeout=10)
     kill_my_spawned_server(proc)
@@ -343,7 +360,7 @@ def test_kill_my_spawned_server_sigterm_then_sigkill_for_ignorer():
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        **new_session_kwargs(),
+        start_new_session=True,
     )
     # Let the child install its SIGTERM handler before we signal.
     time.sleep(0.3)
@@ -377,7 +394,9 @@ def test_completed_warmup_keeps_its_persistent_server(tmp_path):
     )
     server_pid = None
     try:
-        result = run_with_session_kill([sys.executable, "-c", wrapper_code, str(pidfile), server_code], timeout=10)
+        result = run_with_session_kill(
+            [sys.executable, "-c", wrapper_code, str(pidfile), server_code], watch=RoundWatch(timeout=10)
+        )
         assert result.returncode == 0
         server_pid = int(pidfile.read_text())
         assert os.getpgid(server_pid) == server_pid
@@ -418,7 +437,7 @@ def test_kill_my_spawned_server_reaps_grandchildren():
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        **new_session_kwargs(),
+        start_new_session=True,
     )
     pid_file = Path("/tmp/hyperloom_test_grandchild.pid")
     try:
@@ -511,7 +530,7 @@ async def test_baseline_executor_kills_grandchild_on_timeout(tmp_path, monkeypat
         [sys.executable, str(script)],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        **new_session_kwargs(),
+        start_new_session=True,
     )
     try:
         deadline = time.monotonic() + 5.0
@@ -552,8 +571,7 @@ def test_accuracy_never_extends_the_hard_cap(tmp_path, eval_marker):
     with pytest.raises(subprocess.TimeoutExpired):
         run_with_session_kill(
             [sys.executable, "-c", script, str(tmp_path / "server.log"), eval_marker],
-            timeout=0.3,
-            server_log_path=str(tmp_path / "server.log"),
+            watch=RoundWatch(timeout=0.3, server_log_path=str(tmp_path / "server.log")),
         )
 
 
@@ -569,8 +587,7 @@ class TestSessionDeadline:
         start = time.monotonic()
         cp = run_with_session_kill(
             [sys.executable, "-c", "import time; time.sleep(30)"],
-            timeout=60,
-            session_deadline_sec=time.monotonic() - 1.0,
+            watch=RoundWatch(timeout=60, session_deadline_sec=time.monotonic() - 1.0),
         )
         elapsed = time.monotonic() - start
         assert cp.returncode == SESSION_TIME_EXHAUSTED_RETURNCODE
@@ -587,9 +604,7 @@ class TestSessionDeadline:
         start = time.monotonic()
         cp = run_with_session_kill(
             [sys.executable, "-c", "import time; time.sleep(30)"],
-            timeout=60,
-            server_log_path=str(log_path),
-            session_deadline_sec=time.monotonic() + 1.5,
+            watch=RoundWatch(timeout=60, server_log_path=str(log_path), session_deadline_sec=time.monotonic() + 1.5),
         )
         elapsed = time.monotonic() - start
         assert cp.returncode == SESSION_TIME_EXHAUSTED_RETURNCODE
@@ -599,8 +614,7 @@ class TestSessionDeadline:
         start = time.monotonic()
         cp = run_with_session_kill(
             [sys.executable, "-c", "import time; time.sleep(2)"],
-            timeout=60,
-            session_deadline_sec=time.monotonic() + 3600.0,
+            watch=RoundWatch(timeout=60, session_deadline_sec=time.monotonic() + 3600.0),
         )
         elapsed = time.monotonic() - start
         assert cp.returncode == 0
@@ -609,8 +623,7 @@ class TestSessionDeadline:
     def test_no_session_deadline_keeps_the_previous_behaviour(self):
         cp = run_with_session_kill(
             [sys.executable, "-c", "print('done')"],
-            timeout=30,
-            session_deadline_sec=None,
+            watch=RoundWatch(timeout=30, session_deadline_sec=None),
         )
         assert cp.returncode == 0
         assert "done" in (cp.stdout or "")
@@ -631,7 +644,7 @@ class TestAnOrchestratorCancelReachesTheChild:
         with use_cancel_scope(scope):
             cp = run_with_session_kill(
                 [sys.executable, "-c", "import time; time.sleep(30)"],
-                timeout=60,
+                watch=RoundWatch(timeout=60),
             )
         elapsed = time.monotonic() - start
         assert cp.returncode == ORCHESTRATOR_CANCELLED_RETURNCODE
@@ -647,7 +660,7 @@ class TestAnOrchestratorCancelReachesTheChild:
             with use_cancel_scope(scope):
                 cp = run_with_session_kill(
                     [sys.executable, "-c", "import time; time.sleep(30)"],
-                    timeout=60,
+                    watch=RoundWatch(timeout=60),
                 )
         finally:
             timer.cancel()
@@ -660,7 +673,7 @@ class TestAnOrchestratorCancelReachesTheChild:
         with use_cancel_scope(CancelScope()):
             cp = run_with_session_kill(
                 [sys.executable, "-c", "import time; time.sleep(1); print('done')"],
-                timeout=60,
+                watch=RoundWatch(timeout=60),
             )
         assert cp.returncode == 0
         assert "done" in (cp.stdout or "")
@@ -676,8 +689,7 @@ class TestAnOrchestratorCancelReachesTheChild:
         with use_cancel_scope(scope):
             cp = run_with_session_kill(
                 [sys.executable, "-c", "import time; time.sleep(30)"],
-                timeout=60,
-                session_deadline_sec=time.monotonic() - 1.0,
+                watch=RoundWatch(timeout=60, session_deadline_sec=time.monotonic() - 1.0),
             )
         assert cp.returncode == SESSION_TIME_EXHAUSTED_RETURNCODE
 
@@ -694,7 +706,7 @@ class TestAnOrchestratorCancelReachesTheChild:
             with use_cancel_scope(scope):
                 run_with_session_kill(
                     [sys.executable, "-c", "import time; time.sleep(30)"],
-                    timeout=60,
+                    watch=RoundWatch(timeout=60),
                 )
         finally:
             timer.cancel()
@@ -784,7 +796,7 @@ def test_an_actor_timeout_is_not_recorded_as_a_failed_agentx_preflight():
 def test_run_with_session_kill_streams_child_output_to_parent(capsys):
     """Captured child output is also mirrored immediately to parent streams."""
     code = "import sys\nprint('child-out', flush=True)\nprint('child-err', file=sys.stderr, flush=True)\n"
-    cp = run_with_session_kill([sys.executable, "-c", code], timeout=10)
+    cp = run_with_session_kill([sys.executable, "-c", code], watch=RoundWatch(timeout=10))
 
     captured = capsys.readouterr()
     assert cp.returncode == 0
@@ -801,8 +813,8 @@ def test_run_with_session_kill_reports_each_line_of_child_output():
 
     cp = run_with_session_kill(
         [sys.executable, "-c", code],
-        timeout=10,
         on_output=lambda: lines.append(time.monotonic()),
+        watch=RoundWatch(timeout=10),
     )
 
     assert cp.returncode == 0
@@ -876,10 +888,8 @@ def test_run_with_session_kill_reports_a_silent_child_alive_only_on_real_progres
     try:
         cp = run_with_session_kill(
             [sys.executable, "-c", "import time; time.sleep(2)"],
-            timeout=30,
-            server_log_path=str(log_path),
-            silence_timeout_sec=30.0,
             on_output=lambda: reported.append(1),
+            watch=RoundWatch(timeout=30, server_log_path=str(log_path), silence_timeout_sec=30.0),
         )
     finally:
         stop.set()
@@ -913,10 +923,8 @@ def test_run_with_session_kill_reports_the_output_a_child_redirected_to_disk(tmp
 
     cp = run_with_session_kill(
         [sys.executable, "-c", script, str(bench / "benchmark_stderr.log")],
-        timeout=30,
-        server_log_path=str(tmp_path / "server.log"),
-        silence_timeout_sec=30.0,
         on_output=lambda: reported.append(1),
+        watch=RoundWatch(timeout=30, server_log_path=str(tmp_path / "server.log"), silence_timeout_sec=30.0),
     )
 
     assert cp.returncode == 0
@@ -931,8 +939,8 @@ def test_run_with_session_kill_survives_a_broken_liveness_callback():
 
     cp = run_with_session_kill(
         [sys.executable, "-c", "print('still-captured', flush=True)"],
-        timeout=10,
         on_output=_boom,
+        watch=RoundWatch(timeout=10),
     )
 
     assert cp.returncode == 0
@@ -944,7 +952,7 @@ def test_run_with_session_kill_legacy_timeout_still_raises():
     with pytest.raises(subprocess.TimeoutExpired):
         run_with_session_kill(
             [sys.executable, "-c", "import time; time.sleep(30)"],
-            timeout=1,
+            watch=RoundWatch(timeout=1),
         )
 
 
@@ -1024,9 +1032,7 @@ def test_fatal_text_does_not_kill_a_running_child(tmp_path):
     )
     cp = run_with_session_kill(
         [sys.executable, "-c", script, str(tmp_path / "server.log")],
-        timeout=5,
-        server_log_path=str(tmp_path / "server.log"),
-        silence_timeout_sec=0.2,
+        watch=RoundWatch(timeout=5, server_log_path=str(tmp_path / "server.log"), silence_timeout_sec=0.2),
     )
     assert cp.returncode == 0
 
@@ -1044,8 +1050,7 @@ def test_run_with_session_kill_watchdog_grace_lets_clean_exit_win(tmp_path):
     )
     cp = run_with_session_kill(
         [sys.executable, "-c", script, str(log_path)],
-        timeout=30,
-        server_log_path=str(log_path),
+        watch=RoundWatch(timeout=30, server_log_path=str(log_path)),
     )
     assert cp.returncode == 7
 
@@ -1062,8 +1067,7 @@ def test_run_with_session_kill_watchdog_ignores_healthy_server(tmp_path):
     )
     cp = run_with_session_kill(
         [sys.executable, "-c", script, str(log_path)],
-        timeout=30,
-        server_log_path=str(log_path),
+        watch=RoundWatch(timeout=30, server_log_path=str(log_path)),
     )
     assert cp.returncode == 0
     assert "ok" in (cp.stdout or "")
@@ -1196,9 +1200,7 @@ def test_run_with_session_kill_detok_stall_reaps_ready_but_silent_server(tmp_pat
     start = time.monotonic()
     cp = run_with_session_kill(
         [sys.executable, "-c", script, str(log_path)],
-        timeout=60,
-        server_log_path=str(log_path),
-        silence_timeout_sec=1.0,
+        watch=RoundWatch(timeout=60, server_log_path=str(log_path), silence_timeout_sec=1.0),
     )
     elapsed = time.monotonic() - start
     assert cp.returncode == DETOKENIZER_STALL_RETURNCODE
@@ -1217,9 +1219,7 @@ def test_run_with_session_kill_detok_stall_not_armed_before_ready(tmp_path):
     )
     cp = run_with_session_kill(
         [sys.executable, "-c", script, str(log_path)],
-        timeout=30,
-        server_log_path=str(log_path),
-        silence_timeout_sec=0.5,
+        watch=RoundWatch(timeout=30, server_log_path=str(log_path), silence_timeout_sec=0.5),
     )
     assert cp.returncode == 0
 
@@ -1239,9 +1239,7 @@ def test_run_with_session_kill_detok_stall_progress_keeps_it_alive(tmp_path):
     )
     cp = run_with_session_kill(
         [sys.executable, "-c", script, str(log_path)],
-        timeout=30,
-        server_log_path=str(log_path),
-        silence_timeout_sec=1.0,
+        watch=RoundWatch(timeout=30, server_log_path=str(log_path), silence_timeout_sec=1.0),
     )
     assert cp.returncode == 0
 
@@ -1262,9 +1260,7 @@ def test_run_with_session_kill_detok_stall_compile_logs_keep_it_alive(tmp_path):
     )
     cp = run_with_session_kill(
         [sys.executable, "-c", script, str(log_path)],
-        timeout=30,
-        server_log_path=str(log_path),
-        silence_timeout_sec=1.0,
+        watch=RoundWatch(timeout=30, server_log_path=str(log_path), silence_timeout_sec=1.0),
     )
     assert cp.returncode == 0
 
@@ -1280,9 +1276,7 @@ def test_shared_helper_does_not_enable_silence_without_a_policy(tmp_path):
     )
     cp = run_with_session_kill(
         [sys.executable, "-c", script, str(log_path)],
-        timeout=30,
-        server_log_path=str(log_path),
-        silence_timeout_sec=None,
+        watch=RoundWatch(timeout=30, server_log_path=str(log_path), silence_timeout_sec=None),
     )
     assert cp.returncode == 0
 

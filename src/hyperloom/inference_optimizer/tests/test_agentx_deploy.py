@@ -25,12 +25,11 @@ def test_asset_dir_has_all_files():
 
 def test_deploy_copies_and_is_executable(tmp_path):
     dst = tmp_path / "benchmarks"
-    written = deploy_agentx_assets(dst)
+    deploy_agentx_assets(dst)
     assert (dst / "mlperf_agentic_client.sh").exists()
     assert (dst / "map_mlperf.py").exists()
     assert (dst / "agentx_mapping.py").read_bytes() == Path(mapping.__file__).read_bytes()
     assert os.access(dst / "mlperf_agentic_client.sh", os.X_OK)
-    assert len(written) == 3
 
 
 def test_deploy_idempotent(tmp_path):

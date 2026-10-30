@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -15,6 +15,8 @@ from hyperloom.common.perf_metric import (
     GRADED_ERROR_RATE,
     GRADED_INTVTY_P50,
     GRADED_OUTPUT,
+    GRADED_REQUESTS_TOTAL,
+    GRADED_UNSERVED_REQUESTS,
     VERDICT_KEEP,
     VERDICT_REVERT,
     graded_axes_of,
@@ -506,7 +508,6 @@ def baseline_writer(native_benchmark, monkeypatch, tmp_path):
     monkeypatch.setattr(coord.gap_refresh, "refresh_gaps", AsyncMock())
     monkeypatch.setattr(writer, "drain_queued_baselines", AsyncMock())
     monkeypatch.setattr(writer, "_should_run_prelude_bootstrap", lambda _tput: False)
-    monkeypatch.setattr(coord.shared_state, "record_baseline_roofline_ceiling", Mock())
     return writer, _PromoteOutcome(verdict=Verdict.RECORDED)
 
 
@@ -531,7 +532,7 @@ async def test_baseline_perf_updates_without_resetting_the_stack(baseline_writer
         "extra_server_args": "--enable-prefix-caching",
         "extra_envs": {"VLLM_USE_V1": "1"},
         "optimization_stack": deepcopy(stack),
-        "measurement": {"tput": 210.0, "launch_identity": "stack-identity"},
+        "measurement": {"tput": 210.0, "declared_launch_identity": "stack-identity"},
     }
     state.optimization_stack = deepcopy(stack)
     state.current_best = deepcopy(current_best)
@@ -545,7 +546,6 @@ async def test_baseline_perf_updates_without_resetting_the_stack(baseline_writer
     await writer._promote_baseline(result, task=None, outcome=outcome)
 
     assert outcome.audit_decision == "promoted"
-    assert outcome.changed
     assert state.baseline_tput == 190.0
     assert state.baseline_config_path == result["materialized_config"]
     assert state.baseline_perf == {
@@ -580,7 +580,7 @@ async def test_rejected_baseline_preserves_the_entire_anchor(baseline_writer, tm
     state.baseline_post_ready_runtime_sec = 20.0
     state.optimization_stack = [{"action": "integrate_patch"}] if stacked else []
     state.current_best = dict(_ANCHOR)
-    state.current_best_measurement = {"launch_identity": "old-identity"}
+    state.current_best_measurement = {"declared_launch_identity": "old-identity"}
     prior_baseline = {key: deepcopy(value) for key, value in vars(state).items() if key.startswith("baseline_")}
     result = {
         **_full_measurement(total=30000.0, output=180.0, intvty=25.0),
@@ -596,7 +596,7 @@ async def test_rejected_baseline_preserves_the_entire_anchor(baseline_writer, tm
     assert outcome.audit_decision == "no_promote"
     assert {key: getattr(state, key) for key in prior_baseline} == prior_baseline
     assert state.current_best == _ANCHOR
-    assert state.current_best_measurement == {"launch_identity": "old-identity"}
+    assert state.current_best_measurement == {"declared_launch_identity": "old-identity"}
 
 
 @pytest.mark.parametrize("stacked", [False, True])
@@ -642,7 +642,10 @@ async def test_accepted_baseline_without_axes_clears_stale_perf(baseline_writer,
     else:
         assert state.current_best["tput"] == 190.0
         assert state.current_best_measurement["benchmark_workspace"] == result["workspace"]
-        assert state.current_best_measurement["launch_identity"] != prior_best["measurement"]["launch_identity"]
+        assert (
+            state.current_best_measurement["declared_launch_identity"]
+            != prior_best["measurement"]["declared_launch_identity"]
+        )
     graded = resolve_graded_comparison(
         state,
         _full_measurement(total=27000.0, output=195.0, intvty=24.0),
@@ -741,6 +744,26 @@ def test_agentx_keeps_through_one_extra_failure_inside_the_slack(native_benchmar
         keep_threshold_pct=2.0,
     )
     assert graded.verdict == VERDICT_KEEP
+
+
+@pytest.mark.parametrize(
+    ("unserved", "verdict"),
+    [(0.0, VERDICT_KEEP), (9.0, VERDICT_REVERT)],
+    ids=["short-replies-only", "unserved-requests"],
+)
+def test_agentx_reverts_on_unserved_requests_not_on_short_replies(native_benchmark, monkeypatch, unserved, verdict):
+    """A gain whose extra failures are all short replies keeps; one that left requests unserved does not."""
+    _agentx(monkeypatch, native_benchmark)
+    counts = {GRADED_UNSERVED_REQUESTS: 0.0, GRADED_REQUESTS_TOTAL: 1000.0}
+    state = _State(current_best={**_ANCHOR, **counts})
+    measurement = {
+        **_full_measurement(total=25984.0, output=183.0, intvty=24.8, error_rate=5.0),
+        **counts,
+        GRADED_UNSERVED_REQUESTS: unserved,
+    }
+    graded = resolve_graded_comparison(state, measurement, keep_threshold_pct=2.0)
+    assert graded.verdict == verdict
+    assert graded.refused_by == ("" if verdict == VERDICT_KEEP else "extra_failed_requests")
 
 
 def test_agentx_revert_when_a_comparability_input_is_unreported(native_benchmark, monkeypatch):

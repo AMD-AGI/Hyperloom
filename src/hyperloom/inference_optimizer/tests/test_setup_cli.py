@@ -175,7 +175,7 @@ def _credential_functions() -> str:
 
 
 def test_baremetal_setup_accepts_a_codex_only_gateway(tmp_path: Path):
-    """Hyperloom's runtime drives both claude and codex, and ``cli/preflight._provider_only_mode`` already treats an
+    """Hyperloom's runtime drives both claude and codex, and ``cli/preflight_env._provider_only_mode`` already treats an
     OpenAI-only environment as a valid single provider; the bare-metal installer must not be the one place refusing it.
     """
     dotenv = tmp_path / ".env"

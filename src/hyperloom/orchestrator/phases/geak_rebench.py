@@ -9,6 +9,13 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
+from hyperloom.inference_optimizer.session.geak_rebench_verdict import (
+    REBENCH_FALLBACK_FAILED,
+    REBENCH_NO_MATERIAL,
+    REBENCH_NO_PROMOTE,
+    REBENCH_VALIDATED,
+)
+
 INCOMPARABLE_REVALIDATION = "incomparable"
 
 # Verdict annotations are not candidate identity.
@@ -26,7 +33,7 @@ _REVALIDATION_ANNOTATION_KEYS: frozenset[str] = frozenset(
 )
 
 # Failed measurements remain retryable.
-_TERMINAL_REVALIDATION_STATUSES: frozenset[str] = frozenset({"no_material", "no_promote"})
+_TERMINAL_REVALIDATION_STATUSES: frozenset[str] = frozenset({REBENCH_NO_MATERIAL, REBENCH_NO_PROMOTE})
 
 
 def geak_harness_replays_workload(state: Any) -> bool:
@@ -38,8 +45,7 @@ def geak_harness_replays_workload(state: Any) -> bool:
     switch, matching that refusal, so a session recorded as synthetic keeps
     replaying.
     """
-    from hyperloom.common.perf_metric import is_agentx_mode
-    from ..actions.executors._workload_envs import agentx_enabled
+    from hyperloom.common.perf_metric import agentx_enabled, is_agentx_mode
 
     mode = str(state.benchmark_mode or "").strip()
     return not (is_agentx_mode(mode) if mode else agentx_enabled())
@@ -55,7 +61,8 @@ def geak_verdict_is_terminal(persisted: Any) -> bool:
     prev = persisted if isinstance(persisted, dict) else {}
     status = str(prev.get("revalidation_status") or "")
     return status in _TERMINAL_REVALIDATION_STATUSES or (
-        status == "fallback_failed" and str(prev.get("revalidation_error_class") or "") == INCOMPARABLE_REVALIDATION
+        status == REBENCH_FALLBACK_FAILED
+        and str(prev.get("revalidation_error_class") or "") == INCOMPARABLE_REVALIDATION
     )
 
 
@@ -87,9 +94,11 @@ def geak_candidate_is_adjudicated(persisted: Any, recovered: Any, *, harness_can
         return False
     blocked_overlay = str(prev.get("revalidation_blocked_overlay") or "")
     if blocked_overlay:
-        from ..kernel.geak_config import geak_overlay_is_loadable, _normalize_geak_overlay_dir
+        from hyperloom.common.overlay import overlay_is_loadable
 
-        if geak_overlay_is_loadable(_normalize_geak_overlay_dir(blocked_overlay)):
+        from ..kernel.geak_config import _normalize_geak_overlay_dir
+
+        if overlay_is_loadable(_normalize_geak_overlay_dir(blocked_overlay)):
             return False
     return geak_candidate_matches(prev, recovered)
 
@@ -151,7 +160,7 @@ def verify_source_artifacts(params: dict[str, Any]) -> None:
 def source_verdict_matches(result: dict[str, Any]) -> bool:
     """A canonical verdict settles only the source bytes that were reviewed."""
     settled = result["native_source_revalidation"]
-    if settled.get("status") not in {"validated", "no_promote"}:
+    if settled.get("status") not in {REBENCH_VALIDATED, REBENCH_NO_PROMOTE}:
         return False
     params = settled["params"]
     try:

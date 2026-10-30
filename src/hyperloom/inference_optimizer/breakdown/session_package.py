@@ -1,7 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Bundle a session's consumer-facing artifacts into a single zip under ``/workspace`` so the Claw sandbox sync picks it up."""
+"""Bundle a session's consumer-facing artifacts into a single zip under the destination root.
+
+The root is ``HYPERLOOM_SESSION_PACKAGE_DEST``, ``/workspace`` when unset, so the Claw sandbox sync picks the zip up.  A
+hosted run (``hyperloom hosted run``) sets it to ``<session dir>/archive``, on the shared storage, whatever the host passed.
+"""
 
 from __future__ import annotations
 
@@ -24,7 +28,7 @@ from hyperloom.common.env import env_flag
 from hyperloom.common.env_safety import redact_secret_env_values
 
 from ..session.optimization_journal import JOURNAL_FILENAME
-from ..session.paths import is_path_within
+from ..session.paths import PRIVATE_SESSION_SUBDIRS, is_path_within
 from ..session.session_paths import BRINGUP_SEGMENT, ENABLEMENT_SEGMENT
 
 log = logging.getLogger(__name__)
@@ -211,7 +215,9 @@ def _is_packageable(path: Path, session_dir: Path) -> bool:
 def _iter_session_files(session_dir: Path) -> list[Path]:
     """All files under session_dir (one walk), so glob matching is a single pass instead of N globs each re-walking the tree."""
     out: list[Path] = []
-    for dp, _dn, fn in os.walk(session_dir):
+    for dp, dn, fn in os.walk(session_dir):
+        if Path(dp) == session_dir:
+            dn[:] = [d for d in dn if d not in PRIVATE_SESSION_SUBDIRS]
         for f in fn:
             out.append(Path(dp) / f)
     return out
@@ -566,7 +572,6 @@ def package_session_artifacts(
     session_dir: Path | str,
     *,
     session_id: str = "",
-    dest_root: Path | str | None = None,
 ) -> Path | None:
     """Bundle curated artifacts of ``session_dir`` into one zip under the dest root (default ``/workspace/<PACKAGE_SUBDIR>/``)."""
     sd = Path(session_dir).resolve()
@@ -591,7 +596,7 @@ def package_session_artifacts(
         reserved_overflow=reserved_overflow,
     )
 
-    root = Path(dest_root).resolve() if dest_root else _dest_root()
+    root = _dest_root()
     out_dir = root / PACKAGE_SUBDIR
     out_dir.mkdir(parents=True, exist_ok=True)
     target = out_dir / f"{sid}.zip"

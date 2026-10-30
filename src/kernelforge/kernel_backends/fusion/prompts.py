@@ -7,8 +7,8 @@ from kernelforge.kernel_backends.prompt_utils import (
     EDIT_SURFACE_AND_SWEEPS_PROMPT,
     context_sections_block,
 )
-from kernelforge.fusion.harness_contract import harness_contract
-from kernelforge.fusion.validate import (
+from kernelforge.workflows.forge_fusion.harness_contract import harness_contract
+from kernelforge.workflows.forge_fusion.validate import (
     DEFAULT_SNR_THRESHOLD_DB,
     DEFAULT_TARGET_SPEEDUP,
 )

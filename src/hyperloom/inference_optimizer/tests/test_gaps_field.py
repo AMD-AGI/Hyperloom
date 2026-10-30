@@ -176,10 +176,10 @@ def test_to_gaps_summary_caps_entries_at_max():
                 "layer": "framework",
             }
         )
-    out = s.to_gaps_summary(max_entries=5)
-    # Only 5 rows + 1 elision marker.
+    out = s.to_gaps_summary()
+    # Only 10 rows + 1 elision marker.
     rendered_rows = [ln for ln in out.splitlines() if ln.startswith("  - issue.c")]
-    assert len(rendered_rows) == 5
+    assert len(rendered_rows) == 10
     assert "older gaps elided" in out
 
 
