@@ -584,7 +584,7 @@ def test_the_hosts_template_variable_reaches_the_toolbox_unchanged(tmp_path: Pat
         "HYPERLOOM_STATE_DIR": str(tmp_path),
         "E2B_API_URL": "http://service.invalid",
         "E2B_SANDBOX_URL": "http://sandboxes.invalid",
-        "HYPERLOOM_SANDBOX_KEY_MEASUREMENT": "m-key-0123456789",
+        "HYPERLOOM_SANDBOX_KEY_MEASUREMENT": "m-key-000000000000",
         "HYPERLOOM_SANDBOX_TEMPLATES": json.dumps(templates),
         "HYPERLOOM_SOURCE_REPO": _SOURCE_REPO,
         "HYPERLOOM_SOURCE_SHA": _SOURCE_SHA,

@@ -1052,7 +1052,7 @@ def host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Host:
         "HYPERLOOM_GRANT_LIMITS": json.dumps(GRANT),
         "E2B_API_URL": "http://service.invalid",
         "E2B_SANDBOX_URL": "http://sandboxes.invalid",
-        "HYPERLOOM_SANDBOX_KEY_MEASUREMENT": "m-key-0123456789",
+        "HYPERLOOM_SANDBOX_KEY_MEASUREMENT": "m-key-000000000000",
         "HYPERLOOM_SANDBOX_TEMPLATES": json.dumps({"measurement": {"2": "ar-01ja-measurement"}}),
         "HYPERLOOM_SOURCE_REPO": "AMD-AGI/Hyperloom",
         "HYPERLOOM_SOURCE_SHA": "c" * 40,
@@ -1338,7 +1338,7 @@ def test_a_restart_over_a_session_that_already_chose_ends_the_run_for_good(
 HANDED = {
     "E2B_API_URL": "http://service.invalid",
     "E2B_SANDBOX_URL": "http://sandboxes.invalid",
-    "HYPERLOOM_SANDBOX_KEY_MEASUREMENT": "m-key-0123456789",
+    "HYPERLOOM_SANDBOX_KEY_MEASUREMENT": "m-key-000000000000",
     "HYPERLOOM_SANDBOX_TEMPLATES": json.dumps({"measurement": {"2": "ar-01ja-measurement"}}),
     "HYPERLOOM_GRANT_LIMITS": json.dumps({**GRANT, "max_gpus": 8, "max_sandboxes": 3}),
     "HYPERLOOM_SOURCE_REPO": "AMD-AGI/Hyperloom",

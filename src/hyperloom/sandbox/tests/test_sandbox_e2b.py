@@ -35,7 +35,7 @@ from hyperloom.sandbox.socket import (
 )
 
 KEY_DEV = "e2b_dev_key_0123456789abcdef"
-KEY_MEASUREMENT = "e2b_measurement_key_0123456789"
+KEY_MEASUREMENT = "e2b_measurement_key_000000000000"
 FAST = RetryPolicy(budget_sec=2.0, first_delay_sec=0.01, max_delay_sec=0.05)
 SANDBOX = {"templateID": "dev", "sandboxID": "sbx-1", "clientID": "c", "envdVersion": "0.10.0"}
 
@@ -203,11 +203,11 @@ def test_create_with_an_idempotency_key_is_replayed_after_a_server_error(
 
 #: Agent Sandbox's answer to a create whose sandbox failed while starting (joint hosted run 4), word for word: the E2B
 #: error body (the SDK requires its ``code``) with the reason code beside it, and in ``message``, which the SDK keeps.
-CREATE_FAILED_MESSAGE = "sandbox_create_failed: workload sbx-f7f56db77ec7244ae34d9886d2ed9dde phase Failed"
+CREATE_FAILED_MESSAGE = "sandbox_create_failed: workload sbx-00000000000000000000000000000000 phase Failed"
 CREATE_FAILED_BODY = {"code": 500, "reason": "sandbox_create_failed", "message": CREATE_FAILED_MESSAGE}
 #: Its answer to every replay of that key afterwards: the key stays bound to the failed sandbox, whose id it names (the
 #: SDK's message of joint run 4, word for word, in the same E2B error body).
-KEY_SPENT_MESSAGE = "idempotency_key_spent: sbx-f7f56db77ec7244ae34d9886d2ed9dde"
+KEY_SPENT_MESSAGE = "idempotency_key_spent: sbx-00000000000000000000000000000000"
 KEY_SPENT_BODY = {"code": 410, "reason": "idempotency_key_spent", "message": KEY_SPENT_MESSAGE}
 #: How a gateway cuts a create that is still pending: its 180 s limit, or the service's context cancelled under it.
 GATEWAY_CUTS = [

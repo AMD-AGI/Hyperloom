@@ -160,7 +160,7 @@ def _host(tmp_path: Path, repo: Path, sha: str) -> HostInfo:
         "HYPERLOOM_STATE_DIR": str(tmp_path),
         "E2B_API_URL": "http://service.invalid",
         "E2B_SANDBOX_URL": "http://sandboxes.invalid",
-        "HYPERLOOM_SANDBOX_KEY_MEASUREMENT": "m-key-0123456789",
+        "HYPERLOOM_SANDBOX_KEY_MEASUREMENT": "m-key-000000000000",
         "HYPERLOOM_SANDBOX_TEMPLATES": '{"measurement": {"2": "ar-01ja-measurement"}}',
         "HYPERLOOM_SOURCE_REPO": str(repo),
         "HYPERLOOM_SOURCE_SHA": sha,

@@ -38,18 +38,3 @@ regexes = [
   '''Authorization: Bearer secret-token-value''',
   '''OPENAI_API_KEY=sk-live-abcdef''',
 ]
-
-[[allowlists]]
-description = "Hosted sandbox fixtures and a type annotation -- no credential"
-# The generic-api-key rule reads ``key: <Type>`` and ``KEY...= "<token>"`` as an
-# assignment. These are a dataclass field's type (the Ed25519 signer), fake
-# sequential sandbox keys in tests, and an E2B sandbox id quoted in an error
-# message. Matched on the exact line content, not by path, for the reason given
-# in the allowlist above.
-regexTarget = "line"
-regexes = [
-  '''^\s*key: Ed25519PrivateKey = field\(repr=False\)$''',
-  '''KEY_MEASUREMENT = "e2b_measurement_key_0123456789"''',
-  '''"idempotency_key_spent: sbx-f7f56db77ec7244ae34d9886d2ed9dde"''',
-  '''"HYPERLOOM_SANDBOX_KEY_MEASUREMENT": "m-key-0123456789"''',
-]
