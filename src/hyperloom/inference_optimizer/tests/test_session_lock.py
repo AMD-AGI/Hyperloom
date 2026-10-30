@@ -40,7 +40,6 @@ def test_acquire_writes_owner_metadata(tmp_path):
         assert owner is not None
         assert owner["pid"] == os.getpid()
         assert owner["started_at"]
-        assert owner["heartbeat_at"]
     finally:
         lock.release()
 
@@ -209,22 +208,6 @@ def test_read_owner_fd_empty_and_malformed(tmp_path):
     fd2 = os.open(lock_path, os.O_RDWR)
     os.close(fd2)
     assert SessionLock._read_owner_fd(fd2) is None
-
-
-def test_heartbeat_refreshes_body(tmp_path):
-    """heartbeat rewrites the lock body while held; no-op when not held."""
-    lock = SessionLock(tmp_path)
-    # Not held yet -> no-op, no raise.
-    lock.heartbeat()
-    lock.acquire()
-    try:
-        before = _read_owner(tmp_path)
-        lock.heartbeat()
-        after = _read_owner(tmp_path)
-        assert before is not None and after is not None
-        assert after["pid"] == os.getpid()
-    finally:
-        lock.release()
 
 
 @pytest.mark.skipif(

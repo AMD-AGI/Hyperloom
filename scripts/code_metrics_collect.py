@@ -42,7 +42,8 @@ from typing import NamedTuple
 
 MODULE = "<module>"
 #: Metric names used by more than one collector.
-COGNITIVE, FUNCTION_LINES, MODULE_LINES = "cognitive-complexity", "function-lines", "module-lines"
+CYCLOMATIC, COGNITIVE = "cyclomatic-complexity", "cognitive-complexity"
+FUNCTION_LINES, MODULE_LINES = "function-lines", "module-lines"
 FUNCTION_ARGS = "function-args"
 DIRECTORY_ENTRIES = "directory-entries"
 _JSON, _CONFIG = "json", "--config"
@@ -59,7 +60,7 @@ class Metric:
 METRICS = {
     m.name: m
     for m in (
-        Metric("cyclomatic-complexity", "Cyclomatic complexity"),
+        Metric(CYCLOMATIC, "Cyclomatic complexity"),
         Metric(COGNITIVE, "Cognitive complexity"),
         Metric(FUNCTION_LINES, "Function length (lines)"),
         Metric("nested-blocks", "Nested block depth"),
@@ -80,9 +81,7 @@ PENDING: tuple[str, ...] = ()
 
 #: Ruff rule -> (metric, the ruff setting that carries its threshold).
 RUFF_RULES = {
-    "C901": ("cyclomatic-complexity", "lint.mccabe.max-complexity"),
     "PLR1702": ("nested-blocks", "lint.pylint.max-nested-blocks"),
-    "PLR0913": (FUNCTION_ARGS, "lint.pylint.max-args"),
 }
 
 _RUFF_VALUE = re.compile(r"\((\d+) > \d+\)")
@@ -140,13 +139,14 @@ def worse(metric: str, value: float, reference: float) -> bool:
 
 @dataclasses.dataclass(frozen=True)
 class Def:
-    """One class or function: its ``def``/``class`` line, last line, qualified name and first body line."""
+    """One class or function: its ``def``/``class`` line, last line, qualified name, first body line, parameters."""
 
     start: int
     end: int
     name: str
     is_function: bool
     body: int
+    params: int
 
 
 class Units:
@@ -199,10 +199,19 @@ def _walk_defs(node: ast.AST, prefix: str) -> Iterator[Def]:
         if isinstance(child, _DEFS):
             name = prefix + child.name
             end = child.end_lineno or child.lineno
-            yield Def(child.lineno, end, name, isinstance(child, _FUNCTIONS), child.body[0].lineno)
+            is_function = isinstance(child, _FUNCTIONS)
+            params = _parameter_count(child.args) if is_function else 0
+            yield Def(child.lineno, end, name, is_function, child.body[0].lineno, params)
             yield from _walk_defs(child, name + ".")
         else:
             yield from _walk_defs(child, prefix)
+
+
+def _parameter_count(args: ast.arguments) -> int:
+    """Named parameters but a leading ``self`` or ``cls``, plus one each for ``*args`` and ``**kwargs``."""
+    positional = [*args.posonlyargs, *args.args]
+    receiver = bool(positional) and positional[0].arg in ("self", "cls")
+    return len(positional) - receiver + len(args.kwonlyargs) + (args.vararg is not None) + (args.kwarg is not None)
 
 
 def _code_lines(source: bytes, tree: ast.Module) -> set[int]:
@@ -326,6 +335,33 @@ def parse_ruff(rows: list[dict], root: Path, units: Units) -> list[Finding]:
     return findings
 
 
+def radon_findings(root: Path, files: list[str], threshold: int, units: Units) -> list[Finding]:
+    """Cyclomatic complexity as radon counts it: every ``and`` / ``or``, ternary, comprehension and assert too."""
+    with tempfile.TemporaryDirectory() as work:
+        rows = json.loads(_run(["radon", "cc", "--json", *(str(root / f) for f in files)], work))
+    return parse_radon(rows, root, threshold, units)
+
+
+def parse_radon(rows: dict[str, object], root: Path, threshold: int, units: Units) -> list[Finding]:
+    """Functions and methods over ``threshold``; a closure is a unit of its own, a class is none."""
+    findings = []
+    for name, blocks in rows.items():
+        if not isinstance(blocks, list):
+            raise ToolError(f"radon could not measure {name}: {blocks}")
+        path = _relative(root, name)
+        pending, seen = list(blocks), set()
+        while pending:
+            block = pending.pop()
+            pending += block.get("methods", []) + block.get("closures", [])
+            if block["type"] == "class" or block["lineno"] in seen:
+                continue
+            seen.add(block["lineno"])
+            if worse(CYCLOMATIC, block["complexity"], threshold):
+                line = block["lineno"]
+                findings.append(Finding(CYCLOMATIC, path, units.owner(path, line), block["complexity"], line))
+    return sorted(findings, key=lambda f: (f.path, f.line))
+
+
 def complexipy_findings(root: Path, files: list[str], threshold: int, units: Units) -> list[Finding]:
     with tempfile.TemporaryDirectory() as work:
         report = Path(work) / "complexipy.json"
@@ -382,6 +418,16 @@ def function_line_findings(files: list[str], threshold: int, units: Units) -> li
             if worse(FUNCTION_LINES, length, threshold):
                 findings.append(Finding(FUNCTION_LINES, path, d.name, length, d.start))
     return findings
+
+
+def function_arg_findings(files: list[str], threshold: int, units: Units) -> list[Finding]:
+    """Functions with more than ``threshold`` parameters; a nested function is its own unit."""
+    return [
+        Finding(FUNCTION_ARGS, path, d.name, d.params, d.start)
+        for path in files
+        for d in units.defs(path)
+        if d.is_function and worse(FUNCTION_ARGS, d.params, threshold)
+    ]
 
 
 def _nested_function_lines(parent: Def, defs: list[Def]) -> set[int]:

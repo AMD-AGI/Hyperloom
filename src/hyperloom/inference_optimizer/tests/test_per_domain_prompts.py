@@ -14,10 +14,10 @@ from hyperloom.orchestrator.specialists.domains import (
     SPECIALIST_DOMAINS,
     get_domain,
 )
+from hyperloom.orchestrator.prompts.specialist_focus import _DOMAIN_FOCUS_TEMPLATES
+from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
-    _DOMAIN_FOCUS_TEMPLATES,
     _THROUGHPUT_AUTHORING_DOMAINS,
-    SpecialistPromptInputs,
     build_specialist_prompts,
 )
 
@@ -31,7 +31,6 @@ def _build(domain_key: str) -> str:
     domain = get_domain(domain_key)
     assert domain is not None, domain_key
     inp = SpecialistPromptInputs(
-        task_id=f"task-{domain_key}",
         domain=domain,
         max_turns=4,
         gap_canonical_id=f"gap.{domain_key}.example",
@@ -106,7 +105,6 @@ def test_research_mode_gets_no_altitude_block():
     domain = get_domain("serving_specialist")
     assert domain is not None
     inp = SpecialistPromptInputs(
-        task_id="task-research",
         domain=domain,
         max_turns=4,
         gap_canonical_id="gap.serving.research",
@@ -204,7 +202,6 @@ def test_static_recon_specialist_renders_seed_checklist_and_model_info():
     domain = get_domain("static_recon_specialist")
     assert domain is not None
     inp = SpecialistPromptInputs(
-        task_id="task-recon",
         domain=domain,
         max_turns=4,
         gpu_type="MI300X",
@@ -237,7 +234,6 @@ def _build_split(domain_key: str) -> tuple[str, str]:
     domain = get_domain(domain_key)
     assert domain is not None, domain_key
     inp = SpecialistPromptInputs(
-        task_id=f"task-{domain_key}",
         domain=domain,
         max_turns=4,
         gap_canonical_id=f"gap.{domain_key}.example",
@@ -249,7 +245,6 @@ def _build_split(domain_key: str) -> tuple[str, str]:
         warm_start_recipe={"name": "r1"},
         warm_start_lessons=[{"attrs": {"statement": "prior keep lesson"}}],
         warm_start_pitfalls=[{"attrs": {"description": "prior revert pitfall"}}],
-        kb_subgraph={"nodes": ["x"]},
         framework="sglang",
         workspace_path=f"/tmp/test/{domain_key}",
         enablement_failure_signature=_DISPATCHED,
@@ -294,7 +289,6 @@ def test_enablement_mandate_carries_the_dispatch_evidence():
     assert domain is not None
     weights = "CHECKPOINT WEIGHTS: model.layers.0.mlp.gate_up_proj.weight [8192, 4096]"
     inp = SpecialistPromptInputs(
-        task_id="task-enablement-evidence",
         domain=domain,
         max_turns=4,
         gap_canonical_id="gap.enablement.weight_init",
@@ -323,7 +317,6 @@ def test_enablement_mandate_renders_the_dispatched_signature():
         "ValueError: Model architectures ['GlmForCausalLM'] are not supported for now."
     )
     inp = SpecialistPromptInputs(
-        task_id="task-enablement-signature",
         domain=domain,
         max_turns=4,
         gap_canonical_id="gap.enablement.missing_arch",
@@ -360,7 +353,6 @@ def test_static_recon_shared_expert_model_features_line():
     domain = get_domain("static_recon_specialist")
     assert domain is not None
     inp = SpecialistPromptInputs(
-        task_id="task-shared-moe",
         domain=domain,
         max_turns=4,
         gpu_type="MI355X",
@@ -386,7 +378,6 @@ def test_static_recon_shared_expert_advisory_present():
     domain = get_domain("static_recon_specialist")
     assert domain is not None
     inp = SpecialistPromptInputs(
-        task_id="task-advisory",
         domain=domain,
         max_turns=4,
         gpu_type="MI355X",
@@ -409,7 +400,6 @@ def test_static_recon_no_shared_expert_no_advisory():
     domain = get_domain("static_recon_specialist")
     assert domain is not None
     inp = SpecialistPromptInputs(
-        task_id="task-plain-moe",
         domain=domain,
         max_turns=4,
         gpu_type="MI355X",
@@ -432,7 +422,6 @@ def test_static_recon_existing_markers_unaffected_by_shared_expert_change():
         {"is_moe": True, "has_shared_expert": True, "num_shared_experts": 1},
     ):
         inp = SpecialistPromptInputs(
-            task_id="task-regression",
             domain=domain,
             max_turns=4,
             gpu_type="MI355X",
@@ -493,12 +482,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.inference_optimizer.protocol.intent import (
-    Intent,
-    IntentType,
-    IntentValidationError,
-    validate_envelope,
-)
+from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.policy.gate import (
     PolicyDenied,
@@ -522,10 +506,8 @@ from hyperloom.orchestrator.specialists.runner import (
     build_empty_specialist_done,
 )
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
-from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
-    SpecialistPromptInputs,
-    build_specialist_prompts,
-)
+from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
+from hyperloom.orchestrator.prompts.specialist_prompt_builder import build_specialist_prompts
 
 from .conftest import init_git_repo, make_fake_claude
 
@@ -587,36 +569,6 @@ def test_serving_specialist_is_M5_active():
 def test_get_domain_returns_none_for_unknown():
     assert get_domain("nonsense_specialist") is None
     assert get_domain("serving_specialist").kb_anchor == "framework"
-
-
-# 2. intent_parser — SPECIALIST_DONE envelope round-trip
-def test_specialist_done_envelope_passes_validation():
-    envelope = {
-        "intents": [
-            {
-                "intent_type": "specialist_done",
-                "payload": _valid_done_payload(),
-            }
-        ]
-    }
-    intents = validate_envelope(envelope)
-    assert len(intents) == 1
-    assert intents[0].type == IntentType.SPECIALIST_DONE
-
-
-def test_specialist_done_envelope_missing_required_field():
-    bad_payload = _valid_done_payload()
-    bad_payload.pop("summary")
-    envelope = {
-        "intents": [
-            {
-                "intent_type": "specialist_done",
-                "payload": bad_payload,
-            }
-        ]
-    }
-    with pytest.raises(IntentValidationError, match="summary"):
-        validate_envelope(envelope)
 
 
 # 3. PolicyGate R2 — specialist_dispatch_source
@@ -752,7 +704,6 @@ def _build_serving_prompt(**kwargs: Any) -> tuple[str, str]:
 
 def test_prompt_builder_emits_nine_sections():
     sys_p, usr_p = _build_serving_prompt(
-        task_id="task-001",
         gap_canonical_id="gap.scheduler.long_isl",
         gpu_type="MI300X",
         tp=8,
@@ -771,16 +722,13 @@ def test_prompt_builder_emits_nine_sections():
 
 
 def test_prompt_builder_uses_none_placeholder_for_empty_sections():
-    sys_p, usr_p = _build_serving_prompt(
-        task_id="task-002",
-    )
+    sys_p, usr_p = _build_serving_prompt()
     # Several user-side sections will be empty → "(none)" placeholder.
     assert "(none)" in usr_p
 
 
 def test_prompt_builder_pr_monitor_unavailable_renders_explanatory_line():
     sys_p, usr_p = _build_serving_prompt(
-        task_id="task-003",
         pr_monitor_available=False,
     )
     assert "unavailable" in usr_p
@@ -790,7 +738,7 @@ def test_pr_monitor_section_lists_all_granted_tools():
     """Every tool in PR_MONITOR_TOOL_NAMES must appear in the rendered §6."""
     from hyperloom.orchestrator.policy.gate import PR_MONITOR_TOOL_NAMES
 
-    _sys, usr_p = _build_serving_prompt(task_id="tool-drift", pr_monitor_available=True)
+    _sys, usr_p = _build_serving_prompt(pr_monitor_available=True)
     prefix = "mcp__pr_monitor__"
     for tool_full in PR_MONITOR_TOOL_NAMES:
         short = tool_full[len(prefix) :]
@@ -842,7 +790,6 @@ async def test_specialist_runner_happy_path(tmp_path, monkeypatch):
     assert result.specialist_done["domain"] == "serving_specialist"
     assert result.specialist_done["gap_canonical_id"] == "gap.scheduler"
     assert len(result.specialist_done["proposal_set"]) == 2
-    assert result.turns_used == 1
 
     workspace = tmp_path / "session" / "runs" / "specialist" / "task-xyz"
     assert (workspace / "prompt.md").exists()
@@ -1046,7 +993,6 @@ def test_readonly_domains_never_grant_patch_authoring():
     for key in READONLY_DOMAIN_KEYS:
         system, user = build_specialist_prompts(
             SpecialistPromptInputs(
-                task_id=f"task-{key}",
                 domain=get_domain(key),
                 max_turns=4,
                 mode="research",
@@ -1063,7 +1009,6 @@ def test_readonly_dispatch_states_the_read_only_boundary():
     """The iron rule that replaces the staging grant must say so explicitly."""
     system, _ = build_specialist_prompts(
         SpecialistPromptInputs(
-            task_id="task-ro",
             domain=get_domain("static_recon_specialist"),
             max_turns=4,
             mode="research",
@@ -1078,7 +1023,6 @@ def test_cross_domain_research_dispatch_drops_patch_deliverable():
     """Mode outranks scope: a read-only `domains` dispatch must not be promised the coupled cross-domain patch."""
     _, user = build_specialist_prompts(
         SpecialistPromptInputs(
-            task_id="task-domains-ro",
             domain=get_domain("candidate_discovery_specialist"),
             max_turns=4,
             scope="domains",
@@ -1095,7 +1039,6 @@ def test_freeform_research_dispatch_drops_patch_deliverable():
     """A bare freeform dispatch resolves to research mode, so its mandate must not promise a patch deliverable."""
     system, user = build_specialist_prompts(
         SpecialistPromptInputs(
-            task_id="task-ff",
             domain=get_domain("serving_specialist"),
             max_turns=4,
             scope="freeform",
@@ -1113,7 +1056,6 @@ def test_patch_mode_keeps_full_authoring_contract():
     """The gating must not strip anything from a patch-capable dispatch."""
     system, user = build_specialist_prompts(
         SpecialistPromptInputs(
-            task_id="task-patch",
             domain=get_domain("serving_specialist"),
             max_turns=4,
             mode="patch",
@@ -1136,7 +1078,6 @@ def test_patch_mode_keeps_full_authoring_contract():
 def test_patch_mode_without_gpu_keeps_the_authoring_clause():
     """The no-GPU iron rule still offers patch authoring in patch mode; only research mode drops it."""
     kwargs = dict(
-        task_id="task-patch-cpu",
         domain=get_domain("serving_specialist"),
         max_turns=4,
         allocated_gpu_ids=[],
@@ -1155,13 +1096,13 @@ def test_mandate_section_renders_run_status():
     domain = get_domain("serving_specialist")
     assert domain is not None
     inp = SpecialistPromptInputs(
-        task_id="task-mandate",
         domain=domain,
         max_turns=4,
         gap_canonical_id="gap.serving.test",
         framework="vllm",
         baseline_tput=6232.0,
         current_tput=6848.5,
+        current_launch_args="--moe-backend aiter --kv-cache-dtype fp8_e4m3",
         cumulative_gain_validated=9.89,
         keep_threshold_pct=1.0,
         applied_stack=[{"variant_name": "--kv-cache-dtype fp8_e4m3", "gain_pct": 5.99}],
@@ -1172,6 +1113,7 @@ def test_mandate_section_renders_run_status():
     assert "9.89" in user or "+9.89" in user
     assert "1.00%" in user or "1.0%" in user
     assert "--kv-cache-dtype fp8_e4m3" in user
+    assert "--moe-backend aiter --kv-cache-dtype fp8_e4m3" in user
 
 
 # --------------------------------------------------------------------------- # Stage-3 guard: enablement ladder book
@@ -1181,7 +1123,6 @@ def test_enablement_ladder_rendered_exactly_once():
     domain = get_domain("enablement_specialist")
     assert domain is not None
     inp = SpecialistPromptInputs(
-        task_id="task-enablement-dedup",
         domain=domain,
         max_turns=4,
         gap_canonical_id="gap.enablement.unknown",
@@ -1204,7 +1145,6 @@ def test_kb_write_iron_rule_absent():
     domain = get_domain("serving_specialist")
     assert domain is not None
     inp = SpecialistPromptInputs(
-        task_id="task-iron",
         domain=domain,
         max_turns=4,
         gap_canonical_id="gap.serving.iron_rule",

@@ -15,7 +15,8 @@ import pytest
 
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.proposals import PendingProposal
-from hyperloom.orchestrator.phases.framework import _AUTHORED_LANE_MAX_ATTEMPTS, ProgressStamp
+from hyperloom.orchestrator.phases.framework import _AUTHORED_LANE_MAX_ATTEMPTS
+from hyperloom.orchestrator.phases.framework_records import ProgressStamp
 
 from .conftest import make_coordinator
 

@@ -23,7 +23,7 @@ except ImportError:  # pragma: no cover - exercised only on non-POSIX hosts
     fcntl = None  # type: ignore[assignment]
 
 from kernelforge.knowledge.kb_store.remote_client import KBStoreClient, KBStoreError
-from kernelforge.tools.durable_io import atomic_write_bytes, fsync_directory, fsync_tree_directories
+from kernelforge.utils.durable_io import atomic_write_bytes, fsync_directory, fsync_tree_directories
 
 CHAMPION_METRIC = "speedup"
 MEASURED_SPEEDUP_KEY = "measured_speedup"
@@ -866,10 +866,8 @@ class LocalRewriteRecords:
 
 def create_rewrite_record_store(config: Any) -> RewriteRecordStore | None:
     """Pick a backend from the process-wide knowledge configuration."""
-    from kernelforge.knowledge.kb_store.config import (
-        KnowledgeStoreMode,
-        knowledge_config_from_runtime,
-    )
+    from kernelforge.config import KnowledgeStoreMode
+    from kernelforge.knowledge.kb_store.config import knowledge_config_from_runtime
 
     knowledge = knowledge_config_from_runtime(config)
     if knowledge.mode is KnowledgeStoreMode.LOCAL:

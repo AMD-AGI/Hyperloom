@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -13,7 +14,7 @@ from typing import Any
 from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
 from hyperloom.inference_optimizer.session.resume_guard import confirmed_stopped_scope
 
-from ..state.task_registry import Task
+from ..state.task_registry import IllegalTransition, Task, TaskNotFound
 from ._current_best_lift import _StackKey, _orphan_stack_key, _stacked_keep_keys
 from ._integrate_promotion import _IntegrateMarker, _KeptResultScan, _integrate_marker_of, _task_recorded_a_result
 
@@ -112,7 +113,7 @@ class ResumeRecoveryMixin:
                     and str(res.get("status") or "").lower() == "kept"
                 ):
                     return _KeptResultScan(scanned=True, kept=res)
-        except Exception:
+        except (sqlite3.Error, ValueError):
             log.exception("Coordinator: pending_integrate kept-result scan failed")
             return _KeptResultScan(scanned=False, kept=None)
         return _KeptResultScan(scanned=True, kept=None)
@@ -278,7 +279,7 @@ class ResumeRecoveryMixin:
                             evidence={"failure_class": "resume_interrupted"},
                         )
                         task_state = "failed"
-            except Exception as exc:  # noqa: BLE001
+            except (sqlite3.Error, RuntimeError, ValueError) as exc:
                 state.warm_replay_pending = {
                     **dict(pending),
                     "status": "task_invalidation_failed",
@@ -324,7 +325,7 @@ class ResumeRecoveryMixin:
         aiter JIT locks (a killed compile leaves a pid-less lock that wedges
         every later build of that module), mark the row failed with a
         ``timeout`` failure_class for the framework channel, and clear the
-        sentinel. Best-effort throughout.
+        sentinel. Each step absorbs its expected failures; any other aborts the resume.
         """
         import shutil
         import signal
@@ -353,13 +354,10 @@ class ResumeRecoveryMixin:
 
         jit_dir = str(pending.get("aiter_jit_dir") or "").strip()
         if jit_dir:
-            try:
-                from ..actions.executors._aiter_jit import sweep_stale_aiter_locks_if_dead
+            from ..actions.executors._aiter_jit import sweep_stale_aiter_locks_if_dead
 
-                sweep_stale_aiter_locks_if_dead(aiter_jit_dir=Path(jit_dir))
-                summary["swept_jit_dir"] = jit_dir
-            except Exception:
-                log.debug("resume: targeted-build jit sweep failed for %s", jit_dir, exc_info=True)
+            sweep_stale_aiter_locks_if_dead(aiter_jit_dir=Path(jit_dir))
+            summary["swept_jit_dir"] = jit_dir
 
         state.enablement.last_build_failure = {
             "failure_class": "timeout",
@@ -371,7 +369,7 @@ class ResumeRecoveryMixin:
                 if getattr(task, "state", "") == "running":
                     await self.tasks.transition(task_id, "failed", evidence={"failure_class": "resume_interrupted"})
                     summary["failed_row"] = True
-            except Exception:
+            except (TaskNotFound, IllegalTransition, sqlite3.Error, ValueError):
                 log.debug("resume: targeted-build row fail raced for %s", task_id, exc_info=True)
 
         state.pending_targeted_build = {}
@@ -400,39 +398,36 @@ class ResumeRecoveryMixin:
         tracked_tid = str(state.enablement.revalidation_task_id or "").strip()
         if not tracked_tid:
             return
-        try:
-            from ..state.task_registry import TERMINAL_STATES, TaskNotFound
+        from ..state.task_registry import TERMINAL_STATES
 
-            row_state = ""
-            try:
-                row = await self.tasks.get(tracked_tid)
-                row_state = str(getattr(row, "state", "") or "")
-                is_terminal = row_state in TERMINAL_STATES
-            except TaskNotFound:
-                is_terminal = True
-            if not is_terminal:
-                return
-            if row_state == "cancelled":
-                await self._reopen_revalidation_window()
-                report["fixes"].append({"kind": "reopened_revalidation_the_run_cancelled", "task_id": tracked_tid})
-                log.info(
-                    "resume: revalidation task %s was cancelled by the run; window left open at generation %d",
-                    tracked_tid,
-                    int(state.enablement.revalidation_generation or 0),
-                )
-                return
-            enablement_event.record_revalidation_cleared(
-                generation=int(state.enablement.revalidation_generation or 0), task_id=tracked_tid
-            )
-            state.enablement.validation_pending = False
-            state.enablement.revalidation_task_id = ""
-            report["fixes"].append({"kind": "cleared_orphaned_revalidation_pending", "task_id": tracked_tid})
+        row_state = ""
+        try:
+            row = await self.tasks.get(tracked_tid)
+            row_state = str(getattr(row, "state", "") or "")
+            is_terminal = row_state in TERMINAL_STATES
+        except TaskNotFound:
+            is_terminal = True
+        if not is_terminal:
+            return
+        if row_state == "cancelled":
+            await self._reopen_revalidation_window()
+            report["fixes"].append({"kind": "reopened_revalidation_the_run_cancelled", "task_id": tracked_tid})
             log.info(
-                "resume: cleared stale enablement_validation_pending for terminal revalidation task %s",
+                "resume: revalidation task %s was cancelled by the run; window left open at generation %d",
                 tracked_tid,
+                int(state.enablement.revalidation_generation or 0),
             )
-        except Exception:
-            log.debug("resume: revalidation pending recovery check failed", exc_info=True)
+            return
+        enablement_event.record_revalidation_cleared(
+            generation=int(state.enablement.revalidation_generation or 0), task_id=tracked_tid
+        )
+        state.enablement.validation_pending = False
+        state.enablement.revalidation_task_id = ""
+        report["fixes"].append({"kind": "cleared_orphaned_revalidation_pending", "task_id": tracked_tid})
+        log.info(
+            "resume: cleared stale enablement_validation_pending for terminal revalidation task %s",
+            tracked_tid,
+        )
 
     async def _surface_orphaned_keep(self, report: dict[str, Any], kind: str, variant: str, task_id: Any) -> None:
         report["warnings"].append(
@@ -490,22 +485,19 @@ class ResumeRecoveryMixin:
         Args:
             report: The resume report dict to append fixes/warnings to.
         """
-        try:
-            stack_keys = _stacked_keep_keys(self.shared_state.optimization_stack)
-            seen: set[_StackKey] = set()
-            for msg in await self.bus.tail(topic="delegated_result", n=10_000):
-                payload = msg.payload or {}
-                res = payload.get("result") or {}
-                if not isinstance(res, dict) or str(res.get("status") or "").lower() != "kept":
-                    continue
-                kind = str(payload.get("kind") or "")
-                key = _orphan_stack_key(kind, res)
-                if key is None or not key.variant or key in stack_keys or key in seen:
-                    continue
-                seen.add(key)
-                if kind != "integrate_patch":
-                    await self._surface_orphaned_keep(report, kind, key.variant, payload.get("task_id"))
-                elif await self._recover_orphaned_integrate_keep(res, report, key.variant, payload.get("task_id")):
-                    stack_keys.add(key)
-        except Exception:
-            log.exception("Coordinator: orphaned KEEP resume recovery failed")
+        stack_keys = _stacked_keep_keys(self.shared_state.optimization_stack)
+        seen: set[_StackKey] = set()
+        for msg in await self.bus.tail(topic="delegated_result", n=10_000):
+            payload = msg.payload or {}
+            res = payload.get("result") or {}
+            if not isinstance(res, dict) or str(res.get("status") or "").lower() != "kept":
+                continue
+            kind = str(payload.get("kind") or "")
+            key = _orphan_stack_key(kind, res)
+            if key is None or not key.variant or key in stack_keys or key in seen:
+                continue
+            seen.add(key)
+            if kind != "integrate_patch":
+                await self._surface_orphaned_keep(report, kind, key.variant, payload.get("task_id"))
+            elif await self._recover_orphaned_integrate_keep(res, report, key.variant, payload.get("task_id")):
+                stack_keys.add(key)

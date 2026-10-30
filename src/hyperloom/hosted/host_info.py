@@ -44,6 +44,7 @@ class Var:
     RUN_CREATED_AT = "HYPERLOOM_RUN_CREATED_AT"
     STATE_DIR = "HYPERLOOM_STATE_DIR"
     EVENTS_DIR = "HYPERLOOM_EVENTS_DIR"
+    MCP_HOST = "HYPERLOOM_MCP_HOST"
     MCP_PORT = "HYPERLOOM_MCP_PORT"
     MCP_TOKEN = "HYPERLOOM_MCP_TOKEN"
     MCP_PUBLIC_URL = "HYPERLOOM_MCP_PUBLIC_URL"
@@ -59,9 +60,15 @@ class Var:
     AWS_ACCESS_KEY_ID = "AWS_ACCESS_KEY_ID"
     AWS_SECRET_ACCESS_KEY = "AWS_SECRET_ACCESS_KEY"
     AWS_SESSION_TOKEN = "AWS_SESSION_TOKEN"
+    GRANT_LIMITS = "HYPERLOOM_GRANT_LIMITS"
+    SOURCE_REPO = "HYPERLOOM_SOURCE_REPO"
+    SOURCE_SHA = "HYPERLOOM_SOURCE_SHA"
     NODE_NAME = "NODE_NAME"
     CLAW_SESSION_ID = "CLAW_SESSION_ID"
 
+
+#: Shortest accepted ``HYPERLOOM_MCP_TOKEN``; the MCP server refuses a shorter host token.
+MIN_MCP_TOKEN_LENGTH = 16
 
 #: Every variable whose value is a credential.  Removed from the environment by :func:`take_host_info`.
 SECRET_VARS: tuple[str, ...] = (
@@ -111,6 +118,7 @@ _GROUP_VARS: Mapping[HostGroup, tuple[str, ...]] = {
 DEFAULT_REQUIRE: frozenset[HostGroup] = frozenset({HostGroup.MCP})
 
 _BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
+_COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _CONTROL_OR_SPACE_RE = re.compile(r"[\s\x00-\x1f\x7f]")
 
 
@@ -185,6 +193,16 @@ class SandboxKeys:
 
 
 @dataclass(frozen=True)
+class GrantLimits:
+    """The totals the host granted the run; a total the host did not state is ``None``."""
+
+    max_sandboxes: int | None
+    max_gpus: int | None
+    gpu_hours: float | None
+    max_runtime_sec: int | None
+
+
+@dataclass(frozen=True)
 class HostInfo:
     """Everything the host injected, typed.  Optional fields are ``None`` when the host did not set them."""
 
@@ -193,6 +211,7 @@ class HostInfo:
     run_created_at: datetime
     state_dir: Path
     events_dir: Path
+    mcp_host: str | None
     mcp_port: int | None
     mcp_token: Secret | None
     mcp_public_url: str | None
@@ -206,6 +225,9 @@ class HostInfo:
     archive_credentials: ArchiveCredentials | None
     node_name: str | None
     claw_session_id: str | None
+    grant_limits: GrantLimits | None = None
+    source_repo: str | None = None  # what the runner sandbox's start-up script fetches
+    source_sha: str | None = None  # full 40-hex commit id of the version this run executes
 
 
 class _Reader:
@@ -265,14 +287,32 @@ class _Reader:
     def archive(self, name: str) -> ArchiveLocation | None:
         return self._parsed(name, _archive_location)
 
-    def secret(self, name: str, *, force: bool = False) -> Secret | None:
-        value = self._parsed(name, _plain_text, force=force)
+    def grant_limits(self, name: str) -> GrantLimits | None:
+        return self._parsed(name, _grant_limits)
+
+    def commit_sha(self, name: str) -> str | None:
+        return self._parsed(name, _commit_sha)
+
+    def secret(self, name: str, *, force: bool = False, min_length: int = 0) -> Secret | None:
+        def parse(value: str) -> str:
+            text = _plain_text(value)
+            if len(text) < min_length:
+                raise ValueError(f"must be at least {min_length} characters")
+            return text
+
+        value = self._parsed(name, parse, force=force)
         return None if value is None else Secret(value)
 
 
 def _plain_text(value: str) -> str:
     if _CONTROL_OR_SPACE_RE.search(value):
         raise ValueError("must not contain whitespace or control characters")
+    return value
+
+
+def _commit_sha(value: str) -> str:
+    if not _COMMIT_SHA_RE.match(value):
+        raise ValueError("must be a full lowercase 40-hex commit id")
     return value
 
 
@@ -349,6 +389,33 @@ def _is_template_entry(entry: object) -> bool:
     return _is_template_name(entry)
 
 
+_GRANT_COUNTS = ("max_sandboxes", "max_gpus", "max_runtime_sec")
+
+
+def _grant_total(value: object, name: str, *, whole: bool) -> int | float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not value >= 0 or value == float("inf"):
+        raise ValueError(f"{name} must be a number >= 0")
+    if whole and value != int(value):
+        raise ValueError(f"{name} must be a whole number")
+    return int(value) if whole else value
+
+
+def _grant_limits(value: str) -> GrantLimits:
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"is not valid JSON ({exc.msg} at line {exc.lineno} column {exc.colno})") from None
+    if not isinstance(parsed, dict):
+        raise ValueError("must be a JSON object")
+    totals = {
+        name: _grant_total(parsed.get(name), name, whole=name in _GRANT_COUNTS)
+        for name in (*_GRANT_COUNTS, "gpu_hours")
+    }
+    return GrantLimits(**totals)  # type: ignore[arg-type]
+
+
 def _archive_location(value: str) -> ArchiveLocation:
     parts = urlsplit(value)
     if parts.scheme != "s3" or parts.query or parts.fragment:
@@ -400,8 +467,9 @@ def _build(reader: _Reader) -> HostInfo:
         run_created_at=reader.timestamp(Var.RUN_CREATED_AT),  # type: ignore[arg-type]
         state_dir=state_dir,  # type: ignore[arg-type]
         events_dir=events_dir or (state_dir / "events" if state_dir else None),  # type: ignore[arg-type]
+        mcp_host=reader.text(Var.MCP_HOST),
         mcp_port=reader.port(Var.MCP_PORT),
-        mcp_token=reader.secret(Var.MCP_TOKEN),
+        mcp_token=reader.secret(Var.MCP_TOKEN, min_length=MIN_MCP_TOKEN_LENGTH),
         mcp_public_url=reader.url(Var.MCP_PUBLIC_URL),
         sandbox_templates=reader.templates(Var.SANDBOX_TEMPLATES),
         e2b_api_url=reader.url(Var.E2B_API_URL),
@@ -413,6 +481,9 @@ def _build(reader: _Reader) -> HostInfo:
         archive_credentials=_archive_credentials(reader, result_archive),
         node_name=reader.text(Var.NODE_NAME),
         claw_session_id=reader.text(Var.CLAW_SESSION_ID),
+        grant_limits=reader.grant_limits(Var.GRANT_LIMITS),
+        source_repo=reader.text(Var.SOURCE_REPO),
+        source_sha=reader.commit_sha(Var.SOURCE_SHA),
     )
 
 

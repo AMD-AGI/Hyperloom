@@ -30,21 +30,20 @@ from hyperloom.inference_optimizer.protocol.action_surfaces import (
     NO_KERNEL_AGENT_ENABLED_ACTIONS,
 )
 from hyperloom.common.perf_metric import graded_metric_key, is_agentx_mode
+from ..mcp_tool_names import qualified_context_tool_name
 from . import read_rules_fragment as _read_rules_fragment
-from .agentx_context import corpus_lines, grading_lines, launch_ownership_lines
+from .agentx_context import agentx_session_lines, reference_out_of_mode
 from .transport import TRANSPORTS, TRANSPORT_STRUCTURED_OUTPUT, TRANSPORT_TOOLS
 
 
-# Phase ordering for the catalogue; unknown phases appended at the end.
+# Phase ordering for the catalogue; every action's ``pipeline_phase`` must be listed.
 _PHASE_ORDER: tuple[str, ...] = (
     "prep",
     "measure",
     "analysis",
     "explore",
     "deep",
-    "validate",
     "finalize",
-    "support",
 )
 _PHASE_HEADERS: dict[str, str] = {
     "prep": "Prep — initialise session metadata. Always finishes first.",
@@ -52,9 +51,7 @@ _PHASE_HEADERS: dict[str, str] = {
     "analysis": "Analysis — read-only; produces traces / candidate kernels.",
     "explore": "Explore — propose modifications; one round produces a candidate, not yet validated.",
     "deep": "Deep — kernel_agent-owned. Emit via REQUEST(target_agent='kernel_agent', kind=...).",
-    "validate": "Validate — apply the accumulated optimization_stack and re-bench to get an honest cumulative gain.",
     "finalize": "Finalize — write the final report.",
-    "support": "Support — invoke only when triggered (plateau / crash / re-exploration).",
 }
 
 
@@ -116,7 +113,6 @@ class SessionContext:
 
     Attributes:
         framework: ``sglang`` / ``vllm`` -- printed in SESSION CONTEXT.
-        kernel_enabled: Explicit override; ``None`` derives from the kernel-owned actions.
         framework_agent_phase_enabled: When False (``--no-framework-agent``) the FRAMEWORK_AGENT phase is skipped.
         objective_kind: Objective kind string, printed verbatim.
         objective_value: Objective target value, printed verbatim.
@@ -133,7 +129,6 @@ class SessionContext:
     """
 
     framework: str = "sglang"
-    kernel_enabled: bool | None = None
     framework_agent_phase_enabled: bool = True
     objective_kind: str = "time_only"
     objective_value: float | str | None = None
@@ -181,12 +176,13 @@ class PromptAssets:
     references_dir: Path | None = None
 
 
-def _section_session_context(session: SessionContext) -> list[str]:
+def _section_session_context(session: SessionContext, *, kernel_enabled: bool) -> list[str]:
     """Build the SESSION CONTEXT section lines.
 
     Args:
         session (SessionContext): The session's framework, enabled phases,
             objective, budget, source roots and AgentX workload.
+        kernel_enabled (bool): Whether kernel_agent-owned actions are enabled.
 
     Returns:
         list[str]: Markdown lines describing static session context and phase
@@ -203,7 +199,7 @@ def _section_session_context(session: SessionContext) -> list[str]:
         "## 2. SESSION CONTEXT",
         "",
         f"- framework        : {session.framework}",
-        f"- kernel_enabled   : {'true' if session.kernel_enabled else 'false'}",
+        f"- kernel_enabled   : {'true' if kernel_enabled else 'false'}",
         f"- optimize_enabled : {'true' if session.framework_agent_phase_enabled else 'false'}",
         f"- objective        : {obj}",
         f"- graded_axis      : {graded_metric_key(benchmark_mode=session.benchmark_mode)}",
@@ -212,18 +208,14 @@ def _section_session_context(session: SessionContext) -> list[str]:
         f"- framework_source_roots: {roots_line}  (source roots to search)",
     ]
     if is_agentx_mode(session.benchmark_mode):
-        lines += [
-            "",
-            *corpus_lines(session.agentx_corpus_shape),
-            "",
-            *grading_lines(session.agentx_grading, session.agentx_backend),
-            *launch_ownership_lines(session.agentx_backend),
-        ]
+        lines += agentx_session_lines(session.agentx_corpus_shape, session.agentx_grading, session.agentx_backend)
     lines += [
         "",
-        "The Coordinator supplies the session context (Shared session state, KB hints,",
-        "advisories) and the per-tick blocks (Phase, Mission progress, Time budget,",
-        "Tick, inbox tail) every tick.",
+        "The Coordinator supplies the session context (resource pools,",
+        "constraints, advisories) first, then the per-tick blocks (Phase,",
+        "Mission progress, Time budget, Tick, Shared session state, recent",
+        "policy denials, Untested proposals, KB hints, Plateau advisory,",
+        "inbox tail) every tick.",
         "The Time-budget block carries `remaining=X.Xmin`.",
         "See PHASE CONTRACT below for the phase chain, per-phase allowed",
         "actions, and phase-transition rules.",
@@ -287,22 +279,18 @@ def _section_phase_semantics(
             "",
             "Phase transitions are Coordinator-owned. The hard advance gates",
             "are: `baseline_tput > 0` (+ revalidation settled + build drain)",
-            "exits ENABLEMENT; `baseline_tput > 0` exits PRELUDE; the per-phase",
-            "budget cap or a terminal stop_reason exits FRAMEWORK_AGENT /",
-            "KERNEL_AGENT / SWEEP; the wall-clock deadline (closing phase) routes",
-            "to CLOSE.",
+            "exits ENABLEMENT and `baseline_tput > 0` exits PRELUDE, each after",
+            "the initial roofline it enqueued completes (the Phase block's `hold` line);",
+            "the per-phase budget cap or a terminal stop_reason exits FRAMEWORK_AGENT",
+            "/ KERNEL_AGENT / SWEEP; the wall-clock deadline (closing phase) routes to CLOSE.",
             "You may also emit `escalate_strategy_change{next_action_hint=",
             "'skip_to_kernel'}` in FRAMEWORK_AGENT when you judge",
             "the current phase exhausted; the Coordinator validates the hint",
-            "vocab and routes the transition on the next tick. `skip_to_close`",
-            "is not in that set — see the exception below for when it applies.",
-            "`skip_to_close` is reserved, in EVERY phase, for genuine early",
-            "abandonment (e.g. infra is dead and the sweep cannot run at all):",
-            "it closes the run instead of advancing a phase. Running low on",
-            "budget is not abandonment — the",
-            "Coordinator prices the remaining budget itself and exits with an",
-            "honest terminal stop_reason (`sweep_done` / `global_converged` /",
-            "`time_exhausted`) once a further cycle cannot be funded.",
+            "vocab and routes the transition on the next tick. No hint ends the",
+            "run: the Coordinator prices the remaining budget itself and exits",
+            "with an honest terminal stop_reason (`sweep_done` /",
+            "`global_converged` / `time_exhausted`) once a further cycle cannot",
+            "be funded.",
         ]
     )
     return lines
@@ -332,49 +320,6 @@ def _filter_actions(
     return out
 
 
-def _resolve_prompt_prelude(
-    action_registry: Mapping[str, ActionMetadata],
-    enabled_actions: Iterable[str],
-    framework: str,
-    kernel_enabled: bool | None,
-    rules_fragment_path: Path | None,
-) -> tuple[list[ActionMetadata], bool, str, str]:
-    """Resolve the shared prelude for the orchestration / critic prompt builders.
-
-    Args:
-        action_registry (Mapping[str, ActionMetadata]): The action catalogue.
-        enabled_actions (Iterable[str]): Action names enabled for this run.
-        framework (str): The framework name; normalised to lower-case (default
-            ``sglang``).
-        kernel_enabled (bool | None): Explicit override; ``None`` derives from
-            whether any KERNEL_OWNED action is enabled.
-        rules_fragment_path (Path | None): Path to the rules fragment.
-
-    Returns:
-        tuple[list[ActionMetadata], bool, str, str]: ``(actions, kernel_enabled,
-        framework_norm, rules_md)``.
-    """
-    actions = _filter_actions(action_registry, enabled_actions)
-    if kernel_enabled is None:
-        kernel_enabled = any(a.name in KERNEL_AGENT_OWNED_ACTIONS for a in actions)
-    framework_norm = (framework or "sglang").strip().lower() or "sglang"
-    rules_md = _read_rules_fragment(rules_fragment_path)
-    return actions, kernel_enabled, framework_norm, rules_md
-
-
-def join_sections(sections: list[list[str]]) -> str:
-    """Join prompt sections into the final prompt string (shared epilogue).
-
-    Args:
-        sections (list[list[str]]): Per-section line lists.
-
-    Returns:
-        str: The sections joined (lines by ``\\n``, sections by blank line),
-        right-stripped with a trailing newline.
-    """
-    return "\n\n".join("\n".join(s) for s in sections).rstrip() + "\n"
-
-
 def _phase_eta_summary(actions: list[ActionMetadata]) -> list[tuple[str, float, list[str]]]:
     """Group actions by phase in _PHASE_ORDER; return (phase, eta_min_sum, names).
 
@@ -382,27 +327,18 @@ def _phase_eta_summary(actions: list[ActionMetadata]) -> list[tuple[str, float, 
         actions: The enabled actions to group by pipeline phase.
 
     Returns:
-        A list of ``(phase, eta_min_sum, names)`` tuples ordered by
-        ``_PHASE_ORDER`` with unknown phases appended last.
+        A list of ``(phase, eta_min_sum, names)`` tuples ordered by ``_PHASE_ORDER``.
+
+    Raises:
+        ValueError: When an action's ``pipeline_phase`` is not in ``_PHASE_ORDER``.
     """
     bucket: dict[str, list[ActionMetadata]] = {}
     for a in actions:
         bucket.setdefault(a.pipeline_phase, []).append(a)
-    ordered: list[tuple[str, float, list[str]]] = []
-    seen: set[str] = set()
-    for phase in _PHASE_ORDER:
-        if phase not in bucket:
-            continue
-        items = bucket[phase]
-        eta = sum(max(0.0, a.typical_runtime_min) for a in items)
-        ordered.append((phase, eta, [a.name for a in items]))
-        seen.add(phase)
-    for phase, items in bucket.items():
-        if phase in seen:
-            continue
-        eta = sum(max(0.0, a.typical_runtime_min) for a in items)
-        ordered.append((phase, eta, [a.name for a in items]))
-    return ordered
+    return [
+        (phase, sum(max(0.0, a.typical_runtime_min) for a in bucket[phase]), [a.name for a in bucket[phase]])
+        for phase in sorted(bucket, key=_PHASE_ORDER.index)
+    ]
 
 
 def _section_pipeline_and_budget(
@@ -440,7 +376,7 @@ def _section_pipeline_and_budget(
             "",
             f"Sum of typical phase ETAs: ~{eta_total:.0f} min vs max_minutes={max_minutes}.",
             "If sum >> budget, prefer high-gain/low-cost actions and skip optional",
-            "phases (analysis / support). If sum << budget, do an extra explore round",
+            "phases (analysis). If sum << budget, do an extra explore round",
             "before report.",
         ]
     )
@@ -537,10 +473,9 @@ def _format_grid_injection_hint(name: str) -> str | None:
             "base_extra_args?, base_tput?, accuracy_baseline?, "
             "keep_threshold_pct?: <raise only; floored at the session-cycle bar>}}`. "
             "Variants run serially; a KEEP is graded on its decision "
-            "round. Variant identity is content-based (args+envs+"
-            "remove_args+unset_envs+args_mode); only exact duplicates within "
-            "the same submitted grid are collapsed, so any prior fingerprint "
-            "may be re-proposed. "
+            "round. A row that starts the stack's own server (see "
+            "`current_launch_flags`) is skipped, and rows starting the same server "
+            "are benched once; any prior fingerprint may be re-proposed. "
             "Use remove_args/unset_envs to ablate harmful base flags; "
             "args_mode='replace' to drop inherited server args. "
             "Every variant requires action-time reasoning that names the "
@@ -614,15 +549,13 @@ def _stop_report_step(phase_key: str) -> str:
     return "do not propose `report` (only CLOSE allows it, and the Coordinator routes the run there)"
 
 
-def _section_decision_framework(*, kernel_enabled: bool, phase: str = "", transport: str = "") -> list[str]:
+def _section_decision_framework(*, phase: str = "", transport: str = "") -> list[str]:
     """Build the DECISION FRAMEWORK section lines.
 
     Covers the per-tick selection order, FAILURE RECOVERY, and the
     Config-arm IDEA GENERATION block.
 
     Args:
-        kernel_enabled (bool): Whether kernel_agent-owned actions are enabled for this
-            run.
         phase (str): Normalised current pipeline phase; ``""`` renders every
             phase-scoped block.
         transport (str): One of :data:`TRANSPORTS`; scopes the tool references
@@ -706,8 +639,7 @@ def _section_decision_framework(*, kernel_enabled: bool, phase: str = "", transp
             "   the next phase-compute, while one arm dry means work the other.",
             "   When you judge FRAMEWORK_AGENT exhausted,",
             "   emit ``escalate_strategy_change{next_action_hint=",
-            "   'skip_to_kernel'}``. `skip_to_close` is not a",
-            "   phase advance -- see PHASE CONTRACT before emitting it.",
+            "   'skip_to_kernel'}``. No hint ends the run.",
             "",
             "If you cannot move forward, emit",
             "`send_message{topic='observation', body_md='blocked: <reason>'}`.",
@@ -737,12 +669,13 @@ def _failure_recovery_lines(*, phase: str, transport: str = "") -> list[str]:
         list[str]: Markdown lines for the failure-recovery block.
     """
     baseline_scoped = _renders_in(phase, _BASELINE_RECOVERY_PHASES)
+    read_reference = qualified_context_tool_name("read_reference")
     detail = (
         "/ `last_action_failures` for the error detail."
         if transport == TRANSPORT_STRUCTURED_OUTPUT
         else (
             "/ `last_action_failures` for the error detail. Full diagnostic surfaces,\n"
-            "fingerprint semantics, and examples: ``read_reference('failure_recovery')``."
+            f"fingerprint semantics, and examples: ``{read_reference}('failure_recovery')``."
         )
     )
     lines = [
@@ -768,8 +701,8 @@ def _failure_recovery_lines(*, phase: str, transport: str = "") -> list[str]:
         )
     lines.extend(
         [
-            "* **RULE F3** — repeated `error_class='subprocess_nonzero'` on `baseline`"
-            " → stop retrying baseline; send observation 'blocked: …'."
+            "* **RULE F3** — repeated `error_class='subprocess_nonzero'` or `'magpie_nonzero_invalid_measurement'`"
+            " on `baseline` → stop retrying baseline; send observation 'blocked: …' quoting the failure excerpt."
             " Explore variants may be re-proposed; read the failure log first.",
             "* **RULE F4** — `policy_denial_streak` is information only."
             " Change something substantive; re-emitting the identical intent wastes a tick.",
@@ -806,8 +739,7 @@ def _idea_generation_lines() -> list[str]:
         "   be slowing the workload, emit a variant with `remove_args` and/or",
         "   `unset_envs` instead of only adding more knobs.",
         "",
-        "Variant identity is content-based (args+envs+remove_args+",
-        "unset_envs+args_mode); only exact same-grid duplicates are collapsed.",
+        "A row starting the stack's own server is skipped; rows starting the same server run once.",
         "`extra_server_args` is framework-neutral (routed to EXTRA_SGLANG_ARGS",
         "/ EXTRA_VLLM_ARGS / EXTRA_ATOM_ARGS by `--framework`).",
         "",
@@ -1016,10 +948,6 @@ def _section_cycle_directive(
 
 
 _WHEN_TAG_RE = re.compile(r"^<!--\s*when:\s*(?P<when>.+?)\s*-->$")
-# Reference docs surfaced only on AgentX runs. Gated here (keyed on the session's
-# benchmark_mode, i.e. HYPERLOOM_AGENTX) rather than by an orchestration.md rule,
-# so a synthetic run never lists a doc it should not act on.
-_AGENTX_ONLY_REFERENCES: frozenset[str] = frozenset({"speculative_decoding"})
 
 
 def _section_reference_index(
@@ -1034,17 +962,14 @@ def _section_reference_index(
         references_dir: Directory containing the reference markdown files.
         phase: Normalised current pipeline phase; ``""`` includes all entries.
         benchmark_mode: The session's benchmark mode (i.e. HYPERLOOM_AGENTX);
-            docs in :data:`_AGENTX_ONLY_REFERENCES` are listed only when it names
-            the AgentX workload. ``""`` (unscoped) still lists every doc.
+            :func:`reference_out_of_mode` keeps an AgentX-only doc out of a
+            synthetic run's index.
 
     Returns:
         Markdown lines, or ``[]`` when the directory is absent or empty.
     """
     if not references_dir.is_dir():
         return []
-    # Only filter AgentX-only docs when a concrete mode is set; unscoped renders all.
-    mode_set = bool(str(benchmark_mode or "").strip())
-    agentx = is_agentx_mode(benchmark_mode)
     entries: list[tuple[str, str]] = []
     for path in sorted(references_dir.glob("*.md")):
         when_text = ""
@@ -1064,15 +989,16 @@ def _section_reference_index(
             break
         if file_phases and not _renders_in(phase, file_phases):
             continue
-        if path.stem in _AGENTX_ONLY_REFERENCES and mode_set and not agentx:
+        if reference_out_of_mode(path.stem, benchmark_mode):
             continue
         entries.append((path.stem, when_text or "see document"))
     if not entries:
         return []
+    read_reference = qualified_context_tool_name("read_reference")
     lines: list[str] = [
         "## 8. ON-DEMAND REFERENCE INDEX",
         "",
-        "Use ``read_reference(name='<name>')`` to pull the full document.",
+        f"Use ``{read_reference}(name='<name>')`` to pull the full document.",
         "",
     ]
     for stem, when in entries:
@@ -1118,13 +1044,10 @@ def build_orchestration_prompt(
     transport = session.transport
     if transport and transport not in TRANSPORTS:
         raise ValueError(f"unknown prompt transport {transport!r}; expected one of {', '.join(sorted(TRANSPORTS))}")
-    actions, kernel_enabled, framework_norm, rules_md = _resolve_prompt_prelude(
-        action_registry,
-        enabled_actions,
-        session.framework,
-        session.kernel_enabled,
-        assets.rules_fragment_path,
-    )
+    actions = _filter_actions(action_registry, enabled_actions)
+    kernel_enabled = any(a.name in KERNEL_AGENT_OWNED_ACTIONS for a in actions)
+    framework_norm = (session.framework or "sglang").strip().lower() or "sglang"
+    rules_md = _read_rules_fragment(assets.rules_fragment_path)
     phase_norm = (cycle.phase or "").strip().upper()
 
     references_dir = assets.references_dir
@@ -1135,14 +1058,14 @@ def build_orchestration_prompt(
 
     sections: list[list[str]] = [
         _section_mission(),
-        _section_session_context(replace(session, framework=framework_norm, kernel_enabled=kernel_enabled)),
+        _section_session_context(replace(session, framework=framework_norm), kernel_enabled=kernel_enabled),
         _section_pipeline_and_budget(actions, max_minutes=session.max_minutes),
         _section_phase_semantics(
             kernel_enabled=kernel_enabled,
             framework_agent_phase_enabled=session.framework_agent_phase_enabled,
         ),
         _section_action_catalogue(actions),
-        _section_decision_framework(kernel_enabled=kernel_enabled, phase=phase_norm, transport=transport),
+        _section_decision_framework(phase=phase_norm, transport=transport),
         _section_cycle_directive(
             macro_cycle=cycle.macro_cycle, cycle_directive=cycle.cycle_directive, cycle_strategy=cycle.cycle_strategy
         ),
@@ -1165,7 +1088,7 @@ def build_orchestration_prompt(
             sections.append(ref_index)
     sections.append(_section_rules(rules_md, phase=phase_norm, transport=transport))
 
-    return join_sections(sections)
+    return "\n\n".join("\n".join(s) for s in sections).rstrip() + "\n"
 
 
 def default_enabled_actions(
@@ -1198,11 +1121,6 @@ def default_enabled_actions(
 
 
 __all__ = [
-    "FULL_ENABLED_ACTIONS",
-    "KERNEL_AGENT_OWNED_ACTIONS",
-    "NO_KERNEL_AGENT_ENABLED_ACTIONS",
-    "TRANSPORTS",
-    "TRANSPORT_STRUCTURED_OUTPUT",
     "TRANSPORT_TOOLS",
     "PromptAssets",
     "PromptCycle",

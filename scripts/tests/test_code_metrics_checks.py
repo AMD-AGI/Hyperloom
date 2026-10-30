@@ -160,6 +160,106 @@ def test_a_broad_noqa_the_change_removed_elsewhere_was_moved_not_added() -> None
     assert checks.broad_noqa_problems("m.py", BROAD_NOQA, {3, 15}, removed) == []
 
 
+# --- Broad catch that records nothing ---------------------------------------------
+
+
+BROAD_UNRECORDED = """\
+def swallows():
+    try:
+        f()
+    except Exception:
+        pass
+def logs():
+    try:
+        f()
+    except Exception:
+        log.warning("f failed", exc_info=True)
+def reraises():
+    try:
+        f()
+    except BaseException:
+        cleanup()
+        raise
+def converts():
+    try:
+        return f()
+    except Exception:
+        return None
+def narrow():
+    try:
+        f()
+    except ValueError:
+        pass
+def helper():
+    try:
+        f()
+    except:
+        _log(traceback.format_exc())
+def nested():
+    try:
+        f()
+    except (OSError, Exception):
+        def later():
+            log.warning("f failed")
+        return later
+def raising_helper():
+    try:
+        f()
+    except Exception as exc:
+        _raise_failure(exc)
+def stored():
+    try:
+        f()
+    except BaseException as exc:
+        error = exc
+    restore()
+    if error is not None:
+        raise error
+def converted_by_name():
+    try:
+        f()
+    except Exception as exc:
+        return _raised(exc), catalog_entry()
+def kept_but_never_raised():
+    try:
+        f()
+    except Exception as exc:
+        last = exc
+    return last
+def status_check_is_not_a_raise():
+    try:
+        f()
+    except Exception:
+        response.raise_for_status()
+def wrapped_later():
+    try:
+        f()
+    except Exception as exc:
+        error = exc
+    raise RuntimeError("f failed") from error
+"""
+_EXCEPT_ROWS = {4, 9, 14, 20, 25, 30, 35, 42, 47, 55, 60, 66, 71}
+
+
+def test_an_added_broad_handler_must_reraise_or_record() -> None:
+    got = [(p.check, p.line) for p in checks.broad_unrecorded_problems("m.py", BROAD_UNRECORDED, _EXCEPT_ROWS)]
+    unrecorded = [(checks.BROAD_UNRECORDED, row) for row in (4, 20, 35, 55, 60, 66)]
+    assert got == unrecorded
+
+
+def test_a_broad_handler_whose_body_the_change_did_not_touch_is_not_judged() -> None:
+    assert checks.broad_unrecorded_problems("m.py", BROAD_UNRECORDED, {3, 5, 21}) == []
+    # Only the comment on the except line changed: its code was removed as it is, the body is untouched.
+    assert checks.broad_unrecorded_problems("m.py", BROAD_UNRECORDED, {4}, {"except Exception:  # old note"}) == []
+
+
+def test_an_added_handler_is_judged_even_when_the_change_removed_the_same_except_line_elsewhere() -> None:
+    removed = {"except Exception:  # noqa: BLE001 - another file", "pass"}
+    got = checks.broad_unrecorded_problems("m.py", BROAD_UNRECORDED, {4, 5}, removed)
+    assert [(p.check, p.line) for p in got] == [(checks.BROAD_UNRECORDED, 4)]
+    assert checks.broad_unrecorded_problems("src/tests/test_m.py", BROAD_UNRECORDED, _EXCEPT_ROWS) == []
+
+
 # --- English only ----------------------------------------------------------------
 
 
@@ -357,6 +457,18 @@ def test_diff_only_checks_judge_the_change_and_skip_tests(tmp_path: Path) -> Non
     assert checks.run_all(tmp_path, ["src"], [], Units(tmp_path), None) == []
 
 
+def test_show_reads_a_file_and_refuses_a_directory(tmp_path: Path) -> None:
+    """A caller writes what ``show`` returns as a file, and ``git show <ref>:<dir>`` prints a tree listing."""
+    (tmp_path / "src/pkg").mkdir(parents=True)
+    (tmp_path / "src/pkg/a.py").write_text("x = 1\n", encoding="utf-8")
+    git(tmp_path, "init", "-q")
+    git(tmp_path, "add", "-A")
+    git(tmp_path, "commit", "-q", "-m", "base")
+    assert checks.show(tmp_path, "HEAD", "src/pkg/a.py") == "x = 1\n"
+    assert checks.show(tmp_path, "HEAD", "src/pkg") is None
+    assert checks.show(tmp_path, "HEAD", "src/pkg/gone.py") is None
+
+
 def commit_base(root: Path, files: dict[str, str]) -> None:
     for path, text in files.items():
         (root / path).parent.mkdir(parents=True, exist_ok=True)
@@ -409,7 +521,19 @@ def test_parse_diff_keeps_hunk_lines_apart_from_headers() -> None:
     diff = checks.parse_diff(text)
     assert diff.added == {"y.py": {3, 4}}
     assert diff.removed == {"# old"}
+    assert diff.removed_in == {"y.py": {"# old"}}
     assert diff.renames == {"y.py": "x.py"}
+
+
+def test_a_widened_except_is_judged_even_when_another_file_lost_the_same_line(tmp_path: Path) -> None:
+    before_a = "try:\n    f()\nexcept ValueError:\n    pass\n"
+    before_b = "try:\n    g()\nexcept Exception:\n    raise\n"
+    commit_base(tmp_path, {"src/pkg/a.py": before_a, "src/pkg/b.py": before_b})
+    (tmp_path / "src/pkg/a.py").write_text(before_a.replace("ValueError", "Exception"), encoding="utf-8")
+    (tmp_path / "src/pkg/b.py").write_text("g()\n", encoding="utf-8")
+    problems = checks.run_all(tmp_path, ["src"], [], Units(tmp_path), "HEAD")
+    got = [(p.where, p.line) for p in problems if p.check == checks.BROAD_UNRECORDED]
+    assert got == [("src/pkg/a.py", 3)]
 
 
 def test_parse_added_lines_reads_new_side_hunks() -> None:

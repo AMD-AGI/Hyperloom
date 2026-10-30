@@ -1,49 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the slimmed PRMonitorClient stub and KnowledgePlane facade."""
+"""Tests for the PR Monitor tool surface and the specialist MCP config."""
 
 from __future__ import annotations
 
 import json
 
-import pytest
-
-from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
-from hyperloom.orchestrator.knowledge.pr_monitor import PRMonitorClient
 from hyperloom.orchestrator.policy.gate import PR_MONITOR_TOOL_NAMES as _PR_MONITOR_TOOL_NAMES
-
-
-def test_pr_monitor_client_from_args_default_enabled():
-    c = PRMonitorClient.from_args()
-    assert c.enabled is True
-
-
-def test_pr_monitor_client_from_args_disabled():
-    c = PRMonitorClient.from_args(enabled=False)
-    assert c.enabled is False
-
-
-@pytest.fixture
-def plane_with_disabled_pr() -> KnowledgePlane:
-    return KnowledgePlane.from_clients(
-        pr_monitor=PRMonitorClient.from_args(enabled=False),
-    )
-
-
-def test_plane_default_disabled_states(plane_with_disabled_pr):
-    plane = plane_with_disabled_pr
-    assert plane.pr_monitor_enabled is False
-    assert plane.specialist_mcp_url() == ""
-
-
-def test_plane_enabled_returns_mcp_url():
-    plane = KnowledgePlane.from_clients(
-        pr_monitor=PRMonitorClient.from_args(enabled=True),
-        pr_monitor_mcp_url="http://pr.test/mcp/",
-    )
-    assert plane.pr_monitor_enabled is True
-    assert plane.specialist_mcp_url() == "http://pr.test/mcp/"
 
 
 def test_pr_monitor_tool_names_count():

@@ -99,6 +99,23 @@ def test_stage_a_lifts_metrics_and_maps_gpu_pct(tmp_path, monkeypatch):
     assert row["impact_score"] == 3.5
 
 
+def test_stage_a_reads_a_nan_metric_as_absent(tmp_path, monkeypatch):
+    """A NaN TraceLens metric is no reading: gpu_pct stays unset for finalize, the rest read 0."""
+    monkeypatch.setattr(
+        ks,
+        "resolve_kernel_source",
+        lambda *a, **k: ResolveResult(location=None, patchable=False, method="unresolved"),
+    )
+    nan = float("nan")
+    (row,) = aj.load_report_tasks(
+        _write_report(tmp_path, [_member(pct_e2e=nan, time_ms=nan, count=nan, efficiency_percent=nan)])
+    )
+    assert row["gpu_pct"] is None
+    assert row["duration_us"] == 0.0
+    assert row["call_count"] == 0
+    assert row["efficiency_percent"] == 0.0
+
+
 def test_finalize_derives_gpu_pct_from_duration_when_absent():
     """A row missing gpu_pct gets its duration share; an authoritative one stays.
 

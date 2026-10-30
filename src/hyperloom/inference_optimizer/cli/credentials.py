@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import logging
 import os
 import re
 import subprocess
@@ -20,8 +19,6 @@ from hyperloom.common.llm_config import (
     anthropic_synthesizable_key,
     has_anthropic_credential,
 )
-
-log = logging.getLogger(__name__)
 
 _OFFICIAL_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 _OFFICIAL_OPENAI_BASE_URL = "https://api.openai.com/v1"
@@ -52,26 +49,26 @@ _CATALOG_RETRY_DELAYS_SEC = (1.0, 3.0, 5.0)
 _CRITIC_AGENT_ROOT_ENV = "CRITIC_AGENT_ROOT"
 
 
-def _resolve_agent_root(agent: str) -> Path | None:
-    """Return an agent skill root (``$<AGENT>_AGENT_ROOT`` else the in-tree package), or ``None``."""
-    override = os.environ.get(f"{agent.upper()}_AGENT_ROOT", "").strip()
+def _resolve_agent_root() -> Path | None:
+    """Return the critic-agent skill root (``$CRITIC_AGENT_ROOT`` else the in-tree package), or ``None``."""
+    override = os.environ.get(_CRITIC_AGENT_ROOT_ENV, "").strip()
     if override:
         p = Path(override).expanduser()
         return p if (p / "runtime" / "cli.py").is_file() else None
     from ..session.paths import PACKAGE_ROOT
 
-    candidate = PACKAGE_ROOT.parent / "agents" / agent
+    candidate = PACKAGE_ROOT.parent / "agents" / "critic"
     return candidate if (candidate / "runtime" / "cli.py").is_file() else None
 
 
-def _validate_agent_runtime(root: Path, *, agent: str) -> None:
-    """Fail fast (SystemExit) if ``python -m hyperloom.agents.<agent>.runtime.cli --help`` doesn't work."""
-    module = f"hyperloom.agents.{agent}.runtime.cli"
+def _validate_agent_runtime(root: Path) -> None:
+    """Fail fast (SystemExit) if ``python -m hyperloom.agents.critic.runtime.cli --help`` doesn't work."""
+    module = "hyperloom.agents.critic.runtime.cli"
     cmd = [sys.executable, "-m", module, "--help"]
     # Probe cost is import-bound and can spike on a loaded pod; allow an env override so a slow-but-healthy runtime is
     # not misdiagnosed as broken.
     try:
-        _probe_timeout = float(os.environ.get(f"{agent.upper()}_AGENT_PROBE_TIMEOUT_SEC", "90"))
+        _probe_timeout = float(os.environ.get("CRITIC_AGENT_PROBE_TIMEOUT_SEC", "90"))
     except (TypeError, ValueError):
         _probe_timeout = 90.0
     try:
@@ -84,12 +81,12 @@ def _validate_agent_runtime(root: Path, *, agent: str) -> None:
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
         print(
-            f"ERROR: {agent}-agent runtime sanity check failed: {exc!r}\n"
+            f"ERROR: critic-agent runtime sanity check failed: {exc!r}\n"
             f"  cwd={root}\n"
             f"  cmd={' '.join(cmd)}\n"
-            f"Either fix {agent.upper()}_AGENT_ROOT, check the "
-            f"src/hyperloom/agents/{agent}/ install, or pass --{agent}-mock to "
-            f"bypass {agent}-agent.",
+            f"Either fix {_CRITIC_AGENT_ROOT_ENV}, check the "
+            "src/hyperloom/agents/critic/ install, or pass --critic-mock to "
+            "bypass critic-agent.",
             file=sys.stderr,
         )
         sys.exit(2)
@@ -140,15 +137,6 @@ def _has_claude_oauth_token() -> bool:
     return bool(os.environ.get(CLAUDE_OAUTH_TOKEN_ENV, "").strip())
 
 
-def _has_explicit_anthropic_key() -> bool:
-    """True for any credential form in ``ANTHROPIC_CREDENTIAL_ENV_ORDER``."""
-    return has_anthropic_credential()
-
-
-def _has_explicit_openai_key() -> bool:
-    return bool(os.environ.get("OPENAI_API_KEY"))
-
-
 def _is_stale_proxy_url(value: str | None) -> bool:
     """Return true for the retired local llm-proxy endpoint."""
     if not value:
@@ -169,9 +157,9 @@ def _resolve_llm_endpoints() -> tuple[str, str]:
     openai_url = os.environ.get("OPENAI_BASE_URL", "").strip()
     anthropic_url = os.environ.get("ANTHROPIC_BASE_URL", "").strip()
 
-    if not anthropic_url and _has_explicit_anthropic_key():
+    if not anthropic_url and has_anthropic_credential():
         anthropic_url = _OFFICIAL_ANTHROPIC_BASE_URL
-    if not openai_url and _has_explicit_openai_key():
+    if not openai_url and os.environ.get("OPENAI_API_KEY"):
         openai_url = _OFFICIAL_OPENAI_BASE_URL
     return anthropic_url, openai_url
 
@@ -335,27 +323,15 @@ def _validate_credentials() -> None:
     _warn_on_oauth_against_a_foreign_endpoint()
     _warn_on_oauth_widened_provider_shape()
     anthropic_url, openai_url = _resolve_llm_endpoints()
-    has_anthropic_side = has_anthropic_credential()
-    has_key = bool(os.environ.get("OPENAI_API_KEY") or has_anthropic_side)
-    has_usable_endpoint = bool(
-        (anthropic_url and has_anthropic_side) or (openai_url and os.environ.get("OPENAI_API_KEY"))
-    )
-    if has_usable_endpoint and has_key:
+    if (anthropic_url and has_anthropic_credential()) or (openai_url and os.environ.get("OPENAI_API_KEY")):
         return
 
-    missing: list[str] = []
-    if not has_usable_endpoint:
-        missing.append("a usable endpoint/key pair")
-    if not has_key:
-        missing.append(
-            "an API key (OPENAI_API_KEY / ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN / CLAUDE_CODE_OAUTH_TOKEN)"
-        )
     repo_root = os.environ.get("REPO_ROOT") or os.getcwd()
     env_file = Path(repo_root) / ".env"
     env_status = "present" if env_file.exists() else "not found"
     print(
-        "\nERROR: Missing required credential(s): "
-        f"{', '.join(missing)}\n\n"
+        "\nERROR: Missing required credential(s): a usable endpoint/key pair "
+        "(OPENAI_API_KEY / ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN / CLAUDE_CODE_OAUTH_TOKEN)\n\n"
         "Tried loading from:\n"
         "  - shell environment\n"
         f"  - $REPO_ROOT/.env  ({env_status}: {env_file})\n\n"

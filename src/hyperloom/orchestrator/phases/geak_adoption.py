@@ -46,7 +46,7 @@ def adoption_entry(
             "cycle": measurement.cycle,
         }
     )
-    # Max over attempts, matching the canonical ledger writer in ``_kernel_decisions.py``: a second, worse rebench
+    # Max over attempts, matching the canonical ledger writer in ``kernel_decisions.py``: a second, worse rebench
     # must not lower the kernel's best.
     gains = [
         float(a["gain_pct"]) for a in attempts if isinstance(a, dict) and isinstance(a.get("gain_pct"), (int, float))
@@ -65,10 +65,6 @@ def adoption_entry(
             "overlay_loaded": bool(measurement.overlay_loaded),
             "basis": measurement.basis,
             "alignment_status": measurement.alignment_status,
-            # GEAK's own same-config A/B, kept beside the orchestrator number so the two are never confused
-            # for each other.
-            "geak_same_config_delta_pct": spec.get("e2e_delta_pct"),
-            "geak_isolated_speedup": spec.get("isolated"),
             "updated_at": measurement.ts,
         }
     )

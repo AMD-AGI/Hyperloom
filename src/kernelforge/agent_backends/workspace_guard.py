@@ -16,12 +16,9 @@ from pathlib import Path
 from typing import Any
 
 from kernelforge.agent_backends.base import AgentProviderError, AgentRunSpec
-from kernelforge.tools.git import git, git_bytes
-from kernelforge.loop.new_path_allowlist import matches_commit_new_paths, normalize_commit_new_paths
-from kernelforge.workspace.edit_policy import (
-    is_protected_path,
-    protected_path_inventory,
-)
+from kernelforge.utils.git import git, git_bytes
+from kernelforge.utils.new_path_allowlist import matches_commit_new_paths, normalize_commit_new_paths
+from kernelforge.utils.protected_paths import ProtectedPathRules
 
 log = logging.getLogger(__name__)
 
@@ -129,6 +126,16 @@ class WorkspaceGuard:
             explicit.add(Path(self.driver_path).resolve())
         return self.target_paths - explicit
 
+    def _protected_path_rules(self) -> ProtectedPathRules:
+        """The caller's rules for what this session must leave as it is; refused when it supplied none."""
+        rules = self.spec.protected_path_rules
+        if rules is None:
+            raise WorkspaceSafetyError(
+                "a session that can write needs its caller's protected-path rules (AgentRunSpec.protected_path_rules)",
+                rejection=False,
+            )
+        return rules
+
     def _is_protected(self, relative: str) -> bool:
         """Return whether a repository path belongs to the measurement surface."""
         if (self.root / relative).resolve() in self._target_exempt():
@@ -136,7 +143,7 @@ class WorkspaceGuard:
         exact_paths = list(self.spec.protected_paths)
         if self.driver_path is not None:
             exact_paths.append(str(self.driver_path))
-        return is_protected_path(
+        return self._protected_path_rules().is_protected(
             relative,
             workspace=self.root,
             exact_paths=exact_paths,
@@ -144,7 +151,7 @@ class WorkspaceGuard:
         )
 
     def _ignored_protected_paths(self) -> set[Path]:
-        """List the complete protected inventory using the shared policy."""
+        """List the complete protected inventory under the caller's rules."""
 
         exact_paths = list(self.spec.protected_paths)
         if self.driver_path is not None:
@@ -152,7 +159,7 @@ class WorkspaceGuard:
         try:
             return (
                 set(
-                    protected_path_inventory(
+                    self._protected_path_rules().inventory(
                         self.root,
                         exact_paths=exact_paths,
                         extra_globs=self.spec.protected_globs,
@@ -196,16 +203,7 @@ class WorkspaceGuard:
             # would make the phase unrunnable in the only worktrees it ever runs in. verify() judges the deviations.
             pass
         elif self.spec.allow_dirty_targets:
-            unexpected = [
-                relative for relative in unstaged if (self.root / relative).resolve() not in self.target_paths
-            ]
-            violations: list[str] = []
-            if staged:
-                violations.append(f"staged changes: {', '.join(staged)}")
-            if refused_untracked:
-                violations.append(f"untracked files: {', '.join(refused_untracked)}")
-            if unexpected:
-                violations.append(f"non-target changes: {', '.join(unexpected)}")
+            violations = self._resumed_baseline_violations(unstaged, staged, refused_untracked)
             if violations:
                 raise WorkspaceSafetyError(
                     "a resumed session requires only unstaged target changes; " + "; ".join(violations)
@@ -237,6 +235,18 @@ class WorkspaceGuard:
         if self._guards_dirty_baseline():
             self._snapshot_baseline(unstaged, staged, untracked)
         self.prepared = True
+
+    def _resumed_baseline_violations(self, unstaged: list[str], staged: list[str], untracked: list[str]) -> list[str]:
+        """Describe the starting state a resumed session may not inherit: anything but unstaged target edits."""
+        unexpected = [relative for relative in unstaged if (self.root / relative).resolve() not in self.target_paths]
+        violations: list[str] = []
+        if staged:
+            violations.append(f"staged changes: {', '.join(staged)}")
+        if untracked:
+            violations.append(f"untracked files: {', '.join(untracked)}")
+        if unexpected:
+            violations.append(f"non-target changes: {', '.join(unexpected)}")
+        return violations
 
     def _unsupported_untracked(self, untracked: list[str]) -> list[str]:
         """List new paths the caller has not authorized as campaign sources."""
@@ -563,14 +573,19 @@ class WorkspaceGuard:
         if self._read_only_state() != self.read_only_state:
             violations.append("tracked, staged, or untracked files changed")
 
+        protected_ignored = self._protected_ignored_changes()
+        if protected_ignored:
+            violations.append("protected ignored files changed: " + ", ".join(protected_ignored))
+        return violations
+
+    def _protected_ignored_changes(self) -> list[str]:
+        """Protected ignored paths whose snapshot no longer matches, then those created since the baseline."""
         current_protected = self._ignored_protected_paths()
         changed_snapshots = [
             str(path) for path, snapshot in self.snapshots.items() if self._filesystem_snapshot(path) != snapshot
         ]
         new_protected = [str(path) for path in current_protected - self.baseline_protected_ignored]
-        if changed_snapshots or new_protected:
-            violations.append("protected ignored files changed: " + ", ".join([*changed_snapshots, *new_protected]))
-        return violations
+        return [*changed_snapshots, *new_protected]
 
     def _read_only_state(self) -> tuple:
         """Fingerprint all Git-visible state a read-only turn must preserve."""
@@ -737,11 +752,7 @@ class WorkspaceGuard:
             path for path in tracked_changes if not self.spec.allow_tracked_changes or self._is_protected(path)
         ]
         protected_untracked = [path for path in untracked if self._is_protected(path)]
-        current_protected = self._ignored_protected_paths()
-        changed_snapshots = [
-            str(path) for path, snapshot in self.snapshots.items() if self._filesystem_snapshot(path) != snapshot
-        ]
-        new_protected = [str(path) for path in current_protected - self.baseline_protected_ignored]
+        protected_ignored = self._protected_ignored_changes()
 
         violations: list[str] = []
         if index_changed:
@@ -754,9 +765,8 @@ class WorkspaceGuard:
             violations.append(f"protected tracked files changed: {', '.join(protected_changes)}")
         if protected_untracked:
             violations.append(f"protected files created: {', '.join(protected_untracked)}")
-        if changed_snapshots or new_protected:
-            paths = [*changed_snapshots, *new_protected]
-            violations.append(f"protected ignored files changed: {', '.join(paths)}")
+        if protected_ignored:
+            violations.append(f"protected ignored files changed: {', '.join(protected_ignored)}")
         unsupported = self._unsupported_untracked(untracked)
         if unsupported:
             violations.append(f"new non-ignored files are unsupported: {', '.join(unsupported)}")

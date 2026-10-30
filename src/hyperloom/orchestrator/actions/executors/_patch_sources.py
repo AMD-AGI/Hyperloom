@@ -12,6 +12,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.fs_utils import read_text_nofollow
 from hyperloom.common.github_urls import repo_slug
 from hyperloom.inference_optimizer.framework_paths import (
     framework_apply_tree,
@@ -86,7 +87,7 @@ def _read_done_payload(workspace: Path) -> dict[str, Any] | None:
     if not done.exists():
         return None
     try:
-        return json.loads(done.read_text(encoding="utf-8"))
+        return json.loads(read_text_nofollow(done))
     except (OSError, json.JSONDecodeError) as exc:
         log.warning(
             "integrate_patch: failed to parse %s: %r",

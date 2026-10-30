@@ -13,6 +13,8 @@ import pytest
 import yaml
 
 from hyperloom.inference_optimizer import framework_registry as fr
+from hyperloom.orchestrator.actions.executors._grid_runner import GridLaunch, GridRecipe
+from hyperloom.orchestrator.actions.executors._workload_envs import BenchmarkTarget
 
 
 class TestRegistryEntry:
@@ -35,6 +37,8 @@ class TestRegistryEntry:
         """The new entry must not perturb how existing sessions report."""
         assert fr.throughput_unit("xdit") == "img/s"
         assert fr.throughput_unit("sglang") == "tok/s"
+        assert fr.throughput_unit("custom") == "unit/s"
+        assert fr.throughput_unit("bogus") == "tok/s"
 
 
 class TestConfigResolution:
@@ -356,14 +360,36 @@ class TestLaunchValidation:
 
         monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "magpie")
         for framework in ("sglang", "vllm", "xdit"):
-            _apply_operator_supplied_paths(self._args(), framework)
+            args = self._args()
+            if framework == "xdit":
+                args.xdit_model_name = "FLUX.2-dev"
+            _apply_operator_supplied_paths(args, framework)
 
     def test_a_shipped_framework_needs_neither_flag(self, monkeypatch):
         from hyperloom.inference_optimizer.cli import _apply_operator_supplied_paths
 
         monkeypatch.setenv("FRAMEWORK_REPO_PATH", "")
         monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", "")
-        _apply_operator_supplied_paths(self._args(), "xdit")
+        _apply_operator_supplied_paths(self._args(xdit_model_name="FLUX.2-dev"), "xdit")
+
+    def test_xdit_resume_accepts_env_without_flag(self, monkeypatch):
+        """On resume, _restore exports XDIT_MODEL_NAME; apply must accept it."""
+        from hyperloom.inference_optimizer.cli import _apply_operator_supplied_paths
+
+        monkeypatch.setenv("XDIT_MODEL_NAME", "FLUX.2-dev")
+        args = self._args()
+        _apply_operator_supplied_paths(args, "xdit")
+        assert os.environ["XDIT_MODEL_NAME"] == "FLUX.2-dev"
+
+    def test_xdit_without_flag_or_env_exits(self, monkeypatch):
+        """Neither flag nor env → exit 2."""
+        from hyperloom.inference_optimizer.cli import _apply_operator_supplied_paths
+
+        monkeypatch.delenv("XDIT_MODEL_NAME", raising=False)
+        args = self._args()
+        with pytest.raises(SystemExit) as exc:
+            _apply_operator_supplied_paths(args, "xdit")
+        assert exc.value.code == 2
 
     def test_an_exported_env_outranks_the_flag(self, monkeypatch, tmp_path):
         """Matches every other path override in the loop."""
@@ -378,6 +404,14 @@ class TestLaunchValidation:
 
         _apply_operator_supplied_paths(args, "custom")
         assert os.environ["FRAMEWORK_REPO_PATH"] == "/already/exported"
+
+    def test_an_exported_xdit_model_name_outranks_the_flag(self, monkeypatch):
+        """XDIT_MODEL_NAME follows the same env-wins rule as the path overrides."""
+        from hyperloom.inference_optimizer.cli import _apply_operator_supplied_paths
+
+        monkeypatch.setenv("XDIT_MODEL_NAME", "black-forest-labs/FLUX.2-dev")
+        _apply_operator_supplied_paths(self._args(xdit_model_name="stale/override"), "xdit")
+        assert os.environ["XDIT_MODEL_NAME"] == "black-forest-labs/FLUX.2-dev"
 
 
 class TestEntrypointFailFast:
@@ -606,10 +640,10 @@ class TestCustomAdapterMeasurement:
         )
 
         def _ok(cmd, *a, **k):
-            assert k["timeout"] == expected_timeout
-            assert k["silence_timeout_sec"] == 600
-            assert k["server_log_path"] is None
-            assert k["session_deadline_sec"] is None
+            assert k["watch"].timeout == expected_timeout
+            assert k["watch"].silence_timeout_sec == 600
+            assert k["watch"].server_log_path is None
+            assert k["watch"].session_deadline_sec is None
             slot = Path(cmd[cmd.index("--output-dir") + 1])
             ws = slot / "benchmark_custom_20260101_000000"
             ws.mkdir(parents=True, exist_ok=True)
@@ -640,8 +674,6 @@ class TestCustomAdapterMeasurement:
         ) as launch:
             results = asyncio.run(
                 run_grid(
-                    base_yaml_path=base,
-                    base_extra_args="",
                     grid=[
                         GridVariant(name="baseline"),
                         GridVariant(
@@ -650,8 +682,8 @@ class TestCustomAdapterMeasurement:
                         ),
                     ],
                     output_root=tmp_path / "out",
-                    magpie_python=sys.executable,
-                    gpu_type="mi355x",
+                    recipe=GridRecipe(base_yaml_path=base, target=BenchmarkTarget(gpu_type="mi355x")),
+                    launch=GridLaunch(magpie_python=sys.executable),
                 )
             )
         assert launch.call_count == 2

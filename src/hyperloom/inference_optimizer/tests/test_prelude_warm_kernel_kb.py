@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.orchestrator.actions.executors.baseline import (
+from hyperloom.orchestrator.actions.executors.benchmark_run.warm_patches import (
     restore_warm_kernel_snapshots,
     revert_warm_kernel_patches,
 )
@@ -19,7 +19,7 @@ from hyperloom.orchestrator.knowledge.agent_kb import KernelAgentKB
 from hyperloom.orchestrator.knowledge.remote_recipe._vendor.kb_store_client import (
     KnowledgeSections,
 )
-from hyperloom.orchestrator.phases import prelude as prelude_mod
+from hyperloom.orchestrator.phases import prelude_warm_kernel as prelude_warm_kernel_mod
 from hyperloom.orchestrator.phases.prelude import PreludePhase
 
 
@@ -33,6 +33,7 @@ class _StubPrelude:
     _set_warm_kernel_outcome = PreludePhase._set_warm_kernel_outcome
     _prepare_warm_kernel_kb = PreludePhase._prepare_warm_kernel_kb
     _apply_warm_kernel_plan = PreludePhase._apply_warm_kernel_plan
+    _kernel_launch_overlay = PreludePhase._kernel_launch_overlay
     _land_warm_kernel_entry = PreludePhase._land_warm_kernel_entry
     _settle_warm_kernel_preparation = PreludePhase._settle_warm_kernel_preparation
     _unwind_prepared_warm_kernel = PreludePhase._unwind_prepared_warm_kernel
@@ -259,6 +260,71 @@ def test_warm_kernel_apply_prefers_deploy_patch_over_source_snapshot(
     assert materialized["repo_root"] == framework_root
 
 
+def test_warm_kernel_materialization_fault_is_recorded_by_the_landing_step(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    def _materialize(*, patch_path, repo_root, snapshot_dir):
+        raise RuntimeError("could not materialize patch snapshot: corrupt hunk")
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors._kernel_agent_tool.materialize_unified_patch_snapshot",
+        _materialize,
+    )
+    relative_target = Path("pkg/kernel.py")
+    target = tmp_path / "framework" / relative_target
+    target.parent.mkdir(parents=True)
+    target.write_text("original\n", encoding="utf-8")
+    deploy_patch = tmp_path / "deploy.patch"
+    deploy_patch.write_text(
+        f"diff --git a/{relative_target} b/{relative_target}\n"
+        f"--- a/{relative_target}\n"
+        f"+++ b/{relative_target}\n"
+        "@@ -1 +1 @@\n"
+        "-original\n"
+        "+patched\n",
+        encoding="utf-8",
+    )
+
+    class _MaterializingPrelude(_StubPrelude):
+        _apply_warm_kernel_patch = PreludePhase._apply_warm_kernel_patch
+
+    stub = _MaterializingPrelude(tmp_path / "session")
+    entry = {"patch_path": str(deploy_patch), "meta": {"kernel_name": "k1"}}
+
+    landed = stub._land_warm_kernel_entry(entry, [str(target)], [], [])
+
+    assert landed is False
+    assert entry["decision"] == "ERROR"
+    assert entry["apply_result"] == {"exception": "RuntimeError: could not materialize patch snapshot: corrupt hunk"}
+
+
+@pytest.mark.asyncio
+async def test_unpersistable_pending_kernel_state_reaches_the_replay_recorder(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "serving" / "kernel.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("old")
+    record = _kernel_record(
+        tmp_path,
+        {"rewrite": {"items": [_rewrite_item(target)]}},
+        {"kernel/rewrite/k1.py": "new"},
+    )
+    stub = _StubPrelude(tmp_path, reader=_kernel_reader(record))
+    saves: list[int] = []
+
+    def _save(*_args, **_kwargs) -> None:
+        saves.append(len(saves))
+        if len(saves) > 1:
+            raise OSError("No space left on device")
+
+    stub.shared_state.save = _save
+
+    with pytest.raises(OSError, match="No space left on device"):
+        await stub._prepare_warm_kernel_kb()
+
+
 def test_multi_file_manifest_and_target_snapshot_both_roll_back(
     tmp_path: Path,
 ) -> None:
@@ -336,6 +402,20 @@ async def test_inactive_without_record(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_raising_section_open_is_not_read_as_an_unavailable_section(tmp_path: Path) -> None:
+    # Opening the section handles its own store and file errors, so anything else is a fault, not a cold start.
+    stub = _StubPrelude(tmp_path)
+
+    def _broken_open() -> None:
+        raise AttributeError("'NoneType' object has no attribute 'files_dir'")
+
+    stub._open_warm_kernel_section = _broken_open
+
+    with pytest.raises(AttributeError, match="has no attribute 'files_dir'"):
+        await stub._prepare_warm_kernel_kb()
+
+
+@pytest.mark.asyncio
 async def test_one_shot_save_failure_stops_before_kernel_apply(
     tmp_path: Path,
 ) -> None:
@@ -387,7 +467,7 @@ async def test_prepared_state_save_failure_rolls_back_kernel_set(
 
     stub.shared_state.save = _save
     monkeypatch.setattr(
-        prelude_mod,
+        prelude_warm_kernel_mod,
         "revert_warm_kernel_patches",
         lambda applied, snapshots=None: (
             rollbacks.append((list(applied), list(snapshots or []))) or {"ok": True, "errors": []}
@@ -500,7 +580,7 @@ async def test_prepared_set_waits_for_combined_verdict(
     stub = _StubPrelude(tmp_path, reader=_kernel_reader(record))
     reverted: list[list[dict]] = []
     monkeypatch.setattr(
-        prelude_mod,
+        prelude_warm_kernel_mod,
         "revert_warm_kernel_patches",
         lambda applied, snapshots=None: {
             "ok": not bool(reverted.append(applied)),

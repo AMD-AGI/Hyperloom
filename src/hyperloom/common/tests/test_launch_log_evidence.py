@@ -38,7 +38,7 @@ def test_server_args_records_preserve_typed_identity(tmp_path: Path, form: str) 
     log = tmp_path / "server.log"
     log.write_text(f"[2026-09-17 00:00:00] server_args={record}\n", encoding="utf-8")
 
-    identity = evidence.observed_sglang_server_identity_from_log(str(log))
+    identity = evidence.observed_server_identity_from_log(str(log), "sglang")
 
     assert identity == fields
     assert list(identity) == sorted(fields)
@@ -72,7 +72,7 @@ def test_multiline_records_ignore_quoted_delimiters(tmp_path: Path, record: str)
     log = tmp_path / "server.log"
     log.write_text(f"startup\nINFO server_args = {record} trailing log text\n", encoding="utf-8")
 
-    assert evidence.observed_sglang_server_identity_from_log(str(log)) == {
+    assert evidence.observed_server_identity_from_log(str(log), "sglang") == {
         "model_path": "/models/{qwen}(v1)[test]",
         "served_model_name": 'qwen\'s } ) ] "alias"',
         "tp_size": 8,
@@ -89,7 +89,7 @@ def test_dictionary_records_exclude_sensitive_and_unknown_fields(tmp_path: Path)
         encoding="utf-8",
     )
 
-    assert evidence.observed_sglang_server_identity_from_log(str(log)) == {"tp_size": 1}
+    assert evidence.observed_server_identity_from_log(str(log), "sglang") == {"tp_size": 1}
 
 
 @pytest.mark.parametrize("form", ["dictionary", "server_args"])
@@ -100,7 +100,7 @@ def test_executable_values_are_never_evaluated(tmp_path: Path, form: str) -> Non
     log = tmp_path / "server.log"
     log.write_text(f"server_args={record}\n", encoding="utf-8")
 
-    assert evidence.observed_sglang_server_identity_from_log(str(log)) == {}
+    assert evidence.observed_server_identity_from_log(str(log), "sglang") == {}
     assert not sentinel.exists()
 
 
@@ -135,7 +135,7 @@ def test_malformed_or_nonliteral_records_are_unavailable(tmp_path: Path, record:
     log = tmp_path / "server.log"
     log.write_text(f"server_args={record}\n", encoding="utf-8")
 
-    assert evidence.observed_sglang_server_identity_from_log(str(log)) == {}
+    assert evidence.observed_server_identity_from_log(str(log), "sglang") == {}
 
 
 @pytest.mark.parametrize("form", ["dictionary", "server_args"])
@@ -179,7 +179,7 @@ def test_disallowed_or_oversized_values_reject_the_record(tmp_path: Path, form: 
     log = tmp_path / "server.log"
     log.write_text(f"server_args={record}\n", encoding="utf-8")
 
-    assert evidence.observed_sglang_server_identity_from_log(str(log)) == {}
+    assert evidence.observed_server_identity_from_log(str(log), "sglang") == {}
 
 
 @pytest.mark.parametrize("form", ["dictionary", "server_args"])
@@ -189,7 +189,7 @@ def test_supported_nested_values_remain_bounded_and_json_safe(tmp_path: Path, fo
     log = tmp_path / "server.log"
     log.write_text(f"server_args={record}\n", encoding="utf-8")
 
-    assert evidence.observed_sglang_server_identity_from_log(str(log)) == {
+    assert evidence.observed_server_identity_from_log(str(log), "sglang") == {
         "served_model_name": {"a": [True, {"size": -1}], "z": ["name", None]}
     }
 
@@ -203,7 +203,7 @@ def test_top_level_field_count_is_capped(tmp_path: Path, form: str) -> None:
     log = tmp_path / "server.log"
     log.write_text(f"server_args={record}\n", encoding="utf-8")
 
-    assert evidence.observed_sglang_server_identity_from_log(str(log)) == {}
+    assert evidence.observed_server_identity_from_log(str(log), "sglang") == {}
 
 
 @pytest.mark.parametrize("extra", [0, 1], ids=["at-cap", "past-cap"])
@@ -212,7 +212,7 @@ def test_log_character_scan_is_capped(tmp_path: Path, extra: int) -> None:
     log = tmp_path / "server.log"
     log.write_text(" " * (512 * 1024 - len(record) + extra) + record, encoding="utf-8")
 
-    assert evidence.observed_sglang_server_identity_from_log(str(log)) == ({"tp_size": 1} if extra == 0 else {})
+    assert evidence.observed_server_identity_from_log(str(log), "sglang") == ({"tp_size": 1} if extra == 0 else {})
 
 
 @pytest.mark.parametrize("lines", [2047, 2048], ids=["at-cap", "past-cap"])
@@ -220,11 +220,11 @@ def test_log_line_scan_is_capped(tmp_path: Path, lines: int) -> None:
     log = tmp_path / "server.log"
     log.write_text("startup noise\n" * lines + "server_args={'tp_size': 1}\n", encoding="utf-8")
 
-    assert evidence.observed_sglang_server_identity_from_log(str(log)) == ({"tp_size": 1} if lines == 2047 else {})
+    assert evidence.observed_server_identity_from_log(str(log), "sglang") == ({"tp_size": 1} if lines == 2047 else {})
 
 
 def test_missing_log_is_unavailable(tmp_path: Path) -> None:
-    assert evidence.observed_sglang_server_identity_from_log(str(tmp_path / "missing.log")) == {}
+    assert evidence.observed_server_identity_from_log(str(tmp_path / "missing.log"), "sglang") == {}
 
 
 def test_the_config_read_keeps_the_settings_identity_discards(tmp_path: Path) -> None:

@@ -12,9 +12,7 @@ import json
 import os
 import shlex
 import subprocess
-import pathlib
 import sys
-import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -398,10 +396,7 @@ def _rollback_remote(pid: int) -> str:
 def _rank0_pid_from_log(pid_dir: str) -> int | None:
     """Read rank 0 PID from ``{pid_dir}/rank_0.pid`` (best-effort)."""
     try:
-        pid_path = pathlib.Path(pid_dir) / "rank_0.pid"
-        if not pid_path.is_file():
-            pid_path = pathlib.Path(tempfile.gettempdir()) / "multi_node_pids" / "rank_0.pid"
-        return int(pid_path.read_text().strip())
+        return int((Path(pid_dir) / "rank_0.pid").read_text().strip())
     except (OSError, ValueError):
         return None
 
@@ -836,7 +831,7 @@ def _rollback_spawned(pids: dict[str, tuple[str, int]]) -> None:
                 timeout=_ROLLBACK_TIMEOUT_SEC,
             )
             _log(f"rolling back {tag} pid={pid} on node={node_id[:16]}...: {outcome}")
-        except Exception as rb_exc:  # noqa: BLE001
+        except (ray.exceptions.RayError, OSError) as rb_exc:
             # An unreachable rank keeps its GPUs until the platform reclaims the cluster, so it is reported
             # rather than dropped.
             _log(
@@ -852,7 +847,7 @@ def _collect_spawned_pids(refs: list) -> dict[str, tuple[str, int]] | None:
     for tag, node_id, ref in refs:
         try:
             pid = ray.get(ref, timeout=120)
-        except Exception as exc:  # noqa: BLE001
+        except (ray.exceptions.RayError, OSError) as exc:
             _log(f"{tag}: spawn FAILED: {type(exc).__name__}: {exc}")
             _rollback_spawned(pids)
             return None

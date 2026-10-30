@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import math
 import statistics
 
@@ -107,7 +107,7 @@ def attribute_sigma(
 ) -> SigmaAttribution | None:
     """Blame the objective's spread on the cases that produced it."""
     scored = [case_id for case_id in sorted(baseline_case_times) if case_id in case_series]
-    if not scored or len(scored) != len(baseline_case_times):
+    if len(scored) != len(baseline_case_times):
         return None
     count = len(scored)
     sizes = {len(tuple(case_series[case_id])) for case_id in scored}
@@ -119,7 +119,7 @@ def attribute_sigma(
     mean_times: dict[str, float] = {}
     for case_id in scored:
         baseline = float(baseline_case_times[case_id])
-        times = [float(value) for value in case_series[case_id]]
+        times = case_series[case_id]
         if baseline <= 0.0 or not math.isfinite(baseline):
             return None
         if any(not math.isfinite(t) or t <= 0.0 for t in times):
@@ -130,7 +130,7 @@ def attribute_sigma(
 
     total_variance = sum(sigma * sigma for sigma in case_sigmas.values())
     total_time = sum(mean_times.values())
-    if total_variance <= 0.0 or total_time <= 0.0:
+    if total_variance <= 0.0:
         return None
 
     variance_shares = {case_id: (sigma * sigma) / total_variance for case_id, sigma in case_sigmas.items()}
@@ -169,6 +169,14 @@ def keep_t_critical(sample_size: int) -> float:
     df = int(sample_size) - 1
     earned = [key for key in KEEP_T_CRITICAL if key <= df]
     return KEEP_T_CRITICAL[max(earned)] if earned else KEEP_T_CRITICAL[min(KEEP_T_CRITICAL)]
+
+
+@dataclass(frozen=True)
+class GateScoring:
+    """What the in-session gate scores a candidate against: the pristine per-case times and the current best."""
+
+    baseline_case_times: dict[str, float] = field(default_factory=dict)
+    best_mean_case_speedup: float | None = None
 
 
 def required_keep_speedup(

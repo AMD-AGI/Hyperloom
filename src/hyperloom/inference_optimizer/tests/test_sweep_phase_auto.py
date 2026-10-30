@@ -9,12 +9,14 @@ import asyncio
 from copy import deepcopy
 from dataclasses import dataclass, field
 import json
+import sqlite3
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from hyperloom.orchestrator.kernel import kernel_decisions as kd
 from hyperloom.orchestrator.phases.machine import Transition
 
 from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_INTVTY_P50
@@ -32,6 +34,7 @@ from hyperloom.orchestrator.phases import machine_state
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 from .conftest import seed_kernel_keep
+from hyperloom.orchestrator.kernel import integrate_accuracy as integrate_accuracy
 
 
 # Fixtures
@@ -39,6 +42,7 @@ from .conftest import seed_kernel_keep
 class _BareState(SharedState):
     conc_sweep_concs: list[int] = field(default_factory=lambda: [1, 2, 4])
     conc_sweep_total_budget_sec: int = 60
+    baseline_runtime_sec: float = 20.0
     save_count: int = 0
     usable_sec: float | None = None
 
@@ -60,37 +64,24 @@ class _StubTaskRegistry:
     def __init__(self):
         self._tasks: dict[str, Any] = {}
 
-    async def create_or_return_existing(
-        self,
-        *,
-        kind: str,
-        params: dict,
-        idempotency_key: str,
-        requires_lanes: list | None = None,
-        allowed_tools: list | None = None,
-        side_effects: list | None = None,
-        lease_ttl_sec: int = 0,
-        task_id: str | None = None,
-        dispatch_class: str | None = None,
-        dispatch_origin: dict | None = None,
-    ):
+    async def create_or_return_existing(self, spec):
         from hyperloom.orchestrator.state.task_registry import Task
 
-        self.last_lease_ttl_sec = lease_ttl_sec
-        existing = self._tasks.get(idempotency_key)
+        self.last_lease_ttl_sec = spec.lease_ttl_sec
+        existing = self._tasks.get(spec.idempotency_key)
         if existing is not None:
             return existing, True
         import uuid as _uuid
 
         task = Task(
-            task_id=task_id or _uuid.uuid4().hex,
-            kind=kind,
+            task_id=spec.task_id or _uuid.uuid4().hex,
+            kind=spec.kind,
             state="queued",
-            params=dict(params),
-            idempotency_key=idempotency_key,
-            requires_lanes=list(requires_lanes) if requires_lanes else [],
+            params=dict(spec.params),
+            idempotency_key=spec.idempotency_key,
+            requires_lanes=list(spec.requires_lanes) if spec.requires_lanes else [],
         )
-        self._tasks[idempotency_key] = task
+        self._tasks[spec.idempotency_key] = task
         return task, False
 
 
@@ -148,7 +139,7 @@ async def test_drain_pending_keep_integrates_records_result_once(
 
     assert calls == ["k004"]
     assert c.shared_state.kernel_integrate_attempts
-    assert c.shared_state.next_pending_keep_kernel_id() == ""
+    assert kd.pending_keep_kernel_ids(c.shared_state) == []
     assert c.shared_state.current_best["action"] == "integrate"
     assert c.shared_state.current_best["variant_name"] == "k004"
 
@@ -165,8 +156,7 @@ def test_pending_keep_kernel_ids_prioritize_trace_impact_over_micro():
     seed_kernel_keep(state, "k004", micro=4.21, source_file="/tmp/rmsnorm.cu", artifact="/tmp/k004_opt.cu")
     seed_kernel_keep(state, "k001", micro=1.51, source_file="/tmp/moe.cu", artifact="/tmp/k001_opt.cu")
 
-    assert state.pending_keep_kernel_ids() == ["k001", "k004"]
-    assert state.next_pending_keep_kernel_id() == "k001"
+    assert kd.pending_keep_kernel_ids(state) == ["k001", "k004"]
 
 
 def test_pending_keep_kernel_ids_do_not_retry_needs_review():
@@ -187,8 +177,7 @@ def test_pending_keep_kernel_ids_do_not_retry_needs_review():
         }
     )
 
-    assert state.pending_keep_kernel_ids() == ["k001"]
-    assert state.next_pending_keep_kernel_id() == "k001"
+    assert kd.pending_keep_kernel_ids(state) == ["k001"]
 
 
 def _patch_stack_validation_internals(monkeypatch, *, new_tput: float, revert_status: str = "ok"):
@@ -289,7 +278,6 @@ async def test_stack_validation_partial_revert_becomes_failed(
     assert result["decision"] == "REVERT"
     # partial -> failed at the aggregate level: patch still live on remote pod
     assert result["status"] == "failed"
-    assert result["patch_cleanup_status"] == "recovery_required"
     assert result["patch_cleanup_action"] == "revert"
     assert all(r["status"] == "partial" for r in result["revert_result"]["stack_reverts"])
 
@@ -564,7 +552,7 @@ async def test_stack_validation_preserves_actual_measurement(
     assert result["new_tput"] == (output if valid else 0.0)
     assert result["gain_pct"] == pytest.approx(output - 100.0 if valid else -100.0)
     assert result["stack_kernel_ids"] == ["k001", "k004"]
-    assert result["patch_cleanup_status"] == "complete"
+    assert result["patch_cleanup_action"] == ""
     expected_source = optimized_source if decision == "KEEP" else original_source
     assert all(Path(entry["target_file"]).read_text(encoding="utf-8") == expected_source for entry in stack)
     assert result["bench_result"] == original_measurement
@@ -785,7 +773,7 @@ async def test_on_enter_sweep_triggers_stack_validation_without_pending_keeps(
                 "workspace": f"/tmp/integrate-{kid}",
             }
         )
-    assert not c.shared_state.has_keep_pending_integrate
+    assert not kd.has_keep_pending_integrate(c.shared_state)
 
     validation_calls = []
 
@@ -949,7 +937,7 @@ async def test_on_enter_sweep_failure_records_evidence(coord, monkeypatch):
     """If conc_sweep enqueue raises, the hook records a terminal skip."""
 
     async def _boom(*args, **kwargs):
-        raise RuntimeError("simulated DB outage")
+        raise sqlite3.OperationalError("simulated DB outage")
 
     monkeypatch.setattr(coord.phase_sweep, "_enqueue_internal_conc_sweep_task", _boom)
     coord.shared_state.phase_history = [
@@ -984,7 +972,7 @@ async def test_on_enter_sweep_keeps_the_declines_own_skip_reason(coord):
     )
 
     assert coord.tasks._tasks == {}
-    assert coord.shared_state.last_conc_sweep["skip_reason"] == "session_time_budget"
+    assert coord.shared_state.last_conc_sweep["skip_reason"] == "grant_cannot_fit_one_pair"
 
 
 @pytest.mark.asyncio
@@ -1000,7 +988,27 @@ async def test_enqueue_conc_sweep_declines_when_clamp_leaves_no_time(coord):
 
     assert task is None
     assert coord.tasks._tasks == {}
-    assert coord.shared_state.last_conc_sweep["skip_reason"] == "session_time_budget"
+    assert coord.shared_state.last_conc_sweep["skip_reason"] == "grant_cannot_fit_one_pair"
+
+
+@pytest.mark.asyncio
+async def test_enqueue_conc_sweep_declines_a_grant_that_cannot_fit_one_pair(coord):
+    """The sweep's own budget, not only the session clock, has to hold the anchor pair: two measured rounds."""
+    coord.shared_state.phase_history = [
+        {"to_phase": "SWEEP", "reason": "kernel_no_more_leverage", "evidence": {}},
+    ]
+    coord.shared_state.remaining_minutes = lambda: 600.0
+    coord.shared_state.baseline_runtime_sec = 40.0
+
+    coord.shared_state.conc_sweep_total_budget_sec = 79
+    assert await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry") is None
+    assert coord.tasks._tasks == {}
+    assert coord.shared_state.last_conc_sweep["skip_reason"] == "grant_cannot_fit_one_pair"
+
+    coord.shared_state.last_conc_sweep = {}
+    coord.shared_state.conc_sweep_total_budget_sec = 80
+    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+    assert task is not None and task.params["total_budget_sec"] == 80
 
 
 @pytest.mark.asyncio
@@ -1107,8 +1115,9 @@ async def test_on_enter_sweep_skips_when_no_validated_gain_since_last_conc_sweep
 
 @pytest.mark.asyncio
 async def test_on_enter_sweep_skips_when_the_session_budget_cannot_fit_conc_sweep(coord):
-    """A conc_sweep the clock cannot pay for must not be enqueued, or SWEEP idles."""
+    """A conc_sweep the clock cannot fit one measured pair into must not be enqueued, or SWEEP idles."""
     coord.shared_state.usable_sec = 14 * 60.0
+    coord.shared_state.baseline_runtime_sec = 8 * 60.0
     coord.shared_state.phase_history = [
         {"to_phase": "SWEEP", "reason": "kernel_no_more_leverage", "evidence": {}},
     ]
@@ -1265,6 +1274,7 @@ class _SweepPhaseState:
 
     def __init__(self, phase_history=None):
         self.phase_history = list(phase_history or [])
+        self.tp = 0
 
 
 def _sweep_phase_row(*, auto_sweep_task_id: str = "") -> dict:
@@ -1355,7 +1365,6 @@ async def test_stack_validation_failed_revert_sets_status_failed(
 
     assert result["decision"] == "REVERT"
     assert result["status"] == "failed"
-    assert result["patch_cleanup_status"] == "recovery_required"
     assert result["patch_cleanup_action"] == "revert"
     assert result.get("error_class") == "patch_revert_incomplete"
     assert all(r["status"] == "failed" for r in result["revert_result"]["stack_reverts"])
@@ -1394,7 +1403,7 @@ async def test_stack_validation_keep_calls_finalize(
 
     assert result["decision"] == "KEEP"
     assert result["status"] == "ok"
-    assert result["patch_cleanup_status"] == "complete"
+    assert result["patch_cleanup_action"] == ""
     # One finalize call per patch in the two-entry stack.
     assert len(finalize_calls) == 2
 
@@ -1430,7 +1439,6 @@ async def test_stack_validation_keep_partial_finalize_requires_recovery(
 
     assert result["decision"] == "KEEP"
     assert result["status"] == "ok"
-    assert result["patch_cleanup_status"] == "recovery_required"
     assert result["patch_cleanup_action"] == "finalize"
 
 
@@ -1440,7 +1448,6 @@ async def test_stack_validation_accuracy_regression_downgrades_to_needs_review(
     monkeypatch,
 ):
     """An accuracy regression on a stack KEEP must drop decision to NEEDS_REVIEW."""
-    from hyperloom.orchestrator.kernel import request_handlers as krh
 
     seen: dict[str, object] = {}
 
@@ -1460,7 +1467,7 @@ async def test_stack_validation_accuracy_regression_downgrades_to_needs_review(
             "source_file": "/tmp/result.json",
         }
 
-    monkeypatch.setattr(krh, "_grade_integrate_accuracy", _fake_accuracy_gate)
+    monkeypatch.setattr(integrate_accuracy, "grade_integrate_accuracy", _fake_accuracy_gate)
 
     c = _stack_validation_coordinator(tmp_path)
     stack = _ledger_rows(c, ["k001", "k004"])
@@ -1480,17 +1487,17 @@ async def test_integrate_handler_revert_partial_becomes_failed(
     monkeypatch,
 ):
     """Non-KEEP + partial revert must set top-level status='failed'."""
-    from hyperloom.orchestrator.kernel import request_handlers as krh
+    from hyperloom.orchestrator.kernel import _integrate_outcomes as integrate_outcomes
     import hyperloom.orchestrator.actions.executors.baseline as baseline_mod
     import hyperloom.orchestrator.actions.executors.benchmark_result as br
 
     monkeypatch.setattr(
-        krh,
+        integrate_outcomes,
         "_maybe_revert_kernel_patch",
         lambda apply_result: {"status": "partial", "reason": "mn_revert_failed"},
     )
     monkeypatch.setattr(
-        krh,
+        integrate_outcomes,
         "_maybe_apply_kernel_patch",
         lambda payload, *, session_dir, kernel_id=None: {
             "status": "ok",
@@ -1528,7 +1535,6 @@ async def test_integrate_handler_revert_partial_becomes_failed(
 
     assert result["decision"] == "REVERT"
     assert result["status"] == "failed"
-    assert result["patch_cleanup_status"] == "recovery_required"
     assert result["patch_cleanup_action"] == "revert"
     assert result.get("error_class") == "patch_revert_incomplete"
 
@@ -1717,7 +1723,7 @@ async def test_stack_members_selected_patch_ignores_other_patch_history(historic
 @pytest.mark.asyncio
 async def test_stack_members_checkpoint_selects_exact_patch_among_history(historical_stack_coord, monkeypatch):
     from hyperloom.inference_optimizer.session.session_binding import session_scope
-    from hyperloom.orchestrator.kernel import request_handlers as krh
+    from hyperloom.orchestrator.kernel import _integrate_outcomes as integrate_outcomes
 
     c = historical_stack_coord
     selected = c.phase_kernel_stack._positive_needs_review_integrates()
@@ -1747,8 +1753,8 @@ async def test_stack_members_checkpoint_selects_exact_patch_among_history(histor
     c.shared_state = SharedState.from_dict(c.shared_state.to_dict())
     apply = Mock(side_effect=AssertionError("recovery must not apply patches"))
     revert = Mock(side_effect=AssertionError("completed validation must not revert"))
-    monkeypatch.setattr(krh, "_maybe_apply_kernel_patch", apply)
-    monkeypatch.setattr(krh, "_maybe_revert_kernel_patch", revert)
+    monkeypatch.setattr(integrate_outcomes, "_maybe_apply_kernel_patch", apply)
+    monkeypatch.setattr(integrate_outcomes, "_maybe_revert_kernel_patch", revert)
 
     with session_scope(c.session_dir):
         assert await c.phase_kernel_stack.recover_interrupted_stack_validation() is True
@@ -1826,13 +1832,13 @@ def test_stack_members_invalid_refused_before_marking(tmp_path, monkeypatch, cas
 @pytest.mark.asyncio
 async def test_stack_members_legacy_display_id_is_not_split_during_selection(tmp_path, monkeypatch):
     from hyperloom.orchestrator.actions.executors import baseline as baseline_mod
-    from hyperloom.orchestrator.kernel import request_handlers as krh
+    from hyperloom.orchestrator.kernel import _integrate_outcomes as integrate_outcomes
 
     monkeypatch.setenv("HYPERLOOM_LANGFUSE_ENABLE", "0")
     c = _stack_validation_coordinator(tmp_path)
     c.shared_state.optimization_stack = [{"action": "integrate", "kernel_id": "a+b", "tput": 110.0}]
-    monkeypatch.setattr(krh, "_maybe_apply_kernel_patch", Mock(return_value={"status": "failed"}))
-    monkeypatch.setattr(krh, "_maybe_revert_kernel_patch", Mock(return_value={"status": "ok"}))
+    monkeypatch.setattr(integrate_outcomes, "_maybe_apply_kernel_patch", Mock(return_value={"status": "failed"}))
+    monkeypatch.setattr(integrate_outcomes, "_maybe_revert_kernel_patch", Mock(return_value={"status": "ok"}))
     monkeypatch.setattr(baseline_mod, "BaselineExecutor", Mock(side_effect=AssertionError("unexpected benchmark")))
     before = deepcopy(c.shared_state.to_dict())
     with pytest.raises(ValueError, match="(?i)stack|member"):

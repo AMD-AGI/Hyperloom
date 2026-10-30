@@ -25,8 +25,10 @@ from ..actions.executors._subprocess_kill import AGENTX_PREFLIGHT_ERROR_CLASS
 from ..actions.stop_attribution import stopped_by_the_run_class
 from ..bringup import ARGV_INVALID
 from ..bus.message_bus import Message
-from ..phases.machine_state import PHASE_ENABLEMENT
+from ..phases.machine_state import PHASE_ENABLEMENT, PHASE_PRELUDE
 from ..state._shared_state.attempt_audit import _AUDIT_ACTIONS
+from ..state.failure_evidence import MAGPIE_NONZERO_INVALID_MEASUREMENT
+from ..state.shared_state import ActionAttempt
 from ..state.round_store import ABANDONED, FAILED
 from ..state.task_registry import Task
 from ._baseline_promotion import _adopt_eval_trigger, _preserves_measured_eval_trigger
@@ -47,6 +49,9 @@ _STOPS_ON_FIRST_OCCURRENCE: dict[str, str] = {
     # The server booted and measured a cold cache. The next attempt launches the same server and no framework patch
     # changes the operator's flag; ``_authorable_launch_log`` keeps it out of enablement.
     PREFIX_CACHE_OFF_ERROR_CLASS: _BASELINE_FAILED_STOP_REASON,
+    # The round served its whole protocol and the harness around it still refused the result. The next
+    # attempt runs the same harness over the same workload, so it is refused the same way.
+    MAGPIE_NONZERO_INVALID_MEASUREMENT: _BASELINE_FAILED_STOP_REASON,
 }
 
 
@@ -97,13 +102,15 @@ class BaselineFailureMixin:
         if was_validation_pending:
             state.enablement.validation_pending = False
             enablement_event.record_revalidation_outcome(
-                generation=int(state.enablement.revalidation_generation or 0),
-                promoted=False,
-                task_id=str(state.enablement.revalidation_task_id or ""),
-                accuracy=result_payload.get(BASELINE_EVAL_OBSERVED_ACCURACY_KEY),
-                accuracy_floor=state.enablement.accuracy_floor,
-                error_class=str(result_payload.get(BASELINE_EVAL_FAILURE_KIND_KEY) or ""),
-                reason="revalidation eval failed",
+                enablement_event.RevalidationOutcome(
+                    generation=int(state.enablement.revalidation_generation or 0),
+                    promoted=False,
+                    task_id=str(state.enablement.revalidation_task_id or ""),
+                    accuracy=result_payload.get(BASELINE_EVAL_OBSERVED_ACCURACY_KEY),
+                    accuracy_floor=state.enablement.accuracy_floor,
+                    error_class=str(result_payload.get(BASELINE_EVAL_FAILURE_KIND_KEY) or ""),
+                    reason="revalidation eval failed",
+                ),
             )
         floor = to_float(result_payload.get(BASELINE_EVAL_ACCURACY_FLOOR_KEY))
         if floor is not None:
@@ -131,16 +138,18 @@ class BaselineFailureMixin:
         """
         state = self.shared_state
         enablement_event.record_trigger(
-            origin=enablement_event.ORIGIN_EVAL,
-            mode=str(state.enablement_mode or ""),
-            kind=str(state.enablement.baseline_eval_kind or ""),
-            evidence=str(state.enablement.baseline_eval_evidence or ""),
-            observed_accuracy=state.enablement.observed_accuracy,
-            accuracy_floor=state.enablement.accuracy_floor,
-            observed_task=state.enablement.observed_task,
-            observed_metric=state.enablement.observed_metric,
-            eval_contract_fingerprint=state.enablement.eval_contract_fingerprint,
-            probe_config_path=state.enablement.probe_config_path,
+            enablement_event.LaneTrigger(
+                origin=enablement_event.ORIGIN_EVAL,
+                mode=str(state.enablement_mode or ""),
+                kind=str(state.enablement.baseline_eval_kind or ""),
+                evidence=str(state.enablement.baseline_eval_evidence or ""),
+                observed_accuracy=state.enablement.observed_accuracy,
+                accuracy_floor=state.enablement.accuracy_floor,
+                observed_task=state.enablement.observed_task,
+                observed_metric=state.enablement.observed_metric,
+                eval_contract_fingerprint=state.enablement.eval_contract_fingerprint,
+                probe_config_path=state.enablement.probe_config_path,
+            ),
         )
 
     async def _reopen_revalidation_window(self) -> None:
@@ -195,12 +204,14 @@ class BaselineFailureMixin:
             state.enablement.validation_pending = False
             await self._coord.enablement_lane.settle_enablement_round(FAILED, reason=err_class or "revalidation_failed")
             enablement_event.record_revalidation_outcome(
-                generation=generation,
-                promoted=False,
-                task_id=tid,
-                accuracy_floor=floor,
-                error_class=str(err_class or ""),
-                reason="revalidation baseline failed",
+                enablement_event.RevalidationOutcome(
+                    generation=generation,
+                    promoted=False,
+                    task_id=tid,
+                    accuracy_floor=floor,
+                    error_class=str(err_class or ""),
+                    reason="revalidation baseline failed",
+                ),
             )
         launch_log = _authorable_launch_log(result_payload, err_class=str(err_class or ""))
         if launch_log:
@@ -237,10 +248,10 @@ class BaselineFailureMixin:
         """
         # A process that exited with the same output as last time (modulo numbers)
         # will do so again: stop at two instead of spending a third attempt. The
-        # executor signs only ``subprocess_nonzero``, from the process's whole
-        # output rather than the 2000-character ``error`` tail; other classes carry
-        # a fixed sentence that two unrelated failures share.
-        signature = str(result_payload.get("output_signature") or "") if err_class == "subprocess_nonzero" else ""
+        # executor decides which classes are worth signing and signs them from the
+        # process's whole output rather than the 2000-character ``error`` tail, so a
+        # signature is present exactly when it identifies the failure.
+        signature = str(result_payload.get("output_signature") or "")
         repeated = bool(
             signature
             and self.shared_state.baseline_failure_streak >= 1
@@ -299,11 +310,13 @@ class BaselineFailureMixin:
                 audit_extras["fingerprint"] = self.baseline_params_fingerprint(task.params)
             self.shared_state.record_action_attempt(
                 action=task.kind,
-                task_id=task.task_id,
-                status="failed",
-                decision="no_promote",
-                result=result_payload,
-                extras=audit_extras,
+                attempt=ActionAttempt(
+                    task_id=task.task_id,
+                    status="failed",
+                    decision="no_promote",
+                    result=result_payload,
+                    extras=audit_extras,
+                ),
             )
         # Global rolling failure log (every kind, including kernel_agent-owned).
         self.shared_state.record_action_failure(
@@ -387,9 +400,12 @@ class BaselineFailureMixin:
         # so does a session that never admitted the eval lane -- nothing would
         # re-run the eval, so holding the budget just stalls the run. Baseline
         # failures are also the ENABLEMENT phase's own input, and its attempt cap
-        # bounds them.
+        # bounds them -- including a PRELUDE retry that settles before the transition.
         eval_pending_suppress = eval_failed and not is_multi_node() and eval_enablement_allowed(self.shared_state)
-        in_enablement = str(self.shared_state.phase or "").strip().upper() == PHASE_ENABLEMENT
+        phase = str(self.shared_state.phase or "").strip().upper()
+        in_enablement = phase == PHASE_ENABLEMENT or (
+            phase == PHASE_PRELUDE and self._coord.enablement_lane.enablement_admitted()
+        )
         retries_suppressed = bool(eval_pending_suppress or in_enablement)
         if eval_failed:
             self._persist_eval_failure(result_payload)
@@ -477,8 +493,10 @@ class BaselineFailureMixin:
         if str(self.shared_state.enablement.origin or ""):
             return
         enablement_event.record_trigger(
-            origin=enablement_event.ORIGIN_BOOT,
-            mode=str(self.shared_state.enablement_mode or ""),
-            kind=str(err_class or ""),
-            evidence=launch_log,
+            enablement_event.LaneTrigger(
+                origin=enablement_event.ORIGIN_BOOT,
+                mode=str(self.shared_state.enablement_mode or ""),
+                kind=str(err_class or ""),
+                evidence=launch_log,
+            ),
         )

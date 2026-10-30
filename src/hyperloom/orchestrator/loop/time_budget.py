@@ -72,6 +72,8 @@ def expected_action_cost_minutes(
         catalogue_min = 0.0
     if measured_baseline_sec <= 0.0 or not _action_benches_on_gpu(meta):
         return catalogue_min
+    if meta.admission_rounds > 0:
+        return meta.admission_rounds * measured_baseline_sec / _SECONDS_PER_MINUTE
     return max(catalogue_min, measured_baseline_sec / _SECONDS_PER_MINUTE)
 
 

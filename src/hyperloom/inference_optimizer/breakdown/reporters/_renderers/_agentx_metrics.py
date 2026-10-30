@@ -13,7 +13,11 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from ..base import as_dict, md_kv_list
+
+from hyperloom.common.coerce import to_mapping
+from hyperloom.common.perf_metric import INTVTY_OBJECTIVES
+
+from ..base import md_kv_list
 
 #: ``perf`` key -> label, ordered as a reader needs them rather than alphabetically: the objective, then the two
 #: guards that can veto it, then the comparability inputs a pair is refused on, then the latency detail, then what
@@ -39,33 +43,23 @@ _GRADED_ROWS: tuple[tuple[str, str], ...] = (
 #: open the table to learn where the round sits.
 _HEADLINE = ("e2e_norm_intvty_p50", "e2e_norm_intvty_p90", "output_tput_per_gpu")
 
-#: What makes a round AgentX-graded, and it is only these two. Every other row in the table is filled for an
-#: ordinary measurement as well: ``benchmark_result._merge_raw_result`` fills ``duration_seconds`` from raw
-#: ``duration``, the four latency percentiles from ``median_ttft_ms`` / ``p90_ttft_ms`` / ``median_tpot_ms`` /
-#: ``p90_tpot_ms``, and ``request_error_rate`` whenever the raw result carries it, none of them gated on the
-#: workload; ``output_tput_per_gpu`` is stamped unconditionally by ``writeback._promote_baseline``; and total and
-#: input throughput are on every report. The interactivity pair is different because its only producer is
-#: ``agentx/mapping.py``, so a value there means the agentic mapper ran.
-#:
-#: Testing the wider set headed a section "AgentX graded axes" over a synthetic SGLang session that merely reported
-#: a duration -- while the change that added the section claimed it appears on no synthetic session.
-_DECIDING_AXES = ("e2e_norm_intvty_p50", "e2e_norm_intvty_p90")
-
 
 def has_graded_axes(perf: Any) -> bool:
     """Whether *perf* carries an axis that exists only when the AgentX verdict ran.
 
-    A synthetic round carries the AgentX-only axes as nulls and at most ``output_tput_per_gpu``, so the block stays
-    hidden: rendering it would claim the session was graded on axes it never had. Deliberately narrower than the table
-    it gates: a row being *displayed* beside the objective does not make it evidence the objective was measured.
+    That is only the interactivity family: every other row in the table is filled for an ordinary measurement as
+    well (duration, latency percentiles and error rate from the raw result, ``output_tput_per_gpu`` stamped on
+    promotion, total and input throughput on every report), while the interactivity axes' only producer is
+    ``agentx/mapping.py``. A synthetic round carries them as nulls, so the block stays hidden: rendering it would claim
+    the session was graded on axes it never had.
     """
-    axes = as_dict(perf)
-    return any(axes.get(key) is not None for key in _DECIDING_AXES)
+    axes = to_mapping(perf)
+    return any(axes.get(key) is not None for key in INTVTY_OBJECTIVES)
 
 
 def graded_axes_facts(perf: Any, *, label: str) -> list[str]:
     """One fact per frontier axis the round measured, prefixed by *label*."""
-    axes = as_dict(perf)
+    axes = to_mapping(perf)
     facts: list[str] = []
     for key in _HEADLINE:
         value = axes.get(key)
@@ -80,5 +74,5 @@ def render_graded_axes(perf: Any) -> str:
     """The graded axes as a KV block; empty when the round measured none of them."""
     if not has_graded_axes(perf):
         return ""
-    axes = as_dict(perf)
+    axes = to_mapping(perf)
     return md_kv_list([(label, axes.get(key)) for key, label in _GRADED_ROWS])

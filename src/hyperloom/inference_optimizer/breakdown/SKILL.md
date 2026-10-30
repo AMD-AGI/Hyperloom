@@ -18,13 +18,13 @@ globs:
 
 A single JSON file: **`<session_dir>/session_breakdown.json`**.
 
-- Schema:   `hyperloom.session_breakdown.v6.1` (hardcoded; see `SCHEMA_VERSION` in `breakdown/schema.py`).
+- Schema:   `hyperloom.session_breakdown.v6.1` (hardcoded; see `SCHEMA_VERSION_V6` in `session/sbd_v6.py`).
 - Producer: `src/hyperloom/inference_optimizer/breakdown/exporter.py`
 - Filename: `BREAKDOWN_FILENAME` (= `session_breakdown.json`)
 
 Beyond the envelope (`schema_version` / `exported_at_utc` / `exporter_version`), the JSON
 carries the sections below. This is the subset most consumers use, not the full set —
-`breakdown/exporter.py` (the `breakdown = {...}` literal) and `breakdown/schema.py` are
+`breakdown/exporter.py` (the `breakdown = {...}` literal) and `breakdown/schema.py` (with `schema_framework.py` and `schema_kernel.py`) are
 authoritative.
 
 | Section             | What it carries                                                                                          |

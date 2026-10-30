@@ -27,22 +27,11 @@ def test_document_carries_a_major_versioned_envelope():
 
 def test_entry_always_carries_every_required_key():
     """Consumers read these without defaulting, so absence is a contract break."""
-    entry = ksc.SourceResolutionEntry(kernel_id="k001", name="k", gpu_pct=1.0).to_dict()
+    entry = ksc.SourceResolutionEntry(
+        kernel_id="k001", name="k", gpu_pct=1.0, reason_class=ksc.CLASS_SOURCE_NOT_RESOLVED
+    ).to_dict()
     for key in ksc.REQUIRED_ENTRY_KEYS:
         assert key in entry, key
-
-
-def test_entry_carries_audit_history_when_supplied():
-    """Optional review history must survive document reconstruction."""
-    entry = ksc.SourceResolutionEntry(
-        kernel_id="k001",
-        name="k",
-        gpu_pct=1.0,
-        previous_source_file="/repo/old.py",
-        previous_method=ksc.METHOD_SYMBOL_INDEX,
-    ).to_dict()
-    assert entry["previous_source_file"] == "/repo/old.py"
-    assert entry["previous_method"] == ksc.METHOD_SYMBOL_INDEX
 
 
 def test_validate_reports_every_problem_not_just_the_first():
@@ -60,7 +49,11 @@ def test_validate_rejects_a_foreign_major_version():
 
 def test_validate_catches_a_path_that_claims_to_be_unresolved():
     doc = ksc.make_document(
-        [ksc.SourceResolutionEntry(kernel_id="k1", name="n", gpu_pct=1.0, source_file="/a/b.py").to_dict()],
+        [
+            ksc.SourceResolutionEntry(
+                kernel_id="k1", name="n", gpu_pct=1.0, reason_class=ksc.CLASS_RESOLVED, source_file="/a/b.py"
+            ).to_dict()
+        ],
         generated_by="test",
     )
     assert any("unresolved" in p for p in ksc.validate_document(doc))
@@ -74,6 +67,7 @@ def test_validate_allows_a_non_patchable_gate_verdict_with_a_source():
                 kernel_id="k1",
                 name="Cijk_Ailk_Bljk",
                 gpu_pct=1.0,
+                reason_class=ksc.CLASS_VENDOR_BINARY,
                 source_file="/a/dispatcher.cu",
                 method=ksc.METHOD_GATE_NON_PATCHABLE,
             ).to_dict()
@@ -91,29 +85,13 @@ def test_validate_allows_a_non_patchable_gate_verdict_without_a_source():
                 kernel_id="k1",
                 name="Cijk_Ailk_Bljk",
                 gpu_pct=1.0,
+                reason_class=ksc.CLASS_NON_PATCHABLE_NAME,
                 method=ksc.METHOD_GATE_NON_PATCHABLE,
             ).to_dict()
         ],
         generated_by="test",
     )
     assert ksc.validate_document(doc) == []
-
-
-def test_validate_rejects_non_finite_and_out_of_range_confidence():
-    """Artifact confidence must remain a finite probability."""
-    for confidence in (float("nan"), float("inf"), float("-inf"), -0.1, 1.1, "NaN"):
-        doc = ksc.make_document(
-            [
-                ksc.SourceResolutionEntry(
-                    kernel_id="k1",
-                    name="n",
-                    gpu_pct=1.0,
-                    confidence=confidence,
-                ).to_dict()
-            ],
-            generated_by="test",
-        )
-        assert any("invalid confidence" in problem for problem in ksc.validate_document(doc))
 
 
 # --- projection from candidates ---------------------------------------------

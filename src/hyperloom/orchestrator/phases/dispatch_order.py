@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from ..specialists.domains import CUSTOM_SPECIALIST_KEY
-from .machine_state import PHASE_ENABLEMENT, PHASE_FRAMEWORK_AGENT
+from .machine_state import PHASE_FRAMEWORK_AGENT
 
 if TYPE_CHECKING:
     from ..state.task_registry import Task
@@ -17,10 +17,7 @@ __all__ = ["PHASE_DISPATCH_FIRST", "in_dispatch_order", "is_operator_work"]
 
 # In FRAMEWORK_AGENT a reviewed patch and a configuration grid hold the same serving lanes for a whole round: a grid
 # can be proposed again, but a patch still queued when the phase exits is cancelled unmeasured.
-# ENABLEMENT holds its exit for the initial roofline its promoted baseline enqueued, so a roofline queued behind
-# integrates would keep the phase open for as long as they take.
 PHASE_DISPATCH_FIRST: dict[str, frozenset[str]] = {
-    PHASE_ENABLEMENT: frozenset({"roofline"}),
     PHASE_FRAMEWORK_AGENT: frozenset({"integrate_patch"}),
 }
 

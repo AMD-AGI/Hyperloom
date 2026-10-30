@@ -5,18 +5,18 @@
 
 from __future__ import annotations
 
-import os
 import re
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from statistics import median
 from typing import Any, NamedTuple, Sequence
 
-from ._bypass_trace_reader import (
+from ._capture_shapes import is_capture_fragment
+from ._idle_gate import resolve_idle_pct_threshold
+from ._trace_gates import CHUNK_QUALITY_ALTERNATE_MARGIN, resolve_min_busy_ratio
+from ._trace_reader import (
     _GRAPH_RECORDED_LAUNCH_COVERAGE_MAX,
-    TraceAnalysisOptions,
     _MAX_EVENT_CHARS,
     _MAX_TRACE_PREFIX_CHARS,
     _open_trace_binary,
@@ -26,21 +26,12 @@ from ._bypass_trace_reader import (
     _union_ms,
     analyze_trace,
     resolve_trace_file,
-    select_steady_window,
     stream_events,
 )
-from ._capture_shapes import is_capture_fragment
 
 SCHEMA_VERSION = 1
 PROBE_VERSION = "selfcert-1.0.0"
 
-#: Checklist thresholds. Every one is the value the shipping consumer uses, so a
-#: certificate and the real gate cannot disagree. Overridable values are read
-#: from the environment and echoed into ``thresholds_effective``.
-IDLE_PCT_THRESHOLD_DEFAULT = 80.0
-IDLE_PCT_ENV = "HYPERLOOM_TRACELENS_IDLE_PCT_THRESHOLD"
-CHUNK_QUALITY_MIN_BUSY_RATIO = 0.05
-CHUNK_QUALITY_ALTERNATE_MARGIN = 0.10
 MIN_REPEATS_DEFAULT = 3
 MIN_REPEATS_XDIT = 2
 
@@ -61,10 +52,7 @@ _ROOT_PATTERNS = {
     ),
 }
 _SGLANG_STEP_RE = re.compile(r"step\[(\w+)\s+bs=(\d+)(?:\s+toks=(\d+))?\]")
-_STEP_MARKER_RE = re.compile(r"(?i)profilerstep|denoise|iteration|(?:^|[^a-z])step|step(?:$|[^a-z])")
 _ROOFLINE_TASK_RE = re.compile(r"/runs/[a-z_]+/([0-9a-f]{32})/")
-
-_SCRIPTABLE_FRAMEWORKS = frozenset(("sglang", "vllm", "trtllm", "tensorrt_llm"))
 
 
 def _iso_now() -> str:
@@ -96,20 +84,12 @@ def _ratio(num: float | None, den: float | None) -> float | None:
 
 
 def effective_thresholds() -> dict[str, Any]:
-    """Resolve the gate constants, honouring the environment overrides."""
-    idle = IDLE_PCT_THRESHOLD_DEFAULT
-    raw = os.environ.get(IDLE_PCT_ENV)
-    if raw:
-        try:
-            idle = float(raw)
-        except ValueError:
-            pass
+    """Resolve the thresholds the shipping gates apply, through the gates' own resolvers."""
     return {
         "graph_launch_coverage_max": _GRAPH_RECORDED_LAUNCH_COVERAGE_MAX,
-        "idle_pct_threshold": idle,
-        "idle_pct_threshold_source": "env" if raw else "default",
+        "idle_pct_threshold": resolve_idle_pct_threshold(),
         "min_repeats": MIN_REPEATS_DEFAULT,
-        "chunk_quality_min_busy_ratio": CHUNK_QUALITY_MIN_BUSY_RATIO,
+        "chunk_quality_min_busy_ratio": resolve_min_busy_ratio(),
         "chunk_quality_alternate_margin": CHUNK_QUALITY_ALTERNATE_MARGIN,
         "trace_prefix_max_chars": _MAX_TRACE_PREFIX_CHARS,
         "event_max_chars": _MAX_EVENT_CHARS,
@@ -248,7 +228,6 @@ class StepPass:
     def __init__(self) -> None:
         self.steps: list[dict[str, Any]] = []
         self.root_family: str | None = None
-        self.gpu_annotations: list[dict[str, Any]] = []
         self.runtime_ts: list[float] = []
         self.runtime_corr: list[Any] = []
         self.graph_corrs: set[Any] = set()
@@ -281,20 +260,21 @@ class StepPass:
                         ts, dur = _span(ev)
                         root = {"name": name, "ts": ts, "end": ts + dur, "dur_us": dur, **iter_details_from_name(name)}
                         roots.setdefault(family, []).append(root)
-                elif cat == "gpu_user_annotation":
-                    ts, dur = _span(ev)
-                    self.gpu_annotations.append({"name": ev.get("name") or "", "ts": ts, "dur": dur})
                 elif cat == "kernel":
                     ts, dur = _span(ev)
                     self.kernel_by_corr.setdefault(args.get("correlation"), []).append((ts, ts + dur))
         finally:
             fobj.close()
+        self._index_scan(runtime, roots)
+        return errors
+
+    def _index_scan(self, runtime: list[tuple[float, Any]], roots: dict[str, list[dict[str, Any]]]) -> None:
+        """Order the runtime launches by time and keep the steps of the highest-precedence root family found."""
         runtime.sort(key=lambda x: x[0])
         self.runtime_ts = [t for t, _ in runtime]
         self.runtime_corr = [c for _, c in runtime]
         self.root_family = next((family for family in _ROOT_PATTERNS if family in roots), None)
         self.steps = sorted(roots.get(self.root_family, ()), key=lambda s: s["ts"])
-        return errors
 
     def attribute_steps(self) -> None:
         """Fill each step with the device work its own launches produced."""
@@ -361,46 +341,12 @@ def _details(kind: str, batch: int, context: _RequestCounts, generation: _Reques
     }
 
 
-def annotation_report(sp: StepPass, *, framework: str, min_repeats: int) -> dict[str, Any]:
-    """Group 6: reproduce the window selector's view of the annotations."""
-    groups: dict[str, list[dict[str, Any]]] = {}
-    for w in sp.gpu_annotations:
-        norm = re.sub(r"\d+$", "", w["name"]).rstrip("#_ -")
-        if norm:
-            groups.setdefault(norm, []).append(w)
-    rows = [
-        {
-            "norm_name": norm,
-            "occurrences": len(ws),
-            "is_step_marker": bool(_STEP_MARKER_RE.search(norm)),
-            "dur_median_us": round(median([w["dur"] for w in ws]), 3),
-        }
-        for norm, ws in sorted(groups.items(), key=lambda kv: -len(kv[1]))
-    ]
-    window = select_steady_window(sp.gpu_annotations, framework=framework, min_repeats=min_repeats)
-    qualified = [r for r in rows if r["occurrences"] >= min_repeats]
-    selected = None
-    if qualified:
-        selected = max(qualified, key=lambda r: (r["is_step_marker"], r["occurrences"]))["norm_name"]
-
-    contains_prefill = None
-    if window:
-        overlapping = [s for s in sp.steps if s["ts"] < window["end_us"] and s["end"] > window["start_us"]]
-        contains_prefill = any(s["is_prefill"] for s in overlapping)
-
+def annotation_report(sp: StepPass, *, min_repeats: int) -> dict[str, Any]:
+    """Group 6: the step roots and what each step launched."""
     return {
-        "annotation_window_count": len(sp.gpu_annotations),
-        "groups": rows,
-        "selected_group": selected,
-        # Two different requirements, deliberately not merged. bypass windows over gpu_user_annotation groups and
-        # falls back to the whole trace when none repeats enough, so this is soft. tracelens cuts on the splitter's
-        # user_annotation step roots and has no fallback, so that one is hard.
-        "min_repeats_met_bypass_window": bool(qualified),
         "step_root_count": len(sp.steps),
         "step_root_pattern_family": sp.root_family,
         "step_roots_sufficient_for_tracelens": len(sp.steps) >= min_repeats,
-        "steady_window": window,
-        "steady_window_contains_prefill": contains_prefill,
         "steps": [
             {
                 "index": s["index"],
@@ -477,8 +423,7 @@ def build_verdict(
         blocking.append("source recorded zero GPU kernels")
     if health.capture_fragment:
         blocking.append("selected file is a CUDA-graph capture sidecar")
-    bypass_ok = not blocking
-    if bypass_ok and not health.attributed_pct:
+    if not blocking and not health.attributed_pct:
         blocking.append("correlation chain resolves no kernel to an op")
     tracelens_ok = not blocking
 
@@ -503,7 +448,7 @@ def build_verdict(
     else:
         severity = "ok"
     return {
-        "usable_by": [consumer for consumer, ok in (("bypass", bypass_ok), ("tracelens", tracelens_ok)) if ok],
+        "usable_by": ["tracelens"] if tracelens_ok else [],
         "decode_conclusions_valid": valid,
         "silently_wrong": silently_wrong,
         "severity": severity,
@@ -540,10 +485,8 @@ def certify_trace_dir(trace_dir: str | Path, *, framework: str = "") -> dict[str
         "trace_dir": str(tdir),
         "roofline_task_id": task.group(1) if task else None,
         "framework": framework or None,
-        "has_steady_state_semantics": framework.lower() in _SCRIPTABLE_FRAMEWORKS if framework else None,
         "trace_dir_level": inv,
         "rank_level": [],
-        "chunk_level": [],
     }
 
     # Before the early return below: a directory that produced only capture sidecars and no usable trace is
@@ -584,7 +527,7 @@ def certify_trace_dir(trace_dir: str | Path, *, framework: str = "") -> dict[str
 
     if inv["production_selected_path"] and inv["production_selected_path"] != selected:
         inv["production_pick_probe"] = _probe_production_pick(inv)
-    rank = _certify_rank(Path(selected), framework=framework, thresholds=thresholds)
+    rank = _certify_rank(Path(selected), thresholds=thresholds)
     record["rank_level"].append(rank)
     record["verdict"] = build_verdict(
         TraceHealth(
@@ -607,7 +550,7 @@ def certify_trace_dir(trace_dir: str | Path, *, framework: str = "") -> dict[str
 
 def _probe_production_pick(inv: dict[str, Any]) -> dict[str, Any]:
     """Measure the file the live resolver would open in place of the selected one."""
-    probe = analyze_trace(inv["production_selected_path"], TraceAnalysisOptions(top_k=1, steady_state=False))
+    probe = analyze_trace(Path(inv["production_selected_path"]))
     # ``analyze_trace`` reports the kernel count inside ``attribution`` and has no ``parse_ok`` key at all --
     # parse health is the emptiness of ``stream_errors``.
     return {
@@ -621,10 +564,10 @@ def _probe_production_pick(inv: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _certify_rank(path: Path, *, framework: str, thresholds: dict[str, Any]) -> dict[str, Any]:
-    """The rank-level row for one trace file: the shipping reader's pass, then the step pass."""
-    # Pass 1: the shipping reader, whole-trace scope. Groups 1, 3, 4, 5.
-    analysis = analyze_trace(path, TraceAnalysisOptions(top_k=1, steady_state=False, framework=framework))
+def _certify_rank(path: Path, *, thresholds: dict[str, Any]) -> dict[str, Any]:
+    """The rank-level row for one trace file: the trace reader's pass, then the step pass."""
+    # Pass 1: the trace reader, whole-trace scope. Groups 1, 3, 4, 5.
+    analysis = analyze_trace(path)
     # Pass 2: step structure and subtree attribution. Groups 6, 7, 8.
     sp = StepPass()
     pass2_errors = sp.scan(path)
@@ -654,8 +597,7 @@ def _certify_rank(path: Path, *, framework: str, thresholds: dict[str, Any]) -> 
             "bytes": size,
             "gz": path.name.lower().endswith(".gz"),
             # A ratio computed over a truncated aggregation is not the same measurement as one computed over the
-            # whole trace, so the record says which one it carries.
-            "aggregation_scope": analysis.get("aggregation_scope"),
+            # whole trace, so the record says whether it was truncated.
             "truncated": bool(analysis.get("truncated")),
             "truncation_reason": analysis.get("truncation_reason") or "",
         },
@@ -693,5 +635,5 @@ def _certify_rank(path: Path, *, framework: str, thresholds: dict[str, Any]) -> 
             "idle_pct_full_trace": timeline.get("idle_pct"),
             "stream_overlap": timeline.get("stream_overlap") or {},
         },
-        "annotations": annotation_report(sp, framework=framework, min_repeats=thresholds["min_repeats"]),
+        "annotations": annotation_report(sp, min_repeats=thresholds["min_repeats"]),
     }
