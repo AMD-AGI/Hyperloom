@@ -696,6 +696,10 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     rounds_since_last_keep: dict[str, int] = field(default_factory=dict)
     # Patch verdict ledger keyed by review subject (a specialist task_id, or a candidate id for a PR pre-screen); Critic must approve/advise before PolicyGate allows the integrate_patch delegate.
     specialist_patch_verdicts: dict[str, str] = field(default_factory=dict)
+    # Export gate (only when optimization_scope declares aoti.enabled); set once a KEEP lands whose applied module compiles an AOTInductor package. Until then the dispatcher admits only export work.
+    export_landed: bool = False
+    # Integrate rounds that passed without the export landing. Reporting only, deliberately not a terminal cap: the export error is not captured, so N attempts cannot distinguish N blockers from one blocker N times.
+    export_attempts: int = 0
     # Intervention-mix ledger ({change_type∈{config,code_patch}, action, task_id, ts, delta_pct}); Robustness detects config-only loops.
     intervention_mix: list[dict[str, Any]] = field(default_factory=list)
     # Current run of contiguous config KEEPs; resets when a code_patch KEEP lands.

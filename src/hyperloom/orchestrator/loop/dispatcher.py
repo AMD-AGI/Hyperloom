@@ -39,6 +39,7 @@ from ..policy.gate import (
     PolicyDenied,
     SPECIALIST_FROM_AGENT_PREFIX,
 )
+from ..framework.optimization_scope import aoti_config
 from ..bus.gpu_pool import (
     GPU_LEASE_TTL_GRACE,
 )
@@ -1396,7 +1397,41 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 rule="execution_order",
                 hint="propose/delegate `baseline` until baseline_tput > 0",
             )
-        return None
+        return self._export_gate_denial_for_action(action)
+
+    def _export_gate_denial_for_action(self, action: str) -> PolicyDenied | None:
+        """Refuse search actions until the declared ahead-of-time export lands.
+
+        Inert unless the operator declared ``aoti.enabled``.
+
+        Args:
+            action: The proposed/delegated action name.
+
+        Returns:
+            A :class:`PolicyDenied` while the export gate is closed, else ``None``.
+        """
+        if action not in {"explore", "sweep", "profile", "roofline"}:
+            return None
+        if self.shared_state.export_landed:
+            return None
+        try:
+            config = aoti_config()
+        except ValueError:
+            # Unreadable mid-apply, or malformed. Hold the gate rather than admitting
+            # search on a transient: a false denial costs one tick, a false admission
+            # spends the budget the gate exists to protect.
+            return self._export_gate_denied(action, "the optimization scope is unreadable")
+        if config is None or not config.enabled:
+            return None
+        return self._export_gate_denied(action, "ahead-of-time export has not landed yet")
+
+    @staticmethod
+    def _export_gate_denied(action: str, why: str) -> PolicyDenied:
+        return PolicyDenied(
+            f"action={action!r} denied: {why}",
+            rule="export_gate",
+            hint="land the whole-model torch.export + aoti_compile_and_package first; no eager fallback",
+        )
 
     def time_budget_denial_for_action(
         self,

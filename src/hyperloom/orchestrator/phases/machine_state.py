@@ -187,6 +187,42 @@ DEFAULT_PHASE_BUDGET_PCT: dict[str, float] = {
     PHASE_CLOSE: 0.02,
 }
 
+
+def export_gate_budget_shortfall(hours: float, phase_budget_pct: dict[str, float]) -> dict[str, float] | None:
+    """How far a declared export run falls short of funding two patch specialists.
+
+    Under ``aoti.enabled`` nothing is scored until the export lands, so the run depends
+    entirely on patch specialists, which have a 60-min floor
+    (``specialists.profile.wall_budget_base_min``). Two is the minimum that allows one
+    failure and one fix.
+
+    Returns ``None`` when the budget is sufficient, when no export is declared, or when
+    the declaration is unreadable -- this is advisory, and the gate itself already fails
+    closed on an unreadable scope. The caller owns the wording.
+    """
+    from ..framework.optimization_scope import aoti_config
+    from ..specialists.profile import MODE_PATCH, wall_budget_base_min
+
+    try:
+        config = aoti_config()
+    except ValueError:
+        return None
+    if config is None or not config.enabled:
+        return None
+    pct = phase_budget_pct.get(PHASE_FRAMEWORK_AGENT, DEFAULT_PHASE_BUDGET_PCT.get(PHASE_FRAMEWORK_AGENT, 0.0))
+    framework_min = hours * 60.0 * float(pct)
+    specialist_min = wall_budget_base_min({"mode": MODE_PATCH})
+    if specialist_min <= 0 or framework_min // specialist_min >= 2:
+        return None
+    return {
+        "framework_min": framework_min,
+        "specialist_min": specialist_min,
+        "affords": framework_min // specialist_min,
+        "pct": float(pct),
+        "needed_pct": min((2.0 * specialist_min) / (hours * 60.0), 1.0) if hours > 0 else 1.0,
+    }
+
+
 # Share of the session held back for the phases that actually produce a result.
 OPTIMIZATION_RESERVE_PCT: float = 0.50
 

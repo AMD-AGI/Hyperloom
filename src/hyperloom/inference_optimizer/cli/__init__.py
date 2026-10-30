@@ -454,6 +454,10 @@ def _emit_launch_info(
 # Exit code for "another optimizer already owns this session".
 SESSION_BUSY_EXIT_CODE = 3
 
+# argparse destination for ``--max-hours``; read via getattr on several paths that run
+# before the budget is settled, where absence is meaningful.
+MAX_HOURS_ARG = "max_hours"
+
 
 def _acquire_session_lock_or_exit(session_dir: Path) -> SessionLock:
     """Take the single-optimizer session lock or exit ``SESSION_BUSY_EXIT_CODE``."""
@@ -1125,7 +1129,7 @@ def _apply_agentx_budget_profile(args: argparse.Namespace) -> None:
     # ``--max-hours`` carries no argparse default, so absence reads as ``None``
     # here: this runs before either path settles the budget. An explicit value
     # is a deliberate choice even when it equals the default, and gets no note.
-    if getattr(args, "max_hours", None) is None:
+    if getattr(args, MAX_HOURS_ARG, None) is None:
         print(
             f"NOTE: HYPERLOOM_AGENTX is on and --max-hours is at its default of {DEFAULT_MAX_HOURS}. "
             "One AgentX round (corpus load + warmup + drain + measurement window) "
@@ -1204,6 +1208,32 @@ def _resolve_run_max_model_len_inner(args: argparse.Namespace) -> tuple[int, str
 def _resume_can_disable_eval(baseline_accuracy: float) -> bool:
     """Whether ``--no-eval`` may still disable the accuracy eval for a resumed session."""
     return float(baseline_accuracy or 0.0) <= 0.0
+
+
+def _check_export_gate_budget(args: argparse.Namespace, phase_budget_pct: dict[str, float]) -> None:
+    """Warn when the export gate cannot afford two patch specialists.
+
+    The judgment lives in ``machine_state.export_gate_budget_shortfall`` -- it is phase
+    budget policy, not CLI concern. Advisory only: the default ``--max-hours`` affords
+    none, and a short deliberate run is the operator's call to make.
+    """
+    from hyperloom.orchestrator.phases.machine_state import export_gate_budget_shortfall
+
+    # --extend-hours lands in session state, not args, so fold it in here or a resumed
+    # run is judged on the leg it started with.
+    hours = float(getattr(args, MAX_HOURS_ARG, 0.0) or 0.0) + float(getattr(args, "extend_hours", 0.0) or 0.0)
+    short = export_gate_budget_shortfall(hours, phase_budget_pct)
+    if short is None:
+        return
+    print(
+        f"Preflight: WARNING — aoti.enabled is declared, so nothing is scored until the export "
+        f"lands. FRAMEWORK_AGENT has {short['framework_min']:.0f} min ({hours:g}h x "
+        f"{short['pct']:.2f}) and a patch specialist needs {short['specialist_min']:.0f} min, so "
+        f"this run affords {int(short['affords'])}. Two is the minimum that allows one failure "
+        f"and one fix: --phase-budget-framework-pct {short['needed_pct']:.2f} at this budget, or "
+        f"raise --max-hours.",
+        file=sys.stderr,
+    )
 
 
 def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
@@ -1605,7 +1635,7 @@ def _restore_budget_and_objective(args: Any, state: SharedState, manifest: Mappi
     """
     lines: list[str] = []
     persisted_minutes = float(getattr(state, "max_minutes", 0) or 0)
-    if getattr(args, "max_hours", None) is None and persisted_minutes > 0:
+    if getattr(args, MAX_HOURS_ARG, None) is None and persisted_minutes > 0:
         args.max_hours = persisted_minutes / 60.0
         lines.append(f"  → restored budget: --max-hours {args.max_hours:.2f} (persisted)")
 
@@ -2703,6 +2733,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         _reset_state_file(session_dir, framework=state.framework)
     # Build phase budget pct dict from CLI flags; absent values fall back to Coordinator library defaults.
     phase_budget_pct = _build_phase_budget_pct(args)
+    _check_export_gate_budget(args, phase_budget_pct)
 
     coordinator = Coordinator(
         session_dir,
