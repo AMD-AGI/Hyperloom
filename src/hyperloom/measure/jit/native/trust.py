@@ -86,11 +86,11 @@ class Trust:
 class Signer:
     """The build service's private key; it signs records and nothing else."""
 
-    key: Ed25519PrivateKey = field(repr=False)
+    private: Ed25519PrivateKey = field(repr=False)
 
     @classmethod
     def from_file(cls, path: Path) -> Signer:
         return cls(load_private_key(path))
 
     def sign(self, raw: bytes) -> bytes:
-        return sign(raw, self.key).encode(_ASCII)
+        return sign(raw, self.private).encode(_ASCII)
