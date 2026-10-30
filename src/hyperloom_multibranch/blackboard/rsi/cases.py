@@ -8,7 +8,8 @@ CLOSE keeps each case the session registered once (:func:`pool_cases`), with whe
 commit, the image digest, the model, the framework and its version, and the hardware. A case runs against the
 framework source of the image it was found on, so a later session is handed the cases of its own image digest and
 model only (:class:`SessionCases`), for its regression set to run on its root before its first check
-(:class:`~hyperloom_multibranch.rulegate.regression.RegressionSet`).
+(:class:`~hyperloom_multibranch.rulegate.regression.RegressionSet`). A case that reproduced there is a defect the root
+carries (:func:`known_defects`), which the briefs name.
 """
 
 from __future__ import annotations
@@ -22,8 +23,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from hyperloom.contracts.measurement import REPRODUCED, TestKind
 from hyperloom.measure.compile import BlobError, BlobStore
-from hyperloom_multibranch.contracts.blackboard import NotRecorded
+from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, NotRecorded
 from hyperloom_multibranch.contracts.blackboard.interfaces import SessionRecords
 from hyperloom_multibranch.contracts.blackboard.records import BlackboardSnapshot
 from hyperloom_multibranch.blackboard.codec import decode, encode
@@ -84,6 +86,14 @@ class CasePool:
         """The pool beside ``archive``, read as of the time it is."""
 
         return cls(archive.root.parent / CASES_DIR, archive.as_of)
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str] | None = None) -> CasePool | None:
+        """The pool beside the archive a running session reads; ``None`` when it reads none
+        (:meth:`TreeArchive.read_from_env`)."""
+
+        archive = TreeArchive.read_from_env(env)
+        return None if archive is None else cls.beside(archive)
 
     def write(self, entry: PoolEntry) -> bool:
         """Keep ``entry`` unless the pool holds its case for its image and model already."""
@@ -156,6 +166,26 @@ def pool_cases(snapshot: BlackboardSnapshot, blobs: BlobStore, pool: CasePool, i
     return CasesPooled(written, len(reasons), tuple(reasons))
 
 
+def known_defects(snapshot: BlackboardSnapshot, pool: CasePool) -> tuple[PoolEntry, ...]:
+    """The pooled cases that reproduced on the session's root: defects the root carries, which no merge is held to."""
+
+    root = snapshot.baseline.root_commit if snapshot.baseline is not None else None
+    reproduced = {
+        item.sha256
+        for record in snapshot.records
+        if record.request.kind is TestKind.REPRO
+        and (record.request.branch_id, record.request.parent_commit) == (INTEGRATION_BRANCH, root)
+        and record.result is not None
+        and record.result.repro_verdict == REPRODUCED
+        for item in record.request.attachments
+    }
+    found: dict[str, PoolEntry] = {}
+    for entry in pool.entries() if reproduced else ():
+        if entry.case_id in reproduced:
+            found.setdefault(entry.case_id, entry)
+    return tuple(found.values())
+
+
 def image_digest_from_env(env: Mapping[str, str] | None = None) -> str:
     return str((os.environ if env is None else env).get(IMAGE_DIGEST_ENV) or "").strip()
 
@@ -206,6 +236,7 @@ __all__ = [
     "PoolEntry",
     "SessionCases",
     "image_digest_from_env",
+    "known_defects",
     "pool_cases",
     "session_cases",
 ]
