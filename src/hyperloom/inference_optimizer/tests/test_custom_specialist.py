@@ -1086,8 +1086,6 @@ async def test_only_mode_leaves_framework_once_the_custom_cycle_is_done(kw, hint
     ],
 )
 async def test_only_mode_framework_ticks_without_an_orchestration_turn(tmp_path, monkeypatch, phase, only, expected):
-    import time
-
     coord = _coordinator(tmp_path, SharedState(custom_specialist_prompt=_PROMPT, custom_specialist_only=only))
     coord.shared_state.phase = phase
     turns: list[str] = []
@@ -1104,7 +1102,6 @@ async def test_only_mode_framework_ticks_without_an_orchestration_turn(tmp_path,
     monkeypatch.setattr(coord.dispatcher, "pump_dispatcher_once", _noop)
     monkeypatch.setattr(coord.enablement_lane, "pump_enablement_safely", _noop)
     coord.phase_machine.pump_table = {"CLOSE": _noop}
-    coord._last_maintenance_ts = time.monotonic()
 
     await coord._tick_once()
 
