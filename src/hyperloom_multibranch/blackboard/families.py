@@ -40,7 +40,7 @@ OP_FAMILIES: tuple[tuple[str, str], ...] = (
     (
         "gemm",
         r"gemm|matmul|blockscale|a8w8|a16w16|qkv_proj|o_proj|gate_up|down_proj|split-?k|\bck\b|hipblaslt"
-        r"|aten::(?:addmm|bmm|mm)\b",
+        r"|aten::(?:addmm|bmm|mm)\b|parallellinear|replicatedlinear|(?<![a-z])linear(?![a-z])|lm_?head",
     ),
     ("norm", r"rmsnorm|layernorm|qk-?norm|(?<![a-z])norm(?![a-z])"),
     ("rope", r"rope|rotary"),
@@ -123,6 +123,8 @@ ANY_LAYER = "any layer"
 _LABEL_SEPARATOR = " · "
 _FLAG = re.compile(r"--[a-z0-9][a-z0-9-]*")
 _ENV = re.compile(r"\b[A-Z][A-Z0-9]*_[A-Z0-9_]+\b")
+#: A profile's op name that carries the modules that launched it, outermost first: ``kernel [Module.Layer]``.
+_LAUNCHED = re.compile(r"(?P<kernel>.+?) \[(?P<launcher>[^\[\]]+)\]")
 _Named = TypeVar("_Named")
 
 
@@ -166,9 +168,15 @@ def _matched(patterns: Iterable[tuple[_Named, str]], text: str) -> _Named | None
 
 
 def op_family(op: str) -> str | None:
-    """The op family of :data:`OP_FAMILIES` a profile's op name belongs to; ``None`` for one of none."""
+    """The op family of :data:`OP_FAMILIES` a profile's op name belongs to; ``None`` for one of none. A name that
+    carries its launcher is read by its kernel first, then by its layer, then by its module, so a GEMM an attention
+    module launched stays a GEMM."""
 
-    return _matched(OP_FAMILIES, op)
+    launched = _LAUNCHED.fullmatch(op)
+    if launched is None:
+        return _matched(OP_FAMILIES, op)
+    parts = (launched["kernel"], *reversed(launched["launcher"].split(".")))
+    return next((family for part in parts if (family := _matched(OP_FAMILIES, part)) is not None), None)
 
 
 def _target(text: str) -> str | None:
