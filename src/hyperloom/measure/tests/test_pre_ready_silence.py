@@ -56,6 +56,40 @@ def test_each_new_sign_of_output_restarts_the_bound(change: dict) -> None:
     assert silence.silent_for(1.0 + _LIMIT) is None and silence.silent_for(8.0 + _LIMIT) is not None
 
 
+_TAG = "[aiter] [pid=829812 pname=Process-1]"
+
+
+def test_a_server_building_an_aiter_jit_module_is_working_however_long_the_build_is_silent() -> None:
+    building = f"{_TAG} start build [module_gemm_a8w8_bpreshuffle_cktile] under /sb/1/work/scratch/test/jit/aiter_jit"
+    silence = _silence(last_line=building)
+    silence.observe({**_RUNNING, "last_line": building}, 1.0 + 3 * _LIMIT)  # the same reading, a long build later
+    assert silence.silent_for(1.0 + 3 * _LIMIT) is None
+
+    built = f"{_TAG} finish build [module_gemm_a8w8_bpreshuffle_cktile], cost 844.2s"
+    silence.observe({**_RUNNING, "last_line": built}, 2.0 + 3 * _LIMIT)
+    assert silence.silent_for(2.0 + 4 * _LIMIT) is not None, "once the module is built, silence counts again"
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "[aiter] start build /sb/1/work/scratch/test/jit/aiter_cpp/build/pa_ragged_18aef236b4b102ad875f1200701980d3",
+        "mb-toolbox/sandboxes/lsb-4c93a10a/fs/work/x: [aiter] start build [module_quant] under /sb/1/jit/aiter_jit",
+    ],
+)
+def test_a_build_line_without_the_process_tag_or_after_other_text_still_shows_the_build(line: str) -> None:
+    silence = _silence(last_line=line)
+    silence.observe({**_RUNNING, "last_line": line}, 1.0 + 3 * _LIMIT)
+    assert silence.silent_for(1.0 + 3 * _LIMIT) is None
+
+
+def test_aiter_importing_a_built_module_is_no_build() -> None:
+    line = f"{_TAG} import [module_gemm_a8w8_bpreshuffle_cktile] under /sb/1/work/scratch/test/jit/aiter_jit/m.so"
+    silence = _silence(last_line=line)
+    silence.observe({**_RUNNING, "last_line": line}, 1.0 + _LIMIT)
+    assert silence.silent_for(1.0 + _LIMIT) is not None
+
+
 def test_a_log_whose_write_time_only_jitters_by_the_clock_is_not_written_again() -> None:
     silence = _silence()
     silence.observe({**_RUNNING, "updated_unix": 220.0, "last_log_age_sec": 25.4}, 8.0)  # written at 194.6, not 195
