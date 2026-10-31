@@ -143,7 +143,7 @@ class ResourceFacts:
 
         Args:
             shared_state: SharedState to read the session's own facts from.
-            rounds: Rounds excluding now, from ``RoundStore.excluding``. The
+            rounds: Rounds excluding now, from ``RoundStore.open_rounds``. The
                 first is reported.
             live_task_ids: Tasks observed running; ``None`` leaves the set
                 unknown.
