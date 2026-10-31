@@ -224,51 +224,13 @@ class Coordinator:
         self.reactor_turn_timeout_sec = resolve_reactor_turn_timeout_sec()
 
         # Persistence layer
-        db_path = db_path_for(self.session_dir)
-        # The session directory can sit on a networked filesystem where WAL's
-        # shared-memory mapping corrupts the database, so the mode is resolved
-        # before the file is opened.
-        self.db = SqliteConnection(db_path)
-
-        self.bus = MessageBus(self.db)
-        self.locks = SqliteLeaseBackend(self.db)
-        self.tasks = TaskRegistry(
-            self.db,
-            dispatch_origin_provider=lambda: task_dispatch_origin(self.shared_state),
-        )
-        self.cursors = CursorStore(self.db)
-        self.sub = SubAgentRunner(
-            self.locks,
-            self.tasks,
-            session_dir=self.session_dir,
-        )
+        self._open_persistence()
 
         # Persistent session state (state.json) — load existing for resume.
         self.shared_state = SharedState.load_or_init(self.session_dir)
         # Thread live SharedState into the runner so executors get it via ctx.extra.
         self.sub.shared_state = self.shared_state
-        # Serving-disjoint invariant: the live serving process holds the first ``serving_tp`` cards, carved off the
-        # specialist pool.
-        self.gpu_specialist_pool = SpecialistGpuPool(
-            self.db,
-            gpu_ids=resolve_gpu_specialist_devices(
-                int(self.shared_state.gpu_specialist_capacity or 0),
-                serving_tp=serving_tp_for_policy(self.shared_state),
-            ),
-        )
-        # Whole-node pool for enablement and bench specialists.
-        self.framework_gpu_pool = SpecialistGpuPool(
-            self.db,
-            gpu_ids=resolve_whole_machine_devices(),
-        )
-        # Sync research_lane capacity into lane_capacity so acquire_many honours the cap.
-        from ..bus.storage.schema import set_lane_capacity as _set_lane_capacity
-
-        cap = int(self.shared_state.research_lane_capacity or 0)
-        if cap >= 0:
-            _set_lane_capacity(self.db.raw, "research_lane", cap)
-        # gpu_research_lane stays capacity-1 (strictly serial GPU specialists);
-        # the GPU pool partitions physical cards within that one lease.
+        self._init_gpu_pools()
         # The durable bring-up mutex. The gate never reads it; ``open`` decides.
         self.rounds = RoundStore(self.db)
         self.policy = PolicyGate(
@@ -339,6 +301,52 @@ class Coordinator:
         self.phase_machine.ensure_phase_initialised(settings.phase_budget_pct)
         # Recipe KB T0 defensive fallback for direct SDK/test callers; best-effort.
         self.phase_machine.ensure_recipe_kb_t0_anchored()
+
+    def _open_persistence(self) -> None:
+        """Open the session database and the bus, lease, task, cursor and sub-agent layers over it."""
+        db_path = db_path_for(self.session_dir)
+        # The session directory can sit on a networked filesystem where WAL's
+        # shared-memory mapping corrupts the database, so the mode is resolved
+        # before the file is opened.
+        self.db = SqliteConnection(db_path)
+
+        self.bus = MessageBus(self.db)
+        self.locks = SqliteLeaseBackend(self.db)
+        self.tasks = TaskRegistry(
+            self.db,
+            dispatch_origin_provider=lambda: task_dispatch_origin(self.shared_state),
+        )
+        self.cursors = CursorStore(self.db)
+        self.sub = SubAgentRunner(
+            self.locks,
+            self.tasks,
+            session_dir=self.session_dir,
+        )
+
+    def _init_gpu_pools(self) -> None:
+        """Carve the specialist and whole-node GPU pools and sync the research lane's capacity."""
+        # Serving-disjoint invariant: the live serving process holds the first ``serving_tp`` cards, carved off the
+        # specialist pool.
+        self.gpu_specialist_pool = SpecialistGpuPool(
+            self.db,
+            gpu_ids=resolve_gpu_specialist_devices(
+                int(self.shared_state.gpu_specialist_capacity or 0),
+                serving_tp=serving_tp_for_policy(self.shared_state),
+            ),
+        )
+        # Whole-node pool for enablement and bench specialists.
+        self.framework_gpu_pool = SpecialistGpuPool(
+            self.db,
+            gpu_ids=resolve_whole_machine_devices(),
+        )
+        # Sync research_lane capacity into lane_capacity so acquire_many honours the cap.
+        from ..bus.storage.schema import set_lane_capacity as _set_lane_capacity
+
+        cap = int(self.shared_state.research_lane_capacity or 0)
+        if cap >= 0:
+            _set_lane_capacity(self.db.raw, "research_lane", cap)
+        # gpu_research_lane stays capacity-1 (strictly serial GPU specialists);
+        # the GPU pool partitions physical cards within that one lease.
 
     @property
     def recipe_kb(self) -> RecipeKB | None:
@@ -1050,14 +1058,7 @@ class Coordinator:
         prompt = f"{turn.prompt}\n\n{request}" if request else turn.prompt
         tools = self.policy.allowed_tools_for_agent(agent_name)
         # Stamp timeline keys onto backends that self-write their trace row.
-        _set_trace_ctx = getattr(backend, "set_trace_context", None)
-        backend_self_traces = callable(_set_trace_ctx)
-        if backend_self_traces:
-            _set_trace_ctx(
-                tick=int(self.shared_state.tick or 0),
-                phase=(self.shared_state.phase or "") or None,
-                macro_cycle=int(self.shared_state.macro_cycle or 0),
-            )
+        backend_self_traces = self._stamp_trace_context(backend)
         # max_turns=0 → backend default.
         _t0 = time.perf_counter()
         call_id = new_call_id()
@@ -1101,25 +1102,11 @@ class Coordinator:
             return None
         except Exception as exc:  # isolation boundary: one agent's reactor turn
             log.exception("reactor pass for %s raised", agent_name)
-            await self.bus.record_observation(
-                "coordinator",
-                "observation",
-                {"kind": "reactor_exception", "agent": agent_name, "error": format_exc_brief(exc, limit=500)},
-            )
-            self.record_exception(
-                stage="reactor_pass",
-                agent=agent_name,
-                exc=exc,
-            )
+            await self._record_reactor_exception(agent_name, exc)
             return None
         finally:
             self._trace_mcp_setup(agent_name=agent_name, backend=backend)
-        # Reset the streak — a successful turn proves the backend is alive again.
-        if self._backend_error_streak.get(agent_name):
-            self._backend_error_streak[agent_name] = 0
-            self._backend_error_alarm_armed[agent_name] = True
-            self._backend_error_since.pop(agent_name, None)
-            self._backend_retry_at.pop(agent_name, None)
+        self._reset_backend_error_streak(agent_name)
         # Record this reactor turn's token spend on the unified ledger.
         latency_ms = int((time.perf_counter() - _t0) * 1000)
         self._trace_reactor_llm_call(agent_name, result, latency_ms=latency_ms)
@@ -1128,6 +1115,45 @@ class Coordinator:
         with trajectory_scope(call_id=call_id, parent_span_id=call_span.span_id):
             for intent in result.intents:
                 await self.router.handle_intent(agent_name, intent)
+        await self._settle_routed_turn(agent_name, result, request=request)
+        return result
+
+    def _stamp_trace_context(self, backend: Backend) -> bool:
+        """Set the tick, phase and macro cycle on a backend that accepts them; return whether it does."""
+        _set_trace_ctx = getattr(backend, "set_trace_context", None)
+        backend_self_traces = callable(_set_trace_ctx)
+        if backend_self_traces:
+            _set_trace_ctx(
+                tick=int(self.shared_state.tick or 0),
+                phase=(self.shared_state.phase or "") or None,
+                macro_cycle=int(self.shared_state.macro_cycle or 0),
+            )
+        return backend_self_traces
+
+    async def _record_reactor_exception(self, agent_name: str, exc: Exception) -> None:
+        """Record an unexpected reactor-turn failure as an observation and a session exception."""
+        await self.bus.record_observation(
+            "coordinator",
+            "observation",
+            {"kind": "reactor_exception", "agent": agent_name, "error": format_exc_brief(exc, limit=500)},
+        )
+        self.record_exception(
+            stage="reactor_pass",
+            agent=agent_name,
+            exc=exc,
+        )
+
+    def _reset_backend_error_streak(self, agent_name: str) -> None:
+        """Clear the agent's backend-error streak and re-arm its alarm."""
+        # Reset the streak — a successful turn proves the backend is alive again.
+        if self._backend_error_streak.get(agent_name):
+            self._backend_error_streak[agent_name] = 0
+            self._backend_error_alarm_armed[agent_name] = True
+            self._backend_error_since.pop(agent_name, None)
+            self._backend_retry_at.pop(agent_name, None)
+
+    async def _settle_routed_turn(self, agent_name: str, result: BackendTurnResult, *, request: str) -> None:
+        """Book a turn whose intents were routed: its no-intent streak, rendered cursor and last-active stamp."""
         if result.intents:
             self._no_intent_streak.pop(agent_name, None)
         elif not request:
@@ -1138,7 +1164,6 @@ class Coordinator:
             state.last_discarded_escalate_hint = ""
             state.last_discarded_escalate_hint_ts = ""
         self.shared_state.agent_last_active[agent_name] = time.time()
-        return result
 
     def _trace_mcp_setup(self, *, agent_name: str, backend: Backend) -> None:
         """Persist orchestration MCP setup once per session."""

@@ -326,6 +326,52 @@ def _load_codex_sdk() -> Any:
     return openai_codex
 
 
+def _probe_spec(cwd: str, model: str, reasoning_effort: str, timeout_sec: int) -> AgentRunSpec:
+    """The read-only run spec of one startup probe turn."""
+    return AgentRunSpec(
+        system_prompt="",
+        user_prompt="",
+        cwd=cwd,
+        model=model,
+        writable=False,
+        timeout_sec=timeout_sec,
+        reasoning_effort=reasoning_effort,
+        role="startup probe",
+    )
+
+
+async def _await_turn(turn_handle: Any, turn_task: asyncio.Task[Any], timeout_sec: int | None, thread_id: str) -> Any:
+    """Wait for ``turn_task`` within ``timeout_sec``, interrupting the turn when it times out or is cancelled."""
+    try:
+        completed, _ = await asyncio.wait(
+            {turn_task},
+            timeout=timeout_sec,
+        )
+    except asyncio.CancelledError:
+        with contextlib.suppress(Exception):  # broad-suppress: SDK teardown
+            await asyncio.wait_for(
+                turn_handle.interrupt(),
+                timeout=5,
+            )
+        raise
+    if not completed:
+        with contextlib.suppress(Exception):  # broad-suppress: SDK teardown
+            await asyncio.wait_for(
+                turn_handle.interrupt(),
+                timeout=5,
+            )
+        with contextlib.suppress(Exception):  # broad-suppress: SDK teardown
+            await asyncio.wait_for(
+                asyncio.shield(turn_task),
+                timeout=5,
+            )
+        raise CodexExecutionError(
+            f"Codex timed out after {timeout_sec}s",
+            session_id=thread_id,
+        )
+    return turn_task.result()
+
+
 class CodexBackend:
     """Execute Forge sessions through the Codex Python SDK."""
 
@@ -588,6 +634,15 @@ class CodexBackend:
             client_title="KernelForge",
         )
 
+    def _guarded_sdk_config(self, sdk: Any, spec: AgentRunSpec, guard_dir: Path) -> Any:
+        """Build the SDK configuration for ``spec`` with the git guard written under ``guard_dir``."""
+        child_env = self._child_environment(_write_git_guard(guard_dir))
+        return self._sdk_config(
+            sdk=sdk,
+            spec=spec,
+            child_env=child_env,
+        )
+
     def _thread_start_options(
         self,
         sdk: Any,
@@ -632,16 +687,7 @@ class CodexBackend:
         model = model.strip() or self.runtime.model
         reasoning_effort = reasoning_effort.strip() or self.runtime.reasoning_effort
         timeout_sec = timeout_sec or min(60, self.runtime.timeout_sec)
-        spec = AgentRunSpec(
-            system_prompt="",
-            user_prompt="",
-            cwd=cwd,
-            model=model,
-            writable=False,
-            timeout_sec=timeout_sec,
-            reasoning_effort=reasoning_effort,
-            role="startup probe",
-        )
+        spec = _probe_spec(cwd, model, reasoning_effort, timeout_sec)
         client = None
         turn = None
         outcome: dict[str, Any] = {}
@@ -659,14 +705,7 @@ class CodexBackend:
 
         try:
             with tempfile.TemporaryDirectory(prefix="forge-codex-git-") as tmpdir:
-                child_env = self._child_environment(_write_git_guard(Path(tmpdir)))
-                client = sdk.Codex(
-                    self._sdk_config(
-                        sdk=sdk,
-                        spec=spec,
-                        child_env=child_env,
-                    )
-                )
+                client = sdk.Codex(self._guarded_sdk_config(sdk, spec, Path(tmpdir)))
                 thread_options = self._thread_start_options(sdk, spec)
                 turn_options = self._turn_options(sdk, spec)
                 thread = client.thread_start(**thread_options)
@@ -730,12 +769,7 @@ class CodexBackend:
         thread_id = session_id
         try:
             with tempfile.TemporaryDirectory(prefix="forge-codex-git-") as tmpdir:
-                child_env = self._child_environment(_write_git_guard(Path(tmpdir)))
-                config = self._sdk_config(
-                    sdk=sdk,
-                    spec=spec,
-                    child_env=child_env,
-                )
+                config = self._guarded_sdk_config(sdk, spec, Path(tmpdir))
                 async with sdk.AsyncCodex(config) as client:
                     if session_id:
                         thread = await client.thread_resume(session_id)
@@ -747,34 +781,7 @@ class CodexBackend:
                         **self._turn_options(sdk, spec),
                     )
                     turn_task = asyncio.create_task(turn_handle.run())
-                    try:
-                        completed, _ = await asyncio.wait(
-                            {turn_task},
-                            timeout=spec.timeout_sec,
-                        )
-                    except asyncio.CancelledError:
-                        with contextlib.suppress(Exception):  # broad-suppress: SDK teardown
-                            await asyncio.wait_for(
-                                turn_handle.interrupt(),
-                                timeout=5,
-                            )
-                        raise
-                    if not completed:
-                        with contextlib.suppress(Exception):  # broad-suppress: SDK teardown
-                            await asyncio.wait_for(
-                                turn_handle.interrupt(),
-                                timeout=5,
-                            )
-                        with contextlib.suppress(Exception):  # broad-suppress: SDK teardown
-                            await asyncio.wait_for(
-                                asyncio.shield(turn_task),
-                                timeout=5,
-                            )
-                        raise CodexExecutionError(
-                            f"Codex timed out after {spec.timeout_sec}s",
-                            session_id=thread_id,
-                        )
-                    sdk_result = turn_task.result()
+                    sdk_result = await _await_turn(turn_handle, turn_task, spec.timeout_sec, thread_id)
         except asyncio.CancelledError:
             guard.rollback()
             raise

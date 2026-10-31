@@ -13,19 +13,14 @@ Two routes produce the report: ``agent`` runs the TraceLens skill under a model,
 import argparse
 import asyncio
 import contextlib
-import json
 import logging
 import os
 import shutil
 import sys
-import uuid
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from hyperloom_common.coerce import first_str
-from hyperloom_common.io import JsonFormat, atomic_write_json
-from hyperloom_common.timeutil import now_iso
 from hyperloom.inference_optimizer.framework_paths import (
     FRAMEWORK_SOURCE_PACKAGES as _FRAMEWORK_SOURCE_PACKAGES,
 )
@@ -51,15 +46,16 @@ from TraceLens.Agent.Analysis.post_processing import render_analysis_json
 from ._analysis_json import load_report_tasks
 from ._io_utils import append_log
 from ._analysis_reports import OrchestratorOutcome, write_reports
+from ._analysis_run import AnalysisRun, finish_run, report_failure, start_run
 from .analysis_route import AnalysisRoute
 from ._candidate_assembly import _finalize_candidates, analyze_trace_files, write_source_resolution_artifact
 from ._collective_candidates_inject import _inject_collective_candidates
 from ._kernel_roofline import default_roofline_fields
 from ._kernel_search import refresh_kernel_search_roots
 from ._perf_report_analysis import analyze_perf_report
-from ._run_status import RunStatus
 from ._trace_gates import WorkloadShares, _evaluate_idle_gate_with_graph_guard, _evaluate_low_compute_gate
 from ._trace_inputs import (
+    TraceInputs,
     _capture_classification_root,
     _count_kernels_if_readable,
     _is_capture_fragment,
@@ -636,23 +632,8 @@ def _add_chunk_selection_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def main() -> int:
-    """CLI entry point for the TraceLens analysis tool.
-
-    Parses arguments, optionally splits the trace into a steady-state chunk,
-    runs the selected analysis route, extracts hot-kernel candidates,
-    merges roofline data, and writes the run's report sidecars and status.
-
-    Returns:
-        int: ``0`` on success, ``1`` when the run failed (the error is also
-            written to status and printed as JSON).
-    """
-    parser = argparse.ArgumentParser(description="Kernel-agent TraceLens analysis tool")
-    parser.add_argument("--trace-input", required=True)
-    parser.add_argument("--session-id", default="")
-    parser.add_argument("--model-name", default="")
-    parser.add_argument("--framework", default="")
-    parser.add_argument("--target-platform", default="MI355X")
+def _add_root_args(parser: argparse.ArgumentParser) -> None:
+    """Add the workspace and TraceLens checkout root flags; their env defaults are read now."""
     parser.add_argument(
         "--workspace-path",
         default=_default_workspace_path(),
@@ -679,6 +660,17 @@ def main() -> int:
         "Rehydration module; plumbed to run_tracelens_skill. "
         "Leave empty for the open-source-only report.",
     )
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    """Build the analysis tool's CLI parser."""
+    parser = argparse.ArgumentParser(description="Kernel-agent TraceLens analysis tool")
+    parser.add_argument("--trace-input", required=True)
+    parser.add_argument("--session-id", default="")
+    parser.add_argument("--model-name", default="")
+    parser.add_argument("--framework", default="")
+    parser.add_argument("--target-platform", default="MI355X")
+    _add_root_args(parser)
     _add_run_args(parser)
     # Join keys of the launching Hyperloom session's trajectory ledger; unset outside a session.
     parser.add_argument("--trajectory-session-dir", default="")
@@ -698,70 +690,11 @@ def main() -> int:
     )
     _add_split_args(parser)
     _add_chunk_selection_args(parser)
-    args = parser.parse_args()
-    route = AnalysisRoute(args.route)
+    return parser
 
-    args.target_platform = normalize_platform(args.target_platform)
 
-    session_id = args.session_id or uuid.uuid4().hex[:12]
-    run_id = f"tl-{uuid.uuid4().hex[:8]}"
-    started_at = now_iso(timespec="auto")
-    # Keep each TraceLens invocation's artifacts in its own run subdirectory.
-    # now_iso renders UTC as "+00:00", never "Z", so the suffix is always added.
-    ts_compact = started_at.replace("-", "").replace(":", "").split(".")[0] + "Z"
-    sub_dir = f"{ts_compact}_{run_id}"
-    root = Path(args.workspace_path) / "kernel-agent"
-    run_dir = root / "runs" / session_id / sub_dir
-    log_path = run_dir / "logs" / "tracelens_analysis" / f"{run_id}.log"
-    status_path = run_dir / "status" / "tracelens_analysis" / f"{run_id}.json"
-    artifacts: dict[str, str] = {}
-    run_status = RunStatus(status_path, log_path, artifacts, run_id, started_at)
-    route_candidates: list[dict[str, Any]] | None = None
-    route_report_path: Path | None = None
-    orchestrator_mode = "inline"
-    # Structured trace-health findings surfaced to the Coordinator.
-    trace_health_warnings: list[dict[str, Any]] = []
-    # What this run saw and decided, returned to the caller instead of only
-    # reaching the CLI log. The caller records it on the SBD V6 roofline event as
-    # the run happens, so "which file was analysed, how was the steady-state
-    # window picked, which gate refused" survives without re-reading the log.
-    run_meta: dict[str, Any] = {
-        "preflight": {},
-        "split": {},
-        "selection": {},
-        "steps": [],
-        "route_ext": {},
-    }
-
-    def _note_step(
-        step_id: str,
-        *,
-        category: str,
-        status: str,
-        skip_reason: str | None = None,
-        **detail: Any,
-    ) -> None:
-        """Append one step to the run's ladder.
-
-        Args:
-            step_id: Stable step name.
-            category: Ladder phase (``preflight`` / ``install`` / ``split`` /
-                ``select`` / ``analyze`` / ``emit``).
-            status: ``ok`` / ``failed`` / ``skipped``.
-            skip_reason: Why the step did not run, when skipped.
-            **detail: Measured values for the step.
-        """
-        run_meta["steps"].append(
-            {
-                "step_id": step_id,
-                "order": len(run_meta["steps"]) + 1,
-                "category": category,
-                "status": status,
-                "skip_reason": skip_reason,
-                "detail": detail,
-            }
-        )
-
+def _warn_without_search_roots(trace_health_warnings: list[dict[str, Any]]) -> None:
+    """Refresh the kernel search roots and record an error finding when this host has none."""
     # Discovery is cached per run, so re-run it here: a process that outlives a
     # single run would otherwise keep the roots it saw when it first imported
     # this module, and miss a framework installed since.
@@ -786,8 +719,396 @@ def main() -> int:
             }
         )
 
+
+def _record_input_promotion(run: AnalysisRun, trace_files: list[Path], probe: _KernelProbe) -> None:
+    """Record that the preflight analyses a later candidate than the leading one."""
+    analysis_trace_path = probe.analysed
+    promotion_warning: dict[str, Any] = {
+        "code": "trace_analysis_input_promoted",
+        "severity": "info",
+        "leading_candidate": trace_files[0].name,
+        "analysed": analysis_trace_path.name,
+        "probed": list(probe.probed),
+        "detail": (
+            "the leading candidate carried no GPU kernel events or "
+            "could not be read; the analysis ran on the first "
+            "candidate that did"
+        ),
+    }
+    # Structured as well as logged: a run that changed its own input
+    # has to be explicable from the artifacts, not only from a tool
+    # log nobody keeps.
+    run.trace_health_warnings.append(promotion_warning)
+    run.artifacts["tracelens_analysis_input"] = str(analysis_trace_path)
+    append_log(
+        run.log_path,
+        "trace_analysis_input promoted from "
+        f"{trace_files[0].name} to {analysis_trace_path.name} "
+        f"(probed={', '.join(probe.probed)})",
+    )
+
+
+def _preflight_trace_input(run: AnalysisRun, trace_input: Path, trace_files: list[Path]) -> Path:
+    """Reject capture-only and CPU-only inputs; return the trace the preflight proved carries GPU kernels."""
+    # The file the analysis will actually read. Discovery order picks the
+    # default; the preflight below promotes whichever candidate it proves
+    # carries GPU kernels, because passing the check on one file and then
+    # analysing another is how an empty trace reaches TraceLens silently.
+    #
+    # Unconditional: discover_trace_inputs returns [trace_input] for a file
+    # and raises FileNotFoundError for a directory with no traces, so the
+    # list is never empty. Guarding it would type this as Path | None and
+    # push that None through every downstream call for a branch that cannot
+    # be taken.
+    analysis_trace_path = trace_files[0]
+
+    # Fail-fast when the input is nothing but CUDA-graph capture sidecars.
+    #
+    # Ahead of the kernel probe below because the two answer different
+    # questions and only this one is reliable here. A capture records the
+    # graph being built, so it carries a handful of stray kernels rather
+    # than none -- 2 out of 1.49M events on the run that prompted this --
+    # and a probe that asks "are there any kernels" therefore passes it and
+    # hands the splitter a file with no iteration loop in it. The splitter
+    # then fails with ``trace_split_no_steady_state``, which reads as "the
+    # window was too short" and sends the next person to lengthen a capture
+    # that was never a workload timeline to begin with.
+    #
+    # ``all`` rather than ``any``: a healthy profile writes the annotated
+    # trace *beside* its sidecars, and discovery already sorts those first.
+    # Only an input with nothing else in it is unanalysable.
+    _reject_capture_only_input(trace_input, trace_files)
+
+    # Fail-fast on CPU-only traces.
+    #
+    # Probes candidates in discovery order rather than only the first. A
+    # single-file probe reports the capture directory as CPU-only whenever
+    # the leading file happens to be a fragment with no kernels, and the
+    # error it raises then blames the profiler for a capture that is sitting
+    # in the same directory with thirty thousand kernel events in it.
+    #
+    # With size ordering the first candidate is normally the capture, so this
+    # loop exits on one probe and the promotion below stays quiet. It earns
+    # its keep on the layouts where it does not: a multi-rank capture whose
+    # leading rank recorded nothing.
+    probe = _probe_gpu_kernels(trace_files)
+    analysis_trace_path = probe.analysed
+    kernel_event_count, probed, spent_bytes = probe.kernel_event_count, probe.probed, probe.spent_bytes
+    append_log(
+        run.log_path,
+        f"trace_gpu_kernel_events={kernel_event_count} (probed={', '.join(probed)})",
+    )
+    run.run_meta["preflight"].update(
+        {
+            "probe_gpu_kernel_events": kernel_event_count,
+            "probed_files": list(probed),
+            "probed_bytes": spent_bytes,
+            "analysed_file": analysis_trace_path.name,
+            "input_promoted": analysis_trace_path != trace_files[0],
+        }
+    )
+    run.note_step(
+        "probe_gpu_kernels",
+        category="preflight",
+        status="ok" if kernel_event_count else "failed",
+        gpu_kernel_events=kernel_event_count,
+        probed_file_count=len(probed),
+        analysed_file=analysis_trace_path.name,
+    )
+    if analysis_trace_path != trace_files[0]:
+        _record_input_promotion(run, trace_files, probe)
+    if kernel_event_count == 0:
+        raise RuntimeError(
+            "Trace contains zero GPU kernel events in any of "
+            f"{len(probed)} probed file(s) under {trace_input}: "
+            f"{', '.join(probed)}. Either the upstream profile run "
+            "captured CPU-only activity -- re-run profile with the "
+            "torch.profiler GPU activities enabled (no LD_PRELOAD "
+            "competing for ROCprofiler-SDK) -- or the traces listed as "
+            "'unreadable' above are truncated or corrupt, which is a "
+            "different problem in the same place."
+        )
+    return analysis_trace_path
+
+
+def _split_steady_state(run: AnalysisRun, job: TraceSplitJob) -> Path:
+    """Split the analysed trace and return the steady-state chunk the perf report reads."""
+    args = run.args
+    cli_trace_path, split_meta = _run_trace_split(
+        args,
+        job,
+        run.log_path,
+        run.trace_health_warnings,
+    )
+    run.run_meta["split"].update(split_meta)
+    run.run_meta["selection"].update(
+        {
+            "requested_mode": args.steady_state_mode,
+            "chunk_label": split_meta.get("chunk_label"),
+            "selected_chunk": str(cli_trace_path),
+            "selected_chunk_count": split_meta.get("selected_chunk_count"),
+            "available_modes": split_meta.get("available_modes"),
+            "fell_back_to_full_trace": False,
+        }
+    )
+    run.note_step(
+        "split_trace",
+        category="split",
+        status="ok",
+        returncode=split_meta.get("returncode"),
+        num_steps=split_meta.get("num_steps"),
+        chunks_extracted=split_meta["chunks_extracted"],
+    )
+    run.note_step(
+        "select_chunk",
+        category="select",
+        status="ok",
+        requested_mode=args.steady_state_mode,
+        selected_chunk=cli_trace_path.name,
+        selected_chunk_count=split_meta.get("selected_chunk_count"),
+    )
+    run.artifacts["tracelens_trace_split_dir"] = str(job.split_dir)
+    run.artifacts["tracelens_steady_state_trace"] = str(cli_trace_path)
+    append_log(
+        run.log_path,
+        f"trace split OK: "
+        f"{split_meta['chunks_by_mode']}; "
+        f"--steady-state-mode={args.steady_state_mode} -> "
+        f"using {cli_trace_path.name} for perf report",
+    )
+    return cli_trace_path
+
+
+def _resolve_capture_folder(run: AnalysisRun, trace_input: Path, analysis_trace_path: Path) -> Path | None:
+    """Resolve the graph-capture folder TraceLens inference graph replay analysis reads, noting the step."""
+    capture_folder: Path | None = (
+        Path(run.args.capture_folder).expanduser().resolve()
+        if run.args.capture_folder
+        # The analysed trace, not the leading candidate: the helper looks
+        # for capture_traces/ beside the file it is given, and after a
+        # cross-directory promotion those are different places.
+        else discover_capture_folder(trace_input, [analysis_trace_path])
+    )
+    if capture_folder:
+        run.note_step(
+            "discover_capture_folder",
+            category="preflight",
+            status="ok",
+            skip_reason=None,
+            capture_folder=str(capture_folder),
+            exists=capture_folder.is_dir(),
+        )
+        append_log(
+            run.log_path,
+            f"capture_folder resolved: {capture_folder} (exists={capture_folder.is_dir()})",
+        )
+    else:
+        run.note_step(
+            "discover_capture_folder",
+            category="preflight",
+            status="skipped",
+            skip_reason="no capture_traces/ beside the analysed trace",
+            capture_folder="",
+            exists=False,
+        )
+    return capture_folder
+
+
+class _RouteResult(NamedTuple):
+    """The route's report, how it ran and its finalized hot-kernel candidates."""
+
+    report_path: Path
+    orchestrator_mode: str
+    candidates: list[dict[str, Any]]
+
+
+def _run_route(
+    run: AnalysisRun,
+    request: TraceLensSkillRequest,
+    gpu_arch_path: Path | None,
+    cli_trace_path: Path,
+    raw_trace_path: Path,
+) -> _RouteResult:
+    """Run the selected route on the steady-state chunk and finalize the candidates it kept."""
+    args = run.args
+    log_path = run.log_path
+    tracelens_dir = request.output_dir
+    run.run_status.write(state="running", current_step="run_trace_analysis")
+    with _tracelens_knows_arch(gpu_arch_path, args.target_platform, tracelens_dir):
+        run_config_path = write_run_config(
+            output_dir=tracelens_dir,
+            trace_path=cli_trace_path,
+            platform=args.target_platform,
+            analysis_mode=tracelens_analysis_mode(args.framework),
+            capture_folder=request.capture_folder,
+        )
+        if run.route is AnalysisRoute.AGENT:
+            skill_result = _run_agent_skill(request, args, log_path)
+            run.artifacts.update(skill_result.artifact_paths)
+            outcome = _agent_route_outcome(skill_result, args, raw_trace_path, run.trace_health_warnings, log_path)
+        else:
+            outcome = _run_non_llm_route(
+                run_config_path, args.framework, raw_trace_path, run.trace_health_warnings, log_path
+            )
+    route_candidates = []
+    if outcome.raw_candidates:
+        route_candidates = _finalize_candidates(
+            outcome.raw_candidates,
+            perf_report_csv_dir=perf_report_csv_dir(str(tracelens_dir)),
+        )
+        write_source_resolution_artifact(
+            route_candidates,
+            run.run_dir / _KSC.SOURCE_RESOLUTION_FILENAME,
+            framework=args.framework,
+            model_name=args.model_name,
+            log_path=log_path,
+        )
+    return _RouteResult(outcome.report_path, outcome.orchestrator_mode, route_candidates)
+
+
+def _analyse_trace(run: AnalysisRun, trace_input: Path, trace_files: list[Path]) -> _RouteResult:
+    """Preflight the discovered traces, split out the steady-state chunk and run the route on it."""
+    args = run.args
+    analysis_trace_path = _preflight_trace_input(run, trace_input, trace_files)
+    run.run_status.write(
+        state="running",
+        current_step="check_tracelens_dependencies",
+    )
+    tl_root, tl_internal_root, skill = _check_tracelens_checkout(args, run.log_path)
+
+    tracelens_dir = run.run_dir / "tracelens"
+    tracelens_dir.mkdir(parents=True, exist_ok=True)
+
+    # Backfill MAF for the open-source TraceLens path: measure the
+    # missing arch/MAF spec on an idle GPU before report generation,
+    # unless the internal extension (which backfills MAF) is enabled.
+    run.run_status.write(
+        state="running",
+        current_step="populate_gpu_arch_json",
+    )
+    gpu_arch_path = _gpu_arch_json(args, tl_root=tl_root, tl_internal_root=tl_internal_root, log_path=run.log_path)
+    if gpu_arch_path is not None:
+        run.artifacts["tracelens_gpu_arch_json"] = str(gpu_arch_path)
+
+    # Split the full-window filtered trace into steady-state chunks via
+    # TraceLens's own splitter, since the perf report expects a single
+    # steady-state chunk.
+    # Whichever candidate the preflight proved has GPU kernels, which is
+    # trace_files[0] unless it was promoted. Analysing a different file
+    # from the one that passed the check would let an empty rank through
+    # on a sibling's evidence.
+    cli_trace_path = analysis_trace_path
+    # The un-split source trace: analysis runs on the steady-state chunk
+    # (cli_trace_path is reassigned below), but graph-capture health is a
+    # whole-run property and must be read from the original trace -- the
+    # chunk may drop the graph-launch runtime events the detector needs.
+    raw_trace_path = analysis_trace_path
+    run.run_status.write(
+        state="running",
+        current_step="split_trace",
+    )
+    split_dir = tracelens_dir / "trace_split"
+    cli_trace_path = _split_steady_state(run, TraceSplitJob(analysis_trace_path, split_dir, tl_root))
+
+    # Graph-capture folder for TraceLens inference graph replay analysis.
+    capture_folder = _resolve_capture_folder(run, trace_input, analysis_trace_path)
+    request = TraceLensSkillRequest(
+        skill_path=skill,
+        output_dir=tracelens_dir,
+        tracelens_root=tl_root,
+        tracelens_internal_root=tl_internal_root,
+        capture_folder=capture_folder,
+    )
+    return _run_route(run, request, gpu_arch_path, cli_trace_path, raw_trace_path)
+
+
+def _hot_kernel_candidates(
+    run: AnalysisRun, route_candidates: list[dict[str, Any]] | None, trace_files: list[Path]
+) -> list[dict[str, Any]]:
+    """Pick the run's hot kernels: the route's candidates, the raw trace's on a dry run, else none."""
+    log_path = run.log_path
+    run.run_status.write(
+        state="running",
+        current_step="extract_hot_kernels",
+    )
+    # Production candidates come only from the route's analysis.json.
+    candidates = route_candidates
+    if candidates:
+        append_log(
+            log_path,
+            f"hot kernels from the {run.route.value} route ({len(candidates)})",
+        )
+    elif run.args.dry_run:
+        # Dry-run only.
+        append_log(log_path, "dry-run: parsing raw trace for hot kernels")
+        candidates = analyze_trace_files(trace_files, _default_top_k())
+    else:
+        # Routing signal (high idle / TraceLens failure): keep candidates
+        # empty so the Coordinator pivots to params/backends.
+        append_log(
+            log_path,
+            "TraceLens produced no kernel candidates; returning "
+            "empty hot_kernels[] without fallback so params/backends "
+            "optimization can continue.",
+        )
+    default_roofline_fields(candidates)
+    return candidates
+
+
+def _write_run_reports(
+    run: AnalysisRun, trace_inputs: TraceInputs, candidates: list[dict[str, Any]], route_report_path: Path | None
+) -> None:
+    """Write the source-resolution artifact when the route did not, then the run's report sidecars."""
+    args = run.args
+    source_resolution_path = run.run_dir / _KSC.SOURCE_RESOLUTION_FILENAME
+    if not source_resolution_path.is_file():
+        write_source_resolution_artifact(
+            candidates,
+            source_resolution_path,
+            framework=args.framework,
+            model_name=args.model_name,
+            log_path=run.log_path,
+        )
+    if source_resolution_path.is_file():
+        run.artifacts["kernel_source_resolution"] = str(source_resolution_path)
+    run.artifacts.update(
+        write_reports(
+            run.run_dir,
+            trace_inputs,
+            candidates,
+            args,
+            OrchestratorOutcome(route_report_path, run.trace_health_warnings),
+        )
+    )
+    run.artifacts["cli_log_path"] = str(run.log_path)
+    run.artifacts["status_path"] = str(run.status_path)
+
+
+def main() -> int:
+    """CLI entry point for the TraceLens analysis tool.
+
+    Parses arguments, optionally splits the trace into a steady-state chunk,
+    runs the selected analysis route, extracts hot-kernel candidates,
+    merges roofline data, and writes the run's report sidecars and status.
+
+    Returns:
+        int: ``0`` on success, ``1`` when the run failed (the error is also
+            written to status and printed as JSON).
+    """
+    args = _build_parser().parse_args()
+    route = AnalysisRoute(args.route)
+
+    args.target_platform = normalize_platform(args.target_platform)
+
+    run = start_run(args, route)
+    log_path = run.log_path
+    route_candidates: list[dict[str, Any]] | None = None
+    route_report_path: Path | None = None
+    orchestrator_mode = "inline"
+    _warn_without_search_roots(run.trace_health_warnings)
+
     try:
-        run_status.write(
+        run.run_status.write(
             state="running",
             current_step="discover_trace_input",
         )
@@ -796,402 +1117,35 @@ def main() -> int:
         trace_input_type, trace_files = trace_inputs
         append_log(log_path, f"trace_input_type={trace_input_type}")
         append_log(log_path, f"trace_files={len(trace_files)}")
-        run_meta["preflight"].update(
+        run.run_meta["preflight"].update(
             {
                 "trace_input": str(trace_input),
                 "trace_input_type": trace_input_type,
                 "trace_file_count": len(trace_files),
             }
         )
-        _note_step(
+        run.note_step(
             "discover_inputs",
             category="preflight",
             status="ok",
             trace_input_type=trace_input_type,
             trace_file_count=len(trace_files),
         )
-        # The file the analysis will actually read. Discovery order picks the
-        # default; the preflight below promotes whichever candidate it proves
-        # carries GPU kernels, because passing the check on one file and then
-        # analysing another is how an empty trace reaches TraceLens silently.
-        #
-        # Unconditional: discover_trace_inputs returns [trace_input] for a file
-        # and raises FileNotFoundError for a directory with no traces, so the
-        # list is never empty. Guarding it would type this as Path | None and
-        # push that None through every downstream call for a branch that cannot
-        # be taken.
-        analysis_trace_path = trace_files[0]
-
-        # Fail-fast when the input is nothing but CUDA-graph capture sidecars.
-        #
-        # Ahead of the kernel probe below because the two answer different
-        # questions and only this one is reliable here. A capture records the
-        # graph being built, so it carries a handful of stray kernels rather
-        # than none -- 2 out of 1.49M events on the run that prompted this --
-        # and a probe that asks "are there any kernels" therefore passes it and
-        # hands the splitter a file with no iteration loop in it. The splitter
-        # then fails with ``trace_split_no_steady_state``, which reads as "the
-        # window was too short" and sends the next person to lengthen a capture
-        # that was never a workload timeline to begin with.
-        #
-        # ``all`` rather than ``any``: a healthy profile writes the annotated
-        # trace *beside* its sidecars, and discovery already sorts those first.
-        # Only an input with nothing else in it is unanalysable.
         if not args.dry_run:
-            _reject_capture_only_input(trace_input, trace_files)
-
-            # Fail-fast on CPU-only traces.
-            #
-            # Probes candidates in discovery order rather than only the first. A
-            # single-file probe reports the capture directory as CPU-only whenever
-            # the leading file happens to be a fragment with no kernels, and the
-            # error it raises then blames the profiler for a capture that is sitting
-            # in the same directory with thirty thousand kernel events in it.
-            #
-            # With size ordering the first candidate is normally the capture, so this
-            # loop exits on one probe and the promotion below stays quiet. It earns
-            # its keep on the layouts where it does not: a multi-rank capture whose
-            # leading rank recorded nothing.
-            probe = _probe_gpu_kernels(trace_files)
-            analysis_trace_path = probe.analysed
-            kernel_event_count, probed, spent_bytes = probe.kernel_event_count, probe.probed, probe.spent_bytes
-            append_log(
-                log_path,
-                f"trace_gpu_kernel_events={kernel_event_count} (probed={', '.join(probed)})",
-            )
-            run_meta["preflight"].update(
-                {
-                    "probe_gpu_kernel_events": kernel_event_count,
-                    "probed_files": list(probed),
-                    "probed_bytes": spent_bytes,
-                    "analysed_file": analysis_trace_path.name,
-                    "input_promoted": analysis_trace_path != trace_files[0],
-                }
-            )
-            _note_step(
-                "probe_gpu_kernels",
-                category="preflight",
-                status="ok" if kernel_event_count else "failed",
-                gpu_kernel_events=kernel_event_count,
-                probed_file_count=len(probed),
-                analysed_file=analysis_trace_path.name,
-            )
-            if analysis_trace_path != trace_files[0]:
-                promotion_warning: dict[str, Any] = {
-                    "code": "trace_analysis_input_promoted",
-                    "severity": "info",
-                    "leading_candidate": trace_files[0].name,
-                    "analysed": analysis_trace_path.name,
-                    "probed": list(probed),
-                    "detail": (
-                        "the leading candidate carried no GPU kernel events or "
-                        "could not be read; the analysis ran on the first "
-                        "candidate that did"
-                    ),
-                }
-                # Structured as well as logged: a run that changed its own input
-                # has to be explicable from the artifacts, not only from a tool
-                # log nobody keeps.
-                trace_health_warnings.append(promotion_warning)
-                artifacts["tracelens_analysis_input"] = str(analysis_trace_path)
-                append_log(
-                    log_path,
-                    "trace_analysis_input promoted from "
-                    f"{trace_files[0].name} to {analysis_trace_path.name} "
-                    f"(probed={', '.join(probed)})",
-                )
-            if kernel_event_count == 0:
-                raise RuntimeError(
-                    "Trace contains zero GPU kernel events in any of "
-                    f"{len(probed)} probed file(s) under {trace_input}: "
-                    f"{', '.join(probed)}. Either the upstream profile run "
-                    "captured CPU-only activity -- re-run profile with the "
-                    "torch.profiler GPU activities enabled (no LD_PRELOAD "
-                    "competing for ROCprofiler-SDK) -- or the traces listed as "
-                    "'unreadable' above are truncated or corrupt, which is a "
-                    "different problem in the same place."
-                )
-
-            run_status.write(
-                state="running",
-                current_step="check_tracelens_dependencies",
-            )
-            tl_root, tl_internal_root, skill = _check_tracelens_checkout(args, log_path)
-
-            tracelens_dir = run_dir / "tracelens"
-            tracelens_dir.mkdir(parents=True, exist_ok=True)
-
-            # Backfill MAF for the open-source TraceLens path: measure the
-            # missing arch/MAF spec on an idle GPU before report generation,
-            # unless the internal extension (which backfills MAF) is enabled.
-            run_status.write(
-                state="running",
-                current_step="populate_gpu_arch_json",
-            )
-            gpu_arch_path = _gpu_arch_json(args, tl_root=tl_root, tl_internal_root=tl_internal_root, log_path=log_path)
-            if gpu_arch_path is not None:
-                artifacts["tracelens_gpu_arch_json"] = str(gpu_arch_path)
-
-            # Split the full-window filtered trace into steady-state chunks via
-            # TraceLens's own splitter, since the perf report expects a single
-            # steady-state chunk.
-            # Whichever candidate the preflight proved has GPU kernels, which is
-            # trace_files[0] unless it was promoted. Analysing a different file
-            # from the one that passed the check would let an empty rank through
-            # on a sibling's evidence.
-            cli_trace_path = analysis_trace_path
-            # The un-split source trace: analysis runs on the steady-state chunk
-            # (cli_trace_path is reassigned below), but graph-capture health is a
-            # whole-run property and must be read from the original trace -- the
-            # chunk may drop the graph-launch runtime events the detector needs.
-            raw_trace_path = analysis_trace_path
-            run_status.write(
-                state="running",
-                current_step="split_trace",
-            )
-            split_dir = tracelens_dir / "trace_split"
-            cli_trace_path, split_meta = _run_trace_split(
-                args,
-                TraceSplitJob(analysis_trace_path, split_dir, tl_root),
-                log_path,
-                trace_health_warnings,
-            )
-            run_meta["split"].update(split_meta)
-            run_meta["selection"].update(
-                {
-                    "requested_mode": args.steady_state_mode,
-                    "chunk_label": split_meta.get("chunk_label"),
-                    "selected_chunk": str(cli_trace_path),
-                    "selected_chunk_count": split_meta.get("selected_chunk_count"),
-                    "available_modes": split_meta.get("available_modes"),
-                    "fell_back_to_full_trace": False,
-                }
-            )
-            _note_step(
-                "split_trace",
-                category="split",
-                status="ok",
-                returncode=split_meta.get("returncode"),
-                num_steps=split_meta.get("num_steps"),
-                chunks_extracted=split_meta["chunks_extracted"],
-            )
-            _note_step(
-                "select_chunk",
-                category="select",
-                status="ok",
-                requested_mode=args.steady_state_mode,
-                selected_chunk=cli_trace_path.name,
-                selected_chunk_count=split_meta.get("selected_chunk_count"),
-            )
-            artifacts["tracelens_trace_split_dir"] = str(split_dir)
-            artifacts["tracelens_steady_state_trace"] = str(cli_trace_path)
-            append_log(
-                log_path,
-                f"trace split OK: "
-                f"{split_meta['chunks_by_mode']}; "
-                f"--steady-state-mode={args.steady_state_mode} -> "
-                f"using {cli_trace_path.name} for perf report",
-            )
-
-            # Graph-capture folder for TraceLens inference graph replay analysis.
-            capture_folder: Path | None = (
-                Path(args.capture_folder).expanduser().resolve()
-                if args.capture_folder
-                # The analysed trace, not the leading candidate: the helper looks
-                # for capture_traces/ beside the file it is given, and after a
-                # cross-directory promotion those are different places.
-                else discover_capture_folder(trace_input, [analysis_trace_path])
-            )
-            if capture_folder:
-                _note_step(
-                    "discover_capture_folder",
-                    category="preflight",
-                    status="ok",
-                    skip_reason=None,
-                    capture_folder=str(capture_folder),
-                    exists=capture_folder.is_dir(),
-                )
-                append_log(
-                    log_path,
-                    f"capture_folder resolved: {capture_folder} (exists={capture_folder.is_dir()})",
-                )
-            else:
-                _note_step(
-                    "discover_capture_folder",
-                    category="preflight",
-                    status="skipped",
-                    skip_reason="no capture_traces/ beside the analysed trace",
-                    capture_folder="",
-                    exists=False,
-                )
-
-            run_status.write(state="running", current_step="run_trace_analysis")
-            with _tracelens_knows_arch(gpu_arch_path, args.target_platform, tracelens_dir):
-                run_config_path = write_run_config(
-                    output_dir=tracelens_dir,
-                    trace_path=cli_trace_path,
-                    platform=args.target_platform,
-                    analysis_mode=tracelens_analysis_mode(args.framework),
-                    capture_folder=capture_folder,
-                )
-                if route is AnalysisRoute.AGENT:
-                    skill_result = _run_agent_skill(
-                        TraceLensSkillRequest(
-                            skill_path=skill,
-                            output_dir=tracelens_dir,
-                            tracelens_root=tl_root,
-                            tracelens_internal_root=tl_internal_root,
-                            capture_folder=capture_folder,
-                        ),
-                        args,
-                        log_path,
-                    )
-                    artifacts.update(skill_result.artifact_paths)
-                    outcome = _agent_route_outcome(skill_result, args, raw_trace_path, trace_health_warnings, log_path)
-                else:
-                    outcome = _run_non_llm_route(
-                        run_config_path, args.framework, raw_trace_path, trace_health_warnings, log_path
-                    )
-            route_report_path = outcome.report_path
-            orchestrator_mode = outcome.orchestrator_mode
-            route_candidates = []
-            if outcome.raw_candidates:
-                route_candidates = _finalize_candidates(
-                    outcome.raw_candidates,
-                    perf_report_csv_dir=perf_report_csv_dir(str(tracelens_dir)),
-                )
-                write_source_resolution_artifact(
-                    route_candidates,
-                    run_dir / _KSC.SOURCE_RESOLUTION_FILENAME,
-                    framework=args.framework,
-                    model_name=args.model_name,
-                    log_path=log_path,
-                )
+            analysed = _analyse_trace(run, trace_input, trace_files)
+            route_report_path = analysed.report_path
+            orchestrator_mode = analysed.orchestrator_mode
+            route_candidates = analysed.candidates
         else:
             append_log(log_path, "[dry-run] skipping TraceLens install and external CLI")
 
-        run_status.write(
-            state="running",
-            current_step="extract_hot_kernels",
-        )
-        # Production candidates come only from the route's analysis.json.
-        candidates = route_candidates
-        if candidates:
-            append_log(
-                log_path,
-                f"hot kernels from the {route.value} route ({len(candidates)})",
-            )
-        elif args.dry_run:
-            # Dry-run only.
-            append_log(log_path, "dry-run: parsing raw trace for hot kernels")
-            candidates = analyze_trace_files(trace_files, _default_top_k())
-        else:
-            # Routing signal (high idle / TraceLens failure): keep candidates
-            # empty so the Coordinator pivots to params/backends.
-            append_log(
-                log_path,
-                "TraceLens produced no kernel candidates; returning "
-                "empty hot_kernels[] without fallback so params/backends "
-                "optimization can continue.",
-            )
-        default_roofline_fields(candidates)
-        source_resolution_path = run_dir / _KSC.SOURCE_RESOLUTION_FILENAME
-        if not source_resolution_path.is_file():
-            write_source_resolution_artifact(
-                candidates,
-                source_resolution_path,
-                framework=args.framework,
-                model_name=args.model_name,
-                log_path=log_path,
-            )
-        if source_resolution_path.is_file():
-            artifacts["kernel_source_resolution"] = str(source_resolution_path)
-        artifacts.update(
-            write_reports(
-                run_dir,
-                trace_inputs,
-                candidates,
-                args,
-                OrchestratorOutcome(route_report_path, trace_health_warnings),
-            )
-        )
-        artifacts["cli_log_path"] = str(log_path)
-        artifacts["status_path"] = str(status_path)
-
-        # Surface the contracted ``analysis.md`` exit path alongside hot_kernels.
-        analysis_report_path = first_str(artifacts.get("tracelens_agent_report"), artifacts.get("trace_report_path"))
-
-        result = {
-            "tool": "tracelens_analysis",
-            "session_id": session_id,
-            "run_id": run_id,
-            "trace_input_type": trace_input_type,
-            "hot_kernels": candidates,
-            "trace_report_path": artifacts["trace_report_path"],
-            "analysis_report_path": analysis_report_path,
-            "cli_log_path": str(log_path),
-            "status_path": str(status_path),
-            "artifact_paths": artifacts,
-            "orchestrator_mode": orchestrator_mode,
-            # Trace-quality findings surfaced to the Coordinator (empty = nothing wrong).
-            "trace_health_warnings": trace_health_warnings,
-            # What this run saw and decided, for the caller's timeline event.
-            "run_meta": run_meta,
-        }
-        _note_step(
-            "extract_hot_kernels",
-            category="emit",
-            status="ok",
-            hot_kernel_count=len(candidates),
-            orchestrator_mode=orchestrator_mode,
-        )
-        atomic_write_json(
-            run_dir / "session_state.json",
-            {
-                "session_id": session_id,
-                "last_tool": "tracelens_analysis",
-                "last_run_id": run_id,
-                "updated_at": now_iso(timespec="auto"),
-                "model_name": args.model_name,
-                "framework": args.framework,
-            },
-            fmt=JsonFormat(trailing_newline=True),
-        )
-        run_status.write(
-            state="succeeded",
-            current_step="done",
-        )
-        print(json.dumps(result, indent=2, sort_keys=True))
+        candidates = _hot_kernel_candidates(run, route_candidates, trace_files)
+        _write_run_reports(run, trace_inputs, candidates, route_report_path)
+        finish_run(run, trace_input_type, candidates, orchestrator_mode)
         return 0
     except Exception as exc:  # top-level barrier; logged and reported
         log.warning("tracelens analysis failed: %s", exc, exc_info=True)
-        append_log(log_path, f"[error] {type(exc).__name__}: {exc}")
-        run_status.write(
-            state="failed",
-            current_step="failed",
-            error=f"{type(exc).__name__}: {exc}",
-        )
-        # Include trace_health_warnings accumulated pre-exception for auto-recovery.
-        # ``run_meta`` goes out on this path too: the ladder up to the failure is
-        # what says which rung refused, so dropping it here would leave the
-        # failure cases -- the ones worth explaining -- as the only blind spot.
-        print(
-            json.dumps(
-                {
-                    "tool": "tracelens_analysis",
-                    "session_id": session_id,
-                    "run_id": run_id,
-                    "status": "failed",
-                    "error": f"{type(exc).__name__}: {exc}",
-                    "cli_log_path": str(log_path),
-                    "status_path": str(status_path),
-                    "trace_health_warnings": trace_health_warnings,
-                    "run_meta": run_meta,
-                },
-                indent=2,
-                sort_keys=True,
-            )
-        )
+        report_failure(run, exc)
         return 1
 
 

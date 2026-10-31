@@ -31,6 +31,7 @@ from hyperloom_common.llm.llm_config import (
 )
 from hyperloom_common.jsonio import extract_last_json_matching
 from hyperloom.inference_optimizer.protocol.intent import (
+    Intent,
     IntentValidationError,
     NoIntentEmitted,
     validate_envelope,
@@ -275,6 +276,36 @@ def _kb_writes_by_target(emit: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return writes
 
 
+def _intents_from_emit(emit: dict[str, Any]) -> list[Intent]:
+    """Validate the commit emit's intent envelope and return its intents."""
+    envelope = emit.get("intent_envelope")
+    if not isinstance(envelope, dict):
+        raise BackendError(f"CriticAgentBackend: emit.json missing intent_envelope (got keys={sorted(emit.keys())!r})")
+    try:
+        return validate_envelope(envelope)
+    except IntentValidationError as exc:
+        raise NoIntentEmitted(f"critic_agent_envelope_invalid: {exc}") from exc
+
+
+def _review_prompt(judge_bundle: dict[str, Any]) -> str:
+    """The review prompt: the judge-bundle fields the reviewer reads, then the output instructions."""
+    bundle_view: dict[str, Any] = {
+        "session_id": judge_bundle.get("session_id"),
+        "decision_id": judge_bundle.get("decision_id"),
+        "phase": judge_bundle.get("phase"),
+        "merged_context": judge_bundle.get("merged_context"),
+        "missing_context": judge_bundle.get("missing_context"),
+        "required_context": judge_bundle.get("required_context"),
+        "proposals": judge_bundle.get("proposals"),
+        "kb_priors_by_proposal": judge_bundle.get("kb_priors_by_proposal"),
+        "kb_read_skipped_reason": judge_bundle.get("kb_read_skipped_reason"),
+        "review_constraints": judge_bundle.get("review_constraints"),
+        "notes": judge_bundle.get("notes"),
+    }
+    bundle_text = json.dumps(bundle_view, ensure_ascii=False, separators=(",", ":"))
+    return f"==== JUDGE BUNDLE ====\n{bundle_text}\n==== END JUDGE BUNDLE ====\n\n{_REVIEW_OUTPUT_INSTRUCTIONS}"
+
+
 def _verdict_references_kb(review: dict[str, Any] | None) -> bool:
     """Whether any final review verdict cites KB evidence."""
     if not isinstance(review, dict):
@@ -439,36 +470,11 @@ class CriticAgentBackend:
         review_path = workdir / "review.json"
         emit_path = workdir / "emit.json"
 
-        session_id = self.session_dir.name
         request = self._write_review_request(request_path, prompt)
 
         env = self._build_runtime_env()
 
-        # prepare-review runs off-thread because subprocess.run blocks.
-        await asyncio.to_thread(
-            self._runtime_caller,
-            RuntimeCall(
-                phase="prepare-review",
-                request_path=request_path,
-                review_path=None,
-                out_path=judge_path,
-                cwd=self.critic_agent_root,
-                env=env,
-            ),
-        )
-        try:
-            judge_bundle = json.loads(judge_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise BackendError(f"CriticAgentBackend: failed to read judge_bundle from {judge_path}: {exc}") from exc
-
-        # Snapshot the reviewed proposal msg_ids for trace attribution.
-        self._trace_reviewed_msg_ids = _reviewed_msg_ids_from_bundle(judge_bundle)
-
-        apply_review_constraints(
-            judge_bundle,
-            phase=self._trace_phase or "",
-            action_verdict_policy=self.action_verdict_policy,
-        )
+        judge_bundle = await self._prepare_review(request_path, judge_path, env)
 
         # Codex reasoning; short-circuit when there are no proposals.
         proposals = judge_bundle.get("proposals") or []
@@ -487,51 +493,11 @@ class CriticAgentBackend:
             encoding="utf-8",
         )
 
-        # commit-review.
-        await asyncio.to_thread(
-            self._runtime_caller,
-            RuntimeCall(
-                phase="commit-review",
-                request_path=request_path,
-                review_path=review_path,
-                out_path=emit_path,
-                cwd=self.critic_agent_root,
-                env=env,
-            ),
-        )
-        try:
-            emit = json.loads(emit_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise BackendError(f"CriticAgentBackend: failed to read emit.json from {emit_path}: {exc}") from exc
+        emit = await self._commit_review(request_path, review_path, emit_path, env)
+        intents = _intents_from_emit(emit)
 
-        envelope = emit.get("intent_envelope")
-        if not isinstance(envelope, dict):
-            raise BackendError(
-                f"CriticAgentBackend: emit.json missing intent_envelope (got keys={sorted(emit.keys())!r})"
-            )
-        try:
-            intents = validate_envelope(envelope)
-        except IntentValidationError as exc:
-            raise NoIntentEmitted(f"critic_agent_envelope_invalid: {exc}") from exc
-
-        kb_skipped = judge_bundle.get("kb_read_skipped_reason")
-        required_context = list(judge_bundle.get("required_context") or [])
-        verdicts_summary = [
-            (i.payload.get("verdict"), i.payload.get("source")) for i in intents if i.type.value == "review_verdict"
-        ]
         kb_priors_trace = self._build_kb_priors_trace(judge_bundle, review)
-        log.info(
-            "critic_agent_backend turn=%d session=%s proposals=%d "
-            "verdicts=%s kb_skipped=%s required_context=%s finish=%s kb_priors=%d",
-            turn_idx,
-            session_id,
-            len(proposals),
-            verdicts_summary,
-            kb_skipped,
-            required_context,
-            llm_finish,
-            kb_priors_trace.get("prior_count") or 0,
-        )
+        self._log_turn(turn_idx, judge_bundle, intents, llm_finish, kb_priors_trace)
         from hyperloom.inference_optimizer.breakdown.recorder import critic_out
 
         iteration = critic_out.CriticIteration(
@@ -565,6 +531,83 @@ class CriticAgentBackend:
         )
 
     # Helpers
+
+    async def _prepare_review(self, request_path: Path, judge_path: Path, env: dict[str, str]) -> dict[str, Any]:
+        """Run prepare-review and return its judge bundle with the phase's review constraints applied."""
+        # prepare-review runs off-thread because subprocess.run blocks.
+        await asyncio.to_thread(
+            self._runtime_caller,
+            RuntimeCall(
+                phase="prepare-review",
+                request_path=request_path,
+                review_path=None,
+                out_path=judge_path,
+                cwd=self.critic_agent_root,
+                env=env,
+            ),
+        )
+        try:
+            judge_bundle = json.loads(judge_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise BackendError(f"CriticAgentBackend: failed to read judge_bundle from {judge_path}: {exc}") from exc
+
+        # Snapshot the reviewed proposal msg_ids for trace attribution.
+        self._trace_reviewed_msg_ids = _reviewed_msg_ids_from_bundle(judge_bundle)
+
+        apply_review_constraints(
+            judge_bundle,
+            phase=self._trace_phase or "",
+            action_verdict_policy=self.action_verdict_policy,
+        )
+        return judge_bundle
+
+    async def _commit_review(
+        self, request_path: Path, review_path: Path, emit_path: Path, env: dict[str, str]
+    ) -> dict[str, Any]:
+        """Run commit-review on the written review and return its emit."""
+        await asyncio.to_thread(
+            self._runtime_caller,
+            RuntimeCall(
+                phase="commit-review",
+                request_path=request_path,
+                review_path=review_path,
+                out_path=emit_path,
+                cwd=self.critic_agent_root,
+                env=env,
+            ),
+        )
+        try:
+            emit = json.loads(emit_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise BackendError(f"CriticAgentBackend: failed to read emit.json from {emit_path}: {exc}") from exc
+        return emit
+
+    def _log_turn(
+        self,
+        turn_idx: int,
+        judge_bundle: dict[str, Any],
+        intents: list[Intent],
+        llm_finish: str | None,
+        kb_priors_trace: dict[str, Any],
+    ) -> None:
+        """Log one Critic turn's proposals, verdicts, KB context and finish."""
+        kb_skipped = judge_bundle.get("kb_read_skipped_reason")
+        required_context = list(judge_bundle.get("required_context") or [])
+        verdicts_summary = [
+            (i.payload.get("verdict"), i.payload.get("source")) for i in intents if i.type.value == "review_verdict"
+        ]
+        log.info(
+            "critic_agent_backend turn=%d session=%s proposals=%d "
+            "verdicts=%s kb_skipped=%s required_context=%s finish=%s kb_priors=%d",
+            turn_idx,
+            self.session_dir.name,
+            len(judge_bundle.get("proposals") or []),
+            verdicts_summary,
+            kb_skipped,
+            required_context,
+            llm_finish,
+            kb_priors_trace.get("prior_count") or 0,
+        )
 
     def _write_review_request(self, request_path: Path, prompt: str) -> dict[str, Any]:
         """Write the coordinator-inbox request prepare-review reads, and return what it was given."""
@@ -757,23 +800,7 @@ class CriticAgentBackend:
     ) -> tuple[dict[str, Any], str, str | None]:
         """Drive Codex with the judge bundle and parse a review object."""
         preamble = self._load_skill_preamble()
-        bundle_view: dict[str, Any] = {
-            "session_id": judge_bundle.get("session_id"),
-            "decision_id": judge_bundle.get("decision_id"),
-            "phase": judge_bundle.get("phase"),
-            "merged_context": judge_bundle.get("merged_context"),
-            "missing_context": judge_bundle.get("missing_context"),
-            "required_context": judge_bundle.get("required_context"),
-            "proposals": judge_bundle.get("proposals"),
-            "kb_priors_by_proposal": judge_bundle.get("kb_priors_by_proposal"),
-            "kb_read_skipped_reason": judge_bundle.get("kb_read_skipped_reason"),
-            "review_constraints": judge_bundle.get("review_constraints"),
-            "notes": judge_bundle.get("notes"),
-        }
-        bundle_text = json.dumps(bundle_view, ensure_ascii=False, separators=(",", ":"))
-        review_prompt = (
-            f"==== JUDGE BUNDLE ====\n{bundle_text}\n==== END JUDGE BUNDLE ====\n\n{_REVIEW_OUTPUT_INSTRUCTIONS}"
-        )
+        review_prompt = _review_prompt(judge_bundle)
         user_prompt = f"{preamble}\n\n{review_prompt}"
         max_tokens = self._resolve_max_completion_tokens()
         # One id per review call, shared by its token row and its conversation row so the two halves pair on the call

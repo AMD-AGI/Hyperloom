@@ -61,11 +61,7 @@ the wrong baseline.
 """
 
 
-def harness_contract(harness_path: str = "", env_flags: str = "") -> str:
-    """Render the contract, naming the path and flags when the caller knows them."""
-    where = f"at EXACTLY:\n    {harness_path}" if harness_path else "at the harness path the task gives you."
-    flags = f"`{env_flags}`" if env_flags else "the fusion env flag(s)"
-    return f"""
+_HARNESS_CONTRACT_TEMPLATE = """
 ## Kernel-validation harness (MANDATORY — the loop runs THIS to score you)
 Write a self-contained Python script {where}
 The loop RUNS this script from a different directory than the one you write it
@@ -168,3 +164,16 @@ Do NOT hard-code metrics; compute them live. Parity uses an \
 SNR>={DEFAULT_SNR_THRESHOLD_DB:g} dB gate and the keep bar is \
 >={DEFAULT_TARGET_SPEEDUP:g}x.
 """
+
+
+def harness_contract(harness_path: str = "", env_flags: str = "") -> str:
+    """Render the contract, naming the path and flags when the caller knows them."""
+    where = f"at EXACTLY:\n    {harness_path}" if harness_path else "at the harness path the task gives you."
+    flags = f"`{env_flags}`" if env_flags else "the fusion env flag(s)"
+    return _HARNESS_CONTRACT_TEMPLATE.format(
+        where=where,
+        flags=flags,
+        TRACE_KERNELS_HEADING=TRACE_KERNELS_HEADING,
+        DEFAULT_SNR_THRESHOLD_DB=DEFAULT_SNR_THRESHOLD_DB,
+        DEFAULT_TARGET_SPEEDUP=DEFAULT_TARGET_SPEEDUP,
+    )

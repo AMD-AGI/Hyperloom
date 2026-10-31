@@ -325,6 +325,71 @@ def calculate_measurement_case_speedups(
     return scores
 
 
+def _case_bandwidth(full_output: str) -> dict[str, dict[str, float | int]]:
+    """The per-case bandwidth a driver printed on its ``case_bw:`` lines."""
+    # Optional per-case bandwidth, for kernels whose wall time alone cannot say what got faster.
+    case_bandwidth: dict[str, dict[str, float | int]] = {}
+    for cid, nbytes, algbw, busbw in re.findall(
+        r"case_bw:\s*(\S+)\s+bytes=(\d+)\s+algbw=([\d.eE+-]+)GB/s\s+busbw=([\d.eE+-]+)GB/s",
+        full_output,
+    ):
+        try:
+            case_bandwidth[cid] = {
+                "bytes": int(nbytes),
+                "algbw_gbs": float(algbw),
+                "busbw_gbs": float(busbw),
+            }
+        except ValueError:
+            continue
+    return case_bandwidth
+
+
+def _samples_result(
+    times: list[float],
+    case_times: dict[str, float],
+    unscored_cases: list[str],
+    case_bandwidth: dict[str, dict[str, float | int]],
+) -> dict:
+    """The benchmark result summarizing per-iteration ``wall_ms`` samples."""
+    times_sorted = sorted(times)
+    median = times_sorted[len(times_sorted) // 2]
+    return {
+        "success": True,
+        "median_ms": round(median, 4),
+        "min_ms": round(min(times), 4),
+        "max_ms": round(max(times), 4),
+        "n_samples": len(times),
+        "all_times_ms": [round(t, 4) for t in times],
+        "case_times": case_times,
+        "unscored_cases": unscored_cases,
+        "case_bandwidth": case_bandwidth,
+        "message": (f"BENCH: median={median:.4f} ms (min={min(times):.4f}, max={max(times):.4f}, n={len(times)})"),
+    }
+
+
+def _aggregate_result(
+    agg_match: re.Match[str],
+    case_times: dict[str, float],
+    unscored_cases: list[str],
+    case_bandwidth: dict[str, dict[str, float | int]],
+) -> dict:
+    """The benchmark result for a driver that printed one pre-aggregated summary line."""
+    stat_label = agg_match.group(1)  # "median_ms" or "mean_ms"
+    agg_value = float(agg_match.group(2))
+    stat_name = "mean" if stat_label == "mean_ms" else "median"
+    return {
+        # ``median_ms`` is this tool's stable representative-time field; the value is the driver's aggregate as-is
+        # (labeled honestly above).
+        "success": True,
+        "median_ms": round(agg_value, 4),
+        "stat": stat_name,
+        "case_times": case_times,
+        "unscored_cases": unscored_cases,
+        "case_bandwidth": case_bandwidth,
+        "message": f"BENCH: {stat_name}={agg_value:.4f} ms",
+    }
+
+
 async def bench_wallclock(
     run: BenchRun,
     *,
@@ -375,54 +440,15 @@ async def bench_wallclock(
             "output": full_output[-1500:],
         }
 
-    # Optional per-case bandwidth, for kernels whose wall time alone cannot say what got faster.
-    case_bandwidth: dict[str, dict[str, float | int]] = {}
-    for cid, nbytes, algbw, busbw in re.findall(
-        r"case_bw:\s*(\S+)\s+bytes=(\d+)\s+algbw=([\d.eE+-]+)GB/s\s+busbw=([\d.eE+-]+)GB/s",
-        full_output,
-    ):
-        try:
-            case_bandwidth[cid] = {
-                "bytes": int(nbytes),
-                "algbw_gbs": float(algbw),
-                "busbw_gbs": float(busbw),
-            }
-        except ValueError:
-            continue
+    case_bandwidth = _case_bandwidth(full_output)
 
     if times:
-        times_sorted = sorted(times)
-        median = times_sorted[len(times_sorted) // 2]
-        result = {
-            "success": True,
-            "median_ms": round(median, 4),
-            "min_ms": round(min(times), 4),
-            "max_ms": round(max(times), 4),
-            "n_samples": len(times),
-            "all_times_ms": [round(t, 4) for t in times],
-            "case_times": case_times,
-            "unscored_cases": unscored_cases,
-            "case_bandwidth": case_bandwidth,
-            "message": (f"BENCH: median={median:.4f} ms (min={min(times):.4f}, max={max(times):.4f}, n={len(times)})"),
-        }
+        result = _samples_result(times, case_times, unscored_cases, case_bandwidth)
         if on_result:
             on_result(result)
         return result
     if agg_match:
-        stat_label = agg_match.group(1)  # "median_ms" or "mean_ms"
-        agg_value = float(agg_match.group(2))
-        stat_name = "mean" if stat_label == "mean_ms" else "median"
-        result = {
-            # ``median_ms`` is this tool's stable representative-time field; the value is the driver's aggregate as-is
-            # (labeled honestly above).
-            "success": True,
-            "median_ms": round(agg_value, 4),
-            "stat": stat_name,
-            "case_times": case_times,
-            "unscored_cases": unscored_cases,
-            "case_bandwidth": case_bandwidth,
-            "message": f"BENCH: {stat_name}={agg_value:.4f} ms",
-        }
+        result = _aggregate_result(agg_match, case_times, unscored_cases, case_bandwidth)
         if on_result:
             on_result(result)
         return result

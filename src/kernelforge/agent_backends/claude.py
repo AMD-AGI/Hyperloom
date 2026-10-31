@@ -446,6 +446,63 @@ def _verified_file_changes(guard: WorkspaceGuard):
         raise
 
 
+def _note_session_timeout(spec: AgentRunSpec, session_id: str) -> None:
+    """Log and record a session that hit its deadline after it established ``session_id``."""
+    log.warning(
+        "Claude session %s timed out after %ss; preserving the resume handle and reaping its leftovers",
+        session_id,
+        spec.timeout_sec,
+    )
+    if spec.progress_log is not None:
+        spec.progress_log.append(f"end: timeout {spec.timeout_sec}s")
+
+
+def _note_stream_failure(spec: AgentRunSpec, session_id: str, exc: Exception) -> None:
+    """Log and record an SDK stream failure after the session established ``session_id``."""
+    if not _is_turn_cap_error(exc):
+        log.warning(
+            "Claude SDK stream failed after session %s; preserving the resume handle (%s: %s)",
+            session_id,
+            type(exc).__name__,
+            exc,
+        )
+    if spec.progress_log is not None:
+        spec.progress_log.append(f"end: sdk-error {str(exc)[:_PROGRESS_TEXT_CHARS]}")
+
+
+def _session_result(
+    transcript: _StreamTranscript,
+    guard: WorkspaceGuard,
+    *,
+    timed_out: bool,
+    stream_error: Exception | None,
+    contention: str,
+) -> AgentRunResult:
+    """The run result of a session that has stopped, with the workspace changes the guard verified."""
+    subtype, end_reason, closing_note = _session_end_reason(
+        timed_out=timed_out,
+        stream_error=stream_error,
+        subtype=transcript.subtype,
+    )
+    if closing_note:
+        transcript.text_parts.append(closing_note)
+
+    result = AgentRunResult(
+        text="\n".join(transcript.text_parts).strip(),
+        subtype=subtype,
+        num_turns=transcript.num_turns,
+        end_reason=end_reason,
+        session_id=transcript.session_id,
+        tool_calls=transcript.tool_calls,
+        stderr_tail=(str(stream_error)[:2000] if stream_error else ""),
+        workspace_contention=contention,
+    )
+    result.file_changes = _verified_file_changes(guard)
+    result.target_edit_count = guard.count_target_edits()
+    result.edit_count = result.target_edit_count
+    return result
+
+
 class ClaudeBackend:
     """Execute Forge sessions through the Claude Agent SDK."""
 
@@ -802,27 +859,13 @@ class ClaudeBackend:
                         ) from exc
                     timed_out = True
                     stream_error = TimeoutError(f"Claude session timed out after {spec.timeout_sec}s")
-                    log.warning(
-                        "Claude session %s timed out after %ss; preserving the resume handle and reaping its leftovers",
-                        transcript.session_id,
-                        spec.timeout_sec,
-                    )
-                    if spec.progress_log is not None:
-                        spec.progress_log.append(f"end: timeout {spec.timeout_sec}s")
+                    _note_session_timeout(spec, transcript.session_id)
                 else:
                     if not transcript.session_id:
                         rollback_on_exit = True
                         raise
                     stream_error = exc
-                    if not _is_turn_cap_error(exc):
-                        log.warning(
-                            "Claude SDK stream failed after session %s; preserving the resume handle (%s: %s)",
-                            transcript.session_id,
-                            type(exc).__name__,
-                            exc,
-                        )
-                    if spec.progress_log is not None:
-                        spec.progress_log.append(f"end: sdk-error {str(exc)[:_PROGRESS_TEXT_CHARS]}")
+                    _note_stream_failure(spec, transcript.session_id, exc)
         except asyncio.CancelledError:
             # The subprocess and any detached benchmark children are running regardless of whether a session id was
             # established; reap them so they do not hold the GPU past this point.
@@ -843,28 +886,7 @@ class ClaudeBackend:
             if rollback_on_exit:
                 guard.rollback()
 
-        subtype, end_reason, closing_note = _session_end_reason(
-            timed_out=timed_out,
-            stream_error=stream_error,
-            subtype=transcript.subtype,
-        )
-        if closing_note:
-            transcript.text_parts.append(closing_note)
-
-        result = AgentRunResult(
-            text="\n".join(transcript.text_parts).strip(),
-            subtype=subtype,
-            num_turns=transcript.num_turns,
-            end_reason=end_reason,
-            session_id=transcript.session_id,
-            tool_calls=transcript.tool_calls,
-            stderr_tail=(str(stream_error)[:2000] if stream_error else ""),
-            workspace_contention=contention,
-        )
-        result.file_changes = _verified_file_changes(guard)
-        result.target_edit_count = guard.count_target_edits()
-        result.edit_count = result.target_edit_count
-        return result
+        return _session_result(transcript, guard, timed_out=timed_out, stream_error=stream_error, contention=contention)
 
 
 __all__ = [

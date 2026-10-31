@@ -11,6 +11,7 @@ import re
 import shutil
 import tempfile
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,15 @@ from kernelforge.workflows.forge_loop.roles.contracts import (
     OrchestrationContext,
 )
 from kernelforge.workflows.forge_loop.roles.analysis_protection import AnalysisProtection
+from kernelforge.workflows.forge_loop.roles.analysis_prompts import (
+    ANALYSIS_SESSION_BRIEF,
+    FRAMEWORK_OWNED_FILES,
+    INCREMENTAL_REANALYSIS_PROMPT,
+    MARKDOWN_CONTRACT,
+    PROFILED_SYSTEM_PROMPT,
+    PUBLICATION_POLICY,
+    STATIC_SYSTEM_PROMPT,
+)
 from kernelforge.workflows.forge_loop.roles.analysis_session import (
     AnalysisAttemptLimitError,
     AnalysisSessionJournal,
@@ -380,6 +390,13 @@ _CASE_ARTIFACTS = {
 }
 
 
+_CATALOG_ARTIFACT = (
+    "analysis_artifact_catalog",
+    "Index of Analysis artifact paths, contents, status, and available information for downstream agents.",
+    ["artifact discovery", "partial checkpoint status", "per-file semantics"],
+)
+
+
 @dataclass(frozen=True)
 class _BundleIdentity:
     """What a bundle must answer for: the orchestration context, its cases, and the driver and source digests."""
@@ -416,6 +433,55 @@ class _AnalysisSession:
     source_files: tuple[Path, ...]
     reference_script: Path
     timeout_sec: float
+
+
+def _manifest_or_empty(work_root: Path) -> dict:
+    """The work root's manifest.json, or an empty dict when it is absent, unreadable or not an object."""
+    manifest = {}
+    manifest_path = work_root / "manifest.json"
+    if manifest_path.is_file():
+        try:
+            loaded = json.loads(manifest_path.read_text())
+            if isinstance(loaded, dict):
+                manifest = loaded
+        except (OSError, json.JSONDecodeError):
+            manifest = {}
+    return manifest
+
+
+def _case_artifact_entries(
+    work_root: Path,
+    cases: tuple[AnalysisCase, ...],
+    *,
+    output_path: Callable[[Path], str],
+    case_status: Callable[[str], str],
+) -> list[dict]:
+    """Catalog entries for every non-empty per-case artifact present under the work root."""
+    artifacts = []
+    for case in cases:
+        case_root = work_root / "cases" / case.directory
+        for name, (
+            kind,
+            description,
+            information,
+        ) in _CASE_ARTIFACTS.items():
+            path = case_root / name
+            if not path.exists():
+                continue
+            if path.is_dir() and not any(path.iterdir()):
+                continue
+            artifacts.append(
+                {
+                    "kind": kind,
+                    "scope": "case",
+                    "case_id": case.case_id,
+                    "status": case_status(case.case_id),
+                    "path": output_path(path),
+                    "description": description,
+                    "available_information": information,
+                }
+            )
+    return artifacts
 
 
 class AnalysisAgentService:
@@ -619,31 +685,7 @@ class AnalysisAgentService:
             )
 
         status = "READY" if len(completed) == len(cases) else "PARTIAL"
-        atomic_write_json(
-            work_root / "case_inventory.json",
-            {
-                "analysis_commit": context.analysis_commit,
-                "cases": case_states,
-            },
-            fmt=JsonFormat(trailing_newline=True),
-            options=DURABLE,
-        )
-        atomic_write_json(
-            work_root / "progress.json",
-            {
-                "analysis_commit": context.analysis_commit,
-                "status": status,
-                "cases": [
-                    {
-                        "case_id": case["case_id"],
-                        "status": case["status"],
-                    }
-                    for case in case_states
-                ],
-            },
-            fmt=JsonFormat(trailing_newline=True),
-            options=DURABLE,
-        )
+        cls._write_case_progress(work_root, context.analysis_commit, status, case_states)
         atomic_write_json(
             work_root / "manifest.json",
             {
@@ -656,6 +698,35 @@ class AnalysisAgentService:
                 "failed_case_ids": failed,
                 "skipped_case_ids": skipped,
                 "report": "report.md",
+            },
+            fmt=JsonFormat(trailing_newline=True),
+            options=DURABLE,
+        )
+
+    @staticmethod
+    def _write_case_progress(work_root: Path, analysis_commit: str, status: str, case_states: list[dict]) -> None:
+        """Write the case inventory and the per-case progress the session finalized."""
+        atomic_write_json(
+            work_root / "case_inventory.json",
+            {
+                "analysis_commit": analysis_commit,
+                "cases": case_states,
+            },
+            fmt=JsonFormat(trailing_newline=True),
+            options=DURABLE,
+        )
+        atomic_write_json(
+            work_root / "progress.json",
+            {
+                "analysis_commit": analysis_commit,
+                "status": status,
+                "cases": [
+                    {
+                        "case_id": case["case_id"],
+                        "status": case["status"],
+                    }
+                    for case in case_states
+                ],
             },
             fmt=JsonFormat(trailing_newline=True),
             options=DURABLE,
@@ -801,6 +872,25 @@ class AnalysisAgentService:
         )
         self._stage_request(session, identity, incremental, retry_published_bundle=retry_published_bundle)
         (work_root / "commands.jsonl").touch(exist_ok=True)
+        workflow = await self._run_protected_session(
+            session, identity, protection, usage=usage, retry_published_bundle=retry_published_bundle
+        )
+        changed = protection.restore_and_report_changes()
+        if changed:
+            raise AnalysisBundleError("Analysis Agent modified immutable inputs; restored: " + ", ".join(changed))
+        return self._publish_session_bundle(work_root, final_root, identity, workflow, incremental)
+
+    async def _run_protected_session(
+        self,
+        session: _AnalysisSession,
+        identity: _BundleIdentity,
+        protection: AnalysisProtection,
+        *,
+        usage,
+        retry_published_bundle: bool,
+    ) -> AnalysisSessionJournal:
+        """Run the journaled session, restoring the protected inputs before any failure leaves."""
+        work_root, context = session.work_root, identity.context
         try:
             workflow = AnalysisSessionJournal(
                 work_root,
@@ -822,10 +912,7 @@ class AnalysisAgentService:
                 f"Analysis workflow failed: {type(error).__name__}: {error}; "
                 f"checkpoint={work_root}; restored inputs={changed}"
             ) from error
-        changed = protection.restore_and_report_changes()
-        if changed:
-            raise AnalysisBundleError("Analysis Agent modified immutable inputs; restored: " + ", ".join(changed))
-        return self._publish_session_bundle(work_root, final_root, identity, workflow, incremental)
+        return workflow
 
     def _stage_incremental_diff(
         self, analysis_root: Path, work_root: Path, incremental: IncrementalAnalysisInput | None
@@ -964,15 +1051,7 @@ class AnalysisAgentService:
         """Publish a compact map of every currently usable Analysis artifact."""
         target_root = (artifact_root or work_root).resolve()
         session_complete = workflow.status == "COMPLETE"
-        manifest = {}
-        manifest_path = work_root / "manifest.json"
-        if manifest_path.is_file():
-            try:
-                loaded = json.loads(manifest_path.read_text())
-                if isinstance(loaded, dict):
-                    manifest = loaded
-            except (OSError, json.JSONDecodeError):
-                manifest = {}
+        manifest = _manifest_or_empty(work_root)
         completed = set(manifest.get("completed_case_ids") or [])
         failed = set(manifest.get("failed_case_ids") or [])
         skipped = set(manifest.get("skipped_case_ids") or [])
@@ -1008,46 +1087,18 @@ class AnalysisAgentService:
                     "available_information": information,
                 }
             )
-        for case in cases:
-            case_root = work_root / "cases" / case.directory
-            for name, (
-                kind,
-                description,
-                information,
-            ) in _CASE_ARTIFACTS.items():
-                path = case_root / name
-                if not path.exists():
-                    continue
-                if path.is_dir() and not any(path.iterdir()):
-                    continue
-                artifacts.append(
-                    {
-                        "kind": kind,
-                        "scope": "case",
-                        "case_id": case.case_id,
-                        "status": case_status(case.case_id),
-                        "path": output_path(path),
-                        "description": description,
-                        "available_information": information,
-                    }
-                )
+        artifacts.extend(_case_artifact_entries(work_root, cases, output_path=output_path, case_status=case_status))
         catalog_path = work_root / "artifact_catalog.json"
+        kind, description, information = _CATALOG_ARTIFACT
         artifacts.append(
             {
-                "kind": "analysis_artifact_catalog",
+                "kind": kind,
                 "scope": "global",
                 "case_id": None,
                 "status": ("COMPLETE" if session_complete else "AVAILABLE"),
                 "path": output_path(catalog_path),
-                "description": (
-                    "Index of Analysis artifact paths, contents, status, and "
-                    "available information for downstream agents."
-                ),
-                "available_information": [
-                    "artifact discovery",
-                    "partial checkpoint status",
-                    "per-file semantics",
-                ],
+                "description": description,
+                "available_information": information,
             }
         )
         atomic_write_json(
@@ -1272,130 +1323,7 @@ class AnalysisAgentService:
         methodology_candidates = tuple(profiling_root / name for name in PROFILING_METHODOLOGY_FILES)
         methodology = tuple(path.resolve() for path in methodology_candidates if path.is_file())
         missing_methodology = tuple(path.name for path in methodology_candidates if not path.is_file())
-        if self.profiling_enabled:
-            system_prompt = """\
-You are the single Analysis Agent for one immutable canonical kernel. Complete
-the entire source, case, profiling, interpretation, potential, direction, and
-summary workflow in this one session. Do not stop after planning or after one
-case.
-
-Do not optimize or edit the kernel, driver, tests, harness, or scoring inputs.
-Correctness, accuracy, benchmark, KEEP, and REVERT remain controlled by the
-outer loop. Write analysis artifacts only inside the supplied staging directory.
-You may read and execute the canonical source and driver. Any temporary adapter,
-script, cache, log, profiler output, or other generated file must live below the
-staging directory.
-
-Markdown-first output contract:
-- Write one authoritative report.md with the cross-case findings, evidence
-  interpretation, remaining headroom, and prioritized optimization directions.
-- For each requested case, write cases/<directory>/analysis.md, or failure.md
-  when the case cannot be analyzed. Preserve raw profiler output below that
-  case's profile/ directory.
-- Optional JSON or additional Markdown may be written when it improves the
-  analysis, but it is never required for publication. Do not duplicate the same
-  conclusion across several formats merely to satisfy a schema.
-- request.json, case_inventory.json, progress.json, manifest.json,
-  workflow.json, workflow_events.jsonl, and artifact_catalog.json are owned by
-  the framework. Read them as inputs but do not edit them.
-- Append profiler commands and outcomes to commands.jsonl when practical.
-- Resume useful Markdown and raw evidence already present in staging instead of
-  regenerating it.
-
-The profiling reference has already been copied into the staging tools
-directory. Inspect that exact file; do not search the filesystem for another
-copy. If it does not fit this driver, create a separate adapter in staging/tools.
-You may use other
-profilers, compiler IR, ISA, register, occupancy, cache, or roofline tools when
-useful. Preserve raw evidence and record every command in commands.jsonl.
-
-Profiler safety contract:
-- Never invoke rocprofv3 --pmc with an ad-hoc or oversized counter list.
-- Prefer the supplied absolute rocpc_profile.py reference.
-- If rocprof-compute is unavailable, its dependency preflight fails, or its
-  collection cannot isolate the target kernel, fall back to rocprofv3
-  kernel-trace plus small hardware-compatible PMC groups. Record why the
-  fallback was selected.
-- If raw PMC is necessary, run one hardware-compatible counter group per
-  rocprofv3 process and use a separate output directory for every pass.
-- Every profiler command must have a finite timeout.
-- On error 38, SIGABRT, timeout, non-zero exit, or missing output, stop that
-  counter group immediately and never retry the same group.
-- Write failure.md for the affected case and continue with other cases.
-- Record one JSON row per profiler command in commands.jsonl with the exact
-  case_id, command, timeout, exit_code or returncode, success, output directory,
-  signal, and failure reason. A case is considered profiled only when it also
-  has non-empty normalized_metrics.json and successful command provenance.
-
-Case grouping contract:
-- You are NOT required to profile every test shape independently.
-- You own the semantic grouping decision. Use source structure, dispatch
-  behavior, shapes, measurements, and domain judgment to decide whether one
-  representative profile can support the same bottleneck and optimization
-  conclusion for multiple cases. The outer code does not hard-code grouping
-  categories.
-- Signals such as dispatch path, dtype/layout, algorithmic regime, size regime,
-  and expected bottleneck are advisory evidence, not mandatory equality rules.
-- Choose the case that is most representative and information-rich. It may
-  appear anywhere in request order. Profile it before drawing conclusions for
-  member cases.
-- Reuse only conclusions that you believe transfer. Every member still needs its
-  own case artifacts that identify the representative and reuse rationale.
-- report.md must explain the grouping decision, representative cases,
-  transferable evidence, and concrete rationale.
-
-Finish the useful analysis in this session. Prefer a complete report, but return
-PARTIAL evidence rather than spending turns repairing optional output formats.
-"""
-        else:
-            system_prompt = """\
-You are the single Analysis Agent for one immutable canonical kernel. Complete
-the entire static source, case, potential, direction, and summary workflow in
-this one session.
-
-Do not optimize or edit the kernel, driver, tests, harness, or scoring inputs.
-Correctness, accuracy, benchmark, KEEP, and REVERT remain controlled by the
-outer loop. Write analysis artifacts only inside the supplied staging directory.
-You may read and execute canonical files but may not modify them. Any generated
-file must live below the staging directory.
-
-Analysis profiling is disabled by campaign budget policy. Do not invoke a
-profiler, collect hardware counters, adapt the driver, or present inferred
-behavior as measured evidence. Use source, driver, case definitions, historical
-canonical evidence, and domain reasoning only. Clearly label static inference.
-
-Inspect existing artifacts first. Write report.md plus one analysis.md or
-failure.md per case. Profiling is disabled, so clearly label every conclusion as
-static inference. The framework owns control JSON and will publish the result as
-PARTIAL without requiring you to repair optional formats.
-"""
-        if request["analysis_trigger"] == "post_keep_incremental":
-            system_prompt += f"""
-
-This is a cumulative re-analysis after one or more solutions were validated and
-KEPT since the last Analysis refresh.
-The previous analyzed commit is {request["previous_analysis_commit"]}.
-Read the cumulative canonical diff at {request["incremental_diff_path"]} and the
-previous published bundle at {request["previous_analysis_bundle"]} before doing
-work. The diff may span multiple accepted KEEP commits.
-
-Update analysis incrementally:
-- Identify which source regions, dispatch paths, and cases changed across the
-  accepted KEEP sequence.
-- Re-profile only when the change invalidates previous measurements or when new
-  evidence is necessary to assess the changed mechanism.
-- Reuse unaffected parent analysis or profile artifacts by copying only the
-  needed files into this staging directory. Clearly label reused measurements
-  with their parent commit; never present inherited evidence as newly measured.
-- Refresh report.md, source_map.md, and affected case analysis files so they
-  describe the new canonical solution. A complete re-profile is not required.
-"""
-        system_prompt += (
-            "\nThe exact profiling reference for this session is:\n"
-            f"    {reference_script}\n"
-            "It already exists inside staging. Use it directly and never search "
-            "the root filesystem for another copy.\n"
-        )
+        system_prompt = self._system_prompt(request, reference_script)
         user_payload = {
             "analysis_commit": context.analysis_commit,
             "analysis_mode": ("PROFILED" if self.profiling_enabled else "STATIC_ONLY"),
@@ -1408,22 +1336,7 @@ Update analysis incrementally:
             "workflow_file": str(staging_root / "workflow.json"),
             "workflow_events": str(staging_root / "workflow_events.jsonl"),
             "artifact_catalog": str(staging_root / "artifact_catalog.json"),
-            "analysis_session": {
-                "session_id": ANALYSIS_SESSION_STEP_ID,
-                "agent_outputs": [
-                    "report.md",
-                    "source_map.md",
-                    "cases/<directory>/analysis.md or failure.md",
-                    "cases/<directory>/profile/ when profiling succeeds",
-                    "optional Markdown or JSON supporting evidence",
-                ],
-                "instructions": (
-                    "Produce useful Markdown analysis and raw evidence in this "
-                    "single session. The framework generates and validates the "
-                    "control manifest; do not spend turns repairing optional "
-                    "serialization formats."
-                ),
-            },
+            "analysis_session": {"session_id": ANALYSIS_SESSION_STEP_ID, **ANALYSIS_SESSION_BRIEF},
             "analysis_trigger": request["analysis_trigger"],
             "analysis_session_timeout_sec": session.timeout_sec,
             "previous_analysis_commit": request["previous_analysis_commit"],
@@ -1442,53 +1355,57 @@ Update analysis incrementally:
                 }
                 for evidence, case in zip(context.cases, cases)
             ],
-            "step_rules": [
-                "Complete the full analysis_session in this single Agent run.",
-                "Read existing durable outputs instead of regenerating completed work.",
-                "Write each case's analysis.md immediately after its evidence is ready.",
-                "Use the exact reference_profiling_script path; do not search for it.",
-                (
-                    "Begin every Bash command with `timeout --signal=TERM "
-                    "--kill-after=5s <duration>` and keep duration within the "
-                    "analysis_session_timeout_sec remaining budget."
-                ),
-                (
-                    "Never treat pooled multi-case counters as a valid per-case profile."
-                    if self.profiling_enabled
-                    else "Do not run profiling or claim static inference as measured evidence."
-                ),
-                (
-                    "Preserve raw profiler artifacts and separate measured facts from interpretation."
-                    if self.profiling_enabled
-                    else "Separate source facts, historical evidence, and static inference."
-                ),
-                "If a case cannot complete, write failure.md with a concrete reason.",
-            ],
-            "markdown_contract": {
-                "global_report": "report.md",
-                "source_map": "source_map.md",
-                "per_case": "cases/<directory>/analysis.md or failure.md",
-                "raw_profile": "cases/<directory>/profile/",
-                "optional_directions": "cases/<directory>/directions.md",
-            },
-            "framework_owned_files": [
-                "request.json",
-                "case_inventory.json",
-                "progress.json",
-                "manifest.json",
-                "workflow.json",
-                "workflow_events.jsonl",
-                "artifact_catalog.json",
-                "framework_commands.jsonl",
-                "published.json",
-            ],
-            "publication_policy": {
-                "format_errors_block_publication": False,
-                "missing_case_reports_publish_as": "PARTIAL",
-                "optional_json": "catalogued when present, never required",
-            },
+            "step_rules": self._step_rules(),
+            "markdown_contract": MARKDOWN_CONTRACT,
+            "framework_owned_files": FRAMEWORK_OWNED_FILES,
+            "publication_policy": PUBLICATION_POLICY,
         }
         return system_prompt, json.dumps(user_payload, indent=2, sort_keys=True)
+
+    def _system_prompt(self, request: dict, reference_script: Path) -> str:
+        """The Analysis Agent's instructions for this tier, trigger and profiling reference."""
+        if self.profiling_enabled:
+            system_prompt = PROFILED_SYSTEM_PROMPT
+        else:
+            system_prompt = STATIC_SYSTEM_PROMPT
+        if request["analysis_trigger"] == "post_keep_incremental":
+            system_prompt += INCREMENTAL_REANALYSIS_PROMPT.format(
+                previous_analysis_commit=request["previous_analysis_commit"],
+                incremental_diff_path=request["incremental_diff_path"],
+                previous_analysis_bundle=request["previous_analysis_bundle"],
+            )
+        system_prompt += (
+            "\nThe exact profiling reference for this session is:\n"
+            f"    {reference_script}\n"
+            "It already exists inside staging. Use it directly and never search "
+            "the root filesystem for another copy.\n"
+        )
+        return system_prompt
+
+    def _step_rules(self) -> list:
+        """The rules every step of the session follows, for this profiling tier."""
+        return [
+            "Complete the full analysis_session in this single Agent run.",
+            "Read existing durable outputs instead of regenerating completed work.",
+            "Write each case's analysis.md immediately after its evidence is ready.",
+            "Use the exact reference_profiling_script path; do not search for it.",
+            (
+                "Begin every Bash command with `timeout --signal=TERM "
+                "--kill-after=5s <duration>` and keep duration within the "
+                "analysis_session_timeout_sec remaining budget."
+            ),
+            (
+                "Never treat pooled multi-case counters as a valid per-case profile."
+                if self.profiling_enabled
+                else "Do not run profiling or claim static inference as measured evidence."
+            ),
+            (
+                "Preserve raw profiler artifacts and separate measured facts from interpretation."
+                if self.profiling_enabled
+                else "Separate source facts, historical evidence, and static inference."
+            ),
+            "If a case cannot complete, write failure.md with a concrete reason.",
+        ]
 
     @staticmethod
     def _protected_paths(workspace: Path, sources: AnalysisSources) -> tuple[Path, ...]:

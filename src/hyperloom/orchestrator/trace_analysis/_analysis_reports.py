@@ -147,6 +147,82 @@ class OrchestratorOutcome:
     health_warnings: list[dict[str, Any]] | None = None
 
 
+def _tracelens_report(
+    args: argparse.Namespace,
+    trace_inputs: TraceInputs,
+    candidates: list[dict[str, Any]],
+    task_groups: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """The ``tracelens_report.json`` document of one run."""
+    return {
+        "model_name": args.model_name,
+        "framework": args.framework,
+        "target_platform": args.target_platform,
+        "analysis_mode": tracelens_analysis_mode(args.framework),
+        "trace_input_type": trace_inputs.input_type,
+        "hot_kernels": candidates,
+        "task_groups": task_groups,
+        "source": "tracelens_analysis",
+        "dry_run": args.dry_run,
+    }
+
+
+def _write_audit_summary(
+    tracelens_dir: Path,
+    candidates: list[dict[str, Any]],
+    args: argparse.Namespace,
+    task_groups: list[dict[str, Any]],
+    health_warnings: list[dict[str, Any]] | None,
+) -> Path:
+    """Write the per-run audit sidecar and return its path."""
+    # Per-run audit sidecar (tasks routed vs skipped w/ reason).
+    summary = build_audit_summary(
+        candidates,
+        AuditSubject(
+            trace_input=str(Path(args.trace_input).resolve()),
+            framework=args.framework,
+            target_platform=args.target_platform,
+        ),
+        task_groups=task_groups,
+        trace_health_warnings=health_warnings,
+    )
+    summary_path = tracelens_dir / "summary.json"
+    atomic_write_json(summary_path, summary, fmt=JsonFormat(trailing_newline=True))
+    return summary_path
+
+
+def _settled_report_path(
+    existing_report_path: Path | None,
+    tracelens_dir: Path,
+    args: argparse.Namespace,
+    health_warnings: list[dict[str, Any]] | None,
+) -> Path | None:
+    """The report to surface: the route's, a dry-run stub, or none for a refused trace; raises when it is missing."""
+    missing_trace_report = existing_report_path is None or not existing_report_path.exists()
+    trace_quality_blocked = any(w.get("code") == "trace_split_no_steady_state" for w in (health_warnings or []))
+    if missing_trace_report:
+        if not getattr(args, "dry_run", False):
+            if trace_quality_blocked:
+                # Refused to run on a raw/non-steady trace; leave trace_report_path empty.
+                existing_report_path = None
+            else:
+                raise RuntimeError(
+                    "TraceLens SDK orchestrator did not produce analysis.md "
+                    f"(expected at {existing_report_path}); refusing to "
+                    "fabricate a Markdown report. Inspect the TraceLens skill "
+                    "log and report upstream if this is reproducible."
+                )
+        else:
+            # ``--dry-run``: synthesize a tiny stub so existence checks pass.
+            stub_md = tracelens_dir / "analysis.md"
+            stub_md.write_text(
+                "# TraceLens dry-run stub (no SDK orchestrator output)\n",
+                encoding="utf-8",
+            )
+            existing_report_path = stub_md
+    return existing_report_path
+
+
 def write_reports(
     run_dir: Path,
     trace_inputs: TraceInputs,
@@ -188,17 +264,7 @@ def write_reports(
     }
     # Aggregate reusable candidates into source-function task groups.
     task_groups = build_task_groups(candidates)
-    report = {
-        "model_name": args.model_name,
-        "framework": args.framework,
-        "target_platform": args.target_platform,
-        "analysis_mode": tracelens_analysis_mode(args.framework),
-        "trace_input_type": trace_inputs.input_type,
-        "hot_kernels": candidates,
-        "task_groups": task_groups,
-        "source": "tracelens_analysis",
-        "dry_run": args.dry_run,
-    }
+    report = _tracelens_report(args, trace_inputs, candidates, task_groups)
     atomic_write_json(run_dir / "trace_input_manifest.json", manifest, fmt=JsonFormat(trailing_newline=True))
     atomic_write_json(tracelens_dir / "tracelens_report.json", report, fmt=JsonFormat(trailing_newline=True))
     kernel_candidates_path = run_dir / "kernel_candidates.json"
@@ -217,42 +283,8 @@ def write_reports(
         fmt=JsonFormat(trailing_newline=True),
     )
 
-    # Per-run audit sidecar (tasks routed vs skipped w/ reason).
-    summary = build_audit_summary(
-        candidates,
-        AuditSubject(
-            trace_input=str(Path(args.trace_input).resolve()),
-            framework=args.framework,
-            target_platform=args.target_platform,
-        ),
-        task_groups=task_groups,
-        trace_health_warnings=outcome.health_warnings,
-    )
-    summary_path = tracelens_dir / "summary.json"
-    atomic_write_json(summary_path, summary, fmt=JsonFormat(trailing_newline=True))
-
-    missing_trace_report = existing_report_path is None or not existing_report_path.exists()
-    trace_quality_blocked = any(w.get("code") == "trace_split_no_steady_state" for w in (outcome.health_warnings or []))
-    if missing_trace_report:
-        if not getattr(args, "dry_run", False):
-            if trace_quality_blocked:
-                # Refused to run on a raw/non-steady trace; leave trace_report_path empty.
-                existing_report_path = None
-            else:
-                raise RuntimeError(
-                    "TraceLens SDK orchestrator did not produce analysis.md "
-                    f"(expected at {existing_report_path}); refusing to "
-                    "fabricate a Markdown report. Inspect the TraceLens skill "
-                    "log and report upstream if this is reproducible."
-                )
-        else:
-            # ``--dry-run``: synthesize a tiny stub so existence checks pass.
-            stub_md = tracelens_dir / "analysis.md"
-            stub_md.write_text(
-                "# TraceLens dry-run stub (no SDK orchestrator output)\n",
-                encoding="utf-8",
-            )
-            existing_report_path = stub_md
+    summary_path = _write_audit_summary(tracelens_dir, candidates, args, task_groups, outcome.health_warnings)
+    existing_report_path = _settled_report_path(existing_report_path, tracelens_dir, args, outcome.health_warnings)
 
     kernel_roofline_path = kernel_roofline_path_for_run(
         run_dir,

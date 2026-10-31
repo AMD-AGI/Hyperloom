@@ -20,10 +20,7 @@ from typing import Any
 from hyperloom_common.llm import llm_config
 from hyperloom_common.env import EnvValueError, env_bool
 from hyperloom.common.gpu_partition import PartitionModel
-from .executors import (
-    _build_specialist_executor,
-    _register_executors,
-)
+from .lineup_banners import print_lineup_banners
 from .kb import (
     _bootstrap_recipe_kb,
     _bootstrap_knowledge_plane,
@@ -59,7 +56,7 @@ from .bootstrap import (
     constraint_budget_resume_conflict,
     resolve_launch_gpu_power,
     _begin_resume_leg,
-    resolve_research_lane_capacity,
+    _install_executors,
     _resume_budget_lines,
     _print_final_summary,
     _print_session_skeleton,
@@ -93,6 +90,7 @@ from .model_catalog import (
     _resolve_models_for_run,
 )
 from .launch_shape import (
+    _refuse_multinode_partition_shape,
     _export_operator_launch_shape,
     _positive_env_int,
     _resolve_precision,
@@ -637,22 +635,7 @@ def _export_partition_shape(
         sys.exit(2)
 
     if nodes >= 2:
-        # Unconditional: the misleading record is produced by observing at all, not by asking for a mode.
-        print(
-            f"WARN: this session has --nodes {nodes}, and a compute-partition shape "
-            f"describes one card. The benchmark node's topology cannot be read from here, "
-            f"so no shape is recorded for this session.",
-            file=sys.stderr,
-        )
-        if mode:
-            print(
-                f"ERROR: --compute-partition-mode {mode} cannot be checked on a "
-                f"--nodes {nodes} session: the assertion is about the benchmark node's "
-                f"card, which this process cannot read. An unverifiable assertion is not "
-                f"a satisfied one. Drop the flag to run multi-node.",
-                file=sys.stderr,
-            )
-            sys.exit(2)
+        _refuse_multinode_partition_shape(nodes, mode)
         return {}
 
     fanout, fanout_detail = _partition_fanout_supported(framework)
@@ -1012,22 +995,8 @@ class _OperatorLaunchShape:
     extra_env: dict
 
 
-def _reexport_session_environment(
-    args: argparse.Namespace,
-    state,
-    *,
-    session_dir: Path,
-    session_id: str,
-    launch_shape: _OperatorLaunchShape,
-) -> None:
-    """Put the session's recorded environment back, so a fresh shell resumes what was measured.
-
-    Without this a resume falls back to the YAML defaults for anything the
-    original run pinned. Every knob resumes on the same ladder: an explicit
-    flag on this resume wins, otherwise the archived value is re-exported, so a
-    re-passed pin can still change it.
-    """
-    # Re-export session-level env from persisted state so a fresh-shell resume doesn't fall back to YAML defaults.
+def _reexport_session_identity(args: argparse.Namespace, state, session_dir: Path) -> None:
+    """Re-export the resumed session's model path, framework and GPU type."""
     if state.model_path:
         resume_model_path = str(state.model_path)
         os.environ["MODEL_PATH"] = resume_model_path
@@ -1055,6 +1024,25 @@ def _reexport_session_environment(
         print(f"  re-exported GPU_TYPE  : {state.gpu_type}")
         if runner_gpu_type != state.gpu_type:
             print(f"  Magpie runner GPU_TYPE: {runner_gpu_type}")
+
+
+def _reexport_session_environment(
+    args: argparse.Namespace,
+    state,
+    *,
+    session_dir: Path,
+    session_id: str,
+    launch_shape: _OperatorLaunchShape,
+) -> None:
+    """Put the session's recorded environment back, so a fresh shell resumes what was measured.
+
+    Without this a resume falls back to the YAML defaults for anything the
+    original run pinned. Every knob resumes on the same ladder: an explicit
+    flag on this resume wins, otherwise the archived value is re-exported, so a
+    re-passed pin can still change it.
+    """
+    # Re-export session-level env from persisted state so a fresh-shell resume doesn't fall back to YAML defaults.
+    _reexport_session_identity(args, state, session_dir)
     info = LaunchInfo(
         pid=os.getpid(),
         session_dir=session_dir,
@@ -1451,39 +1439,7 @@ def _resolve_agent_lineup(args: argparse.Namespace) -> _AgentLineup:
     """
     no_kernel = getattr(args, "no_kernel", False)
     no_framework_agent = bool(getattr(args, "no_framework_agent", False))
-    # Mirror the kernel banner so both phase toggles surface their state.
-    if no_framework_agent:
-        print(
-            "Optimize phase  : DISABLED (--no-framework-agent); "
-            f"{'baseline -> SWEEP' if no_kernel else 'baseline -> KERNEL -> SWEEP'}"
-        )
-    else:
-        print("Optimize phase  : ENABLED")
-    if no_framework_agent and no_kernel:
-        print(
-            "WARNING: --no-framework-agent and --no-kernel are both set; the "
-            "run collapses to baseline -> SWEEP over an empty "
-            "optimization_stack (no config or source search, no KERNEL "
-            "rewrites). SWEEP only re-validates the baseline recipe. "
-            "Continuing as requested.",
-            file=sys.stderr,
-        )
-    if bool(getattr(args, "research_scout", True)):
-        print(
-            "Research scout  : ENABLED at PRELUDE (re-dispatch every "
-            f"{max(1, int(getattr(args, 'research_scout_interval', 3) or 3))} "
-            "explore rounds)"
-        )
-    else:
-        print("Research scout  : DISABLED (--no-research-scout)")
-    if bool(getattr(args, "target_advisory", True)):
-        print("Target advisory : ENABLED (External target gap injected into prompts; advisory-only)")
-    else:
-        print("Target advisory : DISABLED (--no-target-advisory)")
-    if bool(getattr(args, "recipe_sediment", True)):
-        print("Recipe sediment : ENABLED (KEEP/REVERT provenance written to persistent recipe)")
-    else:
-        print("Recipe sediment : DISABLED (--no-recipe-sediment)")
+    print_lineup_banners(args, no_kernel=no_kernel, no_framework_agent=no_framework_agent)
     # Resolve critic backend + runtime root before _build_backends; abort rc=2 if --critic-agent runtime unreachable.
     critic_choice = _resolve_critic_choice(args)
     if critic_choice == "mock" and args.critic_protocol != "auto":
@@ -1620,12 +1576,16 @@ def _settle_custom_specialist_only(args: argparse.Namespace) -> None:
         raise SystemExit(2)
 
 
-async def _run_optimize(args: argparse.Namespace) -> int:
-    """Run the ``optimize`` subcommand end to end."""
-    plug_manifest = resolve_plug_manifest(args)  # first: a refused flag must leave any session as it was
-    nodes_resolved = _resolve_run_topology(args)
-    _settle_custom_specialist_only(args)
+@dataclass(frozen=True)
+class _ProviderIntent:
+    """Which provider side follows the other, as configured before preflight fills missing endpoints."""
 
+    claude_follows_codex: bool
+    codex_follows_claude: bool
+
+
+async def _prepare_run(args: argparse.Namespace) -> _ProviderIntent:
+    """Clear stale locks, run preflight, resolve the models and settle the pre-session workload checks."""
     # Stale aiter JIT lock sweep: killed runs leave locks that block subsequent starts (locks <5min preserved).
     aiter_sweep = clean_stale_aiter_locks()
     if aiter_sweep["dir"] and aiter_sweep["deleted"]:
@@ -1673,6 +1633,109 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     from hyperloom.orchestrator.actions.executors._subprocess_kill import resolve_benchmark_timeouts
 
     resolve_benchmark_timeouts()
+    return _ProviderIntent(claude_follows_codex=claude_follows_codex, codex_follows_claude=codex_follows_claude)
+
+
+async def _open_knowledge_plane(
+    args: argparse.Namespace, recipe_kb_client: Any, *, session_dir: Path, nodes_resolved: int
+) -> Any:
+    """Open the KnowledgePlane over the Recipe KB and bind the multi-node state to the session."""
+    # KnowledgePlane owns Recipe KB even when PR Monitor is degraded.
+    knowledge_plane = _bootstrap_knowledge_plane(args, recipe_kb_client=recipe_kb_client)
+
+    from ..multi_node.state_paths import bind_state_file_to_session
+
+    bind_state_file_to_session(session_dir)
+    if nodes_resolved >= 2:
+        await asyncio.to_thread(_prepare_multi_node_state, args)
+    return knowledge_plane
+
+
+def _build_run_objective(args: argparse.Namespace) -> Objective:
+    """Build the run's objective from the budget and stop-target flags."""
+    objective_env = {"MAX_HOURS": str(args.max_hours)}
+    for env_name, target in (
+        ("TARGET_GAIN_PCT", args.target_gain),
+        ("TARGET_TPUT_PER_GPU", args.target_tput),
+        ("TARGET_DIR", args.target_baseline_dir),
+        ("TARGET_WITHIN_ROOFLINE_PCT", args.target_roofline),
+    ):
+        objective_env[env_name] = str(target) if target else ""
+    objective = build_objective(objective_env)
+    print(f"Objective       : kind={objective.kind()} {objective.describe()}")
+    return objective
+
+
+def _build_run_backends(
+    args: argparse.Namespace, intent: _ProviderIntent, lineup: _AgentLineup, session_dir: Path
+) -> dict[str, Any]:
+    """Build the LLM backends for the run's model routing and critic."""
+    return _build_backends(
+        ModelRouting(
+            claude_model=args.claude_model,
+            codex_model=args.codex_model,
+            codex_follows_claude=intent.codex_follows_claude,
+            claude_follows_codex=intent.claude_follows_codex,
+            deepseek_model=llm_config.resolve_forge_llm_model(llm_config.AGENT_BACKEND_DEEPSEEK),
+        ),
+        CriticSetup(
+            choice=lineup.critic_choice,
+            agent_root=lineup.critic_agent_root,
+            protocol=args.critic_protocol,
+        ),
+        session_dir=session_dir,
+    )
+
+
+def _build_coordinator(
+    args: argparse.Namespace,
+    state: SharedState,
+    backends: dict[str, Any],
+    *,
+    session_dir: Path,
+    knowledge_plane: Any,
+) -> Coordinator:
+    """Pin the session dir, apply ``--reset-state`` and construct the Coordinator."""
+    # Expose active session_dir to in-process executors via the canonical pin env var; reinforced here for resume
+    # paths.
+    os.environ["INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR"] = str(session_dir)
+    # --reset-state backs up state.json and starts blank, before Coordinator is constructed.
+    if getattr(args, "reset_state", False):
+        _reset_state_file(session_dir, framework=state.framework)
+
+    return Coordinator(
+        session_dir,
+        backends=backends,
+        settings=CoordinatorSettings(
+            model_class=getattr(args, "model_class", None) or os.environ.get("MODEL_CLASS", ""),
+            phase_budget_pct=_build_phase_budget_pct(args),
+        ),
+        advisory=AdvisoryServices(
+            # KnowledgePlane facade (None when --degraded-pr).
+            knowledge_plane=knowledge_plane,
+            # Advisory multi-model specialist-proposal scorer, disabled by default (enable via --proposal-scoring).
+            proposal_scorer=_build_proposal_scorer(args, session_dir),
+        ),
+    )
+
+
+def _run_options(args: argparse.Namespace) -> RunOptions:
+    """Build the Coordinator run options from the budget and tick flags."""
+    return RunOptions(
+        max_minutes=args.max_hours * 60.0,
+        tick_interval_sec=args.tick_interval_sec,
+        max_ticks=args.max_ticks,
+        install_signal_handlers=True,
+        closing_grace_sec=args.closing_grace_sec,
+    )
+
+
+async def _run_optimize(args: argparse.Namespace) -> int:
+    """Run the ``optimize`` subcommand end to end."""
+    plug_manifest = resolve_plug_manifest(args)  # first: a refused flag must leave any session as it was
+    nodes_resolved = _resolve_run_topology(args)
+    _settle_custom_specialist_only(args)
+    intent = await _prepare_run(args)
     # A fresh launch has nothing to restore, so settle the budget before the
     # manifest and the workload env read it. A resume keeps ``None`` until
     # ``_restore_budget_and_objective`` has had its chance at the session's own.
@@ -1694,82 +1757,21 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         manifest=manifest,
         resume=bool(args.resume_from),
     )
-    # KnowledgePlane owns Recipe KB even when PR Monitor is degraded.
-    knowledge_plane = _bootstrap_knowledge_plane(args, recipe_kb_client=recipe_kb_client)
+    knowledge_plane = await _open_knowledge_plane(
+        args, recipe_kb_client, session_dir=session_dir, nodes_resolved=nodes_resolved
+    )
 
-    from ..multi_node.state_paths import bind_state_file_to_session
-
-    bind_state_file_to_session(session_dir)
-    if nodes_resolved >= 2:
-        await asyncio.to_thread(_prepare_multi_node_state, args)
-
-    objective_env = {"MAX_HOURS": str(args.max_hours)}
-    for env_name, target in (
-        ("TARGET_GAIN_PCT", args.target_gain),
-        ("TARGET_TPUT_PER_GPU", args.target_tput),
-        ("TARGET_DIR", args.target_baseline_dir),
-        ("TARGET_WITHIN_ROOFLINE_PCT", args.target_roofline),
-    ):
-        objective_env[env_name] = str(target) if target else ""
-    objective = build_objective(objective_env)
-    print(f"Objective       : kind={objective.kind()} {objective.describe()}")
+    objective = _build_run_objective(args)
     lineup = _resolve_agent_lineup(args)
 
     # T0 may have persisted warm-start state; preserve it before constructing the Coordinator.
     state = SharedState.load_or_init(session_dir)
 
-    backends = _build_backends(
-        ModelRouting(
-            claude_model=args.claude_model,
-            codex_model=args.codex_model,
-            codex_follows_claude=codex_follows_claude,
-            claude_follows_codex=claude_follows_codex,
-            deepseek_model=llm_config.resolve_forge_llm_model(llm_config.AGENT_BACKEND_DEEPSEEK),
-        ),
-        CriticSetup(
-            choice=lineup.critic_choice,
-            agent_root=lineup.critic_agent_root,
-            protocol=args.critic_protocol,
-        ),
-        session_dir=session_dir,
-    )
-    # Expose active session_dir to in-process executors via the canonical pin env var; reinforced here for resume
-    # paths.
-    os.environ["INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR"] = str(session_dir)
-    # --reset-state backs up state.json and starts blank, before Coordinator is constructed.
-    if getattr(args, "reset_state", False):
-        _reset_state_file(session_dir, framework=state.framework)
-
-    coordinator = Coordinator(
-        session_dir,
-        backends=backends,
-        settings=CoordinatorSettings(
-            model_class=getattr(args, "model_class", None) or os.environ.get("MODEL_CLASS", ""),
-            phase_budget_pct=_build_phase_budget_pct(args),
-        ),
-        advisory=AdvisoryServices(
-            # KnowledgePlane facade (None when --degraded-pr).
-            knowledge_plane=knowledge_plane,
-            # Advisory multi-model specialist-proposal scorer, disabled by default (enable via --proposal-scoring).
-            proposal_scorer=_build_proposal_scorer(args, session_dir),
-        ),
-    )
+    backends = _build_run_backends(args, intent, lineup, session_dir)
+    coordinator = _build_coordinator(args, state, backends, session_dir=session_dir, knowledge_plane=knowledge_plane)
     _initial_macro_cycle = int(getattr(coordinator.shared_state, "macro_cycle", 0) or 0)
     prompts = _install_system_prompts(coordinator, args, objective, lineup, macro_cycle=_initial_macro_cycle)
-    # Build specialist executor only when research_lane capacity > 0 (0 degrades to LLM-direct grid).
-    specialist_executor: "Any" = None
-    if resolve_research_lane_capacity(args) > 0:
-        specialist_executor = _build_specialist_executor(
-            args,
-            session_dir=session_dir,
-            knowledge_plane=knowledge_plane,
-        )
-    _register_executors(
-        coordinator,
-        compare_against_gpu=getattr(args, "compare_against_gpu", None),
-        session_dir=session_dir,
-        specialist_executor=specialist_executor,
-    )
+    _install_executors(coordinator, args, session_dir=session_dir, knowledge_plane=knowledge_plane)
     # Persist effective system prompts for resume / drift inspection.
     _snapshot_system_prompts(
         session_dir,
@@ -1786,13 +1788,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         with running_plug_host(plug_host):
             stop_reason = await coordinator.run(
                 objective=objective,
-                options=RunOptions(
-                    max_minutes=args.max_hours * 60.0,
-                    tick_interval_sec=args.tick_interval_sec,
-                    max_ticks=args.max_ticks,
-                    install_signal_handlers=True,
-                    closing_grace_sec=args.closing_grace_sec,
-                ),
+                options=_run_options(args),
             )
     finally:
         state = coordinator.shared_state

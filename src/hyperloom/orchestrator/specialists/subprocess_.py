@@ -29,7 +29,6 @@ import logging
 import os
 import subprocess
 import time
-import uuid
 from concurrent.futures import CancelledError
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -43,7 +42,6 @@ from hyperloom.common.codex_session import (
     resolve_codex_sandbox_mode,
 )
 from hyperloom.common.deadline import Deadline
-from hyperloom_common.llm.llm_attribution import inject_env as inject_attribution_env
 from hyperloom_common.llm.llm_config import (
     AGENT_BACKEND_CLAUDE,
     AGENT_BACKEND_CODEX,
@@ -65,12 +63,18 @@ from hyperloom.common.proctree import REAP_MARK_ENV, collect_tree, kill_tree, ma
 
 from .agent_cli_config import (
     SpecialistAgentUnavailableError,
-    _build_specialist_env,
     _codex_mcp_config,
     _codex_provider_resolver_overlay,
     _write_private_codex_config,
 )
-from .launch_env import apply_gpu_env, prepare_demote, resolve_launch_user, stage_mcp_config
+from .launch_env import (
+    SpecialistLaunch,
+    apply_gpu_env,
+    compose_launch_env,
+    prepare_demote,
+    resolve_launch_user,
+    stage_mcp_config,
+)
 from .dsh_launch import DshLaunchRequest, build_dsh_launch, remove_dsh_profiles, resolve_dsh_executable
 from .reap_watch import PROCESS_LOG_NAME, ReapWatch, newest_activity, specialist_activity_paths, tool_in_flight
 from .trace_harvest import harvest_agent_trace
@@ -433,6 +437,17 @@ class SpecialistSpawn:
     progress_cb: Any = None
 
 
+def _launch_failure(process_log: Path, error: str) -> SpecialistSubprocessResult:
+    """Result of a task whose agent CLI never ran."""
+    return SpecialistSubprocessResult(
+        done_payload=None,
+        exit_code=None,
+        elapsed_seconds=0.0,
+        process_log_path=str(process_log),
+        error=error,
+    )
+
+
 # Dispatcher
 class SpecialistSubprocessDispatcher:
     """Spawn + reap one agent-CLI subprocess for a specialist task.
@@ -484,30 +499,9 @@ class SpecialistSubprocessDispatcher:
         try:
             run_as = resolve_launch_user(request.gpu_lease)
         except RunAsError as exc:
-            return SpecialistSubprocessResult(
-                done_payload=None,
-                exit_code=None,
-                elapsed_seconds=0.0,
-                process_log_path=str(process_log),
-                error=f"specialist user refused: {exc}",
-            )
+            return _launch_failure(process_log, f"specialist user refused: {exc}")
 
-        # Compose a minimal env. Provider credentials are inherited by default
-        # for compatibility with deployments that authenticate the agent CLI
-        # via env; set HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=0 to disable.
-        env = _build_specialist_env()
-        # Keep the spawned CLI off its non-essential traffic and auto-updater.
-        from hyperloom_common.llm.llm_stability_env import apply_llm_stability_env
-
-        apply_llm_stability_env(env)
-        # Unique to this launch, so every process the CLI starts can be found after it detaches.
-        reap_mark = uuid.uuid4().hex
-        env[REAP_MARK_ENV] = reap_mark
-        # The child spends against the gateway, so tag it or its spend lands
-        # under no component at all. The task tag is what attributes the
-        # requests of a child that dies before its result row -- the only
-        # place such a child's token usage survives is the gateway's log.
-        inject_attribution_env(env, component="specialist", operation="run_agent", task=request.task_id)
+        env, reap_mark = compose_launch_env(request.task_id)
 
         backend = ""
         try:
@@ -517,15 +511,14 @@ class SpecialistSubprocessDispatcher:
         except SpecialistAgentUnavailableError as exc:
             # No runtime for this deployment's credential shape. Report it as the
             # task's failure rather than degrading to a CLI that cannot auth.
-            return SpecialistSubprocessResult(
-                done_payload=None,
-                exit_code=None,
-                elapsed_seconds=0.0,
-                process_log_path=str(process_log),
-                error=f"specialist agent runtime unavailable (backend={backend or 'unresolved'}): {exc}",
+            return _launch_failure(
+                process_log, f"specialist agent runtime unavailable (backend={backend or 'unresolved'}): {exc}"
             )
 
         apply_gpu_env(env, request.workspace, request.gpu_ids, request.gpu_lease)
+        launch = SpecialistLaunch(
+            cmd=cmd, env=env, run_as=run_as, backend=backend, prompt_file=prompt_file, process_log=process_log
+        )
 
         with cancel_scope_listener() as scope:
             log_fh: Any = None
@@ -534,71 +527,10 @@ class SpecialistSubprocessDispatcher:
             try:
                 _raise_if_cancelled(scope)
                 if request.gpu_lease is not None:
-                    # Non-blocking start: submit the actor launch, then poll for
-                    # the pid with ``asyncio.sleep`` between polls. This keeps the
-                    # Coordinator event loop responsive while Ray schedules the actor
-                    # (no blocking ``ray.get``), and — combined with the timing split
-                    # below — excludes Ray *pending* time from the specialist's running
-                    # wall budget. A bounded pending deadline turns a permanently
-                    # unschedulable request into a structured task failure instead of an
-                    # unbounded stall. The actor opens process.log inside its worker
-                    # (same host on single-node), so the reaper below reads it directly.
-                    from hyperloom.orchestrator.actions.executors._ray_serving import ActorLaunch
-
-                    try:
-                        request.gpu_lease.start_async(
-                            ActorLaunch(
-                                cmd,
-                                env=env,
-                                cwd=str(request.worktree or request.workspace),
-                                log_path=str(process_log),
-                                stdin_path=str(prompt_file),
-                            )
-                        )
-                    except Exception as exc:  # isolation boundary: one specialist's GPU actor submit
-                        log.warning("specialist GPU actor submit failed: %s", exc, exc_info=True)
-                        return SpecialistSubprocessResult(
-                            done_payload=None,
-                            exit_code=None,
-                            elapsed_seconds=0.0,
-                            process_log_path=str(process_log),
-                            error=f"failed to submit specialist GPU actor: {exc!r}",
-                        )
-                    pending_deadline_sec = _ray_specialist_pending_deadline_sec()
-                    pending_start = time.monotonic()
-                    pid: int | None = None
-                    while True:
-                        _raise_if_cancelled(scope)
-                        try:
-                            pid = request.gpu_lease.poll_started()
-                        except Exception as exc:  # isolation boundary: one specialist's GPU actor start
-                            log.warning("specialist GPU actor start failed: %s", exc, exc_info=True)
-                            request.gpu_lease.close()
-                            return SpecialistSubprocessResult(
-                                done_payload=None,
-                                exit_code=None,
-                                elapsed_seconds=0.0,
-                                process_log_path=str(process_log),
-                                error=f"specialist GPU actor start failed: {exc!r}",
-                            )
-                        if pid is not None:
-                            break
-                        pending_elapsed = time.monotonic() - pending_start
-                        if pending_elapsed >= pending_deadline_sec:
-                            request.gpu_lease.close()
-                            return SpecialistSubprocessResult(
-                                done_payload=None,
-                                exit_code=None,
-                                elapsed_seconds=0.0,
-                                process_log_path=str(process_log),
-                                error=(
-                                    f"specialist GPU actor did not schedule within "
-                                    f"{pending_deadline_sec:.0f}s (Ray pending deadline); "
-                                    "cluster fully occupied"
-                                ),
-                            )
-                        await asyncio.sleep(_RAY_PENDING_POLL_INTERVAL_SEC)
-                    proc = _RayLeaseProcess(request.gpu_lease, pid)
+                    started = await self._start_ray_actor(request, launch, scope)
+                    if isinstance(started, SpecialistSubprocessResult):
+                        return started
+                    proc = started
                     # Timing split: the wall-budget clock starts
                     # only now that a real pid exists — the Ray pending time above is
                     # excluded so a slow-to-schedule actor is never mis-reaped.
@@ -607,39 +539,10 @@ class SpecialistSubprocessDispatcher:
                     proc_started = time.monotonic()
                     # Created fresh, never through a name the previous run's account planted; owner-only.
                     log_fh = create_nofollow(request.workspace, (process_log.name,))
-                    stdin_fh: Any = None
-                    try:
-                        demote = await asyncio.to_thread(
-                            prepare_demote, run_as, request.workspace, request.worktree, env, (prompt_file, process_log)
-                        )
-                        stdin_fh = prompt_file.open("rb")
-                        proc = subprocess.Popen(
-                            cmd if run_as is None else run_as.command(cmd),
-                            stdin=stdin_fh,
-                            stdout=log_fh,
-                            stderr=subprocess.STDOUT,
-                            env=env,
-                            cwd=str(request.worktree or request.workspace),
-                            start_new_session=True,
-                            **demote,
-                        )
-                    except (FileNotFoundError, OSError) as exc:
-                        log_fh.close()
-                        return SpecialistSubprocessResult(
-                            done_payload=None,
-                            exit_code=None,
-                            elapsed_seconds=0.0,
-                            process_log_path=str(process_log),
-                            error=f"failed to spawn {backend} subprocess: {exc!r}",
-                        )
-                    finally:
-                        # Popen duplicates the descriptor before returning. Close the
-                        # parent's copy on success and every spawn failure.
-                        if stdin_fh is not None:
-                            try:
-                                stdin_fh.close()
-                            except OSError:
-                                log.warning("failed to close specialist prompt stdin", exc_info=True)
+                    spawned = await self._spawn_local(request, launch, log_fh)
+                    if isinstance(spawned, SpecialistSubprocessResult):
+                        return spawned
+                    proc = spawned
 
                 # Reap loop — poll done-file / exit / heartbeat staleness / deadline.
                 outcome = await self._reap_loop(proc, watch, deadline=request.deadline, started=proc_started)
@@ -656,6 +559,99 @@ class SpecialistSubprocessDispatcher:
                     self._release_task(backend, request)
 
         return self._harvest_result(request, watch, backend, outcome, worktree_base_commit=worktree_base_commit)
+
+    @staticmethod
+    async def _start_ray_actor(
+        request: SpecialistSpawn, launch: SpecialistLaunch, scope: CancelScope | None
+    ) -> _RayLeaseProcess | SpecialistSubprocessResult:
+        """Submit the GPU actor launch and poll until it has a pid; a failure returns the task's result."""
+        # Non-blocking start: submit the actor launch, then poll for
+        # the pid with ``asyncio.sleep`` between polls. This keeps the
+        # Coordinator event loop responsive while Ray schedules the actor
+        # (no blocking ``ray.get``), and — combined with the timing split
+        # below — excludes Ray *pending* time from the specialist's running
+        # wall budget. A bounded pending deadline turns a permanently
+        # unschedulable request into a structured task failure instead of an
+        # unbounded stall. The actor opens process.log inside its worker
+        # (same host on single-node), so the reaper below reads it directly.
+        from hyperloom.orchestrator.actions.executors._ray_serving import ActorLaunch
+
+        try:
+            request.gpu_lease.start_async(
+                ActorLaunch(
+                    launch.cmd,
+                    env=launch.env,
+                    cwd=str(request.worktree or request.workspace),
+                    log_path=str(launch.process_log),
+                    stdin_path=str(launch.prompt_file),
+                )
+            )
+        except Exception as exc:  # isolation boundary: one specialist's GPU actor submit
+            log.warning("specialist GPU actor submit failed: %s", exc, exc_info=True)
+            return _launch_failure(launch.process_log, f"failed to submit specialist GPU actor: {exc!r}")
+        pending_deadline_sec = _ray_specialist_pending_deadline_sec()
+        pending_start = time.monotonic()
+        pid: int | None = None
+        while True:
+            _raise_if_cancelled(scope)
+            try:
+                pid = request.gpu_lease.poll_started()
+            except Exception as exc:  # isolation boundary: one specialist's GPU actor start
+                log.warning("specialist GPU actor start failed: %s", exc, exc_info=True)
+                request.gpu_lease.close()
+                return _launch_failure(launch.process_log, f"specialist GPU actor start failed: {exc!r}")
+            if pid is not None:
+                break
+            pending_elapsed = time.monotonic() - pending_start
+            if pending_elapsed >= pending_deadline_sec:
+                request.gpu_lease.close()
+                return _launch_failure(
+                    launch.process_log,
+                    f"specialist GPU actor did not schedule within "
+                    f"{pending_deadline_sec:.0f}s (Ray pending deadline); "
+                    "cluster fully occupied",
+                )
+            await asyncio.sleep(_RAY_PENDING_POLL_INTERVAL_SEC)
+        return _RayLeaseProcess(request.gpu_lease, pid)
+
+    @staticmethod
+    async def _spawn_local(
+        request: SpecialistSpawn, launch: SpecialistLaunch, log_fh: Any
+    ) -> subprocess.Popen | SpecialistSubprocessResult:
+        """Spawn the agent CLI as a local process logging to ``log_fh``; a failure returns the task's result."""
+        stdin_fh: Any = None
+        try:
+            demote = await asyncio.to_thread(
+                prepare_demote,
+                launch.run_as,
+                request.workspace,
+                request.worktree,
+                launch.env,
+                (launch.prompt_file, launch.process_log),
+            )
+            stdin_fh = launch.prompt_file.open("rb")
+            proc = subprocess.Popen(
+                launch.cmd if launch.run_as is None else launch.run_as.command(launch.cmd),
+                stdin=stdin_fh,
+                stdout=log_fh,
+                stderr=subprocess.STDOUT,
+                env=launch.env,
+                cwd=str(request.worktree or request.workspace),
+                start_new_session=True,
+                **demote,
+            )
+        except (FileNotFoundError, OSError) as exc:
+            log_fh.close()
+            return _launch_failure(launch.process_log, f"failed to spawn {launch.backend} subprocess: {exc!r}")
+        finally:
+            # Popen duplicates the descriptor before returning. Close the
+            # parent's copy on success and every spawn failure.
+            if stdin_fh is not None:
+                try:
+                    stdin_fh.close()
+                except OSError:
+                    log.warning("failed to close specialist prompt stdin", exc_info=True)
+        return proc
 
     def _harvest_result(
         self,
@@ -912,6 +908,14 @@ class SpecialistSubprocessDispatcher:
                 f"cannot prepare private Codex config under {codex_home}: {exc}"
             ) from exc
 
+        cmd = self._codex_argv(executable, sandbox_mode, workspace, worktree, provider_config.overrides)
+        return cmd, env_additions
+
+    def _codex_argv(
+        self, executable: str, sandbox_mode: str, workspace: Path, worktree: Path | None, overrides: tuple[str, ...]
+    ) -> list[str]:
+        """Assemble the ``codex exec`` argv for a specialist under ``sandbox_mode``."""
+        cfg = self.config
         writable_dirs = self._writable_dirs(workspace, worktree)
         cmd: list[str] = [
             executable,
@@ -930,12 +934,12 @@ class SpecialistSubprocessDispatcher:
             cmd.extend(["--add-dir", extra_dir])
         # ``features.memories=false`` matches the SDK session: a specialist must
         # not carry state between tasks.
-        for override in ("features.memories=false", *provider_config.overrides):
+        for override in ("features.memories=false", *overrides):
             cmd.extend(["-c", override])
         if cfg.model:
             cmd.extend(["-m", cfg.model])
         cmd.append("-")
-        return cmd, env_additions
+        return cmd
 
     def _build_claude_cmd(
         self,
@@ -1091,14 +1095,7 @@ class SpecialistSubprocessDispatcher:
 
             # done.json appeared — graceful exit with up to 30s grace.
             if any(p.exists() for p in watch.done_files):
-                grace_until = now + 30.0
-                while time.monotonic() < grace_until and proc.poll() is None:
-                    _raise_if_cancelled(scope)
-                    await asyncio.sleep(2.0)
-                _raise_if_cancelled(scope)
-                # Still alive after grace — reap it so no orphaned subprocess leaks.
-                if proc.poll() is None:
-                    self._kill(proc)
+                await self._reap_after_done_file(proc, now, scope)
                 outcome["exit_code"] = proc.returncode
                 outcome["elapsed"] = time.monotonic() - started
                 break
@@ -1150,6 +1147,17 @@ class SpecialistSubprocessDispatcher:
                 break
 
         return outcome
+
+    async def _reap_after_done_file(self, proc: Any, now: float, scope: CancelScope | None) -> None:
+        """Give a process that wrote its done-file up to 30s from ``now`` to exit, then kill it."""
+        grace_until = now + 30.0
+        while time.monotonic() < grace_until and proc.poll() is None:
+            _raise_if_cancelled(scope)
+            await asyncio.sleep(2.0)
+        _raise_if_cancelled(scope)
+        # Still alive after grace — reap it so no orphaned subprocess leaks.
+        if proc.poll() is None:
+            self._kill(proc)
 
     @staticmethod
     def _kill(proc: Any) -> bool:

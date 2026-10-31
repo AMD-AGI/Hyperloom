@@ -9,6 +9,7 @@ import contextlib
 import logging
 import shutil
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator, Protocol
 
@@ -138,6 +139,87 @@ def _build_solution_dict(
     }
 
 
+@dataclass(frozen=True)
+class _ConsumerImplementation:
+    """The implementation identity of the kernel a warm start is read for."""
+
+    signature: str
+    identity: dict
+    source_map: dict[str, str]
+
+
+def _consumer_implementation(kernel: LoopKernel, framework: str) -> _ConsumerImplementation:
+    """Fingerprint the consumer kernel's editable sources the way the write side records them."""
+    consumer_workspace = kernel.workspace or str(Path(kernel.kernel_path).resolve().parent)
+    consumer_signature, consumer_identity = implementation_signature(
+        workspace=consumer_workspace,
+        kernel_path=kernel.kernel_path,
+        source_files=kernel.source_files,
+        framework=framework,
+    )
+    consumer_source_map = canonical_editable_source_map(
+        workspace=consumer_workspace,
+        kernel_path=kernel.kernel_path,
+        source_files=kernel.source_files,
+        framework=framework,
+    )
+    return _ConsumerImplementation(consumer_signature, consumer_identity, consumer_source_map)
+
+
+@dataclass(frozen=True)
+class _FuzzyMatch:
+    """The donor KB a fuzzy identity search selected and its candidates, or neither."""
+
+    kb: Any = None
+    candidates: Any = ()
+
+
+def _fuzzy_match(kb, config, destination: Path, top_k: int, read_status) -> _FuzzyMatch | None:
+    """Read candidates from the first fallback identity that has any; None after a read error it recorded."""
+    # Deferred for the same import cycle as in ``_read_top_solutions_impl``.
+    from kernelforge.knowledge.kb_store.recipe import KernelRecipeKB
+
+    fallback_ids = kb.fallback_canonical_ids()
+    if kb.reason:
+        log.warning("experience fuzzy identity search failed: %s", kb.reason)
+        _set_read_status(read_status, "read_error", kb.reason)
+        return None
+    for fallback_id in fallback_ids:
+        donor_kb = KernelRecipeKB.open_canonical_id(fallback_id, config)
+        candidates = donor_kb.read_top_n(destination, limit=top_k)
+        if donor_kb.reason:
+            log.warning(
+                "experience fuzzy candidate read failed for %s: %s",
+                fallback_id,
+                donor_kb.reason,
+            )
+            _set_read_status(read_status, "read_error", donor_kb.reason)
+            return None
+        if candidates:
+            log.info(
+                "experience fuzzy identity match: requested=%s selected=%s",
+                kb.canonical_id,
+                fallback_id,
+            )
+            return _FuzzyMatch(donor_kb, candidates)
+    return _FuzzyMatch()
+
+
+def _report_read(out: list[dict[str, Any]], canonical_id: str, read_status: dict[str, str] | None) -> None:
+    """Log what the read returned and record it as a hit or a miss."""
+    if not out:
+        log.info("experience read: no usable record for %s", canonical_id)
+        _set_read_status(read_status, "no_prior_record")
+    else:
+        log.info(
+            "experience read: %d solution(s), best %s (speedup=%.3f)",
+            len(out),
+            out[0]["solution_slug"],
+            out[0]["speedup"],
+        )
+        _set_read_status(read_status, "hit")
+
+
 def _read_top_solutions_impl(*, config, kernel: LoopKernel, top_k=3, read_status=None):
     # Must be the same dimension the write side addresses by, or the read resolves to an address no run ever wrote to
     # and every start looks cold.
@@ -166,19 +248,7 @@ def _read_top_solutions_impl(*, config, kernel: LoopKernel, top_k=3, read_status
         _set_read_status(read_status, kb.reason or "not_configured")
         return []
 
-    consumer_workspace = kernel.workspace or str(Path(kernel.kernel_path).resolve().parent)
-    consumer_signature, consumer_identity = implementation_signature(
-        workspace=consumer_workspace,
-        kernel_path=kernel.kernel_path,
-        source_files=kernel.source_files,
-        framework=framework,
-    )
-    consumer_source_map = canonical_editable_source_map(
-        workspace=consumer_workspace,
-        kernel_path=kernel.kernel_path,
-        source_files=kernel.source_files,
-        framework=framework,
-    )
+    consumer = _consumer_implementation(kernel, framework)
     log.info("experience read: identity=%s", kb.canonical_id)
 
     # Materialize the Top-N and read them back off disk: that is the SDK's normal consumer path, it downloads each
@@ -195,31 +265,13 @@ def _read_top_solutions_impl(*, config, kernel: LoopKernel, top_k=3, read_status
         selected_kb = kb
         match_tier = "exact"
         if not candidates:
-            fallback_ids = kb.fallback_canonical_ids()
-            if kb.reason:
-                log.warning("experience fuzzy identity search failed: %s", kb.reason)
-                _set_read_status(read_status, "read_error", kb.reason)
+            fuzzy = _fuzzy_match(kb, config, destination, top_k, read_status)
+            if fuzzy is None:
                 return []
-            for fallback_id in fallback_ids:
-                donor_kb = KernelRecipeKB.open_canonical_id(fallback_id, config)
-                candidates = donor_kb.read_top_n(destination, limit=top_k)
-                if donor_kb.reason:
-                    log.warning(
-                        "experience fuzzy candidate read failed for %s: %s",
-                        fallback_id,
-                        donor_kb.reason,
-                    )
-                    _set_read_status(read_status, "read_error", donor_kb.reason)
-                    return []
-                if candidates:
-                    selected_kb = donor_kb
-                    match_tier = "fuzzy"
-                    log.info(
-                        "experience fuzzy identity match: requested=%s selected=%s",
-                        kb.canonical_id,
-                        fallback_id,
-                    )
-                    break
+            if fuzzy.candidates:
+                selected_kb = fuzzy.kb
+                candidates = fuzzy.candidates
+                match_tier = "fuzzy"
         if not candidates:
             log.info("experience read: no prior record for %s", kb.canonical_id)
             _set_read_status(read_status, "no_prior_record")
@@ -229,9 +281,9 @@ def _read_top_solutions_impl(*, config, kernel: LoopKernel, top_k=3, read_status
             _build_solution_dict(
                 canonical_id=selected_kb.canonical_id,
                 prior=bundle,
-                consumer_signature=consumer_signature,
-                consumer_identity=consumer_identity,
-                consumer_source_map=consumer_source_map,
+                consumer_signature=consumer.signature,
+                consumer_identity=consumer.identity,
+                consumer_source_map=consumer.source_map,
             )
             for bundle in candidates
         ]
@@ -239,15 +291,5 @@ def _read_top_solutions_impl(*, config, kernel: LoopKernel, top_k=3, read_status
             read_status["match_tier"] = match_tier
             read_status["requested_canonical_id"] = kb.canonical_id
             read_status["selected_canonical_id"] = selected_kb.canonical_id
-    if not out:
-        log.info("experience read: no usable record for %s", kb.canonical_id)
-        _set_read_status(read_status, "no_prior_record")
-    else:
-        log.info(
-            "experience read: %d solution(s), best %s (speedup=%.3f)",
-            len(out),
-            out[0]["solution_slug"],
-            out[0]["speedup"],
-        )
-        _set_read_status(read_status, "hit")
+    _report_read(out, kb.canonical_id, read_status)
     return out

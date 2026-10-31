@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -68,6 +69,70 @@ def _load_session_json(path: Path, label: str, warnings: list[str]) -> dict[str,
         return {}
 
 
+@dataclass(frozen=True)
+class _RunSections:
+    """The timeline, close-out and outcome sections of a breakdown."""
+
+    timeline: Any
+    close: Any
+    outcome: Any
+
+
+def _collect_run_sections(
+    sd: Path,
+    assembled: dict[str, Any],
+    *,
+    session_section: Any,
+    state: dict[str, Any],
+    warnings: list[str],
+) -> _RunSections:
+    """Close the orphaned events of killed phases, then collect the timeline, close-out and outcome."""
+    # Events whose phase was killed before it could close them are closed here,
+    # before the timeline is read: their fragments are on disk, and an event
+    # left open would otherwise be read back as still running. Programming
+    # errors in finalize are left to raise; spool failures are a dedicated
+    # warning rather than a generic collector miss.
+    try:
+        closed = finalize_events(sd)
+    except RECORDING_ERRORS as exc:
+        warnings.append(f"timeline_finalize: {type(exc).__name__}: {exc}")
+        closed = []
+    if closed:
+        log.info("timeline_finalize: closed %s orphan event(s)", len(closed))
+    timeline = _safe_collect(
+        "timeline",
+        lambda: collectors.collect_v6_timeline(sd, warnings),
+        warnings,
+        default=[],
+    )
+    # Before ``outcome``, which reads the recipe the close-out settled: the
+    # session's terminal configuration is only final once the stack has stopped
+    # changing, and the close-out is what states it.
+    v6_close = _safe_collect(
+        "close",
+        lambda: collectors.collect_v6_close(
+            warnings,
+            recorded=assembled.get("close"),
+        ),
+        warnings,
+    )
+    outcome = _safe_collect(
+        "outcome",
+        lambda: collectors.collect_v6_outcome(
+            collectors.OutcomeSources(
+                session=session_section,
+                close=v6_close,
+                state=state,
+                timeline=timeline,
+                recorded=assembled.get("outcome"),
+            ),
+            warnings,
+        ),
+        warnings,
+    )
+    return _RunSections(timeline=timeline, close=v6_close, outcome=outcome)
+
+
 def build(session_dir: Path | str) -> dict[str, Any]:
     """Build a complete :class:`SessionBreakdown` for ``session_dir``.
 
@@ -123,49 +188,7 @@ def build(session_dir: Path | str) -> dict[str, Any]:
         ),
         warnings,
     )
-    # Events whose phase was killed before it could close them are closed here,
-    # before the timeline is read: their fragments are on disk, and an event
-    # left open would otherwise be read back as still running. Programming
-    # errors in finalize are left to raise; spool failures are a dedicated
-    # warning rather than a generic collector miss.
-    try:
-        closed = finalize_events(sd)
-    except RECORDING_ERRORS as exc:
-        warnings.append(f"timeline_finalize: {type(exc).__name__}: {exc}")
-        closed = []
-    if closed:
-        log.info("timeline_finalize: closed %s orphan event(s)", len(closed))
-    timeline = _safe_collect(
-        "timeline",
-        lambda: collectors.collect_v6_timeline(sd, warnings),
-        warnings,
-        default=[],
-    )
-    # Before ``outcome``, which reads the recipe the close-out settled: the
-    # session's terminal configuration is only final once the stack has stopped
-    # changing, and the close-out is what states it.
-    v6_close = _safe_collect(
-        "close",
-        lambda: collectors.collect_v6_close(
-            warnings,
-            recorded=assembled.get("close"),
-        ),
-        warnings,
-    )
-    outcome = _safe_collect(
-        "outcome",
-        lambda: collectors.collect_v6_outcome(
-            collectors.OutcomeSources(
-                session=session_section,
-                close=v6_close,
-                state=state,
-                timeline=timeline,
-                recorded=assembled.get("outcome"),
-            ),
-            warnings,
-        ),
-        warnings,
-    )
+    sections = _collect_run_sections(sd, assembled, session_section=session_section, state=state, warnings=warnings)
     metadata = _safe_collect(
         "metadata",
         lambda: collectors.collect_v6_metadata(
@@ -192,9 +215,9 @@ def build(session_dir: Path | str) -> dict[str, Any]:
         "exported_at_utc": exported_at,
         "exporter_version": EXPORTER_VERSION,
         "metadata": metadata,
-        "outcome": outcome,
-        "timeline": timeline,
-        "close": v6_close,
+        "outcome": sections.outcome,
+        "timeline": sections.timeline,
+        "close": sections.close,
         "critic": v6_critic,
     }
 

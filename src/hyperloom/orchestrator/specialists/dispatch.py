@@ -104,6 +104,31 @@ class ClassifiedFailure(NamedTuple):
     error: str
 
 
+def _auto_retry_cap() -> int:
+    """How many infra-failure retries a specialist gets; the default when the override is not an integer."""
+    try:
+        cap = int(
+            os.environ.get(
+                "INFERENCE_OPTIMIZER_SPECIALIST_AUTO_RETRY_MAX",
+                str(SPECIALIST_AUTO_RETRY_MAX),
+            )
+        )
+    except (TypeError, ValueError):
+        cap = SPECIALIST_AUTO_RETRY_MAX
+    return cap
+
+
+def _auto_retry_key(task: "Task", next_attempt: int) -> str:
+    """The retry task's idempotency key, on a base stable across attempts."""
+    # Stable base key across attempts: strip any prior ``-autoretryN`` suffix.
+    base_key = str(task.idempotency_key or task.task_id or "")
+    if "-autoretry" in base_key:
+        head, _, tail = base_key.rpartition("-autoretry")
+        if tail.isdigit():
+            base_key = head
+    return f"{base_key}-autoretry{next_attempt}"
+
+
 def _round_entry_extras(
     done_payload: dict[str, Any], task_params: dict[str, Any], *, run_error: str, source_phase: str
 ) -> dict[str, Any]:
@@ -405,15 +430,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         """
         if not env_flag("INFERENCE_OPTIMIZER_SPECIALIST_AUTO_RETRY", default=True):
             return False
-        try:
-            cap = int(
-                os.environ.get(
-                    "INFERENCE_OPTIMIZER_SPECIALIST_AUTO_RETRY_MAX",
-                    str(SPECIALIST_AUTO_RETRY_MAX),
-                )
-            )
-        except (TypeError, ValueError):
-            cap = SPECIALIST_AUTO_RETRY_MAX
+        cap = _auto_retry_cap()
         if cap <= 0:
             return False
         from .runner import classify_specialist_failure
@@ -452,13 +469,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         if requires_gpu(retry_params):
             ttl = self._coord.dispatcher.gpu_lease_ttl_sec(int(ttl or 0), params=retry_params)
 
-        # Stable base key across attempts: strip any prior ``-autoretryN`` suffix.
-        base_key = str(task.idempotency_key or task.task_id or "")
-        if "-autoretry" in base_key:
-            head, _, tail = base_key.rpartition("-autoretry")
-            if tail.isdigit():
-                base_key = head
-        retry_key = f"{base_key}-autoretry{next_attempt}"
+        retry_key = _auto_retry_key(task, next_attempt)
 
         with trajectory_scope(parent_span_id=task.task_id):
             new_task, was_existing = await self.tasks.create_or_return_existing(
@@ -481,14 +492,30 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 detail="retry slot already taken",
             )
             return False
+        await self._announce_specialist_retry(
+            task, new_task, ClassifiedFailure(ftype=ftype, error=error), attempt=next_attempt, cap=cap
+        )
+        return True
+
+    async def _announce_specialist_retry(
+        self,
+        task: "Task",
+        retry_task: "Task",
+        failure: ClassifiedFailure,
+        *,
+        attempt: int,
+        cap: int,
+    ) -> None:
+        """Record the retry on the trajectory and the bus, and log it."""
+        ftype, error = failure.ftype, failure.error
         record_event(
             EVENT_TASK_RETRY,
             task_id=task.task_id,
             parent_span_id=task.task_id,
             attributes={
                 "name": "specialist",
-                "retry_task_id": new_task.task_id,
-                "attempt": next_attempt,
+                "retry_task_id": retry_task.task_id,
+                "attempt": attempt,
                 "max_attempts": cap,
                 "failure_type": ftype.value,
                 "reason": error[:200],
@@ -500,8 +527,8 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             {
                 "kind": "specialist_auto_retry",
                 "task_id": task.task_id,
-                "retry_task_id": new_task.task_id,
-                "attempt": next_attempt,
+                "retry_task_id": retry_task.task_id,
+                "attempt": attempt,
                 "max_attempts": cap,
                 "failure_type": ftype.value,
                 "reason": error[:200],
@@ -511,11 +538,10 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             "specialist auto-retry: task=%s failure=%s attempt=%d/%d re-enqueued as %s",
             task.task_id,
             ftype.value,
-            next_attempt,
+            attempt,
             cap,
-            new_task.task_id,
+            retry_task.task_id,
         )
-        return True
 
     async def _record_specialist_retry_exhausted(
         self,
