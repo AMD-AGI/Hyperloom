@@ -116,14 +116,19 @@ def descendants(root_pid: int) -> list[ProcessId]:
         parent_pid, start_time = identity
         children.setdefault(parent_pid, []).append((pid, start_time))
 
+    # A sandboxed PID view can list a process as its own ancestor, so a pid is visited once; the walk keeps
+    # its own stack, so a deep tree cannot exhaust Python's.
     collected: list[ProcessId] = []
-
-    def _walk(parent_pid: int) -> None:
-        for child_pid, start_time in children.get(parent_pid, []):
-            _walk(child_pid)
-            collected.append((child_pid, start_time))
-
-    _walk(root_pid)
+    seen = {root_pid}
+    stack = [(child, False) for child in reversed(children.get(root_pid, []))]
+    while stack:
+        (pid, start_time), expanded = stack.pop()
+        if expanded:
+            collected.append((pid, start_time))
+        elif pid not in seen:
+            seen.add(pid)
+            stack.append(((pid, start_time), True))
+            stack.extend((child, False) for child in reversed(children.get(pid, [])))
     return collected
 
 
