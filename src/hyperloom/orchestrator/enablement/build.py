@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from hyperloom_common.coerce import first_text
 from hyperloom_common.fs_utils import read_text_nofollow
@@ -21,6 +21,8 @@ from .params import _enablement_carrier_params
 from .generation_scan import GenerationScan
 
 if TYPE_CHECKING:
+    from ..bringup.observe import BringupVerdict
+    from ..bringup.persist import LoadedObservation
     from ..state.task_registry import Task
     from .runtime.build_actions import TargetedBuildAction
 
@@ -74,6 +76,61 @@ def _compiled_gap_component(framework: str, symbol: str, launch_log: str) -> str
     ):
         return "vllm_source"
     return "aiter"
+
+
+class _BuildSource(NamedTuple):
+    """Where a targeted build fetches from: the repo, the ref, and the PR the ref came from."""
+
+    repo_url: str
+    ref: str
+    source_pr_url: str
+
+
+def _targeted_build_source(state: Any, component: str) -> _BuildSource:
+    """The kept stack's repo and ref, else the first discovered candidate ref that suits ``component``."""
+    # Derive novelty fields from the current failure + session context.
+    existing_stack = state.enablement.kept_stack_action or {}
+    repo_url = first_text(existing_stack.get("repo_url"))
+    ref = first_text(existing_stack.get("ref"))
+
+    source_pr_url = ""
+    # When no operator-pinned/kept ref, try the top discovery candidate.
+    if not ref:
+        from .runtime.build_actions import resolve_build_ref
+
+        for _cand in list(state.enablement.candidate_refs):
+            _repo, _ref, _pr_url = resolve_build_ref(str(_cand), repo_url)
+            if not _ref or not _repo_matches_targeted_build_component(_repo or _cand, component):
+                continue
+            repo_url = _repo or repo_url
+            ref = _ref
+            source_pr_url = _pr_url
+            break
+    return _BuildSource(repo_url, ref, source_pr_url)
+
+
+def _log_escalated_build(
+    action: TargetedBuildAction,
+    task_id: str,
+    verdict: BringupVerdict,
+    loaded: LoadedObservation,
+    *,
+    arch_stall: bool,
+) -> None:
+    """Log the targeted build an escalation enqueued, with the failure it answers."""
+    from hyperloom.common.bringup import failure_digest
+
+    log.info(
+        "ENABLEMENT: enqueued targeted_build kind=%s component=%s arch_stall=%s "
+        "gpu_arch=%s digest=%s degraded=%s task=%s",
+        verdict.signature.kind,
+        action.component,
+        arch_stall,
+        action.gpu_arch,
+        failure_digest(verdict.observation)[:12],
+        loaded.degraded or "-",
+        task_id,
+    )
 
 
 class EnablementBuild(CoordinatorCollaborator):
@@ -142,11 +199,6 @@ class EnablementBuild(CoordinatorCollaborator):
         # Past the guard, a gap that is not a compiled miss is an arch stall.
         arch_only = not is_compiled_gap
 
-        # Derive novelty fields from the current failure + session context.
-        existing_stack = state.enablement.kept_stack_action or {}
-        repo_url = first_text(existing_stack.get("repo_url"))
-        ref = first_text(existing_stack.get("ref"))
-
         if arch_only:
             # Arch/weight deep-failure on vLLM after source patches: the fix is a from-source vLLM build that
             # natively implements the arch, not an aiter/sgl-kernel op build.
@@ -159,19 +211,7 @@ class EnablementBuild(CoordinatorCollaborator):
             component = _compiled_gap_component(framework, signature.offending_symbol, launch_log)
             reason = f"Rung-5 auto-escalation from {signature.kind}"
 
-        source_pr_url = ""
-        # When no operator-pinned/kept ref, try the top discovery candidate.
-        if not ref:
-            from .runtime.build_actions import resolve_build_ref
-
-            for _cand in list(state.enablement.candidate_refs):
-                _repo, _ref, _pr_url = resolve_build_ref(str(_cand), repo_url)
-                if not _ref or not _repo_matches_targeted_build_component(_repo or _cand, component):
-                    continue
-                repo_url = _repo or repo_url
-                ref = _ref
-                source_pr_url = _pr_url
-                break
+        repo_url, ref, source_pr_url = _targeted_build_source(state, component)
 
         if not _repo_matches_targeted_build_component(repo_url, component):
             log.warning(
@@ -193,19 +233,7 @@ class EnablementBuild(CoordinatorCollaborator):
         )
         task_id = await self._enqueue_on_validated_board(action)
         if task_id:
-            from hyperloom.common.bringup import failure_digest
-
-            log.info(
-                "ENABLEMENT: enqueued targeted_build kind=%s component=%s arch_stall=%s "
-                "gpu_arch=%s digest=%s degraded=%s task=%s",
-                signature.kind,
-                component,
-                arch_only,
-                action.gpu_arch,
-                failure_digest(verdict.observation)[:12],
-                loaded.degraded or "-",
-                task_id,
-            )
+            _log_escalated_build(action, task_id, verdict, loaded, arch_stall=arch_only)
 
     async def maybe_enqueue_specialist_requested_build(
         self,

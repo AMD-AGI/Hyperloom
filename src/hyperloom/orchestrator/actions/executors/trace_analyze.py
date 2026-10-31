@@ -594,6 +594,60 @@ def _record_analysis_failure(result: dict[str, Any]) -> None:
     result.setdefault("orchestrator_error", failure_warning.get("error", ""))
 
 
+def _invalid_route_result(requested_route: str) -> dict[str, Any]:
+    """Log and return the failure for an explicit analysis route that names no known route."""
+    valid_routes = [route.value for route in AnalysisRoute]
+    message = (
+        f"unknown analysis_route {requested_route!r} (expected one of {valid_routes}); "
+        "refusing to fall back to 'agent' because that may start an LLM session. "
+        "Use 'non-llm' for no-LLM trace analysis."
+    )
+    log.error("trace_analyze: %s", message)
+    return {
+        "status": "failed",
+        "error_class": "invalid_analysis_route",
+        "error": message,
+        "requested_route": requested_route,
+        "valid_routes": valid_routes,
+    }
+
+
+async def _run_analysis_tool(cmd: list[str], timeout_sec: int) -> dict[str, Any]:
+    """Run the analysis tool and shape its result; a timeout becomes a failed result."""
+    try:
+        rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout_sec)
+        result = _shape_tool_result(rc, stdout, stderr)
+    except subprocess.TimeoutExpired:
+        cmd_repr = " ".join(str(c) for c in cmd)
+        result = {
+            "status": "failed",
+            "error_class": "subprocess_timeout",
+            "error": f"TimeoutExpired after {timeout_sec}s: {cmd_repr[:1500]}",
+        }
+    return result
+
+
+def _settle_tool_result(
+    result: dict[str, Any], metadata: dict[str, Any], framework_warnings: list[dict[str, Any]]
+) -> None:
+    """Surface the result's artifacts, record a failed run, and enrich its candidates with the workload metadata."""
+    report_path = _surface_artifact_paths(result)
+    if report_path:
+        _enrich_candidate_trace_report(result.get("hot_kernels"), report_path)
+
+    # A failed TraceLens run is a hard failure, not "empty candidates".
+    if result.get("status") == "failed" and "trace_split_no_steady_state" not in str(result.get("error")):
+        _record_analysis_failure(result)
+
+    # Prepend handler validation warnings so they reach the LLM.
+    result["trace_health_warnings"] = framework_warnings + list(result.get("trace_health_warnings") or [])
+
+    _enrich_candidate_runtime_metadata(result.get("hot_kernels"), metadata)
+    candidates_path = result.get("candidates_path")
+    if isinstance(candidates_path, str):
+        _enrich_candidates_artifact(candidates_path, metadata, trace_report_path=report_path)
+
+
 async def trace_analyze_handler(
     payload: dict,
     *,
@@ -639,20 +693,7 @@ async def trace_analyze_handler(
     try:
         analysis_route = AnalysisRoute(requested_route) if requested_route else AnalysisRoute.AGENT
     except ValueError:
-        valid_routes = [route.value for route in AnalysisRoute]
-        message = (
-            f"unknown analysis_route {requested_route!r} (expected one of {valid_routes}); "
-            "refusing to fall back to 'agent' because that may start an LLM session. "
-            "Use 'non-llm' for no-LLM trace analysis."
-        )
-        log.error("trace_analyze: %s", message)
-        return {
-            "status": "failed",
-            "error_class": "invalid_analysis_route",
-            "error": message,
-            "requested_route": requested_route,
-            "valid_routes": valid_routes,
-        }
+        return _invalid_route_result(requested_route)
     tracelens_root = paths.tracelens_root()
     # Self-heal when the checkout is missing or incomplete (no .git).
     if not (tracelens_root / ".git").exists():
@@ -691,32 +732,9 @@ async def trace_analyze_handler(
     timeout_sec = int(payload.get("budget_minutes", 60)) * 60
 
     _disc_started = time.monotonic()
-    try:
-        rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout_sec)
-        result = _shape_tool_result(rc, stdout, stderr)
-    except subprocess.TimeoutExpired:
-        cmd_repr = " ".join(str(c) for c in cmd)
-        result = {
-            "status": "failed",
-            "error_class": "subprocess_timeout",
-            "error": f"TimeoutExpired after {timeout_sec}s: {cmd_repr[:1500]}",
-        }
+    result = await _run_analysis_tool(cmd, timeout_sec)
     _disc_duration_sec = round(time.monotonic() - _disc_started, 3)
-    report_path = _surface_artifact_paths(result)
-    if report_path:
-        _enrich_candidate_trace_report(result.get("hot_kernels"), report_path)
-
-    # A failed TraceLens run is a hard failure, not "empty candidates".
-    if result.get("status") == "failed" and "trace_split_no_steady_state" not in str(result.get("error")):
-        _record_analysis_failure(result)
-
-    # Prepend handler validation warnings so they reach the LLM.
-    result["trace_health_warnings"] = framework_warnings + list(result.get("trace_health_warnings") or [])
-
-    _enrich_candidate_runtime_metadata(result.get("hot_kernels"), metadata)
-    candidates_path = result.get("candidates_path")
-    if isinstance(candidates_path, str):
-        _enrich_candidates_artifact(candidates_path, metadata, trace_report_path=report_path)
+    _settle_tool_result(result, metadata, framework_warnings)
 
     # Surfaced for the caller's SBD V6 roofline event, which records the run
     # as it happens rather than re-deriving it at export time.
