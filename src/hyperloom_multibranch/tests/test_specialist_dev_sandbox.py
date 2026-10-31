@@ -447,6 +447,23 @@ async def test_a_running_lease_charges_its_forge_spend_as_it_grows_and_counts_ea
     assert [usage.tokens.input for usage in rig.logs.usage] == [100, 200]
 
 
+async def test_a_forge_rerun_that_restarts_its_ledger_charges_its_new_spend_and_keeps_the_old(rig):
+    built = rig.build()
+    granted = await built.server.call("dev_sandbox_lease", term="long", minutes=6 * 60)
+    ledger = Path(granted["root"]) / "ff" / "llm_usage.json"
+    ledger.parent.mkdir()
+    ledger.write_text(json.dumps({"output_tokens": 290, "total_cost_usd": 5.0}))
+    rig.clock.now += LIMITS.spend_s
+    await built.leases.sweep()
+    ledger.write_text(json.dumps({"output_tokens": 30, "total_cost_usd": 0.5}))
+    rig.clock.now += LIMITS.spend_s
+    await built.leases.sweep()
+    ledger.write_text(json.dumps({"output_tokens": 50, "total_cost_usd": 0.75}))
+    await built.server.call("dev_sandbox_release")
+    assert [usage.cost_usd for usage in rig.logs.usage] == [5.0, 0.5, 0.25]
+    assert [usage.tokens.output for usage in rig.logs.usage] == [290, 30, 20]
+
+
 async def test_a_lease_whose_tools_kept_no_ledger_records_no_spend(rig):
     built = rig.build()
     await built.server.call("dev_sandbox_lease")
