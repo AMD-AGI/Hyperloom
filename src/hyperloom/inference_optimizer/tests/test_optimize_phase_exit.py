@@ -9,6 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from hyperloom.orchestrator.phases.exit_predicates import framework_plateau
+
 from hyperloom.orchestrator.phases import machine_state as ps
 from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_SKIP_TO_KERNEL, ESCALATE_HINT_SKIP_TO_SWEEP
 
@@ -106,7 +108,7 @@ def test_the_config_arm_needs_a_trailing_no_keep_streak_to_report_dry():
         ],
     )
     evidence = ps._config_lever_evidence(state, {})
-    assert ps._framework_plateau(evidence).config_dry is False
+    assert framework_plateau(evidence).config_dry is False
     assert evidence["empty_streak"] == 0
 
 
