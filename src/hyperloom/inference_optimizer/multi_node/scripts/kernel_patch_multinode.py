@@ -19,6 +19,7 @@ import socket
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
@@ -76,6 +77,59 @@ def _alive_nodes() -> list[dict]:
     return [n for n in ray.nodes() if n.get("Alive")]
 
 
+def _dispatch_apply(nodes: list[dict], args: argparse.Namespace) -> list[tuple[str, Any]]:
+    """Start one node-pinned apply actor per alive node; return each node id with its pending result."""
+    ApplyActor = ray.remote(num_cpus=0, num_gpus=0)(_apply_remote)
+    refs = []
+    for node in nodes:
+        node_id = node["NodeID"]
+        ref = ApplyActor.options(
+            scheduling_strategy=NodeAffinitySchedulingStrategy(
+                node_id=node_id,
+                soft=False,
+            ),
+        ).remote(
+            args.target_path,
+            args.patch_b64,
+            args.backup_dir,
+            args.kernel_id,
+            args.jit_build_dir,
+        )
+        refs.append((node_id, ref))
+    return refs
+
+
+def _roll_back_nodes(successful_nodes: list[tuple[str, dict]], *, timeout_sec: int) -> list[dict]:
+    """Revert the patch on every node that applied it; one result row per node."""
+    rollback: list[dict] = []
+    RevertActor = ray.remote(num_cpus=0, num_gpus=0)(_revert_remote)
+    rollback_refs = [
+        (
+            node_id,
+            RevertActor.options(
+                scheduling_strategy=NodeAffinitySchedulingStrategy(
+                    node_id=node_id,
+                    soft=False,
+                )
+            ).remote([record]),
+        )
+        for node_id, record in successful_nodes
+    ]
+    for node_id, ref in rollback_refs:
+        try:
+            rollback.append({"node_id": node_id[:16], **ray.get(ref, timeout=timeout_sec)})
+        except (ray.exceptions.RayError, OSError) as exc:
+            _log(f"node {node_id[:16]}: rollback FAILED: {type(exc).__name__}: {exc}")
+            rollback.append(
+                {
+                    "node_id": node_id[:16],
+                    "status": "failed",
+                    "error": str(exc),
+                }
+            )
+    return rollback
+
+
 def _do_apply(args: argparse.Namespace) -> int:
     """Fan out the patch-apply actor across every alive node and report.
 
@@ -104,23 +158,7 @@ def _do_apply(args: argparse.Namespace) -> int:
         )
         return 1
 
-    ApplyActor = ray.remote(num_cpus=0, num_gpus=0)(_apply_remote)
-    refs = []
-    for node in nodes:
-        node_id = node["NodeID"]
-        ref = ApplyActor.options(
-            scheduling_strategy=NodeAffinitySchedulingStrategy(
-                node_id=node_id,
-                soft=False,
-            ),
-        ).remote(
-            args.target_path,
-            args.patch_b64,
-            args.backup_dir,
-            args.kernel_id,
-            args.jit_build_dir,
-        )
-        refs.append((node_id, ref))
+    refs = _dispatch_apply(nodes, args)
 
     per_node: list[dict] = []
     failures: list[dict] = []
@@ -137,31 +175,7 @@ def _do_apply(args: argparse.Namespace) -> int:
 
     rollback: list[dict] = []
     if failures and successful_nodes:
-        RevertActor = ray.remote(num_cpus=0, num_gpus=0)(_revert_remote)
-        rollback_refs = [
-            (
-                node_id,
-                RevertActor.options(
-                    scheduling_strategy=NodeAffinitySchedulingStrategy(
-                        node_id=node_id,
-                        soft=False,
-                    )
-                ).remote([record]),
-            )
-            for node_id, record in successful_nodes
-        ]
-        for node_id, ref in rollback_refs:
-            try:
-                rollback.append({"node_id": node_id[:16], **ray.get(ref, timeout=args.timeout_sec)})
-            except (ray.exceptions.RayError, OSError) as exc:
-                _log(f"node {node_id[:16]}: rollback FAILED: {type(exc).__name__}: {exc}")
-                rollback.append(
-                    {
-                        "node_id": node_id[:16],
-                        "status": "failed",
-                        "error": str(exc),
-                    }
-                )
+        rollback = _roll_back_nodes(successful_nodes, timeout_sec=args.timeout_sec)
     payload = {
         "command": "apply",
         "target_path": args.target_path,
@@ -177,18 +191,8 @@ def _do_apply(args: argparse.Namespace) -> int:
     return 0 if not failures else 1
 
 
-def _do_revert(args: argparse.Namespace) -> int:
-    """Fan out the patch-revert actor to each backed-up host and report.
-
-    Args:
-        args (argparse.Namespace): Parsed ``revert`` arguments
-            (``target_path``, ``backup_map_json``, ``timeout_sec``).
-
-    Returns:
-        int: ``0`` if every reachable host reverted successfully, otherwise
-        ``1`` (including when ``backup_map_json`` is empty).
-    """
-    _init_ray()
+def _load_revert_records(args: argparse.Namespace) -> dict[str, list[dict]] | None:
+    """Read the per-host revert records, falling back to the backup map; ``None`` after reporting a failure."""
     try:
         records_by_host: dict[str, list[dict]] = json.loads(args.records_json or "{}")
         backup_map: dict[str, str] = json.loads(args.backup_map_json or "{}")
@@ -204,7 +208,7 @@ def _do_revert(args: argparse.Namespace) -> int:
             )
             + "\n"
         )
-        return 1
+        return None
     if not records_by_host and backup_map:
         records_by_host = {
             host: [
@@ -227,6 +231,24 @@ def _do_revert(args: argparse.Namespace) -> int:
             )
             + "\n"
         )
+        return None
+    return records_by_host
+
+
+def _do_revert(args: argparse.Namespace) -> int:
+    """Fan out the patch-revert actor to each backed-up host and report.
+
+    Args:
+        args (argparse.Namespace): Parsed ``revert`` arguments
+            (``target_path``, ``backup_map_json``, ``timeout_sec``).
+
+    Returns:
+        int: ``0`` if every reachable host reverted successfully, otherwise
+        ``1`` (including when ``backup_map_json`` is empty).
+    """
+    _init_ray()
+    records_by_host = _load_revert_records(args)
+    if records_by_host is None:
         return 1
 
     nodes = _alive_nodes()
