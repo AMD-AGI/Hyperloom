@@ -135,6 +135,23 @@ def test_an_op_name_joined_by_underscores_reads_its_family(op: str, found: str |
 
 
 @pytest.mark.parametrize(
+    ("op", "found"),
+    [
+        ("ck_tile::kentry [Qwen3Attention.QKVParallelLinear]", "gemm"),
+        ("ck_tile::kentry [Qwen3MLP.MergedColumnParallelLinear]", "gemm"),
+        ("paged_attention_ll4mi_qkv_kernel [Qwen3Attention.RadixAttention]", "attention"),
+        ("triton_poi_fused_0 [Qwen3DecoderLayer.RMSNorm]", "norm"),
+        ("triton_poi_fused_1 [Qwen3Attention.Unnamed]", "attention"),
+        ("aten::linear", "gemm"),
+    ],
+)
+def test_an_op_name_with_its_launcher_reads_its_kernel_first_then_its_layer_then_its_module(
+    op: str, found: str
+) -> None:
+    assert op_family(op) == found
+
+
+@pytest.mark.parametrize(
     "family", [Family("KV cache", Mechanism.PRECISION, CONFIG), Family("moe", Mechanism.OTHER, None)]
 )
 def test_a_label_reads_back_as_its_family(family: Family) -> None:
