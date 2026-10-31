@@ -1325,6 +1325,21 @@ async def test_a_turn_waiting_on_its_long_dev_lease_s_process_is_not_idle_and_it
     assert dev.toolbox.released == ["lease-1"], "with Forge ended, the run's stop gives the lease back"
 
 
+async def test_a_cli_waiting_on_its_long_dev_lease_is_woken_before_the_reaper_takes_its_silence_for_a_loss(
+    rig, tmp_path
+):
+    dev = await _forge_running(rig, tmp_path)
+    session = rig.session(nudge_waits_s=NO_WAITS, dev_leases=dev.leases, lease_wake_s=0.05)
+    running = asyncio.create_task(session.run())
+    await _until(lambda: len(rig.runner.specs) == 1, "the launch")
+
+    _end_turn(rig)
+    await _until(lambda: rig.runner.sent, "a wake while Forge runs")
+    assert "dev_sandbox_read" in rig.runner.sent[0] and dev.forge.alive()
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+
+
 async def test_a_cli_lost_while_its_long_dev_lease_s_process_runs_was_waiting_and_keeps_the_lease(rig, tmp_path):
     dev = await _forge_running(rig, tmp_path)
     first = rig.session(nudge_waits_s=NO_WAITS, dev_leases=dev.leases)

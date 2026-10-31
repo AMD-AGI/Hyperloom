@@ -3,6 +3,9 @@
 
 """``requirements/runner.lock`` is the ``runner`` extra compiled with hashes, which is all the sealed runner installs (4.8.1).
 
+A Python with a lock of its own (``requirements/runner-cpXY.lock``, :func:`hyperloom.measure.runner.cache_layout.lock_file`)
+is held to the same, and to the shared lock's pins but for those its header says it moved.
+
 CI has no framework image to resolve in, so these tests hold the file to what the install relies on: every entry is an
 exact pin that carries hashes (so ``pip install --require-hashes`` has nothing to resolve), the entries that
 ``pip-compile`` marked as asked for by ``pyproject.toml`` are exactly the ``runner`` extra (so the lock and the extra
@@ -101,20 +104,46 @@ def _runner_extra() -> list[str]:
     return document["project"]["optional-dependencies"]["runner"]
 
 
-def test_the_lock_is_the_runner_extra_pinned_with_hashes_and_holds_no_framework_package():
+def _locks() -> list[str]:
+    return sorted(path.name for path in (_ROOT / "requirements").glob("runner*.lock")) if _ROOT else ["runner.lock"]
+
+
+@pytest.mark.parametrize("name", _locks())
+def test_the_lock_is_the_runner_extra_pinned_with_hashes_and_holds_no_framework_package(name):
     assert _ROOT is not None
-    lock = (_ROOT / "requirements" / "runner.lock").read_text(encoding="utf-8")
+    lock = (_ROOT / "requirements" / name).read_text(encoding="utf-8")
 
     assert _problems(lock, _runner_extra()) == []
+
+
+_OWN_LOCK = re.compile(r"runner-cp3[0-9]+\.lock")
+_MOVED = re.compile(r"grep -viE '\^\((?P<names>[a-z0-9_|.-]+)\)=='")
+
+
+def test_a_pythons_own_lock_is_the_shared_lock_but_for_the_pins_its_header_says_it_moved():
+    assert _ROOT is not None
+    own_locks = [name for name in _locks() if _OWN_LOCK.fullmatch(name)]
+    assert own_locks, "no runner-cpXY.lock: the CPython 3.14 images need one"
+    shared = {pin.name: pin.version for pin in _parse((_ROOT / "requirements" / "runner.lock").read_text())[0]}
+    for name in own_locks:
+        text = (_ROOT / "requirements" / name).read_text(encoding="utf-8")
+        moved = _MOVED.search("\n".join(text.splitlines()[:12]))
+        assert moved, f"{name}'s header does not say which pins it moved"
+        allowed = {canonicalize_name(moved_name) for moved_name in moved["names"].split("|")}
+        pins = {pin.name: pin.version for pin in _parse(text)[0]}
+        assert sorted(set(pins) - set(shared)) == [], f"{name} pins what runner.lock does not"
+        differing = {pin for pin in set(pins) & set(shared) if pins[pin] != shared[pin]}
+        assert differing <= allowed, f"{name} moved {sorted(differing - allowed)} without saying so"
 
 
 def test_the_extra_itself_leaves_the_framework_to_the_image():
     assert [spec for spec in _runner_extra() if _is_framework(canonicalize_name(Requirement(spec).name))] == []
 
 
-def test_the_header_says_how_the_lock_is_regenerated():
+@pytest.mark.parametrize("name", _locks())
+def test_the_header_says_how_the_lock_is_regenerated(name):
     assert _ROOT is not None
-    header = (_ROOT / "requirements" / "runner.lock").read_text(encoding="utf-8").splitlines()[:12]
+    header = (_ROOT / "requirements" / name).read_text(encoding="utf-8").splitlines()[:12]
 
     assert any("pip-compile" in line and "--generate-hashes" in line for line in header)
 

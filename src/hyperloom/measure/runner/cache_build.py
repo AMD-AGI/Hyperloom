@@ -5,9 +5,11 @@
 
 It runs on a machine with egress, in the application that starts a campaign, before the first measurement request::
 
-    python -m hyperloom.measure.runner.cache_build --sha <commit> --repo <checkout> [--out <cache>]
+    python -m hyperloom.measure.runner.cache_build --sha <commit> --repo <checkout> [--out <cache>] \
+        [--wheel-target cp314-manylinux_2_28_x86_64]
 
-``--out`` defaults to ``$HYPERLOOM_RUNNER_CACHE``. A build that fails fails the campaign: nothing falls back to
+``--out`` defaults to ``$HYPERLOOM_RUNNER_CACHE``; ``--wheel-target`` takes the tag ``$HYPERLOOM_RUNNER_WHEEL_TARGET``
+does (:func:`runner_wheel_target`) and stands for the separate options below. A build that fails fails the campaign: nothing falls back to
 installing over the network inside a sandbox. The wheels are downloaded for the interpreter and platform of the
 *framework image*, which is not the builder's own unless it is told: ``--python-version 3.10 --implementation cp
 --abi cp310 --abi abi3 --abi none`` and one ``--platform`` for every platform tag the image accepts
@@ -46,6 +48,11 @@ Before the entry is renamed into place, the builder asks pip whether the require
 --only-binary=:all:``, the sandbox's own flags), so a cache the runner could not install is refused here instead of
 failing in the sandbox. A hosted session names the runner's interpreter in ``$HYPERLOOM_RUNNER_WHEEL_TARGET``
 (:func:`runner_wheel_target`); it never builds for its own.
+
+The pins come from the lock of the target's Python (:func:`~hyperloom.measure.runner.cache_layout.lock_file`):
+``requirements/runner-cp314.lock`` for ``--python-version 3.14``, ``requirements/runner.lock`` for a version without a
+lock of its own or when no ``--python-version`` is given. A build for a Python that has its own lock must therefore name
+it (``--python-version``, or the ``cpXY`` of ``$HYPERLOOM_RUNNER_WHEEL_TARGET``).
 """
 
 from __future__ import annotations
@@ -54,6 +61,7 @@ import argparse
 import re
 import fcntl
 import hashlib
+import importlib.metadata
 import json
 import os
 import secrets
@@ -72,7 +80,6 @@ from hyperloom.measure.runner.bootstrap import BOOTSTRAP_SCRIPT
 from hyperloom.measure.runner.cache_layout import (
     BOOTSTRAP_NAME,
     CACHE_ENV,
-    LOCK_FILE,
     MANIFEST_NAME,
     SOURCE_DIR,
     WHEELS_DIR,
@@ -83,6 +90,7 @@ from hyperloom.measure.runner.cache_layout import (
     check_entry,
     file_sha256,
     is_full_commit,
+    lock_file,
     manifest_from_json,
     manifest_to_json,
     parse_lock,
@@ -123,6 +131,9 @@ _TARGET_TAG = re.compile(r"cp(?P<major>3)(?P<minor>[0-9]+)-manylinux_2_(?P<glibc
 #: The legacy manylinux names of a glibc 2 minor version; pip accepts both spellings and downloads only what it is told.
 _LEGACY_MANYLINUX = {17: "manylinux2014", 12: "manylinux2010", 5: "manylinux1"}
 _OLDEST_GLIBC_MINOR = 5
+#: The first pip whose ``install --python-version`` checks ``Requires-Python`` against that version; older ones check it
+#: against the interpreter pip runs on, the builder's, which says nothing about the runner's.
+_PIP_CHECKS_TARGET_PYTHON = (24, 2)
 
 
 class CacheBuildError(CacheError):
@@ -241,8 +252,6 @@ def _export_source(repo: Path, sha: str, destination: Path) -> None:
     _run(_git(repo, "archive", "--format=tar", "-o", str(tarball), sha), f"exporting {sha} from {repo}")
     _run(["tar", "-x", "--no-same-owner", "-f", str(tarball), "-C", str(destination)], f"unpacking {sha}")
     tarball.unlink()
-    if not (destination / LOCK_FILE).is_file():
-        raise CacheBuildError(f"commit {sha} has no {LOCK_FILE}")
 
 
 def _pip(*args: str, python: Path | None = None) -> list[str]:
@@ -337,6 +346,23 @@ def _wheel_entries(wheels: Path, pins: list[LockPin], built: Mapping[str, str]) 
     return tuple(entries.values())
 
 
+def _pip_version() -> tuple[int, ...]:
+    """The builder's pip as numbers (``(24, 2)``); ``()`` when it cannot be read."""
+    try:
+        return tuple(int(part) for part in re.findall(r"[0-9]+", importlib.metadata.version("pip"))[:2])
+    except importlib.metadata.PackageNotFoundError:
+        return ()
+
+
+def _requires_python_flags(target: WheelTarget) -> list[str]:
+    """``--ignore-requires-python`` when the builder's pip would check ``Requires-Python`` against its own interpreter
+    instead of the target's (pip before 24.2): a numpy that needs Python 3.12 is no reason to refuse a 3.14 entry built
+    on 3.10. The wheel tags are checked either way, and the sandbox's pip checks ``Requires-Python`` for itself."""
+    if target.python_version and _pip_version() < _PIP_CHECKS_TARGET_PYTHON:
+        return ["--ignore-requires-python"]
+    return []
+
+
 def _check_installable(entry: Path, manifest: Manifest, target: WheelTarget) -> None:
     """Refuse an entry whose wheels alone do not satisfy what the sandbox installs, for the target's interpreter."""
     with tempfile.TemporaryDirectory(dir=entry, prefix=".resolve-") as scratch:
@@ -344,7 +370,7 @@ def _check_installable(entry: Path, manifest: Manifest, target: WheelTarget) -> 
         requirements.write_text(requirements_text(manifest), encoding=_UTF8)
         install = [_ISOLATED, "install", "--dry-run", "--target", str(Path(scratch) / "site"), _NO_INDEX]
         install += [_FIND_LINKS, str(entry / WHEELS_DIR), _ONLY_BINARY, _REQUIRE_HASHES, _NO_DEPS]
-        install += [*_PIP_QUIET, *target.pip_args(), "-r", str(requirements)]
+        install += [*_PIP_QUIET, *target.pip_args(), *_requires_python_flags(target), "-r", str(requirements)]
         interpreter = f"Python {target.python_version}" if target.python_version else "the builder's interpreter"
         _run(_pip(*install), f"checking that the runner ({interpreter}) can install the entry's wheels")
 
@@ -384,9 +410,12 @@ def _build(repo: Path, sha: str, tree: str, final: Path, options: BuildOptions) 
     try:
         source = pending / SOURCE_DIR
         _export_source(repo, sha, source)
-        lock = source / LOCK_FILE
+        name = lock_file(source, options.target.python_version)
+        lock = source / name
+        if not lock.is_file():
+            raise CacheBuildError(f"commit {sha} has no {name}")
         wheels = pending / WHEELS_DIR
-        pins = parse_lock(lock.read_text(encoding=_UTF8))
+        pins = parse_lock(lock.read_text(encoding=_UTF8), name)
         entries = _wheel_entries(wheels, pins, _download_wheels(lock, wheels, pins, options))
         bootstrap = _write_bootstrap(pending)
         manifest = Manifest(sha, tree, tree_digest(source), entries, options.target.manifest_form(), bootstrap)
@@ -485,6 +514,11 @@ def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument("--sha", required=True, help="the full commit hash")
     parser.add_argument("--repo", type=Path, required=True, help="a clone that has the commit")
     parser.add_argument("--out", type=Path, default=os.environ.get(CACHE_ENV), help=f"the cache (default ${CACHE_ENV})")
+    parser.add_argument(
+        "--wheel-target",
+        help=f"the image's interpreter and platform as one tag, e.g. cp314-manylinux_2_28_x86_64, as ${RUNNER_TARGET_ENV} "
+        "names it; instead of --python-version, --implementation, --abi and --platform",
+    )
     parser.add_argument("--python-version", help="the image's Python, e.g. 3.10")
     parser.add_argument("--implementation", help="the image's implementation, e.g. cp")
     _repeatable(parser, "--abi", "an ABI tag of the image, e.g. cp310")
@@ -496,18 +530,24 @@ def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.out is None:
         parser.error(f"--out or ${CACHE_ENV} is required")
+    if args.wheel_target and (args.python_version or args.implementation or args.abi or args.platform):
+        parser.error("--wheel-target names the whole target: give it alone, or the separate options")
     return args
+
+
+def _target(args: argparse.Namespace) -> WheelTarget:
+    if args.wheel_target:
+        return runner_wheel_target({RUNNER_TARGET_ENV: args.wheel_target})
+    return WheelTarget(args.python_version, args.implementation, tuple(args.abi), tuple(args.platform))
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     """The command line: print one JSON line about the entry and exit 0, or say why not on stderr and exit 1."""
     args = _arguments(argv)
-    options = BuildOptions(
-        WheelTarget(args.python_version, args.implementation, tuple(args.abi), tuple(args.platform)),
-        WheelSource(args.index_url, tuple(args.find_links), args.no_index),
-        args.lock_timeout_sec,
-    )
     try:
+        options = BuildOptions(
+            _target(args), WheelSource(args.index_url, tuple(args.find_links), args.no_index), args.lock_timeout_sec
+        )
         entry = ensure_runner_cache(args.repo, args.sha, args.out, options)
     except (CacheError, OSError) as exc:
         print(f"runner cache not built: {exc}", file=sys.stderr)

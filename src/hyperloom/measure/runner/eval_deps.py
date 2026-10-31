@@ -10,17 +10,24 @@ sandbox of the vLLM 0.16 image it ran past the 600 s window, and the watchdog re
 before the evaluation sent a request (hyperloom-multibranch #156 c4287). Here it runs once, before the server boots,
 with a limit and a log of its own, and the round's own call finds it done through the install-once marker
 (``_magpie_patcher.ensure_lm_eval_install_once``).
+
+It runs in the environment the round starts its benchmark script with, not the runner's own: the round's ``python3``
+is the one ``PATH`` names there, and the marker is kept by that interpreter's ``sys.prefix``, so an install for another
+interpreter would leave the round to install again in its silent window. What decides that it worked is the round's own
+check, run in that environment: ``python3`` imports lm-eval and the round's ``_install_lm_eval_deps`` would install
+nothing (hyperloom-multibranch #156 c4469).
 """
 
 from __future__ import annotations
 
 import os
+import shutil
 import signal
 import subprocess
 from collections.abc import Mapping
 from pathlib import Path
 
-from hyperloom.orchestrator.actions.executors import ensure_lm_eval_install_once
+from hyperloom.orchestrator.actions.executors import EVAL_OUTPUT_ENV, LM_EVAL_READY_FN, ensure_lm_eval_install_once
 
 __all__ = ["EVAL_DEPS_LOG", "EVAL_DEPS_TIMEOUT_SEC", "EvalDepsError", "install_eval_deps"]
 
@@ -31,7 +38,8 @@ EVAL_DEPS_TIMEOUT_SEC = 900.0
 _LIB = Path("benchmarks") / "benchmark_lib.sh"
 #: The round sources the same library and calls the same function, so this is the install the round would run.
 _INSTALL = 'source "$1" && _install_lm_eval_deps'
-_PROBE = ("python3", "-c", "import lm_eval")
+_READY = f'source "$1" && {LM_EVAL_READY_FN}'
+_IMPORT = ("python3", "-c", "import lm_eval")
 _TAIL_CHARS = 1500
 
 
@@ -44,17 +52,20 @@ def install_eval_deps(
 ) -> str | None:
     """Install lm-eval the way the accuracy round would, before it, and make the round's own install a no-op.
 
+    ``environ`` is the environment the round runs its benchmark script with (its ``python3`` is the one installed for).
     Returns a note when it did not run (the checkout cannot be made to install once, so the round installs anyway).
 
     Raises:
-        EvalDepsError: the install outlived ``timeout_sec``, or lm-eval does not import after it.
+        EvalDepsError: the install outlived ``timeout_sec``, lm-eval does not import after it, or the round's install
+            would not find it installed.
     """
     if not ensure_lm_eval_install_once(inferencex):
         return (
             f"lm-eval was not installed before the server booted: {inferencex / _LIB} cannot be made to install it "
             "once, so the accuracy round installs it itself"
         )
-    env = dict(environ)
+    # The install's output is kept in its own log already; the round's eval keeps its output where the round says.
+    env = {**environ, EVAL_OUTPUT_ENV: str(log_path)}
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("wb") as log:
         process = subprocess.Popen(
@@ -74,13 +85,23 @@ def install_eval_deps(
                 f"installing lm-eval for the accuracy evaluation did not end within {timeout_sec:.0f} s; "
                 f"its output: {_tail(log_path)}"
             ) from None
-    probe = subprocess.run(_PROBE, env=env, cwd=inferencex, capture_output=True, text=True, timeout=300)
+    lib = str(inferencex / _LIB)
+    ready = subprocess.run(
+        ["bash", "-c", _READY, "bash", lib], env=env, cwd=inferencex, capture_output=True, timeout=300
+    )
+    if ready.returncode == 0:
+        return None
+    probe = subprocess.run(_IMPORT, env=env, cwd=inferencex, capture_output=True, text=True, timeout=300)
     if probe.returncode != 0:
         raise EvalDepsError(
             f"lm-eval does not import after its install (install exit {returncode}): "
             f"{probe.stderr.strip()[-_TAIL_CHARS:]}; the install's output: {_tail(log_path)}"
         )
-    return None
+    python3 = shutil.which("python3", path=env.get("PATH")) or "python3"
+    raise EvalDepsError(
+        f"lm-eval imports in {python3}, but the install left no marker the round's install finds, so the round would "
+        f"install it again on an idle server; the install's output: {_tail(log_path)}"
+    )
 
 
 def _end(process: subprocess.Popen) -> None:

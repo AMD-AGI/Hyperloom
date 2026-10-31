@@ -40,7 +40,13 @@ from hyperloom.measure.bundle import (
     ResultRejected,
     VerifiedBundle,
 )
-from hyperloom.measure.failures import RUNNER_EXITED, Disposition, FailureClassification, classify_test_failure
+from hyperloom.measure.failures import (
+    RUNNER_EXITED,
+    SANDBOX_ACQUIRE_TIMEOUT,
+    Disposition,
+    FailureClassification,
+    classify_test_failure,
+)
 from hyperloom.measure.hosted_live import LiveOutputs, finite_number
 from hyperloom.measure.hosted_log import (
     STATE_FINISHED,
@@ -70,6 +76,7 @@ from hyperloom.measure.sandboxes import (
     DEFAULT_MAX_PARALLEL_TESTS,
     DEFAULT_RUNNER_START_TIMEOUT_SEC,
     DEFAULT_TIMEOUT_SLACK_SEC,
+    AcquireTimedOut,
     AttemptTag,
     NoRunnerTemplate,
     PoolClosed,
@@ -433,6 +440,8 @@ class HostedMeasurementBackend:
                 remaining_sec=remaining,
                 stop=stop,
             )
+        except AcquireTimedOut as exc:  # before SandboxUnavailable, its base: no sandbox was made, so the line is safe
+            return self._create_failed(call, number, SANDBOX_ACQUIRE_TIMEOUT, str(exc))
         except SandboxUnavailable as exc:
             return _infra(call, HOSTED_RUNNER_UNAVAILABLE_RC, "runner_start_timeout", str(exc))
         except SandboxGone as exc:
@@ -482,7 +491,12 @@ class HostedMeasurementBackend:
     ) -> TestOutcome | None:
         """Re-attach to the sandbox of an unfinished attempt; ``None`` when it is gone and a new attempt must start."""
         try:
-            runner = self._pool.reattach(str(previous.sandbox_id), stop=stop)
+            runner = self._pool.reattach(str(previous.sandbox_id), stop=stop, timeout_sec=call.timeout_sec)
+        except AcquireTimedOut as exc:  # its sandbox measures on with no slot to hold it: end it, and the attempt
+            self._pool.discard(str(previous.sandbox_id))
+            outcome = _infra(call, HOSTED_INFRA_FAILURE_RC, SANDBOX_ACQUIRE_TIMEOUT, bounded(str(exc)))
+            self._mark_finished(previous, _end_fields(outcome, self._clock(), {"verdict": SANDBOX_ACQUIRE_TIMEOUT}))
+            return outcome
         except SandboxGone:
             self._mark_finished(previous, {"verdict": RUNNER_LOST, "reason": "sandbox gone on resume"})
             return None

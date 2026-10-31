@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from collections.abc import Callable
@@ -15,6 +16,7 @@ import pytest
 from hyperloom.measure import sandboxes
 from hyperloom.measure.sandboxes import (
     RUN_ID_KEY,
+    AcquireTimedOut,
     AttemptTag,
     NoRunnerTemplate,
     PoolClosed,
@@ -204,6 +206,66 @@ def test_a_full_quota_is_asked_again_after_the_retry_interval(monkeypatch: pytes
     threading.Timer(0.3, lambda: setattr(provider, "quota", None)).start()
     assert _acquire(pool).sandbox_id == "sbx-1"
     assert len(provider.calls) > 2 and pool.active == 1
+
+
+def test_waiting_for_the_quota_ends_at_the_tests_timeout_with_what_the_service_said(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(sandboxes, "_QUOTA_RETRY_SEC", 0.05)
+    monkeypatch.setattr(sandboxes, "WAIT_LOG_EVERY_SEC", 0.2)
+    caplog.set_level(logging.INFO, logger=sandboxes.__name__)
+    provider = _Provider()
+    provider.quota = 0  # filled by sandboxes of another role or process: nothing this pool holds ends to wake it
+    pool = _pool(provider)
+    started = time.monotonic()
+    with pytest.raises(AcquireTimedOut) as gave_up:
+        _acquire(pool, "req-q", attempt=2, timeout_sec=1)
+    assert time.monotonic() - started < 3, "the wait ended at the test's timeout"
+    assert "room in the grant's quota" in str(gave_up.value) and "grant_quota_exceeded" in str(gave_up.value)
+    assert pool.active == 0, "the slot is given back"
+    lines = [record.getMessage() for record in caplog.records]
+    assert any(line.startswith("test req-q attempt 2 waits for room in the grant's quota") for line in lines), lines
+    assert any("still waiting for room in the grant's quota" in line for line in lines), lines
+
+
+def test_waiting_for_a_slot_ends_at_the_tests_timeout_naming_what_holds_the_slots(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger=sandboxes.__name__)
+    provider = _Provider()
+    provider.create("runner-1", role="measurement", timeout_sec=10, metadata=_THIS_RUN)  # one nobody released
+    pool = _pool(provider, max_parallel_tests=1)
+    with pytest.raises(
+        AcquireTimedOut, match="a sandbox slot.*0 held by this pool and 1 running that it does not hold"
+    ):
+        _acquire(pool, "req-s", timeout_sec=0.5)
+    assert pool.active == 0 and len(provider.calls) == 1, "no create was sent for the attempt"
+    assert any("req-s attempt 1 waits for a sandbox slot" in r.getMessage() for r in caplog.records)
+
+
+def test_a_reattach_waits_for_its_slot_no_longer_than_it_is_told() -> None:
+    provider = _Provider()
+    survivor = provider.create("runner-1", role="measurement", timeout_sec=10, metadata=_THIS_RUN)
+    provider.create("runner-1", role="measurement", timeout_sec=10, metadata=_THIS_RUN)  # holds the only slot
+    pool = _pool(provider, max_parallel_tests=1)
+    with pytest.raises(AcquireTimedOut, match="a sandbox slot"):
+        pool.reattach(survivor.sandbox_id, timeout_sec=0.3)
+    assert pool.active == 0
+
+
+def test_a_create_that_waits_for_its_sandbox_says_so_while_it_waits(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(sandboxes, "WAIT_LOG_EVERY_SEC", 0.1)
+    caplog.set_level(logging.INFO, logger=sandboxes.__name__)
+    provider = _Provider()
+    slow = provider.create
+    provider.create = lambda *a, **kw: (time.sleep(0.5), slow(*a, **kw))[1]  # type: ignore[method-assign]
+    runner = _acquire(_pool(provider), "req-c", timeout_sec=30)
+    lines = [record.getMessage() for record in caplog.records]
+    assert any(line.startswith("test req-c attempt 1: creating its sandbox") for line in lines), lines
+    assert any("req-c attempt 1 still waiting for its sandbox to run" in line for line in lines), lines
+    assert any(f"sandbox {runner.sandbox_id} is running" in line for line in lines), lines
 
 
 def test_waiting_for_the_quota_ends_when_the_run_stops() -> None:
@@ -421,7 +483,9 @@ def test_the_create_call_carries_the_template_lifetime_and_metadata_of_the_desig
     call = provider.calls[0]
     assert call["template"] == "runner-1" and call["role"] == "measurement"
     assert call["timeout_sec"] == 1500, "the test's timeout plus the slack"
-    assert call["wait_sec"] == 3000
+    assert 590 < call["wait_sec"] <= 600, "the wait for the sandbox to run is bounded by the test's own timeout"
+    _acquire(pool, "req-8", timeout_sec=5000)
+    assert provider.calls[1]["wait_sec"] == 3000, "and by the pool's own when that is shorter"
     assert call["envs"] is None, "a pool given no create environment passes none"
     assert call["metadata"] == {
         "agent-sandbox.io/idempotency-key": "run-1:req-7:3",

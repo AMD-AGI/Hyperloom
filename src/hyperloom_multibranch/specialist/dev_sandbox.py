@@ -213,6 +213,10 @@ class Released:
     seconds: float
 
 
+#: What one Forge ledger says its runs spent: dollars and tokens.
+Spend = tuple[float, TokenCounts]
+
+
 @dataclass
 class _Lease:
     lease: BranchLease
@@ -224,7 +228,7 @@ class _Lease:
     term: LeaseTerm = LeaseTerm.SHORT
     queued_since: float | None = None
     processes: dict[int, AgentProcess] = field(default_factory=dict)
-    charged: tuple[float, TokenCounts] = (0.0, TokenCounts())
+    charged: dict[Path, Spend] = field(default_factory=dict)
     charged_at: float = 0.0
     #: Whether the branch log says the lease outlived a run, since the branch's last call.
     kept_noted: bool = False
@@ -526,12 +530,15 @@ class DevLeases:
     async def _charge(self, branch: str, held: _Lease) -> None:
         """Record what the Forge runs under the lease spent since the last charge."""
         spent = await asyncio.to_thread(forge_spend, held.sandbox.root)
-        if spent is None:
-            return
-        cost, tokens = spent[0] - held.charged[0], _less(spent[1], held.charged[1])
+        cost, tokens = 0.0, TokenCounts()
+        for ledger, now in spent.items():
+            before = held.charged.get(ledger, (0.0, TokenCounts()))
+            # A ledger whose total fell was restarted by a rerun in the same directory: all it holds is new.
+            new = now if _fell(now, before) else (now[0] - before[0], _less(now[1], before[1]))
+            cost, tokens = cost + new[0], _plus(tokens, new[1])
         if cost <= 0 and tokens == TokenCounts():
             return
-        held.charged = spent
+        held.charged.update(spent)
         await self._blackboards(branch).record_llm_usage(
             LlmUsage(branch, UsageSource.SPECIALIST, cost, tokens, f"forge:{held.lease.lease_id}")
         )
@@ -563,18 +570,19 @@ class DevLeases:
 FORGE_LEDGER = "llm_usage.json"
 
 
-def forge_spend(root: Path) -> tuple[float, TokenCounts] | None:
-    """What the Forge runs under ``root`` spent on LLM calls, summed over their ledgers; ``None`` with no ledger."""
-    ledgers = [json.loads(path.read_text(encoding="utf-8")) for path in sorted(root.rglob(FORGE_LEDGER))]
-    if not ledgers:
-        return None
-    tokens = TokenCounts(
-        input=sum(int(ledger.get("input_tokens", 0)) for ledger in ledgers),
-        output=sum(int(ledger.get("output_tokens", 0)) for ledger in ledgers),
-        cache_read=sum(int(ledger.get("cache_read_input_tokens", 0)) for ledger in ledgers),
-        cache_write=sum(int(ledger.get("cache_creation_input_tokens", 0)) for ledger in ledgers),
-    )
-    return sum(float(ledger.get("total_cost_usd", 0.0)) for ledger in ledgers), tokens
+def forge_spend(root: Path) -> dict[Path, Spend]:
+    """What each Forge ledger under ``root`` says its runs spent on LLM calls, by ledger path."""
+    spent = {}
+    for path in sorted(root.rglob(FORGE_LEDGER)):
+        ledger = json.loads(path.read_text(encoding="utf-8"))
+        tokens = TokenCounts(
+            input=int(ledger.get("input_tokens", 0)),
+            output=int(ledger.get("output_tokens", 0)),
+            cache_read=int(ledger.get("cache_read_input_tokens", 0)),
+            cache_write=int(ledger.get("cache_creation_input_tokens", 0)),
+        )
+        spent[path] = (float(ledger.get("total_cost_usd", 0.0)), tokens)
+    return spent
 
 
 def _ordinal(place: int) -> str:
@@ -584,6 +592,14 @@ def _ordinal(place: int) -> str:
 
 def _less(total: TokenCounts, before: TokenCounts) -> TokenCounts:
     return TokenCounts(**{item.name: getattr(total, item.name) - getattr(before, item.name) for item in fields(total)})
+
+
+def _plus(one: TokenCounts, other: TokenCounts) -> TokenCounts:
+    return TokenCounts(**{item.name: getattr(one, item.name) + getattr(other, item.name) for item in fields(one)})
+
+
+def _fell(now: Spend, before: Spend) -> bool:
+    return now[0] < before[0] or any(getattr(now[1], f.name) < getattr(before[1], f.name) for f in fields(now[1]))
 
 
 def _report_failure(task: asyncio.Task[None]) -> None:

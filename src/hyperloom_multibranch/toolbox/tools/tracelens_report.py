@@ -42,6 +42,8 @@ It is for LLM serving traces (SGLang, vLLM, ATOM): the splitter reads their step
 from __future__ import annotations
 
 import asyncio
+import csv
+import json
 import math
 import shlex
 import subprocess
@@ -54,6 +56,9 @@ from typing import TYPE_CHECKING, Any
 
 from hyperloom.common.outside_facts import ENV_CONC, ENV_ISL, ENV_OSL, ENV_RANDOM_RANGE_RATIO
 from hyperloom.inference_optimizer.session import paths as session_paths
+from hyperloom.measure.profile_traces import PROFILE_DIR
+from hyperloom.measure.ruppell import CHECK_FILE, MODULE_SHARES_FILE, UNATTRIBUTED
+from hyperloom.measure.ruppell import OUTPUT_DIR as RUPPELL_DIR
 from hyperloom.orchestrator.actions.executors import RoundWatch, run_with_session_kill
 from hyperloom.orchestrator.trace_analysis import count_gpu_kernel_events, discover_trace_inputs, is_capture_fragment
 from hyperloom.orchestrator.trace_analysis.tracelens_arch_benchmark import resolve_arch_json_path
@@ -71,6 +76,7 @@ from hyperloom_multibranch.toolbox.tools.op_shares import (
     EXCLUDED_CLAIMED_KEY,
     EXCLUDED_EVENTS_KEY,
     KERNEL_SHARES_KEY,
+    MODULE_SHARES_KEY,
     OWN_DEGRADED_KEY,
 )
 from hyperloom_multibranch.toolbox.tools.phase_mix import (
@@ -120,6 +126,8 @@ _ENCODING = "utf-8"
 #: The error class of a perf report that lacks a table the route reads.
 _INCOMPLETE = "perf_report_incomplete"
 _CAPTURE_KEYS = ("capture_folder", "graph_capture_path", "capture_folder_path")
+#: How far above the trace input its ``profile`` directory may be (a trace file sits a level or two below it).
+_PROFILE_DEPTH = 3
 _OPS_SUMMARY = "ops_summary.csv"
 _TAIL_CHARS = 1500
 #: Decimal places of the times in the result.
@@ -439,7 +447,41 @@ def _analyse(payload: Mapping[str, Any], session_dir: Path) -> dict[str, Any]:
         "graph_under_recorded": coverage.graph_under_recorded,
         **mix_fields(windows, mix, table),
         "trace_health_warnings": warnings,
+        **ruppell_fields(trace_input),
         "duration_sec": round(time.monotonic() - started, _TIME_DIGITS),
+    }
+
+
+def ruppell_fields(trace_input: Path) -> dict[str, Any]:
+    """What ruppell kept of the profile whose traces are at ``trace_input`` (``<output>/profile`` or a file below it):
+    its module table, whether its own check passed, and the share of decode GPU time it attributed to a module.
+
+    Empty when ruppell did not trace the profile. ``ruppell_status`` is ``ok``, ``check_failed`` or ``unchecked`` (no
+    readable check), and the decode share is ``None`` when the table has no decode step.
+    """
+    profile = next(
+        (path for path in (trace_input, *trace_input.parents[:_PROFILE_DEPTH]) if path.name == PROFILE_DIR), None
+    )
+    kept = profile.parent / RUPPELL_DIR if profile is not None else None
+    if kept is None or not (kept / MODULE_SHARES_FILE).is_file():
+        return {}
+    try:
+        verdict = json.loads((kept / CHECK_FILE).read_text(encoding=_ENCODING)).get("ok")
+    except (OSError, ValueError, AttributeError):
+        verdict = None
+    status = "unchecked" if verdict is None else "ok" if verdict is True else "check_failed"
+    try:
+        with (kept / MODULE_SHARES_FILE).open(encoding=_ENCODING, newline="") as handle:
+            decode = [row for row in csv.DictReader(handle) if row.get("kind") == "decode"]
+        total = sum(float(row.get("gpu_ms") or 0.0) for row in decode)
+        unattributed = sum(float(row.get("gpu_ms") or 0.0) for row in decode if row.get("module") == UNATTRIBUTED)
+    except (OSError, ValueError, csv.Error):
+        return {MODULE_SHARES_KEY: "", "ruppell_status": "unreadable", "ruppell_check_ok": verdict is True}
+    return {
+        MODULE_SHARES_KEY: str(kept / MODULE_SHARES_FILE),
+        "ruppell_status": status,
+        "ruppell_check_ok": verdict is True,
+        "ruppell_decode_attributed_share": round(1.0 - unattributed / total, 6) if total > 0 else None,
     }
 
 
@@ -466,6 +508,7 @@ __all__ = [
     "REPORT_ROUTE",
     "WORKLOAD_HINTS",
     "report_handler",
+    "ruppell_fields",
     "split_hint",
     "unusable_trace",
     "with_window_shares",

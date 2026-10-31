@@ -328,12 +328,23 @@ def _install_eval_deps(ctx: _Context, spec: MeasurementSpec, points: list[Path],
     if is_magpie_agentx(benchmark):
         return
     ctx.phases.begin(EVAL_DEPS)
-    try:  # the round's PATH is this sandbox's (``rewrite_config``), so its python3 is the one installed for
-        note = install_eval_deps(inferencex, environ=ctx.environ, log_path=ctx.files / EVAL_DEPS_LOG)
+    try:
+        note = install_eval_deps(
+            inferencex, environ=_round_environment(ctx, spec, points), log_path=ctx.files / EVAL_DEPS_LOG
+        )
     except EvalDepsError as exc:
         raise RunnerFailure(_START_FAILED, str(exc)) from exc
     if note:
         ctx.notes.append(note)
+
+
+def _round_environment(ctx: _Context, spec: MeasurementSpec, points: list[Path]) -> dict[str, str]:
+    """The environment a round's benchmark script starts with: what the server inherits from this runner, and the
+    point's own variables over it, as Magpie sets them (upper-cased), so ``PATH`` and with it ``python3`` are the
+    round's."""
+    config = yaml.safe_load(points[0].read_text()) or {}
+    inherited = inherited_environment(ctx.environ, spec.process_env, spec.unset_envs)
+    return {**inherited, **{str(name).upper(): str(value) for name, value in server_environment(config).items()}}
 
 
 def _case_attachments(spec: MeasurementSpec) -> tuple[AttachmentRef, ...]:
@@ -563,6 +574,8 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
     progress.phase("running")
     started = time.time()
     outcome, timed_out = _execute_watched(ctx, call)
+    if outcome is not None:
+        ctx.notes.extend(outcome.notes)
     ctx.cards.enforce_guard()
     observed = ctx.cards.observation()
     if observed is not None:

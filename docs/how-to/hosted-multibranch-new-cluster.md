@@ -25,7 +25,7 @@ These are set in the app container's environment.
 | --- | --- | --- |
 | `USER_DATA_PATH` | yes | Absolute, writable directory. Session directories are created below `<model basename>/` here; put it on persistent storage so a restarted run finds its session again. |
 | `HYPERLOOM_RUNNER_CACHE` | yes | Absolute, writable directory on shared storage that the measurement sandboxes also mount. The session builds the runner cache entry of the commit it runs here (`<cache>/<commit>/`) before the first test. This is the path *on the app host*; the sandboxes may mount the same storage elsewhere (see the template's `HYPERLOOM_RUNNER_CACHE` below). |
-| `HYPERLOOM_RUNNER_WHEEL_TARGET` | yes | The measurement image's interpreter and platform, for example `cp310-manylinux_2_28_x86_64`. The runner cache's wheels are built for it, not for the app container. |
+| `HYPERLOOM_RUNNER_WHEEL_TARGET` | yes | The measurement image's interpreter and platform, for example `cp310-manylinux_2_28_x86_64`, or `cp314-manylinux_2_28_x86_64` for the Python 3.14 `rocm/vllm` images. The runner cache's wheels are built for it, not for the app container, from the lock of that Python: `requirements/runner-cp314.lock` for `cp314`, `requirements/runner.lock` for the others. An entry holds the wheels of one Python, so deployments whose images run different Pythons need different `HYPERLOOM_RUNNER_CACHE` directories; a sandbox whose interpreter is not the entry's fails its start with `runner_start_failed`. |
 | `HYPERLOOM_SOURCE_REPO` | yes | Where the run's Hyperloom source is fetched from: `OWNER/NAME` on GitHub, any git URL, or a local path (for example a mirror on shared storage when the app host has no GitHub egress). |
 | `HYPERLOOM_SOURCE_SHA` | yes | The full 40-hex commit the run executes. |
 | `HYPERLOOM_RSI_ARCHIVE` | yes | Writable directory where sessions archive their search trees for later sessions to learn from. Point every session of a deployment at the same directory to share what they learn; a private directory keeps a session's tree out of the shared archive. There is no default. |
@@ -84,6 +84,18 @@ HYPERLOOM_RUNNER_CACHE=/shared_nfs/hyperloom/runner-cache
 INFERENCEX_REPO=/shared_nfs/hyperloom/mirrors/InferenceX.git
 MAGPIE_REPO=/shared_nfs/hyperloom/mirrors/Magpie.git
 ```
+
+For a measurement image on CPython 3.14 (the current `rocm/vllm` tags), set
+`HYPERLOOM_RUNNER_WHEEL_TARGET=cp314-manylinux_2_28_x86_64` and give it a cache of its own, for example
+`HYPERLOOM_RUNNER_CACHE=/shared_nfs/hyperloom/runner-cache-cp314` on the app host and in the template. To build an
+entry by hand, for example to check an image before a session, run from a checkout with egress (pip 22.3 or newer):
+
+```shell
+PYTHONPATH=src python -m hyperloom.measure.runner.cache_build --sha <commit> --repo <checkout> \
+    --out /shared_nfs/hyperloom/runner-cache-cp314 --wheel-target cp314-manylinux_2_28_x86_64
+```
+
+It prints the entry's `manifest_sha256`, the value a template pins with `HYPERLOOM_RUNNER_CACHE_MANIFEST_SHA256`.
 
 On a cluster whose sandboxes mount the shared volume at, say, `/data`, keep the app host's values and set the
 template's `HYPERLOOM_RUNNER_CACHE=/data/hyperloom/runner-cache` (and the mirrors below `/data`).

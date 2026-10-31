@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.contracts.measurement import AccuracyValue
+from hyperloom.measure.failures import SANDBOX_ACQUIRE_TIMEOUT
 from hyperloom.measure.hosted import STOPPED_RETURNCODE, HostedStartError
 from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT, STATE_SUBMITTED
 from hyperloom.measure.returncodes import (
@@ -447,6 +448,27 @@ def test_a_restarted_application_reattaches_instead_of_measuring_twice(rig, tmp_
     assert (record.state, record.attempt) == (STATE_FINISHED, 1) and record.extra["verified"] is True
     report = call.output_dir / "benchmark_fake_20261014_000000" / "benchmark_report.json"
     assert json.loads(report.read_text())["throughput"]["output_throughput"] == 1234.0
+
+
+def test_a_restart_that_finds_no_slot_for_its_sandbox_ends_the_attempt_with_the_reason(rig, tmp_path) -> None:
+    """The re-attach waits for a slot no longer than the test's timeout; the sandbox it could not hold is closed."""
+    r = rig()
+    call = make_call(tmp_path, point=point_yaml(tmp_path, fake_mode="hang"), timeout_sec=1)
+    _crash_mid_wait(r, call)
+    submitted = r.backend.journal.latest("req-1")
+    other = r.provider.create(
+        runner_template().name, role="measurement", timeout_sec=60, metadata={"hyperloom.run-id": r.config.run_id}
+    )  # a sandbox of the run that nobody holds: it takes the only slot
+    started = time.monotonic()
+    outcome = r.another_backend(max_parallel_tests=1).run_test(call)
+    assert time.monotonic() - started < 10
+    assert outcome.returncode == HOSTED_INFRA_FAILURE_RC
+    assert outcome.failure_reason == SANDBOX_ACQUIRE_TIMEOUT and "a sandbox slot" in outcome.stderr
+    record = r.backend.journal.latest("req-1")
+    assert (record.state, record.attempt, record.sandbox_id) == (STATE_FINISHED, 1, submitted.sandbox_id)
+    assert record.extra["verdict"] == SANDBOX_ACQUIRE_TIMEOUT
+    running = {info.sandbox_id for info in r.provider.find({}, role="measurement")}
+    assert submitted.sandbox_id not in running and other.sandbox_id in running
 
 
 def test_a_restart_before_the_sheet_was_sent_sends_it_to_the_sandbox_that_waits(rig, tmp_path) -> None:

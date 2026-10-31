@@ -80,6 +80,10 @@ Since your last turn ended, this arrived for your branch:
 Read what bears on your work (test_result, blackboard_brief) and carry on from where you stopped."""
 _WAKE_ITEM = "- {kind} {pointer}: {summary}"
 _MOVED = "Since your last turn ended, the integration head moved."
+_LEASE_WAKE = """\
+Your long dev lease's process still runs. Read its progress with dev_sandbox_read if you want to, act on it, or end \
+your turn again to keep waiting."""
+
 _NUDGE = """\
 Your turn ended with no test of yours running and nothing new for your branch. Nothing arrives on its own: a brief \
 comes only when the integration head moves, and no one hands your branch a new direction, so read blackboard_brief for \
@@ -171,7 +175,8 @@ instead. To profile: \
 submit_test with kind "profile", purpose "profile", your head as the parent commit and no delta. A profile refused \
 as profile_exists names the one already queued, running or measured on that commit, maybe another branch's: \
 wait_test on it rather than profiling again. Once the profile succeeded, start_analysis with tool "tracelens" and that test's id as profile_request_id reports each operator's share through \
-poll_inbox. When start_analysis lists roofline, the same profile test with tool "roofline" reports how far \
+poll_inbox; when ruppell traced the profile, the result also names module_shares_path, a table of decode and prefill GPU \
+time per module with graph-replayed kernels attributed, which you may read. When start_analysis lists roofline, the same profile test with tool "roofline" reports how far \
 each kernel is from the card's compute or memory bound: a kernel far below its bound is one a kernel change can gain \
 on. When start_analysis lists upstream_pr_search, search with tool "upstream_pr_search" (params repo_url and \
 keywords) before you write a source or kernel change: an upstream PR that already does it is the patch to start from. \
@@ -437,7 +442,8 @@ _DEV_SANDBOX = (
     "queue for cards. When a lease is refused, submit the full test instead of waiting.\n\n"
     "Forge, a kernel optimizer you may call on a hot kernel, runs for hours: lease it with term=long (up to 6 h, kept "
     "while its process runs). forge-fuse finds a fusion in the code by itself, or around a kernel you name, from a "
-    "decode trace without CUDA graphs; forge-loop rewrites one kernel you name (to FlyDSL, to assembly, or HIP to HIP, "
+    "decode trace without CUDA graphs; forge-fuse checks its fusion by serving the model at the session's TP: lease "
+    "it that many cards. forge-loop rewrites one kernel you name (to FlyDSL, to assembly, or HIP to HIP, "
     "with --kernel-backend) and forge-rewrite-by-flydsl ports one to FlyDSL. Run them as `python -m kernelforge.cli "
     "<command>` (--help lists the options) with dev_sandbox_start, on a copy of your worktree under the lease's root "
     "(git worktree add there; Forge commits and switches branches in its workspace, so never point it at your own "
@@ -616,6 +622,12 @@ def _arrivals(items: Sequence[InboxItem], notices: Sequence[BranchLogRecord]) ->
     return "\n".join(lines)
 
 
+def lease_wake_message() -> str:
+    """The message to a specialist whose turn ended while its long dev lease's process runs, before its silence would
+    be taken for a lost session."""
+    return _LEASE_WAKE
+
+
 def nudge_message() -> str:
     """The message to a specialist whose turn ended with nothing of its own running and nothing new arrived."""
     return _NUDGE
@@ -677,6 +689,7 @@ __all__ = [
     "idle_resume_message",
     "integration_section",
     "launch_prompt",
+    "lease_wake_message",
     "nudge_message",
     "prompt_versions",
     "resume_message",
