@@ -622,11 +622,11 @@ class AgentSession:
                 return wake_message(
                     (*items, *landed), notices, integration=_joined(followed.detail if followed else "", holdings)
                 )
-            lease, tests = self._dev_lease_busy(), await self._tests_in_flight()
-            if lease or tests or seen.profiles:
+            pending = await self._pending(seen)
+            if pending:
                 quiet_since = None
                 if loop.time() - waited_since >= self._setup.wait_wake_s:
-                    return lease_wake_message() if lease else wait_wake_message(tests, sorted(seen.profiles))
+                    return pending
             else:
                 quiet_since = loop.time() if quiet_since is None else quiet_since
                 if loop.time() - quiet_since >= patience:
@@ -664,6 +664,14 @@ class AgentSession:
             for record in records
             if record.request.branch == branch and record.request.kind is TestKind.TEST
         )
+
+    async def _pending(self, seen: _Seen) -> str:
+        """The wake for what of the branch still runs, its long dev lease's process, a test of it or another branch's
+        profile of its head; ``""`` when none does."""
+        if self._dev_lease_busy():
+            return lease_wake_message()
+        tests = await self._tests_in_flight()
+        return wait_wake_message(tests, sorted(seen.profiles)) if tests or seen.profiles else ""
 
     def _dev_lease_busy(self) -> bool:
         return self._setup.dev_leases is not None and self._setup.dev_leases.busy(self._start.branch)
