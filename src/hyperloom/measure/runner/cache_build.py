@@ -61,6 +61,7 @@ import argparse
 import re
 import fcntl
 import hashlib
+import importlib.metadata
 import json
 import os
 import secrets
@@ -130,6 +131,9 @@ _TARGET_TAG = re.compile(r"cp(?P<major>3)(?P<minor>[0-9]+)-manylinux_2_(?P<glibc
 #: The legacy manylinux names of a glibc 2 minor version; pip accepts both spellings and downloads only what it is told.
 _LEGACY_MANYLINUX = {17: "manylinux2014", 12: "manylinux2010", 5: "manylinux1"}
 _OLDEST_GLIBC_MINOR = 5
+#: The first pip whose ``install --python-version`` checks ``Requires-Python`` against that version; older ones check it
+#: against the interpreter pip runs on, the builder's, which says nothing about the runner's.
+_PIP_CHECKS_TARGET_PYTHON = (24, 2)
 
 
 class CacheBuildError(CacheError):
@@ -342,6 +346,23 @@ def _wheel_entries(wheels: Path, pins: list[LockPin], built: Mapping[str, str]) 
     return tuple(entries.values())
 
 
+def _pip_version() -> tuple[int, ...]:
+    """The builder's pip as numbers (``(24, 2)``); ``()`` when it cannot be read."""
+    try:
+        return tuple(int(part) for part in re.findall(r"[0-9]+", importlib.metadata.version("pip"))[:2])
+    except importlib.metadata.PackageNotFoundError:
+        return ()
+
+
+def _requires_python_flags(target: WheelTarget) -> list[str]:
+    """``--ignore-requires-python`` when the builder's pip would check ``Requires-Python`` against its own interpreter
+    instead of the target's (pip before 24.2): a numpy that needs Python 3.12 is no reason to refuse a 3.14 entry built
+    on 3.10. The wheel tags are checked either way, and the sandbox's pip checks ``Requires-Python`` for itself."""
+    if target.python_version and _pip_version() < _PIP_CHECKS_TARGET_PYTHON:
+        return ["--ignore-requires-python"]
+    return []
+
+
 def _check_installable(entry: Path, manifest: Manifest, target: WheelTarget) -> None:
     """Refuse an entry whose wheels alone do not satisfy what the sandbox installs, for the target's interpreter."""
     with tempfile.TemporaryDirectory(dir=entry, prefix=".resolve-") as scratch:
@@ -349,7 +370,7 @@ def _check_installable(entry: Path, manifest: Manifest, target: WheelTarget) -> 
         requirements.write_text(requirements_text(manifest), encoding=_UTF8)
         install = [_ISOLATED, "install", "--dry-run", "--target", str(Path(scratch) / "site"), _NO_INDEX]
         install += [_FIND_LINKS, str(entry / WHEELS_DIR), _ONLY_BINARY, _REQUIRE_HASHES, _NO_DEPS]
-        install += [*_PIP_QUIET, *target.pip_args(), "-r", str(requirements)]
+        install += [*_PIP_QUIET, *target.pip_args(), *_requires_python_flags(target), "-r", str(requirements)]
         interpreter = f"Python {target.python_version}" if target.python_version else "the builder's interpreter"
         _run(_pip(*install), f"checking that the runner ({interpreter}) can install the entry's wheels")
 

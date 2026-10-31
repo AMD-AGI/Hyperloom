@@ -155,7 +155,8 @@ def _commit_with_a_lock_for_cp314(rig: Rig, root: Path) -> tuple[Commit, Path, d
     is the same lock but for ``bin_pkg==2.0`` (one cp314 wheel); the wheelhouse holds all of them."""
     wheelhouse, digests = _binary_wheelhouse(rig, root, _INTERPRETERS)
     tag = f"cp314-cp314-{_PLATFORM}"
-    _, digests["cp314"] = build_wheel(wheelhouse, _BIN, "2.0", "ORIGIN = 'cp314'\n", tag=tag)
+    # Like numpy 2.5, it needs a newer Python than the builder runs.
+    _, digests["cp314"] = build_wheel(wheelhouse, _BIN, "2.0", "ORIGIN = 'cp314'\n", tag=tag, requires_python=">=3.14")
 
     def two_locks(repo: Path) -> None:
         shared = (repo / LOCK_FILE).read_text(encoding="utf-8")
@@ -243,3 +244,14 @@ def test_the_command_line_takes_the_target_as_one_tag_and_alone(
     assert "must name the runner's interpreter" in capsys.readouterr().err
     with pytest.raises(SystemExit):
         cache_build.main([*common, "--wheel-target", "cp314-manylinux_2_28_x86_64", "--python-version", "3.14"])
+
+
+@pytest.mark.parametrize(("pip", "flags"), [((23, 0), ["--ignore-requires-python"]), ((24, 2), []), ((26, 1), [])])
+def test_the_install_check_ignores_requires_python_only_where_pip_would_check_the_builders_interpreter(
+    monkeypatch: pytest.MonkeyPatch, pip: tuple[int, int], flags: list[str]
+) -> None:
+    monkeypatch.setattr(cache_build, "_pip_version", lambda: pip)
+    target = runner_wheel_target({RUNNER_TARGET_ENV: "cp314-manylinux_2_28_x86_64"})
+
+    assert cache_build._requires_python_flags(target) == flags
+    assert cache_build._requires_python_flags(BuildOptions().target) == []
