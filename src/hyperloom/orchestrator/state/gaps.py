@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.timeutil import now_iso
 
 from ._shared_state import gap_rows
 

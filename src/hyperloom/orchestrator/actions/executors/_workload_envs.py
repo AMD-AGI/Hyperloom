@@ -31,9 +31,9 @@ from typing import Any, Mapping, NamedTuple
 import yaml
 
 from hyperloom.common.agentx_workload import pin_mlperf_round_concurrency
-from hyperloom.common.coerce import to_str_list
+from hyperloom_common.coerce import to_str_list
 from hyperloom.inference_optimizer.runtime_environment import prepend_launch_path
-from hyperloom.common.gpu_identity import AMD_GPU_BOARDS
+from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
 from hyperloom.common.perf_metric import (
     AGENTX_KEEP_P50_THRESHOLD_PCT,
     GRADED_INTVTY,
@@ -1524,7 +1524,7 @@ def materialize_benchmark_config(
     import yaml
 
     from hyperloom.common.benchmark_config import is_magpie_agentx
-    from hyperloom.common.coerce import to_str_list
+    from hyperloom_common.coerce import to_str_list
     from .magpie_agentx import LaunchChanges, apply_launch_changes, materialize_agentx, recipe_option_names
 
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
@@ -1534,7 +1534,7 @@ def materialize_benchmark_config(
     inherited = "" if replacing else os.environ.get("INFERENCE_OPTIMIZER_SERVER_ARGS", "")
     recipe_options = recipe_option_names(config_path)
     apply_launch_changes(config["benchmark"], LaunchChanges(args=inherited), recipe_options=recipe_options)
-    from hyperloom.common.env import is_truthy
+    from hyperloom_common.env import is_truthy
 
     unset_envs = to_str_list(launch.unset_envs)
     server_env, dropped = filter_untrusted_env_mapping(

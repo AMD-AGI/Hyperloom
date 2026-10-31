@@ -13,7 +13,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from hyperloom.common.io import JsonLineFormat, append_jsonl
+from hyperloom_common.io import JsonLineFormat, append_jsonl
 from hyperloom.orchestrator.knowledge.recipe_kb_t0 import T0AnchorRequest, run_t0_anchor
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -182,7 +182,7 @@ def _bootstrap_knowledge_plane(
 ) -> "KnowledgePlane":
     """Construct the :class:`KnowledgePlane` facade."""
     from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
-    from hyperloom.common.pr_monitor_urls import pr_monitor_mcp_url
+    from hyperloom_common.pr_monitor_urls import pr_monitor_mcp_url
 
     pr_enabled = bool(getattr(args, "pr_monitor_enabled", True))
     pr_mcp_url = pr_monitor_mcp_url() if pr_enabled else ""

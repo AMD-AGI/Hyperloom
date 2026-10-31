@@ -9,7 +9,7 @@ import shlex
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from hyperloom.common.coerce import to_str_list
+from hyperloom_common.coerce import to_str_list
 
 from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
 

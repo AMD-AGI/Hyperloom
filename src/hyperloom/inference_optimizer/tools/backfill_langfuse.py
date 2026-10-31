@@ -80,7 +80,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.jsonio import read_json, read_jsonl
+from hyperloom_common.jsonio import read_json, read_jsonl
 from hyperloom.inference_optimizer.session.optimization_journal import (
     OUTCOME_KEEP,
     OUTCOME_NO_PROMOTE,

@@ -27,17 +27,10 @@ ABANDONED = "abandoned"
 #: The round cleared a new boot failure without reaching a clean boot.
 ADVANCED = "advanced"
 
-#: The lease ran out and the holder's processes were confirmed killed.
+#: The lease ran out and the holder's processes were killed.
 EXPIRED_REAPED = "expired_reaped"
 
-#: The lease ran out and nothing ever confirmed the holder dead.
-EXPIRED_UNREAPED = "expired_unreaped"
-
-#: The two ways a lease can run out, kept apart because the reap either
-#: confirmed the holder dead or did not.
-EXPIRY_OUTCOMES = frozenset({EXPIRED_REAPED, EXPIRED_UNREAPED})
-
-OUTCOMES = frozenset({BOOTED, FAILED, ABANDONED, ADVANCED, *EXPIRY_OUTCOMES})
+OUTCOMES = frozenset({BOOTED, FAILED, ABANDONED, ADVANCED, EXPIRED_REAPED})
 
 #: Rejection reasons, recorded on the outbox row.
 UNKNOWN_ROUND = "unknown_round"
@@ -60,14 +53,12 @@ __all__ = [
     "BOOTED",
     "EXCLUDED",
     "EXPIRED_REAPED",
-    "EXPIRED_UNREAPED",
     "FAILED",
     "NOT_OWNER",
     "OPEN",
     "SETTLED",
     "STALE_FENCE",
     "Round",
-    "RoundEvent",
     "RoundRequest",
     "RoundResult",
     "RoundStore",
@@ -126,61 +117,6 @@ class Round:
 
 
 @dataclass(frozen=True)
-class RoundEvent:
-    """One ``round_events`` row: an attempt, and what became of it.
-
-    Attributes:
-        event_id: Monotone id; also the outbox's order.
-        round_id: The round the attempt addressed.
-        request_id: The caller's id for this attempt, carried into a re-drive.
-        op: ``open`` / ``renew`` / ``handoff`` / ``settle``.
-        result: ``applied`` / ``rejected`` / ``duplicate``.
-        outcome: The outcome a settle asked for.
-        fence: The fence the caller presented.
-        actor_task_id: The task that made the attempt.
-        reason: Why a rejected attempt was rejected.
-        evidence: Whatever the caller recorded alongside the attempt.
-        recorded_unix: When it was recorded.
-    """
-
-    event_id: int
-    round_id: str
-    request_id: str
-    op: str
-    result: str
-    outcome: str
-    fence: int
-    actor_task_id: str
-    reason: str
-    evidence: dict[str, Any] = field(default_factory=dict)
-    recorded_unix: float = 0.0
-
-    @classmethod
-    def from_row(cls, row: Any) -> "RoundEvent":
-        """Build a :class:`RoundEvent` from a ``round_events`` row.
-
-        Args:
-            row: A mapping-like database row (``sqlite3.Row`` in production).
-
-        Returns:
-            RoundEvent: The decoded row, with ``evidence`` JSON-decoded.
-        """
-        return cls(
-            event_id=int(row["event_id"]),
-            round_id=str(row["round_id"]),
-            request_id=str(row["request_id"]),
-            op=str(row["op"]),
-            result=str(row["result"]),
-            outcome=str(row["outcome"]),
-            fence=int(row["fence"]),
-            actor_task_id=str(row["actor_task_id"]),
-            reason=str(row["reason"]),
-            evidence=json.loads(row["evidence"]),
-            recorded_unix=float(row["recorded_unix"]),
-        )
-
-
-@dataclass(frozen=True)
 class RoundRequest:
     """The caller's stamp on one attempt against a round.
 
@@ -201,23 +137,11 @@ class RoundResult:
 
     Attributes:
         ok: Whether the store's state now reflects what was asked.
-        round_id: The round addressed.
-        fence: The fence in force after the operation.
-        state: The round's state after the operation.
-        outcome: The round's outcome after the operation.
         reason: Why a failed operation failed; empty when ``ok``.
-        duplicate: Whether this was a replay of an attempt already applied.
-        event_id: The outbox row this attempt wrote.
     """
 
     ok: bool
-    round_id: str
-    fence: int = 0
-    state: str = ""
-    outcome: str = ""
     reason: str = ""
-    duplicate: bool = False
-    event_id: int = 0
 
 
 class RoundStore:
@@ -303,7 +227,7 @@ class RoundStore:
             )
             if cur.rowcount != 1:
                 cur.execute("SELECT 1 FROM bringup_rounds WHERE round_id = ?", (round_id,))
-                return attempt.reject(cur, None, ALREADY_EXISTS if cur.fetchone() is not None else EXCLUDED)
+                return attempt.reject(cur, ALREADY_EXISTS if cur.fetchone() is not None else EXCLUDED)
             _place_lane(cur, opened)
             if join is not None:
                 join(cur)
@@ -350,8 +274,7 @@ class RoundStore:
             lease_sec: The new holder's lease, from ``request.now_unix``.
 
         Returns:
-            RoundResult: ``ok`` with the advanced ``fence``; otherwise
-            ``reason``.
+            RoundResult: ``ok`` when the round moved; otherwise ``reason``.
         """
         return await self._swap(
             held,
@@ -381,8 +304,8 @@ class RoundStore:
             outcome: One of :data:`OUTCOMES`.
 
         Returns:
-            RoundResult: ``ok`` when the round settled, ``duplicate`` when this
-            settle had already been applied, otherwise ``reason``.
+            RoundResult: ``ok`` when the round settled or this settle had
+            already been applied; otherwise ``reason``.
 
         Raises:
             ValueError: When ``outcome`` is not one of :data:`OUTCOMES`.
@@ -423,7 +346,7 @@ class RoundStore:
         async with self.db.transaction() as cur:
             current = _load(cur, held.round_id)
             if current is None:
-                return attempt.reject(cur, None, UNKNOWN_ROUND)
+                return attempt.reject(cur, UNKNOWN_ROUND)
             if op == "settle" and current.state == SETTLED:
                 if (
                     current.outcome == outcome
@@ -431,10 +354,10 @@ class RoundStore:
                     and current.fence == held.fence
                 ):
                     return attempt.applied(cur, current, duplicate=True)
-                return attempt.reject(cur, current, ALREADY_SETTLED)
+                return attempt.reject(cur, ALREADY_SETTLED)
             reason = _cas_reason(current, held)
             if reason:
-                return attempt.reject(cur, current, reason)
+                return attempt.reject(cur, reason)
             after = advance(current)
             # The transaction is BEGIN IMMEDIATE, so the check above and this write are one step.
             cur.execute(
@@ -468,14 +391,13 @@ class RoundStore:
         return None if row is None else Round.from_row(row)
 
     async def open_rounds(self) -> list[Round]:
-        """Return every round still open, oldest first.
+        """Return every round that denies an acquire, oldest first.
 
         Returns:
             list[Round]: The open rounds.
         """
         rows = await self.db.fetchall(
-            "SELECT * FROM bringup_rounds WHERE state = ? ORDER BY opened_unix ASC",
-            (OPEN,),
+            f"SELECT * FROM bringup_rounds WHERE {_LIVE_EXCLUSION} ORDER BY opened_unix ASC",  # nosec B608 - a fixed predicate constant, no caller input.
         )
         return [Round.from_row(r) for r in rows]
 
@@ -491,20 +413,6 @@ class RoundStore:
         row = await self.db.fetchone("SELECT * FROM bringup_rounds WHERE round_id = ?", (round_id,))
         return None if row is None else Round.from_row(row)
 
-    async def excluding(self, now_unix: float) -> list[Round]:
-        """Return every round that denies an acquire at ``now_unix``.
-
-        Args:
-            now_unix: The instant to test.
-
-        Returns:
-            list[Round]: The rounds currently excluding, oldest first.
-        """
-        rows = await self.db.fetchall(
-            f"SELECT * FROM bringup_rounds WHERE {_LIVE_EXCLUSION} ORDER BY opened_unix ASC",  # nosec B608 - a fixed predicate constant, no caller input.
-        )
-        return [Round.from_row(r) for r in rows]
-
     async def consecutive_stalled(self) -> int:
         """Count the newest settled rounds that bought no ground.
 
@@ -515,7 +423,7 @@ class RoundStore:
             "SELECT outcome FROM bringup_rounds WHERE state = ? ORDER BY settled_unix DESC",
             (SETTLED,),
         )
-        neutral = {ABANDONED, *EXPIRY_OUTCOMES}
+        neutral = {ABANDONED, EXPIRED_REAPED}
         count = 0
         for row in rows:
             outcome = row["outcome"]
@@ -572,48 +480,32 @@ class _Attempt:
     now_unix: float
 
     def applied(self, cur: sqlite3.Cursor, after: Round, *, duplicate: bool = False) -> RoundResult:
-        """Record this attempt as having left the round at ``after``, and describe ``after`` to the caller.
+        """Record this attempt as having left the round at ``after``; a ``duplicate`` replay is recorded as such.
 
         The outbox row carries ``after``'s fence and holder, so an open or a handoff records the ones it put in place.
         """
-        event_id = self._append(
+        self._append(
             cur,
             result="duplicate" if duplicate else "applied",
             fence=after.fence,
             actor_task_id=after.holder_task_id,
             reason="",
         )
-        return RoundResult(
-            ok=True,
-            round_id=after.round_id,
-            fence=after.fence,
-            state=after.state,
-            outcome=after.outcome,
-            duplicate=duplicate,
-            event_id=event_id,
-        )
+        return RoundResult(ok=True)
 
-    def reject(self, cur: sqlite3.Cursor, current: Round | None, reason: str) -> RoundResult:
-        """Record this attempt as refused with what it presented, and describe the round as it stands to the caller."""
-        event_id = self._append(
+    def reject(self, cur: sqlite3.Cursor, reason: str) -> RoundResult:
+        """Record this attempt as refused with what it presented."""
+        self._append(
             cur,
             result="rejected",
             fence=self.fence,
             actor_task_id=self.actor_task_id,
             reason=reason,
         )
-        return RoundResult(
-            ok=False,
-            round_id=self.round_id,
-            fence=0 if current is None else current.fence,
-            state="" if current is None else current.state,
-            outcome="" if current is None else current.outcome,
-            reason=reason,
-            event_id=event_id,
-        )
+        return RoundResult(ok=False, reason=reason)
 
-    def _append(self, cur: sqlite3.Cursor, *, result: str, fence: int, actor_task_id: str, reason: str) -> int:
-        """Append this attempt to the outbox and return its ``event_id``."""
+    def _append(self, cur: sqlite3.Cursor, *, result: str, fence: int, actor_task_id: str, reason: str) -> None:
+        """Append this attempt to the outbox."""
         cur.execute(
             "INSERT INTO round_events ("
             "  round_id, request_id, op, result, outcome, fence,"
@@ -632,7 +524,3 @@ class _Attempt:
                 self.now_unix,
             ),
         )
-        event_id = cur.lastrowid
-        if event_id is None:
-            raise sqlite3.DatabaseError("the round_events insert reported no row id")
-        return event_id

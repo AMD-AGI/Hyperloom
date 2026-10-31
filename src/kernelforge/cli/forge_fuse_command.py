@@ -9,7 +9,7 @@ import json
 
 import click
 
-from hyperloom.common.llm_config import AGENT_BACKEND_CHOICES
+from hyperloom_common.llm.llm_config import AGENT_BACKEND_CHOICES
 from kernelforge.cli.option_groups import option_group
 from kernelforge.workflows.forge_fusion import __version__
 from kernelforge.workflows.forge_fusion.errors import FuseError, FuseUsageError

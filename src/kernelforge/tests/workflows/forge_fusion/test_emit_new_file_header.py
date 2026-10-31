@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from hyperloom.common.unified_diff import PatchOp, PatchTarget, parse_patch_manifest
+from hyperloom_common.unified_diff import PatchOp, PatchTarget, parse_patch_manifest
 from kernelforge.workflows.forge_fusion.emit import FusionFiles, _export_nongit, _unified_file_diff
 
 

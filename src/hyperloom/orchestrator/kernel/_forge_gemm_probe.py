@@ -15,8 +15,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.checkpoint_quant import checkpoint_format
-from hyperloom.common.env import is_truthy
+from hyperloom_common.checkpoint_quant import checkpoint_format
+from hyperloom_common.env import is_truthy
 from hyperloom.inference_optimizer.model_config_utils import load_model_config_dict
 
 from . import forge_gemm_tuning
