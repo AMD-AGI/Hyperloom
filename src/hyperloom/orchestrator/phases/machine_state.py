@@ -47,6 +47,12 @@ from .phase_chain import (
     phase_index,
     render_phase_action_bullets,
 )
+from .prelude_exits import (
+    _baseline_is_anchored,
+    _cold_anchor_shortfall,
+    _prelude_budget_line,
+    _prelude_viability,
+)
 
 
 log = logging.getLogger(__name__)
@@ -69,8 +75,10 @@ DEFAULT_PHASE_BUDGET_PCT: dict[str, float] = {
     PHASE_CLOSE: 0.02,
 }
 
-# Share of the session held back for the phases that actually produce a result.
+# Share of the session held back for the phases that actually produce a result, and the reason a round
+# PRELUDE can no longer pay for out of what is left outside it is refused.
 OPTIMIZATION_RESERVE_PCT: float = 0.50
+RETRY_PAST_THE_RESERVE: str = "retry_past_the_optimization_reserve"
 
 # Wall-clock ceiling for an unbounded run (``max_minutes`` == 0): the container lifetime.
 DEFAULT_LONGRUN_MAX_MINUTES: int = 14 * 24 * 60
@@ -723,13 +731,21 @@ def append_phase_evidence_row(history: Any, *, key: str, row: dict[str, Any]) ->
 
 
 def prelude_affordable_seconds(state: Any) -> tuple[float | None, dict[str, Any]]:
-    """Seconds PRELUDE may still spend, and the numbers the figure is built from."""
+    """Seconds PRELUDE may still spend, and the numbers the figure is built from.
+
+    The reserve is an absolute share of the session, so once preparation has eaten past it the subtraction
+    would run negative. A negative is not a quantity of seconds anyone can spend: the figure is floored at
+    zero, the same shape :meth:`SharedState.session_budget_usable_sec` keeps, so every caller reads one
+    meaning -- zero is "nothing left outside the reserve", not a debt that grows while the phase waits.
+    Reaching zero refuses a baseline retry at admission (:func:`a_retry_past_the_reserve_line`) and is a
+    terminal for an idle PRELUDE (:func:`.prelude_exits._prelude_budget_line`), not a number the phase sits on.
+    """
     max_sec = _max_minutes(state) * 60.0
     usable = state.session_budget_usable_sec()
     if max_sec <= 0.0 or usable is None:
         return None, {"reason": "unbounded_budget"}
     reserve_sec = max_sec * OPTIMIZATION_RESERVE_PCT
-    affordable_sec = usable - reserve_sec
+    affordable_sec = max(0.0, usable - reserve_sec)
     return affordable_sec, {
         "optimization_reserve_sec": round(reserve_sec, 1),
         "session_usable_sec": round(usable, 1),
@@ -738,11 +754,7 @@ def prelude_affordable_seconds(state: Any) -> tuple[float | None, dict[str, Any]
     }
 
 
-def prelude_can_afford(
-    state: Any,
-    *,
-    expected_cost_sec: float,
-) -> tuple[bool, dict[str, Any]]:
+def prelude_can_afford(state: Any, *, expected_cost_sec: float) -> tuple[bool, dict[str, Any]]:
     """Decide whether PRELUDE can still buy an optional arm costing ``expected_cost_sec``."""
     cost = max(0.0, float(expected_cost_sec or 0.0))
     affordable_sec, evidence = prelude_affordable_seconds(state)
@@ -750,6 +762,38 @@ def prelude_can_afford(
     if affordable_sec is None:
         return True, priced
     return affordable_sec >= cost, priced
+
+
+def round_headroom_sec(state: Any) -> tuple[float | None, dict[str, Any]]:
+    """Seconds this round's budget may still spend, and the numbers behind it."""
+    if state is None:
+        return None, {"reason": "no_session_state"}
+    usable_sec = state.session_budget_usable_sec()
+    if usable_sec is None:
+        return None, {"reason": "unbounded_session_budget"}
+    return usable_sec, {"bound": "session_usable", "affordable_sec": round(usable_sec, 1)}
+
+
+def a_use_must_follow_the_round(state: Any) -> bool:
+    """Whether this round is only worth running if something can be measured after it."""
+    return str(getattr(state, "phase", "") or "").strip().upper() == PHASE_PRELUDE
+
+
+def a_retry_past_the_reserve_line(state: Any) -> tuple[bool, dict[str, Any]]:
+    """Whether this is a PRELUDE baseline retry the phase can no longer pay for.
+
+    Once PRELUDE's own allowance past the reserve (:func:`prelude_affordable_seconds`) is gone, a leg that already
+    failed a baseline may not retry; only this leg's failures count, so a resumed leg still gets its first one.
+    """
+    if not a_use_must_follow_the_round(state):
+        return False, {}
+    leg_failures = int(getattr(state, "baseline_failures_this_leg", 0) or 0)
+    if leg_failures < 1:
+        return False, {}
+    affordable_sec, evidence = prelude_affordable_seconds(state)
+    if affordable_sec is None or affordable_sec > 0.0:
+        return False, {}
+    return True, {"reason": RETRY_PAST_THE_RESERVE, "baseline_failures_this_leg": leg_failures, **evidence}
 
 
 def _resolve_plateau_overrides(state: Any) -> dict[str, Any]:
@@ -908,6 +952,15 @@ class PhaseFlags:
     enablement_enabled: bool = False
 
 
+@dataclass(frozen=True)
+class WorkInFlight:
+    """Which phases still have work of their own queued or running, as one decision sees it."""
+
+    enablement: bool = False
+    kernel: bool = False
+    prelude: bool = False
+
+
 def _base_workflow_predicate_inputs(
     state: Any,
     *,
@@ -947,6 +1000,7 @@ def _prelude_predicate_inputs(state: Any, *, now_unix: float) -> dict[str, Any]:
     warm_status = str(outcome.get("status") or "").strip() if isinstance(outcome, dict) else ""
     return {
         "failure_streak": int(state.baseline_failure_streak or 0),
+        "failures_this_leg": int(state.baseline_failures_this_leg or 0),
         "warm_replay_status": warm_status,
         "measure_round_dropped": bool(state.baseline_measure_round_dropped),
         "tput": to_float(state.baseline_tput) or 0.0,
@@ -1080,8 +1134,7 @@ def workflow_predicate_inputs(
     *,
     flags: PhaseFlags = PhaseFlags(),
     now_unix: float | None = None,
-    enablement_in_flight: bool = False,
-    kernel_work_in_flight: bool = False,
+    in_flight: WorkInFlight = WorkInFlight(),
 ) -> dict[str, Any]:
     """Freeze primitive, normalized facts consumed by one phase decision."""
     current = (state.phase or "").strip().upper() or PHASE_PRELUDE
@@ -1091,16 +1144,17 @@ def workflow_predicate_inputs(
         current=current,
         now_unix=frozen_now,
         flags=flags,
-        enablement_in_flight=enablement_in_flight,
+        enablement_in_flight=in_flight.enablement,
     )
     if current == PHASE_PRELUDE:
         inputs["baseline"] = _prelude_predicate_inputs(state, now_unix=frozen_now)
+        inputs["pending_work"] = {"prelude_work_in_flight": bool(in_flight.prelude)}
     elif current == PHASE_ENABLEMENT:
         enablement = state.enablement
         inputs["baseline"] = {"tput": to_float(state.baseline_tput) or 0.0, **_initial_analysis_inputs(state)}
         inputs["pending_work"] = {
             "validation_pending": bool(enablement.validation_pending),
-            "enablement_in_flight": bool(enablement_in_flight),
+            "enablement_in_flight": bool(in_flight.enablement),
         }
     elif current == PHASE_FRAMEWORK_AGENT:
         inputs["plateau"], inputs["budget"] = _framework_predicate_inputs(state, now_unix=frozen_now)
@@ -1108,7 +1162,7 @@ def workflow_predicate_inputs(
         inputs["pending_work"], inputs["plateau"], inputs["budget"] = _kernel_predicate_inputs(
             state,
             now_unix=frozen_now,
-            kernel_work_in_flight=kernel_work_in_flight,
+            kernel_work_in_flight=in_flight.kernel,
         )
     elif current == PHASE_SWEEP:
         inputs["sweep_result"], inputs["budget"] = _sweep_predicate_inputs(state, now_unix=frozen_now)
@@ -1133,30 +1187,6 @@ def _transition_result(
     predicate_inputs: dict[str, Any],
 ) -> tuple[str, str, dict[str, Any]]:
     return target, reason, {**evidence, "predicate_inputs": predicate_inputs}
-
-
-def _prelude_viability(baseline: dict[str, Any]) -> dict[str, Any]:
-    usable = to_float(baseline.get("session_usable_sec"))
-    runtime = optional_positive_float(baseline.get("runtime_sec"))
-    post_ready = optional_positive_float(baseline.get("post_ready_runtime_sec"))
-    warm = optional_positive_float(baseline.get("warm_runtime_sec"))
-    benchmark = warm or post_ready
-    round_sec = None
-    if runtime is not None and post_ready is not None and benchmark is not None:
-        round_sec = max(0.0, runtime - post_ready) + benchmark
-        priced_by = "boot_plus_benchmark"
-    else:
-        round_sec = runtime
-        priced_by = "cold_round"
-    if usable is None or round_sec is None:
-        return {}
-    return {
-        "session_usable_sec": round(usable, 1),
-        "measured_round_sec": round(round_sec, 1),
-        "priced_by": priced_by,
-        "affordable_rounds": round(usable / round_sec, 2),
-        "fits_one_optimization_round": usable >= round_sec,
-    }
 
 
 def _budget_exit(
@@ -1375,17 +1405,10 @@ def compute_next_phase(
     *,
     flags: PhaseFlags = PhaseFlags(),
     now_unix: float | None = None,
-    enablement_in_flight: bool = False,
-    kernel_work_in_flight: bool = False,
+    in_flight: WorkInFlight = WorkInFlight(),
 ) -> tuple[str, str, dict[str, Any]] | None:
     """Return the next transition with the primitive inputs it consumed."""
-    inputs = workflow_predicate_inputs(
-        state,
-        flags=flags,
-        now_unix=now_unix,
-        enablement_in_flight=enablement_in_flight,
-        kernel_work_in_flight=kernel_work_in_flight,
-    )
+    inputs = workflow_predicate_inputs(state, flags=flags, now_unix=now_unix, in_flight=in_flight)
     return replay_next_phase(inputs)
 
 
@@ -1446,34 +1469,6 @@ def _terminal_close_transition(inputs: dict[str, Any]) -> tuple[str, str, dict[s
     return None
 
 
-def _cold_anchor_shortfall(baseline: dict[str, Any]) -> dict[str, Any] | None:
-    """The evidence that retrying a dropped measure round no longer fits the session's budget."""
-    if not bool(baseline.get("measure_round_dropped")):
-        return None
-    usable = to_float(baseline.get("session_usable_sec"))
-    runtime = optional_positive_float(baseline.get("runtime_sec"))
-    benchmark = optional_positive_float(baseline.get("warm_runtime_sec")) or optional_positive_float(
-        baseline.get("post_ready_runtime_sec")
-    )
-    retry = runtime
-    if runtime is not None and benchmark is not None:
-        retry += benchmark
-    viability = _prelude_viability(baseline)
-    use_sec = to_float(viability.get("measured_round_sec")) or runtime
-    if usable is None or retry is None or use_sec is None or usable >= retry + use_sec:
-        return None
-    return {"terminal": True, "baseline_anchor": "cold", "retry_round_sec": round(retry, 1), **viability}
-
-
-def _baseline_is_anchored(baseline: dict[str, Any]) -> bool:
-    """Whether a measured baseline the rest of the session can be compared against is in hand."""
-    return (
-        str(baseline.get("warm_replay_status") or "") != "in_flight"
-        and not bool(baseline.get("measure_round_dropped"))
-        and (to_float(baseline.get("tput")) or 0.0) > 0.0
-    )
-
-
 def _anchored_baseline_transition(
     inputs: dict[str, Any],
     flags: dict[str, Any],
@@ -1498,6 +1493,7 @@ def _prelude_transition(
 ) -> tuple[str, str, dict[str, Any]] | None:
     """The transition PRELUDE takes once its baseline round has settled."""
     baseline = dict(inputs.get("baseline") or {})
+    pending = dict(inputs.get("pending_work") or {})
     streak = int(baseline.get("failure_streak") or 0)
     if streak >= 3:
         return _transition_result(
@@ -1506,7 +1502,7 @@ def _prelude_transition(
             {"terminal": True, "baseline_failure_streak": streak},
             inputs,
         )
-    shortfall = _cold_anchor_shortfall(baseline)
+    shortfall = _cold_anchor_shortfall(baseline, pending)
     if shortfall is not None:
         return _transition_result(PHASE_CLOSE, "prelude_cold_anchor_low_budget", shortfall, inputs)
     if bool(flags.get("enablement_enabled")) and streak >= 1:
@@ -1532,6 +1528,9 @@ def _prelude_transition(
             },
             inputs,
         )
+    reserve_line = _prelude_budget_line(baseline, pending)
+    if reserve_line is not None:
+        return _transition_result(PHASE_CLOSE, "prelude_budget_exhausted", reserve_line, inputs)
     return None
 
 
@@ -1857,6 +1856,7 @@ __all__ = [
     "LifecycleMark",
     "PhaseClock",
     "PhaseFlags",
+    "WorkInFlight",
     "lifecycle_label",
     "make_lifecycle_event",
     "DEFAULT_GLOBAL_CONVERGENCE_NO_GAIN_CYCLES",

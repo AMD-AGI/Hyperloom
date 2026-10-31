@@ -93,6 +93,10 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         # The same for ``--max-power-w``: the baseline's per-GPU mean power is over it, or was not reported.
         "baseline_over_power_budget",
         "prelude_cold_anchor_low_budget",
+        # Preparation spent everything outside the optimization reserve without anchoring a
+        # baseline, and the machine has no arm of its own left to dispatch: the phase closes
+        # on the budget line instead of idling on the reserve it may not spend.
+        "prelude_budget_exhausted",
         "time_exhausted_during_prelude",
         "warm_replay_rollback_failed",
         "active_inferencex_checkout_missing",

@@ -127,22 +127,6 @@ _MOE_SCHEME_CONTEXT_MARKERS = (
 )
 
 
-def _round_headroom_sec(state: Any) -> tuple[float | None, dict[str, Any]]:
-    """Seconds this round's budget may still spend, and the numbers behind it."""
-    if state is None:
-        return None, {"reason": "no_session_state"}
-    usable_sec = state.session_budget_usable_sec()
-    if usable_sec is None:
-        return None, {"reason": "unbounded_session_budget"}
-    return usable_sec, {"bound": "session_usable", "affordable_sec": round(usable_sec, 1)}
-
-
-def _a_use_must_follow_the_round(state: Any) -> bool:
-    """Whether this round is only worth running if something can be measured after it."""
-    phase = str(getattr(state, "phase", "") or "").strip().upper()
-    return phase == _phase_state.PHASE_PRELUDE
-
-
 class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _BenchmarkRoundsMixin):
     """One benchmark action: materialize the config, launch the backend, retry, parse the report."""
 
@@ -345,6 +329,9 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
     ) -> tuple[bool, dict[str, Any]]:
         """Whether the budget holds a whole round *and a use for it*, before anything boots."""
         state = (ctx_extra or {}).get("shared_state") or self.shared_state
+        past_the_line, reserve_evidence = _phase_state.a_retry_past_the_reserve_line(state)
+        if past_the_line:
+            return False, reserve_evidence
         return self._round_affordable(
             state,
             round_sec=_phase_state.baseline_round_cost_sec(state, double_run=double_run),
@@ -357,11 +344,11 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
         if cold_sec is None or round_sec is None:
             return True, {"reason": "no_measured_round_to_predict_from"}
         use_sec = 0.0
-        if _a_use_must_follow_the_round(state):
+        if _phase_state.a_use_must_follow_the_round(state):
             # Without the split, a variant is priced at a whole cold round, which is what it is: a boot and a
             # benchmark that pays the compile.
             use_sec = _phase_state.one_more_measurement_sec(state) or cold_sec
-        headroom_sec, evidence = _round_headroom_sec(state)
+        headroom_sec, evidence = _phase_state.round_headroom_sec(state)
         if headroom_sec is None:
             return True, evidence
         cost = round_sec + use_sec
@@ -382,7 +369,7 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
     ) -> tuple[bool, dict[str, Any]]:
         """Whether the budget covers the measured round *and a use for it*."""
         state = (ctx_extra or {}).get("shared_state") or self.shared_state
-        headroom_sec, evidence = _round_headroom_sec(state)
+        headroom_sec, evidence = _phase_state.round_headroom_sec(state)
         if headroom_sec is None:
             return True, evidence
         warmup_sec = optional_positive_float(warmup_runtime_sec)
@@ -394,7 +381,7 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
         if benchmark_sec is None or warmup_sec is None:
             return True, {"reason": "no_measured_benchmark_to_predict_from", **evidence}
         use_sec = 0.0
-        if _a_use_must_follow_the_round(state):
+        if _phase_state.a_use_must_follow_the_round(state):
             use_sec = _phase_state.one_more_measurement_sec(state) or warmup_sec
         cost = benchmark_sec + use_sec
         priced = {
