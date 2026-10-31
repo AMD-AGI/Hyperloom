@@ -10,7 +10,7 @@ from dataclasses import asdict, dataclass, field
 
 from kernelforge.workflows.flydsl_rewrite import protocol
 from kernelforge.workflows.flydsl_rewrite.budget import DEFAULT_REWRITE_BUDGET, RewriteBudgetPolicy
-from kernelforge.utils.durable_io import atomic_write_text
+from hyperloom_common.io import DURABLE, atomic_write_text
 
 # The nested forge-loop sentinel is suppressed while its stdout is streamed by workflows.flydsl_rewrite.optimize, so this is
 # the only one a caller sees.
@@ -171,5 +171,5 @@ def emit_result(result: RewriteResult, result_json: str | None = None) -> str:
         protocol.validate_applyback_outer_result(document)
     payload = json.dumps(document)
     if result_json:
-        atomic_write_text(result_json, payload)
+        atomic_write_text(result_json, payload, options=DURABLE)
     return payload

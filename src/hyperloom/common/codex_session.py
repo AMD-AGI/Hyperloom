@@ -21,11 +21,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
 
-from hyperloom.common.coerce import to_int
-from hyperloom.common.llm_attribution import inject_env as inject_attribution_env
-from hyperloom.common.llm_config import LLMConfigError, resolve_openai_client_config
-from hyperloom.common.llm_headers import parse_unexpanded_headers
-from hyperloom.common.token_usage import uncached_input_tokens
+from hyperloom_common.coerce import to_int
+from hyperloom_common.llm.llm_attribution import inject_env as inject_attribution_env
+from hyperloom_common.llm.llm_config import LLMConfigError, resolve_openai_client_config
+from hyperloom_common.llm.llm_headers import parse_unexpanded_headers
+from hyperloom_common.llm.token_usage import uncached_input_tokens
 
 # Name Codex records the gateway under in its own TOML config.
 CODEX_PROVIDER_NAME = "hyperloom"

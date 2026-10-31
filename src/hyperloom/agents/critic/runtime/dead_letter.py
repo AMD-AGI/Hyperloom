@@ -12,8 +12,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from hyperloom.common.io import JsonLineFormat, append_jsonl
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.io import JsonLineFormat, append_jsonl
+from hyperloom_common.timeutil import now_iso
 
 from .errors import RuntimeAdapterError
 

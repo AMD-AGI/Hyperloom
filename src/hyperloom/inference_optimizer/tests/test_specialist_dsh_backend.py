@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 import yaml
 
-from hyperloom.common import llm_config
+from hyperloom_common.llm import llm_config
 from hyperloom.common.deadline import Deadline
 
 import hyperloom.orchestrator.specialists.dsh_launch as dsh_launch
@@ -199,7 +199,6 @@ async def _run(dispatcher: Any, tmp_path: Path, **overrides: Any) -> Any:
         "system_prompt": "be a research scout",
         "user_prompt": "find the gap",
         "disallowed_tools": frozenset({"KillShell"}),
-        "max_turns": 2,
         "deadline": Deadline.after(60.0),
     }
     kwargs.update(overrides)

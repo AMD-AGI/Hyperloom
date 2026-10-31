@@ -8,7 +8,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from hyperloom.common.coerce import optional_positive_int
+from hyperloom_common.coerce import optional_positive_int
 
 #: SharedState fields that describe the served workload's parallelism and traffic shape.
 WORKLOAD_SHAPE_FIELDS: tuple[str, ...] = ("tp", "ep", "conc", "isl", "osl", "max_model_len")

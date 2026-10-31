@@ -15,8 +15,8 @@ import shutil
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
 
-from hyperloom.common.coerce import first_float, first_int, to_float, to_int
-from hyperloom.common.jsonio import read_json
+from hyperloom_common.coerce import first_float, first_int, to_float, to_int
+from hyperloom_common.jsonio import read_json
 
 from ._gpu_metrics import gpu_metrics_from_report, write_gpu_metrics
 
@@ -889,7 +889,7 @@ def _find_server_logs(slot: Path) -> list[Path]:
 
 def double_run_requested(params: dict | None) -> bool:
     """Whether baseline double-run is enabled; defaults to True when not in params."""
-    from hyperloom.common.env import is_truthy
+    from hyperloom_common.env import is_truthy
 
     if params and "baseline_double_run" in params:
         return is_truthy(params["baseline_double_run"])

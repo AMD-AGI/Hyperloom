@@ -27,7 +27,7 @@ import logging
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from hyperloom.common.coerce import to_float as _float_or_none, to_int as _int_or_none, to_mapping as _as_dict
+from hyperloom_common.coerce import to_float as _float_or_none, to_int as _int_or_none, to_mapping as _as_dict
 from hyperloom.plugs import progress as _progress
 
 from .event_fields import now_iso_seconds as _now, text as _text
