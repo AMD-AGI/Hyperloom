@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from kernelforge.utils.git import git
-from kernelforge.utils.durable_io import atomic_write_json
+from hyperloom_common.io import DURABLE, JsonFormat, atomic_write_json
 from kernelforge.workflows.forge_loop.campaign.reporting import (
     BestResultPublisher,
     KeepBundle,
@@ -191,7 +191,7 @@ def _persist_warm_recovery(caller: CallerRecovery, tracker, checkpoint: dict, re
             result["persistence_degraded"] = True
     if caller.result_json:
         try:
-            atomic_write_json(caller.result_json, result)
+            atomic_write_json(caller.result_json, result, fmt=JsonFormat(trailing_newline=True), options=DURABLE)
         except (OSError, TypeError, ValueError) as error:
             errors.append(f"result-json: {error}")
             result["persistence_degraded"] = True

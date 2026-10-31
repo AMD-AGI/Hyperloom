@@ -95,7 +95,7 @@ _SRC = _REPO_ROOT / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from hyperloom.common.coerce import to_float  # noqa: E402
+from hyperloom_common.coerce import to_float  # noqa: E402
 from hyperloom.common.gpu_partition import (  # noqa: E402
     MODE_PARTITION_COUNTS,
     PARTITION_COUNT_ENV,

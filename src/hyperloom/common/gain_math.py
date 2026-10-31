@@ -8,7 +8,7 @@ from __future__ import annotations
 import statistics
 from typing import Any
 
-from hyperloom.common.coerce import to_float
+from hyperloom_common.coerce import to_float
 from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_TOTAL, graded_axes_of, holds_within_band
 
 

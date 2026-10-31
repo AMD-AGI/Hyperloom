@@ -21,7 +21,8 @@ from hyperloom.inference_optimizer.session.manifest import (
 )
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.orchestrator.policy.gate import PolicyDenied, PolicyGate
+from hyperloom.orchestrator.policy.denial import PolicyDenied
+from hyperloom.orchestrator.policy.gate import PolicyGate
 from hyperloom.orchestrator.bus.resource_lock import (
     SqliteLeaseBackend,
 )
@@ -491,12 +492,8 @@ async def test_sub_agent_runner_skips_unknown_action(tmp_path, monkeypatch):
     assert captured["session_dir"] == str(sd)
 
 
-def _gate(tmp_path: Path, *, strict: bool = True) -> PolicyGate:
-    return PolicyGate(
-        role_registry=default_role_registry(),
-        session_dir=tmp_path,
-        strict_paths=strict,
-    )
+def _gate(tmp_path: Path) -> PolicyGate:
+    return PolicyGate(role_registry=default_role_registry(), session_dir=tmp_path)
 
 
 def test_policy_path_inside_session_dir_passes(tmp_path):
@@ -548,35 +545,3 @@ def test_policy_source_like_fields_are_exempt_from_path_checks(tmp_path):
         },
     )
     gate.validate_intent("orchestration", intent)
-
-
-def test_policy_strict_off_skips_path_check(tmp_path):
-    gate = _gate(tmp_path, strict=False)
-    intent = Intent(
-        type=IntentType.REQUEST,
-        payload={
-            "target_agent": "kernel_agent",
-            "kind": "trace_analyze",
-            "params": {"trace_input": "/tmp/anywhere.json"},
-        },
-    )
-    gate.validate_intent("orchestration", intent)
-
-
-def test_policy_env_var_enables_strict(tmp_path, monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_STRICT_PATHS", "1")
-    gate = PolicyGate(
-        role_registry=default_role_registry(),
-        session_dir=tmp_path,
-    )
-    assert gate.strict_paths is True
-    intent = Intent(
-        type=IntentType.REQUEST,
-        payload={
-            "target_agent": "kernel_agent",
-            "kind": "trace_analyze",
-            "params": {"trace_input": "/tmp/x.json"},
-        },
-    )
-    with pytest.raises(PolicyDenied):
-        gate.validate_intent("orchestration", intent)

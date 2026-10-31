@@ -984,7 +984,7 @@ async def test_enqueue_conc_sweep_declines_when_clamp_leaves_no_time(coord):
     # 1 minute left, minus the 120 s CLOSE reserve, is a negative budget.
     coord.shared_state.remaining_minutes = lambda: 1.0
 
-    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task()
 
     assert task is None
     assert coord.tasks._tasks == {}
@@ -1001,13 +1001,13 @@ async def test_enqueue_conc_sweep_declines_a_grant_that_cannot_fit_one_pair(coor
     coord.shared_state.baseline_runtime_sec = 40.0
 
     coord.shared_state.conc_sweep_total_budget_sec = 79
-    assert await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry") is None
+    assert await coord.phase_sweep._enqueue_internal_conc_sweep_task() is None
     assert coord.tasks._tasks == {}
     assert coord.shared_state.last_conc_sweep["skip_reason"] == "grant_cannot_fit_one_pair"
 
     coord.shared_state.last_conc_sweep = {}
     coord.shared_state.conc_sweep_total_budget_sec = 80
-    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task()
     assert task is not None and task.params["total_budget_sec"] == 80
 
 
@@ -1020,7 +1020,7 @@ async def test_conc_sweep_lease_follows_the_clamped_budget(coord):
     coord.shared_state.conc_sweep_total_budget_sec = 0
     coord.shared_state.remaining_minutes = lambda: 300.0  # 5 h
 
-    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task()
 
     expected_budget = 300 * 60 - 120
     assert task.params["total_budget_sec"] == expected_budget
@@ -1035,7 +1035,7 @@ async def test_conc_sweep_unbounded_budget_opts_out_of_the_lease(coord):
     ]
     coord.shared_state.conc_sweep_total_budget_sec = 0
 
-    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task()
 
     assert task.params["total_budget_sec"] is None
     assert coord.tasks.last_lease_ttl_sec == 0
@@ -1049,7 +1049,7 @@ async def test_enqueue_conc_sweep_unbounded_budget_is_none(coord):
     ]
     coord.shared_state.conc_sweep_total_budget_sec = 0
 
-    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task()
 
     assert task is not None
     assert task.params["total_budget_sec"] is None
@@ -1064,7 +1064,7 @@ async def test_enqueue_conc_sweep_clamps_to_remaining_session_time(coord):
     coord.shared_state.conc_sweep_total_budget_sec = 9000
     coord.shared_state.remaining_minutes = lambda: 5.0
 
-    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task()
 
     assert task is not None
     assert task.params["total_budget_sec"] == 180  # 5 min - 120 s reserve
@@ -1550,7 +1550,7 @@ async def test_conc_sweep_task_carries_catalogue_lanes(coord):
     ]
     coord.shared_state.remaining_minutes = lambda: 300.0
 
-    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task()
 
     assert task is not None
     expected_lanes = sorted(ACTION_CATALOGUE["conc_sweep"].requires_lanes)
@@ -2388,14 +2388,14 @@ async def test_enqueue_conc_sweep_grants_the_phase_its_budget_and_lease(coord):
     coord.shared_state.remaining_minutes = lambda: 62.4
     coord.shared_state._now_unix = lambda: 1_800_000_000.0
 
-    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task()
 
     assert task.params["total_budget_sec"] == 3624
     assert coord.shared_state.conc_sweep_granted_until_unix == 1_800_000_000.0 + 3624 + 600
 
     # A re-entry that finds the task already queued does not move the grant.
     coord.shared_state._now_unix = lambda: 1_800_000_100.0
-    await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+    await coord.phase_sweep._enqueue_internal_conc_sweep_task()
     assert coord.shared_state.conc_sweep_granted_until_unix == 1_800_000_000.0 + 3624 + 600
 
 
@@ -2407,6 +2407,6 @@ async def test_enqueue_unbounded_conc_sweep_grants_nothing(coord):
     ]
     coord.shared_state.conc_sweep_total_budget_sec = 0
 
-    await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+    await coord.phase_sweep._enqueue_internal_conc_sweep_task()
 
     assert coord.shared_state.conc_sweep_granted_until_unix == 0.0

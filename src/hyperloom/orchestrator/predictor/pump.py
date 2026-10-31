@@ -26,7 +26,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.timeutil import now_iso
 from hyperloom.common import predictor_config
 from hyperloom.orchestrator.predictor.client import Prediction, predict
 from hyperloom.orchestrator.predictor.mandate import patch_mandate

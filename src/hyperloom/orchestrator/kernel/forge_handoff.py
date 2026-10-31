@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.env_safety import is_secret_shaped_env_name, redact_secret_values
-from hyperloom.common.io import WriteOptions, atomic_write_text
+from hyperloom_common.io import WriteOptions, atomic_write_text
 from hyperloom.common.kernel_source_contract import SOURCE_RESOLUTION_FILENAME
 from hyperloom.inference_optimizer.roofline_snapshot import extract_workload_summary
 from hyperloom.orchestrator.kernel.campaign_baseline import campaign_repositories

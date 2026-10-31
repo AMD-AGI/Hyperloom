@@ -18,7 +18,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from hyperloom.common.gpu_identity import (
+from hyperloom_common.gpu_identity import (
     AMD_GPU_BOARDS,
     gfx_arch_for_gpu_type,
     gpu_type_for_device_id,

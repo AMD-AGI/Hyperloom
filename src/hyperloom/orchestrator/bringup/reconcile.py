@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.timeutil import now_iso
 
 from ..bus.db_maintenance import DECIDED_PROPOSAL_IDS_SQL
 from ..bus.resource_lock import BRINGUP_ROUND_LANE, SqliteLeaseBackend
@@ -402,7 +402,7 @@ class Reconciler:
         """Re-read the facts the gate's resource rules judge against."""
         self._resources.update(
             self._shared_state,
-            rounds=await self._rounds.excluding(now_unix),
+            rounds=await self._rounds.open_rounds(),
             live_task_ids=[t.task_id for t in await self._tasks.running()],
         )
 

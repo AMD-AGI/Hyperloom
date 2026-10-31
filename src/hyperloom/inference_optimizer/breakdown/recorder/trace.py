@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
-from hyperloom.common.env import env_bool
+from hyperloom_common.env import env_bool
 from hyperloom.common.env_safety import redact_secret_values
 
 #: Below ``DEBUG`` because every recorder write emits an event.

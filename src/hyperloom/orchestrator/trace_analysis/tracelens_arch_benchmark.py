@@ -10,52 +10,24 @@ import sys
 from pathlib import Path
 from typing import Callable
 
+from TraceLens.Agent.Analysis.utils.arch_utils import _collect_arch_jsons
+
+from hyperloom.common.visible_devices import (
+    HIP_LEVEL_VARS,
+    ROCR_LEVEL_VARS,
+    effective_mask_tokens,
+    parse_device_list,
+)
+
 try:
     import torch
 except ImportError:
     torch = None  # type: ignore[assignment,misc]
 
-# TraceLens is pip-installed after this module is first imported, so resolve these lazily via the _get_* helpers.
-_collect_arch_jsons = None  # type: ignore[assignment,misc]
-check_gpu_idle = None  # type: ignore[assignment,misc]
-
-
-def _get_collect_arch_jsons():
-    """Return TraceLens' arch-JSON collector, importing lazily post-install."""
-    global _collect_arch_jsons
-    if _collect_arch_jsons is None:
-        try:
-            from TraceLens.Agent.Analysis.utils.arch_utils import (
-                _collect_arch_jsons as _fn,
-            )
-        except ImportError:
-            return None
-        _collect_arch_jsons = _fn
-    return _collect_arch_jsons
-
-
-def _get_check_gpu_idle():
-    """Return TraceLens' ``check_gpu_idle``, importing lazily post-install."""
-    global check_gpu_idle
-    if check_gpu_idle is None:
-        try:
-            from TraceLens.PerfModel.benchmarking.microbench_utils import (
-                check_gpu_idle as _fn,
-            )
-        except ImportError:
-            return None
-        check_gpu_idle = _fn
-    return check_gpu_idle
-
-
 MICROBENCH_WARMUP = 20
 MICROBENCH_REP = 50
-
-_VISIBLE_DEVICE_VARS = (
-    "HIP_VISIBLE_DEVICES",
-    "CUDA_VISIBLE_DEVICES",
-    "ROCR_VISIBLE_DEVICES",
-)
+#: Exit status of ``TraceLens.PerfModel.benchmarking.microbench`` when its idle gate rejects the GPU.
+_MICROBENCH_BUSY_EXIT = 2
 
 
 def normalize_platform(platform: str) -> str:
@@ -63,19 +35,24 @@ def normalize_platform(platform: str) -> str:
     return (platform or "").strip().upper()
 
 
+def _first_mask_ids(level_vars: tuple[str, ...]) -> list[int] | None:
+    """Ids named by the first non-empty mask in ``level_vars``; a UUID mask maps to its logical positions."""
+    for var in level_vars:
+        tokens = effective_mask_tokens(os.environ.get(var))
+        if tokens:
+            return parse_device_list(tokens) or list(range(len(tokens)))
+    return None
+
+
 def list_candidate_physical_gpus() -> list[int]:
     """List the physical GPU ids currently visible to this process."""
-    for var in _VISIBLE_DEVICE_VARS:
-        val = os.environ.get(var, "").strip()
-        if not val:
-            continue
-        parts = [part.strip() for part in val.split(",") if part.strip()]
-        if not parts:
-            continue
-        try:
-            return [int(part) for part in parts]
-        except ValueError:
-            return list(range(len(parts)))
+    rocr_ids = _first_mask_ids(ROCR_LEVEL_VARS)
+    hip_ids = _first_mask_ids(HIP_LEVEL_VARS)
+    if rocr_ids is not None and hip_ids is not None:
+        return [rocr_ids[i] for i in hip_ids if i < len(rocr_ids)]
+    ids = rocr_ids if rocr_ids is not None else hip_ids
+    if ids is not None:
+        return ids
     if torch is not None:
         try:
             if torch.cuda.is_available():
@@ -89,49 +66,24 @@ def list_candidate_physical_gpus() -> list[int]:
 
 
 def single_physical_gpu_env(physical_id: int, *, base_env: dict[str, str] | None = None) -> dict[str, str]:
-    """Build a subprocess env that exposes exactly one physical GPU."""
+    """Build a subprocess env whose device 0 is ``physical_id``.
+
+    TraceLens' idle gate reads HIP/CUDA masks as absolute physical ids and ignores ROCr-level masks, so the
+    child is pinned at the HIP level with every ROCr-level mask cleared.
+    """
     env = dict(base_env if base_env is not None else os.environ)
-    value = str(physical_id)
-    for var in _VISIBLE_DEVICE_VARS:
-        env[var] = value
+    for var in (*ROCR_LEVEL_VARS, *HIP_LEVEL_VARS):
+        env.pop(var, None)
+    env["HIP_VISIBLE_DEVICES"] = env["CUDA_VISIBLE_DEVICES"] = str(physical_id)
     return env
-
-
-def select_idle_gpu(*, log: Callable[[str], None] | None = None, util_threshold: int = 5) -> int:
-    """Pick an unoccupied GPU for the arch microbenchmark subprocess."""
-    check_idle = _get_check_gpu_idle()
-    if check_idle is None:
-        raise RuntimeError("TraceLens is not installed; cannot check GPU idle state")
-
-    candidates = list_candidate_physical_gpus()
-    if not candidates:
-        raise RuntimeError("gpu_arch_benchmark found no GPUs; cannot run arch microbenchmark")
-
-    busy_reports: list[str] = []
-    for logical_idx, physical_id in enumerate(candidates):
-        idle, msg = check_idle(logical_idx, util_threshold=util_threshold)
-        if idle:
-            if log is not None:
-                if len(candidates) == 1:
-                    log(f"gpu_arch_json: using idle GPU {physical_id} ({msg})")
-                else:
-                    log(f"gpu_arch_json: selected idle GPU {physical_id} from candidates {candidates} ({msg})")
-            return physical_id
-        busy_reports.append(f"GPU {physical_id}: {msg}")
-
-    raise RuntimeError(f"gpu_arch_benchmark found no unoccupied GPU among {candidates}. {'; '.join(busy_reports)}")
 
 
 def resolve_arch_json_path(platform: str) -> Path | None:
     """Resolve the bundled arch JSON path for a platform."""
-    collect = _get_collect_arch_jsons()
-    if collect is None:
-        return None
-
     canonical = normalize_platform(platform)
     if not canonical:
         return None
-    for name, path in collect().items():
+    for name, path in _collect_arch_jsons().items():
         if name.upper() == canonical:
             return Path(path)
     return None
@@ -258,6 +210,42 @@ def _sanitize_measured_arch_spec(
     return False
 
 
+def _run_microbench_on_idle_gpu(
+    tracelens_root: Path,
+    out_path: Path,
+    *,
+    log: Callable[[str], None],
+    run_command: Callable[..., int],
+    timeout_s: int,
+) -> None:
+    """Run the arch microbenchmark on the first candidate GPU its own idle gate accepts."""
+    candidates = list_candidate_physical_gpus()
+    if not candidates:
+        raise RuntimeError("gpu_arch_benchmark found no GPUs; cannot run arch microbenchmark")
+    cmd = [
+        sys.executable,
+        "-m",
+        "TraceLens.PerfModel.benchmarking.microbench",
+        "--device",
+        "0",
+        "--warmup",
+        str(MICROBENCH_WARMUP),
+        "--rep",
+        str(MICROBENCH_REP),
+        "--output",
+        str(out_path),
+    ]
+    for physical_id in candidates:
+        rc = run_command(cmd, cwd=tracelens_root, timeout_s=timeout_s, env=single_physical_gpu_env(physical_id))
+        if rc == 0:
+            log(f"gpu_arch_json: microbenchmark ran on GPU {physical_id}")
+            return
+        if rc != _MICROBENCH_BUSY_EXIT:
+            raise RuntimeError(f"gpu arch microbenchmark failed with exit code {rc}; see log for details")
+        log(f"gpu_arch_json: GPU {physical_id} is busy; trying the next candidate")
+    raise RuntimeError(f"gpu_arch_benchmark found no unoccupied GPU among {candidates}")
+
+
 def internal_extension_arch_json(platform: str, *, log: Callable[[str], None]) -> Path | None:
     """The bundled GPU arch JSON when the internal extension backfills MAF, or ``None`` when none is bundled."""
     existing = resolve_arch_json_path(platform)
@@ -296,27 +284,7 @@ def populate_gpu_arch_json(
             f"{canonical} and internal extension disabled; running TraceLens "
             f"microbenchmark -> {out_path}"
         )
-        physical_id = select_idle_gpu(log=log)
-        rc = run_command(
-            [
-                sys.executable,
-                "-m",
-                "TraceLens.PerfModel.benchmarking.microbench",
-                "--device",
-                "0",
-                "--warmup",
-                str(MICROBENCH_WARMUP),
-                "--rep",
-                str(MICROBENCH_REP),
-                "--output",
-                str(out_path),
-            ],
-            cwd=tracelens_root,
-            timeout_s=timeout_s,
-            env=single_physical_gpu_env(physical_id),
-        )
-        if rc != 0:
-            raise RuntimeError(f"gpu arch microbenchmark failed with exit code {rc}; see log for details")
+        _run_microbench_on_idle_gpu(tracelens_root, out_path, log=log, run_command=run_command, timeout_s=timeout_s)
         if not out_path.is_file():
             raise RuntimeError(f"gpu arch microbenchmark finished but output is missing: {out_path}")
 
