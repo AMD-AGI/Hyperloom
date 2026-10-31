@@ -117,6 +117,8 @@ _CHECK_SCRIPT = ("tests", "m2", "check_m2.py")
 _DUMP_ENV = "import json, os, sys; json.dump(dict(os.environ), sys.stdout)"
 _VERSION = re.compile(r"(\d+)\.(\d+)\.(\d+)")
 _GFX = re.compile(r"gfx[0-9a-f]+")
+#: How the log says how each command ended and how long it took (the build's time is measured on the first GPU run).
+_ELAPSED = "# exit"
 
 
 class RuppellError(Exception):
@@ -487,6 +489,7 @@ def _run(
     with Path(log).open("ab") as sink:
         sink.write(f"$ {' '.join(command)}\n".encode(_UTF8))
         sink.flush()
+        started = time.monotonic()
         try:
             process = subprocess.Popen(
                 command,
@@ -505,6 +508,8 @@ def _run(
                 os.killpg(process.pid, signal.SIGKILL)
             process.communicate()
             raise RuppellError(f"{name} ran past {timeout:.0f}s") from exc
+        finally:
+            sink.write(f"{_ELAPSED} {process.returncode} after {time.monotonic() - started:.1f}s\n".encode(_UTF8))
     if process.returncode not in accept:
         raise RuppellError(f"{name} exited {process.returncode}: {_log_tail(log)}")
     return (out or b"").decode(_UTF8, errors="replace") if capture else ""
@@ -512,7 +517,8 @@ def _run(
 
 def _log_tail(log: Path) -> str:
     try:
-        lines = [line for line in Path(log).read_text(encoding=_UTF8, errors="replace").splitlines() if line.strip()]
+        text = Path(log).read_text(encoding=_UTF8, errors="replace")
+        lines = [line for line in text.splitlines() if line.strip() and not line.startswith(_ELAPSED)]
     except OSError:
         return ""
     return lines[-1][:300] if lines else ""

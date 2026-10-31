@@ -13,6 +13,7 @@ import csv
 import gzip
 import json
 import os
+import re
 import tempfile
 from pathlib import Path
 
@@ -196,7 +197,9 @@ def test_the_report_keeps_the_census_the_check_and_the_module_table_beside_the_p
     assert gzip.decompress((kept / "census.jsonl.gz").read_bytes()) == (DATA / "offline_census.jsonl").read_bytes()
     assert json.loads((kept / "check.json").read_text())["ok"] is True
     assert not (tracer.work / "trace.json").exists(), "the export's trace is not kept"
-    assert "--expect-ranks 1" in (kept / "ruppell.log").read_text()
+    log = (kept / "ruppell.log").read_text()
+    assert "--expect-ranks 1" in log
+    assert re.search(r"build\.sh\n# exit 0 after \d+\.\ds\n", log), "the build's wall time is in the log"
     assert not (tmp_path / "out" / "profile").exists(), "nothing of ruppell's lands among the traces"
 
 
