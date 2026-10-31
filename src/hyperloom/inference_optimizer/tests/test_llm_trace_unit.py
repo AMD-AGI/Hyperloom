@@ -11,12 +11,13 @@ import pytest
 from hyperloom.inference_optimizer.trace import _row_utils, llm_trace
 
 
-def test_llm_call_record_from_metadata_coerces_and_appends(tmp_path: Path, monkeypatch):
+@pytest.mark.parametrize("component", ["forge", "ave"])
+def test_llm_call_record_from_metadata_coerces_and_appends(tmp_path: Path, monkeypatch, component):
     monkeypatch.setattr(_row_utils, "now_iso", lambda **_: "2026-01-01T00:00:00Z")
     monkeypatch.setattr(llm_trace, "get_emitter", lambda _session_dir: None, raising=False)
 
     record = llm_trace.LLMCallRecord.from_metadata(
-        llm_trace.LLMCallSite(session_id="s1", component="forge", task_id="k1"),
+        llm_trace.LLMCallSite(session_id="s1", component=component, task_id="k1"),
         {
             "model": "m",
             "input_tokens": "12",
@@ -31,7 +32,7 @@ def test_llm_call_record_from_metadata_coerces_and_appends(tmp_path: Path, monke
     llm_trace.append_llm_call(session_dir=tmp_path, record=record)
     row = json.loads((tmp_path / "reports" / "trace" / "llm_calls.jsonl").read_text())
 
-    assert row["component"] == "forge"
+    assert row["component"] == component
     assert row["input_tokens"] == 12
     assert row["output_tokens"] == 3
     assert row["cache_read_input_tokens"] == 4

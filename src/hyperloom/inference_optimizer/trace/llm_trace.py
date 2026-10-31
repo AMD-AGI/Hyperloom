@@ -11,6 +11,8 @@ from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
 
+from hyperloom_common.kernel_backend import AVE_BACKEND
+
 from hyperloom_common.coerce import text_or_none, to_int
 from hyperloom_common.io import JsonLineFormat, append_jsonl
 from hyperloom.inference_optimizer.session.session_paths import llm_calls_path
@@ -30,6 +32,7 @@ VALID_COMPONENTS: frozenset[str] = frozenset(
         "proposal_scorer",
         "geak",
         "forge",
+        AVE_BACKEND,
         "tracelens",
         "breakdown",
         # Framework-side reasoning (agent ranker, audit refinement, KB synthesis) and the quantization agent.

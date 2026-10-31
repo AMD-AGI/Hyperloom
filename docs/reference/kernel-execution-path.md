@@ -72,28 +72,28 @@ dispatcher admits it under `server_lifecycle`, `workspace_mutation` and
 `benchmark_lane` without joining it, so ticks keep running while it works. Its
 executor, `run_agent`, calls the handlers directly in Python — not
 through the REQUEST bus — and every step it runs (reprofile, GEMM tuning,
-fusion, the rewrite controller, GEAK and its revalidation) is covered by those
+fusion, the rewrite controller, Ave, GEAK and its revalidation) is covered by those
 lanes. Which calls it makes depends on the backend:
 
 ```python
-# 1. GEAK branch — the SGLang/vLLM default. One whole-pipeline e2e run, then
-#    the phase winds down to SWEEP. Nothing below this line executes.
-if geak_enabled:                      # KernelPhase.geak_enabled(): kernel_optimizer == "geak"
+if self.geak_enabled():
     await self._run_geak_kernel_phase(from_phase=from_phase)
-    return
+    return {"status": "ok", "route": "geak"}
 
-# 2. Forge branch — only with KERNEL_OPT_BACKEND_ORDER=forge. Two routes into
-#    one shared tail, chosen by whether GEMM tuning is due.
+if self.shared_state.kernel_optimizer == AVE_BACKEND:
+    return await self._run_ave_kernel_phase()
+
 if not self._gemm_tuning_required_before_kernel_opt():
     await self._finish_kernel_entry()
-    return
-result = await run_gemm_tuning_handler({...}, session_dir=session_dir)
-...                                    # handle result, post the bus response
+    return {"status": "ok", "route": "forge_no_gemm"}
+
+...  # GEMM tuning and result handling.
 await self._finish_kernel_entry()
+return {"status": "ok", "route": "forge_gemm"}
 ```
 
-Both routes end in `_finish_kernel_entry()`, and that is where the rest of the
-phase's own work happens:
+`run_agent()` handles Forge inline: it runs GEMM tuning when required, then calls
+`_finish_kernel_entry()`. Without GEMM tuning it calls that shared tail directly:
 
 ```python
 async def _finish_kernel_entry(self) -> None:
@@ -155,8 +155,11 @@ The seven rules from the retired `kernel_agent.md` live in executable Python:
 
 ## Backend selection
 
-GEAK owns the KERNEL phase by default for every framework, ATOM included, and
-decides kernel strategy internally:
+`KERNEL_OPT_BACKEND_ORDER=ave` selects the Ave loop. Only that route checks
+workload, trace and source evidence for an applicable AveLang kernel. Ave uses a
+built-in prompt string as one step; `AVE_PROMPTS_FILE` can replace it with ordered
+instructions. Without a match, or if preparation fails, the phase records the
+reason and finishes without invoking another optimizer.
 
 - **Framework default**: an unset or blank `KERNEL_OPT_BACKEND_ORDER` resolves
   to `geak`. No framework overrides it at CLI launch; ATOM's former `forge`
@@ -174,8 +177,8 @@ decides kernel strategy internally:
   shell variable. `.env.template` ships the line commented out.
 - **Slurm launchers**: still export `${KERNEL_OPT_BACKEND_ORDER:-geak}` into
   the job / container environment; their behavior is unchanged.
-- **Explicit selection**: only an exact, case-insensitive `forge` enables
-  per-kernel Forge. Other nonblank values, including `forge,geak`, retain GEAK;
+- **Explicit selection**: an exact, case-insensitive `forge` enables
+  per-kernel Forge; `ave` enables Ave. Other nonblank values, including `forge,geak`, retain GEAK;
   `--backends` CLI flags and payload `backends` hints do not override this
   choice.
 
@@ -233,7 +236,8 @@ Required env vars:
 | `OPENAI_API_KEY`, `OPENAI_BASE_URL` | operator | OpenAI-side key and endpoint; with only this side configured, TraceLens and Forge run on Codex and GEAK cannot start. The DeepSeek Harness (`INFERENCE_OPTIMIZER_AGENT_BACKEND=deepseek`) authenticates on this side too |
 | `INFERENCE_OPTIMIZER_AGENT_BACKEND` | operator | `claude`, `codex` or `deepseek`: the agent CLI orchestration, specialists, TraceLens and Forge run on, instead of the credential-ranked choice. Quantization honours only `deepseek`. With `deepseek`, specialists run on the `dsh` CLI with `DSH_PERMISSION_MODE=danger-full-access` |
 | `TRACELENS_ROOT` | `install.sh` (operator can override) | TraceLens checkout; installer clones to `.cache/TraceLens` by default |
-| `KERNEL_OPT_BACKEND_ORDER` | Unset/blank resolves to `geak` for every framework, ATOM included; the CLI fills in nothing. Bare-metal setup only persists nonempty choices; Slurm launchers still export `${KERNEL_OPT_BACKEND_ORDER:-geak}` | Exact, case-insensitive `forge` enables per-kernel Forge; existing `.env` choices are retained |
+| `KERNEL_OPT_BACKEND_ORDER` | Unset/blank resolves to `geak` for every framework, ATOM included; the CLI fills in nothing. Bare-metal setup only persists nonempty choices; Slurm launchers still export `${KERNEL_OPT_BACKEND_ORDER:-geak}` | Exact, case-insensitive `forge` selects per-kernel Forge; `ave` selects Ave. Existing `.env` choices are retained. |
+| `AVE_PROMPTS_FILE` | Unset (built-in prompt string) | Optional replacement steps for Ave's ordered prompt loop; saved in session state. Workload evidence selects the target kernel. |
 
 Forge needs **no path variable**. It ships inside the Hyperloom wheel, so the
 `FORGE_PATH` that used to be required here is removed and nothing reads it. The

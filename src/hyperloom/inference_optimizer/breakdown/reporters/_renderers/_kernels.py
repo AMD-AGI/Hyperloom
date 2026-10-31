@@ -4,7 +4,7 @@
 """Shared per-kernel rollup over the ``kernel`` timeline events.
 
 Three consumers need the same view and had three projections of it: the
-lifecycle table, the capability summary's two kernel lanes, and the executive
+lifecycle table, the capability summary's kernel routes, and the executive
 summary's funnel. Building it once here is what keeps them from disagreeing
 about how many kernels a session adopted.
 
@@ -20,11 +20,15 @@ from __future__ import annotations
 
 from typing import Any
 
+from hyperloom_common.kernel_backend import AVE_BACKEND
+
 from hyperloom_common.coerce import dict_rows, to_mapping
 
+from ...recorder.stack_event import BACKENDS
 from ..base import events_of
 
 __all__ = [
+    "AVE_SOURCES",
     "FORGE_SOURCES",
     "GEAK_SOURCES",
     "kernel_rows",
@@ -33,9 +37,10 @@ __all__ = [
 
 #: The source kinds each report-level capability owns. The recorder tallies at
 #: the granularity of the producer that made the candidate; the report speaks
-#: of the two routes those producers belong to.
+#: of the routes those producers belong to.
 FORGE_SOURCES = ("kernel_rewrite", "fusion", "gemm_tuning")
 GEAK_SOURCES = ("geak_authored_kernel", "geak_env_selection")
+AVE_SOURCES = ("ave_kernel",)
 
 #: Attempt outcomes that say the candidate was ruled against rather than left
 #: unsettled. ``needs_review`` is deliberately absent: nothing concluded.
@@ -86,7 +91,7 @@ def _measured_speedup(value: Any) -> Any:
 
 
 def _attempts(breakdown: dict[str, Any]) -> list[dict[str, Any]]:
-    """Every candidate either route produced, across every visit."""
+    """Every candidate across all routes and visits."""
     return [row for ext in _visits(breakdown) for row in dict_rows(ext.get("attempts"))]
 
 
@@ -152,6 +157,7 @@ def _seed(rows: dict[str, dict[str, Any]], kernel_id: str) -> dict[str, Any]:
             "selected_for_optimization": False,
             "geak": None,
             "forge": None,
+            AVE_BACKEND: None,
             "adopted_by": None,
             "final_decision": "not_optimized",
         }
@@ -184,8 +190,8 @@ def _fold_discovered(rows: dict[str, dict[str, Any]], ext: dict[str, Any]) -> No
 def _fold_attempts(rows: dict[str, dict[str, Any]], ext: dict[str, Any]) -> None:
     """Fold one visit's candidate attempts into the rollup.
 
-    Both routes are read from the same array under the same field names, so
-    the two lane summaries are built by one pass rather than two that have to
+    All routes are read from the same array under the same field names, so
+    the lane summaries are built by one pass rather than several that have to
     agree about what a speedup is called.
 
     Args:
@@ -195,7 +201,7 @@ def _fold_attempts(rows: dict[str, dict[str, Any]], ext: dict[str, Any]) -> None
     for entry in dict_rows(ext.get("attempts")):
         kernel_id = str(entry.get("kernel_id") or "")
         lane = str(entry.get("route") or "")
-        if not kernel_id or lane not in {"forge", "geak"}:
+        if not kernel_id or lane not in BACKENDS:
             continue
         row = _seed(rows, kernel_id)
         if not row["name"]:
@@ -242,8 +248,8 @@ def _fold_adopted_by(rows: dict[str, dict[str, Any]]) -> None:
     """Name the route each kept kernel was adopted from.
 
     The gate rules on a patch and is handed no producer, so the route is the
-    one that produced a candidate for that kernel. A kernel both routes touched
-    names both rather than picking one, since nothing recorded says which
+    one that produced a candidate for that kernel. A kernel multiple routes touched
+    names all of them rather than picking one, since nothing recorded says which
     patch the gate measured.
 
     Args:
@@ -252,7 +258,7 @@ def _fold_adopted_by(rows: dict[str, dict[str, Any]]) -> None:
     for row in rows.values():
         if row["final_decision"] not in {"kept", _REVERTED}:
             continue
-        touched = [lane for lane in ("geak", "forge") if row.get(lane)]
+        touched = [lane for lane in BACKENDS if row.get(lane)]
         if touched:
             row["adopted_by"] = "+".join(touched)
 

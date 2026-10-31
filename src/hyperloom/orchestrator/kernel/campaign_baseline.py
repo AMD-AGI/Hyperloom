@@ -35,6 +35,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from hyperloom_common.kernel_backend import AVE_BACKEND
 from kernelforge.workflows.rewrite_controller import (
     CAMPAIGN_BRANCH_PREFIX,
     reclaim_campaign_branch,
@@ -142,7 +143,10 @@ def campaign_repositories(state: Any) -> tuple[Path, ...]:
     already serving.
     """
     roots = _configured_repository_roots(state)
-    for name in _FRAMEWORK_PACKAGES:
+    packages = _FRAMEWORK_PACKAGES
+    if getattr(state, "kernel_optimizer", "") == AVE_BACKEND:
+        packages += ("avelang",)
+    for name in packages:
         repo = _package_repository(name)
         if repo is not None:
             roots.add(repo)

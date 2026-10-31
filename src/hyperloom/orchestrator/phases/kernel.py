@@ -8,22 +8,31 @@ import asyncio
 import hashlib
 import json
 import logging as _logging
+import os
 import sqlite3
 import subprocess
+import sys
+import tempfile
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
+from concurrent.futures import CancelledError as FuturesCancelledError
+from dataclasses import asdict, dataclass
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from . import machine_state as _phase_state
+from hyperloom_common.kernel_backend import AVE_BACKEND
 from .kernel_round_budget import controller_round_stop, measurement_round_sec
 from hyperloom_common.coerce import first_str, to_int
 from hyperloom_common.env import env_bool, env_float
+from hyperloom.common.perf_metric import VERDICT_KEEP
+from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 from hyperloom.inference_optimizer.session.geak_rebench_verdict import REBENCH_NO_PROMOTE
 from hyperloom.inference_optimizer.breakdown.recorder import tool_versions
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
     ROUTE_FORGE,
     ROUTE_GEAK,
+    record_ave_attempt,
 )
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import (
     FusionRun,
@@ -35,20 +44,25 @@ from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import (
     LaneRunFields,
 )
 from ..actions.stop_attribution import stopped_by_the_run_class
+from ..actions.executors._gpu_pin import _resolve_handoff_physical_gpus
 from ..state.analysis_failures import analysis_skip_reason, remembered_trace_failure
 from ..state.task_registry import TERMINAL_STATES, TaskNotFound, TaskSpec
 from ..bus.message_bus import Message
 from ..kernel import kernel_decisions
 from ..collaborator import CoordinatorCollaborator
-from .kernel_geak_dispatch import _GeakDispatchMixin
-from .kernel_geak_promotion import _GeakPromotionMixin, _covered_step
+from .kernel_geak_dispatch import _GeakDispatchMixin, _GPU_FREE_WAIT_SEC
+from .kernel_geak_promotion import _GeakPromotionMixin, _bench_envs, _covered_step
 from .kernel_gemm_tuning import _GemmTuningMixin, _first_text
 
 if TYPE_CHECKING:
+    from ave.preparation import PreparedKernel
+    from ave.task import OptimizationRun, PromptStep
     from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import KernelEventRecorder
     from .machine import Transition
 
 log = _logging.getLogger(__name__)
+
+_ENCODING = "utf-8"
 
 # What the phase, not the Controller subprocess, decides about a rewrite-controller attempt.
 _CONTROLLER_ATTEMPT_FACTS = ("macro_cycle", "handoff_dir", "budget_minutes", "hard_timeout_sec")
@@ -204,7 +218,7 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
             },
             sort_keys=True,
             separators=(",", ":"),
-        ).encode("utf-8")
+        ).encode(_ENCODING)
         stack_len = int(self.shared_state.cumulative_gain_validated_stack_len or 0)
         return f"kernel_entry_g{stack_len}_{hashlib.sha256(identity).hexdigest()[:12]}"
 
@@ -371,7 +385,7 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
                 continue
             status = first_str(row.get("status"), "unknown").lower()
             if status == "kept":
-                decision = "KEEP"
+                decision = VERDICT_KEEP
             elif status.startswith("reverted"):
                 decision = "REVERT"
             elif status.startswith("skipped") or stopped_by_the_run_class(status):
@@ -399,7 +413,7 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
                     kernel_id=kernel_id,
                     kernel_name=kernel_id.split(":")[2] if len(kernel_id.split(":")) > 2 else "",
                     backends_tried=["forge"],
-                    adopted_backend="forge" if decision == "KEEP" else "",
+                    adopted_backend="forge" if decision == VERDICT_KEEP else "",
                     speedup=speedup or None,
                 )
             )
@@ -551,7 +565,11 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
             )
             return
         self._open_kernel_timeline(
-            route=ROUTE_GEAK if self.geak_enabled() else ROUTE_FORGE,
+            route=ROUTE_GEAK
+            if self.geak_enabled()
+            else ROUTE_FORGE
+            if state.kernel_optimizer != AVE_BACKEND
+            else AVE_BACKEND,
             route_reason=f"kernel_optimizer={str(state.kernel_optimizer or '')}",
             from_phase=tr.from_phase,
         )
@@ -643,6 +661,8 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
             # hand straight to SWEEP.
             await self._run_geak_kernel_phase(from_phase=from_phase)
             return {"status": "ok", "route": "geak"}
+        if self.shared_state.kernel_optimizer == AVE_BACKEND:
+            return await self._run_ave_kernel_phase()
         if not self._gemm_tuning_required_before_kernel_opt():
             await self._finish_kernel_entry()
             return {"status": "ok", "route": "forge_no_gemm"}
@@ -718,6 +738,155 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
         # The phase still measures the Controller's patches E2E after the Controller exits.
         hard_timeout = int(min(candidates) - measurement_round_sec(self.shared_state)) if candidates else 90 * 60
         return max(0, hard_timeout - 30), max(0, hard_timeout)
+
+    async def _prepare_ave_kernel(self, output: Path, steps: tuple[PromptStep, ...]) -> PreparedKernel | None:
+        """Check workload evidence for an Ave target before handing over the GPUs."""
+        from ave.preparation import NoAveKernel, prepare_kernel
+        from ave.task import OptimizationRequest
+        from ..kernel.campaign_baseline import campaign_repositories
+        from ..kernel.forge_handoff import build_serving_context_md, build_trace_evidence_md, build_workload_md
+
+        state = self.shared_state
+        try:
+            repositories = campaign_repositories(state)
+            if not repositories:
+                raise NoAveKernel("No serving source repositories are available")
+            await self._maybe_reprofile_for_kernel()
+            budget, _ = self._kernel_rewrite_controller_timeouts()
+            if budget <= 0:
+                raise NoAveKernel("No time remaining for Ave kernel preparation")
+            request = OptimizationRequest(
+                workload=build_workload_md(state),
+                serving=build_serving_context_md(state),
+                trace=build_trace_evidence_md(state),
+                repositories=repositories,
+                steps=steps,
+            )
+            return await asyncio.wait_for(prepare_kernel(request, output), timeout=min(300, budget))
+        except NoAveKernel as error:
+            result = {"status": "skipped", "reason": str(error)}
+        except asyncio.TimeoutError:
+            result = {"status": "timed_out", "reason": "Ave kernel preparation exceeded its time budget"}
+        except FuturesCancelledError:
+            raise
+        except Exception as error:  # outermost Ave preparation boundary
+            log.exception("Ave kernel preparation failed")
+            result = {"status": "failed", "reason": str(error)}
+        state.ave_result = result
+        state.save(self.session_dir)
+        log.info("Ave preparation %s: %s", result["status"], result["reason"])
+        return None
+
+    async def _run_ave_subprocess(self, run: OptimizationRun, *, devices: Mapping[str, Any]) -> int:
+        """Run Ave with Hyperloom's bounded, cancellable subprocess lifecycle."""
+        from ..actions.executors._subprocess_kill import (
+            ORCHESTRATOR_CANCELLED_RETURNCODE,
+            RoundWatch,
+            run_with_session_kill,
+        )
+
+        context = run.result_json.parent / "run.json"
+        context.write_text(json.dumps(asdict(run), default=str), encoding=_ENCODING)
+        command = [sys.executable, "-m", AVE_BACKEND, "optimize", str(context)]
+        env = {name: value for name, value in os.environ.items() if name not in GPU_MASK_ENV_NAMES}
+        env.update(
+            HIP_VISIBLE_DEVICES=devices["gpu_ids"], CUDA_VISIBLE_DEVICES=devices["gpu_ids"], TP=str(devices["tp"])
+        )
+        pin = devices.get("gpu_pin")
+        if pin:
+            env[pin["var"]] = pin["value"]
+        env["PYTHONPATH"] = os.pathsep.join(str(Path(path).resolve()) for path in sys.path if path)
+        try:
+            completed = await asyncio.to_thread(
+                run_with_session_kill,
+                command,
+                env=env,
+                watch=RoundWatch(timeout=max(0.1, run.deadline_unix - time.time())),
+            )
+        except subprocess.TimeoutExpired as error:
+            completed = subprocess.CompletedProcess(command, -9, error.stdout, error.stderr)
+        (run.result_json.parent / "console.log").write_text(
+            (completed.stdout or "") + (completed.stderr or ""), encoding=_ENCODING
+        )
+        if completed.returncode == ORCHESTRATOR_CANCELLED_RETURNCODE:
+            raise FuturesCancelledError("Ave optimization was cancelled by Hyperloom")
+        return completed.returncode
+
+    async def _optimize_ave_kernel(
+        self, kernel: PreparedKernel, *, steps: tuple[PromptStep, ...], output: Path
+    ) -> dict[str, Any]:
+        """Hand the workload's GPUs to Ave and optimize within the remaining budget."""
+        from ave.optimizer import optimize
+
+        devices = self._kernel_device_fields(
+            _bench_envs(self._recipe_benchmark(str(self.shared_state.baseline_config_path or "")))
+        )
+        if devices["gpu_ids_space"] == "none":
+            raise ValueError("Ave cannot start: GPU visibility masks expose no devices")
+        cards = _resolve_handoff_physical_gpus(
+            gpu_ids=devices["gpu_ids"], gpu_ids_space=devices["gpu_ids_space"], gpu_pin=devices.get("gpu_pin")
+        )
+        budget, _ = self._kernel_rewrite_controller_timeouts()
+        if budget > 0:
+            still_busy = await self._free_gpus_for_kernel_opt(cards, timeout_sec=min(_GPU_FREE_WAIT_SEC, budget))
+            if still_busy:
+                return {"status": "failed", "error_class": "gpus_busy_at_handoff", "reason": still_busy}
+        budget, _ = self._kernel_rewrite_controller_timeouts()
+        return await optimize(
+            kernel,
+            steps=steps,
+            output=output,
+            budget_sec=budget,
+            run_worker=partial(self._run_ave_subprocess, devices=devices),
+        )
+
+    async def _run_ave_kernel_phase(self) -> dict[str, Any]:
+        """Optimize one applicable Ave kernel and settle the selected Ave phase."""
+        from ave.task import parse_prompts
+        from ..kernel.request_handlers import integrate_handler
+
+        state = self.shared_state
+        if state.ave_result:
+            return {"status": "ok", "route": AVE_BACKEND, "result": state.ave_result}
+        session_dir = self.session_dir
+        root = (session_dir / AVE_BACKEND).resolve()
+        root.mkdir(parents=True, exist_ok=True)
+        output = Path(tempfile.mkdtemp(prefix="run-", dir=root))
+        steps = parse_prompts({"steps": state.ave_prompts})
+        kernel = await self._prepare_ave_kernel(output, steps)
+        if kernel is None:
+            return {"status": "ok", "route": AVE_BACKEND, "result": state.ave_result}
+        recorder = self.timeline()
+        result = {}
+        try:
+            result = await self._optimize_ave_kernel(kernel, steps=steps, output=output)
+            params = result.get("integrate_params")
+            if params:
+                state.save(session_dir)
+                integration = {**params, **await integrate_handler(params, session_dir=session_dir)}
+                result["integration"] = integration
+                state.record_kernel_integrate_result(integration)
+                if integration.get("decision") == VERDICT_KEEP:
+                    await self._coord.writeback.record_integrate_keep(integration)
+        except (OSError, ValueError, SyntaxError, RuntimeError, subprocess.SubprocessError) as error:
+            result.update(status="failed", reason=str(error))
+        state.ave_result = result
+        if recorder is not None:
+            record_ave_attempt(
+                event=recorder.event_id,
+                run_id=str(result.get("result_json") or session_dir / AVE_BACKEND),
+                result=result,
+            )
+        state.save(session_dir)
+        await self.bus.append_and_seq(
+            Message.new(
+                "kernel_agent",
+                "orchestration",
+                "response",
+                {"kind": "ave_done", "status": result["status"], "result": result, "source": "kernel_entry_auto"},
+            )
+        )
+        return {"status": "ok", "route": AVE_BACKEND, "result": result}
 
     def reject_geak_promotion(
         self,

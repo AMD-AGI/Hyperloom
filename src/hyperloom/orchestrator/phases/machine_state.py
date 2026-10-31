@@ -10,6 +10,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, NamedTuple
 
+from hyperloom_common.kernel_backend import AVE_BACKEND
+
 from hyperloom_common.coerce import optional_positive_float, to_float, to_unix
 from hyperloom_common.env import env_float as _env_float, env_int as _env_int
 from hyperloom_common.timeutil import now_iso as _now_iso
@@ -655,6 +657,9 @@ def kernel_work_pending(state: Any) -> bool:
         return True
     if _controller_phase_terminal(state) or _geak_phase_terminal(state):
         return False
+
+    if state.kernel_optimizer == AVE_BACKEND:
+        return not state.ave_result
 
     return bool(kernel_decisions.untried_hot_reusable_kernels(state))
 

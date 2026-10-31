@@ -47,8 +47,8 @@ log = logging.getLogger(__name__)
 
 _GEAK_RUNNER_MODULE = "hyperloom.orchestrator.kernel.geak_runner"
 
-# How long the GEAK handoff waits for the servers it stopped to release their VRAM.
-_GEAK_GPU_FREE_WAIT_SEC: float = 120.0
+# How long a kernel optimizer handoff waits for stopped servers to release their VRAM.
+_GPU_FREE_WAIT_SEC: float = 120.0
 
 
 def _served_replay_result(path: str, root: Path) -> dict[str, Any] | None:
@@ -297,30 +297,36 @@ class _GeakDispatchMixin:
         runner_timeout = int(max(0.0, kill_budget - margin))
         return runner_timeout, kill_timeout, True
 
-    async def _free_gpus_for_geak(self, cards: list[int] | None) -> str | None:
-        """Stop what this session left on GEAK's GPUs, then wait for them to drain; return why they did not, if so.
+    async def _free_gpus_for_kernel_opt(
+        self, cards: list[int] | None, *, timeout_sec: float = _GPU_FREE_WAIT_SEC
+    ) -> str | None:
+        """Stop this session's leftover servers and wait for the optimizer's GPUs to drain; return why they did not.
 
         The ``kernel_agent`` task holds every serving lane by now, but a lane only records that the round holding it
         ended, not that the server the round booted went with it.
         """
         from ..actions.executors._server_lifecycle import free_gpus_for_handoff
 
-        gpus = await asyncio.to_thread(
-            free_gpus_for_handoff, self.session_dir, cards, timeout_sec=_GEAK_GPU_FREE_WAIT_SEC
-        )
+        gpus = await asyncio.to_thread(free_gpus_for_handoff, self.session_dir, cards, timeout_sec=timeout_sec)
+        backend = self.shared_state.kernel_optimizer
         if gpus.reaped:
             log.warning(
-                "geak handoff: stopped %d server(s) this session left running: pids=%s", len(gpus.reaped), gpus.reaped
+                "%s handoff: stopped %d server(s) this session left running: pids=%s",
+                backend,
+                len(gpus.reaped),
+                gpus.reaped,
             )
         if gpus.unverified:
-            log.warning("geak handoff: cannot confirm GPUs %s are free (%s); delegating anyway", cards, gpus.unverified)
+            log.warning(
+                "%s handoff: cannot confirm GPUs %s are free (%s); delegating anyway", backend, cards, gpus.unverified
+            )
         if not gpus.busy:
             return None
         busy = ", ".join(f"GPU{card} {used:.0f}/{total:.0f} MiB" for card, used, total in gpus.busy)
         error = f"GPUs still hold VRAM after this session's leftover servers were stopped: {busy}"
         if gpus.holders:
             error += f"; serving processes still up: {'; '.join(gpus.holders)}"
-        log.error("geak handoff: %s; not delegating", error)
+        log.error("%s handoff: %s; not delegating", backend, error)
         return error
 
     async def _wait_for_gpus_before_rebench(self, cards: list[int] | None) -> None:
@@ -331,9 +337,7 @@ class _GeakDispatchMixin:
         """
         from ..actions.executors._server_lifecycle import free_gpus_for_handoff
 
-        gpus = await asyncio.to_thread(
-            free_gpus_for_handoff, self.session_dir, cards, timeout_sec=_GEAK_GPU_FREE_WAIT_SEC
-        )
+        gpus = await asyncio.to_thread(free_gpus_for_handoff, self.session_dir, cards, timeout_sec=_GPU_FREE_WAIT_SEC)
         if gpus.reaped:
             log.warning(
                 "geak rebench: stopped %d server(s) this session left running: pids=%s", len(gpus.reaped), gpus.reaped
@@ -467,7 +471,7 @@ class _GeakDispatchMixin:
         }
 
     @staticmethod
-    def _geak_device_fields(recipe_envs: Mapping[str, Any]) -> dict[str, Any]:
+    def _kernel_device_fields(recipe_envs: Mapping[str, Any]) -> dict[str, Any]:
         gpu_pin = resolve_gpu_pin(recipe_envs=recipe_envs)
         tp = coerce_tp(recipe_envs.get("TP"), os.environ.get("TP"))
         gpu_ids = _resolve_handoff_gpu_ids(gpu_pin=gpu_pin, tp=tp)
@@ -475,7 +479,7 @@ class _GeakDispatchMixin:
         if space == "none":
             # An empty visibility mask means the ids are placeholders, not devices.
             log.error(
-                "geak handoff: %s is set but empty; the run has no visible GPUs. "
+                "kernel handoff: %s is set but empty; the run has no visible GPUs. "
                 "gpu_ids=%s is a placeholder (gpu_ids_space=none), not a device set.",
                 gpu_pin.get("var"),
                 gpu_ids,
@@ -578,7 +582,7 @@ class _GeakDispatchMixin:
         launch_server_script = self._resolve_launch_server_script(recipe_bench)
         handoff = {
             **self._geak_session_fields(agentx=agentx),
-            **self._geak_device_fields(recipe_envs),
+            **self._kernel_device_fields(recipe_envs),
             "accepted_flags": accepted_flags,
             "accepted_env": shlex.join(f"{k}={v}" for k, v in dict(extra_envs).items()),
             **self._same_config_reference(
@@ -905,7 +909,7 @@ class _GeakDispatchMixin:
         if await self._promote_crashed_geak_result(handoff, agentx=agentx, cards=cards):
             return
 
-        still_busy = await self._free_gpus_for_geak(cards)
+        still_busy = await self._free_gpus_for_kernel_opt(cards)
         if still_busy:
             self._finish_geak_skip(
                 {"status": "error", "error_class": "gpus_busy_at_handoff", "error": still_busy}, handoff=handoff

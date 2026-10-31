@@ -24,6 +24,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from hyperloom_common.kernel_backend import AVE_BACKEND
+
 from hyperloom_common.coerce import (
     text_or_none as _text_or_none,
     to_float as _float_or_none,
@@ -115,7 +117,7 @@ _SOURCE_BY_ACTION: dict[str, str] = {
 
 #: The kernel backends the per-backend split reports. Anything else is folded
 #: into ``unattributed`` rather than minting a bucket per unrecognized string.
-BACKENDS: tuple[str, ...] = ("geak", "forge")
+BACKENDS: tuple[str, ...] = ("geak", "forge", AVE_BACKEND)
 
 STATUS_SUCCEEDED = "succeeded"
 STATUS_DEGRADED = "degraded"

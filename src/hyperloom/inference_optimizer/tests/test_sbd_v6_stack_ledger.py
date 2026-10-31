@@ -372,9 +372,10 @@ def _outcome(session_dir) -> dict[str, Any]:
     )["validation"]
 
 
-def test_outcome_validation_reads_the_ledger_rather_than_a_legacy_projection(tmp_path):
+@pytest.mark.parametrize("backend", ["geak", "ave"])
+def test_outcome_validation_reads_the_ledger_rather_than_a_legacy_projection(tmp_path, backend):
     _adopt(0, "replay_warm_recipe", 100.0, 110.0)
-    _adopt(1, "integrate", 110.0, 130.0, backend="geak")
+    _adopt(1, "integrate", 110.0, 130.0, backend=backend)
     stack_event.record_validation(
         stack_event.StackValidation(
             stack_len=2,
@@ -391,7 +392,8 @@ def test_outcome_validation_reads_the_ledger_rather_than_a_legacy_projection(tmp
     by_source = validation["attribution"]["by_source"]
     assert validation["attribution"]["available"] is True
     assert by_source["warm_replay"] == {"total_gain_pct": 10.0, "keep_count": 1, "unmeasured_keep_count": 0}
-    assert by_source["kernel"]["by_backend"]["geak"]["total_gain_pct"] == 20.0
+    assert by_source["kernel"]["by_backend"][backend]["total_gain_pct"] == 20.0
+    assert by_source["kernel"]["by_backend"][backend]["keep_count"] == 1
     assert by_source["kernel"]["by_backend"]["forge"]["keep_count"] == 0
 
 
