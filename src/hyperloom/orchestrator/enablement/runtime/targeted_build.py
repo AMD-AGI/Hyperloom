@@ -11,7 +11,7 @@ import signal
 import subprocess
 import sys
 
-from hyperloom.common.git_safety import safe_directory_args
+from hyperloom_common.git_safety import safe_directory_args
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable

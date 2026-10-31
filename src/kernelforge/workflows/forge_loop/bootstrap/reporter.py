@@ -23,7 +23,7 @@ from kernelforge.workflows.forge_loop.memory.knowledge_integration import (
     write_experience_to_kb,
 )
 from kernelforge.workflows.forge_loop.campaign.recovery import load_published_best
-from kernelforge.utils.durable_io import atomic_write_json
+from hyperloom_common.io import DURABLE, JsonFormat, atomic_write_json
 from kernelforge.utils.git import git_head
 
 if TYPE_CHECKING:
@@ -185,7 +185,9 @@ class _RunReporter:
         if not self.run.request.artifacts.result_json:
             return
         try:
-            atomic_write_json(self.run.request.artifacts.result_json, result)
+            atomic_write_json(
+                self.run.request.artifacts.result_json, result, fmt=JsonFormat(trailing_newline=True), options=DURABLE
+            )
         except (OSError, TypeError, ValueError) as e:
             print(f"  [forge-loop] result-json snapshot skipped ({e})", flush=True)
 

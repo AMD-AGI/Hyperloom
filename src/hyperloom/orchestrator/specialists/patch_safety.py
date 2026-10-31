@@ -15,7 +15,7 @@ freeform). It provides:
 * the cross-domain Critic rule descriptors, surfaced when ``scope == 'domains'``.
 
 Pure / dependency-light: imports only stdlib, git via subprocess, and the
-stdlib-only ``hyperloom.common.unified_diff`` so it can be imported from the
+stdlib-only ``hyperloom_common.unified_diff`` so it can be imported from the
 runner, the Critic backend, and tests without cycles.
 """
 
@@ -31,9 +31,9 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from hyperloom.common.fs_utils import read_bytes_nofollow
+from hyperloom_common.fs_utils import read_bytes_nofollow
 from hyperloom.common.env_safety import ungrounded_env_file_reason
-from hyperloom.common.unified_diff import strip_diff_path, strip_path_components
+from hyperloom_common.unified_diff import strip_diff_path, strip_path_components
 
 
 # Quantitative / priority fields rejected outright on any patch proposal:

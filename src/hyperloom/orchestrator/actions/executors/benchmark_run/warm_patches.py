@@ -13,7 +13,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Iterable, Mapping, NamedTuple
 
-from hyperloom.common.git_safety import safe_directory_args
+from hyperloom_common.git_safety import safe_directory_args
 from .._git import _git_head_sha
 from .._patch_snapshot import (
     _create_patch_snapshot,

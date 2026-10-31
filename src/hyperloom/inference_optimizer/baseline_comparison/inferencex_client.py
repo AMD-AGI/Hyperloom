@@ -17,7 +17,7 @@ import zlib
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 
-from hyperloom.common.coerce import to_int
+from hyperloom_common.coerce import to_int
 from hyperloom.common.url_safety import require_http_url
 
 from .types import BaselineQuery

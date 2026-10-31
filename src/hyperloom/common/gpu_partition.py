@@ -13,7 +13,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Sequence
 
-from .gpu_identity import gpu_board
+from hyperloom_common.gpu_identity import gpu_board
 
 log = logging.getLogger(__name__)
 

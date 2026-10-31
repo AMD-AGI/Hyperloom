@@ -30,7 +30,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from hyperloom.common.git_safety import safe_directory_args
+from hyperloom_common.git_safety import safe_directory_args
 from hyperloom.inference_optimizer import framework_registry as _reg
 
 log = logging.getLogger(__name__)
