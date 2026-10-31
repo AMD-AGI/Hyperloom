@@ -85,12 +85,18 @@ GIT_FETCH_TIMEOUT = "git_fetch_timeout"
 #: address the sandbox reaches it from, after the client's own retries; the reason is ``<this>: <the line>``. No candidate
 #: causes it and the node has no part in it (``hyperloom_multibranch.toolbox.attempts`` does not report it against one).
 HUB_RATE_LIMITED = "hub_rate_limited"
+#: The test's own timeout passed while its attempt waited for a slot of the sandbox pool or for room in the grant's
+#: quota, before any sandbox was made (``hyperloom.measure.sandboxes.AcquireTimedOut``); the reason is ``<this>: <what it
+#: waited for and what held it>``. Nothing ran, so no node and no candidate is to blame, and a retry would wait on the same
+#: sandboxes: ``hyperloom_multibranch.toolbox.attempts`` ends the test with it.
+SANDBOX_ACQUIRE_TIMEOUT = "sandbox_acquire_timeout"
 
 #: ``error_class`` values a runner, the hosted backend or the platform reports that are not about the candidate.
 INFRA_ERROR_CLASSES: frozenset[str] = frozenset(
     {
         "runner_start_failed",
         "runner_start_timeout",
+        SANDBOX_ACQUIRE_TIMEOUT,
         "runner_lost",
         "preflight_mismatch",
         FOREIGN_PROCESS_ON_CARD,

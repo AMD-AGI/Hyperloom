@@ -26,11 +26,12 @@ attempt ``same_node``.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from typing import NamedTuple, Protocol
 
-from hyperloom.measure.failures import HUB_RATE_LIMITED, JIT_BUILD_TIMEOUT
+from hyperloom.measure.failures import HUB_RATE_LIMITED, JIT_BUILD_TIMEOUT, SANDBOX_ACQUIRE_TIMEOUT
 from hyperloom.measure.runner.import_outcome import INERT_PATCH
 from hyperloom.contracts.measurement import (
     Attempt,
@@ -42,11 +43,15 @@ from hyperloom.contracts.measurement import (
 )
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 
+log = logging.getLogger(__name__)
+
 DEFAULT_MAX_INFRA_RETRIES = 3
 #: Infrastructure failures a fresh sandbox repeats, by the name a reason starts with (before its ``: <detail>``). They are
 #: about how the test was built, not about a node: a patch whose files the server did not import from the farm imports
-#: them from the same place in every sandbox, so a retry only spends GPU time.
-UNRETRIED_INFRA_REASONS: frozenset[str] = frozenset({INERT_PATCH})
+#: them from the same place in every sandbox, so a retry only spends GPU time. An attempt that waited the test's whole
+#: timeout for a sandbox slot or for room in the quota (``SANDBOX_ACQUIRE_TIMEOUT``) never started, and a retry would
+#: wait on the same sandboxes: the test ends with what held it instead.
+UNRETRIED_INFRA_REASONS: frozenset[str] = frozenset({INERT_PATCH, SANDBOX_ACQUIRE_TIMEOUT})
 #: The hosted backend's ``error_class`` when the platform made the sandbox and it failed before it ran
 #: (``hyperloom.measure.hosted.SANDBOX_CREATE_FAILED``).
 SANDBOX_CREATE_FAILED = "sandbox_create_failed"
@@ -68,7 +73,7 @@ RUNNER_LOST = "runner_lost"
 #: failed before it ran failed on its template or what the platform mounted, and was never placed on a node it could blame.
 #: A download the Hugging Face Hub refused for its rate limit is refused for the egress address every node shares.
 NODE_BLAMELESS_INFRA_REASONS: frozenset[str] = frozenset(
-    {RUNNER_START_FAILED, RUNNER_LOST, SANDBOX_CREATE_FAILED, HUB_RATE_LIMITED}
+    {RUNNER_START_FAILED, RUNNER_LOST, SANDBOX_CREATE_FAILED, HUB_RATE_LIMITED, SANDBOX_ACQUIRE_TIMEOUT}
 )
 #: Infrastructure failures whose node is not reported.
 _UNREPORTED_INFRA_REASONS = ONCE_RETRIED_INFRA_REASONS | NODE_BLAMELESS_INFRA_REASONS
@@ -198,6 +203,14 @@ class AttemptRunner:
         while True:
             avoided = set(job.request.avoid_nodes) | self._avoid() | set(_facts_nodes(attempts))
             attempt_job = replace(job, attempt=len(attempts) + 1, avoid_nodes=tuple(sorted(avoided)))
+            if attempts:
+                log.info(
+                    "test %s: attempt %d starts after %s (%s)",
+                    job.request.request_id,
+                    attempt_job.attempt,
+                    attempts[-1].failure_class.value if attempts[-1].failure_class else "a failure",
+                    attempts[-1].failure_reason or "no reason given",
+                )
             try:
                 result = await self._executor.run(attempt_job)
             except MeasurementRefused as error:

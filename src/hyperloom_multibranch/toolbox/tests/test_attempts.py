@@ -157,6 +157,7 @@ def test_the_blameless_names_are_the_ones_the_runner_and_the_backend_report() ->
         "runner_lost",
         "sandbox_create_failed",
         "hub_rate_limited",
+        "sandbox_acquire_timeout",
     }
     assert NODE_BLAMELESS_INFRA_REASONS - {HUB_RATE_LIMITED} <= INFRA_ERROR_CLASSES, (
         "the one a log, not a status, names"
