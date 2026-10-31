@@ -671,18 +671,18 @@ def measured_seconds(state: Any, field: str) -> float | None:
 def boot_cost_sec(state: Any) -> float | None:
     """What bringing this workload's server up costs, or ``None`` when unmeasured."""
     total_sec = measured_seconds(state, "baseline_runtime_sec")
-    post_ready_sec = measured_seconds(state, "baseline_post_ready_runtime_sec")
+    post_ready_sec = measured_seconds(state, _POST_READY_FIELD)
     if total_sec is None or post_ready_sec is None:
         return None
     return max(0.0, total_sec - post_ready_sec)
 
 
-def benchmark_cost_sec(state: Any) -> float | None:
-    """What one benchmark pass costs on a server already up, or ``None``."""
-    hot_sec = measured_seconds(state, "baseline_warm_runtime_sec")
-    if hot_sec is not None:
-        return hot_sec
-    return measured_seconds(state, "baseline_post_ready_runtime_sec")
+def hot_pass_cost_sec(warm_sec: Any, post_ready_sec: Any, eval_sec: Any) -> float | None:
+    """A hot pass's warm runtime, else the cold post-ready time less an eval it strictly encloses (separate clocks)."""
+    warm, post_ready, evaluation = (optional_positive_float(value) for value in (warm_sec, post_ready_sec, eval_sec))
+    if warm is not None or post_ready is None:
+        return warm
+    return post_ready - evaluation if evaluation is not None and evaluation < post_ready else post_ready
 
 
 def baseline_round_cost_sec(state: Any, *, double_run: bool) -> float | None:
@@ -690,17 +690,17 @@ def baseline_round_cost_sec(state: Any, *, double_run: bool) -> float | None:
     first_pass_sec = measured_seconds(state, "baseline_runtime_sec")
     if first_pass_sec is None or not double_run:
         return first_pass_sec
-    second_pass_sec = benchmark_cost_sec(state)
+    fields = ("baseline_warm_runtime_sec", _POST_READY_FIELD, "baseline_eval_runtime_sec")
+    second_pass_sec = hot_pass_cost_sec(*(measured_seconds(state, field) for field in fields))
     return first_pass_sec if second_pass_sec is None else first_pass_sec + second_pass_sec
 
 
 def one_more_measurement_sec(state: Any) -> float | None:
-    """What the next measured variant will cost, or ``None`` when unmeasured."""
+    """A boot plus one benchmark pass (the warm runtime once measured, else the cold post-ready time), or ``None``."""
     boot_sec = boot_cost_sec(state)
-    benchmark_sec = benchmark_cost_sec(state)
-    if boot_sec is None or benchmark_sec is None:
-        return None
-    return boot_sec + benchmark_sec
+    warm_sec = measured_seconds(state, "baseline_warm_runtime_sec")
+    benchmark_sec = warm_sec or measured_seconds(state, _POST_READY_FIELD)
+    return None if boot_sec is None or benchmark_sec is None else boot_sec + benchmark_sec
 
 
 def append_phase_evidence_row(history: Any, *, key: str, row: dict[str, Any]) -> bool:
@@ -864,6 +864,7 @@ def per_lever_dryness(state: Any) -> tuple[bool, dict[str, Any]]:
 
 
 _STOP_TIME_EXHAUSTED = "time_exhausted"
+_POST_READY_FIELD = "baseline_post_ready_runtime_sec"
 
 #: SWEEP's close reason per ``reloop_blocked`` value.
 _RELOOP_BLOCK_TERMINALS: dict[str, str] = {
@@ -956,6 +957,7 @@ def _prelude_predicate_inputs(state: Any, *, now_unix: float) -> dict[str, Any]:
         "runtime_sec": optional_positive_float(state.baseline_runtime_sec),
         "post_ready_runtime_sec": optional_positive_float(state.baseline_post_ready_runtime_sec),
         "warm_runtime_sec": optional_positive_float(state.baseline_warm_runtime_sec),
+        "eval_runtime_sec": optional_positive_float(state.baseline_eval_runtime_sec),
     }
 
 
@@ -1452,12 +1454,10 @@ def _cold_anchor_shortfall(baseline: dict[str, Any]) -> dict[str, Any] | None:
         return None
     usable = to_float(baseline.get("session_usable_sec"))
     runtime = optional_positive_float(baseline.get("runtime_sec"))
-    benchmark = optional_positive_float(baseline.get("warm_runtime_sec")) or optional_positive_float(
-        baseline.get("post_ready_runtime_sec")
+    benchmark = hot_pass_cost_sec(
+        baseline.get("warm_runtime_sec"), baseline.get("post_ready_runtime_sec"), baseline.get("eval_runtime_sec")
     )
-    retry = runtime
-    if runtime is not None and benchmark is not None:
-        retry += benchmark
+    retry = runtime if runtime is None or benchmark is None else runtime + benchmark
     viability = _prelude_viability(baseline)
     use_sec = to_float(viability.get("measured_round_sec")) or runtime
     if usable is None or retry is None or use_sec is None or usable >= retry + use_sec:
@@ -1874,7 +1874,7 @@ __all__ = [
     "append_phase_evidence_row",
     "append_phase_history_event",
     "baseline_round_cost_sec",
-    "benchmark_cost_sec",
+    "hot_pass_cost_sec",
     "boot_cost_sec",
     "measured_seconds",
     "one_more_measurement_sec",

@@ -9,7 +9,7 @@ import logging
 import sqlite3
 from typing import Any, Mapping
 
-from hyperloom_common.coerce import to_float
+from hyperloom_common.coerce import optional_positive_float, to_float
 from hyperloom_common.env import is_truthy
 from hyperloom.common.perf_metric import constraint_fields, stamp_output_per_gpu
 from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
@@ -408,6 +408,7 @@ class BaselinePromotionMixin:
         state.baseline_post_ready_runtime_sec = (
             float(post_ready) if isinstance(post_ready, (int, float)) and post_ready > 0 else 0.0
         )
+        state.baseline_eval_runtime_sec = optional_positive_float(result.get("eval_runtime_sec"), 0.0)
 
     def _anchor_current_best(self, result: dict) -> None:
         tput = result.get("output_throughput")

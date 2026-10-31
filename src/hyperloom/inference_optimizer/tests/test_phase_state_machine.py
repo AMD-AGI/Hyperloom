@@ -163,6 +163,7 @@ def _prelude_state(
     baseline_runtime_sec: float = 0.0,
     baseline_post_ready_runtime_sec: float = 0.0,
     baseline_warm_runtime_sec: float = 0.0,
+    baseline_eval_runtime_sec: float = 0.0,
     baseline_measure_round_dropped: bool = False,
     auto_roofline_pending_task_id: str = "",
 ) -> SharedState:
@@ -178,6 +179,7 @@ def _prelude_state(
         baseline_runtime_sec=baseline_runtime_sec,
         baseline_post_ready_runtime_sec=baseline_post_ready_runtime_sec,
         baseline_warm_runtime_sec=baseline_warm_runtime_sec,
+        baseline_eval_runtime_sec=baseline_eval_runtime_sec,
         baseline_measure_round_dropped=baseline_measure_round_dropped,
         resumed_ts="",
         pending_escalate_hint="",
@@ -321,6 +323,23 @@ _COLD_ANCHOR_WORKLOAD = {
 _RETRY_COST_SEC = 1300.0 + 750.0
 
 
+@pytest.mark.parametrize(
+    ("warm", "post_ready", "eval_sec", "expected"),
+    [
+        (None, 550.0, 450.0, 100.0),
+        (None, 550.0, 550.0, 550.0),
+        (None, 550.0, 900.0, 550.0),
+        (None, 550.0, None, 550.0),
+        (400.0, 550.0, 450.0, 400.0),
+        (None, None, 450.0, None),
+    ],
+    ids=["enclosed", "equal", "oversized", "no-eval", "warm-measured", "nothing-measured"],
+)
+def test_a_hot_pass_drops_only_an_eval_its_post_ready_time_encloses(warm, post_ready, eval_sec, expected):
+    """The eval and the post-ready interval come from separate clocks, so an eval that cannot fit is not taken off."""
+    assert phase_state.hot_pass_cost_sec(warm, post_ready, eval_sec) == expected
+
+
 class TestAColdAnchorIsNotAFinishedPrelude:
     """What happens to a session whose baseline could only keep its cold figure."""
 
@@ -353,6 +372,19 @@ class TestAColdAnchorIsNotAFinishedPrelude:
         assert evidence["baseline_anchor"] == "cold"
         assert evidence["retry_round_sec"] == pytest.approx(1300.0)
         assert is_valid_stop_reason(reason)
+
+    def test_the_retry_prices_its_second_pass_without_the_cold_rounds_eval(self):
+        """No hot pass measured: the retry is 900 + (550 - 450) = 1000s, and a 900s variant follows it."""
+        workload = {**_COLD_ANCHOR_WORKLOAD, "baseline_warm_runtime_sec": 0.0, "baseline_eval_runtime_sec": 450.0}
+        flags = phase_state.PhaseFlags(kernel_enabled=True)
+
+        fits = _prelude_state(**workload, baseline_measure_round_dropped=True, usable_sec=1950.0)
+        assert phase_state.compute_next_phase(fits, flags=flags) is None
+
+        short = _prelude_state(**workload, baseline_measure_round_dropped=True, usable_sec=1800.0)
+        _, reason, evidence = phase_state.compute_next_phase(short, flags=flags)
+        assert reason == "prelude_cold_anchor_low_budget"
+        assert evidence["retry_round_sec"] == pytest.approx(1000.0)
 
     def test_a_session_resumed_with_a_fresh_clock_measures_another_baseline(self):
         """The marker outlives the shortfall, so it must not decide on its own."""

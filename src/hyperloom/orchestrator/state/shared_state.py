@@ -449,14 +449,14 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
     # Baseline COLD (warmup-round) full boot+bench wall-clock; the hard-cap anchor from which ExploreExecutor derives
     # the overtime-kill deadline.
     baseline_runtime_sec: float = 0.0
-    # Baseline WARM measure-round wall-clock (client-only, no boot); anchors the explore overtime kill
-    # apples-to-apples.
+    # Baseline WARM measure-round wall-clock (client-only, no boot); anchors the explore overtime kill apples-to-apples.
     baseline_warm_runtime_sec: float = 0.0
     # Whether the baseline's hot pass was dropped because the budget could not cover it plus one variant to read
     # against it, leaving the cold pass's depressed figure as the anchor.
     baseline_measure_round_dropped: bool = False
-    # The benchmark's own share of the COLD round above, from the server-ready marker onward.
+    # The COLD round above from the server-ready marker onward (benchmark and accuracy eval), and that eval's own time.
     baseline_post_ready_runtime_sec: float = 0.0
+    baseline_eval_runtime_sec: float = 0.0
     current_best: dict[str, Any] = field(default_factory=dict)
     # Immutable measurement evidence captured with the current-best promotion.
     current_best_measurement: dict[str, Any] = field(default_factory=dict)
