@@ -43,6 +43,9 @@ _REPORT_KEYS = ("trace_report_path", "analysis_md_path")
 OWN_DEGRADED_KEY = "window_degraded_reason"
 #: The report route's table of the window's kernels and their shares; empty when the window gives none.
 KERNEL_SHARES_KEY = "kernel_shares_path"
+#: ruppell's table of the profile's GPU time by module and step kind, beside the profile; absent when ruppell did not
+#: trace it (``hyperloom.measure.ruppell``). The op shares never come from it.
+MODULE_SHARES_KEY = "module_shares_path"
 #: How many GPU events of the window the report route left out of its kernel shares, and the time they claim.
 EXCLUDED_EVENTS_KEY, EXCLUDED_CLAIMED_KEY = "excluded_events", "excluded_claimed_ms"
 #: What the report route says of a graded mix in which one window stands for the wave alone (``phase_mix``).

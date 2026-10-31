@@ -42,6 +42,7 @@ from hyperloom.common.outside_facts import (
     ENV_CONC,
     ENV_NUM_PROMPTS,
     ENV_RUN_EVAL,
+    ENV_TP,
     MAGPIE_AGENTX_CLIENT_LOG,
     ROCR_VISIBLE_DEVICES_ENV,
 )
@@ -90,9 +91,10 @@ from hyperloom.measure.phases import (
 from hyperloom.measure.points import AMBIENT_SHAPE_ENVS, launch_carriers
 from hyperloom.measure.ports import DEV_SANDBOX_PORTS, pick_port_outside_dev_sandboxes
 from hyperloom.measure.profile_client import ProfileClientError, patch_profile_client
-from hyperloom.measure.profile_traces import PROFILE_DIR, collect_traces
+from hyperloom.measure.profile_traces import PROFILE_DIR, collect_traces, round_has_traces
 from hyperloom.measure.repro import ReproError, find_case, run_case
 from hyperloom.measure.returncodes import HOSTED_INFRA_FAILURE_RC, SERVER_BOOT_TIMEOUT_RC
+from hyperloom.measure import ruppell
 from hyperloom.measure.round_marks import ROLE_BOOT, ROLE_MEASURE, ROLE_WARMUP, RoundShape, read_runs, round_boundaries
 from hyperloom.sandbox.node import node_name
 from hyperloom.measure.short_prompts.rounds import Serving, write_answered
@@ -218,6 +220,8 @@ class _Run:
     phases: PhaseRecorder = field(default_factory=PhaseRecorder)
     #: What the accuracy checks left on the test's own server before its teardown; ``None`` until they ran there.
     held: HeldAnswers | None = None
+    #: The ruppell that traces the test's server (a profile's); ``None`` when it runs untraced.
+    traced: ruppell.Tracer | None = None
 
     def add(self, point: int, result: VariantResult) -> bool:
         """Record one result; say whether the test must go on."""
@@ -237,14 +241,28 @@ class LocalMeasurementBackend:
         """Run ``call`` to the end and return its outcome; the inference server is reclaimed when this returns."""
         _validate(call)
         phases = PhaseRecorder() if call.phases is None else call.phases
-        with _PROCESS_LOCK:
-            call = _seeded(call, phases)
-            phases.begin(KERNEL_TABLES)
-            run = _measure(call, phases)
-        _raise_on_timeout(run)
-        if run.call.kind == _PROFILE:
-            _gather_traces(run)
-        return _staged(_outcome(run), call, phases)
+        notes: list[str] = []
+        tracer = None
+        try:
+            with _PROCESS_LOCK:
+                call = _seeded(call, phases)
+                phases.begin(KERNEL_TABLES)
+                tracer = _tracer(call, notes)
+                run = _measure(call, phases, tracer, notes)
+                failed = _traced_attempt_failed(run)
+                if failed:
+                    notes.append(f"ruppell: attempt failed ({failed}), profiled again without it")
+                    _set_aside(run)
+                    run = _measure(call, phases, None, notes)
+            _raise_on_timeout(run)
+            if run.call.kind == _PROFILE:
+                _gather_traces(run)
+            if run.traced is not None:
+                notes.append(run.traced.report(Path(run.call.output_dir), _ranks(run.call)))
+        finally:
+            if tracer is not None:
+                tracer.close()
+        return _staged(dataclasses.replace(_outcome(run), notes=tuple(notes)), call, phases)
 
 
 def _seeded(call: TestCall, phases: PhaseRecorder) -> TestCall:
@@ -270,17 +288,20 @@ def _staged(outcome: TestOutcome, call: TestCall, phases: PhaseRecorder) -> Test
     return outcome
 
 
-def _measure(call: TestCall, phases: PhaseRecorder) -> _Run:
-    """Lay out the test's environment, run its rounds and give what they produced."""
+def _measure(call: TestCall, phases: PhaseRecorder, tracer: ruppell.Tracer | None, notes: list[str]) -> _Run:
+    """Lay out the test's environment, run its rounds and give what they produced; ``tracer`` traces the server of a
+    profile, when it can be given the points (a note says why not)."""
     with _rebuilt_environment(call) as call, _framework_tables(call) as private:
         call = private.call
         if call.kind == _PROFILE:
             _patch_profile_client(call)
             _patch_profile_server(call)
         with _test_environment(call) as unset_envs:
+            call, tracer = _traced(call, tracer, notes)
             if resolve_backend().name == "magpie":
                 install_launchers(call.points)
             run = _Run(call, [name for name in unset_envs if name not in private.redirected], phases=phases)
+            run.traced = tracer
             with _watch_output(call), _guard_boot(run):
                 asyncio.run(_runner_of(call)(run))
     return run
@@ -958,6 +979,69 @@ async def _long_context_unheld(run: _Run) -> None:
 def _held_checks_of(call: TestCall) -> HeldChecks:
     served = served_by(*launch_carriers(_point_config(call.points[0])))
     return HeldChecks(call.short_prompts, call.long_context, Path(call.output_dir), served)
+
+
+def _tracer(call: TestCall, notes: list[str]) -> ruppell.Tracer | None:
+    """ruppell built for a profile test, or ``None`` with a note saying why the profile runs without it."""
+    if call.kind != _PROFILE:
+        return None
+    prepared = ruppell.prepare(call.points, os.environ)
+    if isinstance(prepared, str):
+        notes.append(prepared)
+        return None
+    return prepared
+
+
+def _traced(call: TestCall, tracer: ruppell.Tracer | None, notes: list[str]) -> tuple[TestCall, ruppell.Tracer | None]:
+    """The call whose points launch their servers under ``tracer``; unchanged, with a note, when it cannot be given
+    them. Read in the test's own process environment, which the server inherits."""
+    if tracer is None:
+        return call, None
+    try:
+        return dataclasses.replace(call, points=tracer.traced_points(call.points, os.environ)), tracer
+    except (ruppell.RuppellError, OSError, ValueError, yaml.YAMLError) as exc:
+        notes.append(f"ruppell: skipped ({str(exc).strip()[:300]})")
+        return call, None
+
+
+def _traced_attempt_failed(run: _Run) -> str:
+    """Why the traced attempt of a profile failed in a way a run without ruppell may not, or ``""``.
+
+    A round that failed, or passed with no trace, is run again; a timeout, a cancellation or a run out of the session's
+    time is not: the time is spent.
+    """
+    if run.traced is None or run.stopped_rc is not None:
+        return ""
+    if any(result.error_class in _TIMEOUT_CLASSES for _, result in run.results):
+        return ""
+    for _, result in run.results:
+        if _is_failure(result):
+            first = (result.error or result.error_class or "the round failed").strip().splitlines()
+            return (first[0] if first else "the round failed")[:300]
+    if not any(result.workspace and round_has_traces(Path(result.workspace)) for _, result in run.results):
+        return "the profiled round left no trace file"
+    return ""
+
+
+def _set_aside(run: _Run) -> None:
+    """Remove what the failed traced attempt left in the test's output, keeping the tail of its server log, so the
+    attempt without ruppell starts from an empty one and the bundle carries one attempt's traces."""
+    tracer = run.traced
+    assert tracer is not None
+    output = Path(run.call.output_dir)
+    for _, result in run.results:
+        tracer.keep_attempt(result.server_log_path, output)
+        if result.workspace:
+            shutil.rmtree(result.workspace, ignore_errors=True)
+    shutil.rmtree(output / "capture_traces", ignore_errors=True)
+
+
+def _ranks(call: TestCall) -> int:
+    """The worker processes ruppell's check expects: the point's tensor-parallel size."""
+    try:
+        return max(1, int(_point_envs(call.points[0]).get(ENV_TP) or 1))
+    except (TypeError, ValueError):
+        return 1
 
 
 def _gather_traces(run: _Run) -> None:

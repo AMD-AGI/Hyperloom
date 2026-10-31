@@ -1,0 +1,206 @@
+{
+ "ok": true,
+ "criteria": {
+  "worker_processes_with_engine_steps": {
+   "value": [
+    "rank 0 (worker)"
+   ],
+   "pass": true
+  },
+  "merge": {
+   "value": {
+    "processes": [
+     "host-16553",
+     "host-16691",
+     "host-16703",
+     "host-16722",
+     "rank 0 (worker)",
+     "host-16868",
+     "host-17143",
+     "host-17160",
+     "host-17168",
+     "host-17181"
+    ],
+    "ranks_with_engine_steps": [
+     "rank 0 (worker)"
+    ],
+    "merge_ok": true,
+    "clock_offset_spread_ns": 256.0
+   },
+   "pass": true
+  },
+  "schema": {
+   "value": {
+    "ok": true,
+    "processes": {
+     "rank 0 (worker)": {
+      "engine_steps": 12356,
+      "missing_or_wrong_run_fields": [],
+      "steps_missing_or_wrong": {},
+      "ok": true
+     }
+    }
+   },
+   "pass": true
+  },
+  "rank 0 (worker): every replay joined or refused with a reason": {
+   "value": {
+    "captures": 52,
+    "graphs": 2,
+    "joined": 2,
+    "refused": 0,
+    "replays": 12296,
+    "replays_joined": 12296,
+    "replays_refused": 0,
+    "keys_shared_by_several_graphs": 0,
+    "refused_detail": {}
+   },
+   "pass": true
+  },
+  "rank 0 (worker): registry: >= 99% of each graph's replays joined (plan-v0)": {
+   "value": {
+    "worst_graph": "target|decode|pass1|g0041",
+    "worst_share": 1.0
+   },
+   "pass": true
+  },
+  "rank 0 (worker): no key shared by several graphs": {
+   "value": 0,
+   "pass": true
+  },
+  "rank 0 (worker): attributed share (work GPU time)": {
+   "value": 0.9999999560399013,
+   "pass": true
+  },
+  "rank 0 (worker): attributed by": {
+   "value": {
+    "none": 4,
+    "eager": 343449,
+    "graph": 9393504
+   },
+   "pass": true
+  },
+  "rank 0 (worker): every kernel after the first engine step in exactly one step": {
+   "value": {
+    "kernels_outside_any_step_after_first_engine_step": 0,
+    "kernels_inside_more_than_one_step": 0,
+    "kernels_straddling_a_step_end": 0,
+    "outside_or_straddling_after_first_engine_step": []
+   },
+   "pass": true
+  },
+  "rank 0 (worker): side-stream kernels after the first engine step owned by a step": {
+   "value": {
+    "side_stream_kernels": 143151,
+    "side_stream_kernels_owned": 143151,
+    "side_stream_kernels_unowned_after_first_engine_step": 0,
+    "side_stream_kernels_running_outside_their_step": 0
+   },
+   "pass": true
+  },
+  "rank 0 (worker): named startup steps": {
+   "value": {
+    "load_model": 1,
+    "alloc_memory_pool": 1,
+    "init_attention_backends": 1,
+    "init_cuda_graphs": 1,
+    "prepare": 13,
+    "server_warmup": 9
+   },
+   "pass": true
+  },
+  "rank 0 (worker): kernels before the first engine step outside any named step": {
+   "value": 4,
+   "pass": true
+  },
+  "rank 0 (worker): dropped records": {
+   "value": 0,
+   "pass": true
+  },
+  "rank 0 (worker): records complete (a final flush, or the adapter's flush at shutdown)": {
+   "value": {
+    "records_complete": true,
+    "finalized": true
+   },
+   "pass": true
+  },
+  "rank 0 (worker): buffer": {
+   "value": {
+    "bytes": 16777216,
+    "callback_total_ns": 543014661,
+    "callback_max_ns": 5042798,
+    "first_callback_ts": 1457621087077103,
+    "last_callback_ts": 1457846395496088,
+    "records_per_s": 45307.2
+   },
+   "pass": true
+  },
+  "rank 0 (worker): top unattributed kernels": {
+   "value": [
+    {
+     "kernel": "at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<int>, std::array<char*, 1ul> >",
+     "count": 4,
+     "gpu_time_ns": 8160
+    }
+   ],
+   "pass": true
+  },
+  "census": {
+   "value": {
+    "rank 0 (worker)": {
+     "steps": 12382,
+     "counter_steps_left_out": 0,
+     "engine_steps": 12356,
+     "records_complete": true,
+     "kernel_ns": 185622869261,
+     "attributed_ns": 185622869261,
+     "engine_busy_over_period": 0.9117200222045679,
+     "mean_running_requests_per_step": 63.70993849142117,
+     "by_client_phase": {}
+    }
+   },
+   "pass": true
+  },
+  "coverage: decode GPU time attributed to a (layer, op) key, aiperf profiling phase (plan-v0, >= 95%)": {
+   "value": {
+    "rank 0 (worker)": {
+     "decode_steps": null,
+     "decode_module_share": null,
+     "decode_attributed_share": null
+    }
+   },
+   "pass": null,
+   "status": "not run (no aiperf profiling phase)"
+  },
+  "granularity: decode GPU time on a layer >= 80% and on the largest single scope <= 50%, aiperf profiling phase": {
+   "value": {},
+   "pass": null,
+   "status": "not run (no aiperf profiling phase)"
+  },
+  "running requests (census, time-weighted) vs aiperf in flight, profiling phase": {
+   "value": null,
+   "pass": null,
+   "status": "not run"
+  },
+  "witness": {
+   "value": null,
+   "pass": null,
+   "status": "not run"
+  },
+  "greedy outputs identical (RUPPELL_VLLM off vs on)": {
+   "value": null,
+   "pass": null,
+   "status": "not run"
+  },
+  "first-token logprobs (RUPPELL_VLLM off vs on) within the untraced server's own spread": {
+   "value": null,
+   "pass": null,
+   "status": "not run"
+  },
+  "GPU program of every first-token step identical, traced vs untraced (M2.8 where outputs are not reproducible)": {
+   "value": null,
+   "pass": null,
+   "status": "not run"
+  }
+ }
+}

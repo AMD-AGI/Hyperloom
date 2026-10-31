@@ -1,0 +1,52 @@
+{
+  "processes": {
+    "rank 0 (worker)": {
+      "steps": 12382,
+      "counter_steps_left_out": 0,
+      "engine_steps": 12356,
+      "records_complete": true,
+      "kernel_ns": 185622869261,
+      "attributed_ns": 185622869261,
+      "engine_busy_over_period": 0.9117200222045679,
+      "mean_running_requests_per_step": 63.70993849142117,
+      "by_client_phase": {}
+    }
+  },
+  "lines": 12382,
+  "merge": {
+    "processes": [
+      "host-16553",
+      "host-16691",
+      "host-16703",
+      "host-16722",
+      "rank 0 (worker)",
+      "host-16868",
+      "host-17143",
+      "host-17160",
+      "host-17168",
+      "host-17181"
+    ],
+    "ranks_with_engine_steps": [
+      "rank 0 (worker)"
+    ],
+    "merge_ok": true
+  },
+  "incomplete_processes": [],
+  "limitations": [
+    {
+      "id": "collective-wait",
+      "applies_to": "collective kernels",
+      "text": "A collective kernel's time is transfer plus waiting for the slowest rank. Tracing changes which rank arrives last (M3, jobs 49062 and 49794), so per-rank collective time and rank skew in a traced run do not describe the untraced server. Use the minimum across ranks per launch (the transfer estimate) for collective cost; do not rank optimization sites by collective wait."
+    },
+    {
+      "id": "traced-latency",
+      "applies_to": "latency and throughput",
+      "text": "Tracing adds host time per traced dispatch (about 2 us on ROCm). Compare kernel time within a run, not a traced run's latency or throughput with an untraced baseline."
+    },
+    {
+      "id": "module-ops",
+      "applies_to": "op names and shapes",
+      "text": "Without the CPU op tree, ops are modules (class or path) and the shape is the first input's; FLOP and roofline models keyed on aten ops do not apply."
+    }
+  ]
+}

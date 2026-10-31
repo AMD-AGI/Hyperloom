@@ -574,6 +574,8 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
     progress.phase("running")
     started = time.time()
     outcome, timed_out = _execute_watched(ctx, call)
+    if outcome is not None:
+        ctx.notes.extend(outcome.notes)
     ctx.cards.enforce_guard()
     observed = ctx.cards.observation()
     if observed is not None:
