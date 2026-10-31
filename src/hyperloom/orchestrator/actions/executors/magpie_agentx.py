@@ -370,3 +370,22 @@ def materialize_variant(
     bind_source_evidence(path, variant.source_patches)
     apply_native_runtime(path, variant.runtime_override, variant.overlay_pythonpath)
     return path
+
+
+def materialize_grid_variant(
+    config_path: Path, variant: Any, output: Path, *, model_path: str | None, base: Any
+) -> Path:
+    """Materialize a grid variant whose accepted launch is the grid recipe's base layer."""
+    return materialize_variant(
+        config_path,
+        variant,
+        output,
+        model_path=model_path,
+        base=LaunchChanges(
+            base.extra_server_args,
+            base.extra_envs or {},
+            base.remove_args or [],
+            base.unset_envs or [],
+            base.args_mode == "replace",
+        ),
+    )

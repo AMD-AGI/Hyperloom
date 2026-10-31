@@ -1213,22 +1213,9 @@ class PolicyGate:
         admitted: set[str] = set()
         patch_coverage: dict[str, tuple[frozenset[str], set[str]]] = {}
         for index, entry in enumerate(plan):
-            if not isinstance(entry, dict):
-                raise PolicyDenied(
-                    f"replay_warm_recipe warm_kernel_plan[{index}] must be an object",
-                    rule="warm_replay_plan_invalid",
-                )
-            raw_targets = entry.get("resolved_patch_targets")
+            raw_targets = _warm_plan_entry_targets(entry, index)
             if not raw_targets:
                 continue
-            if not isinstance(raw_targets, list) or not all(
-                isinstance(target, str) and target.strip() for target in raw_targets
-            ):
-                raise PolicyDenied(
-                    f"replay_warm_recipe warm_kernel_plan[{index}].resolved_patch_targets "
-                    "must be a flat non-empty string list",
-                    rule="warm_replay_plan_invalid",
-                )
 
             patch_key = self._warm_replay_patch_key(entry.get("patch_path"), raw_targets)
             if patch_key not in patch_coverage:
@@ -1363,6 +1350,30 @@ class PolicyGate:
                     f"only cancels the queued backlog."
                 ),
             )
+
+
+def _warm_plan_entry_targets(entry: Any, index: int) -> list[str]:
+    """The ``resolved_patch_targets`` of one warm-kernel plan entry, ``[]`` when it names none.
+
+    Raises:
+        PolicyDenied: When the entry is not an object or its targets are not a flat non-empty string list.
+    """
+    if not isinstance(entry, dict):
+        raise PolicyDenied(
+            f"replay_warm_recipe warm_kernel_plan[{index}] must be an object",
+            rule="warm_replay_plan_invalid",
+        )
+    raw_targets = entry.get("resolved_patch_targets")
+    if not raw_targets:
+        return []
+    if not isinstance(raw_targets, list) or not all(
+        isinstance(target, str) and target.strip() for target in raw_targets
+    ):
+        raise PolicyDenied(
+            f"replay_warm_recipe warm_kernel_plan[{index}].resolved_patch_targets must be a flat non-empty string list",
+            rule="warm_replay_plan_invalid",
+        )
+    return raw_targets
 
 
 def _validate_specialist_framework(params: dict[str, Any]) -> None:

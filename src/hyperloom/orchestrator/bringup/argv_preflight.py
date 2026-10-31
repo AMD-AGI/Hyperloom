@@ -337,6 +337,38 @@ def _parse(parser_source: str, argv: Sequence[str], target: ProbeTarget) -> tupl
     return status, detail, flags
 
 
+@dataclass(frozen=True)
+class _ProvenProbe:
+    """The probe interpreter proven to be the serving install, or why it could not be."""
+
+    target: ProbeTarget | None
+    reason: str = ""
+    detail: str = ""
+
+
+def _prove_probe_target(name: str, launch_env: Mapping[str, str]) -> _ProvenProbe:
+    """Resolve the probe interpreter and prove it runs the same install as the serving one."""
+    from hyperloom.orchestrator.actions.executors._benchmark_interpreter import _resolve_probe_python
+
+    serving = resolve_serving_interpreter(name, launch_env)
+    if not serving:
+        return _ProvenProbe(None, INTERPRETER_UNPROVEN, "could not resolve the serving interpreter")
+    serving_id, serving_why = _identity(ProbeTarget(serving, launch_env), name)
+    if serving_id is None:
+        return _ProvenProbe(None, INTERPRETER_UNPROVEN, f"serving interpreter: {serving_why}")
+    probe_target = ProbeTarget(_resolve_probe_python(name), launch_env)
+    probe_id, probe_why = _identity(probe_target, name)
+    if probe_id is None:
+        return _ProvenProbe(None, INTERPRETER_UNPROVEN, f"probe interpreter: {probe_why}")
+    if not _same_install(probe_id, serving_id):
+        return _ProvenProbe(
+            None,
+            INTERPRETER_MISMATCH,
+            f"probe {json.dumps(dict(probe_id), sort_keys=True)} != serving {json.dumps(dict(serving_id), sort_keys=True)}",
+        )
+    return _ProvenProbe(probe_target)
+
+
 def check_server_argv(
     *,
     framework: str,
@@ -357,7 +389,6 @@ def check_server_argv(
     Returns:
         ArgvVerdict: The verdict, and the argv that should now launch.
     """
-    from hyperloom.orchestrator.actions.executors._benchmark_interpreter import _resolve_probe_python
     from hyperloom.orchestrator.framework.adapter_parsers import parser_source_for
 
     name = framework.strip().lower()
@@ -371,7 +402,7 @@ def check_server_argv(
             text=text,
         )
 
-    serving = resolve_serving_interpreter(name, launch_env)
+    proven = _prove_probe_target(name, launch_env)
 
     def _unavailable(reason: str, detail: str) -> ArgvVerdict:
         return ArgvVerdict(
@@ -382,20 +413,9 @@ def check_server_argv(
             text=text,
         )
 
-    if not serving:
-        return _unavailable(INTERPRETER_UNPROVEN, "could not resolve the serving interpreter")
-    serving_id, serving_why = _identity(ProbeTarget(serving, launch_env), name)
-    if serving_id is None:
-        return _unavailable(INTERPRETER_UNPROVEN, f"serving interpreter: {serving_why}")
-    probe_target = ProbeTarget(_resolve_probe_python(name), launch_env)
-    probe_id, probe_why = _identity(probe_target, name)
-    if probe_id is None:
-        return _unavailable(INTERPRETER_UNPROVEN, f"probe interpreter: {probe_why}")
-    if not _same_install(probe_id, serving_id):
-        return _unavailable(
-            INTERPRETER_MISMATCH,
-            f"probe {json.dumps(dict(probe_id), sort_keys=True)} != serving {json.dumps(dict(serving_id), sort_keys=True)}",
-        )
+    if proven.target is None:
+        return _unavailable(proven.reason, proven.detail)
+    probe_target = proven.target
 
     status, detail, flags = _parse(parser_source, argv, probe_target)
     if status == UNAVAILABLE:

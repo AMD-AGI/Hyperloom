@@ -182,6 +182,36 @@ def select_run_workspace(root: Path, *, known_before: frozenset[Path]) -> Path |
     return max(fresh, default=None)
 
 
+def _is_fresh_leak_file(match: Path, subprocess_started_unix: float | None) -> bool:
+    """Whether ``match`` is a file the round could have written (not older than its subprocess start)."""
+    if not match.is_file():
+        return False
+    if subprocess_started_unix is not None:
+        try:
+            mtime = match.stat().st_mtime
+        except OSError:
+            return False
+        if mtime + _MTIME_GATE_SLACK_SEC < float(subprocess_started_unix):
+            return False
+    return True
+
+
+def _copy_leak_artifact(match: Path, destination: Path) -> Path | None:
+    """Copy one leak artifact into ``destination``; return its new path, or ``None`` when the copy failed."""
+    destination_path = destination / match.name
+    try:
+        shutil.copy2(match, destination_path)
+    except OSError as exc:
+        log.warning(
+            "benchmark_result.harvest: copy %s -> %s failed: %s",
+            match,
+            destination_path,
+            exc,
+        )
+        return None
+    return destination_path
+
+
 def harvest_leaked_artifacts(
     destination: Path,
     *,
@@ -229,27 +259,11 @@ def harvest_leaked_artifacts(
                     continue  # Already under the workspace — nothing to harvest.
                 except ValueError:
                     pass  # Outside the workspace; fall through to harvest below.
-                if not match.is_file():
+                if not _is_fresh_leak_file(match, subprocess_started_unix):
                     continue
-                if subprocess_started_unix is not None:
-                    try:
-                        mtime = match.stat().st_mtime
-                    except OSError:
-                        continue
-                    if mtime + _MTIME_GATE_SLACK_SEC < float(subprocess_started_unix):
-                        continue
-                destination_path = destination / match.name
-                try:
-                    shutil.copy2(match, destination_path)
-                except OSError as exc:
-                    log.warning(
-                        "benchmark_result.harvest: copy %s -> %s failed: %s",
-                        match,
-                        destination_path,
-                        exc,
-                    )
-                    continue
-                harvested.append((match, destination_path))
+                destination_path = _copy_leak_artifact(match, destination)
+                if destination_path is not None:
+                    harvested.append((match, destination_path))
     # Multi-node: fold pod-side GPU sampler CSVs into this workspace and inject a flat gpu_monitor list into
     # benchmark_report.json (no-op single-node).
     try:

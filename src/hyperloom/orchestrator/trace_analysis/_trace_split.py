@@ -9,6 +9,7 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NoReturn
 
 from hyperloom.inference_optimizer.session.paths import workspace_root
 
@@ -76,6 +77,37 @@ def _build_split_cmd(
     return split_cmd
 
 
+def _refuse_missing_steady_state_mode(
+    mode_to_chunks: "dict[str, tuple[str, list[Path]]]",
+    steady_state_mode: str,
+    *,
+    split_dir: "Path",
+    analysis_trace_path: "Path",
+    health_warnings: "list[dict]",
+) -> NoReturn:
+    """Record a blocking warning naming the modes the splitter did produce, then refuse the requested one."""
+    available = [m for m, (_, ch) in mode_to_chunks.items() if ch]
+    warning = {
+        "code": "steady_state_chunk_missing",
+        "severity": "blocking",
+        "requested_mode": steady_state_mode,
+        "available_modes": available,
+        "remediation": (
+            "Re-issue roofline with env "
+            "INFERENCE_OPTIMIZER_STEADY_STATE_MODE set to one of "
+            f"{available} (or pass --steady-state-mode directly)."
+        ),
+        "trace_input": str(analysis_trace_path),
+        "split_dir": str(split_dir),
+    }
+    health_warnings.append(warning)
+    raise RuntimeError(
+        f"steady_state_chunk_missing: requested "
+        f"--steady-state-mode={steady_state_mode} but "
+        f"splitter produced no matching chunk under {split_dir}"
+    )
+
+
 def _collect_split_chunks(
     split_dir: "Path",
     steady_state_mode: str,
@@ -130,25 +162,12 @@ def _collect_split_chunks(
     }
     chunk_label, selected_chunks = mode_to_chunks[steady_state_mode]
     if not selected_chunks:
-        available = [m for m, (_, ch) in mode_to_chunks.items() if ch]
-        warning = {
-            "code": "steady_state_chunk_missing",
-            "severity": "blocking",
-            "requested_mode": steady_state_mode,
-            "available_modes": available,
-            "remediation": (
-                "Re-issue roofline with env "
-                "INFERENCE_OPTIMIZER_STEADY_STATE_MODE set to one of "
-                f"{available} (or pass --steady-state-mode directly)."
-            ),
-            "trace_input": str(analysis_trace_path),
-            "split_dir": str(split_dir),
-        }
-        health_warnings.append(warning)
-        raise RuntimeError(
-            f"steady_state_chunk_missing: requested "
-            f"--steady-state-mode={steady_state_mode} but "
-            f"splitter produced no matching chunk under {split_dir}"
+        _refuse_missing_steady_state_mode(
+            mode_to_chunks,
+            steady_state_mode,
+            split_dir=split_dir,
+            analysis_trace_path=analysis_trace_path,
+            health_warnings=health_warnings,
         )
 
     selected_chunk = selected_chunks[0]

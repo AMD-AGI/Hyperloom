@@ -69,6 +69,32 @@ _BENCHMARK_REPORT_NAME = "benchmark_report.json"
 _COLD_START_DELTA_WARN_PCT = 25.0
 
 
+def _cold_anchor_after_reaped_measure(warmup_result: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    """Keep the warmup as the baseline when the run's clock stopped the measured round mid-flight."""
+    log.warning(
+        "baseline_executor: the run's clock stopped the measured round mid-flight, so the warmup "
+        "stands as the baseline. It is the cold anchor a single-round baseline would have produced, "
+        "and the marker below says so.",
+    )
+    dropped = {"reason": "measure_round_reaped_by_the_run", "measure_round_error": result.get("error")}
+    return _cold_anchor_from_warmup(warmup_result, dropped=dropped)
+
+
+def _record_accuracy_round(result: dict[str, Any], accuracy_result: dict[str, Any]) -> None:
+    """Fold the deferred accuracy round's outcome into the measured round's result."""
+    result["accuracy_stage"] = {
+        "status": accuracy_result.get("status"),
+        "error_class": accuracy_result.get("error_class"),
+        "workspace": accuracy_result.get("workspace"),
+    }
+    if accuracy_result.get("status") != "succeeded":
+        result.setdefault("nonfatal_warnings", []).append("post_measure_accuracy_failed")
+        return
+    for key in ("accuracy", "accuracy_task", "accuracy_metric", "accuracy_source"):
+        if accuracy_result.get(key) is not None:
+            result[key] = accuracy_result[key]
+
+
 class _BenchmarkRoundsMixin:
     """Round guards, cold-start passes and failed-round results of a benchmark run."""
 
@@ -388,13 +414,7 @@ class _BenchmarkRoundsMixin:
                 return result
             # The gate before this pass admitted it and the run's clock took it anyway -- the pass overran what it
             # was priced at.
-            log.warning(
-                "baseline_executor: the run's clock stopped the measured round mid-flight, so the warmup "
-                "stands as the baseline. It is the cold anchor a single-round baseline would have produced, "
-                "and the marker below says so.",
-            )
-            dropped = {"reason": "measure_round_reaped_by_the_run", "measure_round_error": result.get("error")}
-            return _cold_anchor_from_warmup(warmup_result, dropped=dropped)
+            return _cold_anchor_after_reaped_measure(warmup_result, result)
         self._record_measured_against_warmup(result, warmup_result)
         if defer_accuracy:
             await self._settle_deferred_accuracy(attempt, output_dir, hot_round, result)
@@ -530,17 +550,7 @@ class _BenchmarkRoundsMixin:
             run_eval=True,
             **hot_round,
         )
-        result["accuracy_stage"] = {
-            "status": accuracy_result.get("status"),
-            "error_class": accuracy_result.get("error_class"),
-            "workspace": accuracy_result.get("workspace"),
-        }
-        if accuracy_result.get("status") != "succeeded":
-            result.setdefault("nonfatal_warnings", []).append("post_measure_accuracy_failed")
-            return
-        for key in ("accuracy", "accuracy_task", "accuracy_metric", "accuracy_source"):
-            if accuracy_result.get(key) is not None:
-                result[key] = accuracy_result[key]
+        _record_accuracy_round(result, accuracy_result)
 
     def _write_lifecycle_config(
         self,

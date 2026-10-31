@@ -212,6 +212,18 @@ def _record_phase_proposal_review(pending: Any, ruling: CriticRuling) -> None:
         log.debug("phase timeline: proposal review row failed for %s", proposal_id, exc_info=True)
 
 
+def _patch_verdict_subject(pending: Any, pa_params: Mapping[str, Any]) -> str:
+    """The key a proposal's Critic verdict is mirrored under as a patch verdict, or ``""`` when none."""
+    sid_candidate = ""
+    if pending.action_name == "integrate_patch":
+        # A pre-screen carries its candidate id at the top level, not in params.
+        sid_candidate = verdict_subject({**pa_params, **(pending.payload or {})})
+    elif pending.action_name == "specialist":
+        # Critic verdict on the specialist proposal counts as the verdict on its patches; task_id is the key.
+        sid_candidate = str(pa_params.get("task_id") or "").strip()
+    return sid_candidate
+
+
 def _record_critic_review(router: Any, pending: Any, ruling: CriticRuling) -> None:
     """Record the Critic's ruling on one proposal, onto the proposal.
 
@@ -721,22 +733,7 @@ class IntentRouter(CoordinatorCollaborator):
                     "verdict": verdict,
                 },
             )
-        rebroadcast_payload: dict[str, Any] = {
-            "target_proposal_msg_id": pending.proposal_msg_id,
-            "verdict": verdict,
-            "reasoning": ruling.reasoning,
-        }
-        if ruling.advisory:
-            rebroadcast_payload.update(ruling.advisory)
-        await self.bus.append_and_seq(
-            Message.new(
-                source,
-                pending.from_agent,
-                "review_verdict",
-                rebroadcast_payload,
-                in_reply_to=pending.proposal_msg_id,
-            )
-        )
+        await self._rebroadcast_verdict(source, pending, ruling)
         # Mirror specialist / integrate_patch verdicts onto SharedState so PolicyGate's integrate_patch gate can
         # consult them on the next tick.
         patch_verdict = ruling.authored
@@ -744,13 +741,7 @@ class IntentRouter(CoordinatorCollaborator):
             pa_params = pending.payload.get("params") or {}
         except AttributeError:
             pa_params = {}
-        sid_candidate = ""
-        if pending.action_name == "integrate_patch":
-            # A pre-screen carries its candidate id at the top level, not in params.
-            sid_candidate = verdict_subject({**pa_params, **(pending.payload or {})})
-        elif pending.action_name == "specialist":
-            # Critic verdict on the specialist proposal counts as the verdict on its patches; task_id is the key.
-            sid_candidate = str(pa_params.get("task_id") or "").strip()
+        sid_candidate = _patch_verdict_subject(pending, pa_params)
         if sid_candidate and patch_verdict:
             try:
                 self.shared_state.record_specialist_patch_verdict(
@@ -787,6 +778,25 @@ class IntentRouter(CoordinatorCollaborator):
                 STATUS_COMPLETED if verdict in ("approve", "advise") else STATUS_CANCELLED,
                 task_id=pending.task_id,
             )
+
+    async def _rebroadcast_verdict(self, source: str, pending: Any, ruling: CriticRuling) -> None:
+        """Re-publish the collapsed verdict as a ``review_verdict`` reply to the proposal's author."""
+        rebroadcast_payload: dict[str, Any] = {
+            "target_proposal_msg_id": pending.proposal_msg_id,
+            "verdict": ruling.verdict,
+            "reasoning": ruling.reasoning,
+        }
+        if ruling.advisory:
+            rebroadcast_payload.update(ruling.advisory)
+        await self.bus.append_and_seq(
+            Message.new(
+                source,
+                pending.from_agent,
+                "review_verdict",
+                rebroadcast_payload,
+                in_reply_to=pending.proposal_msg_id,
+            )
+        )
 
     async def _apply_verdict_outcome(
         self,

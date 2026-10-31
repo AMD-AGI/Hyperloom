@@ -840,6 +840,10 @@ class _ExploreRound:
         self.round_id = f"explore-{(to_int(params.get('explore_search_cursor'), 0) or 0) + 1:03d}"
         self.observed = observed_launch_from_state(self.ss)
         self.opening_stack = self.launched_stack()
+        self._init_round_ledgers()
+
+    def _init_round_ledgers(self) -> None:
+        """Start the round's variant lists, verdict ledgers and run-stop record empty."""
         self.lever_payload: list[dict[str, Any]] = []
         self.grid: list[GridVariant] = []
         self.runnable: list[GridVariant] = []
@@ -1531,22 +1535,30 @@ class _ExploreRound:
             }
         )
 
-    def _keep(self, gv: GridVariant, run_gv: GridVariant, r: Any, row: dict[str, Any], meas: dict[str, Any]) -> dict:
-        control_fields = controls_of(vars(gv))
-        run_remove_args = self._run_remove_args(gv)
-        next_effective_args = compose_server_args(
+    def _next_effective_args(self, gv: GridVariant, run_remove_args: list[str]) -> str:
+        """The full server argv string ``gv`` ran with on top of the inherited and accumulated args."""
+        return compose_server_args(
             inherited_args=self.inherited_args,
             base_extra_args=self.args,
             variant_extra_args=gv.extra_server_args,
             remove_args=run_remove_args,
             args_mode="replace" if self.args_mode == "replace" else gv.args_mode,
         )
-        next_stack_args = compose_server_args(
+
+    def _next_stack_args(self, gv: GridVariant) -> str:
+        """The accumulated stack args extended with ``gv``'s own delta."""
+        return compose_server_args(
             base_extra_args=self.args,
             variant_extra_args=gv.extra_server_args,
             remove_args=gv.remove_args,
             args_mode=gv.args_mode,
         )
+
+    def _keep(self, gv: GridVariant, run_gv: GridVariant, r: Any, row: dict[str, Any], meas: dict[str, Any]) -> dict:
+        control_fields = controls_of(vars(gv))
+        run_remove_args = self._run_remove_args(gv)
+        next_effective_args = self._next_effective_args(gv, run_remove_args)
+        next_stack_args = self._next_stack_args(gv)
         effective = dict(control_fields)
         if run_remove_args:
             effective["remove_args"] = list(run_remove_args)

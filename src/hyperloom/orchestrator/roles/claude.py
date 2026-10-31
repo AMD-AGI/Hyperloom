@@ -437,6 +437,11 @@ class ClaudeBackend:
             # usable — including the gateway 400s (``litellm.BadRequestError: AnthropicException``) this telemetry
             # exists to count.
             raise LLMCallFailed(f"Claude backend call failed: {exc!r}") from exc
+        return self._turn_result(collected, full_prompt)
+
+    # Internals
+    def _turn_result(self, collected: _StreamedTurn, full_prompt: str) -> BackendTurnResult:
+        """Package one collected SDK stream as the turn's result, with its token usage and conversation text."""
         raw_text = collected.raw_text
         usage = collected.usage
         cache_creation = to_int(usage.get("cache_creation_input_tokens") if usage else None, 0)
@@ -466,7 +471,6 @@ class ClaudeBackend:
             },
         )
 
-    # Internals
     @property
     def _offered_intents(self) -> frozenset[IntentType]:
         """The intent types the agent is offered: the role's set, or every type when none is given."""
