@@ -758,7 +758,6 @@ def test_specialist_followup_ack_reaches_dispatcher_cleanup(tmp_path, monkeypatc
                 worktree_base=None,
                 system_prompt="system",
                 user_prompt="user",
-                max_turns=1,
                 gpu_lease=lease,
                 deadline=Deadline.after(0 if phase == "timeout" else 600, now=100),
             )

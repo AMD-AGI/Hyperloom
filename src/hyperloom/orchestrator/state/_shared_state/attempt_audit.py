@@ -5,21 +5,14 @@
 
 from __future__ import annotations
 
-# Per-action audit trail kinds; kernel_agent-owned actions excluded (dedicated structures).
-_AUDIT_ACTIONS: frozenset[str] = frozenset(
-    {
-        "baseline",
-        "profile",
-        "explore",
-        # ``roofline`` runs profile + trace_analyze atomically.
-        "roofline",
-    }
-)
-
-# audit-action name -> (result-dict key, key_metric_kind).
+# audit-action name -> (result-dict key, key_metric_kind); kernel_agent-owned actions excluded (dedicated structures).
 _KEY_METRIC_MAP: dict[str, tuple[str, str]] = {
     "baseline": ("output_throughput", "output_throughput"),
     "profile": ("output_throughput", "output_throughput"),
     "explore": ("best_gain_pct", "gain_pct"),
+    # ``roofline`` runs profile + trace_analyze atomically.
     "roofline": ("snapshot_id", "snapshot_id"),
 }
+
+# Per-action audit trail kinds.
+_AUDIT_ACTIONS: frozenset[str] = frozenset(_KEY_METRIC_MAP)
