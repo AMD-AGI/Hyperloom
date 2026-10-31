@@ -843,3 +843,9 @@ def test_the_role_names_native_sources_only_when_the_session_lays_them_out(tmp_p
     assert "sgl_kernel" not in role_prompt(WORKLOAD).split("sglang/kernels/jit/csrc")[1]
     assert "python/sglang/kernels/aot" in native and "pending_build" in native and "CMakeLists.txt" in native
     assert native.startswith(role_prompt(WORKLOAD))
+
+
+def test_forge_fuse_is_leased_the_session_s_tp_since_it_serves_the_model_to_check_its_fusion():
+    prompt = " ".join(role_prompt(WORKLOAD, dev_leases=1).split())
+
+    assert "forge-fuse checks its fusion by serving the model at the session's TP: lease it that many cards" in prompt
