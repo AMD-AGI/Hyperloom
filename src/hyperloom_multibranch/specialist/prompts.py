@@ -80,6 +80,10 @@ Since your last turn ended, this arrived for your branch:
 Read what bears on your work (test_result, blackboard_brief) and carry on from where you stopped."""
 _WAKE_ITEM = "- {kind} {pointer}: {summary}"
 _MOVED = "Since your last turn ended, the integration head moved."
+_LEASE_WAKE = """\
+Your long dev lease's process still runs. Read its progress with dev_sandbox_read if you want to, act on it, or end \
+your turn again to keep waiting."""
+
 _NUDGE = """\
 Your turn ended with no test of yours running and nothing new for your branch. Nothing arrives on its own: a brief \
 comes only when the integration head moves, and no one hands your branch a new direction, so read blackboard_brief for \
@@ -617,6 +621,12 @@ def _arrivals(items: Sequence[InboxItem], notices: Sequence[BranchLogRecord]) ->
     return "\n".join(lines)
 
 
+def lease_wake_message() -> str:
+    """The message to a specialist whose turn ended while its long dev lease's process runs, before its silence would
+    be taken for a lost session."""
+    return _LEASE_WAKE
+
+
 def nudge_message() -> str:
     """The message to a specialist whose turn ended with nothing of its own running and nothing new arrived."""
     return _NUDGE
@@ -678,6 +688,7 @@ __all__ = [
     "idle_resume_message",
     "integration_section",
     "launch_prompt",
+    "lease_wake_message",
     "nudge_message",
     "prompt_versions",
     "resume_message",

@@ -101,6 +101,7 @@ from hyperloom_multibranch.specialist.prompts import (
     idle_resume_message,
     integration_section,
     launch_prompt,
+    lease_wake_message,
     nudge_message,
     resume_message,
     wake_message,
@@ -129,6 +130,9 @@ _SILENT, _WORKED = 2, 1
 #: A session silent this long, with no log growth, CPU work or tool call in flight, is hung: a test takes about eight
 #: minutes and one reasoning step can take as long, and Claude streams its reasoning into the log.
 SPECIALIST_LOST_AFTER_S = 600.0
+#: How long a CLI waiting on its long dev lease's process stays unwoken: the reaper reads only the CLI's own output, so
+#: a wait in silence past ``SPECIALIST_LOST_AFTER_S`` would be taken for a hung session.
+LEASE_WAKE_S = SPECIALIST_LOST_AFTER_S / 2
 #: How a launch that ended early to wait for its branch's test ended, as the next launch is told.
 WAITED_END = "its model ended its turn to wait for a test, which has its result now"
 #: A conversation whose last call read this many tokens is not resumed: about 60% of the 1M-token window of the
@@ -257,7 +261,8 @@ class AgentSetup:
     many idle turns as patiences. ``idle_resume_wait_s`` bounds how long the resume of an idle session waits for
     something to arrive. ``dev_leases`` are the session's dev sandboxes, ``None`` when it lends none: a
     branch's lease is given back when its run ends, however it ended, and when it is stopped, unless it is a long one
-    with a process running, which only the branch's stop gives back.
+    with a process running, which only the branch's stop gives back. A CLI waiting on such a process is woken every
+    ``lease_wake_s``.
     """
 
     command: AgentCommand
@@ -275,6 +280,7 @@ class AgentSetup:
     idle_resume_wait_s: float = IDLE_RESUME_WAIT_S
     clock: Callable[[], float] = time.time
     dev_leases: DevLeaseHolder | None = None
+    lease_wake_s: float = LEASE_WAKE_S
 
 
 class SessionBlackboard(BranchLogStore, UsageSink, Inbox, LearningStore, AgentRecords, LineageSink, Protocol):
@@ -590,6 +596,7 @@ class AgentSession:
         once the session is stopped or the CLI ended."""
         loop = asyncio.get_running_loop()
         quiet_since: float | None = None
+        waited_since = loop.time()
         while not self._stopped.is_set() and (await self._setup.runner.poll(handle)).state == _RUNNING:
             if self._beat is not None:
                 self._beat()
@@ -610,6 +617,8 @@ class AgentSession:
                 return wake_message(
                     (*items, *landed), notices, integration=_joined(followed.detail if followed else "", holdings)
                 )
+            if self._dev_lease_busy() and loop.time() - waited_since >= self._setup.lease_wake_s:
+                return lease_wake_message()
             if seen.profiles or await self._tests_in_flight() or self._dev_lease_busy():
                 quiet_since = None
             else:
