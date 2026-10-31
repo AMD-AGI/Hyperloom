@@ -280,16 +280,8 @@ async def _run_outer_gate_turns(gate, backend, run_spec: AgentRunSpec, run_resul
     integrity verdict.
     """
 
-    def count_result_target_edits(result) -> int:
-        """Count incremental target edits from a hookless backend turn."""
-        reported = getattr(result, "target_edit_count", None)
-        if reported is not None:
-            return max(0, int(reported))
-        return gate.count_target_edits(run_spec.cwd, result.file_changes)
-
     continuation_turns = 1
     integrity_error: BaseException | None = None
-    gate.edit_count += count_result_target_edits(run_result)
     while True:
         decision = await gate._on_stop({}, None, None)
         if decision.get("decision") != "block":
@@ -325,7 +317,6 @@ async def _run_outer_gate_turns(gate, backend, run_spec: AgentRunSpec, run_resul
             gate.findings.append(f"Agent resume failed: {type(exc).__name__}: {exc}")
             break
         continuation_turns += 1
-        gate.edit_count += count_result_target_edits(resumed)
         resumed.tool_calls = [*run_result.tool_calls, *resumed.tool_calls]
         resumed.findings = [*run_result.findings, *resumed.findings]
         # A turn that left a benchmark running poisons every turn after it: resuming the session does not free
