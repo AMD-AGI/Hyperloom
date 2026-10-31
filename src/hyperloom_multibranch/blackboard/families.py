@@ -27,17 +27,22 @@ from hyperloom.contracts.recipe import KernelKind, RecipeDelta
 from hyperloom_multibranch.contracts.blackboard.peers import IntentLayer
 from hyperloom_multibranch.contracts.blackboard.records import REPLAY_TARGET
 
-#: The op families a target names, each with what its words or op names look like, the more specific first.
+#: The op families a target names, each with what its words or op names look like, the more specific first. A short
+#: name counts where no letter adjoins it, as op names join their words with ``_``; ``ck`` only standing alone, as CK
+#: prefixes it to kernels of every family.
 OP_FAMILIES: tuple[tuple[str, str], ...] = (
     ("linear attention", r"gdn|gated_delta|delta_rule|causal_conv1d|conv1d|mamba|linear[ _-]attention"),
     ("moe", r"moe|expert|router|gating|topk_?softmax|softmax_?topk"),
-    ("attention", r"attn|attention|paged_attention|\bpa_|\bmla\b|\bmha\b|flash|ll4mi"),
+    (
+        "attention",
+        r"attn|attention|paged_attention|(?<![a-z])pa_|(?<![a-z])mla(?![a-z])|(?<![a-z])f?mha(?![a-z])|flash|ll4mi",
+    ),
     (
         "gemm",
         r"gemm|matmul|blockscale|a8w8|a16w16|qkv_proj|o_proj|gate_up|down_proj|split-?k|\bck\b|hipblaslt"
         r"|aten::(?:addmm|bmm|mm)\b",
     ),
-    ("norm", r"rmsnorm|layernorm|qk-?norm|\bnorm\b"),
+    ("norm", r"rmsnorm|layernorm|qk-?norm|(?<![a-z])norm(?![a-z])"),
     ("rope", r"rope|rotary"),
     ("activation", r"silu|gelu|swiglu|_and_mul|activation"),
     ("sampling", r"sampl|logits"),

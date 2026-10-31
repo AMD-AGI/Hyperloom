@@ -10,7 +10,14 @@ import pytest
 from hyperloom.contracts.recipe import ConfigDelta, KernelArtifact, KernelKind, RecipeDelta
 from hyperloom_multibranch.contracts.blackboard.peers import IntentLayer
 from hyperloom_multibranch.contracts.blackboard.records import REPLAY_TARGET
-from hyperloom_multibranch.blackboard.families import OTHER_TARGET, Component, Family, Mechanism, family_of
+from hyperloom_multibranch.blackboard.families import (
+    OTHER_TARGET,
+    Component,
+    Family,
+    Mechanism,
+    family_of,
+    op_family,
+)
 
 CONFIG, SOURCE, KERNEL = IntentLayer.CONFIG, IntentLayer.SOURCE, IntentLayer.KERNEL
 TUNED = KernelArtifact(KernelKind.GEMM, "bf16 4096x14336", "kernel/gemm/tuned.csv", "a" * 64)
@@ -107,6 +114,24 @@ def test_a_warm_start_replay_is_a_family_of_its_own_and_a_family_reads_as_a_labe
     assert replay == Family(Component.WARM_START.value, Mechanism.OTHER, SOURCE)
     assert Family("KV cache", Mechanism.PRECISION, CONFIG).label == "KV cache · quantization precision · config"
     assert Family("gemm", Mechanism.FUSION, None).label == "gemm · fusion · any layer"
+
+
+@pytest.mark.parametrize(
+    ("op", "found"),
+    [
+        ("mla_decode_fwd", "attention"),
+        ("aiter::mha_varlen_fwd", "attention"),
+        ("ck_fmha_fwd_d128", "attention"),
+        ("fused_pa_decode", "attention"),
+        ("vllm::fused_add_rms_norm", "norm"),
+        ("layer_norm_kernel", "norm"),
+        ("ck_layernorm2d_fwd", "norm"),
+        ("normal_sampler", "sampling"),
+        ("block_reduce", None),
+    ],
+)
+def test_an_op_name_joined_by_underscores_reads_its_family(op: str, found: str | None) -> None:
+    assert op_family(op) == found
 
 
 @pytest.mark.parametrize(
