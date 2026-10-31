@@ -529,7 +529,8 @@ async def test_entry_asks_at_its_own_decision_point_after_filing_an_earlier_answ
 
 
 async def test_a_filed_answer_is_the_phases_work_and_a_run_on_its_event(service, monkeypatch):
-    from hyperloom.orchestrator.phases.machine_state import _framework_exit, _framework_predicate_inputs
+    from hyperloom.orchestrator.phases.machine_state import _framework_predicate_inputs
+    from hyperloom.orchestrator.phases.exit_predicates import framework_exit
     from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_SKIP_TO_KERNEL
 
     state = _state(phase_started_unix=time.time() - 60)
@@ -544,7 +545,7 @@ async def test_a_filed_answer_is_the_phases_work_and_a_run_on_its_event(service,
     plateau, budget = _framework_predicate_inputs(state, now_unix=time.time())
     assert plateau["specialist_round_count"] == 1
     # The skip hint is honoured only once the phase did work.
-    exit_ = _framework_exit({"plateau": plateau, "budget": budget, "hint": ESCALATE_HINT_SKIP_TO_KERNEL})
+    exit_ = framework_exit({"plateau": plateau, "budget": budget, "hint": ESCALATE_HINT_SKIP_TO_KERNEL})
     assert exit_ is not None and exit_[0] == "optimize_no_more_leverage"
     assert [(run_id, f["role"], f["status"], f["domain"], f["proposals_total"]) for run_id, f in runs] == [
         ("c0-s0-r0", "config", "succeeded", "primatune", 1)

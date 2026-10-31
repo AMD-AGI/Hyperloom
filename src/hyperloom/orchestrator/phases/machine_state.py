@@ -21,11 +21,10 @@ from hyperloom.orchestrator.lever import (
 from hyperloom.inference_optimizer.breakdown.stop_reasons import is_valid_stop_reason
 from ..kernel import kernel_decisions
 from ..state.shared_state import (
-    ESCALATE_HINT_SKIP_TO_KERNEL,
-    ESCALATE_HINT_SKIP_TO_SWEEP,
     _LIFECYCLE_CAP,
     is_valid_escalate_hint,
 )
+from .exit_predicates import budget_exit, framework_exit, framework_plateau
 from .phase_chain import (
     LIFECYCLE_STATUS_ENTER,
     PHASE_ALLOWED_ACTIONS,
@@ -857,7 +856,7 @@ def per_lever_dryness(state: Any) -> tuple[bool, dict[str, Any]]:
     steers elsewhere; the phase advances only once none of them is paying.
     """
     overrides = _resolve_plateau_overrides(state)
-    plateau = _framework_plateau(
+    plateau = framework_plateau(
         {**_config_lever_evidence(state, overrides), **_patch_lever_evidence(state, overrides)},
     )
     return (plateau.config_dry and plateau.source_dry), plateau.arms
@@ -1159,74 +1158,6 @@ def _prelude_viability(baseline: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _budget_exit(
-    budget: dict[str, Any],
-    *,
-    exhausted_reason: str,
-    evidence: dict[str, Any],
-) -> tuple[str, dict[str, Any]] | None:
-    remaining = to_float(budget.get("remaining_sec"))
-    elapsed = to_float(budget.get("entry_elapsed_sec")) or 0.0
-    cumulative = to_float(budget.get("cumulative_elapsed_sec")) or 0.0
-    timing = {
-        **evidence,
-        "entry_elapsed_seconds": elapsed,
-        "cumulative_elapsed_seconds": cumulative,
-    }
-    if remaining is not None and remaining <= 0.0:
-        return exhausted_reason, timing
-    return None
-
-
-class _FrameworkPlateau(NamedTuple):
-    """Whether each FRAMEWORK_AGENT arm has stopped paying, and the arm evidence that says so."""
-
-    config_dry: bool
-    source_dry: bool
-    arms: dict[str, Any]
-    did_work: bool
-
-
-def _framework_plateau(plateau: dict[str, Any]) -> _FrameworkPlateau:
-    """Read the per-arm plateau verdicts off the FRAMEWORK_AGENT predicate inputs."""
-    recent_gain = to_float(plateau.get("recent_keep_gain_pct")) or 0.0
-    keep_threshold = to_float(plateau.get("keep_gain_threshold_pct")) or 0.0
-    empty_streak = int(plateau.get("empty_streak") or 0)
-    empty_threshold = int(plateau.get("empty_streak_threshold") or 0)
-    source_streak = int(plateau.get("source_consecutive_no_keep") or 0)
-    source_threshold = int(plateau.get("source_threshold") or 0)
-    config_dry = recent_gain < keep_threshold and empty_streak >= empty_threshold
-    source_dry = source_streak >= source_threshold or bool(plateau.get("source_candidates_exhausted"))
-    return _FrameworkPlateau(
-        config_dry=config_dry,
-        source_dry=source_dry,
-        arms={
-            **{key: value for key, value in plateau.items() if key not in {"attempt_count", "specialist_round_count"}},
-            "config_arm_plateaued": config_dry,
-            "source_arm_plateaued": source_dry,
-            "switch_bottleneck": bool(config_dry or source_dry),
-        },
-        did_work=int(plateau.get("attempt_count") or 0) > 0 or int(plateau.get("specialist_round_count") or 0) > 0,
-    )
-
-
-def _framework_exit(inputs: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
-    plateau = _framework_plateau(dict(inputs.get("plateau") or {}))
-    arms = plateau.arms
-    hint = str(inputs.get("hint") or "")
-    if hint == ESCALATE_HINT_SKIP_TO_KERNEL and plateau.did_work:
-        return "optimize_no_more_leverage", {**arms, "evidence": "llm_escalation", "hint": hint}
-    if hint == ESCALATE_HINT_SKIP_TO_SWEEP:
-        return "optimize_no_more_leverage", {**arms, "evidence": "skip_to_sweep", "hint": hint}
-    if plateau.config_dry and plateau.source_dry:
-        return "optimize_no_more_leverage", {**arms, "evidence": "both_arms_plateaued", "plateau": True}
-    return _budget_exit(
-        dict(inputs.get("budget") or {}),
-        exhausted_reason="optimize_phase_budget_exhausted",
-        evidence=arms,
-    )
-
-
 def _controller_round_settled(pending: dict[str, Any], macro_cycle: Any) -> bool:
     """Whether the Forge rewrite controller has finished the round this macro-cycle opened."""
     return (
@@ -1274,7 +1205,7 @@ def _kernel_exit(inputs: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
         idle = _kernel_idle_exit(plateau, inputs.get("now_unix"))
         if idle is not None:
             return idle
-    return _budget_exit(
+    return budget_exit(
         dict(inputs.get("budget") or {}),
         exhausted_reason="kernel_phase_budget_exhausted",
         evidence={"rejected_kernel_count": int(plateau.get("rejected_kernel_count") or 0)},
@@ -1303,7 +1234,7 @@ def _sweep_exit(inputs: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
         return "sweep_done", evidence
     # Anything else -- nothing landed yet, or a sweep the orchestrator cancelled -- leaves the phase to its budget:
     # a cancelled sweep was stopped by a session-wide stop that already decided the run is over.
-    return _budget_exit(
+    return budget_exit(
         dict(inputs.get("budget") or {}),
         exhausted_reason="sweep_budget_exhausted",
         evidence={"sweep_status": status} if status else {},
@@ -1560,7 +1491,7 @@ def _framework_transition(
     flags: dict[str, Any],
 ) -> tuple[str, str, dict[str, Any]] | None:
     """The transition FRAMEWORK_AGENT takes when its leverage or its budget runs out."""
-    normal = _framework_exit(inputs)
+    normal = framework_exit(inputs)
     if normal is None:
         return None
     if bool(flags.get("kernel_enabled")):
