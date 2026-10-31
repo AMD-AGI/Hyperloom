@@ -124,20 +124,8 @@ class BestPublicationMixin:
             checkpoint_metadata=pending,
         )
 
-    def _reconcile_best_publication(self) -> None:
-        """Repair manifest and derived best views from the durable run state."""
-        best = self.run_state.best
-        if not best.commit_hash or best.wall_ms is None or best.mean_case_speedup is None:
-            return
-        # A resumed session recomputes session_index and experiment_id, which legitimately differ from what the stored
-        # manifest was written with, so republishing an already-current best tripped the same-iteration conflict guard
-        # and reported persistence_degraded over a bundle that was already correct.
-        if self.best_publisher.describes_current_best(
-            iteration=best.iteration,
-            commit_hash=best.commit_hash,
-        ):
-            return
-        metadata = self.archive.load_meta(best.iteration)
+    def _stored_best_publication(self, best: BestRecord) -> dict:
+        """The stored publication metadata that describes ``best``, or an empty dict when none does."""
         published: dict = {}
         publication_paths = [
             self.best_publisher.manifest_path,
@@ -156,6 +144,23 @@ class BestPublicationMixin:
             ):
                 published = candidate
                 break
+        return published
+
+    def _reconcile_best_publication(self) -> None:
+        """Repair manifest and derived best views from the durable run state."""
+        best = self.run_state.best
+        if not best.commit_hash or best.wall_ms is None or best.mean_case_speedup is None:
+            return
+        # A resumed session recomputes session_index and experiment_id, which legitimately differ from what the stored
+        # manifest was written with, so republishing an already-current best tripped the same-iteration conflict guard
+        # and reported persistence_degraded over a bundle that was already correct.
+        if self.best_publisher.describes_current_best(
+            iteration=best.iteration,
+            commit_hash=best.commit_hash,
+        ):
+            return
+        metadata = self.archive.load_meta(best.iteration)
+        published = self._stored_best_publication(best)
         validation_text = (
             self.archive.read_candidate_file(
                 best.iteration,

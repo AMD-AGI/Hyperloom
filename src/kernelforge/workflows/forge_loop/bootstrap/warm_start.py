@@ -91,6 +91,27 @@ def _publish_warm_start(run: _ForgeRun, warm: dict) -> dict:
     return warm
 
 
+def _record_warm_start_baselines(run: _ForgeRun, warm: dict) -> None:
+    """Set the run's baselines, and its warm-start anchors when the candidate was adopted, from the KB verdict."""
+    iter_config = run.iter_config
+    # Keep the pristine raw baseline immutable.
+    if warm.get("pristine_ms"):
+        iter_config.baseline_wall_ms = warm["pristine_ms"]
+    if warm.get("baseline_case_times"):
+        iter_config.baseline_case_times = dict(warm["baseline_case_times"])
+    iter_config.preloop_baseline_unscored_cases = list(warm.get("baseline_unscored_cases") or [])
+    if warm.get("applied"):
+        iter_config.pristine_baseline_wall_ms = warm.get("pristine_ms")
+        iter_config.warm_start_wall_ms = warm.get("keep_baseline_ms")
+        iter_config.warm_start_mean_case_speedup = warm.get("mean_case_speedup")
+        iter_config.warm_start_bench = {
+            "case_times": dict(warm.get("case_times") or {}),
+            "unscored_cases": list(warm.get("unscored_cases") or []),
+        }
+        iter_config.warm_start_commit = warm.get("applied_commit", "")
+        iter_config.warm_start_solution_slug = warm.get("solution_slug", "")
+
+
 def _read_kb_warm_start(run: _ForgeRun, program_md: str, kb_warmstart_enabled: bool) -> _WarmStart:
     """Adopt the best prior solution the KB offers, so iteration 1 starts from it rather than from scratch.
 
@@ -137,22 +158,7 @@ def _read_kb_warm_start(run: _ForgeRun, program_md: str, kb_warmstart_enabled: b
             warm = _publish_warm_start(run, warm)
         if warm.get("program_md_addition"):
             program_md = program_md + "\n\n" + warm["program_md_addition"]
-        # Keep the pristine raw baseline immutable.
-        if warm.get("pristine_ms"):
-            iter_config.baseline_wall_ms = warm["pristine_ms"]
-        if warm.get("baseline_case_times"):
-            iter_config.baseline_case_times = dict(warm["baseline_case_times"])
-        iter_config.preloop_baseline_unscored_cases = list(warm.get("baseline_unscored_cases") or [])
-        if warm.get("applied"):
-            iter_config.pristine_baseline_wall_ms = warm.get("pristine_ms")
-            iter_config.warm_start_wall_ms = warm.get("keep_baseline_ms")
-            iter_config.warm_start_mean_case_speedup = warm.get("mean_case_speedup")
-            iter_config.warm_start_bench = {
-                "case_times": dict(warm.get("case_times") or {}),
-                "unscored_cases": list(warm.get("unscored_cases") or []),
-            }
-            iter_config.warm_start_commit = warm.get("applied_commit", "")
-            iter_config.warm_start_solution_slug = warm.get("solution_slug", "")
+        _record_warm_start_baselines(run, warm)
     return _WarmStart(
         warm=warm,
         program_md=program_md,

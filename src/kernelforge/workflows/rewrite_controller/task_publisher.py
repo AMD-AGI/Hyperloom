@@ -182,6 +182,29 @@ def _validate_framework_against_sources(task: KernelRewriteTask) -> None:
     )
 
 
+def _install_task(layout: ControllerLayout, destination: Path, payload: dict, driver: Path) -> None:
+    """Write the pinned task and its driver to ``destination`` in one durable rename."""
+    layout.tasks_root.mkdir(parents=True, exist_ok=True)
+    temporary = Path(
+        tempfile.mkdtemp(
+            dir=str(layout.tasks_root),
+            prefix=f".{destination.name}.",
+        )
+    )
+    try:
+        atomic_write_text(
+            temporary / "task.json",
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+            options=DURABLE,
+        )
+        shutil.copy2(driver, temporary / "driver.py")
+        fsync_tree(temporary)
+        os.replace(temporary, destination)
+        fsync_directory(layout.tasks_root)
+    finally:
+        shutil.rmtree(temporary, ignore_errors=True)
+
+
 def publish_staged_task(
     layout: ControllerLayout,
     staged_dir: str | Path,
@@ -234,25 +257,7 @@ def publish_staged_task(
             ),
         )
 
-    layout.tasks_root.mkdir(parents=True, exist_ok=True)
-    temporary = Path(
-        tempfile.mkdtemp(
-            dir=str(layout.tasks_root),
-            prefix=f".{destination.name}.",
-        )
-    )
-    try:
-        atomic_write_text(
-            temporary / "task.json",
-            json.dumps(payload, indent=2, sort_keys=True) + "\n",
-            options=DURABLE,
-        )
-        shutil.copy2(driver, temporary / "driver.py")
-        fsync_tree(temporary)
-        os.replace(temporary, destination)
-        fsync_directory(layout.tasks_root)
-    finally:
-        shutil.rmtree(temporary, ignore_errors=True)
+    _install_task(layout, destination, payload, driver)
 
     shutil.rmtree(source, ignore_errors=True)
     return TaskPublicationResult(
