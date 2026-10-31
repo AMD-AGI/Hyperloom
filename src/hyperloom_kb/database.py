@@ -26,6 +26,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
+from hyperloom_kb.schema import Experience
+
 SCHEMA_VERSION = 1
 #: The SQLite file a service without a PostgreSQL server keeps under its home.
 # Not main's kb.sqlite3, whose tables of the same names hold another shape: a home from main keeps that file unread.
@@ -474,6 +476,28 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def record_write(connection: Connection, kb_id: str, experience: Experience, status: str, source: WriteSource) -> None:
+    """Record one write of ``experience`` to the KB ``kb_id`` with its source and result."""
+
+    connection.execute(
+        """
+        INSERT INTO writes(kb_id, experience_id, schema_ref, result, source_kb_id, source_name, request_id,
+            received_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        (
+            kb_id,
+            experience.id,
+            experience.schema_ref,
+            status,
+            source.kb_id,
+            source.name,
+            source.request_id,
+            utc_now(),
+        ),
+    )
+
+
 __all__ = [
     "SCHEMA_VERSION",
     "SQLITE_FILE",
@@ -485,5 +509,6 @@ __all__ = [
     "SqliteDatabase",
     "WriteSource",
     "open_database",
+    "record_write",
     "utc_now",
 ]

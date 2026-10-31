@@ -28,7 +28,7 @@ from typing import Any, BinaryIO, TextIO, cast
 from urllib.parse import parse_qs, urlsplit
 
 from hyperloom_kb.config import PACKAGED_DECLARATION, load_declaration
-from hyperloom_kb.database import Connection, Database, DatabaseError, WriteSource, open_database
+from hyperloom_kb.database import Connection, Database, DatabaseError, WriteSource, open_database, record_write
 from hyperloom_kb.files import FileStore, file_sha256
 from hyperloom_kb.observability import (
     PROBE_ROUTES,
@@ -49,6 +49,7 @@ from hyperloom_kb.knowledge_read import (
     PlannerConfiguration,
     PlannerGatewayConfig,
     QueryExecutor,
+    ReadResult,
     ReadStatus,
     ReadTrace,
 )
@@ -603,23 +604,7 @@ class ExperienceHTTPService:
                 )
                 self._schema_row(connection, experience.schema_ref, changes_reads=True)
                 status = InsertStatus.CREATED.value
-            connection.execute(
-                """
-                INSERT INTO writes(kb_id, experience_id, schema_ref, result, source_kb_id, source_name, request_id,
-                    received_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                (
-                    self.kb_id,
-                    experience.id,
-                    experience.schema_ref,
-                    status,
-                    source.kb_id,
-                    source.name,
-                    source.request_id,
-                    _utc_now(),
-                ),
-            )
+            record_write(connection, self.kb_id, experience, status, source)
         self.metrics.count("hyperloom_kb_writes_total", schema_ref=experience.schema_ref, result=status)
         if status == _CONFLICT:
             raise ImmutableExperienceConflict("Experience id already exists with different content")
@@ -671,6 +656,55 @@ class ExperienceHTTPService:
         self._views[schema_ref] = built
         return built
 
+    def _restrict_to_outcome(
+        self, declaration: ExperienceDeclaration, store: InMemoryExperienceStore, view: QueryView, outcome: str
+    ) -> QueryView:
+        """``view`` narrowed to the Experiences whose decision is ``outcome``."""
+
+        return QueryViewBuilder().restrict(
+            view,
+            (
+                experience_id
+                for experience_id in view.visible_experience_ids
+                if self._decision(declaration, store, experience_id) == outcome
+            ),
+        )
+
+    def _completed_fields(
+        self,
+        declaration: ExperienceDeclaration,
+        store: InMemoryExperienceStore,
+        result: ReadResult,
+        traces: list[ReadTrace],
+    ) -> dict[str, JsonValue]:
+        """The response fields of a completed read, each rendered Experience summarized with its score."""
+
+        groups = {
+            experience_id: group
+            for group in (traces[-1].execution.groups if traces else ())
+            for experience_id in group.representative_ids
+        }
+        experiences: list[JsonValue] = []
+        for reference in result.rendered_refs:
+            stored = store.get_experience(reference.id)
+            item = _summary(declaration, stored.experience if stored is not None else self.held(reference.id))
+            group = groups.get(reference.id)
+            item["score"] = group.score if group is not None else 0.0
+            item["why_matched"] = [
+                contribution.to_dict()
+                for contribution in (group.contributions if group is not None else ())
+                if contribution.experience_id == reference.id
+            ]
+            experiences.append(item)
+        return {
+            "status": result.status.value,
+            "prompt_block": result.prompt_block,
+            "rendered_refs": [reference.to_dict() for reference in result.rendered_refs],
+            "experiences": experiences,
+            "rendered_count": len(result.rendered_refs),
+            "warnings": list(result.warnings),
+        }
+
     def read(self, query: ReadQuery) -> dict[str, JsonValue]:
         """Search one schema's Experiences, this service's default schema unless ``query.schema_ref`` names another.
 
@@ -691,14 +725,7 @@ class ExperienceHTTPService:
         read_view = self._read_view(declaration)
         store, view = read_view.store, read_view.view
         if selected_outcome != MIXED_OUTCOME:
-            view = QueryViewBuilder().restrict(
-                view,
-                (
-                    experience_id
-                    for experience_id in view.visible_experience_ids
-                    if self._decision(declaration, store, experience_id) == selected_outcome
-                ),
-            )
+            view = self._restrict_to_outcome(declaration, store, view, selected_outcome)
         eligible_count = len(view.visible_experience_ids)
         response: dict[str, JsonValue] = {
             "read_id": f"read-{uuid.uuid4().hex}",
@@ -742,33 +769,7 @@ class ExperienceHTTPService:
             planner=self._planner,
             trace_sink=traces.append,
         ).read(decision, query.context)
-        groups = {
-            experience_id: group
-            for group in (traces[-1].execution.groups if traces else ())
-            for experience_id in group.representative_ids
-        }
-        experiences: list[JsonValue] = []
-        for reference in result.rendered_refs:
-            stored = store.get_experience(reference.id)
-            item = _summary(declaration, stored.experience if stored is not None else self.held(reference.id))
-            group = groups.get(reference.id)
-            item["score"] = group.score if group is not None else 0.0
-            item["why_matched"] = [
-                contribution.to_dict()
-                for contribution in (group.contributions if group is not None else ())
-                if contribution.experience_id == reference.id
-            ]
-            experiences.append(item)
-        response.update(
-            {
-                "status": result.status.value,
-                "prompt_block": result.prompt_block,
-                "rendered_refs": [reference.to_dict() for reference in result.rendered_refs],
-                "experiences": experiences,
-                "rendered_count": len(result.rendered_refs),
-                "warnings": list(result.warnings),
-            }
-        )
+        response.update(self._completed_fields(declaration, store, result, traces))
         return response
 
     def _listed(self, experience: Experience, include_excluded: bool) -> bool:
@@ -1425,7 +1426,8 @@ def serve_until_stopped(server: ExperienceHTTPServer, stop: threading.Event, dra
         time.sleep(0.05)
 
 
-def main(argv: list[str] | None = None) -> int:
+def _build_parser() -> argparse.ArgumentParser:
+    """The command-line parser for the Experience service."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--declaration", type=Path, default=PACKAGED_DECLARATION)
     parser.add_argument("--home", type=Path, default=DEFAULT_HOME)
@@ -1439,7 +1441,11 @@ def main(argv: list[str] | None = None) -> int:
         default=[],
         help="Import complete Experiences from JSONL before serving; repeatable.",
     )
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _build_parser().parse_args(argv)
     handler = logging.StreamHandler()
     handler.setFormatter(JsonLogFormatter())
     logging.basicConfig(level=logging.INFO, handlers=[handler])
