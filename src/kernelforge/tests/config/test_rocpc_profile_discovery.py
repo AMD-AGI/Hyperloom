@@ -9,6 +9,7 @@ it is loaded here by path rather than imported as a module.
 
 from __future__ import annotations
 
+import importlib.machinery
 import importlib.util
 import os
 import subprocess
@@ -117,12 +118,29 @@ def _make_sdk_pkg(site: Path, name: str, *, profiler: bool = False, amdsmi: bool
     return root
 
 
+def _only_the_sdk_in(site: Path, monkeypatch) -> None:
+    """Resolve the SDK wheels from ``site`` alone.
+
+    A ROCm wheel image has its own installed, and torch has already imported ``_rocm_sdk_core``, so a
+    ``sys.path`` prepend does not reach ``find_spec``.
+    """
+    find_spec = importlib.util.find_spec
+
+    def from_site(name, *args):
+        if name in ("_rocm_sdk_core", "_rocm_sdk_devel"):
+            return importlib.machinery.PathFinder.find_spec(name, [str(site)])
+        return find_spec(name, *args)
+
+    monkeypatch.setattr(importlib.util, "find_spec", from_site)
+
+
 def test_profiler_env_points_rocm_path_at_the_package_holding_the_sdk(rocpc_profile, tmp_path, monkeypatch) -> None:
     """The runtime-only wheel stack ships no _rocm_sdk_devel, so ROCM_PATH is
     unset and rocprof-compute cannot resolve its rocprofiler-sdk tool at all --
     it aborts before profiling anything."""
     site = tmp_path / "site"
     core = _make_sdk_pkg(site, "_rocm_sdk_core", profiler=True, amdsmi=True)
+    _only_the_sdk_in(site, monkeypatch)
     monkeypatch.delenv("ROCM_PATH", raising=False)
     monkeypatch.syspath_prepend(str(site))
 
@@ -147,6 +165,7 @@ def test_profiler_env_exposes_the_sdk_own_amdsmi(rocpc_profile, tmp_path, monkey
     stand in: it is ROCm 7 era and resolves libamd_smi.so under /opt/rocm."""
     site = tmp_path / "site"
     core = _make_sdk_pkg(site, "_rocm_sdk_core", profiler=True, amdsmi=True)
+    _only_the_sdk_in(site, monkeypatch)
     monkeypatch.delenv("ROCM_PATH", raising=False)
     monkeypatch.delenv("PYTHONPATH", raising=False)
     monkeypatch.syspath_prepend(str(site))
