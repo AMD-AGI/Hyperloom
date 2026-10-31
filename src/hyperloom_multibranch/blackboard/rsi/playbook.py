@@ -19,13 +19,16 @@ whose judge ordered a stop the envelope refused plays the champion from then on.
 
 The pool beside the archive (:class:`PlaybookPool`, ``<root>/playbooks``) keeps every playbook written, the
 champions crowned and the playbooks retired, each with its evidence. A session plays the champion, or, in a
-challenger session, the oldest playbook still on trial (:func:`session_playbook`); :meth:`Playbook.render` is what
+challenger session, the oldest playbook still on trial (:func:`session_playbook`); a session the command line names
+neither is a challenger session when its id draws it (:func:`drawn_challenger`), so the playbooks on trial are played
+without anyone asking for them. :meth:`Playbook.render` is what
 the judge reads of it every round.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import logging
 import re
@@ -48,6 +51,9 @@ PLAYBOOK_KEY = "playbook"
 #: The key the scheduler records beside :data:`PLAYBOOK_KEY` when a challenger session broke the safety envelope and
 #: played the champion for the rest of it, the breach as its value.
 FALLBACK_KEY = "playbook_fallback"
+#: The share of sessions their id draws as challenger sessions: an even split, so a challenger session finds a session
+#: of the champion on its task to pair with soonest.
+CHALLENGER_SHARE = 0.5
 CROWNED_FORMAT = "multibranch.scheduling-playbook-crowned"
 RETIRED_FORMAT = "multibranch.scheduling-playbook-retired"
 #: A playbook's label: lower-case letters, digits and ``.``, ``_``, ``-``.
@@ -376,6 +382,14 @@ def session_playbook(pool: PlaybookPool | None, *, challenger: bool) -> Playbook
     return PlaybookChoice(champion, champion)
 
 
+def drawn_challenger(session_id: str) -> bool:
+    """Whether the session's id draws it as one of the :data:`CHALLENGER_SHARE` of sessions that are challenger
+    sessions: the same draw whenever it is asked, and apart from the menu's draw of its control branches."""
+
+    digest = hashlib.sha256(f"{session_id}:playbook".encode()).hexdigest()
+    return int(digest, 16) < CHALLENGER_SHARE * 16 ** len(digest)
+
+
 @dataclass
 class PlaybookPlay:
     """What a session plays as it goes: the ``choice`` it started with, then, once a challenger session broke the
@@ -437,6 +451,7 @@ def playbook_label(text: str) -> str:
 
 __all__ = [
     "BOUNDS",
+    "CHALLENGER_SHARE",
     "CROWNED_FORMAT",
     "FALLBACK_KEY",
     "H0",
@@ -459,6 +474,7 @@ __all__ = [
     "PlaybookRule",
     "Retired",
     "changes",
+    "drawn_challenger",
     "playbook_label",
     "problems",
     "replaced",

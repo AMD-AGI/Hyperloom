@@ -159,8 +159,9 @@ def test_run_defaults() -> None:
     )
 
 
-def test_a_session_plays_the_champion_playbook_unless_it_is_a_challenger_session() -> None:
-    assert _settings().playbook is PlaybookMode.CHAMPION
+def test_a_session_draws_its_playbook_unless_the_command_line_names_champion_or_challenger() -> None:
+    assert _settings().playbook is PlaybookMode.AUTO
+    assert _settings("--playbook", "champion").playbook is PlaybookMode.CHAMPION
     assert _settings("--playbook", "challenger").playbook is PlaybookMode.CHALLENGER
     with pytest.raises(SystemExit):
         _settings("--playbook", "favourite")

@@ -7,7 +7,8 @@ PRELUDE gets the whole remaining budget, and spends none of it on a child when i
 EXPLORE then runs until the longest baseline test and one CLOSE grace are left before the deadline. EXPLORE and CLOSE
 score the branches with the frontier's defaults for the session's budget. Once the baseline is established, a session
 with an RSI archive plays the scheduling playbook ``--playbook`` asks for, the champion of the pool beside it or a
-playbook on trial, recorded under ``playbook`` in ``policy_versions``. The FINAL candidates are fixed while every
+playbook on trial, as the session's id draws under ``auto``, recorded under ``playbook`` in ``policy_versions``. The
+FINAL candidates are fixed while every
 branch still stands, then exploration ends and FINAL validates them. A failed PRELUDE, an EXPLORE that ran out of
 cards to measure on, a stop signal, the session deadline before FINAL starts or an unhandled error skip straight to
 CLOSE, which always runs and kills every process the session started. FINAL waits for the validation tests it started, past the deadline and the hard
@@ -52,7 +53,13 @@ from hyperloom_multibranch.blackboard.knowledge.reference_leads import (
     reference_leads,
 )
 from hyperloom_multibranch.blackboard.rsi.frontier import FrontierPolicy, FrontierScoring
-from hyperloom_multibranch.blackboard.rsi.playbook import PlaybookChoice, PlaybookPlay, PlaybookPool, session_playbook
+from hyperloom_multibranch.blackboard.rsi.playbook import (
+    PlaybookChoice,
+    PlaybookPlay,
+    PlaybookPool,
+    drawn_challenger,
+    session_playbook,
+)
 from hyperloom_multibranch.blackboard.rsi.session import FRONTIER_LOG, archived_history
 from hyperloom_multibranch.rulegate.critic import FixReviewer
 from hyperloom_multibranch.scheduling.branches import BranchControl
@@ -475,10 +482,13 @@ class Session:
     async def _adopt_playbook(self) -> None:
         """Play the scheduling playbook ``--playbook`` asks for from the pool beside the RSI archive, read off the event
         loop, and record it as a scheduler decision: the champion, or in a challenger session the oldest playbook on
-        trial. Without an archive, or under ``HYPERLOOM_RSI_WRITE_ONLY=1``, the session plays none, and runs and is
-        judged as one without the RSI."""
+        trial; under ``auto`` a session is a challenger session when its id draws it. Without an archive, or under
+        ``HYPERLOOM_RSI_WRITE_ONLY=1``, the session plays none, and runs and is judged as one without the RSI."""
 
-        challenger = self._settings.playbook is PlaybookMode.CHALLENGER
+        mode = self._settings.playbook
+        challenger = mode is PlaybookMode.CHALLENGER or (
+            mode is PlaybookMode.AUTO and drawn_challenger(self._layout.session_id)
+        )
         choice = await asyncio.to_thread(_pooled_choice, challenger)
         if choice is None:
             return

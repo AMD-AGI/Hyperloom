@@ -22,8 +22,10 @@ would record tokens only. ``--reuse-prelude DIR`` roots the session on the child
 earlier session in ``DIR`` rooted on instead of starting a child, and still measures the baseline; it is a usage error
 unless that session committed its root on the same workload and on the image ``HYPERLOOM_ACTIVE_IMAGE_DIGEST`` names.
 ``--playbook`` says which scheduling playbook the session plays once ``HYPERLOOM_RSI_ARCHIVE`` names an archive:
-``champion`` (the default), or ``challenger``, which plays the oldest playbook on trial in the pool beside it and the
-champion while none is; the manifest fingerprint and the session's manifest record the label under ``playbook`` in
+``champion``, ``challenger``, which plays the oldest playbook on trial in the pool beside it and the champion while
+none is, or ``auto`` (the default), a challenger session when the session's id draws it, half of them, so the
+playbooks on trial are played without anyone asking; the manifest fingerprint and the session's manifest record the
+label under ``playbook`` in
 ``policy_versions``, and a challenger's fallback to the champion under ``playbook_fallback``. Without an archive, or
 under ``HYPERLOOM_RSI_WRITE_ONLY=1``, the session plays none and is judged as before the RSI: no stall evidence, safety
 envelope or probation.
@@ -332,10 +334,11 @@ def _add_playbook_option(run: argparse.ArgumentParser) -> None:
     run.add_argument(
         "--playbook",
         choices=[mode.value for mode in PlaybookMode],
-        default=PlaybookMode.CHAMPION.value,
+        default=PlaybookMode.AUTO.value,
         help=(
             "The scheduling playbook the session plays once the RSI archive is configured: the champion, or, in a "
-            "challenger session, the oldest playbook on trial."
+            "challenger session, the oldest playbook on trial; auto (the default) makes half the sessions, drawn by "
+            "their id, challenger sessions."
         ),
     )
 

@@ -35,8 +35,10 @@ class KernelOptimizer(str, Enum):
 
 class PlaybookMode(str, Enum):
     """Which scheduling playbook a session plays once the RSI archive is configured: the champion of the pool beside
-    it, or, in a challenger session, the oldest playbook on trial, the champion while none is."""
+    it, or, in a challenger session, the oldest playbook on trial, the champion while none is; ``auto`` makes it a
+    challenger session when its id draws it (:func:`~hyperloom_multibranch.blackboard.rsi.playbook.drawn_challenger`)."""
 
+    AUTO = "auto"
     CHAMPION = "champion"
     CHALLENGER = "challenger"
 
@@ -135,7 +137,7 @@ class RunSettings:
     agents: tuple[str, ...] = ()
     references: tuple[ReferenceSource, ...] = ()
     dev_leases: int = 0
-    playbook: PlaybookMode = PlaybookMode.CHAMPION
+    playbook: PlaybookMode = PlaybookMode.AUTO
 
 
 __all__ = [
