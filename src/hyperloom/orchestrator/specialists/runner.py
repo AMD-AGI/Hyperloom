@@ -210,6 +210,56 @@ def _param_texts(params: dict[str, Any], key: str) -> tuple[str, ...]:
     return tuple(str(entry).strip() for entry in (params.get(key) or ()) if str(entry).strip())
 
 
+def _workload_prompt_fields(params: dict[str, Any]) -> dict[str, Any]:
+    """Prompt inputs read off the task params: model, enablement context, hardware, workload and bench state."""
+    return {
+        "model_name": _param(params, "model_name", str),
+        "model_path": _param(params, "model_path", str),
+        "model_info": _param(params, "model_info", dict),
+        "static_recon_checklist": _param(params, "static_recon_checklist", str),
+        "enablement_source_context": _param(params, "enablement_source_context", str),
+        "enablement_candidate_refs": _param_texts(params, "enablement_candidate_refs"),
+        "enablement_failure_signature": _param(params, "enablement_failure_signature", dict),
+        "enablement_accepted_config": {
+            "extra_envs": _param(params, "base_extra_envs", dict),
+            "extra_server_args": _param(params, "base_extra_args", str).strip(),
+        },
+        "gpu_type": _param(params, "gpu_type", str),
+        "tp": _param(params, "tp", int),
+        "arch_notes": _param(params, "arch_notes", str),
+        "target_gap_notes": _param(params, "target_gap_notes", str),
+        "already_proven": _param_dicts(params, "already_proven"),
+        "recipe_sites": _param_texts(params, "recipe_sites"),
+        "research_hints": _param(params, "research_hints", str),
+        # Workload context warmed from SharedState.
+        "precision": _param(params, "precision", str),
+        "conc": _param(params, "conc", int),
+        "isl": _param(params, "isl", int),
+        "osl": _param(params, "osl", int),
+        "max_model_len": _param(params, "max_model_len", int),
+        # benchmark_mode selects the AgentX prompt blocks; the corpus
+        # shape supplies their numbers.
+        "benchmark_mode": _param(params, "benchmark_mode", str),
+        "agentx_corpus_shape": _param(params, "agentx_corpus_shape", dict),
+        "agentx_grading": _param(params, "agentx_grading", dict),
+        "agentx_backend": _param(params, "agentx_backend", str),
+        # Runtime fingerprint to flag version-mismatched lessons.
+        "framework_version": _param(params, "framework_version", str),
+        "notes": _param(params, "notes", str),
+        # Coordinator-injected note when this is a bounded auto-retry.
+        "auto_retry_reason": _param(params, "_auto_retry_reason", str),
+        "baseline_tput": _param(params, "baseline_tput", float),
+        "current_tput": _param(params, "current_tput", float),
+        "current_launch_args": _param(params, "current_launch_args", str),
+        "cumulative_gain_validated": _param(params, "cumulative_gain_validated", float),
+        "keep_threshold_pct": _param(params, "keep_threshold_pct", float),
+        "applied_stack": _param_dicts(params, "applied_stack"),
+        "task_kind": _param(params, "task_kind", str),
+        "prior_attempts": _param_dicts(params, "prior_attempts"),
+        "pr_lead": _param(params, "pr_lead", dict),
+    }
+
+
 SPECIALIST_TOOL_DENYLIST: frozenset[str] = frozenset(
     {
         "KillShell",
@@ -583,7 +633,6 @@ class SpecialistRunner:
         max_turns = resolve_specialist_max_turns(params.get("max_turns"), default=self.default_max_turns)
         domain = domain_for_tag(domain_key)
         profile = resolve_specialist_profile(params, domain=domain)
-        task_description = _param(params, "task_description", str).strip()
 
         workspace = self._resolve_workspace(ctx)
 
@@ -592,24 +641,7 @@ class SpecialistRunner:
             domain = FREEFORM_DOMAIN
 
         if domain is None:
-            done = build_empty_specialist_done(
-                gap_canonical_id=gap,
-                domain=domain_key,
-                reason=f"unknown specialist domain={domain_key!r}",
-            )
-            self._write_specialist_done(workspace, done)
-            return _PreparedRun(
-                early_return=SpecialistRunResult(
-                    task_id=ctx.task.task_id,
-                    domain=domain_key,
-                    gap_canonical_id=gap,
-                    status="empty_synthesised",
-                    specialist_done=done,
-                    workspace=str(workspace) if workspace else "",
-                    error="unknown_domain",
-                    notes=[f"unknown_domain:{domain_key!r}"],
-                )
-            )
+            return self._unknown_domain_run(ctx, workspace, domain_key, gap)
 
         # Domains outside the catalogue (today only the synthetic freeform
         # domain) still dispatch, just without a per-domain focus block.
@@ -634,101 +666,8 @@ class SpecialistRunner:
         if worktree_err:
             notes.append(f"worktree_setup_failed:{worktree_err}")
         worktree_base = worktree_source.root if worktree_source is not None else None
-        workspace_for_prompt = worktree or workspace
 
-        allocated_gpu_ids = tuple(int(g) for g in (ctx.extra.get("gpu_ids") or []))
-
-        prompt_inputs = SpecialistPromptInputs(
-            domain=domain,
-            max_turns=max_turns,
-            gap_canonical_id=gap,
-            gap_symptom=_param(params, "gap_symptom", str),
-            gap_layer=_param(params, "gap_layer", str),
-            gap_evidence=_param(params, "gap_evidence", dict),
-            experience_kb_block=_param(params, "experience_kb_block", str),
-            # Coordinator-populated roofline pre-fetch; empty when not warmed.
-            roofline_evidence=_param(params, "roofline_evidence", dict),
-            runtime_findings=_param(params, "runtime_findings", str),
-            extra_focus_tags=_extra_focus_tags(params, domain),
-            warm_start_recipe=_param(params, "warm_start_recipe", dict),
-            warm_start_pitfalls=_param(params, "warm_start_pitfalls", list),
-            warm_start_lessons=_param(params, "warm_start_lessons", list),
-            pr_monitor_available=bool(params.get("pr_monitor_available", True)),
-            framework=_param(params, "framework", str),
-            session_framework_tree=_param(params, "session_framework_tree", str),
-            framework_source_roots=_param(params, "framework_source_roots", tuple),
-            worktree_base=str(worktree_base) if worktree is not None else "",
-            worktree_package_dir=(
-                str(worktree_source.tree.relative_to(worktree_source.root)) if worktree is not None else ""
-            ),
-            source_hint_directories=_param(params, "source_hint_directories", tuple),
-            model_name=_param(params, "model_name", str),
-            model_path=_param(params, "model_path", str),
-            model_info=_param(params, "model_info", dict),
-            static_recon_checklist=_param(params, "static_recon_checklist", str),
-            enablement_source_context=_param(params, "enablement_source_context", str),
-            enablement_candidate_refs=_param_texts(params, "enablement_candidate_refs"),
-            enablement_failure_signature=_param(params, "enablement_failure_signature", dict),
-            enablement_accepted_config={
-                "extra_envs": _param(params, "base_extra_envs", dict),
-                "extra_server_args": _param(params, "base_extra_args", str).strip(),
-            },
-            gpu_type=_param(params, "gpu_type", str),
-            allocated_gpu_ids=allocated_gpu_ids,
-            tp=_param(params, "tp", int),
-            arch_notes=_param(params, "arch_notes", str),
-            target_gap_notes=_param(params, "target_gap_notes", str),
-            already_proven=_param_dicts(params, "already_proven"),
-            recipe_sites=_param_texts(params, "recipe_sites"),
-            research_hints=_param(params, "research_hints", str),
-            # Workload context warmed from SharedState.
-            precision=_param(params, "precision", str),
-            conc=_param(params, "conc", int),
-            isl=_param(params, "isl", int),
-            osl=_param(params, "osl", int),
-            max_model_len=_param(params, "max_model_len", int),
-            # benchmark_mode selects the AgentX prompt blocks; the corpus
-            # shape supplies their numbers.
-            benchmark_mode=_param(params, "benchmark_mode", str),
-            agentx_corpus_shape=_param(params, "agentx_corpus_shape", dict),
-            agentx_grading=_param(params, "agentx_grading", dict),
-            agentx_backend=_param(params, "agentx_backend", str),
-            # Runtime fingerprint to flag version-mismatched lessons.
-            framework_version=_param(params, "framework_version", str),
-            workspace_path=(str(workspace_for_prompt) if workspace_for_prompt else ""),
-            notes=_param(params, "notes", str),
-            scope=profile.scope,
-            mode=profile.mode,
-            task_description=task_description,
-            # Coordinator-injected note when this is a bounded auto-retry.
-            auto_retry_reason=_param(params, "_auto_retry_reason", str),
-            # The same instant the reaper kills at, as a duration.
-            wall_budget_sec=seconds_until(
-                _ctx_deadline(ctx),
-                unbounded_cap=UNBOUNDED_REAP_CAP_SEC,
-            ),
-            started_at_iso=datetime.now(timezone.utc).isoformat(),
-            baseline_tput=_param(params, "baseline_tput", float),
-            current_tput=_param(params, "current_tput", float),
-            current_launch_args=_param(params, "current_launch_args", str),
-            cumulative_gain_validated=_param(params, "cumulative_gain_validated", float),
-            keep_threshold_pct=_param(params, "keep_threshold_pct", float),
-            applied_stack=_param_dicts(params, "applied_stack"),
-            task_kind=_param(params, "task_kind", str),
-            prior_attempts=_param_dicts(params, "prior_attempts"),
-            pr_lead=_param(params, "pr_lead", dict),
-            custom_specialist_prompt=custom_specialist_prompt,
-        )
-
-        system_prompt, user_prompt = build_specialist_prompts(prompt_inputs)
-        self._write_heartbeat(
-            workspace,
-            turn=0,
-            max_turns=max_turns,
-            status="starting",
-        )
-
-        return _PreparedRun(
+        prep = _PreparedRun(
             domain=domain,
             gap=gap,
             max_turns=max_turns,
@@ -736,9 +675,86 @@ class SpecialistRunner:
             workspace=workspace,
             worktree=worktree,
             worktree_base=worktree_base,
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
             notes=notes,
+        )
+        prep.system_prompt, prep.user_prompt = build_specialist_prompts(
+            self._prompt_inputs(ctx, prep, worktree_source, custom_specialist_prompt)
+        )
+        self._write_heartbeat(
+            workspace,
+            turn=0,
+            max_turns=max_turns,
+            status="starting",
+        )
+        return prep
+
+    def _unknown_domain_run(
+        self, ctx: RunnerContext, workspace: Path | None, domain_key: str, gap: str
+    ) -> "_PreparedRun":
+        """Write an empty done for a task naming no known domain; the setup that skips execute."""
+        done = build_empty_specialist_done(
+            gap_canonical_id=gap,
+            domain=domain_key,
+            reason=f"unknown specialist domain={domain_key!r}",
+        )
+        self._write_specialist_done(workspace, done)
+        return _PreparedRun(
+            early_return=SpecialistRunResult(
+                task_id=ctx.task.task_id,
+                domain=domain_key,
+                gap_canonical_id=gap,
+                status="empty_synthesised",
+                specialist_done=done,
+                workspace=str(workspace) if workspace else "",
+                error="unknown_domain",
+                notes=[f"unknown_domain:{domain_key!r}"],
+            )
+        )
+
+    @staticmethod
+    def _prompt_inputs(
+        ctx: RunnerContext, prep: "_PreparedRun", worktree_source: FrameworkTree | None, custom_specialist_prompt: str
+    ) -> SpecialistPromptInputs:
+        """Assemble the specialist prompt inputs for the setup ``prep`` resolved."""
+        params = ctx.task.params or {}
+        workspace_for_prompt = prep.worktree or prep.workspace
+        return SpecialistPromptInputs(
+            domain=prep.domain,
+            max_turns=prep.max_turns,
+            gap_canonical_id=prep.gap,
+            gap_symptom=_param(params, "gap_symptom", str),
+            gap_layer=_param(params, "gap_layer", str),
+            gap_evidence=_param(params, "gap_evidence", dict),
+            experience_kb_block=_param(params, "experience_kb_block", str),
+            # Coordinator-populated roofline pre-fetch; empty when not warmed.
+            roofline_evidence=_param(params, "roofline_evidence", dict),
+            runtime_findings=_param(params, "runtime_findings", str),
+            extra_focus_tags=_extra_focus_tags(params, prep.domain),
+            warm_start_recipe=_param(params, "warm_start_recipe", dict),
+            warm_start_pitfalls=_param(params, "warm_start_pitfalls", list),
+            warm_start_lessons=_param(params, "warm_start_lessons", list),
+            pr_monitor_available=bool(params.get("pr_monitor_available", True)),
+            framework=_param(params, "framework", str),
+            session_framework_tree=_param(params, "session_framework_tree", str),
+            framework_source_roots=_param(params, "framework_source_roots", tuple),
+            worktree_base=str(prep.worktree_base) if prep.worktree is not None else "",
+            worktree_package_dir=(
+                str(worktree_source.tree.relative_to(worktree_source.root)) if prep.worktree is not None else ""
+            ),
+            source_hint_directories=_param(params, "source_hint_directories", tuple),
+            allocated_gpu_ids=tuple(int(g) for g in (ctx.extra.get("gpu_ids") or [])),
+            workspace_path=(str(workspace_for_prompt) if workspace_for_prompt else ""),
+            scope=prep.profile.scope,
+            mode=prep.profile.mode,
+            task_description=_param(params, "task_description", str).strip(),
+            # The same instant the reaper kills at, as a duration.
+            wall_budget_sec=seconds_until(
+                _ctx_deadline(ctx),
+                unbounded_cap=UNBOUNDED_REAP_CAP_SEC,
+            ),
+            started_at_iso=datetime.now(timezone.utc).isoformat(),
+            custom_specialist_prompt=custom_specialist_prompt,
+            **_workload_prompt_fields(params),
         )
 
     @staticmethod
