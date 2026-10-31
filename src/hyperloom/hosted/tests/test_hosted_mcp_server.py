@@ -413,7 +413,7 @@ def test_revoking_the_specialist_drops_its_beat() -> None:
 
 def test_a_failing_beat_does_not_break_the_call() -> None:
     def broken() -> None:
-        raise OSError("beat down")
+        raise RuntimeError("beat down")
 
     server = McpServer(McpServerConfig(host_token=HOST_TOKEN), campaign="camp", heartbeat_seconds=0.05)
     server.register(
@@ -426,6 +426,27 @@ def test_a_failing_beat_does_not_break_the_call() -> None:
         assert status == 200 and reply["result"]["isError"] is False
     finally:
         server.stop()
+
+
+def test_a_beat_that_raises_once_keeps_beating() -> None:
+    beats: list[str] = []
+
+    def flaky() -> None:
+        beats.append("beat")
+        if len(beats) == 1:
+            raise RuntimeError("beat down")
+
+    server = McpServer(McpServerConfig(host_token=HOST_TOKEN), campaign="camp", heartbeat_seconds=0.05)
+    server.register(
+        "slow", schema={"type": "object"}, handler=lambda a, c: time.sleep(0.4) or {"ok": 1}, scopes={"specialist"}
+    )
+    server.attach_heartbeat("s", flaky)
+    server.start()
+    try:
+        assert Client(server).call(server.issue_token("s", "b"), "slow")[0] == 200
+    finally:
+        server.stop()
+    assert len(beats) >= 3
 
 
 def test_issued_scopes_decide_which_tools_open(server: McpServer) -> None:

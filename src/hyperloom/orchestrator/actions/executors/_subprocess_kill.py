@@ -846,7 +846,16 @@ class _RecorderFanout:
         self._each("tick", mono)
 
     def close(self, *, aborted: bool = False) -> None:
-        self._each("close", aborted=aborted)
+        """Close every recorder, then raise the first error one of them raised."""
+        first_error: Exception | None = None
+        for recorder in self._recorders:
+            try:
+                recorder.close(aborted=aborted)
+            except Exception as exc:  # noqa: BLE001 - re-raised once every recorder is closed
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
 
 
 def _build_round_recorders(server_log_path: str | None, env: dict[str, str] | None) -> _RecorderFanout:

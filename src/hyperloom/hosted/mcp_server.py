@@ -465,7 +465,7 @@ class McpServer:
             while not done.wait(self._heartbeat_seconds):
                 try:
                     hook()
-                except OSError as exc:  # a failing beat must not break the call
+                except Exception as exc:  # noqa: BLE001 - outermost heartbeat thread: a failing beat must not break the call
                     logger.warning(
                         "heartbeat beat failed: %s\n%s",
                         type(exc).__name__,
