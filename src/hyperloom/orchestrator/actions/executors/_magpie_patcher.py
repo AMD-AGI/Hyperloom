@@ -112,6 +112,13 @@ _LM_EVAL_ONCE_SENTINEL = "HYPERLOOM_LM_EVAL_INSTALL_ONCE"
 _LM_EVAL_UNLOCKED_FN = "_hyperloom_install_lm_eval_deps_unlocked"
 _LM_EVAL_DEPS_FN_RE = re.compile(r"^_install_lm_eval_deps\(\) \{\n.*?^\}\n", re.DOTALL | re.MULTILINE)
 _LM_EVAL_REF_RE = re.compile(r'local lm_eval_ref="([^"]+)"')
+#: Succeeds when ``python3`` has the pinned lm-eval and the round's ``_install_lm_eval_deps`` would install nothing.
+LM_EVAL_READY_FN = "_hyperloom_lm_eval_ready"
+_LM_EVAL_SPARE_MARKER_FN = "_hyperloom_lm_eval_spare_marker"
+_EVAL_OUTPUT_FN = "_hyperloom_keep_eval_output"
+#: Names the file the eval's output is kept in once it is (``$RESULT_DIR/EVAL_OUTPUT_LOG``); set, nothing else is kept.
+EVAL_OUTPUT_ENV = "HYPERLOOM_EVAL_OUTPUT_LOG"
+EVAL_OUTPUT_LOG = "hyperloom_eval.log"
 
 _LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_magpie_benchmarker_patcher.lock")
 
@@ -289,11 +296,34 @@ def _apply_run_lm_eval_arg_patch_atomic(benchmark_lib: Path) -> bool:
 
 
 def _lm_eval_once_wrapper(ref: str) -> str:
-    return f"""_install_lm_eval_deps() {{
+    return f"""{LM_EVAL_READY_FN}() {{
+    # {_LM_EVAL_ONCE_SENTINEL}: whether this python3 has lm-eval {ref}: it imports, and the install left its marker,
+    # below sys.prefix or, where this account cannot write there, below /tmp under a name keyed by that prefix.
+    local prefix
+    prefix="$(python3 -c 'import sys; print(sys.prefix)' 2>/dev/null)" || return 1
+    [[ -f "$prefix/.hyperloom-lm-eval-{ref}" || -f "$({_LM_EVAL_SPARE_MARKER_FN} "$prefix")" ]] || return 1
+    python3 -c 'import lm_eval' 2>/dev/null
+}}
+
+{_LM_EVAL_SPARE_MARKER_FN}() {{
+    printf '/tmp/hyperloom-lm-eval-{ref}-%s\\n' "$(printf '%s' "$1" | cksum | cut -d' ' -f1)"
+}}
+
+{_EVAL_OUTPUT_FN}() {{
+    # From here on what this shell writes is kept in $RESULT_DIR/{EVAL_OUTPUT_LOG} as it is written: Magpie holds the
+    # round's output until the round ends, so a round its watchdog ends leaves nothing of what its eval printed.
+    [[ -z "${{{EVAL_OUTPUT_ENV}:-}}" && -n "${{RESULT_DIR:-}}" && -d "${{RESULT_DIR:-}}" ]] || return 0
+    export {EVAL_OUTPUT_ENV}="$RESULT_DIR/{EVAL_OUTPUT_LOG}"
+    exec > >(tee -a "${EVAL_OUTPUT_ENV}") 2> >(tee -a "${EVAL_OUTPUT_ENV}" >&2)
+}}
+
+_install_lm_eval_deps() {{
     # {_LM_EVAL_ONCE_SENTINEL}: local tests share one Python environment, and a reinstall racing
     # another test's eval breaks it; install once per environment and lm-eval revision, under a lock.
-    local marker lock
-    marker="$(python3 -c 'import sys; print(sys.prefix)')/.hyperloom-lm-eval-{ref}"
+    {_EVAL_OUTPUT_FN}
+    local prefix marker lock
+    prefix="$(python3 -c 'import sys; print(sys.prefix)' 2>/dev/null)" || prefix=unknown
+    marker="$prefix/.hyperloom-lm-eval-{ref}"
     lock="$marker.lock"
     touch "$lock" 2>/dev/null || lock="/tmp/hyperloom-lm-eval-{ref}.lock"
     if ! command -v flock >/dev/null 2>&1; then
@@ -302,13 +332,17 @@ def _lm_eval_once_wrapper(ref: str) -> str:
     fi
     (
         flock 9
-        if [[ -f "$marker" ]] && python3 -c 'import lm_eval' 2>/dev/null; then
+        if {LM_EVAL_READY_FN}; then
+            echo "hyperloom: $(date -u +%FT%TZ) lm-eval {ref} is installed for $prefix; not installing it again" >&2
             exit 0
         fi
+        echo "hyperloom: $(date -u +%FT%TZ) installing lm-eval {ref} for $prefix" >&2
         {_LM_EVAL_UNLOCKED_FN}
         if python3 -c 'import lm_eval' 2>/dev/null; then
-            touch "$marker" 2>/dev/null || true
+            touch "$marker" 2>/dev/null || touch "$({_LM_EVAL_SPARE_MARKER_FN} "$prefix")" 2>/dev/null ||
+                echo "hyperloom: no marker for lm-eval {ref} could be written; the next call installs it again" >&2
         fi
+        echo "hyperloom: $(date -u +%FT%TZ) the lm-eval install ended" >&2
     ) 9>"$lock"
 }}
 """
@@ -666,6 +700,9 @@ __all__ = [
     "client_tokenizer_hook_installed",
     "ensure_eval_concurrency_compat",
     "ensure_lm_eval_install_once",
+    "EVAL_OUTPUT_ENV",
+    "EVAL_OUTPUT_LOG",
+    "LM_EVAL_READY_FN",
     "ensure_client_trust_compat",
     "live_eval_concurrency_flag_scripts",
     "magpie_scripts_patch_status",

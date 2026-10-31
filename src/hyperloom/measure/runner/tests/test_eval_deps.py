@@ -170,3 +170,86 @@ def test_a_checkout_whose_install_cannot_run_once_is_left_to_the_round_and_said_
 
     assert note is not None and "cannot be made to install it once" in note
     assert sandbox.install_count() == 0
+
+
+def test_the_install_runs_in_the_round_s_environment_so_the_round_does_not_install_again(tmp_path, env, monkeypatch):
+    """Run V6 of #156 (c4469): ``eval_deps`` succeeded, yet the warmup round sat idle on its server until the watchdog.
+
+    The point's variables are the round's, not the runner's: here they name the user base pip installs into when the
+    image's site-packages is not the account's, as ``PYTHONUSERBASE`` does. Installed in the runner's environment,
+    lm-eval was where the round's ``python3`` does not look, and the round installed it again on an idle server.
+    """
+    prefix, runner_base, round_base = tmp_path / "prefix", tmp_path / "runner-base", tmp_path / "round-base"
+    for directory in (prefix, runner_base, round_base):
+        directory.mkdir()
+    checkout = tmp_path / "ix"
+    (checkout / "benchmarks").mkdir(parents=True)
+    (checkout / "benchmarks" / "benchmark_lib.sh").write_text(
+        LIB.replace('touch "$INSTALLED"', 'touch "${PYTHONUSERBASE:-$DEFAULT_BASE}/lm_eval"')
+    )
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "python3").write_text(
+        "#!/bin/sh\n"
+        f'if [ "$2" = "import sys; print(sys.prefix)" ]; then echo {prefix}; exit 0; fi\n'
+        'case "$2" in *"import lm_eval"*) [ -f "${PYTHONUSERBASE:-$DEFAULT_BASE}/lm_eval" ] && exit 0;'
+        ' echo "No module named lm_eval" >&2; exit 1;; esac\n'
+        "exit 0\n"
+    )
+    (bin_dir / "python3").chmod(0o755)
+    installs = tmp_path / "installs"
+    env.update(
+        {
+            "PATH": f"{bin_dir}:/usr/bin:/bin",
+            "INSTALLS": str(installs),
+            "INSTALL_EXTRA": ":",
+            "DEFAULT_BASE": str(runner_base),
+        }
+    )
+    monkeypatch.setattr(runner, "ensure_inferencex", lambda commit, cache: checkout)
+    monkeypatch.setattr(runner, "ensure_magpie", lambda commit, cache: tmp_path / "magpie")
+    round_env = {**env, "PYTHONUSERBASE": str(round_base)}
+
+    def run(call):
+        script = f'source "{checkout / "benchmarks" / "benchmark_lib.sh"}" && _install_lm_eval_deps'
+        subprocess.run(["bash", "-c", script], check=True, env=round_env)
+        return _ok(call)
+
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", _Backend(run))
+    text = yaml.safe_dump(
+        {
+            "benchmark": {
+                "model": "/m",
+                "framework": "vllm",
+                "envs": {"TP": 1, "RUN_EVAL": "true", "pythonuserbase": str(round_base)},
+            }
+        }
+    )
+    sheet = _sheet(config=[{"yaml": text, "sha256": hashlib.sha256(text.encode()).hexdigest()}])
+    sheet["procedure"].update({"benchmark_backend": "magpie", "accuracy": True})
+
+    assert _go(tmp_path, env, sheet) == 0, _status(tmp_path)
+
+    assert installs.read_text().count("install") == 1, "the round found lm-eval installed for its own python3"
+    assert (round_base / "lm_eval").is_file() and not (runner_base / "lm_eval").exists()
+
+
+def test_an_install_the_round_would_repeat_stops_the_runner_before_the_test(tmp_path):
+    sandbox = _Image(tmp_path)
+    # No marker can be written: the prefix lies below a regular file, and ``touch`` refuses the spare one below /tmp.
+    (tmp_path / "file").write_text("")
+    python3 = Path(sandbox.environ["PATH"].split(":")[0]) / "python3"
+    python3.write_text(python3.read_text().replace(str(sandbox.prefix), str(tmp_path / "file" / "prefix")))
+    stubs = tmp_path / "stubs"
+    stubs.mkdir()
+    (stubs / "touch").write_text(
+        '#!/bin/sh\ncase "$1" in /tmp/hyperloom-lm-eval-*) exit 1;; esac\nexec /usr/bin/touch "$@"\n'
+    )
+    (stubs / "touch").chmod(0o755)
+    sandbox.environ["PATH"] = f"{stubs}:{sandbox.environ['PATH']}"
+
+    with pytest.raises(eval_deps.EvalDepsError) as raised:
+        eval_deps.install_eval_deps(sandbox.checkout, environ=sandbox.environ, log_path=tmp_path / "log")
+
+    assert "would install it again" in str(raised.value)
+    assert "no marker for lm-eval" in str(raised.value), "the install's own output says why"

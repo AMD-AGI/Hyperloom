@@ -98,3 +98,92 @@ def test_two_tests_on_one_environment_install_lm_eval_once(tmp_path: Path) -> No
 
     assert installs.read_text() == "install\n"
     assert (prefix / f".hyperloom-lm-eval-{REF}").is_file()
+
+
+def _python3(tmp_path: Path, prefix: Path) -> Path:
+    """A ``python3`` with ``prefix`` for ``sys.prefix`` that imports lm_eval once ``$INSTALLS`` says it was installed."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    python3 = bin_dir / "python3"
+    python3.write_text(
+        "#!/bin/sh\n"
+        f'if [ "$2" = "import sys; print(sys.prefix)" ]; then echo {prefix}; exit 0; fi\n'
+        'if [ "$2" = "import lm_eval" ]; then [ -s "$INSTALLS" ]; exit $?; fi\n'
+        "exit 0\n"
+    )
+    python3.chmod(0o755)
+    return bin_dir
+
+
+@pytest.mark.skipif(not (shutil.which("bash") and shutil.which("flock")), reason="needs bash and flock")
+def test_an_environment_whose_prefix_cannot_be_written_installs_once_too(tmp_path: Path) -> None:
+    """The image's interpreter may sit where the sandbox's account cannot write, while pip still installs (into a
+    writable site-packages or the user site). The marker then goes below /tmp, and the round does not install again."""
+    lib = _lib(tmp_path)
+    patcher._apply_lm_eval_install_once_patch_atomic(lib)
+    (tmp_path / "file").write_text("")
+    prefix = tmp_path / "file" / "prefix"
+    bin_dir = _python3(tmp_path, prefix)
+    installs = tmp_path / "installs"
+    environ = {"PATH": f"{bin_dir}:/usr/bin:/bin", "INSTALLS": str(installs)}
+    spare = subprocess.run(
+        ["bash", "-c", f'source "{lib}" && {patcher._LM_EVAL_SPARE_MARKER_FN} "$1"', "bash", str(prefix)],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environ,
+    ).stdout.strip()
+    try:
+        script = f'source "{lib}"; _install_lm_eval_deps; _install_lm_eval_deps; {patcher.LM_EVAL_READY_FN}'
+        done = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=environ)
+
+        assert done.returncode == 0, done.stderr
+        assert installs.read_text() == "install\n"
+        assert Path(spare).is_file() and spare.startswith(f"/tmp/hyperloom-lm-eval-{REF}-")
+        assert "is installed for" in done.stderr, "the skip says so"
+    finally:
+        Path(spare).unlink(missing_ok=True)
+
+
+@pytest.mark.skipif(not (shutil.which("bash") and shutil.which("flock")), reason="needs bash and flock")
+def test_what_the_eval_prints_is_kept_in_the_round_s_directory_as_it_is_written(tmp_path: Path) -> None:
+    """Magpie holds the round's output until the round ends; a round the watchdog ends kept nothing of its eval."""
+    lib = _lib(tmp_path)
+    patcher._apply_lm_eval_install_once_patch_atomic(lib)
+    prefix = tmp_path / "venv"
+    prefix.mkdir()
+    environ = {
+        "PATH": f"{_python3(tmp_path, prefix)}:/usr/bin:/bin",
+        "INSTALLS": str(tmp_path / "installs"),
+        "RESULT_DIR": str(tmp_path),
+    }
+    log = tmp_path / patcher.EVAL_OUTPUT_LOG
+    script = (
+        f'source "{lib}"; _install_lm_eval_deps; echo "Eval budget: 4096"; echo "loading gsm8k from the Hub" >&2; '
+        f'while ! grep -q "loading gsm8k" "{log}" 2>/dev/null; do sleep 0.1; done; kill -9 $$'
+    )
+
+    done = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=environ, timeout=60)
+
+    assert done.returncode == -9, "the shell was killed, as the watchdog ends a round"
+    kept = log.read_text()
+    assert "installing lm-eval" in kept and "Eval budget: 4096" in kept and "loading gsm8k from the Hub" in kept
+    assert "loading gsm8k from the Hub" in done.stderr and "Eval budget: 4096" in done.stdout, "the round still sees it"
+
+
+@pytest.mark.skipif(not (shutil.which("bash") and shutil.which("flock")), reason="needs bash and flock")
+def test_an_install_whose_output_is_kept_elsewhere_keeps_none_in_the_round_s_directory(tmp_path: Path) -> None:
+    lib = _lib(tmp_path)
+    patcher._apply_lm_eval_install_once_patch_atomic(lib)
+    prefix = tmp_path / "venv"
+    prefix.mkdir()
+    environ = {
+        "PATH": f"{_python3(tmp_path, prefix)}:/usr/bin:/bin",
+        "INSTALLS": str(tmp_path / "installs"),
+        "RESULT_DIR": str(tmp_path),
+        patcher.EVAL_OUTPUT_ENV: str(tmp_path / "eval_deps.log"),
+    }
+
+    subprocess.run(["bash", "-c", f'source "{lib}"; _install_lm_eval_deps'], check=True, env=environ)
+
+    assert not (tmp_path / patcher.EVAL_OUTPUT_LOG).exists()
