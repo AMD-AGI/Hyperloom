@@ -6,8 +6,10 @@ long as its branch runs.
 
 Every fresh session starts at the branch head, with the worktree synced to it and a launch prompt built from the brief,
 rebuilt at that head when the setup can, and the branch log. A Claude CLI keeps its stdin open and lives across turns:
-when a turn ends, the session waits, keeping its heartbeat, until something arrives for the branch (an inbox item or a
-runtime notice) and sends it to the CLI as the next message, so the model goes on with its whole conversation. A turn
+when a turn ends, the session waits until something arrives for the branch (an inbox item or a runtime notice) and
+sends it to the CLI as the next message, so the model goes on with its whole conversation. While what it waits on runs,
+a test of the branch, another branch's profile of its head or its long dev lease's process, the CLI is woken every
+``WAIT_WAKE_S``: the reaper reads only the CLI's own output, so a CLI silent longer is taken for a hung one. A turn
 that ends with no test of the branch in flight (one waiting on its native builds is) and no process running in its
 long dev lease waits a patience for something to arrive, and is nudged when nothing did;
 ``IDLE_TURNS`` such turns in a row end the session with :class:`SessionIdle`, which is no crash. A turn that called
@@ -104,6 +106,7 @@ from hyperloom_multibranch.specialist.prompts import (
     lease_wake_message,
     nudge_message,
     resume_message,
+    wait_wake_message,
     wake_message,
 )
 from hyperloom_multibranch.specialist.runtime import SessionCrashed, SessionIdle, SessionStart, restart_notice
@@ -130,9 +133,10 @@ _SILENT, _WORKED = 2, 1
 #: A session silent this long, with no log growth, CPU work or tool call in flight, is hung: a test takes about eight
 #: minutes and one reasoning step can take as long, and Claude streams its reasoning into the log.
 SPECIALIST_LOST_AFTER_S = 600.0
-#: How long a CLI waiting on its long dev lease's process stays unwoken: the reaper reads only the CLI's own output, so
-#: a wait in silence past ``SPECIALIST_LOST_AFTER_S`` would be taken for a hung session.
-LEASE_WAKE_S = SPECIALIST_LOST_AFTER_S / 2
+#: How long a CLI waiting on something of its branch stays unwoken: the reaper reads only the CLI's own output, so a
+#: wait in silence past ``SPECIALIST_LOST_AFTER_S`` would be taken for a hung session; and under the five minutes a
+#: prompt cache entry lives, so a wake reads the conversation from the cache instead of writing it there again.
+WAIT_WAKE_S = 270.0
 #: How a launch that ended early to wait for its branch's test ended, as the next launch is told.
 WAITED_END = "its model ended its turn to wait for a test, which has its result now"
 #: A conversation whose last call read this many tokens is not resumed: about 60% of the 1M-token window of the
@@ -261,8 +265,8 @@ class AgentSetup:
     many idle turns as patiences. ``idle_resume_wait_s`` bounds how long the resume of an idle session waits for
     something to arrive. ``dev_leases`` are the session's dev sandboxes, ``None`` when it lends none: a
     branch's lease is given back when its run ends, however it ended, and when it is stopped, unless it is a long one
-    with a process running, which only the branch's stop gives back. A CLI waiting on such a process is woken every
-    ``lease_wake_s``.
+    with a process running, which only the branch's stop gives back. A CLI waiting on such a process, a test of its
+    branch or another branch's profile of its head is woken every ``wait_wake_s``.
     """
 
     command: AgentCommand
@@ -280,7 +284,7 @@ class AgentSetup:
     idle_resume_wait_s: float = IDLE_RESUME_WAIT_S
     clock: Callable[[], float] = time.time
     dev_leases: DevLeaseHolder | None = None
-    lease_wake_s: float = LEASE_WAKE_S
+    wait_wake_s: float = WAIT_WAKE_S
 
 
 class SessionBlackboard(BranchLogStore, UsageSink, Inbox, LearningStore, AgentRecords, LineageSink, Protocol):
@@ -591,9 +595,10 @@ class AgentSession:
         return SessionIdle(reason, tested=tested, resumable=resumable)
 
     async def _wake(self, handle: AgentHandle, seen: _Seen, patience: float) -> str | None:
-        """Wait, beating the heartbeat, until something arrives for the branch, and move ``seen`` past it. An empty
-        message asks for a nudge: nothing arrived while nothing of the branch ran for ``patience`` seconds. ``None``
-        once the session is stopped or the CLI ended."""
+        """Wait, beating the heartbeat, until something arrives for the branch, and move ``seen`` past it; or until
+        what the branch waits on has run ``wait_wake_s`` with nothing arriving, for a wake. An empty message asks for a
+        nudge: nothing arrived while nothing of the branch ran for ``patience`` seconds. ``None`` once the session is
+        stopped or the CLI ended."""
         loop = asyncio.get_running_loop()
         quiet_since: float | None = None
         waited_since = loop.time()
@@ -617,10 +622,11 @@ class AgentSession:
                 return wake_message(
                     (*items, *landed), notices, integration=_joined(followed.detail if followed else "", holdings)
                 )
-            if self._dev_lease_busy() and loop.time() - waited_since >= self._setup.lease_wake_s:
-                return lease_wake_message()
-            if seen.profiles or await self._tests_in_flight() or self._dev_lease_busy():
+            lease, tests = self._dev_lease_busy(), await self._tests_in_flight()
+            if lease or tests or seen.profiles:
                 quiet_since = None
+                if loop.time() - waited_since >= self._setup.wait_wake_s:
+                    return lease_wake_message() if lease else wait_wake_message(tests, sorted(seen.profiles))
             else:
                 quiet_since = loop.time() if quiet_since is None else quiet_since
                 if loop.time() - quiet_since >= patience:
@@ -662,10 +668,11 @@ class AgentSession:
     def _dev_lease_busy(self) -> bool:
         return self._setup.dev_leases is not None and self._setup.dev_leases.busy(self._start.branch)
 
-    async def _tests_in_flight(self) -> bool:
+    async def _tests_in_flight(self) -> tuple[str, ...]:
+        """The request ids of the branch's tests in flight."""
         branch = self._start.branch
         records = (await self._place.blackboard.snapshot()).records
-        return any(record.request.branch == branch and record.in_flight for record in records)
+        return tuple(record.request_id for record in records if record.request.branch == branch and record.in_flight)
 
     async def _follow(self) -> Followed | None:
         """Move the branch onto the integration head when its specialist asked to since the runtime last answered,
