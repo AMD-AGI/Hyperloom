@@ -22,7 +22,7 @@ from pathlib import Path
 
 from hyperloom.orchestrator.trace_analysis import is_capture_fragment
 
-__all__ = ["PROFILE_DIR", "collect_traces", "has_step_traces", "has_traces", "is_trace_file"]
+__all__ = ["PROFILE_DIR", "collect_traces", "has_step_traces", "has_traces", "is_trace_file", "round_has_traces"]
 
 #: The directory, below a test's output directory, that holds the traces of a ``profile`` test.
 PROFILE_DIR = "profile"
@@ -56,6 +56,11 @@ def has_step_traces(directory: Path) -> bool:
     """Whether ``directory`` holds a trace of serving steps: a trace file that is not a CUDA-graph capture sidecar."""
     root = Path(directory)
     return any(not is_capture_fragment(path, root) for path in _trace_files(root))
+
+
+def round_has_traces(workspace: Path) -> bool:
+    """Whether the round at ``workspace`` left a trace where :func:`collect_traces` looks, without moving it."""
+    return any(has_traces(source) for source in _candidates(Path(workspace)))
 
 
 def collect_traces(workspace: Path, destination: Path) -> int:
