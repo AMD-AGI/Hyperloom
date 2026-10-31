@@ -60,6 +60,7 @@ from hyperloom_multibranch.blackboard.rsi.playbook import (
 )
 from hyperloom_multibranch.blackboard.rsi.session import NO_PLAYBOOK_PLAYED, STOP_AUDIT_REPORT, WRITTEN
 from hyperloom_multibranch.blackboard.tools import CODE_TITLE, SETTINGS_TITLE
+from hyperloom_multibranch.scheduling import lifecycle
 from hyperloom_multibranch.scheduling.explore import PLAYBOOK_FALLBACK_REASON, PLAYBOOK_OPEN_CUT_REASON
 from hyperloom_multibranch.scheduling.judge import GRACE_KEY, HoldReason
 from hyperloom_multibranch.scheduling.judge_prompt import (
@@ -320,6 +321,35 @@ async def test_a_challenger_the_command_line_asks_for_plays_until_its_judge_brea
     assert (await _stops(stage))["b02"].startswith("session_end")
     [trial] = trials(pool)
     assert (trial.played, trial.champion, trial.fell_back) == ("stall-4", H0.label, True)
+
+
+@pytest.mark.parametrize("drawn", [True, False], ids=["drawn", "not-drawn"])
+async def test_a_session_the_command_line_names_no_playbook_for_plays_the_one_on_trial_when_its_id_draws_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, drawn: bool
+) -> None:
+    archive = _archive(tmp_path, monkeypatch)
+    PlaybookPool.beside(archive).register(
+        Playbook("stall-4", replaced(H0, stall_tests=4).numbers, parent=H0.label, hypothesis="earlier stops")
+    )
+    asked: list[str] = []
+
+    def draw(session_id: str) -> bool:
+        asked.append(session_id)
+        return drawn
+
+    monkeypatch.setattr(lifecycle, "drawn_challenger", draw)
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.judge = PlaybookJudge()
+    stage.scripts = {"b01": (tagged("c1"),), "b02": FLAT[:6]}
+
+    outcome = await stage.run()
+
+    assert outcome.exit_code == 0 and stage.settings.playbook is PlaybookMode.AUTO
+    assert asked == [stage.layout.session_id]
+    first = (await stage.handle(Role.OBSERVER).manifest_fingerprints())[0]
+    assert first.policy_versions[PLAYBOOK_KEY] == ("stall-4" if drawn else H0.label)
+    [chosen] = [row for row in _decisions(stage) if row["reason"] == "scheduling playbook"]
+    assert chosen["detail"]["challenger"] is drawn
 
 
 @pytest.mark.parametrize("write_only", [False, True], ids=["no-archive", "write-only"])
