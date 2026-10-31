@@ -19,7 +19,7 @@ import uuid
 from collections.abc import Collection, Iterable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from functools import cache, partial
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -28,7 +28,15 @@ from typing import Any, BinaryIO, TextIO, cast
 from urllib.parse import parse_qs, urlsplit
 
 from hyperloom_kb.config import PACKAGED_DECLARATION, load_declaration
-from hyperloom_kb.database import Connection, Database, DatabaseError, WriteSource, open_database, record_write
+from hyperloom_kb.database import (
+    Connection,
+    Database,
+    DatabaseError,
+    WriteSource,
+    open_database,
+    record_write,
+    utc_now,
+)
 from hyperloom_kb.files import FileStore, file_sha256
 from hyperloom_kb.observability import (
     PROBE_ROUTES,
@@ -156,10 +164,6 @@ def _canonical(value: Any) -> str:
         sort_keys=True,
         separators=(",", ":"),
     )
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 @dataclass(frozen=True)
@@ -461,7 +465,7 @@ class ExperienceHTTPService:
                 INSERT INTO schemas(kb_id, schema_ref, declaration, registered_at) VALUES (%s, %s, %s, %s)
                 ON CONFLICT DO NOTHING
                 """,
-                (self.kb_id, declaration.schema_ref, _canonical(declaration.to_dict()), _utc_now()),
+                (self.kb_id, declaration.schema_ref, _canonical(declaration.to_dict()), utc_now()),
             ).rowcount
         if registered:
             event(log, _AUDIT, action="register_schema", schema_ref=declaration.schema_ref)
@@ -514,7 +518,7 @@ class ExperienceHTTPService:
         with self._database.transaction() as connection:
             created = connection.execute(
                 "INSERT INTO files(kb_id, sha256, bytes, stored_at) VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING",
-                (self.kb_id, sha256, size, _utc_now()),
+                (self.kb_id, sha256, size, utc_now()),
             ).rowcount
         status = InsertStatus.CREATED.value if created else InsertStatus.UNCHANGED.value
         self.metrics.count("hyperloom_kb_file_writes_total", result=status)
@@ -599,7 +603,7 @@ class ExperienceHTTPService:
                         position["last_sequence"],
                         content_hash,
                         len(data),
-                        _utc_now(),
+                        utc_now(),
                     ),
                 )
                 self._schema_row(connection, experience.schema_ref, changes_reads=True)
