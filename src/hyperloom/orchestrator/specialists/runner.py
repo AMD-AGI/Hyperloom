@@ -961,7 +961,6 @@ class SpecialistRunner:
                     system_prompt=prep.system_prompt,
                     user_prompt=prep.user_prompt,
                     disallowed_tools=SPECIALIST_TOOL_DENYLIST,
-                    max_turns=prep.max_turns,
                     gpu_ids=tuple(ctx.extra.get("gpu_ids") or ()),
                     deadline=deadline,
                     gpu_lease=ctx.extra.get("gpu_specialist_lease"),

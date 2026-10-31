@@ -1246,7 +1246,7 @@ def _ensure_magpie(
         if not magpie_active:
             print(f"Preflight: benchmark backend is {benchmark_backend!r}; skipping Magpie install/import")
         else:
-            magpie_ref = os.environ.get("MAGPIE_REF", "6a1ee26f9053363d3750b43e3d5afb5d1c4ce84e")
+            magpie_ref = os.environ.get("MAGPIE_REF", "06b7cf6e185fdd49483a512e350cb3964ba3bf68")
             checker = _ASSETS / "check_magpie.py"
             check = subprocess.run([magpie_python, str(checker), magpie_ref], capture_output=True)
             if check.returncode != 0 and not os.environ.get("MAGPIE_PATH"):

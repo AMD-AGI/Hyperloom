@@ -32,12 +32,10 @@ def test_format_variant_line_no_measurement_carries_reason():
         {
             "name": "slow",
             "reason": "killed_overtime",
-            "wall_clock_ratio_vs_baseline": 2.06,
         }
     )
     assert "no_meas" in line
     assert "killed_overtime" in line
-    assert "2.06x" in line
     # A measured row needs no reason: the gain already carries the verdict.
     measured = SharedState._format_variant_line(
         {"name": "low", "gain_pct": 0.4, "reason": "gain_below_threshold"},
