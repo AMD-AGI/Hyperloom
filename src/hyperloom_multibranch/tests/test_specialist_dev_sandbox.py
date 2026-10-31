@@ -27,6 +27,7 @@ from hyperloom_multibranch.specialist.dev_sandbox import (
     DevLeases,
     DevLimits,
     LeaseTerm,
+    forge_spend,
     hosted_dev_sandboxes,
     local_dev_sandboxes,
     register_dev_sandbox_tools,
@@ -462,6 +463,21 @@ async def test_a_forge_rerun_that_restarts_its_ledger_charges_its_new_spend_and_
     await built.server.call("dev_sandbox_release")
     assert [usage.cost_usd for usage in rig.logs.usage] == [5.0, 0.5, 0.25]
     assert [usage.tokens.output for usage in rig.logs.usage] == [290, 30, 20]
+
+
+def test_a_forge_lane_s_copy_of_the_ledger_is_not_spend_of_its_own(tmp_path):
+    experiments = tmp_path / "forge_pa" / "forge_experiments"
+    lane = tmp_path / "forge_pa" / "forge-lanes-df56e2d3" / "1" / "forge_experiments"
+    for directory in (experiments, lane):
+        directory.mkdir(parents=True)
+        (directory / "llm_usage.json").write_text(json.dumps({"output_tokens": 40, "total_cost_usd": 2.0}))
+    assert list(forge_spend(tmp_path)) == [experiments / "llm_usage.json"]
+
+
+def test_a_ledger_removed_while_the_spend_is_read_is_skipped(tmp_path, monkeypatch):
+    gone = tmp_path / "loop" / "llm_usage.json"
+    monkeypatch.setattr(Path, "rglob", lambda self, pattern: iter([gone]))
+    assert forge_spend(tmp_path) == {}
 
 
 async def test_a_lease_whose_tools_kept_no_ledger_records_no_spend(rig):

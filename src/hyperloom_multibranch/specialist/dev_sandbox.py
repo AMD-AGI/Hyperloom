@@ -568,13 +568,21 @@ class DevLeases:
 #: The ledger Forge's loop and FlyDSL rewrite keep in each experiments directory (``kernelforge.tracker.usage_ledger``):
 #: the running total of the LLM calls made from it.
 FORGE_LEDGER = "llm_usage.json"
+#: The directories forge-loop clones its workspace into for one fan-out round (``kernelforge``'s ``LANE_ROOT_PREFIX``)
+#: and removes after it: a lane's ledger is a copy of its run's, whose process records the lane's spend itself.
+FORGE_LANE_PREFIX = "forge-lanes-"
 
 
 def forge_spend(root: Path) -> dict[Path, Spend]:
     """What each Forge ledger under ``root`` says its runs spent on LLM calls, by ledger path."""
     spent = {}
     for path in sorted(root.rglob(FORGE_LEDGER)):
-        ledger = json.loads(path.read_text(encoding="utf-8"))
+        if any(part.startswith(FORGE_LANE_PREFIX) for part in path.relative_to(root).parts):
+            continue
+        try:
+            ledger = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            continue
         tokens = TokenCounts(
             input=int(ledger.get("input_tokens", 0)),
             output=int(ledger.get("output_tokens", 0)),
@@ -820,6 +828,7 @@ __all__ = [
     "LeaseSource",
     "SandboxFor",
     "Starting",
+    "forge_spend",
     "hosted_dev_sandboxes",
     "local_dev_sandboxes",
     "register_dev_sandbox_tools",
