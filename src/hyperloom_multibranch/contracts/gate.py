@@ -96,11 +96,14 @@ class SessionGate(Protocol):
 @dataclass(frozen=True)
 class RegressionOutcome:
     """What the regression set found: ``passed``, or why not in ``reason``, naming each failed case and its cause, and
-    how many ``cases`` it checked, so a set with no case is told from one whose cases all ran clean."""
+    how many ``cases`` it checked, so a set with no case is told from one whose cases all ran clean. ``carried`` names
+    the cases that reproduced on the root as well, the root's defects a commit lacking their fixes still carries, which
+    :meth:`RegressionCheck.check_every_case` names rather than fails on."""
 
     passed: bool
     reason: str = ""
     cases: int = 0
+    carried: tuple[str, ...] = ()
 
 
 class RegressionCheck(Protocol):
@@ -108,7 +111,7 @@ class RegressionCheck(Protocol):
     each, as a repro test of ``base_commit`` with ``candidate_delta`` applied.
 
     The integrator names the commit a merge brings in as ``sources``: a fix only that commit's ancestry holds is not in
-    the integration head's. FINAL names none, because the candidate's own commit carries its whole ancestry.
+    the integration head's.
 
     It passes only when every case ran clean, and passes without a test, checking no case, when there is no case. A
     case that reproduced, or ended without a verdict for any reason, fails it; a test outcome is never raised. A caller
@@ -118,6 +121,12 @@ class RegressionCheck(Protocol):
     async def check(
         self, base_commit: str, candidate_delta: RecipeDelta, *, sources: tuple[str, ...]
     ) -> RegressionOutcome: ...
+
+    async def check_every_case(self, commit: str) -> RegressionOutcome:
+        """Run every case the session registered on ``commit``, its fix in ``commit``'s ancestry or not, as FINAL
+        holds a candidate to every defect the session found: a candidate that lacks a fix still carries its defect.
+        A case that reproduces there and on the root too is a defect of the root, named in ``carried``; one that
+        reproduces there but not on the root, or ends without a verdict, fails it as it fails :meth:`check`."""
 
 
 __all__ = [
