@@ -40,10 +40,12 @@ jobs:
 
       - name: Install pytest
         # The lint is stdlib-only (tomllib + ast + pathlib), so no project
-        # extras are installed here; this job stays seconds long.
+        # extras are installed here; this job stays seconds long. PyYAML is the
+        # one third-party import left: the test package's conftest imports
+        # hyperloom.common.gpu_power_settings, which reads the rule pack.
         run: |
           pip install --upgrade pip
-          pip install "pytest>=8.0"
+          pip install "pytest>=8.0" "PyYAML>=6.0"
 
       - name: Lint pyproject declarations
         run: |

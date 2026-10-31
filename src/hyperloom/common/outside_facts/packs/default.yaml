@@ -1,0 +1,1252 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+#
+# Reference copy of the rule pack: the facts about projects outside this repository that our rules and log readers
+# depend on. A session reads the pack named by HYPERLOOM_RULE_PACK, and this copy when the variable is not set, so a fact
+# that changed upstream is changed by publishing a pack, not by changing code.
+#
+# Entry kinds, a closed list in hyperloom.common.outside_facts.rule_pack:
+#   names         closed set of names, each under the role the code reads it by
+#   log_regex     a pattern for a log line; every examples.match line must match it, every examples.no_match line must not
+#   env_default   an environment variable and the value a launch sets
+#   component_layout  where a component's upstream paths lie in the image (sections), the files its layout cannot measure
+#                 (refuse) and the package directories its runtime writes builds into (generated); every examples.place
+#                 line "<upstream path> -> <base>:<path in base>" must be placed so, every examples.refuse path refused
+#   arg_value     reserved: no rule reads one yet, so a pack that holds one is refused
+#   kernel_table  reserved: no rule reads one yet, so a pack that holds one is refused
+# An entry may also declare image_check: checks the environment a session runs in can answer about the fact
+# (path_exists, csv_has_columns, cli_accepts_flag, source_contains, module_attr; hyperloom.common.outside_facts.
+# image_check_spec). Each carries examples.pass and examples.fail that the loader runs it against, and {ref: entry.role}
+# reads a name another entry holds. A fact with no check is reported unverifiable by the image check.
+# Every entry names its project, says why the fact exists and carries examples. A pack that fails its own examples, or
+# lacks an entry the code reads, is refused when it is loaded; nothing falls back to a default.
+version: "16"
+facts:
+  aiter_merged_view:
+    kind: names
+    project: aiter
+    reason: >-
+      AITER_CONFIG.update_config_files writes the merged view of a variable that lists several tuned tables to this
+      directory, a literal in aiter's function body that no variable and no TMPDIR moves; two local tests that share
+      /tmp overwrite each other's merged file there.
+    names:
+      dir: /tmp/aiter_configs
+    examples:
+      - "hyperloom.measure.aiter_merge_hook: the sandbox start-up hook redirects this directory (a standalone copy of the literal, pinned to this entry by a test)"
+    image_check:
+      - check: source_contains
+        module: aiter.jit.core
+        text: {ref: aiter_merged_view.dir}
+        examples:
+          pass:
+            - source: |-
+                config_path = Path("/tmp/aiter_configs/")
+                if not config_path.exists():
+                    config_path.mkdir(parents=True, exist_ok=True)
+          fail:
+            - source: |-
+                config_path = Path(tempfile.gettempdir()) / "aiter_configs"
+                if not config_path.exists():
+                    config_path.mkdir(parents=True, exist_ok=True)
+      - check: module_attr
+        module: aiter.jit.core
+        attr: AITER_CONFIG.update_config_files
+        examples:
+          pass:
+            - source: |-
+                class AITER_CONFIG:
+                    def update_config_files(self, file_path: str, merge_name: str, env_name: str | None = None):
+                        return file_path
+          fail:
+            - source: |-
+                class AITER_CONFIG:
+                    def merge_config_files(self, file_path: str, merge_name: str):
+                        return file_path
+
+  aiter_meta_dir:
+    kind: names
+    project: aiter
+    reason: >-
+      aiter reads its device sources and code generators (csrc, hsa, 3rdparty) from one meta directory, which it also puts
+      first on sys.path so that "from csrc.cpp_itfs.pa.pa import ..." resolves while aiter.ops is imported. It works the
+      directory out from where aiter/jit/core.py sits: the install_mode file beside the package says develop (also when
+      the file is missing) for a source checkout, whose meta directory is the directory around the package, and anything
+      else for a wheel, whose meta directory is the aiter_meta package beside it. The variable overrides that, and aiter
+      ignores a value whose directory holds no csrc. An aiter package laid anywhere else, as the farm lays a patched one,
+      therefore finds none of it and "import aiter" stops at "No module named 'csrc'" unless the variable names the
+      image's own directory.
+    names:
+      variable: AITER_META_DIR
+      wheel_dir: aiter_meta
+      marker_dir: csrc
+      install_mode_file: install_mode
+      develop_mode: develop
+    examples:
+      - "hyperloom.measure.farm: a farm that lays a patched aiter sets the variable to the image's own meta directory, resolved as aiter resolves it, unless the server already inherits one"
+      - "hyperloom_multibranch.toolbox.tools.kernel_tune: the tuner is pinned to the directory around the aiter package or its aiter_meta, whichever holds csrc"
+    image_check:
+      - check: source_contains
+        module: aiter.jit.core
+        text:
+          - {ref: aiter_meta_dir.variable}
+          - {ref: aiter_meta_dir.wheel_dir}
+          - {ref: aiter_meta_dir.marker_dir}
+          - {ref: aiter_meta_dir.install_mode_file}
+          - {ref: aiter_meta_dir.develop_mode}
+        match: word
+        examples:
+          pass:
+            - source: |-
+                try:
+                    with open(f"{this_dir}/../install_mode", "r") as f:
+                        isDevelopMode = f.read().strip() == "develop"
+                except FileNotFoundError:
+                    isDevelopMode = True
+                AITER_META_DIR = AITER_ROOT_DIR if isDevelopMode else os.path.abspath(f"{AITER_ROOT_DIR}/aiter_meta/")
+                env_meta = os.environ.get("AITER_META_DIR")
+                if env_meta:
+                    AITER_META_DIR = os.path.abspath(env_meta)
+                if not os.path.exists(os.path.join(AITER_META_DIR, "csrc")):
+                    AITER_META_DIR = AITER_ROOT_DIR
+          fail:
+            - source: |-
+                AITER_META_DIR = os.path.abspath(f"{AITER_ROOT_DIR}/aiter_meta/")
+                env_meta = os.environ.get("AITER_META_DIR")
+                if env_meta:
+                    AITER_META_DIR = os.path.abspath(env_meta)
+                if not os.path.exists(os.path.join(AITER_META_DIR, "csrc")):
+                    AITER_META_DIR = AITER_ROOT_DIR
+            - source: |-
+                AITER_SOURCE_DIR = os.environ.get("AITER_SOURCE_DIR") or AITER_ROOT_DIR
+                if not os.path.exists(os.path.join(AITER_SOURCE_DIR, "csrc")):
+                    AITER_SOURCE_DIR = os.path.join(AITER_ROOT_DIR, "aiter_src")
+
+  sglang_image_layout:
+    kind: names
+    project: SGLang serving image
+    reason: >-
+      The SGLang image keeps its source checkouts (aiter, sglang, vllm, flydsl) below one workspace directory, and
+      aiter's default tuned tables below the aiter checkout.
+    names:
+      workspace: /sgl-workspace
+      aiter_configs: aiter/aiter/configs
+    examples:
+      - "hyperloom.measure.compile: IMAGE_SOURCE_ROOTS lists the workspace as a place sources are read from"
+      - "hyperloom.measure.framework.base: DEFAULT_CONFIGS is the aiter tables directory, the workspace joined with aiter_configs"
+    image_check:
+      - check: path_exists
+        installed: sglang
+        path: [{ref: sglang_image_layout.workspace}, {ref: sglang_image_layout.aiter_configs}]
+        type: dir
+        examples:
+          pass:
+            - tree: ["/sgl-workspace/aiter/aiter/configs/"]
+          fail:
+            - tree: ["/sgl-workspace/aiter/aiter/", "/sgl-workspace/aiter/aiter/jit/"]
+
+  context_length_flags:
+    kind: names
+    project: SGLang, vLLM
+    reason: >-
+      The server flag that sets the context length a server serves is named by the framework that takes it; a launch that
+      serves less than the evaluation needs fails the evaluation after the cluster time is spent.
+    names:
+      sglang: --context-length
+      vllm: --max-model-len
+    examples:
+      - "hyperloom.measure.eval_context: a launch's served context is read from whichever of the two flags it carries"
+    image_check:
+      - check: cli_accepts_flag
+        module: sglang.launch_server
+        flag: {ref: context_length_flags.sglang}
+        examples:
+          pass:
+            - help: |-
+                usage: launch_server.py [-h] --model-path MODEL_PATH
+                options:
+                  -h, --help            show this help message and exit
+                  --model-path MODEL_PATH, --model MODEL_PATH
+                                        The path of the model weights.
+                  --tokenizer-path TOKENIZER_PATH
+                                        The path of the tokenizer.
+                  --context-length CONTEXT_LENGTH
+                                        The model's maximum context length.
+          fail:
+            - help: |-
+                usage: launch_server.py [-h] --model-path MODEL_PATH
+                options:
+                  -h, --help            show this help message and exit
+                  --model-path MODEL_PATH, --model MODEL_PATH
+                                        The path of the model weights.
+                  --tokenizer-path TOKENIZER_PATH
+                                        The path of the tokenizer.
+                  --max-context-length MAX_CONTEXT_LENGTH
+                                        The model's maximum context length.
+      - check: cli_accepts_flag
+        module: vllm.entrypoints.openai.api_server
+        flag: {ref: context_length_flags.vllm}
+        examples:
+          pass:
+            - help: |-
+                usage: api_server.py [-h] [--host HOST] [--port PORT]
+                ModelConfig:
+                  --model MODEL         Name or path of the Hugging Face model to use.
+                  --max-model-len MAX_MODEL_LEN
+                                        Model context length (prompt and output).
+          fail:
+            - help: |-
+                usage: api_server.py [-h] [--host HOST] [--port PORT]
+                ModelConfig:
+                  --model MODEL         Name or path of the Hugging Face model to use.
+                  --max-model-length MAX_MODEL_LENGTH
+                                        Model context length (prompt and output).
+
+  python_import_errors:
+    kind: names
+    project: Python
+    reason: A failed import raises one of these two exceptions, and the log line that reports it starts with its name.
+    names:
+      import_error: ImportError
+      module_not_found_error: ModuleNotFoundError
+    examples:
+      - "hyperloom.measure.log_causes: _IMPORT_FAILURE tells a raised import error from a server's 'Ignore import error' line"
+      - "hyperloom.common.failure_signature: the missing-module and import-failure signatures"
+
+  rocr_visible_devices:
+    kind: names
+    project: ROCm (ROCr runtime)
+    reason: >-
+      The device mask a sandbox's cards are leased through; it renumbers the visible devices 0..N-1, so every reader that
+      maps a card to an ordinal goes through it.
+    names:
+      env: ROCR_VISIBLE_DEVICES
+    examples:
+      - "hyperloom.common.visible_devices: ROCR_LEVEL_VARS lists it first among the variables that mask devices"
+      - "hyperloom.measure.runner.run: the runner reads the ordinals its sandbox's mask lists"
+
+  kfd_process_listing:
+    kind: names
+    project: amdkfd (the Linux amdgpu kernel driver's compute interface)
+    reason: >-
+      The kernel lists every process that has opened the GPU compute interface in one directory, a subdirectory per
+      process id (the id in the host's namespace). It holds a vram_<gpu id> file with the bytes the process has resident
+      on that GPU and a queues directory with one directory per compute queue, whose gpuid file names the GPU the queue
+      runs on. The topology below the same root numbers the GPUs: a node directory per device, whose gpu_id file is 0 for a
+      CPU and the kernel's id for a GPU, in the order the ROCm runtime counts devices for ROCR_VISIBLE_DEVICES. The ROCm
+      tools (rocm-smi --showpids, amd-smi process) read these same files, so a process that holds a card is found here with
+      no tool whose output format changes between ROCm releases and without root. A container is refused (EPERM) the
+      gpu_id and properties of every GPU node its device cgroup does not grant, and the runtime (libhsakmt) leaves such a
+      node out when it numbers the devices.
+    names:
+      root: /sys/class/kfd/kfd
+      processes: proc
+      nodes: topology/nodes
+      node_gpu_id: gpu_id
+      queues: queues
+      queue_gpu_id: gpuid
+      vram_prefix: vram_
+      node_properties: properties
+      render_minor_key: drm_render_minor
+    examples:
+      - "hyperloom.sandbox.card_occupancy: read_holders maps a card ordinal to the gpu_id of the n-th GPU node and lists the processes that have a queue or resident memory on it"
+      - "hyperloom.sandbox.card_occupancy: the render node of a card is the drm_render_minor line of its node's properties file, which reads 'drm_render_minor 128' for the first GPU of a machine"
+      - "kernel tree, as read on a GPU node: /sys/class/kfd/kfd/proc/4242/vram_61439 holds 8589934592 and /sys/class/kfd/kfd/proc/4242/queues/0/gpuid holds 61439"
+      - "hyperloom.sandbox.card_occupancy: read_holders skips a GPU node whose gpu_id reads permission denied, as a one-GPU pod read /sys/class/kfd/kfd/topology/nodes/2/gpu_id"
+
+  linux_pid_namespace:
+    kind: names
+    project: Linux kernel
+    reason: >-
+      The kernel's process list of the GPUs names a process by its id in the host's (initial) pid namespace. A reader can
+      only match those ids to what it sees in /proc when it is in that namespace itself, which the link below says by
+      naming the namespace's inode, a fixed number the kernel gives the initial one. A reader in a namespace of its own
+      cannot match them and counts holders per card instead.
+    names:
+      link: self/ns/pid
+      initial: "pid:[4026531836]"
+    examples:
+      - "hyperloom.sandbox.card_occupancy: the process ids of the list are matched to /proc only by a reader whose /proc/self/ns/pid is the initial namespace, otherwise the probe counts the holders of each card without naming whose they are"
+
+  drm_fdinfo:
+    kind: names
+    project: Linux kernel (DRM, the amdgpu driver)
+    reason: >-
+      A process that has a GPU's render node open says what memory it holds on it in the fdinfo file of that descriptor:
+      a drm-client-id line (one per open DRM file, shared by every descriptor that duplicates it) and a drm-memory-vram line
+      with a number and a unit (KiB, MiB, or no unit for 0). The descriptor's link names the render node, /dev/dri/renderD
+      and the node's minor, which the GPU's node of the kernel's topology states. This is how a reader in a pid namespace of
+      its own learns what the processes it can see hold, to set against the kernel's list of the whole machine.
+    names:
+      fd_dir: fd
+      fdinfo_dir: fdinfo
+      render_node_prefix: renderD
+      client_id_key: drm-client-id
+      vram_key: drm-memory-vram
+    examples:
+      - "hyperloom.sandbox.drm_fdinfo: /proc/4242/fdinfo/7 of a descriptor that links to /dev/dri/renderD152 reads 'drm-client-id: 17' and 'drm-memory-vram: 249506392 KiB'"
+
+  pytorch_tunableop_env:
+    kind: names
+    project: PyTorch
+    reason: >-
+      TunableOp tunes a GEMM shape the first time a server runs it when ENABLED is 1 and TUNING is not 0, which makes the
+      measured number depend on the tuning that ran inside the measurement; the results file is named by FILENAME.
+    names:
+      enabled: PYTORCH_TUNABLEOP_ENABLED
+      tuning: PYTORCH_TUNABLEOP_TUNING
+      table: PYTORCH_TUNABLEOP_FILENAME
+    examples:
+      - "hyperloom_multibranch.toolbox.acceptance: a launch with ENABLED=1 and TUNING not 0 is refused as online tuning"
+      - "hyperloom.measure.compile: PER_DEVICE_TABLE_ENVS lists FILENAME, the table that is placed once per device ordinal"
+    image_check:
+      - check: source_contains
+        module: torch.cuda.tunable
+        text:
+          - {ref: pytorch_tunableop_env.enabled}
+          - {ref: pytorch_tunableop_env.tuning}
+          - {ref: pytorch_tunableop_env.table}
+        examples:
+          pass:
+            - source: |-
+                export PYTORCH_TUNABLEOP_ENABLED=1
+                export PYTORCH_TUNABLEOP_TUNING=0
+                results_filename_env = os.getenv("PYTORCH_TUNABLEOP_FILENAME")
+          fail:
+            - source: |-
+                export PYTORCH_TUNABLEOP_ENABLED=1
+                export PYTORCH_TUNABLEOP_TUNING=0
+                results_filename_env = os.getenv("PYTORCH_TUNABLEOP_RESULTS")
+
+  inferencex_benchmark_envs:
+    kind: names
+    project: InferenceX
+    reason: >-
+      The names of the workload, the request and the evaluation in benchmark.envs, as InferenceX's benchmark scripts read
+      them; a renamed variable is silently ignored by the script and the point measures another workload.
+    names:
+      isl: ISL
+      osl: OSL
+      random_range_ratio: RANDOM_RANGE_RATIO
+      conc: CONC
+      run_eval: RUN_EVAL
+      num_prompts: NUM_PROMPTS
+      num_warmups: NUM_WARMUPS
+      max_model_len: MAX_MODEL_LEN
+      tp: TP
+      ep: EP
+      magpie_eval_tasks: MAGPIE_EVAL_TASKS
+      magpie_eval_limit: MAGPIE_EVAL_LIMIT
+      magpie_eval_tokenized_requests: MAGPIE_EVAL_TOKENIZED_REQUESTS
+    examples:
+      - "hyperloom.measure.surface: SURFACE_ENV_KEYS, POINT_ENV_KEYS and REQUEST_ENV_KEYS group these names by who may set them"
+      - "hyperloom.common.env_safety: BLOCKED_EXTERNAL_ENV_NAMES refuses these names in an env export from an untrusted source"
+
+  hip_graph_packet_capture:
+    kind: env_default
+    project: ROCm (HIP runtime, CLR)
+    reason: >-
+      The HIP runtime replays a captured graph from its recorded packets by default, and the ROCm profiler then records a
+      replay's kernels only when a host sync follows it; replayed node by node (0) every replay is recorded.
+    env: DEBUG_CLR_GRAPH_PACKET_CAPTURE
+    value: "0"
+    examples:
+      - "hyperloom/inference_optimizer/assets/configs/profile_sglang.yaml, profile_vllm.yaml and profile_atom.yaml: the profile launch's env block"
+
+  hip_undefined_symbol:
+    kind: log_regex
+    project: glibc (the dynamic loader), as it reports PyTorch, aiter and SGLang extensions
+    reason: A compiled extension that references a symbol nothing defines does not load; the loader names it this way.
+    pattern: undefined symbol
+    examples:
+      match:
+        - "ImportError: /sgl-workspace/sglang/python/sgl_kernel/common_ops.abi3.so: undefined symbol: _ZN3c104cuda14ExchangeDeviceEa"
+      no_match:
+        - "undefined behavior sanitizer is not enabled"
+
+  hip_no_kernel_image:
+    kind: log_regex
+    project: ROCm (HIP runtime)
+    reason: A kernel built for another GPU architecture than the device's is reported this way when it is launched.
+    pattern: no kernel image is available
+    examples:
+      match:
+        - "RuntimeError: HIP error: no kernel image is available for execution on the device"
+      no_match:
+        - "RuntimeError: HIP error: out of memory"
+
+  hip_no_binary_for_gpu:
+    kind: log_regex
+    project: ROCm (HIP runtime)
+    reason: A code object that holds no binary for the device's architecture is refused with this error name.
+    pattern: hipErrorNoBinaryForGpu
+    examples:
+      match:
+        - "hipErrorNoBinaryForGpu: Unable to find code object for all current devices"
+      no_match:
+        - "hipErrorOutOfMemory: out of memory"
+
+  hsa_status_error:
+    kind: log_regex
+    project: ROCm (ROCr runtime)
+    reason: A failed HSA call is reported with a status name that starts with this prefix.
+    pattern: HSA_STATUS_ERROR
+    examples:
+      match:
+        - "HSA_STATUS_ERROR_EXCEPTION: An HSAIL operation resulted in a hardware exception."
+      no_match:
+        - "HSA runtime initialised with status success"
+
+  hip_error_prefix:
+    kind: log_regex
+    project: ROCm (HIP runtime)
+    reason: Every HIP call that fails names its error with this prefix (hipErrorIllegalAddress, hipErrorOutOfMemory, ...).
+    pattern: hipError
+    examples:
+      match:
+        - "Search for `hipErrorIllegalAddress' in the ROCm documentation"
+      no_match:
+        - "hipcc finished with no error"
+
+  argparse_unrecognized_arguments:
+    kind: log_regex
+    project: Python (argparse)
+    reason: >-
+      argparse refuses a command line that carries a flag its parser does not define with this message; the singular and
+      the plural both occur, so it is regular-expression source.
+    pattern: unrecognized arguments?
+    examples:
+      match:
+        - "launch_server.py: error: unrecognized arguments: --enable-profile-cuda-graph"
+        - "launch_server.py: error: unrecognized argument: --enable-profile-cuda-graph"
+      no_match:
+        - "launch_server.py: error: the following arguments are required: --model-path"
+    image_check:
+      - check: source_contains
+        module: argparse
+        text: "unrecognized arguments"
+        examples:
+          pass:
+            - source: "msg = _('unrecognized arguments: %s')"
+          fail:
+            - source: "msg = _('unexpected arguments: %s')"
+
+  argparse_invalid_choice:
+    kind: log_regex
+    project: Python (argparse)
+    reason: argparse refuses a flag value that is not one of the choices its parser lists with this message.
+    pattern: invalid choice
+    examples:
+      match:
+        - "launch_server.py: error: argument --attention-backend: invalid choice: 'fa9' (choose from 'triton', 'aiter')"
+      no_match:
+        - "launch_server.py: error: argument --tp-size: invalid int value: 'many'"
+    image_check:
+      - check: source_contains
+        module: argparse
+        text: "invalid choice"
+        examples:
+          pass:
+            - source: "msg = _('invalid choice: %(value)r (choose from %(choices)s)')"
+          fail:
+            - source: "msg = _('unknown choice: %(value)r (choose from %(choices)s)')"
+
+  transformers_unknown_architecture:
+    kind: log_regex
+    project: Transformers
+    reason: >-
+      Transformers raises this for a checkpoint whose model_type or architecture it does not know, which a newer release
+      or the model's remote code resolves and a retry does not.
+    pattern: does not recognize this architecture
+    examples:
+      match:
+        - "but Transformers does not recognize this architecture. This could be because of an issue with the checkpoint"
+      no_match:
+        - "Transformers loaded the architecture from the checkpoint's config"
+    image_check:
+      - check: source_contains
+        module: transformers.models.auto.configuration_auto
+        text: does not recognize this architecture
+        examples:
+          pass:
+            - source: '"but Transformers does not recognize this architecture. This could be because of an "'
+          fail:
+            - source: '"but this model type is not supported by Transformers. This could be because of an "'
+
+  transformers_does_not_recognize:
+    kind: log_regex
+    project: Transformers
+    reason: >-
+      The first half of the same message, which names the model type that was refused; it is read for the type, so it is
+      its own fact.
+    pattern: Transformers does not recognize
+    examples:
+      match:
+        - "The checkpoint you are trying to load has model type `qwen3_5` but Transformers does not recognize this architecture."
+      no_match:
+        - "The checkpoint you are trying to load has model type `qwen3` and Transformers loads it"
+    image_check:
+      - check: source_contains
+        module: transformers.models.auto.configuration_auto
+        text: Transformers does not recognize
+        examples:
+          pass:
+            - source: '"but Transformers does not recognize this architecture. This could be because of an "'
+          fail:
+            - source: '"but this model type is not supported by Transformers. This could be because of an "'
+
+  aiter_log_tuned_config:
+    kind: names
+    project: aiter
+    reason: >-
+      aiter logs a tuned-table lookup that missed unconditionally, and one that hit only when this variable is a non-zero
+      integer in the server's environment; a log without it cannot tell a table that nothing read from one whose hits
+      were not logged.
+    names:
+      env: AITER_LOG_TUNED_CONFIG
+    examples:
+      - "hyperloom_multibranch.toolbox.table_hits: a table is called not exercised only when a server with this variable set logged no hit in its rows"
+      - "hyperloom_multibranch.toolbox.planner: every point it plans launches its server with this variable at 1, a baseline's and a candidate's alike"
+    image_check:
+      - check: source_contains
+        module: aiter.jit.core
+        text: {ref: aiter_log_tuned_config.env}
+        examples:
+          pass:
+            - source: 'AITER_LOG_TUNED_CONFIG = int(os.getenv("AITER_LOG_TUNED_CONFIG", "0"))'
+          fail:
+            - source: 'AITER_LOG_TUNED = int(os.getenv("AITER_LOG_TUNED", "0"))'
+
+  aiter_tuned_hit:
+    kind: log_regex
+    project: aiter
+    reason: >-
+      The line aiter logs, under AITER_LOG_TUNED_CONFIG, when a GEMM lookup resolved in a tuned row. The lookup asks for
+      M and finds the row of padded_M, so the group M is the row's M and the other groups are the columns the line prints
+      of the row it found, named as the table's columns (otype is the column outdtype). The dense bf16 lines print the
+      shape's dtypes, flags, libtype and kernel name; the a8w8 lines print only cu_num and the kernel name, after a space
+      before the comma that follows the path.
+    pattern: |-
+      (?x)
+      shape (?:\s+is)? \s+ M:\d+, \s+ N:\d+, \s+ K:\d+ ,?
+      (?: \s+ dtype='(?P<dtype>[^']*)' \s+ otype='(?P<outdtype>[^']*)'
+          \s+ bias=(?P<bias>True|False), \s+ scaleAB=(?P<scaleAB>True|False)
+          , \s+ bpreshuffle=(?P<bpreshuffle>True|False) )?
+      \s+ found \s+ padded_M: \s+ (?P<M>\d+), \s+ N:(?P<N>\d+), \s+ K:(?P<K>\d+)
+      \s+ is \s+ tuned \s+ on \s+ cu_num \s+ = \s+ (?P<cu_num>\d+) \s+ in \s+ (?P<table>[^\s,!]+)
+      (?: \s* , \s+ libtype \s+ is \s+ (?P<libtype>\w+) )?
+      (?: \s* , \s+ kernel \s+ name \s+ is \s+ (?P<kernelName>[^\s!]*) )?
+    examples:
+      match:
+        - "[aiter] shape is M:4, N:6144, K:4096 dtype='torch.bfloat16' otype='torch.bfloat16' bias=False, scaleAB=False, bpreshuffle=False found padded_M: 4, N:6144, K:4096 is tuned on cu_num = 256 in /work/hl-framework-x/merged/bf16_tuned_gemm.csv, libtype is torch, kernel name is torch"
+        - "[aiter] shape is M:192, N:4096, K:4096 dtype='torch.bfloat16' otype='torch.bfloat16' bias=False, scaleAB=False, bpreshuffle=False found padded_M: 192, N:4096, K:4096 is tuned on cu_num = 256 in /work/hl-framework-x/merged/bf16_tuned_gemm.csv, libtype is torch, kernel name is native"
+        - "[aiter] shape is M:512, N:4096, K:4096 dtype='torch.bfloat16' otype='torch.bfloat16' bias=False, scaleAB=False, bpreshuffle=False found padded_M: 512, N:4096, K:4096 is tuned on cu_num = 256 in /work/hl-framework-x/merged/bf16_tuned_gemm.csv, libtype is flydsl, kernel name is flydsl_hgemm_abf16_wbf16_bf16_t128x64x64x4_ks1_w4x2x1_bias0_ktail0_gm0_pft_gfx950"
+        - "[aiter] shape is M:1392, N:4096, K:4096 dtype='torch.bfloat16' otype='torch.bfloat16' bias=False, scaleAB=False, bpreshuffle=False found padded_M: 2048, N:4096, K:4096 is tuned on cu_num = 256 in /work/hl-framework-x/merged/bf16_tuned_gemm.csv, libtype is opus, kernel name is opus_gemm_mono_tile_512x128x256x64_2x4_16x16x32_0x0x0_nooob"
+        - "[aiter] shape is M:64, N:6144, K:4096 dtype='torch.bfloat16' otype='torch.bfloat16' bias=False, scaleAB=False, bpreshuffle=False found padded_M: 64, N:6144, K:4096 is tuned on cu_num = 256 in /work/hl-framework-x/merged/bf16_tuned_gemm.csv, libtype is triton, kernel name is auto"
+        - "(Worker_TP7 pid=380239) [aiter] shape is M:16384, N:4608, K:8192 dtype='torch.bfloat16' otype='torch.bfloat16' bias=False, scaleAB=False, bpreshuffle=False found padded_M: 8192, N:4608, K:8192 is tuned on cu_num = 256 in /work/merged_tuned_dense_bf16.csv,"
+        - "[aiter] shape is M:12, N:34816, K:5120, found padded_M: 16, N:34816, K:5120 is tuned on cu_num = 256 in /work/hl-framework-x/tables/AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE/5c34e83d432c56e2/k-5c34e83d432c56e2 , kernel name is a8w8_blockscale_bpreshuffle_1x128x128_256x16x64x256_16x16_16x16_16x16x1_16x16x1_1x16x1x16_4_1x1_intrawave_v1!"
+      no_match:
+        - "[aiter] shape is M:512, N:6144, K:4096 dtype='torch.bfloat16' otype='torch.bfloat16' bias=False, scaleAB=False, bpreshuffle=False, not found tuned config in /work/hl-framework-x/merged/bf16_tuned_gemm.csv, will use default config! using torch solution:0"
+        - "[aiter] shape is M:8192, N:7168, K:5120, not found tuned config in /work/hl-framework-x/merged/a8w8_bpreshuffle_tuned_gemm.csv, will use default config!"
+    image_check:
+      - check: source_contains
+        module: aiter.tuned_gemm
+        text: ["found padded_M:", "is tuned on cu_num", "libtype is", "kernel name is"]
+        examples:
+          pass:
+            - source: |-
+                f"shape is M:{M}, N:{N}, K:{K} {dtype=} {otype=} {bias=}, {scaleAB=}, {bpreshuffle=} found padded_M: {padded_M}, N:{N}, K:{K} is tuned on cu_num = {cu_num} in {table}, libtype is {libtype}, kernel name is {kernelName}"
+          fail:
+            - source: |-
+                f"shape is M:{M}, N:{N}, K:{K} {dtype=} {otype=} {bias=}, {scaleAB=}, {bpreshuffle=} hit a tuned row for cu_num = {cu_num} in {table}, libtype is {libtype}, kernel name is {kernelName}"
+      - check: csv_has_columns
+        installed: sglang
+        path:
+          - {ref: sglang_image_layout.workspace}
+          - {ref: sglang_image_layout.aiter_configs}
+          - bf16_tuned_gemm.csv
+        columns: [M, N, K, bias, dtype, outdtype, scaleAB, bpreshuffle, cu_num, libtype, kernelName]
+        examples:
+          pass:
+            - header: "gfx,cu_num,M,N,K,bias,dtype,outdtype,scaleAB,bpreshuffle,libtype,solidx,splitK,us,kernelName,err_ratio,tflops,bw"
+          fail:
+            - header: "gfx,cu_num,M,N,K,bias,dtype,outdtype,scaleAB,bpreshuffle,libtype,solidx,splitK,us,kernel_name,err_ratio,tflops,bw"
+
+  aiter_tuned_hit_marker:
+    kind: log_regex
+    project: aiter
+    reason: >-
+      What the aiter lines that report a lookup resolved in a tuned row have in common, whatever else they print ("is
+      tuned on cu_num", "is tuned, in", "tuned at padded_M", "found lookup M"), so a reader that parses aiter_tuned_hit
+      can tell a log with no hit from a log whose hits it cannot read (a newer aiter that words them differently). A
+      lookup that missed says "not found tuned config" and an untuned shape "untuned", which this does not match.
+    pattern: "\\btuned(?: on| at|,)|found (?:padded_M|lookup M):"
+    examples:
+      match:
+        - "[aiter] shape is M:192, N:4096, K:4096 dtype='torch.bfloat16' otype='torch.bfloat16' bias=False, scaleAB=False, bpreshuffle=False found padded_M: 192, N:4096, K:4096 is tuned on cu_num = 256 in /work/hl-framework-x/merged/bf16_tuned_gemm.csv, libtype is torch, kernel name is native"
+      no_match:
+        - "[aiter] shape is M:512, N:6144, K:4096 dtype='torch.bfloat16' otype='torch.bfloat16' bias=False, scaleAB=False, bpreshuffle=False, not found tuned config in /work/hl-framework-x/merged/bf16_tuned_gemm.csv, will use default config! using torch solution:0"
+
+  sglang_cuda_graph_capture_end:
+    kind: log_regex
+    project: SGLang
+    reason: >-
+      The line SGLang prints when it has captured its decode CUDA graphs, with how long it took, which is the graph part of a
+      server's boot. Releases word it differently: "Capture cuda graph end. Time elapsed: 11.34 s." before, and "Capture
+      target decode CUDA graph end. elapsed=11.34 s" (with a word naming what was captured) now; both are read. The
+      pattern's first group is the seconds.
+    pattern: |-
+      (?ix)
+      Capture \s+ (?: [a-z]+ \s+ )*? cuda \s+ graph \s+ end \. \s+ (?: Time \s+ )? elapsed (?: : \s* | = \s*)
+      (\d+(?:\.\d+)?) \s* s\b
+    examples:
+      match:
+        - "[2026-10-24 06:38:19 TP0] Capture cuda graph end. Time elapsed: 11.34 s. mem usage=1.52 GB. avail mem=51.20 GB."
+        - "[2026-10-24 06:38:19 TP0] Capture target decode CUDA graph end. elapsed=11.34 s, mem usage=1.52 GB, avail mem=51.20 GB."
+        - "Capture target decode CUDA graph end. elapsed=11.34 s"
+      no_match:
+        - "[2026-10-24 06:38:08 TP0] Capture cuda graph begin. This can take up to several minutes. avail mem=52.72 GB"
+        - "Exception: Capture cuda graph failed: HIP error: an illegal memory access was encountered"
+        - "Capture target decode CUDA graph begin. elapsed=11.34 s"
+
+  sglang_cuda_graph_decode_bs:
+    kind: log_regex
+    project: SGLang
+    reason: >-
+      SGLang prints the arguments a server resolved at launch (server_args=...), and the batch sizes its decode CUDA
+      graphs are captured for are in that line: the decode entry of cuda_graph_config in the current layout, cuda_graph_bs
+      before it. A decode step of N running requests replays the graph of the smallest captured size that is at least N,
+      so these are the M of every dense GEMM of a graph-served decode step, whatever the server's flag or default list
+      was. The pattern's group "sizes" is the comma-separated list.
+    pattern: |-
+      (?x)
+      (?: 'cuda_graph_config': \s* \{ \s* 'decode': \s* \{ [^{}]*? 'bs'
+        | \bcuda_graph_bs\b'? )
+      \s* [:=] \s* \[ (?P<sizes>\d+ (?: \s*,\s* \d+ )* ) \]
+    examples:
+      match:
+        - "[2026-10-22 04:34:21] server_args={'model_path': '/models/m', 'cuda_graph_bs_decode': None, 'cuda_graph_config': {'decode': {'backend': 'full', 'max_bs': 512, 'bs': [1, 2, 4, 8, 12, 16, 24, 32, 40, 512], 'tc_compiler': 'eager', 'max_context_size': None}, 'prefill': {'backend': 'disabled', 'max_bs': 16384, 'bs': [4, 8, 12]}}, 'tp_size': 1}"
+        - "[2025-06-01 00:00:00] server_args=ServerArgs(model_path='/models/m', cuda_graph_max_bs=160, cuda_graph_bs=[1, 2, 4, 8, 16, 24, 32], disable_cuda_graph=False)"
+        - "[2025-06-01 00:00:00] server_args={'tp_size': 1, 'cuda_graph_bs': [1, 2, 4], 'disable_cuda_graph': False}"
+      no_match:
+        - "[2026-10-22 04:34:21] server_args={'cuda_graph_bs_decode': None, 'cuda_graph_bs_prefill': None, 'tp_size': 1}"
+        - "server_args={'cuda_graph_config': {'decode': {'backend': 'disabled', 'max_bs': 16, 'bs': None}, 'prefill': {'backend': 'disabled', 'max_bs': 16384, 'bs': [4, 8, 12]}}}"
+        - "Capturing batches (bs=512 avail_mem=54.88 GB):   2%|2         | 1/52 [00:03<03:10,  3.73s/it]"
+
+  aiperf_request_export:
+    kind: names
+    project: aiperf (the replay client of an AgentX round, SemiAnalysisAI fork pinned by InferenceX)
+    reason: >-
+      aiperf writes one JSON line per request, warm-up requests included, to aiperf_artifacts/profile_export.jsonl at its
+      default export level. A line has metadata, metrics and error; error is absent for a request the client counted
+      successful and, for one it counted failed, carries the class name of the exception in its type. The client's own
+      summary counts the requests of the profiling phase only. The metrics of a failed line are at most error_isl, the
+      input token count (InferenceX asks for the server's token counts, so a request that got no reply has none), and
+      the client as released exports no output token count for it, so it cannot tell a reply it found no content in as
+      empty from short. The runner's patch of the client (aiperf_source) adds error_osl, the output and reasoning token
+      count the server reported, to the line of a reply that arrived and held nothing the client could use.
+    names:
+      dir: aiperf_artifacts
+      file: profile_export.jsonl
+      metadata: metadata
+      metrics: metrics
+      error: error
+      error_class: type
+      phase: benchmark_phase
+      profiling_phase: profiling
+      error_output_length: error_osl
+    examples:
+      - "hyperloom.measure.agentx_requests: the export of a measured round is found at <round>/aiperf_artifacts/profile_export.jsonl or one directory below the round, and a request is counted when its phase is the profiling one or absent"
+      - "hyperloom.measure.agentx_requests: a request is failed when its line has an error, and the output length of a no-content failure is read from the metrics of its line only when the line holds one"
+      - "hyperloom.measure.runner.aiperf_patch: the metric the patched client adds to the line of a no-content failure is named by this role, so the patch and the reader state it once"
+      - 'export line, a request the server answered, as the aiperf docs print it (docs/tutorials/working-with-profile-exports.md at the pinned commit; reconstructed, no real export was at hand): {"metadata": {"session_num": 45, "x_request_id": "7609a2e7-aa53-4ab1-98f4-f35ecafefd25", "x_correlation_id": "32ee4f33-cfca-4cfc-988f-79b45408b909", "conversation_id": "77aa5b0e-b305-423f-88d5-c00da1892599", "turn_index": 0, "request_start_ns": 1759813207532900363, "request_ack_ns": 1759813207650730976, "request_end_ns": 1759813207838764604, "worker_id": "worker_359d423a", "record_processor_id": "record_processor_1fa47cd7", "benchmark_phase": "profiling", "was_cancelled": false}, "metrics": {"input_sequence_length": {"value": 550, "unit": "tokens"}, "time_to_first_token": {"value": 255.88656799999998, "unit": "ms"}, "request_latency": {"value": 297.52522799999997, "unit": "ms"}, "output_token_count": {"value": 9, "unit": "tokens"}, "output_sequence_length": {"value": 9, "unit": "tokens"}}}'
+      - 'export line, a request the server refused with an HTTP status (aiohttp_client.py: code is the status, type its reason phrase), produced by the pinned client''s own parser, metric processor and export writer on a constructed reply as InferenceX runs it (server token counts, no AgentX run): {"metadata":{"session_num":5,"x_request_id":"http_error","conversation_id":"c","turn_index":0,"request_start_ns":1000000000,"request_end_ns":1100000000,"worker_id":"worker-1","record_processor_id":"processor-1","benchmark_phase":"profiling","was_cancelled":false,"context_overflow_skip":false,"agent_depth":0},"metrics":{},"error":{"code":503,"type":"Service Unavailable","message":"overloaded"}}'
+      - 'export line, a request that never reached a server (the exception''s class name is the type and cause_chain lists the chain), produced by the pinned client''s own parser, metric processor and export writer on a constructed reply as InferenceX runs it (server token counts, no AgentX run): {"metadata":{"session_num":6,"x_request_id":"unreachable","conversation_id":"c","turn_index":0,"request_start_ns":1000000000,"request_end_ns":1100000000,"worker_id":"worker-1","record_processor_id":"processor-1","benchmark_phase":"profiling","was_cancelled":false,"context_overflow_skip":false,"agent_depth":0},"metrics":{},"error":{"type":"ClientConnectorError","message":"ClientConnectorError(ConnectionKey(host=''localhost'', port=30000, is_ssl=False, ssl=True, proxy=None, proxy_auth=None, proxy_headers_hash=None), ConnectionRefusedError(111, ''Connect call failed''))","cause_chain":["ClientConnectorError","ConnectionRefusedError"]}}'
+      - 'export line of the client as released, a request the server answered with 2xx and nothing the client could use (error.type names InvalidInferenceResultError; the metrics hold the input token count the server reported and no output token count), produced by the pinned client''s own parser, metric processor and export writer on a constructed reply as InferenceX runs it (server token counts, no AgentX run): {"metadata":{"session_num":1,"x_request_id":"no_content_usage_zero","conversation_id":"c","turn_index":0,"request_start_ns":1000000000,"request_end_ns":1100000000,"worker_id":"worker-1","record_processor_id":"processor-1","benchmark_phase":"profiling","was_cancelled":false,"context_overflow_skip":false,"agent_depth":0},"metrics":{"error_isl":{"value":550,"unit":"tokens"}},"error":{"type":"InvalidInferenceResultError","message":"InvalidInferenceResultError(''Invalid inference result: No responses with actual content were received from the server (only usage/metadata, null/empty data, or [DONE] markers)'')","cause_chain":["InvalidInferenceResultError"]}}'
+      - 'export line of the client the runner patched, the same reply: error_osl is the output token count the server reported (here 0: it produced nothing), produced by the pinned client''s own parser, metric processor and export writer on a constructed reply as InferenceX runs it (server token counts, no AgentX run): {"metadata":{"session_num":1,"x_request_id":"no_content_usage_zero","conversation_id":"c","turn_index":0,"request_start_ns":1000000000,"request_end_ns":1100000000,"worker_id":"worker-1","record_processor_id":"processor-1","benchmark_phase":"profiling","was_cancelled":false,"context_overflow_skip":false,"agent_depth":0},"metrics":{"error_osl":{"value":0,"unit":"tokens"},"error_isl":{"value":550,"unit":"tokens"}},"error":{"type":"InvalidInferenceResultError","message":"InvalidInferenceResultError(''Invalid inference result: No responses with actual content were received from the server (only usage/metadata, null/empty data, or [DONE] markers)'')","cause_chain":["InvalidInferenceResultError"]}}'
+
+  aiperf_invalid_reply:
+    kind: names
+    project: aiperf (the replay client of an AgentX round, SemiAnalysisAI fork pinned by InferenceX)
+    reason: >-
+      A reply that arrived with a 2xx status and held nothing the client could use (no response with content: only usage
+      chunks, empty deltas or the [DONE] marker; or a timestamp outside its range) is converted to an error record by the
+      client, and the error is InvalidInferenceResultError. Every other error is counted as a request the server did not
+      serve (a connection error, a timeout, a cancellation, an HTTP error status or an error event in the stream); the
+      client's own exception while it processes a reply that did arrive is exported the same way and cannot be told apart.
+    names:
+      error_class: InvalidInferenceResultError
+    examples:
+      - "hyperloom.measure.agentx_requests: a failed request whose error class is this one is a no-content failure, every other failed request a transport failure"
+      - "hyperloom_multibranch.toolbox.hosted_executor: the classes a result carries for each measured round of an AgentX test are read from the export with this"
+
+  aiperf_source:
+    kind: names
+    project: aiperf (the replay client of an AgentX round, SemiAnalysisAI fork pinned by InferenceX)
+    reason: >-
+      InferenceX carries the client as the git submodule named utils/aiperf (at utils/aiperf at the commit Hyperloom pins,
+      at inferencex-e2e/utils/aiperf at later commits Magpie pins; the patch finds it by name), and its benchmark
+      library installs it editable into an environment made for each job, so the source of that submodule is what a round
+      runs. The released client keeps only the input token count of a reply it converts to an error record
+      (inference_result_parser.py, the branch of a parsed record that is invalid), and computes only the metrics flagged
+      error-only for an error record (output_sequence_length_metric.py holds the output length metric, which is not one).
+    names:
+      submodule: utils/aiperf
+      parser_file: src/aiperf/records/inference_result_parser.py
+      output_length_file: src/aiperf/metrics/types/output_sequence_length_metric.py
+    examples:
+      - "hyperloom.measure.runner.aiperf_patch: the runner edits these two files of the submodule before an AgentX round, so the client keeps the output token count of a no-content failure and exports it as an error-only metric"
+    image_check:
+      - check: source_contains
+        path: [{env: INFERENCEX_PATH}, .gitmodules]
+        text: {ref: aiperf_source.submodule}
+        examples:
+          pass:
+            - env: {INFERENCEX_PATH: /checkout}
+              source: |-
+                [submodule "utils/aiperf"]
+                    path = utils/aiperf
+                    url = https://github.com/SemiAnalysisAI/aiperf.git
+          fail:
+            - env: {INFERENCEX_PATH: /checkout}
+              source: |-
+                [submodule "inferencex-e2e/utils/srt-slurm"]
+                    path = inferencex-e2e/utils/srt-slurm
+                    url = https://github.com/NVIDIA/srt-slurm.git
+
+  short_prompt_check:
+    kind: names
+    project: aiter (the prefill kernels the framework image serves with) and the framework that calls them
+    reason: >-
+      aiter's vectorized_5d mha_batch_prefill gave wrong output for short sequences in about one server process in three,
+      and a long, batched, averaged evaluation (GSM8K) did not see it. The check asks a test's own server, after its rounds,
+      the same short prompts greedily, and compares the answers of every test of one recipe (each test's server is one
+      launch; the check boots none); max_new_tokens is how many tokens each prompt may generate, phase_cap_sec how long the
+      check may take before it ends incomplete, and always_purposes the test purposes that run it
+      whatever their recipe change is (a baseline measures the inconsistency the rule gate holds every candidate to, a
+      final candidate is the one that ships). The values are read as numbers and words by the toolbox.
+    names:
+      max_new_tokens: "32"
+      phase_cap_sec: "1200"
+      always_purposes: "baseline final"
+    examples:
+      - "hyperloom_multibranch.toolbox.short_prompts: the plan of a test that runs the check takes its token budget and time cap from these names"
+      - "hyperloom_multibranch.toolbox.short_prompts: a test whose purpose is one of always_purposes runs the check, with the purpose as the reason"
+
+  short_prompt_touch:
+    kind: log_regex
+    project: aiter (the prefill kernels the framework image serves with) and the framework that calls them
+    reason: >-
+      A recipe change that can alter what an attention, KV-cache or prefill kernel computes needs the short-prompt check;
+      the toolbox renders the change from the parent recipe to the candidate as lines and the check runs when any line
+      matches. A line is "arg <flag> <value>" for a server argument that differs ("(unset)" where a side lacks it), "env
+      <name>=<value>" for a launch variable, "ref <component> <parent ref>-><candidate ref>" for a component moved to
+      another upstream commit, "patch <component> <path>" for a patch added or removed (its path is named by its hash, so
+      it says nothing of what the patch changes) followed by "patch-file <component> <file>" for each file the patch
+      changes, read from the patch itself, "kernel <kind> <target>" for a kernel artifact added or removed, "image
+      changed", and, because a change the toolbox cannot read must count as touching, "unexpressed <entry>" (a patch whose
+      files cannot be read is one). A launch variable touches when it names attention, the KV cache or prefill, selects
+      aiter as the attention backend (the framework's switch that turns aiter on also makes it the attention backend), or
+      sets the vectorized_5d KV layout; aiter's other variables (custom all-reduce, the tuned GEMM tables, MoE sorting)
+      leave attention as it is. A server argument touches when a word of its name names attention, the KV cache, its
+      pages or prefix cache, prefill or a sparse or sliding-window attention (a multimodal encoder's attention flag does
+      not: the prompts are text). A patched file touches when a word of its path names attention, the KV cache, prefill,
+      decode, paged attention or rotary embedding, or it is a file that builds the attention batch or captures its graph
+      (forward_batch_info, schedule_batch, model_runner, the CUDA-graph runners, vLLM's cache_kernels and block_pool); a
+      word starts after a character that is not a letter or digit, so deepseekv3, qkv_proj and dflash do not count;
+      radix counts only as the radix cache or tree, flash not as flashinfer (its attention files are in attention
+      directories, the rest is MoE and all-reduce), decode not as a video decoder nor in a MoE or GEMM file, and a
+      vision encoder's file does not count at all (the prompts are text). A patch to a model's file (a "models/"
+      directory) counts too: it holds the model's attention forward (DeepSeek's MLA, llama's), and a wrong-output bug
+      the check would have caught costs more than the six boots the check takes. aiter is judged by the files of its
+      patch like any component, so a GEMM or MoE patch to aiter does not touch. Which flags, variables, components and
+      files touch attention is the project's to say, so they are here and not in code.
+    pattern: |-
+      (?ix) ^ (?:
+          arg \s+ --(?: block-size | max-num-batched-tokens | num-continuous-decode-steps ) \b
+        | arg \s+ --(?! mm- ) [a-z0-9-]*? (?<![a-z0-9])
+                     (?: atten | attn | f?mha | mla | kv | prefill | radix | prefix-cach | page | hicache
+                       | hierarchical-cache | hisparse | nsa | dsa | kda | swa | sliding-window | rotary | rope )
+        | env \s+ \S*? (?: ATTN | ATTENTION | FLASH | MHA | MLA | KV | PREFILL | RADIX ) \S*? =
+        | env \s+ (?: SGLANG_USE_AITER | VLLM_ROCM_USE_AITER | VLLM_USE_AITER ) =
+        | (?: arg | env ) \s .* vectorized_5d
+        | ref \s+ (?: aiter | sglang | vllm | flash-attention | flash_attn | triton ) \b
+        | patch-file \s+ \S+ \s+ (?! \S*? vision ) \S*? (?<![a-z0-9])
+                     (?: atten | attn | f?mha | mla | flash(?!infer) | kv | prefill | radix[_-]?(?:cache|tree)
+                       | mem_cache | paged | pa(?=[_./-]) | asm_pa | rotary | rope | forward_batch_info | schedule_batch
+                       | model_runner | cuda_graph | cache_kernels | block_pool | models/ )
+        | patch-file \s+ \S+ \s+ (?! \S*? (?: vision | moe | gemm(?!a) ) ) \S*? (?<![a-z0-9]) decode(?!r)
+        | kernel \s+ (?: fusion | rewrite ) \s+ \S*? (?<![a-z0-9])
+                     (?: atten | attn | f?mha | mla | flash | kv | prefill | paged | pa(?=[_./-]) | rotary | rope )
+        | image \s+ changed
+        | unexpressed \s
+      )
+    examples:
+      match:
+        - "arg --attention-backend aiter"
+        - "arg --prefill-attention-backend (unset)"
+        - "arg --kv-cache-dtype fp8_e4m3"
+        - "arg --enable-dp-attention (unset)"
+        - "arg --nsa-prefill-backend tilelang"
+        - "arg --dsa-decode-backend flashmla_kv"
+        - "arg --linear-attn-backend triton"
+        - "arg --triton-attention-num-kv-splits 16"
+        - "arg --enable-page-major-kv-layout (unset)"
+        - "arg --enable-hierarchical-cache (unset)"
+        - "arg --hicache-ratio 2"
+        - "arg --speculative-attention-mode decode"
+        - "arg --speculative-draft-kv-cache-dtype fp8_e4m3"
+        - "arg --attention-config {\"backend\": \"ROCM_AITER_FA\"}"
+        - "arg --calculate-kv-scales (unset)"
+        - "arg --page-size 64"
+        - "arg --block-size 16"
+        - "arg --chunked-prefill-size 8192"
+        - "arg --enable-prefix-caching (unset)"
+        - "arg --disable-radix-cache (unset)"
+        - "arg --max-num-batched-tokens 16384"
+        - "env SGLANG_USE_AITER_ATTN=1"
+        - "env SGLANG_USE_AITER=1"
+        - "env VLLM_ROCM_USE_AITER=(unset)"
+        - "env AITER_ENABLE_PREFILL_VSKIP=(unset)"
+        - "env SGLANG_AITER_MLA_PERSIST=1"
+        - "env SGLANG_AITER_KV_CACHE_LAYOUT=vectorized_5d"
+        - "env SGLANG_AITER_KV_CACHE_LAYOUT=(unset)"
+        - "ref aiter 0123456789abcdef0123456789abcdef01234567->89abcdef0123456789abcdef0123456789abcdef"
+        - "patch-file sglang python/sglang/srt/layers/attention/aiter_backend.py"
+        - "patch-file sglang python/sglang/srt/models/deepseek_v2.py"
+        - "patch-file sglang python/sglang/srt/models/llama.py"
+        - "patch-file sglang python/sglang/srt/model_executor/forward_batch_info.py"
+        - "patch-file sglang python/sglang/srt/model_executor/model_runner.py"
+        - "patch-file sglang python/sglang/srt/managers/schedule_batch.py"
+        - "patch-file sglang python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py"
+        - "patch-file sglang python/sglang/srt/layers/rotary_embedding/base.py"
+        - "patch-file vllm csrc/cache_kernels.cu"
+        - "patch-file vllm vllm/v1/core/block_pool.py"
+        - "patch-file vllm vllm/model_executor/models/deepseek_v2.py"
+        - "patch-file aiter aiter/ops/triton/attention/lean_atten_paged.py"
+        - "patch-file aiter aiter/ops/triton/attention/pa_decode.py"
+        - "patch-file aiter csrc/py_itfs_cu/asm_pa.cu"
+        - "patch-file aiter aiter/ops/mha.py"
+        - "patch-file sglang python/sglang/srt/disaggregation/decode.py"
+        - "patch-file vllm vllm/v1/attention/backends/flashinfer.py"
+        - "patch-file vllm vllm/model_executor/models/qwen3_moe.py"
+        - "patch-file sglang python/sglang/srt/layers/radix_attention.py"
+        - "patch-file sglang python/sglang/srt/mem_cache/memory_pool.py"
+        - "patch-file sglang python/sglang/srt/mem_cache/radix_cache.py"
+        - "kernel rewrite mha_batch_prefill_short"
+        - "kernel fusion fmha_fwd_v3"
+        - "kernel rewrite pa_ragged"
+        - "image changed"
+        - "unexpressed launch envs set outside the recipe"
+        - "unexpressed patch patch/sglang/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.patch: its files cannot be read (BlobError: blob 0123 is not in the blob store)"
+      no_match:
+        - "arg --max-running-requests 128"
+        - "arg --tensor-parallel-size 8"
+        - "arg --enable-flashinfer-allreduce-fusion (unset)"
+        - "arg --mm-attention-backend fa3"
+        - "arg --decode-log-interval 40"
+        - "arg --moe-runner-backend triton"
+        - "env HIP_FORCE_DEV_KERNARG=1"
+        - "env AITER_CUSTOM_AR_MAX_SIZE=16777216"
+        - "env SGLANG_USE_AITER_AR=1"
+        - "env AITER_USE_CK_MOE_SORTING=1"
+        - "env AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE=/configs/a8w8_blockscale_bpreshuffle_tuned_gemm.csv"
+        - "env AITER_CONFIG_GEMM_BF16=/configs/bf16_tuned_gemm.csv"
+        - "env AITER_CONFIG_FMOE=/configs/tuned_fmoe.csv"
+        - "patch sglang patch/sglang/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.patch"
+        - "patch-file sglang python/sglang/srt/layers/moe/fused_moe_triton/layer.py"
+        - "patch-file sglang python/sglang/srt/distributed/device_communicators/custom_all_reduce.py"
+        - "patch aiter patch/aiter/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.patch"
+        - "patch-file aiter aiter/ops/gemm_op_a8w8.py"
+        - "patch-file aiter aiter/fused_moe.py"
+        - "patch-file sglang python/sglang/srt/function_call/deepseekv3_detector.py"
+        - "patch-file vllm vllm/tool_parsers/deepseekv3_tool_parser.py"
+        - "patch-file sglang python/sglang/srt/configs/deepseekvl2.py"
+        - "patch-file sglang python/sglang/srt/speculative/dflash_info.py"
+        - "patch-file sglang python/sglang/kernels/aot/csrc/cpu/qkv_proj.cpp"
+        - "patch-file sglang python/sglang/multimodal_gen/test/unit/test_usp_packed_qkv_a2a.py"
+        - "kernel rewrite deepseekv3_gemm"
+        - "patch-file sglang python/sglang/kernels/ops/moe/moe_route_radix.py"
+        - "patch-file vllm vllm/multimodal/video_decoders/base.py"
+        - "patch-file sglang python/sglang/srt/layers/moe/moe_runner/flashinfer_trtllm.py"
+        - "patch-file aiter csrc/opus_moe/include/gfx950/a8w4/opus_moe_stage2_a8w4_decode_dispatch_gfx950.cuh"
+        - "patch-file sglang python/sglang/srt/layers/attention/vision.py"
+        - "kernel gemm bf16_gemm_M16_N4096_K4096"
+        - "ref transformers 0123456789abcdef0123456789abcdef01234567->89abcdef0123456789abcdef0123456789abcdef"
+
+  aiter_tuned_row_columns:
+    kind: names
+    project: aiter
+    reason: >-
+      A row of a table aiter's tuner writes says, in these columns, which library runs its kernel (libtype, "asm" for a
+      hand-written assembly kernel) and how many splits of the K dimension the kernel makes (splitK). The rows an accuracy
+      check must treat differently, the asm kernels at a splitK above 1, are told apart by them.
+    names:
+      libtype_column: libtype
+      splitk_column: splitK
+      asm_libtype: asm
+    examples:
+      - "hyperloom_multibranch.toolbox.tools.tune_rows: a row is one of the rows judged by its relative-norm error when its libtype column says asm and its splitK column a number above 1, and the profile of the tuner's candidates is searched by the same two columns"
+
+  forge_rel_norm_err:
+    kind: names
+    project: Forge (kernelforge gemm_tune)
+    reason: >-
+      aiter's tuner counts the elements of a candidate's output that lie outside the reference's tolerance (errRatio). An
+      asm kernel at a splitK above 1 accumulates its partial results in bf16 with atomics, which fails that count while the
+      output as a whole stays accurate, so Forge also measures such a row by the relative norm of its error,
+      ||out - ref|| / ||ref|| against the fp32 dequantized matmul, ships the row when that is within 0.01, and writes the
+      figure to this column of the tuned table. Only those rows carry a figure; the column is Forge's, not aiter's, and a
+      table without it comes from a Forge that does not make the check.
+    names:
+      column: relNormErr
+    examples:
+      - "hyperloom_multibranch.toolbox.tools.tune_rows: an asm row at a splitK above 1 whose mismatch ratio is above the limit is verified when this column holds a figure from 0 to 0.01, and the column is left out of the rows handed over"
+
+  upstream_pr_repos:
+    kind: names
+    project: SGLang, vLLM, aiter, PyTorch
+    reason: >-
+      The GitHub repositories whose pull requests a specialist may search for a change that looks relevant to the
+      measurement in hand (the upstream_pr_search analysis tool). The search runs in the toolbox host process and, when
+      the host holds a GitHub token, with it, so the tool answers only for these repositories and never for one a caller
+      names; a repository that moved or was renamed upstream is changed here, by publishing a pack.
+    names:
+      sglang: sgl-project/sglang
+      vllm: vllm-project/vllm
+      aiter: ROCm/aiter
+      pytorch: pytorch/pytorch
+    examples:
+      - "hyperloom_multibranch.toolbox.tools.upstream_pr: a search names a repository by its GitHub URL, and is refused unless the owner/name of that URL is one of these"
+
+  component_layout_sglang:
+    kind: component_layout
+    project: sglang
+    reason: >-
+      SGLang's package is python/sglang in its repository and lies over the installed sglang.
+    import_name: sglang
+    sections:
+      - {prefix: python/sglang, base: package}
+    refuse: []
+    generated: []
+    examples:
+      place:
+        - "python/sglang/srt/server_args.py -> package:srt/server_args.py"
+      refuse:
+        - "python/sgl-kernel/setup.py"
+        - "docs/index.md"
+
+  component_layout_vllm:
+    kind: component_layout
+    project: vllm
+    reason: >-
+      vLLM's package is vllm at the top of its repository and lies over the installed vllm. Its operators are native
+      extensions beside the package (vllm/_C, vllm/_moe_C and vllm/_rocm_C on ROCm, *.so), which its setup.py builds with
+      CMake from csrc at the top of the repository: a Python patch cannot change them, so a patch that names a native file
+      is refused with its path, and the build definition (CMakeLists.txt, setup.py, cmake/) with it.
+    import_name: vllm
+    sections:
+      - {prefix: vllm, base: package}
+    refuse:
+      - "*.so"
+      - "*.so.*"
+      - "*.a"
+      - "*.o"
+      - "*.bc"
+      - "*.co"
+      - "*.hsaco"
+      - "*.cubin"
+      - "*.pyd"
+      - "*.c"
+      - "*.cc"
+      - "*.cpp"
+      - "*.cxx"
+      - "*.h"
+      - "*.hh"
+      - "*.hpp"
+      - "*.cu"
+      - "*.cuh"
+      - "*.hip"
+      - "*.inc"
+      - "CMakeLists.txt"
+      - "*.cmake"
+      - "setup.py"
+      - "pyproject.toml"
+      - "Makefile"
+    generated: []
+    examples:
+      place:
+        - "vllm/envs.py -> package:envs.py"
+      refuse:
+        - "csrc/cache_kernels.cu"
+        - "csrc/rocm/attention.cu"
+        - "csrc/ops.h"
+        - "vllm/_C.abi3.so"
+        - "CMakeLists.txt"
+        - "setup.py"
+        - "cmake/utils.cmake"
+
+  component_layout_aiter:
+    kind: component_layout
+    project: aiter
+    reason: >-
+      aiter's Python package is aiter at the top of its repository and lies over the installed aiter. A compiled module or a
+      code object is a build product, which a text patch cannot make; the runtime writes its builds into the directories listed in
+      generated. csrc and hsa lie over aiter's meta directory (AITER_META_DIR), where aiter builds its modules from and reads
+      its code generators and tables: a text change there is measured by building the modules it touches again, while the
+      code objects under hsa (*.co) stay as they are.
+    import_name: aiter
+    sections:
+      - {prefix: aiter, base: package}
+      - {prefix: csrc, base: meta, into: csrc}
+      - {prefix: hsa, base: meta, into: hsa}
+    refuse:
+      - "*.so"
+      - "*.so.*"
+      - "*.a"
+      - "*.o"
+      - "*.co"
+      - "*.hsaco"
+      - "*.cubin"
+    generated:
+      - jit/build
+      - jit/hyperloom_jit_backup
+      - jit/flydsl_cache
+    examples:
+      place:
+        - "aiter/ops/mha.py -> package:ops/mha.py"
+        - "csrc/kernels/activation_kernels.cu -> meta:csrc/kernels/activation_kernels.cu"
+        - "hsa/gfx942/pa/pa_bf16.csv -> meta:hsa/gfx942/pa/pa_bf16.csv"
+      refuse:
+        - "aiter/jit/module_activation.so"
+        - "hsa/gfx942/pa/pa_bf16.co"
+        - "3rdparty/composable_kernel/include/ck/ck.hpp"
+
+  component_layout_atom:
+    kind: component_layout
+    project: atom
+    reason: >-
+      ATOM's package is atom at the top of its repository and lies over the installed atom.
+    import_name: atom
+    sections:
+      - {prefix: atom, base: package}
+    refuse: []
+    generated: []
+    examples:
+      place:
+        - "atom/config.py -> package:config.py"
+      refuse:
+        - "docs/readme.md"
+
+  component_layout_xdit:
+    kind: component_layout
+    project: xdit
+    reason: >-
+      xDiT installs its package as xfuser, which is xfuser at the top of its repository.
+    import_name: xfuser
+    sections:
+      - {prefix: xfuser, base: package}
+    refuse: []
+    generated: []
+    examples:
+      place:
+        - "xfuser/config/args.py -> package:config/args.py"
+      refuse:
+        - "examples/run.sh"
+
+  component_layout_triton:
+    kind: component_layout
+    project: triton
+    reason: >-
+      Triton is installed as a wheel: its Python is python/triton in the repository, and the AMD backend and the HIP language
+      extension, which the wheel moves into the package, are third_party/amd/backend and third_party/amd/language/hip. The wheel
+      carries its compiler as native files (libtriton.so, the bitcode libraries, the C launcher stub driver.c): a Python patch
+      cannot change them, so a patch that names one is refused with its path instead of being laid beside the old binary.
+    import_name: triton
+    sections:
+      - {prefix: python/triton, base: package}
+      - {prefix: third_party/amd/backend, base: package, into: backends/amd}
+      - {prefix: third_party/amd/language/hip, base: package, into: language/extra/hip}
+    refuse:
+      - "*.so"
+      - "*.so.*"
+      - "*.a"
+      - "*.o"
+      - "*.bc"
+      - "*.co"
+      - "*.hsaco"
+      - "*.cubin"
+      - "*.pyd"
+      - "*.aks2"
+      - "*.c"
+      - "*.cc"
+      - "*.cpp"
+      - "*.cxx"
+      - "*.h"
+      - "*.hh"
+      - "*.hpp"
+      - "*.cu"
+      - "*.cuh"
+      - "*.hip"
+      - "*.inc"
+      - "*.td"
+      - "CMakeLists.txt"
+      - "*.cmake"
+      - "setup.py"
+      - "pyproject.toml"
+      - "Makefile"
+      - "*.ld"
+    generated: []
+    examples:
+      place:
+        - "python/triton/language/core.py -> package:language/core.py"
+        - "third_party/amd/backend/compiler.py -> package:backends/amd/compiler.py"
+        - "third_party/amd/language/hip/libdevice.py -> package:language/extra/hip/libdevice.py"
+      refuse:
+        - "python/triton/_C/libtriton.so"
+        - "third_party/amd/backend/driver.c"
+        - "CMakeLists.txt"
+        - "lib/Dialect/Triton/IR/Ops.cpp"
+
+  component_layout_torch:
+    kind: component_layout
+    project: pytorch
+    reason: >-
+      PyTorch is installed as a wheel: its Python is torch/ in the repository and lies over the installed torch. Everything native in the
+      wheel (the libtorch libraries, the aotriton kernel images, headers) is a build product of C++ sources that a Python patch
+      cannot change, so a patch that names one of those files, or a native source, is refused with its path.
+    import_name: torch
+    sections:
+      - {prefix: torch, base: package}
+    refuse:
+      - "*.so"
+      - "*.so.*"
+      - "*.a"
+      - "*.o"
+      - "*.bc"
+      - "*.co"
+      - "*.hsaco"
+      - "*.cubin"
+      - "*.pyd"
+      - "*.aks2"
+      - "*.c"
+      - "*.cc"
+      - "*.cpp"
+      - "*.cxx"
+      - "*.h"
+      - "*.hh"
+      - "*.hpp"
+      - "*.cu"
+      - "*.cuh"
+      - "*.hip"
+      - "*.inc"
+      - "*.td"
+      - "CMakeLists.txt"
+      - "*.cmake"
+      - "setup.py"
+      - "pyproject.toml"
+      - "Makefile"
+      - "*.ld"
+    generated: []
+    examples:
+      place:
+        - "torch/_inductor/config.py -> package:_inductor/config.py"
+      refuse:
+        - "torch/lib/libtorch_hip.so"
+        - "torch/csrc/autograd/engine.cpp"
+        - "aten/src/ATen/native/native_functions.yaml"
+        - "CMakeLists.txt"
+
+  component_layout_sgl_kernel:
+    kind: component_layout
+    project: sglang
+    reason: >-
+      sgl_kernel is installed as the wheel sglang-kernel. In the SGLang repository of the measured image its Python is
+      python/sglang/kernels/aot/python/sgl_kernel (the directory sgl-kernel/python/sgl_kernel of older SGLang no longer exists
+      there). Its operators are one native extension, common_ops.*.so, built from the C++ beside it: a Python patch cannot change
+      it, so a patch that names a native file is refused with its path.
+    import_name: sgl_kernel
+    sections:
+      - {prefix: python/sglang/kernels/aot/python/sgl_kernel, base: package}
+    refuse:
+      - "*.so"
+      - "*.so.*"
+      - "*.a"
+      - "*.o"
+      - "*.bc"
+      - "*.co"
+      - "*.hsaco"
+      - "*.cubin"
+      - "*.pyd"
+      - "*.aks2"
+      - "*.c"
+      - "*.cc"
+      - "*.cpp"
+      - "*.cxx"
+      - "*.h"
+      - "*.hh"
+      - "*.hpp"
+      - "*.cu"
+      - "*.cuh"
+      - "*.hip"
+      - "*.inc"
+      - "*.td"
+      - "CMakeLists.txt"
+      - "*.cmake"
+      - "setup.py"
+      - "pyproject.toml"
+      - "Makefile"
+      - "*.ld"
+    generated: []
+    examples:
+      place:
+        - "python/sglang/kernels/aot/python/sgl_kernel/gemm.py -> package:gemm.py"
+      refuse:
+        - "python/sglang/kernels/aot/python/sgl_kernel/common_ops.cpython-310-x86_64-linux-gnu.so"
+        - "python/sglang/kernels/aot/csrc/gemm/fp8_gemm.cu"
+        - "python/sglang/kernels/aot/CMakeLists.txt"
+
+  component_layout_flydsl:
+    kind: component_layout
+    project: flydsl
+    reason: >-
+      FlyDSL is installed as a wheel: its Python is python/flydsl in its repository. Its MLIR bindings (_mlir/_mlir_libs/*.so) are
+      native, so a patch that names a native file is refused with its path.
+    import_name: flydsl
+    sections:
+      - {prefix: python/flydsl, base: package}
+    refuse:
+      - "*.so"
+      - "*.so.*"
+      - "*.a"
+      - "*.o"
+      - "*.bc"
+      - "*.co"
+      - "*.hsaco"
+      - "*.cubin"
+      - "*.pyd"
+      - "*.aks2"
+      - "*.c"
+      - "*.cc"
+      - "*.cpp"
+      - "*.cxx"
+      - "*.h"
+      - "*.hh"
+      - "*.hpp"
+      - "*.cu"
+      - "*.cuh"
+      - "*.hip"
+      - "*.inc"
+      - "*.td"
+      - "CMakeLists.txt"
+      - "*.cmake"
+      - "setup.py"
+      - "pyproject.toml"
+      - "Makefile"
+      - "*.ld"
+    generated: []
+    examples:
+      place:
+        - "python/flydsl/compiler/jit_function.py -> package:compiler/jit_function.py"
+      refuse:
+        - "python/flydsl/_mlir/_mlir_libs/_mlir.cpython-310-x86_64-linux-gnu.so"
+        - "lib/Conversion/pass.cpp"
