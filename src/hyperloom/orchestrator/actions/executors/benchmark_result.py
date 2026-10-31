@@ -155,8 +155,10 @@ def _env_derived_leak_roots() -> list[Path]:
     return out
 
 
-def _resolve_leak_roots() -> tuple[Path, ...]:
-    """Return the directory roots to scan for wrapper-side leak files."""
+def _resolve_leak_roots(leak_root: Path | None = None) -> tuple[Path, ...]:
+    """Return the directory roots to scan for wrapper-side leak files: ``leak_root`` alone when it is given."""
+    if leak_root is not None:
+        return (leak_root,)
     env_raw = os.environ.get("INFERENCE_OPTIMIZER_LEAK_ROOTS", "").strip()
     if env_raw:
         parts = [Path(p.strip()) for p in env_raw.split(":") if p.strip()]
@@ -186,10 +188,12 @@ def harvest_leaked_artifacts(
     destination: Path,
     *,
     subprocess_started_unix: float | None = None,
+    leak_root: Path | None = None,
 ) -> list[tuple[Path, Path]]:
-    """Copy known Magpie/InferenceX leak artifacts into ``destination``."""
+    """Copy known Magpie/InferenceX leak artifacts into ``destination``; a measurement runner names its own work
+    directory as ``leak_root`` so that nothing another test left elsewhere is copied into its signed output."""
     harvested: list[tuple[Path, Path]] = []
-    leak_roots = _resolve_leak_roots()
+    leak_roots = _resolve_leak_roots(leak_root)
     try:
         destination.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
