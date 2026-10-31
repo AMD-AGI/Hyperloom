@@ -77,11 +77,9 @@ def _role_haystack(candidate: dict[str, Any]) -> str:
 
 def match_vendor_operator_playbook(candidate: dict[str, Any]) -> dict[str, Any] | None:
     """Return a matched playbook entry for ``candidate``, or ``None``."""
-    if not isinstance(candidate, dict):
-        return None
     haystack = _candidate_haystack(candidate)
     role_haystack = _role_haystack(candidate)
-    if not haystack or not role_haystack:
+    if not role_haystack:
         return None
     for playbook in load_vendor_operator_playbooks():
         match = playbook.get("match")
