@@ -337,8 +337,8 @@ def _correct_kernel_agent_path_vars(file_vars: dict[str, str], env_path: Path) -
     return corrected
 
 
-def _load_kernel_agent_env_fallback() -> dict[str, Any]:
-    """Auto-source the installer-written kernel-agent env file (``$KERNEL_AGENT_ENV`` or ``$USER_DATA_PATH/runtime/kernel-agent.env.sh``)."""
+def _kernel_agent_env_path() -> Path:
+    """The kernel-agent env file this run sources; exit 2 when it cannot be resolved or does not exist."""
     candidate = os.environ.get("KERNEL_AGENT_ENV")
     if not candidate:
         user_data = (os.environ.get("USER_DATA_PATH") or "").strip()
@@ -369,6 +369,12 @@ def _load_kernel_agent_env_fallback() -> dict[str, Any]:
             file=sys.stderr,
         )
         sys.exit(2)
+    return env_path
+
+
+def _load_kernel_agent_env_fallback() -> dict[str, Any]:
+    """Auto-source the installer-written kernel-agent env file (``$KERNEL_AGENT_ENV`` or ``$USER_DATA_PATH/runtime/kernel-agent.env.sh``)."""
+    env_path = _kernel_agent_env_path()
     try:
         text = env_path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:

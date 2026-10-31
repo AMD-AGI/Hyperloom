@@ -120,19 +120,7 @@ class AuthorBrief:
     model_path: str = ""
 
 
-def build_author_prompt(recipe: dict, brief: AuthorBrief) -> str:
-    """Build the authoring prompt from a recipe dict (``Recipe.to_dict()``)."""
-    framework, ab_hint, target_speedup = brief.framework, brief.ab_hint, brief.target_speedup
-    harness_path, gpu_arch, model_path = brief.harness_path, brief.gpu_arch, brief.model_path
-    shapes = recipe.get("shapes", {})
-    hints = recipe.get("source_hints", [])
-    env_flag = recipe.get("env_flag", "FUSED")
-    harness_block = harness_contract(harness_path, env_flag) if harness_path else ""
-    candidate_kind = str(recipe.get("candidate_kind") or "new_fusion")
-    existing_operator = str(recipe.get("existing_operator") or "").strip()
-    integration_block = ""
-    if candidate_kind == "integration" and existing_operator:
-        integration_block = f"""## Existing operator integration (MANDATORY first path)
+_INTEGRATION_BLOCK = """## Existing operator integration (MANDATORY first path)
 - Candidate kind: integration
 - Existing ROCm operator: `{existing_operator}`
 - Reproduce the eager boundary, then benchmark and wire the existing operator first.
@@ -146,6 +134,46 @@ def build_author_prompt(recipe: dict, brief: AuthorBrief) -> str:
   numerically worse operator is visible as such.
 
 """
+
+_AUTHOR_REACH_RULES = """## Engineering discipline (MUST follow)
+- The kernel MUST be REACHED by the decode path, not merely defined and exposed.
+  Assigning it onto another module (`other_mod.my_fused_op = ...`) does nothing
+  unless something already reads that name -- check that a reader exists before
+  you rely on it. When the chain you are fusing lives in a file you may not edit,
+  take over the call site from the file you may: rebind the method or attribute
+  the chain already goes through, so the existing callers reach your kernel
+  without changing any signature. Publishing a new name that nothing calls scores
+  as a failed attempt, and it is the most common way a correct kernel is wasted.
+- If you cannot reach the chain from the files you are allowed to touch, say so
+  explicitly in your final message instead of leaving an unreachable kernel
+  behind. That answer is useful; an inert one is not.
+"""
+
+_MULTI_INTEGRATION_BLOCK = """## Existing operator integrations (MANDATORY first paths)
+Benchmark and wire these existing ROCm operators before authoring replacements:
+{operators}
+Do not author replacement kernels unless an operator is incompatible or loses its
+exact-shape microbenchmark; record that evidence before falling back.
+For each integrated operator, record parity against the eager reference at the
+framework's own rtol/atol for this dtype and report the measured max relative error
+next to the speedup. A microbenchmark win alone is NOT sufficient to keep it.
+
+"""
+
+
+def build_author_prompt(recipe: dict, brief: AuthorBrief) -> str:
+    """Build the authoring prompt from a recipe dict (``Recipe.to_dict()``)."""
+    framework, ab_hint, target_speedup = brief.framework, brief.ab_hint, brief.target_speedup
+    harness_path, gpu_arch, model_path = brief.harness_path, brief.gpu_arch, brief.model_path
+    shapes = recipe.get("shapes", {})
+    hints = recipe.get("source_hints", [])
+    env_flag = recipe.get("env_flag", "FUSED")
+    harness_block = harness_contract(harness_path, env_flag) if harness_path else ""
+    candidate_kind = str(recipe.get("candidate_kind") or "new_fusion")
+    existing_operator = str(recipe.get("existing_operator") or "").strip()
+    integration_block = ""
+    if candidate_kind == "integration" and existing_operator:
+        integration_block = _INTEGRATION_BLOCK.format(existing_operator=existing_operator)
     rocm_line = (
         "- TARGET IS ROCm (AMD GPU): author a ROCm-native Triton (or aiter) kernel. "
         "Do NOT reuse a framework CUDA-only fused op; verify it BUILDS and RUNS.\n"
@@ -170,19 +198,7 @@ def build_author_prompt(recipe: dict, brief: AuthorBrief) -> str:
 Grep the model file for these anchors and fuse the chain they mark:
 {chr(10).join(f"  - {h}" for h in hints)}
 
-{integration_block}{proven_fusion_fewshot()}## Engineering discipline (MUST follow)
-- The kernel MUST be REACHED by the decode path, not merely defined and exposed.
-  Assigning it onto another module (`other_mod.my_fused_op = ...`) does nothing
-  unless something already reads that name -- check that a reader exists before
-  you rely on it. When the chain you are fusing lives in a file you may not edit,
-  take over the call site from the file you may: rebind the method or attribute
-  the chain already goes through, so the existing callers reach your kernel
-  without changing any signature. Publishing a new name that nothing calls scores
-  as a failed attempt, and it is the most common way a correct kernel is wasted.
-- If you cannot reach the chain from the files you are allowed to touch, say so
-  explicitly in your final message instead of leaving an unreachable kernel
-  behind. That answer is useful; an inert one is not.
-- The fusion MUST be env-gated by `{env_flag}`. With the flag UNSET the code path
+{integration_block}{proven_fusion_fewshot()}{_AUTHOR_REACH_RULES}- The fusion MUST be env-gated by `{env_flag}`. With the flag UNSET the code path
   stays bit-for-bit the original eager path.
 {rocm_line}- Cast to fp32 inside the fused kernel; one launch instead of the multi-op chain.
 - NET launch count must DROP. Count the kernels the eager path launches per decode
@@ -238,16 +254,9 @@ def build_multi_author_prompt(recipes: list[dict], brief: AuthorBrief) -> str:
     ]
     integration_block = ""
     if existing_operators:
-        integration_block = f"""## Existing operator integrations (MANDATORY first paths)
-Benchmark and wire these existing ROCm operators before authoring replacements:
-{chr(10).join(f"- `{operator}`" for operator in existing_operators)}
-Do not author replacement kernels unless an operator is incompatible or loses its
-exact-shape microbenchmark; record that evidence before falling back.
-For each integrated operator, record parity against the eager reference at the
-framework's own rtol/atol for this dtype and report the measured max relative error
-next to the speedup. A microbenchmark win alone is NOT sufficient to keep it.
-
-"""
+        integration_block = _MULTI_INTEGRATION_BLOCK.format(
+            operators=chr(10).join(f"- `{operator}`" for operator in existing_operators)
+        )
     rocm_line = (
         "- TARGET IS ROCm (AMD GPU): author ROCm-native Triton/aiter kernels; do NOT "
         "reuse a framework CUDA-only fused op; verify each BUILDS and RUNS.\n"

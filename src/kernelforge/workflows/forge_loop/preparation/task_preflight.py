@@ -462,6 +462,32 @@ def _distributed_contract_violation(worker_payloads: dict[int, dict]) -> str:
     return ""
 
 
+def _graph_probe_env(out_path: str, probe_dir: str, require_ranks: int) -> dict[str, str]:
+    """The driver environment that loads the replay counter and names the ranks it must launch."""
+    # PYTHONPATH rather than a wrapper script: torchrun children of a self-launching driver inherit the environment,
+    # so each rank imports the counter and reports its own replays.
+    env = dict(
+        os.environ,
+        GRAPH_PROBE_OUT=out_path,
+        PYTHONPATH=os.pathsep.join([probe_dir, *([os.environ["PYTHONPATH"]] if os.environ.get("PYTHONPATH") else [])]),
+    )
+    if require_ranks > 1:
+        # The driver reads the rank count it must launch; the probe reads it to
+        # decide whether to observe the distributed contract at all.
+        env["FORGE_NPROC_PER_NODE"] = str(require_ranks)
+        env["GRAPH_PROBE_EXPECT_RANKS"] = str(require_ranks)
+    return env
+
+
+async def _abandon_probe(proc: asyncio.subprocess.Process, out_path: str, probe_dir: str) -> None:
+    """Kill an unfinished probe run's process group and remove what it leaves behind."""
+    _kill_process_group(proc)
+    with contextlib.suppress(asyncio.TimeoutError):
+        await asyncio.wait_for(proc.wait(), timeout=10)
+    cleanup_current_owned_aiter_locks()
+    _cleanup_probe(out_path, probe_dir)
+
+
 async def _count_graph_replays(
     driver: str,
     warmup: int,
@@ -475,18 +501,7 @@ async def _count_graph_replays(
     os.close(fd)
     probe_dir = tempfile.mkdtemp(prefix="forge_graph_probe_site_")
     pathlib.Path(probe_dir, "sitecustomize.py").write_text(_GRAPH_PROBE_SITECUSTOMIZE)
-    # PYTHONPATH rather than a wrapper script: torchrun children of a self-launching driver inherit the environment,
-    # so each rank imports the counter and reports its own replays.
-    env = dict(
-        os.environ,
-        GRAPH_PROBE_OUT=out_path,
-        PYTHONPATH=os.pathsep.join([probe_dir, *([os.environ["PYTHONPATH"]] if os.environ.get("PYTHONPATH") else [])]),
-    )
-    if require_ranks > 1:
-        # The driver reads the rank count it must launch; the probe reads it to
-        # decide whether to observe the distributed contract at all.
-        env["FORGE_NPROC_PER_NODE"] = str(require_ranks)
-        env["GRAPH_PROBE_EXPECT_RANKS"] = str(require_ranks)
+    env = _graph_probe_env(out_path, probe_dir, require_ranks)
     cmd = [
         sys.executable,
         driver,
@@ -509,18 +524,10 @@ async def _count_graph_replays(
             timeout=timeout_sec,
         )
     except asyncio.TimeoutError:
-        _kill_process_group(proc)
-        with contextlib.suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(proc.wait(), timeout=10)
-        cleanup_current_owned_aiter_locks()
-        _cleanup_probe(out_path, probe_dir)
+        await _abandon_probe(proc, out_path, probe_dir)
         return PROBE_FAILED, "benchmark timed out"
     except asyncio.CancelledError:
-        _kill_process_group(proc)
-        with contextlib.suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(proc.wait(), timeout=10)
-        cleanup_current_owned_aiter_locks()
-        _cleanup_probe(out_path, probe_dir)
+        await _abandon_probe(proc, out_path, probe_dir)
         raise
     except OSError as exc:
         _cleanup_probe(out_path, probe_dir)

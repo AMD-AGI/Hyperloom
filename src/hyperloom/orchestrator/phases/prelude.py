@@ -4,8 +4,10 @@
 """PRELUDE phase handler for section-based Recipe replay and initial analysis."""
 
 from __future__ import annotations
+
 import logging as _logging
 import sqlite3
+from dataclasses import dataclass
 from pathlib import Path
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -64,6 +66,7 @@ from .warm_replay_stack import (
     warm_replay_source_layer,
 )
 from .prelude_warm_kernel import _WarmKernelPrepMixin, _merge_named_current_recipe_configs
+from .prelude_warm_launch import suppress_recipe_config, warm_replay_task_spec
 
 log = _logging.getLogger(__name__)
 
@@ -146,6 +149,20 @@ def _overlay_provenance_summary(sdk_replay: Mapping[str, Any]) -> dict[str, Any]
         "incomplete": sum(1 for row in rows if row.get("complete") is False),
         "artifacts_outside_root": sum(_count(row.get("artifacts_outside_root")) for row in rows),
     }
+
+
+@dataclass(frozen=True)
+class _ReplayEval:
+    """A replay's accuracy as read back from its eval output."""
+
+    accuracy: float | None
+    ran: bool
+    error: str
+
+
+def _warm_donor_metadata(replay: Mapping[str, Any]) -> dict[str, Any]:
+    """The donor fields a warm replay's record carries, dropping the ones the recipe left empty."""
+    return {field: replay.get(field) for field in _WARM_REPLAY_DONOR_FIELDS if replay.get(field) not in (None, "", [])}
 
 
 class PreludePhase(_WarmKernelPrepMixin, CoordinatorCollaborator):
@@ -530,11 +547,7 @@ class PreludePhase(_WarmKernelPrepMixin, CoordinatorCollaborator):
         # tier/conf stamped at T0.
         tier = str(warm.get("tier") or "").strip()
         conf = config["confidence"]
-        donor_metadata = {
-            field: config["replay"].get(field)
-            for field in _WARM_REPLAY_DONOR_FIELDS
-            if config["replay"].get(field) not in (None, "", [])
-        }
+        donor_metadata = _warm_donor_metadata(config["replay"])
         identity = {"warm_recipe_tier": tier, "warm_recipe_conf": conf, **donor_metadata}
         min_conf = float(state.warm_replay_min_confidence)
         replay_conf = config["replay_confidence"]
@@ -555,11 +568,7 @@ class PreludePhase(_WarmKernelPrepMixin, CoordinatorCollaborator):
             )
             return None
         if recipe_suppressed:
-            config["extra_server_args"] = ""
-            config["extra_envs"] = {}
-            config["config_source"] = ""
-            config["config_tier"] = "suppressed_low_confidence"
-            config["donor_expected_gain"] = 0.0
+            suppress_recipe_config(config)
             patches: list[Any] = []
             # Current records derive fail-closed mode from their exact SDK timeline.
             required_timeline = False
@@ -665,14 +674,7 @@ class PreludePhase(_WarmKernelPrepMixin, CoordinatorCollaborator):
         try:
             lanes, ttl = self._coord.dispatcher.registry_lanes_ttl("replay_warm_recipe")
             task, was_existing = await self.tasks.create_or_return_existing(
-                TaskSpec(
-                    kind="replay_warm_recipe",
-                    params=params,
-                    idempotency_key="warm-replay-prelude",
-                    requires_lanes=lanes,
-                    lease_ttl_sec=ttl,
-                    dispatch_class="coordinator",
-                )
+                warm_replay_task_spec(params, lanes=lanes, ttl=ttl)
             )
         except Exception as exc:
             rollback = self._unwind_warm_kernel_half(overlay)
@@ -881,6 +883,25 @@ class PreludePhase(_WarmKernelPrepMixin, CoordinatorCollaborator):
             return path
         return None
 
+    def _replay_eval_on_disk(self, result: dict) -> _ReplayEval:
+        """Read the replay's accuracy from the eval output its round left on disk."""
+        from ..actions.executors._accuracy_gate import parse_eval_results
+
+        root = self._replay_eval_search_root(result)
+        if root is None:
+            return _ReplayEval(None, False, "replay result names no round directory")
+        try:
+            eval_out = parse_eval_results(root)
+        except (OSError, AttributeError, TypeError, ValueError) as exc:  # an unreadable eval is "no verdict"
+            eval_out = {"error": f"eval parse raised: {type(exc).__name__}"}
+        parsed = eval_out.get("accuracy")
+        if isinstance(parsed, (int, float)):
+            return _ReplayEval(float(parsed), True, "")
+        eval_error = str(eval_out.get("error") or "no accuracy in eval output")
+        # Only a results file the parser reached can say the eval ran; a parser that never got one says
+        # nothing either way.
+        return _ReplayEval(None, eval_error.startswith(_EVAL_RAN_BUT_UNSCORABLE), eval_error)
+
     def _judge_warm_replay_accuracy(
         self, result: dict, task: "Task | None", outcome: dict, recorder: Any = None
     ) -> Verdict | None:
@@ -900,7 +921,6 @@ class PreludePhase(_WarmKernelPrepMixin, CoordinatorCollaborator):
             DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
             accuracy_meets_floor,
             accuracy_passed,
-            parse_eval_results,
         )
 
         baseline_accuracy = self.shared_state.baseline_accuracy or 0.0
@@ -909,24 +929,8 @@ class PreludePhase(_WarmKernelPrepMixin, CoordinatorCollaborator):
         eval_ran = isinstance(measured, (int, float))
         eval_error = ""
         if not eval_ran:
-            measured = None
-            root = self._replay_eval_search_root(result)
-            if root is None:
-                eval_error = "replay result names no round directory"
-            else:
-                try:
-                    eval_out = parse_eval_results(root)
-                except (OSError, AttributeError, TypeError, ValueError) as exc:  # an unreadable eval is "no verdict"
-                    eval_out = {"error": f"eval parse raised: {type(exc).__name__}"}
-                parsed = eval_out.get("accuracy")
-                if isinstance(parsed, (int, float)):
-                    measured = float(parsed)
-                    eval_ran = True
-                else:
-                    eval_error = str(eval_out.get("error") or "no accuracy in eval output")
-                    # Only a results file the parser reached can say the eval ran; a parser that never got one says
-                    # nothing either way.
-                    eval_ran = eval_error.startswith(_EVAL_RAN_BUT_UNSCORABLE)
+            on_disk = self._replay_eval_on_disk(result)
+            measured, eval_ran, eval_error = on_disk.accuracy, on_disk.ran, on_disk.error
 
         outcome["eval_ran"] = bool(eval_ran)
         outcome["eval_error"] = eval_error or None

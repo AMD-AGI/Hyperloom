@@ -108,13 +108,7 @@ class ExternalArtifactTransaction:
                 rel: path for path in passthrough if (rel := self._relative_descendant(path)) is not None
             }
             self._excluded_rels.update(self._passthrough)
-            self._read_only_rels: set[Path] = set()
-            for path in read_only_paths or []:
-                lexical = Path(os.path.abspath(os.path.expanduser(str(path))))
-                for candidate in (lexical, lexical.resolve(strict=False)):
-                    rel = self._relative_descendant(candidate)
-                    if rel is not None:
-                        self._read_only_rels.add(rel)
+            self._read_only_rels = self._read_only_relatives(read_only_paths or [])
 
             driver_rel = self.driver_path.relative_to(self.root)
             if self._is_excluded(driver_rel):
@@ -134,6 +128,17 @@ class ExternalArtifactTransaction:
             fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
             os.close(self._lock_fd)
             raise
+
+    def _read_only_relatives(self, read_only_paths: list[Path]) -> set[Path]:
+        """Root-relative paths of the read-only inputs, both as given and with symlinks resolved."""
+        read_only_rels: set[Path] = set()
+        for path in read_only_paths:
+            lexical = Path(os.path.abspath(os.path.expanduser(str(path))))
+            for candidate in (lexical, lexical.resolve(strict=False)):
+                rel = self._relative_descendant(candidate)
+                if rel is not None:
+                    read_only_rels.add(rel)
+        return read_only_rels
 
     @property
     def published(self) -> bool:

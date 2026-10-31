@@ -189,6 +189,31 @@ async def _validate_port(spec: RewriteSpec, driver_path: str, stop_at_unix: floa
         raise _ReserveReached(attempt, "PORT validation reached the 20-minute finalization reserve") from None
 
 
+def _pre_validation_rejection(spec: RewriteSpec, attempt: int, integrity_error: str) -> str:
+    """Return the feedback for an attempt rejected before validation, or "" when it may be validated."""
+    if integrity_error:
+        log.info("port attempt %d rejected before validation (integrity): %s", attempt, integrity_error)
+        return (
+            "Your PORT attempt changed protected driver/source-oracle state "
+            "and was REJECTED before validation. The protected files were "
+            f"restored. Modify only {spec.flydsl_kernel_name}.\n"
+            f"{integrity_error}"
+        )
+
+    # FlyDSL-only gate (security/intent): a numerically-correct kernel that cheats by re-calling the source
+    # (or reimplementing in Triton) is NOT a valid rewrite.
+    flydsl_violation = check_flydsl_port(spec)
+    if flydsl_violation:
+        log.info("port attempt %d rejected (not FlyDSL): %s", attempt, flydsl_violation)
+        return (
+            "Your port is NOT a valid FlyDSL rewrite and was REJECTED before "
+            "correctness was even checked:\n" + flydsl_violation + "\n"
+            "Reimplement the operator in FlyDSL (import flydsl...) in "
+            f"{spec.flydsl_kernel_name}; do NOT import/call the source kernel."
+        )
+    return ""
+
+
 async def run_port_loop(
     spec: RewriteSpec,
     driver_path: str,
@@ -242,27 +267,9 @@ async def run_port_loop(
                 continue
 
             integrity_error = restore_integrity(sink)
-            if integrity_error:
-                log.info("port attempt %d rejected before validation (integrity): %s", attempt, integrity_error)
-                history = (
-                    "Your PORT attempt changed protected driver/source-oracle state "
-                    "and was REJECTED before validation. The protected files were "
-                    f"restored. Modify only {spec.flydsl_kernel_name}.\n"
-                    f"{integrity_error}"
-                )
-                continue
-
-            # FlyDSL-only gate (security/intent): a numerically-correct kernel that cheats by re-calling the source
-            # (or reimplementing in Triton) is NOT a valid rewrite.
-            flydsl_violation = check_flydsl_port(spec)
-            if flydsl_violation:
-                log.info("port attempt %d rejected (not FlyDSL): %s", attempt, flydsl_violation)
-                history = (
-                    "Your port is NOT a valid FlyDSL rewrite and was REJECTED before "
-                    "correctness was even checked:\n" + flydsl_violation + "\n"
-                    "Reimplement the operator in FlyDSL (import flydsl...) in "
-                    f"{spec.flydsl_kernel_name}; do NOT import/call the source kernel."
-                )
+            rejection = _pre_validation_rejection(spec, attempt, integrity_error)
+            if rejection:
+                history = rejection
                 continue
 
             report = await _validate_port(spec, driver_path, request.stop_at_unix, attempt)

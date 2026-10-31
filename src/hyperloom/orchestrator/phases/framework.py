@@ -232,6 +232,39 @@ def _apply_failure_feedback_lines(retry: AuthoringRetry) -> list[str]:
     return lines
 
 
+def _coordinator_specialist_spec(params: dict[str, Any], idem: str, *, lanes: list[str] | None, ttl: int) -> TaskSpec:
+    """The specialist task a coordinator-internal dispatch opens with ``params``."""
+    return TaskSpec(
+        kind="specialist",
+        params=params,
+        idempotency_key=idem,
+        requires_lanes=lanes,
+        lease_ttl_sec=ttl,
+        dispatch_class="coordinator",
+    )
+
+
+def _settled_local_explore_rounds(state: Any) -> int:
+    """How many local-exploration rounds the phase progress already records."""
+    return sum(
+        1
+        for p in to_list(state.framework_agent_phase_progress)
+        if first_str(to_mapping(p).get("candidate_id")).startswith(LOCAL_EXPLORE_CANDIDATE_PREFIX)
+    )
+
+
+def _local_explore_gap(gap_cid: str, gap: str, domain: str) -> dict[str, Any]:
+    """The gap row a local-exploration round is filed under."""
+    return {
+        "canonical_id": gap_cid,
+        "symptom": gap or "Author a throughput patch from live source + profiling evidence",
+        "layer": "framework",
+        "severity": "medium",
+        "domain_hint": domain,
+        "source": "coordinator_internal",
+    }
+
+
 class FrameworkPhase(_AuthoredOutcomeMixin, _CandidateDiscoveryMixin, ProposalBench):
     """The FRAMEWORK_AGENT phase: upstream candidates, authored patches, deliverable routing, and the enablement hand-off."""
 
@@ -689,14 +722,7 @@ class FrameworkPhase(_AuthoredOutcomeMixin, _CandidateDiscoveryMixin, ProposalBe
         # This internal dispatch bypasses intent_router (adds gpu_research_lane + budget TTL).
         lanes, ttl = self._coord.gpu_lanes.framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
         spec_task, _spec_existing = await self.tasks.create_or_return_existing(
-            TaskSpec(
-                kind="specialist",
-                params=params,
-                idempotency_key=idem,
-                requires_lanes=lanes,
-                lease_ttl_sec=ttl,
-                dispatch_class="coordinator",
-            )
+            _coordinator_specialist_spec(params, idem, lanes=lanes, ttl=ttl)
         )
         if _spec_existing and await self._settle_finished_authoring_specialist(
             spec_task, cand_id=cand_id, batch_id=batch_id, label="authoring"
@@ -1092,11 +1118,7 @@ class FrameworkPhase(_AuthoredOutcomeMixin, _CandidateDiscoveryMixin, ProposalBe
         """Dispatch a candidate-free authoring specialist (no upstream PR lead)."""
         state = self.shared_state
         # A local-exploration round has no upstream lead to key on, so its id counts the rounds already settled.
-        settled = sum(
-            1
-            for p in to_list(state.framework_agent_phase_progress)
-            if first_str(to_mapping(p).get("candidate_id")).startswith(LOCAL_EXPLORE_CANDIDATE_PREFIX)
-        )
+        settled = _settled_local_explore_rounds(state)
         cand_id = self._framework_candidate_key(candidate) or f"{LOCAL_EXPLORE_CANDIDATE_PREFIX}{settled}"
         gap = first_str(candidate.get("gap_description")).strip()
         gap_cid = first_str(candidate.get("gap_canonical_id")).strip() or f"gap.framework.local_explore.{cand_id}"
@@ -1105,16 +1127,7 @@ class FrameworkPhase(_AuthoredOutcomeMixin, _CandidateDiscoveryMixin, ProposalBe
         notes = ""
         if domain == "framework_rewrite_specialist":
             notes = self._render_rewrite_evidence_for_prompt() or self._rewrite_evidence_absence_note()
-        state.upsert_gap(
-            {
-                "canonical_id": gap_cid,
-                "symptom": gap or "Author a throughput patch from live source + profiling evidence",
-                "layer": "framework",
-                "severity": "medium",
-                "domain_hint": domain,
-                "source": "coordinator_internal",
-            }
-        )
+        state.upsert_gap(_local_explore_gap(gap_cid, gap, domain))
         memory = self._build_framework_working_memory()
         prior_attempts = [
             t for t in to_list(memory.get("tried_and_why")) if first_str(to_mapping(t).get("ref")).strip()

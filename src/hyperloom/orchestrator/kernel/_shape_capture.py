@@ -299,6 +299,25 @@ def _extract_vllm_block_fp8_profile_shapes(
     return str(out), len(payload)
 
 
+def _analyzed_trace_is_latest_profile(state: Any, last_trace_analyze: dict[str, Any]) -> bool:
+    """Whether the analyzed trace is the latest profile's; logs the Roofline fallback when it is not."""
+    profile_trace = str(getattr(state, "last_profile_trace", "") or "").strip()
+    analyzed_trace = str(last_trace_analyze.get("trace_input") or "").strip()
+    try:
+        profile_trace_id = str(Path(profile_trace).expanduser().resolve(strict=False))
+        analyzed_trace_id = str(Path(analyzed_trace).expanduser().resolve(strict=False))
+    except OSError:
+        profile_trace_id = profile_trace
+        analyzed_trace_id = analyzed_trace
+    if not profile_trace or not analyzed_trace or profile_trace_id != analyzed_trace_id:
+        log.info(
+            "vLLM block-FP8 shape capture: steady-state trace provenance does "
+            "not match the latest profile; running a standard Roofline fallback"
+        )
+        return False
+    return True
+
+
 def _reuse_vllm_block_fp8_roofline_shapes(
     state: Any,
     *,
@@ -316,19 +335,7 @@ def _reuse_vllm_block_fp8_roofline_shapes(
             "steady-state trace; running a standard Roofline fallback"
         )
         return None
-    profile_trace = str(getattr(state, "last_profile_trace", "") or "").strip()
-    analyzed_trace = str(last_trace_analyze.get("trace_input") or "").strip()
-    try:
-        profile_trace_id = str(Path(profile_trace).expanduser().resolve(strict=False))
-        analyzed_trace_id = str(Path(analyzed_trace).expanduser().resolve(strict=False))
-    except OSError:
-        profile_trace_id = profile_trace
-        analyzed_trace_id = analyzed_trace
-    if not profile_trace or not analyzed_trace or profile_trace_id != analyzed_trace_id:
-        log.info(
-            "vLLM block-FP8 shape capture: steady-state trace provenance does "
-            "not match the latest profile; running a standard Roofline fallback"
-        )
+    if not _analyzed_trace_is_latest_profile(state, last_trace_analyze):
         return None
     if not state.profile_trace_usable():
         log.info(

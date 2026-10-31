@@ -235,9 +235,8 @@ def session_start_payload(
     return payload
 
 
-def decision_to_scores(decision_row: dict[str, Any]) -> list[dict[str, Any]]:
-    """Project one ``decision_trace.jsonl`` row onto one or more Score dicts."""
-    dec = decision_row.get("decision") or {}
+def _decision_score_metadata(decision_row: dict[str, Any], dec: dict[str, Any]) -> dict[str, Any]:
+    """The metadata every Score of one decision carries, without the keys the decision lacks."""
     meta = {
         "phase": decision_row.get("phase"),
         "tick": decision_row.get("tick"),
@@ -256,7 +255,13 @@ def decision_to_scores(decision_row: dict[str, Any]) -> list[dict[str, Any]]:
         "predicted_gain_pct": dec.get("predicted_gain_pct"),
     }
     # Drop keys the decision didn't carry.
-    meta = {k: v for k, v in meta.items() if v is not None}
+    return {k: v for k, v in meta.items() if v is not None}
+
+
+def decision_to_scores(decision_row: dict[str, Any]) -> list[dict[str, Any]]:
+    """Project one ``decision_trace.jsonl`` row onto one or more Score dicts."""
+    dec = decision_row.get("decision") or {}
+    meta = _decision_score_metadata(decision_row, dec)
     comment = str(dec.get("change") or "")
     scores: list[dict[str, Any]] = [
         {

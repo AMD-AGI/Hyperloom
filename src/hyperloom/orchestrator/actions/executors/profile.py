@@ -12,7 +12,7 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 import yaml
 
@@ -1088,6 +1088,17 @@ class ProfileExecutor(BenchmarkRunExecutor):
         patchers["benchmark_lib_eval_dest"] = ensure_benchmark_lib_eval_dest_patched(ix_root)
         serving_ok = ensure_benchmark_serving_patched(ix_root)
         patchers["benchmark_serving"] = serving_ok
+        return self._verify_inferencex_patches(ix_root, patchers, _note_instrumentation)
+
+    def _verify_inferencex_patches(
+        self,
+        ix_root: Path,
+        patchers: dict[str, Any],
+        note_instrumentation: Callable[[], None],
+    ) -> dict[str, Any] | None:
+        """Read the patched InferenceX sentinels back; a failed result when the checkout is not patched."""
+        lib_ok = patchers["benchmark_lib"]
+        serving_ok = patchers["benchmark_serving"]
         lib_path = ix_root / "benchmarks" / "benchmark_lib.sh"
         # path as a forwarding shim, which never carries the sentinel however well the patch landed.
         # Scoped to ``ix_root`` like ``lib_path`` above: this gate speaks for the tree Magpie runs.
@@ -1107,7 +1118,7 @@ class ProfileExecutor(BenchmarkRunExecutor):
         patchers["benchmark_lib_sentinel"] = lib_valid
         patchers["benchmark_serving_sentinel"] = serving_valid
         patchers["inferencex_path"] = str(ix_root)
-        _note_instrumentation()
+        note_instrumentation()
         if not (lib_ok and serving_ok and lib_valid and serving_valid):
             return {
                 "status": "failed",

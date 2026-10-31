@@ -18,7 +18,7 @@ from ..policy.gate import SPECIALIST_ACTION_NAME
 from ..policy.specialist_in_flight import specialist_in_flight_denial
 from ..specialists.domains import gap_backfilled_domain
 from ..state.shared_state import inject_stack_base_params
-from ..state.task_registry import TERMINAL_STATES, TaskSpec
+from ..state.task_registry import TERMINAL_STATES, Task, TaskSpec
 from ..collaborator import CoordinatorCollaborator
 
 if TYPE_CHECKING:
@@ -401,6 +401,15 @@ class ProposalsCollaborator(CoordinatorCollaborator):
             return
         # The round the authoring specialist opened runs on under this task id.
         await self._coord.enablement_lane.handoff_enablement_round(task)
+        await self._announce_approved_proposal(pending, task)
+        # Trace attribution: record proposal_msg_id -> task_id for the decision-trace collector.
+        self._record_proposal_task_map(pending.proposal_msg_id, task.task_id)
+        pending.task_id = task.task_id
+        _record_proposal_materialized(pending.proposal_msg_id, task.task_id)
+        _record_config_routed(self, pending, task_id=task.task_id)
+
+    async def _announce_approved_proposal(self, pending: PendingProposal, task: Task) -> None:
+        """Publish the ``approved_proposal`` decision naming the task a proposal became."""
         # proposal_msg_id is the resume contract for the deferred queue (see replay_for_resume).
         await self.bus.append_and_seq(
             Message.new(
@@ -416,11 +425,6 @@ class ProposalsCollaborator(CoordinatorCollaborator):
                 },
             )
         )
-        # Trace attribution: record proposal_msg_id -> task_id for the decision-trace collector.
-        self._record_proposal_task_map(pending.proposal_msg_id, task.task_id)
-        pending.task_id = task.task_id
-        _record_proposal_materialized(pending.proposal_msg_id, task.task_id)
-        _record_config_routed(self, pending, task_id=task.task_id)
 
     async def _seed_materialized_params(
         self,

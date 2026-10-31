@@ -214,6 +214,38 @@ def _round_wait_timeout_stderr(waited: float, ceiling: float) -> str:
     )
 
 
+@dataclass(frozen=True)
+class _StopRequest:
+    """Why a round in flight is to be asked to stop, and whether its wall-clock ceiling is what asked."""
+
+    reason: str
+    timed_out: bool
+
+
+def _stop_request(waited: float, wait_ceiling: float, cancel_scope: Any) -> _StopRequest | None:
+    """The stop to ask of a round that has run ``waited`` seconds, or ``None`` while it may keep running."""
+    if wait_ceiling > 0 and waited >= wait_ceiling:
+        # Nobody is going to cancel this scope: a task Ray never schedules stays 'running' forever and
+        # the lease it holds is never released. Go through the cancel path's cooperative step first --
+        # ``ray.kill`` runs neither ``__ray_terminate__`` nor atexit, so killing an actor whose round is
+        # genuinely still running would strand the served process tree on its GPUs.
+        log.warning(
+            "ServingLease: the round has not returned in %.0fs (ceiling %.0fs); asking the actor to "
+            "stop it -- its task was most likely never schedulable",
+            waited,
+            wait_ceiling,
+        )
+        return _StopRequest(f"ray_round_wait_timeout after {waited:.0f}s", timed_out=True)
+    if cancel_scope is not None and cancel_scope.cancelled:
+        reason = cancel_scope.reason or "orchestrator_cancelled"
+        log.warning(
+            "ServingLease: asking the actor to stop the round in flight (%s)",
+            reason,
+        )
+        return _StopRequest(reason, timed_out=False)
+    return None
+
+
 def _pdeathsig_preexec() -> None:
     """Ask the OS to SIGTERM this child if its parent dies (Linux ``PR_SET_PDEATHSIG``).
 
@@ -633,39 +665,15 @@ class ServingLease:
                 # session -- which is the failure the ceiling below exists to bound, cancellable or not.
                 continue
             if not acquired and time.monotonic() >= acquire_deadline:
-                # Killing outright is safe here in a way it is not at the ceiling: an actor Ray never placed holds no
-                # resources and has spawned no server, so nothing survives this call still mapping GPUs.
-                log.warning(
-                    "ServingLease: actor did not acquire resources within %.0fs; killing it",
-                    RESOURCE_ACQUIRE_TIMEOUT_SEC,
-                )
-                self._kill_actor()
+                self._kill_unplaced_actor()
                 return 1, "", "resource_acquire_timeout"
             if asked_at is None:
-                waited = time.monotonic() - started_at
-                if wait_ceiling > 0 and waited >= wait_ceiling:
-                    # Nobody is going to cancel this scope: a task Ray never schedules stays 'running' forever and
-                    # the lease it holds is never released. Go through the cancel path's cooperative step first --
-                    # ``ray.kill`` runs neither ``__ray_terminate__`` nor atexit, so killing an actor whose round is
-                    # genuinely still running would strand the served process tree on its GPUs.
-                    timed_out = True
-                    reason = f"ray_round_wait_timeout after {waited:.0f}s"
-                    log.warning(
-                        "ServingLease: the round has not returned in %.0fs (ceiling %.0fs); asking the actor to "
-                        "stop it -- its task was most likely never schedulable",
-                        waited,
-                        wait_ceiling,
-                    )
-                elif cancel_scope is not None and cancel_scope.cancelled:
-                    reason = cancel_scope.reason or "orchestrator_cancelled"
-                    log.warning(
-                        "ServingLease: asking the actor to stop the round in flight (%s)",
-                        reason,
-                    )
-                else:
+                stop = _stop_request(time.monotonic() - started_at, wait_ceiling, cancel_scope)
+                if stop is None:
                     continue
+                timed_out = stop.timed_out
                 asked_at = time.monotonic()
-                if not self._ask_actor_to_cancel(reason):
+                if not self._ask_actor_to_cancel(stop.reason):
                     # The actor never took the round, or cannot be reached to be told about it.
                     asked_at -= CANCEL_ROUND_GRACE_SEC
             elif time.monotonic() - asked_at >= CANCEL_ROUND_GRACE_SEC:
@@ -701,6 +709,16 @@ class ServingLease:
                     "the orchestrator cancelled this action; its Ray actor was killed after "
                     f"{CANCEL_ROUND_GRACE_SEC:.0f}s without returning the round",
                 )
+
+    def _kill_unplaced_actor(self) -> None:
+        """Kill an actor Ray never placed before it acquired resources."""
+        # Killing outright is safe here in a way it is not at the ceiling: an actor Ray never placed holds no
+        # resources and has spawned no server, so nothing survives this call still mapping GPUs.
+        log.warning(
+            "ServingLease: actor did not acquire resources within %.0fs; killing it",
+            RESOURCE_ACQUIRE_TIMEOUT_SEC,
+        )
+        self._kill_actor()
 
     def _quarantine_unresponsive_round(
         self,

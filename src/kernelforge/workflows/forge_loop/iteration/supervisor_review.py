@@ -66,32 +66,7 @@ class SupervisorReviewMixin:
                     self._checkpoint_llm_usage()
                 memo = memo or ""
                 if memo.strip():
-                    interaction_path, ruling_path = persist_supervisor_ruling(
-                        self.ic.workspace_dir,
-                        iteration,
-                        supervisor_reason,
-                        memo,
-                    )
-                    self._supervisor_ruling = memo
-                    print(f"  [supervisor] injected free-form ruling: {len(self._supervisor_ruling)} chars")
-                    self.state_store.append_event(
-                        make_event(
-                            "supervisor_ruling",
-                            iteration,
-                            reason=supervisor_reason,
-                            ruling_len=len(self._supervisor_ruling),
-                            interaction_path=(
-                                str(interaction_path.relative_to(Path(self.ic.workspace_dir)))
-                                if interaction_path is not None
-                                else None
-                            ),
-                            ruling_path=(
-                                str(ruling_path.relative_to(Path(self.ic.workspace_dir)))
-                                if ruling_path is not None
-                                else None
-                            ),
-                        )
-                    )
+                    self._record_supervisor_ruling(iteration, supervisor_reason, memo)
                 else:
                     print("  [supervisor] no new ruling returned; continuing without an active ruling")
                 if memo.strip():
@@ -102,6 +77,33 @@ class SupervisorReviewMixin:
                         stall_threshold=self.ic.supervise_after,
                     )
                     self.state_store.save(self.run_state)
+
+    def _record_supervisor_ruling(self, iteration: int, supervisor_reason: str, memo: str) -> None:
+        """Persist a returned ruling, make it the active one, and log its event."""
+        interaction_path, ruling_path = persist_supervisor_ruling(
+            self.ic.workspace_dir,
+            iteration,
+            supervisor_reason,
+            memo,
+        )
+        self._supervisor_ruling = memo
+        print(f"  [supervisor] injected free-form ruling: {len(self._supervisor_ruling)} chars")
+        self.state_store.append_event(
+            make_event(
+                "supervisor_ruling",
+                iteration,
+                reason=supervisor_reason,
+                ruling_len=len(self._supervisor_ruling),
+                interaction_path=(
+                    str(interaction_path.relative_to(Path(self.ic.workspace_dir)))
+                    if interaction_path is not None
+                    else None
+                ),
+                ruling_path=(
+                    str(ruling_path.relative_to(Path(self.ic.workspace_dir))) if ruling_path is not None else None
+                ),
+            )
+        )
 
     def _record_critic_ruling(self, iteration: int, critic) -> None:
         """Put this round's verdict where the next process can still find it."""

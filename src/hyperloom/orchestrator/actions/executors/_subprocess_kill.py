@@ -49,6 +49,18 @@ COOPERATIVE_REAP_BUDGET_SEC: float = (
 )
 
 
+def _terminate_single_process(proc: subprocess.Popen, grace_seconds: float) -> None:
+    """Terminate ``proc`` alone, escalating to kill after ``grace_seconds``, where process groups are unavailable."""
+    try:
+        proc.terminate()
+        proc.wait(timeout=grace_seconds)
+    except (subprocess.TimeoutExpired, OSError):
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
 def kill_my_spawned_server(
     proc: subprocess.Popen | None,
     *,
@@ -64,14 +76,7 @@ def kill_my_spawned_server(
             kill_tree(collect_tree(marked), grace_sec=grace_seconds, confirm_sec=grace_seconds)
         return
     if os.name != "posix":
-        try:
-            proc.terminate()
-            proc.wait(timeout=grace_seconds)
-        except (subprocess.TimeoutExpired, OSError):
-            try:
-                proc.kill()
-            except OSError:
-                pass
+        _terminate_single_process(proc, grace_seconds)
         return
 
     try:

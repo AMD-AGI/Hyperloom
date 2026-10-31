@@ -162,6 +162,46 @@ class _CidLock:
             self._mutex = None
 
 
+def _live_recipe_payload(
+    upsert: RecipeUpsert, live: dict[str, Any] | None, *, version: int, now: str
+) -> dict[str, Any]:
+    """The live row ``upsert`` writes as ``version``, carrying forward what ``live`` already recorded."""
+    # ``Recipe.from_dict`` normalises every list field into the on-disk shape.
+    payload_dict: dict[str, Any] = {
+        "canonical_id": upsert.canonical_id,
+        "version": version,
+        "created_at": (str(live.get("created_at") or now) if isinstance(live, dict) else now),
+        "updated_at": now,
+        "model": upsert.model,
+        "hardware": upsert.hardware,
+        "framework_name": upsert.framework_name,
+        "framework_version": upsert.framework_version,
+        "precision": upsert.precision,
+        "best_config": dict(upsert.best_config or {}),
+        "best_throughput": float(upsert.best_throughput),
+        # No projection: these rows are stored as the Coordinator wrote them, so a field it adds arrives
+        # without a schema here to teach. ``Recipe.from_dict`` rejects an unusable ``extra_envs`` / ``gain_pct``.
+        "what_worked": upsert.what_worked,
+        "what_failed": upsert.what_failed,
+        "remaining_gaps": upsert.remaining_gaps,
+        "pitfalls": upsert.pitfalls,
+        "lessons": upsert.lessons,
+        "last_profiled": upsert.last_profiled
+        or (str(live.get("last_profiled") or "") if isinstance(live, dict) else ""),
+        "stack_fingerprint": dict(upsert.stack_fingerprint or {}),
+        "sessions": upsert.sessions,
+        "authority": upsert.authority,
+        "confidence": float(upsert.confidence),
+        "evidence_refs": list(upsert.evidence_refs or []),
+        "provenance": dict(upsert.provenance or {}),
+    }
+    if upsert.extras:
+        # Splat extras at the top level (no nested ``extras`` key on disk).
+        for key, val in upsert.extras.items():
+            payload_dict.setdefault(key, val)
+    return payload_dict
+
+
 # LocalRecipeStore
 @dataclass
 class LocalRecipeStore:
@@ -284,39 +324,7 @@ class LocalRecipeStore:
                     replaced_by=upsert.provenance,
                 )
 
-            # ``Recipe.from_dict`` normalises every list field into the on-disk shape.
-            payload_dict: dict[str, Any] = {
-                "canonical_id": upsert.canonical_id,
-                "version": new_version,
-                "created_at": (str(live.get("created_at") or now) if isinstance(live, dict) else now),
-                "updated_at": now,
-                "model": upsert.model,
-                "hardware": upsert.hardware,
-                "framework_name": upsert.framework_name,
-                "framework_version": upsert.framework_version,
-                "precision": upsert.precision,
-                "best_config": dict(upsert.best_config or {}),
-                "best_throughput": float(upsert.best_throughput),
-                # No projection: these rows are stored as the Coordinator wrote them, so a field it adds arrives
-                # without a schema here to teach. ``Recipe.from_dict`` rejects an unusable ``extra_envs`` / ``gain_pct``.
-                "what_worked": upsert.what_worked,
-                "what_failed": upsert.what_failed,
-                "remaining_gaps": upsert.remaining_gaps,
-                "pitfalls": upsert.pitfalls,
-                "lessons": upsert.lessons,
-                "last_profiled": upsert.last_profiled
-                or (str(live.get("last_profiled") or "") if isinstance(live, dict) else ""),
-                "stack_fingerprint": dict(upsert.stack_fingerprint or {}),
-                "sessions": upsert.sessions,
-                "authority": upsert.authority,
-                "confidence": float(upsert.confidence),
-                "evidence_refs": list(upsert.evidence_refs or []),
-                "provenance": dict(upsert.provenance or {}),
-            }
-            if upsert.extras:
-                # Splat extras at the top level (no nested ``extras`` key on disk).
-                for key, val in upsert.extras.items():
-                    payload_dict.setdefault(key, val)
+            payload_dict = _live_recipe_payload(upsert, live, version=new_version, now=now)
 
             recipe = Recipe.from_dict(payload_dict)
             written = recipe.to_dict()

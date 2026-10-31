@@ -143,6 +143,26 @@ def _a_use_must_follow_the_round(state: Any) -> bool:
     return phase == _phase_state.PHASE_PRELUDE
 
 
+def _unaffordable_mn_round_result(round_: _BenchmarkRound, evidence: dict[str, Any]) -> dict[str, Any]:
+    """The stopped result of a multi-node round whose two passes the session budget cannot afford."""
+    log.warning(
+        "baseline_executor: a multi-node round is two passes needing %.0fs "
+        "and %.0fs is left (bound=%s), so neither is launched. The anchor "
+        "this session already measured stands.",
+        evidence.get("expected_cost_sec", 0.0),
+        evidence.get("affordable_sec", 0.0),
+        evidence.get("bound", ""),
+    )
+    refused = _unlaunched_round_result(
+        STOPPED_BY_THE_RUN[SESSION_TIME_EXHAUSTED_CLASS],
+        round_label="multi-node round",
+        output_dir=round_.output_dir,
+        capture_meta=round_.capture_meta,
+    )
+    refused["budget_shortfall"] = evidence
+    return refused
+
+
 class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _BenchmarkRoundsMixin):
     """One benchmark action: materialize the config, launch the backend, retry, parse the report."""
 
@@ -418,22 +438,7 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
             round_sec=None if one_pass_sec is None else one_pass_sec * 2.0,
         )
         if not affordable:
-            log.warning(
-                "baseline_executor: a multi-node round is two passes needing %.0fs "
-                "and %.0fs is left (bound=%s), so neither is launched. The anchor "
-                "this session already measured stands.",
-                evidence.get("expected_cost_sec", 0.0),
-                evidence.get("affordable_sec", 0.0),
-                evidence.get("bound", ""),
-            )
-            refused = _unlaunched_round_result(
-                STOPPED_BY_THE_RUN[SESSION_TIME_EXHAUSTED_CLASS],
-                round_label="multi-node round",
-                output_dir=round_.output_dir,
-                capture_meta=round_.capture_meta,
-            )
-            refused["budget_shortfall"] = evidence
-            return refused
+            return _unaffordable_mn_round_result(round_, evidence)
         warm_dir = round_.output_dir / "mn_warmup"
         started_unix = time.time()
         # The measurement is discarded, but the returncode is not: this pass is a full benchmark round, so a stop here

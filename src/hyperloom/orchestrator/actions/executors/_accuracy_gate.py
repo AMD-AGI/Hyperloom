@@ -481,6 +481,11 @@ def parse_eval_results(
             "error": qg_out.get("error", "no quality_gate"),
         }
 
+    return _lm_eval_accuracy_result(workspace)
+
+
+def _lm_eval_accuracy_result(workspace: Path) -> dict[str, Any]:
+    """Read the accuracy score from the latest lm-eval results*.json under ``workspace``."""
     search_paths = [
         workspace / "eval_*" / "**" / "results*.json",
         workspace / "**" / "results*.json",

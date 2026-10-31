@@ -367,6 +367,17 @@ def _infera_launch_workers(
     return rc, {"worker": results}
 
 
+def _record_last_restart(state: dict[str, Any], args: argparse.Namespace, framework: str, pd_mode: str) -> None:
+    """Stamp the launched config onto ``state`` for the next restart's resume fast-path."""
+    state["last_restart_framework"] = framework
+    state["last_restart_model"] = args.model
+    state["last_restart_tp"] = int(args.tp)
+    state["last_restart_ep"] = int(getattr(args, "ep", 1) or 1)
+    state["last_restart_pd_mode"] = pd_mode
+    state["last_restart_extra_args"] = _mn_cli._normalize_extra_args(getattr(args, "extra_args", ""))
+    state["last_restart_forward_env"] = _mn_cli.per_round_forward_overrides()
+
+
 def _infera_restart_server(args: argparse.Namespace) -> int:
     """Infera restart: SSH fan-out launch_infera_node.py to every worker pod."""
     state = _infera_require_state()
@@ -422,13 +433,7 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
     else:
         rc_total, all_results = _infera_launch_workers(state, args, framework, fanout)
 
-    state["last_restart_framework"] = framework
-    state["last_restart_model"] = args.model
-    state["last_restart_tp"] = int(args.tp)
-    state["last_restart_ep"] = int(getattr(args, "ep", 1) or 1)
-    state["last_restart_pd_mode"] = pd_mode
-    state["last_restart_extra_args"] = _mn_cli._normalize_extra_args(getattr(args, "extra_args", ""))
-    state["last_restart_forward_env"] = _mn_cli.per_round_forward_overrides()
+    _record_last_restart(state, args, framework, pd_mode)
     _mn_cli._save_state(state)
     print(
         json.dumps(
@@ -495,6 +500,27 @@ def _infera_ssh_node_op(
     }
 
 
+def _report_tracelens_patch(per_pod: list[dict], failures: list[dict]) -> int:
+    """Print the apply-tracelens-patch fan-out result as JSON and return its exit code."""
+    overall = "applied" if not failures else "failed"
+    if overall == "applied" and all(r.get("status") == "skipped" for r in per_pod):
+        overall = "skipped"
+    print(
+        json.dumps(
+            {
+                "command": "apply-tracelens-patch",
+                "backend": "infera",
+                "status": overall,
+                "per_pod": per_pod,
+                "failures": failures,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    return 0 if not failures else 1
+
+
 def _infera_apply_tracelens_patch(args: argparse.Namespace) -> int:
     """Infera apply-tracelens-patch: SSH fan-out the TraceLens SGLang patch set to every GPU pod via ``apply_tracelens_patch_multinode.py --local``."""
     state = _infera_require_state()
@@ -549,23 +575,7 @@ def _infera_apply_tracelens_patch(args: argparse.Namespace) -> int:
                     "rc": cp.returncode,
                 }
             )
-    overall = "applied" if not failures else "failed"
-    if overall == "applied" and all(r.get("status") == "skipped" for r in per_pod):
-        overall = "skipped"
-    print(
-        json.dumps(
-            {
-                "command": "apply-tracelens-patch",
-                "backend": "infera",
-                "status": overall,
-                "per_pod": per_pod,
-                "failures": failures,
-            },
-            indent=2,
-            sort_keys=True,
-        )
-    )
-    return 0 if not failures else 1
+    return _report_tracelens_patch(per_pod, failures)
 
 
 def _infera_apply_patch(args: argparse.Namespace) -> int:

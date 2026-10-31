@@ -35,7 +35,7 @@ from .controller_publication import (
     ControllerPublicationError,
     load_controller_publication,
 )
-from .patch_conflict_merge import LandingContext, apply_patch_resolving_conflicts
+from .patch_conflict_merge import LandingContext, PatchMergeOutcome, apply_patch_resolving_conflicts
 
 log = logging.getLogger(__name__)
 
@@ -368,6 +368,23 @@ class _ControllerIntegration:
             return _refusal(publication, "skipped_dirty_worktree", reason, head_before)
         return await self._apply_and_validate(publication, head_before, touched)
 
+    async def _apply_onto_landed(self, publication: ControllerPatchPublication) -> PatchMergeOutcome:
+        """Apply one publication's patch, resolving conflicts against the patches already landed in its repo."""
+        repo = publication.repo_root
+        # Lanes all diff against the pinned base, so every KEEP committed above
+        # makes the diffs still queued stale on the files it touched.
+        landed = self._landed.get(repo, [])
+        return await apply_patch_resolving_conflicts(
+            repo,
+            publication.patch_path,
+            LandingContext(
+                operator_id=publication.operator_id,
+                landed_operator_ids=[operator for operator, _ in landed],
+                landed_patches=[patch for _, patch in landed],
+                intent=f"{publication.operator_name} in {publication.kernel_path}",
+            ),
+        )
+
     async def _apply_and_validate(
         self,
         publication: ControllerPatchPublication,
@@ -380,19 +397,7 @@ class _ControllerIntegration:
                 operator_id=publication.operator_id, status=stop.error_class, reason=stop.never_started
             )
         repo = publication.repo_root
-        # Lanes all diff against the pinned base, so every KEEP committed above
-        # makes the diffs still queued stale on the files it touched.
-        landed = self._landed.get(repo, [])
-        merge = await apply_patch_resolving_conflicts(
-            repo,
-            publication.patch_path,
-            LandingContext(
-                operator_id=publication.operator_id,
-                landed_operator_ids=[operator for operator, _ in landed],
-                landed_patches=[patch for _, patch in landed],
-                intent=f"{publication.operator_name} in {publication.kernel_path}",
-            ),
-        )
+        merge = await self._apply_onto_landed(publication)
         if not merge.applied:
             return _refusal(
                 publication,

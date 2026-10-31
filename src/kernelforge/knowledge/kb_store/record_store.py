@@ -224,6 +224,24 @@ def _bundle_staging(destination: str | Path, session_id: str) -> tuple[Path, Pat
     return bundle, staging
 
 
+def _manifest_paths(listing: Any) -> set[str]:
+    """The artifact paths a session file manifest declares, refusing a malformed or duplicated one."""
+    if not isinstance(listing, Mapping):
+        raise RewriteRecordError("session file manifest is not an object")
+    raw_files = listing.get("files") or []
+    if not isinstance(raw_files, list):
+        raise RewriteRecordError("session file manifest files is not a list")
+    expected: set[str] = set()
+    for item in raw_files:
+        if not isinstance(item, Mapping):
+            raise RewriteRecordError("session file manifest contains a non-object entry")
+        rel_path = safe_rel_path(item.get("path"))
+        if rel_path in expected:
+            raise RewriteRecordError(f"duplicate session artifact path: {rel_path}")
+        expected.add(rel_path)
+    return expected
+
+
 def _safe_files(root: Path) -> set[str]:
     """Validate a files tree and return all regular-file relative paths."""
     if root.is_symlink():
@@ -503,19 +521,7 @@ class KBStoreRewriteRecords:
 
             with self._download_lock:
                 listing = self._client.list_session_files(canonical_id, candidate.session_id)
-                if not isinstance(listing, Mapping):
-                    raise RewriteRecordError("session file manifest is not an object")
-                raw_files = listing.get("files") or []
-                if not isinstance(raw_files, list):
-                    raise RewriteRecordError("session file manifest files is not a list")
-                expected: set[str] = set()
-                for item in raw_files:
-                    if not isinstance(item, Mapping):
-                        raise RewriteRecordError("session file manifest contains a non-object entry")
-                    rel_path = safe_rel_path(item.get("path"))
-                    if rel_path in expected:
-                        raise RewriteRecordError(f"duplicate session artifact path: {rel_path}")
-                    expected.add(rel_path)
+                expected = _manifest_paths(listing)
 
                 # The upstream SDK lists internally.
                 original_listing = self._client.list_session_files

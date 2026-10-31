@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom_common import io as _common_io
+from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.platform_probe import platform_fingerprint
 
 from ...bus.message_bus import MessageBus
@@ -29,7 +30,7 @@ from hyperloom.inference_optimizer.session.paths import db_path_for
 from ...kernel import kernel_decisions
 from ...measurement.baseline_budget import BASELINE_BUDGET_STOP_EXPLANATIONS
 from ...state.failure_evidence import classify_root_cause_type
-from ...state.shared_state import SharedState
+from ...state.shared_state import SharedState, resolve_graded_comparison
 
 
 log = logging.getLogger(__name__)
@@ -366,10 +367,6 @@ def _build_summary_dict(
     session_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Assemble the machine-readable session summary dict."""
-    from hyperloom.common.gain_math import gain_pct
-
-    from ...state.shared_state import resolve_graded_comparison
-
     graded = resolve_graded_comparison(state, state.current_best, against_baseline=True)
     # The wind-down report is rendered inside closing_phase, before the loop assigns the terminal stop_reason;
     # closing_phase is only entered on the wall-clock deadline, so fall back to time_exhausted rather than blank.
@@ -1092,6 +1089,47 @@ def reconcile_final_crash_count(session_dir: Path, crash_count: int) -> None:
         _write_final_json(json_path, summary)
 
 
+def _companion_artifact_refs(state: SharedState, session_dir: Path, output_dir: Path) -> dict[str, Any]:
+    """The final.json fields pointing at the artifacts written beside the report."""
+    refs: dict[str, Any] = {}
+    # Kernel-optimization forensic summary in a separate file (pointer added to final.json).
+    ko_summary_path = _write_kernel_opt_summary(state, session_dir, output_dir)
+    if ko_summary_path is not None:
+        try:
+            rel = ko_summary_path.relative_to(session_dir)
+            refs["kernel_optimization_summary"] = {
+                "report_path": str(rel),
+                "totals": _read_ko_summary_totals(ko_summary_path),
+            }
+        except ValueError:
+            refs["kernel_optimization_summary"] = {
+                "report_path": str(ko_summary_path),
+                "totals": _read_ko_summary_totals(ko_summary_path),
+            }
+
+    # Post-sweep concurrency comparison pointer.
+    cs_pointer = _read_conc_sweep_pointer(session_dir)
+    if cs_pointer is not None:
+        refs["conc_sweep_summary"] = cs_pointer
+
+    # Best-effort InferenceX-style concurrency sweep plot.
+    conc_sweep_curve_png: Path | None = None
+    try:
+        conc_sweep_curve_png = _render_conc_sweep_curve_for_report(
+            session_dir=session_dir,
+            output_dir=output_dir,
+            state=state,
+        )
+    except (ValueError, TypeError, AttributeError, KeyError):
+        log.debug("report_executor: conc_sweep curve render failed", exc_info=True)
+    if conc_sweep_curve_png is not None:
+        try:
+            refs["conc_sweep_curve_png"] = conc_sweep_curve_png.relative_to(session_dir).as_posix()
+        except ValueError:
+            refs["conc_sweep_curve_png"] = conc_sweep_curve_png.as_posix()
+    return refs
+
+
 # ---------------------------------------------------------------------------
 class ReportExecutor:
     """ActionRunner for the ``report`` action."""
@@ -1152,41 +1190,7 @@ class ReportExecutor:
             session_dir=session_dir,
         )
 
-        # Kernel-optimization forensic summary in a separate file (pointer added to final.json).
-        ko_summary_path = _write_kernel_opt_summary(state, session_dir, output_dir)
-        if ko_summary_path is not None:
-            try:
-                rel = ko_summary_path.relative_to(session_dir)
-                summary["kernel_optimization_summary"] = {
-                    "report_path": str(rel),
-                    "totals": _read_ko_summary_totals(ko_summary_path),
-                }
-            except ValueError:
-                summary["kernel_optimization_summary"] = {
-                    "report_path": str(ko_summary_path),
-                    "totals": _read_ko_summary_totals(ko_summary_path),
-                }
-
-        # Post-sweep concurrency comparison pointer.
-        cs_pointer = _read_conc_sweep_pointer(session_dir)
-        if cs_pointer is not None:
-            summary["conc_sweep_summary"] = cs_pointer
-
-        # Best-effort InferenceX-style concurrency sweep plot.
-        conc_sweep_curve_png: Path | None = None
-        try:
-            conc_sweep_curve_png = _render_conc_sweep_curve_for_report(
-                session_dir=session_dir,
-                output_dir=output_dir,
-                state=state,
-            )
-        except (ValueError, TypeError, AttributeError, KeyError):
-            log.debug("report_executor: conc_sweep curve render failed", exc_info=True)
-        if conc_sweep_curve_png is not None:
-            try:
-                summary["conc_sweep_curve_png"] = conc_sweep_curve_png.relative_to(session_dir).as_posix()
-            except ValueError:
-                summary["conc_sweep_curve_png"] = conc_sweep_curve_png.as_posix()
+        summary.update(_companion_artifact_refs(state, session_dir, output_dir))
 
         json_path, md_path = _write_final_report(output_dir, summary)
 

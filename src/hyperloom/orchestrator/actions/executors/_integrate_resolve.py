@@ -11,7 +11,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from hyperloom_common.coerce import to_float
 from hyperloom.inference_optimizer.session.session_paths import enablement_stacks_dir, runs_dir
@@ -30,6 +30,9 @@ from ._patch_sources import (
     _read_done_payload,
     _resolve_framework_root,
 )
+
+if TYPE_CHECKING:
+    from ...enablement.runtime.stack_actions import EnablementStackAction
 
 log = logging.getLogger(__name__)
 
@@ -127,6 +130,15 @@ class ResolveStageMixin:
         if resolve_patch_source(params) == PATCH_SOURCE_UPSTREAM_PR:
             return self._stage_resolve_upstream_pr(attempt, params, shared_state)
 
+        return self._stage_resolve_specialist(attempt, params, shared_state)
+
+    def _stage_resolve_specialist(
+        self,
+        attempt: IntegrateAttempt,
+        params: dict[str, Any],
+        shared_state: Any,
+    ) -> dict[str, Any] | None:
+        """Resolve a completed specialist's workspace and done payload onto the attempt."""
         specialist_task_id = str(params.get("specialist_task_id") or "").strip()
         if not specialist_task_id:
             return {
@@ -275,21 +287,11 @@ class ResolveStageMixin:
             return None
 
         from ...enablement.runtime.adapters import get_adapter
-        from ...enablement.runtime.stack_actions import EnablementStackAction, RuntimeRequest
+        from ...enablement.runtime.stack_actions import EnablementStackAction
 
-        request = RuntimeRequest.from_payload(_done_field(attempt.done_payload, "needs_runtime"))
-        kept = attempt.shared_state.enablement.kept_stack_action
-        if kept:
-            action = EnablementStackAction.from_state(kept)
-            if request is not None:
-                log.info("integrate_patch: needs_runtime ignored; the kept %s runtime stays", action.framework)
-        else:
-            if request is None:
-                return None
-            framework = str(getattr(attempt.shared_state, "framework", "") or "").strip().lower()
-            action = get_adapter(framework).build_stack_action(request)
-            if action is None:
-                return None
+        action = _attempt_stack_action(attempt)
+        if action is None:
+            return None
 
         attempt_dir = (
             enablement_stacks_dir(self.session_dir)
@@ -297,23 +299,9 @@ class ResolveStageMixin:
             / (specialist_task_id or "attempt")
         )
 
-        from hyperloom.agents.framework.isolation import DiskPreflightError, disk_preflight
-
-        try:
-            disk_preflight(attempt_dir.parent, n_candidates=1)
-        except DiskPreflightError as exc:
-            return {
-                "status": "reverted",
-                "error_class": "disk_preflight_failed",
-                "error": str(exc),
-                "specialist_task_id": specialist_task_id,
-                "patches_applied": [],
-                "patches_reverted": [],
-                "enablement": True,
-                "reason": f"attempt-runtime provision aborted: {exc}",
-            }
-        except OSError as exc:
-            log.warning("integrate_patch: disk preflight raised (%r); continuing", exc)
+        preflight_failure = _attempt_disk_preflight_failure(attempt_dir, specialist_task_id)
+        if preflight_failure is not None:
+            return preflight_failure
 
         adapter = get_adapter(action.framework)
         try:
@@ -477,3 +465,43 @@ class ResolveStageMixin:
         except (OSError, AttributeError):
             # Held in memory either way, and the rearm saves again.
             log.debug("integrate_patch: save after closure baseline failed", exc_info=True)
+
+
+def _attempt_stack_action(attempt: IntegrateAttempt) -> EnablementStackAction | None:
+    """The stack action this round provisions: the kept runtime, else the one the specialist requested."""
+    from ...enablement.runtime.adapters import get_adapter
+    from ...enablement.runtime.stack_actions import EnablementStackAction, RuntimeRequest
+
+    request = RuntimeRequest.from_payload(_done_field(attempt.done_payload, "needs_runtime"))
+    kept = attempt.shared_state.enablement.kept_stack_action
+    if kept:
+        action = EnablementStackAction.from_state(kept)
+        if request is not None:
+            log.info("integrate_patch: needs_runtime ignored; the kept %s runtime stays", action.framework)
+        return action
+    if request is None:
+        return None
+    framework = str(getattr(attempt.shared_state, "framework", "") or "").strip().lower()
+    return get_adapter(framework).build_stack_action(request)
+
+
+def _attempt_disk_preflight_failure(attempt_dir: Path, specialist_task_id: str) -> dict[str, Any] | None:
+    """A ``reverted`` result when the disk cannot hold an attempt runtime, else ``None``."""
+    from hyperloom.agents.framework.isolation import DiskPreflightError, disk_preflight
+
+    try:
+        disk_preflight(attempt_dir.parent, n_candidates=1)
+    except DiskPreflightError as exc:
+        return {
+            "status": "reverted",
+            "error_class": "disk_preflight_failed",
+            "error": str(exc),
+            "specialist_task_id": specialist_task_id,
+            "patches_applied": [],
+            "patches_reverted": [],
+            "enablement": True,
+            "reason": f"attempt-runtime provision aborted: {exc}",
+        }
+    except OSError as exc:
+        log.warning("integrate_patch: disk preflight raised (%r); continuing", exc)
+    return None

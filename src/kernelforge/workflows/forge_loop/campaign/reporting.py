@@ -379,6 +379,16 @@ class BestResultPublisher:
                 shutil.rmtree(temporary)
         return manifest
 
+    def _check_current_manifest(self, iteration: int, manifest: dict) -> None:
+        """Raise when the current best manifest is ahead of, or conflicts with, this iteration's publication."""
+        if self.manifest_path.is_file():
+            current = self._load_json(self.manifest_path, label="best manifest")
+            current_iteration = int(current.get("iteration", 0) or 0)
+            if current_iteration > iteration:
+                raise ValueError(f"best manifest is ahead of iteration {iteration}: {current_iteration}")
+            if current_iteration == iteration and not self._same_publication(current, manifest):
+                raise ValueError(f"best manifest conflicts with iteration {iteration}")
+
     def publish(
         self,
         keep: KeepIdentity,
@@ -441,13 +451,7 @@ class BestResultPublisher:
         }
         manifest = self._store_version(expected, bundle, sources)
 
-        if self.manifest_path.is_file():
-            current = self._load_json(self.manifest_path, label="best manifest")
-            current_iteration = int(current.get("iteration", 0) or 0)
-            if current_iteration > iteration:
-                raise ValueError(f"best manifest is ahead of iteration {iteration}: {current_iteration}")
-            if current_iteration == iteration and not self._same_publication(current, manifest):
-                raise ValueError(f"best manifest conflicts with iteration {iteration}")
+        self._check_current_manifest(iteration, manifest)
         if round_budget:
             manifest = {**manifest, "round_budget": dict(round_budget)}
         payload = json.dumps(manifest, indent=2, sort_keys=True) + "\n"

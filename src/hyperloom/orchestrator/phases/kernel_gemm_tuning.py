@@ -185,6 +185,37 @@ def _paired_measurement_basis(verdict: Any) -> str:
     return f"e2e_paired_entry_reference_to_tuned_{getattr(verdict, 'reason', 'unknown')}"
 
 
+def _gemm_revert_reason(decision: str, gain_pct: float, blockers: list[str]) -> str:
+    """Why a tuning candidate was reverted, naming the apply blockers when its artifact never reached the runtime."""
+    reason = f"decision={decision}, gain={gain_pct:.2f}%"
+    if blockers:
+        # Distinguish no gain from a tuned artifact the runtime never reached.
+        reason = f"tuned_config_never_applied[{'+'.join(blockers)}] ({reason})"
+    return reason
+
+
+def _no_fmoe_dispatch_verdict(log_text: str, *, hit_logging: bool) -> dict[str, Any]:
+    """The coverage fields of a server log that logged no parseable fused-MoE dispatch."""
+    from ..kernel.gemm_shape_coverage import log_has_fused_moe_activity
+
+    verdict: dict[str, Any] = {}
+    if log_has_fused_moe_activity(log_text):
+        verdict["artifact_applied"] = False
+        verdict["not_applied_reason"] = "fused_moe_parse_inconclusive"
+        verdict["conclusive"] = False
+    elif not hit_logging:
+        verdict["artifact_applied"] = False
+        verdict["not_applied_reason"] = "fused_moe_logging_disabled"
+        verdict["conclusive"] = False
+    else:
+        verdict["artifact_applied"] = False
+        verdict["not_applied_reason"] = "no_fused_moe_dispatch"
+        verdict["conclusive"] = True
+    verdict["runtime_lookup_miss"] = 0
+    verdict["runtime_lookup_hit"] = 0
+    return verdict
+
+
 class _GemmTuningMixin:
     def _runtime_uses_aiter_fused_moe(self) -> bool:
         """Return whether the served model dispatches MoE through aiter."""
@@ -291,7 +322,6 @@ class _GemmTuningMixin:
         from ..kernel.gemm_shape_coverage import (
             aiter_log_tuned_config_enabled,
             fmoe_tuned_config_coverage,
-            log_has_fused_moe_activity,
             parse_aiter_fused_moe_dispatches,
             read_latest_integrate_server_log,
             resolve_fmoe_candidate_csv,
@@ -313,20 +343,7 @@ class _GemmTuningMixin:
             "requested": len(dispatches),
         }
         if not dispatches:
-            if log_has_fused_moe_activity(log_text):
-                report["artifact_applied"] = False
-                report["not_applied_reason"] = "fused_moe_parse_inconclusive"
-                report["conclusive"] = False
-            elif not hit_logging:
-                report["artifact_applied"] = False
-                report["not_applied_reason"] = "fused_moe_logging_disabled"
-                report["conclusive"] = False
-            else:
-                report["artifact_applied"] = False
-                report["not_applied_reason"] = "no_fused_moe_dispatch"
-                report["conclusive"] = True
-            report["runtime_lookup_miss"] = 0
-            report["runtime_lookup_hit"] = 0
+            report.update(_no_fmoe_dispatch_verdict(log_text, hit_logging=hit_logging))
             return report
         if candidate_path is None:
             report["artifact_applied"] = False
@@ -1038,6 +1055,20 @@ class _GemmTuningMixin:
             result["micro_decision"] = "candidate_no_e2e_gain"
         self._replace_latest_gemm_tuning_attempt(result)
 
+    def _screened_candidate_envs(
+        self,
+        cand: dict[str, Any],
+        *,
+        triton_moe_inert: bool,
+    ) -> tuple[dict[str, str], dict[str, Any] | None]:
+        """A candidate's merged envs, or the refusal row when it is skipped or one of its tables is unusable."""
+        skip_reason = self._gemm_candidate_skip_reason(cand["tuner"], triton_moe_inert=triton_moe_inert)
+        if skip_reason:
+            return {}, {**cand, "reason": skip_reason}
+        # Merge candidate CSV with the runtime config so that shapes NOT in the candidate keep their existing
+        # tuned entries.
+        return self._merged_candidate_envs(cand)
+
     async def _validate_gemm_tuning_e2e(self, result: dict[str, Any]) -> None:
         """Sequentially E2E-validate each tuning candidate's env independently."""
         from ..actions.executors._aiter_jit import drop_serving_so_for_envs
@@ -1063,13 +1094,7 @@ class _GemmTuningMixin:
         )
         for cand in candidates:
             tuner_name = cand["tuner"]
-            skip_reason = self._gemm_candidate_skip_reason(tuner_name, triton_moe_inert=triton_moe_inert)
-            if skip_reason:
-                reverted.append({**cand, "reason": skip_reason})
-                continue
-            # Merge candidate CSV with the runtime config so that shapes NOT in the candidate keep their existing
-            # tuned entries.
-            env, refusal = self._merged_candidate_envs(cand)
+            env, refusal = self._screened_candidate_envs(cand, triton_moe_inert=triton_moe_inert)
             if refusal is not None:
                 reverted.append(refusal)
                 continue
@@ -1097,11 +1122,7 @@ class _GemmTuningMixin:
                     accepted_measurement = measurement
                     kept.append(keep_row)
                     continue
-            reason = f"decision={decision}, gain={gain_pct:.2f}%"
-            if blockers:
-                # Distinguish no gain from a tuned artifact the runtime never reached.
-                reason = f"tuned_config_never_applied[{'+'.join(blockers)}] ({reason})"
-            reverted.append({**cand, "reason": reason})
+            reverted.append({**cand, "reason": _gemm_revert_reason(decision, gain_pct, blockers)})
             await asyncio.to_thread(drop_serving_so_for_envs, test_envs, backup_dir=jit_backup_dir)
 
         _record_gemm_e2e_envelope(result, stacked_envs, kept=kept, reverted=reverted, faults=faults)

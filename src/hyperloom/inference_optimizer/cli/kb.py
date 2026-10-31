@@ -78,7 +78,7 @@ def _build_recipe_kb_dispatcher() -> Any:
 
 def _mirror_stack_fingerprint_meta(
     state: SharedState,
-    stack_fp: Mapping[str, Any],
+    stack_fp: Mapping[str, Any] | None,
     image_digest: str,
 ) -> None:
     """Copy usable stack fingerprint fields onto SharedState for the CLOSE-time recipe write."""
@@ -92,6 +92,32 @@ def _mirror_stack_fingerprint_meta(
         merged_meta["image_digest"] = image_digest
     if merged_meta:
         state.stack_fingerprint_meta = merged_meta
+
+
+def _t0_anchor_request(state: SharedState, manifest: dict[str, Any], resume: bool) -> T0AnchorRequest:
+    """The T0 anchor's workload identity, read from SharedState with the manifest as fallback."""
+    workload = (
+        state.model_name
+        or manifest.get("model_name", "")
+        or Path(manifest.get("model_path", "") or "").name
+        or "unknown_model"
+    )
+    hw = state.gpu_type or manifest.get("gpu_type", "") or "unknown_gpu"
+    extra_attrs = {
+        "framework_name": state.framework or manifest.get("framework", ""),
+        "model_class": state.model_class or "",
+        # Operator traceability.
+        "claw_session_id": manifest.get("claw_session_id") or "",
+        "sandbox_user_id": manifest.get("sandbox_user_id") or "",
+    }
+    return T0AnchorRequest(
+        workload=workload,
+        hw=hw,
+        image_digest=manifest.get("image") or "",
+        stack_fingerprint=manifest.get("stack_fingerprint") or {},
+        extra_attrs=extra_attrs,
+        resume=resume,
+    )
 
 
 def _bootstrap_recipe_kb(
@@ -108,23 +134,8 @@ def _bootstrap_recipe_kb(
 
     kb = _build_recipe_kb_dispatcher()
     state = SharedState.load_or_init(session_dir)
-    workload = (
-        state.model_name
-        or manifest.get("model_name", "")
-        or Path(manifest.get("model_path", "") or "").name
-        or "unknown_model"
-    )
-    hw = state.gpu_type or manifest.get("gpu_type", "") or "unknown_gpu"
-    stack_fp = manifest.get("stack_fingerprint") or {}
-    image_digest = manifest.get("image") or ""
-    _mirror_stack_fingerprint_meta(state, stack_fp, image_digest)
-    extra_attrs = {
-        "framework_name": state.framework or manifest.get("framework", ""),
-        "model_class": state.model_class or "",
-        # Operator traceability.
-        "claw_session_id": manifest.get("claw_session_id") or "",
-        "sandbox_user_id": manifest.get("sandbox_user_id") or "",
-    }
+    request = _t0_anchor_request(state, manifest, resume)
+    _mirror_stack_fingerprint_meta(state, request.stack_fingerprint, request.image_digest)
     try:
         if kb is None:
             from hyperloom.orchestrator.knowledge.remote_recipe import (
@@ -149,20 +160,7 @@ def _bootstrap_recipe_kb(
         else:
             _attach_recipe_audit_hook(kb, session_dir)
             t0_kb = kb
-        run_t0_anchor(
-            t0_kb,
-            state,
-            T0AnchorRequest(
-                workload=workload,
-                hw=hw,
-                image_digest=image_digest,
-                stack_fingerprint=stack_fp,
-                extra_attrs=extra_attrs,
-                resume=resume,
-            ),
-            on_status=print,
-            session_dir=session_dir,
-        )
+        run_t0_anchor(t0_kb, state, request, on_status=print, session_dir=session_dir)
         if kb is None:
             print("Recipe KB       : REMOTE (KB Store current Recipe warm replay)")
     except Exception as exc:  # isolation boundary: the T0 recipe warm-start anchor

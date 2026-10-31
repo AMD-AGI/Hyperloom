@@ -74,6 +74,17 @@ def _task_is_dead(task: Task | None) -> bool:
     return str(getattr(task, "state", "") or "") in _DEAD_TASK_STATES
 
 
+def _revalidation_budget_shortfall(state: Any) -> str:
+    """Why the session budget cannot fit one more stack measurement, or ``""`` when it can."""
+    usable_sec = state.session_budget_usable_sec()
+    needed_sec = _phase_state.one_more_measurement_sec(state) or _phase_state.measured_seconds(
+        state, "baseline_runtime_sec"
+    )
+    if usable_sec is not None and needed_sec is not None and usable_sec < needed_sec:
+        return f"session_budget usable={usable_sec:.0f}s needed={needed_sec:.0f}s"
+    return ""
+
+
 class CloseArtifact(NamedTuple):
     """The file a close step produced, as the close-out records it."""
 
@@ -189,16 +200,9 @@ class ClosePhase(CoordinatorCollaborator):
             return
         # Explore refuses a variant the budget cannot fit, so asking here only
         # names the reason in the close section instead of in a no-op task.
-        usable_sec = state.session_budget_usable_sec()
-        needed_sec = _phase_state.one_more_measurement_sec(state) or _phase_state.measured_seconds(
-            state, "baseline_runtime_sec"
-        )
-        if usable_sec is not None and needed_sec is not None and usable_sec < needed_sec:
-            await self._record_close_step(
-                step,
-                status="skipped",
-                detail=f"session_budget usable={usable_sec:.0f}s needed={needed_sec:.0f}s",
-            )
+        shortfall = _revalidation_budget_shortfall(state)
+        if shortfall:
+            await self._record_close_step(step, status="skipped", detail=shortfall)
             return
         generation = int(state.working_recipe_generation or 0)
         summary = await self._coord.writeback.enqueue_internal_stack_rebench(
