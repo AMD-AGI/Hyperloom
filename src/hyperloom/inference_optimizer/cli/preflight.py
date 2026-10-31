@@ -30,6 +30,7 @@ from hyperloom_common.llm.llm_config import (
     preferred_agent_backend,
     with_synthesized_anthropic_keys,
 )
+from hyperloom_common.env import forge_explicitly_enabled
 from hyperloom_common.fs_utils import is_network_fs
 from hyperloom_common.llm.llm_headers import expand_env_refs
 from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
@@ -55,6 +56,7 @@ from .framework_probe import (
     _resolve_framework_build,
     _setup_install_command,
 )
+from .geak_binaries import check_geak_binaries
 from .preflight_env import (
     _ANTHROPIC_FALLBACK_KEYS,
     _PROVIDER_FALLBACK_KEYS,
@@ -1445,6 +1447,10 @@ def _check_kernel_and_tracelens_clis(install_event: Any, args: argparse.Namespac
             category="check",
             action=_check_kernel_tuning_clis,
         )
+        if not forge_explicitly_enabled():
+            _run_install_step(
+                install_event, step_id="check_geak_binaries", category="check", action=check_geak_binaries
+            )
     if _tracelens_required_at_preflight(no_kernel, enable_roofline):
         _run_install_step(install_event, step_id="check_tracelens_cli", category="check", action=_check_tracelens_cli)
         _run_install_step(
@@ -1574,18 +1580,8 @@ def _preflight(args: argparse.Namespace) -> tuple[str, str]:
 
     # --- ROCm env hygiene + GPU/shm sanity (defensive WARN-only) ---
     _normalize_hip_visible_devices()
-    _run_install_step(
-        install_event,
-        step_id="check_gpu_visibility",
-        category="check",
-        action=_check_gpu_visibility,
-    )
-    _run_install_step(
-        install_event,
-        step_id="check_shm_disk",
-        category="check",
-        action=_check_shm_disk,
-    )
+    _run_install_step(install_event, step_id="check_gpu_visibility", category="check", action=_check_gpu_visibility)
+    _run_install_step(install_event, step_id="check_shm_disk", category="check", action=_check_shm_disk)
     _run_install_step(
         install_event,
         step_id="check_platform_tuning",

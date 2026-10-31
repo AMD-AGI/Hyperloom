@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 from typing import IO
 
+from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.proctree import signal_group
 
 _TAIL_CHARS = 4000
@@ -145,7 +146,13 @@ def main(argv: list[str]) -> int:
             }
         )
     )
-    return 0 if out.get("status") not in ("error", None) else 1
+    if out.get("status") not in ("error", "timeout", None):
+        return 0
+    # The caller logs only the tail of this stream, so the error goes last. Both fields can carry subprocess stderr.
+    for text in (out.get("stderr_tail"), out.get("error")):
+        if text:
+            print(redact_secret_values(str(text).rstrip()), file=sys.stderr)
+    return 1
 
 
 if __name__ == "__main__":

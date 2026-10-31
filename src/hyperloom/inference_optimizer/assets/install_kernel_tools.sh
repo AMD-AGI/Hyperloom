@@ -202,6 +202,9 @@ case "$GEAK_RUN_MODE_VAL" in
   quick|full) ;;
   *) die "GEAK_RUN_MODE must be 'quick' or 'full'; got '$GEAK_RUN_MODE_VAL'" ;;
 esac
+# GEAK's workflow runtime (interface/runtime/engine) needs Node 20 or newer.
+_GEAK_NODE_MIN_MAJOR=20
+HYPERLOOM_GEAK_NODE_VERSION="${HYPERLOOM_GEAK_NODE_VERSION:-22.23.3}"
 # Split-provider aware per-side credentials: each protocol side keeps its own
 # base URL/key. A dual-protocol gateway simply has both pointed at one host.
 _ANTHROPIC_BASE_URL_VAL="${ANTHROPIC_BASE_URL:-}"
@@ -975,6 +978,9 @@ write_env_file() {
     # fall back to its older bundled CLI). run_e2e.py maps this to cli_path.
     _geak_claude_bin="$(command -v claude 2>/dev/null || true)"
     [ -n "${_geak_claude_bin}" ] && echo "export GEAK_CLAUDE_BIN='${_geak_claude_bin}'"
+    # GEAK runs bare `node` / `codex` when these are unset, and neither is on a stock image's PATH.
+    [ -n "${_geak_node_bin:-}" ] && echo "export GEAK_NODE_BIN='${_geak_node_bin}'"
+    [ -n "${_geak_codex_bin:-}" ] && echo "export GEAK_CODEX_BIN='${_geak_codex_bin}'"
     # e2e optimizer budget mode (read by the inference_optimizer kernel request
     # handler to pick the backend budget default) + LLM connection for the runner.
     [ -n "${GEAK_RUN_MODE_VAL}" ] && echo "export GEAK_RUN_MODE='${GEAK_RUN_MODE_VAL}'"
@@ -1051,6 +1057,8 @@ write_env_file() {
   fi
   [ -n "${GEAK_CLAUDE_MODEL_VAL}" ] && upsert_dotenv_var GEAK_CLAUDE_MODEL "$GEAK_CLAUDE_MODEL_VAL"
   [ -n "${_geak_claude_bin}" ] && upsert_dotenv_var GEAK_CLAUDE_BIN "$_geak_claude_bin"
+  [ -n "${_geak_node_bin:-}" ] && upsert_dotenv_var GEAK_NODE_BIN "$_geak_node_bin"
+  [ -n "${_geak_codex_bin:-}" ] && upsert_dotenv_var GEAK_CODEX_BIN "$_geak_codex_bin"
   [ -n "${GEAK_RUN_MODE_VAL}" ] && upsert_dotenv_var GEAK_RUN_MODE "$GEAK_RUN_MODE_VAL"
   remove_dotenv_var GEAK_API_KEY
   remove_dotenv_var GEAK_BASE_URL
@@ -1185,6 +1193,81 @@ EOF
   fi
 }
 
+# The Codex CLI Hyperloom's own specialists resolve: an operator's GEAK_CODEX_BIN, then PATH, then the
+# runtime bundled with the openai-codex SDK that install.sh installs with Hyperloom.
+_resolve_geak_codex_bin() {
+  "${PYTHON:-python3}" -c 'import os; from hyperloom.common.agent_cli import resolve_codex_executable; print(resolve_codex_executable(os.environ.get("GEAK_CODEX_BIN", "")))' 2>/dev/null || true
+}
+
+# Pin the Node binary GEAK's workflow runtime runs (GEAK_NODE_BIN). An operator's
+# value is kept, a Node on PATH that is new enough is reused, and otherwise the
+# official build is fetched once into the dependency cache, checked against the
+# release's SHASUMS256.txt.
+ensure_geak_node() {
+  _geak_node_bin=""
+  if [ -n "${GEAK_NODE_BIN:-}" ]; then
+    _geak_node_bin="${GEAK_NODE_BIN}"
+    return 0
+  fi
+  local _found _major
+  _found="$(command -v node 2>/dev/null || true)"
+  if [ -n "$_found" ]; then
+    _major="$("$_found" --version 2>/dev/null || true)"
+    _major="${_major#v}"
+    _major="${_major%%.*}"
+    case "$_major" in
+      ''|*[!0-9]*) ;;
+      *)
+        if [ "$_major" -ge "$_GEAK_NODE_MIN_MAJOR" ]; then
+          _geak_node_bin="$_found"
+          return 0
+        fi
+        ;;
+    esac
+  fi
+  local _arch
+  case "$(uname -m)" in
+    x86_64) _arch=x64 ;;
+    aarch64|arm64) _arch=arm64 ;;
+    *) die "no Node build for $(uname -m); set GEAK_NODE_BIN to a Node ${_GEAK_NODE_MIN_MAJOR}+ binary" ;;
+  esac
+  local _name="node-v${HYPERLOOM_GEAK_NODE_VERSION}-linux-${_arch}"
+  local _dir="${_open_source_root}/${_name}"
+  if [ -x "${_dir}/bin/node" ]; then
+    _geak_node_bin="${_dir}/bin/node"
+    return 0
+  fi
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    warn "no Node ${_GEAK_NODE_MIN_MAJOR}+ on PATH or in ${_dir}; GEAK's workflow runtime cannot start"
+    return 0
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "would fetch ${_name} into ${_open_source_root} for GEAK"
+    return 0
+  fi
+  command -v curl >/dev/null 2>&1 || die "curl missing; Node for GEAK cannot be fetched"
+  local _base="https://nodejs.org/dist/v${HYPERLOOM_GEAK_NODE_VERSION}" _tmp
+  mkdir -p "${_open_source_root}"
+  _tmp="$(mktemp -d "${_open_source_root}/.${_name}.XXXXXX")"
+  log "fetching ${_name} for GEAK into ${_dir}"
+  if ! curl -fsSL --connect-timeout 20 -o "${_tmp}/${_name}.tar.xz" "${_base}/${_name}.tar.xz" \
+     || ! curl -fsSL --connect-timeout 20 -o "${_tmp}/SHASUMS256.txt" "${_base}/SHASUMS256.txt"; then
+    rm -rf -- "$_tmp"
+    die "downloading ${_name} from ${_base} failed"
+  fi
+  if ! (cd "$_tmp" && grep " ${_name}.tar.xz\$" SHASUMS256.txt | sha256sum -c - >/dev/null); then
+    rm -rf -- "$_tmp"
+    die "${_name}.tar.xz does not match its SHASUMS256.txt entry"
+  fi
+  if ! tar -xJf "${_tmp}/${_name}.tar.xz" -C "$_tmp"; then
+    rm -rf -- "$_tmp"
+    die "unpacking ${_name}.tar.xz failed (is xz installed?)"
+  fi
+  mv "${_tmp}/${_name}" "$_dir"
+  rm -rf -- "$_tmp"
+  _geak_node_bin="${_dir}/bin/node"
+}
+
 report_status() {
   log "ray: $(python3 - <<'PY' 2>/dev/null || echo missing
 try:
@@ -1228,6 +1311,8 @@ install_kernel_tools() {
   # TraceLens / GEAK clones run under the install lock install.sh holds.
   ensure_tracelens
   ensure_claude_cli
+  ensure_geak_node
+  _geak_codex_bin="$(_resolve_geak_codex_bin)"
 
   # The GEAK e2e whole-pipeline optimizer is always installed; whether it is
   # used at runtime is decided per-session via KERNEL_OPT_BACKEND_ORDER.
