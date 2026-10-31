@@ -881,11 +881,11 @@ async def test_delegate_accepts_nested_params_idempotency_key(session_dir):
     c.sub.register_executor("explore", _runner)
     try:
         c.shared_state.baseline_tput = 100.0
-        c.shared_state.baseline_config_path = "/tmp/baseline.yaml"
-        c.shared_state.last_profile_trace = "/tmp/trace.json.gz"
+        c.shared_state.baseline_config_path = str(session_dir / "baseline.yaml")
+        c.shared_state.last_profile_trace = str(session_dir / "trace.json.gz")
         # params delegate requires a fresh roofline snapshot.
         c.shared_state.last_trace_analyze = {
-            "trace_input": "/tmp/trace.json.gz",
+            "trace_input": str(session_dir / "trace.json.gz"),
             "analysis_md_text": "FAKE_REPORT",
         }
         c.shared_state.save(session_dir)
@@ -932,7 +932,7 @@ async def test_coordinator_response_routes_back_to_requester(session_dir):
         payload={
             "target_agent": "kernel_agent",
             "kind": "trace_analyze",
-            "params": {"trace_input": "/tmp/trace.json.gz"},
+            "params": {"trace_input": str(session_dir / "trace.json.gz")},
         },
     )
     plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[req])])}
@@ -2505,7 +2505,7 @@ async def test_a_registered_run_is_reachable_by_the_wall_clock_defences(tmp_path
 @pytest.mark.asyncio
 async def test_a_registered_run_labels_its_llm_calls_with_the_action(tmp_path):
     """This is the only place ``type`` is published for gateway attribution."""
-    from hyperloom.common.llm_attribution import current_action
+    from hyperloom_common.llm.llm_attribution import current_action
 
     db = SqliteConnection(tmp_path / "x.db")
     locks = SqliteLeaseBackend(db)

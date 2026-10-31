@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.io import JsonFormat, WriteOptions, atomic_write_bytes, atomic_write_json
+from hyperloom_common.io import JsonFormat, WriteOptions, atomic_write_bytes, atomic_write_json
 
 from .remote_recipe._vendor.kb_store_client import (
     FILES_MEMBER_ROOT,

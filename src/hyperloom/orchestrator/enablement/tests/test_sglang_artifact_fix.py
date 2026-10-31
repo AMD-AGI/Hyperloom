@@ -33,6 +33,14 @@ def _diff(path: str) -> str:
     return f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-one\n+two\n"
 
 
+def _vet(tmp_path: Path, path: str, base: Path, other: Path) -> tuple[list[str], list[dict[str, str]], str]:
+    """Vet one patch naming ``path`` against ``base`` and ``other``: kept paths, ungrounded rows, verdict."""
+    patch = tmp_path / "p.patch"
+    patch.write_text(_diff(path), encoding="utf-8")
+    kept, ungrounded, grounding, _spans = _ps.vet_patches([str(patch)], base_checkout=base, candidate_roots=(other,))
+    return kept, ungrounded, grounding[str(patch)]
+
+
 # Cross-repo grounding
 
 
@@ -41,17 +49,17 @@ def test_patch_grounds_against_a_candidate_root(tmp_path):
     aiter = _checkout(tmp_path / "aiter", "aiter_file.py")
     sglang = _checkout(tmp_path / "sglang", "sglang_file.py")
 
-    res = _ps.ground_patch_text(_diff("sglang_file.py"), base_checkout=aiter, candidate_roots=(sglang,))
-    assert res.verdict == _ps.GROUND_APPLIES
+    _kept, _ungrounded, verdict = _vet(tmp_path, "sglang_file.py", aiter, sglang)
+    assert verdict == _ps.GROUND_APPLIES
 
 
 def test_patch_absent_from_every_root_is_reported_not_dropped(tmp_path):
     aiter = _checkout(tmp_path / "aiter", "aiter_file.py")
     sglang = _checkout(tmp_path / "sglang", "sglang_file.py")
 
-    res = _ps.ground_patch_text(_diff("ghost.py"), base_checkout=aiter, candidate_roots=(sglang,))
-    assert res.verdict == _ps.GROUND_MISSING_TARGET
-    assert not res.is_garbage
+    kept, _ungrounded, verdict = _vet(tmp_path, "ghost.py", aiter, sglang)
+    assert verdict == _ps.GROUND_MISSING_TARGET
+    assert kept
 
 
 def test_duplicate_matching_roots_are_reported_as_ambiguous(tmp_path):
@@ -60,10 +68,10 @@ def test_duplicate_matching_roots_are_reported_as_ambiguous(tmp_path):
     (base / "f.py").write_text("drifted\n", encoding="utf-8")
     _git("-C", str(base), "-c", "user.email=a@b", "-c", "user.name=x", "commit", "-qam", "drift")
 
-    res = _ps.ground_patch_text(_diff("f.py"), base_checkout=base, candidate_roots=(other,))
-    assert res.verdict == _ps.GROUND_AMBIGUOUS_ROOT
-    assert res.detail.startswith("ambiguous_root:")
-    assert not res.is_garbage
+    kept, ungrounded, verdict = _vet(tmp_path, "f.py", base, other)
+    assert verdict == _ps.GROUND_AMBIGUOUS_ROOT
+    assert ungrounded[0]["detail"].startswith("ambiguous_root:")
+    assert kept
 
 
 def test_basename_does_not_create_false_ambiguity(tmp_path):

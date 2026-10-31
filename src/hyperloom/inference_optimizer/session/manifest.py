@@ -16,9 +16,9 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.io import atomic_write_json
+from hyperloom_common.io import atomic_write_json
 from hyperloom.common.provenance import build_provenance
-from hyperloom.common.timeutil import now_iso, utc_now_compact
+from hyperloom_common.timeutil import now_iso, utc_now_compact
 
 from . import paths as _paths
 from .session_paths import manifest_path

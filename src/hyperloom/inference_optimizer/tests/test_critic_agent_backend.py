@@ -15,17 +15,15 @@ from typing import Any, Callable
 
 import pytest
 
-from hyperloom.orchestrator.roles import (
-    CriticAgentBackend,
-    RuntimeCall,
-)
+from hyperloom.orchestrator.roles import CriticAgentBackend
 from hyperloom.orchestrator.roles.base import BackendError, LLMCallFailed
-from hyperloom.common.llm_config import AnthropicMessageResult
+from hyperloom_common.llm.llm_config import AnthropicMessageResult
 from hyperloom.orchestrator.roles.critic_agent import (
     CRITIC_AGENT_LLM_CONNECT_TIMEOUT_SEC,
     CRITIC_AGENT_LLM_RW_TIMEOUT_SEC,
     CRITIC_AGENT_MAX_COMPLETION_TOKENS,
     CRITIC_AGENT_TRUNCATION_RETRY_FACTOR,
+    RuntimeCall,
     _REVIEW_OUTPUT_INSTRUCTIONS,
     _default_runtime_caller,
     _extract_review_json,
@@ -1808,7 +1806,7 @@ async def test_critic_cache_blocks_preserve_transport_prompt(
 ):
     import httpx
     from types import SimpleNamespace
-    from hyperloom.common import claude_oneshot, llm_config
+    from hyperloom_common.llm import claude_oneshot, llm_config
 
     bundle = _minimal_judge_bundle()
     bundle["notes"] = ["Unicode \u03bb ==== JUDGE BUNDLE ==== inside data"]

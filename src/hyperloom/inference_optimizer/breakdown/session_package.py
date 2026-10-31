@@ -24,7 +24,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Iterable
 
-from hyperloom.common.env import env_flag
+from hyperloom_common.env import env_flag
 from hyperloom.common.env_safety import redact_secret_env_values
 
 from ..session.optimization_journal import JOURNAL_FILENAME
