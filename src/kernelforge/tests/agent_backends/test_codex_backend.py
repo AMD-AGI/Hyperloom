@@ -856,8 +856,9 @@ def test_make_agent_fn_dispatches_codex_without_claude_model(
     # record is written afterwards by a dedicated summarizer session.
     assert "lesson" not in session
     assert session["summarize"] is None
-    assert session["end_reason"] == "resume_unavailable"
-    assert rationale.startswith("[gate edits=0 pass=False end=resume_unavailable")
+    # The session left the tree at HEAD, so the gate had no candidate to validate and nothing to resume for.
+    assert session["end_reason"] == "no_changes"
+    assert rationale.startswith("[gate edits=0 pass=False end=no_changes")
 
 
 @pytest.mark.parametrize(
@@ -1092,16 +1093,16 @@ def test_implementer_leaves_the_takeaway_to_the_lesson_turn(
     assert spec.system_prompt.index("starting with `PLAN:`") < spec.system_prompt.index("You do NOT write a takeaway")
 
 
-def test_outer_gate_counts_only_incremental_resume_target_edits(
+def test_outer_gate_edit_count_is_the_candidate_diff_not_the_turn_counts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Use per-turn target counts instead of cumulative dirty file lists."""
+    """The session reports the files its candidate changes from HEAD, however many turns edited them."""
     resume_calls = 0
     stop_calls = 0
 
     class FakeCodexBackend:
-        """Return one edit followed by an unchanged resumed candidate."""
+        """Report target edits on every turn."""
 
         name = "codex"
         capabilities = AgentCapabilities(resumable=True)
@@ -1111,12 +1112,12 @@ def test_outer_gate_counts_only_incremental_resume_target_edits(
             spec: AgentRunSpec,
             usage: object = None,
         ) -> AgentRunResult:
-            """Report the initial target edit."""
+            """Report the initial target edits."""
             return AgentRunResult(
                 text="PLAN: initial candidate",
                 session_id="thread-incremental-edits",
                 file_changes=["kernel.py"],
-                target_edit_count=1,
+                target_edit_count=3,
             )
 
         async def resume(
@@ -1126,14 +1127,14 @@ def test_outer_gate_counts_only_incremental_resume_target_edits(
             feedback: str,
             usage: object = None,
         ) -> AgentRunResult:
-            """Return the same cumulative diff without a new target edit."""
+            """Report more target edits to the same file."""
             nonlocal resume_calls
             resume_calls += 1
             return AgentRunResult(
-                text="PLAN: unchanged candidate",
+                text="PLAN: resumed candidate",
                 session_id=session_id,
                 file_changes=["kernel.py"],
-                target_edit_count=0,
+                target_edit_count=3,
             )
 
     def fake_factory(runtime, **kwargs: object) -> FakeCodexBackend:
@@ -1143,7 +1144,7 @@ def test_outer_gate_counts_only_incremental_resume_target_edits(
         return backend
 
     async def fake_on_stop(self, *_args, **_kwargs):
-        """Block once, then allow the unchanged resumed candidate."""
+        """Block once, then allow the resumed candidate."""
         nonlocal stop_calls
         stop_calls += 1
         if stop_calls == 1:
@@ -1160,6 +1161,14 @@ def test_outer_gate_counts_only_incremental_resume_target_edits(
     kernel.write_text("VALUE = 1\n")
     driver = tmp_path / "forge_driver.py"
     driver.write_text("print('allclose: True')\n")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "base"],
+        cwd=tmp_path,
+        check=True,
+    )
+    kernel.write_text("VALUE = 2\n")
     config = Config(
         workspace=str(tmp_path),
         agent_backend="codex",
