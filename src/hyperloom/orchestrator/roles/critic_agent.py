@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Literal
 
 from hyperloom.common.framework_arm import review_row_id
-from hyperloom.common.llm_config import (
+from hyperloom_common.llm.llm_config import (
     DEFAULT_CODEX_MODEL,
     AnthropicCompletionRequest,
     LLMConfigError,
@@ -29,15 +29,15 @@ from hyperloom.common.llm_config import (
     build_http_timeout,
     get_async_openai_client,
 )
-from hyperloom.common.jsonio import extract_last_json_matching
+from hyperloom_common.jsonio import extract_last_json_matching
 from hyperloom.inference_optimizer.protocol.intent import (
     IntentValidationError,
     NoIntentEmitted,
     validate_envelope,
 )
 from hyperloom.inference_optimizer.session.session_paths import allocate_turn_workdir, manifest_path
-from hyperloom.common.coerce import optional_positive_int, to_int
-from hyperloom.common.token_usage import anthropic_usage_counts, openai_usage_counts
+from hyperloom_common.coerce import optional_positive_int, to_int
+from hyperloom_common.llm.token_usage import anthropic_usage_counts, openai_usage_counts
 from hyperloom.inference_optimizer.trace.conversation_trace import ConversationRecord, append_conversation
 from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, LLMCallSite, append_llm_call, new_call_id
 from hyperloom.inference_optimizer.trace.parse_usage import reasoning_output_tokens

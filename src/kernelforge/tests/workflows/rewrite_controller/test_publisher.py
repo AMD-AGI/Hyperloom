@@ -109,10 +109,10 @@ def test_failure_while_writing_staging_keeps_the_previous_result(
     destination = publisher.publish_operator_result(layout, first)
     real_write = publisher.atomic_write_text
 
-    def _fail_report(path, text):
+    def _fail_report(path, text, **kwargs):
         if Path(path).name == publisher.REPORT_FILENAME:
             raise OSError("injected report failure")
-        return real_write(path, text)
+        return real_write(path, text, **kwargs)
 
     monkeypatch.setattr(publisher, "atomic_write_text", _fail_report)
 

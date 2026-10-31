@@ -17,8 +17,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common import llm_config
-from hyperloom.common.env import EnvValueError, env_bool
+from hyperloom_common.llm import llm_config
+from hyperloom_common.env import EnvValueError, env_bool
 from hyperloom.common.gpu_partition import PartitionModel
 from .executors import (
     _build_specialist_executor,
@@ -261,9 +261,17 @@ def _require_custom_entrypoint(framework: str, gpu_type: str | None = None) -> N
         apply_scriptable_runtime_defaults,
     )
     from hyperloom.orchestrator.actions.executors.bypass_scriptable import (
+        DeclaredLeversError,
+        load_declared_levers,
         resolve_scriptable_script,
         scriptable_script_candidates,
     )
+
+    try:  # a malformed declaration must fail here, not surface later as empty_grid
+        load_declared_levers()
+    except DeclaredLeversError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(2)
 
     bench: dict[str, Any] = {"framework": "custom"}
     envs: dict[str, Any] = {}
@@ -1728,8 +1736,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # Expose active session_dir to in-process executors via the canonical pin env var; reinforced here for resume
     # paths.
     os.environ["INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR"] = str(session_dir)
-    # Production: enable strict PolicyGate path-containment (escaping intents land as policy_denied).
-    os.environ["INFERENCE_OPTIMIZER_STRICT_PATHS"] = "1"
     # --reset-state backs up state.json and starts blank, before Coordinator is constructed.
     if getattr(args, "reset_state", False):
         _reset_state_file(session_dir, framework=state.framework)

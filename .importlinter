@@ -27,6 +27,8 @@
 [importlinter]
 root_packages =
     hyperloom
+    hyperloom_common
+    hyperloom_kb
     kernelforge
 include_external_packages = False
 exclude_type_checking_imports = True
@@ -103,16 +105,31 @@ ignore_imports =
 unmatched_ignore_imports_alerting = error
 
 
-[importlinter:contract:kf-only-common]
-name = kernelforge may depend on hyperloom.common only
+[importlinter:contract:kf-no-hyperloom]
+name = kernelforge does not depend on hyperloom
 type = forbidden
+# What the two packages share is the `hyperloom_common` package; nothing in the optimizer
+# is KernelForge's to reach for.
 source_modules = kernelforge
-forbidden_modules =
-    hyperloom.cli
-    hyperloom.orchestrator
-    hyperloom.inference_optimizer
-    hyperloom.agents
+forbidden_modules = hyperloom
+allow_indirect_imports = True
 ignore_imports =
+    hyperloom.**.tests.** -> **
+    kernelforge.tests.** -> **
+unmatched_ignore_imports_alerting = none
+
+
+[importlinter:contract:common-is-leaf]
+name = hyperloom_common imports nothing else from the project
+type = forbidden
+source_modules = hyperloom_common
+forbidden_modules =
+    hyperloom
+    hyperloom_kb
+    kernelforge
+ignore_imports =
+    hyperloom_common.tests.** -> **
+    hyperloom_common.llm.tests.** -> **
     hyperloom.**.tests.** -> **
     kernelforge.tests.** -> **
 unmatched_ignore_imports_alerting = none
@@ -183,8 +200,8 @@ ignore_imports =
 unmatched_ignore_imports_alerting = none
 
 
-[importlinter:contract:common-is-leaf]
-name = hyperloom.common imports nothing else from the project
+[importlinter:contract:hl-common-is-leaf]
+name = hyperloom.common imports nothing from the project but hyperloom_common
 type = forbidden
 source_modules = hyperloom.common
 forbidden_modules =
@@ -283,13 +300,14 @@ name = no cycles between sibling packages (baseline may only shrink)
 type = acyclic_siblings
 ancestors =
     hyperloom
+    hyperloom_common
     kernelforge
 # Baseline: the exact imports import-linter nominates as cycle breakers on
 # main today. Removing one of these imports means deleting its line here.
 ignore_imports =
     hyperloom.**.tests.** -> **
     kernelforge.tests.** -> **
-    hyperloom.common.llm_config -> hyperloom.common.claude_oneshot
+    hyperloom_common.llm.llm_config -> hyperloom_common.llm.claude_oneshot
     hyperloom.inference_optimizer.breakdown.critic_reviews -> hyperloom.inference_optimizer.breakdown.collectors._common
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._aiter_jit
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._partition_shape

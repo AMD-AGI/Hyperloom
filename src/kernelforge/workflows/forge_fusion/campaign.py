@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
+from hyperloom_common.jsonio import read_json
 from kernelforge.workflows.forge_fusion.driver_shim import DriverSpec, write_driver
 from kernelforge.workflows.forge_fusion.models import Recipe, ValidationResult
 from kernelforge.workflows.forge_fusion.shadow_repo import SHADOW_BRANCH
@@ -79,11 +80,13 @@ def _failed_campaign(note: str) -> CampaignOutcome:
 
 def _read_result_json(result_json: str) -> dict:
     """Read the campaign result the loop wrote to ``--result-json``."""
-    try:
-        return json.loads(Path(result_json).read_text(encoding="utf-8")) or {}
-    except (OSError, ValueError) as exc:
-        log.error("no usable forge-loop result at %s: %s", result_json, exc)
-        return {}
+    return read_json(
+        Path(result_json),
+        {},
+        require_dict=True,
+        on_error=lambda exc: log.error("no usable forge-loop result at %s: %s", result_json, exc),
+        errors="replace",
+    )
 
 
 def _read_harness_reports(report_log: str) -> list[dict]:

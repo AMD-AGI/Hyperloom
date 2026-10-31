@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence
 
-from hyperloom.common.coerce import to_float
+from hyperloom_common.coerce import to_float
 from kernelforge.agent_backends.base import AgentRunSpec, AgentToolPolicy, watchdog_timeout_sec
 from kernelforge.agent_backends.session_resume import is_api_failure
 from kernelforge.config.resources import resource_path
