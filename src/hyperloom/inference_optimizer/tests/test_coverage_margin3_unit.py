@@ -11,7 +11,7 @@ import pytest
 
 
 def test_common_io_bytes_and_safe_mtime_edges(monkeypatch, tmp_path) -> None:
-    from hyperloom.common import io
+    from hyperloom_common import io
 
     path = tmp_path / "nested" / "payload.bin"
     io.atomic_write_bytes(path, b"abc", options=io.WriteOptions(make_parents=True, fsync=True, mode=0o777))
@@ -30,11 +30,11 @@ def test_common_io_bytes_and_safe_mtime_edges(monkeypatch, tmp_path) -> None:
 
 
 def test_llm_config_parse_and_derive_edges() -> None:
-    from hyperloom.common.llm_config import (
+    from hyperloom_common.llm.llm_config import (
         claude_sdk_env_options,
         derive_openai_base_url,
     )
-    from hyperloom.common.llm_headers import parse_custom_headers
+    from hyperloom_common.llm.llm_headers import parse_custom_headers
 
     assert parse_custom_headers(None) == {}
     assert parse_custom_headers("   ") == {}

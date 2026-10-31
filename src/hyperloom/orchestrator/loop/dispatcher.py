@@ -12,11 +12,11 @@ import time
 from collections.abc import Awaitable, Callable, Collection
 from functools import partial
 from typing import Any, NamedTuple
-from hyperloom.common.coerce import to_int
+from hyperloom_common.coerce import to_int
 from hyperloom.common.deadline import Deadline
-from hyperloom.common.env import is_truthy
+from hyperloom_common.env import is_truthy
 from hyperloom.common.framework_arm import verdict_subject
-from hyperloom.common.llm_attribution import current_action_scope
+from hyperloom_common.llm.llm_attribution import current_action_scope
 from hyperloom.common.proctree import TERM_GRACE_SEC
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     KERNEL_AGENT_OWNED_ACTIONS,
@@ -36,9 +36,9 @@ from ..actions.executors._subprocess_kill import (
 from ..phases import dispatch_order, machine_state as _phase_state
 from ..bus.message_bus import Message
 from ..kernel.request_handlers import KERNEL_REQUEST_HANDLERS
+from ..policy.denial import PolicyDenied
 from ..policy.gate import (
     INTEGRATE_PATCH_PERMISSIVE_VERDICTS,
-    PolicyDenied,
     SPECIALIST_FROM_AGENT_PREFIX,
 )
 from ..policy.projection import serving_tp_for_policy
@@ -594,7 +594,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             serving_slot_busy,
         )
         from ..actions.executors._ray_serving import maybe_gpu_specialist_lease
-        from ..specialists.profile import holds_serving_slot, is_authoring_specialist, requires_gpu
+        from ..specialists.profile import is_authoring_specialist, requires_gpu, resolve_specialist_profile
         from ..specialists.profile import uses_whole_machine_gpu_lane
 
         params = task.params
@@ -647,7 +647,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         # ``num_gpus`` accounting still keeps it off serving's cards.
         gpu_specialist_lease = maybe_gpu_specialist_lease(
             num_gpus=gpu_count,
-            serving_slot=holds_serving_slot(params),
+            serving_slot=resolve_specialist_profile(params).reserves_benchmark_lane,
         )
         if gpu_specialist_lease is not None:
             # Ray assigns and masks the physical cards, so the specialist sees a logical 0..N-1

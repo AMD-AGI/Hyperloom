@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from kernelforge.workflows.forge_loop.campaign.experiments_layout import ExperimentsLayout, tagged_iteration
-from kernelforge.utils.durable_io import atomic_write_text
+from hyperloom_common.io import DURABLE, atomic_write_text
 
 
 @dataclass(frozen=True)
@@ -107,7 +107,7 @@ class HandoffStore:
                 time.gmtime(),
             ),
         }
-        atomic_write_text(destination, json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        atomic_write_text(destination, json.dumps(payload, indent=2, sort_keys=True) + "\n", options=DURABLE)
         return destination
 
     def read(self, iteration: int) -> dict[str, Any]:

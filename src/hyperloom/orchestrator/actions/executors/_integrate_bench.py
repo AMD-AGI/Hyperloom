@@ -11,7 +11,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.coerce import to_str_list
+from hyperloom_common.coerce import to_str_list
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.perf_metric import constraint_fields
 from hyperloom.inference_optimizer.grid_server_args import compose_server_args

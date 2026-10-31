@@ -35,7 +35,7 @@ from kernelforge.workflows.forge_loop.bootstrap.warm_start import _read_kb_warm_
 from kernelforge.agent_backends.runtime import agent_runtime
 from kernelforge.config import Config, KnowledgeConfig, agent_runtime_overrides
 from kernelforge.workflows.forge_loop.memory.knowledge_integration import kb_reference_program_md
-from kernelforge.utils.durable_io import atomic_write_json
+from hyperloom_common.io import DURABLE, JsonFormat, atomic_write_json
 from kernelforge.utils.git import git_head
 from kernelforge.workflows.forge_loop.campaign.schema import ExperimentSubject
 
@@ -832,7 +832,7 @@ def _publish(run: _ForgeRun, loop_runner: IterationLoop, reporter: _RunReporter)
     result = reporter.build_result(kb_experience=kb_experience)
     result_json = run.request.artifacts.result_json
     if result_json:
-        atomic_write_json(result_json, result)
+        atomic_write_json(result_json, result, fmt=JsonFormat(trailing_newline=True), options=DURABLE)
     run.publish_result(result)
     _write_pr_provenance(
         workspace_dir=run.request.campaign.workspace_dir,

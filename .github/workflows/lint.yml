@@ -128,7 +128,7 @@ jobs:
           python-version: "3.11"
 
       - name: Byte-compile package sources
-        run: python -m compileall -q src/kernelforge src/hyperloom
+        run: python -m compileall -q src/hyperloom_common src/kernelforge src/hyperloom
 
   bandit:
     name: bandit (medium+, production code)
@@ -170,7 +170,7 @@ jobs:
           # kernelforge/data out of the scan) is inert unless the config is
           # passed. B101 in the same table is already below --severity-level
           # medium, so the config changes nothing for the existing scan.
-          bandit -c pyproject.toml -r src/hyperloom src/kernelforge scripts \
+          bandit -c pyproject.toml -r src/hyperloom_common src/hyperloom src/kernelforge scripts \
             -x "*/tests/*" -q --severity-level medium
 
       - name: Advisory notice when Bandit failed
@@ -236,7 +236,7 @@ jobs:
       - name: Mypy
         id: mypy
         continue-on-error: true
-        run: mypy src/hyperloom
+        run: mypy src/hyperloom_common src/hyperloom
 
       - name: Advisory notice when Mypy failed
         if: always() && steps.mypy.outcome == 'failure'

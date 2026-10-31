@@ -81,7 +81,7 @@ def test_the_detector_actually_detects(tmp_path: Path) -> None:
 
     # Neighbouring modules under the same package must not trip it.
     innocent = [
-        "from hyperloom.common import io",
+        "from common import io",
         "from hyperloom.inference_optimizer.breakdown import exporter",
         "from hyperloom.inference_optimizer.breakdown import schema",
     ]

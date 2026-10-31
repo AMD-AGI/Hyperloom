@@ -16,8 +16,8 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from hyperloom.common.git_safety import safe_directory_args
-from hyperloom.common.unified_diff import PatchOp, repo_relative_manifest
+from hyperloom_common.git_safety import safe_directory_args
+from hyperloom_common.unified_diff import PatchOp, repo_relative_manifest
 from hyperloom.inference_optimizer.trace.task_progress import heartbeat_while_output_flows
 from hyperloom.orchestrator.kernel import apply_kernel_patch
 

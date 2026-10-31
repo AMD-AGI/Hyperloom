@@ -17,8 +17,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from . import machine_state as _phase_state
 from .kernel_round_budget import controller_round_stop, measurement_round_sec
-from hyperloom.common.coerce import first_str, to_int
-from hyperloom.common.env import env_bool, env_float
+from hyperloom_common.coerce import first_str, to_int
+from hyperloom_common.env import env_bool, env_float
 from hyperloom.inference_optimizer.session.geak_rebench_verdict import REBENCH_NO_PROMOTE
 from hyperloom.inference_optimizer.breakdown.recorder import tool_versions
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
@@ -544,7 +544,7 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
     async def on_enter_kernel(self, tr: "Transition") -> None:
         """Open the KERNEL timeline and enqueue the ``kernel_agent`` task that carries the phase's work."""
         state = self.shared_state
-        if not self._coord.phase_machine.kernel_enabled():
+        if not state.kernel_enabled:
             log.info(
                 "KERNEL entry hook fired with kernel_enabled=False (from=%s)",
                 tr.from_phase or "<unknown>",

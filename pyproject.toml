@@ -367,6 +367,7 @@ branch = false
 # combine into consistent totals.
 relative_files = true
 source = [
+    "src/hyperloom_common",
     "src/hyperloom",
     "src/kernelforge",
     "src/hyperloom_kb",
@@ -568,9 +569,9 @@ cyclomatic-complexity = 20
 # a reader has to re-read rather than read.
 cognitive-complexity = 30
 # Lines of code in the body: the ``def`` lines, decorators, blank, comment and
-# docstring lines do not count. Past 50 a function rarely does one thing; split
-# it along its steps.
-function-lines = 50
+# docstring lines do not count. Past 60, about the tree's 98th percentile, a
+# function rarely does one thing; split it along its steps.
+function-lines = 60
 # Past four nested blocks the innermost line depends on five conditions at
 # once; extract the inner loop or invert a condition.
 nested-blocks = 4
@@ -728,7 +729,7 @@ exclude = ["**/*.md", "**/*.rst"]
 
 [tool.mypy]
 python_version = "3.10"
-files = ["src/hyperloom"]
+files = ["src/hyperloom_common", "src/hyperloom"]
 exclude = [
     ".*/tests/.*",
     "build",

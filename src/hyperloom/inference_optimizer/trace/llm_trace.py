@@ -11,8 +11,8 @@ from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.coerce import text_or_none, to_int
-from hyperloom.common.io import JsonLineFormat, append_jsonl
+from hyperloom_common.coerce import text_or_none, to_int
+from hyperloom_common.io import JsonLineFormat, append_jsonl
 from hyperloom.inference_optimizer.session.session_paths import llm_calls_path
 from ._row_utils import call_key_fields, validate_closed_row
 

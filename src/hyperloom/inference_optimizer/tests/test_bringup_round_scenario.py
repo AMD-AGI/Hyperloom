@@ -267,7 +267,6 @@ async def test_a_bringup_round_peels_two_blockers_and_lands_one_observation_per_
         role_registry=default_role_registry(),
         session_dir=session,
         shared_state=None,
-        strict_paths=False,
     )
 
     observations: list = []
@@ -322,7 +321,6 @@ async def test_a_bringup_round_peels_two_blockers_and_lands_one_observation_per_
             worktree_base=None,
             system_prompt="",
             user_prompt="",
-            max_turns=1,
         )
         outcome = await specialists.run(spawn)
         await tasks.transition(task_id, "running")

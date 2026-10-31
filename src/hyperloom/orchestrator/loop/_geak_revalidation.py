@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging as _logging
 from typing import Any, Mapping, NamedTuple
 
-from hyperloom.common.env import env_int
+from hyperloom_common.env import env_int
 from hyperloom.common.overlay import overlay_is_loadable
 from hyperloom.inference_optimizer.session.geak_rebench_verdict import (
     REBENCH_FAILED,
@@ -657,7 +657,7 @@ class GeakRevalidation(CoordinatorCollaborator):
         return {"validated": False, "status": res.get("status"), "reason": reason}
 
     async def _replay_through_geak(self, accepted: Mapping[str, Any], mode: str) -> dict[str, Any]:
-        from hyperloom.common.jsonio import read_json
+        from hyperloom_common.jsonio import read_json
         from hyperloom.inference_optimizer.session.session_paths import unique_runs_dir
         from ..actions.executors._geak_sweep import GeakSweepSpec, sweep_via_geak
         from ..actions.executors._workload_envs import geak_metric_axis
