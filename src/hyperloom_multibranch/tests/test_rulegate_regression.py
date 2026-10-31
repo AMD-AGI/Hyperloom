@@ -330,6 +330,35 @@ async def test_every_failed_case_is_named(session):
     assert outcome.reason == "fp8_overflow: reproduced; nan_logits: withdrawn (the branch was stopped)"
 
 
+def _fixed_on(fix: str, *, root: ReproAnswer = REPRODUCED):
+    """A case that reproduces on every commit but ``fix``, the root answering ``root``."""
+
+    def answer(request):
+        if request.parent_commit == fix:
+            return NOT_REPRODUCED
+        return root if request.parent_commit == ROOT else REPRODUCED
+
+    return answer
+
+
+async def test_every_case_runs_on_a_commit_that_lacks_its_fix_and_one_the_root_reproduces_too_is_carried(session):
+    session.answers.update({"fp8_overflow": _fixed_on("c1"), "nan_logits": _fixed_on("c2")})
+
+    outcome = await session.regression.check_every_case("c2")
+
+    assert outcome == RegressionOutcome(True, cases=2, carried=("fp8_overflow",))
+    ran = sorted((run.parent_commit, run.attachments[0].id) for run in session.runs())
+    assert ran == [("c0", "fp8_overflow"), ("c2", "fp8_overflow"), ("c2", "nan_logits")]
+
+
+async def test_a_case_that_reproduces_on_a_commit_but_runs_clean_on_the_root_fails_every_case_check(session):
+    session.answers.update({"fp8_overflow": _fixed_on("c1", root=NOT_REPRODUCED), "nan_logits": _fixed_on("c2")})
+
+    outcome = await session.regression.check_every_case("c2")
+
+    assert outcome == RegressionOutcome(False, "fp8_overflow: reproduced", cases=2)
+
+
 @pytest.mark.parametrize("verdict", [NOT_REPRODUCED, REPRODUCED])
 async def test_a_case_s_verdict_on_a_recipe_is_not_asked_for_again(session, verdict):
     session.answers["fp8_overflow"] = verdict

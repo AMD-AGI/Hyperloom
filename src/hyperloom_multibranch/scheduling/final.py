@@ -8,7 +8,9 @@ its branch, unless that head carries the recipe the integration head already car
 leaves behind. Each is validated through the toolbox as a session measurement: one ``SWEEP`` test over the workload's
 :attr:`~hyperloom_multibranch.scheduling.settings.Workload.final_concs`, read per conc from its rounds, and a
 cold-start reproduction the rule gate measures against the commit's own recorded value and holds to the accuracy gate,
-and the regression set of the commit's own ancestry run on the commit itself. A sweep that gives no value at the
+and every case of the session's regression set run on the commit itself, whether it builds on the case's fix or not:
+a case that reproduces there but not on the root disqualifies it, and the candidates that carry the fewest of the
+root's defects are the ones ranked. A sweep that gives no value at the
 operating point that decides does not void the candidate: the reproduction measured the same commit there, so the
 candidate is ranked on that one point and the choice's reason says so. The toolbox measures a
 sweep over the concs its request names and the primary one alone when it names none, so FINAL names them. FINAL
@@ -35,12 +37,7 @@ from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import RequestRejected, TestWithdrawn
 from hyperloom_multibranch.blackboard.changes import same_recipe
 from hyperloom_multibranch.scheduling.integrator import defects_beyond_gain
-from hyperloom_multibranch.scheduling.requests import (
-    NO_DELTA,
-    SessionChecks,
-    integration_test_request,
-    together,
-)
+from hyperloom_multibranch.scheduling.requests import SessionChecks, integration_test_request, together
 from hyperloom_multibranch.scheduling.settings import Workload
 
 #: How far below the other candidate a non-primary sweep point may fall before the candidate is passed over.
@@ -143,7 +140,8 @@ class CandidateCheck:
 
     ``curve`` is the sweep's primary metric per conc, without the concs it measured nothing at; ``degraded_concs``
     are the sweep points that fell below the other candidate's. ``regression_cases`` is how many regression cases ran
-    on the commit, none when no fix it builds on registered one. ``note`` says what the choice's reason should carry
+    on the commit, none when the session registered none, and ``carried`` names those that reproduced on it and on the
+    root alike, the root's defects it still carries. ``note`` says what the choice's reason should carry
     about how this candidate was measured, for a candidate that was still ranked on something short of a whole sweep.
     """
 
@@ -153,6 +151,7 @@ class CandidateCheck:
     reproduced: bool = False
     regression_passed: bool = False
     regression_cases: int = 0
+    carried: tuple[str, ...] = ()
     degraded_concs: tuple[int, ...] = ()
     error: str = ""
     note: str = ""
@@ -196,11 +195,33 @@ def _with_degradation(checks: tuple[CandidateCheck, ...], conc: int) -> tuple[Ca
     return tuple(marked(check) for check in checks)
 
 
-def pick_final(checks: tuple[CandidateCheck, ...], metric: str, conc: int) -> FinalChoice:
-    """The eligible candidate with the higher ``metric`` at ``conc``, unless only it degrades elsewhere in the sweep."""
+def _carried(reason: str, eligible: list[CandidateCheck], chosen: CandidateCheck, fewest: int) -> str:
+    """``reason`` after the candidates passed over for carrying more of the root's defects, and before those the
+    chosen one still carries."""
 
-    marked = _with_degradation(checks, conc)
-    ranked = sorted((check for check in marked if check.eligible), key=lambda check: -check.curve[conc])
+    over = [check for check in eligible if len(check.carried) > fewest]
+    if over:
+        said = "; ".join(
+            f"{check.candidate.label} carries more of the root's defects ({', '.join(check.carried)})" for check in over
+        )
+        reason = f"{said}; among the rest, {reason}"
+    if chosen.carried:
+        reason = f"{reason}; {chosen.candidate.label} still carries the root's defects {', '.join(chosen.carried)}"
+    return reason
+
+
+def pick_final(checks: tuple[CandidateCheck, ...], metric: str, conc: int) -> FinalChoice:
+    """The eligible candidate with the higher ``metric`` at ``conc``, unless only it degrades elsewhere in the sweep,
+    among those that carry the fewest of the root's defects."""
+
+    eligible = [check for check in checks if check.eligible]
+    fewest = min((len(check.carried) for check in eligible), default=0)
+    staying = {
+        check.candidate.label: check
+        for check in _with_degradation(tuple(check for check in eligible if len(check.carried) == fewest), conc)
+    }
+    marked = tuple(staying.get(check.candidate.label, check) for check in checks)
+    ranked = sorted(staying.values(), key=lambda check: -check.curve[conc])
     if not ranked:
         return FinalChoice(None, marked, "no candidate passed the final validation", metric, conc)
     chosen = next((check for check in ranked if not check.degraded_concs), ranked[0])
@@ -214,6 +235,7 @@ def pick_final(checks: tuple[CandidateCheck, ...], metric: str, conc: int) -> Fi
         reason = f"every candidate degrades somewhere in the sweep; the higher {metric} at conc {conc} decides"
     else:
         reason = f"the higher {metric} at conc {conc}"
+    reason = _carried(reason, eligible, chosen, fewest)
     notes = "; ".join(check.note for check in marked if check.note)
     return FinalChoice(chosen.candidate, marked, f"{reason}; {notes}" if notes else reason, metric, conc)
 
@@ -266,7 +288,7 @@ class FinalSelector:
     async def _check(self, candidate: FinalCandidate) -> CandidateCheck:
         sweep = asyncio.ensure_future(self._sweep(candidate.commit))
         repro = asyncio.ensure_future(self._reproduction(candidate.commit))
-        regression = asyncio.ensure_future(self._regression.check(candidate.commit, NO_DELTA, sources=()))
+        regression = asyncio.ensure_future(self._regression.check_every_case(candidate.commit))
         await together(sweep, repro, regression)
         swept, reproduction, regressed = sweep.result(), repro.result(), regression.result()
         check = CandidateCheck(
@@ -276,6 +298,7 @@ class FinalSelector:
             reproduction.reproduced,
             regressed.passed,
             regression_cases=regressed.cases,
+            carried=regressed.carried,
         )
         if self._workload.conc in check.curve:
             return check
