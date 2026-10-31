@@ -30,6 +30,7 @@ from ....measurement.integrate_performance import assess_integrate_performance
 from ....state.failure_evidence import (
     MAGPIE_NONZERO_INVALID_MEASUREMENT,
     SUBPROCESS_NONZERO,
+    engine_capacity_cause,
     nonzero_output_signature,
 )
 from ...stop_attribution import SESSION_TIME_EXHAUSTED_CLASS, STOPPED_BY_THE_RUN
@@ -67,6 +68,12 @@ _BENCHMARK_REPORT_NAME = "benchmark_report.json"
 # climbed 14,202 -> 19,374 -> 22,425 tok/s across three rounds of one unchanged config, i.e. +36% into round 2 and
 # another +16% into round 3.
 _COLD_START_DELTA_WARN_PCT = 25.0
+
+
+def _capacity_fields(error_class: str, error: str) -> dict[str, Any]:
+    """The parsed capacity numbers of an ``engine_capacity`` failure; nothing for any other class."""
+    cause = engine_capacity_cause(error) if error_class == "engine_capacity" else None
+    return {"capacity": cause} if cause else {}
 
 
 class _BenchmarkRoundsMixin:
@@ -657,6 +664,7 @@ class _BenchmarkRoundsMixin:
                 "error_class": error_class,
                 "returncode": finished.returncode,
                 "error": redact_secret_values(error),
+                **_capacity_fields(error_class, error),
                 **failure_extras,
             }
         if finished.returncode != 0:
@@ -731,6 +739,7 @@ class _BenchmarkRoundsMixin:
                 "error_class": error_class,
                 "error": redact_secret_values(error),
                 "output_signature": nonzero_output_signature(error_class, finished.stdout, finished.stderr),
+                **_capacity_fields(error_class, error),
             }
         if finished.returncode == 0:
             return None

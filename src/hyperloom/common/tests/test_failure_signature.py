@@ -470,6 +470,20 @@ def test_resource_constraint_tp() -> None:
     assert sig.kind == RESOURCE_CONSTRAINT
 
 
+def test_engine_capacity_is_a_resource_constraint_not_a_kernel_or_arch_gap() -> None:
+    """vLLM start-time capacity errors say the card holds less than the launch asked for."""
+    for text in (
+        "ValueError: max_num_seqs (256) exceeds available Mamba cache blocks (237). Each decode sequence "
+        "requires one Mamba cache block, so CUDA graph capture cannot proceed.",
+        "ValueError: To serve at least one request with the model's max seq len (262144), (24.5 GiB KV cache is "
+        "needed, which is larger than the available KV cache memory (9.1 GiB).",
+        "ValueError: No available memory for the cache blocks. Try increasing `gpu_memory_utilization`",
+    ):
+        sig = classify_failure(text)
+        assert sig.kind == RESOURCE_CONSTRAINT, text
+        assert sig.kind not in (HIP_KERNEL_MISSING, MISSING_MODEL_ARCH), text
+
+
 def test_resource_constraint_no_kv_cache() -> None:
     sig = classify_failure("No GPU memory left for the KV cache. Please try enabling quantization")
     assert sig.kind == RESOURCE_CONSTRAINT

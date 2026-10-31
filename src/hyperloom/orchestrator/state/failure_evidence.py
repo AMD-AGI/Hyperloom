@@ -94,6 +94,37 @@ KV_CACHE_OOM_MARKERS: tuple[str, ...] = (
     "raise --mem-fraction-static above",
 )
 
+# vLLM start-time capacity errors: the card holds less than the launch asked for. Each entry names its kind and
+# captures the numbers the message carries.
+_ENGINE_CAPACITY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "mamba_cache_blocks",
+        re.compile(r"max_num_seqs \((?P<requested>\d+)\) exceeds available Mamba cache blocks \((?P<available>\d+)\)"),
+    ),
+    (
+        "kv_cache_memory",
+        re.compile(
+            r"max seq len \((?P<max_model_len>\d+)\), \((?P<needed_gib>[\d.]+) GiB KV cache is needed, "
+            r"which is larger than the available KV cache memory \((?P<available_gib>[\d.]+) GiB\)"
+        ),
+    ),
+    ("kv_cache_empty", re.compile(r"No available memory for the cache blocks")),
+)
+
+
+def engine_capacity_cause(text: str) -> dict[str, Any] | None:
+    """Return the parsed vLLM engine-capacity error in ``text``, else ``None``.
+
+    The dict names the ``kind`` and the numbers the message carries; a capacity failure is the host lacking room for
+    the launch settings, so it never reads as a kernel or architecture gap.
+    """
+    for kind, pattern in _ENGINE_CAPACITY_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            numbers = {k: float(v) if "." in v else int(v) for k, v in match.groupdict().items()}
+            return {"kind": kind, **numbers}
+    return None
+
 # Text in which a process says it died. Each marker names the death itself, not
 # the subsystem around it: ranks, collectives and worker ids are printed by every
 # healthy multi-GPU launch, so matching those reports a crash for a run that only
@@ -193,6 +224,8 @@ def classify_root_cause_type(error_class: str, error_text: str) -> str:
     blob = f"{error_class} {error_text}".lower()
     if error_class == "kv_cache_oom" or any(m in blob for m in KV_CACHE_OOM_MARKERS):
         return "kv_cache_oom"
+    if error_class == "engine_capacity" or engine_capacity_cause(error_text) is not None:
+        return "engine_capacity"
     if "out of memory" in blob or "hip oom" in blob:
         return "oom"
     if error_class == "timeout" or "benchmark exceeded" in blob:

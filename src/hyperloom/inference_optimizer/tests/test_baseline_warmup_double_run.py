@@ -1801,6 +1801,64 @@ def test_baseline_classifies_vllm_engine_init_as_server_init_dead(
     assert "Engine core initialization failed" in result["error"]
 
 
+_MAMBA_CAPACITY_ERROR = (
+    "(EngineCore pid=7) ValueError: max_num_seqs (256) exceeds available Mamba cache blocks (237). "
+    "Each decode sequence requires one Mamba cache block, so CUDA graph capture cannot proceed."
+)
+
+
+def _engine_capacity_server_log() -> str:
+    """vLLM writes the start-failure marker first and the traceback, ending in the cause, after it."""
+    frames = "".join(f"(EngineCore pid=7)     frame {i}\n" for i in range(55))
+    return (
+        "(EngineCore pid=7) ERROR core.py:1349] EngineCore failed to start.\n"
+        "(EngineCore pid=7) Traceback (most recent call last):\n"
+        f"{frames}{_MAMBA_CAPACITY_ERROR}\n"
+        "(APIServer pid=1) RuntimeError: Engine core initialization failed. Failed core proc(s): {}\n"
+    )
+
+
+@pytest.mark.parametrize("with_workspace", [False, True])
+def test_baseline_classifies_engine_capacity_separately_from_server_init_dead(
+    tmp_path,
+    with_workspace,
+):
+    """A vLLM capacity error keeps its own class and its cause line, with or without a benchmark_* workspace."""
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    output_dir = tmp_path / "ws"
+
+    def fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        slot.mkdir(parents=True, exist_ok=True)
+        if with_workspace:
+            (slot / "benchmark_vllm_20260602_010101").mkdir(parents=True)
+        (slot / "server.log").write_text(_engine_capacity_server_log(), encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 1, "", "magpie wrapper noise")
+
+    executor = _executor(base, tmp_path)
+    ctx = _make_ctx(
+        {
+            "baseline_double_run": False,
+            "output_dir": str(output_dir),
+            "timeout_sec": 10,
+            "gpu_type": "mi300x",
+        }
+    )
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "failed"
+    assert result["error_class"] == "engine_capacity", result
+    assert "max_num_seqs (256) exceeds available Mamba cache blocks (237)" in result["error"]
+    assert result["capacity"] == {"kind": "mamba_cache_blocks", "requested": 256, "available": 237}
+
+
 def test_baseline_invalid_measurement_with_server_death_marker_is_dead(
     tmp_path,
     monkeypatch,

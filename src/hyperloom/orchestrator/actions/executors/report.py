@@ -28,7 +28,7 @@ from hyperloom.inference_optimizer.session.optimization_journal import read_jour
 from hyperloom.inference_optimizer.session.paths import db_path_for
 from ...kernel import kernel_decisions
 from ...measurement.baseline_budget import BASELINE_BUDGET_STOP_EXPLANATIONS
-from ...state.failure_evidence import classify_root_cause_type
+from ...state.failure_evidence import classify_root_cause_type, engine_capacity_cause
 from ...state.shared_state import SharedState
 
 
@@ -77,6 +77,9 @@ def _pick_failure_headline(text: str) -> str:
     lines = [ln.strip() for ln in str(text or "").splitlines() if ln.strip()]
     if not lines:
         return ""
+    for ln in lines:
+        if engine_capacity_cause(ln) is not None:
+            return ln
     priority = (
         "out of memory",
         "fatal",
