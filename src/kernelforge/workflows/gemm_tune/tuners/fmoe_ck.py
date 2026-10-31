@@ -237,23 +237,7 @@ class FmoeCKTuner(BaseTuner):
         tuned_csv = self.work_dir / "tuned_fmoe.csv"
         profile_csv = self.work_dir / "profile_fmoe.csv"
 
-        # Flags shared by every shape (except -i/-o). aiter --timeout is injected below to activate mp_tuner's
-        # per-candidate GPU-fault isolation -- MoE asm candidates fault on gfx950, and without --timeout the run
-        # hangs.
-        base_args = [
-            "-o2",
-            str(profile_csv),
-            "--mp",
-            str(self.ctx.mp),
-            "--compare",
-            "--iters",
-            str(self.ctx.iters),
-            "--warmup",
-            str(self.ctx.warmup),
-            "--min_improvement_pct",
-            str(self.ctx.min_improvement_pct),
-            "-v",
-        ]
+        base_args = self._base_args(profile_csv)
 
         aiter_root = resolve_aiter_root()
         cwd = aiter_root if aiter_root else None
@@ -264,21 +248,12 @@ class FmoeCKTuner(BaseTuner):
         isolated = _tr.is_isolation_enabled()
         iso_candidate = None
         if isolated:
-            blocklist = _tr.FaultBlocklist(
-                getattr(self.ctx, "faulted_blocklist_path", None),
-                {
-                    "gpu_type": getattr(self.ctx, "gpu_type", ""),
-                    "quant_type": getattr(self.ctx, "quant_type", ""),
-                    "tp": getattr(self.ctx, "tp", 1),
-                    "tuner": self.name,
-                },
-            )
             rc, stdout, stderr, iso_candidate = _tr.run_isolated(
                 invocation,
                 _tr.IsolationGuard(
                     outer_timeout_s=self.ctx.timeout_s,
                     gpu_ids=getattr(self.ctx, "gpu_ids", "") or "",
-                    blocklist=blocklist,
+                    blocklist=self._fault_blocklist(),
                 ),
             )
         else:
@@ -316,6 +291,42 @@ class FmoeCKTuner(BaseTuner):
         candidate_csv = (
             iso_candidate if isolated else _tr._latest_candidate(compare_dir, tuned_csv.stem, run_start_time)
         )
+        return self._tune_result(shape_results, candidate_csv, key_source)
+
+    def _base_args(self, profile_csv: Path) -> list[str]:
+        """The gemm_moe_tune.py command-line flags this run's context selects."""
+        # Flags shared by every shape (except -i/-o). aiter --timeout is injected below to activate mp_tuner's
+        # per-candidate GPU-fault isolation -- MoE asm candidates fault on gfx950, and without --timeout the run
+        # hangs.
+        return [
+            "-o2",
+            str(profile_csv),
+            "--mp",
+            str(self.ctx.mp),
+            "--compare",
+            "--iters",
+            str(self.ctx.iters),
+            "--warmup",
+            str(self.ctx.warmup),
+            "--min_improvement_pct",
+            str(self.ctx.min_improvement_pct),
+            "-v",
+        ]
+
+    def _fault_blocklist(self) -> _tr.FaultBlocklist:
+        """The persisted record of candidates that faulted on this GPU, quantization and TP width."""
+        return _tr.FaultBlocklist(
+            getattr(self.ctx, "faulted_blocklist_path", None),
+            {
+                "gpu_type": getattr(self.ctx, "gpu_type", ""),
+                "quant_type": getattr(self.ctx, "quant_type", ""),
+                "tp": getattr(self.ctx, "tp", 1),
+                "tuner": self.name,
+            },
+        )
+
+    def _tune_result(self, shape_results: list[dict[str, Any]], candidate_csv, key_source: str) -> TuneResult:
+        """Keep a valid candidate CSV as the artifact and report the compare results against it."""
         artifact = ""
         artifact_problem = (
             _validate_fmoe_csv(candidate_csv, tuned=True) if candidate_csv else "no candidate CSV produced"

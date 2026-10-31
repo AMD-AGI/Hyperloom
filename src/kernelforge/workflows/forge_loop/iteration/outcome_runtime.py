@@ -74,6 +74,37 @@ _LABELS_WITHOUT_A_MEASURED_NEGATIVE = frozenset(
 )
 
 
+def _append_lesson_scope(store, iteration: int, scope: LessonScope, *, agent_narrative: bool) -> None:
+    """Append the lesson's scope line and say what it leaves open, or that the document stays unscoped."""
+    if store.append_scope(iteration, scope):
+        print(f"  [lesson] {format_scope_line(scope)}")
+        if scope.carries_negative is not False and not scope.held_fixed:
+            print(
+                "  [lesson] no held-fixed constants recorded — negatives from this iteration re-open on the next change"
+            )
+        if is_claim_disproved(scope.disproof):
+            print(
+                "  [lesson] a direction reported unreachable was "
+                "shown reachable by the experiment run against it — "
+                "later iterations are told to re-enter it, not to "
+                "treat this record as closing it"
+            )
+        elif scope.disproof == UNDISPROVEN_CLAIM:
+            print(
+                "  [lesson] a direction was reported unreachable "
+                "without running the experiment that would falsify "
+                "that — it stays open for later iterations"
+            )
+        elif scope.disproof is None and agent_narrative:
+            print(
+                "  [lesson] the record answered nothing about "
+                "unreachable directions — any 'cannot' in it is "
+                "recorded as unchecked, and closes nothing"
+            )
+    else:
+        print(f"  [lesson] scope not recorded for iter {iteration}: the document renders unscoped and closes nothing")
+
+
 class OutcomeMixin:
     """Reduce one completed iteration into campaign state, the durable event stream, the experience ledger and the session lesson."""
 
@@ -323,18 +354,7 @@ class OutcomeMixin:
                 or self.ic.campaign_base_commit
                 or "uncommitted"
             )
-            lesson_path = ""
-            handoff_plan = str(session_sink.get("plan") or "")
-            if getattr(self, "lessons", None) is not None:
-                candidate = self.lessons.path(iteration)
-                if candidate.is_file():
-                    lesson_path = str(candidate.resolve().relative_to(Path(self.ic.workspace_dir).resolve()))
-                    # The planner reads handoffs, not lesson documents, and a refutation quoted out of a handoff is
-                    # how one sweep at one M became a ban on every case.
-                    scope = self.lessons.scope_of(iteration)
-                    if scope is not None:
-                        line = format_scope_line(scope)
-                        handoff_plan = f"{handoff_plan}\n{line}" if handoff_plan else line
+            lesson_path, handoff_plan = self._handoff_lesson(iteration, str(session_sink.get("plan") or ""))
             workspace = Path(self.ic.workspace_dir).resolve()
             relative_plan_path = ""
             orchestration_artifacts = ""
@@ -379,6 +399,21 @@ class OutcomeMixin:
                 exc_info=True,
             )
             return None
+
+    def _handoff_lesson(self, iteration: int, handoff_plan: str) -> tuple[str, str]:
+        """The iteration's lesson document path, and the handoff plan with that lesson's scope line appended."""
+        lesson_path = ""
+        if getattr(self, "lessons", None) is not None:
+            candidate = self.lessons.path(iteration)
+            if candidate.is_file():
+                lesson_path = str(candidate.resolve().relative_to(Path(self.ic.workspace_dir).resolve()))
+                # The planner reads handoffs, not lesson documents, and a refutation quoted out of a handoff is
+                # how one sweep at one M became a ban on every case.
+                scope = self.lessons.scope_of(iteration)
+                if scope is not None:
+                    line = format_scope_line(scope)
+                    handoff_plan = f"{handoff_plan}\n{line}" if handoff_plan else line
+        return lesson_path, handoff_plan
 
     def _loop_measured_a_negative(self, decision: str, result: IterationResult, session_sink: dict) -> bool:
         """Whether the LOOP itself saw something come out worse this iteration."""
@@ -507,38 +542,7 @@ class OutcomeMixin:
                 result=result,
                 agent_narrative=agent_narrative,
             )
-            if store.append_scope(iteration, scope):
-                print(f"  [lesson] {format_scope_line(scope)}")
-                if scope.carries_negative is not False and not scope.held_fixed:
-                    print(
-                        "  [lesson] no held-fixed constants recorded — "
-                        "negatives from this iteration re-open on the next "
-                        "change"
-                    )
-                if is_claim_disproved(scope.disproof):
-                    print(
-                        "  [lesson] a direction reported unreachable was "
-                        "shown reachable by the experiment run against it — "
-                        "later iterations are told to re-enter it, not to "
-                        "treat this record as closing it"
-                    )
-                elif scope.disproof == UNDISPROVEN_CLAIM:
-                    print(
-                        "  [lesson] a direction was reported unreachable "
-                        "without running the experiment that would falsify "
-                        "that — it stays open for later iterations"
-                    )
-                elif scope.disproof is None and agent_narrative:
-                    print(
-                        "  [lesson] the record answered nothing about "
-                        "unreachable directions — any 'cannot' in it is "
-                        "recorded as unchecked, and closes nothing"
-                    )
-            else:
-                print(
-                    f"  [lesson] scope not recorded for iter {iteration}: "
-                    f"the document renders unscoped and closes nothing"
-                )
+            _append_lesson_scope(store, iteration, scope, agent_narrative=agent_narrative)
         except Exception:  # isolation boundary: one iteration's scope line; the outcome line still records
             log.debug("lessons: scope append failed", exc_info=True)
 

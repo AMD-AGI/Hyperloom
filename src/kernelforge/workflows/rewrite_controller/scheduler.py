@@ -69,15 +69,10 @@ def _skip_task(task_dir: Path, task, reason: str) -> SingleTaskResult:
     return _skipped_result(task, reason)
 
 
-def dispatch_prepared_tasks(
-    layout: ControllerLayout,
-    *,
-    controller_deadline_unix: float,
-    clock: Callable[[], float] = time.time,
-    on_progress: Callable[[ScheduleResult], None] | None = None,
-) -> ScheduleResult:
-    """Validate and run all published tasks sequentially by priority."""
-    task_dirs = discover_task_dirs(layout)
+def _parse_unique_tasks(
+    task_dirs: list[Path],
+) -> tuple[dict[str, tuple[Path, KernelRewriteTask]], list[SingleTaskResult]]:
+    """Load each published task, keeping the highest-priority one per operator, and skip the rest."""
     parsed_by_id: dict[str, tuple[Path, KernelRewriteTask]] = {}
     results: list[SingleTaskResult] = []
 
@@ -107,6 +102,19 @@ def dispatch_prepared_tasks(
                     f"duplicate operator identity: {parsed.task.operator_id}",
                 )
             )
+    return parsed_by_id, results
+
+
+def dispatch_prepared_tasks(
+    layout: ControllerLayout,
+    *,
+    controller_deadline_unix: float,
+    clock: Callable[[], float] = time.time,
+    on_progress: Callable[[ScheduleResult], None] | None = None,
+) -> ScheduleResult:
+    """Validate and run all published tasks sequentially by priority."""
+    task_dirs = discover_task_dirs(layout)
+    parsed_by_id, results = _parse_unique_tasks(task_dirs)
 
     tasks = sort_tasks([entry[1] for entry in parsed_by_id.values()])
     if not tasks:

@@ -22,6 +22,7 @@ from kernelforge.agent_backends.session_resume import is_api_failure
 from kernelforge.config.resources import resource_path
 
 from .diagnose import LAUNCH_BOUND_CATEGORIES, _load_trace_events, categories_in_text, categorize_kernel_name
+from .discovery_prompt import DISCOVERY_PROMPT_TEMPLATE
 from .llm_failure import (
     API_ERROR,
     DEFAULT_ATTEMPTS,
@@ -779,46 +780,22 @@ def build_discovery_prompt(
 
     operator_lines = "\n".join(operator_line(hint) for hint in (evidence.existing_operator_hints or []))
     dom = ", ".join(diagnosis.dominant_categories)
-    return f"""You are analyzing the DECODE path of a {framework} model (`model_type={model_type}`)
-on AMD MI325X (gfx942), bf16, to find SOURCE-LEVEL KERNEL FUSIONS. Analyze only; do
-not edit anything. Return your answer as JSON (schema below).
-
-## The lever (general, not model-specific)
-The decode path is launch/dispatch bound: launch_bound_share={diagnosis.launch_bound_share:.2f}
-of GPU-busy time is in many tiny fp32 ops ({lb}) rather than the heavy GEMM/attention.
-Each tiny op is a separate kernel launch + HBM round-trip. The win is to FUSE a
-CONTIGUOUS chain of these tiny ops (as they appear in the decode forward, between two
-heavy ops) into ONE kernel — fewer launches, fewer round-trips.
-
-## Measured launch-bound hot kernels (top, this trace)
-{hot_lines}
-Dominant launch-bound categories: {dom}
-Representative decode shapes: {shapes}
-
-## Ordered fusion boundaries (same stream, compute endpoints retained)
-{boundary_lines or "  - none"}
-
-## Existing ROCm operator evidence
-Retrieved by whole-word overlap between the observed kernel/category names and the
-documented operation chain; a higher score means stronger evidence. The score is a
-retrieval hint, NOT a correctness claim: you must still confirm from the source and
-the card that shape, dtype, and cache layout actually match.
-{operator_lines or "  - none found"}
-
-## Your task
-{read_verb} up to {max_fusions} CONTIGUOUS op chains in
-the DECODE forward that are worth fusing. Include GEMM/attention prologue or epilogue
-boundaries when the ordered trace proves adjacency. Treat an existing ROCm operator
-that covers a larger boundary as an `integration` candidate and benchmark/wire it
-before proposing a new kernel. Judge from the SOURCE and ordered trace what actually
-runs back-to-back on the decode path.
-
-{fusion_constraints(repo_scope=repo_scope)}
-
-{_output_schema_block(model_type, repo_scope=repo_scope)}
-
-{source_block}
-"""
+    return DISCOVERY_PROMPT_TEMPLATE.format(
+        framework=framework,
+        model_type=model_type,
+        diagnosis=diagnosis,
+        lb=lb,
+        hot_lines=hot_lines,
+        dom=dom,
+        shapes=shapes,
+        boundary_lines=boundary_lines or "  - none",
+        operator_lines=operator_lines or "  - none found",
+        read_verb=read_verb,
+        max_fusions=max_fusions,
+        fusion_constraints=fusion_constraints(repo_scope=repo_scope),
+        output_schema_block=_output_schema_block(model_type, repo_scope=repo_scope),
+        source_block=source_block,
+    )
 
 
 def _salvage_objects(text: str) -> list[dict[str, Any]]:
@@ -1252,6 +1229,35 @@ def _override_or_env(override: Any, name: str, default: float, cast: Callable[[A
     return cast(override) if override is not None else cast(env_setting(name, default, cast=cast))
 
 
+def _discovery_run_spec(
+    prompt: str, session: DiscoverySession, model: str, max_turns: int, progress: list[str]
+) -> AgentRunSpec:
+    """One read-only discovery turn in the session's working directory, logging into ``progress``."""
+    return AgentRunSpec(
+        system_prompt=_DISCOVERY_SYSTEM_PROMPT,
+        user_prompt=prompt,
+        role="fusion discovery",
+        cwd=session.workdir,
+        model=model,
+        writable=False,
+        timeout_sec=max(1, int(session.timeout_s)),
+        tool_policy=AgentToolPolicy(
+            read=True,
+            search=True,
+            write=False,
+            shell=False,
+            max_turns=max_turns,
+        ),
+        protected_globs=["*"],
+        # Not read_only_resume: discovery only needs the "tolerate a dirty worktree" half of that flag, and
+        # claiming the resume contract disqualifies this session from the guard's read-only fast path
+        # (workspace_guard.is_read_only_session), forcing a git-worktree requirement on a cwd that is
+        # routinely a pip install root.
+        allow_dirty_baseline=True,
+        progress_log=progress,
+    )
+
+
 def registered_agent_llm_fn(
     backend: Any,
     session: DiscoverySession = DiscoverySession(),
@@ -1260,7 +1266,7 @@ def registered_agent_llm_fn(
     """Adapt one registered Agent backend into discovery's text interface."""
     import time as _time
 
-    timeout_s, log_path, workdir = session.timeout_s, session.log_path, session.workdir
+    timeout_s, log_path = session.timeout_s, session.log_path
     selected_model = session.model.strip() or str(getattr(getattr(backend, "runtime", None), "model", "")).strip()
     resolved_attempts = _override_or_env(retry.attempts, "FORGE_FUSION_LLM_ATTEMPTS", DEFAULT_ATTEMPTS, int)
     resolved_turns = max(1, int(env_setting("FORGE_FUSION_DISCOVERY_TURNS", DEFAULT_DISCOVERY_TURNS, cast=int)))
@@ -1282,35 +1288,33 @@ def registered_agent_llm_fn(
         with contextlib.suppress(OSError):
             Path(log_path).write_text("\n".join([*progress, text]).strip() + "\n", encoding="utf-8")
 
+    def _back_off(attempt: int, started_at: float, progress: list[str], last_error: str, last_kind: str) -> None:
+        """Sleep before the next attempt, or give up once the retry deadline has passed."""
+        elapsed = clock() - started_at
+        if resolved_deadline > 0 and elapsed >= resolved_deadline:
+            _record_transcript(progress, last_error)
+            raise LlmUnavailableError(
+                f"discovery Agent produced no usable answer in {attempt} "
+                f"attempt(s) and {elapsed:.0f}s "
+                f"(deadline {resolved_deadline:.0f}s): {last_error}",
+                kind=last_kind,
+                attempts=attempt,
+            )
+        pause(
+            retry_delay(
+                attempt,
+                base_sec=resolved_base_delay,
+                max_sec=resolved_max_delay,
+            )
+        )
+
     def _fn(prompt: str) -> str:
         started_at = clock()
         last_error = ""
         last_kind = API_ERROR
         progress: list[str] = []
         for attempt in range(1, max(1, resolved_attempts) + 1):
-            spec = AgentRunSpec(
-                system_prompt=_DISCOVERY_SYSTEM_PROMPT,
-                user_prompt=prompt,
-                role="fusion discovery",
-                cwd=workdir,
-                model=selected_model,
-                writable=False,
-                timeout_sec=max(1, int(timeout_s)),
-                tool_policy=AgentToolPolicy(
-                    read=True,
-                    search=True,
-                    write=False,
-                    shell=False,
-                    max_turns=resolved_turns,
-                ),
-                protected_globs=["*"],
-                # Not read_only_resume: discovery only needs the "tolerate a dirty worktree" half of that flag, and
-                # claiming the resume contract disqualifies this session from the guard's read-only fast path
-                # (workspace_guard.is_read_only_session), forcing a git-worktree requirement on a cwd that is
-                # routinely a pip install root.
-                allow_dirty_baseline=True,
-                progress_log=progress,
-            )
+            spec = _discovery_run_spec(prompt, session, selected_model, resolved_turns, progress)
             try:
                 result = _run_agent_discovery_once(
                     backend,
@@ -1358,23 +1362,7 @@ def registered_agent_llm_fn(
             )
             if attempt >= max(1, resolved_attempts):
                 break
-            elapsed = clock() - started_at
-            if resolved_deadline > 0 and elapsed >= resolved_deadline:
-                _record_transcript(progress, last_error)
-                raise LlmUnavailableError(
-                    f"discovery Agent produced no usable answer in {attempt} "
-                    f"attempt(s) and {elapsed:.0f}s "
-                    f"(deadline {resolved_deadline:.0f}s): {last_error}",
-                    kind=last_kind,
-                    attempts=attempt,
-                )
-            pause(
-                retry_delay(
-                    attempt,
-                    base_sec=resolved_base_delay,
-                    max_sec=resolved_max_delay,
-                )
-            )
+            _back_off(attempt, started_at, progress, last_error, last_kind)
         _record_transcript(progress, last_error)
         raise LlmUnavailableError(
             f"discovery Agent produced no usable answer in {max(1, resolved_attempts)} attempt(s): {last_error}",
