@@ -18,7 +18,10 @@ The application reads the runner's ``progress.json`` on every poll. Each change 
 the last output it saw, the newest live log's write time or last line) is activity; once the runner says a round's server
 is ready (:data:`SERVER_READY_KEY`), or the test is past running, the bound no longer applies. A test with no activity
 for :data:`PRE_READY_SILENCE_SEC` before that ends as ``hung_before_ready``, an infrastructure failure a new sandbox
-retries.
+retries. A server whose last line says aiter started building a JIT module is working, as aiter writes nothing until the
+module is built: with eight tests of a session each building its own copy, the FP8 GEMM module
+``module_gemm_a8w8_bpreshuffle_cktile`` took up to 844 s in the tests that finished it. While that line stands, only
+the boot guard bounds the boot.
 
 The limit comes from the server logs of 1857 test rounds (1711 reached ready): the longest stretch before ready with
 no output line, timestamped or carrying a progress figure, was 262 s, an aiter JIT build that reported ``cost 273``
@@ -30,6 +33,7 @@ from __future__ import annotations
 
 import contextlib
 import math
+import re
 import threading
 import time
 from collections.abc import Iterator, Mapping
@@ -183,6 +187,10 @@ _COLLECTING = "collecting"
 #: A log written within this many seconds of the last write seen is the same write, seen again through the clock jitter
 #: of ``updated_unix - last_log_age_sec``.
 _WRITE_RESOLUTION_SEC = 1.0
+#: The line aiter writes as it starts building a JIT module, with or without the process tag it puts first (``[aiter]
+#: [pid=829812 pname=Process-1] start build [module_gemm_a8w8_bpreshuffle_cktile] under ...``), searched for anywhere in
+#: the line, as the runner keeps only the end of a long one.
+_JIT_BUILD_STARTED = re.compile(r"\[aiter\] (?:\[[^\]]*\] )*start build ")
 
 
 def _log_written_at(progress: Mapping[str, Any]) -> float | None:
@@ -218,7 +226,8 @@ class PreReadySilence:
         rewritten = written is not None and (
             self._written_at is None or written > self._written_at + _WRITE_RESOLUTION_SEC
         )
-        if seen != self._seen or rewritten:
+        building = _JIT_BUILD_STARTED.search(str(progress.get("last_line") or "")) is not None
+        if seen != self._seen or rewritten or building:
             self._active_at = now
         self._seen = seen
         if rewritten:
