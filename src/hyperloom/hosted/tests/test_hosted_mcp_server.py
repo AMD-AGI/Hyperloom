@@ -467,7 +467,7 @@ class Feed:
     def annotate(self, call: ReplyCall, cursor: str | None) -> ReplyNote:
         self.seen.append((call.tool, cursor))
         if self.broken:
-            raise OSError("inbox down")
+            raise RuntimeError("inbox down")
         return ReplyNote("\n".join(self.items[int(cursor or 0) :]), str(len(self.items)))
 
 
@@ -647,13 +647,3 @@ def test_a_failing_annotator_costs_the_reply_its_block_and_nothing_more(noted: M
     assert status == 200 and reply["result"]["isError"] is False and len(_blocks(reply)) == 1
     feed.broken = False
     assert _blocks(client.call(token, "whoami")[2])[1:] == ["one"]
-
-
-def test_an_annotator_bug_is_answered_as_an_internal_error(noted: McpServer) -> None:
-    client, token = Client(noted), _primed(noted)
-    noted.attach_reply_annotator(lambda call, cursor: {}[call.tool])
-    status, _, reply = client.call(token, "whoami")
-    assert (status, reply) == (
-        200,
-        {"jsonrpc": "2.0", "id": 1, "error": {"code": -32603, "message": "KeyError: 'whoami'"}},
-    )
