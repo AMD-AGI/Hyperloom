@@ -97,8 +97,13 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
     async def exit_facts(self) -> KernelExitFacts:
         """Advance the idle streak for this tick and report the facts the KERNEL exit decision reads."""
         await self._track_idle_streak()
-        in_kernel = str(self.shared_state.phase or "").upper() == _phase_state.PHASE_KERNEL_AGENT
-        return KernelExitFacts(agent_in_flight=in_kernel and await self._agent_in_flight())
+        return KernelExitFacts(agent_in_flight=await self.agent_in_flight())
+
+    async def agent_in_flight(self) -> bool:
+        """Whether KERNEL is the phase and its ``kernel_agent`` task is queued or running; reads only."""
+        if str(self.shared_state.phase or "").upper() != _phase_state.PHASE_KERNEL_AGENT:
+            return False
+        return any(task.kind == "kernel_agent" for task in [*await self.tasks.queued(), *await self.tasks.running()])
 
     async def _inflight_task_ids(self) -> tuple[str, ...]:
         """Return the ids of queued/running tasks doing KERNEL-lane work."""
@@ -107,11 +112,6 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
         return tuple(
             sorted(str(task.task_id) for task in tasks if str(getattr(task, "kind", "") or "").strip() in kinds)
         )
-
-    async def _agent_in_flight(self) -> bool:
-        """Whether the ``kernel_agent`` task is queued or running."""
-        tasks = list(await self.tasks.queued()) + list(await self.tasks.running())
-        return any(task.kind == "kernel_agent" for task in tasks)
 
     async def _track_idle_streak(self) -> None:
         """Advance or reset the KERNEL idle-streak counters for this tick."""
@@ -1156,11 +1156,10 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
             task = None
         if task is not None and str(getattr(task, "state", "")) not in TERMINAL_STATES:
             return
+        if self._coord.dispatcher.owes_result(pending):
+            return
         self.shared_state.auto_roofline_pending_task_id = ""
-        log.info(
-            "watermark-roofline: released in-flight gate held by finished task=%s",
-            pending,
-        )
+        log.info("watermark-roofline: released in-flight gate held by finished task=%s", pending)
 
     async def maybe_enqueue_watermark_roofline(
         self,

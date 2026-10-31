@@ -213,6 +213,21 @@ class MachinePhase(CoordinatorCollaborator):
         log.info("phase_machine: holding %s exit (reason=%s) for operator work", state.phase, next_phase[1])
         return None
 
+    def _transition_pending(self, next_phase: tuple[str, str, dict[str, Any]] | None) -> bool:
+        return next_phase is not None and next_phase[0] != (self.shared_state.phase or "").upper()
+
+    async def refresh_admission_freeze(self) -> None:
+        """Re-derive the freeze after reactors, releasing any hold they settled."""
+        state = self.shared_state
+        await self._release_holds_no_task_will_settle()
+        in_enablement = str(state.phase or "").upper() == _phase_state.PHASE_ENABLEMENT
+        next_phase = await self._next_phase(
+            optimize_enabled=self.optimize_enabled(),
+            enablement_in_flight=in_enablement and await self._coord.enablement_lane.enablement_in_flight(),
+            kernel_work_in_flight=await self._coord.phase_kernel.agent_in_flight(),
+        )
+        self._coord.dispatcher.admission_frozen = self._transition_pending(next_phase)
+
     def settle_escalate_hint(self, move: Transition) -> None:
         """Consume or discard the pending escalate hint, according to what drove this transition."""
         state = self.shared_state
@@ -375,7 +390,7 @@ class MachinePhase(CoordinatorCollaborator):
         await self._coord.phase_internal.maybe_enqueue_trajectory_reviewer()
         dispatcher = self._coord.dispatcher
         # Admission stays frozen for as long as a transition is pending.
-        dispatcher.admission_frozen = next_phase is not None and next_phase[0] != (state.phase or "").upper()
+        dispatcher.admission_frozen = self._transition_pending(next_phase)
         if not dispatcher.admission_frozen:
             return
         target, reason, evidence = next_phase
