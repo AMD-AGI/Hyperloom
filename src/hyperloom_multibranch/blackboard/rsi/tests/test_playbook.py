@@ -13,6 +13,7 @@ import pytest
 from hyperloom_multibranch.blackboard.rsi.archive import TreeArchive
 from hyperloom_multibranch.blackboard.rsi.frontier import StopRule
 from hyperloom_multibranch.blackboard.rsi.playbook import (
+    CHALLENGER_SHARE,
     FALLBACK_KEY,
     H0,
     MAX_RULES,
@@ -29,6 +30,7 @@ from hyperloom_multibranch.blackboard.rsi.playbook import (
     PlaybookRule,
     Retired,
     changes,
+    drawn_challenger,
     playbook_label,
     problems,
     replaced,
@@ -156,6 +158,14 @@ def test_a_session_plays_the_champion_or_in_a_challenger_session_the_oldest_play
     assert pool.champion() == LONGER and pool.on_trial() == ()
     assert session_playbook(pool, challenger=True) == session_playbook(pool, challenger=False)
     assert [item.evidence for item in pool.retired()] == ["behind the champion"]
+
+
+def test_a_session_is_drawn_a_challenger_by_its_id_alone_in_about_half_the_sessions() -> None:
+    ids = [f"MB-20261031T{index:06d}Z-{index:08x}" for index in range(2000)]
+    drawn = [drawn_challenger(session_id) for session_id in ids]
+
+    assert drawn == [drawn_challenger(session_id) for session_id in ids]
+    assert abs(sum(drawn) / len(drawn) - CHALLENGER_SHARE) < 0.05
 
 
 def test_a_playbook_file_with_numbers_no_code_applies_any_more_still_reads(tmp_path: Path) -> None:
