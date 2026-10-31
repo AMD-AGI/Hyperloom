@@ -442,6 +442,7 @@ class TestARaiseStaysWithItsShapeOrCandidate:
             assert pointed == [adapter._baseline_csv]
         (record,) = self._records(caplog, "tier3: cannot build fused-MoE operands for ")
         assert record.exc_info[1] is oom
+        assert record.levelno == logging.WARNING
 
     def test_a_candidate_whose_kernel_raises_is_not_dispatched_and_aiter_is_pointed_back(self, monkeypatch, caplog):
         fault = RuntimeError(self._FAULT)

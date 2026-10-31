@@ -447,7 +447,7 @@ class OutcomeMixin:
                 references=PrReferenceNote(self.ic.pr_reference_labels, self.ic.pr_reference_context),
             )
         except Exception as error:  # isolation boundary: one iteration's lesson summarizer step
-            log.debug("lessons: summarizer step failed", exc_info=True)
+            log.warning("lessons: summarizer step failed", exc_info=True)
             return SummaryOutcome(reason=f"{type(error).__name__}: {str(error)[:200]}")
         finally:
             self._checkpoint_llm_usage()

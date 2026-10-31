@@ -967,9 +967,9 @@ class LangfuseEmitter:
                     metadata=score.get("metadata") or {},
                 )
             self._counts["scores_sent"] += 1
-        except Exception:  # isolation boundary: one decision Score
+        except _SDK_FAILURES:
             self._counts["errors"] += 1
-            log.debug(
+            log.warning(
                 "langfuse: create_score failed for %s",
                 score.get("name"),
                 exc_info=True,
