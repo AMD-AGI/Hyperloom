@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from dataclasses import replace
 from pathlib import Path
 
@@ -160,6 +161,49 @@ def test_a_recovery_defect_on_a_borrowed_tree_still_releases_the_tree(
             expected_base_commit="a" * 40,
         )
 
+    assert released == borrowed
+
+
+def test_a_git_failure_in_the_last_recovery_keeps_the_result_and_releases_the_tree(
+    tmp_path: Path,
+    task_dir: Path,
+    monkeypatch,
+) -> None:
+    layout = ControllerLayout(tmp_path / "output")
+    borrowed: list[OperatorWorktree] = []
+    released: list[OperatorWorktree | None] = []
+
+    def _borrowed_worktree(task, layout: ControllerLayout) -> OperatorWorktree:
+        borrowed.append(replace(_fake_worktree(task, layout), inplace=True))
+        return borrowed[0]
+
+    def _git_timeout(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(["git", "cat-file"], 30)
+
+    monkeypatch.setattr(dispatcher, "create_operator_worktree", _borrowed_worktree)
+    monkeypatch.setattr(
+        dispatcher,
+        "run_forge_loop",
+        lambda invocation, **_kwargs: ForgeLoopOutcome(
+            returncode=2,
+            stdout="",
+            stderr="driver preparation failed",
+            result=None,
+            timed_out=False,
+            command=invocation.command,
+        ),
+    )
+    monkeypatch.setattr(dispatcher, "recover_task_result", _git_timeout)
+    monkeypatch.setattr(dispatcher, "release_operator_worktree", released.append)
+
+    result = dispatcher.dispatch_single_task(
+        task_dir,
+        layout=layout,
+        deadline_unix=10**12,
+        expected_base_commit="a" * 40,
+    )
+
+    assert result.status == "failed"
     assert released == borrowed
 
 

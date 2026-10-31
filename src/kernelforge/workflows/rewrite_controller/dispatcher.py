@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -282,7 +283,12 @@ def dispatch_single_task(
         # reason gets one more attempt here. Publication is idempotent.
         try:
             if worktree is not None and worktree.inplace:
-                recover_task_result(layout, task_path, update_state=False)
+                try:
+                    recover_task_result(layout, task_path, update_state=False)
+                except (subprocess.SubprocessError, OSError):
+                    log.warning(
+                        "last-chance recovery of %s failed; the tree is released either way", task_path, exc_info=True
+                    )
         finally:
             # After that, never before: the patch is what the campaign was for, and
             # this returns the tree the patch was built in. A private checkout is

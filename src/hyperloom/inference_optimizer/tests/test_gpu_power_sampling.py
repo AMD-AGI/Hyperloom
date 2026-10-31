@@ -408,6 +408,15 @@ def test_fanout_propagates_a_failing_recorder():
     assert healthy.calls == []
 
 
+def test_fanout_closes_every_recorder_before_raising_the_first_failure():
+    broken, healthy = _Recorder(fail=True), _Recorder()
+    fanout = _subprocess_kill._RecorderFanout([broken, healthy])
+    with pytest.raises(RuntimeError, match="^boom$"):
+        fanout.close(aborted=False)
+    assert broken.calls == ["close"]
+    assert healthy.calls == ["close"]
+
+
 def test_round_recorders_combine_kv_and_power(monkeypatch, tmp_path):
     kv, power = _Recorder(), _Recorder()
     monkeypatch.setattr(_subprocess_kill, "_build_kv_recorder", lambda *a: kv)
