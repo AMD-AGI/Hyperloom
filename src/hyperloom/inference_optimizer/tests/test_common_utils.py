@@ -343,9 +343,9 @@ def test_recover_session_nonfatal_langfuse_and_package_errors(tmp_path: Path, mo
     monkeypatch.setattr(
         breakdown_mod, "write_breakdown_json", lambda s: calls.append("write") or s / "session_breakdown.json"
     )
-    monkeypatch.setattr(emitter, "flush_session", lambda _s: (_ for _ in ()).throw(RuntimeError("langfuse down")))
+    monkeypatch.setattr(emitter, "flush_session", lambda _s: (_ for _ in ()).throw(OSError("langfuse down")))
     monkeypatch.setattr(
-        breakdown_mod, "package_session_artifacts", lambda _s: (_ for _ in ()).throw(RuntimeError("zip failed"))
+        breakdown_mod, "package_session_artifacts", lambda _s: (_ for _ in ()).throw(OSError("zip failed"))
     )
 
     rc = recover._run_recover_session(argparse.Namespace(session_dir=session, force=True))

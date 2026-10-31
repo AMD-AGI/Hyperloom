@@ -931,22 +931,6 @@ def test_run_with_session_kill_reports_the_output_a_child_redirected_to_disk(tmp
     assert reported, "a child talking only through its redirected stderr was never reported alive"
 
 
-def test_run_with_session_kill_survives_a_broken_liveness_callback():
-    """Reporting is best-effort; a raising callback must not eat child output."""
-
-    def _boom() -> None:
-        raise RuntimeError("callback is broken")
-
-    cp = run_with_session_kill(
-        [sys.executable, "-c", "print('still-captured', flush=True)"],
-        on_output=_boom,
-        watch=RoundWatch(timeout=10),
-    )
-
-    assert cp.returncode == 0
-    assert "still-captured" in (cp.stdout or "")
-
-
 def test_run_with_session_kill_legacy_timeout_still_raises():
     """With ``soft_deadline_sec`` None, a child exceeding the hard ``timeout`` still raises ``TimeoutExpired``."""
     with pytest.raises(subprocess.TimeoutExpired):

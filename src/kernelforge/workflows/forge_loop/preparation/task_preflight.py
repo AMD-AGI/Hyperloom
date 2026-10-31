@@ -103,7 +103,7 @@ def _ancestor_pids():
         try:
             stat = open(f"/proc/{pid}/stat").read()
             pid = int(stat.rsplit(")", 1)[1].split()[1])
-        except Exception:
+        except (OSError, ValueError, IndexError):
             break
     return ancestors
 
@@ -127,7 +127,7 @@ def _install(torch):
 
         torch.cuda.CUDAGraph.replay = _replay
         return True
-    except Exception:
+    except (AttributeError, TypeError):
         return False
 
 
@@ -168,7 +168,7 @@ def _harness_measured():
         return False
     try:
         return int(module.MEASURED[0]) > 0
-    except Exception:
+    except (AttributeError, IndexError, TypeError, ValueError):
         return False
 
 
@@ -196,8 +196,8 @@ def _dump():
         # overwrite each other and the count would be one rank's, or zero.
         with open(f"{out}.{os.getpid()}", "w") as fh:
             json.dump(payload, fh)
-    except Exception:
-        pass
+    except OSError as exc:
+        sys.stderr.write(f"graph probe: could not write {out}.{os.getpid()}: {exc}\n")
 
 
 atexit.register(_dump)

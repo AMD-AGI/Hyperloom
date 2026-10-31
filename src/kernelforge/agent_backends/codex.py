@@ -35,7 +35,7 @@ from kernelforge.agent_backends.base import (
     AgentRuntimeConfig,
 )
 from kernelforge.agent_backends.gateway import LlmGateway, resolve_openai_gateway
-from kernelforge.agent_backends.workspace_guard import WorkspaceGuard
+from kernelforge.agent_backends.workspace_guard import WorkspaceGuard, WorkspaceSafetyError
 
 log = logging.getLogger(__name__)
 
@@ -681,7 +681,7 @@ class CodexBackend:
                 )
                 worker.start()
                 if not completed.wait(timeout_sec):
-                    with contextlib.suppress(Exception):  # broad-suppress: interrupt must not shadow the timeout
+                    with contextlib.suppress(sdk.CodexError, OSError, RuntimeError):  # must not shadow the timeout
                         turn.interrupt()
                     raise CodexUnavailableError(f"Codex gateway precheck timed out after {timeout_sec}s")
                 if "error" in outcome:
@@ -725,6 +725,7 @@ class CodexBackend:
         guard.prepare()
         turn_handle = None
         turn_task: asyncio.Task[Any] | None = None
+        teardown_errors = (sdk.CodexError, OSError, RuntimeError, asyncio.TimeoutError)
         # Set as soon as the thread exists, so a failure past that point can hand the handle to the caller instead of
         # stranding the turns it already paid for.
         thread_id = session_id
@@ -753,19 +754,19 @@ class CodexBackend:
                             timeout=spec.timeout_sec,
                         )
                     except asyncio.CancelledError:
-                        with contextlib.suppress(Exception):  # broad-suppress: SDK teardown
+                        with contextlib.suppress(*teardown_errors):
                             await asyncio.wait_for(
                                 turn_handle.interrupt(),
                                 timeout=5,
                             )
                         raise
                     if not completed:
-                        with contextlib.suppress(Exception):  # broad-suppress: SDK teardown
+                        with contextlib.suppress(*teardown_errors):
                             await asyncio.wait_for(
                                 turn_handle.interrupt(),
                                 timeout=5,
                             )
-                        with contextlib.suppress(Exception):  # broad-suppress: SDK teardown
+                        with contextlib.suppress(*teardown_errors):
                             await asyncio.wait_for(
                                 asyncio.shield(turn_task),
                                 timeout=5,
@@ -792,7 +793,7 @@ class CodexBackend:
         finally:
             if turn_task is not None and not turn_task.done():
                 turn_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):  # broad-suppress: reaping a cancelled task
+                with contextlib.suppress(asyncio.CancelledError, *teardown_errors):
                     _ = await turn_task
 
         result = _normalize_sdk_result(sdk_result, thread_id)
@@ -808,8 +809,10 @@ class CodexBackend:
         except Exception:
             # verify() restores the baseline itself before raising a rejection, so this second call only covers the
             # paths that fail before it gets there.
-            with contextlib.suppress(Exception):  # broad-suppress: rollback must not shadow the verify error
+            try:
                 guard.rollback()
+            except (WorkspaceSafetyError, OSError, subprocess.SubprocessError):
+                log.warning("workspace rollback after a failed verify also failed", exc_info=True)
             raise
         result.file_changes = actual_changes
         result.target_edit_count = guard.count_target_edits()

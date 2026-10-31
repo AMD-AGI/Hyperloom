@@ -1601,6 +1601,12 @@ class _FakeKbEmitter:
     def record_kb_span(self, **kwargs):
         self.spans.append(kwargs)
 
+    def record_llm_call(self, row):
+        pass
+
+    def record_conversation(self, row):
+        pass
+
 
 @pytest.mark.asyncio
 async def test_run_mirrors_kb_trace_to_langfuse(

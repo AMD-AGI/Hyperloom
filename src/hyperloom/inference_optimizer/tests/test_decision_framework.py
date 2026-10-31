@@ -190,6 +190,10 @@ async def test_kernel_entry_auto_runs_gemm_tuning_for_fp8_sglang(
             lambda _self, _env_var, env_value: env_value,
         )
 
+        async def no_reprofile(_ctx):
+            return {"status": "skipped"}
+
+        c.sub.register_executor("roofline", no_reprofile)
         await c.phase_kernel.run_agent(SimpleNamespace(task=SimpleNamespace(params={"from_phase": "FRAMEWORK_AGENT"})))
 
         assert calls

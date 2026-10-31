@@ -98,13 +98,14 @@ def test_summary_calls_out_an_agent_that_did_nothing():
     assert "no tool calls at all" in summarize_agent_progress(["say: hmm"])
 
 
-def test_a_message_that_cannot_be_read_does_not_break_the_session():
+def test_a_message_that_cannot_be_read_is_not_swallowed():
     class _Unreadable:
         @property
         def content(self):
             raise RuntimeError("SDK message shape changed")
 
     sink: list[str] = []
-    claude_backend._record_progress(sink, _Unreadable())
+    with pytest.raises(RuntimeError, match="SDK message shape changed"):
+        claude_backend._record_progress(sink, _Unreadable())
 
     assert sink == []

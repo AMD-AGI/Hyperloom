@@ -274,7 +274,7 @@ async def test_a_sink_that_raises_is_swallowed_not_propagated(tmp_path, monkeypa
     """The reporter is an observability path; it owns its own failures."""
 
     async def _broken(**_note) -> None:
-        raise RuntimeError("sink is down")
+        raise sqlite3.OperationalError("database is locked")
 
     with progress_scope(_broken):
         await report_progress(unit="variant")

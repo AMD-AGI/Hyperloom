@@ -4,6 +4,8 @@ import json
 import multiprocessing
 from pathlib import Path
 
+import pytest
+
 from kernelforge.agent_backends.usage_ledger import LEDGER_FILENAME, UsageLedgerFile, read_usage_ledger
 from kernelforge.agent_backends.usage import UsageAccumulator
 
@@ -123,13 +125,14 @@ def test_accumulator_publishes_on_every_counted_call(tmp_path):
     assert recorded["total_cost_usd"] == 0.3
 
 
-def test_accumulator_survives_a_failing_sink():
+def test_accumulator_counts_the_call_before_a_failing_sink_raises():
     def explode(_totals):
         raise RuntimeError("disk gone")
 
     usage = UsageAccumulator(on_update=explode)
 
-    assert usage.add_usage({"input_tokens": 5}, total_cost_usd=0.1) is True
+    with pytest.raises(RuntimeError, match="disk gone"):
+        usage.add_usage({"input_tokens": 5}, total_cost_usd=0.1)
     assert usage.totals()["calls"] == 1
 
 

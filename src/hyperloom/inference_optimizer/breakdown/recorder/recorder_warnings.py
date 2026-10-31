@@ -105,9 +105,8 @@ def note_failure(
         if session is None:
             # Nowhere to park it: the warning above is the whole record.
             return
-        record_write_warning(session, component=component, exc=error)
-    except Exception:
-        log.debug("recorder: could not park the failure note for %s", section, exc_info=True)
+        if not record_write_warning(session, component=component, exc=error):
+            log.debug("recorder: could not park the failure note for %s", section)
     finally:
         _parking.active = False
 

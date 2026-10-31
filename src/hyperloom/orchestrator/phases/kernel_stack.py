@@ -494,8 +494,8 @@ class KernelStackPhase(CoordinatorCollaborator):
     def halt_stack_recovery(self, error: Exception) -> NoReturn:
         """Stop the session on stack state no resume can account for, keeping the evidence, then raise ``error``.
 
-        ``_on_phase_entered`` logs and swallows whatever a phase hook raises, so the raise alone would let SWEEP
-        benchmark the tree. The stop reason is what actually ends the run, and it is deliberately not an
+        A raise alone does not end the run: the tick that sees it only counts it toward the crash limit, so SWEEP
+        could still benchmark the tree. The stop reason is what actually ends the run, and it is deliberately not an
         infrastructure one: a tree that no longer matches the ledger is a failed session, not an aborted one.
         """
         self.shared_state.set_stop_reason(PATCH_RECOVERY_INCOMPLETE_STOP_REASON)

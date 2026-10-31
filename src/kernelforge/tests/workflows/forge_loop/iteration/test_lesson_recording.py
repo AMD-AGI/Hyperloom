@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import json
 from pathlib import Path
 
@@ -1185,3 +1186,17 @@ def test_prompt_omits_the_digest_once_lessons_exist(tmp_path, monkeypatch):
     assert "Solution archive — your lineage so far" not in prompts[1]
     assert "Long-Horizon Memory" in prompts[1]
     assert "Implementer session records from recent iterations" in prompts[1]
+
+
+def test_a_summarizer_that_raises_is_logged_at_warning_with_its_traceback(tmp_path, monkeypatch, caplog):
+    loop, _workspace = _make_loop(tmp_path, monkeypatch)
+
+    async def broken(_prompt: str) -> str:
+        raise RuntimeError("backend exploded")
+
+    caplog.set_level(logging.WARNING, logger="kernelforge.workflows.forge_loop.iteration.outcome_runtime")
+    outcome = asyncio.run(loop._request_lesson(2, "", broken))
+
+    assert outcome == SummaryOutcome(reason="RuntimeError: backend exploded")
+    failed = [r for r in caplog.records if r.getMessage() == "lessons: summarizer step failed"]
+    assert [(r.levelno, repr(r.exc_info[1])) for r in failed] == [(logging.WARNING, "RuntimeError('backend exploded')")]

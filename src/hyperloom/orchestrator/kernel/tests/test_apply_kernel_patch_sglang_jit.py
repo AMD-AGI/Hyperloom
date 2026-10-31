@@ -219,3 +219,19 @@ def test_import_probe_skips_non_interpreter_rebuild():
 
     assert result["status"] == "skipped"
     assert "not interpreter-led" in result["reason"]
+
+
+def test_import_probe_records_the_traceback_of_a_parent_that_raises(monkeypatch, tmp_path):
+    package = tmp_path / "halfpkg"
+    package.mkdir()
+    (package / "__init__.py").write_text('raise RuntimeError("half installed")\n', encoding="utf-8")
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
+
+    result = patch_rebuild._verify_rebuild_imports(["halfpkg.sub"], sys.executable)
+
+    assert result["status"] == "failed"
+    assert result["modules"]["halfpkg.sub"]["error"].endswith(
+        f'File "{package / "__init__.py"}", line 1, in <module>\n'
+        '    raise RuntimeError("half installed")\n'
+        "RuntimeError: half installed\n"
+    )

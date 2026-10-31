@@ -643,6 +643,7 @@ class _DriverAuthoring:
             _audit_json(
                 record, "agent_event.json", {"status": "error", "type": type(error).__name__, "error": str(error)}
             )
+            self.prior_failure = f"the previous authoring session failed: {type(error).__name__}: {error}"
         finally:
             _audit_text(record, "agent_progress.txt", "\n".join(turn.progress_log))
             _audit_driver(record, "driver_after_agent.py", turn.stage_driver)

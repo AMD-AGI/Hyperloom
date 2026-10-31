@@ -560,8 +560,8 @@ def test_no_recorder_leaves_the_loop_unchanged():
     assert out == ("out", "err")
 
 
-def test_a_lone_failing_recorder_does_not_fail_the_round(monkeypatch, tmp_path):
-    """Telemetry stays observational past construction, even when it is the round's only recorder."""
+def test_a_failing_recorder_fails_the_round(monkeypatch, tmp_path):
+    """Recorders absorb their own scrape and write failures, so anything else they raise is a defect that surfaces."""
 
     class _Exploding:
         def note_phase(self, phase, mono):
@@ -575,12 +575,12 @@ def test_a_lone_failing_recorder_does_not_fail_the_round(monkeypatch, tmp_path):
 
     monkeypatch.setattr(sk, "_build_kv_recorder", lambda *a: _Exploding())
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors._gpu_power.build_gpu_power_recorder", lambda *a: None)
-    out = _watch(
-        _DoneProc(),
-        sk._WatchedRound(sk.RoundWatch(timeout=5, server_already_ready=True)),
-        sk._build_round_recorders(str(tmp_path / "server.log"), {}),
-    )
-    assert out == ("out", "err")
+    with pytest.raises(RuntimeError, match="^boom$"):
+        _watch(
+            _DoneProc(),
+            sk._WatchedRound(sk.RoundWatch(timeout=5, server_already_ready=True)),
+            sk._build_round_recorders(str(tmp_path / "server.log"), {}),
+        )
 
 
 def test_artifact_name_is_stable():

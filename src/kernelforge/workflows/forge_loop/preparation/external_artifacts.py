@@ -193,7 +193,7 @@ class ExternalArtifactTransaction:
                     self._baseline_manifest,
                     scope=changed,
                 )
-            except Exception as rollback_exc:  # noqa: BLE001 - translated into ExternalArtifactError
+            except (OSError, ExternalArtifactError) as rollback_exc:
                 raise ExternalArtifactError(
                     f"external artifact publish failed ({exc}); rollback also failed ({rollback_exc})"
                 ) from exc

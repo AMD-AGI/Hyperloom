@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -217,7 +218,7 @@ def publish_warm_start_recovery(
     errors: list[str] = []
     try:
         manifest = BestResultPublisher(workspace_dir).publish(keep, score, bundle)
-    except Exception as error:
+    except (OSError, subprocess.SubprocessError, KeyError, TypeError, ValueError) as error:
         # A derived view can fail after best_result.json is already durable.
         manifest = _validated_warm_start_result(
             workspace_dir,

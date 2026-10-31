@@ -228,7 +228,7 @@ class CampaignConfigStore:
             raise FileNotFoundError(f"campaign config not found: {self.path}")
         try:
             payload = json.loads(self.path.read_text())
-        except Exception as error:
+        except (OSError, ValueError) as error:
             raise ValueError(f"invalid campaign config: {error}") from error
         if not isinstance(payload, dict):
             raise ValueError("campaign config must be a JSON object")

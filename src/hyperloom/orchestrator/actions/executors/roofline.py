@@ -1096,7 +1096,8 @@ class RooflineExecutor:
     ) -> _AnalysedProfile | None:
         """Re-profile a host-bound trace once with DP attention stripped; return the pair to adopt, or ``None``.
 
-        Fail-soft: whatever goes wrong, the original analysis stands.
+        A re-profile or re-analysis that returns a failure leaves the original analysis standing; one that raises does
+        not, and the action crashes with its attempt rows already written.
         """
         from ._multi_node_server_lifecycle import _COMPUTE_BOUND_PROFILE_ENV, _scoped_env
 
@@ -1104,17 +1105,10 @@ class RooflineExecutor:
             "roofline: host-bound trace (0 hot kernels + high GPU idle); "
             "attempting one compute-bound re-profile (DP-attention stripped)"
         )
-        adopted: _AnalysedProfile | None = None
-        outcome = "re-profile produced no usable trace"
         with _scoped_env({_COMPUTE_BOUND_PROFILE_ENV: "1"}):
-            try:
-                adopted, outcome = await self._compute_bound_attempt(ctx, recorder, arm, analysis.payload)
-            except Exception as exc:  # isolation boundary: one optional compute-bound re-profile
-                outcome = f"re-profile raised: {exc!r}"
-                log.warning("roofline: compute-bound re-profile failed (%s); keeping original", exc, exc_info=True)
-            finally:
-                if recorder is not None:
-                    recorder.record_compute_bound_reprofile(attempted=True, adopted=adopted is not None, reason=outcome)
+            adopted, outcome = await self._compute_bound_attempt(ctx, recorder, arm, analysis.payload)
+        if recorder is not None:
+            recorder.record_compute_bound_reprofile(attempted=True, adopted=adopted is not None, reason=outcome)
         return adopted
 
     async def _compute_bound_attempt(

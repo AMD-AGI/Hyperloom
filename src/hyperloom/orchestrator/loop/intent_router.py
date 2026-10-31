@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import sqlite3
 import time
 import uuid
 from collections.abc import Mapping
@@ -190,26 +191,23 @@ def _record_phase_proposal_review(pending: Any, ruling: CriticRuling) -> None:
     proposal_id = str(getattr(pending, "proposal_msg_id", "") or "")
     if not proposal_id:
         return
-    try:
-        from hyperloom.inference_optimizer.breakdown.recorder import phase_event
-        from hyperloom.inference_optimizer.breakdown.recorder.phase_records import ProposalReview
+    from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+    from hyperloom.inference_optimizer.breakdown.recorder.phase_records import ProposalReview
 
-        fields = ruling.payload or {}
-        phase_event.record_proposal_review(
-            ProposalReview(
-                proposal_msg_id=proposal_id,
-                verdict=ruling.authored or ruling.effective,
-                effective_verdict=ruling.effective,
-                source=str(fields.get("source") or ""),
-                reasoning=str(ruling.reasoning or ""),
-                confidence=fields.get("confidence"),
-                failure_reason_code=fields.get("failure_reason_code"),
-                advisory=ruling.advisory,
-                variants=ruling.variant_verdicts,
-            )
+    fields = ruling.payload or {}
+    phase_event.record_proposal_review(
+        ProposalReview(
+            proposal_msg_id=proposal_id,
+            verdict=ruling.authored or ruling.effective,
+            effective_verdict=ruling.effective,
+            source=str(fields.get("source") or ""),
+            reasoning=str(ruling.reasoning or ""),
+            confidence=fields.get("confidence"),
+            failure_reason_code=fields.get("failure_reason_code"),
+            advisory=ruling.advisory,
+            variants=ruling.variant_verdicts,
         )
-    except Exception:
-        log.debug("phase timeline: proposal review row failed for %s", proposal_id, exc_info=True)
+    )
 
 
 def _record_critic_review(router: Any, pending: Any, ruling: CriticRuling) -> None:
@@ -277,21 +275,18 @@ def _record_phase_proposal_outcome(pending: Any, **outcome: Any) -> None:
     proposal_id = str(getattr(pending, "proposal_msg_id", "") or "")
     if not proposal_id:
         return
-    try:
-        from hyperloom.inference_optimizer.breakdown.recorder import phase_event
-        from hyperloom.inference_optimizer.breakdown.recorder.phase_records import ProposalOutcome
+    from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+    from hyperloom.inference_optimizer.breakdown.recorder.phase_records import ProposalOutcome
 
-        phase_event.record_proposal_outcome(
-            ProposalOutcome(
-                proposal_msg_id=proposal_id,
-                materialized=bool(outcome.get("materialized")),
-                denied=bool(outcome.get("denied")),
-                reauthored=bool(outcome.get("reauthored")),
-                patch_verdict_key=outcome.get("patch_verdict_key"),
-            )
+    phase_event.record_proposal_outcome(
+        ProposalOutcome(
+            proposal_msg_id=proposal_id,
+            materialized=bool(outcome.get("materialized")),
+            denied=bool(outcome.get("denied")),
+            reauthored=bool(outcome.get("reauthored")),
+            patch_verdict_key=outcome.get("patch_verdict_key"),
         )
-    except Exception:
-        log.debug("phase timeline: proposal outcome row failed for %s", proposal_id, exc_info=True)
+    )
 
 
 def _record_review_outcome(router: Any, pending: Any, **outcome: Any) -> None:
@@ -503,7 +498,7 @@ class IntentRouter(CoordinatorCollaborator):
                         "error": format_exc_brief(exc, limit=500),
                     },
                 )
-            except Exception:
+            except sqlite3.Error:
                 log.exception("failed to record handle_intent_exception observation")
             return
 

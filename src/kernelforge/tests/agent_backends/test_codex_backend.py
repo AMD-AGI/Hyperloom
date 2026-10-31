@@ -396,6 +396,7 @@ class _FakeCodexSdk:
     AsyncCodex = _FakeAsyncCodex
     Codex = _FakeCodex
     CodexConfig = _FakeCodexConfig
+    CodexError = type("CodexError", (Exception,), {})
     Sandbox = _FakeSandbox
 
 
@@ -1916,6 +1917,7 @@ def test_codex_safety_error_marks_a_verdict_and_not_a_failed_query(
 def test_codex_verify_rejection_survives_a_failing_second_rollback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """The author needs the violating paths, not a complaint about a restore."""
     from kernelforge.agent_backends import codex as codex_module
@@ -1954,8 +1956,13 @@ def test_codex_verify_rejection_survives_a_failing_second_rollback(
         failing_second_rollback,
     )
 
-    with pytest.raises(WorkspaceSafetyError, match="forge_driver.py"):
-        asyncio.run(_backend(fake).run(_author_spec(repo, kernel, driver)))
+    with caplog.at_level("WARNING", logger="kernelforge.agent_backends.codex"):
+        with pytest.raises(WorkspaceSafetyError, match="forge_driver.py"):
+            asyncio.run(_backend(fake).run(_author_spec(repo, kernel, driver)))
+
+    assert [record.getMessage() for record in caplog.records if "rollback" in record.getMessage()] == [
+        "workspace rollback after a failed verify also failed"
+    ]
 
 
 def test_codex_writable_author_accepts_inherited_dirty_non_target_state(

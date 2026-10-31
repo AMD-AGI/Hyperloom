@@ -136,6 +136,7 @@ import json
 import os
 import sys
 import time
+import traceback
 
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "{gpu_id}")
 os.environ.setdefault("HIP_VISIBLE_DEVICES", "{gpu_id}")
@@ -211,6 +212,7 @@ def main():
         }}))
         return 0
     except Exception as e:
+        traceback.print_exc()
         elapsed = time.time() - start
         print(json.dumps({{
             "status": "failed",

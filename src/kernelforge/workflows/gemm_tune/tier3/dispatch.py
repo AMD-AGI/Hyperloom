@@ -382,7 +382,7 @@ class _FusedMoeAdapter:
                 1,
             )
         except Exception as exc:  # isolation boundary: one fused-MoE shape's operand bundle
-            log.info("tier3: cannot build fused-MoE operands for %s: %r", shape, exc, exc_info=True)
+            log.warning("tier3: cannot build fused-MoE operands for %s: %r", shape, exc, exc_info=True)
             self._operands[shape] = None
             return None
         self._operands[shape] = bundle
