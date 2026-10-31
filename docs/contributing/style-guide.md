@@ -78,7 +78,7 @@ Two layers. The **gate** is the `code-metrics` CI job (`scripts/code_metrics.py`
 |-----------------|-----------|-----------------|------|
 | Cyclomatic complexity | > 20 | The [Complexity ceiling](#complexity-ceiling): twice McCabe's 10, the point where a function has more paths than a reviewer can hold while reading it. Every `and` / `or`, ternary, comprehension and `assert` counts as a branch, so it reads higher than ruff `C901` | radon `cc` |
 | Cognitive complexity | > 30 | Twice SonarSource's S3776 default of 15, the same step as the ceiling; it weights nesting, so past 30 a function has to be re-read rather than read | complexipy |
-| Function length | > 50 lines | Lines of code in the body, counted as below: past 50 a function rarely does one thing | the script |
+| Function length | > 60 lines | Lines of code in the body, counted as below: past 60, about the tree's 98th percentile, a function rarely does one thing | the script |
 | Nested block depth | > 4 | Past four levels the innermost line depends on five conditions at once | ruff `PLR1702` |
 | Parameter count | > 5 | pylint `R0913` default: past five, the call site stops reading as a sentence and the values travel together anyway — pass the object they come from, or name them in a dataclass (A8). A first parameter named `self`/`cls` does not count; every other named parameter does, keyword-only and `_`-named ones included, `@overload`/`@override` signatures are counted like any other, and `*args` and `**kwargs` count one each, so it reads higher than ruff `PLR0913` | the script |
 | Module length | > 1200 lines (over 800 is a report-only warning) | Half again the 800-line review trigger; at that size a module almost always holds more than one job | the script |
