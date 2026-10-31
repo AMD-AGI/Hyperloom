@@ -228,7 +228,7 @@ def test_a_lane_session_is_given_the_protected_path_hooks(tmp_path, monkeypatch)
         gate_module._EDIT_TOOL_MATCHER,
         "Bash",
     }
-    assert [hook.matcher for hook in spec.hooks.post_tool_use] == [gate_module._EDIT_TOOL_MATCHER]
+    assert spec.hooks.post_tool_use == []
 
 
 def test_a_lane_session_is_not_given_the_benchmarking_stop_hook(tmp_path, monkeypatch):
@@ -485,7 +485,7 @@ def test_both_gate_modes_share_one_protected_path_rule(tmp_path, stop_check):
     pre_edit_callbacks = {hook.callback for hook in hooks.pre_tool_use}
     assert gate._on_pre_edit in pre_edit_callbacks
     assert gate._on_pre_bash in pre_edit_callbacks
-    assert [hook.callback for hook in hooks.post_tool_use] == [gate._on_edit]
+    assert hooks.post_tool_use == []
 
 
 def _register_provider(name: str, **capabilities: bool) -> None:

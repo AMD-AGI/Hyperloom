@@ -127,7 +127,7 @@ def test_make_agent_hooks_shape(tmp_path):
     gate, _ = _gate(tmp_path)
     hooks = gate.make_agent_hooks()
     assert len(hooks.pre_tool_use) == 2
-    assert len(hooks.post_tool_use) == 1
+    assert hooks.post_tool_use == []
     assert len(hooks.stop) == 1
     # The Stop hook runs correctness AND bench, so its ceiling has to cover both stages plus slack -- under a
     # multi-rank driver each is a full launch, and a timeout sized for one of them loses the verdict mid-bench.
@@ -189,37 +189,6 @@ def test_on_pre_bash_ignores_non_bash(tmp_path):
     assert out == {}
 
 
-# ── PostToolUse edit counting ──────────────────────────────────────────────────
-
-
-def test_on_edit_counts_all_non_protected_implementation_files(tmp_path):
-    gate, workspace = _gate(tmp_path)
-    kernel = str(workspace / "aiter" / "csrc" / "kernel.cu")
-    _run(gate._on_edit({"tool_name": "Edit", "tool_input": {"file_path": kernel}}, None, None))
-    assert gate.edit_count == 1
-    # A non-target helper is an equally valid implementation edit.
-    _run(gate._on_edit({"tool_name": "Edit", "tool_input": {"file_path": str(workspace / "helper.py")}}, None, None))
-    assert gate.edit_count == 2
-
-
-# ── hookless outer-gate edit counting ──────────────────────────────────────────
-
-
-def test_count_target_edits_includes_non_target_implementation_files(tmp_path):
-    """Mirror _on_edit for backends whose changes are counted post-hoc."""
-    gate, workspace = _gate(tmp_path)
-    relative_changes = ["aiter/csrc/kernel.cu", "helper.py", "aiter/csrc/other.cu"]
-    assert gate.count_target_edits(str(workspace), relative_changes) == 3
-
-
-def test_count_target_edits_accepts_absolute_implementation_paths(tmp_path):
-    """Count absolute non-protected implementation paths."""
-    gate, workspace = _gate(tmp_path)
-    kernel_abs = str(workspace / "aiter" / "csrc" / "kernel.cu")
-    assert gate.count_target_edits(str(workspace), [kernel_abs, str(workspace / "helper.py")]) == 2
-    assert gate.count_target_edits(str(workspace), []) == 0
-
-
 # ── Stop hook decisions ────────────────────────────────────────────────────────
 
 import kernelforge.workflows.forge_loop.gate.insession_gate as gate_module
@@ -250,6 +219,97 @@ def _patch_canonical(monkeypatch, *, correct=True, wall_ms=0.5):
     monkeypatch.setattr(gate_module, "measure_wallclock", _bench)
 
 
+def _edit_kernel(workspace: Path, body: str = "__global__ void kernel() { /* faster */ }\n") -> None:
+    """Change the committed kernel on disk, as any tool would: no hook sees the write."""
+    (workspace / "aiter" / "csrc" / "kernel.cu").write_text(body)
+
+
+def _count_canonical_calls(monkeypatch, *, wall_ms=0.5) -> dict[str, int]:
+    """Stub the canonical checks as correct (and faster at 0.5 ms), counting each call."""
+    calls = {"correctness": 0, "bench": 0}
+    _patch_canonical(monkeypatch, correct=True, wall_ms=wall_ms)
+    correctness, bench = gate_module.test_correctness, gate_module.measure_wallclock
+
+    async def counted_correctness(*a, **k):
+        calls["correctness"] += 1
+        return await correctness(*a, **k)
+
+    async def counted_bench(*a, **k):
+        calls["bench"] += 1
+        return await bench(*a, **k)
+
+    monkeypatch.setattr(gate_module, "test_correctness", counted_correctness)
+    monkeypatch.setattr(gate_module, "measure_wallclock", counted_bench)
+    return calls
+
+
+def test_stop_benches_a_candidate_written_without_an_edit_tool(tmp_path, monkeypatch):
+    """A kernel rewritten from Bash (heredoc, sed -i) is as much a candidate as one written with Edit."""
+    gate, workspace = _gate(tmp_path)
+    calls = _count_canonical_calls(monkeypatch)
+    _edit_kernel(workspace)
+
+    assert _run(gate._on_stop({}, None, None)) == {}
+    assert calls == {"correctness": 1, "bench": 1}
+    assert gate.edit_count == 1
+    assert gate.end_reason == "converged"
+
+
+def test_stop_after_edit_then_revert_allows_without_validation_or_bench(tmp_path, monkeypatch):
+    """A tree back at HEAD is the incumbent: re-benching it can only block on noise against a ratcheted bar."""
+    gate, workspace = _gate(tmp_path)
+    calls = _count_canonical_calls(monkeypatch, wall_ms=1.0)
+    gate.last_bench_result = {"success": True, "median_ms": 9.0}
+    gate.last_mean_case_speedup = 9.0
+    gate.last_wall_ms = 9.0
+    _edit_kernel(workspace)
+    subprocess.run(["git", "checkout", "--", "aiter/csrc/kernel.cu"], cwd=workspace, check=True)
+
+    assert _run(gate._on_stop({}, None, None)) == {}
+    assert calls == {"correctness": 0, "bench": 0}
+    assert gate.end_reason == "no_changes"
+    assert (gate.block_count, gate.edit_count, gate.passed) == (0, 0, False)
+    assert gate.findings == []
+    # No measurement of this stop exists, so none may be reported for it.
+    assert (gate.last_bench_result, gate.last_mean_case_speedup, gate.last_wall_ms) == (None, None, None)
+
+
+def test_stop_with_only_untracked_files_allows_without_validation_or_bench(tmp_path, monkeypatch):
+    """A new file no tracked source changed to use cannot change the build, and the outer loop calls this NO_CHANGES."""
+    gate, workspace = _gate(tmp_path)
+    calls = _count_canonical_calls(monkeypatch)
+    (workspace / "aiter" / "csrc" / "scratch.cu").write_text("__global__ void unused() {}\n")
+
+    assert _run(gate._on_stop({}, None, None)) == {}
+    assert calls == {"correctness": 0, "bench": 0}
+    assert gate.end_reason == "no_changes"
+    assert (gate.block_count, gate.edit_count) == (0, 0)
+
+
+def test_stop_benches_an_edit_tool_change_as_before(tmp_path, monkeypatch):
+    gate, workspace = _gate(tmp_path)
+    calls = _count_canonical_calls(monkeypatch)
+    kernel = str(workspace / "aiter" / "csrc" / "kernel.cu")
+    assert _run(gate._on_pre_edit({"tool_name": "Edit", "tool_input": {"file_path": kernel}}, None, None)) == {}
+    _edit_kernel(workspace)
+
+    assert _run(gate._on_stop({}, None, None)) == {}
+    assert calls == {"correctness": 1, "bench": 1}
+    assert gate.edit_count == 1
+    assert gate.passed is True
+    assert gate.end_reason == "converged"
+    assert gate.last_wall_ms == 0.5
+
+
+def test_session_end_counts_the_candidate_diff_without_a_stop(tmp_path):
+    """A lane session runs no Stop hook; its edit count still comes from the tree it leaves."""
+    gate, workspace = _gate(tmp_path)
+    _edit_kernel(workspace)
+
+    assert gate.finalize_integrity() == ""
+    assert gate.edit_count == 1
+
+
 def test_stop_blocks_when_protected_changed(tmp_path):
     gate, workspace = _gate(tmp_path)
     (workspace / "forge_driver.py").write_text("print('driver')\nhacked=1\n")
@@ -262,7 +322,8 @@ def test_stop_blocks_when_protected_changed(tmp_path):
 
 def test_stop_allows_when_correct_and_faster(tmp_path, monkeypatch):
     # best_ms=1.0; a 0.5ms candidate beats it by > noise floor -> converged.
-    gate, _ = _gate(tmp_path)
+    gate, workspace = _gate(tmp_path)
+    _edit_kernel(workspace)
     _patch_canonical(monkeypatch, correct=True, wall_ms=0.5)
     out = _run(gate._on_stop({}, None, None))
     assert out == {}
@@ -272,7 +333,8 @@ def test_stop_allows_when_correct_and_faster(tmp_path, monkeypatch):
 
 
 def test_stop_gate_invokes_driver_without_shape_selectors(tmp_path, monkeypatch):
-    gate, _ = _gate(tmp_path)
+    gate, workspace = _gate(tmp_path)
+    _edit_kernel(workspace)
     calls = []
 
     async def correctness(**kwargs):
@@ -319,7 +381,8 @@ def test_stop_gate_invokes_driver_without_shape_selectors(tmp_path, monkeypatch)
 
 
 def test_stop_hands_validation_timeout_to_outer_loop(tmp_path, monkeypatch):
-    gate, _ = _gate(tmp_path)
+    gate, workspace = _gate(tmp_path)
+    _edit_kernel(workspace)
     bench_calls = {"count": 0}
 
     async def correctness(**_kwargs):
@@ -345,7 +408,8 @@ def test_stop_hands_validation_timeout_to_outer_loop(tmp_path, monkeypatch):
 
 
 def test_stop_blocks_when_incorrect(tmp_path, monkeypatch):
-    gate, _ = _gate(tmp_path)
+    gate, workspace = _gate(tmp_path)
+    _edit_kernel(workspace)
     _patch_canonical(monkeypatch, correct=False)
     out = _run(gate._on_stop({}, None, None))
     assert out["decision"] == "block"
@@ -355,7 +419,8 @@ def test_stop_blocks_when_incorrect(tmp_path, monkeypatch):
 
 def test_stop_blocks_when_correct_but_not_faster(tmp_path, monkeypatch):
     # best_ms=1.0; a 1.0ms candidate does not beat it -> block, keep optimizing.
-    gate, _ = _gate(tmp_path)
+    gate, workspace = _gate(tmp_path)
+    _edit_kernel(workspace)
     _patch_canonical(monkeypatch, correct=True, wall_ms=1.0)
     out = _run(gate._on_stop({}, None, None))
     assert out["decision"] == "block"
@@ -405,7 +470,8 @@ def test_performance_verdict_keeps_current_wall_when_scoring_is_unavailable(tmp_
 
 
 def test_stop_clears_stale_bench_state_when_benchmark_raises(tmp_path, monkeypatch):
-    gate, _ = _gate(tmp_path)
+    gate, workspace = _gate(tmp_path)
+    _edit_kernel(workspace)
     gate.last_bench_result = {"success": True, "median_ms": 9.0}
     gate.last_mean_case_speedup = 9.0
     gate.last_wall_ms = 9.0
@@ -426,10 +492,11 @@ def test_stop_clears_stale_bench_state_when_benchmark_raises(tmp_path, monkeypat
 
 def test_correctness_only_allows_without_ever_consulting_the_perf_gate(tmp_path, monkeypatch):
     """PORT-mode contract: with correctness_only=True the gate allows a CORRECT kernel and MUST NOT run the benchmark / perf gate at all."""
-    gate, _ = _gate(
+    gate, workspace = _gate(
         tmp_path,
         correctness_only=True,
     )
+    _edit_kernel(workspace)
     bench_calls = {"n": 0}
 
     async def _corr(*a, **k):
@@ -452,7 +519,8 @@ def test_correctness_only_allows_without_ever_consulting_the_perf_gate(tmp_path,
 def test_stop_hands_off_when_block_budget_exhausted(tmp_path, monkeypatch):
     # Budget is checked BEFORE the canonical validation, so an exhausted session hands off immediately (the fakes
     # would otherwise report correct+faster).
-    gate, _ = _gate(tmp_path, max_blocks=2)
+    gate, workspace = _gate(tmp_path, max_blocks=2)
+    _edit_kernel(workspace)
     _patch_canonical(monkeypatch, correct=True, wall_ms=0.5)
     gate.block_count = gate.max_blocks
     out = _run(gate._on_stop({}, None, None))

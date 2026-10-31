@@ -25,8 +25,9 @@ def _gate(tmp_path: Path) -> tuple[InSessionGate, Path]:
     kernel.write_text("__global__ void kernel() {}\n")
     # The gate diffs the session's edits against HEAD, so its workspace is a repo that has one.
     subprocess.run(["git", "init", "-q"], cwd=workspace, check=True, capture_output=True)
+    subprocess.run(["git", "add", "-A"], cwd=workspace, check=True, capture_output=True)
     subprocess.run(
-        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "base"],
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "base"],
         cwd=workspace,
         check=True,
         capture_output=True,
@@ -105,11 +106,12 @@ def test_a_multi_line_python_c_payload_does_not_split_the_command(tmp_path: Path
     assert bool(gate._bash_deny_reason(command)) is denied
 
 
-def test_non_target_implementation_edits_are_counted(tmp_path: Path):
+def test_only_implementation_changes_from_head_are_counted_as_edits(tmp_path: Path):
     gate, workspace = _gate(tmp_path)
+    (workspace / "aiter" / "csrc" / "kernel.cu").write_text("__global__ void kernel() { }\n")
+    (workspace / "scripts" / "task_runner.py").write_text("print('changed')\n")
 
-    assert gate.count_target_edits(str(workspace), ["src/helper.py"]) == 1
-    assert gate.count_target_edits(str(workspace), ["scripts/task_runner.py"]) == 0
+    assert gate._changed_implementation_paths() == [str(workspace.resolve() / "aiter" / "csrc" / "kernel.cu")]
 
 
 def test_bash_allows_readonly_diagnostics_with_dev_null(tmp_path: Path):
@@ -355,7 +357,8 @@ def test_safe_stop_runs_canonical_validation_and_converges(
 ):
     # Harness intact: the gate runs its canonical correctness+bench self-check and, on a correct + faster candidate,
     # ALLOWS the stop as a real convergence (best_ms=1.0 in the helper; 0.5ms beats it by > noise floor).
-    gate, _workspace = _gate(tmp_path)
+    gate, workspace = _gate(tmp_path)
+    (workspace / "aiter" / "csrc" / "kernel.cu").write_text("__global__ void kernel() { }\n")
 
     async def _corr(**_kwargs):
         return {"passed": True, "message": ""}
@@ -428,6 +431,7 @@ def test_an_unreadable_declared_source_ends_the_session_as_a_rebuild_failure(
     """A workspace file the loop cannot read is the same class of fault as a workspace git that cannot answer."""
     gate, workspace = _gate(tmp_path)
     kernel = (workspace / "aiter" / "csrc" / "kernel.cu").resolve()
+    kernel.write_text("__global__ void kernel() { }\n")
     monkeypatch.setenv("FORGE_AITER_CACHE_ROOT", str(tmp_path / "cache"))
     readable = Path.read_bytes
 
