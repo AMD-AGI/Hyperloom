@@ -22,7 +22,7 @@ from hyperloom.contracts.measurement import (
     TestResult,
     Validity,
 )
-from hyperloom.contracts.recipe import Recipe, RecipeDelta
+from hyperloom.contracts.recipe import Recipe
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
@@ -349,7 +349,8 @@ async def test_a_candidate_the_regression_set_fails_on_its_own_commit_is_not_eli
 
     assert choice.chosen == bench.candidates().best_branch
     assert [check.regression_passed for check in choice.checks] == [False, True]
-    assert sorted(bench.regression.calls) == sorted((bench.commits[tag], RecipeDelta(), ()) for tag in ("i1", "c7"))
+    assert sorted(bench.regression.every_case) == sorted(bench.commits[tag] for tag in ("i1", "c7"))
+    assert bench.regression.calls == []
 
 
 async def test_a_candidate_check_says_how_many_regression_cases_ran_on_its_commit(tmp_path: Path) -> None:
@@ -363,6 +364,43 @@ async def test_a_candidate_check_says_how_many_regression_cases_ran_on_its_commi
     choice = await bench.selector().select(bench.candidates())
 
     assert [(check.regression_passed, check.regression_cases) for check in choice.checks] == [(True, 2), (True, 0)]
+
+
+async def test_a_candidate_that_carries_more_of_the_roots_defects_ranks_below_one_that_carries_fewer(
+    tmp_path: Path,
+) -> None:
+    curves = {
+        frozenset({"i1"}): {MAIN_POINT: 1040.0, CONC: 1040.0},
+        frozenset({"c7"}): {MAIN_POINT: 1060.0, CONC: 1060.0},
+    }
+    bench = await Bench(tmp_path).build(curves)
+    bench.regression.carried = {bench.commits["c7"]: ("rope-swap",)}
+
+    choice = await bench.selector().select(bench.candidates())
+
+    assert choice.chosen == bench.candidates().integration
+    assert [check.carried for check in choice.checks] == [(), ("rope-swap",)]
+    assert choice.reason == (
+        f"best_branch carries more of the root's defects (rope-swap); among the rest, the higher {METRIC} at conc {CONC}"
+    )
+
+
+async def test_when_every_candidate_carries_a_defect_of_the_root_the_metric_decides_and_the_reason_names_it(
+    tmp_path: Path,
+) -> None:
+    curves = {
+        frozenset({"i1"}): {MAIN_POINT: 1040.0, CONC: 1040.0},
+        frozenset({"c7"}): {MAIN_POINT: 1060.0, CONC: 1060.0},
+    }
+    bench = await Bench(tmp_path).build(curves)
+    bench.regression.carried = {bench.commits[tag]: ("rope-swap",) for tag in ("i1", "c7")}
+
+    choice = await bench.selector().select(bench.candidates())
+
+    assert choice.chosen == bench.candidates().best_branch
+    assert (
+        choice.reason == f"the higher {METRIC} at conc {CONC}; best_branch still carries the root's defects rope-swap"
+    )
 
 
 async def test_a_cold_start_within_the_reproduction_tolerance_of_its_record_is_reproduced(tmp_path: Path) -> None:

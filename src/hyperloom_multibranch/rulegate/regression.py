@@ -6,7 +6,8 @@
 A reproduction case is the attachments of a repro test: a directory with a ``repro.sh`` at its top, whose verdict on a
 commit is ``reproduced`` (the failure occurs) or ``not_reproduced`` (it ran clean). :class:`ReproRunner` is the one
 place that submits repro tests; :class:`RegressionSet` runs the cases of every fix a commit builds on, and the cases
-other sessions on the same image and model registered (:class:`CasePool`) that run clean on the root.
+other sessions on the same image and model registered (:class:`CasePool`) that run clean on the root. For FINAL it
+runs every case the session registered, whether a candidate builds on the case's fix or not.
 """
 
 from __future__ import annotations
@@ -191,10 +192,33 @@ class RegressionSet:
         cases = await self._cases((base_commit, *sources))
         if not cases:
             return RegressionOutcome(True)
-        digest = apply(await self._repo.read_recipe(base_commit), candidate_delta).digest()
-        outcomes = await _gathered(self._outcome(case, base_commit, candidate_delta, digest) for case in cases)
+        outcomes = await self._on(cases, base_commit, candidate_delta)
         failed = [f"{case.case_ref}: {outcome}" for case, outcome in zip(cases, outcomes) if outcome != NOT_REPRODUCED]
         return RegressionOutcome(not failed, "; ".join(failed), len(cases))
+
+    async def check_every_case(self, commit: str) -> RegressionOutcome:
+        await self._pooled()
+        root = (await self._blackboard.baseline()).root_commit
+        cases = await self._cases((root, *(item.commit_id for item in await self._blackboard.committed())))
+        if not cases:
+            return RegressionOutcome(True)
+        outcomes = await self._on(cases, commit, NO_DELTA)
+        reproduced = [case for case, outcome in zip(cases, outcomes) if outcome == REPRODUCED]
+        on_root = await self._on(reproduced, root, NO_DELTA) if reproduced else []
+        carried = {case.request_id for case, outcome in zip(reproduced, on_root) if outcome == REPRODUCED}
+        failed = [
+            f"{case.case_ref}: {outcome}"
+            for case, outcome in zip(cases, outcomes)
+            if outcome != NOT_REPRODUCED and case.request_id not in carried
+        ]
+        named = tuple(case.case_ref for case in cases if case.request_id in carried)
+        return RegressionOutcome(not failed, "; ".join(failed), len(cases), named)
+
+    async def _on(self, cases: list[RegressionCase], commit: str, delta: RecipeDelta) -> list[str]:
+        """Each case's outcome on ``commit`` with ``delta`` applied, run at once."""
+
+        digest = apply(await self._repo.read_recipe(commit), delta).digest()
+        return await _gathered(self._outcome(case, commit, delta, digest) for case in cases)
 
     async def _pooled(self) -> None:
         """The pool's cases on the root, once a set; not before the baseline names the root."""

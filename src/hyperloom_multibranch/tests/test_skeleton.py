@@ -1633,6 +1633,9 @@ class NoRegressionSet(FakeRegressionCheck):
     async def check(self, base_commit: str, candidate_delta: RecipeDelta, *, sources: tuple[str, ...]) -> NoReturn:
         raise LookupError(REGRESSION_SET_GONE)
 
+    async def check_every_case(self, commit: str) -> NoReturn:
+        raise LookupError(REGRESSION_SET_GONE)
+
 
 async def test_a_final_only_that_fails_reports_the_session_as_it_ended_and_leaves_it_open_to_another(
     tmp_path: Path,
