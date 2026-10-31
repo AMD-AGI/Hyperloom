@@ -116,16 +116,7 @@ class IterationPhasesMixin:
         """
         iteration, session_sink = frame.iteration, frame.session_sink
         merge_pair, merge_diff = frame.merge
-        hazard, queued_lane, fan_out_plan = supply.hazard, supply.queued_lane, supply.fan_out_plan
-        agent_fn, orchestration_service, on_iteration = (
-            agents.agent_fn,
-            agents.orchestration_service,
-            callbacks.on_iteration,
-        )
-        # Only an orchestrated round synthesizes a plan; every other way of
-        # sourcing an attempt leaves the iteration without one.
-        optimization_plan_path = ""
-        optimization_plan_executable = False
+        hazard, queued_lane = supply.hazard, supply.queued_lane
         lane_record = None
         if hazard is not None:
             unmeasured_result = self._unmeasurable_on_a_held_device(
@@ -151,107 +142,14 @@ class IterationPhasesMixin:
             lane_record = queued_lane.lesson
             print(f"  [lane {queued_lane.lane_id}] measuring queued candidate")
         elif merge_diff and merge_pair is not None:
-            unmeasured_result = None
-            commit_hash = ""
-            rationale = (
-                f"stacked iterations {merge_pair[0].iteration} and {merge_pair[1].iteration}; no Implementer session"
-            )
-            attempt_source = self._read_kernel_source()
-            attempt_diff = merge_diff
-            reusable_benchmark = None
-            session_sink["plan"] = merge_plan(*merge_pair)
-            print(f"  [merge] {session_sink['plan']}")
-            # How often the mechanism engaged.
-            self.state_store.append_event(
-                make_event(
-                    "merge_attempt_staged",
-                    iteration,
-                    first_iteration=merge_pair[0].iteration,
-                    second_iteration=merge_pair[1].iteration,
-                    cases=sorted(merge_pair[0].winning_cases | merge_pair[1].winning_cases),
-                    unresolved_stall_iters=(self.run_state.stall.unresolved_stall_iters),
-                )
-            )
-        elif agent_fn is not None:
-            print("  [agent] Querying agent for kernel modification...")
-            self._bind_session_producer(session_sink, self.run_state.agent_relay.active_profile_id)
-            if orchestration_service is not None:
-                if fan_out_plan is not None:
-                    plan_path, orchestration_error = fan_out_plan
-                else:
-                    print("  [orchestration] analyzing and dispatching specialists...")
-                    self._last_orchestration_plan_executable = None
-                    plan_path, orchestration_error = await self._plan_round(
-                        iteration=iteration,
-                        orchestration_service=orchestration_service,
-                    )
-                if plan_path is None:
-                    await self._abandon_iteration(
-                        IterationResult(
-                            iteration=iteration,
-                            duration_sec=0.0,
-                            validation_passed=False,
-                            validation_summary=(f"ORCHESTRATION ERROR: {orchestration_error}"),
-                            session_end_reason="orchestration_error",
-                        ),
-                        frame,
-                        decision_label=DecisionLabel.ORCHESTRATION_ERROR.value,
-                        on_iteration=on_iteration,
-                    )
-                    return None
-                optimization_plan_path = str(plan_path)
-                optimization_plan_executable = (
-                    self._last_orchestration_plan_executable
-                    if self._last_orchestration_plan_executable is not None
-                    else True
-                )
-                complete_orchestration_probe(self.run_state)
-                self.state_store.save(self.run_state)
-            # The last point before the round buys its session, and the first at which what planning cost is a
-            # measurement rather than an estimate.
-            if not self._admit_dispatch(iteration):
-                return None
-            session_sink["session_started"] = True
-            history = self._implementer_history(
-                digest=digest,
-                optimization_plan_path=optimization_plan_path,
-            )
-            # Pass extras only to agent_fns that declare them: the in-session gate uses the current best mean case
-            # speedup and immutable pristine per-case timings; session_sink hands back findings and the
-            # resumed-session factual-record callback. The lesson turn, not this session, writes the record.
-            extras = {
-                "gate_scoring": GateScoring(dict(self._baseline_case_times), self.best_mean_case_speedup),
-                "session_sink": session_sink,
-            }
-            extra_kwargs = declared_extras(agent_fn, extras)
-            agent_error = None
-            try:
-                rationale = await agent_fn(
-                    self.ic.kernel_file,
-                    history,
-                    **extra_kwargs,
-                )
-                print(f"  [agent] Rationale: {rationale[:200]}")
-            except Exception as e:  # isolation boundary: one implementer agent session
-                log.warning("implementer agent session failed at iteration %s", iteration, exc_info=True)
-                agent_error = e
-                print(f"  [agent] ERROR: {e}")
-                rationale = f"agent session ended with error after edits: {e}"
-                session_sink.setdefault("end_reason", "sdk_error")
-                session_sink.setdefault(
-                    "findings",
-                    f"Agent session error before outer validation: {e}",
-                )
-            finally:
-                # The SDK result stream has completed (or unwound).
-                self._checkpoint_llm_usage()
-
-            return await self._collect_session_candidate(
+            return self._merge_attempt(frame)
+        elif agents.agent_fn is not None:
+            return await self._implementer_attempt(
                 frame,
-                agent_error=agent_error,
-                rationale=rationale,
-                plan=_RoundPlan(optimization_plan_path, optimization_plan_executable),
-                on_iteration=on_iteration,
+                supply.fan_out_plan,
+                agents=agents,
+                digest=digest,
+                on_iteration=callbacks.on_iteration,
             )
         else:
             unmeasured_result = None
@@ -267,10 +165,167 @@ class IterationPhasesMixin:
             attempt_source=attempt_source,
             attempt_diff=attempt_diff,
             reusable_benchmark=reusable_benchmark,
-            optimization_plan_path=optimization_plan_path,
-            optimization_plan_executable=optimization_plan_executable,
+            # Only an orchestrated round synthesizes a plan; every other way of
+            # sourcing an attempt leaves the iteration without one.
+            optimization_plan_path="",
+            optimization_plan_executable=False,
             lane_record=lane_record,
         )
+
+    def _merge_attempt(self, frame: _IterationFrame) -> _Attempt:
+        """Stage the two queued winners' stacked diff as this iteration's candidate, with no Implementer session."""
+        iteration, session_sink = frame.iteration, frame.session_sink
+        merge_pair, merge_diff = frame.merge
+        unmeasured_result = None
+        commit_hash = ""
+        rationale = (
+            f"stacked iterations {merge_pair[0].iteration} and {merge_pair[1].iteration}; no Implementer session"
+        )
+        attempt_source = self._read_kernel_source()
+        attempt_diff = merge_diff
+        reusable_benchmark = None
+        session_sink["plan"] = merge_plan(*merge_pair)
+        print(f"  [merge] {session_sink['plan']}")
+        # How often the mechanism engaged.
+        self.state_store.append_event(
+            make_event(
+                "merge_attempt_staged",
+                iteration,
+                first_iteration=merge_pair[0].iteration,
+                second_iteration=merge_pair[1].iteration,
+                cases=sorted(merge_pair[0].winning_cases | merge_pair[1].winning_cases),
+                unresolved_stall_iters=(self.run_state.stall.unresolved_stall_iters),
+            )
+        )
+        return _Attempt(
+            unmeasured_result=unmeasured_result,
+            commit_hash=commit_hash,
+            rationale=rationale,
+            attempt_source=attempt_source,
+            attempt_diff=attempt_diff,
+            reusable_benchmark=reusable_benchmark,
+            optimization_plan_path="",
+            optimization_plan_executable=False,
+        )
+
+    async def _implementer_attempt(
+        self,
+        frame: _IterationFrame,
+        fan_out_plan,
+        *,
+        agents: LoopAgents,
+        digest,
+        on_iteration,
+    ) -> _Attempt | None:
+        """Plan an orchestrated round, buy the Implementer session, and collect the candidate it leaves."""
+        iteration, session_sink = frame.iteration, frame.session_sink
+        print("  [agent] Querying agent for kernel modification...")
+        self._bind_session_producer(session_sink, self.run_state.agent_relay.active_profile_id)
+        plan = _RoundPlan()
+        if agents.orchestration_service is not None:
+            plan = await self._orchestrated_plan(
+                frame,
+                fan_out_plan,
+                orchestration_service=agents.orchestration_service,
+                on_iteration=on_iteration,
+            )
+            if plan is None:
+                return None
+        # The last point before the round buys its session, and the first at which what planning cost is a
+        # measurement rather than an estimate.
+        if not self._admit_dispatch(iteration):
+            return None
+        session_sink["session_started"] = True
+        history = self._implementer_history(
+            digest=digest,
+            optimization_plan_path=plan.path,
+        )
+        agent_error, rationale = await self._run_implementer_session(agents.agent_fn, history, frame)
+
+        return await self._collect_session_candidate(
+            frame,
+            agent_error=agent_error,
+            rationale=rationale,
+            plan=plan,
+            on_iteration=on_iteration,
+        )
+
+    async def _orchestrated_plan(
+        self,
+        frame: _IterationFrame,
+        fan_out_plan,
+        *,
+        orchestration_service,
+        on_iteration,
+    ) -> _RoundPlan | None:
+        """The round's synthesized plan, or None when planning failed and the iteration was abandoned."""
+        iteration = frame.iteration
+        if fan_out_plan is not None:
+            plan_path, orchestration_error = fan_out_plan
+        else:
+            print("  [orchestration] analyzing and dispatching specialists...")
+            self._last_orchestration_plan_executable = None
+            plan_path, orchestration_error = await self._plan_round(
+                iteration=iteration,
+                orchestration_service=orchestration_service,
+            )
+        if plan_path is None:
+            await self._abandon_iteration(
+                IterationResult(
+                    iteration=iteration,
+                    duration_sec=0.0,
+                    validation_passed=False,
+                    validation_summary=(f"ORCHESTRATION ERROR: {orchestration_error}"),
+                    session_end_reason="orchestration_error",
+                ),
+                frame,
+                decision_label=DecisionLabel.ORCHESTRATION_ERROR.value,
+                on_iteration=on_iteration,
+            )
+            return None
+        optimization_plan_path = str(plan_path)
+        optimization_plan_executable = (
+            self._last_orchestration_plan_executable if self._last_orchestration_plan_executable is not None else True
+        )
+        complete_orchestration_probe(self.run_state)
+        self.state_store.save(self.run_state)
+        return _RoundPlan(optimization_plan_path, optimization_plan_executable)
+
+    async def _run_implementer_session(
+        self, agent_fn, history: str, frame: _IterationFrame
+    ) -> tuple[Exception | None, str]:
+        """Run the Implementer session on the kernel; return its error, if any, and its rationale."""
+        iteration, session_sink = frame.iteration, frame.session_sink
+        # Pass extras only to agent_fns that declare them: the in-session gate uses the current best mean case
+        # speedup and immutable pristine per-case timings; session_sink hands back findings and the
+        # resumed-session factual-record callback. The lesson turn, not this session, writes the record.
+        extras = {
+            "gate_scoring": GateScoring(dict(self._baseline_case_times), self.best_mean_case_speedup),
+            "session_sink": session_sink,
+        }
+        extra_kwargs = declared_extras(agent_fn, extras)
+        agent_error = None
+        try:
+            rationale = await agent_fn(
+                self.ic.kernel_file,
+                history,
+                **extra_kwargs,
+            )
+            print(f"  [agent] Rationale: {rationale[:200]}")
+        except Exception as e:  # isolation boundary: one implementer agent session
+            log.warning("implementer agent session failed at iteration %s", iteration, exc_info=True)
+            agent_error = e
+            print(f"  [agent] ERROR: {e}")
+            rationale = f"agent session ended with error after edits: {e}"
+            session_sink.setdefault("end_reason", "sdk_error")
+            session_sink.setdefault(
+                "findings",
+                f"Agent session error before outer validation: {e}",
+            )
+        finally:
+            # The SDK result stream has completed (or unwound).
+            self._checkpoint_llm_usage()
+        return agent_error, rationale
 
     async def _collect_session_candidate(
         self,
@@ -297,41 +352,7 @@ class IterationPhasesMixin:
             # Capture evidence before restoration.
             attempt_diff = self._working_tree_diff()
             attempt_source = self._read_kernel_source()
-            integrity_reason = str(session_sink.get("integrity_reason") or "protected workspace state changed")
-            restore_errors: list[str] = []
-            restore = session_sink.get("integrity_restore")
-            if callable(restore):
-                try:
-                    restore()
-                except (RuntimeError, OSError) as error:
-                    restore_errors.append(f"protected snapshot restore failed: {type(error).__name__}: {error}")
-            else:
-                restore_errors.append("protected snapshot restore callback unavailable")
-            try:
-                self._git_discard_worktree()
-            except (OSError, RuntimeError, subprocess.SubprocessError) as error:
-                restore_errors.append(f"tracked candidate restore failed: {type(error).__name__}: {error}")
-            if not restore_errors:
-                try:
-                    self._validate_driver_integrity(self.run_state)
-                except (ValueError, OSError) as error:
-                    restore_errors.append(str(error))
-            summary = (
-                "REVERT (protected integrity violation): canonical "
-                "correctness and benchmark were skipped before executing "
-                f"the measurement surface. {integrity_reason}"
-            )
-            if restore_errors:
-                summary += " Restoration errors: " + "; ".join(restore_errors)
-            _append_finding(session_sink, summary)
-            unmeasured_result = IterationResult(
-                iteration=iteration,
-                duration_sec=0.0,
-                validation_passed=False,
-                validation_summary=summary,
-                kept=False,
-                integrity_violation=True,
-            )
+            unmeasured_result = self._refuse_integrity_violation(frame)
             reusable_benchmark = None
             print("  [REVERT] Protected integrity violation; canonical validation skipped")
         elif str(session_sink.get("workspace_contention") or ""):
@@ -347,26 +368,7 @@ class IterationPhasesMixin:
             )
             attempt_diff = self._working_tree_diff()
             attempt_source = self._read_kernel_source()
-            summary = (
-                "REVERT (workspace contention): canonical correctness "
-                "and benchmark were skipped because the session's "
-                f"workspace could not be cleared. {contention}"
-            )
-            try:
-                # The candidate itself may be sound, but nothing here can establish that, and HEAD has to stay
-                # at the last measured best rather than carry an unmeasured diff into the next iteration.
-                self._git_discard_worktree()
-            except (OSError, RuntimeError, subprocess.SubprocessError) as error:
-                summary += f" Candidate restore failed: {type(error).__name__}: {error}"
-            _append_finding(session_sink, summary)
-            unmeasured_result = IterationResult(
-                iteration=iteration,
-                duration_sec=0.0,
-                validation_passed=False,
-                validation_summary=summary,
-                kept=False,
-                workspace_contention=contention,
-            )
+            unmeasured_result = self._refuse_contended_workspace(frame, contention)
             reusable_benchmark = None
             print("  [REVERT] Workspace still contended; canonical measurement skipped")
         else:
@@ -376,52 +378,12 @@ class IterationPhasesMixin:
             # Keep HEAD at the last validated best state while this candidate remains unverified.
             attempt_diff = self._working_tree_diff()
             if not attempt_diff.strip():
-                # An outage leaves the same empty diff as a deliberate no-op.
-                api_failed = session_sink.get("end_reason") == EXHAUSTED_END_REASON
-                # A file the agent created is not in the tracked diff.
-                new_files_only = self._new_paths_need_discard()
-                if new_files_only:
-                    self._git_discard_worktree()
-                if agent_error:
-                    decision_label = DecisionLabel.AGENT_ERROR.value
-                    summary = f"agent_fn error: {agent_error}"
-                elif api_failed:
-                    decision_label = DecisionLabel.API_ERROR.value
-                    summary = (
-                        "LLM API never answered this Session; no candidate was attempted (not an optimization result)"
-                    )
-                elif new_files_only:
-                    decision_label = DecisionLabel.NO_CHANGES.value
-                    summary = (
-                        "NO TRACKED CHANGES: the whole candidate was in "
-                        "new file(s) matching "
-                        f"{', '.join(self.ic.commit_new_paths)}. A KEEP "
-                        "commit is built from the tracked diff, so an "
-                        "allowlisted new file can only ship alongside a "
-                        "tracked edit. The file was taken off the tree "
-                        "rather than measured with the next candidate."
-                    )
-                else:
-                    decision_label = DecisionLabel.NO_CHANGES.value
-                    summary = "NO TRACKED CHANGES: agent produced no candidate diff"
-                print("  [agent] No tracked source changes; skipping candidate")
-                result = IterationResult(
-                    iteration=iteration,
-                    duration_sec=0.0,
-                    validation_passed=False,
-                    validation_summary=summary,
-                    kept=False,
-                )
-                self._stamp_result_profile(result, session_sink)
-                result.agent_rationale = rationale
-                result.session_end_reason = session_sink.get("end_reason", "")
-                result.turns = session_sink.get("turns")
-                await self._abandon_iteration(
-                    result,
+                await self._abandon_unchanged_session(
                     frame,
-                    decision_label=decision_label,
+                    agent_error=agent_error,
+                    rationale=rationale,
+                    plan=plan,
                     on_iteration=on_iteration,
-                    round_plan=_RoundPlan(optimization_plan_path, optimization_plan_executable),
                 )
                 return None
             reusable_benchmark = None
@@ -442,6 +404,126 @@ class IterationPhasesMixin:
             reusable_benchmark=reusable_benchmark,
             optimization_plan_path=optimization_plan_path,
             optimization_plan_executable=optimization_plan_executable,
+        )
+
+    def _refuse_integrity_violation(self, frame: _IterationFrame) -> IterationResult:
+        """Restore the protected state the session tainted and judge its candidate unmeasurable."""
+        iteration, session_sink = frame.iteration, frame.session_sink
+        integrity_reason = str(session_sink.get("integrity_reason") or "protected workspace state changed")
+        restore_errors: list[str] = []
+        restore = session_sink.get("integrity_restore")
+        if callable(restore):
+            try:
+                restore()
+            except (RuntimeError, OSError) as error:
+                restore_errors.append(f"protected snapshot restore failed: {type(error).__name__}: {error}")
+        else:
+            restore_errors.append("protected snapshot restore callback unavailable")
+        try:
+            self._git_discard_worktree()
+        except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+            restore_errors.append(f"tracked candidate restore failed: {type(error).__name__}: {error}")
+        if not restore_errors:
+            try:
+                self._validate_driver_integrity(self.run_state)
+            except (ValueError, OSError) as error:
+                restore_errors.append(str(error))
+        summary = (
+            "REVERT (protected integrity violation): canonical "
+            "correctness and benchmark were skipped before executing "
+            f"the measurement surface. {integrity_reason}"
+        )
+        if restore_errors:
+            summary += " Restoration errors: " + "; ".join(restore_errors)
+        _append_finding(session_sink, summary)
+        return IterationResult(
+            iteration=iteration,
+            duration_sec=0.0,
+            validation_passed=False,
+            validation_summary=summary,
+            kept=False,
+            integrity_violation=True,
+        )
+
+    def _refuse_contended_workspace(self, frame: _IterationFrame, contention: str) -> IterationResult:
+        """Take the candidate off a workspace that is still busy and judge it unmeasurable."""
+        iteration, session_sink = frame.iteration, frame.session_sink
+        summary = (
+            "REVERT (workspace contention): canonical correctness "
+            "and benchmark were skipped because the session's "
+            f"workspace could not be cleared. {contention}"
+        )
+        try:
+            # The candidate itself may be sound, but nothing here can establish that, and HEAD has to stay
+            # at the last measured best rather than carry an unmeasured diff into the next iteration.
+            self._git_discard_worktree()
+        except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+            summary += f" Candidate restore failed: {type(error).__name__}: {error}"
+        _append_finding(session_sink, summary)
+        return IterationResult(
+            iteration=iteration,
+            duration_sec=0.0,
+            validation_passed=False,
+            validation_summary=summary,
+            kept=False,
+            workspace_contention=contention,
+        )
+
+    async def _abandon_unchanged_session(
+        self,
+        frame: _IterationFrame,
+        *,
+        agent_error,
+        rationale,
+        plan: _RoundPlan,
+        on_iteration,
+    ) -> None:
+        """Close out a session that left no tracked change, saying why there was none."""
+        iteration, session_sink = frame.iteration, frame.session_sink
+        # An outage leaves the same empty diff as a deliberate no-op.
+        api_failed = session_sink.get("end_reason") == EXHAUSTED_END_REASON
+        # A file the agent created is not in the tracked diff.
+        new_files_only = self._new_paths_need_discard()
+        if new_files_only:
+            self._git_discard_worktree()
+        if agent_error:
+            decision_label = DecisionLabel.AGENT_ERROR.value
+            summary = f"agent_fn error: {agent_error}"
+        elif api_failed:
+            decision_label = DecisionLabel.API_ERROR.value
+            summary = "LLM API never answered this Session; no candidate was attempted (not an optimization result)"
+        elif new_files_only:
+            decision_label = DecisionLabel.NO_CHANGES.value
+            summary = (
+                "NO TRACKED CHANGES: the whole candidate was in "
+                "new file(s) matching "
+                f"{', '.join(self.ic.commit_new_paths)}. A KEEP "
+                "commit is built from the tracked diff, so an "
+                "allowlisted new file can only ship alongside a "
+                "tracked edit. The file was taken off the tree "
+                "rather than measured with the next candidate."
+            )
+        else:
+            decision_label = DecisionLabel.NO_CHANGES.value
+            summary = "NO TRACKED CHANGES: agent produced no candidate diff"
+        print("  [agent] No tracked source changes; skipping candidate")
+        result = IterationResult(
+            iteration=iteration,
+            duration_sec=0.0,
+            validation_passed=False,
+            validation_summary=summary,
+            kept=False,
+        )
+        self._stamp_result_profile(result, session_sink)
+        result.agent_rationale = rationale
+        result.session_end_reason = session_sink.get("end_reason", "")
+        result.turns = session_sink.get("turns")
+        await self._abandon_iteration(
+            result,
+            frame,
+            decision_label=decision_label,
+            on_iteration=on_iteration,
+            round_plan=plan,
         )
 
     async def _abandon_iteration(

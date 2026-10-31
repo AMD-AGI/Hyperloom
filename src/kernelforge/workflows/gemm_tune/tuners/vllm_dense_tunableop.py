@@ -119,16 +119,7 @@ def _candidate_pythonpath(site_dir: Path) -> str:
     return site if not existing else os.pathsep.join([site, existing])
 
 
-def _generate_tunableop_script(
-    work_dir: Path,
-    input_file: Path,
-    output_file: Path,
-    timeout_per_shape: int,
-    gpu_id: str,
-) -> Path:
-    """Generate a standalone script that runs PyTorch TunableOp offline tuning."""
-    script_path = work_dir / "tunableop_tune.py"
-    script_content = f'''#!/usr/bin/env python3
+_TUNABLEOP_SCRIPT_TEMPLATE = '''#!/usr/bin/env python3
 """Auto-generated PyTorch TunableOp offline tuning script."""
 
 import inspect
@@ -224,9 +215,43 @@ def main():
 if __name__ == "__main__":
     sys.exit(main())
 '''
+
+
+def _generate_tunableop_script(
+    work_dir: Path,
+    input_file: Path,
+    output_file: Path,
+    timeout_per_shape: int,
+    gpu_id: str,
+) -> Path:
+    """Generate a standalone script that runs PyTorch TunableOp offline tuning."""
+    script_path = work_dir / "tunableop_tune.py"
+    script_content = _TUNABLEOP_SCRIPT_TEMPLATE.format(
+        gpu_id=gpu_id,
+        input_file=input_file,
+        output_file=output_file,
+        timeout_per_shape=timeout_per_shape,
+    )
     script_path.write_text(script_content, encoding="utf-8")
     script_path.chmod(0o755)
     return script_path
+
+
+def _tuned_shape_count(script_result: dict[str, Any], output_file: Path) -> int:
+    """Tuned shapes the script reported, or the result lines counted in its output file."""
+    tuned_shapes = int(script_result.get("tuned_shapes", 0) or 0)
+    if tuned_shapes == 0 and output_file.is_file():
+        raw_text = output_file.read_text(encoding="utf-8", errors="replace")
+        tuned_shapes = count_tunableop_result_lines(raw_text)
+        if tuned_shapes == 0 and raw_text.strip():
+            log.warning(
+                "TunableOp output %s is non-empty but no result lines matched "
+                "(expected >=3 comma-separated fields); candidate will be skipped. "
+                "First 200 chars: %r",
+                output_file,
+                raw_text[:200],
+            )
+    return tuned_shapes
 
 
 class VllmDenseTunableopTuner(BaseTuner):
@@ -384,18 +409,7 @@ class VllmDenseTunableopTuner(BaseTuner):
                 error_class=script_result.get("error_class", "subprocess_error"),
             )
 
-        tuned_shapes = int(script_result.get("tuned_shapes", 0) or 0)
-        if tuned_shapes == 0 and output_file.is_file():
-            raw_text = output_file.read_text(encoding="utf-8", errors="replace")
-            tuned_shapes = count_tunableop_result_lines(raw_text)
-            if tuned_shapes == 0 and raw_text.strip():
-                log.warning(
-                    "TunableOp output %s is non-empty but no result lines matched "
-                    "(expected >=3 comma-separated fields); candidate will be skipped. "
-                    "First 200 chars: %r",
-                    output_file,
-                    raw_text[:200],
-                )
+        tuned_shapes = _tuned_shape_count(script_result, output_file)
 
         env_vars: dict[str, str] = {}
         if tuned_shapes > 0:

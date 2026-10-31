@@ -259,6 +259,29 @@ def _decode_band_buckets(groups: Sequence[set[int]], decode_m: Sequence[int]) ->
     return [[m for m in decode_m if m not in tuned] for tuned in groups]
 
 
+def _decode_band_rows(
+    header: list[str],
+    idx: dict[str, int],
+    q_idx: int | None,
+    group_order: list[tuple[int, int, str]],
+    plan: list[list[int]],
+) -> tuple[list[str], int]:
+    """The CSV rows that fill each group's missing decode-band M, and how many groups needed any."""
+    additions: list[str] = []
+    uncovered = 0
+    for (n, k, q), buckets in zip(group_order, plan):
+        if not buckets:
+            continue
+        uncovered += 1
+        for bucket in buckets:
+            row = [""] * len(header)
+            row[idx["M"]], row[idx["N"]], row[idx["K"]] = str(bucket), str(n), str(k)
+            if q_idx is not None:
+                row[q_idx] = q
+            additions.append(",".join(row))
+    return additions, uncovered
+
+
 def _ensure_decode_m_coverage(
     csv: Path,
     ctx: TuneContext,
@@ -307,18 +330,7 @@ def _ensure_decode_m_coverage(
 
     decode_m = compute_decode_m_values(ctx.conc, ctx.m_grid)
     plan = _decode_band_buckets([group_m[key] for key in group_order], decode_m)
-    additions: list[str] = []
-    uncovered = 0
-    for (n, k, q), buckets in zip(group_order, plan):
-        if not buckets:
-            continue
-        uncovered += 1
-        for bucket in buckets:
-            row = [""] * len(header)
-            row[idx["M"]], row[idx["N"]], row[idx["K"]] = str(bucket), str(n), str(k)
-            if q_idx is not None:
-                row[q_idx] = q
-            additions.append(",".join(row))
+    additions, uncovered = _decode_band_rows(header, idx, q_idx, group_order, plan)
 
     if not additions:
         return csv
@@ -845,17 +857,17 @@ class DenseTunerSpec:
     extra_args: tuple[str, ...] = ()
 
 
+def _failed_result(tuner_name: str, error: str, error_class: str) -> TuneResult:
+    """A failed run of ``tuner_name``."""
+    return TuneResult(tuner_name=tuner_name, status="failed", error=error, error_class=error_class)
+
+
 def run_aiter_dense_tuner(spec: DenseTunerSpec, ctx: TuneContext, work_dir: Path) -> TuneResult:
     """Run an aiter dense GEMM tuner subprocess."""
     tuner_name, script_key = spec.tuner_name, spec.script_key
     script = find_tuner_script(script_key)
     if script is None:
-        return TuneResult(
-            tuner_name=tuner_name,
-            status="failed",
-            error=f"Tuner script not found for {script_key}",
-            error_class="script_missing",
-        )
+        return _failed_result(tuner_name, f"Tuner script not found for {script_key}", "script_missing")
 
     # a8w8 and bpreshuffle need q_dtype_w column in CSV
     needs_q_dtype_w = tuner_name in ("a8w8", "a8w8_bpreshuffle")
@@ -864,12 +876,7 @@ def run_aiter_dense_tuner(spec: DenseTunerSpec, ctx: TuneContext, work_dir: Path
         ctx, work_dir, needs_q_dtype_w=needs_q_dtype_w
     )
     if input_csv is None:
-        return TuneResult(
-            tuner_name=tuner_name,
-            status="failed",
-            error="No input CSV or shapes JSON available",
-            error_class="input_missing",
-        )
+        return _failed_result(tuner_name, "No input CSV or shapes JSON available", "input_missing")
 
     tuned_csv = work_dir / f"tuned_{tuner_name}.csv"
     profile_csv = work_dir / f"profile_{tuner_name}.csv"
@@ -896,14 +903,13 @@ def run_aiter_dense_tuner(spec: DenseTunerSpec, ctx: TuneContext, work_dir: Path
     # Check the script's argparse surface before spending minutes on it.
     filtered = filter_args(base_args, probe_script(script))
     if not filtered.ok:
-        return TuneResult(
-            tuner_name=tuner_name,
-            status="failed",
-            error=(
+        return _failed_result(
+            tuner_name,
+            (
                 f"{script} does not accept {', '.join(filtered.rejected_required)}; "
                 "without it the tuner has no candidates to search"
             ),
-            error_class="unsupported_argument",
+            "unsupported_argument",
         )
     base_args = filtered.args
 
@@ -918,20 +924,10 @@ def run_aiter_dense_tuner(spec: DenseTunerSpec, ctx: TuneContext, work_dir: Path
     )
 
     if rc == 124:
-        return TuneResult(
-            tuner_name=tuner_name,
-            status="failed",
-            error=f"Tuning timed out after {ctx.timeout_s}s",
-            error_class="timeout",
-        )
+        return _failed_result(tuner_name, f"Tuning timed out after {ctx.timeout_s}s", "timeout")
 
     if rc != 0:
-        return TuneResult(
-            tuner_name=tuner_name,
-            status="failed",
-            error=f"Tuner exited with code {rc}: {stderr[-500:]}",
-            error_class="subprocess_error",
-        )
+        return _failed_result(tuner_name, f"Tuner exited with code {rc}: {stderr[-500:]}", "subprocess_error")
 
     candidate = iso_candidate if iso_candidate is not None else _find_latest_candidate(tuner_name, run_start_time)
     artifact = str(candidate) if candidate else str(tuned_csv)
@@ -941,14 +937,34 @@ def run_aiter_dense_tuner(spec: DenseTunerSpec, ctx: TuneContext, work_dir: Path
         shutil.copy2(candidate, dest)
         artifact = str(dest)
 
+    run = _TunerRunOutput(stdout, stderr, artifact, profile_csv, run_start_time, deadline)
+    return _tuned_result(spec, ctx, work_dir, run)
+
+
+@dataclass(frozen=True)
+class _TunerRunOutput:
+    """What one tuner subprocess left: its output streams, the artifact to deploy, and its timing window."""
+
+    stdout: str
+    stderr: str
+    artifact: str
+    profile_csv: Path
+    run_start_time: float
+    deadline: float
+
+
+def _tuned_result(spec: DenseTunerSpec, ctx: TuneContext, work_dir: Path, run: _TunerRunOutput) -> TuneResult:
+    """Cap, accuracy-filter and summarize the run's artifact into the tuner's result."""
+    tuner_name, script_key = spec.tuner_name, spec.script_key
+    artifact, profile_csv = run.artifact, run.profile_csv
     limit = _serve_safe_limit(script_key, ctx)
     force_candidate = _apply_splitk_cap(artifact, profile_csv, limit, script_key=script_key)
 
     shape_results = _shape_results_for_run(
-        stdout,
-        stderr,
+        run.stdout,
+        run.stderr,
         tuner_name=tuner_name,
-        run_start_time=run_start_time,
+        run_start_time=run.run_start_time,
         work_dir=work_dir,
     )
 
@@ -957,11 +973,10 @@ def run_aiter_dense_tuner(spec: DenseTunerSpec, ctx: TuneContext, work_dir: Path
     accuracy = drop_inaccurate_rows(Path(artifact), limit.rel_norm)
     if not accuracy.completed:
         # An unfiltered table is a table whose wrong rows are still in it, and this artifact is what gets deployed.
-        return TuneResult(
-            tuner_name=tuner_name,
-            status="failed",
-            error=f"aiter's accuracy figures were not applied to {artifact}: {accuracy.reason}",
-            error_class="accuracy_filter_incomplete",
+        return _failed_result(
+            tuner_name,
+            f"aiter's accuracy figures were not applied to {artifact}: {accuracy.reason}",
+            "accuracy_filter_incomplete",
         )
     if accuracy.dropped:
         shape_results = _forget_shapes_that_lost_their_row(shape_results, accuracy.dropped)
@@ -991,7 +1006,7 @@ def run_aiter_dense_tuner(spec: DenseTunerSpec, ctx: TuneContext, work_dir: Path
         candidate=force_candidate,
         shape_results=shape_results,
         dropped_inaccurate=[dropped_row_record(r) for r in accuracy.dropped],
-        graph_retime=retime_table(artifact, profile_csv, limit, RetimeTarget(script_key, _gpu_ids(ctx), deadline)),
+        graph_retime=retime_table(artifact, profile_csv, limit, RetimeTarget(script_key, _gpu_ids(ctx), run.deadline)),
     )
 
 
@@ -1187,6 +1202,12 @@ def _cap_splitk_to_serve_safe(
     if changed:
         with artifact_csv.open("w", newline="") as f:
             csv.writer(f).writerows(out)
+    _warn_unforwarded_splitk(dropped_unforwarded, forwarding_libtypes)
+    return changed, has_splitk
+
+
+def _warn_unforwarded_splitk(dropped_unforwarded: int, forwarding_libtypes: frozenset[str]) -> None:
+    """Say how many rows lost a splitK their libtype's production wrapper cannot forward."""
     if dropped_unforwarded:
         log.warning(
             "splitK forwarding: %d row(s) carried splitK>0 on a libtype whose "
@@ -1196,7 +1217,6 @@ def _cap_splitk_to_serve_safe(
             dropped_unforwarded,
             sorted(forwarding_libtypes),
         )
-    return changed, has_splitk
 
 
 def _stem_matches(tuner_name: str, filename: str) -> bool:
