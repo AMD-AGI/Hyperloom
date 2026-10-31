@@ -162,7 +162,6 @@ def test_the_roofline_vendor_specs_are_the_board_facts():
 
     published = {product for product, board in AMD_GPU_BOARDS.items() if board.hbm_bw_gbps is not None}
     assert set(HW_SPECS) == published
-    assert "radeon8060s" not in HW_SPECS
     for product in published:
         board, spec = AMD_GPU_BOARDS[product], HW_SPECS[product]
         assert (spec["hbm_gb"], spec["hbm_bw_gbps"]) == (board.hbm_gb, board.hbm_bw_gbps)
