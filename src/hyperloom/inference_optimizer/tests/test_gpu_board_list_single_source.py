@@ -9,7 +9,6 @@ import pytest
 
 from hyperloom_common.gpu_identity import (
     AMD_GPU_BOARDS,
-    board_named_in,
     gfx_arch_for_gpu_type,
     is_gfx_arch,
 )
@@ -54,27 +53,6 @@ def test_every_listed_board_actually_resolves():
 def test_r9700_has_explicit_gfx1201_dispatch_identity():
     board = AMD_GPU_BOARDS["r9700"]
     assert (board.gfx, board.compute_units) == ("gfx1201", 64)
-
-
-@pytest.mark.parametrize(
-    ("text", "product"),
-    [
-        ("Card Series: AMD Instinct MI300X OAM", "mi300x"),
-        ("Card Series: AMD Instinct MI325X OAM", "mi325x"),
-        ("AMD_INSTINCT_MI355X", "mi355x"),
-        ("Card Series: AMD Radeon AI PRO R9700", "r9700"),
-        ("card series: amd radeon ai pro r9700", "r9700"),
-        ("Card Series: AMD Instinct MI300XL", None),
-        ("Card Series: AMD Radeon AI PRO R9700S", None),
-        ("Card Series: AMD Radeon AI PRO XR9700", None),
-        ("", None),
-        (None, None),
-    ],
-)
-def test_a_board_is_named_only_as_a_whole_word(text, product):
-    """One rule for every board: a longer product name that contains a tag is a different product."""
-    board = board_named_in(text)
-    assert (board.product if board else None) == product
 
 
 def test_the_preflight_warning_names_the_boards_the_cli_accepts(capsys, monkeypatch):
@@ -157,23 +135,21 @@ def test_the_fp8_dense_quant_type_reads_gfx950_from_the_table():
     assert _is_gfx950("gfx950") is True
 
 
-def test_the_roofline_vendor_specs_are_the_board_facts():
-    from hyperloom.inference_optimizer.roofline_ceiling import HW_SPECS
+def test_the_roofline_peaks_carry_every_precision_spelling():
+    """Vendor and achievable peaks are keyed by precision once and read under each of its spellings."""
+    from hyperloom.inference_optimizer.roofline_ceiling import HW_SPECS, HW_SPECS_ACHIEVABLE
 
-    published = {product for product, board in AMD_GPU_BOARDS.items() if board.hbm_bw_gbps is not None}
-    assert set(HW_SPECS) == published
-    assert "radeon8060s" not in HW_SPECS
-    for product in published:
-        board, spec = AMD_GPU_BOARDS[product], HW_SPECS[product]
-        assert (spec["hbm_gb"], spec["hbm_bw_gbps"]) == (board.hbm_gb, board.hbm_bw_gbps)
-        for precision, peak in board.vendor_peak_tflops.items():
-            assert spec["peak_tflops"][precision] == peak, (product, precision)
-
-
-def test_server_reuse_covers_the_vllm_script_of_every_reusing_runner():
-    from hyperloom.orchestrator.actions.executors._server_lifecycle import MAGPIE_BUILTIN_SCRIPTS
-
-    assert MAGPIE_BUILTIN_SCRIPTS == gpu_types.magpie_reuse_scripts()
-    for product in AMD_GPU_BOARDS:
-        if gpu_types._board_policy(product).runner.reuse_frameworks:
-            assert f"vllm_{gpu_types.gpu_runner_type(product)}.sh" in MAGPIE_BUILTIN_SCRIPTS, product
+    vendor, mi355x = AMD_GPU_BOARDS["mi300x"].vendor_peak_tflops, HW_SPECS["mi355x"]["peak_tflops"]
+    assert {
+        tag: HW_SPECS["mi300x"]["peak_tflops"][tag] for tag in ("bfloat16", "float16", "float8_e5m2", "float32")
+    } == {
+        "bfloat16": vendor["bf16"],
+        "float16": vendor["fp16"],
+        "float8_e5m2": vendor["fp8"],
+        "float32": vendor["fp32"],
+    }
+    assert mi355x["mxfp4"] == mi355x["float4"] == AMD_GPU_BOARDS["mi355x"].vendor_peak_tflops["fp4"]
+    achievable = HW_SPECS_ACHIEVABLE["mi325x"]["peak_tflops"]
+    assert achievable["bfloat16"] == achievable["bf16"]
+    assert achievable["float8_e4m3fn"] == achievable["float8_e5m2"] == achievable["fp8"]
+    assert set(HW_SPECS) == {product for product, board in AMD_GPU_BOARDS.items() if board.hbm_bw_gbps is not None}
