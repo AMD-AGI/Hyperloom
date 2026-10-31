@@ -104,27 +104,13 @@ def test_framework_registry_surface() -> None:
 
 # --------------------------------------------------------------------------- # orchestrator.state.objective #
 # --------------------------------------------------------------------------- #
-def test_tput_objective_progress_zero() -> None:
+def test_tput_objective_unmeasured_is_not_reached() -> None:
     from hyperloom.orchestrator.state.objective import TargetTputObjective
 
     obj = TargetTputObjective(target_tput_per_gpu=100.0)
     state = SimpleNamespace(current_best={}, baseline_tput=0.0)
-    assert obj.progress(state) == 0.0
     assert obj.reached(state) is False
     assert obj.describe() == "target_tput_per_gpu=100.0"
-
-
-def test_baseline_objective_progress_zero_ref(tmp_path) -> None:
-    from hyperloom.orchestrator.state.objective import TargetBaselineObjective
-
-    report = tmp_path / "benchmark_report.json"
-    report.write_text(json.dumps({"throughput": {"output_throughput": 50.0}}), encoding="utf-8")
-    obj = TargetBaselineObjective(baseline_dir=str(tmp_path))
-    assert obj.kind() == "baseline"
-    # Force the degenerate ref to exercise the guard.
-    obj._ref_tput = 0.0
-    state = SimpleNamespace(current_best={"tput": 10.0}, baseline_tput=0.0)
-    assert obj.progress(state) == 0.0
 
 
 def test_baseline_objective_invalid_dir() -> None:

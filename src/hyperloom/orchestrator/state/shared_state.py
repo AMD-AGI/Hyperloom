@@ -1610,10 +1610,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
         attempts_attr = f"{action}_attempts"
         last_attr = f"last_{action}"
         result = attempt.result or {}
-        metric_key, metric_kind = _KEY_METRIC_MAP.get(
-            action,
-            ("output_throughput", "output_throughput"),
-        )
+        metric_key, metric_kind = _KEY_METRIC_MAP[action]
         raw_metric = result.get(metric_key)
         try:
             key_metric: float | None = float(raw_metric) if isinstance(raw_metric, (int, float)) else None
