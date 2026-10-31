@@ -9,6 +9,7 @@ import dataclasses
 import subprocess
 from pathlib import Path
 
+from kernelforge.utils.git import GitError
 from kernelforge.workflows.forge_loop.gate.gate_settings import GateMeasurement, GateScope
 from kernelforge.workflows.forge_loop.gate.insession_gate import InSessionGate
 
@@ -284,6 +285,23 @@ def test_stop_with_only_untracked_files_allows_without_validation_or_bench(tmp_p
     assert calls == {"correctness": 0, "bench": 0}
     assert gate.end_reason == "no_changes"
     assert (gate.block_count, gate.edit_count) == (0, 0)
+
+
+def test_stop_in_a_workspace_git_cannot_diff_leaves_the_candidate_to_the_outer_loop(tmp_path, monkeypatch):
+    gate, workspace = _gate(tmp_path)
+    calls = _count_canonical_calls(monkeypatch)
+    _edit_kernel(workspace)
+
+    def broken_git_bytes(*args, **kwargs):
+        raise GitError(128, ["git", *args], stderr=b"fatal: bad object HEAD")
+
+    monkeypatch.setattr(gate_module, "git_bytes", broken_git_bytes)
+
+    assert _run(gate._on_stop({}, None, None)) == {}
+    assert calls == {"correctness": 0, "bench": 0}
+    assert gate.end_reason == "jit_rebuild_unavailable"
+    assert gate.block_count == 0
+    assert "bad object HEAD" in gate.findings[-1]
 
 
 def test_stop_benches_an_edit_tool_change_as_before(tmp_path, monkeypatch):
