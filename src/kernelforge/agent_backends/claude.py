@@ -815,10 +815,9 @@ class ClaudeBackend:
                     stream_error = exc
                     if not _is_turn_cap_error(exc):
                         log.warning(
-                            "Claude SDK stream failed after session %s; preserving the resume handle (%s: %s)",
+                            "Claude SDK stream failed after session %s; preserving the resume handle",
                             transcript.session_id,
-                            type(exc).__name__,
-                            exc,
+                            exc_info=True,
                         )
                     if spec.progress_log is not None:
                         spec.progress_log.append(f"end: sdk-error {str(exc)[:_PROGRESS_TEXT_CHARS]}")
