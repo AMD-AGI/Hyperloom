@@ -239,6 +239,26 @@ def _experience(value: Any, names: frozenset[str], declaration: ExperienceDeclar
     return compiled
 
 
+def _units(raw_units: Any, outer: frozenset[str]) -> tuple[UnitStep, ...]:
+    """Compile the ``units`` steps, each seeing the names ``outer`` and the earlier steps bind."""
+    bound = set(outer)
+    if not isinstance(raw_units, list) or not raw_units:
+        raise MappingError("units must be a non-empty list")
+    units: list[UnitStep] = []
+    for index, item in enumerate(raw_units):
+        location = f"units[{index}]"
+        step = _mapping(item, location)
+        _reject_unknown(step, {"each", "as", "where"}, location)
+        if "each" not in step:
+            raise MappingError(f"{location}.each is required")
+        items = compile_expression(step["each"], frozenset(bound), f"{location}.each")
+        name = _identifier(step.get("as"), f"{location}.as", bound)
+        bound.add(name)
+        where = compile_expression(step["where"], frozenset(bound), f"{location}.where") if "where" in step else None
+        units.append(UnitStep(name, items, where))
+    return tuple(units)
+
+
 def compile_mapping(
     value: Any,
     *,
@@ -257,21 +277,8 @@ def compile_mapping(
     bound = {"doc"}
     skip = _rules(data.get("skip"), "skip", "when", frozenset(bound))
 
-    raw_units = data.get("units")
-    if not isinstance(raw_units, list) or not raw_units:
-        raise MappingError("units must be a non-empty list")
-    units: list[UnitStep] = []
-    for index, item in enumerate(raw_units):
-        location = f"units[{index}]"
-        step = _mapping(item, location)
-        _reject_unknown(step, {"each", "as", "where"}, location)
-        if "each" not in step:
-            raise MappingError(f"{location}.each is required")
-        items = compile_expression(step["each"], frozenset(bound), f"{location}.each")
-        name = _identifier(step.get("as"), f"{location}.as", bound)
-        bound.add(name)
-        where = compile_expression(step["where"], frozenset(bound), f"{location}.where") if "where" in step else None
-        units.append(UnitStep(name, items, where))
+    units = _units(data.get("units"), frozenset(bound))
+    bound.update(unit.name for unit in units)
 
     unit_id = compile_expression(data["unit_id"], frozenset(bound), "unit_id") if "unit_id" in data else None
 
@@ -310,7 +317,7 @@ def compile_mapping(
         declaration=declaration,
         producer=producer,
         skip=skip,
-        units=tuple(units),
+        units=units,
         unit_id=unit_id,
         lookups=tuple(lookups),
         lets=tuple(lets),

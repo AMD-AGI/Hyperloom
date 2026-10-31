@@ -376,6 +376,43 @@ async def _verify_roundtrip(
     }
 
 
+async def _export_compiler_assembly(
+    binding: _Binding, task: AssemblyTask, deadline: float, manifest: Path, export_source: str
+) -> dict:
+    """Run the export-mode launcher and return the provenance the compiler wrote beside the captured assembly."""
+    binding.kernel.write_text(export_source, encoding="utf-8")
+    export_report = await _validate(task.driver, task.threshold, deadline)
+    if not export_report.results or not export_report.all_passed or not manifest.is_file():
+        raise AssemblyPreparationError(export_report.failed_output or "compiler output was not captured")
+    provenance = json.loads(manifest.read_text(encoding="utf-8"))
+    if provenance["compiler_assembly_sha256"] != _digest(binding.assembly):
+        raise AssemblyPreparationError("initial assembly differs from compiler output")
+    return provenance
+
+
+def _ready_record(
+    checkpoint: _Checkpoint, origin: str, base_commit: str, evidence: dict, bound_manifest: Path | None
+) -> dict:
+    """The ready record of a verified preparation, stamped with the commit the binding landed on."""
+    binding = checkpoint.binding
+    workspace = binding.workspace
+    return {
+        "status": "ready",
+        "origin": origin,
+        "kernel": checkpoint.paths[0],
+        "assembly": binding.assembly.relative_to(workspace).as_posix(),
+        "gpu_target": binding.target,
+        "source_base_commit": base_commit,
+        "preparation_commit": _git(workspace, "rev-parse", "HEAD"),
+        "source_sha256": hashlib.sha256(checkpoint.original).hexdigest(),
+        "launcher_sha256": _digest(binding.kernel),
+        "initial_assembly_sha256": _digest(binding.assembly),
+        "binding_manifest": bound_manifest.relative_to(workspace).as_posix() if bound_manifest is not None else "",
+        "binding_manifest_sha256": _digest(bound_manifest) if bound_manifest is not None else "",
+        **evidence,
+    }
+
+
 async def prepare_assembly(
     config: Config,
     task: AssemblyTask,
@@ -422,33 +459,14 @@ async def prepare_assembly(
     try:
         source_bench, source_numerical_evidence = await _measure_source_baseline(workspace, task, deadline)
         if capture:
-            kernel_path.write_text(export_source, encoding="utf-8")
-            export_report = await _validate(task.driver, task.threshold, deadline)
-            if not export_report.results or not export_report.all_passed or not manifest.is_file():
-                raise AssemblyPreparationError(export_report.failed_output or "compiler output was not captured")
-            provenance = json.loads(manifest.read_text(encoding="utf-8"))
-            if provenance["compiler_assembly_sha256"] != _digest(assembly):
-                raise AssemblyPreparationError("initial assembly differs from compiler output")
+            provenance = await _export_compiler_assembly(binding, task, deadline, manifest, export_source)
             kernel_path.write_text(candidate_source, encoding="utf-8")
         evidence = await _verify_roundtrip(binding, task, deadline, source_bench, source_numerical_evidence)
         _git(workspace, "add", "--", *paths)
         if _git(workspace, "diff", "--cached", "--name-only"):
             _git(workspace, "commit", "-m", "forge: bind compiler assembly to original launcher")
-        record = {
-            "status": "ready",
-            "origin": provenance["frontend"] + "_compiler" if capture else "existing_assembly",
-            "kernel": paths[0],
-            "assembly": assembly.relative_to(workspace).as_posix(),
-            "gpu_target": config.gpu_target,
-            "source_base_commit": base_commit,
-            "preparation_commit": _git(workspace, "rev-parse", "HEAD"),
-            "source_sha256": hashlib.sha256(original).hexdigest(),
-            "launcher_sha256": _digest(kernel_path),
-            "initial_assembly_sha256": _digest(assembly),
-            "binding_manifest": manifest.relative_to(workspace).as_posix() if capture else "",
-            "binding_manifest_sha256": _digest(manifest) if capture else "",
-            **evidence,
-        }
+        origin = provenance["frontend"] + "_compiler" if capture else "existing_assembly"
+        record = _ready_record(checkpoint, origin, base_commit, evidence, manifest if capture else None)
         atomic_write_text(record_path, json.dumps(record, indent=2) + "\n", options=DURABLE)
         committed = True
         score = evidence["roundtrip_mean_case_speedup"]

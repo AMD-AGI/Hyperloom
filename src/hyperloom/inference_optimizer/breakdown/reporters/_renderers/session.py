@@ -22,6 +22,35 @@ def _elapsed_facts(session: dict[str, Any]) -> list[str]:
     return facts
 
 
+def _configured_image(session: dict[str, Any]) -> str | None:
+    """The session's container image, or ``None`` when it is missing or blank."""
+    image = session.get("image")
+    return image if isinstance(image, str) and image.strip() else None
+
+
+def _session_markdown(session: dict[str, Any], sid: str, host: str, code: str, stop_reason: str) -> str:
+    """The session section's key/value bullet list."""
+    return md_kv_list(
+        [
+            ("session_id", sid),
+            ("claw_session_id", session.get("claw_session_id")),
+            ("sandbox_user_id", session.get("sandbox_user_id")),
+            ("stop_reason", stop_reason),
+            ("elapsed_minutes", session.get("elapsed_minutes")),
+            ("total_elapsed_minutes", session.get("total_elapsed_minutes")),
+            ("tick_count", session.get("tick_count")),
+            ("host", host),
+            # Always emit the image row so a missing image is visible.
+            ("image", _configured_image(session) or "(not configured)"),
+            ("code_revision", code),
+            ("created_at_utc", session.get("created_at_utc")),
+            ("ended_at_utc", session.get("ended_at_utc")),
+            ("max_minutes", session.get("max_minutes")),
+            ("session_dir", session.get("session_dir")),
+        ]
+    )
+
+
 @register_renderer("session")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
     """Render the session-identification + lifecycle section.
@@ -46,8 +75,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     sandbox = s.get("sandbox_user_id")
     stop_reason = stop_reason_of(breakdown)
     host = str(s.get("host") or "")
-    image = s.get("image")
-    has_image = isinstance(image, str) and bool(image.strip())
+    image = _configured_image(s)
     code = str(s.get("code_revision") or "")
     tick = s.get("tick_count")
 
@@ -78,36 +106,16 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         )
     if host:
         facts.append(f"Ran on host `{host}`.")
-    if has_image:
+    if image:
         facts.append(f"Container image `{image}`.")
     if code:
         facts.append(f"Hyperloom code revision `{code}`.")
-
-    md = md_kv_list(
-        [
-            ("session_id", sid),
-            ("claw_session_id", claw),
-            ("sandbox_user_id", sandbox),
-            ("stop_reason", stop_reason),
-            ("elapsed_minutes", s.get("elapsed_minutes")),
-            ("total_elapsed_minutes", s.get("total_elapsed_minutes")),
-            ("tick_count", tick),
-            ("host", host),
-            # Always emit the image row so a missing image is visible.
-            ("image", image if has_image else "(not configured)"),
-            ("code_revision", code),
-            ("created_at_utc", s.get("created_at_utc")),
-            ("ended_at_utc", s.get("ended_at_utc")),
-            ("max_minutes", s.get("max_minutes")),
-            ("session_dir", s.get("session_dir")),
-        ]
-    )
 
     return RenderedSection(
         section_id="session",
         title="Session",
         key_facts=facts,
-        markdown_block=md,
+        markdown_block=_session_markdown(s, sid, host, code, stop_reason),
         decisions=decisions,
         warnings=warnings,
         skipped=not (sid or host),

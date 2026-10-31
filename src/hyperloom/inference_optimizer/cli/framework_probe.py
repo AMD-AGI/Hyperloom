@@ -258,6 +258,28 @@ def _report_framework_probe(
     return _report_unusable_framework(framework, found, probe, interpreters)
 
 
+def _missing_framework_remedy(framework: str) -> str:
+    """How to get a missing ``framework``, depending on whether this process already runs in a container."""
+    if _in_container():
+        return (
+            "This process already runs in a container, so its image does not ship\n"
+            f"{framework}. Restart it from a ROCm image that does, or install it here:\n"
+            f"    {_setup_install_command(framework)}"
+        )
+    return (
+        "Pick ONE of:\n"
+        f"  1. Install it on this host (ROCm {framework} is NOT on PyPI; setup pulls\n"
+        "     it from the ROCm wheel index instead):\n"
+        f"       {_setup_install_command(framework)}\n"
+        "  2. Run Hyperloom inside a ROCm image that already ships it: set\n"
+        "     HYPERLOOM_RUN_MODE=docker before setup, which hands image choice\n"
+        "     and container startup to the demo skill.\n"
+        "\nNote: HYPERLOOM_RUN_MODE selects where Hyperloom itself runs and is\n"
+        "unrelated to Magpie's run_mode=local, which only means: do not start a\n"
+        "second container. That stays correct in both cases."
+    )
+
+
 def _report_unusable_framework(
     framework: str, found: str | None, probe: _Probe, interpreters: list[str]
 ) -> dict[str, Any]:
@@ -297,25 +319,7 @@ def _report_unusable_framework(
         )
         raise SystemExit(2)
 
-    if _in_container():
-        remedy = (
-            "This process already runs in a container, so its image does not ship\n"
-            f"{framework}. Restart it from a ROCm image that does, or install it here:\n"
-            f"    {_setup_install_command(framework)}"
-        )
-    else:
-        remedy = (
-            "Pick ONE of:\n"
-            f"  1. Install it on this host (ROCm {framework} is NOT on PyPI; setup pulls\n"
-            "     it from the ROCm wheel index instead):\n"
-            f"       {_setup_install_command(framework)}\n"
-            "  2. Run Hyperloom inside a ROCm image that already ships it: set\n"
-            "     HYPERLOOM_RUN_MODE=docker before setup, which hands image choice\n"
-            "     and container startup to the demo skill.\n"
-            "\nNote: HYPERLOOM_RUN_MODE selects where Hyperloom itself runs and is\n"
-            "unrelated to Magpie's run_mode=local, which only means: do not start a\n"
-            "second container. That stays correct in both cases."
-        )
+    remedy = _missing_framework_remedy(framework)
     print(
         f"\nERROR: serving framework {framework!r} is not importable by any candidate interpreter:\n"
         f"{probed}{_probe_detail_block(probe.detail)}\n\n"

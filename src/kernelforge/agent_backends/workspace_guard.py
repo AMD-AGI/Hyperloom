@@ -491,10 +491,8 @@ class WorkspaceGuard:
         self._remove_filesystem_path(self.root / relative)
         self._run_git_restore("checkout-index", "--force", "--", relative)
 
-    def _restore_baseline(self) -> None:
-        """Reconstruct the exact pre-turn refs, index, and Git-visible files."""
-        before_unstaged, before_staged, before_untracked = self._current_changes()
-        before_protected = self._ignored_protected_paths()
+    def _restore_baseline_refs(self) -> None:
+        """Put every ref and HEAD back to the pre-turn values."""
         current_refs = self._current_refs()
 
         for ref in sorted(current_refs.keys() - self.baseline_refs.keys()):
@@ -515,6 +513,12 @@ class WorkspaceGuard:
                 "HEAD",
                 f"refs/heads/{self.branch}",
             )
+
+    def _restore_baseline(self) -> None:
+        """Reconstruct the exact pre-turn refs, index, and Git-visible files."""
+        before_unstaged, before_staged, before_untracked = self._current_changes()
+        before_protected = self._ignored_protected_paths()
+        self._restore_baseline_refs()
 
         if self.baseline_index_path is None or self.baseline_index_snapshot is None:
             raise WorkspaceSafetyError(

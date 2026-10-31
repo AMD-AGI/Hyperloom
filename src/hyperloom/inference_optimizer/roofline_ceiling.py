@@ -1123,6 +1123,20 @@ class OpBreakdown:
     pct_time: float  # fraction of total forward time (0–1)
 
 
+def _repeated_op_row(name: str, fl: float, by: float, rep: int, timing: tuple[float, str, float, float]) -> OpBreakdown:
+    """The breakdown row for an op that runs ``rep`` times per forward, from one run's roofline timing."""
+    t, side, _t_mem, _t_cmp = timing
+    return OpBreakdown(
+        name=name,
+        flops=fl * rep,
+        bytes_moved=by * rep,
+        ai=(fl / by if by else 0.0),
+        time_s=t * rep,
+        bound=side,
+        pct_time=0.0,  # filled after total is known
+    )
+
+
 @_dc.dataclass(frozen=True)
 class PerfModelBreakdown:
     """Bottom-up per-op roofline breakdown via TraceLens PerfModel."""
@@ -1268,21 +1282,12 @@ def compute_roofline_from_perfmodel(
         for name, K, N, rep in linears:
             fl = _gemm_flops(M=M, N=N, K=K)
             by = _gemm_bytes(M=M, N=N, K=K, weight_bpe=bpe, act_bpe=act_bpe)
-            t, side, t_mem, t_cmp = _roofline_time(fl, by)
+            timing = _roofline_time(fl, by)
+            t, _side, t_mem, t_cmp = timing
             total_t += t * rep
             total_mem_t += t_mem * rep
             total_cmp_t += t_cmp * rep
-            op_rows.append(
-                OpBreakdown(
-                    name=name,
-                    flops=fl * rep,
-                    bytes_moved=by * rep,
-                    ai=(fl / by if by else 0.0),
-                    time_s=t * rep,
-                    bound=side,
-                    pct_time=0.0,  # filled after total is known
-                )
-            )
+            op_rows.append(_repeated_op_row(name, fl, by, rep, timing))
         # MoE FFN: FusedMoE formula with batch-aware coupon E_active.
         if n_moe_layers > 0:
             # Latent-MoE decoders run the experts below the residual width.
@@ -1292,40 +1297,22 @@ def compute_roofline_from_perfmodel(
             )
             fl_moe = _fused_moe_flops(moe)
             by_moe = _fused_moe_bytes(moe, weight_bpe=expert_bpe, act_bpe=act_bpe)
-            t_moe, side_moe, t_mem_moe, t_cmp_moe = _roofline_time(fl_moe, by_moe)
+            timing_moe = _roofline_time(fl_moe, by_moe)
+            t_moe, _side_moe, t_mem_moe, t_cmp_moe = timing_moe
             total_t += t_moe * n_moe_layers
             total_mem_t += t_mem_moe * n_moe_layers
             total_cmp_t += t_cmp_moe * n_moe_layers
-            op_rows.append(
-                OpBreakdown(
-                    name="moe_fused",
-                    flops=fl_moe * n_moe_layers,
-                    bytes_moved=by_moe * n_moe_layers,
-                    ai=(fl_moe / by_moe if by_moe else 0.0),
-                    time_s=t_moe * n_moe_layers,
-                    bound=side_moe,
-                    pct_time=0.0,
-                )
-            )
+            op_rows.append(_repeated_op_row("moe_fused", fl_moe, by_moe, n_moe_layers, timing_moe))
         # SDPA
         attn = _SdpaShape(B=batch, N_Q=s_q, H_Q=n_q_heads, N_KV=s_kv, H_KV=n_kv_heads, d_h_qk=hd, d_h_v=hd)
         fl_s = _sdpa_flops(attn, causal=s_q == s_kv)
         by_s = _sdpa_bytes(attn, act_bpe)
-        t_s, side_s, t_mem_s, t_cmp_s = _roofline_time(fl_s, by_s)
+        timing_s = _roofline_time(fl_s, by_s)
+        t_s, _side_s, t_mem_s, t_cmp_s = timing_s
         total_t += t_s * n_layers
         total_mem_t += t_mem_s * n_layers
         total_cmp_t += t_cmp_s * n_layers
-        op_rows.append(
-            OpBreakdown(
-                name="sdpa",
-                flops=fl_s * n_layers,
-                bytes_moved=by_s * n_layers,
-                ai=(fl_s / by_s if by_s else 0.0),
-                time_s=t_s * n_layers,
-                bound=side_s,
-                pct_time=0.0,
-            )
-        )
+        op_rows.append(_repeated_op_row("sdpa", fl_s, by_s, n_layers, timing_s))
         op_rows = [_dc.replace(op, pct_time=op.time_s / total_t) for op in op_rows]
         return total_t, total_mem_t, total_cmp_t, op_rows
 
