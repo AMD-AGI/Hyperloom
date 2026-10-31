@@ -25,7 +25,6 @@ from hyperloom.orchestrator.specialists.profile import (
     SCOPE_DOMAIN,
     SCOPE_FREEFORM,
     SpecialistProfile,
-    holds_serving_slot,
     requires_gpu,
     resolve_specialist_profile,
     specialist_lanes,
@@ -97,12 +96,13 @@ def test_bench_falsy_values(falsy):
     assert prof.reserves_benchmark_lane is False
 
 
-def test_holds_serving_slot_only_for_bench_capable():
+def test_reserves_benchmark_lane_only_for_bench_capable():
     """Only bench-capable patch specialists hold the whole-machine serving_slot."""
-    assert holds_serving_slot({"mode": "patch", "bench": True}) is True
-    assert holds_serving_slot({"framework_agent_authoring": True, "domain": "serving_specialist"}) is False
-    assert holds_serving_slot({"mode": "research"}) is False
-    assert holds_serving_slot(None) is False
+    assert resolve_specialist_profile({"mode": "patch", "bench": True}).reserves_benchmark_lane is True
+    authoring = {"framework_agent_authoring": True, "domain": "serving_specialist"}
+    assert resolve_specialist_profile(authoring).reserves_benchmark_lane is False
+    assert resolve_specialist_profile({"mode": "research"}).reserves_benchmark_lane is False
+    assert resolve_specialist_profile(None).reserves_benchmark_lane is False
 
 
 def test_bench_is_meaningless_for_research_mode():
