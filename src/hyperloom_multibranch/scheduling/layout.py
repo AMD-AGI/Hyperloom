@@ -35,6 +35,7 @@ BLOBS_DIR = "MB-blobs"
 BRANCHES_DIR = "MB-branches"
 AGENT_PLANS_DIR = "MB-agent-plans"
 AGENT_MAP_DIR = "MB-agent-map"
+REVIEW_DIR = "MB-review"
 SOURCE_DIR = "MB-source"
 RUNNER_SOURCE_DIR = "MB-runner-source"
 TOOLBOX_DIR = "MB-toolbox"
@@ -131,6 +132,11 @@ class SessionLayout:
     def agent_map(self) -> Path:
         """The map and dossier a session that stops after its map leaves for review (:func:`.agent_plans.keep_map`)."""
         return self.root / AGENT_MAP_DIR
+
+    @property
+    def review(self) -> Path:
+        """The person's review of the agent map the session paused for, and what they read (:mod:`.review`)."""
+        return self.root / REVIEW_DIR
 
     @property
     def source(self) -> Path:

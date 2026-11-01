@@ -133,6 +133,14 @@ class HardStop:
             self._at = max(self._at, self._clock.now() + self._grace)
         return self._at
 
+    def extend(self, seconds: float) -> float:
+        """Move the hard stop ``seconds`` later, as the deadline moves past a person's review, unless it was brought
+        forward; return it."""
+
+        if not self._brought_forward:
+            self._at += max(seconds, 0.0)
+        return self._at
+
 
 __all__ = [
     "MB_CLOSE_GRACE_CAP_SECONDS",

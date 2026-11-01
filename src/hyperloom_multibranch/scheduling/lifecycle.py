@@ -8,8 +8,10 @@ EXPLORE then runs until the longest baseline test and one CLOSE grace are left b
 score the branches with the frontier's defaults for the session's budget. Once the baseline is established, a session
 with an RSI archive plays the scheduling playbook ``--playbook`` asks for, the champion of the pool beside it or a
 playbook on trial, recorded under ``playbook`` in ``policy_versions``. The FINAL candidates are fixed while every
-branch still stands, then exploration ends and FINAL validates them. A failed PRELUDE, a run asked to stop once its
-Arbor agents' directions are mapped, an EXPLORE that ran out of cards to measure on, a stop signal, the session deadline
+branch still stands, then exploration ends and FINAL validates them. With the review on, a session with Arbor agents
+pauses before their branches open until a person approves their map (:mod:`.review`); the pause moves the deadline,
+and EXPLORE's end, by its length. A failed PRELUDE, a run asked to stop once its Arbor agents' directions are mapped,
+a map a person rejected, an EXPLORE that ran out of cards to measure on, a stop signal, the session deadline
 before FINAL starts or an unhandled error skip straight to CLOSE, which always runs and kills every process the session started. FINAL waits for the validation tests it started, past the deadline and the hard
 stop if need be, and moves the hard stop to no sooner than one CLOSE grace from its end. The deadline plus the CLOSE
 grace bounds CLOSE itself; a stop signal brings that hard stop forward to the CLOSE grace from the signal, once, and the
@@ -106,6 +108,19 @@ from hyperloom_multibranch.scheduling.prelude import (
 )
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.reference import copy_references
+from hyperloom_multibranch.scheduling.review import (
+    MADE_BY_USER,
+    POLL_SECONDS,
+    REJECTED,
+    REVIEW_APPROVED,
+    REVIEW_PAGE,
+    REVIEW_REJECTED,
+    REVIEW_REQUESTED,
+    REVIEW_SKIPPED,
+    ReviewRejected,
+    request,
+    wait,
+)
 from hyperloom_multibranch.scheduling.root_shares import RootShares, root_shares
 from hyperloom_multibranch.scheduling.requests import SessionChecks, SessionTests
 from hyperloom_multibranch.scheduling.roster import QUOTA_POLICY_VERSION, Roster, final_quota
@@ -163,7 +178,7 @@ class SessionOutcome:
 
     The session completed (exit code 0) only when it ran its course without an error, FINAL chose a commit, and the
     stop left no process and no test behind; or when, asked to stop after its map, it kept one without an error and the
-    stop left nothing behind.
+    stop left nothing behind; or when a person rejected its agent map at its review and the stop left nothing behind.
     """
 
     stop_reason: SessionStopReason
@@ -174,7 +189,7 @@ class SessionOutcome:
     @property
     def completed(self) -> bool:
         clean = not self.error and self.close is not None and self.close.stop.clean
-        if self.stop_reason is SessionStopReason.MAPPED:
+        if self.stop_reason in (SessionStopReason.MAPPED, SessionStopReason.REVIEW_REJECTED):
             return clean
         chose = self.final is not None and self.final.chosen is not None
         return self.stop_reason in COMPLETED_REASONS and chose and clean
@@ -269,6 +284,11 @@ class Session:
         self._signals = StopSignals()
         self._in_final = False
         self._image_check: ImageCheckReport | None = None
+        # The budget and hard stop the session's deadline is read from, which a person's review moves by its length
+        # (_extend); while the review is pending the deadline does not pass.
+        self._budget: SessionBudget | None = None
+        self._hard_stop: HardStop | None = None
+        self._reviewing = False
 
     def _open_records(self) -> None:
         """The scheduler's blackboard handle, the roster, the decision log and the blob store, on the session's layout."""
@@ -396,9 +416,10 @@ class Session:
     async def _until_stopped(
         self, work: Awaitable[SessionOutcome], budget: SessionBudget, hard_stop: HardStop
     ) -> SessionOutcome:
+        self._budget, self._hard_stop = budget, hard_stop
         phases = asyncio.ensure_future(work)
         signal = asyncio.ensure_future(self._signals.wait())
-        deadline = asyncio.ensure_future(self._clock.sleep(budget.remaining(self._clock.now())))
+        deadline = asyncio.ensure_future(self._past_deadline())
         try:
             await asyncio.wait({phases, signal, deadline}, return_when=asyncio.FIRST_COMPLETED)
             if self._in_final:
@@ -419,6 +440,26 @@ class Session:
             )
         await self._unwind(phases, hard_stop.at)
         return ending
+
+    async def _past_deadline(self) -> None:
+        """Return once the session's deadline passes: its budget's, never while a person's review is pending, and
+        later once the review moved it (:meth:`_extend`)."""
+
+        while self._budget is not None:
+            left = self._budget.remaining(self._clock.now())
+            if left <= 0 and not self._reviewing:
+                return
+            await self._clock.sleep(left if left > 0 else POLL_SECONDS)
+
+    def _extend(self, seconds: float) -> None:
+        """Move the session's deadline and its hard stop ``seconds`` later: the time it paused for a person's review,
+        which does not count against ``--max-hours``."""
+
+        if self._budget is None or seconds <= 0:
+            return
+        self._budget = replace(self._budget, total_seconds=self._budget.total_seconds + seconds)
+        if self._hard_stop is not None:
+            self._hard_stop.extend(seconds)
 
     async def _unwind(self, phases: asyncio.Future[SessionOutcome], until: float) -> None:
         """Cancel the phases and give them until ``until`` (clock seconds), or a second signal, to unwind.
@@ -464,8 +505,14 @@ class Session:
             )
         )
         if self._settings.stop_after_map:
+            # Its stop is the review point: the map is kept and reviewed offline, so the session does not pause.
             return await self._stop_after_map(prelude)
-        plans = await self._agent_plans(prelude)
+        try:
+            plans = await self._agent_plans(prelude)
+        except ReviewRejected as exc:
+            logger.info("the agent map was rejected at its review: %s", exc)
+            return SessionOutcome(SessionStopReason.REVIEW_REJECTED, None, None, "")
+        budget = self._budget or budget  # a review's pause moved the deadline
         explore_end = budget.explore_end(self._clock.now(), prelude.longest_root_test)
         self._phase("explore", explore_end=explore_end)
         window = ExploreWindow(
@@ -493,20 +540,69 @@ class Session:
     async def _agent_plans(self, prelude: PreludeResult) -> tuple[str, ...]:
         """Each agent branch's share of the directions (:mod:`agent_plans`): of the user's map; for two or more Arbors
         without one, of the dossier pass's map, else of one generated from the root's shares, waited for (its op
-        shares, else its kernel shares); for fewer, none. The time this takes is EXPLORE's."""
+        shares, else its kernel shares); for fewer, none. The time this takes is EXPLORE's.
+
+        With the review on, the session pauses for a person once the map is made and before it is split (:meth:`_review`):
+        the user's map, or for one Arbor too the pass's or the generated one, which a lone Arbor then takes whole.
+        Raises :class:`~hyperloom_multibranch.scheduling.review.ReviewRejected` when the person rejects it."""
 
         settings, work = self._settings, self._layout.agent_plans
+        if settings.agents and not settings.review_gate:
+            self._decisions.record(Decision(DecisionKind.PRELUDE, REVIEW_SKIPPED, INTEGRATION_BRANCH, {}))
         if not settings.agents or settings.agent_directions:
+            if settings.agent_directions and settings.review_gate and await self._arbors():
+                dossier = Path(settings.agent_dossier) if settings.agent_dossier else None
+                await self._review(Path(settings.agent_directions), dossier, MADE_BY_USER)
             return await agent_plans(settings.agents, settings.agent_directions, work)
         arbors = await self._arbors()
-        if len(arbors) < GENERATED_FOR:
+        if not arbors or (len(arbors) < GENERATED_FOR and not settings.review_gate):
             return await agent_plans(settings.agents, "", work)
         shares = await self._root_shares(prelude)
         outcome = await self._dossier_map(settings.agents[min(arbors)], prelude.start_commit, shares)
         map_file = "" if outcome is None or outcome.map is None else str(outcome.map)
+        if settings.review_gate:
+            made_by = MADE_BY_PASS if map_file else MADE_BY_SHARES
+            map_file = map_file or await self._generated(arbors, shares)
+            dossier = None if outcome is None else outcome.dossier
+            await self._review(Path(map_file) if map_file else None, dossier, made_by)
         if shares is None:
             return await agent_plans(settings.agents, map_file, work)
         return await agent_plans(settings.agents, map_file, work, shares.shares, shares.source)
+
+    async def _generated(self, arbors: dict[int, Path], shares: RootShares | None) -> str:
+        """The map the first Arbor generates from the root's ``shares``, for a person to review before it is split;
+        ``""`` when there are none, or Arbor cannot."""
+
+        given = (None, ROOT_PROFILE_SOURCE) if shares is None else (shares.shares, shares.source)
+        try:
+            return str(await generated_map(arbors[min(arbors)], *given, self._layout.agent_plans))
+        except SplitFailed as exc:
+            logger.warning("no map could be generated for the review: %s", exc)
+            return ""
+
+    async def _review(self, map_file: Path | None, dossier: Path | None, made_by: str) -> None:
+        """Pause, holding no lease, until a person decides on ``map_file`` and ``dossier`` (:mod:`.review`); each step
+        is a ``PRELUDE`` decision. The deadline does not pass while it waits, and moves by the time paused
+        (:meth:`_extend`). Raises :class:`~hyperloom_multibranch.scheduling.review.ReviewRejected` on a rejection."""
+
+        directory, began = self._layout.review, self._clock.now()
+        state = request(directory, self._layout.root, map_file, dossier, made_by, began)
+        asked = {"page": str(directory / REVIEW_PAGE), "map": state["map"], "dossier": state["dossier"]}
+        self._decisions.record(Decision(DecisionKind.PRELUDE, REVIEW_REQUESTED, INTEGRATION_BRANCH, asked))
+        logger.warning("waiting for a person's review of the agent map: read %s", directory / REVIEW_PAGE)
+        self._reviewing = True
+        try:
+            decided = await wait(directory, self._clock.sleep)
+        finally:
+            self._reviewing = False
+            self._extend(self._clock.now() - began)
+        detail = {key: decided.get(key) for key in ("by", "note", "changed", "decided_at_iso")}
+        detail["paused_seconds"] = round(self._clock.now() - began, 1)
+        rejected = decided.get("status") == REJECTED
+        reason = REVIEW_REJECTED if rejected else REVIEW_APPROVED
+        self._decisions.record(Decision(DecisionKind.PRELUDE, reason, INTEGRATION_BRANCH, detail))
+        if rejected:
+            raise ReviewRejected(f"rejected by {decided.get('by') or 'a person'}: {decided.get('note') or ''}")
 
     async def _stop_after_map(self, prelude: PreludeResult) -> SessionOutcome:
         """End the session before EXPLORE once its Arbor agents' directions are mapped, for one Arbor too: the map of

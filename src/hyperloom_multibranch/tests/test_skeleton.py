@@ -202,6 +202,14 @@ from hyperloom_multibranch.scheduling.agent_plans import (
     ROOT_SHARES_READ,
 )
 from hyperloom_multibranch.scheduling.lifecycle import NO_MAP
+from hyperloom_multibranch.scheduling import review
+from hyperloom_multibranch.scheduling.review import (
+    REVIEW_APPROVED,
+    REVIEW_PAGE,
+    REVIEW_REJECTED,
+    REVIEW_REQUESTED,
+    REVIEW_SKIPPED,
+)
 from hyperloom_multibranch.scheduling.settings import DOSSIER_MINUTES
 from hyperloom_multibranch.specialist.arbor_adapter import MAPPED, SplitFailed
 from hyperloom_multibranch.specialist.directions import DIRECTIONS
@@ -230,6 +238,8 @@ IMAGE_CHECK = ImageCheckReport(
     {"python": "/usr/bin/python3"},
     (FactResult("sglang.renamed-flag", "sglang", Status.FAIL, (), "the flag is gone"),),
 )
+#: The review gate pauses a session with Arbor agents for a person; these sessions open their branches without one,
+#: as ``run --no-review-gate`` does, and the review's own tests turn it on.
 SETTINGS = RunSettings(
     WORKLOAD,
     max_hours=0.5,
@@ -237,6 +247,7 @@ SETTINGS = RunSettings(
     max_llm_usd=0.0,
     caps=RosterCaps(3, 2, 8),
     judge_interval_seconds=600.0,
+    review_gate=False,
 )
 #: An InferenceX matrix with one single-node entry for the workload's model.
 LLAMA_MATRIX = """\
@@ -2101,6 +2112,189 @@ async def test_a_run_that_stops_after_its_map_and_gets_none_fails_with_why_and_k
     assert outcome.error.startswith(NO_MAP)
     assert "the pack has no dossier skill" in outcome.error
     assert not stage.layout.agent_map.exists()
+
+
+async def _decide(
+    stage: Stage, approve: bool, after: float = 0.0, edit: Callable[[], object] | None = None
+) -> dict[str, Any]:
+    """Decide as a person on the session's review once it asks for one, ``after`` seconds of virtual time later,
+    having made ``edit`` first; the review's state as decided."""
+
+    for _ in range(2000):
+        if review.load(stage.layout.review) is not None:
+            break
+        await stage.time.sleep(5.0)
+    else:
+        raise AssertionError("the session never asked for a review")
+    await stage.time.sleep(after)
+    if edit is not None:
+        edit()
+    assert review.decide(stage.layout.review, approve, "reviewer", "read it", stage.time.now()) == []
+    decided = review.load(stage.layout.review)
+    assert decided is not None
+    return decided
+
+
+def _review_steps(stage: Stage) -> list[str]:
+    return [str(row["reason"]) for row in _decisions(stage) if str(row["reason"]).startswith("review ")]
+
+
+def _two_arbors_reviewed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, read: list[str]) -> tuple[Stage, Path, Path]:
+    """A session of two Arbors with the review on, whose dossier pass writes a map and a dossier; the split records
+    the map's text as it reads it."""
+
+    map_file, dossier = _pass_wrote(tmp_path)
+
+    async def split(
+        agents: tuple[str, ...], given: str, work_dir: Path, root_shares: OpShares | None = None, *_source: str
+    ) -> tuple[str, ...]:
+        read.append(Path(given).read_text())
+        return ("/shares/share-1.json", "/shares/share-2.json")
+
+    async def mapping(_start: DossierStart) -> DossierOutcome:
+        return DossierOutcome(map_file, dossier, MAPPED)
+
+    monkeypatch.setattr(lifecycle, "agent_plans", split)
+    monkeypatch.setattr(lifecycle, "arbor_agents", _two_arbors)
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.settings = replace(SETTINGS, agents=("/agents/arbor", "/agents/arbor"), review_gate=True)
+    stage.dossier_pass = mapping
+    stage.judge = ScriptedCompletion([])
+    return stage, map_file, dossier
+
+
+async def test_two_arbors_wait_for_a_person_s_review_and_split_the_map_as_edited_after_a_pause_past_the_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    read: list[str] = []
+    stage, map_file, dossier = _two_arbors_reviewed(tmp_path, monkeypatch, read)
+    edited = json.dumps({"directions": [{"id": "m-attn", "title": "attention"}, {"id": "m-gemm"}]})
+
+    # The person takes an hour, twice the whole session's budget: the pause does not count against it.
+    outcome, decided = await asyncio.gather(
+        stage.run(), _decide(stage, True, after=3600.0, edit=lambda: map_file.write_text(edited))
+    )
+
+    assert outcome.stop_reason is SessionStopReason.TIME_EXHAUSTED
+    assert read == [edited]
+    assert (decided["status"], decided["by"], decided["changed"]) == ("approved", "reviewer", [str(map_file)])
+    assert _review_steps(stage) == [REVIEW_REQUESTED, REVIEW_APPROVED]
+    approved = next(row for row in _decisions(stage) if row["reason"] == REVIEW_APPROVED)
+    assert approved["detail"]["paused_seconds"] >= 3600.0
+    assert {branch for branch, origin in _origins(stage).items() if origin == "agent"} == {"b01", "b02"}
+    assert stage.sessions.plans == {"b01": "/shares/share-1.json", "b02": "/shares/share-2.json"}
+    page = (stage.layout.review / REVIEW_PAGE).read_text()
+    assert "`m-attn`" in page and str(dossier) in page and "approve" in page
+
+
+async def test_a_rejected_map_ends_the_session_and_opens_no_agent_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    read: list[str] = []
+    stage, _map_file, _dossier = _two_arbors_reviewed(tmp_path, monkeypatch, read)
+
+    outcome, decided = await asyncio.gather(stage.run(), _decide(stage, False))
+
+    assert (outcome.stop_reason, outcome.error, outcome.exit_code) == (SessionStopReason.REVIEW_REJECTED, "", 0)
+    assert decided["status"] == "rejected" and read == []
+    assert _review_steps(stage) == [REVIEW_REQUESTED, REVIEW_REJECTED]
+    assert not stage.sessions.plans
+    assert not [branch for branch, origin in _origins(stage).items() if origin == "agent"]
+
+
+async def test_without_the_review_gate_two_arbors_split_their_map_at_once_and_the_skip_is_recorded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    read: list[str] = []
+    stage, map_file, _dossier = _two_arbors_reviewed(tmp_path, monkeypatch, read)
+    stage.settings = replace(stage.settings, review_gate=False)
+
+    outcome = await stage.run()
+
+    assert outcome.stop_reason is SessionStopReason.TIME_EXHAUSTED
+    assert read == [map_file.read_text()]
+    assert _review_steps(stage) == [REVIEW_SKIPPED] and not stage.layout.review.exists()
+    assert stage.sessions.plans == {"b01": "/shares/share-1.json", "b02": "/shares/share-2.json"}
+
+
+async def test_with_the_review_on_one_arbor_gets_the_map_step_and_takes_the_reviewed_map_whole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    map_file, dossier = _pass_wrote(tmp_path)
+    asked: list[tuple[tuple[str, ...], str]] = []
+
+    async def split(
+        agents: tuple[str, ...], given: str, work_dir: Path, root_shares: OpShares | None = None, *_source: str
+    ) -> tuple[str, ...]:
+        asked.append((agents, given))
+        return ("/shares/share-1.json",)
+
+    async def mapping(_start: DossierStart) -> DossierOutcome:
+        return DossierOutcome(map_file, dossier, MAPPED)
+
+    monkeypatch.setattr(lifecycle, "agent_plans", split)
+    monkeypatch.setattr(lifecycle, "arbor_agents", _one_arbor)
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.settings = replace(SETTINGS, agents=("/agents/arbor",), review_gate=True)
+    stage.dossier_pass = mapping
+    stage.judge = ScriptedCompletion([])
+
+    outcome, _decided = await asyncio.gather(stage.run(), _decide(stage, True))
+
+    assert outcome.stop_reason is SessionStopReason.TIME_EXHAUSTED
+    assert asked == [(("/agents/arbor",), str(map_file))]
+    steps = [row["reason"] for row in _agent_map(stage)]
+    assert steps == [ROOT_SHARES_READ, DOSSIER_STARTED, DOSSIER_ENDED]
+    assert _review_steps(stage) == [REVIEW_REQUESTED, REVIEW_APPROVED]
+    assert stage.sessions.plans == {"b01": "/shares/share-1.json"}
+
+
+async def test_a_given_map_is_reviewed_too_and_split_as_given(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    given = tmp_path / "maps" / "d.json"
+    given.parent.mkdir()
+    given.write_text(json.dumps({"directions": [{"id": "m-attn"}, {"id": "m-gemm"}]}))
+    asked: list[str] = []
+
+    async def split(
+        agents: tuple[str, ...], map_file: str, work_dir: Path, root_shares: OpShares | None = None, *_source: str
+    ) -> tuple[str, ...]:
+        asked.append(map_file)
+        return ("/shares/share-1.json", "/shares/share-2.json")
+
+    monkeypatch.setattr(lifecycle, "agent_plans", split)
+    monkeypatch.setattr(lifecycle, "arbor_agents", _two_arbors)
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.settings = replace(
+        SETTINGS, agents=("/agents/arbor", "/agents/arbor"), agent_directions=str(given), review_gate=True
+    )
+    stage.judge = ScriptedCompletion([])
+
+    outcome, decided = await asyncio.gather(stage.run(), _decide(stage, True))
+
+    assert outcome.stop_reason is SessionStopReason.TIME_EXHAUSTED
+    assert asked == [str(given)] and decided["map"] == str(given) and decided["made_by"] == review.MADE_BY_USER
+    assert _review_steps(stage) == [REVIEW_REQUESTED, REVIEW_APPROVED]
+
+
+async def test_a_run_that_stops_after_its_map_does_not_pause_even_with_the_review_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Its stop is the review point: the map is kept and reviewed offline, across the points.
+    map_file, dossier = _pass_wrote(tmp_path)
+
+    async def mapping(_start: DossierStart) -> DossierOutcome:
+        return DossierOutcome(map_file, dossier, MAPPED)
+
+    monkeypatch.setattr(lifecycle, "arbor_agents", _one_arbor)
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.settings = replace(SETTINGS, agents=("/agents/arbor",), stop_after_map=True, review_gate=True)
+    stage.dossier_pass = mapping
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error, outcome.exit_code) == (SessionStopReason.MAPPED, "", 0)
+    assert (stage.layout.agent_map / KEPT_MAP).is_file()
+    assert not stage.layout.review.exists() and _review_steps(stage) == []
 
 
 USER_DIRECTION = "Fuse the MoE gate into the router kernel."
