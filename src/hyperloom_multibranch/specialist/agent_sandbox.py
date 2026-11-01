@@ -48,6 +48,7 @@ from pathlib import Path
 from hyperloom.common.outside_facts import ROCR_VISIBLE_DEVICES_ENV
 from hyperloom.common.proctree import descendants, running
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
+from hyperloom.measure.compile import COMPONENT_LAYOUTS, UnsupportedComponentError, locate_installed_package
 from hyperloom.sandbox.launcher import LAUNCHER_SOURCE, StatusPipe, launcher_argv
 from hyperloom_multibranch.specialist.agent_onboarding import CommandResult
 from hyperloom_multibranch.specialist.agent_session import Processes
@@ -63,6 +64,15 @@ from hyperloom_multibranch.specialist.agent_watch import (
 
 logger = logging.getLogger(__name__)
 
+#: The frameworks whose installed package a sandbox may not write: every test lays its patches over those files, so an
+#: edit in place (a tool defaulting to the installed tree) breaks every branch's tests. aiter is left writable, since
+#: it builds its JIT modules beside itself unless told otherwise.
+READ_ONLY_FRAMEWORKS = ("sglang", "vllm")
+#: Mounts each path given before ``--`` read-only in the command's own mount namespace, then runs the rest.
+_READ_ONLY_SCRIPT = (
+    'while [ "$1" != -- ]; do mount --bind "$1" "$1" && mount -o remount,bind,ro "$1" || exit 97; shift; done; '
+    'shift; exec "$@"'
+)
 BIN_DIR = "bin"
 LOG_DIR = "logs"
 #: Where a sandbox's temporary files go, under the host's local temporary directory: HIP unbundles its code objects
@@ -277,7 +287,8 @@ class LocalAgentSandbox:
     """Commands on this host, confined to ``cards`` (absolute GPU ids) and marked as the sandbox's, importing
     ``python_path`` first; ``root`` is the sandbox's own directory, for its logs and wrappers.
     ``processes`` adopts every command it starts for ``branch``; ``base_env`` is ``os.environ`` when ``None``.
-    ``niceness`` lowers every command's CPU priority, for a sandbox whose host work must not slow the tests beside it."""
+    ``niceness`` lowers every command's CPU priority, for a sandbox whose host work must not slow the tests beside it.
+    ``read_only`` are directories every command sees read-only (:func:`framework_read_only`)."""
 
     cards: tuple[int, ...]
     python_path: tuple[Path, ...]
@@ -288,6 +299,7 @@ class LocalAgentSandbox:
     grace_seconds: float = GRACE_SECONDS
     poll_seconds: float = POLL_SECONDS
     niceness: int = 0
+    read_only: tuple[Path, ...] = ()
     _numbers: Iterator[int] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -380,6 +392,8 @@ class LocalAgentSandbox:
         argv = ["bash", "-c", command]
         if self.niceness:
             argv = ["nice", "-n", str(self.niceness), *argv]
+        if self.read_only:
+            argv = read_only_argv(self.read_only, argv)
         read_fd, write_fd = os.pipe()
         try:
             with log.open("ab") as out:
@@ -410,6 +424,32 @@ class LocalAgentSandbox:
         return os.environ if self.base_env is None else self.base_env
 
 
+def read_only_argv(paths: tuple[Path, ...], argv: list[str]) -> list[str]:
+    """``argv`` run in a private mount namespace where each of ``paths`` is mounted read-only."""
+    script = ["sh", "-c", _READ_ONLY_SCRIPT, "read-only", *map(str, paths), "--", *argv]
+    return ["unshare", "--mount", "--propagation", "private", "--", *script]
+
+
+def framework_read_only() -> tuple[Path, ...]:
+    """The installed framework packages of this image a sandbox command must not write, or none when this host cannot
+    give a command a mount namespace of its own (not root, or no ``unshare``), which is logged."""
+    probe = ["unshare", "--mount", "--propagation", "private", "--", "true"]
+    try:
+        permitted = shutil.which("unshare") is not None and subprocess.run(probe, capture_output=True).returncode == 0
+    except OSError:
+        permitted = False
+    if not permitted:
+        logger.warning("sandboxes cannot mount the image's frameworks read-only on this host: they stay writable")
+        return ()
+    paths = []
+    for name in READ_ONLY_FRAMEWORKS:
+        try:
+            paths.append(locate_installed_package(COMPONENT_LAYOUTS[name]).path)
+        except UnsupportedComponentError:
+            continue
+    return tuple(paths)
+
+
 def _reap(root: str) -> None:
     """Collect the launchers of the sandbox at ``root`` that ended, which would otherwise linger as zombies."""
 
@@ -431,9 +471,12 @@ def read_tail(log: Path, size: int = TAIL_BYTES) -> str:
 
 __all__ = [
     "CONFINE_SCRIPT",
+    "READ_ONLY_FRAMEWORKS",
     "TAIL_BYTES",
     "TIMED_OUT",
     "LocalAgentSandbox",
     "LocalProcess",
+    "framework_read_only",
+    "read_only_argv",
     "read_tail",
 ]
