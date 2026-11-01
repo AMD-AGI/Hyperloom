@@ -138,10 +138,9 @@ _PROBE = textwrap.dedent(
         elif isinstance(value, tuple):
             setattr(o, name, tuple(f"{name}_{i}" for i in range(len(value))))
 
-    from hyperloom.common import env_safety, failure_signature, visible_devices
+    from hyperloom.common import aiter_layout, env_safety, failure_signature, visible_devices
     from hyperloom.measure import compile as compiled
     from hyperloom.measure import agentx_requests, eval_context, farm, hosted_spec, local, log_causes, points, surface
-    from hyperloom.measure.jit import modules as jit_modules
     from hyperloom.measure.framework import base as framework_base
     from hyperloom.measure.runner import run
     from hyperloom.sandbox import card_occupancy, templates
@@ -182,8 +181,8 @@ _PROBE = textwrap.dedent(
             farm.AITER_META_DIR_ENV,
             farm.AITER_META_MARKER_DIR,
             farm.AITER_META_WHEEL_DIR,
-            jit_modules.AITER_INSTALL_MODE_FILE,
-            jit_modules.AITER_DEVELOP_MODE,
+            aiter_layout.AITER_INSTALL_MODE_FILE,
+            aiter_layout.AITER_DEVELOP_MODE,
         ],
         "tuner": kernel_tune.AITER_META_MARKER_DIR,
         "relnorm": tune_rows._rel_norm(

@@ -53,6 +53,7 @@ from typing import Any
 import yaml
 
 from hyperloom.common.benchmark_config import is_magpie_agentx
+from hyperloom.common.outside_facts import HIP_GRAPH_PACKET_CAPTURE_ENV
 from hyperloom.measure.short_prompts.staging import CACHE_ENV, DEFAULT_CACHE_DIR
 
 __all__ = [
@@ -107,7 +108,6 @@ KINETO_NOTE = (
     "ruppell: traced with HIP graph packet capture off (DEBUG_CLR_GRAPH_PACKET_CAPTURE=0); "
     "kernel shares compare only with profiles that set it too"
 )
-_PACKET_CAPTURE = "DEBUG_CLR_GRAPH_PACKET_CAPTURE"
 
 _SCHEMA = 1
 _UTF8 = "utf-8"
@@ -260,7 +260,7 @@ class Tracer:
         parts = [early, *base.split(os.pathsep), str(self.source / "python"), str(site)]
         path = os.pathsep.join(dict.fromkeys(part for part in parts if part))
         envs = {**_TRACED_ENVS, **added, _PYTHONPATH: path}
-        self.packet_capture_off |= {**given, **envs}.get(_PACKET_CAPTURE) == "0"
+        self.packet_capture_off |= {**given, **envs}.get(HIP_GRAPH_PACKET_CAPTURE_ENV) == "0"
         return envs
 
     def _probe(self, environ: Mapping[str, str]) -> dict[str, str]:
