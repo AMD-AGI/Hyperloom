@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.contracts.recipe import (
+    REMOVED,
     ComponentChange,
     ComponentPatches,
     ConfigDelta,
@@ -171,6 +172,31 @@ def test_a_setting_both_sides_changed_takes_the_candidates_value_and_is_listed()
 
     assert diff(candidate, apply(ours, merge.delta)).is_empty
     assert merge.config_conflicts == (ValueChange("--max-num-seqs", "192", "256"),)
+
+
+def test_the_candidates_removals_from_the_resolved_launch_land_beside_the_heads_and_one_it_stopped_leaves():
+    base = _changed(BASE, ConfigDelta(remove_args=("--resolved-a",)))
+    candidate = _changed(base, ConfigDelta(launch_remove_args=("--resolved-b",)))
+    ours = _changed(base, ConfigDelta(remove_args=("--enforce-eager", "--resolved-c")))
+
+    merge = carry("i1", base, candidate, ours, Stored(_applies, _table, _store, _keep))
+
+    merged = apply(ours, merge.delta)
+    assert (merged.launch.server_args, merged.launch.remove_args) == (
+        "--max-num-seqs 128",
+        ("--resolved-b", "--resolved-c"),
+    )
+    assert (merge.config_conflicts, merge.clean) == ((), True)
+
+
+def test_a_removal_from_the_resolved_launch_against_a_value_the_head_set_takes_the_candidates_and_is_listed():
+    candidate = _changed(BASE, ConfigDelta(remove_args=("--enable-prefix-caching",)))
+    ours = _changed(BASE, ConfigDelta(server_args="--enable-prefix-caching"))
+
+    merge = carry("i1", BASE, candidate, ours, Stored(_applies, _table, _store, _keep))
+
+    assert diff(candidate, apply(ours, merge.delta)).is_empty
+    assert merge.config_conflicts == (ValueChange("--enable-prefix-caching", "", REMOVED),)
 
 
 def test_the_candidates_patches_stack_after_the_heads():

@@ -2940,6 +2940,24 @@ def test_remote_adapter_detects_kernel_only_replay_material(
     assert not RemoteWarmRecipeAdapter._candidate_has_replay_material(candidate)
 
 
+def test_remote_adapter_detects_a_launch_that_only_removes_options_of_the_resolved_launch(
+    tmp_path: Path,
+) -> None:
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    knowledge = _current_knowledge()
+    knowledge["value"]["config"] = {
+        "extra_server_args": "",
+        "extra_envs": {},
+        "remove_args": ["--enable-linear-replayssm-spec"],
+    }
+    knowledge["value"]["patch"] = {}
+    knowledge["value"]["kernel"] = {}
+    (candidate / "recipe.json").write_text(json.dumps(knowledge), encoding="utf-8")
+
+    assert RemoteWarmRecipeAdapter._candidate_has_replay_material(candidate)
+
+
 def test_patch_column_returns_the_recorded_replay_order(tmp_path: Path) -> None:
     timeline = [
         "patch/overlays/000002/00-pr-7.patch",

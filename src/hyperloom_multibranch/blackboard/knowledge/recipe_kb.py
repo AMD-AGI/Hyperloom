@@ -5,7 +5,8 @@
 
 CLOSE writes a session's final recipe to the Recipe KB; PRELUDE reads one back as a lead for the first specialists.
 
-* ``config`` is the recipe's launch document: ``extra_server_args`` and ``extra_envs``.
+* ``config`` is the recipe's launch document: ``extra_server_args`` and ``extra_envs``, and ``remove_args`` when the
+  launch removes options of the launch the framework resolves.
 * ``patch``: component ``i`` is overlay stack ``i``. Its patches are listed as
   ``patch/overlays/<i:06d>/<j:02d>-<name>.patch``, the refs the KB orders replay by. Its provenance row carries the
   component, its upstream repository, its upstream commit as ``base_sha``, and each patch's own path and hash, so a

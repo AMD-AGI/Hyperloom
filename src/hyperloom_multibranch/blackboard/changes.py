@@ -45,6 +45,9 @@ def _config(config: ConfigDelta) -> list[str]:
         parts.append(f"add args {config.server_args}")
     if config.remove_args:
         parts.append(f"remove args {' '.join(config.remove_args)}")
+    if config.launch_remove_args is not None:
+        names = " ".join(config.launch_remove_args)
+        parts.append(f"resolved launch removes only {names}" if names else "resolved launch removes nothing")
     if config.envs:
         parts.append(f"set env {LIST.join(f'{name}={value}' for name, value in sorted(config.envs.items()))}")
     if config.unset_envs:

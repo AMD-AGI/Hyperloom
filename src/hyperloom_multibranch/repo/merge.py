@@ -34,11 +34,13 @@ from functools import partial
 from pathlib import Path
 
 from hyperloom.contracts.recipe import (
+    REMOVED,
     ComponentChange,
     ComponentPatches,
     ConfigDelta,
     KernelArtifact,
     KernelKind,
+    LaunchConfig,
     PatchRef,
     Recipe,
     RecipeDelta,
@@ -127,7 +129,7 @@ def carry(onto: str, base: Recipe, candidate: Recipe, ours: Recipe, stored: Stor
         raise RecipeError("the candidate changes the base image, which a session keeps")
     kernels = _added_kernels(base, candidate, ours, stored)
     delta = RecipeDelta(
-        config=_config(change),
+        config=_config(change, ours.launch),
         components=_components(base, candidate, ours),
         add_kernels=kernels.added,
         remove_kernels=(*_removed_kernels(base, candidate, ours), *kernels.displaced),
@@ -149,12 +151,22 @@ def carry(onto: str, base: Recipe, candidate: Recipe, ours: Recipe, stored: Stor
     )
 
 
-def _config(change: RecipeDiff) -> ConfigDelta:
+def _config(change: RecipeDiff, ours: LaunchConfig) -> ConfigDelta:
+    """The candidate's launch change, onto ``ours``. One that removes anything gives the launch's removals whole:
+    ``ours``'s, with the options the candidate removed from the resolved launch (:data:`REMOVED`) and without those it
+    stopped removing, so an argument it dropped is never taken for one of them."""
+
+    values = [f"{arg.name} {arg.after}".strip() for arg in change.args if arg.after not in (None, REMOVED)]
+    resolved = {arg.name: arg.after == REMOVED for arg in change.args if REMOVED in (arg.before, arg.after)}
+    dropped = tuple(arg.name for arg in change.args if arg.after in (None, REMOVED) and arg.before != REMOVED)
+    added = {name for name, removes in resolved.items() if removes}
+    removals = (set(ours.remove_args) | added) - (set(resolved) - added)
     return ConfigDelta(
-        server_args=" ".join(f"{arg.name} {arg.after}".strip() for arg in change.args if arg.after is not None),
-        remove_args=tuple(arg.name for arg in change.args if arg.after is None),
+        server_args=" ".join(values),
+        remove_args=dropped,
         envs={env.name: env.after for env in change.envs if env.after is not None},
         unset_envs=tuple(env.name for env in change.envs if env.after is None),
+        launch_remove_args=tuple(sorted(removals)) if dropped or resolved else None,
     )
 
 

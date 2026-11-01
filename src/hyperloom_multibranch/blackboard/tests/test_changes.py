@@ -28,6 +28,16 @@ def test_an_empty_delta_changes_nothing() -> None:
     assert describe_change(RecipeDelta()) == NO_CHANGE
 
 
+def test_the_config_part_names_the_launch_s_removals_when_it_gives_them_whole() -> None:
+    removing = RecipeDelta(config=ConfigDelta(remove_args=("--enable-x",), launch_remove_args=("--enable-x",)))
+    restoring = RecipeDelta(config=ConfigDelta(launch_remove_args=()))
+
+    assert (describe_change(removing), describe_change(restoring)) == (
+        "remove args --enable-x; resolved launch removes only --enable-x",
+        "resolved launch removes nothing",
+    )
+
+
 def test_the_config_part_names_what_it_adds_removes_sets_and_unsets() -> None:
     config = ConfigDelta(
         server_args="--cuda-graph-max-bs 256", remove_args=("--enable-x",), envs={"B": "2", "A": "1"}, unset_envs=("C",)

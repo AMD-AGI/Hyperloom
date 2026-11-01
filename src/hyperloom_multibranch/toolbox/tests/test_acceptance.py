@@ -276,6 +276,16 @@ async def test_an_explore_that_changes_one_setting_of_its_parent_is_accepted(tmp
     assert await rig.toolbox.submit_test(req(change=change))
 
 
+async def test_an_explore_that_only_removes_a_flag_its_parents_args_lack_is_accepted_for_measurement(
+    tmp_path: Path,
+) -> None:
+    """The flag is one of the launch the framework resolves; the candidate's launch keeps it removed."""
+    rig = build(tmp_path, repo=_parent_with_settings())
+    change = RecipeDelta(config=ConfigDelta(remove_args=("--enable-linear-replayssm-spec",)))
+    assert await rig.toolbox.submit_test(req(change=change))
+    assert rig.planner.calls == [change]
+
+
 @pytest.mark.parametrize("purpose", [Purpose.CONFIRM, Purpose.INTEGRATION, Purpose.FINAL])
 async def test_a_confirm_integration_or_final_may_re_run_the_parent_recipe(tmp_path: Path, purpose: Purpose) -> None:
     rig = build(tmp_path, repo=_parent_with_settings())
