@@ -1367,8 +1367,9 @@ async def test_a_snapshot_imports_only_the_launch_changes_made_since_the_start_a
     assert request.delta.config.envs == {"SGLANG_QWEN3_GATE_UP_PTPC": "1"}
     assert request.delta.config.server_args == "" and request.delta.config.unset_envs == ()
     watch = json.loads((tmp_path / BRANCH / "session" / "agent-watch.json").read_text())
-    assert watch["refused_envs"] == {"ISL": "1024", "OSL": "1024"}
-    dropped = [note for note in await rig.notices() if "ISL, OSL" in note]
+    # GSM8K_LIMIT is Arbor's evaluation setting, which MB gives it (arbor_adapter.EVAL_ENVS)
+    assert watch["refused_envs"] == {"GSM8K_LIMIT": "400", "ISL": "1024", "OSL": "1024"}
+    dropped = [note for note in await rig.notices() if "GSM8K_LIMIT, ISL, OSL" in note]
     assert len(dropped) == 1 and "keep 1" in dropped[0]
 
 
