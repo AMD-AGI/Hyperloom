@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.measure.framework import base
 from hyperloom.measure.framework.base import (
     DEFAULT_CONFIGS,
     SESSION_SHA_ENV,
@@ -18,6 +19,7 @@ from hyperloom.measure.framework.base import (
     FrameworkBaseError,
     files_digest,
     framework_envs,
+    image_configs,
     load_snapshot,
     restore,
     shared_view,
@@ -127,6 +129,27 @@ def test_a_machine_without_the_tables_gets_no_variables(tmp_path: Path) -> None:
     assert framework_envs(tmp_path / "snap", "") == {}
     if not Path(DEFAULT_CONFIGS).is_dir():
         assert framework_envs(tmp_path / "snap") == {}
+
+
+def test_a_vllm_image_snapshots_the_tables_of_its_installed_aiter(tmp_path: Path, monkeypatch) -> None:
+    """A vLLM image has no SGLang workspace; its aiter keeps the tables in the installed package."""
+    installed = make_framework(tmp_path / "site-packages")
+    monkeypatch.setattr(base, "DEFAULT_CONFIGS", str(tmp_path / "sgl-workspace-absent"))
+    monkeypatch.setattr(base, "resolve_package_root", lambda: installed.parent)
+
+    envs = framework_envs(tmp_path / "snap")
+
+    assert image_configs() == installed
+    assert envs == {SNAPSHOT_ENV: str(tmp_path / "snap"), SESSION_SHA_ENV: load_snapshot(tmp_path / "snap").sha256}
+    assert load_snapshot(tmp_path / "snap").source == installed
+
+
+def test_a_machine_with_no_aiter_takes_no_snapshot_and_says_so(tmp_path: Path, monkeypatch, caplog) -> None:
+    monkeypatch.setattr(base, "DEFAULT_CONFIGS", str(tmp_path / "sgl-workspace-absent"))
+    monkeypatch.setattr(base, "resolve_package_root", lambda: None)
+
+    assert framework_envs(tmp_path / "snap") == {}
+    assert "no framework tables at" in caplog.text
 
 
 def test_a_snapshot_that_cannot_be_taken_still_names_its_directory_so_each_test_says_it_found_none(

@@ -48,7 +48,7 @@ from hyperloom.measure.jit.key import build_surface
 from hyperloom.measure.jit.store import DirJitStore
 from hyperloom.measure.live_log import last_output
 from hyperloom.measure.local import SUPPORTED_KINDS
-from hyperloom.measure.framework.base import DEFAULT_CONFIGS, SESSION_SNAPSHOT_DIR, framework_envs
+from hyperloom.measure.framework.base import SESSION_SNAPSHOT_DIR, framework_envs, image_configs
 from hyperloom.measure.local_templates import image_env, local_runner_template
 from hyperloom.measure.rule_pack_stage import rule_pack_envs
 from hyperloom.measure.runner.jit import JIT_CACHE_ENV
@@ -369,7 +369,7 @@ def _local_tools(leases: BranchLeases, options: LocalOptions) -> Sequence[AsyncT
     if options.tools is not None:
         return options.tools
     tuner = (
-        (kernel_tune_tool(leases, Path(options.framework_configs or DEFAULT_CONFIGS)),) if leases.can_lease(1) else ()
+        (kernel_tune_tool(leases, Path(options.framework_configs or image_configs())),) if leases.can_lease(1) else ()
     )
     return (tracelens_tool(), roofline_tool(), UpstreamPrSearch(), *tuner)
 
