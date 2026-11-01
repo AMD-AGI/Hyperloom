@@ -100,9 +100,14 @@ LOG_FILE = "ruppell.log"
 ATTEMPT_LOG_FILE = "attempt_server.log"
 MODULE_SHARES_COLUMNS = ("kind", "module", "gpu_ms", "share_percent", "steps")
 UNATTRIBUTED = "unattributed"
-#: The note of a profile whose server ran traced: its Kineto trace was taken beside ruppell in one process, which
-#: ruppell has not yet measured (ruppell-board#19), so its numbers are read with care.
-KINETO_NOTE = "ruppell: the Kineto trace was taken in a traced run, cross-process overhead untested"
+#: The note of a profile whose server ran traced with HIP graph packet capture off (ROCm 7.2.4 under the SGLang adapter):
+#: Kineto then records every kernel of each graph replay, where with it on the replays are nearly hidden, so its kernel
+#: shares compare only with a profile that sets ``DEBUG_CLR_GRAPH_PACKET_CAPTURE=0`` too (ruppell-board#19).
+KINETO_NOTE = (
+    "ruppell: traced with HIP graph packet capture off (DEBUG_CLR_GRAPH_PACKET_CAPTURE=0); "
+    "kernel shares compare only with profiles that set it too"
+)
+_PACKET_CAPTURE = "DEBUG_CLR_GRAPH_PACKET_CAPTURE"
 
 _SCHEMA = 1
 _UTF8 = "utf-8"
@@ -207,6 +212,8 @@ class Tracer:
     work: Path
     source: Path
     build: Path
+    #: Whether a traced server got HIP graph packet capture off, which changes what Kineto records (:data:`KINETO_NOTE`).
+    packet_capture_off: bool = False
 
     @property
     def records(self) -> Path:
@@ -252,7 +259,9 @@ class Tracer:
         early = str(self.source.joinpath(*_EARLY_HOOK))
         parts = [early, *base.split(os.pathsep), str(self.source / "python"), str(site)]
         path = os.pathsep.join(dict.fromkeys(part for part in parts if part))
-        return {**_TRACED_ENVS, **added, _PYTHONPATH: path}
+        envs = {**_TRACED_ENVS, **added, _PYTHONPATH: path}
+        self.packet_capture_off |= {**given, **envs}.get(_PACKET_CAPTURE) == "0"
+        return envs
 
     def _probe(self, environ: Mapping[str, str]) -> dict[str, str]:
         """The variables ``ruppell run`` adds to or changes in ``environ`` for its command, read from a command that

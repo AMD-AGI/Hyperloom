@@ -145,6 +145,7 @@ def test_the_server_gets_ruppell_runs_environment_with_the_points_own_values_kep
     )
     assert (envs["RUPPELL_SGLANG"], envs["RUPPELL_DETAIL"]) == ("1", "5/1000")
     assert envs["DEBUG_CLR_GRAPH_PACKET_CAPTURE"] == "1", "a value the point sets is the point's"
+    assert not tracer.packet_capture_off, "Kineto records as in an untraced run"
     assert envs["TP"] == 2
     assert "PYTHONDONTWRITEBYTECODE" not in envs, "only what ruppell run sets"
     assert json.loads((tracer.records / "run.json").read_text())["commit"] == COMMIT
@@ -172,6 +173,7 @@ def test_a_point_with_no_path_of_its_own_builds_on_the_inherited_one(tmp_path, h
 
     path = yaml.safe_load(traced.read_text())["benchmark"]["envs"]["PYTHONPATH"].split(os.pathsep)
     assert path[:3] == [str(tracer.source.joinpath(*EARLY)), "/runner", "/img"]
+    assert tracer.packet_capture_off, "ruppell run turned packet capture off, which changes what Kineto records"
 
 
 # --- what the report keeps ----------------------------------------------------------------------------------------
