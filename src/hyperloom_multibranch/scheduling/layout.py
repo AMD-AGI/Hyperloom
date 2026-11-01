@@ -34,6 +34,7 @@ REPO_DIR = "MB-repo"
 BLOBS_DIR = "MB-blobs"
 BRANCHES_DIR = "MB-branches"
 AGENT_PLANS_DIR = "MB-agent-plans"
+AGENT_MAP_DIR = "MB-agent-map"
 SOURCE_DIR = "MB-source"
 RUNNER_SOURCE_DIR = "MB-runner-source"
 TOOLBOX_DIR = "MB-toolbox"
@@ -125,6 +126,11 @@ class SessionLayout:
     def agent_plans(self) -> Path:
         """The agent sources fetched to split the session's directions, and the shares (:mod:`.agent_plans`)."""
         return self.root / AGENT_PLANS_DIR
+
+    @property
+    def agent_map(self) -> Path:
+        """The map and dossier a session that stops after its map leaves for review (:func:`.agent_plans.keep_map`)."""
+        return self.root / AGENT_MAP_DIR
 
     @property
     def source(self) -> Path:

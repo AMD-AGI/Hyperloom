@@ -454,6 +454,16 @@ def _add_agent_options(run: argparse.ArgumentParser) -> None:
             f" dossier pass; sessions that share a machine each need their own (default {AGENT_PORT})."
         ),
     )
+    run.add_argument(
+        "--stop-after-map",
+        dest="stop_after_map",
+        action="store_true",
+        help=(
+            "End the session before EXPLORE once the Arbor --autonomous-agent directions are mapped, one Arbor's"
+            " too: PRELUDE, the dossier pass (--agent-dossier-minutes; with 0, a map generated from the root's"
+            " profile), then CLOSE. The map and its dossier are kept in the session's MB-agent-map/ for review."
+        ),
+    )
 
 
 def _positive(args: argparse.Namespace, names: tuple[str, ...]) -> list[str]:
@@ -556,6 +566,16 @@ def _agent_launch(path: Path | None, agents: list[str]) -> str:
     return str(path.absolute())
 
 
+def _stop_after_map(stop: bool, agents: list[str], directions: Path | None) -> bool:
+    """Whether the session stops after its map; refused with no agent to map for, or a map already given."""
+
+    if stop and not agents:
+        raise ValueError("--stop-after-map needs an --autonomous-agent whose directions it maps")
+    if stop and directions is not None:
+        raise ValueError("--stop-after-map maps directions, and --agent-directions already gives them")
+    return stop
+
+
 def _agent_port(port: int | None, agents: list[str]) -> int:
     """The first port of the agents' port blocks; refused with no agent to serve on it, or when it is no port."""
 
@@ -647,6 +667,7 @@ def settings_from(
         agent_launch=_agent_launch(args.agent_launch, args.agents or []),
         agent_dossier_minutes=_dossier_minutes(args.agent_dossier_minutes),
         agent_port=_agent_port(args.agent_port, args.agents or []),
+        stop_after_map=_stop_after_map(args.stop_after_map, args.agents or [], args.agent_directions),
     )
 
 

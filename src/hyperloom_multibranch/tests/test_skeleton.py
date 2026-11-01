@@ -193,10 +193,17 @@ from hyperloom_multibranch.scheduling.agent_plans import (
     DOSSIER_ENDED,
     DOSSIER_SKIPPED,
     DOSSIER_STARTED,
+    KEPT_DOSSIER,
+    KEPT_MAP,
+    KEPT_SUMMARY,
+    MADE_BY_PASS,
+    MADE_BY_SHARES,
+    MAP_KEPT,
     ROOT_SHARES_READ,
 )
+from hyperloom_multibranch.scheduling.lifecycle import NO_MAP
 from hyperloom_multibranch.scheduling.settings import DOSSIER_MINUTES
-from hyperloom_multibranch.specialist.arbor_adapter import MAPPED
+from hyperloom_multibranch.specialist.arbor_adapter import MAPPED, SplitFailed
 from hyperloom_multibranch.specialist.directions import DIRECTIONS
 from hyperloom_multibranch.specialist.dossier_pass import DossierOutcome, DossierPass, DossierStart
 from hyperloom_multibranch.specialist.prompts import prompt_versions
@@ -1976,6 +1983,112 @@ async def test_a_dossier_pass_with_no_map_or_no_minutes_leaves_the_split_to_the_
         assert _agent_map(stage)[-1]["detail"]["map"] == ""
     else:
         assert (steps, started) == ([ROOT_SHARES_READ, DOSSIER_SKIPPED], [])
+
+
+async def _one_arbor(agents: tuple[str, ...], work_dir: Path) -> dict[int, Path]:
+    return {0: work_dir / "sources" / "0"}
+
+
+def _pass_wrote(tmp_path: Path) -> tuple[Path, Path]:
+    """A map and a dossier as a dossier pass leaves them in its checkout."""
+
+    map_file, dossier = tmp_path / "pass" / "directions.json", tmp_path / "pass" / "docs" / "dossier" / "qwen3-8b"
+    dossier.mkdir(parents=True)
+    (dossier / "index.md").write_text("# dossier\n")
+    map_file.write_text(json.dumps({"directions": [{"id": "m-attn"}]}))
+    return map_file, dossier
+
+
+async def test_a_run_that_stops_after_its_map_maps_one_arbor_keeps_map_and_dossier_and_opens_no_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    map_file, dossier = _pass_wrote(tmp_path)
+    started: list[DossierStart] = []
+
+    async def mapping(start: DossierStart) -> DossierOutcome:
+        started.append(start)
+        return DossierOutcome(map_file, dossier, MAPPED)
+
+    monkeypatch.setattr(lifecycle, "arbor_agents", _one_arbor)
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.settings = replace(SETTINGS, agents=("/agents/arbor",), stop_after_map=True)
+    stage.dossier_pass = mapping
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error, outcome.exit_code) == (SessionStopReason.MAPPED, "", 0)
+    [start] = started
+    assert start.start_commit == await stage.root()
+    kept = stage.layout.agent_map
+    summary = json.loads((kept / KEPT_SUMMARY).read_text())
+    assert summary == {
+        "conc": SETTINGS.workload.conc,
+        "source": "/agents/arbor",
+        "start_commit": start.start_commit,
+        "pass": MAPPED,
+        "made_by": MADE_BY_PASS,
+        "map": str(kept / KEPT_MAP),
+        "dossier": str(kept / KEPT_DOSSIER / "qwen3-8b"),
+    }
+    assert (kept / KEPT_MAP).read_text() == map_file.read_text()
+    assert (kept / KEPT_DOSSIER / "qwen3-8b" / "index.md").is_file()
+    steps = [row["reason"] for row in _agent_map(stage)]
+    assert steps == [ROOT_SHARES_READ, DOSSIER_STARTED, DOSSIER_ENDED, MAP_KEPT]
+    assert not stage.sessions.plans
+    assert not [branch for branch, origin in _origins(stage).items() if origin == "agent"]
+
+
+async def test_a_run_that_stops_after_its_map_keeps_a_map_generated_from_the_root_when_the_pass_set_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    generated = tmp_path / "generated-directions.json"
+    generated.write_text(json.dumps({"directions": [{"id": "m-gemm"}]}))
+
+    async def mapping(_start: DossierStart) -> DossierOutcome:
+        return DossierOutcome(None, None, "it set no map by its deadline and was stopped")
+
+    async def generate(*_args: object) -> Path:
+        return generated
+
+    monkeypatch.setattr(lifecycle, "arbor_agents", _one_arbor)
+    monkeypatch.setattr(lifecycle, "generated_map", generate)
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.settings = replace(SETTINGS, agents=("/agents/arbor",), stop_after_map=True)
+    stage.dossier_pass = mapping
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.exit_code) == (SessionStopReason.MAPPED, 0)
+    summary = json.loads((stage.layout.agent_map / KEPT_SUMMARY).read_text())
+    assert (summary["made_by"], summary["pass"], summary["dossier"]) == (
+        MADE_BY_SHARES,
+        "it set no map by its deadline and was stopped",
+        "",
+    )
+    assert (stage.layout.agent_map / KEPT_MAP).read_text() == generated.read_text()
+
+
+async def test_a_run_that_stops_after_its_map_and_gets_none_fails_with_why_and_keeps_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def mapping(_start: DossierStart) -> DossierOutcome:
+        return DossierOutcome(None, None, "it refused its config: the pack has no dossier skill")
+
+    async def generate(*_args: object) -> Path:
+        raise SplitFailed("the root has no shares to generate a map from")
+
+    monkeypatch.setattr(lifecycle, "arbor_agents", _one_arbor)
+    monkeypatch.setattr(lifecycle, "generated_map", generate)
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.settings = replace(SETTINGS, agents=("/agents/arbor",), stop_after_map=True)
+    stage.dossier_pass = mapping
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.exit_code) == (SessionStopReason.MAPPED, 1)
+    assert outcome.error.startswith(NO_MAP)
+    assert "the pack has no dossier skill" in outcome.error
+    assert not stage.layout.agent_map.exists()
 
 
 USER_DIRECTION = "Fuse the MoE gate into the router kernel."

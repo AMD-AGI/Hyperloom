@@ -408,6 +408,21 @@ def test_an_agent_port_without_an_agent_or_that_is_no_port_is_a_usage_error(extr
         _settings(*extra)
 
 
+def test_a_run_stops_after_its_map_only_when_asked() -> None:
+    assert _settings("--autonomous-agent", "/agents/arbor", "--stop-after-map").stop_after_map
+    assert not _settings("--autonomous-agent", "/agents/arbor").stop_after_map
+
+
+def test_stopping_after_the_map_without_an_agent_or_with_a_map_given_is_a_usage_error(tmp_path: Path) -> None:
+    given = tmp_path / "map.json"
+    given.write_text(json.dumps({"directions": [{"id": "m-attn"}]}))
+
+    with pytest.raises(ValueError, match="needs an --autonomous-agent"):
+        _settings("--stop-after-map")
+    with pytest.raises(ValueError, match="already gives them"):
+        _settings("--autonomous-agent", "/agents/arbor", "--agent-directions", str(given), "--stop-after-map")
+
+
 @pytest.mark.parametrize(
     ("document", "agent", "match"),
     [
