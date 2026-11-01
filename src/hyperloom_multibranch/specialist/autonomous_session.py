@@ -565,8 +565,18 @@ class AutonomousSession:
                     f"keep {seq}: the kernel tables of {names} were not copied, too large; imported as set"
                 )
             await self._record_dropped(watch, watch.pending)
+            await self._warn_disabled(watch.pending)
         await self._learn(manifest.ledger, watch)
         watch.save(self._place.workspace / WATCH_FILE)
+
+    async def _warn_disabled(self, kept: KeptChange) -> None:
+        """Warn, in the log and on the branch, of each server flag the keep is imported without because a variable it
+        sets needs it off (``FLAG_CONFLICTS``): a flag the launch set is turned off."""
+
+        for flag, setting in kept.disabled.items():
+            said = f"keep {kept.seq} is imported without {flag}, which was set: {setting} needs it off"
+            log.warning("%s: %s", self._start.branch, said)
+            await self._note(said)
 
     async def _record_dropped(self, watch: KeepWatch, kept: KeptChange) -> None:
         """Record in ``watch`` the variables of the agent's launch the measurement sets itself, noting each once."""

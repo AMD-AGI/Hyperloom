@@ -23,6 +23,10 @@ the chain of its patches from the root, so a snapshot made on a commit that no s
 root other than the one MB gave, is refused; one made on the root after another, its ``notes`` saying the earlier commit
 is gone, starts the chain again with ``served.patch``, its whole tree against the root. What the agent's tree links to
 outside itself (``outside.json``) is not read: AITER builds a JIT module it lacks at its first call.
+
+Some framework settings cannot run together, which an agent need not know: a keep that sets a variable of
+:data:`FLAG_CONFLICTS` is read with each server flag the variable needs off removed, each named in
+:attr:`KeptChange.disabled`, so the gate's server does not inherit it from the head's launch and fail.
 """
 
 from __future__ import annotations
@@ -69,6 +73,16 @@ TABLES_DIR = "tables"
 #: The patch from the state the head's imported patches make, in order, to the state a keep's cumulative patch makes,
 #: both over the root; empty when they are the same.
 SourceIncrement = Callable[[tuple[PatchRef, ...], str], Awaitable[str]]
+#: The server flags a framework variable needs off, by the variable: a keep that sets it (to anything but off) runs
+#: without them. Framework knowledge a pack's author or a weaker model will not carry; each entry says where it was
+#: found.
+FLAG_CONFLICTS: Mapping[str, tuple[str, ...]] = {
+    # SGLang: the Qwen3.8 monokernel replaces ReplaySSM's linear-attention spec path, whose server asserts with both
+    # on (found in a Qwen3.8-Flash-Next AgentX campaign: 18 failed gate attempts)
+    "SGLANG_ENABLE_QWEN4_MONOKERNEL": ("--enable-linear-replayssm-spec",),
+}
+#: The values that leave a variable off.
+OFF_VALUES = frozenset({"", "0", "false", "False", "FALSE", "off", "no"})
 
 
 def _image_tables() -> tuple[PurePosixPath, ...]:
@@ -100,7 +114,8 @@ class KeptChange:
     table files of its own a variable of ``envs`` lists, one table by the variable's value; ``uncopied``, the variables
     whose table the agent did not copy into its snapshot, which then load what the variable names; ``dropped``, the
     variables the agent runs with that the measurement sets itself (workload, evaluation, request), left out of
-    ``envs``."""
+    ``envs``; ``disabled``, each server flag removed from ``server_args`` because a variable of ``envs`` needs it off
+    (:data:`FLAG_CONFLICTS`), with that variable's setting."""
 
     seq: int
     source_patch: str
@@ -110,6 +125,27 @@ class KeptChange:
     tables: Mapping[str, str] = field(default_factory=dict)
     uncopied: tuple[str, ...] = ()
     dropped: Mapping[str, str] = field(default_factory=dict)
+    disabled: Mapping[str, str] = field(default_factory=dict)
+
+
+def without_conflicts(kept: KeptChange) -> KeptChange:
+    """``kept`` with each server flag a variable it sets needs off (:data:`FLAG_CONFLICTS`) removed from its server
+    arguments, flag and value, and named in ``disabled`` with the variable's setting; ``kept`` itself when it sets
+    none against a flag it has."""
+
+    groups = _flag_groups(kept.server_args)
+    named = {name for name, _ in groups}
+    disabled = {
+        flag: f"{variable}={kept.envs[variable]}"
+        for variable, flags in FLAG_CONFLICTS.items()
+        if kept.envs.get(variable, "") not in OFF_VALUES
+        for flag in flags
+        if flag in named
+    }
+    if not disabled:
+        return kept
+    args = " ".join(word for name, words in groups if name not in disabled for word in words)
+    return replace(kept, server_args=args, disabled={**kept.disabled, **disabled})
 
 
 def read_kept_change(
@@ -132,7 +168,7 @@ def read_kept_change(
     if source.adds:
         args, named = _over(start, ("", {}), args, named)
     named, dropped = _without_measurement(named)
-    return KeptChange(seq, source_patch, args, named, summary, dropped=dropped)
+    return without_conflicts(KeptChange(seq, source_patch, args, named, summary, dropped=dropped))
 
 
 def _assignments(words: str, source: ConfigSource) -> dict[str, str]:
@@ -254,7 +290,8 @@ def read_snapshot(outbox: Path, number: int, root: str, applied: Applied, start:
     base = start.launch
     args, named = _over(base, _component_launch(start.config) or (base.server_args, base.envs), launch[0], named)
     tables, uncopied = _snapshot_tables(directory / TABLES_DIR, chain[-1].tables, named, start.copies)
-    return KeptChange(number, applied(patches), args, named, chain[-1].summary, tables, uncopied, dropped)
+    kept = KeptChange(number, applied(patches), args, named, chain[-1].summary, tables, uncopied, dropped)
+    return without_conflicts(kept)
 
 
 def _component_launch(config: object) -> _Launch | None:
@@ -569,6 +606,7 @@ __all__ = [
     "Applied",
     "CHANGE_FILE",
     "ComponentStart",
+    "FLAG_CONFLICTS",
     "KEEP_FILE",
     "LATEST_FILE",
     "LAUNCH_FILE",
@@ -587,4 +625,5 @@ __all__ = [
     "read_kept_change",
     "read_snapshot",
     "with_tables",
+    "without_conflicts",
 ]

@@ -1372,6 +1372,24 @@ async def test_a_snapshot_imports_only_the_launch_changes_made_since_the_start_a
     assert len(dropped) == 1 and "keep 1" in dropped[0]
 
 
+async def test_a_keep_setting_a_variable_that_needs_a_set_flag_off_is_imported_without_the_flag_and_warns(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # SGLang's Qwen3.8 monokernel asserts with ReplaySSM's spec path on, which the start's launch sets
+    monokernel, replayssm = "SGLANG_ENABLE_QWEN4_MONOKERNEL", "--enable-linear-replayssm-spec"
+    flags = f"--max-num-seqs 128 {replayssm}"
+    agent = Component(keeps=(256,), gap=0.1, flags=flags, envs={monokernel: "1"})
+    rig = await _rig(tmp_path, agent, start=replace(ROOT, launch=LaunchConfig(flags)), start_seconds=0.2)
+
+    with caplog.at_level("WARNING"):
+        request = await _imported(rig)
+
+    assert replayssm in request.delta.config.remove_args and request.delta.config.envs == {monokernel: "1"}
+    warned = [note for note in await rig.notices() if replayssm in note]
+    assert len(warned) == 1 and "which was set" in warned[0] and f"{monokernel}=1 needs it off" in warned[0]
+    assert any(replayssm in record.getMessage() for record in caplog.records if record.levelname == "WARNING")
+
+
 async def test_a_snapshot_whose_launch_is_the_one_it_started_with_imports_no_launch_change(tmp_path: Path) -> None:
     started = {"server_flags": ARBOR_FLAGS, "server_env": ARBOR_ENV}
     agent = Component(keeps=(256,), gap=0.1, flags=ARBOR_FLAGS, envs=ARBOR_ENV, started=started)

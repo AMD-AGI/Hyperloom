@@ -28,6 +28,7 @@ from hyperloom_multibranch.specialist.agent_import import (
     read_kept_change,
     read_snapshot,
     with_tables,
+    without_conflicts,
 )
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.specialist import agent_import
@@ -501,3 +502,47 @@ async def test_a_keep_carries_an_earlier_unmerged_keep_that_clashes_with_integra
     assert merge.carried == (first, second) and merge.replaced_patches == ()
     merged = apply(await source.repo.read_recipe(integration), merge.delta)
     assert source.config(merged) == _expected(line_2="2000", line_10="1000", line_25="250")
+
+
+#: A framework variable and the server flag it needs off (agent_import.FLAG_CONFLICTS).
+MONOKERNEL, REPLAYSSM = "SGLANG_ENABLE_QWEN4_MONOKERNEL", "--enable-linear-replayssm-spec"
+SPEC_LAUNCH = LaunchConfig(f"--tp 1 {REPLAYSSM} --mem-fraction-static 0.8", {})
+
+
+def test_a_keep_that_sets_a_variable_needing_a_flag_off_is_read_without_it_and_names_it() -> None:
+    source = ConfigSource("agent/config.json", "server_flags", "server_env")
+    state = {"server_flags": SPEC_LAUNCH.server_args, "server_env": {MONOKERNEL: "1"}}
+
+    kept = read_kept_change(1, "", state, source, "", SPEC_LAUNCH)
+    off = read_kept_change(2, "", {**state, "server_env": {MONOKERNEL: "0"}}, source, "", SPEC_LAUNCH)
+    valued = without_conflicts(KeptChange(3, "", f"--tp 1 {REPLAYSSM}=true", {MONOKERNEL: "1"}))
+
+    assert (kept.server_args, kept.disabled) == ("--tp 1 --mem-fraction-static 0.8", {REPLAYSSM: f"{MONOKERNEL}=1"})
+    assert (off.server_args, off.disabled) == (SPEC_LAUNCH.server_args, {})
+    assert (valued.server_args, valued.disabled) == ("--tp 1", {REPLAYSSM: f"{MONOKERNEL}=1"})
+
+
+def test_an_arbor_snapshot_that_sets_a_variable_needing_a_flag_off_is_read_without_the_flag(tmp_path: Path) -> None:
+    directory = tmp_path / "keeps" / "0001"
+    directory.mkdir(parents=True)
+    keep = {"number": 1, "previous": None, "root": ROOT_COMMIT, "parent": ROOT_COMMIT, "commit": "b" * 40,
+            "change": "the monokernel", "tables": {}}  # fmt: skip
+    (directory / "keep.json").write_text(json.dumps(keep), encoding="utf-8")
+    (directory / "change.patch").write_text("", encoding="utf-8")
+    config = {"server_flags": SPEC_LAUNCH.server_args, "server_env": {MONOKERNEL: "1"}}
+    (directory / "config.json").write_text(json.dumps(config), encoding="utf-8")
+
+    kept = read_snapshot(tmp_path / "keeps", 1, ROOT_COMMIT, "".join, ComponentStart(SPEC_LAUNCH, {}, ()))
+
+    assert (kept.server_args, kept.envs) == ("--tp 1 --mem-fraction-static 0.8", {MONOKERNEL: "1"})
+    assert kept.disabled == {REPLAYSSM: f"{MONOKERNEL}=1"}
+
+
+async def test_a_keep_imported_without_a_conflicting_flag_takes_it_off_the_head_s_launch() -> None:
+    root = Recipe(ROOT.base_image_digest, launch=SPEC_LAUNCH, components=ROOT.components)
+    kept = without_conflicts(_kept(1, "", args=SPEC_LAUNCH.server_args, envs={MONOKERNEL: "1"}))
+
+    delta = await import_delta(kept, root=root, head=root, component="sglang", stores=_stores(Store()))
+
+    assert delta is not None and REPLAYSSM in delta.config.remove_args
+    assert apply(root, delta).launch == LaunchConfig("--tp 1 --mem-fraction-static 0.8", {MONOKERNEL: "1"})
