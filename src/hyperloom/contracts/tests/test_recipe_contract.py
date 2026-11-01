@@ -199,6 +199,30 @@ def test_delta_between_makes_one_recipe_into_the_other() -> None:
     assert delta_between(second, second) == RecipeDelta()
 
 
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        pytest.param((GEMM,), (replace(GEMM, target="bf16 8192x14336"),), id="a ref moves to another slot"),
+        pytest.param(
+            (replace(GEMM, ref="kernel/gemm/a.csv"), replace(GEMM, target="bf16 8192x14336")),
+            (GEMM,),
+            id="a ref takes the slot another ref leaves",
+        ),
+        pytest.param((GEMM,), (replace(GEMM, sha256="f" * 64),), id="a ref keeps its slot with new content"),
+    ],
+)
+def test_delta_between_moves_a_kernel_ref_the_two_recipes_load_at_different_slots(
+    before: tuple[KernelArtifact, ...], after: tuple[KernelArtifact, ...]
+) -> None:
+    first = _recipe(kernels=before)
+    second = _recipe(kernels=after)
+
+    made = apply(first, delta_between(first, second))
+
+    assert made.kernels == second.kernels
+    assert made.digest() == second.digest()
+
+
 def test_delta_between_keeps_the_shared_head_of_a_patch_stack_and_drops_the_patches_the_other_lacks() -> None:
     reworked = replace(MOE_PATCH, sha256="8" * 64)
     stacked = _recipe(
