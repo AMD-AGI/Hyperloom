@@ -10,6 +10,7 @@ import pytest
 
 from hyperloom.contracts.recipe import (
     RECIPE_SCHEMA_VERSION,
+    REMOVED,
     ArgsMode,
     ComponentChange,
     ComponentPatches,
@@ -399,3 +400,102 @@ def test_an_unexpressed_entry_of_no_known_kind_or_out_of_order_is_refused(
 ) -> None:
     with pytest.raises(RecipeError, match=message):
         _recipe(unexpressed=entries)
+
+
+#: An option of the launch the framework resolves (a Magpie AgentX recipe's), which a recipe's own arguments lack.
+RESOLVED_OPTION = "--enable-linear-replayssm-spec"
+
+
+def test_a_removal_of_an_option_the_recipe_s_own_arguments_lack_is_remembered_until_one_sets_it_again() -> None:
+    root = _recipe(launch=LaunchConfig("--max-num-seqs 128"))
+
+    off = apply(root, RecipeDelta(config=ConfigDelta(remove_args=(RESOLVED_OPTION,))))
+    own = apply(root, RecipeDelta(config=ConfigDelta(remove_args=("--max-num-seqs",))))
+    later = apply(off, RecipeDelta(config=ConfigDelta(server_args="--max-num-seqs 64")))
+    back = apply(off, RecipeDelta(config=ConfigDelta(server_args=RESOLVED_OPTION)))
+
+    assert (off.launch.server_args, off.launch.remove_args) == ("--max-num-seqs 128", (RESOLVED_OPTION,))
+    assert (own.launch.server_args, own.launch.remove_args) == ("", ())
+    assert later.launch.remove_args == (RESOLVED_OPTION,)
+    assert back.launch.remove_args == ()
+
+
+def test_a_launch_with_no_removals_keeps_its_document_and_one_with_them_reads_back() -> None:
+    plain = _recipe()
+    removing = _recipe(launch=replace(plain.launch, remove_args=("--a", "--b")))
+
+    assert "remove_args" not in plain.launch.to_document()
+    assert LaunchConfig.from_document(removing.launch.to_document()) == removing.launch
+    assert removing.digest() != plain.digest()
+
+
+@pytest.mark.parametrize(
+    ("build", "message"),
+    [
+        (lambda: LaunchConfig(remove_args=("--a=1",)), "bare option names"),
+        (lambda: LaunchConfig(remove_args=("--a 1",)), "bare option names"),
+        (lambda: LaunchConfig(remove_args=("a",)), "bare option names"),
+        (lambda: LaunchConfig(remove_args=("--b", "--a")), "sorted and unique"),
+        (lambda: LaunchConfig(remove_args=("--a", "--a")), "sorted and unique"),
+        (lambda: LaunchConfig("--a 1 --b", remove_args=("--b",)), "both sets and removes --b"),
+        (lambda: LaunchConfig.from_document({"extra_server_args": "", "remove": ["--a"]}), "unknown key 'remove'"),
+        (lambda: ConfigDelta(launch_remove_args=("--b", "--a")), "sorted and unique"),
+    ],
+)
+def test_a_launch_s_removals_have_one_canonical_form(build: Callable[[], object], message: str) -> None:
+    with pytest.raises(RecipeError, match=message):
+        build()
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        pytest.param(LaunchConfig("--a 1"), LaunchConfig("--a 1", remove_args=("--r",)), id="a new removal"),
+        pytest.param(LaunchConfig("--a 1", remove_args=("--r",)), LaunchConfig("--a 1"), id="a removal undone"),
+        pytest.param(LaunchConfig(remove_args=("--r",)), LaunchConfig("--r 2"), id="a removed option set again"),
+        pytest.param(LaunchConfig("--r 2"), LaunchConfig(remove_args=("--r",)), id="an own option removed resolved"),
+        pytest.param(
+            LaunchConfig("--a 1", remove_args=("--q", "--r")),
+            LaunchConfig("--b", remove_args=("--r", "--s")),
+            id="removals both added and undone",
+        ),
+    ],
+)
+def test_delta_between_makes_one_launch_s_removals_into_the_other_s(before: LaunchConfig, after: LaunchConfig) -> None:
+    first = _recipe(launch=before)
+    second = _recipe(launch=after)
+
+    delta = delta_between(first, second)
+    made = apply(first, delta)
+
+    assert made.launch == second.launch
+    assert made.digest() == second.digest()
+    assert RecipeDelta.from_document(delta.to_document()) == delta
+
+
+def test_the_delta_between_two_recipes_carries_a_new_removal_and_the_diff_names_it() -> None:
+    first = _recipe(launch=LaunchConfig("--max-num-seqs 128"))
+    second = apply(first, RecipeDelta(config=ConfigDelta(remove_args=(RESOLVED_OPTION,))))
+
+    delta = delta_between(first, second)
+
+    assert (delta.config.remove_args, delta.config.launch_remove_args) == ((RESOLVED_OPTION,), None)
+    assert "launch_remove_args" not in delta.config.to_document()
+    assert apply(first, delta).launch == second.launch
+    assert [(change.name, change.before, change.after) for change in diff(first, second).args] == [
+        (RESOLVED_OPTION, None, REMOVED)
+    ]
+    assert not diff(first, second).is_empty
+
+
+def test_a_delta_that_stops_removing_an_option_gives_the_launch_s_removals_whole() -> None:
+    first = _recipe(launch=LaunchConfig("--max-num-seqs 128", remove_args=(RESOLVED_OPTION,)))
+    second = _recipe(launch=LaunchConfig("--max-num-seqs 128"))
+
+    delta = delta_between(first, second)
+
+    assert delta.config.launch_remove_args == ()
+    assert delta.config.to_document()["launch_remove_args"] == []
+    assert [(change.name, change.before, change.after) for change in diff(first, second).args] == [
+        (RESOLVED_OPTION, REMOVED, None)
+    ]

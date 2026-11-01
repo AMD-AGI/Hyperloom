@@ -34,6 +34,7 @@ from pathlib import PurePosixPath
 from hyperloom.inference_optimizer.grid_server_args import (
     compose_server_args,
     dedupe_extra_server_args,
+    removal_option_names,
     tokenize_server_args_preserving_json,
     validate_server_args_shell_safe,
 )
@@ -51,8 +52,12 @@ _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 #: Framework arguments travel in the server arguments; the launcher derives these variables from them.
 _FRAMEWORK_ARGS_ENV = re.compile(r"EXTRA_\w*_ARGS")
 _FLAG = "--"
+_OPTION = re.compile(r"--[A-Za-z0-9][\w.-]*")
 _REMOVE_ARGS = "remove_args"
+_LAUNCH_REMOVE_ARGS = "launch_remove_args"
 _UNSET_ENVS = "unset_envs"
+#: How a recipe diff names an option a launch removes from the resolved launch.
+REMOVED = "<removed>"
 _COMPONENTS = "components"
 #: What a recipe may name as left out of it; an entry is ``<kind>`` or ``<kind>:<detail>``.
 UNEXPRESSED_KINDS = frozenset(
@@ -143,6 +148,17 @@ def _strings(value: object, what: str) -> tuple[str, ...]:
     return tuple(value)
 
 
+def _option_names(names: Sequence[str], what: str) -> tuple[str, ...]:
+    """``names`` as bare long options, sorted and each once, so one launch has one digest."""
+
+    for name in names:
+        if not isinstance(name, str) or not _OPTION.fullmatch(name):
+            raise RecipeError(f"{what} must be bare option names (--name), got {name!r}")
+    if list(names) != sorted(set(names)):
+        raise RecipeError(f"{what} must be sorted and unique, got {list(names)!r}")
+    return tuple(names)
+
+
 def _items(value: object, what: str) -> tuple[object, ...]:
     if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
         raise RecipeError(f"{what} must be a list, got {value!r}")
@@ -208,22 +224,40 @@ def _digest(document: Mapping[str, object]) -> str:
 
 @dataclass(frozen=True)
 class LaunchConfig:
-    """Server arguments in the shell form the launcher takes, and the extra environment variables."""
+    """Server arguments in the shell form the launcher takes, the extra environment variables, and ``remove_args``:
+    the long options, by name, removed from the launch the framework resolves before these arguments are added (a
+    Magpie AgentX recipe's, from InferenceX), so a change that turns off an option of that launch stays off. Its
+    document carries ``remove_args`` only when there are any, so a launch without them keeps its digest."""
 
     server_args: str = ""
     envs: Mapping[str, str] = field(default_factory=dict)
+    remove_args: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _server_args(self.server_args)
         _env_names(_string_map(self.envs, "environment variables"))
+        object.__setattr__(self, "remove_args", _option_names(self.remove_args, "a launch's remove_args"))
+        both = sorted(set(self.remove_args) & set(_flag_values(self.server_args)))
+        if both:
+            raise RecipeError(f"a launch both sets and removes {', '.join(both)}")
 
     def to_document(self) -> dict[str, object]:
-        return {"extra_server_args": self.server_args, "extra_envs": dict(sorted(self.envs.items()))}
+        document: dict[str, object] = {
+            "extra_server_args": self.server_args,
+            "extra_envs": dict(sorted(self.envs.items())),
+        }
+        if self.remove_args:
+            document[_REMOVE_ARGS] = list(self.remove_args)
+        return document
 
     @classmethod
     def from_document(cls, document: object) -> LaunchConfig:
-        fields = _mapping(document, "a launch config")
-        return cls(server_args=fields.get("extra_server_args", ""), envs=fields.get("extra_envs", {}))
+        fields = _known(document, ("extra_server_args", "extra_envs", _REMOVE_ARGS), "a launch config")
+        return cls(
+            server_args=fields.get("extra_server_args", ""),
+            envs=fields.get("extra_envs", {}),
+            remove_args=_strings(fields.get(_REMOVE_ARGS, ()), _REMOVE_ARGS),
+        )
 
 
 @dataclass(frozen=True)
@@ -409,13 +443,18 @@ def with_unexpressed(recipe: Recipe, entries: Iterable[str]) -> Recipe:
 
 @dataclass(frozen=True)
 class ConfigDelta:
-    """A change to the launch config; its document is the single-lineage ``recipe_delta``."""
+    """A change to the launch config; its document is the single-lineage ``recipe_delta``.
+
+    ``launch_remove_args``, when not ``None``, is the launch's ``remove_args`` after the change, as a whole: how a delta
+    stops removing an option of the resolved launch, which a removal cannot say. Its document carries the field only
+    then, so every other delta keeps its fingerprint."""
 
     server_args: str = ""
     args_mode: ArgsMode = ArgsMode.APPEND
     remove_args: tuple[str, ...] = ()
     envs: Mapping[str, str] = field(default_factory=dict)
     unset_envs: tuple[str, ...] = ()
+    launch_remove_args: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         _server_args(self.server_args)
@@ -426,30 +465,38 @@ class ConfigDelta:
                 raise RecipeError(f"a removed argument must name a flag, got {spec!r}")
         _env_names([*_string_map(self.envs, "environment variables"), *self.unset_envs])
         _unique([*self.envs, *self.unset_envs], "environment variables set and unset at once")
+        if self.launch_remove_args is not None:
+            names = _option_names(self.launch_remove_args, _LAUNCH_REMOVE_ARGS)
+            object.__setattr__(self, _LAUNCH_REMOVE_ARGS, names)
 
     def to_document(self) -> dict[str, object]:
-        return {
+        document: dict[str, object] = {
             "extra_server_args": self.server_args,
             "args_mode": self.args_mode.value,
             _REMOVE_ARGS: list(self.remove_args),
             "extra_envs": dict(sorted(self.envs.items())),
             _UNSET_ENVS: list(self.unset_envs),
         }
+        if self.launch_remove_args is not None:
+            document[_LAUNCH_REMOVE_ARGS] = list(self.launch_remove_args)
+        return document
 
     @classmethod
     def from_document(cls, document: object) -> ConfigDelta:
-        keys = ("extra_server_args", "args_mode", _REMOVE_ARGS, "extra_envs", _UNSET_ENVS)
+        keys = ("extra_server_args", "args_mode", _REMOVE_ARGS, "extra_envs", _UNSET_ENVS, _LAUNCH_REMOVE_ARGS)
         fields = _known(document, keys, "a config delta")
         try:
             mode = ArgsMode(fields.get("args_mode", ArgsMode.APPEND.value))
         except ValueError as exc:
             raise RecipeError(f"unknown args_mode {fields.get('args_mode')!r}") from exc
+        launch_removals = fields.get(_LAUNCH_REMOVE_ARGS)
         return cls(
             server_args=fields.get("extra_server_args", ""),
             args_mode=mode,
             remove_args=_strings(fields.get(_REMOVE_ARGS, ()), _REMOVE_ARGS),
             envs=fields.get("extra_envs", {}),
             unset_envs=_strings(fields.get(_UNSET_ENVS, ()), _UNSET_ENVS),
+            launch_remove_args=None if launch_removals is None else _strings(launch_removals, _LAUNCH_REMOVE_ARGS),
         )
 
 
@@ -552,15 +599,27 @@ def apply(recipe: Recipe, delta: RecipeDelta) -> Recipe:
 
 
 def _apply_config(launch: LaunchConfig, delta: ConfigDelta) -> LaunchConfig:
-    args = compose_server_args(
-        base_extra_args=launch.server_args,
-        variant_extra_args=delta.server_args,
-        remove_args=list(delta.remove_args),
-        args_mode=delta.args_mode.value,
+    """``launch`` changed by ``delta``. A removal of an option the launch's own arguments lack is one of the resolved
+    launch's, kept in ``remove_args``, unless the delta gives ``launch_remove_args`` whole; an option the new arguments
+    set again leaves it."""
+
+    args = dedupe_extra_server_args(
+        compose_server_args(
+            base_extra_args=launch.server_args,
+            variant_extra_args=delta.server_args,
+            remove_args=list(delta.remove_args),
+            args_mode=delta.args_mode.value,
+        )
     )
     envs = {name: value for name, value in launch.envs.items() if name not in delta.unset_envs}
     envs.update(delta.envs)
-    return LaunchConfig(server_args=dedupe_extra_server_args(args), envs=envs)
+    if delta.launch_remove_args is not None:
+        removed = set(delta.launch_remove_args)
+    else:
+        own = _flag_values(launch.server_args)
+        resolved = {name for name in removal_option_names(delta.remove_args) if name not in own}
+        removed = set(launch.remove_args) | resolved
+    return LaunchConfig(server_args=args, envs=envs, remove_args=tuple(sorted(removed - set(_flag_values(args)))))
 
 
 def _apply_components(
@@ -629,14 +688,22 @@ def delta_between(first: Recipe, second: Recipe) -> RecipeDelta:
 
 
 def _config_delta(first: LaunchConfig, second: LaunchConfig) -> ConfigDelta:
+    """The change from ``first`` to ``second``: each option ``second`` newly removes from the resolved launch is
+    removed again, so :func:`apply` remembers it. Where that does not make ``second``'s removals -- one it stops
+    removing without setting it, or one ``first``'s own arguments set -- the delta gives them whole."""
+
     changed_args = first.server_args != second.server_args
     dropped = set(_flag_values(first.server_args)) - set(_flag_values(second.server_args)) - {""}
-    return ConfigDelta(
+    removals = (dropped if changed_args else set()) | (set(second.remove_args) - set(first.remove_args))
+    delta = ConfigDelta(
         server_args=second.server_args if changed_args else "",
-        remove_args=tuple(sorted(dropped)) if changed_args else (),
+        remove_args=tuple(sorted(removals)),
         envs={name: value for name, value in second.envs.items() if first.envs.get(name) != value},
         unset_envs=tuple(sorted(set(first.envs) - set(second.envs))),
     )
+    if _apply_config(first, delta).remove_args == second.remove_args:
+        return delta
+    return replace(delta, launch_remove_args=second.remove_args)
 
 
 def _component_delta(current: ComponentPatches | None, wanted: ComponentPatches) -> ComponentChange | None:
@@ -737,7 +804,7 @@ def diff(first: Recipe, second: Recipe) -> RecipeDiff:
     first_kernels = {artifact.sha256 for artifact in first.kernels}
     second_kernels = {artifact.sha256 for artifact in second.kernels}
     return RecipeDiff(
-        args=_value_changes(_flag_values(first.launch.server_args), _flag_values(second.launch.server_args)),
+        args=_value_changes(_launch_values(first.launch), _launch_values(second.launch)),
         envs=_value_changes(first.launch.envs, second.launch.envs),
         refs=_ref_changes(first, second),
         shared_patches=frozenset(first_patches & second_patches),
@@ -754,6 +821,12 @@ def diff(first: Recipe, second: Recipe) -> RecipeDiff:
 
 def _patch_hashes(recipe: Recipe) -> set[str]:
     return {patch.sha256 for component in recipe.components for patch in component.patches}
+
+
+def _launch_values(launch: LaunchConfig) -> dict[str, str]:
+    """Each option the launch sets with its value, and each it removes from the resolved launch as removed."""
+
+    return {**dict.fromkeys(launch.remove_args, REMOVED), **_flag_values(launch.server_args)}
 
 
 def _flag_values(server_args: str) -> dict[str, str]:
@@ -794,6 +867,7 @@ __all__ = [
     "DIGEST_PREFIX",
     "KERNEL_ROOT",
     "PATCH_ROOT",
+    "REMOVED",
     "RECIPE_SCHEMA_VERSION",
     "UNEXPRESSED_KINDS",
     "ArgsMode",
