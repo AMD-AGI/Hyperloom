@@ -16,6 +16,7 @@ from hyperloom_multibranch.scheduling.review import (
     REVIEW_PAGE,
     decide,
     load,
+    Reviewed,
     request,
     show,
     wait,
@@ -39,7 +40,7 @@ def test_a_request_writes_the_page_and_a_pending_state(tmp_path: Path) -> None:
     map_file, dossier = _map_and_dossier(tmp_path)
     directory, session = tmp_path / "session" / "MB-review", tmp_path / "session"
 
-    state = request(directory, session, map_file, dossier, "dossier pass", NOW)
+    state = request(directory, session, Reviewed(map_file, dossier, "dossier pass"), NOW)
 
     assert state == load(directory)
     assert (state["status"], state["map"], state["dossier"], state["made_by"]) == (
@@ -61,7 +62,7 @@ def test_a_request_writes_the_page_and_a_pending_state(tmp_path: Path) -> None:
 def test_an_approval_names_the_files_the_review_changed_and_a_second_decision_is_refused(tmp_path: Path) -> None:
     map_file, dossier = _map_and_dossier(tmp_path)
     directory = tmp_path / "MB-review"
-    request(directory, tmp_path, map_file, dossier, "dossier pass", NOW)
+    request(directory, tmp_path, Reviewed(map_file, dossier, "dossier pass"), NOW)
     (dossier / "07-profile.md").write_text("profile, corrected\n")
 
     assert decide(directory, True, "alice", "looks right", NOW + 60) == []
@@ -83,7 +84,7 @@ def test_a_decision_with_no_review_pending_is_refused(tmp_path: Path) -> None:
 
 
 def test_a_review_with_no_map_says_each_arbor_maps_its_own(tmp_path: Path) -> None:
-    request(tmp_path / "MB-review", tmp_path, None, None, "generated from the root's shares", NOW)
+    request(tmp_path / "MB-review", tmp_path, Reviewed(None, None, "generated from the root's shares"), NOW)
 
     page = (tmp_path / "MB-review" / REVIEW_PAGE).read_text()
     assert "none could be made: each Arbor maps its own" in page and "**Dossier:** none" in page
@@ -92,7 +93,7 @@ def test_a_review_with_no_map_says_each_arbor_maps_its_own(tmp_path: Path) -> No
 async def test_the_wait_ends_once_a_person_decides(tmp_path: Path) -> None:
     map_file, dossier = _map_and_dossier(tmp_path)
     directory = tmp_path / "MB-review"
-    request(directory, tmp_path, map_file, dossier, "dossier pass", NOW)
+    request(directory, tmp_path, Reviewed(map_file, dossier, "dossier pass"), NOW)
     slept: list[float] = []
 
     async def sleep(seconds: float) -> None:

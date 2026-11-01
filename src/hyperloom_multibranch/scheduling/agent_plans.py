@@ -106,8 +106,10 @@ async def agent_plans(
     if not arbors:
         logger.error("the agents' directions are not split: no agent named is Arbor")
         return none
+    arbor = next(iter(arbors.values()))
     try:
-        shares = await _split(next(iter(arbors.values())), map_file, root_shares, shares_source, len(arbors), work_dir)
+        given = Path(map_file) if map_file else await generated_map(arbor, root_shares, shares_source, work_dir)
+        shares = await _split(arbor, given, len(arbors), work_dir)
     except SplitFailed as exc:
         logger.error("the agents' directions are not split: %s", exc)
         return none
@@ -118,17 +120,12 @@ async def agent_plans(
     return tuple(plans)
 
 
-async def _split(
-    arbor: Path, map_file: str, root_shares: OpShares | None, source: str, shares: int, work_dir: Path
-) -> tuple[Path, ...]:
-    """``map_file``, or a map ``arbor`` generates from ``root_shares`` (from ``source``) without one, split into
-    ``shares`` plans."""
+async def _split(arbor: Path, map_file: Path, shares: int, work_dir: Path) -> tuple[Path, ...]:
+    """``map_file`` split by the Arbor checkout ``arbor`` into ``shares`` plans under ``work_dir``."""
 
-    if not map_file:
-        map_file = str(await generated_map(arbor, root_shares, source, work_dir))
     out = work_dir / SHARES_DIR
     out.mkdir(parents=True, exist_ok=True)
-    return await split_directions(arbor, Path(map_file), shares, out)
+    return await split_directions(arbor, map_file, shares, out)
 
 
 async def generated_map(arbor: Path, root_shares: OpShares | None, source: str, work_dir: Path) -> Path:

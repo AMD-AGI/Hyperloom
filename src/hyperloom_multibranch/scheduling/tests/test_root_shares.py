@@ -8,6 +8,7 @@ from urllib.parse import quote
 from hyperloom_multibranch.contracts.blackboard.records import OpShares
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.root_shares import (
+    ShareSources,
     KERNEL_SHARES_SOURCE,
     RESULT_FILE,
     TOOL_RESULTS_DIR,
@@ -75,7 +76,7 @@ def _degraded(toolbox_dir: Path, table: str | None = TABLE) -> None:
 async def test_the_root_s_op_shares_are_read_once_its_profile_job_ended(tmp_path: Path) -> None:
     toolbox, clock = Toolbox(JobStatus.RUNNING, JobStatus.RUNNING, JobStatus.SUCCEEDED), _clock()
 
-    read = await root_shares(Records(OPS), toolbox, clock, tmp_path, ROOT, JOB)  # type: ignore[arg-type]
+    read = await root_shares(ShareSources(Records(OPS), toolbox, clock, tmp_path), ROOT, JOB)  # type: ignore[arg-type]
 
     assert read.shares is not None and (read.shares.shares, read.shares.source) == (OPS, ROOT_PROFILE_SOURCE)
     assert (read.detail["job"], read.detail["taken"], toolbox.asked) == ("succeeded", "op shares", 3)
@@ -85,7 +86,7 @@ async def test_the_root_s_op_shares_are_read_once_its_profile_job_ended(tmp_path
 async def test_a_degraded_profile_s_kernel_shares_stand_in_for_arbor_alone(tmp_path: Path) -> None:
     _degraded(tmp_path)
 
-    read = await root_shares(Records(None), Toolbox(JobStatus.SUCCEEDED), _clock(), tmp_path, ROOT, JOB)  # type: ignore[arg-type]
+    read = await root_shares(ShareSources(Records(None), Toolbox(JobStatus.SUCCEEDED), _clock(), tmp_path), ROOT, JOB)  # type: ignore[arg-type]
 
     assert read.shares is not None and read.shares.source == KERNEL_SHARES_SOURCE
     assert read.shares.shares == OpShares(
@@ -102,14 +103,14 @@ async def test_a_degraded_profile_s_kernel_shares_stand_in_for_arbor_alone(tmp_p
 
 
 async def test_without_a_job_or_a_table_or_past_the_wait_there_is_nothing_to_map_from(tmp_path: Path) -> None:
-    none = await root_shares(Records(None), Toolbox(), _clock(), tmp_path, ROOT, "")  # type: ignore[arg-type]
+    none = await root_shares(ShareSources(Records(None), Toolbox(), _clock(), tmp_path), ROOT, "")  # type: ignore[arg-type]
     assert none.shares is None and none.detail["job"] == "no root profile was started"
 
-    unknown = await root_shares(Records(None), Toolbox(), _clock(), tmp_path, ROOT, JOB)  # type: ignore[arg-type]
+    unknown = await root_shares(ShareSources(Records(None), Toolbox(), _clock(), tmp_path), ROOT, JOB)  # type: ignore[arg-type]
     assert unknown.detail["job"] == "the toolbox knows no such job"
 
     running = Toolbox(JobStatus.RUNNING)
-    late = await root_shares(Records(None), running, _clock(), tmp_path, ROOT, JOB, wait_seconds=30)  # type: ignore[arg-type]
+    late = await root_shares(ShareSources(Records(None), running, _clock(), tmp_path), ROOT, JOB, wait_seconds=30)  # type: ignore[arg-type]
     assert (late.shares, late.detail["job"]) == (None, "still running after 30 s")
     assert late.detail["taken"] == "none: no op shares and no kernel table"
 

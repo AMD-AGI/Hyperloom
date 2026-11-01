@@ -59,18 +59,24 @@ class SharesRead:
     detail: dict[str, object]
 
 
+@dataclass(frozen=True)
+class ShareSources:
+    """Where :func:`root_shares` reads: the blackboard's op shares, the toolbox's jobs and the directory they write
+    their results in, on the session's clock."""
+
+    blackboard: RecordSearch
+    toolbox: RealToolbox
+    clock: Clock
+    toolbox_dir: Path
+
+
 async def root_shares(
-    blackboard: RecordSearch,
-    toolbox: RealToolbox,
-    clock: Clock,
-    toolbox_dir: Path,
-    root_commit: str,
-    job: str,
-    wait_seconds: float = WAIT_SECONDS,
+    sources: ShareSources, root_commit: str, job: str, wait_seconds: float = WAIT_SECONDS
 ) -> SharesRead:
     """The shares of ``root_commit`` once its profile's ``job`` ended or ``wait_seconds`` passed: its op shares, else
-    the job's kernel shares from ``toolbox_dir``."""
+    the job's kernel shares from the toolbox's directory."""
 
+    blackboard, toolbox, clock, toolbox_dir = sources.blackboard, sources.toolbox, sources.clock, sources.toolbox_dir
     waited = await _wait(toolbox, clock, job, wait_seconds)
     detail: dict[str, object] = {"job_id": job, "job": waited}
     own = await blackboard.op_shares(root_commit)
@@ -132,4 +138,12 @@ def kernel_shares(result: Path, limit: int = MAX_OP_SHARES) -> dict[str, float]:
     return dict(sorted(shares.items(), key=lambda item: (-item[1], item[0]))[:limit])
 
 
-__all__ = ["KERNEL_SHARES_SOURCE", "WAIT_SECONDS", "RootShares", "SharesRead", "kernel_shares", "root_shares"]
+__all__ = [
+    "KERNEL_SHARES_SOURCE",
+    "WAIT_SECONDS",
+    "RootShares",
+    "ShareSources",
+    "SharesRead",
+    "kernel_shares",
+    "root_shares",
+]

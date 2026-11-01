@@ -424,7 +424,7 @@ def test_a_person_shows_and_approves_a_session_s_review_and_a_second_decision_is
 ) -> None:
     session, map_file = tmp_path / "MB-session", tmp_path / "directions.json"
     map_file.write_text(json.dumps({"directions": [{"id": "m-attn", "title": "attention"}]}))
-    review.request(session / REVIEW_DIR, session, map_file, None, "dossier pass", 1793500000.0)
+    review.request(session / REVIEW_DIR, session, review.Reviewed(map_file, None, "dossier pass"), 1793500000.0)
 
     assert cli.main(["review", "--session", str(session), "show"]) == 0
     shown = capsys.readouterr().out

@@ -97,7 +97,7 @@ from hyperloom_multibranch.scheduling.manifest import (
     code_version,
     read_manifest,
 )
-from hyperloom_multibranch.scheduling.peers import PeerFactory, PeerSetup
+from hyperloom_multibranch.scheduling.peers import PeerFactory, Peers, PeerSetup
 from hyperloom_multibranch.scheduling.policy import SCHEDULING_POLICY, policy_version
 from hyperloom_multibranch.scheduling.prelude import (
     Prelude,
@@ -117,11 +117,12 @@ from hyperloom_multibranch.scheduling.review import (
     REVIEW_REJECTED,
     REVIEW_REQUESTED,
     REVIEW_SKIPPED,
+    Reviewed,
     ReviewRejected,
     request,
     wait,
 )
-from hyperloom_multibranch.scheduling.root_shares import RootShares, root_shares
+from hyperloom_multibranch.scheduling.root_shares import RootShares, ShareSources, root_shares
 from hyperloom_multibranch.scheduling.requests import SessionChecks, SessionTests
 from hyperloom_multibranch.scheduling.roster import QUOTA_POLICY_VERSION, Roster, final_quota
 from hyperloom_multibranch.scheduling.settings import PlaybookMode, RunSettings
@@ -263,20 +264,9 @@ class Session:
         self._lifecycle = peers.lifecycle
         self._branches = BranchControl(context, peers.lifecycle, peers.toolbox, peers.repo, peers.briefs)
         self._stopper = SessionStopper(context, self._branches, peers.toolbox, peers.mcp)
-        warm_start = None if services.recipe_kb is None else WarmStartSource(services.recipe_kb, self._blobs)
         self._integrator = self._build_integrator(peers.repo, checks, services)
         profiler = IntegrationProfiler(peers.toolbox, tests, self._blackboard, self._clock)
-        prelude_services = PreludeServices(
-            peers.repo,
-            peers.gate,
-            tests,
-            peers.toolbox,
-            peers.on_this_machine,
-            self._open_integration,
-            self._integrator.replay_champion,
-            profiler.profile_root,
-        )
-        self._prelude = Prelude(context, prelude_services, warm_start=warm_start)
+        self._prelude = self._build_prelude(peers, tests, profiler, services)
         self._open_llm_roles(services)
         self._similarity = BranchSimilarity(peers.repo, self._roster)
         self._events = SessionEvents(self._blackboard, self._decisions, profiler, peers.toolbox, settings.workload)
@@ -328,6 +318,25 @@ class Session:
         # A session is not evidence about itself: a run over a directory whose CLOSE already archived its tree would
         # otherwise set its stall bar and history against that tree.
         self._history = tuple(tree for tree in archived_history() if tree.session_id != self._layout.session_id)
+
+    def _build_prelude(
+        self, peers: Peers, tests: SessionTests, profiler: IntegrationProfiler, services: SessionServices
+    ) -> Prelude:
+        """PRELUDE on the peers' repository, gate and toolbox: it opens the integration branch, replays the champion
+        recipe on it and profiles the root, warm-started from the Recipe KB when the session has one."""
+
+        warm_start = None if services.recipe_kb is None else WarmStartSource(services.recipe_kb, self._blobs)
+        prelude_services = PreludeServices(
+            peers.repo,
+            peers.gate,
+            tests,
+            peers.toolbox,
+            peers.on_this_machine,
+            self._open_integration,
+            self._integrator.replay_champion,
+            profiler.profile_root,
+        )
+        return Prelude(self._context, prelude_services, warm_start=warm_start)
 
     def _build_integrator(self, repo: ExperimentRepo, checks: SessionChecks, services: SessionServices) -> Integrator:
         """The integrator, writing as itself to the blackboard and the merge log, with the LLM patch resolver whose
@@ -493,17 +502,7 @@ class Session:
         except PreludeFailed as exc:
             return SessionOutcome(SessionStopReason.PRELUDE_FAILED, None, None, str(exc))
         await self._adopt_playbook()
-        manifest = read_manifest(self._layout.manifest)
-        replace(manifest, policy_versions=self._policy_versions()).write(self._layout.manifest)
-        sockets = await asyncio.to_thread(socket_versions)
-        await self._blackboard.write_manifest_fingerprint(
-            ManifestFingerprint(
-                activity=self._layout.session_id,
-                sockets=sockets,
-                prompt_versions=prompt_versions(),
-                policy_versions=self._policy_versions(),
-            )
-        )
+        await self._record_versions()
         if self._settings.stop_after_map:
             # Its stop is the review point: the map is kept and reviewed offline, so the session does not pause.
             return await self._stop_after_map(prelude)
@@ -536,6 +535,22 @@ class Session:
         candidates = await self._final_candidates()
         await self._stopper.end_exploration(reason)
         return await self._final(candidates, reason)
+
+    async def _record_versions(self) -> None:
+        """The policy versions the session runs, once PRELUDE settled its playbook: in the manifest, and with the
+        sockets' and the prompts' versions in the session's fingerprint on the blackboard."""
+
+        manifest = read_manifest(self._layout.manifest)
+        replace(manifest, policy_versions=self._policy_versions()).write(self._layout.manifest)
+        sockets = await asyncio.to_thread(socket_versions)
+        await self._blackboard.write_manifest_fingerprint(
+            ManifestFingerprint(
+                activity=self._layout.session_id,
+                sockets=sockets,
+                prompt_versions=prompt_versions(),
+                policy_versions=self._policy_versions(),
+            )
+        )
 
     async def _agent_plans(self, prelude: PreludeResult) -> tuple[str, ...]:
         """Each agent branch's share of the directions (:mod:`agent_plans`): of the user's map; for two or more Arbors
@@ -586,7 +601,7 @@ class Session:
         (:meth:`_extend`). Raises :class:`~hyperloom_multibranch.scheduling.review.ReviewRejected` on a rejection."""
 
         directory, began = self._layout.review, self._clock.now()
-        state = request(directory, self._layout.root, map_file, dossier, made_by, began)
+        state = request(directory, self._layout.root, Reviewed(map_file, dossier, made_by), began)
         asked = {"page": str(directory / REVIEW_PAGE), "map": state["map"], "dossier": state["dossier"]}
         self._decisions.record(Decision(DecisionKind.PRELUDE, REVIEW_REQUESTED, INTEGRATION_BRANCH, asked))
         logger.warning("waiting for a person's review of the agent map: read %s", directory / REVIEW_PAGE)
@@ -636,14 +651,8 @@ class Session:
         """The root's shares, waited for (its op shares, else its kernel shares), recorded as a ``PRELUDE`` decision;
         ``None`` when it has none."""
 
-        read = await root_shares(
-            self._blackboard,
-            self._toolbox,
-            self._clock,
-            self._layout.toolbox,
-            prelude.root_commit,
-            prelude.root_profile_job,
-        )
+        sources = ShareSources(self._blackboard, self._toolbox, self._clock, self._layout.toolbox)
+        read = await root_shares(sources, prelude.root_commit, prelude.root_profile_job)
         self._decisions.record(Decision(DecisionKind.PRELUDE, ROOT_SHARES_READ, INTEGRATION_BRANCH, read.detail))
         return read.shares
 

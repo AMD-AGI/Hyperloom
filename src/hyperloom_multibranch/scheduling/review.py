@@ -30,6 +30,7 @@ import os
 import sys
 import time
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -59,6 +60,15 @@ ENCODING = "utf-8"
 
 class ReviewRejected(Exception):
     """A person rejected the session's agent map; the message is who and why."""
+
+
+@dataclass(frozen=True)
+class Reviewed:
+    """What a review shows: the map file and the dossier (either may be ``None``), and what made the map."""
+
+    map_file: Path | None
+    dossier: Path | None
+    made_by: str
 
 
 def _iso(now: float) -> str:
@@ -94,24 +104,22 @@ def directions(map_file: Path | None) -> list[Mapping[str, Any]]:
     return [entry for entry in listed if isinstance(entry, Mapping)] if isinstance(listed, list) else []
 
 
-def request(
-    directory: Path, session: Path, map_file: Path | None, dossier: Path | None, made_by: str, now: float
-) -> dict[str, Any]:
-    """Ask for a review of ``map_file`` and ``dossier`` (either may be ``None``), which ``made_by`` made, for the
-    session in ``session``: write ``REVIEW.md`` and a pending ``review.json`` in ``directory``; the state written."""
+def request(directory: Path, session: Path, shown: Reviewed, now: float) -> dict[str, Any]:
+    """Ask for a review of what ``shown`` names, for the session in ``session``: write ``REVIEW.md`` and a pending
+    ``review.json`` in ``directory``; the state written."""
 
     directory.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(directory / REVIEW_PAGE, _page(session, map_file, dossier, made_by))
+    atomic_write_text(directory / REVIEW_PAGE, _page(session, shown))
     state = {
         "status": PENDING,
         "requested_at_iso": _iso(now),
         "decided_at_iso": None,
         "by": None,
         "note": "",
-        "map": None if map_file is None else str(map_file),
-        "dossier": None if dossier is None else str(dossier),
-        "made_by": made_by,
-        "requested_digests": digests(map_file, dossier),
+        "map": None if shown.map_file is None else str(shown.map_file),
+        "dossier": None if shown.dossier is None else str(shown.dossier),
+        "made_by": shown.made_by,
+        "requested_digests": digests(shown.map_file, shown.dossier),
         "changed": [],
     }
     atomic_write_json(directory / REVIEW_FILE, state)
@@ -185,7 +193,8 @@ def _login() -> str:
         return os.environ.get("USER", "")
 
 
-def _page(session: Path, map_file: Path | None, dossier: Path | None, made_by: str) -> str:
+def _page(session: Path, shown: Reviewed) -> str:
+    map_file, dossier, made_by = shown.map_file, shown.dossier, shown.made_by
     listed = directions(map_file)
     rows = [
         f"| `{entry.get('id', '')}` | {entry.get('status', '')} | {str(entry.get('title') or '').replace('|', '/')} |"
@@ -263,6 +272,7 @@ __all__ = [
     "REVIEW_REQUESTED",
     "REVIEW_SKIPPED",
     "ReviewRejected",
+    "Reviewed",
     "add_parser",
     "decide",
     "digests",
