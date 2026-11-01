@@ -201,6 +201,8 @@ MAGPIE_RUNNER_GPU_TYPES = ("mi300x", "mi350x", "mi355x")
 SEQUENCE_LENGTHS = ("isl", "osl")
 #: The argparse action of an option the user may give more than once, each giving one more value.
 REPEATABLE = "append"
+#: The argparse action of a switch, an option that takes no value and is on when given.
+SWITCH = "store_true"
 #: Where ``run`` measures: this machine's cards, or the sandboxes of a grant handed to it.
 LOCAL_MEASUREMENT, HOSTED_MEASUREMENT = "local", "hosted"
 #: What a grant handed to ``run --measurement hosted`` must give: the sandbox service, the measurement key and
@@ -228,7 +230,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     final_only.add_argument("session_dir", type=Path, help="The session directory of the run to finish.")
-    final_only.add_argument("-v", "--verbose", action="store_true", help="Log at debug level.")
+    final_only.add_argument("-v", "--verbose", action=SWITCH, help="Log at debug level.")
     hosted = commands.add_parser("hosted", help="Run under a host that injects the campaign spec and its inputs.")
     hosted_commands = hosted.add_subparsers(dest="hosted_command", required=True)
     hosted_commands.add_parser(
@@ -254,7 +256,7 @@ def _add_run_options(run: argparse.ArgumentParser) -> None:
         help="An earlier session of this workload and image whose PRELUDE child to root on instead of starting one.",
     )
     _add_playbook_option(run)
-    run.add_argument("-v", "--verbose", action="store_true", help="Log at debug level.")
+    run.add_argument("-v", "--verbose", action=SWITCH, help="Log at debug level.")
 
 
 def _add_workload_options(run: argparse.ArgumentParser) -> None:
@@ -428,6 +430,13 @@ def _add_agent_options(run: argparse.ArgumentParser) -> None:
             f" iteration with under 63 minutes left, so less runs none; 0 skips it (default {DOSSIER_MINUTES:g})."
         ),
     )
+    _add_arbor_start_options(run)
+    _add_agent_review_options(run)
+
+
+def _add_arbor_start_options(run: argparse.ArgumentParser) -> None:
+    """How an Arbor --autonomous-agent is started: its pack, the launch its recipe adds to, and its servers' ports."""
+
     run.add_argument(
         "--agent-pack",
         dest="agent_pack",
@@ -458,10 +467,16 @@ def _add_agent_options(run: argparse.ArgumentParser) -> None:
             f" dossier pass; sessions that share a machine each need their own (default {AGENT_PORT})."
         ),
     )
+
+
+def _add_agent_review_options(run: argparse.ArgumentParser) -> None:
+    """The stages of a person's review of the Arbor agents' map: stop once it is made, run on a reviewed one, or skip
+    the review."""
+
     run.add_argument(
         "--stop-after-map",
         dest="stop_after_map",
-        action="store_true",
+        action=SWITCH,
         help=(
             "End the session before EXPLORE once the Arbor --autonomous-agent directions are mapped, one Arbor's"
             " too: PRELUDE, the dossier pass (--agent-dossier-minutes; with 0, a map generated from the root's"
@@ -661,23 +676,10 @@ def settings_from(
     """
 
     errors = _shape_errors(args) + _ep_errors(args) + _positive(args, ("tp", "conc", "judge_interval_sec"))
-    if args.max_hours < 0 or 0 < args.max_hours < MB_MIN_PRELUDE_HOURS:
-        errors.append(f"--max-hours must be 0 (no limit) or at least {MB_MIN_PRELUDE_HOURS:.4f} (one minute)")
-    if not math.isfinite(args.max_gpu_hours) or args.max_gpu_hours < 0:
-        errors.append("--max-gpu-hours must be 0 (no limit) or a positive number of hours")
-    if not math.isfinite(args.max_llm_usd) or args.max_llm_usd < 0:
-        errors.append("--max-llm-usd must be 0 (no limit) or a positive number of dollars")
-    if args.dev_leases < 0:
-        errors.append("--dev-leases must be 0 (none) or a positive number of sandboxes")
+    errors += _limit_errors(args)
     if errors:
         raise ValueError("; ".join(errors))
-    try:
-        fitting = tests_that_fit(args.tp)
-    except ValueError as exc:
-        raise ValueError(f"--tp does not fit where the session measures: {exc}") from exc
-    parallel = fitting if args.max_parallel_tests is None else args.max_parallel_tests
-    if parallel > fitting:
-        raise ValueError(f"--max-parallel-tests must be at most {fitting}, the tests that run at once at TP")
+    parallel = _parallel_tests(args, tests_that_fit)
     workload = Workload(
         _workload_model(args),
         args.framework,
@@ -690,6 +692,7 @@ def settings_from(
         DEFAULT_EP if args.ep is None else args.ep,
     )
     caps = RosterCaps(args.max_branches, args.max_k_per_branch, parallel)
+    prompts, agents = args.specialist_prompts or [], args.agents or []
     return RunSettings(
         workload,
         args.max_hours,
@@ -697,20 +700,49 @@ def settings_from(
         args.max_llm_usd,
         caps,
         args.judge_interval_sec,
-        user_directions=_user_directions(args.specialist_prompts or [], caps.max_branches),
-        agents=_agents(args.agents or [], caps.max_branches - len(args.specialist_prompts or [])),
+        user_directions=_user_directions(prompts, caps.max_branches),
+        agents=_agents(agents, caps.max_branches - len(prompts)),
         references=_references(args.references or []),
         dev_leases=args.dev_leases,
         playbook=PlaybookMode(args.playbook),
-        agent_directions=_agent_directions(args.agent_directions, args.agents or []),
-        agent_pack=_agent_pack(args.agent_pack, args.agents or []),
-        agent_launch=_agent_launch(args.agent_launch, args.agents or []),
+        agent_directions=_agent_directions(args.agent_directions, agents),
+        agent_pack=_agent_pack(args.agent_pack, agents),
+        agent_launch=_agent_launch(args.agent_launch, agents),
         agent_dossier_minutes=_dossier_minutes(args.agent_dossier_minutes),
-        agent_port=_agent_port(args.agent_port, args.agents or []),
-        stop_after_map=_stop_after_map(args.stop_after_map, args.agents or [], args.agent_directions),
+        agent_port=_agent_port(args.agent_port, agents),
+        stop_after_map=_stop_after_map(args.stop_after_map, agents, args.agent_directions),
         agent_dossier=_agent_dossier(args.agent_dossier, args.agent_directions),
         review_gate=args.review_gate,
     )
+
+
+def _limit_errors(args: argparse.Namespace) -> list[str]:
+    """What is wrong with the session's limits: its hours, GPU hours, LLM dollars and dev sandboxes."""
+
+    errors: list[str] = []
+    if args.max_hours < 0 or 0 < args.max_hours < MB_MIN_PRELUDE_HOURS:
+        errors.append(f"--max-hours must be 0 (no limit) or at least {MB_MIN_PRELUDE_HOURS:.4f} (one minute)")
+    if not math.isfinite(args.max_gpu_hours) or args.max_gpu_hours < 0:
+        errors.append("--max-gpu-hours must be 0 (no limit) or a positive number of hours")
+    if not math.isfinite(args.max_llm_usd) or args.max_llm_usd < 0:
+        errors.append("--max-llm-usd must be 0 (no limit) or a positive number of dollars")
+    if args.dev_leases < 0:
+        errors.append("--dev-leases must be 0 (none) or a positive number of sandboxes")
+    return errors
+
+
+def _parallel_tests(args: argparse.Namespace, tests_that_fit: Callable[[int], int]) -> int:
+    """How many tests run at once: ``--max-parallel-tests``, at most the tests of the TP that fit where the session
+    measures (``tests_that_fit``); raises ValueError when the TP does not fit, or more are asked for."""
+
+    try:
+        fitting = tests_that_fit(args.tp)
+    except ValueError as exc:
+        raise ValueError(f"--tp does not fit where the session measures: {exc}") from exc
+    parallel = fitting if args.max_parallel_tests is None else args.max_parallel_tests
+    if parallel > fitting:
+        raise ValueError(f"--max-parallel-tests must be at most {fitting}, the tests that run at once at TP")
+    return parallel
 
 
 def _dossier_minutes(minutes: float) -> float:
