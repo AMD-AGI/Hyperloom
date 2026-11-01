@@ -216,7 +216,11 @@ def test_arbor_s_config_follows_from_the_spec_on_the_serving_pack_in_component_m
     assert (config["framework"], config["model_path"], config["tp"]) == ("vllm", MODEL, 2)
     assert config["model_name"] == "Qwen/Qwen3-14B-FP8"
     assert config["server_flags"] == "--max-num-seqs 128"
-    assert config["server_env"] == {"VLLM_ROCM_USE_AITER": "1", TABLE_ENV: os.pathsep.join(START_TABLE_PARTS)}
+    assert config["server_env"] == {
+        arbor_adapter.ACCURACY_FLOOR_ENV: "0.5",
+        "VLLM_ROCM_USE_AITER": "1",
+        TABLE_ENV: os.pathsep.join(START_TABLE_PARTS),
+    }
     assert config["bench_script"] == str(validator / "bench.sh")
     assert config["correctness_script"] == str(validator / "correctness.sh")
     assert (config["workspace_root"], config["session_root"]) == (spec.workspace, str(session))
@@ -494,10 +498,27 @@ def test_a_launch_file_is_served_with_the_recipe_s_launch_added_to_it(tmp_path: 
     config = arbor_config(spec, tmp_path / "checkout", BRANCH_RUN)
 
     flags = f"{RESOLVED['server_flags']} --max-running-requests 64 --tp-size 1"
-    envs = {"SGLANG_SIMULATE_ACC_LEN": "3", "VLLM_ROCM_USE_AITER": "1", TABLE_ENV: os.pathsep.join(START_TABLE_PARTS)}
+    envs = {
+        arbor_adapter.ACCURACY_FLOOR_ENV: "0.5",
+        "SGLANG_SIMULATE_ACC_LEN": "3",
+        "VLLM_ROCM_USE_AITER": "1",
+        TABLE_ENV: os.pathsep.join(START_TABLE_PARTS),
+    }
     assert (config["server_flags"], config["server_env"]) == (flags, envs)
     assert config["model_name"] == "Qwen/Qwen3.8-Flash-Next"
     assert "bench_command" not in config["component"]
+
+
+def test_arbor_is_held_to_mb_s_accuracy_floor_unless_the_launch_or_the_recipe_sets_its_own(tmp_path: Path) -> None:
+    # Without a floor the serving pack books every iteration whose accuracy it must judge as invalid; MB's eval and the
+    # pack's score one model points apart, so the floor is MB's absolute one, not its baseline less its tolerance.
+    floor, spec = arbor_adapter.ACCURACY_FLOOR_ENV, _spec(tmp_path)
+    given = replace(spec, launch=_launch_file(tmp_path, {**RESOLVED, "server_env": {floor: "0.85"}}))
+    recipe = replace(spec, envs={**spec.envs, floor: "0.8"})
+
+    configs = [arbor_config(each, tmp_path / "checkout", BRANCH_RUN) for each in (spec, given, recipe)]
+
+    assert [config["server_env"][floor] for config in configs] == ["0.5", "0.85", "0.8"]
 
 
 def test_a_launch_file_s_client_measures_arbor_only_when_mb_gives_none(tmp_path: Path) -> None:
@@ -735,7 +756,7 @@ async def test_arbor_starts_with_the_start_s_kernel_tables_and_a_keep_that_keeps
 
     config = json.loads((tmp_path / BRANCH / "session" / AGENT_DIR / "src" / CONFIG_FILE).read_text())
     given = json.loads((tmp_path / BRANCH / "session" / START_TABLES_FILE).read_text())[TABLE_ENV]["value"]
-    assert config["server_env"] == {TABLE_ENV: given}
+    assert config["server_env"] == {arbor_adapter.ACCURACY_FLOOR_ENV: "0.5", TABLE_ENV: given}
     assert Path(given.split(os.pathsep)[-1]).read_text() == CHAMPION_ROWS
     assert (request.delta.add_kernels, request.delta.remove_kernels) == ((), ())
     assert request.delta.config == ConfigDelta() and "+max_num_seqs = 256" in rig.patch(request)

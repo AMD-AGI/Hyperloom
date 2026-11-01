@@ -50,6 +50,7 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
+from hyperloom.common.gain_math import DEFAULT_ENABLEMENT_ACCURACY_FLOOR
 from hyperloom.inference_optimizer.framework_registry import EXPERT_PARALLEL_FLAGS
 from hyperloom.inference_optimizer.grid_server_args import merge_server_args, tokenize_server_args_preserving_json
 from hyperloom.measure.compile import (
@@ -81,6 +82,16 @@ PLAN_FILE = f"{MB_DIR}/plan.json"
 OUTBOX = "keeps"
 #: The keys of a launch file (:func:`read_launch`): the first two it must give, the others it may.
 LAUNCH_KEYS = ("server_flags", "server_env", "model_name", "client")
+#: The pass floor of the serving pack's GSM8K check, which Arbor reads from the config's ``server_env``; without one
+#: it books every measured iteration whose accuracy it must judge as invalid (Ruby, 2026-11-01: 4 of 20 on one
+#: branch). MB gives it its own absolute floor, ``DEFAULT_ENABLEMENT_ACCURACY_FLOOR``, the part of MB's accuracy rule
+#: that holds on any eval's scale: MB's eval and the pack's lm_eval score one model points apart (Qwen3-8B on Ruby:
+#: 0.939 against 0.870 on the full set), so the rule's other part, at most ``ACCURACY_THRESHOLD`` under the
+#: baseline's score, stays MB's, judged at its confirm test. A launch file or the recipe may set its own.
+ACCURACY_FLOOR_ENV = "GSM8K_MIN"
+#: The pack's evaluation settings, which Arbor reads from its campaign config and never from what an iteration
+#: changed: no keep carries them into a recipe.
+EVAL_ENVS = (ACCURACY_FLOOR_ENV, "GSM8K_LIMIT")
 #: The workload kind whose recipe Magpie resolves, the root's launch holding only what is added to it.
 AGENTX = "agentx"
 #: Arbor gives vLLM its TP itself and SGLang none, which reads it from these flags only.
@@ -393,7 +404,7 @@ def arbor_config(spec: AgentSpec, checkout: Path, run: ArborRun) -> dict[str, An
         "model_name": launch.model_name or _client_value(client, MODEL) or spec.model,
         "tp": spec.tp,
         "server_flags": server_flags(spec, launch.server_flags),
-        "server_env": {**launch.server_env, **spec.envs},
+        "server_env": {ACCURACY_FLOOR_ENV: str(DEFAULT_ENABLEMENT_ACCURACY_FLOOR), **launch.server_env, **spec.envs},
         "bench_script": str(pack / BENCH_SCRIPT),
         "correctness_script": str(pack / CORRECTNESS_SCRIPT),
         "workspace_root": spec.workspace,
@@ -689,12 +700,14 @@ async def _directions(checkout: Path, written: tuple[Path, ...], *args: str) -> 
 
 
 __all__ = [
+    "ACCURACY_FLOOR_ENV",
     "BLOCK_KEYS",
     "BRANCH_RUN",
     "BUILT",
     "DOSSIER_DIR",
     "DOSSIER_INDEX",
     "DOSSIER_PASS",
+    "EVAL_ENVS",
     "EXIT_REFUSED",
     "INSTALL",
     "LAUNCH_KEYS",

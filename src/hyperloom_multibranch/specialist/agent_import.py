@@ -53,6 +53,7 @@ from hyperloom.measure.framework.rows import DEFAULT_TABLE_PLACEHOLDER
 from hyperloom.measure.framework.tables import AITER_VARIABLE_PREFIX
 from hyperloom.measure.surface import measurement_envs
 from hyperloom_multibranch.specialist.agent_manifest import ConfigSource, read_field
+from hyperloom_multibranch.specialist.arbor_adapter import EVAL_ENVS
 from hyperloom_multibranch.specialist.worktree import Upstream
 from hyperloom_multibranch.toolbox.kernel_artifacts import image_aiter_configs
 
@@ -208,9 +209,10 @@ def _by_flag(args: str) -> dict[str, list[list[str]]]:
 
 
 def _without_measurement(envs: Mapping[str, str]) -> tuple[dict[str, str], dict[str, str]]:
-    """``envs`` without the variables the measurement sets itself, which a test refuses in its launch, and those."""
+    """``envs`` without the variables the measurement sets itself, which a test refuses in its launch, and Arbor's
+    evaluation settings (:data:`~.arbor_adapter.EVAL_ENVS`), which MB gives it; and those."""
 
-    owned = set(measurement_envs(envs))
+    owned = {*measurement_envs(envs), *(name for name in envs if name in EVAL_ENVS)}
     return {name: value for name, value in envs.items() if name not in owned}, {name: envs[name] for name in owned}
 
 

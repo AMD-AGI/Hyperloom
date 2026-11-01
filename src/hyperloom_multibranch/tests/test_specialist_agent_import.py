@@ -126,6 +126,16 @@ def test_a_keep_leaves_out_the_workload_variables_the_measurement_sets_and_names
     assert kept.dropped == {"ISL": "1024", "osl": "1024"}
 
 
+def test_a_keep_leaves_out_arbor_s_evaluation_settings_which_mb_gives_it() -> None:
+    source = ConfigSource("agent/config.json", "server_flags", "server_env")
+    state = {"server_flags": "--tp 1", "server_env": {"SGLANG_A": "0", "GSM8K_MIN": "0.5", "GSM8K_LIMIT": "400"}}
+
+    kept = read_kept_change(1, "", state, source, "", ROOT.launch)
+
+    assert kept.envs == {"SGLANG_A": "0"}
+    assert kept.dropped == {"GSM8K_MIN": "0.5", "GSM8K_LIMIT": "400"}
+
+
 def test_a_keep_whose_config_the_source_cannot_read_is_refused_naming_the_file() -> None:
     source = ConfigSource("agent/config.json", "server_flags", "server_env")
 
