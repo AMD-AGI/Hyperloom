@@ -136,8 +136,10 @@ class RunSettings:
     their servers take, one block per agent branch and one for the dossier pass. ``stop_after_map`` ends the session
     once those Arbors' directions are mapped, one Arbor's too, before EXPLORE, and leaves the map and its dossier for a
     person to review; the run after the review is given that map as ``agent_directions`` and that dossier as
-    ``agent_dossier``, which every agent branch gets in place of a dossier pass's (``""`` for none). ``references`` are
-    the
+    ``agent_dossier``, which every agent branch gets in place of a dossier pass's (``""`` for none). ``review_gate``
+    pauses the session, once those Arbors' map is made, until a person approves or rejects it (:mod:`.review`), and
+    tells each Arbor the host reviewed; off, nothing pauses and each Arbor is started with its own gate off.
+    ``references`` are the
     directories of reference material the run copies in before its first phase, each with the commit it was taken at.
     ``dev_leases`` is how many dev sandboxes the session lends its specialists at once; 0 lends none. ``playbook`` says
     which scheduling playbook the session plays."""
@@ -161,6 +163,7 @@ class RunSettings:
     agent_port: int = AGENT_PORT
     stop_after_map: bool = False
     agent_dossier: str = ""
+    review_gate: bool = True
 
 
 __all__ = [

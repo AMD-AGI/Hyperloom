@@ -934,6 +934,18 @@ async def test_the_agent_port_of_the_run_reaches_the_peers(tmp_path: Path) -> No
     assert stage.setup.agent_port == 32100
 
 
+@pytest.mark.parametrize(("review_gate", "handed"), [(True, "host"), (False, "off")])
+async def test_the_session_s_review_stands_in_for_each_arbor_s_own(
+    tmp_path: Path, review_gate: bool, handed: str
+) -> None:
+    stage = _stage(tmp_path, child=None)
+    stage.settings = replace(stage.settings, review_gate=review_gate)
+
+    stage._session()
+
+    assert stage.setup.agent_review == handed
+
+
 async def test_a_failed_prelude_skips_to_close(tmp_path: Path) -> None:
     stage = _stage(tmp_path, child=None, exit_code=1)
 

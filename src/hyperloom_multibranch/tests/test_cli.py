@@ -413,6 +413,11 @@ def test_a_run_stops_after_its_map_only_when_asked() -> None:
     assert not _settings("--autonomous-agent", "/agents/arbor").stop_after_map
 
 
+def test_the_review_gate_is_on_unless_the_run_turns_it_off() -> None:
+    assert _settings("--autonomous-agent", "/agents/arbor").review_gate
+    assert not _settings("--autonomous-agent", "/agents/arbor", "--no-review-gate").review_gate
+
+
 def test_stopping_after_the_map_without_an_agent_or_with_a_map_given_is_a_usage_error(tmp_path: Path) -> None:
     given = tmp_path / "map.json"
     given.write_text(json.dumps({"directions": [{"id": "m-attn"}]}))

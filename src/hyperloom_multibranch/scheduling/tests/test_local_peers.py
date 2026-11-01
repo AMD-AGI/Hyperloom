@@ -213,6 +213,11 @@ def test_the_agents_spec_starts_its_port_blocks_where_the_session_says() -> None
     assert _agent_spec(WORKLOAD).port == AGENT_PORT
 
 
+def test_the_agents_spec_hands_their_review_gate_over_as_the_session_says() -> None:
+    assert _agent_spec(WORKLOAD, "", "", AGENT_PORT, "host").review == "host"
+    assert _agent_spec(WORKLOAD).review == ""
+
+
 @pytest.mark.parametrize("optimizer", list(KernelOptimizer))
 def test_the_kernel_optimizer_flag_picks_the_backend_kernel_tuning_runs(
     optimizer: KernelOptimizer, monkeypatch: pytest.MonkeyPatch
@@ -921,6 +926,7 @@ async def test_the_specialists_are_told_of_and_give_back_the_dev_sandboxes_the_s
                 agent_launch="",
                 agent_port=AGENT_PORT,
                 agent_dossier="",
+                agent_review="",
             ),
             tokens=None,
             repo=None,
@@ -1004,6 +1010,7 @@ def test_the_specialists_source_base_holds_aiter_beside_the_framework_only_from_
             agent_launch="",
             agent_port=AGENT_PORT,
             agent_dossier="",
+            agent_review="",
         ),
         tokens=None,
         repo=None,
@@ -1125,6 +1132,7 @@ def test_a_session_on_a_host_that_builds_native_code_lays_out_the_native_tree_an
                 agent_launch="",
                 agent_port=AGENT_PORT,
                 agent_dossier="",
+                agent_review="",
             ),
             tokens=None,
             repo=None,

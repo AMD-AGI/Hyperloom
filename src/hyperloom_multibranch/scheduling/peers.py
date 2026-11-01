@@ -78,8 +78,10 @@ class PeerSetup:
     sandboxes the session lends its specialists at once, from the toolbox's cards; 0 lends none. ``agents`` are the
     third-party agents the user named, each run on an autonomous branch of its own, ``agent_pack`` the pack an
     Arbor among them runs (``""`` for the adapter's default), ``agent_launch`` the file of the launch its recipe's
-    adds to (``""`` when the recipe's is the whole launch), ``agent_port`` the first port of their port blocks, and
-    ``agent_dossier`` the dossier the run gives every agent branch with its reviewed map (``""`` for none).
+    adds to (``""`` when the recipe's is the whole launch), ``agent_port`` the first port of their port blocks,
+    ``agent_dossier`` the dossier the run gives every agent branch with its reviewed map (``""`` for none), and
+    ``agent_review`` how an Arbor's own review gate is handed over (``AgentSpec.review``: the host reviews, nobody
+    does, or ``""`` for neither).
     """
 
     layout: SessionLayout
@@ -95,6 +97,7 @@ class PeerSetup:
     agent_launch: str = ""
     agent_port: int = AGENT_PORT
     agent_dossier: str = ""
+    agent_review: str = ""
 
 
 PeerFactory = Callable[[PeerSetup], Peers]

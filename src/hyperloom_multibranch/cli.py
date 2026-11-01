@@ -478,6 +478,17 @@ def _add_agent_options(run: argparse.ArgumentParser) -> None:
             " (a --stop-after-map session keeps it under MB-agent-map/dossier/)."
         ),
     )
+    run.add_argument(
+        "--no-review-gate",
+        dest="review_gate",
+        action="store_false",
+        help=(
+            "Open the Arbor --autonomous-agent branches without a person's review: by default the session pauses"
+            " once their map is made, holding no cards, until `hyperloom-multibranch review --session DIR approve`"
+            " (or reject). With this flag it does not pause, and its Arbors are started with their own review gate"
+            " off. For unattended runs, and for the second stage of a reviewed run."
+        ),
+    )
 
 
 def _positive(args: argparse.Namespace, names: tuple[str, ...]) -> list[str]:
@@ -696,6 +707,7 @@ def settings_from(
         agent_port=_agent_port(args.agent_port, args.agents or []),
         stop_after_map=_stop_after_map(args.stop_after_map, args.agents or [], args.agent_directions),
         agent_dossier=_agent_dossier(args.agent_dossier, args.agent_directions),
+        review_gate=args.review_gate,
     )
 
 
