@@ -116,6 +116,9 @@ INFRA_ERROR_CLASSES: frozenset[str] = frozenset(
 #: ``error_class`` values that mean the framework or the result is wrong, not the measurement or the candidate.
 PROGRAM_ERROR_CLASSES: frozenset[str] = frozenset({"spec_rejected", "result_rejected", CARDS_UNOBSERVABLE})
 
+#: The test ran past its own timeout: unclear, since a hung server and a test longer than its timeout end alike.
+#: ``hyperloom_multibranch.toolbox.attempts`` does not rerun a sweep that ends so.
+TEST_TIMEOUT_REASON = "timeout"
 #: The server could not bind its port. The launcher picks a free port and releases it before the server binds, so
 #: another process can take it in between; the candidate has no say in that, and a fresh sandbox does not repeat it.
 PORT_IN_USE_REASON = "port_in_use"
@@ -229,7 +232,7 @@ def classify_test_failure(
     if returncode in _INFRA_RETURNCODES:
         return _infra(_INFRA_RETURNCODES[returncode])
     if timed_out:
-        return _unclear("timeout")
+        return _unclear(TEST_TIMEOUT_REASON)
     if returncode == 0:
         return FailureClassification(Disposition.SUCCEEDED)
     text = "\n".join(_bounded(part) for part in logs if part)
