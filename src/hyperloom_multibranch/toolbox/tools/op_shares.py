@@ -13,8 +13,11 @@ trace. Neither is the
 ``analysis.json`` task list, which holds only the few optimisation tasks the report recommends (a few percent of the time)
 and would hide GEMM and attention from the Amdahl ceiling. A tool that produced no table, or whose request does not name the
 commit the profile ran on, reports no shares: they are never guessed. A report TraceLens marked degraded (its deterministic
-fallback, or a poor trace) carries no shares either: the decomposition behind them failed, so the one row it keeps is a
-kernel name, not an op. So does one the report route itself found hollow (``window_degraded_reason``).
+fallback, or a poor trace) gives no shares from ``ops_summary.csv``: the decomposition behind them failed, so the one row
+it keeps is a kernel name, not an op. The report route's kernel table does not rest on that decomposition, so it still
+gives its kernel shares, and the summary says the op decomposition is degraded: for a model that spends most of its time
+in graph replays, kernel names and their share of the time are the best ranking there is. No shares come from a table
+the report route itself found hollow (``window_degraded_reason``).
 """
 
 from __future__ import annotations
@@ -53,6 +56,7 @@ PHASE_NOTE_KEY = "phase_note"
 DEGRADED_MODE = "deterministic-fallback"
 POOR_QUALITY = "poor"
 DEGRADED_NOTICE = "TraceLens report is degraded, so no op shares were taken from it"
+KERNEL_SHARES_NOTICE = "TraceLens op decomposition is degraded, so the shares are kernel shares from the report route"
 
 
 def _report_dir(result: Mapping[str, Any]) -> Path | None:
@@ -64,8 +68,12 @@ def _report_dir(result: Mapping[str, Any]) -> Path | None:
 
 
 def degraded_reason(result: Mapping[str, Any]) -> str:
-    """Why the analysis ``result`` is degraded: TraceLens' ``report_info``, else the report route's own finding; empty if not."""
-    return _tracelens_reason(result) or str(result.get(OWN_DEGRADED_KEY) or "").strip()
+    """Why the shares of the analysis ``result`` cannot be taken: the report route's own finding about its kernel table,
+    or, for TraceLens' ops summary, its ``report_info``; empty if they can."""
+    own = str(result.get(OWN_DEGRADED_KEY) or "").strip()
+    if KERNEL_SHARES_KEY in result:
+        return own
+    return _tracelens_reason(result) or own
 
 
 def _tracelens_reason(result: Mapping[str, Any]) -> str:
@@ -138,7 +146,11 @@ def with_op_shares(output: ToolOutput, request: ToolRequest) -> ToolOutput:
         reason = degraded_reason(output.result) if commit and output.ok else ""
         return replace(output, summary=f"{output.summary} | {DEGRADED_NOTICE} ({reason})") if reason else output
     profile = str(request.params.get(PROFILE_REQUEST_PARAM) or "").strip()
-    return replace(output, summary=_with_notes(output), commit_id=commit, profile_request_id=profile, op_shares=shares)
+    summary = _with_notes(output)
+    decomposition = _tracelens_reason(output.result)
+    if decomposition:
+        summary = f"{summary} | {KERNEL_SHARES_NOTICE} ({decomposition})"
+    return replace(output, summary=summary, commit_id=commit, profile_request_id=profile, op_shares=shares)
 
 
 def _with_notes(output: ToolOutput) -> str:
