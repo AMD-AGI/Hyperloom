@@ -139,6 +139,15 @@ def test_the_hard_stop_is_never_brought_later() -> None:
     assert hard_stop.bring_forward() == budget.hard_stop_at
 
 
+def test_a_review_s_pause_moves_the_hard_stop_unless_it_was_brought_forward() -> None:
+    budget = SessionBudget.from_hours(1.0, 0.0)
+    hard_stop = HardStop(budget, Clock(now=lambda: 600.0))
+
+    assert hard_stop.extend(900.0) == budget.hard_stop_at + 900.0
+    brought = hard_stop.bring_forward()
+    assert hard_stop.extend(900.0) == brought
+
+
 def test_a_gpu_hour_budget_ends_explore_where_only_finals_share_is_left() -> None:
     assert explore_gpu_seconds(9.0) == pytest.approx(9.0 * _HOUR * 85 / 90)
     assert explore_gpu_seconds(0.0) == math.inf

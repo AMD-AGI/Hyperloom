@@ -130,9 +130,11 @@ class AgentSpec:
     which the profile file says came from ``root_shares_source``. Arbor (:mod:`arbor_adapter`) is also given ``ep``,
     the expert-parallel size the workload is served at, and may be given ``plan``, the file of the branch's share of
     the session's directions, ``pack``, the name of the pack it runs (``None`` for the adapter's default),
-    ``launch``, the file of the launch the recipe's adds to (``None`` when the recipe's is the whole launch), and
-    ``dossier``, the dossier the session's dossier pass wrote, for its checkout (``None`` without one); the onboarding
-    model is told none of them."""
+    ``launch``, the file of the launch the recipe's adds to (``None`` when the recipe's is the whole launch),
+    ``dossier``, the dossier the session's dossier pass wrote, for its checkout (``None`` without one), and
+    ``review``, how its review gate is handed over (:data:`~hyperloom_multibranch.specialist.arbor_adapter.REVIEW_HOST`
+    when MB reviews before its branches open, :data:`~hyperloom_multibranch.specialist.arbor_adapter.REVIEW_OFF` when
+    nobody does, ``""`` to leave the config without either); the onboarding model is told none of them."""
 
     model: str
     framework: str
@@ -159,6 +161,7 @@ class AgentSpec:
     launch: str | None = None
     dossier: str | None = None
     root_shares_source: str = ROOT_PROFILE_SOURCE
+    review: str = ""
 
     def to_document(self) -> dict[str, object]:
         return {

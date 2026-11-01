@@ -122,6 +122,7 @@ from hyperloom.measure.pins import IMAGE_DIGEST_VAR
 from hyperloom.measure.runner.cache_build import CacheBuildError
 from hyperloom.measure.short_prompts.staging import CACHE_ENV as RUNNER_CACHE_ENV
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient, RemoteRecipeConfigurationError
+from hyperloom_multibranch import points
 from hyperloom_multibranch.contracts.llm_prices import price_of
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.blackboard.knowledge.reference_leads import INFERENCEX_REFERENCE
@@ -144,6 +145,7 @@ from hyperloom_multibranch.scheduling.hosted_run import (
     toolbox_grant,
     write_final_exit,
 )
+from hyperloom_multibranch.scheduling import review
 from hyperloom_multibranch.scheduling.layout import create_session
 from hyperloom_multibranch.scheduling.lifecycle import (
     PersistedRun,
@@ -170,6 +172,7 @@ from hyperloom_multibranch.scheduling.processes import ProcessRegistry, adopting
 from hyperloom_multibranch.scheduling.reference import ReferenceSource, reference_source
 from hyperloom_multibranch.scheduling.roster import RosterCaps
 from hyperloom_multibranch.scheduling.settings import (
+    AGENT_PORT,
     DOSSIER_MINUTES,
     InferenceXShape,
     KernelOptimizer,
@@ -177,11 +180,12 @@ from hyperloom_multibranch.scheduling.settings import (
     RunSettings,
     Workload,
 )
-from hyperloom_multibranch.specialist.arbor_adapter import ArborRefused, read_launch
+from hyperloom_multibranch.specialist.arbor_adapter import DOSSIER_INDEX, ArborRefused, read_launch
 
 PROG = "hyperloom-multibranch"
 EXIT_FAILED = 1
 EXIT_USAGE = 2
+MAX_PORT = 65535
 DEFAULT_MAX_BRANCHES = 4
 DEFAULT_MAX_K_PER_BRANCH = 2
 DEFAULT_JUDGE_INTERVAL_SECONDS = 600.0
@@ -212,6 +216,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog=PROG, description="Run a multi-branch optimization session.")
     commands = parser.add_subparsers(dest="command", required=True)
     _add_run_options(commands.add_parser("run", help="Run one session: PRELUDE, EXPLORE, FINAL and CLOSE."))
+    points.add_parser(commands)
+    review.add_parser(commands)
     final_only = commands.add_parser(
         "final-only",
         help=(
@@ -441,6 +447,50 @@ def _add_agent_options(run: argparse.ArgumentParser) -> None:
             " (examples/multibranch-arbor-launch)."
         ),
     )
+    run.add_argument(
+        "--agent-port",
+        dest="agent_port",
+        type=int,
+        default=None,
+        metavar="PORT",
+        help=(
+            "The first port of the blocks the --autonomous-agent servers take, one block per agent and one for the"
+            f" dossier pass; sessions that share a machine each need their own (default {AGENT_PORT})."
+        ),
+    )
+    run.add_argument(
+        "--stop-after-map",
+        dest="stop_after_map",
+        action="store_true",
+        help=(
+            "End the session before EXPLORE once the Arbor --autonomous-agent directions are mapped, one Arbor's"
+            " too: PRELUDE, the dossier pass (--agent-dossier-minutes; with 0, a map generated from the root's"
+            " profile), then CLOSE. The map and its dossier are kept in the session's MB-agent-map/ for review."
+        ),
+    )
+    run.add_argument(
+        "--agent-dossier",
+        dest="agent_dossier",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help=(
+            "The dossier the reviewed --agent-directions map was made with, a directory with Arbor's dossier index:"
+            " every Arbor --autonomous-agent branch gets it in its checkout, as it would a dossier pass's"
+            " (a --stop-after-map session keeps it under MB-agent-map/dossier/)."
+        ),
+    )
+    run.add_argument(
+        "--no-review-gate",
+        dest="review_gate",
+        action="store_false",
+        help=(
+            "Open the Arbor --autonomous-agent branches without a person's review: by default the session pauses"
+            " once their map is made, holding no cards, until `hyperloom-multibranch review --session DIR approve`"
+            " (or reject). With this flag it does not pause, and its Arbors are started with their own review gate"
+            " off. For unattended runs, and for the second stage of a reviewed run."
+        ),
+    )
 
 
 def _positive(args: argparse.Namespace, names: tuple[str, ...]) -> list[str]:
@@ -543,6 +593,41 @@ def _agent_launch(path: Path | None, agents: list[str]) -> str:
     return str(path.absolute())
 
 
+def _stop_after_map(stop: bool, agents: list[str], directions: Path | None) -> bool:
+    """Whether the session stops after its map; refused with no agent to map for, or a map already given."""
+
+    if stop and not agents:
+        raise ValueError("--stop-after-map needs an --autonomous-agent whose directions it maps")
+    if stop and directions is not None:
+        raise ValueError("--stop-after-map maps directions, and --agent-directions already gives them")
+    return stop
+
+
+def _agent_dossier(path: Path | None, directions: Path | None) -> str:
+    """The absolute path of the dossier every Arbor branch is given, ``""`` without one; refused without the reviewed
+    map it was made with, or when it is no dossier: a directory with Arbor's dossier index."""
+
+    if path is None:
+        return ""
+    if directions is None:
+        raise ValueError("--agent-dossier is given with the --agent-directions map it was made with")
+    if not (path / DOSSIER_INDEX).is_file():
+        raise ValueError(f"--agent-dossier {path} is no dossier: it has no {DOSSIER_INDEX}")
+    return str(path.absolute())
+
+
+def _agent_port(port: int | None, agents: list[str]) -> int:
+    """The first port of the agents' port blocks; refused with no agent to serve on it, or when it is no port."""
+
+    if port is None:
+        return AGENT_PORT
+    if not agents:
+        raise ValueError("--agent-port needs an --autonomous-agent to serve on it")
+    if not 1 <= port <= MAX_PORT:
+        raise ValueError(f"--agent-port {port} is not a port")
+    return port
+
+
 def _user_directions(files: list[Path], max_branches: int) -> tuple[str, ...]:
     if len(files) > max_branches:
         raise ValueError(f"--specialist-prompt is given {len(files)} times, more than --max-branches {max_branches}")
@@ -621,6 +706,10 @@ def settings_from(
         agent_pack=_agent_pack(args.agent_pack, args.agents or []),
         agent_launch=_agent_launch(args.agent_launch, args.agents or []),
         agent_dossier_minutes=_dossier_minutes(args.agent_dossier_minutes),
+        agent_port=_agent_port(args.agent_port, args.agents or []),
+        stop_after_map=_stop_after_map(args.stop_after_map, args.agents or [], args.agent_directions),
+        agent_dossier=_agent_dossier(args.agent_dossier, args.agent_directions),
+        review_gate=args.review_gate,
     )
 
 
@@ -981,6 +1070,14 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "hosted":
         return hosted_run()
+    if args.command == "points":
+        try:
+            return points.main(args)
+        except ValueError as exc:
+            print(f"{parser.prog} points: error: {exc}", file=sys.stderr)
+            return EXIT_USAGE
+    if args.command == "review":
+        return review.main(args)
     persisted = grant = None
     try:
         if args.command == "final-only":

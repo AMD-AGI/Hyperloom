@@ -14,7 +14,8 @@ benchmark client (:mod:`gate_client`), each agent's spec names it aimed at the b
 
 The session's dossier pass (:mod:`dossier_pass`) runs on the same: a port block of its own, a sandbox of a lease, a
 worktree and a directory beside the branches', under :data:`~.dossier_pass.DOSSIER_HOLDER`. The dossier it writes is
-given to every agent branch built after it, which copies it into its checkout.
+given to every agent branch built after it, which copies it into its checkout; a run given a reviewed map and its
+dossier runs no pass, and gives every branch that dossier.
 """
 
 from __future__ import annotations
@@ -117,7 +118,8 @@ class AgentSessions:
     start commit's arguments and the workspace are each branch's own); the onboarding ``command`` and its ``env``; the
     ``toolbox`` the sandboxes are leased from and imports go to, and the ``repo`` they are read against; the
     ``sandboxes`` the agents run in; and ``client``, the gate's benchmark client, ``None`` when the session has none to
-    give. ``dossier`` is the dossier the session's dossier pass wrote, once it has."""
+    give. ``dossier`` is the dossier every agent branch is given: the one the run was given with its reviewed map, or
+    the one the session's dossier pass wrote, once it has."""
 
     spec: AgentSpec
     command: AgentCommand
@@ -126,7 +128,7 @@ class AgentSessions:
     repo: ExperimentRepo
     sandboxes: AgentSandboxes
     client: GateClient | None = None
-    dossier: str | None = field(default=None, init=False)
+    dossier: str | None = None
     _taken: dict[str, int] = field(default_factory=dict, init=False)
 
     def session(self, start: SessionStart, place: BranchPlace) -> AutonomousSession:

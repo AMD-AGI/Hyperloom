@@ -596,6 +596,49 @@ def test_what_arbor_refuses_at_its_start_is_refused_before_it_starts(tmp_path: P
     assert len(reasons) == len(expected) and all(said in reason for said, reason in zip(expected, reasons))
 
 
+#: Arbor main 1fa2069's arbor/component.py, as far as the adapter reads it: its component keys, "review" among them.
+GATED_COMPONENT = (
+    'BLOCK_KEYS = ("host", "deadline", "seconds", "notes", "bench_command", "outbox", "phase_minutes",\n'
+    '              "root", "plan", "stop_at", "profile", "review")\n'
+    'REVIEW_BY = ("host",)\n'
+)
+#: Arbor 05d04d5's: no review gate.
+UNGATED_COMPONENT = (
+    'BLOCK_KEYS = ("host", "deadline", "seconds", "notes", "bench_command", "outbox", "phase_minutes",\n'
+    '              "root", "plan", "stop_at", "profile")\n'
+)
+
+
+@pytest.mark.parametrize(
+    ("component", "review", "block", "top"),
+    [
+        (GATED_COMPONENT, "host", "host", None),
+        (GATED_COMPONENT, "off", None, False),
+        (GATED_COMPONENT, "", None, None),
+        (UNGATED_COMPONENT, "host", None, None),
+        (UNGATED_COMPONENT, "off", None, None),
+        ("# no component mode here\n", "host", None, None),
+    ],
+)
+def test_the_review_gate_is_handed_over_only_to_an_arbor_that_has_one(
+    tmp_path: Path, component: str, review: str, block: str | None, top: bool | None
+) -> None:
+    checkout = _write(tmp_path / "checkout", {**CHECKOUT_FILES, "arbor/component.py": component})
+
+    config = arbor_config(_spec(tmp_path, review=review), checkout, BRANCH_RUN)
+
+    assert arbor_adapter.has_review_gate(checkout) == ("review" in component)
+    assert config["component"].get("review") == block and config.get("review_gate") == top
+    assert not [reason for reason in refusals(config, {}) if "component" in reason and "review" in reason]
+
+
+def test_a_review_by_anyone_but_the_host_is_refused(tmp_path: Path) -> None:
+    config = arbor_config(_spec(tmp_path), tmp_path / "checkout", BRANCH_RUN)
+    config = {**config, "component": {**config["component"], "review": "operator"}}
+
+    assert "component.review is 'operator', not 'host'" in refusals(config, {})
+
+
 async def test_an_arbor_checkout_is_made_ready_by_the_adapter_without_the_onboarding_model(tmp_path: Path) -> None:
     repo, process = _arbor_repo(tmp_path), Process(None)
     sandbox, onboard = Sandbox([process]), Onboarder([])

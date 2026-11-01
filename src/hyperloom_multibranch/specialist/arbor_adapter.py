@@ -25,10 +25,17 @@ Arbor looks a dossier up. The root's op shares are not the adapter's: the prefli
 The spec's ``launch``, a launch file (:func:`read_launch`), stands in for what MB does not carry yet: the launch a
 Magpie AgentX recipe resolves from InferenceX, of which the root recipe holds only what is added to it. Without one,
 an AgentX branch is refused before Arbor starts, which would otherwise serve defaults MB does not measure.
+
+The spec's ``review`` hands Arbor's human review gate over (ArborDevelopment #30): Arbor waits at the start of a new
+session for a person's approval unless the host says it reviewed (``component.review: "host"``, :data:`REVIEW_HOST`)
+or the config turns the gate off (``"review_gate": false``, :data:`REVIEW_OFF`). Arbor refuses a component key it does
+not know, so either is written only for a checkout whose component mode has the gate (:func:`has_review_gate`); an
+older Arbor gets neither and runs as before.
 """
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
 import os
@@ -112,7 +119,16 @@ BLOCK_KEYS = (
     "plan",
     "stop_at",
     "profile",
+    "review",
 )
+#: How a spec hands Arbor's review gate over: the host reviewed the campaign before it starts the run (the only value
+#: ``component.review`` takes), or nobody reviews it (``"review_gate": false`` at the config's top level).
+REVIEW_KEY = "review"
+REVIEW_HOST = "host"
+REVIEW_OFF = "off"
+REVIEW_GATE_KEY = "review_gate"
+#: Where an Arbor checkout declares its component block's keys, which says whether it has the review gate.
+COMPONENT_MODULE = "arbor/component.py"
 #: Arbor's ledger: FACT and DEAD_END records are what it measured and ruled out.
 LEDGER = {"id": "id", "kind": "type", "text": "claim", "kinds": {"FACT": "insight", "DEAD_END": "pitfall"}}
 ENCODING = "utf-8"
@@ -210,6 +226,22 @@ def is_arbor(checkout: Path) -> bool:
     """Whether ``checkout`` is Arbor's, which runs as a component of a host: it has every one of :data:`MARKERS`."""
 
     return all((checkout / marker).is_file() for marker in MARKERS)
+
+
+def has_review_gate(checkout: Path) -> bool:
+    """Whether the Arbor in ``checkout`` has the human review gate: its component block takes :data:`REVIEW_KEY`, as
+    its :data:`COMPONENT_MODULE` declares ``BLOCK_KEYS``, read without importing Arbor (Arbor ``1fa2069`` and later);
+    ``False`` for a checkout without that module, or whose keys cannot be read."""
+
+    try:
+        tree = ast.parse((checkout / COMPONENT_MODULE).read_text(encoding=ENCODING))
+    except (OSError, SyntaxError, UnicodeDecodeError):
+        return False
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "BLOCK_KEYS" for t in node.targets):
+            if isinstance(node.value, (ast.Tuple, ast.List)):
+                return any(isinstance(e, ast.Constant) and e.value == REVIEW_KEY for e in node.value.elts)
+    return False
 
 
 def arbor_manifest(
@@ -334,7 +366,11 @@ def arbor_config(spec: AgentSpec, checkout: Path, run: ArborRun) -> dict[str, An
         component["stop_at"] = run.stop_at
     elif spec.plan:
         component["plan"] = spec.plan
+    gate = spec.review if spec.review and has_review_gate(checkout) else ""
+    if gate == REVIEW_HOST:
+        component[REVIEW_KEY] = REVIEW_HOST
     return {
+        **({REVIEW_GATE_KEY: False} if gate == REVIEW_OFF else {}),
         "pack": name,
         "identity": f"{HOST} {Path(spec.model).name}",
         "goal": f"{spec.metric} of {spec.model} on {spec.framework} at TP{spec.tp} on {spec.gpu_type}, as MB measures it",
@@ -514,6 +550,8 @@ def _block_refusals(component: Mapping[str, Any]) -> list[str]:
         reasons.append(f"no deadline: component.deadline is {deadline!r}")
     if component.get("plan") is not None and component.get("stop_at") is not None:
         reasons.append("a dossier pass (component.stop_at) takes no plan")
+    if component.get(REVIEW_KEY) not in (None, REVIEW_HOST):
+        reasons.append(f"component.review is {component.get(REVIEW_KEY)!r}, not {REVIEW_HOST!r}")
     return reasons
 
 
@@ -648,9 +686,14 @@ __all__ = [
     "EXIT_REFUSED",
     "INSTALL",
     "LAUNCH_KEYS",
+    "COMPONENT_MODULE",
     "MAP_FILE",
     "MAPPED",
     "MARKERS",
+    "REVIEW_GATE_KEY",
+    "REVIEW_HOST",
+    "REVIEW_KEY",
+    "REVIEW_OFF",
     "ArborCheckout",
     "ArborRefused",
     "ArborRun",
@@ -661,6 +704,7 @@ __all__ = [
     "bench_command",
     "carry_dossier",
     "generate_directions",
+    "has_review_gate",
     "is_arbor",
     "link_built",
     "mapped",

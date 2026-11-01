@@ -87,7 +87,7 @@ from hyperloom_multibranch.scheduling.peers import Peers, PeerSetup, PeersUnavai
 from hyperloom_multibranch.scheduling.prelude import prelude_argv
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.roster import Roster, RosterCaps
-from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, Workload
+from hyperloom_multibranch.scheduling.settings import AGENT_PORT, InferenceXShape, KernelOptimizer, Workload
 from hyperloom_multibranch.specialist import agent_sessions as agent_sessions_module
 from hyperloom_multibranch.specialist import model_sessions as model_sessions_module
 from hyperloom_multibranch.specialist import worktree as worktree_module
@@ -206,6 +206,16 @@ def test_the_agents_spec_names_the_pack_the_session_gives_its_arbors_and_none_by
 def test_the_agents_spec_names_the_launch_file_the_session_gives_its_arbors_and_none_by_default() -> None:
     assert _agent_spec(WORKLOAD, "", "/runs/launch.json").launch == "/runs/launch.json"
     assert _agent_spec(WORKLOAD).launch is None
+
+
+def test_the_agents_spec_starts_its_port_blocks_where_the_session_says() -> None:
+    assert _agent_spec(WORKLOAD, "", "", 32100).port == 32100
+    assert _agent_spec(WORKLOAD).port == AGENT_PORT
+
+
+def test_the_agents_spec_hands_their_review_gate_over_as_the_session_says() -> None:
+    assert _agent_spec(WORKLOAD, "", "", AGENT_PORT, "host").review == "host"
+    assert _agent_spec(WORKLOAD).review == ""
 
 
 @pytest.mark.parametrize("optimizer", list(KernelOptimizer))
@@ -819,7 +829,7 @@ def _agent_clients(monkeypatch: pytest.MonkeyPatch) -> list[GateClient | None]:
 
     clients: list[GateClient | None] = []
 
-    def agents(*args: object, client: GateClient | None = None) -> object:
+    def agents(*args: object, client: GateClient | None = None, dossier: str | None = None) -> object:
         clients.append(client)
         return SimpleNamespace()
 
@@ -845,6 +855,29 @@ async def test_an_agent_of_an_inferencex_session_measures_with_the_client_of_the
     [client] = clients
     assert client is not None and (client.conc, client.isl, client.osl) == (WORKLOAD.conc, 1024, 512)
     assert client.inferencex_root == HOST.inferencex.path
+
+
+@pytest.mark.parametrize(
+    ("given", "dossier"), [("/reviewed/dossier/qwen3-8b", "/reviewed/dossier/qwen3-8b"), ("", None)]
+)
+async def test_the_agents_are_given_the_reviewed_dossier_the_run_names_and_none_without(
+    built: _Built, monkeypatch: pytest.MonkeyPatch, given: str, dossier: str | None
+) -> None:
+    dossiers: list[str | None] = []
+
+    def agents(*args: object, client: GateClient | None = None, dossier: str | None = None) -> object:
+        dossiers.append(dossier)
+        return SimpleNamespace()
+
+    _agent_clients(monkeypatch)
+    monkeypatch.setattr(agent_sessions_module, "AgentSessions", agents)
+    wiring = _with_agent(built.wiring)
+
+    model_backed_sessions(AgentCommand("claude", "claude"))(
+        replace(wiring, setup=replace(wiring.setup, agent_dossier=given))
+    )
+
+    assert dossiers == [dossier]
 
 
 async def test_an_agent_of_an_agentx_session_gets_no_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -891,6 +924,9 @@ async def test_the_specialists_are_told_of_and_give_back_the_dev_sandboxes_the_s
                 agents=(),
                 agent_pack="",
                 agent_launch="",
+                agent_port=AGENT_PORT,
+                agent_dossier="",
+                agent_review="",
             ),
             tokens=None,
             repo=None,
@@ -972,6 +1008,9 @@ def test_the_specialists_source_base_holds_aiter_beside_the_framework_only_from_
             agents=(),
             agent_pack="",
             agent_launch="",
+            agent_port=AGENT_PORT,
+            agent_dossier="",
+            agent_review="",
         ),
         tokens=None,
         repo=None,
@@ -1091,6 +1130,9 @@ def test_a_session_on_a_host_that_builds_native_code_lays_out_the_native_tree_an
                 agents=(),
                 agent_pack="",
                 agent_launch="",
+                agent_port=AGENT_PORT,
+                agent_dossier="",
+                agent_review="",
             ),
             tokens=None,
             repo=None,

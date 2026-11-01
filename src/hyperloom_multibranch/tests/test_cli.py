@@ -65,7 +65,8 @@ from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.scheduling.budget import MB_CLOSE_GRACE_CAP_SECONDS, MB_DEFAULT_MAX_HOURS
 from hyperloom_multibranch.scheduling.hosted_run import GRANT_MARGIN_SECONDS
 from hyperloom_multibranch.scheduling.clock import Clock
-from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
+from hyperloom_multibranch.scheduling import review
+from hyperloom_multibranch.scheduling.layout import REVIEW_DIR, SessionLayout, create_session
 from hyperloom_multibranch.scheduling.lifecycle import PersistedRun, persisted_run
 from hyperloom_multibranch.scheduling.manifest import SessionManifest, code_version
 from hyperloom_multibranch.scheduling import local_peers
@@ -76,6 +77,7 @@ from hyperloom_multibranch.scheduling.reference import ReferenceSource
 from hyperloom_multibranch.scheduling.tests.checkouts import knowledge_checkout
 from hyperloom_multibranch.scheduling.roster import RosterCaps
 from hyperloom_multibranch.scheduling.settings import (
+    AGENT_PORT,
     DOSSIER_MINUTES,
     InferenceXShape,
     KernelOptimizer,
@@ -386,6 +388,100 @@ def test_an_agent_launch_without_an_agent_or_unusable_is_a_usage_error(
 
     with pytest.raises(ValueError, match=match):
         _settings(*extra, "--agent-launch", str(path))
+
+
+def test_the_agent_port_is_the_run_s_own_or_the_shared_default() -> None:
+    assert _settings("--autonomous-agent", "/agents/arbor", "--agent-port", "32100").agent_port == 32100
+    assert _settings("--autonomous-agent", "/agents/arbor").agent_port == AGENT_PORT
+
+
+@pytest.mark.parametrize(
+    ("extra", "match"),
+    [
+        (["--agent-port", "32100"], "needs an --autonomous-agent"),
+        (["--autonomous-agent", "/agents/arbor", "--agent-port", "0"], "is not a port"),
+        (["--autonomous-agent", "/agents/arbor", "--agent-port", "65536"], "is not a port"),
+    ],
+    ids=["no-agent", "zero", "past-the-last-port"],
+)
+def test_an_agent_port_without_an_agent_or_that_is_no_port_is_a_usage_error(extra: list[str], match: str) -> None:
+    with pytest.raises(ValueError, match=match):
+        _settings(*extra)
+
+
+def test_a_run_stops_after_its_map_only_when_asked() -> None:
+    assert _settings("--autonomous-agent", "/agents/arbor", "--stop-after-map").stop_after_map
+    assert not _settings("--autonomous-agent", "/agents/arbor").stop_after_map
+
+
+def test_the_review_gate_is_on_unless_the_run_turns_it_off() -> None:
+    assert _settings("--autonomous-agent", "/agents/arbor").review_gate
+    assert not _settings("--autonomous-agent", "/agents/arbor", "--no-review-gate").review_gate
+
+
+def test_a_person_shows_and_approves_a_session_s_review_and_a_second_decision_is_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    session, map_file = tmp_path / "MB-session", tmp_path / "directions.json"
+    map_file.write_text(json.dumps({"directions": [{"id": "m-attn", "title": "attention"}]}))
+    review.request(session / REVIEW_DIR, session, map_file, None, "dossier pass", 1793500000.0)
+
+    assert cli.main(["review", "--session", str(session), "show"]) == 0
+    shown = capsys.readouterr().out
+    assert "`m-attn`" in shown and "Status: pending" in shown
+    assert cli.main(["review", "--session", str(session), "approve", "--by", "alice", "--note", "ok"]) == 0
+    assert "approved by alice" in capsys.readouterr().out
+    assert cli.main(["review", "--session", str(session), "reject"]) == review.EXIT_REFUSED
+    assert "the review is already approved" in capsys.readouterr().err
+
+
+def test_a_review_command_for_a_session_with_no_review_is_refused(tmp_path: Path) -> None:
+    assert cli.main(["review", "--session", str(tmp_path), "show"]) == review.EXIT_REFUSED
+    assert cli.main(["review", "--session", str(tmp_path), "reject", "--note", "no"]) == review.EXIT_REFUSED
+
+
+def test_stopping_after_the_map_without_an_agent_or_with_a_map_given_is_a_usage_error(tmp_path: Path) -> None:
+    given = tmp_path / "map.json"
+    given.write_text(json.dumps({"directions": [{"id": "m-attn"}]}))
+
+    with pytest.raises(ValueError, match="needs an --autonomous-agent"):
+        _settings("--stop-after-map")
+    with pytest.raises(ValueError, match="already gives them"):
+        _settings("--autonomous-agent", "/agents/arbor", "--agent-directions", str(given), "--stop-after-map")
+
+
+def _reviewed(tmp_path: Path) -> tuple[Path, Path]:
+    """A reviewed map and the dossier it was made with, as a ``--stop-after-map`` session keeps them."""
+
+    given, dossier = tmp_path / "directions.json", tmp_path / "dossier" / "qwen3-8b"
+    given.write_text(json.dumps({"directions": [{"id": "m-attn"}]}))
+    dossier.mkdir(parents=True)
+    (dossier / "README.md").write_text("# dossier\n")
+    return given, dossier
+
+
+def test_the_reviewed_dossier_is_kept_by_its_absolute_path_beside_its_map(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    given, _ = _reviewed(tmp_path)
+    agent = ["--autonomous-agent", "/agents/arbor", "--agent-directions", str(given)]
+
+    assert _settings(*agent, "--agent-dossier", "dossier/qwen3-8b").agent_dossier == str(
+        tmp_path / "dossier" / "qwen3-8b"
+    )
+    assert _settings(*agent).agent_dossier == ""
+
+
+def test_a_dossier_without_its_map_or_that_is_no_dossier_is_a_usage_error(tmp_path: Path) -> None:
+    given, dossier = _reviewed(tmp_path)
+
+    with pytest.raises(ValueError, match="with the --agent-directions map"):
+        _settings("--autonomous-agent", "/agents/arbor", "--agent-dossier", str(dossier))
+    with pytest.raises(ValueError, match="is no dossier"):
+        _settings(
+            "--autonomous-agent", "/agents/arbor", "--agent-directions", str(given), "--agent-dossier", str(tmp_path)
+        )
 
 
 @pytest.mark.parametrize(

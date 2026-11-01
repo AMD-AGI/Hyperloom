@@ -8,9 +8,11 @@ EXPLORE then runs until the longest baseline test and one CLOSE grace are left b
 score the branches with the frontier's defaults for the session's budget. Once the baseline is established, a session
 with an RSI archive plays the scheduling playbook ``--playbook`` asks for, the champion of the pool beside it or a
 playbook on trial, recorded under ``playbook`` in ``policy_versions``. The FINAL candidates are fixed while every
-branch still stands, then exploration ends and FINAL validates them. A failed PRELUDE, an EXPLORE that ran out of
-cards to measure on, a stop signal, the session deadline before FINAL starts or an unhandled error skip straight to
-CLOSE, which always runs and kills every process the session started. FINAL waits for the validation tests it started, past the deadline and the hard
+branch still stands, then exploration ends and FINAL validates them. With the review on, a session with Arbor agents
+pauses before their branches open until a person approves their map (:mod:`.review`); the pause moves the deadline,
+and EXPLORE's end, by its length. A failed PRELUDE, a run asked to stop once its Arbor agents' directions are mapped,
+a map a person rejected, an EXPLORE that ran out of cards to measure on, a stop signal, the session deadline
+before FINAL starts or an unhandled error skip straight to CLOSE, which always runs and kills every process the session started. FINAL waits for the validation tests it started, past the deadline and the hard
 stop if need be, and moves the hard stop to no sooner than one CLOSE grace from its end. The deadline plus the CLOSE
 grace bounds CLOSE itself; a stop signal brings that hard stop forward to the CLOSE grace from the signal, once, and the
 unwinding of the cancelled phases and CLOSE share it. An unhandled error brings it forward the same way when CLOSE
@@ -32,7 +34,7 @@ import math
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from hyperloom.common.outside_facts.image_check import ImageCheckReport, run_image_check
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
@@ -61,9 +63,14 @@ from hyperloom_multibranch.scheduling.agent_plans import (
     DOSSIER_SKIPPED,
     DOSSIER_STARTED,
     GENERATED_FOR,
+    MADE_BY_PASS,
+    MADE_BY_SHARES,
+    MAP_KEPT,
     ROOT_SHARES_READ,
     agent_plans,
     arbor_agents,
+    generated_map,
+    keep_map,
 )
 from hyperloom_multibranch.scheduling.branches import BranchControl
 from hyperloom_multibranch.scheduling.budget import HardStop, SessionBudget, budget_seconds, explore_gpu_seconds
@@ -101,6 +108,19 @@ from hyperloom_multibranch.scheduling.prelude import (
 )
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.reference import copy_references
+from hyperloom_multibranch.scheduling.review import (
+    MADE_BY_USER,
+    POLL_SECONDS,
+    REJECTED,
+    REVIEW_APPROVED,
+    REVIEW_PAGE,
+    REVIEW_REJECTED,
+    REVIEW_REQUESTED,
+    REVIEW_SKIPPED,
+    ReviewRejected,
+    request,
+    wait,
+)
 from hyperloom_multibranch.scheduling.root_shares import RootShares, root_shares
 from hyperloom_multibranch.scheduling.requests import SessionChecks, SessionTests
 from hyperloom_multibranch.scheduling.roster import QUOTA_POLICY_VERSION, Roster, final_quota
@@ -115,7 +135,11 @@ from hyperloom_multibranch.scheduling.stops import (
 from hyperloom_multibranch.scheduling.similarity import BranchSimilarity
 from hyperloom_multibranch.scheduling.widening import Widening
 from hyperloom_multibranch.specialist.agent_onboarding import ROOT_PROFILE_SOURCE, AttemptFailed
+from hyperloom_multibranch.specialist.arbor_adapter import REVIEW_HOST, REVIEW_OFF, SplitFailed
 from hyperloom_multibranch.specialist.prompts import prompt_versions
+
+if TYPE_CHECKING:
+    from hyperloom_multibranch.specialist.dossier_pass import DossierOutcome
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +167,9 @@ COMPLETED_REASONS = frozenset(
 )
 CUT_SHORT = "CLOSE was cut short after a stop signal"
 NO_CARDS_LEFT = "the toolbox has fewer usable cards than one test needs, so FINAL could not run"
+#: Why a session that was to stop after its map kept none.
+NO_ARBOR_TO_MAP = "no map: no agent named is an Arbor whose directions could be mapped"
+NO_MAP = "no map: the dossier pass set none and none could be generated from the root's shares"
 
 
 @dataclass(frozen=True)
@@ -150,7 +177,8 @@ class SessionOutcome:
     """How the session ended; ``close`` is ``None`` only while CLOSE has not run.
 
     The session completed (exit code 0) only when it ran its course without an error, FINAL chose a commit, and the
-    stop left no process and no test behind.
+    stop left no process and no test behind; or when, asked to stop after its map, it kept one without an error and the
+    stop left nothing behind; or when a person rejected its agent map at its review and the stop left nothing behind.
     """
 
     stop_reason: SessionStopReason
@@ -160,9 +188,11 @@ class SessionOutcome:
 
     @property
     def completed(self) -> bool:
-        ran_its_course = self.stop_reason in COMPLETED_REASONS and not self.error
+        clean = not self.error and self.close is not None and self.close.stop.clean
+        if self.stop_reason in (SessionStopReason.MAPPED, SessionStopReason.REVIEW_REJECTED):
+            return clean
         chose = self.final is not None and self.final.chosen is not None
-        return ran_its_course and chose and self.close is not None and self.close.stop.clean
+        return self.stop_reason in COMPLETED_REASONS and chose and clean
 
     @property
     def exit_code(self) -> int:
@@ -254,6 +284,11 @@ class Session:
         self._signals = StopSignals()
         self._in_final = False
         self._image_check: ImageCheckReport | None = None
+        # The budget and hard stop the session's deadline is read from, which a person's review moves by its length
+        # (_extend); while the review is pending the deadline does not pass.
+        self._budget: SessionBudget | None = None
+        self._hard_stop: HardStop | None = None
+        self._reviewing = False
 
     def _open_records(self) -> None:
         """The scheduler's blackboard handle, the roster, the decision log and the blob store, on the session's layout."""
@@ -278,6 +313,10 @@ class Session:
             settings.agents,
             settings.agent_pack,
             settings.agent_launch,
+            settings.agent_port,
+            settings.agent_dossier,
+            # The session's review stands in for each Arbor's own; without one, nobody's does.
+            REVIEW_HOST if settings.review_gate else REVIEW_OFF,
         )
 
     def _score_with_defaults(self) -> None:
@@ -377,9 +416,10 @@ class Session:
     async def _until_stopped(
         self, work: Awaitable[SessionOutcome], budget: SessionBudget, hard_stop: HardStop
     ) -> SessionOutcome:
+        self._budget, self._hard_stop = budget, hard_stop
         phases = asyncio.ensure_future(work)
         signal = asyncio.ensure_future(self._signals.wait())
-        deadline = asyncio.ensure_future(self._clock.sleep(budget.remaining(self._clock.now())))
+        deadline = asyncio.ensure_future(self._past_deadline())
         try:
             await asyncio.wait({phases, signal, deadline}, return_when=asyncio.FIRST_COMPLETED)
             if self._in_final:
@@ -400,6 +440,26 @@ class Session:
             )
         await self._unwind(phases, hard_stop.at)
         return ending
+
+    async def _past_deadline(self) -> None:
+        """Return once the session's deadline passes: its budget's, never while a person's review is pending, and
+        later once the review moved it (:meth:`_extend`)."""
+
+        while self._budget is not None:
+            left = self._budget.remaining(self._clock.now())
+            if left <= 0 and not self._reviewing:
+                return
+            await self._clock.sleep(left if left > 0 else POLL_SECONDS)
+
+    def _extend(self, seconds: float) -> None:
+        """Move the session's deadline and its hard stop ``seconds`` later: the time it paused for a person's review,
+        which does not count against ``--max-hours``."""
+
+        if self._budget is None or seconds <= 0:
+            return
+        self._budget = replace(self._budget, total_seconds=self._budget.total_seconds + seconds)
+        if self._hard_stop is not None:
+            self._hard_stop.extend(seconds)
 
     async def _unwind(self, phases: asyncio.Future[SessionOutcome], until: float) -> None:
         """Cancel the phases and give them until ``until`` (clock seconds), or a second signal, to unwind.
@@ -444,7 +504,15 @@ class Session:
                 policy_versions=self._policy_versions(),
             )
         )
-        plans = await self._agent_plans(prelude)
+        if self._settings.stop_after_map:
+            # Its stop is the review point: the map is kept and reviewed offline, so the session does not pause.
+            return await self._stop_after_map(prelude)
+        try:
+            plans = await self._agent_plans(prelude)
+        except ReviewRejected as exc:
+            logger.info("the agent map was rejected at its review: %s", exc)
+            return SessionOutcome(SessionStopReason.REVIEW_REJECTED, None, None, "")
+        budget = self._budget or budget  # a review's pause moved the deadline
         explore_end = budget.explore_end(self._clock.now(), prelude.longest_root_test)
         self._phase("explore", explore_end=explore_end)
         window = ExploreWindow(
@@ -472,14 +540,102 @@ class Session:
     async def _agent_plans(self, prelude: PreludeResult) -> tuple[str, ...]:
         """Each agent branch's share of the directions (:mod:`agent_plans`): of the user's map; for two or more Arbors
         without one, of the dossier pass's map, else of one generated from the root's shares, waited for (its op
-        shares, else its kernel shares); for fewer, none. The time this takes is EXPLORE's."""
+        shares, else its kernel shares); for fewer, none. The time this takes is EXPLORE's.
+
+        With the review on, the session pauses for a person once the map is made and before it is split (:meth:`_review`):
+        the user's map, or for one Arbor too the pass's or the generated one, which a lone Arbor then takes whole.
+        Raises :class:`~hyperloom_multibranch.scheduling.review.ReviewRejected` when the person rejects it."""
 
         settings, work = self._settings, self._layout.agent_plans
+        if settings.agents and not settings.review_gate:
+            self._decisions.record(Decision(DecisionKind.PRELUDE, REVIEW_SKIPPED, INTEGRATION_BRANCH, {}))
         if not settings.agents or settings.agent_directions:
+            if settings.agent_directions and settings.review_gate and await self._arbors():
+                dossier = Path(settings.agent_dossier) if settings.agent_dossier else None
+                await self._review(Path(settings.agent_directions), dossier, MADE_BY_USER)
             return await agent_plans(settings.agents, settings.agent_directions, work)
         arbors = await self._arbors()
-        if len(arbors) < GENERATED_FOR:
+        if not arbors or (len(arbors) < GENERATED_FOR and not settings.review_gate):
             return await agent_plans(settings.agents, "", work)
+        shares = await self._root_shares(prelude)
+        outcome = await self._dossier_map(settings.agents[min(arbors)], prelude.start_commit, shares)
+        map_file = "" if outcome is None or outcome.map is None else str(outcome.map)
+        if settings.review_gate:
+            made_by = MADE_BY_PASS if map_file else MADE_BY_SHARES
+            map_file = map_file or await self._generated(arbors, shares)
+            dossier = None if outcome is None else outcome.dossier
+            await self._review(Path(map_file) if map_file else None, dossier, made_by)
+        if shares is None:
+            return await agent_plans(settings.agents, map_file, work)
+        return await agent_plans(settings.agents, map_file, work, shares.shares, shares.source)
+
+    async def _generated(self, arbors: dict[int, Path], shares: RootShares | None) -> str:
+        """The map the first Arbor generates from the root's ``shares``, for a person to review before it is split;
+        ``""`` when there are none, or Arbor cannot."""
+
+        given = (None, ROOT_PROFILE_SOURCE) if shares is None else (shares.shares, shares.source)
+        try:
+            return str(await generated_map(arbors[min(arbors)], *given, self._layout.agent_plans))
+        except SplitFailed as exc:
+            logger.warning("no map could be generated for the review: %s", exc)
+            return ""
+
+    async def _review(self, map_file: Path | None, dossier: Path | None, made_by: str) -> None:
+        """Pause, holding no lease, until a person decides on ``map_file`` and ``dossier`` (:mod:`.review`); each step
+        is a ``PRELUDE`` decision. The deadline does not pass while it waits, and moves by the time paused
+        (:meth:`_extend`). Raises :class:`~hyperloom_multibranch.scheduling.review.ReviewRejected` on a rejection."""
+
+        directory, began = self._layout.review, self._clock.now()
+        state = request(directory, self._layout.root, map_file, dossier, made_by, began)
+        asked = {"page": str(directory / REVIEW_PAGE), "map": state["map"], "dossier": state["dossier"]}
+        self._decisions.record(Decision(DecisionKind.PRELUDE, REVIEW_REQUESTED, INTEGRATION_BRANCH, asked))
+        logger.warning("waiting for a person's review of the agent map: read %s", directory / REVIEW_PAGE)
+        self._reviewing = True
+        try:
+            decided = await wait(directory, self._clock.sleep)
+        finally:
+            self._reviewing = False
+            self._extend(self._clock.now() - began)
+        detail = {key: decided.get(key) for key in ("by", "note", "changed", "decided_at_iso")}
+        detail["paused_seconds"] = round(self._clock.now() - began, 1)
+        rejected = decided.get("status") == REJECTED
+        reason = REVIEW_REJECTED if rejected else REVIEW_APPROVED
+        self._decisions.record(Decision(DecisionKind.PRELUDE, reason, INTEGRATION_BRANCH, detail))
+        if rejected:
+            raise ReviewRejected(f"rejected by {decided.get('by') or 'a person'}: {decided.get('note') or ''}")
+
+    async def _stop_after_map(self, prelude: PreludeResult) -> SessionOutcome:
+        """End the session before EXPLORE once its Arbor agents' directions are mapped, for one Arbor too: the map of
+        the dossier pass of the first Arbor, else one generated from the root's shares, kept with the pass's dossier in
+        ``MB-agent-map`` for a person to review (:func:`keep_map`). Without either, the session ends with why as its
+        error."""
+
+        arbors = await self._arbors()
+        if not arbors:
+            return SessionOutcome(SessionStopReason.MAPPED, None, None, NO_ARBOR_TO_MAP)
+        first = min(arbors)
+        source, start_commit = self._settings.agents[first], prelude.start_commit
+        shares = await self._root_shares(prelude)
+        outcome = await self._dossier_map(source, start_commit, shares)
+        passed = "no dossier pass ran" if outcome is None else outcome.reason
+        made = {"conc": self._settings.workload.conc, "source": source, "start_commit": start_commit, "pass": passed}
+        if outcome is not None and outcome.map is not None:
+            kept = keep_map(self._layout.agent_map, outcome.map, outcome.dossier, {**made, "made_by": MADE_BY_PASS})
+        else:
+            given = (None, ROOT_PROFILE_SOURCE) if shares is None else (shares.shares, shares.source)
+            try:
+                generated = await generated_map(arbors[first], *given, self._layout.agent_plans)
+            except SplitFailed as exc:
+                return SessionOutcome(SessionStopReason.MAPPED, None, None, f"{NO_MAP}: {passed}; {exc}")
+            dossier = None if outcome is None else outcome.dossier
+            kept = keep_map(self._layout.agent_map, generated, dossier, {**made, "made_by": MADE_BY_SHARES})
+        self._decisions.record(Decision(DecisionKind.PRELUDE, MAP_KEPT, INTEGRATION_BRANCH, {"summary": str(kept)}))
+        return SessionOutcome(SessionStopReason.MAPPED, None, None, "")
+
+    async def _root_shares(self, prelude: PreludeResult) -> RootShares | None:
+        """The root's shares, waited for (its op shares, else its kernel shares), recorded as a ``PRELUDE`` decision;
+        ``None`` when it has none."""
+
         read = await root_shares(
             self._blackboard,
             self._toolbox,
@@ -489,12 +645,7 @@ class Session:
             prelude.root_profile_job,
         )
         self._decisions.record(Decision(DecisionKind.PRELUDE, ROOT_SHARES_READ, INTEGRATION_BRANCH, read.detail))
-        shares = read.shares
-        source = settings.agents[min(arbors)]
-        map_file = await self._dossier_map(source, prelude.start_commit, shares)
-        if shares is None:
-            return await agent_plans(settings.agents, map_file, work)
-        return await agent_plans(settings.agents, map_file, work, shares.shares, shares.source)
+        return read.shares
 
     async def _arbors(self) -> dict[int, Path]:
         """The Arbor agents of the run, by index; none, recorded, when a source cannot be fetched."""
@@ -506,9 +657,9 @@ class Session:
             self._decisions.record(Decision(DecisionKind.PRELUDE, AGENT_SOURCES_UNREAD, INTEGRATION_BRANCH, detail))
             return {}
 
-    async def _dossier_map(self, source: str, start_commit: str, shares: RootShares | None) -> str:
-        """The map of the dossier pass of the Arbor ``source`` on ``start_commit``, given ``shares`` as its profile;
-        ``""`` when it set none, or none ran (no runner, or no minutes for it). Each step is a ``PRELUDE`` decision."""
+    async def _dossier_map(self, source: str, start_commit: str, shares: RootShares | None) -> DossierOutcome | None:
+        """How the dossier pass of the Arbor ``source`` on ``start_commit``, given ``shares`` as its profile, ended;
+        ``None`` when none ran (no runner, or no minutes for it) or it crashed. Each step is a ``PRELUDE`` decision."""
 
         from hyperloom_multibranch.specialist.dossier_pass import DossierStart
 
@@ -516,7 +667,7 @@ class Session:
         if self._dossier_pass is None or minutes <= 0:
             detail = {"minutes": minutes, "runner": self._dossier_pass is not None}
             self._decisions.record(Decision(DecisionKind.PRELUDE, DOSSIER_SKIPPED, INTEGRATION_BRANCH, detail))
-            return ""
+            return None
         given = (None, ROOT_PROFILE_SOURCE) if shares is None else (shares.shares, shares.source)
         start = DossierStart(source, start_commit, self._clock.now() + minutes * 60, *given)
         detail = {"source": source, "start_commit": start_commit, "minutes": minutes, "profile": given[1]}
@@ -527,10 +678,10 @@ class Session:
             logger.exception("the dossier pass crashed")
             failed = {"reason": f"it crashed: {exc}", "map": "", "dossier": ""}
             self._decisions.record(Decision(DecisionKind.PRELUDE, DOSSIER_ENDED, INTEGRATION_BRANCH, failed))
-            return ""
+            return None
         ended = {"reason": outcome.reason, "map": str(outcome.map or ""), "dossier": str(outcome.dossier or "")}
         self._decisions.record(Decision(DecisionKind.PRELUDE, DOSSIER_ENDED, INTEGRATION_BRANCH, ended))
-        return "" if outcome.map is None else str(outcome.map)
+        return outcome
 
     async def _final_phases(self, candidates: FinalCandidates, ended: SessionStopReason) -> SessionOutcome:
         """FINAL alone over ``candidates``, inside the phases coroutine, so a failure still goes through CLOSE and
