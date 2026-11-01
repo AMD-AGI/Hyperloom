@@ -47,7 +47,15 @@ USER_DATA_DIR = "userdata"
 FIRST_PORT = 8888
 PORT_STEP = 100
 #: The flags each point's session is given by its stage, which the run arguments the points share may not set.
-POINT_FLAGS = ("--conc", "--agent-port", "--stop-after-map", "--reuse-prelude", "--agent-directions", "--agent-dossier")
+POINT_FLAGS = (
+    "--conc",
+    "--agent-port",
+    "--stop-after-map",
+    "--no-review-gate",
+    "--reuse-prelude",
+    "--agent-directions",
+    "--agent-dossier",
+)
 #: The device mask each point's session is given; the other masks are dropped so that none names other cards.
 MASK = "ROCR_VISIBLE_DEVICES"
 OTHER_MASKS = ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")
@@ -140,13 +148,14 @@ def shared_args(args: Sequence[str]) -> list[str]:
 def stage_argv(point: Point, stage: Stage, run_args: Sequence[str], reviewed: Reviewed | None = None) -> list[str]:
     """The ``run`` arguments of ``point``'s session in ``stage``: the shared ``run_args``, its conc and Arbor ports, and
     either the flag that stops it after its map or, from ``reviewed``, the PRELUDE it roots on and its reviewed map and
-    dossier."""
+    dossier, with no second review: the points' review was it."""
 
     argv = ["run", *run_args, "--conc", str(point.conc), "--agent-port", str(point.agent_port)]
     if stage is Stage.MAP:
         return [*argv, "--stop-after-map"]
     assert reviewed is not None and reviewed.session is not None
-    argv += ["--reuse-prelude", str(reviewed.session), "--agent-directions", str(reviewed.summary["map"])]
+    argv += ["--no-review-gate", "--reuse-prelude", str(reviewed.session)]
+    argv += ["--agent-directions", str(reviewed.summary["map"])]
     dossier = str(reviewed.summary.get("dossier") or "")
     return [*argv, "--agent-dossier", dossier] if dossier else argv
 

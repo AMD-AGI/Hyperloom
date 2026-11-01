@@ -141,7 +141,8 @@ async def test_only_approved_points_run_on_their_reviewed_map_and_dossier_and_th
     [ran] = [session for session in (tmp_path / "c8" / "userdata").glob("*/MB-*") if session != mapped[8].session]
     start = _started(ran)
     summary = mapped[8].summary
-    assert start["argv"][-6:] == [
+    assert start["argv"][-7:] == [
+        "--no-review-gate",
         "--reuse-prelude",
         str(mapped[8].session),
         "--agent-directions",
