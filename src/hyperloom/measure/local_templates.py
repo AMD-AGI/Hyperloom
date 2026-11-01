@@ -16,6 +16,7 @@ from collections.abc import Mapping
 from typing import Final
 
 from hyperloom.common.env_safety import is_secret_shaped_env_name
+from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 from hyperloom.sandbox.local import LocalTemplate
 
 __all__ = [
@@ -45,13 +46,17 @@ _DEFAULT_SPEC_WAIT_SEC = 600
 def image_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
     """The image's own variables in ``environ`` (the application's, which shares the image): a named list, never all of it.
 
-    Credential-shaped names stay out even when a prefix matches.
+    Credential-shaped names stay out even when a prefix matches, and so do the GPU masks (``HIP_VISIBLE_DEVICES``,
+    ``HSA_VISIBLE_DEVICES``): the sandbox sets the mask of its leased cards, and an inherited one naming more cards
+    than that makes torch refuse to start.
     """
     source = os.environ if environ is None else environ
     return {
         name: value
         for name, value in source.items()
-        if (name in IMAGE_ENV_NAMES or name.startswith(IMAGE_ENV_PREFIXES)) and not is_secret_shaped_env_name(name)
+        if (name in IMAGE_ENV_NAMES or name.startswith(IMAGE_ENV_PREFIXES))
+        and name not in GPU_MASK_ENV_NAMES
+        and not is_secret_shaped_env_name(name)
     }
 
 
