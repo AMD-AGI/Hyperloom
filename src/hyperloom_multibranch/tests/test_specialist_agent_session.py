@@ -1283,6 +1283,7 @@ class _Forge:
 
     def __init__(self, root) -> None:
         self.started, self.returncode, self.root, self.lifetime_s = False, None, root, math.inf
+        self.cache_root = root / "cache"
 
     async def start(self, command, cwd, env):
         self.started = True

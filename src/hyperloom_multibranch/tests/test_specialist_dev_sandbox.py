@@ -109,6 +109,7 @@ class _Sandbox:
     def __init__(self, lease: BranchLease, lifetime_s: float = math.inf) -> None:
         self.lease, self.runs, self.processes, self.stopped = lease, [], [], False
         self.root, self.lifetime_s = lease.root, lifetime_s
+        self.cache_root = Path(lease.root) / "host-cache"
 
     async def run(self, command, cwd, env, timeout) -> CommandResult:
         self.runs.append((command, cwd, dict(env), timeout))
@@ -505,7 +506,7 @@ async def test_run_start_and_read_work_in_the_branchs_own_sandbox(rig):
     command, cwd, env, timeout = rig.sandboxes[B1].runs[0]
     assert (command, cwd, timeout) == ("python bench.py", rig.toolbox.root / "lease-1", LIMITS.run_s)
     assert {name: env[name] for name in CACHE_DIRS} == {
-        name: str(rig.toolbox.root / "lease-1" / "cache" / sub) for name, sub in CACHE_DIRS.items()
+        name: str(rig.toolbox.root / "lease-1" / "host-cache" / sub) for name, sub in CACHE_DIRS.items()
     }
     assert ran == {"returncode": 3, "output": "\n".join(f"line {n}" for n in range(495, 500))}
 
@@ -657,7 +658,9 @@ async def test_a_sandbox_run_leaves_the_worktrees_diff_unchanged(tmp_path, _loca
     assert ran.returncode == 0, ran.output
     assert f"imported {worktree.path / 'vllm' / '__init__.py'}" in ran.output
     assert worktree.diff("vllm") == before
-    assert (tmp_path / "leases" / "lease-1" / "cache" / "aiter-jit" / "build" / "module.cpp").exists()
+    local = sandboxes(B1, BranchLease("lease-1", B1, (0,), tmp_path / "leases" / "lease-1", {}, 0))
+    assert (local.cache_root / "aiter-jit" / "build" / "module.cpp").exists()
+    assert not (tmp_path / "leases" / "lease-1" / "cache").exists(), "JIT caches stay off the session's shared storage"
 
 
 async def test_a_lease_asks_the_toolbox_for_its_term_and_a_shorter_lived_sandbox_bounds_it(rig):

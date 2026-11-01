@@ -21,8 +21,8 @@ Commands run in a :class:`~hyperloom_multibranch.specialist.agent_sandbox.LocalA
 lower CPU priority, or, on the hosted backend, in the leased ``dev`` sandbox
 (:class:`~hyperloom_multibranch.specialist.remote_sandbox.RemoteAgentSandbox`), whose root is on the shared storage
 below the branch's directory. Either way they import the branch worktree's source, with every JIT and kernel cache in
-the sandbox's root: a cache beside the package it compiles for would be in the worktree, and its files in the next
-patch. A lease's sandbox lives as long as the lease asks, unless the toolbox lets it live less, which then bounds the
+the sandbox's :attr:`DevSandbox.cache_root`: a cache beside the package it compiles for would be in the worktree, and
+its files in the next patch. A lease's sandbox lives as long as the lease asks, unless the toolbox lets it live less, which then bounds the
 lease. A lease whose sandbox is not up within :attr:`DevLimits.lease_wait_s` answers that it is starting, so the MCP
 call returns, and the specialist's next lease call waits for the same sandbox again; a command meanwhile is refused
 (``lease_not_ready``). Nothing a dev sandbox measures is written as a test, claim or judgement; its records are branch-log notices and the LLM spend the
@@ -141,8 +141,12 @@ class LeaseSource(Protocol):
 
 
 class DevSandbox(AgentSandbox, Protocol):
-    #: The sandbox's own directory, on this host's file system, where its caches and the specialist's files go.
+    #: The sandbox's own directory, on this host's file system, where the specialist's files go.
     root: Path
+
+    @property
+    def cache_root(self) -> Path:
+        """Where the sandbox's JIT and kernel caches go."""
 
     @property
     def lifetime_s(self) -> float:
@@ -333,12 +337,12 @@ class DevLeases:
     async def run(self, branch: str, command: str, cwd: str | None, timeout_s: float) -> Ran:
         held = self._touch(branch)
         timeout = min(timeout_s, self._limits.run_s)
-        done = await held.sandbox.run(command, _cwd(held, cwd), _caches(held.sandbox.root), timeout)
+        done = await held.sandbox.run(command, _cwd(held, cwd), _caches(held.sandbox.cache_root), timeout)
         return Ran(done.returncode, done.output)
 
     async def start(self, branch: str, command: str, cwd: str | None) -> Started:
         held = self._touch(branch)
-        process = await held.sandbox.start(command, _cwd(held, cwd), _caches(held.sandbox.root))
+        process = await held.sandbox.start(command, _cwd(held, cwd), _caches(held.sandbox.cache_root))
         number = len(held.processes) + 1
         held.processes[number] = process
         return Started(number)
@@ -624,7 +628,7 @@ def _cwd(held: _Lease, cwd: str | None) -> Path:
 
 
 def _caches(root: Path) -> dict[str, str]:
-    return {name: str(root / "cache" / directory) for name, directory in CACHE_DIRS.items()}
+    return {name: str(root / directory) for name, directory in CACHE_DIRS.items()}
 
 
 def local_dev_sandboxes(
