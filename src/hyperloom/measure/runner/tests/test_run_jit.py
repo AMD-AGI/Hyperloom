@@ -20,6 +20,7 @@ import os
 import shutil
 import sys
 import tarfile
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -77,6 +78,9 @@ class _CompilingGrid(_Grid):
         self.fail = fail
         self.triton_found: list[bool] = []
         self.triton_group: dict[str, str] | None = None
+        #: Whether every file of the group was in the Triton directory the server was given, while it ran: the runner
+        #: removes the test's compile directory afterwards.
+        self.triton_group_held = False
 
     async def __call__(self, **kwargs):
         log = self.files / "variant_0" / "server.log"
@@ -93,6 +97,9 @@ class _CompilingGrid(_Grid):
         triton = Path(os.environ.get("TRITON_CACHE_DIR") or self.tmp_path / "default" / "TRITON_CACHE_DIR")
         self.triton_found.append(find_kernel(triton, HASH_DIR))
         self.triton_group = get_group(triton, HASH_DIR)
+        self.triton_group_held = bool(self.triton_group) and all(
+            Path(target).is_file() and Path(target).is_relative_to(triton) for target in self.triton_group.values()
+        )
         for path in triton.rglob("kernel.*") if self.recompile_triton else ():
             path.write_bytes(b"compiled again, differently")
         with open(log, "a", encoding="utf-8") as out:
@@ -131,6 +138,10 @@ class Rig:
         self.store = DirJitStore(tmp_path / "store")
         self.bases = tmp_path / "bases"
         self._make_bases()
+        # The host's temporary disk, where a runner puts its test's compile directory.
+        self.host_tmp = tmp_path / "host-tmp"
+        self.host_tmp.mkdir()
+        monkeypatch.setattr(tempfile, "tempdir", str(self.host_tmp))
         monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "bypass")
         monkeypatch.setattr(runner_jit, "locate_package", self._locate)
         monkeypatch.setattr(own_jit, "locate_package", self._locate)
@@ -295,12 +306,11 @@ def test_a_kernel_triton_compiled_in_a_sandbox_that_is_gone_is_found_by_the_next
 ) -> None:
     first, _, first_run = rig.run("first", _arm(rig))
     rig.publish(first_run, first)
-    shutil.rmtree(first_run / "scratch")  # the sandbox, and the directories the group was written with
+    shutil.rmtree(first_run / "scratch")  # the sandbox; its run removed the directories the group was written with
     second, status, _ = rig.run("second", _arm(rig))
 
     assert rig.grid.triton_found == [True], "Triton found the kernel through the group: it compiled nothing"
-    group = rig.grid.triton_group
-    assert group and all(Path(target).is_file() and str(rig.tmp_path / "second") in target for target in group.values())
+    assert rig.grid.triton_group_held, "the group named the files of the second test's own Triton directory"
     assert status["message"] == "" and _kind(second, "triton").contribution is None, "no file was rewritten"
 
 

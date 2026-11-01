@@ -9,7 +9,10 @@ import dataclasses
 import hashlib
 import importlib.metadata
 import os
+import re
+import shutil
 import subprocess
+import tempfile
 import time
 import traceback
 from collections.abc import Mapping, MutableMapping
@@ -116,6 +119,9 @@ class _Context:
     notes: list[str] = field(default_factory=list)
     #: The phases of this run on this machine's clock; the signed result states them.
     phases: PhaseRecorder = field(default_factory=PhaseRecorder)
+    #: The directory the test's compilers write below, on this host's temporary disk; made once the sheet names the
+    #: test (:func:`_compile_dir`) and removed when the run ends.
+    compile: Path | None = None
 
     @property
     def files(self) -> Path:
@@ -519,19 +525,37 @@ def _write_bundle(ctx: _Context, signed: _Signed, outcome: dict, found: _Finding
     (ctx.out_dir / "manifest.sig").write_text(signing.sign(manifest, key), encoding="ascii")
 
 
+def _compile_dir(ctx: _Context, test: str) -> Path:
+    """The test's directory on this host's temporary disk (``TMPDIR`` honoured) its compilers write below, made on the
+    first call: a CK module build writes thousands of files, which crawls on the shared storage the sandbox's scratch
+    lies on. ``run`` removes it when the test ends, after the cache collected what the compilers added."""
+    if ctx.compile is None:
+        name = re.sub(r"[^0-9A-Za-z_.-]", "_", test)[:64]
+        ctx.compile = Path(tempfile.mkdtemp(prefix=f"hl-jit-{name}-"))
+    return ctx.compile
+
+
+def _drop_compile_dir(ctx: _Context) -> None:
+    if ctx.compile is not None:
+        shutil.rmtree(ctx.compile, ignore_errors=True)
+
+
 def _jit_session(
     ctx: _Context, spec: MeasurementSpec, points: list[Path], farm: Farm | None, facts
 ) -> JitCacheSession | None:
-    """The test's use of the shared compiled-code cache, or ``None`` when none is configured (``measure.runner.jit``)."""
-    around = Surroundings(ctx.environ, ctx.work / "jit", ctx.out_dir / STAGING_DIR, ctx.read_blob, ctx.notes)
+    """The test's use of the shared compiled-code cache, or ``None`` when none is configured (``measure.runner.jit``);
+    its private directories lie in the test's compile directory, its staged contribution in the output."""
+    private = _compile_dir(ctx, spec.request_id) / "jit"
+    around = Surroundings(ctx.environ, private, ctx.out_dir / STAGING_DIR, ctx.read_blob, ctx.notes)
     return build_session(spec, points, farm, facts[0] if facts else None, around)
 
 
 def _own_directories(ctx: _Context, call: TestCall, session: JitCacheSession | None, farm: Farm | None) -> TestCall:
     """``call`` with the test's compiled-code cache, the tables its farm patches and, when the cache gives aiter no JIT
-    directory, one of the test's own, so nothing the server builds lands in the image. A point that rebuilds stale aiter
-    modules at its first prefill gets a watchdog that waits for the builds (``rebuild_watchdog``)."""
-    own = own_aiter_jit(call, farm, session, ctx.environ, ctx.work / OWN_AITER_JIT_DIR)
+    directory, one of the test's own in its compile directory, so nothing the server builds lands in the image. A point
+    that rebuilds stale aiter modules at its first prefill gets a watchdog that waits for the builds
+    (``rebuild_watchdog``)."""
+    own = own_aiter_jit(call, farm, session, ctx.environ, _compile_dir(ctx, call.task_id) / OWN_AITER_JIT_DIR)
     raised = raise_rebuild_watchdog(call, farm, ctx.environ, ctx.work)
     if raised is not None:
         ctx.notes.append(raised)
@@ -686,6 +710,8 @@ def run(
             message = f"{type(exc).__name__}: {exc} (at {_raised_at(exc)})"
             write_status(out_dir, state=_FAILED, error_class=error_class, message=message)
             return 1
+        finally:
+            _drop_compile_dir(ctx)
         write_status(out_dir, state="succeeded", message=join_notes(ctx.notes))
     return 0
 
