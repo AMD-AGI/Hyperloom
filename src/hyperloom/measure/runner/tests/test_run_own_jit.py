@@ -43,11 +43,13 @@ WANTED = ("module_gemm", "module_other", "module_new")
 
 
 class _JitServer:
-    """What the server's aiter does with its JIT directory; what it found and where it built, by test."""
+    """What the server's aiter does with its JIT directory; what it found, where it built and what the directory held
+    once it had built (each module a link or not, and its bytes), by test: the runner removes the directory afterwards."""
 
     def __init__(self, rig: Rig, monkeypatch) -> None:
         self.image_jit = rig.bases / "aiter" / "jit"
         self.found: dict[str, bool] = {}
+        self.held: dict[str, tuple[bool, bytes]] = {}
         self.jit_dir: Path | None = None
         grid = local.run_grid
 
@@ -59,6 +61,7 @@ class _JitServer:
                 self.found[module] = target.exists()
                 if not target.exists():
                     target.write_bytes(BUILT)
+            self.held = {path.name: (path.is_symlink(), path.read_bytes()) for path in jit.iterdir()}
             return await grid(**kwargs)
 
         monkeypatch.setattr(local, "run_grid", serve)
@@ -81,7 +84,13 @@ def _run(rig: Rig, monkeypatch, name: str, make_sheet, **kwargs) -> tuple[_JitSe
     monkeypatch.setattr(rig, "_start", start)
     _, _, run = rig.run(name, make_sheet, **kwargs)
     assert _image_jit(rig) == before, "nothing the server built reached the image's aiter/jit"
+    assert list(rig.host_tmp.iterdir()) == [], "the test's compile directory went with the test"
     return server, run
+
+
+def _in_a_compile_directory(rig: Rig, compile_dir: Path) -> bool:
+    """Whether ``compile_dir`` is a test's compile directory on the host's temporary disk, not in its sandbox."""
+    return compile_dir.parent == rig.host_tmp and compile_dir.name.startswith("hl-jit-")
 
 
 def test_a_test_with_no_patch_and_no_cache_builds_in_its_own_jit_directory_beside_the_images_modules(
@@ -89,19 +98,18 @@ def test_a_test_with_no_patch_and_no_cache_builds_in_its_own_jit_directory_besid
 ) -> None:
     server, run = _run(image, monkeypatch, "plain", _arm(image), cache=False)
 
-    own = run / "scratch" / "test" / OWN_AITER_JIT_DIR
-    assert server.jit_dir == own
+    assert server.jit_dir.name == OWN_AITER_JIT_DIR and _in_a_compile_directory(image, server.jit_dir.parent)
+    assert not (run / "scratch" / "test" / OWN_AITER_JIT_DIR).exists(), "nothing is built on the sandbox's disk"
     assert server.found == {"module_gemm": True, "module_other": True, "module_new": False}
-    assert (own / "module_gemm.so").is_symlink() and (own / "module_gemm.so").read_text() == IMAGE_MODULE
-    assert (own / "module_new.so").read_bytes() == BUILT and not (own / "module_new.so").is_symlink()
+    assert server.held["module_gemm.so"] == (True, IMAGE_MODULE.encode())
+    assert server.held["module_new.so"] == (False, BUILT)
 
 
 def test_a_module_the_tests_table_makes_stale_is_not_linked_but_built(image, monkeypatch) -> None:
-    server, run = _run(image, monkeypatch, "table", _deliver(image, _by_variable(TEST_TABLE)), cache=False)
+    server, _ = _run(image, monkeypatch, "table", _deliver(image, _by_variable(TEST_TABLE)), cache=False)
 
-    own = run / "scratch" / "test" / OWN_AITER_JIT_DIR
     assert server.found == {"module_gemm": False, "module_other": True, "module_new": False}
-    assert (own / "module_gemm.so").read_bytes() == BUILT
+    assert server.held["module_gemm.so"] == (False, BUILT)
 
 
 def test_a_jit_directory_the_sheet_names_is_left_as_it_is(image, monkeypatch, tmp_path) -> None:
@@ -115,7 +123,9 @@ def test_a_jit_directory_the_sheet_names_is_left_as_it_is(image, monkeypatch, tm
 def test_a_test_the_cache_gives_a_jit_directory_gets_no_second_one(image, monkeypatch) -> None:
     server, run = _run(image, monkeypatch, "cached", _arm(image), cache=True)
 
-    assert server.jit_dir == run / "scratch" / "test" / "jit" / "aiter_jit", "the cache's directory"
+    assert server.jit_dir.name == "aiter_jit" and server.jit_dir.parent.name == "jit", "the cache's directory"
+    assert _in_a_compile_directory(image, server.jit_dir.parent.parent)
+    assert not (run / "scratch" / "test" / "jit").exists(), "nothing is built on the sandbox's disk"
     assert not (run / "scratch" / "test" / OWN_AITER_JIT_DIR).exists()
 
 
