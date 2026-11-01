@@ -423,6 +423,40 @@ def test_stopping_after_the_map_without_an_agent_or_with_a_map_given_is_a_usage_
         _settings("--autonomous-agent", "/agents/arbor", "--agent-directions", str(given), "--stop-after-map")
 
 
+def _reviewed(tmp_path: Path) -> tuple[Path, Path]:
+    """A reviewed map and the dossier it was made with, as a ``--stop-after-map`` session keeps them."""
+
+    given, dossier = tmp_path / "directions.json", tmp_path / "dossier" / "qwen3-8b"
+    given.write_text(json.dumps({"directions": [{"id": "m-attn"}]}))
+    dossier.mkdir(parents=True)
+    (dossier / "README.md").write_text("# dossier\n")
+    return given, dossier
+
+
+def test_the_reviewed_dossier_is_kept_by_its_absolute_path_beside_its_map(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    given, _ = _reviewed(tmp_path)
+    agent = ["--autonomous-agent", "/agents/arbor", "--agent-directions", str(given)]
+
+    assert _settings(*agent, "--agent-dossier", "dossier/qwen3-8b").agent_dossier == str(
+        tmp_path / "dossier" / "qwen3-8b"
+    )
+    assert _settings(*agent).agent_dossier == ""
+
+
+def test_a_dossier_without_its_map_or_that_is_no_dossier_is_a_usage_error(tmp_path: Path) -> None:
+    given, dossier = _reviewed(tmp_path)
+
+    with pytest.raises(ValueError, match="with the --agent-directions map"):
+        _settings("--autonomous-agent", "/agents/arbor", "--agent-dossier", str(dossier))
+    with pytest.raises(ValueError, match="is no dossier"):
+        _settings(
+            "--autonomous-agent", "/agents/arbor", "--agent-directions", str(given), "--agent-dossier", str(tmp_path)
+        )
+
+
 @pytest.mark.parametrize(
     ("document", "agent", "match"),
     [

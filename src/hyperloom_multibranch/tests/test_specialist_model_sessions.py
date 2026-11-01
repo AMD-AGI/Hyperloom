@@ -155,6 +155,18 @@ async def test_the_dossier_pass_runs_on_a_port_block_of_its_own_and_its_dossier_
     assert (spec.port, spec.dossier) == (31110, str(tmp_path / "docs" / "dossier" / "qwen3-8b"))
 
 
+def test_a_run_given_a_reviewed_dossier_gives_it_to_every_agent_branch(tmp_path):
+    agents = replace(_agent_sessions(), dossier="/reviewed/dossier/qwen3-8b")
+    place = BranchPlace(SimpleNamespace(path=tmp_path / "worktree"), object(), tmp_path / "session")
+
+    specs = [
+        agents.session(SessionStart(branch, "c0", 1, BranchTask(agent="arbor")), place)._setup.spec
+        for branch in ("a1", "a2")
+    ]
+
+    assert [spec.dossier for spec in specs] == ["/reviewed/dossier/qwen3-8b"] * 2
+
+
 def test_each_agent_is_given_the_client_the_gate_measures_with_on_its_own_port(tmp_path):
     canonical = tmp_path / "canonical.yaml"
     canonical.write_text(CANONICAL, encoding="utf-8")

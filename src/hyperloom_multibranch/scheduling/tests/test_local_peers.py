@@ -824,7 +824,7 @@ def _agent_clients(monkeypatch: pytest.MonkeyPatch) -> list[GateClient | None]:
 
     clients: list[GateClient | None] = []
 
-    def agents(*args: object, client: GateClient | None = None) -> object:
+    def agents(*args: object, client: GateClient | None = None, dossier: str | None = None) -> object:
         clients.append(client)
         return SimpleNamespace()
 
@@ -850,6 +850,29 @@ async def test_an_agent_of_an_inferencex_session_measures_with_the_client_of_the
     [client] = clients
     assert client is not None and (client.conc, client.isl, client.osl) == (WORKLOAD.conc, 1024, 512)
     assert client.inferencex_root == HOST.inferencex.path
+
+
+@pytest.mark.parametrize(
+    ("given", "dossier"), [("/reviewed/dossier/qwen3-8b", "/reviewed/dossier/qwen3-8b"), ("", None)]
+)
+async def test_the_agents_are_given_the_reviewed_dossier_the_run_names_and_none_without(
+    built: _Built, monkeypatch: pytest.MonkeyPatch, given: str, dossier: str | None
+) -> None:
+    dossiers: list[str | None] = []
+
+    def agents(*args: object, client: GateClient | None = None, dossier: str | None = None) -> object:
+        dossiers.append(dossier)
+        return SimpleNamespace()
+
+    _agent_clients(monkeypatch)
+    monkeypatch.setattr(agent_sessions_module, "AgentSessions", agents)
+    wiring = _with_agent(built.wiring)
+
+    model_backed_sessions(AgentCommand("claude", "claude"))(
+        replace(wiring, setup=replace(wiring.setup, agent_dossier=given))
+    )
+
+    assert dossiers == [dossier]
 
 
 async def test_an_agent_of_an_agentx_session_gets_no_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -897,6 +920,7 @@ async def test_the_specialists_are_told_of_and_give_back_the_dev_sandboxes_the_s
                 agent_pack="",
                 agent_launch="",
                 agent_port=AGENT_PORT,
+                agent_dossier="",
             ),
             tokens=None,
             repo=None,
@@ -979,6 +1003,7 @@ def test_the_specialists_source_base_holds_aiter_beside_the_framework_only_from_
             agent_pack="",
             agent_launch="",
             agent_port=AGENT_PORT,
+            agent_dossier="",
         ),
         tokens=None,
         repo=None,
@@ -1099,6 +1124,7 @@ def test_a_session_on_a_host_that_builds_native_code_lays_out_the_native_tree_an
                 agent_pack="",
                 agent_launch="",
                 agent_port=AGENT_PORT,
+                agent_dossier="",
             ),
             tokens=None,
             repo=None,

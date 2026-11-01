@@ -178,7 +178,7 @@ from hyperloom_multibranch.scheduling.settings import (
     RunSettings,
     Workload,
 )
-from hyperloom_multibranch.specialist.arbor_adapter import ArborRefused, read_launch
+from hyperloom_multibranch.specialist.arbor_adapter import DOSSIER_INDEX, ArborRefused, read_launch
 
 PROG = "hyperloom-multibranch"
 EXIT_FAILED = 1
@@ -464,6 +464,18 @@ def _add_agent_options(run: argparse.ArgumentParser) -> None:
             " profile), then CLOSE. The map and its dossier are kept in the session's MB-agent-map/ for review."
         ),
     )
+    run.add_argument(
+        "--agent-dossier",
+        dest="agent_dossier",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help=(
+            "The dossier the reviewed --agent-directions map was made with, a directory with Arbor's dossier index:"
+            " every Arbor --autonomous-agent branch gets it in its checkout, as it would a dossier pass's"
+            " (a --stop-after-map session keeps it under MB-agent-map/dossier/)."
+        ),
+    )
 
 
 def _positive(args: argparse.Namespace, names: tuple[str, ...]) -> list[str]:
@@ -576,6 +588,19 @@ def _stop_after_map(stop: bool, agents: list[str], directions: Path | None) -> b
     return stop
 
 
+def _agent_dossier(path: Path | None, directions: Path | None) -> str:
+    """The absolute path of the dossier every Arbor branch is given, ``""`` without one; refused without the reviewed
+    map it was made with, or when it is no dossier: a directory with Arbor's dossier index."""
+
+    if path is None:
+        return ""
+    if directions is None:
+        raise ValueError("--agent-dossier is given with the --agent-directions map it was made with")
+    if not (path / DOSSIER_INDEX).is_file():
+        raise ValueError(f"--agent-dossier {path} is no dossier: it has no {DOSSIER_INDEX}")
+    return str(path.absolute())
+
+
 def _agent_port(port: int | None, agents: list[str]) -> int:
     """The first port of the agents' port blocks; refused with no agent to serve on it, or when it is no port."""
 
@@ -668,6 +693,7 @@ def settings_from(
         agent_dossier_minutes=_dossier_minutes(args.agent_dossier_minutes),
         agent_port=_agent_port(args.agent_port, args.agents or []),
         stop_after_map=_stop_after_map(args.stop_after_map, args.agents or [], args.agent_directions),
+        agent_dossier=_agent_dossier(args.agent_dossier, args.agent_directions),
     )
 
 
