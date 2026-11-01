@@ -33,6 +33,8 @@ from hyperloom.measure.compile import (
 from hyperloom_multibranch.contracts.sources import NativeTree, SourceRoot, meta_sections, source_roots
 
 #: Built files a text patch can never change.
+#: The file in a base's git directory that names the trees each worktree links rather than holds.
+THIRD_PARTY_LINKS = "hyperloom-third-party"
 SKIPPED = ("__pycache__", "*.pyc", "*.pyo", "*.so", "*.a", "*.o", "*.co", "*.hsaco")
 BASE_BRANCH = "installed"
 HEAD_SUBJECT = "head "
@@ -141,6 +143,7 @@ class SourceBase:
         self.path.mkdir(parents=True)
         _git(self.path, "init", f"--initial-branch={BASE_BRANCH}")
         excluded = list(SKIPPED)
+        links: list[tuple[str, str]] = []
         for component in components:
             layout = self._layout(component)
             package, *metas = source_roots(layout, _with_checkout(component, self._locator(layout), layout))
@@ -153,17 +156,27 @@ class SourceBase:
             excluded += [f"/{package.prefix}/{built}/" for built in layout.generated]
             for meta in (meta for meta in metas if meta.path.is_dir()):
                 shutil.copytree(meta.path, self.path / meta.prefix, ignore=_ignore(meta.path, ()))
+            third_party = _third_party(metas)
+            if third_party is not None:
+                links.append(third_party)
+                excluded.append(f"/{third_party[0]}")
             native = self._native.get(component)
             if native is not None:
                 self._lay_native(native.root, (package, *metas))
         (self.path / ".git" / "info").mkdir(exist_ok=True)
         (self.path / ".git" / "info" / "exclude").write_text("".join(f"{line}\n" for line in excluded))
+        (self.path / ".git" / THIRD_PARTY_LINKS).write_text(
+            "".join(f"{prefix}\t{target}\n" for prefix, target in links)
+        )
         _commit_all(self.path, BASE_BRANCH)
 
     def worktree(self, branch: str, path: Path) -> BranchWorktree:
         """The worktree of ``branch`` at ``path``, added at the installed packages the first time."""
         if not path.exists():
             _git(self.path, "worktree", "add", "-b", f"mb/{branch}", str(path), BASE_BRANCH)
+        for prefix, target in third_party_links(path):
+            if not (path / prefix).exists():
+                (path / prefix).symlink_to(target)
         return BranchWorktree(path, self._layouts, self._native)
 
     def _lay_native(self, native: SourceRoot, laid: Sequence[SourceRoot]) -> None:
@@ -179,6 +192,25 @@ class SourceBase:
         if layout is None:
             raise UnsupportedComponentError(f"{component} has no package layout; its source cannot be laid out")
         return layout
+
+
+def third_party_links(worktree: Path) -> list[tuple[str, str]]:
+    """The trees the worktree at ``worktree`` links from the installed checkouts, as its source base recorded them."""
+    common = Path(_git(worktree, "rev-parse", "--path-format=absolute", "--git-common-dir").strip())
+    links = common / THIRD_PARTY_LINKS
+    lines = links.read_text().splitlines() if links.exists() else []
+    return [(prefix, target) for prefix, target in (line.split("\t") for line in lines)]
+
+
+def _third_party(metas: Sequence[SourceRoot]) -> tuple[str, str] | None:
+    """Where a worktree links the checkout's ``3rdparty`` tree (CK and its kind), the headers a JIT build of the meta
+    trees includes: ``(path in the worktree, installed tree)``, or ``None`` without one. It is linked, not laid out:
+    it is large, never patched, and a patch must not see it."""
+    if not metas:
+        return None
+    tree = metas[0].path.parent / "3rdparty"
+    prefix = PurePosixPath(metas[0].prefix).parent / "3rdparty"
+    return (prefix.as_posix(), str(tree)) if tree.is_dir() else None
 
 
 def _ignore(root: Path, built: Sequence[str]) -> Callable[[str, list[str]], set[str]]:
@@ -322,7 +354,8 @@ class BranchWorktree:
 
     def _reset(self, commit: str) -> None:
         _git(self.path, "reset", "--hard", commit)
-        _git(self.path, "clean", "-fdx", _QUIET)
+        kept = [f"--exclude=/{prefix}" for prefix, _target in third_party_links(self.path)]
+        _git(self.path, "clean", "-fdx", _QUIET, *kept)
 
     def _staged_diff(self, component: str, *options: str) -> str:
         paths = self._paths(component)
@@ -354,10 +387,12 @@ __all__ = [
     "BASE_BRANCH",
     "HEAD_SUBJECT",
     "SKIPPED",
+    "THIRD_PARTY_LINKS",
     "BranchWorktree",
     "Changes",
     "SourceBase",
     "Upstream",
     "WorktreeError",
     "installed_upstream",
+    "third_party_links",
 ]
