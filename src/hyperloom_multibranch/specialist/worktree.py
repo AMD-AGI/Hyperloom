@@ -33,8 +33,11 @@ from hyperloom.measure.compile import (
 from hyperloom_multibranch.contracts.sources import NativeTree, SourceRoot, meta_sections, source_roots
 
 #: Built files a text patch can never change.
-#: The file in a base's git directory that names the trees each worktree links rather than holds.
-THIRD_PARTY_LINKS = "hyperloom-third-party"
+#: The file in a base's git directory that names the paths each worktree links rather than holds.
+LINKED_PATHS = "hyperloom-third-party"
+#: A Python extension module (``_C.abi3.so``, ``ops.cpython-312-x86_64-linux-gnu.so``): what importing the package
+#: from a worktree needs of its build. Other libraries (aiter's JIT modules) stay out, so a patched source is rebuilt.
+_EXTENSION = re.compile(r"\.(abi3|cpython-[^.]+)\.so$")
 #: Where in a base's git directory the copies of those trees go.
 THIRD_PARTY_COPY = "hyperloom-third-party-trees"
 SKIPPED = ("__pycache__", "*.pyc", "*.pyo", "*.so", "*.a", "*.o", "*.co", "*.hsaco")
@@ -156,6 +159,7 @@ class SourceBase:
                 shutil.rmtree(target)
             shutil.copytree(package.path, target, ignore=_ignore(package.path, layout.generated))
             excluded += [f"/{package.prefix}/{built}/" for built in layout.generated]
+            links += _extensions(package, layout.generated)
             for meta in (meta for meta in metas if meta.path.is_dir()):
                 shutil.copytree(meta.path, self.path / meta.prefix, ignore=_ignore(meta.path, ()))
             third_party = _third_party(metas)
@@ -170,17 +174,16 @@ class SourceBase:
                 self._lay_native(native.root, (package, *metas))
         (self.path / ".git" / "info").mkdir(exist_ok=True)
         (self.path / ".git" / "info" / "exclude").write_text("".join(f"{line}\n" for line in excluded))
-        (self.path / ".git" / THIRD_PARTY_LINKS).write_text(
-            "".join(f"{prefix}\t{target}\n" for prefix, target in links)
-        )
+        (self.path / ".git" / LINKED_PATHS).write_text("".join(f"{prefix}\t{target}\n" for prefix, target in links))
         _commit_all(self.path, BASE_BRANCH)
 
     def worktree(self, branch: str, path: Path) -> BranchWorktree:
         """The worktree of ``branch`` at ``path``, added at the installed packages the first time."""
         if not path.exists():
             _git(self.path, "worktree", "add", "-b", f"mb/{branch}", str(path), BASE_BRANCH)
-        for prefix, target in third_party_links(path):
+        for prefix, target in linked_paths(path):
             if not (path / prefix).exists():
+                (path / prefix).parent.mkdir(parents=True, exist_ok=True)
                 (path / prefix).symlink_to(target)
         return BranchWorktree(path, self._layouts, self._native)
 
@@ -199,12 +202,26 @@ class SourceBase:
         return layout
 
 
-def third_party_links(worktree: Path) -> list[tuple[str, str]]:
-    """The trees the worktree at ``worktree`` links from its source base's copies, as the base recorded them."""
+def linked_paths(worktree: Path) -> list[tuple[str, str]]:
+    """The paths the worktree at ``worktree`` links rather than holds, as its source base recorded them: ``3rdparty``
+    trees from the base's copies (:func:`_third_party`) and compiled extensions from the installed package
+    (:func:`_extensions`)."""
     common = Path(_git(worktree, "rev-parse", "--path-format=absolute", "--git-common-dir").strip())
-    links = common / THIRD_PARTY_LINKS
+    links = common / LINKED_PATHS
     lines = links.read_text().splitlines() if links.exists() else []
     return [(prefix, target) for prefix, target in (line.split("\t") for line in lines)]
+
+
+def _extensions(package: SourceRoot, generated: Sequence[str]) -> list[tuple[str, str]]:
+    """``package``'s compiled Python extensions, ``(path in a worktree, installed file)``: the worktree holds none, as a
+    patch never carries a build, and without them its package cannot be imported (vLLM's ``_C``). They are binaries a
+    branch never edits, so each links the installed file."""
+    built = [package.path / path for path in generated]
+    return [
+        (f"{package.prefix}/{path.relative_to(package.path).as_posix()}", str(path))
+        for path in sorted(package.path.rglob("*.so"))
+        if _EXTENSION.search(path.name) and not any(root in path.parents for root in built)
+    ]
 
 
 def _third_party(metas: Sequence[SourceRoot]) -> tuple[PurePosixPath, Path] | None:
@@ -359,7 +376,7 @@ class BranchWorktree:
 
     def _reset(self, commit: str) -> None:
         _git(self.path, "reset", "--hard", commit)
-        kept = [f"--exclude=/{prefix}" for prefix, _target in third_party_links(self.path)]
+        kept = [f"--exclude=/{prefix}" for prefix, _target in linked_paths(self.path)]
         _git(self.path, "clean", "-fdx", _QUIET, *kept)
 
     def _staged_diff(self, component: str, *options: str) -> str:
@@ -393,12 +410,12 @@ __all__ = [
     "HEAD_SUBJECT",
     "SKIPPED",
     "THIRD_PARTY_COPY",
-    "THIRD_PARTY_LINKS",
+    "LINKED_PATHS",
     "BranchWorktree",
     "Changes",
     "SourceBase",
     "Upstream",
     "WorktreeError",
     "installed_upstream",
-    "third_party_links",
+    "linked_paths",
 ]
