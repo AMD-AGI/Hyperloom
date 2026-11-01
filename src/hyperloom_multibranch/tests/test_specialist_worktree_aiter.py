@@ -172,3 +172,18 @@ def test_a_sync_lays_a_csrc_patch_over_the_installed_sources(worktree):
 
     assert (worktree.path / "csrc" / "kernels" / "gemm.cu").read_bytes() == b"// patched\n"
     assert worktree.diff("aiter") == ""
+
+
+def test_a_worktree_reads_the_checkout_s_third_party_headers_without_tracking_them(tmp_path):
+    checkout = tmp_path / "aiter-checkout"
+    _write(checkout / "3rdparty" / "composable_kernel" / "include" / "ck" / "ck.hpp", HEADER)
+    editable = _develop_install(checkout)[0]
+    base = SourceBase(tmp_path / "source", locator=lambda _layout: editable)
+    base.build(["aiter"])
+    worktree = base.worktree("s1", tmp_path / "s1")
+
+    assert (worktree.path / "3rdparty" / "composable_kernel" / "include" / "ck" / "ck.hpp").read_bytes() == HEADER
+    assert not any(path.startswith("3rdparty") for path in _tracked(worktree.path))
+    assert "3rdparty" not in worktree.diff("aiter")
+    worktree.sync("c0", [])
+    assert (worktree.path / "3rdparty" / "composable_kernel" / "include" / "ck" / "ck.hpp").exists(), "a sync keeps it"
