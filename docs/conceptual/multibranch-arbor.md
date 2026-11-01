@@ -12,7 +12,7 @@ In component mode, Hyperloom's multi-branch mode (MB) runs Arbor as an autonomou
 
 This page says which side runs each step of an MB session, and what passes between the two.
 - **As of 2026-11-01:**
-  - Hyperloom `jiaweche/Hyperloom` `arbor-adapter-v2` `195ec7085`, merging into `multibranch-dev`;
+  - Hyperloom `jiaweche/Hyperloom` `arbor-adapter-v2` `cc5fc7dca`, merging into `multibranch-dev`;
   - Arbor `main` `1fa2069`.
 - **Arbor's copy of this page:** [`docs/who-runs-what.md`](https://github.com/AMD-AGI/Arbor/blob/main/docs/who-runs-what.md).
 - **The contract key by key, from Arbor's side:** [`docs/hosts.md`](https://github.com/AMD-AGI/Arbor/blob/main/docs/hosts.md).
@@ -30,8 +30,8 @@ In the Hyperloom paths below, `src/hyperloom_multibranch/` is left out. Arbor's 
 | **Clock** | Owns the session's deadline. Gives each Arbor `component.deadline` = EXPLORE's end minus 40 min. | Starts an iteration only if it fits, and exits 0 `deadline`. |
 | **Operating point** | One per session: `--conc`, ISL/OSL, and its gate's client. | Runs MB's client, `component.bench_command`, against its own server. |
 | **Root and baseline** | PRELUDE: the root commit, the baseline tests, and the root profile (a TraceLens job). | None. |
-| **The map** | For two or more Arbors without `--agent-directions`: the dossier pass, an Arbor run MB starts and reads. Without a map from it, `python3 -m arbor.directions generate`. Then `split`. Each Arbor gets its share as `component.plan`. | In the dossier pass: writes the dossier and `directions.json`, then exits `mapped`. In a branch: plans from its share. |
-| **Human review** | Pauses after the map step, before the split (branch `arbor-review-gate`, not merged yet). | Its gate at session start passes at once when the host reviewed (`component.review: "host"`). |
+| **The map** | Without `--agent-directions`, for two or more Arbors, or for one with the review on: the dossier pass, an Arbor run MB starts and reads. Without a map from it, `python3 -m arbor.directions generate`. Then `split`. Each Arbor gets its share as `component.plan`. | In the dossier pass: writes the dossier and `directions.json`, then exits `mapped`. In a branch: plans from its share. |
+| **Human review** | On by default: pauses after the map step, before the split, holding no lease, until `hyperloom-multibranch review --session D approve`. `--no-review-gate` skips it. | Its gate at session start passes at once when the host reviewed (`component.review: "host"`). |
 | **The optimization loop** | None. | Agent turns, its own server, the bench, GSM8K and the short-prompt check, and its own KEEP or REVERT. |
 | **A KEEP** | Imports the snapshot, tests it on its own measurement pool, judges it, lands it on the branch and merges it into integration. | Writes an atomic snapshot to `keeps/NNNN/`. |
 | **Numbers of record** | MB's toolbox: InferenceX or AgentX, through Magpie. | Its own measurements decide only its own KEEPs. |
@@ -51,7 +51,7 @@ In the Hyperloom paths below, `src/hyperloom_multibranch/` is left out. Arbor's 
    - **The root:** it commits the root recipe and measures the baseline.
    - **The profile:** it starts the root profile, TraceLens job `prelude:<run id>`, without waiting for it.
    - **Code:** `scheduling/prelude.py`.
-3. **MB reads the root's shares.** This and steps 4 and 5 happen only for two or more Arbors without `--agent-directions`.
+3. **MB reads the root's shares.** This and steps 4 and 5 happen only without `--agent-directions`: for two or more Arbors, or for one with the review on, which then takes the map whole.
    - **The wait:** up to 10 min, for the profile job.
    - **What it takes:** the root's op shares; or, when TraceLens degraded, the kernel shares from the job's result.
    - **Code:** `scheduling/root_shares.py`.
@@ -71,7 +71,7 @@ In the Hyperloom paths below, `src/hyperloom_multibranch/` is left out. Arbor's 
    - **Without a map from the pass,** MB runs `python3 -m arbor.directions generate` in the Arbor checkout, on its own host.
    - **The split:** `split --shares N` writes `MB-agent-plans/shares/share-<k>.json`.
    - **Code:** `specialist/arbor_adapter.py`.
-6. **MB pauses for a human,** unless `--no-review-gate` (branch `arbor-review-gate`, not merged yet).
+6. **MB pauses for a human,** unless `--no-review-gate`. It also pauses on a map given with `--agent-directions`. A run with `--stop-after-map` never pauses: it keeps the map and ends, for a review offline.
    - **The state:** `MB-review/review.json`.
    - **The decision:** `hyperloom-multibranch review --session D approve|reject`.
    - **Code:** `scheduling/review.py`.
@@ -133,13 +133,14 @@ In the Hyperloom paths below, `src/hyperloom_multibranch/` is left out. Arbor's 
 
 ## Known gaps (2026-11-01)
 
-- **Arbor's gate and MB's review:**
-  - MB's review pause is on `arbor-review-gate`, not yet in `arbor-adapter-v2`.
-  - Until it is, an MB that starts Arbor at `1fa2069` or later leaves its Arbors waiting at Arbor's own gate, holding their leases.
-  - Keep Arbor at `05d04d5` under such an MB.
+- **The review pauses unattended runs:** it is on by default. A batch run passes `--no-review-gate`, or a person
+  approves from a login node.
+- **An older MB under a newer Arbor:** an MB before `cc5fc7dca` doesn't write `component.review`. Its Arbors at
+  `1fa2069` or later wait at Arbor's own gate, holding their leases.
 - **One operating point per session:** several concurrencies means several MB sessions (ArborDevelopment #27).
 - **A dropped launch-file flag stays:**
   - A flag set by the `--agent-launch` file, which a KEEP drops, is not removed on import.
   - A recipe's launch cannot record such a removal either (`boards/hyperloom-multibranch#168` c4583).
 - **No profile on CUDA-graph runs:** a branch's `component.profile` takes op shares only. On a run where TraceLens degraded, the branches get none, though the dossier pass got kernel shares.
-- **One Arbor gets no dossier pass:** on `arbor-adapter-v2`, one Arbor without `--agent-directions` makes its own dossier inside its branch. `arbor-review-gate` gives it the dossier pass when the review is on.
+- **One Arbor without the review:** with `--no-review-gate` and no `--agent-directions`, a lone Arbor gets no
+  dossier pass and makes its own dossier inside its branch.
