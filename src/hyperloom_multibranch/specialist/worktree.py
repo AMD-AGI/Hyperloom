@@ -35,6 +35,8 @@ from hyperloom_multibranch.contracts.sources import NativeTree, SourceRoot, meta
 #: Built files a text patch can never change.
 #: The file in a base's git directory that names the trees each worktree links rather than holds.
 THIRD_PARTY_LINKS = "hyperloom-third-party"
+#: Where in a base's git directory the copies of those trees go.
+THIRD_PARTY_COPY = "hyperloom-third-party-trees"
 SKIPPED = ("__pycache__", "*.pyc", "*.pyo", "*.so", "*.a", "*.o", "*.co", "*.hsaco")
 BASE_BRANCH = "installed"
 HEAD_SUBJECT = "head "
@@ -158,8 +160,11 @@ class SourceBase:
                 shutil.copytree(meta.path, self.path / meta.prefix, ignore=_ignore(meta.path, ()))
             third_party = _third_party(metas)
             if third_party is not None:
-                links.append(third_party)
-                excluded.append(f"/{third_party[0]}")
+                prefix, installed = third_party
+                copy = self.path / ".git" / THIRD_PARTY_COPY / prefix
+                shutil.copytree(installed, copy, symlinks=True, ignore=_ignore(installed, ()))
+                links.append((prefix.as_posix(), str(copy)))
+                excluded.append(f"/{prefix.as_posix()}")
             native = self._native.get(component)
             if native is not None:
                 self._lay_native(native.root, (package, *metas))
@@ -195,22 +200,22 @@ class SourceBase:
 
 
 def third_party_links(worktree: Path) -> list[tuple[str, str]]:
-    """The trees the worktree at ``worktree`` links from the installed checkouts, as its source base recorded them."""
+    """The trees the worktree at ``worktree`` links from its source base's copies, as the base recorded them."""
     common = Path(_git(worktree, "rev-parse", "--path-format=absolute", "--git-common-dir").strip())
     links = common / THIRD_PARTY_LINKS
     lines = links.read_text().splitlines() if links.exists() else []
     return [(prefix, target) for prefix, target in (line.split("\t") for line in lines)]
 
 
-def _third_party(metas: Sequence[SourceRoot]) -> tuple[str, str] | None:
-    """Where a worktree links the checkout's ``3rdparty`` tree (CK and its kind), the headers a JIT build of the meta
-    trees includes: ``(path in the worktree, installed tree)``, or ``None`` without one. It is linked, not laid out:
-    it is large, never patched, and a patch must not see it."""
+def _third_party(metas: Sequence[SourceRoot]) -> tuple[PurePosixPath, Path] | None:
+    """The checkout's ``3rdparty`` tree (CK and its kind), the headers a JIT build of the meta trees includes:
+    ``(path in a worktree, installed tree)``, or ``None`` without one. A worktree links a copy the base keeps, never
+    the installed tree, which every test builds against: an edit through the link must stay in the session. It is
+    linked, not laid out, as it is large, never patched, and a patch must not see it."""
     if not metas:
         return None
     tree = metas[0].path.parent / "3rdparty"
-    prefix = PurePosixPath(metas[0].prefix).parent / "3rdparty"
-    return (prefix.as_posix(), str(tree)) if tree.is_dir() else None
+    return (PurePosixPath(metas[0].prefix).parent / "3rdparty", tree) if tree.is_dir() else None
 
 
 def _ignore(root: Path, built: Sequence[str]) -> Callable[[str, list[str]], set[str]]:
@@ -387,6 +392,7 @@ __all__ = [
     "BASE_BRANCH",
     "HEAD_SUBJECT",
     "SKIPPED",
+    "THIRD_PARTY_COPY",
     "THIRD_PARTY_LINKS",
     "BranchWorktree",
     "Changes",

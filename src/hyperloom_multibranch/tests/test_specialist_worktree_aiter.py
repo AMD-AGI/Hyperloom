@@ -187,3 +187,17 @@ def test_a_worktree_reads_the_checkout_s_third_party_headers_without_tracking_th
     assert "3rdparty" not in worktree.diff("aiter")
     worktree.sync("c0", [])
     assert (worktree.path / "3rdparty" / "composable_kernel" / "include" / "ck" / "ck.hpp").exists(), "a sync keeps it"
+
+
+def test_an_edit_through_a_worktree_s_third_party_tree_never_reaches_the_installed_checkout(tmp_path):
+    checkout = tmp_path / "aiter-checkout"
+    installed = checkout / "3rdparty" / "composable_kernel" / "include" / "ck" / "ck.hpp"
+    _write(installed, HEADER)
+    editable = _develop_install(checkout)[0]
+    base = SourceBase(tmp_path / "source", locator=lambda _layout: editable)
+    base.build(["aiter"])
+    worktree = base.worktree("s1", tmp_path / "s1")
+
+    (worktree.path / "3rdparty" / "composable_kernel" / "include" / "ck" / "ck.hpp").write_bytes(b"// edited\n")
+
+    assert installed.read_bytes() == HEADER, "every test builds against the installed checkout"
