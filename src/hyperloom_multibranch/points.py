@@ -51,9 +51,11 @@ USER_DATA_DIR = "userdata"
 #: Arbor port blocks are: wider than all the blocks one session takes.
 FIRST_PORT = 8888
 PORT_STEP = 100
+#: The operating point's flag, as ``run`` and these commands spell it.
+CONC = "--conc"
 #: The flags each point's session is given by its stage, which the run arguments the points share may not set.
 POINT_FLAGS = (
-    "--conc",
+    CONC,
     "--agent-port",
     "--stop-after-map",
     "--no-review-gate",
@@ -158,7 +160,7 @@ def stage_argv(point: Point, stage: Stage, run_args: Sequence[str], reviewed: Re
     either the flag that stops it after its map or, from ``reviewed``, the PRELUDE it roots on and its reviewed map and
     dossier, with no second review: the points' review was it."""
 
-    argv = ["run", *run_args, "--conc", str(point.conc), "--agent-port", str(point.agent_port)]
+    argv = ["run", *run_args, CONC, str(point.conc), "--agent-port", str(point.agent_port)]
     if stage is Stage.MAP:
         return [*argv, "--stop-after-map"]
     assert reviewed is not None and reviewed.session is not None
@@ -330,9 +332,9 @@ def add_parser(commands: argparse._SubParsersAction[argparse.ArgumentParser]) ->
         return parser
 
     mapping = action(Stage.MAP.value, "Run each --conc's session to its map, then write the review page.")
-    mapping.add_argument("--conc", type=int, action="append", required=True, help="An operating point; repeatable.")
+    mapping.add_argument(CONC, type=int, action="append", required=True, help="An operating point; repeatable.")
     running = action(Stage.RUN.value, "Run the approved points, each on its reviewed map and dossier.")
-    running.add_argument("--conc", type=int, action="append", default=[], help="Only this approved point; repeatable.")
+    running.add_argument(CONC, type=int, action="append", default=[], help="Only this approved point; repeatable.")
     for stage in (mapping, running):
         stage.add_argument("--cards-per-point", type=int, default=None, help="Default: the machine's cards shared out.")
         stage.add_argument(
@@ -345,7 +347,7 @@ def add_parser(commands: argparse._SubParsersAction[argparse.ArgumentParser]) ->
         stage.add_argument("run_args", nargs=argparse.REMAINDER, help="-- and the run arguments the points share.")
     for verb, decision in DECISIONS.items():
         deciding = action(verb, f"Record one point as {decision.value}.")
-        deciding.add_argument("--conc", type=int, required=True)
+        deciding.add_argument(CONC, type=int, required=True)
         deciding.add_argument("--why", default="", required=decision is Decision.REJECTED)
     action(REVIEW, "Write the review page again.")
 
