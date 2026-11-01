@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A TraceLens report marked degraded gives no op shares, and its tool summary says so."""
+"""A TraceLens report marked degraded gives no op shares from its ops summary, and its tool summary says so; the report
+route's kernel table still gives kernel shares, unless the route found it hollow."""
 
 from __future__ import annotations
 
@@ -17,6 +18,7 @@ from hyperloom_multibranch.toolbox.tools import ToolOutput, ToolRequest
 from hyperloom_multibranch.toolbox.tools.op_shares import (
     ANALYSIS_JSON,
     DEGRADED_NOTICE,
+    KERNEL_SHARES_NOTICE,
     OPS_SUMMARY,
     read_op_shares,
     with_op_shares,
@@ -71,3 +73,22 @@ def test_a_report_the_route_found_hollow_gives_no_shares_though_tracelens_marked
     output = with_op_shares(hollow, REQUEST)
     assert not output.op_shares and "kernels fill 0.6% of the span" in output.summary
     assert with_op_shares(replace(hollow, result={**hollow.result, "window_degraded_reason": ""}), REQUEST).op_shares
+
+
+def test_a_degraded_report_keeps_the_report_routes_kernel_shares_and_says_they_are_kernel_shares(
+    tmp_path: Path,
+) -> None:
+    written = _write(
+        tmp_path, {"mode": "deterministic-fallback", "trace_quality": "poor", "warnings": [FALLBACK_WARNING]}
+    )
+    table = tmp_path / "kernel_shares.csv"
+    table.write_text("name,Percentage (%)\nCijk_gemm,61.5\npaged_attention,20.0\n", encoding="utf-8")
+    routed = replace(written, result={**written.result, "kernel_shares_path": str(table)})
+
+    output = with_op_shares(routed, REQUEST)
+
+    assert output.op_shares == {"Cijk_gemm": 61.5, "paged_attention": 20.0} and output.commit_id == "c1"
+    assert KERNEL_SHARES_NOTICE in output.summary and FALLBACK_WARNING in output.summary
+    assert DEGRADED_NOTICE not in output.summary
+    hollow = replace(routed, result={**routed.result, "window_degraded_reason": "kernels fill 0.6% of the span"})
+    assert not with_op_shares(hollow, REQUEST).op_shares
