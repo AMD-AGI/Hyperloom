@@ -176,7 +176,8 @@ async def _ended(ready: ReadyAgent, start: DossierStart, setup: DossierSetup) ->
     process, checkout = ready.process, ready.source_dir
     while process.returncode is None and setup.clock() < start.deadline + setup.exit_grace_seconds:
         await setup.sleep(setup.poll_seconds)
-    session, dossier = checkout / DOSSIER_PASS.session_dir, pass_dossier(checkout)
+    session = checkout / DOSSIER_PASS.session_dir
+    dossier = pass_dossier(checkout, session)
     if process.returncode is None:
         return DossierOutcome(None, dossier, "it set no map by its deadline and was stopped")
     if process.returncode == 0 and mapped(session):

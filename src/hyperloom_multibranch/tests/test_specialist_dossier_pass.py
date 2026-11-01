@@ -32,7 +32,8 @@ FAKE_DOSSIER = """
 import json, pathlib, sys, time
 config = json.loads(pathlib.Path(sys.argv[sys.argv.index("--config") + 1]).read_text())
 pathlib.Path("seen-config.json").write_text(json.dumps(config))
-do = json.loads(pathlib.Path("fake-dossier.json").read_text())["do"]
+fake = json.loads(pathlib.Path("fake-dossier.json").read_text())
+do = fake["do"]
 session = pathlib.Path(config["session_root"])
 session.mkdir(parents=True, exist_ok=True)
 
@@ -49,7 +50,7 @@ if do == "crash":
     time.sleep(0.5)
     print("Traceback: the profiler died", flush=True)
     sys.exit(1)
-dossier = pathlib.Path("docs/dossier/qwen3-8b-1k1k-c64")
+dossier = (session if fake.get("in_session") else pathlib.Path(".")) / "docs/dossier/qwen3-8b-1k1k-c64"
 dossier.mkdir(parents=True, exist_ok=True)
 (dossier / "README.md").write_text("# Qwen3-8B 1k/1k C64\\n")
 if do == "hang":
@@ -68,15 +69,16 @@ async def _tick(_seconds: float) -> None:
 
 
 async def _pass(
-    tmp_path: Path, do: str, *, cards: int = 1, seconds: float = 30.0, arbor: bool = True
+    tmp_path: Path, do: str, *, cards: int = 1, seconds: float = 30.0, arbor: bool = True, in_session: bool = False
 ) -> tuple[DossierOutcome, Toolbox, Path, DossierSetup]:
-    """The dossier pass of a fake Arbor doing ``do``, on a rig whose toolbox has ``cards`` free, given ``seconds``."""
+    """The dossier pass of a fake Arbor doing ``do``, on a rig whose toolbox has ``cards`` free, given ``seconds``,
+    writing its dossier in its session (``in_session``) or, by default, in its checkout."""
 
     rig = await branch_rig(tmp_path, ROOT, "a1")
     files = {
         **CHECKOUT_FILES,
         "arbor/__main__.py": FAKE_DOSSIER,
-        "fake-dossier.json": json.dumps({"do": do}),
+        "fake-dossier.json": json.dumps({"do": do, "in_session": in_session}),
         "docs/dossier/shipped/README.md": "# one of Arbor's own\n",
     }
     source = _committed(_write(tmp_path / "arbor-repo", files if arbor else {"README.md": "not Arbor\n"}))
@@ -122,6 +124,13 @@ async def test_the_pass_maps_on_its_own_lease_from_the_start_commit_and_gives_th
     assert config["server_flags"] == "--max-num-seqs 128"  # the start commit's launch
     profile = json.loads((session / PROFILE_FILE).read_text())
     assert (profile["source"], profile["shares"]) == ("kernel shares", dict(SHARES.shares))
+
+
+async def test_a_pass_whose_agent_writes_the_dossier_in_its_session_is_found_there(tmp_path: Path) -> None:
+    outcome, _, checkout, _ = await _pass(tmp_path, "mapped", in_session=True)
+
+    session = checkout / DOSSIER_PASS.session_dir
+    assert (outcome.reason, outcome.dossier) == (MAPPED, session / "docs" / "dossier" / "qwen3-8b-1k1k-c64")
 
 
 @pytest.mark.parametrize(

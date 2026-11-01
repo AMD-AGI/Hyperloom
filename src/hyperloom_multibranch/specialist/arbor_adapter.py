@@ -328,19 +328,31 @@ def carry_dossier(checkout: Path, dossier: Path) -> None:
         shutil.copytree(dossier, target)
 
 
-def pass_dossier(checkout: Path) -> Path | None:
-    """The dossier a dossier pass in ``checkout`` wrote: the newest directory of :data:`DOSSIER_DIR` with an index that
-    git does not track (the ones it tracks are Arbor's own); ``None`` when it wrote none."""
+def pass_dossier(checkout: Path, session: Path) -> Path | None:
+    """The dossier a dossier pass in ``checkout`` wrote: the newest directory with an index under :data:`DOSSIER_DIR`
+    of the checkout, where git does not track it (the ones it tracks are Arbor's own), or of the pass's ``session``,
+    where Arbor's dossier skill writes it when its agent works from there (Ruby, 2026-11-01: one of three passes did);
+    ``None`` when it wrote none."""
 
-    root = checkout / DOSSIER_DIR
-    if not root.is_dir():
-        return None
+    written = [*_written(checkout / DOSSIER_DIR, _shipped(checkout)), *_written(session / DOSSIER_DIR, frozenset())]
+    return max(written, key=lambda path: (path / DOSSIER_INDEX).stat().st_mtime, default=None)
+
+
+def _shipped(checkout: Path) -> frozenset[str]:
+    """The dossiers ``checkout`` ships, the ones git tracks under :data:`DOSSIER_DIR`."""
+
     listed = subprocess.run(["git", "ls-files", "--", DOSSIER_DIR], cwd=checkout, capture_output=True, text=True)
     depth = len(PurePosixPath(DOSSIER_DIR).parts)
     tracked = (PurePosixPath(line).parts for line in listed.stdout.splitlines())
-    shipped = {parts[depth] for parts in tracked if len(parts) > depth}
-    written = [path for path in root.iterdir() if path.name not in shipped and (path / DOSSIER_INDEX).is_file()]
-    return max(written, key=lambda path: (path / DOSSIER_INDEX).stat().st_mtime, default=None)
+    return frozenset(parts[depth] for parts in tracked if len(parts) > depth)
+
+
+def _written(root: Path, shipped: frozenset[str]) -> list[Path]:
+    """The directories of ``root`` with a dossier index, but for the ``shipped`` ones."""
+
+    if not root.is_dir():
+        return []
+    return [path for path in root.iterdir() if path.name not in shipped and (path / DOSSIER_INDEX).is_file()]
 
 
 def arbor_config(spec: AgentSpec, checkout: Path, run: ArborRun) -> dict[str, Any]:
