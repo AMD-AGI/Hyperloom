@@ -383,3 +383,15 @@ def test_rows_that_are_not_text_are_refused() -> None:
         mint_kernel_artifact(KernelKind.GEMM, TARGET, ENV, b"M,N,K\n\xff\xfe", rows_only=True)
 
     assert refused.value.code == kernel_artifacts.CODE_INVALID
+
+
+def test_the_image_s_aiter_tables_are_the_installed_aiter_s_else_an_sglang_image_s(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package = tmp_path / "site-packages" / "aiter"
+    monkeypatch.setattr(kernel_artifacts, "resolve_package_root", lambda: package)
+    assert kernel_artifacts.image_aiter_configs() == Path(SGLANG_IMAGE_AITER_CONFIGS)  # no configs directory there
+    (package / "configs").mkdir(parents=True)
+    assert kernel_artifacts.image_aiter_configs() == package / "configs"
+    monkeypatch.setattr(kernel_artifacts, "resolve_package_root", lambda: None)
+    assert kernel_artifacts.image_aiter_configs() == Path(SGLANG_IMAGE_AITER_CONFIGS)

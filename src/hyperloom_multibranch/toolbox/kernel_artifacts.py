@@ -40,6 +40,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from hyperloom.common.aiter_jit_cache import resolve_package_root
 from hyperloom.common.outside_facts import SGLANG_IMAGE_AITER_CONFIGS
 from hyperloom.contracts.recipe import KERNEL_ROOT, KernelArtifact, KernelKind, RecipeError
 from hyperloom.measure.compile import (
@@ -65,6 +66,7 @@ __all__ = [
     "KernelRowsMixed",
     "KernelRowsUnmergeable",
     "KernelVariables",
+    "image_aiter_configs",
     "mint_kernel_artifact",
     "shape_order",
     "union_rows",
@@ -75,6 +77,15 @@ TARGET_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._=,+-]{0,127}")
 CODE_INVALID = "kernel_artifact_invalid"
 CODE_TARGET_REQUIRED = "target_required"
 CODE_VARIABLE_TAKEN = "kernel_variable_taken"
+
+
+def image_aiter_configs() -> Path:
+    """The image's aiter tables: ``configs`` of the aiter its servers import, found without importing it (a vLLM image
+    keeps it in its Python's site-packages), else where an SGLang image keeps it (``SGLANG_IMAGE_AITER_CONFIGS``)."""
+
+    package = resolve_package_root()
+    configs = None if package is None else package / "configs"
+    return configs if configs is not None and configs.is_dir() else Path(SGLANG_IMAGE_AITER_CONFIGS)
 
 
 def mint_kernel_artifact(
@@ -292,7 +303,7 @@ def _read(data: bytes, which: str) -> _Table:
 
 
 def _shape_key(env: str, header: Sequence[str], configs: Path | None) -> tuple[str, ...]:
-    root = Path(SGLANG_IMAGE_AITER_CONFIGS if configs is None else configs)
+    root = image_aiter_configs() if configs is None else Path(configs)
     variable = read_variables(root.parent / "jit" / "core.py").get(env)
     key = None if variable is None else table_key(root, variable.tuned, header)
     if not key:
