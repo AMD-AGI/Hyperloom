@@ -21,9 +21,9 @@ return code, and a profile whose traced attempt failed runs again without it.
 * **Launch.** Magpie and InferenceX own the server's command line, so the server is not wrapped in ``ruppell run``: the
   environment ``ruppell run`` would give its command goes into the point's ``benchmark.envs``. It is taken from
   ``ruppell run`` itself (a probe command that prints its environment), so ruppell's own rules apply (the tool library,
-  its early load, the NCCL plugin, packet capture off on ROCm 7.2.0-7.2.2, a value the point sets kept). ruppell's
-  start-up hook goes first on ``PYTHONPATH``: it runs the ``sitecustomize`` it shadows by looking from the start of
-  ``sys.path``, so anywhere else it would run a farm hook a second time.
+  its early load, the NCCL plugin, packet capture off on ROCm 7.2.0-7.2.2 and, under the SGLang adapter, 7.2.4, a value
+  the point sets kept). ruppell's start-up hook goes first on ``PYTHONPATH``: it runs the ``sitecustomize`` it shadows
+  by looking from the start of ``sys.path``, so anywhere else it would run a farm hook a second time.
 * **Report.** After the round: ``ruppell census``, ``ruppell export`` (for ``check_m2``'s ``report.json``; the trace
   itself is not kept) and ``tests/m2/check_m2.py``, then the GPU time of each module by step kind
   (:data:`MODULE_SHARES_FILE`). What is kept goes to ``<output_dir>/ruppell``, beside ``profile/`` and never in it: a
@@ -74,13 +74,14 @@ __all__ = [
 ]
 
 #: The ruppell commit every profile test builds, and the digest (:func:`tree_sha256`) of its staged
-#: ``source`` directory, ``.commit`` included. ``0ef9b0d`` is the first commit that turns HIP graph packet capture off on
-#: ROCm 7.2.0-7.2.2, where kernel dispatch tracing otherwise crashes the first decode graph replay.
-RUPPELL_COMMIT = "0ef9b0dac1cfd3caf533346aca5bdbbc925c918b"
-RUPPELL_TREE_SHA256 = "32710ea380a08db3a2611965979875533adf7d99b706d68fc158ab10a178e6fa"
+#: ``source`` directory, ``.commit`` included. ``v0.10.0``: on ROCm 7.2.0-7.2.2 HIP graph packet capture is off for
+#: any traced run, and on 7.2.4 for SGLang (``RUPPELL_SGLANG=1`` in the probe's environment), where kernel dispatch
+#: tracing otherwise crashes graph replays once the queue runs deep (ROCm/rocm-systems#14586).
+RUPPELL_COMMIT = "22b813b113d363d70963ac33e868cfbf486e7521"
+RUPPELL_TREE_SHA256 = "b46077bc11cc2e79453fa7c3ec074fc9e9e664f30ec49eb26b969fd3d0935c34"
 #: The detail sampling of a profile test: kernel detail for 5 of every 1000 serving steps.
 DETAIL = "5/1000"
-#: The ROCm releases ruppell supports, [from, to): its QUICKSTART says 7.0.2 to 7.2.3, its checks covered 7.2.4, and
+#: The ROCm releases ruppell supports, [from, to): it has been run on 7.0.2 to 7.2.4 (MI350X, MI355X), and
 #: it has never been built on ROCm 10.
 SUPPORTED_ROCM = ((7, 0, 2), (8, 0, 0))
 
