@@ -122,6 +122,7 @@ from hyperloom.measure.pins import IMAGE_DIGEST_VAR
 from hyperloom.measure.runner.cache_build import CacheBuildError
 from hyperloom.measure.short_prompts.staging import CACHE_ENV as RUNNER_CACHE_ENV
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient, RemoteRecipeConfigurationError
+from hyperloom_multibranch import points
 from hyperloom_multibranch.contracts.llm_prices import price_of
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.blackboard.knowledge.reference_leads import INFERENCEX_REFERENCE
@@ -214,6 +215,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog=PROG, description="Run a multi-branch optimization session.")
     commands = parser.add_subparsers(dest="command", required=True)
     _add_run_options(commands.add_parser("run", help="Run one session: PRELUDE, EXPLORE, FINAL and CLOSE."))
+    points.add_parser(commands)
     final_only = commands.add_parser(
         "final-only",
         help=(
@@ -1054,6 +1056,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "hosted":
         return hosted_run()
+    if args.command == "points":
+        try:
+            return points.main(args)
+        except ValueError as exc:
+            print(f"{parser.prog} points: error: {exc}", file=sys.stderr)
+            return EXIT_USAGE
     persisted = grant = None
     try:
         if args.command == "final-only":
