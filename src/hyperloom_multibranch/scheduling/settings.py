@@ -22,6 +22,9 @@ SWEEP_FACTORS = (0.5, 1.0, 2.0)
 #: starts its first iteration only with an hour and its 3 min margin left (its estimate with none measured), and ends
 #: the pass as soon as the map is set: on Ruby, two of its iterations wrote a Qwen3-8B dossier and map in 15-25 min.
 DOSSIER_MINUTES = 90.0
+#: The first port of the blocks the Arbor agents' servers take, unless the run names another. Sessions that share a
+#: machine each name their own, since every agent serves on the host's network.
+AGENT_PORT = 31100
 
 
 def sweep_concs(conc: int) -> tuple[int, ...]:
@@ -127,9 +130,10 @@ class RunSettings:
     the directions map whose disjoint shares the Arbor agents among them work, one share each (``""`` for none; see
     :mod:`~hyperloom_multibranch.scheduling.agent_plans`), ``agent_pack`` the pack those Arbors run (``""`` for
     the adapter's default, Arbor's serving template), ``agent_launch`` the file of the launch their recipe's adds
-    to (``""`` when the recipe's is the whole launch), and ``agent_dossier_minutes`` how long the dossier pass that
+    to (``""`` when the recipe's is the whole launch), ``agent_dossier_minutes`` how long the dossier pass that
     maps two or more Arbors' directions may run when no map is given (0: none, the map is generated from the root's
-    shares; :mod:`~hyperloom_multibranch.specialist.dossier_pass`). ``references`` are the
+    shares; :mod:`~hyperloom_multibranch.specialist.dossier_pass`), and ``agent_port`` the first port of the blocks
+    their servers take, one block per agent branch and one for the dossier pass. ``references`` are the
     directories of reference material the run copies in before its first phase, each with the commit it was taken at.
     ``dev_leases`` is how many dev sandboxes the session lends its specialists at once; 0 lends none. ``playbook`` says
     which scheduling playbook the session plays."""
@@ -150,9 +154,11 @@ class RunSettings:
     agent_pack: str = ""
     agent_launch: str = ""
     agent_dossier_minutes: float = DOSSIER_MINUTES
+    agent_port: int = AGENT_PORT
 
 
 __all__ = [
+    "AGENT_PORT",
     "DOSSIER_MINUTES",
     "SWEEP_FACTORS",
     "InferenceXShape",

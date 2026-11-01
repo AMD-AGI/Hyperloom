@@ -278,6 +278,7 @@ class Session:
             settings.agents,
             settings.agent_pack,
             settings.agent_launch,
+            settings.agent_port,
         )
 
     def _score_with_defaults(self) -> None:

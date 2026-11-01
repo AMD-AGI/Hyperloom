@@ -170,6 +170,7 @@ from hyperloom_multibranch.scheduling.processes import ProcessRegistry, adopting
 from hyperloom_multibranch.scheduling.reference import ReferenceSource, reference_source
 from hyperloom_multibranch.scheduling.roster import RosterCaps
 from hyperloom_multibranch.scheduling.settings import (
+    AGENT_PORT,
     DOSSIER_MINUTES,
     InferenceXShape,
     KernelOptimizer,
@@ -182,6 +183,7 @@ from hyperloom_multibranch.specialist.arbor_adapter import ArborRefused, read_la
 PROG = "hyperloom-multibranch"
 EXIT_FAILED = 1
 EXIT_USAGE = 2
+MAX_PORT = 65535
 DEFAULT_MAX_BRANCHES = 4
 DEFAULT_MAX_K_PER_BRANCH = 2
 DEFAULT_JUDGE_INTERVAL_SECONDS = 600.0
@@ -441,6 +443,17 @@ def _add_agent_options(run: argparse.ArgumentParser) -> None:
             " (examples/multibranch-arbor-launch)."
         ),
     )
+    run.add_argument(
+        "--agent-port",
+        dest="agent_port",
+        type=int,
+        default=None,
+        metavar="PORT",
+        help=(
+            "The first port of the blocks the --autonomous-agent servers take, one block per agent and one for the"
+            f" dossier pass; sessions that share a machine each need their own (default {AGENT_PORT})."
+        ),
+    )
 
 
 def _positive(args: argparse.Namespace, names: tuple[str, ...]) -> list[str]:
@@ -543,6 +556,18 @@ def _agent_launch(path: Path | None, agents: list[str]) -> str:
     return str(path.absolute())
 
 
+def _agent_port(port: int | None, agents: list[str]) -> int:
+    """The first port of the agents' port blocks; refused with no agent to serve on it, or when it is no port."""
+
+    if port is None:
+        return AGENT_PORT
+    if not agents:
+        raise ValueError("--agent-port needs an --autonomous-agent to serve on it")
+    if not 1 <= port <= MAX_PORT:
+        raise ValueError(f"--agent-port {port} is not a port")
+    return port
+
+
 def _user_directions(files: list[Path], max_branches: int) -> tuple[str, ...]:
     if len(files) > max_branches:
         raise ValueError(f"--specialist-prompt is given {len(files)} times, more than --max-branches {max_branches}")
@@ -621,6 +646,7 @@ def settings_from(
         agent_pack=_agent_pack(args.agent_pack, args.agents or []),
         agent_launch=_agent_launch(args.agent_launch, args.agents or []),
         agent_dossier_minutes=_dossier_minutes(args.agent_dossier_minutes),
+        agent_port=_agent_port(args.agent_port, args.agents or []),
     )
 
 

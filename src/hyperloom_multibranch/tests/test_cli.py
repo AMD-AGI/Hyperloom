@@ -76,6 +76,7 @@ from hyperloom_multibranch.scheduling.reference import ReferenceSource
 from hyperloom_multibranch.scheduling.tests.checkouts import knowledge_checkout
 from hyperloom_multibranch.scheduling.roster import RosterCaps
 from hyperloom_multibranch.scheduling.settings import (
+    AGENT_PORT,
     DOSSIER_MINUTES,
     InferenceXShape,
     KernelOptimizer,
@@ -386,6 +387,25 @@ def test_an_agent_launch_without_an_agent_or_unusable_is_a_usage_error(
 
     with pytest.raises(ValueError, match=match):
         _settings(*extra, "--agent-launch", str(path))
+
+
+def test_the_agent_port_is_the_run_s_own_or_the_shared_default() -> None:
+    assert _settings("--autonomous-agent", "/agents/arbor", "--agent-port", "32100").agent_port == 32100
+    assert _settings("--autonomous-agent", "/agents/arbor").agent_port == AGENT_PORT
+
+
+@pytest.mark.parametrize(
+    ("extra", "match"),
+    [
+        (["--agent-port", "32100"], "needs an --autonomous-agent"),
+        (["--autonomous-agent", "/agents/arbor", "--agent-port", "0"], "is not a port"),
+        (["--autonomous-agent", "/agents/arbor", "--agent-port", "65536"], "is not a port"),
+    ],
+    ids=["no-agent", "zero", "past-the-last-port"],
+)
+def test_an_agent_port_without_an_agent_or_that_is_no_port_is_a_usage_error(extra: list[str], match: str) -> None:
+    with pytest.raises(ValueError, match=match):
+        _settings(*extra)
 
 
 @pytest.mark.parametrize(

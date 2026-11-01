@@ -87,7 +87,7 @@ from hyperloom_multibranch.scheduling.peers import Peers, PeerSetup, PeersUnavai
 from hyperloom_multibranch.scheduling.prelude import prelude_argv
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.roster import Roster, RosterCaps
-from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, Workload
+from hyperloom_multibranch.scheduling.settings import AGENT_PORT, InferenceXShape, KernelOptimizer, Workload
 from hyperloom_multibranch.specialist import agent_sessions as agent_sessions_module
 from hyperloom_multibranch.specialist import model_sessions as model_sessions_module
 from hyperloom_multibranch.specialist import worktree as worktree_module
@@ -206,6 +206,11 @@ def test_the_agents_spec_names_the_pack_the_session_gives_its_arbors_and_none_by
 def test_the_agents_spec_names_the_launch_file_the_session_gives_its_arbors_and_none_by_default() -> None:
     assert _agent_spec(WORKLOAD, "", "/runs/launch.json").launch == "/runs/launch.json"
     assert _agent_spec(WORKLOAD).launch is None
+
+
+def test_the_agents_spec_starts_its_port_blocks_where_the_session_says() -> None:
+    assert _agent_spec(WORKLOAD, "", "", 32100).port == 32100
+    assert _agent_spec(WORKLOAD).port == AGENT_PORT
 
 
 @pytest.mark.parametrize("optimizer", list(KernelOptimizer))
@@ -891,6 +896,7 @@ async def test_the_specialists_are_told_of_and_give_back_the_dev_sandboxes_the_s
                 agents=(),
                 agent_pack="",
                 agent_launch="",
+                agent_port=AGENT_PORT,
             ),
             tokens=None,
             repo=None,
@@ -972,6 +978,7 @@ def test_the_specialists_source_base_holds_aiter_beside_the_framework_only_from_
             agents=(),
             agent_pack="",
             agent_launch="",
+            agent_port=AGENT_PORT,
         ),
         tokens=None,
         repo=None,
@@ -1091,6 +1098,7 @@ def test_a_session_on_a_host_that_builds_native_code_lays_out_the_native_tree_an
                 agents=(),
                 agent_pack="",
                 agent_launch="",
+                agent_port=AGENT_PORT,
             ),
             tokens=None,
             repo=None,

@@ -918,6 +918,15 @@ async def test_the_dev_leases_of_the_run_reach_the_peers(tmp_path: Path) -> None
     assert stage.setup.dev_leases == 2
 
 
+async def test_the_agent_port_of_the_run_reaches_the_peers(tmp_path: Path) -> None:
+    stage = _stage(tmp_path, child=None)
+    stage.settings = replace(stage.settings, agent_port=32100)
+
+    stage._session()
+
+    assert stage.setup.agent_port == 32100
+
+
 async def test_a_failed_prelude_skips_to_close(tmp_path: Path) -> None:
     stage = _stage(tmp_path, child=None, exit_code=1)
 
