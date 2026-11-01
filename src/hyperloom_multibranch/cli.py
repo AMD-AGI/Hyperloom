@@ -145,6 +145,7 @@ from hyperloom_multibranch.scheduling.hosted_run import (
     toolbox_grant,
     write_final_exit,
 )
+from hyperloom_multibranch.scheduling import review
 from hyperloom_multibranch.scheduling.layout import create_session
 from hyperloom_multibranch.scheduling.lifecycle import (
     PersistedRun,
@@ -216,6 +217,7 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     _add_run_options(commands.add_parser("run", help="Run one session: PRELUDE, EXPLORE, FINAL and CLOSE."))
     points.add_parser(commands)
+    review.add_parser(commands)
     final_only = commands.add_parser(
         "final-only",
         help=(
@@ -1074,6 +1076,8 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as exc:
             print(f"{parser.prog} points: error: {exc}", file=sys.stderr)
             return EXIT_USAGE
+    if args.command == "review":
+        return review.main(args)
     persisted = grant = None
     try:
         if args.command == "final-only":

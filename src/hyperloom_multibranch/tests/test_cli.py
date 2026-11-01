@@ -65,7 +65,8 @@ from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.scheduling.budget import MB_CLOSE_GRACE_CAP_SECONDS, MB_DEFAULT_MAX_HOURS
 from hyperloom_multibranch.scheduling.hosted_run import GRANT_MARGIN_SECONDS
 from hyperloom_multibranch.scheduling.clock import Clock
-from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
+from hyperloom_multibranch.scheduling import review
+from hyperloom_multibranch.scheduling.layout import REVIEW_DIR, SessionLayout, create_session
 from hyperloom_multibranch.scheduling.lifecycle import PersistedRun, persisted_run
 from hyperloom_multibranch.scheduling.manifest import SessionManifest, code_version
 from hyperloom_multibranch.scheduling import local_peers
@@ -416,6 +417,27 @@ def test_a_run_stops_after_its_map_only_when_asked() -> None:
 def test_the_review_gate_is_on_unless_the_run_turns_it_off() -> None:
     assert _settings("--autonomous-agent", "/agents/arbor").review_gate
     assert not _settings("--autonomous-agent", "/agents/arbor", "--no-review-gate").review_gate
+
+
+def test_a_person_shows_and_approves_a_session_s_review_and_a_second_decision_is_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    session, map_file = tmp_path / "MB-session", tmp_path / "directions.json"
+    map_file.write_text(json.dumps({"directions": [{"id": "m-attn", "title": "attention"}]}))
+    review.request(session / REVIEW_DIR, session, map_file, None, "dossier pass", 1793500000.0)
+
+    assert cli.main(["review", "--session", str(session), "show"]) == 0
+    shown = capsys.readouterr().out
+    assert "`m-attn`" in shown and "Status: pending" in shown
+    assert cli.main(["review", "--session", str(session), "approve", "--by", "alice", "--note", "ok"]) == 0
+    assert "approved by alice" in capsys.readouterr().out
+    assert cli.main(["review", "--session", str(session), "reject"]) == review.EXIT_REFUSED
+    assert "the review is already approved" in capsys.readouterr().err
+
+
+def test_a_review_command_for_a_session_with_no_review_is_refused(tmp_path: Path) -> None:
+    assert cli.main(["review", "--session", str(tmp_path), "show"]) == review.EXIT_REFUSED
+    assert cli.main(["review", "--session", str(tmp_path), "reject", "--note", "no"]) == review.EXIT_REFUSED
 
 
 def test_stopping_after_the_map_without_an_agent_or_with_a_map_given_is_a_usage_error(tmp_path: Path) -> None:

@@ -22,16 +22,20 @@ reviewed offline across the points (:mod:`~hyperloom_multibranch.points`).
 
 from __future__ import annotations
 
+import argparse
 import getpass
 import hashlib
 import json
 import os
+import sys
+import time
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from hyperloom.common.io import atomic_write_json, atomic_write_text
+from hyperloom_multibranch.scheduling.layout import REVIEW_DIR
 
 REVIEW_FILE = "review.json"
 REVIEW_PAGE = "REVIEW.md"
@@ -45,8 +49,11 @@ REVIEW_REJECTED = "review rejected"
 REVIEW_SKIPPED = "review skipped (--no-review-gate)"
 #: What made the map the review shows.
 MADE_BY_USER = "given by --agent-directions"
-#: The command a person decides with.
+#: The command a person decides with, its actions, and its exit code when there is nothing to show or to decide.
 COMMAND = "hyperloom-multibranch review"
+SHOW, APPROVE, REJECT = "show", "approve", "reject"
+DONE = {APPROVE: APPROVED, REJECT: REJECTED}
+EXIT_REFUSED = 2
 ENCODING = "utf-8"
 
 
@@ -211,7 +218,39 @@ def _page(session: Path, map_file: Path | None, dossier: Path | None, made_by: s
     return "\n".join(lines)
 
 
+def add_parser(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    """The ``review`` command: show a session's review, or approve or reject its agent map."""
+
+    parser = commands.add_parser("review", help="Show a session's review of its agent map, or approve or reject it.")
+    parser.add_argument("action", choices=(SHOW, APPROVE, REJECT))
+    parser.add_argument("--session", type=Path, required=True, help="The session's directory, as this machine sees it.")
+    parser.add_argument("--note", default="", help="Why, for the record.")
+    parser.add_argument("--by", default=None, help="Who decides (default: the login name).")
+
+
+def main(args: argparse.Namespace) -> int:
+    """Carry out the ``review`` action ``args`` name: 0 when done, :data:`EXIT_REFUSED` when there is no review to
+    show or none pending to decide on."""
+
+    directory = args.session / REVIEW_DIR
+    if args.action == SHOW:
+        shown = show(directory)
+        if shown is None:
+            print(f"no review in {directory}", file=sys.stderr)
+            return EXIT_REFUSED
+        print(shown, end="")
+        return 0
+    refused = decide(directory, args.action == APPROVE, args.by, args.note, time.time())
+    if refused:
+        print(f"not {DONE[args.action]}: {'; '.join(refused)}", file=sys.stderr)
+        return EXIT_REFUSED
+    state = load(directory) or {}
+    print(f"{DONE[args.action]} by {state.get('by')}; files changed during the review: {len(state.get('changed', []))}")
+    return 0
+
+
 __all__ = [
+    "APPROVE",
     "APPROVED",
     "MADE_BY_USER",
     "PENDING",
@@ -224,10 +263,12 @@ __all__ = [
     "REVIEW_REQUESTED",
     "REVIEW_SKIPPED",
     "ReviewRejected",
+    "add_parser",
     "decide",
     "digests",
     "directions",
     "load",
+    "main",
     "request",
     "show",
     "wait",
