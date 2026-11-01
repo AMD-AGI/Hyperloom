@@ -601,7 +601,8 @@ def apply(recipe: Recipe, delta: RecipeDelta) -> Recipe:
 def _apply_config(launch: LaunchConfig, delta: ConfigDelta) -> LaunchConfig:
     """``launch`` changed by ``delta``. A removal of an option the launch's own arguments lack is one of the resolved
     launch's, kept in ``remove_args``, unless the delta gives ``launch_remove_args`` whole; an option the new arguments
-    set again leaves it."""
+    set again leaves it. Such a removal is kept by name: one scoped to a value (``--x=v``) removes ``--x`` whatever
+    the resolved launch sets it to, as Magpie removes by name only."""
 
     args = dedupe_extra_server_args(
         compose_server_args(
