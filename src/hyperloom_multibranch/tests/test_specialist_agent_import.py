@@ -3,7 +3,7 @@
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from hyperloom.contracts.recipe import (
@@ -556,3 +556,48 @@ async def test_a_keep_imported_without_a_conflicting_flag_takes_it_off_the_head_
 
     assert delta is not None and REPLAYSSM in delta.config.remove_args
     assert apply(root, delta).launch == LaunchConfig("--tp 1 --mem-fraction-static 0.8", {MONOKERNEL: "1"})
+
+
+#: The launch Magpie resolves from an InferenceX recipe, and the start commit's own arguments, which add to it.
+RESOLVED_FLAGS = f"--tp 1 {REPLAYSSM} --mem-fraction-static 0.8 --disable-radix-cache"
+OWN_LAUNCH = LaunchConfig("--chunked-prefill-size 4096")
+
+
+def _resolved_snapshot(tmp_path: Path, flags: str, envs: dict[str, str]) -> KeptChange:
+    """Snapshot 1 of an Arbor MB started on ``RESOLVED_FLAGS`` with ``OWN_LAUNCH`` added, run with ``flags``."""
+
+    directory = tmp_path / "keeps" / "0001"
+    directory.mkdir(parents=True)
+    keep = {"number": 1, "previous": None, "root": ROOT_COMMIT, "parent": ROOT_COMMIT, "commit": "b" * 40,
+            "change": "a resolved flag", "tables": {}}  # fmt: skip
+    (directory / "keep.json").write_text(json.dumps(keep), encoding="utf-8")
+    (directory / "change.patch").write_text("", encoding="utf-8")
+    (directory / "config.json").write_text(json.dumps({"server_flags": flags, "server_env": envs}), encoding="utf-8")
+    start = {"server_flags": f"{RESOLVED_FLAGS} {OWN_LAUNCH.server_args}", "server_env": {}}
+    return read_snapshot(tmp_path / "keeps", 1, ROOT_COMMIT, "".join, ComponentStart(OWN_LAUNCH, start, ()))
+
+
+def test_a_flag_of_the_resolved_launch_a_keep_runs_without_is_read_as_removed(tmp_path: Path) -> None:
+    flags = f"--tp 1 {REPLAYSSM} --mem-fraction-static 0.8 {OWN_LAUNCH.server_args}"
+
+    kept = _resolved_snapshot(tmp_path, flags, {})
+
+    assert (kept.server_args, kept.removed, kept.disabled) == (OWN_LAUNCH.server_args, ("--disable-radix-cache",), {})
+
+
+def test_a_flag_of_the_resolved_launch_a_variable_needs_off_is_read_as_removed_and_named(tmp_path: Path) -> None:
+    kept = _resolved_snapshot(tmp_path, f"{RESOLVED_FLAGS} {OWN_LAUNCH.server_args}", {MONOKERNEL: "1"})
+
+    assert (kept.server_args, kept.removed) == (OWN_LAUNCH.server_args, (REPLAYSSM,))
+    assert kept.disabled == {REPLAYSSM: f"{MONOKERNEL}=1"}
+
+
+async def test_a_keep_s_removal_from_the_resolved_launch_stays_on_the_head_s_launch_once() -> None:
+    kept = replace(_kept(1, "", envs={**ROOT.launch.envs, MONOKERNEL: "1"}), removed=(REPLAYSSM,))
+
+    delta = await import_delta(kept, root=ROOT, head=ROOT, component="sglang", stores=_stores(Store()))
+    assert delta is not None
+    head = apply(ROOT, delta)
+
+    assert head.launch == LaunchConfig(ROOT.launch.server_args, kept.envs, remove_args=(REPLAYSSM,))
+    assert await import_delta(kept, root=ROOT, head=head, component="sglang", stores=_stores(Store())) is None

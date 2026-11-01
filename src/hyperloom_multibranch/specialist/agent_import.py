@@ -27,6 +27,10 @@ outside itself (``outside.json``) is not read: AITER builds a JIT module it lack
 Some framework settings cannot run together, which an agent need not know: a keep that sets a variable of
 :data:`FLAG_CONFLICTS` is read with each server flag the variable needs off removed, each named in
 :attr:`KeptChange.disabled`, so the gate's server does not inherit it from the head's launch and fail.
+
+A flag of the launch the framework resolves (a Magpie AgentX recipe's, which the start commit's own arguments add to)
+that a keep runs without, or that a variable of it needs off, is read into :attr:`KeptChange.removed`: the recipe's
+own arguments cannot drop it, so the import removes it from the resolved launch (``LaunchConfig.remove_args``).
 """
 
 from __future__ import annotations
@@ -116,7 +120,8 @@ class KeptChange:
     whose table the agent did not copy into its snapshot, which then load what the variable names; ``dropped``, the
     variables the agent runs with that the measurement sets itself (workload, evaluation, request), left out of
     ``envs``; ``disabled``, each server flag removed from ``server_args`` because a variable of ``envs`` needs it off
-    (:data:`FLAG_CONFLICTS`), with that variable's setting."""
+    (:data:`FLAG_CONFLICTS`), with that variable's setting; ``removed``, each flag of the launch the framework resolves
+    that the agent runs without, or that ``disabled`` names, which ``server_args`` cannot drop."""
 
     seq: int
     source_patch: str
@@ -127,15 +132,17 @@ class KeptChange:
     uncopied: tuple[str, ...] = ()
     dropped: Mapping[str, str] = field(default_factory=dict)
     disabled: Mapping[str, str] = field(default_factory=dict)
+    removed: tuple[str, ...] = ()
 
 
-def without_conflicts(kept: KeptChange) -> KeptChange:
+def without_conflicts(kept: KeptChange, inherited: Collection[str] = ()) -> KeptChange:
     """``kept`` with each server flag a variable it sets needs off (:data:`FLAG_CONFLICTS`) removed from its server
-    arguments, flag and value, and named in ``disabled`` with the variable's setting; ``kept`` itself when it sets
-    none against a flag it has."""
+    arguments, flag and value, or added to ``removed`` when ``inherited``, the flags the launch the framework resolves
+    gives it, has it; each named in ``disabled`` with the variable's setting. ``kept`` itself when it sets none against
+    a flag it runs with."""
 
     groups = _flag_groups(kept.server_args)
-    named = {name for name, _ in groups}
+    named = {name for name, _ in groups} | set(inherited)
     disabled = {
         flag: f"{variable}={kept.envs[variable]}"
         for variable, flags in FLAG_CONFLICTS.items()
@@ -146,7 +153,8 @@ def without_conflicts(kept: KeptChange) -> KeptChange:
     if not disabled:
         return kept
     args = " ".join(word for name, words in groups if name not in disabled for word in words)
-    return replace(kept, server_args=args, disabled={**kept.disabled, **disabled})
+    removed = tuple(sorted({*kept.removed, *(flag for flag in disabled if flag in inherited)}))
+    return replace(kept, server_args=args, removed=removed, disabled={**kept.disabled, **disabled})
 
 
 def read_kept_change(
@@ -290,10 +298,13 @@ def read_snapshot(outbox: Path, number: int, root: str, applied: Applied, start:
         raise KeptChangeError(f"{_directory(number)}/{LAUNCH_FILE} holds no server_flags string or server_env object")
     named, dropped = _without_measurement(launch[1])
     base = start.launch
-    args, named = _over(base, _component_launch(start.config) or (base.server_args, base.envs), launch[0], named)
+    since = _component_launch(start.config) or (base.server_args, base.envs)
+    args, named = _over(base, since, launch[0], named)
+    # The flags the launch the framework resolves gives the agent, which the start commit's own arguments lack.
+    resolved, runs = _flags(since[0]) - _flags(base.server_args), _flags(launch[0])
     tables, uncopied = _snapshot_tables(directory / TABLES_DIR, chain[-1].tables, named, start.copies)
     kept = KeptChange(number, applied(patches), args, named, chain[-1].summary, tables, uncopied, dropped)
-    return without_conflicts(kept)
+    return without_conflicts(replace(kept, removed=tuple(sorted(resolved - runs))), resolved & runs)
 
 
 def _component_launch(config: object) -> _Launch | None:
@@ -588,13 +599,17 @@ def _rows_only(name: str) -> bool:
 
 
 def _config_change(launch: LaunchConfig, kept: KeptChange) -> ConfigDelta:
+    """The change from the head's ``launch`` to ``kept``'s; each flag ``kept`` removes from the resolved launch that
+    ``launch`` does not remove already is removed, which the head's launch then keeps (``LaunchConfig.remove_args``)."""
+
     replaced = kept.server_args != launch.server_args
     dropped = _flags(launch.server_args) - _flags(kept.server_args) if replaced else set()
+    removed = set(kept.removed) - set(launch.remove_args)
     envs = {name: value for name, value in kept.envs.items() if launch.envs.get(name) != value}
     unset = tuple(sorted(name for name in launch.envs if name not in kept.envs))
     return ConfigDelta(
         server_args=kept.server_args if replaced else "",
-        remove_args=tuple(sorted(dropped)),
+        remove_args=tuple(sorted(dropped | removed)),
         envs=envs,
         unset_envs=unset,
     )
