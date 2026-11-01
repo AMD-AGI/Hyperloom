@@ -15,6 +15,7 @@ from hyperloom_multibranch import cli
 from hyperloom_multibranch.points import (
     REVIEW_PAGE,
     Decision,
+    Placement,
     Stage,
     decide,
     map_points,
@@ -72,6 +73,33 @@ def test_points_on_one_machine_share_its_cards_and_take_ports_and_directories_of
     assert c8.port != c64.port and c8.agent_port == AGENT_PORT and c64.agent_port > c8.agent_port
     assert (c8.root, c64.root) == (tmp_path / "c8", tmp_path / "c64")
     assert [point.cards for point in place_points([8, 64], tuple(range(8)), tmp_path, 2)] == [(0, 1), (2, 3)]
+
+
+def test_points_in_containers_of_their_own_on_one_machine_take_ports_by_their_slot(tmp_path: Path) -> None:
+    [c8] = place_points([8], (0, 1, 2, 3), tmp_path, None, slot=0)
+    [c64] = place_points([64], (4, 5, 6, 7), tmp_path, None, slot=1)
+
+    assert (c8.cards, c64.cards) == ((0, 1, 2, 3), (4, 5, 6, 7))
+    assert c8.port != c64.port and c8.agent_port != c64.agent_port
+    shared = place_points([8, 64], tuple(range(8)), tmp_path, None)[1]
+    assert (c64.port, c64.agent_port) == (shared.port, shared.agent_port)
+
+
+async def test_a_container_runs_only_its_own_approved_point(tmp_path: Path, command: tuple[str, ...]) -> None:
+    await map_points(place_points([8, 64], tuple(range(8)), tmp_path, None), RUN_ARGS, command)
+    decide(tmp_path, 8, Decision.APPROVED, "")
+    decide(tmp_path, 64, Decision.APPROVED, "")
+
+    outcome = await run_approved(tmp_path, Placement((4, 5, 6, 7), slot=1), RUN_ARGS, command, only=[64])
+
+    assert outcome == {64: 0}
+    assert len(list((tmp_path / "c8" / "userdata").glob("*/MB-*"))) == 1
+    started = [_started(s) for s in (tmp_path / "c64" / "userdata").glob("*/MB-*") if "--reuse-prelude" in _argv(s)]
+    assert [start["env"]["ROCR_VISIBLE_DEVICES"] for start in started] == ["4,5,6,7"]
+
+
+def _argv(session: Path) -> list[str]:
+    return _started(session)["argv"]
 
 
 @pytest.mark.parametrize(
@@ -135,7 +163,7 @@ async def test_only_approved_points_run_on_their_reviewed_map_and_dossier_and_th
     decide(tmp_path, 64, Decision.REJECTED, "the map only tunes GEMM tables")
     mapped = {point.conc: point for point in reviewed_points(tmp_path)}
 
-    outcome = await run_approved(tmp_path, tuple(range(8)), 2, RUN_ARGS, command)
+    outcome = await run_approved(tmp_path, Placement(tuple(range(8)), 2), RUN_ARGS, command)
 
     assert outcome == {8: 0, 16: "not reviewed", 64: "rejected: the map only tunes GEMM tables"}
     [ran] = [session for session in (tmp_path / "c8" / "userdata").glob("*/MB-*") if session != mapped[8].session]

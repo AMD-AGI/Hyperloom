@@ -10,6 +10,11 @@ points directory holds every point's directory, whichever machine ran it: one ma
 point can run on a machine of its own, into one directory on shared storage. It keeps the run arguments the points
 share, so the second stage can be started with none.
 
+Points that share a machine run best in a container each: Magpie ends a benchmark by killing every serving process it
+can see, so one process namespace lets one point's benchmark kill another's server. A container per point gives each
+its own; the container's device mask is the point's cards, and its ``--slot`` keeps the points' ports apart on the
+machine's network.
+
 - **map**: each point's session runs PRELUDE and its map, and ends (``run --stop-after-map``); the review page
   (:data:`REVIEW_PAGE`) then lists every point's map and dossier, and how to approve or reject it;
 - **approve**, **reject**: a person's decision on one point, once they have read its map and edited it if they wish;
@@ -117,9 +122,12 @@ class Reviewed:
     decision: Mapping[str, object] | None
 
 
-def place_points(concs: Sequence[int], cards: Sequence[int], root: Path, per_point: int | None) -> tuple[Point, ...]:
+def place_points(
+    concs: Sequence[int], cards: Sequence[int], root: Path, per_point: int | None, slot: int = 0
+) -> tuple[Point, ...]:
     """The points of ``concs`` in ``root``: each an equal share of ``cards`` in order, ``per_point`` each when given,
-    a port and Arbor port blocks of its own; raise ValueError when there are no points or the cards do not go round."""
+    a port and Arbor port blocks of its own from the machine's ``slot`` on; raise ValueError when there are no points
+    or the cards do not go round."""
 
     if not concs or len(set(concs)) != len(concs):
         raise ValueError("give each --conc once, and at least one")
@@ -127,7 +135,7 @@ def place_points(concs: Sequence[int], cards: Sequence[int], root: Path, per_poi
     if share < 1 or share * len(concs) > len(cards):
         raise ValueError(f"{len(cards)} cards do not give {len(concs)} points {share or 1} each")
     return tuple(
-        Point(conc, tuple(cards[at * share : (at + 1) * share]), *_ports(at), root / f"c{conc}")
+        Point(conc, tuple(cards[at * share : (at + 1) * share]), *_ports(slot + at), root / f"c{conc}")
         for at, conc in enumerate(concs)
     )
 
@@ -267,18 +275,29 @@ async def map_points(points: Sequence[Point], run_args: Sequence[str], command: 
     return exited
 
 
-async def run_approved(
-    root: Path, cards: Sequence[int], per_point: int | None, run_args: Sequence[str], command: Sequence[str]
-) -> dict[int, int | str]:
-    """Run, at once on ``cards``, the second stage of every point in ``root`` a person approved; by conc, each run
-    point's exit code, and for every other point why it did not run."""
+@dataclass(frozen=True)
+class Placement:
+    """Where a stage's points run on this machine: its ``cards``, ``per_point`` of them each when given, and the
+    machine's ``slot`` their ports start from."""
 
-    reviewed = reviewed_points(root)
+    cards: Sequence[int]
+    per_point: int | None = None
+    slot: int = 0
+
+
+async def run_approved(
+    root: Path, placement: Placement, run_args: Sequence[str], command: Sequence[str], only: Sequence[int] = ()
+) -> dict[int, int | str]:
+    """Run, at once as ``placement`` says, the second stage of every point in ``root`` (of ``only`` those, when given)
+    a person approved; by conc, each run point's exit code, and for every other point why it did not run."""
+
+    reviewed = [point for point in reviewed_points(root) if not only or point.conc in only]
     approved = [point for point in reviewed if _approved(point)]
     outcome: dict[int, int | str] = {point.conc: _held_back(point) for point in reviewed if point not in approved}
     if not approved:
         return outcome
-    placed = place_points([point.conc for point in approved], cards, root, per_point)
+    concs = [point.conc for point in approved]
+    placed = place_points(concs, placement.cards, root, placement.per_point, placement.slot)
     runs = (
         run_point(point, Stage.RUN, stage_argv(point, Stage.RUN, run_args, review), command)
         for point, review in zip(placed, approved)
@@ -313,8 +332,16 @@ def add_parser(commands: argparse._SubParsersAction[argparse.ArgumentParser]) ->
     mapping = action(Stage.MAP.value, "Run each --conc's session to its map, then write the review page.")
     mapping.add_argument("--conc", type=int, action="append", required=True, help="An operating point; repeatable.")
     running = action(Stage.RUN.value, "Run the approved points, each on its reviewed map and dossier.")
+    running.add_argument("--conc", type=int, action="append", default=[], help="Only this approved point; repeatable.")
     for stage in (mapping, running):
         stage.add_argument("--cards-per-point", type=int, default=None, help="Default: the machine's cards shared out.")
+        stage.add_argument(
+            "--slot",
+            type=int,
+            default=0,
+            help="Where on this machine these points' ports start, one slot per point: containers that share the"
+            " machine's network each give theirs (default 0).",
+        )
         stage.add_argument("run_args", nargs=argparse.REMAINDER, help="-- and the run arguments the points share.")
     for verb, decision in DECISIONS.items():
         deciding = action(verb, f"Record one point as {decision.value}.")
@@ -336,16 +363,17 @@ def main(args: argparse.Namespace) -> int:
         return 0
     from hyperloom_multibranch.scheduling.local_peers import machine_cards
 
+    placement = Placement(machine_cards(), args.cards_per_point, args.slot)
     if action == Stage.MAP.value:
         run_args = shared_args(_after_dashes(args.run_args))
         atomic_write_json(root / POINTS_FILE, {"run_args": run_args})
-        points = place_points(args.conc, machine_cards(), root, args.cards_per_point)
+        points = place_points(args.conc, placement.cards, root, placement.per_point, placement.slot)
         exited = asyncio.run(map_points(points, run_args, COMMAND))
         print(root / REVIEW_PAGE)
         return 0 if not any(exited) else 1
     given = _after_dashes(args.run_args)
     run_args = shared_args(given or (_read(root / POINTS_FILE) or {}).get("run_args", []))
-    outcome = asyncio.run(run_approved(root, machine_cards(), args.cards_per_point, run_args, COMMAND))
+    outcome = asyncio.run(run_approved(root, placement, run_args, COMMAND, args.conc))
     for conc, ended in sorted(outcome.items()):
         print(f"C{conc}: {ended}")
     return 0 if all(isinstance(ended, str) or ended == 0 for ended in outcome.values()) else 1
@@ -371,6 +399,7 @@ __all__ = [
     "COMMAND",
     "REVIEW_PAGE",
     "Decision",
+    "Placement",
     "Point",
     "Reviewed",
     "Stage",
