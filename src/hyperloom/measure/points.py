@@ -224,9 +224,28 @@ def launch_carriers(config: Mapping[str, Any]) -> tuple[Mapping[str, Any], str |
     return present, None if spec is None else str(present.get(spec.extra_args_env, ""))
 
 
-def _check_launch_present(config: Mapping[str, Any], launch: LaunchConfig, envs: Mapping[str, str]) -> None:
-    """Every variable and argument the recipe launches with must be in the YAML, or the test would not use it."""
+def _check_removals(config: Mapping[str, Any], launch: LaunchConfig) -> None:
+    """Every option the recipe removes from the launch the framework resolves must be among an AgentX point's
+    removals, or Magpie would launch with it. Any other point carries its whole launch in the recipe's own arguments,
+    so a removal it could not make is refused, not left on."""
 
+    if not launch.remove_args:
+        return
+    names = ", ".join(launch.remove_args)
+    benchmark = config.get("benchmark") or {}
+    if not is_magpie_agentx(benchmark):
+        raise PointError(f"only a Magpie AgentX point removes options of the launch it resolves, so {names} would stay")
+    removed = set(benchmark["agentx"]["launch_overrides"].get("remove_args") or ())
+    kept = sorted(name for name in launch.remove_args if name not in removed)
+    if kept:
+        raise PointError(f"the renderer did not remove launch arguments {', '.join(kept)}")
+
+
+def _check_launch_present(config: Mapping[str, Any], launch: LaunchConfig, envs: Mapping[str, str]) -> None:
+    """Every variable and argument the recipe launches with must be in the YAML, or the test would not use it, and
+    every option it removes must be removed (:func:`_check_removals`)."""
+
+    _check_removals(config, launch)
     present, carried = launch_carriers(config)
     missing = sorted(name for name, value in {**launch.envs, **envs}.items() if str(present.get(name)) != value)
     if missing:
@@ -272,6 +291,7 @@ def generate_points(
             name,
             extra_server_args=launch.server_args,
             extra_envs={**launch.envs, **environment.envs, **pins},
+            remove_args=launch.remove_args,
         )
         check_surface(config, canonical.surface)
         check_point(config, concurrency=level, accuracy=accuracy, reference=point_values(reference))
@@ -346,6 +366,7 @@ def generate_profile_point(
         "point-profile.yaml",
         extra_server_args=launch.server_args,
         extra_envs={**launch.envs, **environment.envs, **workload, **pins},
+        remove_args=launch.remove_args,
     )
     check_surface(config, canonical.surface, ignore=_PROFILE_SURFACE_EXEMPT)
     check_point(config, concurrency=level, accuracy=False, reference={})

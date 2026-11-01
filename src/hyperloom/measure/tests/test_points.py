@@ -343,6 +343,31 @@ def test_an_agentx_point_is_what_the_main_flow_hands_magpie_for_the_recipe_and_c
     assert launch["env"] == {"HSA_FORCE_FINE_GRAIN_PCIE": "1"}
 
 
+#: An option of the launch Magpie resolves from the InferenceX recipe, which the recipe's own arguments lack.
+RESOLVED_OPTION = "--enable-linear-replayssm-spec"
+
+
+def test_an_agentx_point_removes_the_options_of_the_resolved_launch_the_recipe_removes(
+    agentx_canonical, blobs, tmp_path
+):
+    delta = RecipeDelta(config=ConfigDelta(server_args=SERVER_ARGS, remove_args=(RESOLVED_OPTION,)))
+    env = environment(blobs, tmp_path, delta=delta)
+
+    (point,) = generate_points(env, agentx_canonical, tmp_path / "points", concurrency=(8,))
+    (profile,) = generate_profile_point(env, agentx_canonical, tmp_path / "profile")
+
+    for config in (point, profile):
+        assert load(config)["benchmark"]["agentx"]["launch_overrides"]["remove_args"] == [RESOLVED_OPTION]
+
+
+def test_a_point_that_resolves_no_launch_of_its_own_refuses_a_removal_it_cannot_make(canonical, blobs, tmp_path):
+    delta = RecipeDelta(config=ConfigDelta(remove_args=(RESOLVED_OPTION,)))
+    env = environment(blobs, tmp_path, delta=delta)
+
+    with pytest.raises(PointError, match=f"only a Magpie AgentX point .* so {RESOLVED_OPTION} would stay"):
+        generate_points(env, canonical, tmp_path / "points")
+
+
 def test_an_agentx_workload_has_no_accuracy_test(agentx_canonical, blobs, tmp_path):
     with pytest.raises(PointError, match="no accuracy test"):
         generate_points(environment(blobs, tmp_path), agentx_canonical, tmp_path / "points", accuracy=True)
