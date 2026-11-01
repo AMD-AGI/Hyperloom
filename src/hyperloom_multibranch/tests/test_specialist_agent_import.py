@@ -30,6 +30,7 @@ from hyperloom_multibranch.specialist.agent_import import (
     with_tables,
 )
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
+from hyperloom_multibranch.specialist import agent_import
 from hyperloom_multibranch.specialist.agent_import import SourceIncrement
 from hyperloom_multibranch.specialist.agent_manifest import ConfigSource
 from hyperloom_multibranch.specialist.worktree import BranchWorktree, SourceBase, Upstream
@@ -328,6 +329,27 @@ def test_a_snapshot_reads_every_file_a_multi_part_aiter_value_lists_as_one_table
     assert (
         kept.tables == {value: on_disk.tables[_listing(start, own)]} == {value: "M,N,K\n64,5120,5120\n256,5120,5120\n"}
     )
+
+
+def test_the_tables_of_a_vllm_image_s_aiter_are_the_image_s_not_the_agent_s_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Ruby, 2026-10-31: in the vLLM image aiter lives in the Python's site-packages, not the SGLang workspace, and its
+    # default tables were read as the agent's own rows.
+    configs = tmp_path / "site-packages" / "aiter" / "configs"
+    monkeypatch.setattr(agent_import, "image_aiter_configs", lambda: configs)
+    defaults = [configs / "bf16_tuned_gemm.csv", configs / "model_configs" / "llama70B_bf16_tuned_gemm.csv"]
+    own = tmp_path / "worktree" / "arbor" / "aiter_tables" / "qwen3_bf16_tuned_gemm.csv"
+    texts = ("M,N,K\n1,4096,4096\n", "M,N,K\n2,4096,4096\n", "M,N,K\n8,6144,4096\n")
+    for path, text in zip((*defaults, own), texts, strict=True):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    value = ":".join(map(str, (*defaults, own)))
+    _arbor_keep(tmp_path / "outbox", value, {str(path): path.read_bytes() for path in (*defaults, own)})
+
+    kept = _read(tmp_path / "outbox", ())
+
+    assert kept.envs[TABLE_ENV] == value and kept.tables == {value: "M,N,K\n8,6144,4096\n"}
 
 
 def test_a_multi_part_value_whose_copy_does_not_match_its_sha256_or_is_missing_is_refused(tmp_path: Path) -> None:

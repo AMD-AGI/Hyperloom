@@ -50,6 +50,7 @@ from hyperloom.measure.framework.tables import AITER_VARIABLE_PREFIX
 from hyperloom.measure.surface import measurement_envs
 from hyperloom_multibranch.specialist.agent_manifest import ConfigSource, read_field
 from hyperloom_multibranch.specialist.worktree import Upstream
+from hyperloom_multibranch.toolbox.kernel_artifacts import image_aiter_configs
 
 #: Stores a component's patch text and returns its reference, as ``ExperimentRepo.store_patch`` does.
 PatchStore = Callable[[str, str], Awaitable[PatchRef]]
@@ -69,7 +70,13 @@ TABLES_DIR = "tables"
 #: both over the root; empty when they are the same.
 SourceIncrement = Callable[[tuple[PatchRef, ...], str], Awaitable[str]]
 
-_IMAGE_TABLES = PurePosixPath(SGLANG_IMAGE_AITER_CONFIGS)
+
+def _image_tables() -> tuple[PurePosixPath, ...]:
+    """Where the image keeps aiter's default tables: the installed aiter's (a vLLM image's site-packages) and an SGLang
+    image's, either of which a keep's aiter variable may name."""
+
+    installed = PurePosixPath(image_aiter_configs().as_posix())
+    return tuple(dict.fromkeys((installed, PurePosixPath(SGLANG_IMAGE_AITER_CONFIGS))))
 
 
 @dataclass(frozen=True)
@@ -455,7 +462,7 @@ def _image_table(part: str, copies: Collection[str] = ()) -> bool:
     return (
         part in copies
         or part == DEFAULT_TABLE_PLACEHOLDER
-        or PurePosixPath(os.path.normpath(part)).is_relative_to(_IMAGE_TABLES)
+        or any(PurePosixPath(os.path.normpath(part)).is_relative_to(root) for root in _image_tables())
     )
 
 

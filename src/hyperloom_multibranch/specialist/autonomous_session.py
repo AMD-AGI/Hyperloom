@@ -50,7 +50,6 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from hyperloom.common.outside_facts import SGLANG_IMAGE_AITER_CONFIGS
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import KernelArtifact, KernelKind, LaunchConfig, PatchRef, RecipeDelta, RecipeError
 from hyperloom.measure.compile import COMPONENT_LAYOUTS, kernel_load_env, locate_installed_package
@@ -111,6 +110,7 @@ from hyperloom_multibranch.specialist.start_tables import (
 )
 from hyperloom_multibranch.specialist.tools import sync_to_head
 from hyperloom_multibranch.specialist.worktree import Upstream, WorktreeError, installed_upstream
+from hyperloom_multibranch.toolbox.kernel_artifacts import image_aiter_configs
 
 if TYPE_CHECKING:
     from hyperloom_multibranch.toolbox.toolbox import RealToolbox
@@ -178,7 +178,7 @@ class AutonomousSetup:
     stall_seconds: float = STALL_SECONDS
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
     clock: Callable[[], float] = time.time
-    aiter_configs: Path = Path(SGLANG_IMAGE_AITER_CONFIGS)
+    aiter_configs: Path = field(default_factory=image_aiter_configs)
 
 
 @dataclass
