@@ -96,6 +96,17 @@ def test_a_credential_shaped_name_is_left_out_even_when_a_prefix_matches() -> No
     assert image_env({**IMAGE, **secrets}) == IMAGE
 
 
+def test_the_gpu_masks_are_left_out_even_when_a_prefix_matches() -> None:
+    """The image's profile exports masks for all eight cards; the sandbox's mask for its leased cards must be the only
+    one, or torch refuses: HIP_VISIBLE_DEVICES contains more devices than ROCR_VISIBLE_DEVICES."""
+    masks = {
+        "HIP_VISIBLE_DEVICES": "0,1,2,3,4,5,6,7",
+        "HSA_VISIBLE_DEVICES": "0,1,2,3,4,5,6,7",
+        "ROCR_VISIBLE_DEVICES": "0,1,2,3,4,5,6,7",
+    }
+    assert image_env({**IMAGE, **masks}) == IMAGE
+
+
 def test_a_template_without_envs_carries_the_image_variables_of_this_process(monkeypatch) -> None:
     for name, value in IMAGE.items():
         monkeypatch.setenv(name, value)
