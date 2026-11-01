@@ -313,6 +313,12 @@ class LocalAgentSandbox:
         digest = hashlib.sha256(str(self.root.resolve()).encode()).hexdigest()[:16]
         return Path(tempfile.gettempdir()) / f"{TMP_PREFIX}{digest}"
 
+    @property
+    def cache_root(self) -> Path:
+        """Where the sandbox's JIT and kernel caches go: this host's temporary disk, since a CK module's build writes
+        thousands of generated sources, which crawl on the shared storage :attr:`root` is on."""
+        return self.tmp / "cache"
+
     def env(self, env: Mapping[str, str]) -> dict[str, str]:
         """The environment a command runs with, ``env`` added; the cards and the wrappers are not ``env``'s to
         change."""
