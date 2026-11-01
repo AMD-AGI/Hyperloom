@@ -128,9 +128,10 @@ own:
   - An InferenceX test has a 60 min timeout.
   - A sweep that runs out of its time is not rerun: FINAL ranks its candidate on the reproduction, and the choice's
     reason says so.
-- **The agent cutoff:** Arbor stops at the latest 40 min before EXPLORE ends, so that MB can measure and merge its
-  last keep. At a low conc, where one test is long, a merge takes two tests after that keep, and may not fit. The keep
-  then reaches FINAL as the head of Arbor's branch.
+- **The agent cutoff:** Arbor stops early enough before EXPLORE ends for MB to measure its last keep and confirm it
+  on Arbor's branch. That is the tests in flight plus two of the session's longest test: about 50 min at C8 and 20 at
+  C64 in the example below, and 40 min before any test was measured. Merging that keep into the integration head takes
+  two tests more, which may not fit; the keep then reaches FINAL as the head of Arbor's branch.
 
 On a cluster that caps a job's time, size each point's `--max-hours` so the session ends before the cap. Count the
 container and install time first. Then add FINAL's length beyond its reserve, and CLOSE. With a container per point,

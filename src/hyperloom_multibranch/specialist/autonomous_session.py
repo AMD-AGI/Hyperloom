@@ -121,9 +121,10 @@ MANIFEST_FILE = "agent-manifest.json"
 LEASE_FILE = "agent-lease.json"
 #: How often the agent's LLM spend is read and recorded while it runs: one record per CLI session a minute, not a poll.
 SPEND_SECONDS = 60.0
-#: The least time before the EXPLORE end an agent that signals no keep has its workspace collected, for a session that
-#: has measured nothing yet to time a test by: an import's test and its confirm, about ten minutes each on an InferenceX
-#: workload, after whatever test runs then (see :func:`collection_margin`).
+#: How long before the EXPLORE end the agent stops, and an agent that signals no keep has its workspace collected, for a
+#: session that has measured nothing yet to time a test by: an import's test and its confirm, about ten minutes each on
+#: an InferenceX workload, after whatever test runs then. A session that measured a test times it by its own tests
+#: instead (:func:`collection_margin`).
 CUTOFF_SECONDS = 40 * 60.0
 SPEND_FILE = "agent-spend.json"
 #: How long the running agent may write nothing (output, transcript or file), and the run's poll take to come round,
@@ -254,7 +255,7 @@ class AutonomousSession:
         await self._notes.refresh()
         snapshot = await self._place.blackboard.snapshot()
         baseline = snapshot.baseline
-        seconds = self._run_seconds()
+        seconds = self._run_seconds(snapshot.records)
         spec = replace(
             self._setup.spec,
             server_args=recipe.launch.server_args,
@@ -291,15 +292,17 @@ class AutonomousSession:
         save_start_tables(tables, self._place.workspace / START_TABLES_FILE)
         return tables
 
-    def _run_seconds(self) -> float:
+    def _run_seconds(self, records: Iterable[TestRecord]) -> float:
         """How long the agent may run: until the import of what it keeps last can still be measured and judged in
-        EXPLORE, or, when the branch starts later than that, until EXPLORE ends; 0, no end, with no deadline."""
+        EXPLORE, by the session's ``records`` so far (:func:`collection_margin`), or, when the branch starts later than
+        that, until EXPLORE ends; 0, no end, with no deadline."""
 
         deadline = self._start.task.deadline
         if not deadline:
             return 0.0
         left = deadline - self._setup.clock()
-        return left - self._setup.cutoff_seconds if left > self._setup.cutoff_seconds else max(left, 1.0)
+        margin = collection_margin(records, self._setup.cutoff_seconds)
+        return left - margin if left > margin else max(left, 1.0)
 
     async def run(self) -> None:
         manifest, process, sandbox = await self._running()
@@ -858,7 +861,10 @@ def _reverted(kept: KeptChange, launch: LaunchConfig, names: tuple[str, ...], ar
 def collection_margin(records: Iterable[TestRecord], floor: float) -> float:
     """How long before the EXPLORE end an import must go to be measured and judged in EXPLORE: the session's tests in
     flight, then the import's test and its confirm, one after another at the longest test measured so far, as on one
-    card; at least ``floor``, which is all there is to go by before any test was measured."""
+    card; ``floor`` before any test was measured, which is all there is to go by then. Once a test was measured, the
+    session's own tests decide, below ``floor`` too: an agent stops about 20 min before the end where a test takes 10,
+    at a high conc, and about 50 min before where a test takes 25, at a low one. The import is then judged on its
+    branch, which FINAL weighs; a merge into the integration head takes two tests more."""
 
     records = list(records)
     durations = [
@@ -871,7 +877,7 @@ def collection_margin(records: Iterable[TestRecord], floor: float) -> float:
     if not durations:
         return floor
     queued = sum(record.in_flight for record in records)
-    return max(floor, (queued + 2) * max(durations))
+    return (queued + 2) * max(durations)
 
 
 def _being_judged(record: TestRecord, settled_before: float) -> bool:

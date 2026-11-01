@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.contracts.measurement import TestRequest
+from hyperloom.contracts.measurement import Attempt, Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import (
     ComponentPatches,
     ConfigDelta,
@@ -1158,7 +1158,7 @@ def test_the_collection_margin_covers_the_tests_queued_and_the_import_s_test_and
     assert collection_margin([], 2400.0) == 2400.0
     assert collection_margin(measured, 600.0) == 2 * 540.0
     assert collection_margin([*measured, _record(), _record(), _record()], 600.0) == 5 * 540.0
-    assert collection_margin([*measured, _record()], 2400.0) == 2400.0
+    assert collection_margin([*measured, _record()], 2400.0) == 3 * 540.0, "once measured, the tests decide"
 
 
 async def test_the_agent_runs_until_its_imports_can_still_be_judged_against_the_gate_s_baseline(
@@ -1178,6 +1178,30 @@ async def test_the_agent_runs_until_its_imports_can_still_be_judged_against_the_
     assert spec["seconds"] == pytest.approx(3600.0 - 0.5)
     assert spec["baseline"] == 6290.7
     assert spec["knowledge"] == str(tmp_path / BRANCH / "session" / AGENT_DIR / "mb-integration.md")
+    await rig.session.stop()
+
+
+async def test_the_agent_stops_by_the_session_s_own_tests_once_one_was_measured(tmp_path: Path) -> None:
+    now = time.time()
+    rig = await _rig(tmp_path, Agent(keeps=(), tail=30.0), clock=lambda: now, deadline=now + 3600.0)
+    root = await rig.repo.head(INTEGRATION_BRANCH)
+    measured = TestRequest(
+        kind=TestKind.TEST,
+        purpose=Purpose.BASELINE,
+        branch_id=INTEGRATION_BRANCH,
+        parent_commit=root,
+        delta=RecipeDelta(),
+        request_id="root-1",
+    )
+    await rig.toolbox_blackboard.write_request(measured)
+    attempt = Attempt(started_at=now - 1000.0, finished_at=now - 400.0)
+    await rig.toolbox_blackboard.write_result(replace(result("root-1"), attempts=(attempt,)))
+
+    await rig.session.preflight()
+
+    prompt = rig.sandbox.prompts[0]
+    spec = json.loads(prompt[prompt.index("{\n") : prompt.index("\n}\n") + 2])
+    assert spec["seconds"] == pytest.approx(3600.0 - 2 * 600.0), "its import's test and confirm, at 600 s each"
     await rig.session.stop()
 
 
