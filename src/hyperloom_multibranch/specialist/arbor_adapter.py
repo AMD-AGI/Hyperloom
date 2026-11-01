@@ -92,8 +92,13 @@ LAUNCH_KEYS = ("server_flags", "server_env", "model_name", "client")
 #: branch). MB gives it its own absolute floor, ``DEFAULT_ENABLEMENT_ACCURACY_FLOOR``, the part of MB's accuracy rule
 #: that holds on any eval's scale: MB's eval and the pack's lm_eval score one model points apart (Qwen3-8B on Ruby:
 #: 0.939 against 0.870 on the full set), so the rule's other part, at most ``ACCURACY_THRESHOLD`` under the
-#: baseline's score, stays MB's, judged at its confirm test. A launch file or the recipe may set its own.
+#: baseline's score, Arbor applies on its own eval: it measures the root's full GSM8K itself (Arbor ``f0e9abb``) and
+#: holds a numerics change to that less ``ACCURACY_POLICY``'s tolerance; this floor stands when it could not.
+#: MB still judges its own, at its confirm test. A launch file or the recipe may set its own floor.
 ACCURACY_FLOOR_ENV = "GSM8K_MIN"
+#: Arbor's policy under MB: a numerics change may cost what MB's rule allows, ``ACCURACY_THRESHOLD`` under the root,
+#: measured on Arbor's own eval against the root it scores itself.
+ACCURACY_POLICY = {"accuracy_tolerance": ACCURACY_THRESHOLD}
 #: The pack's evaluation settings, which Arbor reads from its campaign config and never from what an iteration
 #: changed: no keep carries them into a recipe.
 EVAL_ENVS = (ACCURACY_FLOOR_ENV, "GSM8K_LIMIT")
@@ -421,6 +426,7 @@ def arbor_config(spec: AgentSpec, checkout: Path, run: ArborRun) -> dict[str, An
         "gpu_ids": list(range(len(spec.cards))),
         **_operating_point(spec.workload),
         "directives": host_rules(spec),
+        "policy": dict(ACCURACY_POLICY),
         "component": component,
     }
 
@@ -489,7 +495,8 @@ def host_rules(spec: AgentSpec) -> list[str]:
         rules.append(
             f"{HOST_RULE}: accuracy: MB's own eval of a change scores at least {DEFAULT_ENABLEMENT_ACCURACY_FLOOR:g} and"
             f" at most {ACCURACY_THRESHOLD:g} under the root's score; a numerics change that costs more is never merged."
-            f" Arbor's GSM8K runs on another scale, so its floor here is {DEFAULT_ENABLEMENT_ACCURACY_FLOOR:g} only."
+            f" Arbor's GSM8K reads on another scale, so Arbor holds the change to the same drop against the root it"
+            f" measures itself, and to {DEFAULT_ENABLEMENT_ACCURACY_FLOOR:g} when it could not."
         )
     return rules
 
@@ -737,6 +744,7 @@ async def _directions(checkout: Path, written: tuple[Path, ...], *args: str) -> 
 
 __all__ = [
     "ACCURACY_FLOOR_ENV",
+    "ACCURACY_POLICY",
     "BLOCK_KEYS",
     "BRANCH_RUN",
     "BUILT",

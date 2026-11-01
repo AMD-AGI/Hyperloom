@@ -534,7 +534,16 @@ def test_arbor_is_given_mb_s_rules_as_directives_the_dossier_copies(tmp_path: Pa
     assert "inferencex at concurrency 8, isl 1024, osl 1024" in fixed and "ISL" in fixed and "CONC" in fixed
     assert "output_throughput" in kept
     assert "at least 0.5" in accuracy and "at most 0.05" in accuracy
+    assert "the root it measures itself" in accuracy
     assert "error rate stays at or under 10%" in agentx_rules[-1]
+
+
+def test_arbor_s_accuracy_tolerance_is_the_drop_mb_s_rule_allows(tmp_path: Path) -> None:
+    # Arbor measures the root's full GSM8K itself and holds a numerics change to it less this tolerance, on its own
+    # eval's scale: MB's rule allows ACCURACY_THRESHOLD under the root, so Arbor allows the same.
+    config = arbor_config(_spec(tmp_path), tmp_path / "checkout", BRANCH_RUN)
+
+    assert config["policy"] == {"accuracy_tolerance": 0.05}
 
 
 def test_a_launch_file_s_client_measures_arbor_only_when_mb_gives_none(tmp_path: Path) -> None:
