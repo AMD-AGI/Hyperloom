@@ -100,6 +100,9 @@ LOG_FILE = "ruppell.log"
 ATTEMPT_LOG_FILE = "attempt_server.log"
 MODULE_SHARES_COLUMNS = ("kind", "module", "gpu_ms", "share_percent", "steps")
 UNATTRIBUTED = "unattributed"
+#: The note of a profile whose server ran traced: its Kineto trace was taken beside ruppell in one process, which
+#: ruppell has not yet measured (ruppell-board#19), so its numbers are read with care.
+KINETO_NOTE = "ruppell: the Kineto trace was taken in a traced run, cross-process overhead untested"
 
 _SCHEMA = 1
 _UTF8 = "utf-8"

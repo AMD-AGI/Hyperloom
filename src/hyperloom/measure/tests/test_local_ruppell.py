@@ -98,7 +98,7 @@ def test_a_profile_with_ruppell_ready_traces_its_server_and_notes_the_report(gri
     assert not _traced(yaml.safe_load(point.read_text())), "the point itself is shared and stays as it was"
     assert tracer.reports == [(tmp_path / "out", 1)], "after the traces were gathered, for the point's TP"
     assert (tmp_path / "out" / "profile" / "torch_trace" / "rank0.pt.trace.json.gz").is_file()
-    assert (outcome.returncode, outcome.notes) == (0, ("ruppell: ok, 64 detail steps, check ok",))
+    assert (outcome.returncode, outcome.notes) == (0, ("ruppell: ok, 64 detail steps, check ok", ruppell.KINETO_NOTE))
     assert tracer.closed
 
 
@@ -110,7 +110,7 @@ def test_a_report_that_failed_leaves_the_return_code_alone(grid, tmp_path, monke
     outcome = _run(_call(tmp_path, _profile_point(tmp_path), kind="profile"))
 
     assert (outcome.returncode, outcome.failure_class) == (0, None)
-    assert outcome.notes == ("ruppell: report failed (the server left no records)",)
+    assert outcome.notes == ("ruppell: report failed (the server left no records)", ruppell.KINETO_NOTE)
 
 
 def test_a_traced_attempt_that_failed_is_profiled_again_without_ruppell(grid, tracer, tmp_path, monkeypatch):
