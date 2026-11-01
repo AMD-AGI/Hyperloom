@@ -12,8 +12,8 @@ In component mode, Hyperloom's multi-branch mode (MB) runs Arbor as an autonomou
 
 This page says which side runs each step of an MB session, and what passes between the two.
 - **As of 2026-11-01:**
-  - Hyperloom `jiaweche/Hyperloom` `arbor-adapter-v2` `cc5fc7dca`, merging into `multibranch-dev`;
-  - Arbor `main` `1fa2069`.
+  - Hyperloom `jiaweche/Hyperloom` `arbor-adapter-v2` `8f59f12db` or later, merging into `multibranch-dev`;
+  - Arbor `main` `85f01cc`.
 - **Arbor's copy of this page:** [`docs/who-runs-what.md`](https://github.com/AMD-AGI/Arbor/blob/main/docs/who-runs-what.md).
 - **The contract key by key, from Arbor's side:** [`docs/hosts.md`](https://github.com/AMD-AGI/Arbor/blob/main/docs/hosts.md).
 - **The design and its decisions:** [`docs/component-mode.md`](https://github.com/AMD-AGI/Arbor/blob/main/docs/component-mode.md).
@@ -28,10 +28,12 @@ In the Hyperloom paths below, `src/hyperloom_multibranch/` is left out. Arbor's 
 | **GPUs** | Leases `--tp` cards per Arbor from its pool. Sets `ROCR_VISIBLE_DEVICES` (absolute ids) and `HIP_VISIBLE_DEVICES`. Kills any process that reaches past the lease. | Serves on the cards it is given. Never sets or passes a mask. |
 | **Ports** | A block of 10 per Arbor, from 31100. | Serves on the config's `port` only. |
 | **Clock** | Owns the session's deadline. Gives each Arbor `component.deadline` = EXPLORE's end minus 40 min. | Starts an iteration only if it fits, and exits 0 `deadline`. |
-| **Operating point** | One per session: `--conc`, ISL/OSL, and its gate's client. | Runs MB's client, `component.bench_command`, against its own server. |
+| **Operating point** | One per session: `--conc`, ISL/OSL, and its gate's client. Several points are several sessions ([below](#several-operating-points)). | Runs MB's client, `component.bench_command`, against its own server. |
 | **Root and baseline** | PRELUDE: the root commit, the baseline tests, and the root profile (a TraceLens job). | None. |
 | **The map** | Without `--agent-directions`, for two or more Arbors, or for one with the review on: the dossier pass, an Arbor run MB starts and reads. Without a map from it, `python3 -m arbor.directions generate`. Then `split`. Each Arbor gets its share as `component.plan`. | In the dossier pass: writes the dossier and `directions.json`, then exits `mapped`. In a branch: plans from its share. |
 | **Human review** | On by default: pauses after the map step, before the split, holding no lease, until `hyperloom-multibranch review --session D approve`. `--no-review-gate` skips it. | Its gate at session start passes at once when the host reviewed (`component.review: "host"`). |
+| **Accuracy** | Gives Arbor its absolute floor, `GSM8K_MIN` 0.5, and its allowed drop, `policy.accuracy_tolerance` 0.05. Holds a change to its own eval of the root at its confirm test. | Measures the root's full GSM8K once before iteration 1, when its accuracy gate is on. Holds a numerics change to that score less the tolerance, else to `GSM8K_MIN`. |
+| **The benchmark's rules** | Writes its rules into the config's `directives`, each starting `Host rule (MB)`: the workload it holds fixed and the variables it owns, how it keeps a change, its accuracy rule. | Every agent reads them. The dossier copies them into part 4's `## The benchmark's rules` table. |
 | **The optimization loop** | None. | Agent turns, its own server, the bench, GSM8K and the short-prompt check, and its own KEEP or REVERT. |
 | **A KEEP** | Imports the snapshot, tests it on its own measurement pool, judges it, lands it on the branch and merges it into integration. | Writes an atomic snapshot to `keeps/NNNN/`. |
 | **Numbers of record** | MB's toolbox: InferenceX or AgentX, through Magpie. | Its own measurements decide only its own KEEPs. |
@@ -81,11 +83,11 @@ In the Hyperloom paths below, `src/hyperloom_multibranch/` is left out. Arbor's 
      - `link_built`, which links the installed framework's compiled files into the worktree;
      - the dossier, copied into the branch's own Arbor checkout;
      - the start tables: aiter rows laid over private copies of the image's tables;
-     - the config `hyperloom-mb/config.json`.
+     - the config `hyperloom-mb/config.json`, with MB's rules as `directives`, `GSM8K_MIN` and `policy.accuracy_tolerance`.
    - **The start:** `python3 -m arbor run --config hyperloom-mb/config.json`. The process must stay up for 300 s.
    - **Code:** `specialist/autonomous_session.py`, `specialist/agent_onboarding.py`, `specialist/arbor_adapter.py`.
 8. **Arbor runs.**
-   - **Before the first iteration:** the review gate, then the init: it pins the validators and seeds the workspace.
+   - **Before the first iteration:** the review gate, then the init: it pins the validators and seeds the workspace. With its accuracy gate on, it then serves the root once and measures its full GSM8K (`<session>/baseline_accuracy.json`; about 2 min for Qwen3-8B on MI350X).
    - **Each iteration:** an agent turn, its server and the bench, the correctness checks, and its own gate.
    - **A KEEP:** written as a snapshot (Arbor's `docs/hosts.md`, "What to read back").
    - **Code:** Arbor's `arbor/driver.py`, `arbor/component.py` (`snapshot_keep`).
@@ -103,6 +105,23 @@ In the Hyperloom paths below, `src/hyperloom_multibranch/` is left out. Arbor's 
       - at session end, stops any Arbor still running (SIGTERM, then SIGKILL after 30 s) and releases its lease.
     - **Code:** `scheduling/stops.py`, `specialist/agent_watch.py`.
 11. **MB's FINAL.** MB sweeps 0.5x, 1x and 2x the concurrency for the integration head and the best branch head, and picks at the primary concurrency. Arbor plays no part. **Code:** `scheduling/final.py`.
+
+## Several operating points
+
+Each concurrency is its own MB session: its own PRELUDE, Arbor(s), map from its own dossier pass, gate, integration
+and FINAL. No map is split across the points. `hyperloom-multibranch points` runs them in two stages, so no node waits
+for a person:
+
+1. **`points map`:** each point runs `run --stop-after-map`. That is PRELUDE and the map step, kept in
+   `MB-agent-map/` (the map, the dossier); then it stops with reason `mapped`. It never pauses.
+2. **The review, offline:** `points approve` or `points reject`, per point, on the points directory.
+3. **`points run`:** the approved points run with their reviewed map and dossier (`--agent-directions`,
+   `--agent-dossier`) and `--no-review-gate`.
+
+On a shared node, each point gets its own container (`--slot`), cards and Arbor port base (`--agent-port`). Each
+point's Arbor gets its own point's `Host rule` directives. Each point ends with its own recipe; nothing merges across
+the points (ArborDevelopment #27). Verified on Ruby, C8 and C64 on one node (2026-11-01; runner
+`plans/arbor/M08_multi_point/`).
 
 ## What passes between them
 
@@ -137,10 +156,15 @@ In the Hyperloom paths below, `src/hyperloom_multibranch/` is left out. Arbor's 
   approves from a login node.
 - **An older MB under a newer Arbor:** an MB before `cc5fc7dca` doesn't write `component.review`. Its Arbors at
   `1fa2069` or later wait at Arbor's own gate, holding their leases.
-- **One operating point per session:** several concurrencies means several MB sessions (ArborDevelopment #27).
-- **A dropped launch-file flag stays:**
-  - A flag set by the `--agent-launch` file, which a KEEP drops, is not removed on import.
-  - A recipe's launch cannot record such a removal either (`boards/hyperloom-multibranch#168` c4583).
-- **No profile on CUDA-graph runs:** a branch's `component.profile` takes op shares only. On a run where TraceLens degraded, the branches get none, though the dossier pass got kernel shares.
+- **No merge across operating points:** each point's session ends with its own recipe. A rule that combines them
+  (for example, keep a change only if no point regresses) is not built (ArborDevelopment #27).
+- **A dropped flag of the resolved launch:** a KEEP that runs without a flag the `--agent-launch` file sets now
+  removes it, and the recipe keeps the removal (`LaunchConfig.remove_args`, `arbor-adapter-v2` `b9d65167d` and
+  after). Only on AgentX, though: there Magpie applies it; on InferenceX such a removal is refused
+  (`boards/hyperloom-multibranch#168`).
+- **No profile on CUDA-graph runs:** a branch's `component.profile` takes op shares only. On a run where TraceLens
+  degraded, the branches get none, though the dossier pass got kernel shares.
 - **One Arbor without the review:** with `--no-review-gate` and no `--agent-directions`, a lone Arbor gets no
   dossier pass and makes its own dossier inside its branch.
+- **Each Arbor measures the root itself:** one server boot and the full GSM8K per Arbor session. For a large model,
+  the full set may hit the 30-min correctness cap; then the floor (`GSM8K_MIN`) is all the gate has.
