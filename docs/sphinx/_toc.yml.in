@@ -39,6 +39,8 @@ subtrees:
         title: AgentKernelArena
   - file: conceptual/optimization-loop.md
     title: Hyperloom optimization loop
+  - file: conceptual/multibranch-arbor.md
+    title: Arbor in multi-branch, who runs what
 
 - caption: How to
   entries:
