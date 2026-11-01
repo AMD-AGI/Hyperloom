@@ -400,7 +400,7 @@ async def test_a_failed_preflight_gives_up_the_specialist_with_every_reason_and_
 
 
 async def test_a_finished_session_ends_its_specialist_with_no_restart_and_no_crash(session):
-    runs = _Runs(errors=(SessionFinished("the agent finished its run"),))
+    runs = _Runs(errors=(SessionFinished("the agent finished its run: deadline"),))
     runtime = session.runtime(runs)
 
     await runtime.start(BRANCH, await session.repo.head(BRANCH), BranchTask(agent="https://example.com/agent.git"))
@@ -408,7 +408,8 @@ async def test_a_finished_session_ends_its_specialist_with_no_restart_and_no_cra
 
     assert len(runs.started) == 1 and runs.started[0].stopped.is_set()
     assert any("the agent finished its run" in notice for notice in await session.notices())
-    assert await runtime.status(BRANCH) == SpecialistStatus(False, 0, 0, True, False)
+    expected = SpecialistStatus(False, 0, 0, True, False, finished="the agent finished its run: deadline")
+    assert await runtime.status(BRANCH) == expected
     await runtime.stop(BRANCH)
 
 

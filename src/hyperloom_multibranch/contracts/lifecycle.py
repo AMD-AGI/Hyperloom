@@ -20,7 +20,8 @@ class SpecialistStatus:
     ``gave_up`` says the runtime stopped restarting it after repeated crashes, losses or sessions in a row that found
     nothing to test, ``judge_failed`` that it was stopped because judging the branch failed; the branch keeps its slot
     either way. ``unready`` says why its specialist could not be started (its session not built, or its preflight
-    failed), empty when it was.
+    failed), empty when it was. ``finished`` says why a third-party agent's run ended of itself (its exit, such as its
+    deadline), the other way such a specialist is not restarted; empty when it did not.
     """
 
     running: bool
@@ -29,6 +30,7 @@ class SpecialistStatus:
     gave_up: bool
     judge_failed: bool
     unready: str = ""
+    finished: str = ""
 
 
 @dataclass(frozen=True)

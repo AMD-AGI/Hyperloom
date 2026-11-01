@@ -72,6 +72,9 @@ _KEY_BRANCHES = "branches"
 _KEY_STOP = "stop"
 _KEY_STOP_SESSION = "stop_session"
 _KEY_BRANCH = "branch"
+#: What the runtime knows of a specialist but the judge's prompt does not name: why an agent's run ended of itself is
+#: the scheduler's stop reason, since the scheduler stops that branch.
+_NOT_JUDGED = frozenset({"finished"})
 _KEY_REASON = "reason"
 #: Decimals the GPU hours in the judge's view are rounded to.
 _GPU_HOURS_DIGITS = 3
@@ -387,7 +390,7 @@ def _branch_row(entry: BranchEntry, progress: BranchProgress | None, view: Judge
         row["steered"] = False
     specialist = view.specialists.get(entry.branch)
     if specialist is not None:
-        row["specialist"] = asdict(specialist)
+        row["specialist"] = {name: value for name, value in asdict(specialist).items() if name not in _NOT_JUDGED}
     row.update(_progress_row(progress))
     return row
 

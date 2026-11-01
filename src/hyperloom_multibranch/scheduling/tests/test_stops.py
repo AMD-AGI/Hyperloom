@@ -72,6 +72,8 @@ def test_the_stop_of_a_gave_up_branch_names_the_counts_the_runtime_kept() -> Non
     assert gave_up_reason(crashed) == "its specialist gave up after 4 crashes"
     assert gave_up_reason(replace(crashed, crashes=3, lost=3)).endswith("3 crashes, 3 of them with a lost heartbeat")
     assert gave_up_reason(replace(crashed, crashes=0)).endswith("its sessions in a row found nothing to test")
+    finished = replace(crashed, crashes=0, finished="the agent finished its run: deadline")
+    assert gave_up_reason(finished) == "the agent finished its run: deadline"
     unready = replace(crashed, crashes=0, unready="attempt 1: the onboarding model's call failed: API Error: 400")
     assert gave_up_reason(unready) == (
         "its specialist could not be started: attempt 1: the onboarding model's call failed: API Error: 400"

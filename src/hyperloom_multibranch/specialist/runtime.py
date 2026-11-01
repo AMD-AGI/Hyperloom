@@ -196,6 +196,7 @@ class _Branch:
     gave_up: bool = False
     judge_failed: bool = False
     unready: str = ""
+    finished: str = ""
     judge: BranchJudge | None = None
 
 
@@ -281,7 +282,9 @@ class SpecialistRuntime:
         if state is None:
             return None
         running = not state.tasks[0].done()
-        return SpecialistStatus(running, state.crashes, state.lost, state.gave_up, state.judge_failed, state.unready)
+        return SpecialistStatus(
+            running, state.crashes, state.lost, state.gave_up, state.judge_failed, state.unready, state.finished
+        )
 
     async def stop(self, branch: str, *, finish_tests: bool = False) -> None:
         """Stop the branch's specialist, at most once whoever asks; a branch already stopped is left alone.
@@ -348,7 +351,7 @@ class SpecialistRuntime:
                 return
             except SessionFinished as error:
                 await state.session.stop()
-                state.session, state.gave_up = None, True
+                state.session, state.gave_up, state.finished = None, True, str(error)
                 await _notice(state, f"{error}; it is not restarted")
                 return
             except SessionIdle as error:
