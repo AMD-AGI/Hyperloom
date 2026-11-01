@@ -521,6 +521,22 @@ def test_arbor_is_held_to_mb_s_accuracy_floor_unless_the_launch_or_the_recipe_se
     assert [config["server_env"][floor] for config in configs] == ["0.5", "0.85", "0.8"]
 
 
+def test_arbor_is_given_mb_s_rules_as_directives_the_dossier_copies(tmp_path: Path) -> None:
+    # Operator, 2026-11-01: the benchmark's rules are considered in validation, and are part of the dossier.
+    spec = _spec(tmp_path)
+    agentx = replace(spec, workload={"kind": "agentx", "conc": 8})
+
+    rules = arbor_config(spec, tmp_path / "checkout", BRANCH_RUN)["directives"]
+    agentx_rules = arbor_config(agentx, tmp_path / "checkout", BRANCH_RUN)["directives"]
+
+    assert all(rule.startswith(arbor_adapter.HOST_RULE) for rule in (*rules, *agentx_rules))
+    fixed, kept, accuracy = rules
+    assert "inferencex at concurrency 8, isl 1024, osl 1024" in fixed and "ISL" in fixed and "CONC" in fixed
+    assert "output_throughput" in kept
+    assert "at least 0.5" in accuracy and "at most 0.05" in accuracy
+    assert "error rate stays at or under 10%" in agentx_rules[-1]
+
+
 def test_a_launch_file_s_client_measures_arbor_only_when_mb_gives_none(tmp_path: Path) -> None:
     client = "python3 bench.py --port 8000 --result-dir /tmp/out --model served"
     spec = _spec(tmp_path, launch=_launch_file(tmp_path, {**RESOLVED, "model_name": "", "client": client}))

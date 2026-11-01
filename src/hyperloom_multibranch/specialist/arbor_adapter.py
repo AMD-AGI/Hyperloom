@@ -50,7 +50,11 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
-from hyperloom.common.gain_math import DEFAULT_ENABLEMENT_ACCURACY_FLOOR
+from hyperloom.common.gain_math import (
+    ACCURACY_THRESHOLD,
+    AGENTX_ERROR_RATE_THRESHOLD_PCT,
+    DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
+)
 from hyperloom.inference_optimizer.framework_registry import EXPERT_PARALLEL_FLAGS
 from hyperloom.inference_optimizer.grid_server_args import merge_server_args, tokenize_server_args_preserving_json
 from hyperloom.measure.compile import (
@@ -59,6 +63,7 @@ from hyperloom.measure.compile import (
     UnsupportedComponentError,
     locate_installed_package,
 )
+from hyperloom.measure.surface import POINT_ENV_KEYS, REQUEST_ENV_KEYS, SURFACE_ENV_KEYS
 from hyperloom_multibranch.specialist.agent_manifest import EXIT_FILE, AgentManifest
 from hyperloom_multibranch.specialist.worktree import SKIPPED
 
@@ -92,6 +97,9 @@ ACCURACY_FLOOR_ENV = "GSM8K_MIN"
 #: The pack's evaluation settings, which Arbor reads from its campaign config and never from what an iteration
 #: changed: no keep carries them into a recipe.
 EVAL_ENVS = (ACCURACY_FLOOR_ENV, "GSM8K_LIMIT")
+#: How each of MB's rules starts among Arbor's ``directives``, which every agent reads in its program and the dossier
+#: copies into part 4's rules table (Arbor's docs/hosts.md, the config's ``directives``).
+HOST_RULE = "Host rule (MB)"
 #: The workload kind whose recipe Magpie resolves, the root's launch holding only what is added to it.
 AGENTX = "agentx"
 #: Arbor gives vLLM its TP itself and SGLang none, which reads it from these flags only.
@@ -412,6 +420,7 @@ def arbor_config(spec: AgentSpec, checkout: Path, run: ArborRun) -> dict[str, An
         "port": spec.port,
         "gpu_ids": list(range(len(spec.cards))),
         **_operating_point(spec.workload),
+        "directives": host_rules(spec),
         "component": component,
     }
 
@@ -456,6 +465,33 @@ def _operating_point(workload: Mapping[str, object]) -> dict[str, int]:
 
     named = {"concurrency": workload.get("conc"), "isl": workload.get("isl"), "osl": workload.get("osl")}
     return {key: value for key, value in named.items() if isinstance(value, int) and not isinstance(value, bool)}
+
+
+def host_rules(spec: AgentSpec) -> list[str]:
+    """MB's rules for ``spec``'s runs, as Arbor's ``directives`` (:data:`HOST_RULE`): the workload it holds fixed and
+    the variables it owns, how it keeps a change, and its accuracy rule. MB refuses or rejects a change that breaks
+    one, whatever Arbor measured; the dossier lists them among the benchmark's rules (operator, 2026-11-01)."""
+
+    point = ", ".join(f"{key} {value}" for key, value in _operating_point(spec.workload).items())
+    owned = ", ".join(sorted({*SURFACE_ENV_KEYS, *POINT_ENV_KEYS, *REQUEST_ENV_KEYS}))
+    kind = str(spec.workload.get("kind") or "the session's workload")
+    rules = [
+        f"{HOST_RULE}: the workload is fixed: {kind}{f' at {point}' if point else ''}, measured by MB's client, the"
+        f" only bench of record. A change never sets {owned}: MB owns them and refuses a launch that does.",
+        f"{HOST_RULE}: MB keeps a change only on its own measurement of {spec.metric} on its own cards, a gain above"
+        " its bar that a second measurement confirms; Arbor's numbers decide only Arbor's own KEEPs.",
+    ]
+    if kind == AGENTX:
+        rules.append(
+            f"{HOST_RULE}: accuracy: the request error rate stays at or under {AGENTX_ERROR_RATE_THRESHOLD_PCT:g}%."
+        )
+    else:
+        rules.append(
+            f"{HOST_RULE}: accuracy: MB's own eval of a change scores at least {DEFAULT_ENABLEMENT_ACCURACY_FLOOR:g} and"
+            f" at most {ACCURACY_THRESHOLD:g} under the root's score; a numerics change that costs more is never merged."
+            f" Arbor's GSM8K runs on another scale, so its floor here is {DEFAULT_ENABLEMENT_ACCURACY_FLOOR:g} only."
+        )
+    return rules
 
 
 def bench_command(client: str) -> str:
@@ -709,6 +745,7 @@ __all__ = [
     "DOSSIER_PASS",
     "EVAL_ENVS",
     "EXIT_REFUSED",
+    "HOST_RULE",
     "INSTALL",
     "LAUNCH_KEYS",
     "COMPONENT_MODULE",
@@ -730,6 +767,7 @@ __all__ = [
     "carry_dossier",
     "generate_directions",
     "has_review_gate",
+    "host_rules",
     "is_arbor",
     "link_built",
     "mapped",
