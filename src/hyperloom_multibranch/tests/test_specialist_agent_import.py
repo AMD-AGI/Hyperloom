@@ -479,3 +479,11 @@ async def test_a_keep_carries_an_earlier_unmerged_keep_that_clashes_with_integra
     assert merge.carried == (first, second) and merge.replaced_patches == ()
     merged = apply(await source.repo.read_recipe(integration), merge.delta)
     assert source.config(merged) == _expected(line_2="2000", line_10="1000", line_25="250")
+
+
+def test_a_keep_s_patch_is_read_byte_for_byte_with_a_lone_carriage_return_in_an_added_file(tmp_path: Path) -> None:
+    # A server log with a progress bar, as Arbor's landed tree carries: universal newlines would split its line.
+    patch = "--- /dev/null\n+++ b/eval/server.log\n@@ -0,0 +1 @@\n+Loading 10%\r 20%\r 30%\n"
+    _arbor_keep(tmp_path, "", {})
+    (tmp_path / "0001" / "change.patch").write_bytes(patch.encode())
+    assert _read(tmp_path, ()).source_patch == patch

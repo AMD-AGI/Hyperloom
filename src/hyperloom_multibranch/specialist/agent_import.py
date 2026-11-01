@@ -307,8 +307,10 @@ def _said(keep: Mapping[str, object]) -> str:
 
 
 def _patch(directory: Path, name: str) -> str:
+    # No newline translation: a lone CR in an added file (a progress bar in a log) would otherwise split its line.
     try:
-        return (directory / name).read_text(encoding="utf-8")
+        with (directory / name).open(encoding="utf-8", newline="") as text:
+            return text.read()
     except (OSError, UnicodeDecodeError) as error:
         raise KeptChangeError(f"{directory.name}/{name} cannot be read: {error}") from error
 
