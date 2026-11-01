@@ -54,6 +54,8 @@ subtrees:
     title: Run hosted multi-branch on a new cluster
   - file: how-to/multibranch-points.md
     title: Run several operating points with Arbor
+  - file: how-to/multibranch-review-gate.md
+    title: Review the agent map before the Arbor branches open
 
 - caption: Reference
   entries:

@@ -121,7 +121,9 @@ for a person:
 On a shared node, each point gets its own container (`--slot`), cards and Arbor port base (`--agent-port`). Each
 point's Arbor gets its own point's `Host rule` directives. Each point ends with its own recipe; nothing merges across
 the points (ArborDevelopment #27). Verified on Ruby, C8 and C64 on one node (2026-11-01; runner
-`plans/arbor/M08_multi_point/`).
+`plans/arbor/M08_multi_point/`). How to run it: {doc}`Run several operating points with Arbor
+</how-to/multibranch-points>`; the single-session review: {doc}`Review the agent map before the Arbor branches open
+</how-to/multibranch-review-gate>`.
 
 ## What passes between them
 

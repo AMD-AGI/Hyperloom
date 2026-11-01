@@ -34,6 +34,7 @@ The Hyperloom source code is hosted on GitHub at `https://github.com/AMD-AGI/Hyp
     * :doc:`Quantization with AMD Quark </how-to/quantization-quark>`
     * :doc:`Run hosted multi-branch on a new cluster </how-to/hosted-multibranch-new-cluster>`
     * :doc:`Run several operating points with Arbor </how-to/multibranch-points>`
+    * :doc:`Review the agent map before the Arbor branches open </how-to/multibranch-review-gate>`
 
   .. grid-item-card:: Reference
 
