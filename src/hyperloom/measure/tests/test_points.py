@@ -21,6 +21,7 @@ from hyperloom.measure.compile import (
     compile_environment,
 )
 from hyperloom.inference_optimizer.session.paths import asset_root
+from hyperloom.measure import points
 from hyperloom.measure.points import (
     AGENTX_PROFILE_STEPS,
     CANONICAL_FILE,
@@ -366,6 +367,24 @@ def test_a_point_that_resolves_no_launch_of_its_own_refuses_a_removal_it_cannot_
 
     with pytest.raises(PointError, match=f"only a Magpie AgentX point .* so {RESOLVED_OPTION} would stay"):
         generate_points(env, canonical, tmp_path / "points")
+
+
+def test_an_agentx_point_whose_renderer_drops_a_removal_is_refused(agentx_canonical, blobs, tmp_path, monkeypatch):
+    rendered = points.materialize_benchmark_config
+
+    def dropping(*args, **kwargs):
+        path = rendered(*args, **kwargs)
+        config = load(path)
+        config["benchmark"]["agentx"]["launch_overrides"]["remove_args"] = []
+        path.write_text(yaml.safe_dump(config, sort_keys=False))
+        return path
+
+    monkeypatch.setattr(points, "materialize_benchmark_config", dropping)
+    delta = RecipeDelta(config=ConfigDelta(remove_args=(RESOLVED_OPTION,)))
+    env = environment(blobs, tmp_path, delta=delta)
+
+    with pytest.raises(PointError, match=f"the renderer did not remove launch arguments {RESOLVED_OPTION}"):
+        generate_points(env, agentx_canonical, tmp_path / "points")
 
 
 def test_an_agentx_workload_has_no_accuracy_test(agentx_canonical, blobs, tmp_path):
