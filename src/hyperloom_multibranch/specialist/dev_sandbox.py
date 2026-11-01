@@ -62,7 +62,7 @@ from hyperloom_multibranch.contracts.toolbox import (
     RequestRejected,
 )
 from hyperloom_multibranch.specialist.agent_onboarding import AgentProcess, AgentSandbox
-from hyperloom_multibranch.specialist.agent_sandbox import LocalAgentSandbox
+from hyperloom_multibranch.specialist.agent_sandbox import LocalAgentSandbox, framework_read_only
 from hyperloom_multibranch.specialist.agent_session import Processes
 from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.remote_sandbox import RemoteAgentSandbox, forwarded_env
@@ -634,7 +634,10 @@ def _caches(root: Path) -> dict[str, str]:
 def local_dev_sandboxes(
     worktrees: WorktreeFor, processes: Processes | None, limits: DevLimits = DevLimits()
 ) -> SandboxFor:
-    """Sandboxes on this host, importing the source of every component the branch's worktree holds."""
+    """Sandboxes on this host, importing the source of every component the branch's worktree holds, with the image's
+    installed frameworks read-only."""
+
+    read_only = framework_read_only()
 
     def sandbox(branch: str, lease: BranchLease) -> LocalAgentSandbox:
         base_env = {**os.environ, **lease.env}
@@ -646,6 +649,7 @@ def local_dev_sandboxes(
             branch,
             base_env,
             niceness=limits.niceness,
+            read_only=read_only,
         )
 
     return sandbox
