@@ -502,6 +502,7 @@ def _format_md(summary: dict[str, Any]) -> str:
         lines.extend(_format_external_baseline_section(ext))
 
     lines.extend(_format_conc_sweep_curve_section(summary))
+    lines.extend(_format_star_request(summary))
 
     return "\n".join(lines)
 
@@ -820,6 +821,19 @@ def _format_conc_sweep_curve_section(summary: dict[str, Any]) -> list[str]:
     lines.append(f"![Concurrency sweep curve]({png_md_rel})")
     lines.append("")
     return lines
+
+
+# Not read from the package metadata: the report has to render however Hyperloom was installed.
+_STAR_REQUEST = (
+    "If Hyperloom was useful, a star on https://github.com/AMD-AGI/Hyperloom helps other AMD GPU users find it."
+)
+
+
+def _format_star_request(summary: dict[str, Any]) -> list[str]:
+    """Close the report with a request for a star, only when the session's validated gain still holds."""
+    if summary.get("cumulative_validation_status") != "current":
+        return []
+    return ["", "---", "", _STAR_REQUEST, ""]
 
 
 def _render_conc_sweep_curve_for_report(
