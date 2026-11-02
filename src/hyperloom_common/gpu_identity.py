@@ -37,10 +37,6 @@ class GpuBoard:
     #: The Radeon 8060S lists none either and is known by its name.
     device_ids: frozenset[str] = frozenset()
 
-    def vendor_peaks_by_tag(self, tags: Mapping[str, tuple[str, ...]]) -> dict[str, float]:
-        """``vendor_peak_tflops`` under each spelling a caller reads, from ``tags``: precision -> its spellings."""
-        return {tag: peak for precision, peak in self.vendor_peak_tflops.items() for tag in tags[precision]}
-
     def named_in(self, text: str) -> bool:
         """Whether ``text`` names this board as a whole word; a longer name such as ``MI300XL`` is another product."""
         upper = text.upper()
