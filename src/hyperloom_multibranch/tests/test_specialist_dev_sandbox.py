@@ -22,6 +22,8 @@ from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind, UsageSou
 from hyperloom_multibranch.contracts.toolbox import BranchLease, LeaseCharge, QueueState, RequestRejected
 from hyperloom_multibranch.specialist.agent_onboarding import CommandResult
 from hyperloom_multibranch.specialist.agent_session import AgentCommand, AgentSession, AgentSetup, BranchPlace
+from hyperloom_multibranch.specialist import dev_sandbox
+from hyperloom_multibranch.specialist.agent_sandbox import FrameworkProtection
 from hyperloom_multibranch.specialist.dev_sandbox import (
     CACHE_DIRS,
     DevLeases,
@@ -32,6 +34,7 @@ from hyperloom_multibranch.specialist.dev_sandbox import (
     local_dev_sandboxes,
     register_dev_sandbox_tools,
 )
+from hyperloom_multibranch.specialist.framework_guard import FrameworkGuard, GuardedPackage
 from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.prompts import role_prompt
 from hyperloom_multibranch.specialist.runtime import SessionCrashed, SessionStart
@@ -643,7 +646,8 @@ def _worktree(tmp_path):
     return worktree
 
 
-async def test_a_sandbox_run_leaves_the_worktrees_diff_unchanged(tmp_path, _local_temp):
+async def test_a_sandbox_run_leaves_the_worktrees_diff_unchanged(tmp_path, _local_temp, monkeypatch):
+    monkeypatch.setattr(dev_sandbox, "framework_protection", FrameworkProtection)
     worktree = _worktree(tmp_path)
     before = worktree.diff("vllm")
     script = tmp_path / "writer.py"
@@ -661,6 +665,20 @@ async def test_a_sandbox_run_leaves_the_worktrees_diff_unchanged(tmp_path, _loca
     local = sandboxes(B1, BranchLease("lease-1", B1, (0,), tmp_path / "leases" / "lease-1", {}, 0))
     assert (local.cache_root / "aiter-jit" / "build" / "module.cpp").exists()
     assert not (tmp_path / "leases" / "lease-1" / "cache").exists(), "JIT caches stay off the session's shared storage"
+
+
+async def test_a_host_whose_frameworks_cannot_be_protected_refuses_dev_commands(tmp_path, _local_temp, monkeypatch):
+    guard = FrameworkGuard((GuardedPackage("vllm", _worktree(tmp_path).path / "missing"),))
+    monkeypatch.setattr(dev_sandbox, "framework_protection", lambda: FrameworkProtection(guard=guard))
+    sandboxes = local_dev_sandboxes(lambda branch: _worktree(tmp_path / "other"), processes=None, limits=LIMITS)
+    leases = DevLeases(_Toolbox(tmp_path / "leases"), sandboxes, lambda _branch: _Logs(), limits=replace(LIMITS, cap=1))
+    await leases.lease(B1, 1, 5)
+    try:
+        why = await _refused(leases.run(B1, f"touch {tmp_path}/ran", None, 30), "frameworks_unguarded")
+        await _refused(leases.start(B1, f"touch {tmp_path}/ran", None), "frameworks_unguarded")
+    finally:
+        await leases.release(B1)
+    assert "cannot be copied" in why and not (tmp_path / "ran").exists()
 
 
 async def test_a_lease_asks_the_toolbox_for_its_term_and_a_shorter_lived_sandbox_bounds_it(rig):
