@@ -228,7 +228,7 @@ def test_a_variable_the_modules_generator_reads_decides_whether_the_cpu_build_is
 
 
 #: A flag aiter's module config reads from the environment as it builds (the image aiter's ``module_mha_batch_prefill``,
-#: 285579b62); no Python of the build path names the variable.
+#: e7d2453f); no Python of the build path names the variable.
 ENTRY_VARIABLE = "CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT"
 ENTRY_FLAG = "f'-DCK_TILE_FLOAT_TO_BFLOAT16_DEFAULT={os.environ.get(\"CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT\", 2)}'"
 
