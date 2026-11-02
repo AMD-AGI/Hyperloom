@@ -257,28 +257,7 @@ class ResumeRecoveryMixin:
         task_state = ""
         if task_id:
             try:
-                from ..state.task_registry import TaskNotFound
-
-                try:
-                    task = await self.tasks.get(task_id)
-                except TaskNotFound:
-                    task = None
-                if task is not None:
-                    task_state = str(task.state or "")
-                    if task_state == "queued":
-                        await self.tasks.transition(
-                            task_id,
-                            "cancelled",
-                            evidence={"reason": "resume_interrupted_warm_replay"},
-                        )
-                        task_state = "cancelled"
-                    elif task_state == "running":
-                        await self.tasks.transition(
-                            task_id,
-                            "failed",
-                            evidence={"failure_class": "resume_interrupted"},
-                        )
-                        task_state = "failed"
+                task_state = await self._invalidate_interrupted_warm_task(task_id)
             except (sqlite3.Error, RuntimeError, ValueError) as exc:
                 state.warm_replay_pending = {
                     **dict(pending),
@@ -316,6 +295,33 @@ class ResumeRecoveryMixin:
             }
         )
         state.save(self.session_dir)
+
+    async def _invalidate_interrupted_warm_task(self, task_id: str) -> str:
+        """End the warm-replay task a crash interrupted; return the state it is left in, or ``""`` when gone."""
+        from ..state.task_registry import TaskNotFound
+
+        task_state = ""
+        try:
+            task = await self.tasks.get(task_id)
+        except TaskNotFound:
+            task = None
+        if task is not None:
+            task_state = str(task.state or "")
+            if task_state == "queued":
+                await self.tasks.transition(
+                    task_id,
+                    "cancelled",
+                    evidence={"reason": "resume_interrupted_warm_replay"},
+                )
+                task_state = "cancelled"
+            elif task_state == "running":
+                await self.tasks.transition(
+                    task_id,
+                    "failed",
+                    evidence={"failure_class": "resume_interrupted"},
+                )
+                task_state = "failed"
+        return task_state
 
     async def _resume_recover_pending_targeted_build(self, report: dict[str, Any]) -> None:
         """Reclaim an off-loop build that was in flight when the coordinator died.

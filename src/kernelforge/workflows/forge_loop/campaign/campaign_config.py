@@ -488,6 +488,36 @@ def _program_md_sha256(program_md_file: str | None) -> str:
     return hashlib.sha256(source_program.read_text(errors="replace").encode()).hexdigest()
 
 
+def _resolved_kernel_backend(workspace: Path, kernel_backend: str, normalized_sources: list[str]) -> str:
+    """The operator's kernel backend override, or the backend inferred from the campaign sources."""
+    backend_override = kernel_backend.strip()
+    return (
+        resolve_kernel_backend_override(backend_override)
+        if backend_override
+        else infer_kernel_backend([workspace / path for path in normalized_sources])
+    )
+
+
+def _source_owner_framework(
+    kernel_absolute: str,
+    raw_source_paths: list[str],
+    pristine_sources: dict[str, str],
+    resolved_targets: list[str],
+    framework: str,
+) -> str:
+    """The framework that owns the pristine kernel sources, unless the operator named one."""
+    return infer_source_owner_framework(
+        KernelSources(
+            kernel_absolute,
+            pristine_sources.get(kernel_absolute, ""),
+            raw_source_paths,
+            source_contents=pristine_sources,
+        ),
+        target_functions=resolved_targets,
+        framework_override=framework.strip(),
+    )
+
+
 def create_campaign_config(
     workspace_dir: str,
     inputs: CampaignInputs,
@@ -503,27 +533,15 @@ def create_campaign_config(
     resolved_base_commit = (base_commit or "").strip() or _git_value(workspace, "rev-parse", "HEAD")
     raw_source_paths = _campaign_source_paths(workspace, kernel_path, normalized_sources)
     pristine_sources = _read_pristine_sources(workspace, raw_source_paths, base_commit=resolved_base_commit)
-    backend_override = inputs.kernel_backend.strip()
-    resolved_kernel_backend = (
-        resolve_kernel_backend_override(backend_override)
-        if backend_override
-        else infer_kernel_backend([workspace / path for path in normalized_sources])
-    )
+    resolved_kernel_backend = _resolved_kernel_backend(workspace, inputs.kernel_backend, normalized_sources)
     resolved_targets = parse_list(inputs.target_functions) or _derive_target_functions(
         workspace,
         normalized_sources,
         source_contents=pristine_sources,
     )
     kernel_absolute = str((workspace / kernel_path).resolve())
-    resolved_framework = infer_source_owner_framework(
-        KernelSources(
-            kernel_absolute,
-            pristine_sources.get(kernel_absolute, ""),
-            raw_source_paths,
-            source_contents=pristine_sources,
-        ),
-        target_functions=resolved_targets,
-        framework_override=inputs.framework.strip(),
+    resolved_framework = _source_owner_framework(
+        kernel_absolute, raw_source_paths, pristine_sources, resolved_targets, inputs.framework
     )
     pristine_signature, pristine_identity = implementation_signature(
         workspace=str(workspace),

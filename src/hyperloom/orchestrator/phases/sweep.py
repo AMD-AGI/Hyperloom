@@ -97,24 +97,7 @@ class SweepPhase(CoordinatorCollaborator):
             )
             self._record_terminal_conc_sweep("skipped", "disabled", auto_conc_sweep_skipped="disabled")
             return
-        prev_conc = state.last_conc_sweep_watermark
-        prev_conc = prev_conc if isinstance(prev_conc, dict) else {}
-        prev_validated = prev_conc.get("cumulative_gain_validated_at_record")
-        cur_validated = float(state.cumulative_gain_validated or 0.0)
-        if prev_conc and isinstance(prev_validated, (int, float)) and cur_validated <= float(prev_validated) + 1e-6:
-            log.info(
-                "SWEEP entry (from=%s): skipping auto-conc-sweep — no validated gain since last "
-                "conc_sweep (validated=%.4f%% unchanged since %s).",
-                from_phase or "<unknown>",
-                cur_validated,
-                prev_conc.get("ts") or "(unknown)",
-            )
-            self._record_terminal_conc_sweep(
-                "skipped",
-                "no_validated_gain_since_last_conc_sweep",
-                auto_conc_sweep_skipped="no_validated_gain_since_last_conc_sweep",
-                auto_conc_sweep_skipped_validated_gain=cur_validated,
-            )
+        if self._skip_conc_sweep_without_new_gain(from_phase):
             return
         denied = self._coord.dispatcher.time_budget_denial_for_action("conc_sweep")
         if denied is not None:
@@ -154,6 +137,30 @@ class SweepPhase(CoordinatorCollaborator):
             # Verbatim: None records "the workload picks", which is not the same statement as an empty ladder.
             auto_conc_sweep_concs=task.params.get("concs"),
         )
+
+    def _skip_conc_sweep_without_new_gain(self, from_phase: str) -> bool:
+        """Record a terminal skip when no validated gain landed since the last ``conc_sweep``; True when skipped."""
+        state = self.shared_state
+        prev_conc = state.last_conc_sweep_watermark
+        prev_conc = prev_conc if isinstance(prev_conc, dict) else {}
+        prev_validated = prev_conc.get("cumulative_gain_validated_at_record")
+        cur_validated = float(state.cumulative_gain_validated or 0.0)
+        if prev_conc and isinstance(prev_validated, (int, float)) and cur_validated <= float(prev_validated) + 1e-6:
+            log.info(
+                "SWEEP entry (from=%s): skipping auto-conc-sweep — no validated gain since last "
+                "conc_sweep (validated=%.4f%% unchanged since %s).",
+                from_phase or "<unknown>",
+                cur_validated,
+                prev_conc.get("ts") or "(unknown)",
+            )
+            self._record_terminal_conc_sweep(
+                "skipped",
+                "no_validated_gain_since_last_conc_sweep",
+                auto_conc_sweep_skipped="no_validated_gain_since_last_conc_sweep",
+                auto_conc_sweep_skipped_validated_gain=cur_validated,
+            )
+            return True
+        return False
 
     async def _enqueue_internal_conc_sweep_task(self) -> Task | None:
         """Build + enqueue a Coordinator-internal ``conc_sweep`` task."""

@@ -1076,13 +1076,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             return
         if task.kind == "specialist":
             await self._record_specialist_settlement(task, result)
-        payload = dict(result.result)
-        # A warm replay that failed in dispatch still owes its promote handler a cleanup pass.
-        if task.kind == _REPLAY_WARM_RECIPE and result.state == "failed":
-            payload.setdefault("status", "failed")
-            payload.setdefault("error_class", "dispatch_failed")
-            if result.error:
-                payload.setdefault("error", str(result.error))
+        payload = _promotion_payload(task, result)
         promotion = await self._promote_settled_result(task, result, payload)
         verdict, adopted = promotion or (Verdict.FAILED, ())
         # Settle the dispatch row on the phase that ordered it, whichever way promotion ended.
@@ -1424,3 +1418,15 @@ def _dispatch_policy_denied_evidence(task: Task) -> dict[str, Any]:
         if evidence.get("reason") == "policy_denied":
             return dict(evidence)
     return {}
+
+
+def _promotion_payload(task: Task, result: SubAgentResult) -> dict[str, Any]:
+    """The settled result's payload as its promote handler reads it."""
+    payload = dict(result.result)
+    # A warm replay that failed in dispatch still owes its promote handler a cleanup pass.
+    if task.kind == _REPLAY_WARM_RECIPE and result.state == "failed":
+        payload.setdefault("status", "failed")
+        payload.setdefault("error_class", "dispatch_failed")
+        if result.error:
+            payload.setdefault("error", str(result.error))
+    return payload
