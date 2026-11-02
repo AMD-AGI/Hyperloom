@@ -36,7 +36,7 @@ from typing import Any
 import yaml
 
 from hyperloom.common.benchmark_config import is_magpie_agentx
-from hyperloom.common.env import env_bool, is_truthy
+from hyperloom.common.env import is_truthy
 from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
 from hyperloom.common.outside_facts import (
     ENV_CONC,
@@ -644,7 +644,7 @@ def _free_port_for(point: Path, server_lifecycle: dict[str, Any] | None) -> Iter
 async def _grid(run: _Run, point: int, name: str, **launch: Any) -> VariantResult:
     """One ``run_grid`` call for the point at index ``point``: ``launch`` its GridLaunch, and its base_extra_envs."""
     call, envs = run.call, launch.pop("base_extra_envs", None)
-    launch.setdefault("warmup_round", name == _WARMUP and env_bool("HYPERLOOM_WARMUP_OWN_PROMPTS", default=True))
+    launch.setdefault("warmup_round", name == _WARMUP)  # the held warmup draws its own prompts (_eval_then_measure)
     with _free_port_for(call.points[point], launch.get("server_lifecycle")) as base_yaml, _booting(run, point, launch):
         started = time.time()
         results = await run_grid(

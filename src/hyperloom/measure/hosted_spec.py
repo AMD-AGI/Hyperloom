@@ -54,8 +54,6 @@ PROCESS_ENV_WHITELIST = (
     "HYPERLOOM_AGENTIC_BACKEND",
     "HYPERLOOM_PERF_METRIC",
     "HYPERLOOM_PERF_NOISE_PCT",
-    # Off ("0"), a held server's warmup round sends the measured round's prompts (measure/local.py, ``_grid``).
-    "HYPERLOOM_WARMUP_OWN_PROMPTS",
     "INFERENCE_OPTIMIZER_RUN_GRID_WARMUP",
     "INFERENCE_OPTIMIZER_SERVER_ARGS",
     "INFERENCE_OPTIMIZER_EXTRA_ENV",

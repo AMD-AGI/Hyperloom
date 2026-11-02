@@ -649,16 +649,6 @@ end-to-end run.
 Profile, KernelForge, GEAK, LLM-call, and SGLang's own watchdog budgets are separate
 from these benchmark limits and retain their existing contracts.
 
-## Warmup round prompts
-
-A test that holds its server across its rounds (a graded test, or one held up
-for its accuracy checks) runs a warmup round, then the measured round, on that
-server, with prefix caching on.
-
-| Variable | Default | Description |
-|---|---|---|
-| `HYPERLOOM_WARMUP_OWN_PROMPTS` | on | The warmup round is seeded as `run_grid` seeds its own (`HYPERLOOM_BENCH_SEED=1`), so the measured round's prompts are not in the prefix cache the warmup left. `0` gives both rounds the client's default seed, as before: the measured round then reads high wherever the warmup's prompts stay cached (6–14 % at C64 on Qwen3-8B, Ruby MI350X). A native AgentX workload is never reseeded. |
-
 ## Reactor budgets
 
 | Variable | Default | Description |

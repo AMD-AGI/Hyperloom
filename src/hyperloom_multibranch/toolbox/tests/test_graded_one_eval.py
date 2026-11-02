@@ -105,21 +105,11 @@ def test_a_graded_test_with_a_warmup_runs_one_evaluation_and_its_score_is_the_re
 def test_the_warmup_round_draws_other_prompts_than_the_measured_round(tmp_path, monkeypatch):
     """With one seed, the measured round reused the warmup's prompts from the prefix cache whenever the evaluation between
     them did not evict them, and read 6-14 % high at C64 (Ruby, 2026-11-01)."""
-    monkeypatch.delenv("HYPERLOOM_WARMUP_OWN_PROMPTS", raising=False)
     grid, call, point = _graded(tmp_path, monkeypatch, warmup_rounds=1)
 
     _result_of(call, point)
 
     assert grid.reseeded == {"warmup": True, "test": False}
-
-
-def test_the_flag_set_false_gives_the_warmup_the_measured_rounds_prompts(tmp_path, monkeypatch):
-    monkeypatch.setenv("HYPERLOOM_WARMUP_OWN_PROMPTS", "0")
-    grid, call, point = _graded(tmp_path, monkeypatch, warmup_rounds=1)
-
-    _result_of(call, point)
-
-    assert grid.reseeded == {"warmup": False, "test": False}
 
 
 def test_a_graded_test_without_a_warmup_still_evaluates_in_its_one_round(tmp_path, monkeypatch):
