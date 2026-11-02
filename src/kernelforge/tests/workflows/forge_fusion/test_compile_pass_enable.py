@@ -30,6 +30,8 @@ from kernelforge.workflows.forge_fusion.vllm_passes import (
     resolve_target_runtime,
 )
 
+from ._vllm_tree import fake_vllm_tree
+
 QK_FLAG = "enable_qk_norm_rope_fusion"
 QK_SHARES = {"gemm": 0.5, "rmsnorm": 0.12, "rope": 0.06, "add": 0.02}
 QK_BODY = "def _normalize_qk(self):\n    q_norm = 1\n    k_norm = 1\n    return self.rotary_emb(q_norm)\n"
@@ -48,23 +50,10 @@ def _fake_probe(
     return fn
 
 
-def _fake_vllm_tree(tmp_path, model_type: str, body: str):
-    mdir = tmp_path / "fw" / "vllm" / "model_executor" / "models"
-    mdir.mkdir(parents=True)
-    (mdir / f"{model_type}.py").write_text(body, encoding="utf-8")
-    model = tmp_path / "model"
-    model.mkdir()
-    (model / "config.json").write_text(
-        json.dumps({"model_type": model_type, "hidden_size": 2048, "num_attention_heads": 16}),
-        encoding="utf-8",
-    )
-    return str(model), str(tmp_path / "fw")
-
-
 class TestPatternRoute:
     def test_proposes_enabling_the_switch_when_it_is_off(self, tmp_path):
         # THE MISS: pass exists but is disabled -> must be proposed, not dropped.
-        model, root = _fake_vllm_tree(tmp_path, "qklm", QK_BODY)
+        model, root = fake_vllm_tree(tmp_path, "qklm", QK_BODY)
         recipes = build_recipes(
             diagnose_from_shares(TraceProfile(QK_SHARES, busy_fraction_of_wall=0.21)),
             install=FrameworkInstall(
@@ -85,7 +74,7 @@ class TestPatternRoute:
 
     def test_still_drops_when_the_switch_is_already_on(self, tmp_path):
         # No regression: an ENABLED pass really does make source-level fusion a no-op.
-        model, root = _fake_vllm_tree(tmp_path, "qklm", QK_BODY)
+        model, root = fake_vllm_tree(tmp_path, "qklm", QK_BODY)
         recipes = build_recipes(
             diagnose_from_shares(TraceProfile(QK_SHARES, busy_fraction_of_wall=0.21)),
             install=FrameworkInstall(framework="vllm", framework_root=root, pass_probe=_fake_probe(enabled=True)),
@@ -108,7 +97,7 @@ class TestPatternRoute:
             "level-pinned-off": (dict(enabled=False, source="level"), False, True),
         }
         for label, (kw, want_compile_pass, want_authoring) in cases.items():
-            model, root = _fake_vllm_tree(tmp_path / label, "qklm", QK_BODY)
+            model, root = fake_vllm_tree(tmp_path / label, "qklm", QK_BODY)
             recipes = build_recipes(
                 diagnose_from_shares(TraceProfile(QK_SHARES, busy_fraction_of_wall=0.21)),
                 install=FrameworkInstall(framework="vllm", framework_root=root, pass_probe=_fake_probe(**kw)),
@@ -162,7 +151,7 @@ class TestRanking:
     )
 
     def _recipes(self, tmp_path):
-        model, root = _fake_vllm_tree(tmp_path, "ranklm", self.BODY)
+        model, root = fake_vllm_tree(tmp_path, "ranklm", self.BODY)
         return build_recipes(
             diagnose_from_shares(TraceProfile(self.SHARES, busy_fraction_of_wall=0.21)),
             install=FrameworkInstall(framework="vllm", framework_root=root, pass_probe=_fake_probe(enabled=False)),
