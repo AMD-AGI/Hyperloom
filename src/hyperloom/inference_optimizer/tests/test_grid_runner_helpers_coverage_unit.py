@@ -65,24 +65,24 @@ def test_compatibility_filter_no_model_path_assumes_compatible() -> None:
     assert [v.name for v in kept] == ["moe"] and dropped == []
 
 
-# -- ungrounded_env_file_reason (env-value file grounding) ----------------
-def test_ungrounded_env_file_reason_drops_missing_config_path(tmp_path) -> None:
-    # A proposal may point a config env at an artifact no stage authored; the server would read it
-    # unconditionally and die at config load, so the variant must be dropped with a reason.
+# -- unserveable_env_file_reason (launch-side env-value grounding) ----------------
+def test_unserveable_env_file_reason_drops_missing_config_path(tmp_path) -> None:
+    # The one table a variant names is not on this host (a recipe published against another run's artifacts); the
+    # server would read it unconditionally and die at config load, so the variant must be dropped with a reason.
     v = _variant("gemm", envs={"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": str(tmp_path / "nope.csv")})
-    reason = gr.ungrounded_env_file_reason(v.extra_envs)
+    reason = gr.unserveable_env_file_reason(v.extra_envs)
     assert reason and "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE" in reason
     assert str(tmp_path / "nope.csv") in reason
 
 
-def test_ungrounded_env_file_reason_passes_authored_file(tmp_path) -> None:
+def test_unserveable_env_file_reason_passes_authored_file(tmp_path) -> None:
     csv = tmp_path / "tuned.csv"
     csv.write_text("gfx,M,N,K,splitK\ngfx950,64,5120,5120,2\n", encoding="utf-8")
     v = _variant("gemm", envs={"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": str(csv)})
-    assert gr.ungrounded_env_file_reason(v.extra_envs) is None
+    assert gr.unserveable_env_file_reason(v.extra_envs) is None
 
 
-def test_ungrounded_env_file_reason_accepts_colon_joined_existing_files(tmp_path) -> None:
+def test_unserveable_env_file_reason_accepts_colon_joined_existing_files(tmp_path) -> None:
     # A set AITER_CONFIG_* is aiter's SET form: a `:`-joined list, each element loaded (csvs_aiter_will_load).
     # Both files on disk is a valid variant and must not be dropped.
     a = tmp_path / "t.csv"
@@ -90,25 +90,25 @@ def test_ungrounded_env_file_reason_accepts_colon_joined_existing_files(tmp_path
     b = tmp_path / "t2.csv"
     b.write_text("gfx,M,N,K\ngfx950,4,5,6\n", encoding="utf-8")
     v = _variant("gemm", envs={"AITER_CONFIG_GEMM_BF16": f"{a}:{b}"})
-    assert gr.ungrounded_env_file_reason(v.extra_envs) is None
+    assert gr.unserveable_env_file_reason(v.extra_envs) is None
 
 
-def test_ungrounded_env_file_reason_keeps_colon_joined_list_with_one_element_left(tmp_path) -> None:
+def test_unserveable_env_file_reason_keeps_colon_joined_list_with_one_element_left(tmp_path) -> None:
     # aiter merges a `:`-joined list element by element and skips the ones it cannot read, so a list that has lost
     # an element still boots on the elements that are left: a thinner merge, not a dead server.
     a = tmp_path / "t.csv"
     a.write_text("gfx,M,N,K\ngfx950,1,2,3\n", encoding="utf-8")
     missing = str(tmp_path / "never_authored.csv")
     v = _variant("gemm", envs={"AITER_CONFIG_GEMM_BF16": f"{missing}:{a}"})
-    assert gr.ungrounded_env_file_reason(v.extra_envs) is None
+    assert gr.unserveable_env_file_reason(v.extra_envs) is None
 
 
-def test_ungrounded_env_file_reason_drops_colon_joined_list_with_nothing_left(tmp_path) -> None:
+def test_unserveable_env_file_reason_drops_colon_joined_list_with_nothing_left(tmp_path) -> None:
     # Nothing in the list is readable, so aiter's merge raises FileNotFoundError and the server never serves.
     first = str(tmp_path / "gone.csv")
     second = str(tmp_path / "also_gone.csv")
     v = _variant("gemm", envs={"AITER_CONFIG_GEMM_BF16": f"{first}:{second}"})
-    reason = gr.ungrounded_env_file_reason(v.extra_envs)
+    reason = gr.unserveable_env_file_reason(v.extra_envs)
     assert reason and first in reason and second in reason
 
 
@@ -132,7 +132,7 @@ def _aiter_merge_raises(file_path: str) -> bool:
 
 
 @pytest.mark.parametrize("present", [(), (0,), (1,), (0, 1)])
-def test_ungrounded_env_file_reason_matches_aiter_merge(tmp_path, present) -> None:
+def test_unserveable_env_file_reason_matches_aiter_merge(tmp_path, present) -> None:
     # The preflight refuses exactly the values aiter's loader cannot survive -- no wider, or a grid loses variants
     # that would have served.
     paths = []
@@ -142,29 +142,29 @@ def test_ungrounded_env_file_reason_matches_aiter_merge(tmp_path, present) -> No
             csv.write_text("gfx,M,N,K\ngfx950,1,2,3\n", encoding="utf-8")
         paths.append(str(csv))
     value = ":".join(paths)
-    refused = gr.ungrounded_env_file_reason({"AITER_CONFIG_GEMM_BF16": value}) is not None
+    refused = gr.unserveable_env_file_reason({"AITER_CONFIG_GEMM_BF16": value}) is not None
     assert refused is _aiter_merge_raises(value)
 
 
-def test_ungrounded_env_file_reason_treats_an_unreadable_path_as_missing(monkeypatch) -> None:
+def test_unserveable_env_file_reason_treats_an_unreadable_path_as_missing(monkeypatch) -> None:
     # An unreadable parent or an overlong name makes Path.is_file() raise; the variant is dropped, the grid runs on.
     def raise_eacces(self):
         raise PermissionError(13, "Permission denied")
 
     monkeypatch.setattr(gr.Path, "is_file", raise_eacces)
     v = _variant("gemm", envs={"AITER_CONFIG_GEMM_BF16": "/root/private/tuned.csv"})
-    reason = gr.ungrounded_env_file_reason(v.extra_envs)
+    reason = gr.unserveable_env_file_reason(v.extra_envs)
     assert reason and "/root/private/tuned.csv" in reason
 
 
 def test_run_grid_fast_fail_drops_a_variant_whose_config_file_is_missing(tmp_path, monkeypatch) -> None:
-    # The backstop of the admission check: run_grid's fast-fail drops it before boot, whatever the framework.
+    # The launch-side backstop: run_grid's fast-fail drops it before boot, whatever the framework.
     monkeypatch.setenv("FRAMEWORK", "sglang")
     v = _variant("gemm", envs={"AITER_CONFIG_GEMM_BF16": str(tmp_path / "never_written.csv")})
     assert "AITER_CONFIG_GEMM_BF16" in (gr.unsupported_capability_reason(v) or "")
 
 
-def test_ungrounded_env_file_reason_noop_without_config_envs(tmp_path) -> None:
+def test_unserveable_env_file_reason_noop_without_config_envs(tmp_path) -> None:
     # Non-file envs (even under aiter-ish prefixes like the JSON-payload AITER_CONFIG) must stay untouched.
     v = _variant(
         "plain",
@@ -174,7 +174,7 @@ def test_ungrounded_env_file_reason_noop_without_config_envs(tmp_path) -> None:
             "AITER_CONFIG_GEMM_A8W8": "",
         },
     )
-    assert gr.ungrounded_env_file_reason(v.extra_envs) is None
+    assert gr.unserveable_env_file_reason(v.extra_envs) is None
 
 
 # -- unsupported_capability_reason (env-flag build probe) -----------------

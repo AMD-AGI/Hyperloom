@@ -961,8 +961,13 @@ def drop_env_ungrounded_proposals(payload: dict[str, Any]) -> list[str]:
 
     The patch gate grounds what a proposal changes; this grounds the files its envs make the server read. A proposal
     premised on an artifact some later step would write ("author the CSV, then point the env at it") is refused here,
-    where the orchestrator hears why, rather than benched as a config arm whose server dies at config load.
-    ``run_grid`` keeps the same check as the backstop.
+    where the orchestrator hears why, rather than benched as a config arm whose result stands for a table nothing
+    wrote. Every element of a ``:``-joined list must be on disk, including the ones listed beside a table that is:
+    an agent asking for one table it has not authored is asking for the same unwritten artifact (#1982).
+
+    ``run_grid``'s preflight asks the other question of the same values -- whether the server boots, which for a
+    list is "is any element loadable" (``unserveable_env_file_reason``), the rule aiter's loader actually follows.
+    It is the backstop for values no proposal carried, such as a replayed recipe's refs resolved onto this run.
     """
     proposals = payload.get("proposal_set")
     if not isinstance(proposals, list):

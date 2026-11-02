@@ -503,11 +503,41 @@ def _is_file(path: str) -> bool:
 
 
 def ungrounded_env_file_reason(envs: Mapping[str, object] | None) -> str | None:
-    """Return why ``envs`` cannot be served if one names only config files that do not exist, else ``None``.
+    """Return why ``envs`` names a config file that is not on disk, else ``None`` -- the admission rule.
 
     Grounds file-like env values the way patch targets are grounded: a proposal may point a config env at an
-    artifact only a later (possibly rejected) authoring step would create, and the server would die at config load.
-    The check is existence-only; anything already on disk (a promoted, durable artifact) passes.
+    artifact only a later (possibly rejected) authoring step would create, so the arm would be benched, and its
+    result recorded, against a table nothing ever wrote. The check is existence-only; anything already on disk (a
+    promoted, durable artifact) passes. A set value is a ``:``-joined list of paths (see ``csvs_aiter_will_load``),
+    and every non-empty element must exist, not only one of them: an element no stage has authored is ungrounded
+    whatever its neighbours are (#1982).
+
+    This is deliberately stricter than what the serving stack survives; for a value its producer already grounded,
+    ``unserveable_env_file_reason`` asks the launch-side question instead.
+    """
+    for raw_key, raw_value in (envs or {}).items():
+        key = str(raw_key or "").strip().upper()
+        value = str(raw_value or "").strip()
+        if not is_file_referencing_env_name(key) or not value:
+            continue
+        missing = [p for p in env_file_list_elements(value) if not _is_file(p)]
+        if missing:
+            joined = ENV_FILE_LIST_SEP.join(missing)
+            return (
+                f"{key} points at {value}, whose element(s) {joined} do not exist; a config env may only name "
+                "tables that are on disk now. Point it at a file a stage wrote (the gemm_tuning action writes "
+                "tuned-GEMM CSVs) or leave it unset to use the default config table."
+            )
+    return None
+
+
+def unserveable_env_file_reason(envs: Mapping[str, object] | None) -> str | None:
+    """Return why ``envs`` cannot be served, if one names only config files that do not exist, else ``None``.
+
+    The launch-side rule, for values whose producer already grounded them -- a replayed warm recipe carries refs
+    that are resolved against this run's artifacts before the grid sees them, so what reaches here is a value that
+    was grounded once, not a proposal asking for a table to be written later (that is
+    ``ungrounded_env_file_reason``'s question, asked at admission).
 
     A set value is a ``:``-joined list of paths (see ``csvs_aiter_will_load``), and aiter's own loader merges that
     list element by element: it logs ``path <n>: <p> (not exist)`` for an element it cannot read, keeps going, and
@@ -856,5 +886,6 @@ __all__ = [
     "scrub_benchmark_process_env",
     "scrub_child_process_env",
     "ungrounded_env_file_reason",
+    "unserveable_env_file_reason",
     "valid_env_key",
 ]

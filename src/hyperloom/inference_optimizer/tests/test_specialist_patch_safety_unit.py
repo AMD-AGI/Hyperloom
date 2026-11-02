@@ -213,6 +213,24 @@ def test_a_proposal_pointing_an_env_at_an_unwritten_file_is_dropped_at_admission
     assert ps.drop_env_ungrounded_proposals({"proposal_set": "not a list"}) == []
 
 
+def test_a_proposal_listing_one_unwritten_table_beside_a_written_one_is_still_dropped(tmp_path):
+    """The same two-step proposal, written as a `:`-joined list: the server would boot on the table that is there,
+    but the arm would still be benched -- and its result recorded -- for a merge the missing table never joined."""
+    written = tmp_path / "tuned.csv"
+    written.write_text("gfx,M,N,K\n", encoding="utf-8")
+    missing = str(tmp_path / "aiter_configs" / "never_written.csv")
+    payload = {
+        "proposal_set": [
+            {"name": "two-table", "extra_envs": {"AITER_CONFIG_GEMM_BF16": f"{written}:{missing}"}},
+            {"name": "both-written", "extra_envs": {"AITER_CONFIG_GEMM_BF16": f"{written}:{written}"}},
+        ]
+    }
+    dropped = ps.drop_env_ungrounded_proposals(payload)
+    assert [p["name"] for p in payload["proposal_set"]] == ["both-written"]
+    assert len(dropped) == 1 and dropped[0].startswith("proposal 'two-table': ")
+    assert missing in dropped[0]
+
+
 def test_admit_payload_books_the_gate_and_reports_the_env_drops(tmp_path):
     missing = str(tmp_path / "never_written.csv")
     payload = {
