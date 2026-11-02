@@ -10,11 +10,10 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from hyperloom_common.coerce import first_str
-from hyperloom_common.io import JsonFormat, atomic_write_json
 from hyperloom_common.timeutil import now_iso
 
 from ._io_utils import append_log
-from ._run_status import RunStatus
+from ._run_status import RunStatus, new_run_meta, note_step
 from .analysis_route import AnalysisRoute
 
 
@@ -32,36 +31,6 @@ class AnalysisRun(NamedTuple):
     run_status: RunStatus
     trace_health_warnings: list[dict[str, Any]]
     run_meta: dict[str, Any]
-
-    def note_step(
-        self,
-        step_id: str,
-        *,
-        category: str,
-        status: str,
-        skip_reason: str | None = None,
-        **detail: Any,
-    ) -> None:
-        """Append one step to the run's ladder.
-
-        Args:
-            step_id: Stable step name.
-            category: Ladder phase (``preflight`` / ``install`` / ``split`` /
-                ``select`` / ``analyze`` / ``emit``).
-            status: ``ok`` / ``failed`` / ``skipped``.
-            skip_reason: Why the step did not run, when skipped.
-            **detail: Measured values for the step.
-        """
-        self.run_meta["steps"].append(
-            {
-                "step_id": step_id,
-                "order": len(self.run_meta["steps"]) + 1,
-                "category": category,
-                "status": status,
-                "skip_reason": skip_reason,
-                "detail": detail,
-            }
-        )
 
 
 def start_run(args: argparse.Namespace, route: AnalysisRoute) -> AnalysisRun:
@@ -85,13 +54,7 @@ def start_run(args: argparse.Namespace, route: AnalysisRoute) -> AnalysisRun:
     # reaching the CLI log. The caller records it on the SBD V6 roofline event as
     # the run happens, so "which file was analysed, how was the steady-state
     # window picked, which gate refused" survives without re-reading the log.
-    run_meta: dict[str, Any] = {
-        "preflight": {},
-        "split": {},
-        "selection": {},
-        "steps": [],
-        "route_ext": {},
-    }
+    run_meta = new_run_meta()
     return AnalysisRun(
         args=args,
         route=route,
@@ -110,7 +73,7 @@ def start_run(args: argparse.Namespace, route: AnalysisRoute) -> AnalysisRun:
 def finish_run(
     run: AnalysisRun, trace_input_type: str, candidates: list[dict[str, Any]], orchestrator_mode: str
 ) -> None:
-    """Record the emit step and session state, mark the run succeeded and print its result JSON."""
+    """Record the emit step, mark the run succeeded and print its result JSON."""
     artifacts = run.artifacts
     # Surface the contracted ``analysis.md`` exit path alongside hot_kernels.
     analysis_report_path = first_str(artifacts.get("tracelens_agent_report"), artifacts.get("trace_report_path"))
@@ -132,24 +95,13 @@ def finish_run(
         # What this run saw and decided, for the caller's timeline event.
         "run_meta": run.run_meta,
     }
-    run.note_step(
+    note_step(
+        run.run_meta,
         "extract_hot_kernels",
         category="emit",
         status="ok",
         hot_kernel_count=len(candidates),
         orchestrator_mode=orchestrator_mode,
-    )
-    atomic_write_json(
-        run.run_dir / "session_state.json",
-        {
-            "session_id": run.session_id,
-            "last_tool": "tracelens_analysis",
-            "last_run_id": run.run_id,
-            "updated_at": now_iso(timespec="auto"),
-            "model_name": run.args.model_name,
-            "framework": run.args.framework,
-        },
-        fmt=JsonFormat(trailing_newline=True),
     )
     run.run_status.write(
         state="succeeded",

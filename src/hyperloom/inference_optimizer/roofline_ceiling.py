@@ -10,7 +10,7 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, Mapping, NamedTuple
 
 from hyperloom_common.checkpoint_quant import WeightDeclaration, weight_declarations
 from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
@@ -31,6 +31,12 @@ _PRECISION_TAGS: dict[str, tuple[str, ...]] = {
     "fp32": ("fp32", "float32"),
 }
 
+
+def _with_precision_aliases(peaks: Mapping[str, float]) -> dict[str, float]:
+    """*peaks*, keyed by precision, under every tag :data:`_PRECISION_TAGS` reads that precision as."""
+    return {alias: tflops for tag, tflops in peaks.items() for alias in _PRECISION_TAGS[tag]}
+
+
 #: GPU per-chip peak specs (keys match ``SharedState.gpu_type``, lowercase).
 #: ``hbm_bw_gbps`` is vendor peak; ``peak_tflops`` is DENSE peak (missing key
 #: ⇒ 0.0 falls back to T_mem).
@@ -38,7 +44,7 @@ HW_SPECS: dict[str, dict[str, Any]] = {
     product: {
         "hbm_gb": board.hbm_gb,
         "hbm_bw_gbps": board.hbm_bw_gbps,
-        "peak_tflops": board.vendor_peaks_by_tag(_PRECISION_TAGS),
+        "peak_tflops": _with_precision_aliases(board.vendor_peak_tflops),
     }
     for product, board in AMD_GPU_BOARDS.items()
     if board.hbm_bw_gbps is not None
@@ -1020,42 +1026,11 @@ def compute_roofline_breakdown_from_state(
 
 # TraceLens PerfModel per-op (bottom-up) roofline breakdown.
 
-#: Max-achievable (sustained) TFLOPS from TraceLens arch JSON files (same HBM
-#: bandwidth as HW_SPECS, empirically-measured max throughput instead of vendor
-#: dense TFLOPS).
-_MI300X_ACHIEVABLE_TFLOPS: dict[str, float] = {
-    "bf16": 708.0,
-    "bfloat16": 708.0,
-    "fp16": 654.0,
-    "float16": 654.0,
-    "fp8": 1273.0,
-    "float8_e4m3fn": 1273.0,
-    "float8_e5m2": 1273.0,
-    "fp32": 163.0,
-    "float32": 163.0,
-}
-_MI325X_ACHIEVABLE_TFLOPS: dict[str, float] = {
-    "bf16": 843.0,
-    "bfloat16": 843.0,
-    "fp16": 794.0,
-    "float16": 794.0,
-    "fp8": 1519.0,
-    "float8_e4m3fn": 1519.0,
-    "float8_e5m2": 1519.0,
-    "fp32": 194.0,
-    "float32": 194.0,
-}
+#: Max-achievable (sustained) TFLOPS from TraceLens arch JSON files: measured max throughput instead of vendor dense
+#: TFLOPS. Only the peaks; bandwidth and capacity always come from HW_SPECS, the board rows.
 HW_SPECS_ACHIEVABLE: dict[str, dict[str, Any]] = {
-    "mi300x": {
-        "hbm_bw_gbps": 5300.0,
-        "hbm_gb": 192.0,
-        "peak_tflops": _MI300X_ACHIEVABLE_TFLOPS,
-    },
-    "mi325x": {
-        "hbm_bw_gbps": 6000.0,
-        "hbm_gb": 256.0,
-        "peak_tflops": _MI325X_ACHIEVABLE_TFLOPS,
-    },
+    "mi300x": {"peak_tflops": _with_precision_aliases({"bf16": 708.0, "fp16": 654.0, "fp8": 1273.0, "fp32": 163.0})},
+    "mi325x": {"peak_tflops": _with_precision_aliases({"bf16": 843.0, "fp16": 794.0, "fp8": 1519.0, "fp32": 194.0})},
 }
 
 
@@ -1196,7 +1171,7 @@ def compute_roofline_from_perfmodel(
 ) -> "PerfModelBreakdown | None":
     """Bottom-up decode + prefill roofline using inlined GEMM/SDPA formulas."""
     gpu_key = (target.gpu_type or "").strip().lower()
-    spec = HW_SPECS_ACHIEVABLE.get(gpu_key) or HW_SPECS.get(gpu_key)
+    spec = HW_SPECS.get(gpu_key)
     if spec is None:
         return None
 
