@@ -11,9 +11,14 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from kernelforge.workflows.rewrite_controller import operator_directory_name
+from kernelforge.workflows.rewrite_controller import (
+    PATCH_FILENAME,
+    PUBLICATION_FILENAME,
+    PUBLICATION_SCHEMA_VERSION,
+    REPORT_FILENAME,
+    operator_directory_name,
+)
 
-PUBLICATION_SCHEMA_VERSION = 2
 _COMMIT_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _IDENTITY_FIELDS = (
     "producer",
@@ -43,20 +48,6 @@ class ControllerPatchPublication:
     report_path: Path
     publication_path: Path
     changed_files: tuple[str, ...] = ()
-
-
-def discover_controller_patch_dirs(patches_root: str | Path) -> tuple[Path, ...]:
-    """Return complete operator directories in deterministic filename order."""
-    root = Path(patches_root).expanduser().resolve()
-    if not root.is_dir():
-        return ()
-    complete = []
-    for entry in sorted(root.iterdir(), key=lambda path: path.name):
-        if entry.name.startswith(".") or not entry.is_dir():
-            continue
-        if all((entry / name).is_file() for name in ("change.patch", "report.md", "publication.json")):
-            complete.append(entry)
-    return tuple(complete)
 
 
 def _relative_path(value: Any, field_name: str) -> str:
@@ -103,9 +94,9 @@ def load_controller_publication(patch_dir: str | Path) -> ControllerPatchPublica
     root = Path(patch_dir).expanduser()
     if not root.is_dir():
         raise ControllerPublicationError(f"patch directory does not exist: {root}")
-    patch_path = root / "change.patch"
-    report_path = root / "report.md"
-    publication_path = root / "publication.json"
+    patch_path = root / PATCH_FILENAME
+    report_path = root / REPORT_FILENAME
+    publication_path = root / PUBLICATION_FILENAME
     for path in (patch_path, report_path, publication_path):
         if not path.is_file() or path.is_symlink():
             raise ControllerPublicationError(f"publication artifact must be a regular file: {path}")
@@ -156,9 +147,7 @@ def load_controller_publication(patch_dir: str | Path) -> ControllerPatchPublica
 
 
 __all__ = [
-    "PUBLICATION_SCHEMA_VERSION",
     "ControllerPatchPublication",
     "ControllerPublicationError",
-    "discover_controller_patch_dirs",
     "load_controller_publication",
 ]

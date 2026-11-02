@@ -18,6 +18,9 @@ from .runner import AttemptContext, RunOneAttemptFn, attempt_ended, run_one_atte
 
 # Upstream git URL for the Quark repo; quoted in the quark_root_missing error so operators know where to clone from.
 DEFAULT_QUARK_GIT_URL = "https://github.com/amd/Quark.git"
+_QUARK_ROOT_HINT = (
+    f"set $QUARK_ROOT or pass options=QuantSkillRunOptions(quark_root=...); clone from {DEFAULT_QUARK_GIT_URL}"
+)
 
 
 @dataclass(frozen=True)
@@ -29,6 +32,17 @@ class QuantSkillRunResult:
     assessment: Assessment
     # The directory this run's attempts wrote into; None when the run failed before it started.
     run_dir: Path | None = None
+
+
+@dataclass(frozen=True)
+class QuantSkillRunOptions:
+    """Operator settings of one :func:`quantize_via_prompt` run."""
+
+    quark_root: str | os.PathLike | None = None
+    interactive: bool | None = None
+    acceptable_eval_gap: float | None = None
+    max_requantize_attempts: int = 1
+    model: str | None = None
 
 
 _RUNS_DIR = "runs"
@@ -192,11 +206,7 @@ async def quantize_via_prompt(
     prompt: str,
     *,
     workspace: str | os.PathLike,
-    quark_root: str | os.PathLike | None = None,
-    interactive: bool | None = None,
-    acceptable_eval_gap: float | None = None,
-    max_requantize_attempts: int = 1,
-    model: str | None = None,
+    options: QuantSkillRunOptions = QuantSkillRunOptions(),
     runner_fn: RunOneAttemptFn | None = None,
     log: Callable[[str], None] | None = None,
 ) -> QuantSkillRunResult:
@@ -204,24 +214,23 @@ async def quantize_via_prompt(
     workspace_path = Path(workspace).resolve()
     workspace_path.mkdir(parents=True, exist_ok=True)
 
-    if quark_root is None:
-        quark_root = os.environ.get("QUARK_ROOT")
+    quark_root = os.environ.get("QUARK_ROOT") if options.quark_root is None else options.quark_root
     if not quark_root:
         return _build_failed_bootstrap_result(
             workspace_path,
             OutcomeId.quark_root_missing,
-            f"quark_root is not configured; set $QUARK_ROOT or pass quark_root= (clone from {DEFAULT_QUARK_GIT_URL})",
+            f"quark_root is not configured ({_QUARK_ROOT_HINT})",
         )
     quark_root_path = Path(quark_root).expanduser()
     if not quark_root_path.is_dir():
         return _build_failed_bootstrap_result(
             workspace_path,
             OutcomeId.quark_root_missing,
-            f"quark_root path does not exist or is not a directory: {quark_root_path} "
-            f"(set $QUARK_ROOT or pass quark_root=; clone from {DEFAULT_QUARK_GIT_URL})",
+            f"quark_root path does not exist or is not a directory: {quark_root_path} ({_QUARK_ROOT_HINT})",
         )
 
-    interactive_resolved = _resolve_interactive(interactive)
+    interactive_resolved = _resolve_interactive(options.interactive)
+    max_attempts = options.max_requantize_attempts
     run_attempt: RunOneAttemptFn = runner_fn or run_one_attempt
     run_dir = _new_run_dir(workspace_path)
 
@@ -236,11 +245,11 @@ async def quantize_via_prompt(
             workspace=run_dir,
             quark_root=quark_root_path,
             attempt_number=attempt_n,
-            acceptable_eval_gap=acceptable_eval_gap,
+            acceptable_eval_gap=options.acceptable_eval_gap,
             interactive=interactive_resolved,
             previous_outcome=last_outcome.value if isinstance(last_outcome, OutcomeId) else None,
         )
-        outcome = await _run_and_classify(attempt, run_attempt, model=model, log=log)
+        outcome = await _run_and_classify(attempt, run_attempt, model=options.model, log=log)
         attempts_list.append(outcome)
         last_outcome = outcome
 
@@ -248,7 +257,7 @@ async def quantize_via_prompt(
             outcome,
             fix_hypothesis=_fix_hypothesis_path(run_dir, attempt_n),
             interactive=interactive_resolved,
-            max_requantize_attempts=max_requantize_attempts,
+            max_requantize_attempts=max_attempts,
             counter=attempt_n - 1,
         )
         if decision.note:
@@ -261,7 +270,7 @@ async def quantize_via_prompt(
             break
 
         if log:
-            log(f"quantization-agent: retrying after outcome={outcome} (retry {attempt_n}/{max_requantize_attempts})")
+            log(f"quantization-agent: retrying after outcome={outcome} (retry {attempt_n}/{max_attempts})")
         attempt_n += 1
 
     artifacts = collect_artifacts(run_dir)
@@ -302,6 +311,7 @@ def _build_failed_bootstrap_result(
 
 
 __all__ = [
+    "QuantSkillRunOptions",
     "QuantSkillRunResult",
     "quantize_via_prompt",
 ]

@@ -16,8 +16,9 @@ from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
-from hyperloom.orchestrator.loop.sub_agent_runner import RunnerLinks, SubAgentRunner
-from hyperloom.orchestrator.policy.gate import PolicyDenied, PolicyGate
+from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
+from hyperloom.orchestrator.policy.denial import PolicyDenied
+from hyperloom.orchestrator.policy.gate import PolicyGate
 from hyperloom.orchestrator.policy.projection import ResourceFacts
 from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
@@ -75,7 +76,6 @@ def _gate(tmp_path: Path, monkeypatch) -> tuple[PolicyGate, Path]:
         role_registry=default_role_registry(),
         session_dir=sd,
         shared_state=state,
-        strict_paths=True,
         resources=ResourceFacts(),
     )
     return gate, sd
@@ -108,10 +108,12 @@ def _runner_with_policy(tmp_path: Path, monkeypatch, *, shared_state: object | N
         role_registry=default_role_registry(),
         session_dir=sd,
         shared_state=state,
-        strict_paths=True,
         resources=ResourceFacts(),
     )
-    return SubAgentRunner(locks, tasks, session_dir=sd, links=RunnerLinks(shared_state=state, policy=gate))
+    sub = SubAgentRunner(locks, tasks, session_dir=sd)
+    sub.shared_state = state
+    sub.policy = gate
+    return sub
 
 
 @pytest.mark.asyncio
@@ -549,9 +551,10 @@ async def test_dispatched_integrate_patch_resume_with_persisted_verdict_passes(t
         role_registry=default_role_registry(),
         session_dir=sd,
         shared_state=resumed_state,
-        strict_paths=True,
     )
-    sub = SubAgentRunner(locks2, tasks2, session_dir=sd, links=RunnerLinks(shared_state=resumed_state, policy=gate))
+    sub = SubAgentRunner(locks2, tasks2, session_dir=sd)
+    sub.shared_state = resumed_state
+    sub.policy = gate
     executed = {"ran": False}
 
     async def _stub(_ctx) -> dict:
@@ -741,7 +744,7 @@ async def test_runner_without_policy_skips_dispatch_validation(tmp_path, monkeyp
     db = SqliteConnection(tmp_path / "coord.db")
     locks = SqliteLeaseBackend(db)
     tasks = TaskRegistry(db)
-    sub = SubAgentRunner(locks, tasks, session_dir=sd, links=RunnerLinks(policy=None))
+    sub = SubAgentRunner(locks, tasks, session_dir=sd)
     executed = {"ran": False}
 
     async def _stub(_ctx) -> dict:

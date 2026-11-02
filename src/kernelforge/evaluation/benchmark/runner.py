@@ -24,6 +24,10 @@ from kernelforge.utils.process_group import kill_process_group
 # instead of its whole suite.
 SWEEP_CASE_FLAG = "--bench-case"
 
+# Warmup and timed iterations of one sweep point unless the operator asks for others.
+SWEEP_WARMUP_ITERS = 3
+SWEEP_BENCH_ITERS = 20
+
 # How case selection actually resolved for one sweep point.
 SELECTION_NARROWED = "narrowed"
 SELECTION_WHOLE_SUITE = "whole_suite"
@@ -584,11 +588,9 @@ def _sweep_caveats(whole_suite: str, consumption: dict[str, str], samples: list[
 
 async def sweep_case(
     *,
-    driver_script: str,
+    bench: BenchRun,
     case_id: str,
     constants: dict[str, Any] | None = None,
-    warmup_iters: int = 3,
-    bench_iters: int = 20,
     timeout_sec: int = 120,
     prefix_constants: bool = True,
 ) -> dict:
@@ -603,7 +605,7 @@ async def sweep_case(
     described = ", ".join(f"{k}={v}" for k, v in exported.items()) or "no overrides"
     point_failure = partial(_sweep_failure, case_id=case, constants=exported)
 
-    base_cmd = bench_command(BenchRun(driver_script, warmup_iters=warmup_iters, bench_iters=bench_iters))
+    base_cmd = bench_command(bench)
     memo_key = _case_flag_memo_key(base_cmd)
     rejected_before = _CASE_FLAG_REJECTED.get(memo_key, False)
     cmd = list(base_cmd) if rejected_before else base_cmd + [SWEEP_CASE_FLAG, case]
@@ -649,8 +651,8 @@ async def sweep_case(
         "narrowed": narrowed,
         "case_selection": SELECTION_NARROWED if selected else SELECTION_WHOLE_SUITE,
         "override_consumption": consumption,
-        "warmup_iters": warmup_iters,
-        "bench_iters": bench_iters,
+        "warmup_iters": bench.warmup_iters,
+        "bench_iters": bench.bench_iters,
         **(
             {"n_samples": len(samples), "wall_min_ms": round(min(samples), 6), "wall_max_ms": round(max(samples), 6)}
             if spread
@@ -695,8 +697,8 @@ def _sweep_cli(argv: list[str] | None = None) -> int:
             "HIP_VISIBLE_DEVICES, ...) is refused"
         ),
     )
-    parser.add_argument("--warmup", type=int, default=3)
-    parser.add_argument("--iters", type=int, default=20)
+    parser.add_argument("--warmup", type=int, default=SWEEP_WARMUP_ITERS)
+    parser.add_argument("--iters", type=int, default=SWEEP_BENCH_ITERS)
     parser.add_argument("--timeout", type=int, default=120)
     args = parser.parse_args(argv)
 
@@ -710,11 +712,9 @@ def _sweep_cli(argv: list[str] | None = None) -> int:
 
     result = asyncio.run(
         sweep_case(
-            driver_script=args.driver,
+            bench=BenchRun(args.driver, warmup_iters=args.warmup, bench_iters=args.iters),
             case_id=args.case,
             constants=constants,
-            warmup_iters=args.warmup,
-            bench_iters=args.iters,
             timeout_sec=args.timeout,
             prefix_constants=not args.verbatim_names,
         )

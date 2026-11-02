@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from kernelforge.workflows.rewrite_controller.paths import operator_directory_name
+from kernelforge.workflows.rewrite_controller.paths import ControllerLayout, operator_directory_name
 from hyperloom.common.perf_metric import VERDICT_KEEP, GradedComparison
 from hyperloom.inference_optimizer.breakdown.recorder import stack_event
 from hyperloom.inference_optimizer.breakdown.recorder.assembler import event_parts
@@ -170,7 +170,7 @@ def test_patch_directories_follow_controller_task_priority(tmp_path: Path, monke
     alphabetical = tuple(root / name for name in ("first", "second", "third"))
     priorities = {"first": 2, "second": 0, "third": 1}
 
-    monkeypatch.setattr(integration, "discover_controller_patch_dirs", lambda _root: alphabetical)
+    monkeypatch.setattr(integration, "published_operator_dirs", lambda _layout: alphabetical)
     monkeypatch.setattr(
         integration,
         "load_task",
@@ -179,7 +179,7 @@ def test_patch_directories_follow_controller_task_priority(tmp_path: Path, monke
         ),
     )
 
-    ordered = integration._priority_ordered_patch_dirs(root)
+    ordered = integration._priority_ordered_patch_dirs(ControllerLayout(tmp_path / "cycle"))
     assert [path.name for path in ordered] == ["second", "third", "first"]
 
 

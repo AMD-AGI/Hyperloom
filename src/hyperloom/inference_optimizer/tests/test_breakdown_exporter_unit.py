@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.common.timeutil import iso_z
+from hyperloom_common.timeutil import iso_z
 from hyperloom.inference_optimizer.breakdown import exporter as ex
 from hyperloom.inference_optimizer.breakdown.collectors import sessions
 from hyperloom.inference_optimizer.trace import decision_trace

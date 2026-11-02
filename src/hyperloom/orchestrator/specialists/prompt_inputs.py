@@ -138,6 +138,7 @@ class SpecialistPromptInputs:
     # Run-status snapshot for §0 MANDATE; 0/[] = absent (section renders gracefully).
     baseline_tput: float = 0.0
     current_tput: float = 0.0
+    current_launch_args: str = ""
     cumulative_gain_validated: float = 0.0
     keep_threshold_pct: float = 0.0
     applied_stack: list[dict[str, Any]] = field(default_factory=list)

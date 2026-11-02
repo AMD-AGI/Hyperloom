@@ -9,7 +9,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from hyperloom.common.env import env_flag
+from hyperloom_common.env import env_flag
 from hyperloom.common.env_safety import scrub_benchmark_process_env
 from hyperloom.common.visible_devices import hip_mask_within_rocr
 

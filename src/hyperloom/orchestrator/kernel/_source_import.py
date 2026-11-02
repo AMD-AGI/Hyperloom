@@ -12,23 +12,6 @@ from typing import Any, NamedTuple
 from .kernel_decisions import _honest_flag
 
 
-_RUNTIME_GENERATED_SOURCE_MARKERS = (  # nosec B108 - marker strings, not filesystem writes.
-    "/tmp/torchinductor",
-    "/torchinductor_",
-    "/.cache/torch/inductor",
-    "/.triton/cache",
-    "/triton/cache",
-)
-
-_COMPILE_GENERATED_NAME_MARKERS = (
-    "triton_poi_",
-    "triton_red_",
-    "triton_tem_",
-    "torchinductor",
-    "inductor",
-)
-
-
 def _confirm_source_imported(source_file: str, workspace: str | Path | None) -> bool | None:
     """Best-effort confirm the patched source was actually imported/compiled.
 

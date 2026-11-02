@@ -252,8 +252,8 @@ Fusion lane:
 | Variable | Purpose |
 |---|---|
 | `HYPERLOOM_SKIP_FUSION` | Truthy disables the fusion lane before any other gate is evaluated |
-| `FORGE_FUSION_TIMEOUT` | Wrapper timeout in seconds (default 7200 = 2h); a payload `timeout` / `timeout_sec` wins over it |
-| `FORGE_FUSION_MAX_TURNS` | Agent turn cap for one fusion run (default 100); a payload `max_turns` wins over it |
+| `FORGE_FUSION_TIMEOUT` | Wrapper timeout in seconds; unset, the fusion lane's share of the phase, else 7200 (2h) |
+| `FORGE_FUSION_MAX_TURNS` | Agent turn cap for one fusion run (default 100) |
 
 Collective candidate extraction:
 

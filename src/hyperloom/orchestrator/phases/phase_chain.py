@@ -175,14 +175,9 @@ PHASE_HUMAN_LABELS: dict[str, str] = {
 LIFECYCLE_STEP_LABELS: dict[str, str] = {
     "roofline": "TraceLens",
     "trace_analyze": "TraceLens",
-    "run_gemm_tuning": "GEMM tuning",
-    "run_optimization": "GEAK",
     "integrate": "Integrate",
     "apply_patch": "Integrate",
-    "explore": "Validate (bench on the stack)",
-    "sweep": "Concurrency sweep",
     "report": "Report",
-    "session_breakdown": "Report (session breakdown)",
 }
 
 
@@ -203,21 +198,19 @@ class LifecycleMark:
 
     step: str
     status: str
-    phase: str | None = None
-    label: str | None = None
     artifacts: dict[str, str] | None = None
     detail: str = ""
     duration_s: float | None = None
 
 
-def make_lifecycle_event(mark: LifecycleMark, *, seq: int, ts: str) -> dict[str, Any]:
+def make_lifecycle_event(mark: LifecycleMark, *, phase: str, seq: int, ts: str) -> dict[str, Any]:
     """Construct a canonical lifecycle event row."""
     event: dict[str, Any] = {
         "seq": int(seq),
         "ts": ts,
-        "phase": (mark.phase or "").strip().upper(),
+        "phase": (phase or "").strip().upper(),
         "step": (mark.step or "").strip(),
-        "label": (mark.label or lifecycle_label(mark.step)),
+        "label": lifecycle_label(mark.step),
         "status": (mark.status or "").strip().upper(),
         "detail": (mark.detail or "").strip(),
         "artifacts": {str(k): str(v) for k, v in (mark.artifacts or {}).items() if v not in (None, "")},

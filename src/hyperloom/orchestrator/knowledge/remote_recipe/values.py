@@ -14,9 +14,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Collection, Final, Mapping
 
-from hyperloom.common.coerce import to_float
+from hyperloom_common.coerce import to_float
 
-from hyperloom.common.coerce import first_text, optional_positive_int
+from hyperloom_common.coerce import first_text, optional_positive_int
 from hyperloom.common.env_safety import (
     ENV_FILE_LIST_SEP,
     env_file_list_elements,

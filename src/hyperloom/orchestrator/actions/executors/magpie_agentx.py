@@ -16,7 +16,7 @@ from typing import AbstractSet, Any, Mapping
 import yaml
 
 from hyperloom.common.benchmark_config import is_magpie_agentx
-from hyperloom.common.unified_diff import touched_paths
+from hyperloom_common.unified_diff import touched_paths
 from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
 
 

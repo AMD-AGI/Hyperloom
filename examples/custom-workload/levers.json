@@ -1,0 +1,8 @@
+[
+  {"name": "workers_2", "extra_envs": {"EXAMPLE_WORKERS": "2"}},
+  {"name": "workers_4", "extra_envs": {"EXAMPLE_WORKERS": "4"}},
+  {"name": "workers_8", "extra_envs": {"EXAMPLE_WORKERS": "8"}},
+  {"name": "chunk_25k", "extra_envs": {"EXAMPLE_CHUNK": "25000"}},
+  {"name": "chunk_400k", "extra_envs": {"EXAMPLE_CHUNK": "400000"}},
+  {"name": "workers_4_chunk_25k", "extra_envs": {"EXAMPLE_WORKERS": "4", "EXAMPLE_CHUNK": "25000"}}
+]

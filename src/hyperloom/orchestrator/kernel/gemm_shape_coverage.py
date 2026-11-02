@@ -10,7 +10,7 @@ import re
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from hyperloom.common.env import is_truthy
+from hyperloom_common.env import is_truthy
 from kernelforge.workflows.gemm_tune import moe_tuple
 
 # Emitted by aiter on every tuned-config lookup miss, naming the table consulted.

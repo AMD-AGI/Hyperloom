@@ -16,9 +16,13 @@ from kernelforge.evaluation.benchmark.runner import (
     SELECTION_NARROWED,
     SELECTION_REJECTED,
     SELECTION_WHOLE_SUITE,
+    SWEEP_BENCH_ITERS,
     SWEEP_CASE_FLAG,
     SWEEP_ENV_PREFIX,
+    SWEEP_WARMUP_ITERS,
+    BenchRun,
     _CASE_FLAG_REJECTED,
+    _sweep_cli,
     aggregate_benchmark_measurements,
     calculate_measurement_case_speedups,
     sweep_case,
@@ -41,7 +45,8 @@ def _driver(tmp_path: pathlib.Path, body: str) -> str:
 
 def _sweep(driver: str, **kwargs) -> dict:
     kwargs.setdefault("case_id", "sq64")
-    return asyncio.run(sweep_case(driver_script=driver, **kwargs))
+    bench = BenchRun(driver, warmup_iters=SWEEP_WARMUP_ITERS, bench_iters=SWEEP_BENCH_ITERS)
+    return asyncio.run(sweep_case(bench=bench, **kwargs))
 
 
 # A driver that honours the flag: one case in, that case's lines out.
@@ -129,6 +134,18 @@ def test_narrowed_sweep_reports_one_case_as_exploratory(tmp_path):
     assert result["n_samples"] == 2
     assert result["wall_max_ms"] > result["wall_min_ms"]
     assert "EXPLORATORY, NOT AN ACCEPTANCE RESULT" in result["message"]
+
+
+def test_the_sweep_command_times_the_point_at_its_default_iterations(tmp_path, capsys):
+    argv_file = tmp_path / "argv.txt"
+    driver = _driver(
+        tmp_path,
+        f"import sys\nopen({str(argv_file)!r}, 'w').write(' '.join(sys.argv[1:]))\nprint('case_ms: sq64 0.500000')\n",
+    )
+
+    assert _sweep_cli(["--driver", driver, "--case", "sq64"]) == 0
+    assert argv_file.read_text() == "--warmup 3 --iters 20 --bench-mode --bench-case sq64"
+    assert capsys.readouterr().out.startswith("SWEEP (EXPLORATORY, NOT AN ACCEPTANCE RESULT): sq64 = 0.500000 ms at")
 
 
 def test_constants_reach_the_driver_under_the_sweep_prefix(tmp_path):

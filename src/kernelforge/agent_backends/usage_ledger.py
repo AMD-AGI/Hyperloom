@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from kernelforge.utils.durable_io import atomic_write_text
+from hyperloom_common.io import DURABLE, atomic_write_text
 from kernelforge.agent_backends.usage import combine_usage_totals
 
 log = logging.getLogger(__name__)
@@ -75,7 +75,7 @@ class UsageLedgerFile:
             try:
                 merged = combine_usage_totals(self._current(), delta)
                 merged["updated_at"] = datetime.now().isoformat()
-                atomic_write_text(self.path, json.dumps(merged, indent=2))
+                atomic_write_text(self.path, json.dumps(merged, indent=2), options=DURABLE)
             finally:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
         self._published = dict(totals)

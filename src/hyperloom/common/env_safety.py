@@ -13,9 +13,9 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, MutableMapping, Sequence
-from hyperloom.common.env import env_str
-from hyperloom.common.git_safety import trusted_admin_dir
-from hyperloom.common.fs_utils import rewrite_lines_nofollow
+from hyperloom_common.env import env_str
+from hyperloom_common.git_safety import trusted_admin_dir
+from hyperloom_common.fs_utils import rewrite_lines_nofollow
 
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 
@@ -81,6 +81,7 @@ BENCHMARK_SECRET_ENV_NAMES: frozenset[str] = frozenset(
         "CLAW_API_KEY",
         "DEEPSEEK_API_KEY",
         "GEAK_API_KEY",
+        "KB_STORE_TOKEN",
         "LLM_API_KEY",
         "LLM_GATEWAY_KEY",
         "LLM_PROXY_API_KEY",
@@ -165,7 +166,7 @@ DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "CLAUDE_MODEL",
         "CODEX_MODEL",
         # Retired provider variables, still readable so a pre-migration .env can be normalized by
-        # hyperloom.common.llm_config.deepseek_compat_env.
+        # hyperloom_common.llm.llm_config.deepseek_compat_env.
         "DEEPSEEK_API_KEY",
         "DEEPSEEK_BASE_URL",
         "DEEPSEEK_MODEL",
@@ -570,6 +571,8 @@ def scrub_benchmark_process_env(env: dict[str, str]) -> dict[str, str]:
     scrub_child_process_env(env)
     for name in BENCHMARK_SECRET_ENV_NAMES:
         env.pop(name, None)
+    # The --extra-env blob repeats every pin's value, credentials included; each pin is also exported by name.
+    env.pop(OPERATOR_EXTRA_ENV_VAR, None)
     return env
 
 
@@ -594,7 +597,7 @@ def redact_file_in_place(path: os.PathLike[str] | str, *, mode: int = 0o600) -> 
 
     The file sits in a directory a less-privileged account may write, so the
     redacted copy is staged and moved without following any link there
-    (:func:`hyperloom.common.fs_utils.rewrite_lines_nofollow`). A failure
+    (:func:`hyperloom_common.fs_utils.rewrite_lines_nofollow`). A failure
     leaves the file as it was.
     """
     try:

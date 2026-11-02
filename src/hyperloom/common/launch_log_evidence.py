@@ -447,6 +447,8 @@ _LAUNCH_RECORDS: dict[str, _LaunchRecord] = {
         identity_rejects_unreadable_values=False,
     ),
 }
+#: Frameworks whose launch record the readers here parse.
+LAUNCH_RECORD_FRAMEWORKS = frozenset(_LAUNCH_RECORDS)
 
 
 def _is_inside_string_literal(text: str, index: int) -> bool:

@@ -39,7 +39,7 @@ The unmodified source remains the baseline. The example does not promise a
 speedup: vector addition may already be limited by memory or launch overhead.
 If no instruction candidate passes KEEP, Forge selects the source commit.
 
-Run `pytest -q src/kernelforge/tests/test_assembly_campaign_gpu.py` from the
+Run `pytest -q src/kernelforge/tests/kernel_backends/assembly/test_assembly_campaign_gpu.py` from the
 Hyperloom checkout for a finite, LLM-free capture/rebuild test, a deliberate
 add-to-subtract wrong-result test, and clean patch replay. The test requires
 gfx950 and skips when the GPU dependencies are unavailable.

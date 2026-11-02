@@ -13,7 +13,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.coerce import first_text, to_float, to_str_list
+from hyperloom_common.coerce import first_text, to_float, to_str_list
 from hyperloom.inference_optimizer import framework_paths
 
 from ...bringup import (
@@ -422,12 +422,7 @@ class EnablementGateMixin:
                     continue
                 patch_targets[patch_path] = ops
                 targets.setdefault(patch_root, {}).update(ops)
-        for declared_root, ops in keep_records.declared_targets(
-            framework_root=root,
-            upserted=(),
-            deleted=(),
-            artifacts=stack_artifacts,
-        ).items():
+        for declared_root, ops in keep_records.declared_targets(framework_root=root, artifacts=stack_artifacts).items():
             targets.setdefault(declared_root, {}).update(ops)
         snapshots = keep_records.capture_root_snapshots(
             records=records,

@@ -35,7 +35,7 @@ from kernelforge.workflows.flydsl_rewrite.budget import DEFAULT_REWRITE_BUDGET
 from kernelforge.workflows.flydsl_rewrite.measurement import FlydslMeasurement
 from kernelforge.workflows.flydsl_rewrite.protocol import validate_applyback_manifest
 from kernelforge.workflows.flydsl_rewrite.spec import RewriteSpec
-from kernelforge.utils.durable_io import atomic_write_json, atomic_write_text
+from hyperloom_common.io import DURABLE, JsonFormat, atomic_write_json, atomic_write_text
 from kernelforge.agent_backends.usage import UsageAccumulator
 
 log = logging.getLogger(__name__)
@@ -507,10 +507,12 @@ def _snapshot_failure(
     _git(worktree, "add", "-A", "--", ".")
     partial = _git(worktree, "diff", "--cached", "--binary", "--", ".")
     status = _git(worktree, "status", "--short")
-    atomic_write_text(root / "partial.patch", partial.stdout or "")
-    atomic_write_text(root / "status.txt", status.stdout or "")
-    atomic_write_text(root / "error.txt", error + "\n")
-    atomic_write_json(root / "progress.json", {"events": progress_log})
+    atomic_write_text(root / "partial.patch", partial.stdout or "", options=DURABLE)
+    atomic_write_text(root / "status.txt", status.stdout or "", options=DURABLE)
+    atomic_write_text(root / "error.txt", error + "\n", options=DURABLE)
+    atomic_write_json(
+        root / "progress.json", {"events": progress_log}, fmt=JsonFormat(trailing_newline=True), options=DURABLE
+    )
     return str(root)
 
 
@@ -561,7 +563,7 @@ def _collect_patch(spec: RewriteSpec, worktree: Path, patch_path: Path, base_com
         ".",
     ).stdout
     changed_files = [path for path in names_raw.split("\0") if path]
-    atomic_write_text(patch_path, patch)
+    atomic_write_text(patch_path, patch, options=DURABLE)
 
     # Verify against the pristine base, not against the agent's already-modified worktree.
     reset = _git(worktree, "reset", "--hard", base_commit)
@@ -653,11 +655,12 @@ def _publish_patch(
         )
     )
     try:
-        atomic_write_text(temporary / "forge.patch", collected.patch)
+        atomic_write_text(temporary / "forge.patch", collected.patch, options=DURABLE)
         atomic_write_text(
             temporary / "validation.txt",
             "Standalone FlyDSL reference passed the rewrite correctness gate.\n"
             "Framework integration validation is intentionally pending in Hyperloom.\n",
+            options=DURABLE,
         )
         atomic_write_json(
             temporary / "benchmark.json",
@@ -665,8 +668,12 @@ def _publish_patch(
                 "source_ms": measurement.source_ms,
                 "flydsl_best_ms": measurement.flydsl_ms,
             },
+            fmt=JsonFormat(trailing_newline=True),
+            options=DURABLE,
         )
-        atomic_write_json(temporary / "publication.json", manifest)
+        atomic_write_json(
+            temporary / "publication.json", manifest, fmt=JsonFormat(trailing_newline=True), options=DURABLE
+        )
         files_root = temporary / "files"
         files_root.mkdir(parents=True, exist_ok=True)
         for relative in changed_files:
@@ -687,8 +694,8 @@ def _publish_patch(
 
     # The bundle is complete on disk before either pointer becomes readable, so a hard kill can only leave the
     # previous publication or nothing at all.
-    atomic_write_json(manifest_path, manifest)
-    atomic_write_json(result_path, manifest)
+    atomic_write_json(manifest_path, manifest, fmt=JsonFormat(trailing_newline=True), options=DURABLE)
+    atomic_write_json(result_path, manifest, fmt=JsonFormat(trailing_newline=True), options=DURABLE)
     return (
         str(version / "forge.patch"),
         str(manifest_path),

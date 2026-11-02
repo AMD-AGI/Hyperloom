@@ -12,9 +12,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
-from hyperloom.common import llm_config
-from hyperloom.common.env import env_bool, env_flag
-from hyperloom.common.reasoning_effort import (
+from hyperloom_common.llm import llm_config
+from hyperloom_common.env import env_bool, env_flag
+from hyperloom_common.llm.reasoning_effort import (
     DEFAULT_REASONING_EFFORT,
     REASONING_EFFORT_LEVELS,
     normalize_reasoning_effort,
@@ -28,7 +28,7 @@ def resolve_agent_model(agent_backend: str) -> str:
     Forge ships inside Hyperloom, so an operator configuring a box learns one
     vocabulary for the decision. There is exactly one rung, and it is the
     platform's: ``CLAUDE_MODEL`` / ``CODEX_MODEL`` / ``DSH_MODEL``, the same
-    variables :func:`hyperloom.common.llm_config.resolve_forge_llm_model` reads.
+    variables :func:`hyperloom_common.llm.llm_config.resolve_forge_llm_model` reads.
     The first two are written out separately rather than sharing one helper
     because they answer different questions -- that one picks the model for
     Hyperloom's own calls into a Forge campaign, this one picks the model an

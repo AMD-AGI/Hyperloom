@@ -28,7 +28,7 @@ from kernelforge.workflows.forge_loop.search.search_policy import (
     SEARCH_MODE_EXPLOIT,
     SEARCH_MODES,
 )
-from kernelforge.utils.durable_io import atomic_write_text
+from hyperloom_common.io import DURABLE, atomic_write_text
 
 log = logging.getLogger(__name__)
 
@@ -724,6 +724,7 @@ class LoopStateStore:
             atomic_write_text(
                 self.state_path,
                 json.dumps(state.to_dict(), indent=2, sort_keys=True),
+                options=DURABLE,
             )
         except (OSError, TypeError, ValueError) as e:
             self._mark_degraded(f"save {self.state_path}", e)

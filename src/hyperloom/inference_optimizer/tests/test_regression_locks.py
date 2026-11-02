@@ -111,7 +111,7 @@ async def test_trace_analyze_caches_result_to_shared_state(session_dir, monkeypa
             payload={
                 "target_agent": "kernel_agent",
                 "kind": "trace_analyze",
-                "params": {"trace_input": "/tmp/trace-A.json.gz"},
+                "params": {"trace_input": str(session_dir / "trace-A.json.gz")},
             },
         )
         await c.router.handle_intent("orchestration", intent)
@@ -119,7 +119,7 @@ async def test_trace_analyze_caches_result_to_shared_state(session_dir, monkeypa
 
         assert call_count["n"] == 1, "second identical request must hit the cache"
         cached = c.shared_state.last_trace_analyze
-        assert cached["trace_input"] == "/tmp/trace-A.json.gz"
+        assert cached["trace_input"] == str(session_dir / "trace-A.json.gz")
         assert cached["candidates_path"] == str(candidates_path)
         assert cached["hot_kernels_top15"][0]["kernel_id"] == "k001"
         assert "k001" in cached["reusable_native_kernel_ids"]
@@ -131,7 +131,7 @@ async def test_trace_analyze_caches_result_to_shared_state(session_dir, monkeypa
                 payload={
                     "target_agent": "kernel_agent",
                     "kind": "trace_analyze",
-                    "params": {"trace_input": "/tmp/trace-B.json.gz"},
+                    "params": {"trace_input": str(session_dir / "trace-B.json.gz")},
                 },
             ),
         )
@@ -252,7 +252,11 @@ async def test_request_response_visible_in_next_prompt(session_dir, monkeypatch)
     monkeypatch.setitem(krh.KERNEL_REQUEST_HANDLERS, "trace_analyze", fake_handler)
     request = Intent(
         type=IntentType.REQUEST,
-        payload={"target_agent": "kernel_agent", "kind": "trace_analyze", "params": {"trace_input": "/t.json"}},
+        payload={
+            "target_agent": "kernel_agent",
+            "kind": "trace_analyze",
+            "params": {"trace_input": str(session_dir / "t.json")},
+        },
     )
     c = Coordinator(session_dir, backends=_orchestration_turn(MockTurn(intents=[request])))
     try:
@@ -391,7 +395,7 @@ async def test_integrate_deferred_when_lanes_busy(session_dir, monkeypatch):
                 payload={
                     "target_agent": "kernel_agent",
                     "kind": "integrate",
-                    "patch_path": "/tmp/fake.patch",
+                    "patch_path": str(session_dir / "fake.patch"),
                 },
             ),
         )

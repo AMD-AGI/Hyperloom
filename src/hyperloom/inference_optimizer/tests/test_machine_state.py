@@ -240,6 +240,6 @@ def test_a_failing_marker_record_propagates_after_the_history_row_is_appended(mo
     state = SimpleNamespace(phase="kernel_agent", macro_cycle=0, phase_history=[])
 
     with pytest.raises(RuntimeError, match="marker bug"):
-        ps.append_phase_history_event(state, reason="arm_dropped", evidence={"k": 1}, ts="t", ts_unix=1.0)
+        ps.append_phase_history_event(state, reason="arm_dropped", evidence={"k": 1})
 
     assert [row["reason"] for row in state.phase_history] == ["arm_dropped"]

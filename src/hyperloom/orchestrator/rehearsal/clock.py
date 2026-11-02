@@ -33,17 +33,11 @@ class VirtualClock:
         self._elapsed = 0.0
         self._start_monotonic = float(start_monotonic)
         self._start_wall = float(start_wall)
-        self._marks: list[tuple[float, str]] = []
 
     @property
     def elapsed(self) -> float:
         """float: Seconds charged to this clock since it was created."""
         return self._elapsed
-
-    @property
-    def marks(self) -> tuple[tuple[float, str], ...]:
-        """tuple: ``(elapsed, label)`` for every :meth:`mark`, in order."""
-        return tuple(self._marks)
 
     @property
     def installed(self) -> bool:
@@ -69,21 +63,6 @@ class VirtualClock:
         """
         self._elapsed += max(0.0, float(seconds))
         return self.monotonic()
-
-    def mark(self, label: str) -> None:
-        """Record that ``label`` happened at the current reading."""
-        self._marks.append((self._elapsed, label))
-
-    def deadline_in(self, seconds: float) -> float:
-        """Return the monotonic instant ``seconds`` from now.
-
-        Args:
-            seconds: How far ahead the deadline sits.
-
-        Returns:
-            float: An absolute reading suitable for ``session_deadline_sec``.
-        """
-        return self.monotonic() + float(seconds)
 
     async def sleep(self, seconds: float, real_sleep: Callable[..., Awaitable[Any]]) -> None:
         """Advance the clock instead of waiting.
