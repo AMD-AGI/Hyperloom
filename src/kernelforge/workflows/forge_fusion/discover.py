@@ -1286,6 +1286,7 @@ def registered_agent_llm_fn(
         started_at = clock()
         last_error = ""
         last_kind = API_ERROR
+        last_exc: Exception | None = None
         progress: list[str] = []
         for attempt in range(1, max(1, resolved_attempts) + 1):
             spec = AgentRunSpec(
@@ -1336,13 +1337,13 @@ def registered_agent_llm_fn(
                 last_error = (
                     f"{backend.name} returned no final text" if not text else f"{backend.name} ended with {end_reason}"
                 )
-                last_kind = API_ERROR
+                last_kind, last_exc = API_ERROR, None
             except DiscoverySafetyError:
                 raise
             except Exception as exc:
                 if is_agent_safety_error(exc):
                     raise DiscoverySafetyError("discovery Agent safety violation: " + str(exc)) from exc
-                last_kind = classify_llm_error(exc)
+                last_kind, last_exc = classify_llm_error(exc), exc
                 last_error = f"{type(exc).__name__}: {str(exc)[:240]}"
                 if last_kind not in RETRYABLE_KINDS:
                     raise LlmUnavailableError(
@@ -1355,6 +1356,7 @@ def registered_agent_llm_fn(
                 attempt,
                 max(1, resolved_attempts),
                 last_error,
+                exc_info=last_exc,
             )
             if attempt >= max(1, resolved_attempts):
                 break
@@ -1367,7 +1369,7 @@ def registered_agent_llm_fn(
                     f"(deadline {resolved_deadline:.0f}s): {last_error}",
                     kind=last_kind,
                     attempts=attempt,
-                )
+                ) from last_exc
             pause(
                 retry_delay(
                     attempt,
@@ -1380,7 +1382,7 @@ def registered_agent_llm_fn(
             f"discovery Agent produced no usable answer in {max(1, resolved_attempts)} attempt(s): {last_error}",
             kind=last_kind,
             attempts=max(1, resolved_attempts),
-        )
+        ) from last_exc
 
     return _fn
 

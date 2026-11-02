@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -65,12 +66,12 @@ def _publish_warm_start(run: _ForgeRun, warm: dict) -> dict:
                 flush=True,
             )
         print("  [warm-start] published recoverable best before iteration 1", flush=True)
-    except Exception as error:  # noqa: BLE001 - translated into a rollback below
+    except (OSError, subprocess.SubprocessError, ValueError) as error:
         try:
             rollback_unpublished_warm_start(
                 workspace_dir, base_commit=run.campaign.base_commit, result_json=result_json
             )
-        except Exception as rollback_error:
+        except (OSError, subprocess.SubprocessError, RuntimeError) as rollback_error:
             raise ForgeLoopError(
                 f"failed to publish validated warm-start and could not restore pristine workspace: {rollback_error}"
             ) from rollback_error

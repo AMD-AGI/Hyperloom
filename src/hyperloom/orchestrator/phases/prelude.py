@@ -57,6 +57,7 @@ from ..loop.time_budget import (
     measured_baseline_runtime_sec,
 )
 from ..collaborator import CoordinatorCollaborator
+from ..knowledge.remote_recipe import KBStoreError
 from .warm_replay_stack import (
     commit_warm_replay_overlays,
     committing_overlays,
@@ -368,7 +369,7 @@ class PreludePhase(_WarmKernelPrepMixin, CoordinatorCollaborator):
                 if current_remote
                 else await self._prepare_warm_kernel_kb()
             )
-        except Exception as exc:  # isolation boundary: the warm-kernel preparation, recorded as the kernel outcome
+        except (KBStoreError, OSError, ValueError) as exc:
             log.warning("PRELUDE: warm-kernel preparation failed", exc_info=True)
             kernel = {"status": "error", "errors": 1, "reason": f"{type(exc).__name__}: {exc}"[:300]}
         if self._refused_dirty_warm_kernel(kernel):

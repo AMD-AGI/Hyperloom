@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
+import subprocess
 import threading
 import uuid
 from collections.abc import Iterator
@@ -43,7 +45,9 @@ from kernelforge.agent_backends.base import (
     AgentRunSpec,
     AgentRuntimeConfig,
 )
-from kernelforge.agent_backends.workspace_guard import WorkspaceGuard
+from kernelforge.agent_backends.workspace_guard import WorkspaceGuard, WorkspaceSafetyError
+
+log = logging.getLogger(__name__)
 
 
 class DeepSeekHarnessBackendError(AgentProviderError):
@@ -389,8 +393,10 @@ class DeepSeekHarnessBackend:
         except Exception:
             # verify() restores the baseline itself before raising a rejection, so this second call only covers the
             # paths that fail before it gets there.
-            with contextlib.suppress(Exception):  # broad-suppress: rollback must not shadow the verify error
+            try:
                 guard.rollback()
+            except (WorkspaceSafetyError, OSError, subprocess.SubprocessError):
+                log.warning("workspace rollback after a failed verify also failed", exc_info=True)
             raise
         result.file_changes = actual_changes
         result.target_edit_count = guard.count_target_edits()
