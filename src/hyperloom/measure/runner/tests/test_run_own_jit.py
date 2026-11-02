@@ -16,6 +16,7 @@ import json
 import os
 from pathlib import Path
 
+import pytest
 import yaml
 
 from hyperloom.measure import local
@@ -41,6 +42,7 @@ from hyperloom.measure.runner.tests.test_run_jit_variables import FLAG, VARIABLE
 from hyperloom.measure.socket import TestCall
 
 BUILT = b"\x7fELF built by the test"
+PREWARMED = b"\x7fELF built once by the launch preflight"
 WANTED = ("module_gemm", "module_other", "module_new")
 
 
@@ -199,3 +201,23 @@ def test_a_farm_with_no_cache_leaves_out_the_module_a_build_variable_makes_stale
 
 def _aiter_package_root(rig: Rig):
     return lambda run: [rig.root(run, "aiter", "ops/mha.py", b"X = 2\n")]
+
+
+@pytest.mark.parametrize("cache", [False, True], ids=["own-directory", "cache-directory"])
+@pytest.mark.parametrize("touched", [False, True], ids=["untouched", "touched-by-its-table"])
+def test_a_module_built_once_into_the_image_is_linked_by_a_later_test_it_does_not_touch(
+    image, monkeypatch, cache: bool, touched: bool
+) -> None:
+    """The launch preflight moved ``module_gemm`` aside and built it once into the image's ``aiter/jit``, replacing the
+    file in place (board #169). A test that starts after links it, unless its own table touches it."""
+    image_module = image.bases / "aiter" / "jit" / "module_gemm.so"
+    image_module.unlink()
+    installing = image_module.with_name(".module_gemm.so.prewarm")
+    installing.write_bytes(PREWARMED)
+    os.replace(installing, image_module)
+    sheet = _deliver(image, _by_variable(TEST_TABLE)) if touched else _arm(image)
+
+    server, _ = _run(image, monkeypatch, "after", sheet, cache=cache)
+
+    assert server.found["module_gemm"] is not touched
+    assert server.held["module_gemm.so"] == ((False, BUILT) if touched else (True, PREWARMED))
