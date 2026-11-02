@@ -56,6 +56,24 @@ class PartitionAnswer(AgentAnswer):
     cross_cutting_move: CrossCuttingMoveAnswer
 
 
+class AssignedLaneGroundAnswer(LaneGroundAnswer):
+    """One lane of a round whose lanes are already decided: the ground serving its assignment, or why none can."""
+
+    unplannable: str = Field(
+        description=(
+            "Why the supplied evidence cannot serve this lane's assignment at all, with its ground left empty; empty "
+            "when the lane is planned."
+        )
+    )
+
+
+class AssignedPartitionAnswer(AgentAnswer):
+    """How a round whose lanes are already decided gives each one, in order, the ground that serves its assignment."""
+
+    lanes: list[AssignedLaneGroundAnswer]
+    cross_cutting_move: CrossCuttingMoveAnswer
+
+
 def dispatch_answer_model(role_ids: tuple[str, ...], case_ids: tuple[str, ...]) -> type[AgentAnswer]:
     """The specialist assignments one round's dispatch asks for, naming only the roles registered and the cases scored."""
     assignment = create_model(

@@ -25,6 +25,12 @@ _LANE_TASK = (
     "analyses rather than copying them, and choose a clear "
     "implementation sequence."
 )
+_ASSIGNED_LANE_TASK = (
+    "Produce the optimization plan this lane's Implementer "
+    "should execute on the ground this lane owns, serving the "
+    "lane's assignment. Judge the analyses rather than copying "
+    "them, and choose a clear implementation sequence."
+)
 
 
 def lane_prompts(
@@ -32,9 +38,12 @@ def lane_prompts(
     specialists: SpecialistRound,
     grounds: Sequence[LaneGround],
 ) -> list[tuple[str, str]]:
-    """Each lane's prompt and the leading part of it that every lane of the round shares."""
+    """Each lane's prompt and the leading part of it that every lane of the round shares.
+
+    A lane of a round whose lanes are assigned also carries its own assignment, inside the block only it reads.
+    """
     evidence = {
-        "task": _LANE_TASK,
+        "task": _ASSIGNED_LANE_TASK if context.lane_assignments else _LANE_TASK,
         "context": context.to_prompt_dict(),
         "dispatch_plan": specialists.dispatch_plan.to_dict(),
         "specialist_coverage": dict(specialists.coverage),
@@ -53,6 +62,8 @@ def lane_prompts(
                 other.ground for position, other in enumerate(grounds) if position != index
             ],
         }
+        if context.lane_assignments:
+            lane["assignment"] = context.lane_assignments[own.lane_id - 1]
         prompts.append(lane_last_prompt({**evidence, LANE_KEY: lane}))
     return prompts
 

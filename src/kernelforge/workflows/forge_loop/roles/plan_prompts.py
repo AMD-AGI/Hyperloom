@@ -149,6 +149,18 @@ object containing the lane grounds. Do not use Markdown fences or add text
 outside the JSON object.
 """
 
+PARTITION_ASSIGNED_BLOCK = """\
+
+This round's lanes are already decided and listed in the payload under
+`lane_assignments`: lane k serves assignment k. Return exactly one lane per
+assignment, in that order, and do not merge, drop or add lanes; the
+instruction above to return fewer lanes does not apply to this round. Give
+each lane the ground that serves its assignment, still divided so that no two
+lanes would edit the same code. When the supplied evidence cannot serve an
+assignment at all, return its lane with an empty `ground` and say why in
+`unplannable`: that reason goes back to whoever made the assignment.
+"""
+
 PARTITION_CHALLENGER_BLOCK = """\
 
 The previous round's critic returned REPLACE: it judged that the route this
