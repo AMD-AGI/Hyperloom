@@ -22,11 +22,6 @@ writes while it runs for hours is restored before the tests that follow measure 
 process exits, removing its copy after, and logs as an error the commands still running then, whose later writes
 nothing restores.
 
-The toolbox patches the installed frameworks in place itself, with TraceLens's profiling patch, before it profiles
-(``hyperloom.orchestrator.actions.executors._server_patcher``). A changed or added file that is the copy with one of
-the patches under ``profile_patches`` (TraceLens's checkout) applied is that patch: it is kept and becomes the file's
-copy, so the next profile finds it applied; anything else written to the same file is restored to it.
-
 A check races the commands that write while it runs: a file or directory that disappears under it was removed
 meanwhile, and is left to the next check rather than ending this one before it restored the rest.
 
@@ -45,7 +40,6 @@ import shutil
 import stat
 import tempfile
 import threading
-import subprocess
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -59,9 +53,6 @@ _CACHE_SUFFIX = ".pyc"
 #: How often a guard checks while a command runs: a walk of vllm's directories costs a fraction of a second, and a test
 #: takes longer than this to lay its patches over the packages.
 PATROL_SECONDS = 5.0
-#: Where TraceLens keeps the patches the toolbox applies to the installed frameworks before it profiles.
-PATCH_TREE = ("examples", "custom_workflows", "inference_analysis")
-_TARGET_PREFIX = "+++ b/"
 
 
 class FrameworksUnguarded(RuntimeError):
@@ -135,67 +126,20 @@ class _Tree:
         return tree
 
 
-class ProfilePatches:
-    """The profiling patches under a TraceLens checkout at ``root``, read once, by the file each one changes or adds;
-    none when there is no checkout."""
-
-    def __init__(self, root: Path | None) -> None:
-        self._root = root
-        self._targets: dict[str, list[Path]] | None = None
-
-    def applied(self, package: str, rel: str, installed: Path, pristine: Path | None) -> bool:
-        """Whether ``installed``, the file at ``rel`` of the package named ``package``, is ``pristine`` (``None`` for a
-        file the package did not have) with a patch that changes it applied."""
-
-        for target, patches in self._read().items():
-            parts = target.split("/")
-            if package not in parts or "/".join(parts[parts.index(package) + 1 :]) != rel:
-                continue
-            if any(_patched(patch, target, pristine, installed) for patch in patches):
-                return True
-        return False
-
-    def _read(self) -> dict[str, list[Path]]:
-        if self._targets is None:
-            self._targets = {}
-            tree = None if self._root is None else self._root.joinpath(*PATCH_TREE)
-            for patch in sorted(tree.rglob("*.patch")) if tree is not None and tree.is_dir() else ():
-                for line in patch.read_text(encoding="utf-8", errors="replace").splitlines():
-                    if line.startswith(_TARGET_PREFIX):
-                        self._targets.setdefault(line[len(_TARGET_PREFIX) :].strip(), []).append(patch)
-        return self._targets
-
-
-def _patched(patch: Path, target: str, pristine: Path | None, installed: Path) -> bool:
-    """Whether ``patch``'s change to ``target`` turns ``pristine`` into ``installed``."""
-
-    with tempfile.TemporaryDirectory(prefix=PRISTINE_PREFIX) as scratch:
-        result = Path(scratch) / target
-        if pristine is not None:
-            result.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(pristine, result)
-        applied = subprocess.run(
-            ["git", "apply", f"--include={target}", str(patch)], cwd=scratch, capture_output=True, check=False
-        )
-        return applied.returncode == 0 and result.is_file() and filecmp.cmp(result, installed, shallow=False)
-
-
 @dataclass
 class _Baseline:
-    """``package`` as it was copied to ``pristine``: the stamp of each file and the directories, by relative path;
-    ``patches`` the profiling patches a file may carry and still be as installed."""
+    """``package`` as it was copied to ``pristine``: the stamp of each file and the directories, by relative path."""
 
     package: GuardedPackage
     pristine: Path
-    patches: ProfilePatches
     stamps: dict[str, _Stamp] = field(default_factory=dict)
     dirs: set[str] = field(default_factory=set)
 
     @classmethod
-    def take(cls, package: GuardedPackage, pristine: Path, patches: ProfilePatches) -> _Baseline:
+    def take(cls, package: GuardedPackage, pristine: Path) -> _Baseline:
         if not package.path.is_dir():
             raise FileNotFoundError(f"no package at {package.path}")
-        baseline = cls(package, pristine, patches)
+        baseline = cls(package, pristine)
         pristine.mkdir(parents=True)
         tree = _Tree.walk(package.path, package.generated)
         for rel in tree.dirs:
@@ -213,7 +157,7 @@ class _Baseline:
         tree = _Tree.walk(root, self.package.generated)
         found: list[str] = []
         for rel in sorted(set(tree.files) - self.stamps.keys()):
-            if not self._profiled(rel, None) and _gone(_remove, root / rel):
+            if _gone(_remove, root / rel):
                 found.append(f"added {root / rel}")
         for rel in sorted(set(tree.dirs) - self.dirs, reverse=True):
             if _gone(shutil.rmtree, root / rel):
@@ -223,7 +167,7 @@ class _Baseline:
             (root / rel).mkdir(parents=True, exist_ok=True)
         for rel, stamp in list(self.stamps.items()):
             how = self._differs(rel, stamp, rel in present)
-            if how is None or how == "changed" and self._profiled(rel, self.pristine / rel):
+            if how is None:
                 continue
             if not _gone(_copy, self.pristine / rel, root / rel):
                 if not os.path.lexists(self.pristine / rel):
@@ -232,24 +176,6 @@ class _Baseline:
             if how:
                 found.append(f"{how} {root / rel}")
         return found
-
-    def _profiled(self, rel: str, pristine: Path | None) -> bool:
-        """Keep the file at ``rel`` as its copy when it is ``pristine`` with a profiling patch applied."""
-
-        installed = self.package.path / rel
-        try:
-            if not self.patches.applied(self.package.name, rel, installed, pristine):
-                return False
-            _copy(installed, self.pristine / rel)
-            self.stamps[rel] = _stamp(installed)
-        except FileNotFoundError:
-            return False
-        parent = Path(rel).parent
-        while parent != Path("."):
-            self.dirs.add(parent.as_posix())
-            parent = parent.parent
-        logger.info("%s carries the toolbox's profiling patch, which is kept", installed)
-        return True
 
     def _differs(self, rel: str, stamp: _Stamp, present: bool) -> str | None:
         """How the file at ``rel`` differs from its copy: ``None`` when its stamp is the copy's, empty when only its
@@ -282,11 +208,9 @@ class FrameworkGuard:
         self,
         packages: tuple[GuardedPackage, ...],
         patrol_seconds: float = PATROL_SECONDS,
-        profile_patches: Path | None = None,
     ) -> None:
         self.packages = packages
         self.patrol_seconds = patrol_seconds
-        self._patches = ProfilePatches(profile_patches)
         self._baselines: list[_Baseline] | None = None
         self._lock = threading.Lock()
         self._tickets = itertools.count()
@@ -371,7 +295,7 @@ class FrameworkGuard:
         # atexit runs last what it was given first: the last check needs the copy.
         atexit.register(self._last_check)
         try:
-            baselines = [_Baseline.take(package, pristine / package.name, self._patches) for package in self.packages]
+            baselines = [_Baseline.take(package, pristine / package.name) for package in self.packages]
         except OSError as error:
             shutil.rmtree(pristine, ignore_errors=True)
             raise FrameworksUnguarded(f"the installed frameworks cannot be copied to {pristine}: {error}") from error
@@ -423,4 +347,4 @@ def _copy(source: Path, target: Path) -> None:
     os.replace(staged, target)
 
 
-__all__ = ["FrameworkGuard", "FrameworksUnguarded", "GuardedPackage", "ProfilePatches", "Restoration"]
+__all__ = ["FrameworkGuard", "FrameworksUnguarded", "GuardedPackage", "Restoration"]
