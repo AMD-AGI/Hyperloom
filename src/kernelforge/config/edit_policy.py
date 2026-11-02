@@ -54,10 +54,9 @@ PROTECTED_DIRS = frozenset(
 )
 
 # The authoritative measurement surface of a Forge workspace. The repository's own bookkeeping is not part of it, and
-# it moves on its own: git rewrites the index whenever a stat cache goes cold, which a build alone is enough to cause,
-# and the interpreter rewrites a module's bytecode cache whenever it imports it.
+# it moves on its own: git rewrites the index whenever a stat cache goes cold, which a build alone is enough to cause.
 FORGE_PROTECTED_PATHS = ProtectedPathRules(
     globs=PROTECTED_GLOBS,
     dirs=PROTECTED_DIRS,
-    unscanned_dirs=frozenset({".git", "__pycache__", FORGE_LOOP_OUTPUT_DIRNAME}),
+    unscanned_dirs=frozenset({".git", FORGE_LOOP_OUTPUT_DIRNAME}),
 )

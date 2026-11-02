@@ -87,24 +87,30 @@ def test_the_guard_protects_what_the_callers_rules_name_and_nothing_else(repo: P
     assert guard.verify() == ["config.yaml"]
 
 
-def test_forge_rules_leave_the_bytecode_cache_of_a_protected_dir_to_the_interpreter(repo: Path) -> None:
+def test_changed_bytecode_under_a_protected_dir_is_deleted_and_a_changed_source_still_reported(repo: Path) -> None:
     tests = repo / "test"
     tests.mkdir()
     (tests / "layer_ut_utils.py").write_text("VALUE = 1\n")
-    (repo / ".gitignore").write_text("__pycache__/\n")
+    (repo / ".gitignore").write_text("__pycache__/\n*.pyc\n")
     _git(repo, "add", ".")
     _git(repo, "commit", "-qm", "test sources")
     cache = tests / "__pycache__"
     cache.mkdir()
-    (cache / "layer_ut_utils.cpython-312.pyc").write_bytes(b"stale")
+    rewritten, untouched, created = (
+        cache / name
+        for name in ("layer_ut_utils.cpython-312.pyc", "helpers.cpython-312.pyc", "conftest.cpython-312.pyc")
+    )
+    rewritten.write_bytes(b"stale")
+    untouched.write_bytes(b"cached")
 
     guard = WorkspaceGuard(_writable(repo, FORGE_PROTECTED_PATHS))
     guard.prepare()
-    # Importing a module during the session rewrites its bytecode and compiles the ones not yet cached.
-    (cache / "layer_ut_utils.cpython-312.pyc").write_bytes(b"fresh")
-    (cache / "conftest.cpython-312.pyc").write_bytes(b"new")
+    rewritten.write_bytes(b"forged")
+    created.write_bytes(b"new")
 
     assert guard.verify() == []
+    assert not rewritten.exists() and not created.exists()
+    assert untouched.read_bytes() == b"cached"
 
     guard = WorkspaceGuard(_writable(repo, FORGE_PROTECTED_PATHS))
     guard.prepare()
@@ -113,3 +119,14 @@ def test_forge_rules_leave_the_bytecode_cache_of_a_protected_dir_to_the_interpre
     with pytest.raises(WorkspaceSafetyError, match="protected tracked files changed: test/layer_ut_utils.py"):
         guard.verify()
     assert (tests / "layer_ut_utils.py").read_text() == "VALUE = 1\n"
+
+    # Only the interpreter's cache is rebuilt from source; a .pyc beside the sources may be the module itself.
+    sourceless = tests / "legacy.pyc"
+    sourceless.write_bytes(b"module")
+    guard = WorkspaceGuard(_writable(repo, FORGE_PROTECTED_PATHS))
+    guard.prepare()
+    sourceless.write_bytes(b"forged")
+
+    with pytest.raises(WorkspaceSafetyError, match="protected ignored files changed: .*legacy.pyc"):
+        guard.verify()
+    assert sourceless.read_bytes() == b"module"
