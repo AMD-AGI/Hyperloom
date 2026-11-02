@@ -51,6 +51,8 @@ _log = logging.getLogger(__name__)
 
 DEFAULT_ALLOWED_TOOLS = ["Read", "Write", "Edit", "Bash", "Task"]
 _MAX_AGENT_TURNS = 300
+# How much of the agent's last reply a missing-report error quotes.
+_REPLY_EXCERPT_CHARS = 1000
 
 # The run config the TraceLens skill reads.
 RUN_CONFIG_NAME = "run.yaml"
@@ -712,7 +714,10 @@ def _skill_result(run: _SkillRun, *, runner: str, label: str, raw_text: str, err
     if not report_path.exists():
         if error:
             raise RuntimeError(f"TraceLens {label} runner failed before writing {report_path}: {error}")
-        raise RuntimeError(f"TraceLens {label} runner did not write {report_path}")
+        reply = raw_text.strip()[:_REPLY_EXCERPT_CHARS]
+        raise RuntimeError(
+            f"TraceLens {label} runner did not write {report_path}" + (f"; the agent replied: {reply}" if reply else "")
+        )
     artifact_paths = {"tracelens_agent_report": str(report_path), "tracelens_cmd_prefix": str(run.prefix_path)}
     if error:
         artifact_paths["tracelens_agent_sdk_error"] = error
