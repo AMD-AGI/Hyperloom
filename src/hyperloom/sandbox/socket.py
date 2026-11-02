@@ -144,17 +144,20 @@ class Sandbox(Protocol):
 
     sandbox_id: str
 
-    def info(self) -> SandboxInfo: ...
+    def info(self) -> SandboxInfo:
+        """Return the sandbox's id, template and metadata."""
 
-    def write_file(self, path: str, data: bytes) -> None: ...
+    def write_file(self, path: str, data: bytes) -> None:
+        """Write ``data`` to ``path``, creating its parent directories."""
 
-    def read_file(self, path: str) -> bytes: ...
+    def read_file(self, path: str) -> bytes:
+        """Return the contents of the file at ``path``."""
 
     def copy_out(self, path: str, dest: Path) -> int:
         """Stream a (possibly large) file to ``dest``; return the byte count."""
-        ...
 
-    def list_dir(self, path: str) -> list[str]: ...
+    def list_dir(self, path: str) -> list[str]:
+        """Return the entry names of the directory ``path``, sorted."""
 
     def run(
         self,
@@ -163,13 +166,14 @@ class Sandbox(Protocol):
         background: bool = False,
         settings: RunSettings = RunSettings(),
         sinks: OutputSinks = OutputSinks(),
-    ) -> CommandResult: ...
+    ) -> CommandResult:
+        """Run a shell command; a background one returns at once with exit code 0 and keeps running."""
 
-    def set_timeout(self, timeout_sec: int) -> None: ...
+    def set_timeout(self, timeout_sec: int) -> None:
+        """Restart the lifetime clock: the sandbox ends ``timeout_sec`` from now."""
 
     def kill(self) -> None:
         """End the sandbox and everything running in it; safe to call again."""
-        ...
 
 
 class SandboxProvider(Protocol):
@@ -185,8 +189,11 @@ class SandboxProvider(Protocol):
         timeout_sec: int,
         metadata: Mapping[str, str],
         options: CreateOptions = CreateOptions(),
-    ) -> Sandbox: ...
+    ) -> Sandbox:
+        """Create a sandbox from ``template`` for ``role``, tagged with ``metadata``, and wait until it runs."""
 
-    def connect(self, sandbox_id: str, *, role: Role) -> Sandbox: ...
+    def connect(self, sandbox_id: str, *, role: Role) -> Sandbox:
+        """Return a handle on the live sandbox ``sandbox_id`` that ``role`` created."""
 
-    def find(self, metadata: Mapping[str, str], *, role: Role) -> list[SandboxInfo]: ...
+    def find(self, metadata: Mapping[str, str], *, role: Role) -> list[SandboxInfo]:
+        """List the running sandboxes of ``role`` whose metadata contains every given pair."""
