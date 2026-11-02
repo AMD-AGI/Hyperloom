@@ -551,11 +551,11 @@ def main() -> int:
             # Bound outside the `with` on purpose.
             acct = TempBmcAccount()
             with acct:
+                if acct.password and acct.mint_errors:
+                    print(f"Note: {'; '.join(acct.mint_errors)}", file=sys.stderr)
                 if not acct.password:
                     no_access = acct.note
                 else:
-                    if acct.mint_errors:
-                        print(f"Note: {'; '.join(acct.mint_errors)}", file=sys.stderr)
                     attrs, _, err = redfish_bios(RedfishEndpoint(host, acct.user, acct.password, ctx))
     except KeyboardInterrupt:
         # SIGTERM and SIGINT arrive here as an exception precisely so the `with` above unwinds and revokes.

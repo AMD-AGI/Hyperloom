@@ -99,14 +99,19 @@ def _live_file_restored(path: str):
         # Stay in the ``finally`` without returning: a return here would swallow an exception from the body when there
         # was nothing to restore.
         if original is not None and target is not None:
-            try:
-                if target.read_bytes() != original:
-                    target.write_bytes(original)
-                    if mode is not None:
-                        os.chmod(target, mode)
-                    log.info("restored %s to its pre-run contents", path)
-            except OSError as exc:
-                log.error("FAILED to restore %s (%s): the install may be left modified", path, exc)
+            _restore_live_file(path, target, original, mode)
+
+
+def _restore_live_file(path: str, target: Path, original: bytes, mode: Optional[int]) -> None:
+    """Write ``original`` back to ``target`` when its contents changed, logging an ``OSError``."""
+    try:
+        if target.read_bytes() != original:
+            target.write_bytes(original)
+            if mode is not None:
+                os.chmod(target, mode)
+            log.info("restored %s to its pre-run contents", path)
+    except OSError as exc:
+        log.error("FAILED to restore %s (%s): the install may be left modified", path, exc)
 
 
 def _serving_arm(label: str, server: SmokeServer, load: DecodeLoad, out: Path) -> tuple[bool, str, dict]:

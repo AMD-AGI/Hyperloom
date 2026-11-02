@@ -232,6 +232,53 @@ def stream_ordered_kernels(
     return streams, total_kernel_us
 
 
+def _normalized_kernel_name(name: str) -> str:
+    """``name`` lower-cased with hex addresses, integers and whitespace runs collapsed."""
+    value = re.sub(r"0x[0-9a-f]+", "0x*", name.lower())
+    value = re.sub(r"\b\d+\b", "N", value)
+    return re.sub(r"\s+", " ", value).strip()[:160]
+
+
+def _record_boundary_segment(
+    aggregated: dict[tuple[tuple[str, str], ...], dict[str, Any]],
+    segment: list[dict[str, Any]],
+    max_chain_len: int,
+) -> None:
+    """Count one compute-anchored ``segment`` into ``aggregated`` when it holds a launch-bound kernel."""
+    if len(segment) < 2 or len(segment) > max_chain_len:
+        return
+    categories = [str(item["category"]) for item in segment]
+    if not any(category in LAUNCH_BOUND_CATEGORIES for category in categories):
+        return
+    key = tuple((str(item["category"]), _normalized_kernel_name(str(item["name"]))) for item in segment)
+    interior_count = max(0, len(segment) - 2)
+    if len(segment) == 3 and categories[0] == "gemm" and categories[1] in LAUNCH_BOUND_CATEGORIES:
+        boundary_kind = "epilogue"
+    elif categories[0] in COMPUTE_CATEGORIES:
+        boundary_kind = "compute_boundary"
+    else:
+        boundary_kind = "vertical"
+    # The trailing kernel is the NEXT compute anchor.
+    terminal_compute = categories[-1] if categories[-1] in COMPUTE_CATEGORIES else ""
+    fusable_categories = categories[1:-1] if terminal_compute else categories[1:]
+    row = aggregated.setdefault(
+        key,
+        {
+            "signature": " -> ".join(categories),
+            "categories": categories,
+            "fusable_categories": fusable_categories,
+            "terminal_compute": terminal_compute,
+            "kernels": [str(item["name"])[:200] for item in segment],
+            "count": 0,
+            "total_us": 0.0,
+            "boundary_kind": boundary_kind,
+            "launches_removed_upper_bound": max(1, interior_count),
+        },
+    )
+    row["count"] += 1
+    row["total_us"] += sum(float(item["dur"]) for item in segment)
+
+
 def ordered_fusion_boundaries_from_trace(
     trace_path: str | Path,
     *,
@@ -241,58 +288,17 @@ def ordered_fusion_boundaries_from_trace(
 ) -> list[dict[str, Any]]:
     """Recover repeated compute-to-compute fusion boundaries from stream order."""
     streams, total_kernel_us = stream_ordered_kernels(trace_path)
-
-    def normalized_name(name: str) -> str:
-        value = re.sub(r"0x[0-9a-f]+", "0x*", name.lower())
-        value = re.sub(r"\b\d+\b", "N", value)
-        return re.sub(r"\s+", " ", value).strip()[:160]
-
     aggregated: dict[tuple[tuple[str, str], ...], dict[str, Any]] = {}
-
-    def record(segment: list[dict[str, Any]]) -> None:
-        if len(segment) < 2 or len(segment) > max_chain_len:
-            return
-        categories = [str(item["category"]) for item in segment]
-        if not any(category in LAUNCH_BOUND_CATEGORIES for category in categories):
-            return
-        key = tuple((str(item["category"]), normalized_name(str(item["name"]))) for item in segment)
-        interior_count = max(0, len(segment) - 2)
-        if len(segment) == 3 and categories[0] == "gemm" and categories[1] in LAUNCH_BOUND_CATEGORIES:
-            boundary_kind = "epilogue"
-        elif categories[0] in COMPUTE_CATEGORIES:
-            boundary_kind = "compute_boundary"
-        else:
-            boundary_kind = "vertical"
-        # The trailing kernel is the NEXT compute anchor.
-        terminal_compute = categories[-1] if categories[-1] in COMPUTE_CATEGORIES else ""
-        fusable_categories = categories[1:-1] if terminal_compute else categories[1:]
-        row = aggregated.setdefault(
-            key,
-            {
-                "signature": " -> ".join(categories),
-                "categories": categories,
-                "fusable_categories": fusable_categories,
-                "terminal_compute": terminal_compute,
-                "kernels": [str(item["name"])[:200] for item in segment],
-                "count": 0,
-                "total_us": 0.0,
-                "boundary_kind": boundary_kind,
-                "launches_removed_upper_bound": max(1, interior_count),
-            },
-        )
-        row["count"] += 1
-        row["total_us"] += sum(float(item["dur"]) for item in segment)
-
     for ordered in streams.values():
         start_index: Optional[int] = None
         for index, event in enumerate(ordered):
             if event["category"] not in COMPUTE_CATEGORIES:
                 continue
             if start_index is not None:
-                record(ordered[start_index : index + 1])
+                _record_boundary_segment(aggregated, ordered[start_index : index + 1], max_chain_len)
             start_index = index
         if start_index is not None:
-            record(ordered[start_index:])
+            _record_boundary_segment(aggregated, ordered[start_index:], max_chain_len)
 
     rows: list[dict[str, Any]] = []
     for row in aggregated.values():
@@ -798,6 +804,15 @@ def build_discovery_prompt(
     )
 
 
+def _json_object(fragment: str) -> dict[str, Any] | None:
+    """``fragment`` parsed as JSON when it is an object, else None."""
+    with contextlib.suppress(json.JSONDecodeError, ValueError):
+        obj = json.loads(fragment)
+        if isinstance(obj, dict):
+            return obj
+    return None
+
+
 def _salvage_objects(text: str) -> list[dict[str, Any]]:
     """Recover every complete top-level ``{...}`` object from (possibly truncated) text, ignoring braces inside strings.
 
@@ -827,11 +842,9 @@ def _salvage_objects(text: str) -> list[dict[str, Any]]:
             depth += 1
         elif ch == "}" and depth > 0:
             depth -= 1
-            if depth == 0:
-                with contextlib.suppress(json.JSONDecodeError, ValueError):
-                    obj = json.loads(text[start : i + 1])
-                    if isinstance(obj, dict):
-                        out.append(obj)
+            obj = _json_object(text[start : i + 1]) if depth == 0 else None
+            if obj is not None:
+                out.append(obj)
         elif ch == "," and depth == 1:
             commas.append(i - start)
     repaired = _repair_truncated_object(text[start:], depth, in_str, commas) if depth else None
@@ -1258,6 +1271,24 @@ def _discovery_run_spec(
     )
 
 
+def _discovery_answer(result: Any, backend: Any) -> tuple[str, str]:
+    """``(text, "")`` when one session's answer is usable, else ``("", why it is not)``."""
+    text = str(getattr(result, "text", "") or "").strip()
+    end_reason = result.end_reason
+    cut_short = end_reason in {"turn_cap", "timeout"}
+    # A cut-short session still answered if it got its proposals out first, and discovery spends turns by
+    # design -- it is handed read and search tools precisely so it explores.
+    usable = text and (not cut_short or _extract_json_array(text))
+    if usable and not is_api_failure(result):
+        if cut_short:
+            log.warning(
+                "discovery Agent ended with %s but its proposals parsed; using them",
+                end_reason,
+            )
+        return text, ""
+    return "", f"{backend.name} returned no final text" if not text else f"{backend.name} ended with {end_reason}"
+
+
 def registered_agent_llm_fn(
     backend: Any,
     session: DiscoverySession = DiscoverySession(),
@@ -1326,23 +1357,11 @@ def registered_agent_llm_fn(
                     protected_files=protected,
                     usage=session.usage,
                 )
-                text = str(getattr(result, "text", "") or "").strip()
-                end_reason = result.end_reason
-                cut_short = end_reason in {"turn_cap", "timeout"}
-                # A cut-short session still answered if it got its proposals out first, and discovery spends turns by
-                # design -- it is handed read and search tools precisely so it explores.
-                usable = text and (not cut_short or _extract_json_array(text))
-                if usable and not is_api_failure(result):
-                    if cut_short:
-                        log.warning(
-                            "discovery Agent ended with %s but its proposals parsed; using them",
-                            end_reason,
-                        )
+                text, failure = _discovery_answer(result, backend)
+                if text:
                     _record_transcript(progress, text)
                     return text
-                last_error = (
-                    f"{backend.name} returned no final text" if not text else f"{backend.name} ended with {end_reason}"
-                )
+                last_error = failure
                 last_kind, last_exc = API_ERROR, None
             except DiscoverySafetyError:
                 raise
