@@ -829,7 +829,7 @@ def _agent_clients(monkeypatch: pytest.MonkeyPatch) -> list[GateClient | None]:
 
     clients: list[GateClient | None] = []
 
-    def agents(*args: object, client: GateClient | None = None, dossier: str | None = None) -> object:
+    def agents(*args: object, client: GateClient | None = None, dossier: str | None = None, **_: object) -> object:
         clients.append(client)
         return SimpleNamespace()
 
@@ -865,7 +865,7 @@ async def test_the_agents_are_given_the_reviewed_dossier_the_run_names_and_none_
 ) -> None:
     dossiers: list[str | None] = []
 
-    def agents(*args: object, client: GateClient | None = None, dossier: str | None = None) -> object:
+    def agents(*args: object, client: GateClient | None = None, dossier: str | None = None, **_: object) -> object:
         dossiers.append(dossier)
         return SimpleNamespace()
 
@@ -927,6 +927,7 @@ async def test_the_specialists_are_told_of_and_give_back_the_dev_sandboxes_the_s
                 agent_port=AGENT_PORT,
                 agent_dossier="",
                 agent_review="",
+                agent_maps=None,
             ),
             tokens=None,
             repo=None,
@@ -1011,6 +1012,7 @@ def test_the_specialists_source_base_holds_aiter_beside_the_framework_only_from_
             agent_port=AGENT_PORT,
             agent_dossier="",
             agent_review="",
+            agent_maps=None,
         ),
         tokens=None,
         repo=None,
@@ -1133,6 +1135,7 @@ def test_a_session_on_a_host_that_builds_native_code_lays_out_the_native_tree_an
                 agent_port=AGENT_PORT,
                 agent_dossier="",
                 agent_review="",
+                agent_maps=None,
             ),
             tokens=None,
             repo=None,

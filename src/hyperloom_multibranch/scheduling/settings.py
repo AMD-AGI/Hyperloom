@@ -133,12 +133,13 @@ class RunSettings:
     to (``""`` when the recipe's is the whole launch), ``agent_dossier_minutes`` how long the dossier pass that
     maps two or more Arbors' directions may run when no map is given (0: none, the map is generated from the root's
     shares; :mod:`~hyperloom_multibranch.specialist.dossier_pass`), and ``agent_port`` the first port of the blocks
-    their servers take, one block per agent branch and one for the dossier pass. ``stop_after_map`` ends the session
+    their servers take, one block per agent branch, a mapping branch's included, and one for a pass before EXPLORE. ``stop_after_map`` ends the session
     once those Arbors' directions are mapped, one Arbor's too, before EXPLORE, and leaves the map and its dossier for a
     person to review; the run after the review is given that map as ``agent_directions`` and that dossier as
     ``agent_dossier``, which every agent branch gets in place of a dossier pass's (``""`` for none). ``review_gate``
-    pauses the session, once those Arbors' map is made, until a person approves or rejects it (:mod:`.review`), and
-    tells each Arbor the host reviewed; off, nothing pauses and each Arbor is started with its own gate off.
+    has those Arbors wait, once their map is made, until a person approves or rejects it (:mod:`.review`): the mapping
+    branch waits in EXPLORE while the others go on, a given map pauses the session before EXPLORE. It tells each Arbor
+    the host reviewed; off, nothing waits and each Arbor is started with its own gate off.
     ``references`` are the
     directories of reference material the run copies in before its first phase, each with the commit it was taken at.
     ``dev_leases`` is how many dev sandboxes the session lends its specialists at once; 0 lends none. ``playbook`` says

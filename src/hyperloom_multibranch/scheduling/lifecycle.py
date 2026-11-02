@@ -34,13 +34,14 @@ import math
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from hyperloom.common.outside_facts.image_check import ImageCheckReport, run_image_check
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.measure.versions import socket_versions
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient
+from hyperloom_multibranch.contracts.fork import ShareRequest
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.blackboard.interfaces import UsageSink
 from hyperloom_multibranch.contracts.blackboard.records import ManifestFingerprint, SessionProfile
@@ -137,12 +138,23 @@ from hyperloom_multibranch.scheduling.similarity import BranchSimilarity
 from hyperloom_multibranch.scheduling.widening import Widening
 from hyperloom_multibranch.specialist.agent_onboarding import ROOT_PROFILE_SOURCE, AttemptFailed
 from hyperloom_multibranch.specialist.arbor_adapter import REVIEW_HOST, REVIEW_OFF, SplitFailed
+from hyperloom_multibranch.specialist.map_session import MapCalls
 from hyperloom_multibranch.specialist.prompts import prompt_versions
 
 if TYPE_CHECKING:
-    from hyperloom_multibranch.specialist.dossier_pass import DossierOutcome
+    from hyperloom_multibranch.specialist.dossier_pass import DossierOutcome, DossierStart
 
 logger = logging.getLogger(__name__)
+
+
+class AgentBranches(NamedTuple):
+    """The agents EXPLORE opens a branch for at once, each one's share of the directions, and the Arbor agents a
+    mapping branch maps for (empty for none)."""
+
+    agents: tuple[str, ...]
+    plans: tuple[str, ...]
+    map_for: tuple[str, ...] = ()
+
 
 SCHEDULER_WRITER = "scheduler"
 INTEGRATOR_WRITER = "integrator"
@@ -238,6 +250,9 @@ class Session:
         self._layout, self._processes, self._clock = host.layout, host.processes, host.clock
         self._open_records()
         desk = ForkDesk(self._roster, self._decisions, self._clock)
+        self._desk = desk
+        self._prelude: PreludeResult | None = None
+        self._map_shares: tuple[RootShares | None] | None = None
         peers = peer_factory(self._peer_setup(desk, services))
         context = SchedulerContext(
             self._layout,
@@ -307,6 +322,7 @@ class Session:
             settings.agent_dossier,
             # The session's review stands in for each Arbor's own; without one, nobody's does.
             REVIEW_HOST if settings.review_gate else REVIEW_OFF,
+            MapCalls(self._map_start, self._map_split) if settings.agents else None,
         )
 
     def _score_with_defaults(self) -> None:
@@ -506,8 +522,9 @@ class Session:
         if self._settings.stop_after_map:
             # Its stop is the review point: the map is kept and reviewed offline, so the session does not pause.
             return await self._stop_after_map(prelude)
+        self._prelude = prelude
         try:
-            plans = await self._agent_plans(prelude)
+            opening = await self._agent_branches(prelude)
         except ReviewRejected as exc:
             logger.info("the agent map was rejected at its review: %s", exc)
             return SessionOutcome(SessionStopReason.REVIEW_REJECTED, None, None, "")
@@ -525,8 +542,9 @@ class Session:
             self._settings.max_llm_usd or math.inf,
             prelude.child_gpu_seconds_upper_bound,
             self._settings.user_directions,
-            self._settings.agents,
-            plans,
+            opening.agents,
+            opening.plans,
+            opening.map_for,
         )
         reason = await self._explorer().run(window)
         if reason is SessionStopReason.NO_MEASUREMENT_CARDS:
@@ -552,14 +570,16 @@ class Session:
             )
         )
 
-    async def _agent_plans(self, prelude: PreludeResult) -> tuple[str, ...]:
-        """Each agent branch's share of the directions (:mod:`agent_plans`): of the user's map; for two or more Arbors
-        without one, of the dossier pass's map, else of one generated from the root's shares, waited for (its op
-        shares, else its kernel shares); for fewer, none. The time this takes is EXPLORE's.
+    async def _agent_branches(self, prelude: PreludeResult) -> AgentBranches:
+        """The agents whose branches EXPLORE opens at once, each one's share of the directions (:mod:`agent_plans`),
+        and the Arbor agents a mapping branch maps for (:mod:`~hyperloom_multibranch.specialist.map_session`).
 
-        With the review on, the session pauses for a person once the map is made and before it is split (:meth:`_review`):
-        the user's map, or for one Arbor too the pass's or the generated one, which a lone Arbor then takes whole.
-        Raises :class:`~hyperloom_multibranch.scheduling.review.ReviewRejected` when the person rejects it."""
+        With the user's map, every agent opens on its share of it, after a person reviewed it when the review is on.
+        Without one, two or more Arbors, or one under the review, wait for a mapping branch, which EXPLORE opens beside
+        the others: its map is the dossier pass's, else one generated from the root's shares, and is reviewed, split
+        and handed out as share branches (:meth:`_map_split`), so no other branch waits for it. Fewer Arbors map their
+        own directions and open at once. Raises :class:`~hyperloom_multibranch.scheduling.review.ReviewRejected` when
+        the person rejects the user's map."""
 
         settings, work = self._settings, self._layout.agent_plans
         if settings.agents and not settings.review_gate:
@@ -568,21 +588,70 @@ class Session:
             if settings.agent_directions and settings.review_gate and await self._arbors():
                 dossier = Path(settings.agent_dossier) if settings.agent_dossier else None
                 await self._review(Path(settings.agent_directions), dossier, MADE_BY_USER)
-            return await agent_plans(settings.agents, settings.agent_directions, work)
+            return AgentBranches(settings.agents, await agent_plans(settings.agents, settings.agent_directions, work))
         arbors = await self._arbors()
         if not arbors or (len(arbors) < GENERATED_FOR and not settings.review_gate):
-            return await agent_plans(settings.agents, "", work)
-        shares = await self._root_shares(prelude)
-        outcome = await self._dossier_map(settings.agents[min(arbors)], prelude.start_commit, shares)
+            return AgentBranches(settings.agents, await agent_plans(settings.agents, "", work))
+        others = tuple(agent for index, agent in enumerate(settings.agents) if index not in arbors)
+        return AgentBranches(others, ("",) * len(others), tuple(settings.agents[index] for index in sorted(arbors)))
+
+    async def _map_start(self, source: str, start_commit: str, deadline: float) -> DossierStart | None:
+        """The dossier pass a mapping branch runs on the Arbor ``source`` at ``start_commit``, by ``deadline`` or
+        sooner by ``--agent-dossier-minutes``, with the root's shares as its profile; ``None`` with no minutes for it."""
+
+        from hyperloom_multibranch.specialist.dossier_pass import DossierStart
+
+        minutes = self._settings.agent_dossier_minutes
+        shares = None if self._prelude is None else await self._mapped_shares(self._prelude)
+        if minutes <= 0:
+            self._decisions.record(
+                Decision(DecisionKind.SHARE, DOSSIER_SKIPPED, INTEGRATION_BRANCH, {"minutes": minutes})
+            )
+            return None
+        given = (None, ROOT_PROFILE_SOURCE) if shares is None else (shares.shares, shares.source)
+        ends = self._clock.now() + minutes * 60
+        detail = {"source": source, "start_commit": start_commit, "minutes": minutes, "profile": given[1]}
+        self._decisions.record(Decision(DecisionKind.SHARE, DOSSIER_STARTED, INTEGRATION_BRANCH, detail))
+        return DossierStart(source, start_commit, min(ends, deadline) if deadline else ends, *given)
+
+    async def _mapped_shares(self, prelude: PreludeResult) -> RootShares | None:
+        """The root's shares a mapping branch maps and splits by, read once."""
+
+        if self._map_shares is None:
+            self._map_shares = (await self._root_shares(prelude),)
+        return self._map_shares[0]
+
+    async def _map_split(
+        self, branch: str, start_commit: str, map_for: tuple[str, ...], outcome: DossierOutcome | None
+    ) -> str:
+        """Hand the map of the mapping branch ``branch`` out to the Arbor agents ``map_for``: the pass's map, else one
+        generated from the root's shares, reviewed by a person when the session's review is on, while the other
+        branches go on; split into one share each; and asked of the fork desk as share branches cut at
+        ``start_commit``. A rejected map opens none. What was done, for the branch log."""
+
+        if outcome is not None:
+            ended = {"reason": outcome.reason, "map": str(outcome.map or ""), "dossier": str(outcome.dossier or "")}
+            self._decisions.record(Decision(DecisionKind.SHARE, DOSSIER_ENDED, branch, ended))
+        shares = None if self._prelude is None else await self._mapped_shares(self._prelude)
         map_file = "" if outcome is None or outcome.map is None else str(outcome.map)
-        if settings.review_gate:
+        if self._settings.review_gate:
             made_by = MADE_BY_PASS if map_file else MADE_BY_SHARES
-            map_file = map_file or await self._generated(arbors, shares)
+            arbors = await self._arbors()
+            map_file = map_file or (await self._generated(arbors, shares) if arbors else "")
             dossier = None if outcome is None else outcome.dossier
-            await self._review(Path(map_file) if map_file else None, dossier, made_by)
-        if shares is None:
-            return await agent_plans(settings.agents, map_file, work)
-        return await agent_plans(settings.agents, map_file, work, shares.shares, shares.source)
+            try:
+                await self._review(Path(map_file) if map_file else None, dossier, made_by, branch=branch)
+            except ReviewRejected as exc:
+                return f"the map was rejected at its review ({exc}); no share branch opens"
+        work = self._layout.agent_plans
+        given = () if shares is None else (shares.shares, shares.source)
+        plans = await agent_plans(map_for, map_file, work, *given)
+        answers = []
+        for agent, plan in zip(map_for, plans):
+            admission = await self._desk.admit_share(ShareRequest(branch, start_commit, agent, plan))
+            answers.append(f"{admission.branch or admission.reason} ({admission.status.value})")
+        split = "split" if any(plans) else "not split, each Arbor maps its own"
+        return f"{len(map_for)} share branches asked, the map {split}: {', '.join(answers)}"
 
     async def _generated(self, arbors: dict[int, Path], shares: RootShares | None) -> str:
         """The map the first Arbor generates from the root's ``shares``, for a person to review before it is split;
@@ -595,27 +664,31 @@ class Session:
             logger.warning("no map could be generated for the review: %s", exc)
             return ""
 
-    async def _review(self, map_file: Path | None, dossier: Path | None, made_by: str) -> None:
-        """Pause, holding no lease, until a person decides on ``map_file`` and ``dossier`` (:mod:`.review`); each step
-        is a ``PRELUDE`` decision. The deadline does not pass while it waits, and moves by the time paused
-        (:meth:`_extend`). Raises :class:`~hyperloom_multibranch.scheduling.review.ReviewRejected` on a rejection."""
+    async def _review(self, map_file: Path | None, dossier: Path | None, made_by: str, *, branch: str = "") -> None:
+        """Wait, holding no lease, until a person decides on ``map_file`` and ``dossier`` (:mod:`.review`). Before
+        EXPLORE the session pauses: each step is a ``PRELUDE`` decision, the deadline does not pass while it waits and
+        moves by the time paused (:meth:`_extend`). For the mapping ``branch`` in EXPLORE, only that branch waits, each
+        step a ``SHARE`` decision of it, and the deadline stays. Raises
+        :class:`~hyperloom_multibranch.scheduling.review.ReviewRejected` on a rejection."""
 
         directory, began = self._layout.review, self._clock.now()
+        kind, holder = (DecisionKind.SHARE, branch) if branch else (DecisionKind.PRELUDE, INTEGRATION_BRANCH)
         state = request(directory, self._layout.root, Reviewed(map_file, dossier, made_by), began)
         asked = {"page": str(directory / REVIEW_PAGE), "map": state["map"], "dossier": state["dossier"]}
-        self._decisions.record(Decision(DecisionKind.PRELUDE, REVIEW_REQUESTED, INTEGRATION_BRANCH, asked))
+        self._decisions.record(Decision(kind, REVIEW_REQUESTED, holder, asked))
         logger.warning("waiting for a person's review of the agent map: read %s", directory / REVIEW_PAGE)
-        self._reviewing = True
+        self._reviewing = not branch
         try:
             decided = await wait(directory, self._clock.sleep)
         finally:
             self._reviewing = False
-            self._extend(self._clock.now() - began)
+            if not branch:
+                self._extend(self._clock.now() - began)
         detail = {key: decided.get(key) for key in ("by", "note", "changed", "decided_at_iso")}
         detail["paused_seconds"] = round(self._clock.now() - began, 1)
         rejected = decided.get("status") == REJECTED
         reason = REVIEW_REJECTED if rejected else REVIEW_APPROVED
-        self._decisions.record(Decision(DecisionKind.PRELUDE, reason, INTEGRATION_BRANCH, detail))
+        self._decisions.record(Decision(kind, reason, holder, detail))
         if rejected:
             raise ReviewRejected(f"rejected by {decided.get('by') or 'a person'}: {decided.get('note') or ''}")
 

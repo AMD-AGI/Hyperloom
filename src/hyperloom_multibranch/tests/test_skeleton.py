@@ -456,6 +456,8 @@ class Stage:
             hanging=self.hanging,
             sleep=self.time.sleep,
             poll_seconds=VIRTUAL_POLL_SECONDS,
+            maps=setup.agent_maps,
+            run_pass=self.dossier_pass,
         )
         self.gate = RuleGate(self.handle(Role.GATE), repo, setup.desk, RecordingVerifier())
         runtime = specialist_runtime(
@@ -1902,16 +1904,16 @@ async def test_two_agents_started_on_their_shares_both_have_their_keeps_merged_i
     monkeypatch.setattr(lifecycle, "arbor_agents", _two_arbors)
     stage = _stage(tmp_path, child=child_with_patch(tmp_path))
     stage.settings = replace(SETTINGS, agents=("/agents/arbor", "/agents/arbor"))
-    stage.scripts = {"b01": (tagged("a1"),), "b02": (tagged("a2"),)}
+    # b01 maps, and the two shares open as b02 and b03.
+    stage.scripts = {"b02": (tagged("a1"),), "b03": (tagged("a2"),)}
     stage.explored = stage.measured = AGENT_CURVES
     stage.judge = ScriptedCompletion([])
 
     outcome = await stage.run()
 
     assert outcome.stop_reason is SessionStopReason.TIME_EXHAUSTED
-    assert {branch for branch, origin in _origins(stage).items() if origin == "agent"} == {"b01", "b02"}
-    assert stage.sessions.plans == {"b01": "/shares/share-1.json", "b02": "/shares/share-2.json"}
-    a1, a2 = await stage.repo.head("b01"), await stage.repo.head("b02")
+    assert _shares(stage) == {"b02": "/shares/share-1.json", "b03": "/shares/share-2.json"}
+    a1, a2 = await stage.repo.head("b02"), await stage.repo.head("b03")
     observer = stage.handle(Role.OBSERVER)
     merged = {item.commit_id: item.last_merge.outcome.value for item in await observer.committed() if item.last_merge}
     assert merged == {a1: "merged", a2: "merged"}
@@ -1925,10 +1927,20 @@ async def _two_arbors(agents: tuple[str, ...], work_dir: Path) -> dict[int, Path
     return dict.fromkeys(range(len(agents)), work_dir / "sources" / "0")
 
 
+def _shares(stage: Stage) -> dict[str, str]:
+    """Each share branch the session opened, with the plan its agent started on."""
+
+    return {branch: stage.sessions.plans[branch] for branch, origin in _origins(stage).items() if origin == "share"}
+
+
 def _agent_map(stage: Stage) -> list[dict[str, Any]]:
     """The decisions of the session's agent map, in order."""
 
     return [row for row in _decisions(stage) if str(row["reason"]).startswith("agent map:")]
+
+
+#: How long a dossier pass takes in these tests, in virtual seconds.
+PASS_SECONDS = 600.0
 
 
 async def test_without_a_map_two_arbors_split_the_map_of_the_session_s_dossier_pass(
@@ -1945,6 +1957,7 @@ async def test_without_a_map_two_arbors_split_the_map_of_the_session_s_dossier_p
 
     async def dossier(start: DossierStart) -> DossierOutcome:
         started.append(start)
+        await stage.time.sleep(PASS_SECONDS)
         return DossierOutcome(Path("/pass/directions.json"), Path("/pass/docs/dossier/qwen3-8b"), MAPPED)
 
     monkeypatch.setattr(lifecycle, "agent_plans", split)
@@ -1958,18 +1971,30 @@ async def test_without_a_map_two_arbors_split_the_map_of_the_session_s_dossier_p
 
     assert outcome.stop_reason is SessionStopReason.TIME_EXHAUSTED
     [start] = started
-    assert (start.source, start.start_commit) == ("/agents/arbor", await stage.root())
+    root = await stage.root()
+    assert (start.source, start.start_commit) == ("/agents/arbor", root)
+    assert stage.sessions.mapping == {"b01": ("/agents/arbor", "/agents/arbor")}
     assert asked == [("/pass/directions.json", None)]
     read, began, ended = _agent_map(stage)
     assert [read["reason"], began["reason"], ended["reason"]] == [ROOT_SHARES_READ, DOSSIER_STARTED, DOSSIER_ENDED]
     assert read["detail"]["job"] == "no root profile was started"
-    assert start.deadline == pytest.approx(began["at"] + DOSSIER_MINUTES * 60)
+    [explore] = [row for row in _decisions(stage) if row["kind"] == "phase" and row["reason"] == "explore"]
+    explore_end = float(str(explore["detail"]["explore_end"]))
+    assert start.deadline == pytest.approx(min(began["at"] + DOSSIER_MINUTES * 60, explore_end))
     assert ended["detail"] == {
         "reason": MAPPED,
         "map": "/pass/directions.json",
         "dossier": "/pass/docs/dossier/qwen3-8b",
     }
-    assert stage.sessions.plans == {"b01": "/shares/share-1.json", "b02": "/shares/share-2.json"}
+    assert (began["kind"], ended["kind"], ended["branch"]) == ("share", "share", "b01")
+    shares = _shares(stage)
+    assert sorted(shares.values()) == ["/shares/share-1.json", "/shares/share-2.json"]
+    assert all(stage.sessions.started[branch] == root for branch in shares)
+    rows = _decisions(stage)
+    opened = [index for index, row in enumerate(rows) if row["kind"] == "open"]
+    asked_at = [index for index, row in enumerate(rows) if row["kind"] == "share" and row["detail"].get("agent")]
+    # The specialists did not wait for the map: the opening batch opened while the pass ran.
+    assert len(opened) >= 2 and rows[opened[1]]["at"] < ended["at"] - PASS_SECONDS / 2 and opened[1] < asked_at[0]
 
 
 @pytest.mark.parametrize("minutes", [DOSSIER_MINUTES, 0.0])
@@ -2135,6 +2160,10 @@ async def _decide(
     return decided
 
 
+#: How long a person takes to review a map in these tests, in virtual seconds.
+REVIEW_SECONDS = 300.0
+
+
 def _review_steps(stage: Stage) -> list[str]:
     return [str(row["reason"]) for row in _decisions(stage) if str(row["reason"]).startswith("review ")]
 
@@ -2163,31 +2192,34 @@ def _two_arbors_reviewed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, read: 
     return stage, map_file, dossier
 
 
-async def test_two_arbors_wait_for_a_person_s_review_and_split_the_map_as_edited_after_a_pause_past_the_budget(
+async def test_two_arbors_wait_for_a_person_s_review_of_the_map_as_edited_while_the_other_branches_go_on(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     read: list[str] = []
     stage, map_file, dossier = _two_arbors_reviewed(tmp_path, monkeypatch, read)
     edited = json.dumps({"directions": [{"id": "m-attn", "title": "attention"}, {"id": "m-gemm"}]})
 
-    # The person takes an hour, twice the whole session's budget: the pause does not count against it.
     outcome, decided = await asyncio.gather(
-        stage.run(), _decide(stage, True, after=3600.0, edit=lambda: map_file.write_text(edited))
+        stage.run(), _decide(stage, True, after=REVIEW_SECONDS, edit=lambda: map_file.write_text(edited))
     )
 
     assert outcome.stop_reason is SessionStopReason.TIME_EXHAUSTED
     assert read == [edited]
     assert (decided["status"], decided["by"], decided["changed"]) == ("approved", "reviewer", [str(map_file)])
     assert _review_steps(stage) == [REVIEW_REQUESTED, REVIEW_APPROVED]
-    approved = next(row for row in _decisions(stage) if row["reason"] == REVIEW_APPROVED)
-    assert approved["detail"]["paused_seconds"] >= 3600.0
-    assert {branch for branch, origin in _origins(stage).items() if origin == "agent"} == {"b01", "b02"}
-    assert stage.sessions.plans == {"b01": "/shares/share-1.json", "b02": "/shares/share-2.json"}
+    rows = _decisions(stage)
+    asked, approved = (next(row for row in rows if row["reason"] == reason) for reason in _review_steps(stage))
+    assert (asked["kind"], asked["branch"]) == ("share", "b01") and approved["detail"][
+        "paused_seconds"
+    ] >= REVIEW_SECONDS
+    # Only the mapping branch waited: a specialist opened before the review was decided, and no deadline moved.
+    assert any(row["kind"] == "open" and row["branch"] != "b01" and row["at"] < approved["at"] for row in rows)
+    assert sorted(_shares(stage).values()) == ["/shares/share-1.json", "/shares/share-2.json"]
     page = (stage.layout.review / REVIEW_PAGE).read_text()
     assert "`m-attn`" in page and str(dossier) in page and "approve" in page
 
 
-async def test_a_rejected_map_ends_the_session_and_opens_no_agent_branch(
+async def test_a_rejected_map_opens_no_share_branch_and_the_session_goes_on(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     read: list[str] = []
@@ -2195,11 +2227,10 @@ async def test_a_rejected_map_ends_the_session_and_opens_no_agent_branch(
 
     outcome, decided = await asyncio.gather(stage.run(), _decide(stage, False))
 
-    assert (outcome.stop_reason, outcome.error, outcome.exit_code) == (SessionStopReason.REVIEW_REJECTED, "", 0)
+    assert (outcome.stop_reason, outcome.error) == (SessionStopReason.TIME_EXHAUSTED, "")
     assert decided["status"] == "rejected" and read == []
     assert _review_steps(stage) == [REVIEW_REQUESTED, REVIEW_REJECTED]
-    assert not stage.sessions.plans
-    assert not [branch for branch, origin in _origins(stage).items() if origin == "agent"]
+    assert not _shares(stage)
 
 
 async def test_without_the_review_gate_two_arbors_split_their_map_at_once_and_the_skip_is_recorded(
@@ -2214,7 +2245,7 @@ async def test_without_the_review_gate_two_arbors_split_their_map_at_once_and_th
     assert outcome.stop_reason is SessionStopReason.TIME_EXHAUSTED
     assert read == [map_file.read_text()]
     assert _review_steps(stage) == [REVIEW_SKIPPED] and not stage.layout.review.exists()
-    assert stage.sessions.plans == {"b01": "/shares/share-1.json", "b02": "/shares/share-2.json"}
+    assert sorted(_shares(stage).values()) == ["/shares/share-1.json", "/shares/share-2.json"]
 
 
 async def test_with_the_review_on_one_arbor_gets_the_map_step_and_takes_the_reviewed_map_whole(
@@ -2246,7 +2277,8 @@ async def test_with_the_review_on_one_arbor_gets_the_map_step_and_takes_the_revi
     steps = [row["reason"] for row in _agent_map(stage)]
     assert steps == [ROOT_SHARES_READ, DOSSIER_STARTED, DOSSIER_ENDED]
     assert _review_steps(stage) == [REVIEW_REQUESTED, REVIEW_APPROVED]
-    assert stage.sessions.plans == {"b01": "/shares/share-1.json"}
+    assert stage.sessions.mapping == {"b01": ("/agents/arbor",)}
+    assert list(_shares(stage).values()) == ["/shares/share-1.json"]
 
 
 async def test_a_given_map_is_reviewed_too_and_split_as_given(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
