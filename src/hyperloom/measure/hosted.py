@@ -121,6 +121,17 @@ READY_PATH, SPEC_PATH = "/in/READY", "/in/spec.json"
 STATUS_PATH, PROGRESS_PATH = "/out/status.json", "/out/progress.json"
 MANIFEST_PATH, SIGNATURE_PATH, FILES_ROOT = "/out/manifest.json", "/out/manifest.sig", "/out/files"
 _LOSS_POLLS = 3
+#: The steps of a landing, marked on the attempt's timeline when each ends. The journal line of the attempt's end says how
+#: long each took (``landing_sec``): all of them are file system work below the session directory, and a slow landing
+#: is told apart only by its steps. What ``result_landing`` holds beyond them is that journal line and its event.
+_VERIFIED, _ARCHIVED, _MATERIALIZED, _JIT_PUBLISHED, _ROUNDS_READ = (
+    "read_verified",
+    "archived",
+    "materialized",
+    "jit_published",
+    "rounds_read",
+)
+_LANDING_SEC = "landing_sec"
 _LOG_SUFFIX = ".log"
 
 EventEmitter = Callable[[str, Mapping[str, Any]], None]
@@ -650,12 +661,18 @@ class HostedMeasurementBackend:
         """Read, verify, archive and land the bundle; any failure on the way is an outcome, never a half-accepted result."""
         call = attempt.call
         staging = self._staging_dir(attempt)
+        step = attempt.timeline.mark
         try:
             verified = self._read_and_verify(attempt, staging)
+            step(_VERIFIED)
             location = self._archive(attempt, verified, staging)
+            step(_ARCHIVED)
             self._land(attempt, verified)
+            step(_MATERIALIZED)
             self._publish_jit(attempt, verified, staging)
+            step(_JIT_PUBLISHED)
             rounds = _rounds_of(verified, Path(call.output_dir))
+            step(_ROUNDS_READ)
         except ResultRejected as exc:
             outcome = _refusal(call, HOSTED_RESULT_REJECTED_RC, "result_rejected", str(exc))
             self._finish_record(attempt, outcome, {"verdict": "result_rejected", "reject": exc.reason.value})
@@ -871,12 +888,14 @@ class HostedMeasurementBackend:
         reason: str | None,
         extra: Mapping[str, Any],
     ) -> None:
+        landing = attempt.timeline.laps(RUNNER_DONE)
         fields = {
             "returncode": returncode,
             "failure_class": failure_class,
             "failure_reason": reason,
             "finished_unix": self._clock(),
             "node": attempt.runner.node_name,
+            **({_LANDING_SEC: landing} if landing else {}),
             **extra,
         }
         self._journal_end(attempt.request_id, attempt.number, attempt.runner.sandbox_id, attempt.call, fields)
