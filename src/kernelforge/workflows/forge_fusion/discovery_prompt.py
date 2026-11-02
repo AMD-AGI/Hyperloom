@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 DISCOVERY_PROMPT_TEMPLATE = """You are analyzing the DECODE path of a {framework} model (`model_type={model_type}`)
-on AMD MI325X (gfx942), bf16, to find SOURCE-LEVEL KERNEL FUSIONS. Analyze only; do
+on {arch_phrase}, bf16, to find SOURCE-LEVEL KERNEL FUSIONS. Analyze only; do
 not edit anything. Return your answer as JSON (schema below).
 
 ## The lever (general, not model-specific)

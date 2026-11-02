@@ -382,12 +382,14 @@ def test_forge_loop_gpu_type_override_reaches_config(tmp_path, monkeypatch):
 
 
 def test_forge_loop_defaults_gpu_type(tmp_path, monkeypatch):
+    # The fakes run on a gfx942 host (GPU_TARGET); the SKU follows it rather than a fixed mi355x.
     captured = _install_cli_fakes(monkeypatch, tmp_path)
 
-    result, _workspace = _invoke_forge_loop(tmp_path, [])
+    result, workspace = _invoke_forge_loop(tmp_path, [])
 
     assert result.exit_code == 0
-    assert captured["config_overrides"][-1]["gpu_type"] == "mi355x"
+    assert captured["config_overrides"][-1]["gpu_type"] == "mi300x"
+    assert CampaignConfigStore(str(workspace)).load().gpu_type == "mi300x"
 
 
 def test_no_estimator_is_built_while_the_ceiling_is_off(tmp_path, monkeypatch):

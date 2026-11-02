@@ -833,7 +833,7 @@ _CUDA_ONLY_MARKERS = (
     "mma.sync",
     "device_functions.h",
 )
-# Triton JIT/compile failures on this GPU arch (gfx942) — actionable but distinct
+# Triton JIT/compile failures on this GPU arch — actionable but distinct
 # from the CUDA-only case (the kernel IS ROCm-native, it just doesn't build yet).
 _TRITON_BUILD_MARKERS = (
     "out of resource",
@@ -931,7 +931,7 @@ def classify_compile_error(error: str, recipe: Optional[Recipe] = None) -> str:
         )
     if any(m in e for m in _TRITON_BUILD_MARKERS):
         return (
-            "The Triton kernel failed to JIT-compile on this GPU arch (gfx942). "
+            "The Triton kernel failed to JIT-compile on this GPU arch. "
             "Reduce BLOCK size / shared-memory usage or fix tl.constexpr shapes so "
             "it builds, and keep an eager fallback when Triton is unavailable."
         )
