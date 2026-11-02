@@ -11,13 +11,19 @@ tables below ``configs`` and a per-model table below ``configs/model_configs``. 
 
 from __future__ import annotations
 
+import json
+import os
 import shutil
 from pathlib import Path
 
 import pytest
+import yaml
 
+from hyperloom.measure.framework.base import framework_envs
+from hyperloom.measure.framework.copies import private_framework
 from hyperloom.measure.framework.rows import DEFAULT_TABLE_PLACEHOLDER
 from hyperloom.measure.framework.table_modules import named_table_modules, stale_table_modules, table_modules
+from hyperloom.measure.socket import TestCall
 
 A8W8, BPRESHUFFLE = "AITER_CONFIG_GEMM_A8W8", "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE"
 GEMM, BLOCK, OPUS, TUNE = (
@@ -138,6 +144,59 @@ def test_a_variable_set_to_the_images_default_and_per_model_tables_by_path_makes
     environment = {BPRESHUFFLE: ":".join(str(path) for path in listed)}
 
     assert stale_table_modules(CONFIG, image, image, [environment]) == frozenset()
+
+
+#: Three more per-model tables of the bpreshuffle variable, so the order they are listed in can differ from the sorted one.
+MODEL_TABLES = {
+    f"configs/model_configs/{name}_a8w8_blockscale_bpreshuffle_tuned_gemm.csv": f"M,N,K,kernelName\n{m},5,6,bp_{name}\n"
+    for m, name in ((7, "glm5"), (8, "kimi"), (9, "qwen"))
+}
+
+
+def _listing(paths: list[Path]) -> str:
+    return os.pathsep.join(str(path) for path in paths)
+
+
+def test_the_images_tables_listed_in_another_order_make_nothing_stale(tmp_path) -> None:
+    image = _package(tmp_path / "image" / "aiter", MODEL_TABLES)
+    copies = tmp_path / "copies"
+    shutil.copytree(image / "configs", copies)
+    tuned = (copies / "model_configs").glob("*_a8w8_blockscale_bpreshuffle_tuned_gemm.csv")
+    models = sorted((path for path in tuned if "untuned" not in path.name), reverse=True)
+    reordered = {BPRESHUFFLE: _listing([copies / "a8w8_blockscale_bpreshuffle_tuned_gemm.csv", *models])}
+    one_left_out = {BPRESHUFFLE: _listing([copies / "a8w8_blockscale_bpreshuffle_tuned_gemm.csv", *models[1:]])}
+
+    assert stale_table_modules(CONFIG, image, image, [reordered]) == frozenset()
+    assert stale_table_modules(CONFIG, image, image, [one_left_out]) == {BLOCK, OPUS}, "other content stays stale"
+
+
+def test_the_private_copies_a_test_is_redirected_to_make_nothing_stale_whatever_order_the_directory_lists(
+    tmp_path, monkeypatch
+) -> None:
+    """The real redirect: the session's snapshot of the image's tables, and the value ``private_framework`` gives the
+    server for a variable the test leaves unset, its private copies in the order the shared directory listed them."""
+    for name in [name for name in os.environ if name.startswith(("AITER_CONFIG_", "HYPERLOOM_FRAMEWORK_"))]:
+        monkeypatch.delenv(name)
+    image = _package(tmp_path / "image" / "aiter", MODEL_TABLES)
+    for name, value in framework_envs(tmp_path / "framework", str(image / "configs")).items():
+        monkeypatch.setenv(name, value)
+    manifest = tmp_path / "framework" / "snapshot.json"
+    document = json.loads(manifest.read_text(encoding="utf-8"))
+    document["model_order"] = sorted(document["model_order"], reverse=True)  # as an ext4 or overlay directory may list
+    manifest.write_text(json.dumps(document), encoding="utf-8")
+    point = tmp_path / "point.yaml"
+    point.write_text(yaml.safe_dump({"benchmark": {"envs": {"TP": 1}}}), encoding="utf-8")
+    call = TestCall(
+        points=(point,), output_dir=tmp_path / "out", timeout_sec=60, cwd=str(tmp_path), magpie_python="", task_id="t1"
+    )
+
+    with private_framework(call) as private:
+        served = dict(private.call.env_overrides)
+        listed = [Path(part).name for part in served[BPRESHUFFLE].split(os.pathsep)]
+        judged = stale_table_modules(CONFIG, image, image, [served])
+
+    assert listed[1:] == sorted(listed[1:], reverse=True), "the server is told the copies in the directory's order"
+    assert judged == frozenset()
 
 
 def test_a_patch_to_a_default_table_makes_the_modules_of_its_variable_stale(tmp_path, image) -> None:
