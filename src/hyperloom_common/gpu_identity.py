@@ -31,14 +31,11 @@ class GpuBoard:
     #: The PCI device ids that ``amd-smi static --asic`` reports (``asic.device_id``) for this board, lower case, no
     #: ``0x``. A board's name is whatever the VBIOS says (an MI355X node answers "AMD Instinct MI355 OAM"); its device
     #: id is what the silicon is. Read from the ``amdgpu.ids`` that ships with the driver, with the variants (HF, VF)
-    #: listed under their board. Empty when no id names this board alone, and the board is then known by its name.
-    #: 0x74a2 and 0x74b6 are on no board on purpose: the same id is both an MI308X and, at revision A1, an MI300X. So is
-    #: 0x7551, the R9700 at revisions C0 and C1 (R9700S) and the R9600D at C8, so the R9700 lists none.
+    #: listed under their board. 0x74a2 and 0x74b6 are left out on purpose: the same id is both an MI308X and, at
+    #: revision A1, an MI300X, so it names no single board and the caller falls back to the name. So is 0x7551, the
+    #: R9700 at revisions C0 and C1 (R9700S) and the R9600D at C8: the R9700 lists no id and is known by its name alone.
+    #: The Radeon 8060S lists none either and is known by its name.
     device_ids: frozenset[str] = frozenset()
-
-    def vendor_peaks_by_tag(self, tags: Mapping[str, tuple[str, ...]]) -> dict[str, float]:
-        """``vendor_peak_tflops`` under each spelling a caller reads, from ``tags``: precision -> its spellings."""
-        return {tag: peak for precision, peak in self.vendor_peak_tflops.items() for tag in tags[precision]}
 
     def named_in(self, text: str) -> bool:
         """Whether ``text`` names this board as a whole word; a longer name such as ``MI300XL`` is another product."""
@@ -122,7 +119,7 @@ def normalise_device_id(device_id: object) -> str | None:
 def gpu_type_for_device_id(device_id: object) -> str | None:
     """The one board a PCI device id belongs to, or ``None`` when it is unknown, ambiguous or unreadable."""
     key = normalise_device_id(device_id)
-    return next((product for product, board in AMD_GPU_BOARDS.items() if key in board.device_ids), None)
+    return next((board.product for board in AMD_GPU_BOARDS.values() if key in board.device_ids), None)
 
 
 def gpu_board(gpu_type: str | None) -> GpuBoard | None:

@@ -847,7 +847,7 @@ class _ArmServer:
         if self.lifecycle:
             try:
                 self.teardown()
-            except Exception as teardown_exc:  # isolation boundary: one arm's server teardown, recorded as a fault
+            except OSError as teardown_exc:
                 # The last word on this arm's server: a teardown that failed here
                 # leaves it alive past the arm that owned it.
                 log.warning("conc_sweep single-server: arm=%s teardown failed", self.arm_name, exc_info=True)
@@ -884,22 +884,11 @@ def _resolve_arm_strategy(run: _SweepRun, arm_name: str, *, serving_lease_held: 
 
     recorder = run.recorder
     # Resolve lifecycle params (port, framework) from the materialized config.
-    lc_reason = "resolve_failed"
-    try:
-        lc_params = resolve_lifecycle_params(run.base_yaml_path)
-        port = int(lc_params.get("port") or 8888)
-        framework = str(lc_params.get("framework") or "")
-        lc_eligible = bool(lc_params.get("eligible"))
-        lc_reason = str(lc_params.get("reason") or "")
-    except Exception as exc:  # isolation boundary: one arm's lifecycle resolution, recorded as a fault
-        log.warning("conc_sweep single-server: resolve_lifecycle_params failed", exc_info=True)
-        if recorder is not None:
-            # Named per arm: both arms resolve, and two faults reading alike
-            # would collapse into one row.
-            recorder.record_fault(stage=f"resolve_lifecycle_params:{arm_name}", exc=exc)
-        lc_eligible = False
-        port = 8888
-        framework = ""
+    lc_params = resolve_lifecycle_params(run.base_yaml_path)
+    port = int(lc_params.get("port") or 8888)
+    framework = str(lc_params.get("framework") or "")
+    lc_eligible = bool(lc_params.get("eligible"))
+    lc_reason = str(lc_params.get("reason") or "")
 
     arm_strategy = ArmStrategy(
         strategy=STRATEGY_SINGLE_SERVER if lc_eligible else STRATEGY_SERVER_RESTART,

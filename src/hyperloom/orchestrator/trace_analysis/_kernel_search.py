@@ -16,7 +16,7 @@ from hyperloom.inference_optimizer.framework_paths import (
     resolve_kernel_search_roots as _resolve_kernel_search_roots,
 )
 
-from ._task_group_contract import _strip_dispatch_decoration
+from ._task_group_contract import _strip_dispatch_decoration, _strip_template_arguments
 
 log = logging.getLogger(__name__)
 
@@ -158,29 +158,6 @@ def refresh_kernel_search_roots() -> tuple[str, ...]:
     return kernel_search_roots()
 
 
-def _strip_template_args(symbol: str) -> str:
-    """Remove C++ template argument blocks (``<...>``) from a symbol.
-
-    Args:
-        symbol (str): A possibly templated C++ symbol name.
-
-    Returns:
-        str: The symbol with all balanced ``<...>`` sections removed.
-    """
-    out: list[str] = []
-    depth = 0
-    for ch in symbol:
-        if ch == "<":
-            depth += 1
-            continue
-        if ch == ">":
-            depth = max(0, depth - 1)
-            continue
-        if depth == 0:
-            out.append(ch)
-    return "".join(out)
-
-
 _NAMESPACE_BLOCKLIST = {
     "aiter",
     "sglang",
@@ -252,7 +229,7 @@ def _candidate_keywords(name: str) -> list[str]:
         if not tokens:
             tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_]{4,}", cleaned)
     else:
-        cleaned = _strip_template_args(cleaned)
+        cleaned = _strip_template_arguments(cleaned)
         if "::" in cleaned:
             cleaned = cleaned.split("::")[-1]
         tokens = [cleaned]

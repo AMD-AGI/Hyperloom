@@ -287,6 +287,26 @@ def print_plan(plan: dict[str, Any]) -> None:
 
 
 # Real ingest (needs the langfuse SDK)
+def _upload_decision_scores(
+    client: Any, trace_id: str, decisions: list[dict[str, Any]], agent_spans: dict[tuple[str, str], Any]
+) -> int:
+    """Attach each decision's scores to its producer's agent span (or the trace); return how many failed."""
+    failed_scores = 0
+    for i, drow in enumerate(decisions):
+        for score in lfmap.decision_to_scores(drow):
+            meta = score["metadata"]
+            span = agent_spans.get((lfmap.phase_of(meta), lfmap.span_agent_for(str(meta.get("component") or ""))))
+            try:
+                if hasattr(span, "score"):
+                    span.score(**score)
+                else:
+                    client.create_score(trace_id=trace_id, **score)
+            except Exception:  # isolation boundary: one decision Score upload
+                log.exception("create_score failed for decision %d", i)
+                failed_scores += 1
+    return failed_scores
+
+
 def ingest(plan: dict[str, Any]) -> int:
     """Emit a backfill plan to Langfuse as a full trace tree."""
     try:
@@ -341,19 +361,7 @@ def ingest(plan: dict[str, Any]) -> int:
     if plan["recipe_audit"]:
         _emit_recipe_audit(root, plan["recipe_audit"], last_end, trace_start)
 
-    failed_scores = 0
-    for i, drow in enumerate(plan["decisions"]):
-        for score in lfmap.decision_to_scores(drow):
-            meta = score["metadata"]
-            span = agent_spans.get((lfmap.phase_of(meta), lfmap.span_agent_for(str(meta.get("component") or ""))))
-            try:
-                if hasattr(span, "score"):
-                    span.score(**score)
-                else:
-                    client.create_score(trace_id=trace_id, **score)
-            except Exception:  # isolation boundary: one decision Score upload
-                log.exception("create_score failed for decision %d", i)
-                failed_scores += 1
+    failed_scores = _upload_decision_scores(client, trace_id, plan["decisions"], agent_spans)
 
     _end_obs(root, last_end)
     client.flush()

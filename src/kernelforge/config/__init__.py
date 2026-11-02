@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from typing import Any
 
 from hyperloom_common.llm import llm_config
 from hyperloom_common.env import env_bool, env_flag
@@ -88,6 +89,31 @@ def _env_json_object(name: str) -> dict:
     if not isinstance(value, dict):
         raise ValueError(f"{name} must contain a JSON object")
     return value
+
+
+def _specialist_probe_overrides(overrides: dict[str, Any]) -> dict[str, Any]:
+    """The specialist-probe fields of :meth:`Config.from_env`, from ``overrides`` or their env vars."""
+    return {
+        "specialist_probe": overrides.get("specialist_probe", env_flag("FORGE_SPECIALIST_PROBE", default=True)),
+        "specialist_probe_max": int(
+            overrides.get(
+                "specialist_probe_max",
+                os.getenv("FORGE_SPECIALIST_PROBE_MAX", "6"),
+            )
+        ),
+        "specialist_probe_budget_sec": float(
+            overrides.get(
+                "specialist_probe_budget_sec",
+                os.getenv("FORGE_SPECIALIST_PROBE_BUDGET_SEC", "600"),
+            )
+        ),
+        "specialist_probe_scratch_root": str(
+            overrides.get(
+                "specialist_probe_scratch_root",
+                os.getenv("FORGE_SPECIALIST_PROBE_SCRATCH_ROOT", ""),
+            )
+        ),
+    }
 
 
 class KnowledgeStoreMode(str, Enum):
@@ -418,25 +444,7 @@ class Config:
             if "agent_options" in overrides
             else _env_json_object("FORGE_AGENT_OPTIONS_JSON"),
             max_turns=int(overrides.get("max_turns", 500)),
-            specialist_probe=overrides.get("specialist_probe", env_flag("FORGE_SPECIALIST_PROBE", default=True)),
-            specialist_probe_max=int(
-                overrides.get(
-                    "specialist_probe_max",
-                    os.getenv("FORGE_SPECIALIST_PROBE_MAX", "6"),
-                )
-            ),
-            specialist_probe_budget_sec=float(
-                overrides.get(
-                    "specialist_probe_budget_sec",
-                    os.getenv("FORGE_SPECIALIST_PROBE_BUDGET_SEC", "600"),
-                )
-            ),
-            specialist_probe_scratch_root=str(
-                overrides.get(
-                    "specialist_probe_scratch_root",
-                    os.getenv("FORGE_SPECIALIST_PROBE_SCRATCH_ROOT", ""),
-                )
-            ),
+            **_specialist_probe_overrides(overrides),
             knowledge_config=knowledge_config,
             include_mori_kb=overrides.get("include_mori_kb"),
             defer_knowledge_maps=overrides.get("defer_knowledge_maps"),

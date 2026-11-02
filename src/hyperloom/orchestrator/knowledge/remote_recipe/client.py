@@ -249,6 +249,28 @@ def _deactivate_destination(path: Path) -> None:
         shutil.rmtree(path)
 
 
+def _activate_generation(
+    generation: Path,
+    root: Path,
+    listing_manifest: dict[str, tuple[int, str]],
+    recipe_json: str,
+) -> None:
+    """Verify a downloaded generation, write its ``recipe.json`` and swap it in as ``root``."""
+    files_root = generation / "files"
+    files_root.mkdir(parents=True, exist_ok=True)
+    _verify_downloaded_files(files_root, listing_manifest)
+    for generated in list(generation.iterdir()):
+        if generated.name == "files":
+            continue
+        _deactivate_destination(generated)
+    (generation / "recipe.json").write_text(
+        recipe_json,
+        encoding="utf-8",
+    )
+    _deactivate_destination(root)
+    generation.replace(root)
+
+
 def _view_artifact_manifest(
     envelope: dict[str, Any],
 ) -> dict[str, tuple[int, str]]:
@@ -359,53 +381,51 @@ class RemoteRecipeClient:
                         dir=root.parent,
                     )
                 )
-                files_root = generation / "files"
                 if listing_manifest:
-                    # Pin the SDK's internal listing to the compared snapshot.
-                    original_listing_method = self.store.list_session_files
-
-                    def validated_listing(
-                        requested_canonical_id: str,
-                        requested_session_id: str,
-                        *,
-                        kind: str = "",
-                    ) -> dict[str, Any]:
-                        if requested_canonical_id != canonical_id or requested_session_id != session_id or kind:
-                            return original_listing_method(
-                                requested_canonical_id,
-                                requested_session_id,
-                                kind=kind,
-                            )
-                        return listing
-
-                    self.store.list_session_files = validated_listing  # type: ignore[method-assign]
-                    try:
-                        self.store.download_session(
-                            canonical_id,
-                            session_id,
-                            generation,
-                            include_values=False,
-                        )
-                    finally:
-                        self.store.list_session_files = original_listing_method  # type: ignore[method-assign]
-                files_root.mkdir(parents=True, exist_ok=True)
-                _verify_downloaded_files(files_root, listing_manifest)
-                for generated in list(generation.iterdir()):
-                    if generated.name == "files":
-                        continue
-                    _deactivate_destination(generated)
-                (generation / "recipe.json").write_text(
-                    recipe_json,
-                    encoding="utf-8",
-                )
-                _deactivate_destination(root)
-                generation.replace(root)
+                    self._download_with_pinned_listing(canonical_id, session_id, generation, listing)
+                _activate_generation(generation, root, listing_manifest, recipe_json)
             return document
         except Exception:
             _deactivate_destination(root)
             if generation is not None:
                 _deactivate_destination(generation)
             raise
+
+    def _download_with_pinned_listing(
+        self,
+        canonical_id: str,
+        session_id: str,
+        generation: Path,
+        listing: Any,
+    ) -> None:
+        """Download one session's files into ``generation`` with the SDK's listing pinned to ``listing``."""
+        # Pin the SDK's internal listing to the compared snapshot.
+        original_listing_method = self.store.list_session_files
+
+        def validated_listing(
+            requested_canonical_id: str,
+            requested_session_id: str,
+            *,
+            kind: str = "",
+        ) -> dict[str, Any]:
+            if requested_canonical_id != canonical_id or requested_session_id != session_id or kind:
+                return original_listing_method(
+                    requested_canonical_id,
+                    requested_session_id,
+                    kind=kind,
+                )
+            return listing
+
+        self.store.list_session_files = validated_listing  # type: ignore[method-assign]
+        try:
+            self.store.download_session(
+                canonical_id,
+                session_id,
+                generation,
+                include_values=False,
+            )
+        finally:
+            self.store.list_session_files = original_listing_method  # type: ignore[method-assign]
 
     def search_identities(
         self,
@@ -424,6 +444,28 @@ class RemoteRecipeClient:
             offset=offset,
             limit=limit,
         )
+
+    def _put_bundle_files(
+        self,
+        canonical_id: str,
+        session_id: str,
+        bundle: KnowledgeBundle,
+        files_dir: Path,
+    ) -> None:
+        """Upload the bundle's artifact files and require the store to return exactly their refs."""
+        expected = {artifact.path for artifact in bundle.artifacts}
+        if expected:
+            refs = self.store.put_dir(canonical_id, session_id, files_dir)
+            returned = set(refs)
+            missing = expected - returned
+            blank = {path for path in expected if not str(refs.get(path) or "").strip()}
+            unexpected = returned - expected
+            if missing or blank or unexpected:
+                raise RemoteRecipeValidationError(
+                    "put_dir refs mismatch: "
+                    f"missing={sorted(missing)!r} blank={sorted(blank)!r} "
+                    f"unexpected={sorted(unexpected)!r}"
+                )
 
     def write_if_better(
         self,
@@ -468,19 +510,7 @@ class RemoteRecipeClient:
         prior = _champion(rollup, expected_metric=profile.primary_metric)
         if score <= prior:
             return outcome("skipped", "not_better_than_champion")
-        expected = {artifact.path for artifact in bundle.artifacts}
-        if expected:
-            refs = self.store.put_dir(canonical_id, session_id, files_dir)
-            returned = set(refs)
-            missing = expected - returned
-            blank = {path for path in expected if not str(refs.get(path) or "").strip()}
-            unexpected = returned - expected
-            if missing or blank or unexpected:
-                raise RemoteRecipeValidationError(
-                    "put_dir refs mismatch: "
-                    f"missing={sorted(missing)!r} blank={sorted(blank)!r} "
-                    f"unexpected={sorted(unexpected)!r}"
-                )
+        self._put_bundle_files(canonical_id, session_id, bundle, files_dir)
         self.store.put_knowledge(
             canonical_id,
             bundle.knowledge,

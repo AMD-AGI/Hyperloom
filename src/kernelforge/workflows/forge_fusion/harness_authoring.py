@@ -148,6 +148,28 @@ def _probe_eager_alignment(
     return aligned, reason, observed
 
 
+def _group_axis_feedback(recipe, harness_path: str, attempt: int, attempts: int) -> str:
+    """Return the fix request for a harness built on the wrong group axis, or "" when its axis is right."""
+    shape_why = harness_group_dim_mismatch(
+        Path(harness_path).read_text(encoding="utf-8", errors="replace"),
+        getattr(recipe, "shapes", {}) or {},
+    )
+    if not shape_why:
+        return ""
+    log.warning(
+        "harness attempt %d/%d used the wrong group axis: %s",
+        attempt,
+        attempts,
+        shape_why,
+    )
+    return (
+        "\n## FIX REQUIRED (group axis)\n"
+        f"{shape_why}\n"
+        "Rebuild the tensors from `n_local_groups` / `o_groups` in the "
+        "shapes block. Do not set G from gqa_groups or num_attention_heads.\n"
+    )
+
+
 def _author_baseline_harness(
     recipe,
     *,
@@ -191,23 +213,9 @@ def _author_baseline_harness(
         if not published:
             return published, error
 
-        shape_why = harness_group_dim_mismatch(
-            Path(harness_path).read_text(encoding="utf-8", errors="replace"),
-            getattr(recipe, "shapes", {}) or {},
-        )
-        if shape_why:
-            log.warning(
-                "harness attempt %d/%d used the wrong group axis: %s",
-                attempt,
-                attempts,
-                shape_why,
-            )
-            feedback = (
-                "\n## FIX REQUIRED (group axis)\n"
-                f"{shape_why}\n"
-                "Rebuild the tensors from `n_local_groups` / `o_groups` in the "
-                "shapes block. Do not set G from gqa_groups or num_attention_heads.\n"
-            )
+        group_axis_feedback = _group_axis_feedback(recipe, harness_path, attempt, attempts)
+        if group_axis_feedback:
+            feedback = group_axis_feedback
             continue
 
         aligned, why, observed = _probe_eager_alignment(

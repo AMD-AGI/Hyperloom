@@ -258,6 +258,7 @@ class BaselineFailureMixin:
             and signature == self.shared_state.baseline_last_failure_signature
         )
         self.shared_state.baseline_failure_streak += 1
+        self.shared_state.baseline_failures_this_leg += 1
         self.shared_state.baseline_last_failure_signature = signature
         streak = self.shared_state.baseline_failure_streak
         if _is_ray_cluster_infeasible(result_payload):
