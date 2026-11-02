@@ -489,7 +489,7 @@ async def integrate_controller_patches(
             )
             await session.record_keep({**_keep_result(publication, validation, keep_commit), **layer})
             session.shared_state.save(Path(session.session_dir))
-        except Exception as error:  # isolation boundary: one committed publication's KEEP recording
+        except OSError as error:
             log.warning("KEEP %s committed but recording it failed: %s", publication.operator_id, error, exc_info=True)
             return f"Git KEEP committed; SharedState recording failed: {error}"
         return ""
