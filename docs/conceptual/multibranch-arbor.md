@@ -122,12 +122,8 @@ In the Hyperloom paths below, `src/hyperloom_multibranch/` is left out. Arbor's 
 Each concurrency is its own MB session: its own PRELUDE, Arbor(s), map from its own dossier pass, gate, integration
 and FINAL. No map is split across the points, and each point ends with its own recipe.
 
-- **Starting several:** `hyperloom-multibranch-launch`, outside MB, starts one ordinary `hyperloom-multibranch run`
-  per point and waits for them all ({doc}`Run several operating points on one machine </how-to/multibranch-launch>`).
-  Code: `launch.py`.
-- **Sessions that share a machine:** each gets its own container, its own cards, its own server port (`PORT`) and its
-  own Arbor port base (`--agent-port`).
-- **The review:** each session reviews its own map in EXPLORE; the launcher's `STATUS.md` lists the commands.
+- **Starting several:** a launcher outside MB starts one ordinary `hyperloom-multibranch run` per point.
+- **Sessions that share a machine:** each gets its own cards and its own Arbor port base (`--agent-port`).
 - **A review across the points without holding a node:** each session runs `--stop-after-map` first. A second run per
   point then takes its reviewed map and dossier (`--agent-directions`, `--agent-dossier`, `--no-review-gate`).
 
