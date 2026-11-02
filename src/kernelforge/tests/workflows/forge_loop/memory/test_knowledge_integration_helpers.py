@@ -8,6 +8,7 @@ from pathlib import Path
 from kernelforge.workflows.forge_loop.memory import knowledge_integration as integ
 from kernelforge.knowledge.kb_store.identity.run import LoopKernel
 from kernelforge.workflows.forge_loop.memory.knowledge_integration import ExperiencePublication, WarmStartHarness
+from kernelforge.workflows.forge_loop.campaign.run_state import KB_RECORD_WRITTEN, LoopStateStore, RunState
 import pytest
 
 
@@ -337,3 +338,24 @@ def test_kb_warmstart_swallows_reader_error(monkeypatch, tmp_path):
         "read_reason": "warm_start_error",
         "read_error": "RuntimeError: read blew up",
     }
+
+
+@pytest.mark.parametrize(
+    ("status", "recorded"),
+    [
+        pytest.param({"written": True, "solution": "kernel:forge-loop:softmax/rewrite-1"}, True, id="written"),
+        pytest.param({"written": False, "reason": "no_improvement"}, False, id="not-written"),
+    ],
+)
+def test_a_kb_write_is_kept_in_the_runs_events_under_its_iteration(tmp_path, status, recorded):
+    """The export reads the record from the run itself; only a write that filed the run under a record leaves one."""
+    store = LoopStateStore(str(tmp_path))
+    runner = type("Runner", (), {"state_store": store, "run_state": RunState(iteration=4)})()
+
+    integ._record_kb_write(runner, "exp-1", status)
+
+    events = [event for event in store.read_events() if event["type"] == KB_RECORD_WRITTEN]
+    expected = [{"iter": 4, "experiment_id": "exp-1", "record": "kernel:forge-loop:softmax/rewrite-1"}]
+    assert [{key: event[key] for key in ("iter", "experiment_id", "record")} for event in events] == (
+        expected if recorded else []
+    )

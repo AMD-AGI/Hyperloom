@@ -149,6 +149,8 @@ class LaneRuntimeMixin:
     async def _fill_lane_queue(self, *, iteration: int = 0, agent_factory, lane_plans) -> None:
         """Run this round's lane sessions concurrently and queue what they wrote."""
         kernel_relative = self._workspace_path(self.ic.kernel_file)
+        techniques: dict[str, dict | None] = {}
+        declared: dict[str, tuple[str, str]] = {}
 
         async def _session(
             lane: LanePlan,
@@ -164,6 +166,8 @@ class LaneRuntimeMixin:
                 _lane_prompt(lane.plan, serialized_driver=serialized_driver),
                 session_sink=sink,
             )
+            declared[lane.lane_id] = (str(sink.get("reasoning") or ""), str(sink.get("headline") or ""))
+            techniques[lane.lane_id] = sink.get("techniques")
             lesson = await self._request_lesson(iteration, sink.get("end_reason", ""), sink.get("summarize"))
             if not lesson:
                 print(f"  [lane {lane.lane_id}] no lesson from its session ({lesson.reason})")
@@ -183,7 +187,15 @@ class LaneRuntimeMixin:
                 print(f"  [lane {result.lane_id}] session lost: {result.error}")
         active_profile_id = self.run_state.agent_relay.active_profile_id
         self._lane_queue = [
-            replace(item, agent_profile_id=active_profile_id) for item in results if item.produced_candidate
+            replace(
+                item,
+                agent_profile_id=active_profile_id,
+                techniques=techniques.get(item.lane_id),
+                rationale=declared.get(item.lane_id, ("", ""))[0],
+                headline=declared.get(item.lane_id, ("", ""))[1],
+            )
+            for item in results
+            if item.produced_candidate
         ]
         print(f"  [lanes] {len(self._lane_queue)} of {len(results)} lanes produced a candidate")
         self._persist_lane_queue()

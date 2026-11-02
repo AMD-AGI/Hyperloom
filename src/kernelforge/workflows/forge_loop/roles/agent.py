@@ -25,7 +25,7 @@ from kernelforge.agent_backends.session_resume import run_session_with_api_resum
 from kernelforge.config import Config, resolve_agent_model
 from kernelforge.config.edit_policy import FORGE_PROTECTED_PATHS, TOOL_OWNED_UNTRACKED_GLOBS
 from kernelforge.knowledge.pr_knowledge.agent_tools import TOOL_NAMES as PR_TOOL_NAMES
-from kernelforge.workflows.forge_loop.gate.gate_tag import gate_outcome_tag
+from kernelforge.knowledge.techniques import TechniqueVocabulary
 from kernelforge.workflows.forge_loop.gate.insession_gate import GateMeasurement, GateScope, InSessionGate
 from kernelforge.workflows.forge_loop.memory.lessons import SessionEnd
 from kernelforge.evaluation.scoring import (
@@ -54,6 +54,15 @@ _REPO_TASK_TYPES = {"repository", "image_kernel"}
 # Wall-clock fallback for a session that never sized its own budget (every make_agent_fn caller except the forge-loop,
 # e.g. the PORT loop).
 _DEFAULT_SESSION_TIMEOUT_SEC = 90 * 60
+# The most of an iteration's rationale any record keeps.
+RATIONALE_MAX_CHARS = 500
+# Both Implementer prompts ask for the one line agent_fn records as the iteration's rationale.
+_RATIONALE_REQUEST = (
+    "Just before your `PLAN:` line, output one line starting with `RATIONALE:` for the trajectory log: the direction "
+    "you chose and why, the change you made, and why you expect it to beat the current best — or, if you are stopping "
+    "without a win, why this direction is exhausted and what you would try next. Only that line is recorded with the "
+    "iteration's keep/revert decision, so make it specific enough to compare runs by."
+)
 
 # PR KB settings forwarded to the MCP child.
 _PR_KB_CHILD_ENV_VARS = (
@@ -120,8 +129,8 @@ You are a GPU kernel optimization agent in an autonomous iteration loop.
 ## Your Task
 Each invocation: read the target kernel, review the recent iteration history,
 and modify it to improve performance. You MAY make multiple changes across
-several places this iteration — you are not limited to a single change. Then
-explain your rationale in one sentence.
+several places this iteration — you are not limited to a single change.
+{rationale_request}
 
 ## Program (what to optimize and how)
 {program_md}
@@ -155,7 +164,7 @@ explain your rationale in one sentence.
    (≤ ~12 words, one clause, plain prose, NO code/syntax) naming the optimization
    now in the file that will be committed and benchmarked, e.g. "vectorize global
    loads to 128-bit". Name only what you KEPT, not abandoned attempts or bug-fix
-   minutiae. This is the iteration's headline.
+   minutiae. This is the iteration's headline.{declare_techniques}
 
 You do NOT write a takeaway for the next iteration here. After this session ends
 you will be asked, in a separate turn, to record everything you explored — so
@@ -252,13 +261,14 @@ judge your kernel. It is yours to READ and to RUN; it is NOT yours to change.
   say so. An assumption about what the harness does is not a reason.
 - {workspace_hygiene_rule}
 - {deliverable_hygiene_rule}
+- {rationale_request}
 - As your VERY LAST output, after all edits/fixes are done and the kernel is in
   its final state, output one line starting with `PLAN:` — a SHORT headline
   (≤ ~12 words, one clause, plain prose, NO code/syntax) naming the optimization
   NOW IN THE FILE (the one that will be committed and benchmarked), e.g. "raise
   num_stages to 3 to pipeline loads". If you tried several things this session,
   name only what you KEPT, not abandoned attempts or bug-fix minutiae. This is
-  the iteration's headline.
+  the iteration's headline.{declare_techniques}
 - Then output exactly `SUBMIT_CANDIDATE` on its own final line and end the
   Session. This hands the current tracked diff to outer canonical validation.
 - You do NOT write a takeaway for the next iteration here. Once this Session
@@ -486,8 +496,8 @@ async def _run_outer_gate_turns(gate, backend, run_spec: AgentRunSpec, run_resul
             "The canonical Forge gate rejected your current candidate. "
             "Continue the SAME optimization session: inspect the concrete "
             "failure below, edit only the allowed kernel source files, "
-            "re-run any useful checks, and finish with an updated PLAN: "
-            "line. Do not modify git state or measurement files."
+            "re-run any useful checks, and finish with updated RATIONALE: "
+            "and PLAN: lines. Do not modify git state or measurement files."
             "\n\n## Canonical gate feedback\n"
             f"{decision.get('reason', '')}"
         )
@@ -583,6 +593,11 @@ def _fill_session_sink(
     """
     # PLAN — one-sentence description of THIS iteration's FINAL modification.
     session_sink["plan"] = _parse_output_tag(run_result.text, "PLAN:", 160, last=True)
+    # The same headline, and the RATIONALE line the session declared before it was measured ("" when it declared
+    # none), under names nothing replaces: the iteration that measures a lane puts the lane's whole plan under "plan",
+    # and an iteration's rationale stands in a placeholder for a session that declared none.
+    session_sink["headline"] = session_sink["plan"]
+    session_sink["reasoning"] = _parse_output_tag(run_result.text, "RATIONALE:", RATIONALE_MAX_CHARS, last=True)
     session_sink["session_id"] = run_result.session_id
     session_sink["summarize"] = summarize
     session_sink["end_reason"] = ending.end_reason
@@ -757,6 +772,7 @@ def make_agent_fn(
     )
 
     pr_mcp_servers = _pr_mcp_servers(task.pr_kb_repo, backend)
+    techniques = TechniqueVocabulary.from_config(config)
 
     prompt_sections = {
         "program_md": task.program_md,
@@ -766,6 +782,8 @@ def make_agent_fn(
         "self_profiling_section": self_profiling_section,
         "workspace_hygiene_rule": _WORKSPACE_HYGIENE_RULE,
         "deliverable_hygiene_rule": _DELIVERABLE_HYGIENE_RULE,
+        "rationale_request": _RATIONALE_REQUEST,
+        "declare_techniques": techniques.request_suffix(),
     }
     base_system_prompt = _BASE_SYSTEM_PROMPT.format(**prompt_sections)
 
@@ -905,7 +923,7 @@ def make_agent_fn(
         _finalize_gate_integrity(gate, session_sink, integrity_error)
 
         end_reason = _session_end_reason(gate=gate, run_result=run_result)
-        text = _report_session_end(backend, gate, run_result, end_reason, num_turns)
+        rationale = _report_session_end(backend, gate, run_result, end_reason, num_turns)
 
         # Hand back structured session info so the runner can feed the ExperienceLedger with the gate's objective
         # findings, and (via ``summarize``) ask this exact session to record what it explored.
@@ -922,7 +940,9 @@ def make_agent_fn(
             ),
         )
 
-        return text[:200]
+        session_sink["techniques"] = techniques.labels(run_result.text)
+
+        return rationale
 
     _describe_agent_fn(agent_fn, backend, requested_backend)
     return agent_fn
@@ -950,12 +970,14 @@ def _finalize_gate_integrity(
 
 
 def _report_session_end(backend, gate: InSessionGate | None, run_result, end_reason: str, num_turns) -> str:
-    """Print the session's one-line end record and return its rationale, tagged with the gate outcome."""
+    """Print the session's one-line end record and return the RATIONALE line the session declared."""
     edit_count, passed = run_result.edit_count, "-"
-    text = run_result.text or "no rationale provided"
+    # Only the line the agent declares: a backend's text can be the whole session, opening remarks first.
+    rationale = (
+        _parse_output_tag(run_result.text, "RATIONALE:", RATIONALE_MAX_CHARS, last=True) or "no rationale provided"
+    )
     if gate is not None:
         edit_count, passed = gate.edit_count, gate.passed
-        text = f"{gate_outcome_tag(gate, end_reason, num_turns)} {text}"
     # One structured line per session (stdout is captured by the caller's logs) so a run's end-reason distribution
     # is analyzable without the LLM.
     print(
@@ -965,7 +987,7 @@ def _report_session_end(backend, gate: InSessionGate | None, run_result, end_rea
         f"pass={passed}",
         flush=True,
     )
-    return text
+    return rationale
 
 
 def _describe_agent_fn(agent_fn: Callable[..., Awaitable[str]], backend, requested_backend: str) -> None:

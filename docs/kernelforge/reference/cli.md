@@ -35,7 +35,7 @@ kernelforge gemm-tune run --model-path <M> --framework sglang \
 kernelforge kernel-rewrite-controller --handoff-dir <H> \
     --budget-minutes <m> --output-dir <D>
 kernelforge roofline-ceiling --workspace <W> [options]
-kernelforge export-runs <LOG_ROOT>... --output <file>
+kernelforge export-runs <LOG_ROOT>... --output <file> [--collect]
 ```
 
 See {doc}`Experience store </kernelforge/reference/experience-store>` for the exact
@@ -520,26 +520,34 @@ Writes the runs found under one or more directories as one JSON document,
 `run_state.json`. A directory that never wrote those two files is not a run
 this export reports. Each candidate the run archived
 (`candidates/iter_NNN/`) is one entry, so each lane of a fan-out round is an
-entry of its own. A record that exists but is not readable JSON, or a candidate
+entry of its own, and so is each iteration that archived none, from its
+`iteration_result` event, which records what its Implementer declared. A record that exists but is not readable JSON, or a candidate
 whose `meta.json` is missing or malformed, is one entry saying why, which
 collection skips with that reason.
 
 An entry names the candidate's plan, the kernel KernelForge measured, and, when
 the candidate archived one, the diff of every file the commit touched
-(`candidates/iter_NNN/change.diff`). Its reasoning is the whole lesson
-`lessons/iter_NNN.md` or, for a single session that wrote none, the first three
-sentences of the rationale its `meta.json` records. A lane or a merge with
-neither has no reasoning. It holds the text of the `report.md` of the Analysis
+(`candidates/iter_NNN/change.diff`). Its summary and reasoning are the `PLAN:`
+headline and the `RATIONALE:` line the Implementer declared before the
+candidate was measured, which its `meta.json` records as `headline` and
+`reasoning`; a lane's are its own Implementer's. A candidate archived before
+`meta.json` kept them takes, for a single session, its `plan` and its
+`rationale` without the gate tag, unless KernelForge wrote that rationale
+itself. Its lesson is the whole `lessons/iter_NNN.md`, written after the
+measurement. A merge has neither a reasoning nor a lesson, and collection skips
+a candidate with neither. It holds the text of the `report.md` of the Analysis
 generation the candidate's planning round read, which its
 `orchestration/iter_NNN/context.json` names, and names that generation in its
 metadata. It carries the candidate's whole
 `meta.json` as its metadata, and the run's operator, the kernel name
 KernelForge files its KB records under, its framework, backend, GPU, and the
 benchmark driver's SHA-256 from `campaign_config.json`. The run's
-`forge-loop.log` gives the record KernelForge's own experience KB filed a kept
-candidate under; the log is only read, and no entry names it or records its path.
+`events.jsonl` gives the record KernelForge's own experience KB filed a kept
+candidate under, in a `kb_record_written` event; a run made before that event
+existed gives it in its `forge-loop.log`, which is only read, and no entry names
+it or records its path.
 
-A kept candidate's record is the one its own session printed. Each session
+A kept candidate's record is the one its own session wrote. Each session
 prints `Experiment: <id>`, and the run's `events.jsonl` records that
 `experiment_id` on the `iteration_result` of every iteration the session
 measured. The id is new for each session, and `events.jsonl` moves with
@@ -565,3 +573,4 @@ collecting them.
 |:--|:--|:--|
 | `LOG_ROOT...` | required | One or more directories to read runs from, in the order given. |
 | `--output <file>` / `-o` | required | Where to write the JSON document. The empty `raw-logs-not-collected.log` is written beside it. |
+| `--collect` | off | Then collect the document through the `kernelforge-v1` mapping into the Experience KB `HYPERLOOM_KB_URL` names, with its token in `HYPERLOOM_KB_TOKEN` or the file `HYPERLOOM_KB_TOKEN_FILE` names, as a `forge-loop` run collects itself as it ends. The receipt (`collect_receipt.json`) and the writes the KB has not taken yet (`spool/`) are kept beside the document. Collecting a run again writes nothing new, so this collects a run stopped before its end. With `HYPERLOOM_KB_AUTO_PUSH` on, the KB is then asked to push to its global KB. Exits non-zero when no KB is configured or a candidate was not written. |

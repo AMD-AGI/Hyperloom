@@ -372,6 +372,8 @@ def finish_session(
 
 ITERATION_STARTED = "iteration_started"
 ITERATION_RESULT = "iteration_result"
+# The record Kernel Forge's own experience KB filed the run under, written by the session ``experiment_id`` names.
+KB_RECORD_WRITTEN = "kb_record_written"
 
 
 def make_event(event_type: str, iteration: int, **fields: object) -> dict:

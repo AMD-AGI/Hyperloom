@@ -29,6 +29,7 @@ from kernelforge.knowledge.kb_store.identity.implementation import (
     canonical_owner_framework,
 )
 from kernelforge.workflows.forge_loop.campaign.loop_log import kb_write_line
+from kernelforge.workflows.forge_loop.campaign.run_state import KB_RECORD_WRITTEN, make_event
 from hyperloom_common.io import DURABLE, atomic_write_text, fsync_directory
 from kernelforge.evaluation.scoring import (
     DEFAULT_SNR_THRESHOLD_DB,
@@ -1396,7 +1397,18 @@ def write_experience_to_kb(
         usage=usage,
     )
     print(kb_write_line(status), flush=True)
+    _record_kb_write(loop_runner, checkpoint_experiment_id, status)
     return status
+
+
+def _record_kb_write(loop_runner: Any, experiment_id: str, status: dict) -> None:
+    """Keep the record the line above names in the run's events, under the iteration that wrote it, so an export
+    reads it from the run alone rather than from a log the caller may not keep."""
+    store, state = getattr(loop_runner, "state_store", None), getattr(loop_runner, "run_state", None)
+    record = str(status.get("solution") or "") if status.get("written") else ""
+    if store is None or state is None or not experiment_id or not record:
+        return
+    store.append_event(make_event(KB_RECORD_WRITTEN, state.iteration, experiment_id=experiment_id, record=record))
 
 
 def kb_read_status(warm: dict) -> dict:

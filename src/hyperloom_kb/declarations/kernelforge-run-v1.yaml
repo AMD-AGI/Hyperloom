@@ -1,20 +1,26 @@
-# KernelForge forge-loop runs: one Experience per candidate kernel a run archived (candidates/iter_NNN), the kernel
-# one iteration measured and KernelForge's decision to keep or revert it. A run yields one or more: each lane of a
-# fan-out round is measured as its own candidate, built from its own plan, so each lane is its own Experience.
-# rationale.reasoning is the whole lesson KernelForge writes for the iteration, lessons/iter_NNN.md: the implementer's
-# record of what it explored, including HELD-FIXED, NEGATIVES, and DISPROOF, with the loop's scope and outcome lines
-# after the verdict. When that file is absent, a single session's reasoning is the first three sentences of the
-# rationale its meta.json records. A lane or a merge with neither has none. A lesson longer than the 32 KB a text
-# field holds makes collect skip the candidate. Reasoning is required: a candidate whose logs hold none, such as a
-# merge of two earlier candidates, which no agent made, becomes no Experience.
+# KernelForge forge-loop runs: one Experience per iteration an agent gave an account of. That is each candidate kernel
+# a run archived (candidates/iter_NNN), the kernel one iteration measured and KernelForge's decision to keep or revert
+# it, and each iteration whose Implementer session archived none, such as one that changed nothing (NO_CHANGES), which
+# has no kernel and takes its decision and what its Implementer declared from its iteration_result event. A run yields
+# one or more: each lane of a fan-out round is measured as its own candidate, built from its own plan, so each lane is
+# its own Experience. An iteration no agent gave an account of, such as a round that failed to plan or found the device
+# held, becomes none.
+# rationale.reasoning is the RATIONALE line the Implementer declared before KernelForge measured the candidate, as its
+# meta.json records it (reasoning): the direction it chose and why, the change it made, and why it expected the change
+# to beat the current best, or why it stopped without one. A lane's is its own Implementer's. A candidate archived
+# before meta.json kept it takes, for a single session, the rationale the session recorded without the gate tag in
+# front, unless KernelForge wrote that rationale itself; a lane or a merge then has none. The lesson KernelForge writes
+# after the measurement knows the outcome, so it is reflection.lesson rather than reasoning. A candidate with neither,
+# such as a merge of two earlier candidates, which no agent made, becomes no Experience.
 # provenance.extra holds the candidate's metadata, which never reaches a prompt: meta, the scalar measurement and
 # decision fields of the candidate's meta.json (commit_hash, decision, kept, validation_passed, wall_ms,
 # mean_case_speedup, snr_db, vgpr, baseline_wall_ms, best_wall_ms_before, best_mean_case_speedup_before,
 # delta_vs_best_pct, session_end_reason, turns, agent_profile_id, agent_provider, agent_model, blockage_epoch), not
-# its plan, rationale, bench, profile, pmc_diagnosis, or shape; kb_record, the record KernelForge's own experience KB
-# filed a kept candidate under; candidate_origin, session or lane; analysis_generation, the Analysis generation
-# reflection.analysis_report comes from, as analysis/<commit>/generation-NNN under forge_experiments; and
-# analysis_report_omitted, why a report too long for a text field is not held.
+# its plan, rationale, headline, reasoning, bench, profile, pmc_diagnosis, or shape; kb_record, the record
+# KernelForge's own experience KB filed a kept candidate under; candidate_origin, session or lane; analysis_generation,
+# the Analysis generation reflection.analysis_report comes from, as analysis/<commit>/generation-NNN under
+# forge_experiments; analysis_report_omitted, why a report too long for a text field is not held; and lesson_omitted,
+# why a lesson too long for one is not.
 # Every Experience has a raw_logs field, and it is intentionally empty for now: it links one 0-byte file,
 # raw-logs-not-collected.log, which kernelforge export-runs writes beside its document. The global KB refuses a
 # complete Experience without raw logs, and KernelForge's run logs are not collected yet. raw_logs is a top-level
@@ -24,7 +30,7 @@
 # kernel file are different records: the diff has every file the commit touched and not the kernel's unchanged lines,
 # and the kernel file has none of the other files. The kernelforge-v1 mapping names both as code, so collection
 # screens them with the token formats only. The only Analysis output an Experience holds is the report its plan
-# was built on, as text. The lesson is rationale.reasoning, not a second copy under reflection.
+# was built on, as text.
 # The objective and every identity field always form the repeat group, with the schema: Hyperloom groups Experiences
 # that way by itself (hyperloom_kb/query_view.py repeat_group_key) and accepts group: true only on baseline and change
 # fields, so none is declared here.
@@ -73,6 +79,14 @@ baseline:
       this time, the value can occasionally rise.
     kind: number
     role: measurement
+  - name: best_mean_case_speedup_before
+    description: >-
+      The mean case speedup of the best kernel KernelForge had kept when the iteration began, as the candidate's
+      meta.json records it (best_mean_case_speedup_before): the equal-weight mean over the benchmark cases of the
+      original kernel's time on a case divided by that kernel's. KernelForge sets the bar a candidate's
+      mean_case_speedup must clear from it and the spread of the candidate's runs. Absent when meta.json records
+      none.
+    kind: number
   - name: source_ms
     description: >-
       How long the original kernel took before any change, in milliseconds, the same median of three run aggregates:
@@ -82,7 +96,8 @@ baseline:
     kind: number
 
 # Hyperloom adds reasoning, alternatives, and preconditions to every declaration. Writing them here fails with
-# `declaration.rationale redeclares a default field`. For this declaration rationale.reasoning is the whole lesson.
+# `declaration.rationale redeclares a default field`. For this declaration rationale.reasoning is the RATIONALE line
+# the Implementer declared before the measurement.
 rationale:
   - name: plan
     description: >-
@@ -102,11 +117,20 @@ rationale:
     kind: file
 
 change:
+  - name: summary
+    description: >-
+      The headline the Implementer gave the change: the PLAN line it ends its session with, before KernelForge
+      measures the change, naming in one short clause the optimization now in the file, as the candidate's meta.json
+      records it (headline). A lane's is its own Implementer's. A candidate archived before meta.json kept it takes,
+      for a single session, the plan its meta.json records, which is that same line. Absent for a merge, which no
+      Implementer made, and when the Implementer gave none.
+    role: summary
   - name: source_code
     description: >-
       The kernel file that was measured, as KernelForge archived it in candidates/iter_NNN/. The Experience links to
       the file by its name, size, and SHA-256, and the knowledge base stores the file once. This is the anchor kernel
       only. A wrapper or config edit is in change_diff_file, and the unchanged lines of this file are not in that diff.
+      Absent for an iteration that archived no candidate.
     kind: file
   - name: change_diff_file
     description: >-
@@ -117,6 +141,27 @@ change:
       archived no diff.
     kind: file
     required: false
+  - name: techniques
+    description: >-
+      The techniques the Implementer declared the change applies, each a term of the technique vocabulary its
+      campaign was given: the techniques list of a knowledge base's data/tags.yaml, such as InstinctWiki's. The
+      Implementer names them on the TECHNIQUES line it ends its session with, before KernelForge measures the
+      change, and the candidate's meta.json records them (techniques). They are the agent's own declaration: nothing
+      infers them from the diff or checks them against the kernel. Absent when it named none of them.
+    many: true
+  - name: techniques_unlisted
+    description: >-
+      Techniques the Implementer declared the change applies that its vocabulary does not have, each in at most
+      five words of its own and at most five of them, as the candidate's meta.json records them
+      (techniques_unlisted). Absent when it named none.
+    many: true
+  - name: techniques_declared
+    description: >-
+      True when the Implementer declared the change's techniques, which tells a change it declared to apply none
+      of them, which has neither techniques nor techniques_unlisted, from one no declaration was made for. Absent
+      for those: a campaign given no vocabulary, a session that wrote no TECHNIQUES line, a merge, which no agent
+      made, and every candidate KernelForge archived before it asked.
+    kind: boolean
 
 outcome:
   - name: decision
@@ -143,12 +188,28 @@ outcome:
       median of the wall_ms samples that run printed, or the single median_ms or mean_ms summary it prints, kept as
       printed. When the driver prints mean_ms, as the grouped-GEMM driver does for the arithmetic mean of its
       per-case timings, this is the median of those three means. It is reported, not decided on: KernelForge kept or
-      reverted the candidate on its mean case speedup (provenance.extra.meta.mean_case_speedup), so a kept candidate
-      can be slower than best_wall_ms_before.
+      reverted the candidate on its mean case speedup (mean_case_speedup), so a kept candidate can be slower than
+      best_wall_ms_before.
     kind: number
     role: measurement
+  - name: mean_case_speedup
+    description: >-
+      The candidate's mean case speedup, as its meta.json records it (mean_case_speedup): the equal-weight mean over
+      the benchmark cases of the original kernel's time on a case divided by the candidate's, higher is better. It
+      is the number KernelForge decides on: it keeps the candidate only when this clears a bar set from
+      best_mean_case_speedup_before and the spread of the candidate's runs. Absent when meta.json records none.
+    kind: number
 
 reflection:
+  - name: lesson
+    description: >-
+      The whole lesson KernelForge writes for the iteration after measuring the candidate, lessons/iter_NNN.md: the
+      Implementer's record of what it explored, including HELD-FIXED, NEGATIVES, and DISPROOF, with the loop's scope
+      and outcome lines after the verdict. It is written knowing the outcome, so it reflects on the decision rather
+      than being the reasoning the change was made on. Optional: absent when the iteration wrote none, and when it is
+      over the 32 KB a text field holds, which provenance.extra.lesson_omitted then says.
+    kind: text
+    required: false
   - name: analysis_report
     description: >-
       The whole report.md of the Analysis generation the candidate's plan was built on: KernelForge's cross-case

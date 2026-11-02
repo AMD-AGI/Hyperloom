@@ -14,12 +14,14 @@ from pathlib import Path
 from uuid import uuid4
 
 from hyperloom_common.timeutil import utc_now_compact
+from hyperloom_common.workspace import (
+    DEFAULT_SESSION_DIR,
+    ENV_USER_DATA_PATH,
+    default_workspace_root,
+)
 
 log = logging.getLogger(__name__)
 
-DEFAULT_SESSION_DIR = Path("/workspace/hyperloom")
-ENV_USER_DATA_PATH = "USER_DATA_PATH"
-POD_LOCAL_WORKSPACE = Path("/workspace")
 ENV_OVERRIDE_ASSET_ROOT = "INFERENCE_OPTIMIZER_ASSET_ROOT"
 ENV_CURRENT_SESSION_DIR = "INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR"
 ENV_CACHE_DIR = "HYPERLOOM_CACHE_DIR"
@@ -73,18 +75,6 @@ _MODEL_BASENAME_SANITIZE = re.compile(r"[^A-Za-z0-9._-]+")
 
 class AssetRootNotFound(RuntimeError):
     """Raised when an explicit asset root override points at a missing dir."""
-
-
-def default_workspace_root() -> Path:
-    """The workspace to use when ``$USER_DATA_PATH`` is unset."""
-    # The nearest *existing* ancestor decides: os.access is False for a path that does not exist yet, which would
-    # divert root off a /workspace it can create.
-    probe = POD_LOCAL_WORKSPACE
-    while not probe.exists() and probe != probe.parent:
-        probe = probe.parent
-    if os.access(probe, os.W_OK):
-        return DEFAULT_SESSION_DIR
-    return Path.cwd() / "session"
 
 
 def workspace_root() -> Path:

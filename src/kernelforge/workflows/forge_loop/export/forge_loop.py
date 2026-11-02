@@ -1,21 +1,25 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A plain ``kernelforge forge-loop`` run: one unit per candidate Kernel Forge archived.
+"""A plain ``kernelforge forge-loop`` run: one unit per candidate Kernel Forge archived, and per iteration that archived
+none.
 
 The run is a workspace's ``forge_experiments/`` directory, recognized by its ``campaign_config.json`` and
 ``run_state.json``. A directory that never wrote those two files is not a run this export reports. A record that
 exists but is not readable JSON, and a candidate whose ``meta.json`` is missing or malformed, is one entry saying
 why. Every attempt that produced a diff is archived as ``candidates/iter_NNN/meta.json``, and each one is a unit:
 seq N, the candidate iteration N measured and Kernel Forge's decision on it, under the run's ``campaign_id`` as
-``run_id``. The forge-loop's stdout log has no timestamps, so a unit's times come from the run's ``events.jsonl``.
-The log is read only for the experiment each session announces and the record of Kernel Forge's own experience KB a
-kept candidate was written as. Each ``iteration_result`` event records the ``experiment_id`` of the session that
-measured that iteration, and a kept candidate takes the record that session printed under its iteration. A log whose
-experiment no exported run recorded, and two logs that disagree on one session's record, leave ``kb_record`` unset.
-Nothing about a log stops the export, and no path is compared, so two runs on one kernel file each keep their own
-record, as does a run whose ``forge_experiments`` was moved out of the workspace it was made in. A unit does not
-name the log: the only files a unit names are its plan, its kernel, and the diff of every file the commit touched.
+``run_id``. An iteration that archived nothing, such as one whose session changed nothing, is a unit from its
+``iteration_result`` event, which records its decision and what its Implementer declared; the mapping skips one no
+agent gave an account of. The forge-loop's stdout log has no timestamps, so a unit's times come from the run's ``events.jsonl``.
+Each ``iteration_result`` event records the ``experiment_id`` of the session that measured that iteration, and a kept
+candidate takes the record of Kernel Forge's own experience KB that session wrote under its iteration, which a
+``kb_record_written`` event records. A run made before that event existed has it only in its stdout log, which is
+then read for the experiment each session announces and the record it printed. A log whose experiment no exported
+run recorded, and two logs that disagree on one session's record, leave ``kb_record`` unset. Nothing about a log
+stops the export, and no path is compared, so two runs on one kernel file each keep their own record, as does a run
+whose ``forge_experiments`` was moved out of the workspace it was made in. A unit does not name the log: the only
+files a unit names are its plan, its kernel, and the diff of every file the commit touched.
 
 Kernel Forge writes naive local times, and the units carry them as it wrote them; collection reads a naive time as
 UTC. That is right for a run made in a container, which normally runs in UTC, and shifts the times of a run made on a
@@ -46,14 +50,15 @@ from kernelforge.workflows.forge_loop.campaign.loop_log import (
     LOOP_BANNER,
 )
 from kernelforge.workflows.forge_loop.iteration.merge_candidates import MERGE_PLAN_PREFIX
-from kernelforge.workflows.forge_loop.campaign.run_state import ITERATION_RESULT, ITERATION_STARTED
-from kernelforge.workflows.forge_loop.gate.gate_tag import strip_gate_outcome_tag
+from kernelforge.knowledge.kb_store.identity.run import campaign_identity
+from kernelforge.workflows.forge_loop.campaign.run_state import ITERATION_RESULT, ITERATION_STARTED, KB_RECORD_WRITTEN
 from kernelforge.workflows.forge_loop.export.archive import (
     IterationArchive,
     analysis_report,
-    campaign_identity,
+    archived_lesson,
+    declared_account,
+    declared_techniques,
     first_sentences,
-    lesson_reasoning,
 )
 from kernelforge.workflows.forge_loop.export.files import FileRecord, inventory, read_json, read_text
 from kernelforge.workflows.forge_loop.export.units import CandidateOrigin, Run, read_error
@@ -128,34 +133,46 @@ def _iso(stamp: Any) -> str | None:
 
 @dataclass(frozen=True)
 class _RunEvents:
-    """When each iteration last started and reported its result, and which session measured it."""
+    """When each iteration last started and reported its result, which session measured it, and the experience KB
+    record each session wrote, by experiment id and iteration, the first for a key winning as in a log."""
 
     times: dict[tuple[str, int], str]
     experiments: dict[int, str]
+    kb_records: dict[tuple[str, int], str]
+    # Each iteration's last ``iteration_result`` event.
+    results: dict[int, dict[str, Any]]
 
 
 def _run_events(path: Path) -> _RunEvents:
-    """The times and the measuring session ``events.jsonl`` records for each iteration."""
+    """The times, the measuring session, and the experience KB records ``events.jsonl`` records for each iteration."""
 
-    times: dict[tuple[str, int], str] = {}
-    experiments: dict[int, str] = {}
+    found = _RunEvents({}, {}, {}, {})
     lines = read_text(path).splitlines() if path.is_file() else []
     for raw in lines:
         try:
             event = json.loads(raw)
         except ValueError:
             continue
-        if not isinstance(event, dict) or event.get("type") not in (ITERATION_STARTED, ITERATION_RESULT):
+        if not isinstance(event, dict) or event.get("type") not in (
+            ITERATION_STARTED,
+            ITERATION_RESULT,
+            KB_RECORD_WRITTEN,
+        ):
             continue
-        iteration = event.get("iter")
+        iteration, experiment = event.get("iter"), event.get("experiment_id")
         if not isinstance(iteration, int):
             continue
+        if event["type"] == KB_RECORD_WRITTEN:
+            if isinstance(experiment, str) and experiment and isinstance(event.get("record"), str):
+                found.kb_records.setdefault((experiment, iteration), event["record"])
+            continue
         if (stamp := _iso(event.get("ts"))) is not None:
-            times[(event["type"], iteration)] = stamp
-        experiment = event.get("experiment_id")
-        if event.get("type") == ITERATION_RESULT and isinstance(experiment, str) and experiment:
-            experiments[iteration] = experiment
-    return _RunEvents(times, experiments)
+            found.times[(event["type"], iteration)] = stamp
+        if event["type"] == ITERATION_RESULT:
+            found.results[iteration] = event
+            if isinstance(experiment, str) and experiment:
+                found.experiments[iteration] = experiment
+    return found
 
 
 def _origin(meta: dict[str, Any]) -> CandidateOrigin:
@@ -166,18 +183,11 @@ def _origin(meta: dict[str, Any]) -> CandidateOrigin:
     return CandidateOrigin.SESSION
 
 
-def _origin_fields(origin: CandidateOrigin, meta: dict[str, Any], plan: str) -> dict[str, Any]:
-    """What ``meta.json`` says of the candidate that depends on where it came from.
+def _origin_fields(origin: CandidateOrigin, plan: str) -> dict[str, Any]:
+    """What ``meta.json`` says of the candidate that depends on where it came from: a merge's plan is Kernel Forge's
+    line naming the two stacked candidates, and no agent reasoned about it."""
 
-    A merge's plan is Kernel Forge's line naming the two stacked candidates, and no agent reasoned about it. A single
-    session's ``rationale`` is the agent's own text. A lane's records neither, only which lane it was.
-    """
-
-    if origin is CandidateOrigin.MERGE:
-        return {"plan": first_sentences(plan)}
-    if origin is CandidateOrigin.SESSION:
-        return {"reasoning": first_sentences(strip_gate_outcome_tag(str(meta.get("rationale") or "")))}
-    return {}
+    return {"plan": first_sentences(plan)} if origin is CandidateOrigin.MERGE else {}
 
 
 @dataclass(frozen=True)
@@ -198,12 +208,22 @@ class _PlainRun:
         if meta is None:
             message = f"{archive.candidate / CANDIDATE_META} is not a readable JSON object"
             return read_error(f"{self.run.label}/iteration-{seq}", message)
-        origin = _origin(meta)
+        return self._unit(archive, meta, _origin(meta))
+
+    def unarchived_unit(self, seq: int, event: dict[str, Any]) -> dict[str, Any]:
+        """Seq N for an iteration N that archived no candidate, such as one whose session changed nothing: Kernel
+        Forge's decision and what its Implementer declared, from the iteration's ``iteration_result`` event."""
+
+        return self._unit(IterationArchive(self.layout, seq), _event_meta(event), CandidateOrigin.SESSION)
+
+    def _unit(self, archive: IterationArchive, meta: dict[str, Any], origin: CandidateOrigin) -> dict[str, Any]:
+        seq = archive.seq
         plan = str(meta.get("plan") or "").strip()
         plan_file = archive.plan_file(origin, plan)
         report = analysis_report(self.layout, plan_file)
         stamp = _iso(meta.get("timestamp"))
         kb_record = self.kb_records.get(seq) if meta.get("kept") else None
+        lesson = archived_lesson(archive.lesson)
         unit = self.run.unit(
             f"iteration-{seq}",
             seq,
@@ -211,21 +231,67 @@ class _PlainRun:
             candidate_origin=origin.value,
             meta=meta,
             **(report.provenance() if report is not None else {}),
+            **lesson.provenance(),
         )
         unit.update(
             started_at=self.times.get((ITERATION_STARTED, seq), stamp),
             completed_at=self.times.get((ITERATION_RESULT, seq), stamp),
             best_wall_ms_before=meta.get("best_wall_ms_before"),
+            best_mean_case_speedup_before=meta.get("best_mean_case_speedup_before"),
             decision=meta.get("decision"),
             candidate_wall_ms=meta.get("wall_ms"),
+            mean_case_speedup=meta.get("mean_case_speedup"),
         )
         unit.update(archive.fields(meta, plan_file))
-        unit.update(_origin_fields(origin, meta, plan))
-        # The lesson is the reasoning. A session that wrote none keeps the rationale excerpt _origin_fields set.
-        unit.update(lesson_reasoning(archive.lesson))
+        unit.update(declared_techniques(meta))
+        unit.update(declared_account(origin, meta))
+        unit.update(_origin_fields(origin, plan))
+        unit.update(lesson.fields())
         if report is not None and report.fits:
             unit["analysis_report"] = report.text
         return unit
+
+
+#: The scalar fields of an ``iteration_result`` event an iteration that archived no candidate takes as its metadata.
+_EVENT_META_KEYS = (
+    "decision",
+    "validation_passed",
+    "wall_ms",
+    "mean_case_speedup",
+    "snr_db",
+    "session_end_reason",
+    "turns",
+    "agent_profile_id",
+    "agent_provider",
+    "agent_model",
+    "blockage_epoch",
+    "plan",
+    "rationale",
+)
+
+
+def _event_meta(event: dict[str, Any]) -> dict[str, Any]:
+    """An ``iteration_result`` event as the ``meta.json`` of an iteration that archived no candidate.
+
+    It kept nothing, so the best it was measured against is the best the event says stood after it. Its ``plan`` is
+    the Implementer's headline. An event that records ``reasoning`` holds what the Implementer declared, empty when it
+    declared none; one written before it did gives only the rationale, which ``declared_account`` reads as an archived
+    candidate's.
+    """
+
+    meta = {key: event[key] for key in _EVENT_META_KEYS if key in event}
+    meta.update(
+        kept=False,
+        timestamp=event.get("ts"),
+        best_wall_ms_before=event.get("best_after_ms"),
+        best_mean_case_speedup_before=event.get("best_after_mean_case_speedup"),
+    )
+    if "reasoning" in event:
+        meta.update(headline=str(event.get("plan") or ""), reasoning=str(event.get("reasoning") or ""))
+    techniques = event.get("techniques")
+    if isinstance(techniques, dict):
+        meta.update(techniques=techniques.get("listed") or [], techniques_unlisted=techniques.get("unlisted") or [])
+    return meta
 
 
 def _run_units(experiments: Path, kb_records: dict[tuple[str, int], str]) -> list[dict[str, Any]]:
@@ -249,19 +315,24 @@ def _run_units(experiments: Path, kb_records: dict[tuple[str, int], str]) -> lis
         run_id=campaign_id,
         identity=campaign_identity(config),
     )
+    written = {**kb_records, **events.kb_records}
     records = {
-        seq: kb_records[(experiment, seq)]
+        seq: written[(experiment, seq)]
         for seq, experiment in events.experiments.items()
-        if (experiment, seq) in kb_records
+        if (experiment, seq) in written
     }
     plain = _PlainRun(run, layout, events.times, records)
     candidates = layout.candidates
-    numbers = sorted(
+    archived = {
         number
         for path in (candidates.iterdir() if candidates.is_dir() else ())
         if path.is_dir() and (number := tagged_iteration(path.name)) is not None
+    }
+    units = {seq: plain.candidate_unit(seq) for seq in archived}
+    units.update(
+        {seq: plain.unarchived_unit(seq, event) for seq, event in events.results.items() if seq not in archived}
     )
-    return [plain.candidate_unit(seq) for seq in numbers]
+    return [units[seq] for seq in sorted(units)]
 
 
 def forge_loop_runs(root: Path) -> list[dict[str, Any]]:

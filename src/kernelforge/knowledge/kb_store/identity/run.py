@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
 from kernelforge.knowledge.kb_store.identity.source_resolution import (
     KernelSources,
@@ -81,10 +83,40 @@ def resolve_loop_identity(
     return identity, concrete_op, resolved_framework
 
 
+def campaign_identity(config: Mapping[str, Any]) -> dict[str, Any]:
+    """The run's conditions as its ``campaign_config.json`` records them; empty and unknown ones are left out.
+
+    ``kernel`` is the name Kernel Forge files the run's own KB records under, which it derives from the operator.
+    """
+
+    filed, _operation, _framework = resolve_loop_identity(
+        LoopKernel(
+            kernel_path=str(config.get("kernel_path") or ""),
+            kernel_backend=str(config.get("kernel_backend") or ""),
+            target_functions=config.get("target_functions"),
+            source_files=config.get("source_files"),
+            framework=str(config.get("framework") or ""),
+            operator_name=str(config.get("operator_name") or ""),
+        ),
+        gpu_type=str(config.get("gpu_type") or ""),
+    )
+    identity = {
+        "operator": config.get("operator_name"),
+        "kernel": filed.kernel_name,
+        "framework": config.get("framework"),
+        "backend": config.get("kernel_backend"),
+        "gpu": config.get("gpu_type"),
+        # The benchmark driver bytes. Two runs of one operator on different drivers must not share a repeat group.
+        "driver_sha256": config.get("driver_sha256"),
+    }
+    return {key: value for key, value in identity.items() if value not in (None, "", UNKNOWN_SEGMENT)}
+
+
 __all__ = [
     "EXPERIENCE_ARTIFACT",
     "LOOP_PRODUCER",
     "LoopKernel",
     "PATCH_ARTIFACT",
+    "campaign_identity",
     "resolve_loop_identity",
 ]

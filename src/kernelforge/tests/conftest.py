@@ -142,6 +142,15 @@ def _state_root_base(tmp_path_factory) -> Path:
 
 
 @pytest.fixture(autouse=True)
+def _no_workspace_experience_kb(monkeypatch):
+    """Keep a test that runs the forge-loop from writing the checkout's .env, where the workspace's Experience KB is
+    named, and so from starting that KB's service."""
+    from kernelforge.workflows.forge_loop.export import collect
+
+    monkeypatch.setattr(collect, "use_workspace_kb", lambda environ=None: "")
+
+
+@pytest.fixture(autouse=True)
 def _isolated_state_root(request, _state_root_base, monkeypatch):
     """Point the writable-state root at a per-test temporary directory."""
     if os.environ.get("KERNELFORGE_PROJECT_ROOT", "").strip():

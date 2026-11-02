@@ -6,17 +6,20 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import logging
 import os
-import re
-import secrets
-import socket
 import sys
 from pathlib import Path
 
 from hyperloom_common.env import EnvValueError, env_bool
-from hyperloom_common.llm.llm_config import DEFAULT_CLAUDE_MODEL
+from hyperloom_kb import workspace as kb_workspace
+from hyperloom_kb.workspace import (
+    HOME_ENV,
+    LOCAL_PORTS,
+    SERVICE_DIR,
+    init_env,
+    local_url,
+)
 from hyperloom.inference_optimizer.session.paths import workspace_root
 from hyperloom_kb import (
     GLOBAL_URL_ENV,
@@ -36,22 +39,14 @@ from hyperloom_kb.schema import JsonValue
 
 log = logging.getLogger(__name__)
 
-# A workspace's service port is drawn from here, below the ephemeral range a later client socket could take.
-LOCAL_PORTS = range(20_000, 30_000)
 # What a run waits on the local service for one read, write, or health check: above the planner's 20 s default, so a
 # read fails only when the planner does. Push and pull keep the client default, since the service forwards a whole
 # batch to the global KB inside one request.
 REQUEST_TIMEOUT_SECONDS = 30.0
-SERVICE_DIR = "experience-kb"
-# Names the service's data home instead of $USER_DATA_PATH/experience-kb. One home serves one service at a time, so
-# runs on other hosts that share a session root each need their own.
-HOME_ENV = "HYPERLOOM_KB_HOME"
 # The packaged mapping a session's Experiences are collected through; its declaration is the schema this workspace
 # writes, reads, and syncs.
 MAPPING = "hyperloom-sbd-v6"
 AUTO_PUSH_ENV = "HYPERLOOM_KB_AUTO_PUSH"
-_PLACEHOLDER = "<PLEASE_FILL_IN>"
-_PLANNER_MODEL_KEYS = ("LOCAL_KB_PLANNER_MODEL", "CLAUDE_MODEL", "ANTHROPIC_MODEL")
 
 
 def mapping_schema_ref() -> str:
@@ -61,64 +56,13 @@ def mapping_schema_ref() -> str:
 
 
 def service_home() -> Path:
-    named = (os.environ.get(HOME_ENV) or "").strip()
-    return Path(named).expanduser() if named else workspace_root() / SERVICE_DIR
+    return kb_workspace.service_home(root=workspace_root())
 
 
 def spool_root() -> Path:
     """Writes the service has not accepted yet; beside its data, so a removed container keeps them."""
 
     return service_home() / "spool"
-
-
-def _port_is_free(port: int) -> bool:
-    with socket.socket() as probe:
-        try:
-            probe.bind(("127.0.0.1", port))
-        except OSError:
-            return False
-    return True
-
-
-def local_url(workspace: Path) -> str:
-    """The loopback URL of ``workspace``'s own service: a port derived from its path, past any port in use.
-
-    Two workspaces on one host land on different ports even while neither service runs.
-    """
-
-    start = int(hashlib.sha256(str(workspace.resolve()).encode()).hexdigest(), 16) % len(LOCAL_PORTS)
-    for offset in range(len(LOCAL_PORTS)):
-        port = LOCAL_PORTS[(start + offset) % len(LOCAL_PORTS)]
-        if _port_is_free(port):
-            return f"http://127.0.0.1:{port}"
-    raise LocalServiceError(f"no free port in {LOCAL_PORTS.start}-{LOCAL_PORTS.stop - 1} for the Experience service")
-
-
-def init_env(env_file: Path) -> dict[str, str]:
-    """Point ``env_file`` at its workspace's local service with a generated token, keeping any value it already sets."""
-
-    lines = env_file.read_text(encoding="utf-8").splitlines() if env_file.is_file() else []
-    defaults = {
-        "HYPERLOOM_KB_URL": local_url(env_file.resolve().parent),
-        "HYPERLOOM_KB_TOKEN": secrets.token_urlsafe(32),
-    }
-    status: dict[str, str] = {}
-    for key, default in defaults.items():
-        assignment = re.compile(rf"^\s*(?:export\s+)?{key}\s*=(.*)$")
-        index = next((i for i in reversed(range(len(lines))) if assignment.match(lines[i])), None)
-        match = None if index is None else assignment.match(lines[index])
-        value = "" if match is None else match.group(1).strip().strip("\"'")
-        if value and value != _PLACEHOLDER:
-            status[key] = "kept"
-            continue
-        if index is None:
-            lines.append(f"{key}={default}")
-        else:
-            lines[index] = f"{key}={default}"
-        status[key] = "written"
-    if "written" in status.values():
-        env_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return status
 
 
 def ensure_service(*, restart: bool = True) -> LocalService | None:
@@ -131,10 +75,7 @@ def ensure_service(*, restart: bool = True) -> LocalService | None:
     config = RemoteConfig.from_env(timeout_seconds=REQUEST_TIMEOUT_SECONDS)
     if config is None or not is_loopback(config.base_url):
         return None
-    env = dict(os.environ)
-    if not any(env.get(key) for key in _PLANNER_MODEL_KEYS):
-        env["LOCAL_KB_PLANNER_MODEL"] = DEFAULT_CLAUDE_MODEL
-    return ensure_local_service(config, service_home(), env=env, restart=restart)
+    return ensure_local_service(config, service_home(), env=kb_workspace.service_env(), restart=restart)
 
 
 def _workspace_client(command: str) -> RemoteClient:

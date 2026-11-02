@@ -230,6 +230,7 @@ class AttemptVerdictMixin:
             self._record_iteration_outcome(
                 result,
                 plan=session_sink.get("plan", ""),
+                declared=session_sink,
             )
 
         # The verdict is now known, so ask the just-finished implementer session to record what it explored, then

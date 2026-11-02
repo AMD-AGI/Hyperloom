@@ -26,6 +26,17 @@ from hyperloom_common.io import DURABLE, atomic_write_text, fsync_directory
 log = logging.getLogger(__name__)
 
 
+def _technique_fields(techniques: dict | None) -> dict:
+    """meta.json's technique fields, present only for a candidate whose Implementer declared its techniques: an empty
+    list means it declared the change applies none, and absent fields that it declared nothing."""
+    if techniques is None:
+        return {}
+    return {
+        "techniques": list(techniques.get("listed") or []),
+        "techniques_unlisted": list(techniques.get("unlisted") or []),
+    }
+
+
 @dataclass
 class CandidateRecord:
     """Everything worth persisting about one iteration's solution."""
@@ -51,6 +62,13 @@ class CandidateRecord:
     # Agent context
     plan: str = ""
     rationale: str = ""
+    # The PLAN headline and the RATIONALE line the Implementer declared before the candidate was measured; empty when
+    # it declared none, as for a merge, which no Implementer made. A lane's plan above is the lane's whole plan.
+    headline: str = ""
+    reasoning: str = ""
+    # The techniques the Implementer declared its change applies ({"listed": [...], "unlisted": [...]}); None when it
+    # declared nothing.
+    techniques: dict | None = None
 
     # Why the agent session ended + turns spent (for end-reason analysis).
     session_end_reason: str = ""
@@ -339,6 +357,9 @@ class CandidateArchive:
             "delta_vs_best_pct": delta_vs_best,
             "plan": rec.plan,
             "rationale": rec.rationale,
+            "headline": rec.headline,
+            "reasoning": rec.reasoning,
+            **_technique_fields(rec.techniques),
             "session_end_reason": rec.session_end_reason,
             "turns": rec.turns,
             "agent_profile_id": rec.agent_profile_id,

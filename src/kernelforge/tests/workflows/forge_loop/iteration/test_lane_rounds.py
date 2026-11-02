@@ -20,6 +20,7 @@ from kernelforge.workflows.forge_loop.campaign.run_state import LoopStateStore
 from kernelforge.workflows.forge_loop.iteration import campaign_runtime
 from kernelforge.workflows.forge_loop.iteration import lane_runtime
 from kernelforge.workflows.forge_loop.iteration.fanout import LaneResult
+from kernelforge.workflows.forge_loop.iteration.runner import IterationResult
 from kernelforge.tests.conftest import patch_iteration_name
 from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import (
     _counting_plan,
@@ -235,6 +236,38 @@ def test_a_single_lane_runs_the_ordinary_session(tmp_path, monkeypatch):
     assert decisions == ["NO_CHANGES"]
 
 
+def test_an_iteration_that_changed_nothing_keeps_what_its_implementer_declared(tmp_path, monkeypatch):
+    """It archives no candidate, so its iteration_result event is where the Experience KB reads the declaration."""
+    loop, workspace = _make_loop(tmp_path, monkeypatch)
+    monkeypatch.setattr(loop, "_run_orchestration", _published_plan(workspace))
+    declared = {"listed": ["vectorized-loads"], "unlisted": []}
+
+    async def agent(_kernel_path, _history, session_sink):
+        session_sink.update(
+            plan="inspect only",
+            headline="inspect only",
+            reasoning="The loads are already 128-bit, so no change here beats the best.",
+            techniques=declared,
+        )
+        return "No source change was needed."
+
+    asyncio.run(
+        loop.run(
+            runner_module.LoopAgents(
+                agent_fn=agent,
+                agent_factory=_lane_agent_factory({}),
+                orchestration_service=object(),
+                supervisor_fn=_unused_supervisor,
+            )
+        )
+    )
+
+    [event] = [e for e in LoopStateStore(str(workspace)).read_events() if e.get("type") == "iteration_result"]
+    assert (event["decision"], event["plan"]) == ("NO_CHANGES", "inspect only")
+    assert event["reasoning"] == "The loads are already 128-bit, so no change here beats the best."
+    assert event["techniques"] == declared
+
+
 def test_more_than_one_lane_fans_the_round_out(tmp_path, monkeypatch):
     """Guards the single-lane assertion above from passing for the wrong reason."""
     loop, workspace = _make_loop(tmp_path, monkeypatch)
@@ -291,6 +324,57 @@ def _fan_out_iteration(tmp_path, monkeypatch, rounds, **plan_kwargs):
     ]
 
 
+def test_the_iteration_that_measures_a_lane_records_that_lanes_rationale(tmp_path, monkeypatch):
+    loop, workspace = _make_loop(tmp_path, monkeypatch)
+    loop.ic = replace(loop.ic, lanes=2)
+    monkeypatch.setattr(
+        loop, "_run_orchestration", _counting_plan(loop, workspace, [], plans=("widen the loads", "stage LDS"))
+    )
+
+    def factory(lane_dir, _serialized_driver):
+        async def agent(_kernel_file, _prompt, session_sink=None):
+            lane = Path(lane_dir).name
+            path = Path(lane_dir) / "kernel.py"
+            path.write_text(path.read_text().replace("return 1", f"return 1{lane}"))
+            # What the Implementer declared, as agent_fn hands it back; its return value is the iteration's rationale.
+            session_sink.update(reasoning=f"lane {lane} expects this to beat best", headline=f"raise lane {lane}")
+            return "no rationale provided"
+
+        return agent
+
+    async def measured(iteration, plan=""):
+        return IterationResult(
+            iteration=iteration,
+            duration_sec=0.01,
+            validation_passed=True,
+            validation_summary="passed",
+            wall_ms=1.0,
+            mean_case_speedup=1.0,
+            kept=False,
+            bench_detail={"case_times": {"case": 1.0}},
+        )
+
+    monkeypatch.setattr(loop, "run_one_iteration", measured)
+
+    asyncio.run(
+        loop.run(
+            runner_module.LoopAgents(
+                agent_fn=_no_change_agent,
+                agent_factory=factory,
+                orchestration_service=object(),
+                supervisor_fn=_unused_supervisor,
+            )
+        )
+    )
+
+    [event] = [e for e in LoopStateStore(str(workspace)).read_events() if e.get("type") == "iteration_result"]
+    assert event["rationale"] == "lane 1 of a fan-out round: lane 1 expects this to beat best"
+    # The sibling stays queued with its own rationale for the iteration that measures it.
+    assert [(item.lane_id, item.rationale, item.headline) for item in loop._lane_queue] == [
+        ("2", "lane 2 expects this to beat best", "raise lane 2")
+    ]
+
+
 def test_a_planning_outage_is_not_paid_for_twice(tmp_path, monkeypatch):
     """Retrying an outage inside the iteration it stopped cannot clear it.
 
@@ -304,6 +388,10 @@ def test_a_planning_outage_is_not_paid_for_twice(tmp_path, monkeypatch):
 
     assert rounds == [2]
     assert decisions == ["ORCHESTRATION_ERROR"]
+    # An iteration no Implementer ran still says why it ended.
+    events = LoopStateStore(str(tmp_path / "workspace")).read_events()
+    [event] = [event for event in events if event.get("type") == "iteration_result"]
+    assert event["rationale"].startswith("planning failed; no Implementer session: ")
 
 
 def test_a_round_that_could_only_plan_one_lane_spends_that_plan(tmp_path, monkeypatch):

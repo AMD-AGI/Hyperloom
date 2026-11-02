@@ -14,7 +14,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -36,17 +35,15 @@ from kernelforge.workflows.forge_loop.campaign.loop_log import (
     iteration_header,
     kb_write_line,
 )
-from kernelforge.workflows.forge_loop.campaign.run_state import ITERATION_RESULT, ITERATION_STARTED
+from kernelforge.workflows.forge_loop.campaign.run_state import ITERATION_RESULT, ITERATION_STARTED, KB_RECORD_WRITTEN
 from kernelforge.workflows.forge_loop.roles.critic_fallback import render_critic_fallback
-from kernelforge.workflows.forge_loop.gate.gate_tag import gate_outcome_tag
 from kernelforge.workflows.forge_loop.export.document import normalize
 
 CAMPAIGN = "5f1c0a9e2b7d4c38a6e0f1b2c3d4e5f6"
 EXPERIMENT = "a1b2c3d4"
 WORKSPACE = "forge_loop_triton_softmax_1760500000"
-GATE_TAG = gate_outcome_tag(
-    SimpleNamespace(edit_count=2, passed=True, last_mean_case_speedup=1.18, last_wall_ms=0.041), "agent_stopped", 17
-)
+# The tag an Implementer session put in front of its rationale before it recorded only its RATIONALE line.
+GATE_TAG = "[gate edits=2 pass=True end=agent_stopped turns=17 mean_case_speedup=1.180000x raw_mean=0.0410ms]"
 SESSION_RATIONALE = "Two passes over each row cost a second read. Fusing them halves the traffic."
 ROUND_PLAN = """I profiled the kernel first; here is the plan.
 
@@ -331,8 +328,10 @@ def test_a_single_session_candidate_becomes_a_complete_unit(tmp_path: Path) -> N
         "started_at": "2026-10-15T10:00:00",
         "completed_at": "2026-10-15T10:04:30",
         "best_wall_ms_before": 0.052,
+        "best_mean_case_speedup_before": 1.0,
         "decision": "KEEP",
         "candidate_wall_ms": 0.044,
+        "mean_case_speedup": 1.18,
         "plan_file": str((layout.round(1) / lane_plan_name(1)).resolve()),
         "plan": (
             "Small rows are bound by launch latency. This plan fuses the max and sum passes into one sweep. "
@@ -341,8 +340,75 @@ def test_a_single_session_candidate_becomes_a_complete_unit(tmp_path: Path) -> N
         "source_ms": 0.052,
         "source_code": str((candidate / "softmax_kernel.py").resolve()),
         "change_diff_file": str((candidate / "change.diff").resolve()),
-        "reasoning": SESSION_LESSON.strip(),
+        # Archived before meta.json kept the declared headline and reasoning: the plan is the session's headline, and
+        # its rationale without the gate tag is its reasoning.
+        "summary": HEADLINE,
+        "reasoning": SESSION_RATIONALE,
+        "lesson": SESSION_LESSON.strip(),
     }
+
+
+@pytest.mark.parametrize(
+    ("seq", "declared", "expected"),
+    [
+        pytest.param(
+            1,
+            {"headline": "fuse the max and sum passes", "reasoning": "One sweep reads each row once."},
+            {"summary": "fuse the max and sum passes", "reasoning": "One sweep reads each row once."},
+            id="session",
+        ),
+        pytest.param(
+            2,
+            {
+                "headline": "widen the loads",
+                "reasoning": "128-bit loads cut the load count.",
+                "rationale": lane_rationale("2", "128-bit loads cut the load count."),
+            },
+            {"summary": "widen the loads", "reasoning": "128-bit loads cut the load count."},
+            id="lane",
+        ),
+        pytest.param(
+            1, {"headline": "", "reasoning": "", "rationale": "no rationale provided"}, {}, id="session-declared-none"
+        ),
+        pytest.param(1, {"rationale": f"{GATE_TAG} no rationale provided"}, {"summary": HEADLINE}, id="archived-none"),
+    ],
+)
+def test_a_candidate_takes_the_headline_and_the_reasoning_its_implementer_declared(
+    tmp_path: Path, seq: int, declared: dict[str, Any], expected: dict[str, Any]
+) -> None:
+    """Not its plan, which for a lane is the lane's whole plan, nor a rationale Kernel Forge wrote in its place."""
+
+    layout = _plain_run(tmp_path)
+    _write_json(layout.candidate(seq) / CANDIDATE_META, {**_meta(layout, seq), **declared})
+
+    unit = _units(tmp_path)[f"{WORKSPACE}/iteration-{seq}"]
+
+    assert {key: unit[key] for key in ("summary", "reasoning") if key in unit} == expected
+    assert unit["provenance"]["candidate_origin"] == ("lane" if seq == 2 else "session")
+
+
+@pytest.mark.parametrize(
+    ("lesson", "omitted"),
+    [
+        pytest.param("x" * TEXT_MAX_BYTES, None, id="at-the-limit"),
+        pytest.param(
+            "é" * (TEXT_MAX_BYTES // 2) + "x",
+            f"iter_001.md is {TEXT_MAX_BYTES + 1} bytes, over the {TEXT_MAX_BYTES} a text field holds",
+            id="one-byte-over",
+        ),
+    ],
+)
+def test_a_lesson_a_text_field_cannot_hold_is_left_out_and_its_provenance_says_why(
+    tmp_path: Path, lesson: str, omitted: str | None
+) -> None:
+    layout = _plain_run(tmp_path)
+    _write(layout.lesson(1), lesson)
+
+    session = _units(tmp_path)[f"{WORKSPACE}/iteration-1"]
+
+    assert session.get("lesson") == (lesson if omitted is None else None)
+    assert session["provenance"].get("lesson_omitted") == omitted
+    assert session["reasoning"] == SESSION_RATIONALE
 
 
 def test_a_lane_candidate_takes_its_lane_plan_from_the_round_that_planned_it(tmp_path: Path) -> None:
@@ -519,6 +585,115 @@ def test_only_a_kept_candidate_carries_the_kb_record_its_iteration_wrote(tmp_pat
     assert records == [KB_RECORD, None, None]
 
 
+def _unarchived(layout: ExperimentsLayout, iteration: int, **event: Any) -> None:
+    """An iteration that archived no candidate: only its ``iteration_result`` event, and its round's handoff."""
+
+    plan = _write(layout.round(iteration) / lane_plan_name(1), "# Inspect the loads\n\nRead the ISA first.\n")
+    _write_json(layout.handoff(iteration), {"optimization_plan_path": str(plan.relative_to(layout.root.parent))})
+    record = {"ts": "2026-10-15 10:20:00", "type": ITERATION_RESULT, "iter": iteration, "experiment_id": EXPERIMENT}
+    record.update(best_after_ms=0.044, best_after_mean_case_speedup=1.18, session_end_reason="agent_stopped")
+    with layout.events.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps({**record, **event}) + "\n")
+
+
+def test_an_iteration_whose_session_changed_nothing_is_a_unit_of_its_own(tmp_path: Path) -> None:
+    """Its Implementer took part, so what it declared and the lesson after it are an Experience without a kernel."""
+
+    layout = _plain_run(tmp_path)
+    _unarchived(
+        layout,
+        5,
+        decision="NO_CHANGES",
+        plan="inspect only",
+        reasoning="The loads are already 128-bit, so no change beats the best.",
+        techniques={"listed": ["vectorized-loads"], "unlisted": []},
+        rationale="The loads are already 128-bit, so no change beats the best.",
+    )
+    _write(layout.lesson(5), "Nothing to change: the loads are 128-bit.\n")
+
+    unit = _units(tmp_path)[f"{WORKSPACE}/iteration-5"]
+
+    assert (unit["seq"], unit["decision"], unit["summary"]) == (5, "NO_CHANGES", "inspect only")
+    assert unit["reasoning"] == "The loads are already 128-bit, so no change beats the best."
+    assert unit["lesson"] == "Nothing to change: the loads are 128-bit."
+    assert (unit["techniques"], unit["techniques_declared"]) == (["vectorized-loads"], True)
+    assert (unit["best_wall_ms_before"], unit["best_mean_case_speedup_before"]) == (0.044, 1.18)
+    assert unit["plan_file"] == str((layout.round(5) / lane_plan_name(1)).resolve())
+    assert "source_code" not in unit and "change_diff_file" not in unit and unit["candidate_wall_ms"] is None
+    assert unit["provenance"]["candidate_origin"] == "session"
+
+
+def test_an_iteration_that_changed_nothing_collects_as_an_experience_without_a_kernel(tmp_path: Path) -> None:
+    layout = _plain_run(tmp_path / "logs")
+    _unarchived(layout, 5, decision="NO_CHANGES", plan="inspect only", reasoning="The loads are already 128-bit.")
+    output = tmp_path / "runs.json"
+    assert CliRunner().invoke(main, ["export-runs", str(tmp_path / "logs"), "-o", str(output)]).exit_code == 0
+
+    report = collect("kernelforge-v1", output, dry_run=True)
+
+    [experience] = [row.experience for row in report.collected if row.unit_id == f"{WORKSPACE}/iteration-5"]
+    assert experience.outcome == {"decision": "NO_CHANGES"}
+    assert experience.change == {"summary": "inspect only"}
+    assert experience.rationale["reasoning"] == "The loads are already 128-bit."
+    assert experience.provenance.extra["meta"]["session_end_reason"] == "agent_stopped"
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        pytest.param(
+            {"reasoning": "", "rationale": "planning failed; no Implementer session: TimeoutError"}, id="declared-none"
+        ),
+        pytest.param({"rationale": "planning failed; no Implementer session: TimeoutError"}, id="recorded-before"),
+    ],
+)
+def test_an_iteration_no_agent_gave_an_account_of_is_not_collected(tmp_path: Path, event: dict[str, Any]) -> None:
+    """A round that failed to plan ran no Implementer: Kernel Forge's own rationale is not reasoning."""
+
+    layout = _plain_run(tmp_path / "logs")
+    _unarchived(layout, 5, decision="ORCHESTRATION_ERROR", **event)
+    output = tmp_path / "runs.json"
+    assert CliRunner().invoke(main, ["export-runs", str(tmp_path / "logs"), "-o", str(output)]).exit_code == 0
+
+    report = collect("kernelforge-v1", output, dry_run=True)
+
+    skipped = {row.unit_id: row.reason.split(":")[0] for row in report.skipped}
+    assert skipped[f"{WORKSPACE}/iteration-5"] == "No account by an agent"
+
+
+def _record_written(layout: ExperimentsLayout, iteration: int, record: str, experiment: str = EXPERIMENT) -> None:
+    """The event Kernel Forge appends once its own experience KB has filed the run under ``record``."""
+
+    event = {"ts": "2026-10-15 10:04:40", "type": KB_RECORD_WRITTEN, "iter": iteration, "experiment_id": experiment}
+    with layout.events.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps({**event, "record": record}) + "\n")
+
+
+def test_a_kept_candidate_takes_the_kb_record_from_the_runs_events_without_a_log(tmp_path: Path) -> None:
+    """A run collected as it ends has no stdout log to read, and gives the unit a later export with the log gives."""
+
+    layout = _plain_run(tmp_path)
+    _record_written(layout, 1, KB_RECORD)
+    _record_written(layout, 2, "a record for an iteration that kept nothing")
+    _record_written(layout, 1, "the best written again later")
+
+    alone = _units(tmp_path)
+    _loop_log(tmp_path / "forge-loop.log")
+    with_log = _units(tmp_path)
+
+    records = [alone[f"{WORKSPACE}/iteration-{seq}"]["provenance"].get("kb_record") for seq in (1, 2, 3)]
+    assert records == [KB_RECORD, None, None]
+    assert alone == with_log
+
+
+def test_the_runs_events_outrank_a_log_that_names_another_record(tmp_path: Path) -> None:
+    layout = _plain_run(tmp_path)
+    _record_written(layout, 1, KB_RECORD)
+    _loop_log(tmp_path / "forge-loop.log", kb_record="a record the log alone names")
+
+    assert _units(tmp_path)[f"{WORKSPACE}/iteration-1"]["provenance"]["kb_record"] == KB_RECORD
+
+
 def test_lane_copies_are_not_runs_and_unreadable_archives_say_why(tmp_path: Path) -> None:
     layout = _plain_run(tmp_path)
     lane_copy = ExperimentsLayout.of(tmp_path / f"{LANE_ROOT_PREFIX}x1y2" / "2")
@@ -539,7 +714,7 @@ def test_lane_copies_are_not_runs_and_unreadable_archives_say_why(tmp_path: Path
     }
 
 
-def test_summary_lines_give_the_plan_and_the_whole_lesson_is_the_reasoning(tmp_path: Path) -> None:
+def test_summary_lines_give_the_plan_and_the_whole_lesson_is_the_reflection(tmp_path: Path) -> None:
     layout = _plain_run(tmp_path, round_plan=SUMMARY_PLAN, lane_plan=SUMMARY_LANE_PLAN)
     orchestration = layout.round(1)
     _write(layout.lesson(1), SESSION_LESSON)
@@ -554,12 +729,14 @@ def test_summary_lines_give_the_plan_and_the_whole_lesson_is_the_reasoning(tmp_p
         "Small rows are bound by launch latency. Each row is read twice. "
         "This plan fuses the max and sum passes into one sweep. The small cases should gain most."
     )
-    assert session["reasoning"] == SESSION_LESSON.strip()
-    assert "lesson" not in session and "lesson_file" not in session
+    # The lesson is written knowing the outcome, so it is the reflection, and the reasoning stays the session's own.
+    assert (session["reasoning"], session["lesson"]) == (SESSION_RATIONALE, SESSION_LESSON.strip())
+    assert "lesson_file" not in session
     assert session["plan_file"] == str((orchestration / lane_plan_name(1)).resolve())
-    assert (lane["plan"], lane["reasoning"]) == ("Loads are 32-bit. This lane widens them.", LANE_LESSON.strip())
+    assert (lane["plan"], lane["lesson"]) == ("Loads are 32-bit. This lane widens them.", LANE_LESSON.strip())
+    assert "reasoning" not in lane
     assert lane["plan_file"] == str((orchestration / lane_plan_name(2)).resolve())
-    assert "reasoning" not in merge
+    assert "reasoning" not in merge and "lesson" not in merge
 
 
 @pytest.mark.parametrize("lesson", [None, "\n"])
@@ -709,17 +886,22 @@ def test_the_exported_document_collects_through_the_packaged_mapping(tmp_path: P
         "backend": "triton",
         "gpu": "mi300x",
     }
-    assert row.experience.baseline == {"best_wall_ms_before": 0.052, "source_ms": 0.052}
-    assert row.experience.outcome == {"decision": "KEEP", "candidate_wall_ms": 0.044}
-    assert row.experience.rationale["reasoning"] == SESSION_LESSON.strip()
-    assert "lesson" not in row.experience.reflection
+    assert row.experience.baseline == {
+        "best_wall_ms_before": 0.052,
+        "best_mean_case_speedup_before": 1.0,
+        "source_ms": 0.052,
+    }
+    assert row.experience.outcome == {"decision": "KEEP", "candidate_wall_ms": 0.044, "mean_case_speedup": 1.18}
+    assert row.experience.change["summary"] == HEADLINE
+    assert row.experience.rationale["reasoning"] == SESSION_RATIONALE
+    assert row.experience.reflection["lesson"] == SESSION_LESSON.strip()
     assert "llm_backend" not in row.experience.provenance.extra
     assert "llm_model" not in row.experience.provenance.extra
     assert row.experience.provenance.extra["meta"] == _published_meta(_meta(layout, 1))
     assert [ref.to_dict() for ref in row.experience.raw_logs] == [EMPTY_RAW_LOG]
     assert {row.unit_id: row.reason.split(":")[0] for row in report.skipped} == {
-        f"{WORKSPACE}/iteration-2": "No reasoning, which every Experience requires",
-        f"{WORKSPACE}/iteration-3": "No reasoning, which every Experience requires",
+        f"{WORKSPACE}/iteration-2": "No account by an agent",
+        f"{WORKSPACE}/iteration-3": "No account by an agent",
     }
 
 
@@ -749,7 +931,34 @@ def test_a_token_named_case_and_a_per_token_plan_still_collect(tmp_path: Path) -
         assert name not in meta
 
 
-def test_a_run_collects_its_lanes_with_each_lesson_as_their_reasoning(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("declared", "expected"),
+    [
+        pytest.param(
+            {"techniques": ["split-k"], "techniques_unlisted": ["atomic epilogue"]},
+            {"techniques": ["split-k"], "techniques_unlisted": ["atomic epilogue"], "techniques_declared": True},
+            id="named",
+        ),
+        pytest.param({"techniques": [], "techniques_unlisted": []}, {"techniques_declared": True}, id="declared-none"),
+        pytest.param({}, {}, id="never-declared"),
+    ],
+)
+def test_the_techniques_a_session_declared_reach_its_experience(
+    tmp_path: Path, declared: dict[str, Any], expected: dict[str, Any]
+) -> None:
+    logs = tmp_path / "logs"
+    layout = _plain_run(logs)
+    _write_json(layout.candidate(1) / CANDIDATE_META, {**_meta(layout, 1), **declared})
+    output = tmp_path / "runs.json"
+    assert CliRunner().invoke(main, ["export-runs", str(logs), "-o", str(output)]).exit_code == 0
+
+    report = collect("kernelforge-v1", output, dry_run=True).to_dict()
+
+    [change] = [row["experience"]["change"] for row in report["collected"] if row["unit_id"].endswith("iteration-1")]
+    assert {key: value for key, value in change.items() if key.startswith("techniques")} == expected
+
+
+def test_a_run_collects_its_lanes_with_each_lesson_as_their_reflection(tmp_path: Path) -> None:
     logs = tmp_path / "logs"
     layout = _plain_run(logs, round_plan=SUMMARY_PLAN, lane_plan=SUMMARY_LANE_PLAN)
     _write(layout.lesson(2), LANE_LESSON)
@@ -761,23 +970,23 @@ def test_a_run_collects_its_lanes_with_each_lesson_as_their_reasoning(tmp_path: 
     experiences = {row["unit_id"]: row["experience"] for row in report["collected"]}
     assert sorted(experiences) == [f"{WORKSPACE}/iteration-1", f"{WORKSPACE}/iteration-2"]
     session, lane = experiences[f"{WORKSPACE}/iteration-1"], experiences[f"{WORKSPACE}/iteration-2"]
-    assert session["rationale"]["reasoning"] == SESSION_LESSON.strip()
-    assert "lesson" not in session["reflection"]
+    assert session["rationale"]["reasoning"] == SESSION_RATIONALE
+    assert session["reflection"]["lesson"] == SESSION_LESSON.strip()
     assert lane["rationale"] == {
-        "reasoning": LANE_LESSON.strip(),
         "plan": "Loads are 32-bit. This lane widens them.",
         "plan_file": _ref(layout.round(1) / lane_plan_name(2)),
     }
+    assert lane["reflection"]["lesson"] == LANE_LESSON.strip()
     assert lane["change"]["change_diff_file"]["name"] == "change.diff"
     assert (lane["baseline"], lane["outcome"]) == (
-        {"best_wall_ms_before": 0.044, "source_ms": 0.052},
-        {"decision": "REVERT_PERF", "candidate_wall_ms": 0.051},
+        {"best_wall_ms_before": 0.044, "best_mean_case_speedup_before": 1.18, "source_ms": 0.052},
+        {"decision": "REVERT_PERF", "candidate_wall_ms": 0.051, "mean_case_speedup": 1.02},
     )
     origins = [experience["provenance"]["extra"]["candidate_origin"] for experience in (session, lane)]
     assert origins == ["session", "lane"]
     assert session["raw_logs"] == lane["raw_logs"] == [EMPTY_RAW_LOG]
     assert [(row["unit_id"], row["reason"].split(":")[0]) for row in report["skipped"]] == [
-        (f"{WORKSPACE}/iteration-3", "No reasoning, which every Experience requires")
+        (f"{WORKSPACE}/iteration-3", "No account by an agent")
     ]
 
 

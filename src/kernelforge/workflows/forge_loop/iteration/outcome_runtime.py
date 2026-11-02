@@ -8,7 +8,9 @@ from __future__ import annotations
 import logging
 import math
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 from kernelforge.evaluation.scoring import beats_current_best
 from kernelforge.workflows.forge_loop.campaign.decision_labels import DecisionLabel
@@ -56,6 +58,7 @@ from kernelforge.workflows.forge_loop.campaign.run_state import (
     pin_iteration,
 )
 from kernelforge.workflows.forge_loop.search.search_policy import SEARCH_MODE_EXPLOIT
+from kernelforge.workflows.forge_loop.roles.agent import RATIONALE_MAX_CHARS
 from kernelforge.workflows.forge_loop.roles.supervisor import latest_supervisor_ruling_path
 
 log = logging.getLogger(__name__)
@@ -222,8 +225,10 @@ class OutcomeMixin:
         decision_label: str | None = None,
         require_durable: bool = False,
         checkpoint_metadata: dict | None = None,
+        declared: Mapping[str, Any] | None = None,
     ) -> bool:
-        """Synchronize one completed attempt into live and durable control state."""
+        """Synchronize one completed attempt into live and durable control state; ``declared`` is the session sink
+        holding what the Implementer declared, which a KEEP checkpoint carries itself."""
         plan = (plan or "").strip()
 
         try:
@@ -262,6 +267,7 @@ class OutcomeMixin:
                         plan=plan,
                         decision_label=decision_label,
                         checkpoint_metadata=checkpoint_metadata,
+                        declared=declared,
                     )
                 )
             if newly_applied:
@@ -294,14 +300,24 @@ class OutcomeMixin:
         plan: str,
         decision_label: str | None = None,
         checkpoint_metadata: dict | None = None,
+        declared: Mapping[str, Any] | None = None,
     ) -> dict:
         """Build the canonical durable event for one completed iteration."""
         resolved_decision = decision_label or _decision_label(result)
+        declared = declared if declared is not None else (checkpoint_metadata or {})
         return make_event(
             ITERATION_RESULT,
             result.iteration,
             decision=resolved_decision,
+            # Why this candidate was tried and decided, for trajectory comparison. Every path that produces an
+            # iteration names one, a placeholder when no agent ran or it gave none; only a pending KEEP recorded before
+            # the field existed has none, and then the key is omitted.
+            rationale=(result.agent_rationale or "").replace("\n", " ").strip()[:RATIONALE_MAX_CHARS] or None,
             plan=(plan or "").strip()[:120] or None,
+            # What the Implementer declared before the measurement, kept here because an iteration that archived no
+            # candidate has no meta.json to hold it. Empty, not absent, when it declared no reasoning.
+            reasoning=str(declared.get("reasoning") or "").strip(),
+            techniques=declared.get("techniques"),
             # The mode this iteration actually ran under, which is the direction identity the empty-diff streak is
             # counted against.
             search_mode=self.run_state.search_mode,
@@ -631,6 +647,9 @@ class OutcomeMixin:
                         best_mean_case_speedup_before=best_mean_case_speedup_before,
                         plan=session_sink.get("plan", ""),
                         rationale=rationale,
+                        headline=str(session_sink.get("headline") or ""),
+                        reasoning=str(session_sink.get("reasoning") or ""),
+                        techniques=session_sink.get("techniques"),
                         agent_profile_id=result.agent_profile_id,
                         agent_provider=result.agent_provider,
                         agent_model=result.agent_model,

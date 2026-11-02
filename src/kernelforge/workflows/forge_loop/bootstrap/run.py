@@ -34,7 +34,10 @@ from kernelforge.workflows.forge_loop.bootstrap.session_budget import _forge_ses
 from kernelforge.workflows.forge_loop.bootstrap.warm_start import _read_kb_warm_start, _WarmStart
 from kernelforge.agent_backends.runtime import agent_runtime
 from kernelforge.config import Config, KnowledgeConfig, agent_runtime_overrides
+from kernelforge.workflows.forge_loop.campaign.experiments_layout import ExperimentsLayout
 from kernelforge.workflows.forge_loop.memory.knowledge_integration import kb_reference_program_md
+from kernelforge.workflows.forge_loop.export import collect as run_collection
+from kernelforge.workflows.forge_loop.export.collect import collect_run, prepare_collection
 from hyperloom_common.io import DURABLE, JsonFormat, atomic_write_json
 from kernelforge.utils.git import git_head
 from kernelforge.workflows.forge_loop.campaign.schema import ExperimentSubject
@@ -411,6 +414,8 @@ class _RunInputs:
     knowledge_config: KnowledgeConfig
     deadline: _ForgeDeadline
     publish_result: Callable[[dict], None]
+    # What use_workspace_kb said about the Experience KB the run collects into, for the startup banner.
+    workspace_kb: str
 
 
 @dataclass(frozen=True)
@@ -452,6 +457,7 @@ class _SearchPlan:
     critic_enabled: bool
     warm_start: _WarmStart
     assembly: _AssemblyPreparation
+    workspace_kb: str
 
 
 def run_forge_loop(request: ForgeLoopRequest, *, publish_result: Callable[[dict], None]) -> dict:
@@ -464,6 +470,8 @@ def run_forge_loop(request: ForgeLoopRequest, *, publish_result: Callable[[dict]
         knowledge_config = KnowledgeConfig.from_env()
     except ValueError as exc:
         raise ForgeLoopError(str(exc)) from exc
+    # The workspace's one Experience KB, as its .env names it, which the run collects into as it ends.
+    workspace_kb = run_collection.use_workspace_kb()
 
     _reject_incompatible_loop_options(producer=request.knowledge.producer)
 
@@ -482,7 +490,7 @@ def run_forge_loop(request: ForgeLoopRequest, *, publish_result: Callable[[dict]
     except WorkspaceLockError as error:
         raise ForgeLoopError(str(error)) from error
     try:
-        return _run_campaign(_RunInputs(request, workspace, knowledge_config, deadline, publish_result))
+        return _run_campaign(_RunInputs(request, workspace, knowledge_config, deadline, publish_result, workspace_kb))
     finally:
         workspace_lock.release()
 
@@ -520,6 +528,7 @@ def _run_campaign(inputs: _RunInputs) -> dict:
         critic_enabled=bool(long_horizon),
         warm_start=warm_start,
         assembly=assembly,
+        workspace_kb=inputs.workspace_kb,
     )
     actors = _start_actors(run, session, opened, plan)
     return _publish(run, loop_runner, _search(run, loop_runner, session, actors, plan))
@@ -777,6 +786,8 @@ def _search(
         profiling_enabled=plan.profiling_enabled,
     )
     print("  Analysis Agent: " + ("profiled" if plan.profiling_enabled else "static-only"))
+    for line in prepare_collection(note=plan.workspace_kb):
+        print(line)
     print(f"  Orchestration: enabled with parallel specialists ({', '.join(sorted(plan.specialist_definitions))})")
     print(
         "  Plan Critic: "
@@ -840,4 +851,6 @@ def _publish(run: _ForgeRun, loop_runner: IterationLoop, reporter: _RunReporter)
         winning_iteration=int(result.get("best_iteration") or 0),
         experiment_id=str(result.get("experiment_id") or ""),
     )
+    # After the result is out, so a slow or unreachable KB never delays the caller reading it.
+    collect_run(ExperimentsLayout.of(run.request.campaign.workspace_dir).root)
     return result

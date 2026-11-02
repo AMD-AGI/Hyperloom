@@ -28,17 +28,21 @@ SERIALIZED_DRIVER_NAME = "forge_lane_driver.py"
 DEVICE_LOCK_SENTINEL = ".forge-device-bench.lock"
 LANE_ROOT_PREFIX = "forge-lanes-"
 _LANE_RATIONALE_PREFIX, _LANE_RATIONALE_SUFFIX = "lane ", " of a fan-out round"
+_LANE_OWN_RATIONALE_SEPARATOR = ": "
 
 
-def lane_rationale(lane_id: str) -> str:
-    """The rationale a lane's candidate is archived with, which says only which lane of its round produced it."""
-    return f"{_LANE_RATIONALE_PREFIX}{lane_id}{_LANE_RATIONALE_SUFFIX}"
+def lane_rationale(lane_id: str, own: str = "") -> str:
+    """The rationale a lane's candidate is archived with: which lane of its round produced it, then the lane
+    Implementer's own rationale when it gave one."""
+    head = f"{_LANE_RATIONALE_PREFIX}{lane_id}{_LANE_RATIONALE_SUFFIX}"
+    return f"{head}{_LANE_OWN_RATIONALE_SEPARATOR}{own}" if own else head
 
 
 def is_lane_rationale(text: str) -> bool:
     """Whether ``text`` is a rationale ``lane_rationale`` wrote."""
-    lane_id = text.removeprefix(_LANE_RATIONALE_PREFIX).removesuffix(_LANE_RATIONALE_SUFFIX)
-    return lane_id.isdecimal() and text == lane_rationale(lane_id)
+    head = text.partition(_LANE_OWN_RATIONALE_SEPARATOR)[0]
+    lane_id = head.removeprefix(_LANE_RATIONALE_PREFIX).removesuffix(_LANE_RATIONALE_SUFFIX)
+    return lane_id.isdecimal() and head == lane_rationale(lane_id)
 
 
 def campaign_device_lock_path(workspace: str | Path) -> Path:
@@ -68,6 +72,12 @@ class LaneResult:
     # exists. The round deletes that copy on return, so the measuring iteration
     # and a later process read it from the queue rather than resuming the session.
     lesson: SummaryOutcome = field(default_factory=SummaryOutcome)
+    # The techniques the lane's Implementer declared its change applies; None when it declared nothing.
+    techniques: dict | None = None
+    # The RATIONALE line the lane's Implementer declared and the PLAN headline it gave, recorded with the iteration
+    # that measures this candidate; empty when the session declared none or failed.
+    rationale: str = ""
+    headline: str = ""
     # What this lane's teardown found, carried structured rather than folded
     # into ``error``. The two say different things to different readers: the
     # error is why THIS lane produced nothing, which costs the round one
@@ -95,6 +105,9 @@ class LaneResult:
             "agent_profile_id": self.agent_profile_id,
             "lesson": self.lesson.text,
             "lesson_reason": self.lesson.reason,
+            "techniques": self.techniques,
+            "rationale": self.rationale,
+            "headline": self.headline,
         }
 
     @classmethod
@@ -109,6 +122,10 @@ class LaneResult:
             diff=str(entry["diff"]),
             agent_profile_id=str(entry.get("agent_profile_id") or ""),
             lesson=SummaryOutcome(text=text, reason=reason),
+            techniques=entry.get("techniques"),
+            # A queue written before rationales and headlines were kept has neither.
+            rationale=str(entry.get("rationale") or ""),
+            headline=str(entry.get("headline") or ""),
         )
 
 

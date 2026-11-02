@@ -116,8 +116,23 @@ def test_the_mapping_produces_the_packaged_kernelforge_declaration() -> None:
         ("change", "change_diff_file"),
     ]
     assert mapping.code_fields == frozenset({"change.source_code", "change.change_diff_file"})
-    assert [(field.name, field.kind.value, field.required) for field in declaration.fields("reflection")] == [
-        ("analysis_report", "text", False),
+    assert [(field.name, field.kind.value, field.many) for field in declaration.fields("change")] == [
+        ("summary", "string", False),
+        ("source_code", "file", False),
+        ("change_diff_file", "file", False),
+        ("techniques", "string", True),
+        ("techniques_unlisted", "string", True),
+        ("techniques_declared", "boolean", False),
+    ]
+    assert [(field.name, field.kind.value) for field in declaration.fields("outcome")] == [
+        ("decision", "string"),
+        ("candidate_wall_ms", "number"),
+        ("mean_case_speedup", "number"),
+    ]
+    assert declaration.role_field("change", FieldRole.SUMMARY).name == "summary"
+    assert [(field.name, field.required) for field in declaration.fields("reflection")] == [
+        ("lesson", False),
+        ("analysis_report", False),
     ]
 
 
@@ -177,10 +192,43 @@ def test_a_unit_without_an_analysis_report_projects_none(files: dict[str, Path])
 
 
 @pytest.mark.parametrize(
+    ("declared", "expected"),
+    [
+        pytest.param(
+            {"techniques": ["split-k"], "techniques_unlisted": ["atomic epilogue"], "techniques_declared": True},
+            {"techniques": ["split-k"], "techniques_unlisted": ["atomic epilogue"], "techniques_declared": True},
+            id="named",
+        ),
+        pytest.param(
+            {"techniques": [], "techniques_unlisted": [], "techniques_declared": True},
+            {"techniques_declared": True},
+            id="declared-none",
+        ),
+        pytest.param({}, {}, id="never-declared"),
+    ],
+)
+def test_the_declared_techniques_and_the_mean_case_speedups_project_into_the_experience(
+    files: dict[str, Path], declared: dict[str, Any], expected: dict[str, Any]
+) -> None:
+    unit = _session_unit(files, mean_case_speedup=1.18, best_mean_case_speedup_before=1.0, **declared)
+
+    [row] = collect(MAPPING, {"runs": [unit]}, dry_run=True).to_dict()["collected"]
+
+    experience = row["experience"]
+    assert {key: value for key, value in experience["change"].items() if key.startswith("techniques")} == expected
+    assert experience["outcome"] == {"decision": "KEEP", "candidate_wall_ms": 0.044, "mean_case_speedup": 1.18}
+    assert experience["baseline"] == {
+        "best_wall_ms_before": 0.052,
+        "best_mean_case_speedup_before": 1.0,
+        "source_ms": 0.052,
+    }
+
+
+@pytest.mark.parametrize(
     ("fields", "reason"),
     [
         ({"read_error": "run_state.json names no campaign_id"}, "The logs could not be read as a run"),
-        ({"reasoning": None}, "No reasoning, which every Experience requires"),
+        ({"reasoning": None}, "No account by an agent"),
     ],
 )
 def test_units_the_mapping_requires_more_of_are_skipped_with_its_reason(
@@ -190,6 +238,34 @@ def test_units_the_mapping_requires_more_of_are_skipped_with_its_reason(
 
     assert report["collected"] == []
     assert report["skipped"][0]["reason"].startswith(reason)
+
+
+def test_the_declared_headline_and_reasoning_and_the_lesson_after_them_project_into_the_experience(
+    files: dict[str, Path],
+) -> None:
+    """The reasoning is the account the change was made on; the lesson, written knowing the outcome, is reflection."""
+
+    unit = _session_unit(
+        files,
+        summary="fuse the max and sum passes",
+        lesson="Fusing the passes halved the reads.\nHELD-FIXED: the block size.\n",
+    )
+
+    [row] = collect(MAPPING, {"runs": [unit]}, dry_run=True).to_dict()["collected"]
+
+    experience = row["experience"]
+    assert experience["change"]["summary"] == "fuse the max and sum passes"
+    assert experience["rationale"]["reasoning"] == REASONING
+    assert experience["reflection"]["lesson"] == "Fusing the passes halved the reads.\nHELD-FIXED: the block size."
+
+
+def test_a_candidate_with_a_lesson_and_no_declared_reasoning_is_still_collected(files: dict[str, Path]) -> None:
+    unit = _session_unit(files, reasoning=None, lesson="The wider loads did not help.")
+
+    [row] = collect(MAPPING, {"runs": [unit]}, dry_run=True).to_dict()["collected"]
+
+    assert "reasoning" not in row["experience"]["rationale"]
+    assert row["experience"]["reflection"]["lesson"] == "The wider loads did not help."
 
 
 def test_reasoning_longer_than_a_text_field_holds_skips_the_candidate(files: dict[str, Path]) -> None:

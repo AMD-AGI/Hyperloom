@@ -343,6 +343,10 @@ class Config:
     # why a plain bool would make an explicit False indistinguishable.
     defer_knowledge_maps: bool | None = field(default=None)
 
+    # Absolute path of a knowledge base's tags.yaml whose techniques the Implementer declares its change in; empty
+    # asks for no declaration.
+    technique_vocabulary: str = ""
+
     def __post_init__(self):
         """Derive paths and validate the settings that need no other package.
 
@@ -376,6 +380,7 @@ class Config:
             )
         if not isinstance(self.agent_options, dict):
             raise ValueError("agent_options must be a dict")
+        self._normalize_technique_vocabulary()
         if self.experiments_dir is None:
             self.experiments_dir = self.project_root / "experiments"
         if self.local_knowledge_dir is None:
@@ -392,6 +397,13 @@ class Config:
             # Defaults on, so the env var reads as an opt-*out*: anything that
             # is not an explicit "off" leaves the pointers in place.
             self.defer_knowledge_maps = env_flag("KERNELFORGE_DEFER_KNOWLEDGE_MAPS", default=True)
+
+    def _normalize_technique_vocabulary(self) -> None:
+        """Strip the techniques vocabulary path, and refuse one that is not the absolute path of a file."""
+        self.technique_vocabulary = str(self.technique_vocabulary or "").strip()
+        vocabulary = Path(self.technique_vocabulary)
+        if self.technique_vocabulary and not (vocabulary.is_absolute() and vocabulary.is_file()):
+            raise ValueError(f"technique_vocabulary must be the absolute path of a file: {self.technique_vocabulary!r}")
 
     @classmethod
     def from_env(cls, **overrides) -> Config:
@@ -450,4 +462,5 @@ class Config:
             knowledge_config=knowledge_config,
             include_mori_kb=overrides.get("include_mori_kb"),
             defer_knowledge_maps=overrides.get("defer_knowledge_maps"),
+            technique_vocabulary=overrides.get("technique_vocabulary", os.getenv("FORGE_TECHNIQUE_VOCABULARY", "")),
         )

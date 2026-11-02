@@ -9,6 +9,7 @@ import hashlib
 import json
 import logging
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
 
 from kernelforge.workflows.forge_loop.campaign.archive import CandidateRecord
@@ -43,6 +44,9 @@ PENDING_KEEP_FIELDS = frozenset(
         "vgpr",
         "plan",
         "rationale",
+        "headline",
+        "reasoning",
+        "techniques",
         "validation_text",
         "benchmark",
         "changed_files",
@@ -150,6 +154,11 @@ class KeepCheckpointMixin:
         }
         if isinstance(pending, dict) and not set(relay_fields) & set(pending):
             pending.update(relay_fields)
+        if isinstance(pending, dict):
+            # A checkpoint written before techniques, headlines and declared reasoning were kept has none.
+            pending.setdefault("techniques", None)
+            pending.setdefault("headline", "")
+            pending.setdefault("reasoning", "")
         if not isinstance(pending, dict) or set(pending) != PENDING_KEEP_FIELDS:
             raise ValueError(f"invalid pending KEEP metadata: {path}")
         return pending
@@ -180,7 +189,7 @@ class KeepCheckpointMixin:
         self,
         result: IterationResult,
         *,
-        plan: str,
+        session_sink: Mapping,
         best_before: float | None,
         rationale: str,
         kernel_source: str,
@@ -196,7 +205,9 @@ class KeepCheckpointMixin:
         benchmark.setdefault("median_ms", result.wall_ms)
         publication_base = self.ic.campaign_base_commit or base_head
         publication_patch, publication_changed_files = self._candidate_changes(publication_base)
-        commit_message = f"iter-{result.iteration}: {rationale[:72]}"
+        # One line with no trailing space: git folds a multi-line first paragraph into one subject and trims it, and a
+        # resume compares the subject git recorded with the one stored here.
+        commit_message = f"iter-{result.iteration}: {' '.join(rationale.split())[:72]}".rstrip()
         return {
             "campaign_id": self.run_state.campaign_id,
             "session_index": self.run_state.session_index,
@@ -207,8 +218,11 @@ class KeepCheckpointMixin:
             "mean_case_speedup": result.mean_case_speedup,
             "snr_db": result.snr_db,
             "vgpr": result.vgpr,
-            "plan": (plan or "").strip(),
+            "plan": str(session_sink.get("plan") or "").strip(),
             "rationale": rationale,
+            "headline": str(session_sink.get("headline") or ""),
+            "reasoning": str(session_sink.get("reasoning") or ""),
+            "techniques": session_sink.get("techniques"),
             "validation_text": result.keep_validation_text(),
             "benchmark": benchmark,
             "changed_files": changed_files,
@@ -238,7 +252,7 @@ class KeepCheckpointMixin:
             "blockage_epoch": result.blockage_epoch,
             "search_control": self._search_control_snapshot(),
             "commit_message": commit_message,
-            "commit_subject": commit_message.splitlines()[0],
+            "commit_subject": commit_message,
             "task_fingerprint": self._task_fingerprint(),
             "git_branch": self.ic.git_branch,
         }
@@ -312,6 +326,9 @@ class KeepCheckpointMixin:
                 best_mean_case_speedup_before=pending.get("best_mean_case_speedup_before"),
                 plan=str(pending.get("plan") or ""),
                 rationale=str(pending.get("rationale") or ""),
+                headline=str(pending.get("headline") or ""),
+                reasoning=str(pending.get("reasoning") or ""),
+                techniques=pending.get("techniques"),
                 session_end_reason=str(pending.get("session_end_reason") or ""),
                 turns=pending.get("turns"),
                 agent_profile_id=str(pending.get("agent_profile_id") or ""),
@@ -412,7 +429,7 @@ class KeepCheckpointMixin:
                 try:
                     pending_keep = self._build_pending_keep(
                         result,
-                        plan=frame.session_sink.get("plan", ""),
+                        session_sink=frame.session_sink,
                         best_before=frame.best_before,
                         rationale=attempt.rationale,
                         kernel_source=attempt.attempt_source,

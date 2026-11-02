@@ -25,6 +25,8 @@ from kernelforge.workflows.forge_loop.iteration.fanout import (
     DeviceBenchmarkLock,
     LanePlan,
     LaneResult,
+    is_lane_rationale,
+    lane_rationale,
     run_lanes,
 )
 
@@ -236,6 +238,25 @@ async def test_one_failed_lane_does_not_cost_the_round(tmp_path):
     assert results[0].error.startswith("RuntimeError")
     assert results[0].produced_candidate is False
     assert results[1].produced_candidate is True
+
+
+def test_a_queued_lane_keeps_its_rationale_and_headline_across_the_queue_record():
+    """The iteration that measures a lane, in this process or a later one, records why that lane's Implementer made
+    its change and its headline; a queue written before they were kept restores with neither."""
+    lane = LaneResult(lane_id="1", plan="a", diff="d", rationale="wider loads halve the LDS traffic", headline="widen")
+
+    restored = LaneResult.from_dict(lane.to_dict())
+    assert (restored.rationale, restored.headline) == ("wider loads halve the LDS traffic", "widen")
+    older = LaneResult.from_dict({"lane_id": "1", "plan": "a", "diff": "d"})
+    assert (older.rationale, older.headline) == ("", "")
+
+
+def test_a_lane_rationale_with_the_lane_implementers_own_is_still_a_lanes():
+    """The export tells a lane's candidate from a session's by its rationale, whether or not the lane gave its own."""
+    assert lane_rationale("2", "wider loads") == "lane 2 of a fan-out round: wider loads"
+    assert is_lane_rationale(lane_rationale("2")) and is_lane_rationale(lane_rationale("2", "wider loads"))
+    assert not is_lane_rationale("lane two of a fan-out round: wider loads")
+    assert not is_lane_rationale("wider loads")
 
 
 async def test_a_lane_that_staged_its_edit_still_reports_a_candidate(tmp_path):

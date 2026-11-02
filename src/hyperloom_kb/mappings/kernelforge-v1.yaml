@@ -1,7 +1,8 @@
 format: hyperloom-kb.collect.v2
 description: >-
   KernelForge forge-loop runs, one Experience per candidate kernel a run archived, so each lane of a fan-out round
-  gets its own, each holding the time it was measured against, the agent's reasoning and plan, the Analysis report
+  gets its own, and per iteration whose Implementer session archived none but declared its reasoning or wrote a
+  lesson, each holding the time it was measured against, the agent's reasoning and plan, the Analysis report
   the plan was built on, the kernel it measured, and what KernelForge measured and decided; from the document
   kernelforge export-runs writes from a run's forge_experiments directory and its forge-loop.log. Each Experience
   links one empty raw log, raw-logs-not-collected.log, which export-runs writes beside the document.
@@ -31,10 +32,9 @@ require:
       what it found.
     check: {absent: $run.read_error}
   - reason: >-
-      No reasoning, which every Experience requires: the logs hold no lesson for this candidate and no rationale in
-      its meta.json. A merge never has one, since no agent made it, and neither does a lane whose iteration recorded
-      no lesson. For any other candidate, provide the lesson the iteration wrote.
-    check: {present: $run.reasoning}
+      No account by an agent: the candidate's Implementer declared no reasoning before it was measured, and the
+      iteration wrote no lesson after it. A merge never has either, since no agent made it.
+    check: {any: [{present: $run.reasoning}, {present: $run.lesson}]}
 
 experience:
   run_id: {token: $run.run_id}
@@ -45,18 +45,25 @@ experience:
   objective: kernel_time_ms@v1
   baseline:
     best_wall_ms_before: {number: $run.best_wall_ms_before}
+    best_mean_case_speedup_before: {number: $run.best_mean_case_speedup_before}
     source_ms: {number: $run.source_ms}
   rationale:
     reasoning: {text: $run.reasoning}
     plan: {text: $run.plan}
     plan_file: $run.plan_file
   change:
+    summary: {text: $run.summary}
     source_code: $run.source_code
     change_diff_file: $run.change_diff_file
+    techniques: $run.techniques
+    techniques_unlisted: $run.techniques_unlisted
+    techniques_declared: $run.techniques_declared
   outcome:
     decision: {text: $run.decision}
     candidate_wall_ms: {number: $run.candidate_wall_ms}
+    mean_case_speedup: {number: $run.mean_case_speedup}
   reflection:
+    lesson: {text: $run.lesson}
     analysis_report: {text: $run.analysis_report}
   raw_logs: $doc.raw_logs
   provenance:
@@ -68,6 +75,7 @@ experience:
           kb_record: $run.provenance.kb_record
           analysis_generation: $run.provenance.analysis_generation
           analysis_report_omitted: $run.provenance.analysis_report_omitted
+          lesson_omitted: $run.provenance.lesson_omitted
           meta:
             compact:
               object:

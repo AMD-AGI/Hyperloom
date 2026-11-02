@@ -227,12 +227,23 @@ skipped because every Experience records `e2e_throughput@v1`.
 
 Maps the document `kernelforge export-runs` writes from KernelForge's
 `forge-loop` runs to the packaged `kernelforge-run-v1` declaration: one
-Experience per candidate kernel a run archived, the kernel one iteration
-measured and KernelForge's decision to keep or revert it. Each lane of a
-fan-out round is measured as its own candidate, built from its own plan, so a
-run yields one or more Experiences. Collecting a run takes two steps:
+Experience per iteration an agent gave an account of. That is each candidate
+kernel a run archived, the kernel one iteration measured and KernelForge's
+decision to keep or revert it, and each iteration whose Implementer session
+archived none, such as one that changed nothing (`NO_CHANGES`), which has no
+kernel and takes its decision and what its Implementer declared from its
+`iteration_result` event. Each lane of a fan-out round is measured as its own
+candidate, built from its own plan, so a run yields one or more Experiences.
+An iteration no agent gave an account of, such as a round that failed to plan
+or found the device held, becomes none, as an optimize run publishes only the
+failures its candidate caused. A `forge-loop` run collects itself as it
+ends into the KB `HYPERLOOM_KB_URL` names (see
+[environment variables](environment-variables.md)). Any run, such as one
+stopped before its end, is collected in one step or in two:
 
 ```bash
+kernelforge export-runs <LOG_ROOT>... -o runs.json --collect
+# or
 kernelforge export-runs <LOG_ROOT>... -o runs.json
 hyperloom-kb-collect --mapping kernelforge-v1 --document runs.json --dry-run
 ```
@@ -266,21 +277,46 @@ It reads:
   `wall_ms`, the candidate's own recorded wall time, both the median of three
   run aggregates the objective describes, beside KernelForge's decision label
   in `outcome.decision`;
+- `outcome.mean_case_speedup` and `baseline.best_mean_case_speedup_before`
+  from the candidate's `meta.json` fields of those names: the equal-weight mean
+  case speedup KernelForge keeps or reverts the candidate on, and that of the
+  best kernel it had kept when the iteration began;
+- `change.techniques` and `change.techniques_unlisted` from the candidate's
+  `meta.json` fields of those names: the techniques the Implementer declared
+  its change applies, on the `TECHNIQUES:` line it ends its session with
+  before KernelForge measures the change, in the terms of the technique
+  vocabulary its campaign was given, and in its own words for any that
+  vocabulary lacks. `change.techniques_declared` is true whenever it declared
+  them, even as none, and absent when no declaration was made: a campaign
+  given no vocabulary, a session that wrote no `TECHNIQUES:` line, a merge, or
+  a candidate archived before KernelForge asked;
 - `baseline.source_ms` from the pristine baseline the run's `run_state.json`
   records, which for a run given `--baseline-json` is that file's time rather
   than that of the kernel its search started from. It is the same statistic,
   and it is not a measurement role;
 - `rationale.plan` from the whole `Summary:` line the candidate's plan opens
   with, or from the plan's first three sentences when it has none;
-- `rationale.reasoning` from the whole lesson KernelForge writes for the
-  iteration, `lessons/iter_NNN.md` (see the
-  [autonomous loop](../kernelforge/how-to/autonomous-loop.md)). That file is the
-  only reasoning record: it includes `HELD-FIXED`, `NEGATIVES`, and `DISPROOF`,
-  and the loop appends the scope and outcome lines after the verdict. A single
-  session that wrote no lesson gives the first three sentences of the rationale
-  its `meta.json` records. A lane or a merge with neither gives no reasoning.
-  A lesson longer than the 32 KB a text field holds makes collection skip the
-  candidate. Reflection does not also carry the lesson;
+- `change.summary`, the field with the `summary` role, from the candidate's
+  `meta.json` `headline`: the `PLAN:` line the Implementer ends its session
+  with before KernelForge measures the change, a lane's from its own
+  Implementer. A candidate archived before `meta.json` kept it takes, for a
+  single session, its `meta.json` `plan`, which is that same line; a merge has
+  none;
+- `rationale.reasoning` from the candidate's `meta.json` `reasoning`: the
+  `RATIONALE:` line the Implementer declared before the measurement, a lane's
+  from its own Implementer. A candidate archived before `meta.json` kept it
+  takes, for a single session, the rationale it recorded without the gate tag
+  in front, unless KernelForge wrote that rationale itself; a lane or a merge
+  then has none. Reasoning is the account the change was made on, so the
+  lesson, written after the outcome is known, is not used for it;
+- `reflection.lesson` from the whole lesson KernelForge writes for the
+  iteration after the measurement, `lessons/iter_NNN.md` (see the
+  [autonomous loop](../kernelforge/how-to/autonomous-loop.md)): it includes
+  `HELD-FIXED`, `NEGATIVES`, and `DISPROOF`, and the loop appends the scope and
+  outcome lines after the verdict. A lesson longer than the 32 KB a text field
+  holds is left out, with `provenance.extra.lesson_omitted` saying so. A
+  candidate with neither a reasoning nor a lesson, such as a merge, becomes no
+  Experience;
 - `reflection.analysis_report` from the whole `report.md` of the Analysis
   generation the candidate's plan was built on: the
   `forge_experiments/analysis/<commit>/generation-NNN/` its planning round's
@@ -301,11 +337,13 @@ It reads:
   `mean_case_speedup`, `snr_db`, `vgpr`, `baseline_wall_ms`,
   `best_wall_ms_before`, `best_mean_case_speedup_before`, `delta_vs_best_pct`,
   `session_end_reason`, `turns`, `agent_profile_id`, `agent_provider`,
-  `agent_model`, `blockage_epoch`), and not its plan, rationale, bench,
-  profile, pmc diagnosis, or shape; `kb_record`, the record KernelForge's own
-  experience KB filed a kept candidate under;
-  `candidate_origin`, `session` or `lane`; and `analysis_generation`, the
-  `analysis/<commit>/generation-NNN` the Analysis report comes from.
+  `agent_model`, `blockage_epoch`), and not its plan, rationale, headline,
+  reasoning, bench, profile, pmc diagnosis, or shape; `kb_record`, the record
+  KernelForge's own experience KB filed a kept candidate under;
+  `candidate_origin`, `session` or `lane`; `analysis_generation`, the
+  `analysis/<commit>/generation-NNN` the Analysis report comes from; and
+  `lesson_omitted` or `analysis_report_omitted`, why a text too long for its
+  field is left out.
 
 Every Experience has a `raw_logs` field, from the document's top-level
 `raw_logs`, and it is intentionally empty for now: it links exactly one 0-byte

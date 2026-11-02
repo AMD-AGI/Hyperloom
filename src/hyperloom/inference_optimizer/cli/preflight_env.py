@@ -6,10 +6,8 @@
 from __future__ import annotations
 
 import importlib.util
-import io
 import os
 import re
-import shlex
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -21,6 +19,7 @@ from hyperloom.common.env_safety import (
     is_allowed_kernel_agent_env_key,
     is_python_package_root,
 )
+from hyperloom_common.workspace import parse_env_assignments, workspace_dotenv
 from hyperloom_common.llm.llm_config import (
     LEGACY_DEEPSEEK_ENV_KEYS,
     deepseek_compat_env,
@@ -54,22 +53,7 @@ _ANTHROPIC_FALLBACK_KEYS: tuple[str, ...] = (
 
 def _resolve_dotenv_file() -> Path | None:
     """Resolve the trusted repo ``.env`` file without trusting arbitrary cwd."""
-    explicit_root = os.environ.get("REPO_ROOT", "").strip()
-    candidates: list[Path] = []
-    if explicit_root:
-        candidates.append(Path(explicit_root))
-    else:
-        # Development checkout: preflight_env.py -> cli -> inference_optimizer -> hyperloom -> src -> repo root.
-        package_root = Path(__file__).resolve().parents[4]
-        candidates.append(package_root)
-        cwd = Path.cwd()
-        if (cwd / "pyproject.toml").is_file() and (cwd / "src" / "hyperloom").is_dir():
-            candidates.append(cwd)
-    for root in candidates:
-        env_file = root / ".env"
-        if env_file.is_file():
-            return env_file
-    return None
+    return workspace_dotenv()
 
 
 def _provider_only_mode() -> str:
@@ -284,48 +268,7 @@ def _derive_runtime_paths() -> None:
 
 _KERNEL_AGENT_PATH_VARS: tuple[str, ...] = ("TRACELENS_ROOT",)
 
-_SHELL_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
-
-def _parse_env_assignments(text: str) -> dict[str, str]:
-    """Read assignments as data (first wins), decoding quoted values without expansion."""
-    out: dict[str, str] = {}
-    stream = io.StringIO(text)
-    while True:
-        start = stream.tell()
-        raw = stream.readline()
-        if not raw:
-            break
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("export "):
-            line = line[len("export ") :].lstrip()
-        key, separator, value = line.partition("=")
-        key = key.strip()
-        if not separator:
-            continue
-        if not _SHELL_NAME_RE.fullmatch(key):
-            if not any(char.isspace() for char in key):
-                out.setdefault(key, value.strip())  # The allowlist reports invalid assignment names.
-            continue
-        value = value.strip()
-        if value.startswith(("'", '"')):
-            value_start = raw.index("=") + 1
-            while value_start < len(raw) and raw[value_start] in " \t":
-                value_start += 1
-            stream.seek(start + value_start)
-            lexer = shlex.shlex(stream, posix=True)
-            lexer.whitespace_split = True
-            lexer.commenters = ""
-            try:
-                value = lexer.get_token()
-                if stream.tell() and text[stream.tell() - 1] != "\n":
-                    stream.readline()
-            except ValueError as exc:
-                raise ValueError(f"Invalid quoted environment assignment for {key}: {exc}") from exc
-        out.setdefault(key, value)
-    return out
+_parse_env_assignments = parse_env_assignments
 
 
 def _correct_kernel_agent_path_vars(file_vars: dict[str, str], env_path: Path) -> list[str]:

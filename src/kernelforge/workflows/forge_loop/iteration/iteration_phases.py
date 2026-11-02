@@ -37,6 +37,18 @@ from kernelforge.utils.process_reaping import processes_under
 log = logging.getLogger(__name__)
 
 
+def _planning_failure(iteration: int, error: str) -> IterationResult:
+    """The iteration a failed planning round produces: no Implementer session ran, so nothing was measured."""
+    return IterationResult(
+        iteration=iteration,
+        duration_sec=0.0,
+        validation_passed=False,
+        validation_summary=f"ORCHESTRATION ERROR: {error}",
+        session_end_reason="orchestration_error",
+        agent_rationale=f"planning failed; no Implementer session: {error}",
+    )
+
+
 class IterationPhasesMixin:
     """Open an iteration, source the attempt it measures from a session, a lane or a merge, and abandon it when nothing can be."""
 
@@ -132,11 +144,13 @@ class IterationPhasesMixin:
         elif queued_lane is not None:
             unmeasured_result = None
             commit_hash = ""
-            rationale = lane_rationale(queued_lane.lane_id)
+            rationale = lane_rationale(queued_lane.lane_id, queued_lane.rationale)
             attempt_source = self._read_kernel_source()
             attempt_diff = self._working_tree_diff()
             reusable_benchmark = None
             session_sink["plan"] = queued_lane.plan
+            session_sink["techniques"] = queued_lane.techniques
+            session_sink["reasoning"], session_sink["headline"] = queued_lane.rationale, queued_lane.headline
             self._bind_session_producer(session_sink, queued_lane.agent_profile_id)
             session_sink["session_started"] = True
             lane_record = queued_lane.lesson
@@ -273,13 +287,7 @@ class IterationPhasesMixin:
             )
         if plan_path is None:
             await self._abandon_iteration(
-                IterationResult(
-                    iteration=iteration,
-                    duration_sec=0.0,
-                    validation_passed=False,
-                    validation_summary=(f"ORCHESTRATION ERROR: {orchestration_error}"),
-                    session_end_reason="orchestration_error",
-                ),
+                _planning_failure(iteration, orchestration_error),
                 frame,
                 decision_label=DecisionLabel.ORCHESTRATION_ERROR.value,
                 on_iteration=on_iteration,
@@ -553,6 +561,7 @@ class IterationPhasesMixin:
             result,
             plan=session_sink.get("plan", ""),
             decision_label=decision_label,
+            declared=session_sink,
         )
         await self._record_lesson(
             result=result,

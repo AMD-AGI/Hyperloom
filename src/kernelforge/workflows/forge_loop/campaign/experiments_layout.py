@@ -82,6 +82,12 @@ class ExperimentsLayout:
         return self.root / "orchestration"
 
     @property
+    def experience_collection(self) -> Path:
+        """What collecting the run into an Experience KB keeps: the exported document, the collection's receipt, and
+        the writes the KB has not taken yet."""
+        return self.root / "experience_kb"
+
+    @property
     def lane_queue(self) -> Path:
         """Where a fan-out round's unmeasured candidates wait for the iterations that measure them."""
         return self.orchestration / "lane_queue.json"
