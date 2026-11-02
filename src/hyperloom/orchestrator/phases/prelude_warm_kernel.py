@@ -76,6 +76,104 @@ def _env_file_refs(record: Any) -> list[str]:
     return refs
 
 
+def _kernel_plan_entry(kb: Any, column: str, row: dict[str, Any]) -> dict[str, Any] | None:
+    """Resolve one champion kernel row into a local apply entry, or ``None`` when it downloads no content."""
+    # Preserve the exact Recipe row so CLOSE can carry the validated kernel content and its refs forward
+    # on the same inference page.
+    recipe_row = {k: v for k, v in row.items() if k not in _KERNEL_ROW_PATH_KEYS}
+    entry: dict[str, Any] = {
+        "column": column,
+        "meta": {k: v for k, v in recipe_row.items() if k not in _KERNEL_ROW_CONTENT_KEYS},
+        "recipe_row": recipe_row,
+    }
+    # The checkout this item was applied into.
+    host_origin = row.get(HOST_ORIGIN_KEY)
+    if isinstance(host_origin, Mapping):
+        entry["apply_root"] = str(host_origin.get("apply_root") or "").strip()
+    patch_local = kb.prior_file(str(row.get("patch") or "").strip())
+    if patch_local is not None:
+        entry["patch_path"] = str(patch_local)
+    sources: list[str] = []
+    if column == "gemm":
+        tuned_local = kb.prior_file(str(row.get("tuned_file") or "").strip())
+        if tuned_local is not None:
+            sources.append(str(tuned_local))
+    # The row's config-file env values are refs too, and a champion may name several tables; download
+    # each one so ``_warm_kernel_extra_envs`` has a local file to point this run's env at.
+    for ref in _env_file_refs(recipe_row):
+        env_local = kb.prior_file(ref)
+        if env_local is not None and str(env_local) not in sources:
+            sources.append(str(env_local))
+    if sources:
+        entry["source_paths"] = sources
+    if not entry.get("patch_path") and not sources:
+        return None
+    return entry
+
+
+def _merge_kernel_envs(envs: dict[str, str], container: Any, key: str) -> None:
+    """Fold one recorded env mapping into ``envs``, refusing a name two champions disagree on."""
+    source = container.get(key) if isinstance(container, dict) else None
+    if not isinstance(source, dict):
+        return
+    for raw_key, raw_value in source.items():
+        name = str(raw_key).strip()
+        if not name:
+            continue
+        value = str(raw_value)
+        if name in envs and envs[name] != value:
+            raise ValueError(f"current Recipe kernel env conflict for {name}: {envs[name]!r} != {value!r}")
+        envs[name] = value
+
+
+def _merge_kept_tuner_envs(envs: dict[str, str], kept: Any, local: list[str]) -> None:
+    """Fold each accepted tuner's env table in, pointing its own config var at this run's download."""
+    by_name = {Path(path).name: path for path in local}
+    for tuner in kept:
+        if not isinstance(tuner, dict):
+            continue
+        _merge_kernel_envs(envs, tuner, "envs")
+        env_var = str(tuner.get("env_var") or "").strip()
+        if not env_var:
+            continue
+        # Each accepted tuner owns its own table, so match by the recorded value's filename.
+        recorded = str(tuner.get("env_value") or envs.get(env_var) or "").strip()
+        grounded, _ = _reground_env_path_list(recorded, by_name)
+        if not any(path in by_name.values() for path in grounded) and len(local) == 1:
+            grounded = [local[0]]
+        if grounded:
+            envs[env_var] = ENV_FILE_LIST_SEP.join(grounded)
+
+
+def _reground_env_values(envs: dict[str, str], by_name: Mapping[str, str]) -> None:
+    """Re-point every env value that names files at this run's downloads.
+
+    A config-file list is re-grounded element by element, so the value this run launches with names only files this
+    run can read; anything else by the single filename it carries.
+    """
+    for name, value in list(envs.items()):
+        if "/" not in value:
+            continue
+        if not is_file_referencing_env_name(name):
+            replacement = by_name.get(Path(value).name)
+            if replacement:
+                envs[name] = replacement
+            continue
+        grounded, unreachable = _reground_env_path_list(value, by_name)
+        if unreachable:
+            log.info(
+                "warm replay drops %s element(s) this run cannot read: %s",
+                name,
+                ENV_FILE_LIST_SEP.join(unreachable),
+            )
+        if grounded:
+            envs[name] = ENV_FILE_LIST_SEP.join(grounded)
+        else:
+            # Nothing of the champion's list survives here; unset so the stack loads its default config table.
+            envs.pop(name, None)
+            log.info("warm replay unsets %s: none of %s is readable here", name, value)
+
+
 class _KernelLaunchOverlay(NamedTuple):
     """The launch config a kernel plan contributes, with the envs and targets of each contributing entry by index."""
 
@@ -152,37 +250,8 @@ class _WarmKernelPrepMixin:
             if not isinstance(rows, list):
                 continue
             for row in rows:
-                if not isinstance(row, dict):
-                    continue
-                # Preserve the exact Recipe row so CLOSE can carry the validated kernel content and its refs forward
-                # on the same inference page.
-                recipe_row = {k: v for k, v in row.items() if k not in _KERNEL_ROW_PATH_KEYS}
-                entry: dict[str, Any] = {
-                    "column": column,
-                    "meta": {k: v for k, v in recipe_row.items() if k not in _KERNEL_ROW_CONTENT_KEYS},
-                    "recipe_row": recipe_row,
-                }
-                # The checkout this item was applied into.
-                host_origin = row.get(HOST_ORIGIN_KEY)
-                if isinstance(host_origin, Mapping):
-                    entry["apply_root"] = str(host_origin.get("apply_root") or "").strip()
-                patch_local = kb.prior_file(str(row.get("patch") or "").strip())
-                if patch_local is not None:
-                    entry["patch_path"] = str(patch_local)
-                if column == "gemm":
-                    tuned_local = kb.prior_file(str(row.get("tuned_file") or "").strip())
-                    if tuned_local is not None:
-                        entry["source_paths"] = [str(tuned_local)]
-                # The row's config-file env values are refs too, and a champion may name several tables; download
-                # each one so ``_warm_kernel_extra_envs`` has a local file to point this run's env at.
-                sources = [str(path) for path in entry.get("source_paths") or []]
-                for ref in _env_file_refs(recipe_row):
-                    env_local = kb.prior_file(ref)
-                    if env_local is not None and str(env_local) not in sources:
-                        sources.append(str(env_local))
-                if sources:
-                    entry["source_paths"] = sources
-                if entry.get("patch_path") or entry.get("source_paths"):
+                entry = _kernel_plan_entry(kb, column, row) if isinstance(row, dict) else None
+                if entry is not None:
                     plan.append(entry)
         return plan
 
@@ -263,63 +332,12 @@ class _WarmKernelPrepMixin:
         meta = entry["meta"]
         local = [str(p) for p in entry.get("source_paths") or []]
         envs: dict[str, str] = {}
-
-        def _merge(container: Any, key: str) -> None:
-            source = container.get(key) if isinstance(container, dict) else None
-            if not isinstance(source, dict):
-                return
-            for raw_key, raw_value in source.items():
-                name = str(raw_key).strip()
-                if not name:
-                    continue
-                value = str(raw_value)
-                if name in envs and envs[name] != value:
-                    raise ValueError(f"current Recipe kernel env conflict for {name}: {envs[name]!r} != {value!r}")
-                envs[name] = value
-
         for key in ("extra_envs", "env_flags", "recommended_env"):
-            _merge(meta, key)
-        _merge(meta.get("e2e"), "extra_envs")
-        by_name = {Path(path).name: path for path in local}
+            _merge_kernel_envs(envs, meta, key)
+        _merge_kernel_envs(envs, meta.get("e2e"), "extra_envs")
         results = meta.get("e2e_results")
-        kept = (results.get("kept") or []) if isinstance(results, dict) else []
-        for tuner in kept:
-            if not isinstance(tuner, dict):
-                continue
-            _merge(tuner, "envs")
-            env_var = str(tuner.get("env_var") or "").strip()
-            if not env_var:
-                continue
-            # Each accepted tuner owns its own table, so match by the recorded value's filename.
-            recorded = str(tuner.get("env_value") or envs.get(env_var) or "").strip()
-            grounded, _ = _reground_env_path_list(recorded, by_name)
-            if not any(path in by_name.values() for path in grounded) and len(local) == 1:
-                grounded = [local[0]]
-            if grounded:
-                envs[env_var] = ENV_FILE_LIST_SEP.join(grounded)
-        # Re-ground any other var that names files: a config-file list element by element, so the value this run
-        # launches with names only files this run can read; anything else by the single filename it carries.
-        for name, value in list(envs.items()):
-            if "/" not in value:
-                continue
-            if not is_file_referencing_env_name(name):
-                replacement = by_name.get(Path(value).name)
-                if replacement:
-                    envs[name] = replacement
-                continue
-            grounded, unreachable = _reground_env_path_list(value, by_name)
-            if unreachable:
-                log.info(
-                    "warm replay drops %s element(s) this run cannot read: %s",
-                    name,
-                    ENV_FILE_LIST_SEP.join(unreachable),
-                )
-            if grounded:
-                envs[name] = ENV_FILE_LIST_SEP.join(grounded)
-            else:
-                # Nothing of the champion's list survives here; unset so the stack loads its default config table.
-                envs.pop(name, None)
-                log.info("warm replay unsets %s: none of %s is readable here", name, value)
+        _merge_kept_tuner_envs(envs, (results.get("kept") or []) if isinstance(results, dict) else [], local)
+        _reground_env_values(envs, {Path(path).name: path for path in local})
         return envs
 
     def _apply_warm_kernel_patch(self, entry: dict[str, Any], target: str) -> dict[str, Any]:
