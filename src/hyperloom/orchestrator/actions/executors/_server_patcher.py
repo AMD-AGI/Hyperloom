@@ -257,10 +257,15 @@ def _resolve_versioned_patches_dir(
 # Public API
 
 
-def ensure_vllm_patched_for_tracelens() -> PatchedServer | None:
+def ensure_vllm_patched_for_tracelens(checkout: Path | None = None) -> PatchedServer | None:
     """This host's copy of the installed vLLM with the TraceLens patch laid in, whose server accepts the TraceLens
-    profiler flags; ``None`` when the patch cannot be laid."""
-    return ensure_patched_copy("vllm")
+    profiler flags; ``None`` when the patch cannot be laid.
+
+    ``checkout`` is the vLLM source checkout the server imports ahead of the installed vLLM (the image source
+    ``install.sh`` prepares, whose files a session changes): the copy then mirrors its ``vllm``, as the copy goes ahead of
+    it and would otherwise put the installed files back in front of the server.
+    """
+    return ensure_patched_copy("vllm", checkout)
 
 
 def ensure_sglang_patched_for_tracelens() -> PatchedServer | None:
@@ -272,10 +277,11 @@ def ensure_sglang_patched_for_tracelens() -> PatchedServer | None:
     return None if plan is None else _ensure_patched(plan)
 
 
-def ensure_patched_copy(package: str) -> PatchedServer | None:
-    """This host's patched copy of the installed package named ``package``; ``None`` when it cannot be laid, or this
-    module patches no package of that name."""
-    plan = _plan_for(package)
+def ensure_patched_copy(package: str, checkout: Path | None = None) -> PatchedServer | None:
+    """This host's patched copy of the installed package named ``package``, or of a vLLM ``checkout`` the server imports
+    ahead of it (:func:`ensure_vllm_patched_for_tracelens`); ``None`` when it cannot be laid, or this module patches no
+    package of that name."""
+    plan = _plan_for(package, checkout)
     return None if plan is None else _ensure_patched(plan)
 
 
@@ -289,8 +295,12 @@ def lay_tracelens_patch(package: str, site: Path) -> bool:
     return plan is not None and _lay_in(plan, site)
 
 
-def _vllm_plan() -> _PatchPlan | None:
+def _vllm_plan(checkout: Path | None = None) -> _PatchPlan | None:
+    """The plan for the installed vLLM, laid in the ``vllm`` of ``checkout`` instead when it holds one: ``install.sh``
+    activates a checkout only at the installed wheel's commit, so the wheel's version picks its patch."""
     install = _discover_vllm_install()
+    if install is not None and checkout is not None and (checkout / "vllm" / "__init__.py").is_file():
+        install = (install[0], checkout)
     return None if install is None else _discover_vllm_plan(install=install)
 
 
@@ -302,10 +312,10 @@ def _sglang_plan() -> _PatchPlan | None:
     return None if version is None else _discover_sglang_gc_plan(version)
 
 
-def _plan_for(package: str) -> _PatchPlan | None:
+def _plan_for(package: str, checkout: Path | None = None) -> _PatchPlan | None:
     """The plan for the installed package named ``package``; ``None`` for a package this module does not patch."""
     if package == "vllm":
-        return _vllm_plan()
+        return _vllm_plan(checkout)
     if package == "sglang":
         return _sglang_plan()
     return None

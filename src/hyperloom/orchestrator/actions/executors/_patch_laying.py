@@ -9,7 +9,9 @@ of the server that profiles (:class:`PatchedServer`). The copy mirrors the packa
 directory the patch does not reach is a link to the installed one, a file it changes is a patched copy. A copy is built
 once per patch set and installed package, in a directory of its own that is complete before it is published and whose
 files are never changed after (Python adds its bytecode caches), so profiles running at once share it and none can take
-it from under another. A test's farm that rebuilt the framework gets the patch laid in its own files the same way.
+it from under another. A published copy is taken only when this user laid it and no one else can write it: the host's
+temporary directory is shared, and a server imports whatever stands under that name. A test's farm that rebuilt the
+framework gets the patch laid in its own files the same way.
 
 The set is applied as a transaction either way: ``git apply`` per patch, a fuzzy ``patch`` where the plan allows it, and
 the applied patches rolled back when one fails or the sentinels say the set did not land.
@@ -21,6 +23,7 @@ import hashlib
 import logging
 import os
 import shutil
+import stat
 import subprocess
 import tempfile
 from dataclasses import dataclass, replace
@@ -104,16 +107,33 @@ def _ensure_patched(plan: _PatchPlan) -> PatchedServer | None:
     """This host's copy of ``plan.package`` with the patch laid in: the one laid before, else one laid now."""
     try:
         done = Path(tempfile.gettempdir()) / _COPIES_DIR / f"{plan.framework}-{_copy_key(plan)}"
-        if _is_patched(_in_copy(plan, done / _SITE_DIR)):
+        if _is_published(plan, done):
             return PatchedServer(done / _SITE_DIR)
         with best_effort_file_lock(_LOCK_PATH, label="_server_patcher"):
-            if _is_patched(_in_copy(plan, done / _SITE_DIR)):
+            if _is_published(plan, done):
                 return PatchedServer(done / _SITE_DIR)
             built = _build_copy(plan, done)
     except OSError as e:
         log.warning("_server_patcher: cannot lay the %s %s patch in a copy (%s); skip", plan.framework, plan.version, e)
         return None
     return None if built is None else PatchedServer(built / _SITE_DIR)
+
+
+def _is_published(plan: _PatchPlan, done: Path) -> bool:
+    """Whether ``done`` is a complete copy this user published: its sentinels say so only of what it holds, and anyone
+    who can write the host's temporary directory could have put it there."""
+    return _owned(done) and _is_patched(_in_copy(plan, done / _SITE_DIR))
+
+
+def _owned(directory: Path) -> bool:
+    """Whether ``directory`` is a directory of this user's, not a link, that its group and others cannot write."""
+    try:
+        info = directory.lstat()
+    except OSError:
+        return False
+    return (
+        stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and not info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+    )
 
 
 def _copy_key(plan: _PatchPlan) -> str:
@@ -158,14 +178,17 @@ def _build_copy(plan: _PatchPlan, done: Path) -> Path | None:
 
 
 def _publish(plan: _PatchPlan, building: Path, done: Path) -> Path:
-    """``building`` renamed to ``done``; ``done`` when another process published it first; ``building`` kept where it
-    is when ``done`` holds no complete copy, which a server may be importing from, so it is never removed or replaced."""
+    """``building`` renamed to ``done``; ``done`` when another process of this user published it first; ``building``
+    kept under its own private name when ``done`` holds no complete copy of this user's, which a server may be importing
+    from, so it is never removed or replaced."""
     try:
         building.rename(done)
     except OSError as e:
-        if _is_patched(_in_copy(plan, done / _SITE_DIR)):
+        if _is_published(plan, done):
             return done
-        log.warning("_server_patcher: %s holds no complete copy (%s); this profile uses %s", done, e, building)
+        log.warning(
+            "_server_patcher: %s holds no complete copy laid by this user (%s); this profile uses %s", done, e, building
+        )
         return building
     return done
 

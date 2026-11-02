@@ -1036,7 +1036,7 @@ def _mock_patchers(monkeypatch, *, vllm: bool, sglang: bool) -> dict[str, int]:
 
     counts = {"vllm": 0, "sglang": 0}
 
-    def _vllm_stub() -> PatchedServer | None:
+    def _vllm_stub(checkout: Path | None = None) -> PatchedServer | None:
         counts["vllm"] += 1
         return PatchedServer(None) if vllm else None
 

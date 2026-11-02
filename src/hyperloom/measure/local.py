@@ -65,6 +65,7 @@ from hyperloom.measure.farm import (
     patches_aiter_sources,
     place_farm,
     place_host_copies,
+    record_unpatched,
     server_python,
     verify_farm,
 )
@@ -293,7 +294,11 @@ def _staged(outcome: TestOutcome, call: TestCall, phases: PhaseRecorder) -> Test
 def _measure(call: TestCall, phases: PhaseRecorder, tracer: ruppell.Tracer | None, notes: list[str]) -> _Run:
     """Lay out the test's environment, run its rounds and give what they produced; ``tracer`` traces the server of a
     profile, when it can be given the points (a note says why not)."""
-    with _rebuilt_environment(call) as call, _framework_tables(call) as private, _patched_server(private.call) as call:
+    with (
+        _rebuilt_environment(call, notes) as call,
+        _framework_tables(call) as private,
+        _patched_server(private.call) as call,
+    ):
         if call.kind == _PROFILE:
             _patch_profile_client(call)
         with _test_environment(call) as unset_envs:
@@ -457,12 +462,12 @@ def _patched_server(call: TestCall) -> Iterator[TestCall]:
 
 
 @contextlib.contextmanager
-def _rebuilt_environment(call: TestCall) -> Iterator[TestCall]:
+def _rebuilt_environment(call: TestCall, notes: list[str]) -> Iterator[TestCall]:
     """The call to run: when its environment is a compiled one with changes, the points name a rebuilt framework.
 
     The farm and the attachments are made the way the runner makes them, from the same blob store the compile wrote
     to, so a patched test measures the rebuilt framework here as it does in a sandbox. A test on the image as it is
-    runs unchanged.
+    runs unchanged. A profile whose patch cannot be laid in the rebuilt framework says so in ``notes`` and its points.
     """
     environment = call.environment
     if not isinstance(environment, CompiledEnvironment) or environment.is_base:
@@ -470,12 +475,12 @@ def _rebuilt_environment(call: TestCall) -> Iterator[TestCall]:
         return
     work = Path(tempfile.mkdtemp(prefix="hl-farm-"))
     try:
-        yield dataclasses.replace(call, points=_rebuilt_points(call, environment, work))
+        yield dataclasses.replace(call, points=_rebuilt_points(call, environment, work, notes))
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
 
-def _rebuilt_points(call: TestCall, environment: CompiledEnvironment, work: Path) -> tuple[Path, ...]:
+def _rebuilt_points(call: TestCall, environment: CompiledEnvironment, work: Path, notes: list[str]) -> tuple[Path, ...]:
     if call.jit is None and patches_aiter_sources(environment.roots):
         raise TestCallRefused(
             "the patch changes aiter's csrc or hsa, which is measured only by building the modules it touches in the "
@@ -498,13 +503,16 @@ def _rebuilt_points(call: TestCall, environment: CompiledEnvironment, work: Path
         inherited = inherited_environment(os.environ, call.env_overrides, call.unset_envs)
         roots = built_roots(roots, _builds(environment))
         farm = build_farm(roots, work / "farm", python=python, read_blob=read_blob, inherited=inherited)
-        if call.kind == _PROFILE:
-            lay_profile_patch(farm, _point_config(call.points[0]))
+        unpatched = lay_profile_patch(farm, _point_config(call.points[0])) if call.kind == _PROFILE else None
+        if unpatched and unpatched not in notes:
+            notes.append(unpatched)
         points = []
         for index, point in enumerate(call.points):
             config = yaml.safe_load(substitute(Path(point).read_text(encoding=_UTF8), placed)) or {}
             target = work / f"point_{index}.yaml"
             target.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_UTF8)
+            if unpatched:
+                record_unpatched(target)
             if farm is not None:
                 verify_farm(farm, place_farm(target, farm), python=python, cwd=work)
             points.append(target)

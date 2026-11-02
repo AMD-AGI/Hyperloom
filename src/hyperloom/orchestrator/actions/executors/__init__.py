@@ -18,7 +18,7 @@ from ._workload_envs import (
     materialize_config_with_envs,
 )
 from ._grid_base import GridVariant, VariantResult
-from ._profile_setup import VLLM_PATCH_PROFILER_FIELDS
+from ._profile_setup import SGLANG_PATCH_SERVER_FLAG, VLLM_PATCH_PROFILER_FIELDS
 from ._patch_laying import PatchedServer, is_patched_copy
 from ._server_patcher import ensure_patched_copy, lay_tracelens_patch
 from ._magpie_patcher import EVAL_OUTPUT_ENV, LM_EVAL_READY_FN, ensure_lm_eval_install_once
@@ -53,6 +53,7 @@ from ._spec_decode_pin import (
 )
 
 __all__ = [
+    "SGLANG_PATCH_SERVER_FLAG",
     "VLLM_PATCH_PROFILER_FIELDS",
     "PatchedServer",
     "ensure_patched_copy",

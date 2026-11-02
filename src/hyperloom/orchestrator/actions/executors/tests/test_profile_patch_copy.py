@@ -39,6 +39,17 @@ diff --git a/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
      return graph
 """
 
+#: The second patch of a set (the shape of TraceLens's ``sglang_gc_patch/sglang_0_5_21``: a decode and a prefill patch).
+_SGLANG_PREFILL = "sglang/srt/model_executor/runner/prefill_cuda_graph_runner.py"
+_SGLANG_PREFILL_PATCH = """\
+diff --git a/python/sglang/srt/model_executor/runner/prefill_cuda_graph_runner.py b/python/sglang/srt/model_executor/runner/prefill_cuda_graph_runner.py
+--- a/python/sglang/srt/model_executor/runner/prefill_cuda_graph_runner.py
++++ b/python/sglang/srt/model_executor/runner/prefill_cuda_graph_runner.py
+@@ -1 +1,2 @@
+ PREFILL = 1
++PREFILL_TAG = "_profile_runner_name"
+"""
+
 _VLLM_MODULE = "vllm.v1.worker.gpu_worker"
 _VLLM_WORKER = "vllm/v1/worker/gpu_worker.py"
 _VLLM_SOURCE = "def work():\n    return 1\n"
@@ -156,17 +167,17 @@ def _profile(tmp_path: Path, framework: str) -> dict:
     return yaml.safe_load(rendered.read_text(encoding="utf-8"))["benchmark"]["envs"]
 
 
-def _serve(install: _Install, pythonpath: str) -> tuple[str, bool]:
+def _serve(install: _Install, pythonpath: str, attribute: str = "_set_profile_trace_tag") -> tuple[str, bool]:
     """A stub server started with the profile's ``PYTHONPATH``, the installed site after it as Python would add it:
-    the file its patched module came from, and whether it carries the patch."""
+    the file its patched module came from, and whether that module has ``attribute`` (the patch's, by default)."""
     probe = (
         "import importlib, sys\n"
         "module = importlib.import_module(sys.argv[1])\n"
         "print(module.__file__)\n"
-        "print(hasattr(module, '_set_profile_trace_tag'))\n"
+        "print(hasattr(module, sys.argv[2]))\n"
     )
     done = subprocess.run(
-        [sys.executable, "-S", "-c", probe, install.module],
+        [sys.executable, "-S", "-c", probe, install.module, attribute],
         capture_output=True,
         text=True,
         check=True,
@@ -268,6 +279,66 @@ def test_two_profiles_at_once_share_one_copy_and_neither_undoes_the_other(tmp_pa
     assert install.snapshot() == before
 
 
+def test_no_profile_finds_the_copy_before_every_file_of_it_is_laid(tmp_path, monkeypatch):
+    """The copy is built under a private name and published by rename once it is complete: a profile that looks for it
+    while another lays it, between two patches of the set, finds no copy rather than one whose second file is still
+    unpatched, which its server would import."""
+    install = _Install(tmp_path, monkeypatch, "sglang")
+    install.patch.with_name("prefill.patch").write_text(_SGLANG_PREFILL_PATCH, encoding="utf-8")
+    plan = _server_patcher._sglang_plan()
+    assert plan is not None
+    published = tmp_path / "tmp" / "hyperloom-tracelens" / f"{plan.framework}-{_patch_laying._copy_key(plan)}"
+    looks: list[tuple[bool, bool]] = []
+    real_git = _patch_laying._git
+
+    def _git(git: str, args, cwd: Path) -> bool:
+        applied = real_git(git, args, cwd)
+        if "--check" not in args:
+            # What another profile finds under the published name right after this patch, before the next one.
+            prefill = published / "site" / _SGLANG_PREFILL
+            looks.append((published.exists(), prefill.is_file() and "PREFILL_TAG" in prefill.read_text("utf-8")))
+        return applied
+
+    monkeypatch.setattr(_patch_laying, "_git", _git)
+
+    patched = _server_patcher.ensure_sglang_patched_for_tracelens()
+
+    assert len(looks) == 2, "the hook ran after each patch of the set"
+    assert [complete for found, complete in looks if found] == [], (
+        "no published copy was ever missing its prefill patch"
+    )
+    assert patched is not None and patched.site == published / "site"
+    assert _serve(install, str(patched.site)) == (str(patched.site / _SGLANG_RUNNER), True)
+    assert "PREFILL_TAG" in (patched.site / _SGLANG_PREFILL).read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("planted_by", ["others-can-write-it", "another-user"])
+def test_a_copy_under_the_published_name_that_is_not_this_users_own_is_never_imported(
+    tmp_path, monkeypatch, planted_by
+):
+    """The host's temporary directory is shared, and a copy is found by its name: one this user did not lay, or that
+    others can write, is not taken whatever its sentinels say; the profile lays its own under a private name, and leaves
+    the other where it is."""
+    install = _Install(tmp_path, monkeypatch, "sglang")
+    first = _server_patcher.ensure_sglang_patched_for_tracelens()
+    assert first is not None and first.site is not None
+    planted = first.site.parent
+    (first.site / "sglang" / "srt" / "planted.py").write_text("PLANTED = 1\n", encoding="utf-8")
+    if planted_by == "others-can-write-it":
+        planted.chmod(0o777)
+    else:
+        uid = os.getuid()
+        monkeypatch.setattr(_patch_laying.os, "getuid", lambda: uid + 1)
+
+    second = _server_patcher.ensure_sglang_patched_for_tracelens()
+
+    assert second is not None and second.site is not None and second.site.parent != planted
+    assert second.site.parent.parent == planted.parent and second.site.parent.name.startswith(f".{planted.name}-")
+    assert _serve(install, str(second.site)) == (str(second.site / _SGLANG_RUNNER), True)
+    assert not (second.site / "sglang" / "srt" / "planted.py").exists()
+    assert (planted / "site" / "sglang" / "srt" / "planted.py").is_file(), "the other copy is left as it was"
+
+
 def test_a_farm_that_rebuilt_the_framework_gets_the_patch_in_its_own_files_only(tmp_path, monkeypatch):
     install = _Install(tmp_path, monkeypatch, "sglang")
     before = install.snapshot()
@@ -290,10 +361,20 @@ def test_a_farm_that_rebuilt_the_framework_gets_the_patch_in_its_own_files_only(
     assert _copies(tmp_path) == [], "a farm's patch is laid in the farm"
 
 
-def test_the_copy_goes_ahead_of_a_vllm_source_checkout_the_launch_puts_on_the_path(tmp_path, monkeypatch):
-    _Install(tmp_path, monkeypatch, "vllm")
-    checkout = tmp_path / "vllm-checkout"
-    checkout.mkdir()
+def test_the_copy_mirrors_the_vllm_image_checkout_the_launch_puts_on_the_path_and_goes_ahead_of_it(
+    tmp_path, monkeypatch
+):
+    """``install.sh`` pins the image checkout to the wheel's commit but never makes its files the wheel's, and a session
+    changes them: a copy of the wheel ahead of the checkout would profile the wheel."""
+    install = _Install(tmp_path, monkeypatch, "vllm")
+    checkout = tmp_path / "app" / "vllm"
+    for rel, text in install.files.items():
+        (checkout / rel).parent.mkdir(parents=True, exist_ok=True)
+        (checkout / rel).write_text(text, encoding="utf-8")
+    worker = checkout / _VLLM_WORKER
+    worker.write_text(_VLLM_SOURCE + "\n\nCANDIDATE = True\n", encoding="utf-8")
+    checked_out = {path: path.read_bytes() for path in checkout.rglob("*") if path.is_file()}
+    before = install.snapshot()
     monkeypatch.setenv("HYPERLOOM_VLLM_IMAGE_SOURCE", "1")
     for name in ("VLLM_REPO_PATH", "FRAMEWORK_REPO_PATH", "VLLM_DIR"):
         monkeypatch.setenv(name, str(checkout))
@@ -301,4 +382,9 @@ def test_the_copy_goes_ahead_of_a_vllm_source_checkout_the_launch_puts_on_the_pa
     envs = _profile(tmp_path, "vllm")
 
     (copy,) = _copies(tmp_path)
-    assert envs["PYTHONPATH"].split(os.pathsep)[:2] == [str(copy / "site"), str(checkout)]
+    path = envs["PYTHONPATH"]
+    assert path.split(os.pathsep)[:2] == [str(copy / "site"), str(checkout)]
+    assert _serve(install, path) == (str(copy / "site" / _VLLM_WORKER), True), "the server runs the patched copy"
+    assert _serve(install, path, "CANDIDATE")[1], "of the checkout's files, not the wheel's"
+    assert {path: path.read_bytes() for path in checkout.rglob("*") if path.is_file()} == checked_out
+    assert install.snapshot() == before

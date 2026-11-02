@@ -38,7 +38,7 @@ def profile_environment(monkeypatch):
         "TP",
     ):
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setattr(_server_patcher, "ensure_vllm_patched_for_tracelens", lambda: _PATCHED)
+    monkeypatch.setattr(_server_patcher, "ensure_vllm_patched_for_tracelens", lambda *checkout: _PATCHED)
     monkeypatch.setattr(_server_patcher, "ensure_sglang_patched_for_tracelens", lambda: _PATCHED)
 
 
@@ -70,7 +70,9 @@ def _native_config(tmp_path: Path, framework: str, **fields) -> Path:
 def test_native_and_fixed_profiles_share_patches_not_launch_controls(tmp_path, monkeypatch, framework):
     calls = []
     monkeypatch.setattr(
-        _server_patcher, f"ensure_{framework}_patched_for_tracelens", lambda: calls.append(framework) or _PATCHED
+        _server_patcher,
+        f"ensure_{framework}_patched_for_tracelens",
+        lambda *checkout: calls.append(framework) or _PATCHED,
     )
     fixed = _fixed_profile(framework)
     path = _native_config(tmp_path, framework)
@@ -188,7 +190,7 @@ def test_missing_shape_tool_keeps_native_pythonpath(tmp_path, monkeypatch):
 def test_native_profile_server_imports_the_patched_copy_first(tmp_path, monkeypatch, framework):
     copy = tmp_path / "hyperloom-tracelens" / f"{framework}-0123" / "site"
     patched = PatchedServer(copy)
-    monkeypatch.setattr(_server_patcher, f"ensure_{framework}_patched_for_tracelens", lambda: patched)
+    monkeypatch.setattr(_server_patcher, f"ensure_{framework}_patched_for_tracelens", lambda *checkout: patched)
     launch = {"version": 1, "env": {"PYTHONPATH": "/candidate/overlay:/runtime"}}
     path = _native_config(tmp_path, framework, agentx={"enabled": True, "launch_overrides": launch})
 
@@ -283,7 +285,7 @@ def test_fixed_shape_setup_preserves_request_options_and_capture_window(tmp_path
 @pytest.mark.parametrize("framework", ["sglang", "vllm"])
 def test_native_profile_drops_annotations_when_the_patch_did_not_apply(tmp_path, monkeypatch, framework):
     """Magpie raises rather than degrading when the server lacks the fields, so an unreached patch means false."""
-    monkeypatch.setattr(_server_patcher, f"ensure_{framework}_patched_for_tracelens", lambda: None)
+    monkeypatch.setattr(_server_patcher, f"ensure_{framework}_patched_for_tracelens", lambda *checkout: None)
     path = _native_config(tmp_path, framework)
     enable_profile(path)
     native = load_benchmark(path)
@@ -293,7 +295,7 @@ def test_native_profile_drops_annotations_when_the_patch_did_not_apply(tmp_path,
 
 @pytest.mark.parametrize("framework", ["sglang", "vllm"])
 def test_native_profile_keeps_the_operator_annotation_choice_through_a_failed_patch(tmp_path, monkeypatch, framework):
-    monkeypatch.setattr(_server_patcher, f"ensure_{framework}_patched_for_tracelens", lambda: None)
+    monkeypatch.setattr(_server_patcher, f"ensure_{framework}_patched_for_tracelens", lambda *checkout: None)
     requested = {"enabled": False, "detailed_annotations": True}
     path = _native_config(tmp_path, framework, profiler={"torch_profiler": deepcopy(requested)})
     enable_profile(path)

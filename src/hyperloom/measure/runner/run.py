@@ -67,6 +67,7 @@ from hyperloom.measure.farm import (
     inherited_environment,
     lay_profile_patch,
     patched_configs,
+    record_unpatched,
     server_environment,
     server_python,
     verify_farm,
@@ -279,8 +280,11 @@ def _prepare(ctx: _Context, spec: MeasurementSpec, visible: list[int]) -> tuple[
             read_blob=ctx.read_blob,
             inherited=inherited_environment(ctx.environ, spec.process_env, spec.unset_envs),
         )
-        if spec.kind == _PROFILE:
-            lay_profile_patch(farm, yaml.safe_load(spec.config[0].yaml) or {})
+        unpatched = (
+            lay_profile_patch(farm, yaml.safe_load(spec.config[0].yaml) or {}) if spec.kind == _PROFILE else None
+        )
+        if unpatched:
+            ctx.notes.append(unpatched)
         if farm is not None:
             install_import_watch(farm)
         placement = Placement(
@@ -295,6 +299,9 @@ def _prepare(ctx: _Context, spec: MeasurementSpec, visible: list[int]) -> tuple[
             rewrite_config(point.yaml, ctx.work / f"point_{index}.yaml", placement)
             for index, point in enumerate(spec.config)
         ]
+        if unpatched:
+            for point in points:
+                record_unpatched(point)
         if farm is not None:
             for point in points:
                 verify_farm(farm, server_environment(yaml.safe_load(point.read_text())), python=python, cwd=ctx.work)

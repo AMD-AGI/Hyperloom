@@ -967,6 +967,33 @@ def test_a_patched_agentx_test_that_names_no_interpreter_is_rebuilt_for_the_pyth
     assert launched["value"] == "10" and "executable" not in launched["launch"]
 
 
+def test_a_profile_whose_patch_cannot_be_laid_in_the_rebuilt_framework_runs_and_its_record_says_so(
+    grid, monkeypatch, tmp_path, installed_framework
+):
+    """A point rendered with TraceLens's graph-capture patch, whose candidate rebuilt the framework the patch cannot be
+    laid in: no flag of the point needs the patch, so the profile runs, and its note and points say it ran without."""
+    python, _ = installed_framework
+    monkeypatch.setattr(farm_module, "lay_tracelens_patch", lambda package, site: False)
+    monkeypatch.setattr(farm_module, "ensure_patched_copy", lambda package, checkout: pytest.fail("a copy was laid"))
+    _with_trace(grid)
+    point = _profile_point(tmp_path)
+    config = yaml.safe_load(point.read_text())
+    config["benchmark"]["envs"].update(
+        {"HYPERLOOM_FRAMEWORK_PYTHON": str(python), "HYPERLOOM_TRACELENS_PATCH_STATUS": "ok"}
+    )
+    point.write_text(yaml.safe_dump(config), encoding="utf-8")
+
+    outcome = _run(_call(tmp_path, point, kind="profile", environment=_compile(tmp_path, installed_framework)))
+
+    assert outcome.returncode == 0 and len(grid.calls) == 1
+    assert grid.configs[0]["benchmark"]["envs"]["HYPERLOOM_TRACELENS_PATCH_STATUS"] == "unavailable"
+    assert [note for note in outcome.notes if note.startswith(f"{farm_module.PATCH_NOT_LAID}: ")] == [
+        f"{farm_module.PATCH_NOT_LAID}: TraceLens's patch cannot be laid in the sglang the test rebuilt, so the profiled "
+        "server runs it without the patch and its trace lacks what the patch adds, such as the graph-capture tags; "
+        "HYPERLOOM_TRACELENS_PATCH_STATUS=unavailable"
+    ]
+
+
 def test_a_test_on_the_image_as_it_is_runs_the_point_unchanged(grid, tmp_path, installed_framework):
     from hyperloom.contracts.recipe import RecipeDelta
     from hyperloom.measure.compile import LocalBlobStore, compile_environment
@@ -1128,7 +1155,9 @@ def _host_copy(monkeypatch, tmp_path: Path) -> tuple[Path, list[str]]:
     """This host's patched copy of the profiled framework, and the packages a copy was laid for."""
     site = tmp_path / "tmp" / "hyperloom-tracelens" / "fw-0123" / "site"
     laid: list[str] = []
-    monkeypatch.setattr(farm_module, "ensure_patched_copy", lambda package: laid.append(package) or PatchedServer(site))
+    monkeypatch.setattr(
+        farm_module, "ensure_patched_copy", lambda package, checkout: laid.append(package) or PatchedServer(site)
+    )
     return site, laid
 
 
@@ -1164,15 +1193,15 @@ def test_a_profile_rendered_on_another_host_runs_this_hosts_copy_where_the_other
 
 
 def test_a_profile_asking_for_patched_profiler_fields_on_an_unpatchable_vllm_is_refused(grid, tmp_path, monkeypatch):
-    monkeypatch.setattr(farm_module, "ensure_patched_copy", lambda package: None)
+    monkeypatch.setattr(farm_module, "ensure_patched_copy", lambda package, checkout: None)
 
-    with pytest.raises(TestCallRefused, match="only TraceLens's vLLM patch adds"):
+    with pytest.raises(TestCallRefused, match="only TraceLens's patch adds, and the patch cannot be applied"):
         _run(_call(tmp_path, _vllm_profile_point(tmp_path), kind="profile"))
     assert grid.calls == []
 
 
 def test_a_profile_rendered_without_the_patch_runs_as_it_was_rendered(grid, tmp_path, monkeypatch):
-    monkeypatch.setattr(farm_module, "ensure_patched_copy", lambda package: pytest.fail("a copy was laid"))
+    monkeypatch.setattr(farm_module, "ensure_patched_copy", lambda package, checkout: pytest.fail("a copy was laid"))
     _with_trace(grid)
     point = _profile_point(tmp_path)
 
