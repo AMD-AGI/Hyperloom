@@ -22,7 +22,7 @@ from hyperloom_multibranch.specialist.dossier_pass import (
 )
 from hyperloom_multibranch.tests.branch_rig import branch_rig
 from hyperloom_multibranch.tests.test_specialist_arbor_adapter import CHECKOUT_FILES, _committed, _spec, _write
-from hyperloom_multibranch.tests.test_specialist_autonomous_session import ROOT, LocalSandbox, Toolbox
+from hyperloom_multibranch.tests.test_specialist_autonomous_session import ROOT, LocalProcess, LocalSandbox, Toolbox
 
 #: Arbor's entry point in a fake checkout, run as a dossier pass: what it does is fake-dossier.json's ``do``. ``mapped``
 #: writes a dossier, the map and exits 0 with ``mapped``; ``nomap`` writes the dossier and ends with ``deadline``;
@@ -121,7 +121,7 @@ async def test_the_pass_maps_on_its_own_lease_from_the_start_commit_and_gives_th
         str(setup.worktree.path),
         setup.worktree.commit(),
     )
-    assert config["server_flags"] == "--max-num-seqs 128"  # the start commit's launch
+    assert config["server_flags"] == "--max-num-seqs 128 --tensor-parallel-size 1"  # the start commit's launch, its TP
     profile = json.loads((session / PROFILE_FILE).read_text())
     assert (profile["source"], profile["shares"]) == ("kernel shares", dict(SHARES.shares))
 
@@ -164,3 +164,22 @@ async def test_a_source_that_is_not_arbor_or_no_cards_to_lease_runs_no_pass(tmp_
     busy, toolbox, _, _ = await _pass(tmp_path / "busy", "mapped", cards=0)
     assert busy.map is None and busy.reason.startswith("no cards were leased for it")
     assert toolbox.released == []
+
+
+async def test_a_pass_whose_arbor_exited_is_still_killed_before_its_cards_go_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Arbor's top process exiting says nothing of a server it started, which would hold VRAM on cards back in the
+    pool (#155 c4838)."""
+    killed: list[int | None] = []
+    kill = LocalProcess.kill
+
+    async def recorded(self: LocalProcess) -> None:
+        killed.append(self.returncode)
+        await kill(self)
+
+    monkeypatch.setattr(LocalProcess, "kill", recorded)
+    outcome, toolbox, _, _ = await _pass(tmp_path, "crash", seconds=0.6)
+
+    assert outcome.map is None and killed and killed[-1] is not None
+    assert toolbox.released == ["L1"]

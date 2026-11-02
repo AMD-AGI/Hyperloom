@@ -165,7 +165,8 @@ async def run_dossier_pass(start: DossierStart, setup: DossierSetup) -> DossierO
             return DossierOutcome(None, None, f"it did not start: {'; '.join(failed.reasons)}")
         return await _ended(ready, start, setup)
     finally:
-        if ready is not None and ready.process.returncode is None:
+        # Always: Arbor's top process may have exited with a server it started still on the cards.
+        if ready is not None:
             await ready.process.kill()
         await asyncio.shield(setup.toolbox.release_branch_sandbox(lease.lease_id))
 
