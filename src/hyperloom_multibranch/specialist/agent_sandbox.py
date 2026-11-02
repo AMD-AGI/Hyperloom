@@ -56,7 +56,6 @@ from pathlib import Path
 from hyperloom.common.outside_facts import ROCR_VISIBLE_DEVICES_ENV
 from hyperloom.common.proctree import descendants, running
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
-from hyperloom.inference_optimizer.session.paths import tracelens_root
 from hyperloom.measure.compile import COMPONENT_LAYOUTS, UnsupportedComponentError, locate_installed_package
 from hyperloom.sandbox.launcher import LAUNCHER_SOURCE, StatusPipe, launcher_argv
 from hyperloom_multibranch.specialist.agent_onboarding import CommandResult
@@ -613,7 +612,7 @@ def framework_protection() -> FrameworkProtection:
         ", ".join(str(package.path) for package in packages),
         PATROL_SECONDS,
     )
-    return FrameworkProtection(guard=FrameworkGuard(tuple(packages), profile_patches=tracelens_root()))
+    return FrameworkProtection(guard=FrameworkGuard(tuple(packages)))
 
 
 def mount_namespaces() -> bool:
