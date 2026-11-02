@@ -26,6 +26,7 @@ from kernelforge.workflows.forge_loop.iteration.iteration_types import (
 )
 from kernelforge.evaluation.jit_rebuild import force_jit_rebuild
 from kernelforge.workflows.forge_loop.campaign.run_state import make_event
+from kernelforge.workflows.forge_loop.iteration.measurement_site import MeasurementSite
 from kernelforge.workflows.forge_loop.iteration.scoring_runtime import _bench_failure_detail, _build_failure_tail
 from kernelforge.utils.process_group import communicate_process_group
 
@@ -68,36 +69,20 @@ class AttemptVerdictMixin:
         plan: str = "",
         *,
         benchmark_measurement: dict | None = None,
+        site: MeasurementSite | None = None,
     ) -> IterationResult:
-        """Execute a single build→validate→bench→canonical→decide iteration."""
+        """Execute a single build→validate→bench→canonical→decide iteration at ``site``, the workspace by default."""
+        site = site or self._canonical_site()
         iter_start = time.time()
-        force_jit_rebuild(self._jit_source_files())
-
-        if self.ic.build_command:
-            proc = await asyncio.create_subprocess_exec(
-                *self.ic.build_command,
-                cwd=self.ic.build_dir or self.ic.workspace_dir,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=True,
-            )
-            stdout, stderr = await communicate_process_group(
-                proc,
-                timeout=self.ic.build_timeout_sec,
-            )
-            if proc.returncode != 0:
-                return IterationResult(
-                    iteration=iteration,
-                    duration_sec=time.time() - iter_start,
-                    validation_passed=False,
-                    validation_summary=f"BUILD FAILED: {_build_failure_tail(stdout, stderr, 500)}",
-                    kept=False,
-                )
+        force_jit_rebuild(site.jit_sources())
+        build_failure = await self._build_candidate(iteration, iter_start, site)
+        if build_failure is not None:
+            return build_failure
 
         measurement_started = time.time()
         print("  [validate] Running full correctness suite...")
         report = await run_validation_pipeline(
-            driver_script=self.ic.driver_script,
+            driver_script=site.driver_script,
             snr_threshold=self.ic.snr_threshold,
             timeout_per_stage=self.ic.validate_stage_timeout_sec,
         )
@@ -117,13 +102,13 @@ class AttemptVerdictMixin:
                 kept=False,
             )
 
-        bench_result = await self._bench_attempt(benchmark_measurement)
+        bench_result = await self._bench_attempt(benchmark_measurement, site)
         self._observe_measurement(measurement_started)
         self.last_case_bandwidth = dict(bench_result.get("case_bandwidth") or {})
-        return await self._decide_iteration_keep(iteration, iter_start, report, bench_result)
+        return await self._decide_iteration_keep(iteration, iter_start, report, bench_result, site)
 
-    async def _bench_attempt(self, benchmark_measurement: dict | None) -> dict:
-        """Reuse the session's own three-measurement benchmark when it still describes the tree, else measure it."""
+    async def _bench_attempt(self, benchmark_measurement: dict | None, site: MeasurementSite) -> dict:
+        """Reuse the session's own three-measurement benchmark when it still describes the tree, else measure it at ``site``."""
         if benchmark_measurement is not None and self._can_reuse_insession_benchmark(
             benchmark_measurement,
             attempt_diff=self._working_tree_diff(),
@@ -134,11 +119,38 @@ class AttemptVerdictMixin:
         else:
             print("  [bench] Running three independent benchmark suites...")
             bench_result = await measure_wallclock(
-                BenchRun(self.ic.driver_script, driver_args=[], repeat=self.ic.bench_repeat),
+                BenchRun(site.driver_script, driver_args=[], repeat=self.ic.bench_repeat),
                 measurements=KEEP_MEASUREMENT_COUNT,
                 timeout_sec=self.ic.bench_timeout_sec,
             )
         return bench_result
+
+    async def _build_candidate(
+        self, iteration: int, iter_start: float, site: MeasurementSite
+    ) -> IterationResult | None:
+        """Run the task's build at ``site``; the failed result, or ``None`` when it built or the task has no build."""
+        if not self.ic.build_command:
+            return None
+        proc = await asyncio.create_subprocess_exec(
+            *self.ic.build_command,
+            cwd=site.build_dir or site.workspace_dir,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+        stdout, stderr = await communicate_process_group(
+            proc,
+            timeout=self.ic.build_timeout_sec,
+        )
+        if proc.returncode == 0:
+            return None
+        return IterationResult(
+            iteration=iteration,
+            duration_sec=time.time() - iter_start,
+            validation_passed=False,
+            validation_summary=f"BUILD FAILED: {_build_failure_tail(stdout, stderr, 500)}",
+            kept=False,
+        )
 
     def _rule_on_attempt(
         self,
@@ -321,6 +333,7 @@ class AttemptVerdictMixin:
         iter_start: float,
         report,
         bench_result: dict,
+        site: MeasurementSite,
     ) -> IterationResult:
         """Score the bench, check registers, apply the KEEP bar, and build the IterationResult."""
         # A candidate whose bench crashed is reverted for "no speedup" unless the crash itself reaches the agent; the
@@ -332,13 +345,13 @@ class AttemptVerdictMixin:
         # to dominate an aggregate ratio.
         self._apply_mean_case_speedup_metric(bench_result)
         measurement_scores = list(bench_result.get("measurement_mean_case_speedups") or [])
-        sigma_resolution = await self._resolve_keep_sigma(bench_result, measurement_scores)
+        sigma_resolution = await self._resolve_keep_sigma(bench_result, measurement_scores, site)
         self._emit_bench_scores(bench_result, sigma_resolution, measurement_scores, bench_error_output)
         selected_raw_mean_ms = bench_result.get("median_ms")
         mean_case_speedup = bench_result.get("mean_case_speedup")
         snr_db = report.results[-1].snr_db if report.results else None
 
-        reg_result = await check_registers(build_dir=self.ic.build_dir)
+        reg_result = await check_registers(build_dir=site.build_dir)
         vgpr = reg_result.get("vgpr") if reg_result.get("success") else None
         if vgpr:
             print(f"  [registers] VGPR={vgpr}")
@@ -352,7 +365,7 @@ class AttemptVerdictMixin:
         if improved and runs_task_suite_acceptance(self.ic.kernel_backend):
             canonical_started = time.time()
             canonical = await accept_candidate(
-                self.ic.workspace_dir,
+                site.workspace_dir,
                 timeout_cap_sec=self.ic.validate_stage_timeout_sec,
                 candidate_label=f"iteration {iteration}",
                 kernel_backend=self.ic.kernel_backend,

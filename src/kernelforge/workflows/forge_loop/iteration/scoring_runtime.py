@@ -38,6 +38,7 @@ from kernelforge.evaluation.scoring import (
 )
 from kernelforge.workflows.forge_loop.iteration.case_coverage import _measurement_case_times
 from kernelforge.workflows.forge_loop.iteration.iteration_types import IterationResult
+from kernelforge.workflows.forge_loop.iteration.measurement_site import MeasurementSite
 from kernelforge.workflows.forge_loop.campaign.reporting import KeepScore
 from kernelforge.utils.process_group import communicate_process_group
 
@@ -384,8 +385,9 @@ class ScoringMixin:
         self,
         bench_result: dict,
         measurement_scores: list[float],
+        site: MeasurementSite,
     ) -> SigmaResolution:
-        """Estimate the objective's sigma from the case that supplies it."""
+        """Estimate the objective's sigma from the case that supplies it, re-benching at ``site`` when it must."""
         measured = measurement_sigma(measurement_scores)
         idle = SigmaResolution(
             sigma=measured,
@@ -429,7 +431,7 @@ class ScoringMixin:
             sigma_sample_size=base.sample_size,
         ):
             return replace(found, detail="kept at the measured sigma")
-        return await self._remeasure_keep_sigma(found, measured, base, series, baseline)
+        return await self._remeasure_keep_sigma(found, base, series, baseline, site)
 
     def _keep_score(self, result: IterationResult, pending: dict, best_before: float | None) -> KeepScore | None:
         """Score a KEEP against its baseline and the search start; None when either side is unmeasured."""
@@ -458,12 +460,12 @@ class ScoringMixin:
     async def _remeasure_keep_sigma(
         self,
         found: SigmaResolution,
-        measured: float,
         base: SigmaAttribution,
         series: dict[str, list[float]],
         baseline: dict[str, float],
+        site: MeasurementSite,
     ) -> SigmaResolution:
-        """Buy extra benches until the dominant case's sigma settles or the budget ends."""
+        """Buy extra benches at ``site`` until the dominant case's sigma settles or the budget ends."""
         dominant = found.dominant_case
         current = base
         rounds = 0
@@ -471,7 +473,7 @@ class ScoringMixin:
         while rounds < SIGMA_REMEASURE_MAX_ROUNDS and current.dominant_case is not None:
             remeasure_started = time.time()
             extra = await measure_wallclock(
-                BenchRun(self.ic.driver_script, driver_args=[], repeat=self.ic.bench_repeat),
+                BenchRun(site.driver_script, driver_args=[], repeat=self.ic.bench_repeat),
                 measurements=SIGMA_REMEASURE_BATCH,
                 timeout_sec=self.ic.bench_timeout_sec,
             )
@@ -499,7 +501,7 @@ class ScoringMixin:
         settled = current.case_sigmas[dominant] < base.case_sigmas[dominant]
         return replace(
             found,
-            sigma=rescaled_sigma(measured, base, current),
+            sigma=rescaled_sigma(found.measured_sigma, base, current),
             variance_share=share if share is not None else found.variance_share,
             wall_share=current.wall_shares.get(dominant, found.wall_share),
             rounds=rounds,
