@@ -32,9 +32,9 @@ Each ``--autonomous-agent SOURCE`` opens one branch where EXPLORE starts, after 
 carries credentials in its URL is a usage error. ``--agent-directions FILE`` names a directions map that is split, after
 PRELUDE, into disjoint shares, one per Arbor agent among them, each its ``component.plan``; a map with no directions, or
 one given with no agent, is a usage error. Without one, two or more Arbors split the map of a dossier pass, the first
-Arbor run once before their branches open for at most ``--agent-dossier-minutes`` (default 90), or, when it gives none
-or the minutes are 0, a map Arbor generates from the root's profile (its op shares, else its kernel shares); a negative
-value is a usage error. ``--agent-pack NAME`` names the pack those Arbors run instead of Arbor's
+Arbor run once on a mapping branch EXPLORE opens beside the others, for at most ``--agent-dossier-minutes`` (default
+90), or, when it gives none or the minutes are 0, a map Arbor generates from the root's profile (its op shares, else its
+kernel shares); each share then opens as a branch of its own. A negative value is a usage error. ``--agent-pack NAME`` names the pack those Arbors run instead of Arbor's
 serving template; a name that is not one directory, or one given with no agent, is a usage error, and a pack the Arbor
 checkout lacks is refused when the branch starts. ``--agent-launch FILE`` gives those Arbors the launch an AgentX
 recipe's adds to, which Magpie resolves from InferenceX and MB does not carry yet; a file the adapter cannot use, or one
@@ -412,8 +412,9 @@ def _add_agent_options(run: argparse.ArgumentParser) -> None:
         help=(
             'A directions map, a JSON list of directions or {"directions": [...]} as Arbor\'s component.plan reads it;'
             " split into disjoint shares, one per Arbor --autonomous-agent, before EXPLORE opens their branches."
-            " Default: for two or more Arbors, the map of a dossier pass (--agent-dossier-minutes), else one Arbor"
-            " generates from the root's profile."
+            " Default: for two or more Arbors, the map of a dossier pass a mapping branch runs in EXPLORE"
+            " (--agent-dossier-minutes), else one Arbor generates from the root's profile; each share then opens as a"
+            " branch of its own."
         ),
     )
     run.add_argument(
@@ -424,7 +425,8 @@ def _add_agent_options(run: argparse.ArgumentParser) -> None:
         metavar="MINUTES",
         help=(
             "Without --agent-directions, how long the dossier pass that maps two or more Arbor agents' directions may"
-            " run before their branches open, out of EXPLORE's time; it ends once its map is set. Arbor starts no"
+            " run on its mapping branch before their share branches open, out of EXPLORE's time, while the other"
+            " branches work; it ends once its map is set. Arbor starts no"
             f" iteration with under 63 minutes left, so less runs none; 0 skips it (default {DOSSIER_MINUTES:g})."
         ),
     )
@@ -498,10 +500,11 @@ def _add_agent_review_options(run: argparse.ArgumentParser) -> None:
         dest="review_gate",
         action="store_false",
         help=(
-            "Open the Arbor --autonomous-agent branches without a person's review: by default the session pauses"
-            " once their map is made, holding no cards, until `hyperloom-multibranch review --session DIR approve`"
-            " (or reject). With this flag it does not pause, and its Arbors are started with their own review gate"
-            " off. For unattended runs, and for the second stage of a reviewed run."
+            "Open the Arbor --autonomous-agent branches without a person's review: by default they wait once their map"
+            " is made, holding no cards, until `hyperloom-multibranch review --session DIR approve` (or reject); the"
+            " other branches go on, and a --agent-directions map is reviewed before EXPLORE. With this flag nothing"
+            " waits, and its Arbors are started with their own review gate off. For unattended runs, and for the"
+            " second stage of a reviewed run."
         ),
     )
 

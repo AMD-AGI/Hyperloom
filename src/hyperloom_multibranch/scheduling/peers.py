@@ -31,6 +31,7 @@ from hyperloom_multibranch.scheduling.settings import AGENT_PORT, Workload
 if TYPE_CHECKING:
     from hyperloom.hosted.mcp_server import McpServer
     from hyperloom_multibranch.specialist.dossier_pass import DossierPass
+    from hyperloom_multibranch.specialist.map_session import MapCalls
     from hyperloom_multibranch.toolbox.toolbox import RealToolbox
 
 
@@ -45,8 +46,8 @@ class Peers:
     the scheduler starts it, and records each fork and repair the scheduler voids. ``regression`` runs the
     regression set the integrator asks for before a merge and FINAL for every candidate. ``on_this_machine`` says
     whether the toolbox measures on this machine's cards, which the PRELUDE child runs on too; PRELUDE starts none
-    where it does not. ``dossier_pass`` runs the session's dossier pass before EXPLORE opens its agent branches; a
-    session that runs no agent has none.
+    where it does not. ``dossier_pass`` runs the dossier pass of a session that stops after its map; a session that
+    runs no agent has none.
     """
 
     lifecycle: SpecialistLifecycle
@@ -81,7 +82,7 @@ class PeerSetup:
     adds to (``""`` when the recipe's is the whole launch), ``agent_port`` the first port of their port blocks,
     ``agent_dossier`` the dossier the run gives every agent branch with its reviewed map (``""`` for none), and
     ``agent_review`` how an Arbor's own review gate is handed over (``AgentSpec.review``: the host reviews, nobody
-    does, or ``""`` for neither).
+    does, or ``""`` for neither), and ``agent_maps`` the scheduler's side of a mapping branch, ``None`` without agents.
     """
 
     layout: SessionLayout
@@ -98,6 +99,7 @@ class PeerSetup:
     agent_port: int = AGENT_PORT
     agent_dossier: str = ""
     agent_review: str = ""
+    agent_maps: MapCalls | None = None
 
 
 PeerFactory = Callable[[PeerSetup], Peers]

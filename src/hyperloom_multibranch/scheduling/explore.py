@@ -126,7 +126,8 @@ class ExploreWindow:
     limit, for either), the upper bound of the GPU seconds the PRELUDE child used outside a lease, which no limit
     counts (0 where it ran on leased cards, whose card time the integration branch's progress holds), the
     directions the user wrote, one user branch each, the agents the user named, one agent branch each, and in the same
-    order each agent's share of the session's directions (:func:`~.agent_plans.agent_plans`; ``""`` for none).
+    order each agent's share of the session's directions (:func:`~.agent_plans.agent_plans`; ``""`` for none), and
+    the Arbor agents whose directions one mapping branch maps in EXPLORE before each runs its share (empty for none).
 
     ``root_commit`` is the session's measurement anchor and nothing moves it. ``start_commit`` is where EXPLORE opens:
     the root, or the Recipe KB champion PRELUDE replayed onto it.
@@ -144,6 +145,7 @@ class ExploreWindow:
     user_directions: tuple[str, ...]
     agents: tuple[str, ...]
     agent_plans: tuple[str, ...] = ()
+    map_for: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -256,6 +258,8 @@ class Explorer:
             await self._branches.open_agent_branches(
                 window.agents, window.start_commit, window.explore_end, window.agent_plans
             )
+            if window.map_for:
+                await self._branches.open_map_branch(window.map_for, window.start_commit, window.explore_end)
 
     async def _steer(self, window: ExploreWindow, merging: asyncio.Future[None]) -> SessionStopReason:
         next_judge = self._clock.now() + self._interval

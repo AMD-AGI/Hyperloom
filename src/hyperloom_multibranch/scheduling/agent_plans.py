@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Each Arbor agent's share of the session's directions, split before EXPLORE opens the agent branches.
+"""Each Arbor agent's share of the session's directions: a given map's split before EXPLORE, a made one's in it.
 
 The user names one directions map with ``--agent-directions``: the open directions of an Arbor dossier map, or a list
 written by hand, in the form Arbor's ``component.plan`` reads. Two Arbor agents given the whole map would work the
@@ -10,9 +10,10 @@ map is split by Arbor's own command line (:func:`~hyperloom_multibranch.speciali
 into as many disjoint shares as there are Arbor agents, one each, in the order the user named them. Any other agent
 gets none: only Arbor reads a plan.
 
-Without a map, two or more Arbor agents split the map of the session's dossier pass (:mod:`~hyperloom_multibranch.
-specialist.dossier_pass`), which the session runs first and passes here as the map (operator, 2026-10-31: the dossier
-pass is the default). When the pass gives none, they split one Arbor generates from the root's shares, PRELUDE's
+Without a map, two or more Arbor agents split the map of the dossier pass (:mod:`~hyperloom_multibranch.specialist.
+dossier_pass`) a mapping branch runs in EXPLORE (:mod:`~hyperloom_multibranch.specialist.map_session`), which the
+session passes here as the map once the pass ends and opens a share branch for each share (operator, 2026-10-31: the
+dossier pass is the default; 2026-11-02: it runs on a branch, so no other branch waits for it). When the pass gives none, they split one Arbor generates from the root's shares, PRELUDE's
 profile, with no GPU time (:func:`~hyperloom_multibranch.specialist.arbor_adapter.generate_directions`): one direction
 per op family, ranked by its share. Those shares are the root's op shares, or its kernel shares when TraceLens gave none
 (:mod:`~hyperloom_multibranch.scheduling.root_shares`), as ``shares_source`` says. A single Arbor gets none and maps its

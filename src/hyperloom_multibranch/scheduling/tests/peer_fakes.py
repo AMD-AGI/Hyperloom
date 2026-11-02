@@ -47,6 +47,7 @@ from hyperloom_multibranch.contracts.fork import (
     ForkAdmissionService,
     ForkRequest,
     RepairRequest,
+    ShareRequest,
 )
 from hyperloom_multibranch.contracts.gate import RegressionOutcome
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts
@@ -70,7 +71,9 @@ from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.local_peers import GATE_WRITER
 from hyperloom_multibranch.contracts.llm import CompletionReply
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry, RegisteredProcess
+from hyperloom_multibranch.specialist.dossier_pass import DossierOutcome, DossierPass, DossierStart
 from hyperloom_multibranch.specialist.judging import Judging
+from hyperloom_multibranch.specialist.map_session import MapCalls, MapSession
 from hyperloom_multibranch.specialist.runtime import RuntimePacing, SessionFactory, SessionStart, SpecialistRuntime
 from hyperloom_multibranch.specialist.scripted import BranchHeads, ScriptedSession, ScriptedSetup
 from hyperloom_multibranch.toolbox.fake import FakeToolbox, FakeWiring
@@ -421,8 +424,9 @@ class RecordedSessions:
     ``k`` its last K and ``quota_at_start`` the K the toolbox's policy gave it as its first
     run started; ``running`` holds the branches whose last run was not stopped, and ``stopped`` every stop a run was
     asked for. A run of a branch in ``hanging`` never returns from its stop, a failure double. Every scripted session
-    waits ``poll_seconds`` with ``sleep`` between two reads. Not a placeholder: the scripted session is the specialist
-    runtime's own.
+    waits ``poll_seconds`` with ``sleep`` between two reads. A mapping branch runs the specialist side's own
+    :class:`~hyperloom_multibranch.specialist.map_session.MapSession` on ``maps`` with ``run_pass`` as its pass, and is
+    kept in ``mapping``. Not a placeholder: the scripted session is the specialist runtime's own.
     """
 
     def __init__(
@@ -436,8 +440,12 @@ class RecordedSessions:
         hanging: frozenset[str] = frozenset(),
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         poll_seconds: float = SPECIALIST_POLL_SECONDS,
+        maps: MapCalls | None = None,
+        run_pass: DossierPass | None = None,
     ) -> None:
         self._toolbox = toolbox
+        self._maps = maps
+        self._run_pass = run_pass or _no_pass
         self._sleep = sleep
         self._poll_seconds = poll_seconds
         self._repo = repo
@@ -456,9 +464,15 @@ class RecordedSessions:
         self.quota_at_start: dict[str, int | None] = {}
         self.running: set[str] = set()
         self.stopped: list[str] = []
+        self.mapping: dict[str, tuple[str, ...]] = {}
 
-    def __call__(self, start: SessionStart) -> RecordedSession:
+    def __call__(self, start: SessionStart) -> RecordedSession | MapSession:
         branch = start.branch
+        if start.task.map_for:
+            assert self._maps is not None, f"{branch} is a mapping branch in a session with no maps"
+            self.started.setdefault(branch, start.start_commit)
+            self.mapping.setdefault(branch, start.task.map_for)
+            return MapSession(start, self._maps, self._run_pass)
         if branch not in self.started:
             policies = self._toolbox.policies
             self.quota_at_start[branch] = policies[-1].branch_k.get(branch) if policies else None
@@ -476,6 +490,10 @@ class RecordedSessions:
         script = tuple(self._scripts.get(branch, ()))
         setup = ScriptedSetup(script, self._toolbox, self._repo, self._blackboard, self._poll_seconds, self._sleep)
         return RecordedSession(self, branch, ScriptedSession(start, setup), self._steps.get(branch))
+
+
+async def _no_pass(_start: DossierStart) -> DossierOutcome:
+    return DossierOutcome(None, None, "no dossier pass in this test")
 
 
 class RefusingRuntime(SpecialistRuntime):
@@ -498,6 +516,9 @@ class NoForks:
 
     async def admit_repair(self, request: RepairRequest) -> ForkAdmission:
         raise AssertionError("no repair is asked for here")
+
+    async def admit_share(self, request: ShareRequest) -> ForkAdmission:
+        raise AssertionError("no share is asked for here")
 
 
 @dataclass
