@@ -273,11 +273,7 @@ def dispatch_single_task(
             ),
         )
         _persist_forge_loop_output(task_path, outcome)
-        recovered = recover_task_result(
-            layout,
-            task_path,
-            update_state=False,
-        )
+        recovered = recover_task_result(layout, task_path, update_state=False)
         return _settled_result(task, worktree, outcome, recovered, state_store)
     except Exception as error:  # isolation boundary: one prepared operator task
         log.warning("single-task dispatch failed for %s: %s", task_path, error, exc_info=True)

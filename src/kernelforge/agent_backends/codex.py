@@ -783,10 +783,7 @@ class CodexBackend:
                     else:
                         thread = await client.thread_start(**self._thread_start_options(sdk, spec))
                     thread_id = thread.id
-                    turn_handle = await thread.turn(
-                        prompt,
-                        **self._turn_options(sdk, spec),
-                    )
+                    turn_handle = await thread.turn(prompt, **self._turn_options(sdk, spec))
                     turn_task = asyncio.create_task(turn_handle.run())
                     sdk_result = await _await_turn(turn_handle, turn_task, spec.timeout_sec, thread_id, teardown_errors)
         except asyncio.CancelledError:
