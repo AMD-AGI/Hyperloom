@@ -369,6 +369,18 @@ def test_llm_exception_does_not_crash_compose() -> None:
     assert "<llm_error" in r.llm_raw_response
 
 
+@dataclass
+class _SdkStreamFailureLLM:
+    def complete(self, *, system: str, user: str) -> str:
+        raise Exception("Claude CLI stream failed")
+
+
+def test_a_bare_sdk_exception_in_the_narration_falls_back_to_the_deterministic_report() -> None:
+    r = render_session_report(_fixture_breakdown(), llm_client=_SdkStreamFailureLLM())
+    assert r.markdown == render_session_report(_fixture_breakdown()).markdown
+    assert r.llm_raw_response == "<llm_error: Exception: Claude CLI stream failed>"
+
+
 def test_kernel_lifecycle_funnel_propagates_to_global_facts() -> None:
     r = render_session_report(_fixture_breakdown())
     f = r.global_facts.kernel_pipeline_funnel

@@ -103,8 +103,7 @@ class UsageAccumulator:
         self.calls += 1
         bucket["calls"] += 1
         if self._on_update is not None:
-            with contextlib.suppress(Exception):  # broad-suppress: caller-supplied observer
-                self._on_update(self.totals())
+            self._on_update(self.totals())
         return True
 
     def totals(self) -> dict[str, Any]:

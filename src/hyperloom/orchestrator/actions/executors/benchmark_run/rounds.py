@@ -271,7 +271,16 @@ class _BenchmarkRoundsMixin:
             },
         )
         stopped_result["budget_shortfall"] = evidence
-        if evidence.get("one_more_measurement_sec"):
+        if evidence.get("baseline_failures_this_leg"):
+            log.warning(
+                "baseline_executor: the baseline has failed %d time(s) this leg and PRELUDE has spent "
+                "everything outside the %.0fs optimization reserve (%.0fs usable), so no retry "
+                "is booted. The phase closes on this same line.",
+                evidence.get("baseline_failures_this_leg", 0),
+                evidence.get("optimization_reserve_sec", 0.0),
+                evidence.get("session_usable_sec", 0.0),
+            )
+        elif evidence.get("one_more_measurement_sec"):
             log.warning(
                 "baseline_executor: this round (%.0fs) and one variant to read "
                 "against it (%.0fs) need %.0fs, and %.0fs is left (bound=%s), so "

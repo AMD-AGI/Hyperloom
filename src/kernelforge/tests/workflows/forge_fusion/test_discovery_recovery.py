@@ -182,3 +182,25 @@ def test_a_failed_discovery_leaves_a_transcript(tmp_path) -> None:
 
     assert log_path.is_file(), "no transcript written for a failed discovery"
     assert "tool: Read qwen3.py" in log_path.read_text(encoding="utf-8")
+
+
+def test_exhausted_retries_chain_the_last_backend_error(tmp_path) -> None:
+    gateway_error = ConnectionError("gateway reset")
+
+    class Backend:
+        name = "claude"
+        capabilities = AgentCapabilities(sandbox=True, requires_workspace_cwd=True)
+        runtime = AgentRuntimeConfig(provider="claude", model="m", sandbox_mode="bypass")
+
+        async def run(self, spec, usage=None):
+            raise gateway_error
+
+    fn = discover_module.registered_agent_llm_fn(
+        Backend(),
+        DiscoverySession(model="m", timeout_s=10, workdir=str(tmp_path)),
+        DiscoveryRetry(attempts=2, base_delay_sec=0, max_delay_sec=0),
+    )
+
+    with pytest.raises(discover_module.LlmUnavailableError) as raised:
+        fn("DISCOVERY PROMPT")
+    assert raised.value.__cause__ is gateway_error
