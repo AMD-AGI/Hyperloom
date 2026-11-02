@@ -11,6 +11,7 @@ from itertools import chain
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from hyperloom.common.env_safety import ENV_FILE_LIST_SEP, env_file_list_elements, is_file_referencing_env_name
 from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import SKIP_KERNEL_PREPARATION_FAILED
 
 from ..actions.executors.benchmark_run.warm_patches import revert_warm_kernel_patches
@@ -22,6 +23,57 @@ log = _logging.getLogger(__name__)
 # content refs dropped again from that entry's ``meta`` summary.
 _KERNEL_ROW_PATH_KEYS = ("source_file", "source_files", "target_file", "target_files", "target_path")
 _KERNEL_ROW_CONTENT_KEYS = ("patch", "tuned_file", "files")
+
+
+def _reachable_file(path: str) -> bool:
+    try:
+        return Path(path).is_file()
+    except OSError:  # unreadable parent or an overlong name: not a file this run can load either
+        return False
+
+
+def _reground_env_path_list(value: str, by_name: Mapping[str, str]) -> tuple[list[str], list[str]]:
+    """Split a ``:``-joined env path list into the elements this run can load and the ones it cannot.
+
+    An element is re-pointed at this run's download of that filename, kept as recorded when the recorded path is
+    readable here, and otherwise dropped: aiter merges such a list element by element, logging ``(not exist)`` for
+    one it cannot read and failing only when no element of the list exists, so an element another session wrote and
+    deleted must leave the list rather than carry a dead cross-session path into this run's launch env.
+    """
+    grounded: list[str] = []
+    unreachable: list[str] = []
+    for element in env_file_list_elements(value):
+        local = by_name.get(Path(element).name)
+        if local is None and _reachable_file(element):
+            local = element
+        if local is None:
+            unreachable.append(element)
+        elif local not in grounded:
+            grounded.append(local)
+    return grounded, unreachable
+
+
+def _env_file_refs(record: Any) -> list[str]:
+    """Every config-file ref a published Recipe row carries, wherever in the row its env mapping sits.
+
+    Publishing externalizes these values the way it externalizes ``tuned_file`` (see
+    ``remote_recipe.values._externalize_env_files``), so a replay has to download them before it can re-ground
+    the env that names them.
+    """
+    refs: list[str] = []
+    if isinstance(record, Mapping):
+        for key, value in record.items():
+            if isinstance(value, str) and (
+                is_file_referencing_env_name(key)
+                or (key == "env_value" and is_file_referencing_env_name(record.get("env_var")))
+            ):
+                refs.extend(env_file_list_elements(value))
+            else:
+                refs.extend(_env_file_refs(value))
+    elif isinstance(record, Sequence) and not isinstance(record, (str, bytes)):
+        for item in record:
+            refs.extend(_env_file_refs(item))
+    return refs
 
 
 class _KernelLaunchOverlay(NamedTuple):
@@ -121,6 +173,15 @@ class _WarmKernelPrepMixin:
                     tuned_local = kb.prior_file(str(row.get("tuned_file") or "").strip())
                     if tuned_local is not None:
                         entry["source_paths"] = [str(tuned_local)]
+                # The row's config-file env values are refs too, and a champion may name several tables; download
+                # each one so ``_warm_kernel_extra_envs`` has a local file to point this run's env at.
+                sources = [str(path) for path in entry.get("source_paths") or []]
+                for ref in _env_file_refs(recipe_row):
+                    env_local = kb.prior_file(ref)
+                    if env_local is not None and str(env_local) not in sources:
+                        sources.append(str(env_local))
+                if sources:
+                    entry["source_paths"] = sources
                 if entry.get("patch_path") or entry.get("source_paths"):
                     plan.append(entry)
         return plan
@@ -231,18 +292,34 @@ class _WarmKernelPrepMixin:
                 continue
             # Each accepted tuner owns its own table, so match by the recorded value's filename.
             recorded = str(tuner.get("env_value") or envs.get(env_var) or "").strip()
-            local_copy = by_name.get(Path(recorded).name)
-            if local_copy is None and len(local) == 1:
-                local_copy = local[0]
-            if local_copy:
-                envs[env_var] = local_copy
-        # Re-point any other var that still names a file we downloaded.
+            grounded, _ = _reground_env_path_list(recorded, by_name)
+            if not any(path in by_name.values() for path in grounded) and len(local) == 1:
+                grounded = [local[0]]
+            if grounded:
+                envs[env_var] = ENV_FILE_LIST_SEP.join(grounded)
+        # Re-ground any other var that names files: a config-file list element by element, so the value this run
+        # launches with names only files this run can read; anything else by the single filename it carries.
         for name, value in list(envs.items()):
             if "/" not in value:
                 continue
-            replacement = by_name.get(Path(value).name)
-            if replacement:
-                envs[name] = replacement
+            if not is_file_referencing_env_name(name):
+                replacement = by_name.get(Path(value).name)
+                if replacement:
+                    envs[name] = replacement
+                continue
+            grounded, unreachable = _reground_env_path_list(value, by_name)
+            if unreachable:
+                log.info(
+                    "warm replay drops %s element(s) this run cannot read: %s",
+                    name,
+                    ENV_FILE_LIST_SEP.join(unreachable),
+                )
+            if grounded:
+                envs[name] = ENV_FILE_LIST_SEP.join(grounded)
+            else:
+                # Nothing of the champion's list survives here; unset so the stack loads its default config table.
+                envs.pop(name, None)
+                log.info("warm replay unsets %s: none of %s is readable here", name, value)
         return envs
 
     def _apply_warm_kernel_patch(self, entry: dict[str, Any], target: str) -> dict[str, Any]:

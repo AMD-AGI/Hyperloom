@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -92,13 +93,57 @@ def test_ungrounded_env_file_reason_accepts_colon_joined_existing_files(tmp_path
     assert gr.ungrounded_env_file_reason(v.extra_envs) is None
 
 
-def test_ungrounded_env_file_reason_drops_colon_joined_missing_element(tmp_path) -> None:
+def test_ungrounded_env_file_reason_keeps_colon_joined_list_with_one_element_left(tmp_path) -> None:
+    # aiter merges a `:`-joined list element by element and skips the ones it cannot read, so a list that has lost
+    # an element still boots on the elements that are left: a thinner merge, not a dead server.
     a = tmp_path / "t.csv"
     a.write_text("gfx,M,N,K\ngfx950,1,2,3\n", encoding="utf-8")
     missing = str(tmp_path / "never_authored.csv")
-    v = _variant("gemm", envs={"AITER_CONFIG_GEMM_BF16": f"{a}:{missing}"})
+    v = _variant("gemm", envs={"AITER_CONFIG_GEMM_BF16": f"{missing}:{a}"})
+    assert gr.ungrounded_env_file_reason(v.extra_envs) is None
+
+
+def test_ungrounded_env_file_reason_drops_colon_joined_list_with_nothing_left(tmp_path) -> None:
+    # Nothing in the list is readable, so aiter's merge raises FileNotFoundError and the server never serves.
+    first = str(tmp_path / "gone.csv")
+    second = str(tmp_path / "also_gone.csv")
+    v = _variant("gemm", envs={"AITER_CONFIG_GEMM_BF16": f"{first}:{second}"})
     reason = gr.ungrounded_env_file_reason(v.extra_envs)
-    assert reason and missing in reason and str(a) not in reason.split("element(s)")[1].split(" do not exist")[0]
+    assert reason and first in reason and second in reason
+
+
+def _aiter_merge_raises(file_path: str) -> bool:
+    """Whether aiter's own config merge would raise for this env value.
+
+    The body is aiter/jit/core.py::update_config_files with the pandas work left out: a one-element value is handed
+    straight back to the op's loader (which then fails on a path that is not there), and a longer list skips the
+    elements it cannot read and raises only when none of them exists.
+    """
+    path_list = file_path.split(os.pathsep) if file_path else []
+    if len(path_list) <= 1:
+        single = path_list[0] if path_list else None
+        return bool(single) and not os.path.exists(single)
+    source_pairs = []
+    for path in path_list:
+        if not os.path.exists(path):
+            continue
+        source_pairs.append(path)
+    return not source_pairs
+
+
+@pytest.mark.parametrize("present", [(), (0,), (1,), (0, 1)])
+def test_ungrounded_env_file_reason_matches_aiter_merge(tmp_path, present) -> None:
+    # The preflight refuses exactly the values aiter's loader cannot survive -- no wider, or a grid loses variants
+    # that would have served.
+    paths = []
+    for i in (0, 1):
+        csv = tmp_path / f"t{i}.csv"
+        if i in present:
+            csv.write_text("gfx,M,N,K\ngfx950,1,2,3\n", encoding="utf-8")
+        paths.append(str(csv))
+    value = ":".join(paths)
+    refused = gr.ungrounded_env_file_reason({"AITER_CONFIG_GEMM_BF16": value}) is not None
+    assert refused is _aiter_merge_raises(value)
 
 
 def test_ungrounded_env_file_reason_treats_an_unreadable_path_as_missing(monkeypatch) -> None:

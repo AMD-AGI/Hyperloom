@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
+from hyperloom.common.env_safety import ENV_FILE_LIST_SEP, env_file_list_elements
+
 MAX_KNOWLEDGE_BYTES = 5 * 1024 * 1024
 MAX_FILES = 512
 MAX_FILE_BYTES = 512 * 1024 * 1024
@@ -298,6 +300,14 @@ def extract_knowledge_artifact_refs(
         if raw in known_paths:
             refs.add(validate_relative_path(raw))
             return
+        # A config-file env value names several artifacts in one string, joined the way the serving stack splits
+        # them again; each element is a ref in its own right. Only an element that matches an uploaded path counts,
+        # so this cannot invent a ref out of a value that merely contains a separator.
+        if ENV_FILE_LIST_SEP in raw:
+            listed = {part for part in env_file_list_elements(raw) if part in known_paths}
+            if listed:
+                refs.update(validate_relative_path(part) for part in listed)
+                return
         declared = declared_ref(raw, key)
         if declared is not None:
             refs.add(declared)

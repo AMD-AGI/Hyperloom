@@ -472,11 +472,24 @@ def filter_untrusted_env_mapping(
     return allowed, dropped
 
 
-# Env vars whose value names a config file the serving stack reads unconditionally: aiter's tuned-GEMM loader skips
-# its merge default and pd.read_csv's exactly the AITER_CONFIG_* path when one is set, so a missing file kills the
-# server at config load instead of falling back to the default table. Values that are not file paths (e.g. geak's
-# JSON-payload AITER_CONFIG) do not carry the trailing underscore and stay untouched.
+# Env vars whose value names the config files the serving stack reads unconditionally: aiter's tuned-GEMM loader
+# skips its merge default and reads exactly the AITER_CONFIG_* list when one is set, so a value with nothing loadable
+# in it kills the server at config load instead of falling back to the default table. Values that are not file paths
+# (e.g. geak's JSON-payload AITER_CONFIG) do not carry the trailing underscore and stay untouched.
 FILE_REFERENCING_ENV_PREFIXES: tuple[str, ...] = ("AITER_CONFIG_",)
+
+# A set value holds one or more config files, joined the way aiter splits them again (``os.pathsep``).
+ENV_FILE_LIST_SEP = ":"
+
+
+def is_file_referencing_env_name(name: object) -> bool:
+    """Whether this env var's value names config files the serving stack reads (a ``:``-joined list of paths)."""
+    return str(name or "").strip().upper().startswith(FILE_REFERENCING_ENV_PREFIXES)
+
+
+def env_file_list_elements(value: object) -> list[str]:
+    """The non-empty paths of a file-referencing env value, in the order aiter merges them."""
+    return [part for part in (raw.strip() for raw in str(value or "").split(ENV_FILE_LIST_SEP)) if part]
 
 
 def _is_file(path: str) -> bool:
@@ -489,25 +502,29 @@ def _is_file(path: str) -> bool:
 
 
 def ungrounded_env_file_reason(envs: Mapping[str, object] | None) -> str | None:
-    """Return why ``envs`` cannot be served if one names a config file that does not exist, else ``None``.
+    """Return why ``envs`` cannot be served if one names only config files that do not exist, else ``None``.
 
     Grounds file-like env values the way patch targets are grounded: a proposal may point a config env at an
     artifact only a later (possibly rejected) authoring step would create, and the server would die at config load.
-    The check is existence-only; anything already on disk (a promoted, durable artifact) passes. A set value is a
-    ``:``-joined list of paths (see ``csvs_aiter_will_load``), so every non-empty element must exist, not only the
-    first.
+    The check is existence-only; anything already on disk (a promoted, durable artifact) passes.
+
+    A set value is a ``:``-joined list of paths (see ``csvs_aiter_will_load``), and aiter's own loader merges that
+    list element by element: it logs ``path <n>: <p> (not exist)`` for an element it cannot read, keeps going, and
+    raises only when no element of the list exists at all. So a list is un-serveable exactly when none of its
+    elements is loadable -- one missing element of several is a thinner merge, not a dead server.
     """
     for raw_key, raw_value in (envs or {}).items():
         key = str(raw_key or "").strip().upper()
         value = str(raw_value or "").strip()
-        if not key.startswith(FILE_REFERENCING_ENV_PREFIXES) or not value:
+        if not is_file_referencing_env_name(key) or not value:
             continue
-        missing = [p for p in (part.strip() for part in value.split(":")) if p and not _is_file(p)]
-        if missing:
+        elements = env_file_list_elements(value)
+        if elements and not any(_is_file(p) for p in elements):
+            joined = ENV_FILE_LIST_SEP.join(elements)
             return (
-                f"{key} points at {value}, whose element(s) {':'.join(missing)} do not exist; the server would read it "
-                "unconditionally and die at config load. Point it at a file a stage wrote (the gemm_tuning action "
-                "writes tuned-GEMM CSVs) or leave it unset to use the default config table."
+                f"{key} points at {value}, none of whose element(s) {joined} exist; the server would "
+                "read it unconditionally and die at config load. Point it at a file a stage wrote (the gemm_tuning "
+                "action writes tuned-GEMM CSVs) or leave it unset to use the default config table."
             )
     return None
 
@@ -812,17 +829,20 @@ __all__ = [
     "BLOCKED_EXTERNAL_ENV_NAMES",
     "BLOCKED_UNTRUSTED_ENV_NAMES",
     "BLOCKED_VARIANT_ENV_NAMES",
+    "ENV_FILE_LIST_SEP",
     "FILE_REFERENCING_ENV_PREFIXES",
     "LAUNCH_PROVIDED_ENV_NAMES",
     "LAUNCH_PROVIDED_ENV_PREFIXES",
     "OPERATOR_EXTRA_ENV_VAR",
     "SENSITIVE_ENV_NAME_MARKERS",
     "build_benchmark_env",
+    "env_file_list_elements",
     "filter_untrusted_env_mapping",
     "is_allowed_dotenv_key",
     "is_allowed_external_env_key",
     "is_allowed_kernel_agent_env_key",
     "is_allowed_variant_env_key",
+    "is_file_referencing_env_name",
     "is_launch_provided_env_name",
     "is_python_package_root",
     "is_secret_shaped_env_name",
