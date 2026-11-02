@@ -27,7 +27,6 @@ import ast
 import hashlib
 import json
 import os
-import shlex
 import shutil
 import subprocess
 import tempfile
@@ -203,10 +202,7 @@ def _launch_delta(tree: PointTree) -> _Delta:
 
     delta = _Delta()
     launch, base = tree.recipe.get("launch") or {}, tree.root.get("launch") or {}
-    words, root_words = (
-        shlex.split(launch.get("extra_server_args") or ""),
-        shlex.split(base.get("extra_server_args") or ""),
-    )
+    words, root_words = _words(tree, launch), _words(tree, base)
     if words[: len(root_words)] != root_words:
         raise MergeRefused(f"C{tree.conc} changed the root's own server arguments {root_words}; only additions merge")
     delta.server_args = words[len(root_words) :]
@@ -217,6 +213,18 @@ def _launch_delta(tree: PointTree) -> _Delta:
         if name not in root_envs:
             delta.envs[name] = str(value)
     return delta
+
+
+def _words(tree: PointTree, launch: Mapping[str, Any]) -> list[str]:
+    """The words of a launch's server arguments as the measurement splits them: a JSON value stays one word, its
+    double quotes kept (``--compilation-config {"pass_config": ...}``)."""
+
+    from hyperloom.inference_optimizer.grid_server_args import tokenize_server_args_preserving_json
+
+    split = tokenize_server_args_preserving_json(launch.get("extra_server_args") or "")
+    if split is None:
+        raise MergeRefused(f"C{tree.conc}: the server arguments {launch.get('extra_server_args')!r} do not split")
+    return split[1]
 
 
 def _added_patches(tree: PointTree) -> list[Path]:

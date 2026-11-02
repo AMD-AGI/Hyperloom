@@ -14,7 +14,6 @@ import ast
 import hashlib
 import json
 import os
-import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -45,7 +44,7 @@ VLLM = {
         "def width():\n    return total(\n        1,\n        0,\n    )\n\n\ndef total(a, b):\n    return a + b\n"
     ),
 }
-FUSION = '-cc \'{"pass_config": {"fusion": true}}\''
+FUSION = '-cc {"pass_config":{"fusion":true}}'
 ROOT = {
     "base_image_digest": "sha256:image",
     "components": [{"component": "vllm", "patches": [], "upstream_ref": "u", "upstream_repo": "r"}],
@@ -309,4 +308,4 @@ def test_a_change_inside_a_statement_takes_the_whole_statement_and_points_that_a
 def test_the_shipped_server_arguments_are_the_launch_s_words(tmp_path: Path, installed: Path, aiter: Path) -> None:
     merged = merge(_two_points(tmp_path, installed), aiter)
     summary = json.loads(merged.summary.read_text())
-    assert summary["points"][0]["server_args"] == ["--block-size", "64", *shlex.split(FUSION)]
+    assert summary["points"][0]["server_args"] == ["--block-size", "64", "-cc", '{"pass_config":{"fusion":true}}']
