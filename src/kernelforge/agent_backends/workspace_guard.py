@@ -16,7 +16,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from kernelforge.agent_backends.base import AgentProviderError, AgentRunSpec
+from kernelforge.agent_backends.base import AgentProviderError, AgentRunResult, AgentRunSpec
 from kernelforge.utils.git import git, git_bytes
 from kernelforge.utils.new_path_allowlist import matches_commit_new_paths, normalize_commit_new_paths
 from kernelforge.utils.protected_paths import ProtectedPathRules
@@ -750,6 +750,23 @@ class WorkspaceGuard:
                 for path in set(unstaged + staged + untracked)
             )
         return total
+
+    def settle_into(self, result: AgentRunResult) -> AgentRunResult:
+        """Verify the turn and record on ``result`` what it changed; a rejection leaves the workspace as it began."""
+        try:
+            actual_changes = self.verify()
+        except Exception:
+            # verify() restores the baseline itself before raising a rejection, so this second call only covers the
+            # paths that fail before it gets there.
+            try:
+                self.rollback()
+            except (WorkspaceSafetyError, OSError, subprocess.SubprocessError):
+                log.warning("workspace rollback after a failed verify also failed", exc_info=True)
+            raise
+        result.file_changes = actual_changes
+        result.target_edit_count = self.count_target_edits()
+        result.edit_count = max(result.edit_count, result.target_edit_count)
+        return result
 
     def verify(self) -> list[str]:
         """Verify post-run integrity and return allowed tracked changes."""

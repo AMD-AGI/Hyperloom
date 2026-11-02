@@ -14,7 +14,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import subprocess
 import threading
 import uuid
 from collections.abc import Iterator
@@ -45,7 +44,7 @@ from kernelforge.agent_backends.base import (
     AgentRunSpec,
     AgentRuntimeConfig,
 )
-from kernelforge.agent_backends.workspace_guard import WorkspaceGuard, WorkspaceSafetyError
+from kernelforge.agent_backends.workspace_guard import WorkspaceGuard
 
 log = logging.getLogger(__name__)
 
@@ -387,21 +386,8 @@ class DeepSeekHarnessBackend:
 
         result = _normalize_run_result(sdk_result, session_id)
         if usage is not None:
-            usage.add_usage(result.usage, role=spec.role)
-        try:
-            actual_changes = guard.verify()
-        except Exception:
-            # verify() restores the baseline itself before raising a rejection, so this second call only covers the
-            # paths that fail before it gets there.
-            try:
-                guard.rollback()
-            except (WorkspaceSafetyError, OSError, subprocess.SubprocessError):
-                log.warning("workspace rollback after a failed verify also failed", exc_info=True)
-            raise
-        result.file_changes = actual_changes
-        result.target_edit_count = guard.count_target_edits()
-        result.edit_count = max(result.edit_count, result.target_edit_count)
-        return result
+            usage.add_usage(result.usage, role=spec.role, provider=self.name)
+        return guard.settle_into(result)
 
     async def run(self, spec: AgentRunSpec, usage: Any = None) -> AgentRunResult:
         """Run one new DeepSeek Harness session."""
