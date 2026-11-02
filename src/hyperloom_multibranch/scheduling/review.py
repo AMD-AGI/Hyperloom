@@ -17,7 +17,7 @@ are what its branches get, and ``review.json`` names every file the review chang
 ``review_rejected`` and opens nothing. The pause does not count against ``--max-hours``: EXPLORE ends that much later.
 
 A session that stops after its map (``--stop-after-map``) does not pause: its stop is the review point, and its map is
-reviewed offline across the points (:mod:`~hyperloom_multibranch.points`).
+reviewed offline, then given to a second run (``--agent-directions``, ``--agent-dossier``).
 """
 
 from __future__ import annotations

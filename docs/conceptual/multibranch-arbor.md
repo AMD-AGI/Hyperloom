@@ -109,21 +109,15 @@ In the Hyperloom paths below, `src/hyperloom_multibranch/` is left out. Arbor's 
 ## Several operating points
 
 Each concurrency is its own MB session: its own PRELUDE, Arbor(s), map from its own dossier pass, gate, integration
-and FINAL. No map is split across the points. `hyperloom-multibranch points` runs them in two stages, so no node waits
-for a person:
+and FINAL. No map is split across the points, and each point ends with its own recipe.
 
-1. **`points map`:** each point runs `run --stop-after-map`. That is PRELUDE and the map step, kept in
-   `MB-agent-map/` (the map, the dossier); then it stops with reason `mapped`. It never pauses.
-2. **The review, offline:** `points approve` or `points reject`, per point, on the points directory.
-3. **`points run`:** the approved points run with their reviewed map and dossier (`--agent-directions`,
-   `--agent-dossier`) and `--no-review-gate`.
+- **Starting several:** a launcher outside MB starts one ordinary `hyperloom-multibranch run` per point.
+- **Sessions that share a machine:** each gets its own cards and its own Arbor port base (`--agent-port`).
+- **A review across the points without holding a node:** each session runs `--stop-after-map` first. A second run per
+  point then takes its reviewed map and dossier (`--agent-directions`, `--agent-dossier`, `--no-review-gate`).
 
-On a shared node, each point gets its own container (`--slot`), cards and Arbor port base (`--agent-port`). Each
-point's Arbor gets its own point's `Host rule` directives. Each point ends with its own recipe; nothing merges across
-the points (ArborDevelopment #27). Verified on Ruby, C8 and C64 on one node (2026-11-01; runner
-`plans/arbor/M08_multi_point/`). How to run it: {doc}`Run several operating points with Arbor
-</how-to/multibranch-points>`; the single-session review: {doc}`Review the agent map before the Arbor branches open
-</how-to/multibranch-review-gate>`.
+Each point's Arbor gets its own point's `Host rule` directives. The single-session review: {doc}`Review the agent map
+before the Arbor branches open </how-to/multibranch-review-gate>`.
 
 ## What passes between them
 
@@ -158,8 +152,7 @@ the points (ArborDevelopment #27). Verified on Ruby, C8 and C64 on one node (202
   approves from a login node.
 - **An older MB under a newer Arbor:** an MB before `cc5fc7dca` doesn't write `component.review`. Its Arbors at
   `1fa2069` or later wait at Arbor's own gate, holding their leases.
-- **No merge across operating points:** each point's session ends with its own recipe. A rule that combines them
-  (for example, keep a change only if no point regresses) is not built (ArborDevelopment #27).
+- **No merge across operating points:** each point's session ends with its own recipe. Nothing combines them.
 - **A dropped flag of the resolved launch:** a KEEP that runs without a flag the `--agent-launch` file sets now
   removes it, and the recipe keeps the removal (`LaunchConfig.remove_args`, `arbor-adapter-v2` `b9d65167d` and
   after). Only on AgentX, though: there Magpie applies it; on InferenceX such a removal is refused
