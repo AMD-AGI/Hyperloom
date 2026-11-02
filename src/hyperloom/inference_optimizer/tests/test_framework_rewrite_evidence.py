@@ -215,6 +215,39 @@ def test_fingerprint_summarises_a_wide_container(probe_module, tmp_path):
     assert probe._fingerprint(wide, strict=True) == ("list", 64)
 
 
+class _TensorShapedScalar:
+    """Like a NumPy scalar: tensor-shaped attributes, no weak reference, no ``data_ptr``."""
+
+    __slots__ = ("value",)
+    shape = ()
+    dtype = "int64"
+    device = "cpu"
+
+    def __init__(self, value):
+        self.value = value
+
+
+def test_a_deep_probe_failure_never_reaches_the_profiled_call(probe_module, tmp_path):
+    framework_root = tmp_path / "fake_framework"
+    framework_root.mkdir()
+    module_path = framework_root / "step.py"
+    module_path.write_text("def step(scalar):\n    return scalar.value + 1\n", encoding="utf-8")
+    spec = importlib.util.spec_from_file_location("fake_framework_step", module_path)
+    assert spec is not None and spec.loader is not None
+    target = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(target)
+
+    probe = probe_module.HostProbe(out_dir=str(tmp_path / "out"), roots=(str(framework_root) + "/",), deep=True)
+    probe._install_tier2()
+    try:
+        result = target.step(_TensorShapedScalar(3))
+    finally:
+        sys.setprofile(None)
+        threading.setprofile(None)  # type: ignore[arg-type]
+
+    assert result == 4
+
+
 def test_deep_probe_counts_calls_and_argument_repeats(probe_module, tmp_path):
     """The tier-2 hook attributes calls to framework roots and rates arg repeats."""
     framework_root = tmp_path / "fake_framework"

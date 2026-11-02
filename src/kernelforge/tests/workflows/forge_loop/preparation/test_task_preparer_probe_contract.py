@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import subprocess
+import sys
 
 from kernelforge.workflows.forge_loop.preparation import task_preflight
 
@@ -65,6 +67,20 @@ def test_graph_probe_sitecustomize_records_rank_identity():
     assert '"rank": os.environ.get("RANK")' in source
     assert '"world_size": os.environ.get("WORLD_SIZE")' in source
     assert "else _ancestor_pids()" in source
+
+
+def test_graph_probe_reports_a_shard_it_cannot_write(tmp_path):
+    (tmp_path / "sitecustomize.py").write_text(task_preflight._GRAPH_PROBE_SITECUSTOMIZE)
+    out = tmp_path / "missing" / "replays"
+    env = {**os.environ, "PYTHONPATH": str(tmp_path), "GRAPH_PROBE_OUT": str(out)}
+    proc = subprocess.run(
+        [sys.executable, "-c", "import os; print(os.getpid())"], capture_output=True, text=True, env=env, timeout=60
+    )
+    pid = proc.stdout.strip()
+    assert proc.returncode == 0
+    assert proc.stderr == (
+        f"graph probe: could not write {out}.{pid}: [Errno 2] No such file or directory: '{out}.{pid}'\n"
+    )
 
 
 def test_count_graph_replays_reads_replay_file(monkeypatch, tmp_path):

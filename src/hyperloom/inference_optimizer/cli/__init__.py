@@ -784,7 +784,7 @@ def _write_cli_terminal_artifacts(session_dir: Path, state: SharedState, stop_re
 
         final_json = write_minimal_final_json(session_dir)
         print(f"Final summary     : {final_json}")
-    except Exception:
+    except (OSError, ValueError):
         log.exception("crash-safe final.json write failed (non-fatal)")
     if state.close_sequence_done:
         print("Session breakdown : (already written by CLOSE phase sequencer; skipping cli.finally safety-net write)")
@@ -794,14 +794,14 @@ def _write_cli_terminal_artifacts(session_dir: Path, state: SharedState, stop_re
 
             breakdown_path = write_breakdown_json(session_dir)
             print(f"Session breakdown : {breakdown_path}")
-        except Exception:
+        except (OSError, ValueError, TypeError):
             log.exception("session_breakdown finalize failed (non-fatal)")
         try:
             from ..breakdown import write_minimal_final_report
 
             final_md = write_minimal_final_report(session_dir)
             print(f"Final report      : {final_md}")
-        except Exception:
+        except (OSError, ValueError, TypeError):
             log.exception("emergency final report write failed (non-fatal)")
     try:
         from hyperloom.inference_optimizer.trace.langfuse_emitter import flush_session, record_session_breakdown
@@ -811,7 +811,7 @@ def _write_cli_terminal_artifacts(session_dir: Path, state: SharedState, stop_re
 
         patch_breakdown_langfuse(session_dir)
         record_session_breakdown(session_dir)
-    except Exception:
+    except (OSError, ValueError):
         log.debug("langfuse flush_session failed", exc_info=True)
     # Safety net for paths that leave close_sequence_done False and never run
     # the sequencer; ordered after langfuse so the package carries its patch.
@@ -821,7 +821,7 @@ def _write_cli_terminal_artifacts(session_dir: Path, state: SharedState, stop_re
         pkg_path = package_session_artifacts(session_dir, session_id=str(getattr(state, "session_id", "") or ""))
         if pkg_path is not None:
             print(f"Artifact package  : {pkg_path}")
-    except Exception:
+    except (OSError, ValueError):
         log.exception("session artifact package failed (non-fatal)")
 
 
@@ -869,7 +869,7 @@ def _persist_preflight_failure_artifacts(
                 if not getattr(manifest_args, "model", None):
                     manifest_args.model = os.environ.get("MODEL_PATH", "")
                 write_manifest(session_dir, args=manifest_args)
-            except Exception as write_exc:  # isolation boundary: the preflight-failure manifest write
+            except (OSError, ValueError, TypeError) as write_exc:
                 log.warning("failed to write manifest for SBD V6 preflight failure", exc_info=True)
                 from ..session.sbd_v6 import record_write_warning
 
@@ -1317,12 +1317,9 @@ def _create_fresh_session(args: argparse.Namespace, *, framework: str, nodes_res
     manifest = write_manifest(session_dir, args=args)
     _persist_install_event(args, session_dir)
     # One-shot Langfuse startup marker so a run killed before a breakdown still leaves a correlatable trace.
-    try:
-        from hyperloom.inference_optimizer.trace.langfuse_emitter import record_session_start
+    from hyperloom.inference_optimizer.trace.langfuse_emitter import record_session_start
 
-        record_session_start(session_dir)
-    except Exception:  # outermost telemetry sink: the Langfuse session_start marker
-        log.debug("langfuse record_session_start failed (non-fatal)", exc_info=True)
+    record_session_start(session_dir)
     print(f"Session dir     : {session_dir}")
     print(f"Session id      : {manifest['session_id']}  (manifest label only)")
     _print_session_skeleton(session_dir)
@@ -1646,7 +1643,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     except Exception as exc:
         try:
             _persist_preflight_failure_artifacts(args, exc)
-        except Exception:
+        except (OSError, ValueError, TypeError):
             log.warning("failed to preserve SBD V6 preflight failure", exc_info=True)
         raise
 
@@ -1795,9 +1792,22 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 ),
             )
     finally:
-        state = coordinator.shared_state
-        effective_stop_reason = stop_reason or coordinator.stop_classification
+        await _close_optimize_run(coordinator, session_lock, session_dir, stop_reason)
+
+    _reconcile_crash_count(coordinator.shared_state, session_dir)
+    # NOTE: conc_sweep is now a SWEEP-phase action auto-enqueued by the Coordinator, not a post-hook here.
+
+    _print_final_summary(coordinator.shared_state, stop_reason, session_dir)
+    return _exit_code_for_stop_reason(stop_reason, coordinator.shared_state.baseline_tput)
+
+
+async def _close_optimize_run(coordinator: Any, session_lock: Any, session_dir: Path, stop_reason: str | None) -> None:
+    """Stop the coordinator; the lock release and terminal artifacts still happen when stopping raises."""
+    state = coordinator.shared_state
+    effective_stop_reason = stop_reason or coordinator.stop_classification
+    try:
         await coordinator.stop()
+    finally:
         # Drop the single-optimizer session lock once the
         # coordinator has released its leases. The OS would drop it on process
         # exit anyway; this just frees it promptly for an intentional resume.
@@ -1805,14 +1815,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         _write_cli_terminal_artifacts(session_dir, state, effective_stop_reason)
         try:
             state.save(session_dir)
-        except Exception:
+        except (OSError, ValueError, TypeError):
             log.exception("failed to persist post-stop state (non-fatal)")
-
-    _reconcile_crash_count(coordinator.shared_state, session_dir)
-    # NOTE: conc_sweep is now a SWEEP-phase action auto-enqueued by the Coordinator, not a post-hook here.
-
-    _print_final_summary(coordinator.shared_state, stop_reason, session_dir)
-    return _exit_code_for_stop_reason(stop_reason, coordinator.shared_state.baseline_tput)
 
 
 def main(argv: list[str] | None = None) -> int:
