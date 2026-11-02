@@ -138,6 +138,30 @@ def with_writable_sandbox(runtime: AgentRuntimeConfig) -> AgentRuntimeConfig:
     return replace(runtime, sandbox_mode="workspace-write")
 
 
+# The git subcommands a read-only session may run: each reads the repository and none writes it.
+READ_ONLY_GIT_SUBCOMMANDS = frozenset(
+    {
+        "blame",
+        "cat-file",
+        "describe",
+        "diff",
+        "for-each-ref",
+        "grep",
+        "help",
+        "log",
+        "ls-files",
+        "ls-tree",
+        "merge-base",
+        "name-rev",
+        "rev-parse",
+        "shortlog",
+        "show",
+        "status",
+        "version",
+    }
+)
+
+
 @dataclass(frozen=True)
 class AgentToolPolicy:
     """Describe provider-neutral tools and turn limits for one session."""

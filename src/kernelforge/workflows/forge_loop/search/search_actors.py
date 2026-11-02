@@ -28,6 +28,8 @@ class SearchActorBundle:
     # Builds a further planning service for this profile, so planning units of one round run side by side without
     # sharing one service's per-run state.
     orchestration_factory: Callable[[], Any] | None = None
+    # The read-only agent that names a tree round's slots, on this profile's own provider and model.
+    slot_selector: Any = None
 
 
 class SearchActorPool:

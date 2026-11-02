@@ -150,6 +150,8 @@ class LoopAgents:
     search_actors: SearchActorPool | None = None
     # Builds a further planning service for the active profile, for planning units that run side by side.
     orchestration_factory: Any = None
+    # The read-only agent that names a tree round's slots; None outside a tree campaign.
+    slot_selector: Any = None
 
 
 @dataclass(frozen=True)
@@ -172,6 +174,7 @@ def _with_search_actor(agents: LoopAgents, bundle) -> LoopAgents:
         orchestration_service=bundle.orchestration_service,
         supervisor_fn=bundle.supervisor_fn,
         orchestration_factory=bundle.orchestration_factory,
+        slot_selector=bundle.slot_selector,
     )
 
 

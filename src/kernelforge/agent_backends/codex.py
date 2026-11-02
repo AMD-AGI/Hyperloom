@@ -27,6 +27,7 @@ from hyperloom_common.llm.reasoning_effort import (
     gateway_reasoning_effort,
 )
 from kernelforge.agent_backends.base import (
+    READ_ONLY_GIT_SUBCOMMANDS,
     AgentCapabilities,
     AgentProviderError,
     AgentProviderUnavailableError,
@@ -70,10 +71,7 @@ def _write_git_guard(directory: Path) -> dict[str, str]:
         raise CodexUnavailableError("git is required for Codex workspace guards")
 
     wrapper = directory / "git"
-    allowed = (
-        '""|blame|cat-file|describe|diff|for-each-ref|grep|help|log|ls-files|'
-        "ls-tree|merge-base|name-rev|rev-parse|shortlog|show|status|version"
-    )
+    allowed = "|".join(['""', *sorted(READ_ONLY_GIT_SUBCOMMANDS)])
     wrapper.write_text(
         "#!/bin/sh\n"
         "cmd=''\n"

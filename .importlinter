@@ -192,6 +192,7 @@ forbidden_modules =
     kernelforge.workflows.forge_loop.policy
     kernelforge.workflows.forge_loop.preparation
     kernelforge.workflows.forge_loop.search
+    kernelforge.workflows.forge_loop.tree
     kernelforge.workflows.forge_loop.roles.agent_extras
     kernelforge.workflows.forge_loop.roles.analysis_evidence
     kernelforge.workflows.forge_loop.roles.prompt_view
