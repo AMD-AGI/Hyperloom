@@ -6,7 +6,7 @@ of ``test_run_jit``).
 
 The image carries two prebuilt modules: ``module_gemm``, whose config entry passes
 ``-DCK_TILE_FLOAT_TO_BFLOAT16_DEFAULT={os.environ.get("CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT", 2)}`` (the flag of the image
-aiter's ``module_mha_batch_prefill``, 285579b62), and ``module_other``, which reads none. No Python of the build path reads
+aiter's ``module_mha_batch_prefill``, e7d2453f), and ``module_other``, which reads none. No Python of the build path reads
 the variable: aiter evaluates the entry when it builds the module. A candidate that only sets it must neither share the
 image's cache entries nor be given the image's ``module_gemm``, which was built under the image's value; a variable no entry
 and no code names changes nothing.

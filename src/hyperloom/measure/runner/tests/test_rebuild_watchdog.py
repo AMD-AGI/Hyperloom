@@ -119,7 +119,7 @@ def test_a_module_the_patch_touches_that_the_server_builds_raises_the_watchdog_t
     assert note is not None and "module_gemm_a8w8_bpreshuffle_cktile" in note
 
 
-#: A module entry shaped like the image aiter's (285579b62) CK-tile GEMM, which reads its compiler from the environment.
+#: A module entry shaped like the image aiter's (e7d2453f) CK-tile GEMM, which reads its compiler from the environment.
 _CKTILE_ENTRY = {
     "srcs": ["f'{AITER_CSRC_DIR}/cktile_gemm_a8w8_bpreshuffle/gemm_a8w8_bpreshuffle_cktile.cu'"],
     "hip_clang_path": "os.environ.get('FLATMM_HIP_CLANG_PATH')",

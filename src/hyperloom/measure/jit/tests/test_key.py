@@ -251,11 +251,12 @@ def test_a_patch_that_only_changes_what_the_framework_asks_for_is_not(text) -> N
     assert not touches_build_surface(text, {"ENABLE_CK", "GPU_ARCHS"})
 
 
-# Five entries of aiter/jit/optCompilerConfig.json, copied verbatim from ROCm/aiter 285579b6211b0da30f35b91a890c29c823597cd1:
-# the AITER_COMMIT of lmsysorg/sglang-rocm:v0.5.22-rocm10-mi35x-20261022 (and of its -20261025 and mi30x-20261022 builds),
-# as each image's config says; the image checks it out with no change to aiter/jit. aiter's get_args_of_build evaluates
-# every string of an entry as Python when it builds the module, so these read the server's environment then.
-IMAGE_AITER_CONFIG = Path(__file__).parent / "data" / "aiter-285579b62-optCompilerConfig.json"
+# Five entries of aiter/jit/optCompilerConfig.json, copied verbatim from ROCm/aiter e7d2453f25e5aaeea72a3a40b284ba453e026624
+# (2026-09-25): the aiter of the image the paired sessions of #169 run (c5049, read in its container). The AITER_COMMIT that
+# lmsysorg/sglang-rocm:v0.5.22-rocm10-mi35x-20261022, -20261025 and mi30x-20261022 state is 285579b62; there these five
+# entries read the same variables. aiter's get_args_of_build evaluates every string of an entry as Python when it builds
+# the module, so these read the server's environment then.
+IMAGE_AITER_CONFIG = Path(__file__).parent / "data" / "aiter-e7d2453f-optCompilerConfig.json"
 #: What each entry reads on that commit. ``module_deepgemm_opus`` asks ``'gfx1250' in os.environ.get('GPU_ARCHS', '')``:
 #: ``GPU_ARCHS`` is read, ``gfx1250`` is a value. (On aiter main the CK-tile GEMM also reads
 #: ``CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT``; the image's does not.)
@@ -263,7 +264,7 @@ IMAGE_ENTRY_READS = {
     "module_gemm_a8w8_bpreshuffle": set(),
     "module_deepgemm_opus": {"GPU_ARCHS"},
     "module_gemm_a8w8_bpreshuffle_cktile": {"FLATMM_HIP_CLANG_PATH"},
-    "module_rmsnorm": {"OPUS_FP32_to_BF16_DEFAULT"},
+    "module_rmsnorm_quant": {"OPUS_FP32_to_BF16_DEFAULT"},
     "module_mha_batch_prefill": {
         "CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT",
         "CK_TILE_ATTENTION_LOGITS_SOFT_CAP_DEFAULT",
