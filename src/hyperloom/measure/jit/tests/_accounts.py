@@ -37,7 +37,7 @@ def as_store_owner(directory: Path, body: Callable[[Path], None]) -> int:
             os.setuid(UNPRIVILEGED)
             body(Path("."))
             status = 0
-        except BaseException:  # noqa: BLE001 - the child's outermost handler; its traceback goes to captured stderr
+        except Exception:  # noqa: BLE001 - the child's outermost handler; its traceback goes to captured stderr
             traceback.print_exc(file=sys.stderr)
             sys.stderr.flush()
         finally:
