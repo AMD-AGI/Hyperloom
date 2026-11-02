@@ -12,10 +12,11 @@ environment on top of the session's, or, on the hosted backend, in the leased ``
 from the transcripts of the Claude CLI's directory the sandbox gives the agent (:mod:`agent_spend`). Given the gate's
 benchmark client (:mod:`gate_client`), each agent's spec names it aimed at the branch's first port.
 
-The session's dossier pass (:mod:`dossier_pass`) runs on the same: a port block of its own, a sandbox of a lease, a
-worktree and a directory beside the branches', under :data:`~.dossier_pass.DOSSIER_HOLDER`. The dossier it writes is
-given to every agent branch built after it, which copies it into its checkout; a run given a reviewed map and its
-dossier runs no pass, and gives every branch that dossier.
+The dossier pass (:mod:`dossier_pass`) runs on the same: in EXPLORE as the run of a mapping branch (:mod:`map_session`),
+in the branch's place on its port block, its lease charged to it; in a session that stops after its map, with a port
+block, a worktree and a directory beside the branches', under :data:`~.dossier_pass.DOSSIER_HOLDER`. The dossier it
+writes is given to every agent branch built after it, which copies it into its checkout; a run given a reviewed map and
+its dossier runs no pass, and gives every branch that dossier.
 """
 
 from __future__ import annotations
@@ -30,7 +31,8 @@ from typing import TYPE_CHECKING, Protocol
 from hyperloom.measure.compile import COMPONENT_LAYOUTS
 from hyperloom.sandbox import Sandbox, SandboxGone
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
-from hyperloom_multibranch.contracts.toolbox import BranchLease
+from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind
+from hyperloom_multibranch.contracts.toolbox import BranchLease, LeaseCharge
 from hyperloom_multibranch.specialist.agent_onboard import cli_onboard
 from hyperloom_multibranch.specialist.agent_onboarding import AgentSandbox, AgentSpec, OnboardingSetup
 from hyperloom_multibranch.specialist.agent_sandbox import LocalAgentSandbox, framework_read_only
@@ -45,6 +47,7 @@ from hyperloom_multibranch.specialist.dossier_pass import (
     run_dossier_pass,
 )
 from hyperloom_multibranch.specialist.gate_client import GateClient
+from hyperloom_multibranch.specialist.map_session import MapCalls, MapSession
 from hyperloom_multibranch.specialist.model_sessions import ModelSessions, branch_place
 from hyperloom_multibranch.specialist.remote_sandbox import RemoteAgentSandbox, claude_config_dir, forwarded_env
 from hyperloom_multibranch.specialist.runtime import Session, SessionStart
@@ -122,7 +125,8 @@ class AgentSessions:
     ``toolbox`` the sandboxes are leased from and imports go to, and the ``repo`` they are read against; the
     ``sandboxes`` the agents run in; and ``client``, the gate's benchmark client, ``None`` when the session has none to
     give. ``dossier`` is the dossier every agent branch is given: the one the run was given with its reviewed map, or
-    the one the session's dossier pass wrote, once it has."""
+    the one the session's dossier pass wrote, once it has. ``maps`` is the scheduler's side of a mapping branch,
+    ``None`` in a session that opens none."""
 
     spec: AgentSpec
     command: AgentCommand
@@ -132,13 +136,19 @@ class AgentSessions:
     sandboxes: AgentSandboxes
     client: GateClient | None = None
     dossier: str | None = None
+    maps: MapCalls | None = None
     _taken: dict[str, int] = field(default_factory=dict, init=False)
 
-    def session(self, start: SessionStart, place: BranchPlace) -> AutonomousSession:
+    def session(self, start: SessionStart, place: BranchPlace) -> AutonomousSession | MapSession:
         """The run of the agent of ``start``'s branch, in ``place``, with the branch's share of the session's
-        directions when it has one, and the session's dossier when its dossier pass wrote one."""
+        directions when it has one, and the session's dossier when its dossier pass wrote one; for a mapping branch,
+        the run of its dossier pass."""
 
         branch, component = start.branch, self.spec.framework
+        if start.task.map_for:
+            if self.maps is None:
+                raise ValueError(f"{branch} is a mapping branch, and the session has no maps to hand out")
+            return MapSession(start, self.maps, partial(self._mapped, branch, place))
         spec = replace(self._placed(branch, place), plan=start.task.plan or None, dossier=self.dossier)
         onboard = cli_onboard(self.command, self.env, branch, place.blackboard)
         sandbox = self._sandbox(branch, place)
@@ -163,6 +173,21 @@ class AgentSessions:
             return DossierOutcome(None, None, f"its worktree could not be made: {error}")
         spec, sandbox = self._placed(DOSSIER_HOLDER, here), self._sandbox(DOSSIER_HOLDER, here)
         setup = DossierSetup(spec, self.repo, self.toolbox, sandbox, here.worktree, here.workspace / AGENT_DIR)
+        outcome = await run_dossier_pass(start, setup)
+        if outcome.dossier is not None:
+            self.dossier = str(outcome.dossier)
+        return outcome
+
+    async def _mapped(self, branch: str, place: BranchPlace, start: DossierStart) -> DossierOutcome:
+        """The dossier pass of the mapping branch ``branch`` in its ``place``, its lease charged to the branch; the
+        dossier it wrote is kept for the share branches."""
+
+        spec, sandbox = self._placed(branch, place), self._sandbox(branch, place)
+        charge = LeaseCharge(LeaseKind.AUTONOMOUS, branch)
+        agent_dir = place.workspace / AGENT_DIR
+        setup = DossierSetup(
+            spec, self.repo, self.toolbox, sandbox, place.worktree, agent_dir, holder=branch, charge=charge
+        )
         outcome = await run_dossier_pass(start, setup)
         if outcome.dossier is not None:
             self.dossier = str(outcome.dossier)

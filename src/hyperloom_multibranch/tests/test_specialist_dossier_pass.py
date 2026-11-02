@@ -9,6 +9,8 @@ from pathlib import Path
 import pytest
 
 from hyperloom_multibranch.contracts.blackboard.records import OpShares
+from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind
+from hyperloom_multibranch.contracts.toolbox import LeaseCharge
 from hyperloom_multibranch.specialist import arbor_adapter
 from hyperloom_multibranch.specialist.agent_onboarding import PROFILE_FILE
 from hyperloom_multibranch.specialist.arbor_adapter import DOSSIER_PASS, MAPPED
@@ -69,10 +71,18 @@ async def _tick(_seconds: float) -> None:
 
 
 async def _pass(
-    tmp_path: Path, do: str, *, cards: int = 1, seconds: float = 30.0, arbor: bool = True, in_session: bool = False
+    tmp_path: Path,
+    do: str,
+    *,
+    cards: int = 1,
+    seconds: float = 30.0,
+    arbor: bool = True,
+    in_session: bool = False,
+    held_by: tuple[str, LeaseCharge] = (DOSSIER_HOLDER, DOSSIER_CHARGE),
 ) -> tuple[DossierOutcome, Toolbox, Path, DossierSetup]:
     """The dossier pass of a fake Arbor doing ``do``, on a rig whose toolbox has ``cards`` free, given ``seconds``,
-    writing its dossier in its session (``in_session``) or, by default, in its checkout."""
+    writing its dossier in its session (``in_session``) or, by default, in its checkout, its lease held as ``held_by``
+    says."""
 
     rig = await branch_rig(tmp_path, ROOT, "a1")
     files = {
@@ -97,6 +107,8 @@ async def _pass(
         poll_seconds=0.05,
         start_seconds=0.2,
         exit_grace_seconds=0.3,
+        holder=held_by[0],
+        charge=held_by[1],
     )
     start = DossierStart(str(source), rig.root, time.time() + seconds, SHARES, "kernel shares")
     outcome = await run_dossier_pass(start, setup)
@@ -124,6 +136,15 @@ async def test_the_pass_maps_on_its_own_lease_from_the_start_commit_and_gives_th
     assert config["server_flags"] == "--max-num-seqs 128 --tensor-parallel-size 1"  # the start commit's launch, its TP
     profile = json.loads((session / PROFILE_FILE).read_text())
     assert (profile["source"], profile["shares"]) == ("kernel shares", dict(SHARES.shares))
+
+
+async def test_a_mapping_branch_s_pass_leases_its_cards_as_the_branch_and_charges_them_to_it(tmp_path: Path) -> None:
+    charge = LeaseCharge(LeaseKind.AUTONOMOUS, "b01")
+
+    outcome, toolbox, _checkout, _setup = await _pass(tmp_path, "mapped", held_by=("b01", charge))
+
+    assert outcome.reason == MAPPED
+    assert (toolbox.leases, toolbox.charges, toolbox.released) == ([("b01", 1)], [charge], ["L1"])
 
 
 async def test_a_pass_whose_agent_writes_the_dossier_in_its_session_is_found_there(tmp_path: Path) -> None:
