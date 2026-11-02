@@ -882,6 +882,24 @@ def moe_runner_requires_aiter(server_args: str | None, model_path: str | None) -
     )
 
 
+def _flag_pair_at(tokens: list[str], i: int) -> tuple[list[str], int]:
+    """Return the flag at ``tokens[i]`` followed by its values, and the index past them."""
+    t = tokens[i]
+    if "=" in t:
+        flag, _, value = t.partition("=")
+        return [flag, value] if value else [flag], i + 1
+    i += 1
+    pair = [t]
+    if t in _MULTI_VALUE_FLAGS:
+        while i < len(tokens) and not tokens[i].startswith("--"):
+            pair.append(tokens[i])
+            i += 1
+    elif i < len(tokens) and not tokens[i].startswith("--"):
+        pair.append(tokens[i])
+        i += 1
+    return pair, i
+
+
 def dedupe_extra_server_args(args_str: str) -> str:
     """Collapse repeated ``--flag value`` pairs into a unique launch string."""
     if not args_str:
@@ -896,22 +914,8 @@ def dedupe_extra_server_args(args_str: str) -> str:
     while i < len(tokens):
         t = tokens[i]
         if t.startswith("--"):
-            if "=" in t:
-                flag, _, value = t.partition("=")
-                values = [value] if value else []
-                i += 1
-            else:
-                flag = t
-                i += 1
-                values = []
-                if flag in _MULTI_VALUE_FLAGS:
-                    while i < len(tokens) and not tokens[i].startswith("--"):
-                        values.append(tokens[i])
-                        i += 1
-                elif i < len(tokens) and not tokens[i].startswith("--"):
-                    values = [tokens[i]]
-                    i += 1
-            pair = [flag, *values] if values else [flag]
+            pair, i = _flag_pair_at(tokens, i)
+            flag = pair[0]
             if flag not in pair_by_flag:
                 order.append(flag)
             pair_by_flag[flag] = pair
