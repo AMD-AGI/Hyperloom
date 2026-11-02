@@ -162,7 +162,7 @@ def test_seed_shared_state_records_custom_workload_paths(
     assert SharedState.load_or_init(tmp_path).framework == "custom"
 
 
-def _neutralize_seed_io(monkeypatch):
+def _neutralize_seed_io(monkeypatch, *, gpu_count: int = 1, lane_ceiling: int = 1):
     """Stub the model/recipe reads so a seed can be asserted on one field."""
     monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
     monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
@@ -170,8 +170,8 @@ def _neutralize_seed_io(monkeypatch):
     from hyperloom.common import visible_devices
     from hyperloom.orchestrator.policy import gate as policy
 
-    monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 1)
-    monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 1)
+    monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: gpu_count)
+    monkeypatch.setattr(policy, "research_lane_ceiling", lambda: lane_ceiling)
 
 
 def test_seed_records_an_explicit_zero_research_lane_capacity(
@@ -319,19 +319,7 @@ def test_seed_shared_state_falls_back_to_path_basename(
     monkeypatch,
 ) -> None:
     """Without a pinned display name (the common, non-quantized path) the model name is still the plain model-path basename."""
-    monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
-    monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
-    monkeypatch.setattr(
-        cb,
-        "_resolve_reference_recipe",
-        lambda _args, _framework: ("", {}, "", {}),
-    )
-
-    from hyperloom.common import visible_devices
-    from hyperloom.orchestrator.policy import gate as policy
-
-    monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 8)
-    monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 16)
+    _neutralize_seed_io(monkeypatch, gpu_count=8, lane_ceiling=16)
 
     state = cb._seed_shared_state(
         tmp_path,
