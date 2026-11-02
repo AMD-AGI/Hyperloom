@@ -23,6 +23,7 @@ from kernelforge.agent_backends import (
 from kernelforge.agent_backends.runtime import agent_runtime
 from kernelforge.config import Config
 from kernelforge.config.edit_policy import FORGE_PROTECTED_PATHS
+from kernelforge.utils.device_lock import campaign_device_lock_path
 from kernelforge.workflows.forge_loop.roles.agent_response import (
     AgentResponseIncompleteError,
     AgentResponseInfrastructureError,
@@ -1495,6 +1496,7 @@ def _specialist_probe_config(config: Config) -> SpecialistProbeConfig | None:
     def _bounded(root: Path) -> SpecialistProbeConfig:
         return SpecialistProbeConfig(
             scratch_root=str(root),
+            device_lock=str(campaign_device_lock_path(workspace)),
             max_probes=int(config.specialist_probe_max),
             budget_sec=float(config.specialist_probe_budget_sec),
         )
@@ -1535,26 +1537,19 @@ def make_orchestration_service(
     usage=None,
     definitions: Mapping[str, SpecialistDefinition] | None = None,
     enable_plan_critic: bool = False,
+    preflight: bool | None = None,
 ) -> OrchestrationService:
-    """Build the default forge-loop planning chain through registered backends."""
+    """Build the default forge-loop planning chain through registered backends; ``preflight`` overrides the runtime's."""
     resolved_definitions = dict(default_specialist_definitions() if definitions is None else definitions)
     if not resolved_definitions:
         raise ValueError("definitions must not be empty")
     runtime = agent_runtime(config)
     orchestration_backend = create_registered_backend(
-        runtime,
-        probe_cwd=config.workspace,
-        usage=usage,
+        runtime, preflight=preflight, probe_cwd=config.workspace, usage=usage
     )
     effective_runtime = orchestration_backend.runtime
     critic_backend = (
-        create_registered_backend(
-            effective_runtime,
-            preflight=False,
-            usage=usage,
-        )
-        if enable_plan_critic
-        else None
+        create_registered_backend(effective_runtime, preflight=False, usage=usage) if enable_plan_critic else None
     )
     specialist_probe = _specialist_probe_config(config)
     specialist_agents = {

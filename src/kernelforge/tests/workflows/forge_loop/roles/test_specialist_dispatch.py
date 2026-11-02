@@ -105,7 +105,7 @@ def test_the_deadline_is_stated_before_the_probe_section_that_relies_on_it() -> 
     """The probe text says "your own session"; that clock must come first."""
     setup = specialists_module._ProbeSetup(
         enabled=True,
-        config=SpecialistProbeConfig(scratch_root="/tmp/probe-scratch"),
+        config=SpecialistProbeConfig(scratch_root="/tmp/probe-scratch", device_lock="/tmp/device.lock"),
         workspace="/tmp/workspace",
         scratch_dir=Path("/tmp/probe-scratch/memory-0"),
         ledger_path=Path("/tmp/probe-scratch/memory-0/ledger.jsonl"),

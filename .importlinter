@@ -439,5 +439,4 @@ ignore_imports =
     kernelforge.workflows.gemm_tune.dense_shapes -> kernelforge.workflows.gemm_tune.tuners._aiter_dense_common
     kernelforge.kernel_backends.fusion.prompts -> kernelforge.workflows.forge_fusion.harness_contract
     kernelforge.kernel_backends.fusion.prompts -> kernelforge.workflows.forge_fusion.validate
-    kernelforge.workflows.forge_loop.roles.specialists -> kernelforge.workflows.forge_loop.iteration.fanout
 unmatched_ignore_imports_alerting = error

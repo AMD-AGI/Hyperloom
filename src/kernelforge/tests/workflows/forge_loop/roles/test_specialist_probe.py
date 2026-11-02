@@ -15,6 +15,7 @@ from kernelforge.utils.process_reaping import ReapReport
 from kernelforge.agent_backends import AgentCapabilities, AgentRunResult
 from kernelforge.config import Config
 from kernelforge.evaluation.benchmark.runner import BenchRun
+from kernelforge.utils.device_lock import campaign_device_lock_path
 from kernelforge.workflows.forge_loop.roles import specialist_probe
 from kernelforge.workflows.forge_loop.roles import specialist_probe_server as probe_server
 from kernelforge.workflows.forge_loop.roles.contracts import (
@@ -124,6 +125,7 @@ def _fingerprint(root: Path) -> dict[str, str]:
 def _probe(tmp_path: Path, **kwargs) -> SpecialistProbeConfig:
     return SpecialistProbeConfig(
         scratch_root=str(tmp_path / "experiments" / "specialist_probe"),
+        device_lock=str(campaign_device_lock_path(tmp_path / "canonical")),
         **kwargs,
     )
 
@@ -256,7 +258,9 @@ async def test_scratch_root_inside_the_canonical_tree_disables_the_probe(tmp_pat
         backend=backend,
         timeout_sec=1800,
         max_turns=4,
-        probe=SpecialistProbeConfig(scratch_root=str(workspace / "scratch")),
+        probe=SpecialistProbeConfig(
+            scratch_root=str(workspace / "scratch"), device_lock=str(campaign_device_lock_path(workspace))
+        ),
     )
 
     with caplog.at_level("WARNING"):
@@ -812,7 +816,7 @@ def test_load_sandbox_rejects_a_missing_budget(tmp_path) -> None:
 
 def test_probe_config_rejects_an_empty_budget() -> None:
     with pytest.raises(ValueError, match="max_probes"):
-        SpecialistProbeConfig(scratch_root="/tmp/scratch", max_probes=0)
+        SpecialistProbeConfig(scratch_root="/tmp/scratch", device_lock="/tmp/device.lock", max_probes=0)
 
 
 @pytest.mark.asyncio
@@ -901,8 +905,6 @@ async def test_the_probe_child_is_given_the_environment_its_driver_needs(tmp_pat
 @pytest.mark.asyncio
 async def test_a_probe_locks_the_same_device_sentinel_the_fanout_lanes_do(tmp_path, monkeypatch) -> None:
     """One GPU, one sentinel: a probe queues behind a lane and a lane behind it."""
-    from kernelforge.workflows.forge_loop.iteration.fanout import campaign_device_lock_path
-
     _patch_primitive(monkeypatch, _stub_primitive)
     workspace = _workspace(tmp_path)
     backend = _McpBackend()
@@ -922,10 +924,32 @@ async def test_a_probe_locks_the_same_device_sentinel_the_fanout_lanes_do(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_a_probe_in_another_checkout_measures_it_and_still_locks_the_campaign_sentinel(
+    tmp_path, monkeypatch
+) -> None:
+    """A tree round probes each start in its own worktree, on the one GPU every lane queues for."""
+    _patch_primitive(monkeypatch, _stub_primitive)
+    _workspace(tmp_path)
+    start = _workspace(tmp_path / "starts")
+    backend = _McpBackend()
+    agent = SpecialistAgent(
+        definition=_definition(),
+        backend=backend,
+        timeout_sec=1800,
+        max_turns=4,
+        probe=_probe(tmp_path),
+    )
+
+    await agent.run(_assignment(), _context(start))
+
+    env = backend.specs[0].mcp_servers["specialist_probe"].env
+    assert env[specialist_probe.WORKSPACE_ENV] == str(start.resolve())
+    assert env[specialist_probe.DEVICE_LOCK_ENV] == str(campaign_device_lock_path(tmp_path / "canonical"))
+
+
+@pytest.mark.asyncio
 async def test_specialist_setup_creates_the_campaign_sentinel(tmp_path, monkeypatch) -> None:
     """Naming the sentinel is not enough; the analysis round has to find it."""
-    from kernelforge.workflows.forge_loop.iteration.fanout import campaign_device_lock_path
-
     _patch_primitive(monkeypatch, _stub_primitive)
     workspace = _workspace(tmp_path)
     sentinel = campaign_device_lock_path(workspace)
