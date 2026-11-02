@@ -150,13 +150,8 @@ def _load_suite(workspace_dir: str) -> _CanonicalSuite | str | None:
     )
 
 
-async def _run_canonical_suite(
-    workspace_dir: str,
-    *,
-    timeout_cap_sec: int,
-    kernel_backend: str = "",
-) -> CanonicalCorrectnessResult:
-    """Run the arena's Step 1 then Step 2 and stop at the first failure."""
+def _runnable_suite(workspace_dir: str, kernel_backend: str) -> _CanonicalSuite | CanonicalCorrectnessResult:
+    """The suite to run for this workspace, or the verdict that stands in for running one."""
     suite = _load_suite(workspace_dir)
     if suite is None:
         if kernel_backend == "assembly":
@@ -182,6 +177,31 @@ async def _run_canonical_suite(
             detail="assembly acceptance requires numerical_validation with source-relative repeat-output evidence",
             outcome="unverified",
         )
+    return suite
+
+
+async def _start_command(command: str, workspace_dir: str, request_id: str) -> asyncio.subprocess.Process:
+    """Start one suite command in its own session, tagged with the suite's request id."""
+    return await asyncio.create_subprocess_shell(
+        command,
+        cwd=workspace_dir,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,
+        env={**os.environ, REQUEST_ENV: request_id},
+    )
+
+
+async def _run_canonical_suite(
+    workspace_dir: str,
+    *,
+    timeout_cap_sec: int,
+    kernel_backend: str = "",
+) -> CanonicalCorrectnessResult:
+    """Run the arena's Step 1 then Step 2 and stop at the first failure."""
+    suite = _runnable_suite(workspace_dir, kernel_backend)
+    if isinstance(suite, CanonicalCorrectnessResult):
+        return suite
 
     passed_steps: list[str] = []
     numerical_output: list[str] = []
@@ -190,14 +210,7 @@ async def _run_canonical_suite(
     for step in suite.steps:
         timeout_sec = min(step.timeout_sec, timeout_cap_sec)
         for command in step.commands:
-            proc = await asyncio.create_subprocess_shell(
-                command,
-                cwd=workspace_dir,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=True,
-                env={**os.environ, REQUEST_ENV: request_id},
-            )
+            proc = await _start_command(command, workspace_dir, request_id)
             try:
                 stdout, stderr = await communicate_process_group(proc, timeout=timeout_sec)
             except asyncio.TimeoutError:
