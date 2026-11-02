@@ -76,8 +76,17 @@ class TestCategorizeKernelName:
         # as compute and keeping it out of every fusion candidate.
         assert dg.categorize_kernel_name("_gemma_rmsnorm_kernel") == "rmsnorm"
         assert dg.categorize_kernel_name("_gemma_fused_add_rmsnorm_kernel") == "rmsnorm"
-        # CK spells real GEMM types with a ``GemmA`` prefix, so excluding ``gemma`` itself would misfile them.
+        # CK spells real GEMM types with a ``GemmA`` prefix; they stay GEMMs.
         assert dg.categorize_kernel_name("ck_tile::BlockGemmASmemBSmemCRegV1DefaultPolicy") == "gemm"
+        assert dg.categorize_kernel_name("BatchedGemma8W8") == "gemm"
+
+    def test_a_gemma_named_kernel_keeps_its_own_category(self):
+        # Regression: the model name ``gemma`` spells ``gemm``, so every op ranked below the gemm rule was a GEMM.
+        assert dg.categorize_kernel_name("_gemma_rotary_embedding_kernel") == "rope"
+        assert dg.categorize_kernel_name("_gemma3_rotary_kernel") == "rope"
+        assert dg.categorize_kernel_name("_gemma_act_and_mul_kernel") == "activation"
+        # Proposal prose goes through the same rules, all of them rather than the first.
+        assert dg.categories_in_text("Fuse the Gemma RMSNorm into the residual add") == ["add", "rmsnorm"]
 
 
 class TestDiagnoseFromShares:

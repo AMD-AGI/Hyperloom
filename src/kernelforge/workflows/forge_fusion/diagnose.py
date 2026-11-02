@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from hyperloom_common.kernel_names import without_model_names
+
 from .calibration import (
     DEFAULT_MIN_PREDICTED_GAIN,
     predict_cuda_graph_on_gain,
@@ -44,7 +46,7 @@ DEFAULT_MAX_BUSY_WALL = 0.45
 _KERNEL_CATEGORY_RULES: tuple[tuple[str, str], ...] = (
     # MoE first: its kernels are GEMMs too, and the table reports them separately.
     ("moe", r"fused_moe|mfma_moe|moe_align|moe_sum|moe_reduction|_routing|expert|grouped_topk"),
-    # Norms before the bare ``gemm`` substring, which also matches the ``gemma`` of ``_gemma_rmsnorm_kernel``.
+    # Norms before the bare ``gemm`` substring, as in TraceLens: CamelCase ``GemmaRMSNorm`` still spells it.
     ("rmsnorm", r"rmsnorm|rms_norm|_rms_"),
     ("layernorm", r"layernorm|layer_norm"),
     ("gemm", r"cijk_|tensile|gemm|matmul|_bhs_"),
@@ -67,7 +69,7 @@ _KERNEL_CATEGORY_RULES: tuple[tuple[str, str], ...] = (
 
 def categorize_kernel_name(name: str) -> str:
     """Map a GPU kernel name to a coarse op category (model-agnostic)."""
-    s = (name or "").lower()
+    s = without_model_names((name or "").lower())
     for category, pattern in _KERNEL_CATEGORY_RULES:
         if re.search(pattern, s):
             return category
@@ -81,7 +83,7 @@ _PROSE_EXCLUDED_CATEGORIES: frozenset[str] = frozenset({"elementwise"})
 
 def categories_in_text(text: str) -> list[str]:
     """Every op category a free-text description mentions, sorted and de-duped."""
-    s = (text or "").lower()
+    s = without_model_names((text or "").lower())
     return sorted(
         category
         for category, pattern in _KERNEL_CATEGORY_RULES
