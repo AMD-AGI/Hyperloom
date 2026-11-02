@@ -109,9 +109,12 @@ EVAL_ENVS = (ACCURACY_FLOOR_ENV, "GSM8K_LIMIT")
 HOST_RULE = "Host rule (MB)"
 #: The workload kind whose recipe Magpie resolves, the root's launch holding only what is added to it.
 AGENTX = "agentx"
-#: Arbor gives vLLM its TP itself and SGLang none, which reads it from these flags only.
+#: SGLang reads its TP from these flags only. Arbor gives vLLM its TP itself, but MB names it too, so a vLLM branch's
+#: server_flags are never empty, which Arbor refuses (a plain baseline root has no launch of its own).
 SGLANG = "sglang"
 SGLANG_TP_FLAGS = ("--tp-size", "--tp", "--tensor-parallel-size")
+VLLM = "vllm"
+VLLM_TP_FLAGS = ("--tensor-parallel-size", "-tp")
 #: The interpreter Arbor runs under, the sandbox's.
 PYTHON = "python3"
 #: What Arbor needs beyond the image (its docs/getting-started.md, and the third-party modules arbor/ imports outside
@@ -460,17 +463,18 @@ def arbor_config(spec: AgentSpec, checkout: Path, run: ArborRun) -> dict[str, An
 
 
 def server_flags(spec: AgentSpec, resolved: str = "") -> str:
-    """The recipe's server arguments as Arbor launches them, after the ``resolved`` launch's when there is one: on
-    SGLang, with the workload's TP size and its expert-parallel size, each unless the arguments set it; the
-    expert-parallel size only when it divides the TP, as MB's own launch has it."""
+    """The recipe's server arguments as Arbor launches them, after the ``resolved`` launch's when there is one, with
+    the workload's TP size unless the arguments set it (SGLang and vLLM); on SGLang also its expert-parallel size,
+    unless the arguments set it, and only when it divides the TP, as MB's own launch has it."""
 
     args = merge_server_args(resolved, spec.server_args)
-    if spec.framework != SGLANG:
+    tp_flags = {SGLANG: SGLANG_TP_FLAGS, VLLM: VLLM_TP_FLAGS}.get(spec.framework)
+    if tp_flags is None:
         return args
     named = _flag_names(args)
-    added = [] if named & set(SGLANG_TP_FLAGS) else [f"{SGLANG_TP_FLAGS[0]} {spec.tp}"]
+    added = [] if named & set(tp_flags) else [f"{tp_flags[0]} {spec.tp}"]
     flag, aliases, _ = EXPERT_PARALLEL_FLAGS[SGLANG]
-    if spec.ep > 1 and spec.tp % spec.ep == 0 and not named & set(aliases):
+    if spec.framework == SGLANG and spec.ep > 1 and spec.tp % spec.ep == 0 and not named & set(aliases):
         added.append(f"{flag} {spec.ep}")
     return merge_server_args(args, *added)
 
@@ -670,6 +674,8 @@ def _host_refusals(config: Mapping[str, Any], env: Mapping[str, str]) -> list[st
         reasons.append(f"docker_container is {config.get('docker_container')!r}, not @host")
     if env.get("ARBOR_ROLL") == "1":
         reasons.append("ARBOR_ROLL=1 is set: a component's clock is its host's")
+    if not str(config.get("server_flags") or "").strip():
+        reasons.append("no server_flags: Arbor serves the launch MB measures, and an empty one serves defaults")
     return reasons
 
 

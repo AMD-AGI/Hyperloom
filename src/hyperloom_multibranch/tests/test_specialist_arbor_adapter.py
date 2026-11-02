@@ -215,7 +215,7 @@ def test_arbor_s_config_follows_from_the_spec_on_the_serving_pack_in_component_m
     assert (config["pack"], config["mode"], config["docker_container"]) == ("serving", "component", "@host")
     assert (config["framework"], config["model_path"], config["tp"]) == ("vllm", MODEL, 2)
     assert config["model_name"] == "Qwen/Qwen3-14B-FP8"
-    assert config["server_flags"] == "--max-num-seqs 128"
+    assert config["server_flags"] == "--max-num-seqs 128 --tensor-parallel-size 2"
     assert config["server_env"] == {
         arbor_adapter.ACCURACY_FLOOR_ENV: "0.5",
         "VLLM_ROCM_USE_AITER": "1",
@@ -287,12 +287,26 @@ def test_an_sglang_size_the_recipe_sets_in_any_spelling_is_not_set_again(tmp_pat
     assert arbor_config(spec, tmp_path / "checkout", BRANCH_RUN)["server_flags"] == args
 
 
-def test_a_vllm_server_takes_the_tp_from_arbor_and_its_arguments_as_the_recipe_gives_them(tmp_path: Path) -> None:
-    spec = _spec(tmp_path, server_args="", tp=4, ep=4)
+@pytest.mark.parametrize(
+    ("args", "flags"),
+    [("", "--tensor-parallel-size 4"), ("-tp 4", "-tp 4"), ("--tensor-parallel-size=4", "--tensor-parallel-size=4")],
+    ids=["plain-baseline-root", "short-spelling", "equals-spelling"],
+)
+def test_a_vllm_server_names_its_tp_so_a_plain_baseline_root_is_not_refused(
+    tmp_path: Path, args: str, flags: str
+) -> None:
+    # A vLLM root with no launch of its own gave Arbor empty server_flags, which it refuses.
+    spec = _spec(tmp_path, server_args=args, tp=4, ep=4)
 
     config = arbor_config(spec, tmp_path / "checkout", BRANCH_RUN)
 
-    assert (config["framework"], config["server_flags"], config["tp"]) == ("vllm", "", 4)
+    assert (config["framework"], config["server_flags"], config["tp"]) == ("vllm", flags, 4)
+
+
+def test_empty_server_flags_are_refused_with_why(tmp_path: Path) -> None:
+    config = {**arbor_config(_spec(tmp_path), tmp_path / "checkout", BRANCH_RUN), "server_flags": " "}
+
+    assert any(reason.startswith("no server_flags:") for reason in refusals(config, {}))
 
 
 def test_the_gate_s_client_is_arbor_s_bench_command_with_only_its_port_and_result_dir_left_to_fill() -> None:
@@ -772,7 +786,8 @@ async def test_arbor_starts_with_the_start_s_kernel_tables_and_a_keep_that_keeps
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(arbor_adapter, "INSTALL", ())
-    agent = Component(keeps=(256,), gap=0.1, flags="--max-num-seqs 128", tail=0.6)
+    # The keep runs with the flags MB gave it, the TP MB names on vLLM included.
+    agent = Component(keeps=(256,), gap=0.1, flags="--max-num-seqs 128 --tensor-parallel-size 1", tail=0.6)
     start = _replayed(LocalBlobStore(tmp_path / "blobs"))
     source = _arbor_repo(tmp_path, agent)
     rig = await _rig(tmp_path, start=start, start_seconds=0.2, aiter=_aiter(tmp_path), source=source)
