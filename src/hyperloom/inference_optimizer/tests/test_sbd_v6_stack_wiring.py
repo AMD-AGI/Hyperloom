@@ -19,15 +19,11 @@ from hyperloom.common.perf_metric import GRADED_INTVTY, VERDICT_KEEP, GradedComp
 from hyperloom.inference_optimizer.breakdown.recorder import stack_event
 from hyperloom.inference_optimizer.breakdown.recorder.assembler import event_parts
 from hyperloom.inference_optimizer.breakdown.recorder.sections import STACK_EVENT_SECTIONS
-from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.inference_optimizer.session.session_binding import session_scope
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.roles import (
-    MockBackend,
-    MockCriticBackend,
-    ScriptedPlan,
-)
+
+from .conftest import heartbeat_orchestration_with_mock_critic
 
 
 @pytest.fixture
@@ -36,23 +32,9 @@ def session_dir(tmp_path, monkeypatch) -> Path:
     return make_session_dir()
 
 
-def _silent_backends() -> dict[str, object]:
-    silent = ScriptedPlan(
-        turns=[],
-        default_intent=Intent(
-            type=IntentType.SEND_MESSAGE,
-            payload={"topic": "heartbeat", "body_md": "ok"},
-        ),
-    )
-    return {
-        "orchestration": MockBackend(silent, name="orch"),
-        "critic": MockCriticBackend(),
-    }
-
-
 def _coord(session_dir: Path, *, baseline: float = 1000.0, anchor: float = 1000.0) -> Coordinator:
     """A coordinator anchored on a measured baseline, ready to be lifted."""
-    coord = Coordinator(session_dir, backends=_silent_backends())
+    coord = Coordinator(session_dir, backends=heartbeat_orchestration_with_mock_critic())
     coord.shared_state.baseline_tput = baseline
     coord.shared_state.current_best = {
         "action": "baseline",
@@ -144,25 +126,36 @@ def test_a_degraded_agentx_lift_is_refused(session_dir, monkeypatch):
         assert _rows() == []
 
 
+def _agentx_coord(session_dir: Path, *, with_baseline_axes: bool) -> Coordinator:
+    """A coordinator graded on p50 whose session baseline is an output rate on a different scale."""
+    coord = _coord(session_dir, baseline=1000.0, anchor=1000.0)
+    coord.shared_state.benchmark_mode = "agentx"
+    coord.shared_state.grading = {"objective": GRADED_INTVTY, "noise_pct": 5.0}
+    axes = {
+        "output_throughput": 1000.0,
+        "total_throughput": 20000.0,
+        "e2e_norm_intvty_p50": 87.9,
+        "e2e_norm_intvty_p90": 33.7,
+        "duration_seconds": 3600.0,
+        "request_error_rate": 0.0,
+    }
+    coord.shared_state.current_best = {
+        "action": "baseline",
+        "tput": 1000.0,
+        **axes,
+        "extra_server_args": "",
+        "extra_envs": {},
+    }
+    if with_baseline_axes:
+        coord.shared_state.baseline_perf = perf_snapshot_from_mapping(axes) or {}
+    return coord
+
+
 def test_an_agentx_lift_refuses_a_winner_missing_comparability_axes(session_dir, monkeypatch):
     """Explore KEEP that omits duration/error_rate must not promote: incomparability_reason fails closed."""
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     with session_scope(session_dir):
-        coord = _coord(session_dir, baseline=1000.0, anchor=1000.0)
-        coord.shared_state.benchmark_mode = "agentx"
-        coord.shared_state.grading = {"objective": GRADED_INTVTY, "noise_pct": 5.0}
-        coord.shared_state.current_best = {
-            "action": "baseline",
-            "tput": 1000.0,
-            "output_throughput": 1000.0,
-            "total_throughput": 20000.0,
-            "e2e_norm_intvty_p50": 87.9,
-            "e2e_norm_intvty_p90": 33.7,
-            "duration_seconds": 3600.0,
-            "request_error_rate": 0.0,
-            "extra_server_args": "",
-            "extra_envs": {},
-        }
+        coord = _agentx_coord(session_dir, with_baseline_axes=False)
 
         assert (
             coord.writeback.lift_to_current_best(
@@ -187,21 +180,7 @@ def test_an_agentx_lift_keeps_a_winner_with_comparability_axes(session_dir, monk
     """The same intvty win promotes once duration and error_rate travel with the winner."""
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     with session_scope(session_dir):
-        coord = _coord(session_dir, baseline=1000.0, anchor=1000.0)
-        coord.shared_state.benchmark_mode = "agentx"
-        coord.shared_state.grading = {"objective": GRADED_INTVTY, "noise_pct": 5.0}
-        coord.shared_state.current_best = {
-            "action": "baseline",
-            "tput": 1000.0,
-            "output_throughput": 1000.0,
-            "total_throughput": 20000.0,
-            "e2e_norm_intvty_p50": 87.9,
-            "e2e_norm_intvty_p90": 33.7,
-            "duration_seconds": 3600.0,
-            "request_error_rate": 0.0,
-            "extra_server_args": "",
-            "extra_envs": {},
-        }
+        coord = _agentx_coord(session_dir, with_baseline_axes=False)
 
         assert (
             coord.writeback.lift_to_current_best(
@@ -223,31 +202,6 @@ def test_an_agentx_lift_keeps_a_winner_with_comparability_axes(session_dir, monk
         assert coord.shared_state.current_best["e2e_norm_intvty_p50"] == 93.2
         assert coord.shared_state.current_best["duration_seconds"] == 3600.0
         assert coord.shared_state.current_best["request_error_rate"] == 0.0
-
-
-def _agentx_coord(session_dir: Path, *, with_baseline_axes: bool) -> Coordinator:
-    """A coordinator graded on p50 whose session baseline is an output rate on a different scale."""
-    coord = _coord(session_dir, baseline=1000.0, anchor=1000.0)
-    coord.shared_state.benchmark_mode = "agentx"
-    coord.shared_state.grading = {"objective": GRADED_INTVTY, "noise_pct": 5.0}
-    axes = {
-        "output_throughput": 1000.0,
-        "total_throughput": 20000.0,
-        "e2e_norm_intvty_p50": 87.9,
-        "e2e_norm_intvty_p90": 33.7,
-        "duration_seconds": 3600.0,
-        "request_error_rate": 0.0,
-    }
-    coord.shared_state.current_best = {
-        "action": "baseline",
-        "tput": 1000.0,
-        **axes,
-        "extra_server_args": "",
-        "extra_envs": {},
-    }
-    if with_baseline_axes:
-        coord.shared_state.baseline_perf = perf_snapshot_from_mapping(axes) or {}
-    return coord
 
 
 def _agentx_winner(name: str, *, output: float, p50: float, p90: float) -> dict[str, Any]:

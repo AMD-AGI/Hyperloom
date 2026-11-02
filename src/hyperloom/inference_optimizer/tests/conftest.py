@@ -715,3 +715,18 @@ def silent_backends() -> dict[str, object]:
         "orchestration": MockBackend(silent, name="o"),
         "critic": MockBackend(silent, name="c"),
     }
+
+
+def heartbeat_orchestration_with_mock_critic() -> dict[str, object]:
+    """A heartbeat-only orchestration backend beside the default mock critic."""
+    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+    from hyperloom.orchestrator.roles import MockBackend, MockCriticBackend, ScriptedPlan
+
+    silent = ScriptedPlan(
+        turns=[],
+        default_intent=Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"}),
+    )
+    return {
+        "orchestration": MockBackend(silent, name="orch"),
+        "critic": MockCriticBackend(),
+    }
