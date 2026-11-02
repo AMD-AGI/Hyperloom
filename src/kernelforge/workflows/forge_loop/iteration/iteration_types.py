@@ -190,6 +190,17 @@ class _IterationSupply:
 
 
 @dataclass(frozen=True)
+class IterationTurn:
+    """What the loop has settled about one iteration before its search runs."""
+
+    iteration: int
+    actors: LoopAgents
+    digest: str
+    hazard: Any
+    round_lanes: int
+
+
+@dataclass(frozen=True)
 class _IterationFrame:
     """One iteration's number, its session hand-back, its staged merge and the best it is measured against."""
 
