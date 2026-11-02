@@ -14,8 +14,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from hyperloom.measure.framework.table_modules import stale_table_modules
-from hyperloom.measure.jit.modules import config_path, read_config
-from hyperloom.measure.runner.rebuild_watchdog import MODULE_BUILD_SEC
+from hyperloom.measure.jit.modules import config_path, module_build_seconds, read_config
 from hyperloom_multibranch.toolbox.tools.tune_tables import TuneTable
 
 __all__ = ["rebuild_warning"]
@@ -36,5 +35,5 @@ def rebuild_warning(tables: Sequence[TuneTable], configs: Path) -> str | None:
     return (
         f"These rows name kernels outside the image's prebuilt {', '.join(stale)}: a test that puts them rebuilds "
         f"{'that module' if len(stale) == 1 else 'those modules'} at its server's first prefill (estimated "
-        f"{MODULE_BUILD_SEC} s each), and sglang's scheduler watchdog is raised for it."
+        f"{sum(module_build_seconds(name, config) for name in stale)} s), and sglang's scheduler watchdog is raised for it."
     )

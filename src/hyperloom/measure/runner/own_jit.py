@@ -8,7 +8,7 @@ directory of the package it was imported from. A test whose server imports the i
 gets no JIT directory from the cache (none is configured, or the aiter kinds are off) would install what it builds into
 the image, where every later test on the node loads it. Such a server is told ``AITER_JIT_DIR`` of a directory of the
 test's own, holding links to the image's prebuilt modules (as the cache's directory does), so it builds only what the
-image lacks and what the test's tuned tables make stale.
+image lacks and what the test's tuned tables or build variables make stale.
 
 The directory only names a location: the cache's key leaves ``AITER_JIT_DIR`` out (``measure.jit.key``), so no key moves.
 """
@@ -23,7 +23,13 @@ import yaml
 from hyperloom.measure.farm import Farm, FarmError, locate_package, server_environment, server_python
 from hyperloom.measure.framework.table_modules import stale_table_modules
 from hyperloom.measure.jit.key import AITER_PACKAGE
-from hyperloom.measure.jit.modules import config_path, prebuilt_names, read_config, touched_entries
+from hyperloom.measure.jit.modules import (
+    config_path,
+    env_touched_entries,
+    prebuilt_names,
+    read_config,
+    touched_entries,
+)
 from hyperloom.measure.jit.session import JitCacheSession, link_prebuilt
 from hyperloom.measure.jit_kinds import AITER_JIT
 from hyperloom.measure.socket import TestCall
@@ -41,9 +47,9 @@ def own_aiter_jit(
 ) -> dict[str, str]:
     """``{AITER_JIT_DIR: directory}`` with the image's prebuilt modules linked into ``directory``, for a server that
     would otherwise build into the image; empty when the cache's session gives aiter its directory, the farm rebuilds
-    aiter (its ``jit`` is the farm's own: the links to the image's modules its tuned tables make stale are taken out of
-    it, so the server builds them from the farm's tables), something already sets the variable, or the server's
-    interpreter has no aiter.
+    aiter (its ``jit`` is the farm's own: the links to the image's modules its tuned tables or build variables make stale
+    are taken out of it, so the server builds them from the farm's tables and under its own variables), something already
+    sets the variable, or the server's interpreter has no aiter.
 
     ``environ`` is what the server inherits, before the sheet's ``call.env_overrides`` and ``call.unset_envs``.
     """
@@ -59,10 +65,10 @@ def own_aiter_jit(
     except FarmError:
         return {}
     if farm is not None and AITER_PACKAGE in farm.packages:
-        _unlink_stale(farm.site / AITER_PACKAGE, image, servers)
+        _unlink_stale(farm.site / AITER_PACKAGE, image, servers, environ)
         return {}
     directory.mkdir(parents=True, exist_ok=True)
-    link_prebuilt(image / "jit", directory, _stale(image, servers))
+    link_prebuilt(image / "jit", directory, _stale(image, servers, environ))
     return {variable: str(directory)}
 
 
@@ -81,30 +87,32 @@ def server_environments(call: TestCall, configs: list[dict], environ: Mapping[st
     ]
 
 
-def _stale(image: Path, servers: list[dict[str, str]]) -> frozenset[str]:
-    """The prebuilt modules the tables the servers name make stale; none when no table is named or the module config
-    cannot be read (the image's modules are then what the server would have loaded anyway)."""
-    if not any(
-        name.startswith(_TABLE_PREFIX) and value.strip() for server in servers for name, value in server.items()
-    ):
-        return frozenset()
+def _stale(image: Path, servers: list[dict[str, str]], environ: Mapping[str, str]) -> frozenset[str]:
+    """The prebuilt modules the tables the servers name, or the build variables they set otherwise than ``environ``,
+    make stale; none when neither does or the module config cannot be read (the image's modules are then what the server
+    would have loaded anyway)."""
     try:
         config = read_config(config_path(image))
     except (OSError, ValueError):
         return frozenset()
-    stale = stale_table_modules(config, image, image, servers)
+    tables = any(
+        name.startswith(_TABLE_PREFIX) and value.strip() for server in servers for name, value in server.items()
+    )
+    stale = stale_table_modules(config, image, image, servers) if tables else frozenset()
+    stale |= env_touched_entries(config, servers, environ)
     return touched_entries(stale, config, prebuilt_names(image)).names if stale else frozenset()
 
 
-def _unlink_stale(package: Path, image: Path, servers: list[dict[str, str]]) -> None:
+def _unlink_stale(package: Path, image: Path, servers: list[dict[str, str]], environ: Mapping[str, str]) -> None:
     """Take out of the farm's ``jit`` (links to the image's modules) the modules the farm's tuned tables, as the servers
-    resolve them, make stale: aiter builds a module only when its ``.so`` is missing, and the image's holds only the
-    kernels the image's tables name."""
+    resolve them, or the build variables the servers set otherwise than ``environ`` make stale: aiter builds a module only
+    when its ``.so`` is missing, and the image's holds only the kernels the image's tables name, built under the image's
+    variables."""
     try:
         config = read_config(config_path(package))
     except (OSError, ValueError):
         return
-    stale = stale_table_modules(config, image, package, servers)
+    stale = stale_table_modules(config, image, package, servers) | env_touched_entries(config, servers, environ)
     if not stale:
         return
     for name in touched_entries(stale, config, prebuilt_names(image)).names:

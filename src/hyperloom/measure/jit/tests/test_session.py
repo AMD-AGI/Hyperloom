@@ -22,7 +22,7 @@ import pytest
 from hyperloom.measure.jit import session as jit_session
 from hyperloom.measure.jit.builds import BuildLog, scan_builds
 from hyperloom.measure.jit_kinds import AITER_CPP, AITER_JIT, DISABLED, HIT, MISS, TRITON, VERIFY_FAILED
-from hyperloom.measure.jit.session import JitCacheSession, KindPlan
+from hyperloom.measure.jit.session import GivenModules, JitCacheSession, KindPlan
 from hyperloom.measure.jit.store import DirJitStore
 from hyperloom.measure.jit.tests.triton_cache import PRODUCTS, RELEASES, find_kernel, get_group, put_kernel
 
@@ -511,9 +511,25 @@ def test_a_module_the_patch_touches_is_not_linked_from_the_image_and_one_it_does
     assert not (directory / "module_gemm.so").exists() and (directory / "module_other.so").is_symlink()
     assert session.touched == {"module_gemm", "module_not_prebuilt"}
     assert any(
-        "the patch or the tuned tables touch 2 aiter modules, built when first called" in note
+        "the patch, the tuned tables or the build variables touch 2 aiter modules, built when first called" in note
         for note in session.report(NO_BUILDS).notes
     )
+
+
+def test_the_server_builds_the_touched_modules_its_cpu_build_does_not_give() -> None:
+    given = GivenModules(frozenset({"module_gemm"}), lambda directory: None)
+    plan = KindPlan(
+        AITER_JIT, KEY, touched=frozenset({"module_gemm", "module_gemm_a8w8_bpreshuffle_cktile"}), given=given
+    )
+    session = JitCacheSession(DirJitStore(Path("/nonexistent")), [plan], private_root=Path("/p"), staging=Path("/s"))
+
+    assert session.built_by_server == {"module_gemm_a8w8_bpreshuffle_cktile"}
+    assert JitCacheSession(
+        DirJitStore(Path("/nonexistent")),
+        [KindPlan(AITER_JIT, KEY, touched=frozenset({"m"}))],
+        private_root=Path("/p"),
+        staging=Path("/s"),
+    ).built_by_server == {"m"}
 
 
 def test_a_touched_module_the_server_built_or_the_cache_gave_is_fresh_and_one_it_never_called_is_not_there(

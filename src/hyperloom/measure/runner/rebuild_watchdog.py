@@ -4,13 +4,17 @@
 """A longer scheduler watchdog for an sglang server that rebuilds aiter modules at its first prefill.
 
 A tuned table that names kernel instances the image's prebuilt module lacks makes that module stale
-(:func:`~hyperloom.measure.framework.table_modules.stale_table_modules`), and aiter rebuilds it when the first request
-reaches the kernel. sglang's scheduler watchdog (300 s unless the launch sets ``--watchdog-timeout``) can fire while every
-rank is still in the build, and the test then ends as ``jit_build_timeout``. For such a test the runner raises the
-watchdog of every sglang point to the estimated build time of the stale modules: it adds the flag to a launch that sets
-none, and raises a value the launch sets (sglang AgentX launches carry a default one, a recipe or a candidate may set
-their own) when the estimate is higher. It never lowers one: the watchdog only bounds a hang, so a longer one changes
-no measurement.
+(:func:`~hyperloom.measure.framework.table_modules.stale_table_modules`), and so does a build variable the module's config
+entry reads that the server sets otherwise than the image has (:func:`~hyperloom.measure.jit.modules.env_touched_entries`);
+aiter rebuilds such a module when the first request reaches the kernel. sglang's scheduler watchdog (300 s unless the
+launch sets ``--watchdog-timeout``) can fire while every rank is still in the build, and the test then ends as
+``jit_build_timeout``. For such a test the runner raises the watchdog of every sglang point to cover building the stale
+modules one after another, each for as long as a module of its kind may take
+(:func:`~hyperloom.measure.jit.modules.module_build_limit_sec`: a CK-tile module took up to 1347 s with eight tests
+building at once, any other up to 273 s): it adds the flag to a launch that sets none, and raises a value the launch
+sets (sglang AgentX launches carry a default one, a recipe or a candidate may set their own) when the estimate is
+higher. It never lowers one: the watchdog only bounds a hang, so a longer one changes no measurement, and a hang still
+ends once every module has had its time.
 
 The flag is added after the surface and the cache key were taken: how long the watchdog waits changes neither.
 """
@@ -18,7 +22,7 @@ The flag is added after the surface and the cache key were taken: how long the w
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -29,15 +33,22 @@ from hyperloom.inference_optimizer.framework_registry import FRAMEWORKS
 from hyperloom.measure.farm import Farm, FarmError, locate_package, server_python
 from hyperloom.measure.framework.table_modules import stale_table_modules
 from hyperloom.measure.jit.key import AITER_PACKAGE
-from hyperloom.measure.jit.modules import config_path, read_config
+from hyperloom.measure.jit.modules import (
+    MODULE_BUILD_LIMIT_SEC,
+    config_path,
+    env_touched_entries,
+    module_build_limit_sec,
+    read_config,
+)
 from hyperloom.measure.runner.own_jit import point_configs, server_environments
 from hyperloom.measure.socket import TestCall
 
 __all__ = ["MODULE_BUILD_SEC", "WATCHDOG_MARGIN_SEC", "raise_rebuild_watchdog", "rebuild_watchdog_sec"]
 
-#: The seconds one stale module is given to build: over twice the longest aiter build measured before a server was ready
-#: (273 s, in 1711 boots), and a blockscale GEMM rebuild did not finish within sglang's 300 s.
-MODULE_BUILD_SEC = 600
+#: The seconds one stale module other than a CK-tile one is given to build: over twice the longest aiter build measured
+#: before a server was ready (273 s, in 1711 boots), and a blockscale GEMM rebuild did not finish within sglang's 300 s.
+#: A CK-tile module gets :data:`~hyperloom.measure.jit.modules.CKTILE_MODULE_BUILD_LIMIT_SEC`.
+MODULE_BUILD_SEC = MODULE_BUILD_LIMIT_SEC
 #: Added to the builds: sglang's own default watchdog, for the step the build interrupted.
 WATCHDOG_MARGIN_SEC = 300
 _SGLANG = "sglang"
@@ -46,25 +57,29 @@ _FLAG_RE = re.compile(r"(?:^|\s)--watchdog-timeout(?:=|\s+|$)(?P<value>\S*)")
 _UTF8 = "utf-8"
 
 
-def rebuild_watchdog_sec(modules: int) -> int:
-    """The watchdog that covers rebuilding ``modules`` stale modules one after another, plus the margin."""
-    return modules * MODULE_BUILD_SEC + WATCHDOG_MARGIN_SEC
+def rebuild_watchdog_sec(modules: Collection[str]) -> int:
+    """The watchdog that covers rebuilding the stale ``modules`` one after another, each for as long as a module of its
+    kind may take, plus the margin."""
+    return sum(module_build_limit_sec(name) for name in modules) + WATCHDOG_MARGIN_SEC
 
 
-def raise_rebuild_watchdog(call: TestCall, farm: Farm | None, environ: Mapping[str, str], cwd: Path) -> str | None:
-    """Give every sglang point of ``call`` a ``--watchdog-timeout`` that covers rebuilding the modules its tuned tables
-    make stale, keeping a longer one its launch sets, rewriting the point files in place. A note of what was raised, else
-    ``None``.
+def raise_rebuild_watchdog(
+    call: TestCall, farm: Farm | None, environ: Mapping[str, str], cwd: Path, built: Collection[str] = ()
+) -> str | None:
+    """Give every sglang point of ``call`` a ``--watchdog-timeout`` that covers rebuilding the modules its tuned tables or
+    build variables make stale, and ``built`` (the modules the test's patch touches that its server builds, the
+    compiled-code cache's), keeping a longer one its launch sets, rewriting the point files in place. A note of what was
+    raised, else ``None``.
 
     ``environ`` is what the servers inherit, before the sheet's overrides.
     """
     configs = point_configs(call)
     if not configs:
         return None
-    modules = _stale_modules(configs, server_environments(call, configs, environ), farm, cwd)
+    modules = _stale_modules(configs, server_environments(call, configs, environ), environ, farm, cwd) | set(built)
     if not modules:
         return None
-    seconds = rebuild_watchdog_sec(len(modules))
+    seconds = rebuild_watchdog_sec(modules)
     raised = 0
     for point, config in zip(call.points, configs):
         if _with_watchdog(config, seconds):
@@ -73,14 +88,18 @@ def raise_rebuild_watchdog(call: TestCall, farm: Farm | None, environ: Mapping[s
     if not raised:
         return None
     return (
-        f"sglang's watchdog raised to {seconds}s: the tuned tables make {len(modules)} aiter module(s) stale "
-        f"({', '.join(sorted(modules))}), which the server rebuilds at its first prefill"
+        f"sglang's watchdog raised to {seconds}s: the patch, the tuned tables or the build variables make "
+        f"{len(modules)} aiter module(s) stale ({', '.join(sorted(modules))}), which the server rebuilds at its first "
+        "prefill"
     )
 
 
-def _stale_modules(configs: list[dict], servers: list[dict[str, str]], farm: Farm | None, cwd: Path) -> frozenset[str]:
-    """The module config entries the servers' tuned tables make stale, as the aiter they import resolves them (the farm's,
-    when it rebuilds aiter); none when the image has no aiter or its module config cannot be read."""
+def _stale_modules(
+    configs: list[dict], servers: list[dict[str, str]], environ: Mapping[str, str], farm: Farm | None, cwd: Path
+) -> frozenset[str]:
+    """The module config entries the servers' tuned tables, or the build variables they set otherwise than ``environ``,
+    make stale, as the aiter they import resolves them (the farm's, when it rebuilds aiter); none when the image has no
+    aiter or its module config cannot be read."""
     try:
         image = locate_package(AITER_PACKAGE, server_python(configs[0], default="python3"), cwd)
     except FarmError:
@@ -90,7 +109,7 @@ def _stale_modules(configs: list[dict], servers: list[dict[str, str]], farm: Far
         config = read_config(config_path(package))
     except (OSError, ValueError):
         return frozenset()
-    return stale_table_modules(config, image, package, servers)
+    return stale_table_modules(config, image, package, servers) | env_touched_entries(config, servers, environ)
 
 
 def _with_watchdog(config: dict[str, Any], seconds: int) -> bool:

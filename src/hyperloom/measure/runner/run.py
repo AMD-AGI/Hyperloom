@@ -556,7 +556,8 @@ def _own_directories(ctx: _Context, call: TestCall, session: JitCacheSession | N
     that rebuilds stale aiter modules at its first prefill gets a watchdog that waits for the builds
     (``rebuild_watchdog``)."""
     own = own_aiter_jit(call, farm, session, ctx.environ, _compile_dir(ctx, call.task_id) / OWN_AITER_JIT_DIR)
-    raised = raise_rebuild_watchdog(call, farm, ctx.environ, ctx.work)
+    built = session.built_by_server if session is not None else frozenset()
+    raised = raise_rebuild_watchdog(call, farm, ctx.environ, ctx.work, built)
     if raised is not None:
         ctx.notes.append(raised)
     return dataclasses.replace(
