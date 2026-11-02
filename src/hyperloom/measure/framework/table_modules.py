@@ -238,7 +238,8 @@ def _cell(value: str) -> object:
 
 def _shares_a_key(files: list[str], keys: Collection[tuple[str, ...]]) -> bool:
     """Whether a row of one of ``files`` has the key of a row of another, under one of ``keys`` cut to the columns every
-    file with rows has; one that cannot be read as a table counts as sharing every key."""
+    file with rows has; a file without rows shares no key, whatever its header, and one that cannot be read as a table
+    counts as sharing every key."""
     tables: list[tuple[list[str], list[list[str]]]] = []
     for path in files:
         try:
@@ -251,6 +252,8 @@ def _shares_a_key(files: list[str], keys: Collection[tuple[str, ...]]) -> bool:
         columns = [column for column in key if all(column in header for header, rows in tables if rows)]
         first: dict[tuple[object, ...], int] = {}
         for index, (header, rows) in enumerate(tables):
+            if not rows:
+                continue
             places = [header.index(column) for column in columns]
             for row in rows:
                 cells = tuple(_cell(row[place]) if place < len(row) else "" for place in places)
