@@ -540,12 +540,20 @@ def test_a_failing_fact_stops_the_session_under_strict_and_carries_the_report(tm
 
 
 class _Untouchable:
+    """An environment that records every attribute asked of it, so even a swallowed lookup is seen."""
+
+    def __init__(self) -> None:
+        self.asked: list[str] = []
+
     def __getattr__(self, name: str) -> Any:
-        raise AssertionError(f"the environment was asked for {name}")
+        self.asked.append(name)
+        raise AttributeError(name)
 
 
 def test_nothing_is_evaluated_under_off_and_the_report_says_so() -> None:
-    report = run_image_check(mode=ImageCheckMode.OFF, image=_Untouchable())  # type: ignore[arg-type]
+    image = _Untouchable()
+    report = run_image_check(mode=ImageCheckMode.OFF, image=image)  # type: ignore[arg-type]
+    assert image.asked == [], "the environment was asked for something"
     assert report.facts == ()
     assert report.summary()["mode"] == "off"
     assert report.summary()["fail"] == []
