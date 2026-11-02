@@ -13,6 +13,7 @@ import pytest
 from kernelforge.agent_backends.base import AgentRunSpec, AgentToolPolicy
 from kernelforge.agent_backends.session_resume import is_retryable_api_error
 from kernelforge.agent_backends.workspace_guard import WorkspaceGuard, WorkspaceSafetyError
+from kernelforge.config.edit_policy import FORGE_PROTECTED_PATHS
 from kernelforge.utils.protected_paths import ProtectedPathRules
 
 
@@ -84,3 +85,31 @@ def test_the_guard_protects_what_the_callers_rules_name_and_nothing_else(repo: P
     (repo / "config.yaml").write_text("changed\n")
 
     assert guard.verify() == ["config.yaml"]
+
+
+def test_forge_rules_leave_the_bytecode_cache_of_a_protected_dir_to_the_interpreter(repo: Path) -> None:
+    tests = repo / "test"
+    tests.mkdir()
+    (tests / "layer_ut_utils.py").write_text("VALUE = 1\n")
+    (repo / ".gitignore").write_text("__pycache__/\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "test sources")
+    cache = tests / "__pycache__"
+    cache.mkdir()
+    (cache / "layer_ut_utils.cpython-312.pyc").write_bytes(b"stale")
+
+    guard = WorkspaceGuard(_writable(repo, FORGE_PROTECTED_PATHS))
+    guard.prepare()
+    # Importing a module during the session rewrites its bytecode and compiles the ones not yet cached.
+    (cache / "layer_ut_utils.cpython-312.pyc").write_bytes(b"fresh")
+    (cache / "conftest.cpython-312.pyc").write_bytes(b"new")
+
+    assert guard.verify() == []
+
+    guard = WorkspaceGuard(_writable(repo, FORGE_PROTECTED_PATHS))
+    guard.prepare()
+    (tests / "layer_ut_utils.py").write_text("VALUE = 2\n")
+
+    with pytest.raises(WorkspaceSafetyError, match="protected tracked files changed: test/layer_ut_utils.py"):
+        guard.verify()
+    assert (tests / "layer_ut_utils.py").read_text() == "VALUE = 1\n"
