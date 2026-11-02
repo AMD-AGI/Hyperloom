@@ -125,7 +125,13 @@ def _capture_assets(contract: dict, dest: Path, mappings: dict[str, str]) -> lis
     return snapshots
 
 
-def _verify_accepted_source(state: dict, captured: Path) -> None:
+def _verify_accepted_source(state: dict, captured: Path) -> set[str]:
+    """Check the captured tree against the accepted stack; return what it verified.
+
+    The returned set lets a caller fail closed. A stack whose entries carry no
+    snapshot -- a config-only KEEP touches no file, so it records none -- verifies
+    nothing here, and silently returning would ship whatever is on disk.
+    """
     expected = {}
     for entry in state.get("optimization_stack", []):
         if not entry.get("source_snapshot"):
@@ -145,6 +151,7 @@ def _verify_accepted_source(state: dict, captured: Path) -> None:
             content is not None and (not path.is_file() or path.read_bytes() != content)
         ):
             raise ValueError(f"Captured source differs from the accepted stack: {rel}")
+    return set(expected)
 
 
 def _capture_payloads(state: dict, contract: dict, root: Path, dest: Path) -> tuple[dict, dict, list]:
@@ -210,7 +217,10 @@ def _build(session: Path, state: dict, dest: Path) -> dict:
     if hook is not None:
         from .single_file import build_single_file
 
-        _verify_accepted_source(state, root)
+        # Fail closed: the module is the whole deliverable, so exporting it unverified
+        # would ship bytes nothing proves were benchmarked.
+        if hook.name not in _verify_accepted_source(state, root):
+            raise ValueError(f"No accepted source snapshot covers {hook.name}; nothing proves what was benchmarked")
         return build_single_file(state, root, hook, dest)
     contract = _read_contract(root)
     best = state.get("current_best") or {}
