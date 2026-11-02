@@ -211,6 +211,18 @@ async def test_the_cap_keeps_the_most_specific_items(tmp_path: Path) -> None:
     assert brief.leads == ("recipe: inference:older: +10.00% `--enable-expert-parallel` [older]",)
 
 
+async def test_a_champion_that_removes_an_option_of_the_resolved_launch_says_so_in_its_lead(tmp_path: Path) -> None:
+    blackboard = await scripted_session(tmp_path / "blackboard", FakeClock())
+    removing = dataclasses.replace(LEAD, remove_args=("--enable-linear-replayssm-spec",))
+    briefing = CrossSessionBriefing(blackboard, warm=(removing,))
+
+    brief = await briefing.startup_brief("c1")
+
+    assert brief.leads[0] == (
+        "recipe: inference:older: +10.00% `--enable-expert-parallel` without `--enable-linear-replayssm-spec` [older]"
+    )
+
+
 async def test_the_first_batch_brief_is_cross_session_only(tmp_path: Path) -> None:
     clock = FakeClock()
 

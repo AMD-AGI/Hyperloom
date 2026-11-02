@@ -219,6 +219,18 @@ def test_a_lead_lists_its_launch_arguments_without_the_context_length_and_watchd
     assert older.server_args == "--enable-expert-parallel"
 
 
+def test_a_lead_keeps_the_options_its_launch_removes_from_the_resolved_launch_but_not_the_heads(
+    store: FakeRecipeStore,
+) -> None:
+    config = store.views[OLDER_ID]["knowledge"]["value"]["config"]
+    config["remove_args"] = ["--context-length", "--enable-linear-replayssm-spec"]
+
+    older = warm_leads(RemoteRecipeClient(store), PROFILE)[1]
+
+    assert older.remove_args == ("--enable-linear-replayssm-spec",)
+    assert older.render().endswith("`--enable-expert-parallel` without `--enable-linear-replayssm-spec` [older]")
+
+
 def _failed(cause: Exception) -> KBStoreError:
     error = KBStoreError(f"POST /v1/kb/search failed: {cause!r}")
     error.__cause__ = cause
@@ -412,6 +424,18 @@ def test_a_champion_whose_recipe_cannot_come_along_replays_its_launch_config_onl
     made = apply(ROOT, on_root.delta)
     assert (made.launch, made.components) == (LaunchConfig(LEAD.server_args, LEAD.envs), ROOT.components)
     assert "its launch config only" in found.describe()
+
+
+def test_a_replay_keeps_the_options_the_champions_launch_removes(snapshot: BlackboardSnapshot, tmp_path: Path) -> None:
+    lead = replace(LEAD, replayable=False, remove_args=("--enable-linear-replayssm-spec",))
+
+    found = replay(_downloads(snapshot, tmp_path), lead, SCOPE, _target(tmp_path))
+
+    assert found is not None and found.launch.remove_args == lead.remove_args
+    on_root = found.on(ROOT, "c0")
+    assert on_root is not None
+    made = apply(ROOT, on_root.delta)
+    assert made.launch == LaunchConfig(LEAD.server_args, LEAD.envs, remove_args=lead.remove_args)
 
 
 OTHER_IMAGE = "sha256:" + "b" * 64
