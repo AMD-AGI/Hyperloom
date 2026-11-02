@@ -21,7 +21,14 @@ own tables), and aiter would build the same module from the same inputs at the f
 left as it is. A build that fails installs nothing and is only logged: the launch then builds at its first prefill, as
 before, under the watchdog above.
 
-Run it before the first test of a container: ``python -m hyperloom.measure.runner.native.prewarm --gfx gfx950``.
+Given the card's CU count (``cu_num``), the build reads it as ``CU_NUM``, so aiter compiles the tables' rows of exactly
+that ``(gfx, cu_num)`` (it takes the count of ``GFX_CU_NUM_MAP`` otherwise, which a partitioned card does not have), and
+the built modules must pass the launch preflight's own coverage test for it
+(:func:`~hyperloom.orchestrator.actions.executors._aiter_jit.serving_modules_cover_csv`, over every table the image's
+launch loads) before anything is installed, or that preflight would move them aside again.
+
+Run it before the first test of a container: ``python -m hyperloom.measure.runner.native.prewarm --gfx gfx950``. The
+launch preflight runs it for the modules it moves aside (``orchestrator.actions.executors._aiter_serving_once``).
 """
 
 from __future__ import annotations
@@ -64,6 +71,12 @@ from hyperloom.measure.runner.native.builder import BuildMachine
 from hyperloom.measure.runner.native.isolated import IsolatedBuilds, Isolation, local_isolation
 from hyperloom.measure.runner.native.planning import NativePlanner, NativeSite
 from hyperloom.measure.runner.rebuild_watchdog import rebuild_watchdog_sec
+from hyperloom.orchestrator.actions.executors._aiter_jit import (
+    AITER_ENV_TO_SERVING_MODULES,
+    AITER_ENV_TO_TUNED_FILE,
+    csvs_aiter_will_load,
+    serving_modules_cover_csv,
+)
 
 __all__ = [
     "PREWARM_MANIFEST",
@@ -81,7 +94,7 @@ __all__ = [
 ]
 
 #: The manifest of the modules :func:`prewarm` installed, in the image's ``aiter/jit``: ``{"schema", "modules": [{"name",
-#: "sha256", "source_digest", "tables_sha256", "gfx", "built_at"}]}``. A cleanup that moves session-built modules aside
+#: "sha256", "source_digest", "tables_sha256", "gfx", "built_at"}]}``, and ``cu_num`` when the build was given one. A cleanup that moves session-built modules aside
 #: may leave a module listed here whose file still has the listed ``sha256`` and whose tables are still the listed ones
 #: (:func:`tables_digest`), when the round leaves its table unset: it is what aiter builds at the first call.
 PREWARM_MANIFEST = "hyperloom-prewarm.json"
@@ -96,6 +109,8 @@ _LOG_TAIL = 400
 #: Nothing is stored or signed: the build's key only names it within this process.
 _LOCAL_IMAGE = "prewarm"
 _GFX_ENVS = ("HYPERLOOM_BUILD_GFX", "GPU_ARCHS")
+#: What aiter's build reads the card's CU count from (``aiter/jit/utils/build_targets.py``).
+_CU_NUM = "CU_NUM"
 #: The distribution of the image's aiter as the build's root names it: a sheet's root must name one, and the farm lays the
 #: package from the image whatever it says.
 _UNREAD_DIST = (AITER_PACKAGE, "image")
@@ -224,7 +239,7 @@ def isolated_builder(
     return build
 
 
-def _install(jit: Path, built: Mapping[str, Path], entries: Mapping[str, dict[str, str]]) -> None:
+def _install(jit: Path, built: Mapping[str, Path], entries: Mapping[str, dict[str, Any]]) -> None:
     """Copy every built module beside its place first, then ``os.replace`` each into it and the manifest after them: a
     copy that fails leaves the image as it was, and a module installed without its manifest entry is only one the old
     flow's cleanup moves aside (it is then built at the first prefill)."""
@@ -249,10 +264,12 @@ def _install(jit: Path, built: Mapping[str, Path], entries: Mapping[str, dict[st
         os.replace(temporary, target)
 
 
-def _entries(package: Path, built: Mapping[str, Path], gfx: str) -> dict[str, dict[str, str]]:
+def _entries(package: Path, built: Mapping[str, Path], gfx: str, cu_num: int | None) -> dict[str, dict[str, Any]]:
     """The manifest after installing ``built``: its earlier entries, with the built modules' replaced."""
     tables = tables_digest(package)
-    common = {"source_digest": source_digest(package, tables), "tables_sha256": tables, "gfx": gfx}
+    common: dict[str, Any] = {"source_digest": source_digest(package, tables), "tables_sha256": tables, "gfx": gfx}
+    if cu_num is not None:
+        common["cu_num"] = cu_num
     stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     entries = read_manifest(package / _JIT_DIR)
     for name, path in built.items():
@@ -261,11 +278,17 @@ def _entries(package: Path, built: Mapping[str, Path], gfx: str) -> dict[str, di
 
 
 def prewarm(
-    image_root: Path, builder: ModuleBuilder, *, gfx: str, tables: Collection[str] | None = None
+    image_root: Path,
+    builder: ModuleBuilder,
+    *,
+    gfx: str,
+    cu_num: int | None = None,
+    tables: Collection[str] | None = None,
 ) -> PrewarmReport:
     """Build the modules :func:`missing_prebuilt_modules` names that aiter can build by name, with ``builder``, and install
-    them into the image's ``aiter/jit`` (see the module). Never raises for a build or an install that fails: the report
-    says why, the image is unchanged, and the launch builds them at its first prefill."""
+    them into the image's ``aiter/jit`` (see the module); with ``cu_num``, only when they cover the image's tables for
+    ``(gfx, cu_num)``. Never raises for a build or an install that fails: the report says why, the image is unchanged,
+    and the launch builds them at its first prefill."""
     started = time.monotonic()
     package = Path(image_root)
     jit = package / _JIT_DIR
@@ -285,12 +308,32 @@ def prewarm(
             absent = sorted(buildable - set(built))
             if absent:
                 raise PrewarmError(f"the build made no {', '.join(absent)}")
-            _install(jit, built, _entries(package, built, gfx))
+            uncovered = [] if cu_num is None else _uncovered(package, built, (gfx, cu_num), Path(scratch) / "cover")
+            if uncovered:
+                raise PrewarmError(f"the built modules lack kernels of {gfx}/{cu_num} rows of {', '.join(uncovered)}")
+            _install(jit, built, _entries(package, built, gfx, cu_num))
     except (PrewarmError, BuildInfraError, FarmError, OSError, ValueError) as exc:
         report = PrewarmReport(present=present, left=left, failure=f"{type(exc).__name__}: {exc}")
         return _ended(report, started)
     report = PrewarmReport(tuple(sorted(built)), present, left, manifest=str(jit / PREWARM_MANIFEST))
     return _ended(report, started)
+
+
+def _uncovered(package: Path, built: Mapping[str, Path], target: tuple[str, int], view: Path) -> list[str]:
+    """The tables the image's own launch loads (every ``AITER_CONFIG_*`` unset) whose rows for ``target`` name a kernel
+    the built modules lack, by the launch preflight's test; ``view`` is a new directory the test reads them from."""
+    view.mkdir()
+    for name, path in built.items():
+        os.symlink(path, view / f"{name}{_SO}")
+    uncovered: list[str] = []
+    for variable, modules in AITER_ENV_TO_SERVING_MODULES.items():
+        tuned = AITER_ENV_TO_TUNED_FILE.get(variable)
+        if not tuned or not set(modules) & set(built):
+            continue
+        for table in csvs_aiter_will_load(package / _CONFIGS_DIR, tuned, ""):
+            if table.is_file() and not serving_modules_cover_csv(view, modules, table, frozenset({target})):
+                uncovered.append(table.name)
+    return uncovered
 
 
 def _ended(report: PrewarmReport, started: float) -> PrewarmReport:
@@ -310,22 +353,29 @@ def _gfx(given: str | None) -> str:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """``python -m hyperloom.measure.runner.native.prewarm --gfx <arch>``: prewarm the aiter ``--python`` imports and print
-    the report as JSON. Exits 0 when nothing could be installed too, so the launch that follows still runs."""
+    """``python -m hyperloom.measure.runner.native.prewarm --gfx <arch>``: prewarm the aiter ``--python`` imports (or
+    ``--package``, which it must import) and print the report as JSON. Exits 0 when nothing could be installed too, so the
+    launch that follows still runs."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--gfx", help="the GPU architecture the modules are built for, e.g. gfx950")
+    parser.add_argument(
+        "--cu-num", type=int, help="the card's CU count: the build's CU_NUM, and the rows the built modules must cover"
+    )
     parser.add_argument("--python", default="python3", help="the image's interpreter (default: python3)")
+    parser.add_argument("--package", type=Path, help="the aiter package to prewarm (default: the one --python imports)")
     parser.add_argument("--table", action="append", dest="tables", help="only the modules of this AITER_CONFIG_* table")
     args = parser.parse_args(argv)
     gfx = _gfx(args.gfx)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     try:
-        package = locate_package(AITER_PACKAGE, args.python, Path.cwd())
+        package = args.package or locate_package(AITER_PACKAGE, args.python, Path.cwd())
     except FarmError as exc:
         report = PrewarmReport(failure=f"the image's aiter cannot be found: {exc}")
     else:
         machine = BuildMachine(_LOCAL_IMAGE, _LOCAL_IMAGE, gfx, args.python)
-        report = prewarm(package, isolated_builder(machine), gfx=gfx, tables=args.tables)
+        environ = None if args.cu_num is None else {**os.environ, _CU_NUM: str(args.cu_num)}
+        builder = isolated_builder(machine, environ=environ)
+        report = prewarm(package, builder, gfx=gfx, cu_num=args.cu_num, tables=args.tables)
     json.dump(asdict(report), sys.stdout, indent=2, sort_keys=True)
     sys.stdout.write("\n")
     return 0

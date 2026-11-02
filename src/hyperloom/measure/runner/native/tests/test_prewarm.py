@@ -261,3 +261,68 @@ def test_the_command_needs_the_target_and_reports_an_image_without_aiter_without
     assert prewarm.main(["--gfx", GFX]) == 0
     printed = json.loads(capsys.readouterr().out)
     assert printed["failure"] == "the image's aiter cannot be found: no module named aiter" and printed["built"] == []
+
+
+def _a8w8_image(root: Path, *, built_from: str) -> Path:
+    """The stand-in aiter with its table module named as aiter's ``module_gemm_a8w8`` (``AITER_CONFIG_GEMM_A8W8``'s
+    table), that module missing, and a table with a row for a gfx950 of 256 CUs and one for a gfx942 of 80."""
+    package = standin.aiter_image(root)
+    config_file = package / "jit" / "optCompilerConfig.json"
+    config = json.loads(config_file.read_text(encoding="utf-8"))
+    config["module_gemm_a8w8"] = config.pop(standin.MODULE)
+    config_file.write_text(json.dumps(config), encoding="utf-8")
+    (package / "jit" / f"{standin.MODULE}.so").unlink()
+    (package / "configs" / "a8w8_tuned_gemm.csv").write_text(
+        f"gfx,cu_num,M,N,K,kernelName\ngfx950,256,1,2,3,{built_from}_card\ngfx942,80,1,2,3,{built_from}_other\n",
+        encoding="utf-8",
+    )
+    return package
+
+
+@pytest.mark.parametrize(("cu_num", "kernels", "installed"), [(256, "k_card", True), (256, "k_other", False)])
+def test_a_build_for_a_cards_cu_count_is_installed_only_when_it_covers_that_cards_rows(
+    tmp_path: Path, cu_num: int, kernels: str, installed: bool
+) -> None:
+    """aiter compiles the rows of the build's ``(gfx, CU_NUM)`` only; a module that lacks one of them is what the launch
+    preflight moves aside again, so it is not installed. A row of another GPU's is no reason to refuse it."""
+    package = _a8w8_image(tmp_path / "image", built_from="k")
+
+    def builder(_package: Path, modules: frozenset[str], scratch: Path) -> Mapping[str, Path]:
+        (scratch / "module_gemm_a8w8.so").write_bytes(b"\x7fELF " + kernels.encode())
+        return {"module_gemm_a8w8": scratch / "module_gemm_a8w8.so"}
+
+    report = prewarm.prewarm(package, builder, gfx=GFX, cu_num=cu_num, tables=["AITER_CONFIG_GEMM_A8W8"])
+
+    jit = package / "jit"
+    if installed:
+        assert report.built == ("module_gemm_a8w8",) and not report.failure
+        assert read_manifest(jit)["module_gemm_a8w8"]["cu_num"] == cu_num
+    else:
+        assert report.built == () and not (jit / "module_gemm_a8w8.so").exists()
+        assert report.failure == (
+            "PrewarmError: the built modules lack kernels of gfx950/256 rows of a8w8_tuned_gemm.csv"
+        )
+
+
+def test_the_command_builds_for_the_cards_cu_count_into_the_package_it_is_given(tmp_path, monkeypatch, capsys) -> None:
+    package = _a8w8_image(tmp_path / "image", built_from="k")
+    seen: dict[str, object] = {}
+
+    def builder_for(machine: BuildMachine, *, environ: Mapping[str, str] | None = None) -> prewarm.ModuleBuilder:
+        seen.update(gfx=machine.gfx_arch, cu=(environ or {}).get("CU_NUM"))
+        return StandIn()
+
+    def located(name: str, python: str, cwd: Path) -> Path:
+        raise AssertionError("--package names the package; nothing is located")
+
+    monkeypatch.setattr(prewarm, "isolated_builder", builder_for)
+    monkeypatch.setattr(prewarm, "locate_package", located)
+    argv = ["--gfx", GFX, "--cu-num", "256", "--package", str(package), "--table", "AITER_CONFIG_GEMM_A8W8"]
+
+    assert prewarm.main(argv) == 0
+
+    printed = json.loads(capsys.readouterr().out)
+    assert seen == {"gfx": GFX, "cu": "256"}
+    assert printed["failure"].endswith("lack kernels of gfx950/256 rows of a8w8_tuned_gemm.csv"), (
+        "the stand-in writes no kernel name, so the coverage check refuses it"
+    )
