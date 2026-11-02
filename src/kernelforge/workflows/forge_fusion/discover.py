@@ -1289,19 +1289,19 @@ def registered_agent_llm_fn(
             Path(log_path).write_text("\n".join([*progress, text]).strip() + "\n", encoding="utf-8")
 
     def _back_off(
-        attempt: int, started_at: float, progress: list[str], last_error: str, last_kind: str
-    ) -> LlmUnavailableError | None:
-        """Sleep before the next attempt, or return the error to raise once the retry deadline has passed."""
+        attempt: int, started_at: float, progress: list[str], last_error: str, last_exc: Exception | None
+    ) -> None:
+        """Sleep before the next attempt, or give up once the retry deadline has passed."""
         elapsed = clock() - started_at
         if resolved_deadline > 0 and elapsed >= resolved_deadline:
             _record_transcript(progress, last_error)
-            return LlmUnavailableError(
+            raise LlmUnavailableError(
                 f"discovery Agent produced no usable answer in {attempt} "
                 f"attempt(s) and {elapsed:.0f}s "
                 f"(deadline {resolved_deadline:.0f}s): {last_error}",
-                kind=last_kind,
+                kind=API_ERROR if last_exc is None else classify_llm_error(last_exc),
                 attempts=attempt,
-            )
+            ) from last_exc
         pause(
             retry_delay(
                 attempt,
@@ -1309,7 +1309,6 @@ def registered_agent_llm_fn(
                 max_sec=resolved_max_delay,
             )
         )
-        return None
 
     def _fn(prompt: str) -> str:
         started_at = clock()
@@ -1367,9 +1366,7 @@ def registered_agent_llm_fn(
             )
             if attempt >= max(1, resolved_attempts):
                 break
-            expired = _back_off(attempt, started_at, progress, last_error, last_kind)
-            if expired is not None:
-                raise expired from last_exc
+            _back_off(attempt, started_at, progress, last_error, last_exc)
         _record_transcript(progress, last_error)
         raise LlmUnavailableError(
             f"discovery Agent produced no usable answer in {max(1, resolved_attempts)} attempt(s): {last_error}",
