@@ -133,7 +133,8 @@ def _lead(item: RecalledExperience) -> _Item:
 
 def _recipe(lead: WarmLead) -> _Item:
     envs = (f"{name}={value}" for name, value in sorted(lead.envs.items()))
-    change = " ".join(part for part in (lead.server_args, *envs) if part)
+    removed = (f"without {name}" for name in lead.remove_args)
+    change = " ".join(part for part in (lead.server_args, *envs, *removed) if part)
     return _Item(False, f"recipe: {lead.describe()}", ShownLead(lead.canonical_id, change))
 
 

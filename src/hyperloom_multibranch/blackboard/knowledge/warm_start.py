@@ -370,7 +370,8 @@ class ReplayRefusal:
 
 @dataclass(frozen=True)
 class WarmLead:
-    """One Recipe KB champion in this session's scope; ``differing`` maps a dimension to (theirs, ours)."""
+    """One Recipe KB champion in this session's scope; ``differing`` maps a dimension to (theirs, ours), and
+    ``remove_args`` are the options its launch removes from the launch the framework resolves."""
 
     canonical_id: str
     session_id: str
@@ -387,6 +388,7 @@ class WarmLead:
     replay: PreparedReplay | None = None
     refusal: ReplayRefusal | None = None
     unchecked: str = ""
+    remove_args: tuple[str, ...] = ()
 
     def summary(self) -> str:
         """The champion: its id, where its scope differs from this session's, its gain, launch arguments and session."""
@@ -394,7 +396,8 @@ class WarmLead:
         gain = "n/a" if self.gain_pct is None else f"{self.gain_pct:+.2f}%"
         where = "".join(f", {key} {theirs} (here {ours})" for key, (theirs, ours) in self.differing.items())
         args = f" `{self.server_args}`" if self.server_args else ""
-        return f"{self.canonical_id}{where}: {gain}{args} [{self.session_id}]"
+        removed = f" without `{' '.join(self.remove_args)}`" if self.remove_args else ""
+        return f"{self.canonical_id}{where}: {gain}{args}{removed} [{self.session_id}]"
 
     def describe(self) -> str:
         if self.refusal is not None:
@@ -423,13 +426,16 @@ def identity_labels(profile: SessionProfile) -> dict[str, str]:
     return labels_of(recipe_canonical_id(serving_identity(profile)))
 
 
-def _config(envelope: Mapping[str, Any]) -> tuple[str, dict[str, str]]:
-    """The launch arguments and environment of a record ``knowledge_to_warm_recipe`` accepted."""
+def _config(envelope: Mapping[str, Any]) -> tuple[str, dict[str, str], tuple[str, ...]]:
+    """The launch arguments, environment and removals from the resolved launch of a record
+    ``knowledge_to_warm_recipe`` accepted."""
 
     config = envelope["knowledge"]["value"][CONFIG_SECTION]
-    envs = config.get("extra_envs")
-    return str(config.get("extra_server_args") or ""), (
-        {str(key): str(item) for key, item in envs.items()} if isinstance(envs, Mapping) else {}
+    envs, removed = config.get("extra_envs"), config.get("remove_args")
+    return (
+        str(config.get("extra_server_args") or ""),
+        {str(key): str(item) for key, item in envs.items()} if isinstance(envs, Mapping) else {},
+        tuple(str(name) for name in removed) if isinstance(removed, (list, tuple)) else (),
     )
 
 
@@ -443,7 +449,7 @@ def lead_of(
     """The lead one champion View gives; raises ``RemoteRecipeValidationError`` on a record of another contract."""
 
     row = knowledge_to_warm_recipe(envelope)
-    server_args, envs = _config(envelope)
+    server_args, envs, remove_args = _config(envelope)
     return WarmLead(
         canonical_id=str(envelope.get("canonical_id") or ""),
         session_id=str(row.get("remote_session_id") or ""),
@@ -461,6 +467,7 @@ def lead_of(
             for key, ours in labels.items()
             if key in dimensions and str(dimensions[key]) != ours
         },
+        remove_args=tuple(name for name in remove_args if name not in HEAD_FLAGS),
     )
 
 
@@ -527,7 +534,7 @@ def replay(client: RecipeDownloader, lead: WarmLead, scope: RecipeScope, target:
     """
 
     try:
-        launch = LaunchConfig(server_args=lead.server_args, envs=dict(lead.envs))
+        launch = LaunchConfig(server_args=lead.server_args, envs=dict(lead.envs), remove_args=lead.remove_args)
     except RecipeError as exc:
         log.warning("Recipe KB champion %s has no launch config to replay: %s", lead.canonical_id, exc)
         return None
