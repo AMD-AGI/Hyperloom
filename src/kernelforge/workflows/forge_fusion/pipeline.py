@@ -460,6 +460,7 @@ def fuse(request: FuseRequest) -> FuseResult:
     usage = _open_usage_ledger(out)
 
     log.info("forge-fuse %s | framework=%s model=%s", __version__, framework, model_path)
+    request = dataclasses.replace(request, gpu_arch=_run_target_arch(request.gpu_arch))
     backend = _AgentBackendCache(agent)
     diagnosis = _diagnose(request)
 
@@ -476,6 +477,7 @@ def fuse(request: FuseRequest) -> FuseResult:
         out=out,
         agent_factory=backend,
         usage=usage,
+        gpu_arch=request.gpu_arch,
     )
     discovery = _discover(inputs, discover_mode, fuse_kernel, stages.dry_run)
     _log_located_recipes(discovery, dry_run=stages.dry_run)
@@ -535,7 +537,7 @@ def _run_fusion_stages(
             max_model_len=layout.max_model_len,
         ),
         author=author,
-        gpu_arch=_run_target_arch(request.gpu_arch),
+        gpu_arch=request.gpu_arch,
         target_speedup=DEFAULT_TARGET_SPEEDUP,
     )
     if not (split.multi_patch and stages.validate):
@@ -839,14 +841,14 @@ def _combined_recipe(recipes: list[Recipe]) -> Recipe:
 def _run_target_arch(gpu_arch: str) -> str:
     """One GPU arch for the whole run.
 
-    The author tunes for it, so a mismatch would have it writing for a chip the
-    run is not on.
+    Discovery and the author both name it, so a mismatch would have them
+    reasoning about a chip the run is not on.
     """
     run_arch = canon_arch(gpu_arch) or detect_arch()
     if run_arch:
         log.info("target GPU arch: %s", run_arch)
     else:
-        log.warning("GPU arch undetectable; the author will not be told a target ISA")
+        log.warning("GPU arch undetectable; discovery and the author will not be told a target ISA")
     return run_arch
 
 

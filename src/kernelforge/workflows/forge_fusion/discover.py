@@ -21,6 +21,7 @@ from kernelforge.agent_backends.base import AgentRunSpec, AgentToolPolicy, watch
 from kernelforge.agent_backends.session_resume import is_api_failure
 from kernelforge.config.resources import resource_path
 
+from .author import _arch_phrase
 from .diagnose import LAUNCH_BOUND_CATEGORIES, _load_trace_events, categories_in_text, categorize_kernel_name
 from .llm_failure import (
     API_ERROR,
@@ -63,6 +64,7 @@ class DiscoveryTarget:
     shapes: dict[str, Any]
     repo_scope: bool = False
     repo_root: str = ""
+    gpu_arch: str = ""
 
 
 @dataclass(frozen=True)
@@ -716,12 +718,8 @@ def build_discovery_prompt(
     Repo scope embeds no source at all and points the agent at the repository
     instead, naming the target's source file as the entry point to start from.
     """
-    model_type, framework, shapes, repo_scope = (
-        target.model_type,
-        target.install.framework,
-        target.shapes,
-        target.repo_scope,
-    )
+    model_type, framework = target.model_type, target.install.framework
+    shapes, repo_scope = target.shapes, target.repo_scope
     diagnosis, hot_kernels = evidence.diagnosis, evidence.hot_kernels
     if repo_scope:
         source_block = render_repo_scope_brief(
@@ -780,7 +778,7 @@ def build_discovery_prompt(
     operator_lines = "\n".join(operator_line(hint) for hint in (evidence.existing_operator_hints or []))
     dom = ", ".join(diagnosis.dominant_categories)
     return f"""You are analyzing the DECODE path of a {framework} model (`model_type={model_type}`)
-on AMD MI325X (gfx942), bf16, to find SOURCE-LEVEL KERNEL FUSIONS. Analyze only; do
+on {_arch_phrase(target.gpu_arch)}, bf16, to find SOURCE-LEVEL KERNEL FUSIONS. Analyze only; do
 not edit anything. Return your answer as JSON (schema below).
 
 ## The lever (general, not model-specific)

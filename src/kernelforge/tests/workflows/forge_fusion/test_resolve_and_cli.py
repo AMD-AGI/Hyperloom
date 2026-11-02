@@ -1247,7 +1247,7 @@ class TestCliDryRun:
         assert manifest["fusion"] is None
 
     def test_discovery_targets_the_framework_root_it_was_given(self, tmp_path, monkeypatch):
-        """``--framework-root`` pins WHICH install is being optimized."""
+        """``--framework-root`` pins WHICH install is being optimized, and ``--gpu-target`` the chip it runs on."""
         from kernelforge.workflows.forge_fusion import pipeline as cli_module
 
         seen: dict[str, object] = {}
@@ -1292,6 +1292,8 @@ class TestCliDryRun:
                 str(tmp_path / "out"),
                 "--framework-root",
                 str(root),
+                "--gpu-target",
+                "gfx950",
                 "--dry-run",
                 "--discover",
                 "llm",
@@ -1300,6 +1302,7 @@ class TestCliDryRun:
 
         assert res.exit_code == 0, res.output
         assert seen["target"].install.framework_root == str(root)
+        assert seen["target"].gpu_arch == "gfx950"
 
     def test_unreachable_llm_is_not_written_as_no_opportunity(self, tmp_path, monkeypatch):
         """The incident, end to end: launch-bound trace + a dead gateway."""
