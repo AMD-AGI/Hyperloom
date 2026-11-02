@@ -148,6 +148,8 @@ class LoopAgents:
     supervisor_fn: Any = None
     # Every relay profile's search actor; when set, the loop selects among them and the four above are its start actor.
     search_actors: SearchActorPool | None = None
+    # Builds a further planning service for the active profile, for planning units that run side by side.
+    orchestration_factory: Any = None
 
 
 @dataclass(frozen=True)
@@ -169,6 +171,7 @@ def _with_search_actor(agents: LoopAgents, bundle) -> LoopAgents:
         agent_factory=bundle.agent_factory,
         orchestration_service=bundle.orchestration_service,
         supervisor_fn=bundle.supervisor_fn,
+        orchestration_factory=bundle.orchestration_factory,
     )
 
 
