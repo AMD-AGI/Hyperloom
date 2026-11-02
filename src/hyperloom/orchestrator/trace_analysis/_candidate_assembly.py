@@ -41,7 +41,9 @@ from .tracelens_skill_runner import normalize_upstream_category
 log = logging.getLogger(__name__)
 
 # Kernel-name markers per GEAK category, in priority order: the first category with a marker in the name wins.
+# Norms precede the bare ``gemm`` marker, which also matches the ``gemma`` of ``_gemma_rmsnorm_kernel``.
 _NAME_CATEGORY_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("LayerNorm", ("rmsnorm", "layernorm", "norm_kernel")),
     (
         "GEMM",
         (
@@ -59,7 +61,6 @@ _NAME_CATEGORY_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
         ),
     ),
     ("SDPA", ("attention", "attn", "fmha", "paged_attention", "flash")),
-    ("LayerNorm", ("rmsnorm", "layernorm", "norm_kernel")),
     ("Activation", ("act_and_mul", "silu", "gelu", "activation")),
     ("MoE", ("moe", "topk", "expert")),
     ("Softmax", ("softmax",)),

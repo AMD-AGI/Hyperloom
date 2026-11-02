@@ -13,6 +13,7 @@ from typing import Any
 
 _SHAPE_RE = re.compile(r"\(([\d,\s]*)\)")
 _NAMED_DIMENSIONS = ("M", "N", "K", "E", "TOPK")
+_NORM_TOKENS = ("rmsnorm", "rms_norm", "layernorm", "layer_norm")
 CASE_SELECTOR_KEY = "CASE_ID"
 OPERATOR_IDENTITY_VERSION = 3
 
@@ -305,6 +306,9 @@ def named_dimensions(row: dict[str, Any]) -> dict[str, int]:
         dimensions = _attention_dimensions(shapes)
     elif "moe" in operation:
         dimensions = _moe_dimensions(shapes)
+    elif any(token in operation for token in _NORM_TOKENS):
+        # Ahead of the GEMM tokens: ``gemm`` also matches the ``gemma`` of ``_gemma_rmsnorm_kernel``.
+        dimensions = {}
     elif any(token in operation for token in ("gemm", "matmul", "_mm", "linear")):
         dimensions = _gemm_dimensions(shapes)
     else:

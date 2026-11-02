@@ -379,6 +379,15 @@ def test_125_derive_category_normalizations():
         assert candidate_assembly.derive_kernel_category({"name": name}) == expected, name
 
 
+def test_derive_category_gemma_norm_is_a_norm():
+    # Regression: the bare ``gemm`` marker claimed the ``gemma`` of MiniMax-M3's Gemma RMSNorm kernels.
+    for name in ("_gemma_rmsnorm_kernel", "_gemma_fused_add_rmsnorm_kernel"):
+        assert candidate_assembly.derive_kernel_category({"name": name}) == "LayerNorm", name
+    assert (
+        candidate_assembly.derive_kernel_category({"name": "ck_tile::BlockGemmASmemBSmemCRegV1DefaultPolicy"}) == "GEMM"
+    )
+
+
 def test_125_finalize_outputs_source_path_field():
     """_finalize_candidates exposes the source_path mirror of source_file."""
     candidates = [
