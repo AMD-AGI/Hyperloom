@@ -34,7 +34,9 @@ PRELUDE, into disjoint shares, one per Arbor agent among them, each its ``compon
 one given with no agent, is a usage error. Without one, two or more Arbors split the map of a dossier pass, the first
 Arbor run once on a mapping branch EXPLORE opens beside the others, for at most ``--agent-dossier-minutes`` (default
 90), or, when it gives none or the minutes are 0, a map Arbor generates from the root's profile (its op shares, else its
-kernel shares); each share then opens as a branch of its own. A negative value is a usage error. ``--agent-pack NAME`` names the pack those Arbors run instead of Arbor's
+kernel shares); each share then opens as a branch of its own, when it still has ``--agent-share-minutes`` (default 63,
+0 for always) to its cutoff, the least in which Arbor runs an iteration. A negative value of either is a usage error.
+``--agent-pack NAME`` names the pack those Arbors run instead of Arbor's
 serving template; a name that is not one directory, or one given with no agent, is a usage error, and a pack the Arbor
 checkout lacks is refused when the branch starts. ``--agent-launch FILE`` gives those Arbors the launch an AgentX
 recipe's adds to, which Magpie resolves from InferenceX and MB does not carry yet; a file the adapter cannot use, or one
@@ -173,6 +175,7 @@ from hyperloom_multibranch.scheduling.roster import RosterCaps
 from hyperloom_multibranch.scheduling.settings import (
     AGENT_PORT,
     DOSSIER_MINUTES,
+    SHARE_MINUTES,
     InferenceXShape,
     KernelOptimizer,
     PlaybookMode,
@@ -417,6 +420,14 @@ def _add_agent_options(run: argparse.ArgumentParser) -> None:
             " branch of its own."
         ),
     )
+    _add_agent_minutes_options(run)
+    _add_arbor_start_options(run)
+    _add_agent_review_options(run)
+
+
+def _add_agent_minutes_options(run: argparse.ArgumentParser) -> None:
+    """How long the dossier pass may map the Arbors' directions, and how long their shares must have left to open."""
+
     run.add_argument(
         "--agent-dossier-minutes",
         dest="agent_dossier_minutes",
@@ -430,8 +441,18 @@ def _add_agent_options(run: argparse.ArgumentParser) -> None:
             f" iteration with under 63 minutes left, so less runs none; 0 skips it (default {DOSSIER_MINUTES:g})."
         ),
     )
-    _add_arbor_start_options(run)
-    _add_agent_review_options(run)
+    run.add_argument(
+        "--agent-share-minutes",
+        dest="agent_share_minutes",
+        type=float,
+        default=SHARE_MINUTES,
+        metavar="MINUTES",
+        help=(
+            "The least time to their cutoff the share branches of a split map must still have, after the dossier pass"
+            " and the review, to open: Arbor starts no iteration with less. Below it none opens, and the session says"
+            f" why; 0 always opens them (default {SHARE_MINUTES:g})."
+        ),
+    )
 
 
 def _add_arbor_start_options(run: argparse.ArgumentParser) -> None:
@@ -709,7 +730,8 @@ def settings_from(
         agent_directions=_agent_directions(args.agent_directions, agents),
         agent_pack=_agent_pack(args.agent_pack, agents),
         agent_launch=_agent_launch(args.agent_launch, agents),
-        agent_dossier_minutes=_dossier_minutes(args.agent_dossier_minutes),
+        agent_dossier_minutes=_minutes("--agent-dossier-minutes", args.agent_dossier_minutes, "runs no dossier pass"),
+        agent_share_minutes=_minutes("--agent-share-minutes", args.agent_share_minutes, "always opens the shares"),
         agent_port=_agent_port(args.agent_port, agents),
         stop_after_map=_stop_after_map(args.stop_after_map, agents, args.agent_directions),
         agent_dossier=_agent_dossier(args.agent_dossier, args.agent_directions),
@@ -746,9 +768,9 @@ def _parallel_tests(args: argparse.Namespace, tests_that_fit: Callable[[int], in
     return parallel
 
 
-def _dossier_minutes(minutes: float) -> float:
+def _minutes(option: str, minutes: float, zero: str) -> float:
     if minutes < 0:
-        raise ValueError(f"--agent-dossier-minutes {minutes:g} is negative; 0 runs no dossier pass")
+        raise ValueError(f"{option} {minutes:g} is negative; 0 {zero}")
     return minutes
 
 
