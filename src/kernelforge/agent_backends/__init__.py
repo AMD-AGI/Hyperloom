@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from kernelforge.agent_backends.base import (
     AGENT_WATCHDOG_GRACE_SEC,
+    READ_ONLY_GIT_SUBCOMMANDS,
     AgentBackend,
     AgentCapabilities,
     AgentHook,
@@ -44,6 +45,7 @@ __all__ = [
     "AgentProviderError",
     "AgentProviderUnavailableError",
     "PROVIDER_ENTRY_POINT_GROUP",
+    "READ_ONLY_GIT_SUBCOMMANDS",
     "AgentRole",
     "AgentRunResult",
     "AgentRunSpec",
