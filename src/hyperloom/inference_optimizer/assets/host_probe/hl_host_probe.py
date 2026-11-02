@@ -658,7 +658,7 @@ class HostProbe:
                 f"hl_host_probe_rank{_rank()}_pid{os.getpid()}.json",
                 self.report(),
             )
-        except Exception as exc:
+        except OSError as exc:
             log.warning("could not write host probe report: %s", exc, exc_info=True)
             return ""
 

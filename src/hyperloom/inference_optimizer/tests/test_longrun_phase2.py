@@ -13,6 +13,8 @@ from hyperloom.orchestrator.lever import LEVER_CONFIG
 from hyperloom.orchestrator.phases import machine_state as ps
 from hyperloom.orchestrator.state.shared_state import SharedState
 
+from .conftest import make_mock_critic_coordinator
+
 
 def _plateaued_explore_state(
     *,
@@ -63,24 +65,8 @@ def test_compute_next_phase_plateau_routes_optimize_to_kernel():
 
 # Coordinator stamps the bottleneck-switch handoff
 @pytest.fixture
-def cyclic_coordinator(tmp_path, monkeypatch):
-    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    from hyperloom.inference_optimizer.session.paths import make_session_dir as _msd
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
-    from hyperloom.orchestrator.roles import (
-        MockBackend,
-        MockCriticBackend,
-        ScriptedPlan,
-    )
-    from .conftest import seed_target_analysis_marker
-
-    sd = _msd()
-    seed_target_analysis_marker(sd)
-    backends = {
-        "orchestration": MockBackend(ScriptedPlan(turns=[]), name="orchestration"),
-        "critic": MockCriticBackend(),
-    }
-    c = Coordinator(sd, backends=backends)
+def cyclic_coordinator(session_dir):
+    c = make_mock_critic_coordinator(session_dir)
     yield c
 
 

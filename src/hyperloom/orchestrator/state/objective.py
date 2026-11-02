@@ -36,10 +36,6 @@ class Objective(ABC):
         """Return the short tag identifying this objective type."""
 
     @abstractmethod
-    def progress(self, state: "SharedState") -> float:
-        """Compute fractional progress toward the goal."""
-
-    @abstractmethod
     def reached(self, state: "SharedState") -> bool:
         """Report whether the goal has been met."""
 
@@ -54,7 +50,7 @@ class Objective(ABC):
 
 @dataclass
 class _RatioObjective(Objective):
-    """Objective scored as ``current / target`` (clamped to [0, 1]); reached when ``current >= target``."""
+    """Objective reached when ``current >= target``."""
 
     @abstractmethod
     def _current(self, state: "SharedState") -> float:
@@ -63,14 +59,6 @@ class _RatioObjective(Objective):
     @abstractmethod
     def _target(self) -> float:
         """Return the positive target the metric is compared against."""
-
-    def progress(self, state: "SharedState") -> float:
-        """Fraction of the target reached, clamped to [0, 1] (0.0 when either side is non-positive)."""
-        cur = self._current(state)
-        target = self._target()
-        if cur <= 0 or target <= 0:
-            return 0.0
-        return min(1.0, cur / target)
 
     def reached(self, state: "SharedState") -> bool:
         """Report whether the live metric meets or exceeds the target."""
@@ -86,7 +74,7 @@ class _RatioObjective(Objective):
 
 @dataclass
 class TargetGainObjective(_RatioObjective):
-    """Reach ``target_gain_pct`` % over baseline_tput (progress = cumulative_gain_validated / target, capped at 1.0)."""
+    """Reach ``target_gain_pct`` % cumulative validated gain over baseline_tput."""
 
     target_gain_pct: float
 
@@ -160,10 +148,6 @@ class AnyObjective(Objective):
         """Return the members' kinds joined by ``+``."""
         return "+".join(o.kind() for o in self.objectives)
 
-    def progress(self, state: "SharedState") -> float:
-        """Return the highest member progress."""
-        return max(o.progress(state) for o in self.objectives)
-
     def reached(self, state: "SharedState") -> bool:
         """Report whether any member is satisfied."""
         return any(o.reached(state) for o in self.objectives)
@@ -179,7 +163,7 @@ class AnyObjective(Objective):
 
 @dataclass
 class TargetTputObjective(_RatioObjective):
-    """Reach an absolute throughput number (progress against best-so-far tput, not baseline)."""
+    """Reach an absolute throughput number (measured against best-so-far tput, not baseline)."""
 
     target_tput_per_gpu: float
 
@@ -256,10 +240,6 @@ class TimeOnlyObjective(Objective):
     def kind(self) -> str:
         """Return the objective kind tag."""
         return "time_only"
-
-    def progress(self, state: "SharedState") -> float:
-        """Report progress, which is always zero since there is no target."""
-        return 0.0
 
     def reached(self, state: "SharedState") -> bool:
         """Report whether the goal is met, which is never for this objective."""

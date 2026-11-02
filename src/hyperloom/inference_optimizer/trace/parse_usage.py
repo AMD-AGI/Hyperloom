@@ -108,6 +108,18 @@ def parse_claude_stream_json_usage(
     return normalized
 
 
+def _assistant_text_blocks(message: dict[str, Any]) -> list[str]:
+    """Return the non-empty text blocks of one assistant ``message``, in order."""
+    chunks: list[str] = []
+    for block in message.get("content") or []:
+        if not (isinstance(block, dict) and block.get("type") == "text"):
+            continue
+        text = block.get("text")
+        if isinstance(text, str) and text:
+            chunks.append(text)
+    return chunks
+
+
 def parse_claude_stream_json_response(
     log_path: str | Path,
 ) -> str | None:
@@ -124,11 +136,7 @@ def parse_claude_stream_json_response(
             message = obj.get("message")
             if not isinstance(message, dict):
                 continue
-            for block in message.get("content") or []:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    text = block.get("text")
-                    if isinstance(text, str) and text:
-                        assistant_chunks.append(text)
+            assistant_chunks.extend(_assistant_text_blocks(message))
     if result_text is not None:
         return result_text
     if assistant_chunks:

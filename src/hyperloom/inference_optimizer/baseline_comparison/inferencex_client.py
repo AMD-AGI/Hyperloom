@@ -159,30 +159,32 @@ def fetch_agentic_interactivity(benchmark_ids: list[str | int]) -> dict[str, flo
                     log.warning("InferenceX: derived interactivity fetch failed: %s", exc)
                     return None
         try:
-            if body[:2] == b"\x1f\x8b":
-                body = gzip.decompress(body)
-            data = json.loads(body.decode("utf-8"))
-            if not isinstance(data, dict) or "error" in data:
-                raise ValueError("expected a benchmark-ID mapping")
-            for key in batch:
-                if key not in data:
-                    continue
-                row = data[key]
-                if not isinstance(row, dict) or normalize_benchmark_id(row.get("id")) != key:
-                    raise ValueError("derived metric benchmark ID does not match its key")
-                value = row.get("p90_e2e_norm_intvty")
-                result[key] = (
-                    float(value)
-                    if not isinstance(value, bool)
-                    and isinstance(value, (int, float))
-                    and math.isfinite(value)
-                    and value > 0
-                    else None
-                )
+            _parse_derived_batch(body, batch, result)
         except (ValueError, OSError, EOFError, OverflowError, zlib.error) as exc:
             log.warning("InferenceX: invalid derived interactivity response: %s", exc)
             return None
     return result
+
+
+def _parse_derived_batch(body: bytes, batch: list[str], result: dict[str, float | None]) -> None:
+    """Decode one derived-metrics response into ``result``, keyed by benchmark ID."""
+    if body[:2] == b"\x1f\x8b":
+        body = gzip.decompress(body)
+    data = json.loads(body.decode("utf-8"))
+    if not isinstance(data, dict) or "error" in data:
+        raise ValueError("expected a benchmark-ID mapping")
+    for key in batch:
+        if key not in data:
+            continue
+        row = data[key]
+        if not isinstance(row, dict) or normalize_benchmark_id(row.get("id")) != key:
+            raise ValueError("derived metric benchmark ID does not match its key")
+        value = row.get("p90_e2e_norm_intvty")
+        result[key] = (
+            float(value)
+            if not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value) and value > 0
+            else None
+        )
 
 
 def find_reference_rows(rows: list[dict], query: BaselineQuery) -> list[dict]:

@@ -318,6 +318,19 @@ def _sglang_apply_layout(sglang: Any) -> tuple[tuple[Path, int] | None, str]:
     return layout, ""
 
 
+def _new_pod_result() -> dict[str, Any]:
+    """A per-pod summary for this host with no outcome recorded yet."""
+    return {
+        "host": socket.gethostname(),
+        "status": "unknown",
+        "sglang_version": None,
+        "patches_applied": [],
+        "patches_skipped_already_present": False,
+        "error": None,
+        "elapsed_sec": 0.0,
+    }
+
+
 def _apply_on_pod(
     *,
     tracelens_root: str,
@@ -329,15 +342,7 @@ def _apply_on_pod(
     ``patch_set`` is the controller's choice and wins over the pod-side gate.
     """
     started = time.time()
-    result: dict[str, Any] = {
-        "host": socket.gethostname(),
-        "status": "unknown",
-        "sglang_version": None,
-        "patches_applied": [],
-        "patches_skipped_already_present": False,
-        "error": None,
-        "elapsed_sec": 0.0,
-    }
+    result = _new_pod_result()
     try:
         try:
             import sglang  # type: ignore[import-not-found]
@@ -431,8 +436,8 @@ def _fanout_to_all_nodes(
     return list(results)
 
 
-def main() -> int:
-    """Parse CLI arguments, fan out the patch to all pods, and aggregate."""
+def _parse_args() -> argparse.Namespace:
+    """Parse the TraceLens root, version pin, patch set and ``--local`` flags."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--tracelens-root",
@@ -457,8 +462,11 @@ def main() -> int:
         "backend, which ships+runs this script on each GPU pod directly. "
         "ray is never imported in this mode.",
     )
-    args = parser.parse_args()
+    return parser.parse_args()
 
+
+def _preconditions_met(args: argparse.Namespace) -> bool:
+    """Check the TraceLens root and ``git``; print the failure JSON and return False when either is missing."""
     if not args.tracelens_root or not Path(args.tracelens_root).is_dir():
         print(
             json.dumps(
@@ -470,7 +478,7 @@ def main() -> int:
                 indent=2,
             )
         )
-        return 2
+        return False
 
     if shutil.which("git") is None:
         print(
@@ -483,6 +491,15 @@ def main() -> int:
                 indent=2,
             )
         )
+        return False
+    return True
+
+
+def main() -> int:
+    """Parse CLI arguments, fan out the patch to all pods, and aggregate."""
+    args = _parse_args()
+
+    if not _preconditions_met(args):
         return 2
 
     # --local: infera SSH backend.

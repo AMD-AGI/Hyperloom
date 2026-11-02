@@ -17,6 +17,7 @@ from hyperloom.orchestrator.actions.executors import _patch_git as patch_git
 from hyperloom.orchestrator.actions.executors import _patch_sources as patch_sources
 from hyperloom.orchestrator.actions.executors import _integrate_refusals as integrate_refusals
 from hyperloom.orchestrator.actions.executors import _integrate_results as integrate_results
+from hyperloom.orchestrator.tests._helpers import git_repo_tracking
 
 
 class _CP:
@@ -177,22 +178,6 @@ def test_resolve_framework_root_explicit_missing_rejected():
     assert patch_sources._resolve_framework_root("/no/such/dir") is None
 
 
-def _commit_tree(checkout: Path, *files: str) -> None:
-    """Make ``checkout`` a git repository tracking ``files``."""
-    import subprocess
-
-    subprocess.run(["git", "init", "-q", str(checkout)], check=True)
-    for rel in files:
-        target = checkout / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text("x = 1\n", encoding="utf-8")
-    subprocess.run(["git", "-C", str(checkout), "add", "-A"], check=True)
-    subprocess.run(
-        ["git", "-C", str(checkout), "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base"],
-        check=True,
-    )
-
-
 def test_resolve_framework_root_non_git_framework_tree_is_its_own_root(tmp_path, monkeypatch):
     plain = tmp_path / "plain"
     plain.mkdir()
@@ -208,7 +193,7 @@ def test_resolve_framework_root_non_git_framework_tree_is_its_own_root(tmp_path,
 def test_resolve_framework_root_without_a_named_tree_takes_no_discovered_root(tmp_path, monkeypatch):
     """A discovery order is not a name: with no tree named, no search root stands in for one."""
     checkout = tmp_path / "InferenceX"
-    _commit_tree(checkout, "benchmarks/benchmark_lib.sh")
+    git_repo_tracking(checkout, "benchmarks/benchmark_lib.sh")
     monkeypatch.setattr(patch_sources, "resolve_kernel_search_roots", lambda: [str(checkout)])
     monkeypatch.setattr(patch_sources, "resolve_session_framework_root", lambda: "")
     monkeypatch.setattr(patch_sources, "resolve_framework_tree", lambda framework: "")
@@ -219,9 +204,9 @@ def test_resolve_framework_root_without_a_named_tree_takes_no_discovered_root(tm
 def test_resolve_framework_root_artifact_only_prefers_the_framework_checkout(tmp_path, monkeypatch):
     """An artifact-only integrate must not land on the first git root discovered (the InferenceX checkout)."""
     inferencex = tmp_path / "InferenceX"
-    _commit_tree(inferencex, "benchmarks/benchmark_lib.sh")
+    git_repo_tracking(inferencex, "benchmarks/benchmark_lib.sh")
     checkout = tmp_path / "sglang"
-    _commit_tree(checkout, "python/sglang/__init__.py")
+    git_repo_tracking(checkout, "python/sglang/__init__.py")
     package = checkout / "python" / "sglang"
     monkeypatch.setattr(patch_sources, "resolve_kernel_search_roots", lambda: [str(inferencex), str(package)])
     monkeypatch.setattr(patch_sources, "resolve_session_framework_root", lambda: "")
@@ -239,14 +224,14 @@ def test_resolve_framework_root_without_patches_takes_the_installed_package_itse
 ):
     """A pip-installed framework is edited where the server imports it, never in a checkout that happens to be first."""
     inferencex = tmp_path / "InferenceX"
-    _commit_tree(inferencex, "benchmarks/benchmark_lib.sh")
+    git_repo_tracking(inferencex, "benchmarks/benchmark_lib.sh")
     site_packages = tmp_path / "site-packages" / "vllm"
     site_packages.mkdir(parents=True)
     (site_packages / "__init__.py").write_text("", encoding="utf-8")
     roots = [inferencex]
     if image_has_source_checkout:
         source_checkout = tmp_path / "app" / "vllm"
-        _commit_tree(source_checkout, "vllm/__init__.py")
+        git_repo_tracking(source_checkout, "vllm/__init__.py")
         roots.append(source_checkout)
     roots.append(site_packages)
     monkeypatch.setattr(patch_sources, "resolve_kernel_search_roots", lambda: [str(r) for r in roots])
@@ -261,7 +246,7 @@ def test_resolve_framework_root_without_patches_takes_the_installed_package_itse
 def test_resolve_framework_root_ignores_a_repository_that_does_not_track_the_package(tmp_path, monkeypatch):
     """A venv inside an unrelated repository sits under its ``.git`` without being part of it."""
     project = tmp_path / "project"
-    _commit_tree(project, "README.md")
+    git_repo_tracking(project, "README.md")
     package = project / ".venv" / "lib" / "site-packages" / "vllm"
     package.mkdir(parents=True)
     (package / "__init__.py").write_text("", encoding="utf-8")
