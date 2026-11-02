@@ -131,8 +131,8 @@ def dispatch_prepared_tasks(
     def _report() -> None:
         if on_progress is None:
             return
-        # Suppressed on purpose.
-        with contextlib.suppress(Exception):  # broad-suppress: caller-supplied progress callback
+        # A progress snapshot that cannot be written must not stop the dispatch; the final state is written after it.
+        with contextlib.suppress(OSError):
             on_progress(_snapshot())
 
     for index, task in enumerate(tasks):

@@ -589,7 +589,7 @@ def test_a_sweep_that_could_not_write_its_report_records_the_step_that_broke(
     ]
 
 
-def test_a_lifecycle_that_would_not_resolve_is_recorded_rather_than_read_as_unsupported(
+def test_a_lifecycle_that_would_not_resolve_fails_the_sweep_rather_than_reading_as_unsupported(
     session_dir: Path,
     baseline_yaml: Path,
 ):
@@ -600,18 +600,9 @@ def test_a_lifecycle_that_would_not_resolve_is_recorded_rather_than_read_as_unsu
             "hyperloom.orchestrator.actions.executors._server_lifecycle.resolve_lifecycle_params",
             side_effect=RuntimeError("lifecycle probe exploded"),
         ),
+        pytest.raises(RuntimeError, match="^lifecycle probe exploded$"),
     ):
         _run(state, session_dir, recorder=_recorder(), run_grid=_all_succeed)
-        ext = _sweep_event(session_dir)["ext"]
-
-    # Both arms fall back to a server per rung, and each says why it had to.
-    assert [fault["stage"] for fault in ext["faults"]] == [
-        f"resolve_lifecycle_params:{ARM_BASELINE}",
-        f"resolve_lifecycle_params:{ARM_OPTIMIZED}",
-    ]
-    assert {fault["error_class"] for fault in ext["faults"]} == {"RuntimeError"}
-    for arm in (ARM_BASELINE, ARM_OPTIMIZED):
-        assert ext["arms"][arm]["strategy"] == STRATEGY_SERVER_RESTART
 
 
 def test_a_sweep_whose_arm_lost_a_rung_does_not_read_as_whole(session_dir: Path, baseline_yaml: Path):

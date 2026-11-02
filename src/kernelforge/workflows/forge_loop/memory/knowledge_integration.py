@@ -382,7 +382,7 @@ def _git_discard_worktree(
         )
         if pre_untracked is not None:
             _remove_new_untracked(workspace_dir, pre_untracked)
-    except Exception as error:
+    except (OSError, subprocess.SubprocessError, WarmStartRestoreError) as error:
         raise WarmStartRestoreError(f"failed to restore rejected warm-start: {error}") from error
     if restored.returncode != 0 or status.returncode != 0 or bool(status.stdout.strip()):
         detail = (restored.stderr or restored.stdout or status.stderr or status.stdout).strip()

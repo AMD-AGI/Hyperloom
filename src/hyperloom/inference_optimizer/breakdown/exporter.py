@@ -278,7 +278,7 @@ def write_breakdown_json(
 
         for warning in write_session_decision_trace(sd):
             log.debug("decision_trace: %s", warning)
-    except Exception as exc:  # isolation boundary: the decision_trace side artifact
+    except (OSError, ValueError, TypeError) as exc:
         # The trace is a side artifact; losing it must not fail the breakdown
         # write, but it is scored downstream so a silent loss has to be visible.
         log.warning("decision_trace write failed for %s; trace artifacts will be missing", sd, exc_info=True)
