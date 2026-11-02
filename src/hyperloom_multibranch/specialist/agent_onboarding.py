@@ -49,6 +49,7 @@ from hyperloom_multibranch.specialist.arbor_adapter import (
     ArborRefused,
     ArborRun,
     arbor_manifest,
+    fit_keys,
     is_arbor,
     refused_reasons,
 )
@@ -238,11 +239,13 @@ class OnboardingSetup:
 
 @dataclass(frozen=True)
 class ReadyAgent:
-    """An agent preflight made ready: its manifest, its checkout and the process it runs in."""
+    """An agent preflight made ready: its manifest, its checkout and the process it runs in, and what its branch should
+    note of how it was started (an input its Arbor lacks, :func:`fit_keys`)."""
 
     manifest: AgentManifest
     source_dir: Path
     process: AgentProcess
+    notes: tuple[str, ...] = ()
 
 
 class AttemptFailed(RuntimeError):
@@ -318,6 +321,10 @@ async def _attempt(
     if manifest.snapshots is not None:
         profile = root_profile(spec.root_shares, checkout / manifest.snapshots.session, spec.root_shares_source)
         manifest = replace(manifest, config=component_config(manifest.config, spec, profile))
+    notes: tuple[str, ...] = ()
+    if adapted:
+        config, notes = fit_keys(manifest.config, checkout)
+        manifest = replace(manifest, config=config)
     (checkout / manifest.config_file).parent.mkdir(parents=True, exist_ok=True)
     (checkout / manifest.config_file).write_text(json.dumps(manifest.config, indent=2), encoding=ENCODING)
     env = agent_env(agent_dir)
@@ -330,7 +337,7 @@ async def _attempt(
     finally:
         if not started:
             await process.kill()
-    return ReadyAgent(manifest, checkout, process)
+    return ReadyAgent(manifest, checkout, process, notes)
 
 
 async def install(manifest: AgentManifest, setup: OnboardingSetup, checkout: Path, env: Mapping[str, str]) -> None:
