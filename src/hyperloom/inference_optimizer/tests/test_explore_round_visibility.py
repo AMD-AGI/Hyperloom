@@ -124,23 +124,10 @@ async def test_a_running_round_names_its_variants_and_their_latest_progress(coor
 
 
 @pytest.mark.asyncio
-async def test_a_landed_variant_outlives_the_heartbeats_of_the_ones_after_it(coord):
-    """An hour-long variant sends a heartbeat a minute; the trail's bound must not drop an earlier verdict."""
-    task = await _running_round(coord, [{"name": "first"}, {"name": "second"}])
-    await _landed(coord, task.task_id, "first", "failed", None)
-    for _ in range(150):
-        await _step(coord, task.task_id, "second", "benchmark", "running")
-
-    assert "variants=[first: failed, second: benchmark running]" in _task_line(coord, task.task_id)
-
-
-@pytest.mark.asyncio
 async def test_a_round_with_no_progress_yet_says_so(coord):
     task = await _running_round(coord, [{"name": "only"}])
 
-    line = next(
-        line for line in coord.conversation._context_running_tasks_reader().splitlines() if task.task_id in line
-    )
+    line = _task_line(coord, task.task_id)
 
     assert "grid_as_dispatched=['only']" in line
     assert "variants=[]" in line

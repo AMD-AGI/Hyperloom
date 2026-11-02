@@ -332,32 +332,18 @@ def _is_progress_note(entry: Any) -> bool:
     return isinstance(entry, dict) and "progress" in entry
 
 
-def _progress_subject(entry: Any) -> tuple[Any, Any]:
-    """The unit and label a progress note reports on; a newer note on the same subject supersedes it."""
-    note = entry["progress"] if isinstance(entry["progress"], dict) else {}
-    return note.get("unit"), note.get("label")
-
-
 def _drop_oldest_progress_notes(history: list[Any], keep: int) -> list[Any]:
-    """Retain at most ``keep`` progress notes and every other entry.
-
-    Notes a newer note on the same subject supersedes go first, oldest first, so an hour of one step's heartbeats
-    does not push out the last word on an earlier step; then the oldest of the rest.
-    """
-    notes = [index for index, entry in enumerate(history) if _is_progress_note(entry)]
-    surplus = len(notes) - keep
+    """Retain the newest ``keep`` progress notes and every other entry."""
+    surplus = sum(1 for entry in history if _is_progress_note(entry)) - keep
     if surplus <= 0:
         return history
-    seen: set[tuple[Any, Any]] = set()
-    superseded: list[int] = []
-    for index in reversed(notes):
-        subject = _progress_subject(history[index])
-        if subject in seen:
-            superseded.append(index)
-        seen.add(subject)
-    dropped = set(sorted(superseded)[:surplus])
-    dropped.update([index for index in notes if index not in dropped][: surplus - len(dropped)])
-    return [entry for index, entry in enumerate(history) if index not in dropped]
+    kept: list[Any] = []
+    for entry in history:
+        if surplus > 0 and _is_progress_note(entry):
+            surplus -= 1
+            continue
+        kept.append(entry)
+    return kept
 
 
 def _cancel_queued_row(cur: Any, task_id: str, history_json: str, *, now: str, reason: str) -> None:
