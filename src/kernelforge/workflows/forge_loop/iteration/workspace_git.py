@@ -13,8 +13,8 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from hyperloom_common.unified_diff import touched_paths
-from kernelforge.evaluation.jit_rebuild import tracked_source_changes
 from kernelforge.utils.git import git, git_bytes
+from kernelforge.workflows.forge_loop.iteration.measurement_site import MeasurementSite
 from kernelforge.utils.new_path_allowlist import matches_commit_new_paths
 from kernelforge.config.edit_policy import FORGE_PROTECTED_PATHS
 
@@ -365,22 +365,18 @@ class WorkspaceGitMixin:
                 files.append(f)
         return files
 
-    def _jit_source_files(self) -> list[str]:
-        """Declared hints plus actual tracked edits that may require recompilation."""
+    def _canonical_site(self) -> MeasurementSite:
+        """The campaign workspace, where the linear search measures every candidate."""
+        return MeasurementSite(
+            workspace_dir=self.ic.workspace_dir,
+            driver_script=self.ic.driver_script,
+            build_dir=self.ic.build_dir,
+            declared_sources=tuple(self._target_source_files()),
+        )
 
-        workspace = getattr(
-            self.ic,
-            "workspace_dir",
-            str(Path(self.ic.kernel_file).resolve().parent),
-        )
-        return list(
-            dict.fromkeys(
-                [
-                    *self._target_source_files(),
-                    *tracked_source_changes(workspace),
-                ]
-            )
-        )
+    def _jit_source_files(self) -> list[str]:
+        """Declared hints plus actual tracked edits in the campaign workspace that may require recompilation."""
+        return self._canonical_site().jit_sources()
 
     def _full_diff(self, commit_hash: str) -> str:
         """Full unified diff of one iteration's commit (all files it touched)."""

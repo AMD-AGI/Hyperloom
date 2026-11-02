@@ -144,6 +144,41 @@ def test_gpu_type_cli_override_reaches_rewrite_config(monkeypatch, tmp_path):
     assert captured["config"].gpu_target == "gfx950"
 
 
+def test_rewrite_hands_the_loop_shape_to_optimize(monkeypatch, tmp_path):
+    result, captured = _invoke_rewrite(
+        monkeypatch,
+        tmp_path,
+        "--logical-op-name",
+        ("--lanes", "3", "--search-strategy", "tree"),
+    )
+
+    assert result.exit_code == 0
+    assert captured["request"].optimize.lanes == 3
+    assert captured["request"].optimize.search_strategy == "tree"
+
+
+def test_rewrite_leaves_an_unrequested_loop_shape_unset(monkeypatch, tmp_path):
+    result, captured = _invoke_rewrite(monkeypatch, tmp_path, "--logical-op-name")
+
+    assert result.exit_code == 0
+    assert captured["request"].optimize.lanes is None
+    assert captured["request"].optimize.search_strategy is None
+
+
+def test_rewrite_refuses_a_tree_search_on_one_lane_before_it_starts(monkeypatch, tmp_path):
+    """The nested loop would refuse it too, but only after PORT has spent its share of the budget."""
+    result, captured = _invoke_rewrite(
+        monkeypatch,
+        tmp_path,
+        "--logical-op-name",
+        ("--lanes", "1", "--search-strategy", "tree"),
+    )
+
+    assert result.exit_code != 0
+    assert "--lanes 2 or more" in result.output
+    assert captured == {}
+
+
 def test_rewrite_rejects_an_unknown_option(monkeypatch, tmp_path):
     """An undeclared option is fatal here too, for the same reason as forge-loop."""
     result, _captured = _invoke_rewrite(

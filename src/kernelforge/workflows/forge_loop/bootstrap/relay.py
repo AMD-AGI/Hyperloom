@@ -33,6 +33,7 @@ from kernelforge.workflows.forge_loop.search.agent_relay import (
     StartPreference,
     select_start_profile,
 )
+from kernelforge.workflows.forge_loop.campaign.campaign_config import SearchStrategy
 from kernelforge.workflows.forge_loop.search.search_actors import SearchActorBundle, SearchActorPool
 from kernelforge.workflows.forge_loop.roles.agent import ImplementerSetup
 
@@ -47,6 +48,7 @@ class SearchActorBuildContext:
     setup: ImplementerSetup
     lane_binding: LaneBinding
     lanes: int
+    search_strategy: SearchStrategy
     program_md: str
     specialist_definitions: dict
     critic_enabled: bool
@@ -77,12 +79,14 @@ class SearchActorBuildContext:
             setup=setup,
             usage=self.usage,
         )
-        orchestration = make_orchestration_service(
+        make_planning = partial(
+            make_orchestration_service,
             config=actor_config,
             usage=self.usage,
             definitions=self.specialist_definitions,
             enable_plan_critic=self.critic_enabled,
         )
+        orchestration = make_planning()
         supervisor_provider = self.supervisor_backend or profile.provider
         supervisor = make_supervisor_fn(
             program_md=self.program_md,
@@ -91,7 +95,25 @@ class SearchActorBuildContext:
             usage=self.usage,
             config=self._supervisor_config(supervisor_provider, profile, actor_config),
         )
-        return SearchActorBundle(effective_profile, actor_fn, orchestration, lane_factory, supervisor)
+        return SearchActorBundle(
+            effective_profile,
+            actor_fn,
+            orchestration,
+            lane_factory,
+            supervisor,
+            orchestration_factory=partial(make_planning, preflight=False),
+            slot_selector=self._slot_selector(actor_config),
+        )
+
+    def _slot_selector(self, actor_config: Config):
+        """The read-only agent that names a tree round's slots, on the profile's own provider and model."""
+        if self.search_strategy is not SearchStrategy.TREE:
+            return None
+        from kernelforge.agent_backends.registry import create_registered_backend
+        from kernelforge.workflows.forge_loop.roles.slot_selector import SlotSelector
+
+        backend = create_registered_backend(agent_runtime(actor_config), preflight=False, usage=self.usage)
+        return SlotSelector(backend=backend, timeout_sec=backend.runtime.timeout_sec, max_turns=actor_config.max_turns)
 
     def _profile_config(self, profile: AgentProfile) -> Config:
         return config_for_profile(self.config, profile, primary_provider=self.relay.primary_profile.provider)

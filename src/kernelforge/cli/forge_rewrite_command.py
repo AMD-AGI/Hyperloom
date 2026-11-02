@@ -11,10 +11,17 @@ from dataclasses import dataclass
 import click
 
 from kernelforge.cli.option_groups import option_group
-from kernelforge.cli.options import _gpu_options, _roofline_ceiling_option, _validate_max_hours
+from kernelforge.cli.options import (
+    LANE_COUNTS,
+    SEARCH_STRATEGIES,
+    _gpu_options,
+    _roofline_ceiling_option,
+    _validate_max_hours,
+)
 from kernelforge.config import CeilingSwitch, Config, GpuOptions, KnowledgeConfig
 from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
 from kernelforge.workflows.flydsl_rewrite.optimize import OptimizeOptions
+from kernelforge.workflows.forge_loop.api import ForgeLoopUsageError, SearchStrategy, require_lanes_for
 from kernelforge.workflows.flydsl_rewrite.request import ApplybackSwitch, RewriteBudget, RewriteWorkspace
 
 
@@ -104,6 +111,41 @@ class RewriteRequest:
     optimize: OptimizeOptions
     roofline_ceiling: CeilingSwitch
     result_json: str | None
+
+
+def _require_nested_lanes(optimize: OptimizeOptions) -> None:
+    """Refuse a nested tree search on one lane before PORT spends its share of the budget."""
+    if optimize.search_strategy is None or optimize.lanes is None:
+        return
+    try:
+        require_lanes_for(SearchStrategy(optimize.search_strategy), optimize.lanes)
+    except ForgeLoopUsageError as error:
+        raise click.UsageError(str(error)) from error
+
+
+def _rewrite_config(request: RewriteRequest) -> Config:
+    """The runtime configuration of one rewrite: its GPU, its port model and its rewrite KB."""
+    import os
+
+    overrides = {}
+    if request.gpu.gpu_target:
+        overrides["gpu_target"] = request.gpu.gpu_target
+        os.environ["GPU_TARGET"] = request.gpu.gpu_target
+    overrides["gpu_type"] = request.gpu.gpu_type
+    if request.port.model:
+        # Config exposes the model as ``agent_model`` (from_env keys on it); a bare ``model`` override is silently
+        # ignored.
+        overrides["agent_model"] = request.port.model
+    # A disabled KB must not validate ambient remote credentials.
+    try:
+        rewrite_knowledge_config = KnowledgeConfig.from_env(mode="local" if not request.rewrite_kb else None)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    return Config.from_env(
+        workspace=request.workspace.workspace_dir,
+        knowledge_config=rewrite_knowledge_config,
+        **overrides,
+    )
 
 
 @click.command("forge-rewrite-by-flydsl")
@@ -289,6 +331,18 @@ class RewriteRequest:
             type=int,
             help="OPTIMIZE: ceiling for the complete Analysis Agent workflow",
         ),
+        click.option(
+            "--lanes",
+            default=None,
+            type=LANE_COUNTS,
+            help="OPTIMIZE: the nested forge-loop's --lanes. Omitted, it uses its own default.",
+        ),
+        click.option(
+            "--search-strategy",
+            default=None,
+            type=SEARCH_STRATEGIES,
+            help="OPTIMIZE: the nested forge-loop's --search-strategy. Omitted, it searches linearly.",
+        ),
     ),
     _roofline_ceiling_option(
         "OPTIMIZE: passed to the nested forge-loop unchanged. 'off' (default) "
@@ -304,26 +358,8 @@ def forge_rewrite(request: RewriteRequest):
     import os
     import re as _re
 
-    overrides = {}
-    if request.gpu.gpu_target:
-        overrides["gpu_target"] = request.gpu.gpu_target
-        os.environ["GPU_TARGET"] = request.gpu.gpu_target
-    overrides["gpu_type"] = request.gpu.gpu_type
-    if request.port.model:
-        # Config exposes the model as ``agent_model`` (from_env keys on it); a bare ``model`` override is silently
-        # ignored.
-        overrides["agent_model"] = request.port.model
-    rewrite_kb_enabled = bool(request.rewrite_kb)
-    # A disabled KB must not validate ambient remote credentials.
-    try:
-        rewrite_knowledge_config = KnowledgeConfig.from_env(mode="local" if not rewrite_kb_enabled else None)
-    except ValueError as exc:
-        raise click.ClickException(str(exc)) from exc
-    config = Config.from_env(
-        workspace=request.workspace.workspace_dir,
-        knowledge_config=rewrite_knowledge_config,
-        **overrides,
-    )
+    _require_nested_lanes(request.optimize)
+    config = _rewrite_config(request)
 
     description = request.description
     targets = [t.strip() for t in _re.split(r"[,\n]", description.target_functions) if t.strip()]
@@ -360,7 +396,7 @@ def forge_rewrite(request: RewriteRequest):
         roofline_ceiling=request.roofline_ceiling.enabled,
         applyback=request.applyback,
         applyback_import_modules=request.applyback_target.applyback_import_modules,
-        rewrite_kb_enabled=rewrite_kb_enabled,
+        rewrite_kb_enabled=bool(request.rewrite_kb),
         flydsl_kernel_name=description.flydsl_kernel_name,
         max_port_attempts=request.port.max_port_attempts,
         permission_mode=request.port.permission_mode,

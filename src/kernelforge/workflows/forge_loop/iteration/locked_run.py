@@ -14,6 +14,7 @@ from pathlib import Path
 from kernelforge.workflows.forge_loop.iteration.iteration_types import (
     HeldRound,
     IterationResult,
+    IterationTurn,
     LoopAgents,
     LoopCallbacks,
     _IterationFrame,
@@ -149,57 +150,59 @@ class LockedRunMixin:
             if stop:
                 break
             actors = _with_search_actor(actors, self._iteration_bundle(iteration))
-            agent_fn, agent_factory, supervisor_fn = actors.agent_fn, actors.agent_factory, actors.supervisor_fn
-            orchestration_service = actors.orchestration_service
             round_lanes = self._price_round(iteration)
             if round_lanes is None:
                 break
             await self._open_iteration(
                 iteration=iteration,
                 digest=digest,
-                supervisor_fn=supervisor_fn,
+                supervisor_fn=actors.supervisor_fn,
                 analysis_service=analysis_service,
             )
-            session_sink: dict = {}
-            # What a fan-out round leaves this iteration holding, so the single-session path below spends it instead
-            # of buying it again.
-            fan_out_plan: HeldRound | None = None
-            if hazard is None and self._fan_out_ready(round_lanes, agent_fn, agent_factory, orchestration_service):
-                fan_out_plan = await self._fan_out_round(
-                    iteration=iteration,
-                    orchestration_service=orchestration_service,
-                    agent_factory=agent_factory,
-                    lanes=round_lanes,
-                )
-                # The round's own lanes share one device with the canonical measurement, so a lane whose teardown
-                # could not clear it has just refused this iteration -- whatever its siblings produced.
-                hazard = self.device_hazard.live
-                if self._refused_round:
-                    # Planning cost more than the round had left.
-                    break
-            merge = self._stage_merge(
-                iteration=iteration,
-                hazard=hazard,
-                fan_out_plan=fan_out_plan,
-            )
-            # A fan-out round already paid for these candidates, so they are measured before anything new is planned.
-            queued_lane = None if hazard or merge.diff else self._take_lane_candidate()
-            frame = _IterationFrame(iteration, session_sink, merge)
-            attempt = await self._source_attempt(
-                frame,
-                _IterationSupply(hazard, queued_lane, fan_out_plan),
-                agents=agents,
-                digest=digest,
-                callbacks=callbacks,
-            )
-            if attempt is None:
-                if self._refused_round:
-                    break
-                continue
-            await self._settle_locked_attempt(attempt, frame, callbacks=callbacks)
+            turn = IterationTurn(iteration, actors, digest, hazard, round_lanes)
+            if not await self._search_iteration(turn, agents=agents, callbacks=callbacks):
+                break
         self._persist_terminal_state()
         self._print_final_report()
         return self.results
+
+    async def _search_iteration(self, turn: IterationTurn, *, agents: LoopAgents, callbacks: LoopCallbacks) -> bool:
+        """Plan, implement, measure and settle one iteration; ``False`` ends the campaign."""
+        iteration, actors, hazard = turn.iteration, turn.actors, turn.hazard
+        session_sink: dict = {}
+        # What a fan-out round leaves this iteration holding, so the single-session path below spends it instead of
+        # buying it again.
+        fan_out_plan: HeldRound | None = None
+        if hazard is None and self._fan_out_ready(
+            turn.round_lanes, actors.agent_fn, actors.agent_factory, actors.orchestration_service
+        ):
+            fan_out_plan = await self._fan_out_round(
+                iteration=iteration,
+                orchestration_service=actors.orchestration_service,
+                agent_factory=actors.agent_factory,
+                lanes=turn.round_lanes,
+            )
+            # The round's own lanes share one device with the canonical measurement, so a lane whose teardown could
+            # not clear it has just refused this iteration -- whatever its siblings produced.
+            hazard = self.device_hazard.live
+            if self._refused_round:
+                # Planning cost more than the round had left.
+                return False
+        merge = self._stage_merge(iteration=iteration, hazard=hazard, fan_out_plan=fan_out_plan)
+        # A fan-out round already paid for these candidates, so they are measured before anything new is planned.
+        queued_lane = None if hazard or merge.diff else self._take_lane_candidate()
+        frame = _IterationFrame(iteration, session_sink, merge)
+        attempt = await self._source_attempt(
+            frame,
+            _IterationSupply(hazard, queued_lane, fan_out_plan),
+            agents=agents,
+            digest=turn.digest,
+            callbacks=callbacks,
+        )
+        if attempt is None:
+            return not self._refused_round
+        await self._settle_locked_attempt(attempt, frame, callbacks=callbacks)
+        return True
 
     async def _settle_locked_attempt(
         self,

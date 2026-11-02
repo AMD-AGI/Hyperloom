@@ -99,3 +99,24 @@ class ExperimentsLayout:
     def round(self, iteration: int) -> Path:
         """The planning directory of the round ``iteration`` opened: its lanes' plans and its ``ROUND_CONTEXT``."""
         return self.orchestration / iteration_tag(iteration)
+
+    @property
+    def search_tree(self) -> Path:
+        """A tree-strategy campaign's search state: its nodes, directions, attempts and the round in progress."""
+        return self.root / "search_tree.json"
+
+    @property
+    def tree_selections(self) -> Path:
+        return self.root / "tree_selection"
+
+    @property
+    def tree_rounds(self) -> Path:
+        return self.root / "tree_rounds"
+
+    def tree_selection(self, iteration: int) -> Path:
+        """What a tree round's slot selector was shown and answered, and the slots kept and dropped."""
+        return self.tree_selections / f"{iteration_tag(iteration)}.md"
+
+    def tree_round(self, iteration: int) -> Path:
+        """Everything a tree round produced: each start's plans, each slot's diff, measurement and lesson."""
+        return self.tree_rounds / iteration_tag(iteration)

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 from kernelforge.agent_backends import AgentRunResult
 from kernelforge.workflows.forge_loop.roles.contracts import (
@@ -220,6 +221,18 @@ def _partition(*grounds: str) -> str:
 
 GROUND_A = "chunk_intra.py: the MFMA issue schedule"
 GROUND_B = "chunk.py: the scale stream's staging"
+GROUND_C = "chunk_post.py: the epilogue's store"
+
+ASSIGNMENTS = (
+    'DEEPEN direction d001 "MFMA schedule": take its next step.',
+    "BRANCH: open a new direction at this node (none opened here).",
+    'BRANCH: open a new direction at this node, materially different from d001 "MFMA schedule".',
+)
+
+
+def _assigned(count: int) -> OrchestrationContext:
+    """A round whose caller already decided its ``count`` lanes."""
+    return replace(_context(), lane_assignments=ASSIGNMENTS[:count])
 
 
 JOINT_GROUND = "chunk_intra.py: the BLOCK_H tile and the num_warps/waves_per_eu/num_stages the launch passes with it"

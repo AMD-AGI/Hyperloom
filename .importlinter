@@ -192,6 +192,7 @@ forbidden_modules =
     kernelforge.workflows.forge_loop.policy
     kernelforge.workflows.forge_loop.preparation
     kernelforge.workflows.forge_loop.search
+    kernelforge.workflows.forge_loop.tree
     kernelforge.workflows.forge_loop.roles.agent_extras
     kernelforge.workflows.forge_loop.roles.analysis_evidence
     kernelforge.workflows.forge_loop.roles.prompt_view
@@ -439,5 +440,4 @@ ignore_imports =
     kernelforge.workflows.gemm_tune.dense_shapes -> kernelforge.workflows.gemm_tune.tuners._aiter_dense_common
     kernelforge.kernel_backends.fusion.prompts -> kernelforge.workflows.forge_fusion.harness_contract
     kernelforge.kernel_backends.fusion.prompts -> kernelforge.workflows.forge_fusion.validate
-    kernelforge.workflows.forge_loop.roles.specialists -> kernelforge.workflows.forge_loop.iteration.fanout
 unmatched_ignore_imports_alerting = error
