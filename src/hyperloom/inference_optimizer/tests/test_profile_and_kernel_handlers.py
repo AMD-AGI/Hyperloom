@@ -25,6 +25,7 @@ from hyperloom.orchestrator.kernel import request_handlers as krh
 from .conftest import seed_integrate_verdict, seed_kernel_keep
 from hyperloom.inference_optimizer.session import paths as session_paths
 from hyperloom.orchestrator.actions.executors import trace_analyze as ta
+from hyperloom.orchestrator.actions.executors import VLLM_PATCH_PROFILER_FIELDS
 from hyperloom.orchestrator.actions.executors.baseline import (
     BaselineExecutor,
     BenchmarkRunExecutor,
@@ -1065,6 +1066,8 @@ def test_materialize_profile_vllm_injects_tracelens_flags_when_patched(
     assert "--profiler-config.max_iterations 128" in extra, extra
     assert "--profiler-config.capture_torch_profiler True" in extra, extra
     assert "--profiler-config.detailed_trace_annotation True" in extra, extra
+    for field in VLLM_PATCH_PROFILER_FIELDS:
+        assert f"--profiler-config.{field} True" in extra, extra
     # Per-framework dispatch: the SGLang patcher must NOT run for a vLLM YAML.
     assert counts == {"vllm": 1, "sglang": 0}, counts
 
@@ -1087,6 +1090,7 @@ def test_materialize_profile_vllm_omits_tracelens_flags_when_patch_fails(
     assert "--profiler-config.delay_iterations 6080" in extra, extra
     assert "capture_torch_profiler" not in extra, extra
     assert "detailed_trace_annotation" not in extra, extra
+    assert not any(field in extra for field in VLLM_PATCH_PROFILER_FIELDS), extra
     assert envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] == "unavailable"
     assert envs["HYPERLOOM_PROFILE_DEGRADED_REASON"] == "tracelens_runtime_patch_unavailable"
     assert "TraceLens runtime patch unavailable" in caplog.text
