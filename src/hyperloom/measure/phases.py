@@ -212,6 +212,19 @@ class HostTimeline:
     def mark(self, name: str) -> None:
         self.marks[name] = self.clock()
 
+    def laps(self, since: str) -> dict[str, float]:
+        """The seconds each instant marked after ``since`` came after the one before it, by its name; empty before ``since``
+        is marked."""
+        start = self.marks.get(since)
+        if start is None:
+            return {}
+        later = sorted((at, name) for name, at in self.marks.items() if at >= start and name != since)
+        laps, previous = {}, start
+        for at, name in later:
+            laps[name] = round(at - previous, 3)
+            previous = at
+        return laps
+
     def compose(self, runner: Sequence[PhaseTiming]) -> tuple[PhaseTiming, ...]:
         """The attempt's phases: the sandbox starting, the runner's (or one wait where it stated none), what is left of the
         host's wait, the result landing and the sandbox closing.

@@ -90,6 +90,22 @@ def test_the_journal_records_the_sandbox_before_the_sheet_and_the_end_after(rig,
     assert r.backend.journal.records()[0].sandbox_id.startswith("lsb-")
 
 
+def test_the_journal_line_of_a_landing_says_how_long_each_of_its_steps_took(rig, tmp_path, monkeypatch) -> None:
+    r = rig()
+    put = r.archive.put_bundle
+
+    def slow_put(*args):
+        time.sleep(0.3)
+        return put(*args)
+
+    monkeypatch.setattr(r.archive, "put_bundle", slow_put)
+    _run(r, tmp_path)
+
+    landing = r.backend.journal.latest("req-1").extra["landing_sec"]
+    assert set(landing) == {"read_verified", "archived", "materialized", "jit_published", "rounds_read"}
+    assert landing["archived"] >= 0.3 > max(landing[step] for step in landing if step != "archived")
+
+
 def test_rounds_come_from_the_runners_rounds_file_when_it_lists_one(rig, tmp_path) -> None:
     r = rig()
     _, outcome = _run(r, tmp_path, fake_rounds="true")
