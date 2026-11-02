@@ -21,6 +21,12 @@ inherits a meta directory holding an ``aiter`` package is refused. A patch to ``
 
 Which copy each process of the server really imported is checked by the runner
 (:mod:`~hyperloom.measure.runner.import_outcome`), which watches the imports from the farm's ``site`` directory.
+
+TraceLens's profiling patch goes where a candidate's patches go, never into the image either. The render of a profile
+point lays it in a copy of the framework on its own host and names that copy on the server's ``PYTHONPATH``
+(``hyperloom.orchestrator.actions.executors._server_patcher``). Where the test is measured, a farm that rebuilt the
+framework gets the patch laid in its own files (:func:`lay_profile_patch`), and the copy the point names becomes this
+host's (:func:`place_host_copy`): a hosted run renders its points on another container, whose copy is not here.
 """
 
 from __future__ import annotations
@@ -39,10 +45,17 @@ import yaml
 from hyperloom.common.aiter_layout import image_aiter_meta
 from hyperloom.common.benchmark_config import is_magpie_agentx
 from hyperloom.common.outside_facts import AITER_META_DIR_ENV, AITER_META_MARKER_DIR, AITER_META_WHEEL_DIR
+from hyperloom.inference_optimizer import framework_registry
 from hyperloom.measure.jit.key import AITER_PACKAGE
 from hyperloom.measure.jit.native.laying import NativeLayError, SheetBuilds
 from hyperloom.measure.jit.native.record import BuildRecord
 from hyperloom.measure.spec import EnvEntry, EnvRoot
+from hyperloom.orchestrator.actions.executors import (
+    VLLM_PATCH_PROFILER_FIELDS,
+    ensure_patched_copy,
+    is_patched_copy,
+    lay_tracelens_patch,
+)
 from hyperloom.orchestrator.actions.executors.magpie_agentx import apply_native_runtime
 
 __all__ = [
@@ -53,10 +66,12 @@ __all__ = [
     "build_farm",
     "built_roots",
     "inherited_environment",
+    "lay_profile_patch",
     "locate_package",
     "patched_configs",
     "patches_aiter_sources",
     "place_farm",
+    "place_host_copies",
     "prepend_pythonpath",
     "server_environment",
     "server_python",
@@ -75,6 +90,7 @@ _CONFIGS_DIR = "configs"
 _RUNTIME_KIND = "runtime"
 _DELETE = "delete"
 _IMPORT_FILE = "import importlib, sys\nprint(importlib.import_module(sys.argv[1]).__file__)\n"
+_PYTHONPATH = "PYTHONPATH"
 
 #: How the farm lays a directory a package writes into at run time. ``linked``: real, its files links (a writer that
 #: renames a new file over a name replaces the link, not the image's file). ``empty``: real and empty. ``linked_tree``:
@@ -526,3 +542,99 @@ def _verify_aiter_meta(farm: Farm, envs: Mapping[str, Any]) -> None:
             f"the rebuilt aiter would be told {AITER_META_DIR_ENV}={value!r}, which holds no {AITER_META_MARKER_DIR}: "
             f"it would not find its sources and would not import"
         )
+
+
+# --- TraceLens's patch for a profile -----------------------------------------------------------------------------
+
+#: What the render of a profile point says of TraceLens's patch (``_profile_setup.write_tracelens_patch_status``), and
+#: the value it has when the point's server was rendered to run the patched framework.
+_PATCH_STATUS_ENV = "HYPERLOOM_TRACELENS_PATCH_STATUS"
+_PATCH_LAID = "ok"
+
+
+def _rendered_envs(config: Mapping[str, Any]) -> Mapping[str, Any]:
+    return (config.get("benchmark") or {}).get("envs") or {}
+
+
+def _asks_patched_server(config: Mapping[str, Any]) -> bool:
+    """Whether ``config`` asks its vLLM for a field only TraceLens's patch adds; an unpatched vLLM refuses its whole
+    command line."""
+    args = str(_rendered_envs(config).get("EXTRA_VLLM_ARGS", ""))
+    return any(f"--profiler-config.{field}" in args for field in VLLM_PATCH_PROFILER_FIELDS)
+
+
+def _profiled_package(config: Mapping[str, Any]) -> str | None:
+    """The framework package whose patched copy the server of ``config`` must import: that of a point rendered with
+    TraceLens's patch or asking its vLLM for a field only the patch adds; ``None`` for any other point."""
+    if _rendered_envs(config).get(_PATCH_STATUS_ENV) != _PATCH_LAID and not _asks_patched_server(config):
+        return None
+    framework = str((config.get("benchmark") or {}).get("framework") or "")
+    return framework_registry.python_package(framework) if framework_registry.is_supported(framework) else None
+
+
+def lay_profile_patch(farm: Farm | None, config: Mapping[str, Any]) -> None:
+    """Lay TraceLens's patch in the farm's copy of the framework the profile ``config`` runs, when the farm rebuilt it:
+    the server imports that copy.
+
+    Raises:
+        FarmError: The patch cannot be laid there and ``config`` asks its server for a field only the patch adds.
+    """
+    package = _profiled_package(config)
+    if farm is None or package is None or package not in farm.packages:
+        return
+    if not lay_tracelens_patch(package, farm.site) and _asks_patched_server(config):
+        raise FarmError(
+            f"the profile asks its server for {', '.join(VLLM_PATCH_PROFILER_FIELDS)}, which only TraceLens's patch "
+            f"adds, and the patch cannot be laid in the farm's {package}"
+        )
+
+
+def place_host_copies(points: Iterable[Path], work: Path) -> tuple[Path, ...]:
+    """The profile ``points``, each naming this host's patched copy of its framework (:func:`_place_host_copy`): one that
+    changes is written to ``work``, the others are kept as they are.
+
+    Raises:
+        FarmError: No copy can be laid on this host and a point asks its server for a field only the patch adds.
+    """
+    placed = []
+    for index, point in enumerate(points):
+        config = _loaded(point)
+        if _place_host_copy(config):
+            point = work / f"point_{index}.yaml"
+            point.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_UTF8)
+        placed.append(point)
+    return tuple(placed)
+
+
+def _place_host_copy(config: dict[str, Any]) -> bool:
+    """Name this host's patched copy of the framework on the server's ``PYTHONPATH`` in the profile ``config``: where its
+    render named its own copy, which is behind a farm and ahead of the installed framework, or last when it named none;
+    whether ``config`` changed. A point that needs no patch is left as it is."""
+    package = _profiled_package(config)
+    if package is None:
+        return False
+    patched = ensure_patched_copy(package)
+    if patched is None or patched.site is None:
+        if _asks_patched_server(config):
+            raise FarmError(
+                f"the profile asks vLLM for {', '.join(VLLM_PATCH_PROFILER_FIELDS)}, which only TraceLens's vLLM patch "
+                "adds, and the patch cannot be applied to this host's vLLM"
+            )
+        return False
+    envs = _launch_environment(config)
+    current = envs.get(_PYTHONPATH) if _PYTHONPATH in envs else os.environ.get(_PYTHONPATH, "")
+    placed = _with_copy(str(current or ""), patched.site)
+    if _PYTHONPATH in envs and placed == str(envs[_PYTHONPATH]):
+        return False
+    envs[_PYTHONPATH] = placed
+    return True
+
+
+def _with_copy(path: str, site: Path) -> str:
+    """``path`` with ``site`` in place of the first patched copy it names and without the others; last when it names
+    none."""
+    parts = [part for part in path.split(os.pathsep) if part]
+    copies = [index for index, part in enumerate(parts) if is_patched_copy(part)]
+    at = copies[0] if copies else len(parts)
+    kept = [part for part in parts if not is_patched_copy(part)]
+    return os.pathsep.join([*kept[:at], str(site), *kept[at:]])

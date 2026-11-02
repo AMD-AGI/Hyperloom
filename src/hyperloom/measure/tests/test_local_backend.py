@@ -19,6 +19,7 @@ import yaml
 
 from hyperloom.common.env import is_truthy
 from hyperloom.contracts.measurement import AccuracyValue, AttachmentRef
+from hyperloom.measure import farm as farm_module
 from hyperloom.measure import local
 from hyperloom.measure.local import SUPPORTED_KINDS, LocalMeasurementBackend, TestCallRefused
 from hyperloom.measure.points import AMBIENT_SHAPE_ENVS
@@ -29,6 +30,7 @@ from hyperloom.measure.tests._inferencex import CLIENT, CLIENT_PATH, LIBRARY, LI
 from hyperloom.orchestrator.actions.executors import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
+    PatchedServer,
     VariantResult,
 )
 from hyperloom.orchestrator.actions.executors._server_lifecycle import REUSE_PORT_DEFAULT
@@ -1122,29 +1124,61 @@ def _vllm_profile_point(directory: Path) -> Path:
     return point
 
 
-def test_a_profile_asking_for_patched_profiler_fields_patches_this_hosts_vllm_first(grid, tmp_path, monkeypatch):
-    patched = []
-    monkeypatch.setattr(local, "ensure_vllm_patched_for_tracelens", lambda: patched.append(True) or True)
+def _host_copy(monkeypatch, tmp_path: Path) -> tuple[Path, list[str]]:
+    """This host's patched copy of the profiled framework, and the packages a copy was laid for."""
+    site = tmp_path / "tmp" / "hyperloom-tracelens" / "fw-0123" / "site"
+    laid: list[str] = []
+    monkeypatch.setattr(farm_module, "ensure_patched_copy", lambda package: laid.append(package) or PatchedServer(site))
+    return site, laid
+
+
+def test_a_profile_asking_for_patched_profiler_fields_runs_this_hosts_patched_copy(grid, tmp_path, monkeypatch):
+    site, laid = _host_copy(monkeypatch, tmp_path)
     _with_trace(grid)
+    point = _vllm_profile_point(tmp_path)
+    accepted = point.read_text()
 
-    _run(_call(tmp_path, _vllm_profile_point(tmp_path), kind="profile"))
+    _run(_call(tmp_path, point, kind="profile"))
 
-    assert patched == [True] and grid.calls, "the server's own vLLM is patched before the rounds run"
+    assert laid == ["vllm"], "the copy is laid for the server's framework, never the installed one patched"
+    path = grid.configs[0]["benchmark"]["envs"]["PYTHONPATH"].split(os.pathsep)
+    assert path[-1] == str(site), "a point that names no copy gets this host's after what it inherits"
+    assert point.read_text() == accepted, "the accepted point is not rewritten"
+
+
+def test_a_profile_rendered_on_another_host_runs_this_hosts_copy_where_the_other_was(grid, tmp_path, monkeypatch):
+    site, laid = _host_copy(monkeypatch, tmp_path)
+    _with_trace(grid)
+    config = yaml.safe_load(_profile_point(tmp_path).read_text())
+    rendered = os.pathsep.join(["/farm/site", "/app/tmp/hyperloom-tracelens/sglang-gc-ab/site", "/tools/kernel_shape"])
+    config["benchmark"]["envs"].update({"HYPERLOOM_TRACELENS_PATCH_STATUS": "ok", "PYTHONPATH": rendered})
+    point = tmp_path / "rendered.yaml"
+    point.write_text(yaml.safe_dump(config), encoding="utf-8")
+
+    _run(_call(tmp_path, point, kind="profile"))
+
+    assert laid == ["sglang"]
+    assert grid.configs[0]["benchmark"]["envs"]["PYTHONPATH"] == os.pathsep.join(
+        ["/farm/site", str(site), "/tools/kernel_shape"]
+    ), "behind a farm, which carries its own patch, and ahead of the installed framework"
 
 
 def test_a_profile_asking_for_patched_profiler_fields_on_an_unpatchable_vllm_is_refused(grid, tmp_path, monkeypatch):
-    monkeypatch.setattr(local, "ensure_vllm_patched_for_tracelens", lambda: False)
+    monkeypatch.setattr(farm_module, "ensure_patched_copy", lambda package: None)
 
     with pytest.raises(TestCallRefused, match="only TraceLens's vLLM patch adds"):
         _run(_call(tmp_path, _vllm_profile_point(tmp_path), kind="profile"))
     assert grid.calls == []
 
 
-def test_a_profile_without_those_fields_does_not_touch_vllm(grid, tmp_path, monkeypatch):
-    monkeypatch.setattr(local, "ensure_vllm_patched_for_tracelens", lambda: pytest.fail("vLLM was patched"))
+def test_a_profile_rendered_without_the_patch_runs_as_it_was_rendered(grid, tmp_path, monkeypatch):
+    monkeypatch.setattr(farm_module, "ensure_patched_copy", lambda package: pytest.fail("a copy was laid"))
     _with_trace(grid)
+    point = _profile_point(tmp_path)
 
-    _run(_call(tmp_path, _profile_point(tmp_path), kind="profile"))
+    _run(_call(tmp_path, point, kind="profile"))
+
+    assert "PYTHONPATH" not in grid.configs[0]["benchmark"]["envs"], "nothing is added to the point"
 
 
 def test_a_test_that_does_not_profile_leaves_the_checkout_as_upstream_ships_it(grid, tmp_path):

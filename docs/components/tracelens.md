@@ -35,10 +35,12 @@ The orchestration runtime enters TraceLens through two paths:
   `profile` + `trace_analyze` pipeline that first profiles the workload with
   Magpie, then calls `trace_analyze_handler()` directly on the trace.
 
-Before profiling, Hyperloom can patch the active vLLM/SGLang server tree with
-TraceLens-specific runtime flags through
+Before profiling, Hyperloom lays TraceLens's runtime patch for vLLM/SGLang in a
+copy of the installed package on the host's local disk and puts that copy first
+on the profiled server's `PYTHONPATH`, through
 `src/hyperloom/orchestrator/actions/executors/_server_patcher.py` and the
-workload environment helpers. The generated report feeds the roofline ceilings
+workload environment helpers; the installed tree, which every other test and
+session imports, is never written. The generated report feeds the roofline ceilings
 and bottleneck list used to score candidate optimizations. See
 [Hyperloom optimization loop](../conceptual/optimization-loop.md).
 

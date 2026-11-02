@@ -19,7 +19,8 @@ from ._workload_envs import (
 )
 from ._grid_base import GridVariant, VariantResult
 from ._profile_setup import VLLM_PATCH_PROFILER_FIELDS
-from ._server_patcher import ensure_vllm_patched_for_tracelens
+from ._patch_laying import PatchedServer, is_patched_copy
+from ._server_patcher import ensure_patched_copy, lay_tracelens_patch
 from ._magpie_patcher import EVAL_OUTPUT_ENV, LM_EVAL_READY_FN, ensure_lm_eval_install_once
 from ._inferencex_patcher import (
     benchmark_serving_path_in,
@@ -53,7 +54,10 @@ from ._spec_decode_pin import (
 
 __all__ = [
     "VLLM_PATCH_PROFILER_FIELDS",
-    "ensure_vllm_patched_for_tracelens",
+    "PatchedServer",
+    "ensure_patched_copy",
+    "is_patched_copy",
+    "lay_tracelens_patch",
     "ensure_lm_eval_install_once",
     "EVAL_OUTPUT_ENV",
     "LM_EVAL_READY_FN",
