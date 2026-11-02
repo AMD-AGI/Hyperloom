@@ -24,11 +24,19 @@ one beyond them.
 
 Output goes to a numbered log file under the sandbox's root, not to a pipe, which an agent running for hours would
 fill.
+
+No command may write the image's installed frameworks (:func:`framework_protection`): each runs with them mounted
+read-only in a mount namespace of its own, or, on a host that gives a command none, under a
+:class:`~hyperloom_multibranch.specialist.framework_guard.FrameworkGuard` that restores them before the command starts,
+while it runs, once it and every process it started ended, and when the sandbox stops, and says what it restored in the
+logs of the commands that ran; a command whose frameworks neither can protect is refused. A command's end is its
+launcher's: a process the command left running in the background, or detached, still writes as the command.
 """
 
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import itertools
 import logging
@@ -48,6 +56,7 @@ from pathlib import Path
 from hyperloom.common.outside_facts import ROCR_VISIBLE_DEVICES_ENV
 from hyperloom.common.proctree import descendants, running
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
+from hyperloom.inference_optimizer.session.paths import tracelens_root
 from hyperloom.measure.compile import COMPONENT_LAYOUTS, UnsupportedComponentError, locate_installed_package
 from hyperloom.sandbox.launcher import LAUNCHER_SOURCE, StatusPipe, launcher_argv
 from hyperloom_multibranch.specialist.agent_onboarding import CommandResult
@@ -60,6 +69,12 @@ from hyperloom_multibranch.specialist.agent_watch import (
     revive,
     sandbox_pids,
     watch,
+)
+from hyperloom_multibranch.specialist.framework_guard import (
+    FrameworkGuard,
+    FrameworksUnguarded,
+    GuardedPackage,
+    PATROL_SECONDS,
 )
 
 logger = logging.getLogger(__name__)
@@ -82,9 +97,15 @@ TMP_PREFIX = "hyperloom-agent-"
 TAIL_BYTES = 64 * 1024
 #: The exit code a run that timed out reports, as ``timeout(1)`` does.
 TIMED_OUT = 124
+#: How often a command that ended is asked whether a process it left still runs: each asking walks ``/proc``.
+LEFT_POLL_SECONDS = 1.0
 CONFINED = ("pkill", "pgrep", "killall")
 #: The launchers this process started, by the root of their sandbox, so a kill reaps every one of them.
 _launched: dict[str, list[subprocess.Popen[bytes]]] = {}
+GUARDED_NOTE = (
+    "the image's installed frameworks are not mounted read-only on this host: what a command, or a process it left "
+    "running, writes into them is restored within seconds, and recorded with the command"
+)
 
 CONFINE_SCRIPT = """#!{python} -I
 # pkill, pgrep and killall confined to the processes of the caller's sandbox, the caller and its ancestors spared.
@@ -232,10 +253,50 @@ sys.exit(1 if missed else 0)
 """
 
 
+@dataclass(frozen=True)
+class FrameworkProtection:
+    """How sandbox commands are kept from writing the image's installed frameworks: ``read_only``, the packages each
+    command mounts read-only, or ``guard``, which restores them around each command; neither on a host where none is
+    installed."""
+
+    read_only: tuple[Path, ...] = ()
+    guard: FrameworkGuard | None = None
+
+
+@dataclass(frozen=True)
+class _Guarded:
+    """A command ``guard`` counts as running by ``ticket``, none without a guard; ``note`` is what its log says
+    first."""
+
+    guard: FrameworkGuard | None = None
+    ticket: int = 0
+    note: str = ""
+
+    def ended(self) -> None:
+        if self.guard is not None:
+            self.guard.ended(self.ticket)
+
+
+async def _restore(guard: FrameworkGuard | None, log: Path | None = None) -> None:
+    """Restore the frameworks ``guard`` protects, after a command ran: one that cannot be restored is an error of the
+    session's log, and of ``log``, and the next command is refused."""
+
+    if guard is None:
+        return
+    try:
+        await asyncio.to_thread(guard.check)
+    except FrameworksUnguarded as error:
+        logger.exception("the installed frameworks were not restored after a sandbox command")
+        if log is not None:
+            with log.open("a", encoding="utf-8") as out:
+                out.write(f"\n[hyperloom] {error}\n")
+
+
 @dataclass
 class LocalProcess:
     """A command started in a :class:`LocalAgentSandbox` whose processes carry ``marker``, run by the launcher
-    ``popen``, which says on ``status`` how the command ended; its output is in ``log``."""
+    ``popen``, which says on ``status`` how the command ended; its output is in ``log``. ``guard`` restores the
+    image's frameworks once the process is killed."""
 
     popen: subprocess.Popen[bytes]
     log: Path
@@ -243,6 +304,7 @@ class LocalProcess:
     grace_seconds: float = GRACE_SECONDS
     poll_seconds: float = POLL_SECONDS
     status: StatusPipe | None = None
+    guard: FrameworkGuard | None = None
     _code: int | None = field(default=None, init=False, repr=False)
 
     @property
@@ -269,6 +331,14 @@ class LocalProcess:
             self.popen.send_signal(signal.SIGKILL)
             self.popen.wait()
 
+    def ended(self) -> bool:
+        """Whether the command and every process it started ended, its launcher retired then."""
+
+        if self.returncode is None:
+            return False
+        self.retire()
+        return self.popen.poll() is not None
+
     async def output(self) -> str:
         return await asyncio.to_thread(read_tail, self.log)
 
@@ -280,6 +350,7 @@ class LocalProcess:
         if self.returncode is None and self.status is not None:
             self.status.close()
             self.status = None
+        await _restore(self.guard, self.log)
 
 
 @dataclass
@@ -288,7 +359,8 @@ class LocalAgentSandbox:
     ``python_path`` first; ``root`` is the sandbox's own directory, for its logs and wrappers.
     ``processes`` adopts every command it starts for ``branch``; ``base_env`` is ``os.environ`` when ``None``.
     ``niceness`` lowers every command's CPU priority, for a sandbox whose host work must not slow the tests beside it.
-    ``read_only`` are directories every command sees read-only (:func:`framework_read_only`)."""
+    ``frameworks`` keeps every command from writing the image's installed frameworks (:func:`framework_protection`);
+    the default protects none."""
 
     cards: tuple[int, ...]
     python_path: tuple[Path, ...]
@@ -299,8 +371,10 @@ class LocalAgentSandbox:
     grace_seconds: float = GRACE_SECONDS
     poll_seconds: float = POLL_SECONDS
     niceness: int = 0
-    read_only: tuple[Path, ...] = ()
+    frameworks: FrameworkProtection = field(default_factory=FrameworkProtection)
     _numbers: Iterator[int] = field(init=False, repr=False)
+    _told: bool = field(default=False, init=False, repr=False)
+    _guarding: set[asyncio.Task[None]] = field(default_factory=set, init=False, repr=False)
 
     def __post_init__(self) -> None:
         for name in (BIN_DIR, LOG_DIR):
@@ -350,24 +424,31 @@ class LocalAgentSandbox:
         return merged
 
     async def run(self, command: str, cwd: Path, env: Mapping[str, str], timeout: float) -> CommandResult:
-        """Run ``command`` to its end or ``timeout``, at which every process of the sandbox is killed."""
+        """Run ``command`` to its end or ``timeout``, at which every process of the sandbox is killed.
 
-        process = self._spawn("run", command, cwd, env)
-        until = time.monotonic() + timeout
+        Raises :class:`~hyperloom_multibranch.specialist.framework_guard.FrameworksUnguarded` when the image's
+        frameworks can be neither mounted read-only nor restored."""
+
+        log = self._log("run")
+        guarded = await self._guarded(command, log)
+        process = self._spawn_guarded(command, cwd, env, guarded, log)
         try:
-            while process.returncode is None and time.monotonic() < until:
-                await asyncio.sleep(self.poll_seconds)
-        except asyncio.CancelledError:
-            await process.kill()
-            raise
-        if process.returncode is None:
-            await process.kill()
+            code = await self._waited(process, timeout)
+        finally:
+            await self._ran(process, guarded)
+        if code is None:
             return CommandResult(TIMED_OUT, f"{read_tail(process.log)}\n`{command}` timed out after {timeout:g} s")
-        process.retire()
-        return CommandResult(process.returncode, read_tail(process.log))
+        return CommandResult(code, read_tail(process.log))
 
     async def start(self, command: str, cwd: Path, env: Mapping[str, str]) -> LocalProcess:
-        return self._spawn("start", command, cwd, env)
+        """Start ``command``; raises what :meth:`run` raises."""
+
+        log = self._log("start")
+        guarded = await self._guarded(command, log)
+        process = self._spawn_guarded(command, cwd, env, guarded, log)
+        if guarded.guard is not None:
+            self._follow(process, guarded)
+        return process
 
     def alive(self) -> bool:
         """Whether any process of the sandbox is left, its launchers aside."""
@@ -383,20 +464,91 @@ class LocalAgentSandbox:
     async def stop(self) -> None:
         """Kill every process of the sandbox, as :meth:`LocalProcess.kill` does."""
         await kill_marked(str(self.root), self.grace_seconds, self.poll_seconds, partial(_reap, str(self.root)))
+        await _restore(self.frameworks.guard)
 
-    def _spawn(self, kind: str, command: str, cwd: Path, env: Mapping[str, str]) -> LocalProcess:
-        log = self.root / LOG_DIR / f"{next(self._numbers):04d}-{kind}.log"
+    async def _waited(self, process: LocalProcess, timeout: float) -> int | None:
+        """``process``'s exit code, or ``None`` once it ran ``timeout`` and was killed."""
+
+        until = time.monotonic() + timeout
+        try:
+            while process.returncode is None and time.monotonic() < until:
+                await asyncio.sleep(self.poll_seconds)
+        except asyncio.CancelledError:
+            await process.kill()
+            raise
+        if process.returncode is None:
+            await process.kill()
+            return None
+        process.retire()
+        return process.returncode
+
+    async def _guarded(self, command: str, log: Path) -> _Guarded:
+        """The frameworks restored before ``command``, whose output goes to ``log``, starts, and it counted as
+        running."""
+
+        guard = self.frameworks.guard
+        if guard is None:
+            return _Guarded()
+        restored = await asyncio.to_thread(guard.check)
+        said = [] if self._told else [GUARDED_NOTE]
+        self._told = True
+        if restored is not None:
+            said.append(f"before this command: {restored.describe()}")
+        note = "".join(f"[hyperloom] {line}\n" for line in said)
+        return _Guarded(guard, guard.started(self.branch, command, log), note)
+
+    def _spawn_guarded(
+        self, command: str, cwd: Path, env: Mapping[str, str], guarded: _Guarded, log: Path
+    ) -> LocalProcess:
+        try:
+            return self._spawn(log, command, cwd, env, guarded.note)
+        except BaseException:
+            guarded.ended()
+            raise
+
+    async def _ran(self, process: LocalProcess, guarded: _Guarded) -> None:
+        """Restore the frameworks once a run's command ended; the command counts as running while a process it left
+        does."""
+
+        if guarded.guard is None:
+            return
+        if process.popen.poll() is None:
+            self._follow(process, guarded)
+        else:
+            guarded.ended()
+        await _restore(guarded.guard, process.log)
+
+    def _follow(self, process: LocalProcess, guarded: _Guarded) -> None:
+        task = asyncio.get_running_loop().create_task(self._guard_until_ended(process, guarded))
+        self._guarding.add(task)
+        task.add_done_callback(self._guarding.discard)
+
+    async def _guard_until_ended(self, process: LocalProcess, guarded: _Guarded) -> None:
+        """Count ``process`` as running until it and every process it started ended, then restore the frameworks.
+        Cancelled, it leaves the command running, so the guard's checks go on while its processes may write."""
+
+        while not process.ended():
+            await asyncio.sleep(self.poll_seconds if process.returncode is None else LEFT_POLL_SECONDS)
+        guarded.ended()
+        await _restore(guarded.guard, process.log)
+
+    def _log(self, kind: str) -> Path:
+        return self.root / LOG_DIR / f"{next(self._numbers):04d}-{kind}.log"
+
+    def _spawn(self, log: Path, command: str, cwd: Path, env: Mapping[str, str], note: str = "") -> LocalProcess:
         ended = watch(self.root, self.cards)
         if ended is not None:
             logger.warning("%s", _restarted(ended))
         argv = ["bash", "-c", command]
         if self.niceness:
             argv = ["nice", "-n", str(self.niceness), *argv]
-        if self.read_only:
-            argv = read_only_argv(self.read_only, argv)
+        if self.frameworks.read_only:
+            argv = read_only_argv(self.frameworks.read_only, argv)
         read_fd, write_fd = os.pipe()
         try:
             with log.open("ab") as out:
+                out.write(note.encode())
+                out.flush()
                 popen = subprocess.Popen(
                     launcher_argv(sys.executable, write_fd, argv),
                     cwd=cwd,
@@ -418,7 +570,15 @@ class LocalAgentSandbox:
                 self.processes.adopt(popen.pid, branch=self.branch, argv=argv)
             except ValueError:
                 logger.warning("`%s` of %s ended before the process registry took it over", command, self.branch)
-        return LocalProcess(popen, log, str(self.root), self.grace_seconds, self.poll_seconds, StatusPipe(read_fd))
+        return LocalProcess(
+            popen,
+            log,
+            str(self.root),
+            self.grace_seconds,
+            self.poll_seconds,
+            StatusPipe(read_fd),
+            self.frameworks.guard,
+        )
 
     def _base(self) -> Mapping[str, str]:
         return os.environ if self.base_env is None else self.base_env
@@ -430,24 +590,40 @@ def read_only_argv(paths: tuple[Path, ...], argv: list[str]) -> list[str]:
     return ["unshare", "--mount", "--propagation", "private", "--", *script]
 
 
-def framework_read_only() -> tuple[Path, ...]:
-    """The installed framework packages of this image a sandbox command must not write, or none when this host cannot
-    give a command a mount namespace of its own (not root, or no ``unshare``), which is logged."""
-    probe = ["unshare", "--mount", "--propagation", "private", "--", "true"]
-    try:
-        permitted = shutil.which("unshare") is not None and subprocess.run(probe, capture_output=True).returncode == 0
-    except OSError:
-        permitted = False
-    if not permitted:
-        logger.warning("sandboxes cannot mount the image's frameworks read-only on this host: they stay writable")
-        return ()
-    paths = []
+@functools.cache
+def framework_protection() -> FrameworkProtection:
+    """The protection of :data:`READ_ONLY_FRAMEWORKS` installed in this image: read-only mounts where this host gives a
+    command a mount namespace of its own, else the guard, one for every sandbox of this process, which is logged as
+    an error since a command can then write the packages until the guard's next check."""
+
+    packages = []
     for name in READ_ONLY_FRAMEWORKS:
+        layout = COMPONENT_LAYOUTS[name]
         try:
-            paths.append(locate_installed_package(COMPONENT_LAYOUTS[name]).path)
+            packages.append(GuardedPackage(name, locate_installed_package(layout).path, layout.generated))
         except UnsupportedComponentError:
             continue
-    return tuple(paths)
+    if not packages:
+        return FrameworkProtection()
+    if mount_namespaces():
+        return FrameworkProtection(read_only=tuple(package.path for package in packages))
+    logger.error(
+        "sandbox commands get no mount namespace on this host, so %s cannot be mounted read-only: what a command "
+        "writes there is restored within %g s and logged with the command",
+        ", ".join(str(package.path) for package in packages),
+        PATROL_SECONDS,
+    )
+    return FrameworkProtection(guard=FrameworkGuard(tuple(packages), profile_patches=tracelens_root()))
+
+
+def mount_namespaces() -> bool:
+    """Whether this host gives a command a mount namespace of its own: root, and ``unshare`` permitted."""
+
+    probe = ["unshare", "--mount", "--propagation", "private", "--", "true"]
+    try:
+        return shutil.which("unshare") is not None and subprocess.run(probe, capture_output=True).returncode == 0
+    except OSError:
+        return False
 
 
 def _reap(root: str) -> None:
@@ -471,12 +647,15 @@ def read_tail(log: Path, size: int = TAIL_BYTES) -> str:
 
 __all__ = [
     "CONFINE_SCRIPT",
+    "GUARDED_NOTE",
     "READ_ONLY_FRAMEWORKS",
     "TAIL_BYTES",
     "TIMED_OUT",
+    "FrameworkProtection",
     "LocalAgentSandbox",
     "LocalProcess",
-    "framework_read_only",
+    "framework_protection",
+    "mount_namespaces",
     "read_only_argv",
     "read_tail",
 ]

@@ -35,7 +35,7 @@ from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind
 from hyperloom_multibranch.contracts.toolbox import BranchLease, LeaseCharge
 from hyperloom_multibranch.specialist.agent_onboard import cli_onboard
 from hyperloom_multibranch.specialist.agent_onboarding import AgentSandbox, AgentSpec, OnboardingSetup
-from hyperloom_multibranch.specialist.agent_sandbox import LocalAgentSandbox, framework_read_only
+from hyperloom_multibranch.specialist.agent_sandbox import FrameworkProtection, LocalAgentSandbox, framework_protection
 from hyperloom_multibranch.specialist.agent_session import AgentCommand, BranchPlace, Processes, SessionBlackboard
 from hyperloom_multibranch.specialist.agent_spend import AgentSpend
 from hyperloom_multibranch.specialist.autonomous_session import AGENT_DIR, AutonomousSession, AutonomousSetup
@@ -80,15 +80,16 @@ class AgentSandboxes(Protocol):
 
 @dataclass(frozen=True)
 class LocalAgentSandboxes:
-    """Sandboxes on this host, every process joining ``processes``, with the image's installed frameworks read-only."""
+    """Sandboxes on this host, every process joining ``processes``, with the image's installed frameworks protected
+    (:func:`~hyperloom_multibranch.specialist.agent_sandbox.framework_protection`)."""
 
     processes: Processes
-    read_only: tuple[Path, ...] = field(default_factory=framework_read_only)
+    frameworks: FrameworkProtection = field(default_factory=framework_protection)
 
     def sandbox(self, branch: str, place: BranchPlace, source: Path, lease: BranchLease) -> AgentSandbox:
         base_env = {**os.environ, **lease.env}
         return LocalAgentSandbox(
-            lease.gpu_ids, (source,), lease.root, self.processes, branch, base_env, read_only=self.read_only
+            lease.gpu_ids, (source,), lease.root, self.processes, branch, base_env, frameworks=self.frameworks
         )
 
     def claude_config(self, place: BranchPlace) -> Path:

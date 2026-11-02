@@ -15,7 +15,13 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom_multibranch.specialist.agent_sandbox import TIMED_OUT, LocalAgentSandbox, read_only_argv
+from hyperloom_multibranch.specialist.agent_sandbox import (
+    TIMED_OUT,
+    FrameworkProtection,
+    LocalAgentSandbox,
+    mount_namespaces,
+    read_only_argv,
+)
 from hyperloom_multibranch.specialist.agent_watch import MARKER, marked_pids
 
 BASE = {
@@ -398,18 +404,11 @@ def test_read_only_argv_mounts_each_path_before_running_the_command() -> None:
     assert argv[-6:] == ["/img/sglang", "/img/vllm", "--", "bash", "-c", "x"]
 
 
-def _mount_namespaces() -> bool:
-    try:
-        return subprocess.run(["unshare", "--mount", "--propagation", "private", "--", "true"]).returncode == 0
-    except OSError:
-        return False
-
-
-@pytest.mark.skipif(not _mount_namespaces(), reason="this host gives no process a mount namespace of its own")
+@pytest.mark.skipif(not mount_namespaces(), reason="this host gives no process a mount namespace of its own")
 def test_a_read_only_framework_cannot_be_written_from_the_sandbox_and_stays_writable_outside(tmp_path: Path) -> None:
     framework = tmp_path / "framework"
     framework.mkdir()
-    sandbox = replace(_sandbox(tmp_path), read_only=(framework,))
+    sandbox = replace(_sandbox(tmp_path), frameworks=FrameworkProtection(read_only=(framework,)))
     done = asyncio.run(sandbox.run(f"touch {framework}/edited; touch {tmp_path}/beside", tmp_path, {}, 10))
 
     assert "Read-only file system" in done.output

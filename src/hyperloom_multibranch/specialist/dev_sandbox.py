@@ -62,8 +62,9 @@ from hyperloom_multibranch.contracts.toolbox import (
     RequestRejected,
 )
 from hyperloom_multibranch.specialist.agent_onboarding import AgentProcess, AgentSandbox
-from hyperloom_multibranch.specialist.agent_sandbox import LocalAgentSandbox, framework_read_only
+from hyperloom_multibranch.specialist.agent_sandbox import LocalAgentSandbox, framework_protection
 from hyperloom_multibranch.specialist.agent_session import Processes
+from hyperloom_multibranch.specialist.framework_guard import FrameworksUnguarded
 from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.remote_sandbox import RemoteAgentSandbox, forwarded_env
 from hyperloom_multibranch.specialist.tools import WorktreeFor
@@ -337,12 +338,18 @@ class DevLeases:
     async def run(self, branch: str, command: str, cwd: str | None, timeout_s: float) -> Ran:
         held = self._touch(branch)
         timeout = min(timeout_s, self._limits.run_s)
-        done = await held.sandbox.run(command, _cwd(held, cwd), _caches(held.sandbox.cache_root), timeout)
+        try:
+            done = await held.sandbox.run(command, _cwd(held, cwd), _caches(held.sandbox.cache_root), timeout)
+        except FrameworksUnguarded as error:
+            raise DevRefused("frameworks_unguarded", str(error)) from error
         return Ran(done.returncode, done.output)
 
     async def start(self, branch: str, command: str, cwd: str | None) -> Started:
         held = self._touch(branch)
-        process = await held.sandbox.start(command, _cwd(held, cwd), _caches(held.sandbox.cache_root))
+        try:
+            process = await held.sandbox.start(command, _cwd(held, cwd), _caches(held.sandbox.cache_root))
+        except FrameworksUnguarded as error:
+            raise DevRefused("frameworks_unguarded", str(error)) from error
         number = len(held.processes) + 1
         held.processes[number] = process
         return Started(number)
@@ -635,9 +642,9 @@ def local_dev_sandboxes(
     worktrees: WorktreeFor, processes: Processes | None, limits: DevLimits = DevLimits()
 ) -> SandboxFor:
     """Sandboxes on this host, importing the source of every component the branch's worktree holds, with the image's
-    installed frameworks read-only."""
+    installed frameworks protected."""
 
-    read_only = framework_read_only()
+    frameworks = framework_protection()
 
     def sandbox(branch: str, lease: BranchLease) -> LocalAgentSandbox:
         base_env = {**os.environ, **lease.env}
@@ -649,7 +656,7 @@ def local_dev_sandboxes(
             branch,
             base_env,
             niceness=limits.niceness,
-            read_only=read_only,
+            frameworks=frameworks,
         )
 
     return sandbox
