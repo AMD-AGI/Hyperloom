@@ -59,7 +59,7 @@ from hyperloom.measure.surface import measurement_envs
 from hyperloom_multibranch.specialist.agent_manifest import ConfigSource, read_field
 from hyperloom_multibranch.specialist.arbor_adapter import EVAL_ENVS
 from hyperloom_multibranch.specialist.worktree import Upstream
-from hyperloom_multibranch.toolbox.kernel_artifacts import image_aiter_configs
+from hyperloom.measure.framework.base import image_configs
 
 #: Stores a component's patch text and returns its reference, as ``ExperimentRepo.store_patch`` does.
 PatchStore = Callable[[str, str], Awaitable[PatchRef]]
@@ -94,7 +94,7 @@ def _image_tables() -> tuple[PurePosixPath, ...]:
     """Where the image keeps aiter's default tables: the installed aiter's (a vLLM image's site-packages) and an SGLang
     image's, either of which a keep's aiter variable may name."""
 
-    installed = PurePosixPath(image_aiter_configs().as_posix())
+    installed = PurePosixPath(image_configs().as_posix())
     return tuple(dict.fromkeys((installed, PurePosixPath(SGLANG_IMAGE_AITER_CONFIGS))))
 
 
@@ -121,7 +121,8 @@ class KeptChange:
     variables the agent runs with that the measurement sets itself (workload, evaluation, request), left out of
     ``envs``; ``disabled``, each server flag removed from ``server_args`` because a variable of ``envs`` needs it off
     (:data:`FLAG_CONFLICTS`), with that variable's setting; ``removed``, each flag of the launch the framework resolves
-    that the agent runs without, or that ``disabled`` names, which ``server_args`` cannot drop."""
+    that the agent runs without, or that ``disabled`` names, which ``server_args`` cannot drop; ``outside``, the files
+    of its own change left out as outside the component (its scratch)."""
 
     seq: int
     source_patch: str
@@ -133,6 +134,7 @@ class KeptChange:
     dropped: Mapping[str, str] = field(default_factory=dict)
     disabled: Mapping[str, str] = field(default_factory=dict)
     removed: tuple[str, ...] = ()
+    outside: tuple[str, ...] = ()
 
 
 def without_conflicts(kept: KeptChange, inherited: Collection[str] = ()) -> KeptChange:
@@ -364,8 +366,10 @@ def _said(keep: Mapping[str, object]) -> str:
 
 
 def _patch(directory: Path, name: str) -> str:
+    # No newline translation: a lone CR in an added file (a progress bar in a log) would otherwise split its line.
     try:
-        return (directory / name).read_text(encoding="utf-8")
+        with (directory / name).open(encoding="utf-8", newline="") as text:
+            return text.read()
     except (OSError, UnicodeDecodeError) as error:
         raise KeptChangeError(f"{directory.name}/{name} cannot be read: {error}") from error
 

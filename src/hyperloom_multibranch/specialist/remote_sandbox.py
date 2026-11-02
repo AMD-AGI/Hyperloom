@@ -252,6 +252,12 @@ class RemoteAgentSandbox:
     _alive_at: float = field(default=-math.inf, init=False, repr=False)
     _refresh: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
 
+    @property
+    def cache_root(self) -> Path:
+        """Where the sandbox's JIT and kernel caches go: below :attr:`root`, the only disk the remote sandbox and this
+        host share."""
+        return self.root / "cache"
+
     def __post_init__(self) -> None:
         for name in (BIN_DIR, LOG_DIR, RUN_DIR, HOME_DIR, CACHE_DIR):
             (self.root / name).mkdir(parents=True, exist_ok=True)

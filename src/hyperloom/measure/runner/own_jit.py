@@ -30,7 +30,7 @@ from hyperloom.measure.socket import TestCall
 
 __all__ = ["OWN_AITER_JIT_DIR", "own_aiter_jit", "point_configs", "server_environments"]
 
-#: The directory below the test's work directory. Not below the cache's private root, which seeding empties.
+#: The directory below the test's compile directory, beside the cache's private root, not below it: seeding empties that.
 OWN_AITER_JIT_DIR = "aiter_jit"
 _TABLE_PREFIX = "AITER_CONFIG_"
 _UTF8 = "utf-8"

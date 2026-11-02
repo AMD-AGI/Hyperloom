@@ -198,16 +198,14 @@ class LocalCards:
     def toolbox(
         self, setup: PeerSetup, blackboard: LocalBlackboard, acceptance: AcceptanceSetup, spec: SpecContext
     ) -> RealToolbox:
-        from hyperloom_multibranch.toolbox.kernel_artifacts import image_aiter_configs
+        from hyperloom.measure.framework.base import image_configs
         from hyperloom_multibranch.toolbox.local_hosted import LocalOptions, LocalSession, build_local_toolbox
 
         layout = setup.layout
         session = LocalSession(layout.toolbox, layout.session_id, self.cards, setup.workload.tp)
         # The tests read private copies of the tables of the aiter this machine's servers import (a vLLM image's
         # site-packages, not an SGLang image's workspace), or a keep that adds rows to a default table is refused.
-        options = LocalOptions(
-            timeout_sec=attempt_timeout_sec(setup.workload), framework_configs=str(image_aiter_configs())
-        )
+        options = LocalOptions(timeout_sec=attempt_timeout_sec(setup.workload), framework_configs=str(image_configs()))
         return build_local_toolbox(session, blackboard, acceptance, spec, options=options)
 
 

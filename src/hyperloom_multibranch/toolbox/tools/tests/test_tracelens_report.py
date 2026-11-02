@@ -26,7 +26,7 @@ import pytest
 from hyperloom_multibranch.contracts.blackboard.records import ToolResultPointer
 from hyperloom_multibranch.toolbox.tools import JobStatus, ToolJobs, ToolRequest, roofline, tracelens_tool
 from hyperloom_multibranch.toolbox.tools import tracelens_report as report
-from hyperloom_multibranch.toolbox.tools.op_shares import DEGRADED_NOTICE
+from hyperloom_multibranch.toolbox.tools.op_shares import DEGRADED_NOTICE, KERNEL_SHARES_NOTICE
 from hyperloom_multibranch.toolbox.tools.tests import final_probe as probe
 from hyperloom_multibranch.toolbox.tools.tests.sinks import RecordingSink
 
@@ -343,9 +343,12 @@ async def test_a_request_naming_the_report_route_gets_it_whatever_else_would_hav
     assert status is JobStatus.SUCCEEDED and rig.agent_calls == [] and PAGED_ATTENTION in pointer.op_shares
 
 
-async def test_a_graph_collapsed_report_gets_the_degraded_fallback_and_no_shares(
+async def test_a_graph_collapsed_report_gets_the_degraded_fallback_and_keeps_the_windows_kernel_shares(
     rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """TraceLens cannot map a graph replay's kernels to ops, but the window's own check found its kernels there: the
+    kernel shares stand, marked as kernel shares."""
+
     def fallback(csv: Path, fraction: float) -> str:
         return f"# Deterministic Fallback Analysis {fraction}\n"
 
@@ -360,7 +363,8 @@ async def test_a_graph_collapsed_report_gets_the_degraded_fallback_and_no_shares
     _module(monkeypatch, "TraceLens.Agent.Analysis.utils.deterministic_fallback", render_fallback_report=fallback)
     _module(monkeypatch, "TraceLens.Agent.Analysis.post_processing", render_analysis_json=analysis_json)
     status, pointer, record = await _run(tmp_path, probe.GRADED, rig)
-    assert status is JobStatus.SUCCEEDED and not pointer.op_shares and DEGRADED_NOTICE in pointer.summary
+    assert status is JobStatus.SUCCEEDED and pointer.op_shares and DEGRADED_NOTICE not in pointer.summary
+    assert KERNEL_SHARES_NOTICE in pointer.summary and "deterministic-fallback" in pointer.summary
     assert record["result"]["graph_under_recorded"] is True
     assert Path(record["result"]["analysis_md_path"]).read_text(encoding="utf-8").startswith("# Deterministic Fallback")
 

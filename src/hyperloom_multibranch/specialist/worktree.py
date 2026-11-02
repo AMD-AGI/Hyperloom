@@ -33,6 +33,15 @@ from hyperloom.measure.compile import (
 from hyperloom_multibranch.contracts.sources import NativeTree, SourceRoot, meta_sections, source_roots
 
 #: Built files a text patch can never change.
+#: The file in a base's git directory that names the paths each worktree links rather than holds.
+LINKED_PATHS = "hyperloom-third-party"
+#: A Python extension module (``_C.abi3.so``, ``ops.cpython-312-x86_64-linux-gnu.so``): what importing the package
+#: from a worktree needs of its build. Other libraries (aiter's JIT modules) stay out, so a patched source is rebuilt.
+_EXTENSION = re.compile(r"\.(abi3|cpython-[^.]+)\.so$")
+#: Where in a base's git directory the copies of those trees go.
+THIRD_PARTY_COPY = "hyperloom-third-party-trees"
+_EXCLUDE = ":(exclude)"
+_DIFF_HEADER = re.compile(r'^diff --git "?a/(?P<old>.+?)"? "?b/(?P<new>.+?)"?\r?\n?$')
 SKIPPED = ("__pycache__", "*.pyc", "*.pyo", "*.so", "*.a", "*.o", "*.co", "*.hsaco")
 BASE_BRANCH = "installed"
 HEAD_SUBJECT = "head "
@@ -141,6 +150,7 @@ class SourceBase:
         self.path.mkdir(parents=True)
         _git(self.path, "init", f"--initial-branch={BASE_BRANCH}")
         excluded = list(SKIPPED)
+        links: list[tuple[str, str]] = []
         for component in components:
             layout = self._layout(component)
             package, *metas = source_roots(layout, _with_checkout(component, self._locator(layout), layout))
@@ -151,19 +161,32 @@ class SourceBase:
                 shutil.rmtree(target)
             shutil.copytree(package.path, target, ignore=_ignore(package.path, layout.generated))
             excluded += [f"/{package.prefix}/{built}/" for built in layout.generated]
+            links += _extensions(package, layout.generated)
             for meta in (meta for meta in metas if meta.path.is_dir()):
                 shutil.copytree(meta.path, self.path / meta.prefix, ignore=_ignore(meta.path, ()))
+            third_party = _third_party(metas)
+            if third_party is not None:
+                prefix, installed = third_party
+                copy = self.path / ".git" / THIRD_PARTY_COPY / prefix
+                shutil.copytree(installed, copy, symlinks=True, ignore=_ignore(installed, ()))
+                links.append((prefix.as_posix(), str(copy)))
+                excluded.append(f"/{prefix.as_posix()}")
             native = self._native.get(component)
             if native is not None:
                 self._lay_native(native.root, (package, *metas))
         (self.path / ".git" / "info").mkdir(exist_ok=True)
         (self.path / ".git" / "info" / "exclude").write_text("".join(f"{line}\n" for line in excluded))
+        (self.path / ".git" / LINKED_PATHS).write_text("".join(f"{prefix}\t{target}\n" for prefix, target in links))
         _commit_all(self.path, BASE_BRANCH)
 
     def worktree(self, branch: str, path: Path) -> BranchWorktree:
         """The worktree of ``branch`` at ``path``, added at the installed packages the first time."""
         if not path.exists():
             _git(self.path, "worktree", "add", "-b", f"mb/{branch}", str(path), BASE_BRANCH)
+        for prefix, target in linked_paths(path):
+            if not (path / prefix).exists():
+                (path / prefix).parent.mkdir(parents=True, exist_ok=True)
+                (path / prefix).symlink_to(target)
         return BranchWorktree(path, self._layouts, self._native)
 
     def _lay_native(self, native: SourceRoot, laid: Sequence[SourceRoot]) -> None:
@@ -179,6 +202,55 @@ class SourceBase:
         if layout is None:
             raise UnsupportedComponentError(f"{component} has no package layout; its source cannot be laid out")
         return layout
+
+
+def _file_sections(patch: str) -> list[tuple[tuple[str, ...], str]]:
+    """``patch`` cut at each ``diff --git`` header: each file's paths (old, new) and its text, line ends kept."""
+    sections: list[tuple[tuple[str, ...], list[str]]] = []
+    for line in patch.splitlines(keepends=True):
+        header = _DIFF_HEADER.match(line)
+        if header:
+            sections.append(((header["old"], header["new"]), [line]))
+        elif sections:
+            sections[-1][1].append(line)
+    return [(names, "".join(lines)) for names, lines in sections]
+
+
+def _within(path: str, trees: Sequence[str]) -> bool:
+    return any(path == tree or path.startswith(f"{tree}/") for tree in trees)
+
+
+def linked_paths(worktree: Path) -> list[tuple[str, str]]:
+    """The paths the worktree at ``worktree`` links rather than holds, as its source base recorded them: ``3rdparty``
+    trees from the base's copies (:func:`_third_party`) and compiled extensions from the installed package
+    (:func:`_extensions`)."""
+    common = Path(_git(worktree, "rev-parse", "--path-format=absolute", "--git-common-dir").strip())
+    links = common / LINKED_PATHS
+    lines = links.read_text().splitlines() if links.exists() else []
+    return [(prefix, target) for prefix, target in (line.split("\t") for line in lines)]
+
+
+def _extensions(package: SourceRoot, generated: Sequence[str]) -> list[tuple[str, str]]:
+    """``package``'s compiled Python extensions, ``(path in a worktree, installed file)``: the worktree holds none, as a
+    patch never carries a build, and without them its package cannot be imported (vLLM's ``_C``). They are binaries a
+    branch never edits, so each links the installed file."""
+    built = [package.path / path for path in generated]
+    return [
+        (f"{package.prefix}/{path.relative_to(package.path).as_posix()}", str(path))
+        for path in sorted(package.path.rglob("*.so"))
+        if _EXTENSION.search(path.name) and not any(root in path.parents for root in built)
+    ]
+
+
+def _third_party(metas: Sequence[SourceRoot]) -> tuple[PurePosixPath, Path] | None:
+    """The checkout's ``3rdparty`` tree (CK and its kind), the headers a JIT build of the meta trees includes:
+    ``(path in a worktree, installed tree)``, or ``None`` without one. A worktree links a copy the base keeps, never
+    the installed tree, which every test builds against: an edit through the link must stay in the session. It is
+    linked, not laid out, as it is large, never patched, and a patch must not see it."""
+    if not metas:
+        return None
+    tree = metas[0].path.parent / "3rdparty"
+    return (PurePosixPath(metas[0].prefix).parent / "3rdparty", tree) if tree.is_dir() else None
 
 
 def _ignore(root: Path, built: Sequence[str]) -> Callable[[str, list[str]], set[str]]:
@@ -322,7 +394,22 @@ class BranchWorktree:
 
     def _reset(self, commit: str) -> None:
         _git(self.path, "reset", "--hard", commit)
-        _git(self.path, "clean", "-fdx", _QUIET)
+        kept = [f"--exclude=/{prefix}" for prefix, _target in linked_paths(self.path)]
+        _git(self.path, "clean", "-fdx", _QUIET, *kept)
+
+    def source_only(self, component: str, patch: str) -> tuple[str, tuple[str, ...]]:
+        """``patch`` less its files outside ``component``'s paths, and the paths it left out: an agent's scratch (logs,
+        probes, core dumps) committed beside its change never reaches a recipe, nor the apply that builds one."""
+        paths = self._paths(component)
+        own = [path for path in paths if not path.startswith(_EXCLUDE)]
+        nested = [path.removeprefix(_EXCLUDE) for path in paths if path.startswith(_EXCLUDE)]
+        kept, outside = [], []
+        for names, section in _file_sections(patch):
+            if any(_within(name, own) and not _within(name, nested) for name in names):
+                kept.append(section)
+            else:
+                outside.append(names[-1])
+        return "".join(kept), tuple(outside)
 
     def _staged_diff(self, component: str, *options: str) -> str:
         paths = self._paths(component)
@@ -340,7 +427,7 @@ class BranchWorktree:
         # A pathspec that names nothing fails the stage, and an install may ship no meta tree.
         held = _git(self.path, "ls-tree", "--name-only", BASE_BRANCH, "--", *trees).splitlines() if trees else []
         own = (layout.upstream_prefix, *held)
-        return (*own, *(f":(exclude){tree}" for tree in self._nested(component, own)))
+        return (*own, *(f"{_EXCLUDE}{tree}" for tree in self._nested(component, own)))
 
     def _nested(self, component: str, own: Sequence[str]) -> list[str]:
         """The trees of the other components that lie inside ``own``: a change there is theirs."""
@@ -354,10 +441,13 @@ __all__ = [
     "BASE_BRANCH",
     "HEAD_SUBJECT",
     "SKIPPED",
+    "THIRD_PARTY_COPY",
+    "LINKED_PATHS",
     "BranchWorktree",
     "Changes",
     "SourceBase",
     "Upstream",
     "WorktreeError",
     "installed_upstream",
+    "linked_paths",
 ]

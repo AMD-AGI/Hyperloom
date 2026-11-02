@@ -9,6 +9,7 @@ is held to the same bar; judging reads them back from the record, so nothing it 
 
 from __future__ import annotations
 
+import logging
 import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
@@ -28,6 +29,8 @@ from hyperloom_multibranch.rulegate.accuracy import baseline_accuracy
 from hyperloom_multibranch.rulegate.inferencex import DispersionThreshold, InferenceXBaseline
 from hyperloom_multibranch.rulegate.readings import UnreadableResult, agentx_reading, inferencex_reading
 
+logger = logging.getLogger(__name__)
+
 # Without these an AgentX comparison is graded on nothing, or found incomparable for every candidate.
 _AGENTX_REQUIRED = (GRADED_INTVTY_P50, GRADED_DURATION, GRADED_ERROR_RATE)
 
@@ -35,15 +38,20 @@ _AGENTX_REQUIRED = (GRADED_INTVTY_P50, GRADED_DURATION, GRADED_ERROR_RATE)
 async def write_inferencex_baseline(
     store: GateRecords, root_commit: str, baselines: Sequence[TestRecord], concurrency: int
 ) -> BaselineRecord:
-    """Fewer than two baselines, or a mean eval score below the floor, fails PRELUDE."""
+    """Fewer than two baselines, or a mean eval score below the floor, fails PRELUDE. The root's value and the bar are read
+    from the baselines :attr:`DispersionThreshold.kept` keeps, all but one far off the others."""
     results = [_root_result(record, root_commit) for record in baselines]
     readings = [inferencex_reading(result, concurrency) for result in results]
     throughputs = tuple(reading.throughput for reading in readings)
     threshold = DispersionThreshold(throughputs)
+    if threshold.kept != throughputs:
+        logger.warning(
+            "the root's baselines %s leave out one far off the others: the bar reads %s", throughputs, threshold.kept
+        )
     accuracy = baseline_accuracy([reading.accuracy for reading in readings])
     record = BaselineRecord(
         root_commit,
-        values={GRADED_OUTPUT: statistics.fmean(throughputs), ACCURACY_SCORE: accuracy},
+        values={GRADED_OUTPUT: statistics.fmean(threshold.kept), ACCURACY_SCORE: accuracy},
         dispersion_pct={GRADED_OUTPUT: threshold.spread_pct},
         threshold_pct={GRADED_OUTPUT: threshold.threshold_pct},
         request_ids=tuple(record.request_id for record in baselines),

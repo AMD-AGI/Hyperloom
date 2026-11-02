@@ -259,6 +259,8 @@ class LocalMeasurementBackend:
                 _gather_traces(run)
             if run.traced is not None:
                 notes.append(run.traced.report(Path(run.call.output_dir), _ranks(run.call)))
+                if run.traced.packet_capture_off:
+                    notes.append(ruppell.KINETO_NOTE)
         finally:
             if tracer is not None:
                 tracer.close()

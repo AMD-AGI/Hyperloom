@@ -104,13 +104,14 @@ def test_a_profile_with_ruppell_ready_traces_its_server_and_notes_the_report(gri
 
 def test_a_report_that_failed_leaves_the_return_code_alone(grid, tmp_path, monkeypatch):
     made = _Tracer(tmp_path / "w", report="ruppell: report failed (the server left no records)")
+    made.packet_capture_off = True
     monkeypatch.setattr(ruppell, "prepare", lambda points, environ: made)
     _answers(grid, monkeypatch, lambda: _traced_result(grid))
 
     outcome = _run(_call(tmp_path, _profile_point(tmp_path), kind="profile"))
 
     assert (outcome.returncode, outcome.failure_class) == (0, None)
-    assert outcome.notes == ("ruppell: report failed (the server left no records)",)
+    assert outcome.notes == ("ruppell: report failed (the server left no records)", ruppell.KINETO_NOTE)
 
 
 def test_a_traced_attempt_that_failed_is_profiled_again_without_ruppell(grid, tracer, tmp_path, monkeypatch):

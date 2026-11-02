@@ -207,3 +207,31 @@ def test_a_native_tree_inside_the_framework_s_tree_is_the_native_component_s_alo
     framework, native = worktree.diff("sglang"), worktree.diff("sgl_kernel")
     assert "srt/server.py" in framework and "kernels/aot" not in framework
     assert f"b/{AOT}/csrc/gemm.cu" in native and "srt/server.py" not in native
+
+
+def test_a_worktree_links_the_installed_package_s_compiled_extensions_without_tracking_them(tmp_path, installed):
+    (installed.path / "_C.abi3.so").write_bytes(b"\x7fELF ext")
+    (installed.path / "attn").mkdir()
+    (installed.path / "attn" / "_fa_C.cpython-312-x86_64-linux-gnu.so").write_bytes(b"\x7fELF fa")
+    base = SourceBase(tmp_path / "source", locator=lambda _layout: installed)
+    base.build(["vllm"])
+    worktree = base.worktree("s1", tmp_path / "s1")
+
+    assert (worktree.path / "vllm" / "_C.abi3.so").read_bytes() == b"\x7fELF ext"
+    assert (worktree.path / "vllm" / "attn" / "_fa_C.cpython-312-x86_64-linux-gnu.so").read_bytes() == b"\x7fELF fa"
+    assert not (worktree.path / "vllm" / "_C.so").exists(), "a library that is no Python extension stays out"
+    assert worktree.diff("vllm") == ""
+    worktree.sync("c0", [])
+    assert (worktree.path / "vllm" / "_C.abi3.so").exists(), "a sync keeps it"
+
+
+def test_source_only_keeps_the_component_s_files_byte_for_byte_and_names_the_rest(tmp_path, base):
+    worktree = base.worktree("s1", tmp_path / "s1")
+    own = "diff --git a/vllm/config.py b/vllm/config.py\n--- a/vllm/config.py\n+++ b/vllm/config.py\n@@ -1 +1 @@\n-a\n+b\r\n"
+    scratch = "diff --git a/eval/run.log b/eval/run.log\nnew file mode 100644\n--- /dev/null\n+++ b/eval/run.log\n@@ -0,0 +1 @@\n+x\r y\n"
+    near = "diff --git a/vllm_extra/x.py b/vllm_extra/x.py\n--- a/vllm_extra/x.py\n+++ b/vllm_extra/x.py\n@@ -1 +1 @@\n-1\n+2\n"
+
+    kept, outside = worktree.source_only("vllm", scratch + own + near)
+
+    assert kept == own
+    assert outside == ("eval/run.log", "vllm_extra/x.py")

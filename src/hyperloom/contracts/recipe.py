@@ -682,9 +682,7 @@ def delta_between(first: Recipe, second: Recipe) -> RecipeDelta:
         config=_config_delta(first.launch, second.launch),
         components=tuple(change for change in changes if change is not None),
         add_kernels=tuple(artifact for artifact in second.kernels if artifact not in first.kernels),
-        remove_kernels=tuple(
-            sorted({artifact.ref for artifact in first.kernels} - {artifact.ref for artifact in second.kernels})
-        ),
+        remove_kernels=tuple(sorted(artifact.ref for artifact in first.kernels if artifact not in second.kernels)),
     )
 
 

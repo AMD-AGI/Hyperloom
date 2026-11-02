@@ -21,9 +21,9 @@ return code, and a profile whose traced attempt failed runs again without it.
 * **Launch.** Magpie and InferenceX own the server's command line, so the server is not wrapped in ``ruppell run``: the
   environment ``ruppell run`` would give its command goes into the point's ``benchmark.envs``. It is taken from
   ``ruppell run`` itself (a probe command that prints its environment), so ruppell's own rules apply (the tool library,
-  its early load, the NCCL plugin, packet capture off on ROCm 7.2.0-7.2.2, a value the point sets kept). ruppell's
-  start-up hook goes first on ``PYTHONPATH``: it runs the ``sitecustomize`` it shadows by looking from the start of
-  ``sys.path``, so anywhere else it would run a farm hook a second time.
+  its early load, the NCCL plugin, packet capture off on ROCm 7.2.0-7.2.2 and, under the SGLang adapter, 7.2.4, a value
+  the point sets kept). ruppell's start-up hook goes first on ``PYTHONPATH``: it runs the ``sitecustomize`` it shadows
+  by looking from the start of ``sys.path``, so anywhere else it would run a farm hook a second time.
 * **Report.** After the round: ``ruppell census``, ``ruppell export`` (for ``check_m2``'s ``report.json``; the trace
   itself is not kept) and ``tests/m2/check_m2.py``, then the GPU time of each module by step kind
   (:data:`MODULE_SHARES_FILE`). What is kept goes to ``<output_dir>/ruppell``, beside ``profile/`` and never in it: a
@@ -53,6 +53,7 @@ from typing import Any
 import yaml
 
 from hyperloom.common.benchmark_config import is_magpie_agentx
+from hyperloom.common.outside_facts import HIP_GRAPH_PACKET_CAPTURE_ENV
 from hyperloom.measure.short_prompts.staging import CACHE_ENV, DEFAULT_CACHE_DIR
 
 __all__ = [
@@ -74,13 +75,14 @@ __all__ = [
 ]
 
 #: The ruppell commit every profile test builds, and the digest (:func:`tree_sha256`) of its staged
-#: ``source`` directory, ``.commit`` included. ``0ef9b0d`` is the first commit that turns HIP graph packet capture off on
-#: ROCm 7.2.0-7.2.2, where kernel dispatch tracing otherwise crashes the first decode graph replay.
-RUPPELL_COMMIT = "0ef9b0dac1cfd3caf533346aca5bdbbc925c918b"
-RUPPELL_TREE_SHA256 = "32710ea380a08db3a2611965979875533adf7d99b706d68fc158ab10a178e6fa"
+#: ``source`` directory, ``.commit`` included. ``v0.10.0``: on ROCm 7.2.0-7.2.2 HIP graph packet capture is off for
+#: any traced run, and on 7.2.4 for SGLang (``RUPPELL_SGLANG=1`` in the probe's environment), where kernel dispatch
+#: tracing otherwise crashes graph replays once the queue runs deep (ROCm/rocm-systems#14586).
+RUPPELL_COMMIT = "22b813b113d363d70963ac33e868cfbf486e7521"
+RUPPELL_TREE_SHA256 = "b46077bc11cc2e79453fa7c3ec074fc9e9e664f30ec49eb26b969fd3d0935c34"
 #: The detail sampling of a profile test: kernel detail for 5 of every 1000 serving steps.
 DETAIL = "5/1000"
-#: The ROCm releases ruppell supports, [from, to): its QUICKSTART says 7.0.2 to 7.2.3, its checks covered 7.2.4, and
+#: The ROCm releases ruppell supports, [from, to): it has been run on 7.0.2 to 7.2.4 (MI350X, MI355X), and
 #: it has never been built on ROCm 10.
 SUPPORTED_ROCM = ((7, 0, 2), (8, 0, 0))
 
@@ -99,6 +101,13 @@ LOG_FILE = "ruppell.log"
 ATTEMPT_LOG_FILE = "attempt_server.log"
 MODULE_SHARES_COLUMNS = ("kind", "module", "gpu_ms", "share_percent", "steps")
 UNATTRIBUTED = "unattributed"
+#: The note of a profile whose server ran traced with HIP graph packet capture off (ROCm 7.2.4 under the SGLang adapter):
+#: Kineto then records every kernel of each graph replay, where with it on the replays are nearly hidden, so its kernel
+#: shares compare only with a profile that sets ``DEBUG_CLR_GRAPH_PACKET_CAPTURE=0`` too (ruppell-board#19).
+KINETO_NOTE = (
+    "ruppell: traced with HIP graph packet capture off (DEBUG_CLR_GRAPH_PACKET_CAPTURE=0); "
+    "kernel shares compare only with profiles that set it too"
+)
 
 _SCHEMA = 1
 _UTF8 = "utf-8"
@@ -203,6 +212,8 @@ class Tracer:
     work: Path
     source: Path
     build: Path
+    #: Whether a traced server got HIP graph packet capture off, which changes what Kineto records (:data:`KINETO_NOTE`).
+    packet_capture_off: bool = False
 
     @property
     def records(self) -> Path:
@@ -248,7 +259,9 @@ class Tracer:
         early = str(self.source.joinpath(*_EARLY_HOOK))
         parts = [early, *base.split(os.pathsep), str(self.source / "python"), str(site)]
         path = os.pathsep.join(dict.fromkeys(part for part in parts if part))
-        return {**_TRACED_ENVS, **added, _PYTHONPATH: path}
+        envs = {**_TRACED_ENVS, **added, _PYTHONPATH: path}
+        self.packet_capture_off |= {**given, **envs}.get(HIP_GRAPH_PACKET_CAPTURE_ENV) == "0"
+        return envs
 
     def _probe(self, environ: Mapping[str, str]) -> dict[str, str]:
         """The variables ``ruppell run`` adds to or changes in ``environ`` for its command, read from a command that
