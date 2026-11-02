@@ -181,8 +181,6 @@ hyperloom-kb = "hyperloom_kb.cli:main"
 hyperloom-kb-serve = "hyperloom_kb.http_service:main"
 hyperloom-kb-collect = "hyperloom_kb.collect.cli:main"
 hyperloom-multibranch = "hyperloom_multibranch.cli:main"
-# One multi-branch session per operating point on one machine; standard library only, for the machine's own Python.
-hyperloom-multibranch-launch = "hyperloom_multibranch.launch:main"
 
 [tool.setuptools]
 # setuptools defaults this to true for pyproject-based config, which makes
