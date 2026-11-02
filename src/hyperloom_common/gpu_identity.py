@@ -28,6 +28,13 @@ class GpuBoard:
     vendor_peak_tflops: Mapping[str, float] = field(default_factory=dict)
     #: Other spellings probe output uses for the board (rocm-smi prints ``Radeon 8060S Graphics``).
     aliases: tuple[str, ...] = ()
+    #: The PCI device ids that ``amd-smi static --asic`` reports (``asic.device_id``) for this board, lower case, no
+    #: ``0x``. A board's name is whatever the VBIOS says (an MI355X node answers "AMD Instinct MI355 OAM"); its device
+    #: id is what the silicon is. Read from the ``amdgpu.ids`` that ships with the driver, with the variants (HF, VF)
+    #: listed under their board. Empty when no id names this board alone, and the board is then known by its name.
+    #: 0x74a2 and 0x74b6 are on no board on purpose: the same id is both an MI308X and, at revision A1, an MI300X. So is
+    #: 0x7551, the R9700 at revisions C0 and C1 (R9700S) and the R9600D at C8, so the R9700 lists none.
+    device_ids: frozenset[str] = frozenset()
 
     def vendor_peaks_by_tag(self, tags: Mapping[str, tuple[str, ...]]) -> dict[str, float]:
         """``vendor_peak_tflops`` under each spelling a caller reads, from ``tags``: precision -> its spellings."""
@@ -56,9 +63,36 @@ AMD_GPU_BOARDS: dict[str, GpuBoard] = {
     board.product: board
     for board in (
         # product, gfx, CUs, HBM GB, HBM GB/s, vendor peak TFLOPS
-        GpuBoard("mi300x", "gfx942", 304, 192.0, 5300.0, _MI300X_PEAKS, aliases=("AMD Instinct MI300X",)),
-        GpuBoard("mi308x", "gfx942", 304, 192.0, 5300.0, _MI300X_PEAKS, aliases=("AMD Instinct MI308X",)),
-        GpuBoard("mi325x", "gfx942", 304, 256.0, 6000.0, _MI300X_PEAKS, aliases=("AMD Instinct MI325X",)),
+        GpuBoard(
+            "mi300x",
+            "gfx942",
+            304,
+            192.0,
+            5300.0,
+            _MI300X_PEAKS,
+            aliases=("AMD Instinct MI300X",),
+            device_ids=frozenset({"74a1", "74a9", "74b5", "74bd"}),
+        ),
+        GpuBoard(
+            "mi308x",
+            "gfx942",
+            304,
+            192.0,
+            5300.0,
+            _MI300X_PEAKS,
+            aliases=("AMD Instinct MI308X",),
+            device_ids=frozenset({"74a8"}),
+        ),
+        GpuBoard(
+            "mi325x",
+            "gfx942",
+            304,
+            256.0,
+            6000.0,
+            _MI300X_PEAKS,
+            aliases=("AMD Instinct MI325X",),
+            device_ids=frozenset({"74a5", "74b9"}),
+        ),
         GpuBoard(
             "mi355x",
             "gfx950",
@@ -67,28 +101,13 @@ AMD_GPU_BOARDS: dict[str, GpuBoard] = {
             8000.0,
             _matrix_peaks(bf16=2516.6, fp8=5033.2, fp4=10066.4, fp32=157.3),
             aliases=("AMD Instinct MI355X",),
+            device_ids=frozenset({"75a3", "75b3"}),
         ),
         # https://www.amd.com/en/products/graphics/workstations/radeon-ai-pro/ai-9000-series/amd-radeon-ai-pro-r9700.html
         GpuBoard("r9700", "gfx1201", 64, 32.0, 640.0, _matrix_peaks(bf16=191.0, fp8=383.0, fp32=47.8)),
         # The roofline reads TraceLens's bundled Radeon_8060S.json; Hyperloom carries no peaks for it.
         GpuBoard("radeon8060s", "gfx1151", 40, aliases=("Radeon 8060S",)),
     )
-}
-
-#: gpu_type -> the PCI device ids that ``amd-smi static --asic`` reports (``asic.device_id``) for that board, lower case,
-#: no ``0x``. A board's name is whatever the VBIOS says (an MI355X node answers "AMD Instinct MI355 OAM"); its device id
-#: is what the silicon is. Read from the ``amdgpu.ids`` that ships with the driver, with the variants (HF, VF) listed
-#: under their board. 0x74a2 and 0x74b6 are left out on purpose: the same id is both an MI308X and, at revision A1, an
-#: MI300X, so it names no single board and the caller falls back to the name. So is 0x7551, the R9700 at revisions C0
-#: and C1 (R9700S) and the R9600D at C8: the R9700 lists no id and is known by its name alone. The Radeon 8060S lists
-#: none either and is known by its name.
-AMD_GPU_DEVICE_IDS: dict[str, frozenset[str]] = {
-    "mi300x": frozenset({"74a1", "74a9", "74b5", "74bd"}),
-    "mi308x": frozenset({"74a8"}),
-    "mi325x": frozenset({"74a5", "74b9"}),
-    "mi355x": frozenset({"75a3", "75b3"}),
-    "r9700": frozenset(),
-    "radeon8060s": frozenset(),
 }
 
 
@@ -103,7 +122,7 @@ def normalise_device_id(device_id: object) -> str | None:
 def gpu_type_for_device_id(device_id: object) -> str | None:
     """The one board a PCI device id belongs to, or ``None`` when it is unknown, ambiguous or unreadable."""
     key = normalise_device_id(device_id)
-    return next((board for board, ids in AMD_GPU_DEVICE_IDS.items() if key in ids), None)
+    return next((product for product, board in AMD_GPU_BOARDS.items() if key in board.device_ids), None)
 
 
 def gpu_board(gpu_type: str | None) -> GpuBoard | None:
@@ -134,7 +153,6 @@ def is_gfx_arch(gpu_type: str | None, arch: str) -> bool:
 
 __all__ = [
     "AMD_GPU_BOARDS",
-    "AMD_GPU_DEVICE_IDS",
     "GpuBoard",
     "board_named_in",
     "gfx_arch_for_gpu_type",
