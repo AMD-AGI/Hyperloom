@@ -38,6 +38,12 @@ def test_board_decisions(product, runner, build_validated, vendor, convention):
     assert resolve_compute_peak_provenance(product, "bf16")["compute_peak_convention"] == convention
 
 
+def test_radeon8060s_has_its_own_runner_and_no_framework_restriction():
+    assert gpu_types.gpu_runner_type("radeon8060s") == "radeon8060s"
+    assert gpu_types.targeted_build_validated("radeon8060s") is True
+    assert gpu_types._runner_framework_error("radeon8060s", "sglang") is None
+
+
 def test_server_reuse_scripts():
     assert MAGPIE_BUILTIN_SCRIPTS == {
         "vllm_mi300x.sh",
