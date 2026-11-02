@@ -45,7 +45,9 @@ BUILDS_DIR = "builds"
 MAX_LOG_BYTES = 256 * 1024
 #: A record larger than this is not one the service wrote; it is skipped when listing ready builds.
 _MAX_RECORD_BYTES = 1 << 20
-_ENTRY_FILE_MODE = 0o644
+#: An entry's files are written once (``O_EXCL``) and never rewritten, and are read only by the account that wrote the
+#: store (or root), like its blobs (``_BLOB_MODE``): owner-read-only, no group or other bit.
+_ENTRY_FILE_MODE = 0o400
 _FETCHED_EXECUTABLE, _FETCHED_PLAIN = 0o700, 0o600
 
 
