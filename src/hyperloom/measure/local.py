@@ -61,8 +61,10 @@ from hyperloom.measure.farm import (
     build_farm,
     built_roots,
     inherited_environment,
+    lay_profile_patch,
     patches_aiter_sources,
     place_farm,
+    place_host_copies,
     server_python,
     verify_farm,
 )
@@ -107,7 +109,6 @@ from hyperloom.orchestrator.actions.executors import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     REUSE_PORT_DEFAULT,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
-    VLLM_PATCH_PROFILER_FIELDS,
     GridLaunch,
     GridRecipe,
     GridStop,
@@ -115,7 +116,6 @@ from hyperloom.orchestrator.actions.executors import (
     LaunchLayer,
     VariantResult,
     assign_free_port,
-    ensure_vllm_patched_for_tracelens,
     resolve_lifecycle_params,
     run_grid,
     run_grid_warmup_enabled,
@@ -293,11 +293,9 @@ def _staged(outcome: TestOutcome, call: TestCall, phases: PhaseRecorder) -> Test
 def _measure(call: TestCall, phases: PhaseRecorder, tracer: ruppell.Tracer | None, notes: list[str]) -> _Run:
     """Lay out the test's environment, run its rounds and give what they produced; ``tracer`` traces the server of a
     profile, when it can be given the points (a note says why not)."""
-    with _rebuilt_environment(call) as call, _framework_tables(call) as private:
-        call = private.call
+    with _rebuilt_environment(call) as call, _framework_tables(call) as private, _patched_server(private.call) as call:
         if call.kind == _PROFILE:
             _patch_profile_client(call)
-            _patch_profile_server(call)
         with _test_environment(call) as unset_envs:
             call, tracer = _traced(call, tracer, notes)
             if resolve_backend().name == "magpie":
@@ -437,22 +435,22 @@ def _patch_profile_client(call: TestCall) -> None:
         raise TestCallRefused(str(exc)) from exc
 
 
-def _patch_profile_server(call: TestCall) -> None:
-    """Patch the vLLM of this host when a point asks its server for a field only TraceLens's patch adds, or refuse.
-
-    The point may have been rendered on another host (a hosted run plans on its app container), whose patch says
-    nothing of the vLLM the server runs here; unpatched, that server refuses its whole command line.
-    """
-    asked = any(
-        f"--profiler-config.{field}" in str(_point_envs(point).get("EXTRA_VLLM_ARGS", ""))
-        for point in call.points
-        for field in VLLM_PATCH_PROFILER_FIELDS
-    )
-    if asked and not ensure_vllm_patched_for_tracelens():
-        raise TestCallRefused(
-            f"the profile asks vLLM for {', '.join(VLLM_PATCH_PROFILER_FIELDS)}, which only TraceLens's vLLM patch "
-            "adds, and the patch cannot be applied to this host's vLLM"
-        )
+@contextlib.contextmanager
+def _patched_server(call: TestCall) -> Iterator[TestCall]:
+    """The call whose profile server imports its framework with TraceLens's patch from this host's copy (a point may
+    have been rendered on another host), refused when a point asks for what only the patch adds and none can be laid."""
+    if call.kind != _PROFILE:
+        yield call
+        return
+    work = Path(tempfile.mkdtemp(prefix="hl-profile-"))
+    try:
+        try:
+            points = place_host_copies(call.points, work)
+        except FarmError as exc:
+            raise TestCallRefused(str(exc)) from exc
+        yield dataclasses.replace(call, points=points)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
 
 
 # --- the rebuilt environment --------------------------------------------------------------------------------------
@@ -500,6 +498,8 @@ def _rebuilt_points(call: TestCall, environment: CompiledEnvironment, work: Path
         inherited = inherited_environment(os.environ, call.env_overrides, call.unset_envs)
         roots = built_roots(roots, _builds(environment))
         farm = build_farm(roots, work / "farm", python=python, read_blob=read_blob, inherited=inherited)
+        if call.kind == _PROFILE:
+            lay_profile_patch(farm, _point_config(call.points[0]))
         points = []
         for index, point in enumerate(call.points):
             config = yaml.safe_load(substitute(Path(point).read_text(encoding=_UTF8), placed)) or {}

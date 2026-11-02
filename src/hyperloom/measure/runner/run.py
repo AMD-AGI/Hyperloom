@@ -65,6 +65,7 @@ from hyperloom.measure.farm import (
     build_farm,
     built_roots,
     inherited_environment,
+    lay_profile_patch,
     patched_configs,
     server_environment,
     server_python,
@@ -97,6 +98,7 @@ _START_FAILED = "runner_start_failed"
 _SPEC_REJECTED = "spec_rejected"
 _NODE_FAULT = "node_fault"
 _FAILED = "failed"
+_PROFILE = "profile"
 _FILES_DIR = "files"
 _KEY_ENV = "HYPERLOOM_SIGNING_KEY_FILE"
 #: The unix times the start-up script began and ended, which the script sets (``measure.runner.bootstrap``).
@@ -277,6 +279,8 @@ def _prepare(ctx: _Context, spec: MeasurementSpec, visible: list[int]) -> tuple[
             read_blob=ctx.read_blob,
             inherited=inherited_environment(ctx.environ, spec.process_env, spec.unset_envs),
         )
+        if spec.kind == _PROFILE:
+            lay_profile_patch(farm, yaml.safe_load(spec.config[0].yaml) or {})
         if farm is not None:
             install_import_watch(farm)
         placement = Placement(

@@ -270,6 +270,8 @@ def enable_profile(config_path: Path) -> None:
     field is true and raises when the server lacks it, so claiming it on a runtime the patch
     did not reach ends the round before the server starts.
     """
+    from hyperloom.inference_optimizer.runtime_environment import prepend_launch_path
+
     from ._profile_setup import (
         annotations_supported,
         apply_sglang_shape_tool,
@@ -280,16 +282,19 @@ def enable_profile(config_path: Path) -> None:
     config = yaml.safe_load(config_path.read_text(encoding=_ENCODING))
     bench = config["benchmark"]
     framework = str(bench["framework"]).lower()
-    _, sitecustomize = patch_for_profile(bench.setdefault("envs", {}), framework)
+    patch = patch_for_profile(bench.setdefault("envs", {}), framework)
     apply_launch_changes(bench, LaunchChanges())
     launch = bench["agentx"]["launch_overrides"]
     server_env = launch["env"]
     profile_env: dict[str, str] = {}
-    if sitecustomize:
+    if patch.sitecustomize or patch.site is not None:
         if "PYTHONPATH" in server_env:
             profile_env["PYTHONPATH"] = str(server_env["PYTHONPATH"])
         if "PYTHONPATH" in launch["unset_env"]:
             profile_env["PYTHONPATH"] = ""
+    if patch.site is not None:
+        prepend_launch_path(profile_env, "PYTHONPATH", str(patch.site))
+    if patch.sitecustomize:
         apply_sglang_shape_tool(profile_env, shape_discovery=shape_discovery_enabled(bench))
     if framework == "vllm":
         default = str(VLLM_STEP_TIMEOUT_SEC)

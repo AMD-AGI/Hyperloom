@@ -17,6 +17,7 @@ import os
 import re
 import subprocess
 from functools import cache
+from pathlib import Path
 from typing import Any, Mapping, NamedTuple
 
 from hyperloom.common.env import env_bool, env_flag, is_truthy
@@ -222,12 +223,14 @@ def _profile_capture_window(
 
 
 class ProfileInstrumentation(NamedTuple):
-    """What one profile setup wrote, so later steps can restore it."""
+    """What one profile setup wrote, so later steps can restore it, and the patched copy of the framework that goes
+    first on the server's ``PYTHONPATH`` once every other step has written it (``None``: none)."""
 
     num_prompts: int
     atom_caps: _AtomTracelensCaps | None
     vllm_flags: list[tuple[str, str]]
     vllm_cap: int
+    patched_copy: Path | None = None
 
 
 def prepare_profile(bench: dict[str, Any], envs: dict[str, Any]) -> ProfileInstrumentation:
@@ -395,14 +398,14 @@ def _apply_framework_profile(
     num_prompts: int,
 ) -> ProfileInstrumentation:
     framework = str(bench.get("framework") or "").lower()
-    patch_ok, sitecustomize = patch_for_profile(envs, framework)
+    patch_ok, sitecustomize, site = patch_for_profile(envs, framework)
     if "atom" in framework:
         caps = _atom_tracelens_caps()
         conc = int(envs.get("CONC") or DEFAULT_CONC)
         return ProfileInstrumentation(conc, caps, [], 0)
     if "vllm" in framework:
         flags = _apply_vllm_profile(envs, delay_iters=delay_iters, max_iters=max_iters, patch_ok=patch_ok)
-        return ProfileInstrumentation(num_prompts, None, flags, max_iters)
+        return ProfileInstrumentation(num_prompts, None, flags, max_iters, site)
     _apply_sglang_profile(
         bench,
         envs,
@@ -410,7 +413,7 @@ def _apply_framework_profile(
         sitecustomize=sitecustomize,
         patch_ok=patch_ok,
     )
-    return ProfileInstrumentation(num_prompts, None, [], 0)
+    return ProfileInstrumentation(num_prompts, None, [], 0, site)
 
 
 def write_tracelens_patch_status(envs: dict[str, Any], *, attempted: bool, patched: bool, fw: str) -> None:
@@ -432,8 +435,19 @@ def write_tracelens_patch_status(envs: dict[str, Any], *, attempted: bool, patch
         )
 
 
-def patch_for_profile(envs: dict[str, Any], framework: str) -> tuple[bool, bool]:
-    """Patch the installed server the way the fixed-sequence profile does."""
+class ProfilePatch(NamedTuple):
+    """What patching for a profile gave its server: whether it takes the flags only the patch adds, whether SGLang
+    discovers shapes through ``sitecustomize``, and ``site``, the patched copy of the framework to put first on its
+    ``PYTHONPATH`` (``None``: nothing to put there)."""
+
+    patched: bool
+    sitecustomize: bool
+    site: Path | None
+
+
+def patch_for_profile(envs: dict[str, Any], framework: str) -> ProfilePatch:
+    """Lay TraceLens's patch for the server the way the fixed-sequence profile does, in a copy of the installed
+    framework (``_server_patcher``), and write the patch status into ``envs``."""
     from hyperloom.orchestrator.actions.executors._server_patcher import (
         ensure_sglang_patched_for_tracelens,
         ensure_vllm_patched_for_tracelens,
@@ -445,11 +459,13 @@ def patch_for_profile(envs: dict[str, Any], framework: str) -> tuple[bool, bool]
     sitecustomize = is_sglang and resolve_sglang_shape_mode() == "sitecustomize"
     write_tracelens_patch_status(envs, attempted=False, patched=False, fw=framework)
     if is_atom or not _tracelens_patch_enabled():
-        return False, sitecustomize
+        return ProfilePatch(False, sitecustomize, None)
     if "vllm" in framework:
-        patch_ok = ensure_vllm_patched_for_tracelens()
+        patched = ensure_vllm_patched_for_tracelens()
     else:
-        patch_ok = ensure_sglang_patched_for_tracelens()
+        patched = ensure_sglang_patched_for_tracelens()
+    patch_ok = patched is not None
+    site = None if patched is None else patched.site
     if sitecustomize:
         envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "ok" if patch_ok else "unavailable"
         if not patch_ok:
@@ -460,9 +476,9 @@ def patch_for_profile(envs: dict[str, Any], framework: str) -> tuple[bool, bool]
                 "It needs TRACELENS_ROOT with an exact "
                 "examples/custom_workflows/inference_analysis/sglang_gc_patch/sglang_<X_Y_Z> dir."
             )
-        return False, sitecustomize
+        return ProfilePatch(False, sitecustomize, site)
     write_tracelens_patch_status(envs, attempted=True, patched=patch_ok, fw=framework)
-    return patch_ok, sitecustomize
+    return ProfilePatch(patch_ok, sitecustomize, site)
 
 
 #: The ``--profiler-config`` fields only TraceLens's vLLM patch adds (``_server_patcher``): a vLLM that was not patched

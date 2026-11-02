@@ -364,6 +364,16 @@ def test_a_candidate_that_differs_only_in_server_arguments_or_a_framework_patch_
     assert _states(other) == dict.fromkeys(STATES, "hit") and other.jit_cache.builds_seen == 0
 
 
+def test_a_profiles_patched_copy_of_its_framework_on_the_import_path_finds_the_same_cache(rig) -> None:
+    base, _, _ = rig.run("base", _arm(rig))
+    copy = "/tmp/hyperloom-tracelens/sglang-gc-0123/site"
+    profiled, _, _ = rig.run("profiled", _arm(rig, envs={"PYTHONPATH": copy}))
+    elsewhere, _, _ = rig.run("elsewhere", _arm(rig, envs={"PYTHONPATH": "/somewhere/else"}))
+
+    assert _keys(profiled) == _keys(base), "TraceLens's patch changes nothing aiter builds"
+    assert _keys(elsewhere)["aiter_jit"] != _keys(base)["aiter_jit"], "any other import path is an input"
+
+
 def test_an_aiter_patch_misses_the_aiter_caches_and_still_hits_the_one_triton_keeps_content_addressed(rig) -> None:
     base, _, base_run = rig.run("base", _arm(rig))
     rig.publish(base_run, base)
