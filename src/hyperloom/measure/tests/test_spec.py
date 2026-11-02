@@ -288,7 +288,7 @@ def test_a_conc_sweep_arm_carries_one_point_per_level_that_differ_only_in_the_le
     [
         (lambda: _sweep(point_yaml(conc=4), point_yaml(conc=8, port=8001)), "more than the concurrency level", False),
         (lambda: _sweep(point_yaml(conc=4), point_yaml(conc=4)), "appears twice", False),
-        (lambda: _sweep(), "at least one", True),
+        (_sweep, "at least one", True),
         (lambda: _edit(lambda d: d["config"].append(point_document(point_yaml(conc=8)))), "exactly one", True),
         (lambda: _edit(lambda d: d.update(config=[])), "exactly one", True),
     ],
