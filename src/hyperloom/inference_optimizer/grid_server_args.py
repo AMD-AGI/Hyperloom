@@ -496,11 +496,6 @@ def flag_occurrences(server_args: str | None) -> list[tuple[str, str]]:
     return occurrences
 
 
-def last_flag_values(server_args: str | None) -> dict[str, str]:
-    """Each flag's value, last occurrence winning like the engines' argparse; ``""`` for a bare flag."""
-    return dict(flag_occurrences(server_args))
-
-
 def last_alias_value(occurrences: list[tuple[str, str]], aliases: frozenset[str]) -> str | None:
     """The value of the last flag spelling one argparse destination -- the one the engine keeps."""
     return next((value for name, value in reversed(occurrences) if name in aliases), None)

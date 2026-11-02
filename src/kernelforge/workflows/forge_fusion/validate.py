@@ -505,9 +505,9 @@ def _installed_package_dir(pkg: str) -> str:
 
 def _free_vram_fraction(gpu: str, *, _run=None) -> Optional[float]:
     """Fraction of the target GPU's memory that is free, or None if unknown."""
-    run = _run or (lambda cmd: subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60))
+    run = _run or (lambda cmd: subprocess.run(cmd, capture_output=True, text=True, timeout=60))
     try:
-        out = run("rocm-smi --showmemuse").stdout
+        out = run(["rocm-smi", "--showmemuse"]).stdout
     except (OSError, subprocess.SubprocessError):
         return None
     used = re.findall(r"\(VRAM%\):\s*(\d+)", out)

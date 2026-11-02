@@ -181,7 +181,10 @@ def _runnable_suite(workspace_dir: str, kernel_backend: str) -> _CanonicalSuite 
 
 
 async def _start_command(command: str, workspace_dir: str, request_id: str) -> asyncio.subprocess.Process:
-    """Start one suite command in its own session, tagged with the suite's request id."""
+    """Start one suite command in its own session, tagged with the suite's request id.
+
+    The command is a shell line from the workspace's protected ``config.yaml``, run through the shell as the arena does.
+    """
     return await asyncio.create_subprocess_shell(
         command,
         cwd=workspace_dir,
