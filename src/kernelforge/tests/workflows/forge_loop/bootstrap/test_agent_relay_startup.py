@@ -26,6 +26,7 @@ from kernelforge.workflows.forge_loop.search.agent_relay import (
     StartPreference,
     select_start_profile,
 )
+from kernelforge.workflows.forge_loop.campaign.campaign_config import SearchStrategy
 from kernelforge.workflows.forge_loop.search.search_actors import SearchActorBundle
 
 
@@ -227,6 +228,7 @@ def test_supervisor_backend_flag_is_honoured(monkeypatch, tmp_path, relay, super
         setup=_Setup(),
         lane_binding=None,
         lanes=1,
+        search_strategy=SearchStrategy.LINEAR,
         program_md="",
         specialist_definitions={},
         critic_enabled=False,
@@ -238,6 +240,39 @@ def test_supervisor_backend_flag_is_honoured(monkeypatch, tmp_path, relay, super
 
     assert captured["backend"] == provider
     assert captured["config"].agent_model == model
+
+
+@pytest.mark.parametrize("strategy", [SearchStrategy.LINEAR, SearchStrategy.TREE])
+def test_only_a_tree_campaign_builds_a_slot_selector_on_the_profile_s_own_model(monkeypatch, tmp_path, strategy):
+    from kernelforge.agent_backends import registry
+    from kernelforge.workflows.forge_loop.roles.slot_selector import SlotSelector
+
+    _capture_supervisor(monkeypatch)
+    runtimes = []
+
+    def create_backend(runtime, **_kwargs):
+        runtimes.append(runtime)
+        return SimpleNamespace(runtime=runtime)
+
+    monkeypatch.setattr(registry, "create_registered_backend", create_backend)
+    builder = SearchActorBuildContext(
+        config=Config(workspace=str(tmp_path), agent_backend="claude", agent_model="claude-opus-5"),
+        setup=_Setup(),
+        lane_binding=None,
+        lanes=2,
+        search_strategy=strategy,
+        program_md="",
+        specialist_definitions={},
+        critic_enabled=False,
+    )
+
+    bundle = builder.build(AgentProfile("claude", "claude", "claude-opus-5", "max"))
+
+    if strategy is SearchStrategy.LINEAR:
+        assert bundle.slot_selector is None and runtimes == []
+    else:
+        assert isinstance(bundle.slot_selector, SlotSelector)
+        assert [(runtime.provider, runtime.model) for runtime in runtimes] == [("claude", "claude-opus-5")]
 
 
 def test_executable_override_stays_with_the_primary_provider(tmp_path):
