@@ -65,7 +65,8 @@ _FINDINGS_PROMPT_CHARS = 24_000
 _QUESTIONS_PROMPT_CHARS = 6_000
 _INBOX_PROMPT_CHARS = 40_000
 # Task kinds that queue for the benchmark lane, in the order the backlog line lists them.
-_BENCH_LANE_KINDS = ("integrate_patch", "explore")
+_EXPLORE = "explore"
+_BENCH_LANE_KINDS = ("integrate_patch", _EXPLORE)
 # Longest a KERNEL_AGENT session goes without an Orchestration turn while kernel progress is unchanged.
 _KERNEL_ORCHESTRATION_HEARTBEAT_SEC = 900.0
 
@@ -271,27 +272,42 @@ def _advisory_sections(owner: "ConversationCollaborator", blocks: tuple[_Advisor
     return sections
 
 
-def _explore_round_parts(task: "Task", *, now_unix: float) -> list[str]:
-    """A round's grid as dispatched and each variant's latest progress, from the notes its grid runner records.
+def _variant_state(note: dict[str, Any]) -> tuple[str, str, bool] | None:
+    """The variant a grid-runner note is about, what it says, and whether the variant has landed."""
+    label = str(note.get("label") or "")
+    if note.get("unit") == "variant":
+        throughput = note.get("output_throughput")
+        rate = f" {throughput:.1f} tok/s" if isinstance(throughput, (int, float)) else ""
+        return label, f"{note.get('status')}{rate}", True
+    if note.get("unit") == "variant_step":
+        variant, _, step = label.rpartition(":")
+        return variant, f"{step} {note.get('status') or 'running'}", False
+    return None
 
-    The round commits its verdicts only when it ends, so these notes are the only view of a round in flight. Other
-    kinds get nothing.
+
+def _explore_round_parts(task: "Task", *, now_unix: float) -> list[str]:
+    """A round's grid as dispatched and each variant's latest state, from the notes its grid runner records.
+
+    The round commits its verdicts only when it ends, so these notes are the only view of a round in flight. A
+    variant's step notes describe it until its landing note does. Other kinds get nothing.
     """
-    if task.kind != "explore":
+    if task.kind != _EXPLORE:
         return []
     names = [str(v.get("name") or "") for v in (task.params or {}).get("grid") or () if isinstance(v, dict)]
-    latest: dict[str, dict[str, Any]] = {}
+    states: dict[str, str] = {}
+    landed: set[str] = set()
     last_ts = 0.0
     for entry in task.history or ():
         note = entry.get("progress") if isinstance(entry, dict) else None
-        if isinstance(note, dict) and note.get("label"):
-            latest[str(note["label"])] = note
-            last_ts = max(last_ts, to_unix(entry.get("ts"), 0.0))
-    variants = ", ".join(
-        f"{label}: {note.get('status') or 'running'}"
-        + (f" {note['output_throughput']:.1f} tok/s" if isinstance(note.get("output_throughput"), (int, float)) else "")
-        for label, note in latest.items()
-    )
+        state = _variant_state(note) if isinstance(note, dict) else None
+        if state is None or state[0] in landed:
+            continue
+        variant, text, has_landed = state
+        states[variant] = text
+        if has_landed:
+            landed.add(variant)
+        last_ts = max(last_ts, to_unix(entry.get("ts"), 0.0))
+    variants = ", ".join(f"{variant}: {state}" for variant, state in states.items())
     parts = [f"grid_as_dispatched={names!r}", _flatten_for_inbox(f"variants=[{variants}]")]
     if last_ts > 0:
         parts.append(f"last_progress_age_sec={int(max(0.0, now_unix - last_ts))}")
@@ -551,7 +567,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
         return {
             content_fingerprint(variant)
             for task in (*self.tasks.queued_context_sync(), *self.tasks.running_context_sync())
-            if task.kind == "explore"
+            if task.kind == _EXPLORE
             for variant in (task.params or {}).get("grid") or ()
             if isinstance(variant, dict)
         }

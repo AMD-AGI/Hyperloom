@@ -80,23 +80,58 @@ async def test_a_proposal_in_a_running_round_is_named_not_offered_as_untested(co
     assert "1 untested proposals" in coord.conversation._context_running_tasks_reader()
 
 
+async def _step(coord: Coordinator, task_id: str, variant: str, step: str, status: str) -> None:
+    """A step note as the grid runner reports it: on entry, then a heartbeat while output flows."""
+    await coord.tasks.record_progress(
+        task_id, {"unit": "variant_step", "label": f"{variant}:{step}", "index": 1, "total": 1, "status": status}
+    )
+
+
+async def _landed(coord: Coordinator, task_id: str, variant: str, status: str, throughput: float | None) -> None:
+    """The note the grid runner reports when a variant lands."""
+    await coord.tasks.record_progress(
+        task_id,
+        {
+            "unit": "variant",
+            "label": variant,
+            "index": 1,
+            "total": 1,
+            "status": status,
+            "output_throughput": throughput,
+        },
+    )
+
+
+def _task_line(coord: Coordinator, task_id: str) -> str:
+    return next(line for line in coord.conversation._context_running_tasks_reader().splitlines() if task_id in line)
+
+
 @pytest.mark.asyncio
 async def test_a_running_round_names_its_variants_and_their_latest_progress(coord):
-    grid = [{"name": "first"}, {"name": "second"}, {"name": "third"}]
-    task = await _running_round(coord, grid)
-    await coord.tasks.record_progress(task.task_id, {"unit": "variant", "label": "first", "status": "started"})
-    await coord.tasks.record_progress(
-        task.task_id, {"unit": "variant", "label": "first", "status": "succeeded", "output_throughput": 1290.6}
-    )
-    await coord.tasks.record_progress(task.task_id, {"unit": "variant", "label": "second", "status": "started"})
+    task = await _running_round(coord, [{"name": "first"}, {"name": "second"}, {"name": "third"}])
+    for step in ("warmup", "benchmark"):
+        await _step(coord, task.task_id, "first", step, "started")
+        await _step(coord, task.task_id, "first", step, "running")
+    await _landed(coord, task.task_id, "first", "succeeded", 1290.6)
+    await _step(coord, task.task_id, "second", "warmup", "started")
+    await _step(coord, task.task_id, "second", "warmup", "running")
 
-    line = next(
-        line for line in coord.conversation._context_running_tasks_reader().splitlines() if task.task_id in line
-    )
+    line = _task_line(coord, task.task_id)
 
     assert "grid_as_dispatched=['first', 'second', 'third']" in line
-    assert "variants=[first: succeeded 1290.6 tok/s, second: started]" in line
+    assert "variants=[first: succeeded 1290.6 tok/s, second: warmup running]" in line
     assert "last_progress_age_sec=" in line
+
+
+@pytest.mark.asyncio
+async def test_a_landed_variant_outlives_the_heartbeats_of_the_ones_after_it(coord):
+    """An hour-long variant sends a heartbeat a minute; the trail's bound must not drop an earlier verdict."""
+    task = await _running_round(coord, [{"name": "first"}, {"name": "second"}])
+    await _landed(coord, task.task_id, "first", "failed", None)
+    for _ in range(150):
+        await _step(coord, task.task_id, "second", "benchmark", "running")
+
+    assert "variants=[first: failed, second: benchmark running]" in _task_line(coord, task.task_id)
 
 
 @pytest.mark.asyncio
