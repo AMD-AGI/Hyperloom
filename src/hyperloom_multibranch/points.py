@@ -84,6 +84,8 @@ class Decision(str, Enum):
 #: The ``points`` actions that record a decision, and the one that writes the review page again.
 DECISIONS = {"approve": Decision.APPROVED, "reject": Decision.REJECTED}
 REVIEW = "review"
+#: The action that merges the points' best trees into one patch (:mod:`hyperloom_multibranch.points_merge`).
+MERGE = "merge"
 
 
 @dataclass(frozen=True)
@@ -335,6 +337,15 @@ def add_parser(commands: argparse._SubParsersAction[argparse.ArgumentParser]) ->
     mapping.add_argument(CONC, type=int, action="append", required=True, help="An operating point; repeatable.")
     running = action(Stage.RUN.value, "Run the approved points, each on its reviewed map and dossier.")
     running.add_argument(CONC, type=int, action="append", default=[], help="Only this approved point; repeatable.")
+    running.add_argument(
+        "--no-merge",
+        dest="merge",
+        action="store_false",
+        help="Leave the points' trees unmerged. By default a run of every approved point ends by merging their best"
+        " trees into one patch, each behind HYPERLOOM_OPERATING_POINT (points merge).",
+    )
+    merging = action(MERGE, "Merge the points' best trees into one patch, each behind HYPERLOOM_OPERATING_POINT.")
+    merging.add_argument("--aiter", type=Path, default=None, help="The image's aiter package; default: this one's.")
     for stage in (mapping, running):
         stage.add_argument("--cards-per-point", type=int, default=None, help="Default: the machine's cards shared out.")
         stage.add_argument(
@@ -363,6 +374,8 @@ def main(args: argparse.Namespace) -> int:
     if action in DECISIONS:
         print(decide(root, args.conc, DECISIONS[action], args.why))
         return 0
+    if action == MERGE:
+        return _merge(root, args.aiter)
     from hyperloom_multibranch.scheduling.local_peers import machine_cards
 
     placement = Placement(machine_cards(), args.cards_per_point, args.slot)
@@ -378,7 +391,27 @@ def main(args: argparse.Namespace) -> int:
     outcome = asyncio.run(run_approved(root, placement, run_args, COMMAND, args.conc))
     for conc, ended in sorted(outcome.items()):
         print(f"C{conc}: {ended}")
-    return 0 if all(isinstance(ended, str) or ended == 0 for ended in outcome.values()) else 1
+    ran = 0 if all(isinstance(ended, str) or ended == 0 for ended in outcome.values()) else 1
+    if args.merge and not args.conc and any(ended == 0 for ended in outcome.values()):
+        _merge(root, None)
+    elif args.merge and args.conc:
+        print(f"Not merged: this run named its points; merge once every point ran, with points {MERGE} --dir {root}")
+    return ran
+
+
+def _merge(root: Path, aiter: Path | None) -> int:
+    """Merge the points' best trees, saying what it wrote or why it could not; 0 when it wrote the patch."""
+
+    from hyperloom_multibranch.points_merge import MergeRefused, merge
+
+    try:
+        merged = merge(root, aiter)
+    except MergeRefused as refused:
+        print(f"Not merged: {refused}")
+        return 1
+    left = "".join(f"; C{conc} left out: {why}" for conc, why in merged.left_out.items())
+    print(f"Merged C{', C'.join(map(str, merged.points))} into {merged.patch}{left}")
+    return 0
 
 
 def _after_dashes(args: Sequence[str]) -> list[str]:

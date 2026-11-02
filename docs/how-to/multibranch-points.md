@@ -98,6 +98,35 @@ hyperloom-multibranch points run --dir /shared/points/r1
 - **Running a stage again** starts a new session per point and records it in `point.json`. Earlier sessions stay on
   disk.
 
+## Merge the points' trees
+
+Each point ends with the tree its FINAL chose, its best tree, and different points may use different trees. The merge
+puts every point's tree into one vLLM patch, behind one variable: `HYPERLOOM_OPERATING_POINT=<conc>` runs that point's
+tree, and unset, the root's runs. One image then serves each point as its own session measured it.
+
+```shell
+hyperloom-multibranch points merge --dir /shared/points/r1 --aiter <the image's site-packages>/aiter
+HYPERLOOM_OPERATING_POINT=64 vllm serve /models/Qwen3-8B ...      # with the patch applied to the image's vLLM
+```
+
+- **On by default:** `points run` ends with the merge when it ran every approved point itself; `--no-merge` skips it.
+  A run limited with `--conc`, one container per point, leaves it to one `points merge` once every point has run.
+- **What a point changed, as code under the variable:**
+  - **server arguments** become the defaults of vLLM's parser, so an argument given on the command line still wins;
+  - **environment** is set when vLLM is imported, where a variable is not set already;
+  - **kernel tables** ship in the patch, laid over the image's defaults as the point's tests read them, and the
+    variable that loads them names them;
+  - **code** runs under `if` the point is the one named, widened to the whole statements that hold the change. Where
+    two points changed the same statements, the branches are `if`/`elif`; points that changed them alike share one.
+- **Where it writes,** below `<dir>/merged/`:
+  - `merged.patch`, the patch;
+  - `recipe.json`, the root's recipe carrying it;
+  - `merged.json` and `MERGED.md`: what each point brought, and which files more than one point changed.
+- **Run it in the image:** a rows-only kernel table is laid over the image's aiter, which `--aiter` names.
+- **What it refuses, saying why:** a point started from another root, a change outside Python source, a new or deleted
+  file, or a change that leaves no whole statements. A point whose run ended without FINAL's choice is left out.
+- **Not done here:** whether one point could use another's changes. That is a review of its own, later.
+
 ## Points that share a machine: one container each
 
 Magpie ends a benchmark by killing every serving process it can see. Points in one process namespace kill each other's
