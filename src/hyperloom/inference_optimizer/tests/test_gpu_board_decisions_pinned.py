@@ -8,7 +8,7 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.inference_optimizer import gpu_types
-from hyperloom.inference_optimizer.roofline_ceiling import HW_SPECS, resolve_compute_peak_provenance
+from hyperloom.inference_optimizer.roofline_ceiling import resolve_compute_peak_provenance
 from hyperloom.orchestrator.actions.executors._server_lifecycle import MAGPIE_BUILTIN_SCRIPTS
 
 _BOARDS = [
