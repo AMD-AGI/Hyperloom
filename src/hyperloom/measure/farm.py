@@ -51,6 +51,7 @@ from hyperloom.measure.jit.native.laying import NativeLayError, SheetBuilds
 from hyperloom.measure.jit.native.record import BuildRecord
 from hyperloom.measure.spec import EnvEntry, EnvRoot
 from hyperloom.orchestrator.actions.executors import (
+    SGLANG_PATCH_SERVER_FLAG,
     VLLM_PATCH_PROFILER_FIELDS,
     ensure_patched_copy,
     is_patched_copy,
@@ -63,6 +64,7 @@ __all__ = [
     "Farm",
     "FarmError",
     "NativeModule",
+    "PATCH_NOT_LAID",
     "build_farm",
     "built_roots",
     "inherited_environment",
@@ -73,6 +75,7 @@ __all__ = [
     "place_farm",
     "place_host_copies",
     "prepend_pythonpath",
+    "record_unpatched",
     "server_environment",
     "server_python",
     "verify_farm",
@@ -91,6 +94,8 @@ _RUNTIME_KIND = "runtime"
 _DELETE = "delete"
 _IMPORT_FILE = "import importlib, sys\nprint(importlib.import_module(sys.argv[1]).__file__)\n"
 _PYTHONPATH = "PYTHONPATH"
+#: Where the render of a vLLM point names the image checkout it put on the server's path (``_apply_vllm_source_runtime``).
+_VLLM_CHECKOUT_ENV = "VLLM_REPO_PATH"
 
 #: How the farm lays a directory a package writes into at run time. ``linked``: real, its files links (a writer that
 #: renames a new file over a name replaces the link, not the image's file). ``empty``: real and empty. ``linked_tree``:
@@ -546,47 +551,75 @@ def _verify_aiter_meta(farm: Farm, envs: Mapping[str, Any]) -> None:
 
 # --- TraceLens's patch for a profile -----------------------------------------------------------------------------
 
-#: What the render of a profile point says of TraceLens's patch (``_profile_setup.write_tracelens_patch_status``), and
-#: the value it has when the point's server was rendered to run the patched framework.
+#: What the render of a profile point says of TraceLens's patch (``_profile_setup.write_tracelens_patch_status``): the
+#: value it has when the point's server was rendered to run the patched framework, and the one a render writes when the
+#: patch cannot be laid.
 _PATCH_STATUS_ENV = "HYPERLOOM_TRACELENS_PATCH_STATUS"
 _PATCH_LAID = "ok"
+_PATCH_UNAVAILABLE = "unavailable"
+#: The note a profile test's record carries when its server runs without the patch its point was rendered with.
+PATCH_NOT_LAID = "profile_patch_not_laid"
 
 
 def _rendered_envs(config: Mapping[str, Any]) -> Mapping[str, Any]:
     return (config.get("benchmark") or {}).get("envs") or {}
 
 
-def _asks_patched_server(config: Mapping[str, Any]) -> bool:
-    """Whether ``config`` asks its vLLM for a field only TraceLens's patch adds; an unpatched vLLM refuses its whole
-    command line."""
-    args = str(_rendered_envs(config).get("EXTRA_VLLM_ARGS", ""))
-    return any(f"--profiler-config.{field}" in args for field in VLLM_PATCH_PROFILER_FIELDS)
+def _patch_only_flags(config: Mapping[str, Any]) -> list[str]:
+    """The flags ``config`` passes its server that only TraceLens's patch adds: vLLM's profiler fields, or the
+    shape-discovery flag of SGLang's roofline patch. An unpatched server refuses its whole command line."""
+    envs = _rendered_envs(config)
+    vllm = str(envs.get("EXTRA_VLLM_ARGS", ""))
+    flags = [f"--profiler-config.{field}" for field in VLLM_PATCH_PROFILER_FIELDS]
+    asked = [flag for flag in flags if flag in vllm]
+    if SGLANG_PATCH_SERVER_FLAG in str(envs.get("EXTRA_SGLANG_ARGS", "")):
+        asked.append(SGLANG_PATCH_SERVER_FLAG)
+    return asked
 
 
 def _profiled_package(config: Mapping[str, Any]) -> str | None:
     """The framework package whose patched copy the server of ``config`` must import: that of a point rendered with
-    TraceLens's patch or asking its vLLM for a field only the patch adds; ``None`` for any other point."""
-    if _rendered_envs(config).get(_PATCH_STATUS_ENV) != _PATCH_LAID and not _asks_patched_server(config):
+    TraceLens's patch or passing its server a flag only the patch adds; ``None`` for any other point."""
+    if _rendered_envs(config).get(_PATCH_STATUS_ENV) != _PATCH_LAID and not _patch_only_flags(config):
         return None
     framework = str((config.get("benchmark") or {}).get("framework") or "")
     return framework_registry.python_package(framework) if framework_registry.is_supported(framework) else None
 
 
-def lay_profile_patch(farm: Farm | None, config: Mapping[str, Any]) -> None:
+def lay_profile_patch(farm: Farm | None, config: Mapping[str, Any]) -> str | None:
     """Lay TraceLens's patch in the farm's copy of the framework the profile ``config`` runs, when the farm rebuilt it:
     the server imports that copy.
 
+    Returns:
+        The note for the test's record when the patch cannot be laid there: the server then runs the farm's framework
+        without the patch its point was rendered with, and every point must say so (:func:`record_unpatched`).
+        ``None`` when the server runs the patch it was rendered with, or was rendered with none.
+
     Raises:
-        FarmError: The patch cannot be laid there and ``config`` asks its server for a field only the patch adds.
+        FarmError: The patch cannot be laid there and ``config`` passes its server a flag only the patch adds.
     """
     package = _profiled_package(config)
-    if farm is None or package is None or package not in farm.packages:
-        return
-    if not lay_tracelens_patch(package, farm.site) and _asks_patched_server(config):
+    if farm is None or package is None or package not in farm.packages or lay_tracelens_patch(package, farm.site):
+        return None
+    asked = _patch_only_flags(config)
+    if asked:
         raise FarmError(
-            f"the profile asks its server for {', '.join(VLLM_PATCH_PROFILER_FIELDS)}, which only TraceLens's patch "
-            f"adds, and the patch cannot be laid in the farm's {package}"
+            f"the profile asks its server for {', '.join(asked)}, which only TraceLens's patch adds, and the patch "
+            f"cannot be laid in the farm's {package}"
         )
+    return (
+        f"{PATCH_NOT_LAID}: TraceLens's patch cannot be laid in the {package} the test rebuilt, so the profiled server "
+        f"runs it without the patch and its trace lacks what the patch adds, such as the graph-capture tags; "
+        f"{_PATCH_STATUS_ENV}={_PATCH_UNAVAILABLE}"
+    )
+
+
+def record_unpatched(point: Path) -> None:
+    """Say in the profile ``point`` that its server runs without TraceLens's patch (:func:`lay_profile_patch`), as a
+    render whose patch cannot be laid says it."""
+    config = _loaded(point)
+    config.setdefault("benchmark", {}).setdefault("envs", {})[_PATCH_STATUS_ENV] = _PATCH_UNAVAILABLE
+    point.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_UTF8)
 
 
 def place_host_copies(points: Iterable[Path], work: Path) -> tuple[Path, ...]:
@@ -609,21 +642,26 @@ def place_host_copies(points: Iterable[Path], work: Path) -> tuple[Path, ...]:
 def _place_host_copy(config: dict[str, Any]) -> bool:
     """Name this host's patched copy of the framework on the server's ``PYTHONPATH`` in the profile ``config``: where its
     render named its own copy, which is behind a farm and ahead of the installed framework, or last when it named none;
-    whether ``config`` changed. A point that needs no patch is left as it is."""
+    whether ``config`` changed. A point that needs no patch is left as it is. The copy of a vLLM whose render put the
+    image's checkout on the path (``_workload_envs._apply_vllm_source_runtime``) mirrors that checkout, which it goes
+    ahead of."""
     package = _profiled_package(config)
     if package is None:
         return False
-    patched = ensure_patched_copy(package)
+    envs = _launch_environment(config)
+    current = str((envs.get(_PYTHONPATH) if _PYTHONPATH in envs else os.environ.get(_PYTHONPATH, "")) or "")
+    checkout = str(envs.get(_VLLM_CHECKOUT_ENV) or "") if package == "vllm" else ""
+    on_path = bool(checkout) and checkout in current.split(os.pathsep)
+    patched = ensure_patched_copy(package, Path(checkout) if on_path else None)
     if patched is None or patched.site is None:
-        if _asks_patched_server(config):
+        asked = _patch_only_flags(config)
+        if asked:
             raise FarmError(
-                f"the profile asks vLLM for {', '.join(VLLM_PATCH_PROFILER_FIELDS)}, which only TraceLens's vLLM patch "
-                "adds, and the patch cannot be applied to this host's vLLM"
+                f"the profile asks its server for {', '.join(asked)}, which only TraceLens's patch adds, and the patch "
+                f"cannot be applied to this host's {package}"
             )
         return False
-    envs = _launch_environment(config)
-    current = envs.get(_PYTHONPATH) if _PYTHONPATH in envs else os.environ.get(_PYTHONPATH, "")
-    placed = _with_copy(str(current or ""), patched.site)
+    placed = _with_copy(current, patched.site)
     if _PYTHONPATH in envs and placed == str(envs[_PYTHONPATH]):
         return False
     envs[_PYTHONPATH] = placed

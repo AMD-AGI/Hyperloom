@@ -40,7 +40,12 @@ copy of the installed package on the host's local disk and puts that copy first
 on the profiled server's `PYTHONPATH`, through
 `src/hyperloom/orchestrator/actions/executors/_server_patcher.py` and the
 workload environment helpers; the installed tree, which every other test and
-session imports, is never written. The generated report feeds the roofline ceilings
+session imports, is never written. A copy is reused only when the same user laid
+it and no one else can write it; with vLLM's image source checkout
+(`HYPERLOOM_VLLM_IMAGE_SOURCE=1`) the copy mirrors that checkout. A profile test
+whose rebuilt framework the patch cannot be laid in runs without it, and its
+notes and points say so (`profile_patch_not_laid`,
+`HYPERLOOM_TRACELENS_PATCH_STATUS=unavailable`). The generated report feeds the roofline ceilings
 and bottleneck list used to score candidate optimizations. See
 [Hyperloom optimization loop](../conceptual/optimization-loop.md).
 

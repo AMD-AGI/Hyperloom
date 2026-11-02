@@ -233,8 +233,11 @@ class ProfileInstrumentation(NamedTuple):
     patched_copy: Path | None = None
 
 
-def prepare_profile(bench: dict[str, Any], envs: dict[str, Any]) -> ProfileInstrumentation:
-    """Prepare runtime instrumentation and the fixed-sequence capture workload."""
+def prepare_profile(
+    bench: dict[str, Any], envs: dict[str, Any], *, vllm_checkout: Path | None = None
+) -> ProfileInstrumentation:
+    """Prepare runtime instrumentation and the fixed-sequence capture workload; ``vllm_checkout`` is the vLLM source
+    checkout the launch puts on the server's path, which the patched copy then mirrors (:func:`patch_for_profile`)."""
     plan = _capture_plan(envs)
     envs["OSL"] = plan.osl
     return _apply_framework_profile(
@@ -243,6 +246,7 @@ def prepare_profile(bench: dict[str, Any], envs: dict[str, Any]) -> ProfileInstr
         delay_iters=plan.delay_iters,
         max_iters=plan.max_iters,
         num_prompts=plan.num_prompts,
+        vllm_checkout=vllm_checkout,
     )
 
 
@@ -396,9 +400,10 @@ def _apply_framework_profile(
     delay_iters: int,
     max_iters: int,
     num_prompts: int,
+    vllm_checkout: Path | None = None,
 ) -> ProfileInstrumentation:
     framework = str(bench.get("framework") or "").lower()
-    patch_ok, sitecustomize, site = patch_for_profile(envs, framework)
+    patch_ok, sitecustomize, site = patch_for_profile(envs, framework, vllm_checkout=vllm_checkout)
     if "atom" in framework:
         caps = _atom_tracelens_caps()
         conc = int(envs.get("CONC") or DEFAULT_CONC)
@@ -445,9 +450,10 @@ class ProfilePatch(NamedTuple):
     site: Path | None
 
 
-def patch_for_profile(envs: dict[str, Any], framework: str) -> ProfilePatch:
+def patch_for_profile(envs: dict[str, Any], framework: str, *, vllm_checkout: Path | None = None) -> ProfilePatch:
     """Lay TraceLens's patch for the server the way the fixed-sequence profile does, in a copy of the installed
-    framework (``_server_patcher``), and write the patch status into ``envs``."""
+    framework (``_server_patcher``), or of the vLLM source checkout ``vllm_checkout`` the server imports ahead of it,
+    and write the patch status into ``envs``."""
     from hyperloom.orchestrator.actions.executors._server_patcher import (
         ensure_sglang_patched_for_tracelens,
         ensure_vllm_patched_for_tracelens,
@@ -461,7 +467,7 @@ def patch_for_profile(envs: dict[str, Any], framework: str) -> ProfilePatch:
     if is_atom or not _tracelens_patch_enabled():
         return ProfilePatch(False, sitecustomize, None)
     if "vllm" in framework:
-        patched = ensure_vllm_patched_for_tracelens()
+        patched = ensure_vllm_patched_for_tracelens(vllm_checkout)
     else:
         patched = ensure_sglang_patched_for_tracelens()
     patch_ok = patched is not None
@@ -484,6 +490,9 @@ def patch_for_profile(envs: dict[str, Any], framework: str) -> ProfilePatch:
 #: The ``--profiler-config`` fields only TraceLens's vLLM patch adds (``_server_patcher``): a vLLM that was not patched
 #: refuses them, so the server they are passed to must run a patched vLLM.
 VLLM_PATCH_PROFILER_FIELDS: tuple[str, ...] = ("capture_torch_profiler", "detailed_trace_annotation")
+#: The server flag only TraceLens's SGLang roofline patch adds (``server_args.patch``, SGLang < 0.5.18), which an SGLang
+#: that was not patched refuses with its whole command line.
+SGLANG_PATCH_SERVER_FLAG = "--enable-shape-discovery-for-cuda-graph-profile"
 
 
 def _apply_vllm_profile(
@@ -561,7 +570,7 @@ def _apply_sglang_profile(
     if patch_ok and shape_discovery:
         existing = str(envs.get("EXTRA_SGLANG_ARGS", ""))
         if "shape-discovery-for-cuda-graph-profile" not in existing:
-            envs["EXTRA_SGLANG_ARGS"] = f"{existing} --enable-shape-discovery-for-cuda-graph-profile".strip()
+            envs["EXTRA_SGLANG_ARGS"] = f"{existing} {SGLANG_PATCH_SERVER_FLAG}".strip()
 
 
 def apply_sglang_shape_tool(envs: dict[str, Any], *, shape_discovery: bool) -> None:

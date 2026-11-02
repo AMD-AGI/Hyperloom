@@ -188,6 +188,25 @@ def test_the_call_is_built_from_the_sheet_and_the_environment_is_the_sandboxes(t
     assert "HYPERLOOM_SIGNING_KEY_FILE" not in env and env["HYPERLOOM_BENCHMARK_BACKEND"] == "bypass"
 
 
+def test_a_profile_whose_patch_cannot_be_laid_in_its_farm_runs_and_its_points_and_status_say_so(
+    tmp_path, env, monkeypatch
+):
+    backend = _Backend(_ok)
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", backend)
+    laid: list[dict] = []
+    note = "profile_patch_not_laid: TraceLens's patch cannot be laid in the sglang the test rebuilt"
+    monkeypatch.setattr(runner, "lay_profile_patch", lambda farm, config: laid.append(config) or note)
+
+    assert _go(tmp_path, env, _sheet(kind="profile")) == 0
+
+    (call,) = backend.calls
+    assert laid == [POINT], "the patch is laid for the point the sheet names"
+    assert yaml.safe_load(call.points[0].read_text())["benchmark"]["envs"]["HYPERLOOM_TRACELENS_PATCH_STATUS"] == (
+        "unavailable"
+    )
+    assert _status(tmp_path) == {"state": "succeeded", "error_class": None, "message": note}
+
+
 def test_a_failed_test_is_a_signed_result_with_its_failure_class(tmp_path, env, monkeypatch):
     def failing(call):
         return TestOutcome(1, "", "CUDA out of memory: HIP out of memory", (), SandboxFacts(sandbox_id="x"))

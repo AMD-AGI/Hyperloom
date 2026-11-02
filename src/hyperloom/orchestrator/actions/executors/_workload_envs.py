@@ -553,13 +553,19 @@ def _resolve_framework_repo_path(
 VLLM_SOURCE_ROOT_ENVS: tuple[str, ...] = ("FRAMEWORK_REPO_PATH", "VLLM_REPO_PATH", "VLLM_DIR")
 
 
+def _vllm_image_source(bench: dict[str, Any], envs: dict[str, Any]) -> str:
+    """The prepared image checkout ``install.sh`` activates (``HYPERLOOM_VLLM_IMAGE_SOURCE=1``), which the server of a
+    vLLM ``bench`` imports ahead of the installed wheel; ``""`` when there is none."""
+    if str(bench.get("framework") or "").strip().lower() != "vllm":
+        return ""
+    if os.environ.get("HYPERLOOM_VLLM_IMAGE_SOURCE", "").strip() != "1":
+        return ""
+    return _resolve_framework_repo_path(envs, framework="vllm")
+
+
 def _apply_vllm_source_runtime(bench: dict[str, Any], envs: dict[str, Any]) -> None:
     """Route a prepared image checkout into the vLLM server launch."""
-    if str(bench.get("framework") or "").strip().lower() != "vllm":
-        return
-    if os.environ.get("HYPERLOOM_VLLM_IMAGE_SOURCE", "").strip() != "1":
-        return
-    repo_path = _resolve_framework_repo_path(envs, framework="vllm")
+    repo_path = _vllm_image_source(bench, envs)
     if not repo_path:
         return
     for name in VLLM_SOURCE_ROOT_ENVS:
@@ -1058,7 +1064,9 @@ def _shape_request_window(bench: dict[str, Any]) -> _RequestWindow:
     if is_profile and serves_requests:
         from ._profile_setup import prepare_profile
 
-        outcome = prepare_profile(bench, envs)
+        checkout = _vllm_image_source(bench, envs)
+        # The copy TraceLens's patch is laid in goes ahead of that checkout (``materialize_config_with_envs``).
+        outcome = prepare_profile(bench, envs, vllm_checkout=Path(checkout) if checkout else None)
         osl_val = int(envs["OSL"])
         profile_num_prompts = outcome.num_prompts
         atom_caps = outcome.atom_caps
