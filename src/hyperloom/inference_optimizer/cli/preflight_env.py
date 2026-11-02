@@ -174,6 +174,10 @@ def _load_missing_env_vars(file_vars: dict[str, str]) -> int:
     return loaded
 
 
+def _read_dotenv_text(env_file: Path) -> str:
+    return env_file.read_text(encoding="utf-8", errors="replace")
+
+
 def _load_dotenv_fallback() -> dict[str, Any]:
     """Source missing vars from ``$REPO_ROOT/.env``; env always wins (no-clobber)."""
     env_file = _resolve_dotenv_file()
@@ -183,7 +187,7 @@ def _load_dotenv_fallback() -> dict[str, Any]:
             "skip_reason": "dotenv_missing",
             "detail": {"vars_loaded": 0, "source": None},
         }
-    parsed = _parse_env_assignments(env_file.read_text(encoding="utf-8", errors="replace"))
+    parsed = _parse_env_assignments(_read_dotenv_text(env_file))
     for key in ("TRACELENS_ROOT", "TRACELENS_INTERNAL_ROOT"):
         if key in parsed and _is_placeholder_tracelens_path(parsed[key]):
             del parsed[key]
@@ -359,7 +363,7 @@ def _workspace_selection() -> Mapping[str, str]:
     env_file = _resolve_dotenv_file()
     if env_file is None:
         return os.environ
-    text = env_file.read_text(encoding="utf-8", errors="replace")
+    text = _read_dotenv_text(env_file)
     if os.environ.get("HYPERLOOM_SETUP_ENV_AUTHORITATIVE") != "1" and not _AUTHORITATIVE_DOTENV_LINE.search(text):
         return os.environ
     return _parse_env_assignments(text)
