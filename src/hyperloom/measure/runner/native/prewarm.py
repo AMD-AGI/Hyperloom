@@ -148,9 +148,9 @@ def missing_prebuilt_modules(image_root: Path, tables: Collection[str] | None = 
 
 
 def watchdog_seconds_for(modules: Collection[str]) -> int:
-    """The ``--watchdog-timeout`` that covers building ``modules`` at the first prefill, one after another: 600 s each plus
-    sglang's own 300 s (:func:`~hyperloom.measure.runner.rebuild_watchdog.rebuild_watchdog_sec`)."""
-    return rebuild_watchdog_sec(len(modules))
+    """The ``--watchdog-timeout`` that covers building ``modules`` at the first prefill, one after another: 600 s each, a
+    CK-tile module 2700 s, plus sglang's own 300 s (:func:`~hyperloom.measure.runner.rebuild_watchdog.rebuild_watchdog_sec`)."""
+    return rebuild_watchdog_sec(modules)
 
 
 def read_manifest(jit_dir: Path) -> dict[str, dict[str, str]]:

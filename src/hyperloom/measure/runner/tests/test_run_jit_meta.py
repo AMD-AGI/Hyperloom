@@ -70,7 +70,7 @@ def test_the_server_builds_the_module_the_patch_touches_and_keeps_the_one_it_doe
         "module_gemm.so is new; module_other.so is the image's link"
     )
     assert (
-        "the patch or the tuned tables touch 1 aiter modules, built when first called (module_gemm)"
+        "the patch, the tuned tables or the build variables touch 1 aiter modules, built when first called (module_gemm)"
         in status["message"]
     )
 

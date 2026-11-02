@@ -36,7 +36,9 @@ TEST_TABLE = "M,N,K,kernelName\n7,8,9,gemm_k9\n"
 DEFAULT = "configs/a8w8_tuned_gemm.csv"
 IMAGE_MODULE = "image build"
 INERT = "inert_patch:"
-TOUCHED = "the patch or the tuned tables touch 1 aiter modules, built when first called (module_gemm)"
+TOUCHED = (
+    "the patch, the tuned tables or the build variables touch 1 aiter modules, built when first called (module_gemm)"
+)
 DECLARED = (
     'AITER_CONFIG_GEMM_A8W8 = os.getenv("AITER_CONFIG_GEMM_A8W8", f"{AITER_ROOT_DIR}/aiter/configs/a8w8_tuned_gemm.csv")\n'
     "class AITER_CONFIG:\n"

@@ -107,14 +107,15 @@ class ModuleBuild:
 
 class ModulePlan(Protocol):
     """Which of the touched modules ``candidates`` of aiter's stack (its ``roots``, the module config ``config`` they
-    leave) a CPU build makes, ``None`` when it makes none; and how long building ``modules`` on CPU takes."""
+    leave) a CPU build makes, ``None`` when it makes none; and how long building ``modules`` (entries of ``config``, or
+    names aiter makes from one) on CPU takes."""
 
     def __call__(
         self, roots: tuple[EnvRoot, ...], config: Mapping[str, Any], candidates: Collection[str]
     ) -> ModuleBuild | None:
         """The CPU build of the ``candidates`` it makes, if any."""
 
-    def seconds(self, modules: Collection[str]) -> float:
+    def seconds(self, modules: Collection[str], config: Mapping[str, Any]) -> float:
         """How long building ``modules`` on CPU takes, in seconds."""
 
 
