@@ -723,7 +723,7 @@ class FrameworkPhase(_AuthoredOutcomeMixin, _CandidateDiscoveryMixin, ProposalBe
         return spec_tid
 
     async def _maybe_rearm_authored_lane(self, res: dict[str, Any] | None, params: Mapping[str, Any]) -> None:
-        """Route an authored lane's result to the handler that rearms it: enablement settles, a perf apply-failure retries under cap."""
+        """Route an authored lane's result to the handler that rearms it: enablement settles, a perf apply-failure re-authors the candidate ``params`` name, under cap."""
         if not isinstance(res, dict):
             return
         lane = first_str(res.get("lane"))
@@ -734,7 +734,7 @@ class FrameworkPhase(_AuthoredOutcomeMixin, _CandidateDiscoveryMixin, ProposalBe
         if first_str(res.get("status")) != "apply_failed" or lane not in ("perf_framework", "perf_explore"):
             return
 
-        candidate = to_mapping(res.get("candidate")) or self._candidate_row(self._authored_candidate_id(params))
+        candidate = self._candidate_row(self._authored_candidate_id(params))
         cand_id = self._framework_candidate_key(candidate) or first_str(res.get("specialist_task_id")).strip()
         if not cand_id:
             return

@@ -561,7 +561,7 @@ class _AuthoredOutcomeMixin:
     """Bridges authored-deliverable outcomes into the FRAMEWORK progress ledger, the attempt ledger and the timeline."""
 
     def _authored_candidate_id(self, params: Mapping[str, Any]) -> str:
-        """The FRAMEWORK candidate (a PR URL) an authored patch's task belongs to; empty when it names none."""
+        """The FRAMEWORK candidate (a PR URL) an ``integrate_patch`` task's params name; empty when they name none."""
         cand_map = to_mapping(self.shared_state.framework_agent_specialist_candidate_map)
         return first_str(
             params.get("framework_agent_candidate_id"), cand_map.get(first_str(params.get("specialist_task_id")))
@@ -569,9 +569,11 @@ class _AuthoredOutcomeMixin:
 
     def _candidate_row(self, cand_id: str) -> dict[str, Any]:
         """The latest discovered row of candidate ``cand_id``, carrying its batch id; empty when no batch holds it."""
+        if not cand_id:
+            return {}
         for batch in reversed(dict_rows(self.shared_state.framework_agent_batches)):
             for cand in dict_rows(batch.get("candidates")):
-                if cand_id and self._framework_candidate_key(cand) == cand_id:
+                if self._framework_candidate_key(cand) == cand_id:
                     return {"batch_id": first_str(batch.get("batch_id")), **cand}
         return {}
 

@@ -483,7 +483,6 @@ async def test_a_commit_failure_after_a_keep_does_not_rearm_the_author(tmp_path:
         "status": "reverted",
         "error_class": "keep_commit_failed",
         "lane": "perf_framework",
-        "candidate": {"candidate_id": "c1"},
         "specialist_task_id": "t1",
     }
 

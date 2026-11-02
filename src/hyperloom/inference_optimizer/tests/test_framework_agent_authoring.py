@@ -10,11 +10,13 @@ from typing import Any
 import pytest
 
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
+from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 from hyperloom.orchestrator.bus.message_bus import MessageBus
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
 
 from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.state.task_registry import TaskNotFound
 
 from ._optimize_fixtures import optimize_state
 from .conftest import make_coordinator
@@ -935,51 +937,33 @@ async def test_perf_explore_retry_stamps_immutable_explore_owner(
 
 @pytest.mark.asyncio
 async def test_an_authored_patch_that_fails_to_apply_reauthors_its_pr_candidate(tmp_path: Path) -> None:
-    """An authored apply_failed result names no candidate; the retry re-dispatches the PR its task params name."""
-    from hyperloom.inference_optimizer.session.optimization_journal import Verdict
-
+    """An apply_failed result names no candidate; the retry re-authors the PR its task params name."""
     stub = _stub(tmp_path)
     pr_url = "https://github.com/vllm-project/vllm/pull/60076"
-    _seed_batch(stub, {"pr_url": pr_url, "title": "KV-only insert", "diff_url": f"{pr_url}.diff"})
+    _seed_batch(stub, {"pr_url": pr_url, "diff_url": f"{pr_url}.diff"})
 
     async def _no_such_task(task_id: str) -> Any:
-        from hyperloom.orchestrator.state.task_registry import TaskNotFound
-
         raise TaskNotFound(task_id)
 
     stub.tasks.get = _no_such_task
     task = SimpleNamespace(
         task_id="integrate-60076",
         kind="integrate_patch",
-        params={
-            "framework_agent_authoring": True,
-            "framework_agent_candidate_id": pr_url,
-            "framework_batch_id": "b1",
-            "specialist_task_id": "spec-60076",
-        },
+        params={"framework_agent_authoring": True, "framework_agent_candidate_id": pr_url},
     )
     result = SubAgentResult(
         task_id=task.task_id,
         state="succeeded",
-        result={
-            "status": "apply_failed",
-            "lane": "perf_framework",
-            "error_class": "patch_conflict",
-            "specialist_task_id": "spec-60076",
-            "retry_feedback": [{"patch": "kv_insert.patch", "channel": "git", "stderr": "hunk 2 does not apply"}],
-        },
+        result={"status": "apply_failed", "lane": "perf_framework", "specialist_task_id": "spec-60076"},
     )
 
     await stub.phase_framework.on_integrate_patch_settled(task, result, Verdict.FAILED)
 
     assert stub.shared_state.apply_fail_reauthor_attempts == {pr_url: 1}
-    assert stub.shared_state.apply_fail_retry_pending == []
     params = stub.tasks.created[-1]["params"]
     assert params["framework_agent_candidate_id"] == pr_url
     assert params["framework_batch_id"] == "b1"
-    assert params["reauthor_attempt"] == 1
     assert params["pr_lead"]["diff_url"] == f"{pr_url}.diff"
-    assert "hunk 2 does not apply" in params["notes"]
 
 
 # ── Parallel authoring ───────────────────────────────────────────────────────

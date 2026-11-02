@@ -34,8 +34,9 @@ async def _map_authoring_specialist(coord: Coordinator) -> None:
 
 
 async def _rearm_under_cap(coord: Coordinator) -> None:
+    coord.shared_state.framework_agent_batches = [{"batch_id": "b-1", "candidates": [dict(_CAND)]}]
     await coord.phase_framework._maybe_rearm_authored_lane(
-        {"lane": "perf_framework", "status": "apply_failed", "candidate": dict(_CAND)}, {}
+        {"lane": "perf_framework", "status": "apply_failed"}, {"framework_agent_candidate_id": _CAND_ID}
     )
 
 
