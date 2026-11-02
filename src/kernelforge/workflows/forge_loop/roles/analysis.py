@@ -38,7 +38,7 @@ from kernelforge.workflows.forge_loop.roles.analysis_session import (
     AnalysisSessionJournal,
     MAX_ANALYSIS_SESSION_ATTEMPTS,
 )
-from kernelforge.utils.durable_io import atomic_write_json, fsync_directory, fsync_tree
+from hyperloom_common.io import DURABLE, JsonFormat, atomic_write_json, fsync_directory, fsync_tree
 from kernelforge.config.resources import assert_sandbox_grant
 
 
@@ -479,7 +479,9 @@ class AnalysisAgentService:
             case_root = work_root / "cases" / case.directory
             case_root.mkdir(parents=True, exist_ok=True)
             if not (case_root / "case.json").is_file():
-                atomic_write_json(case_root / "case.json", case.to_dict())
+                atomic_write_json(
+                    case_root / "case.json", case.to_dict(), fmt=JsonFormat(trailing_newline=True), options=DURABLE
+                )
         inventory_path = work_root / "case_inventory.json"
         if not inventory_path.is_file():
             atomic_write_json(
@@ -488,6 +490,8 @@ class AnalysisAgentService:
                     "analysis_commit": context.analysis_commit,
                     "cases": [case.to_dict() for case in cases],
                 },
+                fmt=JsonFormat(trailing_newline=True),
+                options=DURABLE,
             )
         progress_path = work_root / "progress.json"
         if not progress_path.is_file():
@@ -498,6 +502,8 @@ class AnalysisAgentService:
                     "status": "RUNNING",
                     "cases": [{"case_id": case.case_id, "status": "PENDING"} for case in cases],
                 },
+                fmt=JsonFormat(trailing_newline=True),
+                options=DURABLE,
             )
 
     @staticmethod
@@ -562,6 +568,8 @@ class AnalysisAgentService:
                 "artifacts": provenance_payload["artifacts"],
                 "normalized_metrics_sha256": provenance_payload["normalized_metrics_sha256"],
             },
+            fmt=JsonFormat(trailing_newline=True),
+            options=DURABLE,
         )
         return True
 
@@ -577,7 +585,9 @@ class AnalysisAgentService:
         case_states = []
         for case in cases:
             case_root = work_root / "cases" / case.directory
-            atomic_write_json(case_root / "case.json", case.to_dict())
+            atomic_write_json(
+                case_root / "case.json", case.to_dict(), fmt=JsonFormat(trailing_newline=True), options=DURABLE
+            )
             analysis_path = case_root / "analysis.md"
             profile_root = case_root / "profile"
             has_analysis = cls._nonempty_file(analysis_path)
@@ -615,6 +625,8 @@ class AnalysisAgentService:
                 "analysis_commit": context.analysis_commit,
                 "cases": case_states,
             },
+            fmt=JsonFormat(trailing_newline=True),
+            options=DURABLE,
         )
         atomic_write_json(
             work_root / "progress.json",
@@ -629,6 +641,8 @@ class AnalysisAgentService:
                     for case in case_states
                 ],
             },
+            fmt=JsonFormat(trailing_newline=True),
+            options=DURABLE,
         )
         atomic_write_json(
             work_root / "manifest.json",
@@ -643,6 +657,8 @@ class AnalysisAgentService:
                 "skipped_case_ids": skipped,
                 "report": "report.md",
             },
+            fmt=JsonFormat(trailing_newline=True),
+            options=DURABLE,
         )
 
     @staticmethod
@@ -860,7 +876,9 @@ class AnalysisAgentService:
             "changed_source_files": (list(incremental.changed_source_files) if incremental is not None else []),
         }
         if not session.request_path.is_file():
-            atomic_write_json(session.request_path, request_payload)
+            atomic_write_json(
+                session.request_path, request_payload, fmt=JsonFormat(trailing_newline=True), options=DURABLE
+            )
             return
         try:
             durable_request = json.loads(session.request_path.read_text())
@@ -881,7 +899,9 @@ class AnalysisAgentService:
             raise AnalysisBundleError("durable analysis request does not match current inputs")
         if retry_published_bundle:
             durable_request["analysis_profiling_enabled"] = self.profiling_enabled
-            atomic_write_json(session.request_path, durable_request)
+            atomic_write_json(
+                session.request_path, durable_request, fmt=JsonFormat(trailing_newline=True), options=DURABLE
+            )
 
     def _publish_session_bundle(
         self,
@@ -1038,6 +1058,8 @@ class AnalysisAgentService:
                 "analysis_session_status": workflow.status,
                 "artifacts": artifacts,
             },
+            fmt=JsonFormat(trailing_newline=True),
+            options=DURABLE,
         )
         return catalog_path
 
@@ -1780,6 +1802,8 @@ Update analysis incrementally:
                 "generation_root": generation_root.name,
                 "published_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             },
+            fmt=JsonFormat(trailing_newline=True),
+            options=DURABLE,
         )
         return generation_root
 

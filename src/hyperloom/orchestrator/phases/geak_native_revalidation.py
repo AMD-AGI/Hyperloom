@@ -19,7 +19,7 @@ from hyperloom.inference_optimizer.session.geak_rebench_verdict import (
     REBENCH_VALIDATED,
 )
 
-from hyperloom.common.io import atomic_write_json
+from hyperloom_common.io import atomic_write_json
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from hyperloom.orchestrator.bus.message_bus import Message
 from hyperloom.common.overlay import overlay_is_loadable

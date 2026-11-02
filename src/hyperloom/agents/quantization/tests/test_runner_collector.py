@@ -99,7 +99,7 @@ def test_resolve_quantized_dir_pyyaml_missing(tmp_path: Path, monkeypatch) -> No
 async def test_an_attempt_runs_on_the_harness_when_the_platform_names_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from hyperloom.common import llm_config
+    from hyperloom_common.llm import llm_config
     from hyperloom.common.deepseek_task import DeepSeekTaskResult
 
     skill = tmp_path / "SKILL.md"
@@ -155,7 +155,7 @@ def test_a_blocked_attempt_is_finished(tmp_path: Path) -> None:
 
 async def test_an_interactive_attempt_is_not_continued(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Its checkpoints wait for an answer a headless session never gets."""
-    from hyperloom.common import llm_config
+    from hyperloom_common.llm import llm_config
     from hyperloom.common.deepseek_task import DeepSeekTaskResult
 
     skill = tmp_path / "SKILL.md"

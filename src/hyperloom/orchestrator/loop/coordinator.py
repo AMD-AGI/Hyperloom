@@ -15,8 +15,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, AbstractSet, Any, Awaitable, Callable
 
-from hyperloom.common.env import env_float, env_int
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.env import env_float, env_int
+from hyperloom_common.timeutil import now_iso
 from hyperloom.orchestrator.knowledge.config import KnowledgeConfig, KnowledgeStoreMode
 from hyperloom.orchestrator.knowledge.recipe_kb import RecipeKB
 
@@ -83,7 +83,7 @@ from hyperloom.common.deadline import Deadline, seconds_until
 from hyperloom.inference_optimizer.trace.orchestration_trace import (
     write_mcp_setup_once,
 )
-from hyperloom.common.timeutil import format_exc_brief
+from hyperloom_common.timeutil import format_exc_brief
 
 
 log = logging.getLogger(__name__)
@@ -269,7 +269,6 @@ class Coordinator:
             _set_lane_capacity(self.db.raw, "research_lane", cap)
         # gpu_research_lane stays capacity-1 (strictly serial GPU specialists);
         # the GPU pool partitions physical cards within that one lease.
-        # `strict_paths` defers to the env flag.
         # The durable bring-up mutex. The gate never reads it; ``open`` decides.
         self.rounds = RoundStore(self.db)
         self.policy = PolicyGate(

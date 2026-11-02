@@ -12,8 +12,8 @@ from datetime import datetime, timezone
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Collection, Mapping, NamedTuple
 
-from hyperloom.common.coerce import first_float, recorded_float, to_float, to_int, to_mapping, to_str_list
-from hyperloom.common.io import JsonLineFormat, append_jsonl
+from hyperloom_common.coerce import first_float, recorded_float, to_float, to_int, to_mapping, to_str_list
+from hyperloom_common.io import JsonLineFormat, append_jsonl
 from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close_out
 from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
     ARM_CONFIG,
@@ -217,7 +217,7 @@ def _record_config_run(coord: Any, *, task: Any, result_dict: Mapping[str, Any])
     recorder = coord._coord.phase_framework.timeline()
     if recorder is None:
         return
-    from hyperloom.common.timeutil import now_iso
+    from hyperloom_common.timeutil import now_iso
     from hyperloom.inference_optimizer.breakdown.recorder.framework_event import ROLE_CONFIG
 
     task_id = str(getattr(task, "task_id", "") or "")

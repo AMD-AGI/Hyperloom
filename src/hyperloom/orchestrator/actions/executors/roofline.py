@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Sequence
 
 from hyperloom.common.provenance import detect_kineto_backend
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.timeutil import now_iso
 from ...phases.machine_state import LifecycleMark, record_lifecycle_event
 from ...loop.sub_agent_runner import RunnerContext
 from ...state.analysis_failures import remember_roofline_failure, remember_trace_failure

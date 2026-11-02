@@ -21,8 +21,8 @@ from typing import Any, Mapping
 
 import yaml
 
-from hyperloom.common.coerce import optional_positive_float
-from hyperloom.common.env import is_truthy
+from hyperloom_common.coerce import optional_positive_float
+from hyperloom_common.env import is_truthy
 from hyperloom.common.perf_metric import agentx_active, with_output_per_gpu
 from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
     ROUND_SINGLE,
@@ -131,7 +131,7 @@ def _round_headroom_sec(state: Any) -> tuple[float | None, dict[str, Any]]:
     """Seconds this round's budget may still spend, and the numbers behind it."""
     if state is None:
         return None, {"reason": "no_session_state"}
-    usable_sec = _phase_state.session_usable_seconds(state)
+    usable_sec = state.session_budget_usable_sec()
     if usable_sec is None:
         return None, {"reason": "unbounded_session_budget"}
     return usable_sec, {"bound": "session_usable", "affordable_sec": round(usable_sec, 1)}

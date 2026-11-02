@@ -9,7 +9,7 @@ import os
 import sys
 from dataclasses import dataclass
 
-from hyperloom.common.gpu_identity import AMD_GPU_BOARDS, GpuBoard, board_named_in, gpu_board
+from hyperloom_common.gpu_identity import AMD_GPU_BOARDS, GpuBoard, board_named_in, gpu_board
 
 
 @dataclass(frozen=True)

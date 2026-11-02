@@ -15,7 +15,7 @@ import pytest
 _SRC = Path(__file__).resolve().parents[3]
 _PLUGS = _SRC / "hyperloom" / "plugs"
 _STDLIB = frozenset(sys.stdlib_module_names)
-_ALLOWED_PLUGS_IMPORTS = ("hyperloom.plugs", "hyperloom.common.entry_points")
+_ALLOWED_PLUGS_IMPORTS = ("hyperloom.plugs", "hyperloom_common.entry_points")
 
 # Hosted implementations, and dev-branch-only packages: nothing on main may reach them except their own owners.
 _HOSTED = (
@@ -54,7 +54,7 @@ def _plugs_import_violations(source: str) -> list[str]:
         top = module.split(".")[0]
         if top in _STDLIB or _under(module, _ALLOWED_PLUGS_IMPORTS):
             continue
-        # ``from hyperloom.common import entry_points`` is reported as hyperloom.common + the joined name.
+        # ``from common import entry_points`` is reported as hyperloom.common + the joined name.
         if module == "hyperloom.common" or module == "hyperloom":
             continue
         bad.append(f"line {line}: imports {module}")
@@ -90,7 +90,7 @@ def test_rule_1_plugs_import_only_the_standard_library_and_entry_points() -> Non
     "source",
     [
         "import yaml",
-        "from hyperloom.common.io import read_json",
+        "from hyperloom_common.io import read_json",
         "import hyperloom.orchestrator.loop",
         "def f():\n    from hyperloom.measure import hosted",
         "import hyperloom_multibranch",
@@ -102,7 +102,7 @@ def test_rule_1_guard_refuses_a_foreign_import_even_inside_a_function(source) ->
 
 
 def test_rule_1_guard_accepts_the_two_sanctioned_imports() -> None:
-    source = "import json\nfrom hyperloom.common.entry_points import iter_entry_point_objects\nfrom hyperloom.plugs.socket import Socket"
+    source = "import json\nfrom hyperloom_common.entry_points import iter_entry_point_objects\nfrom hyperloom.plugs.socket import Socket"
     assert _plugs_import_violations(source) == []
 
 

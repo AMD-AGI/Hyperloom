@@ -33,10 +33,10 @@ from hyperloom.common.codex_session import (
     CodexTurnRequest,
     run_codex_turn,
 )
-from hyperloom.common import llm_config
+from hyperloom_common.llm import llm_config
 from hyperloom.common.deepseek_task import DeepSeekTaskRequest
-from hyperloom.common.llm_config import claude_sdk_env_options
-from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL
+from hyperloom_common.llm.llm_config import claude_sdk_env_options
+from hyperloom_common.llm.llm_config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL
 from ._capture_shapes import is_capture_dir_name
 from ._literal_utils import LITERAL_EVAL_ERRORS as _LITERAL_EVAL_ERRORS
 from ._literal_utils import safe_literal_eval as _safe_literal_eval
@@ -519,7 +519,7 @@ def _import_sdk() -> tuple[Any, Any]:
 
 
 def _iter_message_text(message: Any) -> Iterable[str]:
-    from hyperloom.common.claude_oneshot import message_text
+    from hyperloom_common.llm.claude_oneshot import message_text
 
     yield from (t for t in message_text(message) if t)
 
@@ -759,7 +759,7 @@ async def run_tracelens_skill(
     """Execute the standalone TraceLens skill on the configured agent runtime.
 
     Prepares the command-prefix cache and orchestrator prompt, then dispatches
-    to the agent runtime :mod:`hyperloom.common.llm_config` selects: the DeepSeek
+    to the agent runtime :mod:`hyperloom_common.llm.llm_config` selects: the DeepSeek
     Harness, the Codex Agent SDK, or the Claude Agent SDK. Either way the presence
     of ``analysis.md`` is the source of truth: a runtime error after the report
     was written is recorded as metadata rather than raised.

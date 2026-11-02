@@ -25,12 +25,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TypeVar
 
-from hyperloom.common.coerce import first_str, first_text
-from hyperloom.common.fs_utils import append_text_nofollow
-from hyperloom.common.io import JsonFormat, WriteOptions, atomic_write_json
+from hyperloom_common.coerce import first_str, first_text
+from hyperloom_common.fs_utils import append_text_nofollow
+from hyperloom_common.io import JsonFormat, WriteOptions, atomic_write_json
 from hyperloom.common.deadline import Deadline, seconds_until
 from hyperloom.common.env_safety import BENCHMARK_SECRET_ENV_NAMES, redact_secret_values
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.timeutil import now_iso
 
 from hyperloom.inference_optimizer.session.session_paths import fs_safe_id, runs_dir, specialist_intel_path
 from ..state.experience_citations import normalize_citations, shown_ids
@@ -961,7 +961,6 @@ class SpecialistRunner:
                     system_prompt=prep.system_prompt,
                     user_prompt=prep.user_prompt,
                     disallowed_tools=SPECIALIST_TOOL_DENYLIST,
-                    max_turns=prep.max_turns,
                     gpu_ids=tuple(ctx.extra.get("gpu_ids") or ()),
                     deadline=deadline,
                     gpu_lease=ctx.extra.get("gpu_specialist_lease"),

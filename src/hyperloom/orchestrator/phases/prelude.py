@@ -9,9 +9,9 @@ import sqlite3
 from pathlib import Path
 from collections.abc import Mapping, Sequence
 from typing import Any
-from hyperloom.common.coerce import to_float
+from hyperloom_common.coerce import to_float
 from hyperloom.common.perf_metric import VERDICT_KEEP, GradingAnchor, constraint_fields, graded_axes_of
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.timeutil import now_iso
 from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
     GATE_ACCURACY,
     GATE_KEEP_THRESHOLD,

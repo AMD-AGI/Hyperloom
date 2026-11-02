@@ -9,7 +9,7 @@ import time
 from datetime import datetime
 from typing import Any, NamedTuple
 
-from hyperloom.common.coerce import to_float
+from hyperloom_common.coerce import to_float
 from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_prompt
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import GEAK_DROPPED_STATUSES
 from hyperloom.inference_optimizer.grid_server_args import dedupe_extra_server_args
@@ -83,7 +83,7 @@ class _ProposalRound(NamedTuple):
 
 def _round_attribution(entry: dict[str, Any], severity_of: dict[str, str]) -> _ProposalRound:
     """Read one specialist round's attribution. ``provenance`` defaults to its domain: a proposal cannot choose it."""
-    from hyperloom.common.coerce import to_int
+    from hyperloom_common.coerce import to_int
 
     domain = str(entry.get("domain") or "?").removesuffix("_specialist")
     return _ProposalRound(
@@ -402,7 +402,7 @@ class _RenderMixin:
         round's, ``specialist:<domain>`` unless the round's recorder set one; a
         proposal cannot choose it, since a specialist writes its own proposals.
         """
-        from hyperloom.common.coerce import to_int
+        from hyperloom_common.coerce import to_int
 
         from ...actions.executors._proposal_identity import content_fingerprint, is_executable, normalize_proposal
 

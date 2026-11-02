@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn
 
+from hyperloom_common.timeutil import now_iso
+
 from . import __version__
 from .dense_shapes import MGrid
 from .router import RoutingEvidence, RoutingTarget
@@ -703,7 +705,7 @@ def run_tuning(request: TuneRequest) -> TuneReport:
 
     output_path = Path(request.output_dir)
     _setup_logging(output_path, request.verbose)
-    started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    started_at = now_iso("seconds", z_suffix=True)
     start_time = time.time()
 
     try:

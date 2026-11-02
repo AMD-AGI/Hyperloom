@@ -295,12 +295,12 @@ def test_format_variant_line_includes_artifact_refs():
         "extra_envs": {},
         "reason": "warmup_failed",
         "error_class": "server_init_dead",
-        "failure_id": "fail.t1.abc123456789",
         "workspace": "/runs/v00_fp8_kv",
         "server_log_path": "/runs/v00_fp8_kv/server.log",
     }
     line = _RenderMixin._format_variant_line(entry)
-    assert "fid=fail.t1.abc123456789" in line
+    assert "ws=runs/v00_fp8_kv" in line
+    assert "log=v00_fp8_kv/server.log" in line
 
 
 def test_format_variant_line_no_artifact_refs_when_absent():
@@ -314,7 +314,6 @@ def test_format_variant_line_no_artifact_refs_when_absent():
         "extra_envs": {},
     }
     line = _RenderMixin._format_variant_line(entry)
-    assert "fid=" not in line
     assert "ws=" not in line
 
 
@@ -413,35 +412,6 @@ async def test_compose_prompt_critic_does_not_receive_failure_rows(session_dir):
         assert "failure:" not in prompt
     finally:
         await c.stop()
-
-
-# --- ws=/log= anchor test with real-length task_id ---
-
-
-def test_format_variant_line_ws_and_log_appear_with_real_task_id():
-    """ws= and log= must appear in the rendered line even when task_id is a full uuid4 hex."""
-    import uuid
-    from hyperloom.orchestrator.state.failure_evidence import make_failure_id
-    from hyperloom.orchestrator.state._shared_state.render import _RenderMixin
-
-    task_id = uuid.uuid4().hex  # 32-char hex, as in production
-    fid = make_failure_id(task_id=task_id, fingerprint="a1b2c3d4e5f6")
-    entry = {
-        "name": "fp8_kv",
-        "gain_pct": None,
-        "tput": None,
-        "extra_server_args": "--kv-cache-dtype fp8",
-        "extra_envs": {},
-        "reason": "warmup_failed",
-        "error_class": "server_init_dead",
-        "failure_id": fid,
-        "workspace": "/runs/explore/v00_fp8_kv",
-        "server_log_path": "/runs/explore/v00_fp8_kv/server.log",
-    }
-    line = _RenderMixin._format_variant_line(entry)
-    assert f"fid={fid}" in line
-    # With progressive degradation at least ws= should fit when log= is dropped.
-    assert "ws=" in line or "log=" in line
 
 
 # --- KILLED_OVERTIME writeback and gap-mint integration ---

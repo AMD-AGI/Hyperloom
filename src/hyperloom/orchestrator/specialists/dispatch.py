@@ -12,7 +12,7 @@ import os
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, NamedTuple
 
-from hyperloom.common.env import env_flag
+from hyperloom_common.env import env_flag
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
 from ..collaborator import CoordinatorCollaborator

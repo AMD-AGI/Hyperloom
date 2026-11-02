@@ -1094,7 +1094,7 @@ async def test_fan_out_wave_rejects_invalid_entries(coord: Coordinator, monkeypa
         lambda *a, **k: called.append(a),
     )
     intent = Intent(type=IntentType.DELEGATE, payload={"idempotency_key": "w", "action_name": "specialist"})
-    from hyperloom.orchestrator.policy.gate import PolicyDenied
+    from hyperloom.orchestrator.policy.denial import PolicyDenied
 
     with pytest.raises(PolicyDenied):
         await coord.specialist_dispatch.fan_out_specialist_wave(

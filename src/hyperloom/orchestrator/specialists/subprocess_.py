@@ -9,7 +9,7 @@ CLI subprocess scoped via ``--add-dir``, and a ``specialist_done.json``
 :class:`SpecialistRunResult`.
 
 Three agent CLIs can drive that contract, and the deployment picks one
-(:func:`hyperloom.common.llm_config.resolve_agent_backend`):
+(:func:`hyperloom_common.llm.llm_config.resolve_agent_backend`):
 ``claude --print --output-format stream-json`` authenticates against the
 Anthropic side, ``codex exec --json`` against the OpenAI side and
 ``dsh --profile headless`` through the DeepSeek Harness. An OpenAI-only deployment has no
@@ -43,8 +43,8 @@ from hyperloom.common.codex_session import (
     resolve_codex_sandbox_mode,
 )
 from hyperloom.common.deadline import Deadline
-from hyperloom.common.llm_attribution import inject_env as inject_attribution_env
-from hyperloom.common.llm_config import (
+from hyperloom_common.llm.llm_attribution import inject_env as inject_attribution_env
+from hyperloom_common.llm.llm_config import (
     AGENT_BACKEND_CLAUDE,
     AGENT_BACKEND_CODEX,
     AGENT_BACKEND_DEEPSEEK,
@@ -54,7 +54,7 @@ from hyperloom.common.llm_config import (
 from hyperloom.common.env_safety import (
     redact_file_in_place,
 )
-from hyperloom.common.fs_utils import (
+from hyperloom_common.fs_utils import (
     create_nofollow,
     read_text_nofollow,
     regular_files_nofollow,
@@ -75,7 +75,7 @@ from .dsh_launch import DshLaunchRequest, build_dsh_launch, remove_dsh_profiles,
 from .reap_watch import PROCESS_LOG_NAME, ReapWatch, newest_activity, specialist_activity_paths, tool_in_flight
 from .trace_harvest import harvest_agent_trace
 from ..actions.cancel_channel import CancelScope, cancel_scope_listener, current_cancel_scope
-from hyperloom.common.git_safety import app_git, worktree_head
+from hyperloom_common.git_safety import app_git, worktree_head
 from ..delivery.deliverable import declared_targets
 from ..loop.sub_agent_runner import ExecutionCleanupUnconfirmed
 from .wall_budget import clear_wall_budget_extension, wall_budget_extension
@@ -130,21 +130,6 @@ class SpecialistSubprocessConfig:
 
     mcp_config_path: str | None = None
     """Optional path to a JSON file holding ``{"mcpServers": {...}}``."""
-
-    output_format: str = "stream-json"
-    """claude-cli ``--output-format`` flag; ``stream-json`` matches Arbor.
-
-    Codex has no equivalent knob — ``codex exec --json`` is its only streaming
-    event format — so this applies to the claude backend only."""
-
-    extra_claude_args: tuple[str, ...] = ()
-    """Operator escape hatch — appended verbatim to the claude command."""
-
-    extra_codex_args: tuple[str, ...] = ()
-    """Operator escape hatch — appended verbatim to the codex command."""
-
-    leaf_agents_json: str | None = None
-    """``--agents`` JSON declaring leaf sub-agent types. None = built-in leaf."""
 
     poll_interval_seconds: float = 5.0
     """How often the reaper polls done.json / process exit / heartbeat."""
@@ -416,9 +401,6 @@ class SpecialistSpawn:
         system_prompt: System prompt assembled by
             :func:`specialist_prompt_builder.build_specialist_prompts`.
         user_prompt: User prompt from the same builder.
-        max_turns: Turn budget, never enforced mechanically here; it reaches
-            the specialist only as advisory prompt text baked into
-            ``system_prompt``.
         disallowed_tools: Tool names to deny in the agent CLI subprocess.
             Passed as ``--disallowedTools`` to the Claude CLI; has no Codex or
             dsh equivalent (Codex containment uses ``--sandbox``).
@@ -444,7 +426,6 @@ class SpecialistSpawn:
     worktree_base: Path | None
     system_prompt: str
     user_prompt: str
-    max_turns: int
     disallowed_tools: frozenset[str] | set[str] | tuple[str, ...] = frozenset()
     gpu_ids: tuple[int, ...] = ()
     deadline: Deadline | None = None
@@ -516,7 +497,7 @@ class SpecialistSubprocessDispatcher:
         # via env; set HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=0 to disable.
         env = _build_specialist_env()
         # Keep the spawned CLI off its non-essential traffic and auto-updater.
-        from hyperloom.common.llm_stability_env import apply_llm_stability_env
+        from hyperloom_common.llm.llm_stability_env import apply_llm_stability_env
 
         apply_llm_stability_env(env)
         # Unique to this launch, so every process the CLI starts can be found after it detaches.
@@ -781,7 +762,6 @@ class SpecialistSubprocessDispatcher:
                 worktree=request.worktree,
                 system_prompt=request.system_prompt,
                 base_env=env,
-                probe_sandbox=True,
             )
             env.update(launch_env_additions)
             # Per-task CODEX_HOME so concurrent specialists and the operator's
@@ -869,7 +849,6 @@ class SpecialistSubprocessDispatcher:
         worktree: Path | None,
         system_prompt: str,
         base_env: Mapping[str, str],
-        probe_sandbox: bool,
     ) -> tuple[list[str], dict[str, str]]:
         """Build secure Codex argv, private config, and child-only env values.
 
@@ -901,7 +880,7 @@ class SpecialistSubprocessDispatcher:
                 "Codex sandbox mode 'read-only' cannot run a specialist: "
                 "the specialist must write its result and may need to author patches"
             )
-        if probe_sandbox and sandbox_mode != "bypass" and not probe_codex_sandbox_capability(env=dict(base_env)):
+        if sandbox_mode != "bypass" and not probe_codex_sandbox_capability(env=dict(base_env)):
             raise SpecialistAgentUnavailableError(
                 f"Codex sandbox mode {sandbox_mode!r} requires a working bubblewrap "
                 "sandbox, but the capability probe failed; refusing to fall back to bypass"
@@ -955,8 +934,6 @@ class SpecialistSubprocessDispatcher:
             cmd.extend(["-c", override])
         if cfg.model:
             cmd.extend(["-m", cfg.model])
-        if cfg.extra_codex_args:
-            cmd.extend(list(cfg.extra_codex_args))
         cmd.append("-")
         return cmd, env_additions
 
@@ -993,7 +970,7 @@ class SpecialistSubprocessDispatcher:
             cfg.claude_executable,
             "--print",
             "--output-format",
-            cfg.output_format,
+            "stream-json",
             "--verbose",
             # Unattended: a permission prompt waits with no output and no tool running, so the run is reaped as stale.
             # Worktrees and the tool denylist scope behaviour but are not filesystem containment.
@@ -1011,13 +988,11 @@ class SpecialistSubprocessDispatcher:
             cmd.extend(["--disallowedTools", ",".join(sorted(disallowed_tools))])
         from .leaf import build_leaf_agents_json
 
-        cmd.extend(["--agents", cfg.leaf_agents_json or build_leaf_agents_json()])
+        cmd.extend(["--agents", build_leaf_agents_json()])
         if cfg.mcp_config_path:
             cmd.extend(["--mcp-config", cfg.mcp_config_path])
         for d in self._writable_dirs(workspace, worktree):
             cmd.extend(["--add-dir", d])
-        if cfg.extra_claude_args:
-            cmd.extend(list(cfg.extra_claude_args))
         return cmd
 
     async def _publish_partial_progress(

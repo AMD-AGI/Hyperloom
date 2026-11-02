@@ -27,6 +27,9 @@ _CONC_SWEEP_LEASE_GRACE_SEC = 600
 #: The ``from_phase`` and reason of the entry a resumed session replays, as KERNEL's resume re-entry names it.
 _RESUME = "resume"
 
+#: Why SWEEP enqueues its ``conc_sweep``: persisted in the task's idempotency key and ``params["reason"]``.
+_PHASE_ENTRY = "phase_entry"
+
 
 def _conc_sweep_lease_ttl_sec(clamped_budget: int | None) -> int:
     """Return the execution lease for a conc_sweep task, from its real budget."""
@@ -92,10 +95,7 @@ class SweepPhase(CoordinatorCollaborator):
                 "SWEEP entry (from=%s): conc_sweep disabled; recording terminal skip.",
                 from_phase or "<unknown>",
             )
-            self._record_terminal_conc_sweep_skip(
-                skip_reason="disabled",
-                auto_conc_sweep_skipped="disabled",
-            )
+            self._record_terminal_conc_sweep("skipped", "disabled", auto_conc_sweep_skipped="disabled")
             return
         prev_conc = state.last_conc_sweep_watermark
         prev_conc = prev_conc if isinstance(prev_conc, dict) else {}
@@ -109,8 +109,9 @@ class SweepPhase(CoordinatorCollaborator):
                 cur_validated,
                 prev_conc.get("ts") or "(unknown)",
             )
-            self._record_terminal_conc_sweep_skip(
-                skip_reason="no_validated_gain_since_last_conc_sweep",
+            self._record_terminal_conc_sweep(
+                "skipped",
+                "no_validated_gain_since_last_conc_sweep",
                 auto_conc_sweep_skipped="no_validated_gain_since_last_conc_sweep",
                 auto_conc_sweep_skipped_validated_gain=cur_validated,
             )
@@ -125,9 +126,7 @@ class SweepPhase(CoordinatorCollaborator):
             self.record_session_budget_conc_sweep_skip(denied=denied)
             return
         try:
-            task = await self._enqueue_internal_conc_sweep_task(
-                reason="phase_entry",
-            )
+            task = await self._enqueue_internal_conc_sweep_task()
         except (sqlite3.Error, TypeError, ValueError) as exc:
             log.exception(
                 "SWEEP entry hook: failed to enqueue auto-conc-sweep: %r",
@@ -156,11 +155,7 @@ class SweepPhase(CoordinatorCollaborator):
             auto_conc_sweep_concs=task.params.get("concs"),
         )
 
-    async def _enqueue_internal_conc_sweep_task(
-        self,
-        *,
-        reason: str,
-    ) -> Task | None:
+    async def _enqueue_internal_conc_sweep_task(self) -> Task | None:
         """Build + enqueue a Coordinator-internal ``conc_sweep`` task."""
         state = self.shared_state
         configured_budget = int(state.conc_sweep_total_budget_sec)
@@ -181,21 +176,22 @@ class SweepPhase(CoordinatorCollaborator):
                 clamped_budget,
                 admission_sec,
             )
-            self._record_terminal_conc_sweep_skip(
-                skip_reason="grant_cannot_fit_one_pair",
+            self._record_terminal_conc_sweep(
+                "skipped",
+                "grant_cannot_fit_one_pair",
                 auto_conc_sweep_skipped="grant_cannot_fit_one_pair",
                 auto_conc_sweep_denied=f"granted={clamped_budget}s one_pair={admission_sec:.0f}s",
             )
             return None
         params: dict[str, Any] = {
             "source": "coordinator_internal",
-            "reason": str(reason),
+            "reason": _PHASE_ENTRY,
             # None, not [], when the state carries no ladder: the executor reads [] as a deliberate "no concs" and
             # skips, while None lets it fall back to the ladder for this workload.
             "concs": list(state.conc_sweep_concs) if state.conc_sweep_concs else None,
             "total_budget_sec": clamped_budget,
         }
-        task, was_existing = await self._live_conc_sweep_row(reason=reason, params=params, budget=clamped_budget)
+        task, was_existing = await self._live_conc_sweep_row(params=params, budget=clamped_budget)
         self._grant_conc_sweep(task, was_existing=was_existing, budget=clamped_budget)
         if was_existing:
             log.info(
@@ -207,7 +203,7 @@ class SweepPhase(CoordinatorCollaborator):
             log.info(
                 "internal-conc_sweep task enqueued (task_id=%s reason=%s concs=%s total_budget_sec=%s)",
                 task.task_id,
-                reason,
+                _PHASE_ENTRY,
                 params["concs"],
                 params["total_budget_sec"],
             )
@@ -216,7 +212,6 @@ class SweepPhase(CoordinatorCollaborator):
     async def _live_conc_sweep_row(
         self,
         *,
-        reason: str,
         params: dict[str, Any],
         budget: int | None,
     ) -> tuple[Task, bool]:
@@ -226,7 +221,7 @@ class SweepPhase(CoordinatorCollaborator):
         recorded (``recover`` cancels it out of band), so only a live row is reused.
         """
         lanes, _ = self._coord.dispatcher.registry_lanes_ttl("conc_sweep")
-        base_key = f"internal-conc_sweep-{reason}{self._coord.dispatcher.cycle_idem_suffix()}"
+        base_key = f"internal-conc_sweep-{_PHASE_ENTRY}{self._coord.dispatcher.cycle_idem_suffix()}"
         attempt = 0
         while True:
             task, was_existing = await self.tasks.create_or_return_existing(
@@ -308,15 +303,6 @@ class SweepPhase(CoordinatorCollaborator):
             auto_conc_sweep_skipped="session_time_budget",
             auto_conc_sweep_denied=str(denied),
         )
-
-    def _record_terminal_conc_sweep_skip(
-        self,
-        *,
-        skip_reason: str,
-        **evidence: Any,
-    ) -> None:
-        """Record an auto-conc-sweep skip as terminal so SWEEP can close cleanly."""
-        self._record_terminal_conc_sweep("skipped", skip_reason, **evidence)
 
     def _record_terminal_conc_sweep(
         self,

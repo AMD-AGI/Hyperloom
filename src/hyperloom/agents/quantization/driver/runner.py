@@ -12,10 +12,10 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable
 
-from hyperloom.common import llm_config
+from hyperloom_common.llm import llm_config
 from hyperloom.agents.quantization.driver.result_collector import CollectedArtifacts, collect_artifacts
 from hyperloom.common.deepseek_task import DeepSeekTaskRequest, OwedArtifact, run_deepseek_task
-from hyperloom.common.llm_attribution import sdk_env_overlay
+from hyperloom_common.llm.llm_attribution import sdk_env_overlay
 
 
 DEFAULT_ALLOWED_TOOLS = ["Read", "Write", "Edit", "Bash"]
@@ -72,7 +72,7 @@ def _import_sdk() -> ClaudeAgentSdk:
 
 def _iter_message_text(message: Any) -> Iterable[str]:
     """Yield the non-empty text fragments of a Claude Agent SDK message."""
-    from hyperloom.common.claude_oneshot import message_text
+    from hyperloom_common.llm.claude_oneshot import message_text
 
     yield from (fragment for fragment in message_text(message) if fragment)
 

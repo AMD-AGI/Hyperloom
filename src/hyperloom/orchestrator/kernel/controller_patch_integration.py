@@ -20,7 +20,7 @@ from kernelforge.workflows.rewrite_controller import (
     published_operator_dirs,
 )
 
-from hyperloom.common.io import JsonFormat, atomic_write_json
+from hyperloom_common.io import JsonFormat, atomic_write_json
 from hyperloom.orchestrator.actions.executors._patch_snapshot import (
     _git_commit_kept,
     _patch_touched_paths,
