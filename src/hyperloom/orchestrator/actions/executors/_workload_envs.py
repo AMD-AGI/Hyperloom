@@ -1513,7 +1513,7 @@ def prepare_grid_benchmark_config(
 
     if native_config(config_path):
         agentx = load_benchmark(config_path)["agentx"]
-        if isinstance(agentx, dict) and "launch_overrides" in agentx:
+        if isinstance(agentx, dict) and "append_args" in agentx.get("launch_overrides", {}):
             return config_path
         return materialize_benchmark_config(
             config_path, output_dir, launch=LaunchLayer(args_mode=launch.args_mode), target=target, options=options
