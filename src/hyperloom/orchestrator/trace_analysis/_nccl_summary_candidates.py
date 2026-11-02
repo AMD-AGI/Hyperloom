@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
 from hyperloom.common.kernel_source_contract import is_finite_number
+from ._task_group_contract import native_operation_key
 
 _DEVICE_SOURCE_SUFFIXES = (".cuh", ".cu", ".hip", ".h", ".hpp", ".cpp")
 _MAX_SCANNED_FILES = 4000
@@ -21,33 +22,12 @@ _MAX_SCANNED_FILES = 4000
 _METRICS_RELPATH = "category_data/multi_kernel_metrics.json"
 
 
-def _itanium_components(mangled: str) -> list[str]:
-    """Split a nested Itanium-mangled name into symbol components."""
-    if not mangled.startswith("_ZN"):
-        return []
-    out: list[str] = []
-    i = 3
-    while i < len(mangled) and mangled[i].isdigit():
-        j = i
-        while j < len(mangled) and mangled[j].isdigit():
-            j += 1
-        length = int(mangled[i:j])
-        if length <= 0 or j + length > len(mangled):
-            break
-        out.append(mangled[j : j + length])
-        i = j + length
-    return out
-
-
 def collective_symbol(kernel_name: str) -> str:
     """Extract the bare device symbol from a trace name."""
     name = (kernel_name or "").strip()
     if not name:
         return ""
-    components = _itanium_components(name)
-    if components:
-        return components[-1]
-    head = re.split(r"[<(]", name, maxsplit=1)[0]
+    head = re.split(r"[<(]", native_operation_key(name), maxsplit=1)[0]
     return head.rsplit("::", 1)[-1].strip()
 
 
@@ -232,9 +212,6 @@ def extract_collective_candidates(
                 "bound_type": "communication",
                 "tracelens_category": "collective",
                 "tracelens_pitem_rank": 0,
-                # Feeds the invocation spec that forge-loop's task preparer reads to author run_candidate; the
-                # device source is the only launcher a summary row can attribute.
-                "kernel_path": source_file,
                 "source_file": source_file,
                 "source_line": source_line,
                 "source_function": source_function,
