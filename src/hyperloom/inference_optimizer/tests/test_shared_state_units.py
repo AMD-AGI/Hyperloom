@@ -168,6 +168,19 @@ class TestSessionBudget:
         assert state.elapsed_minutes(now=_at(10_000.0)) == pytest.approx(30.0)
         assert state.remaining_minutes(now=_at(10_000.0)) == pytest.approx(30.0)
 
+    def test_a_new_leg_owns_none_of_the_baseline_failures_the_last_one_booked(self):
+        # The streak is session-wide evidence and survives; what a retry is priced on is the leg's own count.
+        state = SharedState(session_id="s", max_minutes=60)
+        state.begin_leg(now_unix=1_000.0)
+        state.baseline_failure_streak = 2
+        state.baseline_failures_this_leg = 2
+
+        resumed = SharedState.from_dict(state.to_dict())
+        resumed.begin_leg(now_unix=10_000.0)
+
+        assert resumed.baseline_failure_streak == 2
+        assert resumed.baseline_failures_this_leg == 0
+
     def test_a_killed_leg_and_a_stopped_leg_charge_the_same(self):
         # Neither leg records how it ended; both are charged by their last
         # charge_elapsed, which is what makes them indistinguishable here.

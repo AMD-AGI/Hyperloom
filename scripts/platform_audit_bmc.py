@@ -481,7 +481,8 @@ def _usable_host(args: argparse.Namespace, ctx: ssl.SSLContext) -> str:
     return host
 
 
-def main() -> int:
+def _build_parser() -> argparse.ArgumentParser:
+    """The command-line parser for the BIOS knob audit."""
     ap = argparse.ArgumentParser(
         description="Audit BIOS-only EPYC knobs over Redfish (creates a temporary BMC account)",
         epilog=(
@@ -503,7 +504,25 @@ def main() -> int:
     ap.add_argument("--ca-cert", help="CA file (or the BMC's own certificate) to trust")
     ap.add_argument("--insecure", action="store_true", help="skip TLS verification (deliberate)")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
-    args = ap.parse_args()
+    return ap
+
+
+def _print_text_report(rows: list[dict], err: str, credential_failures: list[str]) -> None:
+    """Print the knob verdict table and any credential problems for a human reader."""
+    if err:
+        print(f"BIOS attributes unavailable: {err}", file=sys.stderr)
+    width = max((len(r["knob"]) for r in rows), default=10)
+    for r in rows:
+        want = f"  (want {r['target']})" if r["verdict"] != "PASS" else ""
+        print(f"  {r['verdict']:<7} {r['knob']:<{width}}  {r['value']}{want}")
+    if credential_failures:
+        print("\nCredential problems (exit 3):", file=sys.stderr)
+        for f in credential_failures:
+            print(f"    {f}", file=sys.stderr)
+
+
+def main() -> int:
+    args = _build_parser().parse_args()
 
     install_signal_handlers()
     ctx = tls_context(args.ca_cert, args.insecure)
@@ -568,16 +587,7 @@ def main() -> int:
             )
         )
     else:
-        if err:
-            print(f"BIOS attributes unavailable: {err}", file=sys.stderr)
-        width = max((len(r["knob"]) for r in rows), default=10)
-        for r in rows:
-            want = f"  (want {r['target']})" if r["verdict"] != "PASS" else ""
-            print(f"  {r['verdict']:<7} {r['knob']:<{width}}  {r['value']}{want}")
-        if credential_failures:
-            print("\nCredential problems (exit 3):", file=sys.stderr)
-            for f in credential_failures:
-                print(f"    {f}", file=sys.stderr)
+        _print_text_report(rows, err, credential_failures)
     return code
 
 

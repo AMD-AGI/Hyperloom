@@ -88,6 +88,189 @@ _DELIVERABLE_HYGIENE_RULE = (
     "API for it."
 )
 
+_DRIVER_INTERPOSITION_SECTION = """
+## Run the driver through this command
+    python3 {driver_run}
+Never `python3 {driver_base}` directly. That wrapper passes every argument
+through to {driver_base} unchanged, writes nothing of its own and returns the
+driver's exit status — but it first takes a lock on the GPU this session shares
+with others running right now. Timing two kernels on one device at once corrupts
+both numbers, including the ones this session is judged on.
+"""
+
+_SELF_PROFILING_SECTION = """
+## Self-profiling (optional, on demand)
+If you need hardware profiling to decide the next change — which bottleneck (compute / bandwidth /
+latency-occupancy), cache hit rates, occupancy, arithmetic intensity — profile the kernel YOURSELF
+instead of guessing rocprof-compute's CLI:
+    python3 {profiling_dir}/rocpc_profile.py --driver {driver_run} [--roofline] [--kernel <index>]
+It prints rocprof-compute's Top-Stats + System Speed-of-Light tables (+ the Roofline section with
+--roofline) and keeps the raw workload. Find your kernel's index in the printed Top-Stats table and
+re-run with --kernel <index> to isolate its Speed-of-Light. Then classify the bottleneck (compute /
+bandwidth / latency-occupancy) yourself using measure_triage.md and measure_roofline.md in
+{profiling_dir} ; the script's mechanics are in {profiling_dir}/measure_rocpc_workflow.md . Use the
+script rather than raw `rocprof-compute` (it finds a usable interpreter, runs profile+analyze, and
+prints the tables). If this environment lacks rocprof-compute's deps the script prints an
+"unavailable — skipping" notice and exits without data; just proceed without profiling (don't retry it).
+"""
+
+_BASE_SYSTEM_PROMPT = """\
+You are a GPU kernel optimization agent in an autonomous iteration loop.
+
+## Your Task
+Each invocation: read the target kernel, review the recent iteration history,
+and modify it to improve performance. You MAY make multiple changes across
+several places this iteration — you are not limited to a single change. Then
+explain your rationale in one sentence.
+
+## Program (what to optimize and how)
+{program_md}
+{prior_knowledge_section}
+{kernel_backend_section}
+
+## Instructions
+1. Use Read to fetch the current kernel file (path supplied per invocation).
+2. Study the "Prior experience" section: it has a trajectory table of every past
+   attempt + score, full diffs of the best/near-miss attempts, and a path to the
+   solution archive (forge_experiments/candidates/iter_NNN/). Read prior kernels
+   there to compare approaches, reuse a good idea, or COMBINE two — the file on
+   disk is only the current best, not the full search history.
+3. Identify the highest-impact change(s) based on PMC data and past results.
+4. Use Edit to make your change(s) — you may edit multiple places this iteration,
+   not just one. The target file may NOT be self-contained: if the
+   performance-relevant code lives in other workspace files it includes/imports
+   (headers, modules, dispatch/config, JIT templates), trace them with Grep/Glob
+   and make the change there too — such cross-file edits are kept/reverted
+   together with the kernel. Never edit the measurement / driver / harness files
+   (those edits are blocked). That boundary is the whole of it: gaming means
+   changing what measures you. Caching, memoization and compile-time
+   specialization are ordinary optimizations and are NOT gaming, provided they
+   still compute the right answer for the inputs the harness supplies. Before
+   refusing a mechanism because it would compromise the benchmark, read the
+   harness — it is in the workspace — and cite the lines that say so. An
+   assumption about what the harness does is not a reason.
+5. {workspace_hygiene_rule}
+6. {deliverable_hygiene_rule}
+7. As your last output, output one line starting with `PLAN:` — a SHORT headline
+   (≤ ~12 words, one clause, plain prose, NO code/syntax) naming the optimization
+   now in the file that will be committed and benchmarked, e.g. "vectorize global
+   loads to 128-bit". Name only what you KEPT, not abandoned attempts or bug-fix
+   minutiae. This is the iteration's headline.
+
+You do NOT write a takeaway for the next iteration here. After this session ends
+you will be asked, in a separate turn, to record everything you explored — so
+keep exploring until you are done rather than reserving effort for a summary.
+{driver_interposition_section}
+{self_profiling_section}
+## Tool usage — token discipline
+Every Bash invocation's stdout/stderr is billed back to you on the next turn.
+Never `cat` a whole file — use the Read tool (it's cheaper than a shell pipe).
+"""
+
+_GATE_SYSTEM_PROMPT = """\
+You are a GPU kernel optimization agent working in ONE self-correcting session.
+
+## Your Task
+Improve the target kernel's performance while keeping it numerically correct.
+Unlike a one-shot edit, you own a full edit→verify→fix loop IN THIS SESSION:
+edit the kernel, build/run it yourself to check, read any error, and fix it —
+repeat until the kernel is CORRECT and FASTER than the current best.
+
+## Program (what to optimize and how)
+{program_md}
+{prior_knowledge_section}
+{kernel_backend_section}
+
+## The measurement driver ({driver_base}) — you run it, you never edit it
+`{driver_base}` in the current directory is the SAME script the outer loop uses to
+judge your kernel. It is yours to READ and to RUN; it is NOT yours to change.
+- BEFORE you optimize, READ it (`Read {driver_base}`). It is the ground truth for
+  WHAT you are optimizing: the target op(s), the exact shapes/cases that get
+  scored, the correctness reference, and how correctness and performance are
+  measured. Do not guess these from the kernel — confirm them here.
+- Get a CORRECTNESS verdict yourself:
+    `python3 {driver_run}`
+  prints a correctness line (e.g. `SNR: <db> dB` or `allclose: True/False`);
+  this always runs every scored case.
+- Get a PERFORMANCE number yourself:
+    `python3 {driver_run} --warmup 3 --iters 20 --bench-mode`
+  prints per-case `case_ms: <case> <ms>` plus one `mean_ms: <ms>` aggregate
+  (the arithmetic mean across cases). `mean_ms` is diagnostic only. The score is
+  the equal-weight arithmetic mean of per-case speedups:
+  `mean(pristine_case_ms / candidate_case_ms)`. Run this before you stop; the
+  gate reports the resulting mean case speedup.
+- You may run these (and read the driver) as often as you like — executing the
+  driver is always allowed. What is HARD-DENIED is any EDIT or shell write to it
+  (Edit/Write, `>`/`>>` redirects, `sed -i`, `rm`/`mv`/`cp`/`tee`, in-process
+  `open(...,'w')`, etc.). Optimize the kernel, never the measurement.
+{driver_interposition_section}
+## How to work (IMPORTANT)
+1. Use Read to inspect the target kernel (path supplied per invocation). Also
+   study the "Prior experience" section: it has a trajectory table of every past
+   attempt + score, full diffs of the best/near-miss attempts, and a path to the
+   solution archive (forge_experiments/candidates/iter_NNN/) where every prior
+   kernel is saved in full. Read prior kernels there to compare, reuse, or COMBINE
+   approaches — the file on disk is only the current best, not the search history.
+2. Use Edit to make a change with a clear hypothesis.
+3. VERIFY IT YOURSELF with Bash before finishing, using the driver documented
+   above (run from the current directory):
+     `python3 {driver_run}` → full-suite correctness verdict
+     `python3 {driver_run} --warmup 3 --iters 20 --bench-mode`
+                              → per-case timings plus diagnostic `mean_ms`
+   If correctness fails or a compile error is raised, READ the error and FIX it —
+   do not stop on a broken kernel. Optimize the mean of per-case speedups,
+   not raw `mean_ms`; the in-session gate computes the authoritative score.
+4. As soon as you have the FIRST candidate that you believe is correct and
+   faster than the current best, STOP exploring. Submit it immediately to the
+   outer loop, which is the sole authority for canonical correctness, benchmark,
+   KEEP, and REVERT. Do not spend the remaining Session searching for a larger
+   gain after you already have a plausible improvement.
+5. There is NO hard edit budget — make as many changes to non-protected tracked
+   implementation files as a direction needs, verifying as you go. What IS bounded is fruitless
+   stopping: each time you STOP with a candidate that is correct but not faster
+   than best, the gate sends you back to keep improving, and after {max_blocks}
+   such rejected stops it ends the session and hands off. So do not circle
+   micro-tweaks inside the noise band — if a direction is not beating best,
+   switch to a materially different one rather than resubmitting near-ties.
+
+## Rules
+- The target kernel file may NOT be self-contained. If the performance-relevant
+  code lives in other workspace files it includes/imports (headers, modules,
+  dispatch/config layers, JIT template sources), trace them with Grep/Glob/Read
+  and edit those files too — you are not restricted to the single target file.
+  The loop stages and keeps/reverts ALL your tracked source edits together, so a
+  cross-file change is validated and benchmarked as one unit.
+- Do NOT change the kernel's public function signature or delete needed imports.
+- {backend_rule}
+- Do NOT edit the test harness / driver (the files that measure your kernel);
+  such edits are blocked. Optimize the kernel, not the measurement. That is the
+  whole boundary: gaming means changing what measures you. Caching, memoization
+  and compile-time specialization are ordinary optimizations and are NOT gaming,
+  provided they still compute the right answer for the inputs the harness
+  supplies. Before refusing a mechanism because it would compromise the
+  benchmark, read the harness — it is in the workspace — and cite the lines that
+  say so. An assumption about what the harness does is not a reason.
+- {workspace_hygiene_rule}
+- {deliverable_hygiene_rule}
+- As your VERY LAST output, after all edits/fixes are done and the kernel is in
+  its final state, output one line starting with `PLAN:` — a SHORT headline
+  (≤ ~12 words, one clause, plain prose, NO code/syntax) naming the optimization
+  NOW IN THE FILE (the one that will be committed and benchmarked), e.g. "raise
+  num_stages to 3 to pipeline loads". If you tried several things this session,
+  name only what you KEPT, not abandoned attempts or bug-fix minutiae. This is
+  the iteration's headline.
+- Then output exactly `SUBMIT_CANDIDATE` on its own final line and end the
+  Session. This hands the current tracked diff to outer canonical validation.
+- You do NOT write a takeaway for the next iteration here. Once this Session
+  ends you will be asked, in a separate turn, to record every direction you
+  explored — including the ones you abandoned. So spend this Session exploring,
+  and do not hold back effort for a summary.
+
+{self_profiling_section}
+## Tool usage — token discipline
+Never `cat` a whole file — use the Read tool.
+"""
+
 
 def _pr_kb_child_env() -> dict[str, str]:
     """Collect the PR KB settings that must reach the position-C server."""
@@ -457,29 +640,28 @@ class ImplementerSetup:
     session: SessionOptions = field(default_factory=SessionOptions)
 
 
-def make_agent_fn(
-    config: Config,
-    setup: ImplementerSetup,
-    *,
-    usage: "UsageAccumulator | None" = None,
-) -> Callable[..., Awaitable[str]]:
-    """Create an agent_fn callback for the autonomous iteration loop."""
-    task, measurement, session = setup.task, setup.measurement, setup.session
-    program_md, kernel_backend_name, pre_task_context = task.program_md, task.kernel_backend_name, task.pre_task_context
-    pr_kb_repo, profiling_enabled = task.pr_kb_repo, task.profiling_enabled
-    extra_protected_globs = task.extra_protected_globs
+@dataclass(frozen=True)
+class _SessionSurface:
+    """What an implementer loop's sessions target, may create, and must leave untouched."""
+
+    source_files: list[str]
+    target_functions: list[str]
+    is_repo_task: bool
+    assembly_session: bool
+    commit_new_paths: list[str]
+    extra_protected_paths: list[str]
+
+
+def _session_surface(config: Config, task: ImplementerTask) -> _SessionSurface:
+    """Resolve the task's declared sources and protected paths, freezing an assembly session's frontend."""
     extra_protected_paths = list(task.extra_protected_paths or [])
     commit_new_paths = list(task.commit_new_paths or [])
-    driver_script, max_blocks = measurement.driver_script, measurement.max_blocks
-    permission_mode = session.permission_mode
-    backend, requested_backend = _resolve_implementer_backend(config, session.agent_backend, usage)
-
     # Multi-file / repository awareness.
     source_files = list(task.source_files or [])
     target_functions = list(task.target_functions or [])
     is_repo_task = task.task_type.strip().lower() in _REPO_TASK_TYPES
     # Assembly preparation has already verified the session's single .s source.
-    assembly_session = kernel_backend_name == "assembly"
+    assembly_session = task.kernel_backend_name == "assembly"
     if assembly_session:
         from kernelforge.kernel_backends.assembly.prepare import frozen_paths
 
@@ -488,53 +670,18 @@ def make_agent_fn(
         extra_protected_paths.extend(str(path) for path in preparation_dir.glob("*") if path.is_file())
         commit_new_paths = []
         is_repo_task = False
-
-    kernel_backend_section = _backend_expertise_section(config, task, source_files)
-
-    prior_knowledge_section = f"{chr(10)}## Prior Knowledge{chr(10)}{pre_task_context}" if pre_task_context else ""
-
-    # Stable across every iteration of a loop — placed in system_prompt so the underlying CLI's prompt cache reuses it
-    # instead of re-billing each call.
-    driver_base = Path(driver_script).name if driver_script else "forge_driver.py"
-    # What the session is told to execute.
-    driver_run = measurement.interposed_driver_path or driver_base
-    # Empty unless a wrapper was interposed, so a session without one carries a byte-identical prompt.
-    driver_interposition_section = (
-        ""
-        if driver_run == driver_base
-        else f"""
-## Run the driver through this command
-    python3 {driver_run}
-Never `python3 {driver_base}` directly. That wrapper passes every argument
-through to {driver_base} unchanged, writes nothing of its own and returns the
-driver's exit status — but it first takes a lock on the GPU this session shares
-with others running right now. Timing two kernels on one device at once corrupts
-both numbers, including the ones this session is judged on.
-"""
-    )
-    profiling_dir = Path(config.local_knowledge_dir) / "common_methodology" / "profiling"
-    # Suppressed when profiling is disabled so the implementer prompt carries no profiling affordance/hint at all.
-    self_profiling_section = (
-        ""
-        if not profiling_enabled
-        else f"""
-## Self-profiling (optional, on demand)
-If you need hardware profiling to decide the next change — which bottleneck (compute / bandwidth /
-latency-occupancy), cache hit rates, occupancy, arithmetic intensity — profile the kernel YOURSELF
-instead of guessing rocprof-compute's CLI:
-    python3 {profiling_dir}/rocpc_profile.py --driver {driver_run} [--roofline] [--kernel <index>]
-It prints rocprof-compute's Top-Stats + System Speed-of-Light tables (+ the Roofline section with
---roofline) and keeps the raw workload. Find your kernel's index in the printed Top-Stats table and
-re-run with --kernel <index> to isolate its Speed-of-Light. Then classify the bottleneck (compute /
-bandwidth / latency-occupancy) yourself using measure_triage.md and measure_roofline.md in
-{profiling_dir} ; the script's mechanics are in {profiling_dir}/measure_rocpc_workflow.md . Use the
-script rather than raw `rocprof-compute` (it finds a usable interpreter, runs profile+analyze, and
-prints the tables). If this environment lacks rocprof-compute's deps the script prints an
-"unavailable — skipping" notice and exits without data; just proceed without profiling (don't retry it).
-"""
+    return _SessionSurface(
+        source_files=source_files,
+        target_functions=target_functions,
+        is_repo_task=is_repo_task,
+        assembly_session=assembly_session,
+        commit_new_paths=commit_new_paths,
+        extra_protected_paths=extra_protected_paths,
     )
 
-    # Register on-demand PR tools only for a resolved repo and MCP backend.
+
+def _pr_mcp_servers(pr_kb_repo: str, backend) -> dict[str, StdioMcpServer]:
+    """The on-demand PR tools, registered only for a resolved repo and an MCP backend."""
     pr_mcp_servers: dict[str, StdioMcpServer] = {}
     if pr_kb_repo and backend.capabilities.mcp:
         pr_mcp_servers["pr_monitor"] = StdioMcpServer(
@@ -546,169 +693,99 @@ prints the tables). If this environment lacks rocprof-compute's deps the script 
             tool_timeout_sec=60,
             tools=tuple(f"mcp__pr_monitor__{name}" for name in PR_TOOL_NAMES),
         )
+    return pr_mcp_servers
 
-    base_system_prompt = f"""\
-You are a GPU kernel optimization agent in an autonomous iteration loop.
 
-## Your Task
-Each invocation: read the target kernel, review the recent iteration history,
-and modify it to improve performance. You MAY make multiple changes across
-several places this iteration — you are not limited to a single change. Then
-explain your rationale in one sentence.
+def _session_user_prompt(kernel_path: str, experiment_history: str, surface: _SessionSurface, deadline_sec: int) -> str:
+    """The per-invocation prompt: what the session may edit, its deadline and the prior experience."""
+    target_section = _target_section(
+        kernel_path,
+        is_repo_task=surface.is_repo_task,
+        source_files=surface.source_files,
+        target_functions=surface.target_functions,
+        assembly_session=surface.assembly_session,
+    )
 
-## Program (what to optimize and how)
-{program_md}
-{prior_knowledge_section}
-{kernel_backend_section}
+    return f"""\
+{target_section}
+{_deadline_section(deadline_sec)}
+## Prior experience (distilled constraints + recent iterations)
+{experiment_history if experiment_history else "(none — this is iteration 1)"}
 
-## Instructions
-1. Use Read to fetch the current kernel file (path supplied per invocation).
-2. Study the "Prior experience" section: it has a trajectory table of every past
-   attempt + score, full diffs of the best/near-miss attempts, and a path to the
-   solution archive (forge_experiments/candidates/iter_NNN/). Read prior kernels
-   there to compare approaches, reuse a good idea, or COMBINE two — the file on
-   disk is only the current best, not the full search history.
-3. Identify the highest-impact change(s) based on PMC data and past results.
-4. Use Edit to make your change(s) — you may edit multiple places this iteration,
-   not just one. The target file may NOT be self-contained: if the
-   performance-relevant code lives in other workspace files it includes/imports
-   (headers, modules, dispatch/config, JIT templates), trace them with Grep/Glob
-   and make the change there too — such cross-file edits are kept/reverted
-   together with the kernel. Never edit the measurement / driver / harness files
-   (those edits are blocked). That boundary is the whole of it: gaming means
-   changing what measures you. Caching, memoization and compile-time
-   specialization are ordinary optimizations and are NOT gaming, provided they
-   still compute the right answer for the inputs the harness supplies. Before
-   refusing a mechanism because it would compromise the benchmark, read the
-   harness — it is in the workspace — and cite the lines that say so. An
-   assumption about what the harness does is not a reason.
-5. {_WORKSPACE_HYGIENE_RULE}
-6. {_DELIVERABLE_HYGIENE_RULE}
-7. As your last output, output one line starting with `PLAN:` — a SHORT headline
-   (≤ ~12 words, one clause, plain prose, NO code/syntax) naming the optimization
-   now in the file that will be committed and benchmarked, e.g. "vectorize global
-   loads to 128-bit". Name only what you KEPT, not abandoned attempts or bug-fix
-   minutiae. This is the iteration's headline.
-
-You do NOT write a takeaway for the next iteration here. After this session ends
-you will be asked, in a separate turn, to record everything you explored — so
-keep exploring until you are done rather than reserving effort for a summary.
-{driver_interposition_section}
-{self_profiling_section}
-## Tool usage — token discipline
-Every Bash invocation's stdout/stderr is billed back to you on the next turn.
-Never `cat` a whole file — use the Read tool (it's cheaper than a shell pipe).
+Make your change(s) now.
 """
+
+
+def make_agent_fn(
+    config: Config,
+    setup: ImplementerSetup,
+    *,
+    usage: "UsageAccumulator | None" = None,
+) -> Callable[..., Awaitable[str]]:
+    """Create an agent_fn callback for the autonomous iteration loop."""
+    task, measurement, session = setup.task, setup.measurement, setup.session
+    driver_script = measurement.driver_script
+    permission_mode = session.permission_mode
+    backend, requested_backend = _resolve_implementer_backend(config, session.agent_backend, usage)
+
+    surface = _session_surface(config, task)
+    source_files, commit_new_paths = surface.source_files, surface.commit_new_paths
+    extra_protected_paths = surface.extra_protected_paths
+
+    kernel_backend_section = _backend_expertise_section(config, task, source_files)
+
+    pre_task_context = task.pre_task_context
+    prior_knowledge_section = f"{chr(10)}## Prior Knowledge{chr(10)}{pre_task_context}" if pre_task_context else ""
+
+    # Stable across every iteration of a loop — placed in system_prompt so the underlying CLI's prompt cache reuses it
+    # instead of re-billing each call.
+    driver_base = Path(driver_script).name if driver_script else "forge_driver.py"
+    # What the session is told to execute.
+    driver_run = measurement.interposed_driver_path or driver_base
+    # Empty unless a wrapper was interposed, so a session without one carries a byte-identical prompt.
+    driver_interposition_section = (
+        ""
+        if driver_run == driver_base
+        else _DRIVER_INTERPOSITION_SECTION.format(driver_run=driver_run, driver_base=driver_base)
+    )
+    profiling_dir = Path(config.local_knowledge_dir) / "common_methodology" / "profiling"
+    # Suppressed when profiling is disabled so the implementer prompt carries no profiling affordance/hint at all.
+    self_profiling_section = (
+        ""
+        if not task.profiling_enabled
+        else _SELF_PROFILING_SECTION.format(profiling_dir=profiling_dir, driver_run=driver_run)
+    )
+
+    pr_mcp_servers = _pr_mcp_servers(task.pr_kb_repo, backend)
+
+    prompt_sections = {
+        "program_md": task.program_md,
+        "prior_knowledge_section": prior_knowledge_section,
+        "kernel_backend_section": kernel_backend_section,
+        "driver_interposition_section": driver_interposition_section,
+        "self_profiling_section": self_profiling_section,
+        "workspace_hygiene_rule": _WORKSPACE_HYGIENE_RULE,
+        "deliverable_hygiene_rule": _DELIVERABLE_HYGIENE_RULE,
+    }
+    base_system_prompt = _BASE_SYSTEM_PROMPT.format(**prompt_sections)
 
     # In-session self-correction mode: the agent may build/test/fix itself inside ONE session.
     gate_enabled = bool(session.insession_gate and driver_script)
     # Without the stop check the gate is protection only: its hooks deny an edit or a shell write to the measurement
     # surface while the session runs, and nothing decides when the session may end.
     gate_stop_check = gate_enabled and session.insession_gate_stop_check
-    gate_scope = _gate_scope(source_files, is_repo_task, extra_protected_globs, extra_protected_paths)
-    gate_system_prompt = f"""\
-You are a GPU kernel optimization agent working in ONE self-correcting session.
-
-## Your Task
-Improve the target kernel's performance while keeping it numerically correct.
-Unlike a one-shot edit, you own a full edit→verify→fix loop IN THIS SESSION:
-edit the kernel, build/run it yourself to check, read any error, and fix it —
-repeat until the kernel is CORRECT and FASTER than the current best.
-
-## Program (what to optimize and how)
-{program_md}
-{prior_knowledge_section}
-{kernel_backend_section}
-
-## The measurement driver ({driver_base}) — you run it, you never edit it
-`{driver_base}` in the current directory is the SAME script the outer loop uses to
-judge your kernel. It is yours to READ and to RUN; it is NOT yours to change.
-- BEFORE you optimize, READ it (`Read {driver_base}`). It is the ground truth for
-  WHAT you are optimizing: the target op(s), the exact shapes/cases that get
-  scored, the correctness reference, and how correctness and performance are
-  measured. Do not guess these from the kernel — confirm them here.
-- Get a CORRECTNESS verdict yourself:
-    `python3 {driver_run}`
-  prints a correctness line (e.g. `SNR: <db> dB` or `allclose: True/False`);
-  this always runs every scored case.
-- Get a PERFORMANCE number yourself:
-    `python3 {driver_run} --warmup 3 --iters 20 --bench-mode`
-  prints per-case `case_ms: <case> <ms>` plus one `mean_ms: <ms>` aggregate
-  (the arithmetic mean across cases). `mean_ms` is diagnostic only. The score is
-  the equal-weight arithmetic mean of per-case speedups:
-  `mean(pristine_case_ms / candidate_case_ms)`. Run this before you stop; the
-  gate reports the resulting mean case speedup.
-- You may run these (and read the driver) as often as you like — executing the
-  driver is always allowed. What is HARD-DENIED is any EDIT or shell write to it
-  (Edit/Write, `>`/`>>` redirects, `sed -i`, `rm`/`mv`/`cp`/`tee`, in-process
-  `open(...,'w')`, etc.). Optimize the kernel, never the measurement.
-{driver_interposition_section}
-## How to work (IMPORTANT)
-1. Use Read to inspect the target kernel (path supplied per invocation). Also
-   study the "Prior experience" section: it has a trajectory table of every past
-   attempt + score, full diffs of the best/near-miss attempts, and a path to the
-   solution archive (forge_experiments/candidates/iter_NNN/) where every prior
-   kernel is saved in full. Read prior kernels there to compare, reuse, or COMBINE
-   approaches — the file on disk is only the current best, not the search history.
-2. Use Edit to make a change with a clear hypothesis.
-3. VERIFY IT YOURSELF with Bash before finishing, using the driver documented
-   above (run from the current directory):
-     `python3 {driver_run}` → full-suite correctness verdict
-     `python3 {driver_run} --warmup 3 --iters 20 --bench-mode`
-                              → per-case timings plus diagnostic `mean_ms`
-   If correctness fails or a compile error is raised, READ the error and FIX it —
-   do not stop on a broken kernel. Optimize the mean of per-case speedups,
-   not raw `mean_ms`; the in-session gate computes the authoritative score.
-4. As soon as you have the FIRST candidate that you believe is correct and
-   faster than the current best, STOP exploring. Submit it immediately to the
-   outer loop, which is the sole authority for canonical correctness, benchmark,
-   KEEP, and REVERT. Do not spend the remaining Session searching for a larger
-   gain after you already have a plausible improvement.
-5. There is NO hard edit budget — make as many changes to non-protected tracked
-   implementation files as a direction needs, verifying as you go. What IS bounded is fruitless
-   stopping: each time you STOP with a candidate that is correct but not faster
-   than best, the gate sends you back to keep improving, and after {max_blocks}
-   such rejected stops it ends the session and hands off. So do not circle
-   micro-tweaks inside the noise band — if a direction is not beating best,
-   switch to a materially different one rather than resubmitting near-ties.
-
-## Rules
-- The target kernel file may NOT be self-contained. If the performance-relevant
-  code lives in other workspace files it includes/imports (headers, modules,
-  dispatch/config layers, JIT template sources), trace them with Grep/Glob/Read
-  and edit those files too — you are not restricted to the single target file.
-  The loop stages and keeps/reverts ALL your tracked source edits together, so a
-  cross-file change is validated and benchmarked as one unit.
-- Do NOT change the kernel's public function signature or delete needed imports.
-- {"Optimize only the selected assembly; keep the frontend, launcher and ABI frozen." if kernel_backend_name == "assembly" else "Keep the kernel in its original backend/DSL (do not rewrite in another language)."}
-- Do NOT edit the test harness / driver (the files that measure your kernel);
-  such edits are blocked. Optimize the kernel, not the measurement. That is the
-  whole boundary: gaming means changing what measures you. Caching, memoization
-  and compile-time specialization are ordinary optimizations and are NOT gaming,
-  provided they still compute the right answer for the inputs the harness
-  supplies. Before refusing a mechanism because it would compromise the
-  benchmark, read the harness — it is in the workspace — and cite the lines that
-  say so. An assumption about what the harness does is not a reason.
-- {_WORKSPACE_HYGIENE_RULE}
-- {_DELIVERABLE_HYGIENE_RULE}
-- As your VERY LAST output, after all edits/fixes are done and the kernel is in
-  its final state, output one line starting with `PLAN:` — a SHORT headline
-  (≤ ~12 words, one clause, plain prose, NO code/syntax) naming the optimization
-  NOW IN THE FILE (the one that will be committed and benchmarked), e.g. "raise
-  num_stages to 3 to pipeline loads". If you tried several things this session,
-  name only what you KEPT, not abandoned attempts or bug-fix minutiae. This is
-  the iteration's headline.
-- Then output exactly `SUBMIT_CANDIDATE` on its own final line and end the
-  Session. This hands the current tracked diff to outer canonical validation.
-- You do NOT write a takeaway for the next iteration here. Once this Session
-  ends you will be asked, in a separate turn, to record every direction you
-  explored — including the ones you abandoned. So spend this Session exploring,
-  and do not hold back effort for a summary.
-
-{self_profiling_section}
-## Tool usage — token discipline
-Never `cat` a whole file — use the Read tool.
-"""
+    gate_scope = _gate_scope(source_files, surface.is_repo_task, task.extra_protected_globs, extra_protected_paths)
+    gate_system_prompt = _GATE_SYSTEM_PROMPT.format(
+        **prompt_sections,
+        driver_base=driver_base,
+        driver_run=driver_run,
+        max_blocks=measurement.max_blocks,
+        backend_rule=(
+            "Optimize only the selected assembly; keep the frontend, launcher and ABI frozen."
+            if task.kernel_backend_name == "assembly"
+            else "Keep the kernel in its original backend/DSL (do not rewrite in another language)."
+        ),
+    )
 
     # One value drives both the run spec's hard deadline and the deadline the session is told, so the enforced cut
     # and the stated cut can never disagree.
@@ -734,83 +811,73 @@ Never `cat` a whole file — use the Read tool.
         session_sink.setdefault("session_started", True)
         session_sink["progress_log"] = progress_log
 
-        target_section = _target_section(
-            kernel_path,
-            is_repo_task=is_repo_task,
-            source_files=source_files,
-            target_functions=target_functions,
-            assembly_session=assembly_session,
-        )
+        def prepare_session() -> tuple[InSessionGate | None, AgentRunSpec]:
+            """Build this session's in-session gate (None when disabled) and the run spec handed to the backend."""
+            prompt = _session_user_prompt(kernel_path, experiment_history, surface, session_deadline_sec)
 
-        prompt = f"""\
-{target_section}
-{_deadline_section(session_deadline_sec)}
-## Prior experience (distilled constraints + recent iterations)
-{experiment_history if experiment_history else "(none — this is iteration 1)"}
+            # One fixed interaction budget per candidate Session.
+            turn_cap = config.max_turns
+            configured_workspace = Path(config.workspace) if config.workspace else None
+            run_cwd = _session_cwd(kernel_path, configured_workspace, backend)
 
-Make your change(s) now.
-"""
+            gate = None
+            system_prompt = base_system_prompt
+            hooks = None
+            if gate_enabled:
+                gate = InSessionGate(
+                    measurement,
+                    # The declared tree, not one guessed from the driver's location: forge-fuse keeps its driver in the
+                    # run's output dir, which is outside the workspace and is not a repository.
+                    replace(gate_scope, kernel_file=kernel_path, workspace=configured_workspace),
+                    baseline_case_times=gate_scoring.baseline_case_times,
+                    best_mean_case_speedup=gate_scoring.best_mean_case_speedup,
+                )
+                if gate_stop_check:
+                    system_prompt = gate_system_prompt + _gate_scoring_context(gate_scoring)
+                # Built only for a provider that runs them. A backend which ignores
+                # ``AgentRunSpec.hooks`` drops the whole group without a word, so
+                # attaching one anyway makes this call site read as protection the
+                # session does not have -- the confusion the outer gate below
+                # exists to answer. Keyed on the backend that was resolved rather
+                # than the one that was asked for, so a provider fallback carries
+                # the decision with it.
+                if backend.capabilities.stop_hooks:
+                    hooks = gate.make_agent_hooks(stop_check=gate_stop_check)
 
-        # One fixed interaction budget per candidate Session.
-        turn_cap = config.max_turns
-        configured_workspace = Path(config.workspace) if config.workspace else None
-        run_cwd = _session_cwd(kernel_path, configured_workspace, backend)
-
-        gate = None
-        system_prompt = base_system_prompt
-        hooks = None
-        if gate_enabled:
-            gate = InSessionGate(
-                measurement,
-                # The declared tree, not one guessed from the driver's location: forge-fuse keeps its driver in the
-                # run's output dir, which is outside the workspace and is not a repository.
-                replace(gate_scope, kernel_file=kernel_path, workspace=configured_workspace),
-                baseline_case_times=gate_scoring.baseline_case_times,
-                best_mean_case_speedup=gate_scoring.best_mean_case_speedup,
+            run_spec = AgentRunSpec(
+                system_prompt=system_prompt,
+                user_prompt=prompt,
+                role="implementer",
+                cwd=run_cwd,
+                writable=True,
+                timeout_sec=session_deadline_sec,
+                tool_policy=AgentToolPolicy(
+                    read=True,
+                    search=True,
+                    write=True,
+                    shell=True,
+                    max_turns=turn_cap,
+                    permission_mode=permission_mode or "",
+                    bare=gate is None,
+                    thinking_budget_tokens=3000,
+                ),
+                target_files=(source_files or [kernel_path]),
+                commit_new_paths=list(commit_new_paths),
+                driver_script=driver_script or "",
+                protected_path_rules=FORGE_PROTECTED_PATHS,
+                protected_globs=list(gate_scope.extra_protected_globs),
+                # The loop writes its own ledger into the workspace it hands the implementer, and the kernel's runtime
+                # leaves a JIT cache there, so every iteration starts from a worktree the caller already dirtied.
+                allow_dirty_baseline=True,
+                ignored_untracked_globs=list(TOOL_OWNED_UNTRACKED_GLOBS),
+                protected_paths=list(extra_protected_paths),
+                hooks=hooks,
+                mcp_servers=pr_mcp_servers,
+                progress_log=progress_log,
             )
-            if gate_stop_check:
-                system_prompt = gate_system_prompt + _gate_scoring_context(gate_scoring)
-            # Built only for a provider that runs them. A backend which ignores
-            # ``AgentRunSpec.hooks`` drops the whole group without a word, so
-            # attaching one anyway makes this call site read as protection the
-            # session does not have -- the confusion the outer gate below
-            # exists to answer. Keyed on the backend that was resolved rather
-            # than the one that was asked for, so a provider fallback carries
-            # the decision with it.
-            if backend.capabilities.stop_hooks:
-                hooks = gate.make_agent_hooks(stop_check=gate_stop_check)
+            return gate, run_spec
 
-        run_spec = AgentRunSpec(
-            system_prompt=system_prompt,
-            user_prompt=prompt,
-            role="implementer",
-            cwd=run_cwd,
-            writable=True,
-            timeout_sec=session_deadline_sec,
-            tool_policy=AgentToolPolicy(
-                read=True,
-                search=True,
-                write=True,
-                shell=True,
-                max_turns=turn_cap,
-                permission_mode=permission_mode or "",
-                bare=gate is None,
-                thinking_budget_tokens=3000,
-            ),
-            target_files=(source_files or [kernel_path]),
-            commit_new_paths=list(commit_new_paths),
-            driver_script=driver_script or "",
-            protected_path_rules=FORGE_PROTECTED_PATHS,
-            protected_globs=list(gate_scope.extra_protected_globs),
-            # The loop writes its own ledger into the workspace it hands the implementer, and the kernel's runtime
-            # leaves a JIT cache there, so every iteration starts from a worktree the caller already dirtied.
-            allow_dirty_baseline=True,
-            ignored_untracked_globs=list(TOOL_OWNED_UNTRACKED_GLOBS),
-            protected_paths=list(extra_protected_paths),
-            hooks=hooks,
-            mcp_servers=pr_mcp_servers,
-            progress_log=progress_log,
-        )
+        gate, run_spec = prepare_session()
 
         def _finalize_integrity(error: BaseException | None = None) -> None:
             if gate is None:

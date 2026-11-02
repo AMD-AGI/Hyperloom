@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Collection
 from datetime import datetime
 from typing import Any, NamedTuple
 
@@ -435,26 +436,41 @@ class _RenderMixin:
         ranked.sort(key=lambda r: (-r[0], -r[1], -r[2]))
         return [row for _, _, _, row in ranked]
 
-    def to_untested_proposals_summary(self, *, skip_provenance: str = "") -> str:
+    def to_untested_proposals_summary(self, *, skip_provenance: str = "", in_grids: Collection[str] = ()) -> str:
         """Render the specialist proposals still waiting for a benchmark slot.
 
         Args:
             skip_provenance: Leave out the rows a producer with its own section renders.
+            in_grids: Content fingerprints of the variants in queued or running explore grids. Such a row is
+                already on its way to a bench, so it is named rather than listed as waiting.
         """
         rows = [
             row for row in self.untested_proposal_rows() if not skip_provenance or row["provenance"] != skip_provenance
         ]
-        if not rows:
-            return ""
-        out = [
-            "Executable specialist proposals from this cycle that no explore round has benched.",
-            "Ranked by gap severity, then most recent. The Coordinator benches the head of this",
-            "queue whenever no explore is queued or running; dispatch `explore` only for variants not listed here.",
-            "",
-        ]
-        out.extend(untested_proposal_line(row) for row in rows[:_UNTESTED_PROPOSALS_MAX_ENTRIES])
-        if len(rows) > _UNTESTED_PROPOSALS_MAX_ENTRIES:
-            out.append(f"(+{len(rows) - _UNTESTED_PROPOSALS_MAX_ENTRIES} more not shown)")
+        waiting = [row for row in rows if row["fingerprint"] not in in_grids]
+        held = [row["name"] for row in rows if row["fingerprint"] in in_grids]
+        out: list[str] = []
+        if waiting:
+            out.extend(
+                [
+                    "Executable specialist proposals from this cycle that no explore round has benched or has in its grid.",
+                    "Ranked by gap severity, then most recent. Once no explore is queued or running, the Coordinator",
+                    "benches the head of this list; dispatch `explore` only for variants not listed here.",
+                    "",
+                ]
+            )
+            out.extend(untested_proposal_line(row) for row in waiting[:_UNTESTED_PROPOSALS_MAX_ENTRIES])
+            if len(waiting) > _UNTESTED_PROPOSALS_MAX_ENTRIES:
+                out.append(f"(+{len(waiting) - _UNTESTED_PROPOSALS_MAX_ENTRIES} more not shown)")
+        if held:
+            if out:
+                out.append("")
+            out.append(
+                _flatten_for_prompt(
+                    "Specialist proposals already in a queued or running explore grid (its progress is in that task's "
+                    "line of the tasks in flight): " + ", ".join(held)
+                )
+            )
         return "\n".join(out)
 
     def to_proposal_scores_summary(self) -> str:

@@ -161,6 +161,27 @@ def _extract_quant_info(config: dict[str, Any]) -> tuple[str, int, int]:
     return method, bits, group_size
 
 
+def _log_model_profile(profile: ModelProfile) -> None:
+    """Log the GEMM-relevant shape of an analyzed model."""
+    log.info(
+        "Model analysis: arch=%s, is_moe=%s, experts=%d, topk=%d, "
+        "hidden=%d, inter=%d, moe_inter=%d, heads=%d, kv_heads=%d, "
+        "quant=%s/%d-bit, dtype=%s",
+        profile.architecture,
+        profile.is_moe,
+        profile.num_experts,
+        profile.num_experts_per_tok,
+        profile.hidden_size,
+        profile.intermediate_size,
+        profile.moe_intermediate_size,
+        profile.num_attention_heads,
+        profile.num_key_value_heads,
+        profile.quant_method or "none",
+        profile.quant_bits,
+        profile.model_dtype,
+    )
+
+
 def analyze_model(model_path: str) -> ModelProfile:
     """Read config.json from model_path and build a ModelProfile."""
     config_file = Path(model_path) / "config.json"
@@ -239,21 +260,5 @@ def analyze_model(model_path: str) -> ModelProfile:
         raw_config=config,
     )
 
-    log.info(
-        "Model analysis: arch=%s, is_moe=%s, experts=%d, topk=%d, "
-        "hidden=%d, inter=%d, moe_inter=%d, heads=%d, kv_heads=%d, "
-        "quant=%s/%d-bit, dtype=%s",
-        arch,
-        is_moe,
-        num_experts,
-        topk,
-        hidden_size,
-        intermediate_size,
-        moe_intermediate_size,
-        num_attention_heads,
-        num_key_value_heads,
-        quant_method or "none",
-        quant_bits,
-        model_dtype,
-    )
+    _log_model_profile(profile)
     return profile

@@ -45,9 +45,11 @@ def test_compiler_capture_wrong_instruction_and_replay(tmp_path, frontend, wirin
             )
             .replace("@triton.jit", "@gluon.jit")
         )
-        source = source.replace(
-            "tl.arange(0, BLOCK)", "tl.arange(0, BLOCK, layout=tl.BlockedLayout([1], [64], [4], [0]))"
-        )
+        # The layout must use the device's wave size (64 on CDNA, 32 on RDNA) and still cover the launch's
+        # BLOCK=256 over num_warps=4.
+        warp = torch.cuda.get_device_properties(0).warp_size
+        layout = f"tl.BlockedLayout([{256 // (warp * 4)}], [{warp}], [4], [0])"
+        source = source.replace("tl.arange(0, BLOCK)", f"tl.arange(0, BLOCK, layout={layout})")
         path.write_text(source)
     if frontend == "hip":
         _hip_workspace(workspace)
@@ -97,7 +99,10 @@ def test_compiler_capture_wrong_instruction_and_replay(tmp_path, frontend, wirin
         assert row["source_before"]["oracle_errors"] == row["source_after"]["oracle_errors"] == [0] * 5
     assembly = workspace / "kernel.s"
     original = assembly.read_text()
-    edited, count = re.subn(r"\bv_add_f32(?P<encoding>_e32|_e64)?\b", r"v_sub_f32\g<encoding>", original)
+    # RDNA pairs the add with another VALU op as v_dual_add_f32 (VOPD), which has a v_dual_sub_f32 too.
+    edited, count = re.subn(
+        r"\bv_(?P<dual>dual_)?add_f32(?P<encoding>_e32|_e64)?\b", r"v_\g<dual>sub_f32\g<encoding>", original
+    )
     assert count > 0
     assembly.write_text(edited)
     try:

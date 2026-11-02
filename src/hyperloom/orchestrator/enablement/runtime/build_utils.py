@@ -231,8 +231,7 @@ except Exception as exc:
 is_rocm = False
 checker = getattr(current_platform, "is_rocm", None)
 if callable(checker):
-    try: is_rocm = bool(checker())
-    except Exception: pass
+    is_rocm = bool(checker())
 if "rocm" in f"{current_platform!r} {current_platform.__class__.__name__}".lower():
     is_rocm = True
 if not is_rocm:
