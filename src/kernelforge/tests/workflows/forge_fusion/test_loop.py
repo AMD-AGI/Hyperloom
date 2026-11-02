@@ -333,3 +333,11 @@ class TestLedgerUnit:
             ledger.record(label="x", outcome="COMPILE FAILED", error_text="cuda_bf16.h missing")
         rendered = ledger.render_for_prompt()
         assert rendered.count("CUDA-only") == 1
+
+    def test_triton_build_constraint_names_no_chip(self):
+        # Regression: the constraint told the author to fit "gfx942 limits" whatever GPU the run was on.
+        ledger = FusionExperienceLedger(None)
+        ledger.record(label="x", outcome="COMPILE FAILED", error_text="out of resource: shared memory")
+        assert len(ledger.constraints) == 1
+        assert "shared-memory usage" in ledger.constraints[0]
+        assert "gfx942" not in ledger.constraints[0]

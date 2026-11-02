@@ -189,15 +189,11 @@ def write_gpu_metrics_from_report(workspace: Path | str, report: Any, *, source:
     to write is a defect and says so. Reporting both at the same volume is how a broken writer goes unnoticed for as
     long as this data did.
 
-    It never raises. A round that produced a good benchmark number and no GPU artifact is a far better outcome than a
-    round failed by its own telemetry, so the one guarantee lives here rather than being repeated by each caller.
+    A failed write never raises. A round that produced a good benchmark number and no GPU artifact is a far better
+    outcome than a round failed by its own telemetry, so the one guarantee lives here rather than in each caller.
     """
     root = Path(workspace)
-    try:
-        payload = gpu_metrics_from_report(report)
-    except Exception:
-        log.warning("gpu_metrics: could not normalise telemetry for %s", root, exc_info=True)
-        return None
+    payload = gpu_metrics_from_report(report)
     if not payload:
         return None
     payload["source"] = source
@@ -206,7 +202,7 @@ def write_gpu_metrics_from_report(workspace: Path | str, report: Any, *, source:
         from hyperloom_common.io import atomic_write_json
 
         atomic_write_json(out, payload)
-    except Exception:
+    except OSError:
         log.warning("gpu_metrics: telemetry was read but could not be written to %s", out, exc_info=True)
         return None
     return str(out)

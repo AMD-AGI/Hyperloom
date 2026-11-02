@@ -549,6 +549,54 @@ def _stop_report_step(phase_key: str) -> str:
     return "do not propose `report` (only CLOSE allows it, and the Coordinator routes the run there)"
 
 
+#: Steps 5 and 6 of the DECISION FRAMEWORK and its never-stay-silent rule; the same in every phase.
+_PHASE_AWARE_SELECTION_LINES: tuple[str, ...] = (
+    "5. **Phase-aware action selection**. There is no system-side",
+    "   priority list. Pick the next action by reading FACTS in this order:",
+    "",
+    "   a. **Phase + allowed actions** (the `=== Phase ===` /",
+    "      `=== Phase-allowed actions ===` blocks). PolicyGate denies",
+    "      anything outside the allowed set.",
+    "   b. **Current gaps** (the `=== Current gaps ===` block, sourced",
+    "      from `SharedState.gaps[]`). Each row shows canonical_id /",
+    "      layer / severity / symptom / attempts count + last attempt.",
+    "      The LLM picks the next gap to tackle based on layer (which",
+    "      routes the specialist domain), severity (high vs medium),",
+    "      and whether the attempts history shows the gap is still",
+    "      worth pushing on. When the section is missing it means",
+    "      baseline hasn't completed yet — fall back to",
+    "      `last_action_failures` + `explore_search.winners_history`.",
+    "   c. **KB sub-graphs + warm-start recipe** when present —",
+    "      cross-session priors carry " + "*qualitative* hints (what worked / what failed last time).",
+    "   d. **`=== Untested proposals (current cycle) ===`** — the",
+    "      executable proposals this cycle that no explore round has",
+    "      benched: predictor rows (`provenance: primatune`) first, then",
+    "      specialist proposals ranked by gap severity. The Coordinator",
+    "      benches this queue itself; your own grid adds only what it",
+    "      does not already hold, except predictor rows, which you copy",
+    "      verbatim unless the block names them as already in a grid.",
+    "   e. **Ordering facts**: baseline runs before anything else",
+    "      (invariant). ``analysis.md`` / ``last_profile_trace`` arrive",
+    "      automatically from the Coordinator-owned analysis task at",
+    "      PRELUDE and at every +10% watermark crossing — you do not",
+    "      need a manually-proposed profile before ``kernel_opt``.",
+    "6. **Phase budget awareness**. The `=== Phase ===` block's",
+    "   ``budget`` line carries ``remaining_sec`` against the phase's",
+    "   ``pct`` share; as it falls, prefer lower-cost / known-good",
+    "   actions (explore over kernel_opt).",
+    "   In OPTIMIZE the Plateau advisory reports each arm separately: BOTH arms",
+    "   dry advances to KERNEL_AGENT (``reason=optimize_no_more_leverage``) at",
+    "   the next phase-compute, while one arm dry means work the other.",
+    "   When you judge FRAMEWORK_AGENT exhausted,",
+    "   emit ``escalate_strategy_change{next_action_hint=",
+    "   'skip_to_kernel'}``. No hint ends the run.",
+    "",
+    "If you cannot move forward, emit",
+    "`send_message{topic='observation', body_md='blocked: <reason>'}`.",
+    "NEVER stay silent.",
+)
+
+
 def _section_decision_framework(*, phase: str = "", transport: str = "") -> list[str]:
     """Build the DECISION FRAMEWORK section lines.
 
@@ -599,53 +647,7 @@ def _section_decision_framework(*, phase: str = "", transport: str = "") -> list
         "explore / kernel_agent-owned dispatches are deferred until "
         "``analysis.md`` / ``last_profile_trace`` refreshes.",
     )
-    lines.extend(
-        [
-            "5. **Phase-aware action selection**. There is no system-side",
-            "   priority list. Pick the next action by reading FACTS in this order:",
-            "",
-            "   a. **Phase + allowed actions** (the `=== Phase ===` /",
-            "      `=== Phase-allowed actions ===` blocks). PolicyGate denies",
-            "      anything outside the allowed set.",
-            "   b. **Current gaps** (the `=== Current gaps ===` block, sourced",
-            "      from `SharedState.gaps[]`). Each row shows canonical_id /",
-            "      layer / severity / symptom / attempts count + last attempt.",
-            "      The LLM picks the next gap to tackle based on layer (which",
-            "      routes the specialist domain), severity (high vs medium),",
-            "      and whether the attempts history shows the gap is still",
-            "      worth pushing on. When the section is missing it means",
-            "      baseline hasn't completed yet — fall back to",
-            "      `last_action_failures` + `explore_search.winners_history`.",
-            "   c. **KB sub-graphs + warm-start recipe** when present —",
-            "      cross-session priors carry " + "*qualitative* hints (what worked / what failed last time).",
-            "   d. **`=== Untested proposals (current cycle) ===`** — the",
-            "      executable proposals this cycle that no explore round has",
-            "      benched: predictor rows (`provenance: primatune`) first, then",
-            "      specialist proposals ranked by gap severity. The Coordinator",
-            "      benches this queue itself; your own grid adds only what it",
-            "      does not already hold, except predictor rows, which you copy",
-            "      verbatim unless the block names them as already in a grid.",
-            "   e. **Ordering facts**: baseline runs before anything else",
-            "      (invariant). ``analysis.md`` / ``last_profile_trace`` arrive",
-            "      automatically from the Coordinator-owned analysis task at",
-            "      PRELUDE and at every +10% watermark crossing — you do not",
-            "      need a manually-proposed profile before ``kernel_opt``.",
-            "6. **Phase budget awareness**. The `=== Phase ===` block's",
-            "   ``budget`` line carries ``remaining_sec`` against the phase's",
-            "   ``pct`` share; as it falls, prefer lower-cost / known-good",
-            "   actions (explore over kernel_opt).",
-            "   In OPTIMIZE the Plateau advisory reports each arm separately: BOTH arms",
-            "   dry advances to KERNEL_AGENT (``reason=optimize_no_more_leverage``) at",
-            "   the next phase-compute, while one arm dry means work the other.",
-            "   When you judge FRAMEWORK_AGENT exhausted,",
-            "   emit ``escalate_strategy_change{next_action_hint=",
-            "   'skip_to_kernel'}``. No hint ends the run.",
-            "",
-            "If you cannot move forward, emit",
-            "`send_message{topic='observation', body_md='blocked: <reason>'}`.",
-            "NEVER stay silent.",
-        ]
-    )
+    lines.extend(_PHASE_AWARE_SELECTION_LINES)
     lines.extend(_failure_recovery_lines(phase=phase, transport=transport))
     if _renders_in(phase, _EXPLORE_GRID_PHASES):
         lines.extend(_idea_generation_lines())

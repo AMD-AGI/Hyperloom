@@ -505,9 +505,9 @@ def _installed_package_dir(pkg: str) -> str:
 
 def _free_vram_fraction(gpu: str, *, _run=None) -> Optional[float]:
     """Fraction of the target GPU's memory that is free, or None if unknown."""
-    run = _run or (lambda cmd: subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60))
+    run = _run or (lambda cmd: subprocess.run(cmd, capture_output=True, text=True, timeout=60))
     try:
-        out = run("rocm-smi --showmemuse").stdout
+        out = run(["rocm-smi", "--showmemuse"]).stdout
     except (OSError, subprocess.SubprocessError):
         return None
     used = re.findall(r"\(VRAM%\):\s*(\d+)", out)
@@ -833,7 +833,7 @@ _CUDA_ONLY_MARKERS = (
     "mma.sync",
     "device_functions.h",
 )
-# Triton JIT/compile failures on this GPU arch (gfx942) — actionable but distinct
+# Triton JIT/compile failures on this GPU arch — actionable but distinct
 # from the CUDA-only case (the kernel IS ROCm-native, it just doesn't build yet).
 _TRITON_BUILD_MARKERS = (
     "out of resource",
@@ -931,7 +931,7 @@ def classify_compile_error(error: str, recipe: Optional[Recipe] = None) -> str:
         )
     if any(m in e for m in _TRITON_BUILD_MARKERS):
         return (
-            "The Triton kernel failed to JIT-compile on this GPU arch (gfx942). "
+            "The Triton kernel failed to JIT-compile on this GPU arch. "
             "Reduce BLOCK size / shared-memory usage or fix tl.constexpr shapes so "
             "it builds, and keep an eager fallback when Triton is unavailable."
         )

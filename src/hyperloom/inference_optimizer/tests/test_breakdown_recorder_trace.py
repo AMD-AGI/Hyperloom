@@ -138,7 +138,7 @@ def test_a_trace_that_breaks_does_not_break_the_write(tmp_path, traced, monkeypa
     """A broken trace must never be why a fact went unrecorded."""
 
     def explode(*_args, **_kwargs):
-        raise RuntimeError("trace is broken")
+        raise TypeError("trace is broken")
 
     monkeypatch.setattr(trace_mod, "_entity", explode)
     recorder = Recorder(tmp_path, producer="kernel_agent")

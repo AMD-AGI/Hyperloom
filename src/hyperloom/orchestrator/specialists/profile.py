@@ -110,11 +110,6 @@ def uses_whole_machine_gpu_lane(params: dict[str, Any] | None) -> bool:
     return bool(p.get("enablement")) or resolve_specialist_profile(p).reserves_benchmark_lane
 
 
-def holds_serving_slot(params: dict[str, Any] | None) -> bool:
-    """True when a GPU specialist must hold the whole-machine ``serving_slot`` Ray resource (mutually exclusive with production serving)."""
-    return resolve_specialist_profile(params or {}).reserves_benchmark_lane
-
-
 def resolve_specialist_profile(
     params: dict[str, Any] | None,
     domain: "SpecialistDomain | None" = None,
@@ -158,7 +153,6 @@ __all__ = [
     "SCOPE_FREEFORM",
     "SCOPE_VALUES",
     "SpecialistProfile",
-    "holds_serving_slot",
     "is_authoring_specialist",
     "requires_gpu",
     "resolve_specialist_profile",

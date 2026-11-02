@@ -12,8 +12,10 @@ TraceLens owns the parse/group/prose/impact/order/cap and writes a typed
 expands each task's ``members[]`` into one candidate per member, lifts the task
 scalars and TraceLens metrics verbatim (``gpu_pct := pct_e2e``), then resolves
 each device symbol through TraceLens' single ``resolve_kernel_source`` and stamps
-the resolution onto the row. Host-only classification (patchability, backends,
-category, shapes) is applied afterwards by ``tracelens_analysis`` over these rows.
+the resolution onto the row; TraceLens also owns the native-vs-Triton routing,
+so importing this module requires TraceLens. Host-only classification
+(patchability, backends, category, shapes) is applied afterwards by
+``tracelens_analysis`` over these rows.
 
 Ordering is TraceLens' already: tasks by descending summed member impact, members
 within a task by descending ``impact_score``. This reader preserves that order and
@@ -28,10 +30,10 @@ from typing import Any
 
 from hyperloom_common.coerce import first_str, to_float
 
-from ._kernel_source import ResolveResult, resolve_source_verdict
+from TraceLens.TraceUtils.kernel_source import ResolveResult, resolve_kernel_source
 
 
-def load_report_tasks(analysis_json: str | Path, *, framework: str = "") -> list[dict[str, Any]]:
+def load_report_tasks(analysis_json: str | Path) -> list[dict[str, Any]]:
     """Read ``analysis.json`` into ordered hot-kernel candidate rows.
 
     Expands every ``compute_optimizations[]`` task's ``members[]`` into one
@@ -42,8 +44,6 @@ def load_report_tasks(analysis_json: str | Path, *, framework: str = "") -> list
 
     Args:
         analysis_json: Path to the ``analysis.json`` TraceLens wrote.
-        framework: Optional serving framework. Accepted but not yet forwarded to
-            the resolver; reserved for a future TraceLens per-call search-path filter.
 
     Returns:
         Candidate rows in TraceLens' task/member order. Empty when the file is
@@ -68,7 +68,7 @@ def load_report_tasks(analysis_json: str | Path, *, framework: str = "") -> list
             if not isinstance(member, dict):
                 continue
             candidate = _member_to_candidate(task, member)
-            _resolve_member_source(candidate, framework=framework)
+            _resolve_member_source(candidate)
             candidates.append(candidate)
     return candidates
 
@@ -116,7 +116,7 @@ def _member_to_candidate(task: dict[str, Any], member: dict[str, Any]) -> dict[s
     return candidate
 
 
-def _resolve_member_source(candidate: dict[str, Any], *, framework: str = "") -> None:
+def _resolve_member_source(candidate: dict[str, Any]) -> None:
     """Resolve the candidate's primary device symbol through TraceLens.
 
     One ``resolve_kernel_source`` call per symbol; the returned ``ResolveResult``
@@ -125,7 +125,7 @@ def _resolve_member_source(candidate: dict[str, Any], *, framework: str = "") ->
     which the host-only patchability gate then drops to ``skipped_kernels``.
     """
     symbol = str(candidate.get("device_kernel_name") or candidate.get("name") or "")
-    result: ResolveResult = resolve_source_verdict(
+    result: ResolveResult = resolve_kernel_source(
         symbol,
         kernel_file=str(candidate.get("kernel_launcher_path") or ""),
         op_name=str(candidate.get("name") or ""),
@@ -135,10 +135,8 @@ def _resolve_member_source(candidate: dict[str, Any], *, framework: str = "") ->
     candidate["source_line"] = location.line if location else None
     candidate["op_to_source_patchable"] = result.patchable
     candidate["op_to_source_reason"] = result.reason
-    candidate["op_to_source_status"] = "resolved" if result.patchable else "non_rewritable"
     candidate["kernel_kind"] = result.kind
     candidate["source_resolution_method"] = result.method
-    candidate["source_resolution_reason"] = result.reason
 
 
 def _shapes_with_dtypes(shapes: Any, dtypes: Any) -> list[str]:

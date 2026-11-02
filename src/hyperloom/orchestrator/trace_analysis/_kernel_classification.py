@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""What a traced kernel is: its shape, the source file behind it, and whether that source can be patched."""
+"""What a traced kernel is: the source file behind it, and whether that source can be patched."""
 
 from __future__ import annotations
 
@@ -66,48 +66,6 @@ def is_kernel_event(event: dict[str, Any]) -> bool:
     if name.lower() in RUNTIME_API_NAMES:
         return False
     return True
-
-
-def extract_shape(event: dict[str, Any]) -> dict[str, Any] | None:
-    """Extract a shape annotation from a trace event when present.
-
-    Checks both ``event['args']`` and the event top level for the first of
-    several known shape keys.
-
-    Args:
-        event (dict[str, Any]): A single trace event.
-
-    Returns:
-        dict[str, Any] | None: A single-key dict ``{shape_key: value}`` for
-            the first shape field found, or ``None`` when none is present.
-    """
-    args = event.get("args") if isinstance(event.get("args"), dict) else {}
-    for key in ("shape", "shapes", "input_shape", "trace_shapes"):
-        if key in args:
-            return {key: args[key]}
-        if key in event:
-            return {key: event[key]}
-    return None
-
-
-def extract_source_file(event: dict[str, Any]) -> str:
-    """Extract a source-file path from a trace event when present.
-
-    Checks both ``event['args']`` and the event top level for the first of
-    several known path keys.
-
-    Args:
-        event (dict[str, Any]): A single trace event.
-
-    Returns:
-        str: The first non-empty source path found, or ``""`` when none.
-    """
-    args = event.get("args") if isinstance(event.get("args"), dict) else {}
-    for key in ("source_file", "file", "filename", "path"):
-        value = args.get(key) or event.get(key)
-        if value:
-            return str(value)
-    return ""
 
 
 _FLYDSL_SOURCE_MARKERS = (

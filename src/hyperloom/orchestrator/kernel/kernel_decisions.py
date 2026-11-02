@@ -155,24 +155,30 @@ def enqueue_nominated_patch(state, *, patch, keep_threshold_pct: float = 3.0) ->
         # Re-enqueue of the same sibling: refresh the mutable fields (the patch snapshot identity is immutable) so a
         # re-run's env/threshold win.
         queued = queue[integration_id]
-        if isinstance(queued, dict):
-            if _text(queued.get("status")) in VERDICT_STATUSES:
-                # A settled verdict is not re-litigated: reviving it to pending both misreports it and puts it beyond
-                # evict_terminal's reach.
-                log.info(
-                    "nomination re-offers %s patch %s (%s); keeping the verdict, not re-queueing",
-                    queued.get("status"),
-                    kernel_name or source_file,
-                    artifact_path,
-                )
-                return None
-            queued["status"] = "pending"
-            queued["micro_speedup"] = micro_speedup
-            queued["fusion_env_flags"] = fusion_env_flags
-            queued["keep_threshold_pct"] = float(keep_threshold_pct)
-            queued["source"] = _FUSION_LANE
-            queued["action_label"] = "fusion"
+        if isinstance(queued, dict) and not _refresh_queued_nomination(queued, record, kernel_name or source_file):
+            return None
     return queue[integration_id]
+
+
+def _refresh_queued_nomination(queued: dict[str, Any], record: dict[str, Any], label: str) -> bool:
+    """Refresh a re-offered nomination's mutable fields from ``record``; False when its settled verdict stands."""
+    if _text(queued.get("status")) in VERDICT_STATUSES:
+        # A settled verdict is not re-litigated: reviving it to pending both misreports it and puts it beyond
+        # evict_terminal's reach.
+        log.info(
+            "nomination re-offers %s patch %s (%s); keeping the verdict, not re-queueing",
+            queued.get("status"),
+            label,
+            record["artifact_path"],
+        )
+        return False
+    queued["status"] = "pending"
+    queued["micro_speedup"] = record["micro_speedup"]
+    queued["fusion_env_flags"] = record["fusion_env_flags"]
+    queued["keep_threshold_pct"] = record["keep_threshold_pct"]
+    queued["source"] = _FUSION_LANE
+    queued["action_label"] = "fusion"
+    return True
 
 
 def _patch_budget_for() -> int:
@@ -356,6 +362,47 @@ def _reject_integration(state, entry: dict[str, Any], *, reason: str, pending_re
         pending_record.update(status="rejected", rejected_at=_now_iso(), rejected_reason=reason)
 
 
+def _integrate_identity_fields(result: dict[str, Any], pending_record: Any, key: str) -> dict[str, Any]:
+    """The patch identity an integrate attempts entry is keyed and routed by."""
+    kernel_id, patch_path, target_file, extra_args = _resolve_kernel_patch_identity(result)
+    task_group_key = _text(result.get("task_group_key"))
+    pending = pending_record if isinstance(pending_record, dict) else {}
+    integration_id = _text(pending.get("integration_id") or result.get("integration_id"))
+    identity_route = _text(result.get("identity_route") or pending.get("identity_route"))
+    return {
+        "key": key,
+        "kernel_id": kernel_id,
+        "task_group_key": task_group_key,
+        "identity_route": identity_route,
+        "integration_id": integration_id,
+        "patch_path": patch_path,
+        "target_file": target_file,
+        "extra_server_args": extra_args,
+    }
+
+
+def _integrate_attempt_row(state, result: dict[str, Any], *, is_fault: bool) -> dict[str, Any]:
+    """One integrate E2E attempt as the attempts ledger records it."""
+    return {
+        "decision": result.get("decision"),
+        "status": result.get("status"),
+        "error_class": result.get("error_class"),
+        "is_fault": is_fault,
+        "new_tput": result.get("new_tput"),
+        "gain_pct": result.get("gain_pct"),
+        "graded_objective": result.get("graded_objective"),
+        "accuracy": result.get("accuracy"),
+        "accuracy_pass": result.get("accuracy_pass"),
+        "decision_reason": result.get("decision_reason"),
+        "artifact_kind": _text(result.get("artifact_kind")),
+        "validation_tier": _text(result.get("validation_tier")),
+        "workspace": result.get("workspace"),
+        "report_path": result.get("report_path"),
+        "ts": _now_iso(),
+        "cycle": int(getattr(state, "macro_cycle", 0) or 0),
+    }
+
+
 def record_kernel_integrate_result(state, result: dict[str, Any]) -> dict[str, Any] | None:
     """Persist one integrate E2E result and reject exhausted patch attempts."""
     if not isinstance(result, dict):
@@ -364,47 +411,17 @@ def record_kernel_integrate_result(state, result: dict[str, Any]) -> dict[str, A
     key = kernel_patch_key(result)
     if not key:
         return None
-    kernel_id, patch_path, target_file, extra_args = _resolve_kernel_patch_identity(result)
-    task_group_key = _text(result.get("task_group_key"))
-    pending = pending_record if isinstance(pending_record, dict) else {}
-    integration_id = _text(pending.get("integration_id") or result.get("integration_id"))
-    identity_route = _text(result.get("identity_route") or pending.get("identity_route"))
+    identity = _integrate_identity_fields(result, pending_record, key)
     is_fault = state._is_integrate_fault(result)
     entry = dict(state.kernel_integrate_attempts.get(key) or {})
     attempts = list(entry.get("attempts") or [])
-    attempts.append(
-        {
-            "decision": result.get("decision"),
-            "status": result.get("status"),
-            "error_class": result.get("error_class"),
-            "is_fault": is_fault,
-            "new_tput": result.get("new_tput"),
-            "gain_pct": result.get("gain_pct"),
-            "graded_objective": result.get("graded_objective"),
-            "accuracy": result.get("accuracy"),
-            "accuracy_pass": result.get("accuracy_pass"),
-            "decision_reason": result.get("decision_reason"),
-            "artifact_kind": _text(result.get("artifact_kind")),
-            "validation_tier": _text(result.get("validation_tier")),
-            "workspace": result.get("workspace"),
-            "report_path": result.get("report_path"),
-            "ts": _now_iso(),
-            "cycle": int(getattr(state, "macro_cycle", 0) or 0),
-        }
-    )
+    attempts.append(_integrate_attempt_row(state, result, is_fault=is_fault))
     # Quota accounting: faults and gate verdicts draw from separate budgets.
     best_gain, fault_count = _attempt_totals(attempts)
     verdict_attempt_count = len(attempts) - fault_count
     entry.update(
         {
-            "key": key,
-            "kernel_id": kernel_id,
-            "task_group_key": task_group_key,
-            "identity_route": identity_route,
-            "integration_id": integration_id,
-            "patch_path": patch_path,
-            "target_file": target_file,
-            "extra_server_args": extra_args,
+            **identity,
             "attempts": attempts,
             "attempt_count": len(attempts),
             "fault_count": fault_count,

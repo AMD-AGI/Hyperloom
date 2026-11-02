@@ -756,30 +756,8 @@ def _discover_sglang_plan() -> _PatchPlan | None:
         return None
     apply_root, apply_strip = apply_resolution
 
-    # Per-version subdir layout required.
-    patches_dir = _resolve_versioned_patches_dir(patches_root, version, apply_root)
+    patches_dir = _supported_sglang_patches_dir(patches_root, version, apply_root)
     if patches_dir is None:
-        log.warning(
-            "_server_patcher: no SGLang patches found under %s/%s/ for "
-            "version %s; upgrade TraceLens to Hyperloom_integration_v0.3.1+ — "
-            "kernel shape profiling will be unavailable",
-            patches_root,
-            _versioned_patches_subdir_name(version, apply_root) or "<unknown>",
-            version,
-        )
-        return None
-
-    if not _version_accepted(version, patches_dir=patches_dir):
-        log.warning(
-            "_server_patcher: SGLang %s not in supported version list "
-            "(consulted: $HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS, "
-            "$HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS, %s/SUPPORTED_VERSIONS, "
-            "then built-in minor allowlist %s); skip — kernel shape profiling "
-            "will be unavailable",
-            version,
-            patches_dir,
-            _SGLANG_DEFAULT_ALLOWED_MINORS,
-        )
         return None
     patches = tuple(sorted(patches_dir.glob("*.patch")))
     if not patches:
@@ -813,6 +791,36 @@ def _discover_sglang_plan() -> _PatchPlan | None:
         apply_strip=apply_strip,
         optional_patches=optional_patches,
     )
+
+
+def _supported_sglang_patches_dir(patches_root: Path, version: str, apply_root: Path) -> Path | None:
+    """The versioned SGLang patches dir, or ``None`` (logged) when absent or the version is unsupported."""
+    # Per-version subdir layout required.
+    patches_dir = _resolve_versioned_patches_dir(patches_root, version, apply_root)
+    if patches_dir is None:
+        log.warning(
+            "_server_patcher: no SGLang patches found under %s/%s/ for "
+            "version %s; upgrade TraceLens to Hyperloom_integration_v0.3.1+ — "
+            "kernel shape profiling will be unavailable",
+            patches_root,
+            _versioned_patches_subdir_name(version, apply_root) or "<unknown>",
+            version,
+        )
+        return None
+
+    if not _version_accepted(version, patches_dir=patches_dir):
+        log.warning(
+            "_server_patcher: SGLang %s not in supported version list "
+            "(consulted: $HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS, "
+            "$HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS, %s/SUPPORTED_VERSIONS, "
+            "then built-in minor allowlist %s); skip — kernel shape profiling "
+            "will be unavailable",
+            version,
+            patches_dir,
+            _SGLANG_DEFAULT_ALLOWED_MINORS,
+        )
+        return None
+    return patches_dir
 
 
 def _resolve_sglang_apply_root(sglang_module: Path) -> tuple[Path, int] | None:
@@ -957,75 +965,8 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
     # fallback; if neither accepts a patch the whole set fail-softs.
     strip_arg = f"-p{plan.apply_strip}"
 
-    apply_modes: dict[Path, str] = {}
-    for p in plan.patches:
-        if _git(git, ("apply", "--check", strip_arg, str(p)), plan.apply_root):
-            apply_modes[p] = "git"
-            continue
-        if patch_bin and _patch_dry_run(patch_bin, p, plan.apply_root, plan.apply_strip):
-            log.warning(
-                "_server_patcher: %s patch %s did not apply cleanly with "
-                "`git apply --check %s`; falling back to `patch %s --fuzz=2` "
-                "(TraceLens patch may lag deployed %s by a point release)",
-                plan.framework,
-                p.name,
-                strip_arg,
-                strip_arg,
-                plan.framework,
-            )
-            apply_modes[p] = "patch"
-            continue
-        # Forward apply fails: check whether this patch is ALREADY APPLIED (a clean ``git apply -R --check`` succeeds
-        # iff the tree already contains its post-image).
-        if _git(git, ("apply", "-R", "--check", strip_arg, str(p)), plan.apply_root):
-            log.info(
-                "_server_patcher: %s patch %s already applied (reverse "
-                "`git apply -R --check %s` is clean); skipping it from the "
-                "transaction so the remaining patches still apply",
-                plan.framework,
-                p.name,
-                strip_arg,
-            )
-            apply_modes[p] = "skip"
-            continue
-        # Symmetric check for patches previously applied via fuzzy `patch` (git reverse may fail on fuzzy-applied
-        # hunks).
-        if patch_bin and _patch_reverse_dry_run(
-            patch_bin,
-            p,
-            plan.apply_root,
-            plan.apply_strip,
-        ):
-            log.info(
-                "_server_patcher: %s patch %s already applied (fuzzy reverse dry-run clean); skipping it",
-                plan.framework,
-                p.name,
-            )
-            apply_modes[p] = "skip"
-            continue
-        if p.name in plan.optional_patches:
-            log.warning(
-                "_server_patcher: optional %s patch %s does not apply "
-                "(`git apply --check %s` + fuzzy both failed, not already "
-                "applied) — skipping it so the critical patches still apply "
-                "atomically (version %s; non-critical to kernel shape profiling)",
-                plan.framework,
-                p.name,
-                strip_arg,
-                plan.version,
-            )
-            apply_modes[p] = "skip"
-            continue
-        log.warning(
-            "_server_patcher: `git apply --check %s` AND fuzzy `patch %s "
-            "--dry-run` both failed for %s (version %s, patch %s), and it is "
-            "not already applied (reverse check failed); fail-soft skip",
-            strip_arg,
-            strip_arg,
-            plan.framework,
-            plan.version,
-            p.name,
-        )
+    apply_modes = _precheck_apply_modes(plan, git, patch_bin, strip_arg)
+    if apply_modes is None:
         return False
 
     applied: list[tuple[Path, str]] = []
@@ -1060,17 +1001,7 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
         _rollback_applied(applied, plan, git, patch_bin, strip_arg)
         return False
 
-    fuzzy_count = sum(1 for _, mode in applied if mode == "patch")
-    log.info(
-        "_server_patcher: applied %d patch(es) for %s %s "
-        "(strict=%d, fuzzy=%d, already-applied/skipped=%d) (issue #194 §4/§5)",
-        len(applied),
-        plan.framework,
-        plan.version,
-        len(applied) - fuzzy_count,
-        fuzzy_count,
-        skipped,
-    )
+    _log_applied(plan, applied, skipped)
     # Post-apply sentinel verification: confirm all sentinel markers are present (catches all-skipped,
     # semantically-wrong fuzzy apply, or missing annotation-pipeline markers).
     if not _is_patched(plan):
@@ -1089,6 +1020,102 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
         _rollback_applied(applied, plan, git, patch_bin, strip_arg)
         return False
     return True
+
+
+def _precheck_apply_modes(plan: _PatchPlan, git: str, patch_bin: str | None, strip_arg: str) -> dict[Path, str] | None:
+    """Pick each patch's apply mode (``git``, ``patch`` or ``skip``), or ``None`` when one cannot apply."""
+    apply_modes: dict[Path, str] = {}
+    for p in plan.patches:
+        if _git(git, ("apply", "--check", strip_arg, str(p)), plan.apply_root):
+            apply_modes[p] = "git"
+            continue
+        if patch_bin and _patch_dry_run(patch_bin, p, plan.apply_root, plan.apply_strip):
+            log.warning(
+                "_server_patcher: %s patch %s did not apply cleanly with "
+                "`git apply --check %s`; falling back to `patch %s --fuzz=2` "
+                "(TraceLens patch may lag deployed %s by a point release)",
+                plan.framework,
+                p.name,
+                strip_arg,
+                strip_arg,
+                plan.framework,
+            )
+            apply_modes[p] = "patch"
+            continue
+        if _already_applied(plan, git, patch_bin, strip_arg, p):
+            apply_modes[p] = "skip"
+            continue
+        if p.name in plan.optional_patches:
+            log.warning(
+                "_server_patcher: optional %s patch %s does not apply "
+                "(`git apply --check %s` + fuzzy both failed, not already "
+                "applied) — skipping it so the critical patches still apply "
+                "atomically (version %s; non-critical to kernel shape profiling)",
+                plan.framework,
+                p.name,
+                strip_arg,
+                plan.version,
+            )
+            apply_modes[p] = "skip"
+            continue
+        log.warning(
+            "_server_patcher: `git apply --check %s` AND fuzzy `patch %s "
+            "--dry-run` both failed for %s (version %s, patch %s), and it is "
+            "not already applied (reverse check failed); fail-soft skip",
+            strip_arg,
+            strip_arg,
+            plan.framework,
+            plan.version,
+            p.name,
+        )
+        return None
+    return apply_modes
+
+
+def _already_applied(plan: _PatchPlan, git: str, patch_bin: str | None, strip_arg: str, p: Path) -> bool:
+    """Whether the tree already holds patch ``p``'s post-image, by a strict or fuzzy reverse dry-run."""
+    # Forward apply fails: check whether this patch is ALREADY APPLIED (a clean ``git apply -R --check`` succeeds
+    # iff the tree already contains its post-image).
+    if _git(git, ("apply", "-R", "--check", strip_arg, str(p)), plan.apply_root):
+        log.info(
+            "_server_patcher: %s patch %s already applied (reverse "
+            "`git apply -R --check %s` is clean); skipping it from the "
+            "transaction so the remaining patches still apply",
+            plan.framework,
+            p.name,
+            strip_arg,
+        )
+        return True
+    # Symmetric check for patches previously applied via fuzzy `patch` (git reverse may fail on fuzzy-applied
+    # hunks).
+    if patch_bin and _patch_reverse_dry_run(
+        patch_bin,
+        p,
+        plan.apply_root,
+        plan.apply_strip,
+    ):
+        log.info(
+            "_server_patcher: %s patch %s already applied (fuzzy reverse dry-run clean); skipping it",
+            plan.framework,
+            p.name,
+        )
+        return True
+    return False
+
+
+def _log_applied(plan: _PatchPlan, applied: list[tuple[Path, str]], skipped: int) -> None:
+    """Log how many patches of ``plan`` applied strictly, fuzzily, or were already present."""
+    fuzzy_count = sum(1 for _, mode in applied if mode == "patch")
+    log.info(
+        "_server_patcher: applied %d patch(es) for %s %s "
+        "(strict=%d, fuzzy=%d, already-applied/skipped=%d) (issue #194 §4/§5)",
+        len(applied),
+        plan.framework,
+        plan.version,
+        len(applied) - fuzzy_count,
+        fuzzy_count,
+        skipped,
+    )
 
 
 def _rollback_applied(

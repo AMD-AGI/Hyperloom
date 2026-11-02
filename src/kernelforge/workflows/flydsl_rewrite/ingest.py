@@ -69,6 +69,20 @@ def _discover_c_source_entry(source_path: str, target_functions: list[str]) -> s
     return ""
 
 
+def _references_target(fn_node: ast.FunctionDef, targets: set[str]) -> bool:
+    """Whether ``fn_node`` launches, calls or names one of ``targets``."""
+    for node in ast.walk(fn_node):
+        # Triton launch: kernel[grid](...) -> Subscript with the kernel Name.
+        if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name) and node.value.id in targets:
+            return True
+        # Plain call: kernel(...) or launch helper referencing the name.
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in targets:
+            return True
+        if isinstance(node, ast.Name) and node.id in targets:
+            return True
+    return False
+
+
 def discover_source_entry(
     source_path: str,
     target_functions: list[str],
@@ -87,24 +101,9 @@ def discover_source_entry(
         return ""
 
     targets = set(target_functions)
-
-    def _references_target(fn_node: ast.FunctionDef) -> bool:
-        for node in ast.walk(fn_node):
-            # Triton launch: kernel[grid](...) -> Subscript with the kernel Name.
-            if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name):
-                if node.value.id in targets:
-                    return True
-            # Plain call: kernel(...) or launch helper referencing the name.
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-                if node.func.id in targets:
-                    return True
-            if isinstance(node, ast.Name) and node.id in targets:
-                return True
-        return False
-
     candidates: list[tuple[int, str]] = []  # (num_pos_args, name)
     for node in tree.body:
-        if isinstance(node, ast.FunctionDef) and _references_target(node):
+        if isinstance(node, ast.FunctionDef) and _references_target(node, targets):
             n_pos = len(node.args.args)
             candidates.append((n_pos, node.name))
     if not candidates:

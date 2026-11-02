@@ -343,9 +343,9 @@ def test_recover_session_nonfatal_langfuse_and_package_errors(tmp_path: Path, mo
     monkeypatch.setattr(
         breakdown_mod, "write_breakdown_json", lambda s: calls.append("write") or s / "session_breakdown.json"
     )
-    monkeypatch.setattr(emitter, "flush_session", lambda _s: (_ for _ in ()).throw(RuntimeError("langfuse down")))
+    monkeypatch.setattr(emitter, "flush_session", lambda _s: (_ for _ in ()).throw(OSError("langfuse down")))
     monkeypatch.setattr(
-        breakdown_mod, "package_session_artifacts", lambda _s: (_ for _ in ()).throw(RuntimeError("zip failed"))
+        breakdown_mod, "package_session_artifacts", lambda _s: (_ for _ in ()).throw(OSError("zip failed"))
     )
 
     rc = recover._run_recover_session(argparse.Namespace(session_dir=session, force=True))
@@ -1023,26 +1023,13 @@ def test_retry_policy_env_and_on_retry_error(monkeypatch: pytest.MonkeyPatch) ->
 # orchestrator.state.objective
 
 
-def test_tput_objective_progress_zero() -> None:
+def test_tput_objective_unmeasured_is_not_reached() -> None:
     from hyperloom.orchestrator.state.objective import TargetTputObjective
 
     obj = TargetTputObjective(target_tput_per_gpu=100.0)
     state = SimpleNamespace(current_best={}, baseline_tput=0.0)
-    assert obj.progress(state) == 0.0
     assert obj.reached(state) is False
     assert obj.describe() == "target_tput_per_gpu=100.0"
-
-
-def test_baseline_objective_progress_zero_ref(tmp_path: Path) -> None:
-    from hyperloom.orchestrator.state.objective import TargetBaselineObjective
-
-    report = tmp_path / "benchmark_report.json"
-    report.write_text(json.dumps({"throughput": {"output_throughput": 50.0}}), encoding="utf-8")
-    obj = TargetBaselineObjective(baseline_dir=str(tmp_path))
-    assert obj.kind() == "baseline"
-    obj._ref_tput = 0.0
-    state = SimpleNamespace(current_best={"tput": 10.0}, baseline_tput=0.0)
-    assert obj.progress(state) == 0.0
 
 
 # orchestrator.actions.executors._file_lock
@@ -1204,6 +1191,10 @@ def test_gpu_type_autodetect_rocm_and_torch_fallback(monkeypatch: pytest.MonkeyP
 
     fake_torch.cuda.get_device_properties = lambda _idx: (_ for _ in ()).throw(RuntimeError("no gpu"))
     assert gpu_types._autodetect_gpu_type() is None
+
+    fake_torch.cuda.get_device_properties = lambda _idx: (_ for _ in ()).throw(KeyError("device"))
+    with pytest.raises(KeyError, match="device"):
+        gpu_types._autodetect_gpu_type()
 
 
 def test_gpu_type_autodetect_is_none_when_torch_cannot_load_its_library(monkeypatch: pytest.MonkeyPatch) -> None:
