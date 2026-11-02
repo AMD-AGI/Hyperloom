@@ -49,6 +49,8 @@ HYPERLOOM_RUNTIME_DIR_ENV = "HYPERLOOM_RUNTIME_DIR"
 
 # The probe mirrors the mount/user-namespace operations Codex's bubblewrap sandbox needs.
 _BWRAP_PROBE_TIMEOUT_SEC = 10.0
+# access(2) refuses a directory whose owner is unmapped in the sandbox's user namespace, as bwrap's mkdir does.
+_BWRAP_ROOTS_WRITABLE_SCRIPT = 'for d; do test -w "$d" || exit 1; done'
 _BWRAP_PROBE_CACHE: dict[tuple[Any, ...], bool] = {}
 _BWRAP_PROBE_CACHE_LOCK = threading.Lock()
 
@@ -224,8 +226,8 @@ def _resolve_codex_sandbox_mode(*, sandbox_mode: str, source: Mapping[str, str])
     return resolved
 
 
-def _bwrap_probe_cache_key(bwrap: str, source: Mapping[str, str]) -> tuple[Any, ...]:
-    """Identify the executable, credentials and namespaces relevant to bwrap."""
+def _bwrap_probe_cache_key(bwrap: str, source: Mapping[str, str], roots: Sequence[Path] = ()) -> tuple[Any, ...]:
+    """Identify the executable, credentials, namespaces and working roots relevant to bwrap."""
     path = Path(bwrap).resolve()
     stat_result = path.stat()
 
@@ -240,6 +242,10 @@ def _bwrap_probe_cache_key(bwrap: str, source: Mapping[str, str]) -> tuple[Any, 
             return Path(pathname).read_text(encoding="utf-8").strip()
         except OSError:
             return ""
+
+    def _root_state(root: Path) -> tuple[str, int, int, int]:
+        root_stat = root.stat()
+        return (str(root), root_stat.st_uid, root_stat.st_gid, root_stat.st_mode)
 
     return (
         str(path),
@@ -258,20 +264,19 @@ def _bwrap_probe_cache_key(bwrap: str, source: Mapping[str, str]) -> tuple[Any, 
         source.get("PATH", ""),
         source.get("LD_LIBRARY_PATH", ""),
         source.get("LD_PRELOAD", ""),
+        tuple(_root_state(root) for root in roots),
     )
 
 
-def _run_bwrap_probe(bwrap: str, *, source: Mapping[str, str]) -> bool:
-    """Execute the namespace and root bind that Codex requires."""
-    command = [
-        bwrap,
-        "--unshare-user",
-        "--unshare-net",
-        "--ro-bind",
-        "/",
-        "/",
-        "/bin/true",
-    ]
+def _run_bwrap_probe(bwrap: str, *, source: Mapping[str, str], roots: Sequence[Path] = ()) -> bool:
+    """Execute the namespace and root bind that Codex requires, and a write test in each working root."""
+    command = [bwrap, "--unshare-user", "--unshare-net", "--ro-bind", "/", "/"]
+    for root in roots:
+        command.extend(["--bind", str(root), str(root)])
+    if roots:
+        command.extend(["/bin/sh", "-c", _BWRAP_ROOTS_WRITABLE_SCRIPT, "sh", *(str(root) for root in roots)])
+    else:
+        command.append("/bin/true")
     try:
         completed = subprocess.run(
             command,
@@ -293,18 +298,20 @@ def probe_codex_sandbox_capability(*, env: dict[str, str] | None = None) -> bool
     return _probe_codex_sandbox_capability(source=_effective_env(env))
 
 
-def _probe_codex_sandbox_capability(*, source: Mapping[str, str]) -> bool:
+def _probe_codex_sandbox_capability(*, source: Mapping[str, str], roots: Sequence[Path] = ()) -> bool:
     """Probe bubblewrap from one already-effective environment."""
     bwrap = shutil.which("bwrap", path=source.get("PATH"))
     if not bwrap:
         return False
+    # Codex skips a writable root that does not exist, so there is nothing to write there.
+    present_roots = tuple(resolved for resolved in (Path(root).resolve() for root in roots) if resolved.exists())
     try:
-        cache_key = _bwrap_probe_cache_key(bwrap, source)
+        cache_key = _bwrap_probe_cache_key(bwrap, source, present_roots)
     except OSError:
         return False
     with _BWRAP_PROBE_CACHE_LOCK:
         if cache_key not in _BWRAP_PROBE_CACHE:
-            _BWRAP_PROBE_CACHE[cache_key] = _run_bwrap_probe(bwrap, source=source)
+            _BWRAP_PROBE_CACHE[cache_key] = _run_bwrap_probe(bwrap, source=source, roots=present_roots)
         return _BWRAP_PROBE_CACHE[cache_key]
 
 
@@ -562,6 +569,15 @@ class CodexSession:
                 f"Codex sandbox mode {resolved_sandbox_mode!r} requires a working bubblewrap sandbox, "
                 "but the capability probe failed; refusing to fall back to bypass"
             )
+        if resolved_sandbox_mode == "workspace-write" and self.config.writable_roots:
+            working_roots = (self.config.cwd, *self.config.writable_roots)
+            if not _probe_codex_sandbox_capability(source=effective_env, roots=working_roots):
+                raise CodexSessionUnavailableError(
+                    "Codex sandbox mode 'workspace-write' cannot write to its working directories "
+                    f"({', '.join(str(root) for root in working_roots)}), where it must create its protected paths; "
+                    "a common cause is an owner that is not mapped inside the bubblewrap user namespace. "
+                    f"Fix the ownership or choose the sandbox mode explicitly with {CODEX_SANDBOX_MODE_ENV}"
+                )
 
         provider_config = _resolve_codex_provider_config(effective_env)
         sdk = load_codex_sdk()

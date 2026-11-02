@@ -542,6 +542,63 @@ def test_probe_codex_sandbox_executes_a_real_bwrap_sandbox(monkeypatch, returnco
     assert calls[0][1]["timeout"] > 0
 
 
+def test_probe_binds_each_working_root_and_checks_it_is_writable(tmp_path, monkeypatch):
+    """Codex creates its protected paths in every working root, so the probe must try the same write."""
+    calls: list[list[str]] = []
+
+    def _runner(argv: list[str], **_kwargs: Any) -> Any:
+        calls.append(argv)
+        return type("_Completed", (), {"returncode": 0})()
+
+    monkeypatch.setattr(cs.subprocess, "run", _runner)
+
+    assert cs._run_bwrap_probe("/probe/bin/bwrap", source={"PATH": "/probe/bin"}, roots=(tmp_path,))
+
+    root = str(tmp_path)
+    assert calls[0] == [
+        "/probe/bin/bwrap",
+        "--unshare-user",
+        "--unshare-net",
+        "--ro-bind",
+        "/",
+        "/",
+        "--bind",
+        root,
+        root,
+        "/bin/sh",
+        "-c",
+        'for d; do test -w "$d" || exit 1; done',
+        "sh",
+        root,
+    ]
+
+
+def test_probe_result_is_cached_per_set_of_working_roots(tmp_path, monkeypatch):
+    """A pass for no roots must not answer for a directory the sandbox cannot write."""
+    fake_bwrap = tmp_path / "bwrap"
+    fake_bwrap.write_text("")
+    monkeypatch.setattr(cs.shutil, "which", lambda *_args, **_kwargs: str(fake_bwrap))
+    monkeypatch.setattr(cs, "_run_bwrap_probe", lambda _bwrap, *, source, roots=(): not roots)
+    monkeypatch.setattr(cs, "_BWRAP_PROBE_CACHE", {})
+
+    assert cs._probe_codex_sandbox_capability(source={}) is True
+    assert cs._probe_codex_sandbox_capability(source={}, roots=(tmp_path,)) is False
+
+
+def test_probe_skips_a_working_root_that_does_not_exist(tmp_path, monkeypatch):
+    """Codex skips missing writable roots, so the probe must not bind them."""
+    seen: list[tuple[Any, ...]] = []
+    fake_bwrap = tmp_path / "bwrap"
+    fake_bwrap.write_text("")
+    monkeypatch.setattr(cs.shutil, "which", lambda *_args, **_kwargs: str(fake_bwrap))
+    monkeypatch.setattr(cs, "_run_bwrap_probe", lambda _bwrap, *, source, roots=(): seen.append(roots) or True)
+    monkeypatch.setattr(cs, "_BWRAP_PROBE_CACHE", {})
+
+    assert cs._probe_codex_sandbox_capability(source={}, roots=(tmp_path, tmp_path / "missing"))
+
+    assert seen == [(tmp_path,)]
+
+
 def test_run_codex_turn_defaults_to_workspace_write_for_a_write_scope(tmp_path, monkeypatch):
     """A writing turn uses the least-privilege usable preset by default."""
     output = tmp_path / "out"
@@ -638,6 +695,28 @@ def test_run_codex_turn_does_not_fallback_when_the_bwrap_probe_fails(tmp_path, m
             )
         )
 
+    assert "config" not in record
+
+
+def test_run_codex_turn_names_a_working_directory_the_sandbox_cannot_write(tmp_path, monkeypatch):
+    """A working root bwrap cannot write must fail at start, naming the directory, not mid-turn."""
+    record = _install_fake_sdk(monkeypatch)
+    writable = tmp_path / "out"
+    writable.mkdir()
+    monkeypatch.setattr(cs, "_probe_codex_sandbox_capability", lambda *, source, roots=(): not roots)
+
+    with pytest.raises(cs.CodexSessionUnavailableError) as excinfo:
+        _use_gateway_env(monkeypatch)
+        asyncio.run(
+            cs.run_codex_turn(
+                request=cs.CodexTurnRequest(prompt="inspect", timeout_sec=5.0),
+                config=cs.CodexSessionConfig(cwd=tmp_path, model="m", writable_roots=(writable,)),
+                developer_instructions="i",
+            )
+        )
+
+    assert str(tmp_path) in str(excinfo.value)
+    assert str(writable) in str(excinfo.value)
     assert "config" not in record
 
 

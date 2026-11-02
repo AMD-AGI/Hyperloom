@@ -388,7 +388,12 @@ Codex implements both contained presets with bubblewrap, so Hyperloom executes
 a real namespace-and-mount capability probe before starting the SDK. Merely
 finding a `bwrap` executable is insufficient: if the current kernel or
 container prevents it from establishing the sandbox, `workspace-write` and
-`read-only` fail closed before the app-server starts. There is no automatic
+`read-only` fail closed before the app-server starts. Under `workspace-write`
+the probe also writes to the session's working directory and each declared
+writable root, because Codex creates its protected paths (`.agents`, `.codex`)
+there; a directory whose owner is not mapped inside the sandbox's user
+namespace, such as a checkout owned by another host user inside a root
+container, fails the same way. There is no automatic
 fallback to `bypass`.
 
 `bypass` is an explicit operator opt-in. Set
