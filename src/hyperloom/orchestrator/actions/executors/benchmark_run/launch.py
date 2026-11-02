@@ -18,12 +18,10 @@ from hyperloom_common.jsonio import read_json
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.perf_metric import agentx_active
 from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import BaselineInvocation
-from ....measurement.runtime_findings import persist_runtime_findings, scan_server_log
 from .._grid_runner import sanitize_result_dir, sanitize_script_name
-from .._launch_evidence import RequestedLaunch, build_launch_evidence, persist_launch_evidence
+from .._launch_evidence import RequestedLaunch, build_launch_evidence, persist_measurement_evidence
 from .._subprocess_kill import DETOKENIZER_STALL_RETURNCODE, clear_server_ready_stamp
 from .._workload_envs import (
-    VLLM_SOURCE_ROOT_ENVS,
     BenchmarkTarget,
     FrameworkScriptMismatchError,
     LaunchLayer,
@@ -108,7 +106,7 @@ def _attach_baseline_launch_evidence(
     output_dir: Path,
     framework: str,
 ) -> None:
-    """Persist the declared and observed server identity for a baseline result."""
+    """Persist the declared and observed server identity, and its runtime findings, for a baseline result."""
     from .._grid_runner import _measurement_server_log_path
 
     workspace = Path(str(result.get("workspace") or "")) if result.get("workspace") else None
@@ -118,17 +116,14 @@ def _attach_baseline_launch_evidence(
         from hyperloom.inference_optimizer.agentx.report import native_launch_evidence
 
         evidence = native_launch_evidence(result, config_path, actual_server_log=actual_log)
-        result["launch_evidence"] = evidence
-        result["launch_evidence_path"] = persist_launch_evidence(evidence, slot=output_dir)
-        return
-    evidence = build_launch_evidence(
-        RequestedLaunch(config_path, framework), actual_server_log=actual_log, slot=output_dir
-    )
+    else:
+        evidence = build_launch_evidence(
+            RequestedLaunch(config_path, framework), actual_server_log=actual_log, slot=output_dir
+        )
     result["launch_evidence"] = evidence
-    result["launch_evidence_path"] = persist_launch_evidence(evidence, slot=output_dir)
-    declared_env = evidence["requested_server_env"].keys() - set(VLLM_SOURCE_ROOT_ENVS)
-    report = scan_server_log(actual_log, evidence["framework"], declared_env=declared_env)
-    persist_runtime_findings(report, slot=output_dir)
+    result["launch_evidence_path"] = persist_measurement_evidence(
+        evidence, actual_server_log=actual_log, slot=output_dir
+    )
 
 
 class _BenchmarkLaunchMixin:
