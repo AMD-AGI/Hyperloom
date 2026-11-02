@@ -32,7 +32,9 @@ def _sibling_import(tree: ast.Module, root: Path, hook: Path) -> str | None:
     for name in sorted(names):
         if name == stem:
             continue
-        if (root / f"{name}.py").is_file() or (root / name / "__init__.py").is_file():
+        # A directory counts whether or not it holds __init__.py: since PEP 420 a
+        # plain directory imports fine as a namespace package.
+        if (root / f"{name}.py").is_file() or (root / name).is_dir():
             return name
     return None
 

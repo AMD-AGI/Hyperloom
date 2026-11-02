@@ -284,3 +284,17 @@ def test_export_allows_stdlib_and_unrelated_scratch_files(workload):
     state["optimization_stack"] = [accept_source(session, hook, "accepted1")]
 
     assert export_custom_inference(session, state)["status"] == "exported"
+
+
+def test_export_refuses_a_namespace_package_sibling(workload):
+    """A directory needs no __init__.py to import; ship one file and it is gone."""
+    root, hook, session, state = workload
+    (root / "kernels").mkdir()
+    (root / "kernels" / "fast.py").write_text("Y = 2\n")
+    hook.write_text("import kernels.fast\n\n\ndef hyperloom_optimize(model):\n    return model\n")
+    state["optimization_stack"] = [accept_source(session, hook, "accepted1")]
+
+    result = export_custom_inference(session, state)
+
+    assert result["status"] == "incomplete"
+    assert "imports 'kernels' from beside itself" in result["reasons"][0]
