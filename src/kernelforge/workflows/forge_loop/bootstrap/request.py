@@ -62,13 +62,15 @@ class AgentRoleOptions:
 
 @dataclass(frozen=True)
 class LoopShape:
-    """How the loop measures and how many candidates each round explores."""
+    """How the loop measures, how many candidates each round explores, and how it chooses what they build on."""
 
     nproc_per_node: int
     lanes: int
     merge_stacking: bool
     bench_repeat: int
     commit_new_paths: tuple[str, ...]
+    # None when the invocation did not say: a fresh campaign then searches linearly, a resumed one as it always has.
+    search_strategy: str | None = None
 
 
 @dataclass(frozen=True)

@@ -551,6 +551,31 @@ def test_from_dict_round_trips_measurement_semantics(tmp_path, monkeypatch):
         CampaignConfig.from_dict(payload)
 
 
+def test_the_search_strategy_is_snapshotted_and_a_campaign_recorded_without_it_is_linear(tmp_path, monkeypatch):
+    payload = _campaign_payload(tmp_path, monkeypatch)
+
+    assert payload["search_strategy"] == "linear"
+    payload["search_strategy"] = "tree"
+    assert CampaignConfig.from_dict(payload).search_strategy == "tree"
+    del payload["search_strategy"]
+    assert CampaignConfig.from_dict(payload).search_strategy == "linear"
+    payload["search_strategy"] = "beam"
+    with pytest.raises(ValueError, match="beam"):
+        CampaignConfig.from_dict(payload)
+
+
+def test_a_fresh_campaign_records_the_strategy_it_was_asked_for(tmp_path, monkeypatch):
+    workspace, kernel, _helper, driver = _git_workspace(tmp_path)
+    monkeypatch.setenv("GPU_TARGET", "gfx950")
+    monkeypatch.setenv("FORGE_KERNEL_BACKEND", "triton")
+
+    config = create_campaign_config(
+        str(workspace), CampaignInputs(kernel=str(kernel), driver=str(driver), search_strategy="tree")
+    )
+
+    assert config.search_strategy == "tree"
+
+
 @pytest.mark.parametrize(
     ("content", "error", "match"),
     [
