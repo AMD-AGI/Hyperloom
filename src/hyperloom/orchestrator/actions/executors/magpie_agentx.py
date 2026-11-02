@@ -11,7 +11,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import AbstractSet, Any, Mapping
+from typing import Any, Mapping, Sequence
 
 import yaml
 
@@ -51,20 +51,21 @@ def native_config(path: Path) -> bool:
     return is_magpie_agentx(load_benchmark(path))
 
 
-def recipe_option_names(config_path: Path) -> set[str]:
-    """Canonical options from this config's verified Magpie launch, when available."""
+def recipe_base_argv(config_path: Path) -> list[str]:
+    """The argv this config's verified Magpie launch resolved on its own, when the receipt beside it still matches.
+
+    A native recipe spells its launch in its own resolved argv rather than in ``launch_overrides``, so this is the
+    only place a composing layer can read what the recipe already set: which options it owns, and which settings a
+    candidate composed on top of it is not free to change.
+    """
     receipt_path = config_path.parent / "launch_evidence.json"
     if not receipt_path.is_file():
-        return set()
+        return []
     receipt = json.loads(receipt_path.read_text(encoding=_ENCODING))
     digest = "sha256:" + hashlib.sha256(config_path.read_bytes()).hexdigest()
     if receipt.get("recipe_digest") != digest:
-        return set()
-    return {
-        token.partition("=")[0]
-        for token in receipt.get("magpie_server_launch", {}).get("base_argv", [])
-        if token.startswith("--")
-    }
+        return []
+    return [str(token) for token in receipt.get("magpie_server_launch", {}).get("base_argv", [])]
 
 
 def _inherited_server_args(argv: list[str]) -> str:
@@ -120,13 +121,45 @@ def _server_argv(server_args: str, requested: str) -> list[str]:
     return split[1]
 
 
+def _launch_server_args(recipe_argv: Sequence[str], launch: Mapping[str, Any]) -> str:
+    """The server args this launch resolves to: the recipe's own argv, less what it removes, plus what it appends.
+
+    The recipe's argv is read as text rather than validated as one, since only the settings it spells are wanted:
+    a recipe pins them whether or not a layer on top restates them.
+    """
+    from hyperloom.inference_optimizer.grid_server_args import merge_server_args, remove_server_args
+
+    appended = " ".join(launch.get("append_args", []))
+    if launch.get("replace_args"):
+        return appended
+    return merge_server_args(remove_server_args(" ".join(recipe_argv), launch.get("remove_args", [])), appended)
+
+
+def _launch_envs(benchmark: Mapping[str, Any], launch: Mapping[str, Any]) -> dict[str, Any]:
+    """The environment this launch runs with: Magpie layers the launch's own over the workload's."""
+    unset = set(launch.get("unset_env", []))
+    envs = {**(benchmark.get("envs") or {}), **(launch.get("env") or {})}
+    return {name: value for name, value in envs.items() if name not in unset}
+
+
 def apply_launch_changes(
-    benchmark: dict[str, Any], changes: LaunchChanges, *, recipe_options: AbstractSet[str] = frozenset()
+    benchmark: dict[str, Any],
+    changes: LaunchChanges,
+    *,
+    recipe_argv: Sequence[str] = (),
+    accepted: bool = False,
 ) -> None:
     """Compose a candidate; Magpie validates protected args and environment.
 
+    This is where every AgentX launch is composed, so it is where a candidate meets the speculative-decoding pin the
+    env-composed launches meet as they compose: Magpie refuses an unpinned launch once it is already running a round.
+    ``accepted`` marks a layer that is the session's own accepted launch rather than a candidate, which is what the
+    pin is measured against, the way the base layer is on the env-composed path.
+
     Raises:
         ServerArgvInvalidError: When the composed args cannot become an argv intact.
+        SpeculativeDecodingPinnedError: When a candidate changes the draft or the simulated acceptance its accepted
+            launch pins.
     """
     from hyperloom.inference_optimizer.grid_server_args import (
         compose_server_args,
@@ -134,11 +167,16 @@ def apply_launch_changes(
         removal_option_names,
     )
 
+    from ._spec_decode_pin import refuse_unpinned_speculative_change
+
     agentx = benchmark["agentx"]
     if not isinstance(agentx, dict):
         agentx = {"enabled": True}
         benchmark["agentx"] = agentx
     launch = agentx.setdefault("launch_overrides", {"version": 1})
+    recipe_options = {token.partition("=")[0] for token in recipe_argv if token.startswith("--")}
+    accepted_args = _launch_server_args(recipe_argv, launch)
+    accepted_envs = _launch_envs(benchmark, launch)
     appended_options = {token.partition("=")[0] for token in launch.get("append_args", []) if token.startswith("--")}
     launch["append_args"] = _server_argv(
         dedupe_extra_server_args(
@@ -164,6 +202,10 @@ def apply_launch_changes(
         env.pop(name, None)
     env.update({str(k): str(v) for k, v in changes.env.items()})
     launch["unset_env"] = sorted((set(launch.get("unset_env", [])) | set(changes.unset_env)) - env.keys())
+    if not accepted:
+        refuse_unpinned_speculative_change(
+            accepted_args, accepted_envs, _launch_server_args(recipe_argv, launch), _launch_envs(benchmark, launch)
+        )
 
 
 def _refuse_unrunnable_speculative_launch(benchmark: Mapping[str, Any], *, model_path: str | None) -> None:
@@ -182,7 +224,7 @@ def _refuse_unrunnable_speculative_launch(benchmark: Mapping[str, Any], *, model
         _inherited_server_args(list(launch.get("append_args", []))),
         framework=str(benchmark.get("framework") or ""),
         # launch_server.sh reads TP from the launch environment, which Magpie layers over the workload's.
-        envs={**(benchmark.get("envs") or {}), **(launch.get("env") or {})},
+        envs=_launch_envs(benchmark, launch),
         model_path=model_path or "",
     )
 
@@ -350,10 +392,12 @@ def materialize_variant(
     Raises:
         SpeculativeCapabilityUnsupportedError: When the composed launch drafts with a kernel the pinned stack
             does not ship.
+        SpeculativeDecodingPinnedError: When the candidate changes the draft or the simulated acceptance the
+            recipe and the accepted launch pin.
     """
     config = yaml.safe_load(config_path.read_text(encoding=_ENCODING))
-    recipe_options = recipe_option_names(config_path)
-    apply_launch_changes(config["benchmark"], base, recipe_options=recipe_options)
+    recipe_argv = recipe_base_argv(config_path)
+    apply_launch_changes(config["benchmark"], base, recipe_argv=recipe_argv, accepted=True)
     apply_launch_changes(
         config["benchmark"],
         LaunchChanges(
@@ -363,7 +407,7 @@ def materialize_variant(
             variant.unset_envs,
             variant.args_mode == REPLACE,
         ),
-        recipe_options=recipe_options,
+        recipe_argv=recipe_argv,
     )
     _refuse_unrunnable_speculative_launch(config["benchmark"], model_path=model_path)
     path = materialize_agentx(config, output / "config.yaml", model_path=model_path)
