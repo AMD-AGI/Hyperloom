@@ -156,6 +156,15 @@ def test_gpu_type_cli_override_reaches_rewrite_config(monkeypatch, tmp_path):
     assert captured["config"].gpu_target == "gfx950"
 
 
+def test_the_default_rewrite_gpu_type_follows_the_host_arch(monkeypatch, tmp_path):
+    # Regression: an unset --gpu-type was always mi355x, so a gfx942 host filed its KB records under MI355X.
+    result, captured = _invoke_rewrite(monkeypatch, tmp_path, "--logical-op-name", host_arch="gfx942")
+
+    assert result.exit_code == 0
+    assert captured["config"].gpu_target == "gfx942"
+    assert captured["config"].gpu_type == "mi300x"
+
+
 def test_rewrite_detects_the_gpu_target_when_none_is_given(monkeypatch, tmp_path):
     # Regression: an unset --gpu-target fell through to Config's invented gfx942, which reached forge-loop explicitly.
     result, captured = _invoke_rewrite(monkeypatch, tmp_path, "--logical-op-name", host_arch="gfx950")
