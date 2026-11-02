@@ -37,9 +37,11 @@ class _Grid:
     def __init__(self, root: Path, score: float, throughputs: dict[str, float]) -> None:
         self.root, self.score, self.throughputs = root, score, throughputs
         self.evaluated: list[str] = []
+        self.reseeded: dict[str, bool] = {}
 
     async def __call__(self, **kwargs: Any) -> list[VariantResult]:
         name = kwargs["grid"][0].name
+        self.reseeded[name] = kwargs["launch"].warmup_round
         config = yaml.safe_load(Path(kwargs["recipe"].base_yaml_path).read_text())
         envs = {**config["benchmark"]["envs"], **(kwargs["recipe"].base.extra_envs or {})}
         workspace = self.root / f"variant_00_{name}" / "benchmark_fake_1"
@@ -98,6 +100,26 @@ def test_a_graded_test_with_a_warmup_runs_one_evaluation_and_its_score_is_the_re
     assert accuracy == (AccuracyValue("gsm8k", FLEXIBLE, 0.64),)
     assert [(r.phase, r.metrics["output_throughput"]) for r in rounds] == [("warmup", 1111.0), ("measure", 2222.0)]
     assert [r.phase for r in outcome.rounds] == ["warmup", "accuracy", "measure"]
+
+
+def test_the_warmup_round_draws_other_prompts_than_the_measured_round(tmp_path, monkeypatch):
+    """With one seed, the measured round reused the warmup's prompts from the prefix cache whenever the evaluation between
+    them did not evict them, and read 6-14 % high at C64 (Ruby, 2026-11-01)."""
+    monkeypatch.delenv("HYPERLOOM_WARMUP_OWN_PROMPTS", raising=False)
+    grid, call, point = _graded(tmp_path, monkeypatch, warmup_rounds=1)
+
+    _result_of(call, point)
+
+    assert grid.reseeded == {"warmup": True, "test": False}
+
+
+def test_the_flag_set_false_gives_the_warmup_the_measured_rounds_prompts(tmp_path, monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_WARMUP_OWN_PROMPTS", "0")
+    grid, call, point = _graded(tmp_path, monkeypatch, warmup_rounds=1)
+
+    _result_of(call, point)
+
+    assert grid.reseeded == {"warmup": False, "test": False}
 
 
 def test_a_graded_test_without_a_warmup_still_evaluates_in_its_one_round(tmp_path, monkeypatch):

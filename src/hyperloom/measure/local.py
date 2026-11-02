@@ -36,7 +36,7 @@ from typing import Any
 import yaml
 
 from hyperloom.common.benchmark_config import is_magpie_agentx
-from hyperloom.common.env import is_truthy
+from hyperloom.common.env import env_bool, is_truthy
 from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
 from hyperloom.common.outside_facts import (
     ENV_CONC,
@@ -644,6 +644,7 @@ def _free_port_for(point: Path, server_lifecycle: dict[str, Any] | None) -> Iter
 async def _grid(run: _Run, point: int, name: str, **launch: Any) -> VariantResult:
     """One ``run_grid`` call for the point at index ``point``: ``launch`` its GridLaunch, and its base_extra_envs."""
     call, envs = run.call, launch.pop("base_extra_envs", None)
+    launch.setdefault("warmup_round", name == _WARMUP and env_bool("HYPERLOOM_WARMUP_OWN_PROMPTS", default=True))
     with _free_port_for(call.points[point], launch.get("server_lifecycle")) as base_yaml, _booting(run, point, launch):
         started = time.time()
         results = await run_grid(
@@ -718,12 +719,11 @@ async def _eval_then_measure(run: _Run, lifecycle: _Lifecycle, warmup: int | Non
     """Warmup bench, the evaluation, then the measured bench on one server, with no evaluation after it; then the accuracy
     checks on that server, before its teardown.
 
-    InferenceX's own order; the evaluation between the benches keeps the measured one from reusing the prefix cache the
-    warmup left. The warmup round keeps the point's ``RUN_EVAL`` (on, as validated) and leaves the server up; when
-    the warmup failed or was stopped, nothing is measured, and neither when the logs of the warmup or of its evaluation
-    name a cause that settles the test (a crashed server, a refused request): the measured round would boot a server
-    that cannot serve, and the test ends with the failure those logs state. A test with no warmup boots in its measured
-    round, which then evaluates as the point says.
+    InferenceX's own order, the warmup on prompts of its own (``_grid``): the evaluation between the benches does not
+    always evict the warmup's from the prefix cache. The warmup round keeps the point's ``RUN_EVAL`` (on, as validated)
+    and leaves the server up; when it failed or was stopped, nothing is measured, and neither when its logs or its
+    evaluation's name a cause that settles the test (a crashed server, a refused request), which then ends with the
+    failure those logs state. A test with no warmup boots in its measured round, which then evaluates as the point says.
     """
     warm = _warms(warmup)
     try:

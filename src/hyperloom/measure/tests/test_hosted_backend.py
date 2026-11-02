@@ -549,13 +549,20 @@ def test_a_resumed_landing_that_already_happened_is_not_a_conflict(rig, tmp_path
 
 
 def test_the_sheet_carries_only_whitelisted_variables_and_never_a_credential(rig, tmp_path) -> None:
-    environ = {"HF_TOKEN": "secret", "HYPERLOOM_AGENTX": "1", "PATH": "/x", "INFERENCE_OPTIMIZER_SERVER_ARGS": "--a"}
+    environ = {
+        "HF_TOKEN": "secret",
+        "HYPERLOOM_AGENTX": "1",
+        "HYPERLOOM_WARMUP_OWN_PROMPTS": "0",
+        "PATH": "/x",
+        "INFERENCE_OPTIMIZER_SERVER_ARGS": "--a",
+    }
     r = rig(spec={"process_environ": environ, "platform_env": {"NCCL_IB_SL": "3", "MASTER_ADDR": "m", "HOME": "/h"}})
     call = make_call(tmp_path, env_overrides={"AITER_LOG_LEVEL": "WARNING"}, unset_envs=("FOO",))
     assert r.backend.run_test(call).returncode == 0
     spec = _spec_of(r, "req-1")
     assert dict(spec.process_env) == {
         "HYPERLOOM_AGENTX": "1",
+        "HYPERLOOM_WARMUP_OWN_PROMPTS": "0",
         "INFERENCE_OPTIMIZER_SERVER_ARGS": "--a",
         "AITER_LOG_LEVEL": "WARNING",
     }
