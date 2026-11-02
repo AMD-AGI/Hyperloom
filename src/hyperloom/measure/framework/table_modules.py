@@ -162,10 +162,15 @@ class _Tables:
 
 
 def _contents(listed: list[str]) -> tuple[str, ...]:
-    """What aiter reads from the files ``listed``: one file as it is, several merged with the missing ones left out."""
+    """What aiter reads from the files ``listed``: one file as it is, several merged with the missing ones left out.
+
+    Several are their contents in no order. aiter merges them in the order its directory lists them, which differs
+    between two directories holding the same files (the image's ``model_configs``, a test's private copy of it), and
+    the image's prebuilt module was generated in the order of a directory no test can see; a merge that succeeds holds
+    no shape twice, so what it holds does not depend on the order."""
     if len(listed) == 1:
         return (file_identity(listed[0]),)
-    return tuple(file_identity(path) for path in listed if os.path.isfile(path))
+    return tuple(sorted(file_identity(path) for path in listed if os.path.isfile(path)))
 
 
 def _differs(use: TableUse, image: _Tables, test: _Tables) -> bool:
