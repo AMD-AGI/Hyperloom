@@ -96,7 +96,8 @@ def test_an_image_whose_module_config_cannot_be_read_says_so_rather_than_nothing
 
 def test_the_watchdog_covers_each_module_build_plus_sglangs_own() -> None:
     assert watchdog_seconds_for([]) == 300
-    assert watchdog_seconds_for(["a", "b", "c", "d"]) == 4 * 600 + 300 == rebuild_watchdog_sec(4)
+    assert watchdog_seconds_for(["a", "b", "c", "d"]) == 4 * 600 + 300 == rebuild_watchdog_sec(["a", "b", "c", "d"])
+    assert watchdog_seconds_for(["module_gemm_a8w8_bpreshuffle_cktile"]) == 2700 + 300, "a CK-tile module, 2700 s"
 
 
 def test_prewarm_builds_what_is_missing_installs_it_with_a_manifest_and_a_rerun_does_nothing(tmp_path: Path) -> None:

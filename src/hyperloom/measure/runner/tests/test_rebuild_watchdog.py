@@ -65,15 +65,85 @@ def test_a_table_that_makes_modules_stale_raises_the_watchdog_of_both_carriers(i
 
     note = raise_rebuild_watchdog(_call(tmp_path, plain, agentx), None, {}, tmp_path)
 
-    seconds = rebuild_watchdog_sec(2)  # the blockscale module and the opus module that reads the same table
+    seconds = rebuild_watchdog_sec({"module_gemm_a8w8_blockscale_bpreshuffle", "module_deepgemm_opus"})
     assert _bench(plain)["envs"]["EXTRA_SGLANG_ARGS"] == f"--tp 4 {_FLAG} {seconds}"
     assert _bench(agentx)["agentx"]["launch_overrides"]["append_args"] == ["--tp", "4", _FLAG, str(seconds)]
     assert note is not None and f"raised to {seconds}s" in note and "module_gemm_a8w8_blockscale_bpreshuffle" in note
 
 
 def test_the_estimate_is_the_builds_plus_the_margin() -> None:
-    assert rebuild_watchdog_sec(1) == rebuild_watchdog.MODULE_BUILD_SEC + rebuild_watchdog.WATCHDOG_MARGIN_SEC
-    assert rebuild_watchdog_sec(1) > 300, "longer than sglang's default watchdog"
+    assert rebuild_watchdog_sec(["m"]) == rebuild_watchdog.MODULE_BUILD_SEC + rebuild_watchdog.WATCHDOG_MARGIN_SEC
+    assert rebuild_watchdog_sec(["m"]) > 300, "longer than sglang's default watchdog"
+
+
+#: The longest builds measured in #169, eight tests building at once: module_gemm_a8w8_bpreshuffle_cktile took up to
+#: 1347 s (c5046); module_gemm_a8w8_bpreshuffle's median was up to 181 s (c5046), its longest not stated.
+_LONGEST_CKTILE_SEC, _CK_MEDIAN_SEC = 1347, 181
+
+
+def test_a_cktile_module_is_given_the_time_its_longest_measured_build_took_with_room_to_spare() -> None:
+    """600 s each gave the cktile module and the CK one 1500 s, which their measured builds overrun."""
+    cktile, ck = "module_gemm_a8w8_bpreshuffle_cktile", "module_gemm_a8w8_bpreshuffle"
+    worst = _LONGEST_CKTILE_SEC + 2 * _CK_MEDIAN_SEC + rebuild_watchdog.WATCHDOG_MARGIN_SEC
+
+    assert rebuild_watchdog_sec([cktile, ck]) > worst > 1500
+    assert rebuild_watchdog_sec([cktile]) > _LONGEST_CKTILE_SEC + rebuild_watchdog.WATCHDOG_MARGIN_SEC
+    assert rebuild_watchdog_sec([ck]) == 900, "a module of any other kind keeps 600 s, so a hang there ends as soon"
+    assert rebuild_watchdog_sec(["module_moe_cktile2stages_b16_silu"]) == rebuild_watchdog_sec([cktile]), (
+        "a name aiter makes at run time from a CK-tile entry is one"
+    )
+
+
+def test_a_stale_cktile_module_raises_the_watchdog_by_its_own_time(
+    image, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stale = frozenset({"module_gemm_a8w8_bpreshuffle_cktile", "module_gemm_a8w8_bpreshuffle"})
+    monkeypatch.setattr(rebuild_watchdog, "stale_table_modules", lambda *args: stale)
+    point = _point(tmp_path, "point.yaml", args="--tp 1", **_tuned(tmp_path))
+
+    note = raise_rebuild_watchdog(_call(tmp_path, point), None, {}, tmp_path)
+
+    assert _watchdog(point, False) == f"--tp 1 {_FLAG} 3600", (
+        "2700 s for the CK-tile module, 600 s for the other, 300 s"
+    )
+    assert note is not None and "raised to 3600s" in note
+
+
+def test_a_module_the_patch_touches_that_the_server_builds_raises_the_watchdog_too(image, tmp_path: Path) -> None:
+    """A table the test does not change makes nothing stale; the patch's CK-tile module is still built at first call."""
+    point = _point(tmp_path, "point.yaml", args="--tp 1")
+
+    note = raise_rebuild_watchdog(_call(tmp_path, point), None, {}, tmp_path, {"module_gemm_a8w8_bpreshuffle_cktile"})
+
+    assert _watchdog(point, False) == f"--tp 1 {_FLAG} 3000"
+    assert note is not None and "module_gemm_a8w8_bpreshuffle_cktile" in note
+
+
+#: A module entry shaped like the image aiter's (285579b62) CK-tile GEMM, which reads its compiler from the environment.
+_CKTILE_ENTRY = {
+    "srcs": ["f'{AITER_CSRC_DIR}/cktile_gemm_a8w8_bpreshuffle/gemm_a8w8_bpreshuffle_cktile.cu'"],
+    "hip_clang_path": "os.environ.get('FLATMM_HIP_CLANG_PATH')",
+    "blob_gen_cmd": "''",
+}
+
+
+@pytest.mark.parametrize(("inherited", "stale"), [({}, True), ({"FLATMM_HIP_CLANG_PATH": "/opt/clang"}, False)])
+def test_a_build_variable_set_otherwise_than_the_runner_has_raises_the_watchdog_for_the_module_that_reads_it(
+    image, tmp_path: Path, inherited: dict, stale: bool
+) -> None:
+    """The module is built at the first prefill under the server's value, as one a table makes stale; a value the runner
+    has already is the one the image's module stands for, and changes nothing."""
+    config = {**CONFIG, "module_gemm_a8w8_bpreshuffle_cktile": _CKTILE_ENTRY}
+    (image / "jit" / "optCompilerConfig.json").write_text(json.dumps(config), encoding=_UTF8)
+    point = _point(tmp_path, "point.yaml", args="--tp 1", FLATMM_HIP_CLANG_PATH="/opt/clang")
+
+    note = raise_rebuild_watchdog(_call(tmp_path, point), None, inherited, tmp_path)
+
+    if stale:
+        assert _watchdog(point, False) == f"--tp 1 {_FLAG} 3000"
+        assert note is not None and "module_gemm_a8w8_bpreshuffle_cktile" in note
+    else:
+        assert note is None and _FLAG not in point.read_text(encoding=_UTF8)
 
 
 def _watchdog(point: Path, agentx: bool) -> str:
@@ -98,7 +168,7 @@ def test_a_present_watchdog_below_the_estimate_is_raised_to_it(
 
     note = raise_rebuild_watchdog(_call(tmp_path, point), None, {}, tmp_path)
 
-    assert rebuild_watchdog_sec(3) == 2100
+    assert rebuild_watchdog_sec({"m1", "m2", "m3"}) == 2100
     assert _watchdog(point, agentx) == f"--tp 4 {_FLAG}{sep}2100 --mem 0.8"
     assert note is not None and "raised to 2100s" in note
 
@@ -109,7 +179,7 @@ def test_a_present_watchdog_at_or_above_the_estimate_is_kept(
     image, tmp_path: Path, agentx: bool, sep: str, present: str
 ) -> None:
     """A candidate's 4000 s and a value equal to the estimate stay; a value that is not a number is not rewritten."""
-    assert rebuild_watchdog_sec(2) == 1500
+    assert rebuild_watchdog_sec(["m1", "m2"]) == 1500
     point = _point(tmp_path, "point.yaml", agentx=agentx, args=f"--tp 4 {_FLAG}{sep}{present}", **_tuned(tmp_path))
     before = point.read_text(encoding=_UTF8)
 

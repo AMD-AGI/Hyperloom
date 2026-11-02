@@ -227,6 +227,32 @@ def test_a_variable_the_modules_generator_reads_decides_whether_the_cpu_build_is
     assert (f"jit cache: {refused}" in manifest.notes) is not used, "the signed result carries the runner's note"
 
 
+#: A flag aiter's module config reads from the environment as it builds (the image aiter's ``module_mha_batch_prefill``,
+#: 285579b62); no Python of the build path names the variable.
+ENTRY_VARIABLE = "CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT"
+ENTRY_FLAG = "f'-DCK_TILE_FLOAT_TO_BFLOAT16_DEFAULT={os.environ.get(\"CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT\", 2)}'"
+
+
+@pytest.mark.parametrize(("service", "used"), [({ENTRY_VARIABLE: "3"}, True), ({}, False)], ids=["same", "unset"])
+def test_a_variable_only_the_modules_config_entry_reads_decides_whether_the_cpu_build_is_used(
+    image, tmp_path, monkeypatch, service, used
+) -> None:
+    """A CPU build made under the image's rounding is another module than the one a server that sets 3 would build."""
+    path = image.bases / "aiter" / "jit" / "optCompilerConfig.json"
+    config = json.loads(path.read_text(encoding="utf-8"))
+    config[standin.MODULE]["flags_extra_hip"] = [ENTRY_FLAG]
+    path.write_text(json.dumps(config), encoding="utf-8")
+    built = Built(image, tmp_path, monkeypatch, environ=service)
+
+    manifest, status, _ = image.run(
+        "entry-env", _sheet(image, built, envs={ENTRY_VARIABLE: "3"}), extra_env=built.environ()
+    )
+
+    assert manifest.jit_cache.builds_seen == (0 if used else 1)
+    refused = f"the CPU build of aiter's modules is not used: the server's {ENTRY_VARIABLE} differ from its build's"
+    assert (refused in status["message"]) is not used
+
+
 def test_a_build_by_another_interpreter_than_the_servers_is_not_used(image, tmp_path, monkeypatch) -> None:
     """Another interpreter can be another Python, torch or HIP: the module it would build is not the build's."""
     built = Built(image, tmp_path, monkeypatch)

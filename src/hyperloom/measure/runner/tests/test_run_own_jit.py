@@ -12,6 +12,7 @@ cache had no farm and no session, so its build was written into the image's ``ai
 from __future__ import annotations
 
 import dataclasses
+import json
 import os
 from pathlib import Path
 
@@ -36,6 +37,7 @@ from hyperloom.measure.runner.tests.test_run_jit_tables import (  # noqa: F401 -
     _deliver,
     image,
 )
+from hyperloom.measure.runner.tests.test_run_jit_variables import FLAG, VARIABLE
 from hyperloom.measure.socket import TestCall
 
 BUILT = b"\x7fELF built by the test"
@@ -163,3 +165,37 @@ def test_a_farm_with_no_cache_leaves_out_the_module_its_patched_table_makes_stal
     assert (farm_jit / "module_other.so").is_symlink(), "a module the table does not feed stays the image's"
     assert not os.path.lexists(farm_jit / "module_gemm.so"), "the stale module is built from the farm's table"
     assert (image.bases / "aiter" / "jit" / "module_gemm.so").read_text() == IMAGE_MODULE
+
+
+def _module_gemm_reads_a_build_variable(rig: Rig) -> None:
+    """``module_gemm``'s entry passes a flag aiter takes from the environment as it builds (``test_run_jit_variables``)."""
+    path = rig.bases / "aiter" / "jit" / "optCompilerConfig.json"
+    config = json.loads(path.read_text(encoding="utf-8"))
+    config["module_gemm"]["flags_extra_hip"] = [FLAG]
+    path.write_text(json.dumps(config), encoding="utf-8")
+
+
+def test_a_module_a_build_variable_of_the_test_makes_stale_is_not_linked_but_built(image, monkeypatch) -> None:
+    """With no cache the server would otherwise load the image's module, built under the image's value."""
+    _module_gemm_reads_a_build_variable(image)
+
+    server, _ = _run(image, monkeypatch, "variable", _arm(image, envs={VARIABLE: "3"}), cache=False)
+
+    assert server.found == {"module_gemm": False, "module_other": True, "module_new": False}
+    assert server.held["module_gemm.so"] == (False, BUILT)
+
+
+def test_a_farm_with_no_cache_leaves_out_the_module_a_build_variable_makes_stale(image) -> None:
+    _module_gemm_reads_a_build_variable(image)
+
+    _, _, run = image.run(
+        "farm-variable", _arm(image, envs={VARIABLE: "3"}, roots=_aiter_package_root(image)), cache=False
+    )
+
+    farm_jit = next(run.rglob("farm/site/aiter/jit"))
+    assert (farm_jit / "module_other.so").is_symlink()
+    assert not os.path.lexists(farm_jit / "module_gemm.so"), "built under the test's value, not linked"
+
+
+def _aiter_package_root(rig: Rig):
+    return lambda run: [rig.root(run, "aiter", "ops/mha.py", b"X = 2\n")]

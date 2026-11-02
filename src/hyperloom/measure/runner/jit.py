@@ -52,6 +52,7 @@ from hyperloom.measure.jit.modules import (
     Touched,
     build_env_names,
     config_path,
+    env_touched_entries,
     prebuilt_names,
     read_config,
     touched_entries,
@@ -347,8 +348,10 @@ def _build_differs(record: BuildRecord, gfx_arch: str, read: Mapping[str, str], 
 
 
 def _touched(inputs: _Inputs, base: Path, effective: Path) -> Touched | str:
-    """The prebuilt modules the sheet's patch to aiter's sources or its tuned tables make stale, or why that cannot be
-    told. A table reaches the server through a variable it sets or through a patched aiter package (its ``configs``)."""
+    """The prebuilt modules the sheet's patch to aiter's sources, its tuned tables or its build variables make stale, or
+    why that cannot be told. A table reaches the server through a variable it sets or through a patched aiter package (its
+    ``configs``); a build variable is one a module's config entry reads, which the server sets to another value than the
+    runner has (``env_touched_entries``)."""
     roots = inputs.spec.environment.roots
     patched = [entry.path for root in roots if root.import_name == AITER_META_WHEEL_DIR for entry in root.entries]
     config_patched = any(
@@ -360,16 +363,19 @@ def _touched(inputs: _Inputs, base: Path, effective: Path) -> Touched | str:
     tables = effective != base or any(
         name.startswith(_TABLE_PREFIX) and value.strip() for server in inputs.servers for name, value in server.items()
     )
-    if not patched and not config_patched and not tables:
-        return Touched()
-    meta = _meta_dir(inputs.farm, base)
     try:
         before, after = read_config(config_path(base)), read_config(config_path(effective))
     except (OSError, ValueError) as exc:
+        if not patched and not config_patched and not tables:
+            return Touched()
         return f"the module config of aiter cannot be read ({type(exc).__name__}), so which modules the patch or the tables touch is not known"
+    variables = env_touched_entries(after, inputs.servers, inputs.around.environ)
+    if not patched and not config_patched and not tables and not variables:
+        return Touched()
     stale = stale_table_modules(after, base, effective, inputs.servers) if tables else frozenset()
     prebuilt = prebuilt_names(base)
-    return touched_modules(before, after, SourceTree(meta), patched, prebuilt) | touched_entries(stale, after, prebuilt)
+    found = touched_modules(before, after, SourceTree(_meta_dir(inputs.farm, base)), patched, prebuilt)
+    return found | touched_entries(stale | variables, after, prebuilt)
 
 
 def _build_environment(environment: Mapping[str, str], farm: Farm | None) -> dict[str, str]:

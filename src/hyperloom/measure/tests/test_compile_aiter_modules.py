@@ -16,7 +16,7 @@ import pytest
 
 from hyperloom.contracts.recipe import LaunchConfig, RecipeDelta
 from hyperloom.measure.compile import EnvironmentCompiler, LocalBlobStore, PackageBase, TooManyModulesError
-from hyperloom.measure.jit.modules import ESTIMATED_MODULE_SECONDS, MAX_REBUILD_SECONDS
+from hyperloom.measure.jit.modules import CKTILE_MODULE_SECONDS, ESTIMATED_MODULE_SECONDS, MAX_REBUILD_SECONDS
 from hyperloom.measure.jit.native.key import BuildInputs
 from hyperloom.measure.jit.native.needs import ModuleBuild
 from hyperloom.measure.runner.native.aiter_modules import AiterModules, buildable_modules
@@ -38,7 +38,7 @@ class Plan:
         inputs = BuildInputs(IMAGE, IMAGE, "aiter", "gfx942", "0" * 64, "aiter_jit/1")
         return ModuleBuild(inputs, built) if built else None
 
-    def seconds(self, modules: Collection[str]) -> float:
+    def seconds(self, modules: Collection[str], config: Mapping[str, Any]) -> float:
         return len(modules) * self.each
 
 
@@ -124,10 +124,14 @@ def test_the_cpu_estimate_is_the_median_cpu_seconds_of_a_module_spread_over_max_
     history = [_Record("ready", ("a", "b"), 160.0), _Record("ready", ("a",), 40.0), _Record("failed", (), 1.0)]
     plan = AiterModules(planner=None, history=lambda: history)  # type: ignore[arg-type]
 
-    assert plan.seconds({"x", "y", "z"}) == 3 * 60.0 / 8, "per module 80 and 40 s of CPU, median 60, MAX_JOBS 8"
+    assert plan.seconds({"x", "y", "z"}, {}) == 3 * 60.0 / 8, "per module 80 and 40 s of CPU, median 60, MAX_JOBS 8"
 
 
-def test_with_no_build_of_the_image_yet_a_module_is_estimated_as_on_a_card() -> None:
+def test_with_no_build_of_the_image_yet_a_module_is_estimated_as_on_a_card_by_its_kind() -> None:
     plan = AiterModules(planner=None)  # type: ignore[arg-type]
 
-    assert plan.seconds({"x", "y"}) == 2 * ESTIMATED_MODULE_SECONDS
+    assert plan.seconds({"x", "y"}, {}) == 2 * ESTIMATED_MODULE_SECONDS
+    assert (
+        plan.seconds({"x", "module_gemm_a8w8_bpreshuffle_cktile"}, {})
+        == ESTIMATED_MODULE_SECONDS + CKTILE_MODULE_SECONDS
+    )

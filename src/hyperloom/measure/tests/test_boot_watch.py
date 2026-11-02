@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import importlib
+import os
 import sys
 import time
 from collections.abc import Iterator
@@ -221,3 +222,97 @@ def test_a_test_with_no_stamp_or_a_stamp_that_cannot_be_read_has_no_boot(tmp_pat
     for text in ("", "1792596681.010\n", "1792596681.010 soon\n", "1792596681.010 nan\n", "1792596681.010 inf\n"):
         _stamp(tmp_path / "bad", text)
         assert boot_seconds(tmp_path) is None, text
+
+
+#: A server whose boot is an aiter JIT build longer than the boot limit, after which it is ready: aiter prints nothing
+#: between ``start build`` and ``finish build`` (#169: a CK-tile GEMM took up to 1347 s).
+BUILDING_SERVER = (
+    "import sys, time\n"
+    "log = open(sys.argv[1], 'a', buffering=1)\n"
+    "log.write('[aiter] [pid=7 pname=Process-1] start build [module_gemm_a8w8_bpreshuffle_cktile] under /j/build\\n')\n"
+    "time.sleep(3.5)\n"
+    "log.write('[aiter] finish build [module_gemm_a8w8_bpreshuffle_cktile], cost 3.5s\\n')\n"
+    "log.write('INFO:     Application startup complete.\\n')\n"
+    "time.sleep(2.5)\n"
+)
+#: A server whose aiter build never finishes.
+HUNG_BUILD_SERVER = (
+    "import sys, time\n"
+    "log = open(sys.argv[1], 'a', buffering=1)\n"
+    "log.write('[aiter] [pid=7 pname=Process-1] start build [module_rmsnorm] under /j/build\\n')\n"
+    "time.sleep(300)\n"
+)
+
+
+def test_a_server_building_an_aiter_module_past_the_boot_limit_is_not_ended_while_the_build_has_time(
+    monkeypatch, tmp_path
+) -> None:
+    """The boot limit is 2 s and the build takes 3.5 s: the build is progress, not a boot that hangs."""
+    monkeypatch.setattr(boot_watch, "module_build_limit_sec", lambda module: 30)
+
+    outcome, elapsed, _ = _run(monkeypatch, tmp_path, BUILDING_SERVER)
+
+    assert (outcome.returncode, outcome.failure_class, outcome.failure_reason) == (0, None, None)
+    assert elapsed >= 3.5
+
+
+def test_a_build_that_hangs_ends_the_boot_once_its_module_has_had_its_time(monkeypatch, tmp_path) -> None:
+    allowed: list[str] = []
+    monkeypatch.setattr(boot_watch, "module_build_limit_sec", lambda module: allowed.append(module) or 1)
+
+    outcome, elapsed, _ = _run(monkeypatch, tmp_path, HUNG_BUILD_SERVER)
+
+    assert outcome.returncode == SERVER_BOOT_TIMEOUT_RC and outcome.failure_class == "candidate"
+    assert set(allowed) == {"module_rmsnorm"}, "the module the log names is the one whose time is given"
+    assert 3 <= elapsed < 20, "the 2 s limit and the 1 s the build was given, not the round's cap"
+
+
+def test_the_time_a_module_builds_is_excused_up_to_what_a_module_of_its_kind_may_take(monkeypatch) -> None:
+    monkeypatch.setattr(boot_watch, "module_build_limit_sec", lambda module: 100 if "cktile" in module else 10)
+    clock = boot_watch.BuildTime(0.0)
+
+    for now, building in [(5, None), (10, "module_x"), (25, "module_x"), (30, None), (40, "module_y_cktile")]:
+        clock.observe(float(now), building)
+
+    assert clock.excused == 10 + 10, "module_x for its 10 s, the CK-tile one for its first 10; none while no build is"
+    clock.observe(150.0, "module_y_cktile")
+    assert clock.excused == 10 + 100, "the CK-tile build has had its 100 s; the 20 s past them count"
+
+
+@pytest.mark.parametrize(
+    ("line", "module"),
+    [
+        (
+            "[aiter] [pid=829812 pname=Process-1] start build [module_gemm_a8w8_bpreshuffle_cktile] under /x",
+            "module_gemm_a8w8_bpreshuffle_cktile",
+        ),
+        ("\x1b[33m[aiter] start build [module_rmsnorm] under /x\x1b[0m", "module_rmsnorm"),
+        ("[aiter] start build /x/build/libmha_fwd", ""),
+        ("[aiter] finish build [module_rmsnorm], cost 12.0s", None),
+        ("[aiter] import [module_rmsnorm] under /x", None),
+        ("INFO: loading weights", None),
+    ],
+)
+def test_the_module_a_build_line_names(line: str, module: str | None) -> None:
+    assert boot_watch.building_module(line) == module
+
+
+def test_the_guard_reads_the_last_line_of_the_newest_server_log(tmp_path: Path) -> None:
+    old, new = tmp_path / "variant_00_a" / "server.log", tmp_path / "variant_00_b" / "server.log"
+    for path, text in [
+        (old, "[aiter] start build [module_old] under /x\n"),
+        (new, "[aiter] start build [module_new]\n\n"),
+    ]:
+        path.parent.mkdir(parents=True)
+        path.write_text(text, encoding="utf-8")
+    newer = old.stat().st_mtime + 10
+    os.utime(new, (newer, newer))
+    guard = boot_watch.BootGuard(tmp_path, scope=None)  # type: ignore[arg-type]
+    started = old.stat().st_mtime - 1
+
+    assert guard._building(started) == "module_new"
+    assert guard._building(newer + 1) is None, "a log no round of this boot has written is an earlier round's"
+    new.write_text("[aiter] start build [module_new]\nINFO: capturing cuda graphs\n", encoding="utf-8")
+    os.utime(new, (newer, newer))
+    assert guard._building(started) is None
+    assert boot_watch.BootGuard(tmp_path / "missing", scope=None)._building(started) is None  # type: ignore[arg-type]
