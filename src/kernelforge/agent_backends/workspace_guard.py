@@ -23,6 +23,9 @@ from kernelforge.utils.protected_paths import ProtectedPathRules
 
 log = logging.getLogger(__name__)
 
+_BYTECODE_SUFFIXES = frozenset({".pyc", ".pyo"})
+_BYTECODE_CACHE_DIRNAME = "__pycache__"
+
 
 def _nul_paths(output: str) -> list[str]:
     """Split a NUL-delimited git path list."""
@@ -584,13 +587,28 @@ class WorkspaceGuard:
         return violations
 
     def _protected_ignored_changes(self) -> list[str]:
-        """Protected ignored paths whose snapshot no longer matches, then those created since the baseline."""
-        current_protected = self._ignored_protected_paths()
-        changed_snapshots = [
-            str(path) for path, snapshot in self.snapshots.items() if self._filesystem_snapshot(path) != snapshot
-        ]
-        new_protected = [str(path) for path in current_protected - self.baseline_protected_ignored]
-        return [*changed_snapshots, *new_protected]
+        """Protected ignored paths the turn changed or created, once the bytecode it compiled is put back.
+
+        Python writes bytecode beside every protected module it imports, so running the driver is enough to create
+        it. Bytecode is derived from the protected source, and the interpreter loads it instead of that source when
+        its header matches, so a session's bytecode is never kept: a changed file gets its snapshot back and a new
+        one is removed. Neither rejects the turn.
+        """
+        changed = [path for path, snapshot in self.snapshots.items() if self._filesystem_snapshot(path) != snapshot]
+        created = self._ignored_protected_paths() - self.baseline_protected_ignored
+        for path in changed:
+            if self._is_bytecode(path):
+                self._restore_filesystem_snapshot(path, self.snapshots[path])
+        for path in sorted(created, key=lambda item: len(item.parts), reverse=True):
+            if self._is_bytecode(path):
+                self._remove_filesystem_path(path)
+                self._remove_empty_parents(path)
+        return [str(path) for path in [*changed, *created] if not self._is_bytecode(path)]
+
+    def _is_bytecode(self, path: Path) -> bool:
+        """Whether a workspace path is compiled Python bytecode or a bytecode cache directory."""
+        relative = path.relative_to(self.root) if path.is_relative_to(self.root) else path
+        return relative.suffix in _BYTECODE_SUFFIXES or _BYTECODE_CACHE_DIRNAME in relative.parts
 
     def _read_only_state(self) -> tuple:
         """Fingerprint all Git-visible state a read-only turn must preserve."""
