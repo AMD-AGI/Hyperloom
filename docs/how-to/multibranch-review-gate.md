@@ -18,8 +18,8 @@ waits: the pause holds no GPU lease.
   with one Arbor, which then takes the reviewed map whole, and a session given `--agent-directions`, whose map is
   shown too.
 - **Never:** with `--no-review-gate`, or with `--stop-after-map`. The latter's stop is the review point: it keeps
-  the map and ends, for a review offline (the `points` command's first stage; see
-  {doc}`Run several operating points with Arbor </how-to/multibranch-points>`).
+  the map and ends, for a review offline. A second run then takes the reviewed map and dossier with
+  `--agent-directions` and `--agent-dossier`, and passes `--no-review-gate`.
 
 ## What you see
 
