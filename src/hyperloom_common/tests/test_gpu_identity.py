@@ -5,21 +5,15 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom_common.gpu_identity import (
-    AMD_GPU_BOARDS,
-    AMD_GPU_DEVICE_IDS,
-    gpu_type_for_device_id,
-    normalise_device_id,
-)
+from hyperloom_common.gpu_identity import AMD_GPU_BOARDS, gpu_type_for_device_id, normalise_device_id
 
 
-def test_every_board_has_its_device_ids_listed_and_the_other_way_round():
-    assert set(AMD_GPU_DEVICE_IDS) == set(AMD_GPU_BOARDS)
-    assert {board for board, ids in AMD_GPU_DEVICE_IDS.items() if not ids} == {"r9700", "radeon8060s"}
+def test_the_boards_known_by_their_name_alone_list_no_device_id():
+    assert {board.product for board in AMD_GPU_BOARDS.values() if not board.device_ids} == {"r9700", "radeon8060s"}
 
 
 def test_a_device_id_belongs_to_one_board():
-    listed = [device_id for ids in AMD_GPU_DEVICE_IDS.values() for device_id in ids]
+    listed = [device_id for board in AMD_GPU_BOARDS.values() for device_id in board.device_ids]
     assert len(listed) == len(set(listed))
 
 
