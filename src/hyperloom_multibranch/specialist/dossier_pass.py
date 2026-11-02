@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The session's dossier pass: Arbor run once before the agent branches open, to map the directions they split.
+"""The session's dossier pass: Arbor run once to map the directions the agent branches split.
 
 With two or more Arbor agents and no map given, the session runs the first Arbor source once as its dossier pass
 (:data:`~hyperloom_multibranch.specialist.arbor_adapter.DOSSIER_PASS`, ``component.stop_at: "map"``), as Arbor's
@@ -11,8 +11,9 @@ With two or more Arbor agents and no map given, the session runs the first Arbor
 - **what it leaves:** the dossier and its map, then exit 0 with ``mapped``. The map is what the session splits
   (:mod:`~hyperloom_multibranch.scheduling.agent_plans`), and the dossier is copied into each branch's checkout.
 
-No branch holds the pass. Its lease is charged to the integration branch, as PRELUDE's child's is, and it writes nothing
-to the blackboard. Whatever ends it, its process is killed and its cards are given back. A pass that sets no map says
+In EXPLORE a mapping branch (:mod:`map_session`) holds the pass, and its lease is charged to that branch; a session that
+stops after its map runs it before EXPLORE, held by no branch and charged to the integration branch, as PRELUDE's
+child's is. It writes nothing to the blackboard. Whatever ends it, its process is killed and its cards are given back. A pass that sets no map says
 why (:class:`DossierOutcome`), and the session falls back to the generic map.
 """
 
@@ -100,7 +101,7 @@ class DossierSetup:
     """What the pass runs on: ``spec``, the session's agent spec with the pass's port and client; ``repo`` and
     ``toolbox``; ``sandbox``, the sandbox of a lease; ``worktree``, the pass's own; and ``agent_dir``, where its Arbor
     is fetched. ``start_seconds`` is how long its start may take (:class:`OnboardingSetup`), ``exit_grace_seconds`` how
-    long past its deadline it has to end of itself."""
+    long past its deadline it has to end of itself. ``holder`` holds its lease, charged as ``charge`` says."""
 
     spec: AgentSpec
     repo: ExperimentRepo
@@ -113,6 +114,8 @@ class DossierSetup:
     poll_seconds: float = POLL_SECONDS
     start_seconds: float = START_SECONDS
     exit_grace_seconds: float = EXIT_GRACE_SECONDS
+    holder: str = DOSSIER_HOLDER
+    charge: LeaseCharge = DOSSIER_CHARGE
 
 
 async def _arbor_only(_checkout: Path, _prompt: str) -> str:
@@ -145,7 +148,7 @@ async def run_dossier_pass(start: DossierStart, setup: DossierSetup) -> DossierO
     )
     try:
         lease = await setup.toolbox.lease_branch_sandbox(
-            DOSSIER_HOLDER, spec.tp, charge=DOSSIER_CHARGE, lifetime_sec=seconds + setup.exit_grace_seconds
+            setup.holder, spec.tp, charge=setup.charge, lifetime_sec=seconds + setup.exit_grace_seconds
         )
     except (RequestRejected, SandboxUnavailable) as error:
         return DossierOutcome(None, None, f"no cards were leased for it: {error}")
