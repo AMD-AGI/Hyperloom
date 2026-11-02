@@ -344,11 +344,14 @@ async def test_run_grid_records_the_refusal_without_launching(tmp_path, monkeypa
     assert not results[0].launch_evidence
 
 
-def _native_recipe(tmp_path: Path, recipe_args: list[str] | None = None, envs: dict[str, str] | None = None) -> Path:
+def _native_recipe(
+    tmp_path: Path, recipe_args: list[str] | None = None, recipe_envs: dict[str, str | None] | None = None
+) -> Path:
     """A native recipe as a verified session leaves it: the resolved workload and the launch receipt beside it.
 
-    A native launch spells its server args in its own resolved argv instead of in ``launch_overrides``, so the
-    receipt is the only place a layer composing on top can read the draft the recipe already pinned.
+    A native launch spells its server args in its own resolved argv and its settings in the environment it exports
+    itself, not in ``launch_overrides`` or the workload's ``envs``, so the receipt is the only place a layer
+    composing on top can read the draft and the simulated acceptance the recipe already pinned.
     """
     source = tmp_path / "workload.yaml"
     source.write_text(
@@ -360,7 +363,7 @@ def _native_recipe(tmp_path: Path, recipe_args: list[str] | None = None, envs: d
                     "precision": "bf16",
                     "runner_type": "mi355x",
                     "agentx": {"enabled": True, "mode": "canonical"},
-                    "envs": {"TP": "1", "EP_SIZE": "1", "CONC": "8", **(envs or {})},
+                    "envs": {"TP": "1", "EP_SIZE": "1", "CONC": "8"},
                 }
             }
         ),
@@ -372,7 +375,11 @@ def _native_recipe(tmp_path: Path, recipe_args: list[str] | None = None, envs: d
         native_launch_evidence(
             {
                 "agentx_metrics": {
-                    "server_launch": {"base_argv": argv, "effective_argv": argv, "effective_env": dict(envs or {})},
+                    "server_launch": {
+                        "base_argv": argv,
+                        "effective_argv": argv,
+                        "effective_env": dict(recipe_envs or {}),
+                    },
                     "recipe": {"tp": 1, "ep": 1, "conc": 8},
                 }
             },
@@ -415,6 +422,13 @@ def test_building_a_native_variant_keeps_other_knobs_open(tmp_path):
     config = _native_recipe(tmp_path, DSPARK_RECIPE_ARGS, SGLANG_SYNTHETIC_ENV)
     launch = _build_native(tmp_path, config, GridVariant("v", extra_server_args="--mem-fraction-static 0.85"))
     assert launch["append_args"] == ["--mem-fraction-static", "0.85"]
+
+
+def test_a_variable_the_recipe_cleared_is_not_a_setting_it_pinned(tmp_path):
+    """A ``None`` in the receipt records a name the launch cleared, so this recipe verifies a real draft."""
+    config = _native_recipe(tmp_path, DSPARK_RECIPE_ARGS, {"SGLANG_SIMULATE_ACC_LEN": None})
+    launch = _build_native(tmp_path, config, GridVariant("v", extra_server_args="--speculative-num-draft-tokens 6"))
+    assert launch["append_args"] == ["--speculative-num-draft-tokens", "6"]
 
 
 def test_building_a_native_variant_pins_the_draft_the_accepted_stack_carries(tmp_path):
