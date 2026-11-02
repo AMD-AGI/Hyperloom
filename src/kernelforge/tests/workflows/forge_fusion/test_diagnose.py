@@ -71,6 +71,14 @@ class TestCategorizeKernelName:
         # into the MoE bucket.
         assert dg.categorize_kernel_name("void aiter::fused_mx_quant_moe_sort_kernel<std::bfloat16_t>") != "moe"
 
+    def test_gemma_rmsnorm_is_not_a_gemm(self):
+        # Regression: ``gemm`` matched the ``gemma`` of MiniMax-M3's Gemma RMSNorm kernels, filing a launch-bound norm
+        # as compute and keeping it out of every fusion candidate.
+        assert dg.categorize_kernel_name("_gemma_rmsnorm_kernel") == "rmsnorm"
+        assert dg.categorize_kernel_name("_gemma_fused_add_rmsnorm_kernel") == "rmsnorm"
+        # CK spells real GEMM types with a ``GemmA`` prefix, so excluding ``gemma`` itself would misfile them.
+        assert dg.categorize_kernel_name("ck_tile::BlockGemmASmemBSmemCRegV1DefaultPolicy") == "gemm"
+
 
 class TestDiagnoseFromShares:
     def test_launch_bound_is_candidate(self):

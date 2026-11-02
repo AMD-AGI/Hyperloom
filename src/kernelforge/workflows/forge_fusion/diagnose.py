@@ -44,11 +44,12 @@ DEFAULT_MAX_BUSY_WALL = 0.45
 _KERNEL_CATEGORY_RULES: tuple[tuple[str, str], ...] = (
     # MoE first: its kernels are GEMMs too, and the table reports them separately.
     ("moe", r"fused_moe|mfma_moe|moe_align|moe_sum|moe_reduction|_routing|expert|grouped_topk"),
+    # Norms before the bare ``gemm`` substring, which also matches the ``gemma`` of ``_gemma_rmsnorm_kernel``.
+    ("rmsnorm", r"rmsnorm|rms_norm|_rms_"),
+    ("layernorm", r"layernorm|layer_norm"),
     ("gemm", r"cijk_|tensile|gemm|matmul|_bhs_"),
     ("attention", r"paged_attention|flash|fmha|\bmha\b|attention|attn_|_fwd_kernel|_fwd_grouped|mla_|_mla"),
     ("conv", r"conv1d|_conv_|\bconv\b"),
-    ("rmsnorm", r"rmsnorm|rms_norm|_rms_"),
-    ("layernorm", r"layernorm|layer_norm"),
     ("rope", r"rotary|\brope\b"),
     ("activation", r"silu|gelu|\brelu\b|sigmoid|activation|act_mul|_act_"),
     ("cast", r"tofloat|tohalf|_cast|convert|dtype_|scaled_quant|_quant_kernel"),
