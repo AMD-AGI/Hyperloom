@@ -108,7 +108,8 @@ def test_sdk_error_after_session_id_warns_and_preserves_resume(
     assert result.end_reason == "sdk_error"
     assert result.subtype == "error"
     assert "stream disconnected" in result.stderr_tail
-    assert "preserving the resume handle" in caplog.text
+    (warned,) = [r for r in caplog.records if "preserving the resume handle" in r.getMessage()]
+    assert repr(warned.exc_info[1]) == "ConnectionError('stream disconnected')"
 
 
 def test_stream_error_before_session_id_is_raised():

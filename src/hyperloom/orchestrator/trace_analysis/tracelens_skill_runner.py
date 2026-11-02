@@ -554,11 +554,8 @@ class _TrajectoryCall:
         return self
 
     def observe(self, message: Any) -> None:
-        """Feed one SDK stream message to the per-request tracker; a tracing fault never reaches the run."""
-        try:
-            self._tracker.observe(message)
-        except Exception:  # noqa: BLE001 - outermost telemetry sink: per-request trajectory tracker
-            _log.debug("tracelens trajectory: request tracker rejected a message", exc_info=True)
+        """Feed one SDK stream message to the per-request tracker."""
+        self._tracker.observe(message)
         usage = getattr(message, "usage", None)
         if type(message).__name__ == "ResultMessage" and isinstance(usage, dict):
             self._usage = dict(usage)
@@ -579,10 +576,7 @@ class _TrajectoryCall:
 
     def __exit__(self, *exc_info: Any) -> Any:
         # Requests are written while the call span is still the ambient parent.
-        try:
-            self._tracker.record_trajectory(attempt=1, fallback_model=self._model)
-        except Exception:  # noqa: BLE001 - outermost telemetry sink: trajectory request rows on span exit
-            _log.debug("tracelens trajectory: request rows were not recorded", exc_info=True)
+        self._tracker.record_trajectory(attempt=1, fallback_model=self._model)
         return self._span_cm.__exit__(*exc_info)
 
 
@@ -630,7 +624,7 @@ async def _drive_sdk_stream(
                 if aclose is not None:
                     try:
                         await asyncio.wait_for(aclose(), timeout=10.0)
-                    except (asyncio.TimeoutError, Exception):  # noqa: BLE001 - outermost finalizer: aclose after idle abort
+                    except (asyncio.TimeoutError, OSError, RuntimeError):
                         _log.debug("tracelens: stream aclose failed", exc_info=True)
                 break
             observe(message)

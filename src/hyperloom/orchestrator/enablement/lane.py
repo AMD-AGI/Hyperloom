@@ -129,7 +129,7 @@ class EnablementLane(CoordinatorCollaborator):
         try:
             await self._coord.enablement_build.maybe_enqueue_specialist_requested_build()
             await self._coord.enablement_build.maybe_escalate_to_targeted_build(launch_log, attempt=stalled)
-        except Exception:  # isolation boundary: the build escalation step, kept apart from the dispatch
+        except (OSError, sqlite3.Error):
             log.exception("enablement: build escalation failed")
         await self._coord.specialist_dispatch.warm_specialist_params(params)
         # This internal dispatch bypasses intent_router (adds gpu_research_lane + budget TTL).

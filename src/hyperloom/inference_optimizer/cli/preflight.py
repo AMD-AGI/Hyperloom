@@ -1084,10 +1084,7 @@ def _run_install_step(
     try:
         result = action()
     except BaseException as exc:
-        try:
-            _fail_install_step(event, step_id=step_id, category=category, exc=exc)
-        except Exception:
-            log.warning("failed to record SBD V6 install-step failure", exc_info=True)
+        _fail_install_step(event, step_id=step_id, category=category, exc=exc)
         raise
     outcome = dict(result) if isinstance(result, dict) else {}
     status = str(outcome.pop("status", "applied") or "applied")
