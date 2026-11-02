@@ -22,6 +22,11 @@ from typing import Any, NoReturn
 
 from hyperloom.common.agent_runtime_requirements import agent_runtime_requirements
 from hyperloom.common.agent_cli import resolve_claude_executable, resolve_codex_executable
+from hyperloom.common.codex_session import (
+    CodexSessionError,
+    probe_codex_sandbox_capability,
+    resolve_codex_sandbox_mode,
+)
 from hyperloom_common.llm.llm_config import (
     AGENT_BACKEND_CODEX,
     CLAUDE_OAUTH_TOKEN_ENV,
@@ -861,6 +866,32 @@ def _check_agent_cli() -> None:
         print(f"Preflight: WARNING — no {backend} CLI; specialists cannot start without it (assets/install.sh).")
 
 
+def _check_codex_sandbox() -> None:
+    """Stop before launch when Codex needs a bubblewrap sandbox this host cannot create.
+
+    The same probe runs at every orchestration turn and refuses to fall back to bypass,
+    so without this gate a run only fails turn by turn after the optimizer has started.
+    """
+    if preferred_agent_backend() != AGENT_BACKEND_CODEX:
+        return
+    try:
+        mode = resolve_codex_sandbox_mode()
+    except CodexSessionError as exc:
+        print(f"Preflight: ERROR — Codex sandbox policy is not usable: {exc}", file=sys.stderr)
+        sys.exit(2)
+    if mode == "bypass" or probe_codex_sandbox_capability():
+        return
+    reason = "bwrap is not on PATH" if not shutil.which("bwrap") else "bwrap cannot create the sandbox"
+    print(
+        f"Preflight: ERROR — Codex sandbox mode {mode!r} needs a working bubblewrap, but {reason}. "
+        "Install bubblewrap (assets/install.sh does it as root); in a container run with "
+        "--cap-add SYS_ADMIN and --security-opt apparmor=unconfined; or set "
+        "HYPERLOOM_CODEX_SANDBOX_MODE=bypass to run without the sandbox.",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+
 def _emit_preflight_diagnostics(
     *,
     magpie_python: str,
@@ -1641,6 +1672,7 @@ def _preflight(args: argparse.Namespace) -> tuple[str, str]:
     inferencex_path = _prepare_inferencex(install_event, magpie_active=_magpie_backend_active)
 
     _check_agent_cli()
+    _check_codex_sandbox()
 
     _check_kernel_and_tracelens_clis(install_event, args)
 

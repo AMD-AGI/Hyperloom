@@ -1439,6 +1439,31 @@ for spec in specs:
   return 0
 }
 
+# --- 1d. bubblewrap for Codex's workspace-write sandbox ---
+# Codex orchestration refuses to run without a working bwrap and never falls
+# back to bypass; the stock vllm/sglang ROCm images ship none. Fail-soft: Claude
+# and bypass deployments do not need it, and preflight gates the Codex case.
+ensure_bubblewrap() {
+  if command -v bwrap >/dev/null 2>&1; then
+    log "bubblewrap already present at $(command -v bwrap)"
+  elif [ "$CHECK_ONLY" -eq 1 ]; then
+    warn "bubblewrap not found (check-only; would install it). Codex workspace-write orchestration cannot start without it."
+  elif [ "$DRY_RUN" -eq 1 ]; then
+    log "would run: apt-get install -y --no-install-recommends bubblewrap"
+  elif ! command -v apt-get >/dev/null 2>&1; then
+    warn "bubblewrap: apt-get unavailable and bwrap not found; Codex workspace-write orchestration cannot start. Install bubblewrap in the image."
+  else
+    log "installing bubblewrap via apt"
+    export DEBIAN_FRONTEND=noninteractive
+    if ! apt-get install -y --no-install-recommends bubblewrap >/dev/null 2>&1; then
+      apt-get update -qq >/dev/null 2>&1 || true
+      apt-get install -y --no-install-recommends bubblewrap >/dev/null 2>&1 \
+        || warn "bubblewrap: apt install failed (needs root and a reachable mirror); Codex workspace-write orchestration cannot start."
+    fi
+  fi
+  return 0
+}
+
 # --- 2. Magpie ---
 # The install state is the pip-installed package specified by
 # $MAGPIE_PACKAGE_SPEC. $MAGPIE_PATH remains exported for runtime code that
@@ -1923,6 +1948,7 @@ persist_vllm_image_source_env
 # Unconditional (not gated on the backend): the default-geak install a later
 # forge session inherits still gets rocprof-compute + pandas<3.
 ensure_rocprof_compute
+ensure_bubblewrap
 
 _write_specialist_secret_env_opt_in() {
   if [ "$DRY_RUN" -eq 1 ] || [ "$CHECK_ONLY" -eq 1 ]; then
