@@ -22,7 +22,12 @@ import yaml
 from hyperloom.measure.framework.base import framework_envs
 from hyperloom.measure.framework.copies import private_framework
 from hyperloom.measure.framework.rows import DEFAULT_TABLE_PLACEHOLDER
-from hyperloom.measure.framework.table_modules import named_table_modules, stale_table_modules, table_modules
+from hyperloom.measure.framework.table_modules import (
+    _shares_a_key,
+    named_table_modules,
+    stale_table_modules,
+    table_modules,
+)
 from hyperloom.measure.socket import TestCall
 
 A8W8, BPRESHUFFLE = "AITER_CONFIG_GEMM_A8W8", "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE"
@@ -274,6 +279,21 @@ def test_tables_that_hold_one_shape_count_in_the_order_aiter_merges_them(tmp_pat
 
     assert stale_table_modules(CONFIG, image, image, [as_the_image]) == frozenset()
     assert stale_table_modules(CONFIG, image, image, [by_name]) == {BLOCK, OPUS}, "the other row is merged last"
+
+
+@pytest.mark.parametrize("content", ["", "\n", "M,N,K,kernelName\n"], ids=["empty", "blank-line", "short-header"])
+def test_a_table_without_rows_shares_no_key_whatever_its_header(tmp_path, content) -> None:
+    """aiter merges a header-only table with fewer columns than the others; its missing key columns hold no row."""
+    header = "gfx,cu_num,M,N,K,libtype,kernelName\n"
+    first, second, bare = tmp_path / "first.csv", tmp_path / "second.csv", tmp_path / "bare.csv"
+    first.write_text(header + "gfx950,256,64,1536,5120,ck,a\n")
+    second.write_text(header + "gfx950,256,128,1536,5120,ck,b\n")
+    bare.write_text(content)
+    key = ("gfx", "cu_num", "M", "N", "K", "libtype")
+
+    assert _shares_a_key([str(first), str(second), str(bare)], [key]) is False
+    second.write_text(header + "gfx950,256,64,1536,5120,ck,b\n")
+    assert _shares_a_key([str(first), str(bare), str(second)], [key]) is True
 
 
 def test_rows_of_another_libtype_hold_no_shape_of_a_generator_that_keeps_one_libtype(tmp_path) -> None:
