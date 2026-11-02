@@ -654,7 +654,7 @@ class WorkspaceLock:
     def __enter__(self) -> "WorkspaceLock":
         return self.acquire()
 
-    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
+    def __exit__(self, exc_type: object, _exc_value: object, traceback: object) -> None:
         self.release()
 
 

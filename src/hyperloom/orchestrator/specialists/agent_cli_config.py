@@ -299,6 +299,30 @@ def _codex_provider_resolver_overlay(base_env: Mapping[str, str]) -> dict[str, s
     return overlay
 
 
+def _codex_stdio_env_value(
+    name: str,
+    key: str,
+    raw_value: str,
+    *,
+    source: Mapping[str, str],
+    protected_env_names: frozenset[str],
+) -> str:
+    """Resolve one stdio MCP server env value, refusing a key reserved for specialist or provider control."""
+    if (
+        key in _CODEX_MCP_RESERVED_ENV_NAMES
+        or key in protected_env_names
+        or key.startswith((_CODEX_PROVIDER_ENV_PREFIX, _CODEX_MCP_ENV_PREFIX))
+    ):
+        raise SpecialistAgentUnavailableError(
+            f"Codex MCP server {name!r} env key {key!r} is reserved for specialist control or provider configuration"
+        )
+    return _resolve_env_references(
+        raw_value,
+        source=source,
+        context=f"Codex MCP server {name!r} env {key!r}",
+    )
+
+
 def _codex_mcp_config(
     config_path: str | None,
     *,
@@ -324,57 +348,87 @@ def _codex_mcp_config(
             )
         lines.append(f"[mcp_servers.{name}]")
         if server.is_http:
-            lines.append(f"url = {_toml_string(server.url)}")
-            header_rows: list[tuple[str, str]] = []
-            for header, raw_value in server.headers:
-                value = _resolve_env_references(
-                    raw_value,
-                    source=source,
-                    context=f"Codex MCP server {name!r} header {header!r}",
-                )
-                env_name = _private_mcp_env_name(
-                    header_index,
-                    source=source,
-                    additions=env_additions,
-                    protected_env_names=protected_env_names,
-                )
-                header_index += 1
-                env_additions[env_name] = value
-                header_rows.append((header, env_name))
-            if header_rows:
-                lines.extend(["", f"[mcp_servers.{name}.env_http_headers]"])
-                lines.extend(f"{_toml_string(header)} = {_toml_string(env_name)}" for header, env_name in header_rows)
+            server_lines, header_index = _codex_http_server_lines(
+                server,
+                header_index,
+                source=source,
+                env_additions=env_additions,
+                protected_env_names=protected_env_names,
+            )
         else:
-            env_names: list[str] = []
-            for key, raw_value in server.env:
-                if (
-                    key in _CODEX_MCP_RESERVED_ENV_NAMES
-                    or key in protected_env_names
-                    or key.startswith((_CODEX_PROVIDER_ENV_PREFIX, _CODEX_MCP_ENV_PREFIX))
-                ):
-                    raise SpecialistAgentUnavailableError(
-                        f"Codex MCP server {name!r} env key {key!r} is reserved "
-                        "for specialist control or provider configuration"
-                    )
-                resolved_value = _resolve_env_references(
-                    raw_value,
-                    source=source,
-                    context=f"Codex MCP server {name!r} env {key!r}",
-                )
-                existing_value = env_additions.get(key, child_env.get(key))
-                if existing_value is not None and existing_value != resolved_value:
-                    raise SpecialistAgentUnavailableError(
-                        f"Codex MCP server {name!r} env key {key!r} collides with an existing child environment value"
-                    )
-                if existing_value is None:
-                    env_additions[key] = resolved_value
-                env_names.append(key)
-            lines.append(f"command = {_toml_string(server.command)}")
-            lines.append(f"args = {json.dumps(list(server.args), ensure_ascii=False)}")
-            if env_names:
-                lines.append(f"env_vars = {json.dumps(env_names)}")
+            server_lines = _codex_stdio_server_lines(
+                server,
+                source=source,
+                child_env=child_env,
+                env_additions=env_additions,
+                protected_env_names=protected_env_names,
+            )
+        lines.extend(server_lines)
         lines.append("")
     return lines, env_additions
+
+
+def _codex_http_server_lines(
+    server: McpServer,
+    header_index: int,
+    *,
+    source: Mapping[str, str],
+    env_additions: dict[str, str],
+    protected_env_names: frozenset[str],
+) -> tuple[list[str], int]:
+    """Render one HTTP MCP server body, moving its header values into ``env_additions``; return the next index."""
+    name = server.name
+    lines = [f"url = {_toml_string(server.url)}"]
+    header_rows: list[tuple[str, str]] = []
+    for header, raw_value in server.headers:
+        value = _resolve_env_references(
+            raw_value,
+            source=source,
+            context=f"Codex MCP server {name!r} header {header!r}",
+        )
+        env_name = _private_mcp_env_name(
+            header_index,
+            source=source,
+            additions=env_additions,
+            protected_env_names=protected_env_names,
+        )
+        header_index += 1
+        env_additions[env_name] = value
+        header_rows.append((header, env_name))
+    if header_rows:
+        lines.extend(["", f"[mcp_servers.{name}.env_http_headers]"])
+        lines.extend(f"{_toml_string(header)} = {_toml_string(env_name)}" for header, env_name in header_rows)
+    return lines, header_index
+
+
+def _codex_stdio_server_lines(
+    server: McpServer,
+    *,
+    source: Mapping[str, str],
+    child_env: Mapping[str, str],
+    env_additions: dict[str, str],
+    protected_env_names: frozenset[str],
+) -> list[str]:
+    """Render one stdio MCP server body, moving its env values into ``env_additions``."""
+    name = server.name
+    env_names: list[str] = []
+    for key, raw_value in server.env:
+        resolved_value = _codex_stdio_env_value(
+            name, key, raw_value, source=source, protected_env_names=protected_env_names
+        )
+        existing_value = env_additions.get(key, child_env.get(key))
+        if existing_value is not None and existing_value != resolved_value:
+            raise SpecialistAgentUnavailableError(
+                f"Codex MCP server {name!r} env key {key!r} collides with an existing child environment value"
+            )
+        if existing_value is None:
+            env_additions[key] = resolved_value
+        env_names.append(key)
+    lines = [f"command = {_toml_string(server.command)}"]
+    lines.append(f"args = {json.dumps(list(server.args), ensure_ascii=False)}")
+    if env_names:
+        lines.append(f"env_vars = {json.dumps(env_names)}")
+    return lines
 
 
 def _write_private_codex_config(

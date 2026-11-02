@@ -171,14 +171,18 @@ class _RunReporter:
 
             select_result(result, self.assembly_preparation)
         if exp_id:
-            try:
-                completed_experiment = self.run.tracker.get(exp_id)
-            except FileNotFoundError:
-                # An incomplete run has no tracker record; the result must still be emitted so callers can reject it.
-                return result
-            result["iteration_count"] = len(completed_experiment.iterations)
-            result["checkpoint"] = completed_experiment.checkpoint
+            self._attach_tracker_record(result, exp_id)
         return result
+
+    def _attach_tracker_record(self, result: dict, exp_id: str) -> None:
+        """Copy the completed experiment's iteration count and checkpoint from the tracker into ``result``."""
+        try:
+            completed_experiment = self.run.tracker.get(exp_id)
+        except FileNotFoundError:
+            # An incomplete run has no tracker record; the result must still be emitted so callers can reject it.
+            return
+        result["iteration_count"] = len(completed_experiment.iterations)
+        result["checkpoint"] = completed_experiment.checkpoint
 
     def write_result_json(self, result: dict) -> None:
         """Persist the result dict to --result-json; a failed write is reported, not raised."""

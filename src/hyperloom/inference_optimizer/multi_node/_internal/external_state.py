@@ -261,6 +261,14 @@ def _describes_same_handoff(disk: dict[str, Any], ext_state: dict[str, Any]) -> 
     return all(disk.get(key) == ext_state.get(key) for key in _HANDOFF_IDENTITY_KEYS)
 
 
+def _carry_disk_bookkeeping(disk: dict[str, Any], ext_state: dict[str, Any]) -> None:
+    """Copy on-disk session bookkeeping into ``ext_state`` without overriding hand-off keys."""
+    for key, value in disk.items():
+        carried = key.startswith(_SESSION_KEY_PREFIX) or key in _HANDOFF_CARRIED_KEYS
+        if carried and key not in ext_state:
+            ext_state[key] = value
+
+
 def load_multi_node_state() -> dict[str, Any]:
     """Load multi-node state; a cluster hand-off wins over on-disk state."""
     if external_service_url():
@@ -285,10 +293,7 @@ def load_multi_node_state() -> dict[str, Any]:
                     _SESSION_KEY_PREFIX,
                 )
             elif disk:
-                for key, value in disk.items():
-                    carried = key.startswith(_SESSION_KEY_PREFIX) or key in _HANDOFF_CARRIED_KEYS
-                    if carried and key not in ext_state:
-                        ext_state[key] = value
+                _carry_disk_bookkeeping(disk, ext_state)
             return ext_state
 
     try:

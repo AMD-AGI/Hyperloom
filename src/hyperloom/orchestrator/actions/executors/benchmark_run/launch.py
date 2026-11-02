@@ -50,6 +50,7 @@ from .records import (
 from .rounds import _BENCHMARK_REPORT_NAME
 
 if TYPE_CHECKING:
+    from ....bringup.argv_preflight import ArgvVerdict
     from ....loop.sub_agent_runner import RunnerContext
 
 log = logging.getLogger(__name__)
@@ -131,6 +132,52 @@ def _attach_baseline_launch_evidence(
     persist_runtime_findings(report, slot=output_dir)
 
 
+def _attempt_failure(error_class: str, exc: Exception, output_dir: Path) -> dict[str, Any]:
+    """The failed result of an attempt refused before any round ran."""
+    return {
+        "status": "failed",
+        "error_class": error_class,
+        "error": str(exc),
+        "output_dir": str(output_dir),
+    }
+
+
+def _attempt_launch_layer(params: dict[str, Any], server_args: str, extra_envs: dict[str, Any]) -> LaunchLayer:
+    """The server args, envs and removals the attempt layers onto the benchmark config."""
+    return LaunchLayer(
+        extra_server_args=server_args,
+        extra_envs=extra_envs,
+        remove_args=params.get("remove_args"),
+        unset_envs=params.get("unset_envs"),
+        args_mode=str(params.get("args_mode") or "append"),
+    )
+
+
+def _attempt_target(params: dict[str, Any], resolved_model: str, override_script: str | None) -> BenchmarkTarget:
+    """The model, GPU type and benchmark script the attempt's config targets."""
+    return BenchmarkTarget(
+        model_path=resolved_model,
+        # gpu_type: task.params > $GPU_TYPE (cli.py canonicalizes mi325x->mi300x).
+        gpu_type=str(params.get("gpu_type") or "").strip().lower() or os.environ.get("GPU_TYPE", "").strip().lower(),
+        benchmark_script=override_script,
+    )
+
+
+def _attempt_options(ctx: RunnerContext, shared_state: Any, drop_moe_runner_backend: bool) -> MaterializeOptions:
+    """How the attempt's config is materialized: quality-reference role, MoE-runner drop, FlyDSL, AgentX, grading."""
+    params = ctx.task.params
+    return MaterializeOptions(
+        # Only a genuine ``baseline`` task may establish/overwrite the quality reference;
+        # ``replay_warm_recipe`` reuses this executor but must compare against the pure baseline reference
+        # rather than redefine it.
+        establish_quality_ref=_should_establish_quality_ref(getattr(ctx.task, "kind", ""), params),
+        drop_moe_runner_backend=drop_moe_runner_backend,
+        flydsl_source_dirs=is_truthy(params.get("flydsl_source_dirs")),
+        agentx_mode=agentx_active(benchmark_mode=getattr(shared_state, _BENCHMARK_MODE_ATTR, "")),
+        grading=getattr(shared_state, "grading", None),
+    )
+
+
 class _BenchmarkLaunchMixin:
     """Attempt setup, server-argv preflight and the measured round's result of a benchmark run."""
 
@@ -144,9 +191,7 @@ class _BenchmarkLaunchMixin:
     ) -> dict[str, Any]:
         """Resolve what this baseline attempt runs with, write its config, and run its rounds."""
         params = ctx.task.params
-        config_path = Path(params.get("config_path") or self.default_config_path or self._resolve_default_config())
-        if not config_path.exists():
-            raise FileNotFoundError(f"baseline config not found: {config_path}")
+        config_path = self._attempt_config_path(params)
         shared_state = ctx.extra.get("shared_state") or self.shared_state
         fw, server_args = self._settle_attempt_server_args(
             params,
@@ -160,15 +205,8 @@ class _BenchmarkLaunchMixin:
             override_script = sanitize_script_name(params.get("benchmark_script"))
             override_result_dir = sanitize_result_dir(params.get("result_dir"))
         except ValueError as exc:
-            return {
-                "status": "failed",
-                "error_class": "bad_param",
-                "error": str(exc),
-                "output_dir": str(output_dir),
-            }
-        base_extra_envs = dict(params.get("extra_envs") or {})
-        if not self.runs_accuracy_eval:
-            base_extra_envs["RUN_EVAL"] = "false"
+            return _attempt_failure("bad_param", exc, output_dir)
+        base_extra_envs = self._attempt_extra_envs(params)
         # Model path: unified resolver (params → $MODEL_PATH → SharedState), then serving-path normalization
         # (HL_MODEL_BASE / HF cache).
         resolved_model = resolve_session_model_path(
@@ -180,38 +218,12 @@ class _BenchmarkLaunchMixin:
             config_path = materialize_benchmark_config(
                 config_path,
                 output_dir,
-                launch=LaunchLayer(
-                    extra_server_args=server_args,
-                    extra_envs=base_extra_envs,
-                    remove_args=params.get("remove_args"),
-                    unset_envs=params.get("unset_envs"),
-                    args_mode=str(params.get("args_mode") or "append"),
-                ),
-                target=BenchmarkTarget(
-                    model_path=resolved_model,
-                    # gpu_type: task.params > $GPU_TYPE (cli.py canonicalizes mi325x->mi300x).
-                    gpu_type=str(params.get("gpu_type") or "").strip().lower()
-                    or os.environ.get("GPU_TYPE", "").strip().lower(),
-                    benchmark_script=override_script,
-                ),
-                options=MaterializeOptions(
-                    # Only a genuine ``baseline`` task may establish/overwrite the quality reference;
-                    # ``replay_warm_recipe`` reuses this executor but must compare against the pure baseline reference
-                    # rather than redefine it.
-                    establish_quality_ref=_should_establish_quality_ref(getattr(ctx.task, "kind", ""), params),
-                    drop_moe_runner_backend=force_drop_moe_runner_backend,
-                    flydsl_source_dirs=is_truthy(params.get("flydsl_source_dirs")),
-                    agentx_mode=agentx_active(benchmark_mode=getattr(shared_state, _BENCHMARK_MODE_ATTR, "")),
-                    grading=getattr(shared_state, "grading", None),
-                ),
+                launch=_attempt_launch_layer(params, server_args, base_extra_envs),
+                target=_attempt_target(params, resolved_model, override_script),
+                options=_attempt_options(ctx, shared_state, force_drop_moe_runner_backend),
             )
         except (FrameworkScriptMismatchError, ServerArgvInvalidError) as exc:
-            return {
-                "status": "failed",
-                "error_class": getattr(exc, "error_class", "framework_script_mismatch"),
-                "error": str(exc),
-                "output_dir": str(output_dir),
-            }
+            return _attempt_failure(getattr(exc, "error_class", "framework_script_mismatch"), exc, output_dir)
         from ..magpie_agentx import activate_runtime
 
         activate_runtime(config_path, params.get("runtime_override") or {})
@@ -248,6 +260,20 @@ class _BenchmarkLaunchMixin:
             output_dir,
         )
 
+    def _attempt_config_path(self, params: dict[str, Any]) -> Path:
+        """The benchmark config the attempt starts from: the task's, else the executor's default."""
+        config_path = Path(params.get("config_path") or self.default_config_path or self._resolve_default_config())
+        if not config_path.exists():
+            raise FileNotFoundError(f"baseline config not found: {config_path}")
+        return config_path
+
+    def _attempt_extra_envs(self, params: dict[str, Any]) -> dict[str, Any]:
+        """The attempt's base environment: the task's envs, with the accuracy eval off when this executor skips it."""
+        base_extra_envs = dict(params.get("extra_envs") or {})
+        if not self.runs_accuracy_eval:
+            base_extra_envs["RUN_EVAL"] = "false"
+        return base_extra_envs
+
     def _preflight_server_argv(self, round_: _BenchmarkRound, attempt: int) -> dict[str, Any] | None:
         """Ask the installed framework's parser about this round's argv.
 
@@ -264,12 +290,7 @@ class _BenchmarkLaunchMixin:
 
         if native_config(round_.config_path):
             return None
-        from ....bringup import (
-            ARGV_INVALID,
-            argv_invalid_observation,
-            check_server_argv,
-            write_boot_observation,
-        )
+        from ....bringup import check_server_argv
         from ....bringup.argv_preflight import OK, PARSED_AFTER_DROP, UNAVAILABLE, ArgvRepair
         from .._server_argv import config_launch_env, config_server_argv, reseal_config_argv
 
@@ -317,6 +338,11 @@ class _BenchmarkLaunchMixin:
                     spent.append(verdict.repaired_digest)
                 round_.capture_meta["server_argv_dropped"] = list(verdict.dropped)
             return None
+        return self._argv_refusal(round_, attempt, verdict)
+
+    def _argv_refusal(self, round_: _BenchmarkRound, attempt: int, verdict: ArgvVerdict) -> dict[str, Any]:
+        """Record the boot observation of a refused server argv and return the round's terminal failure."""
+        from ....bringup import ARGV_INVALID, argv_invalid_observation, write_boot_observation
 
         observation = argv_invalid_observation(verdict, session_dir=self.session_dir)
         round_.capture_meta["boot_observation_path"] = write_boot_observation(

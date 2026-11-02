@@ -208,6 +208,43 @@ def recover_task_result(
         kernel_path=(workspace / task.kernel_path).resolve(),
         source_files=tuple((workspace / relative).resolve() for relative in task.source_files),
     )
+    return _publish_recovered(
+        layout,
+        task_dir,
+        _RecoveryTarget(
+            task=task,
+            worktree=worktree,
+            manifest=manifest,
+            source=source,
+            best_commit=best_commit,
+        ),
+        update_state=update_state,
+    )
+
+
+@dataclass(frozen=True)
+class _RecoveryTarget:
+    """The trusted best result one task workspace is recovered from."""
+
+    task: KernelRewriteTask
+    worktree: OperatorWorktree
+    manifest: dict[str, Any]
+    source: str
+    best_commit: str
+
+
+def _publish_recovered(
+    layout: ControllerLayout,
+    task_dir: str | Path,
+    target: _RecoveryTarget,
+    *,
+    update_state: bool,
+) -> RecoveryResult:
+    """Export the target's patch from the controller base and publish it."""
+    task = target.task
+    worktree = target.worktree
+    best_commit = target.best_commit
+    source = target.source
     try:
         patch = export_patch_from_base(worktree, best_commit=best_commit)
         if not patch.strip():
@@ -223,7 +260,7 @@ def recover_task_result(
                 task,
                 best_commit=best_commit,
                 patch=patch,
-                manifest=manifest,
+                manifest=target.manifest,
                 changed_files=changed_files_from_base(worktree, best_commit=best_commit),
             ),
         )

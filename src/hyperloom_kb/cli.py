@@ -17,7 +17,9 @@ from hyperloom_kb.remote import RemoteClient, RemoteClientError, RemoteConfig
 from hyperloom_kb.schema import JsonValue
 
 _Run = Callable[[RemoteClient, argparse.Namespace], dict[str, JsonValue]]
+_Register = Callable[[str, str, _Run], argparse.ArgumentParser | None]
 _SYNC_COMMANDS = ("push", "pull")
+_DEFAULT_SCHEMA = "the schema the service reads by default"
 
 
 def _schema_option(parser: argparse.ArgumentParser, default: str | None, unset: str | None) -> None:
@@ -63,6 +65,30 @@ def _export(client: RemoteClient, args: argparse.Namespace) -> dict[str, JsonVal
     return result
 
 
+def _add_exclusion_commands(command: _Register, schema_ref: str | None) -> None:
+    """Register the commands that hide an Experience from reads, show it again, and list the exclusions."""
+    if exclude := command(
+        "exclude",
+        "Hide an Experience from reads; one written here is no longer pushed either.",
+        lambda c, a: c.exclude(a.experience_id, reason=a.reason),
+    ):
+        exclude.add_argument("experience_id")
+        exclude.add_argument("--reason", required=True, help="Why it is excluded; kept in the exclusion history.")
+    if include := command(
+        "include",
+        "Let reads see an Experience again: lift its exclusion, and put it back into the state if a restore set it "
+        "outside.",
+        lambda c, a: c.include(a.experience_id),
+    ):
+        include.add_argument("experience_id")
+    if exclusions := command(
+        "exclusions",
+        "List a schema's exclusions and the history of every exclude and include.",
+        lambda c, a: c.exclusions(schema_ref=a.schema_ref),
+    ):
+        _schema_option(exclusions, schema_ref, _DEFAULT_SCHEMA)
+
+
 def add_commands(
     commands: argparse._SubParsersAction[argparse.ArgumentParser], *, schema_ref: str | None = None
 ) -> None:
@@ -80,7 +106,6 @@ def add_commands(
         parser.set_defaults(run=run)
         return parser
 
-    default_schema = "the schema the service reads by default"
     command("health", "The service's identity, and what its reads see per schema.", lambda c, a: c.health())
     command("push", "Send what was written here and not pushed yet to the global KB.", lambda c, a: c.push())
     command(
@@ -101,13 +126,13 @@ def add_commands(
         "List a schema's labels, its current label, and whether its state changed since.",
         lambda c, a: c.labels(schema_ref=a.schema_ref),
     ):
-        _schema_option(labels, schema_ref, default_schema)
+        _schema_option(labels, schema_ref, _DEFAULT_SCHEMA)
     if label := command(
         "label",
         "Label a schema's current state, so a restore can return to it.",
         lambda c, a: c.create_label(schema_ref=a.schema_ref, name=a.name),
     ):
-        _schema_option(label, schema_ref, default_schema)
+        _schema_option(label, schema_ref, _DEFAULT_SCHEMA)
         label.add_argument("--name", default="", help="A name for people; the label is identified by its label_id.")
     if restore := command(
         "restore",
@@ -115,26 +140,7 @@ def add_commands(
         lambda c, a: c.restore(a.label_id),
     ):
         restore.add_argument("label_id")
-    if exclude := command(
-        "exclude",
-        "Hide an Experience from reads; one written here is no longer pushed either.",
-        lambda c, a: c.exclude(a.experience_id, reason=a.reason),
-    ):
-        exclude.add_argument("experience_id")
-        exclude.add_argument("--reason", required=True, help="Why it is excluded; kept in the exclusion history.")
-    if include := command(
-        "include",
-        "Let reads see an Experience again: lift its exclusion, and put it back into the state if a restore set it "
-        "outside.",
-        lambda c, a: c.include(a.experience_id),
-    ):
-        include.add_argument("experience_id")
-    if exclusions := command(
-        "exclusions",
-        "List a schema's exclusions and the history of every exclude and include.",
-        lambda c, a: c.exclusions(schema_ref=a.schema_ref),
-    ):
-        _schema_option(exclusions, schema_ref, default_schema)
+    _add_exclusion_commands(command, schema_ref)
     if listing := command("list", "Summaries of the Experiences written here, one page in write order.", _list):
         _schema_option(listing, schema_ref, "every schema")
         _page_options(listing)

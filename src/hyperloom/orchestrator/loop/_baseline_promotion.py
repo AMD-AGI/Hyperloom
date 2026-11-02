@@ -243,6 +243,7 @@ class BaselinePromotionMixin:
                 result, held_reason=held_reason, prior_anchor=prior_anchor, promoting_tid=promoting_tid
             )
             self.shared_state.baseline_failure_streak = 0
+            self.shared_state.baseline_failures_this_leg = 0
             # A genuine baseline is what revalidates an enablement KEEP.
             await self._settle_pending_revalidation(
                 result, is_revalidation=is_revalidation, promoting_tid=promoting_tid
