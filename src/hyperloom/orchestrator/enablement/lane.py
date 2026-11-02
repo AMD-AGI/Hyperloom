@@ -620,6 +620,7 @@ def _reset_baseline_failure_backstop(state: Any) -> None:
     are progress, not a stuck baseline.
     """
     state.baseline_failure_streak = 0
+    state.baseline_failures_this_leg = 0
     state.baseline_total_failures = 0
 
 
