@@ -281,6 +281,8 @@ class AutonomousSession:
         mark = None if ready.manifest.snapshots is not None else self._mark(ready.manifest)
         KeepWatch(root, mark=mark).save(self._place.workspace / WATCH_FILE)
         await self._note(f"the agent {ready.manifest.source} at {ready.manifest.commit} is running")
+        for note in ready.notes:
+            await self._note(note)
 
     async def _lay_start_tables(self, kernels: tuple[KernelArtifact, ...]) -> dict[str, StartTable]:
         directory, configs = self._agent_dir / START_TABLES_DIR, self._setup.aiter_configs

@@ -30,7 +30,9 @@ The spec's ``review`` hands Arbor's human review gate over (ArborDevelopment #30
 session for a person's approval unless the host says it reviewed (``component.review: "host"``, :data:`REVIEW_HOST`)
 or the config turns the gate off (``"review_gate": false``, :data:`REVIEW_OFF`). Arbor refuses a component key it does
 not know, so either is written only for a checkout whose component mode has the gate (:func:`has_review_gate`); an
-older Arbor gets neither and runs as before.
+older Arbor gets neither and runs as before. The keys a checkout declares (:func:`declared_keys`) decide the others
+too: a key that changes what Arbor runs, which the pinned Arbor lacks, refuses its start, naming the Arbor commit to
+pin (:data:`KEY_SINCE`); an input it can run without (:data:`OPTIONAL_KEYS`) is left out with a note (:func:`fit_keys`).
 """
 
 from __future__ import annotations
@@ -153,6 +155,11 @@ REVIEW_OFF = "off"
 REVIEW_GATE_KEY = "review_gate"
 #: Where an Arbor checkout declares its component block's keys, which says whether it has the review gate.
 COMPONENT_MODULE = "arbor/component.py"
+#: The Arbor commit that added each key MB writes, which a refusal names; the rest came with component mode (32bf0c7).
+KEY_SINCE = {"root": "4249384", "plan": "0a17a7b", "stop_at": "15a46e6", "profile": "15a46e6", "review": "e28249f"}
+COMPONENT_SINCE = "32bf0c7"
+#: The keys an Arbor that lacks them runs without, losing only an input: left out, with a note, rather than refused.
+OPTIONAL_KEYS = ("profile",)
 #: Arbor's ledger: FACT and DEAD_END records are what it measured and ruled out.
 LEDGER = {"id": "id", "kind": "type", "text": "claim", "kinds": {"FACT": "insight", "DEAD_END": "pitfall"}}
 ENCODING = "utf-8"
@@ -253,19 +260,40 @@ def is_arbor(checkout: Path) -> bool:
 
 
 def has_review_gate(checkout: Path) -> bool:
-    """Whether the Arbor in ``checkout`` has the human review gate: its component block takes :data:`REVIEW_KEY`, as
-    its :data:`COMPONENT_MODULE` declares ``BLOCK_KEYS``, read without importing Arbor (Arbor ``1fa2069`` and later);
-    ``False`` for a checkout without that module, or whose keys cannot be read."""
+    """Whether the Arbor in ``checkout`` has the human review gate: its component block takes :data:`REVIEW_KEY`
+    (Arbor ``1fa2069`` and later); ``False`` when its keys cannot be read (:func:`declared_keys`)."""
+
+    return REVIEW_KEY in (declared_keys(checkout) or ())
+
+
+def declared_keys(checkout: Path) -> frozenset[str] | None:
+    """The component keys the Arbor in ``checkout`` takes, as its :data:`COMPONENT_MODULE` declares ``BLOCK_KEYS``,
+    read without importing Arbor; ``None`` for a checkout without that module, or whose keys cannot be read."""
 
     try:
         tree = ast.parse((checkout / COMPONENT_MODULE).read_text(encoding=ENCODING))
     except (OSError, SyntaxError, UnicodeDecodeError):
-        return False
+        return None
     for node in tree.body:
         if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "BLOCK_KEYS" for t in node.targets):
             if isinstance(node.value, (ast.Tuple, ast.List)):
-                return any(isinstance(e, ast.Constant) and e.value == REVIEW_KEY for e in node.value.elts)
-    return False
+                keys = [e.value for e in node.value.elts if isinstance(e, ast.Constant)]
+                return frozenset(key for key in keys if isinstance(key, str))
+    return None
+
+
+def fit_keys(config: Mapping[str, Any], checkout: Path) -> tuple[dict[str, Any], tuple[str, ...]]:
+    """``config`` without the :data:`OPTIONAL_KEYS` the Arbor in ``checkout`` lacks, and a note for each one left out:
+    an older pin runs without that input rather than refuse its start. Unchanged when its keys cannot be read."""
+
+    declared, component = declared_keys(checkout), dict(config.get("component") or {})
+    lacking = [key for key in OPTIONAL_KEYS if key in component and declared is not None and key not in declared]
+    for key in lacking:
+        del component[key]
+    notes = tuple(
+        f"the pinned Arbor has no component.{key} (Arbor {KEY_SINCE[key]}): started without it" for key in lacking
+    )
+    return {**config, "component": component}, notes
 
 
 def arbor_manifest(
@@ -284,7 +312,7 @@ def arbor_manifest(
     if spec.dossier:
         carry_dossier(path, Path(spec.dossier))
     config = arbor_config(spec, path, run)
-    reasons = [*_launch_refusals(spec), *refusals(config, checkout.env)]
+    reasons = [*_launch_refusals(spec), *refusals(config, checkout.env, declared_keys(path))]
     if reasons:
         raise ArborRefused(reasons)
     (path / run.session_dir).mkdir(parents=True, exist_ok=True)
@@ -585,9 +613,11 @@ def _client_value(client: str, flag: str) -> str:
     return ""
 
 
-def refusals(config: Mapping[str, Any], env: Mapping[str, str] = os.environ) -> list[str]:
+def refusals(
+    config: Mapping[str, Any], env: Mapping[str, str] = os.environ, declared: frozenset[str] | None = None
+) -> list[str]:
     """Why Arbor would refuse ``config`` at its start, run with ``env``, as far as this side can tell; ``[]`` when it
-    would not.
+    would not. ``declared`` is the component keys the pinned Arbor takes (:func:`declared_keys`), when known.
 
     These are the refusals of Arbor's ``docs/hosts.md`` that a config written from the spec can meet: no session, no
     deadline, a container other than the host, ``ARBOR_ROLL=1``, a component block with a key Arbor does not have, a
@@ -599,6 +629,7 @@ def refusals(config: Mapping[str, Any], env: Mapping[str, str] = os.environ) -> 
     component = component if isinstance(component, Mapping) else {}
     return [
         *_block_refusals(component),
+        *_pin_refusals(component, declared),
         *_host_refusals(config, env),
         *_path_refusals(config),
         *_root_refusals(component.get("root"), Path(str(config.get("workspace_root") or ""))),
@@ -619,6 +650,16 @@ def _block_refusals(component: Mapping[str, Any]) -> list[str]:
     if component.get(REVIEW_KEY) not in (None, REVIEW_HOST):
         reasons.append(f"component.review is {component.get(REVIEW_KEY)!r}, not {REVIEW_HOST!r}")
     return reasons
+
+
+def _pin_refusals(component: Mapping[str, Any], declared: frozenset[str] | None) -> list[str]:
+    """A key MB writes that the pinned Arbor lacks, naming the Arbor commit that added it: Arbor would refuse it too."""
+
+    lacking = sorted(set(component) & set(BLOCK_KEYS) - (declared if declared is not None else set(BLOCK_KEYS)))
+    return [
+        f"the pinned Arbor has no component.{key}: pin Arbor {KEY_SINCE.get(key, COMPONENT_SINCE)} or later"
+        for key in lacking
+    ]
 
 
 def _host_refusals(config: Mapping[str, Any], env: Mapping[str, str]) -> list[str]:
