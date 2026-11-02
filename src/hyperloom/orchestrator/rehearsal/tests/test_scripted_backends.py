@@ -47,7 +47,6 @@ def _spawn(task_id: str, workspace: Path) -> SpecialistSpawn:
         worktree_base=None,
         system_prompt="",
         user_prompt="",
-        max_turns=1,
     )
 
 

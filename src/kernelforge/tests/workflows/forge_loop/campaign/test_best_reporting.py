@@ -257,10 +257,10 @@ def test_failed_manifest_replace_preserves_previous_best(tmp_path, monkeypatch):
     before = manifest_path.read_bytes()
     original = reporting.atomic_write_text
 
-    def fail_manifest(path, text):
+    def fail_manifest(path, text, **kwargs):
         if path == manifest_path:
             raise OSError("simulated manifest failure")
-        return original(path, text)
+        return original(path, text, **kwargs)
 
     monkeypatch.setattr(reporting, "atomic_write_text", fail_manifest)
     kernel.write_text("second\n")
@@ -298,10 +298,10 @@ def test_retry_repairs_partial_derived_best_views(tmp_path, monkeypatch):
     result_path = tmp_path / "forge_experiments" / "best_result.json"
     original = reporting.atomic_write_text
 
-    def fail_result(path, text):
+    def fail_result(path, text, **kwargs):
         if path == result_path:
             raise OSError("simulated result failure")
-        return original(path, text)
+        return original(path, text, **kwargs)
 
     monkeypatch.setattr(reporting, "atomic_write_text", fail_result)
     with pytest.raises(OSError, match="simulated result failure"):
@@ -335,10 +335,10 @@ def test_retry_repairs_incomplete_orphan_bundle(tmp_path, monkeypatch):
     manifest_path = best_root / "manifest.json"
     original = reporting.atomic_write_text
 
-    def fail_manifest(path, text):
+    def fail_manifest(path, text, **kwargs):
         if path == manifest_path:
             raise OSError("simulated manifest failure")
-        return original(path, text)
+        return original(path, text, **kwargs)
 
     monkeypatch.setattr(reporting, "atomic_write_text", fail_manifest)
     with pytest.raises(OSError, match="simulated manifest failure"):
@@ -379,10 +379,10 @@ def test_retry_repairs_inconsistent_orphan_bundle(tmp_path, monkeypatch):
     manifest_path = best_root / "manifest.json"
     original = reporting.atomic_write_text
 
-    def fail_manifest(path, text):
+    def fail_manifest(path, text, **kwargs):
         if path == manifest_path:
             raise OSError("simulated manifest failure")
-        return original(path, text)
+        return original(path, text, **kwargs)
 
     monkeypatch.setattr(reporting, "atomic_write_text", fail_manifest)
     with pytest.raises(OSError, match="simulated manifest failure"):

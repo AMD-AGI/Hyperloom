@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.timeutil import now_iso
 
 from . import _framework_switch_manifest as _switch_manifest
 from ._apply_feedback import ApplyFeedback

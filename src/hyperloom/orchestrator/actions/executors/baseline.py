@@ -21,8 +21,8 @@ from typing import Any, Mapping
 
 import yaml
 
-from hyperloom.common.coerce import optional_positive_float
-from hyperloom.common.env import is_truthy
+from hyperloom_common.coerce import optional_positive_float
+from hyperloom_common.env import is_truthy
 from hyperloom.common.perf_metric import agentx_active, with_output_per_gpu
 from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
     ROUND_SINGLE,

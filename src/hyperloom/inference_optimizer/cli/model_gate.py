@@ -22,7 +22,7 @@ from .. import framework_registry
 from .. import gpu_types as _gpu_types
 from ...common.model_paths import resolve_local_model_dir
 from ..session import sbd_v6
-from ...common.timeutil import now_iso
+from hyperloom_common.timeutil import now_iso
 from ..model_config_utils import (
     GEMMA2_ARCHITECTURES as _GEMMA2_ARCHITECTURES,
     _MAXPOS_CONFIG_KEYS,

@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from kernelforge.utils.durable_io import atomic_write_json
+from hyperloom_common.io import DURABLE, JsonFormat, atomic_write_json
 
 
 _OWNER_FILE = ".forge_cache_owner.json"
@@ -89,6 +89,8 @@ def configure_aiter_cache_isolation(
             "max_cache_bytes": policy.max_bytes,
             "target_cache_bytes": policy.target_bytes,
         },
+        fmt=JsonFormat(trailing_newline=True),
+        options=DURABLE,
     )
 
     # cpp_itfs uses AITER_ROOT_DIR/build while compile_ops uses AITER_JIT_DIR/build.
@@ -297,6 +299,8 @@ def activate_aiter_cache_for_sources(
             "aiter_jit_dir": str(aiter_jit_dir),
             "flydsl_cache_dir": str(flydsl_cache_dir),
         },
+        fmt=JsonFormat(trailing_newline=True),
+        options=DURABLE,
     )
     os.environ["AITER_ROOT_DIR"] = str(aiter_root_dir)
     os.environ["AITER_JIT_DIR"] = str(aiter_jit_dir)

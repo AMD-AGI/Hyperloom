@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common import io as _common_io
+from hyperloom_common import io as _common_io
 from hyperloom.common.platform_probe import platform_fingerprint
 
 from ...bus.message_bus import MessageBus

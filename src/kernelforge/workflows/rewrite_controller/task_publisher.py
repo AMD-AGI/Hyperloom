@@ -15,7 +15,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from kernelforge.utils.durable_io import atomic_write_text, fsync_directory, fsync_tree
+from hyperloom_common.io import DURABLE, atomic_write_text, fsync_directory, fsync_tree
 from kernelforge.workflows.rewrite_controller.contracts import KernelRewriteTask
 from kernelforge.workflows.rewrite_controller.paths import ControllerLayout
 from kernelforge.workflows.rewrite_controller.task import parse_task_payload
@@ -245,6 +245,7 @@ def publish_staged_task(
         atomic_write_text(
             temporary / "task.json",
             json.dumps(payload, indent=2, sort_keys=True) + "\n",
+            options=DURABLE,
         )
         shutil.copy2(driver, temporary / "driver.py")
         fsync_tree(temporary)
@@ -283,6 +284,7 @@ def _write_rejection(staged: Path, reason: str) -> None:
         atomic_write_text(
             staged / REJECTION_FILENAME,
             json.dumps({"draft": staged.name, "reason": reason}, indent=2, sort_keys=True) + "\n",
+            options=DURABLE,
         )
     except OSError:
         log.warning("could not record the refusal of staged task %s", staged.name)

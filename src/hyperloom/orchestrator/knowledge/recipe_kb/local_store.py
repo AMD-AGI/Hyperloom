@@ -14,9 +14,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
-from hyperloom.common.io import WriteOptions, atomic_write_json
-from hyperloom.common.jsonio import read_json_strict
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.io import WriteOptions, atomic_write_json
+from hyperloom_common.jsonio import read_json_strict
+from hyperloom_common.timeutil import now_iso
 
 from .canonical_id import (
     InvalidCanonicalIdError,

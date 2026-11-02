@@ -10,7 +10,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.timeutil import now_iso
 
 from .db_maintenance import DEFAULT_EVENTS_KEEP_RECENT
 from .storage.connection import SqliteConnection

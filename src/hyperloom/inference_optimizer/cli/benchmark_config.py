@@ -19,7 +19,7 @@ from hyperloom.common.benchmark_config import (
     is_magpie_agentx,
 )
 from hyperloom.common.agentx_workload import is_mlperf_backend
-from hyperloom.common.env import env_bool
+from hyperloom_common.env import env_bool
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.inference_optimizer.gpu_types import gpu_runner_type
 

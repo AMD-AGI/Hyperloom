@@ -16,8 +16,8 @@ from typing import Any
 
 import yaml
 
-from hyperloom.common.env import env_flag, is_truthy
-from hyperloom.common.io import safe_mtime
+from hyperloom_common.env import env_flag, is_truthy
+from hyperloom_common.io import safe_mtime
 from hyperloom.common.perf_metric import is_agentx_mode
 
 log = logging.getLogger(__name__)

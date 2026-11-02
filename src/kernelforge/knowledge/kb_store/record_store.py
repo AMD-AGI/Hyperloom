@@ -23,7 +23,7 @@ except ImportError:  # pragma: no cover - exercised only on non-POSIX hosts
     fcntl = None  # type: ignore[assignment]
 
 from kernelforge.knowledge.kb_store.remote_client import KBStoreClient, KBStoreError
-from kernelforge.utils.durable_io import atomic_write_bytes, fsync_directory, fsync_tree_directories
+from hyperloom_common.io import DURABLE, atomic_write_bytes, fsync_directory, fsync_tree_directories
 
 CHAMPION_METRIC = "speedup"
 MEASURED_SPEEDUP_KEY = "measured_speedup"
@@ -845,7 +845,7 @@ class LocalRewriteRecords:
             if not isinstance(knowledge, dict):
                 raise RewriteRecordError("candidate knowledge is not an object")
             knowledge[MEASURED_SPEEDUP_KEY] = measured
-            atomic_write_bytes(document_path, _json_bytes(knowledge))
+            atomic_write_bytes(document_path, _json_bytes(knowledge), options=DURABLE)
 
     def champion_speedup(self, canonical_id: str) -> float | None:
         with self._identity_lock(canonical_id, exclusive=False):
@@ -861,7 +861,9 @@ class LocalRewriteRecords:
             "value": float(speedup),
         }
         with self._identity_lock(canonical_id, exclusive=True):
-            atomic_write_bytes(self._identity_dir(canonical_id) / CHAMPION_FILENAME, _json_bytes(document))
+            atomic_write_bytes(
+                self._identity_dir(canonical_id) / CHAMPION_FILENAME, _json_bytes(document), options=DURABLE
+            )
 
 
 def create_rewrite_record_store(config: Any) -> RewriteRecordStore | None:

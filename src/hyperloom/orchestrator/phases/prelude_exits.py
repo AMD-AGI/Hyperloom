@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from hyperloom.common.coerce import optional_positive_float, to_float
+from hyperloom_common.coerce import optional_positive_float, to_float
 
 
 #: The ``warm_replay_status`` of a baseline round that has not finished yet.

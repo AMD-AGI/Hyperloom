@@ -29,7 +29,7 @@ from kernelforge.knowledge.kb_store.identity.implementation import (
 from kernelforge.knowledge.kb_store.identity.kernel_names import derive_kernel_names
 from kernelforge.workflows.forge_loop.campaign.experiments_layout import ExperimentsLayout
 from kernelforge.utils.new_path_allowlist import normalize_commit_new_paths
-from kernelforge.utils.durable_io import atomic_write_text
+from hyperloom_common.io import DURABLE, atomic_write_text
 from kernelforge.workflows.forge_loop.search.agent_relay import AgentRelayPolicy
 from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
 
@@ -257,10 +257,10 @@ class CampaignConfigStore:
                 if self.program_path.read_text() != program_md:
                     raise ValueError("campaign program context is immutable")
             else:
-                atomic_write_text(self.program_path, program_md)
+                atomic_write_text(self.program_path, program_md, options=DURABLE)
         if not config_exists:
             payload = json.dumps(config.to_dict(), indent=2, sort_keys=True) + "\n"
-            atomic_write_text(self.path, payload)
+            atomic_write_text(self.path, payload, options=DURABLE)
 
     def read_program_md(self, config: CampaignConfig) -> str:
         if not config.program_md_path:

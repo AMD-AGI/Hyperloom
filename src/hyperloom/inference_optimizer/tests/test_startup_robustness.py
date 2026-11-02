@@ -12,7 +12,7 @@ import time
 
 import pytest
 
-from hyperloom.common import llm_config
+from hyperloom_common.llm import llm_config
 from hyperloom.inference_optimizer import cli
 from hyperloom.inference_optimizer.cli import credentials as cli_credentials
 from hyperloom.inference_optimizer.cli import model_catalog

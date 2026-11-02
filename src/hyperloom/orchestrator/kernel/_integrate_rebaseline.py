@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from typing import Any, Iterator, NamedTuple
 
-from hyperloom.common.coerce import to_str_list
+from hyperloom_common.coerce import to_str_list
 
 from . import patch_jit_cache
 from ..actions.executors._kernel_agent_tool import HandlerResult

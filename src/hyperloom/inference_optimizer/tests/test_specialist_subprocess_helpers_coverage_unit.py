@@ -70,7 +70,6 @@ def test_build_claude_cmd_full(tmp_path: Path) -> None:
         model="claude-opus-4-7",
         mcp_config_path="/cfg/mcp.json",
         framework_source_roots=(str(fw),),
-        extra_claude_args=("--foo", "bar"),
     )
     wt = tmp_path / "wt"
     wt.mkdir()
@@ -95,7 +94,6 @@ def test_build_claude_cmd_full(tmp_path: Path) -> None:
     # --add-dir grants writes; integrate_patch is the only writer of source.
     assert str(wt) in cmd and str(ws) in cmd
     assert str(fw) not in cmd
-    assert cmd[-2:] == ["--foo", "bar"]
 
 
 def test_build_claude_cmd_minimal_no_model_no_mcp(tmp_path: Path) -> None:

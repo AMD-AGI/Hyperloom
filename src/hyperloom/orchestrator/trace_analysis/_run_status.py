@@ -11,8 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.io import JsonFormat, atomic_write_json
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.io import JsonFormat, atomic_write_json
+from hyperloom_common.timeutil import now_iso
 
 from ._io_utils import read_last_lines
 
