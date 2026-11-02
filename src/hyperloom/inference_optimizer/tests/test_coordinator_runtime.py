@@ -171,13 +171,16 @@ async def test_a_failed_close_sequence_fails_the_run_after_releasing_it(session_
         nonlocal finalize_calls
         finalize_calls += 1
 
+    closed_proposals: list[str] = []
     c.phase_close.ensure_close_sequence = _close
     c._recipe_kb_t4_hook = _finalize
+    c._close_undecided_proposals = closed_proposals.append
     try:
         with pytest.raises(RuntimeError, match="^close sequence broke$"):
             await c.run(options=RunOptions(tick_interval_sec=0.0, max_ticks=1))
         state = json.loads((session_dir / "state.json").read_text(encoding="utf-8"))
         assert (finalize_calls, state["stop_reason"]) == (1, "signal")
+        assert closed_proposals == ["signal"]
     finally:
         await c.stop()
 

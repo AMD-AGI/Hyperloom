@@ -845,7 +845,11 @@ class Coordinator:
             ),
             trajectory_span(EVENT_SESSION, attributes={"name": self.session_dir.name}) as span,
         ):
-            stop_reason = await self._run_ticks(objective=objective, options=options)
+            try:
+                stop_reason = await self._run_ticks(objective=objective, options=options)
+            except BaseException:
+                self._close_undecided_proposals(self.shared_state.stop_reason)
+                raise
             self._close_undecided_proposals(stop_reason)
             span.finish(stop_reason=stop_reason)
             return stop_reason
