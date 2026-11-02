@@ -1309,30 +1309,37 @@ class PolicyGate:
                 return
             if key not in PATH_LIKE_FIELDS:
                 return
-            if not self._path_under_session(node):
-                if key in {"target_file", "resolved_patch_targets"} and trusted_framework_targets:
-                    try:
-                        resolved = str(Path(node).resolve())
-                    except (OSError, RuntimeError):
-                        resolved = ""
-                    if resolved in trusted_framework_targets:
-                        return
-                # Multi-node profile traces live outside session_dir; allow trace-input fields against the trace allowlist.
-                if key in TRACE_PATH_LIKE_FIELDS and self._path_in_trace_allowlist(node):
-                    return
-                raise PolicyDenied(
-                    f"role={role.name!r} {intent_type.value} payload field "
-                    f"{key!r}={node!r} escapes session_dir={self.session_dir!s}",
-                    rule="path_outside_session_dir",
-                    hint=(
-                        "emit paths verbatim from SharedState (e.g. "
-                        "last_profile_trace) or under SESSION_DIR; "
-                        "multi-node trace fields may also resolve under "
-                        f"{list(_trace_path_allowlist())!r}"
-                    ),
-                )
+            self._check_payload_path(role, intent_type, key, node, trusted_framework_targets)
 
         visit(payload, ())
+
+    def _check_payload_path(
+        self, role: "AgentRole", intent_type: IntentType, key: str, node: str, trusted_framework_targets: frozenset[str]
+    ) -> None:
+        """Reject one path-like payload value escaping session_dir and every allowlist its field may use."""
+        if self._path_under_session(node):
+            return
+        if key in {"target_file", "resolved_patch_targets"} and trusted_framework_targets:
+            try:
+                resolved = str(Path(node).resolve())
+            except (OSError, RuntimeError):
+                resolved = ""
+            if resolved in trusted_framework_targets:
+                return
+        # Multi-node profile traces live outside session_dir; allow trace-input fields against the trace allowlist.
+        if key in TRACE_PATH_LIKE_FIELDS and self._path_in_trace_allowlist(node):
+            return
+        raise PolicyDenied(
+            f"role={role.name!r} {intent_type.value} payload field "
+            f"{key!r}={node!r} escapes session_dir={self.session_dir!s}",
+            rule="path_outside_session_dir",
+            hint=(
+                "emit paths verbatim from SharedState (e.g. "
+                "last_profile_trace) or under SESSION_DIR; "
+                "multi-node trace fields may also resolve under "
+                f"{list(_trace_path_allowlist())!r}"
+            ),
+        )
 
     def _validate_prune_branch(self, payload: dict[str, Any]) -> None:
         """Validate the family and scope of an orchestration prune request."""

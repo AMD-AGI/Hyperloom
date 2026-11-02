@@ -783,10 +783,9 @@ def _visible_gpu_count() -> int:
             indices: set[str] = set()
             for line in (proc.stdout or "").splitlines():
                 stripped = line.strip()
-                if stripped.startswith("GPU["):
-                    idx, _, _ = stripped[4:].partition("]")
-                    if idx:
-                        indices.add(idx)
+                idx, _, _ = stripped[4:].partition("]")
+                if stripped.startswith("GPU[") and idx:
+                    indices.add(idx)
             return len(indices)
     return 0
 

@@ -161,7 +161,7 @@ class SessionDirField:
     def __set_name__(self, owner: type, name: str) -> None:
         self._slot = f"_{name}"
 
-    def __get__(self, obj: Any, objtype: type | None = None) -> Any:
+    def __get__(self, obj: Any, _objtype: type | None = None) -> Any:
         if obj is None:
             return self
         explicit = getattr(obj, self._slot, None)

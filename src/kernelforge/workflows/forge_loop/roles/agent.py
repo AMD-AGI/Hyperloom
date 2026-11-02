@@ -879,23 +879,6 @@ def make_agent_fn(
 
         gate, run_spec = prepare_session()
 
-        def _finalize_integrity(error: BaseException | None = None) -> None:
-            if gate is None:
-                return
-            reason = gate.finalize_integrity()
-            if error is not None and getattr(error, "agent_safety_rejection", False):
-                reason = reason or (f"backend workspace safety rejection: {type(error).__name__}: {error}")
-                gate.integrity_reason = reason
-                gate.integrity_violation = True
-                gate.integrity_verdict = "violation"
-                finding = f"Protected workspace integrity violation: {reason}"
-                if finding not in gate.findings:
-                    gate.findings.append(finding[:1200])
-            session_sink["integrity_verdict"] = gate.integrity_verdict
-            session_sink["integrity_violation"] = gate.integrity_violation
-            session_sink["integrity_reason"] = gate.integrity_reason
-            session_sink["integrity_restore"] = gate.restore_protected_files
-
         # A candidate Session is expensive: by the time the gateway drops it, the agent has usually already read the
         # kernel, edited it, and paid for a build+bench.
         try:
@@ -905,7 +888,7 @@ def make_agent_fn(
                 usage=usage,
             )
         except BaseException as error:
-            _finalize_integrity(error)
+            _finalize_gate_integrity(gate, session_sink, error)
             raise
         num_turns = run_result.num_turns
         integrity_error: BaseException | None = None
@@ -919,24 +902,10 @@ def make_agent_fn(
 
         # Stop hooks are not guaranteed to run: turn caps, SDK failures, and cancellation can all terminate a session
         # first.
-        _finalize_integrity(integrity_error)
+        _finalize_gate_integrity(gate, session_sink, integrity_error)
 
         end_reason = _session_end_reason(gate=gate, run_result=run_result)
-
-        edit_count, passed = run_result.edit_count, "-"
-        text = run_result.text or "no rationale provided"
-        if gate is not None:
-            edit_count, passed = gate.edit_count, gate.passed
-            text = f"{gate_outcome_tag(gate, end_reason, num_turns)} {text}"
-        # One structured line per session (stdout is captured by the caller's logs) so a run's end-reason distribution
-        # is analyzable without the LLM.
-        print(
-            f"  [session-end] backend={backend.name} reason={end_reason} "
-            f"edits={edit_count if edit_count else '-'} "
-            f"turns={num_turns if num_turns is not None else '?'} "
-            f"pass={passed}",
-            flush=True,
-        )
+        text = _report_session_end(backend, gate, run_result, end_reason, num_turns)
 
         # Hand back structured session info so the runner can feed the ExperienceLedger with the gate's objective
         # findings, and (via ``summarize``) ask this exact session to record what it explored.
@@ -957,6 +926,46 @@ def make_agent_fn(
 
     _describe_agent_fn(agent_fn, backend, requested_backend)
     return agent_fn
+
+
+def _finalize_gate_integrity(
+    gate: InSessionGate | None, session_sink: dict, error: BaseException | None = None
+) -> None:
+    """Settle the gate's workspace-integrity verdict, a backend safety rejection included, into ``session_sink``."""
+    if gate is None:
+        return
+    reason = gate.finalize_integrity()
+    if error is not None and getattr(error, "agent_safety_rejection", False):
+        reason = reason or (f"backend workspace safety rejection: {type(error).__name__}: {error}")
+        gate.integrity_reason = reason
+        gate.integrity_violation = True
+        gate.integrity_verdict = "violation"
+        finding = f"Protected workspace integrity violation: {reason}"
+        if finding not in gate.findings:
+            gate.findings.append(finding[:1200])
+    session_sink["integrity_verdict"] = gate.integrity_verdict
+    session_sink["integrity_violation"] = gate.integrity_violation
+    session_sink["integrity_reason"] = gate.integrity_reason
+    session_sink["integrity_restore"] = gate.restore_protected_files
+
+
+def _report_session_end(backend, gate: InSessionGate | None, run_result, end_reason: str, num_turns) -> str:
+    """Print the session's one-line end record and return its rationale, tagged with the gate outcome."""
+    edit_count, passed = run_result.edit_count, "-"
+    text = run_result.text or "no rationale provided"
+    if gate is not None:
+        edit_count, passed = gate.edit_count, gate.passed
+        text = f"{gate_outcome_tag(gate, end_reason, num_turns)} {text}"
+    # One structured line per session (stdout is captured by the caller's logs) so a run's end-reason distribution
+    # is analyzable without the LLM.
+    print(
+        f"  [session-end] backend={backend.name} reason={end_reason} "
+        f"edits={edit_count if edit_count else '-'} "
+        f"turns={num_turns if num_turns is not None else '?'} "
+        f"pass={passed}",
+        flush=True,
+    )
+    return text
 
 
 def _describe_agent_fn(agent_fn: Callable[..., Awaitable[str]], backend, requested_backend: str) -> None:

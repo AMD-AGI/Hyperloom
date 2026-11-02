@@ -10,7 +10,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any, Iterator, NamedTuple
+from typing import Any, BinaryIO, Iterator, NamedTuple
 
 from hyperloom_common.coerce import to_str_list
 
@@ -102,26 +102,26 @@ def _compiled_registry_error_text(
         path = workspace / name
         if not path.is_file():
             continue
-        start = 0 if after_sizes is None else max(0, int(after_sizes.get(name, 0)))
+        start = None if after_sizes is None else max(0, int(after_sizes.get(name, 0)))
         try:
             with path.open("rb") as handle:
-                if after_sizes is None:
-                    handle.seek(0, os.SEEK_END)
-                    size = handle.tell()
-                    handle.seek(max(0, size - 65536))
-                else:
-                    handle.seek(0, os.SEEK_END)
-                    size = handle.tell()
-                    if start >= size:
-                        handle.seek(max(0, size - 65536))
-                    else:
-                        handle.seek(start)
+                _seek_integrate_log(handle, start)
                 text = handle.read().decode("utf-8", errors="replace")
         except OSError:
             continue
         if is_aiter_jit_registry_mismatch(text):
             return text
     return ""
+
+
+def _seek_integrate_log(handle: BinaryIO, start: int | None) -> None:
+    """Position ``handle`` at ``start``, or at its last 64 KiB when ``start`` is unset or past the end."""
+    handle.seek(0, os.SEEK_END)
+    size = handle.tell()
+    if start is None or start >= size:
+        handle.seek(max(0, size - 65536))
+    else:
+        handle.seek(start)
 
 
 def _workspace_has_compiled_registry_error(

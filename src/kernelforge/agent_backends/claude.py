@@ -468,6 +468,15 @@ def _note_stream_failure(spec: AgentRunSpec, session_id: str, exc: Exception) ->
         spec.progress_log.append(f"end: sdk-error {str(exc)[:_PROGRESS_TEXT_CHARS]}")
 
 
+async def _consume_stream(agen: Any, spec: AgentRunSpec, usage: Any, transcript: _StreamTranscript) -> None:
+    """Feed every SDK message to the usage tracker, the progress log and the transcript."""
+    async for message in agen:
+        if usage is not None:
+            usage.add_from_message(message, role=spec.role)
+        _record_progress(spec.progress_log, message)
+        transcript.absorb(message)
+
+
 def _session_result(
     transcript: _StreamTranscript,
     guard: WorkspaceGuard,
@@ -842,11 +851,7 @@ class ClaudeBackend:
         try:
             try:
                 async with deadline:
-                    async for message in agen:
-                        if usage is not None:
-                            usage.add_from_message(message, role=spec.role)
-                        _record_progress(spec.progress_log, message)
-                        transcript.absorb(message)
+                    await _consume_stream(agen, spec, usage, transcript)
             except Exception as exc:
                 if deadline.expired():
                     reap_on_exit = True

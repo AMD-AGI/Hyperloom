@@ -1180,14 +1180,8 @@ def test_124_run_tracelens_skill_uses_sdk_and_artifacts(tmp_path):
     assert res.runner == "claude_agent_sdk"
 
 
-@pytest.mark.parametrize(
-    ("tool_idle_env", "expected_ceiling_ms"),
-    [(None, "3600000"), ("900", "900000"), ("0", "0")],
-)
-def test_run_tracelens_skill_aligns_cli_background_wait_with_tool_idle_bound(
-    tmp_path, monkeypatch, tool_idle_env, expected_ceiling_ms
-):
-    """The Claude CLI must not kill background sub-agents before the runner's own in-flight bound does."""
+def _claude_skill_options(tmp_path):
+    """Run the Claude skill over an SDK that writes the report; return the options it was handed."""
     import asyncio
     from dataclasses import dataclass
     from typing import Any
@@ -1204,11 +1198,6 @@ def test_run_tracelens_skill_aligns_cli_background_wait_with_tool_idle_bound(
         def __init__(self, **kwargs):
             self.kwargs = kwargs
 
-    monkeypatch.delenv("CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS", raising=False)
-    if tool_idle_env is None:
-        monkeypatch.delenv("HYPERLOOM_TRACELENS_TOOL_IDLE_TIMEOUT_SEC", raising=False)
-    else:
-        monkeypatch.setenv("HYPERLOOM_TRACELENS_TOOL_IDLE_TIMEOUT_SEC", tool_idle_env)
     output_dir = tmp_path / "out"
     captured: dict[str, Any] = {}
 
@@ -1226,8 +1215,25 @@ def test_run_tracelens_skill_aligns_cli_background_wait_with_tool_idle_bound(
             sdk=tlr.SdkEntryPoints(query=_fake_query, options_cls=_FakeOptions),
         )
     )
+    return captured["options"]
 
-    assert captured["options"]["env"]["CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS"] == expected_ceiling_ms
+
+@pytest.mark.parametrize(
+    ("tool_idle_env", "expected_ceiling_ms"),
+    [(None, "3600000"), ("900", "900000"), ("0", "0")],
+)
+def test_run_tracelens_skill_aligns_cli_background_wait_with_tool_idle_bound(
+    tmp_path, monkeypatch, tool_idle_env, expected_ceiling_ms
+):
+    """The Claude CLI must not kill background sub-agents before the runner's own in-flight bound does."""
+    monkeypatch.delenv("CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS", raising=False)
+    if tool_idle_env is None:
+        monkeypatch.delenv("HYPERLOOM_TRACELENS_TOOL_IDLE_TIMEOUT_SEC", raising=False)
+    else:
+        monkeypatch.setenv("HYPERLOOM_TRACELENS_TOOL_IDLE_TIMEOUT_SEC", tool_idle_env)
+    options = _claude_skill_options(tmp_path)
+
+    assert options["env"]["CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS"] == expected_ceiling_ms
 
 
 def test_run_tracelens_skill_books_its_requests_on_the_trajectory(tmp_path):
@@ -1400,47 +1406,13 @@ def test_run_tracelens_skill_records_nothing_outside_a_session(tmp_path):
 
 def test_run_tracelens_skill_uses_hermetic_claude_env(tmp_path, monkeypatch):
     """TraceLens SDK runner must not inherit stale global Claude settings."""
-    import asyncio
-    from dataclasses import dataclass
-    from typing import Any
-
-    @dataclass
-    class _TextBlock:
-        text: str
-
-    @dataclass
-    class _Message:
-        content: list[Any]
-
-    class _FakeOptions:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
     monkeypatch.setenv("_".join(("ANTHROPIC", "API", "KEY")), "anthropic-token-active")
     monkeypatch.delenv("_".join(("ANTHROPIC", "AUTH", "TOKEN")), raising=False)
     monkeypatch.delenv("_".join(("OPENAI", "API", "KEY")), raising=False)
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
 
-    output_dir = tmp_path / "out"
-    captured: dict[str, Any] = {}
-
-    async def _fake_query(*, prompt, options):
-        captured["options"] = options.kwargs
-        output_dir.mkdir(parents=True, exist_ok=True)
-        (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
-        yield _Message(content=[_TextBlock("done")])
-
-    asyncio.run(
-        tlr.run_tracelens_skill(
-            _skill_request(tmp_path, output_dir),
-            budget_minutes=1,
-            model="claude-sonnet-4-5-20250929",
-            sdk=tlr.SdkEntryPoints(query=_fake_query, options_cls=_FakeOptions),
-        )
-    )
-
-    opts = captured["options"]
+    opts = _claude_skill_options(tmp_path)
     assert opts["setting_sources"] == []
     child_env = opts["env"]
     assert child_env["ANTHROPIC_BASE_URL"] == "https://api.anthropic.com"

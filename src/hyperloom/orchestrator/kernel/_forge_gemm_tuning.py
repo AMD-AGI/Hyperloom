@@ -107,12 +107,7 @@ def _bridge_forge_decision(
             result.setdefault("source_snapshot", _snap_dir)
         # Derive best_speedup from tuners_run when absent.
         if "best_speedup" not in result:
-            best = 1.0
-            for t in result.get("tuners_run") or []:
-                if isinstance(t, dict):
-                    sp = float(t.get("best_micro_speedup") or 1.0)
-                    if sp > best:
-                        best = sp
+            best = _best_micro_speedup(result.get("tuners_run") or [])
             if best > 1.0:
                 result["best_speedup"] = best
         # Micro-only result: E2E validation still needed.
@@ -125,6 +120,17 @@ def _bridge_forge_decision(
         if micro == "failed":
             result.setdefault("status", "failed")
         result.setdefault("error_class", f"forge_{micro}")
+
+
+def _best_micro_speedup(tuners_run: Any) -> float:
+    """Return the largest ``best_micro_speedup`` among the tuners that ran, never below 1.0."""
+    best = 1.0
+    for t in tuners_run:
+        if isinstance(t, dict):
+            sp = float(t.get("best_micro_speedup") or 1.0)
+            if sp > best:
+                best = sp
+    return best
 
 
 #: forge wordings that carry nothing deployable, each distinct from an honest

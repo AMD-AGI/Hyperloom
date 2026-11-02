@@ -963,7 +963,7 @@ def _reject_fusion_sibling(recipe, vr, arts, disposition: str) -> None:
 
 def _run_fusion_autoloop(recipes, run: _FusionRun, plan: _LoopPlan, campaign: CampaignRuntime, publish=None):
     """Try each ranked recipe as one forge-loop campaign."""
-    out, repo_root, pristine_dir, repo_scope = run.out, run.repo_root, run.pristine_dir, run.repo_scope
+    out, repo_root, repo_scope = run.out, run.repo_root, run.repo_scope
     session, author, combine = run.session, plan.author, plan.combine
     originals = {r.pattern_id: r for r in recipes}
     loop_recipes = [_combined_recipe(recipes)] if (combine and len(recipes) > 1) else recipes
@@ -1092,12 +1092,7 @@ def _run_fusion_autoloop(recipes, run: _FusionRun, plan: _LoopPlan, campaign: Ca
             config=cfg,
             on_keep=on_keep if multi_patch else None,
         )
-        # The combine path folds everything into ONE recipe whose edits are still live in the tree, so the strongest
-        # (only) keeper is smoked here.
-        if multi_patch and shadow is not None:
-            shadow.reset_to_base()
-        elif not multi_patch and result.kept and result.best_recipe is not None:
-            apply_serving_gate(result, session, out, repo_root=repo_root, pristine_dir=pristine_dir)
+        _settle_loop_tree(result, run, plan, shadow)
     except FusionAbort as exc:
         log.error("fusion run aborted (infrastructure failure): %s", exc)
         result = LoopResult(
@@ -1111,8 +1106,23 @@ def _run_fusion_autoloop(recipes, run: _FusionRun, plan: _LoopPlan, campaign: Ca
             # That state is scratch, and the workspace is a framework install.
             shutil.rmtree(Path(shadow.root) / LOOP_CAMPAIGN_STATE, ignore_errors=True)
             shadow.dispose()
+    return _attribute_loop_result(result, campaign_experiments, originals)
 
-    # Only this scope knows which forge-loop run answered which recipe.
+
+def _settle_loop_tree(result, run: _FusionRun, plan: _LoopPlan, shadow) -> None:
+    """Reset the shared tree after a multi-patch loop, or serving-gate the combined keeper still live in it."""
+    multi_patch = not plan.combine
+    # The combine path folds everything into ONE recipe whose edits are still live in the tree, so the strongest
+    # (only) keeper is smoked here.
+    if multi_patch and shadow is not None:
+        shadow.reset_to_base()
+    elif not multi_patch and result.kept and result.best_recipe is not None:
+        apply_serving_gate(result, run.session, run.out, repo_root=run.repo_root, pristine_dir=run.pristine_dir)
+
+
+def _attribute_loop_result(result, campaign_experiments: dict[str, str], originals: dict) -> LoopResult:
+    """Tag each iteration with its forge-loop experiment and name the best recipe as the caller passed it."""
+    # Only the autoloop scope knows which forge-loop run answered which recipe.
     for iteration in result.history:
         iteration.experiment_id = campaign_experiments.get(iteration.pattern_id, "")
 

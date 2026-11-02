@@ -431,7 +431,8 @@ def test_the_ceiling_estimator_gets_the_resolved_session_budget_and_the_deployme
     assert seen == {"backend_timeout_sec": expected, "agent_timeout_sec": expected, "sandbox_mode": "read-only"}
 
 
-def test_validated_warm_start_publishes_recovery_before_iteration(tmp_path):
+def _workspace_with_a_warm_start_commit(tmp_path):
+    """A forge workspace whose HEAD is a KB warm-start commit on top of the base; return it and the base commit."""
     workspace, kernel, _driver = _initialize_workspace(tmp_path)
     base_commit = subprocess.run(
         ["git", "rev-parse", "HEAD"],
@@ -448,6 +449,11 @@ def test_validated_warm_start_publishes_recovery_before_iteration(tmp_path):
         check=True,
         capture_output=True,
     )
+    return workspace, base_commit
+
+
+def test_validated_warm_start_publishes_recovery_before_iteration(tmp_path):
+    workspace, base_commit = _workspace_with_a_warm_start_commit(tmp_path)
     checkpoints = {}
 
     class Tracker:
@@ -533,22 +539,7 @@ def test_warm_start_post_commit_point_failures_are_degraded(
     monkeypatch,
     failure_stage,
 ):
-    workspace, kernel, _driver = _initialize_workspace(tmp_path)
-    base_commit = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=workspace,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    kernel.write_text("def kernel():\n    return 2\n")
-    subprocess.run(["git", "add", "-u"], cwd=workspace, check=True)
-    subprocess.run(
-        ["git", "commit", "-m", "kb warm-start: apply prior/solution"],
-        cwd=workspace,
-        check=True,
-        capture_output=True,
-    )
+    workspace, base_commit = _workspace_with_a_warm_start_commit(tmp_path)
 
     class Tracker:
         @staticmethod

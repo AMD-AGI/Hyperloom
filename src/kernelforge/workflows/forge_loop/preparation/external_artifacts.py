@@ -289,17 +289,7 @@ class ExternalArtifactTransaction:
                 target = destination / child.name
                 child_stat = child.lstat()
                 if stat.S_ISLNK(child_stat.st_mode):
-                    link_target = os.readlink(child)
-                    if os.path.isabs(link_target):
-                        raise ExternalArtifactError(f"absolute artifact symlink is not supported: {child}")
-                    try:
-                        resolved_target = (child.parent / link_target).resolve(strict=False)
-                        target_rel = resolved_target.relative_to(source_root.resolve())
-                    except (OSError, RuntimeError, ValueError) as exc:
-                        raise ExternalArtifactError(f"artifact symlink escapes its staging root: {child}") from exc
-                    if apply_exclusions and (self._is_excluded(target_rel) or self._touches_read_only_path(target_rel)):
-                        raise ExternalArtifactError(f"artifact symlink targets protected state: {child}")
-                    os.symlink(link_target, target)
+                    self._copy_symlink(child, target, source_root, apply_exclusions=apply_exclusions)
                 elif stat.S_ISDIR(child_stat.st_mode):
                     copy_directory(child, target, child_rel)
                     shutil.copystat(child, target, follow_symlinks=False)
@@ -309,6 +299,20 @@ class ExternalArtifactTransaction:
                     raise ExternalArtifactError(f"unsupported artifact file type: {child}")
 
         copy_directory(source_root, destination_root, Path())
+
+    def _copy_symlink(self, child: Path, target: Path, source_root: Path, *, apply_exclusions: bool) -> None:
+        """Recreate the relative symlink ``child`` at ``target`` once it resolves inside ``source_root``."""
+        link_target = os.readlink(child)
+        if os.path.isabs(link_target):
+            raise ExternalArtifactError(f"absolute artifact symlink is not supported: {child}")
+        try:
+            resolved_target = (child.parent / link_target).resolve(strict=False)
+            target_rel = resolved_target.relative_to(source_root.resolve())
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise ExternalArtifactError(f"artifact symlink escapes its staging root: {child}") from exc
+        if apply_exclusions and (self._is_excluded(target_rel) or self._touches_read_only_path(target_rel)):
+            raise ExternalArtifactError(f"artifact symlink targets protected state: {child}")
+        os.symlink(link_target, target)
 
     def _validate_staged_symlinks(
         self,
