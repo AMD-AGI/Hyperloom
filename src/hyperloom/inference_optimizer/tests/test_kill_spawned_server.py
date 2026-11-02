@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cancel_scope
+from hyperloom.orchestrator.actions.executors import _subprocess_kill
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     DETOKENIZER_STALL_RETURNCODE,
     ORCHESTRATOR_CANCELLED_RETURNCODE,
@@ -1274,6 +1275,93 @@ def test_run_with_session_kill_detok_stall_compile_logs_keep_it_alive(tmp_path):
         watch=RoundWatch(timeout=30, server_log_path=str(log_path), silence_timeout_sec=1.0),
     )
     assert cp.returncode == 0
+
+
+#: A server ready and then quiet inside an aiter JIT build (aiter writes nothing between ``start build`` and ``finish
+#: build``), as the first request after ready reaches a module it lacks; ``{seconds}`` is how long the build takes.
+_BUILDING_AFTER_READY = (
+    "import sys, time\n"
+    "f = open(sys.argv[1], 'w')\n"
+    "f.write('Application startup complete\\n'); f.flush()\n"
+    "f.write('[aiter] [pid=7 pname=Process-1] start build [module_gemm_a8w8_bpreshuffle_cktile] under /j\\n')\n"
+    "f.flush(); time.sleep({seconds})\n"
+    "f.write('gen throughput (token/s): 250.0, #queue-req: 0\\n'); f.flush()\n"
+    "time.sleep(0.3)\n"
+    "raise SystemExit(0)\n"
+)
+
+
+def test_a_quiet_aiter_build_after_ready_is_not_a_stall_while_its_module_has_time(tmp_path):
+    """The build takes 2.5 s against a 1 s silence window; a CK-tile module is given 2700 s."""
+    log_path = tmp_path / "server.log"
+    cp = run_with_session_kill(
+        [sys.executable, "-c", _BUILDING_AFTER_READY.format(seconds=2.5), str(log_path)],
+        watch=RoundWatch(timeout=30, server_log_path=str(log_path), silence_timeout_sec=1.0),
+    )
+    assert cp.returncode == 0
+
+
+def test_an_aiter_build_that_hangs_after_ready_is_a_stall_once_its_module_has_had_its_time(tmp_path, monkeypatch):
+    monkeypatch.setattr(_subprocess_kill, "_aiter_build_limit_sec", lambda module: 1.0)
+    log_path = tmp_path / "server.log"
+    start = time.monotonic()
+    cp = run_with_session_kill(
+        [sys.executable, "-c", _BUILDING_AFTER_READY.format(seconds=60), str(log_path)],
+        watch=RoundWatch(timeout=60, server_log_path=str(log_path), silence_timeout_sec=1.0),
+    )
+    assert cp.returncode == DETOKENIZER_STALL_RETURNCODE
+    assert time.monotonic() - start < 15.0, "the build's 1 s and the 1 s window, not the round's 60 s"
+
+
+def test_health_probes_answered_during_the_build_do_not_end_its_excuse(tmp_path):
+    """uvicorn answers a monitor's ``GET /health`` while the engine builds; those lines are neither activity nor news."""
+    log_path = tmp_path / "server.log"
+    script = (
+        "import sys, time\n"
+        "f = open(sys.argv[1], 'w')\n"
+        "f.write('Application startup complete\\n')\n"
+        "f.write('[aiter] start build [module_rmsnorm] under /j\\n'); f.flush()\n"
+        "for _ in range(5):\n"
+        "    time.sleep(0.5)\n"
+        "    f.write('INFO:     127.0.0.1:4 - \"GET /health HTTP/1.1\" 200 OK\\n'); f.flush()\n"
+        "f.write('gen throughput (token/s): 250.0, #queue-req: 0\\n'); f.flush()\n"
+        "raise SystemExit(0)\n"
+    )
+    cp = run_with_session_kill(
+        [sys.executable, "-c", script, str(log_path)],
+        watch=RoundWatch(timeout=30, server_log_path=str(log_path), silence_timeout_sec=1.0),
+    )
+    assert cp.returncode == 0
+
+
+def test_a_line_after_the_build_line_ends_its_excuse(tmp_path):
+    """A server that went on past ``start build`` (here an import of a built module) is judged by its log again."""
+    log_path = tmp_path / "server.log"
+    script = (
+        "import sys, time\n"
+        "f = open(sys.argv[1], 'w')\n"
+        "f.write('Application startup complete\\n')\n"
+        "f.write('[aiter] start build [module_rmsnorm] under /j\\n')\n"
+        "f.write('[aiter] import [module_rmsnorm] under /j\\n'); f.flush()\n"
+        "time.sleep(60)\n"
+    )
+    start = time.monotonic()
+    cp = run_with_session_kill(
+        [sys.executable, "-c", script, str(log_path)],
+        watch=RoundWatch(timeout=60, server_log_path=str(log_path), silence_timeout_sec=1.0),
+    )
+    assert cp.returncode == DETOKENIZER_STALL_RETURNCODE
+    assert time.monotonic() - start < 15.0
+
+
+def test_the_build_limits_the_launcher_copies_equal_the_measurement_layers():
+    from hyperloom.measure.jit import modules
+
+    assert _subprocess_kill._aiter_build_limit_sec("module_gemm_a8w8_bpreshuffle_cktile") == (
+        modules.module_build_limit_sec("module_gemm_a8w8_bpreshuffle_cktile")
+    )
+    assert _subprocess_kill._AITER_BUILD_LIMIT_SEC == modules.MODULE_BUILD_LIMIT_SEC
+    assert _subprocess_kill._AITER_CKTILE_BUILD_LIMIT_SEC == modules.CKTILE_MODULE_BUILD_LIMIT_SEC
 
 
 def test_shared_helper_does_not_enable_silence_without_a_policy(tmp_path):

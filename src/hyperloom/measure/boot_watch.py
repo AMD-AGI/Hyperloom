@@ -9,6 +9,13 @@ candidate repeats it on the rerun. The guard here ends such a round at a share o
 launcher writes beside a round's server log the moment the banner appears and, when none has come within the limit,
 cancels the scope the launcher's watchdog listens to, which reaps the whole process tree.
 
+A server that builds an aiter JIT module is not tuning: aiter writes ``start build [<module>]`` and nothing more until
+the module is built, and a CK-tile GEMM took up to 1347 s with eight tests building at once (#169), which with a CK GEMM
+and the rest of a boot overran half of a 3600 s round. So the time the newest server log's last line says aiter is
+building a module is not counted against the limit, each build for at most as long as a module of its kind may take
+(:func:`~hyperloom.measure.jit.modules.module_build_limit_sec`: 2700 s for a CK-tile module, 600 s for any other). A
+build that hangs counts again from there, and a boot that does anything else is bounded as before.
+
 The guard watches a round's server boot only, so a test that hangs anywhere else before ready (a runner that stopped
 making progress, a round that never launched its server) waited out the whole ``timeout_sec``. :class:`PreReadySilence`
 bounds, on the application's side, how long a hosted test may go without output before its server is ready. Measured: one integration test sat 60 minutes with an empty attempt directory, holding the session's only integration
@@ -41,11 +48,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from hyperloom.measure.jit.modules import module_build_limit_sec
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope
 
 __all__ = [
     "BOOT_CANCEL_REASON",
     "BOOT_SHARE",
+    "BuildTime",
     "HUNG_BEFORE_READY",
     "PRE_READY_SILENCE_SEC",
     "SERVER_READY_KEY",
@@ -53,6 +62,7 @@ __all__ = [
     "PreReadySilence",
     "boot_limit_sec",
     "boot_seconds",
+    "building_module",
     "read_ready_stamp",
     "server_ready",
 ]
@@ -68,6 +78,10 @@ _SERVER_FRAMEWORKS = ("sglang", "vllm", "atom")
 #: server reported ready, its second the seconds the boot took from the spawn (0 for a server the round found ready).
 _READY_STAMP = "server_ready_at"
 _MAX_POLL_SEC = 2.0
+#: The launcher's log of a round's server, beside its ready stamp.
+_SERVER_LOG = "server.log"
+#: How much of the end of a server log is read for its last line.
+_TAIL_BYTES = 8192
 
 
 def boot_limit_sec(benchmark: Mapping[str, Any], timeout_sec: float) -> float | None:
@@ -103,12 +117,15 @@ class BootGuard:
         started = time.time()
         stop = threading.Event()
         poll = min(_MAX_POLL_SEC, max(0.05, limit_sec / 20))
+        builds = BuildTime(started)
 
         def watch() -> None:
             while not stop.wait(poll):
                 if self._ready_since(started):
                     return
-                if time.time() - started >= limit_sec:
+                now = time.time()
+                builds.observe(now, self._building(started))
+                if now - started - builds.excused >= limit_sec:
                     self._expired_after = limit_sec
                     self._scope.cancel(reason=BOOT_CANCEL_REASON)
                     return
@@ -127,6 +144,64 @@ class BootGuard:
         except OSError:
             return False
         return any(_stamped_at(stamp) >= started for stamp in stamps)
+
+    def _building(self, started: float) -> str | None:
+        """The module aiter is building, as the last line of the newest server log written since ``started`` says (an
+        earlier round's is not this boot's); ``None`` when it says no build started, or no such log can be read."""
+        try:
+            logs = [(path.stat().st_mtime, str(path), path) for path in self._output_dir.rglob(_SERVER_LOG)]
+        except OSError:
+            return None
+        logs = [log for log in logs if log[0] >= started]
+        if not logs:
+            return None
+        return building_module(_last_line(max(logs)[2]))
+
+
+@dataclass
+class BuildTime:
+    """The seconds of a boot that aiter spent building modules, as readings of what it is building say, each build
+    excused for at most :func:`~hyperloom.measure.jit.modules.module_build_limit_sec` of its module."""
+
+    last: float
+    excused: float = 0.0
+    module: str | None = None
+    since: float = 0.0
+
+    def observe(self, now: float, building: str | None) -> None:
+        """Take one reading, at ``now``: the module being built, or ``None``. The time since the previous reading is
+        excused when a build was under way through it, as far as the build has not yet had its time."""
+        if building is not None:
+            if building != self.module:
+                self.module, self.since = building, self.last
+            until = self.since + module_build_limit_sec(building)
+            self.excused += max(0.0, min(now, until) - self.last)
+        else:
+            self.module = None
+        self.last = now
+
+
+def building_module(line: str) -> str | None:
+    """The module a line in which aiter says it started a build names; ``""`` for one it names by a path that is not a
+    module's name, ``None`` for a line that says no build started."""
+    found = _JIT_BUILD_MODULE.search(line)
+    if found is None:
+        return None
+    return found.group(1) or ""
+
+
+def _last_line(path: Path) -> str:
+    """The last line with text of the file at ``path``; empty when it has none or cannot be read."""
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(0, 2)
+            size = handle.tell()
+            handle.seek(max(0, size - _TAIL_BYTES))
+            text = handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+    lines = [line for line in text.splitlines() if line.strip()]
+    return lines[-1] if lines else ""
 
 
 def _stamped_at(stamp: Path) -> float:
@@ -191,6 +266,8 @@ _WRITE_RESOLUTION_SEC = 1.0
 #: [pid=829812 pname=Process-1] start build [module_gemm_a8w8_bpreshuffle_cktile] under ...``), searched for anywhere in
 #: the line, as the runner keeps only the end of a long one.
 _JIT_BUILD_STARTED = re.compile(r"\[aiter\] (?:\[[^\]]*\] )*start build ")
+#: The same, with the module it names in brackets (aiter's own form); a path in place of the name gives none.
+_JIT_BUILD_MODULE = re.compile(r"\[aiter\] (?:\[[^\]]*\] )*start build (?:\[([A-Za-z0-9_.-]+)\])?")
 
 
 def _log_written_at(progress: Mapping[str, Any]) -> float | None:

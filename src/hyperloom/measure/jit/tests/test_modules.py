@@ -14,9 +14,17 @@ from pathlib import Path
 import pytest
 
 from hyperloom.measure.jit.modules import (
+    CKTILE_MODULE_BUILD_LIMIT_SEC,
+    CKTILE_MODULE_SECONDS,
+    ESTIMATED_MODULE_SECONDS,
+    MODULE_BUILD_LIMIT_SEC,
+    TABLE_GEMM_MODULE_SECONDS,
     SourceTree,
     build_env_names,
     config_path,
+    env_touched_entries,
+    module_build_limit_sec,
+    module_build_seconds,
     prebuilt_names,
     touched_entries,
     touched_modules,
@@ -298,3 +306,96 @@ def test_a_directory_the_package_links_to_is_read_like_one_it_holds(checkout, tm
     mirrored = build_env_names(farm / "aiter", checkout, CONFIG, {"module_activation"})
 
     assert mirrored == image == BUILDER | {"AITER_GPU_ARCHS"}
+
+
+def _image_config() -> dict:
+    from hyperloom.measure.jit.tests.test_key import IMAGE_AITER_CONFIG
+
+    return json.loads(IMAGE_AITER_CONFIG.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize(
+    ("modules", "read", "not_read"),
+    [
+        ({"module_gemm_a8w8_bpreshuffle_cktile"}, {"FLATMM_HIP_CLANG_PATH"}, {"CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT"}),
+        ({"module_mha_batch_prefill"}, {"CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT"}, {"FLATMM_HIP_CLANG_PATH", "GPU_ARCHS"}),
+        ({"module_gemm_a8w8_bpreshuffle"}, set(), {"FLATMM_HIP_CLANG_PATH", "CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT"}),
+        ({"module_mha_batch_prefill_bf16_nlogits"}, {"CK_TILE_ATTENTION_USE_SOFTSIGN_ASM"}, {"FLATMM_HIP_CLANG_PATH"}),
+        ({"orphan_module"}, {"FLATMM_HIP_CLANG_PATH", "CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT", "GPU_ARCHS"}, set()),
+    ],
+    ids=["cktile", "mha", "none", "runtime-name", "follows-none"],
+)
+def test_the_build_of_a_module_reads_what_its_own_config_entry_reads_and_not_what_others_do(
+    checkout, modules, read, not_read
+):
+    """The image aiter's entries (285579b62): a name aiter makes at run time reads what the entry it follows reads, and
+    a name that follows no entry reads every entry's."""
+    names = build_env_names(checkout / "aiter", checkout, _image_config(), modules)
+
+    assert read <= names and not names & not_read
+    assert BUILDER <= names
+
+
+#: The image's environment: what the image's prebuilt modules were built under, as far as a server can tell.
+_IMAGE_ENV = {"PATH": "/usr/bin", "CK_TILE_ATTENTION_USE_SOFTSIGN_ASM": "1"}
+
+
+@pytest.mark.parametrize(
+    ("server", "touched"),
+    [
+        ({"CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT": "3"}, {"module_mha_batch_prefill"}),
+        ({"FLATMM_HIP_CLANG_PATH": "/opt/clang/bin"}, {"module_gemm_a8w8_bpreshuffle_cktile"}),
+        ({"OPUS_FP32_to_BF16_DEFAULT": "0", "GPU_ARCHS": "gfx950"}, {"module_rmsnorm", "module_deepgemm_opus"}),
+        ({"CK_TILE_ATTENTION_USE_SOFTSIGN_ASM": "1"}, set()),
+        ({"CK_TILE_NOT_READ_BY_ANY_BUILD": "3", "SGLANG_X": "1"}, set()),
+    ],
+    ids=["mha-rounding", "cktile-compiler", "two", "the-images-value", "named-nowhere"],
+)
+def test_a_server_that_sets_a_variable_an_entry_reads_otherwise_than_the_image_touches_that_module(server, touched):
+    config = _image_config()
+
+    assert env_touched_entries(config, [{**_IMAGE_ENV, **server}], _IMAGE_ENV) == touched
+
+
+def test_a_server_that_unsets_a_variable_the_image_has_touches_the_module_too():
+    config = _image_config()
+    server = {name: value for name, value in _IMAGE_ENV.items() if name != "CK_TILE_ATTENTION_USE_SOFTSIGN_ASM"}
+
+    assert env_touched_entries(config, [_IMAGE_ENV, server], _IMAGE_ENV) == {"module_mha_batch_prefill"}
+
+
+def test_the_env_touched_entries_follow_into_the_prebuilt_names_aiter_makes_from_them():
+    config = _image_config()
+    prebuilt = {"module_mha_batch_prefill", "module_mha_batch_prefill_bf16_nlogits", "module_rmsnorm"}
+    keys = env_touched_entries(config, [{"CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT": "3"}], {})
+
+    assert touched_entries(keys, config, prebuilt).rebuilt == {
+        "module_mha_batch_prefill",
+        "module_mha_batch_prefill_bf16_nlogits",
+    }
+
+
+@pytest.mark.parametrize(
+    ("name", "seconds"),
+    [
+        ("module_gemm_a8w8_bpreshuffle_cktile", CKTILE_MODULE_SECONDS),
+        ("module_moe_cktile2stages_b16_silu", CKTILE_MODULE_SECONDS),
+        ("module_gemm_a8w8_bpreshuffle", TABLE_GEMM_MODULE_SECONDS),
+        ("module_deepgemm_opus", TABLE_GEMM_MODULE_SECONDS),
+        ("module_rmsnorm", ESTIMATED_MODULE_SECONDS),
+        ("module_mha_batch_prefill", ESTIMATED_MODULE_SECONDS),
+        ("orphan_module", ESTIMATED_MODULE_SECONDS),
+    ],
+)
+def test_a_module_is_estimated_by_its_kind(name, seconds):
+    """#169's medians a session: the CK-tile GEMM 329 to 680 s, the tuned-table CK GEMM 96 to 181 s; the 63 to 66 s of
+    mha_batch_prefill and module_moe_ck2stages before."""
+    assert module_build_seconds(name, _image_config()) == seconds
+
+
+def test_the_estimates_cover_what_the_builds_measured():
+    assert CKTILE_MODULE_SECONDS >= 680 and TABLE_GEMM_MODULE_SECONDS >= 180
+    assert CKTILE_MODULE_BUILD_LIMIT_SEC >= 2 * 1347, "twice the longest CK-tile build, eight tests building at once"
+    assert MODULE_BUILD_LIMIT_SEC >= 2 * 273, "twice the longest build of any other module before ready"
+    assert module_build_limit_sec("module_gemm_a8w8_bpreshuffle_cktile") == CKTILE_MODULE_BUILD_LIMIT_SEC
+    assert module_build_limit_sec("module_gemm_a8w8_bpreshuffle") == MODULE_BUILD_LIMIT_SEC

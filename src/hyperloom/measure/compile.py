@@ -70,11 +70,11 @@ from hyperloom.measure.jit.native.needs import (
 from hyperloom.measure.framework.rows import DEFAULT_TABLE_PLACEHOLDER
 from hyperloom.measure.jit.modules import (
     CONFIG_FILE,
-    ESTIMATED_MODULE_SECONDS,
     MAX_REBUILD_SECONDS,
     SourceTree,
     Touched,
     config_path,
+    module_build_seconds,
     prebuilt_names,
     read_config,
     touched_entries,
@@ -613,14 +613,20 @@ def refuse_costly_rebuild(
     candidates = touch.found.rebuilt - touch.tabled
     built = modules(roots, touch.config, candidates) if modules is not None and candidates else None
     on_cpu = frozenset() if built is None else built.modules
-    _refuse_slow_build(sorted(touch.found.rebuilt - on_cpu), ESTIMATED_MODULE_SECONDS * 1.0, "on the first test's card")
+    on_card = sorted(touch.found.rebuilt - on_cpu)
+    _refuse_slow_build(
+        on_card, sum(module_build_seconds(name, touch.config) for name in on_card), "on the first test's card"
+    )
     if modules is not None and on_cpu:
-        _refuse_slow_build(sorted(on_cpu), modules.seconds(on_cpu) / len(on_cpu), "on a CPU build runner")
+        _refuse_slow_build(sorted(on_cpu), modules.seconds(on_cpu, touch.config), "on a CPU build runner")
     return built
 
 
-def _refuse_slow_build(names: list[str], each: float, where: str) -> None:
-    seconds = round(len(names) * each)
+def _refuse_slow_build(names: list[str], total: float, where: str) -> None:
+    """Refuse when building ``names`` takes ``total`` seconds, more than :data:`MAX_REBUILD_SECONDS`: each module is
+    counted for what a module of its kind takes (:func:`~hyperloom.measure.jit.modules.module_build_seconds`), so one
+    CK-tile GEMM counts for ten modules of the others."""
+    seconds = round(total)
     if seconds > MAX_REBUILD_SECONDS:
         examples = ", ".join(names[:5])
         raise TooManyModulesError(

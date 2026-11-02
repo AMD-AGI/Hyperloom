@@ -46,7 +46,7 @@ from hyperloom.measure.compile import BlobStore, EnvRoot
 from hyperloom.measure.docs import canonical_json
 from hyperloom.measure.farm import FarmError, build_farm, locate_package
 from hyperloom.measure.jit.key import AITER_PACKAGE, build_surface
-from hyperloom.measure.jit.modules import ESTIMATED_MODULE_SECONDS, build_env_names
+from hyperloom.measure.jit.modules import build_env_names, module_build_seconds
 from hyperloom.measure.jit.native.key import BuildInputs
 from hyperloom.measure.jit.native.needs import ModuleBuild
 from hyperloom.measure.jit.native.record import READY, BuildRecord
@@ -188,16 +188,17 @@ class AiterModules:
         self._planner.remember(inputs, _Planned(self._recipe, machine, aiter, modules, variables))
         return ModuleBuild(inputs, modules)
 
-    def seconds(self, modules: Collection[str]) -> float:
+    def seconds(self, modules: Collection[str], config: Mapping[str, Any]) -> float:
         """How long the CPU build of ``modules`` takes: the median CPU seconds a module took in the image's earlier aiter
-        builds, spread over the recipe's ``MAX_JOBS``; with none yet, what a module takes to build on a card."""
+        builds, spread over the recipe's ``MAX_JOBS``; with none yet, what each takes to build on a card, by its kind
+        (:func:`~hyperloom.measure.jit.modules.module_build_seconds`: a CK-tile module ten times another)."""
         per_module = [
             record.build_seconds / len(record.outputs)
             for record in self._history()
             if record.status == READY and record.outputs
         ]
         if not per_module:
-            return float(len(modules) * ESTIMATED_MODULE_SECONDS)
+            return float(sum(module_build_seconds(name, config) for name in modules))
         return len(modules) * statistics.median(per_module) / self._recipe.max_jobs
 
     def _build_variables(self, python: str, config: Mapping[str, Any], modules: Collection[str]) -> dict[str, str]:
