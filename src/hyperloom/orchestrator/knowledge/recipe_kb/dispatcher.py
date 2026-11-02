@@ -23,6 +23,52 @@ class _ReadRequest:
     label_match: dict[str, Any] | None = None
 
 
+def _local_write_audit(
+    upsert: RecipeUpsert, result: dict[str, Any], *, backend_name: str, canonical_id: str
+) -> dict[str, Any]:
+    """The audit event of one successful local Recipe write."""
+    provenance = upsert.provenance
+    provenance = provenance if isinstance(provenance, dict) else {}
+    details = provenance.get("details")
+    details = details if isinstance(details, dict) else {}
+    counts = result["counts"]
+    prior = result["prior_counts"]
+    return {
+        "op": "write",
+        "method": "put_recipe",
+        "mode": "local",
+        "backend": backend_name,
+        "remote": "none",
+        "resolution": "local_write",
+        "success": True,
+        "hit": True,
+        "generator": str(provenance.get("generator") or ""),
+        "phase": str(details.get("phase") or ""),
+        "request": {"canonical_id": canonical_id or None},
+        "identity": {
+            "model": str(upsert.model or ""),
+            "hardware": str(upsert.hardware or ""),
+            "framework_name": str(upsert.framework_name or ""),
+            "framework_version": str(upsert.framework_version or ""),
+            "precision": str(upsert.precision or ""),
+        },
+        "result": {
+            "canonical_id": result["canonical_id"],
+            "version": result["version"],
+            "created": result["created"],
+            "best_throughput": float(upsert.best_throughput),
+            "best_config_nonempty": bool(upsert.best_config),
+            "write_safety": {},
+        },
+        "counts": {key: int(value) for key, value in counts.items()},
+        "delta": {key: int(value) - prior[key] for key, value in counts.items()},
+        "provenance": {
+            "component": "recipe_kb",
+            "generator": str(provenance.get("generator") or ""),
+        },
+    }
+
+
 @dataclass
 class RecipeKB:
     """Facade over one :class:`LocalRecipeStore`."""
@@ -103,48 +149,7 @@ class RecipeKB:
             )
             raise
 
-        provenance = upsert.provenance
-        provenance = provenance if isinstance(provenance, dict) else {}
-        details = provenance.get("details")
-        details = details if isinstance(details, dict) else {}
-        counts = result["counts"]
-        prior = result["prior_counts"]
-        self._emit_audit(
-            {
-                "op": "write",
-                "method": "put_recipe",
-                "mode": "local",
-                "backend": self.backend_name,
-                "remote": "none",
-                "resolution": "local_write",
-                "success": True,
-                "hit": True,
-                "generator": str(provenance.get("generator") or ""),
-                "phase": str(details.get("phase") or ""),
-                "request": {"canonical_id": canonical_id or None},
-                "identity": {
-                    "model": str(upsert.model or ""),
-                    "hardware": str(upsert.hardware or ""),
-                    "framework_name": str(upsert.framework_name or ""),
-                    "framework_version": str(upsert.framework_version or ""),
-                    "precision": str(upsert.precision or ""),
-                },
-                "result": {
-                    "canonical_id": result["canonical_id"],
-                    "version": result["version"],
-                    "created": result["created"],
-                    "best_throughput": float(upsert.best_throughput),
-                    "best_config_nonempty": bool(upsert.best_config),
-                    "write_safety": {},
-                },
-                "counts": {key: int(value) for key, value in counts.items()},
-                "delta": {key: int(value) - prior[key] for key, value in counts.items()},
-                "provenance": {
-                    "component": "recipe_kb",
-                    "generator": str(provenance.get("generator") or ""),
-                },
-            }
-        )
+        self._emit_audit(_local_write_audit(upsert, result, backend_name=self.backend_name, canonical_id=canonical_id))
         return result
 
     def get_recipe(self, *, canonical_id: str) -> dict[str, Any] | None:

@@ -577,6 +577,36 @@ class CandidateArchive:
         rows.sort(key=lambda e: e.get("iter", 0))
         return rows, True
 
+    def _notable_diffs(self, selected: list[dict], max_diff_lines: int) -> list[str]:
+        """Render the curated full-diff section for the selected iterations."""
+        out: list[str] = []
+        out.append("")
+        out.append("### Notable prior solutions (full change diff vs the state each built on)")
+        for e in selected:
+            it = e.get("iter", "?")
+            dec = self._label(e.get("decision", ""))
+            wtxt = self._fmt_num(e.get("wall_ms"), ".4f")
+            sptxt = self._fmt_num(e.get("mean_case_speedup"), ".4f", "x")
+            dtxt = self._fmt_num(e.get("delta_vs_best_pct"), "+.1f", "%")
+            plan = (e.get("plan") or "").replace("\n", " ").strip()[:80]
+            out.append("")
+            out.append(f'#### iter {it} — {dec} — wall={wtxt} ms, {sptxt}, Δvs_best={dtxt} — "{plan}"')
+            diff = self.read_candidate_file(it, "change.diff")
+            if not diff.strip():
+                out.append(f"(diff unavailable — full kernel at iter_{it:03d}/kernel.py)")
+                continue
+            dlines = diff.splitlines()
+            trunc = ""
+            if len(dlines) > max_diff_lines:
+                dlines = dlines[:max_diff_lines]
+                trunc = (
+                    f"\n... (truncated to {max_diff_lines} lines — Read iter_{it:03d}/kernel.py for the full kernel)"
+                )
+            out.append("```diff")
+            out.append("\n".join(dlines) + trunc)
+            out.append("```")
+        return out
+
     def render_digest(
         self,
         max_full_diffs: int = 5,
@@ -633,31 +663,6 @@ class CandidateArchive:
         # Layer 2 — curated full diffs.
         selected = self._select_for_diffs(index, max_full_diffs, near_miss_count, recent_count)
         if selected:
-            out.append("")
-            out.append("### Notable prior solutions (full change diff vs the state each built on)")
-            for e in selected:
-                it = e.get("iter", "?")
-                dec = self._label(e.get("decision", ""))
-                wtxt = self._fmt_num(e.get("wall_ms"), ".4f")
-                sptxt = self._fmt_num(e.get("mean_case_speedup"), ".4f", "x")
-                dtxt = self._fmt_num(e.get("delta_vs_best_pct"), "+.1f", "%")
-                plan = (e.get("plan") or "").replace("\n", " ").strip()[:80]
-                out.append("")
-                out.append(f'#### iter {it} — {dec} — wall={wtxt} ms, {sptxt}, Δvs_best={dtxt} — "{plan}"')
-                diff = self.read_candidate_file(it, "change.diff")
-                if not diff.strip():
-                    out.append(f"(diff unavailable — full kernel at iter_{it:03d}/kernel.py)")
-                    continue
-                dlines = diff.splitlines()
-                trunc = ""
-                if len(dlines) > max_diff_lines:
-                    dlines = dlines[:max_diff_lines]
-                    trunc = (
-                        f"\n... (truncated to {max_diff_lines} lines — Read "
-                        f"iter_{it:03d}/kernel.py for the full kernel)"
-                    )
-                out.append("```diff")
-                out.append("\n".join(dlines) + trunc)
-                out.append("```")
+            out.extend(self._notable_diffs(selected, max_diff_lines))
 
         return "\n".join(out).strip()

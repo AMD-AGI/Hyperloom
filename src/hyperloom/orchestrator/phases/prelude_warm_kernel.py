@@ -84,6 +84,19 @@ def _merge_named_current_recipe_configs(owners: list[tuple[str, Mapping[str, Any
     return " ".join(chain.from_iterable(pairs.values())), envs
 
 
+def _read_patch_text(patch_path: Path) -> str:
+    """The patch file's text, or ``""`` when it is missing or unreadable."""
+    try:
+        return patch_path.read_text(encoding="utf-8", errors="replace") if patch_path.is_file() else ""
+    except OSError:
+        return ""
+
+
+def _safe_kernel_dir_name(kernel_id: str) -> str:
+    """``kernel_id`` reduced to a bounded, path-safe directory name."""
+    return "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in kernel_id)[:96] or "warm_kernel"
+
+
 class _WarmKernelPrepMixin:
     """Prepares, overlays and unwinds the warm-start Recipe's kernel section for the PRELUDE replay."""
 
@@ -267,10 +280,7 @@ class _WarmKernelPrepMixin:
         }
 
         patch_path = Path(str(replacement or ""))
-        try:
-            patch_text = patch_path.read_text(encoding="utf-8", errors="replace") if patch_path.is_file() else ""
-        except OSError:
-            patch_text = ""
+        patch_text = _read_patch_text(patch_path)
         from ..specialists.patch_safety import is_unified_diff
 
         if patch_text and is_unified_diff(patch_text):
@@ -295,9 +305,7 @@ class _WarmKernelPrepMixin:
                         f"diff={relative_target!r} target={target!r}"
                     ),
                 }
-            safe_kernel_id = (
-                "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in kernel_id)[:96] or "warm_kernel"
-            )
+            safe_kernel_id = _safe_kernel_dir_name(kernel_id)
             snapshot_dir = Path(self.session_dir) / "runtime" / "warm_kernel_materialized" / safe_kernel_id
             materialized = materialize_unified_patch_snapshot(
                 patch_path=patch_path,

@@ -299,6 +299,30 @@ def _codex_provider_resolver_overlay(base_env: Mapping[str, str]) -> dict[str, s
     return overlay
 
 
+def _codex_stdio_env_value(
+    name: str,
+    key: str,
+    raw_value: str,
+    *,
+    source: Mapping[str, str],
+    protected_env_names: frozenset[str],
+) -> str:
+    """Resolve one stdio MCP server env value, refusing a key reserved for specialist or provider control."""
+    if (
+        key in _CODEX_MCP_RESERVED_ENV_NAMES
+        or key in protected_env_names
+        or key.startswith((_CODEX_PROVIDER_ENV_PREFIX, _CODEX_MCP_ENV_PREFIX))
+    ):
+        raise SpecialistAgentUnavailableError(
+            f"Codex MCP server {name!r} env key {key!r} is reserved for specialist control or provider configuration"
+        )
+    return _resolve_env_references(
+        raw_value,
+        source=source,
+        context=f"Codex MCP server {name!r} env {key!r}",
+    )
+
+
 def _codex_mcp_config(
     config_path: str | None,
     *,
@@ -347,19 +371,8 @@ def _codex_mcp_config(
         else:
             env_names: list[str] = []
             for key, raw_value in server.env:
-                if (
-                    key in _CODEX_MCP_RESERVED_ENV_NAMES
-                    or key in protected_env_names
-                    or key.startswith((_CODEX_PROVIDER_ENV_PREFIX, _CODEX_MCP_ENV_PREFIX))
-                ):
-                    raise SpecialistAgentUnavailableError(
-                        f"Codex MCP server {name!r} env key {key!r} is reserved "
-                        "for specialist control or provider configuration"
-                    )
-                resolved_value = _resolve_env_references(
-                    raw_value,
-                    source=source,
-                    context=f"Codex MCP server {name!r} env {key!r}",
+                resolved_value = _codex_stdio_env_value(
+                    name, key, raw_value, source=source, protected_env_names=protected_env_names
                 )
                 existing_value = env_additions.get(key, child_env.get(key))
                 if existing_value is not None and existing_value != resolved_value:
