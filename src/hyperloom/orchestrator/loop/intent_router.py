@@ -19,7 +19,7 @@ from hyperloom.orchestrator.lever import (
     patch_owner_phase,
 )
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.common.timeutil import format_exc_brief
+from hyperloom_common.timeutil import format_exc_brief
 from .verdicts import (
     CriticRuling,
     collapse_verdict_map,
@@ -28,10 +28,10 @@ from .verdicts import (
     verdict_held_to_its_rule,
     verdict_map_entry_held_to_its_rule,
 )
-from hyperloom.common.coerce import to_int, to_unix
+from hyperloom_common.coerce import to_int, to_unix
 from ..bus.message_bus import Message
+from ..policy.denial import PolicyDenied
 from ..policy.gate import (
-    PolicyDenied,
     PRUNE_BRANCH_SCOPE_FAMILY,
     PRUNE_BRANCH_SCOPE_QUEUED,
 )
@@ -53,7 +53,7 @@ from hyperloom.inference_optimizer.trace.trajectory_trace import (
     trajectory_scope,
     trajectory_span,
 )
-from ..kernel.request_handlers import KERNEL_REQUEST_HANDLERS, get_handler
+from ..kernel.request_handlers import KERNEL_REQUEST_HANDLERS
 from ..collaborator import CoordinatorCollaborator
 from .kernel_request import (
     KernelRequest,
@@ -1108,7 +1108,7 @@ class IntentRouter(CoordinatorCollaborator):
                 source=_AUTO_REJECT,
             )
             return
-        handler = get_handler(kind)
+        handler = KERNEL_REQUEST_HANDLERS.get(kind)
         if handler is None:
             await self._reply(
                 request_msg,

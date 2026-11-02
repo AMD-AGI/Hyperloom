@@ -21,7 +21,7 @@ from kernelforge.workflows.forge_loop.campaign.experiments_layout import (
     iteration_tag,
     tagged_iteration,
 )
-from kernelforge.utils.durable_io import atomic_write_text, fsync_directory
+from hyperloom_common.io import DURABLE, atomic_write_text, fsync_directory
 
 log = logging.getLogger(__name__)
 
@@ -225,6 +225,7 @@ class CandidateArchive:
         atomic_write_text(
             self.index_path,
             "".join(json.dumps(entry) + "\n" for entry in entries),
+            options=DURABLE,
         )
 
     def _reconcile_storage(self) -> list[dict]:

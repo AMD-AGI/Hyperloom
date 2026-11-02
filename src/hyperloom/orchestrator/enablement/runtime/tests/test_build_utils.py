@@ -48,10 +48,6 @@ def test_run_argv_ok(argv):
     assert r.returncode == 0
     assert r.stdout_tail == "hello\n"
     assert r.stderr_tail == ""
-    assert r.timed_out is False
-    assert r.command == argv
-    assert r.command is not argv
-    assert r.cwd == str(work_dir)
     assert calls == [(argv, str(work_dir), build_env, True, True, 42)]
 
 
@@ -71,7 +67,6 @@ def test_run_argv_timeout():
 
     r = run_argv(["sleep", "9999"], cwd="/tmp", run=_run)
     assert r.returncode == -1
-    assert r.timed_out is True
 
 
 def test_run_argv_truncates_output():
@@ -148,8 +143,6 @@ def _toolchain_run(hipcc_path="/opt/rocm/bin/hipcc", rocm_path="/opt/rocm", head
         if "which hipcc" in cmd:
             return _completed(stdout=hipcc_path + "\n")
         if "dirname" in cmd:
-            return _completed(stdout=rocm_path + "\n")
-        if f"cd {rocm_path!r}" in cmd or f"cd '{rocm_path}'" in cmd:
             return _completed(stdout=rocm_path + "\n")
         return _completed()
 

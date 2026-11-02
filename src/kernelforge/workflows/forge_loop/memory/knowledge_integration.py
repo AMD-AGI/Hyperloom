@@ -22,14 +22,14 @@ from typing import Any
 
 from kernelforge.config.edit_policy import FORGE_PROTECTED_PATHS
 from kernelforge.workflows.forge_loop.campaign.workspace_files import tracked_editable_paths
-from kernelforge.utils.git import git, git_bytes, git_head
+from kernelforge.utils.git import git, git_apply, git_bytes, git_head
 from kernelforge.knowledge.kb_store import warmstart_policy
 from kernelforge.knowledge.kb_store.identity.run import LoopKernel
 from kernelforge.knowledge.kb_store.identity.implementation import (
     canonical_owner_framework,
 )
 from kernelforge.workflows.forge_loop.campaign.loop_log import kb_write_line
-from kernelforge.utils.durable_io import atomic_write_text, fsync_directory
+from hyperloom_common.io import DURABLE, atomic_write_text, fsync_directory
 from kernelforge.evaluation.scoring import (
     DEFAULT_SNR_THRESHOLD_DB,
     KEEP_MEASUREMENT_COUNT,
@@ -238,17 +238,7 @@ def _git_apply(
 
     def _run(extra: list[str]) -> bool:
         # A depth that does not apply is the question being asked, not a failure.
-        return (
-            git(
-                "apply",
-                *extra,
-                "-",
-                cwd=workspace_dir,
-                input=patch,
-                check=False,
-            ).returncode
-            == 0
-        )
+        return git_apply(patch, *extra, "-", cwd=workspace_dir, check=False).returncode == 0
 
     depths = _GIT_APPLY_STRIP_DEPTHS
     if target is not None:
@@ -524,6 +514,7 @@ def _persist_kb_references(
         atomic_write_text(
             temporary_generation / f"reference_{rank:02d}.md",
             _reference_markdown(sol, rank),
+            options=DURABLE,
         )
     fsync_directory(temporary_generation)
     os.replace(temporary_generation, final_generation)
@@ -531,6 +522,7 @@ def _persist_kb_references(
     atomic_write_text(
         root / "index.md",
         _reference_index_markdown(sols, statuses, generation),
+        options=DURABLE,
     )
     with contextlib.suppress(OSError):
         _cleanup_old_reference_generations(root, generation)
@@ -607,7 +599,7 @@ def mark_kb_reference_rejected(
         count=1,
     )
     if count:
-        atomic_write_text(index_path, updated)
+        atomic_write_text(index_path, updated, options=DURABLE)
 
 
 def _apply_candidate_patch(

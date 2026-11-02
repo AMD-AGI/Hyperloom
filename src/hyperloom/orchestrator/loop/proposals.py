@@ -8,10 +8,10 @@ import hashlib
 import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Mapping
-from hyperloom.common.coerce import to_float
+from hyperloom_common.coerce import to_float
 from hyperloom.common.framework_arm import is_upstream_pr_prescreen
 from hyperloom.orchestrator.lever import LEVER_CONFIG
-from hyperloom.inference_optimizer.trace.trajectory_trace import EVENT_PROPOSAL, STATUS_QUEUED, record_event
+from hyperloom.inference_optimizer.trace.trajectory_trace import EVENT_PROPOSAL, STATUS_QUEUED, EventSpan, record_event
 from ..phases import machine_state as _phase_state
 from ..bus.message_bus import Message
 from ..policy.gate import SPECIALIST_ACTION_NAME
@@ -86,8 +86,7 @@ async def record_proposal(
     coord.state.pending_proposals[msg.msg_id] = pending
     record_event(
         EVENT_PROPOSAL,
-        status=STATUS_QUEUED,
-        span_id=msg.msg_id,
+        span=EventSpan(span_id=msg.msg_id, status=STATUS_QUEUED),
         attributes={
             "name": action_name,
             "action_name": action_name,
@@ -494,8 +493,8 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         if not proposal_msg_id or not task_id:
             return
         try:
-            from hyperloom.common.timeutil import now_iso
-            from hyperloom.common.io import JsonLineFormat, append_jsonl
+            from hyperloom_common.timeutil import now_iso
+            from hyperloom_common.io import JsonLineFormat, append_jsonl
             from hyperloom.inference_optimizer.session.session_paths import proposal_task_map_path
 
             path = proposal_task_map_path(self.session_dir)

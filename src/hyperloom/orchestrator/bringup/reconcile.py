@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.timeutil import now_iso
 
 from ..bus.db_maintenance import DECIDED_PROPOSAL_IDS_SQL
 from ..bus.resource_lock import BRINGUP_ROUND_LANE, SqliteLeaseBackend
@@ -24,7 +24,12 @@ from ..state.round_store import (
     RoundStore,
 )
 from ..state.task_registry import TERMINAL_STATES, Task, TaskNotFound, TaskRegistry
-from hyperloom.inference_optimizer.trace.trajectory_trace import EVENT_PROPOSAL, STATUS_CANCELLED, record_event
+from hyperloom.inference_optimizer.trace.trajectory_trace import (
+    EVENT_PROPOSAL,
+    STATUS_CANCELLED,
+    EventSpan,
+    record_event,
+)
 from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
 
 log = logging.getLogger(__name__)
@@ -260,8 +265,7 @@ class Reconciler:
         action_name = str(getattr(pending, "action_name", "") or "") or None
         record_event(
             EVENT_PROPOSAL,
-            status=STATUS_CANCELLED,
-            span_id=msg_id,
+            span=EventSpan(span_id=msg_id, status=STATUS_CANCELLED),
             attributes={
                 "name": action_name,
                 "action_name": action_name,
@@ -398,7 +402,7 @@ class Reconciler:
         """Re-read the facts the gate's resource rules judge against."""
         self._resources.update(
             self._shared_state,
-            rounds=await self._rounds.excluding(now_unix),
+            rounds=await self._rounds.open_rounds(),
             live_task_ids=[t.task_id for t in await self._tasks.running()],
         )
 

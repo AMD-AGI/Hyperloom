@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import os
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -39,25 +38,18 @@ __all__ = [
 ]
 
 
-def gpu_specialist_ceiling(shared_state: Any | None = None) -> int:
+def gpu_specialist_ceiling(shared_state: Any) -> int:
     """Configured GPU specialist capacity (0 disables ``needs_gpu=true`` dispatch).
 
     Args:
-        shared_state: Optional SharedState whose ``gpu_specialist_capacity`` is
-            read first; ``None`` falls back to the
-            ``INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY`` env var.
+        shared_state: SharedState carrying ``gpu_specialist_capacity``.
 
     Returns:
         int: The configured capacity, 0 when unset or unparseable.
     """
-    if shared_state is not None:
-        try:
-            return max(0, int(getattr(shared_state, "gpu_specialist_capacity", 0)))
-        except (TypeError, ValueError):
-            return 0
     try:
-        return max(0, int(os.environ.get("INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY", "0")))
-    except ValueError:
+        return max(0, int(getattr(shared_state, "gpu_specialist_capacity", 0)))
+    except (TypeError, ValueError):
         return 0
 
 
@@ -151,7 +143,7 @@ class ResourceFacts:
 
         Args:
             shared_state: SharedState to read the session's own facts from.
-            rounds: Rounds excluding now, from ``RoundStore.excluding``. The
+            rounds: Rounds excluding now, from ``RoundStore.open_rounds``. The
                 first is reported.
             live_task_ids: Tasks observed running; ``None`` leaves the set
                 unknown.

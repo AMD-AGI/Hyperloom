@@ -13,27 +13,6 @@ from ..actions.stop_attribution import (
 )
 
 
-def _budget_skip_result(variant: GridVariant) -> VariantResult:
-    """Synthetic VariantResult for a budget-exhausted variant; ``skipped`` status distinguishes \"out of time\" from \"Magpie crashed\".
-
-    No config was composed for this rung and no round of it ran, so it was granted no
-    cap and ``granted_cap_sec`` stays ``None``: the grid runner is the only party that
-    grants one, and only once it knows the env the rounds launch under.
-    """
-    return VariantResult(
-        name=variant.name,
-        extra_server_args=variant.extra_server_args,
-        extra_envs=dict(variant.extra_envs),
-        status="skipped",
-        output_throughput=None,
-        request_throughput=None,
-        total_token_throughput=None,
-        error="conc_sweep total budget exhausted before this variant ran",
-        error_class="budget_exhausted",
-        note=variant.note,
-    )
-
-
 _SWEEP_BUDGET_STOP = StoppedByTheRun(
     error_class="budget_exhausted",
     interrupted="conc_sweep total budget exhausted while this round was running",

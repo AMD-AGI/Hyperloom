@@ -47,7 +47,7 @@ from hyperloom.orchestrator.loop.time_budget import (
     measured_baseline_runtime_sec,
 )
 from hyperloom.orchestrator.phases import machine_state
-from hyperloom.orchestrator.policy.gate import PolicyDenied
+from hyperloom.orchestrator.policy.denial import PolicyDenied
 from hyperloom.orchestrator.roles import Backend, MockBackend, ScriptedPlan
 from hyperloom.orchestrator.state.shared_state import SharedState, effective_closing_grace_sec
 from hyperloom.orchestrator.state.task_registry import Task, TaskSpec

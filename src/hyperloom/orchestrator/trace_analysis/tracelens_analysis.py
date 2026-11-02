@@ -23,9 +23,9 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from hyperloom.common.coerce import first_str
-from hyperloom.common.io import JsonFormat, atomic_write_json
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.coerce import first_str
+from hyperloom_common.io import JsonFormat, atomic_write_json
+from hyperloom_common.timeutil import now_iso
 from hyperloom.inference_optimizer.framework_paths import (
     FRAMEWORK_SOURCE_PACKAGES as _FRAMEWORK_SOURCE_PACKAGES,
 )
@@ -194,7 +194,7 @@ def _tracelens_knows_arch(arch_json: Path | None, platform: str, out_dir: Path) 
     The run config names the platform: TraceLens' analysis steps need the name, and its report refuses a job that names
     both a platform and ``gpu_arch_json_path``. TraceLens resolves a name only from its bundled arch dir and from the
     ``TL_EXTENSION`` packages, so an arch JSON resolved anywhere else (Hyperloom's spec from
-    :data:`hyperloom.common.gpu_identity.AMD_GPU_BOARDS`, a microbenchmark) is otherwise never read and a platform
+    :data:`hyperloom_common.gpu_identity.AMD_GPU_BOARDS`, a microbenchmark) is otherwise never read and a platform
     TraceLens does not bundle fails the run config's check (both routes) and the report. The JSON is served as a ``TL_EXTENSION`` package under ``out_dir``;
     the package root is put on ``sys.path`` and ``PYTHONPATH`` (for child processes); ``sys.path``, ``PYTHONPATH`` and
     ``TL_EXTENSION`` are restored on exit.

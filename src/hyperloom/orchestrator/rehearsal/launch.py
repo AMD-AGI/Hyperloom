@@ -45,33 +45,21 @@ class RecordedLaunch:
     """One launch as it was requested, kept for assertions.
 
     Attributes:
-        attempt: The scenario attempt that answered it.
-        cmd: The command the caller passed.
-        cwd: The working directory the caller passed, if any.
         server_log_path: Where the caller expected the server's log, if named.
         session_deadline_sec: The session budget instant in force, if any.
         timeout: The hard timeout in force, if any.
-        started_at: Clock elapsed when the launch began.
-        finished_at: Clock elapsed when it returned.
         returncode: What the caller was told; ``-1`` for a reaped hang.
     """
 
-    attempt: LaunchAttempt
-    cmd: tuple[str, ...]
-    cwd: str | None
     server_log_path: str | None
     session_deadline_sec: float | None
     timeout: float | None
-    started_at: float
-    finished_at: float
     returncode: int
 
 
 class _LaunchRequest(NamedTuple):
     """The parts of a launch call a recorded launch keeps."""
 
-    cmd: Sequence[str]
-    cwd: str | None
     server_log_path: str | None
     timeout: int | float | None
     session_deadline_sec: float | None
@@ -136,10 +124,9 @@ class ScriptedLaunchBackend:
         """
         server_log_path = watch.server_log_path
         timeout = watch.timeout
-        request = _LaunchRequest(cmd, cwd, server_log_path, timeout, watch.session_deadline_sec)
+        request = _LaunchRequest(server_log_path, timeout, watch.session_deadline_sec)
         budget_left = self._budget_left(watch.session_deadline_sec)
         attempt = self._next_attempt()
-        started = self.clock.elapsed
         if server_log_path:
             slot: Path | None = Path(server_log_path).parent
         else:
@@ -157,8 +144,7 @@ class ScriptedLaunchBackend:
             returncode = SESSION_TIME_EXHAUSTED_RETURNCODE
         elif reap_at is not None:
             self._spend(reap_at, on_output)
-            self.clock.mark(f"launch:{_label(attempt)}:reaped")
-            self.calls.append(self._record(attempt, request, started, -1))
+            self.calls.append(self._record(request, -1))
             raise subprocess.TimeoutExpired(cmd=list(cmd), timeout=reap_at)
         else:
             self._spend(spend, on_output)
@@ -167,8 +153,7 @@ class ScriptedLaunchBackend:
         if attempt.outcome == READY and server_log_path and returncode == 0:
             stamp_server_ready(server_log_path, attempt.duration_sec)
 
-        self.clock.mark(f"launch:{_label(attempt)}:rc={returncode}")
-        self.calls.append(self._record(attempt, request, started, returncode))
+        self.calls.append(self._record(request, returncode))
         return subprocess.CompletedProcess(
             args=list(cmd),
             returncode=returncode,
@@ -246,19 +231,13 @@ class ScriptedLaunchBackend:
             else:
                 path.write_text(str(content), encoding="utf-8")
 
-    def _record(
-        self, attempt: LaunchAttempt, request: _LaunchRequest, started: float, returncode: int
-    ) -> RecordedLaunch:
+    @staticmethod
+    def _record(request: _LaunchRequest, returncode: int) -> RecordedLaunch:
         """Build the :class:`RecordedLaunch` kept for this launch."""
         return RecordedLaunch(
-            attempt=attempt,
-            cmd=tuple(str(c) for c in request.cmd),
-            cwd=request.cwd,
             server_log_path=request.server_log_path,
             session_deadline_sec=request.session_deadline_sec,
             timeout=None if request.timeout is None else float(request.timeout),
-            started_at=started,
-            finished_at=self.clock.elapsed,
             returncode=returncode,
         )
 

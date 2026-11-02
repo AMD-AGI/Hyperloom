@@ -1,0 +1,8 @@
+[
+  {"name": "serialize_off",      "extra_envs": {"AMD_SERIALIZE_KERNEL": "0"}},
+  {"name": "hw_queues_1",        "extra_envs": {"GPU_MAX_HW_QUEUES": "1"}},
+  {"name": "hw_queues_4",        "extra_envs": {"GPU_MAX_HW_QUEUES": "4"}},
+  {"name": "dev_kernarg",        "extra_envs": {"HIP_FORCE_DEV_KERNARG": "1"}},
+  {"name": "no_scratch_reclaim", "extra_envs": {"HSA_NO_SCRATCH_RECLAIM": "1"}},
+  {"name": "kernarg_plus_queues","extra_envs": {"HIP_FORCE_DEV_KERNARG": "1", "GPU_MAX_HW_QUEUES": "1"}}
+]

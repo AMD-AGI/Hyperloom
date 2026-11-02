@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import os
-import time
 from pathlib import Path
 from typing import Any
-from kernelforge.utils.durable_io import atomic_write_text
+
+from hyperloom_common.timeutil import now_iso
+from hyperloom_common.io import DURABLE, atomic_write_text
 
 
 MAX_ANALYSIS_SESSION_ATTEMPTS = 2
@@ -18,8 +20,7 @@ class AnalysisAttemptLimitError(RuntimeError):
     """Raised when one commit has exhausted its Analysis session attempts."""
 
 
-def _utc_now() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+_utc_now = functools.partial(now_iso, "seconds", z_suffix=True)
 
 
 def _sha256(path: Path) -> str:
@@ -100,7 +101,7 @@ class AnalysisSessionJournal:
     def _write_state(self, state: dict[str, Any] | None = None) -> None:
         payload = self.state if state is None else state
         payload["updated_at"] = _utc_now()
-        atomic_write_text(self.path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        atomic_write_text(self.path, json.dumps(payload, indent=2, sort_keys=True) + "\n", options=DURABLE)
 
     def _append_event(self, event_type: str, **fields: Any) -> None:
         event = {

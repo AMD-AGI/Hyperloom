@@ -19,7 +19,7 @@ from hyperloom.common.failure_signature import FailureSignature
 from hyperloom.inference_optimizer import framework_registry
 
 from .build_actions import resolve_build_ref
-from .build_utils import ROCM_CONSTRAINTS_FILE, sglang_rocm_install_target, write_rocm_constraints
+from .build_utils import ROCM_CONSTRAINTS_FILE, VLLM_ROCM_PROBE, sglang_rocm_install_target, write_rocm_constraints
 from .stack_actions import EnablementStackAction, FrameworkRuntime, ProvisionResult, RuntimeRequest
 
 
@@ -65,18 +65,7 @@ def verify_torch_is_rocm(python_path: str, *, run: RunFn = _default_run) -> bool
 
 def verify_vllm_rocm(python_path: str, *, run: RunFn = _default_run) -> bool:
     """True when vLLM imports AND reports a ROCm platform."""
-    probe = (
-        "import sys\n"
-        "import torch\n"
-        "if not getattr(torch.version,'hip',None): sys.exit(1)\n"
-        "import vllm\n"
-        "from vllm.platforms import current_platform\n"
-        "ck=getattr(current_platform,'is_rocm',None)\n"
-        "ok=bool(ck()) if callable(ck) else False\n"
-        "if 'rocm' in f'{current_platform!r}'.lower(): ok=True\n"
-        "sys.exit(0 if ok else 1)\n"
-    )
-    argv = [python_path, "-c", probe]
+    argv = [python_path, "-c", VLLM_ROCM_PROBE]
     try:
         cp = run(argv, dict(os.environ), None)
     except (OSError, subprocess.SubprocessError):
@@ -195,10 +184,6 @@ class BaseAdapter:
         Cancel of the await is fire-and-forget for an in-flight pip install.
         """
         return ProvisionResult(ok=False, error=f"{self.framework or 'null'} adapter does not provision")
-
-    def probe(self, result: ProvisionResult, action: EnablementStackAction) -> bool:
-        """Validate the provisioned runtime carries the expected capability."""
-        return result.ok
 
     def build_localization_action(
         self,
@@ -405,8 +390,6 @@ class VllmRocmAdapter(_VenvProvisionMixin):
             bin_path=str(bin_dir),
             python_path=str(python_path),
             venv_root=str(attempt_dir / "venv"),
-            server_args=action.server_args,
-            envs=dict(action.envs),
             source_root=self._source_root_in(purelib),
         )
         return ProvisionResult(
@@ -416,17 +399,6 @@ class VllmRocmAdapter(_VenvProvisionMixin):
             log_path=log_path,
             resolved_packages=resolved_packages,
         )
-
-    def probe(self, result: ProvisionResult, action: EnablementStackAction) -> bool:
-        """Confirm expected files exist under the venv (symbols validated at boot)."""
-        if not result.ok:
-            return False
-        root = Path(result.runtime.venv_root) if result.runtime.venv_root else None
-        for rel in action.expected_files:
-            if root is not None and not (root / rel).exists() and not Path(rel).exists():
-                log.info("VllmRocmAdapter.probe: expected file missing: %s", rel)
-                return False
-        return True
 
 
 class SglangAdapter(_VenvProvisionMixin):
@@ -493,8 +465,6 @@ class SglangAdapter(_VenvProvisionMixin):
             python_path=str(python_path),
             venv_root=str(attempt_dir / "venv"),
             pythonpath_prefix=pythonpath_prefix,
-            server_args=action.server_args,
-            envs=dict(action.envs),
             source_root=source_root,
         )
         return ProvisionResult(

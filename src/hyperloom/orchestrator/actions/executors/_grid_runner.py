@@ -20,7 +20,7 @@ from typing import Any, Callable, NamedTuple, NoReturn
 
 import yaml
 
-from hyperloom.common.env import env_flag, is_truthy
+from hyperloom_common.env import env_flag, is_truthy
 from hyperloom.common.perf_metric import constraint_fields
 from hyperloom.common.env_safety import (
     BLOCKED_EXTERNAL_ENV_NAMES,
@@ -70,7 +70,7 @@ from ...measurement.runtime_findings import persist_runtime_findings, scan_serve
 from ._spec_decode_pin import SPECULATIVE_DECODING_PINNED, refuse_unpinned_speculative_change
 from hyperloom.common.agentx_workload import pin_mlperf_round_concurrency
 from hyperloom.common.benchmark_config import is_magpie_agentx
-from hyperloom.common.coerce import to_str_list
+from hyperloom_common.coerce import to_str_list
 from hyperloom.inference_optimizer import speculative_capability
 from hyperloom.inference_optimizer.runtime_environment import apply_runtime_override, prepend_launch_path
 from ._recipe_script import launcher_overwritten_envs

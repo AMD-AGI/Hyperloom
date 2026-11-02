@@ -6,10 +6,11 @@
 from __future__ import annotations
 
 import json
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from hyperloom_common.timeutil import now_iso
 
 from .candidates import _tuner_env, failed_tuner_records, is_candidate, per_tuner_candidates
 from .tuners.base import TuneContext, TuneResult
@@ -92,7 +93,7 @@ def build_report(
     total_elapsed_s: float,
 ) -> TuneReport:
     """Build a TuneReport from individual tuner results, recording the context they were tuned in."""
-    finished_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    finished_at = now_iso("seconds", z_suffix=True)
     # An explicitly forced candidate (r.candidate) is promoted regardless of micro status: the aiter dense tuner's
     # split-K cap yields a valid deployable artifact whose benefit is e2e-only, so it reports
     # status="no_improvement" with a best_micro of at most 1.0 -- null when no shape had a baseline -- yet the CSV

@@ -189,7 +189,7 @@ class ClosePhase(CoordinatorCollaborator):
             return
         # Explore refuses a variant the budget cannot fit, so asking here only
         # names the reason in the close section instead of in a no-op task.
-        usable_sec = _phase_state.session_usable_seconds(state)
+        usable_sec = state.session_budget_usable_sec()
         needed_sec = _phase_state.one_more_measurement_sec(state) or _phase_state.measured_seconds(
             state, "baseline_runtime_sec"
         )
@@ -835,16 +835,12 @@ class ClosePhase(CoordinatorCollaborator):
             enablement_in_flight=enablement_in_flight,
             kernel_work_in_flight=kernel_facts.agent_in_flight,
             now_unix=now,
-            flags=_phase_state.PhaseFlags(
-                kernel_enabled=machine.kernel_enabled(),
-                optimize_enabled=machine.optimize_enabled(),
-                enablement_enabled=self._coord.enablement_lane.enablement_admitted(),
-            ),
+            flags=machine.phase_flags(),
         )
         assert decision is not None and decision[0] == _phase_state.PHASE_CLOSE
         target, reason, evidence = decision
         move = Transition(from_phase=prior, to_phase=target, reason=reason, evidence=evidence)
-        machine.set_terminal_stop_reason(state, reason)
+        machine.set_terminal_stop_reason(reason)
         machine.settle_escalate_hint(move)
         _phase_state.record_phase_transition(
             state, to_phase=target, reason=reason, evidence=evidence, at=_phase_state.PhaseClock(ts_unix=now)
@@ -853,7 +849,7 @@ class ClosePhase(CoordinatorCollaborator):
         _phase_state.record_lifecycle_event(
             state,
             _phase_state.LifecycleMark(
-                step=target, status=_phase_state.LIFECYCLE_STATUS_ENTER, phase=target, detail=f"reason={reason}"
+                step=target, status=_phase_state.LIFECYCLE_STATUS_ENTER, detail=f"reason={reason}"
             ),
         )
         state.save(self.session_dir)

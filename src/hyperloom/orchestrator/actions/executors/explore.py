@@ -16,7 +16,7 @@ from typing import Any
 
 import yaml
 
-from hyperloom.common.coerce import to_float, to_int, to_str_list
+from hyperloom_common.coerce import to_float, to_int, to_str_list
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.launch_log_evidence import settings_the_engine_rewrote
 from hyperloom.common.model_paths import resolve_session_model_path
@@ -35,7 +35,7 @@ from hyperloom.common.perf_metric import (
     resolve_grading_anchor_perf,
     stamp_output_per_gpu,
 )
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.timeutil import now_iso
 from hyperloom.inference_optimizer.grading import resolved_grading
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...state.failure_evidence import (
@@ -62,6 +62,7 @@ from ._accuracy_gate import (
     parse_eval_results,
 )
 from . import _framework_switch_manifest as _switch_manifest
+from .bypass_scriptable import declared_lever_payload
 from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
 from ._proposal_identity import BaseControls, controls_of, effective_fingerprint, normalize_proposal
 from .measured_variants import GAIN_BELOW_THRESHOLD, MeasuredOn, measured_verdict, stack_of_measured
@@ -956,7 +957,10 @@ class _ExploreRound:
         payload = self.params.get("grid") or []
         if not isinstance(payload, list):
             payload = []
-        self.lever_payload = framework_lever_grid(self.ss)
+        # A stack revalidation re-measures the recorded stack on purpose. Seeding a lever
+        # into it would validate stack+lever instead, so the declarations sit this round out.
+        declared = [] if is_stack_revalidation(self.params) else declared_lever_payload(self.ss, self.framework)
+        self.lever_payload = framework_lever_grid(self.ss) + declared
         payload = _lever_seeded_payload(payload, self.lever_payload)
         if not payload:
             payload = _seed_grid_payload(self.params, self.framework, self.yaml_envs)

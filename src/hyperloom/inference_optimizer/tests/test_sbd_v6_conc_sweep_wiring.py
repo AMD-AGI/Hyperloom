@@ -145,6 +145,7 @@ def _run(state: SharedState, session_dir: Path, *, recorder: Any, run_grid: Any,
                 session_dir,
                 concs=[4, 16] if concs is None else concs,
                 recorder=recorder,
+                total_budget_sec=9000,
             )
         )
 

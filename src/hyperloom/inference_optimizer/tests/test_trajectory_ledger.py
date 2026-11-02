@@ -68,7 +68,7 @@ def test_unknown_vocabulary_is_rejected(tmp_path):
         with pytest.raises(tt.TrajectoryRowError):
             tt.record_event("not-an-event")
         with pytest.raises(tt.TrajectoryRowError):
-            tt.record_event(tt.EVENT_SESSION, status="done")
+            tt.record_event(tt.EVENT_SESSION, span=tt.EventSpan(status="done"))
         with pytest.raises(tt.TrajectoryRowError):
             tt.record_event(tt.EVENT_SESSION, component="nobody")
 

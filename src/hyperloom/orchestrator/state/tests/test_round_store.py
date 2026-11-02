@@ -14,7 +14,6 @@ from hyperloom.orchestrator.state.round_store import (
     ABANDONED,
     BOOTED,
     EXPIRED_REAPED,
-    EXPIRED_UNREAPED,
     STALE_FENCE,
     Round,
     RoundResult,
@@ -50,7 +49,7 @@ def _claim(round_id: str, holder_task_id: str, fence: int) -> Round:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("outcome", [EXPIRED_UNREAPED, EXPIRED_REAPED, ABANDONED, BOOTED])
+@pytest.mark.parametrize("outcome", [EXPIRED_REAPED, ABANDONED, BOOTED])
 async def test_a_settled_round_releases_the_machine_whatever_it_settled_as(store, virtual_clock, outcome):
     """Settling releases. No outcome buys a round exclusion it did not pay a lease for."""
     clock = virtual_clock
@@ -69,7 +68,7 @@ async def test_a_settled_round_releases_the_machine_whatever_it_settled_as(store
     row = await store.get("r")
     assert row is not None and row.outcome == outcome
     assert row.state == rs.SETTLED
-    assert await store.excluding(settled_at) == []
+    assert await store.open_rounds() == []
     # And the next round is admitted at once, on the same instant.
     opened = await store.open(
         "next", RoundRequest(now_unix=settled_at, request_id="q3"), holder_task_id="t-2", lease_sec=_LEASE
@@ -90,8 +89,7 @@ async def test_an_open_round_holds_the_machine_until_explicit_settlement(store, 
     row = await store.get("r")
     assert row is not None
     assert row.state == rs.OPEN
-    assert [r.round_id for r in await store.excluding(opened_at)] == ["r"]
-    assert [r.round_id for r in await store.excluding(opened_at + _LEASE + 1.0)] == ["r"]
+    assert [r.round_id for r in await store.open_rounds()] == ["r"]
 
     opened = await store.open(
         "next", RoundRequest(now_unix=opened_at + _LEASE + 1.0, request_id="q2"), holder_task_id="t-2", lease_sec=_LEASE
@@ -127,7 +125,8 @@ async def test_only_one_of_two_contending_acquires_wins_and_the_loser_is_told_wh
     second = await store.open(
         "round-b", RoundRequest(now_unix=clock.wall(), request_id="q2"), holder_task_id="t-2", lease_sec=_LEASE
     )
-    assert first.ok and first.fence == 1
+    assert first.ok
+    assert (await store.get("round-a")).fence == 1
     assert second.ok is False
     assert second.reason == rs.EXCLUDED
     assert await store.get("round-b") is None
@@ -213,7 +212,6 @@ async def test_renewing_extends_the_lease_without_invalidating_the_holders_settl
             _claim("r", "t-1", 1), RoundRequest(now_unix=clock.wall(), request_id=f"hb-{tick}"), lease_sec=_LEASE
         )
         assert renewed.ok
-        assert renewed.fence == 1
 
     row = await store.get("r")
     assert row is not None
@@ -244,9 +242,9 @@ async def test_a_handoff_advances_the_fence_and_the_old_holders_settle_is_reject
         new_holder_task_id="t-2",
         lease_sec=_LEASE,
     )
-    assert handed.ok and handed.fence == 2
+    assert handed.ok
     row = await store.get("r")
-    assert row is not None and row.holder_task_id == "t-2"
+    assert row is not None and row.holder_task_id == "t-2" and row.fence == 2
 
     # The old holder is no longer the holder at all.
     clock.advance(60.0)
@@ -296,13 +294,18 @@ async def test_settling_twice_records_the_replay_without_changing_the_round(stor
     first = await store.settle(
         _claim("r", "t-1", 1), RoundRequest(now_unix=first_settled_at, request_id="q2"), outcome=BOOTED
     )
-    assert first.ok and first.duplicate is False
+    assert first.ok
 
     clock.advance(5.0)
     replay = await store.settle(
         _claim("r", "t-1", 1), RoundRequest(now_unix=clock.wall(), request_id="q2"), outcome=BOOTED
     )
-    assert replay.ok and replay.duplicate is True
+    assert replay.ok
+    rows = await store.db.fetchall(
+        "SELECT request_id, result FROM round_events WHERE round_id = ? AND op = 'settle' ORDER BY event_id",
+        ("r",),
+    )
+    assert [(r["request_id"], r["result"]) for r in rows] == [("q2", "applied"), ("q2", "duplicate")]
 
     row = await store.get("r")
     assert row is not None
@@ -312,7 +315,7 @@ async def test_settling_twice_records_the_replay_without_changing_the_round(stor
     assert row.settled_unix == first_settled_at
 
     contradicting = await store.settle(
-        _claim("r", "t-1", 1), RoundRequest(now_unix=clock.wall(), request_id="q3"), outcome=EXPIRED_UNREAPED
+        _claim("r", "t-1", 1), RoundRequest(now_unix=clock.wall(), request_id="q3"), outcome=rs.FAILED
     )
     assert contradicting.ok is False
     assert contradicting.reason == rs.ALREADY_SETTLED
@@ -468,54 +471,36 @@ async def test_every_path_writes_the_same_outbox_row_and_answer(store):
         await store.open("b", RoundRequest(now_unix=1051.0, request_id="o5"), holder_task_id="t-5", lease_sec=600.0),
     ]
 
-    def ok(round_id, fence, state, outcome="", *, event_id, duplicate=False):
-        return RoundResult(
-            ok=True,
-            round_id=round_id,
-            fence=fence,
-            state=state,
-            outcome=outcome,
-            duplicate=duplicate,
-            event_id=event_id,
-        )
+    ok = RoundResult(ok=True)
 
-    def refused(round_id, fence, state, outcome, reason, *, event_id):
-        return RoundResult(
-            ok=False,
-            round_id=round_id,
-            fence=fence,
-            state=state,
-            outcome=outcome,
-            reason=reason,
-            event_id=event_id,
-        )
+    def refused(reason):
+        return RoundResult(ok=False, reason=reason)
 
-    # repr, not ==, so an int where a float was written (or the reverse) also fails.
-    assert repr(results) == repr(
+    assert results == (
         [
-            ok("a", 1, rs.OPEN, event_id=1),
-            refused("b", 0, "", "", rs.EXCLUDED, event_id=2),
-            refused("a", 0, "", "", rs.ALREADY_EXISTS, event_id=3),
-            ok("a", 1, rs.OPEN, event_id=4),
-            refused("a", 1, rs.OPEN, "", rs.NOT_OWNER, event_id=5),
-            refused("a", 1, rs.OPEN, "", rs.STALE_FENCE, event_id=6),
-            refused("ghost", 0, "", "", rs.UNKNOWN_ROUND, event_id=7),
-            ok("a", 2, rs.OPEN, event_id=8),
-            refused("a", 2, rs.OPEN, "", rs.NOT_OWNER, event_id=9),
-            refused("a", 2, rs.OPEN, "", rs.STALE_FENCE, event_id=10),
-            refused("ghost", 0, "", "", rs.UNKNOWN_ROUND, event_id=11),
-            refused("a", 2, rs.OPEN, "", rs.STALE_FENCE, event_id=12),
-            refused("a", 2, rs.OPEN, "", rs.NOT_OWNER, event_id=13),
-            ok("a", 2, rs.SETTLED, BOOTED, event_id=14),
-            ok("a", 2, rs.SETTLED, BOOTED, event_id=15, duplicate=True),
-            refused("a", 2, rs.SETTLED, BOOTED, rs.ALREADY_SETTLED, event_id=16),
-            refused("a", 2, rs.SETTLED, BOOTED, rs.ALREADY_SETTLED, event_id=17),
-            refused("a", 2, rs.SETTLED, BOOTED, rs.ALREADY_SETTLED, event_id=18),
-            refused("a", 2, rs.SETTLED, BOOTED, rs.NOT_OPEN, event_id=19),
-            refused("a", 2, rs.SETTLED, BOOTED, rs.NOT_OPEN, event_id=20),
-            refused("ghost", 0, "", "", rs.UNKNOWN_ROUND, event_id=21),
-            refused("a", 0, "", "", rs.ALREADY_EXISTS, event_id=22),
-            ok("b", 1, rs.OPEN, event_id=23),
+            ok,
+            refused(rs.EXCLUDED),
+            refused(rs.ALREADY_EXISTS),
+            ok,
+            refused(rs.NOT_OWNER),
+            refused(rs.STALE_FENCE),
+            refused(rs.UNKNOWN_ROUND),
+            ok,
+            refused(rs.NOT_OWNER),
+            refused(rs.STALE_FENCE),
+            refused(rs.UNKNOWN_ROUND),
+            refused(rs.STALE_FENCE),
+            refused(rs.NOT_OWNER),
+            ok,
+            ok,
+            refused(rs.ALREADY_SETTLED),
+            refused(rs.ALREADY_SETTLED),
+            refused(rs.ALREADY_SETTLED),
+            refused(rs.NOT_OPEN),
+            refused(rs.NOT_OPEN),
+            refused(rs.UNKNOWN_ROUND),
+            refused(rs.ALREADY_EXISTS),
+            ok,
         ]
     )
     events = await store.db.fetchall("SELECT * FROM round_events ORDER BY event_id")

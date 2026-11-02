@@ -17,7 +17,7 @@ import yaml
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.gain_math import incremental_gain_pct
 from hyperloom.common.perf_metric import is_agentx_mode
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.timeutil import now_iso
 from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
     ROUND_ACCURACY,
     ROUND_MEASURE,

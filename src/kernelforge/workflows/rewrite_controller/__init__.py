@@ -32,6 +32,10 @@ from kernelforge.workflows.rewrite_controller.opportunity_agent import (
 )
 from kernelforge.workflows.rewrite_controller.paths import ControllerLayout, TaskLayout, operator_directory_name
 from kernelforge.workflows.rewrite_controller.publisher import (
+    PATCH_FILENAME,
+    PUBLICATION_FILENAME,
+    PUBLICATION_SCHEMA_VERSION,
+    REPORT_FILENAME,
     OperatorPublication,
     PublicationError,
     publish_operator_result,
@@ -74,6 +78,10 @@ __all__ = [
     "FORGE_LOOP_BUDGET_SEC",
     "MIN_TASK_START_REMAINING_SEC",
     "OperatorPublication",
+    "PATCH_FILENAME",
+    "PUBLICATION_FILENAME",
+    "PUBLICATION_SCHEMA_VERSION",
+    "REPORT_FILENAME",
     "OpportunityAnalysisAgent",
     "OpportunityAnalysisResult",
     "PublicationError",

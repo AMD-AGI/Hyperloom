@@ -14,13 +14,13 @@ from typing import TYPE_CHECKING, Any
 
 from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
 
-from ...enablement.recipe.build_inputs import build_driver_for, build_input_record
+from ...enablement.recipe.build_inputs import BUILTIN_PLAN_DRIVER, build_input_record
 from ...enablement.runtime.build_actions import BuildResult, TargetedBuildAction
 from ...enablement.runtime.stack_actions import FrameworkRuntime
 from ...enablement.runtime.targeted_build import (
-    _resolve_budget_sec,
     BuildHandle,
     classify_build_exit,
+    default_budget_sec,
     ensure_build_dead,
     spawn_build,
 )
@@ -42,7 +42,7 @@ class TargetedBuildExecutor:
         action = TargetedBuildAction.from_state(task.params)
         session_dir = Path(ctx.extra["session_dir"])
         attempt_root = str(action.attempt_root)
-        budget_sec = float(_resolve_budget_sec(action))
+        budget_sec = float(default_budget_sec(action.component))
         shared_state = ctx.extra.get("shared_state")
 
         result: BuildResult | None = None
@@ -169,7 +169,7 @@ class TargetedBuildExecutor:
         unrecoverable from the row it leaves behind.
         """
         entry = result.to_state()
-        entry["build_driver"] = build_driver_for(action)
+        entry["build_driver"] = BUILTIN_PLAN_DRIVER
         entry["build_inputs"] = build_input_record(
             action,
             installed_versions=getattr(result, "installed_versions", {}) or {},

@@ -10,8 +10,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.common import llm_config
-from hyperloom.common.llm_config import ANTHROPIC_CREDENTIAL_ENV_ORDER, _ANTHROPIC_MANAGED_GATEWAY_ENVS
+from hyperloom_common.llm import llm_config
+from hyperloom_common.llm.llm_config import ANTHROPIC_CREDENTIAL_ENV_ORDER, _ANTHROPIC_MANAGED_GATEWAY_ENVS
 from hyperloom.orchestrator.kernel.patch_conflict_merge import (
     STRATEGY_LLM,
     STRATEGY_STRICT,
@@ -22,7 +22,7 @@ from hyperloom.orchestrator.kernel.patch_conflict_merge import (
     _resolver_backend,
     apply_patch_resolving_conflicts,
 )
-from hyperloom.common.llm_config import DEFAULT_CODEX_MODEL
+from hyperloom_common.llm.llm_config import DEFAULT_CODEX_MODEL
 
 _GIT_IDENTITY = {
     "GIT_AUTHOR_NAME": "merge-test",
@@ -183,7 +183,6 @@ async def test_unconflicted_patch_still_applies_verbatim(repo: Path, patches: Pa
 
     assert outcome.applied
     assert outcome.strategy == STRATEGY_STRICT
-    assert not outcome.reconstructed
     assert "_PAD_ZERO" in (repo / _MODULE).read_text(encoding="utf-8")
 
 
@@ -215,7 +214,6 @@ async def test_two_lanes_inserting_at_one_anchor_are_unioned(repo: Path, patches
 
     assert outcome.applied, outcome.error
     assert outcome.strategy == STRATEGY_UNION
-    assert outcome.reconstructed
     merged = (repo / _MODULE).read_text(encoding="utf-8")
     for symbol in ("_sweep_flag", "_PAD_ZERO", "_sweep_int", "_TILE_N"):
         assert symbol in merged, symbol

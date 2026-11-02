@@ -15,11 +15,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, ClassVar
 
-from hyperloom.common.coerce import first_text, to_float, to_int, to_str_list
-from hyperloom.common.env import env_bool
+from hyperloom_common.coerce import first_text, to_float, to_int, to_str_list
+from hyperloom_common.env import env_bool
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.gain_math import gain_pct, gain_pct_or_zero
-from hyperloom.common.io import atomic_write_json
+from hyperloom_common.io import atomic_write_json
 from hyperloom.common.perf_metric import (
     AGENTX_KEEP_P50_THRESHOLD_PCT,
     GRADED_INTVTY,
@@ -38,11 +38,12 @@ from hyperloom.common.perf_metric import (
     resolve_grading_anchor_perf,
     total_tput_of,
 )
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.timeutil import now_iso
 from hyperloom.plugs import progress as _progress
-from hyperloom.common.jsonio import read_json_strict
+from hyperloom_common.jsonio import read_json_strict
 from hyperloom.common.profile_args import sanitize_profile_server_args
 from hyperloom.inference_optimizer.grading import resolved_grading
+from hyperloom.inference_optimizer.grid_server_args import strip_benchmark_harness_flags
 
 from .kernel_decision_settings import _DEFAULT_ATTEMPTS_HISTORY
 from .failure_evidence import tail_excerpt
@@ -1073,6 +1074,18 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
         """Serialize this state to a plain JSON-compatible dict."""
         return asdict(self)
 
+    @property
+    def current_best_launch_args(self) -> str | None:
+        """The complete server args the current best was launched with, as a serving recipe.
+
+        Read from the promoted measurement's launch evidence: what the launch path composed from every layer --
+        reference recipe, operator ``--server-args``, the optimizer's delta -- where ``extra_server_args`` holds the
+        delta alone. ``None`` when that launch was not recorded.
+        """
+        evidence = ((self.current_best or {}).get("measurement") or {}).get("launch_evidence") or {}
+        launched = evidence.get("requested_server_args")
+        return None if launched is None else strip_benchmark_harness_flags(launched)
+
     def save(self, session_dir: Path) -> None:
         """Atomically write ``state.json`` (tmp file + ``os.replace``).
 
@@ -1105,10 +1118,11 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
             if cb:
                 from hyperloom.inference_optimizer import reference_script
 
+                launched = self.current_best_launch_args
                 text = reference_script.render_reference_script(
                     framework=str(self.framework or os.environ.get("FRAMEWORK", "sglang")),
                     launch=reference_script.LaunchSettings(
-                        server_args=str(cb.get("extra_server_args") or ""),
+                        server_args=str(cb.get("extra_server_args") or "") if launched is None else launched,
                         envs=dict(cb.get("extra_envs") or {}),
                         overlay_pythonpath=str(cb.get("final_overlay") or ""),
                         unset_envs=to_str_list(cb.get("unset_envs")),
@@ -1596,10 +1610,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
         attempts_attr = f"{action}_attempts"
         last_attr = f"last_{action}"
         result = attempt.result or {}
-        metric_key, metric_kind = _KEY_METRIC_MAP.get(
-            action,
-            ("output_throughput", "output_throughput"),
-        )
+        metric_key, metric_kind = _KEY_METRIC_MAP[action]
         raw_metric = result.get(metric_key)
         try:
             key_metric: float | None = float(raw_metric) if isinstance(raw_metric, (int, float)) else None

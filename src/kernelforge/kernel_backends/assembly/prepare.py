@@ -20,7 +20,7 @@ import yaml
 
 from kernelforge.kernel_backends.assembly.capture import bind_compile
 from kernelforge.kernel_backends.assembly.compiler import _validate_source
-from kernelforge.utils.durable_io import atomic_write_text
+from hyperloom_common.io import DURABLE, atomic_write_text
 from kernelforge.evaluation.benchmark.runner import BenchRun, bench_wallclock, calculate_mean_case_speedup
 from kernelforge.evaluation.correctness.canonical import accept_candidate
 from kernelforge.evaluation.correctness.numerical import validate_contract, validate_source_independence
@@ -449,7 +449,7 @@ async def prepare_assembly(
             "binding_manifest_sha256": _digest(manifest) if capture else "",
             **evidence,
         }
-        atomic_write_text(record_path, json.dumps(record, indent=2) + "\n")
+        atomic_write_text(record_path, json.dumps(record, indent=2) + "\n", options=DURABLE)
         committed = True
         score = evidence["roundtrip_mean_case_speedup"]
         print(

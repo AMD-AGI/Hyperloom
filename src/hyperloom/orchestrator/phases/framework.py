@@ -12,7 +12,7 @@ from pathlib import Path
 from collections.abc import Collection, Mapping
 from typing import TYPE_CHECKING, Any, NamedTuple
 
-from hyperloom.common.coerce import first_str, to_list, to_mapping
+from hyperloom_common.coerce import first_str, to_list, to_mapping
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 
 from . import machine_state as _phase_state
