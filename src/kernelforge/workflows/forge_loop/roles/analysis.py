@@ -1450,7 +1450,7 @@ class AnalysisAgentService:
         """The bundle's manifest and its per-case status lists, or the reason it is not one."""
         try:
             manifest = json.loads((root / "manifest.json").read_text())
-        except Exception as error:
+        except (OSError, ValueError) as error:
             raise AnalysisBundleError(f"invalid manifest.json: {error}") from error
         if not isinstance(manifest, dict):
             raise AnalysisBundleError("manifest.json must be an object")

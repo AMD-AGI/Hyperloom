@@ -1262,7 +1262,7 @@ def _write_model_gate_breakdown(
         from ..breakdown import write_breakdown_json
 
         write_breakdown_json(session_dir)
-    except Exception as exc:  # isolation boundary: the fail-fast session_breakdown.json
+    except (OSError, ValueError, TypeError) as exc:
         log.warning("session_breakdown.json write failed on %s fail-fast", failure_label, exc_info=True)
         print(
             f"WARNING: failed to write session_breakdown.json on {failure_label} fail-fast: {exc!r}",
@@ -1304,7 +1304,7 @@ def _emit_breakdown_to_langfuse(session_dir: Path) -> None:
         flush_session(session_dir)
         patch_breakdown_langfuse(session_dir)
         record_session_breakdown(session_dir)
-    except Exception as exc:  # outermost telemetry sink: never masks the gate failure
+    except (OSError, ValueError) as exc:
         log.warning("session_breakdown Langfuse push failed on fail-fast", exc_info=True)
         print(
             f"WARNING: failed to emit session_breakdown to Langfuse on fail-fast: {exc!r}",
@@ -1329,7 +1329,7 @@ def _persist_gate_stop_report(session_dir: Path, *, stop_reason: str, reason: st
         state.closing_phase = True
         state.save(session_dir)
         write_stop_report(session_dir, state, stop_detail=reason)
-    except Exception as exc:  # isolation boundary: the gate stop report
+    except (OSError, ValueError, TypeError) as exc:
         log.warning("%s stop report persist failed", warning_label, exc_info=True)
         print(
             f"WARNING: failed to persist {warning_label} stop report: {exc!r}",

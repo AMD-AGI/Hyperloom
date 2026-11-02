@@ -12,6 +12,7 @@ from fnmatch import fnmatch
 import os
 import shutil
 import stat
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -635,7 +636,7 @@ class WorkspaceGuard:
             try:
                 self._restore_baseline()
                 remaining = self._read_only_violations()
-            except Exception as exc:
+            except (WorkspaceSafetyError, OSError, subprocess.SubprocessError) as exc:
                 raise WorkspaceSafetyError(
                     f"the read-only session changed the workspace and automatic restoration failed: {exc}"
                 ) from exc
@@ -652,7 +653,7 @@ class WorkspaceGuard:
             # mode exists to carry through a rejection, so recover the snapshot instead.
             try:
                 self._restore_baseline()
-            except Exception as exc:
+            except (WorkspaceSafetyError, OSError, subprocess.SubprocessError) as exc:
                 # Not a verdict: rollback also runs on the way out of a timeout or a transport failure, so marking
                 # this one a rejection reported an expired clock as a deterministic safety stop and abandoned work a
                 # retry could have finished.

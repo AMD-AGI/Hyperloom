@@ -40,6 +40,13 @@ Consult these SharedState surfaces in order before re-proposing:
 4. **`baseline_failure_streak`** (PRELUDE only — consecutive failed baselines).
    Once this hits 3, Coordinator sets `stop_reason='baseline_failed'`
    and the run terminates; recover BEFORE the third failure.
+   A retry is also only booted while PRELUDE still has time outside the
+   optimization reserve: past that line the executor refuses the retry
+   unlaunched and the run closes on `stop_reason='prelude_budget_exhausted'`,
+   which can happen on the first failure of the leg. Only this leg's failures
+   are priced that way — a resumed session still gets one baseline on its new
+   budget. The time you spend before asking for a retry is part of what pays
+   for it.
 
 ## Baseline fingerprint (PRELUDE)
 

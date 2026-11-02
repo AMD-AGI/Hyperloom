@@ -281,7 +281,7 @@ class OutcomeMixin:
             if require_durable:
                 self._require_durable_outcome(result, decision_label)
             return True
-        except Exception as error:
+        except (OSError, subprocess.SubprocessError, ValueError) as error:
             if require_durable:
                 raise RuntimeError(f"failed to finalize iteration {result.iteration} checkpoint") from error
             log.debug("run_state: iteration reduce/save failed", exc_info=True)
@@ -482,7 +482,7 @@ class OutcomeMixin:
                 references=PrReferenceNote(self.ic.pr_reference_labels, self.ic.pr_reference_context),
             )
         except Exception as error:  # isolation boundary: one iteration's lesson summarizer step
-            log.debug("lessons: summarizer step failed", exc_info=True)
+            log.warning("lessons: summarizer step failed", exc_info=True)
             return SummaryOutcome(reason=f"{type(error).__name__}: {str(error)[:200]}")
         finally:
             self._checkpoint_llm_usage()
@@ -534,17 +534,14 @@ class OutcomeMixin:
                 has_narrative = True
                 print(f"  [lesson] machine-recorded iter {iteration} from gate findings: {len(fallback)} chars")
 
-        try:
-            scope = self._lesson_scope(
-                iteration,
-                session_sink,
-                decision=decision,
-                result=result,
-                agent_narrative=agent_narrative,
-            )
-            _append_lesson_scope(store, iteration, scope, agent_narrative=agent_narrative)
-        except Exception:  # isolation boundary: one iteration's scope line; the outcome line still records
-            log.debug("lessons: scope append failed", exc_info=True)
+        scope = self._lesson_scope(
+            iteration,
+            session_sink,
+            decision=decision,
+            result=result,
+            agent_narrative=agent_narrative,
+        )
+        _append_lesson_scope(store, iteration, scope, agent_narrative=agent_narrative)
 
         turns, failure = (None, "") if has_narrative else (result.turns, summary_failure)
         store.append_outcome(

@@ -148,7 +148,7 @@ class BestPublicationMixin:
                 candidate = json.loads(path.read_text())
             except FileNotFoundError:
                 continue
-            except Exception as error:
+            except (OSError, ValueError) as error:
                 raise ValueError(f"invalid best publication metadata: {path}") from error
             if (
                 int(candidate.get("iteration", 0) or 0) == best.iteration
