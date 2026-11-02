@@ -83,6 +83,25 @@ def apply_serving_gate(
         _clear_kernel_keep_checkpoint(out)
 
 
+_NOT_WIRED_NOTE = (
+    "KERNEL OK but NOT WIRED IN: {reason}. The microbench measured the fused "
+    "entry point directly, so its speedup says nothing about the served model, "
+    "whose end-to-end gain is exactly zero. | LESSON: authoring the fused module "
+    "is half the deliverable -- replace the ORIGINAL call site in the framework's "
+    "forward path with a call to the fused entry point, under the same env gate, "
+    "and leave the unfused code as the fallback branch."
+)
+
+_SERVING_CRASH_NOTE = (
+    "KERNEL OK but SERVING CRASHED (CUDA-graph-ON decode): {reason} "
+    "| LESSON: the kernel is NOT CUDA-graph-capture safe. Use a STATIC "
+    "launch grid (no data-dependent grid size), pre-allocate every "
+    "scratch/output tensor ONCE outside the fused path (no per-call "
+    "torch.empty/zeros/cat), avoid host<->device syncs, and index "
+    "strictly in bounds for every token count. Re-author CUDA-graph safe."
+)
+
+
 def _run_serving_smoke(recipe, base_note: str, session: ServingSession, out: Path) -> tuple[str, str, str]:
     """Wiring-check + CUDA-graph-ON serving smoke for ONE recipe."""
     flags = dict.fromkeys(recipe.env_flag.split(), "1")
@@ -97,14 +116,7 @@ def _run_serving_smoke(recipe, base_note: str, session: ServingSession, out: Pat
     )
     if wiring.verdict == "not_wired":
         log.warning("fusion not wired into %s: %s", recipe.pattern_id, wiring.reason)
-        note = (
-            f"KERNEL OK but NOT WIRED IN: {wiring.reason}. The microbench measured the fused "
-            f"entry point directly, so its speedup says nothing about the served model, "
-            f"whose end-to-end gain is exactly zero. | LESSON: authoring the fused module "
-            f"is half the deliverable -- replace the ORIGINAL call site in the framework's "
-            f"forward path with a call to the fused entry point, under the same env gate, "
-            f"and leave the unfused code as the fallback branch."
-        )
+        note = _NOT_WIRED_NOTE.format(reason=wiring.reason)
         return "not_wired", note, "not_wired"
     if wiring.verdict == "wired":
         log.info("fusion wiring confirmed for %s: %s", recipe.pattern_id, wiring.reason)
@@ -132,14 +144,7 @@ def _run_serving_smoke(recipe, base_note: str, session: ServingSession, out: Pat
         return "ok", f"{base_note} | SERVING SMOKE OK{wiring_note}", ""
     if verdict.blames_kernel:
         log.warning("serving smoke FAILED for %s: %s", recipe.pattern_id, reason)
-        note = (
-            f"KERNEL OK but SERVING CRASHED (CUDA-graph-ON decode): {reason} "
-            f"| LESSON: the kernel is NOT CUDA-graph-capture safe. Use a STATIC "
-            f"launch grid (no data-dependent grid size), pre-allocate every "
-            f"scratch/output tensor ONCE outside the fused path (no per-call "
-            f"torch.empty/zeros/cat), avoid host<->device syncs, and index "
-            f"strictly in bounds for every token count. Re-author CUDA-graph safe."
-        )
+        note = _SERVING_CRASH_NOTE.format(reason=reason)
         return "serving_crash", note, "serving_crash"
     log.warning(
         "serving smoke unconfirmed for %s at stage %s (keeping micro KEEP): %s",

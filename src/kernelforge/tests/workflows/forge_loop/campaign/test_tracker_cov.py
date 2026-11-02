@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from kernelforge.workflows.forge_loop.campaign.schema import Experiment, ExperimentSubject
 from kernelforge.workflows.forge_loop.campaign.experiment import ExperimentTracker
 from kernelforge.workflows.forge_loop.campaign.schema import Iteration
@@ -17,11 +19,18 @@ def test_on_complete_callback_fires(tmp_path):
     exp = tracker.create(ExperimentSubject(task_id="t", backend="ck"))
     seen = []
     tracker.on_complete(lambda e: seen.append(e.experiment_id))
-    # A raising callback must be swallowed (contextlib.suppress).
-    tracker.on_complete(lambda e: (_ for _ in ()).throw(RuntimeError("boom")))
     returned = tracker.mark_complete(exp.experiment_id)
     assert returned.experiment_id == exp.experiment_id
     assert seen == [exp.experiment_id]
+
+
+def test_a_raising_on_complete_callback_propagates_after_the_status_is_saved(tmp_path):
+    tracker = ExperimentTracker(tmp_path)
+    exp = tracker.create(ExperimentSubject(task_id="t", backend="ck"))
+    tracker.on_complete(lambda e: (_ for _ in ()).throw(RuntimeError("boom")))
+    with pytest.raises(RuntimeError, match="boom"):
+        tracker.mark_complete(exp.experiment_id)
+    assert tracker.get(exp.experiment_id).status == "completed"
 
 
 def test_set_llm_usage_and_kb_experience(tmp_path):

@@ -264,7 +264,7 @@ def test_append_conversation_swallows_oserror(tmp_path, monkeypatch):
     ct.append_conversation(session_dir=tmp_path, record=rec)
 
 
-def test_append_conversation_langfuse_mirror_failure_swallowed(tmp_path, monkeypatch):
+def test_append_conversation_langfuse_mirror_defect_raises_after_the_ledger_write(tmp_path, monkeypatch):
     written = {}
 
     def _ok(dest, row, **k):
@@ -272,14 +272,14 @@ def test_append_conversation_langfuse_mirror_failure_swallowed(tmp_path, monkeyp
 
     monkeypatch.setattr(ct, "append_jsonl", _ok)
 
-    # Force the Langfuse mirror import/get_emitter to blow up; must be swallowed.
     import hyperloom.inference_optimizer.trace.langfuse_emitter as le
 
     def _boom(_dir):
-        raise RuntimeError("langfuse down")
+        raise RuntimeError("emitter defect")
 
     monkeypatch.setattr(le, "get_emitter", _boom)
 
     rec = ct.ConversationRecord(session_id="s1", component="orchestration", prompt="p", response="r")
-    ct.append_conversation(session_dir=tmp_path, record=rec)
+    with pytest.raises(RuntimeError, match="emitter defect"):
+        ct.append_conversation(session_dir=tmp_path, record=rec)
     assert written["row"]["component"] == "orchestration"

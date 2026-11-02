@@ -39,6 +39,12 @@ def _git(repo: Path, *args: str) -> str:
     return completed.stdout.strip()
 
 
+@pytest.fixture(autouse=True)
+def _host_gpu(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Publication pins identity.gpu from the host; these tests run on one that has no rocminfo."""
+    monkeypatch.setenv("GPU_TARGET", "gfx950")
+
+
 @pytest.fixture
 def identity_payload() -> dict[str, str]:
     return {
