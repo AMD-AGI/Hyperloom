@@ -344,13 +344,27 @@ def _correct_kernel_agent_path_vars(file_vars: dict[str, str], env_path: Path) -
     return corrected
 
 
+def _kernel_agent_env_candidate() -> str | None:
+    """The kernel-agent env file path, derived the way install.sh writes it.
+
+    ``$KERNEL_AGENT_ENV``, else ``$HYPERLOOM_RUNTIME_DIR/kernel-agent.env.sh``, else
+    ``$USER_DATA_PATH/runtime/kernel-agent.env.sh`` (install.sh's ``KERNEL_AGENT_ENV`` default).
+    """
+    explicit = os.environ.get("KERNEL_AGENT_ENV")
+    if explicit:
+        return explicit
+    runtime_dir = (os.environ.get("HYPERLOOM_RUNTIME_DIR") or "").strip()
+    if runtime_dir:
+        return str(Path(runtime_dir).expanduser() / "kernel-agent.env.sh")
+    user_data = (os.environ.get("USER_DATA_PATH") or "").strip()
+    if user_data:
+        return str(Path(user_data).expanduser() / "runtime" / "kernel-agent.env.sh")
+    return None
+
+
 def _load_kernel_agent_env_fallback() -> dict[str, Any]:
-    """Auto-source the installer-written kernel-agent env file (``$KERNEL_AGENT_ENV`` or ``$USER_DATA_PATH/runtime/kernel-agent.env.sh``)."""
-    candidate = os.environ.get("KERNEL_AGENT_ENV")
-    if not candidate:
-        user_data = (os.environ.get("USER_DATA_PATH") or "").strip()
-        if user_data:
-            candidate = str(Path(user_data).expanduser() / "runtime" / "kernel-agent.env.sh")
+    """Auto-source the installer-written kernel-agent env file (see ``_kernel_agent_env_candidate``)."""
+    candidate = _kernel_agent_env_candidate()
 
     if not candidate:
         print(

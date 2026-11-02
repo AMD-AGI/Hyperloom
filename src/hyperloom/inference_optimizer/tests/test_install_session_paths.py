@@ -50,9 +50,12 @@ def _installer(tmp_path: Path) -> Path:
     return assets / "install.sh"
 
 
-def _install(tmp_path: Path, checkout: Path, user_data_path: Path | None) -> subprocess.CompletedProcess[str]:
+def _install(
+    tmp_path: Path, checkout: Path, user_data_path: Path | None, **shell: str
+) -> subprocess.CompletedProcess[str]:
     env = {key: os.environ[key] for key in ("PATH", "HOME") if key in os.environ}
     env.update(REPO_ROOT=str(checkout), GEAK_REF=_PINNED_GEAK_REF, ANTHROPIC_BASE_URL="https://gateway.invalid")
+    env.update(shell)
     if user_data_path is not None:
         env["USER_DATA_PATH"] = str(user_data_path)
     proc = subprocess.run(
@@ -172,3 +175,42 @@ def test_preflight_takes_runtime_paths_from_the_callers_workspace(tmp_path):
     with mock.patch.dict(os.environ, base, clear=True):
         preflight_env._load_dotenv_fallback()
         assert os.environ["KERNEL_AGENT_ENV"] == "/c16/workspace/runtime/kernel-agent.env.sh"
+
+
+def _preflight_env_file(checkout: Path, shell: dict[str, str]) -> str:
+    """Run preflight's two env fallbacks as `hyperloom optimize` does and return the env file it loaded."""
+    base = {key: value for key, value in os.environ.items() if key not in (*_DERIVED_KEYS, "USER_DATA_PATH")}
+    with mock.patch.dict(os.environ, {**base, "REPO_ROOT": str(checkout), **shell}, clear=True):
+        preflight_env._load_dotenv_fallback()
+        outcome = preflight_env._load_kernel_agent_env_fallback()
+    return outcome["detail"]["env_file"]
+
+
+def test_preflight_finds_the_env_file_under_an_exported_runtime_dir(tmp_path, sessions):
+    """troubleshooting.md: export USER_DATA_PATH and a node-local HYPERLOOM_RUNTIME_DIR, install, then optimize."""
+    checkout, workspace, _ = sessions
+    runtime_dir = tmp_path / "var" / "lib" / "hyperloom" / "runtime"
+    shell = {"USER_DATA_PATH": str(workspace), "HYPERLOOM_RUNTIME_DIR": str(runtime_dir)}
+
+    _install(tmp_path, checkout, workspace, HYPERLOOM_RUNTIME_DIR=str(runtime_dir))
+
+    written = runtime_dir / "kernel-agent.env.sh"
+    assert written.is_file()
+    assert not _kernel_env(workspace).exists()
+    assert _preflight_env_file(checkout, shell) == str(written)
+
+
+def test_preflight_finds_the_env_file_under_a_runtime_dir_kept_in_dotenv(tmp_path, sessions):
+    """A single session whose operator-set HYPERLOOM_RUNTIME_DIR lives only in .env."""
+    checkout, workspace, _ = sessions
+    runtime_dir = tmp_path / "private-runtime"
+    (checkout / ".env").write_text(
+        f"USER_DATA_PATH={workspace}\nHYPERLOOM_RUNTIME_DIR={runtime_dir}\n", encoding="utf-8"
+    )
+
+    _install(tmp_path, checkout, None)
+
+    written = runtime_dir / "kernel-agent.env.sh"
+    assert written.is_file()
+    assert _dotenv_keys(checkout)["HYPERLOOM_RUNTIME_DIR"] == str(runtime_dir)
+    assert _preflight_env_file(checkout, {}) == str(written)

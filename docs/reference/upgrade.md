@@ -246,7 +246,7 @@ Earlier launchers might have waited for the Coordinator to emit a
 # launcher.sh
 - python3 -m hyperloom.inference_optimizer.cli optimize ... # expects setup as first action
 + bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install.sh"
-+ . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
++ . "${KERNEL_AGENT_ENV:-${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime}/kernel-agent.env.sh}"
 + ray stop --force; ulimit -Sn "${RAY_MIN_NOFILE:-65536}" 2>/dev/null || true; ray start --head --num-gpus="$RAY_NUM_GPUS" --include-dashboard=false --resources='{"serving_slot":1}'
 + python3 -m hyperloom optimize ...
 ```
@@ -369,7 +369,7 @@ For any minor or patch upgrade:
    refreshes generated LLM gateway aliases, and regenerates `kernel-agent.env.sh`.
 3. Re-source the env file:
    ```bash
-   . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
+   . "${KERNEL_AGENT_ENV:-${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime}/kernel-agent.env.sh}"
    ```
 4. To resume an ongoing session across the upgrade, first check the target
    release's upgrade section: a release that raises the `coordinator.db`
