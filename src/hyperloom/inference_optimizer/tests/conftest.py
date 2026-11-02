@@ -701,3 +701,17 @@ def make_mock_critic_coordinator(session_dir: Path):
         "critic": MockCriticBackend(),
     }
     return Coordinator(session_dir, backends=backends)
+
+
+def silent_backends() -> dict[str, object]:
+    """Orchestration and critic mock backends sharing one plan that only sends heartbeats."""
+    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+    from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
+
+    silent = ScriptedPlan(
+        turns=[], default_intent=Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"})
+    )
+    return {
+        "orchestration": MockBackend(silent, name="o"),
+        "critic": MockBackend(silent, name="c"),
+    }
