@@ -1283,6 +1283,7 @@ class _Forge:
 
     def __init__(self, root) -> None:
         self.started, self.returncode, self.root, self.lifetime_s = False, None, root, math.inf
+        self.cache_root = root / "cache"
 
     async def start(self, command, cwd, env):
         self.started = True
@@ -1329,7 +1330,7 @@ async def test_a_cli_waiting_on_its_long_dev_lease_is_woken_before_the_reaper_ta
     rig, tmp_path
 ):
     dev = await _forge_running(rig, tmp_path)
-    session = rig.session(nudge_waits_s=NO_WAITS, dev_leases=dev.leases, lease_wake_s=0.05)
+    session = rig.session(nudge_waits_s=NO_WAITS, dev_leases=dev.leases, wait_wake_s=0.05)
     running = asyncio.create_task(session.run())
     await _until(lambda: len(rig.runner.specs) == 1, "the launch")
 
@@ -1338,6 +1339,40 @@ async def test_a_cli_waiting_on_its_long_dev_lease_is_woken_before_the_reaper_ta
     assert "dev_sandbox_read" in rig.runner.sent[0] and dev.forge.alive()
     await session.stop()
     await asyncio.wait_for(running, 1)
+
+
+async def test_a_cli_waiting_on_its_test_is_woken_before_the_reaper_takes_its_silence_for_a_loss(rig):
+    await rig.toolbox_blackboard.write_request(request("r1", intent(BRANCH, rig.root)))
+    session = rig.session(nudge_waits_s=NO_WAITS, wait_wake_s=0.05)
+    running = asyncio.create_task(session.run())
+    await _until(lambda: len(rig.runner.specs) == 1, "the launch")
+
+    _end_turn(rig)
+    await _until(lambda: rig.runner.sent, "a wake while its test runs")
+    _end_turn(rig)
+    await _until(lambda: len(rig.runner.sent) == 2, "a wake again once the woken turn ended")
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+
+    assert len(rig.runner.specs) == 1, "a wake is no restart"
+    assert all("your test r1" in sent and "end your turn again to keep waiting" in sent for sent in rig.runner.sent)
+
+
+async def test_a_cli_waiting_on_another_branch_s_profile_of_its_head_is_woken_before_the_reaper_takes_it(rig):
+    shared = request(
+        "p1", intent(INTEGRATION_BRANCH, rig.root), RecipeDelta(), kind=TestKind.PROFILE, purpose=Purpose.PROFILE
+    )
+    await rig.toolbox_blackboard.write_request(shared)
+    session = rig.session(nudge_waits_s=NO_WAITS, wait_wake_s=0.05)
+    running = asyncio.create_task(session.run())
+    await _until(lambda: len(rig.runner.specs) == 1, "the launch")
+
+    _end_turn(rig)
+    await _until(lambda: rig.runner.sent, "a wake while the profile of its head runs")
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+
+    assert "the profile p1 of your head" in rig.runner.sent[0] and "your test" not in rig.runner.sent[0]
 
 
 async def test_a_cli_lost_while_its_long_dev_lease_s_process_runs_was_waiting_and_keeps_the_lease(rig, tmp_path):

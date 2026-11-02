@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The shared compiled-code cache is an opt-in of the local toolbox: off unless a directory is named (design 4.21).
+"""The shared compiled-code cache of the local toolbox: the directory named, else one below this host's temporary
+directory (design 4.21).
 
 What is proved here is the wiring only: which directory the host publishes to and the runner reads. That a cache serves
 a test and is published to is proved by the measure package's own tests, and on a GPU by the toolbox's measured runs.
@@ -9,6 +10,7 @@ a test and is published to is proved by the measure package's own tests, and on 
 
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +18,7 @@ import pytest
 
 from hyperloom.measure.runner.jit import JIT_CACHE_ENV
 from hyperloom_multibranch.toolbox.local_hosted import (
+    DEFAULT_JIT_STORE,
     JIT_STORE_ENV,
     LocalHostedToolbox,
     LocalOptions,
@@ -29,8 +32,17 @@ _RUNNER = "runner-1"
 
 @pytest.fixture(autouse=True)
 def _no_ambient_store(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Whatever the machine running the suite exports must not decide whether the cache is on."""
+    """Whatever the machine running the suite exports must not decide where the cache is."""
     monkeypatch.delenv(JIT_STORE_ENV, raising=False)
+
+
+@pytest.fixture
+def host_temp_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """This host's temporary directory, the test's own: the default cache lies below it."""
+    host_tmp = tmp_path / "host-tmp"
+    host_tmp.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(host_tmp))
+    return host_tmp
 
 
 def _runner_env(toolbox: LocalHostedToolbox) -> dict[str, str]:
@@ -48,9 +60,11 @@ async def _closing_build(tmp_path: Path, **extra: Any) -> tuple[LocalHostedToolb
     return toolbox, branch_env
 
 
-def test_no_directory_named_means_no_cache(tmp_path: Path) -> None:
-    assert jit_store_root(LocalOptions(), {}) is None
-    assert jit_store_root(LocalOptions(), {JIT_STORE_ENV: "  "}) is None, "a blank variable is not a directory"
+def test_no_directory_named_means_the_default_below_the_hosts_temporary_directory(host_temp_dir: Path) -> None:
+    default = (host_temp_dir / DEFAULT_JIT_STORE).resolve()
+
+    assert jit_store_root(LocalOptions(), {}) == default
+    assert jit_store_root(LocalOptions(), {JIT_STORE_ENV: "  "}) == default, "a blank variable is not a directory"
 
 
 def test_the_host_environment_names_the_directory_when_the_option_does_not(tmp_path: Path) -> None:
@@ -74,11 +88,15 @@ def test_a_relative_directory_is_made_absolute_because_the_runner_starts_elsewhe
     assert jit_store_root(LocalOptions(), {JIT_STORE_ENV: "store"}) == (tmp_path / "store").resolve()
 
 
-async def test_a_toolbox_built_without_a_directory_has_no_cache_anywhere(tmp_path: Path) -> None:
+async def test_a_toolbox_built_without_a_directory_publishes_to_the_default_and_its_runners_read_it(
+    tmp_path: Path, host_temp_dir: Path
+) -> None:
     toolbox, branch_env = await _closing_build(tmp_path)
 
-    assert toolbox.backend._config.jit_store is None
-    assert JIT_CACHE_ENV not in _runner_env(toolbox) and JIT_CACHE_ENV not in branch_env
+    published = toolbox.backend._config.jit_store
+    assert published is not None and published.root == (host_temp_dir / DEFAULT_JIT_STORE).resolve()
+    assert _runner_env(toolbox)[JIT_CACHE_ENV] == str(published.root)
+    assert JIT_CACHE_ENV not in branch_env, "the agent's own sandboxes are not told where the cache is"
 
 
 async def test_a_directory_in_the_options_is_where_the_host_publishes_and_the_runner_reads(tmp_path: Path) -> None:

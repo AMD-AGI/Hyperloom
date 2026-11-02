@@ -685,7 +685,8 @@ class LocalAgentRunner:
             await self._sleep(self._poll_interval)
 
     def _beat(self, session: _Session) -> None:
-        """Refresh the mtime of the heartbeat file, which is what the reap loop and ``poll`` read."""
+        """Refresh the mtime of the heartbeat file, which ``poll`` reads; the reap loop reads only the CLI's own output
+        (:func:`~hyperloom.orchestrator.specialists.reap_watch.specialist_activity_paths`)."""
         if session.finished_mono is not None:
             return
         now = self._wall()

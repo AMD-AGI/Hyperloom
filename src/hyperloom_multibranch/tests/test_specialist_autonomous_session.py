@@ -36,6 +36,7 @@ from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, T
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.local.blackboard import LEARNING_MAX_CHARS
 from hyperloom_multibranch.blackboard.tests.factories import result
+from hyperloom_multibranch.specialist import autonomous_session
 from hyperloom_multibranch.specialist.agent_onboarding import AgentSpec, CommandResult, OnboardingSetup
 from hyperloom_multibranch.specialist.agent_session import BranchPlace
 from hyperloom_multibranch.specialist.agent_manifest import AgentManifest
@@ -146,6 +147,10 @@ for number, seqs in enumerate(plan["keeps"], start=1):
     (workspace / "vllm" / "config.py").write_text(f"max_num_seqs = {seqs}\\n")
     if number == 1:
         (workspace / "vllm" / "first.py").write_text("FIRST = 1\\n")
+        if plan["scratch"]:
+            (workspace / "eval").mkdir()
+            (workspace / "eval" / "server.log").write_bytes(b"Loading 10%\\r 20%\\r 30%\\n")
+            (workspace / "eval" / "gpucore.1.gpu").write_bytes(bytes(range(256)) * 64)
     git("add", "-A")
     git("commit", "-qm", f"keep {number}")
     commit = git("rev-parse", "HEAD").strip()
@@ -252,6 +257,8 @@ class Component:
     bad_sha: bool = False
     #: ``append``, ``replace`` or ``given``: what the agent does to the value of AITER_CONFIG_GEMM_A8W8 it was given.
     parts: str = ""
+    #: Whether the first keep also commits the agent's scratch outside vLLM: a log with progress bars and a core dump.
+    scratch: bool = False
 
 
 async def _until(condition, what: str, seconds: float = 10.0) -> None:
@@ -1315,6 +1322,40 @@ async def test_the_latest_snapshot_is_imported_with_every_keep_it_is_chained_fro
     assert env not in request.delta.config.envs
     notices = await rig.notices()
     assert any(note.startswith(f"{NOTICE} keep 2 imported") and "seqs 512" in note for note in notices)
+
+
+async def test_a_keep_s_files_outside_the_component_never_reach_its_import_and_are_named_in_the_branch_log(
+    tmp_path: Path,
+) -> None:
+    rig = await _rig(tmp_path, Component(keeps=(256,), gap=0.1, scratch=True), start_seconds=0.2)
+
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    await _until(lambda: rig.toolbox.requests, "the import")
+    await rig.toolbox_blackboard.write_result(result("r1"))
+    with pytest.raises(SessionFinished):
+        await asyncio.wait_for(running, 10)
+
+    [request] = rig.toolbox.requests
+    patch = rig.patch(request)
+    assert "+FIRST = 1" in patch and "eval/" not in patch
+    notices = await rig.notices()
+    assert any("keep 1" in note and "eval/gpucore.1.gpu" in note and "eval/server.log" in note for note in notices)
+
+
+async def test_a_keep_whose_source_change_is_over_the_size_cap_is_refused_in_the_branch_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(autonomous_session, "MAX_SOURCE_PATCH_BYTES", 64)
+    rig = await _rig(tmp_path, Component(keeps=(256,), gap=0.1, tail=1.0), start_seconds=0.2)
+
+    await rig.session.preflight()
+    with pytest.raises(SessionFinished):
+        await asyncio.wait_for(rig.session.run(), 10)
+
+    assert not rig.toolbox.requests
+    notices = await rig.notices()
+    assert any("keep 1 cannot be read" in note and "64 bytes" in note for note in notices)
 
 
 async def test_a_snapshot_made_on_a_commit_mb_never_saw_is_refused_in_the_branch_log_and_skipped(

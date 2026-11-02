@@ -83,6 +83,9 @@ _MOVED = "Since your last turn ended, the integration head moved."
 _LEASE_WAKE = """\
 Your long dev lease's process still runs. Read its progress with dev_sandbox_read if you want to, act on it, or end \
 your turn again to keep waiting."""
+_WAIT_WAKE = """\
+Nothing new arrived for your branch, and this still runs: {running}. A result wakes you as it lands: act meanwhile if \
+you have something to do, or end your turn again to keep waiting."""
 
 _NUDGE = """\
 Your turn ended with no test of yours running and nothing new for your branch. Nothing arrives on its own: a brief \
@@ -628,6 +631,14 @@ def lease_wake_message() -> str:
     return _LEASE_WAKE
 
 
+def wait_wake_message(tests: Sequence[str], profiles: Sequence[str]) -> str:
+    """The message to a specialist whose turn ended while ``tests`` of its branch, or ``profiles`` another branch runs
+    of its head, still run, before its silence would be taken for a lost session."""
+    running = [f"your test {request_id}" for request_id in tests]
+    running += [f"the profile {request_id} of your head, which another branch runs" for request_id in profiles]
+    return _WAIT_WAKE.format(running="; ".join(running))
+
+
 def nudge_message() -> str:
     """The message to a specialist whose turn ended with nothing of its own running and nothing new arrived."""
     return _NUDGE
@@ -694,5 +705,6 @@ __all__ = [
     "prompt_versions",
     "resume_message",
     "role_prompt",
+    "wait_wake_message",
     "wake_message",
 ]

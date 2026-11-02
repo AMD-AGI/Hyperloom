@@ -348,7 +348,7 @@ def test_the_tables_of_a_vllm_image_s_aiter_are_the_image_s_not_the_agent_s_rows
     # Ruby, 2026-10-31: in the vLLM image aiter lives in the Python's site-packages, not the SGLang workspace, and its
     # default tables were read as the agent's own rows.
     configs = tmp_path / "site-packages" / "aiter" / "configs"
-    monkeypatch.setattr(agent_import, "image_aiter_configs", lambda: configs)
+    monkeypatch.setattr(agent_import, "image_configs", lambda: configs)
     defaults = [configs / "bf16_tuned_gemm.csv", configs / "model_configs" / "llama70B_bf16_tuned_gemm.csv"]
     own = tmp_path / "worktree" / "arbor" / "aiter_tables" / "qwen3_bf16_tuned_gemm.csv"
     texts = ("M,N,K\n1,4096,4096\n", "M,N,K\n2,4096,4096\n", "M,N,K\n8,6144,4096\n")
@@ -601,3 +601,11 @@ async def test_a_keep_s_removal_from_the_resolved_launch_stays_on_the_head_s_lau
 
     assert head.launch == LaunchConfig(ROOT.launch.server_args, kept.envs, remove_args=(REPLAYSSM,))
     assert await import_delta(kept, root=ROOT, head=head, component="sglang", stores=_stores(Store())) is None
+
+
+def test_a_keep_s_patch_is_read_byte_for_byte_with_a_lone_carriage_return_in_an_added_file(tmp_path: Path) -> None:
+    # A server log with a progress bar, as Arbor's landed tree carries: universal newlines would split its line.
+    patch = "--- /dev/null\n+++ b/eval/server.log\n@@ -0,0 +1 @@\n+Loading 10%\r 20%\r 30%\n"
+    _arbor_keep(tmp_path, "", {})
+    (tmp_path / "0001" / "change.patch").write_bytes(patch.encode())
+    assert _read(tmp_path, ()).source_patch == patch

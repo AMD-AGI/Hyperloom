@@ -21,8 +21,8 @@ Commands run in a :class:`~hyperloom_multibranch.specialist.agent_sandbox.LocalA
 lower CPU priority, or, on the hosted backend, in the leased ``dev`` sandbox
 (:class:`~hyperloom_multibranch.specialist.remote_sandbox.RemoteAgentSandbox`), whose root is on the shared storage
 below the branch's directory. Either way they import the branch worktree's source, with every JIT and kernel cache in
-the sandbox's root: a cache beside the package it compiles for would be in the worktree, and its files in the next
-patch. A lease's sandbox lives as long as the lease asks, unless the toolbox lets it live less, which then bounds the
+the sandbox's :attr:`DevSandbox.cache_root`: a cache beside the package it compiles for would be in the worktree, and
+its files in the next patch. A lease's sandbox lives as long as the lease asks, unless the toolbox lets it live less, which then bounds the
 lease. A lease whose sandbox is not up within :attr:`DevLimits.lease_wait_s` answers that it is starting, so the MCP
 call returns, and the specialist's next lease call waits for the same sandbox again; a command meanwhile is refused
 (``lease_not_ready``). Nothing a dev sandbox measures is written as a test, claim or judgement; its records are branch-log notices and the LLM spend the
@@ -62,7 +62,7 @@ from hyperloom_multibranch.contracts.toolbox import (
     RequestRejected,
 )
 from hyperloom_multibranch.specialist.agent_onboarding import AgentProcess, AgentSandbox
-from hyperloom_multibranch.specialist.agent_sandbox import LocalAgentSandbox
+from hyperloom_multibranch.specialist.agent_sandbox import LocalAgentSandbox, framework_read_only
 from hyperloom_multibranch.specialist.agent_session import Processes
 from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.remote_sandbox import RemoteAgentSandbox, forwarded_env
@@ -141,8 +141,12 @@ class LeaseSource(Protocol):
 
 
 class DevSandbox(AgentSandbox, Protocol):
-    #: The sandbox's own directory, on this host's file system, where its caches and the specialist's files go.
+    #: The sandbox's own directory, on this host's file system, where the specialist's files go.
     root: Path
+
+    @property
+    def cache_root(self) -> Path:
+        """Where the sandbox's JIT and kernel caches go."""
 
     @property
     def lifetime_s(self) -> float:
@@ -333,12 +337,12 @@ class DevLeases:
     async def run(self, branch: str, command: str, cwd: str | None, timeout_s: float) -> Ran:
         held = self._touch(branch)
         timeout = min(timeout_s, self._limits.run_s)
-        done = await held.sandbox.run(command, _cwd(held, cwd), _caches(held.sandbox.root), timeout)
+        done = await held.sandbox.run(command, _cwd(held, cwd), _caches(held.sandbox.cache_root), timeout)
         return Ran(done.returncode, done.output)
 
     async def start(self, branch: str, command: str, cwd: str | None) -> Started:
         held = self._touch(branch)
-        process = await held.sandbox.start(command, _cwd(held, cwd), _caches(held.sandbox.root))
+        process = await held.sandbox.start(command, _cwd(held, cwd), _caches(held.sandbox.cache_root))
         number = len(held.processes) + 1
         held.processes[number] = process
         return Started(number)
@@ -568,13 +572,21 @@ class DevLeases:
 #: The ledger Forge's loop and FlyDSL rewrite keep in each experiments directory (``kernelforge.tracker.usage_ledger``):
 #: the running total of the LLM calls made from it.
 FORGE_LEDGER = "llm_usage.json"
+#: The directories forge-loop clones its workspace into for one fan-out round (``kernelforge``'s ``LANE_ROOT_PREFIX``)
+#: and removes after it: a lane's ledger is a copy of its run's, whose process records the lane's spend itself.
+FORGE_LANE_PREFIX = "forge-lanes-"
 
 
 def forge_spend(root: Path) -> dict[Path, Spend]:
     """What each Forge ledger under ``root`` says its runs spent on LLM calls, by ledger path."""
     spent = {}
     for path in sorted(root.rglob(FORGE_LEDGER)):
-        ledger = json.loads(path.read_text(encoding="utf-8"))
+        if any(part.startswith(FORGE_LANE_PREFIX) for part in path.relative_to(root).parts):
+            continue
+        try:
+            ledger = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            continue
         tokens = TokenCounts(
             input=int(ledger.get("input_tokens", 0)),
             output=int(ledger.get("output_tokens", 0)),
@@ -616,13 +628,16 @@ def _cwd(held: _Lease, cwd: str | None) -> Path:
 
 
 def _caches(root: Path) -> dict[str, str]:
-    return {name: str(root / "cache" / directory) for name, directory in CACHE_DIRS.items()}
+    return {name: str(root / directory) for name, directory in CACHE_DIRS.items()}
 
 
 def local_dev_sandboxes(
     worktrees: WorktreeFor, processes: Processes | None, limits: DevLimits = DevLimits()
 ) -> SandboxFor:
-    """Sandboxes on this host, importing the source of every component the branch's worktree holds."""
+    """Sandboxes on this host, importing the source of every component the branch's worktree holds, with the image's
+    installed frameworks read-only."""
+
+    read_only = framework_read_only()
 
     def sandbox(branch: str, lease: BranchLease) -> LocalAgentSandbox:
         base_env = {**os.environ, **lease.env}
@@ -634,6 +649,7 @@ def local_dev_sandboxes(
             branch,
             base_env,
             niceness=limits.niceness,
+            read_only=read_only,
         )
 
     return sandbox
@@ -820,6 +836,7 @@ __all__ = [
     "LeaseSource",
     "SandboxFor",
     "Starting",
+    "forge_spend",
     "hosted_dev_sandboxes",
     "local_dev_sandboxes",
     "register_dev_sandbox_tools",

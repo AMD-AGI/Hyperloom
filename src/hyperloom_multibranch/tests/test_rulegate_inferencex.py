@@ -43,6 +43,21 @@ def test_the_bar_is_twice_the_baseline_spread_above_a_floor(baselines, spread, b
     assert threshold.threshold_pct == pytest.approx(bar)
 
 
+def test_one_baseline_far_off_two_that_agree_is_left_out_of_the_bar():
+    threshold = DispersionThreshold((6224.0, 6217.0, 5113.0))
+    assert threshold.kept == (6224.0, 6217.0)
+    assert threshold.spread_pct == pytest.approx(0.08, abs=0.01)
+    assert threshold.threshold_pct == FLOOR_PCT
+
+
+@pytest.mark.parametrize(
+    "baselines",
+    [(1000.0, 1050.0, 950.0), (1000.0, 1010.0, 990.0), (1000.0, 1040.0), (1000.0, 1004.0, 960.0)],
+)
+def test_a_spread_without_one_clear_outlier_keeps_every_baseline(baselines):
+    assert DispersionThreshold(baselines).kept == baselines
+
+
 @pytest.mark.parametrize("baselines", [(1000.0,), (1000.0, 0.0), (1000.0, math.nan)])
 def test_the_spread_refuses_too_few_or_unusable_baselines(baselines):
     with pytest.raises(ValueError):

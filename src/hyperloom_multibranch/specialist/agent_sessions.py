@@ -33,7 +33,7 @@ from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import BranchLease
 from hyperloom_multibranch.specialist.agent_onboard import cli_onboard
 from hyperloom_multibranch.specialist.agent_onboarding import AgentSandbox, AgentSpec, OnboardingSetup
-from hyperloom_multibranch.specialist.agent_sandbox import LocalAgentSandbox
+from hyperloom_multibranch.specialist.agent_sandbox import LocalAgentSandbox, framework_read_only
 from hyperloom_multibranch.specialist.agent_session import AgentCommand, BranchPlace, Processes, SessionBlackboard
 from hyperloom_multibranch.specialist.agent_spend import AgentSpend
 from hyperloom_multibranch.specialist.autonomous_session import AGENT_DIR, AutonomousSession, AutonomousSetup
@@ -77,13 +77,16 @@ class AgentSandboxes(Protocol):
 
 @dataclass(frozen=True)
 class LocalAgentSandboxes:
-    """Sandboxes on this host, every process joining ``processes``."""
+    """Sandboxes on this host, every process joining ``processes``, with the image's installed frameworks read-only."""
 
     processes: Processes
+    read_only: tuple[Path, ...] = field(default_factory=framework_read_only)
 
     def sandbox(self, branch: str, place: BranchPlace, source: Path, lease: BranchLease) -> AgentSandbox:
         base_env = {**os.environ, **lease.env}
-        return LocalAgentSandbox(lease.gpu_ids, (source,), lease.root, self.processes, branch, base_env)
+        return LocalAgentSandbox(
+            lease.gpu_ids, (source,), lease.root, self.processes, branch, base_env, read_only=self.read_only
+        )
 
     def claude_config(self, place: BranchPlace) -> Path:
         return Path(os.environ.get(CLAUDE_CONFIG_ENV) or Path.home() / DEFAULT_CLAUDE_CONFIG)

@@ -26,6 +26,11 @@ NOISE_MULTIPLE = 2.0
 FLOOR_PCT = 0.6
 
 MIN_BASELINES = 2
+# One baseline this far from the median, and this many times the spread of the others, measured something else (a
+# test slowed by its neighbours): in session 8430b18e the root read 6224, 6217 and 5113, and the third alone doubled
+# into a 21.9% bar that no branch could clear.
+OUTLIER_MIN_PCT = 5.0
+OUTLIER_MULTIPLE = 4.0
 # PRELUDE measures the root this many times, so one failed measurement still leaves the bar its two.
 BASELINE_TESTS = 3
 
@@ -43,6 +48,10 @@ def _checked(value: float) -> float:
     if not (math.isfinite(value) and value > 0):
         raise ValueError(f"a throughput must be positive and finite, got {value!r}")
     return value
+
+
+def _spread_pct(values: tuple[float, ...]) -> float:
+    return statistics.stdev(values) / statistics.fmean(values) * 100.0
 
 
 def _gain(throughput: float, parent: Mapping[str, float]) -> float:
@@ -65,9 +74,20 @@ class DispersionThreshold:
             _checked(value)
 
     @property
+    def kept(self) -> tuple[float, ...]:
+        """The baselines the bar and the root's value are read from: all of them, but for one far off the others."""
+        if len(self.baselines) <= MIN_BASELINES:
+            return self.baselines
+        median = statistics.median(self.baselines)
+        far = max(range(len(self.baselines)), key=lambda index: abs(self.baselines[index] - median))
+        rest = self.baselines[:far] + self.baselines[far + 1 :]
+        off_pct = abs(self.baselines[far] - median) / median * 100.0
+        return rest if off_pct >= max(OUTLIER_MIN_PCT, OUTLIER_MULTIPLE * _spread_pct(rest)) else self.baselines
+
+    @property
     def spread_pct(self) -> float:
-        """The relative standard deviation of one measurement, in percent."""
-        return statistics.stdev(self.baselines) / statistics.fmean(self.baselines) * 100.0
+        """The relative standard deviation of one measurement, in percent, over :attr:`kept`."""
+        return _spread_pct(self.kept)
 
     @property
     def threshold_pct(self) -> float:
