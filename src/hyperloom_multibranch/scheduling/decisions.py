@@ -27,6 +27,7 @@ class DecisionKind(str, Enum):
     OPEN = "open"
     FORK = "fork"
     REPAIR = "repair"
+    SHARE = "share"
     SET_K = "set_k"
     STOP = "stop"
     JUDGE = "judge"

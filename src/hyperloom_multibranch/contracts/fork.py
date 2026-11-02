@@ -1,13 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Requests to the scheduler for a new branch, to carry a correctness fix that costs its branch performance or to
-repair the defect that blocked a gain, and the scheduler's answer.
+"""Requests to the scheduler for a new branch, to carry a correctness fix that costs its branch performance, to
+repair the defect that blocked a gain, or to run an Arbor agent on its share of the map a mapping branch made, and the
+scheduler's answer.
 
 On ``ACCEPTED`` the answer names the new branch. ``PENDING`` waits for a free branch slot and names the branch id
-reserved for it. The requesting specialist stays on its own branch either way. The scheduler cuts a repair branch
-itself; a fork's branch it has the gate land (:class:`ReservedBranches`) before it starts the branch's specialist, and
-a fork or repair it voids it hands back to the gate to record.
+reserved for it. The requesting specialist stays on its own branch either way. The scheduler cuts a repair or share
+branch itself; a fork's branch it has the gate land (:class:`ReservedBranches`) before it starts the branch's
+specialist, and a fork or repair it voids it hands back to the gate to record.
 """
 
 from __future__ import annotations
@@ -50,6 +51,17 @@ class RepairRequest:
             raise ValueError(f"only a blocked gain is repaired, not a {self.judgement.verdict.value} one")
 
 
+@dataclass(frozen=True)
+class ShareRequest:
+    """Asks for an agent branch, cut at ``start_commit``, that runs the agent ``agent`` on ``plan``, the file of its share
+    of the map ``from_branch`` made."""
+
+    from_branch: str
+    start_commit: str
+    agent: str
+    plan: str
+
+
 class AdmissionStatus(str, Enum):
     ACCEPTED = "accepted"
     PENDING = "pending"
@@ -77,6 +89,8 @@ class ForkAdmissionService(Protocol):
 
     async def admit_repair(self, request: RepairRequest) -> ForkAdmission: ...
 
+    async def admit_share(self, request: ShareRequest) -> ForkAdmission: ...
+
 
 class ReservedBranches(Protocol):
     """The rule gate's side of the branches the scheduler reserved for its forks and repairs, named by the branch.
@@ -99,4 +113,5 @@ __all__ = [
     "ForkRequest",
     "RepairRequest",
     "ReservedBranches",
+    "ShareRequest",
 ]

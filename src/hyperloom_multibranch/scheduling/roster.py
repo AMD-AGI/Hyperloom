@@ -12,7 +12,7 @@ already has one, so the emergency ``final-only`` run carries the dead session's 
 from __future__ import annotations
 
 from collections.abc import Collection, Iterable, Mapping
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -36,7 +36,8 @@ class BranchKind(str, Enum):
 class BranchOrigin(str, Enum):
     """Where a branch's start comes from: the root commit (integration), a direction the user wrote or a third-party
     agent the user named, both opening ahead of the opening batch, the opening batch, a later batch that refills freed
-    slots, or a rule-gate request: a fork for a correctness fix or a repair of a blocked gain."""
+    slots, a rule-gate request: a fork for a correctness fix or a repair of a blocked gain, or an Arbor agent's share of
+    the map a mapping branch made."""
 
     ROOT = "root"
     USER = "user"
@@ -45,6 +46,7 @@ class BranchOrigin(str, Enum):
     REFILL = "refill"
     FORK = "fork"
     REPAIR = "repair"
+    SHARE = "share"
 
     @property
     def cut_by_scheduler(self) -> bool:
@@ -60,9 +62,10 @@ class BranchOrigin(str, Enum):
 
     @property
     def driver(self) -> BranchDriver:
-        """Who drives the branch: the third-party agent the user named for an agent branch, else its specialist."""
+        """Who drives the branch: the third-party agent the user named for an agent or share branch, else its
+        specialist."""
 
-        return BranchDriver.AUTONOMOUS if self is BranchOrigin.AGENT else BranchDriver.SPECIALIST
+        return BranchDriver.AUTONOMOUS if self in (BranchOrigin.AGENT, BranchOrigin.SHARE) else BranchDriver.SPECIALIST
 
     @property
     def steered_by_judge(self) -> bool:
@@ -192,6 +195,7 @@ class Roster:
         self._entries: dict[str, BranchEntry] = {entry.branch: entry for entry in snapshot.entries}
         self._issued = snapshot.issued_branch_ids
         self._closed = snapshot.closed
+        self._held = dict(snapshot.held_slots)
         self._persist()
 
     @property
@@ -207,8 +211,28 @@ class Roster:
     def free_slots(self) -> int:
         if self._closed:
             return 0
-        taken = sum(1 for entry in self._entries.values() if entry.counts_toward_cap)
+        taken = sum(1 for entry in self._entries.values() if entry.counts_toward_cap) + sum(self._held.values())
         return max(self.caps.max_branches - taken, 0)
+
+    def hold(self, branch: str, slots: int) -> None:
+        """Keep ``slots`` free for the share branches the mapping branch ``branch`` will ask for, beside its own slot,
+        which its first share takes once it ends: no branch opened meanwhile takes them. The hold is given back slot by
+        slot as the shares are asked (:meth:`unhold`), and whole when ``branch`` stops."""
+
+        if slots > 0:
+            self._held[branch] = slots
+            self._persist()
+
+    def unhold(self, branch: str) -> None:
+        """Give back one slot ``branch`` holds, if it holds any, for a share it asks for to take."""
+
+        left = self._held.get(branch, 0) - 1
+        if left >= 0:
+            if left:
+                self._held[branch] = left
+            else:
+                del self._held[branch]
+            self._persist()
 
     def open_refusal(self) -> str:
         """Why no branch may be opened now, or ``""`` when one may; :meth:`open` raises :class:`RosterFull` with it."""
@@ -274,6 +298,7 @@ class Roster:
         entry = self._entries[branch]
         if entry.stop is not None:
             return entry
+        self._held.pop(branch, None)
         return self._update(entry, stop=stop)
 
     def quota_policy(self, busy: Collection[str], deadlines: Mapping[str, float]) -> QueuePolicy:
@@ -324,6 +349,7 @@ class Roster:
                 "caps": asdict(self.caps),
                 "closed": self._closed,
                 "issued_branch_ids": self._issued,
+                "held_slots": self._held,
                 "entries": [_entry_record(entry) for entry in self._entries.values()],
             },
         )
@@ -345,6 +371,7 @@ class _Snapshot:
     entries: tuple[BranchEntry, ...] = ()
     issued_branch_ids: int = 0
     closed: bool = False
+    held_slots: Mapping[str, int] = field(default_factory=dict)
 
 
 def _read_snapshot(snapshot_file: Path) -> _Snapshot:
@@ -352,7 +379,8 @@ def _read_snapshot(snapshot_file: Path) -> _Snapshot:
         return _Snapshot()
     document = read_json_strict(snapshot_file, require_dict=True)
     entries = tuple(_entry_from_record(record) for record in document["entries"])
-    return _Snapshot(entries, int(document["issued_branch_ids"]), bool(document["closed"]))
+    held = {str(branch): int(slots) for branch, slots in document.get("held_slots", {}).items()}
+    return _Snapshot(entries, int(document["issued_branch_ids"]), bool(document["closed"]), held)
 
 
 def _entry_from_record(record: dict[str, Any]) -> BranchEntry:

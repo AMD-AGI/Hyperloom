@@ -95,13 +95,15 @@ class BatchStart:
 class Launch:
     """What a branch's specialist starts on: the repair the branch was opened for, the focus the session's briefs keep
     for it unless ``None``, the direction the user wrote for a user branch, and the agent the user named for an agent's
-    branch with the file of its share of the session's directions, if it has one."""
+    branch with the file of its share of the session's directions, if it has one; ``map_for`` makes an agent branch a
+    mapping branch, which maps the directions those Arbor agents split (:attr:`BranchTask.map_for`)."""
 
     repair: RepairRequest | None = None
     focus: str | None = None
     direction: str = ""
     agent: str = ""
     plan: str = ""
+    map_for: tuple[str, ...] = ()
 
 
 class BranchControl:
@@ -172,6 +174,20 @@ class BranchControl:
         launches = tuple(Launch(focus="", agent=agent, plan=plan) for agent, plan in zip(agents, shares))
         return await self._open_named(BranchOrigin.AGENT, launches, start_commit, deadline)
 
+    async def open_map_branch(
+        self, map_for: tuple[str, ...], start_commit: str, deadline: float
+    ) -> tuple[BranchEntry, ...]:
+        """Open one :attr:`BranchOrigin.AGENT` branch at ``start_commit`` that maps the directions the Arbor agents
+        ``map_for`` split, with the first one's dossier pass; each share then opens as a branch the fork desk admits, into
+        the slots the mapping branch holds for them meanwhile."""
+
+        launch = Launch(focus="", agent=map_for[0], map_for=map_for)
+        opened = await self._open_named(BranchOrigin.AGENT, (launch,), start_commit, deadline)
+        for entry in opened:
+            if entry.stop is None:
+                self._roster.hold(entry.branch, len(map_for) - 1)
+        return opened
+
     async def _open_named(
         self, origin: BranchOrigin, launches: tuple[Launch, ...], start_commit: str, deadline: float
     ) -> tuple[BranchEntry, ...]:
@@ -194,8 +210,8 @@ class BranchControl:
         return self._roster.open(branch, origin=start.origin, start_commit=start.start_commit, k=k)
 
     async def start_admitted(self, admitted: AdmittedBranch, deadline: float) -> None:
-        """Open a repair, or a fork the rule gate has landed, that the fork desk admitted, and start its specialist by
-        ``deadline`` (clock seconds); a branch stopped meanwhile stays stopped."""
+        """Open a repair, a share, or a fork the rule gate has landed, that the fork desk admitted, and start its
+        specialist, or a share's agent, by ``deadline`` (clock seconds); a branch stopped meanwhile stays stopped."""
 
         entry = self._roster.entry(admitted.branch)
         if entry.stop is not None:
@@ -205,7 +221,9 @@ class BranchControl:
             await self._fail_start(entry, failure_text(start_commit))
             return
         started = self._roster.started(entry.branch, start_commit)
-        await self._open(started, start_commit, deadline, Launch(repair=admitted.repair))
+        share = admitted.share
+        launch = Launch(repair=admitted.repair) if share is None else Launch(agent=share.agent, plan=share.plan)
+        await self._open(started, start_commit, deadline, launch)
 
     async def void_admitted(self, branch: str, reason: str) -> None:
         """Void a fork the rule gate did not land, for ``reason``: it is stopped as not started, freeing its slot, and
@@ -214,7 +232,7 @@ class BranchControl:
         await self._fail_start(self._roster.entry(branch), reason)
 
     async def _admitted_start(self, entry: BranchEntry, parent_commit: str) -> str:
-        """The commit an admitted branch starts at: a repair's parent commit, a landed fork's head."""
+        """The commit an admitted branch starts at: a repair's or share's parent commit, a landed fork's head."""
 
         return parent_commit if entry.origin.cut_by_scheduler else await self._repo.head(entry.branch)
 
@@ -235,6 +253,8 @@ class BranchControl:
             detail["focus"] = launch.focus
         if launch.direction:
             detail["direction"] = launch.direction
+        if launch.map_for:
+            detail["map_for"] = list(launch.map_for)
         kind = DECISION_KINDS.get(entry.origin, DecisionKind.OPEN)
         self._decisions.record(Decision(kind, f"{entry.origin.value} branch started", entry.branch, detail))
         return entry
@@ -356,7 +376,8 @@ class BranchControl:
         reason = f"parent {parent} stopped: {stop.reason}"
         failures: list[BaseException] = []
         for entry in self._roster.entries():
-            if entry.from_branch == parent and entry.status is BranchStatus.ADMITTED:
+            orphaned = entry.from_branch == parent and entry.origin is not BranchOrigin.SHARE
+            if orphaned and entry.status is BranchStatus.ADMITTED:
                 failures.extend(await self.stop_branch(entry.branch, BranchStop(stop.cause, reason, stop.at)))
         return failures
 
@@ -392,7 +413,12 @@ class BranchControl:
         await self.push_quota()
         self._specialists.add(entry.branch)
         task = BranchTask(
-            repair=launch.repair, direction=launch.direction, agent=launch.agent, deadline=deadline, plan=launch.plan
+            repair=launch.repair,
+            direction=launch.direction,
+            agent=launch.agent,
+            deadline=deadline,
+            plan=launch.plan,
+            map_for=launch.map_for,
         )
         started = await settled(self._lifecycle.start(entry.branch, start_commit, task))
         if isinstance(started, BaseException):
