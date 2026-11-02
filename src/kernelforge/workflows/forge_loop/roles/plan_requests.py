@@ -15,6 +15,7 @@ from kernelforge.workflows.forge_loop.roles.contracts import (
     SynthesizedPlan,
 )
 from kernelforge.workflows.forge_loop.roles.plan_prompts import REVISION_SYSTEM_PROMPT
+from kernelforge.workflows.forge_loop.roles.round_partition import is_challenged
 
 PARTITION_OUTPUT_SCHEMA = {
     "lanes": [
@@ -28,6 +29,10 @@ PARTITION_OUTPUT_SCHEMA = {
             ),
             "fallback": (
                 "For a joint lane: the smaller change inside the same ground to land if the main step is abandoned"
+            ),
+            "unplannable": (
+                "Only when the round's lanes are assigned: why the evidence cannot serve this lane's assignment, with "
+                "its ground left empty"
             ),
         }
     ],
@@ -119,6 +124,38 @@ def synthesis_payload(context: OrchestrationContext, specialists: SpecialistRoun
         "specialist_analyses": analyses,
         "specialist_failures": failures,
     }
+
+
+def partition_payload(context: OrchestrationContext, specialists: SpecialistRound, lanes: int) -> dict:
+    """The partition request: the whole round's evidence, every analysis in view, and the lanes it divides into."""
+    return {
+        "task": _partition_task(context, lanes),
+        "context": context.to_prompt_dict(),
+        "dispatch_plan": specialists.dispatch_plan.to_dict(),
+        "specialist_coverage": dict(specialists.coverage),
+        "specialist_analyses": [
+            {"assignment_id": outcome.assignment_id, "role_id": outcome.role_id, "analysis": outcome.content}
+            for outcome in specialists.analyses
+        ],
+        "output_schema": PARTITION_OUTPUT_SCHEMA,
+    }
+
+
+def _partition_task(context: OrchestrationContext, lanes: int) -> str:
+    if context.lane_assignments:
+        task = (
+            f"Give each of the {lanes} assigned lanes, in order, the ground that serves its assignment, divided so "
+            "that no two lanes would edit the same code. "
+        )
+    else:
+        task = f"Divide this round into at most {lanes} lanes that would not edit the same code. "
+    task += (
+        "Name each lane's ground in files, functions and mechanisms. Name the largest cross-cutting move you found "
+        "and either give it to a lane or say why no lane has it."
+    )
+    if is_challenged(context):
+        task += " One lane validates the alternative the previous round's critic asked for."
+    return task
 
 
 def revision_payloads(

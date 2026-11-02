@@ -19,9 +19,11 @@ from kernelforge.workflows.forge_loop.roles.plan_critic import PlanCriticAgent
 from kernelforge.tests.workflows.forge_loop.roles._orchestration_fakes import (
     GROUND_A,
     GROUND_B,
+    GROUND_C,
     JOINT_GROUND,
     _QueuedBackend,
     _StaticBackend,
+    _assigned,
     _context,
     _definitions,
     _dispatch_payload,
@@ -250,10 +252,12 @@ async def test_a_lane_the_review_will_not_pay_for_is_not_published() -> None:
             "reason": "it is lane 1's epilogue rewrite in different words",
         }
     ]
+    assert narrowing["dropped_lanes"] == {"2": "it is lane 1's epilogue rewrite in different words"}
     assert result.structured_output_diagnostics["lanes"] == {
         "requested": 2,
         "planned": 2,
         "published": 1,
+        "published_lane_ids": [1],
     }
 
 
@@ -518,6 +522,32 @@ async def test_narrowing_the_round_cannot_read_names_what_it_kept() -> None:
 
 
 @pytest.mark.asyncio
+async def test_an_assigned_round_reports_every_lane_by_its_assignment() -> None:
+    """The review numbers drafts by position; the caller that assigned the lanes reads them by lane."""
+    orchestration_backend = _QueuedBackend(
+        [
+            _dispatch_payload(both_roles=True),
+            _partition_lanes([_lane(GROUND_A), {"ground": "", "unplannable": "nothing to stand on"}, _lane(GROUND_C)]),
+            "# Lane 1 draft",
+            "# Lane 3 draft",
+        ]
+    )
+    service = _two_lane_critic_service(
+        orchestration_backend,
+        _StaticBackend("VERDICT: ACCEPT\n\n" + _width_block({"lane_id": 2, "reason": "lane 1 already covers it"})),
+    )
+
+    result = await service.run(_assigned(3), lanes=3)
+
+    assert result.optimization_plans == ("# Lane 1 draft",)
+    diagnostics = result.structured_output_diagnostics
+    assert diagnostics["lanes"]["published_lane_ids"] == [1]
+    assert diagnostics["lane_losses"] == {"2": "nothing to stand on"}
+    assert diagnostics["lane_narrowing"]["dropped"] == [{"lane_id": 2, "reason": "lane 1 already covers it"}]
+    assert diagnostics["lane_narrowing"]["dropped_lanes"] == {"3": "lane 1 already covers it"}
+
+
+@pytest.mark.asyncio
 async def test_a_review_that_asks_for_nothing_leaves_the_round_alone() -> None:
     """The empty block is an answer; only it means "run every lane"."""
     _backend, service = _two_lane_round("VERDICT: ACCEPT\n\nBoth lanes earn it.\n" + _width_block())
@@ -531,6 +561,7 @@ async def test_a_review_that_asks_for_nothing_leaves_the_round_alone() -> None:
         "planned": 2,
         "kept": 2,
         "dropped": [],
+        "dropped_lanes": {},
         "joint": [],
         "dropped_joint": [],
         "notes": [],
