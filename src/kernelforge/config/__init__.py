@@ -232,8 +232,8 @@ class Config:
     """Runtime configuration loaded from environment + optional overrides."""
 
     # GPU environment
-    # ROCm compilation target.
-    gpu_target: str = "gfx942"
+    # ROCm compilation target; empty until the caller resolves the run's arch.
+    gpu_target: str = ""
     # Hardware model used in KB identities.
     gpu_type: str = "mi355x"
     # System owning the candidate stream this run files under; a producer has its
@@ -384,7 +384,7 @@ class Config:
         # A harness the operator named must fail loudly rather than be replaced by Claude.
         default_fallback = "" if platform_backend else "claude"
         return cls(
-            gpu_target=overrides.get("gpu_target", os.getenv("GPU_TARGET", "gfx942")),
+            gpu_target=overrides.get("gpu_target", os.getenv("GPU_TARGET", "")),
             gpu_type=str(overrides["gpu_type"] if "gpu_type" in overrides else "mi355x").strip().lower(),
             producer=str(overrides.get("producer", "")).strip().lower(),
             workspace=overrides.get("workspace", os.getenv("KERNEL_WORKSPACE", "")),
