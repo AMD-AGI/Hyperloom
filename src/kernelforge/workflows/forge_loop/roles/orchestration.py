@@ -10,7 +10,6 @@ from collections.abc import Callable, Iterator, Mapping, MutableMapping, Sequenc
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import NamedTuple
 
 from kernelforge.agent_backends import (
     AgentBackend,
@@ -48,6 +47,15 @@ from kernelforge.workflows.forge_loop.roles.contracts import (
 )
 from kernelforge.workflows.forge_loop.roles.critic_fallback import render_critic_fallback
 from kernelforge.workflows.forge_loop.roles.lane_prompts import lane_prompts, run_lanes_after_the_first_starts
+from kernelforge.workflows.forge_loop.roles.round_partition import (
+    PartitionReading,
+    fallback_grounds,
+    is_challenged,
+    partition_answer_model,
+    partition_payload,
+    partition_system_prompt,
+    read_partition,
+)
 from kernelforge.workflows.forge_loop.roles.specialists import (
     SpecialistAgent,
     SpecialistPool,
@@ -55,13 +63,10 @@ from kernelforge.workflows.forge_loop.roles.specialists import (
 )
 from kernelforge.workflows.forge_loop.roles.plan_prompts import (
     LANE_SYNTHESIS_SYSTEM_PROMPT,
-    PARTITION_CHALLENGER_BLOCK,
-    PARTITION_SYSTEM_PROMPT,
     REVISION_SYSTEM_PROMPT,
     SYNTHESIS_SYSTEM_PROMPT,
 )
 from kernelforge.workflows.forge_loop.roles.plan_requests import (
-    PartitionAnswer,
     dispatch_answer_model,
     dispatch_payload,
     revision_payloads,
@@ -99,6 +104,29 @@ def _phase_timer(
         yield
     finally:
         target[name] = target.get(name, 0.0) + (time.monotonic() - started_at)
+
+
+def _log_partition(reading: PartitionReading, grounds: Sequence[LaneGround], lanes: int) -> None:
+    """Say what a round's partition left the lanes without: a split, an owner for its widest move, a fallback."""
+    move = reading.cross_cutting_move
+    if not reading.grounds:
+        log.warning(
+            "round partition unavailable; the round runs %d fallback lane(s) instead of %d divided ones: %s",
+            len(grounds),
+            lanes,
+            "; ".join(reading.notes) or "no lane ground was usable",
+        )
+    elif move["status"] != "assigned":
+        log.warning(
+            "round partition gave no lane its largest cross-cutting move: %s",
+            move.get("move") or "the partition named none",
+        )
+    unbacked = [ground.lane_id for ground in grounds if ground.joint and not ground.fallback]
+    if unbacked:
+        log.warning(
+            "joint lane(s) %s carry no fallback; a joint step that is abandoned leaves them with nothing to measure",
+            ", ".join(str(lane_id) for lane_id in unbacked),
+        )
 
 
 _GLOBAL_EVIDENCE_KINDS = {
@@ -141,14 +169,6 @@ def _case_evidence_refs(case: CaseEvidence) -> dict[str, EvidenceRef]:
     return refs
 
 
-class _PartitionReading(NamedTuple):
-    """The lanes one partition answer divides the round into, the move it gave a lane, and what reading it found."""
-
-    grounds: list[LaneGround]
-    move: dict
-    notes: list[str]
-
-
 @dataclass(frozen=True)
 class _RevisedPlan:
     """One critic-directed revision plus how its session was obtained."""
@@ -163,6 +183,8 @@ class _RoundReview:
     """What the plan critic made of a synthesized round: the plans it publishes and how they were reached."""
 
     plans: list[str]
+    # The partition lane each published plan was made for, in the order of ``plans``.
+    lane_ids: list[int]
     draft_plan: str
     critic_outcome: PlanCriticOutcome
     plan_revised: bool
@@ -387,181 +409,83 @@ class OrchestrationAgent:
         lanes: int,
         usage=None,
     ) -> list[SynthesizedPlan]:
-        """Partition the round into plans that do not compete for one another's ground."""
-        analyses = specialists.analyses
-        width = max(1, min(int(lanes), len(analyses)))
+        """Partition the round into plans that do not compete for one another's ground.
+
+        A round whose lanes are assigned plans every one of them: it is neither narrowed to the analyses it has nor
+        collapsed to one lane, and a lane that ends without a plan is recorded under ``lane_losses`` with why.
+        """
+        assigned = context.lane_assignments
+        width = len(assigned) if assigned else max(1, min(int(lanes), len(specialists.analyses)))
         if width <= 1:
-            with _phase_timer(self.phase_durations_sec, "synthesis"):
-                return [await self._synthesize_optimization_plan_result(context, specialists, usage=usage)]
+            return [await self._single_lane_plan(context, specialists, usage=usage)]
 
         grounds = await self._partition_round(context, specialists, lanes=width, usage=usage)
-        challenged = context.last_critic_verdict == "REPLACE"
-        if len(grounds) <= 1 and not (challenged and grounds):
+        if not assigned and len(grounds) <= 1 and not is_challenged(context):
             # One real direction is a single-lane round, planned the way one has always been planned rather than as a
             # fan-out of width one.
-            with _phase_timer(self.phase_durations_sec, "synthesis"):
-                return [await self._synthesize_optimization_plan_result(context, specialists, usage=usage)]
-        width = len(grounds)
-        prompts = lane_prompts(context, specialists, grounds)
+            return [await self._single_lane_plan(context, specialists, usage=usage)]
+        plannable = [ground for ground in grounds if not ground.unplannable]
+        prompts = lane_prompts(context, specialists, plannable)
 
         async def _lane(index: int, on_response_started: Callable[[], None] | None = None) -> SynthesizedPlan | None:
+            ground = plannable[index]
+            role = f"orchestration lane {ground.lane_id} synthesis"
             prompt, shared = prompts[index]
             turn = _Turn(
                 LANE_SYNTHESIS_SYSTEM_PROMPT,
                 prompt,
-                role=f"orchestration lane {index + 1} synthesis",
+                role=role,
                 shared_prompt_prefix=shared,
                 on_response_started=on_response_started,
             )
             result = await self._run_result(context, turn, usage=usage)
-            text = self._validated_text(
-                result,
-                role=f"orchestration lane {index + 1} synthesis",
-                allow_empty=True,
-            )
+            text = self._validated_text(result, role=role, allow_empty=True)
             if not text:
                 return None
             return SynthesizedPlan(
                 text=text,
                 session_id=str(result.session_id or "").strip(),
                 system_prompt=turn.system_prompt,
-                ground=grounds[index].ground,
-                joint=grounds[index].joint,
-                fallback=grounds[index].fallback,
+                ground=ground.ground,
+                joint=ground.joint,
+                fallback=ground.fallback,
+                lane_id=ground.lane_id,
             )
 
         # Each lane is an independent call, so one that fails is one lane lost and not the round.
         with _phase_timer(self.phase_durations_sec, "synthesis"):
             capabilities = getattr(self.backend, "capabilities", None)
             answers = await run_lanes_after_the_first_starts(
-                _lane, width, shared_prompt_cache=getattr(capabilities, "shared_prompt_cache", False)
+                _lane, len(plannable), shared_prompt_cache=getattr(capabilities, "shared_prompt_cache", False)
             )
+        return self._kept_lane_plans(grounds, dict(zip((ground.lane_id for ground in plannable), answers)))
+
+    async def _single_lane_plan(self, context: OrchestrationContext, specialists: SpecialistRound, *, usage=None):
+        with _phase_timer(self.phase_durations_sec, "synthesis"):
+            return await self._synthesize_optimization_plan_result(context, specialists, usage=usage)
+
+    def _kept_lane_plans(self, grounds: Sequence[LaneGround], answers: Mapping[int, object]) -> list[SynthesizedPlan]:
+        """The lanes that came back with a plan; every other lane is recorded with why it has none."""
         plans: list[SynthesizedPlan] = []
-        for index, answer in enumerate(answers):
-            if isinstance(answer, BaseException):
-                log.warning(
-                    "lane %d of %d lost its plan: %s: %s",
-                    index + 1,
-                    width,
-                    type(answer).__name__,
-                    answer,
-                )
-                continue
-            if answer is None:
+        losses: dict[str, str] = {}
+        for ground in grounds:
+            answer = answers.get(ground.lane_id)
+            if ground.unplannable:
+                losses[str(ground.lane_id)] = ground.unplannable
+            elif isinstance(answer, BaseException):
+                losses[str(ground.lane_id)] = f"its synthesis failed: {type(answer).__name__}: {answer}"
+            elif answer is None:
                 # A lane that returned nothing is a lane the round paid for and cannot use.
-                log.warning("lane %d of %d returned an empty plan", index + 1, width)
-                continue
-            plans.append(answer)
+                losses[str(ground.lane_id)] = "its synthesis returned an empty plan"
+            else:
+                plans.append(answer)
+        for lane_id, reason in losses.items():
+            log.warning("lane %s of %d has no plan: %s", lane_id, len(grounds), reason)
+        if losses:
+            self.structured_output_diagnostics["lane_losses"] = losses
         if not plans:
             raise OrchestrationOutputError("orchestration synthesis returned no lane plan")
         return plans
-
-    @staticmethod
-    def _collapsed_grounds(
-        analyses: Sequence[SpecialistOutcome],
-        *,
-        challenged: bool = False,
-    ) -> list[LaneGround]:
-        """Collapse a round that could not be divided by code to a single lane."""
-        if challenged:
-            return [
-                LaneGround(
-                    lane_id=1,
-                    ground=(
-                        "the alternative route named in `last_plan_critic`, in "
-                        "the smallest form that would settle whether it beats "
-                        "the current implementation; not that implementation's "
-                        "own code"
-                    ),
-                    reason=(
-                        "fallback partition: the previous round's critic "
-                        "returned REPLACE, and the round it judged collapses to "
-                        "the one lane that validates the route it named"
-                    ),
-                )
-            ]
-        return [
-            LaneGround(
-                lane_id=1,
-                ground=(
-                    "whatever the "
-                    + ", ".join(sorted({outcome.role_id for outcome in analyses}))
-                    + " analysis recommends, planned as a single lane"
-                ),
-                reason=(
-                    "fallback partition: the round's own split was unavailable, "
-                    "so the round runs as one lane rather than over ground the "
-                    "lanes would share"
-                ),
-            )
-        ]
-
-    @staticmethod
-    def _lane_grounds(answer: PartitionAnswer, *, lanes: int) -> _PartitionReading:
-        """The lane grounds and the round's cross-cutting move one partition answer names."""
-        notes: list[str] = []
-        grounds: list[LaneGround] = []
-        for entry in answer.lanes:
-            try:
-                ground = LaneGround(
-                    lane_id=len(grounds) + 1,
-                    ground=entry.ground,
-                    reason=entry.reason,
-                    joint=entry.joint,
-                    fallback=entry.fallback,
-                )
-            except ValueError as error:
-                notes.append(f"dropped a lane: {error}")
-                continue
-            grounds.append(ground)
-        # Before the move is read, so a move can never be recorded as owned by a lane the round is over its ceiling to
-        # run.
-        grounds = grounds[:lanes]
-        notes.extend(
-            f"lane {ground.lane_id} claims joint ground and named no fallback, so an abandoned joint step leaves it "
-            "nothing to measure"
-            for ground in grounds
-            if ground.joint and not ground.fallback
-        )
-        move = answer.cross_cutting_move
-        if not move.move.strip():
-            return _PartitionReading(
-                grounds, {"status": "missing"}, [*notes, "partition named no largest cross-cutting move"]
-            )
-        placed, placement_notes = OrchestrationAgent._placed_move(
-            move.move.strip(), move.lane_id, move.unassigned_reason.strip(), grounds
-        )
-        return _PartitionReading(grounds, placed, notes + placement_notes)
-
-    @staticmethod
-    def _placed_move(move: str, lane_id: int, reason: str, grounds: Sequence[LaneGround]) -> tuple[dict, list[str]]:
-        """Record a named move as owned by the lane it names, or as unassigned with why."""
-        notes: list[str] = []
-        if 1 <= lane_id <= len(grounds):
-            return (
-                {
-                    "status": "assigned",
-                    "move": move,
-                    "lane_id": lane_id,
-                    "lane_ground": grounds[lane_id - 1].ground,
-                },
-                notes,
-            )
-        if lane_id:
-            notes.append(
-                f"cross-cutting move names lane {lane_id}, which this partition of {len(grounds)} lane(s) does not have"
-            )
-        if not reason:
-            notes.append("cross-cutting move was left unassigned and no reason was given")
-        return (
-            {
-                "status": "unassigned",
-                "move": move,
-                "lane_id": 0,
-                "unassigned_reason": reason,
-            },
-            notes,
-        )
 
     async def _partition_round(
         self,
@@ -572,92 +496,39 @@ class OrchestrationAgent:
         usage=None,
     ) -> list[LaneGround]:
         """Decide, once and with every analysis in view, what each lane owns."""
-        challenged = context.last_critic_verdict == "REPLACE"
-        turn = self._partition_turn(context, specialists, lanes=lanes, challenged=challenged)
+        turn = self._partition_turn(context, specialists, lanes=lanes)
         with _phase_timer(self.phase_durations_sec, "partition"):
             try:
                 result = await self._run_result(context, turn, usage=usage)
-                answer = self._validated_answer(result, PartitionAnswer, role=turn.role)
-                grounds, move, notes = self._lane_grounds(answer, lanes=lanes)
-            except (
-                OrchestrationInfrastructureError,
-                OrchestrationOutputError,
-            ) as error:
-                grounds, move, notes = (
-                    [],
-                    {"status": "unavailable"},
-                    [f"{type(error).__name__}: {error}"],
-                )
-        status = "planned"
-        if not grounds:
-            grounds = self._collapsed_grounds(specialists.analyses, challenged=challenged)
-            status = "fallback"
-            log.warning(
-                "round partition unavailable; collapsing the round to a single "
-                "%slane instead of %d over shared ground: %s",
-                "challenger " if challenged else "",
-                lanes,
-                "; ".join(notes) or "no lane ground was usable",
-            )
-        elif move["status"] != "assigned":
-            log.warning(
-                "round partition gave no lane its largest cross-cutting move: %s",
-                move.get("move") or "the partition named none",
-            )
-        unbacked = [ground.lane_id for ground in grounds if ground.joint and not ground.fallback]
-        if unbacked:
-            log.warning(
-                "joint lane(s) %s carry no fallback; a joint step that is "
-                "abandoned leaves them with nothing to measure",
-                ", ".join(str(lane_id) for lane_id in unbacked),
-            )
+                answer = self._validated_answer(result, partition_answer_model(context), role=turn.role)
+                reading = read_partition(answer, lanes=lanes)
+            except (OrchestrationInfrastructureError, OrchestrationOutputError) as error:
+                reading = PartitionReading.unavailable(f"{type(error).__name__}: {error}")
+        grounds = list(reading.grounds) or fallback_grounds(context, specialists.analyses)
+        _log_partition(reading, grounds, lanes)
         self.structured_output_diagnostics["partition"] = {
-            "status": status,
+            "status": "planned" if reading.grounds else "fallback",
             "requested": int(lanes),
             "planned": len(grounds),
-            "collapsed": status == "fallback",
-            "challenger_requested": challenged,
+            "collapsed": not reading.grounds and not context.lane_assignments,
+            "challenger_requested": is_challenged(context),
             "joint": [ground.lane_id for ground in grounds if ground.joint],
-            "cross_cutting_move": move,
-            "notes": notes,
+            "cross_cutting_move": dict(reading.cross_cutting_move),
+            "notes": list(reading.notes),
             "grounds": [ground.to_dict() for ground in grounds],
         }
         return grounds
 
-    def _partition_turn(
-        self, context: OrchestrationContext, specialists: SpecialistRound, *, lanes: int, challenged: bool
-    ) -> _Turn:
-        """The tool-less partition turn asking for at most ``lanes`` lanes over every analysis of the round."""
-        system_prompt = PARTITION_SYSTEM_PROMPT + (PARTITION_CHALLENGER_BLOCK if challenged else "")
-        payload = {
-            "task": (
-                f"Divide this round into at most {lanes} lanes that would not "
-                "edit the same code. Name each lane's ground in files, "
-                "functions and mechanisms. Name the largest cross-cutting move "
-                "you found and either give it to a lane or say why no lane has "
-                "it."
-                + (" One lane validates the alternative the previous round's critic asked for." if challenged else "")
-            ),
-            "context": context.to_prompt_dict(),
-            "dispatch_plan": specialists.dispatch_plan.to_dict(),
-            "specialist_coverage": dict(specialists.coverage),
-            "specialist_analyses": [
-                {
-                    "assignment_id": outcome.assignment_id,
-                    "role_id": outcome.role_id,
-                    "analysis": outcome.content,
-                }
-                for outcome in specialists.analyses
-            ],
-        }
+    def _partition_turn(self, context: OrchestrationContext, specialists: SpecialistRound, *, lanes: int) -> _Turn:
+        """The tool-less partition turn asking for ``lanes`` lanes over every analysis of the round."""
         return _Turn(
-            system_prompt,
-            json.dumps(payload, indent=2, sort_keys=True),
+            partition_system_prompt(context),
+            json.dumps(partition_payload(context, specialists, lanes), indent=2, sort_keys=True),
             max_turns=ROUND_PARTITION_MAX_TURNS,
             timeout_sec=min(self.timeout_sec, ROUND_PARTITION_TIMEOUT_SEC),
             tools=False,
             max_reasoning_effort=ROUND_PARTITION_EFFORT_CEILING,
-            output_schema=PartitionAnswer,
+            output_schema=partition_answer_model(context),
         )
 
     async def revise_optimization_plan(
@@ -886,6 +757,7 @@ class OrchestrationService:
         else:
             plans = [self._render_framework_plan(context, specialists)]
         planned_lanes = len(plans)
+        lane_ids = [plan.lane_id for plan in synthesized_plans]
         draft_plan = ""
         critic_outcome = None
         plan_revised = False
@@ -895,15 +767,11 @@ class OrchestrationService:
             diagnostics.update(review.diagnostics)
             plans, draft_plan, critic_outcome = review.plans, review.draft_plan, review.critic_outcome
             plan_revised, optimization_plan_executable = review.plan_revised, review.executable
+            lane_ids = review.lane_ids
         elif self._plan_critic is not None:
             status = "skipped_synthesis_unavailable" if context.review_plan else "skipped_not_requested"
             diagnostics["plan_critic"] = {"status": status}
-        diagnostics["lanes"] = {
-            "requested": int(lanes),
-            "planned": planned_lanes,
-            # What the round actually hands to Implementer sessions, which is the number the round is billed for.
-            "published": len(plans),
-        }
+        diagnostics["lanes"] = self._lane_counts(lanes, planned_lanes, plans, lane_ids)
         diagnostics["phase_durations_sec"] = self._phase_durations(
             phase_durations,
             critic_outcome=critic_outcome,
@@ -981,7 +849,7 @@ class OrchestrationService:
         synthesized_plans, narrowing_diagnostics = self._narrow_round(
             synthesized_plans,
             critic_outcome=critic_outcome,
-            challenged=context.last_critic_verdict == "REPLACE",
+            challenged=is_challenged(context),
         )
         plans = [plan.text for plan in synthesized_plans]
         diagnostics["lane_narrowing"] = narrowing_diagnostics
@@ -1008,12 +876,26 @@ class OrchestrationService:
             diagnostics["plan_revision"] = revision_diagnostics
         return _RoundReview(
             plans=plans,
+            lane_ids=[plan.lane_id for plan in synthesized_plans],
             draft_plan=draft_plan,
             critic_outcome=critic_outcome,
             plan_revised=plan_revised,
             executable=executable,
             diagnostics=diagnostics,
         )
+
+    @staticmethod
+    def _lane_counts(requested: int, planned: int, plans: Sequence[str], lane_ids: Sequence[int]) -> dict[str, object]:
+        """How many lanes the round was asked for, planned and publishes, and which partition lane each one is."""
+        return {
+            "requested": int(requested),
+            "planned": planned,
+            # What the round actually hands to Implementer sessions, which is the number the round is billed for.
+            "published": len(plans),
+            # The partition lane each published plan was made for, in publication order; empty when no plan came from
+            # a synthesis.
+            "published_lane_ids": list(lane_ids),
+        }
 
     @staticmethod
     def _round_coverage(
@@ -1052,6 +934,9 @@ class OrchestrationService:
                 "planned": len(drafts),
                 "kept": len(drafts) - len(applied),
                 "dropped": [drop.to_dict() for drop in applied],
+                # The same drops by the partition lane each dropped draft was made for, which is what a caller that
+                # assigned the lanes reads; ``dropped`` numbers drafts by their position in this review.
+                "dropped_lanes": {str(drafts[drop.lane_id - 1].lane_id): drop.reason for drop in applied},
                 # The widened lanes this round carries, and the ones it dropped.
                 "joint": joint_lanes,
                 "dropped_joint": dropped_joint,

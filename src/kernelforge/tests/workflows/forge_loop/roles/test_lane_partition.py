@@ -14,11 +14,17 @@ from kernelforge.workflows.forge_loop.roles import orchestration as orchestratio
 from kernelforge.agent_backends import AgentProviderUnavailableError, AgentRunResult
 from kernelforge.workflows.forge_loop.roles.contracts import DispatchPlan, SpecialistRound
 from kernelforge.workflows.forge_loop.roles.orchestration import OrchestrationAgent
+from kernelforge.workflows.forge_loop.roles.plan_requests import AssignedPartitionAnswer, PartitionAnswer
 from kernelforge.tests.workflows.forge_loop.roles._orchestration_fakes import (
+    ASSIGNMENTS,
     GROUND_A,
     GROUND_B,
+    GROUND_C,
     JOINT_GROUND,
     _PerCallBackend,
+    _assigned,
+    _assigned_lane,
+    _assigned_partition,
     _assignment,
     _compute_and_memory_round,
     _context,
@@ -130,6 +136,133 @@ async def test_an_accepted_round_raises_no_challenger() -> None:
     await agent.synthesize_lane_plan_results(context, specialists, lanes=2)
 
     assert "Give exactly one lane" not in backend.specs[0].system_prompt
+
+
+def _planned_lanes(results) -> list[tuple[int, str]]:
+    return [(result.lane_id, result.text) for result in results]
+
+
+def _lane_assignments(specs) -> list[str]:
+    return [json.loads(spec.user_prompt)["lane"]["assignment"] for spec in specs]
+
+
+@pytest.mark.asyncio
+async def test_an_assigned_round_plans_every_assignment_however_few_analyses_it_has() -> None:
+    """The caller decided the width; the evidence only decides each lane's ground."""
+    backend = _PerCallBackend([_assigned_partition(GROUND_A, GROUND_B, GROUND_C), "# Lane 1", "# Lane 2", "# Lane 3"])
+    agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
+    specialists = await _compute_and_memory_round()
+
+    results = await agent.synthesize_lane_plan_results(_assigned(3), specialists, lanes=3)
+
+    assert _planned_lanes(results) == [(1, "# Lane 1"), (2, "# Lane 2"), (3, "# Lane 3")]
+    partition = backend.specs[0]
+    assert "lane k serves assignment k" in partition.system_prompt
+    assert partition.output_schema is AssignedPartitionAnswer
+    assert json.loads(partition.user_prompt)["context"]["lane_assignments"] == list(ASSIGNMENTS)
+    assert _lane_assignments(backend.specs[1:]) == list(ASSIGNMENTS)
+    assert "lane_losses" not in agent.structured_output_diagnostics
+
+
+@pytest.mark.asyncio
+async def test_an_unassigned_round_is_not_told_about_assignments() -> None:
+    """Guards the assigned block from reaching the sequential loop's rounds."""
+    backend = _PerCallBackend([_partition(GROUND_A, GROUND_B), "# Lane A", "# Lane B"])
+    agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
+    specialists = await _compute_and_memory_round()
+
+    await agent.synthesize_lane_plan_results(_context(), specialists, lanes=2)
+
+    assert "lane_assignments" not in backend.specs[0].system_prompt
+    assert backend.specs[0].output_schema is PartitionAnswer
+    assert "lane_assignments" not in json.loads(backend.specs[0].user_prompt)["context"]
+    assert all("assignment" not in json.loads(spec.user_prompt)["lane"] for spec in backend.specs[1:])
+
+
+@pytest.mark.asyncio
+async def test_an_assigned_lane_the_evidence_cannot_serve_costs_only_itself() -> None:
+    """Its reason reaches whoever assigned it, and the lanes after it keep their own assignments."""
+    unplannable = "no analysis read the epilogue's store"
+    backend = _PerCallBackend(
+        [
+            _partition_lanes(
+                [_assigned_lane(GROUND_A), _assigned_lane("", unplannable=unplannable), _assigned_lane(GROUND_C)]
+            ),
+            "# Lane 1",
+            "# Lane 3",
+        ]
+    )
+    agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
+    specialists = await _compute_and_memory_round()
+
+    results = await agent.synthesize_lane_plan_results(_assigned(3), specialists, lanes=3)
+
+    assert _planned_lanes(results) == [(1, "# Lane 1"), (3, "# Lane 3")]
+    # No synthesis is bought for the lane that cannot be planned.
+    assert len(backend.specs) == 3
+    assert _lane_assignments(backend.specs[1:]) == [ASSIGNMENTS[0], ASSIGNMENTS[2]]
+    assert json.loads(backend.specs[1].user_prompt)["lane"]["ground_owned_by_other_lanes"] == [GROUND_C]
+    assert agent.structured_output_diagnostics["lane_losses"] == {"2": unplannable}
+
+
+@pytest.mark.asyncio
+async def test_an_assigned_lane_given_no_ground_and_no_reason_is_unplannable_in_its_own_place() -> None:
+    """A lane the answer could not ground is that lane's loss; the next lane is not renumbered into its place."""
+    backend = _PerCallBackend(
+        [_partition_lanes([_assigned_lane(""), _assigned_lane(GROUND_B)]), "# Lane 2"],
+    )
+    agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
+    specialists = await _compute_and_memory_round()
+
+    results = await agent.synthesize_lane_plan_results(_assigned(2), specialists, lanes=2)
+
+    assert _planned_lanes(results) == [(2, "# Lane 2")]
+    assert _lane_assignments(backend.specs[1:]) == [ASSIGNMENTS[1]]
+    assert agent.structured_output_diagnostics["lane_losses"]["1"].startswith("the partition gave it no usable ground")
+
+
+@pytest.mark.asyncio
+async def test_an_assigned_lane_the_partition_left_out_says_so() -> None:
+    """One returned lane is still lane 1 of an assigned round, not the round collapsed to one plan."""
+    backend = _PerCallBackend([_assigned_partition(GROUND_A), "# Lane 1"])
+    agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
+    specialists = await _compute_and_memory_round()
+
+    results = await agent.synthesize_lane_plan_results(_assigned(2), specialists, lanes=2)
+
+    assert _planned_lanes(results) == [(1, "# Lane 1")]
+    assert _lane_assignments(backend.specs[1:]) == [ASSIGNMENTS[0]]
+    assert agent.structured_output_diagnostics["lane_losses"] == {"2": "the partition returned no lane for it"}
+
+
+@pytest.mark.asyncio
+async def test_an_assigned_round_whose_partition_failed_still_plans_every_assignment() -> None:
+    """Without a split, each lane plans its own assignment rather than the round shrinking to one."""
+    backend = _PerCallBackend(["no lanes here", "# Lane 1", "# Lane 2"])
+    agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
+    specialists = await _compute_and_memory_round()
+
+    results = await agent.synthesize_lane_plan_results(_assigned(2), specialists, lanes=2)
+
+    assert _planned_lanes(results) == [(1, "# Lane 1"), (2, "# Lane 2")]
+    assert _lane_assignments(backend.specs[1:]) == list(ASSIGNMENTS[:2])
+    partition = agent.structured_output_diagnostics["partition"]
+    assert partition["status"] == "fallback"
+    assert partition["collapsed"] is False
+    assert partition["planned"] == 2
+
+
+@pytest.mark.asyncio
+async def test_an_assigned_lane_whose_synthesis_failed_says_why() -> None:
+    """A lost synthesis is that lane's loss, recorded, not a silent gap the caller must guess at."""
+    backend = _PerCallBackend([_assigned_partition(GROUND_A, GROUND_B), "# Lane 1", "  "])
+    agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
+    specialists = await _compute_and_memory_round()
+
+    results = await agent.synthesize_lane_plan_results(_assigned(2), specialists, lanes=2)
+
+    assert _planned_lanes(results) == [(1, "# Lane 1")]
+    assert agent.structured_output_diagnostics["lane_losses"] == {"2": "its synthesis returned an empty plan"}
 
 
 @pytest.mark.asyncio
