@@ -39,6 +39,8 @@ from hyperloom_multibranch.specialist.arbor_adapter import (
     arbor_config,
     arbor_manifest,
     bench_command,
+    carry_dossier,
+    dossier_notes,
     generate_directions,
     is_arbor,
     link_built,
@@ -415,6 +417,32 @@ def test_a_branch_given_the_session_s_dossier_finds_it_in_its_checkout_where_arb
     arbor_manifest(spec, ArborCheckout("arbor", "abc123", checkout, {}), BRANCH_RUN, _located(tmp_path / "none"))
 
     assert (checkout / DOSSIER_DIR / "qwen3-8b" / "README.md").read_text() == "# the pass's\n"  # a copy there stays
+
+
+def test_a_dossier_that_is_gone_is_noted_unless_the_checkout_already_has_a_copy(tmp_path: Path) -> None:
+    dossier = _write(tmp_path / "pass" / "docs" / "dossier" / "qwen3-8b", {"README.md": "# the pass's\n"})
+    checkout, gone = _write(tmp_path / "checkout", CHECKOUT_FILES), str(tmp_path / "gone" / "qwen3-8b")
+    said = f"the dossier pass's dossier {gone} is not there: started without a dossier"
+
+    assert dossier_notes(checkout, str(dossier)) == dossier_notes(checkout, None) == dossier_notes(checkout, "") == ()
+    assert dossier_notes(checkout, gone) == (said,)
+    carry_dossier(checkout, dossier)
+    assert dossier_notes(checkout, gone) == (), "the copy an earlier start made is the same dossier"
+
+
+async def test_a_branch_whose_dossier_is_gone_starts_without_one_and_says_so(tmp_path: Path) -> None:
+    gone = str(tmp_path / "pass" / "docs" / "dossier" / "qwen3-8b")
+    plan = _write(tmp_path / "shares", {"share-1.json": json.dumps(MAP)}) / "share-1.json"
+
+    ready = await make_ready(
+        str(_arbor_repo(tmp_path)),
+        _spec(tmp_path, plan=str(plan), dossier=gone),
+        tmp_path / "agent",
+        _setup(Sandbox([Process(None)]), None),
+    )
+
+    assert ready.notes == (f"the dossier pass's dossier {gone} is not there: started without a dossier",)
+    assert not (ready.source_dir / DOSSIER_DIR / "qwen3-8b").exists()
 
 
 def test_a_framework_not_installed_or_with_no_layout_links_nothing(tmp_path: Path) -> None:

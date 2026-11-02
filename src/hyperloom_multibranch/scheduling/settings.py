@@ -22,6 +22,10 @@ SWEEP_FACTORS = (0.5, 1.0, 2.0)
 #: starts its first iteration only with an hour and its 3 min margin left (its estimate with none measured), and ends
 #: the pass as soon as the map is set: on Ruby, two of its iterations wrote a Qwen3-8B dossier and map in 15-25 min.
 DOSSIER_MINUTES = 90.0
+#: The least time each Arbor's share branch must have to its cutoff for the shares to open, unless the run says
+#: otherwise: with less, that first iteration never starts. Arbor measures the root's GSM8K before it, a few minutes on
+#: a small model and up to 30 on a large one, so a share given just this may still run nothing.
+SHARE_MINUTES = 63.0
 #: The first port of the blocks the Arbor agents' servers take, unless the run names another. Sessions that share a
 #: machine each name their own, since every agent serves on the host's network.
 AGENT_PORT = 31100
@@ -132,7 +136,8 @@ class RunSettings:
     the adapter's default, Arbor's serving template), ``agent_launch`` the file of the launch their recipe's adds
     to (``""`` when the recipe's is the whole launch), ``agent_dossier_minutes`` how long the dossier pass that
     maps two or more Arbors' directions may run when no map is given (0: none, the map is generated from the root's
-    shares; :mod:`~hyperloom_multibranch.specialist.dossier_pass`), and ``agent_port`` the first port of the blocks
+    shares; :mod:`~hyperloom_multibranch.specialist.dossier_pass`), ``agent_share_minutes`` the least time to their
+    cutoff the share branches of a split map must have to open (0: they always open), and ``agent_port`` the first port of the blocks
     their servers take, one block per agent branch, a mapping branch's included, and one for a pass before EXPLORE. ``stop_after_map`` ends the session
     once those Arbors' directions are mapped, one Arbor's too, before EXPLORE, and leaves the map and its dossier for a
     person to review; the run after the review is given that map as ``agent_directions`` and that dossier as
@@ -161,6 +166,7 @@ class RunSettings:
     agent_pack: str = ""
     agent_launch: str = ""
     agent_dossier_minutes: float = DOSSIER_MINUTES
+    agent_share_minutes: float = SHARE_MINUTES
     agent_port: int = AGENT_PORT
     stop_after_map: bool = False
     agent_dossier: str = ""
@@ -170,6 +176,7 @@ class RunSettings:
 __all__ = [
     "AGENT_PORT",
     "DOSSIER_MINUTES",
+    "SHARE_MINUTES",
     "SWEEP_FACTORS",
     "InferenceXShape",
     "KernelOptimizer",

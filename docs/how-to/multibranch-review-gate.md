@@ -1,22 +1,27 @@
 ---
 myst:
     html_meta:
-        "description": "Review the agent map before a multi-branch session opens its Arbor branches: when MB pauses, what it shows, what you may edit, how to approve or reject, and how to skip the pause for unattended runs."
+        "description": "Review the agent map before a multi-branch session opens its Arbor branches: when MB waits, what it shows, the clock, what you may edit, how to approve or reject, and how to skip the review for unattended runs."
         "keywords": "Hyperloom, multi-branch, MB, Arbor, review gate, agent map, dossier, approve, reject, no-review-gate"
 ---
 # Reviewing the agent map before the Arbor branches open
 
 A multi-branch session (MB) with Arbor agents makes a map of directions before its Arbor branches open: the dossier
 pass's map, a map generated from the root's profile, or one you gave with `--agent-directions`. With the review on,
-the default, MB then **pauses** until a person approves or rejects that map and its dossier. Nothing runs while it
-waits: the pause holds no GPU lease.
+the default, MB then **waits** until a person approves or rejects that map and its dossier, holding no GPU lease for
+it.
 
-## When MB pauses
+## When MB waits
 
 - **Where:** after the map step, before it splits the map among the Arbors and before any Arbor branch opens.
 - **Which sessions:** any with Arbor agents (`--autonomous-agent` naming an Arbor checkout). That includes a session
   with one Arbor, which then takes the reviewed map whole, and a session given `--agent-directions`, whose map is
   shown too.
+- **What waits:**
+  - **A map the session makes** (the dossier pass's, or one generated from the root's profile) is made by a mapping
+    branch in EXPLORE. Only that branch waits: the other branches go on, and the deadline stays.
+  - **A map you gave** with `--agent-directions` is reviewed before EXPLORE. The session pauses, and its deadline
+    moves by the pause.
 - **Never:** with `--no-review-gate`, or with `--stop-after-map`. The latter's stop is the review point: it keeps
   the map and ends, for a review offline. A second run then takes the reviewed map and dossier with
   `--agent-directions` and `--agent-dossier`, and passes `--no-review-gate`.
@@ -26,7 +31,7 @@ waits: the pause holds no GPU lease.
 MB writes two files under the session directory and records the decision `review requested`:
 
 - **`MB-review/REVIEW.md`:** the map file and its directions (id, status, title), the dossier directory and its parts,
-  and the commands to decide.
+  and the commands to decide. A review in EXPLORE adds the clock (below).
 - **`MB-review/review.json`:** `status` (`pending`, `approved` or `rejected`), who decided and when, the note, the
   map and dossier paths, and, after an approval, `changed`: the files you edited, by their sha256.
 
@@ -56,14 +61,25 @@ hyperloom-multibranch review --session <MB session dir> reject --note "why"
   sys.exit(review.main(p.parse_args(["review", *sys.argv[1:]])))' approve --session <dir> --note "why"
   ```
 
-- **After an approval:** MB records `review approved`, with how long it paused, and opens the branches.
-- **After a rejection:** MB records `review rejected` and ends the session with stop reason `review_rejected`
-  (exit 0), opening no branch.
+- **After an approval:** MB records `review approved`, with how long it waited, and opens the branches: in EXPLORE,
+  one share branch per Arbor, if there is still time for them (below).
+- **After a rejection:** in EXPLORE, MB records `review rejected`, opens no share branch, and the session goes on.
+  Before EXPLORE (a map you gave), it ends the session with stop reason `review_rejected` (exit 0), opening no branch.
 
 ## The clock
 
-The pause does not count against `--max-hours`. MB moves the session's deadline, and EXPLORE's end, by the time it
-paused. A batch job's own time limit still runs, though: approve promptly, or skip the pause.
+- **A review in EXPLORE does not stop the clock.** EXPLORE ends when it would have, whenever you decide, and each share
+  must still have `--agent-share-minutes` (63 by default) before its cutoff to open: Arbor starts no iteration with
+  less.
+  - **On the page:** `REVIEW.md` says when it was asked, by when to decide for the shares to open, and when EXPLORE
+    ends; `review.json` keeps `open_by_iso` and `explore_end_iso`.
+  - **Time left:** `review show` says how many minutes are left, or that the time has passed.
+  - **Too late:** MB checks before the review and after it. Below that floor it opens no share and records a `SHARE`
+    decision, `agent map: too little time left for the shares`, with the minutes a share would have had.
+    `--agent-share-minutes 0` opens them whatever the time.
+- **A review before EXPLORE** (a map you gave) does not count against `--max-hours`. MB moves the session's deadline,
+  and EXPLORE's end, by the time it paused.
+- **Either way,** a batch job's own time limit still runs: approve promptly, or skip the review.
 
 ## Skipping the pause
 

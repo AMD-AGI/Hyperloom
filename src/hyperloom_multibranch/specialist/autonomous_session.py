@@ -305,11 +305,7 @@ class AutonomousSession:
         that, until EXPLORE ends; 0, no end, with no deadline."""
 
         deadline = self._start.task.deadline
-        if not deadline:
-            return 0.0
-        left = deadline - self._setup.clock()
-        margin = collection_margin(records, self._setup.cutoff_seconds)
-        return left - margin if left > margin else max(left, 1.0)
+        return run_seconds(deadline - self._setup.clock(), records, self._setup.cutoff_seconds) if deadline else 0.0
 
     async def run(self) -> None:
         manifest, process, sandbox = await self._running()
@@ -919,6 +915,15 @@ def collection_margin(records: Iterable[TestRecord], floor: float) -> float:
     return (queued + 2) * max(durations)
 
 
+def run_seconds(left: float, records: Iterable[TestRecord], floor: float) -> float:
+    """How long an agent that starts ``left`` seconds before the EXPLORE end may run: until the import of what it keeps
+    last can still be measured and judged in EXPLORE (:func:`collection_margin`), or, when it starts later than that,
+    until EXPLORE ends."""
+
+    margin = collection_margin(records, floor)
+    return left - margin if left > margin else max(left, 1.0)
+
+
 def _being_judged(record: TestRecord, settled_before: float) -> bool:
     measured_at = record.measured_at if record.measured_at is not None else record.requested_at
     return record.result is not None and record.judgement is None and measured_at > settled_before
@@ -948,5 +953,6 @@ __all__ = [
     "Finding",
     "KeepWatch",
     "read_findings",
+    "run_seconds",
     "without_file",
 ]

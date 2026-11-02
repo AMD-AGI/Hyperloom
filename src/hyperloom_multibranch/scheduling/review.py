@@ -3,18 +3,22 @@
 
 """A person's review of the session's agent map, before the agent branches open (ArborDevelopment #30).
 
-With the review on (the default; ``run --no-review-gate`` turns it off), a session with Arbor agents pauses once their
-map is made: the dossier pass's, one generated from the root's shares, or the one ``--agent-directions`` gives. It
-pauses before it splits the map and before any branch opens, holding no lease, and writes two files in its
-``MB-review`` directory (:func:`request`): ``review.json``, the review's state (``pending``), and ``REVIEW.md``, what
-the person reads: the map's directions, the dossier, and the commands. The person may edit the map file and the
+With the review on (the default; ``run --no-review-gate`` turns it off), a session with Arbor agents waits once their
+map is made, before it splits the map and before their branches open, holding no lease for it, and writes two files in
+its ``MB-review`` directory (:func:`request`): ``review.json``, the review's state (``pending``), and ``REVIEW.md``,
+what the person reads: the map's directions, the dossier, and the commands. The person may edit the map file and the
 dossier where they lie, then decides with ``hyperloom-multibranch review --session DIR approve|reject``
 (:func:`decide`). That needs no running session: the file on the session's storage is the whole protocol, so a person
 on a login node can decide for a session on a GPU node.
 
 The session polls the file (:func:`wait`). Approved, it reads the map and the dossier again from disk, so the edits
-are what its branches get, and ``review.json`` names every file the review changed; rejected, the session ends with
-``review_rejected`` and opens nothing. The pause does not count against ``--max-hours``: EXPLORE ends that much later.
+are what its branches get, and ``review.json`` names every file the review changed. A map ``--agent-directions``
+gives is reviewed before EXPLORE: the session pauses, the pause does not count against ``--max-hours`` (EXPLORE ends
+that much later), and a rejection ends the session with ``review_rejected``. The map a mapping branch makes, the
+dossier pass's or one generated from the root's shares, is reviewed in EXPLORE, where only that branch waits: the
+other branches go on, the clock runs, and a rejection opens no share branch. That page has a clock: when EXPLORE ends,
+and by when a decision still leaves each share the time an Arbor needs for one iteration; ``show`` says how long is
+left.
 
 A session that stops after its map (``--stop-after-map``) does not pause: its stop is the review point, and its map is
 reviewed offline, then given to a second run (``--agent-directions``, ``--agent-dossier``).
@@ -56,6 +60,25 @@ SHOW, APPROVE, REJECT = "show", "approve", "reject"
 DONE = {APPROVE: APPROVED, REJECT: REJECTED}
 EXIT_REFUSED = 2
 ENCODING = "utf-8"
+ISO = "%Y-%m-%dT%H:%M:%SZ"
+#: What ``REVIEW.md`` says before and after the commands: for a review that pauses the session, before EXPLORE, and for
+#: one in EXPLORE, where the clock runs (:func:`_clock`).
+PAUSED = (
+    "The session paused once its Arbor agents' map was made, before it splits the map and before any agent branch",
+    "opens; it holds no cards.",
+)
+PAUSED_DECIDED = (
+    "Approved, the session reads the map and the dossier again and opens its branches on them; rejected, it ends",
+    "(`review_rejected`) and opens none. The pause does not count against --max-hours.",
+)
+RUNNING = (
+    "A mapping branch made the Arbor agents' map. **The session does not pause for this review:** its other branches",
+    "go on, and EXPLORE ends when it would have.",
+)
+RUNNING_DECIDED = (
+    "Approved, the session reads the map and the dossier again and opens one share branch per Arbor on them;",
+    "rejected, it opens none and goes on.",
+)
 
 
 class ReviewRejected(Exception):
@@ -64,15 +87,27 @@ class ReviewRejected(Exception):
 
 @dataclass(frozen=True)
 class Reviewed:
-    """What a review shows: the map file and the dossier (either may be ``None``), and what made the map."""
+    """What a review shows: the map file and the dossier (either may be ``None``), and what made the map. A review
+    in EXPLORE, which does not pause the session, has a clock: when EXPLORE ends, and the time after which a decision
+    leaves the shares too little to run (``open_by``, ``None`` when they open whatever the time); ``explore_end`` is
+    ``None`` for a review that pauses the session."""
 
     map_file: Path | None
     dossier: Path | None
     made_by: str
+    explore_end: float | None = None
+    open_by: float | None = None
 
 
 def _iso(now: float) -> str:
-    return datetime.fromtimestamp(now, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.fromtimestamp(now, tz=timezone.utc).strftime(ISO)
+
+
+def _epoch(iso: object) -> float | None:
+    try:
+        return datetime.strptime(str(iso), ISO).replace(tzinfo=timezone.utc).timestamp()
+    except ValueError:
+        return None
 
 
 def digests(map_file: Path | None, dossier: Path | None) -> dict[str, str]:
@@ -109,10 +144,12 @@ def request(directory: Path, session: Path, shown: Reviewed, now: float) -> dict
     ``review.json`` in ``directory``; the state written."""
 
     directory.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(directory / REVIEW_PAGE, _page(session, shown))
+    atomic_write_text(directory / REVIEW_PAGE, _page(session, shown, now))
     state = {
         "status": PENDING,
         "requested_at_iso": _iso(now),
+        "explore_end_iso": None if shown.explore_end is None else _iso(shown.explore_end),
+        "open_by_iso": None if shown.open_by is None else _iso(shown.open_by),
         "decided_at_iso": None,
         "by": None,
         "note": "",
@@ -172,8 +209,9 @@ def decide(directory: Path, approve: bool, by: str | None, note: str, now: float
     return []
 
 
-def show(directory: Path) -> str | None:
-    """``REVIEW.md`` and the review's state, as the ``show`` command prints them; ``None`` when there is no review."""
+def show(directory: Path, now: float | None = None) -> str | None:
+    """``REVIEW.md`` and the review's state, as the ``show`` command prints them at ``now`` (the time when ``None``),
+    with the time left to decide while a review in EXPLORE is pending; ``None`` when there is no review."""
 
     state = load(directory)
     if state is None:
@@ -183,7 +221,16 @@ def show(directory: Path) -> str | None:
     except OSError:
         page = ""
     decided = f" by {state.get('by')} at {state.get('decided_at_iso')}" if state.get("by") else ""
-    return f"{page}\nStatus: {state.get('status')}{decided}\n"
+    return f"{page}\nStatus: {state.get('status')}{decided}\n{_time_left(state, time.time() if now is None else now)}"
+
+
+def _time_left(state: Mapping[str, Any], now: float) -> str:
+    open_by = _epoch(state.get("open_by_iso"))
+    if state.get("status") != PENDING or open_by is None:
+        return ""
+    if now < open_by:
+        return f"Now {_iso(now)}: {(open_by - now) / 60:.0f} min left to decide, until {_iso(open_by)}\n"
+    return f"Now {_iso(now)}: past {_iso(open_by)}; no share branch opens, whatever is decided\n"
 
 
 def _login() -> str:
@@ -193,7 +240,7 @@ def _login() -> str:
         return os.environ.get("USER", "")
 
 
-def _page(session: Path, shown: Reviewed) -> str:
+def _page(session: Path, shown: Reviewed, now: float) -> str:
     map_file, dossier, made_by = shown.map_file, shown.dossier, shown.made_by
     listed = directions(map_file)
     rows = [
@@ -202,17 +249,18 @@ def _page(session: Path, shown: Reviewed) -> str:
     ]
     parts = sorted(path.name for path in dossier.iterdir()) if dossier is not None and dossier.is_dir() else []
     mapped = f"`{map_file}` ({made_by})" if map_file is not None else "none could be made: each Arbor maps its own"
+    paused = shown.explore_end is None
     lines = [
         f"# Review before the agent branches open: {session.name}",
         "",
-        "The session paused once its Arbor agents' map was made, before it splits the map and before any agent branch",
-        "opens; it holds no cards. Read the map and the dossier below, edit either where it lies if you wish, then:",
+        *(PAUSED if paused else RUNNING),
+        "Read the map and the dossier below, edit either where it lies if you wish, then:",
         "",
         f'    {COMMAND} --session {session} approve --note "..."',
         f'    {COMMAND} --session {session} reject --note "..."',
         "",
-        "Approved, the session reads the map and the dossier again and opens its branches on them; rejected, it ends",
-        "(`review_rejected`) and opens none. The pause does not count against --max-hours.",
+        *(PAUSED_DECIDED if paused else RUNNING_DECIDED),
+        *([] if paused else _clock(session, shown, now)),
         "",
         f"- **Map:** {mapped}",
         f"- **Dossier:** `{dossier}`: {', '.join(parts)}" if parts else "- **Dossier:** none",
@@ -225,6 +273,24 @@ def _page(session: Path, shown: Reviewed) -> str:
         "",
     ]
     return "\n".join(lines)
+
+
+def _clock(session: Path, shown: Reviewed, now: float) -> list[str]:
+    open_by, by = shown.open_by, []
+    if open_by is not None:
+        by = [
+            f"- **Decide by about:** {_iso(open_by)}, {(open_by - now) / 60:.0f} min after it was asked. After that",
+            "  the shares would start with less than one Arbor iteration needs before their cutoff, and none would open.",
+        ]
+    return [
+        "",
+        "## The clock",
+        "",
+        f"- **Asked:** {_iso(now)}",
+        *by,
+        f"- **EXPLORE ends:** {_iso(shown.explore_end or now)}, whenever you decide.",
+        f"- **Time left now:** `{COMMAND} --session {session} show`",
+    ]
 
 
 def add_parser(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:

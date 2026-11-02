@@ -23,6 +23,7 @@ import os
 import signal
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -200,6 +201,7 @@ from hyperloom_multibranch.scheduling.agent_plans import (
     MADE_BY_SHARES,
     MAP_KEPT,
     ROOT_SHARES_READ,
+    SHARES_TOO_LATE,
 )
 from hyperloom_multibranch.scheduling.lifecycle import NO_MAP
 from hyperloom_multibranch.scheduling import review
@@ -211,6 +213,7 @@ from hyperloom_multibranch.scheduling.review import (
     REVIEW_SKIPPED,
 )
 from hyperloom_multibranch.scheduling.settings import DOSSIER_MINUTES
+from hyperloom_multibranch.specialist import autonomous_session
 from hyperloom_multibranch.specialist.arbor_adapter import MAPPED, SplitFailed
 from hyperloom_multibranch.specialist.directions import DIRECTIONS
 from hyperloom_multibranch.specialist.dossier_pass import DossierOutcome, DossierPass, DossierStart
@@ -248,6 +251,7 @@ SETTINGS = RunSettings(
     caps=RosterCaps(3, 2, 8),
     judge_interval_seconds=600.0,
     review_gate=False,
+    agent_share_minutes=0.0,  # these sessions are shorter than the time an Arbor iteration needs
 )
 #: An InferenceX matrix with one single-node entry for the workload's model.
 LLAMA_MATRIX = """\
@@ -2217,6 +2221,8 @@ async def test_two_arbors_wait_for_a_person_s_review_of_the_map_as_edited_while_
     assert sorted(_shares(stage).values()) == ["/shares/share-1.json", "/shares/share-2.json"]
     page = (stage.layout.review / REVIEW_PAGE).read_text()
     assert "`m-attn`" in page and str(dossier) in page and "approve" in page
+    # The clock runs, and with no time the shares need, there is no time to decide by.
+    assert "## The clock" in page and "**EXPLORE ends:**" in page and "Decide by" not in page
 
 
 async def test_a_rejected_map_opens_no_share_branch_and_the_session_goes_on(
@@ -2231,6 +2237,60 @@ async def test_a_rejected_map_opens_no_share_branch_and_the_session_goes_on(
     assert decided["status"] == "rejected" and read == []
     assert _review_steps(stage) == [REVIEW_REQUESTED, REVIEW_REJECTED]
     assert not _shares(stage)
+
+
+def _too_late(stage: Stage) -> list[tuple[object, ...]]:
+    """Each decision that the shares had too little time to open: its kind, branch, step and the minutes needed."""
+
+    rows = [row for row in _decisions(stage) if row["reason"] == SHARES_TOO_LATE]
+    return [(row["kind"], row["branch"], row["detail"]["step"], row["detail"]["floor"]) for row in rows]
+
+
+async def test_shares_with_less_time_than_an_arbor_iteration_needs_open_none_and_ask_no_review(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    read: list[str] = []
+    stage, _map_file, _dossier = _two_arbors_reviewed(tmp_path, monkeypatch, read)
+    stage.settings = replace(stage.settings, agent_share_minutes=600.0)
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error) == (SessionStopReason.TIME_EXHAUSTED, "")
+    assert read == [] and not _shares(stage)
+    assert not stage.layout.review.exists() and _review_steps(stage) == []
+    assert _too_late(stage) == [("share", "b01", "before the review", 600.0)]
+
+
+async def _open_by(stage: Stage) -> float:
+    """The time the session's review in EXPLORE is to be decided by, once it asks for one."""
+
+    for _ in range(2000):
+        if (state := review.load(stage.layout.review)) is not None:
+            return datetime.fromisoformat(str(state["open_by_iso"]).replace("Z", "+00:00")).timestamp()
+        await stage.time.sleep(5.0)
+    raise AssertionError("the session never asked for a review")
+
+
+async def test_a_review_decided_after_its_clock_ran_out_opens_no_share_and_says_why(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    read: list[str] = []
+    stage, _map_file, _dossier = _two_arbors_reviewed(tmp_path, monkeypatch, read)
+    stage.settings = replace(stage.settings, agent_share_minutes=2.0)
+    # No margin before EXPLORE's end: a share opened at any time would run until it, so the clock is EXPLORE's alone.
+    monkeypatch.setattr(autonomous_session, "collection_margin", lambda _records, _floor: 0.0)
+
+    async def late() -> dict[str, Any]:
+        open_by = await _open_by(stage)
+        return await _decide(stage, True, after=open_by + 1 - stage.time.now())
+
+    outcome, decided = await asyncio.gather(stage.run(), late())
+
+    assert outcome.stop_reason is SessionStopReason.TIME_EXHAUSTED
+    assert decided["status"] == "approved" and read == [] and not _shares(stage)
+    assert _review_steps(stage) == [REVIEW_REQUESTED, REVIEW_APPROVED]
+    assert _too_late(stage) == [("share", "b01", "after the review", 2.0)]
+    assert "**Decide by about:**" in (stage.layout.review / REVIEW_PAGE).read_text()
 
 
 async def test_without_the_review_gate_two_arbors_split_their_map_at_once_and_the_skip_is_recorded(
@@ -2306,6 +2366,7 @@ async def test_a_given_map_is_reviewed_too_and_split_as_given(tmp_path: Path, mo
     assert outcome.stop_reason is SessionStopReason.TIME_EXHAUSTED
     assert asked == [str(given)] and decided["map"] == str(given) and decided["made_by"] == review.MADE_BY_USER
     assert _review_steps(stage) == [REVIEW_REQUESTED, REVIEW_APPROVED]
+    assert "## The clock" not in (stage.layout.review / REVIEW_PAGE).read_text(), "the session paused for it"
 
 
 async def test_a_run_that_stops_after_its_map_does_not_pause_even_with_the_review_on(

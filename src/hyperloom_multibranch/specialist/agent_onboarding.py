@@ -49,6 +49,7 @@ from hyperloom_multibranch.specialist.arbor_adapter import (
     ArborRefused,
     ArborRun,
     arbor_manifest,
+    dossier_notes,
     fit_keys,
     is_arbor,
     refused_reasons,
@@ -240,7 +241,8 @@ class OnboardingSetup:
 @dataclass(frozen=True)
 class ReadyAgent:
     """An agent preflight made ready: its manifest, its checkout and the process it runs in, and what its branch should
-    note of how it was started (an input its Arbor lacks, :func:`fit_keys`)."""
+    note of how it was started (an input its Arbor lacks, :func:`fit_keys`, or a dossier that is gone,
+    :func:`dossier_notes`)."""
 
     manifest: AgentManifest
     source_dir: Path
@@ -324,7 +326,7 @@ async def _attempt(
     notes: tuple[str, ...] = ()
     if adapted:
         config, notes = fit_keys(manifest.config, checkout)
-        manifest = replace(manifest, config=config)
+        manifest, notes = replace(manifest, config=config), (*notes, *dossier_notes(checkout, spec.dossier))
     (checkout / manifest.config_file).parent.mkdir(parents=True, exist_ok=True)
     (checkout / manifest.config_file).write_text(json.dumps(manifest.config, indent=2), encoding=ENCODING)
     env = agent_env(agent_dir)

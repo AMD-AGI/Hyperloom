@@ -8,9 +8,10 @@ EXPLORE then runs until the longest baseline test and one CLOSE grace are left b
 score the branches with the frontier's defaults for the session's budget. Once the baseline is established, a session
 with an RSI archive plays the scheduling playbook ``--playbook`` asks for, the champion of the pool beside it or a
 playbook on trial, recorded under ``playbook`` in ``policy_versions``. The FINAL candidates are fixed while every
-branch still stands, then exploration ends and FINAL validates them. With the review on, a session with Arbor agents
-pauses before their branches open until a person approves their map (:mod:`.review`); the pause moves the deadline,
-and EXPLORE's end, by its length. A failed PRELUDE, a run asked to stop once its Arbor agents' directions are mapped,
+branch still stands, then exploration ends and FINAL validates them. With the review on, a session whose Arbor agents
+are given a map pauses before their branches open until a person approves it (:mod:`.review`); the pause moves the
+deadline, and EXPLORE's end, by its length. A map a mapping branch makes is reviewed in EXPLORE, while the clock runs,
+and its shares open only with ``--agent-share-minutes`` left before their cutoff. A failed PRELUDE, a run asked to stop once its Arbor agents' directions are mapped,
 a map a person rejected, an EXPLORE that ran out of cards to measure on, a stop signal, the session deadline
 before FINAL starts or an unhandled error skip straight to CLOSE, which always runs and kills every process the session started. FINAL waits for the validation tests it started, past the deadline and the hard
 stop if need be, and moves the hard stop to no sooner than one CLOSE grace from its end. The deadline plus the CLOSE
@@ -68,6 +69,7 @@ from hyperloom_multibranch.scheduling.agent_plans import (
     MADE_BY_SHARES,
     MAP_KEPT,
     ROOT_SHARES_READ,
+    SHARES_TOO_LATE,
     agent_plans,
     arbor_agents,
     generated_map,
@@ -168,6 +170,8 @@ JUDGE_PROMPT_KEY = "judge_prompt"
 #: The ``policy_versions`` key of the RSI lesson pool's digest as the specialists' recall read it, empty for no pool:
 #: two sessions of one build that were shown different past lessons differ here.
 LESSONS_KEY = "lessons"
+#: Seconds in a minute, the unit of the agents' time options.
+MINUTE = 60.0
 #: Stop reasons a session ends with when it ran its course, a budget spent as set included; any other one, or an
 #: error, is a failed session.
 COMPLETED_REASONS = frozenset(
@@ -253,6 +257,7 @@ class Session:
         self._desk = desk
         self._prelude: PreludeResult | None = None
         self._map_shares: tuple[RootShares | None] | None = None
+        self._explore_end = math.inf
         peers = peer_factory(self._peer_setup(desk, services))
         context = SchedulerContext(
             self._layout,
@@ -529,7 +534,7 @@ class Session:
             logger.info("the agent map was rejected at its review: %s", exc)
             return SessionOutcome(SessionStopReason.REVIEW_REJECTED, None, None, "")
         budget = self._budget or budget  # a review's pause moved the deadline
-        explore_end = budget.explore_end(self._clock.now(), prelude.longest_root_test)
+        explore_end = self._explore_end = budget.explore_end(self._clock.now(), prelude.longest_root_test)
         self._phase("explore", explore_end=explore_end)
         window = ExploreWindow(
             prelude.root_commit,
@@ -609,7 +614,7 @@ class Session:
             )
             return None
         given = (None, ROOT_PROFILE_SOURCE) if shares is None else (shares.shares, shares.source)
-        ends = self._clock.now() + minutes * 60
+        ends = self._clock.now() + minutes * MINUTE
         detail = {"source": source, "start_commit": start_commit, "minutes": minutes, "profile": given[1]}
         self._decisions.record(Decision(DecisionKind.SHARE, DOSSIER_STARTED, INTEGRATION_BRANCH, detail))
         return DossierStart(source, start_commit, min(ends, deadline) if deadline else ends, *given)
@@ -627,11 +632,14 @@ class Session:
         """Hand the map of the mapping branch ``branch`` out to the Arbor agents ``map_for``: the pass's map, else one
         generated from the root's shares, reviewed by a person when the session's review is on, while the other
         branches go on; split into one share each; and asked of the fork desk as share branches cut at
-        ``start_commit``. A rejected map opens none. What was done, for the branch log."""
+        ``start_commit``. A rejected map opens none, and neither does a split too late for the shares to run an Arbor
+        iteration (:meth:`_too_late`), checked before the review and after it. What was done, for the branch log."""
 
         if outcome is not None:
             ended = {"reason": outcome.reason, "map": str(outcome.map or ""), "dossier": str(outcome.dossier or "")}
             self._decisions.record(Decision(DecisionKind.SHARE, DOSSIER_ENDED, branch, ended))
+        if late := await self._too_late(branch, map_for, "before the review"):
+            return late
         shares = None if self._prelude is None else await self._mapped_shares(self._prelude)
         map_file = "" if outcome is None or outcome.map is None else str(outcome.map)
         if self._settings.review_gate:
@@ -643,6 +651,8 @@ class Session:
                 await self._review(Path(map_file) if map_file else None, dossier, made_by, branch=branch)
             except ReviewRejected as exc:
                 return f"the map was rejected at its review ({exc}); no share branch opens"
+            if late := await self._too_late(branch, map_for, "after the review"):
+                return late
         work = self._layout.agent_plans
         given = () if shares is None else (shares.shares, shares.source)
         plans = await agent_plans(map_for, map_file, work, *given)
@@ -652,6 +662,34 @@ class Session:
             answers.append(f"{admission.branch or admission.reason} ({admission.status.value})")
         split = "split" if any(plans) else "not split, each Arbor maps its own"
         return f"{len(map_for)} share branches asked, the map {split}: {', '.join(answers)}"
+
+    async def _too_late(self, branch: str, map_for: tuple[str, ...], step: str) -> str:
+        """Why the shares of ``map_for`` do not open when each would now run less than ``--agent-share-minutes``
+        before its cutoff, recorded as a ``SHARE`` decision of the mapping ``branch`` at ``step``; ``""`` when they
+        may open."""
+
+        need = self._settings.agent_share_minutes
+        runway, _open_by = await self._share_time()
+        minutes = runway / MINUTE
+        if minutes >= need:
+            return ""
+        detail = {"step": step, "agents": len(map_for), "minutes": round(minutes, 1), "floor": need}
+        self._decisions.record(Decision(DecisionKind.SHARE, SHARES_TOO_LATE, branch, detail))
+        return (
+            f"no share branch opens ({step}): each would run {minutes:.0f} min before its cutoff, under the"
+            f" {need:g} an Arbor iteration needs (--agent-share-minutes)"
+        )
+
+    async def _share_time(self) -> tuple[float, float]:
+        """How long a share branch opened now would run before its cutoff, as its agent reckons it by the session's
+        tests so far, and about when that falls under ``--agent-share-minutes``."""
+
+        from hyperloom_multibranch.specialist.autonomous_session import CUTOFF_SECONDS, collection_margin, run_seconds
+
+        records = (await self._blackboard.snapshot()).records
+        runway = run_seconds(self._explore_end - self._clock.now(), records, CUTOFF_SECONDS)
+        margin = collection_margin(records, CUTOFF_SECONDS)
+        return runway, self._explore_end - margin - self._settings.agent_share_minutes * MINUTE
 
     async def _generated(self, arbors: dict[int, Path], shares: RootShares | None) -> str:
         """The map the first Arbor generates from the root's ``shares``, for a person to review before it is split;
@@ -668,12 +706,17 @@ class Session:
         """Wait, holding no lease, until a person decides on ``map_file`` and ``dossier`` (:mod:`.review`). Before
         EXPLORE the session pauses: each step is a ``PRELUDE`` decision, the deadline does not pass while it waits and
         moves by the time paused (:meth:`_extend`). For the mapping ``branch`` in EXPLORE, only that branch waits, each
-        step a ``SHARE`` decision of it, and the deadline stays. Raises
+        step a ``SHARE`` decision of it, and the deadline stays: its page shows the clock (:meth:`_share_time`). Raises
         :class:`~hyperloom_multibranch.scheduling.review.ReviewRejected` on a rejection."""
 
         directory, began = self._layout.review, self._clock.now()
         kind, holder = (DecisionKind.SHARE, branch) if branch else (DecisionKind.PRELUDE, INTEGRATION_BRANCH)
-        state = request(directory, self._layout.root, Reviewed(map_file, dossier, made_by), began)
+        shown = Reviewed(map_file, dossier, made_by)
+        if branch and math.isfinite(self._explore_end):
+            _runway, open_by = await self._share_time()
+            timed = open_by if self._settings.agent_share_minutes > 0 else None
+            shown = replace(shown, explore_end=self._explore_end, open_by=timed)
+        state = request(directory, self._layout.root, shown, began)
         asked = {"page": str(directory / REVIEW_PAGE), "map": state["map"], "dossier": state["dossier"]}
         self._decisions.record(Decision(kind, REVIEW_REQUESTED, holder, asked))
         logger.warning("waiting for a person's review of the agent map: read %s", directory / REVIEW_PAGE)
@@ -751,7 +794,7 @@ class Session:
             self._decisions.record(Decision(DecisionKind.PRELUDE, DOSSIER_SKIPPED, INTEGRATION_BRANCH, detail))
             return None
         given = (None, ROOT_PROFILE_SOURCE) if shares is None else (shares.shares, shares.source)
-        start = DossierStart(source, start_commit, self._clock.now() + minutes * 60, *given)
+        start = DossierStart(source, start_commit, self._clock.now() + minutes * MINUTE, *given)
         detail = {"source": source, "start_commit": start_commit, "minutes": minutes, "profile": given[1]}
         self._decisions.record(Decision(DecisionKind.PRELUDE, DOSSIER_STARTED, INTEGRATION_BRANCH, detail))
         try:

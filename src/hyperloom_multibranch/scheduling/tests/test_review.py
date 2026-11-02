@@ -88,6 +88,42 @@ def test_a_review_with_no_map_says_each_arbor_maps_its_own(tmp_path: Path) -> No
 
     page = (tmp_path / "MB-review" / REVIEW_PAGE).read_text()
     assert "none could be made: each Arbor maps its own" in page and "**Dossier:** none" in page
+    assert "The pause does not count against --max-hours" in page and "## The clock" not in page
+    assert "left to decide" not in str(show(tmp_path / "MB-review", NOW + 60))
+
+
+def test_a_review_in_explore_shows_its_clock_and_show_says_how_long_is_left_until_it_is_decided(tmp_path: Path) -> None:
+    map_file, dossier = _map_and_dossier(tmp_path)
+    directory = tmp_path / "MB-review"
+    shown = Reviewed(map_file, dossier, "dossier pass", explore_end=NOW + 3 * 3600, open_by=NOW + 80 * 60)
+
+    state = request(directory, tmp_path, shown, NOW)
+
+    assert (state["open_by_iso"], state["explore_end_iso"]) == ("2026-11-01T03:46:40Z", "2026-11-01T05:26:40Z")
+    page = (directory / REVIEW_PAGE).read_text()
+    assert "**The session does not pause for this review:**" in page and "it opens none and goes on" in page
+    assert "- **Asked:** 2026-11-01T02:26:40Z" in page
+    assert "- **Decide by about:** 2026-11-01T03:46:40Z, 80 min after it was asked." in page
+    assert "- **EXPLORE ends:** 2026-11-01T05:26:40Z, whenever you decide." in page
+    assert "--max-hours" not in page and f"review --session {tmp_path} approve" in page
+    assert str(show(directory, NOW + 20 * 60)).endswith(
+        "Now 2026-11-01T02:46:40Z: 60 min left to decide, until 2026-11-01T03:46:40Z\n"
+    )
+    late = str(show(directory, NOW + 90 * 60))
+    assert "past 2026-11-01T03:46:40Z; no share branch opens, whatever is decided" in late
+    decide(directory, True, "alice", "", NOW + 90 * 60)
+    assert "Now " not in str(show(directory, NOW + 95 * 60))
+
+
+def test_a_review_in_explore_whose_shares_open_whatever_the_time_has_no_time_to_decide_by(tmp_path: Path) -> None:
+    map_file, dossier = _map_and_dossier(tmp_path)
+    shown = Reviewed(map_file, dossier, "dossier pass", explore_end=NOW + 3 * 3600)
+
+    state = request(tmp_path / "MB-review", tmp_path, shown, NOW)
+
+    page = (tmp_path / "MB-review" / REVIEW_PAGE).read_text()
+    assert "## The clock" in page and "Decide by" not in page and state["open_by_iso"] is None
+    assert "left to decide" not in str(show(tmp_path / "MB-review", NOW))
 
 
 async def test_the_wait_ends_once_a_person_decides(tmp_path: Path) -> None:

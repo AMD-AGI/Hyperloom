@@ -53,12 +53,14 @@ GENERATED_MAP = "generated-directions.json"
 #: The fewest Arbor agents a generated map is split for; one Arbor maps its own directions.
 GENERATED_FOR = 2
 #: The ``PRELUDE`` decisions of the session's agent map, as the lifecycle records them: the root's shares as it waited
-#: for and read them, a source that could not be fetched, and the dossier pass skipped, started and ended.
+#: for and read them, a source that could not be fetched, the dossier pass skipped, started and ended, and the shares
+#: left unopened because each would have less than ``--agent-share-minutes`` before its cutoff.
 ROOT_SHARES_READ = "agent map: root shares read"
 AGENT_SOURCES_UNREAD = "agent map: an agent source cannot be fetched"
 DOSSIER_SKIPPED = "agent map: no dossier pass"
 DOSSIER_STARTED = "agent map: dossier pass started"
 DOSSIER_ENDED = "agent map: dossier pass ended"
+SHARES_TOO_LATE = "agent map: too little time left for the shares"
 #: The files a session that stops after its map keeps in its ``MB-agent-map`` directory: the map, the dossier under its
 #: own name beside it, and what made them, read by whoever reviews it.
 KEPT_MAP = "directions.json"

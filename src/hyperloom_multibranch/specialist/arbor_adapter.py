@@ -383,6 +383,15 @@ def carry_dossier(checkout: Path, dossier: Path) -> None:
         shutil.copytree(dossier, target)
 
 
+def dossier_notes(checkout: Path, dossier: str | None) -> tuple[str, ...]:
+    """A note for the branch when ``dossier``, the session's dossier pass's, is named but neither there nor already in
+    ``checkout``: :func:`carry_dossier` copies nothing then, and the branch runs on its share with no dossier."""
+
+    if not dossier or Path(dossier).is_dir() or (checkout / DOSSIER_DIR / Path(dossier).name).is_dir():
+        return ()
+    return (f"the dossier pass's dossier {dossier} is not there: started without a dossier",)
+
+
 def pass_dossier(checkout: Path, session: Path) -> Path | None:
     """The dossier a dossier pass in ``checkout`` wrote: the newest directory with an index under :data:`DOSSIER_DIR`
     of the checkout, where git does not track it (the ones it tracks are Arbor's own), or of the pass's ``session``,
@@ -820,6 +829,7 @@ __all__ = [
     "arbor_manifest",
     "bench_command",
     "carry_dossier",
+    "dossier_notes",
     "generate_directions",
     "has_review_gate",
     "host_rules",
