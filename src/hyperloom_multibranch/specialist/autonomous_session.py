@@ -43,7 +43,7 @@ import json
 import logging
 import math
 import time
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from functools import partial
 from pathlib import Path
@@ -117,6 +117,11 @@ SPEND_SECONDS = 60.0
 #: has measured nothing yet to time a test by: an import's test and its confirm, about ten minutes each on an InferenceX
 #: workload, after whatever test runs then (see :func:`collection_margin`).
 CUTOFF_SECONDS = 40 * 60.0
+#: A keep's source change larger than this is refused: a real one is kilobytes, and its patch is stored in the recipe,
+#: applied to every test of its head and written back to the Recipe KB.
+MAX_SOURCE_PATCH_BYTES = 16 * 1024 * 1024
+#: How many of a keep's files left out as outside the component its note names.
+_NAMED_OUTSIDE = 5
 SPEND_FILE = "agent-spend.json"
 #: How long the running agent may write nothing (output, transcript or file), and the run's poll take to come round,
 #: before the run is lost. A Claude CLI ends a tool call or a model request within ten minutes and writes its transcript.
@@ -553,6 +558,13 @@ class AutonomousSession:
                     f"keep {seq}: the kernel tables of {names} were not copied, too large; imported as set"
                 )
             await self._record_dropped(watch, watch.pending)
+            if watch.pending.outside:
+                named = ", ".join(watch.pending.outside[:_NAMED_OUTSIDE])
+                more = len(watch.pending.outside) - _NAMED_OUTSIDE
+                await self._note(
+                    f"keep {seq} is imported without {len(watch.pending.outside)} file(s) outside "
+                    f"{self._setup.component}: {named}{f' and {more} more' if more > 0 else ''}"
+                )
         await self._learn(manifest.ledger, watch)
         watch.save(self._place.workspace / WATCH_FILE)
 
@@ -747,10 +759,16 @@ class AutonomousSession:
 
         if manifest.snapshots is not None:
             outbox = self._agent_dir / SOURCE_DIR / manifest.snapshots_outbox
-            applied = partial(self._place.worktree.diff_applied, root, component=self._setup.component)
+            outside: list[str] = []
             copies = [path for table in self._start_tables.values() for path in table.defaults]
-            kept = read_snapshot(outbox, seq, root, applied, ComponentStart(self._root, manifest.config, copies))
-            return from_start_tables(kept, self._start_tables)
+            kept = read_snapshot(
+                outbox,
+                seq,
+                root,
+                partial(self._applied, root, outside),
+                ComponentStart(self._root, manifest.config, copies),
+            )
+            return replace(from_start_tables(kept, self._start_tables), outside=tuple(outside))
         workspace = self._place.worktree.path
         patch = without_file(self._place.worktree.diff_from(root, self._setup.component), manifest)
         source, summary = manifest.config_source, self._summary(manifest)
@@ -759,6 +777,21 @@ class AutonomousSession:
         where = workspace if source.root == WORKSPACE else self._agent_dir / SOURCE_DIR
         kept = read_kept_change(seq, patch, read_json(where / source.path), source, summary, self._root)
         return with_tables(from_start_tables(kept, self._start_tables), (workspace, self._agent_dir))
+
+    def _applied(self, root: str, outside: list[str], patches: Sequence[str]) -> str:
+        """What ``patches`` make of ``root``'s component, each less its files outside the component; ``outside`` gets
+        those of the last, the keep's own change."""
+
+        component, worktree = self._setup.component, self._place.worktree
+        sources = [worktree.source_only(component, patch) for patch in patches]
+        if sources:
+            outside.extend(sources[-1][1])
+        source = worktree.diff_applied(root, [text for text, _ in sources], component=component)
+        if len(source.encode()) > MAX_SOURCE_PATCH_BYTES:
+            raise KeptChangeError(
+                f"its source change is {len(source.encode())} bytes, over the {MAX_SOURCE_PATCH_BYTES} bytes a keep may be"
+            )
+        return source
 
     def _summary(self, manifest: AgentManifest) -> str:
         if manifest.keep is None or not manifest.summary_field:

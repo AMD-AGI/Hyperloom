@@ -40,6 +40,8 @@ LINKED_PATHS = "hyperloom-third-party"
 _EXTENSION = re.compile(r"\.(abi3|cpython-[^.]+)\.so$")
 #: Where in a base's git directory the copies of those trees go.
 THIRD_PARTY_COPY = "hyperloom-third-party-trees"
+_EXCLUDE = ":(exclude)"
+_DIFF_HEADER = re.compile(r'^diff --git "?a/(?P<old>.+?)"? "?b/(?P<new>.+?)"?\r?\n?$')
 SKIPPED = ("__pycache__", "*.pyc", "*.pyo", "*.so", "*.a", "*.o", "*.co", "*.hsaco")
 BASE_BRANCH = "installed"
 HEAD_SUBJECT = "head "
@@ -200,6 +202,22 @@ class SourceBase:
         if layout is None:
             raise UnsupportedComponentError(f"{component} has no package layout; its source cannot be laid out")
         return layout
+
+
+def _file_sections(patch: str) -> list[tuple[tuple[str, ...], str]]:
+    """``patch`` cut at each ``diff --git`` header: each file's paths (old, new) and its text, line ends kept."""
+    sections: list[tuple[tuple[str, ...], list[str]]] = []
+    for line in patch.splitlines(keepends=True):
+        header = _DIFF_HEADER.match(line)
+        if header:
+            sections.append(((header["old"], header["new"]), [line]))
+        elif sections:
+            sections[-1][1].append(line)
+    return [(names, "".join(lines)) for names, lines in sections]
+
+
+def _within(path: str, trees: Sequence[str]) -> bool:
+    return any(path == tree or path.startswith(f"{tree}/") for tree in trees)
 
 
 def linked_paths(worktree: Path) -> list[tuple[str, str]]:
@@ -379,6 +397,20 @@ class BranchWorktree:
         kept = [f"--exclude=/{prefix}" for prefix, _target in linked_paths(self.path)]
         _git(self.path, "clean", "-fdx", _QUIET, *kept)
 
+    def source_only(self, component: str, patch: str) -> tuple[str, tuple[str, ...]]:
+        """``patch`` less its files outside ``component``'s paths, and the paths it left out: an agent's scratch (logs,
+        probes, core dumps) committed beside its change never reaches a recipe, nor the apply that builds one."""
+        paths = self._paths(component)
+        own = [path for path in paths if not path.startswith(_EXCLUDE)]
+        nested = [path.removeprefix(_EXCLUDE) for path in paths if path.startswith(_EXCLUDE)]
+        kept, outside = [], []
+        for names, section in _file_sections(patch):
+            if any(_within(name, own) and not _within(name, nested) for name in names):
+                kept.append(section)
+            else:
+                outside.append(names[-1])
+        return "".join(kept), tuple(outside)
+
     def _staged_diff(self, component: str, *options: str) -> str:
         paths = self._paths(component)
         _git(self.path, *_STAGE, *paths)
@@ -395,7 +427,7 @@ class BranchWorktree:
         # A pathspec that names nothing fails the stage, and an install may ship no meta tree.
         held = _git(self.path, "ls-tree", "--name-only", BASE_BRANCH, "--", *trees).splitlines() if trees else []
         own = (layout.upstream_prefix, *held)
-        return (*own, *(f":(exclude){tree}" for tree in self._nested(component, own)))
+        return (*own, *(f"{_EXCLUDE}{tree}" for tree in self._nested(component, own)))
 
     def _nested(self, component: str, own: Sequence[str]) -> list[str]:
         """The trees of the other components that lie inside ``own``: a change there is theirs."""

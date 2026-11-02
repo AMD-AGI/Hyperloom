@@ -223,3 +223,15 @@ def test_a_worktree_links_the_installed_package_s_compiled_extensions_without_tr
     assert worktree.diff("vllm") == ""
     worktree.sync("c0", [])
     assert (worktree.path / "vllm" / "_C.abi3.so").exists(), "a sync keeps it"
+
+
+def test_source_only_keeps_the_component_s_files_byte_for_byte_and_names_the_rest(tmp_path, base):
+    worktree = base.worktree("s1", tmp_path / "s1")
+    own = "diff --git a/vllm/config.py b/vllm/config.py\n--- a/vllm/config.py\n+++ b/vllm/config.py\n@@ -1 +1 @@\n-a\n+b\r\n"
+    scratch = "diff --git a/eval/run.log b/eval/run.log\nnew file mode 100644\n--- /dev/null\n+++ b/eval/run.log\n@@ -0,0 +1 @@\n+x\r y\n"
+    near = "diff --git a/vllm_extra/x.py b/vllm_extra/x.py\n--- a/vllm_extra/x.py\n+++ b/vllm_extra/x.py\n@@ -1 +1 @@\n-1\n+2\n"
+
+    kept, outside = worktree.source_only("vllm", scratch + own + near)
+
+    assert kept == own
+    assert outside == ("eval/run.log", "vllm_extra/x.py")

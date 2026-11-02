@@ -93,7 +93,7 @@ class KeptChange:
     table files of its own a variable of ``envs`` lists, one table by the variable's value; ``uncopied``, the variables
     whose table the agent did not copy into its snapshot, which then load what the variable names; ``dropped``, the
     variables the agent runs with that the measurement sets itself (workload, evaluation, request), left out of
-    ``envs``."""
+    ``envs``; ``outside``, the files of its own change left out as outside the component (its scratch)."""
 
     seq: int
     source_patch: str
@@ -103,6 +103,7 @@ class KeptChange:
     tables: Mapping[str, str] = field(default_factory=dict)
     uncopied: tuple[str, ...] = ()
     dropped: Mapping[str, str] = field(default_factory=dict)
+    outside: tuple[str, ...] = ()
 
 
 def read_kept_change(
