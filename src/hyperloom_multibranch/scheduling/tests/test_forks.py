@@ -13,7 +13,13 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission, ForkRequest, RepairRequest
+from hyperloom_multibranch.contracts.fork import (
+    AdmissionStatus,
+    ForkAdmission,
+    ForkRequest,
+    RepairRequest,
+    ShareRequest,
+)
 from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
 from hyperloom_multibranch.contracts.intent import Intent, IntentLayer
 from hyperloom_multibranch.scheduling.clock import Clock
@@ -237,3 +243,38 @@ async def test_a_request_of_a_stopped_or_unknown_branch_is_refused(tmp_path: Pat
     assert answer.status is AdmissionStatus.REJECTED
     assert answer.reason == ("parent branch is stopped" if branch == "b01" else f"unknown parent branch {branch!r}")
     assert [entry.branch for entry in roster.entries()] == ["b01"]
+
+
+async def test_shares_take_the_slots_their_mapping_branch_held_and_outlive_its_stop(tmp_path: Path) -> None:
+    # b01 maps for three Arbors in a session of four slots: it holds two beside its own, so the specialist opened
+    # meanwhile finds none, and the third share waits for the mapping branch's own slot.
+    roster, desk = _desk(tmp_path, max_branches=4)
+    roster.hold("b01", 2)
+    roster.open(roster.next_branch_id(), origin=BranchOrigin.FIRST_BATCH, start_commit="c0", k=1)
+    assert roster.open_refusal()
+
+    answers = [await desk.admit_share(ShareRequest("b01", "c0", "/agents/arbor", f"/s/{n}.json")) for n in (1, 2, 3)]
+
+    assert [answer.status for answer in answers] == [AdmissionStatus.ACCEPTED] * 2 + [AdmissionStatus.PENDING]
+    roster.stop("b01", BranchStop(StopCause.GAVE_UP, "the map is made and handed out", CLOCK.now()))
+    assert desk.void_from("b01", "parent b01 stopped") == ()
+    desk.fill_free_slots()
+    waiting = desk.waiting()
+    assert [admitted.branch for admitted in waiting] == [answer.branch for answer in answers]
+    assert [admitted.share and admitted.share.plan for admitted in waiting] == ["/s/1.json", "/s/2.json", "/s/3.json"]
+    assert all(roster.entry(admitted.branch).origin is BranchOrigin.SHARE for admitted in waiting)
+    assert roster.entry(waiting[0].branch).origin.driver.value == "autonomous"
+    assert {row["kind"] for row in _logged(tmp_path)} == {"share"}
+
+
+async def test_a_hold_survives_a_restart_of_the_roster_and_goes_with_its_branch_s_stop(tmp_path: Path) -> None:
+    roster, _desk_ = _desk(tmp_path, max_branches=3)
+    roster.hold("b01", 2)
+
+    again = Roster(roster.caps, tmp_path / "MB-roster.json", CLOCK)
+
+    assert again.free_slots() == 0
+    again.unhold("b01")
+    assert again.free_slots() == 1
+    again.stop("b01", BranchStop(StopCause.GAVE_UP, "mapped", CLOCK.now()))
+    assert again.free_slots() == 3

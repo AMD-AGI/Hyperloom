@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The scheduler's answer to the rule gate's branch requests: a fork for a correctness fix, a repair of a blocked gain.
+"""The scheduler's answer to the requests for a new branch: the rule gate's fork for a correctness fix and repair of a
+blocked gain, and a mapping branch's share branch, which runs an Arbor agent on its share of the map.
 
 :class:`ForkDesk` is the scheduler's :class:`~hyperloom_multibranch.contracts.fork.ForkAdmissionService`. A request of a
 branch that is on the roster and not stopped is queued, first in first out, under a reserved branch id; it enters the
@@ -21,7 +22,8 @@ measured against, a fork once the rule gate has landed its fix. The desk needs n
 handed to the specialist runtime, which builds its rule gates on it.
 
 An admitted repair carries its request, which the branch control hands the new specialist as its branch's task; the
-diagnosis is also kept in the ``REPAIR`` decision. The fix a fork lands reaches its specialist through the blackboard.
+diagnosis is also kept in the ``REPAIR`` decision. An admitted share carries its agent and plan the same way, and is cut
+at the commit its mapping branch opened on. The fix a fork lands reaches its specialist through the blackboard.
 """
 
 from __future__ import annotations
@@ -29,24 +31,35 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, replace
 
-from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission, ForkRequest, RepairRequest
+from hyperloom_multibranch.contracts.fork import (
+    AdmissionStatus,
+    ForkAdmission,
+    ForkRequest,
+    RepairRequest,
+    ShareRequest,
+)
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
 from hyperloom_multibranch.scheduling.roster import BranchOrigin, Roster
 
-DECISION_KINDS = {BranchOrigin.FORK: DecisionKind.FORK, BranchOrigin.REPAIR: DecisionKind.REPAIR}
+DECISION_KINDS = {
+    BranchOrigin.FORK: DecisionKind.FORK,
+    BranchOrigin.REPAIR: DecisionKind.REPAIR,
+    BranchOrigin.SHARE: DecisionKind.SHARE,
+}
 QUEUE_FULL = "pending queue full"
 WAITING = "waiting for a branch slot"
 
 
 @dataclass(frozen=True)
 class AdmittedBranch:
-    """A fork or repair the desk admitted, cut from ``parent_commit``; ``repair`` is the request a repair was admitted
-    for, ``None`` for a fork."""
+    """A fork, repair or share the desk admitted, cut from ``parent_commit``; ``repair`` and ``share`` are the request a
+    repair or a share was admitted for, ``None`` otherwise."""
 
     branch: str
     parent_commit: str
     repair: RepairRequest | None = None
+    share: ShareRequest | None = None
 
 
 @dataclass(frozen=True)
@@ -60,6 +73,7 @@ class PendingBranch:
     parent_commit: str
     queued_at: float
     repair: RepairRequest | None = None
+    share: ShareRequest | None = None
 
 
 def _parent_refusal(roster: Roster, from_branch: str) -> str:
@@ -67,6 +81,14 @@ def _parent_refusal(roster: Roster, from_branch: str) -> str:
     if parent is None:
         return f"unknown parent branch {from_branch!r}"
     return "parent branch is stopped" if parent.stop is not None else ""
+
+
+def _share_refusal(roster: Roster, request: ShareRequest) -> str:
+    """A share is asked by its mapping branch as that branch's run ends, so only an unknown branch refuses it."""
+
+    if any(entry.branch == request.from_branch for entry in roster.entries()):
+        return ""
+    return f"unknown parent branch {request.from_branch!r}"
 
 
 def _repair_keys(repair: RepairRequest) -> tuple[tuple[str, ...], ...]:
@@ -109,6 +131,13 @@ class ForkDesk:
             self._repairs.update(dict.fromkeys(keys, answer.branch))
         return answer
 
+    async def admit_share(self, request: ShareRequest) -> ForkAdmission:
+        pending = PendingBranch(
+            "", BranchOrigin.SHARE, request.from_branch, request.start_commit, self._clock.now(), share=request
+        )
+        self._roster.unhold(request.from_branch)
+        return self._admit(pending, f"share {request.plan} of {request.agent}", _share_refusal(self._roster, request))
+
     def _admit(self, pending: PendingBranch, reason: str, refusal: str) -> ForkAdmission:
         """Refuse, queue or admit ``pending``; nothing jumps the queue, even onto a slot freed while it waits."""
 
@@ -135,7 +164,9 @@ class ForkDesk:
     def _enter(self, pending: PendingBranch) -> None:
         k = self._roster.entry(pending.from_branch).k
         self._roster.open(pending.branch, origin=pending.origin, start_commit="", k=k, from_branch=pending.from_branch)
-        self._waiting[pending.branch] = AdmittedBranch(pending.branch, pending.parent_commit, pending.repair)
+        self._waiting[pending.branch] = AdmittedBranch(
+            pending.branch, pending.parent_commit, pending.repair, pending.share
+        )
 
     def _record(self, pending: PendingBranch, reason: str, status: str) -> None:
         detail: dict[str, object] = {
@@ -145,6 +176,8 @@ class ForkDesk:
         }
         if pending.repair is not None:
             detail["diagnosis"] = pending.repair.diagnosis
+        if pending.share is not None:
+            detail.update(agent=pending.share.agent, plan=pending.share.plan)
         self._decisions.record(Decision(DECISION_KINDS[pending.origin], reason, pending.branch, detail))
 
     def fill_free_slots(self) -> None:
@@ -156,10 +189,11 @@ class ForkDesk:
             self._record(pending, f"dequeued after {self._clock.now() - pending.queued_at:.0f}s", "dequeued")
 
     def void_from(self, parent: str, reason: str) -> tuple[str, ...]:
-        """Void every queued request ``parent`` asked for, as ``parent`` has stopped for ``reason``; their reserved
-        branch ids, oldest first."""
+        """Void every queued fork and repair ``parent`` asked for, as ``parent`` has stopped for ``reason``; their
+        reserved branch ids, oldest first. A share outlives its mapping branch, whose run ends once it has asked."""
 
-        return self._void(tuple(pending for pending in self._queue if pending.from_branch == parent), reason)
+        voided = (p for p in self._queue if p.from_branch == parent and p.origin is not BranchOrigin.SHARE)
+        return self._void(tuple(voided), reason)
 
     def void_all(self, reason: str) -> tuple[str, ...]:
         """Void the whole queue, as the session stops for ``reason``; the reserved branch ids, oldest first."""
