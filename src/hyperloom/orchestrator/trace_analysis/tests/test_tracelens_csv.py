@@ -383,6 +383,9 @@ def test_derive_category_gemma_norm_is_a_norm():
     # Regression: the bare ``gemm`` marker claimed the ``gemma`` of MiniMax-M3's Gemma RMSNorm kernels.
     for name in ("_gemma_rmsnorm_kernel", "_gemma_fused_add_rmsnorm_kernel"):
         assert candidate_assembly.derive_kernel_category({"name": name}) == "LayerNorm", name
+    # The model name spells ``gemm`` for every op named after it, not only the norms.
+    assert candidate_assembly.derive_kernel_category({"name": "_gemma_act_and_mul_kernel"}) == "Activation"
+    assert candidate_assembly.derive_kernel_category({"name": "_gemma3_softmax_kernel"}) == "Softmax"
     assert (
         candidate_assembly.derive_kernel_category({"name": "ck_tile::BlockGemmASmemBSmemCRegV1DefaultPolicy"}) == "GEMM"
     )

@@ -13,6 +13,7 @@ from typing import Any
 
 from hyperloom.common import kernel_source_contract as _KSC
 from hyperloom_common.io import JsonFormat, atomic_write_json
+from hyperloom_common.kernel_names import without_model_names
 
 from ._harness_discovery import find_benchmark_files, find_repo_root
 from ._io_utils import append_log
@@ -41,7 +42,7 @@ from .tracelens_skill_runner import normalize_upstream_category
 log = logging.getLogger(__name__)
 
 # Kernel-name markers per GEAK category, in priority order: the first category with a marker in the name wins.
-# Norms precede the bare ``gemm`` marker, which also matches the ``gemma`` of ``_gemma_rmsnorm_kernel``.
+# Norms precede the bare ``gemm`` marker, as in TraceLens: CamelCase ``GemmaRMSNorm`` still spells it.
 _NAME_CATEGORY_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("LayerNorm", ("rmsnorm", "layernorm", "norm_kernel")),
     (
@@ -88,7 +89,7 @@ def derive_kernel_category(candidate: dict[str, Any]) -> str:
         return normalize_upstream_category(cat)
     if candidate.get("source_type") == "flydsl":
         return "FlyDSL"
-    name = str(candidate.get("name") or "").lower()
+    name = without_model_names(str(candidate.get("name") or "").lower())
     for category, markers in _NAME_CATEGORY_MARKERS:
         if any(marker in name for marker in markers):
             return category

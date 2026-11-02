@@ -34,3 +34,11 @@ def test_a_gemma_norm_row_gets_a_norms_dimensions_not_a_gemms():
     gemma = named_dimensions({"operation": "_gemma_fused_add_rmsnorm_kernel", "input_shapes": shapes})
 
     assert gemma == named_dimensions({"operation": "_fused_add_rmsnorm_kernel", "input_shapes": shapes}) == {}
+
+
+def test_a_gemma_named_non_norm_row_is_not_read_as_a_gemm():
+    """The model name spells ``gemm`` for every op named after it, not only the norms."""
+    shapes = [[40, 128], [40, 128]]
+    rotary = named_dimensions({"operation": "_gemma_rotary_embedding_kernel", "input_shapes": shapes})
+
+    assert rotary == named_dimensions({"operation": "_rotary_embedding_kernel", "input_shapes": shapes}) == {}
