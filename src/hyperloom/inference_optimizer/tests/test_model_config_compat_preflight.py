@@ -1341,7 +1341,7 @@ def test_emit_to_langfuse_is_best_effort(tmp_path, monkeypatch):
     from hyperloom.inference_optimizer.trace import langfuse_emitter as lfe
 
     def _boom(*a, **k):
-        raise RuntimeError("langfuse down")
+        raise OSError("langfuse down")
 
     monkeypatch.setattr(lfe, "flush_session", _boom)
 

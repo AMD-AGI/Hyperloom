@@ -1593,8 +1593,8 @@ async def test_the_compute_bound_reprofile_reports_both_of_its_steps(tmp_path, m
 
 
 @pytest.mark.asyncio
-async def test_a_raising_compute_bound_reprofile_still_rows_the_attempt(tmp_path, monkeypatch):
-    """An attempt that raises must still appear in the event's ``runs``."""
+async def test_a_raising_compute_bound_reprofile_crashes_with_the_attempt_rowed(tmp_path, monkeypatch):
+    """An attempt that raises crashes the action, and must still appear in the event's ``runs``."""
     from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
     from hyperloom.inference_optimizer.breakdown.recorder.roofline_event import PROFILE_ATTEMPT_COMPUTE_BOUND
 
@@ -1625,11 +1625,9 @@ async def test_a_raising_compute_bound_reprofile_still_rows_the_attempt(tmp_path
             "hyperloom.orchestrator.actions.executors.trace_analyze.trace_analyze_handler",
             new=fake_ta,
         ),
+        pytest.raises(RuntimeError, match="^server boot failed on the compute-bound retry$"),
     ):
-        result = await executor(_n26_ctx(tmp_path))
-
-    # Fail-soft is preserved: the host-bound analysis remains the outcome.
-    assert result["status"] == "succeeded"
+        await executor(_n26_ctx(tmp_path))
 
     event = next(e for e in read_timeline_events(tmp_path) if e.get("type") == "roofline")
     action = event["ext"]["actions"][0]
@@ -1638,8 +1636,9 @@ async def test_a_raising_compute_bound_reprofile_still_rows_the_attempt(tmp_path
     raised = profile["runs"][-1]
     assert raised["attempt_reason"] == PROFILE_ATTEMPT_COMPUTE_BOUND
     assert raised["status"] == "failed"
-    assert "server boot failed" in raised["failure"]["message"]
-    assert action["analysis"]["compute_bound_reprofile"]["adopted"] is False
+    assert raised["failure"]["message"] == (
+        "compute-bound re-profile raised: RuntimeError('server boot failed on the compute-bound retry')"
+    )
 
 
 @pytest.mark.asyncio

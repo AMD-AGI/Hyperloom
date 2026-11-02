@@ -24,10 +24,18 @@ class _BudgetStateMixin:
         leg ended is deliberately not consulted, so no leg can begin by handing
         itself a fresh budget.
 
+        The baseline failures a previous leg booked stay in
+        :attr:`baseline_failure_streak`, which is what ends a stuck run; what
+        does not carry over is their claim on *this* leg's budget, so
+        :attr:`baseline_failures_this_leg` starts at zero. A leg resumed past
+        the optimization reserve is owed the one baseline it was resumed for
+        before a retry is priced as a retry.
+
         Args:
             now_unix: Wall instant the leg starts; defaults to ``time.time()``.
         """
         self.leg_anchor_unix = float(time.time() if now_unix is None else now_unix)
+        self.baseline_failures_this_leg = 0
 
     def charge_elapsed(self, *, now_unix: float | None = None) -> float:
         """Fold the time since the last charge into the session's elapsed total.

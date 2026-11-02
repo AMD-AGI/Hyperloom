@@ -9,11 +9,9 @@ reworded) makes the rule that reads it stop firing, and nothing else says so. Ev
 (see ``image_check_spec``); this module evaluates them against the environment it runs in and reports, per fact, one of
 *pass*, *fail* or *unverifiable*. A fact with no check is unverifiable, and says so.
 
-A session runs it once before PRELUDE measures anything (``run_image_check``); ``python -m
-hyperloom.common.outside_facts.image_check`` runs it on its own, and exits 1 when a fact fails. The check looks at the
+``python -m hyperloom.common.outside_facts.image_check`` runs it and exits 1 when a fact fails. The check looks at the
 environment of the process that runs it, which need not be the environment the measurements run in: a hosted sandbox
-has its own image. A failure is therefore a warning by default and not a refusal to start. ``HYPERLOOM_IMAGE_CHECK``
-chooses: ``warn`` (the default), ``strict`` (a failing fact stops the session before it spends anything) or ``off``.
+has its own image. A failure is therefore a reason to look and not a proof.
 """
 
 from __future__ import annotations
@@ -22,14 +20,12 @@ import argparse
 import itertools
 import json
 import logging
-import os
 import sys
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -41,44 +37,18 @@ from hyperloom.common.outside_facts.image_env import HostImage, Image, ImageRead
 from hyperloom.common.outside_facts.rule_pack import RulePack, RulePackIdentity, default_pack
 
 __all__ = [
-    "MODE_ENV",
     "CheckResult",
     "FactResult",
-    "ImageCheckFailed",
-    "ImageCheckMode",
     "ImageCheckReport",
     "build_report",
     "evaluate_pack",
     "main",
-    "mode_from_environment",
-    "run_image_check",
 ]
 
 logger = logging.getLogger(__name__)
 
-#: The session input that chooses what a failing fact does.
-MODE_ENV = "HYPERLOOM_IMAGE_CHECK"
 _WORKERS = 4
 _NOT_DECLARED = "no image_check is declared for this fact, so nothing in the environment was compared with it"
-
-
-class ImageCheckMode(Enum):
-    """What the session does with a fact that fails."""
-
-    OFF = "off"
-    WARN = "warn"
-    STRICT = "strict"
-
-
-def mode_from_environment(environ: Mapping[str, str] | None = None) -> ImageCheckMode:
-    """The mode ``MODE_ENV`` names; ``warn`` when it is unset. A value that is not a mode is refused, not guessed."""
-    given = (os.environ if environ is None else environ).get(MODE_ENV, "").strip().lower()
-    if not given:
-        return ImageCheckMode.WARN
-    try:
-        return ImageCheckMode(given)
-    except ValueError:
-        raise ValueError(f"{MODE_ENV}={given!r} is not one of {[mode.value for mode in ImageCheckMode]}") from None
 
 
 @dataclass(frozen=True)
@@ -122,9 +92,8 @@ class FactResult:
 
 @dataclass(frozen=True)
 class ImageCheckReport:
-    """What the check found, for the session manifest, for CLOSE and for the person who reads the warning."""
+    """What the check found: per fact, what each declared check saw."""
 
-    mode: ImageCheckMode
     pack: RulePackIdentity
     checked_at: str
     environment: Mapping[str, Any]
@@ -138,10 +107,10 @@ class ImageCheckReport:
         return tuple(fact for fact in self.facts if fact.status is Status.FAIL)
 
     def summary(self) -> dict[str, Any]:
-        """The few fields the session manifest records: how the check ran, against which pack, and what failed."""
+        """The few fields worth recording: against which pack, how many facts passed or could not be confirmed, and which
+        failed."""
         counts = self.counts()
         return {
-            "mode": self.mode.value,
             "pack_digest": self.pack["digest"],
             "pass": counts[Status.PASS.value],
             "unverifiable": counts[Status.UNVERIFIABLE.value],
@@ -149,9 +118,8 @@ class ImageCheckReport:
         }
 
     def to_json(self) -> dict[str, Any]:
-        """The whole report, which CLOSE attaches: every fact with every check and what it found."""
+        """The whole report: every fact with every check and what it found."""
         return {
-            "mode": self.mode.value,
             "pack": dict(self.pack),
             "checked_at": self.checked_at,
             "environment": dict(self.environment),
@@ -163,7 +131,7 @@ class ImageCheckReport:
         """The report for people: the counts, every failing fact with the reason, and the facts nothing could confirm."""
         counts = self.counts()
         lines = [
-            f"Image check ({self.mode.value}) of rule pack {self.pack['version']}: "
+            f"Image check of rule pack {self.pack['version']}: "
             f"{counts[Status.PASS.value]} pass, {counts[Status.FAIL.value]} fail, "
             f"{counts[Status.UNVERIFIABLE.value]} unverifiable",
         ]
@@ -178,15 +146,6 @@ class ImageCheckReport:
     def write(self, path: Path) -> None:
         """Write the whole report to ``path`` as JSON, replacing what is there."""
         atomic_write_json(path, self.to_json(), options=WriteOptions(make_parents=True))
-
-
-class ImageCheckFailed(RuntimeError):
-    """A fact of the pack does not hold in this environment and the mode is ``strict``; ``report`` has the detail."""
-
-    def __init__(self, report: ImageCheckReport) -> None:
-        names = ", ".join(fact.fact for fact in report.failed())
-        super().__init__(f"image check failed under {MODE_ENV}=strict: {names}")
-        self.report = report
 
 
 def _roll_up(results: Sequence[CheckResult]) -> Status:
@@ -226,58 +185,14 @@ def evaluate_pack(pack: RulePack, image: Image) -> tuple[FactResult, ...]:
     )
 
 
-def build_report(
-    pack: RulePack | None = None, image: Image | None = None, mode: ImageCheckMode = ImageCheckMode.WARN
-) -> ImageCheckReport:
-    """Evaluate ``pack`` (the one this process reads) against ``image`` (this machine) and report; logs nothing.
-
-    Under ``off`` nothing is evaluated and the report holds no fact.
-    """
+def build_report(pack: RulePack | None = None, image: Image | None = None) -> ImageCheckReport:
+    """Evaluate ``pack`` (the one this process reads) against ``image`` (this machine) and report."""
     held = default_pack() if pack is None else pack
     identity: RulePackIdentity = {"version": held.version, "digest": held.digest}
     checked_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    if mode is ImageCheckMode.OFF:
-        return ImageCheckReport(mode, identity, checked_at, {}, ())
     where = HostImage() if image is None else image
     facts = evaluate_pack(held, where)
-    return ImageCheckReport(mode, identity, checked_at, where.describe(), facts)
-
-
-def _warning(report: ImageCheckReport) -> str:
-    lines = [
-        f"rule pack {report.pack['version']}: {len(report.failed())} fact(s) do not hold in this environment, so the "
-        "rules that read them may stop firing with no other sign:"
-    ]
-    for fact in report.failed():
-        lines.append(f"  - {fact.fact} ({fact.project}): " + "; ".join(fact.reasons()))
-    lines.append(
-        f"The session goes on: {MODE_ENV}=warn is the default because the check reads the environment of this process, "
-        "which may not be the one the measurements run in, so a failure is a reason to look and not a proof. "
-        f"{MODE_ENV}=strict stops the session on a failure, {MODE_ENV}=off skips the check."
-    )
-    return "\n".join(lines)
-
-
-def run_image_check(
-    *, mode: ImageCheckMode | None = None, pack: RulePack | None = None, image: Image | None = None
-) -> ImageCheckReport:
-    """Check the pack against the environment, once, before a session measures anything.
-
-    ``mode`` defaults to what ``HYPERLOOM_IMAGE_CHECK`` names. ``off`` evaluates nothing and reports that it did not.
-    Under ``warn`` a failing fact is logged as one warning naming each fact and why; under ``strict`` it also raises.
-    Blocking: it starts the interpreter and prints the help of the servers it checks, so a session runs it in a thread.
-
-    Raises:
-        ImageCheckFailed: A fact fails and the mode is ``strict``.
-        ValueError: ``HYPERLOOM_IMAGE_CHECK`` names no mode.
-    """
-    chosen = mode_from_environment() if mode is None else mode
-    report = build_report(pack, image, chosen)
-    if report.failed():
-        logger.warning("%s", _warning(report))
-        if chosen is ImageCheckMode.STRICT:
-            raise ImageCheckFailed(report)
-    return report
+    return ImageCheckReport(identity, checked_at, where.describe(), facts)
 
 
 def main(argv: Sequence[str] | None = None, *, pack: RulePack | None = None, image: Image | None = None) -> int:

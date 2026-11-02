@@ -1481,7 +1481,7 @@ class FrameworkPhase(_AuthoredOutcomeMixin, _CandidateDiscoveryMixin, ProposalBe
                     candidate,
                     audit=audit if isinstance(audit, dict) else {},
                 )
-            except Exception as exc:  # isolation boundary: one approved candidate's authoring dispatch
+            except (sqlite3.Error, OSError) as exc:
                 log.warning(
                     "FRAMEWORK: authoring specialist dispatch failed: %r",
                     exc,
