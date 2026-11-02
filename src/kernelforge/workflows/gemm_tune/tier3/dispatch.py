@@ -616,6 +616,30 @@ class _FusedMoeAdapter:
         return True
 
 
+def _flydsl_hgemm_call(a: Any, b: Any, cfg: dict[str, Any]) -> Callable[[], Any]:
+    """One FlyDSL hgemm candidate over the given operands, as a callable."""
+    import aiter.ops.flydsl.gemm_kernels as fly
+
+    return lambda: fly.flydsl_hgemm(
+        a,
+        b,
+        bias=None,
+        kernel_family="hgemm",
+        tile_m=cfg.get("tile_m"),
+        tile_n=cfg.get("tile_n"),
+        tile_k=cfg.get("tile_k"),
+        split_k=cfg.get("split_k", 1),
+        block_m_warps=cfg.get("block_m_warps", 1),
+        block_n_warps=cfg.get("block_n_warps", 1),
+        block_k_warps=cfg.get("block_k_warps", 1),
+        stages=cfg.get("stages", 4),
+        async_copy=cfg.get("async_copy", True),
+        b_to_lds=cfg.get("b_to_lds", True),
+        b_preshuffle=False,
+        c_to_lds=False,
+    )
+
+
 class _Bf16DenseAdapter:
     """Dispatch, baseline and correctness for row-major bf16 A[M,K] x B[N,K]^T."""
 
@@ -782,26 +806,7 @@ class _Bf16DenseAdapter:
                 )
 
             if backend == "aiter_flydsl":
-                import aiter.ops.flydsl.gemm_kernels as fly
-
-                return lambda: fly.flydsl_hgemm(
-                    a,
-                    b,
-                    bias=None,
-                    kernel_family="hgemm",
-                    tile_m=cfg.get("tile_m"),
-                    tile_n=cfg.get("tile_n"),
-                    tile_k=cfg.get("tile_k"),
-                    split_k=cfg.get("split_k", 1),
-                    block_m_warps=cfg.get("block_m_warps", 1),
-                    block_n_warps=cfg.get("block_n_warps", 1),
-                    block_k_warps=cfg.get("block_k_warps", 1),
-                    stages=cfg.get("stages", 4),
-                    async_copy=cfg.get("async_copy", True),
-                    b_to_lds=cfg.get("b_to_lds", True),
-                    b_preshuffle=False,
-                    c_to_lds=False,
-                )
+                return _flydsl_hgemm_call(a, b, cfg)
         except Exception as exc:  # isolation boundary: one dense bf16 candidate callable
             log.info("tier3: cannot dispatch %s: %r", backend, exc, exc_info=True)
             return None

@@ -238,6 +238,12 @@ class CaseCoverageMixin:
             + ". A resumed campaign restarts this record, so earlier "
             "sessions are absent from it rather than counted as uncovered."
         )
+        lines.extend(self._covered_case_lines(coverage, scored))
+        return "\n".join(lines)
+
+    def _covered_case_lines(self, coverage: CaseConfigCoverage, scored: list[str]) -> list[str]:
+        """The coverage ledger's per-category case lines, once some KEEP with per-case timings is on record."""
+        lines: list[str] = []
         lines.append(
             f"Covered {len(coverage.covered)}/{len(scored)}: "
             + (
@@ -268,4 +274,4 @@ class CaseCoverageMixin:
             lines.append(
                 "Never distinguished by any KEEP, so one configuration currently serves them all: " + ", ".join(group)
             )
-        return "\n".join(lines)
+        return lines
