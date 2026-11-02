@@ -11,6 +11,7 @@ import os
 import re
 import shlex
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -154,7 +155,7 @@ _HOST_PYTHON_ENV_KEYS = frozenset({"PYTHON", "VIRTUAL_ENV", "INFERENCE_OPTIMIZER
 
 # Paths install.sh derives from USER_DATA_PATH. The checkout's .env is shared by every session run from it, so when the
 # caller names its own workspace these come from that root, not from whichever workspace last wrote .env (mirrors
-# RUNTIME_ENV_WORKSPACE_DERIVED_KEYS in assets/runtime_env.sh).
+# RUNTIME_ENV_WORKSPACE_DERIVED_KEYS in assets/runtime_env.sh). The kernel-agent.env.sh loaded next carries them.
 _WORKSPACE_DERIVED_ENV_KEYS = frozenset({"HYPERLOOM_RUNTIME_DIR", "KERNEL_AGENT_ENV", "HYPERLOOM_ROOT"})
 
 
@@ -344,19 +345,41 @@ def _correct_kernel_agent_path_vars(file_vars: dict[str, str], env_path: Path) -
     return corrected
 
 
+_AUTHORITATIVE_DOTENV_LINE = re.compile(r"^HYPERLOOM_RUN_MODE=", re.MULTILINE)
+
+
+def _workspace_selection() -> Mapping[str, str]:
+    """The variables that select this run's workspace and so its runtime dir.
+
+    That is the environment, which ``_load_dotenv_fallback`` has already filled from ``.env``, except where a ``.env``
+    written by ``hyperloom setup`` names the workspace itself and the shell's copies are stale. This mirrors
+    ``runtime_env.sh`` (``setup_dotenv_is_authoritative`` and ``runtime_env_forget_stale_workspace``), which install.sh
+    runs; ``test_install_session_paths.py`` holds the two to the same answer.
+    """
+    env_file = _resolve_dotenv_file()
+    if env_file is None:
+        return os.environ
+    text = env_file.read_text(encoding="utf-8", errors="replace")
+    if os.environ.get("HYPERLOOM_SETUP_ENV_AUTHORITATIVE") != "1" and not _AUTHORITATIVE_DOTENV_LINE.search(text):
+        return os.environ
+    return _parse_env_assignments(text)
+
+
 def _kernel_agent_env_candidate() -> str | None:
     """The kernel-agent env file path, derived the way install.sh writes it.
 
-    ``$KERNEL_AGENT_ENV``, else ``$HYPERLOOM_RUNTIME_DIR/kernel-agent.env.sh``, else
-    ``$USER_DATA_PATH/runtime/kernel-agent.env.sh`` (install.sh's ``KERNEL_AGENT_ENV`` default).
+    ``KERNEL_AGENT_ENV``, else ``HYPERLOOM_RUNTIME_DIR/kernel-agent.env.sh``, else
+    ``USER_DATA_PATH/runtime/kernel-agent.env.sh`` (install.sh's ``KERNEL_AGENT_ENV`` default), each as
+    ``_workspace_selection`` has it.
     """
-    explicit = os.environ.get("KERNEL_AGENT_ENV")
+    selection = _workspace_selection()
+    explicit = selection.get("KERNEL_AGENT_ENV")
     if explicit:
         return explicit
-    runtime_dir = (os.environ.get("HYPERLOOM_RUNTIME_DIR") or "").strip()
+    runtime_dir = (selection.get("HYPERLOOM_RUNTIME_DIR") or "").strip()
     if runtime_dir:
         return str(Path(runtime_dir).expanduser() / "kernel-agent.env.sh")
-    user_data = (os.environ.get("USER_DATA_PATH") or "").strip()
+    user_data = (selection.get("USER_DATA_PATH") or "").strip()
     if user_data:
         return str(Path(user_data).expanduser() / "runtime" / "kernel-agent.env.sh")
     return None
@@ -368,7 +391,7 @@ def _load_kernel_agent_env_fallback() -> dict[str, Any]:
 
     if not candidate:
         print(
-            "Preflight: ERROR — neither $KERNEL_AGENT_ENV nor $USER_DATA_PATH is set. Cannot "
+            "Preflight: ERROR — none of $KERNEL_AGENT_ENV, $HYPERLOOM_RUNTIME_DIR, $USER_DATA_PATH is set. Cannot "
             "resolve kernel-agent.env.sh. Run "
             "src/hyperloom/inference_optimizer/assets/install.sh and export "
             "USER_DATA_PATH=/path/to/sessions first.",
@@ -382,8 +405,8 @@ def _load_kernel_agent_env_fallback() -> dict[str, Any]:
             f"{env_path}. USER_DATA_PATH must be the workspace root "
             f"(parent of <model>/<ts>/ per-session subdirs); runtime/ "
             f"is workspace-shared, not per-session. Either "
-            f"(a) re-run src/hyperloom/inference_optimizer/assets/install.sh under "
-            f"USER_DATA_PATH={os.environ.get('USER_DATA_PATH', '?')}, or "
+            f"(a) re-run src/hyperloom/inference_optimizer/assets/install.sh from this checkout in "
+            f"this environment (it writes the file where this check looks), or "
             f"(b) set $KERNEL_AGENT_ENV to point at an existing file. "
             f"Aborting now (was: silently warning and "
             f"letting trace_analyze fail 10h in).",

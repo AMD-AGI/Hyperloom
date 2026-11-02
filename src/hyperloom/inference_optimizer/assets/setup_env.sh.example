@@ -32,7 +32,7 @@ export PATH="$(dirname "$PYTHON"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/
 # $HYPERLOOM_RUNTIME_DIR (default $USER_DATA_PATH/runtime/). Run install, then source the generated file
 # (both idempotent).
 bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"
-. "${KERNEL_AGENT_ENV:-${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH}/runtime}/kernel-agent.env.sh}"
+. "$(. "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/runtime_env.sh"; runtime_env_kernel_agent_env_path)"
 
 # --- workload (override per run) ---
 export MODEL_PATH="${MODEL_PATH:?set MODEL_PATH before sourcing}"
