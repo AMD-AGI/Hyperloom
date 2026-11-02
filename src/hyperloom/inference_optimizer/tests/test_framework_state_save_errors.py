@@ -35,7 +35,7 @@ async def _map_authoring_specialist(coord: Coordinator) -> None:
 
 async def _rearm_under_cap(coord: Coordinator) -> None:
     await coord.phase_framework._maybe_rearm_authored_lane(
-        {"lane": "perf_framework", "status": "apply_failed", "candidate": dict(_CAND)}
+        {"lane": "perf_framework", "status": "apply_failed", "candidate": dict(_CAND)}, {}
     )
 
 

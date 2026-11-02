@@ -11,7 +11,7 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
-from hyperloom_common.coerce import first_str, first_text, to_list, to_mapping
+from hyperloom_common.coerce import dict_rows, first_str, first_text, to_list, to_mapping
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.inference_optimizer.grid_server_args import tokenize_server_args_preserving_json
 from hyperloom.orchestrator.lever import LEVER_SOURCE_PATCH, LEVER_UPSTREAM_PR, patch_lever_kind
@@ -560,6 +560,21 @@ def _record_discovered(coord: Any, task: Any, *, raw: Any, candidates: list[dict
 class _AuthoredOutcomeMixin:
     """Bridges authored-deliverable outcomes into the FRAMEWORK progress ledger, the attempt ledger and the timeline."""
 
+    def _authored_candidate_id(self, params: Mapping[str, Any]) -> str:
+        """The FRAMEWORK candidate (a PR URL) an authored patch's task belongs to; empty when it names none."""
+        cand_map = to_mapping(self.shared_state.framework_agent_specialist_candidate_map)
+        return first_str(
+            params.get("framework_agent_candidate_id"), cand_map.get(first_str(params.get("specialist_task_id")))
+        )
+
+    def _candidate_row(self, cand_id: str) -> dict[str, Any]:
+        """The latest discovered row of candidate ``cand_id``, carrying its batch id; empty when no batch holds it."""
+        for batch in reversed(dict_rows(self.shared_state.framework_agent_batches)):
+            for cand in dict_rows(batch.get("candidates")):
+                if cand_id and self._framework_candidate_key(cand) == cand_id:
+                    return {"batch_id": first_str(batch.get("batch_id")), **cand}
+        return {}
+
     def _record_framework_agent_authored_outcome(
         self,
         *,
@@ -584,12 +599,8 @@ class _AuthoredOutcomeMixin:
         status = first_str(res.get("status"))
         if not status or (status == "apply_failed" and res.get("lane") in ("perf_framework", "perf_explore")):
             return
-        # The FRAMEWORK candidate id an authored patch belongs to is a PR URL.
         spec_tid = first_str(params.get("specialist_task_id"))
-        cand_map = to_mapping(self.shared_state.framework_agent_specialist_candidate_map)
-        cand_id = first_str(
-            params.get("framework_agent_candidate_id"), cand_map.get(spec_tid), spec_tid, getattr(task, "task_id", "")
-        )
+        cand_id = first_str(self._authored_candidate_id(params), spec_tid, getattr(task, "task_id", ""))
         batches = to_list(self.shared_state.framework_agent_batches)
         batch_id = first_str(
             params.get("framework_batch_id"), to_mapping(batches[-1] if batches else None).get("batch_id")

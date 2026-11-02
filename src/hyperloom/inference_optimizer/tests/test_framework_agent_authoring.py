@@ -933,6 +933,55 @@ async def test_perf_explore_retry_stamps_immutable_explore_owner(
     assert params["gap_layer"] == "perf_explore"
 
 
+@pytest.mark.asyncio
+async def test_an_authored_patch_that_fails_to_apply_reauthors_its_pr_candidate(tmp_path: Path) -> None:
+    """An authored apply_failed result names no candidate; the retry re-dispatches the PR its task params name."""
+    from hyperloom.inference_optimizer.session.optimization_journal import Verdict
+
+    stub = _stub(tmp_path)
+    pr_url = "https://github.com/vllm-project/vllm/pull/60076"
+    _seed_batch(stub, {"pr_url": pr_url, "title": "KV-only insert", "diff_url": f"{pr_url}.diff"})
+
+    async def _no_such_task(task_id: str) -> Any:
+        from hyperloom.orchestrator.state.task_registry import TaskNotFound
+
+        raise TaskNotFound(task_id)
+
+    stub.tasks.get = _no_such_task
+    task = SimpleNamespace(
+        task_id="integrate-60076",
+        kind="integrate_patch",
+        params={
+            "framework_agent_authoring": True,
+            "framework_agent_candidate_id": pr_url,
+            "framework_batch_id": "b1",
+            "specialist_task_id": "spec-60076",
+        },
+    )
+    result = SubAgentResult(
+        task_id=task.task_id,
+        state="succeeded",
+        result={
+            "status": "apply_failed",
+            "lane": "perf_framework",
+            "error_class": "patch_conflict",
+            "specialist_task_id": "spec-60076",
+            "retry_feedback": [{"patch": "kv_insert.patch", "channel": "git", "stderr": "hunk 2 does not apply"}],
+        },
+    )
+
+    await stub.phase_framework.on_integrate_patch_settled(task, result, Verdict.FAILED)
+
+    assert stub.shared_state.apply_fail_reauthor_attempts == {pr_url: 1}
+    assert stub.shared_state.apply_fail_retry_pending == []
+    params = stub.tasks.created[-1]["params"]
+    assert params["framework_agent_candidate_id"] == pr_url
+    assert params["framework_batch_id"] == "b1"
+    assert params["reauthor_attempt"] == 1
+    assert params["pr_lead"]["diff_url"] == f"{pr_url}.diff"
+    assert "hunk 2 does not apply" in params["notes"]
+
+
 # ── Parallel authoring ───────────────────────────────────────────────────────
 
 

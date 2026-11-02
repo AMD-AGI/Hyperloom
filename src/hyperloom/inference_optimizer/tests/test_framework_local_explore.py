@@ -487,12 +487,12 @@ async def test_a_commit_failure_after_a_keep_does_not_rearm_the_author(tmp_path:
         "specialist_task_id": "t1",
     }
 
-    await stub.phase_framework._maybe_rearm_authored_lane(res)
+    await stub.phase_framework._maybe_rearm_authored_lane(res, {})
     assert stub.shared_state.apply_fail_retry_pending == []
 
     # A genuine apply failure on the same lane still queues a retry.
     await stub.phase_framework._maybe_rearm_authored_lane(
-        {**res, "status": "apply_failed", "error_class": "patch_did_not_apply"}
+        {**res, "status": "apply_failed", "error_class": "patch_did_not_apply"}, {}
     )
     assert len(stub.shared_state.apply_fail_retry_pending) == 1
 
