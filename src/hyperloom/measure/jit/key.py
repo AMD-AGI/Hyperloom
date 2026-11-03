@@ -65,6 +65,7 @@ __all__ = [
     "build_surface",
     "entry_env_names",
     "env_names_in",
+    "plain_build_names",
     "scan_env_names",
     "touches_build_surface",
     "tree_identity",
@@ -314,14 +315,22 @@ def build_surface(
     """The part of ``environment`` the build reads: a table variable by the content ``table_content`` gives for it, any
     other variable by its value, minus the variables that only name a location or change only speed or noise (``names`` is
     what :func:`scan_env_names` found, which still has them)."""
-    named = set(names) - _LOCATIONS - _NEUTRAL - {REBUILD_VARIABLE}
+    named = _read_names(names)
     tables = {
         name: table_content[name] for name in sorted(named) if name.startswith(_TABLE_PREFIX) and name in table_content
     }
-    plain = {
-        name: environment[name] for name in sorted(named) if not name.startswith(_TABLE_PREFIX) and name in environment
-    }
+    plain = {name: environment[name] for name in sorted(plain_build_names(names)) if name in environment}
     return BuildSurface(tables, plain, rebuild=_rebuilds(environment))
+
+
+def plain_build_names(names: Iterable[str]) -> frozenset[str]:
+    """The variables of ``names`` :func:`build_surface` takes by their value: neither a location, nor one that changes
+    only speed or noise, nor ``AITER_REBUILD``, nor a tuned table (taken by its content)."""
+    return frozenset(name for name in _read_names(names) if not name.startswith(_TABLE_PREFIX))
+
+
+def _read_names(names: Iterable[str]) -> set[str]:
+    return set(names) - _LOCATIONS - _NEUTRAL - {REBUILD_VARIABLE}
 
 
 def without_card_arch(environment: Mapping[str, str], gfx_arch: str | None) -> dict[str, str]:

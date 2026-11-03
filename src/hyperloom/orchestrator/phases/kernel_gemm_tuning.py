@@ -28,6 +28,9 @@ log = logging.getLogger(__name__)
 
 # Last-resort location of the aiter checkout inside the standard serving container.
 _CONTAINER_AITER_CONFIG_DIR = Path("/sgl-workspace/aiter/aiter/configs")
+#: What the lane says it does while it holds this host's preflight lock (``_aiter_serving_once``), moving serving modules
+#: aside: never while a launch preflight of another session builds or installs them.
+_GEMM_LANE_MOVE = "the GEMM tuning lane's move of serving modules"
 
 
 def _record_gemm_e2e_envelope(
@@ -823,6 +826,7 @@ class _GemmTuningMixin:
     ) -> dict[str, Any] | None:
         # The integrate verdict, a row carrying ``fault``, or ``None`` when the run itself was stopped.
         from ..actions.executors._aiter_jit import drop_serving_so_for_envs, prepare_serving_so_for_csvs
+        from ..actions.executors._aiter_serving_once import under_host_lock
         from ..state.kernel_decision_settings import _MAX_INTEGRATE_FAULT_ATTEMPTS
 
         tuner_name = cand["tuner"]
@@ -831,7 +835,9 @@ class _GemmTuningMixin:
         self.shared_state.save(self.session_dir)
 
         async def _fault(attempt: int, error_class: str, **fields: Any) -> dict[str, Any]:
-            await asyncio.to_thread(drop_serving_so_for_envs, test_envs, backup_dir=jit_backup_dir)
+            await asyncio.to_thread(
+                under_host_lock, _GEMM_LANE_MOVE, drop_serving_so_for_envs, test_envs, backup_dir=jit_backup_dir
+            )
             return {
                 **cand,
                 "reason": f"integrate_fault:{error_class}",
@@ -843,7 +849,9 @@ class _GemmTuningMixin:
 
         for attempt in range(1, _MAX_INTEGRATE_FAULT_ATTEMPTS + 1):
             last = attempt >= _MAX_INTEGRATE_FAULT_ATTEMPTS
-            await asyncio.to_thread(prepare_serving_so_for_csvs, test_envs, backup_dir=jit_backup_dir)
+            await asyncio.to_thread(
+                under_host_lock, _GEMM_LANE_MOVE, prepare_serving_so_for_csvs, test_envs, backup_dir=jit_backup_dir
+            )
             try:
                 integrate_result = await integrate_within_phase(
                     payload, state=self.shared_state, session_dir=self.session_dir
@@ -1041,6 +1049,7 @@ class _GemmTuningMixin:
     async def _validate_gemm_tuning_e2e(self, result: dict[str, Any]) -> None:
         """Sequentially E2E-validate each tuning candidate's env independently."""
         from ..actions.executors._aiter_jit import drop_serving_so_for_envs
+        from ..actions.executors._aiter_serving_once import under_host_lock
 
         candidates = self._gemm_canonical_candidates(result)
         if not candidates:
@@ -1102,7 +1111,9 @@ class _GemmTuningMixin:
                 # Distinguish no gain from a tuned artifact the runtime never reached.
                 reason = f"tuned_config_never_applied[{'+'.join(blockers)}] ({reason})"
             reverted.append({**cand, "reason": reason})
-            await asyncio.to_thread(drop_serving_so_for_envs, test_envs, backup_dir=jit_backup_dir)
+            await asyncio.to_thread(
+                under_host_lock, _GEMM_LANE_MOVE, drop_serving_so_for_envs, test_envs, backup_dir=jit_backup_dir
+            )
 
         _record_gemm_e2e_envelope(result, stacked_envs, kept=kept, reverted=reverted, faults=faults)
         await self._settle_gemm_e2e_verdict(
