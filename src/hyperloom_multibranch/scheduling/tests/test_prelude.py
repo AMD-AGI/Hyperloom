@@ -11,13 +11,16 @@ import json
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
+import yaml
 
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.contracts.measurement import Purpose, TestKind, TestResult
+from hyperloom.inference_optimizer.roofline_ceiling import compute_roofline_breakdown_from_state
 from hyperloom.contracts.recipe import PATCH_ROOT, LaunchConfig, PatchRef, RecipeDelta
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
@@ -59,6 +62,7 @@ from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.requests import SessionTests, integration_test_request
 from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, Workload
 from hyperloom_multibranch.scheduling.tests.framework_checkout import framework_checkout, head_of
+from hyperloom_multibranch.scheduling.tests.model_checkout import model_checkout
 from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     BASE_IMAGE_DIGEST,
     OneChampionKB,
@@ -301,6 +305,46 @@ async def test_an_agentx_prelude_anchors_its_baseline_on_one_root_test_and_has_n
     profile_record = await _blackboard(layout).session_profile()
     assert profile_record == result.profile
     assert (profile_record.isl, profile_record.osl, dict(profile_record.roofline_ceiling)) == (None, None, {})
+
+
+def _main_flow_ceiling(tmp_path: Path, workload: Workload) -> float:
+    """The decode ceiling the main flow's roofline snapshot records for ``workload``, read from the benchmark config
+    its baseline run materializes."""
+
+    assert workload.inferencex is not None
+    envs = {"TP": workload.tp, "CONC": workload.conc, "ISL": workload.inferencex.isl, "OSL": workload.inferencex.osl}
+    benchmark = {
+        "model": workload.model,
+        "framework": workload.framework,
+        "precision": workload.precision,
+        "envs": envs,
+    }
+    config = tmp_path / "baseline_config.with_envs.yaml"
+    config.write_text(yaml.safe_dump({"benchmark": benchmark}))
+    state = SimpleNamespace(baseline_config_path=str(config), gpu_type=workload.gpu_type, current_best={})
+    return compute_roofline_breakdown_from_state(state, arm="baseline").peak_tok_per_sec
+
+
+async def test_the_session_profile_bounds_output_throughput_by_the_main_flows_decode_ceiling(tmp_path: Path) -> None:
+    workload = replace(WORKLOAD, model=str(model_checkout(tmp_path)))
+    layout = _layout(tmp_path)
+
+    result = await _run(_prelude(layout, _peers(layout)), workload)
+
+    ceiling = _main_flow_ceiling(tmp_path, workload)
+    assert ceiling > 0
+    assert dict(result.profile.roofline_ceiling) == {GRADED_OUTPUT: pytest.approx(ceiling)}
+    assert await _blackboard(layout).session_profile() == result.profile
+
+
+async def test_an_agentx_session_profile_has_no_roofline_ceiling(tmp_path: Path) -> None:
+    """The decode ceiling bounds output throughput; AgentX is graded on interactivity."""
+
+    layout = _layout(tmp_path)
+
+    result = await _run(_prelude(layout, _peers(layout)), replace(AGENTX, model=str(model_checkout(tmp_path))))
+
+    assert dict(result.profile.roofline_ceiling) == {}
 
 
 async def test_a_prelude_whose_backend_cannot_analyse_the_root_profile_records_it_and_goes_on(tmp_path: Path) -> None:

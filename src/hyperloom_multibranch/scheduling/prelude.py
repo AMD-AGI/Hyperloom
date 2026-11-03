@@ -5,7 +5,8 @@
 
 The root recipe is the framework checkout the session runs on, at its ``HEAD``, on the toolbox's image
 (:func:`~hyperloom_multibranch.scheduling.prelude_reader.launched_root`): the experiment repository stores it as the
-root commit, the integration branch is opened on it with its K at once, and the session profile is written. Three
+root commit, the integration branch is opened on it with its K at once, and the session profile is written, with the decode ceiling the
+main flow's roofline models for the workload (:func:`roofline_ceiling`). Three
 things then run together, any of them failing ending the others: as many tests of the root as the rule gate asks for,
 from which the gate writes the baseline and its bar; a PROFILE test of the root and its TraceLens analysis in the
 toolbox (:meth:`~hyperloom_multibranch.scheduling.events.IntegrationProfiler.profile_root`), which PRELUDE waits for so
@@ -30,13 +31,16 @@ import asyncio
 import os
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 from hyperloom_common.io import atomic_write_json
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
+from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.contracts.measurement import Purpose, TestKind, TestResult
 from hyperloom.contracts.recipe import Recipe
 from hyperloom.inference_optimizer.model_config_utils import summarize_model_config
+from hyperloom.inference_optimizer.roofline_ceiling import compute_roofline_breakdown_from_state
 from hyperloom.measure.compile import BlobStore
 from hyperloom.orchestrator.knowledge.remote_recipe.client import KBStoreError
 from hyperloom_multibranch.contracts.gate import NotMeasured, SessionGate
@@ -202,7 +206,9 @@ class Prelude:
         await self._open_integration(root)
         version = await asyncio.to_thread(launched_framework_version, workload.framework, os.environ)
         model_config = await asyncio.to_thread(summarize_model_config, workload.model)
-        return _OpenedRoot(recipe, root, _session_profile(self._layout.session_id, workload, version, model_config))
+        profile = _session_profile(self._layout.session_id, workload, version, model_config)
+        ceiling = await asyncio.to_thread(roofline_ceiling, workload)
+        return _OpenedRoot(recipe, root, replace(profile, roofline_ceiling=ceiling))
 
     async def _replay(self, opened: _OpenedRoot, anchored: Awaitable[object]) -> _Replayed:
         """Read the warm-start leads and replay the best champion among them on the root, judged once ``anchored``
@@ -312,6 +318,31 @@ def _longest_wall_seconds(results: Iterable[TestResult]) -> float:
     )
 
 
+def roofline_ceiling(workload: Workload) -> dict[str, float]:
+    """The decode ceiling the main flow's roofline snapshot records for ``workload``
+    (:func:`~hyperloom.inference_optimizer.roofline_ceiling.compute_roofline_breakdown_from_state`), keyed by the output
+    throughput it bounds. Empty for an AgentX workload, which is graded on interactivity, and when the model's
+    checkpoint cannot be read on this host or the GPU has no specs."""
+
+    shape = workload.inferencex
+    if shape is None:
+        return {}
+    # The main flow reads a run's state by attribute. The root launches with no extra server args, so the checkpoint's
+    # own dtype sets the bytes per weight.
+    run = SimpleNamespace(
+        model_path=workload.model,
+        gpu_type=workload.gpu_type,
+        precision=workload.precision,
+        framework=workload.framework,
+        tp=workload.tp,
+        conc=workload.conc,
+        isl=shape.isl,
+        osl=shape.osl,
+    )
+    peak = compute_roofline_breakdown_from_state(run, arm="baseline").peak_tok_per_sec
+    return {GRADED_OUTPUT: peak} if peak > 0 else {}
+
+
 def _session_profile(
     session_id: str, workload: Workload, framework_version: str, model_config: Mapping[str, Any]
 ) -> SessionProfile:
@@ -343,4 +374,5 @@ __all__ = [
     "PreludeResult",
     "PreludeServices",
     "WarmStartSource",
+    "roofline_ceiling",
 ]

@@ -760,8 +760,8 @@ class SessionProfile:
     """What a session optimizes: its serving identity and workload, as PRELUDE fixed them.
 
     The serving identity is the seven dimensions of a Recipe KB canonical id. A workload without ``isl`` and ``osl`` is
-    an AgentX trace replay. ``roofline_ceiling`` is the bound the roofline analysis of a PRELUDE child put on each metric;
-    nothing writes it any more, it is read back from the sessions that ran one.
+    an AgentX trace replay. ``roofline_ceiling`` is the bound the main flow's roofline model puts on each metric for the
+    workload, empty when it models none.
     """
 
     session_id: str
