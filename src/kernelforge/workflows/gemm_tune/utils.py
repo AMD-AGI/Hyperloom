@@ -208,17 +208,10 @@ def run_subprocess(
         log.info("Command finished in %.1fs with rc=%d", elapsed, proc.returncode)
 
         if log_file:
-            log_file.parent.mkdir(parents=True, exist_ok=True)
-            with log_file.open("w", encoding="utf-8") as fh:
-                fh.write(f"# Command: {' '.join(cmd)}\n")
-                fh.write(f"# CWD: {cwd}\n")
-                fh.write(f"# Elapsed: {elapsed:.1f}s\n")
-                fh.write(f"# Exit code: {proc.returncode}\n\n")
-                fh.write("=== STDOUT ===\n")
-                fh.write(stdout or "")
-                fh.write("\n=== STDERR ===\n")
-                fh.write(stderr or "")
-
+            head = (
+                f"# Command: {' '.join(cmd)}\n# CWD: {cwd}\n# Elapsed: {elapsed:.1f}s\n# Exit code: {proc.returncode}"
+            )
+            _write_log(log_file, head, stdout, stderr)
         return proc.returncode, stdout or "", stderr or ""
     except subprocess.TimeoutExpired:
         elapsed = time.time() - started
@@ -230,15 +223,44 @@ def run_subprocess(
         time.sleep(2)
         with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
             os.killpg(proc.pid, signal.SIGKILL)
-        # Reap zombie
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+        stdout, stderr = _drain(proc)
         if log_file:
-            log_file.parent.mkdir(parents=True, exist_ok=True)
-            log_file.write_text(f"# TIMEOUT after {elapsed:.1f}s\n# Command: {' '.join(cmd)}\n")
-        return 124, "", msg
+            head = f"# Command: {' '.join(cmd)}\n# CWD: {cwd}\n# Elapsed: {elapsed:.1f}s"
+            _write_log(log_file, head, stdout, f"{stderr}\n# TIMEOUT after {elapsed:.1f}s")
+        return 124, stdout, f"{stderr}\n{msg}" if stderr else msg
+
+
+def _write_log(log_file: Path, head: str, stdout: str, stderr: str) -> None:
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    log_file.write_text(f"{head}\n\n=== STDOUT ===\n{stdout or ''}\n=== STDERR ===\n{stderr or ''}", encoding="utf-8")
+
+
+def _drain(proc: subprocess.Popen) -> tuple[str, str]:
+    """What a killed process wrote before it died; reaps it."""
+    try:
+        stdout, stderr = proc.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        return "", ""
+    return stdout or "", stderr or ""
+
+
+def visible_gpu_count(gpu_ids: str = "") -> int:
+    """The cards a tuner here can spread over: ``gpu_ids`` when given, else the device mask, else what torch counts."""
+    listed = [gpu for gpu in gpu_ids.split(",") if gpu.strip()]
+    if listed:
+        return len(listed)
+    for variable in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
+        masked = [gpu for gpu in os.environ.get(variable, "").split(",") if gpu.strip()]
+        if masked:
+            return len(masked)
+    try:
+        import torch
+
+        return max(1, torch.cuda.device_count())
+    except (ImportError, RuntimeError) as exc:
+        log.warning("could not count the GPUs (%s); tuning on one", exc)
+        return 1
 
 
 def emit_result_json(result: dict[str, Any]) -> None:
