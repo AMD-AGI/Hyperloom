@@ -22,8 +22,8 @@ it.
 
 - **Bump validated SGLang stack to 0.5.23 (ROCm 10 docker).** Updates
   `SGLANG_REF`, `SGLANG_PRETEND_VERSION`, recommended
-  `lmsysorg/sglang-rocm:v0.5.23-rocm10-*` image tags, `models.tsv`, and the
-  quick-start `Dockerfile`. **Upgrade note:** move from
+  `lmsysorg/sglang-rocm:v0.5.23-rocm10-*` image tags, `models.tsv`, the
+  quick-start `Dockerfile`, and the hosted app image `Dockerfile`. **Upgrade note:** move from
   `v0.5.22-rocm10-mi30x|mi35x-20261022` to
   `v0.5.23-rocm10-mi30x|mi35x-20261102` (or match `SGLANG_REF` on bare metal).
 
