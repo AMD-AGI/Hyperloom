@@ -14,10 +14,13 @@ from __future__ import annotations
 
 import contextlib
 import os
+import shlex
 import signal
 import subprocess
+import sys
 import textwrap
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -85,23 +88,101 @@ def _extract_shell_function(name: str) -> str:
     return "\n".join(lines[start : end + 1])
 
 
-def _run_install_ensure_ray_started(tmp_path: Path, extra_env: dict[str, str] | None = None):
+#: The ``ray`` package the installer's own driver connect imports: ``init`` answers as ``FAKE_RAY_HEAD`` says, and
+#: ``gilhold`` waits the way a raylet that never registers the driver makes Ray wait, in native code with the GIL held,
+#: after starting a helper process.
+_FAKE_RAY_PACKAGE = """
+import ctypes, os, subprocess, sys
+
+
+def _note(line):
+    with open(os.environ["FAKE_RAY_LOG"], "a", encoding="utf-8") as log:
+        log.write(line + "\\n")
+
+
+def init(address=None, **_kwargs):
+    _note(f"init {os.getpid()}")
+    if os.environ["FAKE_RAY_HEAD"] == "gilhold":
+        helper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(3600)"])
+        _note(f"helper {helper.pid}")
+        ctypes.PyDLL(None).sleep(3600)
+
+
+def cluster_resources():
+    return {"GPU": 1.0, "serving_slot": 1.0} if os.environ["FAKE_RAY_HEAD"] == "slot" else {"GPU": 1.0}
+
+
+def shutdown():
+    pass
+"""
+# The installer's bound on that connect in these tests, in seconds.
+_DRIVER_CONNECT_BOUND_SEC = 2
+
+
+def _driver_pids(state: Path) -> dict[str, int]:
+    """The pids the installer's driver connect noted: its own (``init``) and its helper's."""
+    path = state / "driver.log"
+    lines = path.read_text(encoding="utf-8").splitlines() if path.is_file() else []
+    return {kind: int(pid) for kind, pid in (line.split() for line in lines)}
+
+
+def _kill_driver_helper(state: Path) -> None:
+    """Kill only the helper the stand-in driver recorded, and only while it is still that sleep."""
+    pid = _driver_pids(state).get("helper")
+    with contextlib.suppress(OSError):
+        if pid is not None and b"time.sleep(3600)" in Path(f"/proc/{pid}/cmdline").read_bytes():
+            os.kill(pid, signal.SIGKILL)
+
+
+def _running(pid: int) -> bool:
+    """Whether ``pid`` is a live process; a zombie is not."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return False
+    return stat.rsplit(")", 1)[1].split()[0] not in ("Z", "X")
+
+
+def _run_install_ensure_ray_started(tmp_path: Path, extra_env: dict[str, str] | None = None, head: str | None = None):
     """Run install.sh's real ``ensure_ray_started`` as a background job of its own group, like a sandbox shell does.
+
+    With ``head`` set, a head is already running and the real ``ray_head_has_serving_slot`` asks it through a driver
+    connect that :data:`_FAKE_RAY_PACKAGE` answers as ``head`` says (``slot``, ``noslot`` or ``gilhold``).
 
     Returns ``(proc, stdout, stderr, state)``; the stand-in daemon is left for the caller to inspect and kill.
     """
     bin_dir, state = tmp_path / "bin", tmp_path / "state"
     _write_fake_ray(bin_dir, state)
+    slot_probe = "ray_head_has_serving_slot() { return 0; }"
+    env = {k: v for k, v in os.environ.items() if k not in ("HL_RAY_HEAD_PORT", "RAY_NUM_GPUS")}
+    if head is not None:
+        (state / "up").touch()
+        package = tmp_path / "driver" / "ray"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text(_FAKE_RAY_PACKAGE, encoding="utf-8")
+        # ``timeout`` runs the python3 on PATH, never a shell function.
+        python3 = bin_dir / "python3"
+        python3.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n', encoding="utf-8")
+        python3.chmod(0o755)
+        slot_probe = _extract_shell_function("ray_head_has_serving_slot")
+        env.update(
+            PYTHONPATH=str(package.parent),
+            FAKE_RAY_HEAD=head,
+            FAKE_RAY_LOG=str(state / "driver.log"),
+            HYPERLOOM_RAY_CONNECT_PROBE_TIMEOUT_SEC=str(_DRIVER_CONNECT_BOUND_SEC),
+        )
     body = "\n".join(
         [
             "set -euo pipefail",
             "CHECK_ONLY=0; DRY_RUN=0; SKIP_RAY_START=0",
             'log() { echo "[kernel-agent] $*"; }',
             'warn() { echo "[kernel-agent WARN] $*" >&2; }',
-            # torch / free-port probes: no python needed for this test.
-            "python3() { cat >/dev/null; echo 0; }",
+            # torch / free-port probes: no python needed for this test. A driver connect goes to the python3 on
+            # PATH, so one that lost its bound would still connect, and hang, rather than read as a stub's answer.
+            'python3() { local src; src="$(cat)"; case "$src" in *"import ray"*) command python3 "$@" <<<"$src" ;; '
+            "*) echo 0 ;; esac; }",
             "ensure_fd_limit_for_ray() { :; }",
-            "ray_head_has_serving_slot() { return 0; }",
+            slot_probe,
             _extract_shell_function("_free_tcp_port"),
             _extract_shell_function("_ray_start_detached"),
             _extract_shell_function("ensure_ray_started"),
@@ -109,7 +190,6 @@ def _run_install_ensure_ray_started(tmp_path: Path, extra_env: dict[str, str] | 
             'echo "installer-done"',
         ]
     )
-    env = {k: v for k, v in os.environ.items() if k not in ("HL_RAY_HEAD_PORT", "RAY_NUM_GPUS")}
     env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
     env["TMPDIR"] = str(tmp_path)
     env.update(extra_env or {})
@@ -126,11 +206,13 @@ def _run_install_ensure_ray_started(tmp_path: Path, extra_env: dict[str, str] | 
         stdout, stderr = proc.communicate(timeout=20)
     except subprocess.TimeoutExpired:
         _kill_daemon(state)
-        proc.kill()
+        # The installer leads its own group: everything it still runs goes with it.
+        os.killpg(proc.pid, signal.SIGKILL)
+        _kill_driver_helper(state)
         stdout, stderr = proc.communicate()
         pytest.fail(
-            "install.sh's output stream never closed: the Ray daemon inherited the installer's pipe "
-            f"(stdout={stdout!r}, stderr={stderr!r})"
+            "install.sh did not finish within 20s: a Ray daemon inherited the installer's pipe, or a driver connect "
+            f"went unbounded (stdout={stdout!r}, stderr={stderr!r})"
         )
     return proc, stdout, stderr, state
 
@@ -168,6 +250,51 @@ def test_install_sh_failed_ray_start_still_warns_and_relays_its_stderr(tmp_path)
         assert "ray start failed; kernel optimization will hang" in stderr
         assert _STDERR_NOTE in stderr
         assert "installer-done" in stdout
+    finally:
+        _kill_daemon(state)
+
+
+# ---- install.sh's driver connect to a running head ------------------------------------------------------------------
+
+
+def test_install_sh_restarts_a_head_that_never_answers_its_driver_within_the_bound(tmp_path):
+    """A head whose raylet never registers a driver costs the bound, not the install, and is replaced like one
+    without serving_slot; nothing the bounded connect started survives it."""
+    started = time.monotonic()
+    proc, stdout, stderr, state = _run_install_ensure_ray_started(tmp_path, head="gilhold")
+    elapsed = time.monotonic() - started
+    try:
+        assert proc.returncode == 0, stderr
+        assert "installer-done" in stdout
+        assert f"ray head did not answer a driver within {_DRIVER_CONNECT_BOUND_SEC}s" in stderr
+        assert "HYPERLOOM_RAY_CONNECT_PROBE_TIMEOUT_SEC" in stderr
+        assert "without serving_slot" not in stderr
+        assert _SERVING_SLOT_ARG in (state / "start.argv").read_text(encoding="utf-8").splitlines()
+        # The bound, plus timeout's SIGKILL grace at most, plus start-up on a loaded host.
+        assert elapsed < _DRIVER_CONNECT_BOUND_SEC + 5 + 10
+        pids = _driver_pids(state)
+        assert set(pids) == {"init", "helper"}, "the stand-in driver did not get as far as starting its helper"
+        assert not [kind for kind, pid in pids.items() if _running(pid)], "the bounded connect left processes behind"
+    finally:
+        _kill_daemon(state)
+        _kill_driver_helper(state)
+
+
+@pytest.mark.parametrize(
+    ("head", "restarted", "message"),
+    [
+        ("slot", False, "ray head already running with serving_slot"),
+        ("noslot", True, "ray head already running without serving_slot; restarting local Ray head"),
+    ],
+)
+def test_install_sh_driver_connect_that_answers_decides_on_the_slot_as_before(tmp_path, head, restarted, message):
+    proc, stdout, stderr, state = _run_install_ensure_ray_started(tmp_path, head=head)
+    try:
+        assert proc.returncode == 0, stderr
+        assert "installer-done" in stdout
+        assert message in stdout + stderr
+        assert "did not answer a driver" not in stderr
+        assert (state / "start.argv").is_file() is restarted
     finally:
         _kill_daemon(state)
 

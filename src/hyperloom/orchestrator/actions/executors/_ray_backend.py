@@ -30,7 +30,7 @@ def ray_exec_enabled() -> bool:
 
     Multi-node is always OFF. On single-node ``INFERENCE_OPTIMIZER_RAY_EXEC`` decides when set; otherwise it is ON,
     and OFF under pytest. ON also needs a Ray head that answers a driver (``ray_head_answers_driver``): one that does
-    not turns this OFF for the rest of the process, as if the flag were ``0``.
+    not turns this OFF, as if the flag were ``0``, until the head is probed again after a reconnect or a head start.
     """
     from ._multi_node_env import is_multi_node
 
@@ -207,13 +207,15 @@ def get_ray_backend() -> RayExecutionBackend:
 
 
 def mark_ray_backend_unhealthy() -> None:
-    """Disconnect the current Ray driver and force the next use to re-ensure."""
+    """Disconnect the current Ray driver and force the next use to re-ensure, probing the head before it reconnects."""
     try:
         import ray
 
         ray.shutdown()
     except (RuntimeError, OSError):
         pass
+    # The head may have stopped answering drivers since it was probed, and the re-ensure connects in-process.
+    _ray_runtime.forget_ray_head_verdict()
     if _BACKEND is not None:
         _BACKEND._ensured = False
 
