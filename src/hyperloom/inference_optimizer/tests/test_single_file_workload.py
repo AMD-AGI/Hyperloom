@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -983,6 +984,11 @@ def test_benchmark_runs_are_armed_not_just_profile_runs(workload, tmp_path, monk
 
     assert env[EVIDENCE_DIR_ENV].endswith("aoti_evidence")
     assert str(workspace) in env[EVIDENCE_DIR_ENV]
+    # Arming without delivering is the whole bug this guards: the variable alone does
+    # nothing unless python imports the bundled sitecustomize that reads it.
+    from hyperloom.orchestrator.actions.executors._framework_rewrite_evidence import probe_asset_dir
+
+    assert env["PYTHONPATH"].split(os.pathsep)[0] == str(probe_asset_dir())
 
 
 def test_not_armed_without_an_aoti_declaration(workload, tmp_path):
@@ -1023,3 +1029,19 @@ def test_gate_stays_shut_when_the_shim_did_not_run(workload, tmp_path):
     empty.mkdir()
 
     assert WritebackCollaborator._keep_really_exported(SimpleNamespace(), str(empty)) is False
+
+
+def test_evidence_pythonpath_keeps_the_inherited_entries(workload, tmp_path, monkeypatch):
+    """Prepended, not replaced: the image and the operator put things there too."""
+    from hyperloom.orchestrator.actions.executors.bypass_scriptable import build_scriptable_env
+    from hyperloom.orchestrator.actions.executors._framework_rewrite_evidence import probe_asset_dir
+
+    _, hook, _, state = workload
+    declare(Path(state["bypass_scripts_dir"]), hook, {"enabled": True})
+    monkeypatch.setenv("PYTHONPATH", "/opt/inherited")
+
+    env = build_scriptable_env({"model": "m"}, "scriptable", tmp_path / "ws", profile=False)
+
+    parts = env["PYTHONPATH"].split(os.pathsep)
+    assert parts[0] == str(probe_asset_dir())
+    assert "/opt/inherited" in parts

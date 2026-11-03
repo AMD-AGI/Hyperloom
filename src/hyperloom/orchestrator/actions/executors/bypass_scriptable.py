@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 from contextlib import ExitStack, nullcontext
@@ -13,6 +14,8 @@ from typing import Any
 
 from hyperloom.common.env_safety import build_benchmark_env
 from hyperloom.inference_optimizer.session.paths import asset_root
+
+log = logging.getLogger(__name__)
 
 
 def _scriptable_script_name(framework: str, runner_type: str) -> str:
@@ -107,10 +110,6 @@ def build_scriptable_env(
         "RESULT_FILENAME": "inferencex_result",
         "RESULT_DIR": str(workspace),
     }
-    # Unlike the kernel-profile flag below, this is armed on every run: the export gate
-    # reads it to decide a KEEP, and KEEPs are decided on benchmark runs. It only
-    # counts calls, so it changes nothing about how the candidate is built.
-    _arm_aoti_evidence(run_scoped, workspace)
     # Scriptable scripts gate tracing on PROFILE=1 and read the trace dir from HYPERLOOM_PROFILE_TRACE_DIR.
     # xDiT's scripts read the legacy VLLM/SGLANG_TORCH_PROFILER_DIR pair (kept for backward compatibility).
     if profile:
@@ -120,11 +119,22 @@ def build_scriptable_env(
             run_scoped["SGLANG_TORCH_PROFILER_DIR"] = profile_dir
             run_scoped["HYPERLOOM_PROFILE_TRACE_DIR"] = profile_dir
         _enable_aoti_kernel_profile(run_scoped)
-    return build_benchmark_env(defaults, bench.get("envs"), run_scoped)
+    env = build_benchmark_env(defaults, bench.get("envs"), run_scoped)
+    # After the layers are merged, not before: PYTHONPATH has to keep whatever the
+    # operator and the image put there, and a run_scoped entry would replace it.
+    _arm_aoti_evidence(env, workspace)
+    return env
 
 
-def _arm_aoti_evidence(run_scoped: dict[str, str], workspace: Path) -> None:
-    """Point the in-process export counters at this run's workspace.
+def _arm_aoti_evidence(env: dict[str, str], workspace: Path) -> None:
+    """Deliver the export counters to the benchmark child and point them at its workspace.
+
+    Both halves are required and only one is obvious. Setting the directory arms
+    ``hl_aoti_evidence``, but the shim only runs if Python imports the bundled
+    ``sitecustomize``, which needs its directory on ``PYTHONPATH``. Armed without
+    delivered, the counters are never written and the export gate -- which has no
+    source fallback -- stays shut for the whole campaign, including on ``profile``,
+    the one action that delivers the shim by another route.
 
     Fails open, like the kernel-profile flag: an unreadable scope costs the gate its
     evidence, and the gate already refuses to open without it.
@@ -132,12 +142,21 @@ def _arm_aoti_evidence(run_scoped: dict[str, str], workspace: Path) -> None:
     from hyperloom.orchestrator.framework.optimization_scope import aoti_config
     from hyperloom.orchestrator.measurement.aoti_evidence import EVIDENCE_DIR_ENV, evidence_dir
 
+    from ._framework_rewrite_evidence import probe_asset_dir
+    from ._workload_envs import prepend_launch_path
+
     try:
         config = aoti_config()
     except ValueError:
         return
-    if config is not None and config.enabled:
-        run_scoped[EVIDENCE_DIR_ENV] = str(evidence_dir(workspace))
+    if config is None or not config.enabled:
+        return
+    asset_dir = probe_asset_dir()
+    if not asset_dir.is_dir():
+        log.warning("bypass_scriptable: start-up shim assets missing at %s; the export gate cannot open", asset_dir)
+        return
+    env[EVIDENCE_DIR_ENV] = str(evidence_dir(workspace))
+    prepend_launch_path(env, "PYTHONPATH", str(asset_dir))
 
 
 def _enable_aoti_kernel_profile(run_scoped: dict[str, str]) -> None:
