@@ -101,8 +101,15 @@ forge-profiling = [
     "textual-fspicker>=0.4.3",
     "tqdm",
 ]
+# Hosted measurement: the E2B sandbox SDK, imported only by ``hyperloom.sandbox.e2b``. ``e2b`` 2.53 is the
+# first SDK whose ``connect`` sends the ``E2b-Sandbox-Id`` header the data-plane router needs and whose errors carry a
+# ``status_code``.
+hosted = [
+    "e2b>=2.53.1,<3",
+]
 test = [
     "hyperloom-inference_optimizer[runtime]",
+    "hyperloom-inference_optimizer[hosted]",
     "hyperloom-inference_optimizer[ci]",
     # The Experience KB tests run on PostgreSQL too when HYPERLOOM_KB_TEST_DATABASE_URL names a server.
     "hyperloom-inference_optimizer[kb-service]",
