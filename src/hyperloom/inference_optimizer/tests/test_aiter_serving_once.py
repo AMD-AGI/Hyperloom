@@ -218,8 +218,8 @@ def test_an_unknown_card_builds_nothing(image, monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_launch_logs_the_decision_where_prelude_s_child_logs_it(image, monkeypatch, caplog) -> None:
-    """``hyperloom optimize`` logs at WARNING without ``-v``: an INFO line never reached PRELUDE's log."""
+async def test_the_launch_logs_the_decision_at_the_level_optimize_logs_at(image, monkeypatch, caplog) -> None:
+    """``hyperloom optimize`` logs at WARNING without ``-v``: an INFO line would not reach its log."""
     monkeypatch.setattr(once, "_run_prewarm", Prewarm())
     monkeypatch.setattr(launch_mod, "_COVERED_SAID", set())
     caplog.set_level(logging.WARNING)

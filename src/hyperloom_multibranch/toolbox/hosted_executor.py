@@ -48,7 +48,7 @@ from hyperloom.contracts.measurement import (
     TestResult,
     Validity,
 )
-from hyperloom.measure.agentx_requests import read_request_classes, read_round_classes
+from hyperloom.measure.agentx_requests import read_round_classes
 from hyperloom.measure.fake_gain import PREFIX_CACHE_OFF_ERROR_CLASS, baseline_prefix_cache_refusal
 from hyperloom.measure.failures import Disposition, classify_test_failure
 from hyperloom.measure.archive import ArchiveError
@@ -88,7 +88,6 @@ __all__ = [
     "HostedExecutor",
     "OUTPUTS_DIR",
     "TEST_SILENCE_TIMEOUT_SEC",
-    "landed_agentx_baseline",
 ]
 
 DEFAULT_TEST_TIMEOUT_SEC = 3600
@@ -742,23 +741,3 @@ def _round_value(phase: str, round_dir: Path, concurrency: int | None) -> RoundV
         completed_requests=completed if isinstance(completed, int) else None,
         failed_requests=max(0, failed) if failed is not None else None,
     )
-
-
-def landed_agentx_baseline(round_dir: Path, point: Path, request_id: str) -> TestResult:
-    """The AgentX baseline round that landed in ``round_dir`` outside any test, read as a test's measured round is.
-
-    ``point`` is the point config it ran. A round without a valid report did not measure, and one served with the
-    prefix cache off is refused as a test's baseline is (main's #1884). Nothing signs it, so it carries no sandbox or
-    manifest. Blocks: the per-request export holds a line for every request.
-    """
-    concurrency = _concurrency_of(point)
-    value = _round_value(_MEASURE, round_dir, concurrency)
-    if value is None:
-        reason = f"no valid {_REPORT} below {round_dir}"
-        return TestResult(request_id, Validity.MEASUREMENT_FAILED, FailureClass.INFRA, failure_reason=reason)
-    refusal = baseline_prefix_cache_refusal(point, round_dir)
-    if refusal:
-        reason = f"{PREFIX_CACHE_OFF_ERROR_CLASS}: {refusal}"
-        return TestResult(request_id, Validity.CANDIDATE_FAILED, FailureClass.CANDIDATE, failure_reason=reason)
-    classes = read_request_classes(round_dir, round_dir, 0, concurrency)
-    return TestResult(request_id, Validity.SUCCEEDED, rounds=(value,), request_classes=(classes,))

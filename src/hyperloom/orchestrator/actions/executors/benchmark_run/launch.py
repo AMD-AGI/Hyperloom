@@ -79,8 +79,8 @@ async def _prepare_aiter_serving_so(extra_envs: dict[str, Any]) -> None:
     (:mod:`.._aiter_serving_once`), so the servers that run in JIT directories of their own link
     it instead of each building it again.
 
-    The decision is logged as a warning, the level ``hyperloom optimize`` logs at without ``-v``
-    (PRELUDE's child among them): a move, every time; that nothing moved, once per process.
+    The decision is logged as a warning, the level ``hyperloom optimize`` logs at without ``-v``:
+    a move, every time; that nothing moved, once per process.
 
     Args:
         extra_envs: The round's environment, whose ``AITER_CONFIG_*`` values decide which
