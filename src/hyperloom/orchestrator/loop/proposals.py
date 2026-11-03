@@ -20,6 +20,7 @@ from ..specialists.domains import gap_backfilled_domain
 from ..state.shared_state import inject_stack_base_params
 from ..state.task_registry import TERMINAL_STATES, TaskSpec
 from ..collaborator import CoordinatorCollaborator
+from ._explore_grid import explore_grid_denial
 
 if TYPE_CHECKING:
     from .coordinator import Coordinator
@@ -442,6 +443,8 @@ class ProposalsCollaborator(CoordinatorCollaborator):
                 _record_config_dropped(self, pending, reason="critic_filter_empty_grid")
                 return False
         if action == "explore":
+            if not await self._explore_grid_runnable(pending, params):
+                return False
             self.inject_explore_runtime_params(params)
             self.credit_predictor_proposals(params)
             inject_stack_base_params(params, self.shared_state, anchor=True)
@@ -450,6 +453,19 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         if action == SPECIALIST_ACTION_NAME:
             return await self._specialist_domain_free(pending, params)
         return True
+
+    async def _explore_grid_runnable(self, pending: PendingProposal, params: dict[str, Any]) -> bool:
+        """Re-judge an approved explore against what it still has to measure.
+
+        Admission judged the grid the proposal carried; the Critic filter above and the session's seed
+        sources both move underneath it between proposal and approval.
+        """
+        denied = explore_grid_denial(pending.action_name, params, self.shared_state)
+        if denied is None:
+            return True
+        await self._record_materialize_skipped(pending, denied.rule, detail=str(denied))
+        _record_config_dropped(self, pending, reason=denied.rule)
+        return False
 
     async def _specialist_domain_free(self, pending: PendingProposal, params: dict[str, Any]) -> bool:
         """Re-judge an approved specialist against the domains held now: admission judged it when it was proposed."""

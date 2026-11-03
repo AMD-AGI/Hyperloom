@@ -695,6 +695,46 @@ def _seed_grid_payload(params: dict[str, Any], framework: str, yaml_envs: dict[s
     ]
 
 
+def _resolved_grid_payload(
+    params: Mapping[str, Any],
+    *,
+    shared_state: Any,
+    framework: str,
+    yaml_envs: Mapping[str, Any] | None = None,
+) -> tuple[list[Any], list[dict[str, Any]]]:
+    """The payload a round over ``params`` measures, and the lever variants seeded into it.
+
+    The sent grid with this session's fresh lever variants in front of it; only when that leaves
+    nothing does the framework's default grid stand in. A non-empty sent grid therefore never
+    reaches the default grid, however little of it is a variant.
+    """
+    payload = params.get("grid") or []
+    if not isinstance(payload, list):
+        payload = []
+    # A stack revalidation re-measures the recorded stack on purpose. Seeding a lever
+    # into it would validate stack+lever instead, so the declarations sit this round out.
+    declared = [] if is_stack_revalidation(params) else declared_lever_payload(shared_state, framework)
+    lever_payload = framework_lever_grid(shared_state) + declared
+    payload = _lever_seeded_payload(payload, lever_payload)
+    if not payload:
+        payload = _seed_grid_payload(dict(params), framework, dict(yaml_envs or {}))
+    return payload, lever_payload
+
+
+def runnable_grid_variants(params: Mapping[str, Any] | None, shared_state: Any) -> list[GridVariant]:
+    """The variants an explore over ``params`` would have to measure, by the round's own reckoning.
+
+    Admission asks this before spending a dispatch on a round that would refuse itself. The round
+    reads its framework back from the materialized YAML, which a proposal has not got yet, so the
+    session's framework answers for it; the config-pinned-env filter that follows in the round needs
+    that YAML, so the variants it drops stay the round's to report.
+    """
+    p = dict(params or {})
+    framework = str(p.get("framework") or getattr(shared_state, "framework", "") or "")
+    payload, _ = _resolved_grid_payload(p, shared_state=shared_state, framework=framework)
+    return _grid_variants_from_payload(payload)
+
+
 # The numbers a measured variant produced. ``base_tput`` is carried verbatim rather than left to be back-solved
 # from the gain: each KEEP advances the round anchor, so a consumer dividing the gain out of the final throughput
 # reconstructs whichever anchor happens to be current, and a FAILED variant has no gain to divide.
@@ -954,16 +994,12 @@ class _ExploreRound:
     # ----- the grid --------------------------------------------------------
 
     def _resolve_grid(self) -> None:
-        payload = self.params.get("grid") or []
-        if not isinstance(payload, list):
-            payload = []
-        # A stack revalidation re-measures the recorded stack on purpose. Seeding a lever
-        # into it would validate stack+lever instead, so the declarations sit this round out.
-        declared = [] if is_stack_revalidation(self.params) else declared_lever_payload(self.ss, self.framework)
-        self.lever_payload = framework_lever_grid(self.ss) + declared
-        payload = _lever_seeded_payload(payload, self.lever_payload)
-        if not payload:
-            payload = _seed_grid_payload(self.params, self.framework, self.yaml_envs)
+        payload, self.lever_payload = _resolved_grid_payload(
+            self.params,
+            shared_state=self.ss,
+            framework=self.framework,
+            yaml_envs=self.yaml_envs,
+        )
         if not payload:
             raise _RoundRefused(
                 "empty_grid",
