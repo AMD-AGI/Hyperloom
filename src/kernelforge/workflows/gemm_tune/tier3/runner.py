@@ -18,7 +18,7 @@ from .generate import generate_tuner
 from .ledger import TunerUse, record_outcome, script_digest
 from .mandate import TunerMandate, build_mandate, write_mandate
 from .referee import CaptureFailed, Judgement, ShapeHarness, judge_candidates
-from .sandbox import run_generated_tuner
+from .sandbox import core_dumps_off, run_generated_tuner
 
 log = logging.getLogger(__name__)
 
@@ -125,7 +125,8 @@ def attempt_generated_tuner(
         outcome.reason = "the script proposed no candidates to re-time"
         return outcome
 
-    outcome.judgements.extend(_rejudge_candidates(candidates, retiming))
+    with core_dumps_off():
+        outcome.judgements.extend(_rejudge_candidates(candidates, retiming))
 
     outcome.ok = outcome.improved_shapes > 0
     best = max(

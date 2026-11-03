@@ -14,6 +14,7 @@ import pytest
 
 from kernelforge.workflows.gemm_tune import utils
 from kernelforge.workflows.gemm_tune.tier3 import gate, ledger, sandbox
+from kernelforge.workflows.gemm_tune.tier3 import runner as runner_mod
 from kernelforge.workflows.gemm_tune.tier3.coverage import CoverageGap
 from kernelforge.workflows.gemm_tune.tier3.referee import CaptureFailed
 from kernelforge.workflows.gemm_tune.tier3.runner import Retiming, Tier3Target, attempt_generated_tuner
@@ -196,6 +197,37 @@ open({str(out)!r}, "w").write(os.environ.get("MAX_JOBS", "?"))
             script, tmp_path, expect=[out], limits=sandbox.SandboxLimits(timeout_s=60, env_overrides={"MAX_JOBS": "8"})
         )
         assert out.read_text(encoding="utf-8") == "8"
+
+    def test_the_script_and_its_workers_cannot_write_core_dumps(self, tmp_path, monkeypatch):
+        # A candidate that faults the GPU makes ROCr dump its memory into the cwd; one run left 35 GB there.
+        monkeypatch.delenv("HSA_DISABLE_COREDUMP_ON_EXCEPTION", raising=False)
+        out = tmp_path / "core.json"
+        script = self._script(
+            tmp_path,
+            f"""
+import json, os, resource, subprocess, sys
+worker = subprocess.run(
+    [sys.executable, "-c", "import resource; print(resource.getrlimit(resource.RLIMIT_CORE)[0])"],
+    capture_output=True, text=True, check=True,
+)
+json.dump(
+    {{
+        "env": os.environ.get("HSA_DISABLE_COREDUMP_ON_EXCEPTION"),
+        "core": list(resource.getrlimit(resource.RLIMIT_CORE)),
+        "worker_core": int(worker.stdout),
+    }},
+    open({str(out)!r}, "w"),
+)
+""",
+        )
+        sandbox.run_generated_tuner(
+            script,
+            tmp_path,
+            expect=[out],
+            limits=sandbox.SandboxLimits(timeout_s=60, env_overrides={"HSA_DISABLE_COREDUMP_ON_EXCEPTION": "0"}),
+        )
+        seen = json.loads(out.read_text(encoding="utf-8"))
+        assert seen == {"env": "1", "core": [0, 0], "worker_core": 0}
 
 
 class TestLedger:
@@ -670,6 +702,23 @@ class TestTheWholeChain:
             tmp_path,
         )
         assert not out.attempted and out.stage == "gate"
+
+    def test_the_referee_re_times_with_core_dumps_off_and_restores_the_limit(self, tmp_path, monkeypatch, open_gate):
+        # The referee launches candidates in this process; ROCr checks RLIMIT_CORE when it is about to dump.
+        import resource
+
+        before = resource.getrlimit(resource.RLIMIT_CORE)
+        seen = []
+        real_judge = runner_mod.judge_candidates
+
+        def _judge(*args, **kwargs):
+            seen.append(resource.getrlimit(resource.RLIMIT_CORE)[0])
+            return real_judge(*args, **kwargs)
+
+        monkeypatch.setattr(runner_mod, "judge_candidates", _judge)
+        self._run(tmp_path, monkeypatch, rows=self._ROWS, cands=self._CANDS)
+        assert seen == [0]
+        assert resource.getrlimit(resource.RLIMIT_CORE) == before
 
     def test_the_outcome_is_written_where_a_human_can_read_it(self, tmp_path, monkeypatch, open_gate):
         self._run(tmp_path, monkeypatch, rows=self._ROWS, cands=self._CANDS)
