@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.measure.runner import aiperf_patch
 from hyperloom.measure.runner.aiperf_patch import ReplayClientPatchError, patch_replay_client
 from hyperloom.measure.runner.tests import aiperf_source as source
 
@@ -61,9 +62,24 @@ def test_the_patch_applies_once_and_a_second_time_changes_nothing(tmp_path: Path
 def test_a_file_keeps_its_mode_and_no_scratch_file_is_left(tmp_path: Path) -> None:
     client = source.write_client(tmp_path)
     (client / PARSER).chmod(0o755)
+    (client / METRIC).chmod(0o644)
     patch_replay_client(tmp_path)
     assert (client / PARSER).stat().st_mode & 0o777 == 0o755
+    assert (client / METRIC).stat().st_mode & 0o777 == 0o644
     assert not [path for path in client.rglob("*") if path.name.endswith(".tmp")]
+
+
+def test_a_file_that_cannot_be_written_is_a_patch_error_naming_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source.write_client(tmp_path)
+
+    def refuse(path: Path, *_args: object, **_kwargs: object) -> None:
+        raise PermissionError(path)
+
+    monkeypatch.setattr(aiperf_patch, "atomic_write_text", refuse)
+    with pytest.raises(ReplayClientPatchError, match=rf"{Path(METRIC).name} cannot be written \(PermissionError\)"):
+        patch_replay_client(tmp_path)
 
 
 def test_a_parser_that_is_not_the_pinned_one_leaves_both_files_as_they_were_and_names_the_parser(

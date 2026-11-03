@@ -309,16 +309,27 @@ def check_entry(entry: Path, sha: str, manifest_pin: str = "", verify_hash: bool
     only with ``verify_hash``: the script that runs this check cannot vouch for itself (see
     :mod:`hyperloom.measure.runner.bootstrap`).
     """
+    return _verified_entry(entry, sha, manifest_pin, verify_hash)[0]
+
+
+def _verified_entry(entry: Path, sha: str, manifest_pin: str, verify_hash: bool) -> tuple[list[str], Manifest | None]:
+    """:func:`check_entry`'s problems, and the manifest it read and checked when there are none (``None`` otherwise).
+
+    The manifest is read once: what the caller goes on to use is the object these checks passed, not the file as it is
+    later.
+    """
     manifest_file = entry / MANIFEST_NAME
     if not manifest_file.is_file():
-        return [f"the cache entry {entry} has no {MANIFEST_NAME}: an unfinished build"]
+        return [f"the cache entry {entry} has no {MANIFEST_NAME}: an unfinished build"], None
     raw = manifest_file.read_bytes()
     if manifest_pin and hashlib.sha256(raw).hexdigest() != manifest_pin:
-        return [f"the manifest of {entry} is not the one pinned by {MANIFEST_PIN_ENV}"]
+        return [f"the manifest of {entry} is not the one pinned by {MANIFEST_PIN_ENV}"], None
     try:
-        return _entry_problems(entry, sha, manifest_from_json(raw), verify_hash)
+        manifest = manifest_from_json(raw)
+        problems = _entry_problems(entry, sha, manifest, verify_hash)
     except (CacheError, ValueError) as exc:
-        return [str(exc)]
+        return [str(exc)], None
+    return problems, None if problems else manifest
 
 
 def requirement_line(name: str, version: str, digests: Iterable[str]) -> str:
@@ -333,20 +344,25 @@ def requirements_text(manifest: Manifest) -> str:
 
 def check_cache(root: Path, sha: str, manifest_pin: str = "") -> list[str]:
     """Every reason the cache below ``root`` cannot install the commit ``sha`` offline; empty when it can."""
+    return _verified_cache(root, sha, manifest_pin)[0]
+
+
+def _verified_cache(root: Path, sha: str, manifest_pin: str) -> tuple[list[str], Manifest | None]:
+    """:func:`check_cache`'s problems, and the manifest it checked when there are none (see :func:`_verified_entry`)."""
     if not is_full_commit(sha):
-        return [f"the source commit {sha!r} is not a full lowercase commit hash"]
+        return [f"the source commit {sha!r} is not a full lowercase commit hash"], None
     if not root.is_dir():
-        return [f"the runner cache {root} does not exist: {CACHE_ENV} names the directory the template mounts"]
+        return [f"the runner cache {root} does not exist: {CACHE_ENV} names the directory the template mounts"], None
     if not (root / sha).is_dir():
-        return [f"the runner cache {root} has no entry for commit {sha}"]
-    return check_entry(root / sha, sha, manifest_pin)
+        return [f"the runner cache {root} has no entry for commit {sha}"], None
+    return _verified_entry(root / sha, sha, manifest_pin, verify_hash=False)
 
 
 def _checked(root: str, sha: str, requirements: str) -> list[str]:
-    """What is wrong with the cache; when nothing is, write the requirements file to ``requirements`` (if given)."""
-    problems = check_cache(Path(root), sha, os.environ.get(MANIFEST_PIN_ENV, ""))
-    if not problems and requirements:
-        manifest = manifest_from_json((Path(root) / sha / MANIFEST_NAME).read_bytes())
+    """What is wrong with the cache; when nothing is, write the requirements file to ``requirements`` (if given) from
+    the manifest the check passed, so a manifest swapped after the check never chooses what pip installs."""
+    problems, manifest = _verified_cache(Path(root), sha, os.environ.get(MANIFEST_PIN_ENV, ""))
+    if manifest is not None and requirements:
         Path(requirements).parent.mkdir(parents=True, exist_ok=True)
         Path(requirements).write_text(requirements_text(manifest), encoding=_UTF8)
     return problems
