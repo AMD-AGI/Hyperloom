@@ -249,6 +249,9 @@ class OrchestrationContext:
     last_critic_review: str = ""
     # Present only when the campaign has a roofline ceiling; each case's own figure rides on ``CaseEvidence.roofline``.
     roofline: CampaignRoofline | None = None
+    # Whether this round's plans go to the campaign's plan critic, when it has one. The loop decides it per round; it
+    # is not part of any prompt.
+    review_plan: bool = True
 
     def __post_init__(self) -> None:
         _text(self.analysis_commit, "context.analysis_commit")

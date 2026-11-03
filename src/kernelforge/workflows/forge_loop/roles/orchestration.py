@@ -983,6 +983,7 @@ class OrchestrationService:
         self._specialist_pool = specialist_pool
         self._definitions = dict(definitions)
         self._plan_critic = plan_critic
+        self.has_plan_critic = plan_critic is not None
 
     async def run(
         self,
@@ -1022,16 +1023,15 @@ class OrchestrationService:
         draft_plan = ""
         critic_outcome = None
         plan_revised = False
-        # Every round a synthesis produced is reviewed, at any width.
-        if self._plan_critic is not None and optimization_plan_executable:
+        # A round the loop sends for review is reviewed once a synthesis produced it, at any width.
+        if self._plan_critic is not None and context.review_plan and optimization_plan_executable:
             review = await self._review_round(context, synthesized_plans, specialists, usage=usage)
             diagnostics.update(review.diagnostics)
             plans, draft_plan, critic_outcome = review.plans, review.draft_plan, review.critic_outcome
             plan_revised, optimization_plan_executable = review.plan_revised, review.executable
         elif self._plan_critic is not None:
-            diagnostics["plan_critic"] = {
-                "status": "skipped_synthesis_unavailable",
-            }
+            status = "skipped_synthesis_unavailable" if context.review_plan else "skipped_not_requested"
+            diagnostics["plan_critic"] = {"status": status}
         diagnostics["lanes"] = {
             "requested": int(lanes),
             "planned": planned_lanes,

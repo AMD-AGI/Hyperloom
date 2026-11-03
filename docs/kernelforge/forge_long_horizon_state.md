@@ -199,7 +199,18 @@ The same `max_hours > 2` long-horizon gate enables both the Plan Critic and
 hardware profiling. Shorter sessions keep Analysis static-only and do not
 inject self-profiling guidance into the Implementer.
 
-The Plan Critic reviews every round a synthesis produced, at any width. A wide
+The Plan Critic reviews the first round a synthesis produced, at any width, and
+a later one only when the previous round kept no candidate of its own, the
+search is in DIVERSIFY mode, or the last critic asked for a challenger lane. A
+round that continues, in EXPLOIT mode, a route its predecessor kept a candidate
+on publishes its drafts unreviewed and records
+`plan_critic.status = "skipped_not_requested"`; every round logs its decision as
+a `plan_review` event naming the rule. A KEEP of two stacked archived gains is
+not a candidate any round planned, so it does not count as the previous round's.
+Every planning happens in an admitted round, including the one an iteration
+buys when the queued lane candidate it held no longer applies, and admission
+prices a round's planning without the review time observed rounds spent, since
+that round may skip it. A wide
 round is reviewed once, with its division in view: whether any lane's ground is
 worth an Implementer session, whether two lanes are one change described twice,
 whether a lane would have to edit code another lane owns, and whether the round
