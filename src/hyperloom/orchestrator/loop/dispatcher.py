@@ -1287,10 +1287,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         return time_budget_denial(action, expected_min, self.shared_state)
 
     def admission_denial_for_action(
-        self,
-        action_name: str,
-        *,
-        params: dict[str, Any] | None = None,
+        self, action_name: str, *, params: dict[str, Any] | None = None
     ) -> PolicyDenied | None:
         """Run every pre-dispatch gate for an action name, first denial wins.
 
@@ -1299,8 +1296,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
 
         Args:
             action_name: The proposed/delegated action name.
-            params: The proposal's parameters, which price a specialist
-                and carry an explore's grid.
+            params: The proposal's parameters: a specialist's price, an explore's grid.
 
         Returns:
             The first :class:`PolicyDenied` that fires, else ``None``.
@@ -1310,8 +1306,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             or self._sequence_denial_for_action(action_name)
             or specialist_in_flight_denial(action_name, params, self.tasks, self.shared_state.find_gap)
             or self.time_budget_denial_for_action(action_name, params=params)
-            # Last of the gates, so a session that is out of time goes on saying so: an explore with
-            # nothing to measure is refused on its own account while the budget would still run it.
+            # Last: a session out of time is told so before an explore is told its grid is missing.
             or explore_grid_denial(action_name, params, self.shared_state)
         )
 

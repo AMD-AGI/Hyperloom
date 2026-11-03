@@ -66,7 +66,7 @@ from .bypass_scriptable import declared_lever_payload
 from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
 from ._proposal_identity import BaseControls, controls_of, effective_fingerprint, normalize_proposal
 from .measured_variants import GAIN_BELOW_THRESHOLD, MeasuredOn, measured_verdict, stack_of_measured
-from ._grid_base import DEFAULT_KEEP_THRESHOLD_PCT, TS_FAILED, TS_SKIPPED_DEDUP
+from ._grid_base import DEFAULT_KEEP_THRESHOLD_PCT, TS_FAILED, TS_SKIPPED_DEDUP, _default_grid_for_framework
 from .benchmark_result import double_run_requested
 from ._grid_runner import (
     GridLaunch,
@@ -302,101 +302,6 @@ def _framework_lever_attributions(
     return out
 
 
-# Curated MTP-capable model class set (needs multi-token-prediction heads).
-_ATOM_MTP_CAPABLE_MODEL_CLASSES: frozenset[str] = frozenset(
-    {
-        "moe_mla",
-        "moe_mla_nsa",
-    }
-)
-
-
-def _atom_default_grid(
-    *,
-    model_class: str,
-    conc: int,
-) -> list[GridVariant]:
-    """Atom default explore grid, seeded from atom's known perf knobs."""
-    mc_l = (model_class or "").strip().lower()
-    is_moe = "moe" in mc_l
-    is_mla = "mla" in mc_l
-    is_fp8 = "fp8" in mc_l or mc_l.endswith("_fp8")
-    is_mtp_capable = mc_l in _ATOM_MTP_CAPABLE_MODEL_CLASSES
-
-    variants: list[GridVariant] = []
-
-    def _add(name: str, args: str) -> None:
-        """Append a ``default_grid``-provenance variant to the grid."""
-        gv = GridVariant(
-            name=name,
-            extra_server_args=args,
-            extra_envs={},
-            note="default_grid",
-        )
-        gv.provenance = "default_grid"  # type: ignore[attr-defined]
-        variants.append(gv)
-
-    # ``atom_level_3`` is atom's default, so use ``atom_level_2`` as the off-default contrast.
-    _add("atom_level_2", "--level 2")
-    _add("atom_prefix_cache", "--enable_prefix_caching")
-
-    if is_fp8:
-        _add("atom_kv_fp8", "--kv_cache_dtype fp8")
-
-    if is_moe:
-        _add("atom_ep", "--enable-expert-parallel")
-
-    if is_mla:
-        _add("atom_dp_attn", "--enable-dp-attention")
-
-    if is_mtp_capable:
-        _add(
-            "atom_mtp_3",
-            "--method mtp --num-speculative-tokens 3",
-        )
-        _add(
-            "atom_mtp_1",
-            "--method mtp --num-speculative-tokens 1",
-        )
-
-    if conc and conc > 0:
-        # Bracket the live concurrency so cudagraph captures the actual decode batch sizes the workload spends most of
-        # its time at.
-        cg_sizes = sorted({1, 2, 4, 8, 16, int(conc)})
-        cg_str = "[" + ",".join(str(s) for s in cg_sizes) + "]"
-        _add(
-            "atom_cudagraph_bracket",
-            f"--cudagraph-capture-sizes {cg_str}",
-        )
-
-    return variants
-
-
-def _xdit_default_grid() -> list[GridVariant]:
-    """xDiT (diffusion) default explore grid, seeded from the empirical KB."""
-    variants: list[GridVariant] = []
-
-    def _add(name: str, *, envs: dict[str, str]) -> None:
-        """Append a ``default_grid``-provenance env-only variant."""
-        gv = GridVariant(
-            name=name,
-            extra_server_args="",
-            extra_envs=dict(envs),
-            note="default_grid",
-        )
-        gv.provenance = "default_grid"  # type: ignore[attr-defined]
-        variants.append(gv)
-
-    # AMD buffer load/store instructions — directionally correct, BF16-safe.
-    _add("xdit_buffer_ops", envs={"AMDGCN_USE_BUFFER_OPS": "1"})
-    # torch.compile reduce-overhead: expose an explicit on/off contrast.
-    _add("xdit_compile_reduce_overhead", envs={"XDIT_USE_TORCH_COMPILE": "1"})
-    _add("xdit_no_compile", envs={"XDIT_USE_TORCH_COMPILE": "0"})
-    # Confirm the safe attention backend (aiter).
-    _add("xdit_attn_aiter", envs={"XDIT_ATTENTION_BACKEND": "aiter"})
-    return variants
-
-
 _CONFIG_REPLAY_PROVENANCE = frozenset({"geak_revalidate"})
 
 
@@ -578,21 +483,6 @@ def filter_operator_pinned_envs(
             continue
         kept.append(gv)
     return kept, dropped
-
-
-def _default_grid_for_framework(
-    framework: str,
-    *,
-    model_class: str,
-    conc: int = 0,
-) -> list[GridVariant]:
-    """Framework-keyed default grid dispatch."""
-    fw = (framework or "").strip().lower()
-    if fw == "atom":
-        return _atom_default_grid(model_class=model_class, conc=conc)
-    if fw == "xdit":
-        return _xdit_default_grid()
-    return []
 
 
 class _RoundRefused(Exception):
