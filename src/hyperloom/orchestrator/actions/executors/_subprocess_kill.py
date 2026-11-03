@@ -872,7 +872,8 @@ class _RecorderFanout:
 class RoundCheckpoint(Protocol):
     """A ruling made while the round runs, by a recorder it builds for the round's slot."""
 
-    def judge(self, slot: Path) -> Any: ...
+    def judge(self, slot: Path) -> Any:
+        """The recorder that rules for the round writing into ``slot``."""
 
 
 def _build_checkpoint_judge(server_log_path: str | None, checkpoint: RoundCheckpoint | None) -> Any:
