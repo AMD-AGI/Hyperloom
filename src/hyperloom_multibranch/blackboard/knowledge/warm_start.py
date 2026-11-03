@@ -39,7 +39,9 @@ PRELUDE checks each replay against the toolbox's acceptance on the root. A repla
 answer for in PRELUDE's time stays offered, its lead saying it was not checked. A cross-image replay whose patches
 acceptance refuses, as a stack that does not apply in order on this image, is checked again as
 :meth:`PreparedReplay.launch_only`: its launch config without the environment its patches read, the patches listed
-as references.
+as references. The champion PRELUDE then replays on the root and whose replay never runs, the toolbox refusing it at
+submit or its test not measuring, keeps its lead too, saying so in place of the replay (:func:`after_replay`):
+replayed whole on another head, it would come to the same end.
 """
 
 from __future__ import annotations
@@ -369,6 +371,18 @@ class ReplayRefusal:
 
 
 @dataclass(frozen=True)
+class ChampionOutcome:
+    """What came of the champion PRELUDE replayed on the session's root: the commit EXPLORE opens on, whether the
+    champion's changes are on it, landed or there already, and why, as the merge log says; ``ran`` is false when it
+    never measured, refused at submit or its test not measuring, as it would end on any head."""
+
+    start_commit: str
+    kept: bool
+    reason: str = ""
+    ran: bool = True
+
+
+@dataclass(frozen=True)
 class WarmLead:
     """One Recipe KB champion in this session's scope; ``differing`` maps a dimension to (theirs, ours), and
     ``remove_args`` are the options its launch removes from the launch the framework resolves."""
@@ -389,6 +403,7 @@ class WarmLead:
     refusal: ReplayRefusal | None = None
     unchecked: str = ""
     remove_args: tuple[str, ...] = ()
+    replay_failed: str = ""
 
     def summary(self) -> str:
         """The champion: its id, where its scope differs from this session's, its gain, launch arguments and session."""
@@ -402,6 +417,13 @@ class WarmLead:
     def describe(self) -> str:
         if self.refusal is not None:
             return f"{self.summary()}; {self.refusal.describe()}"
+        if self.replay_failed:
+            failed = self.replay_failed
+            failed = failed if len(failed) <= REFUSAL_CHARS else failed[: REFUSAL_CHARS - 3] + "..."
+            return (
+                f"{self.summary()}; its whole replay did not run on this session's root ({failed}): "
+                "take its changes one at a time, not its whole recipe"
+            )
         replay = f"; {self.replay.describe()}" if self.replay is not None else ""
         unchecked = f"; not checked against acceptance: {self.unchecked}" if self.unchecked else ""
         return f"{self.summary()}{replay}{unchecked}"
@@ -569,6 +591,21 @@ def replay_leads(
     )
 
 
+def after_replay(leads: Sequence[WarmLead], champion: PreparedReplay, outcome: ChampionOutcome) -> tuple[WarmLead, ...]:
+    """``leads`` once PRELUDE replayed ``champion`` on the root: where its replay never ran, its lead says why and
+    offers no replay of the whole recipe, which a specialist would otherwise replay into the same end. One that ran and
+    did not stack on the root stays offered: on a later head it may."""
+
+    if outcome.kept or outcome.ran:
+        return tuple(leads)
+    return tuple(
+        replace(lead, replay=None, replay_failed=outcome.reason or "no reason recorded")
+        if lead.replay is champion
+        else lead
+        for lead in leads
+    )
+
+
 def _champion(client: RecipeDownloader, lead: WarmLead, scope: RecipeScope, target: ReplayTarget) -> PreparedReplay:
     """The champion's whole replay, its files put into the session's blob store: on another image than this
     session's, without its kernel artifacts, which it lists as references."""
@@ -653,6 +690,7 @@ __all__ = [
     "PATCH_REFERENCE",
     "REPLAY_LEADS",
     "SHORT_REF",
+    "ChampionOutcome",
     "PreparedReplay",
     "RecipeDownloader",
     "RecipeReader",
@@ -660,6 +698,7 @@ __all__ = [
     "ReplayRefusal",
     "ReplayTarget",
     "WarmLead",
+    "after_replay",
     "candidates",
     "delta_layer",
     "identity_labels",

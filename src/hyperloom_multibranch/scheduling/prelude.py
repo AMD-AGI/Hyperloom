@@ -51,11 +51,13 @@ from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.blackboard.knowledge.warm_start import (
     LAUNCH_ONLY_REASON,
+    ChampionOutcome,
     PreparedReplay,
     RecipeDownloader,
     ReplayRefusal,
     ReplayTarget,
     WarmLead,
+    after_replay,
     replay_leads,
     warm_leads,
 )
@@ -128,7 +130,7 @@ class PreludeResult:
 OpenIntegration = Callable[[str], Awaitable[None]]
 #: Replays the champion on the root commit and returns the commit EXPLORE opens on; the replay is judged once the
 #: awaitable, the baseline's anchoring, has ended.
-ReplayChampion = Callable[[PreparedReplay, str, Awaitable[object]], Awaitable[str]]
+ReplayChampion = Callable[[PreparedReplay, str, Awaitable[object]], Awaitable[ChampionOutcome]]
 #: Profiles the root commit in the toolbox and analyses the profile, returning how that ended.
 ProfileRoot = Callable[[str], Awaitable[ProfileOutcome]]
 
@@ -212,13 +214,15 @@ class Prelude:
 
     async def _replay(self, opened: _OpenedRoot, anchored: Awaitable[object]) -> _Replayed:
         """Read the warm-start leads and replay the best champion among them on the root, judged once ``anchored``
-        has ended; with none, EXPLORE opens on the root."""
+        has ended; with none, EXPLORE opens on the root. A champion not kept says why in its lead instead of its
+        replay."""
 
         leads = await self._warm_start(opened.profile, opened.recipe, opened.commit)
         champion = next((lead.replay for lead in leads if lead.replay is not None), None)
         if champion is None:
             return _Replayed(leads, opened.commit)
-        return _Replayed(leads, await self._replay_champion(champion, opened.commit, anchored))
+        outcome = await self._replay_champion(champion, opened.commit, anchored)
+        return _Replayed(after_replay(leads, champion, outcome), outcome.start_commit)
 
     async def _warm_start(self, profile: SessionProfile, root: Recipe, root_commit: str) -> tuple[WarmLead, ...]:
         """The Recipe KB's leads for ``profile``, the best prepared for replay on ``root`` and checked against the

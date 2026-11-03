@@ -74,7 +74,7 @@ from hyperloom_multibranch.contracts.repo import (
     UnitedTable,
 )
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
-from hyperloom_multibranch.blackboard.knowledge.warm_start import PreparedReplay
+from hyperloom_multibranch.blackboard.knowledge.warm_start import ChampionOutcome, PreparedReplay
 from hyperloom_multibranch.blackboard.rsi.stranded import StrandedLead
 from hyperloom_multibranch.rulegate.agentx import P50_BELOW_THRESHOLD
 from hyperloom_multibranch.rulegate.inferencex import GAIN_BELOW_THRESHOLD, GAIN_NOT_CONFIRMED
@@ -634,8 +634,11 @@ class Integrator:
                 await self._repo.rewind(INTEGRATION_BRANCH, merged, tested.onto)
         return merged
 
-    async def replay_champion(self, champion: PreparedReplay, root: str, anchored: Awaitable[object]) -> str:
-        """Put the Recipe KB's ``champion`` on the integration branch at ``root``; the commit EXPLORE opens on.
+    async def replay_champion(
+        self, champion: PreparedReplay, root: str, anchored: Awaitable[object]
+    ) -> ChampionOutcome:
+        """Put the Recipe KB's ``champion`` on the integration branch at ``root``; what came of it, with the commit
+        EXPLORE opens on.
 
         The replay is submitted at once and judged, by the rule every candidate is judged by, once ``anchored`` -- the
         anchoring of ``root``'s baseline -- has ended, so EXPLORE opens on it only where it improved on that baseline,
@@ -650,14 +653,18 @@ class Integrator:
 
         replay = champion.on(await self._repo.read_recipe(root), root)
         if replay is None:
-            return self._record_champion(root, champion.canonical_id, ALREADY_ON_HEAD)
+            kept = self._record_champion(root, champion.canonical_id, ALREADY_ON_HEAD)
+            return ChampionOutcome(kept, True, ALREADY_ON_HEAD)
         request = integration_test_request(TestKind.TEST, Purpose.INTEGRATION, root, replay.delta)
         try:
             return await self._tests.judged(request, partial(self._stack_champion, replay, anchored))
         except RequestRejected as exc:
-            return self._record_champion(root, champion.canonical_id, f"the toolbox refused the replay: {exc.reason}")
+            reason = f"the toolbox refused the replay: {exc.reason}"
+            return ChampionOutcome(self._record_champion(root, champion.canonical_id, reason), False, reason, ran=False)
 
-    async def _stack_champion(self, replay: WarmReplay, anchored: Awaitable[object], request_id: str) -> str:
+    async def _stack_champion(
+        self, replay: WarmReplay, anchored: Awaitable[object], request_id: str
+    ) -> ChampionOutcome:
         confirm = await self._gate.request_confirm(request_id)
         try:
             return await self._judge_champion(replay, anchored, request_id)
@@ -665,22 +672,30 @@ class Integrator:
             if confirm:
                 await asyncio.shield(self._tests.withdraw(confirm))
 
-    async def _judge_champion(self, replay: WarmReplay, anchored: Awaitable[object], request_id: str) -> str:
+    async def _judge_champion(
+        self, replay: WarmReplay, anchored: Awaitable[object], request_id: str
+    ) -> ChampionOutcome:
         root = replay.parent_commit
         name = replay.canonical_id
         await asyncio.shield(anchored)
         try:
             judgement = await self._gate.compare(request_id)
         except NotMeasured as exc:
-            return self._record_champion(root, name, f"the replay did not measure: {exc}", request_id=request_id)
+            reason = f"the replay did not measure: {exc}"
+            return ChampionOutcome(
+                self._record_champion(root, name, reason, request_id=request_id), False, reason, False
+            )
         reason = not_stackable_reason(judgement, foundation_fix=False)
         if reason:
             await self._blackboard.write_judgement(request_id, judgement, Conclusion.NOT_STACKABLE)
-            return self._record_champion(root, name, reason, request_id=request_id)
+            return ChampionOutcome(self._record_champion(root, name, reason, request_id=request_id), False, reason)
         recipe = apply(await self._repo.read_recipe(root), replay.delta)
         landed = await self._repo.commit(INTEGRATION_BRANCH, root, recipe, f"replay the Recipe KB champion {name}")
         await self._blackboard.write_judgement(request_id, judgement, Conclusion.MERGED, landed, recipe.digest())
-        return self._record_champion(root, name, _verdict_on_head(judgement), request_id=request_id, landed=landed)
+        verdict = _verdict_on_head(judgement)
+        return ChampionOutcome(
+            self._record_champion(root, name, verdict, request_id=request_id, landed=landed), True, verdict
+        )
 
     def _record_champion(
         self, onto: str, canonical_id: str, reason: str, *, request_id: str = "", landed: str = ""
