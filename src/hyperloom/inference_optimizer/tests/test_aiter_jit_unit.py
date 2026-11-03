@@ -544,6 +544,16 @@ def test_csv_jit_kernel_rows_skips_blank_kernel_names(tmp_path):
     assert names == {"kernel_a", "kernel_b"}
 
 
+def test_csv_jit_kernel_rows_returns_each_pair_once_in_first_seen_order(tmp_path):
+    csv_path = tmp_path / "tuned.csv"
+    csv_path.write_text(
+        "M,N,K,kernelName,libtype\n16,512,7168,kernel_b,ck\n32,512,7168,kernel_a,ck\n"
+        "64,512,7168,kernel_b,ck\n128,512,7168,kernel_a,cktile\n",
+        encoding="utf-8",
+    )
+    assert aj.csv_jit_kernel_rows(csv_path) == [("kernel_b", "ck"), ("kernel_a", "ck"), ("kernel_a", "cktile")]
+
+
 def test_serving_modules_cover_csv_when_names_are_in_so(tmp_path):
     jit_dir = tmp_path / "jit"
     jit_dir.mkdir()
