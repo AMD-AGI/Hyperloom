@@ -115,6 +115,17 @@ class TestTheCandidateBecomesARow:
             "err2,us,run_1stage,xbf16,flat,tflops,bw"
         )
 
+    def test_a_verified_winner_is_deployed_as_the_row_it_was_dispatched_through(self, monkeypatch, tmp_path):
+        from kernelforge.workflows.gemm_tune.tier3.referee import Judgement, PairedTiming
+
+        adapter = self._adapter(monkeypatch)
+        won = Judgement(shape=_SHAPE, best=_CAND, best_timing=PairedTiming(10.0, 5.0, 2.0))
+        lost = Judgement(shape=_SHAPE, best=_CAND, best_timing=PairedTiming(10.0, 10.0, 1.0))
+        dispatched, _, _ = adapter._candidate_csv(_SHAPE, _CAND)
+        deployed = tmp_path / MOE_TABLE
+        assert adapter.write_table([won, lost], [], deployed) == 1
+        assert deployed.read_text(encoding="utf-8") == dispatched.read_text(encoding="utf-8")
+
     def test_the_baseline_table_is_empty_not_absent(self, monkeypatch):
         # Unsetting AITER_CONFIG_FMOE would let aiter fall back to whatever
         # tuned file is installed -- on a fleet box, one we deployed. Timing a
