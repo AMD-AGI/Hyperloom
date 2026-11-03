@@ -100,7 +100,7 @@ class Entry:
 
 
 _COMMON_FIELDS = frozenset({"kind", "project", "reason", "examples"})
-_LAYOUT_FIELDS = ("import_name", "sections", "refuse", "generated")
+_LAYOUT_FIELDS = ("import_name", "sections", "refuse", "native", "generated")
 _IMAGE_CHECK_FIELD = "image_check"
 _NAMES_FIELD = "names"
 _PATTERN_FIELD = "pattern"

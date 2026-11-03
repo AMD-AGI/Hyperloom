@@ -4,16 +4,18 @@
 """Which stacks need a native build, and the key of each: the compile's side of #125 stage 4b.
 
 :class:`NativePlanner` is the :class:`~hyperloom.measure.jit.native.needs.NativePlan` an environment compiler is given when
-native builds are configured. A stack of a component that has a native recipe and changes a file its package layout
-cannot lay (a ``.cu`` or a header where the component's build compiles it, vLLM's ``csrc``; one inside the package is an
-ordinary file) is planned like a build runner plans it (:func:`~hyperloom.measure.runner.native.builder.plan`): applied
-over the checkout of the component's pinned upstream commit, which yields the key, and its files inside the installed
-package, which the farm lays like a package root's. A stack that changes only Python is left to the package layout, as
-before. The planner keeps what it planned by key, so the build runner of a key can build it.
+native builds are configured. A stack of a component that has a native recipe and changes a native file of its package
+layout (one its ``native`` patterns name: a ``.cu`` or a header where the component's build compiles it, vLLM's
+``csrc``; one inside the package is an ordinary file) is planned like a build runner plans it
+(:func:`~hyperloom.measure.runner.native.builder.plan`): applied over the checkout of the component's pinned upstream
+commit, which yields the key, and its files inside the installed package, which the farm lays like a package root's. A
+stack that changes only Python is left to the package layout, as before. The planner keeps what it planned by key, so
+the build runner of a key can build it.
 
 Refused here, at submission, naming the path: a change to the build definition (``CMakeLists.txt``, ``setup.py`` and the
 other files of :data:`~hyperloom.measure.runner.native.recipes.NATIVE_BUILD_REFUSE`, and anything below a ``cmake/``
-directory), which would run arbitrary code at build time; and a stack whose upstream commit has no checkout here.
+directory), which would run arbitrary code at build time; a change to a build product (a compiled file, which the
+layout's ``refuse`` patterns name), naming the pattern; and a stack whose upstream commit has no checkout here.
 """
 
 from __future__ import annotations
@@ -79,7 +81,7 @@ class Planned:
 
 class NativePlanner:
     """The native build each stack needs (see the module); ``layouts`` are the package layouts that say which files are
-    native (those the layout refuses)."""
+    native (their ``native`` patterns) and which no build takes (their ``refuse`` patterns)."""
 
     def __init__(
         self, site: NativeSite, blobs: BlobStore, layouts: Mapping[str, ComponentLayout] = COMPONENT_LAYOUTS
@@ -124,14 +126,20 @@ class NativePlanner:
         return found
 
     def _changes_native(self, component: ComponentPatches, recipe: NativeRecipe, layout: ComponentLayout) -> bool:
-        """Whether the stack changes a file the package layout cannot lay; a build-definition change is refused."""
+        """Whether the stack changes a native file of the package layout; a change to the build definition, or to a
+        build product, is refused."""
         native = False
         for ref in component.patches:
             text = self._blobs.get(ref.sha256).decode("utf-8", errors="replace")
             for relative in patch_targets(text, recipe.source_dir, ref.path):
                 path = PurePosixPath(recipe.source_dir, relative).as_posix()
                 _refuse_build_definition(path, relative, component.component, ref.path)
-                native = native or layout.spec.refused_by(path) is not None
+                if (pattern := layout.spec.refused_by(path)) is not None:
+                    raise PatchApplyError(
+                        f"{ref.path}: {path!r} is a build product of {component.component} ({pattern}), never a "
+                        "source a native build takes from a patch"
+                    )
+                native = native or layout.spec.native_by(path) is not None
         return native
 
 
