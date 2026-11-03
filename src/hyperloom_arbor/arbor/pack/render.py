@@ -338,7 +338,7 @@ def _render_bundles(campaign) -> str:
     lines = [
         "## Bundles: one claim\n",
         "A bundle is a documented set of settings that pays only together (the serving-playbook "
-        "skill, `amd-knobs.md` §0 rule 6). Apply every member in `arbor/config.json` in one "
+        "skill's `knobs.json`). Apply every member in `arbor/config.json` in one "
         "iteration and write `BUNDLE: <id>` beside `DONE:`; the gate takes the set as one change. "
         "It is NOT_MEASURED unless every member is set as listed and the live server shows each "
         "one. A reverted bundle is one dead end, for the bundle, not for its members.\n",

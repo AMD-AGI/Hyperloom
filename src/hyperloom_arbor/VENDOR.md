@@ -36,6 +36,10 @@ The engine and what its agents read:
     - **Its `SKILL.md`** is this copy's own: the playbook's rules, and what the catalog holds.
     - **`knobs.json`,** which the harness reads (`arbor/knobs.py`), stays, without its entries for another vendor's
       GPUs. Its entries still cite a page section and a study record id (`#655`); neither is carried in this copy.
+    - **What the agent is told** points to what the copy carries: the dossier's template has no section built from
+      the pages, and the dossier skill, the agents' program, the `serving` pack, the always-on MI355X knowledge and
+      the hardware skill name `knobs.json` and the playbook's rules instead. Code comments and the kernels skill's
+      citations keep a page's name, under the convention above.
 - **No competitors' figures:** a figure that sets another vendor's GPU or library against a number is taken out:
   - in the `evolve-asm` pack's MoE context;
   - in the dossier skill;

@@ -152,11 +152,6 @@ apart, and says whether the increments are running out:
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | <N> | `m-<region>` | <ops, first launch to last> | <% per regime> | <µs, from what> | <µs, % of run> | <x % vs g %> | `11.uK-plan-<region>.md` |
 
-## Big directions from the serving playbook
-| Direction (big-directions.md) | Preconditions met here? | Regime fit (regime-tables.md) | In the image? (image-manifest.md) | Here as | Or set aside because |
-| --- | --- | --- | --- | --- | --- |
-| <name> | <yes / no: which one fails> | <favoured / neutral / against at this operating point, with the row> | <ships, ships off, absent> | <map ID> / — | <already on / below the floor: <x %> / image lacks it / regime against it> |
-
 ## Map
 <The line an Arbor campaign reads (arbor/directions.py): every direction above, by its map ID, with its
 status (open, done, killed, below_floor, or plan for a rewrite whose kernel plan is written) and, if closed,

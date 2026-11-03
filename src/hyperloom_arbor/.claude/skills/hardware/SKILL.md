@@ -103,7 +103,7 @@ with its source.
   - the default minimum for bf16 at TP4 is 16 MB, so decode-size messages never take it unless the
     minimum is lowered;
   - prefill needs the maximum raised.
-  - Knobs and evidence: `../serving-playbook/amd-knobs.md`.
+  - Knobs: `../serving-playbook/knobs.json`.
 - **Overlap:** two-batch overlap and multi-stream overlap need more ROCm hardware queues
   (`GPU_MAX_HW_QUEUES`, 5 in the recipes), or the streams serialize.
 - **Across nodes:** MoRI (expert-parallel dispatch/combine and KV transfer over RDMA), with its

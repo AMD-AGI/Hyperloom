@@ -298,8 +298,8 @@ The procedure is [kernels.md](kernels.md).
   codebase that do not run at these shapes, why not, and how to try each;
   KernelForge's pages; what B200 runs for the same op; the gfx950 gap that may
   block a port; the lead, with its ceiling from part 7. The serving playbook's
-  `image-manifest.md` says what the image ships but leaves off, and
-  `amd-knobs.md` what each vendor knob does and whether it changes numerics.
+  `knobs.json` says whether a vendor knob changes numerics, depends on the
+  operating point, or belongs to a bundle.
   The `kernels` skill holds the kernel notes (AITER, FlyDSL, CK, HIP, Triton)
   and the examples a "how to try it" column draws on.
 - **Done when:** every kernel with at least 1% of stratified GPU time in any
@@ -413,20 +413,17 @@ The procedure is [kernels.md](kernels.md).
       can't serve yet aren't cut off;
     - each stage is judged by the plan's gate for it, until the last stage,
       where the campaign's own A/B gate decides.
-- **Check the proven big directions before ranking.** The serving playbook
-  (`.claude/skills/serving-playbook/`) lists structural changes that won
-  large on other stacks, MegaMoE-style fused MoE and mega kernels among them,
-  each with its preconditions (`big-directions.md`), and which settings win at
-  which operating point (`regime-tables.md`). A campaign that works one
-  iteration at a time rarely reaches these on its own, so part 11 has to
-  bring them in.
+- **Check structural directions before ranking.** A campaign that works one
+  iteration at a time rarely reaches large structural changes on its own
+  (fused MoE and mega kernels, persistent kernels, collective fusion, layout
+  changes), so part 11 has to bring them in.
   - **For each one whose preconditions this workload meets** at the target's
     operating point (parts 4 and 5): part 11 carries it, usually as a rewrite
     with a kernel plan, or lists it as set aside with the reason. Reasons: the
-    image lacks it (`image-manifest.md`), the regime doesn't favour it, it is
-    already on, or its best case is below the floor.
+    image lacks it, the operating point doesn't favour it, it is already on,
+    or its best case is below the floor.
   - **Price it on this node,** from part 7 and the hardware skill's measured
-    table, never from the gain the playbook reports elsewhere.
+    table, never from a gain reported elsewhere.
 - **The map: what the campaign tracks.** Every direction has a map ID,
   `m-<component>`, which stays the same across update rounds; a direction
   that changes so much it needs a new ID says which one it replaces.

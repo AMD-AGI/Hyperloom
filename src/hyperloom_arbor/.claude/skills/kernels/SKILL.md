@@ -25,7 +25,8 @@ and the images that carry each kernel family are the `serving-playbook` skill's.
 - `tuning_db.md`, `authoring_delegation.md`, `flydsl_path.md`, `kernel_families.md` and the fused-MoE
   `tuning.md` are under `reference/local_knowledge/`; §7 gives their full paths.
 - `#NNN` is a record id of the serving playbook's InferenceX study (not carried in this copy);
-  `amd-knobs`, `big-directions` (D1–D22) and `image-manifest` are that skill's files.
+  `amd-knobs`, `big-directions` (D1–D22) and `image-manifest` name that skill's reference pages, which are not
+  carried in this copy.
 
 ## 1. Before writing anything: the order of resort
 
