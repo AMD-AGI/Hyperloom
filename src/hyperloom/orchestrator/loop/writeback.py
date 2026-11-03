@@ -2991,6 +2991,10 @@ class WritebackCollaborator(CoordinatorCollaborator):
         Returns whether it mutated state, so the caller persists it. A failed attempt
         is the one this counter exists to record, and that path has no other reason
         to save.
+
+        ``export_attempts`` counts KEEPs whose module did not export. A REVERT is not
+        an export attempt -- it is a candidate that never reached the tree -- and
+        counting one would make the figure read as progress toward an export.
         """
         try:
             config = aoti_config()
@@ -2998,8 +3002,10 @@ class WritebackCollaborator(CoordinatorCollaborator):
             return False
         if config is None or not config.enabled or self.shared_state.export_landed:
             return False
+        if not kept_flag:
+            return False
         hook = optimization_file()
-        if kept_flag and hook is not None and module_uses_aoti(hook):
+        if hook is not None and module_uses_aoti(hook):
             self.shared_state.export_landed = True
             return True
         self.shared_state.export_attempts += 1

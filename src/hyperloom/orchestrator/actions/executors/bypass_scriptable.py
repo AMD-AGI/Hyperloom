@@ -73,13 +73,20 @@ def enforce_custom_scope(framework: str) -> None:
     The operator-declared single-file scope is verified at launch, where the
     framework repo path is already exported, so an out-of-boundary campaign
     fails before spending any work rather than at the first patch apply.
+
+    The ``aoti`` block is parsed here for the same reason, and because nothing
+    else ever reports it: every other caller of ``aoti_config`` swallows the
+    error. A malformed block otherwise costs the whole run -- the agent is never
+    told to export, since ``scope_instructions`` omits the declaration it could
+    not read, while the dispatcher holds the gate shut on the same error.
     """
-    from ...framework.optimization_scope import check_patch_scope, optimization_file
+    from ...framework.optimization_scope import aoti_config, check_patch_scope, optimization_file
 
     if str(framework or "").strip().lower() != "custom":
         return
     if optimization_file() is not None:
         check_patch_scope(Path(os.environ.get("FRAMEWORK_REPO_PATH", "")), [])
+        aoti_config()
 
 
 def build_scriptable_env(

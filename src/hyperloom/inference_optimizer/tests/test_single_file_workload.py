@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -841,3 +842,43 @@ def test_catalog_forbids_a_shared_package_path():
     assert "Write the package somewhere per-process" in text
     assert "HYPERLOOM_CACHE_DIR" in text
     assert "hand-bumped version constant" in text
+
+
+def test_launch_refuses_a_malformed_aoti_block(workload, tmp_path):
+    """Nothing else reports it: every other aoti_config caller swallows the error.
+
+    Left unchecked the run is silently useless -- scope_instructions omits the
+    declaration it could not read, so the agent is never told to export, while the
+    dispatcher holds the gate shut on the same error.
+    """
+    from hyperloom.orchestrator.actions.executors.bypass_scriptable import enforce_custom_scope
+
+    _, hook, _, state = workload
+    declare(Path(state["bypass_scripts_dir"]), hook, {"enabled": True, "dynamic_dims": [dim(min=128, max=8)]})
+
+    with pytest.raises(ValueError, match="requires min < max"):
+        enforce_custom_scope("custom")
+
+
+def test_launch_accepts_a_well_formed_aoti_block(workload, tmp_path):
+    from hyperloom.orchestrator.actions.executors.bypass_scriptable import enforce_custom_scope
+
+    _, hook, _, state = workload
+    declare(Path(state["bypass_scripts_dir"]), hook, {"enabled": True, "dynamic_dims": [dim()]})
+
+    enforce_custom_scope("custom")
+
+
+def test_a_revert_is_not_an_export_attempt(workload):
+    """export_attempts measures progress toward an export; a REVERT never reached the tree."""
+    from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
+
+    _, hook, _, state = workload
+    declare(Path(state["bypass_scripts_dir"]), hook, {"enabled": True})
+
+    # Unbound: ``shared_state`` is a read-only property on the real collaborator, and
+    # the method reads nothing else off ``self``.
+    stub = SimpleNamespace(shared_state=SimpleNamespace(export_landed=False, export_attempts=0))
+
+    assert WritebackCollaborator._record_export_gate(stub, kept_flag=False) is False
+    assert stub.shared_state.export_attempts == 0
