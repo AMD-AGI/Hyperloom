@@ -276,6 +276,74 @@ async def test_a_branch_the_toolbox_has_no_cards_for_is_put_in_line(rig):
     assert rig.toolbox.leased == [(B1, 1)]
 
 
+def _free(toolbox: _Toolbox, free: int, refusal: Exception | None = None):
+    """Lease at most ``free`` cards; more is refused with ``refusal`` (no card free, by default)."""
+    asked: list[int] = []
+    lease = _Toolbox.lease_branch_sandbox.__get__(toolbox)
+
+    async def lease_free(branch_id, cards, **kwargs):
+        asked.append(cards)
+        if cards > free:
+            raise refusal or SandboxUnavailable(f"{cards} cards are not free")
+        return await lease(branch_id, cards, **kwargs)
+
+    toolbox.lease_branch_sandbox = lease_free
+    return asked
+
+
+async def test_asking_for_more_cards_than_are_free_gets_those_that_are(rig):
+    server = rig.build().server
+    asked = _free(rig.toolbox, 2)
+    granted = await server.call("dev_sandbox_lease", cards=4, term="long")
+    assert asked == [4, 3, 2]
+    assert rig.toolbox.leased == [(B1, 2)]
+    assert granted["cards"] == 2 and granted["asked"] == 4
+    assert "2 of the 4 card(s) asked for" in rig.logs.entries[-1].content
+
+
+async def test_free_cards_are_all_given(rig):
+    server = rig.build().server
+    asked = _free(rig.toolbox, 8)
+    granted = await server.call("dev_sandbox_lease", cards=8)
+    assert asked == [8] and granted["cards"] == granted["asked"] == 8
+
+
+async def test_a_partial_grant_is_at_most_four_cards(rig):
+    server = rig.build().server
+    asked = _free(rig.toolbox, 6)
+    granted = await server.call("dev_sandbox_lease", cards=8)
+    assert asked == [8, 4] and granted["cards"] == 4
+
+
+async def test_a_lease_that_would_leave_no_test_its_cards_takes_fewer(rig):
+    server = rig.build().server
+    _free(rig.toolbox, 3, RequestRejected("too few cards left", "lease_leaves_no_measurement"))
+    assert (await server.call("dev_sandbox_lease", cards=4))["cards"] == 3
+
+
+async def test_no_card_free_is_still_refused_and_put_in_line(rig):
+    server = rig.build().server
+    asked = _free(rig.toolbox, 0)
+    assert "1st in line" in await _refused(server.call("dev_sandbox_lease", cards=3), "cards_busy")
+    assert asked == [3, 2, 1] and rig.toolbox.leased == []
+
+
+async def test_a_toolbox_taking_one_card_count_only_is_refused_as_before(rig):
+    # The hosted backend leases the session's TP and refuses any other count.
+    server = rig.build().server
+    asked = []
+
+    async def tp_only(branch_id, cards, **kwargs):
+        asked.append(cards)
+        if cards != 4:
+            raise RequestRejected("a dev sandbox has the session's 4 cards", "invalid_request")
+        raise SandboxUnavailable("the grant has no room")
+
+    rig.toolbox.lease_branch_sandbox = tp_only
+    await _refused(server.call("dev_sandbox_lease", cards=4), "cards_busy")
+    assert asked == [4, 3]
+
+
 async def test_the_lease_tool_tells_a_queued_branch_to_keep_working_and_ask_again(rig):
     server = rig.build(cap=1).server
     await server.call("dev_sandbox_lease")
