@@ -65,8 +65,7 @@ from .benchmark_result import (
 from ._gpu_metrics import write_gpu_metrics_from_report
 from .benchmark_backend import build_benchmark_command
 from .benchmark_config import apply_benchmark_round_seed, composed_benchmark_timeout_sec, prepare_benchmark_runtime
-from ._launch_evidence import RequestedLaunch, build_launch_evidence, persist_launch_evidence
-from ...measurement.runtime_findings import persist_runtime_findings, scan_server_log
+from ._launch_evidence import RequestedLaunch, build_launch_evidence, persist_measurement_evidence
 from ._spec_decode_pin import SPECULATIVE_DECODING_PINNED, refuse_unpinned_speculative_change
 from hyperloom.common.agentx_workload import pin_mlperf_round_concurrency
 from hyperloom.common.benchmark_config import is_magpie_agentx
@@ -1748,8 +1747,6 @@ def _attach_grid_launch_evidence(
     ready_server_log: str | None = None,
 ) -> None:
     """Persist declared and observed launch evidence for each grid result."""
-    from ._workload_envs import VLLM_SOURCE_ROOT_ENVS
-
     for idx, result in enumerate(results):
         if idx >= len(grid):
             break
@@ -1783,10 +1780,7 @@ def _attach_grid_launch_evidence(
                 caller_reused_ready_server=caller_reused_ready_server,
             )
         result.launch_evidence = evidence
-        result.launch_evidence_path = persist_launch_evidence(evidence, slot=slot)
-        declared_env = evidence["requested_server_env"].keys() - set(VLLM_SOURCE_ROOT_ENVS)
-        report = scan_server_log(actual_log, evidence["framework"], declared_env=declared_env)
-        persist_runtime_findings(report, slot=slot)
+        result.launch_evidence_path = persist_measurement_evidence(evidence, actual_server_log=actual_log, slot=slot)
 
 
 def _safe(name: str) -> str:
