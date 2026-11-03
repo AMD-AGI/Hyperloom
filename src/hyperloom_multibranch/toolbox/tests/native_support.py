@@ -32,7 +32,8 @@ FACTORY = f"{__name__}:stand_in_recipe"
 LAYOUT = ComponentLayout(
     COMPONENT,
     f"native/python/{COMPONENT}",
-    refuse=("*.so", "*.c", "*.cu", "*.hip", "*.h", "CMakeLists.txt", "setup.py"),
+    refuse=("*.so",),
+    native=("*.c", "*.cu", "*.hip", "*.h", "CMakeLists.txt", "setup.py"),
 )
 
 _BUILD = """\

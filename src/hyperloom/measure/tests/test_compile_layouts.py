@@ -140,6 +140,18 @@ def test_two_upstream_paths_of_one_installed_file_are_refused(tmp_path, blobs):
         compile_patch(tmp_path, blobs, "triton", files)
 
 
+#: The compiled files a layout may name: what a build makes, never a source of one.
+COMPILED = {"*.so", "*.so.*", "*.a", "*.o", "*.bc", "*.co", "*.hsaco", "*.cubin", "*.pyd", "*.aks2"}
+
+
+@pytest.mark.parametrize("component", sorted(COMPONENT_LAYOUTS))
+def test_every_layout_refuses_only_compiled_files_in_every_session_and_names_none_native(component):
+    """A native build compiles what ``native`` names; a compiled file there would start a build and be laid in it."""
+    layout = COMPONENT_LAYOUTS[component]
+
+    assert set(layout.refuse) <= COMPILED and not set(layout.native) & COMPILED
+
+
 def test_the_binary_names_of_aiter_are_refused_and_its_python_is_not(tmp_path):
     aiter = COMPONENT_LAYOUTS["aiter"]
 

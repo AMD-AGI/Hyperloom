@@ -3,7 +3,8 @@
 
 """#125 stage 4c with a stand-in compiler: a stack that edits vLLM's ``csrc`` is planned by vLLM's own recipe over the
 rule pack's layout of vLLM, built out of process from ``<sources>/vllm/<ref>``, laid in the farm and imported from it. A
-native source inside the ``vllm`` package, which the package compiles at run time, is an ordinary package file."""
+native source inside the ``vllm`` package, which the package compiles at run time, is an ordinary package file; a
+compiled file, which a build makes, is refused with native builds or without."""
 
 from __future__ import annotations
 
@@ -143,22 +144,55 @@ def test_a_source_below_csrc_is_a_native_build_and_without_a_native_plan_is_refu
 
 
 @pytest.mark.parametrize(
-    ("path", "pattern"),
-    [
-        ("vllm/.osk_cache/osk_gemm.co", "*.co"),
-        ("vllm/_osk_gemm.hsaco", "*.hsaco"),
-        ("vllm/_C.abi3.so", "*.so"),
-        ("csrc/prebuilt.so", "*.so"),
-        ("CMakeLists.txt", "CMakeLists.txt"),
-    ],
+    ("path", "pattern"), [("CMakeLists.txt", "CMakeLists.txt"), ("vllm/sub/CMakeLists.txt", "CMakeLists.txt")]
 )
-def test_without_a_native_plan_a_compiled_or_build_file_is_refused_wherever_it_lies(
-    rig: Rig, path: str, pattern: str
-) -> None:
+def test_without_a_native_plan_a_build_file_is_refused_wherever_it_lies(rig: Rig, path: str, pattern: str) -> None:
     stack = rig.recipe(rig.patch({path: "text\n", vllm.PY_FILE: "SCALE = 2\n"}, {vllm.PY_FILE: vllm.BASE_PY}))
 
     with pytest.raises(PatchApplyError, match=re.escape(f"{path!r} is a native or binary file ({pattern}) of vllm")):
         plain_compiler(rig).compile(stack, RecipeDelta())
+
+
+COMPILED = [
+    ("vllm/.osk_cache/osk_gemm.co", "*.co"),
+    ("vllm/_osk_gemm.hsaco", "*.hsaco"),
+    ("vllm/_C.abi3.so", "*.so"),
+    ("vllm/lib/libosk.so.1", "*.so.*"),
+    ("csrc/prebuilt.so", "*.so"),
+    ("csrc/rocm/attention.o", "*.o"),
+]
+
+
+@pytest.mark.parametrize(("path", "pattern"), COMPILED)
+def test_a_compiled_file_is_refused_with_native_builds_or_without_naming_its_pattern(
+    rig: Rig, path: str, pattern: str
+) -> None:
+    """A compiled file is what a build makes: a text patch to one is no source change, so it starts no vLLM build."""
+    stack = rig.recipe(rig.patch({path: "text\n", vllm.PY_FILE: "SCALE = 2\n"}, {vllm.PY_FILE: vllm.BASE_PY}))
+
+    with pytest.raises(PatchApplyError, match=re.escape(f"{path!r} is a build product of vllm ({pattern})")):
+        rig.compiler.compile(stack, RecipeDelta())
+    with pytest.raises(PatchApplyError, match=re.escape(f"{path!r} is a native or binary file ({pattern}) of vllm")):
+        plain_compiler(rig).compile(stack, RecipeDelta())
+
+
+@pytest.mark.parametrize(("path", "pattern"), COMPILED)
+def test_a_compiled_file_beside_a_csrc_change_is_refused_and_never_laid_in_its_build(
+    rig: Rig, path: str, pattern: str
+) -> None:
+    stack = rig.recipe(rig.patch({path: "text\n", vllm.ACT_CU: EDITED_CU}))
+
+    with pytest.raises(PatchApplyError, match=re.escape(f"{path!r} is a build product of vllm ({pattern})")):
+        rig.compiler.compile(stack, RecipeDelta())
+
+
+def test_a_makefile_starts_no_vllm_build_and_is_refused_like_any_file_outside_the_package(rig: Rig) -> None:
+    """vLLM has no Makefile at f46a9dfe2c and its build reads none: a Makefile is no source of it."""
+    stack = rig.recipe(rig.patch({"Makefile": "all:\n", vllm.PY_FILE: "SCALE = 2\n"}, {vllm.PY_FILE: vllm.BASE_PY}))
+
+    for compiler in (rig.compiler, plain_compiler(rig)):
+        with pytest.raises(PatchApplyError, match=re.escape("'Makefile' is outside the installed package (vllm/)")):
+            compiler.compile(stack, RecipeDelta())
 
 
 def test_a_python_only_vllm_stack_stays_a_package_root_with_no_build(rig: Rig) -> None:

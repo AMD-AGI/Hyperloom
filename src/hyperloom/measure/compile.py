@@ -195,11 +195,10 @@ class ComponentLayout:
     """How a component's upstream repository maps onto the package installed in the image.
 
     ``sections`` are the layout's parts (an upstream prefix, the base it lies over and where in the base it starts); a
-    layout without any is the one package section at ``upstream_prefix``. ``refuse`` are the patterns of the files whose
-    change this layout cannot measure (of a file's name, or with a slash of its upstream path:
-    :meth:`~hyperloom.common.outside_facts.component_layout.ComponentLayoutSpec.refused_by`), and ``generated`` the
-    package directories the runtime writes builds into.
-    The rule pack owns all of it (``component_layout`` entries).
+    layout without any is the one package section at ``upstream_prefix``. ``refuse`` are the patterns of the files no
+    patch can change, ``native`` those of the files only a native build measures (each of a file's name, or with a slash
+    of its upstream path: :mod:`~hyperloom.common.outside_facts.component_layout`), and ``generated`` the package
+    directories the runtime writes builds into. The rule pack owns all of it (``component_layout`` entries).
     """
 
     import_name: str
@@ -208,15 +207,16 @@ class ComponentLayout:
     sections: tuple[LayoutSection, ...] = ()
     refuse: tuple[str, ...] = ()
     generated: tuple[str, ...] = ()
+    native: tuple[str, ...] = ()
 
     @classmethod
     def from_spec(cls, spec: ComponentLayoutSpec) -> ComponentLayout:
-        return cls(spec.import_name, spec.sections[0].prefix, spec.sections, spec.refuse, spec.generated)
+        return cls(spec.import_name, spec.sections[0].prefix, spec.sections, spec.refuse, spec.generated, spec.native)
 
     @property
     def spec(self) -> ComponentLayoutSpec:
         sections = self.sections or (LayoutSection(self.upstream_prefix),)
-        return ComponentLayoutSpec(self.import_name, sections, self.refuse, self.generated)
+        return ComponentLayoutSpec(self.import_name, sections, self.refuse, self.generated, self.native)
 
 
 COMPONENT_LAYOUTS: Mapping[str, ComponentLayout] = {
@@ -391,7 +391,7 @@ def _package_path(path: str, prefix: str, patch: str) -> str:
 
 def _place(path: str, layout: ComponentLayout, patch: str) -> PlacedPath:
     _safe_parts(path, patch)
-    pattern = layout.spec.refused_by(path)
+    pattern = layout.spec.refused_by(path) or layout.spec.native_by(path)
     if pattern is not None:
         raise PatchApplyError(
             f"{patch}: {path!r} is a native or binary file ({pattern}) of {layout.import_name}; a patch changes its "
