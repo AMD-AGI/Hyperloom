@@ -64,19 +64,25 @@ def rebuild_watchdog_sec(modules: Collection[str]) -> int:
 
 
 def raise_rebuild_watchdog(
-    call: TestCall, farm: Farm | None, environ: Mapping[str, str], cwd: Path, built: Collection[str] = ()
+    call: TestCall,
+    farm: Farm | None,
+    environ: Mapping[str, str],
+    cwd: Path,
+    built: Collection[str] = (),
+    gfx_arch: str | None = None,
 ) -> str | None:
     """Give every sglang point of ``call`` a ``--watchdog-timeout`` that covers rebuilding the modules its tuned tables or
     build variables make stale, and ``built`` (the modules the test's patch touches that its server builds, the
     compiled-code cache's), keeping a longer one its launch sets, rewriting the point files in place. A note of what was
     raised, else ``None``.
 
-    ``environ`` is what the servers inherit, before the sheet's overrides.
+    ``environ`` is what the servers inherit, before the sheet's overrides; ``gfx_arch`` the card's architecture, when known.
     """
     configs = point_configs(call)
     if not configs:
         return None
-    modules = _stale_modules(configs, server_environments(call, configs, environ), environ, farm, cwd) | set(built)
+    stale = _stale_modules(configs, server_environments(call, configs, environ), environ, farm, cwd, gfx_arch)
+    modules = stale | set(built)
     if not modules:
         return None
     seconds = rebuild_watchdog_sec(modules)
@@ -95,7 +101,12 @@ def raise_rebuild_watchdog(
 
 
 def _stale_modules(
-    configs: list[dict], servers: list[dict[str, str]], environ: Mapping[str, str], farm: Farm | None, cwd: Path
+    configs: list[dict],
+    servers: list[dict[str, str]],
+    environ: Mapping[str, str],
+    farm: Farm | None,
+    cwd: Path,
+    gfx_arch: str | None,
 ) -> frozenset[str]:
     """The module config entries the servers' tuned tables, or the build variables they set otherwise than ``environ``,
     make stale, as the aiter they import resolves them (the farm's, when it rebuilds aiter); none when the image has no
@@ -109,7 +120,9 @@ def _stale_modules(
         config = read_config(config_path(package))
     except (OSError, ValueError):
         return frozenset()
-    return stale_table_modules(config, image, package, servers) | env_touched_entries(config, servers, environ)
+    return stale_table_modules(config, image, package, servers) | env_touched_entries(
+        config, servers, environ, gfx_arch
+    )
 
 
 def _with_watchdog(config: dict[str, Any], seconds: int) -> bool:

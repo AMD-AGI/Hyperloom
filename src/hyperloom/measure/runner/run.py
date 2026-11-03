@@ -70,7 +70,7 @@ from hyperloom.measure.farm import (
     server_python,
     verify_farm,
 )
-from hyperloom.measure.runner.jit import STAGING_DIR, ColdStart, Surroundings, build_session, cold_start
+from hyperloom.measure.runner.jit import STAGING_DIR, ColdStart, Surroundings, build_session, card_arch, cold_start
 from hyperloom.measure.runner.import_outcome import install_import_watch, refine_imports
 from hyperloom.measure.runner.jit_outcome import refine_outcome
 from hyperloom.measure.runner.own_jit import OWN_AITER_JIT_DIR, own_aiter_jit
@@ -550,14 +550,16 @@ def _jit_session(
     return build_session(spec, points, farm, facts[0] if facts else None, around)
 
 
-def _own_directories(ctx: _Context, call: TestCall, session: JitCacheSession | None, farm: Farm | None) -> TestCall:
+def _own_directories(
+    ctx: _Context, call: TestCall, session: JitCacheSession | None, farm: Farm | None, gfx_arch: str | None
+) -> TestCall:
     """``call`` with the test's compiled-code cache, the tables its farm patches and, when the cache gives aiter no JIT
     directory, one of the test's own in its compile directory, so nothing the server builds lands in the image. A point
     that rebuilds stale aiter modules at its first prefill gets a watchdog that waits for the builds
     (``rebuild_watchdog``)."""
-    own = own_aiter_jit(call, farm, session, ctx.environ, _compile_dir(ctx, call.task_id) / OWN_AITER_JIT_DIR)
+    own = own_aiter_jit(call, farm, session, ctx.environ, _compile_dir(ctx, call.task_id) / OWN_AITER_JIT_DIR, gfx_arch)
     built = session.built_by_server if session is not None else frozenset()
-    raised = raise_rebuild_watchdog(call, farm, ctx.environ, ctx.work, built)
+    raised = raise_rebuild_watchdog(call, farm, ctx.environ, ctx.work, built, gfx_arch)
     if raised is not None:
         ctx.notes.append(raised)
     return dataclasses.replace(
@@ -592,7 +594,8 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
     _patch_replay_client(ctx, points, inferencex)
     surface = _surface_sha256(spec, points)
     session = _jit_session(ctx, spec, points, farm, facts)
-    call = _own_directories(ctx, _call(ctx, spec, points, inferencex, progress), session, farm)
+    arch = card_arch(spec, facts[0] if facts else None)
+    call = _own_directories(ctx, _call(ctx, spec, points, inferencex, progress), session, farm, arch)
     _install_eval_deps(ctx, spec, points, inferencex)
     ctx.cards.check(BEFORE_TEST)
     ctx.cards.enforce_guard()
