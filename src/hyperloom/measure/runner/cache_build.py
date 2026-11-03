@@ -131,6 +131,10 @@ _ARCHIVE_SETTINGS = tuple(part for setting in _ARCHIVE_CONFIG for part in ("-c",
 #: What ``git`` reads besides the repository, switched off for the archive: system and global configuration, and the
 #: system's attributes (``/etc/gitattributes``).
 _GIT_NO_SYSTEM_OR_GLOBAL = {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_ATTR_NOSYSTEM": "1"}
+_GIT = "git"
+_OBJECTS = "objects"
+#: The file that names the object directories a repository borrows, relative to the repository.
+_ALTERNATES = (_OBJECTS, "info", "alternates")
 _BUILD_TOOLS = ("setuptools", "wheel")
 _NO_INDEX, _FIND_LINKS, _NO_DEPS = "--no-index", "--find-links", "--no-deps"
 _ISOLATED, _ONLY_BINARY, _REQUIRE_HASHES = "--isolated", "--only-binary=:all:", "--require-hashes"
@@ -244,7 +248,7 @@ def _run(command: Sequence[str], what: str, env: Mapping[str, str] | None = None
 
 
 def _git(repo: Path, *args: str) -> list[str]:
-    return ["git", "-C", str(repo), *args]
+    return [_GIT, "-C", str(repo), *args]
 
 
 def _commit_tree(repo: Path, sha: str) -> str:
@@ -265,17 +269,18 @@ def _archive_source(repo: Path, sha: str, archive: Path) -> None:
     apply. git runs with no ``GIT_`` variable of the builder's environment, an empty ``HOME`` and no system or global
     configuration or attributes (:data:`_GIT_NO_SYSTEM_OR_GLOBAL`), and :data:`_ARCHIVE_SETTINGS` fixes the rest.
     """
-    objects = Path(repo, _run(_git(repo, "rev-parse", "--git-path", "objects"), f"finding the objects of {repo}"))
+    objects = Path(repo, _run(_git(repo, "rev-parse", "--git-path", _OBJECTS), f"finding the objects of {repo}"))
     with tempfile.TemporaryDirectory(dir=archive.parent, prefix=".archive-") as scratch:
-        home, borrower = Path(scratch, "home"), Path(scratch, "git")
+        home, borrower = Path(scratch, "home"), Path(scratch, "repo")
         home.mkdir()
         env = {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
         env.update(HOME=str(home), XDG_CONFIG_HOME=str(home), **_GIT_NO_SYSTEM_OR_GLOBAL)
         object_format = ["--object-format=sha256"] if len(sha) == 64 else []
-        _run(["git", "init", "-q", "--bare", "--template=", *object_format, str(borrower)], "making a repository", env)
-        (borrower / "objects" / "info").mkdir(parents=True, exist_ok=True)
-        (borrower / "objects" / "info" / "alternates").write_text(f"{objects.resolve()}\n", encoding=_UTF8)
-        export = ["git", f"--git-dir={borrower}", *_ARCHIVE_SETTINGS, "archive", "--format=tar"]
+        _run([_GIT, "init", "-q", "--bare", "--template=", *object_format, str(borrower)], "making a repository", env)
+        alternates = borrower.joinpath(*_ALTERNATES)
+        alternates.parent.mkdir(parents=True, exist_ok=True)
+        alternates.write_text(f"{objects.resolve()}\n", encoding=_UTF8)
+        export = [_GIT, f"--git-dir={borrower}", *_ARCHIVE_SETTINGS, "archive", "--format=tar"]
         _run([*export, "-o", str(archive.absolute()), sha], f"exporting {sha} from {repo}", env)
 
 
