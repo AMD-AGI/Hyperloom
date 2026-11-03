@@ -30,7 +30,7 @@ class StubBackend:
     """Stands in for the local measurement backend: no server, one report, and a record of the point it was given."""
 
     def run_test(self, call: TestCall) -> TestOutcome:
-        workspace = Path(call.output_dir) / "benchmark_stub_20261014_000000"
+        workspace = Path(call.output_dir) / "benchmark_stub_20000101_000000"
         workspace.mkdir(parents=True)
         report = {"success": True, "throughput": {"output_throughput": 1234.5, "completed_requests": 8}}
         (workspace / "benchmark_report.json").write_text(json.dumps(report), encoding="utf-8")

@@ -41,7 +41,7 @@ def test_a_directory_without_a_trace_file_has_no_traces(tmp_path: Path) -> None:
         (
             (
                 "torch_trace/graph_capture_profile/DecodeCudaGraphRunner_bs_10_rank0.json.gz",
-                "torch_trace/1792918450.3630219-TP-0.trace.json.gz",
+                "torch_trace/1700000000.0-TP-0.trace.json.gz",
             ),
             True,
         ),

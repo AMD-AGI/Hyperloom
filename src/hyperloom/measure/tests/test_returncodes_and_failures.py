@@ -120,17 +120,17 @@ def test_a_git_fetch_of_the_benchmarks_own_dependencies_that_timed_out_is_an_inf
     assert verdict.failure_reason.startswith(f"{failures.GIT_FETCH_TIMEOUT}: subprocess.TimeoutExpired: Command ['git'")
 
 
-#: What the replay client of an AgentX round printed when the Hub refused its trace dataset, in the words
+#: What the replay client of an AgentX round prints when the Hub refuses its trace dataset, in the words
 #: huggingface_hub raises once its retries are spent; the warning before each retry comes first.
 HUB_REFUSAL = "429 Too Many Requests: you have reached your 'api' rate limit."
 HUB_REFUSED_CLIENT_LOG = (
-    "Loading traces via aiperf public-dataset: semianalysis_cc_traces_weka_062126 (semianalysisai/cc-traces-weka-062126)\n"
-    "HTTP Error 429 thrown while requesting GET https://huggingface.co/api/datasets/semianalysisai/cc-traces-weka-062126"
+    "Loading traces via aiperf public-dataset: example_traces_000000 (example-org/example-traces)\n"
+    "HTTP Error 429 thrown while requesting GET https://huggingface.co/api/datasets/example-org/example-traces"
     "/revision/main\n"
     "Error: Hugging Face Hub request failed.\n"
     f"{HUB_REFUSAL}\n"
-    "Retry after 212 seconds (0/1000 requests remaining in current 300s window).\n"
-    "Failed to load tokenizer deepseek-ai/DeepSeek-V4-Flash\n"
+    "Retry after 60 seconds (0/1000 requests remaining in current 300s window).\n"
+    "Failed to load tokenizer example-org/example-model\n"
 )
 
 
@@ -147,7 +147,7 @@ def test_a_download_the_hub_refused_for_its_rate_limit_is_an_infrastructure_fail
 
 def test_a_client_log_is_not_read_for_a_candidates_signature_nor_a_retried_429() -> None:
     retried = "HTTP Error 429 thrown while requesting HEAD https://huggingface.co/datasets/x/resolve/main/README.md\n"
-    tokenizer = "Failed to load tokenizer deepseek-ai/DeepSeek-V4-Flash\n"
+    tokenizer = "Failed to load tokenizer example-org/example-model\n"
 
     verdict = _classify(
         returncode=1, logs=["AgentX benchmark client failed with exit code 1"], client_logs=[retried + tokenizer]
@@ -288,7 +288,7 @@ def test_a_classification_cannot_be_built_incoherent() -> None:
 
 BIND_LOG = (
     "INFO launching server\n"
-    "ERROR:    [Errno 98] error while attempting to bind on address ('0.0.0.0', 39211): address already in use\n"
+    "ERROR:    [Errno 98] error while attempting to bind on address ('0.0.0.0', 30000): address already in use\n"
 )
 
 

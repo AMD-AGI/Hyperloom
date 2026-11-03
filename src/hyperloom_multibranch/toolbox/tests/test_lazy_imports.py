@@ -4,9 +4,9 @@
 """Every ``from hyperloom... import name`` that importing a module does not run still names something that exists.
 
 Such an import is inside a function or under ``if TYPE_CHECKING``. A test that replaces the module it reads from with a
-stand-in never sees the name go missing: a sync with main moved two names out of ``tracelens_analysis`` and the
-``tracelens`` tool failed on every job while every test stayed green. This reads the names out of the source, so an import
-that is only run when a tool runs is checked as well as the ones at the top of a module.
+stand-in never sees a name go missing when that module is refactored, so a tool can fail on every job while every test
+stays green. This reads the names out of the source, so an import that is only run when a tool runs is checked as well
+as the ones at the top of a module.
 """
 
 from __future__ import annotations

@@ -21,7 +21,7 @@ SPEC_FINGERPRINT = "a1b2c3d4e5f60718"
 SPEC_SHA256 = "ab" * 32
 SANDBOX_ID = "sbx_01JTEST"
 DEFAULT_FILES = {
-    "benchmark_sglang_20261005_101500/benchmark_report.json": b'{"output_throughput": 5123.4}\n',
+    "benchmark_sglang_20000101_000000/benchmark_report.json": b'{"output_throughput": 5000.0}\n',
     "server.log": b"server up\nserver down\n" * 50,
 }
 

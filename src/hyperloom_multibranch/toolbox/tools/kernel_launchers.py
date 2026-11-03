@@ -21,10 +21,10 @@ launch. That is read only when the replay and the capture hold the same kernels,
 anything else keeps the plain names, with the reason.
 
 The capture's name is taken for the slot, not the window's: the window can record the names of a replay in another order
-than its slots run (a recorded decode replay can have most of its kernels under the name of a neighbour), and the slots'
-times follow the capture. By the capture's names every layer's copy of one GEMM takes about the same time and each of
-the four streams its weights at a plausible fraction of the card's memory bandwidth; by the window's names the same
-``kernel_gemm_0`` spreads over an order of magnitude and a paged-attention kernel looks as long as the longest GEMM.
+than its slots run (a recorded decode replay can have kernels under the name of a neighbour), and the slots' times
+follow the capture. By the capture's names every layer's copy of one GEMM takes about the same time and each of the four
+streams its weights at a plausible fraction of the card's memory bandwidth; by the window's names the same
+``kernel_gemm_0`` shows widely different times.
 """
 
 from __future__ import annotations

@@ -25,7 +25,7 @@ from hyperloom_multibranch.toolbox.tests import vllm_support as vllm
 from hyperloom_multibranch.toolbox.tests.test_native_builds import Hooks, Rig, farm_of
 
 EDITED_CU = "__global__ void reshape_and_cache() { /* faster */ }\n"
-KERNEL = '#include <hip/hip_runtime.h>\nextern "C" __global__ void osk_gemm() {}\n'
+KERNEL = '#include <hip/hip_runtime.h>\nextern "C" __global__ void custom_gemm() {}\n'
 
 
 def plain_compiler(rig: Rig) -> EnvironmentCompiler:
@@ -109,11 +109,12 @@ def test_without_a_native_plan_a_vllm_cu_edit_is_refused_by_the_rule_packs_layou
         plain_compiler(rig).compile(rig.recipe(rig.patch({vllm.ACT_CU: EDITED_CU})), RecipeDelta())
 
 
-@pytest.mark.parametrize("path", ["vllm/_osk_gemm.hip", "vllm/kernels/osk.cu", "vllm/kernels/osk.cpp"])
+@pytest.mark.parametrize("path", ["vllm/_custom_gemm.hip", "vllm/kernels/custom.cu", "vllm/kernels/custom.cpp"])
 def test_a_source_the_package_compiles_at_run_time_is_laid_as_a_package_file_and_builds_nothing(
     rig: Rig, path: str
 ) -> None:
-    """T23's keep: ``vllm/_osk_gemm.hip`` beside the Python that hipcc-compiles it when it runs."""
+    """A native source inside the ``vllm`` package that the package compiles at run time is kept:
+    ``vllm/_custom_gemm.hip`` beside the Python that hipcc-compiles it when it runs."""
     stack = rig.recipe(rig.patch({path: KERNEL, vllm.PY_FILE: "SCALE = 2\n"}, {vllm.PY_FILE: vllm.BASE_PY}))
     relative = path.removeprefix("vllm/")
 
@@ -128,7 +129,7 @@ def test_a_source_the_package_compiles_at_run_time_is_laid_as_a_package_file_and
 
 @pytest.mark.parametrize(
     ("path", "pattern"),
-    [("csrc/rocm/osk_gemm.hip", "csrc/*.hip"), ("csrc/osk.cu", "csrc/*.cu"), ("csrc/osk.cpp", "csrc/*.cpp")],
+    [("csrc/rocm/custom_gemm.hip", "csrc/*.hip"), ("csrc/custom.cu", "csrc/*.cu"), ("csrc/custom.cpp", "csrc/*.cpp")],
 )
 def test_a_source_below_csrc_is_a_native_build_and_without_a_native_plan_is_refused(
     rig: Rig, path: str, pattern: str
@@ -154,10 +155,10 @@ def test_without_a_native_plan_a_build_file_is_refused_wherever_it_lies(rig: Rig
 
 
 COMPILED = [
-    ("vllm/.osk_cache/osk_gemm.co", "*.co"),
-    ("vllm/_osk_gemm.hsaco", "*.hsaco"),
+    ("vllm/.custom_cache/custom_gemm.co", "*.co"),
+    ("vllm/_custom_gemm.hsaco", "*.hsaco"),
     ("vllm/_C.abi3.so", "*.so"),
-    ("vllm/lib/libosk.so.1", "*.so.*"),
+    ("vllm/lib/libcustom.so.1", "*.so.*"),
     ("csrc/prebuilt.so", "*.so"),
     ("csrc/rocm/attention.o", "*.o"),
 ]
@@ -187,7 +188,7 @@ def test_a_compiled_file_beside_a_csrc_change_is_refused_and_never_laid_in_its_b
 
 
 def test_a_makefile_starts_no_vllm_build_and_is_refused_like_any_file_outside_the_package(rig: Rig) -> None:
-    """vLLM has no Makefile at f46a9dfe2c and its build reads none: a Makefile is no source of it."""
+    """vLLM has no top-level Makefile and its build reads none: a Makefile is no source of it."""
     stack = rig.recipe(rig.patch({"Makefile": "all:\n", vllm.PY_FILE: "SCALE = 2\n"}, {vllm.PY_FILE: vllm.BASE_PY}))
 
     for compiler in (rig.compiler, plain_compiler(rig)):

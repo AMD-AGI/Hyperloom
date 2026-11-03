@@ -25,9 +25,10 @@ from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, FakePlanner, Fake
 from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
 
 AITER_TABLE_ENV = "AITER_CONFIG_GEMM_BF16"
-#: The envs of the test that was measured, as its config recorded them.
-MEASURED = {"PYTORCH_TUNABLEOP_ENABLED": "1", "PYTORCH_TUNABLEOP_TUNING": "1", "PYTORCH_TUNABLEOP_VERBOSE": "2"}
-#: The head of the image's own bf16 GEMM table, the table a specialist tunes and puts.
+#: The envs of a candidate that runs TunableOp with its tuning on.
+TUNING_ON = {"PYTORCH_TUNABLEOP_ENABLED": "1", "PYTORCH_TUNABLEOP_TUNING": "1", "PYTORCH_TUNABLEOP_VERBOSE": "2"}
+#: The head of aiter's shipped bf16 GEMM table (``aiter/configs/bf16_tuned_gemm.csv``), the table a specialist tunes and
+#: puts.
 TABLE = (
     "gfx,cu_num,M,N,K,bias,dtype,outdtype,scaleAB,bpreshuffle,libtype,solidx,splitK,us,kernelName,err_ratio,tflops,bw\n"
     "gfx950,256,64,256,5120,False,torch.bfloat16,torch.float32,False,False,asm,5,13,7.9191,"
@@ -64,7 +65,7 @@ def test_the_online_tuning_code_is_a_documented_rejection_code() -> None:
 async def test_the_test_that_was_measured_is_refused_and_the_reason_names_the_way_out(tmp_path: Path) -> None:
     rig = build(tmp_path)
     with pytest.raises(RequestRejected) as refused:
-        await rig.toolbox.submit_test(req(change=_delta(**MEASURED)))
+        await rig.toolbox.submit_test(req(change=_delta(**TUNING_ON)))
     assert refused.value.code == ONLINE_TUNING_CODE
     for named in ("PYTORCH_TUNABLEOP_TUNING=0", "put_kernel_artifact", AITER_TABLE_ENV):
         assert named in refused.value.reason, named
@@ -129,13 +130,13 @@ async def test_the_launch_the_delta_produces_is_judged_not_the_delta_alone(tmp_p
 async def test_the_refusal_is_the_same_for_every_workload(tmp_path: Path, kind: WorkloadKind) -> None:
     rig = build(tmp_path, workload_kind=kind)
     with pytest.raises(RequestRejected) as refused:
-        await rig.toolbox.submit_test(req(change=_delta(**MEASURED)))
+        await rig.toolbox.submit_test(req(change=_delta(**TUNING_ON)))
     assert refused.value.code == ONLINE_TUNING_CODE
 
 
 async def test_a_request_an_earlier_toolbox_accepted_is_not_withdrawn_by_the_rule() -> None:
     acceptance = Acceptance(AcceptanceSetup(FakeRepo(), FakePlanner(), IMAGE), is_accepted=lambda _: True)
-    request = req(change=_delta(**MEASURED))
+    request = req(change=_delta(**TUNING_ON))
     await acceptance.prepare(dataclasses.replace(request, request_id="r1"), replay=True)
     with pytest.raises(RequestRejected) as refused:
         await acceptance.prepare(request)

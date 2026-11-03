@@ -39,13 +39,14 @@ _MAX_TRIGGER_CHARS = 200
 KEY_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 #: Keys a sheet written while the toolbox stored each check's outputs by recipe may carry; read and left out.
 _FORMER_FIELDS = ("recipe", "parent_recipe")
-#: The share of server processes a defect of the kind this check looks for shows in (the measured case: one in three).
+#: The share of server processes a defect of the kind this check looks for is assumed to show in: one in three (an
+#: assumption for sizing the check, not a measurement).
 _DEFECT_SHARE = 1 / 3
 
 
 def miss_probability(processes: int) -> float:
-    """The chance that ``processes`` launches (each a test's own server) all miss a defect that shows in one launch in
-    three."""
+    """The chance that ``processes`` launches (each a test's own server) all miss a defect that, by assumption, shows in
+    one launch in three."""
     return (1 - _DEFECT_SHARE) ** processes
 
 

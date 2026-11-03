@@ -73,7 +73,7 @@ SERVER_ARGS = (
 #: print ``q_dtype_w``, which keys it) and one of the dense bf16 table (which prints every column that keys it).
 HIT_LOG = """\
 [aiter] shape is M:12, N:7168, K:5120, found padded_M: 16, N:7168, K:5120 is tuned on cu_num = 256 in /tmp/aiter_configs/a8w8_blockscale_bpreshuffle_tuned_gemm.csv , kernel name is a8w8_blockscale_bpreshuffle_1x128x128_256x16x64x256!
-[aiter] shape is M:64, N:5120, K:17408, found padded_M: 64, N:5120, K:17408 is tuned on cu_num = 256 in /work/tables/AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE/5c34e83d432c56e2/k-5c34e83d432c56e2 , kernel name is a8w8_blockscale_bpreshuffle_1x128x128_256x16x64x256!
+[aiter] shape is M:64, N:5120, K:17408, found padded_M: 64, N:5120, K:17408 is tuned on cu_num = 256 in /work/tables/AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE/0123456789abcdef/k-0123456789abcdef , kernel name is a8w8_blockscale_bpreshuffle_1x128x128_256x16x64x256!
 [aiter] shape is M:512, N:7168, K:5120 found padded_M: 512, N:7168, K:5120 is tuned on cu_num = 256 in /tmp/aiter_configs/a8w8_bpreshuffle_tuned_gemm.csv , kernel name is a8w8_bpreshuffle_x!
 [aiter] shape is M:4, N:6144, K:4096 dtype='torch.bfloat16' otype='torch.bfloat16' bias=False, scaleAB=False, bpreshuffle=False found padded_M: 4, N:6144, K:4096 is tuned on cu_num = 256 in /tmp/aiter_configs/bf16_tuned_gemm.csv, libtype is torch, kernel name is torch
 """
@@ -97,7 +97,7 @@ def table_text(header: str, rows: Iterable[str]) -> str:
     return "".join(f"{line}\n" for line in (header, *rows))
 
 
-def tuned_rows(*, us: Sequence[float] = (8.0, 8.1), err: Sequence[float] = (0.0029, 0.0)) -> tuple[str, ...]:
+def tuned_rows(*, us: Sequence[float] = (8.0, 8.1), err: Sequence[float] = (0.003, 0.0)) -> tuple[str, ...]:
     """Rows of the image's table (the first two of ``SHARED``) with the microseconds and mismatch ratio given."""
     rows = []
     for line, microseconds, ratio in zip(SHARED, us, err, strict=False):

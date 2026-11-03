@@ -169,7 +169,7 @@ def test_the_builder_command_stages_the_set_and_prints_what_a_setup_names(tmp_pa
 @pytest.mark.parametrize(
     ("model_limit", "served", "length"),
     [
-        (32768, 8192, 8064),  # measured: a 32K model whose launch serves 8192 left a 32K set incomplete
+        (32768, 8192, 8064),  # a limit far above what its launch serves: the set is built at the served context
         (32768, None, 32640),
         (4096, 8192, 3968),
         (None, 8192, 8064),

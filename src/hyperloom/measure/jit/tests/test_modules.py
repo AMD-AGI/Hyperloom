@@ -417,14 +417,17 @@ def test_the_env_touched_entries_follow_into_the_prebuilt_names_aiter_makes_from
     ],
 )
 def test_a_module_is_estimated_by_its_kind(name, seconds):
-    """The medians a session, eight tests building at once: the CK-tile GEMM 329 to 680 s, the tuned-table CK GEMM 96 to
-    181 s; the 63 to 66 s of mha_batch_prefill and module_moe_ck2stages before."""
+    """A module is estimated by its kind: a CK-tile module most, a tuned-table GEMM next, any other module least."""
     assert module_build_seconds(name, _image_config()) == seconds
 
 
-def test_the_estimates_cover_what_the_builds_measured():
-    assert CKTILE_MODULE_SECONDS >= 680 and TABLE_GEMM_MODULE_SECONDS >= 180
-    assert CKTILE_MODULE_BUILD_LIMIT_SEC >= 2 * 1347, "twice the longest CK-tile build, eight tests building at once"
+def test_the_hang_limits_are_twice_the_longest_builds_and_the_estimates_rank_the_kinds():
+    assert CKTILE_MODULE_SECONDS > TABLE_GEMM_MODULE_SECONDS > ESTIMATED_MODULE_SECONDS
+    assert CKTILE_MODULE_BUILD_LIMIT_SEC >= 2 * 1347, "twice the longest CK-tile build, several tests building at once"
     assert MODULE_BUILD_LIMIT_SEC >= 2 * 273, "twice the longest build of any other module before ready"
+    assert (
+        MODULE_BUILD_LIMIT_SEC >= 2 * TABLE_GEMM_MODULE_SECONDS
+        and CKTILE_MODULE_BUILD_LIMIT_SEC >= 2 * CKTILE_MODULE_SECONDS
+    )
     assert module_build_limit_sec("module_gemm_a8w8_bpreshuffle_cktile") == CKTILE_MODULE_BUILD_LIMIT_SEC
     assert module_build_limit_sec("module_gemm_a8w8_bpreshuffle") == MODULE_BUILD_LIMIT_SEC

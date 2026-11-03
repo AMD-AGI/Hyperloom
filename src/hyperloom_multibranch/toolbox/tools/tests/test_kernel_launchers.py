@@ -165,8 +165,7 @@ def test_a_replay_without_a_capture_to_read_is_left_as_recorded_with_the_reason(
 
 
 def test_a_replay_that_lost_a_kernel_is_not_paired_by_position(capture: Path) -> None:
-    """The window's profiler drops kernels (it lost every kernel of another branch's replay): a shorter replay is no
-    capture's."""
+    """A window can lose kernels of a replay: a shorter replay is no capture's."""
     window = read_window(DATA / "decode_window_launch_events.json.gz")
     lost = next(i for i, e in enumerate(window.events) if e.correlation == REPLAY and e.name == GEMM)
     short = replace(window, events=[e for i, e in enumerate(window.events) if i != lost])

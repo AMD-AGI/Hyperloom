@@ -9,11 +9,11 @@ from pathlib import Path
 
 from hyperloom.measure.jit.builds import BuildLog, scan_builds, server_logs
 
-# What aiter wrote in real server logs: the cpp_itfs form (a path) and the module builder's form (a bracketed md_name, in colour).
+# The two shapes aiter writes: the cpp_itfs form (a path) and the module builder's (a bracketed md_name, in colour).
 CPP = (
-    "[aiter] start build /root/.aiter/build/pa_ragged_d3ad7c1d008d204c2ad5e06a04e4f5a4\n"
+    "[aiter] start build /root/.aiter/build/pa_ragged_0123456789abcdef0123456789abcdef\n"
     "clang (LLVM option parsing): Unknown command line argument\n"
-    "[aiter] finish build /root/.aiter/build/pa_ragged_d3ad7c1d008d204c2ad5e06a04e4f5a4, cost 12.48115537s\n"
+    "[aiter] finish build /root/.aiter/build/pa_ragged_0123456789abcdef0123456789abcdef, cost 12.25s\n"
 )
 MODULE = (
     "[aiter] [pid=11 pname=MainProcess] start build [module_gemm_a8w8] under /j/build/module_gemm_a8w8\n"
@@ -33,8 +33,8 @@ def test_the_builds_a_log_says_are_counted_by_module_and_timed_by_the_cost_it_pr
 
     built = scan_builds([log])
 
-    assert built.seconds == {"pa_ragged_d3ad7c1d008d204c2ad5e06a04e4f5a4": 12.48115537, "module_gemm_a8w8": 33.5}
-    assert built.builds_seen == 2 and round(built.compile_seconds, 3) == 45.981
+    assert built.seconds == {"pa_ragged_0123456789abcdef0123456789abcdef": 12.25, "module_gemm_a8w8": 33.5}
+    assert built.builds_seen == 2 and round(built.compile_seconds, 3) == 45.75
 
 
 def test_ranks_that_build_one_module_together_are_one_build_of_the_longest_cost(tmp_path) -> None:
@@ -138,7 +138,7 @@ def test_a_build_that_finished_has_no_failure_and_an_open_record_at_the_end_of_t
     assert scan_builds([_log(tmp_path, cut)]).failed == {}, "a record that never closed is not a finished account"
 
 
-# The lines a real server printed when CUDA-graph capture hit a kernel the loaded module lacks (2026-10-25).
+# The lines a server prints when CUDA-graph capture hits a kernel the loaded module lacks.
 REGISTRY_MISS = (
     "RuntimeError: gemm_a8w8_blockscale_bpreshuffle kernel 'a8w8_blockscale_bpreshuffle_1x128x128_256x64x128x128_"
     "intrawave_v1' is not present in the compiled registry. The tuned CSV references a kernel that was not built into "

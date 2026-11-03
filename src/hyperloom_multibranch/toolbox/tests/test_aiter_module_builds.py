@@ -147,7 +147,7 @@ def test_a_host_with_no_build_store_keeps_its_acceptance_as_it_was(tmp_path: Pat
 
 
 class OnCardPlanner:
-    """Acceptance's planner over the rig's compiler without the module plan (no build store, 2a): no points."""
+    """Acceptance's planner over the rig's compiler without the module plan (no build store): no points."""
 
     def __init__(self, rig: AiterRig) -> None:
         self.blobs = rig.blobs

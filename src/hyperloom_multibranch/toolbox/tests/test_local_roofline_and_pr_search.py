@@ -347,7 +347,8 @@ async def test_a_trace_with_no_kernel_or_no_trace_fails_the_job_instead_of_answe
 async def test_an_analysis_that_scanned_none_of_the_traces_kernels_fails_the_job_instead_of_answering_ok(
     served: Local, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """What ``roofline-83e37a2e0267`` answered: ``Events scanned: 0`` over a trace with GPU kernels, and ``ok``."""
+    """A roofline analysis that scanned none of the trace's kernels (``Events scanned: 0`` over a trace with GPU kernels)
+    must not answer ``ok``."""
 
     async def scanned_nothing(payload: dict, *, session_dir: Path) -> dict:
         warning = {"code": "bypass_trace_aggregation_truncated", "severity": "warning"}

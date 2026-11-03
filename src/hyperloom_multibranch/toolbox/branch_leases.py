@@ -58,7 +58,7 @@ LEASE_WAIT_SECONDS = float(DEFAULT_RUNNER_START_TIMEOUT_SEC)
 _POLL_SECONDS = 0.2
 _VISIBLE_DEVICES = "HIP_VISIBLE_DEVICES"
 #: How long a released lease's cards are read again for the memory still listed on them before they are kept out: a
-#: server that ended frees hundreds of GiB in seconds, one that crashed has taken longer.
+#: server that ended normally frees its memory within seconds; one that crashed can take longer.
 CARD_DRAIN_SEC = 60.0
 #: How often a card kept out after that is read again, until nothing is listed on it.
 CARD_RECHECK_SEC = 30.0

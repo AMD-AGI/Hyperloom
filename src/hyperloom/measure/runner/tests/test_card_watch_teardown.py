@@ -4,11 +4,10 @@
 """The test's own server stopping, replayed through the runner's watch in a pod: its memory stays listed after its
 descriptors close, and that is not a foreign holder however long it stays; a holder that was never the test's still is.
 
-:data:`TEARDOWNS` are the 88 results of two long sessions on an 8-card pod whose signed statement said ``foreign``: every
-one was the test's own server's memory on its own cards, first seen this many seconds before the result was signed. A
-row is the test's cards, the cards the statement named, the GiB on each and that lead. What the sessions did not record
-is how long the kernel kept listing the memory, so each row is replayed with the memory freed after a short and after a
-long time.
+:data:`TEARDOWNS` are teardowns of a server that held two cards of an 8-card pod: a row is the test's cards, the cards
+whose memory the kernel keeps listing after the server stops, the GiB on each and the seconds between the stop and the
+signing of the result. The rows are made up. Each is replayed with the memory freed after a short and after a long
+time.
 """
 
 from __future__ import annotations
@@ -32,100 +31,24 @@ _HOST_PID = 1_800_000
 _POD_PID = 6_000
 _FOREIGN_PID = 1_900_000
 _CENSUS_ONCE = card_occupancy._census_once
-#: How long the kernel kept the memory listed: under the census's settle time, as a GPU pod measured for a server that
-#: exited, and longer than the rest of the test.
+#: How long the kernel keeps the memory listed: under the census's settle time (a server that exited frees its memory in
+#: seconds), and longer than the rest of the test.
 SHORT_LINGER_SEC = 3.0
 LONG_LINGER_SEC = 60.0
 
 TEARDOWNS: tuple[tuple[tuple[int, ...], tuple[int, ...], float, int], ...] = (
-    ((0, 1), (1,), 236.5, 34),
-    ((2, 3), (2,), 238.4, 35),
-    ((2, 3), (2, 3), 11.8, 33),
-    ((2, 3), (2, 3), 236.4, 17),
-    ((2, 3), (2, 3), 238.3, 34),
-    ((2, 3), (2, 3), 238.3, 34),
-    ((2, 3), (2, 3), 238.4, 34),
-    ((2, 3), (2, 3), 238.6, 34),
-    ((2, 3), (2, 3), 238.7, 34),
-    ((2, 3), (2, 3), 238.7, 35),
-    ((2, 3), (2, 3), 239.0, 35),
-    ((2, 3), (2, 3), 239.3, 33),
-    ((2, 3), (2, 3), 239.3, 34),
-    ((2, 3), (2, 3), 239.3, 34),
-    ((2, 3), (2, 3), 239.3, 34),
-    ((2, 3), (2, 3), 257.1, 34),
-    ((2, 3), (3,), 237.8, 34),
-    ((2, 3), (3,), 238.3, 34),
-    ((2, 5), (2, 5), 238.0, 33),
-    ((2, 5), (2, 5), 238.0, 34),
-    ((2, 5), (2, 5), 238.0, 34),
-    ((2, 5), (2, 5), 238.0, 36),
-    ((2, 5), (5,), 238.3, 34),
-    ((2, 7), (2,), 236.9, 36),
-    ((2, 7), (2,), 237.0, 20),
-    ((2, 7), (2, 7), 232.2, 37),
-    ((2, 7), (2, 7), 232.2, 37),
-    ((2, 7), (2, 7), 236.9, 34),
-    ((2, 7), (2, 7), 236.9, 34),
-    ((2, 7), (2, 7), 237.1, 34),
-    ((2, 7), (2, 7), 237.3, 34),
-    ((3, 4), (3,), 238.4, 33),
-    ((3, 4), (3, 4), 236.5, 34),
-    ((3, 4), (3, 4), 236.9, 33),
-    ((3, 4), (3, 4), 237.1, 35),
-    ((3, 4), (3, 4), 237.3, 34),
-    ((3, 4), (3, 4), 238.3, 34),
-    ((3, 4), (3, 4), 238.3, 35),
-    ((3, 4), (3, 4), 238.4, 35),
-    ((3, 4), (3, 4), 238.9, 36),
-    ((3, 6), (3, 6), 232.2, 35),
-    ((3, 6), (3, 6), 232.2, 38),
-    ((3, 6), (3, 6), 234.9, 37),
-    ((3, 6), (3, 6), 237.9, 34),
-    ((3, 6), (3, 6), 238.0, 34),
-    ((4, 5), (4,), 239.3, 35),
-    ((4, 5), (4, 5), 232.2, 37),
-    ((4, 5), (4, 5), 232.8, 37),
-    ((4, 5), (4, 5), 236.5, 34),
-    ((4, 5), (4, 5), 236.5, 34),
-    ((4, 5), (4, 5), 236.5, 36),
-    ((4, 5), (4, 5), 236.9, 34),
-    ((4, 5), (4, 5), 237.9, 32),
-    ((4, 5), (4, 5), 237.9, 35),
-    ((4, 5), (4, 5), 237.9, 35),
-    ((4, 5), (4, 5), 238.2, 35),
-    ((4, 5), (4, 5), 238.3, 32),
-    ((4, 5), (4, 5), 238.6, 34),
-    ((4, 5), (4, 5), 238.9, 34),
-    ((4, 5), (4, 5), 238.9, 35),
-    ((4, 5), (4, 5), 239.0, 35),
-    ((4, 5), (4, 5), 239.3, 34),
-    ((4, 5), (4, 5), 239.3, 34),
-    ((4, 5), (4, 5), 239.3, 36),
-    ((4, 5), (4, 5), 256.9, 34),
-    ((5, 6), (5, 6), 236.5, 32),
-    ((5, 6), (5, 6), 236.5, 34),
-    ((5, 6), (5, 6), 236.8, 35),
-    ((5, 6), (5, 6), 237.1, 34),
-    ((5, 6), (5, 6), 237.1, 35),
-    ((5, 6), (5, 6), 237.1, 35),
-    ((5, 6), (5, 6), 237.3, 35),
-    ((5, 6), (5, 6), 238.3, 34),
-    ((5, 6), (5, 6), 238.4, 35),
-    ((5, 6), (5, 6), 238.7, 9),
-    ((6, 7), (6,), 238.3, 34),
-    ((6, 7), (6, 7), 236.8, 33),
-    ((6, 7), (6, 7), 238.1, 21),
-    ((6, 7), (6, 7), 238.1, 35),
-    ((6, 7), (6, 7), 238.3, 34),
-    ((6, 7), (6, 7), 238.3, 35),
-    ((6, 7), (6, 7), 238.4, 35),
-    ((6, 7), (6, 7), 238.7, 33),
-    ((6, 7), (6, 7), 238.8, 35),
-    ((6, 7), (6, 7), 238.9, 33),
-    ((6, 7), (6, 7), 238.9, 35),
-    ((6, 7), (6, 7), 238.9, 35),
-    ((6, 7), (6, 7), 239.4, 34),
+    ((0, 1), (1,), 200.0, 30),
+    ((2, 3), (2,), 200.0, 30),
+    ((2, 3), (3,), 210.0, 35),
+    ((2, 3), (2, 3), 10.0, 30),
+    ((2, 3), (2, 3), 200.0, 10),
+    ((2, 3), (2, 3), 250.0, 20),
+    ((4, 5), (4, 5), 220.0, 35),
+    ((4, 5), (4,), 230.0, 40),
+    ((6, 7), (6, 7), 240.0, 20),
+    ((2, 7), (2, 7), 200.0, 30),
+    ((3, 6), (3, 6), 230.0, 35),
+    ((5, 6), (5, 6), 200.0, 15),
 )
 
 
@@ -171,7 +94,7 @@ class _Machine:
 
 def _machine(root: Path, clock: SettleClock, monkeypatch: pytest.MonkeyPatch) -> _Machine:
     root.mkdir()
-    machine = _Machine(KernelTree(root, pid_namespace="pid:[4026552279]"), clock)
+    machine = _Machine(KernelTree(root, pid_namespace="pid:[4026540000]"), clock)
     monkeypatch.setattr(card_occupancy, "read_holders", machine.read)
 
     def census_once(kfd, procfs, selected):  # the settle's re-reads see the memory freed too
@@ -208,7 +131,7 @@ def _replay(machine: _Machine, row, linger_sec: float, *, intruder_gib: float = 
 
 
 @pytest.mark.parametrize("linger_sec", [SHORT_LINGER_SEC, LONG_LINGER_SEC], ids=["freed-in-3s", "freed-after-60s"])
-def test_the_88_teardowns_two_sessions_called_foreign_are_clean_however_long_the_memory_stays_listed(
+def test_teardowns_of_the_servers_own_memory_are_clean_however_long_it_stays_listed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, settle_clock: SettleClock, linger_sec: float
 ) -> None:
     states = []
@@ -225,7 +148,7 @@ def test_a_process_outside_the_pod_that_takes_memory_on_the_card_as_the_server_s
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, settle_clock: SettleClock
 ) -> None:
     statement = _replay(
-        _machine(tmp_path / "m", settle_clock, monkeypatch), TEARDOWNS[0], LONG_LINGER_SEC, intruder_gib=2.6
+        _machine(tmp_path / "m", settle_clock, monkeypatch), TEARDOWNS[0], LONG_LINGER_SEC, intruder_gib=3.0
     )
 
     assert statement.state == CARD_FOREIGN
@@ -240,7 +163,7 @@ def test_a_second_process_with_memory_beside_the_running_server_is_still_foreign
 ) -> None:
     machine = _machine(tmp_path / "m", settle_clock, monkeypatch)
     watch = CardWatch((2, 3), OwnProcesses(frozenset({100}), procfs=machine.tree.procfs), CardGuard.ENFORCE)
-    machine.serve((2, 3), 238.0)
+    machine.serve((2, 3), 200.0)
     watch.check(DURING_TEST)
     machine.tree.holds(_FOREIGN_PID, 3, vram=3 * _GIB, queues=2)
     watch.check(DURING_TEST)

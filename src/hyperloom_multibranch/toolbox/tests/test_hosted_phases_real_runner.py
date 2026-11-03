@@ -3,11 +3,11 @@
 
 """Where the time of a hosted test goes, from the shipped runner to the result the blackboard stores.
 
-The hosted executor runs the real hosted backend over the local sandbox provider, whose runner is the shipped one with the
-real local backend; only ``run_grid`` is a stand-in (``phased_runner_entry``), which spends a scaled-down share of the
-seconds a real round spends and leaves the marks the launcher leaves. A graded InferenceX test, an AgentX test and a
-test whose server never got ready each go through the whole path, and each result lists its phases in the order they
-happened, ending in the host's, with the seconds none of them covers kept apart.
+The hosted executor runs the real hosted backend over the local sandbox provider, whose runner is the shipped one with
+the real local backend; only ``run_grid`` is a stand-in (``phased_runner_entry``), which spends a scaled-down share of
+the made-up seconds of ``phase_rounds`` and leaves the marks the launcher leaves. A graded InferenceX test, an AgentX
+test and a test whose server never got ready each go through the whole path, and each result lists its phases in the
+order they happened, ending in the host's, with the seconds none of them covers kept apart.
 """
 
 from __future__ import annotations

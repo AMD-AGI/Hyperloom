@@ -3,11 +3,11 @@
 
 """A failed test's reason names the cause its server log or its benchmark's stderr states.
 
-The logs are sanitised, of three kinds a reason must name instead of ``no_known_signature``: the server refusing its
-own command line, the evaluation client answered ``400``, and a worker dying on a Python exception. The fourth, an
-import that failed, is the server.log lines of an SGLang server (one card) asked for ``--load-format fastsafetensors``.
-The two HIP logs are the kind that reads as ``hip_kernel_missing`` although no kernel is missing: a patched kernel that
-read out of bounds and a CUDA graph capture that was invalidated.
+The logs are shaped like real ones, of three kinds a reason must name instead of ``no_known_signature``: the server
+refusing its own command line, the evaluation client answered ``400``, and a worker dying on a Python exception. The
+fourth, an import that failed, is what an SGLang server asked for ``--load-format fastsafetensors`` writes to its
+server.log. The two HIP logs are the kind that could read as ``hip_kernel_missing`` although no kernel is missing: an
+out-of-bounds read and an invalidated CUDA graph capture.
 """
 
 from __future__ import annotations
@@ -27,14 +27,14 @@ ARGPARSE_LOG = (
 )
 
 SERVER_LOG_WITH_BAD_REQUEST = (
-    "[2026-10-20 23:41:01 TP0] Decode batch. #running-req: 64, #token: 70000, token usage: 0.21, gen throughput (token/s): 1000.0\n"
-    'INFO:     127.0.0.1:52144 - "POST /v1/chat/completions HTTP/1.1" 400 Bad Request\n'
-    "[2026-10-20 23:41:02 TP0] Decode batch. #running-req: 0, #token: 0, token usage: 0.00, gen throughput (token/s): 0.0\n"
+    "[2000-01-01 00:00:00 TP0] Decode batch. #running-req: 64, #token: 70000, token usage: 0.21, gen throughput (token/s): 1000.0\n"
+    'INFO:     127.0.0.1:40000 - "POST /v1/chat/completions HTTP/1.1" 400 Bad Request\n'
+    "[2000-01-01 00:00:00 TP0] Decode batch. #running-req: 0, #token: 0, token usage: 0.00, gen throughput (token/s): 0.0\n"
 )
 LM_EVAL_STDERR = (
-    "2026-10-20:23:41:00 INFO     [evaluator:305] Running generate_until requests\n"
-    "2026-10-20:23:41:03 WARNING  [models.api_models:489] API request failed with error message: "
-    '{"object":"error","message":"This model\'s maximum context length is 5120 tokens. However, you requested 5900 '
+    "2000-01-01:00:00:00 INFO     [evaluator:305] Running generate_until requests\n"
+    "2000-01-01:00:00:00 WARNING  [models.api_models:489] API request failed with error message: "
+    '{"object":"error","message":"This model\'s maximum context length is 5000 tokens. However, you requested 5500 '
     'tokens in the messages.","type":"BadRequestError","param":null,"code":400}. Retrying...\n'
     "Traceback (most recent call last):\n"
     '  File "/opt/venv/lib/python3.12/site-packages/lm_eval/models/api_models.py", line 512, in amodel_call\n'
@@ -44,38 +44,38 @@ LM_EVAL_STDERR = (
 )
 
 PYTHON_EXCEPTION_LOG = (
-    "[2026-10-20 23:44:09 TP0] Scheduler hit an exception: Traceback (most recent call last):\n"
+    "[2000-01-01 00:00:00 TP0] Scheduler hit an exception: Traceback (most recent call last):\n"
     '  File "/sgl-workspace/sglang/python/sglang/srt/managers/scheduler.py", line 2531, in run_scheduler_process\n'
     "    scheduler.event_loop_overlap()\n"
     '  File "/sgl-workspace/aiter/aiter/ops/gemm_op_a8w8.py", line 301, in gemm_a8w8_bpreshuffle\n'
     '    assert m % 16 == 0, f"M must be a multiple of 16, got {m}"\n'
     "AssertionError: M must be a multiple of 16, got 63\n"
     "\n"
-    "[2026-10-20 23:44:09] Received sigquit from a child process. It usually means the child failed.\n"
+    "[2000-01-01 00:00:00] Received sigquit from a child process. It usually means the child failed.\n"
 )
 VLLM_PREFIXED_EXCEPTION_LOG = (
-    "(EngineCore_0 pid=4417) ERROR 10-20 23:44:09 [core.py:700] Traceback (most recent call last):\n"
-    '(EngineCore_0 pid=4417) ERROR 10-20 23:44:09 [core.py:700]   File "vllm/v1/engine/core.py", line 691, in run\n'
-    "(EngineCore_0 pid=4417) ERROR 10-20 23:44:09 [core.py:700] ValueError: 8 attention heads cannot be split into 3 shards\n"
+    "(EngineCore_0 pid=100) ERROR 01-01 00:00:00 [core.py:700] Traceback (most recent call last):\n"
+    '(EngineCore_0 pid=100) ERROR 01-01 00:00:00 [core.py:700]   File "vllm/v1/engine/core.py", line 691, in run\n'
+    "(EngineCore_0 pid=100) ERROR 01-01 00:00:00 [core.py:700] ValueError: 8 attention heads cannot be split into 3 shards\n"
 )
 FASTSAFETENSORS_LOG = (
-    "[2026-10-21 06:23:02] Ignore import error when loading sglang.srt.models.falcon_mamba: cannot import name "
+    "[2000-01-01 00:00:00] Ignore import error when loading sglang.srt.models.falcon_mamba: cannot import name "
     "'causal_conv1d_fn' from 'sglang.srt.layers.attention.mamba.mamba' "
     "(/sgl-workspace/sglang/python/sglang/srt/layers/attention/mamba/mamba.py)\n"
-    "[2026-10-21 06:23:03] Ignore import error when loading sglang.srt.models.inkling: No module named 'cutlass'\n"
-    "[2026-10-21 06:23:03] Ignore import error when loading sglang.srt.models.mamba: cannot import name "
+    "[2000-01-01 00:00:00] Ignore import error when loading sglang.srt.models.inkling: No module named 'cutlass'\n"
+    "[2000-01-01 00:00:00] Ignore import error when loading sglang.srt.models.mamba: cannot import name "
     "'causal_conv1d_fn' from 'sglang.srt.layers.attention.mamba.mamba' "
     "(/sgl-workspace/sglang/python/sglang/srt/layers/attention/mamba/mamba.py)\n"
-    "[2026-10-21 06:23:03] Scheduler hit an exception: Traceback (most recent call last):\n"
+    "[2000-01-01 00:00:00] Scheduler hit an exception: Traceback (most recent call last):\n"
     "    raise ImportError(\n"
     "ImportError: Please install fastsafetensors via `pip install fastsafetensors`\n"
     "\n"
-    "[2026-10-21 06:23:03] Received sigquit from a child process. It usually means the child failed.\n"
-    "[2026-10-21 06:23:03] kill_process_tree called: parent_pid=16242, include_parent=True, pid=16242\n"
+    "[2000-01-01 00:00:00] Received sigquit from a child process. It usually means the child failed.\n"
+    "[2000-01-01 00:00:00] kill_process_tree called: parent_pid=1000, include_parent=True, pid=1000\n"
 )
 ILLEGAL_ADDRESS_LOG = (
     "[aiter] -mllvm -amdgpu-coerce-illegal-types=1 is not supported by hipcc.\n"
-    "[2026-10-21 14:46:55] Scheduler hit an exception: Traceback (most recent call last):\n"
+    "[2000-01-01 00:00:00] Scheduler hit an exception: Traceback (most recent call last):\n"
     '  File "/sgl-workspace/sglang/python/sglang/srt/model_executor/runner_backend/full_cuda_graph_backend.py", line 182, '
     "in capture_one\n"
     "torch.AcceleratorError: HIP error: an illegal memory access was encountered\n"
@@ -85,12 +85,12 @@ ILLEGAL_ADDRESS_LOG = (
     "Exception: Capture cuda graph failed: HIP error: an illegal memory access was encountered\n"
     "Search for `hipErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__HIPRT__TYPES.html for more "
     "information.\n"
-    "[2026-10-21 14:46:56] Received sigquit from a child process. It usually means the child failed.\n"
+    "[2000-01-01 00:00:00] Received sigquit from a child process. It usually means the child failed.\n"
 )
 CAPTURE_INVALIDATED_LOG = (
-    "Exception ignored in: <function CompiledKernel.__del__ at 0x77be94b6acb0>\n"
+    "Exception ignored in: <function CompiledKernel.__del__ at 0x7f0000000000>\n"
     "RuntimeError: Triton Error [HIP]:  Code: 900, Messsage: operation not permitted when stream is capturing\n"
-    "[2026-10-21 15:29:10] Scheduler hit an exception: Traceback (most recent call last):\n"
+    "[2000-01-01 00:00:00] Scheduler hit an exception: Traceback (most recent call last):\n"
     "RuntimeError: HIP runtime error: operation failed due to a previous error during capture. hip_check_error.hpp: 18in "
     "function: hip_check_error\n"
     "torch.AcceleratorError: HIP error: operation failed due to a previous error during capture\n"
@@ -151,7 +151,7 @@ def test_a_refused_evaluation_request_stays_unclear_and_shows_the_servers_messag
 
     assert failure_class is FailureClass.UNCLEAR
     assert reason.startswith("lm_eval_http_400: ")
-    assert "maximum context length is 5120 tokens" in reason
+    assert "maximum context length is 5000 tokens" in reason
 
 
 def test_an_evaluation_crash_whose_log_holds_a_refusal_names_the_refusal_and_stays_a_candidate_failure() -> None:
@@ -173,7 +173,7 @@ def test_an_evaluation_crash_with_no_refusal_in_its_log_is_still_the_generic_end
 def test_a_400_in_the_server_access_log_alone_is_named_too() -> None:
     assert _classify(SERVER_LOG_WITH_BAD_REQUEST) == (
         FailureClass.UNCLEAR,
-        'lm_eval_http_400: INFO:     127.0.0.1:52144 - "POST /v1/chat/completions HTTP/1.1" 400 Bad Request',
+        'lm_eval_http_400: INFO:     127.0.0.1:40000 - "POST /v1/chat/completions HTTP/1.1" 400 Bad Request',
     )
 
 

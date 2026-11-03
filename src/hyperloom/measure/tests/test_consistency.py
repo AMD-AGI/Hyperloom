@@ -31,7 +31,7 @@ from hyperloom.measure.socket import RoundOutcome, TestCall, TestOutcome
 from hyperloom.measure.tests.hosted_fixtures import FAKE_RUNNER, Rig, make_rig, point_yaml
 from hyperloom.contracts.measurement import SandboxFacts
 
-REPORT = "benchmark_local_20261014_000000"
+REPORT = "benchmark_local_20000101_000000"
 
 
 class FakeLocal:

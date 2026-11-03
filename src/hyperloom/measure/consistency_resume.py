@@ -7,7 +7,7 @@
 ``hyperloom.measure.consistency``, plus the ones below) keeps one line per finished unit in ``FILE``, a
 ``consistency.jsonl`` that lives somewhere that survives the machine. A unit is one repetition of one test: the local
 measurement and the hosted measurement back to back on the same machine, so units that ran on different machines are each
-a valid same-machine comparison, and the summary over all units is what the graduation criteria judge. A run starts by
+a valid same-machine comparison, and the summary over all units is what the pass criteria judge. A run starts by
 reading ``FILE``, skips every (test id, repetition) already recorded as complete and appends only new ones.
 
 Lines (all carry ``node_name``, ``run_id`` and ``pod``):

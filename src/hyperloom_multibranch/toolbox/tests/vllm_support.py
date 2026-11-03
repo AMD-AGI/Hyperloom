@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A stand-in vLLM for the stage-4c tests: vLLM's own recipe and rule-pack layout over a repository shaped like vLLM's.
+"""A stand-in vLLM for the native vLLM build tests: vLLM's own recipe and rule-pack layout over a repository shaped like
+vLLM's.
 
 The upstream checkout has vLLM's layout (``csrc/`` and the build definition at the top, the package in ``vllm/``). The
 recipe is :func:`~hyperloom.measure.runner.native.recipes.vllm_recipe` as it is, its command included, with only the

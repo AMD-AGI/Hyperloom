@@ -10,8 +10,8 @@ launcher writes beside a round's server log the moment the banner appears and, w
 cancels the scope the launcher's watchdog listens to, which reaps the whole process tree.
 
 A server that builds an aiter JIT module is not tuning: aiter writes ``start build [<module>]`` and nothing more until
-the module is built, and a CK-tile GEMM took up to 1347 s with eight tests building at once, which with a CK GEMM
-and the rest of a boot overran half of a 3600 s round. So the time the newest server log's last line says aiter is
+the module is built, and a CK-tile GEMM can take up to 1347 s when several tests build at once, which with a CK GEMM
+and the rest of a boot can overrun half of a 3600 s round. So the time the newest server log's last line says aiter is
 building a module is not counted against the limit, each build for at most as long as a module of its kind may take
 (:func:`~hyperloom.measure.jit.modules.module_build_limit_sec`: 2700 s for a CK-tile module, 600 s for any other). A
 build that hangs counts again from there, and a boot that does anything else is bounded as before.
@@ -27,14 +27,11 @@ the last output it saw, the newest live log's write time or last line) is activi
 is ready (:data:`SERVER_READY_KEY`), or the test is past running, the bound no longer applies. A test with no activity
 for :data:`PRE_READY_SILENCE_SEC` before that ends as ``hung_before_ready``, an infrastructure failure a new sandbox
 retries. A server whose last line says aiter started building a JIT module is working, as aiter writes nothing until the
-module is built: with eight tests of a session each building its own copy, the FP8 GEMM module
-``module_gemm_a8w8_bpreshuffle_cktile`` took up to 844 s in the tests that finished it. While that line stands, only
-the boot guard bounds the boot.
+module is built, and a CK-tile GEMM module such as ``module_gemm_a8w8_bpreshuffle_cktile`` can take many minutes to
+build. While that line stands, only the boot guard bounds the boot.
 
-The limit comes from the server logs of past test rounds: the longest stretch before ready with no output line,
-timestamped or carrying a progress figure, was an aiter JIT build of a few minutes that reported its own cost, nearly all
-silences are far shorter, and so is the slowest phase before a server starts (``env_rebuild``). 900 s is over three times
-the longest legitimate silence and ends a hang long before the test's own timeout would.
+The limit is generous: an aiter JIT build of a few minutes and the slowest phase before a server starts
+(``env_rebuild``) stay well under it, while a real hang is ended long before the test's own timeout would end it.
 """
 
 from __future__ import annotations
@@ -276,7 +273,7 @@ _COLLECTING = "collecting"
 #: of ``updated_unix - last_log_age_sec``.
 _WRITE_RESOLUTION_SEC = 1.0
 #: The line aiter writes as it starts building a JIT module, with or without the process tag it puts first (``[aiter]
-#: [pid=829812 pname=Process-1] start build [module_gemm_a8w8_bpreshuffle_cktile] under ...``), searched for anywhere in
+#: [pid=1234 pname=Process-1] start build [module_gemm_a8w8_bpreshuffle_cktile] under ...``), searched for anywhere in
 #: the line, as the runner keeps only the end of a long one.
 _JIT_BUILD_STARTED = re.compile(r"\[aiter\] (?:\[[^\]]*\] )*start build ")
 #: The same, with the module it names in brackets (aiter's own form); a path in place of the name gives none.

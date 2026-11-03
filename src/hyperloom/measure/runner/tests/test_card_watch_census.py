@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The runner's watch on its cards in a pod, whose pid namespace is its own: it counts what holds them (the numbers are the
-ones a GPU pod measured) and says in the signed result how it told a foreign holder from the test's own."""
+"""The runner's watch on its cards in a pod, whose pid namespace is its own: it counts what holds them and says in the
+signed result how it told a foreign holder from the test's own."""
 
 from __future__ import annotations
 
@@ -21,14 +21,14 @@ from hyperloom.sandbox.card_occupancy import read_holders as read_the_machine
 from hyperloom.sandbox.tests.kernel_tree import KernelTree
 
 CARD = 5
-SERVER_VRAM = 249_506_392 << 10
-FOREIGN_VRAM = 2_759_956 << 10
+SERVER_VRAM = 200 << 30
+FOREIGN_VRAM = 3 << 30
 
 
 @pytest.fixture
 def pod(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> KernelTree:
-    machine = KernelTree(tmp_path, pid_namespace="pid:[4026552279]")
-    machine.opened_only(1678127)
+    machine = KernelTree(tmp_path, pid_namespace="pid:[4026540000]")
+    machine.opened_only(1_600_000)
     monkeypatch.setattr(
         card_occupancy, "read_holders", lambda cards: read_the_machine(cards, kfd=machine.kfd, procfs=machine.procfs)
     )
@@ -40,9 +40,9 @@ def _watch(pod: KernelTree, guard: CardGuard) -> CardWatch:
 
 
 def _server(pod: KernelTree) -> None:
-    pod.holds(1827025, CARD, vram=SERVER_VRAM, queues=6)
-    pod.process(6495)
-    pod.renders(6495, CARD, kib=SERVER_VRAM >> 10)
+    pod.holds(1_700_000, CARD, vram=SERVER_VRAM, queues=6)
+    pod.process(6_000)
+    pod.renders(6_000, CARD, kib=SERVER_VRAM >> 10)
 
 
 def test_a_pod_whose_card_only_the_server_holds_is_clean_and_the_result_says_how_that_was_told(pod: KernelTree) -> None:
@@ -62,7 +62,7 @@ def test_a_pod_whose_card_only_the_server_holds_is_clean_and_the_result_says_how
 def test_a_holder_of_the_card_before_the_test_starts_refuses_it_under_enforce_and_is_only_noted_under_observe(
     pod: KernelTree,
 ) -> None:
-    pod.holds(1845543, CARD, vram=FOREIGN_VRAM, queues=2)
+    pod.holds(1_900_000, CARD, vram=FOREIGN_VRAM, queues=2)
     enforcing, observing = _watch(pod, CardGuard.ENFORCE), _watch(pod, CardGuard.OBSERVE)
     for watch in (enforcing, observing):
         watch.check(BEFORE_TEST)
@@ -70,7 +70,7 @@ def test_a_holder_of_the_card_before_the_test_starts_refuses_it_under_enforce_an
     with pytest.raises(RunnerFailure) as refused:
         enforcing.enforce_guard()
     assert refused.value.error_class == "foreign_process_on_card"
-    assert "host pid 1845543 on card 5 (2.6 GiB resident, 2 queues), first seen" in str(refused.value)
+    assert "host pid 1900000 on card 5 (3.0 GiB resident, 2 queues), first seen" in str(refused.value)
     observing.enforce_guard()
     assert observing.observation() is not None and "CARD GUARD OBSERVES ONLY" in observing.observation()  # type: ignore[operator]
     statement = observing.statement()
@@ -83,9 +83,9 @@ def test_a_second_holder_that_appears_while_the_test_runs_is_caught_and_one_that
     _server(pod)
     watch = _watch(pod, CardGuard.ENFORCE)
     watch.check(DURING_TEST)
-    pod.holds(1845543, CARD, vram=FOREIGN_VRAM, queues=2)
+    pod.holds(1_900_000, CARD, vram=FOREIGN_VRAM, queues=2)
     watch.check(DURING_TEST)
-    shutil.rmtree(pod.kfd / "proc" / "1845543")
+    shutil.rmtree(pod.kfd / "proc" / "1900000")
     watch.check(AFTER_TEST)
 
     with pytest.raises(RunnerFailure) as refused:
@@ -96,21 +96,21 @@ def test_a_second_holder_that_appears_while_the_test_runs_is_caught_and_one_that
 def test_memory_no_process_of_the_pod_accounts_for_is_caught_while_the_server_is_between_two_starts(
     pod: KernelTree,
 ) -> None:
-    pod.holds(1845543, CARD, vram=FOREIGN_VRAM, queues=2)
+    pod.holds(1_900_000, CARD, vram=FOREIGN_VRAM, queues=2)
     watch = _watch(pod, CardGuard.ENFORCE)
 
     watch.check(DURING_TEST)
 
     with pytest.raises(RunnerFailure) as refused:
         watch.enforce_guard()
-    assert "2.6 GiB on card 5 that no process this container sees accounts for" in str(refused.value)
+    assert "3.0 GiB on card 5 that no process this container sees accounts for" in str(refused.value)
 
 
 def test_a_look_that_could_not_set_the_memory_against_the_pods_processes_says_the_weaker_method(
     pod: KernelTree,
 ) -> None:
     _server(pod)
-    (pod.procfs / "6495" / "fdinfo" / "3").write_text("drm-memory-vram: 1 furlongs\n")
+    (pod.procfs / "6000" / "fdinfo" / "3").write_text("drm-memory-vram: 1 furlongs\n")
     watch = _watch(pod, CardGuard.ENFORCE)
 
     watch.check(DURING_TEST)
@@ -135,12 +135,12 @@ def test_the_previous_tests_server_still_listed_before_the_test_is_not_foreign_o
 ) -> None:
     """In a pod the census cannot name a holder, so before the test any holder counts; the previous test's exiting server
     (its memory already freed, a queue still listed) is gone from the kernel's list within the settle time."""
-    pod.holds(1827025, CARD, vram=0, queues=1)
+    pod.holds(1_700_000, CARD, vram=0, queues=1)
     read_pod = card_occupancy.read_holders
 
     def read(cards):
-        if settle_clock.now >= 1.0 and (pod.kfd / "proc" / "1827025").exists():
-            shutil.rmtree(pod.kfd / "proc" / "1827025")
+        if settle_clock.now >= 1.0 and (pod.kfd / "proc" / "1700000").exists():
+            shutil.rmtree(pod.kfd / "proc" / "1700000")
         return read_pod(cards)
 
     monkeypatch.setattr(card_occupancy, "read_holders", read)

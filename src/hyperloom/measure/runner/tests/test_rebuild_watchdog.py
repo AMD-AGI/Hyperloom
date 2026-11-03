@@ -77,13 +77,13 @@ def test_the_estimate_is_the_builds_plus_the_margin() -> None:
     assert rebuild_watchdog_sec(["m"]) > 300, "longer than sglang's default watchdog"
 
 
-#: The longest builds measured with eight tests building at once: module_gemm_a8w8_bpreshuffle_cktile took up to
-#: 1347 s; module_gemm_a8w8_bpreshuffle's median was up to 181 s, its longest not stated.
+#: How long the two builds can take when several tests build at once: module_gemm_a8w8_bpreshuffle_cktile up to 1347 s,
+#: module_gemm_a8w8_bpreshuffle typically up to 181 s.
 _LONGEST_CKTILE_SEC, _CK_MEDIAN_SEC = 1347, 181
 
 
-def test_a_cktile_module_is_given_the_time_its_longest_measured_build_took_with_room_to_spare() -> None:
-    """600 s each gave the cktile module and the CK one 1500 s, which their measured builds overrun."""
+def test_a_cktile_module_is_given_the_time_its_longest_build_takes_with_room_to_spare() -> None:
+    """600 s each would give the cktile module and the CK one 1500 s, which their longest builds overrun."""
     cktile, ck = "module_gemm_a8w8_bpreshuffle_cktile", "module_gemm_a8w8_bpreshuffle"
     worst = _LONGEST_CKTILE_SEC + 2 * _CK_MEDIAN_SEC + rebuild_watchdog.WATCHDOG_MARGIN_SEC
 

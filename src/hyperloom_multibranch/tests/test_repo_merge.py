@@ -47,14 +47,14 @@ from hyperloom_multibranch.repo.rebase import Files
 from hyperloom_multibranch.scheduling.integrator import LlmPatchResolver
 from hyperloom_multibranch.toolbox.kernel_artifacts import mint_kernel_artifact, union_rows
 from hyperloom_multibranch.toolbox.tests.kernel_rows import (
-    B01_HEAD,
-    B01_NEW,
-    B01_SHARED,
-    B06_HEAD,
-    B06_NEW,
-    B06_SHARED,
-    B09_NEW,
+    ALPHA_NEW,
+    BETA_HEAD,
+    BETA_NEW,
+    BETA_SHARED,
     ENV,
+    GAMMA_HEAD,
+    GAMMA_NEW,
+    GAMMA_SHARED,
     SHARED,
     csv_text,
     install,
@@ -365,7 +365,7 @@ def _filled(*artifacts: KernelArtifact) -> Recipe:
 def test_two_tables_each_with_rows_the_other_lacks_unite_into_one_table(configs):
     """Shapes only one side tuned, and shared shapes tuned to one row: every row of both serves in one table."""
 
-    head, theirs = _aiter(csv_text(SHARED, B01_NEW)), _aiter(csv_text(SHARED[:3], B06_NEW))
+    head, theirs = _aiter(csv_text(SHARED, BETA_NEW)), _aiter(csv_text(SHARED[:3], GAMMA_NEW))
 
     merge = carry("i1", BASE, _filled(theirs), _filled(head), Stored(_applies, _table, _store, _keep, configs))
 
@@ -381,12 +381,12 @@ def test_a_shape_both_sides_tuned_to_other_rows_keeps_the_head_s_row_and_unites_
     """The head's row was measured on integration; the candidate's other shapes still join it, and the shapes whose row
     the merge kept from the head are named."""
 
-    head, theirs = _aiter(csv_text(SHARED, B01_HEAD)), _aiter(csv_text(B01_SHARED, B01_NEW))
+    head, theirs = _aiter(csv_text(SHARED, BETA_HEAD)), _aiter(csv_text(BETA_SHARED, BETA_NEW))
 
     merge = carry("i1", BASE, _filled(theirs), _filled(head), Stored(_applies, _table, _store, _keep, configs))
 
     (united,) = merge.delta.add_kernels
-    expected = union_rows(csv_text(B01_NEW), TABLES[head.sha256], ENV, configs=configs)
+    expected = union_rows(csv_text(BETA_NEW), TABLES[head.sha256], ENV, configs=configs)
     assert TABLES[united.sha256] == expected
     (kept_from,) = merge.united_tables
     assert kept_from.ours == head and len(kept_from.kept_head_shapes) == 2
@@ -396,7 +396,7 @@ def test_a_shape_both_sides_tuned_to_other_rows_keeps_the_head_s_row_and_unites_
 
 
 def test_two_rows_only_sets_unite_into_a_rows_only_set(configs):
-    head, theirs = _aiter_rows(csv_text(B01_NEW)), _aiter_rows(csv_text(B06_NEW))
+    head, theirs = _aiter_rows(csv_text(BETA_NEW)), _aiter_rows(csv_text(GAMMA_NEW))
 
     merge = carry("i1", BASE, _filled(theirs), _filled(head), Stored(_applies, _table, _store, _keep, configs))
 
@@ -408,13 +408,13 @@ def test_two_rows_only_sets_unite_into_a_rows_only_set(configs):
 def test_rows_only_rows_over_a_whole_table_make_one_whole_table(configs):
     """Rows put over the image's table read the same over the head's whole table: the union is a whole table."""
 
-    head, theirs = _aiter(csv_text(SHARED)), _aiter_rows(csv_text(B06_NEW))
+    head, theirs = _aiter(csv_text(SHARED)), _aiter_rows(csv_text(GAMMA_NEW))
 
     merge = carry("i1", BASE, _filled(theirs), _filled(head), Stored(_applies, _table, _store, _keep, configs))
 
     (united,) = merge.delta.add_kernels
     assert not kernel_rows_only(united)
-    assert TABLES[united.sha256] == union_rows(csv_text(B06_NEW), TABLES[head.sha256], ENV, configs=configs)
+    assert TABLES[united.sha256] == union_rows(csv_text(GAMMA_NEW), TABLES[head.sha256], ENV, configs=configs)
 
 
 def _aiter_for(target: str, data: bytes) -> KernelArtifact:
@@ -432,7 +432,7 @@ def test_tables_for_two_targets_that_load_through_one_variable_unite_into_one_ta
     """The service reads one table per variable, so a candidate's table for another layer cannot land beside the head's:
     the two unite, and the merged recipe sets the variable once."""
 
-    head, theirs = _aiter(csv_text(SHARED, B01_NEW)), _aiter_for("qkv", csv_text(SHARED[:3], B06_NEW))
+    head, theirs = _aiter(csv_text(SHARED, BETA_NEW)), _aiter_for("qkv", csv_text(SHARED[:3], GAMMA_NEW))
 
     merge = carry("i1", BASE, _filled(theirs), _filled(head), Stored(_applies, _table, _store, _keep, configs))
 
@@ -444,7 +444,7 @@ def test_tables_for_two_targets_that_load_through_one_variable_unite_into_one_ta
 
 
 def test_a_wider_table_for_another_target_on_one_variable_replaces_the_head_s(configs):
-    head, wide = _aiter(csv_text(SHARED)), _aiter_for("qkv", csv_text(SHARED, B09_NEW))
+    head, wide = _aiter(csv_text(SHARED)), _aiter_for("qkv", csv_text(SHARED, ALPHA_NEW))
 
     merge = carry("i1", BASE, _filled(wide), _filled(head), Stored(_applies, _table, _store, _keep, configs))
 
@@ -454,8 +454,8 @@ def test_a_wider_table_for_another_target_on_one_variable_replaces_the_head_s(co
 def test_a_replay_stacks_a_kernel_slot_as_the_merge_fills_it(configs):
     """The wider table, else the union the merge makes, else ``None`` where the merge refuses the pair."""
 
-    narrow, wide = _aiter(csv_text(SHARED)), _aiter(csv_text(SHARED, B09_NEW))
-    head, theirs = _aiter(csv_text(SHARED, B01_HEAD)), _aiter(csv_text(B01_SHARED, B01_NEW))
+    narrow, wide = _aiter(csv_text(SHARED)), _aiter(csv_text(SHARED, ALPHA_NEW))
+    head, theirs = _aiter(csv_text(SHARED, BETA_HEAD)), _aiter(csv_text(BETA_SHARED, BETA_NEW))
     stored = Stored(_applies, _table, _store, _keep, configs)
 
     assert stack_kernel_slot(wide, narrow, stored) == stack_kernel_slot(narrow, wide, stored) == wide
@@ -465,8 +465,8 @@ def test_a_replay_stacks_a_kernel_slot_as_the_merge_fills_it(configs):
     assert stack_kernel_slot(*refused, stored) is None
 
 
-#: ``B01_HEAD``'s shapes at another time: neither the head's row nor the candidate's.
-B01_BASE = tuple(row.replace(",0,20.0,", ",0,30.0,") for row in B01_HEAD)
+#: ``BETA_HEAD``'s shapes at another time: neither the head's row nor the candidate's.
+BETA_BASE = tuple(row.replace(",0,20.0,", ",0,30.0,") for row in BETA_HEAD)
 
 
 def _named(shapes) -> set[str]:
@@ -477,7 +477,7 @@ def test_a_union_of_only_the_head_s_rows_carries_no_kernel(configs):
     """Every shape the candidate differs on the head also tuned: the head's table stays, and the kept shapes are named."""
 
     base = _aiter(csv_text(SHARED[:2]))
-    head, theirs = _aiter(csv_text(SHARED, B01_HEAD)), _aiter(csv_text(SHARED[:2], B01_SHARED))
+    head, theirs = _aiter(csv_text(SHARED, BETA_HEAD)), _aiter(csv_text(SHARED[:2], BETA_SHARED))
 
     merge = carry("i1", _filled(base), _filled(theirs), _filled(head), Stored(_applies, _table, _store, _keep, configs))
 
@@ -494,21 +494,21 @@ def _untimed(rows: tuple[str, ...]) -> tuple[str, ...]:
 
 
 def test_a_candidate_s_retune_of_a_row_the_head_left_as_in_base_lands_where_a_row_has_no_time(configs):
-    base = _aiter(csv_text(SHARED, B01_HEAD))
-    head, theirs = _aiter(csv_text(SHARED, B01_HEAD, B09_NEW)), _aiter(csv_text(SHARED, _untimed(B01_SHARED)))
+    base = _aiter(csv_text(SHARED, BETA_HEAD))
+    head, theirs = _aiter(csv_text(SHARED, BETA_HEAD, ALPHA_NEW)), _aiter(csv_text(SHARED, _untimed(BETA_SHARED)))
 
     merge = carry("i1", _filled(base), _filled(theirs), _filled(head), Stored(_applies, _table, _store, _keep, configs))
 
     (united,) = merge.delta.add_kernels
-    assert TABLES[united.sha256] == union_rows(TABLES[theirs.sha256], csv_text(SHARED, B09_NEW), ENV, configs=configs)
+    assert TABLES[united.sha256] == union_rows(TABLES[theirs.sha256], csv_text(SHARED, ALPHA_NEW), ENV, configs=configs)
     assert merge.united_tables == (UnitedTable(theirs, head, united),)
 
 
 def test_a_head_row_left_as_in_base_stays_where_the_tuner_timed_it_faster(configs):
-    """``B01_HEAD``'s rows are timed at 20 us, the candidate's retunes of them at 49 and 39."""
+    """``BETA_HEAD``'s rows are timed at 20 us, the candidate's retunes of them at 49 and 39."""
 
-    base = _aiter(csv_text(SHARED, B01_HEAD))
-    head, theirs = _aiter(csv_text(SHARED, B01_HEAD, B09_NEW)), _aiter(csv_text(SHARED, B01_SHARED))
+    base = _aiter(csv_text(SHARED, BETA_HEAD))
+    head, theirs = _aiter(csv_text(SHARED, BETA_HEAD, ALPHA_NEW)), _aiter(csv_text(SHARED, BETA_SHARED))
 
     merge = carry("i1", _filled(base), _filled(theirs), _filled(head), Stored(_applies, _table, _store, _keep, configs))
 
@@ -519,8 +519,8 @@ def test_a_head_row_left_as_in_base_stays_where_the_tuner_timed_it_faster(config
 
 
 def test_a_candidate_row_the_tuner_timed_faster_replaces_the_head_s_retune(configs):
-    base = _aiter(csv_text(SHARED, B01_BASE))
-    head, theirs = _aiter(csv_text(SHARED, B01_SHARED)), _aiter(csv_text(SHARED, B01_HEAD))
+    base = _aiter(csv_text(SHARED, BETA_BASE))
+    head, theirs = _aiter(csv_text(SHARED, BETA_SHARED)), _aiter(csv_text(SHARED, BETA_HEAD))
 
     merge = carry("i1", _filled(base), _filled(theirs), _filled(head), Stored(_applies, _table, _store, _keep, configs))
 
@@ -533,20 +533,20 @@ def test_only_a_shape_both_sides_moved_from_base_keeps_the_head_s_row_and_is_nam
     """The head retuned a shape the candidate left as in base, and both retuned another: the head's rows serve both,
     and only the second is named."""
 
-    base = _aiter(csv_text(SHARED, B06_HEAD, B01_BASE))
-    head = _aiter(csv_text(SHARED, B06_SHARED, B01_HEAD))
-    theirs = _aiter(csv_text(SHARED, B06_HEAD, B01_SHARED, B01_NEW))
+    base = _aiter(csv_text(SHARED, GAMMA_HEAD, BETA_BASE))
+    head = _aiter(csv_text(SHARED, GAMMA_SHARED, BETA_HEAD))
+    theirs = _aiter(csv_text(SHARED, GAMMA_HEAD, BETA_SHARED, BETA_NEW))
 
     merge = carry("i1", _filled(base), _filled(theirs), _filled(head), Stored(_applies, _table, _store, _keep, configs))
 
     (united,) = merge.delta.add_kernels
-    assert TABLES[united.sha256] == union_rows(csv_text(B01_NEW), TABLES[head.sha256], ENV, configs=configs)
+    assert TABLES[united.sha256] == union_rows(csv_text(BETA_NEW), TABLES[head.sha256], ENV, configs=configs)
     (kept_from,) = merge.united_tables
     assert _named(kept_from.kept_head_shapes) == {"M=64 N=34816 K=5120", "M=64 N=5120 K=17408"}
 
 
 def test_a_replay_keeps_the_head_s_table_where_the_union_is_its_rows(configs):
-    head, theirs = _aiter(csv_text(SHARED, B01_HEAD)), _aiter(csv_text(SHARED[:2], B01_SHARED))
+    head, theirs = _aiter(csv_text(SHARED, BETA_HEAD)), _aiter(csv_text(SHARED[:2], BETA_SHARED))
 
     assert stack_kernel_slot(theirs, head, Stored(_applies, _table, _store, _keep, configs)) == head
 
@@ -635,7 +635,7 @@ async def test_the_repository_keeps_a_united_table_a_checkout_writes(tmp_path, c
     repo = GitExperimentRepo(tmp_path / "experiments.git", blobs, aiter_configs=configs)
     root = await repo.init_root(BASE)
     commits = []
-    tables = [csv_text(SHARED, B01_NEW), csv_text(SHARED[:3], B06_NEW)]
+    tables = [csv_text(SHARED, BETA_NEW), csv_text(SHARED[:3], GAMMA_NEW)]
     for branch, data in zip(("s1", "s2"), tables, strict=True):
         blobs.put(data)
         await repo.create_branch(branch, root)

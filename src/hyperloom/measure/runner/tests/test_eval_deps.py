@@ -3,8 +3,8 @@
 
 """The runner installs the accuracy evaluator before the server boots, and the round finds it installed.
 
-A session's run showed it: the warmup round of an accuracy test served its benchmark, then spent the silence window
-installing lm-eval on an idle server whose output Magpie had not yet written anywhere, and the watchdog reaped it.
+Without it, the warmup round of an accuracy test serves its benchmark, then spends the silence window installing lm-eval
+on an idle server whose output Magpie has not yet written anywhere, and the watchdog reaps it.
 """
 
 from __future__ import annotations
@@ -173,11 +173,12 @@ def test_a_checkout_whose_install_cannot_run_once_is_left_to_the_round_and_said_
 
 
 def test_the_install_runs_in_the_round_s_environment_so_the_round_does_not_install_again(tmp_path, env, monkeypatch):
-    """A later run: ``eval_deps`` succeeded, yet the warmup round sat idle on its server until the watchdog.
+    """The install succeeded, yet without this the warmup round would sit idle on its server until the watchdog.
 
     The point's variables are the round's, not the runner's: here they name the user base pip installs into when the
     image's site-packages is not the account's, as ``PYTHONUSERBASE`` does. Installed in the runner's environment,
-    lm-eval was where the round's ``python3`` does not look, and the round installed it again on an idle server.
+    lm-eval would be where the round's ``python3`` does not look, and the round would install it again on an idle
+    server.
     """
     prefix, runner_base, round_base = tmp_path / "prefix", tmp_path / "runner-base", tmp_path / "round-base"
     for directory in (prefix, runner_base, round_base):

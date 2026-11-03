@@ -105,7 +105,7 @@ async def test_a_graded_result_whose_one_evaluation_ran_in_the_warmup_round_reve
     assert derived.rounds[1].output_dir == derived.rounds[0].output_dir != derived.rounds[2].output_dir
     assert [value.score for value in result.accuracy] == [0.64] and record.extra["verified"] is True
     assert [r.phase for r in result.rounds] == ["warmup", "measure"], "the gate reads the same rounds and score"
-    assert (derived.rounds[1].output_dir / "eval_output" / "results_2026-10-14T10-00-00.json").is_file(), "the evidence"
+    assert (derived.rounds[1].output_dir / "eval_output" / "results_2000-01-01T10-00-00.json").is_file(), "the evidence"
     assert executor.difference(result) is None
     edited = replace(result, accuracy=(replace(result.accuracy[0], score=0.99),))
     assert executor.difference(edited) == "accuracy[0].score: recorded 0.99, the bundle has 0.64"
@@ -330,7 +330,7 @@ async def test_the_runners_signed_notes_reach_the_result_after_the_rounds_warnin
 
 
 FOREIGN_REASON = (
-    "1 held the test's cards: pid 900 on card 0, first seen 2026-10-24T04:05:06Z during the test: python3 x.py"
+    "1 held the test's cards: pid 900 on card 0, first seen 2000-01-01T04:05:06Z during the test: python3 x.py"
 )
 KEPT_BESIDE_A_PROCESS = {"state": "foreign", "reason": FOREIGN_REASON, "checks": 5}
 

@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A stand-in native component for the stage-4b tests: compiled, built out of process, laid and imported, with no compiler.
+"""A stand-in native component for the native-build tests: compiled, built out of process, laid and imported, with no
+compiler.
 
 The component ``fakepkg`` keeps its Python in ``native/python/fakepkg`` and its "kernel" in ``native/src/act.cu``. Its
 build script stands in for hipify and a compiler: it writes ``src/act.hip`` from the ``.cu`` the way hipify does (two lines

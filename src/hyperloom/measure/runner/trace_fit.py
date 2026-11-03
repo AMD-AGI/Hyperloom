@@ -3,9 +3,9 @@
 
 """Fit a profile test's traces under the result's size cap before the output is inventoried.
 
-A profile of a large model at TP4 can write more trace than the result may carry (``max_total_bytes``, 4 GiB by
-default), and the whole result was then refused as ``output_too_large`` after the test had held its cards for the whole
-run. Before the inventory, the traces are made to fit, in two steps, each only when the output is still over the cap:
+A profile of a large model can write more trace than the result may carry (``max_total_bytes``, 4 GiB by default), and
+the whole result would then be refused as ``output_too_large`` after the test had held its cards for the whole run.
+Before the inventory, the traces are made to fit, in two steps, each only when the output is still over the cap:
 
 1. every trace written uncompressed is gzipped (the trace analysis reads ``.json.gz`` as it reads ``.json``);
 2. only the traces of the primary rank (rank 0 of each parallel dimension a file name states) are kept: the steady-state

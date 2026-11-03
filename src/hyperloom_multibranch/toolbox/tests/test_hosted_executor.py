@@ -139,10 +139,10 @@ async def test_a_verified_measurement_is_a_succeeded_result_with_its_audit_data(
     assert blackboard_record.result is not None and blackboard_record.result.manifest_sha256 == result.manifest_sha256
 
 
-#: The ready stamps of a real graded test: its warmup round booted the server, its measured round found it ready.
-REAL_STAMPS = {
-    "variant_00_warmup/server_ready_at": "1792596681.010 82.221\n",
-    "variant_00_test/server_ready_at": "1792596811.700 0.000\n",
+#: Ready stamps of a graded test: its warmup round booted the server, its measured round found it ready.
+SAMPLE_STAMPS = {
+    "variant_00_warmup/server_ready_at": "1700000000.000 80.500\n",
+    "variant_00_test/server_ready_at": "1700000100.000 0.000\n",
 }
 
 
@@ -152,10 +152,10 @@ async def test_a_result_carries_the_boot_its_rounds_stamped_whether_or_not_the_t
 ) -> None:
     r = rig()
     tb, scripted = _toolbox(tmp_path, r, mode)
-    scripted.stamps = REAL_STAMPS
+    scripted.stamps = SAMPLE_STAMPS
     _, result = await _run(tb)
-    assert result.cold_start_seconds == 82.221
-    assert (await tb.toolbox.queue_state()).cold_start_seconds == 82.221
+    assert result.cold_start_seconds == 80.5
+    assert (await tb.toolbox.queue_state()).cold_start_seconds == 80.5
 
 
 async def test_a_result_with_no_stamp_has_no_cold_start_and_the_queue_keeps_its_last_one(tmp_path: Path, rig) -> None:

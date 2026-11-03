@@ -69,12 +69,12 @@ from hyperloom.measure.long_context.tests.support import outputs_files as long_c
 from hyperloom.measure.short_prompts.tests.support import outputs_files
 from hyperloom.measure.spec import MeasurementSpec, fingerprint, spec_sha256
 
-REPORT_PATH = "benchmark_fake_20261014_000000/benchmark_report.json"
+REPORT_PATH = "benchmark_fake_20000101_000000/benchmark_report.json"
 TRACE_PATH = "profile/torch_trace/rank0.pt.trace.json.gz"
 #: What ``fake_trace: capture_only`` leaves instead: the CUDA-graph capture sidecar a profile whose profiler never started
-#: holds alone (named as on a NEXTN head, where the run ended before the capture window).
-CAPTURE_TRACE_PATH = "profile/torch_trace/graph_capture_profile/EAGLEDraftExtendCudaGraphRunner_bs_14_rank0.json.gz"
-EXPORT_PATH = "benchmark_fake_20261014_000000/aiperf_artifacts/profile_export.jsonl"
+#: holds alone (named as on a speculative-decoding head).
+CAPTURE_TRACE_PATH = "profile/torch_trace/graph_capture_profile/EAGLEDraftExtendCudaGraphRunner_bs_8_rank0.json.gz"
+EXPORT_PATH = "benchmark_fake_20000101_000000/aiperf_artifacts/profile_export.jsonl"
 #: What a runner of the removed greedy decode pass left in a bundle: a header line, then one line per prompt.
 LEGACY_DECODE_PATH = "decode/outputs.jsonl"
 LEGACY_DECODE_IDENTITY = "sha256:0123456789abcdef|temperature=0|top_k=1"
@@ -142,7 +142,7 @@ def _write_files(out: Path, config: dict[str, Any], mode: str) -> dict[str, byte
     if "fake_export" in config:
         files[EXPORT_PATH] = "".join(f"{line}\n" for line in config["fake_export"]).encode()
     if config.get("fake_warmup") and REPORT_PATH in files:
-        files["warmup_round/benchmark_fake_20261014_000000/benchmark_report.json"] = files[REPORT_PATH]
+        files["warmup_round/benchmark_fake_20000101_000000/benchmark_report.json"] = files[REPORT_PATH]
     in_warmup = bool(config.get("fake_eval_in_warmup")) and REPORT_PATH in files
     if in_warmup:
         report_bytes = files.pop(REPORT_PATH)
@@ -171,7 +171,7 @@ def _write_files(out: Path, config: dict[str, Any], mode: str) -> dict[str, byte
             rounds.insert(1, accuracy_round)  # chronological: warmup bench, the evaluation, measured bench
             if score is not None:
                 results = {"results": {"gsm8k": {"exact_match,flexible-extract": float(score)}}}
-                files[f"{rounds[0]['dir']}/eval_output/results_2026-10-14T10-00-00.json"] = json.dumps(results).encode()
+                files[f"{rounds[0]['dir']}/eval_output/results_2000-01-01T10-00-00.json"] = json.dumps(results).encode()
         else:
             rounds.append(accuracy_round)
     if "fake_warnings" in config:

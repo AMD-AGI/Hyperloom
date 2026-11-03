@@ -180,7 +180,7 @@ def test_a_build_the_service_made_under_the_servers_variables_is_used(image, tmp
 
 
 #: What the real image has outside aiter's build path: its ``setup.py`` and the Triton kernels below ``aiter/ops`` read a
-#: variable the build of a module never reads (``AITER_USE_SYSTEM_TRITON``, set to 1 on the GPU pod).
+#: variable the build of a module never reads (``AITER_USE_SYSTEM_TRITON``, which an image may set to 1).
 OUTSIDE_THE_BUILD = {
     "setup.py": 'import os\nSYSTEM = os.environ.get("AITER_USE_SYSTEM_TRITON", "0")\n',
     "aiter/ops/triton/gluon/__init__.py": 'import os\nUSE = os.getenv("AITER_USE_SYSTEM_TRITON")\n',
@@ -292,8 +292,8 @@ def test_a_build_for_another_gpu_is_not_used(image, tmp_path, monkeypatch) -> No
 
 
 def test_a_touched_module_neither_built_nor_given_still_ends_as_stale_code(image, tmp_path, monkeypatch) -> None:
-    """The 2a guard holds beside a CPU build: when the build is not used and the image's copy of the touched module is
-    in the test's directory anyway, the result is a failed measurement, never the patch's numbers."""
+    """The stale-module guard holds beside a CPU build: when the build is not used and the image's copy of the touched
+    module is in the test's directory anyway, the result is a failed measurement, never the patch's numbers."""
     from hyperloom.measure.jit import session as session_module
 
     built = Built(image, tmp_path, monkeypatch)
@@ -367,7 +367,7 @@ def test_a_module_build_whose_outputs_are_not_module_files_is_refused(tmp_path) 
     (tmp_path / "staging" / "blobs" / sha).write_bytes(data)
     inputs = BuildInputs(SHEET_IMAGE, BUILDER, "aiter", GFX, "0" * 64, "aiter_jit/1")
     output = OutputFile(f"aiter/jit/{standin.MODULE}.so", sha, len(data), "0644")
-    record = BuildRecord(inputs.key, inputs, READY, (output,), {}, "2026-10-27T00:00:00Z", 1.0, 1.0)
+    record = BuildRecord(inputs.key, inputs, READY, (output,), {}, "2000-01-01T00:00:00Z", 1.0, 1.0)
     store.publish(record, tmp_path / "staging", "", Signer(signing_key))
     builds = SheetBuilds(store, {"aiter": NamedBuild("aiter", record.key, manifest_sha256(record))}, SHEET_IMAGE)
 

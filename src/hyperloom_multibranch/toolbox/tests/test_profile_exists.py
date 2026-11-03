@@ -3,9 +3,9 @@
 
 """``profile_exists``: a PROFILE of a commit and recipe that already has a live one is refused at acceptance.
 
-Branches profiled the same commit more than once (a profile is not a claimed test, so nothing deduped it) and every
-repeat held a card. The toolbox now refuses the repeat and names the request to wait for. All of it goes through the
-entry points: ``RealToolbox.submit_test`` and the MCP tools a specialist calls.
+A profile is not a claimed test, so nothing would deduplicate repeats of the same commit and recipe, and every repeat
+would hold a card. The toolbox refuses the repeat and names the request to wait for. All of it goes through the entry
+points: ``RealToolbox.submit_test`` and the MCP tools a specialist calls.
 """
 
 from __future__ import annotations

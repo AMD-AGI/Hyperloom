@@ -216,7 +216,7 @@ def _installed(site: Path, version: str) -> None:
 
 
 def test_an_installed_tracelens_is_compared_by_the_commit_its_version_names(fake_tracelens: Path) -> None:
-    _installed(fake_tracelens, "0.1.0.dev20261024+g614c597")
+    _installed(fake_tracelens, "0.1.0.dev20000101+g614c597")
     assert tracelens_problem(_PIN, package=_PACKAGE) is None
 
     problem = tracelens_problem("647cbf27" + "0" * 32, package=_PACKAGE)

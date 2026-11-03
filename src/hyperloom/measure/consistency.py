@@ -7,7 +7,7 @@
 after the other: with the local backend on this machine, then with the hosted backend in a fresh sandbox. Both sides are
 read with ``extract_benchmark_measurement``; the check compares output throughput, completed requests and error rate,
 and, for a test with a patched recipe, the hashes of the files the runner rebuilt against the locally compiled ones.
-Every test is one line of ``consistency.jsonl``; the last line is the summary against the graduation criteria.
+Every test is one line of ``consistency.jsonl``; the last line is the summary against the pass criteria.
 
 The verdict is ``PASS`` only when every test was compared and every criterion holds. A test that could not be compared
 (either side failed, a report is missing, the rebuilt-file hashes were not available) counts against the verdict, and a
@@ -92,7 +92,7 @@ LOCAL, HOSTED = "local", "hosted"
 
 @dataclass(frozen=True)
 class Criteria:
-    """The graduation criteria of the check's first stage (a stricter second stage raises ``p90_pct`` to 3.5)."""
+    """The default pass thresholds of the check, in percent; ``--median-pct`` and ``--p90-pct`` override them."""
 
     median_pct: float = 0.5
     p90_pct: float = 1.5
@@ -534,7 +534,7 @@ def percentile(values: Sequence[float], fraction: float) -> float:
 
 
 def summarize(reports: Sequence[ItemReport], criteria: Criteria = Criteria()) -> Summary:
-    """The verdict against the graduation criteria; ``PASS`` needs every test compared and every criterion met."""
+    """The verdict against the pass criteria; ``PASS`` needs every test compared and every criterion met."""
     if not reports:
         return Summary(NO_DATA, 0, 0, None, None, False, False, False, ("the checklist has no test",))
     diffs = [r.throughput_diff_pct for r in reports if r.compared and r.throughput_diff_pct is not None]

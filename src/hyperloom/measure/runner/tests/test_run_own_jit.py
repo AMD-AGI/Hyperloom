@@ -5,8 +5,8 @@
 
 The image (``test_run_jit_tables``) ships ``module_gemm`` and ``module_other`` built. The server is a fake grid that
 does what aiter's JIT does: it looks for each module in ``AITER_JIT_DIR``, else in the ``jit`` directory of the package
-(the image's), and builds the one it does not find (``module_new``) there. Before the fix a test with no patch and no
-cache had no farm and no session, so its build was written into the image's ``aiter/jit``.
+(the image's), and builds the one it does not find (``module_new``) there. A test with no patch and no cache has no
+farm and no session, so without this its build would be written into the image's ``aiter/jit``.
 """
 
 from __future__ import annotations
@@ -160,7 +160,8 @@ def _plain_point(tmp_path: Path) -> Path:
 
 def test_a_farm_with_no_cache_leaves_out_the_module_its_patched_table_makes_stale(image, monkeypatch) -> None:
     """A configs patch rebuilds aiter in the farm, whose ``jit`` links the image's modules. With no cache to leave the
-    stale one out, the server loaded the image's module and stopped on a kernel 'not present in the compiled registry'."""
+    stale one out, the server would load the image's module and stop on a kernel 'not present in the compiled
+    registry'."""
     _, _, run = image.run("patched", _deliver(image, _by_patch(image, TEST_TABLE)), cache=False)
 
     farm_jit = next(run.rglob("farm/site/aiter/jit"))

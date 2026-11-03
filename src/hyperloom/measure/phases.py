@@ -3,7 +3,7 @@
 
 """Where the time of a test goes: the phases a runner and the hosted backend stamp, and how they add up.
 
-A test is about ten minutes of wall time, and the measured bench is a small part of it. The runner stamps what it does
+A test is mostly setup, boot and teardown, and the measured bench is a small part of it. The runner stamps what it does
 (waiting for its sheet, checking it, rebuilding the environment, booting the server, each round, signing the result), the
 hosted backend stamps what it does around the runner (starting the sandbox, landing the result, closing the sandbox),
 and the executor reads the whole as ``TestResult.phases`` with the seconds nothing covers kept apart.
