@@ -24,6 +24,7 @@ from hyperloom.measure.jit.key import (
     touches_build_surface,
     tree_identity,
     triton_key,
+    without_card_arch,
 )
 
 MACHINE = Machine("sha256:" + "1" * 64, "gfx950", "MI355X", "SPX/NPS1")
@@ -350,3 +351,28 @@ def test_an_aiter_key_is_not_one_made_before_the_module_configs_variables_were_i
     assert triton_key(MACHINE) == key_module._hash(
         {"schema": 2, "kind": "triton", "image": MACHINE.image_digest, "gfx": MACHINE.gfx_arch}
     ), "Triton's key is unchanged: its cache never depended on aiter's variables"
+
+
+@pytest.mark.parametrize(
+    ("environment", "gfx_arch", "expected"),
+    [
+        ({"GPU_ARCHS": "native"}, "gfx950", {}),
+        ({"GPU_ARCHS": "native"}, None, {}),
+        ({"GPU_ARCHS": "gfx950"}, "gfx950", {}),
+        ({"GPU_ARCHS": "gfx950"}, None, {"GPU_ARCHS": "gfx950"}),
+        ({"GPU_ARCHS": "gfx942"}, "gfx950", {"GPU_ARCHS": "gfx942"}),
+        ({"GPU_ARCHS": "gfx942;gfx950"}, "gfx950", {"GPU_ARCHS": "gfx942;gfx950"}),
+        ({"ENABLE_CK": "1", "GPU_ARCHS": "native"}, "gfx950", {"ENABLE_CK": "1"}),
+        ({"ENABLE_CK": "1"}, None, {"ENABLE_CK": "1"}),
+        ({}, None, {}),
+    ],
+)
+def test_gpu_archs_is_left_out_when_it_only_names_the_card_the_build_is_for(environment, gfx_arch, expected):
+    assert without_card_arch(environment, gfx_arch) == expected
+
+
+def test_the_environment_given_is_not_changed():
+    environment = {"GPU_ARCHS": "native", "ENABLE_CK": "1"}
+
+    assert without_card_arch(environment, "gfx950") == {"ENABLE_CK": "1"}
+    assert environment == {"GPU_ARCHS": "native", "ENABLE_CK": "1"}

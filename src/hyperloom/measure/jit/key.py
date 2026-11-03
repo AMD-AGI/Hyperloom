@@ -69,6 +69,7 @@ __all__ = [
     "touches_build_surface",
     "tree_identity",
     "triton_key",
+    "without_card_arch",
 ]
 
 #: 2: Triton's group files are stored with paths relative to the cache directory, so a snapshot of schema 1 is not read.
@@ -103,6 +104,10 @@ _NEUTRAL = frozenset(
 )
 #: ``AITER_REBUILD`` discards what is cached and builds again: a test that sets it has no cache to use or to add to.
 REBUILD_VARIABLE = "AITER_REBUILD"
+#: The variable that names the architectures aiter's build targets (``jit/core.py``, ``jit/utils/chip_info.py``), and the
+#: value that says the card's own: a module built for either is the same module (:func:`without_card_arch`).
+_GPU_ARCHS = "GPU_ARCHS"
+_NATIVE_ARCH = "native"
 #: Variables the tuned tables are named by; their files' content, not their paths, is what a code generator reads.
 _TABLE_PREFIX = "AITER_CONFIG_"
 _ENV_READ = re.compile(
@@ -317,6 +322,22 @@ def build_surface(
         name: environment[name] for name in sorted(named) if not name.startswith(_TABLE_PREFIX) and name in environment
     }
     return BuildSurface(tables, plain, rebuild=_rebuilds(environment))
+
+
+def without_card_arch(environment: Mapping[str, str], gfx_arch: str | None) -> dict[str, str]:
+    """``environment`` without ``GPU_ARCHS`` when it only names the card the build is for: ``native`` or ``gfx_arch`` (the
+    card's own architecture; ``None`` when it is not known, which leaves ``native`` alone).
+
+    A module built with the variable unset, ``native`` or the card's architecture is built for the same target, so two
+    environments' build variables are compared without it: the CPU build of aiter's modules sets the target itself
+    (``runner.jit._build_differs``), and a module config entry that reads it is compared the same way
+    (:func:`~hyperloom.measure.jit.modules.env_touched_entries`). Any other value (several architectures, another card)
+    stays."""
+    found = dict(environment)
+    value = found.get(_GPU_ARCHS)
+    if value is not None and value in (_NATIVE_ARCH, gfx_arch):
+        del found[_GPU_ARCHS]
+    return found
 
 
 def _rebuilds(environment: Mapping[str, str]) -> bool:

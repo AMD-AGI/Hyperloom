@@ -44,7 +44,7 @@ from hyperloom.common.outside_facts import (
     AITER_META_DIR_ENV,
     AITER_META_MARKER_DIR,
 )
-from hyperloom.measure.jit.key import CONFIG_FILE, build_surface, entry_env_names, env_names_in
+from hyperloom.measure.jit.key import CONFIG_FILE, build_surface, entry_env_names, env_names_in, without_card_arch
 
 __all__ = [
     "CKTILE_MODULE_BUILD_LIMIT_SEC",
@@ -386,7 +386,10 @@ def build_env_names(package: Path, meta: Path, config: Mapping[str, Any], module
 
 
 def env_touched_entries(
-    config: Mapping[str, Any], servers: Iterable[Mapping[str, str]], image: Mapping[str, str]
+    config: Mapping[str, Any],
+    servers: Iterable[Mapping[str, str]],
+    image: Mapping[str, str],
+    gfx_arch: str | None = None,
 ) -> frozenset[str]:
     """The entries of ``config`` whose module a server of ``servers`` would build otherwise than the image's prebuilt one.
 
@@ -395,8 +398,12 @@ def env_touched_entries(
     ``framework.table_modules`` compares by content) that the server sets to another value than ``image``, the environment
     the image's modules stand for (what the server inherits before the sheet's own). aiter builds a module only when its
     ``.so`` is missing, so with the image's linked the server's value would never reach the code it runs.
+
+    ``GPU_ARCHS`` naming the card (``native``, or ``gfx_arch``) is no difference, as it is none to the CPU build's
+    comparison (:func:`~hyperloom.measure.jit.key.without_card_arch`).
     """
-    servers = list(servers)
+    image = without_card_arch(image, gfx_arch)
+    servers = [without_card_arch(server, gfx_arch) for server in servers]
     touched = set()
     for key, entry in config.items():
         names = entry_env_names(entry)

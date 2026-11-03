@@ -38,7 +38,7 @@ from hyperloom.measure.runner.tests.test_run_jit_tables import (  # noqa: F401 -
     _deliver,
     image,
 )
-from hyperloom.measure.runner.tests.test_run_jit_variables import FLAG, VARIABLE
+from hyperloom.measure.runner.tests.test_run_jit_variables import ARCH_FLAG, FLAG, GFX, VARIABLE
 from hyperloom.measure.socket import TestCall
 
 BUILT = b"\x7fELF built by the test"
@@ -169,11 +169,11 @@ def test_a_farm_with_no_cache_leaves_out_the_module_its_patched_table_makes_stal
     assert (image.bases / "aiter" / "jit" / "module_gemm.so").read_text() == IMAGE_MODULE
 
 
-def _module_gemm_reads_a_build_variable(rig: Rig) -> None:
+def _module_gemm_reads_a_build_variable(rig: Rig, flag: str = FLAG) -> None:
     """``module_gemm``'s entry passes a flag aiter takes from the environment as it builds (``test_run_jit_variables``)."""
     path = rig.bases / "aiter" / "jit" / "optCompilerConfig.json"
     config = json.loads(path.read_text(encoding="utf-8"))
-    config["module_gemm"]["flags_extra_hip"] = [FLAG]
+    config["module_gemm"]["flags_extra_hip"] = [flag]
     path.write_text(json.dumps(config), encoding="utf-8")
 
 
@@ -197,6 +197,37 @@ def test_a_farm_with_no_cache_leaves_out_the_module_a_build_variable_makes_stale
     farm_jit = next(run.rglob("farm/site/aiter/jit"))
     assert (farm_jit / "module_other.so").is_symlink()
     assert not os.path.lexists(farm_jit / "module_gemm.so"), "built under the test's value, not linked"
+
+
+_ARCHS = [("native", True), (GFX, True), ("gfx942", False), (f"gfx942;{GFX}", False)]
+
+
+@pytest.mark.parametrize(("value", "image_kept"), _ARCHS)
+def test_gpu_archs_naming_the_card_leaves_the_images_module_linked_with_no_cache(
+    image, monkeypatch, value, image_kept
+) -> None:
+    """The image's module was built for the card, as one built under ``native`` is: only another value makes it stale."""
+    _module_gemm_reads_a_build_variable(image, ARCH_FLAG)
+
+    server, _ = _run(image, monkeypatch, "arch", _arm(image, envs={"GPU_ARCHS": value}), cache=False)
+
+    assert server.found["module_gemm"] is image_kept
+    assert server.held["module_gemm.so"] == ((True, IMAGE_MODULE.encode()) if image_kept else (False, BUILT))
+
+
+@pytest.mark.parametrize(("value", "image_kept"), _ARCHS)
+def test_gpu_archs_naming_the_card_leaves_the_farms_link_to_the_images_module_with_no_cache(
+    image, value, image_kept
+) -> None:
+    _module_gemm_reads_a_build_variable(image, ARCH_FLAG)
+
+    _, _, run = image.run(
+        "farm-arch", _arm(image, envs={"GPU_ARCHS": value}, roots=_aiter_package_root(image)), cache=False
+    )
+
+    farm_jit = next(run.rglob("farm/site/aiter/jit"))
+    assert (farm_jit / "module_gemm.so").is_symlink() is image_kept
+    assert os.path.lexists(farm_jit / "module_gemm.so") is image_kept
 
 
 def _aiter_package_root(rig: Rig):

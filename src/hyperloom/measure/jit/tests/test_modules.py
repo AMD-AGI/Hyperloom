@@ -357,6 +357,35 @@ def test_a_server_that_sets_a_variable_an_entry_reads_otherwise_than_the_image_t
     assert env_touched_entries(config, [{**_IMAGE_ENV, **server}], _IMAGE_ENV) == touched
 
 
+@pytest.mark.parametrize(
+    ("value", "gfx_arch", "touched"),
+    [
+        ("native", None, False),
+        ("native", "gfx950", False),
+        ("gfx950", "gfx950", False),
+        ("gfx950", None, True),
+        ("gfx950", "gfx942", True),
+        ("gfx942;gfx950", "gfx950", True),
+    ],
+)
+def test_gpu_archs_naming_the_card_touches_no_module_as_it_is_no_difference_to_the_cpu_build(value, gfx_arch, touched):
+    """``module_deepgemm_opus`` reads ``GPU_ARCHS``; ``native`` and the card's own architecture are what the image's
+    module was built for, as ``_build_differs`` takes them to be for a CPU build."""
+    config = _image_config()
+
+    found = env_touched_entries(config, [{**_IMAGE_ENV, "GPU_ARCHS": value}], _IMAGE_ENV, gfx_arch)
+
+    assert found == ({"module_deepgemm_opus"} if touched else set())
+
+
+def test_the_images_own_gpu_archs_is_compared_without_the_card_too():
+    config = _image_config()
+    image = {**_IMAGE_ENV, "GPU_ARCHS": "gfx950"}
+
+    assert env_touched_entries(config, [_IMAGE_ENV, {**_IMAGE_ENV, "GPU_ARCHS": "native"}], image, "gfx950") == set()
+    assert env_touched_entries(config, [_IMAGE_ENV], image, None) == {"module_deepgemm_opus"}
+
+
 def test_a_server_that_unsets_a_variable_the_image_has_touches_the_module_too():
     config = _image_config()
     server = {name: value for name, value in _IMAGE_ENV.items() if name != "CK_TILE_ATTENTION_USE_SOFTSIGN_ASM"}

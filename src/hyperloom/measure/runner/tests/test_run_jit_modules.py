@@ -253,6 +253,20 @@ def test_a_variable_only_the_modules_config_entry_reads_decides_whether_the_cpu_
     assert (refused in status["message"]) is not used
 
 
+@pytest.mark.parametrize(("arch", "used"), [("native", True), (GFX, True), (f"gfx942;{GFX}", False)])
+def test_gpu_archs_naming_the_card_is_no_difference_from_the_cpu_build_that_targets_it(
+    image, tmp_path, monkeypatch, arch, used
+) -> None:
+    """The build sets ``GPU_ARCHS`` to its target itself, so a server that sets ``native`` or the card's architecture builds
+    the same module; a list of architectures is another module."""
+    built = Built(image, tmp_path, monkeypatch)
+
+    manifest, status, _ = image.run("arch", _sheet(image, built, envs={"GPU_ARCHS": arch}), extra_env=built.environ())
+
+    assert manifest.jit_cache.builds_seen == (0 if used else 1)
+    assert ("the server's GPU_ARCHS differ from its build's" in status["message"]) is not used
+
+
 def test_a_build_by_another_interpreter_than_the_servers_is_not_used(image, tmp_path, monkeypatch) -> None:
     """Another interpreter can be another Python, torch or HIP: the module it would build is not the build's."""
     built = Built(image, tmp_path, monkeypatch)
