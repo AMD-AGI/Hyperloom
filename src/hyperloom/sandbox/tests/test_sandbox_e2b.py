@@ -21,6 +21,7 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 import e2b
+import httpx
 import pytest
 
 from hyperloom.sandbox import CreateOptions, OutputSinks, RunSettings
@@ -371,6 +372,7 @@ def test_the_retry_budget_ends_in_unavailable(service: _Service) -> None:
     short = E2BSandboxProvider(
         {"dev": KEY_DEV},
         api_url=service.url,
+        sandbox_url=service.url,
         retry=RetryPolicy(budget_sec=0.3, first_delay_sec=0.05, max_delay_sec=0.1),
     )
     service.reply("GET", "/v2/sandboxes", 503)
@@ -383,6 +385,7 @@ def test_an_unreachable_service_is_unavailable() -> None:
     nowhere = E2BSandboxProvider(
         {"dev": KEY_DEV},
         api_url="http://127.0.0.1:9",
+        sandbox_url="http://127.0.0.1:9",
         retry=RetryPolicy(budget_sec=0.2, first_delay_sec=0.05, max_delay_sec=0.1),
     )
     with pytest.raises(SandboxUnavailable):
@@ -453,6 +456,43 @@ def test_from_environ_reads_the_keys_and_both_addresses(service: _Service) -> No
     assert service.calls("GET", "/v2/sandboxes")[0].headers["x-api-key"] == KEY_DEV
 
 
+#: Addresses that resolve nowhere, for a provider that is refused before it sends anything.
+NOWHERE = {"E2B_API_URL": "http://api.invalid", "E2B_SANDBOX_URL": "http://sandboxes.invalid"}
+
+
+@pytest.mark.parametrize("missing", sorted(NOWHERE))
+@pytest.mark.parametrize("given", ["unset", "empty"])
+def test_from_environ_refuses_a_missing_service_url_before_any_request(
+    monkeypatch: pytest.MonkeyPatch, missing: str, given: str
+) -> None:
+    """Without the URL the SDK would take its own default, the public E2B service, and send it the role's key."""
+    for name in (*NOWHERE, "E2B_DOMAIN"):
+        monkeypatch.delenv(name, raising=False)
+    sent: list[httpx.Request] = []
+
+    def send(client: httpx.Client, request: httpx.Request, *args: Any, **kwargs: Any) -> httpx.Response:
+        sent.append(request)
+        raise httpx.ConnectError("intercepted", request=request)
+
+    monkeypatch.setattr(httpx.Client, "send", send)
+    environ = {"HYPERLOOM_SANDBOX_KEY_DEV": KEY_DEV, **NOWHERE}
+    if given == "unset":
+        del environ[missing]
+    else:
+        environ[missing] = ""
+    with pytest.raises(ValueError, match=f"^{missing} is not set"):
+        E2BSandboxProvider.from_environ(environ, retry=FAST).find({}, role="dev")
+    assert [str(request.url) for request in sent] == []
+
+
+@pytest.mark.parametrize("blank", ["api_url", "sandbox_url"])
+def test_a_blank_service_url_is_refused(blank: str) -> None:
+    urls = {"api_url": NOWHERE["E2B_API_URL"], "sandbox_url": NOWHERE["E2B_SANDBOX_URL"], blank: " "}
+    variable = "E2B_API_URL" if blank == "api_url" else "E2B_SANDBOX_URL"
+    with pytest.raises(ValueError, match=f"^{variable} is not set"):
+        E2BSandboxProvider({"dev": KEY_DEV}, **urls)
+
+
 #: The workspace a SaFE key used directly names, and the variable that sets it.
 WORKSPACE = "top-models"
 WORKSPACE_ENV = "HYPERLOOM_SANDBOX_WORKSPACE"
@@ -496,7 +536,9 @@ def test_from_environ_sends_a_workspace_only_when_the_variable_names_one(
 
 def test_a_blank_workspace_is_refused() -> None:
     with pytest.raises(ValueError, match="workspace is blank"):
-        E2BSandboxProvider({"dev": KEY_DEV}, workspace="  ")
+        E2BSandboxProvider(
+            {"dev": KEY_DEV}, api_url=NOWHERE["E2B_API_URL"], sandbox_url=NOWHERE["E2B_SANDBOX_URL"], workspace="  "
+        )
 
 
 #: How the service refuses a create by a key whose user may create in several workspaces when it names none (a 400
