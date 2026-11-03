@@ -23,12 +23,14 @@ from hyperloom_multibranch.specialist.agent_onboarding import (
     ModelRefused,
     OnboardingSetup,
     agent_env,
+    fetch_source,
     gateway_wait,
     make_ready,
     onboarding_prompt,
     split_source,
 )
 from hyperloom_multibranch.specialist.agent_session import AgentCommand
+from hyperloom_multibranch.specialist.arbor_adapter import MARKERS, is_arbor
 from hyperloom_multibranch.specialist.runtime import PreflightFailed
 
 SPEC = AgentSpec(
@@ -142,7 +144,7 @@ async def test_an_agent_is_fetched_onboarded_configured_installed_and_started(tm
     shim = Path(sandbox.ran[-1][2]["PATH"].split(os.pathsep)[0]) / "docker"
     assert os.access(shim, os.X_OK)
     assert '"workspace": "/ws/sglang"' in onboard.prompts[0] and str(repo) in onboard.prompts[0]
-    assert f"checkout, {ready.source_dir}, a clone" in onboard.prompts[0]
+    assert f"checkout, {ready.source_dir}, fetched from {repo}" in onboard.prompts[0]
 
 
 def test_the_prompt_has_every_a_b_measured_with_the_gate_s_client_and_the_integration_notes_read() -> None:
@@ -317,6 +319,39 @@ async def test_an_agent_started_by_a_preflight_that_is_cancelled_is_killed(tmp_p
     with pytest.raises(asyncio.CancelledError):
         await preflight
     assert process.killed
+
+
+def _git_out(cwd: Path, *argv: str) -> str:
+    return subprocess.run(["git", *argv], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+
+
+async def test_a_source_tree_outside_git_is_copied_and_committed_once(tmp_path: Path) -> None:
+    host = _agent_repo(tmp_path)
+    tree = host / "src" / "vendored"
+    for marker in (*MARKERS, "__pycache__/component.pyc"):
+        (tree / marker).parent.mkdir(parents=True, exist_ok=True)
+        (tree / marker).write_text("x", encoding="utf-8")
+    checkout = tmp_path / "checkout"
+
+    commit = await fetch_source(str(tree), checkout)
+
+    assert is_arbor(checkout) and not (checkout / "__pycache__").exists()
+    assert commit == _git_out(checkout, "rev-parse", "HEAD")
+    assert _git_out(host, "rev-parse", "HEAD") in _git_out(checkout, "log", "-1", "--format=%B")
+    (tree / MARKERS[0]).write_text("changed", encoding="utf-8")
+    assert await fetch_source(str(tree), checkout) == commit
+    assert (checkout / MARKERS[0]).read_text(encoding="utf-8") == "x"
+
+
+async def test_a_bare_repository_source_is_cloned_not_copied(tmp_path: Path) -> None:
+    repo = _agent_repo(tmp_path)
+    bare = tmp_path / "agent.git"
+    subprocess.run(["git", "clone", "-q", "--bare", str(repo), str(bare)], check=True)
+
+    commit = await fetch_source(str(bare), tmp_path / "checkout")
+
+    assert commit == _git_out(repo, "rev-parse", "HEAD")
+    assert sorted(path.name for path in (tmp_path / "checkout").iterdir()) == [".git", "README.md"]
 
 
 def test_a_source_ref_follows_its_last_at_unless_that_names_a_host() -> None:

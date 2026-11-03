@@ -69,6 +69,9 @@ INSTALL_SECONDS = 1800.0
 SOURCE_DIR = "src"
 ENCODING = "utf-8"
 GIT = "git"
+GIT_DIR = ".git"
+QUIET = "--quiet"
+REV_PARSE = "rev-parse"
 SHIM_DIR = "bin"
 #: The lines of an output a failure keeps, the end of the output, where the cause usually is.
 TAIL_LINES = 20
@@ -414,23 +417,60 @@ async def _started(
 
 
 async def fetch_source(source: str, checkout: Path) -> str:
-    """Clone the agent ``source`` (:func:`split_source`'s form) into ``checkout`` unless it is there, and return the
-    commit it is at; raise :class:`AttemptFailed` with git's words when it cannot."""
+    """Fetch the agent ``source`` (:func:`split_source`'s form) into ``checkout`` unless it is there, and return the
+    commit it is at; raise :class:`AttemptFailed` with git's words when it cannot. A local directory that is no
+    repository (:func:`_is_repository_root`) is copied and committed as is (:func:`_commit_tree`); anything else is
+    cloned."""
 
-    if not (checkout / ".git").exists():
+    tree = Path(source)
+    if not (checkout / GIT_DIR).exists() and tree.is_dir() and not await _is_repository_root(tree):
+        await _commit_tree(tree, checkout)
+    if not (checkout / GIT_DIR).exists():
         url, ref = split_source(source)
-        clone = [GIT, "clone", "--quiet", url, str(checkout)]
+        clone = [GIT, "clone", QUIET, url, str(checkout)]
         done = await _git(clone, checkout.parent)
         if done.returncode != 0:
             raise AttemptFailed(f"fetching {url}: {tail(done.output)}")
         if ref:
-            checked = await _git([GIT, "checkout", "--quiet", ref], checkout)
+            checked = await _git([GIT, "checkout", QUIET, ref], checkout)
             if checked.returncode != 0:
                 # Left in place, the clone would pass the next attempt on its default branch.
                 shutil.rmtree(checkout)
                 raise AttemptFailed(f"checking out {ref}: {tail(checked.output)}")
-    head = await _git([GIT, "rev-parse", "HEAD"], checkout)
+    head = await _git([GIT, REV_PARSE, "HEAD"], checkout)
     return head.output.strip()
+
+
+async def _is_repository_root(tree: Path) -> bool:
+    """Whether the directory ``tree`` is a bare repository or a work tree's top, the two that clone; ``.git`` alone
+    does not tell, since a bare repository has none and a linked work tree has it as a file."""
+
+    bare = await _git([GIT, REV_PARSE, "--is-bare-repository"], tree)
+    if bare.returncode == 0 and bare.output.strip() == "true":
+        return True
+    top = await _git([GIT, REV_PARSE, "--show-toplevel"], tree)
+    return top.returncode == 0 and Path(top.output.strip()).resolve() == tree.resolve()
+
+
+async def _commit_tree(tree: Path, checkout: Path) -> None:
+    """Copy ``tree`` into ``checkout`` as one commit, which names the commit of the repository ``tree`` lies in, when it
+    lies in one, since that is the version of what was copied."""
+
+    shutil.copytree(tree, checkout, ignore=shutil.ignore_patterns(GIT_DIR, "__pycache__"), dirs_exist_ok=True)
+    enclosing = await _git([GIT, REV_PARSE, "HEAD"], tree)
+    at = f" at {enclosing.output.strip()}" if enclosing.returncode == 0 else ""
+    # Fixed identity and no signing: the host may have neither a git identity nor a signing key.
+    commit = [GIT, "-c", "user.name=hyperloom", "-c", "user.email=hyperloom@localhost", "-c", "commit.gpgsign=false"]
+    for argv in (
+        [GIT, "init", QUIET],
+        [GIT, "add", "--all"],
+        [*commit, "commit", QUIET, "--no-verify", "--message", f"Copy of {tree}{at}"],
+    ):
+        done = await _git(argv, checkout)
+        if done.returncode != 0:
+            # Left in place, the partial repository would pass the next attempt as fetched.
+            shutil.rmtree(checkout)
+            raise AttemptFailed(f"committing a copy of {tree}: {tail(done.output)}")
 
 
 async def _git(argv: list[str], cwd: Path) -> CommandResult:
@@ -498,7 +538,7 @@ def onboarding_prompt(spec: AgentSpec, source: str, checkout: Path, commit: str,
 
 ONBOARDING_PROMPT = """\
 You are onboarding a third-party LLM-serving optimization agent so it can run unattended in a sandbox. Your working
-directory is the agent's checkout, {checkout}, a clone of {source} at {commit}. Read its README, its docs and its entry
+directory is the agent's checkout, {checkout}, fetched from {source}, at commit {commit}. Read its README, its docs and its entry
 points before you answer. Every file the agent writes (its config, the packs or scripts the install adds, its session
 and run directories) must be in that checkout or in "workspace", never in {source}: give absolute paths under them.
 

@@ -402,8 +402,9 @@ def _add_agent_options(run: argparse.ArgumentParser) -> None:
         default=None,
         metavar="SOURCE",
         help=(
-            "A third-party agent to run end to end on one branch, a git URL (URL@ref for a ref) or a local path;"
-            " repeatable, each opens one branch where EXPLORE starts, within --max-branches."
+            "A third-party agent to run end to end on one branch, a git URL (URL@ref for a ref), a local path, or"
+            f" {ARBOR_KEYWORD} for the Arbor vendored in this source checkout (src/hyperloom_arbor); repeatable, each"
+            " opens one branch where EXPLORE starts, within --max-branches."
         ),
     )
     run.add_argument(
@@ -568,11 +569,15 @@ def _workload_model(args: argparse.Namespace) -> str:
 
 #: Schemes whose URL user is a login name rather than a credential; any other scheme's user, or a password, is one.
 SSH_SCHEMES = frozenset({"ssh", "git+ssh", "svn+ssh"})
+#: The --autonomous-agent source that names the Arbor vendored in this checkout, which a wheel does not ship.
+ARBOR_KEYWORD = "arbor"
+VENDORED_ARBOR = Path(__file__).resolve().parent.parent / "hyperloom_arbor"
 
 
 def _agents(sources: list[str], free: int) -> tuple[str, ...]:
-    """The agent sources, refused when one carries credentials, which come from the sandbox's environment only, or
-    when there are more than the ``free`` branches the user's directions leave."""
+    """The agent sources, :data:`ARBOR_KEYWORD` as :data:`VENDORED_ARBOR`'s absolute path; refused when one carries
+    credentials, which come from the sandbox's environment only, when there are more than the ``free`` branches the
+    user's directions leave, or when :data:`ARBOR_KEYWORD` is given and this install has no vendored Arbor."""
 
     if len(sources) > free:
         raise ValueError(f"--autonomous-agent is given {len(sources)} times, more than the {free} branches left")
@@ -581,7 +586,12 @@ def _agents(sources: list[str], free: int) -> tuple[str, ...]:
         user, at, _host = rest.split("/", 1)[0].rpartition("@")
         if found and at and (":" in user or scheme.lower() not in SSH_SCHEMES):
             raise ValueError(f"--autonomous-agent {scheme}://... carries credentials; give them in the environment")
-    return tuple(sources)
+    if ARBOR_KEYWORD in sources and not VENDORED_ARBOR.is_dir():
+        raise ValueError(
+            f"--autonomous-agent {ARBOR_KEYWORD} names the Arbor vendored at {VENDORED_ARBOR}, which this install does"
+            " not have: it is in a source checkout only; give an Arbor checkout's path or URL instead"
+        )
+    return tuple(str(VENDORED_ARBOR) if source == ARBOR_KEYWORD else source for source in sources)
 
 
 def _agent_directions(path: Path | None, agents: list[str]) -> str:
