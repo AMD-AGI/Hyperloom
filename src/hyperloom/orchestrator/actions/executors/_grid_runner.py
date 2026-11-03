@@ -27,7 +27,7 @@ from hyperloom.common.env_safety import (
     is_python_package_root,
     redact_secret_values,
     scrub_benchmark_process_env,
-    unserveable_env_file_reason,
+    ungrounded_env_file_reason,
 )
 
 from ...phases import machine_state as _phase_state
@@ -75,7 +75,7 @@ from hyperloom.inference_optimizer import speculative_capability
 from hyperloom.inference_optimizer.runtime_environment import apply_runtime_override, prepend_launch_path
 from ._recipe_script import launcher_overwritten_envs
 from ._server_argv import seal_server_argv
-from .magpie_agentx import LaunchChanges, ServerArgvInvalidError, materialize_variant
+from .magpie_agentx import ServerArgvInvalidError, materialize_grid_variant
 from ._workload_envs import BenchmarkTarget, LaunchLayer
 
 from ._grid_base import (
@@ -161,7 +161,7 @@ class SessionDirField:
     def __set_name__(self, owner: type, name: str) -> None:
         self._slot = f"_{name}"
 
-    def __get__(self, obj: Any, objtype: type | None = None) -> Any:
+    def __get__(self, obj: Any, _objtype: type | None = None) -> Any:
         if obj is None:
             return self
         explicit = getattr(obj, self._slot, None)
@@ -189,7 +189,7 @@ _AITER_SHARED_EXPERT_PROBE_SCRIPT = (
     "def go():\n"
     "    try:\n"
     "        spec = u.find_spec('vllm')\n"
-    "    except Exception:\n"
+    "    except (ImportError, ValueError):\n"
     "        return {'status': 'unknown'}\n"
     "    if not spec or not spec.origin:\n"
     "        return {'status': 'unknown'}\n"
@@ -200,7 +200,7 @@ _AITER_SHARED_EXPERT_PROBE_SCRIPT = (
     "        return {'status': 'unknown'}\n"
     "    try:\n"
     "        text = open(router, encoding='utf-8').read()\n"
-    "    except Exception:\n"
+    "    except (OSError, UnicodeDecodeError):\n"
     "        return {'status': 'unknown'}\n"
     "    mods = re.findall(r'from\\s+(vllm\\.model_executor\\.layers\\.fused_moe\\.[A-Za-z0-9_.]+)\\s+import', text)\n"
     "    missing = []\n"
@@ -248,9 +248,14 @@ def _probe_vllm_aiter_shared_expert_unsupported() -> str | None:
 
 
 def unsupported_capability_reason(variant: "GridVariant") -> str | None:
-    """Return why a variant cannot boot (no config table on disk, an env flag the build lacks), else ``None``."""
+    """Return why a variant cannot run (a config table that is not on disk, an env flag the build lacks), else ``None``.
+
+    The config-env question is the same one proposal admission asks (``ungrounded_env_file_reason``): every element
+    of a ``:``-joined list must exist, so an arm is never benched against a table that is only partly there. A
+    replayed recipe's values are re-grounded onto this run's downloads before they reach here.
+    """
     envs = {str(k): str(v) for k, v in (getattr(variant, "extra_envs", None) or {}).items()}
-    if missing_file := unserveable_env_file_reason(envs):
+    if missing_file := ungrounded_env_file_reason(envs):
         return missing_file
     if (os.environ.get("FRAMEWORK", "") or "sglang").strip().lower() != "vllm":
         return None
@@ -435,18 +440,8 @@ class MagpieRound:
     warmup: bool = False
 
 
-def _run_magpie(
-    bench_round: MagpieRound,
-    *,
-    unset_envs: list[str] | None = None,
-    serving_lease: Any = None,
-    on_output: Callable[[], None] | None = None,
-) -> tuple[int, str, str]:
-    """Blocking subprocess wrapper. Returns (rc, stdout, stderr)."""
-    config_path = bench_round.config_path
-    output_dir = bench_round.output_dir
-    sync_benchmark_timeout(config_path, bench_round.timeout_sec)
-    server_log_path = _benchmark_server_log(config_path, output_dir)
+def _magpie_process_env(unset_envs: list[str] | None) -> dict[str, str]:
+    """The scrubbed process environment a Magpie round starts from, before per-round pins."""
     env = scrub_benchmark_process_env(os.environ.copy())
     env["PYTHONUNBUFFERED"] = "1"
     from ._workload_envs import resolve_reference_launch
@@ -464,6 +459,22 @@ def _run_magpie(
     from ._multi_node_env import magpie_remote_env
 
     env.update(magpie_remote_env())
+    return env
+
+
+def _run_magpie(
+    bench_round: MagpieRound,
+    *,
+    unset_envs: list[str] | None = None,
+    serving_lease: Any = None,
+    on_output: Callable[[], None] | None = None,
+) -> tuple[int, str, str]:
+    """Blocking subprocess wrapper. Returns (rc, stdout, stderr)."""
+    config_path = bench_round.config_path
+    output_dir = bench_round.output_dir
+    sync_benchmark_timeout(config_path, bench_round.timeout_sec)
+    server_log_path = _benchmark_server_log(config_path, output_dir)
+    env = _magpie_process_env(unset_envs)
 
     preparation_failure = prepare_benchmark_runtime(config_path, env)
     if preparation_failure is not None:
@@ -1882,18 +1893,8 @@ def _build_variant_yaml(
     cfg = yaml.safe_load(recipe.base_yaml_path.read_text(encoding="utf-8"))
     bench = cfg.setdefault("benchmark", {})
     if is_magpie_agentx(bench):
-        return materialize_variant(
-            recipe.base_yaml_path,
-            variant,
-            output_subdir,
-            model_path=target.model_path,
-            base=LaunchChanges(
-                base.extra_server_args,
-                base.extra_envs or {},
-                base.remove_args or [],
-                base.unset_envs or [],
-                base.args_mode == "replace",
-            ),
+        return materialize_grid_variant(
+            recipe.base_yaml_path, variant, output_subdir, model_path=target.model_path, base=base
         )
     replacing = str(base.args_mode).strip().lower() == "replace"
     envs = apply_runtime_benchmark_overrides(
@@ -1948,14 +1949,9 @@ def _build_variant_yaml(
     pin_xdit_tool_path(envs, bench.get("framework"))
 
     if server_lifecycle is not None:
-        from ._server_lifecycle import inject_lifecycle
+        from ._server_lifecycle import inject_lifecycle_settings
 
-        inject_lifecycle(
-            bench,
-            cleanup=bool(server_lifecycle.get("cleanup", True)),
-            pid_dir=server_lifecycle["pid_dir"],
-            port=int(server_lifecycle["port"]),
-        )
+        inject_lifecycle_settings(bench, server_lifecycle)
 
     # The final write to the argument env; nothing below may touch it.
     seal_server_argv(envs, bench.get("framework"))

@@ -13,13 +13,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from hyperloom.orchestrator.roles import (
-    MockBackend,
-    MockCriticBackend,
-    ScriptedPlan,
-)
 from hyperloom.orchestrator.lever import LEVER_CONFIG
-from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session.optimization_journal import OUTCOME_NO_PROMOTE, OUTCOME_RECORDED, Verdict
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
@@ -35,6 +29,8 @@ from hyperloom.orchestrator.state._shared_state.attempt_audit import _AUDIT_ACTI
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.orchestrator.state.task_registry import Task, TaskSpec
 
+from .conftest import heartbeat_orchestration_with_mock_critic
+
 
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
@@ -42,22 +38,8 @@ def session_dir(tmp_path, monkeypatch) -> Path:
     return make_session_dir()
 
 
-def _silent_backends() -> dict[str, object]:
-    silent = ScriptedPlan(
-        turns=[],
-        default_intent=Intent(
-            type=IntentType.SEND_MESSAGE,
-            payload={"topic": "heartbeat", "body_md": "ok"},
-        ),
-    )
-    return {
-        "orchestration": MockBackend(silent, name="orch"),
-        "critic": MockCriticBackend(),
-    }
-
-
 def _coord(session_dir: Path) -> Coordinator:
-    return Coordinator(session_dir, backends=_silent_backends())
+    return Coordinator(session_dir, backends=heartbeat_orchestration_with_mock_critic())
 
 
 def _resume_pending(state) -> bool:

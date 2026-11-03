@@ -850,36 +850,17 @@ def patch_is_annotation_only(patch_text: str, source_root: Path, *, reverse: boo
         return False
 
 
-def vet_patches(
-    patch_paths: list[str],
-    *,
-    base_checkout: Path | None,
-    candidate_roots: tuple[Path, ...] = (),
-    explicit_root: Path | None = None,
-) -> tuple[list[str], list[dict[str, str]], dict[str, str], bool]:
-    """Ground each patch against the candidate checkouts, one root per patch.
+@dataclass(frozen=True)
+class _StructuralScreen:
+    """The patches that survived structural screening, and the verdicts of the ones that did not."""
 
-    Blocking (``git apply --check`` per patch); call via ``asyncio.to_thread``.
+    readable: list[tuple[str, str]]
+    ungrounded: list[dict[str, str]]
+    grounding: dict[str, str]
 
-    Structural rejects, task-owned work artifacts and grounded Python
-    comment-only patches are dropped. Each survivor resolves its own root.
-    Unresolved or ambiguous roots and stale-but-valid patches are kept with
-    their verdict recorded for integrate_patch and the Critic to adjudicate.
 
-    Args:
-        patch_paths: File paths of the candidate patches to vet.
-        base_checkout: The checkout the specialist worktree was cut from. It
-            is offered to root resolution first and is the root a create-only
-            patch lands in.
-        candidate_roots: Further checkouts offered to root resolution.
-        explicit_root: Authoritative target checkout, when declared.
-
-    Returns:
-        A ``(kept_paths, ungrounded_records, grounding_by_path, spans_multiple_roots)``
-        tuple. ``spans_multiple_roots`` is ``True`` when the kept patches
-        resolved to more than one distinct checkout.
-    """
-    kept: list[str] = []
+def _screen_patch_structure(patch_paths: list[str]) -> _StructuralScreen:
+    """Read each patch and drop the unreadable, non-diff, tree-escaping and work-artifact ones."""
     ungrounded: list[dict[str, str]] = []
     grounding: dict[str, str] = {}
     readable: list[tuple[str, str]] = []
@@ -915,6 +896,41 @@ def vet_patches(
             ungrounded.append({"path": path, "verdict": "work_artifact", "detail": ", ".join(work_artifacts)})
             continue
         readable.append((path, text))
+    return _StructuralScreen(readable=readable, ungrounded=ungrounded, grounding=grounding)
+
+
+def vet_patches(
+    patch_paths: list[str],
+    *,
+    base_checkout: Path | None,
+    candidate_roots: tuple[Path, ...] = (),
+    explicit_root: Path | None = None,
+) -> tuple[list[str], list[dict[str, str]], dict[str, str], bool]:
+    """Ground each patch against the candidate checkouts, one root per patch.
+
+    Blocking (``git apply --check`` per patch); call via ``asyncio.to_thread``.
+
+    Structural rejects, task-owned work artifacts and grounded Python
+    comment-only patches are dropped. Each survivor resolves its own root.
+    Unresolved or ambiguous roots and stale-but-valid patches are kept with
+    their verdict recorded for integrate_patch and the Critic to adjudicate.
+
+    Args:
+        patch_paths: File paths of the candidate patches to vet.
+        base_checkout: The checkout the specialist worktree was cut from. It
+            is offered to root resolution first and is the root a create-only
+            patch lands in.
+        candidate_roots: Further checkouts offered to root resolution.
+        explicit_root: Authoritative target checkout, when declared.
+
+    Returns:
+        A ``(kept_paths, ungrounded_records, grounding_by_path, spans_multiple_roots)``
+        tuple. ``spans_multiple_roots`` is ``True`` when the kept patches
+        resolved to more than one distinct checkout.
+    """
+    kept: list[str] = []
+    screen = _screen_patch_structure(patch_paths)
+    ungrounded, grounding, readable = screen.ungrounded, screen.grounding, screen.readable
 
     if not readable:
         return kept, ungrounded, grounding, False
@@ -965,9 +981,9 @@ def drop_env_ungrounded_proposals(payload: dict[str, Any]) -> list[str]:
     wrote. Every element of a ``:``-joined list must be on disk, including the ones listed beside a table that is:
     an agent asking for one table it has not authored is asking for the same unwritten artifact (#1982).
 
-    ``run_grid``'s preflight asks the other question of the same values -- whether the server boots, which for a
-    list is "is any element loadable" (``unserveable_env_file_reason``), the rule aiter's loader actually follows.
-    It is the backstop for values no proposal carried, such as a replayed recipe's refs resolved onto this run.
+    ``run_grid``'s preflight asks the same question of the same values (``ungrounded_env_file_reason`` again), as
+    the backstop for values no proposal carried. A replayed recipe's refs are not an exception to it: warm replay
+    re-grounds them onto this run's downloaded files, dropping what it cannot read, before the grid sees them.
     """
     proposals = payload.get("proposal_set")
     if not isinstance(proposals, list):

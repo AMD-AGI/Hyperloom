@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from typing import Any
 
 from hyperloom_common.llm import llm_config
 from hyperloom_common.env import env_bool, env_flag
@@ -20,6 +21,7 @@ from hyperloom_common.llm.reasoning_effort import (
     normalize_reasoning_effort,
 )
 from kernelforge.config.resources import default_project_root, resource_path
+from kernelforge.utils.gpu_arch import canonical_gpu_type
 
 
 def resolve_agent_model(agent_backend: str) -> str:
@@ -88,6 +90,31 @@ def _env_json_object(name: str) -> dict:
     if not isinstance(value, dict):
         raise ValueError(f"{name} must contain a JSON object")
     return value
+
+
+def _specialist_probe_overrides(overrides: dict[str, Any]) -> dict[str, Any]:
+    """The specialist-probe fields of :meth:`Config.from_env`, from ``overrides`` or their env vars."""
+    return {
+        "specialist_probe": overrides.get("specialist_probe", env_flag("FORGE_SPECIALIST_PROBE", default=True)),
+        "specialist_probe_max": int(
+            overrides.get(
+                "specialist_probe_max",
+                os.getenv("FORGE_SPECIALIST_PROBE_MAX", "6"),
+            )
+        ),
+        "specialist_probe_budget_sec": float(
+            overrides.get(
+                "specialist_probe_budget_sec",
+                os.getenv("FORGE_SPECIALIST_PROBE_BUDGET_SEC", "600"),
+            )
+        ),
+        "specialist_probe_scratch_root": str(
+            overrides.get(
+                "specialist_probe_scratch_root",
+                os.getenv("FORGE_SPECIALIST_PROBE_SCRATCH_ROOT", ""),
+            )
+        ),
+    }
 
 
 class KnowledgeStoreMode(str, Enum):
@@ -232,10 +259,10 @@ class Config:
     """Runtime configuration loaded from environment + optional overrides."""
 
     # GPU environment
-    # ROCm compilation target.
-    gpu_target: str = "gfx942"
-    # Hardware model used in KB identities.
-    gpu_type: str = "mi355x"
+    # ROCm compilation target; empty until the caller resolves the run's arch.
+    gpu_target: str = ""
+    # Hardware model used in KB identities; derived from ``gpu_target`` when unset.
+    gpu_type: str = ""
     # System owning the candidate stream this run files under; a producer has its
     # own index in the KB identity scheme. Empty means the forge-loop's own.
     producer: str = ""
@@ -323,6 +350,7 @@ class Config:
         :func:`kernelforge.agent_backends.runtime.agent_runtime`, which every session resolves through.
         """
         self.project_root = Path(self.project_root)
+        self.gpu_type = (self.gpu_type or canonical_gpu_type(self.gpu_target)).strip().lower()
         self.agent_backend = (self.agent_backend or "auto").strip().lower()
         self.agent_reasoning_effort = normalize_reasoning_effort(
             self.agent_reasoning_effort or DEFAULT_REASONING_EFFORT
@@ -384,8 +412,8 @@ class Config:
         # A harness the operator named must fail loudly rather than be replaced by Claude.
         default_fallback = "" if platform_backend else "claude"
         return cls(
-            gpu_target=overrides.get("gpu_target", os.getenv("GPU_TARGET", "gfx942")),
-            gpu_type=str(overrides["gpu_type"] if "gpu_type" in overrides else "mi355x").strip().lower(),
+            gpu_target=overrides.get("gpu_target", os.getenv("GPU_TARGET", "")),
+            gpu_type=str(overrides.get("gpu_type") or ""),
             producer=str(overrides.get("producer", "")).strip().lower(),
             workspace=overrides.get("workspace", os.getenv("KERNEL_WORKSPACE", "")),
             agent_backend=agent_backend,
@@ -418,25 +446,7 @@ class Config:
             if "agent_options" in overrides
             else _env_json_object("FORGE_AGENT_OPTIONS_JSON"),
             max_turns=int(overrides.get("max_turns", 500)),
-            specialist_probe=overrides.get("specialist_probe", env_flag("FORGE_SPECIALIST_PROBE", default=True)),
-            specialist_probe_max=int(
-                overrides.get(
-                    "specialist_probe_max",
-                    os.getenv("FORGE_SPECIALIST_PROBE_MAX", "6"),
-                )
-            ),
-            specialist_probe_budget_sec=float(
-                overrides.get(
-                    "specialist_probe_budget_sec",
-                    os.getenv("FORGE_SPECIALIST_PROBE_BUDGET_SEC", "600"),
-                )
-            ),
-            specialist_probe_scratch_root=str(
-                overrides.get(
-                    "specialist_probe_scratch_root",
-                    os.getenv("FORGE_SPECIALIST_PROBE_SCRATCH_ROOT", ""),
-                )
-            ),
+            **_specialist_probe_overrides(overrides),
             knowledge_config=knowledge_config,
             include_mori_kb=overrides.get("include_mori_kb"),
             defer_knowledge_maps=overrides.get("defer_knowledge_maps"),

@@ -17,6 +17,18 @@ from hyperloom_common.env import env_str
 from hyperloom_common.git_safety import trusted_admin_dir
 from hyperloom_common.fs_utils import rewrite_lines_nofollow
 
+from hyperloom.common.outside_facts import (
+    ENV_CONC,
+    ENV_EP,
+    ENV_ISL,
+    ENV_MAX_MODEL_LEN,
+    ENV_NUM_PROMPTS,
+    ENV_NUM_WARMUPS,
+    ENV_OSL,
+    ENV_RANDOM_RANGE_RATIO,
+    ENV_RUN_EVAL,
+    ENV_TP,
+)
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 
 import json
@@ -275,18 +287,18 @@ BLOCKED_EXTERNAL_ENV_NAMES: frozenset[str] = (
             "HOME",
             "MODEL",
             "MODEL_PATH",
-            "TP",
-            "EP",
-            "CONC",
-            "ISL",
-            "OSL",
-            "MAX_MODEL_LEN",
+            ENV_TP,
+            ENV_EP,
+            ENV_CONC,
+            ENV_ISL,
+            ENV_OSL,
+            ENV_MAX_MODEL_LEN,
             "PRECISION",
             "PORT",
-            "NUM_PROMPTS",
-            "NUM_WARMUPS",
-            "RANDOM_RANGE_RATIO",
-            "RUN_EVAL",
+            ENV_NUM_PROMPTS,
+            ENV_NUM_WARMUPS,
+            ENV_RANDOM_RANGE_RATIO,
+            ENV_RUN_EVAL,
             "PROFILE",
             "RESULT_DIR",
             "RESULT_FILENAME",
@@ -503,7 +515,7 @@ def _is_file(path: str) -> bool:
 
 
 def ungrounded_env_file_reason(envs: Mapping[str, object] | None) -> str | None:
-    """Return why ``envs`` names a config file that is not on disk, else ``None`` -- the admission rule.
+    """Return why ``envs`` names a config file that is not on disk, else ``None`` -- the one grounding rule.
 
     Grounds file-like env values the way patch targets are grounded: a proposal may point a config env at an
     artifact only a later (possibly rejected) authoring step would create, so the arm would be benched, and its
@@ -512,8 +524,11 @@ def ungrounded_env_file_reason(envs: Mapping[str, object] | None) -> str | None:
     and every non-empty element must exist, not only one of them: an element no stage has authored is ungrounded
     whatever its neighbours are (#1982).
 
-    This is deliberately stricter than what the serving stack survives; for a value its producer already grounded,
-    ``unserveable_env_file_reason`` asks the launch-side question instead.
+    The same rule holds wherever a value is judged -- proposal admission and ``run_grid``'s preflight both ask this
+    question -- so an arm never runs against a table that is only partly there. It is deliberately stricter than
+    what the serving stack survives, where aiter merges a list element by element and dies only when no element
+    loads; a value that carries refs, such as a replayed warm recipe's, is re-grounded onto this run's downloaded
+    files before the grid sees it (``_reground_env_values``), so what reaches here names real local files.
     """
     for raw_key, raw_value in (envs or {}).items():
         key = str(raw_key or "").strip().upper()
@@ -527,35 +542,6 @@ def ungrounded_env_file_reason(envs: Mapping[str, object] | None) -> str | None:
                 f"{key} points at {value}, whose element(s) {joined} do not exist; a config env may only name "
                 "tables that are on disk now. Point it at a file a stage wrote (the gemm_tuning action writes "
                 "tuned-GEMM CSVs) or leave it unset to use the default config table."
-            )
-    return None
-
-
-def unserveable_env_file_reason(envs: Mapping[str, object] | None) -> str | None:
-    """Return why ``envs`` cannot be served, if one names only config files that do not exist, else ``None``.
-
-    The launch-side rule, for values whose producer already grounded them -- a replayed warm recipe carries refs
-    that are resolved against this run's artifacts before the grid sees them, so what reaches here is a value that
-    was grounded once, not a proposal asking for a table to be written later (that is
-    ``ungrounded_env_file_reason``'s question, asked at admission).
-
-    A set value is a ``:``-joined list of paths (see ``csvs_aiter_will_load``), and aiter's own loader merges that
-    list element by element: it logs ``path <n>: <p> (not exist)`` for an element it cannot read, keeps going, and
-    raises only when no element of the list exists at all. So a list is un-serveable exactly when none of its
-    elements is loadable -- one missing element of several is a thinner merge, not a dead server.
-    """
-    for raw_key, raw_value in (envs or {}).items():
-        key = str(raw_key or "").strip().upper()
-        value = str(raw_value or "").strip()
-        if not is_file_referencing_env_name(key) or not value:
-            continue
-        elements = env_file_list_elements(value)
-        if elements and not any(_is_file(p) for p in elements):
-            joined = ENV_FILE_LIST_SEP.join(elements)
-            return (
-                f"{key} points at {value}, none of whose element(s) {joined} exist; the server would "
-                "read it unconditionally and die at config load. Point it at a file a stage wrote (the gemm_tuning "
-                "action writes tuned-GEMM CSVs) or leave it unset to use the default config table."
             )
     return None
 
@@ -886,6 +872,5 @@ __all__ = [
     "scrub_benchmark_process_env",
     "scrub_child_process_env",
     "ungrounded_env_file_reason",
-    "unserveable_env_file_reason",
     "valid_env_key",
 ]
