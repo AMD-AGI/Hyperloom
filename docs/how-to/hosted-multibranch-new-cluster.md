@@ -42,7 +42,7 @@ template's values to the paths inside the sandbox.
 
 | Variable | Required | What it points at |
 | --- | --- | --- |
-| `HYPERLOOM_RUNNER_CACHE` | no | Where the template mounts the runner cache (read-only is enough). Default `/runner-cache`. It must hold the same directory the app host's `HYPERLOOM_RUNNER_CACHE` names: the sandbox runs `<cache>/<HYPERLOOM_SOURCE_SHA>/bootstrap.sh`, installs from the wheels there and never reaches the network for them. A sandbox that does not find the entry fails its start with `runner_start_failed`. |
+| `HYPERLOOM_RUNNER_CACHE` | no | Where the template mounts the runner cache (read-only is enough). Default `/runner-cache`. It must hold the same directory the app host's `HYPERLOOM_RUNNER_CACHE` names: the sandbox runs `<cache>/<HYPERLOOM_SOURCE_SHA>/bootstrap.sh`, which copies the entry's `source.tar` and wheels into the sandbox's scratch directory (about 40 MB and 170 MB), checks each copy against the pinned manifest as it copies, then runs the runner from the unpacked copy and installs only the copied wheels; nothing it runs is read from the cache after that check, and nothing reaches the network. A sandbox that does not find the entry, or finds one built before entries had `source.tar`, fails its start with `runner_start_failed`. |
 | `HYPERLOOM_SOURCE_SHA`, `HYPERLOOM_RUNNER_CACHE_MANIFEST_SHA256` | set by the session | The session passes both on every create; the template must list them in its accepted create environment. |
 | `HYPERLOOM_FRAMEWORK_SNAPSHOT`, `HYPERLOOM_FRAMEWORK_SESSION_SHA256` | set by the session | When the app host has the image's aiter tables, the session snapshots them below `<session_dir>/framework` and passes both on every create; the template must list them in its accepted create environment, and the sandbox must see the session directory at the same path. Without the snapshot, a test that adds tuned rows to a default table is refused as `spec_rejected`. |
 | `INFERENCEX_REPO` | no | Where the runner fetches InferenceX (default: upstream on GitHub). A sandbox without egress needs a mirror it can read, for example a bare repository on the shared storage. |
@@ -96,6 +96,9 @@ PYTHONPATH=src python -m hyperloom.measure.runner.cache_build --sha <commit> --r
 ```
 
 It prints the entry's `manifest_sha256`, the value a template pins with `HYPERLOOM_RUNNER_CACHE_MANIFEST_SHA256`.
+A finished entry is never modified: a checkout of another Hyperloom version that builds the same commit into the same
+directory is refused (`CacheConflict`, naming both `bootstrap.sh` hashes), because a running campaign has pinned that
+entry's manifest. Build by hand from another checkout into a `HYPERLOOM_RUNNER_CACHE` directory of its own.
 
 On a cluster whose sandboxes mount the shared volume at, say, `/data`, keep the app host's values and set the
 template's `HYPERLOOM_RUNNER_CACHE=/data/hyperloom/runner-cache` (and the mirrors below `/data`).

@@ -29,8 +29,10 @@ from hyperloom.measure.runner.cache_build import (
     runner_wheel_target,
 )
 from hyperloom.measure.runner.cache_layout import (
+    LOCAL_SOURCE_DIR,
     LOCK_FILE,
     MANIFEST_NAME,
+    REQUIREMENTS_FILE,
     LockPin,
     check_cache,
     check_entry,
@@ -38,6 +40,7 @@ from hyperloom.measure.runner.cache_layout import (
     manifest_from_json,
     manifest_to_json,
     requirement_line,
+    stage_entry,
 )
 from hyperloom.measure.runner.tests.bootstrap_rig import Commit, Rig, build_wheel, commit_edit
 
@@ -208,6 +211,23 @@ def test_an_entry_for_one_python_is_refused_by_another_and_its_lock_is_the_one_o
     as_cp310 = replace(manifest, target={**manifest.target, "python_version": "3.10"})
     (entry.path / MANIFEST_NAME).write_text(manifest_to_json(as_cp310), encoding="utf-8")
     assert "the manifest lists bin-pkg==2.0, which the lock does not pin" in check_cache(cache, commit.sha, "", "3.10")
+
+
+def test_the_sandbox_stages_an_entry_with_the_lock_of_its_python_and_refuses_it_to_another(
+    rig: Rig, tmp_path: Path
+) -> None:
+    commit, wheelhouse, digests = _commit_with_a_lock_for_cp314(rig, tmp_path)
+    cache, scratch = tmp_path / "cache", tmp_path / "scratch"
+    ensure_runner_cache(commit.repo, commit.sha, cache, _options("cp314-manylinux_2_28_x86_64", wheelhouse))
+
+    (refused,) = stage_entry(cache, commit.sha, scratch, "", "3.12")
+    assert "wheels are for Python 3.14, but this interpreter is Python 3.12" in refused
+    assert not scratch.exists() or list(scratch.iterdir()) == []
+
+    # The 3.14 lock is read from the sandbox's own copy of the source, and the requirements pin the cp314 wheel.
+    assert stage_entry(cache, commit.sha, scratch, "", "3.14") == []
+    assert (scratch / LOCAL_SOURCE_DIR / _OWN_LOCK).is_file()
+    assert f"bin-pkg==2.0 \\\n    --hash=sha256:{digests['cp314']}" in (scratch / REQUIREMENTS_FILE).read_text()
 
 
 def test_an_entry_for_another_python_is_not_reused_for_this_one(rig: Rig, tmp_path: Path) -> None:

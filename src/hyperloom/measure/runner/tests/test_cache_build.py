@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -36,6 +37,7 @@ from hyperloom.measure.runner.cache_build import (
 from hyperloom.measure.runner.cache_layout import (
     CACHE_ENV,
     MANIFEST_NAME,
+    SOURCE_ARCHIVE,
     CacheError,
     LockPin,
     check_cache,
@@ -100,7 +102,43 @@ def test_a_build_exports_the_commit_with_its_wheels_and_a_manifest_that_checks_o
     manifest = json.loads((entry.path / MANIFEST_NAME).read_text())
     assert manifest["git_tree"] == _git(rig.repo, "rev-parse", f"{rig.cache.sha}^{{tree}}")
     assert manifest["source"]["sha256"] == tree_digest(entry.path / "source").sha256
+    archive = entry.path / SOURCE_ARCHIVE
+    assert manifest["source_archive"] == {"size": archive.stat().st_size, "sha256": _digest(archive)}
+    with tarfile.open(archive) as members:
+        assert {member.name for member in members if member.isfile()} == files
     assert _names(cache) == {rig.cache.sha, f".{rig.cache.sha}.lock"}
+
+
+def _archive_from_git(repo: Path, sha: str, *settings: str) -> bytes:
+    """What ``git archive`` writes for ``sha`` with ``settings`` (``-c name=value`` pairs) over what ``repo`` configures."""
+    return subprocess.run(
+        ["git", *settings, "-C", str(repo), "archive", "--format=tar", sha], check=True, capture_output=True
+    ).stdout
+
+
+_FIXED = ("-c", "tar.umask=0022", "-c", "core.autocrlf=false", "-c", "core.eol=lf")
+
+
+def test_the_source_archive_is_the_same_bytes_for_the_same_commit_whoever_builds_it(rig: Rig, tmp_path: Path) -> None:
+    first = ensure_runner_cache(rig.repo, rig.cache.sha, tmp_path / "first", rig.build_options())
+    # Another builder: a clone whose own settings would change what git archive writes, and another umask.
+    other = tmp_path / "other-repo"
+    shutil.copytree(rig.repo, other)
+    for name, value in (("tar.umask", "0077"), ("core.autocrlf", "true")):
+        _git(other, "config", name, value)
+    assert _archive_from_git(other, rig.cache.sha) != _archive_from_git(rig.repo, rig.cache.sha)
+    umask = os.umask(0o027)
+    try:
+        second = ensure_runner_cache(other, rig.cache.sha, tmp_path / "second", rig.build_options())
+    finally:
+        os.umask(umask)
+    archive = (first.path / SOURCE_ARCHIVE).read_bytes()
+    assert (second.path / SOURCE_ARCHIVE).read_bytes() == archive == _archive_from_git(rig.repo, rig.cache.sha, *_FIXED)
+    first_manifest, second_manifest = (json.loads((e.path / MANIFEST_NAME).read_text()) for e in (first, second))
+    assert first_manifest["source_archive"] == second_manifest["source_archive"]
+    # The unpacked tree keeps the builder's umask: nothing in it is writable by the group or readable by others.
+    modes = {stat.S_IMODE(path.lstat().st_mode) for path in (second.path / "source").rglob("*")}
+    assert modes and all(mode & 0o027 == 0 for mode in modes), sorted(oct(mode) for mode in modes)
 
 
 def test_a_pin_the_index_serves_only_as_a_source_distribution_is_built_and_the_sdist_recorded(
@@ -181,12 +219,28 @@ def _name_another_tree(entry: Path) -> None:
     (entry / MANIFEST_NAME).write_text(json.dumps(manifest))
 
 
+def _damage_archive_keeping_its_size(entry: Path) -> None:
+    archive = entry / SOURCE_ARCHIVE
+    damaged = bytearray(archive.read_bytes())
+    damaged[600] ^= 0xFF
+    archive.write_bytes(bytes(damaged))
+
+
+def _as_an_older_builder_left_it(entry: Path) -> None:
+    (entry / SOURCE_ARCHIVE).unlink()
+    manifest = json.loads((entry / MANIFEST_NAME).read_text())
+    del manifest["source_archive"]
+    (entry / MANIFEST_NAME).write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+
+
 @pytest.mark.parametrize(
     ("damage", "difference"),
     [
         (_edit_source, "is not what the manifest recorded"),
         (_damage_wheel_keeping_its_size, f"wheel {_LOCK_WHEEL} for lock-pkg==1.0 does not match the hash"),
         (_name_another_tree, "its manifest records tree " + "f" * 40),
+        (_damage_archive_keeping_its_size, f"{SOURCE_ARCHIVE} does not match the hash in the manifest"),
+        (_as_an_older_builder_left_it, f"records no {SOURCE_ARCHIVE}: an older Hyperloom built this entry"),
     ],
 )
 def test_an_entry_that_differs_from_what_a_build_writes_is_refused_and_left_as_it_was(

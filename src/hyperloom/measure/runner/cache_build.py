@@ -31,14 +31,21 @@ distribution's own build requirements name is never fetched. The lock must there
   finds the finished entry when it gets the lock and uses it, with no download. The lock is also what keeps two hosts that
   share the cache directory over NFS apart (the cache's file system must support ``flock``, as NFSv4 does).
 - An entry that is already there is used when it is complete and still what a build would write (same commit tree, same
-  wheel target, source and wheels intact); one that differs is never overwritten, the build refuses and names the
-  difference. An entry with no manifest is the remains of a build that did not finish; it is removed and built again.
+  wheel target, source archive, source and wheels intact, this builder's script); one that differs is never modified:
+  the build refuses and names the difference (:class:`CacheConflict`). An entry with no manifest is the remains of a
+  build that did not finish; it is removed and built again.
+- ``<entry>/source.tar`` is the commit's ``git archive`` made with every setting that changes its bytes fixed
+  (``git -c tar.umask=0022 -c core.autocrlf=false -c core.eol=lf archive --format=tar <sha>``), so one commit gives the
+  same bytes on every builder, and anyone with the commit can make it again and compare it with the size and SHA-256 the
+  manifest records. ``<entry>/source`` is that archive unpacked with the builder's umask (``--no-same-permissions``);
+  the builder reads the lock from it, the sandbox runs from its own copy of the archive.
 - ``<entry>/bootstrap.sh`` is this builder's start-up script (:data:`~hyperloom.measure.runner.bootstrap.BOOTSTRAP_SCRIPT`,
-  mode 0755), not the commit's, and the manifest records its SHA-256. An entry that is otherwise what a build would write
-  but whose manifest records another script (a builder of another version made it) or none (it predates the script)
-  gets this builder's script and a manifest that records it, each replaced in one rename, under the lock; the result's
-  ``manifest_sha256`` is that new manifest's. A ``bootstrap.sh`` that does not match the hash its manifest records is
-  a difference like any other, and the build refuses.
+  mode 0755), not the commit's, and the manifest records its SHA-256. The script embeds this builder's own
+  ``bootstrap.py`` and ``cache_layout.py``, so a builder of another Hyperloom version writes another one. An entry whose
+  manifest records another script, or none, is a difference like any other: the build refuses, names both hashes and
+  leaves the entry byte for byte as it was, because a campaign that started on it has pinned its manifest
+  (``HYPERLOOM_RUNNER_CACHE_MANIFEST_SHA256``). Builders of different versions that build one commit use separate
+  ``HYPERLOOM_RUNNER_CACHE`` directories.
 
 The cache must stay readable by the account the sandbox runs as: run the builder with a ``umask`` that leaves new files
 readable by others (``022``).
@@ -72,7 +79,7 @@ import tempfile
 import time
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -81,9 +88,11 @@ from hyperloom.measure.runner.cache_layout import (
     BOOTSTRAP_NAME,
     CACHE_ENV,
     MANIFEST_NAME,
+    SOURCE_ARCHIVE,
     SOURCE_DIR,
     WHEELS_DIR,
     CacheError,
+    FileDigest,
     LockPin,
     Manifest,
     WheelEntry,
@@ -120,6 +129,8 @@ _UTF8 = "utf-8"
 #: ``bootstrap.sh`` is run with ``sh`` and may be run directly: readable and executable by the sandbox's account.
 _SCRIPT_MODE = 0o755
 _BOOTSTRAP_SHA256 = hashlib.sha256(BOOTSTRAP_SCRIPT.encode(_UTF8)).hexdigest()
+#: Every setting of ``git archive`` that changes its bytes, fixed: entry modes 0644 and 0755, no line-ending conversion.
+_ARCHIVE_SETTINGS = ("-c", "tar.umask=0022", "-c", "core.autocrlf=false", "-c", "core.eol=lf")
 _BUILD_TOOLS = ("setuptools", "wheel")
 _NO_INDEX, _FIND_LINKS, _NO_DEPS = "--no-index", "--find-links", "--no-deps"
 _ISOLATED, _ONLY_BINARY, _REQUIRE_HASHES = "--isolated", "--only-binary=:all:", "--require-hashes"
@@ -246,12 +257,16 @@ def _commit_tree(repo: Path, sha: str) -> str:
     return _run(_git(repo, "rev-parse", f"{sha}^{{tree}}"), f"reading the tree of {sha}")
 
 
-def _export_source(repo: Path, sha: str, destination: Path) -> None:
-    destination.mkdir()
-    tarball = destination.parent / "source.tar"
-    _run(_git(repo, "archive", "--format=tar", "-o", str(tarball), sha), f"exporting {sha} from {repo}")
-    _run(["tar", "-x", "--no-same-owner", "-f", str(tarball), "-C", str(destination)], f"unpacking {sha}")
-    tarball.unlink()
+def _export_source(repo: Path, sha: str, entry: Path) -> FileDigest:
+    """Write the commit's archive as ``entry/source.tar`` and unpack it into ``entry/source`` with the builder's umask;
+    the archive's size and SHA-256."""
+    archive, source = entry / SOURCE_ARCHIVE, entry / SOURCE_DIR
+    export = _git(repo, *_ARCHIVE_SETTINGS, "archive", "--format=tar", "-o", str(archive), sha)
+    _run(export, f"exporting {sha} from {repo}")
+    source.mkdir()
+    unpack = ["tar", "-x", "--no-same-owner", "--no-same-permissions", "-f", str(archive), "-C", str(source)]
+    _run(unpack, f"unpacking {sha}")
+    return FileDigest(archive.stat().st_size, file_sha256(archive))
 
 
 def _pip(*args: str, python: Path | None = None) -> list[str]:
@@ -375,32 +390,26 @@ def _check_installable(entry: Path, manifest: Manifest, target: WheelTarget) -> 
         _run(_pip(*install), f"checking that the runner ({interpreter}) can install the entry's wheels")
 
 
-def _replace_file(path: Path, text: str, mode: int | None = None) -> None:
-    """Write ``text`` to ``path`` in one rename, so a reader sees the old file or the new one."""
-    pending = path.with_name(f".{path.name}.tmp-{os.getpid()}-{secrets.token_hex(4)}")
-    try:
-        pending.write_text(text, encoding=_UTF8)
-        if mode is not None:
-            pending.chmod(mode)
-        os.replace(pending, path)
-    except BaseException:
-        pending.unlink(missing_ok=True)
-        raise
-
-
 def _write_bootstrap(entry: Path) -> str:
     """Write this builder's start-up script as ``entry/bootstrap.sh`` and return its SHA-256."""
-    _replace_file(entry / BOOTSTRAP_NAME, BOOTSTRAP_SCRIPT, _SCRIPT_MODE)
-    return file_sha256(entry / BOOTSTRAP_NAME)
+    script = entry / BOOTSTRAP_NAME
+    script.write_text(BOOTSTRAP_SCRIPT, encoding=_UTF8)
+    script.chmod(_SCRIPT_MODE)
+    return file_sha256(script)
 
 
-def _with_this_bootstrap(entry: Path, manifest: Manifest) -> None:
-    """Give a finished entry whose manifest records another script, or none, this builder's script and a manifest
-    that records it; the script first, so the manifest never pins a script that is not there."""
-    if manifest.bootstrap_sha256 == _BOOTSTRAP_SHA256:
-        return
-    refreshed = replace(manifest, bootstrap_sha256=_write_bootstrap(entry))
-    _replace_file(entry / MANIFEST_NAME, manifest_to_json(refreshed))
+def _builder_problems(raw: bytes, manifest: Manifest) -> list[str]:
+    """How a finished entry's manifest, whose file holds ``raw``, differs from the one this builder writes for it."""
+    if manifest.bootstrap_sha256 != _BOOTSTRAP_SHA256:
+        recorded = f"SHA-256 {manifest.bootstrap_sha256}" if manifest.bootstrap_sha256 else "none"
+        return [
+            f"its manifest records {BOOTSTRAP_NAME} {recorded}, this builder writes {BOOTSTRAP_NAME} SHA-256 "
+            f"{_BOOTSTRAP_SHA256}: a builder of another Hyperloom version made it, and a campaign may have pinned its "
+            f"manifest; build into a separate {CACHE_ENV} directory"
+        ]
+    if raw != manifest_to_json(manifest).encode(_UTF8):
+        return ["its manifest is not the text this builder writes for what it records"]
+    return []
 
 
 def _build(repo: Path, sha: str, tree: str, final: Path, options: BuildOptions) -> CacheEntry:
@@ -408,8 +417,8 @@ def _build(repo: Path, sha: str, tree: str, final: Path, options: BuildOptions) 
     pending = final.parent / f".{sha}.tmp-{os.getpid()}-{secrets.token_hex(4)}"
     pending.mkdir()
     try:
+        archive = _export_source(repo, sha, pending)
         source = pending / SOURCE_DIR
-        _export_source(repo, sha, source)
         name = lock_file(source, options.target.python_version)
         lock = source / name
         if not lock.is_file():
@@ -418,7 +427,8 @@ def _build(repo: Path, sha: str, tree: str, final: Path, options: BuildOptions) 
         pins = parse_lock(lock.read_text(encoding=_UTF8), name)
         entries = _wheel_entries(wheels, pins, _download_wheels(lock, wheels, pins, options))
         bootstrap = _write_bootstrap(pending)
-        manifest = Manifest(sha, tree, tree_digest(source), entries, options.target.manifest_form(), bootstrap)
+        target = options.target.manifest_form()
+        manifest = Manifest(sha, tree, tree_digest(source), entries, target, bootstrap, archive)
         _check_installable(pending, manifest, options.target)
         (pending / MANIFEST_NAME).write_text(manifest_to_json(manifest), encoding=_UTF8)
         problems = check_entry(pending, sha, verify_hash=True)
@@ -436,18 +446,19 @@ def _differences(final: Path, sha: str, tree: str, options: BuildOptions) -> lis
     problems = check_entry(final, sha, verify_hash=True)
     if problems:
         return problems
-    manifest = manifest_from_json((final / MANIFEST_NAME).read_text(encoding=_UTF8))
+    raw = (final / MANIFEST_NAME).read_bytes()
+    manifest = manifest_from_json(raw)
     if manifest.git_tree != tree:
         problems.append(f"its manifest records tree {manifest.git_tree}, but the tree of {sha} is {tree}")
     if manifest.target != options.target.manifest_form():
         problems.append(f"its wheels are for {json.dumps(manifest.target)}, not {options.target.manifest_form()}")
-    return problems
+    return problems + _builder_problems(raw, manifest)
 
 
 def _use_or_clear(final: Path, sha: str, tree: str, options: BuildOptions) -> CacheEntry | None:
     """The finished entry at ``final`` if it is what a build would write, ``None`` when there is nothing to use.
 
-    An entry that has no manifest is an unfinished build's remains and is removed.
+    An entry that has no manifest is an unfinished build's remains and is removed. A finished one is never written to.
 
     Raises:
         CacheConflict: When the entry is finished and differs.
@@ -462,7 +473,6 @@ def _use_or_clear(final: Path, sha: str, tree: str, options: BuildOptions) -> Ca
         raise CacheConflict(
             f"{final} is not what a build of {sha} writes, so it is left alone: {'; '.join(problems[:3])}"
         )
-    _with_this_bootstrap(final, manifest_from_json((final / MANIFEST_NAME).read_bytes()))
     return CacheEntry(final, file_sha256(final / MANIFEST_NAME), reused=True)
 
 
