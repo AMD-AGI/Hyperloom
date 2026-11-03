@@ -30,7 +30,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Callable, Sequence
 
-from hyperloom.common.unified_diff import parse_unified_diff, strip_path_components
+from hyperloom_common.unified_diff import parse_unified_diff, strip_path_components
 
 from ._file_lock import best_effort_file_lock
 

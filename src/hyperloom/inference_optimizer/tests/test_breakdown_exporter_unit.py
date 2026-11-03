@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.common.timeutil import iso_z
+from hyperloom_common.timeutil import iso_z
 from hyperloom.inference_optimizer.breakdown import exporter as ex
 from hyperloom.inference_optimizer.breakdown.collectors import sessions
 from hyperloom.inference_optimizer.trace import decision_trace
@@ -123,7 +123,7 @@ def test_decision_trace_failure_reaches_the_caller(monkeypatch, tmp_path):
 
 def test_breakdown_is_still_written_when_the_decision_trace_fails(monkeypatch, tmp_path):
     def explode(_session_dir):
-        raise RuntimeError("join failed")
+        raise ValueError("join failed")
 
     monkeypatch.setattr(decision_trace, "write_session_decision_trace", explode)
 
@@ -135,14 +135,14 @@ def test_breakdown_is_still_written_when_the_decision_trace_fails(monkeypatch, t
 
 def test_decision_trace_failure_is_recorded_in_the_breakdown_warnings(monkeypatch, tmp_path):
     def explode(_session_dir):
-        raise RuntimeError("join failed")
+        raise ValueError("join failed")
 
     monkeypatch.setattr(decision_trace, "write_session_decision_trace", explode)
 
     target = ex.write_breakdown_json(tmp_path)
 
     warnings = json.loads(target.read_text(encoding="utf-8"))["metadata"]["warnings"]
-    assert warnings[-1] == "decision_trace failed: RuntimeError: join failed"
+    assert warnings[-1] == "decision_trace failed: ValueError: join failed"
 
 
 def test_write_breakdown_json_custom_output(tmp_path):

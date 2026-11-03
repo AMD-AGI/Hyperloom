@@ -12,7 +12,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Iterable
 
-from hyperloom.common import aiter_jit_cache
+from hyperloom_common import aiter_jit_cache
 from hyperloom.inference_optimizer.framework_paths import resolve_flydsl_source_roots
 
 from .patch_jit_cache import (
@@ -313,13 +313,14 @@ _IMPORT_PROBE_SCRIPT = """\
 import importlib.util
 import json
 import sys
+import traceback
 
 report = {}
 for name in sys.argv[1:]:
     try:
         spec = importlib.util.find_spec(name)
-    except BaseException as exc:  # noqa: BLE001 - a half-installed parent raises anything
-        report[name] = {"importable": False, "error": f"{type(exc).__name__}: {exc}"}
+    except BaseException:  # noqa: BLE001 - a half-installed parent raises anything
+        report[name] = {"importable": False, "error": traceback.format_exc()}
         continue
     if spec is None:
         report[name] = {"importable": False, "error": "no module spec"}

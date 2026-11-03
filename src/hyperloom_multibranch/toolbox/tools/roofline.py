@@ -87,7 +87,7 @@ async def roofline_handler(payload: dict, *, session_dir: Path) -> dict:
 
 def _unknown_arch(platform: str) -> dict[str, str] | None:
     """The failed result of a GPU TraceLens' perf report has no peaks for; ``None`` when it has some. The analysis gives
-    TraceLens the arch TraceLens bundles, else Hyperloom's (built from ``hyperloom.common.gpu_identity.AMD_GPU_BOARDS``):
+    TraceLens the arch TraceLens bundles, else Hyperloom's (built from ``hyperloom_common.gpu_identity.AMD_GPU_BOARDS``):
     with neither, it would run an arch microbenchmark on the host's GPU or fail inside the report."""
     if resolve_arch_json_path(platform) is not None or build_hyperloom_arch_spec(platform) is not None:
         return None

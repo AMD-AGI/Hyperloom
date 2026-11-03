@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from kernelforge.utils.durable_io import atomic_write_json
+from hyperloom_common.io import DURABLE, JsonFormat, atomic_write_json
 
 
 _OWNER_FILE = ".forge_cache_owner.json"
@@ -89,6 +89,8 @@ def configure_aiter_cache_isolation(
             "max_cache_bytes": policy.max_bytes,
             "target_cache_bytes": policy.target_bytes,
         },
+        fmt=JsonFormat(trailing_newline=True),
+        options=DURABLE,
     )
 
     # cpp_itfs uses AITER_ROOT_DIR/build while compile_ops uses AITER_JIT_DIR/build.
@@ -186,6 +188,23 @@ def _source_shard_isolation(path: Path, owner_pid: int) -> AiterCacheIsolation:
     )
 
 
+def _log_prune_outcome(cache_root: Path, stats: dict[str, Any], max_bytes: int) -> None:
+    """Warn when a prune left the cache over budget, otherwise note what it freed."""
+    if stats["after_bytes"] > max_bytes:
+        log.warning(
+            "AITER cache remains over budget: root=%s size=%d max=%d",
+            cache_root,
+            stats["after_bytes"],
+            max_bytes,
+        )
+    elif stats["deleted_shards"]:
+        log.info(
+            "pruned %d AITER cache shard(s), freeing %d bytes",
+            len(stats["deleted_shards"]),
+            stats["deleted_bytes"],
+        )
+
+
 def prune_aiter_cache_shards(
     cache_root: Path,
     *,
@@ -250,19 +269,7 @@ def prune_aiter_cache_shards(
         except OSError:
             stats["errors"] += 1
 
-    if stats["after_bytes"] > policy.max_bytes:
-        log.warning(
-            "AITER cache remains over budget: root=%s size=%d max=%d",
-            cache_root,
-            stats["after_bytes"],
-            policy.max_bytes,
-        )
-    elif stats["deleted_shards"]:
-        log.info(
-            "pruned %d AITER cache shard(s), freeing %d bytes",
-            len(stats["deleted_shards"]),
-            stats["deleted_bytes"],
-        )
+    _log_prune_outcome(cache_root, stats, policy.max_bytes)
     return stats
 
 
@@ -297,6 +304,8 @@ def activate_aiter_cache_for_sources(
             "aiter_jit_dir": str(aiter_jit_dir),
             "flydsl_cache_dir": str(flydsl_cache_dir),
         },
+        fmt=JsonFormat(trailing_newline=True),
+        options=DURABLE,
     )
     os.environ["AITER_ROOT_DIR"] = str(aiter_root_dir)
     os.environ["AITER_JIT_DIR"] = str(aiter_jit_dir)

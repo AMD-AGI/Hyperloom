@@ -410,25 +410,11 @@ async def test_a_compute_bound_reprofile_that_stays_host_bound_leaves_the_first_
     ("profiles", "analyses", "profile_row", "analysis_row", "reason"),
     [
         (
-            [RuntimeError("cb boot")],
-            [],
-            ("failed", "profile", "RuntimeError"),
-            None,
-            "re-profile raised: RuntimeError('cb boot')",
-        ),
-        (
             [{"status": "succeeded"}],
             [],
             ("failed", "profile_no_trace", "no_trace"),
             None,
             "re-profile produced no usable trace",
-        ),
-        (
-            [_profile_ok(CB_TRACE)],
-            [RuntimeError("tl")],
-            ("succeeded", None, None),
-            ("failed", "trace_analyze", "RuntimeError"),
-            "re-profile raised: RuntimeError('tl')",
         ),
         (
             [_profile_ok(CB_TRACE)],
@@ -467,6 +453,42 @@ async def test_a_compute_bound_reprofile_that_fails_still_rows_its_attempts(
     assert result["status"] == "succeeded"
     assert result["last_profile_trace"] == TRACE
     assert state.last_profile_trace == state.last_trace_analyze["trace_input"] == TRACE
+
+
+@pytest.mark.parametrize(
+    ("profiles", "analyses", "profile_row", "analysis_row", "message"),
+    [
+        ([RuntimeError("cb boot")], [], ("failed", "profile", "RuntimeError"), None, "cb boot"),
+        (
+            [_profile_ok(CB_TRACE)],
+            [RuntimeError("tl")],
+            ("succeeded", None, None),
+            ("failed", "trace_analyze", "RuntimeError"),
+            "tl",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_compute_bound_reprofile_that_raises_crashes_with_its_attempts_rowed(
+    tmp_path, monkeypatch, profiles, analyses, profile_row, analysis_row, message
+):
+    md = tmp_path / "analysis.md"
+    md.write_text("# Executive Summary\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match=f"^{message}$"):
+        await _run(
+            tmp_path, monkeypatch, [_profile_ok(), *profiles], [_ta_ok(md, host_bound=True), *analyses], multi_node=True
+        )
+
+    event = next(e for e in read_timeline_events(tmp_path) if e.get("type") == "roofline")
+    (action,) = event["ext"]["actions"]
+    assert _rows(action, "profile") == [
+        (1, PROFILE_ATTEMPT_INITIAL, "succeeded", True, None, None),
+        (2, PROFILE_ATTEMPT_COMPUTE_BOUND, *profile_row[:1], False, *profile_row[1:]),
+    ]
+    expected_analysis = [(1, ANALYSIS_ATTEMPT_INITIAL, "succeeded", False, None, None)]
+    if analysis_row is not None:
+        expected_analysis.append((2, ANALYSIS_ATTEMPT_COMPUTE_BOUND, analysis_row[0], False, *analysis_row[1:]))
+    assert _rows(action, "analysis") == expected_analysis
 
 
 @pytest.mark.asyncio

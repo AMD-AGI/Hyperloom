@@ -17,10 +17,12 @@ import pytest
 import yaml
 
 from hyperloom.orchestrator.state.shared_state import SharedState
-from hyperloom.common.env import is_truthy
+from hyperloom_common.env import is_truthy
 from hyperloom.orchestrator.actions.executors.baseline import (
     BaselineExecutor,
 )
+
+from hyperloom.inference_optimizer.tests._baseline_fakes import fake_workspace, run_baseline, write_sglang_yaml
 
 _ACCURACY_LOGGER = "hyperloom.orchestrator.actions.executors.benchmark_run.accuracy"
 
@@ -29,53 +31,6 @@ _ACCURACY_LOGGER = "hyperloom.orchestrator.actions.executors.benchmark_run.accur
 def _isolate_leak_root(tmp_path_factory, monkeypatch):
     sandbox = tmp_path_factory.mktemp("isolated_leak_root")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(sandbox))
-
-
-def _write_yaml(path: Path) -> None:
-    cfg = {
-        "benchmark": {
-            "framework": "sglang",
-            "model": "/path/models/Qwen-Qwen3-8B",
-            "precision": "bf16",
-            "run_mode": "local",
-            "envs": {"TP": 1, "CONC": 8, "ISL": 256, "OSL": 256},
-            "timeout_seconds": 600,
-            "profiler": {
-                "torch_profiler": {"enabled": False},
-                "system_profiler": {"enabled": False},
-                "tracelens": {"enabled": False},
-            },
-            "gpu_selection": {"auto": False},
-        }
-    }
-    with path.open("w") as f:
-        yaml.safe_dump(cfg, f)
-
-
-def _fake_workspace(slot: Path, *, tput: float = 1500.0) -> Path:
-    ws = slot / "benchmark_sglang_20260513_010101"
-    ws.mkdir(parents=True)
-    (ws / "benchmark_report.json").write_text(
-        json.dumps(
-            {
-                "success": True,
-                "framework": "sglang",
-                "model": "/path/models/Qwen-Qwen3-8B",
-                "throughput": {
-                    "request_throughput": tput / 256,
-                    "output_throughput": tput,
-                    "total_token_throughput": tput * 2,
-                    "completed_requests": 64,
-                    "duration_seconds": 25.0,
-                },
-                "latency": {
-                    "ttft": {"mean_ms": 100.0, "p99_ms": 120.0},
-                    "e2el": {"mean_ms": 2000.0, "p99_ms": 2300.0},
-                },
-            }
-        )
-    )
-    return ws
 
 
 def _make_ctx(params: dict, *, enablement_mode: str = "off") -> SimpleNamespace:
@@ -155,7 +110,7 @@ def test_eval_crash_routes_to_enablement_no_salvage(tmp_path, monkeypatch):
     """flag on + single-node: an eval crash is stamped as an eval-failure contract with no RUN_EVAL=false salvage retry."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
     base = tmp_path / "base.yaml"
-    _write_yaml(base)
+    write_sglang_yaml(base)
     calls: list[dict] = []
 
     def fake_run(cmd, *args, **kwargs):
@@ -206,7 +161,7 @@ def test_eval_failure_from_an_unreachable_server_is_not_an_enablement_gap(tmp_pa
     """
     monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
     base = tmp_path / "base.yaml"
-    _write_yaml(base)
+    write_sglang_yaml(base)
 
     def fake_run(cmd, *args, **kwargs):
         # Verbatim shape of the real failure: the server was torn down mid-eval, so the client's next request is
@@ -251,7 +206,7 @@ def test_eval_failure_from_an_unreachable_server_is_not_an_enablement_gap(tmp_pa
 
 def test_non_eval_failure_does_not_retry(tmp_path):
     base = tmp_path / "base.yaml"
-    _write_yaml(base)
+    write_sglang_yaml(base)
     calls: list[str] = []
 
     def fake_run(cmd, *args, **kwargs):
@@ -295,11 +250,11 @@ def test_baseline_missing_accuracy_stops_run(tmp_path):
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     base = tmp_path / "base.yaml"
-    _write_yaml(base)
+    write_sglang_yaml(base)
 
     def fake_run(cmd, *args, **kwargs):
         out_idx = cmd.index("--output-dir")
-        _fake_workspace(Path(cmd[out_idx + 1]))  # throughput only, no GSM8K
+        fake_workspace(Path(cmd[out_idx + 1]))  # throughput only, no GSM8K
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
     executor = BaselineExecutor(
@@ -328,31 +283,28 @@ def test_baseline_missing_accuracy_stops_run(tmp_path):
     assert state.stop_reason == "baseline_accuracy_failed"
 
 
+def _eval_failing_run(run_evals: list[str]):
+    """A Magpie run that records each round's RUN_EVAL and fails every round that runs the eval."""
+
+    def fake_run(cmd, *args, **kwargs):
+        cfg = yaml.safe_load(Path(cmd[cmd.index("--benchmark-config") + 1]).read_text())
+        run_eval = str(cfg["benchmark"]["envs"].get("RUN_EVAL", "true")).lower()
+        run_evals.append(run_eval)
+        if run_eval != "false":
+            return subprocess.CompletedProcess(cmd, 1, "", "ERROR: run_eval failed with exit code 1\n")
+        fake_workspace(Path(cmd[cmd.index("--output-dir") + 1]))
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    return fake_run
+
+
 def test_baseline_eval_failure_stops_run_without_burning_a_retry(tmp_path):
     """A genuine baseline whose eval aborted must stop the run IMMEDIATELY."""
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     base = tmp_path / "base.yaml"
-    _write_yaml(base)
+    write_sglang_yaml(base)
     run_evals: list[str] = []
-
-    def fake_run(cmd, *args, **kwargs):
-        cfg_idx = cmd.index("--benchmark-config")
-        out_idx = cmd.index("--output-dir")
-        cfg = yaml.safe_load(Path(cmd[cfg_idx + 1]).read_text())
-        slot = Path(cmd[out_idx + 1])
-        run_eval = str(cfg["benchmark"]["envs"].get("RUN_EVAL", "true")).lower()
-        run_evals.append(run_eval)
-        if run_eval != "false":
-            return subprocess.CompletedProcess(cmd, 1, "", "ERROR: run_eval failed with exit code 1\n")
-        _fake_workspace(slot)
-        return subprocess.CompletedProcess(cmd, 0, "ok", "")
-
-    executor = BaselineExecutor(
-        magpie_python="/opt/venv/bin/python",
-        default_config_path=base,
-        session_dir=tmp_path,
-    )
     state = SharedState(enablement_mode="off")
     ctx = _make_baseline_ctx(
         {
@@ -363,11 +315,7 @@ def test_baseline_eval_failure_stops_run_without_burning_a_retry(tmp_path):
         },
         state,
     )
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        result = _run(executor(ctx))
+    result = run_baseline(base, tmp_path, ctx, _eval_failing_run(run_evals))
 
     # No RUN_EVAL=false salvage round was launched -- the wasted budget is gone.
     assert "false" not in run_evals
@@ -383,26 +331,8 @@ def test_non_baseline_kind_eval_failure_fails_without_retry_or_stop(tmp_path):
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     base = tmp_path / "base.yaml"
-    _write_yaml(base)
+    write_sglang_yaml(base)
     run_evals: list[str] = []
-
-    def fake_run(cmd, *args, **kwargs):
-        cfg_idx = cmd.index("--benchmark-config")
-        out_idx = cmd.index("--output-dir")
-        cfg = yaml.safe_load(Path(cmd[cfg_idx + 1]).read_text())
-        slot = Path(cmd[out_idx + 1])
-        run_eval = str(cfg["benchmark"]["envs"].get("RUN_EVAL", "true")).lower()
-        run_evals.append(run_eval)
-        if run_eval != "false":
-            return subprocess.CompletedProcess(cmd, 1, "", "ERROR: run_eval failed with exit code 1\n")
-        _fake_workspace(slot)
-        return subprocess.CompletedProcess(cmd, 0, "ok", "")
-
-    executor = BaselineExecutor(
-        magpie_python="/opt/venv/bin/python",
-        default_config_path=base,
-        session_dir=tmp_path,
-    )
     state = SharedState()
     task = SimpleNamespace(
         task_id="t-warm",
@@ -415,11 +345,7 @@ def test_non_baseline_kind_eval_failure_fails_without_retry_or_stop(tmp_path):
         },
     )
     ctx = SimpleNamespace(task=task, extra={"shared_state": state})
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        result = _run(executor(ctx))
+    result = run_baseline(base, tmp_path, ctx, _eval_failing_run(run_evals))
 
     assert "false" not in run_evals
     assert result["status"] == "failed"
@@ -1083,11 +1009,11 @@ def test_an_mlperf_baseline_without_a_clean_inline_score_stops_the_session(tmp_p
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     monkeypatch.setenv("HYPERLOOM_AGENTIC_BACKEND", "mlperf")
     base = tmp_path / "base.yaml"
-    _write_yaml(base)
+    write_sglang_yaml(base)
 
     def fake_run(cmd, *args, **kwargs):
         slot = Path(cmd[cmd.index("--output-dir") + 1])
-        ws = _fake_workspace(slot)
+        ws = fake_workspace(slot)
         (ws / "inferencex_result.json").write_text(
             json.dumps({"output_throughput": 1500.0, "request_error_rate": 0.0, "submission_valid": True, **inline}),
             encoding="utf-8",

@@ -15,28 +15,24 @@ from ._workload_envs import (
     MaterializeOptions,
     default_baseline_config,
     materialize_benchmark_config,
-    materialize_config_with_envs,
 )
 from ._grid_base import GridVariant, VariantResult
 from ._profile_setup import SGLANG_PATCH_SERVER_FLAG, VLLM_PATCH_PROFILER_FIELDS
 from ._patch_laying import PatchedServer, is_patched_copy
-from ._server_patcher import ensure_patched_copy, lay_tracelens_patch
+from ._server_patcher import ensure_patched_copy, ensure_vllm_patched_for_tracelens, lay_tracelens_patch
 from ._magpie_patcher import EVAL_OUTPUT_ENV, LM_EVAL_READY_FN, ensure_lm_eval_install_once
 from ._inferencex_patcher import (
     benchmark_serving_path_in,
     ensure_benchmark_lib_patched,
     ensure_benchmark_serving_patched,
 )
-from ._grid_runner import _num_gpus_for_config as num_gpus_for_config
 from ._grid_runner import _run_grid_warmup_enabled as run_grid_warmup_enabled
-from ._grid_runner import GridLaunch, GridRecipe, GridStop, run_grid, sync_benchmark_timeout
+from ._grid_runner import GridLaunch, GridRecipe, GridStop, run_grid
 from ._ray_backend import strip_visible_devices_from_config
 from ._server_lifecycle import REUSE_PORT_DEFAULT, resolve_lifecycle_params, teardown_lifecycle_server
 from ._server_lifecycle import _assign_free_port as assign_free_port
 from ._subprocess_kill import (
-    AGENTX_PREFLIGHT_RETURNCODE,
     COOPERATIVE_REAP_BUDGET_SEC,
-    EVAL_PROBE_UNPATCHABLE_RETURNCODE,
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
     RoundWatch,
@@ -57,6 +53,7 @@ __all__ = [
     "VLLM_PATCH_PROFILER_FIELDS",
     "PatchedServer",
     "ensure_patched_copy",
+    "ensure_vllm_patched_for_tracelens",
     "is_patched_copy",
     "lay_tracelens_patch",
     "ensure_lm_eval_install_once",
@@ -64,10 +61,8 @@ __all__ = [
     "LM_EVAL_READY_FN",
     "PREFIX_CACHE_OFF_ERROR_CLASS",
     "CONTEXT_COPY_REFUSAL",
-    "AGENTX_PREFLIGHT_RETURNCODE",
     "BenchmarkTarget",
     "COOPERATIVE_REAP_BUDGET_SEC",
-    "EVAL_PROBE_UNPATCHABLE_RETURNCODE",
     "GridLaunch",
     "GridRecipe",
     "GridStop",
@@ -95,8 +90,6 @@ __all__ = [
     "explore_executor",
     "harvest_leaked_artifacts",
     "materialize_benchmark_config",
-    "materialize_config_with_envs",
-    "num_gpus_for_config",
     "refuse_cacheless_agentx_baseline",
     "refuse_unpinned_speculative_change",
     "report_executor",
@@ -106,6 +99,5 @@ __all__ = [
     "run_with_session_kill",
     "session_breakdown_executor",
     "strip_visible_devices_from_config",
-    "sync_benchmark_timeout",
     "teardown_lifecycle_server",
 ]

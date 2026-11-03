@@ -14,17 +14,17 @@ from typing import Any
 
 import pytest
 
-from hyperloom.orchestrator.roles import (
-    ClaudeBackend,
+from hyperloom.orchestrator.roles import ClaudeBackend
+from hyperloom.orchestrator.roles.agent_role import default_role_registry
+from hyperloom.orchestrator.roles.base import BackendError, LLMCallFailed, RetryPolicy
+from hyperloom.orchestrator.roles.mcp_emit_intent import (
     EMIT_INTENT_TOOL_NAME,
     EMIT_INTENT_TOOL_QUALIFIED,
     build_emit_intent_server,
+    build_emit_intent_tool_input_schema,
     validate_emit_intent_input,
 )
 from hyperloom.orchestrator.roles import claude as claude_module
-from hyperloom.orchestrator.roles.agent_role import default_role_registry
-from hyperloom.orchestrator.roles.base import BackendError, LLMCallFailed, RetryPolicy
-from hyperloom.orchestrator.roles.mcp_emit_intent import build_emit_intent_tool_input_schema
 from hyperloom.inference_optimizer.protocol.intent import (
     IntentType,
     IntentValidationError,

@@ -12,8 +12,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common import aiter_jit_cache
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common import aiter_jit_cache
+from hyperloom_common.timeutil import now_iso
 
 
 _ALLOWED_KERNEL_DEPLOY_PACKAGES = frozenset({"aiter", "aiter_meta", "sglang", "vllm"})
@@ -380,6 +380,12 @@ def _invalidate_aiter_cpp_itfs_cache(
             }
         )
         return record
+    record.update(_move_cache_dirs_aside(to_move, backup_dir))
+    return record
+
+
+def _move_cache_dirs_aside(to_move: list[Path], backup_dir: Path) -> dict[str, Any]:
+    """Move each cache dir into ``backup_dir/cpp_itfs_cache/``; return the move's status fields."""
     cache_backup_root = backup_dir / "cpp_itfs_cache"
     moved: list[dict[str, str]] = []
     try:
@@ -387,27 +393,20 @@ def _invalidate_aiter_cpp_itfs_cache(
         for src in to_move:
             dst = cache_backup_root / src.name
             if dst.exists():
-                record.update(
-                    {
-                        "status": "failed",
-                        "error": f"cpp_itfs cache backup path already exists: {dst}",
-                        "moved": moved,
-                    }
-                )
-                return record
+                return {
+                    "status": "failed",
+                    "error": f"cpp_itfs cache backup path already exists: {dst}",
+                    "moved": moved,
+                }
             shutil.move(str(src), str(dst))
             moved.append({"src": str(src), "backup_path": str(dst)})
     except (OSError, shutil.Error) as exc:
-        record.update(
-            {
-                "status": "failed",
-                "error": f"shutil.move failed: {exc}",
-                "moved": moved,
-            }
-        )
-        return record
-    record.update({"status": "ok", "moved": moved})
-    return record
+        return {
+            "status": "failed",
+            "error": f"shutil.move failed: {exc}",
+            "moved": moved,
+        }
+    return {"status": "ok", "moved": moved}
 
 
 def verify_cpp_itfs_rebuilt(cache_backup: dict[str, Any]) -> dict[str, Any]:

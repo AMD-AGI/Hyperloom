@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 from hyperloom.common import deepseek_task
-from hyperloom.common.deepseek_session import DeepSeekSessionError, DeepSeekSessionResult
+from hyperloom_common.llm.deepseek_session import DeepSeekSessionError, DeepSeekSessionResult
 
 
 class _FakeSession:

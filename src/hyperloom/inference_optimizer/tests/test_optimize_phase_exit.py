@@ -51,9 +51,7 @@ def test_candidate_exhaustion_dries_the_source_arm_without_a_no_keep_streak():
 @pytest.mark.parametrize("arm", [_DRY_SOURCE, _DRY_CONFIG])
 def test_one_dry_arm_still_flags_a_bottleneck_switch(arm):
     state = optimize_state(**arm)
-    patch_dry, _ = ps._patch_lever_dry(state, {})
-    config_dry, _ = ps._config_lever_dry(state, {})
-    assert patch_dry or config_dry
+    assert ps.per_lever_dryness(state)[1]["switch_bottleneck"] is True
     # No exit, but the signal is available to whatever does exit later.
     assert ps.compute_next_phase(state) is None
 
@@ -107,8 +105,8 @@ def test_the_config_arm_needs_a_trailing_no_keep_streak_to_report_dry():
             {"lever_kind": "config", "outcome": "KEEP", "adopted": True, "gain_pct": 0.01, "cycle": 0},
         ],
     )
-    triggered, evidence = ps._config_lever_dry(state, {})
-    assert triggered is False
+    evidence = ps._config_lever_evidence(state, {})
+    assert ps._framework_plateau(evidence).config_dry is False
     assert evidence["empty_streak"] == 0
 
 

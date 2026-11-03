@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from kernelforge.utils.durable_io import atomic_write_text
+from hyperloom_common.io import DURABLE, atomic_write_text
 from kernelforge.agent_backends.usage import combine_usage_totals
 
 log = logging.getLogger(__name__)
@@ -59,10 +59,10 @@ class UsageLedgerFile:
         self._published: dict[str, Any] = {}
 
     def publish(self, totals: dict[str, Any]) -> None:
-        """Record this process's totals so far. Never raises: accounting must not end a run."""
+        """Record this process's totals so far. An I/O failure is logged, not raised: accounting must not end a run."""
         try:
             self._publish(totals)
-        except Exception as error:  # outermost accounting sink: a ledger write must never break the caller
+        except OSError as error:
             log.debug("usage ledger publish skipped (%s: %s)", type(error).__name__, error, exc_info=True)
 
     def _publish(self, totals: dict[str, Any]) -> None:
@@ -75,7 +75,7 @@ class UsageLedgerFile:
             try:
                 merged = combine_usage_totals(self._current(), delta)
                 merged["updated_at"] = datetime.now().isoformat()
-                atomic_write_text(self.path, json.dumps(merged, indent=2))
+                atomic_write_text(self.path, json.dumps(merged, indent=2), options=DURABLE)
             finally:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
         self._published = dict(totals)

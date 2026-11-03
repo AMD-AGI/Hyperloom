@@ -25,8 +25,8 @@ from hyperloom.common.gain_math import (
     accuracy_passed,
     finite_score,
 )
-from hyperloom.common.env import env_flag, is_truthy
-from hyperloom.common.io import safe_mtime
+from hyperloom_common.env import env_flag, is_truthy
+from hyperloom_common.io import safe_mtime
 from hyperloom.common.perf_metric import is_agentx_mode
 
 log = logging.getLogger(__name__)
@@ -463,6 +463,11 @@ def parse_eval_results(
             "error": qg_out.get("error", "no quality_gate"),
         }
 
+    return _lm_eval_accuracy_result(workspace)
+
+
+def _lm_eval_accuracy_result(workspace: Path) -> dict[str, Any]:
+    """Read the accuracy score from the latest lm-eval results*.json under ``workspace``."""
     search_paths = [
         workspace / "eval_*" / "**" / "results*.json",
         workspace / "**" / "results*.json",

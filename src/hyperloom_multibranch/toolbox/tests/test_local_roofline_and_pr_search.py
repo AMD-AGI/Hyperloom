@@ -24,7 +24,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.common.gpu_identity import AMD_GPU_BOARDS
+from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
 from hyperloom.hosted.mcp_server import McpServer, McpServerConfig
 from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.contracts.toolbox import RequestRejected

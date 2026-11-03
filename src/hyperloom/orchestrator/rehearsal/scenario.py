@@ -5,10 +5,8 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 from hyperloom.common.bringup import LadderStage
@@ -230,26 +228,6 @@ class LaunchScenario:
             return cls(attempts=tuple(LaunchAttempt.from_dict(e) for e in entries), name=name)
         blockers = _entry_list(raw, "blockers")
         return cls(attempts=_peel(blockers, clean_after=bool(raw.get("clean_after", True))), name=name)
-
-    @classmethod
-    def from_file(cls, path: str | Path) -> "LaunchScenario":
-        """Read a scenario from a JSON file.
-
-        Args:
-            path: The scenario file.
-
-        Returns:
-            LaunchScenario: The parsed scenario.
-
-        Raises:
-            OSError: When the file cannot be read.
-            json.JSONDecodeError: When it is not JSON.
-            ScenarioError: When it is JSON but not an object, or not a scenario.
-        """
-        raw = json.loads(Path(path).read_text(encoding="utf-8"))
-        if not isinstance(raw, Mapping):
-            raise ScenarioError(f"scenario {path} is not a JSON object")
-        return cls.from_dict(raw)
 
 
 def _entry_list(raw: Mapping[str, Any], key: str) -> Sequence[Any]:

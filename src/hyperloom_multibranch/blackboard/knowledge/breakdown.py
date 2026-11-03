@@ -41,7 +41,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from hyperloom.common.io import atomic_write_json
+from hyperloom_common.io import atomic_write_json
 from hyperloom.contracts.measurement import BuildPayment
 from hyperloom.orchestrator.knowledge.remote_recipe.models import RemoteWriteResult
 from hyperloom.orchestrator.specialists.resources import (

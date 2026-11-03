@@ -104,11 +104,10 @@ def test_post_init_imports_sdk(monkeypatch):
     assert b.sdk_module is fake
 
 
-def test_post_init_emit_intent_setup_failure(monkeypatch, caplog):
+def test_post_init_emit_intent_setup_failure_fails_construction(monkeypatch):
     monkeypatch.setattr(cl, "build_emit_intent_server", lambda **k: (_ for _ in ()).throw(RuntimeError("boom")))
-    b = _backend()
-    assert b.mcp_server_config is None
-    assert "emit_intent MCP setup failed: boom" in caplog.messages
+    with pytest.raises(RuntimeError, match="^boom$"):
+        _backend()
 
 
 # ---- set_context_provider -------------------------------------------------
@@ -119,12 +118,12 @@ def test_set_context_provider_success(monkeypatch):
     assert b._context_server_config is not None
 
 
-def test_set_context_provider_failure(monkeypatch, caplog):
+def test_set_context_provider_failure_raises(monkeypatch):
     monkeypatch.setattr(cl, "build_context_tools_server", lambda provider, **k: (_ for _ in ()).throw(ValueError("x")))
     b = _backend()
-    b.set_context_provider(SimpleNamespace())
+    with pytest.raises(ValueError, match="^x$"):
+        b.set_context_provider(SimpleNamespace())
     assert b._context_server_config is None
-    assert "context tools MCP setup failed: x" in caplog.messages
 
 
 # ---- _build_options -------------------------------------------------------

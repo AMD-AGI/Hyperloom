@@ -14,7 +14,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.io import append_jsonl
+from hyperloom_common.io import append_jsonl
 
 log = logging.getLogger(__name__)
 
@@ -227,6 +227,30 @@ def load_prepared_records(backup_root: Path | str) -> list[dict[str, Any]]:
     return committed
 
 
+def _restore_target(name: str, record: Mapping[str, Any]) -> None:
+    """Bring one target back to its first preimage and verify the result."""
+    target = Path(name)
+    if not record["existed"]:
+        target.unlink(missing_ok=True)
+        if target.exists():
+            raise OSError(f"created target still present: {name}")
+        return
+    if target.is_symlink():
+        raise ValueError(f"existing backup target became a symlink: {name}")
+    backup = _backup_of(record)
+    digest = record["pre_image_sha256"]
+    if file_digest(target) != digest:
+        if file_digest(Path(backup)) != digest:
+            raise ValueError(f"missing or corrupt backup: {name}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(backup, target)
+    mode = record.get("mode")
+    if mode is not None:
+        target.chmod(mode)
+    if file_digest(target) != digest:
+        raise OSError(f"preimage verification failed: {name}")
+
+
 def restore_records(records: Sequence[Mapping[str, Any]]) -> tuple[list[str], list[str]]:
     """Restore each target's first preimage, verifying before reporting completion.
 
@@ -249,27 +273,8 @@ def restore_records(records: Sequence[Mapping[str, Any]]) -> tuple[list[str], li
         return [], errors
     restored: list[str] = []
     for name, record in reversed(first.items()):
-        target = Path(name)
         try:
-            if record["existed"]:
-                if target.is_symlink():
-                    raise ValueError(f"existing backup target became a symlink: {name}")
-                backup = _backup_of(record)
-                digest = record["pre_image_sha256"]
-                if file_digest(target) != digest:
-                    if file_digest(Path(backup)) != digest:
-                        raise ValueError(f"missing or corrupt backup: {name}")
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(backup, target)
-                mode = record.get("mode")
-                if mode is not None:
-                    target.chmod(mode)
-                if file_digest(target) != digest:
-                    raise OSError(f"preimage verification failed: {name}")
-            else:
-                target.unlink(missing_ok=True)
-                if target.exists():
-                    raise OSError(f"created target still present: {name}")
+            _restore_target(name, record)
             restored.append(name)
         except (OSError, ValueError, TypeError) as exc:
             errors.append(f"{name}: {exc}")
