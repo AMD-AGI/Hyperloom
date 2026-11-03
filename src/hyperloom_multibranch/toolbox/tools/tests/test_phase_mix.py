@@ -3,8 +3,8 @@
 
 """The report's op shares are those of a graded wave: its decode window and its prefill window, weighted by the time each takes.
 
-The real excerpts are those of ``final_probe.py``: a Qwen3-14B-FP8 profile at ISL 1024, OSL 1024, concurrency 64, whose
-``mixed`` window is 52% prefill by time while a wave of that workload is 11% prefill.
+The real excerpts are those of ``final_probe.py``: a profile at equal input and output lengths, whose ``mixed`` window
+is about half prefill by time while a wave of that workload is about a tenth prefill.
 """
 
 from __future__ import annotations
@@ -214,7 +214,8 @@ def test_a_prefill_window_without_its_kernels_leaves_the_decode_window_to_stand_
     real: dict[str, PhaseWindow], split_dir: Path
 ) -> None:
     starved = split_dir / probe.PREFILL_CHUNK
-    shutil.copy(probe.DATA / "b06_window_gpu_events.json.gz", starved)  # the replay lost its kernels: 0.6% of the span
+    # the replay lost its kernels: 0.6% of the span
+    shutil.copy(probe.DATA / "lost_replay_window_gpu_events.json.gz", starved)
     prefill = read_phase_window(PREFILL, starved, split_steps(split_dir), None, list)
 
     mix = graded_mix([prefill, real[DECODE]], WORKLOAD)
@@ -270,7 +271,7 @@ def test_where_the_missing_windows_share_of_the_wave_cannot_be_taken_the_other_s
 def test_with_neither_window_the_shares_are_degraded_and_the_reason_names_both(split_dir: Path) -> None:
     gone = read_phase_window(PREFILL, None, {}, None, list)
     starved = split_dir / probe.DECODE_CHUNK
-    shutil.copy(probe.DATA / "b06_window_gpu_events.json.gz", starved)
+    shutil.copy(probe.DATA / "lost_replay_window_gpu_events.json.gz", starved)
     decode = read_phase_window(DECODE, starved, split_steps(split_dir), None, list)
 
     mix = graded_mix([gone, decode], WORKLOAD)

@@ -30,7 +30,7 @@ from hyperloom_multibranch.contracts.toolbox import RequestRejected, WorkloadKin
 from hyperloom_multibranch.toolbox.planner import HIT_LOGGING_ON, HostedPlanner
 from hyperloom_multibranch.toolbox.table_hits import read_table_hits
 from hyperloom_multibranch.toolbox.tests.helpers import FakeRepo, build, req
-from hyperloom_multibranch.toolbox.tests.kernel_rows_cc2bf0ef import B01_NEW, csv_text
+from hyperloom_multibranch.toolbox.tests.kernel_rows import B01_NEW, csv_text
 from hyperloom_multibranch.toolbox.tests.test_table_hits import MERGED, MISS, ROW_16_34816, Session, a8w8_hit
 
 

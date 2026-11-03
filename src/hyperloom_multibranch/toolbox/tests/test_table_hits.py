@@ -3,9 +3,9 @@
 
 """How many rows of a kernel table a test's server hit, from the server's log, and what a table nothing hit is called.
 
-The rows of the a8w8 tables are those of run ``cc2bf0ef`` (``kernel_rows_cc2bf0ef``), the bf16 rows are the four ``torch``
-rows of the rows-only test (W115) at Qwen3-8B's linear shapes, and the log lines are aiter's own: the bf16 ones are the
-lookups of the W116 server of that test (paths shortened), the a8w8 ones follow the line aiter writes for its CK GEMM, with
+The rows of the a8w8 tables are those of ``kernel_rows``, the bf16 rows are the four ``torch``
+rows of the rows-only GPU test at Qwen3-8B's linear shapes, and the log lines are aiter's own: the bf16 ones are the
+lookups of a server of that test (paths shortened), the a8w8 ones follow the line aiter writes for its CK GEMM, with
 the rows' real kernel names. Each outcome is its own test: a table with hits, a table with none although hits were
 logged ("not exercised"), a table the logs cannot speak for ("not observable"), and no table at all.
 """
@@ -28,7 +28,7 @@ from hyperloom.measure.compile import CompiledEnvironment, LocalBlobStore
 from hyperloom_multibranch.toolbox import table_hits
 from hyperloom_multibranch.toolbox.kernel_artifacts import mint_kernel_artifact
 from hyperloom_multibranch.toolbox.table_hits import describe, read_table_hits, runtime_findings
-from hyperloom_multibranch.toolbox.tests.kernel_rows_cc2bf0ef import B01_HEAD, B01_NEW, ENV, csv_text
+from hyperloom_multibranch.toolbox.tests.kernel_rows import B01_HEAD, B01_NEW, ENV, csv_text
 
 IMAGE = "sha256:" + "a" * 64
 BF16_ENV = "AITER_CONFIG_GEMM_BF16"
@@ -55,7 +55,7 @@ ROW_16_34816 = (16, 34816, 5120)
 ROW_16_5120 = (16, 5120, 17408)
 HEAD_ROW_64_5120 = (64, 5120, 17408)
 
-#: From the W116 server of Qwen3-8B (bf16, TP1): lookups that resolved in the image's own rows (``flydsl``, ``triton``,
+#: From a server of Qwen3-8B (bf16, TP1): lookups that resolved in the image's own rows (``flydsl``, ``triton``,
 #: and ``torch`` rows whose kernel is named ``native``), and one that resolved in a row of the rows put, which are ``torch``
 #: rows whose kernel is named ``torch``.
 _BF16_PREFIX = "[aiter] shape is M:{asked}, N:{n}, K:{k} dtype='torch.bfloat16' otype='torch.bfloat16' bias=False, "
@@ -302,7 +302,7 @@ def test_rows_put_over_the_image_table_are_hit_only_by_lines_that_name_a_row_of_
 def test_an_image_row_of_the_same_libtype_and_shape_but_another_kernel_is_not_a_row_that_was_put(
     session: Session,
 ) -> None:
-    """The W116 server's own ``torch`` rows are named ``native``; a count by libtype alone took them for the rows put."""
+    """The image's own ``torch`` rows are named ``native``; a count by libtype alone took them for the rows put."""
     table = "\n".join([BF16_HEADER, bf16_row(4096, 4096, m=192)]).encode() + b"\n"
     session.put(table, env=BF16_ENV, target="gemm_bf16")
     session.log(IMAGE_TORCH_ROW_HIT)

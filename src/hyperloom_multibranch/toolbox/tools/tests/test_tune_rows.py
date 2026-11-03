@@ -15,7 +15,7 @@ import pytest
 
 from hyperloom.contracts.recipe import KernelKind
 from hyperloom_multibranch.toolbox.kernel_artifacts import mint_kernel_artifact
-from hyperloom_multibranch.toolbox.tests.kernel_rows_cc2bf0ef import ENV, HEADER, SHARED, install
+from hyperloom_multibranch.toolbox.tests.kernel_rows import ENV, HEADER, SHARED, install
 from hyperloom_multibranch.toolbox.tests.kernel_tune_rig import REL_NORM_HEADER, forge_dropped, profile_row, table_text
 from hyperloom.common.outside_facts import FORGE_REL_NORM_ERR_COLUMN
 from hyperloom_multibranch.toolbox.tools.tune_rows import (

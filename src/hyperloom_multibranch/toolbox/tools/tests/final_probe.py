@@ -1,16 +1,15 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Real excerpts of one Qwen3-14B-FP8 profile (SGLang, ISL 1024, OSL 1024, concurrency 64, graphs replayed node by node)
-that the graded mix is checked on.
+"""Real excerpts of one SGLang profile (equal input and output lengths, graphs replayed node by node) that the graded
+mix is checked on.
 
 ``data/final_probe_*`` are cut from the windows TraceLens' splitter wrote for that profile's trace: four consecutive
-decode steps of its ``decode_only`` window (each a 764-kernel graph replay), and two of the five 16384-token prefill steps
-of its ``prefilldecode`` window, each with the launch calls, step annotations and module frames the readers use, and the
-steps the splitter's ``execution_details.json`` lists for them. The whole windows give, by the route (decode 32 steps in
-434.4 ms, prefill 5 steps and 65536 prompt tokens in 1787.0 ms): 11.4% of a wave in prefill, paged attention 25.2%, against
-28.5% of the decode window and 14.1% of the ``mixed`` window (2 prefill steps among 30 decode steps, 52% of its time in
-prefill).
+decode steps of its ``decode_only`` window (each one graph replay), and two of the five prefill steps of its
+``prefilldecode`` window, each with the launch calls, step annotations and module frames the readers use, and the steps
+the splitter's ``execution_details.json`` lists for them. By the route, a wave of the profile's workload spends about a
+tenth of its time in prefill, so paged attention's share of the wave is close to its share of the decode window and well
+above its share of the ``mixed`` window, about half of whose time is its two prefill steps.
 """
 
 from __future__ import annotations

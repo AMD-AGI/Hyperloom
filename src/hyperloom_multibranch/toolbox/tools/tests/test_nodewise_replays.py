@@ -4,7 +4,7 @@
 """A profile taken with the graph replayed node by node has every decode replay's kernels, and the report reads them.
 
 ``data/nodewise_decode4_window_launch_events.json.gz`` is four consecutive decode steps (batch size 64) of a
-Qwen3-14B-FP8 profile of one SGLang server, taken with ``DEBUG_CLR_GRAPH_PACKET_CAPTURE=0``: each step's graph replay
+profile of one SGLang server, taken with ``DEBUG_CLR_GRAPH_PACKET_CAPTURE=0``: each step's graph replay
 has its 764 kernels in the trace. A server of the same configuration with the runtime's default replay of captured
 packets recorded the kernels of the last replay only (1 of 4 in such a window, 1 of 32 in a 32-step one).
 ``nodewise_capture_bs64_launches.json.gz`` is the graph capture of batch size 64 from the first server: the launches

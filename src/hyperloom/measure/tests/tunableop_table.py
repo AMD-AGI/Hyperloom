@@ -11,16 +11,17 @@ from pathlib import Path
 TUNABLEOP_ENV = "PYTORCH_TUNABLEOP_FILENAME"
 #: Cards of a node: a test reads the file of device 0 up to the last of the cards it runs on.
 NODE_CARDS = 8
-#: The head of a TunableOp results file as PyTorch 2.9.1 wrote it on an MI355X, tuning Qwen3-8B at decode batch sizes.
+#: The head of a TunableOp results file in the form PyTorch 2.9.1 writes on gfx950, for GEMMs at a decode batch size;
+#: the times are made up.
 TUNABLEOP_TABLE = (
     "Validator,PT_VERSION,2.9.1\n"
     "Validator,HIP_VERSION,702\n"
     "Validator,HIPBLASLT_VERSION,100201-5b515cf1bc\n"
     "Validator,GCN_ARCH_NAME,gfx950:sramecc+:xnack-\n"
     "Validator,ROCBLAS_VERSION,5.2.0.5b515cf1bc\n"
-    "GemmTunableOp_BFloat16_TN,tn_6144_64_4096_ld_4096_4096_6144,Gemm_Hipblaslt_438622,0.0162337\n"
-    "GemmTunableOp_BFloat16_TN,tn_4096_64_4096_ld_4096_4096_4096,Gemm_Rocblas_440187,0.0143973\n"
-    "GemmTunableOp_BFloat16_TN,tn_24576_64_4096_ld_4096_4096_24576,Gemm_Rocblas_438292,0.0343204\n"
+    "GemmTunableOp_BFloat16_TN,tn_6144_64_4096_ld_4096_4096_6144,Gemm_Hipblaslt_438622,0.02\n"
+    "GemmTunableOp_BFloat16_TN,tn_4096_64_4096_ld_4096_4096_4096,Gemm_Rocblas_440187,0.01\n"
+    "GemmTunableOp_BFloat16_TN,tn_24576_64_4096_ld_4096_4096_24576,Gemm_Rocblas_438292,0.03\n"
 ).encode()
 
 

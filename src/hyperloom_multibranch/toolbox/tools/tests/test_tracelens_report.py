@@ -41,7 +41,7 @@ OPS_SUMMARY = (
 )
 HINTS = {"split_conc": "4", "split_osl": "64", "split_r": "1", "split_isl": "256"}
 ANALYSIS_JSON = {"report_info": {"mode": "deterministic-fallback", "trace_quality": "poor", "warnings": ["collapsed"]}}
-#: What the fake splitter writes as the perf report's window: a Qwen3-14B-FP8 root prefill step, GEMM-led. The shares are
+#: What the fake splitter writes as the perf report's window: the root's prefill step, GEMM-led. The shares are
 #: never its own, whatever the mode that picks it.
 MIXED_WINDOW = "root_window"
 CK_GEMM = probe.CK_GEMM
@@ -383,12 +383,12 @@ async def _with_window(
 async def test_a_window_whose_graph_replay_kernels_are_missing_from_the_trace_gives_no_shares_and_says_why(
     rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A Qwen3-14B-FP8 branch profile: its one decode step is a replay with no kernels, TraceLens skips it with a warning.
+    """A branch profile: its one decode step is a replay with no kernels, TraceLens skips it with a warning.
 
     The window holds the four eager ops around it (11 kernels, 0.05 ms) in an 8.2 ms span, no GEMM, and TraceLens' own
     check passes it (0% of the time is in replay wrapper ops); only the window's own events show 0.6% of the span covered.
     """
-    status, pointer, record = await _with_window(tmp_path, rig, monkeypatch, "b06_window")
+    status, pointer, record = await _with_window(tmp_path, rig, monkeypatch, "lost_replay_window")
     assert status is JobStatus.SUCCEEDED and not pointer.op_shares and not pointer.commit_id
     result = record["result"]
     assert (
@@ -402,8 +402,8 @@ async def test_a_window_whose_graph_replay_kernels_are_missing_from_the_trace_gi
     ("window", "busy", "top", "top_share"),
     [
         ("root_window", 100.0, CK_GEMM, 87.08),
-        ("qwen3_8b_window", 31.28, "at::native::vectorized_elementwise_kernel", 37.34),
-        ("qwen3_8b_tp2_window", 26.57, "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs", 28.62),
+        ("eager_window", 31.28, "at::native::vectorized_elementwise_kernel", 37.34),
+        ("eager_tp2_window", 26.57, "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs", 28.62),
     ],
 )
 async def test_a_real_window_whose_kernels_run_one_after_another_keeps_its_kernel_shares(
@@ -422,13 +422,13 @@ async def test_a_real_window_whose_kernels_run_one_after_another_keeps_its_kerne
 async def test_a_decode_window_with_eager_kernels_stamped_inside_the_graph_replay_gets_kernel_shares_and_a_count(
     rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The Qwen3-14B-FP8 branch b40 (profile 2b7acc33): the brief's top four were copy_, index_put, greedy_sample and add.
+    """A branch's decode step: the brief's top four were copy_, index_put, greedy_sample and add.
 
     The profiler stamps six eager kernels after the one replay as lasting 9 ms each (54.84 ms in all, 50 to 80 us really),
     on the stream the replay's 604 kernels run on. They are left out and counted; the FlyDSL GEMM, the fp8 quantisation and
     paged attention lead a list that sums to 100% of the replay's 7.93 ms.
     """
-    status, pointer, record = await _with_window(tmp_path, rig, monkeypatch, "b40_window", trace="b40_rank_trace")
+    status, pointer, record = await _with_window(tmp_path, rig, monkeypatch, "decode_window", trace="decode_rank_trace")
     assert status is JobStatus.SUCCEEDED and DEGRADED_NOTICE not in pointer.summary
     result = record["result"]
     assert (result["excluded_events"], result["excluded_claimed_ms"], result["window_degraded_reason"]) == (
@@ -453,15 +453,15 @@ async def test_a_decode_window_with_eager_kernels_stamped_inside_the_graph_repla
 async def _with_capture(
     tmp_path: Path, rig: Rig, monkeypatch: pytest.MonkeyPatch, *, capture: bool = True
 ) -> tuple[JobStatus, ToolResultPointer, dict]:
-    """The b40 decode window with the launch calls and frames of its trace, beside the graph capture it replays."""
+    """The decode window with the launch calls and frames of its trace, beside the graph capture it replays."""
     folder = rig.trace_input / "torch_trace" / "graph_capture_profile"
     if capture:
-        shutil.copy(DATA / "b40_capture_execution_details.json", folder / "execution_details.json")
-        shutil.copy(DATA / "b40_capture_bs64_launches.json.gz", folder / "DecodeCudaGraphRunner_bs_64_rank0.json.gz")
+        shutil.copy(DATA / "decode_capture_execution_details.json", folder / "execution_details.json")
+        shutil.copy(DATA / "decode_capture_bs64_launches.json.gz", folder / "DecodeCudaGraphRunner_bs_64_rank0.json.gz")
     monkeypatch.setattr(
-        report, "run_with_session_kill", Shell(decode=decode_of("b40_window", "launch_events"), prefill=None)
+        report, "run_with_session_kill", Shell(decode=decode_of("decode_window", "launch_events"), prefill=None)
     )
-    shutil.copy(DATA / "b40_rank_trace_gpu_events.json.gz", rig.trace)
+    shutil.copy(DATA / "decode_rank_trace_gpu_events.json.gz", rig.trace)
     return await _run(tmp_path, HINTS, rig)
 
 
@@ -501,15 +501,16 @@ async def test_a_decode_window_without_its_graph_capture_keeps_one_gemm_entry_an
 
 
 def _analysed_window(rig: Rig, tmp_path: Path, *, capture: bool = True) -> tuple[Path, Path]:
-    """What an orchestrator analysis leaves: the b40 window it ran on, and its report with the misreporting ops table."""
+    """What an orchestrator analysis leaves: the decode window it ran on, and its report with the misreporting ops
+    table."""
     folder = rig.trace_input / "torch_trace" / "graph_capture_profile"
     if capture:
-        shutil.copy(DATA / "b40_capture_execution_details.json", folder / "execution_details.json")
-        shutil.copy(DATA / "b40_capture_bs64_launches.json.gz", folder / "DecodeCudaGraphRunner_bs_64_rank0.json.gz")
-    shutil.copy(DATA / "b40_rank_trace_gpu_events.json.gz", rig.trace)
+        shutil.copy(DATA / "decode_capture_execution_details.json", folder / "execution_details.json")
+        shutil.copy(DATA / "decode_capture_bs64_launches.json.gz", folder / "DecodeCudaGraphRunner_bs_64_rank0.json.gz")
+    shutil.copy(DATA / "decode_rank_trace_gpu_events.json.gz", rig.trace)
     window = tmp_path / "analysis" / "window.json.gz"
     window.parent.mkdir()
-    shutil.copy(DATA / "b40_window_launch_events.json.gz", window)
+    shutil.copy(DATA / "decode_window_launch_events.json.gz", window)
     table = window.parent / "perf_report_csvs" / "ops_summary.csv"
     table.parent.mkdir()
     table.write_text(OPS_SUMMARY, encoding="utf-8")
@@ -568,7 +569,7 @@ async def test_excluded_events_of_a_kernel_the_trace_never_ran_clean_degrade_the
     rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The same window, but the rank trace it was cut from holds no undisturbed ``greedy_sample``: no price, no shares."""
-    status, pointer, record = await _with_window(tmp_path, rig, monkeypatch, "b40_window", trace="root_window")
+    status, pointer, record = await _with_window(tmp_path, rig, monkeypatch, "decode_window", trace="root_window")
     assert status is JobStatus.SUCCEEDED and not pointer.op_shares and not pointer.commit_id
     result = record["result"]
     assert "no undisturbed instance of " in result["window_degraded_reason"] and result["kernel_shares_path"] == ""

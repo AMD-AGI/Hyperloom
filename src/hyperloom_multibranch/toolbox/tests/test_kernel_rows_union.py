@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""``union_rows``: the rows of two tuned tables of one variable as one table, on the rows of run ``cc2bf0ef``.
+"""``union_rows``: the rows of two tuned tables of one variable as one table, on the rows of ``kernel_rows``.
 
-The run's merges were refused by shape: b09's table held every row of the head's and was refused, b01/b07's and b06's
-shared two shapes and one with the head, tuned to other rows. The tables here are those rows (``kernel_rows_cc2bf0ef``),
+A campaign's merges are refused by shape: b09's table holds every row of the head's and is refused, b01/b07's and b06's
+share two shapes and one with the head, tuned to other rows. The tables here are those rows (``kernel_rows``),
 read against a stand-in for the image's aiter, whose untuned sibling of the table gives the shape key.
 """
 
@@ -26,7 +26,7 @@ from hyperloom_multibranch.toolbox.kernel_artifacts import (
     mint_kernel_artifact,
     union_rows,
 )
-from hyperloom_multibranch.toolbox.tests.kernel_rows_cc2bf0ef import (
+from hyperloom_multibranch.toolbox.tests.kernel_rows import (
     B01_HEAD,
     B01_NEW,
     B01_SHARED,
@@ -48,7 +48,7 @@ B06 = csv_text(B06_SHARED, SHARED[:3], B06_NEW)
 #: b06's rows that no other table has, and three the head has the same.
 B06_AND_HEAD_ROWS = csv_text(SHARED[:3], B06_NEW)
 #: The union of the head's and b09's rows, as the bytes a merge stores.
-B09_UNION_SHA256 = "457c705743cac8fd6276d500fd7905893bfe85998f940cff5306d151796a4a52"
+B09_UNION_SHA256 = "202c39ea837d563d8e5e8a599a7ccc140c30d95d4ef601e3e81a77f9c86fc0e8"
 #: b01's two shapes the head also tuned, and b06's one.
 B01_SHAPES = {("64", "34816", "5120"), ("64", "5120", "17408")}
 B06_SHAPES = {("20480", "7168", "2304")}

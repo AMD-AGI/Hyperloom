@@ -3,9 +3,9 @@
 
 """A kernel name that several modules launch is split by the module, as the trace records it; otherwise the name stays.
 
-``data/*_launch_events.json.gz`` are real windows with what launched their kernels: the Qwen3-14B-FP8 branch b40 decode
-step (one graph replay of 604 kernels and the eager sampling after it) and a slice of a Qwen3-14B-FP8 root prefill step
-(eager kernels). ``b40_capture_bs64_launches.json.gz`` is the graph capture of batch size 64 from the same profile: its
+``data/*_launch_events.json.gz`` are real windows with what launched their kernels: a branch's decode step (one graph
+replay of 604 kernels and the eager sampling after it) and a slice of the root's prefill step (eager kernels).
+``decode_capture_bs64_launches.json.gz`` is the graph capture of batch size 64 from the same profile: its
 kernel launches and the ``nn.Module`` frames that made them, which the replay's kernels do not carry.
 """
 
@@ -45,27 +45,27 @@ def _entry(name: str, launcher: str) -> str:
 
 @pytest.fixture
 def capture(tmp_path: Path) -> Path:
-    """The graph-capture folder of the b40 profile: the manifest TraceLens writes and the trace of batch size 64."""
+    """The graph-capture folder of the decode profile: the manifest TraceLens writes and the trace of batch size 64."""
     folder = tmp_path / "graph_capture_profile"
     folder.mkdir()
-    shutil.copy(DATA / "b40_capture_execution_details.json", folder / CAPTURE_MANIFEST)
-    shutil.copy(DATA / "b40_capture_bs64_launches.json.gz", folder / "DecodeCudaGraphRunner_bs_64_rank0.json.gz")
+    shutil.copy(DATA / "decode_capture_execution_details.json", folder / CAPTURE_MANIFEST)
+    shutil.copy(DATA / "decode_capture_bs64_launches.json.gz", folder / "DecodeCudaGraphRunner_bs_64_rank0.json.gz")
     return folder
 
 
-def _b40(folder: Path | None):
-    return read_launched_window(DATA / "b40_window_launch_events.json.gz", folder)
+def _decode(folder: Path | None):
+    return read_launched_window(DATA / "decode_window_launch_events.json.gz", folder)
 
 
-def _b40_shares(events: list[GpuEvent]) -> dict[str, float]:
-    return kernel_window(events, lambda: read_gpu_events(DATA / "b40_rank_trace_gpu_events.json.gz")).shares
+def _decode_shares(events: list[GpuEvent]) -> dict[str, float]:
+    return kernel_window(events, lambda: read_gpu_events(DATA / "decode_rank_trace_gpu_events.json.gz")).shares
 
 
-def test_the_b40_decode_replays_one_gemm_name_is_four_entries_one_per_projection_of_the_layer(capture: Path) -> None:
+def test_the_decode_replays_one_gemm_name_is_four_entries_one_per_projection_of_the_layer(capture: Path) -> None:
     """Before: ``kernel_gemm_0`` 44.1%, the four FlyDSL GEMMs of a layer under one name."""
-    launched = _b40(capture)
+    launched = _decode(capture)
     assert launched.notes == () and launched.renamed == 420
-    shares = _b40_shares(launched.events)
+    shares = _decode_shares(launched.events)
     assert GEMM not in shares and sum(shares.values()) == pytest.approx(100.0)
     gemms = {name: share for name, share in shares.items() if name.startswith(f"{GEMM} [")}
     assert list(gemms) == [_entry(GEMM, launcher) for launcher in (GATE_UP, DOWN, QKV, OUT)]
@@ -75,7 +75,7 @@ def test_the_b40_decode_replays_one_gemm_name_is_four_entries_one_per_projection
 def test_a_name_with_one_launcher_keeps_its_plain_name_and_a_name_with_several_is_split_everywhere(
     capture: Path,
 ) -> None:
-    shares = _b40_shares(_b40(capture).events)
+    shares = _decode_shares(_decode(capture).events)
     assert PAGED_ATTENTION in shares and "reshape_and_cache_flash" in shares  # one launcher: RadixAttention
     quant = [name for name in shares if name.startswith("aiter::dynamic_per_token_scaled_quant_kernel")]
     assert len(quant) == 4 and all(name.endswith("]") for name in quant)  # one before each GEMM
@@ -84,24 +84,24 @@ def test_a_name_with_one_launcher_keeps_its_plain_name_and_a_name_with_several_i
 
 def test_without_the_capture_the_names_stay_as_the_window_records_them(tmp_path: Path) -> None:
     for folder in (None, tmp_path):
-        launched = _b40(folder)
+        launched = _decode(folder)
         assert [e for e in launched.events if e.name == GEMM and e.launcher] == []
         assert len(launched.notes) == 1 and "left as recorded" in launched.notes[0]
-        assert _b40_shares(launched.events)[GEMM] == pytest.approx(44.1, abs=0.05)  # as W95 gave it
+        assert _decode_shares(launched.events)[GEMM] == pytest.approx(44.1, abs=0.05)  # as the report gave it before
 
 
 def test_the_capture_names_the_replays_slots_because_the_slots_times_follow_it(capture: Path) -> None:
     """The window records 420 of the replay's 604 kernels under the name of a neighbour.
 
-    Taken by its recorded names, ``kernel_gemm_0`` lasts 4 to 58 us (14x apart) and each of the 40 layers' copies of one
-    projection is as likely to be the 4 us one as the 58 us one; taken by the capture's, each projection takes one time:
-    its 40 layers within 35% of each other (the last layer's down projection is the one slot at the replay's tail that
-    does not), qkv 13 us, out 11 us, gate_up 56 us, down 33 us.
+    Taken by its recorded names, ``kernel_gemm_0`` spreads over an order of magnitude and each layer's copy of one
+    projection is as likely to be the shortest as the longest; taken by the capture's, each projection takes one time:
+    its layers within 35% of each other (the last layer's down projection is the one slot at the replay's tail that
+    does not), each projection at its own median.
     """
-    recorded = [e.duration for e in read_window(DATA / "b40_window_launch_events.json.gz").events if e.name == GEMM]
+    recorded = [e.duration for e in read_window(DATA / "decode_window_launch_events.json.gz").events if e.name == GEMM]
     assert max(recorded) / min(recorded) > 14
     by_launcher: dict[str, list[float]] = defaultdict(list)
-    for event in _b40(capture).events:
+    for event in _decode(capture).events:
         if event.name == GEMM:
             by_launcher[event.launcher].append(event.duration)
     assert {launcher: len(times) for launcher, times in by_launcher.items()} == {
@@ -122,21 +122,21 @@ def test_the_capture_names_the_replays_slots_because_the_slots_times_follow_it(c
 
 
 def test_a_replay_in_the_order_its_capture_launched_it_keeps_its_names_and_gets_the_launchers(tmp_path: Path) -> None:
-    """The root and Qwen3-8B windows' replays run in capture order; their names are the capture's already."""
-    launches = read_launches(DATA / "b40_capture_bs64_launches.json.gz")
+    """The root and eager windows' replays run in capture order; their names are the capture's already."""
+    launches = read_launches(DATA / "decode_capture_bs64_launches.json.gz")
     events = [GpuEvent(("4", "3"), 10.0 * i, 10.0 * i + 9.0, launch.kernel, 7) for i, launch in enumerate(launches)]
     window = TraceWindow(events, (Replay(7, 64),))
     folder = tmp_path / "capture"
     folder.mkdir()
-    shutil.copy(DATA / "b40_capture_execution_details.json", folder / CAPTURE_MANIFEST)
-    shutil.copy(DATA / "b40_capture_bs64_launches.json.gz", folder / "DecodeCudaGraphRunner_bs_64_rank0.json.gz")
+    shutil.copy(DATA / "decode_capture_execution_details.json", folder / CAPTURE_MANIFEST)
+    shutil.copy(DATA / "decode_capture_bs64_launches.json.gz", folder / "DecodeCudaGraphRunner_bs_64_rank0.json.gz")
     result = relabel_replays(window, folder)
     assert (result.renamed, result.notes) == (0, ())
     assert [e.launcher for e in result.events] == [launch.launcher for launch in launches]
 
 
 def test_a_launcher_is_the_innermost_module_and_the_one_around_it_without_instance_numbers() -> None:
-    launches = read_launches(DATA / "b40_capture_bs64_launches.json.gz")
+    launches = read_launches(DATA / "decode_capture_bs64_launches.json.gz")
     assert len(launches) == 604
     assert {launch.launcher for launch in launches if launch.kernel == GEMM} == {GATE_UP, DOWN, QKV, OUT}
     assert launches[-1].launcher == "LogitsProcessor" and launches[0].launcher == "Qwen3Model.VocabParallelEmbedding"
@@ -154,15 +154,16 @@ def test_a_launcher_is_the_innermost_module_and_the_one_around_it_without_instan
 def test_a_replay_without_a_capture_to_read_is_left_as_recorded_with_the_reason(
     capture: Path, batch_size: int | None, why: str
 ) -> None:
-    window = read_window(DATA / "b40_window_launch_events.json.gz")
+    window = read_window(DATA / "decode_window_launch_events.json.gz")
     result = relabel_replays(replace(window, replays=(Replay(223967, batch_size),)), capture)
     assert result.events == window.events and result.renamed == 0
     assert result.notes == (f"the replay of correlation 223967 is left as recorded: {why}",)
 
 
 def test_a_replay_that_lost_a_kernel_is_not_paired_by_position(capture: Path) -> None:
-    """The window's profiler drops kernels (it lost every kernel of the b06 replay): a shorter replay is no capture's."""
-    window = read_window(DATA / "b40_window_launch_events.json.gz")
+    """The window's profiler drops kernels (it lost every kernel of another branch's replay): a shorter replay is no
+    capture's."""
+    window = read_window(DATA / "decode_window_launch_events.json.gz")
     lost = next(i for i, e in enumerate(window.events) if e.correlation == 223967 and e.name == GEMM)
     short = replace(window, events=[e for i, e in enumerate(window.events) if i != lost])
     result = relabel_replays(short, capture)
@@ -171,7 +172,7 @@ def test_a_replay_that_lost_a_kernel_is_not_paired_by_position(capture: Path) ->
 
 
 def test_a_replay_on_two_streams_is_not_paired_by_position(capture: Path) -> None:
-    window = read_window(DATA / "b40_window_launch_events.json.gz")
+    window = read_window(DATA / "decode_window_launch_events.json.gz")
     first = next(i for i, e in enumerate(window.events) if e.correlation == 223967)
     events = list(window.events)
     events[first] = replace(events[first], stream=("4", "9"))
@@ -181,7 +182,7 @@ def test_a_replay_on_two_streams_is_not_paired_by_position(capture: Path) -> Non
 
 def test_a_capture_that_cannot_be_read_is_a_note_not_a_failure(capture: Path) -> None:
     (capture / "DecodeCudaGraphRunner_bs_64_rank0.json.gz").write_bytes(b"not gzip")
-    result = _b40(capture)
+    result = _decode(capture)
     assert "is not a readable trace" in result.notes[0] and result.renamed == 0
 
 

@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A succeeded test carries how much of each kernel table its recipe loads the test's server hit (#109 item 4).
+"""A succeeded test carries how much of each kernel table its recipe loads the test's server hit.
 
 The executor is the real one over the hosted backend and the local sandbox provider; the compiled environment is a real
-one that loads a table of the rows of run ``cc2bf0ef``, and the server log the sandbox's rounds leave in the landed output
-holds aiter's hit lines. What is read from the result is what the blackboard stored.
+one that loads a table of the rows of ``kernel_rows``, and the server log the sandbox's rounds leave in the landed
+output holds aiter's hit lines. What is read from the result is what the blackboard stored.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from hyperloom_multibranch.toolbox.hosted_executor import HostedExecutor
 from hyperloom_multibranch.toolbox.kernel_artifacts import mint_kernel_artifact
 from hyperloom_multibranch.toolbox.mcp_tools import jsonable
 from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, build, req
-from hyperloom_multibranch.toolbox.tests.kernel_rows_cc2bf0ef import B01_NEW, ENV, csv_text
+from hyperloom_multibranch.toolbox.tests.kernel_rows import B01_NEW, ENV, csv_text
 from hyperloom_multibranch.toolbox.tests.test_hosted_executor import (  # noqa: F401  (rig is a fixture)
     CANDIDATE,
     OK,

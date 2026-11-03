@@ -3,7 +3,7 @@
 
 """The op shares are a complete per-op (or per-kernel) GPU time table, not the few optimisation tasks of TraceLens' report.
 
-``data/tracelens_ops_summary.csv`` is a real ``ops_summary.csv`` of a TraceLens perf report (Qwen3-8B on SGLang, TP2,
+``data/tracelens_ops_summary.csv`` is a real ``ops_summary.csv`` of a TraceLens perf report (an SGLang server at TP2,
 one steady-state window). The report route names a kernel table of its own, which is read instead of it.
 """
 
