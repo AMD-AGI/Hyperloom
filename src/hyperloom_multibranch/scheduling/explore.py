@@ -353,6 +353,7 @@ class Explorer:
             roster=self._roster.entries(),
             progress=progress,
             integration_value=integration_value,
+            roofline_ceiling=snapshot.profile.roofline_ceiling if snapshot.profile is not None else {},
             metric=self._metric,
             opening=opening,
             free_slots=self._roster.free_slots(),

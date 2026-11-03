@@ -116,6 +116,7 @@ class JudgeView:
     and ``behind_integration_pct`` maps a running specialist branch to how far its head lies behind the integration
     head, in percent of the root's value. ``stranded_leads`` are the branches whose head leads the integration head by
     more than the bar while commits of theirs failed to merge, the largest lead first. ``profile_running`` is whether a profile of the integration head runs.
+    ``roofline_ceiling`` is the session profile's bound on each metric, empty when PRELUDE modelled none.
     ``gpu_hours_used`` are the GPU hours of the session's tests that have a result plus the card time any lease holds
     outside them, an open one up to the reading: the root's baseline is among them, a test withdrawn before its result
     is not. ``explore_gpu_hours`` is where EXPLORE ends under ``--max-gpu-hours``, ``None`` without a limit.
@@ -138,6 +139,7 @@ class JudgeView:
     roster: tuple[BranchEntry, ...]
     progress: tuple[BranchProgress, ...]
     integration_value: Mapping[str, float]
+    roofline_ceiling: Mapping[str, float]
     metric: str
     opening: bool
     free_slots: int
@@ -326,6 +328,14 @@ def _hours(hours: float | None) -> float | None:
     return None if hours is None else round(hours, _GPU_HOURS_DIGITS)
 
 
+def _headroom_pct(view: JudgeView) -> float | None:
+    value = view.integration_value.get(view.metric)
+    ceiling = view.roofline_ceiling.get(view.metric)
+    if value is None or not ceiling:
+        return None
+    return (ceiling - value) / ceiling * 100.0
+
+
 def _progress_row(progress: BranchProgress | None) -> dict[str, object]:
     if progress is None:
         return {}
@@ -432,7 +442,11 @@ def render_prompt(view: JudgeView) -> str:
         "toolbox_headroom": view.widening.toolbox_headroom,
         "pending": [_pending_row(pending, view.now) for pending in view.pending],
         "session_remaining_seconds": round(view.session_remaining_seconds),
-        "integration": {"recorded_value": dict(view.integration_value)},
+        "integration": {
+            "recorded_value": dict(view.integration_value),
+            "roofline_ceiling": dict(view.roofline_ceiling),
+            "headroom_pct": _headroom_pct(view),
+        },
         "spend": {
             "gpu_hours_used": round(view.gpu_hours_used, _GPU_HOURS_DIGITS),
             "explore_gpu_hours": _hours(view.explore_gpu_hours),

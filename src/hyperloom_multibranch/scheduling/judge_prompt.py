@@ -101,7 +101,9 @@ the slots left open your branches. You do not admit them; stop a branch that is 
 start.
 {{spend}}
 A branch's basis says what its expected gain rests on: its own trend, the floor of a direction still being observed,
-or the floor of a branch too new to have a trend; trust a measured trend over a floor.
+the floor of a branch too new to have a trend, or the roofline headroom that capped it; trust a measured trend over a
+floor. integration.headroom_pct is how far the integration head's recorded value lies below roofline_ceiling, the bound
+the workload's roofline model puts on the metric, in percent of that bound; it is null when no bound was modelled.
 {{stall}}
 A branch's similar_to lists the other running branches whose own change since the commit they last followed, their
 start commit or the integration commit they were re-rooted onto, is much the same as its own, with score the share of
