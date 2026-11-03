@@ -81,21 +81,6 @@ def _fit_m_values_to_budget(
     return picked
 
 
-def _spread_order(m_values: list[int]) -> list[int]:
-    """``m_values`` ordered so every prefix spreads over the whole range: the largest first, as for a one-M budget,
-    then whichever is farthest from those already taken, so a deadline that ends the chunks early cuts coverage evenly.
-    """
-    if not m_values:
-        return []
-    picked = [len(m_values) - 1]
-    rest = list(range(len(m_values) - 1))
-    while rest:
-        best = max(rest, key=lambda i: (min(abs(i - j) for j in picked), -i))
-        picked.append(best)
-        rest.remove(best)
-    return [m_values[i] for i in picked]
-
-
 def _generate_untuned_csv(
     nk_shapes: list[tuple[int, int]],
     m_values: list[int],
@@ -488,7 +473,7 @@ class SglangDenseBf16Tuner(BaseTuner):
             self.ctx.thorough,
             cap or "none",
         )
-        return _generate_untuned_csv(nk_shapes, _spread_order(m_values), self.work_dir, dtype=dtype_str)
+        return _generate_untuned_csv(nk_shapes, m_values, self.work_dir, dtype=dtype_str)
 
     def _tail(self, untuned_csv: Path, tuned_csv: Path, profile_csv: Path, aiter_timeout: int) -> list[str]:
         """The tuner script's arguments for one chunk."""
