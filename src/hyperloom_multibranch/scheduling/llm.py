@@ -39,10 +39,10 @@ COMPLETION_MAX_TOKENS = 8192
 MB_LLM_CONNECT_TIMEOUT_SECONDS = 15.0
 MB_LLM_READ_TIMEOUT_SECONDS = 120.0
 # A patch resolver's reply carries a whole unified diff, far longer than a judgement: under the judge's 8192-token cap
-# the 4aef3318 session lost every one of a branch's six cumulative patches to replies cut off at the cap.
+# a session lost every one of a branch's cumulative patches to replies cut off at the cap.
 MB_RESOLVER_MAX_TOKENS = 32768
 # The slowest output rate a resolver reply is waited for at. The read timeout follows from it, so a reply the cap allows
-# arrives before the timeout ends it; ad4ab4d9 lost two merge candidates to a read timeout sized for a judgement.
+# arrives before the timeout ends it; a read timeout sized for a judgement once lost merge candidates.
 _SLOWEST_OUTPUT_TOKENS_PER_SECOND = 40.0
 MB_RESOLVER_READ_TIMEOUT_SECONDS = MB_RESOLVER_MAX_TOKENS / _SLOWEST_OUTPUT_TOKENS_PER_SECOND
 

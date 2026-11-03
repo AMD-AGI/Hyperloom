@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A person's review of the session's agent map, before the agent branches open (ArborDevelopment #30).
+"""A person's review of the session's agent map, before the agent branches open.
 
 With the review on (the default; ``run --no-review-gate`` turns it off), a session with Arbor agents waits once their
 map is made, before it splits the map and before their branches open, holding no lease for it, and writes two files in
