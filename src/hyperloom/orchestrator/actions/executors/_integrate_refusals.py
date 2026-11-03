@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.coerce import to_float, to_str_list
+from hyperloom_common.coerce import to_float, to_str_list
 from hyperloom.common.gain_math import incremental_gain_pct
 from hyperloom.common.perf_metric import (
     GRADED_INTVTY,

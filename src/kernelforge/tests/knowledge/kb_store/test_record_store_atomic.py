@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.utils import durable_io
+from hyperloom_common import io as shared_io
 from kernelforge.knowledge.kb_store import record_store
 
 CANONICAL_ID = "kernel:flydsl:softmax:vllm:1.0:flydsl:mi355x"
@@ -102,7 +102,7 @@ def test_failed_champion_write_preserves_the_old_pointer(
     store.promote(CANONICAL_ID, "old-session", 2.0)
     if failure == "json":
         monkeypatch.setattr(
-            durable_io.os,
+            shared_io.os,
             "fsync",
             lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("champion json failed")),
         )

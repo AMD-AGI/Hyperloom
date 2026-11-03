@@ -36,7 +36,7 @@ from kernelforge.workflows.forge_loop.iteration.merge_candidates import (
     select_merge_pair,
 )
 from kernelforge.workflows.forge_loop.campaign.run_state import make_event
-from kernelforge.utils.durable_io import atomic_write_json, atomic_write_text
+from hyperloom_common.io import DURABLE, JsonFormat, atomic_write_json, atomic_write_text
 from kernelforge.utils.git import git
 from kernelforge.config.edit_policy import FORGE_PROTECTED_PATHS
 
@@ -419,7 +419,12 @@ class LaneRuntimeMixin:
                 path.unlink(missing_ok=True)
                 return
             path.parent.mkdir(parents=True, exist_ok=True)
-            atomic_write_json(path, {"candidates": [lane.to_dict() for lane in self._lane_queue]})
+            atomic_write_json(
+                path,
+                {"candidates": [lane.to_dict() for lane in self._lane_queue]},
+                fmt=JsonFormat(trailing_newline=True),
+                options=DURABLE,
+            )
         except OSError as error:
             print(
                 f"  [lanes] queue not durable ({error}); the "
@@ -468,7 +473,7 @@ class LaneRuntimeMixin:
             if stale not in keep:
                 stale.unlink()
         for lane, plan in enumerate(published, start=1):
-            atomic_write_text(self._lane_plan_path(iteration, lane), plan + "\n")
+            atomic_write_text(self._lane_plan_path(iteration, lane), plan + "\n", options=DURABLE)
         atomic_write_json(
             manifest,
             {
@@ -476,6 +481,8 @@ class LaneRuntimeMixin:
                 "lanes": len(published),
                 "agent_profile_id": self.run_state.agent_relay.active_profile_id,
             },
+            fmt=JsonFormat(trailing_newline=True),
+            options=DURABLE,
         )
         return self._lane_plan_path(iteration, 1)
 
@@ -551,11 +558,15 @@ class LaneRuntimeMixin:
         atomic_write_json(
             root / ROUND_CONTEXT,
             context.to_prompt_dict(),
+            fmt=JsonFormat(trailing_newline=True),
+            options=DURABLE,
         )
         if result.dispatch_plan is not None:
             atomic_write_json(
                 root / "dispatch.json",
                 result.dispatch_plan.to_dict(),
+                fmt=JsonFormat(trailing_newline=True),
+                options=DURABLE,
             )
         atomic_write_json(
             root / "specialists.json",
@@ -563,13 +574,15 @@ class LaneRuntimeMixin:
                 "analysis_commit": context.analysis_commit,
                 "outcomes": [outcome.to_dict() for outcome in result.specialist_outcomes],
             },
+            fmt=JsonFormat(trailing_newline=True),
+            options=DURABLE,
         )
         diagnostics = dict(result.structured_output_diagnostics or {})
         artifact_paths = {}
         draft = str(result.optimization_plan_draft or "").strip()
         if draft:
             draft_path = root / "draft_plan.md"
-            atomic_write_text(draft_path, draft + "\n")
+            atomic_write_text(draft_path, draft + "\n", options=DURABLE)
             artifact_paths["draft_plan"] = str(draft_path.resolve())
         critic = result.plan_critic
         if critic is not None:
@@ -577,6 +590,7 @@ class LaneRuntimeMixin:
             atomic_write_text(
                 critic_path,
                 critic.render_artifact().rstrip() + "\n",
+                options=DURABLE,
             )
             artifact_paths["critic_review"] = str(critic_path.resolve())
         if artifact_paths:
@@ -586,6 +600,8 @@ class LaneRuntimeMixin:
             atomic_write_json(
                 root / "structured_output.json",
                 diagnostics,
+                fmt=JsonFormat(trailing_newline=True),
+                options=DURABLE,
             )
 
     def _record_orchestration_final_plan(
@@ -604,7 +620,7 @@ class LaneRuntimeMixin:
         if not isinstance(artifact_paths, dict):
             return
         artifact_paths["final_plan"] = str(plan_path.resolve())
-        atomic_write_json(diagnostics_path, diagnostics)
+        atomic_write_json(diagnostics_path, diagnostics, fmt=JsonFormat(trailing_newline=True), options=DURABLE)
 
     def _record_probe_hazard(self, iteration: int, result) -> None:
         """Turn a probe the analysis phase could not clear into a live hazard."""

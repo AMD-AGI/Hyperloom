@@ -3,7 +3,8 @@
 
 """Where the run's code emits a progress event: one call, to whichever implementation fills the ``events`` socket.
 
-Best effort by construction: an event that cannot be emitted is logged at debug level and the run goes on.
+An event with no ``events`` socket to take it is logged at debug level and the run goes on; the implementation owns
+its own write failures.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ import threading
 import time
 from typing import Any, Mapping
 
+from hyperloom.plugs.errors import PlugError
 from hyperloom.plugs.host import active
 
 log = logging.getLogger(__name__)
@@ -49,10 +51,10 @@ _budget = _Throttle(BUDGET_INTERVAL_SEC)
 
 
 def emit(event_type: str, data: Mapping[str, Any]) -> None:
-    """Hand one event to the run's ``events`` implementation; never raises."""
+    """Hand one event to the run's ``events`` implementation, if one is started."""
     try:
         active().get("events").emit(event_type, data)  # type: ignore[attr-defined]
-    except Exception:
+    except PlugError:
         log.debug("could not emit %s", event_type, exc_info=True)
 
 

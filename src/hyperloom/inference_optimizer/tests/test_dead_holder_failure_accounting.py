@@ -172,6 +172,7 @@ class _ReapStub:
         self.gpu_specialist_pool = SimpleNamespace(release=self._noop_async)
         self.bus = SimpleNamespace(append_and_seq=self._noop_async, record_observation=self._noop_async)
         self.shared_state = SimpleNamespace(phase="PRELUDE", macro_cycle=0)
+        self.recipe_journal = SimpleNamespace(fact_write_hook=self._noop_async)
         _outer = self
         self.writeback = SimpleNamespace(
             handle_unpromotable_result=lambda task, result: _outer._handle_unpromotable_result(task, result)

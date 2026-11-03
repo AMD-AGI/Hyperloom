@@ -7,35 +7,19 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.orchestrator.roles import (
-    Backend,
-    MockBackend,
-    ScriptedPlan,
-)
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.state.objective import TargetGainObjective
-from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.knowledge.recipe_journal import (
     workload_kb_tags,
 )
 from hyperloom.orchestrator.loop.dispatcher import HeldLeases
 
-
-def _heartbeat() -> Intent:
-    return Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"})
-
-
-def _silent_plan() -> ScriptedPlan:
-    return ScriptedPlan(turns=[], default_intent=_heartbeat())
-
-
-def _build_backends() -> dict[str, Backend]:
-    return {name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "critic")}
+from .conftest import make_coordinator
 
 
 @pytest.fixture
 def coord(session_dir) -> Coordinator:
-    return Coordinator(session_dir, backends=_build_backends())
+    return make_coordinator(session_dir)
 
 
 # -- The specialist wall-clock deadline ------------------------------------
@@ -293,13 +277,6 @@ def test_source_session_id_prefers_recipe_kb(coord: Coordinator) -> None:
     assert coord.recipe_journal._source_session_id() == "recipe-kb-99"
     coord.shared_state.recipe_kb_session_id = ""
     assert coord.recipe_journal._source_session_id() == coord.session_dir.name
-
-
-def test_kernel_enabled(coord: Coordinator) -> None:
-    coord.shared_state.kernel_enabled = True
-    assert coord.phase_machine.kernel_enabled() is True
-    coord.shared_state.kernel_enabled = False
-    assert coord.phase_machine.kernel_enabled() is False
 
 
 def test_internal_analysis_kind(coord: Coordinator) -> None:

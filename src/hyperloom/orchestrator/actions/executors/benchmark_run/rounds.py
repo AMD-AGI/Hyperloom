@@ -17,7 +17,7 @@ import yaml
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.gain_math import incremental_gain_pct
 from hyperloom.common.perf_metric import is_agentx_mode
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.timeutil import now_iso
 from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
     ROUND_ACCURACY,
     ROUND_MEASURE,
@@ -67,6 +67,32 @@ _BENCHMARK_REPORT_NAME = "benchmark_report.json"
 # climbed 14,202 -> 19,374 -> 22,425 tok/s across three rounds of one unchanged config, i.e. +36% into round 2 and
 # another +16% into round 3.
 _COLD_START_DELTA_WARN_PCT = 25.0
+
+
+def _cold_anchor_after_reaped_measure(warmup_result: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    """Keep the warmup as the baseline when the run's clock stopped the measured round mid-flight."""
+    log.warning(
+        "baseline_executor: the run's clock stopped the measured round mid-flight, so the warmup "
+        "stands as the baseline. It is the cold anchor a single-round baseline would have produced, "
+        "and the marker below says so.",
+    )
+    dropped = {"reason": "measure_round_reaped_by_the_run", "measure_round_error": result.get("error")}
+    return _cold_anchor_from_warmup(warmup_result, dropped=dropped)
+
+
+def _record_accuracy_round(result: dict[str, Any], accuracy_result: dict[str, Any]) -> None:
+    """Fold the deferred accuracy round's outcome into the measured round's result."""
+    result["accuracy_stage"] = {
+        "status": accuracy_result.get("status"),
+        "error_class": accuracy_result.get("error_class"),
+        "workspace": accuracy_result.get("workspace"),
+    }
+    if accuracy_result.get("status") != "succeeded":
+        result.setdefault("nonfatal_warnings", []).append("post_measure_accuracy_failed")
+        return
+    for key in ("accuracy", "accuracy_task", "accuracy_metric", "accuracy_source"):
+        if accuracy_result.get(key) is not None:
+            result[key] = accuracy_result[key]
 
 
 class _BenchmarkRoundsMixin:
@@ -271,7 +297,16 @@ class _BenchmarkRoundsMixin:
             },
         )
         stopped_result["budget_shortfall"] = evidence
-        if evidence.get("one_more_measurement_sec"):
+        if evidence.get("baseline_failures_this_leg"):
+            log.warning(
+                "baseline_executor: the baseline has failed %d time(s) this leg and PRELUDE has spent "
+                "everything outside the %.0fs optimization reserve (%.0fs usable), so no retry "
+                "is booted. The phase closes on this same line.",
+                evidence.get("baseline_failures_this_leg", 0),
+                evidence.get("optimization_reserve_sec", 0.0),
+                evidence.get("session_usable_sec", 0.0),
+            )
+        elif evidence.get("one_more_measurement_sec"):
             log.warning(
                 "baseline_executor: this round (%.0fs) and one variant to read "
                 "against it (%.0fs) need %.0fs, and %.0fs is left (bound=%s), so "
@@ -388,13 +423,7 @@ class _BenchmarkRoundsMixin:
                 return result
             # The gate before this pass admitted it and the run's clock took it anyway -- the pass overran what it
             # was priced at.
-            log.warning(
-                "baseline_executor: the run's clock stopped the measured round mid-flight, so the warmup "
-                "stands as the baseline. It is the cold anchor a single-round baseline would have produced, "
-                "and the marker below says so.",
-            )
-            dropped = {"reason": "measure_round_reaped_by_the_run", "measure_round_error": result.get("error")}
-            return _cold_anchor_from_warmup(warmup_result, dropped=dropped)
+            return _cold_anchor_after_reaped_measure(warmup_result, result)
         self._record_measured_against_warmup(result, warmup_result)
         if defer_accuracy:
             await self._settle_deferred_accuracy(attempt, output_dir, hot_round, result)
@@ -530,17 +559,7 @@ class _BenchmarkRoundsMixin:
             run_eval=True,
             **hot_round,
         )
-        result["accuracy_stage"] = {
-            "status": accuracy_result.get("status"),
-            "error_class": accuracy_result.get("error_class"),
-            "workspace": accuracy_result.get("workspace"),
-        }
-        if accuracy_result.get("status") != "succeeded":
-            result.setdefault("nonfatal_warnings", []).append("post_measure_accuracy_failed")
-            return
-        for key in ("accuracy", "accuracy_task", "accuracy_metric", "accuracy_source"):
-            if accuracy_result.get(key) is not None:
-                result[key] = accuracy_result[key]
+        _record_accuracy_round(result, accuracy_result)
 
     def _write_lifecycle_config(
         self,

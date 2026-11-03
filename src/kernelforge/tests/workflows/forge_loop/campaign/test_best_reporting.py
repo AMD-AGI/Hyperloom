@@ -257,10 +257,10 @@ def test_failed_manifest_replace_preserves_previous_best(tmp_path, monkeypatch):
     before = manifest_path.read_bytes()
     original = reporting.atomic_write_text
 
-    def fail_manifest(path, text):
+    def fail_manifest(path, text, **kwargs):
         if path == manifest_path:
             raise OSError("simulated manifest failure")
-        return original(path, text)
+        return original(path, text, **kwargs)
 
     monkeypatch.setattr(reporting, "atomic_write_text", fail_manifest)
     kernel.write_text("second\n")
@@ -298,10 +298,10 @@ def test_retry_repairs_partial_derived_best_views(tmp_path, monkeypatch):
     result_path = tmp_path / "forge_experiments" / "best_result.json"
     original = reporting.atomic_write_text
 
-    def fail_result(path, text):
+    def fail_result(path, text, **kwargs):
         if path == result_path:
             raise OSError("simulated result failure")
-        return original(path, text)
+        return original(path, text, **kwargs)
 
     monkeypatch.setattr(reporting, "atomic_write_text", fail_result)
     with pytest.raises(OSError, match="simulated result failure"):
@@ -326,8 +326,8 @@ def test_retry_repairs_partial_derived_best_views(tmp_path, monkeypatch):
     assert "verified candidate" in (tmp_path / "forge_experiments" / "optimization_report.md").read_text()
 
 
-def test_retry_repairs_incomplete_orphan_bundle(tmp_path, monkeypatch):
-    """A crash between os.replace and manifest write can leave version_dir visible but truncated."""
+def _orphan_first_publication(tmp_path, monkeypatch):
+    """Publish iteration 1 while its manifest write fails, leaving the bundle on disk but unreferenced."""
     kernel = tmp_path / "kernel.py"
     kernel.write_text("verified\n")
     publisher = BestResultPublisher(str(tmp_path))
@@ -335,10 +335,10 @@ def test_retry_repairs_incomplete_orphan_bundle(tmp_path, monkeypatch):
     manifest_path = best_root / "manifest.json"
     original = reporting.atomic_write_text
 
-    def fail_manifest(path, text):
+    def fail_manifest(path, text, **kwargs):
         if path == manifest_path:
             raise OSError("simulated manifest failure")
-        return original(path, text)
+        return original(path, text, **kwargs)
 
     monkeypatch.setattr(reporting, "atomic_write_text", fail_manifest)
     with pytest.raises(OSError, match="simulated manifest failure"):
@@ -349,6 +349,12 @@ def test_retry_repairs_incomplete_orphan_bundle(tmp_path, monkeypatch):
             plan="verified candidate",
             changed_files=["kernel.py"],
         )
+    return publisher, best_root, manifest_path, original
+
+
+def test_retry_repairs_incomplete_orphan_bundle(tmp_path, monkeypatch):
+    """A crash between os.replace and manifest write can leave version_dir visible but truncated."""
+    publisher, best_root, manifest_path, original = _orphan_first_publication(tmp_path, monkeypatch)
 
     # Simulate the post-crash truncation: a visible but incomplete bundle.
     (best_root / "iter_001" / "validation.txt").unlink()
@@ -372,27 +378,7 @@ def test_retry_repairs_incomplete_orphan_bundle(tmp_path, monkeypatch):
 
 def test_retry_repairs_inconsistent_orphan_bundle(tmp_path, monkeypatch):
     """A visible-but-inconsistent orphan bundle (wrong patch bytes) is treated as repairable: quarantine + rewrite, not a hard 'inconsistent' error."""
-    kernel = tmp_path / "kernel.py"
-    kernel.write_text("verified\n")
-    publisher = BestResultPublisher(str(tmp_path))
-    best_root = tmp_path / "forge_experiments" / "best"
-    manifest_path = best_root / "manifest.json"
-    original = reporting.atomic_write_text
-
-    def fail_manifest(path, text):
-        if path == manifest_path:
-            raise OSError("simulated manifest failure")
-        return original(path, text)
-
-    monkeypatch.setattr(reporting, "atomic_write_text", fail_manifest)
-    with pytest.raises(OSError, match="simulated manifest failure"):
-        _publish(
-            publisher,
-            iteration=1,
-            wall_ms=0.9,
-            plan="verified candidate",
-            changed_files=["kernel.py"],
-        )
+    publisher, best_root, manifest_path, original = _orphan_first_publication(tmp_path, monkeypatch)
 
     (best_root / "iter_001" / "forge.patch").write_text("different patch\n")
     monkeypatch.setattr(reporting, "atomic_write_text", original)

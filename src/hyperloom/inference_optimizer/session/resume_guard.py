@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 
 from hyperloom.common.owner_scope import process_started_at, same_environment
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.timeutil import now_iso
 
 from . import lock as session_lock
 from . import session_paths

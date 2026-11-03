@@ -16,12 +16,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence
 
-from hyperloom.common.coerce import to_float
+from hyperloom_common.coerce import to_float
 from kernelforge.agent_backends.base import AgentRunSpec, AgentToolPolicy, watchdog_timeout_sec
 from kernelforge.agent_backends.session_resume import is_api_failure
 from kernelforge.config.resources import resource_path
 
+from .author import _arch_phrase
 from .diagnose import LAUNCH_BOUND_CATEGORIES, _load_trace_events, categories_in_text, categorize_kernel_name
+from .discovery_prompt import DISCOVERY_PROMPT_TEMPLATE
 from .llm_failure import (
     API_ERROR,
     DEFAULT_ATTEMPTS,
@@ -63,6 +65,7 @@ class DiscoveryTarget:
     shapes: dict[str, Any]
     repo_scope: bool = False
     repo_root: str = ""
+    gpu_arch: str = ""
 
 
 @dataclass(frozen=True)
@@ -231,6 +234,53 @@ def stream_ordered_kernels(
     return streams, total_kernel_us
 
 
+def _normalized_kernel_name(name: str) -> str:
+    """``name`` lower-cased with hex addresses, integers and whitespace runs collapsed."""
+    value = re.sub(r"0x[0-9a-f]+", "0x*", name.lower())
+    value = re.sub(r"\b\d+\b", "N", value)
+    return re.sub(r"\s+", " ", value).strip()[:160]
+
+
+def _record_boundary_segment(
+    aggregated: dict[tuple[tuple[str, str], ...], dict[str, Any]],
+    segment: list[dict[str, Any]],
+    max_chain_len: int,
+) -> None:
+    """Count one compute-anchored ``segment`` into ``aggregated`` when it holds a launch-bound kernel."""
+    if len(segment) < 2 or len(segment) > max_chain_len:
+        return
+    categories = [str(item["category"]) for item in segment]
+    if not any(category in LAUNCH_BOUND_CATEGORIES for category in categories):
+        return
+    key = tuple((str(item["category"]), _normalized_kernel_name(str(item["name"]))) for item in segment)
+    interior_count = max(0, len(segment) - 2)
+    if len(segment) == 3 and categories[0] == "gemm" and categories[1] in LAUNCH_BOUND_CATEGORIES:
+        boundary_kind = "epilogue"
+    elif categories[0] in COMPUTE_CATEGORIES:
+        boundary_kind = "compute_boundary"
+    else:
+        boundary_kind = "vertical"
+    # The trailing kernel is the NEXT compute anchor.
+    terminal_compute = categories[-1] if categories[-1] in COMPUTE_CATEGORIES else ""
+    fusable_categories = categories[1:-1] if terminal_compute else categories[1:]
+    row = aggregated.setdefault(
+        key,
+        {
+            "signature": " -> ".join(categories),
+            "categories": categories,
+            "fusable_categories": fusable_categories,
+            "terminal_compute": terminal_compute,
+            "kernels": [str(item["name"])[:200] for item in segment],
+            "count": 0,
+            "total_us": 0.0,
+            "boundary_kind": boundary_kind,
+            "launches_removed_upper_bound": max(1, interior_count),
+        },
+    )
+    row["count"] += 1
+    row["total_us"] += sum(float(item["dur"]) for item in segment)
+
+
 def ordered_fusion_boundaries_from_trace(
     trace_path: str | Path,
     *,
@@ -240,58 +290,17 @@ def ordered_fusion_boundaries_from_trace(
 ) -> list[dict[str, Any]]:
     """Recover repeated compute-to-compute fusion boundaries from stream order."""
     streams, total_kernel_us = stream_ordered_kernels(trace_path)
-
-    def normalized_name(name: str) -> str:
-        value = re.sub(r"0x[0-9a-f]+", "0x*", name.lower())
-        value = re.sub(r"\b\d+\b", "N", value)
-        return re.sub(r"\s+", " ", value).strip()[:160]
-
     aggregated: dict[tuple[tuple[str, str], ...], dict[str, Any]] = {}
-
-    def record(segment: list[dict[str, Any]]) -> None:
-        if len(segment) < 2 or len(segment) > max_chain_len:
-            return
-        categories = [str(item["category"]) for item in segment]
-        if not any(category in LAUNCH_BOUND_CATEGORIES for category in categories):
-            return
-        key = tuple((str(item["category"]), normalized_name(str(item["name"]))) for item in segment)
-        interior_count = max(0, len(segment) - 2)
-        if len(segment) == 3 and categories[0] == "gemm" and categories[1] in LAUNCH_BOUND_CATEGORIES:
-            boundary_kind = "epilogue"
-        elif categories[0] in COMPUTE_CATEGORIES:
-            boundary_kind = "compute_boundary"
-        else:
-            boundary_kind = "vertical"
-        # The trailing kernel is the NEXT compute anchor.
-        terminal_compute = categories[-1] if categories[-1] in COMPUTE_CATEGORIES else ""
-        fusable_categories = categories[1:-1] if terminal_compute else categories[1:]
-        row = aggregated.setdefault(
-            key,
-            {
-                "signature": " -> ".join(categories),
-                "categories": categories,
-                "fusable_categories": fusable_categories,
-                "terminal_compute": terminal_compute,
-                "kernels": [str(item["name"])[:200] for item in segment],
-                "count": 0,
-                "total_us": 0.0,
-                "boundary_kind": boundary_kind,
-                "launches_removed_upper_bound": max(1, interior_count),
-            },
-        )
-        row["count"] += 1
-        row["total_us"] += sum(float(item["dur"]) for item in segment)
-
     for ordered in streams.values():
         start_index: Optional[int] = None
         for index, event in enumerate(ordered):
             if event["category"] not in COMPUTE_CATEGORIES:
                 continue
             if start_index is not None:
-                record(ordered[start_index : index + 1])
+                _record_boundary_segment(aggregated, ordered[start_index : index + 1], max_chain_len)
             start_index = index
         if start_index is not None:
-            record(ordered[start_index:])
+            _record_boundary_segment(aggregated, ordered[start_index:], max_chain_len)
 
     rows: list[dict[str, Any]] = []
     for row in aggregated.values():
@@ -716,12 +725,8 @@ def build_discovery_prompt(
     Repo scope embeds no source at all and points the agent at the repository
     instead, naming the target's source file as the entry point to start from.
     """
-    model_type, framework, shapes, repo_scope = (
-        target.model_type,
-        target.install.framework,
-        target.shapes,
-        target.repo_scope,
-    )
+    model_type, framework = target.model_type, target.install.framework
+    shapes, repo_scope = target.shapes, target.repo_scope
     diagnosis, hot_kernels = evidence.diagnosis, evidence.hot_kernels
     if repo_scope:
         source_block = render_repo_scope_brief(
@@ -779,46 +784,32 @@ def build_discovery_prompt(
 
     operator_lines = "\n".join(operator_line(hint) for hint in (evidence.existing_operator_hints or []))
     dom = ", ".join(diagnosis.dominant_categories)
-    return f"""You are analyzing the DECODE path of a {framework} model (`model_type={model_type}`)
-on AMD MI325X (gfx942), bf16, to find SOURCE-LEVEL KERNEL FUSIONS. Analyze only; do
-not edit anything. Return your answer as JSON (schema below).
+    return DISCOVERY_PROMPT_TEMPLATE.format(
+        framework=framework,
+        model_type=model_type,
+        arch_phrase=_arch_phrase(target.gpu_arch),
+        diagnosis=diagnosis,
+        lb=lb,
+        hot_lines=hot_lines,
+        dom=dom,
+        shapes=shapes,
+        boundary_lines=boundary_lines or "  - none",
+        operator_lines=operator_lines or "  - none found",
+        read_verb=read_verb,
+        max_fusions=max_fusions,
+        fusion_constraints=fusion_constraints(repo_scope=repo_scope),
+        output_schema_block=_output_schema_block(model_type, repo_scope=repo_scope),
+        source_block=source_block,
+    )
 
-## The lever (general, not model-specific)
-The decode path is launch/dispatch bound: launch_bound_share={diagnosis.launch_bound_share:.2f}
-of GPU-busy time is in many tiny fp32 ops ({lb}) rather than the heavy GEMM/attention.
-Each tiny op is a separate kernel launch + HBM round-trip. The win is to FUSE a
-CONTIGUOUS chain of these tiny ops (as they appear in the decode forward, between two
-heavy ops) into ONE kernel — fewer launches, fewer round-trips.
 
-## Measured launch-bound hot kernels (top, this trace)
-{hot_lines}
-Dominant launch-bound categories: {dom}
-Representative decode shapes: {shapes}
-
-## Ordered fusion boundaries (same stream, compute endpoints retained)
-{boundary_lines or "  - none"}
-
-## Existing ROCm operator evidence
-Retrieved by whole-word overlap between the observed kernel/category names and the
-documented operation chain; a higher score means stronger evidence. The score is a
-retrieval hint, NOT a correctness claim: you must still confirm from the source and
-the card that shape, dtype, and cache layout actually match.
-{operator_lines or "  - none found"}
-
-## Your task
-{read_verb} up to {max_fusions} CONTIGUOUS op chains in
-the DECODE forward that are worth fusing. Include GEMM/attention prologue or epilogue
-boundaries when the ordered trace proves adjacency. Treat an existing ROCm operator
-that covers a larger boundary as an `integration` candidate and benchmark/wire it
-before proposing a new kernel. Judge from the SOURCE and ordered trace what actually
-runs back-to-back on the decode path.
-
-{fusion_constraints(repo_scope=repo_scope)}
-
-{_output_schema_block(model_type, repo_scope=repo_scope)}
-
-{source_block}
-"""
+def _json_object(fragment: str) -> dict[str, Any] | None:
+    """``fragment`` parsed as JSON when it is an object, else None."""
+    with contextlib.suppress(json.JSONDecodeError, ValueError):
+        obj = json.loads(fragment)
+        if isinstance(obj, dict):
+            return obj
+    return None
 
 
 def _salvage_objects(text: str) -> list[dict[str, Any]]:
@@ -850,11 +841,9 @@ def _salvage_objects(text: str) -> list[dict[str, Any]]:
             depth += 1
         elif ch == "}" and depth > 0:
             depth -= 1
-            if depth == 0:
-                with contextlib.suppress(json.JSONDecodeError, ValueError):
-                    obj = json.loads(text[start : i + 1])
-                    if isinstance(obj, dict):
-                        out.append(obj)
+            obj = _json_object(text[start : i + 1]) if depth == 0 else None
+            if obj is not None:
+                out.append(obj)
         elif ch == "," and depth == 1:
             commas.append(i - start)
     repaired = _repair_truncated_object(text[start:], depth, in_str, commas) if depth else None
@@ -1252,6 +1241,53 @@ def _override_or_env(override: Any, name: str, default: float, cast: Callable[[A
     return cast(override) if override is not None else cast(env_setting(name, default, cast=cast))
 
 
+def _discovery_run_spec(
+    prompt: str, session: DiscoverySession, model: str, max_turns: int, progress: list[str]
+) -> AgentRunSpec:
+    """One read-only discovery turn in the session's working directory, logging into ``progress``."""
+    return AgentRunSpec(
+        system_prompt=_DISCOVERY_SYSTEM_PROMPT,
+        user_prompt=prompt,
+        role="fusion discovery",
+        cwd=session.workdir,
+        model=model,
+        writable=False,
+        timeout_sec=max(1, int(session.timeout_s)),
+        tool_policy=AgentToolPolicy(
+            read=True,
+            search=True,
+            write=False,
+            shell=False,
+            max_turns=max_turns,
+        ),
+        protected_globs=["*"],
+        # Not read_only_resume: discovery only needs the "tolerate a dirty worktree" half of that flag, and
+        # claiming the resume contract disqualifies this session from the guard's read-only fast path
+        # (workspace_guard.is_read_only_session), forcing a git-worktree requirement on a cwd that is
+        # routinely a pip install root.
+        allow_dirty_baseline=True,
+        progress_log=progress,
+    )
+
+
+def _discovery_answer(result: Any, backend: Any) -> tuple[str, str]:
+    """``(text, "")`` when one session's answer is usable, else ``("", why it is not)``."""
+    text = str(getattr(result, "text", "") or "").strip()
+    end_reason = result.end_reason
+    cut_short = end_reason in {"turn_cap", "timeout"}
+    # A cut-short session still answered if it got its proposals out first, and discovery spends turns by
+    # design -- it is handed read and search tools precisely so it explores.
+    usable = text and (not cut_short or _extract_json_array(text))
+    if usable and not is_api_failure(result):
+        if cut_short:
+            log.warning(
+                "discovery Agent ended with %s but its proposals parsed; using them",
+                end_reason,
+            )
+        return text, ""
+    return "", f"{backend.name} returned no final text" if not text else f"{backend.name} ended with {end_reason}"
+
+
 def registered_agent_llm_fn(
     backend: Any,
     session: DiscoverySession = DiscoverySession(),
@@ -1260,7 +1296,7 @@ def registered_agent_llm_fn(
     """Adapt one registered Agent backend into discovery's text interface."""
     import time as _time
 
-    timeout_s, log_path, workdir = session.timeout_s, session.log_path, session.workdir
+    timeout_s, log_path = session.timeout_s, session.log_path
     selected_model = session.model.strip() or str(getattr(getattr(backend, "runtime", None), "model", "")).strip()
     resolved_attempts = _override_or_env(retry.attempts, "FORGE_FUSION_LLM_ATTEMPTS", DEFAULT_ATTEMPTS, int)
     resolved_turns = max(1, int(env_setting("FORGE_FUSION_DISCOVERY_TURNS", DEFAULT_DISCOVERY_TURNS, cast=int)))
@@ -1282,35 +1318,36 @@ def registered_agent_llm_fn(
         with contextlib.suppress(OSError):
             Path(log_path).write_text("\n".join([*progress, text]).strip() + "\n", encoding="utf-8")
 
+    def _back_off(
+        attempt: int, started_at: float, progress: list[str], last_error: str, last_exc: Exception | None
+    ) -> None:
+        """Sleep before the next attempt, or give up once the retry deadline has passed."""
+        elapsed = clock() - started_at
+        if resolved_deadline > 0 and elapsed >= resolved_deadline:
+            _record_transcript(progress, last_error)
+            raise LlmUnavailableError(
+                f"discovery Agent produced no usable answer in {attempt} "
+                f"attempt(s) and {elapsed:.0f}s "
+                f"(deadline {resolved_deadline:.0f}s): {last_error}",
+                kind=API_ERROR if last_exc is None else classify_llm_error(last_exc),
+                attempts=attempt,
+            ) from last_exc
+        pause(
+            retry_delay(
+                attempt,
+                base_sec=resolved_base_delay,
+                max_sec=resolved_max_delay,
+            )
+        )
+
     def _fn(prompt: str) -> str:
         started_at = clock()
         last_error = ""
         last_kind = API_ERROR
+        last_exc: Exception | None = None
         progress: list[str] = []
         for attempt in range(1, max(1, resolved_attempts) + 1):
-            spec = AgentRunSpec(
-                system_prompt=_DISCOVERY_SYSTEM_PROMPT,
-                user_prompt=prompt,
-                role="fusion discovery",
-                cwd=workdir,
-                model=selected_model,
-                writable=False,
-                timeout_sec=max(1, int(timeout_s)),
-                tool_policy=AgentToolPolicy(
-                    read=True,
-                    search=True,
-                    write=False,
-                    shell=False,
-                    max_turns=resolved_turns,
-                ),
-                protected_globs=["*"],
-                # Not read_only_resume: discovery only needs the "tolerate a dirty worktree" half of that flag, and
-                # claiming the resume contract disqualifies this session from the guard's read-only fast path
-                # (workspace_guard.is_read_only_session), forcing a git-worktree requirement on a cwd that is
-                # routinely a pip install root.
-                allow_dirty_baseline=True,
-                progress_log=progress,
-            )
+            spec = _discovery_run_spec(prompt, session, selected_model, resolved_turns, progress)
             try:
                 result = _run_agent_discovery_once(
                     backend,
@@ -1319,30 +1356,18 @@ def registered_agent_llm_fn(
                     protected_files=protected,
                     usage=session.usage,
                 )
-                text = str(getattr(result, "text", "") or "").strip()
-                end_reason = result.end_reason
-                cut_short = end_reason in {"turn_cap", "timeout"}
-                # A cut-short session still answered if it got its proposals out first, and discovery spends turns by
-                # design -- it is handed read and search tools precisely so it explores.
-                usable = text and (not cut_short or _extract_json_array(text))
-                if usable and not is_api_failure(result):
-                    if cut_short:
-                        log.warning(
-                            "discovery Agent ended with %s but its proposals parsed; using them",
-                            end_reason,
-                        )
+                text, failure = _discovery_answer(result, backend)
+                if text:
                     _record_transcript(progress, text)
                     return text
-                last_error = (
-                    f"{backend.name} returned no final text" if not text else f"{backend.name} ended with {end_reason}"
-                )
-                last_kind = API_ERROR
+                last_error = failure
+                last_kind, last_exc = API_ERROR, None
             except DiscoverySafetyError:
                 raise
             except Exception as exc:
                 if is_agent_safety_error(exc):
                     raise DiscoverySafetyError("discovery Agent safety violation: " + str(exc)) from exc
-                last_kind = classify_llm_error(exc)
+                last_kind, last_exc = classify_llm_error(exc), exc
                 last_error = f"{type(exc).__name__}: {str(exc)[:240]}"
                 if last_kind not in RETRYABLE_KINDS:
                     raise LlmUnavailableError(
@@ -1355,32 +1380,17 @@ def registered_agent_llm_fn(
                 attempt,
                 max(1, resolved_attempts),
                 last_error,
+                exc_info=last_exc,
             )
             if attempt >= max(1, resolved_attempts):
                 break
-            elapsed = clock() - started_at
-            if resolved_deadline > 0 and elapsed >= resolved_deadline:
-                _record_transcript(progress, last_error)
-                raise LlmUnavailableError(
-                    f"discovery Agent produced no usable answer in {attempt} "
-                    f"attempt(s) and {elapsed:.0f}s "
-                    f"(deadline {resolved_deadline:.0f}s): {last_error}",
-                    kind=last_kind,
-                    attempts=attempt,
-                )
-            pause(
-                retry_delay(
-                    attempt,
-                    base_sec=resolved_base_delay,
-                    max_sec=resolved_max_delay,
-                )
-            )
+            _back_off(attempt, started_at, progress, last_error, last_exc)
         _record_transcript(progress, last_error)
         raise LlmUnavailableError(
             f"discovery Agent produced no usable answer in {max(1, resolved_attempts)} attempt(s): {last_error}",
             kind=last_kind,
             attempts=max(1, resolved_attempts),
-        )
+        ) from last_exc
 
     return _fn
 

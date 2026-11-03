@@ -33,9 +33,9 @@ from hyperloom.orchestrator.loop.verdicts import (
     verdict_map_entry_grounds,
     verdict_map_entry_held_to_its_rule,
 )
+from hyperloom.orchestrator.policy.denial import PolicyDenied
 from hyperloom.orchestrator.policy.gate import (
     INTEGRATE_PATCH_PERMISSIVE_VERDICTS,
-    PolicyDenied,
     PolicyGate,
 )
 from hyperloom.orchestrator.specialists.patch_safety import (

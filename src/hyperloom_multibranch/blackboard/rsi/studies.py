@@ -33,7 +33,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.llm_config import AnthropicCompletionRequest, aanthropic_completion
+from hyperloom_common.llm.llm_config import AnthropicCompletionRequest, aanthropic_completion
 from hyperloom_multibranch.blackboard.codec import encode
 from hyperloom_multibranch.blackboard.rsi.archive import SearchTree, TreeArchive
 from hyperloom_multibranch.blackboard.rsi.decisions import decision_calls

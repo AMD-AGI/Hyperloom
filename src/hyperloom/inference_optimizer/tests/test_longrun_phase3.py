@@ -235,7 +235,6 @@ async def _build_minimal_coord(tmp_path: Path, monkeypatch):
         "ROCR_VISIBLE_DEVICES",
         "HIP_VISIBLE_DEVICES",
         "CUDA_VISIBLE_DEVICES",
-        "INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY",
         "INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES",
     ):
         monkeypatch.delenv(_var, raising=False)

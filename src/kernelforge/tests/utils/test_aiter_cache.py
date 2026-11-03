@@ -296,19 +296,11 @@ def test_cleanup_refuses_foreign_owner_marker(tmp_path, monkeypatch):
     assert stats["deleted"] == 0
 
 
-def test_profiler_droppings_do_not_fail_a_session(tmp_path):
-    """rocprofv3 writes into the cwd it is handed; that is not the agent's doing."""
-    import subprocess
-
-    from kernelforge.agent_backends.base import AgentRunSpec
-    from kernelforge.agent_backends.workspace_guard import (
-        WorkspaceGuard,
-        WorkspaceSafetyError,
-    )
-
-    ws = tmp_path / "ws"
-    (ws / "src").mkdir(parents=True)
-    (ws / "src" / "k.py").write_text("x = 1\n", encoding="utf-8")
+def _committed_workspace(ws, target: str, content: str):
+    """A git repo at ``ws`` whose one commit holds ``target``; returns the target's path."""
+    path = ws / target
+    path.parent.mkdir(parents=True)
+    path.write_text(content, encoding="utf-8")
     for cmd in (
         ["git", "init", "-q"],
         ["git", "config", "user.email", "t@t"],
@@ -317,18 +309,36 @@ def test_profiler_droppings_do_not_fail_a_session(tmp_path):
         ["git", "commit", "-q", "-m", "base"],
     ):
         subprocess.run(cmd, cwd=ws, check=True, capture_output=True)
+    return path
+
+
+def _prepared_guard(cwd, target, globs):
+    """A workspace guard over ``target`` that forgives untracked paths matching ``globs``."""
+    from kernelforge.agent_backends.base import AgentRunSpec
+    from kernelforge.agent_backends.workspace_guard import WorkspaceGuard
+
+    spec = AgentRunSpec(
+        system_prompt="",
+        user_prompt="",
+        cwd=str(cwd),
+        target_files=[str(target)],
+        ignored_untracked_globs=list(globs),
+        protected_path_rules=FORGE_PROTECTED_PATHS,
+    )
+    guard = WorkspaceGuard(spec, dirty_baseline_default=True)
+    guard.prepare()
+    return guard
+
+
+def test_profiler_droppings_do_not_fail_a_session(tmp_path):
+    """rocprofv3 writes into the cwd it is handed; that is not the agent's doing."""
+    from kernelforge.agent_backends.workspace_guard import WorkspaceSafetyError
+
+    ws = tmp_path / "ws"
+    target = _committed_workspace(ws, "src/k.py", "x = 1\n")
 
     def run(globs):
-        spec = AgentRunSpec(
-            system_prompt="",
-            user_prompt="",
-            cwd=str(ws),
-            target_files=[str(ws / "src" / "k.py")],
-            ignored_untracked_globs=list(globs),
-            protected_path_rules=FORGE_PROTECTED_PATHS,
-        )
-        guard = WorkspaceGuard(spec, dirty_baseline_default=True)
-        guard.prepare()
+        guard = _prepared_guard(ws, target, globs)
         (ws / ".rocprofv3").mkdir(exist_ok=True)
         (ws / ".rocprofv3" / "101-102-counter_values.dat").write_text("", encoding="utf-8")
         (ws / "101_results.db").write_text("", encoding="utf-8")
@@ -343,41 +353,17 @@ def test_profiler_droppings_do_not_fail_a_session(tmp_path):
 
 def test_aiter_cache_droppings_do_not_fail_a_session(tmp_path):
     """Accept mid-turn JIT shards using the exact tool-owned glob list."""
-    import subprocess
-
-    from kernelforge.agent_backends.base import AgentRunSpec
-    from kernelforge.agent_backends.workspace_guard import (
-        WorkspaceGuard,
-        WorkspaceSafetyError,
-    )
+    from kernelforge.agent_backends.workspace_guard import WorkspaceSafetyError
     from kernelforge.workflows.forge_loop.roles.agent import TOOL_OWNED_UNTRACKED_GLOBS
 
     ws = tmp_path / "ws"
-    (ws / "csrc").mkdir(parents=True)
-    (ws / "csrc" / "k.cu").write_text("// kernel\n", encoding="utf-8")
-    for cmd in (
-        ["git", "init", "-q"],
-        ["git", "config", "user.email", "t@t"],
-        ["git", "config", "user.name", "t"],
-        ["git", "add", "-A"],
-        ["git", "commit", "-q", "-m", "base"],
-    ):
-        subprocess.run(cmd, cwd=ws, check=True, capture_output=True)
+    target = _committed_workspace(ws, "csrc/k.cu", "// kernel\n")
 
     # The exact shapes observed in the campaign that lost the candidate.
     shard = "forge_experiments/aiter_cache/sources/d7287ba5e00fb3a3529d082a"
 
     def run(globs):
-        spec = AgentRunSpec(
-            system_prompt="",
-            user_prompt="",
-            cwd=str(ws),
-            target_files=[str(ws / "csrc" / "k.cu")],
-            ignored_untracked_globs=list(globs),
-            protected_path_rules=FORGE_PROTECTED_PATHS,
-        )
-        guard = WorkspaceGuard(spec, dirty_baseline_default=True)
-        guard.prepare()
+        guard = _prepared_guard(ws, target, globs)
         (ws / shard / "flydsl_cache").mkdir(parents=True, exist_ok=True)
         (ws / shard / ".forge_cache_owner.json").write_text("{}", encoding="utf-8")
         (ws / shard / "flydsl_cache" / "launch_1b1a70825d5869240ee77e954dd460a0").write_text("", encoding="utf-8")
@@ -392,37 +378,12 @@ def test_aiter_cache_droppings_do_not_fail_a_session(tmp_path):
 
 def test_tool_owned_globs_still_refuse_an_undeclared_stray(tmp_path):
     """Tool-owned globs do not permit unrelated untracked files."""
-    import subprocess
-
-    from kernelforge.agent_backends.base import AgentRunSpec
-    from kernelforge.agent_backends.workspace_guard import (
-        WorkspaceGuard,
-        WorkspaceSafetyError,
-    )
+    from kernelforge.agent_backends.workspace_guard import WorkspaceSafetyError
     from kernelforge.workflows.forge_loop.roles.agent import TOOL_OWNED_UNTRACKED_GLOBS
 
     ws = tmp_path / "ws"
-    (ws / "csrc").mkdir(parents=True)
-    (ws / "csrc" / "k.cu").write_text("// kernel\n", encoding="utf-8")
-    for cmd in (
-        ["git", "init", "-q"],
-        ["git", "config", "user.email", "t@t"],
-        ["git", "config", "user.name", "t"],
-        ["git", "add", "-A"],
-        ["git", "commit", "-q", "-m", "base"],
-    ):
-        subprocess.run(cmd, cwd=ws, check=True, capture_output=True)
-
-    spec = AgentRunSpec(
-        system_prompt="",
-        user_prompt="",
-        cwd=str(ws),
-        target_files=[str(ws / "csrc" / "k.cu")],
-        ignored_untracked_globs=list(TOOL_OWNED_UNTRACKED_GLOBS),
-        protected_path_rules=FORGE_PROTECTED_PATHS,
-    )
-    guard = WorkspaceGuard(spec, dirty_baseline_default=True)
-    guard.prepare()
+    target = _committed_workspace(ws, "csrc/k.cu", "// kernel\n")
+    guard = _prepared_guard(ws, target, TOOL_OWNED_UNTRACKED_GLOBS)
     (ws / "forge_experiments" / "aiter_cache").mkdir(parents=True, exist_ok=True)
     (ws / "forge_experiments" / "aiter_cache" / "shard.json").write_text("{}", encoding="utf-8")
     (ws / "smuggled_notes.txt").write_text("not the framework's", encoding="utf-8")
@@ -433,38 +394,10 @@ def test_tool_owned_globs_still_refuse_an_undeclared_stray(tmp_path):
 
 def test_profiler_droppings_are_forgiven_below_the_git_toplevel(tmp_path):
     """The guard reports paths from the git toplevel; the profiler runs deeper."""
-    import subprocess
-
-    from kernelforge.agent_backends.base import AgentRunSpec
-    from kernelforge.agent_backends.workspace_guard import WorkspaceGuard
-
     ws = tmp_path / "nested"
-    nested = ws / "aiter" / "ops" / "triton"
-    nested.mkdir(parents=True)
-    (nested / "k.py").write_text("x = 1\n", encoding="utf-8")
-    for cmd in (
-        ["git", "init", "-q"],
-        ["git", "config", "user.email", "t@t"],
-        ["git", "config", "user.name", "t"],
-        ["git", "add", "-A"],
-        ["git", "commit", "-q", "-m", "base"],
-    ):
-        subprocess.run(cmd, cwd=ws, check=True, capture_output=True)
-
-    spec = AgentRunSpec(
-        system_prompt="",
-        user_prompt="",
-        cwd=str(nested),
-        target_files=[str(nested / "k.py")],
-        ignored_untracked_globs=[
-            ".rocprofv3/*",
-            "*/.rocprofv3/*",
-            "*_results.db",
-        ],
-        protected_path_rules=FORGE_PROTECTED_PATHS,
-    )
-    guard = WorkspaceGuard(spec, dirty_baseline_default=True)
-    guard.prepare()
+    target = _committed_workspace(ws, "aiter/ops/triton/k.py", "x = 1\n")
+    nested = target.parent
+    guard = _prepared_guard(nested, target, [".rocprofv3/*", "*/.rocprofv3/*", "*_results.db"])
     (nested / ".rocprofv3").mkdir()
     (nested / ".rocprofv3" / "101-102-counter_values.dat").write_text("", encoding="utf-8")
     # The observed layout: a hash-named directory holding <pid>_results.db.
@@ -477,36 +410,11 @@ def test_profiler_droppings_are_forgiven_below_the_git_toplevel(tmp_path):
 
 def test_an_undeclared_stray_file_is_still_refused(tmp_path):
     """The allowance is per-path, not a blanket one."""
-    import subprocess
-
-    from kernelforge.agent_backends.base import AgentRunSpec
-    from kernelforge.agent_backends.workspace_guard import (
-        WorkspaceGuard,
-        WorkspaceSafetyError,
-    )
+    from kernelforge.agent_backends.workspace_guard import WorkspaceSafetyError
 
     ws = tmp_path / "ws2"
-    (ws / "src").mkdir(parents=True)
-    (ws / "src" / "k.py").write_text("x = 1\n", encoding="utf-8")
-    for cmd in (
-        ["git", "init", "-q"],
-        ["git", "config", "user.email", "t@t"],
-        ["git", "config", "user.name", "t"],
-        ["git", "add", "-A"],
-        ["git", "commit", "-q", "-m", "base"],
-    ):
-        subprocess.run(cmd, cwd=ws, check=True, capture_output=True)
-
-    spec = AgentRunSpec(
-        system_prompt="",
-        user_prompt="",
-        cwd=str(ws),
-        target_files=[str(ws / "src" / "k.py")],
-        ignored_untracked_globs=[".rocprofv3/*"],
-        protected_path_rules=FORGE_PROTECTED_PATHS,
-    )
-    guard = WorkspaceGuard(spec, dirty_baseline_default=True)
-    guard.prepare()
+    target = _committed_workspace(ws, "src/k.py", "x = 1\n")
+    guard = _prepared_guard(ws, target, [".rocprofv3/*"])
     (ws / "src" / "the_agent_left_this.py").write_text("y = 2\n", encoding="utf-8")
     with pytest.raises(WorkspaceSafetyError, match="the_agent_left_this"):
         guard.verify()

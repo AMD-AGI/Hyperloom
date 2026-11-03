@@ -333,10 +333,7 @@ class _BaselineAccuracyMixin:
         eval_enablement = self._eval_enablement_active(ctx)
         from .._accuracy_gate import (
             DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
-            EVAL_KIND_GENERATION_PATHOLOGY,
             accuracy_meets_floor,
-            classify_accuracy_failure,
-            eval_probe_summary,
             request_baseline_accuracy_stop,
         )
 
@@ -381,31 +378,7 @@ class _BaselineAccuracyMixin:
         # Route into enablement instead of stopping: the throughput baseline stays for diagnostics but is blocked from
         # anchoring.
         if eval_enablement:
-            kind = classify_accuracy_failure(acc, floor)
-            evidence = (
-                f"baseline accuracy did not meet floor: accuracy={acc} floor={floor} "
-                f"task={result.get('accuracy_task')} metric={result.get('accuracy_metric')} "
-                f"source={result.get('accuracy_source')}"
-            )
-            # A tripped probe means the eval was cut short because the model never stopped generating, not that it
-            # answered and got them wrong.
-            if probe := result.get("eval_probe"):
-                kind = EVAL_KIND_GENERATION_PATHOLOGY
-                evidence = f"{evidence}; {eval_probe_summary(probe)}"
-            self._stamp_eval_failure_contract(
-                ctx,
-                result,
-                kind=kind or "",
-                observed_accuracy=float(acc) if isinstance(acc, (int, float)) else None,
-                evidence=evidence,
-            )
-            log.warning(
-                "baseline_executor: accuracy %s below floor %.4f (kind=%s); routing to "
-                "enablement instead of stopping the run.",
-                acc,
-                floor,
-                kind,
-            )
+            self._route_baseline_accuracy_to_enablement(ctx, result, acc, floor)
             return
         # Only a *missing* reference can be explained by a dead server. A measured zero -- including one salvaged
         # from a sibling attempt -- means the eval did run and did write its results, so blaming the death here would
@@ -425,6 +398,46 @@ class _BaselineAccuracyMixin:
                 "no accuracy result, and a fatal engine death on record for this round",
             )
         request_baseline_accuracy_stop(shared_state, context=context, cause=cause)
+
+    def _route_baseline_accuracy_to_enablement(
+        self,
+        ctx: RunnerContext,
+        result: dict[str, Any],
+        acc: Any,
+        floor: float,
+    ) -> None:
+        """Stamp an under-floor baseline accuracy as an eval failure for enablement to act on."""
+        from .._accuracy_gate import (
+            EVAL_KIND_GENERATION_PATHOLOGY,
+            classify_accuracy_failure,
+            eval_probe_summary,
+        )
+
+        kind = classify_accuracy_failure(acc, floor)
+        evidence = (
+            f"baseline accuracy did not meet floor: accuracy={acc} floor={floor} "
+            f"task={result.get('accuracy_task')} metric={result.get('accuracy_metric')} "
+            f"source={result.get('accuracy_source')}"
+        )
+        # A tripped probe means the eval was cut short because the model never stopped generating, not that it
+        # answered and got them wrong.
+        if probe := result.get("eval_probe"):
+            kind = EVAL_KIND_GENERATION_PATHOLOGY
+            evidence = f"{evidence}; {eval_probe_summary(probe)}"
+        self._stamp_eval_failure_contract(
+            ctx,
+            result,
+            kind=kind or "",
+            observed_accuracy=float(acc) if isinstance(acc, (int, float)) else None,
+            evidence=evidence,
+        )
+        log.warning(
+            "baseline_executor: accuracy %s below floor %.4f (kind=%s); routing to "
+            "enablement instead of stopping the run.",
+            acc,
+            floor,
+            kind,
+        )
 
     def _apply_salvaged_accuracy(
         self,

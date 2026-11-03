@@ -34,7 +34,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from hyperloom.common.env import EnvValueError, env_float
+from hyperloom_common.env import EnvValueError, env_float
 from hyperloom.common.gpu_power_settings import (
     NPM_ENABLED,
     gfx_clock_limits,
@@ -490,7 +490,7 @@ class GpuPowerRecorder:
             return payload
         self._closed = True
         try:
-            from hyperloom.common.io import atomic_write_json
+            from hyperloom_common.io import atomic_write_json
 
             atomic_write_json(Path(self._output_path), payload)
         except (OSError, TypeError, ValueError):

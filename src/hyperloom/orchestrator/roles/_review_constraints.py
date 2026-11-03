@@ -157,12 +157,10 @@ def _maybe_inject_cross_domain_constraints(judge_bundle: dict[str, Any]) -> None
     proposals = judge_bundle.get("proposals") or []
     if not isinstance(proposals, list):
         return
-    from ..specialists.patch_safety import (
-        SCOPE_DOMAINS_LITERAL,
-        cross_domain_rule_descriptors,
-    )
+    from ..specialists.patch_safety import cross_domain_rule_descriptors
+    from ..specialists.profile import SCOPE_DOMAINS
 
-    has_cross_domain = any(_proposal_scope_literal(p) == SCOPE_DOMAINS_LITERAL for p in proposals)
+    has_cross_domain = any(_proposal_scope_literal(p) == SCOPE_DOMAINS for p in proposals)
     if not has_cross_domain:
         return
     rc = judge_bundle.setdefault("review_constraints", {})

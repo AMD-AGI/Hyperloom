@@ -512,6 +512,29 @@ def _parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def _finish_kill_only(framework: str, env: dict[str, str], node_rank: int) -> int:
+    """Finish a ``--kill-only`` run once the prior server is gone and report the kill."""
+    if framework == "vllm":  # also tear down the local ray node so GPUs are freed
+        subprocess.run(
+            ["/bin/bash", "-lc", "ray stop --force || true"], env=env, capture_output=True, text=True, timeout=60
+        )
+    print(json.dumps({"status": "ok", "action": "kill", "node_rank": node_rank}))
+    return 0
+
+
+def _launch_args_rejected(args: argparse.Namespace) -> bool:
+    """Log why the launch arguments cannot start a server, and whether they cannot."""
+    if not args.model or args.tp <= 0:
+        _log("ERROR --model and --tp are required unless --kill-only")
+        return True
+
+    denied = find_denied_flags(args.extra_args) + find_unsafe_flag_values(args.extra_args)
+    if denied:
+        _log(f"ERROR denied server flags in --extra-args: {denied}")
+        return True
+    return False
+
+
 def main() -> int:
     """Launch (or kill) this pod's Infera multi-node server rank."""
     args = _parse_args()
@@ -538,20 +561,9 @@ def main() -> int:
         print(json.dumps({"status": "error", "action": "kill", "node_rank": node_rank, "error": str(exc)}))
         return 3
     if args.kill_only:
-        if args.framework == "vllm":  # also tear down the local ray node so GPUs are freed
-            subprocess.run(
-                ["/bin/bash", "-lc", "ray stop --force || true"], env=env, capture_output=True, text=True, timeout=60
-            )
-        print(json.dumps({"status": "ok", "action": "kill", "node_rank": node_rank}))
-        return 0
+        return _finish_kill_only(args.framework, env, node_rank)
 
-    if not args.model or args.tp <= 0:
-        _log("ERROR --model and --tp are required unless --kill-only")
-        return 2
-
-    denied = find_denied_flags(args.extra_args) + find_unsafe_flag_values(args.extra_args)
-    if denied:
-        _log(f"ERROR denied server flags in --extra-args: {denied}")
+    if _launch_args_rejected(args):
         return 2
 
     _log(

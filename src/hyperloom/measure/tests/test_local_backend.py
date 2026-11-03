@@ -17,7 +17,7 @@ from unittest import mock
 import pytest
 import yaml
 
-from hyperloom.common.env import is_truthy
+from hyperloom_common.env import is_truthy
 from hyperloom.contracts.measurement import AccuracyValue, AttachmentRef
 from hyperloom.measure import farm as farm_module
 from hyperloom.measure import local

@@ -216,7 +216,7 @@ class ResumeConsistencyMixin:
         state = self.shared_state
         if (state.phase or "").strip().upper() != PHASE_KERNEL_AGENT:
             return
-        if not (self._coord.phase_machine.kernel_enabled() and self._coord.phase_kernel.geak_enabled()):
+        if not (state.kernel_enabled and self._coord.phase_kernel.geak_enabled()):
             return
         history = state.phase_history or []
         row = history[-1] if history else {}

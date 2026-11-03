@@ -11,10 +11,10 @@ import os
 import sys
 import time
 
-from hyperloom.common import llm_config
-from hyperloom.common.env import env_bool
-from hyperloom.common.llm_config import CLAUDE_OAUTH_TOKEN_ENV
-from hyperloom.common.llm_headers import parse_custom_headers
+from hyperloom_common.llm import llm_config
+from hyperloom_common.env import env_bool
+from hyperloom_common.llm.llm_config import CLAUDE_OAUTH_TOKEN_ENV
+from hyperloom_common.llm.llm_headers import parse_custom_headers
 from .backends import (
     critic_review_target,
     critic_on_codex_side,

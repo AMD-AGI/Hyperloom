@@ -287,9 +287,6 @@ def render_failure_line(fe: dict[str, Any], *, excerpt_chars: int = 160) -> str:
     ]
     if error_class:
         parts.append(f"err={error_class}")
-    attribution = str(fe.get("attribution") or "")
-    if attribution:
-        parts.append(f"attribution={attribution}")
     if body:
         parts.append(f"msg={body[-excerpt_chars:]!r}")
     return " ".join(parts)

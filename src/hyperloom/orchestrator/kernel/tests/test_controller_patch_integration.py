@@ -976,7 +976,7 @@ async def test_a_commit_that_lands_is_reported_even_if_the_ledger_write_fails(tm
     state = _state(session_dir, repo)
 
     def _boom(*_args, **_kwargs):
-        raise RuntimeError("state file is read-only")
+        raise PermissionError("state file is read-only")
 
     state.save = _boom  # type: ignore[method-assign]
     summary = await _integrate(

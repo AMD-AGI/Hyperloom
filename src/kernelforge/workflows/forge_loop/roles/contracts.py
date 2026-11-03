@@ -282,6 +282,19 @@ class OrchestrationContext:
         if self.search_mode not in {"EXPLOIT", "DIVERSIFY"}:
             raise ValueError("context.search_mode is unsupported")
         _text(self.search_objective, "context.search_objective")
+        self._validate_evidence_standing()
+        if self.search_mode_residence_remaining < 0:
+            raise ValueError("context.search_mode_residence_remaining must be non-negative")
+        case_ids = [case.case_id for case in self.cases]
+        if not case_ids:
+            raise ValueError("context.cases must not be empty")
+        if len(set(case_ids)) != len(case_ids):
+            raise ValueError("context.cases must have unique case_id values")
+        if self.roofline is not None and not isinstance(self.roofline, CampaignRoofline):
+            raise ValueError("context.roofline must be a CampaignRoofline or absent")
+
+    def _validate_evidence_standing(self) -> None:
+        """Validate the fields that place the Analysis evidence against the canonical commit."""
         _text(
             self.canonical_commit,
             "context.canonical_commit",
@@ -317,15 +330,6 @@ class OrchestrationContext:
             "context.cumulative_diff_error",
             allow_empty=True,
         )
-        if self.search_mode_residence_remaining < 0:
-            raise ValueError("context.search_mode_residence_remaining must be non-negative")
-        case_ids = [case.case_id for case in self.cases]
-        if not case_ids:
-            raise ValueError("context.cases must not be empty")
-        if len(set(case_ids)) != len(case_ids):
-            raise ValueError("context.cases must have unique case_id values")
-        if self.roofline is not None and not isinstance(self.roofline, CampaignRoofline):
-            raise ValueError("context.roofline must be a CampaignRoofline or absent")
 
     @property
     def case_ids(self) -> frozenset[str]:

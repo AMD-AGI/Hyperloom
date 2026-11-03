@@ -34,7 +34,7 @@ import shutil
 from collections.abc import Mapping
 from pathlib import Path
 
-from hyperloom.common.io import atomic_write_json
+from hyperloom_common.io import atomic_write_json
 from hyperloom_multibranch.contracts.blackboard.records import OpShares
 from hyperloom_multibranch.specialist.agent_onboarding import (
     ROOT_PROFILE_SOURCE,

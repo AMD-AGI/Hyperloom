@@ -29,7 +29,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Protocol
 
-from hyperloom.common.io import append_jsonl
+from hyperloom_common.io import append_jsonl
 from hyperloom_multibranch.contracts.blackboard.peers import Intent, Validity
 from hyperloom_multibranch.contracts.blackboard.records import Learning, LearningRecord, BlackboardSnapshot, TestRecord
 from hyperloom_multibranch.blackboard.codec import key_sorted

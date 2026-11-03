@@ -157,26 +157,34 @@ def test_git_apply_normalizes_strip_depth_for_deeper_workspace(tmp_path):
     assert (repo / "kernel.py").read_text() == "new\n"
 
 
-def test_git_apply_rewrites_matching_canonical_owner_paths(tmp_path):
-    repo = _init_repo(tmp_path)
-    consumer = repo / "src" / "aiter" / "ops" / "kernel.py"
-    consumer.parent.mkdir(parents=True)
-    consumer.write_text("old\n")
-    _run(["git", "add", str(consumer.relative_to(repo))], repo)
-    _run(["git", "commit", "-m", "consumer layout"], repo)
-    producer_patch = """diff --git a/packages/src/aiter_meta/ops/kernel.py b/packages/src/aiter_meta/ops/kernel.py
+_PRODUCER_PATCH = """diff --git a/packages/src/aiter_meta/ops/kernel.py b/packages/src/aiter_meta/ops/kernel.py
 --- a/packages/src/aiter_meta/ops/kernel.py
 +++ b/packages/src/aiter_meta/ops/kernel.py
 @@ -1 +1 @@
 -old
 +new
 """
+
+
+def _repo_with_consumer_layout(tmp_path: Path) -> tuple[Path, Path]:
+    """A repo whose kernel lives at the consumer path ``src/aiter/ops/kernel.py``; returns it and that file."""
+    repo = _init_repo(tmp_path)
+    consumer = repo / "src" / "aiter" / "ops" / "kernel.py"
+    consumer.parent.mkdir(parents=True)
+    consumer.write_text("old\n")
+    _run(["git", "add", str(consumer.relative_to(repo))], repo)
+    _run(["git", "commit", "-m", "consumer layout"], repo)
+    return repo, consumer
+
+
+def test_git_apply_rewrites_matching_canonical_owner_paths(tmp_path):
+    repo, consumer = _repo_with_consumer_layout(tmp_path)
     allowed = {"src/aiter/ops/kernel.py"}
     source_map = {"aiter/ops/kernel.py": "src/aiter/ops/kernel.py"}
 
     target = integ._PatchTarget(allowed, {"aiter/ops/kernel.py"}, source_map)
-    assert integ._git_apply(str(repo), producer_patch, check_only=True, target=target)
-    assert integ._git_apply(str(repo), producer_patch, target=target)
+    assert integ._git_apply(str(repo), _PRODUCER_PATCH, check_only=True, target=target)
+    assert integ._git_apply(str(repo), _PRODUCER_PATCH, target=target)
     assert consumer.read_text() == "new\n"
 
 
@@ -184,23 +192,11 @@ def test_kb_warmstart_uses_canonical_path_mapping_end_to_end(
     monkeypatch,
     tmp_path,
 ):
-    repo = _init_repo(tmp_path)
-    consumer = repo / "src" / "aiter" / "ops" / "kernel.py"
-    consumer.parent.mkdir(parents=True)
-    consumer.write_text("old\n")
-    _run(["git", "add", str(consumer.relative_to(repo))], repo)
-    _run(["git", "commit", "-m", "consumer layout"], repo)
-    producer_patch = """diff --git a/packages/src/aiter_meta/ops/kernel.py b/packages/src/aiter_meta/ops/kernel.py
---- a/packages/src/aiter_meta/ops/kernel.py
-+++ b/packages/src/aiter_meta/ops/kernel.py
-@@ -1 +1 @@
--old
-+new
-"""
+    repo, consumer = _repo_with_consumer_layout(tmp_path)
     _patch_read_solutions(
         monkeypatch,
         _solution(
-            producer_patch,
+            _PRODUCER_PATCH,
             implementation_identity={"source_paths": ["aiter/ops/kernel.py"]},
             consumer_implementation_identity={
                 "source_paths": ["aiter/ops/kernel.py"],
@@ -511,10 +507,10 @@ def test_reference_generation_failure_before_index_keeps_old_index_valid(
     old_reference = _indexed_reference(root, 1)
     real_atomic_write = integ.atomic_write_text
 
-    def fail_index(path, text):
+    def fail_index(path, text, **kwargs):
         if path == root / "index.md":
             raise OSError("simulated index replacement failure")
-        return real_atomic_write(path, text)
+        return real_atomic_write(path, text, **kwargs)
 
     monkeypatch.setattr(integ, "atomic_write_text", fail_index)
     with pytest.raises(OSError, match="index replacement"):

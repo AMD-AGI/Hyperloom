@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
-from hyperloom.common.io import WriteOptions, atomic_write_text
+from hyperloom_common.io import WriteOptions, atomic_write_text
 from hyperloom.inference_optimizer.session.session_paths import enablement_dir
 
 from .recipe.projections import root_id_for

@@ -20,7 +20,7 @@ from typing import Any
 import yaml
 
 from hyperloom.common.benchmark_config import is_magpie_agentx
-from hyperloom.common.coerce import to_str_list
+from hyperloom_common.coerce import to_str_list
 from hyperloom.common.launch_log_evidence import launch_flag_setting_name
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 

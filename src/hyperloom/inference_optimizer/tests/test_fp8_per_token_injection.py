@@ -20,6 +20,8 @@ from hyperloom.orchestrator.actions.executors._workload_envs import (
     LaunchLayer,
 )
 
+from .conftest import write_benchmark_yaml
+
 _AMD = "mi300x"
 _ENV = "SGLANG_USE_AITER_FP8_PER_TOKEN"
 
@@ -183,27 +185,6 @@ def test_detect_false_for_missing_config(tmp_path):
 
 
 # ── materialize_config_with_envs (production choke point) ───────────────────
-def _write_yaml(path: Path, *, model: str, framework: str, precision: str) -> None:
-    cfg = {
-        "benchmark": {
-            "framework": framework,
-            "model": model,
-            "precision": precision,
-            "run_mode": "local",
-            "envs": {"TP": 1, "CONC": 8, "ISL": 256, "OSL": 256},
-            "timeout_seconds": 600,
-            "profiler": {
-                "torch_profiler": {"enabled": False},
-                "system_profiler": {"enabled": False},
-                "tracelens": {"enabled": False},
-            },
-            "gpu_selection": {"auto": False},
-        }
-    }
-    with path.open("w") as f:
-        yaml.safe_dump(cfg, f)
-
-
 def _materialize_envs(
     tmp_path: Path,
     *,
@@ -214,7 +195,7 @@ def _materialize_envs(
     extra_envs: dict | None = None,
 ) -> dict:
     base = tmp_path / "base.yaml"
-    _write_yaml(base, model=model, framework=framework, precision=precision)
+    write_benchmark_yaml(base, model=model, framework=framework, precision=precision, benchmark_script=None)
     out = tmp_path / "out"
     out.mkdir()
     materialized = materialize_config_with_envs(

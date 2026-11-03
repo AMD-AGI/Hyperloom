@@ -4,68 +4,11 @@
 
 from __future__ import annotations
 
-import argparse
-import json
 from pathlib import Path
-from types import SimpleNamespace
 
 from hyperloom.inference_optimizer.cli import bootstrap as cb
-from hyperloom.orchestrator.state.shared_state import SharedState
 
-
-def _args(**overrides):
-    base = dict(
-        model="/models/moonshotai-Kimi-K2.6",
-        model_class="KimiK2ForCausalLM",
-        gpu_type="mi300x",
-        precision="int4",
-        framework="vllm",
-        framework_version="",
-        tp="8",
-        ep="0",
-        conc=64,
-        isl=8192,
-        osl=1024,
-        max_model_len=13312,
-        no_kernel=False,
-        auto_kernel_opt=True,
-        target_gain=60.0,
-        target_tput=None,
-        max_hours=30,
-        research_lane_capacity=999,
-        gpu_specialist_capacity=8,
-        plateau_explore_keep_gain=1.5,
-        plateau_explore_empty_streak=2,
-        plateau_explore_lookback=4,
-        enable_roofline=False,
-        no_framework_agent=True,
-        research_scout=False,
-        research_scout_interval=0,
-        target_advisory=False,
-        recipe_sediment=False,
-        enable_conc_sweep=True,
-        conc_sweep_concs="1, bad, 4,,8",
-        conc_sweep_total_budget_sec=120,
-        reference_script="",
-    )
-    base.update(overrides)
-    return argparse.Namespace(**base)
-
-
-def _stub_seed_deps(monkeypatch, tmp_path):
-    """Common monkeypatches so ``_seed_shared_state`` runs without real I/O."""
-    monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
-    monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
-    monkeypatch.setattr(
-        cb,
-        "_resolve_reference_recipe",
-        lambda _args, _framework: ("", {}, "", {}),
-    )
-    from hyperloom.common import visible_devices
-    from hyperloom.orchestrator.policy import gate as policy
-
-    monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 8)
-    monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 16)
+from .test_cli_bootstrap import _args, _neutralize_seed_io
 
 
 def test_seed_uses_explicit_workload_flags_over_defaults(
@@ -73,7 +16,7 @@ def test_seed_uses_explicit_workload_flags_over_defaults(
     monkeypatch,
 ) -> None:
     """Regression for #903: explicit workload flags must reach SharedState."""
-    _stub_seed_deps(monkeypatch, tmp_path)
+    _neutralize_seed_io(monkeypatch, gpu_count=8, lane_ceiling=16)
     monkeypatch.setenv("ISL", "256")
     monkeypatch.setenv("OSL", "256")
     monkeypatch.setenv("CONC", "8")
@@ -98,7 +41,7 @@ def test_seed_applies_new_workload_defaults_when_unset(
     monkeypatch,
 ) -> None:
     """Regression for #903: when workload flags are unset (argparse default ``None``) and no inherited env is present, SharedState must seed the new fallback defaults (ISL/OSL=1024, CONC=64, TP/EP=1)."""
-    _stub_seed_deps(monkeypatch, tmp_path)
+    _neutralize_seed_io(monkeypatch, gpu_count=8, lane_ceiling=16)
     for key in ("ISL", "OSL", "CONC", "TP", "EP"):
         monkeypatch.delenv(key, raising=False)
 
@@ -161,180 +104,6 @@ def test_seed_passes_raw_model_path_to_model_arch_guard(
     )
 
     assert captured["args"][2] == raw
-
-
-def test_manifest_preserves_quantized_model_identity(tmp_path: Path) -> None:
-    """Regression: ``manifest.json`` ``model_name`` must honor the pinned display name from the quantize prelude, not the collapsed path basename."""
-    from hyperloom.inference_optimizer.session import manifest as m
-
-    quant_dir = tmp_path / "quantization" / "google-gemma-4-26B-A4B-it" / "quantized"
-    quant_dir.mkdir(parents=True)
-    args = _args(
-        model=str(quant_dir),
-        model_display_name="google-gemma-4-26B-A4B-it-quantized",
-    )
-    built = m.build_manifest(tmp_path, args=args, session_id="s-q")
-    assert built["model_name"] == "google-gemma-4-26B-A4B-it-quantized"
-    assert built["model_name"] != "quantized"
-    assert built["model_path"].endswith("/quantized")
-
-
-def test_resolve_model_display_name_helper() -> None:
-    """Unit cover for the identity resolver: pinned override wins, else basename."""
-    plain = SimpleNamespace(model="/models/Qwen3-32B")
-    assert cb.resolve_model_display_name(plain) == "Qwen3-32B"
-
-    pinned = SimpleNamespace(
-        model="/tmp/quantization/x/quantized",
-        model_display_name="x-quantized",
-    )
-    assert cb.resolve_model_display_name(pinned) == "x-quantized"
-
-    empty_override = SimpleNamespace(model="/models/Foo", model_display_name="")
-    assert cb.resolve_model_display_name(empty_override) == "Foo"
-
-
-def test_conc_sweep_parser(caplog) -> None:
-    assert cb._parse_conc_sweep_concs(_args(conc_sweep_concs=""), "synthetic") == [
-        256,
-        128,
-        64,
-        32,
-        16,
-        8,
-        4,
-        2,
-    ]
-    assert cb._parse_conc_sweep_concs(_args(conc_sweep_concs="bad,"), "synthetic") == [
-        256,
-        128,
-        64,
-        32,
-        16,
-        8,
-        4,
-        2,
-    ]
-    assert "ignoring non-integer CONC token" in caplog.text
-
-
-def test_read_failure_summary_and_final_summary_output(tmp_path: Path, capsys) -> None:
-    assert cb._read_failure_summary(tmp_path) is None
-    reports = tmp_path / "reports"
-    reports.mkdir()
-    (reports / "final.json").write_text(
-        json.dumps(
-            {
-                "failure_summary": {
-                    "root_cause_type": "config",
-                    "root_cause": "bad flag",
-                    "server_log": "/tmp/server.log",
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-    assert cb._read_failure_summary(tmp_path)["root_cause"] == "bad flag"
-
-    state = SharedState(
-        session_id="s",
-        model_name="m",
-        baseline_tput=10.0,
-        cumulative_gain_validated=1.0,
-        cumulative_gain_validated_ts="2026-01-01T00:00:00Z",
-        cumulative_gain_validated_stack_len=0,
-        current_best={"action": "x"},
-        pruned_families=["a"],
-        crash_count=2,
-    )
-    state.optimization_stack = [{"action": "geak_e2e"}]
-
-    cb._print_final_summary(state, "baseline_failed", tmp_path)
-
-    out = capsys.readouterr().out
-    assert "root_cause" in out
-    assert "bad flag" in out
-    assert "stack changed since validation" in out
-
-    cb._print_final_summary(
-        SharedState(session_id="s2", model_name="m2", baseline_tput=0.0),
-        "done",
-        tmp_path,
-    )
-    assert "never validated" in capsys.readouterr().out
-
-
-def test_snapshot_skeleton_and_session_dir_helpers(
-    tmp_path: Path,
-    monkeypatch,
-    capsys,
-) -> None:
-    cb._snapshot_system_prompts(tmp_path, prompts={"orch": "hello", "critic": ""}, macro_cycle=0)
-    assert (tmp_path / "agents" / "orch" / "system_prompt.snapshot.md").read_text(
-        encoding="utf-8",
-    ) == "hello"
-    assert (tmp_path / "agents" / "critic" / "system_prompt.snapshot.md").read_text(
-        encoding="utf-8",
-    ) == "(empty)"
-
-    for sub in cb._SESSION_SKELETON[:2]:
-        (tmp_path / sub).mkdir(parents=True, exist_ok=True)
-    cb._print_session_skeleton(tmp_path)
-    out = capsys.readouterr().out
-    assert "Session layout under" in out
-    assert "manifest.json" in out
-
-
-def test_reconcile_crash_count_updates_state_and_final_json(tmp_path: Path) -> None:
-    state = SharedState(session_id="s", crash_count=5)
-    SharedState(session_id="s", crash_count=1).save(tmp_path)
-    reports = tmp_path / "reports"
-    reports.mkdir()
-    (reports / "final.json").write_text(
-        json.dumps({"crash_count": 2, "other": True}),
-        encoding="utf-8",
-    )
-
-    cb._reconcile_crash_count(state, tmp_path)
-
-    assert SharedState.load_or_init(tmp_path).crash_count == 5
-    patched = json.loads((reports / "final.json").read_text(encoding="utf-8"))
-    assert patched["crash_count"] == 5
-    assert patched["other"] is True
-
-
-def test_resolve_reference_recipe_branches(tmp_path: Path, monkeypatch) -> None:
-    import pytest
-    from hyperloom.inference_optimizer import reference_script
-
-    args = _args(model="/models/kimi", reference_script="")
-    assert cb._resolve_reference_recipe(args, "vllm") == ("", {}, "", {})
-
-    monkeypatch.setattr(
-        reference_script,
-        "parse_reference_script",
-        lambda source, framework: SimpleNamespace(
-            server_args="--tp 8",
-            envs={"A": "1"},
-            model="kimi",
-        ),
-    )
-    assert cb._resolve_reference_recipe(_args(reference_script="usable.sh"), "vllm") == (
-        "--tp 8",
-        {"A": "1"},
-        "kimi",
-        {},
-    )
-
-    # Unreadable path raises SystemExit(2).
-    monkeypatch.setattr(
-        reference_script,
-        "parse_reference_script",
-        lambda source, framework: (_ for _ in ()).throw(OSError("not found")),
-    )
-    with pytest.raises(SystemExit) as exc_info:
-        cb._resolve_reference_recipe(_args(reference_script="empty.sh"), "vllm")
-    assert exc_info.value.code == 2
 
 
 # _detect_checkpoint_precision tests

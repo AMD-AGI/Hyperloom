@@ -179,16 +179,23 @@ def _read_result(path: Path, stdout: str) -> dict[str, Any] | None:
     return parse_forge_loop_result(stdout)
 
 
-def _notify_checkpoint(callback: Callable[[], None] | None) -> bool:
-    """Run one checkpoint probe. Returns whether it completed without raising."""
-    if callback is None:
-        return True
-    try:
-        callback()
-    except Exception:  # isolation boundary: one checkpoint-recovery probe tick
-        log.debug("checkpoint recovery probe raised", exc_info=True)
-        return False
-    return True
+@dataclass
+class _CheckpointProbe:
+    """The checkpoint-recovery probe of one run: its failure count and the last error, for the run's one report."""
+
+    callback: Callable[[], None] | None
+    failures: int = 0
+    last_error: Exception | None = None
+
+    def tick(self) -> None:
+        if self.callback is None:
+            return
+        try:
+            self.callback()
+        except Exception as error:  # isolation boundary: one checkpoint-recovery probe tick
+            log.debug("checkpoint recovery probe raised", exc_info=True)
+            self.failures += 1
+            self.last_error = error
 
 
 def run_forge_loop(
@@ -219,7 +226,7 @@ def run_forge_loop(
     timed_out = False
     # Counted into one warning: the probe fires about once a second for up to ninety minutes, so a warning per tick
     # would bury the run; each failure's traceback is logged at debug.
-    probe_failures = 0
+    probe = _CheckpointProbe(on_checkpoint)
     while True:
         remaining = invocation.deadline_unix - time.time()
         if remaining <= 0:
@@ -230,13 +237,14 @@ def run_forge_loop(
             stdout, stderr = process.communicate(timeout=min(remaining, _CHECKPOINT_POLL_SEC))
             break
         except subprocess.TimeoutExpired:
-            probe_failures += not _notify_checkpoint(on_checkpoint)
-    probe_failures += not _notify_checkpoint(on_checkpoint)
-    if probe_failures:
+            probe.tick()
+    probe.tick()
+    if probe.failures:
         log.warning(
             "checkpoint recovery probe failed %d time(s) for %s; interim patches were not published",
-            probe_failures,
+            probe.failures,
             invocation.workspace,
+            exc_info=probe.last_error,
         )
     return ForgeLoopOutcome(
         returncode=int(process.returncode if process.returncode is not None else -1),

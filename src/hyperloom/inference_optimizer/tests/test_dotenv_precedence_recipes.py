@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.common.llm_config import ANTHROPIC_SYNTHESIZABLE_KEY_ENVS, DEFAULT_CODEX_MODEL
+from hyperloom_common.llm.llm_config import ANTHROPIC_SYNTHESIZABLE_KEY_ENVS, DEFAULT_CODEX_MODEL
 from hyperloom.inference_optimizer.cli.credentials import _OFFICIAL_OPENAI_BASE_URL
 
 

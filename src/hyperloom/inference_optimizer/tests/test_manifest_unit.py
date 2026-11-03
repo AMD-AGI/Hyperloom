@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.common.timeutil import utc_now_compact
+from hyperloom_common.timeutil import utc_now_compact
 from hyperloom.inference_optimizer.session import manifest as mf
 
 

@@ -14,7 +14,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from hyperloom.common.coerce import text_or_none, to_float
+from hyperloom_common.coerce import text_or_none, to_float
 
 GAIN_AXIS_KERNEL_MICRO = "kernel_micro"
 GAIN_AXIS_OUTPUT_THROUGHPUT = "output_throughput"

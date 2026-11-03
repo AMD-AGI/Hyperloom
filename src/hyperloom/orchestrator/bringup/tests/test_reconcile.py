@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import subprocess  # nosec B404 - starts and kills a sleep, to exercise the reaper
 import sys
 import time
@@ -443,7 +444,7 @@ async def test_a_rule_that_raises_does_not_stop_the_rules_after_it(db):
     await _open_round(rounds, tasks, holder="spec-1", lease=1.0)
 
     async def _boom(*_a, **_k):
-        raise RuntimeError("rule failed")
+        raise sqlite3.OperationalError("database is locked")
 
     rec._deny_timed_out_reviews = _boom
 
@@ -452,6 +453,20 @@ async def test_a_rule_that_raises_does_not_stop_the_rules_after_it(db):
     assert report.failures == ["_boom"]
     assert report.settled == []
     assert rec._resources.excluding_round_id == "round-spec-1"
+
+
+@pytest.mark.asyncio
+async def test_a_rule_that_raises_a_bug_fails_the_pass(db):
+    """Only storage errors are isolated; anything else reaches the tick boundary."""
+    rec, _, _, _ = _build(db)
+
+    async def _boom(*_a, **_k):
+        raise RuntimeError("rule failed")
+
+    rec._deny_timed_out_reviews = _boom
+
+    with pytest.raises(RuntimeError, match="^rule failed$"):
+        await rec.run(_NOW)
 
 
 @pytest.mark.asyncio

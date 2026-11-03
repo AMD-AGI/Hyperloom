@@ -9,12 +9,7 @@ from kernelforge.kernel_backends.prompt_utils import (
 )
 
 
-def build_system_prompt(
-    config_gpu_target: str,
-    knowledge_content: str,
-    canonical_gate: str,
-) -> str:
-    return f"""\
+_SYSTEM_PROMPT_TEMPLATE = """\
 You are the HIP kernel backend — a specialist in raw HIP C++ and HipKittens kernel development
 for {config_gpu_target}.
 
@@ -119,6 +114,19 @@ ITERATION N:
   Decision: {{what to try next and why}}
 ```
 
-{EDIT_SURFACE_AND_SWEEPS_PROMPT}
-{context_sections_block(knowledge_content=knowledge_content)}
+{edit_surface}
+{context_sections}
 """
+
+
+def build_system_prompt(
+    config_gpu_target: str,
+    knowledge_content: str,
+    canonical_gate: str,
+) -> str:
+    return _SYSTEM_PROMPT_TEMPLATE.format(
+        config_gpu_target=config_gpu_target,
+        canonical_gate=canonical_gate,
+        edit_surface=EDIT_SURFACE_AND_SWEEPS_PROMPT,
+        context_sections=context_sections_block(knowledge_content=knowledge_content),
+    )

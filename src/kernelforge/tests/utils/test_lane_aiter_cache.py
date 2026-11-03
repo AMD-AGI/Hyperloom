@@ -17,7 +17,7 @@ from kernelforge.agent_backends.base import (
     AgentRuntimeConfig,
     AgentToolPolicy,
 )
-from hyperloom.common.llm_stability_env import apply_llm_stability_env
+from hyperloom_common.llm.llm_stability_env import apply_llm_stability_env
 from kernelforge.agent_backends.claude import ClaudeBackend
 from kernelforge.agent_backends.codex import CodexBackend
 from kernelforge.workflows.forge_loop.bootstrap import lanes as cli_lanes

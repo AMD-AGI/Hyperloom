@@ -18,6 +18,7 @@ from collections.abc import Mapping, Sequence
 from kernelforge.agent_backends import (
     AgentBackend,
     AgentProviderError,
+    AgentRunResult,
     AgentRunSpec,
     AgentToolPolicy,
     StdioMcpServer,
@@ -486,55 +487,12 @@ class SpecialistAgent:
             )
             result = await asyncio.wait_for(
                 self.backend.run(
-                    AgentRunSpec(
-                        system_prompt=system_prompt,
-                        user_prompt=user_prompt,
-                        role=f"specialist {self.definition.role_id}",
-                        cwd=context.workspace,
-                        writable=False,
-                        timeout_sec=self.timeout_sec,
-                        tool_policy=AgentToolPolicy(
-                            read=True,
-                            search=True,
-                            write=False,
-                            shell=False,
-                            max_turns=self.max_turns,
-                            extra_tools=probe_setup.tool_names(),
-                        ),
-                        protected_globs=["*"],
-                        mcp_servers=probe_setup.mcp_servers(),
-                    ),
+                    self._run_spec(system_prompt, user_prompt, context, probe_setup),
                     usage=usage,
                 ),
                 timeout=watchdog_timeout_sec(self.timeout_sec),
             )
-            if is_api_failure(result):
-                detail = (
-                    result.stderr_tail or result.end_reason or "specialist backend failed before producing an answer"
-                )
-                return self._failure(
-                    assignment,
-                    started,
-                    kind="backend_failure",
-                    message=detail,
-                    probe_setup=probe_setup,
-                )
-            content = (result.text or "").strip()
-            if not content:
-                return self._failure(
-                    assignment,
-                    started,
-                    kind="empty_output",
-                    message="specialist returned no analysis",
-                    probe_setup=probe_setup,
-                )
-            report = _render_probe_report(probe_setup)
-            return SpecialistOutcome(
-                assignment_id=assignment.assignment_id,
-                role_id=assignment.role_id,
-                duration_sec=time.monotonic() - started,
-                content=f"{content}\n\n{report}" if report else content,
-            )
+            return self._outcome(assignment, started, result, probe_setup)
         except asyncio.TimeoutError:
             return self._failure(
                 assignment,
@@ -568,6 +526,67 @@ class SpecialistAgent:
                 message=f"{type(error).__name__}: {error}",
                 probe_setup=probe_setup,
             )
+
+    def _run_spec(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        context: OrchestrationContext,
+        probe_setup: _ProbeSetup,
+    ) -> AgentRunSpec:
+        """The read-only backend session one specialist assignment runs in."""
+        return AgentRunSpec(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            role=f"specialist {self.definition.role_id}",
+            cwd=context.workspace,
+            writable=False,
+            timeout_sec=self.timeout_sec,
+            tool_policy=AgentToolPolicy(
+                read=True,
+                search=True,
+                write=False,
+                shell=False,
+                max_turns=self.max_turns,
+                extra_tools=probe_setup.tool_names(),
+            ),
+            protected_globs=["*"],
+            mcp_servers=probe_setup.mcp_servers(),
+        )
+
+    def _outcome(
+        self,
+        assignment: SpecialistAssignment,
+        started: float,
+        result: AgentRunResult,
+        probe_setup: _ProbeSetup,
+    ) -> SpecialistOutcome:
+        """Turn a finished backend session into the specialist's outcome or its failure."""
+        if is_api_failure(result):
+            detail = result.stderr_tail or result.end_reason or "specialist backend failed before producing an answer"
+            return self._failure(
+                assignment,
+                started,
+                kind="backend_failure",
+                message=detail,
+                probe_setup=probe_setup,
+            )
+        content = (result.text or "").strip()
+        if not content:
+            return self._failure(
+                assignment,
+                started,
+                kind="empty_output",
+                message="specialist returned no analysis",
+                probe_setup=probe_setup,
+            )
+        report = _render_probe_report(probe_setup)
+        return SpecialistOutcome(
+            assignment_id=assignment.assignment_id,
+            role_id=assignment.role_id,
+            duration_sec=time.monotonic() - started,
+            content=f"{content}\n\n{report}" if report else content,
+        )
 
     def _prepare_probe(
         self,

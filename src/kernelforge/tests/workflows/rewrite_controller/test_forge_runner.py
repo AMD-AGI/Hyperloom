@@ -271,6 +271,7 @@ def test_a_checkpoint_probe_that_always_raises_is_reported_once(
     probe_warnings = [record for record in caplog.records if "checkpoint recovery probe failed" in record.message]
     assert len(probe_warnings) == 1
     assert probe_warnings[0].args[0] >= 2
+    assert repr(probe_warnings[0].exc_info[1]) == "RuntimeError('recovery is broken')"
 
 
 def test_a_corrupt_result_file_falls_back_to_the_sentinel_in_stdout(tmp_path: Path) -> None:

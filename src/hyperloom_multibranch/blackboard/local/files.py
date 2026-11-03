@@ -3,7 +3,7 @@
 
 """Whole-file writes for files every participant of a session reads.
 
-The files are owner-only, as ``tempfile.mkstemp`` creates them and as ``hyperloom.common.io`` writes its own: every
+The files are owner-only, as ``tempfile.mkstemp`` creates them and as ``hyperloom_common.io`` writes its own: every
 participant of a session runs as the session's user. A reader never sees a partial file.
 """
 

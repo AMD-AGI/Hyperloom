@@ -1,0 +1,8 @@
+[
+  {"name": "gpu_workers_1",  "extra_envs": {"MINIMAP2_GPU_CHAIN_WORKERS": "1"}},
+  {"name": "gpu_workers_4",  "extra_envs": {"MINIMAP2_GPU_CHAIN_WORKERS": "4"}},
+  {"name": "gpu_workers_8",  "extra_envs": {"MINIMAP2_GPU_CHAIN_WORKERS": "8"}},
+  {"name": "gpu_workers_16", "extra_envs": {"MINIMAP2_GPU_CHAIN_WORKERS": "16"}},
+  {"name": "host_threads_8", "extra_envs": {"MINIMAP2_THREADS": "8"}},
+  {"name": "flush_16k",      "extra_envs": {"MINIMAP2_GPU_FLUSH_THRESHOLD": "16384"}}
+]

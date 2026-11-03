@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Mapping
 
-from hyperloom.common.coerce import to_float
+from hyperloom_common.coerce import to_float
 from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
 from hyperloom.inference_optimizer.breakdown.stop_reasons import AGENTX_PREFLIGHT_STOP_REASON
 
@@ -258,6 +258,7 @@ class BaselineFailureMixin:
             and signature == self.shared_state.baseline_last_failure_signature
         )
         self.shared_state.baseline_failure_streak += 1
+        self.shared_state.baseline_failures_this_leg += 1
         self.shared_state.baseline_last_failure_signature = signature
         streak = self.shared_state.baseline_failure_streak
         if _is_ray_cluster_infeasible(result_payload):

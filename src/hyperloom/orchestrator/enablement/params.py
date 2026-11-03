@@ -454,7 +454,7 @@ class EnablementParams(CoordinatorCollaborator):
         from .mandate import score_enablement_title
         from hyperloom.agents.framework.models import Candidate, CandidateSearchRequest, PRMonitorConfig
         from hyperloom.agents.framework.sources import enumerate_candidates
-        from hyperloom.common.pr_monitor_urls import pr_monitor_base_url
+        from hyperloom_common.pr_monitor_urls import pr_monitor_base_url
 
         # The PR query service is co-hosted by KB Store.
         plane = self.knowledge_plane

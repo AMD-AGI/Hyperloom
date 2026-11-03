@@ -38,10 +38,11 @@ from typing import Any, Awaitable, Callable, Literal, Mapping, Protocol
 
 from hyperloom.common.deadline import Deadline
 from hyperloom.common.env_safety import RunAs, RunAsError, redact_file_in_place
-from hyperloom.common.fs_utils import create_nofollow, read_bytes_nofollow, read_text_nofollow, write_text_nofollow
-from hyperloom.common.llm_config import AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
+from hyperloom_common.fs_utils import create_nofollow, read_bytes_nofollow, read_text_nofollow, write_text_nofollow
+from hyperloom_common.llm.llm_config import AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX
 
+from .agent_cli_config import _build_specialist_env as build_specialist_env
 from .launch_env import prepare_demote, resolve_launch_user, stage_mcp_config
 from .mcp_config import SPECIALIST_MCP_CONFIG_FILENAME
 from .resources import (
@@ -62,7 +63,6 @@ from .subprocess_ import (
     _write_private_codex_config,
     clear_wall_budget_extension,
 )
-from .subprocess_ import _build_specialist_env as build_specialist_env
 
 log = logging.getLogger(__name__)
 

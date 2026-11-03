@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from hyperloom.common.env import is_truthy
+from hyperloom_common.env import is_truthy
 from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
 from hyperloom_multibranch.toolbox.tools.base import InvalidRequest, ToolRequest
 from hyperloom_multibranch.toolbox.tools.executor_tool import ExecutorFn, ExecutorTool

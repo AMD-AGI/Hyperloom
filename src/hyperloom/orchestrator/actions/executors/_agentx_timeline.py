@@ -159,10 +159,11 @@ def parse_profile_export(path: Path) -> list[RequestRecord]:
                     payload = json.loads(line)
                 except ValueError:
                     continue
-                if isinstance(payload, dict):
-                    record = _record_from(payload)
-                    if record is not None:
-                        records.append(record)
+                if not isinstance(payload, dict):
+                    continue
+                record = _record_from(payload)
+                if record is not None:
+                    records.append(record)
     except OSError as exc:
         log.debug("agentx_timeline: could not read %s (%s)", path, exc)
         return []

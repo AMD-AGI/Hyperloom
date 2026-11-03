@@ -11,7 +11,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from kernelforge.utils.durable_io import atomic_write_json
+from hyperloom_common.io import DURABLE, JsonFormat, atomic_write_json
 from kernelforge.utils.process_reaping import device_holders, still_holding_device
 
 log = logging.getLogger(__name__)
@@ -94,7 +94,7 @@ class DeviceHazardLog:
         self._hazard = hazard
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            atomic_write_json(self.path, hazard.to_dict())
+            atomic_write_json(self.path, hazard.to_dict(), fmt=JsonFormat(trailing_newline=True), options=DURABLE)
         except OSError as error:
             log.warning(
                 "device hazard not durable (%s); a restart will measure without knowing the device was held",

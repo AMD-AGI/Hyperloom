@@ -108,8 +108,8 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 
 | Option | Default | Meaning |
 |:--|:--|:--|
-| `--gpu-target <arch>` | none | ROCm compilation architecture, e.g. `gfx950`. Also exported to the environment. |
-| `--gpu-type <sku>` | `mi355x` | Hardware SKU used in knowledge-base identities. |
+| `--gpu-target <arch>` | auto-detect | ROCm compilation architecture, e.g. `gfx950`. When omitted it is read from `GPU_TARGET`, then `rocminfo`, and the run refuses to start when neither names exactly one GPU. Also exported to the environment. |
+| `--gpu-type <sku>` | from the arch | Hardware SKU used in knowledge-base identities. When omitted it follows the resolved GPU arch (`gfx950` → `mi355x`, `gfx942` → `mi300x`). |
 | `--nproc-per-node <n>` | `1` | Ranks the driver self-launches via torchrun, for collective tasks such as all-reduce. Above 1, EVERY rank is profiled in its own rocprofv3 session — wrapping the driver would only profile the launcher process, which runs no kernel. |
 | `--bench-repeat <n>` | `1` | How many times each bench repeats its measurement in-process, reporting the per-case median. Above 1 shrinks run-to-run spread and requires a driver that accepts `--repeat`; the flag is omitted entirely when this is 1. |
 | `--aiter-cache-max-gb <g>` | `4.0` | Per-attempt AITER cache soft limit in GiB. LRU pruning targets 75% of the limit; `0` disables in-run pruning. |
@@ -214,8 +214,8 @@ the same `__FORGE_RESULT__` contract as `forge-loop`.
 
 | Option | Default | Meaning |
 |:--|:--|:--|
-| `--gpu-target <arch>` | none | ROCm compilation architecture, e.g. `gfx950`. Also exported to the environment. |
-| `--gpu-type <sku>` | `mi355x` | Hardware SKU for rewrite KB identities. |
+| `--gpu-target <arch>` | auto-detect | ROCm compilation architecture, e.g. `gfx950`. When omitted it is read from `GPU_TARGET`, then `rocminfo`, and the rewrite refuses to start when neither names exactly one GPU. Also exported to the environment. |
+| `--gpu-type <sku>` | from the arch | Hardware SKU for rewrite KB identities. When omitted it follows the resolved GPU arch (`gfx950` → `mi355x`, `gfx942` → `mi300x`). |
 | `--model <name>` | provider default | LLM model; overrides `CLAUDE_MODEL`/`CODEX_MODEL`/`DSH_MODEL`. |
 | `--permission-mode <v>` | `acceptEdits` | Claude permission mode. |
 | `--supervisor-backend <name>` | `codex` | OPTIMIZE supervisor backend on stall: `codex` or `claude`. |

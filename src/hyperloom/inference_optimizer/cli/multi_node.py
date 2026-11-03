@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from typing import Any
 
 from ..multi_node import TopologyHandoffError, topology_file_overlay
 
@@ -92,32 +93,7 @@ def _prepare_multi_node_state(args: argparse.Namespace) -> None:
 
     ext_state = build_external_state_from_env()
     ext_state["backend"] = _resolve_mn_backend(args)
-    if ext_state["backend"] == "infera" and not external_has_ssh_control():
-        print(
-            "ERROR: the infera backend requires SSH control. Set "
-            "HYPERLOOM_MN_EXT_SSH_KEY plus HYPERLOOM_MN_EXT_PREFILL_IPS/"
-            "DECODE_IPS (or WORKER_IPS). rayjob uses Ray, not SSH.",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-    # The mirror image. --mn-backend defaults to rayjob, so an infera-shaped hand-off whose operator forgot the flag
-    # arrives here as rayjob and would report server_control=yes -- SSH control is real, it is simply not the control
-    # this backend uses.
-    if ext_state["backend"] == "rayjob" and not ext_state.get("head_pod_ip"):
-        if external_has_ssh_control():
-            print(
-                "ERROR: --mn-backend rayjob (the default) needs "
-                "HYPERLOOM_MN_EXT_HEAD_IP, but this hand-off carries SSH "
-                "credentials and GPU pod IPs instead -- it is an infera "
-                "cluster. Pass --mn-backend infera.",
-                file=sys.stderr,
-            )
-            sys.exit(2)
-        print(
-            "multi-node: rayjob with no HYPERLOOM_MN_EXT_HEAD_IP -- this cluster cannot be "
-            "restarted, so the run is benchmark-only (see the warning below).",
-            file=sys.stderr,
-        )
+    _reject_unusable_backend(ext_state)
     try:
         _save_state(ext_state)
     except OSError as exc:
@@ -154,6 +130,38 @@ def _prepare_multi_node_state(args: argparse.Namespace) -> None:
         str(ext_state["backend"]),
         head_ip=str(ext_state.get("head_pod_ip") or ""),
     )
+
+
+def _reject_unusable_backend(ext_state: dict[str, Any]) -> None:
+    """Exit 2 when the selected backend cannot control this hand-off; flag a benchmark-only rayjob."""
+    from ..multi_node._internal.external_state import external_has_ssh_control
+
+    if ext_state["backend"] == "infera" and not external_has_ssh_control():
+        print(
+            "ERROR: the infera backend requires SSH control. Set "
+            "HYPERLOOM_MN_EXT_SSH_KEY plus HYPERLOOM_MN_EXT_PREFILL_IPS/"
+            "DECODE_IPS (or WORKER_IPS). rayjob uses Ray, not SSH.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    # The mirror image. --mn-backend defaults to rayjob, so an infera-shaped hand-off whose operator forgot the flag
+    # arrives here as rayjob and would report server_control=yes -- SSH control is real, it is simply not the control
+    # this backend uses.
+    if ext_state["backend"] == "rayjob" and not ext_state.get("head_pod_ip"):
+        if external_has_ssh_control():
+            print(
+                "ERROR: --mn-backend rayjob (the default) needs "
+                "HYPERLOOM_MN_EXT_HEAD_IP, but this hand-off carries SSH "
+                "credentials and GPU pod IPs instead -- it is an infera "
+                "cluster. Pass --mn-backend infera.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        print(
+            "multi-node: rayjob with no HYPERLOOM_MN_EXT_HEAD_IP -- this cluster cannot be "
+            "restarted, so the run is benchmark-only (see the warning below).",
+            file=sys.stderr,
+        )
 
 
 def _prepare_adopted_cluster(args: argparse.Namespace, backend: str, *, head_ip: str) -> None:

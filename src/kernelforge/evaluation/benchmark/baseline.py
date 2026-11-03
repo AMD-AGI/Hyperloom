@@ -119,6 +119,31 @@ def load_reference_case_times(workspace_dir: str) -> ReferenceCases | None:
     return ReferenceCases(case_times=cases, unusable_entries=tuple(unusable))
 
 
+def _reject_drifted_cases(
+    shared: list[str], measured: dict[str, float], reference: dict[str, float], drift_tolerance: float
+) -> None:
+    """Raise when any shared case's measured time drifts from its reference beyond ``drift_tolerance``."""
+    drifted = [
+        f"{case_id}: measured {measured[case_id]:g} ms vs reference "
+        f"{reference[case_id]:g} ms "
+        f"({abs(measured[case_id] - reference[case_id]) / reference[case_id] * 100:.1f}%"
+        " drift)"
+        for case_id in shared
+        if abs(measured[case_id] - reference[case_id]) / reference[case_id] > drift_tolerance
+    ]
+    if drifted:
+        raise BaselineReferenceError(
+            "the pristine baseline disagrees with "
+            f"{BASELINE_REFERENCE_FILENAME} by more than "
+            f"{drift_tolerance * 100:.0f}%, so every speedup measured "
+            "against it would be wrong: " + "; ".join(drifted) + ". The "
+            "reference was measured on one machine and image: if this run is "
+            "on different hardware, re-measure it, or export "
+            f"{BASELINE_DRIFT_TOLERANCE_ENV}=<fraction, e.g. 0.5 for 50%> to "
+            "widen the tolerance for this run, which the console then reports"
+        )
+
+
 def check_baseline_against_reference(
     workspace_dir: str,
     measured_case_times: dict[str, float],
@@ -161,25 +186,7 @@ def check_baseline_against_reference(
             ),
         )
 
-    drifted = [
-        f"{case_id}: measured {measured[case_id]:g} ms vs reference "
-        f"{reference[case_id]:g} ms "
-        f"({abs(measured[case_id] - reference[case_id]) / reference[case_id] * 100:.1f}%"
-        " drift)"
-        for case_id in shared
-        if abs(measured[case_id] - reference[case_id]) / reference[case_id] > drift_tolerance
-    ]
-    if drifted:
-        raise BaselineReferenceError(
-            "the pristine baseline disagrees with "
-            f"{BASELINE_REFERENCE_FILENAME} by more than "
-            f"{drift_tolerance * 100:.0f}%, so every speedup measured "
-            "against it would be wrong: " + "; ".join(drifted) + ". The "
-            "reference was measured on one machine and image: if this run is "
-            "on different hardware, re-measure it, or export "
-            f"{BASELINE_DRIFT_TOLERANCE_ENV}=<fraction, e.g. 0.5 for 50%> to "
-            "widen the tolerance for this run, which the console then reports"
-        )
+    _reject_drifted_cases(shared, measured, reference, drift_tolerance)
     return BaselineReferenceCheck(
         compared_case_count=len(shared),
         measured_case_count=len(measured),

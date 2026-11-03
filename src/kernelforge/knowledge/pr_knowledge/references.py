@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from kernelforge.utils.durable_io import atomic_write_text
+from hyperloom_common.io import DURABLE, atomic_write_text
 from kernelforge.knowledge.pr_knowledge.client import (
     PRContractError,
     PRMonitorClient,
@@ -307,7 +307,7 @@ def load_snapshot(workspace_dir: str) -> Snapshot:
 def save_snapshot(workspace_dir: str, snapshot: Snapshot) -> Path:
     """Durably persist the snapshot."""
     path = refs_dir(workspace_dir) / SNAPSHOT_NAME
-    atomic_write_text(path, json.dumps(snapshot.to_dict(), indent=2, sort_keys=True))
+    atomic_write_text(path, json.dumps(snapshot.to_dict(), indent=2, sort_keys=True), options=DURABLE)
     return path
 
 
@@ -342,7 +342,7 @@ def render_index(snapshot: Snapshot) -> str:
 def write_index(workspace_dir: str, snapshot: Snapshot) -> Path:
     """Write the index alongside the snapshot."""
     path = refs_dir(workspace_dir) / INDEX_NAME
-    atomic_write_text(path, render_index(snapshot))
+    atomic_write_text(path, render_index(snapshot), options=DURABLE)
     return path
 
 
@@ -613,5 +613,5 @@ def _ranked_from_snapshot(snapshot: Snapshot, context: PRQueryContext) -> list[P
 def write_provenance(workspace_dir: str, payload: dict[str, Any]) -> Path:
     """Write PR reference exposure data beside the best-artifact manifest."""
     path = refs_dir(workspace_dir) / PROVENANCE_NAME
-    atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True))
+    atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True), options=DURABLE)
     return path

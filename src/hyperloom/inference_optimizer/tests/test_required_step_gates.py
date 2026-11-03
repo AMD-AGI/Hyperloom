@@ -18,7 +18,7 @@ from hyperloom.orchestrator.roles import (
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.orchestrator.policy.gate import PolicyDenied
+from hyperloom.orchestrator.policy.denial import PolicyDenied
 
 from .conftest import seed_kernel_keep
 from hyperloom.inference_optimizer.session.paths import make_session_dir

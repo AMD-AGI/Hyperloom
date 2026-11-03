@@ -29,7 +29,7 @@ from hyperloom.inference_optimizer import inferencex_checkout
 from hyperloom.inference_optimizer.cli.benchmark_config import configure_benchmark
 from hyperloom.inference_optimizer.cli.parser import _build_parser
 from hyperloom.contracts.recipe import Recipe, RecipeDelta
-from hyperloom.common.env import forge_explicitly_enabled
+from hyperloom_common.env import forge_explicitly_enabled
 from hyperloom.common.perf_metric import agentx_enabled
 from hyperloom.common.visible_devices import COUNTING_VISIBLE_DEVICE_VARS
 from hyperloom.measure import compile as compile_module

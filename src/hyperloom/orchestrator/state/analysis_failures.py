@@ -19,7 +19,7 @@ import logging
 from collections.abc import Mapping
 from typing import Any
 
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.timeutil import now_iso
 
 log = logging.getLogger(__name__)
 

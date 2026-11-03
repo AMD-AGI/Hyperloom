@@ -107,12 +107,7 @@ def _bridge_forge_decision(
             result.setdefault("source_snapshot", _snap_dir)
         # Derive best_speedup from tuners_run when absent.
         if "best_speedup" not in result:
-            best = 1.0
-            for t in result.get("tuners_run") or []:
-                if isinstance(t, dict):
-                    sp = float(t.get("best_micro_speedup") or 1.0)
-                    if sp > best:
-                        best = sp
+            best = _best_micro_speedup(result.get("tuners_run") or [])
             if best > 1.0:
                 result["best_speedup"] = best
         # Micro-only result: E2E validation still needed.
@@ -125,6 +120,17 @@ def _bridge_forge_decision(
         if micro == "failed":
             result.setdefault("status", "failed")
         result.setdefault("error_class", f"forge_{micro}")
+
+
+def _best_micro_speedup(tuners_run: Any) -> float:
+    """Return the largest ``best_micro_speedup`` among the tuners that ran, never below 1.0."""
+    best = 1.0
+    for t in tuners_run:
+        if isinstance(t, dict):
+            sp = float(t.get("best_micro_speedup") or 1.0)
+            if sp > best:
+                best = sp
+    return best
 
 
 #: forge wordings that carry nothing deployable, each distinct from an honest
@@ -416,6 +422,56 @@ def _fill_forge_tuner_outcomes(result: HandlerResult, workspace: Path) -> None:
             result[key] = reported
 
 
+def _forge_gemm_tune_not_found() -> HandlerResult:
+    """The failure for an interpreter that cannot run ``kernelforge gemm-tune``."""
+    return {
+        "status": "failed",
+        "error_class": "forge_gemm_tune_not_found",
+        "error": (
+            "forge-gemm-tune is not runnable in this interpreter: "
+            f"'{sys.executable} -m kernelforge.cli gemm-tune --help' failed. "
+            "kernelforge ships with this distribution, so this means a "
+            "partial install: reinstall with 'pip install -e .[forge]'."
+            f" (interpreter: {sys.executable!r})"
+        ),
+        "backend": "forge",
+    }
+
+
+def _model_path_unavailable_skip(model_id: str) -> HandlerResult:
+    """The skip for a model path that resolves to no local directory."""
+    # Forge needs the config on disk to derive shapes, so it cannot run --
+    # but not running one tuning backend is a skip, not a session failure.
+    # Reporting it as failed would spend a REVERT verdict on an experiment
+    # that never started.
+    return {
+        "status": "skipped",
+        "error_class": "model_path_unavailable",
+        "skip_reason": (
+            f"Model path {model_id!r} is neither an existing local "
+            "directory nor an available Hugging Face cache snapshot"
+        ),
+        "backend": "forge",
+    }
+
+
+async def _with_server_log(run: _ForgeGemmRun, state: Any, session_dir: Path) -> _ForgeGemmRun:
+    """``run`` with the serving log it tunes against and the forge framework that log's routing selects."""
+    # Off the event loop: this walks runs/ and byte-scans server logs that measure
+    # ~17MB apiece on the fleet. Inline, it stalled every other coroutine on this
+    # orchestrator -- heartbeats included -- for the duration.
+    server_log = await asyncio.to_thread(resolve_forge_server_log, state, session_dir)
+    return run._replace(
+        server_log=server_log,
+        tuning_framework=_forge_framework_for_vllm(
+            framework=run.framework,
+            precision=run.precision,
+            quant_type=run.quant_type,
+            aiter_routing=_resolve_vllm_aiter_routing(model_path=run.model_dir, server_log=server_log, tp=run.tp),
+        ),
+    )
+
+
 async def _run_forge_gemm_tuning(
     payload: dict,
     *,
@@ -441,49 +497,14 @@ async def _run_forge_gemm_tuning(
     # that subprocess may still take until the bounded timeout to fail. Keep the
     # synchronous probe off the orchestrator reactor.
     if not await asyncio.to_thread(_forge_gemm_tune_available):
-        return {
-            "status": "failed",
-            "error_class": "forge_gemm_tune_not_found",
-            "error": (
-                "forge-gemm-tune is not runnable in this interpreter: "
-                f"'{sys.executable} -m kernelforge.cli gemm-tune --help' failed. "
-                "kernelforge ships with this distribution, so this means a "
-                "partial install: reinstall with 'pip install -e .[forge]'."
-                f" (interpreter: {sys.executable!r})"
-            ),
-            "backend": "forge",
-        }
+        return _forge_gemm_tune_not_found()
 
     run = _forge_gemm_run(state, str(payload.get("task_id") or ""), session_dir)
     if not run.model_id:
         return {"status": "failed", "error_class": "model_path_missing", "error": "model_path is required"}
     if not run.model_dir:
-        # Forge needs the config on disk to derive shapes, so it cannot run --
-        # but not running one tuning backend is a skip, not a session failure.
-        # Reporting it as failed would spend a REVERT verdict on an experiment
-        # that never started.
-        return {
-            "status": "skipped",
-            "error_class": "model_path_unavailable",
-            "skip_reason": (
-                f"Model path {run.model_id!r} is neither an existing local "
-                "directory nor an available Hugging Face cache snapshot"
-            ),
-            "backend": "forge",
-        }
-    # Off the event loop: this walks runs/ and byte-scans server logs that measure
-    # ~17MB apiece on the fleet. Inline, it stalled every other coroutine on this
-    # orchestrator -- heartbeats included -- for the duration.
-    server_log = await asyncio.to_thread(resolve_forge_server_log, state, session_dir)
-    run = run._replace(
-        server_log=server_log,
-        tuning_framework=_forge_framework_for_vllm(
-            framework=run.framework,
-            precision=run.precision,
-            quant_type=run.quant_type,
-            aiter_routing=_resolve_vllm_aiter_routing(model_path=run.model_dir, server_log=server_log, tp=run.tp),
-        ),
-    )
+        return _model_path_unavailable_skip(run.model_id)
+    run = await _with_server_log(run, state, session_dir)
     priced_gemm_lane = functools.partial(
         _priced_gemm_lane,
         state,

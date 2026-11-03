@@ -204,10 +204,6 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
 SPECIALIST_DOMAIN_KEYS: frozenset[str] = frozenset(d.key for d in SPECIALIST_DOMAINS)
 
 
-# Extra knowledge-domain tags for anchors with no backing SpecialistDomain yet.
-EXTRA_KNOWLEDGE_DOMAIN_TAGS: tuple[str, ...] = ()
-
-
 def _derive_knowledge_domain_tags() -> tuple[str, ...]:
     """Collect the distinct knowledge-domain tags from the catalogue."""
     seen: dict[str, None] = {}
@@ -218,10 +214,6 @@ def _derive_knowledge_domain_tags() -> tuple[str, ...]:
         anchor = d.kb_anchor.strip()
         if anchor:
             seen.setdefault(anchor, None)
-    for extra in EXTRA_KNOWLEDGE_DOMAIN_TAGS:
-        tag = extra.strip()
-        if tag:
-            seen.setdefault(tag, None)
     return tuple(seen.keys())
 
 
@@ -364,7 +356,6 @@ SPECIALIST_MAX_TURNS_HARD_CAP: int = 1000
 __all__ = [
     "CUSTOM_SPECIALIST_KEY",
     "DEFAULT_SPECIALIST_MAX_TURNS",
-    "EXTRA_KNOWLEDGE_DOMAIN_TAGS",
     "FREEFORM_DOMAIN",
     "KNOWLEDGE_DOMAIN_TAGS",
     "KNOWLEDGE_DOMAIN_TAG_SET",

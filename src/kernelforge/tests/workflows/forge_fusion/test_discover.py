@@ -390,6 +390,31 @@ class TestDiscoveryPrompt:
 
         assert "score=812.5" in prompt
         assert "score=30.0" in prompt
+
+    def test_prompt_names_the_arch_it_was_given(self):
+        prompt = build_discovery_prompt(
+            DiscoveryTarget(
+                model_type="toy",
+                install=FrameworkInstall(framework="vllm"),
+                source_file="",
+                shapes={},
+                gpu_arch="gfx950",
+            ),
+            "def forward(x): return x\n",
+            DiscoveryEvidence(diagnosis=_candidate_diag(), hot_kernels=[]),
+        )
+        assert "on AMD MI355X (gfx950), bf16" in prompt
+        # Regression: this used to be hardcoded to another chip.
+        assert "gfx942" not in prompt
+
+    def test_no_arch_leaves_no_false_target_in_the_prompt(self):
+        prompt = build_discovery_prompt(
+            DiscoveryTarget(model_type="toy", install=FrameworkInstall(framework="vllm"), source_file="", shapes={}),
+            "def forward(x): return x\n",
+            DiscoveryEvidence(diagnosis=_candidate_diag(), hot_kernels=[]),
+        )
+        assert "on an AMD ROCm GPU, bf16" in prompt
+        assert "MI325X" not in prompt
         # The prompt must say what the score means, or it is noise to the model.
         assert "higher score" in prompt.lower()
 

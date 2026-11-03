@@ -11,10 +11,12 @@ from pathlib import Path
 import pytest
 import yaml
 
+from hyperloom.inference_optimizer.agentx.report import native_launch_evidence
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
 from hyperloom.orchestrator.actions.executors._grid_base import GridVariant
 from hyperloom.orchestrator.actions.executors._grid_runner import GridRecipe, _build_variant_yaml, run_grid
-from hyperloom.orchestrator.actions.executors._workload_envs import LaunchLayer
+from hyperloom.orchestrator.actions.executors._launch_evidence import persist_launch_evidence
+from hyperloom.orchestrator.actions.executors._workload_envs import LaunchLayer, materialize_benchmark_config
 from hyperloom.orchestrator.actions.executors._spec_decode_pin import (
     SPECULATIVE_DECODING_PINNED,
     SpeculativeDecodingPinnedError,
@@ -34,6 +36,8 @@ def _spec_config(**overrides) -> str:
     return "--speculative-config " + json.dumps({k: v for k, v in config.items() if v is not None})
 
 
+#: The scheduler watchdog every sglang AgentX launch gets unless its recipe or candidate sets one.
+WATCHDOG = ["--watchdog-timeout", "1800"]
 VLLM_SYNTHETIC = _spec_config() + " --max-num-seqs 128"
 DSPARK_SYNTHETIC = "--speculative-config " + json.dumps(
     {
@@ -46,6 +50,15 @@ DSPARK_SYNTHETIC = "--speculative-config " + json.dumps(
 SGLANG_EAGLE = "--speculative-algorithm EAGLE --speculative-num-steps 5 --speculative-eagle-topk 1 --speculative-num-draft-tokens 6"
 SGLANG_SYNTHETIC_ENV = {"SGLANG_SIMULATE_ACC_LEN": "3.61"}
 ATOM_SYNTHETIC = "--method mtp --num-speculative-tokens 3 --spec-decode-acceptance-length 2.5"
+NATIVE_PREFIX = ["python3", "-m", "sglang.launch_server", "--model-path", "Qwen/Qwen3-0.6B"]
+DSPARK_RECIPE_ARGS = [
+    "--speculative-algorithm",
+    "DSPARK",
+    "--speculative-dspark-block-size",
+    "4",
+    "--speculative-num-draft-tokens",
+    "4",
+]
 
 
 @pytest.mark.parametrize(
@@ -251,6 +264,7 @@ def _base_yaml(tmp_path: Path, framework: str, args: str, envs: dict[str, str]) 
 def _no_launcher_checkout(monkeypatch):
     monkeypatch.delenv("INFERENCEX_PATH", raising=False)
     monkeypatch.delenv("INFERENCE_OPTIMIZER_SERVER_ARGS", raising=False)
+    monkeypatch.delenv("SGLANG_WATCHDOG_TIMEOUT", raising=False)
 
 
 def _build(tmp_path: Path, base: Path, variant: GridVariant, stack: LaunchLayer = LaunchLayer()) -> dict:
@@ -331,3 +345,110 @@ async def test_run_grid_records_the_refusal_without_launching(tmp_path, monkeypa
     assert [(r.status, r.error_class) for r in results] == [("failed", SPECULATIVE_DECODING_PINNED)]
     assert "num_speculative_tokens" in results[0].error
     assert not results[0].launch_evidence
+
+
+def _native_recipe(
+    tmp_path: Path, recipe_args: list[str] | None = None, recipe_envs: dict[str, str | None] | None = None
+) -> Path:
+    """A native recipe as a verified session leaves it: the resolved workload and the launch receipt beside it.
+
+    A native launch spells its server args in its own resolved argv and its settings in the environment it exports
+    itself, not in ``launch_overrides`` or the workload's ``envs``, so the receipt is the only place a layer
+    composing on top can read the draft and the simulated acceptance the recipe already pinned.
+    """
+    source = tmp_path / "workload.yaml"
+    source.write_text(
+        yaml.safe_dump(
+            {
+                "benchmark": {
+                    "model": "Qwen/Qwen3-0.6B",
+                    "framework": "sglang",
+                    "precision": "bf16",
+                    "runner_type": "mi355x",
+                    "agentx": {"enabled": True, "mode": "canonical"},
+                    "envs": {"TP": "1", "EP_SIZE": "1", "CONC": "8"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = materialize_benchmark_config(source, tmp_path / "recipe")
+    argv = NATIVE_PREFIX + list(recipe_args or [])
+    persist_launch_evidence(
+        native_launch_evidence(
+            {
+                "agentx_metrics": {
+                    "server_launch": {
+                        "base_argv": argv,
+                        "effective_argv": argv,
+                        "effective_env": dict(recipe_envs or {}),
+                    },
+                    "recipe": {"tp": 1, "ep": 1, "conc": 8},
+                }
+            },
+            config,
+        ),
+        slot=config.parent,
+    )
+    return config
+
+
+def _build_native(tmp_path: Path, config: Path, variant: GridVariant, stack: LaunchLayer = LaunchLayer()) -> dict:
+    out = _build_variant_yaml(
+        GridRecipe(base_yaml_path=config, base=stack), variant, output_subdir=tmp_path / variant.name
+    )
+    return yaml.safe_load(out.read_text(encoding="utf-8"))["benchmark"]["agentx"]["launch_overrides"]
+
+
+@pytest.mark.parametrize(
+    "variant",
+    [
+        pytest.param(
+            GridVariant("v", extra_server_args="--speculative-dspark-block-size 5 --speculative-num-draft-tokens 6"),
+            id="appends-a-different-draft",
+        ),
+        pytest.param(GridVariant("v", remove_args=["--speculative-dspark-block-size"]), id="removes-the-draft-flag"),
+        pytest.param(GridVariant("v", unset_envs=["SGLANG_SIMULATE_ACC_LEN"]), id="unsets-acc-len"),
+        pytest.param(
+            GridVariant("v", extra_server_args="--max-num-seqs 64", args_mode="replace"), id="replace-drops-the-draft"
+        ),
+    ],
+)
+def test_building_a_native_variant_refuses_a_change_to_the_recipes_pinned_draft(tmp_path, variant):
+    config = _native_recipe(tmp_path, DSPARK_RECIPE_ARGS, SGLANG_SYNTHETIC_ENV)
+    with pytest.raises(SpeculativeDecodingPinnedError, match=SPECULATIVE_DECODING_PINNED) as refused:
+        _build_native(tmp_path, config, variant)
+    assert refused.value.error_class == SPECULATIVE_DECODING_PINNED
+
+
+def test_building_a_native_variant_keeps_other_knobs_open(tmp_path):
+    config = _native_recipe(tmp_path, DSPARK_RECIPE_ARGS, SGLANG_SYNTHETIC_ENV)
+    launch = _build_native(tmp_path, config, GridVariant("v", extra_server_args="--mem-fraction-static 0.85"))
+    assert launch["append_args"] == [*WATCHDOG, "--mem-fraction-static", "0.85"]
+
+
+def test_a_variable_the_recipe_cleared_is_not_a_setting_it_pinned(tmp_path):
+    """A ``None`` in the receipt records a name the launch cleared, so this recipe verifies a real draft."""
+    config = _native_recipe(tmp_path, DSPARK_RECIPE_ARGS, {"SGLANG_SIMULATE_ACC_LEN": None})
+    launch = _build_native(tmp_path, config, GridVariant("v", extra_server_args="--speculative-num-draft-tokens 6"))
+    assert launch["append_args"] == [*WATCHDOG, "--speculative-num-draft-tokens", "6"]
+
+
+def test_building_a_native_variant_pins_the_draft_the_accepted_stack_carries(tmp_path):
+    """The session's own accepted layer is what the pin is measured against, not a candidate to refuse."""
+    config = _native_recipe(tmp_path)
+    stack = LaunchLayer(extra_server_args=SGLANG_EAGLE, extra_envs=SGLANG_SYNTHETIC_ENV)
+    launch = _build_native(tmp_path, config, GridVariant("ok", extra_server_args="--mem-fraction-static 0.85"), stack)
+    assert "--speculative-num-steps" in launch["append_args"]
+    with pytest.raises(SpeculativeDecodingPinnedError):
+        _build_native(tmp_path, config, GridVariant("v", extra_server_args="--speculative-num-steps 3"), stack)
+
+
+def test_resolving_the_session_launch_may_restate_the_recipes_draft(tmp_path):
+    """Materializing the accepted launch admits it as it is; only a candidate composed on top is measured."""
+    config = _native_recipe(tmp_path, DSPARK_RECIPE_ARGS, SGLANG_SYNTHETIC_ENV)
+    resolved = materialize_benchmark_config(
+        config, tmp_path / "accepted", launch=LaunchLayer(extra_server_args="--speculative-num-draft-tokens 6")
+    )
+    launch = yaml.safe_load(resolved.read_text(encoding="utf-8"))["benchmark"]["agentx"]["launch_overrides"]
+    assert launch["append_args"] == [*WATCHDOG, "--speculative-num-draft-tokens", "6"]

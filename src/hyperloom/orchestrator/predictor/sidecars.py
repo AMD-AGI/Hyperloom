@@ -13,8 +13,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.coerce import to_float
-from hyperloom.common.jsonio import read_json
+from hyperloom_common.coerce import to_float
+from hyperloom_common.jsonio import read_json
 from hyperloom.orchestrator.trace_analysis._kernel_category import canonical_category
 
 ANALYSIS_JSON = "analysis.json"

@@ -17,7 +17,7 @@ import re
 from collections.abc import Mapping
 from pathlib import Path
 
-from hyperloom.common.jsonio import read_jsonl
+from hyperloom_common.jsonio import read_jsonl
 from hyperloom.orchestrator.knowledge.remote_recipe.sanitize import sanitize_shared_knowledge
 from hyperloom_multibranch.blackboard.local.files import encode_json, publish_once
 from hyperloom_multibranch.blackboard.rsi.archive import TreeArchive

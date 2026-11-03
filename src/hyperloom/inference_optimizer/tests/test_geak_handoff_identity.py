@@ -264,6 +264,18 @@ async def test_handoff_rejects_stale_tput_without_matching_measurement(
     assert handoff["orchestrator_best_tput_same_config"] == 0.0
 
 
+async def _sglang_geak_handoff(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: SharedState) -> dict:
+    """Run the sglang GEAK kernel phase over ``state`` up to the launch; return the handoff it wrote."""
+    coord = Coordinator.__new__(Coordinator)
+    coord.session_dir = tmp_path
+    coord.shared_state = state
+    coord._record_geak_kernel_journey = lambda _result: None
+    monkeypatch.setenv("FRAMEWORK", "sglang")
+    stop_geak_before_launch(monkeypatch)
+    await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
+    return json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
+
+
 @pytest.mark.parametrize("with_removal_controls", [False, True], ids=["plain", "removal_controls"])
 @pytest.mark.asyncio
 async def test_handoff_uses_only_matching_current_best_measurement(
@@ -288,17 +300,7 @@ async def test_handoff_uses_only_matching_current_best_measurement(
     state.isl = 8192
     state.osl = 1024
     state.conc = 64
-    coord = Coordinator.__new__(Coordinator)
-    coord.session_dir = tmp_path
-    coord.shared_state = state
-    coord._record_geak_kernel_journey = lambda _result: None
-    monkeypatch.setenv("FRAMEWORK", "sglang")
-
-    stop_geak_before_launch(monkeypatch)
-
-    await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
-
-    handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
+    handoff = await _sglang_geak_handoff(tmp_path, monkeypatch, state)
     assert handoff["same_config_reference_status"] == "verified"
     assert handoff["same_config_reference_verification_status"] == "verified_observed"
     assert handoff["orchestrator_best_tput_same_config"] == pytest.approx(1403.43)
@@ -323,17 +325,7 @@ async def test_handoff_marks_declared_only_identity_without_faking_observation(
         "observed_server_launch_flags": "",
     }
     measurement["declared_launch_identity"] = _writeback(tmp_path, state).build_env_spec()["launch_identity"]
-    coord = Coordinator.__new__(Coordinator)
-    coord.session_dir = tmp_path
-    coord.shared_state = state
-    coord._record_geak_kernel_journey = lambda _result: None
-    monkeypatch.setenv("FRAMEWORK", "sglang")
-
-    stop_geak_before_launch(monkeypatch)
-
-    await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
-
-    handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
+    handoff = await _sglang_geak_handoff(tmp_path, monkeypatch, state)
     assert handoff["same_config_reference_status"] == "unverified"
     assert handoff["same_config_reference_verification_status"] == "verified_declared_only"
     assert handoff["same_config_reference_observed_identity"] == ""
@@ -350,17 +342,7 @@ async def test_handoff_does_not_verify_matching_identity_without_evidence(
     measurement["resolved_server_launch_flags"] = ""
     measurement.pop("launch_evidence", None)
     measurement["declared_launch_identity"] = _writeback(tmp_path, state).build_env_spec()["launch_identity"]
-    coord = Coordinator.__new__(Coordinator)
-    coord.session_dir = tmp_path
-    coord.shared_state = state
-    coord._record_geak_kernel_journey = lambda _result: None
-    monkeypatch.setenv("FRAMEWORK", "sglang")
-
-    stop_geak_before_launch(monkeypatch)
-
-    await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
-
-    handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
+    handoff = await _sglang_geak_handoff(tmp_path, monkeypatch, state)
     assert handoff["same_config_reference_status"] == "unverified"
     assert handoff["same_config_reference_verification_status"] == "unverified"
     assert handoff["orchestrator_best_tput_same_config"] == 0.0
@@ -387,16 +369,7 @@ async def test_handoff_exposes_archived_sglang_observed_identity_map(
         },
     }
     measurement["declared_launch_identity"] = _writeback(tmp_path, state).build_env_spec()["launch_identity"]
-    coord = Coordinator.__new__(Coordinator)
-    coord.session_dir = tmp_path
-    coord.shared_state = state
-    coord._record_geak_kernel_journey = lambda _result: None
-    monkeypatch.setenv("FRAMEWORK", "sglang")
-
-    stop_geak_before_launch(monkeypatch)
-    await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
-
-    handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
+    handoff = await _sglang_geak_handoff(tmp_path, monkeypatch, state)
     expected = measurement["launch_evidence"]["observed_server_identity"]
     assert handoff["same_config_reference_verification_status"] == "verified_observed"
     assert handoff["same_config_observed_identity"] == expected
@@ -420,16 +393,7 @@ async def test_handoff_hashes_observed_identity_from_server_args_alone(
         "observed_server_identity": {"model_path": "/models/qwen", "tp_size": 8},
     }
     measurement["declared_launch_identity"] = _writeback(tmp_path, state).build_env_spec()["launch_identity"]
-    coord = Coordinator.__new__(Coordinator)
-    coord.session_dir = tmp_path
-    coord.shared_state = state
-    coord._record_geak_kernel_journey = lambda _result: None
-    monkeypatch.setenv("FRAMEWORK", "sglang")
-
-    stop_geak_before_launch(monkeypatch)
-    await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
-
-    handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
+    handoff = await _sglang_geak_handoff(tmp_path, monkeypatch, state)
     assert handoff["same_config_reference_verification_status"] == "verified_observed"
     assert handoff["same_config_reference_observed_identity"].startswith("sha256:")
     assert handoff["orchestrator_best_tput_same_config"] == pytest.approx(1403.43)

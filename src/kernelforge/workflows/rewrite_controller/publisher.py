@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from kernelforge.utils.durable_io import atomic_write_text, fsync_directory, fsync_tree
+from hyperloom_common.io import DURABLE, atomic_write_text, fsync_directory, fsync_tree
 from kernelforge.workflows.rewrite_controller.contracts import KernelRewriteTask
 from kernelforge.workflows.rewrite_controller.paths import ControllerLayout
 
@@ -106,11 +106,12 @@ def publish_operator_result(
             )
         )
         try:
-            atomic_write_text(staging / PATCH_FILENAME, publication.patch)
-            atomic_write_text(staging / REPORT_FILENAME, publication.report)
+            atomic_write_text(staging / PATCH_FILENAME, publication.patch, options=DURABLE)
+            atomic_write_text(staging / REPORT_FILENAME, publication.report, options=DURABLE)
             atomic_write_text(
                 staging / PUBLICATION_FILENAME,
                 json.dumps(publication.metadata(), indent=2, sort_keys=True) + "\n",
+                options=DURABLE,
             )
             fsync_tree(staging)
             os.replace(staging, version)

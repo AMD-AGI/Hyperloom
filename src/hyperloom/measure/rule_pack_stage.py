@@ -18,7 +18,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-from hyperloom.common.io import WriteOptions, atomic_write_bytes
+from hyperloom_common.io import WriteOptions, atomic_write_bytes
 from hyperloom.common.outside_facts.rule_pack import DEFAULT_PACK_PATH, PACK_ENV, RulePackError, default_pack
 
 __all__ = ["rule_pack_envs"]

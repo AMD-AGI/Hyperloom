@@ -48,6 +48,20 @@ def _emit_rewrite_applyback_contract(ctx, _param, value):
     ctx.exit()
 
 
+def _gpu_overrides(gpu: GpuOptions) -> dict:
+    """Config overrides for the run's GPU, the target resolved the way forge-loop resolves its own."""
+    import os
+
+    from kernelforge.workflows.forge_loop.campaign.campaign_config import detect_gpu_target
+
+    try:
+        gpu_target = gpu.gpu_target or detect_gpu_target()
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    os.environ["GPU_TARGET"] = gpu_target
+    return {"gpu_target": gpu_target, "gpu_type": gpu.gpu_type}
+
+
 @dataclass(frozen=True)
 class RewriteSource:
     """The source kernel to rewrite, its measurement driver and the workload identity."""
@@ -304,11 +318,7 @@ def forge_rewrite(request: RewriteRequest):
     import os
     import re as _re
 
-    overrides = {}
-    if request.gpu.gpu_target:
-        overrides["gpu_target"] = request.gpu.gpu_target
-        os.environ["GPU_TARGET"] = request.gpu.gpu_target
-    overrides["gpu_type"] = request.gpu.gpu_type
+    overrides = _gpu_overrides(request.gpu)
     if request.port.model:
         # Config exposes the model as ``agent_model`` (from_env keys on it); a bare ``model`` override is silently
         # ignored.

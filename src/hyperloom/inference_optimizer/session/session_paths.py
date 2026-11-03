@@ -366,19 +366,24 @@ def _prune_old_workdirs(root: Path, *, keep: int) -> None:
         return
     for stale in entries[: len(entries) - keep]:
         try:
-            for child in stale.rglob("*"):
-                if child.is_file():
-                    child.unlink(missing_ok=True)
-            for child in sorted(stale.rglob("*"), key=lambda p: -len(p.parts)):
-                if child.is_dir():
-                    try:
-                        child.rmdir()
-                    except OSError:
-                        # Best-effort cleanup; the outer rmdir / next sweep retries.
-                        pass
-            stale.rmdir()
+            _remove_workdir(stale)
         except OSError:
             continue
+
+
+def _remove_workdir(stale: Path) -> None:
+    """Remove one workdir tree: its files first, then its directories deepest first."""
+    for child in stale.rglob("*"):
+        if child.is_file():
+            child.unlink(missing_ok=True)
+    for child in sorted(stale.rglob("*"), key=lambda p: -len(p.parts)):
+        if child.is_dir():
+            try:
+                child.rmdir()
+            except OSError:
+                # Best-effort cleanup; the outer rmdir / next sweep retries.
+                pass
+    stale.rmdir()
 
 
 def allocate_turn_workdir(session_dir: Path, subdir: str, turn_idx: int, *, keep: int) -> Path:

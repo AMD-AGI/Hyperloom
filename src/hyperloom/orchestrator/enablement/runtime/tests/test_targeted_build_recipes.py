@@ -547,7 +547,8 @@ def test_driver_main_missing_plan_writes_error(tmp_path):
 # sgl-kernel
 
 
-def test_sgl_kernel_build_success(monkeypatch, tmp_path):
+def _build_sgl_kernel_on_rocm(monkeypatch, tmp_path):
+    """Build sgl-kernel from a worktree that already holds its extension, on a ROCm host."""
     wt = tmp_path / "worktree"
     (wt / "sgl-kernel").mkdir(parents=True)
     _sglang_python_dir(wt)
@@ -556,13 +557,17 @@ def test_sgl_kernel_build_success(monkeypatch, tmp_path):
     (venv / "bin").mkdir(parents=True)
     _patch_isolation(monkeypatch, wt, venv)
 
-    result = run_sgl_kernel_build(
+    return run_sgl_kernel_build(
         _sgl_action(),
         str(tmp_path / "attempt"),
         run=_make_rocm_run(),
         git=_make_git(),
         disk_preflight_fn=_noop_disk,
     )
+
+
+def test_sgl_kernel_build_success(monkeypatch, tmp_path):
+    result = _build_sgl_kernel_on_rocm(monkeypatch, tmp_path)
     assert result.ok is True
     assert result.failure_class == "ok"
     assert result.installed_versions.get("arch") == "gfx950"
@@ -672,21 +677,7 @@ def test_sgl_kernel_import_probe_gate(monkeypatch, tmp_path):
 
 def test_sgl_kernel_runtime_python_exe_set(monkeypatch, tmp_path):
     """sgl-kernel build must set runtime_python_exe and entrypoint_bin_dir."""
-    wt = tmp_path / "worktree"
-    (wt / "sgl-kernel").mkdir(parents=True)
-    _sglang_python_dir(wt)
-    (wt / "sgl-kernel" / "sgl_kernel_ext.so").write_bytes(b"\x7fELF")
-    venv = tmp_path / "venv"
-    (venv / "bin").mkdir(parents=True)
-    _patch_isolation(monkeypatch, wt, venv)
-
-    result = run_sgl_kernel_build(
-        _sgl_action(),
-        str(tmp_path / "attempt"),
-        run=_make_rocm_run(),
-        git=_make_git(),
-        disk_preflight_fn=_noop_disk,
-    )
+    result = _build_sgl_kernel_on_rocm(monkeypatch, tmp_path)
     assert result.ok is True
     assert result.runtime.runtime_python_exe
     assert result.runtime.entrypoint_bin_dir

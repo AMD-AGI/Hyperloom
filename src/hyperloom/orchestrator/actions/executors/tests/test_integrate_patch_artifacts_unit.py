@@ -175,6 +175,21 @@ def _reverted(applied: list[dict]) -> list[str]:
     return [names[target] for target in restored]
 
 
+def _pending_artifact_restore(target: Path, backup_root: Path) -> dict:
+    """A ready non-git integrate whose one artifact ``target`` was prepared under ``backup_root``."""
+    return {
+        "artifacts": [{"target": str(target)}],
+        "patches": [],
+        "workspace": str(backup_root.parent),
+        "recovery": {
+            "version": 1,
+            "phase": "ready",
+            "root": str(backup_root.parent),
+            "artifacts_prepared": True,
+        },
+    }
+
+
 def _git_repo(path: Path) -> Path:
     """A one-commit git tree holding ``src.py`` at ``return 1``."""
     path.mkdir(parents=True, exist_ok=True)
@@ -443,17 +458,7 @@ def test_recovery_refuses_a_witnessed_artifact_ledger_that_lost_its_evidence(tmp
         record["pre_image_sha256"] = "0" * 64
         path.write_text(json.dumps(record) + "\n" + "".join(lines[1:]), encoding="utf-8")
 
-    pending = {
-        "artifacts": [{"target": str(target)}],
-        "patches": [],
-        "workspace": str(backup_root.parent),
-        "recovery": {
-            "version": 1,
-            "phase": "ready",
-            "root": str(backup_root.parent),
-            "artifacts_prepared": True,
-        },
-    }
+    pending = _pending_artifact_restore(target, backup_root)
     assert ip.restore_pending_integrate(pending)["failed"]
     assert pending["recovery"]["phase"] == "ready"
     assert target.read_text(encoding="utf-8") == "B"
@@ -488,17 +493,7 @@ def test_recovery_refuses_an_invalid_record_inside_the_committed_prefix(tmp_path
     assert ledger.append_record(backup_root, record)
     assert ledger.mark_prepared(backup_root)
 
-    pending = {
-        "artifacts": [{"target": str(target)}],
-        "patches": [],
-        "workspace": str(backup_root.parent),
-        "recovery": {
-            "version": 1,
-            "phase": "ready",
-            "root": str(backup_root.parent),
-            "artifacts_prepared": True,
-        },
-    }
+    pending = _pending_artifact_restore(target, backup_root)
     assert ip.restore_pending_integrate(pending)["failed"]
     assert pending["recovery"]["phase"] == "ready"
     assert target.read_text(encoding="utf-8") == "B"
@@ -519,17 +514,7 @@ def test_recovery_ignores_a_tail_written_after_the_last_checkpoint(tmp_path, tai
     path = ledger.ledger_path(backup_root)
     path.write_text(path.read_text(encoding="utf-8") + tail, encoding="utf-8")
 
-    pending = {
-        "artifacts": [{"target": str(target)}],
-        "patches": [],
-        "workspace": str(backup_root.parent),
-        "recovery": {
-            "version": 1,
-            "phase": "ready",
-            "root": str(backup_root.parent),
-            "artifacts_prepared": True,
-        },
-    }
+    pending = _pending_artifact_restore(target, backup_root)
     assert ip.restore_pending_integrate(pending)["failed"] == []
     assert pending["recovery"]["phase"] == "restored"
     assert target.read_text(encoding="utf-8") == "A"

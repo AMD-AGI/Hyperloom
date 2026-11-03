@@ -10,7 +10,7 @@ import json
 import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from kernelforge.utils.durable_io import atomic_write_text
+from hyperloom_common.io import DURABLE, atomic_write_text
 from kernelforge.knowledge.experience.distillation import (
     ConstraintMemory,
     extract_signature,
@@ -190,7 +190,7 @@ class ExperienceLedger:
         with contextlib.suppress(OSError):
             self.root.mkdir(parents=True, exist_ok=True)
             payload = "".join(json.dumps(asdict(entry), sort_keys=True) + "\n" for entry in self.entries)
-            atomic_write_text(self.jsonl_path, payload)
+            atomic_write_text(self.jsonl_path, payload, options=DURABLE)
         with contextlib.suppress(OSError):
             self.root.mkdir(parents=True, exist_ok=True)
             header = "# Forge experience ledger\n\n"

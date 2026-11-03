@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.common.llm_config import AnthropicCompletionRequest, AnthropicMessageResult
+from hyperloom_common.llm.llm_config import AnthropicCompletionRequest, AnthropicMessageResult
 from hyperloom_multibranch.blackboard.rsi import studies
 from hyperloom_multibranch.blackboard.rsi.archive import SearchTree, TreeArchive
 from hyperloom_multibranch.blackboard.rsi.decisions import archive_decisions

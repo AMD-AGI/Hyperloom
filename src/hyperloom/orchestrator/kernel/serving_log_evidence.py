@@ -62,17 +62,21 @@ def _scan_serving_log_m(path) -> dict[int, int]:
                 chunk = handle.read(_LOG_SCAN_CHUNK)
                 if not chunk:
                     break
-                buf = carry + chunk
-                last_end = 0
-                for match in _AITER_M_RE.finditer(buf):
-                    last_end = match.end()
-                    value = int(match.group(1))
-                    if value > 0:
-                        counts[value] = counts.get(value, 0) + 1
-                carry = buf[max(last_end, len(buf) - _LOG_SCAN_OVERLAP) :]
+                carry = _tally_m_values(carry + chunk, counts)
     except (OSError, ValueError):
         return {}
     return counts
+
+
+def _tally_m_values(buf: bytes, counts: dict[int, int]) -> bytes:
+    """Add the positive M values in ``buf`` to ``counts`` and return the carry for the next chunk."""
+    last_end = 0
+    for match in _AITER_M_RE.finditer(buf):
+        last_end = match.end()
+        value = int(match.group(1))
+        if value > 0:
+            counts[value] = counts.get(value, 0) + 1
+    return buf[max(last_end, len(buf) - _LOG_SCAN_OVERLAP) :]
 
 
 def _log_has_aiter_evidence(path) -> bool:
@@ -139,6 +143,59 @@ def _tokens_from_serving_log(path, limit: int = 16, reserve_largest: int = 4) ->
     return ",".join(str(m) for m in sorted(picked))
 
 
+def _warmup_server_logs(warmup: Path) -> list[tuple[float, str]]:
+    """List the ``server.log`` files of the benchmark dirs under ``warmup``, newest first."""
+    candidates: list[tuple[float, str]] = []
+    for child in warmup.iterdir():
+        sl = child / "server.log"
+        if sl.is_file():
+            try:
+                candidates.append((sl.stat().st_mtime, str(sl)))
+            except OSError:
+                continue
+    candidates.sort(reverse=True)
+    return candidates
+
+
+def _find_server_log_near(workspace_str: str) -> str | None:
+    """Return the evidence-bearing server log of a workspace or its sibling warmup round."""
+    if not workspace_str:
+        return None
+    ws = Path(workspace_str)
+    # Direct hit (server started in this exact dir).
+    direct = ws / "server.log"
+    if direct.is_file() and _log_has_aiter_evidence(direct):
+        return str(direct)
+    # Sibling warmup_round — benchmark dirs sit under
+    # {run_hash}/{warmup_round|measure_round}/{benchmark_dir}/
+    parent = ws.parent  # e.g. measure_round/
+    if parent.name in ("warmup_round", "measure_round"):
+        run_hash_dir = parent.parent
+    else:
+        run_hash_dir = parent
+    warmup = run_hash_dir / "warmup_round"
+    if not warmup.is_dir():
+        return None
+    for _mtime, candidate in _warmup_server_logs(warmup):
+        if _log_has_aiter_evidence(candidate):
+            return candidate
+    return None
+
+
+def _runs_server_logs(runs_dir: Path) -> list[tuple[float, Path]]:
+    """List every ``server.log`` under ``runs_dir``, newest first."""
+    candidates_by_age: list[tuple[float, Path]] = []
+    if not runs_dir.is_dir():
+        return candidates_by_age
+    for candidate_log in runs_dir.glob("**/server.log"):
+        try:
+            candidates_by_age.append((candidate_log.stat().st_mtime, candidate_log))
+        except OSError:
+            continue
+    candidates_by_age.sort(key=lambda item: item[0], reverse=True)
+    return candidates_by_age
+
+
 def resolve_forge_server_log(state, session_dir: Path) -> str:
     """Find the server log matching the current runtime configuration.
 
@@ -158,38 +215,6 @@ def resolve_forge_server_log(state, session_dir: Path) -> str:
     check sibling ``warmup_round/`` dirs and walk up to the parent run
     directory.
     """
-
-    def _find_server_log_near(workspace_str: str) -> str | None:
-        if not workspace_str:
-            return None
-        ws = Path(workspace_str)
-        # Direct hit (server started in this exact dir).
-        direct = ws / "server.log"
-        if direct.is_file() and _log_has_aiter_evidence(direct):
-            return str(direct)
-        # Sibling warmup_round — benchmark dirs sit under
-        # {run_hash}/{warmup_round|measure_round}/{benchmark_dir}/
-        parent = ws.parent  # e.g. measure_round/
-        if parent.name in ("warmup_round", "measure_round"):
-            run_hash_dir = parent.parent
-        else:
-            run_hash_dir = parent
-        warmup = run_hash_dir / "warmup_round"
-        if warmup.is_dir():
-            candidates: list[tuple[float, str]] = []
-            for child in warmup.iterdir():
-                sl = child / "server.log"
-                if sl.is_file():
-                    try:
-                        candidates.append((sl.stat().st_mtime, str(sl)))
-                    except OSError:
-                        continue
-            candidates.sort(reverse=True)
-            for _mtime, candidate in candidates:
-                if _log_has_aiter_evidence(candidate):
-                    return candidate
-        return None
-
     current_best = getattr(state, "current_best", None) or {}
     found = _find_server_log_near(str(current_best.get("workspace") or "").strip())
     if found:
@@ -208,17 +233,10 @@ def resolve_forge_server_log(state, session_dir: Path) -> str:
     # Newest-first with an early return also means only the logs newer than the
     # winner are scanned, instead of every log in the tree.
     runs_dir = session_dir / "runs"
-    candidates_by_age: list[tuple[float, Path]] = []
-    if runs_dir.is_dir():
-        for candidate_log in runs_dir.glob("**/server.log"):
-            try:
-                candidates_by_age.append((candidate_log.stat().st_mtime, candidate_log))
-            except OSError:
-                continue
-        candidates_by_age.sort(key=lambda item: item[0], reverse=True)
-        for _mtime, candidate_log in candidates_by_age:
-            if _log_has_aiter_evidence(candidate_log):
-                return str(candidate_log)
+    candidates_by_age = _runs_server_logs(runs_dir)
+    for _mtime, candidate_log in candidates_by_age:
+        if _log_has_aiter_evidence(candidate_log):
+            return str(candidate_log)
 
     # Separate the two ways this fails. No server.log at all is an upstream
     # gap; logs that exist but never dispatched through aiter means the serving
@@ -264,11 +282,16 @@ def _aiter_serving_evidence(server_log: str) -> set[str]:
     try:
         with open(server_log, encoding="utf-8", errors="replace") as handle:
             for line in handle:
-                for family, markers in _AITER_SERVING_MARKERS.items():
-                    if family not in found and any(marker in line for marker in markers):
-                        found.add(family)
+                _mark_serving_families(line, found)
                 if len(found) == len(_AITER_SERVING_MARKERS):
                     break
     except OSError:
         return set()
     return found
+
+
+def _mark_serving_families(line: str, found: set[str]) -> None:
+    """Add to ``found`` every aiter kernel family whose marker appears in ``line``."""
+    for family, markers in _AITER_SERVING_MARKERS.items():
+        if family not in found and any(marker in line for marker in markers):
+            found.add(family)

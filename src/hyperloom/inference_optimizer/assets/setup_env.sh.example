@@ -29,10 +29,10 @@ export PYTHON="${PYTHON:-$(command -v python3)}"
 export PATH="$(dirname "$PYTHON"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 
 # install.sh (IR-2) regenerates kernel-agent.env.sh under
-# $USER_DATA_PATH/runtime/. Run install, then source the generated file
+# $HYPERLOOM_RUNTIME_DIR (default $USER_DATA_PATH/runtime/). Run install, then source the generated file
 # (both idempotent).
 bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"
-. "${KERNEL_AGENT_ENV:-${USER_DATA_PATH}/runtime/kernel-agent.env.sh}"
+. "$(. "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/runtime_env.sh"; runtime_env_kernel_agent_env_path)"
 
 # --- workload (override per run) ---
 export MODEL_PATH="${MODEL_PATH:?set MODEL_PATH before sourcing}"

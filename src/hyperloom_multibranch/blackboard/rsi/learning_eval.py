@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.jsonio import read_jsonl
+from hyperloom_common.jsonio import read_jsonl
 from hyperloom_multibranch.contracts.blackboard.peers import Intent, TestKind
 from hyperloom_multibranch.contracts.blackboard.records import Learning, BlackboardSnapshot, Writer, is_lesson_id
 from hyperloom_multibranch.contracts.blackboard.vocab import COMMITTING, LearningKind, Role

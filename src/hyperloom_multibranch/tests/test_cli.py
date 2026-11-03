@@ -34,7 +34,7 @@ from types import SimpleNamespace
 import pytest
 
 from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV
-from hyperloom.common.llm_config import (
+from hyperloom_common.llm.llm_config import (
     AGENT_BACKEND_CLAUDE,
     AGENT_BACKEND_CODEX,
     ANTHROPIC_CREDENTIAL_ENV_ORDER,

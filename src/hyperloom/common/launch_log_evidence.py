@@ -231,21 +231,28 @@ def _recipe_server_env(path: Path) -> dict[str, str]:
             for line in handle:
                 if _TRACE_LAUNCH_RE.match(line):
                     return env
-                match = _TRACE_EXPORT_RE.match(line.rstrip("\n"))
-                if not match:
-                    continue
-                try:
-                    words = shlex.split(match.group(1))
-                except ValueError:
-                    continue
-                for word in words:
-                    name, assigned, value = word.partition("=")
-                    if assigned and _ENV_NAME_RE.match(name) and _is_server_env(name):
-                        env[name] = value
+                env.update(_export_line_env(line))
     except OSError:
         return {}
     # Without the launch marker there is no telling which exports the server saw.
     return {}
+
+
+def _export_line_env(line: str) -> dict[str, str]:
+    """Return the server variables one traced ``export`` line assigns."""
+    env: dict[str, str] = {}
+    match = _TRACE_EXPORT_RE.match(line.rstrip("\n"))
+    if not match:
+        return env
+    try:
+        words = shlex.split(match.group(1))
+    except ValueError:
+        return env
+    for word in words:
+        name, assigned, value = word.partition("=")
+        if assigned and _ENV_NAME_RE.match(name) and _is_server_env(name):
+            env[name] = value
+    return env
 
 
 def _is_server_env(name: str) -> bool:
@@ -726,9 +733,7 @@ def _read_launch_record(path: str, spec: _LaunchRecord) -> str:
                 if chunks or spec.marker.search(line):
                     chunks.append(line)
                     parsed = _balanced_record_payload("".join(chunks), spec.marker)
-                    if parsed:
-                        break
-                if remaining <= 0:
+                if parsed or remaining <= 0:
                     break
     except OSError:
         return ""

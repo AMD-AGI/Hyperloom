@@ -183,7 +183,7 @@ def _hl_eval_probe_install():
         if not state["tripped"]:
             try:
                 _observe(outputs)
-            except Exception:
+            except (AttributeError, TypeError, ValueError, OSError):
                 pass
         return _hl_prev_parse(outputs, **kwargs)
 
@@ -233,7 +233,7 @@ def _hl_eval_model_dir():
         from huggingface_hub import try_to_load_from_cache
 
         hit = try_to_load_from_cache(repo_id=raw, filename="config.json")
-    except Exception:
+    except (ImportError, OSError, ValueError):
         return None
     if isinstance(hit, str) and _hl_os.path.isfile(hit):
         return _hl_os.path.dirname(hit)
@@ -376,7 +376,7 @@ def _hl_eval_bounds_install():
                     counts["generations"] += 1
                     if choice.get("finish_reason") == "length":
                         counts["truncated"] += 1
-        except Exception:
+        except (AttributeError, TypeError):
             pass
         return _hl_prev_parse(outputs, **kwargs)
 
@@ -464,7 +464,7 @@ def _hl_eval_unbound_outputs_install():
     """
     try:
         from lm_eval.models.api_models import TemplateAPI as _hl_api
-    except Exception:
+    except ImportError:
         return
 
     outer = getattr(_hl_api, "amodel_call", None)
@@ -479,13 +479,13 @@ def _hl_eval_unbound_outputs_install():
 
         try:
             from lm_eval.models import api_models as _hl_mod
-        except Exception:
+        except ImportError:
             return ""
         try:
             path = _hl_inspect.getfile(_hl_mod)
             with open(path, encoding="utf-8") as fh:
                 text = fh.read()
-        except Exception:
+        except (OSError, TypeError, UnicodeDecodeError):
             return ""
         lines = text.splitlines()
         start = None
@@ -521,7 +521,7 @@ def _hl_eval_unbound_outputs_install():
             seen.add(id(call))
             try:
                 source = _hl_inspect.getsource(call)
-            except Exception:
+            except (OSError, TypeError):
                 source = ""
             if _hl_is_vulnerable_source(source):
                 return True

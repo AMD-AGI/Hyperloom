@@ -33,7 +33,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.io import WriteOptions, atomic_write_json
+from hyperloom_common.io import WriteOptions, atomic_write_json
+
 from hyperloom.common.outside_facts.image_check_eval import Status, evaluate
 from hyperloom.common.outside_facts.image_check_spec import CheckSpec
 from hyperloom.common.outside_facts.image_env import HostImage, Image, ImageReadError

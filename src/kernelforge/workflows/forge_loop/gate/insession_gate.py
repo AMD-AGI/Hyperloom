@@ -1127,6 +1127,20 @@ class InSessionGate:
         bench["bench_repeat"] = self.bench_repeat
         self.last_bench_result = bench
 
+    def _block_not_faster(self, mean_case_speedup: float, wall, required: float) -> dict:
+        """Block a stop whose correct candidate does not clear the KEEP bar."""
+        speedup_txt = f"{mean_case_speedup:.6f}x"
+        wall_txt = f"{wall:.6f}" if wall is not None else "unmeasured"
+        self._log(
+            f"BLOCK (correct but not faster: mean case speedup {speedup_txt}; required={required:.6f}x; "
+            f"raw mean {wall_txt} ms) edit={self.edit_count}"
+        )
+        return self._block(
+            "The kernel is CORRECT but NOT faster than the current best, so it is not good enough to finish.\n"
+            f"Measured mean case speedup={speedup_txt}; required={required:.6f}x; raw mean={wall_txt} ms.\n"
+            "Keep the kernel correct and try a DIFFERENT optimization to reduce wall time, then continue."
+        )
+
     async def _stop_performance_verdict(self) -> dict:
         """Bench the correct candidate and allow only when it clears the KEEP bar."""
         self.last_wall_ms = None
@@ -1182,17 +1196,7 @@ class InSessionGate:
             )
             return self._allow()
 
-        speedup_txt = f"{mean_case_speedup:.6f}x"
-        wall_txt = f"{wall:.6f}" if wall is not None else "unmeasured"
-        self._log(
-            f"BLOCK (correct but not faster: mean case speedup {speedup_txt}; required={required:.6f}x; "
-            f"raw mean {wall_txt} ms) edit={self.edit_count}"
-        )
-        return self._block(
-            "The kernel is CORRECT but NOT faster than the current best, so it is not good enough to finish.\n"
-            f"Measured mean case speedup={speedup_txt}; required={required:.6f}x; raw mean={wall_txt} ms.\n"
-            "Keep the kernel correct and try a DIFFERENT optimization to reduce wall time, then continue."
-        )
+        return self._block_not_faster(mean_case_speedup, wall, required)
 
     async def _stop_candidate_verdict(self) -> dict:
         """Run in-session correctness (and performance) and allow or block the stop."""

@@ -10,7 +10,8 @@ import os
 from pathlib import Path
 from typing import Any, Mapping
 
-from hyperloom.common import codex_session, llm_config
+from hyperloom.common import codex_session
+from hyperloom_common.llm import llm_config
 
 from . import forge_fusion
 from ..actions.executors._kernel_agent_tool import HandlerResult

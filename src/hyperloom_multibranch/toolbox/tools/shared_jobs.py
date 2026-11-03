@@ -22,7 +22,7 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.io import atomic_write_json
+from hyperloom_common.io import atomic_write_json
 from hyperloom_multibranch.contracts.blackboard.records import ToolResultPointer
 
 __all__ = ["SHARED_JOBS_FILE", "SharedEntry", "SharedJobLedger"]

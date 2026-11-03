@@ -7,11 +7,12 @@ from __future__ import annotations
 
 import json
 import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
 from kernelforge.utils.git import git
-from kernelforge.utils.durable_io import atomic_write_json
+from hyperloom_common.io import DURABLE, JsonFormat, atomic_write_json
 from kernelforge.workflows.forge_loop.campaign.reporting import (
     BestResultPublisher,
     KeepBundle,
@@ -191,11 +192,41 @@ def _persist_warm_recovery(caller: CallerRecovery, tracker, checkpoint: dict, re
             result["persistence_degraded"] = True
     if caller.result_json:
         try:
-            atomic_write_json(caller.result_json, result)
+            atomic_write_json(caller.result_json, result, fmt=JsonFormat(trailing_newline=True), options=DURABLE)
         except (OSError, TypeError, ValueError) as error:
             errors.append(f"result-json: {error}")
             result["persistence_degraded"] = True
     return result
+
+
+@dataclass(frozen=True)
+class _WarmPublication:
+    """The published best manifest, and the derived-view failures the publication survived."""
+
+    manifest: dict
+    errors: list[str]
+
+
+def _publish_warm_best(
+    workspace_dir: str, keep: KeepIdentity, score: KeepScore, bundle: KeepBundle
+) -> _WarmPublication:
+    """Publish the warm start as the local best, accepting a durable best whose derived views failed."""
+    errors: list[str] = []
+    try:
+        manifest = BestResultPublisher(workspace_dir).publish(keep, score, bundle)
+    except (OSError, subprocess.SubprocessError, KeyError, TypeError, ValueError) as error:
+        # A derived view can fail after best_result.json is already durable.
+        manifest = _validated_warm_start_result(
+            workspace_dir,
+            commit_hash=keep.commit_hash,
+            baseline_ms=score.baseline_wall_ms,
+            best_ms=score.best_wall_ms,
+            mean_case_speedup=score.mean_case_speedup,
+        )
+        if manifest is None:
+            raise
+        errors.append(f"derived-best-view: {error}")
+    return _WarmPublication(manifest, errors)
 
 
 def publish_warm_start_recovery(
@@ -214,21 +245,8 @@ def publish_warm_start_recovery(
     external_id = caller.caller_experiment_id or caller.experience_id or "warm-start"
     keep = _warm_start_identity(workspace_dir, base_commit, warm, external_id)
     bundle = _warm_start_bundle(workspace_dir, base_commit, keep, measurements)
-    errors: list[str] = []
-    try:
-        manifest = BestResultPublisher(workspace_dir).publish(keep, score, bundle)
-    except Exception as error:
-        # A derived view can fail after best_result.json is already durable.
-        manifest = _validated_warm_start_result(
-            workspace_dir,
-            commit_hash=keep.commit_hash,
-            baseline_ms=score.baseline_wall_ms,
-            best_ms=score.best_wall_ms,
-            mean_case_speedup=score.mean_case_speedup,
-        )
-        if manifest is None:
-            raise
-        errors.append(f"derived-best-view: {error}")
+    publication = _publish_warm_best(workspace_dir, keep, score, bundle)
+    manifest, errors = publication.manifest, publication.errors
     # The manifest publish above withholds improvement when aggregate wall times contradict the case score.
     improvement = warm_start_improvement_flags(
         pristine_ms=score.baseline_wall_ms, best_ms=score.best_wall_ms, mean_case_speedup=score.mean_case_speedup

@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.common import llm_config
+from hyperloom_common.llm import llm_config
 from hyperloom.contracts.measurement import NOT_REPRODUCED, REPRODUCED
 from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta
 from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict

@@ -18,41 +18,22 @@ from hyperloom.orchestrator.actions.executors._server_patcher import (
     ensure_sglang_patched_for_tracelens,
 )
 
-_RUNNER_REL = Path("python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py")
-_SOURCE = """\
-def capture():
-    return 1
-
-
-def done():
-    return 0
-"""
-_PATCH = """\
-diff --git a/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py b/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
---- a/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
-+++ b/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
-@@ -1,2 +1,5 @@
-+def _set_profile_trace_tag(self):
-+    return "_profile_runner_name"
-+
- def capture():
-     return 1
-"""
+from ._sglang_gc_patch_tree import RUNNER_PATCH, RUNNER_REL, RUNNER_SOURCE
 
 
 def _editable_install(root: Path) -> Path:
     pkg = root / "python" / "sglang"
-    target = root / _RUNNER_REL
+    target = root / RUNNER_REL
     target.parent.mkdir(parents=True, exist_ok=True)
     (pkg / "__init__.py").write_text("__version__ = '0.5.21'\n", encoding="utf-8")
-    target.write_text(_SOURCE, encoding="utf-8")
+    target.write_text(RUNNER_SOURCE, encoding="utf-8")
     return target
 
 
 def _gc_tree(tracelens: Path, version_dir: str = "sglang_0_5_21") -> None:
     patches = tracelens / "examples" / "custom_workflows" / "inference_analysis" / "sglang_gc_patch" / version_dir
     patches.mkdir(parents=True)
-    (patches / "decode_cuda_graph_runner.patch").write_text(_PATCH, encoding="utf-8")
+    (patches / "decode_cuda_graph_runner.patch").write_text(RUNNER_PATCH, encoding="utf-8")
 
 
 @pytest.fixture(autouse=True)
@@ -85,10 +66,10 @@ def test_gc_patch_applies_and_is_idempotent(tmp_path: Path, monkeypatch):
 
     patched = ensure_sglang_patched_for_tracelens()
     assert patched is not None and patched.site is not None
-    text = (patched.site / _RUNNER_REL.relative_to("python")).read_text(encoding="utf-8")
+    text = (patched.site / RUNNER_REL.relative_to("python")).read_text(encoding="utf-8")
     assert "_set_profile_trace_tag" in text
     assert "_profile_runner_name" in text
-    assert target.read_text(encoding="utf-8") == _SOURCE, "the installed tree is never patched"
+    assert target.read_text(encoding="utf-8") == RUNNER_SOURCE, "the installed tree is never patched"
 
     assert ensure_sglang_patched_for_tracelens() == patched
     assert len(_copies(tmp_path)) == 1
@@ -106,8 +87,8 @@ def test_gc_patch_uses_the_cached_tracelens_checkout_without_tracelens_root(tmp_
 
     patched = ensure_sglang_patched_for_tracelens()
     assert patched is not None and patched.site is not None
-    assert "_set_profile_trace_tag" in (patched.site / _RUNNER_REL.relative_to("python")).read_text(encoding="utf-8")
-    assert target.read_text(encoding="utf-8") == _SOURCE
+    assert "_set_profile_trace_tag" in (patched.site / RUNNER_REL.relative_to("python")).read_text(encoding="utf-8")
+    assert target.read_text(encoding="utf-8") == RUNNER_SOURCE
 
 
 def test_newer_sglang_without_exact_gc_set_is_left_alone(tmp_path: Path, monkeypatch):
@@ -118,14 +99,14 @@ def test_newer_sglang_without_exact_gc_set_is_left_alone(tmp_path: Path, monkeyp
     monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path / "TraceLens"))
 
     assert ensure_sglang_patched_for_tracelens() is None
-    assert target.read_text(encoding="utf-8") == _SOURCE
+    assert target.read_text(encoding="utf-8") == RUNNER_SOURCE
 
 
 def test_drifted_source_is_not_fuzzy_patched(tmp_path: Path, monkeypatch):
     """A hunk whose context drifted would pass ``patch --fuzz=2``; the gc set must refuse it."""
     repo = tmp_path / "sglang"
     target = _editable_install(repo)
-    drifted = _SOURCE.replace("    return 1", "    return 2")
+    drifted = RUNNER_SOURCE.replace("    return 1", "    return 2")
     target.write_text(drifted, encoding="utf-8")
     _gc_tree(tmp_path / "TraceLens")
     _fake_sglang(monkeypatch, repo / "python" / "sglang", "0.5.21")
@@ -148,7 +129,7 @@ def test_older_than_gate_does_not_touch_the_tree(tmp_path: Path, monkeypatch):
     monkeypatch.delenv("TRACELENS_ROOT", raising=False)
 
     assert ensure_sglang_patched_for_tracelens() is None
-    assert target.read_text(encoding="utf-8") == _SOURCE
+    assert target.read_text(encoding="utf-8") == RUNNER_SOURCE
 
 
 def test_missing_gc_tree_fails_soft(tmp_path: Path, monkeypatch):

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.common import llm_config
+from hyperloom_common.llm import llm_config
 from kernelforge.config import Config, resolve_agent_model
 
 _ENV_KEYS = (

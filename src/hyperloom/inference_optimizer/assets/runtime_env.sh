@@ -49,11 +49,33 @@ _runtime_env_read_quoted_value() {
   done
 }
 
-# Paths install.sh derives from USER_DATA_PATH. A checkout's .env is shared by
-# every session that runs from it, so a copy there belongs to whichever
-# workspace wrote it last: when the caller names its own USER_DATA_PATH these
-# come from that root, never from .env.
+# Which workspace a run uses, and so where its kernel-agent.env.sh lands, is decided here and nowhere else:
+# install.sh sets its paths through runtime_env_forget_stale_workspace and runtime_env_derive_runtime_paths, and
+# preflight (cli/preflight_env.py) asks runtime_env_kernel_agent_env_path for the file install.sh wrote.
+#
+#   - A .env that `hyperloom setup` wrote (setup_dotenv_is_authoritative) names the workspace: the caller's
+#     USER_DATA_PATH and the paths derived from it are what an earlier workspace left in the shell, so they are
+#     dropped and .env supplies them.
+#   - Any other .env only fills what the caller left unset. It is shared by every session that runs from the
+#     checkout, so a copy of a derived path there belongs to whichever workspace wrote it last: when the caller
+#     names its own USER_DATA_PATH these come from that root, never from .env. This is how several sessions share
+#     one checkout, each exporting only its own USER_DATA_PATH.
 RUNTIME_ENV_WORKSPACE_DERIVED_KEYS="HYPERLOOM_RUNTIME_DIR KERNEL_AGENT_ENV HYPERLOOM_ROOT"
+
+# Drop the caller's workspace selection when .env is setup-written; a readonly USER_DATA_PATH cannot be dropped.
+runtime_env_forget_stale_workspace() {
+  setup_dotenv_is_authoritative || return 0
+  runtime_env_var_is_readonly USER_DATA_PATH || unset USER_DATA_PATH
+  unset HYPERLOOM_RUNTIME_DIR KERNEL_AGENT_ENV HYPERLOOM_ROOT
+}
+
+# Fill the runtime paths from USER_DATA_PATH; call once the workspace is selected.
+runtime_env_derive_runtime_paths() {
+  HYPERLOOM_RUNTIME_DIR="${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH}/runtime}"
+  KERNEL_AGENT_ENV="${KERNEL_AGENT_ENV:-${HYPERLOOM_RUNTIME_DIR}/kernel-agent.env.sh}"
+  # Legacy variable kept for compatibility; open-source checkouts use install.sh's _open_source_root.
+  HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors}"
+}
 
 load_dotenv_no_clobber() {
   DOTENV_LOADED_COUNT=0
@@ -113,4 +135,20 @@ load_dotenv_no_clobber() {
   done
   DOTENV_LOADED_COUNT="$loaded"
   return 0
+}
+
+# Print the kernel-agent.env.sh install.sh writes for the checkout $1 (default $REPO_ROOT) under the caller's
+# environment, or nothing when no workspace is named. Run it in a command substitution: it loads .env into the shell
+# that runs it.
+runtime_env_kernel_agent_env_path() {
+  local REPO_ROOT="${1:-${REPO_ROOT:-}}"
+  if [ -n "$REPO_ROOT" ]; then
+    runtime_env_forget_stale_workspace
+    load_dotenv_no_clobber || return 1
+  fi
+  if [ -z "${KERNEL_AGENT_ENV:-}" ]; then
+    [ -n "${HYPERLOOM_RUNTIME_DIR:-}${USER_DATA_PATH:-}" ] || return 0
+    runtime_env_derive_runtime_paths
+  fi
+  printf '%s\n' "$KERNEL_AGENT_ENV"
 }

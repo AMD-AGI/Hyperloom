@@ -12,21 +12,19 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common import kernel_source_contract as _KSC
-from hyperloom.common.io import JsonFormat, atomic_write_json
+from hyperloom_common.io import JsonFormat, atomic_write_json
+from hyperloom_common.kernel_names import without_model_names
 
 from ._harness_discovery import find_benchmark_files, find_repo_root
 from ._io_utils import append_log
+from ._kernel_category import canonical_category
 from ._kernel_classification import (
     classify_patchability,
-    extract_shape,
-    extract_source_file,
-    is_kernel_event,
     is_runtime_generated_kernel,
     is_vendor_dispatch_wrapper,
     source_type_for,
 )
 from ._kernel_roofline import _resolve_flydsl_source_fallback
-from ._trace_inputs import open_json
 from ._trace_shapes import (
     _FUSED_MOE_KERNEL_MARKER,
     resolve_fused_moe_invocation_cases_from_csv,
@@ -36,12 +34,13 @@ from ._trace_shapes import (
     resolve_shapes_from_csv_for_op,
 )
 from ._vendor_operator_playbooks import match_vendor_operator_playbook, resolve_kernel_anchor_path
-from .tracelens_skill_runner import normalize_upstream_category
 
 log = logging.getLogger(__name__)
 
 # Kernel-name markers per GEAK category, in priority order: the first category with a marker in the name wins.
+# Norms precede the bare ``gemm`` marker, as in TraceLens: CamelCase ``GemmaRMSNorm`` still spells it.
 _NAME_CATEGORY_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("Normalization", ("rmsnorm", "layernorm", "norm_kernel")),
     (
         "GEMM",
         (
@@ -59,7 +58,6 @@ _NAME_CATEGORY_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
         ),
     ),
     ("SDPA", ("attention", "attn", "fmha", "paged_attention", "flash")),
-    ("LayerNorm", ("rmsnorm", "layernorm", "norm_kernel")),
     ("Activation", ("act_and_mul", "silu", "gelu", "activation")),
     ("MoE", ("moe", "topk", "expert")),
     ("Softmax", ("softmax",)),
@@ -73,7 +71,7 @@ _NAME_CATEGORY_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
 def derive_kernel_category(candidate: dict[str, Any]) -> str:
     """Map a candidate to its GEAK-facing kernel category.
 
-    Priority: explicit TraceLens category (normalized), then a kernel-name
+    Priority: explicit TraceLens category (canonical label), then a kernel-name
     heuristic, then ``unknown``.
 
     Args:
@@ -84,10 +82,10 @@ def derive_kernel_category(candidate: dict[str, Any]) -> str:
     """
     cat = (candidate.get("tracelens_category") or "").strip()
     if cat:
-        return normalize_upstream_category(cat)
+        return canonical_category(cat)
     if candidate.get("source_type") == "flydsl":
         return "FlyDSL"
-    name = str(candidate.get("name") or "").lower()
+    name = without_model_names(str(candidate.get("name") or "").lower())
     for category, markers in _NAME_CATEGORY_MARKERS:
         if any(marker in name for marker in markers):
             return category
@@ -128,81 +126,6 @@ def is_multigpu_kernel(name: str, source_file: str) -> bool:
             "communicator",
         )
     )
-
-
-def analyze_trace_files(
-    trace_files: list[Path],
-    top_k: int,
-) -> list[dict[str, Any]]:
-    """Aggregate GPU kernels across raw trace files into top-K candidates.
-
-    Sums per-kernel duration and call counts across all events, takes the
-    top ``top_k`` by duration, then runs :func:`_finalize_candidates`. This
-    is the dry-run / test-only raw-trace path (production reads candidates
-    from the orchestrator's analysis.json).
-
-    Args:
-        trace_files (list[Path]): Trace files (optionally gzipped) to scan.
-        top_k (int): Number of hottest kernels to keep.
-
-    Returns:
-        list[dict[str, Any]]: Finalized hot-kernel candidate dicts.
-    """
-    aggregates: dict[str, dict[str, Any]] = {}
-    total_dur = 0.0
-
-    for trace_file in trace_files:
-        try:
-            payload = open_json(trace_file)
-        except ValueError:
-            continue
-
-        if isinstance(payload.get("kernels"), list):
-            events = payload["kernels"]
-        else:
-            events = payload.get("traceEvents", [])
-        if not isinstance(events, list):
-            continue
-
-        for event in events:
-            if not isinstance(event, dict) or not is_kernel_event(event):
-                continue
-            name = str(event.get("kernel_name") or event.get("name") or "unknown_kernel")
-            dur = float(event.get("dur") or event.get("duration_us") or event.get("duration") or 0)
-            if dur <= 0:
-                continue
-            total_dur += dur
-            item = aggregates.setdefault(
-                name,
-                {
-                    "name": name,
-                    "duration_us": 0.0,
-                    "call_count": 0,
-                    "source_file": "",
-                    "source_type": "unknown",
-                    "shapes": [],
-                },
-            )
-            item["duration_us"] += dur
-            item["call_count"] += 1
-            if not item.get("_extracted_source_checked"):
-                item["source_file"] = extract_source_file(event)
-                item["_extracted_source_checked"] = True
-            shape = extract_shape(event)
-            if shape and shape not in item["shapes"]:
-                item["shapes"].append(shape)
-
-    candidates = sorted(aggregates.values(), key=lambda x: x["duration_us"], reverse=True)
-    top = candidates[:top_k]
-    # This raw-trace path never runs the analysis.json reader, so it fills its own
-    # per-kernel GPU share and records that any source came straight from the
-    # trace event, not TraceLens' resolver.
-    denom = total_dur or 1.0
-    for item in top:
-        item["gpu_pct"] = round(item["duration_us"] / denom * 100.0, 3)
-        if item.get("source_file"):
-            item["source_resolution_method"] = "trace_kernel_file"
-    return _finalize_candidates(top)
 
 
 def load_op_category_map(
@@ -391,7 +314,6 @@ def _finalize_candidates(
     # Denominator for the duration-derived gpu_pct fallback below.
     sum_dur = sum(float(it.get("duration_us") or 0.0) for it in top) or 1.0
     for idx, item in enumerate(top, 1):
-        item.pop("_extracted_source_checked", None)
         item.setdefault("source_file", "")
         item.setdefault("source_type", "unknown")
         item.setdefault("shapes", [])
@@ -442,27 +364,10 @@ def _apply_vendor_operator_playbook_grouping(top: list[dict[str, Any]]) -> None:
     dispatch path de-duplicates so only one forge-loop session actually
     runs per group per analysis session.
     """
-    groups: dict[str, list[dict[str, Any]]] = {}
-    for item in top:
-        if not isinstance(item, dict) or item.get("patch_strategy") != "vendor_playbook":
-            continue
-        playbook = item.get("vendor_operator_playbook")
-        group_id = str(playbook.get("id") or "") if isinstance(playbook, dict) else ""
-        if not group_id:
-            continue
-        groups.setdefault(group_id, []).append(item)
-    for group_id, members in groups.items():
+    for group_id, members in _vendor_playbook_groups(top).items():
         aggregate = round(sum(float(m.get("gpu_pct") or 0.0) for m in members), 3)
         member_ids = [str(m.get("kernel_id") or "") for m in members]
-        floor: float | None = None
-        for member in members:
-            playbook = member.get("vendor_operator_playbook")
-            if isinstance(playbook, dict) and playbook.get("min_gpu_pct_floor") is not None:
-                try:
-                    floor = float(playbook["min_gpu_pct_floor"])
-                except (TypeError, ValueError):
-                    floor = None
-                break
+        floor = _vendor_playbook_floor(members)
         for member in members:
             member["vendor_playbook_group_id"] = group_id
             # Namespaced (not bare "aggregate_gpu_pct"): that name is already
@@ -483,6 +388,32 @@ def _apply_vendor_operator_playbook_grouping(top: list[dict[str, Any]]) -> None:
                 # playbook isn't dispatched below its own floor even when
                 # HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT is loosened elsewhere.
                 member["vendor_playbook_min_gpu_pct_floor"] = floor
+
+
+def _vendor_playbook_groups(top: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """Group the vendor-playbook candidates by their playbook id, in candidate order."""
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for item in top:
+        if not isinstance(item, dict) or item.get("patch_strategy") != "vendor_playbook":
+            continue
+        playbook = item.get("vendor_operator_playbook")
+        group_id = str(playbook.get("id") or "") if isinstance(playbook, dict) else ""
+        if not group_id:
+            continue
+        groups.setdefault(group_id, []).append(item)
+    return groups
+
+
+def _vendor_playbook_floor(members: list[dict[str, Any]]) -> float | None:
+    """Return the first member's declared GPU-share floor, or ``None`` when absent or malformed."""
+    for member in members:
+        playbook = member.get("vendor_operator_playbook")
+        if isinstance(playbook, dict) and playbook.get("min_gpu_pct_floor") is not None:
+            try:
+                return float(playbook["min_gpu_pct_floor"])
+            except (TypeError, ValueError):
+                return None
+    return None
 
 
 def _candidate_resolution_method(item: dict[str, Any]) -> str:
@@ -513,7 +444,7 @@ def build_source_resolution_entries(candidates: list[dict[str, Any]]) -> list[di
             source_line=int(line) if isinstance(line, (int, float)) else None,
             source_function=str(item.get("source_function") or ""),
             method=method,
-            reason=str(item.get("source_resolution_reason") or ""),
+            reason=str(item.get("op_to_source_reason") or ""),
             # Classify from the routing gate's own verdict, so the artifact
             # reports why a kernel is undispatchable rather than only how many.
             reason_class=_KSC.classify_skip_reason(

@@ -25,7 +25,8 @@ import subprocess  # nosec B404 - fixed amd-smi invocations.
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Sequence
 
-from hyperloom.common.env import env_flag
+from hyperloom_common.env import env_flag
+
 from hyperloom.common.outside_facts import ROCR_VISIBLE_DEVICES_ENV
 
 __all__ = [

@@ -14,26 +14,14 @@ from hyperloom.orchestrator.loop import coordinator as coord_mod
 from hyperloom.orchestrator.phases import framework_records
 from hyperloom.orchestrator.phases import machine_state as ps_mod
 from hyperloom.orchestrator.actions.executors import _patch_source_pr as fpr_mod
-from hyperloom.orchestrator.roles import Backend, MockBackend, ScriptedPlan
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
-
-def _heartbeat() -> Intent:
-    return Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"})
-
-
-def _silent_plan() -> ScriptedPlan:
-    return ScriptedPlan(turns=[], default_intent=_heartbeat())
-
-
-def _build_backends() -> dict[str, Backend]:
-    return {name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "critic")}
+from .conftest import make_coordinator
 
 
 @pytest.fixture
 def coord(session_dir) -> Coordinator:
-    return Coordinator(session_dir, backends=_build_backends())
+    return make_coordinator(session_dir)
 
 
 # _framework_config_levers_from_done
@@ -144,7 +132,7 @@ def test_an_already_present_candidate_counts_as_tested() -> None:
 
 def _stub_sanctioned_async_client(monkeypatch, recorder: list[dict] | None = None):
     """Patch ``llm_config``'s async-client contract with a resolving stub."""
-    from hyperloom.common import llm_config
+    from hyperloom_common.llm import llm_config
 
     def _fake(**kwargs):
         kwargs.pop("timeout", None)

@@ -2485,8 +2485,11 @@ def test_checkout_promotion_failure_rejects_keep_and_rolls_kernel(tmp_path, monk
     assert kernel_rollbacks == [[{"manifest_path": "/tmp/m"}]]
 
 
-def test_every_patched_tree_is_promoted(tmp_path):
-    """A replay spanning two checkouts has to promote both, not just the first."""
+def _promote_sglang_and_tuning_trees(tmp_path, *, tuning_snapshot_of: str):
+    """Resolve the promoted checkout of a replay that patched ``sglang`` and ``tuning`` under ``tmp_path``.
+
+    The tuning tree's snapshot manifest names the tree ``tuning_snapshot_of``.
+    """
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     sglang = tmp_path / "sglang"
     tuning = tmp_path / "tuning"
@@ -2498,19 +2501,24 @@ def test_every_patched_tree_is_promoted(tmp_path):
             "patches": [{"patch_file": "p.patch", "framework_root": str(sglang)}],
         }
     )
-
-    ok, promotion = coord.phase_prelude._resolve_promoted_recipe_checkout(
+    tuning_snapshot = {"repo_path": str(tmp_path / tuning_snapshot_of)}
+    return coord.phase_prelude._resolve_promoted_recipe_checkout(
         {
             "warm_patch_trees": [
                 {"root": str(sglang), "pre_sha": "abc", "snapshot_manifest": {"repo_path": str(sglang)}},
-                {"root": str(tuning), "pre_sha": "def", "snapshot_manifest": {"repo_path": str(tuning)}},
+                {"root": str(tuning), "pre_sha": "def", "snapshot_manifest": tuning_snapshot},
             ],
         },
         task,
     )
 
+
+def test_every_patched_tree_is_promoted(tmp_path):
+    """A replay spanning two checkouts has to promote both, not just the first."""
+    ok, promotion = _promote_sglang_and_tuning_trees(tmp_path, tuning_snapshot_of="tuning")
+
     assert ok is True
-    assert promotion["target_repos"] == [str(sglang), str(tuning)]
+    assert promotion["target_repos"] == [str(tmp_path / "sglang"), str(tmp_path / "tuning")]
 
 
 def test_a_nogit_apply_counts_as_a_replayed_overlay(tmp_path):
@@ -2597,28 +2605,8 @@ def test_a_tree_that_names_no_checkout_is_still_refused(tmp_path):
 
 def test_one_tree_failing_validation_rejects_the_whole_promotion(tmp_path):
     """The gain came from the whole set, so a half-promoted replay is not a win."""
-    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
-    sglang = tmp_path / "sglang"
-    tuning = tmp_path / "tuning"
-    sglang.mkdir()
-    tuning.mkdir()
-    task = _StubTask(
-        params={
-            "required_patch_timeline": True,
-            "patches": [{"patch_file": "p.patch", "framework_root": str(sglang)}],
-        }
-    )
-
-    ok, promotion = coord.phase_prelude._resolve_promoted_recipe_checkout(
-        {
-            "warm_patch_trees": [
-                {"root": str(sglang), "pre_sha": "abc", "snapshot_manifest": {"repo_path": str(sglang)}},
-                # Snapshot taken against a different tree than the one patched.
-                {"root": str(tuning), "pre_sha": "def", "snapshot_manifest": {"repo_path": str(sglang)}},
-            ],
-        },
-        task,
-    )
+    # Snapshot taken against a different tree than the one patched.
+    ok, promotion = _promote_sglang_and_tuning_trees(tmp_path, tuning_snapshot_of="sglang")
 
     assert ok is False
     assert promotion["failure"] == "validated_recipe_checkout_manifest_mismatch"

@@ -176,6 +176,34 @@ def _status_finding(rule_id: str, status: str, reason: str) -> dict[str, Any]:
     }
 
 
+def _apply_line_rules(line: str, line_rules: list[_LineRule], declared_env: Collection[str], hits: _Hits) -> None:
+    """Record the first matching pattern of every line rule that fires on ``line``."""
+    for rule in line_rules:
+        for pattern in rule.patterns:
+            match = pattern.search(line)
+            if match is not None:
+                subject = rule.subject(match)
+                if not rule.declared_only or subject in declared_env:
+                    hits.add(rule.rule_id, subject, line)
+                break
+
+
+def _track_traceback(line: str, traceback_line: str, hits: _Hits) -> str:
+    """Feed ``line`` to the open traceback, recording its exception line; return the traceback still open."""
+    if _TRACEBACK_MARKER in line:
+        return line
+    if not traceback_line:
+        return traceback_line
+    body = _LOG_PREFIX_RE.sub("", line.rstrip("\n"), count=1)
+    if not body or body[0].isspace():
+        return traceback_line
+    exception = _EXCEPTION_LINE_RE.match(body)
+    name = exception.group(1) if exception is not None else ""
+    if name.rsplit(".", 1)[-1] not in _SHUTDOWN_EXCEPTIONS:
+        hits.add(_RUNTIME_TRACEBACK, name, body)
+    return ""
+
+
 def _scan_lines(path: str, framework: str, declared_env: Collection[str], hits: _Hits) -> None:
     line_rules = _line_rules(framework)
     missed_shapes: set[tuple[int, int, int]] = set()
@@ -183,31 +211,13 @@ def _scan_lines(path: str, framework: str, declared_env: Collection[str], hits: 
     traceback_line = ""
     with open(path, encoding="utf-8", errors="replace") as handle:
         for line in handle:
-            for rule in line_rules:
-                for pattern in rule.patterns:
-                    match = pattern.search(line)
-                    if match is not None:
-                        subject = rule.subject(match)
-                        if not rule.declared_only or subject in declared_env:
-                            hits.add(rule.rule_id, subject, line)
-                        break
+            _apply_line_rules(line, line_rules, declared_env, hits)
             if _AITER_MISS_MARKER in line:
                 shapes, _ = parse_aiter_shape_lookups(line)
                 if shapes and not first_miss_line:
                     first_miss_line = line
                 missed_shapes |= shapes
-            if _TRACEBACK_MARKER in line:
-                traceback_line = line
-                continue
-            if traceback_line:
-                body = _LOG_PREFIX_RE.sub("", line.rstrip("\n"), count=1)
-                if not body or body[0].isspace():
-                    continue
-                exception = _EXCEPTION_LINE_RE.match(body)
-                name = exception.group(1) if exception is not None else ""
-                if name.rsplit(".", 1)[-1] not in _SHUTDOWN_EXCEPTIONS:
-                    hits.add(_RUNTIME_TRACEBACK, name, body)
-                traceback_line = ""
+            traceback_line = _track_traceback(line, traceback_line, hits)
     if traceback_line:
         hits.add(_RUNTIME_TRACEBACK, "", traceback_line)
     if missed_shapes:

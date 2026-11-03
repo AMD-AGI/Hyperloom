@@ -11,8 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.coerce import first_str, to_unix
-from hyperloom.common.timeutil import iso_z, now_iso
+from hyperloom_common.coerce import first_str, to_unix
+from hyperloom_common.timeutil import iso_z, now_iso
 
 from ._common import _to_int
 from ..session_facts import recovery_block

@@ -10,9 +10,9 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any, Iterator, NamedTuple
+from typing import Any, BinaryIO, Iterator, NamedTuple
 
-from hyperloom.common.coerce import to_str_list
+from hyperloom_common.coerce import to_str_list
 
 from . import patch_jit_cache
 from ..actions.executors._kernel_agent_tool import HandlerResult
@@ -102,26 +102,26 @@ def _compiled_registry_error_text(
         path = workspace / name
         if not path.is_file():
             continue
-        start = 0 if after_sizes is None else max(0, int(after_sizes.get(name, 0)))
+        start = None if after_sizes is None else max(0, int(after_sizes.get(name, 0)))
         try:
             with path.open("rb") as handle:
-                if after_sizes is None:
-                    handle.seek(0, os.SEEK_END)
-                    size = handle.tell()
-                    handle.seek(max(0, size - 65536))
-                else:
-                    handle.seek(0, os.SEEK_END)
-                    size = handle.tell()
-                    if start >= size:
-                        handle.seek(max(0, size - 65536))
-                    else:
-                        handle.seek(start)
+                _seek_integrate_log(handle, start)
                 text = handle.read().decode("utf-8", errors="replace")
         except OSError:
             continue
         if is_aiter_jit_registry_mismatch(text):
             return text
     return ""
+
+
+def _seek_integrate_log(handle: BinaryIO, start: int | None) -> None:
+    """Position ``handle`` at ``start``, or at its last 64 KiB when ``start`` is unset or past the end."""
+    handle.seek(0, os.SEEK_END)
+    size = handle.tell()
+    if start is None or start >= size:
+        handle.seek(max(0, size - 65536))
+    else:
+        handle.seek(start)
 
 
 def _workspace_has_compiled_registry_error(
@@ -149,6 +149,53 @@ def _lock_cleanup_allows_retry(cleanup: dict[str, Any]) -> bool:
     return bool(cleanup.get("deleted")) or (cleanup.get("scanned", 0) == 0 and not cleanup.get("skipped_fresh"))
 
 
+async def _retry_after_registry_mismatch(
+    executor: Any, ctx: Any, result: dict[str, Any], *, workspace: Path, reason: str
+) -> dict[str, Any]:
+    """Drop the serving modules a JIT registry miss names, then run the baseline once more."""
+    from ..actions.executors._aiter_jit import drop_serving_so_for_envs, result_is_aiter_jit_registry_mismatch
+
+    envs = _integrate_extra_envs(ctx)
+    log_sizes = _workspace_log_sizes(workspace)
+    # The env does not always reach the module at fault: a round that pins one
+    # table leaves every other AITER_CONFIG_* unset, and each of those resolves to
+    # the shipped default plus its matching model_configs overlays, and
+    # AITER_CONFIG_FMOE maps to no serving module at all. Read the module out of
+    # the kernel the error named, or the drop unlinks nothing and the retry
+    # repeats the failure.
+    from ..actions.executors._aiter_jit import registry_mismatch_modules
+
+    named_modules = registry_mismatch_modules(
+        str(result.get("error") or ""),
+        _compiled_registry_error_text(workspace),
+    )
+    cleanup = drop_serving_so_for_envs(
+        envs,
+        backup_dir=workspace / "aiter_jit_backup",
+        also_modules=named_modules,
+    )
+    log.warning(
+        "integrate_handler: classified %s as aiter_jit_registry_mismatch; "
+        "retrying once after so drop (env modules + %s from the error)",
+        reason,
+        list(named_modules) or "none",
+    )
+    retry_result = await executor(ctx)
+    if not isinstance(retry_result, dict):
+        return retry_result
+    retry_result["aiter_jit_registry_mismatch_retry"] = {
+        "cleanup": cleanup,
+        "retry_attempted": True,
+        "retry_succeeded": retry_result.get("status") == "succeeded",
+    }
+    if result_is_aiter_jit_registry_mismatch(retry_result) or (
+        retry_result.get("status") != "succeeded"
+        and _workspace_has_compiled_registry_error(workspace, after_sizes=log_sizes)
+    ):
+        retry_result["error_class"] = "aiter_jit_registry_mismatch"
+    return retry_result
+
+
 async def _run_integrate_rebaseline_with_lock_retry(
     executor: Any,
     ctx: Any,
@@ -157,11 +204,7 @@ async def _run_integrate_rebaseline_with_lock_retry(
     reason: str,
 ) -> dict[str, Any]:
     """Run one integrate baseline and retry once after a JIT registry miss or baton stall."""
-    from ..actions.executors._aiter_jit import (
-        drop_serving_so_for_envs,
-        find_aiter_baton_wait,
-        result_is_aiter_jit_registry_mismatch,
-    )
+    from ..actions.executors._aiter_jit import find_aiter_baton_wait, result_is_aiter_jit_registry_mismatch
 
     prelaunch_sweep = _sweep_integrate_aiter_locks(reason=reason)
     first_started_unix = time.time()
@@ -170,45 +213,7 @@ async def _run_integrate_rebaseline_with_lock_retry(
         return result
 
     if result_is_aiter_jit_registry_mismatch(result) or _workspace_has_compiled_registry_error(workspace):
-        envs = _integrate_extra_envs(ctx)
-        log_sizes = _workspace_log_sizes(workspace)
-        # The env does not always reach the module at fault: a round that pins one
-        # table leaves every other AITER_CONFIG_* unset, and each of those resolves to
-        # the shipped default plus its matching model_configs overlays, and
-        # AITER_CONFIG_FMOE maps to no serving module at all. Read the module out of
-        # the kernel the error named, or the drop unlinks nothing and the retry
-        # repeats the failure.
-        from ..actions.executors._aiter_jit import registry_mismatch_modules
-
-        named_modules = registry_mismatch_modules(
-            str(result.get("error") or ""),
-            _compiled_registry_error_text(workspace),
-        )
-        cleanup = drop_serving_so_for_envs(
-            envs,
-            backup_dir=workspace / "aiter_jit_backup",
-            also_modules=named_modules,
-        )
-        log.warning(
-            "integrate_handler: classified %s as aiter_jit_registry_mismatch; "
-            "retrying once after so drop (env modules + %s from the error)",
-            reason,
-            list(named_modules) or "none",
-        )
-        retry_result = await executor(ctx)
-        if not isinstance(retry_result, dict):
-            return retry_result
-        retry_result["aiter_jit_registry_mismatch_retry"] = {
-            "cleanup": cleanup,
-            "retry_attempted": True,
-            "retry_succeeded": retry_result.get("status") == "succeeded",
-        }
-        if result_is_aiter_jit_registry_mismatch(retry_result) or (
-            retry_result.get("status") != "succeeded"
-            and _workspace_has_compiled_registry_error(workspace, after_sizes=log_sizes)
-        ):
-            retry_result["error_class"] = "aiter_jit_registry_mismatch"
-        return retry_result
+        return await _retry_after_registry_mismatch(executor, ctx, result, workspace=workspace, reason=reason)
 
     evidence = find_aiter_baton_wait(
         workspace,

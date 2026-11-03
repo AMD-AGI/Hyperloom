@@ -16,7 +16,7 @@ from typing import Any
 
 import yaml
 
-from hyperloom.common.coerce import to_float, to_int, to_str_list
+from hyperloom_common.coerce import to_float, to_int, to_str_list
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.launch_log_evidence import settings_the_engine_rewrote
 from hyperloom.common.model_paths import resolve_session_model_path
@@ -35,7 +35,7 @@ from hyperloom.common.perf_metric import (
     resolve_grading_anchor_perf,
     stamp_output_per_gpu,
 )
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.timeutil import now_iso
 from hyperloom.inference_optimizer.grading import resolved_grading
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...state.failure_evidence import (
@@ -62,6 +62,7 @@ from ._accuracy_gate import (
     parse_eval_results,
 )
 from . import _framework_switch_manifest as _switch_manifest
+from .bypass_scriptable import declared_lever_payload
 from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
 from ._proposal_identity import BaseControls, controls_of, effective_fingerprint, normalize_proposal
 from .measured_variants import GAIN_BELOW_THRESHOLD, MeasuredOn, measured_verdict, stack_of_measured
@@ -839,6 +840,10 @@ class _ExploreRound:
         self.round_id = f"explore-{(to_int(params.get('explore_search_cursor'), 0) or 0) + 1:03d}"
         self.observed = observed_launch_from_state(self.ss)
         self.opening_stack = self.launched_stack()
+        self._init_round_ledgers()
+
+    def _init_round_ledgers(self) -> None:
+        """Start the round's variant lists, verdict ledgers and run-stop record empty."""
         self.lever_payload: list[dict[str, Any]] = []
         self.grid: list[GridVariant] = []
         self.runnable: list[GridVariant] = []
@@ -956,7 +961,10 @@ class _ExploreRound:
         payload = self.params.get("grid") or []
         if not isinstance(payload, list):
             payload = []
-        self.lever_payload = framework_lever_grid(self.ss)
+        # A stack revalidation re-measures the recorded stack on purpose. Seeding a lever
+        # into it would validate stack+lever instead, so the declarations sit this round out.
+        declared = [] if is_stack_revalidation(self.params) else declared_lever_payload(self.ss, self.framework)
+        self.lever_payload = framework_lever_grid(self.ss) + declared
         payload = _lever_seeded_payload(payload, self.lever_payload)
         if not payload:
             payload = _seed_grid_payload(self.params, self.framework, self.yaml_envs)
@@ -1527,22 +1535,30 @@ class _ExploreRound:
             }
         )
 
-    def _keep(self, gv: GridVariant, run_gv: GridVariant, r: Any, row: dict[str, Any], meas: dict[str, Any]) -> dict:
-        control_fields = controls_of(vars(gv))
-        run_remove_args = self._run_remove_args(gv)
-        next_effective_args = compose_server_args(
+    def _next_effective_args(self, gv: GridVariant, run_remove_args: list[str]) -> str:
+        """The full server argv string ``gv`` ran with on top of the inherited and accumulated args."""
+        return compose_server_args(
             inherited_args=self.inherited_args,
             base_extra_args=self.args,
             variant_extra_args=gv.extra_server_args,
             remove_args=run_remove_args,
             args_mode="replace" if self.args_mode == "replace" else gv.args_mode,
         )
-        next_stack_args = compose_server_args(
+
+    def _next_stack_args(self, gv: GridVariant) -> str:
+        """The accumulated stack args extended with ``gv``'s own delta."""
+        return compose_server_args(
             base_extra_args=self.args,
             variant_extra_args=gv.extra_server_args,
             remove_args=gv.remove_args,
             args_mode=gv.args_mode,
         )
+
+    def _keep(self, gv: GridVariant, run_gv: GridVariant, r: Any, row: dict[str, Any], meas: dict[str, Any]) -> dict:
+        control_fields = controls_of(vars(gv))
+        run_remove_args = self._run_remove_args(gv)
+        next_effective_args = self._next_effective_args(gv, run_remove_args)
+        next_stack_args = self._next_stack_args(gv)
         effective = dict(control_fields)
         if run_remove_args:
             effective["remove_args"] = list(run_remove_args)

@@ -11,7 +11,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, NamedTuple
 
-from hyperloom.common.coerce import (
+from hyperloom_common.coerce import (
     to_float as _float_or_none,
     to_int as _int_or_none,
     to_mapping as _as_dict,

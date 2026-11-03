@@ -8,6 +8,7 @@ import sys
 from kernelforge.workflows.gemm_tune.tuners.vllm_dense_tunableop import (
     _candidate_pythonpath,
     _generate_candidate_sitecustomize,
+    _generate_tunableop_script,
     count_tunableop_result_lines,
 )
 
@@ -166,3 +167,34 @@ def test_candidate_sitecustomize_loads_file_when_read_file_works(tmp_path):
     assert result.returncode == 0, result.stderr
     assert "candidate ran" in result.stdout
     assert marker.read_text(encoding="utf-8") == str(tmp_path / "tunableop_results.csv")
+
+
+def test_tunableop_script_failure_reports_status_and_traceback(tmp_path):
+    torch_dir = tmp_path / "fake_torch" / "torch"
+    torch_dir.mkdir(parents=True)
+    (torch_dir / "__init__.py").write_text(
+        "class _Tunable:\n"
+        "    def enable(self, value): pass\n"
+        "    def tuning_enable(self, value): pass\n"
+        "    def record_untuned_enable(self, value): pass\n"
+        "    def tune_gemm_in_file(self, path): raise RuntimeError('hipBLASLt unavailable')\n"
+        "class cuda:\n"
+        "    tunable = _Tunable()\n",
+        encoding="utf-8",
+    )
+    untuned = tmp_path / "untuned.csv"
+    untuned.write_text("", encoding="utf-8")
+    script = _generate_tunableop_script(tmp_path, untuned, tmp_path / "tuned.csv", 10, "0")
+
+    proc = subprocess.run(
+        [sys.executable, str(script)],
+        env={**os.environ, "PYTHONPATH": str(tmp_path / "fake_torch")},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert proc.returncode == 1
+    assert '"status": "failed", "error": "hipBLASLt unavailable", "error_class": "RuntimeError"' in proc.stdout
+    assert proc.stderr.startswith("Traceback (most recent call last):")
+    assert proc.stderr.rstrip().endswith("RuntimeError: hipBLASLt unavailable")

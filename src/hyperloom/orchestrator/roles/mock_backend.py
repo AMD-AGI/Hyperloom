@@ -142,7 +142,7 @@ class MockRowScanBackend:
         return BackendTurnResult(intents=intents, raw_text=self._raw_text)
 
 
-def auto_approve_critic(name: str = "critic-mock") -> MockRowScanBackend:
+def MockCriticBackend(name: str = "critic-mock") -> MockRowScanBackend:
     """Build the always-approve mock Critic backend."""
 
     def _approve(match: re.Match[str]) -> Intent:
@@ -168,8 +168,8 @@ def auto_approve_critic(name: str = "critic-mock") -> MockRowScanBackend:
 
 __all__ = [
     "MockBackend",
+    "MockCriticBackend",
     "MockRowScanBackend",
     "MockTurn",
     "ScriptedPlan",
-    "auto_approve_critic",
 ]

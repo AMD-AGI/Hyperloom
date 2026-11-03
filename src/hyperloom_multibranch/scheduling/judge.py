@@ -32,8 +32,8 @@ from dataclasses import asdict, dataclass, replace
 from enum import Enum
 from pathlib import Path
 
-from hyperloom.common.io import append_jsonl
-from hyperloom.common.jsonio import extract_last_json_with_key
+from hyperloom_common.io import append_jsonl
+from hyperloom_common.jsonio import extract_last_json_with_key
 from hyperloom.contracts.measurement import Purpose, Validity
 from hyperloom_multibranch.contracts.lifecycle import SpecialistStatus
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH

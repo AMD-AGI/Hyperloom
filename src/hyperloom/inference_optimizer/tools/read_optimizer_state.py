@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.jsonio import read_json_strict
+from hyperloom_common.jsonio import read_json_strict
 from hyperloom.inference_optimizer.session.session_paths import manifest_path, state_path
 
 

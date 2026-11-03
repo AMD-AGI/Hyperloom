@@ -159,6 +159,58 @@ async def _noop_finalize() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_failed_close_sequence_fails_the_run_after_releasing_it(session_dir):
+    c = Coordinator(session_dir, backends=_build_backends({}))
+    c._stop.set()
+    finalize_calls = 0
+
+    async def _close(*, reason):
+        raise RuntimeError("close sequence broke")
+
+    async def _finalize():
+        nonlocal finalize_calls
+        finalize_calls += 1
+
+    closed_proposals: list[str] = []
+    c.phase_close.ensure_close_sequence = _close
+    c._recipe_kb_t4_hook = _finalize
+    c._close_undecided_proposals = closed_proposals.append
+    try:
+        with pytest.raises(RuntimeError, match="^close sequence broke$"):
+            await c.run(options=RunOptions(tick_interval_sec=0.0, max_ticks=1))
+        state = json.loads((session_dir / "state.json").read_text(encoding="utf-8"))
+        assert (finalize_calls, state["stop_reason"]) == (1, "signal")
+        assert closed_proposals == ["signal"]
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_pre_reactor_phase_advance_fails_the_tick(session_dir, monkeypatch):
+    c = Coordinator(session_dir, backends=_build_backends({}))
+    turns: list[str] = []
+
+    async def _noop(*args, **kwargs):
+        return None
+
+    async def _advance():
+        raise RuntimeError("phase entry hook broke")
+
+    async def _turn(name, **kwargs):
+        turns.append(name)
+
+    monkeypatch.setattr(c.reconciler, "run", _noop)
+    monkeypatch.setattr(c.phase_machine, "advance_phase_if_needed", _advance)
+    monkeypatch.setattr(c, "reactor_pass", _turn)
+    try:
+        with pytest.raises(RuntimeError, match="^phase entry hook broke$"):
+            await c._tick_once()
+        assert turns == []
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("stop_signal", [signal.SIGINT, signal.SIGTERM, signal.SIGHUP])
 @pytest.mark.parametrize("cancelled", [False, True])
 async def test_stop_signals_follow_the_normal_terminal_path(session_dir, stop_signal, cancelled, monkeypatch):
@@ -389,9 +441,13 @@ async def test_a_tick_while_closing_runs_no_reactor_turn(session_dir):
 @pytest.mark.asyncio
 async def test_a_phase_advance_that_raises_is_recorded_at_the_session_tick(session_dir, monkeypatch):
     c = Coordinator(session_dir, backends=_build_backends({}))
+    calls = 0
 
     async def _raise() -> None:
-        raise RuntimeError("advance broke")
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise RuntimeError("advance broke")
 
     monkeypatch.setattr(c.phase_machine, "advance_phase_if_needed", _raise)
     try:
@@ -881,11 +937,11 @@ async def test_delegate_accepts_nested_params_idempotency_key(session_dir):
     c.sub.register_executor("explore", _runner)
     try:
         c.shared_state.baseline_tput = 100.0
-        c.shared_state.baseline_config_path = "/tmp/baseline.yaml"
-        c.shared_state.last_profile_trace = "/tmp/trace.json.gz"
+        c.shared_state.baseline_config_path = str(session_dir / "baseline.yaml")
+        c.shared_state.last_profile_trace = str(session_dir / "trace.json.gz")
         # params delegate requires a fresh roofline snapshot.
         c.shared_state.last_trace_analyze = {
-            "trace_input": "/tmp/trace.json.gz",
+            "trace_input": str(session_dir / "trace.json.gz"),
             "analysis_md_text": "FAKE_REPORT",
         }
         c.shared_state.save(session_dir)
@@ -932,7 +988,7 @@ async def test_coordinator_response_routes_back_to_requester(session_dir):
         payload={
             "target_agent": "kernel_agent",
             "kind": "trace_analyze",
-            "params": {"trace_input": "/tmp/trace.json.gz"},
+            "params": {"trace_input": str(session_dir / "trace.json.gz")},
         },
     )
     plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[req])])}
@@ -2505,7 +2561,7 @@ async def test_a_registered_run_is_reachable_by_the_wall_clock_defences(tmp_path
 @pytest.mark.asyncio
 async def test_a_registered_run_labels_its_llm_calls_with_the_action(tmp_path):
     """This is the only place ``type`` is published for gateway attribution."""
-    from hyperloom.common.llm_attribution import current_action
+    from hyperloom_common.llm.llm_attribution import current_action
 
     db = SqliteConnection(tmp_path / "x.db")
     locks = SqliteLeaseBackend(db)
@@ -2640,14 +2696,13 @@ async def test_run_preserves_prior_stop_reason_when_loop_exits_without_new_reaso
         reason = await c.run(options=RunOptions(max_ticks=5))
         assert reason == "target_reached"
         assert c.shared_state.stop_reason == "target_reached"
-        # Two advance_phase calls per run (pre-reactor hint consume + main) each record a coordinator exception when
-        # the tick body raises.
-        assert c.shared_state.crash_count == 2
-        assert c.shared_state.last_tick_exception["stage"] == "advance_phase"
+        # The pre-reactor advance raising ends the tick, which the tick boundary records once.
+        assert c.shared_state.crash_count == 1
+        assert c.shared_state.last_tick_exception["stage"] == "tick_body"
         assert c.shared_state.last_tick_exception["type"] == "RuntimeError"
         persisted = SharedState.load_or_init(session_dir)
         assert persisted.stop_reason == "target_reached"
-        assert persisted.last_tick_exception["stage"] == "advance_phase"
+        assert persisted.last_tick_exception["stage"] == "tick_body"
     finally:
         await c.stop()
 

@@ -500,24 +500,7 @@ def certify_trace_dir(trace_dir: str | Path, *, framework: str = "") -> dict[str
         # An empty capture directory still deserves a full record rather than a hole: the profiler created the
         # directory and wrote nothing, which is a finding in its own right and distinct from a trace that parsed
         # badly.
-        record["rank_level"].append(
-            {
-                "rank": None,
-                "path": None,
-                "parse": {"parse_ok": False, "stream_errors": [], "event_total": 0, "bytes": None, "gz": False},
-                "attribution": {},
-                "density": {
-                    "kernel_count": 0,
-                    "graph_mode": False,
-                    "graph_launch_count": 0,
-                    "graph_launches_with_kernels": 0,
-                    "graph_launch_coverage": None,
-                    "graph_under_recorded": False,
-                },
-                "time_structure": {},
-                "annotations": {},
-            }
-        )
+        record["rank_level"].append(_empty_rank_row())
         record["verdict"] = build_verdict(
             TraceHealth(parse_ok=False, kernel_count=0, capture_fragment=False, attributed_pct=None),
             thresholds=thresholds,
@@ -548,6 +531,26 @@ def certify_trace_dir(trace_dir: str | Path, *, framework: str = "") -> dict[str
     return record
 
 
+def _empty_rank_row() -> dict[str, Any]:
+    """The rank-level row of a capture directory that holds no usable trace file."""
+    return {
+        "rank": None,
+        "path": None,
+        "parse": {"parse_ok": False, "stream_errors": [], "event_total": 0, "bytes": None, "gz": False},
+        "attribution": {},
+        "density": {
+            "kernel_count": 0,
+            "graph_mode": False,
+            "graph_launch_count": 0,
+            "graph_launches_with_kernels": 0,
+            "graph_launch_coverage": None,
+            "graph_under_recorded": False,
+        },
+        "time_structure": {},
+        "annotations": {},
+    }
+
+
 def _probe_production_pick(inv: dict[str, Any]) -> dict[str, Any]:
     """Measure the file the live resolver would open in place of the selected one."""
     probe = analyze_trace(Path(inv["production_selected_path"]))
@@ -561,6 +564,24 @@ def _probe_production_pick(inv: dict[str, Any]) -> dict[str, Any]:
         "event_total": probe.get("event_total"),
         "parse_ok": not probe.get("stream_errors") and not probe.get("truncated"),
         "truncated": bool(probe.get("truncated")),
+    }
+
+
+def _rank_attribution_block(attribution: dict[str, Any], timeline: dict[str, Any], sp: StepPass) -> dict[str, Any]:
+    """The rank row's kernel-attribution block, from the trace reader's pass and the step pass."""
+    return {
+        "cuda_runtime_links": attribution.get("cuda_runtime_links"),
+        "cpu_ops": attribution.get("cpu_ops"),
+        "attributed_kernels": attribution.get("attributed_kernels"),
+        "unlinked_kernels": attribution.get("unlinked_kernels"),
+        "graph_attributed_kernels": attribution.get("graph_attributed_kernels"),
+        "attributed_pct": attribution.get("attributed_pct"),
+        # The terms the percentage is a ratio of. Without them a reader cannot tell 90% of a millisecond
+        # from 90% of a minute, and the two warrant opposite reactions.
+        "attributed_gpu_ms": attribution.get("attributed_gpu_ms"),
+        "gpu_kernel_sum_ms": timeline.get("gpu_kernel_sum_ms"),
+        "op_meta_coverage": _ratio(sp.cpu_op_with_meta, sp.cpu_op_total),
+        "op_meta_basis": {"cpu_op_total": sp.cpu_op_total, "cpu_op_with_meta": sp.cpu_op_with_meta},
     }
 
 
@@ -601,20 +622,7 @@ def _certify_rank(path: Path, *, thresholds: dict[str, Any]) -> dict[str, Any]:
             "truncated": bool(analysis.get("truncated")),
             "truncation_reason": analysis.get("truncation_reason") or "",
         },
-        "attribution": {
-            "cuda_runtime_links": attribution.get("cuda_runtime_links"),
-            "cpu_ops": attribution.get("cpu_ops"),
-            "attributed_kernels": attribution.get("attributed_kernels"),
-            "unlinked_kernels": attribution.get("unlinked_kernels"),
-            "graph_attributed_kernels": attribution.get("graph_attributed_kernels"),
-            "attributed_pct": attribution.get("attributed_pct"),
-            # The terms the percentage is a ratio of. Without them a reader cannot tell 90% of a millisecond
-            # from 90% of a minute, and the two warrant opposite reactions.
-            "attributed_gpu_ms": attribution.get("attributed_gpu_ms"),
-            "gpu_kernel_sum_ms": timeline.get("gpu_kernel_sum_ms"),
-            "op_meta_coverage": _ratio(sp.cpu_op_with_meta, sp.cpu_op_total),
-            "op_meta_basis": {"cpu_op_total": sp.cpu_op_total, "cpu_op_with_meta": sp.cpu_op_with_meta},
-        },
+        "attribution": _rank_attribution_block(attribution, timeline, sp),
         "density": {
             "kernel_count": kernel_count,
             "graph_mode": coverage_block.get("graph_mode"),

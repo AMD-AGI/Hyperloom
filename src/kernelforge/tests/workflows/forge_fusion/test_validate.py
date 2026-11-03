@@ -64,7 +64,9 @@ class TestClassifiers:
 
     def test_triton_build_lesson(self):
         msg = classify_compile_error("triton compilation failed: out of resource: shared memory")
-        assert "gfx942" in msg or "shared-memory" in msg
+        assert "shared-memory" in msg
+        # Regression: the lesson named gfx942 whatever GPU the run was on.
+        assert "gfx942" not in msg
 
     def test_generic_compile_lesson(self):
         msg = classify_compile_error("ImportError: cannot import name 'foo'")

@@ -478,6 +478,27 @@ def test_a_failed_authoring_session_is_audited_with_its_progress(tmp_path, monke
     assert not (tmp_path / "rewrite_driver.py").exists()
 
 
+def test_a_session_that_crashes_after_writing_a_conforming_driver_still_has_it_preflighted(tmp_path, monkeypatch):
+    async def writes_then_crashes(**kwargs):
+        kwargs["turn"].stage_driver.write_text("print('conforming driver')\n", encoding="utf-8")
+        raise RuntimeError("backend exploded")
+
+    preflighted: list[str] = []
+
+    def preflight(spec, driver, **kwargs):
+        preflighted.append(Path(driver).read_text(encoding="utf-8"))
+        return _ok_preflight()
+
+    monkeypatch.setattr(driver_preparation, "_run_agent", writes_then_crashes)
+    monkeypatch.setattr(driver_preparation, "preflight_rewrite_driver", preflight)
+
+    result = _prepare(tmp_path, tmp_path / "rewrite_driver.py")
+
+    assert result.ok is True
+    assert preflighted == ["print('conforming driver')\n"]
+    assert (tmp_path / "rewrite_driver.py").read_text(encoding="utf-8") == "print('conforming driver')\n"
+
+
 def test_an_attempt_that_deletes_the_driver_is_rejected_without_preflight(tmp_path, monkeypatch):
     async def deleting_agent(**kwargs):
         kwargs["turn"].stage_driver.unlink()

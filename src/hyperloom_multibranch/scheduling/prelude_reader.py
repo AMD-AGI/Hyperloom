@@ -23,7 +23,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from hyperloom.common.jsonio import read_json_strict
+from hyperloom_common.jsonio import read_json_strict
 from hyperloom.common.perf_metric import GRADED_INTVTY_P50, GRADED_OUTPUT
 from hyperloom.contracts.recipe import ComponentPatches, Recipe, RecipeError
 from hyperloom.inference_optimizer.breakdown.stop_reasons import outcome_status

@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.jsonio import read_jsonl
+from hyperloom_common.jsonio import read_jsonl
 from hyperloom.common.outside_facts.image_check import ImageCheckReport
 from hyperloom.contracts.recipe import RecipeError
 from hyperloom.measure.compile import BlobError, BlobStore

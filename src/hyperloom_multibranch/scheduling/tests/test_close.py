@@ -22,7 +22,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.common.io import append_jsonl, atomic_write_json
+from hyperloom_common.io import append_jsonl, atomic_write_json
 from hyperloom.common.outside_facts.image_check import FactResult, ImageCheckMode, ImageCheckReport
 from hyperloom.common.outside_facts.image_check_eval import Status
 from hyperloom.common.owner_scope import local_owner_scope

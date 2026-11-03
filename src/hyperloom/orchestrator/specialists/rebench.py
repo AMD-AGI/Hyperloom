@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.perf_metric import constraint_fields
-from ..actions.executors._grid_runner import GridLaunch, GridRecipe, GridStop, GridVariant, run_grid
+from ..actions.executors._grid_runner import GridLaunch, GridRecipe, GridStop, GridVariant, VariantResult, run_grid
 from ..actions.executors._workload_envs import (
     BenchmarkTarget,
     LaunchLayer,
@@ -122,7 +122,6 @@ async def run_specialist_rebench(
     }
 
     gpu_ids = _current_leased_cards()
-    warnings: list[str] = []
     try:
         results = await run_grid(
             grid=[variant],
@@ -152,6 +151,12 @@ async def run_specialist_rebench(
             "port": resolved_port,
             "gpu_ids": gpu_ids,
         }
+    return _rebench_result(rb, port=resolved_port, gpu_ids=gpu_ids)
+
+
+def _rebench_result(rb: VariantResult, *, port: int, gpu_ids: str) -> dict[str, Any]:
+    """The CLI result of one finished rebench variant."""
+    warnings: list[str] = []
     ok = rb.status == "succeeded"
     if not ok:
         warnings.append(f"rebench_failed:{(rb.error or '')[-160:]}")
@@ -166,7 +171,7 @@ async def run_specialist_rebench(
         # The session's constraints fail closed, so a lane that drops these refuses every KEEP.
         **constraint_fields(rb),
         "workspace": str(getattr(rb, "workspace", "") or ""),
-        "port": resolved_port,
+        "port": port,
         "gpu_ids": gpu_ids,
         "error": getattr(rb, "error", "") or "",
         "warnings": warnings + list(getattr(rb, "nonfatal_warnings", []) or []),

@@ -376,7 +376,9 @@ def test_agent_prompt_spells_out_nested_identity_and_evidence_list() -> None:
     assert "correctness and performance must invoke the same operator" in prompt
     assert "CUDA/HIP graph replays over preallocated inputs" in prompt
     assert "Do not place identity fields at the top level" in prompt
-    assert '"gpu": "mi355x"' in prompt
+    # The host pins identity.gpu; an example value here was copied onto every run whatever its GPU.
+    assert '"gpu"' not in prompt
+    assert "gpu from the hardware it runs on" in prompt
     assert "registered backend" in prompt
     assert "one task cannot modify multiple repos" in prompt
     assert "case_ms: <case> <ms>" in prompt

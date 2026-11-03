@@ -460,6 +460,7 @@ def fuse(request: FuseRequest) -> FuseResult:
     usage = _open_usage_ledger(out)
 
     log.info("forge-fuse %s | framework=%s model=%s", __version__, framework, model_path)
+    request = dataclasses.replace(request, gpu_arch=_run_target_arch(request.gpu_arch))
     backend = _AgentBackendCache(agent)
     diagnosis = _diagnose(request)
 
@@ -476,6 +477,7 @@ def fuse(request: FuseRequest) -> FuseResult:
         out=out,
         agent_factory=backend,
         usage=usage,
+        gpu_arch=request.gpu_arch,
     )
     discovery = _discover(inputs, discover_mode, fuse_kernel, stages.dry_run)
     _log_located_recipes(discovery, dry_run=stages.dry_run)
@@ -535,7 +537,7 @@ def _run_fusion_stages(
             max_model_len=layout.max_model_len,
         ),
         author=author,
-        gpu_arch=_run_target_arch(request.gpu_arch),
+        gpu_arch=request.gpu_arch,
         target_speedup=DEFAULT_TARGET_SPEEDUP,
     )
     if not (split.multi_patch and stages.validate):
@@ -839,14 +841,14 @@ def _combined_recipe(recipes: list[Recipe]) -> Recipe:
 def _run_target_arch(gpu_arch: str) -> str:
     """One GPU arch for the whole run.
 
-    The author tunes for it, so a mismatch would have it writing for a chip the
-    run is not on.
+    Discovery and the author both name it, so a mismatch would have them
+    reasoning about a chip the run is not on.
     """
     run_arch = canon_arch(gpu_arch) or detect_arch()
     if run_arch:
         log.info("target GPU arch: %s", run_arch)
     else:
-        log.warning("GPU arch undetectable; the author will not be told a target ISA")
+        log.warning("GPU arch undetectable; discovery and the author will not be told a target ISA")
     return run_arch
 
 
@@ -963,7 +965,7 @@ def _reject_fusion_sibling(recipe, vr, arts, disposition: str) -> None:
 
 def _run_fusion_autoloop(recipes, run: _FusionRun, plan: _LoopPlan, campaign: CampaignRuntime, publish=None):
     """Try each ranked recipe as one forge-loop campaign."""
-    out, repo_root, pristine_dir, repo_scope = run.out, run.repo_root, run.pristine_dir, run.repo_scope
+    out, repo_root, repo_scope = run.out, run.repo_root, run.repo_scope
     session, author, combine = run.session, plan.author, plan.combine
     originals = {r.pattern_id: r for r in recipes}
     loop_recipes = [_combined_recipe(recipes)] if (combine and len(recipes) > 1) else recipes
@@ -1092,12 +1094,7 @@ def _run_fusion_autoloop(recipes, run: _FusionRun, plan: _LoopPlan, campaign: Ca
             config=cfg,
             on_keep=on_keep if multi_patch else None,
         )
-        # The combine path folds everything into ONE recipe whose edits are still live in the tree, so the strongest
-        # (only) keeper is smoked here.
-        if multi_patch and shadow is not None:
-            shadow.reset_to_base()
-        elif not multi_patch and result.kept and result.best_recipe is not None:
-            apply_serving_gate(result, session, out, repo_root=repo_root, pristine_dir=pristine_dir)
+        _settle_loop_tree(result, run, plan, shadow)
     except FusionAbort as exc:
         log.error("fusion run aborted (infrastructure failure): %s", exc)
         result = LoopResult(
@@ -1111,8 +1108,23 @@ def _run_fusion_autoloop(recipes, run: _FusionRun, plan: _LoopPlan, campaign: Ca
             # That state is scratch, and the workspace is a framework install.
             shutil.rmtree(Path(shadow.root) / LOOP_CAMPAIGN_STATE, ignore_errors=True)
             shadow.dispose()
+    return _attribute_loop_result(result, campaign_experiments, originals)
 
-    # Only this scope knows which forge-loop run answered which recipe.
+
+def _settle_loop_tree(result, run: _FusionRun, plan: _LoopPlan, shadow) -> None:
+    """Reset the shared tree after a multi-patch loop, or serving-gate the combined keeper still live in it."""
+    multi_patch = not plan.combine
+    # The combine path folds everything into ONE recipe whose edits are still live in the tree, so the strongest
+    # (only) keeper is smoked here.
+    if multi_patch and shadow is not None:
+        shadow.reset_to_base()
+    elif not multi_patch and result.kept and result.best_recipe is not None:
+        apply_serving_gate(result, run.session, run.out, repo_root=run.repo_root, pristine_dir=run.pristine_dir)
+
+
+def _attribute_loop_result(result, campaign_experiments: dict[str, str], originals: dict) -> LoopResult:
+    """Tag each iteration with its forge-loop experiment and name the best recipe as the caller passed it."""
+    # Only the autoloop scope knows which forge-loop run answered which recipe.
     for iteration in result.history:
         iteration.experiment_id = campaign_experiments.get(iteration.pattern_id, "")
 

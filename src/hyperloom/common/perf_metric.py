@@ -6,13 +6,13 @@
 from __future__ import annotations
 
 from hyperloom.common.benchmark_config import configured_benchmark, is_magpie_agentx
-from hyperloom.common.coerce import optional_positive_float
+from hyperloom_common.coerce import optional_positive_float
 
 from dataclasses import dataclass
 from math import isfinite
 from typing import Any, Mapping
 
-from hyperloom.common.env import env_bool, env_float, env_str
+from hyperloom_common.env import env_bool, env_float, env_str
 
 INTVTY_V1 = "intvty_v1"
 

@@ -6,7 +6,7 @@ import logging
 import time
 from typing import Any
 
-from hyperloom.common.env import env_int
+from hyperloom_common.env import env_int
 
 from .external_state import reachable_service_url
 

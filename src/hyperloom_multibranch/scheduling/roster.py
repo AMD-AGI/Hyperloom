@@ -17,8 +17,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.io import atomic_write_json
-from hyperloom.common.jsonio import read_json_strict
+from hyperloom_common.io import atomic_write_json
+from hyperloom_common.jsonio import read_json_strict
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.blackboard.vocab import BranchDriver
 from hyperloom_multibranch.scheduling.clock import Clock

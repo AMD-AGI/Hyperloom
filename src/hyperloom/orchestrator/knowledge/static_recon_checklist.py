@@ -6,20 +6,25 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
 class ChecklistEntry:
-    """One known un-bridged-capability pattern the static-recon specialist hunts."""
+    """One known un-bridged-capability pattern the static-recon specialist hunts.
+
+    ``source_dirs`` maps each framework the pattern lives in to its repo-relative
+    directories; the entry applies to no other framework.
+    """
 
     id: str
     applies_when: dict[str, str]
     detect: str
     consequence: str
     bridge: str
+    source_dirs: Mapping[str, tuple[str, ...]]
     domain_hint: str = "freeform"
-    source_dirs: tuple[str, ...] = ()
     evidence: tuple[str, ...] = ()
 
 
@@ -48,7 +53,7 @@ _CHECKLIST: tuple[ChecklistEntry, ...] = (
             "route to the AITER fp8 GEMM."
         ),
         domain_hint="freeform",
-        source_dirs=("vllm/model_executor/layers/quantization/",),
+        source_dirs={"vllm": ("vllm/model_executor/layers/quantization/",)},
         evidence=("vllm#45854", "session:Qwen3-32B/20260622T032133Z"),
     ),
     ChecklistEntry(
@@ -71,10 +76,12 @@ _CHECKLIST: tuple[ChecklistEntry, ...] = (
             "the per-channel scale bridge above."
         ),
         domain_hint="freeform",
-        source_dirs=(
-            "vllm/model_executor/layers/quantization/",
-            "vllm/model_executor/kernels/linear/",
-        ),
+        source_dirs={
+            "vllm": (
+                "vllm/model_executor/layers/quantization/",
+                "vllm/model_executor/kernels/linear/",
+            )
+        },
         evidence=("vllm#45854",),
     ),
     ChecklistEntry(
@@ -97,10 +104,12 @@ _CHECKLIST: tuple[ChecklistEntry, ...] = (
             "Triton) on the non-EP decode path."
         ),
         domain_hint="kernel_switch_specialist",
-        source_dirs=(
-            "vllm/model_executor/kernels/linear/mxfp8/",
-            "vllm/model_executor/layers/fused_moe/experts/",
-        ),
+        source_dirs={
+            "vllm": (
+                "vllm/model_executor/kernels/linear/mxfp8/",
+                "vllm/model_executor/layers/fused_moe/experts/",
+            )
+        },
         evidence=("vllm#46063",),
     ),
     ChecklistEntry(
@@ -123,7 +132,7 @@ _CHECKLIST: tuple[ChecklistEntry, ...] = (
             "required pad / GateMode config so the AITER MoE backend accepts it."
         ),
         domain_hint="kernel_switch_specialist",
-        source_dirs=("vllm/model_executor/layers/fused_moe/",),
+        source_dirs={"vllm": ("vllm/model_executor/layers/fused_moe/",)},
         evidence=("vllm#46419",),
     ),
     ChecklistEntry(
@@ -161,12 +170,10 @@ _CHECKLIST: tuple[ChecklistEntry, ...] = (
             "Reference: vLLM PR #46545, upstream MiniMax-M3 shared-expert fusion."
         ),
         domain_hint="freeform",
-        source_dirs=(
-            "vllm/model_executor/layers/fused_moe/",
-            "vllm/model_executor/models/",
-            "python/sglang/srt/layers/moe/",
-            "python/sglang/srt/models/",
-        ),
+        source_dirs={
+            "vllm": ("vllm/model_executor/layers/fused_moe/", "vllm/model_executor/models/"),
+            "sglang": ("python/sglang/srt/layers/moe/", "python/sglang/srt/models/"),
+        },
         evidence=("vllm#46545", "MiniMax-M3-shared-expert-fusion-MI355X-mxfp8"),
     ),
 )
@@ -218,11 +225,13 @@ def workload_precision(state: object) -> str:
     return str(getattr(state, "precision", "") or "").strip().lower()
 
 
-def entries_for(*, gpu_type: str = "", precision: str = "") -> list[ChecklistEntry]:
-    """Return the checklist entries applicable to a ``(gpu, precision)``."""
+def entries_for(*, framework: str, gpu_type: str = "", precision: str = "") -> list[ChecklistEntry]:
+    """Return the checklist entries applicable to a ``(framework, gpu, precision)``."""
     gpu_fam = _gpu_family(gpu_type)
     out: list[ChecklistEntry] = []
     for e in _CHECKLIST:
+        if framework not in e.source_dirs:
+            continue
         if not _matches(e.applies_when.get("gpu", "*"), gpu_fam):
             continue
         if not _matches(e.applies_when.get("precision", "*"), precision):
@@ -231,21 +240,14 @@ def entries_for(*, gpu_type: str = "", precision: str = "") -> list[ChecklistEnt
     return out
 
 
-def source_hint_directories_for(*, gpu_type: str = "", precision: str = "") -> tuple[str, ...]:
-    """Return the de-duplicated source subdirectories to point the specialist at."""
-    seen: set[str] = set()
-    out: list[str] = []
-    for e in entries_for(gpu_type=gpu_type, precision=precision):
-        for d in e.source_dirs:
-            d = (d or "").strip()
-            if d and d not in seen:
-                seen.add(d)
-                out.append(d)
-    return tuple(out)
+def source_hint_directories_for(*, framework: str, gpu_type: str = "", precision: str = "") -> tuple[str, ...]:
+    """Return the de-duplicated source subdirectories of ``framework`` to point the specialist at."""
+    entries = entries_for(framework=framework, gpu_type=gpu_type, precision=precision)
+    return tuple(dict.fromkeys(d for e in entries for d in e.source_dirs[framework]))
 
 
-def render_checklist_for_prompt(entries: list[ChecklistEntry]) -> str:
-    """Render checklist entries as a Markdown block for the specialist prompt."""
+def render_checklist_for_prompt(entries: list[ChecklistEntry], *, framework: str) -> str:
+    """Render checklist entries as a Markdown block for a ``framework`` specialist prompt."""
     if not entries:
         return ""
     lines: list[str] = []
@@ -254,8 +256,7 @@ def render_checklist_for_prompt(entries: list[ChecklistEntry]) -> str:
         lines.append(f"  - detect: {e.detect}")
         lines.append(f"  - consequence: {e.consequence}")
         lines.append(f"  - bridge: {e.bridge}")
-        if e.source_dirs:
-            lines.append(f"  - look under: {', '.join(e.source_dirs)}")
+        lines.append(f"  - look under: {', '.join(e.source_dirs[framework])}")
         if e.evidence:
             lines.append(f"  - evidence: {', '.join(e.evidence)}")
     return "\n".join(lines)

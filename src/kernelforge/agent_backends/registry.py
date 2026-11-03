@@ -12,9 +12,9 @@ import threading
 from dataclasses import dataclass, replace
 from typing import Callable, Mapping
 
-from hyperloom.common.entry_points import iter_entry_point_objects
-from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL, DEFAULT_DEEPSEEK_HARNESS_MODEL
-from hyperloom.common.reasoning_effort import DEFAULT_REASONING_EFFORT
+from hyperloom_common.entry_points import iter_entry_point_objects
+from hyperloom_common.llm.llm_config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL, DEFAULT_DEEPSEEK_HARNESS_MODEL
+from hyperloom_common.llm.reasoning_effort import DEFAULT_REASONING_EFFORT
 from kernelforge.agent_backends.base import (
     AgentBackend,
     AgentCapabilities,
@@ -152,8 +152,8 @@ def list_agent_providers() -> tuple[str, ...]:
 def select_default_agent_provider(preferred_model: str = "") -> AgentProvider:
     """Select a provider by the one rule the whole repository shares.
 
-    Ranked by :func:`hyperloom.common.llm_config.agent_backend_rank`, the key
-    :func:`hyperloom.common.llm_config.preferred_agent_backend` also sorts on.
+    Ranked by :func:`hyperloom_common.llm.llm_config.agent_backend_rank`, the key
+    :func:`hyperloom_common.llm.llm_config.preferred_agent_backend` also sorts on.
     Providers that tie keep registration order, which is what puts Claude ahead
     of Codex.
 
@@ -166,7 +166,7 @@ def select_default_agent_provider(preferred_model: str = "") -> AgentProvider:
     preflight reports the absent extra or the failed login. Only a provider
     missing both is refused.
     """
-    from hyperloom.common import llm_config
+    from hyperloom_common.llm import llm_config
 
     discover_agent_providers()
     failures: list[str] = []
@@ -331,35 +331,35 @@ def _create_deepseek_backend(runtime: AgentRuntimeConfig) -> AgentBackend:
 
 def _claude_available() -> bool:
     """Return whether the optional Claude SDK is installed."""
-    from hyperloom.common import llm_config
+    from hyperloom_common.llm import llm_config
 
     return llm_config.claude_agent_sdk_installed()
 
 
 def _codex_available() -> bool:
     """Return whether the optional Codex Python SDK is installed."""
-    from hyperloom.common import llm_config
+    from hyperloom_common.llm import llm_config
 
     return llm_config.codex_agent_sdk_installed()
 
 
 def _deepseek_available() -> bool:
     """Return whether the optional DeepSeek Harness SDK is installed."""
-    from hyperloom.common import llm_config
+    from hyperloom_common.llm import llm_config
 
     return llm_config.deepseek_harness_sdk_installed()
 
 
 def _claude_credentialed(env: Mapping[str, str]) -> bool:
     """Return whether the Anthropic side can authenticate this CLI."""
-    from hyperloom.common import llm_config
+    from hyperloom_common.llm import llm_config
 
     return llm_config.anthropic_agent_credentialed(env)
 
 
 def _codex_credentialed(env: Mapping[str, str]) -> bool:
     """Return whether the OpenAI side can authenticate this CLI."""
-    from hyperloom.common import llm_config
+    from hyperloom_common.llm import llm_config
 
     return llm_config.openai_agent_credentialed(env)
 

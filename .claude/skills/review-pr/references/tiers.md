@@ -20,7 +20,7 @@ a failure surfaces, not by file size or churn.
 | 2 | `orchestrator/phases/framework.py`, `phases/framework_records.py`, `phases/framework_discovery.py`, `phases/kernel.py`, `phases/kernel_geak_dispatch.py`, `phases/kernel_geak_promotion.py`, `phases/kernel_gemm_tuning.py` | One phase produces nothing or loops |
 | 2 | `protocol/action_surfaces.py` | Consumed by the CLI catalogue, the gate, the phase machine and the dispatcher. An action here but not in the owning role's set is unroutable |
 | 2 | `protocol/intent.py` | Severity/verdict frozensets deliberately duplicated from `agents/critic/runtime/intent_envelope.py`. Change one copy and the emitter produces intents the transport rejects |
-| 2 | `common/llm_config.py`, `common/perf_metric.py` | Gateway env resolution and client construction for every role; `graded_axes_of` is what the phase handlers and writeback grade against |
+| 2 | `hyperloom_common/llm/llm_config.py`, `common/perf_metric.py` | Gateway env resolution and client construction for every role; `graded_axes_of` is what the phase handlers and writeback grade against |
 | 2 | `breakdown/schema.py`, `schema_framework.py`, `schema_kernel.py` | Typed shape of the persisted `session_breakdown.json`. Zero import fan-in, so nothing catches writer/reader drift |
 | 2 | `inference_optimizer/framework_paths.py` | Three non-interchangeable resolvers. Patches land in the wrong tree, or the session optimizes a tree it is not measuring |
 | 2 | `kernelforge/cli/`, `kernelforge/config/` | Dispatched as `python -m kernelforge.cli` — a subprocess contract |

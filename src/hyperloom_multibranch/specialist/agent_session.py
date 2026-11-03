@@ -58,8 +58,8 @@ from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
 from typing import Protocol
 
-from hyperloom.common.fs_utils import read_text_nofollow, write_text_nofollow
-from hyperloom.common.llm_config import AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX
+from hyperloom_common.fs_utils import read_text_nofollow, write_text_nofollow
+from hyperloom_common.llm.llm_config import AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX
 from hyperloom.contracts.measurement import Purpose, TestKind, Validity
 from hyperloom.orchestrator.specialists.agent_runner import (
     PROCESS_LOG,

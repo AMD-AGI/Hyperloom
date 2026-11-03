@@ -195,7 +195,7 @@ class HostedProgressEvents:
         self._dirty = True
 
     def emit(self, event_type: str, data: Mapping[str, Any]) -> None:
-        """Append one event.  Never raises: a failure is logged and the run goes on."""
+        """Append one event.  A write or encoding failure is logged and the run goes on."""
         try:
             with self._lock:
                 if self._closed:
@@ -205,7 +205,7 @@ class HostedProgressEvents:
                 self._last_id += 1
                 if self._clock() - self._last_sync >= FSYNC_INTERVAL_SEC:
                     self._sync()
-        except Exception:
+        except (OSError, ValueError):
             log.exception("events: could not write %s", event_type)
 
     def flush(self) -> None:

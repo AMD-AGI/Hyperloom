@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-from hyperloom.common.jsonio import read_json
+from hyperloom_common.jsonio import read_json
 
 
 STRICT_VALIDATION_ENV = "HYPERLOOM_QUANT_STRICT_VALIDATION"

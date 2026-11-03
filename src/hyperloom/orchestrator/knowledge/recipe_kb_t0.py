@@ -16,8 +16,8 @@ from typing import Any, Callable, Iterator, Mapping, NamedTuple
 
 from packaging.version import InvalidVersion, Version
 
-from hyperloom.common.coerce import to_float
-from hyperloom.common.gpu_identity import AMD_GPU_BOARDS
+from hyperloom_common.coerce import to_float
+from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
 from hyperloom.common.perf_metric import agentx_active
 from hyperloom.orchestrator.knowledge.recipe_kb import (
     LocalRecipeStoreError,

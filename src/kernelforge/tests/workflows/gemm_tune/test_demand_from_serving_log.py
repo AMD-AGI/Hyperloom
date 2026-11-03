@@ -9,7 +9,7 @@ import json
 
 import pytest
 
-from hyperloom.common.env import EnvValueError
+from hyperloom_common.env import EnvValueError
 from kernelforge.workflows.gemm_tune import pipeline as cli
 
 _MISS = (

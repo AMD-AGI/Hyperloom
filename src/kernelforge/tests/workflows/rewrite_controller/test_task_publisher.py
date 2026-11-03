@@ -76,6 +76,47 @@ def test_publish_pins_live_head_and_moves_complete_task_atomically(tmp_path: Pat
     assert payload["driver_path"] == "driver.py"
 
 
+def test_publish_pins_the_hosts_gpu_over_the_drafts(tmp_path: Path, monkeypatch) -> None:
+    # Regression: identity.gpu was the agent's guess, and the prompt's only example of it was mi355x.
+    monkeypatch.setenv("GPU_TARGET", "gfx942")
+    repo, _head = _repo(tmp_path)
+    layout = ControllerLayout(tmp_path / "output")
+
+    result = publish_staged_task(layout, _staged(layout, repo))
+
+    assert result.published is True
+    assert result.operator_id.endswith(":mi300x")
+    payload = json.loads((layout.task_dir(result.operator_id) / "task.json").read_text(encoding="utf-8"))
+    assert payload["identity"]["gpu"] == "mi300x"
+
+
+def test_publish_accepts_a_draft_without_a_gpu(tmp_path: Path) -> None:
+    repo, _head = _repo(tmp_path)
+    layout = ControllerLayout(tmp_path / "output")
+    staged = _staged(layout, repo)
+    draft = json.loads((staged / "task.json").read_text(encoding="utf-8"))
+    del draft["identity"]["gpu"]
+    (staged / "task.json").write_text(json.dumps(draft), encoding="utf-8")
+
+    result = publish_staged_task(layout, staged)
+
+    assert result.published is True
+    payload = json.loads((layout.task_dir(result.operator_id) / "task.json").read_text(encoding="utf-8"))
+    assert payload["identity"]["gpu"] == "mi355x"
+
+
+def test_publish_refuses_when_the_host_gpu_is_unknown(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("GPU_TARGET", raising=False)
+    monkeypatch.setattr("kernelforge.workflows.forge_loop.campaign.campaign_config.detect_arch", lambda: "")
+    repo, _head = _repo(tmp_path)
+    layout = ControllerLayout(tmp_path / "output")
+
+    result = publish_staged_task(layout, _staged(layout, repo))
+
+    assert result.published is False
+    assert "GPU_TARGET" in result.reason
+
+
 def test_publish_normalizes_harmless_agent_identity_variations(tmp_path: Path) -> None:
     repo, _head = _repo(tmp_path)
     layout = ControllerLayout(tmp_path / "output")
@@ -437,7 +478,7 @@ def test_a_refusal_is_written_beside_the_draft_that_earned_it(tmp_path: Path) ->
     layout = ControllerLayout(tmp_path / "output")
     staged = _staged(layout, repo)
     payload = json.loads((staged / "task.json").read_text(encoding="utf-8"))
-    payload["identity"].pop("gpu")
+    payload["identity"].pop("backend")
     (staged / "task.json").write_text(json.dumps(payload), encoding="utf-8")
 
     publish_complete_staged_tasks(
@@ -447,7 +488,7 @@ def test_a_refusal_is_written_beside_the_draft_that_earned_it(tmp_path: Path) ->
     )
 
     assert pending_rejections(layout.agent_staging_root) == {
-        "draft": "invalid staged task: identity is missing fields: gpu"
+        "draft": "invalid staged task: identity is missing fields: backend"
     }
 
 

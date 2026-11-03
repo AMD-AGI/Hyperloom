@@ -121,11 +121,13 @@ async def test_a_delegate_citing_no_known_mandate_is_refused_rather_than_run_on_
 
 def test_a_consumed_mandate_is_withdrawn_and_keeps_its_first_consumer():
     state = _state_with_mandate()
-    assert mark_mandate_consumed(state, MANDATE_ID, "task-1")
-    assert mark_mandate_consumed(state, MANDATE_ID, "task-2")
+    mark_mandate_consumed(state, MANDATE_ID, "task-1")
+    mark_mandate_consumed(state, MANDATE_ID, "task-2")
     assert state.specialist_rounds[0]["mandate_consumed_by"] == "task-1"
     assert queue_block(state) == ""
-    assert not mark_mandate_consumed(state, "nope", "task-3")
+    mark_mandate_consumed(state, "nope", "task-3")
+    assert state.specialist_rounds[0]["mandate_consumed_by"] == "task-1"
+    assert all("mandate_consumed_by" not in r for r in state.specialist_rounds[1:])
 
 
 def test_the_patch_keeps_the_predictors_provenance_on_its_way_to_integrate_patch():

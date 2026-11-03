@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from hyperloom.common.timeutil import utc_now_compact
+from hyperloom_common.timeutil import utc_now_compact
 
 log = logging.getLogger(__name__)
 

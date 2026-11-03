@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
+from hyperloom.common.visible_devices import VISIBLE_DEVICE_VARS as _VISIBLE_DEVICE_VARS
 from hyperloom.orchestrator.trace_analysis import tracelens_arch_benchmark as tab
 
 
@@ -18,13 +19,6 @@ def tla():
     from hyperloom.orchestrator.trace_analysis import _tracelens_checkout
 
     return _tracelens_checkout
-
-
-_VISIBLE_DEVICE_VARS = (
-    "HIP_VISIBLE_DEVICES",
-    "CUDA_VISIBLE_DEVICES",
-    "ROCR_VISIBLE_DEVICES",
-)
 
 
 @pytest.mark.parametrize(
@@ -47,61 +41,54 @@ def test_list_candidate_physical_gpus_from_env(monkeypatch: pytest.MonkeyPatch) 
     assert tab.list_candidate_physical_gpus() == [2, 5]
 
 
+def test_list_candidate_physical_gpus_reads_legacy_rocr_mask(monkeypatch: pytest.MonkeyPatch) -> None:
+    for var in _VISIBLE_DEVICE_VARS:
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("HSA_VISIBLE_DEVICES", "4,5")
+    assert tab.list_candidate_physical_gpus() == [4, 5]
+
+
+def test_list_candidate_physical_gpus_applies_hip_mask_within_rocr(monkeypatch: pytest.MonkeyPatch) -> None:
+    for var in _VISIBLE_DEVICE_VARS:
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6")
+    monkeypatch.setenv("HIP_VISIBLE_DEVICES", "2,0")
+    assert tab.list_candidate_physical_gpus() == [6, 4]
+
+
+def test_list_candidate_physical_gpus_uuid_mask_is_logical(monkeypatch: pytest.MonkeyPatch) -> None:
+    for var in _VISIBLE_DEVICE_VARS:
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "GPU-a1b2,GPU-c3d4")
+    assert tab.list_candidate_physical_gpus() == [0, 1]
+
+
 def test_single_physical_gpu_env_pins_subprocess_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     for var in _VISIBLE_DEVICE_VARS:
         monkeypatch.delenv(var, raising=False)
-    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1,2")
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5")
+    monkeypatch.setenv("HSA_VISIBLE_DEVICES", "4,5")
+    monkeypatch.setenv("HIP_VISIBLE_DEVICES", "0,1")
+    monkeypatch.setenv("GPU_DEVICE_ORDINAL", "0,1")
 
-    env = tab.single_physical_gpu_env(4)
+    env = tab.single_physical_gpu_env(5)
 
-    assert env["HIP_VISIBLE_DEVICES"] == "4"
-    assert env["CUDA_VISIBLE_DEVICES"] == "4"
-    assert env["ROCR_VISIBLE_DEVICES"] == "4"
-    assert os.environ.get("CUDA_VISIBLE_DEVICES") == "0,1,2"
-
-
-def test_select_idle_gpu_picks_first_free_from_many(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    for var in _VISIBLE_DEVICE_VARS:
-        monkeypatch.delenv(var, raising=False)
-    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1,2")
-
-    def _idle(logical_idx: int, *, util_threshold: int = 5):
-        return logical_idx == 1, f"logical={logical_idx}"
-
-    monkeypatch.setattr(tab, "check_gpu_idle", _idle)
-
-    selected = tab.select_idle_gpu()
-    assert selected == 1
-    assert os.environ["CUDA_VISIBLE_DEVICES"] == "0,1,2"
+    assert env["HIP_VISIBLE_DEVICES"] == "5"
+    assert env["CUDA_VISIBLE_DEVICES"] == "5"
+    for var in ("ROCR_VISIBLE_DEVICES", "HSA_VISIBLE_DEVICES", "GPU_DEVICE_ORDINAL"):
+        assert var not in env
+    assert os.environ.get("ROCR_VISIBLE_DEVICES") == "4,5"
 
 
-def test_select_idle_gpu_reuses_single_idle_gpu(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    for var in _VISIBLE_DEVICE_VARS:
-        monkeypatch.delenv(var, raising=False)
-    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3")
+def test_single_physical_gpu_env_matches_tracelens_idle_gate() -> None:
+    """The microbench child's own idle gate must probe the GPU the child runs on."""
+    from TraceLens.PerfModel.benchmarking.microbench_utils import resolve_physical_device
 
-    monkeypatch.setattr(tab, "check_gpu_idle", lambda *_a, **_k: (True, "idle"))
-
-    selected = tab.select_idle_gpu()
-    assert selected == 3
-    assert os.environ["CUDA_VISIBLE_DEVICES"] == "3"
-
-
-def test_select_idle_gpu_raises_when_all_busy(monkeypatch: pytest.MonkeyPatch) -> None:
-    for var in _VISIBLE_DEVICE_VARS:
-        monkeypatch.delenv(var, raising=False)
-    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
-
-    monkeypatch.setattr(tab, "check_gpu_idle", lambda *_a, **_k: (False, "busy"))
-
-    with pytest.raises(RuntimeError, match="no unoccupied GPU"):
-        tab.select_idle_gpu()
+    env = tab.single_physical_gpu_env(6, base_env={"ROCR_VISIBLE_DEVICES": "4,5,6,7", "HIP_VISIBLE_DEVICES": "0,1,2,3"})
+    with patch.dict(os.environ, env, clear=True):
+        assert resolve_physical_device(0)[0] == 6
 
 
 def test_populate_gpu_arch_json_uses_bundled_spec(tmp_path: Path) -> None:
@@ -149,11 +136,7 @@ def test_populate_gpu_arch_json_runs_microbench_when_missing(
 
     with (
         patch.object(tab, "resolve_arch_json_path", return_value=None),
-        patch.object(
-            tab,
-            "select_idle_gpu",
-            return_value=2,
-        ),
+        patch.object(tab, "list_candidate_physical_gpus", return_value=[2]),
     ):
         path = tab.populate_gpu_arch_json(
             tracelens_root=tmp_path,
@@ -175,7 +158,36 @@ def test_populate_gpu_arch_json_runs_microbench_when_missing(
     assert "--rep" in calls[0] and "50" in calls[0]
     assert calls[0][calls[0].index("--output") + 1].endswith("TraceLens/Agent/Analysis/utils/arch/MI355X.json")
     assert captured_env is not None
+    assert captured_env["HIP_VISIBLE_DEVICES"] == "2"
     assert captured_env["CUDA_VISIBLE_DEVICES"] == "2"
+
+
+def test_populate_gpu_arch_json_skips_busy_gpu(tmp_path: Path) -> None:
+    """A GPU the microbench's idle gate rejects (exit 2) is skipped for the next candidate."""
+    tried: list[str] = []
+
+    def _run_command(cmd, *, cwd, timeout_s, env=None):
+        tried.append(env["HIP_VISIBLE_DEVICES"])
+        if env["HIP_VISIBLE_DEVICES"] == "4":
+            return 2
+        out = Path(cmd[cmd.index("--output") + 1])
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(
+            json.dumps({"name": "MI355X", "mem_bw_gbps": 8000, "max_achievable_tflops": {"matrix_bf16": 1000}}),
+            encoding="utf-8",
+        )
+        return 0
+
+    with (
+        patch.object(tab, "resolve_arch_json_path", return_value=None),
+        patch.object(tab, "list_candidate_physical_gpus", return_value=[4, 5]),
+    ):
+        path = tab.populate_gpu_arch_json(
+            tracelens_root=tmp_path, platform="MI355X", log=lambda _msg: None, run_command=_run_command
+        )
+
+    assert tried == ["4", "5"]
+    assert path == tmp_path / "TraceLens/Agent/Analysis/utils/arch/MI355X.json"
 
 
 def test_populate_skips_microbench_when_internal_extension_enabled(
@@ -184,12 +196,12 @@ def test_populate_skips_microbench_when_internal_extension_enabled(
     """Internal extension backfills MAF, so no microbenchmark runs even when the bundled arch spec is missing."""
     with (
         patch.object(tab, "resolve_arch_json_path", return_value=None),
-        patch.object(tab, "select_idle_gpu") as select_idle,
+        patch.object(tab, "list_candidate_physical_gpus") as candidates,
     ):
         path = tab.internal_extension_arch_json("MI355X", log=lambda _msg: None)
 
     assert path is None
-    select_idle.assert_not_called()
+    candidates.assert_not_called()
 
 
 def test_populate_internal_extension_returns_bundled_spec_without_benchmark(
@@ -201,12 +213,12 @@ def test_populate_internal_extension_returns_bundled_spec_without_benchmark(
 
     with (
         patch.object(tab, "resolve_arch_json_path", return_value=bundled),
-        patch.object(tab, "select_idle_gpu") as select_idle,
+        patch.object(tab, "list_candidate_physical_gpus") as candidates,
     ):
         path = tab.internal_extension_arch_json("MI300X", log=lambda _msg: None)
 
     assert path == bundled
-    select_idle.assert_not_called()
+    candidates.assert_not_called()
 
 
 def test_populate_external_raises_on_microbench_failure(
@@ -216,7 +228,7 @@ def test_populate_external_raises_on_microbench_failure(
     with (
         patch.object(tab, "resolve_arch_json_path", return_value=None),
         patch.object(tab, "write_hyperloom_arch_spec", return_value=None),
-        patch.object(tab, "select_idle_gpu", return_value=0),
+        patch.object(tab, "list_candidate_physical_gpus", return_value=[0]),
     ):
         with pytest.raises(RuntimeError, match="exit code 7"):
             tab.populate_gpu_arch_json(
@@ -230,19 +242,19 @@ def test_populate_external_raises_on_microbench_failure(
 def test_populate_falls_back_to_hyperloom_when_microbench_unavailable(
     tmp_path: Path,
 ) -> None:
-    """No idle GPU -> the hyperloom achievable spec is used instead of raising."""
+    """Every GPU busy -> the hyperloom achievable spec is used instead of raising."""
     fallback = tmp_path / "MI355X.json"
 
     with (
         patch.object(tab, "resolve_arch_json_path", return_value=None),
-        patch.object(tab, "select_idle_gpu", side_effect=RuntimeError("no unoccupied GPU")),
+        patch.object(tab, "list_candidate_physical_gpus", return_value=[0, 1]),
         patch.object(tab, "write_hyperloom_arch_spec", return_value=fallback),
     ):
         path = tab.populate_gpu_arch_json(
             tracelens_root=tmp_path,
             platform="MI355X",
             log=lambda _msg: None,
-            run_command=lambda *_a, **_k: 0,
+            run_command=lambda *_a, **_k: 2,
         )
 
     assert path == fallback
@@ -271,7 +283,7 @@ def test_populate_falls_back_to_hyperloom_on_zeroed_measured_spec(
 
     with (
         patch.object(tab, "resolve_arch_json_path", return_value=None),
-        patch.object(tab, "select_idle_gpu", return_value=0),
+        patch.object(tab, "list_candidate_physical_gpus", return_value=[0]),
         patch.object(tab, "write_hyperloom_arch_spec", return_value=fallback),
     ):
         path = tab.populate_gpu_arch_json(
@@ -282,50 +294,6 @@ def test_populate_falls_back_to_hyperloom_on_zeroed_measured_spec(
         )
 
     assert path == fallback
-
-
-def _install_fake_tracelens(monkeypatch: pytest.MonkeyPatch, leaf: str, attr: str, value) -> None:
-    """Inject a fake ``TraceLens.…`` package tree so a lazy ``from … import`` succeeds without the real TraceLens being present."""
-    import sys
-    import types
-
-    parts = leaf.split(".")
-    for i in range(1, len(parts) + 1):
-        name = ".".join(parts[:i])
-        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
-    setattr(sys.modules[leaf], attr, value)
-
-
-def test_get_check_gpu_idle_resolves_after_install(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A None cache (TraceLens not importable at process start) is re-resolved once TraceLens is installed by tracelens_analysis.main()."""
-    monkeypatch.setattr(tab, "check_gpu_idle", None)
-    sentinel = lambda *_a, **_k: (True, "idle")  # noqa: E731
-    _install_fake_tracelens(
-        monkeypatch,
-        "TraceLens.PerfModel.benchmarking.microbench_utils",
-        "check_gpu_idle",
-        sentinel,
-    )
-    assert tab._get_check_gpu_idle() is sentinel
-    assert tab.check_gpu_idle is sentinel  # cached on first success
-
-
-def test_get_collect_arch_jsons_resolves_after_install(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Same lazy re-resolution for the arch-JSON collector."""
-    monkeypatch.setattr(tab, "_collect_arch_jsons", None)
-    sentinel = lambda: {"MI355X": "/tmp/MI355X.json"}  # noqa: E731
-    _install_fake_tracelens(
-        monkeypatch,
-        "TraceLens.Agent.Analysis.utils.arch_utils",
-        "_collect_arch_jsons",
-        sentinel,
-    )
-    assert tab._get_collect_arch_jsons() is sentinel
-    assert tab._collect_arch_jsons is sentinel
 
 
 @pytest.mark.parametrize(
