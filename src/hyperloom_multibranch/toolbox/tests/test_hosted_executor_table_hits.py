@@ -22,7 +22,7 @@ from hyperloom_multibranch.toolbox.hosted_executor import HostedExecutor
 from hyperloom_multibranch.toolbox.kernel_artifacts import mint_kernel_artifact
 from hyperloom_multibranch.toolbox.mcp_tools import jsonable
 from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, build, req
-from hyperloom_multibranch.toolbox.tests.kernel_rows import B01_NEW, ENV, csv_text
+from hyperloom_multibranch.toolbox.tests.kernel_rows import BETA_NEW, ENV, csv_text
 from hyperloom_multibranch.toolbox.tests.test_hosted_executor import (  # noqa: F401  (rig is a fixture)
     CANDIDATE,
     OK,
@@ -38,7 +38,7 @@ SERVER_LOG = "variant_00_c128/benchmark_sglang_0/server.log"
 
 def _environment(root: Path, *, with_table: bool) -> CompiledEnvironment:
     blobs = LocalBlobStore(root / "blobs")
-    table = csv_text(B01_NEW)
+    table = csv_text(BETA_NEW)
     kernels = (mint_kernel_artifact(KernelKind.GEMM, "gemm", ENV, table),) if with_table else ()
     blobs.put(table)
     return CompiledEnvironment(Recipe(IMAGE, kernels=kernels), IMAGE, (), (), {}, blobs.root)

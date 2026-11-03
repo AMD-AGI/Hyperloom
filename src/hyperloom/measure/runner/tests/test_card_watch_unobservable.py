@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The runner's card watch in a container shown only some GPUs (a one-GPU Agent Sandbox pod read ``permission denied`` on
-the other GPUs' topology nodes). A view that still reads its own card's node is watched as any pod is: the server counts,
+"""The runner's card watch in a container shown only some GPUs (a one-GPU pod, whose other GPUs' topology nodes read
+``permission denied``). A view that still reads its own card's node is watched as any pod is: the server counts,
 a foreign holder is caught. A view refused the list for its cards is ``unobservable``, never ``clean``; enforcing, it is
 refused before the test starts unless the one switch, ``REFUSE_UNOBSERVABLE``, says to keep it with a note."""
 
@@ -35,8 +35,8 @@ _COULD_NOT_LOOK = "CARD GUARD COULD NOT LOOK"
 
 
 def _pod(root: Path, monkeypatch: pytest.MonkeyPatch, *shown: int) -> KernelTree:
-    machine = KernelTree(root, pid_namespace="pid:[4026552279]")
-    machine.opened_only(1678127)
+    machine = KernelTree(root, pid_namespace="pid:[4026540000]")
+    machine.opened_only(1_600_000)
     machine.show_only(*shown)
     machine.refuse_denied(monkeypatch)
     monkeypatch.setattr(
@@ -68,9 +68,9 @@ def keep_unobservable(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _server(pod: KernelTree) -> None:
-    pod.holds(1827025, GIVEN, vram=SERVER_VRAM, queues=6)
-    pod.process(6495)
-    pod.renders(6495, GIVEN, kib=SERVER_VRAM >> 10)
+    pod.holds(1_700_000, GIVEN, vram=SERVER_VRAM, queues=6)
+    pod.process(6_000)
+    pod.renders(6_000, GIVEN, kib=SERVER_VRAM >> 10)
 
 
 def test_a_pod_that_reads_only_its_cards_node_watches_its_server_as_clean(pod: KernelTree) -> None:
@@ -96,7 +96,7 @@ def test_a_pod_that_reads_only_its_cards_node_still_refuses_a_foreign_holder_of_
     watch = _watch(CardGuard.ENFORCE, pod.procfs)
     watch.check(BEFORE_TEST)
     _server(pod)
-    pod.holds(1845543, GIVEN, vram=FOREIGN_VRAM, queues=2)
+    pod.holds(1_900_000, GIVEN, vram=FOREIGN_VRAM, queues=2)
     watch.check(DURING_TEST)
 
     with pytest.raises(RunnerFailure) as refused:

@@ -104,7 +104,8 @@ async def test_the_local_toolbox_advertises_the_tuner_where_it_can_spare_a_card_
 async def test_the_advertisement_says_a_test_request_id_is_required_and_the_server_refuses_shapes_alone(
     make: Any,
 ) -> None:
-    """A specialist read the old text as "shapes alone will do" and got test_required: both places now say otherwise."""
+    """The tool's description and its schema both say that ``test_request_id`` is required and that ``shapes`` alone do
+    not stand in for it."""
     served = await make(cards=2)
     entry = served.stack.advertised()
     description = entry["description"]

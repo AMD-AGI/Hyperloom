@@ -70,21 +70,21 @@ __all__ = [
 
 #: The directory of the aiter package that holds its builder, its module config and its prebuilt modules.
 _JIT_DIR = "jit"
-#: What one module typically takes to build on a card, by its kind (:func:`module_build_seconds`). Most modules: the 63 to
-#: 66 s that the heaviest of them (mha_batch_prefill, module_moe_ck2stages) took in earlier tests' server logs.
+#: What one module typically takes to build on a card, by its kind (:func:`module_build_seconds`). Most modules: about a
+#: minute, a round figure at the heavy end of ordinary modules (mha_batch_prefill, module_moe_ck2stages).
 ESTIMATED_MODULE_SECONDS = 65
 #: A GEMM whose code generator writes a kernel instance for each row of a tuned table (``gen_instances.py`` reading
-#: ``AITER_CONFIGS``): module_gemm_a8w8_bpreshuffle's median was 96 to 181 s a session (eight tests building at once).
+#: ``AITER_CONFIGS``), such as module_gemm_a8w8_bpreshuffle: a few times an ordinary module.
 TABLE_GEMM_MODULE_SECONDS = 180
-#: A CK-tile module: module_gemm_a8w8_bpreshuffle_cktile's median was 329 to 680 s a session, its longest 1347 s.
+#: A CK-tile module, such as module_gemm_a8w8_bpreshuffle_cktile, the slowest kind: about ten times an ordinary module.
 CKTILE_MODULE_SECONDS = 680
 #: The single-lineage flow gives aiter 40 minutes to build in (``targeted_build``); a patch whose touched modules would
 #: take longer than that to rebuild before its test starts is refused when the test is accepted.
 MAX_REBUILD_SECONDS = 40 * 60
 #: How long a timer that ends a hang lets one module build (:func:`module_build_limit_sec`): over twice the longest build
-#: of its kind. Most modules: 273 s was the longest before a server was ready, over the boots of earlier tests.
+#: of its kind, so only a hung build trips it. Most modules: up to 273 s before a server is ready.
 MODULE_BUILD_LIMIT_SEC = 600
-#: A CK-tile module: 1347 s was the longest (eight tests building at once).
+#: A CK-tile module: up to 1347 s when several tests build at once.
 CKTILE_MODULE_BUILD_LIMIT_SEC = 2700
 _CKTILE = "cktile"
 _TABLE_GENERATOR = "gen_instances"
@@ -417,7 +417,7 @@ def env_touched_entries(
 
 def is_cktile_module(name: str) -> bool:
     """Whether ``name`` (an entry of the module config, or a name aiter makes from one) is one of aiter's CK-tile modules,
-    ``module_gemm_a8w8_bpreshuffle_cktile`` and the like: the longest builds measured."""
+    ``module_gemm_a8w8_bpreshuffle_cktile`` and the like: the slowest kind of build."""
     return _CKTILE in name
 
 

@@ -56,7 +56,7 @@ class _Grid:
             results = workspace / "eval_output"
             results.mkdir()
             document = {"results": {"gsm8k": {FLEXIBLE: self.score}}}
-            (results / "results_2026-10-14T10-00-00.json").write_text(json.dumps(document), encoding="utf-8")
+            (results / "results_2000-01-01T10-00-00.json").write_text(json.dumps(document), encoding="utf-8")
         return [VariantResult(name, "", {}, "succeeded", returncode=0, workspace=str(workspace))]
 
 

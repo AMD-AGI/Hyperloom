@@ -70,7 +70,7 @@ def test_rows_within_the_limit_are_handed_over_each_with_its_figure_and_verified
     rows = from_artifact(table(tmp_path, *SHARED[:2]), ENV, configs)
 
     assert [(r["M"], r["verified"], r["err_ratio"]) for r in rows.verified] == [
-        ("16", True, 0.0029),
+        ("16", True, 0.003),
         ("20480", True, 0.0),
     ]
     assert rows.refused == () and shapes(rows.csv) == [("16", "512", "7168"), ("20480", "512", "7168")]
@@ -80,13 +80,13 @@ def test_rows_within_the_limit_are_handed_over_each_with_its_figure_and_verified
 def test_a_row_whose_output_is_outside_the_references_tolerance_is_refused_and_not_in_the_csv(
     tmp_path: Path, configs: Path
 ) -> None:
-    """The 69% case: the fastest fused row of an outside package had 69% of its elements outside the tolerance."""
-    wrong = row(64, 5120, 5120, us=1.0, err="0.69")
+    """A fused row that is the fastest but wrong: half of its elements are outside the tolerance."""
+    wrong = row(64, 5120, 5120, us=1.0, err="0.5")
     rows = from_artifact(table(tmp_path, row(16, 512, 7168), wrong), ENV, configs)
 
     assert shapes(rows.csv) == [("16", "512", "7168")]
     (refused,) = rows.refused
-    assert (refused["verified"], refused["err_ratio"], refused["M"]) == (False, 0.69, "64")
+    assert (refused["verified"], refused["err_ratio"], refused["M"]) == (False, 0.5, "64")
     assert "outside the reference's tolerance" in refused["reason"] and f"{ERR_RATIO_LIMIT:g}" in refused["reason"]
 
 
@@ -116,7 +116,7 @@ def test_a_table_without_an_accuracy_column_has_every_row_refused_as_unchecked(t
 
 def test_the_bf16_tables_err_ratio_column_is_read_too(tmp_path: Path, configs: Path) -> None:
     header = HEADER.replace("errRatio", "err_ratio")
-    ok_row, bad_row = (r.replace("0.0029", "0.0") for r in SHARED[:1]), row(64, 5120, 5120, err="0.5")
+    ok_row, bad_row = (r.replace("0.003", "0.0") for r in SHARED[:1]), row(64, 5120, 5120, err="0.5")
     rows = from_artifact(table(tmp_path, *ok_row, bad_row, header=header), ENV, configs)
 
     assert shapes(rows.csv) == [("16", "512", "7168")] and [r["M"] for r in rows.refused] == ["64"]
@@ -173,13 +173,13 @@ def test_what_forge_dropped_as_wrong_is_reported_as_rejected_with_its_figure() -
     run = {
         "tuner": "a8w8_blockscale_bpreshuffle",
         "dropped_inaccurate": [
-            {"M": 64, "N": 5120, "K": 5120, "libtype": "ck", "splitK": 0, "us": 1.0, "err_ratio": 0.69}
+            {"M": 64, "N": 5120, "K": 5120, "libtype": "ck", "splitK": 0, "us": 1.0, "err_ratio": 0.5}
         ],
     }
 
     (dropped,) = dropped_by_forge(run)
 
-    assert (dropped["M"], dropped["verified"], dropped["err_ratio"]) == (64, False, 0.69)
+    assert (dropped["M"], dropped["verified"], dropped["err_ratio"]) == (64, False, 0.5)
     assert "Forge removed it" in dropped["reason"]
     assert dropped_by_forge({"tuner": "x"}) == () and dropped_by_forge({"dropped_inaccurate": "no"}) == ()
 
@@ -261,8 +261,8 @@ def test_the_rows_forge_dropped_are_split_at_the_allowed_ratio_and_the_default_i
     dropped = dropped_by_forge(
         {
             "dropped_inaccurate": [
-                forge_dropped(1, 2, 3, err=0.0116),
-                forge_dropped(4, 5, 6, err=0.0145),
+                forge_dropped(1, 2, 3, err=0.012),
+                forge_dropped(4, 5, 6, err=0.015),
                 forge_dropped(7, 8, 9, err=0.4),
                 forge_dropped(10, 11, 12, err=ERR_RATIO_LIMIT),
                 {**forge_dropped(13, 14, 15), "err_ratio": None},
@@ -270,7 +270,7 @@ def test_the_rows_forge_dropped_are_split_at_the_allowed_ratio_and_the_default_i
         }
     )
 
-    within, beyond = split_dropped(dropped, 0.0145)
+    within, beyond = split_dropped(dropped, 0.015)
 
     assert [r["M"] for r in within] == ["1", "4"], (
         "the limit itself is allowed; the default itself is not above the default"
@@ -379,8 +379,8 @@ def test_a_shape_with_two_relaxed_candidates_keeps_the_fastest_and_the_csv_is_in
 def test_a_row_above_the_allowed_ratio_is_not_read_back_even_when_the_profile_holds_it(
     tmp_path: Path, configs: Path
 ) -> None:
-    line = profile_row(*DOWN, lib="asm", kernel_id=4, split_k=6, us=20.0, err=0.0145, name=ASM)
-    within, beyond = split_dropped(dropped_by_forge({"dropped_inaccurate": [forge_dropped(*DOWN, err=0.0145)]}), 0.0125)
+    line = profile_row(*DOWN, lib="asm", kernel_id=4, split_k=6, us=20.0, err=0.015, name=ASM)
+    within, beyond = split_dropped(dropped_by_forge({"dropped_inaccurate": [forge_dropped(*DOWN, err=0.015)]}), 0.0125)
 
     rows = from_artifact(
         table(tmp_path, row(16, 512, 7168)), ENV, configs, Relax(0.0125, within, (profile(tmp_path, line),))
@@ -396,7 +396,7 @@ REL_COLUMNS = REL_NORM_HEADER.split(",")
 
 
 def sk_row(
-    m: int, n: int, k: int, *, lib: str = "asm", split_k: str | int = 6, err: str = "0.0125", rel: str = "0.0047"
+    m: int, n: int, k: int, *, lib: str = "asm", split_k: str | int = 6, err: str = "0.0125", rel: str = "0.005"
 ) -> str:
     """A row of a table that carries Forge's ``relNormErr`` column, the asm kernel at splitK 6 of the down projection by default."""
     cells = dict.fromkeys(REL_COLUMNS, "0") | {

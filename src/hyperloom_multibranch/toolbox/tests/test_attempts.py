@@ -35,7 +35,7 @@ from hyperloom_multibranch.toolbox.attempts import (
 INERT_REASON = f"{INERT_PATCH}: process 1 imported aiter from /sgl-workspace/aiter/aiter/__init__.py, not from the farm"
 PORT_REASON = "port_in_use: [Errno 98] address already in use"
 DISK_FULL_REASON = "disk_full: OSError: [Errno 122] Disk quota exceeded: '/work/.cache/triton/k.json'"
-HUNG_REASON = f"{HUNG_BEFORE_READY}: no output for 901s before the server was ready"
+HUNG_REASON = f"{HUNG_BEFORE_READY}: no output for 600s before the server was ready"
 
 
 class _ScriptedExecutor:
@@ -115,16 +115,16 @@ async def test_a_jit_build_timeout_is_retried_once_and_not_held_against_the_node
     assert reported == [], "the tables, not the node, made the server build past its watchdog"
 
 
-#: What hosted runs reported, word for word but for the cache path.
+#: Reasons a hosted runner can report on a failed start.
 KEY_READ_ONLY_REASON = f"{RUNNER_START_FAILED}: signing key file cannot be removed: OSError"
 CACHE_REASON = (
-    f"{RUNNER_START_FAILED}: runner bootstrap, step cache, exit 1: the source in /cache/2ebadc612/source is not what "
-    "the manifest recorded: 3980 files and 54915363 bytes, the manifest has 3457 and 46986171"
+    f"{RUNNER_START_FAILED}: runner bootstrap, step cache, exit 1: the source in /cache/abc123/source is not what "
+    "the manifest recorded: 100 files and 1000000 bytes, the manifest has 90 and 900000"
 )
 LOST_REASON = f"{RUNNER_LOST}: the sandbox could not be read"
-#: What the hosted backend reports for the Agent Sandbox answer of a hosted run, word for word.
 #: What a runner reports when the Hub refused the replay client's download for its rate limit.
 HUB_REFUSED_REASON = f"{HUB_RATE_LIMITED}: 429 Too Many Requests: you have reached your 'api' rate limit."
+#: What the hosted backend reports when the sandbox service answers a create with an error.
 CREATE_FAILED_REASON = (
     f"{SANDBOX_CREATE_FAILED}: 500: sandbox_create_failed: workload sbx-0123456789abcdef0123456789abcdef phase Failed"
 )

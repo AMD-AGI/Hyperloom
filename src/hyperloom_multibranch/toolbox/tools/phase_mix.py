@@ -5,9 +5,9 @@
 share of the wave's time each phase takes.
 
 TraceLens' splitter writes three steady-state windows of a serving trace. Its ``mixed`` window holds a few prefill steps
-among decode steps and takes its time from whatever steps it holds: with equal input and output lengths, 2 prefill
-steps of 32 can be half of the window while a graded wave spends about a tenth of its time in prefill, so a decode-bound
-kernel such as paged attention reads about half the share of the mixed window that it has of the decode window. The
+among decode steps and takes its time from whatever steps it holds: a few prefill steps among many decode steps can be
+half of the window by time while a graded wave spends only a small fraction of its time in prefill, so a decode-bound
+kernel such as paged attention reads far less of the mixed window than it has of the decode window. The
 brief turns the shares into Amdahl ceilings of the graded metric, so they are the graded wave's: the ``decode_only``
 window's kernel shares and the ``prefilldecode`` window's (the longest run of prefill steps), each as
 :mod:`~.kernel_shares` and :mod:`~.kernel_launchers` make them (the profiler's misreported events left out, a kernel
@@ -267,7 +267,7 @@ def _stand_alone(alone: PhaseWindow, left: PhaseWindow, workload: Workload | Non
     if kept > 0.5:
         return "", f"the {alone.phase} window stands for the whole wave: {gone}, it is {lost:.1%} of a graded wave"
     # The window's own reason comes last: the pointer's summary is cut at 400 characters, and a reason of TraceLens' checks
-    # runs to 230 of them.
+    # can run to a large part of them.
     reason = (
         f"the {left.phase} window is missing or degraded, it is {lost:.1%} of a graded wave, so the {alone.phase} "
         f"window's shares ({kept:.1%} of it) cannot stand for the wave; profile again on a build with node-by-node graph "

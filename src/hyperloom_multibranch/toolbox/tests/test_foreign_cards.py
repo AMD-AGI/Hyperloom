@@ -150,7 +150,7 @@ async def test_the_signed_result_says_the_cards_were_clean_or_that_nobody_could_
 
 async def test_a_result_kept_beside_a_process_says_so_in_its_facts_and_carries_a_warning(make: Make) -> None:
     """Only a runner whose guard observes signs this state: one that enforces refuses the result instead."""
-    reason = "1 held the test's cards: pid 900 on card 0, first seen 2026-10-24T04:05:06Z during the test: python3 x.py"
+    reason = "1 held the test's cards: pid 900 on card 0, first seen 2000-01-01T04:05:06Z during the test: python3 x.py"
     rig, tb, _ = await make(
         kept={"fake_card_occupancy": json.dumps({"state": "foreign", "reason": reason, "checks": 5})},
         clean={"fake_card_occupancy": json.dumps({"state": "clean", "reason": None, "checks": 5})},

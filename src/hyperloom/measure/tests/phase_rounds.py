@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Rounds a stand-in ``run_grid`` plays for the phase tests: they spend the seconds a real round spends and leave what the
-launcher leaves beside each Magpie run's server log (``server_ready_at``, ``kv_metrics.json``, the engine's own log).
+"""Rounds a stand-in ``run_grid`` plays for the phase tests: they spend made-up seconds the way a real round does and
+leave what the launcher leaves beside each Magpie run's server log (``server_ready_at``, ``kv_metrics.json``, the
+engine's own log).
 
 The same rounds serve a test that owns the clock, so every length can be asserted exactly, and the runner of a hosted
 test, which spends real seconds scaled down: ``Rounds(RealClock(), 0.002)`` plays the 82 s boot in 0.16 s.
@@ -126,12 +127,12 @@ class Rounds:
         return {"test": self._failing_boot}
 
     def _graded_warmup(self, slot: Path, kwargs: dict[str, Any]) -> VariantResult:
-        self._spend(7.779)
-        run = Run(self.clock, slot).boot(82.221 * self.scale, log=self.vllm_log())
+        self._spend(8.0)
+        run = Run(self.clock, slot).boot(82.0 * self.scale, log=self.vllm_log())
         run.mark("measured", 0.0).mark("eval", 60.0 * self.scale).end(50.0 * self.scale)
         self._spend(5.0)
         (slot / "eval_output").mkdir(exist_ok=True)
-        (slot / "eval_output" / "results_2026-10-14T10-00-00.json").write_text(json.dumps(LM_EVAL_RESULTS))
+        (slot / "eval_output" / "results_2000-01-01T10-00-00.json").write_text(json.dumps(LM_EVAL_RESULTS))
         return result("warmup", run.directory)
 
     def _graded_measured(self, slot: Path, kwargs: dict[str, Any]) -> VariantResult:
@@ -148,7 +149,7 @@ class Rounds:
         measured.mark("warmup", 15.0 * self.scale).mark("measured", 30.0 * self.scale)
         measured.mark("finished", 200.0 * self.scale).end(15.0 * self.scale)
         self._spend(30.0)
-        workspace = slot / "benchmark_20261014_000000"  # the run's own directory, below the round's
+        workspace = slot / "benchmark_20000101_000000"  # the run's own directory, below the round's
         workspace.mkdir()
         (workspace / "benchmark_report.json").write_text(json.dumps(REPORT), encoding="utf-8")
         return result("test", workspace, nonfatal_warnings=["run_grid_warmup_discarded_first"])

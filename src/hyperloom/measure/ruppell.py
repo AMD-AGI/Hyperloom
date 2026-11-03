@@ -83,8 +83,7 @@ RUPPELL_COMMIT = "22b813b113d363d70963ac33e868cfbf486e7521"
 RUPPELL_TREE_SHA256 = "b46077bc11cc2e79453fa7c3ec074fc9e9e664f30ec49eb26b969fd3d0935c34"
 #: The detail sampling of a profile test: kernel detail for 5 of every 1000 serving steps.
 DETAIL = "5/1000"
-#: The ROCm releases ruppell supports, [from, to): it has been run on 7.0.2 to 7.2.4 (MI350X, MI355X), and
-#: it has never been built on ROCm 10.
+#: The ROCm releases ruppell supports, [from, to): 7.0.2 up to but not including 8.0.0.
 SUPPORTED_ROCM = ((7, 0, 2), (8, 0, 0))
 
 TOOLS_DIR = "tools"

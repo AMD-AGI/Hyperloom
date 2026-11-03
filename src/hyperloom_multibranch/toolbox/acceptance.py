@@ -3,10 +3,11 @@
 
 """Acceptance of a test request: the checks that refuse a request before it queues.
 
-Steps: the request validates (3.7, done by its constructor, plus the toolbox's own: no preset ``request_id``, a
-``retest_of`` that names an accepted request, a PROFILE that no live profile already covers); the parent recipe is read from the experiment repository; the delta
-applies, changes an explore's parent recipe, and the environment compiles; the measurement surface matches the canonical one, and a test that carries the accuracy
-evaluation serves a context that evaluation can run in. Compile, points, surface and the evaluation's context come from
+Steps: the request validates (done by its constructor, plus the toolbox's own: no preset ``request_id``, a
+``retest_of`` that names an accepted request, a PROFILE that no live profile already covers); the parent recipe is read
+from the experiment repository; the delta applies, changes an explore's parent recipe, and the environment compiles; the
+measurement surface matches the canonical one, and a test that carries the accuracy evaluation serves a context that
+evaluation can run in. Compile, points, surface and the evaluation's context come from
 hosted measurement (``hyperloom.measure``) through the one :class:`MeasurementPlanner` seam.
 """
 
@@ -167,7 +168,8 @@ def _no_live_profile(request: TestRequest, recipe_digest: str) -> str | None:
 
 
 class MeasurementPlanner(Protocol):
-    """Compiles the test environment, generates the measurement points and checks the surface (acceptance steps 2 to 4).
+    """Compiles the test environment, generates the measurement points and checks the surface (the compile, points and
+    surface steps of acceptance).
 
     Raises ``RecipeError`` when it cannot: a ``SurfaceViolation`` means the measurement surface differs, a
     ``BaseImageMismatchError`` a recipe on another image, an ``EvalContextError`` a launch whose context the accuracy

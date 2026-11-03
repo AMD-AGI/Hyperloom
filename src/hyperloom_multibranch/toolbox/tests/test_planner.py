@@ -30,7 +30,7 @@ from hyperloom_multibranch.contracts.toolbox import RequestRejected, WorkloadKin
 from hyperloom_multibranch.toolbox.planner import HIT_LOGGING_ON, HostedPlanner
 from hyperloom_multibranch.toolbox.table_hits import read_table_hits
 from hyperloom_multibranch.toolbox.tests.helpers import FakeRepo, build, req
-from hyperloom_multibranch.toolbox.tests.kernel_rows import B01_NEW, csv_text
+from hyperloom_multibranch.toolbox.tests.kernel_rows import BETA_NEW, csv_text
 from hyperloom_multibranch.toolbox.tests.test_table_hits import MERGED, MISS, ROW_16_34816, Session, a8w8_hit
 
 
@@ -272,7 +272,7 @@ async def test_a_table_no_hit_names_is_not_exercised_under_the_planner_and_not_o
 ) -> None:
     """A planned test's points ask for hits, so a log with none says "not exercised"; a point that did not ask cannot."""
     session = Session(tmp_path)
-    artifact = session.put(csv_text(B01_NEW))
+    artifact = session.put(csv_text(BETA_NEW))
     delta = RecipeDelta(add_kernels=(artifact,))
     accepted = _agentx_planner(tmp_path).plan(req(change=delta), recipe_with())
     session.log(MISS)
@@ -289,7 +289,7 @@ async def test_a_table_no_hit_names_is_not_exercised_under_the_planner_and_not_o
 
 async def test_a_table_a_hit_names_is_exercised_under_the_planner(tmp_path: Path) -> None:
     session = Session(tmp_path)
-    artifact = session.put(csv_text(B01_NEW))
+    artifact = session.put(csv_text(BETA_NEW))
     accepted = _agentx_planner(tmp_path).plan(req(change=RecipeDelta(add_kernels=(artifact,))), recipe_with())
     session.log(MISS, a8w8_hit(ROW_16_34816, MERGED, asked_m=12))
 

@@ -6,11 +6,11 @@
 The agent route prepares the trace the same way before its model reads anything: it picks the rank trace that holds GPU
 kernels, cuts a steady-state window out of it with TraceLens' splitter, finds the graph-capture folder beside the trace
 and runs TraceLens' inference perf report on the window with that folder. The per-op table the op shares come from
-(``perf_report_csvs/ops_summary.csv``) is that report's output; the model only writes prose over it, which takes about
-half an hour. This route stops at the report: the same split, the same report command, and TraceLens' own graph-replay
+(``perf_report_csvs/ops_summary.csv``) is that report's output; the model only writes prose over it, which is the slow
+part. This route stops at the report: the same split, the same report command, and TraceLens' own graph-replay
 check on the result. A report the check marks graph-collapsed gets TraceLens' degraded fallback ``analysis.md`` and
 ``analysis.json``, which is how :func:`~hyperloom_multibranch.toolbox.tools.op_shares.degraded_reason` knows to withhold
-its shares. Without a model it takes about a minute.
+its shares. Without a model it finishes far sooner.
 
 The splitter's workload hints (``--CONC``, ``--OSL``, ``--R``), the prompt length the op shares are weighted by (``ISL``) and
 the steady-state mode come from the request alone. A specialist's request gets the hints from the profile test's own point
@@ -189,9 +189,9 @@ def _sh(run: _Run, step: str, cmd: list[str]) -> None:
 def _analysed_trace(trace_input: Path) -> Path:
     """The trace of the input that holds GPU kernels: the file itself, or the first trace of a directory that does.
 
-    A CUDA-graph capture sidecar is never it: it holds the kernels of one graph capture (two fill kernels on a NEXTN head's
-    profile), not serving steps, so the splitter finds no steady state in it. An input with nothing else is refused as
-    ``trace_without_serving_steps``.
+    A CUDA-graph capture sidecar is never it: it holds the kernels of one graph capture (a few fill kernels at most, as
+    on a speculative-decoding head's profile), not serving steps, so the splitter finds no steady state in it. An input
+    with nothing else is refused as ``trace_without_serving_steps``.
     """
     try:
         _, found = discover_trace_inputs(trace_input)

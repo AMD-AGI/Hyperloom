@@ -28,7 +28,7 @@ from hyperloom.measure.compile import CompiledEnvironment, LocalBlobStore
 from hyperloom_multibranch.toolbox import table_hits
 from hyperloom_multibranch.toolbox.kernel_artifacts import mint_kernel_artifact
 from hyperloom_multibranch.toolbox.table_hits import describe, read_table_hits, runtime_findings
-from hyperloom_multibranch.toolbox.tests.kernel_rows import B01_HEAD, B01_NEW, ENV, csv_text
+from hyperloom_multibranch.toolbox.tests.kernel_rows import BETA_HEAD, BETA_NEW, ENV, csv_text
 
 IMAGE = "sha256:" + "a" * 64
 BF16_ENV = "AITER_CONFIG_GEMM_BF16"
@@ -48,8 +48,8 @@ def assert_says_the_logs_lacked_hit_lines(reason: str | None) -> None:
         assert asks_for_the_variable not in reason, reason
 
 
-#: The kernel names of the rows of ``B01_NEW`` (``gfx,cu_num,M,N,K,libtype,kernelId,splitK,us,kernelName,...``).
-_KERNEL = {tuple(int(cell) for cell in row.split(",")[2:5]): row.split(",")[9] for row in (*B01_NEW, *B01_HEAD)}
+#: The kernel names of the rows of ``BETA_NEW`` (``gfx,cu_num,M,N,K,libtype,kernelId,splitK,us,kernelName,...``).
+_KERNEL = {tuple(int(cell) for cell in row.split(",")[2:5]): row.split(",")[9] for row in (*BETA_NEW, *BETA_HEAD)}
 ROW_1_34816 = (1, 34816, 5120)
 ROW_16_34816 = (16, 34816, 5120)
 ROW_16_5120 = (16, 5120, 17408)
@@ -143,7 +143,7 @@ def session(tmp_path: Path) -> Session:
 
 
 def test_a_table_whose_rows_the_server_hit_says_how_many_rows_and_lines(session: Session) -> None:
-    artifact = session.put(csv_text(B01_NEW))
+    artifact = session.put(csv_text(BETA_NEW))
     session.log(
         MISS,
         a8w8_hit(ROW_16_34816, MERGED, asked_m=12),
@@ -156,14 +156,14 @@ def test_a_table_whose_rows_the_server_hit_says_how_many_rows_and_lines(session:
 
 
 def test_the_row_a_lookup_found_is_the_padded_shape_not_the_shape_it_asked_for(session: Session) -> None:
-    session.put(csv_text(B01_NEW))
+    session.put(csv_text(BETA_NEW))
     session.log(a8w8_hit(ROW_16_34816, MERGED, asked_m=12))
     (hits,) = session.read()
     assert hits.rows_hit == 1, "the row of M=16 is hit by the lookup of M=12, and the row of M=1 is not"
 
 
 def test_a_table_with_no_row_hit_although_the_server_logged_hits_is_not_exercised_and_says_so(session: Session) -> None:
-    artifact = session.put(csv_text(B01_NEW))
+    artifact = session.put(csv_text(BETA_NEW))
     session.log(MISS, a8w8_hit(HEAD_ROW_64_5120, MERGED), a8w8_hit(HEAD_ROW_64_5120, MERGED))
     (hits,) = session.read()
     assert hits == TableHits(
@@ -181,14 +181,14 @@ def test_a_table_with_no_row_hit_although_the_server_logged_hits_is_not_exercise
 
 
 def test_a_server_launched_to_log_hits_that_logged_none_did_not_exercise_the_table(session: Session) -> None:
-    session.put(csv_text(B01_NEW))
+    session.put(csv_text(BETA_NEW))
     session.log(MISS)
     (hits,) = session.read(session.point(hits=1))
     assert (hits.status, hits.rows_hit, hits.reason) == (TABLE_NOT_EXERCISED, 0, "aiter logged no hit at all")
 
 
 def test_with_no_hit_logging_a_table_with_no_hit_is_not_observable_not_not_exercised(session: Session) -> None:
-    session.put(csv_text(B01_NEW))
+    session.put(csv_text(BETA_NEW))
     session.log(MISS)
     for point in (session.point(), session.point(hits=0)):
         (hits,) = session.read(point)
@@ -199,7 +199,7 @@ def test_with_no_hit_logging_a_table_with_no_hit_is_not_observable_not_not_exerc
 
 
 def test_a_hit_line_of_any_table_shows_that_hits_were_logged_whatever_the_points_say(session: Session) -> None:
-    session.put(csv_text(B01_NEW))
+    session.put(csv_text(BETA_NEW))
     session.log(IMAGE_ROW_HIT)
     (hits,) = session.read()
     assert hits.status == TABLE_NOT_EXERCISED
@@ -207,7 +207,7 @@ def test_a_hit_line_of_any_table_shows_that_hits_were_logged_whatever_the_points
 
 def test_one_server_that_logged_no_hit_keeps_the_table_not_observable_whatever_another_logged(session: Session) -> None:
     """The first point's server may have hit the table unseen: another's hit line of another table does not say it did not."""
-    session.put(csv_text(B01_NEW))
+    session.put(csv_text(BETA_NEW))
     session.log(MISS, name="variant_00_c32/server.log")
     session.log(MISS, IMAGE_ROW_HIT, name="variant_01_c64/server.log")
     mixed = (session.point(hits=0, name="point-0.yaml"), session.point(hits=1, name="point-1.yaml"))
@@ -224,7 +224,7 @@ def test_one_server_that_logged_no_hit_keeps_the_table_not_observable_whatever_a
 
 
 def test_a_test_that_landed_no_server_log_says_nothing_of_its_table(session: Session) -> None:
-    session.put(csv_text(B01_NEW))
+    session.put(csv_text(BETA_NEW))
     (hits,) = session.read(session.point(hits=1))
     assert (hits.status, hits.reason) == (TABLE_NOT_OBSERVABLE, "the test landed no server log")
 
@@ -232,7 +232,7 @@ def test_a_test_that_landed_no_server_log_says_nothing_of_its_table(session: Ses
 def test_hit_lines_this_reader_cannot_read_keep_a_table_with_no_hit_from_being_called_not_exercised(
     session: Session,
 ) -> None:
-    session.put(csv_text(B01_NEW))
+    session.put(csv_text(BETA_NEW))
     # aiter's quantised GEMM words its hit as "is tuned, in <file>!"; the rule pack's hit line has no such form.
     session.log(
         "[aiter] shape M:128, N:512, K:7168 q_dtype_w:torch.float8_e4m3fn, found padded_M: 128, N:512, K:7168 is tuned, in /x/t.csv!"
@@ -243,7 +243,7 @@ def test_hit_lines_this_reader_cannot_read_keep_a_table_with_no_hit_from_being_c
 
 
 def test_an_unreadable_log_keeps_a_table_with_no_hit_from_being_called_not_exercised(session: Session) -> None:
-    session.put(csv_text(B01_NEW))
+    session.put(csv_text(BETA_NEW))
     session.log(MISS)
     (session.output / "variant_01" / "server.log").mkdir(parents=True)  # a path that matches and cannot be read
     (hits,) = session.read(session.point(hits=1))
@@ -251,7 +251,7 @@ def test_an_unreadable_log_keeps_a_table_with_no_hit_from_being_called_not_exerc
 
 
 def test_a_hit_is_a_fact_even_when_other_lines_were_not_read(session: Session) -> None:
-    session.put(csv_text(B01_NEW))
+    session.put(csv_text(BETA_NEW))
     session.log(
         "[aiter] shape M:1, N:2, K:3 q, found padded_M: 1, N:2, K:3 is tuned, in /x/t.csv!",
         a8w8_hit(ROW_16_5120, MERGED),
@@ -261,7 +261,7 @@ def test_a_hit_is_a_fact_even_when_other_lines_were_not_read(session: Session) -
 
 
 def test_the_lines_of_a_server_with_several_ranks_count_once_a_row_and_once_a_line_each(session: Session) -> None:
-    session.put(csv_text(B01_NEW))
+    session.put(csv_text(BETA_NEW))
     ranks = [f"(Worker_TP{rank} pid={rank}) {a8w8_hit(ROW_1_34816, MERGED)}" for rank in range(8)]
     session.log(*ranks)
     (hits,) = session.read()
@@ -269,7 +269,7 @@ def test_the_lines_of_a_server_with_several_ranks_count_once_a_row_and_once_a_li
 
 
 def test_a_hit_in_the_private_copy_of_another_table_is_not_a_row_of_this_one(session: Session) -> None:
-    artifact = session.put(csv_text(B01_NEW))
+    artifact = session.put(csv_text(BETA_NEW))
     own = f"/work/hl-framework-x/tables/{ENV}/{artifact.sha256[:16]}/k-{artifact.sha256[:16]}"
     other_variable = f"/work/hl-framework-x/tables/{BF16_ENV}/{artifact.sha256[:16]}/k-{artifact.sha256[:16]}"
     other_table = f"/work/hl-framework-x/tables/{ENV}/{'0' * 16}/k-{'0' * 16}"
@@ -282,7 +282,7 @@ def test_a_hit_in_the_private_copy_of_another_table_is_not_a_row_of_this_one(ses
 
 
 def test_a_row_with_the_shape_of_the_hit_but_another_kernel_is_not_the_row_that_was_hit(session: Session) -> None:
-    session.put(csv_text((B01_NEW[0].replace(_KERNEL[ROW_1_34816], "kernel_of_another_tuner"),)))
+    session.put(csv_text((BETA_NEW[0].replace(_KERNEL[ROW_1_34816], "kernel_of_another_tuner"),)))
     session.log(a8w8_hit(ROW_1_34816, MERGED))
     (hits,) = session.read(session.point(hits=1))
     assert (hits.status, hits.rows_hit) == (TABLE_NOT_EXERCISED, 0)
@@ -341,7 +341,7 @@ def test_an_aiter_table_that_is_not_keyed_by_shape_is_not_observable_by_this_rea
 
 
 def test_a_table_whose_blob_is_gone_is_not_observable_not_an_error(session: Session) -> None:
-    artifact = session.put(csv_text(B01_NEW))
+    artifact = session.put(csv_text(BETA_NEW))
     (session.blobs.root / artifact.sha256).unlink()
     session.log(a8w8_hit(ROW_16_34816, MERGED))
     (hits,) = session.read()
@@ -349,7 +349,7 @@ def test_a_table_whose_blob_is_gone_is_not_observable_not_an_error(session: Sess
 
 
 def test_every_table_of_the_recipe_has_its_own_entry_in_the_recipes_order(session: Session) -> None:
-    first = session.put(csv_text(B01_NEW))
+    first = session.put(csv_text(BETA_NEW))
     second = session.put(
         "\n".join([BF16_HEADER, bf16_row(*QWEN3_8B_SHAPES[1])]).encode() + b"\n", env=BF16_ENV, target="gemm_bf16"
     )
@@ -373,7 +373,7 @@ def test_a_recipe_that_loads_no_table_has_nothing_to_report(session: Session) ->
 def test_a_pack_whose_hit_line_has_no_group_for_the_shape_says_nothing_of_any_table_instead_of_failing_the_test(
     session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    session.put(csv_text(B01_NEW))
+    session.put(csv_text(BETA_NEW))
     session.log(a8w8_hit(ROW_16_5120, MERGED))
     monkeypatch.setattr(table_hits, "_HIT", re.compile(r"found padded_M: (?P<M>\d+), N:(?P<N>\d+) is tuned"))
     (hits,) = session.read(session.point(hits=1))

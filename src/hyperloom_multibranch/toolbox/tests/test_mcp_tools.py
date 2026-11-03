@@ -744,7 +744,8 @@ def _pointers(pages: list[dict[str, Any]]) -> list[str]:
 
 
 def test_a_poll_inbox_cursor_that_is_not_one_says_how_to_get_one(rig: Rig) -> None:
-    """A specialist that tried ``"latest"`` was told ``JSONDecodeError: Expecting value``."""
+    """A cursor that is not one the inbox gave (for example ``"latest"``) is refused with a message that says what a
+    cursor is, not with a JSON decode error."""
     status, reply = rig.call(rig.token("s1"), "poll_inbox", cursor="latest")
     assert status == 200 and reply["error"] == {
         "code": -32602,

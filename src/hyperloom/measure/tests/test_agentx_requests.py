@@ -3,11 +3,10 @@
 
 """The requests a measured AgentX round's client marked failed are counted by class from the round's export.
 
-The export lines are rebuilt from the pinned client's source and docs (``agentx_export``: no export of a real run was
-at hand). What is pinned: which failed request is transport and which is no-content, that a request the client counted
-successful is none of them, that a count the export cannot give is ``None`` with its reason and never zero, that
-warm-up requests count in none, and that a file that is missing, ambiguous or damaged says so instead of reading as a
-round with nothing failed.
+The export lines are rebuilt from the pinned client's source and docs (``agentx_export``). What is pinned: which failed
+request is transport and which is no-content, that a request the client counted successful is none of them, that a count
+the export cannot give is ``None`` with its reason and never zero, that warm-up requests count in none, and that a file
+that is missing, ambiguous or damaged says so instead of reading as a round with nothing failed.
 """
 
 from __future__ import annotations

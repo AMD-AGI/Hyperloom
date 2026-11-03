@@ -42,11 +42,11 @@ def _request(**overrides: object) -> TestRequest:
     return TestRequest(**{**fields, **overrides})
 
 
-def test_default_node_bias_matches_the_measured_cross_node_spread() -> None:
+def test_default_node_bias_is_small_on_most_nodes_and_a_few_percent_on_some() -> None:
     model = NoiseModel()
     magnitudes = sorted(abs(model.node_bias(7, f"node-{index}")) for index in range(4000))
-    assert statistics.median(magnitudes) == pytest.approx(0.004, rel=0.15)
-    assert magnitudes[int(0.9 * len(magnitudes))] == pytest.approx(0.033, rel=0.2)
+    assert statistics.median(magnitudes) == pytest.approx(0.005, rel=0.15)
+    assert magnitudes[int(0.9 * len(magnitudes))] == pytest.approx(0.03, rel=0.2)
     signs = {model.node_bias(7, f"node-{index}") > 0 for index in range(50)}
     assert signs == {True, False}
 

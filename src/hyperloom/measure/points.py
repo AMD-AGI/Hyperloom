@@ -321,8 +321,8 @@ def _profile_canonical(canonical: CanonicalMeasurement) -> CanonicalMeasurement:
     return CanonicalMeasurement(path, canonical.surface, canonical.primary_concurrency, canonical.materialize)
 
 
-#: The serving steps an AgentX profile captures when its point names no count: half the single-lineage default (256), at
-#: which a TP4 MoE head wrote more trace than the 4 GiB a result may carry.
+#: The serving steps an AgentX profile captures when its point names no count: half the single-lineage default (256),
+#: because a large multi-GPU MoE point can otherwise write more trace than a result may carry.
 AGENTX_PROFILE_STEPS = 128
 
 

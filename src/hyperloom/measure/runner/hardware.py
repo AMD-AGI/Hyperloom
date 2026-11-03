@@ -46,9 +46,9 @@ __all__ = [
 
 _JSON = "--json"
 #: How long a visible card that holds memory before the test is read again. A server that crashed in the test before on
-#: the card frees its memory only once its processes are torn down, and a retry that starts at once (8 s after the crash
-#: on the GPU check) found the card still held and failed three times over; a holder that lasts longer is not the last
-#: test's. The census's settle (``EXCESS_SETTLE_SEC``) is for a server that exited, which frees its memory in seconds.
+#: the card frees its memory only once its processes are torn down, and a retry that starts at once finds the card still
+#: held and fails; a holder that lasts longer is not the last test's. The census's settle (``EXCESS_SETTLE_SEC``) is for
+#: a server that exited, which frees its memory in seconds.
 CARD_RELEASE_WAIT_SEC = 60.0
 _RELEASE_STEP_SEC = 1.0
 _TIMEOUT_SEC = 30.0

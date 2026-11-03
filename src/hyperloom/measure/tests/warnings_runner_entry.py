@@ -32,7 +32,7 @@ WARNINGS = ["warmup_round_seed:1", "harvested_leaked_artifact:x", "warmup_round_
 
 async def fake_run_grid(*, grid: list[Any], output_root: Path, **_: Any) -> list[VariantResult]:
     name = grid[0].name
-    workspace = Path(output_root) / name / "benchmark_stub_20261014_000000"
+    workspace = Path(output_root) / name / "benchmark_stub_20000101_000000"
     workspace.mkdir(parents=True)
     report = {"success": True, "throughput": {"output_throughput": 1234.5, "completed_requests": 8, "num_prompts": 8}}
     (workspace / "benchmark_report.json").write_text(json.dumps(report), encoding="utf-8")

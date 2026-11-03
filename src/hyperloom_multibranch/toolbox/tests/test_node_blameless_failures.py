@@ -29,13 +29,13 @@ NODE_FAULT_REASON = "node_fault: amdgpu: GPU reset on card 3"
 
 
 def _fails_once_then_succeeds(reason: str) -> ScriptedExecutor:
-    """The first attempt fails with ``reason`` on node ``v3-1``; the retry succeeds on ``v3-2``."""
+    """The first attempt fails with ``reason`` on node ``node-1``; the retry succeeds on ``node-2``."""
 
     def first(job: TestJob) -> TestResult:
-        return failed(job, FailureClass.INFRA, node="v3-1", reason=reason)
+        return failed(job, FailureClass.INFRA, node="node-1", reason=reason)
 
     def second(job: TestJob) -> TestResult:
-        return ok(job, node="v3-2")
+        return ok(job, node="node-2")
 
     return ScriptedExecutor(script=[first, second])
 
@@ -71,7 +71,7 @@ async def test_a_runner_that_could_not_start_or_was_lost_does_not_quarantine_its
     await rig.toolbox.close()
     assert result.validity is Validity.SUCCEEDED
     assert [a.failure_reason for a in result.attempts] == [reason, None]
-    assert [a.node for a in result.attempts] == ["v3-1", "v3-2"], "the retry still went to another node"
+    assert [a.node for a in result.attempts] == ["node-1", "node-2"], "the retry still went to another node"
     assert rig.toolbox.quarantined == frozenset() and await rig.blackboard.quarantined() == ()
     assert await _restarted_quarantine(tmp_path) == frozenset()
 
@@ -81,23 +81,23 @@ async def test_a_node_fault_still_quarantines_its_node_and_a_restart_reads_it_ba
     result = await _run_one(rig)
     await rig.toolbox.close()
     assert result.validity is Validity.SUCCEEDED
-    assert rig.toolbox.quarantined == frozenset({"v3-1"})
-    assert [(e.node, e.reason) for e in await rig.blackboard.quarantined()] == [("v3-1", NODE_FAULT_REASON)]
-    assert await _restarted_quarantine(tmp_path) == frozenset({"v3-1"}), "the blackboard keeps it across restarts"
+    assert rig.toolbox.quarantined == frozenset({"node-1"})
+    assert [(e.node, e.reason) for e in await rig.blackboard.quarantined()] == [("node-1", NODE_FAULT_REASON)]
+    assert await _restarted_quarantine(tmp_path) == frozenset({"node-1"}), "the blackboard keeps it across restarts"
 
 
 async def test_a_node_quarantine_recorded_for_a_blameless_failure_is_not_read_back(tmp_path: Path) -> None:
     rig = build(tmp_path)
     recorded = {
-        "v3-014": KEY_READ_ONLY_REASON,
-        "v3-073": CACHE_REASON,
-        "v3-083": LOST_REASON,
-        "v3-099": NODE_FAULT_REASON,
+        "node-a": KEY_READ_ONLY_REASON,
+        "node-b": CACHE_REASON,
+        "node-c": LOST_REASON,
+        "node-d": NODE_FAULT_REASON,
     }
     for node, reason in recorded.items():
         event = QuarantineEvent(node=node, action=QuarantineAction.QUARANTINE, reason=reason, request_ids=("r1",))
         await rig.blackboard.record_quarantine(event)
     await rig.toolbox.start()
     await rig.toolbox.close()
-    assert rig.toolbox.quarantined == frozenset({"v3-099"}), "only the node fault still holds its node"
+    assert rig.toolbox.quarantined == frozenset({"node-d"}), "only the node fault still holds its node"
     assert {e.node for e in await rig.blackboard.quarantined()} == set(recorded), "the record itself stays as written"

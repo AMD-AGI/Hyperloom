@@ -38,7 +38,7 @@ class FakeBackend:
         sandbox = SandboxFacts(sandbox_id=f"sb-{call.task_id}", node_name=self.node)
         if action == "fail":
             return TestOutcome(1, "", "boom", (), sandbox, call.task_id, "candidate", "import_error")
-        workspace = Path(call.output_dir) / "benchmark_local_20261014_000000"
+        workspace = Path(call.output_dir) / "benchmark_local_20000101_000000"
         workspace.mkdir(parents=True)
         report = {
             "success": True,

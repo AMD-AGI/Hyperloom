@@ -43,7 +43,7 @@ class Listing:
             self.reads += 1
             if self.unavailable is not None:
                 return CardReading(unavailable=self.unavailable)
-            held = tuple(Holder(card, 1_827_000 + card, "", vram) for card, vram in sorted(self.vram.items()))
+            held = tuple(Holder(card, 1_000_000 + card, "", vram) for card, vram in sorted(self.vram.items()))
         return CardReading(holders=tuple(h for h in held if h.card in cards))
 
     def free(self, card: int) -> None:
@@ -102,7 +102,7 @@ async def test_a_card_whose_memory_is_freed_within_the_drain_time_is_not_handed_
     leases, released = _leases(tmp_path, listing)
     lease = await leases.lease("b1", 2, wait_sec=0, charge=LeaseCharge(LeaseKind.DEV, "b1"))
     busy, free = lease.gpu_ids
-    listing.vram[busy] = 238 * _GIB  # the agent's server ended; the driver has not freed its memory yet
+    listing.vram[busy] = 200 * _GIB  # the agent's server ended; the driver has not freed its memory yet
 
     leases.release(lease.lease_id)
 
@@ -134,7 +134,7 @@ async def test_a_card_still_holding_memory_after_the_drain_time_is_kept_out_with
     assert _until(lambda: any("kept out of the pool" in r.getMessage() for r in caplog.records))
     warning = next(r for r in caplog.records if f"lease {lease.lease_id} still hold" in r.getMessage())
     assert warning.levelno == logging.WARNING
-    assert f"card {card}: kernel id {1_827_000 + card} with 12.0 GiB" in warning.getMessage()
+    assert f"card {card}: kernel id {1_000_000 + card} with 12.0 GiB" in warning.getMessage()
     assert f"read again every {_RECHECK_SEC:g} s" in warning.getMessage()
     reads = listing.reads
     assert _until(lambda: listing.reads >= reads + 3)  # read again while it is kept out
@@ -184,7 +184,7 @@ async def test_a_card_a_released_lease_still_drains_is_never_read_as_held_by_an_
     leases, _ = _leases(tmp_path, listing, pool)
     lease = await leases.lease("b1", 1, wait_sec=0, charge=LeaseCharge(LeaseKind.DEV, "b1"))
     (busy,) = lease.gpu_ids
-    listing.vram[busy] = 238 * _GIB
+    listing.vram[busy] = 200 * _GIB
 
     leases.release(lease.lease_id)
 

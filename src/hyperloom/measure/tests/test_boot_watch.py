@@ -206,14 +206,14 @@ def _stamp(directory: Path, text: str) -> None:
 
 
 def test_the_boot_of_a_test_is_the_longest_boot_its_round_stamps_record(tmp_path: Path) -> None:
-    _stamp(tmp_path / "variant_00_warmup", "1792596681.010 82.221\n")  # the stamps of a graded test
-    _stamp(tmp_path / "variant_00_test", "1792596811.700 0.000\n")  # its measured round found the server ready
+    _stamp(tmp_path / "variant_00_warmup", "1700000000.000 80.500\n")  # the stamps of a graded test
+    _stamp(tmp_path / "variant_00_test", "1700000100.000 0.000\n")  # its measured round found the server ready
 
-    assert boot_seconds(tmp_path) == 82.221
+    assert boot_seconds(tmp_path) == 80.5
 
 
 def test_a_test_whose_rounds_all_found_a_server_ready_booted_none(tmp_path: Path) -> None:
-    _stamp(tmp_path / "variant_00_test", "1792596811.700 0.000\n")
+    _stamp(tmp_path / "variant_00_test", "1700000100.000 0.000\n")
 
     assert boot_seconds(tmp_path) is None
 
@@ -221,13 +221,13 @@ def test_a_test_whose_rounds_all_found_a_server_ready_booted_none(tmp_path: Path
 def test_a_test_with_no_stamp_or_a_stamp_that_cannot_be_read_has_no_boot(tmp_path: Path) -> None:
     assert boot_seconds(tmp_path) is None
     assert boot_seconds(tmp_path / "never_landed") is None
-    for text in ("", "1792596681.010\n", "1792596681.010 soon\n", "1792596681.010 nan\n", "1792596681.010 inf\n"):
+    for text in ("", "1700000000.000\n", "1700000000.000 soon\n", "1700000000.000 nan\n", "1700000000.000 inf\n"):
         _stamp(tmp_path / "bad", text)
         assert boot_seconds(tmp_path) is None, text
 
 
 #: A server whose boot is an aiter JIT build longer than the boot limit, after which it is ready: aiter prints nothing
-#: between ``start build`` and ``finish build`` (a CK-tile GEMM took up to 1347 s).
+#: between ``start build`` and ``finish build`` (a CK-tile GEMM can take up to 1347 s).
 BUILDING_SERVER = (
     "import sys, time\n"
     "log = open(sys.argv[1], 'a', buffering=1)\n"
@@ -315,7 +315,7 @@ def test_a_module_built_again_after_a_reading_that_says_none_is_under_way_has_it
     ("line", "module"),
     [
         (
-            "[aiter] [pid=829812 pname=Process-1] start build [module_gemm_a8w8_bpreshuffle_cktile] under /x",
+            "[aiter] [pid=7 pname=Process-1] start build [module_gemm_a8w8_bpreshuffle_cktile] under /x",
             "module_gemm_a8w8_bpreshuffle_cktile",
         ),
         ("\x1b[33m[aiter] start build [module_rmsnorm] under /x\x1b[0m", "module_rmsnorm"),

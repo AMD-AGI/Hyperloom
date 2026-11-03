@@ -31,7 +31,7 @@ from hyperloom.measure.bundle import (
     verify_bundle,
 )
 
-REPORT = "benchmark_sglang_20261005_101500/benchmark_report.json"
+REPORT = "benchmark_sglang_20000101_000000/benchmark_report.json"
 PACK = {"version": "2-test", "digest": "sha256:" + "ab" * 32}
 
 
@@ -156,7 +156,7 @@ def test_a_file_the_manifest_does_not_list_is_rejected(bundle) -> None:
     (bundle.staging / "extra.txt").write_text("planted")
     assert _reason(bundle.staging, bundle) is RejectReason.UNLISTED_FILE
     (bundle.staging / "extra.txt").unlink()
-    (bundle.staging / "benchmark_sglang_20261005_101500" / "planted.json").write_text("{}")
+    (bundle.staging / "benchmark_sglang_20000101_000000" / "planted.json").write_text("{}")
     assert _reason(bundle.staging, bundle) is RejectReason.UNLISTED_FILE
 
 
@@ -175,8 +175,8 @@ def test_a_planted_symlink_the_manifest_does_not_list_is_rejected_as_unsafe(bund
 
 def test_a_symlinked_directory_is_rejected(bundle, tmp_path: Path) -> None:
     moved = tmp_path / "moved"
-    (bundle.staging / "benchmark_sglang_20261005_101500").rename(moved)
-    os.symlink(moved, bundle.staging / "benchmark_sglang_20261005_101500")
+    (bundle.staging / "benchmark_sglang_20000101_000000").rename(moved)
+    os.symlink(moved, bundle.staging / "benchmark_sglang_20000101_000000")
     assert _reason(bundle.staging, bundle) is RejectReason.UNSAFE_PATH
 
 
@@ -237,7 +237,7 @@ def test_a_symlinked_directory_in_the_output_is_not_followed_and_nothing_is_writ
 ) -> None:
     out, outside = tmp_path / "out", _outside(tmp_path)
     out.mkdir()
-    os.symlink(outside, out / "benchmark_sglang_20261005_101500")
+    os.symlink(outside, out / "benchmark_sglang_20000101_000000")
     with pytest.raises(MaterializeError, match="symlink"):
         materialize(verify_bundle(bundle.staging, verify_args(bundle)), out)
     assert list(outside.iterdir()) == []
@@ -254,14 +254,14 @@ def test_a_symlink_planted_after_the_precheck_is_not_followed(bundle, tmp_path: 
     def plant_before_first_file(rel, scratch_fd, out_fd, created):
         calls.append(rel)
         if len(calls) == 1:
-            os.symlink(outside, out / "benchmark_sglang_20261005_101500")
+            os.symlink(outside, out / "benchmark_sglang_20000101_000000")
         return real_place(rel, scratch_fd, out_fd, created)
 
     monkeypatch.setattr(bundle_mod, "_place", plant_before_first_file)
     with pytest.raises(MaterializeError, match="symlink"):
         materialize(verified, out)
     assert list(outside.iterdir()) == []
-    assert [p.name for p in out.iterdir()] == ["benchmark_sglang_20261005_101500"]  # only the planted link remains
+    assert [p.name for p in out.iterdir()] == ["benchmark_sglang_20000101_000000"]  # only the planted link remains
 
 
 def test_a_copy_that_fails_without_hard_links_leaves_no_partial_file(bundle, tmp_path: Path, monkeypatch) -> None:
@@ -396,7 +396,7 @@ def test_placed_files_and_directories_have_fixed_modes_whatever_the_umask(bundle
     finally:
         os.umask(old)
     assert (out / "server.log").stat().st_mode & 0o777 == 0o600
-    assert (out / "benchmark_sglang_20261005_101500").stat().st_mode & 0o777 == 0o700
+    assert (out / "benchmark_sglang_20000101_000000").stat().st_mode & 0o777 == 0o700
 
 
 def _stating(bundle, pack: dict[str, str]) -> None:

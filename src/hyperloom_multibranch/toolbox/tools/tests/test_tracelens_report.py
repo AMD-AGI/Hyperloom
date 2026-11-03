@@ -34,7 +34,7 @@ DATA = Path(__file__).parent / "data"
 SPLITTER = "TraceLens.TraceUtils.split_trace.main"
 #: One GPU kernel: what TraceLens' trace discovery needs to take a trace for one that ran on a card.
 KERNEL_EVENT = {"cat": "kernel", "ph": "X", "name": "gemm", "ts": 1, "dur": 2}
-CHUNK = "mixed_steady_state_prefill_1_prefilldecode_0_decode_31_bs11_conc3_t-TP-0.trace.json.gz"
+CHUNK = "mixed_steady_state_prefill_1_prefilldecode_0_decode_31_bs16_conc4_t-TP-0.trace.json.gz"
 OPS_SUMMARY = (
     "name,parent_module,total_direct_kernel_time_ms,Percentage (%)\n"
     "aten::mm,A,0.2,20.0\naten::mm,B,0.045,4.5\naten::copy_,C,0.19,19.0\naten::mul,D,0.1,10.0\n"
@@ -358,9 +358,7 @@ async def test_a_graph_collapsed_report_gets_the_degraded_fallback_and_keeps_the
         out.write_text(json.dumps(ANALYSIS_JSON), encoding="utf-8")
         return out
 
-    _module(
-        monkeypatch, "TraceLens.Agent.Analysis.utils", check_graph_replay_coverage=lambda csv: Coverage(True, 0.362)
-    )
+    _module(monkeypatch, "TraceLens.Agent.Analysis.utils", check_graph_replay_coverage=lambda csv: Coverage(True, 0.25))
     _module(monkeypatch, "TraceLens.Agent.Analysis.utils.deterministic_fallback", render_fallback_report=fallback)
     _module(monkeypatch, "TraceLens.Agent.Analysis.post_processing", render_analysis_json=analysis_json)
     status, pointer, record = await _run(tmp_path, probe.GRADED, rig)
@@ -635,9 +633,9 @@ async def test_a_step_that_fails_fails_the_job_with_its_reason(
     assert record["result"]["error_class"] == error_class and record["result"]["error"] in pointer.summary
 
 
-CAPTURE_SIDECAR = "EAGLEDraftExtendCudaGraphRunner_bs_14_rank0.json.gz"
-#: The GPU events of a CUDA-graph capture sidecar of a speculative (NEXTN) head's profile (``CAPTURE_SIDECAR``), all of
-#: them: a graph capture launches the fills that set it up, and nothing of a serving step.
+CAPTURE_SIDECAR = "EAGLEDraftExtendCudaGraphRunner_bs_16_rank0.json.gz"
+#: The GPU events of a CUDA-graph capture sidecar of a speculative-decoding head's profile (``CAPTURE_SIDECAR``): a
+#: graph capture launches the fills that set it up, and nothing of a serving step.
 CAPTURE_KERNELS = [
     {
         "ph": "X",
@@ -657,9 +655,9 @@ CAPTURE_KERNELS = [
 async def test_a_profile_of_graph_capture_sidecars_alone_is_refused_before_the_splitter_runs(
     rig: Rig, tmp_path: Path
 ) -> None:
-    """What an analysis of a NEXTN head's profile can meet: no rank trace, only the boot's graph captures, whose two fill
-    kernels made one pass for a trace that ran on a card; the splitter then found no window (``steady_state_chunk_missing``).
-    The sidecar is refused by name and the splitter is not run on it."""
+    """What an analysis of a speculative-decoding head's profile can meet: no rank trace, only the boot's graph captures,
+    whose few fill kernels would pass for a trace that ran on a card; the splitter would then find no window
+    (``steady_state_chunk_missing``). The sidecar is refused by name and the splitter is not run on it."""
     rig.trace.unlink()
     sidecar = rig.trace_input / "torch_trace" / "graph_capture_profile" / CAPTURE_SIDECAR
     sidecar.write_bytes(gzip.compress(json.dumps({"traceEvents": CAPTURE_KERNELS}).encode()))

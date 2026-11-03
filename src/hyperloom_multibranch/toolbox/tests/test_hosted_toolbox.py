@@ -84,9 +84,9 @@ from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
 from hyperloom_multibranch.toolbox.tools import TRACELENS_TOOL
 
 #: Template names are opaque (no card count in them): a template's cards are its key in the template list.
-_RUNNERS = ("ar-01ja-measurement-7f3c", "ar-01ja-measurement-b20e")
-_NARROW = "ar-01ja-narrow-55aa"  # a 1-card runner template that accepts the commit but not the manifest pin
-_DEVS = ("ar-01ja-dev-c41d", "ar-01ja-dev-9e02")
+_RUNNERS = ("tpl-runner-a", "tpl-runner-b")
+_NARROW = "tpl-narrow"  # a 1-card runner template that accepts the commit but not the manifest pin
+_DEVS = ("tpl-dev-a", "tpl-dev-b")
 _RUNNER_MAP = {"1": _RUNNERS[0], "2": _RUNNERS[1]}
 _DEV_MAP = {"1": _DEVS[0], "2": _DEVS[1]}
 _SOURCE_REPO, _SOURCE_SHA = "https://source.invalid/hyperloom.git", "ab" * 20
@@ -350,7 +350,7 @@ def test_a_plain_dict_with_exactly_the_field_names_builds_the_inputs(tmp_path: P
         "dev_key": "d-key",
         "grant_limits": dict(_GRANT),
         "runner_cache_manifest_sha256": _MANIFEST,
-        "sandbox_workspace": "top-models",
+        "sandbox_workspace": "workspace-a",
     }
     assert set(plain) == {*_REQUIRED_FIELDS, *_OPTIONAL_FIELDS}
     inputs = HostedToolboxInputs(**plain)
@@ -584,7 +584,7 @@ def test_the_hosts_template_variable_reaches_the_toolbox_unchanged(tmp_path: Pat
     env = {
         "HYPERLOOM_INPUT_FILE": str(spec),
         "HYPERLOOM_RUN_ID": "run-1",
-        "HYPERLOOM_RUN_CREATED_AT": "2026-10-28T12:00:00Z",
+        "HYPERLOOM_RUN_CREATED_AT": "2026-01-01T00:00:00Z",
         "HYPERLOOM_STATE_DIR": str(tmp_path),
         "E2B_API_URL": "http://service.invalid",
         "E2B_SANDBOX_URL": "http://sandboxes.invalid",
@@ -604,7 +604,7 @@ class _Sent(Exception):
 
 @pytest.mark.parametrize(
     ("named", "sent"),
-    [({}, {}), ({"HYPERLOOM_SANDBOX_WORKSPACE": "top-models"}, {WORKSPACE_KEY: "top-models"})],
+    [({}, {}), ({"HYPERLOOM_SANDBOX_WORKSPACE": "workspace-a"}, {WORKSPACE_KEY: "workspace-a"})],
     ids=["claw_grant", "safe_key"],
 )
 def test_the_hosts_workspace_goes_with_every_create_of_the_toolbox(
@@ -619,7 +619,7 @@ def test_the_hosts_workspace_goes_with_every_create_of_the_toolbox(
         "HYPERLOOM_SANDBOX_KEY_DEV": "d-key-000000000000",
         "HYPERLOOM_SANDBOX_TEMPLATES": json.dumps({"measurement": _RUNNER_MAP, "dev": _DEV_MAP}),
         "HYPERLOOM_GRANT_LIMITS": json.dumps(_GRANT),
-        "HYPERLOOM_RUN_CREATED_AT": "2026-10-28T12:00:00Z",
+        "HYPERLOOM_RUN_CREATED_AT": "2026-01-01T00:00:00Z",
         "HYPERLOOM_SOURCE_REPO": _SOURCE_REPO,
         "HYPERLOOM_SOURCE_SHA": _SOURCE_SHA,
         **named,

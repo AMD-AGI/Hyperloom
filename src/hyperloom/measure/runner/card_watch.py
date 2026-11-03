@@ -10,7 +10,7 @@ remembered with the time it was first seen. Before the test, a holder is read ag
 counts only if it is still there: the previous test's server, as it exits, stays listed for a few seconds.
 
 While the test runs and after it, the test's own server stops: its descriptors close and the kernel still lists its memory
-for as long as the driver takes to free it, which on a GPU pod was seconds and can be longer for hundreds of GiB. In a pod
+for as long as the driver takes to free it, which can be longer for hundreds of GiB. In a pod
 that memory is then accounted for by no process the container sees, as a foreign holder's would be. The watch therefore
 remembers every holder a look found accounted for on a card (the test's own) and does not count memory on a card all of
 whose holders it remembers; a holder it never saw accounted for, or a second one, still counts, however long the first one

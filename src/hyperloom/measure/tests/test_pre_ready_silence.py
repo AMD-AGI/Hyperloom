@@ -56,7 +56,7 @@ def test_each_new_sign_of_output_restarts_the_bound(change: dict) -> None:
     assert silence.silent_for(1.0 + _LIMIT) is None and silence.silent_for(8.0 + _LIMIT) is not None
 
 
-_TAG = "[aiter] [pid=829812 pname=Process-1]"
+_TAG = "[aiter] [pid=7 pname=Process-1]"
 
 
 def test_a_server_building_an_aiter_jit_module_is_working_however_long_the_build_is_silent() -> None:
@@ -65,7 +65,7 @@ def test_a_server_building_an_aiter_jit_module_is_working_however_long_the_build
     silence.observe({**_RUNNING, "last_line": building}, 1.0 + 3 * _LIMIT)  # the same reading, a long build later
     assert silence.silent_for(1.0 + 3 * _LIMIT) is None
 
-    built = f"{_TAG} finish build [module_gemm_a8w8_bpreshuffle_cktile], cost 844.2s"
+    built = f"{_TAG} finish build [module_gemm_a8w8_bpreshuffle_cktile], cost 600.0s"
     silence.observe({**_RUNNING, "last_line": built}, 2.0 + 3 * _LIMIT)
     assert silence.silent_for(2.0 + 4 * _LIMIT) is not None, "once the module is built, silence counts again"
 
@@ -73,7 +73,7 @@ def test_a_server_building_an_aiter_jit_module_is_working_however_long_the_build
 @pytest.mark.parametrize(
     "line",
     [
-        "[aiter] start build /sb/1/work/scratch/test/jit/aiter_cpp/build/pa_ragged_18aef236b4b102ad875f1200701980d3",
+        "[aiter] start build /sb/1/work/scratch/test/jit/aiter_cpp/build/pa_ragged_0123456789abcdef0123456789abcdef",
         "pool/sandboxes/sandbox-0001/fs/work/x: [aiter] start build [module_quant] under /sb/1/jit/aiter_jit",
     ],
 )
@@ -104,8 +104,9 @@ def test_once_the_server_is_ready_or_the_test_is_past_running_nothing_bounds_it(
     assert silence.silent_for(1.0 + 100 * _LIMIT) is None
 
 
-def test_the_limit_is_above_the_longest_silence_measured_before_ready() -> None:
-    """262 s: an aiter JIT build that reported 273 s, the longest silent stretch before ready in earlier tests' boots."""
+def test_the_limit_is_well_above_a_silent_aiter_build_before_ready() -> None:
+    """An aiter JIT build can stay silent for minutes before the server is ready (262 s here); the bound is a multiple of
+    it."""
     assert PRE_READY_SILENCE_SEC >= 3 * 262
 
 
@@ -145,8 +146,8 @@ def test_a_test_silent_before_ready_ends_as_hung_before_ready_long_before_its_ti
     assert rig.provider.find({}, role="measurement") == [], "the hung sandbox is closed"
 
 
-#: The bound of the test below: longer than the stand-in runner takes to start and stamp its server ready (4.5 to
-#: 7.7 s on a loaded machine, where a 1 s bound ended the test as hung before the runner wrote anything).
+#: The bound of the test below: longer than the stand-in runner takes to start and stamp its server ready, even on a
+#: loaded machine (a bound of a second can end the test as hung before the runner writes anything).
 _STARTUP_BOUND_SEC = 15.0
 #: Its timeout: past the bound counted from the ready stamp, so the bound would end the test first were it still armed.
 _AFTER_READY_TIMEOUT_SEC = 25

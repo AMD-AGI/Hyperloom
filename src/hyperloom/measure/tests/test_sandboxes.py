@@ -345,9 +345,9 @@ def test_a_sandbox_that_failed_before_it_ran_ends_the_attempt_without_another_ke
     assert runner.metadata[IDEMPOTENCY_KEY] == "run-1:req-1:2", "the next attempt is a new key"
 
 
-def test_a_failed_sandbox_is_created_once_against_the_platform_of_joint_run_4(service: _Service) -> None:
-    """Agent Sandbox answers a failed sandbox with a 500, then reports its key spent (410), and a new key makes another
-    sandbox that fails the same way: one acquire made three sandboxes in 27 s until the session was killed."""
+def test_a_failed_sandbox_is_created_once_against_a_platform_that_replays_a_spent_key(service: _Service) -> None:
+    """Agent Sandbox answers a failed sandbox with a 500, then reports its key spent (410); a new key would make another
+    sandbox that fails the same way, so one acquire must create exactly one sandbox."""
     _platform_answers(service, *[(500, CREATE_FAILED_BODY), (410, KEY_SPENT_BODY)] * 20)
     with pytest.raises(SandboxCreateFailed, match="sandbox_create_failed"):
         _acquire(_e2b_pool(service))

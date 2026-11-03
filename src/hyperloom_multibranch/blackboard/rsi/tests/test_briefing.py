@@ -70,12 +70,12 @@ from hyperloom_multibranch.blackboard.tools import FOCUS_LINE
 from hyperloom_multibranch.repo.merge import Stored, stack_kernel_slot
 from hyperloom_multibranch.toolbox.kernel_artifacts import mint_kernel_artifact, union_rows
 from hyperloom_multibranch.toolbox.tests.kernel_rows import (
-    B01_HEAD,
-    B01_NEW,
-    B01_SHARED,
-    B06_NEW,
-    B09_NEW,
+    ALPHA_NEW,
+    BETA_HEAD,
+    BETA_NEW,
+    BETA_SHARED,
     ENV,
+    GAMMA_NEW,
     SHARED,
     csv_text,
     install,
@@ -442,8 +442,8 @@ async def test_a_peer_replay_takes_the_wider_table_and_names_no_loss(tmp_path: P
     blackboard = await scripted_session(root, FakeClock())
     toolbox = LocalBlackboard(root, Writer(Role.TOOLBOX, "toolbox"), clock=FakeClock())
     narrow = mint_kernel_artifact(KernelKind.GEMM, "a8w8", ENV, csv_text(SHARED))
-    wide = mint_kernel_artifact(KernelKind.GEMM, target, ENV, csv_text(SHARED, B09_NEW))
-    store = {narrow.sha256: csv_text(SHARED), wide.sha256: csv_text(SHARED, B09_NEW)}
+    wide = mint_kernel_artifact(KernelKind.GEMM, target, ENV, csv_text(SHARED, ALPHA_NEW))
+    store = {narrow.sha256: csv_text(SHARED), wide.sha256: csv_text(SHARED, ALPHA_NEW)}
     await toolbox.write_request(request("r7", SPLIT_KV, RecipeDelta(add_kernels=(wide,))))
     head = Recipe("sha256:" + "a" * 64, LaunchConfig("--max-num-seqs 128"), kernels=(narrow,))
     briefing = CrossSessionBriefing(
@@ -462,8 +462,8 @@ async def test_a_peer_replay_drops_a_kernel_the_heads_wider_table_already_covers
     blackboard = await scripted_session(root, FakeClock())
     toolbox = LocalBlackboard(root, Writer(Role.TOOLBOX, "toolbox"), clock=FakeClock())
     narrow = mint_kernel_artifact(KernelKind.GEMM, "a8w8", ENV, csv_text(SHARED))
-    wide = mint_kernel_artifact(KernelKind.GEMM, "a8w8", ENV, csv_text(SHARED, B09_NEW))
-    store = {narrow.sha256: csv_text(SHARED), wide.sha256: csv_text(SHARED, B09_NEW)}
+    wide = mint_kernel_artifact(KernelKind.GEMM, "a8w8", ENV, csv_text(SHARED, ALPHA_NEW))
+    store = {narrow.sha256: csv_text(SHARED), wide.sha256: csv_text(SHARED, ALPHA_NEW)}
     await toolbox.write_request(request("r7", SPLIT_KV, RecipeDelta(add_kernels=(narrow,))))
     head = Recipe("sha256:" + "a" * 64, LaunchConfig("--max-num-seqs 128"), kernels=(wide,))
     briefing = CrossSessionBriefing(
@@ -499,7 +499,7 @@ async def _replayed_over(
 async def test_a_peer_replay_unites_two_tables_each_with_rows_the_other_lacks(tmp_path: Path, target: str) -> None:
     """In the head's slot, also when the peer's table is for another layer on the head's load variable."""
 
-    head_data, peer_data = csv_text(SHARED, B01_NEW), csv_text(SHARED[:3], B06_NEW)
+    head_data, peer_data = csv_text(SHARED, BETA_NEW), csv_text(SHARED[:3], GAMMA_NEW)
 
     replayed, store = await _replayed_over(tmp_path, head_data, peer_data, target)
 
@@ -511,12 +511,12 @@ async def test_a_peer_replay_unites_two_tables_each_with_rows_the_other_lacks(tm
 
 
 async def test_a_peer_replay_keeps_the_heads_row_for_a_shape_both_tuned(tmp_path: Path) -> None:
-    head_data, peer_data = csv_text(SHARED, B01_HEAD), csv_text(B01_SHARED, B01_NEW)
+    head_data, peer_data = csv_text(SHARED, BETA_HEAD), csv_text(BETA_SHARED, BETA_NEW)
 
     replayed, store = await _replayed_over(tmp_path, head_data, peer_data)
 
     (united,) = replayed.delta.add_kernels
-    expected = union_rows(csv_text(B01_NEW), head_data, ENV, configs=install(tmp_path / "expected"))
+    expected = union_rows(csv_text(BETA_NEW), head_data, ENV, configs=install(tmp_path / "expected"))
     assert replayed.replaces == ()
     assert store[united.sha256] == expected
 

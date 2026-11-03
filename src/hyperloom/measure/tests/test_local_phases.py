@@ -69,8 +69,8 @@ def test_a_graded_test_goes_through_its_phases_in_order_and_they_add_up_to_the_t
     outcome, recorder = _run(monkeypatch, clock, _graded_call(tmp_path), Rounds(clock).graded())
 
     assert _stamped(outcome.phases) == [
-        ("round_setup", 7.779, 0),
-        ("server_boot.other", 20.221, 0),
+        ("round_setup", 8.0, 0),
+        ("server_boot.other", 20.0, 0),
         ("server_boot.weights_load", 40.0, 0),
         ("server_boot.compile", 10.0, 0),
         ("server_boot.graph_capture", 12.0, 0),

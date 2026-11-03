@@ -82,9 +82,9 @@ async def test_a_profile_result_that_holds_no_trace_is_refused(tmp_path: Path, r
 async def test_a_profile_whose_traces_are_all_graph_capture_sidecars_is_refused_with_the_reason(
     tmp_path: Path, rig: Rig
 ) -> None:
-    """A NEXTN head's profile: the server captured its CUDA graphs at boot, then the run ended before the capture window,
-    so ``graph_capture_profile/`` is all that landed. It is no result, and says why, rather than a success no analysis
-    can read op shares from."""
+    """A profile whose run ends before the capture window: the server captured its CUDA graphs at boot, so
+    ``graph_capture_profile/`` is all that lands. It is no result, and says why, rather than a success no analysis can
+    read op shares from."""
     executor = HostedExecutor(rig.backend, tmp_path / "session")
 
     with pytest.raises(MeasurementRefused) as refused:

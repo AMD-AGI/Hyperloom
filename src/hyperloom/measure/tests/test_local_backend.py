@@ -214,7 +214,7 @@ def test_an_accuracy_test_reports_the_accuracy_round_with_the_eval_exit_code(gri
 def _lm_eval_results(directory: Path, score: float) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     document = {"results": {"gsm8k": {"exact_match,flexible-extract": score}}}
-    (directory / "results_2026-10-14T10-00-00.json").write_text(json.dumps(document), encoding="utf-8")
+    (directory / "results_2000-01-01T10-00-00.json").write_text(json.dumps(document), encoding="utf-8")
 
 
 def test_the_accuracy_round_carries_the_measured_rounds_scores_not_the_warmups(grid, tmp_path):
@@ -238,7 +238,7 @@ def test_the_accuracy_round_carries_the_version_lm_eval_reported(grid, tmp_path)
     workspace.joinpath("eval_output").mkdir(parents=True, exist_ok=True)
     document = {"results": {"gsm8k": {"exact_match,flexible-extract": 0.64}}, "versions": {"gsm8k": 3.0}}
     document["lm_eval_version"] = "0.4.13"
-    (workspace / "eval_output" / "results_2026-10-14T10-00-00.json").write_text(json.dumps(document), encoding="utf-8")
+    (workspace / "eval_output" / "results_2000-01-01T10-00-00.json").write_text(json.dumps(document), encoding="utf-8")
     grid.answers["test"] = result
     point = _point(tmp_path, "acc", run_eval="true")
 
@@ -1565,17 +1565,17 @@ def test_a_failed_round_is_classified_from_the_refused_request_in_its_benchmark_
     assert (outcome.failure_class, outcome.failure_reason) == ("unclear", f"lm_eval_http_400: WARNING {refusal}")
 
 
-# What a graded test whose evaluation was refused left on a real SGLang 0.5 server (``--context-length 400``, a small
-# dense model): the benchmark served its whole protocol, so run_grid kept the round ``succeeded`` with the evaluation's
-# exit code.
+# What the server and the evaluation client print when the evaluation's request is longer than the served context
+# (``--context-length 400``): the benchmark served its whole protocol, so run_grid kept the round ``succeeded`` with the
+# evaluation's exit code.
 _REFUSED_REQUEST = (
-    "2026-10-21:06:27:25 WARNING  [models.api_models:521] API request failed! Status code: 400, Response text: "
-    '{"object":"error","message":"The input (1392 tokens) is longer than the model\'s context length (400 tokens).",'
+    "2000-01-01:00:00:00 WARNING  [models.api_models:521] API request failed! Status code: 400, Response text: "
+    '{"object":"error","message":"The input (1000 tokens) is longer than the model\'s context length (400 tokens).",'
     '"type":"BadRequestError","param":null,"code":400}. Retrying...'
 )
 _SESSION_CLOSED = """\
 Task exception was never retrieved
-future: <Task finished name='Task-121' coro=<tqdm_asyncio.gather.<locals>.wrap_awaitable() done, defined at /opt/venv/lib/python3.10/site-packages/tqdm/asyncio.py:75> exception=RuntimeError('Session is closed')>
+future: <Task finished name='Task-1' coro=<tqdm_asyncio.gather.<locals>.wrap_awaitable() done, defined at /opt/venv/lib/python3.10/site-packages/tqdm/asyncio.py:75> exception=RuntimeError('Session is closed')>
 Traceback (most recent call last):
   File "/opt/venv/lib/python3.10/site-packages/lm_eval/models/api_models.py", line 514, in amodel_call
     async with session.post(
@@ -1585,7 +1585,7 @@ Traceback (most recent call last):
     raise RuntimeError("Session is closed")
 RuntimeError: Session is closed
 """
-_ACCESS_400 = '[2026-10-21 06:27:25] INFO:     127.0.0.1:58342 - "POST /v1/completions HTTP/1.1" 400 Bad Request\n'
+_ACCESS_400 = '[2000-01-01 00:00:00] INFO:     127.0.0.1:40000 - "POST /v1/completions HTTP/1.1" 400 Bad Request\n'
 
 
 def test_a_refused_evaluation_names_the_refusal_that_a_flood_of_tracebacks_pushed_out_of_the_log_tail(
@@ -1654,7 +1654,7 @@ def test_an_evaluation_that_fails_after_a_whole_protocol_is_classified_from_the_
     workspace = tmp_path / "ws" / "warmup"
     workspace.mkdir(parents=True)
     (workspace / "server.log").write_text(_ACCESS_400 * 4, encoding="utf-8")
-    (workspace / "benchmark_stderr.log").write_text(_REFUSED_REQUEST + "\n" + _SESSION_CLOSED * 38, encoding="utf-8")
+    (workspace / "benchmark_stderr.log").write_text(_REFUSED_REQUEST + "\n" + _SESSION_CLOSED * 40, encoding="utf-8")
     (workspace / "eval_returncode").write_text("1", encoding="utf-8")
     grid.answers.update(
         warmup=grid.result(

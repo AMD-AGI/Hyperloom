@@ -4,8 +4,8 @@
 """The start step of a measurement template: one line that starts the checked runner in the background and returns.
 
 A template's steps run before the sandbox service starts its agent, so a step that ran the runner in the foreground would
-keep the sandbox from ever turning ready and the spec from ever arriving. The line is pinned to a step that was seen
-working on a sandbox service, and run here with ``/bin/sh`` against the rig's stand-in cache entry.
+keep the sandbox from ever turning ready and the spec from ever arriving. The line is pinned byte for byte (its SHA-256
+below), and run here with ``/bin/sh`` against the rig's stand-in cache entry.
 """
 
 from __future__ import annotations
@@ -25,8 +25,8 @@ from hyperloom.measure.runner.bootstrap import TEMPLATE_SPEC_WAIT_SEC, runner_st
 from hyperloom.measure.runner.cache_layout import MANIFEST_NAME, MANIFEST_PIN_ENV
 from hyperloom.measure.runner.tests.bootstrap_rig import PROBE_FILE, Rig, read_probe
 
-#: A step whose sandboxes turned ready (a key copy as the template's own preparation).
-_MEASURED_STEP = (
+#: The step as a template carries it (a key copy as the template's own preparation).
+_PINNED_STEP = (
     'mkdir -p /app/in /app/out /app/work/scratch && (umask 077 && cp "$HYPERLOOM_SIGNING_KEY_FILE" /app/w'
     "ork/hl-sign.pem) && (HYPERLOOM_SIGNING_KEY_FILE=/app/work/hl-sign.pem nohup sh -c 'e=\"${HYPERLOOM_RU"
     'NNER_CACHE:-/runner-cache}/${HYPERLOOM_SOURCE_SHA:-}" d="${TMPDIR:-/tmp}/hl-start.$$" o="${HYPERLOOM'
@@ -42,8 +42,8 @@ _MEASURED_STEP = (
     'HA256 pins, or that or HYPERLOOM_SOURCE_SHA is not set", "state": "failed"}\'"\'"\' >"$o/.status.json.t'
     'mp" && mv "$o/.status.json.tmp" "$o/status.json"; exit 2\' >/app/work/runner-boot.log 2>&1 &)'
 )
-#: The SHA-256 of that step as the run's file held it, with its final newline.
-_MEASURED_SHA256 = "a9f37e7ea9b19f7c5ae6c2d79d9c1a0a27872dd1b96bb75ab1bf7b03c8edf36c"
+#: The SHA-256 of that step, with its final newline.
+_PINNED_SHA256 = "a9f37e7ea9b19f7c5ae6c2d79d9c1a0a27872dd1b96bb75ab1bf7b03c8edf36c"
 _KEY_COPY = '(umask 077 && cp "$HYPERLOOM_SIGNING_KEY_FILE" /app/work/hl-sign.pem)'
 _APP_PATHS = {"dirs": ("/app/in", "/app/out", "/app/work/scratch"), "boot_log": "/app/work/runner-boot.log"}
 #: How long the step may take to return: it makes three directories and forks; the runner's start is not waited for.
@@ -53,8 +53,8 @@ _RUNNER_UP_SEC = 150.0
 _SPEC = b'{"id": 7}'
 
 
-def test_the_step_is_the_one_the_joint_run_measured() -> None:
-    assert hashlib.sha256(f"{_MEASURED_STEP}\n".encode()).hexdigest() == _MEASURED_SHA256
+def test_the_step_is_the_pinned_one() -> None:
+    assert hashlib.sha256(f"{_PINNED_STEP}\n".encode()).hexdigest() == _PINNED_SHA256
     step = runner_template_step(
         "--spec-wait-sec",
         "1800",
@@ -62,7 +62,7 @@ def test_the_step_is_the_one_the_joint_run_measured() -> None:
         env={"HYPERLOOM_SIGNING_KEY_FILE": "/app/work/hl-sign.pem"},
         **_APP_PATHS,
     )
-    assert step == _MEASURED_STEP
+    assert step == _PINNED_STEP
     subprocess.run(["/bin/sh", "-n", "-c", step], check=True)
 
 

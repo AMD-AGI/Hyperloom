@@ -24,7 +24,7 @@ TRACE_NAME = "rank0.pt.trace.json.gz"
 
 async def fake_run_grid(*, grid: list[Any], output_root: Path, **_: Any) -> list[VariantResult]:
     name = grid[0].name
-    workspace = Path(output_root) / name / "benchmark_stub_20261014_000000"
+    workspace = Path(output_root) / name / "benchmark_stub_20000101_000000"
     trace = workspace / "torch_trace" / TRACE_NAME
     trace.parent.mkdir(parents=True)
     trace.write_bytes(b"stub trace bytes")

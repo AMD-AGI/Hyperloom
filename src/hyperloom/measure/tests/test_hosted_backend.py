@@ -68,7 +68,7 @@ def test_a_signed_result_is_verified_archived_and_landed(rig, tmp_path) -> None:
     call, outcome = _run(r, tmp_path, fake_throughput=4321.5, fake_completed=77)
     assert outcome.returncode == 0
     assert outcome.failure_class is None and outcome.failure_reason is None
-    report = call.output_dir / "benchmark_fake_20261014_000000" / "benchmark_report.json"
+    report = call.output_dir / "benchmark_fake_20000101_000000" / "benchmark_report.json"
     assert json.loads(report.read_text())["throughput"]["output_throughput"] == 4321.5
     assert (call.output_dir / "server.log").read_bytes() == b"server up\nserver down\n"
     assert outcome.sandbox.node_name == HOSTNAME and outcome.sandbox.backend == "hosted"
@@ -110,13 +110,13 @@ def test_rounds_come_from_the_runners_rounds_file_when_it_lists_one(rig, tmp_pat
     r = rig()
     _, outcome = _run(r, tmp_path, fake_rounds="true")
     assert [(x.point, x.phase, x.returncode) for x in outcome.rounds] == [(0, "measure", 0)]
-    assert outcome.rounds[0].output_dir.name == "benchmark_fake_20261014_000000"
+    assert outcome.rounds[0].output_dir.name == "benchmark_fake_20000101_000000"
 
 
 def test_without_a_rounds_file_a_report_in_the_warmup_directory_is_not_a_measuring_round(rig, tmp_path) -> None:
     r = rig()
     _, outcome = _run(r, tmp_path, fake_warmup="true")
-    assert [(x.phase, x.output_dir.name) for x in outcome.rounds] == [("measure", "benchmark_fake_20261014_000000")]
+    assert [(x.phase, x.output_dir.name) for x in outcome.rounds] == [("measure", "benchmark_fake_20000101_000000")]
     assert "warmup_round" not in outcome.rounds[0].output_dir.parts
 
 
@@ -462,7 +462,7 @@ def test_a_restarted_application_reattaches_instead_of_measuring_twice(rig, tmp_
     assert resumed.sandbox.sandbox_id == submitted.sandbox_id
     record = r.backend.journal.latest("req-1")
     assert (record.state, record.attempt) == (STATE_FINISHED, 1) and record.extra["verified"] is True
-    report = call.output_dir / "benchmark_fake_20261014_000000" / "benchmark_report.json"
+    report = call.output_dir / "benchmark_fake_20000101_000000" / "benchmark_report.json"
     assert json.loads(report.read_text())["throughput"]["output_throughput"] == 1234.0
 
 
@@ -507,7 +507,7 @@ def test_a_restart_before_the_sheet_was_sent_sends_it_to_the_sandbox_that_waits(
     resumed = r.another_backend().run_test(call)
     assert resumed.returncode == 0 and created == [], "the waiting sandbox was used, not a second one"
     assert [x.state for x in r.backend.journal.records()] == [STATE_SUBMITTED, STATE_SENT, STATE_FINISHED]
-    report = call.output_dir / "benchmark_fake_20261014_000000" / "benchmark_report.json"
+    report = call.output_dir / "benchmark_fake_20000101_000000" / "benchmark_report.json"
     assert json.loads(report.read_text())["throughput"]["output_throughput"] == 777.0
 
 

@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: MIT
 
 """The real runner and the real local backend, with only ``run_grid`` replaced: the test of the kind
-``HL_PHASE_SCENARIO`` names (``graded``, ``agentx`` or ``failing_boot``, see ``phase_rounds.Rounds``), whose rounds spend
-``HL_PHASE_SCALE`` times the seconds a real round spends and leave the marks a launcher leaves beside each run's log.
+``HL_PHASE_SCENARIO`` names (``graded``, ``agentx`` or ``failing_boot``, see ``phase_rounds.Rounds``), whose rounds
+spend ``HL_PHASE_SCALE`` times the made-up seconds of ``phase_rounds`` and leave the marks a launcher leaves beside each
+run's log.
 
 Started as a local sandbox template's command. What the runner stamps, signs and the host lands is all shipped code.
 """

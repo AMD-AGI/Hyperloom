@@ -28,7 +28,7 @@ from hyperloom_multibranch.toolbox.mcp_tools import jsonable
 from hyperloom_multibranch.toolbox.tests.helpers import build
 from hyperloom_multibranch.toolbox.tests.test_hosted_executor import POLICY, PointPlanner, _run
 
-EXPORT_IN_BUNDLE = "benchmark_fake_20261014_000000/aiperf_artifacts/profile_export.jsonl"
+EXPORT_IN_BUNDLE = "benchmark_fake_20000101_000000/aiperf_artifacts/profile_export.jsonl"
 
 
 @pytest.fixture

@@ -76,7 +76,7 @@ def test_cards_nobody_but_the_test_holds_are_clean_and_the_result_says_how_often
 def test_a_process_outside_the_test_that_holds_a_card_before_it_starts_refuses_the_result(tree: KernelTree) -> None:
     tree.process(900, command=("python3", "-c", "import torch; torch.zeros(1).cuda()"))
     tree.holds(900, 1)
-    watch = _watch(tree, clock=lambda: _unix("2026-10-24T04:05:06Z"))
+    watch = _watch(tree, clock=lambda: _unix("2000-01-01T04:05:06Z"))
 
     watch.check(BEFORE_TEST)
 
@@ -84,7 +84,7 @@ def test_a_process_outside_the_test_that_holds_a_card_before_it_starts_refuses_t
         watch.enforce_guard()
     assert refused.value.error_class == "foreign_process_on_card"
     assert str(refused.value) == (
-        "1 held the test's cards: pid 900 on card 1, first seen 2026-10-24T04:05:06Z before the test: "
+        "1 held the test's cards: pid 900 on card 1, first seen 2000-01-01T04:05:06Z before the test: "
         "python3 -c import torch; torch.zeros(1).cuda()"
     )
 
@@ -266,7 +266,7 @@ def _intruder_seen_by(watch: CardWatch, tree: KernelTree) -> None:
 
 
 def test_a_guard_that_observes_refuses_nothing_and_the_result_says_who_was_seen(tree: KernelTree) -> None:
-    watch = _watch(tree, guard=CardGuard.OBSERVE, clock=lambda: _unix("2026-10-24T04:05:06Z"))
+    watch = _watch(tree, guard=CardGuard.OBSERVE, clock=lambda: _unix("2000-01-01T04:05:06Z"))
     _intruder_seen_by(watch, tree)
 
     watch.enforce_guard()
@@ -274,7 +274,7 @@ def test_a_guard_that_observes_refuses_nothing_and_the_result_says_who_was_seen(
     statement = watch.statement()
     assert statement == CardStatement(
         CARD_FOREIGN,
-        "1 held the test's cards: pid 950 on card 1, first seen 2026-10-24T04:05:06Z before the test: "
+        "1 held the test's cards: pid 950 on card 1, first seen 2000-01-01T04:05:06Z before the test: "
         "python3 -c import torch",
         2,
         METHOD_PID_MATCH,

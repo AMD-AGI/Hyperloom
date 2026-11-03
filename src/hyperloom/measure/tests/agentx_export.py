@@ -3,15 +3,13 @@
 
 """Lines of aiperf's per-request export (``profile_export.jsonl``), in the shapes the pinned replay client writes them.
 
-No export of a real AgentX run was reachable. The shapes of a failed request are those the pinned client
-(``SemiAnalysisAI/aiperf`` 754356e) wrote when its own parser, metric processor and export writer were run on a
-constructed reply with the server token counts InferenceX asks for: a request that got no reply has no metric at all, a
-reply the client found nothing in has the input token count the server reported and, with the runner's patch, the
-output one as ``error_osl`` (the name is written out here, not read from the rule pack, so a pack that renames it
-breaks the tests). The metadata keys and the successful and cancelled records are those of
-``docs/tutorials/working-with-profile-exports.md``; the error of a refused request is what ``aiohttp_client.py`` builds
-(the status as ``code``, its reason phrase as ``type``). Fields the writer leaves out when they are ``None``
-(``exclude_none``) are left out.
+The shapes are built from the pinned client's source and docs (``SemiAnalysisAI/aiperf`` 754356e): a request that got
+no reply has no metric at all, a reply the client found nothing in has the input token count the server reported and,
+with the runner's patch, the output one as ``error_osl`` (the name is written out here, not read from the rule pack, so
+a pack that renames it breaks the tests). The metadata keys, their example values and the successful and cancelled
+records are those of the client's ``docs/tutorials/working-with-profile-exports.md``; the error of a refused request is
+what ``aiohttp_client.py`` builds (the status as ``code``, its reason phrase as ``type``). Fields the writer leaves out
+when they are ``None`` (``exclude_none``) are left out.
 """
 
 from __future__ import annotations

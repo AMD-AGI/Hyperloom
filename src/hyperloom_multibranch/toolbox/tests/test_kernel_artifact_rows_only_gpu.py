@@ -90,9 +90,8 @@ def image_rows_taken(rows: list[dict[str, str]]) -> dict[str, int]:
 
 
 def _hits_of_put_rows(lookups: list[str]) -> list[str]:
-    """The hit lines of the rows put: ``torch`` rows whose kernel is named ``torch``. The image's own ``torch`` rows (the
-    server of the not-exercised test logs six of them) name their kernel ``native``, so the libtype alone does not tell
-    the two apart."""
+    """The hit lines of the rows put: ``torch`` rows whose kernel is named ``torch``. The image's own ``torch`` rows name
+    their kernel ``native``, so the libtype alone does not tell the two apart."""
     named = f"libtype is {TORCH_ROW['libtype']}, kernel name is {TORCH_ROW['kernelName']}"
     return [line for line in lookups if "is tuned on cu_num" in line and line.endswith(named)]
 

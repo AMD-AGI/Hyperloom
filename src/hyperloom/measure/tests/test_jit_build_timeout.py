@@ -4,8 +4,8 @@
 """A server the scheduler watchdog ended while a rank was still in aiter's JIT build is ``jit_build_timeout``, an
 infrastructure failure, not an unclear one with no known signature.
 
-The log lines are those of a TP4 test whose tuned blockscale table made aiter rebuild its module at the first
-prefill: the watchdog's line on every rank, then the stacks py-spy dumped.
+The log lines have the shape a server leaves when the scheduler watchdog fires while a rank is still in aiter's JIT
+build: the watchdog's line, then the stacks py-spy dumped.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import pytest
 from hyperloom.contracts.measurement import FailureClass
 from hyperloom.measure.failures import JIT_BUILD_TIMEOUT, NO_KNOWN_SIGNATURE_REASON, classify_test_failure
 
-WATCHDOG = "[2026-10-27 06:58:27 TP0] Scheduler watchdog timeout (self.watchdog_timeout=300)"
+WATCHDOG = "[2000-01-01 00:00:00 TP0] Scheduler watchdog timeout (self.watchdog_timeout=300)"
 PYSPY = """Thread 1234 (idle): "MainThread"
     mp_lock (aiter/jit/core.py:211)
     build_module (aiter/jit/core.py:497)
