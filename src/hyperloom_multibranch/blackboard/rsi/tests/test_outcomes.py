@@ -13,18 +13,21 @@ import pytest
 from hyperloom_multibranch.contracts.blackboard.peers import IntentLayer
 from hyperloom_multibranch.contracts.blackboard.records import BlackboardSnapshot
 from hyperloom_multibranch.blackboard.families import Family, Mechanism
-from hyperloom_multibranch.blackboard.rsi.archive import TreeArchive
+from hyperloom_multibranch.blackboard.rsi.archive import TreeArchive, TreeDirection
 from hyperloom_multibranch.blackboard.rsi.menu import CODE, SETTINGS, LoggedMenu, record_family
 from hyperloom_multibranch.blackboard.rsi.outcomes import (
     CONTROL_GROUP,
     MENU_GROUP,
+    NO_MENU_GROUP,
     GroupOutcome,
     OutcomePool,
     SpecialistOutcomes,
     pooled,
     specialist_outcomes,
 )
+from hyperloom_multibranch.blackboard.rsi.similarity import task_conditions
 from hyperloom_multibranch.blackboard.rsi.studies import main
+from hyperloom_multibranch.blackboard.rsi.tests.trees import branch, tree
 
 
 def _menu_before_r4(snapshot: BlackboardSnapshot) -> LoggedMenu:
@@ -73,6 +76,33 @@ def test_an_open_line_of_an_op_family_lists_every_test_of_that_op(snapshot: Blac
     assert total.odds_sum == pytest.approx(0.2)
 
 
+def test_an_explore_test_of_a_family_the_archive_tried_and_never_committed_in_is_a_retry(
+    snapshot: BlackboardSnapshot,
+) -> None:
+    records = {record.request_id: record for record in snapshot.records}
+    family = record_family(snapshot, records["r4"])
+    assert family is not None and snapshot.profile is not None
+    assert record_family(snapshot, records["r1"]) == family
+    tried = TreeDirection(
+        family.target,
+        family.mechanism.value,
+        family.layer,
+        tests=3,
+        family_target=family.target,
+        family_mechanism=family.mechanism.value,
+    )
+    past = tree("past", branch("b1", [], directions=(tried,)), task=task_conditions(snapshot.profile))
+
+    found = specialist_outcomes(snapshot, (), (past,))
+
+    total = sum(found.groups.values(), GroupOutcome())
+    # r1 and r4 are tests of the family the past session tried three times; r1 committed.
+    assert (total.retried_tests, total.retried_commits) == (2, 1)
+    # No menu was given, so no branch is the menu's or its control.
+    assert set(found.groups) == {NO_MENU_GROUP} and "| no menu |" in found.render()
+    assert found.render().splitlines()[2].endswith("| retried barren share | commit rate retried / rest |")
+
+
 def test_the_pool_keeps_each_sessions_outcomes_once_and_the_studies_add_them_up(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -87,6 +117,8 @@ def test_the_pool_keeps_each_sessions_outcomes_once_and_the_studies_add_them_up(
     code = main(["outcomes", "--archive", str(tmp_path)])
 
     assert both.groups[MENU_GROUP] == GroupOutcome(branches=4, tests=15, commits=4)
-    assert both.note() == "commit rate 0.27 with the menu, 0.00 without; on a menu line n/a against n/a"
+    assert both.note() == (
+        "commit rate 0.27 with the menu, 0.00 without; on a menu line n/a against n/a; retried barren 0.00 against 0.00"
+    )
     assert code == 0 and "| menu | 4 | 15 | 0.27 |" in capsys.readouterr().out
     assert main(["outcomes", "--archive", str(tmp_path / "empty")]) == 2

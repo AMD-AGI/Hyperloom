@@ -4,12 +4,16 @@
 """What the specialists' tests came to, the menu's branches beside its control: whether the menu pays, by outcomes.
 
 :func:`specialist_outcomes` counts, at CLOSE, each group's explore tests (the branches shown the menu, and the control
-branches, drawn for none, :func:`~.menu.in_control`): how many committed, the gain their merged commits brought per GPU
+branches, drawn for none, :func:`~.menu.in_control`; in a session that gave no menu, reading no archive, its branches
+are one group of their own, :data:`NO_MENU_GROUP`): how many committed, the gain their merged commits brought per GPU
 hour, and how many fell on a family the session's model type had tried fewer than :data:`EXPLORE_TRIALS` times before,
-the exploring ones, with what those committed. A test whose branch was drawn a menu before it, the control's as well, is
-read against the last one: whether a line of either list covers its family and, where one does, the odds it gave beside
-whether the test committed, the menu's calibration. A control branch's menu was drawn but never shown, so how often its
-tests fall on a menu line anyway is what the menu's own share is read against.
+the exploring ones, with what those committed, and how many on a family it had tried :data:`BARREN_TRIALS` times or
+more and never committed in, the barren ones: a session that reads the archive should seldom try those again, and when
+their commit rate nears the rest's, the archive has called directions barren that are not. A test whose branch was
+drawn a menu before it, the control's as well, is read against the last one: whether a line of either list covers its
+family and, where one does, the odds it gave beside whether the test committed, the menu's calibration. A control
+branch's menu was drawn but never shown, so how often its tests fall on a menu line anyway is what the menu's own
+share is read against.
 
 Each session's outcomes are kept beside the archive (:class:`OutcomePool`), so the studies add them up over sessions.
 """
@@ -29,17 +33,21 @@ from hyperloom_multibranch.blackboard.codec import decode, encode
 from hyperloom_multibranch.blackboard.families import Family
 from hyperloom_multibranch.blackboard.local.files import encode_json, publish_once
 from hyperloom_multibranch.blackboard.rsi.archive import SearchTree, TreeArchive
-from hyperloom_multibranch.blackboard.rsi.family_stats import family_stats
+from hyperloom_multibranch.blackboard.rsi.family_stats import FamilyStat, family_stats
 from hyperloom_multibranch.blackboard.rsi.history import MODEL_TYPE_LABEL
 from hyperloom_multibranch.blackboard.rsi.menu import LoggedMenu, explored, in_control, record_family
 from hyperloom_multibranch.blackboard.rsi.report import table
 
 #: Fewer tests of the session's model type than this make a family one to explore.
 EXPLORE_TRIALS = 2.0
+#: As many tests of the session's model type as this, none of them committing, make a family barren.
+BARREN_TRIALS = 2.0
 OUTCOMES_FORMAT = "multibranch.specialist-outcomes"
 OUTCOMES_REPORT = "specialist-outcomes.md"
 MENU_GROUP = "menu"
 CONTROL_GROUP = "control"
+#: The branches of a session that gave no menu, one that reads no archive: neither the menu's nor its control.
+NO_MENU_GROUP = "no menu"
 _OUTCOMES = "outcomes"
 _SECONDS_PER_HOUR = 3600.0
 
@@ -49,7 +57,7 @@ class GroupOutcome:
     """One group's explore tests, every count adding up over sessions: its ``branches``, ``tests`` and ``commits``,
     the GPU seconds all its tests took and the gain its merged commits brought; the exploring tests and their commits;
     the tests read against a menu drawn before them, and those on a family one of its lines listed with the odds it
-    gave them summed, what they committed and their squared error."""
+    gave them summed, what they committed and their squared error; the tests on a barren family and their commits."""
 
     branches: int = 0
     tests: int = 0
@@ -63,6 +71,8 @@ class GroupOutcome:
     listed_commits: int = 0
     odds_sum: float = 0.0
     squared_error: float = 0.0
+    retried_tests: int = 0
+    retried_commits: int = 0
 
     def __add__(self, other: GroupOutcome) -> GroupOutcome:
         return GroupOutcome(
@@ -83,6 +93,9 @@ class GroupOutcome:
             _rate(self.listed, self.after_menu),
             f"{_rate(self.odds_sum, self.listed)} / {_rate(self.listed_commits, self.listed)}",
             _rate(self.squared_error, self.listed),
+            _rate(self.retried_tests, self.tests),
+            f"{_rate(self.retried_commits, self.retried_tests)} / "
+            f"{_rate(self.commits - self.retried_commits, self.tests - self.retried_tests)}",
         )
 
 
@@ -101,6 +114,8 @@ HEADERS = (
     "on a menu line",
     "odds given / committed",
     "Brier score",
+    "retried barren share",
+    "commit rate retried / rest",
 )
 
 
@@ -112,7 +127,8 @@ class SpecialistOutcomes:
     groups: Mapping[str, GroupOutcome] = field(default_factory=dict)
 
     def render(self, title: str = "") -> str:
-        rows = [self.groups.get(name, GroupOutcome()).row(name) for name in (MENU_GROUP, CONTROL_GROUP)]
+        names = (MENU_GROUP, CONTROL_GROUP, *((NO_MENU_GROUP,) if NO_MENU_GROUP in self.groups else ()))
+        rows = [self.groups.get(name, GroupOutcome()).row(name) for name in names]
         return "\n".join([f"# {title or f'Specialist outcomes of {self.session_id}'}", "", *table(HEADERS, rows)])
 
     def note(self) -> str:
@@ -120,7 +136,8 @@ class SpecialistOutcomes:
         return (
             f"commit rate {_rate(menu.commits, menu.tests)} with the menu, {_rate(control.commits, control.tests)} "
             f"without; on a menu line {_rate(menu.listed, menu.after_menu)} against "
-            f"{_rate(control.listed, control.after_menu)}"
+            f"{_rate(control.listed, control.after_menu)}; retried barren {_rate(menu.retried_tests, menu.tests)} "
+            f"against {_rate(control.retried_tests, control.tests)}"
         )
 
 
@@ -128,16 +145,18 @@ def _last_menu(menus: Sequence[LoggedMenu], branch: str, before: float) -> Logge
     return next((menu for menu in reversed(menus) if menu.branch == branch and menu.at <= before), None)
 
 
-def _test(committed: bool, exploring: bool, shown: LoggedMenu | None, family: Family) -> GroupOutcome:
-    """One explore test of ``family``, read against the menu ``shown`` before it, if any: a line lists the test when
-    one of the families it was logged as covers the test's, as a line of a target with its mechanism open covers every
-    test of that target at its layer."""
+def _test(committed: bool, exploring: bool, retried: bool, shown: LoggedMenu | None, family: Family) -> GroupOutcome:
+    """One explore test of ``family``, a ``retried`` barren one or not, read against the menu ``shown`` before it, if
+    any: a line lists the test when one of the families it was logged as covers the test's, as a line of a target with
+    its mechanism open covers every test of that target at its layer."""
 
     found = GroupOutcome(
         tests=1,
         commits=int(committed),
         exploring_tests=int(exploring),
         exploring_commits=int(exploring and committed),
+        retried_tests=int(retried),
+        retried_commits=int(retried and committed),
     )
     if shown is None:
         return found
@@ -152,6 +171,22 @@ def _test(committed: bool, exploring: bool, shown: LoggedMenu | None, family: Fa
     )
 
 
+def _barren(stats: Mapping[Family, FamilyStat]) -> frozenset[str]:
+    """The labels of the families tried :data:`BARREN_TRIALS` times or more without a commit."""
+
+    return frozenset(family.label for family, stat in stats.items() if stat.tests >= BARREN_TRIALS and not stat.commits)
+
+
+def _groups(snapshot: BlackboardSnapshot, menus: Sequence[LoggedMenu], session: str) -> dict[str, str]:
+    """Each specialist branch's group: :data:`NO_MENU_GROUP` in a session that gave no menu, else the menu's or its
+    control's."""
+
+    branches = [row.branch for row in snapshot.progress if row.branch != INTEGRATION_BRANCH]
+    if not menus:
+        return dict.fromkeys(branches, NO_MENU_GROUP)
+    return {branch: CONTROL_GROUP if in_control(session, branch) else MENU_GROUP for branch in branches}
+
+
 def specialist_outcomes(
     snapshot: BlackboardSnapshot, menus: Sequence[LoggedMenu], history: Sequence[SearchTree]
 ) -> SpecialistOutcomes:
@@ -161,12 +196,10 @@ def specialist_outcomes(
     session = snapshot.profile.session_id if snapshot.profile is not None else ""
     kind = snapshot.profile.model_type if snapshot.profile is not None else ""
     typed = [tree for tree in history if tree.session_id != session and tree.task.labels.get(MODEL_TYPE_LABEL) == kind]
-    tried = {family.label: stat.tests for family, stat in family_stats(typed).items()}
-    group = {
-        row.branch: CONTROL_GROUP if in_control(session, row.branch) else MENU_GROUP
-        for row in snapshot.progress
-        if row.branch != INTEGRATION_BRANCH
-    }
+    stats = family_stats(typed)
+    tried = {family.label: stat.tests for family, stat in stats.items()}
+    barren = _barren(stats)
+    group = _groups(snapshot, menus, session)
     found: dict[str, GroupOutcome] = {}
 
     def add(branch: str, outcome: GroupOutcome) -> None:
@@ -183,7 +216,7 @@ def specialist_outcomes(
         if family is not None:
             exploring = tried.get(family.label, 0.0) < EXPLORE_TRIALS
             shown = _last_menu(menus, branch, record.requested_at)
-            add(branch, _test(record.commit_id is not None, exploring, shown, family))
+            add(branch, _test(record.commit_id is not None, exploring, family.label in barren, shown, family))
     for item in snapshot.committed:
         if item.branch in group and item.merged_into is not None:
             add(item.branch, GroupOutcome(merged_gain_pct=item.gain_pct))
@@ -230,10 +263,12 @@ def pooled(sessions: Sequence[SpecialistOutcomes]) -> SpecialistOutcomes:
 
 
 __all__ = [
+    "BARREN_TRIALS",
     "CONTROL_GROUP",
     "EXPLORE_TRIALS",
     "HEADERS",
     "MENU_GROUP",
+    "NO_MENU_GROUP",
     "OUTCOMES_FORMAT",
     "OUTCOMES_REPORT",
     "GroupOutcome",
