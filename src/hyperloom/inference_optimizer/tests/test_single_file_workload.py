@@ -882,3 +882,144 @@ def test_a_revert_is_not_an_export_attempt(workload):
 
     assert WritebackCollaborator._record_export_gate(stub, kept_flag=False) is False
     assert stub.shared_state.export_attempts == 0
+
+
+def write_evidence(workspace, *, pid=1, instrumented=True, compiled=0, loaded=0, invoked=0, nested="bench"):
+    """Write one process's export counters where the reader looks for them."""
+    from hyperloom.orchestrator.measurement.aoti_evidence import EVIDENCE_DIR_NAME
+
+    out = workspace / nested / EVIDENCE_DIR_NAME
+    out.mkdir(parents=True, exist_ok=True)
+    (out / f"{pid}.json").write_text(
+        json.dumps(
+            {
+                "schema": "hyperloom.aoti_evidence/1",
+                "pid": pid,
+                "instrumented": instrumented,
+                "compiled": compiled,
+                "loaded": loaded,
+                "invoked": invoked,
+            }
+        )
+    )
+
+
+# The four shapes a candidate can take, measured on gfx1151. Only the first exports;
+# all four produce a valid benchmark, and all four parse as "uses aoti".
+EVIDENCE_SHAPES = [
+    ("real export", {"compiled": 1, "loaded": 1, "invoked": 1}, True),
+    ("dead code", {"compiled": 0, "loaded": 0, "invoked": 0}, False),
+    ("caught fallback", {"compiled": 0, "loaded": 0, "invoked": 0}, False),
+    ("compiled, not used", {"compiled": 1, "loaded": 1, "invoked": 0}, False),
+]
+
+
+@pytest.mark.parametrize("name,counts,exported", EVIDENCE_SHAPES, ids=[s[0] for s in EVIDENCE_SHAPES])
+def test_evidence_separates_a_real_export(tmp_path, name, counts, exported):
+    from hyperloom.orchestrator.measurement.aoti_evidence import read_evidence
+
+    write_evidence(tmp_path, **counts)
+
+    evidence = read_evidence(tmp_path)
+
+    assert evidence.observed is True
+    assert evidence.exported is exported
+
+
+def test_evidence_absent_is_not_the_same_as_did_not_export(tmp_path):
+    """No counters means the shim never ran; the gate must not read that as a verdict."""
+    from hyperloom.orchestrator.measurement.aoti_evidence import read_evidence
+
+    evidence = read_evidence(tmp_path)
+
+    assert evidence.observed is False
+    assert evidence.exported is False
+
+
+def test_evidence_ignores_a_process_that_never_instrumented(tmp_path):
+    """Wrapped nothing, so its zeros are evidence of nothing."""
+    from hyperloom.orchestrator.measurement.aoti_evidence import read_evidence
+
+    write_evidence(tmp_path, instrumented=False, compiled=1, loaded=1, invoked=1)
+
+    assert read_evidence(tmp_path).observed is False
+
+
+def test_evidence_aggregates_across_processes(tmp_path):
+    """A forked benchmark reports once per pid; the export may land in any of them."""
+    from hyperloom.orchestrator.measurement.aoti_evidence import read_evidence
+
+    write_evidence(tmp_path, pid=1, compiled=1, loaded=1, invoked=0)
+    write_evidence(tmp_path, pid=2, compiled=0, loaded=0, invoked=1)
+
+    evidence = read_evidence(tmp_path)
+
+    assert evidence.processes == 2
+    assert evidence.exported is True
+
+
+def test_evidence_survives_an_unreadable_file(tmp_path):
+    from hyperloom.orchestrator.measurement.aoti_evidence import EVIDENCE_DIR_NAME, read_evidence
+
+    write_evidence(tmp_path, pid=1, compiled=1, loaded=1, invoked=1)
+    (tmp_path / "bench" / EVIDENCE_DIR_NAME / "2.json").write_text("{ truncated")
+
+    assert read_evidence(tmp_path).exported is True
+
+
+def test_benchmark_runs_are_armed_not_just_profile_runs(workload, tmp_path, monkeypatch):
+    """The gate decides KEEPs, and KEEPs are decided on benchmark runs."""
+    from hyperloom.orchestrator.actions.executors.bypass_scriptable import build_scriptable_env
+    from hyperloom.orchestrator.measurement.aoti_evidence import EVIDENCE_DIR_ENV
+
+    _, hook, _, _ = workload
+    declaration = tmp_path / "bench" / "optimization_scope.json"
+    scope = json.loads(declaration.read_text())
+    scope.update({"schema_version": 2, "aoti": {"enabled": True}})
+    declaration.write_text(json.dumps(scope))
+
+    workspace = tmp_path / "ws"
+    env = build_scriptable_env({"model": "m"}, "scriptable", workspace, profile=False)
+
+    assert env[EVIDENCE_DIR_ENV].endswith("aoti_evidence")
+    assert str(workspace) in env[EVIDENCE_DIR_ENV]
+
+
+def test_not_armed_without_an_aoti_declaration(workload, tmp_path):
+    """Every other workload runs this code path and must see no change."""
+    from hyperloom.orchestrator.actions.executors.bypass_scriptable import build_scriptable_env
+    from hyperloom.orchestrator.measurement.aoti_evidence import EVIDENCE_DIR_ENV
+
+    env = build_scriptable_env({"model": "m"}, "scriptable", tmp_path / "ws", profile=False)
+
+    assert EVIDENCE_DIR_ENV not in env
+
+
+def test_gate_stays_shut_when_the_shim_did_not_run(workload, tmp_path, monkeypatch):
+    """Missing counters are a broken harness, not a verdict; there is no source fallback."""
+    from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
+
+    _, hook, _, _ = workload
+    # A module that would satisfy the old source check, with no counters beside it.
+    hook.write_text(
+        "import torch\n\n\ndef hyperloom_optimize(model):\n    return torch._inductor.aoti_load_package('m.pt2')\n"
+    )
+    empty = tmp_path / "ws-no-counters"
+    empty.mkdir()
+
+    assert WritebackCollaborator._keep_really_exported(object.__new__(WritebackCollaborator), str(empty)) is False
+
+
+def test_gate_stays_shut_when_the_shim_did_not_run(workload, tmp_path):
+    """Missing counters are a broken harness, not a verdict; there is no source fallback."""
+    from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
+
+    _, hook, _, _ = workload
+    # A module that would satisfy the old source check, with no counters beside it.
+    hook.write_text(
+        "import torch\n\n\ndef hyperloom_optimize(model):\n    return torch._inductor.aoti_load_package('m.pt2')\n"
+    )
+    empty = tmp_path / "ws-no-counters"
+    empty.mkdir()
+
+    assert WritebackCollaborator._keep_really_exported(SimpleNamespace(), str(empty)) is False

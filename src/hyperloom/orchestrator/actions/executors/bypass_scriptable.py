@@ -107,6 +107,10 @@ def build_scriptable_env(
         "RESULT_FILENAME": "inferencex_result",
         "RESULT_DIR": str(workspace),
     }
+    # Unlike the kernel-profile flag below, this is armed on every run: the export gate
+    # reads it to decide a KEEP, and KEEPs are decided on benchmark runs. It only
+    # counts calls, so it changes nothing about how the candidate is built.
+    _arm_aoti_evidence(run_scoped, workspace)
     # Scriptable scripts gate tracing on PROFILE=1 and read the trace dir from HYPERLOOM_PROFILE_TRACE_DIR.
     # xDiT's scripts read the legacy VLLM/SGLANG_TORCH_PROFILER_DIR pair (kept for backward compatibility).
     if profile:
@@ -117,6 +121,23 @@ def build_scriptable_env(
             run_scoped["HYPERLOOM_PROFILE_TRACE_DIR"] = profile_dir
         _enable_aoti_kernel_profile(run_scoped)
     return build_benchmark_env(defaults, bench.get("envs"), run_scoped)
+
+
+def _arm_aoti_evidence(run_scoped: dict[str, str], workspace: Path) -> None:
+    """Point the in-process export counters at this run's workspace.
+
+    Fails open, like the kernel-profile flag: an unreadable scope costs the gate its
+    evidence, and the gate already refuses to open without it.
+    """
+    from hyperloom.orchestrator.framework.optimization_scope import aoti_config
+    from hyperloom.orchestrator.measurement.aoti_evidence import EVIDENCE_DIR_ENV, evidence_dir
+
+    try:
+        config = aoti_config()
+    except ValueError:
+        return
+    if config is not None and config.enabled:
+        run_scoped[EVIDENCE_DIR_ENV] = str(evidence_dir(workspace))
 
 
 def _enable_aoti_kernel_profile(run_scoped: dict[str, str]) -> None:
