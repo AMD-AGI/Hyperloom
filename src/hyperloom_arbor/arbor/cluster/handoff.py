@@ -7,8 +7,8 @@ with no dependency, and the work switches to it at 4 hours. The switch happens
 at the last iteration boundary before then: an iteration starts only if it can
 finish before the switch, so none is lost.
 
-This is Cluster A's rule, not a universal one: it lives on ArborX ``main`` only (it
-began on Arbor's ``jiawei-dev``). It is off unless the launcher sets ``ARBOR_ROLL=1``
+This is Cluster A's rule, not a universal one: it lives on Arbor ``main`` only (it
+began on Arbor's ``<old branch>``). It is off unless the launcher sets ``ARBOR_ROLL=1``
 (``scripts/cluster/chunk_lib.sh``); without that the driver never imports this
 module and behaves as before.
 

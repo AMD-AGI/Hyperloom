@@ -22,7 +22,7 @@ MODEL_NAME_LOWER=$(echo "${MODEL_PATH}${MODEL_NAME:-}" | tr '[:upper:]' '[:lower
 
 # ── Route to model-specific SIKL dir if available ──────────────────────────
 if echo "$MODEL_NAME_LOWER" | grep -q "glm"; then
-    SIKL_DIR="${SIKL_DIR:-/it-share-4/yanyuan-glm52-cache/SIKL/sikl/benchmarks/models/glm52}"
+    SIKL_DIR="${SIKL_DIR:-/shared/<cache>/SIKL/sikl/benchmarks/models/glm52}"
     if [ -d "$SIKL_DIR" ]; then
         cd "$SIKL_DIR"
         python3 profile_decode.py \

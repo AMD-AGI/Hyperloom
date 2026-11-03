@@ -1,36 +1,11 @@
-"""Measurement driver for the forge-loop FlyDSL softmax example.
-
-forge-loop treats the driver as a black box invoked as ``python driver.py <args>``
-and communicates with it purely through stdout. This driver implements the three
-modes of that contract:
-
-  * Correctness  ``python driver.py`` -> runs the complete suite and prints
-    ``SNR: <db> dB`` (and ``allclose: True/False``).
-    forge invokes this once as the driver-owned complete correctness suite.
-
-  * Benchmark    ``python driver.py --warmup <n> --iters <n>
-    --bench-mode`` -> prints ``wall_ms`` samples plus one ``case_ms`` aggregate.
-    forge takes the median of those samples as the kernel's wall time.
-
-  * Profiling    ``python driver.py --profile-run`` -> the driver selects the
-    profile case, runs only the target kernel, and exits without reference/timing.
-
-The driver is the correctness ORACLE and the perf MEASURER; forge never edits it
-(it is a protected measurement file). It imports the kernel under optimization by
-its stable public builder ``build_softmax_module`` from ``softmax_kernel.py``.
-
-Stream routing lives HERE, not in the kernel: the FlyDSL launcher takes a
-``stream`` kwarg, and this driver always passes the CURRENT stream. Under the
-CUDA-graph harness the current stream IS the capture stream, so the kernel is
-recorded into the graph. Keeping this in the (protected) driver means the agent
-cannot accidentally break graph capture by editing the kernel.
-"""
+"""Measurement driver for the forge-loop FlyDSL softmax example."""
 
 from __future__ import annotations
 
 import argparse
 import math
 import sys
+from dataclasses import dataclass
 
 import torch
 import flydsl.expr as fx
@@ -48,40 +23,41 @@ _SEED = 0
 
 _TORCH_DTYPE = {"f16": torch.float16, "bf16": torch.bfloat16, "f32": torch.float32}
 
-# build_softmax_module JIT-compiles per (M, N, dtype); cache so correctness and
-# bench of the same shape do not recompile.
+# build_softmax_module JIT-compiles per (M, N, dtype); cache so correctness and bench of the same shape do not
+# recompile.
 _MODULE_CACHE: dict[tuple[int, int, str], object] = {}
 
 
-def _case_id(rows: int, cols: int, dtype: str) -> str:
+@dataclass(frozen=True)
+class _Case:
+    """One scored softmax case: the rows x cols of the 2D input and its dtype."""
+
+    rows: int
+    cols: int
+    dtype: str
+
+
+def _case_id(case: _Case) -> str:
     """Return the opaque token emitted by benchmark mode."""
-    return f"M{rows}_N{cols}_{dtype}"
+    return f"M{case.rows}_N{case.cols}_{case.dtype}"
 
 
-def _build(rows: int, cols: int, dtype: str):
-    key = (rows, cols, dtype)
+def _build(case: _Case):
+    key = (case.rows, case.cols, case.dtype)
     if key not in _MODULE_CACHE:
-        _MODULE_CACHE[key] = build_softmax_module(rows, cols, dtype)
+        _MODULE_CACHE[key] = build_softmax_module(case.rows, case.cols, case.dtype)
     return _MODULE_CACHE[key]
 
 
-def _make_input(rows: int, cols: int, dtype: str, mode: str, device: str) -> torch.Tensor:
-    """Build the softmax input for a given validation mode."""
+def _make_input(case: _Case, device: str) -> torch.Tensor:
+    """Build a standard random softmax input tensor."""
     torch.manual_seed(_SEED)
-    x = torch.randn(rows, cols, device=device, dtype=_TORCH_DTYPE[dtype])
-    if mode == "stability":
-        # Large magnitudes stress the max-subtraction; a kernel that skips it
-        # overflows exp() and fails here.
-        x = x * 50.0
+    x = torch.randn(case.rows, case.cols, device=device, dtype=_TORCH_DTYPE[case.dtype])
     return x
 
 
 def _launch_on_current_stream(launch_fn, x: torch.Tensor, out: torch.Tensor, rows: int) -> None:
-    """Run the FlyDSL kernel on whatever stream is currently active.
-
-    Queried at call time on purpose: under torch.cuda.graph the active stream is
-    the private capture stream, so the launch gets recorded into the graph.
-    """
+    """Run the FlyDSL kernel on whatever stream is currently active."""
     stream = fx.Stream(torch.cuda.current_stream().cuda_stream)
     launch_fn(x, out, rows, stream=stream)
 
@@ -104,11 +80,11 @@ def _snr_db(reference: torch.Tensor, test: torch.Tensor) -> float:
     return 10.0 * math.log10(signal_power / noise_power)
 
 
-def _run_correctness(rows: int, cols: int, dtype: str, mode: str, device: str) -> int:
-    x = _make_input(rows, cols, dtype, mode, device)
+def _run_correctness(case: _Case, device: str) -> int:
+    x = _make_input(case, device)
     out = torch.empty_like(x)
-    launch_fn = _build(rows, cols, dtype)
-    _launch_on_current_stream(launch_fn, x, out, rows)
+    launch_fn = _build(case)
+    _launch_on_current_stream(launch_fn, x, out, case.rows)
     torch.cuda.synchronize()
 
     ref = _reference(x)
@@ -117,19 +93,19 @@ def _run_correctness(rows: int, cols: int, dtype: str, mode: str, device: str) -
     return 0
 
 
-def _run_bench(rows: int, cols: int, dtype: str, warmup: int, iters: int, device: str) -> int:
-    # Static tensors allocated once; the graph harness replays the op on the same
-    # memory so it times GPU execution, not host launch overhead.
-    x = _make_input(rows, cols, dtype, "full", device)
+def _run_bench(case: _Case, warmup: int, iters: int, device: str) -> int:
+    # Static tensors allocated once; the graph harness replays the op on the same memory so it times GPU execution,
+    # not host launch overhead.
+    x = _make_input(case, device)
     out = torch.empty_like(x)
-    launch_fn = _build(rows, cols, dtype)
+    launch_fn = _build(case)
     ref = _reference(x)
 
     def step():
-        _launch_on_current_stream(launch_fn, x, out, rows)
+        _launch_on_current_stream(launch_fn, x, out, case.rows)
 
-    # dirty + verify prove the graph actually captured the kernel (an uncaptured
-    # launch would leave `out` at its dirtied value and fail verify -> eager).
+    # dirty + verify prove the graph actually captured the kernel (an uncaptured launch would leave `out` at its
+    # dirtied value and fail verify, which raises).
     result = cuda_graph_bench(
         step,
         warmup=warmup,
@@ -144,27 +120,22 @@ def _run_bench(rows: int, cols: int, dtype: str, warmup: int, iters: int, device
         print(f"wall_ms: {t:.6f}")
     times = sorted(result["times_ms"])
     print(
-        f"case_ms: {_case_id(rows, cols, dtype)} "
+        f"case_ms: {_case_id(case)} "
         f"{times[len(times) // 2]:.6f}"
     )
     return 0
 
 
-def _run_profile(
-    rows: int,
-    cols: int,
-    dtype: str,
-    device: str,
-) -> int:
+def _run_profile(case: _Case, device: str) -> int:
     """Warm the target, then expose only its dispatches to the profiler."""
-    x = _make_input(rows, cols, dtype, "full", device)
+    x = _make_input(case, device)
     out = torch.empty_like(x)
-    launch_fn = _build(rows, cols, dtype)
+    launch_fn = _build(case)
     for _ in range(3):
-        _launch_on_current_stream(launch_fn, x, out, rows)
+        _launch_on_current_stream(launch_fn, x, out, case.rows)
     torch.cuda.synchronize()
     for _ in range(3):
-        _launch_on_current_stream(launch_fn, x, out, rows)
+        _launch_on_current_stream(launch_fn, x, out, case.rows)
     torch.cuda.synchronize()
     return 0
 
@@ -183,25 +154,13 @@ def main() -> int:
         return 1
 
     device = "cuda"
+    case = _Case(_DEFAULT_M, _DEFAULT_N, _DEFAULT_DTYPE)
     if args.profile_run:
-        return _run_profile(_DEFAULT_M, _DEFAULT_N, _DEFAULT_DTYPE, device)
+        return _run_profile(case, device)
 
     if args.bench_mode:
-        return _run_bench(
-            _DEFAULT_M,
-            _DEFAULT_N,
-            _DEFAULT_DTYPE,
-            args.warmup,
-            args.iters,
-            device,
-        )
-    return _run_correctness(
-        _DEFAULT_M,
-        _DEFAULT_N,
-        _DEFAULT_DTYPE,
-        "full",
-        device,
-    )
+        return _run_bench(case, args.warmup, args.iters, device)
+    return _run_correctness(case, device)
 
 
 if __name__ == "__main__":

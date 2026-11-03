@@ -197,7 +197,7 @@ Constraints:
 - LDS address aligned to data size
 - 64-bit DS ops require even-aligned VGPRs (except B96_TR_B6)
 
-Empirical semantics from kernel-agents/memory: for `DS_READ_B64_TR_B16`,
+Empirical semantics from kernelforge's memory: for `DS_READ_B64_TR_B16`,
 **a 16-lane tile**: `dest[LIT[i]] = src[(LIT/4 + 4i)][LIT%4]`. Works with V
 row-major LDS (no V^T pre-transpose needed). Supersedes earlier asm-playbook
 claims. See `reference_ds_read_b64_tr_b16_semantics.md`.

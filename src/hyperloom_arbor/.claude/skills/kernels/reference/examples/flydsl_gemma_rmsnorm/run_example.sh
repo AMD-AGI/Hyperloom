@@ -2,7 +2,7 @@
 # Drive this forge-loop task (FlyDSL Gemma RMSNorm) end to end.
 #
 # forge-loop git-inits its workspace and edits the kernel IN PLACE, so this
-# script copies the task out of the KernelForge repo into a scratch workspace
+# script copies the task out of the packaged example tree into a scratch workspace
 # first (keeping the repo tree clean) — the isolate-then-run pattern any
 # forge-loop caller should follow.
 #
@@ -11,12 +11,11 @@
 #
 # Environment overrides (all optional):
 #   GPU_TARGET   gfx arch (default: autodetect via rocminfo, else gfx950)
-#   MAX_ITERS    compatibility value; forge-loop ignores it (default: 5)
 #   MAX_HOURS    wall-clock budget in hours            (default: 1.0)
 #   FORGE_MODEL  model name served by your gateway     (default: forge default)
 #
 # Prerequisites:
-#   * KernelForge installed so `kernel-agents` is on PATH (pip install -e .)
+#   * Hyperloom installed so `kernelforge` is on PATH (pip install -e .)
 #   * A GPU with torch + FlyDSL available (`python -c "import flydsl"` works)
 #   * Claude auth configured: ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN, or
 #     CLAUDE_CODE_OAUTH_TOKEN for subscription billing
@@ -32,12 +31,11 @@ detect_arch() {
 }
 GPU_TARGET="${GPU_TARGET:-$(detect_arch)}"
 GPU_TARGET="${GPU_TARGET:-gfx950}"
-MAX_ITERS="${MAX_ITERS:-5}"
 MAX_HOURS="${MAX_HOURS:-1.0}"
 
-if ! command -v kernel-agents >/dev/null 2>&1; then
-  echo "error: 'kernel-agents' not found on PATH. Install KernelForge first:" >&2
-  echo "         pip install -e /path/to/KernelForge" >&2
+if ! command -v kernelforge >/dev/null 2>&1; then
+  echo "error: 'kernelforge' not found on PATH. Install Hyperloom first:" >&2
+  echo "         pip install -e /path/to/Hyperloom" >&2
   exit 1
 fi
 
@@ -77,19 +75,18 @@ if [ -n "${FORGE_MODEL:-}" ]; then
   MODEL_ARGS+=(--model "$FORGE_MODEL")
 fi
 
-echo "==> Launching forge-loop (gpu=mi355x/$GPU_TARGET, max_iters=$MAX_ITERS, max_hours=$MAX_HOURS)"
-kernel-agents forge-loop \
+echo "==> Launching forge-loop (gpu=mi355x/$GPU_TARGET, max_hours=$MAX_HOURS)"
+kernelforge forge-loop \
   --kernel "$WORKSPACE/rmsnorm_kernel.py" \
   --driver "$WORKSPACE/driver.py" \
   --workspace "$WORKSPACE" \
   --experiments-dir "$WORKSPACE/forge_experiments" \
   --result-json "$WORKSPACE/forge_experiments/forge_result.json" \
   --program-md-file "$WORKSPACE/program.md" \
-  --fellow flydsl-fellow \
+  --kernel-backend flydsl \
   --task-type flydsl2flydsl \
   --gpu-target "$GPU_TARGET" \
   --snr-threshold 40.0 \
-  --max-iters "$MAX_ITERS" \
   --max-hours "$MAX_HOURS" \
   --git-branch forge-optimize \
   --target-functions "gemma_rmsnorm" \

@@ -307,7 +307,7 @@ def _skill_options(options_cls, skills: list[str] | None,
 
 
 # An agent that cannot reach its model has done nothing, so it is started again before the
-# iteration is booked not measured: under Hyperloom on Lux (2026-10-29) a 20-minute gateway
+# iteration is booked not measured: under Hyperloom on Cluster C (2026-10-29) a 20-minute gateway
 # outage made three starts in a row fail with ERR_PROXY_TUNNEL, and the not-measured streak
 # ended a 9-hour run. Connection-level and server-side (5xx, overloaded) errors only: a 4xx
 # (a refused key, a model the CLI does not support) does not heal by waiting.
@@ -428,7 +428,7 @@ async def _run_claude_once(prompt: str, cwd: str, allowed_tools: list[str],
                 # the model "<synthetic>" ("API Error: Couldn't connect through your proxy"):
                 # not the agent's words, so neither its output nor a sign that the turn started.
                 # Counted as text, it made every gateway outage look like a turn that did work,
-                # which is never retried (Lux job 370569, 2026-10-29).
+                # which is never retried (a Cluster C job, 2026-10-29).
                 synthetic = getattr(message, "model", None) == SYNTHETIC_MODEL
                 for block in message.content:
                     if hasattr(block, "text") and synthetic:
@@ -498,7 +498,7 @@ def _run_phase(coro, phase: str, config: dict):
 def _write_aborted(session_dir_p: Path, msg: str) -> None:
     """ABORTED.md, which ends the run: a broken harness, or, when the last agent start could
     not reach its model, component.UNREACHABLE_HEAD, on which a component run exits 3 so the
-    host resumes it once the model answers again (a gateway outage, Lux 2026-10-29)."""
+    host resumes it once the model answers again (a gateway outage, Cluster C 2026-10-29)."""
     if _unreachable:
         text = (f"{component.UNREACHABLE_HEAD}\n\nThe model could not be reached: "
                 f"{_unreachable}\n{msg}\n")
@@ -1792,7 +1792,7 @@ def _host_bench_steps(command: str, port, iter_dir, bench_output_path: str,
     replay); with replays, the fixed block books the mean, as with the pack's bench.
     The pack's second metric (``secondary_key``) is recorded beside it when the client
     gives it: without it the gate is one-axis, blind to a gain bought with the other
-    axis (Lux job 370797, 2026-10-30: `secondary: None` on every KEEP).
+    axis (a Cluster C job, 2026-10-30: `secondary: None` on every KEEP).
     """
     base = Path(iter_dir) / "host_bench"
     outs = [base] if repeats <= 1 else [base / f"run{i}" for i in range(1, repeats + 1)]

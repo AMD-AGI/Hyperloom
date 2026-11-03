@@ -6,7 +6,7 @@ of* external codebases. They cite source files in those repos using stable,
 repo-rooted relative prefixes — never absolute machine paths.
 
 The playbook prose, technique catalogs, tables, and ISA extracts are **fully
-self-contained**. The citations are convenience pointers — a fellow learns
+self-contained**. The citations are convenience pointers — an agent learns
 the technique from the playbook text without ever opening a citation.
 
 ## Citation prefixes
@@ -28,5 +28,5 @@ vendored and has **no** external citations.
 
 On a machine without the upstream repos the citations are dangling pointers,
 but the knowledge itself is intact: every technique, table, dispatch path,
-and ISA chapter extract referenced by the playbooks is in-tree. A fellow can
+and ISA chapter extract referenced by the playbooks is in-tree. An agent can
 operate from these files alone.

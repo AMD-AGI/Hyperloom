@@ -75,7 +75,7 @@ def _aborted_detail(session_dir: Path) -> str:
     """ABORTED.md's message (the streak and the last not-measured reason), for the exit record.
 
     A host has to tell a broken harness from a finished run: an abort recorded as `done`
-    read as a normal end under Hyperloom on Lux (2026-10-29, a gateway outage).
+    read as a normal end under Hyperloom on Cluster C (2026-10-29, a gateway outage).
     """
     try:
         text = (session_dir / "ABORTED.md").read_text()
@@ -311,7 +311,7 @@ def _main(argv: list[str] | None, held: dict) -> int:
     if refused:
         return component.refuse(refused, campaign.config, session_dir)
 
-    # Cluster A's rolling chunks (ArborX main only; arbor/cluster/handoff.py): the
+    # Cluster A's rolling chunks (Arbor main only; arbor/cluster/handoff.py): the
     # launcher opts in with ARBOR_ROLL=1. The lease is taken before anything
     # writes the session, so two drivers never share one.
     roll = None

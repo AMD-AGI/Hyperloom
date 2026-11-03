@@ -136,7 +136,7 @@ manifest without either side writing host-specific code.
    `aborted` (the harness stopped measuring: `ABORTED.md`, its message as `detail`), and since
    2026-10-31 `review_rejected` (a human rejected the campaign at the review gate); the same line
    goes to the log and the heartbeat. A host reads why Arbor ended instead of guessing from an exit code.
-   **One exception exits non-zero** (operator, 2026-10-29, on Lux's gateway outages, ArborDevelopment
+   **One exception exits non-zero** (operator, 2026-10-29, on Cluster C's gateway outages, ArborDevelopment
    #11): `unreachable`, a streak that ended while the model could not be reached, exits 3 after
    writing its record. The host resumes it as it does a crash, instead of retiring the branch; the
    resumed run moves that `ABORTED.md` aside and starts a fresh not-measured streak.
@@ -202,7 +202,7 @@ command in the prompts (`arbor/component.py`, `arbor/policy/claude_loop.py`), an
   `bench_output.json` with a fixed one-line command, and with `bench_repeats` the fixed mean
   block aggregates, as with the pack's bench. Since 2026-10-30 the same command also takes the
   pack's `secondary_metric` when the client gives it; before, the gate saw only the primary
-  (Lux job 370797: `secondary: None` on every KEEP).
+  (a Cluster C job: `secondary: None` on every KEEP).
 - **`component.root`** (MB's request, board #154 c3600): MB's worktree is at the branch's start
   commit with the experiment repository's history behind it, so the first commit is not what MB
   gave. A sha in `component.root` is the base of `served.patch`, the first `change.patch`,

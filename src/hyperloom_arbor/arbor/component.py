@@ -313,7 +313,7 @@ except Exception as e:
 
 def _native_import_error(config, env) -> str | None:
     """A refusal when the framework's package is there but its compiled extension does not
-    import, as a source-only worktree's vLLM lacks ``vllm._C`` (Lux, #11 c3939; #11 c3928
+    import, as a source-only worktree's vLLM lacks ``vllm._C`` (Cluster C, #11 c3939; #11 c3928
     item 2): every server start would fail. Checked with the driver's environment, the
     server_env's PYTHONPATH over it, by the ``python3`` on its PATH. A package that is not
     found at all, or a check that cannot run, refuses nothing."""
@@ -785,7 +785,7 @@ def gpu_list(value) -> list[int] | None:
 def turn_block(config, session_dir=None, now: float | None = None) -> str:
     """The main agent's time this turn: its phase cap and what is left before the deadline.
 
-    On Lux (2026-10-29) an agent started an AITER fused-MoE tuning sweep inside a 30-minute
+    On Cluster C (2026-10-29) an agent started an AITER fused-MoE tuning sweep inside a 30-minute
     turn, hit the cap before measuring, and lost half of Arbor's 67 minutes: nothing had
     told it how long its turn was. Empty in standalone, where turns have no cap.
     """
@@ -1069,7 +1069,7 @@ def carried_changes(container: str, workspace: str, parent: str, commit: str, it
     ``Revert "iter-N: ..."`` undoes, and that changes what is served: the served pathspec,
     or arbor/config.json (flags and env, which the patches leave out). A NOT_MEASURED
     iteration keeps its tree, so its change rides into the next KEEP, whose gate judges
-    only the two together (Lux, 2026-10-30: iteration 5's INT4 QuickReduce env in KEEP 2).
+    only the two together (Cluster C, 2026-10-30: iteration 5's INT4 QuickReduce env in KEEP 2).
     Each is named with its own verdict from session.json, for the host to see.
     """
     from arbor.execute.workspace import git

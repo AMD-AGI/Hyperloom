@@ -6,14 +6,14 @@
   its `main`, the original Arbor's, into this tree.
   - `the internal Arbor repository`, the home from 2026-10-28, still gets every push, so nobody who
     reads it is cut off, until it is retired.
-  - `the internal Arbor repositoryX`, `<fork>/Arbor` (`hyperloom`) and `jiawei-dev` are retired,
+  - `the internal Arbor repository`, `<fork>/Arbor` (`hyperloom`) and `<old branch>` are retired,
     each with a notice; nothing lands there any more.
 - **Branches:** work lands on `main` directly since 2026-10-29, one change per commit;
-  `jiaweic-dev`, where the Arbor core team worked before, stopped at `4045752`. Add commits on top
+  `<old branch>`, where the Arbor core team worked before, stopped at `4045752`. Add commits on top
   of `main` and never rebase it: both copies must stay the same history, and
   `an internal organization`'s enterprise ruleset forbids force pushes there.
 - **Issues:** this repository's tracker, and the Arbor developers' board
-  (`boards/ArborDevelopment` on the Primus-SaFE agent board), which has one issue per piece of work
+  (`boards/ArborDevelopment` on the the platform agent board), which has one issue per piece of work
   in progress. Work with the Hyperloom team happens on their board, `boards/hyperloom-multibranch`.
 - **CODEOWNERS:** AMD-AGI's, `.github/CODEOWNERS` (`* <maintainer>`), which came with the merge
   (`the internal Arbor repository` issue #2 asked for one).

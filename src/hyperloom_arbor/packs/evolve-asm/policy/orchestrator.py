@@ -690,7 +690,7 @@ Vague "kernel is HBM-bound" answers are not acceptable. Show the work.
     # ------------------------------------------------------------------
 
     def _git_commit_keep(self, candidate: Candidate) -> None:
-        """Stage all changes in /home/nprakriy/Evolve and commit."""
+        """Stage all changes in $HOME/Evolve and commit."""
         repo = _EVOLVE_REPO
         if not repo.exists():
             log.warning("Evolve repo not found at %s — skipping commit.", repo)

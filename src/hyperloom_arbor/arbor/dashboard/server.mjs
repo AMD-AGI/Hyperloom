@@ -190,7 +190,7 @@ function ssh(host, command) {
 }
 
 // The command's answer is the JSON object on its stdout. Through the
-// Primus-SaFE gateway every command exits 0 and its stderr arrives on stdout
+// the platform gateway every command exits 0 and its stderr arrives on stdout
 // (tested 2026-10-07), so a failure there is either share_query's
 // {"error": ...} or output that is not JSON, never an exit status.
 function parseJson(result) {

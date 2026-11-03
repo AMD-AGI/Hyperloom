@@ -7,7 +7,7 @@ component-mode GPU test. The loop itself: [how-it-works.md](how-it-works.md).
 
 - **Arbor on the cluster.** Clusters often cannot read `AMD-AGI/Arbor` directly. Clone
   from a mirror you can read and point launchers at it with `ARBOR_URL`. **The launchers' defaults
-  still name the retired repository and branches** (`<fork>/Arbor`, `jiawei-dev`,
+  still name the retired repository and branches** (`<fork>/Arbor`, `<old branch>`,
   `<fork>/model-m`): always set `ARBOR_URL` and the branch.
 - **Credentials.** The launchers source `~/.arbor/gateway.env` (mode 600) for the agents' gateway.
 - **The image and weights.** Launchers load the serving image from an archive and check its ID, and

@@ -35,9 +35,9 @@ never raises either: a section that fails is recorded in the snapshot's `errors`
 
 ## Once per person: reach the share
 
-The share is `/shared/arbor` on the Primus-SaFE pod
-`arbor-pipeline-b9kcp-master-0` (workspace `control-plan-dev`), reached
-through the Primus-SaFE ssh gateway. The gateway takes ssh commands, scp and
+The share is `/shared/arbor` on the share's pod
+`<pod name>` (workspace `<workspace>`), reached
+through the platform's ssh gateway. The gateway takes ssh commands, scp and
 sftp, but not rsync and not piped stdin (tested 2026-10-06). That is why an
 upload is one sftp batch (make the directories, put each file under a temporary
 name, rename it into place), so a reader never sees half a file. The gateway
@@ -45,7 +45,7 @@ also returns exit status 0 for every command and puts its stderr on stdout
 (tested 2026-10-07): in anything you script against it, print a marker or
 JSON and read that, never `$?`.
 
-1. Register your public key on Primus-SaFE, and add the pod to `~/.ssh/config`
+1. Register your public key on the platform, and add the pod to `~/.ssh/config`
    on every host that will run a collector (your workstation, WSL, a Cluster B
    login node):
 
@@ -53,14 +53,14 @@ JSON and read that, never `$?`.
    Host arbor-share
        HostName <ssh gateway host>
        Port 2222
-       User <your Primus-SaFE user id>.arbor-pipeline-b9kcp-master-0.pytorch.bash.control-plan-dev
+       User <your platform user id>.<pod name>
        IdentityFile ~/.ssh/<the key you registered>
        IdentitiesOnly yes
        ServerAliveInterval 60
    ```
 
    The user is `<user id>.<pod>.<container>.<shell>.<workspace>`. If the pod
-   is replaced, its name changes; Primus-SaFE shows the current one.
+   is replaced, its name changes; the platform shows the current one.
    Cluster B's login nodes reach the gateway (port 2222 open from `<login node>`,
    2026-10-07).
 2. Check it from an Arbor checkout: `python3 -m arbor.collect check`. It runs
@@ -69,11 +69,11 @@ JSON and read that, never `$?`.
 
 The share root and its `projects/` directory are made once, by a person, never
 by a collector. They were made on 2026-10-07 to match `/shared` itself:
-owner root, group 10008 (`allusers` on Cluster B), mode 1775, so every member of
+owner root, group <gid> (the share's group), mode 1775, so every member of
 the group can add a project and no one can remove another person's:
 
 ```bash
-ssh arbor-share 'mkdir -p /shared/arbor/projects && chgrp 10008 /shared/arbor /shared/arbor/projects && chmod 1775 /shared/arbor /shared/arbor/projects'
+ssh arbor-share 'mkdir -p /shared/arbor/projects && chgrp <gid> /shared/arbor /shared/arbor/projects && chmod 1775 /shared/arbor /shared/arbor/projects'
 ```
 
 The pod's `/shared` is the same NFS volume Cluster B mounts (both see

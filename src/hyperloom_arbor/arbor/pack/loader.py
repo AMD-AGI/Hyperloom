@@ -20,7 +20,7 @@ VALID_WORKLOAD_KINDS = {"serving", "kernel", "repro", "document"}
 ALLOWED_PACK_DIRS = {"knowledge", "validator", "eval"}
 
 # A pack's results/ is refused unless the user opts in (`arbor run --allow-pack-results`;
-# operator, 2026-10-30: Ravi's Qwen3.8 packs keep their results there, ArborDevelopment #25).
+# operator, 2026-10-30: a colleague's Qwen3.8 packs keep their results there, ArborDevelopment #25).
 PACK_RESULTS_DIR = "results"
 PACK_RESULTS_FLAG = "--allow-pack-results"
 PACK_RESULTS_CONCERNS = (

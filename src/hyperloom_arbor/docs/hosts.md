@@ -327,4 +327,4 @@ record.
   does, restarts it, and the run carries on once the gateway answers. Each restart into a
   continuing outage takes as long again, so it never fills a crash window like MB's (3 in 10
   minutes); the deadline still ends the run. Sites that reach the gateway through a tunnel or a
-  proxy should expect drops (Lux: 7 in four days, 2026-10).
+  proxy should expect drops (Cluster C: 7 in four days, 2026-10).

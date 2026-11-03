@@ -100,7 +100,7 @@ agent only (not the server or bench agent); a skill named in a pack must exist.
 | `knowledge-collector` | share and read campaign learnings | parallel-dossier |
 | `campaign-archive`, `dashboard`, `realtime-collector`, `merge-optimization-trees`, `geko-hipblaslt-tuning` | operator tools | none |
 
-Vendored: `kernels/reference` and `hardware/reference` from `AMD-AGI/KernelForge` (MIT).
+Vendored: `kernels/reference` and `hardware/reference` from KernelForge (`src/kernelforge`) (MIT).
 
 How to use `dossier` and `profiler`, in a campaign and by hand, and why a dossier's directions go
 into the dossier rather than the pack: [dossier-and-profiler.md](dossier-and-profiler.md).

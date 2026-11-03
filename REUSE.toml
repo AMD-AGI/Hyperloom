@@ -63,3 +63,11 @@ path = "src/hyperloom_arbor/.claude/skills/kernels/reference/examples/flydsl-sof
 precedence = "override"
 SPDX-FileCopyrightText = "FlyDSL Project Contributors"
 SPDX-License-Identifier = "Apache-2.0"
+
+# The SGLang kernel among those pages, the Triton oracle of the mxfp8 grouped-GEMM example: SGLang's, as
+# src/kernelforge annotates its own copy of it.
+[[annotations]]
+path = "src/hyperloom_arbor/.claude/skills/kernels/reference/examples/triton2flydsl-mxfp8-grouped-gemm/mxfp8_grouped_gemm.py"
+precedence = "override"
+SPDX-FileCopyrightText = "SGLang Team and contributors"
+SPDX-License-Identifier = "Apache-2.0"

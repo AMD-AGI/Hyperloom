@@ -2,7 +2,7 @@
 # Drive this triton2flydsl rewrite task (Triton softmax -> FlyDSL) end to end.
 #
 # `forge-rewrite-by-flydsl` git-inits its workspace and writes the FlyDSL kernel
-# IN PLACE, so this script copies the task out of the KernelForge repo into a
+# IN PLACE, so this script copies the task out of the packaged example tree into a
 # scratch workspace first (keeping the repo tree clean) — the isolate-then-run
 # pattern any caller should follow. The pipeline then runs:
 #   ingest -> seed kernel.py -> measure source baseline (oracle)
@@ -16,12 +16,11 @@
 # Environment overrides (all optional):
 #   GPU_TARGET         gfx arch (default: autodetect via rocminfo, else gfx950)
 #   MAX_PORT_ATTEMPTS  correctness-only port sessions before giving up (default: 3)
-#   MAX_ITERS          compatibility value forwarded to forge-loop      (default: 3)
 #   MAX_HOURS          OPTIMIZE: wall-clock budget in hours (min 1.0)   (default: 1.0)
 #   FORGE_MODEL        model name served by your gateway                (default: forge default)
 #
 # Prerequisites:
-#   * KernelForge installed so `kernel-agents` is on PATH (pip install -e .)
+#   * Hyperloom installed so `kernelforge` is on PATH (pip install -e .)
 #   * A GPU with torch + Triton + FlyDSL available
 #   * Claude auth configured: ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN, or
 #     CLAUDE_CODE_OAUTH_TOKEN for subscription billing
@@ -38,12 +37,11 @@ detect_arch() {
 GPU_TARGET="${GPU_TARGET:-$(detect_arch)}"
 GPU_TARGET="${GPU_TARGET:-gfx950}"
 MAX_PORT_ATTEMPTS="${MAX_PORT_ATTEMPTS:-3}"
-MAX_ITERS="${MAX_ITERS:-3}"
 MAX_HOURS="${MAX_HOURS:-1.0}"
 
-if ! command -v kernel-agents >/dev/null 2>&1; then
-  echo "error: 'kernel-agents' not found on PATH. Install KernelForge first:" >&2
-  echo "         pip install -e /path/to/KernelForge" >&2
+if ! command -v kernelforge >/dev/null 2>&1; then
+  echo "error: 'kernelforge' not found on PATH. Install Hyperloom first:" >&2
+  echo "         pip install -e /path/to/Hyperloom" >&2
   exit 1
 fi
 
@@ -76,8 +74,8 @@ if [ -n "${FORGE_MODEL:-}" ]; then
   MODEL_ARGS+=(--model "$FORGE_MODEL")
 fi
 
-echo "==> Launching forge-rewrite-by-flydsl (gpu=mi355x/$GPU_TARGET, port_attempts=$MAX_PORT_ATTEMPTS, max_iters=$MAX_ITERS, max_hours=$MAX_HOURS)"
-kernel-agents forge-rewrite-by-flydsl \
+echo "==> Launching forge-rewrite-by-flydsl (gpu=mi355x/$GPU_TARGET, port_attempts=$MAX_PORT_ATTEMPTS, max_hours=$MAX_HOURS)"
+kernelforge forge-rewrite-by-flydsl \
   --source-kernel "$WORKSPACE/softmax.py" \
   --driver "$WORKSPACE/driver.py" \
   --logical-op-name softmax \
@@ -91,7 +89,6 @@ kernel-agents forge-rewrite-by-flydsl \
   --gpu-target "$GPU_TARGET" \
   --snr-threshold 30.0 \
   --max-port-attempts "$MAX_PORT_ATTEMPTS" \
-  --max-iters "$MAX_ITERS" \
   --max-hours "$MAX_HOURS" \
   "${MODEL_ARGS[@]}"
 

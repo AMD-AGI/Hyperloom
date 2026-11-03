@@ -1,6 +1,6 @@
 # reference/: a curated copy of KernelForge
 
-**Source:** [AMD-AGI/KernelForge](https://github.com/AMD-AGI/KernelForge) (internal), MIT licence
+**Source:** KernelForge (this repository carries it as `src/kernelforge`), MIT licence
 (`LICENSE-KernelForge`, copied unchanged). Copied on 2026-10-20 from the runner's read-only copy at
 `~/runner-ws/tools/KernelForge` (the same tree as `$HOME/runner-ws/tools/KernelForge` on
 Cluster B).

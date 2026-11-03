@@ -267,7 +267,7 @@ This is decision 0003, the mesh as Arbor's parallel mode, with three lane types:
 - The mesh turns those into lanes, and the dossier's next round sees the results.
 
 **Prerequisites:**
-- A worked kernel-plan example on `jiawei-dev`. B5 and C5's plans sit on the un-pulled
+- A worked kernel-plan example on `<old branch>`. B5 and C5's plans sit on the un-pulled
   `<fork>/b5-results` branch.
 - A kernel-plan template that points at real roofline numbers (§4.3).
 
@@ -331,4 +331,4 @@ These help single-node campaigns now, independent of the mesh:
 3. **Then:** the harness changes in §4.4.
 4. **With the mesh (decision 0003):**
    - the kernel-plan, architectural and upstream-integration lanes;
-   - first, a worked kernel-plan example brought onto `jiawei-dev`.
+   - first, a worked kernel-plan example brought onto `<old branch>`.

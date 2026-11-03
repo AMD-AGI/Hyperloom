@@ -22,9 +22,9 @@ repos:
     rev: v6.0.0
     hooks:
       - id: trailing-whitespace
-        exclude: ^docs/_build/
+        exclude: ^(docs/_build/|src/hyperloom_arbor/)
       - id: end-of-file-fixer
-        exclude: ^docs/_build/
+        exclude: ^(docs/_build/|src/hyperloom_arbor/)
       - id: check-merge-conflict
       - id: check-yaml
         exclude: ^docs/_build/
@@ -35,6 +35,7 @@ repos:
         exclude: ^src/hyperloom_arbor/\.claude/skills/serving-playbook/evidence/records\.jsonl$
       - id: detect-private-key
       - id: mixed-line-ending
+        exclude: ^src/hyperloom_arbor/
         args: ["--fix=lf"]
 
   # --- Python: Ruff (same rules as pyproject.toml and lint.yml) ---
@@ -54,19 +55,21 @@ repos:
       - id: bandit
         args: ["-c", "pyproject.toml"]
         additional_dependencies: ["bandit[toml]"]
-        exclude: "^.*/tests?/"
+        exclude: "^(.*/tests?/|src/hyperloom_arbor/)"
 
   # --- Shell ---
   - repo: https://github.com/shellcheck-py/shellcheck-py
     rev: v0.11.0.1
     hooks:
       - id: shellcheck
+        exclude: ^src/hyperloom_arbor/
 
   # --- YAML / GitHub Actions ---
   - repo: https://github.com/adrienverge/yamllint
     rev: v1.38.0
     hooks:
       - id: yamllint
+        exclude: ^src/hyperloom_arbor/
         args: ["-d", "{extends: relaxed, rules: {line-length: disable}}"]
 
   - repo: https://github.com/rhysd/actionlint
@@ -96,7 +99,7 @@ repos:
         args:
           - --ignore-words-list=rocm,hip,aiter,vllm,sglang,triton,jsonl,kwargs,nd,te,ser,crate,assertin
           - --skip=*.json,*.jsonl,*.svg,*.lock,docs/_build,.venv,_audit_artifacts
-        exclude: ^(LICENSES/|docs/_build/)
+        exclude: ^(LICENSES/|docs/_build/|src/hyperloom_arbor/)
 
   # --- contextlib.suppress(Exception): the blind spot BLE001 cannot see ---
   - repo: local

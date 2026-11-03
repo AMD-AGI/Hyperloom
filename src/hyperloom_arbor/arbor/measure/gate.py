@@ -77,7 +77,7 @@ _INFRA_CORRECTNESS_MARKERS = (
     "non-json",
     # An eval dataset that cannot be loaded (no egress, an offline cache without it): the
     # Hub's own errors, for a validator that reports lm_eval's log tail as it is. The packs'
-    # scripts say "correctness inconclusive" for it themselves (Hyperloom on Lux, 2026-10-29).
+    # scripts say "correctness inconclusive" for it themselves (Hyperloom on Cluster C, 2026-10-29).
     "couldn't reach",
     "offlinemodeisenabled",
     "datasetnotfounderror",

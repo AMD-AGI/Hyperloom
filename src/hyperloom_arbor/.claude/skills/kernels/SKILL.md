@@ -57,7 +57,7 @@ Write a kernel last. Each step before the last is cheaper, reversible and alread
      Prove engagement first (`grep -c 'is tuned on cu_num' server.log` > 0, `tuning_db.md`). The CSV
      is build-locked: regenerate it on every image change.
    - **Size the sweep to your turn.** A tuner sweep over many shapes can outlast an agent turn; a
-     turn cut off by its cap is not measured, and its uncommitted work is discarded (Lux,
+     turn cut off by its cap is not measured, and its uncommitted work is discarded (Cluster C,
      2026-10-29: a fused-MoE sweep used a whole 30-minute turn, half the run). Tune the shapes the
      served load runs, a batch at a time, writing each batch's rows to the CSV in the workspace,
      so the next iteration continues. Inside a host the prompt says how long the turn is.

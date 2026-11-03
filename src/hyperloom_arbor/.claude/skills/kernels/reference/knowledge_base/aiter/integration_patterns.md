@@ -281,7 +281,7 @@ def bench_baseline():
 aiter_result = bench_aiter()
 baseline_result = bench_baseline()
 
-# Report format matching AITER Fellow reporting
+# Report format matching AITER kernel-backend reporting
 print(f"AITER: {aiter_result.median_ms:.3f} ms")
 print(f"Baseline: {baseline_result.median_ms:.3f} ms")
 print(f"Speedup: {baseline_result.median_ms / aiter_result.median_ms:.2f}x")

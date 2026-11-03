@@ -43,23 +43,35 @@ The engine and what its agents read:
 
   Every mention of the other tracer, in the agents' program (`arbor/pack/render.py`), the `serving` pack, the dossier
   skill and the docs, says TraceLens instead.
+- **KernelForge's examples are this repository's:** the four examples under `.claude/skills/kernels/reference/examples/`
+  are taken from `src/kernelforge/examples`, which runs `kernelforge forge-loop --kernel-backend ...`. Arbor's own
+  copies predate that rename. KernelForge's knowledge pages here use the same names.
+- **One permission:** the round-end A/B's output directory is created group-writable (`0o775`) instead of
+  world-writable (`arbor/rounds.py`). The round-end A/B never runs under a host.
 
 ## What it carries from elsewhere
 
-**KernelForge pages,** in `.claude/skills/kernels/reference/` and `.claude/skills/hardware/reference/` (MIT, as
-`src/kernelforge`), among them one FlyDSL reference kernel (Apache-2.0, FlyDSL Project Contributors).
+**KernelForge pages,** in `.claude/skills/kernels/reference/` and `.claude/skills/hardware/reference/`. They are MIT, as
+in `src/kernelforge`, except two kernels, each annotated as `src/kernelforge`'s copy of it is:
+- a FlyDSL reference kernel (Apache-2.0, FlyDSL Project Contributors);
+- an SGLang Triton kernel (Apache-2.0, SGLang Team and contributors).
 
 ## How it is used
 
 Arbor runs from its own root: `python -m arbor run --config <config>` with this directory as the working directory
 (`README.md`, `docs/getting-started.md`). It is not a Python package of this repository, so the wheel does not ship it
-(`pyproject.toml` excludes `hyperloom_arbor` from the packages). MB's `--autonomous-agent` still takes a git source and
-clones it; starting an Arbor from this tree is a change to MB of its own.
+(`pyproject.toml` excludes `hyperloom_arbor` from the packages). MB starts it with `--autonomous-agent arbor`, which
+names this tree.
+
+Its `install.sh` pins TraceLens for a standalone Arbor. Under MB, Arbor uses the TraceLens this repository's own
+install pins.
 
 ## How it is updated
 
-Never edit it here: a change is made in Arbor and the copy is taken again, whole, from a new tag, with the same
-omissions, placeholders and TraceLens profiler skill, by the Arbor maintainers' vendoring tool. The tool refuses a copy that still names any of
-the replaced terms. Linting, formatting and code metrics skip this tree (`pyproject.toml`: `[tool.ruff]`,
-`[tool.hyperloom.code_metrics]`, `[tool.bandit]`), as for the other vendored code; secret scanning and the licence check
-do not.
+Never edit it here: a change is made in Arbor and the copy is taken again, whole, from a new tag, by the Arbor
+maintainers' vendoring tool, with the same omissions, placeholders, profiler skill and examples. The tool refuses a
+copy that still names any of the replaced terms.
+
+Linting, formatting and code metrics skip this tree, as for the other vendored code (`pyproject.toml`: `[tool.ruff]`,
+`[tool.hyperloom.code_metrics]`, `[tool.bandit]`; `.pre-commit-config.yaml`'s formatting and lint hooks). Secret
+scanning (`detect-private-key`, `gitleaks`) and the licence check (`reuse`) do not.

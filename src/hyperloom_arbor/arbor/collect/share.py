@@ -1,12 +1,12 @@
 """The share: where collectors put campaign data for everyone to read.
 
-Layout under the share root (default /shared/arbor, on a Primus-SaFE pod)::
+Layout under the share root (default /shared/arbor, on the share's pod)::
 
     projects/<project>/<user>/<campaign>/realtime/          status.json, meta.json
     projects/<project>/<user>/<campaign>/knowledge/<type>/  summary, outcomes, findings,
                                                             profiles, dossier, artifacts
 
-The pod is reached through the Primus-SaFE ssh gateway, which takes ssh
+The pod is reached through the platform's ssh gateway, which takes ssh
 commands, scp and sftp but not rsync and not piped stdin (tested 2026-10-06).
 So an upload is one sftp batch: make the directories, put each file under a
 temporary name, rename it into place. sftp's rename replaces the target in one
@@ -105,12 +105,12 @@ class Share:
                     f"reached {self.host}" if reached else (se.strip() or so.strip() or f"exit {rc}")[-300:],
                     f"ssh to {self.host} failed. Add the pod to ~/.ssh/config as {self.host} "
                     f"(the collector skills show the entry) with the key you registered "
-                    f"on Primus-SaFE, and check `ssh {self.host} true`."):
+                    f"on the platform, and check `ssh {self.host} true`."):
             return out
         if not step("share root", "WRITABLE" in so,
                     f"{self.projects} {'is writable' if 'WRITABLE' in so else 'is missing or not writable'}",
                     f"{self.projects} must exist and be writable. A person creates it once: "
-                    f"ssh {self.host} 'mkdir -p {self.projects} && chgrp 10008 {self.root} "
+                    f"ssh {self.host} 'mkdir -p {self.projects} && chgrp <gid> {self.root} "
                     f"{self.projects} && chmod 1775 {self.root} {self.projects}' (the mode and "
                     f"group of /shared itself)"):
             return out

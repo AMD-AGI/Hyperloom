@@ -6,7 +6,7 @@
 
 ``server.mjs`` sends this file compressed and base64-encoded inside the command
 (``python3 -c 'import base64,zlib;exec(zlib.decompress(base64.b64decode("...")))' index <root>``),
-because the Primus-SaFE gateway takes ssh commands but not piped stdin; nothing
+because the platform's gateway takes ssh commands but not piped stdin; nothing
 is installed on the share host. Compressed, the command stays under the 8 KB
 that Git for Windows' ssh passes (``arbor/tests/test_dashboard.py`` holds it
 there). Standard library only, Python 3.8 or later.

@@ -68,7 +68,7 @@ anything else:
 
 ## Worked example
 
-DeepSeek V4.1 Flash, AgentX, MI355X, in `<fork>/jiaweic-runner`:
+DeepSeek V4.1 Flash, AgentX, MI355X, in `<fork>/<runner>`:
 
 | Part | There |
 | --- | --- |
