@@ -584,8 +584,19 @@ ensure_fd_limit_for_ray() {
   return 0
 }
 
+# Whether the running head declares serving_slot, asked through a driver
+# connect. A raylet that accepts a driver and never registers it holds ray.init
+# forever, with the GIL held, so the connect is bounded from outside: `timeout`
+# signals the child's whole process group, SIGKILL 5 s after SIGTERM. The bound is
+# HYPERLOOM_RAY_CONNECT_PROBE_TIMEOUT_SEC, the one the optimizer puts on its own
+# connect probe (default 60 s). Returns 0 with the slot, 124 (timeout's own
+# status) when the head did not answer in time, saying so, and 1 otherwise.
 ray_head_has_serving_slot() {
-  python3 - <<'PY' >/dev/null 2>&1
+  local bound="${HYPERLOOM_RAY_CONNECT_PROBE_TIMEOUT_SEC:-}" rc=0
+  if ! [[ "$bound" =~ ^[0-9]+([.][0-9]+)?$ && "$bound" =~ [1-9] ]]; then
+    bound=60
+  fi
+  timeout -k 5 "$bound" python3 - <<'PY' >/dev/null 2>&1 || rc=$?
 import ray
 
 ray.init(address="auto", ignore_reinit_error=True, log_to_driver=False, logging_level="error")
@@ -595,6 +606,14 @@ finally:
     ray.shutdown()
 raise SystemExit(0 if "serving_slot" in resources else 1)
 PY
+  case "$rc" in
+    0) return 0 ;;
+    124 | 137)
+      warn "ray head did not answer a driver within ${bound}s (HYPERLOOM_RAY_CONNECT_PROBE_TIMEOUT_SEC); restarting local Ray head"
+      return 124
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 # Idempotently bring up a Ray head node. Kernel backends submit Ray tasks with
@@ -656,11 +675,16 @@ ensure_ray_started() {
     return 0
   fi
   if ray status >/dev/null 2>&1; then
-    if ray_head_has_serving_slot; then
+    local slot_rc=0
+    ray_head_has_serving_slot || slot_rc=$?
+    if [ "$slot_rc" -eq 0 ]; then
       log "ray head already running with serving_slot"
       return 0
     fi
-    warn "ray head already running without serving_slot; restarting local Ray head"
+    # 124: the head did not answer at all, which ray_head_has_serving_slot reported.
+    if [ "$slot_rc" -ne 124 ]; then
+      warn "ray head already running without serving_slot; restarting local Ray head"
+    fi
   else
     log "no live ray head detected; starting one"
   fi
