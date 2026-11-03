@@ -32,6 +32,7 @@ from ._internal.server_args_safety import (
     prepare_shell_safe_extra_args,
     validate_server_args,
 )
+from .restart_pd_args import add_restart_pd_role_arguments, add_restart_pd_shape_arguments
 from .state_paths import _ensure_runtime_dir, resolve_state_file
 from ._internal.env_safety import filter_forward_env
 from ._internal.external_state import external_service_url, load_multi_node_state
@@ -1373,41 +1374,8 @@ def _add_common_poll_flags(p: argparse.ArgumentParser) -> None:
     )
 
 
-def build_parser() -> argparse.ArgumentParser:
-    """Build the top-level argparse parser with every subcommand."""
-    p = argparse.ArgumentParser(
-        prog="hyperloom multi-node",
-        description=(
-            "Drive the multi-node cluster the platform provisioned and handed over "
-            "via HYPERLOOM_MN_EXT_*. State persists in $MULTI_NODE_STATE_FILE."
-        ),
-    )
-    sub = p.add_subparsers(dest="cmd", required=True)
-
-    # bootstrap
-    sp = sub.add_parser(
-        "bootstrap",
-        help="install Hyperloom RayJob toolchain inside the RayJob via Ray Dashboard REST. "
-        "Default: uses multi_node/scripts/bootstrap.sh from this checkout.",
-    )
-    sp.add_argument(
-        "--script",
-        default=None,
-        help="optional override: absolute path to a bootstrap.sh "
-        "ALREADY VISIBLE inside the RayJob pod (e.g. baked into "
-        "the image). When omitted, the bundled script is streamed in.",
-    )
-    sp.add_argument("--force", action="store_true", help="re-run bootstrap even if the marker file says it's done")
-    sp.add_argument("--print-logs", action="store_true")
-    _add_common_poll_flags(sp)
-    sp.set_defaults(func=cmd_bootstrap)
-
-    # verify
-    sp = sub.add_parser("verify", help="confirm ray is on PATH inside the RayJob")
-    sp.add_argument("--print-logs", action="store_true")
-    _add_common_poll_flags(sp)
-    sp.set_defaults(func=cmd_verify)
-
+def _add_restart_server_parser(sub: argparse._SubParsersAction) -> None:
+    """Register the ``restart-server`` subcommand."""
     # restart-server
     sp = sub.add_parser("restart-server", help="kill prior vllm/sglang server and start a new one")
     sp.add_argument("--framework", required=True, choices=("sglang", "vllm"))
@@ -1423,85 +1391,8 @@ def build_parser() -> argparse.ArgumentParser:
         "`--enable-expert-parallel`. EP > TP is rejected by the "
         "orchestrator helper before this CLI is invoked.",
     )
-    # Prefill-Decode disaggregation: aggregated (default) keeps a single server group; disaggregated splits into
-    # prefill + decode groups fronted by a router on the head pod that binds the public 8888 port.
-    sp.add_argument(
-        "--pd-mode",
-        choices=("aggregated", "disaggregated"),
-        default="aggregated",
-        help="PD disaggregation mode (default aggregated).",
-    )
-    sp.add_argument(
-        "--pd-prefill-nodes",
-        type=int,
-        default=0,
-        help="number of prefill nodes (disaggregated only); pn+dn==nnodes",
-    )
-    sp.add_argument(
-        "--pd-decode-nodes",
-        type=int,
-        default=0,
-        help="number of decode nodes (disaggregated only)",
-    )
-    sp.add_argument(
-        "--pd-prefill-tp",
-        type=int,
-        default=0,
-        help="TP for prefill group (disaggregated only); default = --tp",
-    )
-    sp.add_argument(
-        "--pd-decode-tp",
-        type=int,
-        default=0,
-        help="TP for decode group (disaggregated only); default = --tp",
-    )
-    # Per-role EP / extra server args (disaggregated only), so prefill and decode can use different MoE topologies.
-    sp.add_argument(
-        "--pd-prefill-ep",
-        type=int,
-        default=int(os.environ.get("PD_PREFILL_EP", "0") or 0),
-        help="EP for prefill group (disaggregated only); 0 = use --ep",
-    )
-    sp.add_argument(
-        "--pd-decode-ep",
-        type=int,
-        default=int(os.environ.get("PD_DECODE_EP", "0") or 0),
-        help="EP for decode group (disaggregated only); 0 = use --ep",
-    )
-    sp.add_argument(
-        "--pd-prefill-extra-args",
-        default=os.environ.get("PD_PREFILL_EXTRA_ARGS", ""),
-        help="extra sglang args appended to the PREFILL group only "
-        "(merged after the shared --extra-args); disaggregated only",
-    )
-    sp.add_argument(
-        "--pd-decode-extra-args",
-        default=os.environ.get("PD_DECODE_EXTRA_ARGS", ""),
-        help="extra sglang args appended to the DECODE group only "
-        "(merged after the shared --extra-args); disaggregated only",
-    )
-    sp.add_argument(
-        "--pd-transfer-backend",
-        default="",
-        help="sglang: mooncake|nixl ; vllm: NixlConnector|P2pNcclConnector|"
-        "MooncakeConnector|LMCacheConnectorV1; empty = framework default",
-    )
-    sp.add_argument(
-        "--pd-ib-device",
-        default="",
-        help="comma-separated IB/RoCE device list (e.g. mlx5_0,mlx5_1). Empty = read $NCCL_IB_HCA from RayJob pod env.",
-    )
-    sp.add_argument(
-        "--pd-bootstrap-port",
-        type=int,
-        default=8998,
-        help="sglang PD bootstrap rendezvous port (default 8998)",
-    )
-    sp.add_argument(
-        "--pd-vllm-router-cmd",
-        default="",
-        help="vllm-only override for router cmdline; supports {prefill}/{decode}/{port} placeholders",
-    )
+    add_restart_pd_shape_arguments(sp)
+    add_restart_pd_role_arguments(sp)
     sp.add_argument("--extra-args", default="", help="extra CLI args appended verbatim to the framework launch command")
     sp.add_argument(
         "--pid-file", default=None, help="PID file path inside the head pod; defaults to /tmp/multi_node_server.pid"
@@ -1518,20 +1409,9 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common_poll_flags(sp)
     sp.set_defaults(func=cmd_restart_server)
 
-    sp = sub.add_parser(
-        "kill-inference",
-        help="kill vllm/sglang on the RayJob only (no new server; frees GPU for kernel-agent)",
-    )
-    sp.add_argument(
-        "--pid-file",
-        default=None,
-        help="single-node: head-pod PID file path; multi-node: pid-dir path "
-        "(same override semantics as restart-server --pid-file)",
-    )
-    sp.add_argument("--print-logs", action="store_true")
-    _add_common_poll_flags(sp)
-    sp.set_defaults(func=cmd_kill_inference)
 
+def _add_kernel_patch_parsers(sub: argparse._SubParsersAction) -> None:
+    """Register the ``apply-patch``, ``revert-patch`` and ``finalize-patch`` subcommands."""
     # apply-patch (multi-node only)
     sp = sub.add_parser(
         "apply-patch",
@@ -1586,6 +1466,9 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common_poll_flags(sp)
     sp.set_defaults(func=cmd_finalize_patch)
 
+
+def _add_apply_tracelens_patch_parser(sub: argparse._SubParsersAction) -> None:
+    """Register the ``apply-tracelens-patch`` subcommand."""
     # apply-tracelens-patch (multi-node only)
     sp = sub.add_parser(
         "apply-tracelens-patch",
@@ -1621,6 +1504,9 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common_poll_flags(sp)
     sp.set_defaults(func=cmd_apply_tracelens_patch)
 
+
+def _add_install_geak_parser(sub: argparse._SubParsersAction) -> None:
+    """Register the ``install-geak`` subcommand."""
     # install-geak (infera only)
     sp = sub.add_parser(
         "install-geak",
@@ -1637,6 +1523,64 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--print-logs", action="store_true")
     _add_common_poll_flags(sp)
     sp.set_defaults(func=cmd_install_geak)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the top-level argparse parser with every subcommand."""
+    p = argparse.ArgumentParser(
+        prog="hyperloom multi-node",
+        description=(
+            "Drive the multi-node cluster the platform provisioned and handed over "
+            "via HYPERLOOM_MN_EXT_*. State persists in $MULTI_NODE_STATE_FILE."
+        ),
+    )
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    # bootstrap
+    sp = sub.add_parser(
+        "bootstrap",
+        help="install Hyperloom RayJob toolchain inside the RayJob via Ray Dashboard REST. "
+        "Default: uses multi_node/scripts/bootstrap.sh from this checkout.",
+    )
+    sp.add_argument(
+        "--script",
+        default=None,
+        help="optional override: absolute path to a bootstrap.sh "
+        "ALREADY VISIBLE inside the RayJob pod (e.g. baked into "
+        "the image). When omitted, the bundled script is streamed in.",
+    )
+    sp.add_argument("--force", action="store_true", help="re-run bootstrap even if the marker file says it's done")
+    sp.add_argument("--print-logs", action="store_true")
+    _add_common_poll_flags(sp)
+    sp.set_defaults(func=cmd_bootstrap)
+
+    # verify
+    sp = sub.add_parser("verify", help="confirm ray is on PATH inside the RayJob")
+    sp.add_argument("--print-logs", action="store_true")
+    _add_common_poll_flags(sp)
+    sp.set_defaults(func=cmd_verify)
+
+    _add_restart_server_parser(sub)
+
+    sp = sub.add_parser(
+        "kill-inference",
+        help="kill vllm/sglang on the RayJob only (no new server; frees GPU for kernel-agent)",
+    )
+    sp.add_argument(
+        "--pid-file",
+        default=None,
+        help="single-node: head-pod PID file path; multi-node: pid-dir path "
+        "(same override semantics as restart-server --pid-file)",
+    )
+    sp.add_argument("--print-logs", action="store_true")
+    _add_common_poll_flags(sp)
+    sp.set_defaults(func=cmd_kill_inference)
+
+    _add_kernel_patch_parsers(sub)
+
+    _add_apply_tracelens_patch_parser(sub)
+
+    _add_install_geak_parser(sub)
 
     return p
 

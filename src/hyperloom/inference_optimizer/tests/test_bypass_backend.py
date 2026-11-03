@@ -498,15 +498,8 @@ def test_bypass_cli_rejects_non_local(tmp_path):
     assert rc == 2
 
 
-def test_bypass_eval_env_passthrough(tmp_path, monkeypatch):
-    """RUN_EVAL uses MAGPIE_EVAL_TASKS/MAGPIE_EVAL_LIMIT env in the eval command."""
-    inferencex = tmp_path / "InferenceX"
-    (inferencex / "utils" / "bench_serving").mkdir(parents=True)
-    (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
-    cfg_path = _write_cfg(tmp_path, inferencex, run_eval="true")
-
-    monkeypatch.setenv("MAGPIE_EVAL_TASKS", "gsm8k")
-    monkeypatch.setenv("MAGPIE_EVAL_LIMIT", "8")
+def _stub_ready_server(monkeypatch) -> None:
+    """A launched server that is ready at once and exits cleanly."""
 
     class _FakeServer:
         pid = 7
@@ -517,6 +510,15 @@ def test_bypass_eval_env_passthrough(tmp_path, monkeypatch):
     monkeypatch.setattr(bypass_runner, "_launch_server", lambda cmd, env, log: _FakeServer())
     monkeypatch.setattr(bypass_runner, "_terminate_server", lambda proc: None)
     monkeypatch.setattr(bypass_engine, "wait_for_server_ready", lambda *a, **k: True)
+
+
+def _run_capturing_eval_command(tmp_path, monkeypatch) -> tuple[int, dict]:
+    """Run an eval-enabled sglang benchmark; return its rc and the eval run its command was built from."""
+    inferencex = tmp_path / "InferenceX"
+    (inferencex / "utils" / "bench_serving").mkdir(parents=True)
+    (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
+    cfg_path = _write_cfg(tmp_path, inferencex, run_eval="true")
+    _stub_ready_server(monkeypatch)
 
     captured = {}
 
@@ -546,6 +548,14 @@ def test_bypass_eval_env_passthrough(tmp_path, monkeypatch):
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors._subprocess_kill.run_with_session_kill", fake_run)
 
     rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
+    return rc, captured
+
+
+def test_bypass_eval_env_passthrough(tmp_path, monkeypatch):
+    """RUN_EVAL uses MAGPIE_EVAL_TASKS/MAGPIE_EVAL_LIMIT env in the eval command."""
+    monkeypatch.setenv("MAGPIE_EVAL_TASKS", "gsm8k")
+    monkeypatch.setenv("MAGPIE_EVAL_LIMIT", "8")
+    rc, captured = _run_capturing_eval_command(tmp_path, monkeypatch)
     assert rc == 0
     assert captured.get("tasks") == "gsm8k"
     assert captured.get("limit") == "8"
@@ -553,52 +563,9 @@ def test_bypass_eval_env_passthrough(tmp_path, monkeypatch):
 
 def test_bypass_eval_limit_absent_is_none(tmp_path, monkeypatch):
     """Without MAGPIE_EVAL_LIMIT, the eval command limit is None (full run)."""
-    inferencex = tmp_path / "InferenceX"
-    (inferencex / "utils" / "bench_serving").mkdir(parents=True)
-    (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
-    cfg_path = _write_cfg(tmp_path, inferencex, run_eval="true")
-
     monkeypatch.delenv("MAGPIE_EVAL_LIMIT", raising=False)
     monkeypatch.delenv("MAGPIE_EVAL_TASKS", raising=False)
-
-    class _FakeServer:
-        pid = 7
-
-        def wait(self, timeout=None):
-            return 0
-
-    monkeypatch.setattr(bypass_runner, "_launch_server", lambda cmd, env, log: _FakeServer())
-    monkeypatch.setattr(bypass_runner, "_terminate_server", lambda proc: None)
-    monkeypatch.setattr(bypass_engine, "wait_for_server_ready", lambda *a, **k: True)
-
-    captured = {}
-
-    def fake_eval_cmd(run):
-        captured.update(dataclasses.asdict(run))
-        return ["true"]
-
-    monkeypatch.setattr(bypass_engine, "build_eval_command", fake_eval_cmd)
-
-    def fake_run(cmd, capture_output=True, text=True, timeout=None, env=None, watch=None):
-        if "--result-dir" in cmd:
-            rd = Path(cmd[cmd.index("--result-dir") + 1])
-            rd.mkdir(parents=True, exist_ok=True)
-            (rd / "inferencex_result.json").write_text(
-                json.dumps({"output_throughput": 100.0, "completed": 40, "duration": 30.0}),
-                encoding="utf-8",
-            )
-
-        class _P:
-            returncode = 0
-            stdout = "ok"
-            stderr = ""
-
-        return _P()
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._subprocess_kill.run_with_session_kill", fake_run)
-
-    rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
+    rc, captured = _run_capturing_eval_command(tmp_path, monkeypatch)
     assert rc == 0
     assert captured.get("tasks") == "gsm8k"
     assert captured.get("limit") is None
@@ -1134,9 +1101,28 @@ def test_scriptable_run_timeout_writes_stderr_log(tmp_path, monkeypatch):
     assert "scriptable benchmark timed out" in (workspace / "scriptable_stderr.log").read_text(encoding="utf-8")
 
 
+def _write_xdit_cfg(tmp_path, inferencex, **bench_extra):
+    cfg = {
+        "benchmark": {
+            "framework": "xdit",
+            "model": "/primus/models/FLUX",
+            "precision": "bf16",
+            "runner_type": "mi300x",
+            "run_mode": "local",
+            "inferencex_path": str(inferencex),
+            "timeout_seconds": 60,
+            "workload_kind": "scriptable",
+            "envs": {"TP": 1},
+            **bench_extra,
+        }
+    }
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    return cfg_path
+
+
 def test_scriptable_run_end_to_end(tmp_path, monkeypatch):
     """xdit scriptable run produces a report carrying quality_gate; eval maps it."""
-    import yaml
     from hyperloom.orchestrator.actions.executors._accuracy_gate import parse_eval_results
 
     inferencex = tmp_path / "InferenceX"
@@ -1156,21 +1142,7 @@ def test_scriptable_run_end_to_end(tmp_path, monkeypatch):
     )
     monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", str(scripts_dir))
 
-    cfg = {
-        "benchmark": {
-            "framework": "xdit",
-            "model": "/primus/models/FLUX",
-            "precision": "bf16",
-            "runner_type": "mi300x",
-            "run_mode": "local",
-            "inferencex_path": str(inferencex),
-            "timeout_seconds": 60,
-            "workload_kind": "scriptable",
-            "envs": {"TP": 1},
-        }
-    }
-    cfg_path = tmp_path / "config.yaml"
-    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    cfg_path = _write_xdit_cfg(tmp_path, inferencex)
 
     rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
     assert rc == 0
@@ -1188,7 +1160,6 @@ def test_scriptable_run_end_to_end(tmp_path, monkeypatch):
 
 def test_scriptable_profile_passthrough(tmp_path, monkeypatch):
     """torch_profiler.enabled=true must reach the scriptable script as PROFILE=1."""
-    import yaml
 
     inferencex = tmp_path / "InferenceX"
     (inferencex / "benchmarks").mkdir(parents=True)
@@ -1210,22 +1181,7 @@ def test_scriptable_profile_passthrough(tmp_path, monkeypatch):
     monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", str(scripts_dir))
     monkeypatch.delenv("PROFILE", raising=False)
 
-    cfg = {
-        "benchmark": {
-            "framework": "xdit",
-            "model": "/primus/models/FLUX",
-            "precision": "bf16",
-            "runner_type": "mi300x",
-            "run_mode": "local",
-            "inferencex_path": str(inferencex),
-            "timeout_seconds": 60,
-            "workload_kind": "scriptable",
-            "envs": {"TP": 1},
-            "profiler": {"torch_profiler": {"enabled": True}},
-        }
-    }
-    cfg_path = tmp_path / "config.yaml"
-    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    cfg_path = _write_xdit_cfg(tmp_path, inferencex, profiler={"torch_profiler": {"enabled": True}})
 
     rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
     assert rc == 0
@@ -1241,7 +1197,6 @@ def test_scriptable_profile_passthrough(tmp_path, monkeypatch):
 
 def test_scriptable_profile_disabled_by_default(tmp_path, monkeypatch):
     """Without torch_profiler, the scriptable script sees no PROFILE=1."""
-    import yaml
 
     inferencex = tmp_path / "InferenceX"
     (inferencex / "benchmarks").mkdir(parents=True)
@@ -1260,21 +1215,7 @@ def test_scriptable_profile_disabled_by_default(tmp_path, monkeypatch):
     monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", str(scripts_dir))
     monkeypatch.delenv("PROFILE", raising=False)
 
-    cfg = {
-        "benchmark": {
-            "framework": "xdit",
-            "model": "/primus/models/FLUX",
-            "precision": "bf16",
-            "runner_type": "mi300x",
-            "run_mode": "local",
-            "inferencex_path": str(inferencex),
-            "timeout_seconds": 60,
-            "workload_kind": "scriptable",
-            "envs": {"TP": 1},
-        }
-    }
-    cfg_path = tmp_path / "config.yaml"
-    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    cfg_path = _write_xdit_cfg(tmp_path, inferencex)
 
     rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
     assert rc == 0
@@ -1444,15 +1385,7 @@ def test_eval_failure_propagates_as_run_failure(tmp_path, monkeypatch):
     (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
     cfg_path = _write_cfg(tmp_path, inferencex, run_eval="true")
 
-    class _FakeServer:
-        pid = 7
-
-        def wait(self, timeout=None):
-            return 0
-
-    monkeypatch.setattr(bypass_runner, "_launch_server", lambda cmd, env, log: _FakeServer())
-    monkeypatch.setattr(bypass_runner, "_terminate_server", lambda proc: None)
-    monkeypatch.setattr(bypass_engine, "wait_for_server_ready", lambda *a, **k: True)
+    _stub_ready_server(monkeypatch)
     _eval_client_run(monkeypatch, client_rc=0, eval_rc=1)
 
     rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
@@ -1470,15 +1403,7 @@ def test_eval_success_keeps_run_success(tmp_path, monkeypatch):
     (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
     cfg_path = _write_cfg(tmp_path, inferencex, run_eval="true")
 
-    class _FakeServer:
-        pid = 7
-
-        def wait(self, timeout=None):
-            return 0
-
-    monkeypatch.setattr(bypass_runner, "_launch_server", lambda cmd, env, log: _FakeServer())
-    monkeypatch.setattr(bypass_runner, "_terminate_server", lambda proc: None)
-    monkeypatch.setattr(bypass_engine, "wait_for_server_ready", lambda *a, **k: True)
+    _stub_ready_server(monkeypatch)
     _eval_client_run(monkeypatch, client_rc=0, eval_rc=0)
 
     rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")

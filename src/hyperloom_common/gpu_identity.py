@@ -28,10 +28,14 @@ class GpuBoard:
     vendor_peak_tflops: Mapping[str, float] = field(default_factory=dict)
     #: Other spellings probe output uses for the board (rocm-smi prints ``Radeon 8060S Graphics``).
     aliases: tuple[str, ...] = ()
-
-    def vendor_peaks_by_tag(self, tags: Mapping[str, tuple[str, ...]]) -> dict[str, float]:
-        """``vendor_peak_tflops`` under each spelling a caller reads, from ``tags``: precision -> its spellings."""
-        return {tag: peak for precision, peak in self.vendor_peak_tflops.items() for tag in tags[precision]}
+    #: The PCI device ids that ``amd-smi static --asic`` reports (``asic.device_id``) for this board, lower case, no
+    #: ``0x``. A board's name is whatever the VBIOS says (an MI355X node answers "AMD Instinct MI355 OAM"); its device
+    #: id is what the silicon is. Read from the ``amdgpu.ids`` that ships with the driver, with the variants (HF, VF)
+    #: listed under their board. 0x74a2 and 0x74b6 are left out on purpose: the same id is both an MI308X and, at
+    #: revision A1, an MI300X, so it names no single board and the caller falls back to the name. So is 0x7551, the
+    #: R9700 at revisions C0 and C1 (R9700S) and the R9600D at C8: the R9700 lists no id and is known by its name alone.
+    #: The Radeon 8060S lists none either and is known by its name.
+    device_ids: frozenset[str] = frozenset()
 
     def named_in(self, text: str) -> bool:
         """Whether ``text`` names this board as a whole word; a longer name such as ``MI300XL`` is another product."""
@@ -56,9 +60,36 @@ AMD_GPU_BOARDS: dict[str, GpuBoard] = {
     board.product: board
     for board in (
         # product, gfx, CUs, HBM GB, HBM GB/s, vendor peak TFLOPS
-        GpuBoard("mi300x", "gfx942", 304, 192.0, 5300.0, _MI300X_PEAKS, aliases=("AMD Instinct MI300X",)),
-        GpuBoard("mi308x", "gfx942", 304, 192.0, 5300.0, _MI300X_PEAKS, aliases=("AMD Instinct MI308X",)),
-        GpuBoard("mi325x", "gfx942", 304, 256.0, 6000.0, _MI300X_PEAKS, aliases=("AMD Instinct MI325X",)),
+        GpuBoard(
+            "mi300x",
+            "gfx942",
+            304,
+            192.0,
+            5300.0,
+            _MI300X_PEAKS,
+            aliases=("AMD Instinct MI300X",),
+            device_ids=frozenset({"74a1", "74a9", "74b5", "74bd"}),
+        ),
+        GpuBoard(
+            "mi308x",
+            "gfx942",
+            304,
+            192.0,
+            5300.0,
+            _MI300X_PEAKS,
+            aliases=("AMD Instinct MI308X",),
+            device_ids=frozenset({"74a8"}),
+        ),
+        GpuBoard(
+            "mi325x",
+            "gfx942",
+            304,
+            256.0,
+            6000.0,
+            _MI300X_PEAKS,
+            aliases=("AMD Instinct MI325X",),
+            device_ids=frozenset({"74a5", "74b9"}),
+        ),
         GpuBoard(
             "mi355x",
             "gfx950",
@@ -67,6 +98,7 @@ AMD_GPU_BOARDS: dict[str, GpuBoard] = {
             8000.0,
             _matrix_peaks(bf16=2516.6, fp8=5033.2, fp4=10066.4, fp32=157.3),
             aliases=("AMD Instinct MI355X",),
+            device_ids=frozenset({"75a3", "75b3"}),
         ),
         # https://www.amd.com/en/products/graphics/workstations/radeon-ai-pro/ai-9000-series/amd-radeon-ai-pro-r9700.html
         GpuBoard("r9700", "gfx1201", 64, 32.0, 640.0, _matrix_peaks(bf16=191.0, fp8=383.0, fp32=47.8)),
@@ -74,6 +106,20 @@ AMD_GPU_BOARDS: dict[str, GpuBoard] = {
         GpuBoard("radeon8060s", "gfx1151", 40, aliases=("Radeon 8060S",)),
     )
 }
+
+
+def normalise_device_id(device_id: object) -> str | None:
+    """``"0x75A3"`` (or the integer ``0x75a3``) as ``"75a3"``; ``None`` when it is not a device id."""
+    if isinstance(device_id, int) and not isinstance(device_id, bool) and device_id >= 0:
+        return f"{device_id:04x}"
+    text = str(device_id or "").strip().lower().removeprefix("0x")
+    return text if text and all(c in "0123456789abcdef" for c in text) else None
+
+
+def gpu_type_for_device_id(device_id: object) -> str | None:
+    """The one board a PCI device id belongs to, or ``None`` when it is unknown, ambiguous or unreadable."""
+    key = normalise_device_id(device_id)
+    return next((board.product for board in AMD_GPU_BOARDS.values() if key in board.device_ids), None)
 
 
 def gpu_board(gpu_type: str | None) -> GpuBoard | None:
@@ -102,4 +148,13 @@ def is_gfx_arch(gpu_type: str | None, arch: str) -> bool:
     return bool(key) and (key == arch or gfx_arch_for_gpu_type(key) == arch)
 
 
-__all__ = ["AMD_GPU_BOARDS", "GpuBoard", "board_named_in", "gfx_arch_for_gpu_type", "gpu_board", "is_gfx_arch"]
+__all__ = [
+    "AMD_GPU_BOARDS",
+    "GpuBoard",
+    "board_named_in",
+    "gfx_arch_for_gpu_type",
+    "gpu_board",
+    "gpu_type_for_device_id",
+    "is_gfx_arch",
+    "normalise_device_id",
+]

@@ -369,6 +369,37 @@ async def try_flydsl_kb_warmstart(
     return result
 
 
+def _solution_value(
+    target: RewriteKbTarget,
+    measurement: FlydslMeasurement,
+    session_id: str,
+    signature: str,
+    implementation: dict,
+) -> dict:
+    """Build the ``value`` payload of one FlyDSL rewrite record."""
+    spec = target.spec
+    speedup = measurement.speedup
+    return {
+        "id": session_id,
+        "schema_version": _SCHEMA_VERSION,
+        "rewrite_kind": _REWRITE_KIND,
+        "flydsl_kernel": _KERNEL_ARTIFACT,
+        "metric": {
+            "wall_ms": measurement.flydsl_ms,
+            "baseline_wall_ms": measurement.source_ms,
+            "speedup": round(speedup, 4) if speedup is not None else None,
+            "snr_db": measurement.snr_db,
+            "gpu_arch": target.config.gpu_target,
+            "correct": True,
+        },
+        "implementation_signature": signature,
+        "implementation_identity": implementation,
+        "source_sha256": _sha256(spec.source_kernel),
+        "driver_sha256": _sha256(target.driver_path),
+        "builder_symbol": spec.builder_symbol,
+    }
+
+
 def write_flydsl_kb_solution(
     target: RewriteKbTarget,
     measurement: FlydslMeasurement,
@@ -408,25 +439,7 @@ def write_flydsl_kb_solution(
             "producer": identity.producer,
             "speedup": round(speedup, 4) if speedup is not None else None,
             "identity": asdict(identity),
-            "value": {
-                "id": session_id,
-                "schema_version": _SCHEMA_VERSION,
-                "rewrite_kind": _REWRITE_KIND,
-                "flydsl_kernel": _KERNEL_ARTIFACT,
-                "metric": {
-                    "wall_ms": measurement.flydsl_ms,
-                    "baseline_wall_ms": measurement.source_ms,
-                    "speedup": round(speedup, 4) if speedup is not None else None,
-                    "snr_db": measurement.snr_db,
-                    "gpu_arch": config.gpu_target,
-                    "correct": True,
-                },
-                "implementation_signature": signature,
-                "implementation_identity": implementation,
-                "source_sha256": _sha256(spec.source_kernel),
-                "driver_sha256": _sha256(target.driver_path),
-                "builder_symbol": spec.builder_symbol,
-            },
+            "value": _solution_value(target, measurement, session_id, signature, implementation),
         }
         with tempfile.TemporaryDirectory(prefix="flydsl-rewrite-write-") as temporary:
             staged = Path(temporary) / _KERNEL_ARTIFACT

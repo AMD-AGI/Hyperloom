@@ -298,12 +298,8 @@ def _floored_case_times() -> tuple[dict[str, float], dict[str, float]]:
     return pristine, dict.fromkeys(pristine, TIMING_FLOOR_MS)
 
 
-def test_kb_warm_start_adopts_a_high_scoring_prior_solution(
-    monkeypatch,
-    tmp_path,
-):
-    """The KB write path scores a 19.29x warm start on its measurement alone."""
-    pristine, candidate = _floored_case_times()
+def _try_prior_solution(monkeypatch, tmp_path, candidate: dict[str, float], pristine_bench: dict):
+    """Trial a correct KB prior solution whose bench reads ``candidate`` per case against ``pristine_bench``."""
     monkeypatch.setattr(integration, "_apply_candidate_patch", lambda *_a, **_k: "")
     monkeypatch.setattr(integration, "_force_jit_rebuild", lambda *_a, **_k: None)
     monkeypatch.setattr(integration, "_correctness_once", lambda *_a, **_k: True)
@@ -318,20 +314,28 @@ def test_kb_warm_start_adopts_a_high_scoring_prior_solution(
         },
     )
 
-    trial = integration._try_apply_candidate(
+    return integration._try_apply_candidate(
         {"solution_slug": "prior-solution"},
         integration._CandidateField(
             LoopKernel(kernel_path=str(tmp_path / "kernel.py"), kernel_backend="", workspace=str(tmp_path)),
             integration.WarmStartHarness(str(tmp_path / "driver.py"), snr_threshold=30.0),
-            # A real pristine bench reports both halves of its measurement; the aggregate is dominated by the one
-            # expensive case.
-            pristine_bench={
-                "case_times": pristine,
-                "median_ms": EXPENSIVE_PRISTINE_MS,
-            },
+            pristine_bench=pristine_bench,
             allowed_paths=None,
         ),
         pre_untracked=set(),
+    )
+
+
+def test_kb_warm_start_adopts_a_high_scoring_prior_solution(
+    monkeypatch,
+    tmp_path,
+):
+    """The KB write path scores a 19.29x warm start on its measurement alone."""
+    pristine, candidate = _floored_case_times()
+    # A real pristine bench reports both halves of its measurement; the aggregate is dominated by the one expensive
+    # case.
+    trial = _try_prior_solution(
+        monkeypatch, tmp_path, candidate, {"case_times": pristine, "median_ms": EXPENSIVE_PRISTINE_MS}
     )
 
     assert trial.reject_reason == ""
@@ -346,34 +350,10 @@ def test_kb_warm_start_still_adopts_a_modest_prior_solution(
 ):
     pristine, _ = _floored_case_times()
     candidate = {case_id: baseline_ms / MODEST_SPEEDUP for case_id, baseline_ms in pristine.items()}
-    monkeypatch.setattr(integration, "_apply_candidate_patch", lambda *_a, **_k: "")
-    monkeypatch.setattr(integration, "_force_jit_rebuild", lambda *_a, **_k: None)
-    monkeypatch.setattr(integration, "_correctness_once", lambda *_a, **_k: True)
-    monkeypatch.setattr(
-        integration,
-        "_bench_once",
-        lambda *_a, **_k: {
-            "success": True,
-            "median_ms": TIMING_FLOOR_MS,
-            "case_times": dict(candidate),
-            "unscored_cases": [],
-        },
-    )
-
-    trial = integration._try_apply_candidate(
-        {"solution_slug": "prior-solution"},
-        integration._CandidateField(
-            LoopKernel(kernel_path=str(tmp_path / "kernel.py"), kernel_backend="", workspace=str(tmp_path)),
-            integration.WarmStartHarness(str(tmp_path / "driver.py"), snr_threshold=30.0),
-            # Both halves of the pristine measurement, agreeing at 5.72x: the candidate has to beat the aggregate as well
-            # as the per-case mean.
-            pristine_bench={
-                "case_times": pristine,
-                "median_ms": TIMING_FLOOR_MS * MODEST_SPEEDUP,
-            },
-            allowed_paths=None,
-        ),
-        pre_untracked=set(),
+    # Both halves of the pristine measurement, agreeing at 5.72x: the candidate has to beat the aggregate as well as
+    # the per-case mean.
+    trial = _try_prior_solution(
+        monkeypatch, tmp_path, candidate, {"case_times": pristine, "median_ms": TIMING_FLOOR_MS * MODEST_SPEEDUP}
     )
 
     assert trial.reject_reason == ""
@@ -532,35 +512,13 @@ def test_a_warm_start_without_a_pristine_aggregate_refuses_to_adopt(
     pristine, _ = _floored_case_times()
     candidate = {case_id: baseline_ms / MODEST_SPEEDUP for case_id, baseline_ms in pristine.items()}
     discarded: list[str] = []
-    monkeypatch.setattr(integration, "_apply_candidate_patch", lambda *_a, **_k: "")
-    monkeypatch.setattr(integration, "_force_jit_rebuild", lambda *_a, **_k: None)
-    monkeypatch.setattr(integration, "_correctness_once", lambda *_a, **_k: True)
-    monkeypatch.setattr(
-        integration,
-        "_bench_once",
-        lambda *_a, **_k: {
-            "success": True,
-            "median_ms": TIMING_FLOOR_MS,
-            "case_times": dict(candidate),
-            "unscored_cases": [],
-        },
-    )
     monkeypatch.setattr(
         integration,
         "_git_discard_worktree",
         lambda workspace, **_k: discarded.append(str(workspace)),
     )
 
-    trial = integration._try_apply_candidate(
-        {"solution_slug": "prior-solution"},
-        integration._CandidateField(
-            LoopKernel(kernel_path=str(tmp_path / "kernel.py"), kernel_backend="", workspace=str(tmp_path)),
-            integration.WarmStartHarness(str(tmp_path / "driver.py"), snr_threshold=30.0),
-            pristine_bench={"case_times": pristine},
-            allowed_paths=None,
-        ),
-        pre_untracked=set(),
-    )
+    trial = _try_prior_solution(monkeypatch, tmp_path, candidate, {"case_times": pristine})
 
     # Named apart from aggregate_regression: nothing was compared at all.
     assert trial.reject_reason == "pristine_aggregate_missing"

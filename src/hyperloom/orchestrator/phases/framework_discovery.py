@@ -32,6 +32,17 @@ log = _logging.getLogger(__name__)
 DISCOVER_FAILURE_RETRY_LIMIT: int = 3
 
 
+def _specialist_resolve_bases(session_dir: Any, sid: str) -> list[Path]:
+    """The specialist's worktree and run dir, which its ``patches_written`` paths are resolved against."""
+    from hyperloom.inference_optimizer.session.session_paths import runs_dir as _runs_dir
+
+    resolve_bases: list[Path] = []
+    if session_dir is not None:
+        spec_root = _runs_dir(Path(session_dir), "specialist", sid)
+        resolve_bases = [spec_root / "worktree", spec_root]
+    return resolve_bases
+
+
 class _CandidateDiscoveryMixin:
     """Dispatches and harvests candidate-discovery rounds and routes specialist deliverables to Critic review."""
 
@@ -223,12 +234,7 @@ class _CandidateDiscoveryMixin:
         if not sid:
             return
         # Resolve patches_written; submit only when >=1 real file exists.
-        from hyperloom.inference_optimizer.session.session_paths import runs_dir as _runs_dir
-
-        resolve_bases: list[Path] = []
-        if self.session_dir is not None:
-            spec_root = _runs_dir(Path(self.session_dir), "specialist", sid)
-            resolve_bases = [spec_root / "worktree", spec_root]
+        resolve_bases = _specialist_resolve_bases(self.session_dir, sid)
         existing_patches = [str(p) for p in patches if _patches_on_disk(Path(str(p)), resolve_bases)]
         # A non-diff tuned artifact is also a routable deliverable; route it like a patch.
         routable_artifacts = _resolvable_artifacts_from_done(done_payload, resolve_bases)

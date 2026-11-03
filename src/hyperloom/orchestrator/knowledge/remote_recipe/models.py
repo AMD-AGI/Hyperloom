@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
+from hyperloom.common.env_safety import ENV_FILE_LIST_SEP, env_file_list_elements
+
 MAX_KNOWLEDGE_BYTES = 5 * 1024 * 1024
 MAX_FILES = 512
 MAX_FILE_BYTES = 512 * 1024 * 1024
@@ -262,6 +264,52 @@ def validate_relative_path(value: str) -> str:
     return normalized
 
 
+def _declared_ref(raw: str, key: str) -> str | None:
+    """The ref a value declares by the key it sits under, or ``None`` when the key declares none."""
+    if key not in _ARTIFACT_REF_KEYS or "/" not in raw:
+        return None
+    try:
+        normalized = validate_relative_path(raw)
+    except RemoteRecipeValidationError:
+        return None
+    if key == "files" or normalized.startswith(_BUILDER_REF_PREFIXES):
+        return normalized
+    return None
+
+
+def _string_refs(raw: str, key: str, known_paths: set[str]) -> set[str]:
+    """The refs one knowledge string carries: an uploaded path, a config-file env list, or a declared ref."""
+    if raw in known_paths:
+        return {validate_relative_path(raw)}
+    # A config-file env value names several artifacts in one string, joined the way the serving stack splits
+    # them again; each element is a ref in its own right. Only an element that matches an uploaded path counts,
+    # so this cannot invent a ref out of a value that merely contains a separator.
+    if ENV_FILE_LIST_SEP in raw:
+        listed = {part for part in env_file_list_elements(raw) if part in known_paths}
+        if listed:
+            return {validate_relative_path(part) for part in listed}
+    declared = _declared_ref(raw, key)
+    return {declared} if declared is not None else set()
+
+
+def _visit_refs(value: Any, key: str, known_paths: set[str], refs: set[str]) -> None:
+    """Walk a knowledge document, adding the refs of every string it holds to ``refs``."""
+    if isinstance(value, dict):
+        for nested_key, nested_value in value.items():
+            _visit_refs(nested_value, str(nested_key), known_paths, refs)
+        return
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            _visit_refs(item, key, known_paths, refs)
+        return
+    if not isinstance(value, str):
+        return
+    raw = value.strip()
+    if not raw or "://" in raw:
+        return
+    refs.update(_string_refs(raw, key, known_paths))
+
+
 def extract_knowledge_artifact_refs(
     knowledge: Any,
     artifact_paths: Iterable[str] = (),
@@ -269,40 +317,7 @@ def extract_knowledge_artifact_refs(
     """Collect artifact refs actually present in the final knowledge document."""
     known_paths = {validate_relative_path(path) for path in artifact_paths if str(path or "").strip()}
     refs: set[str] = set()
-
-    def declared_ref(raw: str, key: str) -> str | None:
-        if key not in _ARTIFACT_REF_KEYS or "/" not in raw:
-            return None
-        try:
-            normalized = validate_relative_path(raw)
-        except RemoteRecipeValidationError:
-            return None
-        if key == "files" or normalized.startswith(_BUILDER_REF_PREFIXES):
-            return normalized
-        return None
-
-    def visit(value: Any, *, key: str = "") -> None:
-        if isinstance(value, dict):
-            for nested_key, nested_value in value.items():
-                visit(nested_value, key=str(nested_key))
-            return
-        if isinstance(value, (list, tuple)):
-            for item in value:
-                visit(item, key=key)
-            return
-        if not isinstance(value, str):
-            return
-        raw = value.strip()
-        if not raw or "://" in raw:
-            return
-        if raw in known_paths:
-            refs.add(validate_relative_path(raw))
-            return
-        declared = declared_ref(raw, key)
-        if declared is not None:
-            refs.add(declared)
-
-    visit(knowledge)
+    _visit_refs(knowledge, "", known_paths, refs)
     return refs
 
 

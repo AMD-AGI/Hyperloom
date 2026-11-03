@@ -744,6 +744,22 @@ async def _settle(atask: asyncio.Task) -> None:
     await asyncio.wait_for(asyncio.gather(atask, return_exceptions=True), timeout=5.0)
 
 
+async def _cancel_then_let_finish(coord, task, atask: asyncio.Task, finish: asyncio.Event, cancel) -> None:
+    """After ``cancel`` the action keeps its task and lane until its execution returns, then releases both."""
+    try:
+        await cancel()
+        assert atask.cancelled()
+        assert coord.dispatcher._inflight_actions[task.task_id].scope.cancelled
+        assert (await coord.tasks.get(task.task_id)).state == "running"
+        assert (await coord.locks.lane_holders())[_CHEAP_ACTION_LANE] == 1
+    finally:
+        executions = tuple(coord.dispatcher._executions)
+        finish.set()
+        await asyncio.gather(*executions)
+    assert (await coord.tasks.get(task.task_id)).state == "succeeded"
+    assert not await coord.locks.lane_holders()
+
+
 class TestInflightHandles:
     """Something other than the pump has to be able to reach a running action."""
 
@@ -772,19 +788,12 @@ class TestInflightHandles:
             return execute
 
         task, atask = await _start_action(coord, kind=_CHEAP_ACTION, key="h-retire", make_executor=make_executor)
-        try:
+
+        async def _cancel_the_caller() -> None:
             atask.cancel()
             await _settle(atask)
-            assert atask.cancelled()
-            assert coord.dispatcher._inflight_actions[task.task_id].scope.cancelled
-            assert (await coord.tasks.get(task.task_id)).state == "running"
-            assert (await coord.locks.lane_holders())[_CHEAP_ACTION_LANE] == 1
-        finally:
-            executions = tuple(coord.dispatcher._executions)
-            finish.set()
-            await asyncio.gather(*executions)
-        assert (await coord.tasks.get(task.task_id)).state == "succeeded"
-        assert not await coord.locks.lane_holders()
+
+        await _cancel_then_let_finish(coord, task, atask, finish, _cancel_the_caller)
         assert not coord.dispatcher._executions
         assert task.task_id not in coord.dispatcher._inflight_actions
 
@@ -1455,18 +1464,7 @@ class TestCoordinatorStop:
             return execute
 
         task, atask = await _start_action(coord, kind=_CHEAP_ACTION, key="s-stop", make_executor=make_executor)
-        try:
-            await coord.stop()
-            assert atask.cancelled()
-            assert coord.dispatcher._inflight_actions[task.task_id].scope.cancelled
-            assert (await coord.tasks.get(task.task_id)).state == "running"
-            assert (await coord.locks.lane_holders())[_CHEAP_ACTION_LANE] == 1
-        finally:
-            executions = tuple(coord.dispatcher._executions)
-            finish.set()
-            await asyncio.gather(*executions)
-        assert (await coord.tasks.get(task.task_id)).state == "succeeded"
-        assert not await coord.locks.lane_holders()
+        await _cancel_then_let_finish(coord, task, atask, finish, coord.stop)
         assert coord.dispatcher._inflight_actions == {}
         assert not coord.dispatcher._executions
         await coord.stop()

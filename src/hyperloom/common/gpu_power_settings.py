@@ -27,6 +27,8 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from hyperloom_common.env import env_flag
 
+from hyperloom.common.outside_facts import ROCR_VISIBLE_DEVICES_ENV
+
 __all__ = [
     "GPU_POWER_SAMPLING_ENV",
     "GpuPowerSettingsError",
@@ -116,7 +118,7 @@ def normalize_perf_level(value: Any) -> str:
 
 #: The masks the ROCm runtime honours, ROCr level then HIP level. HSA_VISIBLE_DEVICES and GPU_DEVICE_ORDINAL are left
 #: out: ROCm ignores them, so a card they name is not one the session's servers are limited to.
-_ROCR_MASKS = ("ROCR_VISIBLE_DEVICES",)
+_ROCR_MASKS = (ROCR_VISIBLE_DEVICES_ENV,)
 _HIP_MASKS = ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")
 
 
