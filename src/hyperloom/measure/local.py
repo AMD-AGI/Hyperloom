@@ -1213,12 +1213,16 @@ def _client_logs(failing: list[VariantResult]) -> list[str]:
 
 
 def _boot_timeout_detail(run: _Run, failing: list[VariantResult]) -> str:
-    """What the boot guard saw when it ended the test, or ``""`` when it did not: the limit, and where the log stopped."""
+    """What the boot guard saw when it ended the test, or ``""`` when it did not: the limit, the time aiter's module builds
+    were left out of it, and where the log stopped."""
     if run.boot is None or run.boot.expired_after is None or run.stopped_rc != ORCHESTRATOR_CANCELLED_RETURNCODE:
         return ""
     logs = [_read_tail(result.server_log_path) for result in failing]
     ends = log_causes.last_line(next((text for text in logs if text), ""))
-    detail = f"the server was not ready within {run.boot.expired_after:.0f}s of the {run.call.timeout_sec:.0f}s a round may take"
+    detail = f"the server was not ready within {run.boot.expired_after:.0f}s"
+    if run.boot.building_sec > 0:
+        detail += f" plus {run.boot.building_sec:.0f}s of aiter module builds ({run.boot.waited_sec:.0f}s in all)"
+    detail += f" of the {run.call.timeout_sec:.0f}s a round may take"
     return f"{detail}; its log ends: {ends}" if ends else detail
 
 

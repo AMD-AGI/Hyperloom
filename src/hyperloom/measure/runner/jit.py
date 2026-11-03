@@ -44,6 +44,7 @@ from hyperloom.measure.jit.key import (
     touches_build_surface,
     tree_identity,
     triton_key,
+    without_card_arch,
 )
 from hyperloom.measure.jit_kinds import AITER_CPP, AITER_JIT, TRITON, CacheKind
 from hyperloom.measure.jit.modules import (
@@ -75,6 +76,7 @@ __all__ = [
     "ColdStart",
     "Surroundings",
     "build_session",
+    "card_arch",
     "cold_start",
     "interpreter_identity",
 ]
@@ -89,7 +91,6 @@ _UTF8 = "utf-8"
 _PREFLIGHT_MISMATCH = "preflight_mismatch"
 _SPEC_REJECTED = "spec_rejected"
 _RUNTIME_KIND = "runtime"
-_GPU_ARCHS, _NATIVE = "GPU_ARCHS", "native"
 _MODULE_SUFFIX = ".so"
 _NEEDS_JIT_DIR = (
     "the patch changes aiter's csrc or hsa, which is measured only by building the modules it touches in the test's own "
@@ -134,6 +135,11 @@ class _ModuleBuild:
     lay: Callable[[Path], None]
 
 
+def card_arch(spec: MeasurementSpec, gpu: GpuFacts | None) -> str | None:
+    """The architecture of the card the test runs on: the one the card reports, else the sheet's GPU type's."""
+    return (gpu.gfx_arch if gpu else None) or gfx_arch_for_gpu_type(spec.hardware.gpu_type)
+
+
 def build_session(
     spec: MeasurementSpec, points: list[Path], farm: Farm | None, gpu: GpuFacts | None, around: Surroundings
 ) -> JitCacheSession | None:
@@ -144,7 +150,7 @@ def build_session(
     """
     needs_jit_dir = patches_aiter_sources(spec.environment.roots)
     root = around.environ.get(JIT_CACHE_ENV, "").strip()
-    arch = (gpu.gfx_arch if gpu else None) or gfx_arch_for_gpu_type(spec.hardware.gpu_type)
+    arch = card_arch(spec, gpu)
     if not root or arch is None:
         why = f"{JIT_CACHE_ENV} is not set" if not root else "the GPU architecture is not known"
         if needs_jit_dir:
@@ -337,10 +343,8 @@ def _build_differs(record: BuildRecord, gfx_arch: str, read: Mapping[str, str], 
         if name.startswith(COMPILE_ENV_PREFIX)
     }
     # The import path is the image's on both sides; what a patch could change on it is in the farm.
-    server = {k: v for k, v in read.items() if k != _PYTHONPATH}
+    server = without_card_arch({k: v for k, v in read.items() if k != _PYTHONPATH}, gfx_arch)
     server[_FRAMEWORK_PYTHON] = interpreter_identity(python)
-    if server.get(_GPU_ARCHS) in (_NATIVE, gfx_arch):
-        del server[_GPU_ARCHS]
     differing = sorted(name for name in set(built) | set(server) if built.get(name) != server.get(name))
     if differing:
         return f"the server's {', '.join(differing)} differ from its build's"
@@ -369,7 +373,7 @@ def _touched(inputs: _Inputs, base: Path, effective: Path) -> Touched | str:
         if not patched and not config_patched and not tables:
             return Touched()
         return f"the module config of aiter cannot be read ({type(exc).__name__}), so which modules the patch or the tables touch is not known"
-    variables = env_touched_entries(after, inputs.servers, inputs.around.environ)
+    variables = env_touched_entries(after, inputs.servers, inputs.around.environ, inputs.machine.gfx_arch)
     if not patched and not config_patched and not tables and not variables:
         return Touched()
     stale = stale_table_modules(after, base, effective, inputs.servers) if tables else frozenset()

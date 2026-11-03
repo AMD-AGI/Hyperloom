@@ -13,6 +13,7 @@ import asyncio
 import contextlib
 import importlib
 import os
+import re
 import sys
 import time
 from collections.abc import Iterator
@@ -128,6 +129,7 @@ def test_a_server_that_never_gets_ready_ends_the_test_at_the_boot_limit_as_the_c
     assert outcome.failure_reason is not None
     assert outcome.failure_reason.startswith("server_boot_timeout: the server was not ready within 2s of the 4s")
     assert "TunableOp: tuning gemm 17/4096" in outcome.failure_reason, "the reason shows where the log stopped"
+    assert "module builds" not in outcome.failure_reason, "no build time was left out of the 2 s"
     assert [r.returncode for r in outcome.rounds] == [SERVER_BOOT_TIMEOUT_RC]
     assert 2 <= elapsed < 20, "the round ended at the limit, not at its 60 s cap"
 
@@ -265,6 +267,13 @@ def test_a_build_that_hangs_ends_the_boot_once_its_module_has_had_its_time(monke
     assert outcome.returncode == SERVER_BOOT_TIMEOUT_RC and outcome.failure_class == "candidate"
     assert set(allowed) == {"module_rmsnorm"}, "the module the log names is the one whose time is given"
     assert 3 <= elapsed < 20, "the 2 s limit and the 1 s the build was given, not the round's cap"
+    waited = re.fullmatch(
+        r"server_boot_timeout: the server was not ready within 2s plus 1s of aiter module builds \((\d+)s in all\) of the 4s a"
+        r" round may take; its log ends: .*start build \[module_rmsnorm\].*",
+        outcome.failure_reason or "",
+    )
+    assert waited is not None, outcome.failure_reason
+    assert 3 <= int(waited.group(1)) <= 5, "the 2 s of boot, the 1 s of build, and the seconds the guard took to see it"
 
 
 def test_the_time_a_module_builds_is_excused_up_to_what_a_module_of_its_kind_may_take(monkeypatch) -> None:
@@ -277,6 +286,29 @@ def test_the_time_a_module_builds_is_excused_up_to_what_a_module_of_its_kind_may
     assert clock.excused == 10 + 10, "module_x for its 10 s, the CK-tile one for its first 10; none while no build is"
     clock.observe(150.0, "module_y_cktile")
     assert clock.excused == 10 + 100, "the CK-tile build has had its 100 s; the 20 s past them count"
+
+
+def test_a_second_build_is_excused_for_its_own_time_from_when_it_is_first_seen(monkeypatch) -> None:
+    """The next module's build follows the previous one's with no reading between that says none was under way."""
+    monkeypatch.setattr(boot_watch, "module_build_limit_sec", lambda module: 10)
+    clock = boot_watch.BuildTime(0.0)
+
+    for now, building in [(5, "module_a"), (9, "module_b"), (14, "module_b"), (16, "module_b"), (30, "module_b")]:
+        clock.observe(float(now), building)
+
+    assert clock.excused == 5 + 10, (
+        "module_a's first 5 s, then module_b's 10 s from the reading before it was first seen"
+    )
+
+
+def test_a_module_built_again_after_a_reading_that_says_none_is_under_way_has_its_time_again(monkeypatch) -> None:
+    monkeypatch.setattr(boot_watch, "module_build_limit_sec", lambda module: 10)
+    clock = boot_watch.BuildTime(0.0)
+
+    for now, building in [(5, "module_a"), (8, None), (12, "module_a"), (30, "module_a")]:
+        clock.observe(float(now), building)
+
+    assert clock.excused == 5 + 10, "the 5 s before the gap, then a second build's 10 s from the reading that began it"
 
 
 @pytest.mark.parametrize(

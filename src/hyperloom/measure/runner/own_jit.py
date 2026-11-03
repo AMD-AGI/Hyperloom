@@ -43,7 +43,12 @@ _UTF8 = "utf-8"
 
 
 def own_aiter_jit(
-    call: TestCall, farm: Farm | None, session: JitCacheSession | None, environ: Mapping[str, str], directory: Path
+    call: TestCall,
+    farm: Farm | None,
+    session: JitCacheSession | None,
+    environ: Mapping[str, str],
+    directory: Path,
+    gfx_arch: str | None = None,
 ) -> dict[str, str]:
     """``{AITER_JIT_DIR: directory}`` with the image's prebuilt modules linked into ``directory``, for a server that
     would otherwise build into the image; empty when the cache's session gives aiter its directory, the farm rebuilds
@@ -51,7 +56,8 @@ def own_aiter_jit(
     are taken out of it, so the server builds them from the farm's tables and under its own variables), something already
     sets the variable, or the server's interpreter has no aiter.
 
-    ``environ`` is what the server inherits, before the sheet's ``call.env_overrides`` and ``call.unset_envs``.
+    ``environ`` is what the server inherits, before the sheet's ``call.env_overrides`` and ``call.unset_envs``;
+    ``gfx_arch`` the card's architecture, when known (``GPU_ARCHS`` naming it makes nothing stale).
     """
     variable = AITER_JIT.env_var
     if session is not None and variable in session.environment():
@@ -65,10 +71,10 @@ def own_aiter_jit(
     except FarmError:
         return {}
     if farm is not None and AITER_PACKAGE in farm.packages:
-        _unlink_stale(farm.site / AITER_PACKAGE, image, servers, environ)
+        _unlink_stale(farm.site / AITER_PACKAGE, image, servers, environ, gfx_arch)
         return {}
     directory.mkdir(parents=True, exist_ok=True)
-    link_prebuilt(image / "jit", directory, _stale(image, servers, environ))
+    link_prebuilt(image / "jit", directory, _stale(image, servers, environ, gfx_arch))
     return {variable: str(directory)}
 
 
@@ -87,7 +93,9 @@ def server_environments(call: TestCall, configs: list[dict], environ: Mapping[st
     ]
 
 
-def _stale(image: Path, servers: list[dict[str, str]], environ: Mapping[str, str]) -> frozenset[str]:
+def _stale(
+    image: Path, servers: list[dict[str, str]], environ: Mapping[str, str], gfx_arch: str | None
+) -> frozenset[str]:
     """The prebuilt modules the tables the servers name, or the build variables they set otherwise than ``environ``,
     make stale; none when neither does or the module config cannot be read (the image's modules are then what the server
     would have loaded anyway)."""
@@ -99,11 +107,13 @@ def _stale(image: Path, servers: list[dict[str, str]], environ: Mapping[str, str
         name.startswith(_TABLE_PREFIX) and value.strip() for server in servers for name, value in server.items()
     )
     stale = stale_table_modules(config, image, image, servers) if tables else frozenset()
-    stale |= env_touched_entries(config, servers, environ)
+    stale |= env_touched_entries(config, servers, environ, gfx_arch)
     return touched_entries(stale, config, prebuilt_names(image)).names if stale else frozenset()
 
 
-def _unlink_stale(package: Path, image: Path, servers: list[dict[str, str]], environ: Mapping[str, str]) -> None:
+def _unlink_stale(
+    package: Path, image: Path, servers: list[dict[str, str]], environ: Mapping[str, str], gfx_arch: str | None
+) -> None:
     """Take out of the farm's ``jit`` (links to the image's modules) the modules the farm's tuned tables, as the servers
     resolve them, or the build variables the servers set otherwise than ``environ`` make stale: aiter builds a module only
     when its ``.so`` is missing, and the image's holds only the kernels the image's tables name, built under the image's
@@ -112,7 +122,9 @@ def _unlink_stale(package: Path, image: Path, servers: list[dict[str, str]], env
         config = read_config(config_path(package))
     except (OSError, ValueError):
         return
-    stale = stale_table_modules(config, image, package, servers) | env_touched_entries(config, servers, environ)
+    stale = stale_table_modules(config, image, package, servers) | env_touched_entries(
+        config, servers, environ, gfx_arch
+    )
     if not stale:
         return
     for name in touched_entries(stale, config, prebuilt_names(image)).names:
