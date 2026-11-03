@@ -5,7 +5,7 @@
 
 The socket is implementation-neutral. The local implementation
 (:mod:`hyperloom.sandbox.local`) and a hosted one both speak these types, and
-callers classify failures by the three exception classes below without knowing
+callers classify failures by the five exception classes below without knowing
 which implementation is underneath.
 """
 
@@ -57,7 +57,7 @@ PLATFORM_METADATA_KEYS = frozenset({NODE_NAME_KEY, SIGNING_PUBLIC_KEY, SAME_NODE
 
 
 class SandboxError(Exception):
-    """Base of the three sandbox failure classes."""
+    """Base of the five sandbox failure classes."""
 
 
 class SandboxUnavailable(SandboxError):
