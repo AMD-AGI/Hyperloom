@@ -273,8 +273,7 @@ HARNESS_FILES = ("arbor/config.json",)
 # reach an export, an integration or another tree. A config's `scratch_paths` adds more.
 # `eval` is the packs' probe space at the workspace's top, which the loop already treats as
 # read-only (READONLY_PROBE_PREFIXES): under Hyperloom MB the agent kept its logs, probes and
-# a 327 MB GPU core dump there, and they rode in a KEEP's patches (<gpu host> T15, Hyperloom #155
-# c4786). Logs are never served, wherever the agent leaves one.
+# a 327 MB GPU core dump there, and they rode in a KEEP's patches. Logs are never served, wherever the agent leaves one.
 SCRATCH_PATHS = ("arbor/eval", "eval", "*.log")
 # A file this large is no source change. Such a file stays in the tree and out of every patch
 # (landed.patch, scratch.patch and a KEEP's), each named where its patch is written (`oversize`).
@@ -354,7 +353,7 @@ def base_commit(container: str, workspace: str, config: dict | None = None) -> s
     In component mode a host may hand over a worktree with history behind it (MB's is its
     experiment repository at the branch's start commit, with the session root and earlier
     merges before that), so ``component.root`` names the start commit, and the first commit
-    is only the fallback (board #154, c3600). A ``component.root`` that is not a commit of
+    is only the fallback. A ``component.root`` that is not a commit of
     the workspace raises: the driver refuses such a config at start.
     """
     config = config or {}

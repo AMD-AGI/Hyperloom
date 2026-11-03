@@ -8,7 +8,7 @@ Until v0.9.1 the agent asserted them as flags in its STAGE line, which only
 parallel mode's lanes judge. Hyperloom MB's T23 kept such a step (b06,
 ``HL_OSK_DECODE``, a split-K decode GEMM JIT-compiled at first call) whose
 per-GEMM check passed at three batch sizes; served with the switch on, GSM8K
-went from 0.945 to 0.000 (boards/hyperloom-multibranch#155 c5075, c5083).
+went from 0.945 to 0.000.
 
 So the harness checks every switch a KEEP lands, lane or not:
 

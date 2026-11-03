@@ -101,7 +101,7 @@ On a KEEP, before `session.json` records it:
 ```
 
 - `previous`: the number of the KEEP before this one, or `null` for the first, so a host tells
-  a skipped snapshot from a gap after a crash (MB's request, board #154 c3546).
+  a skipped snapshot from a gap after a crash (MB's request).
 - `root`: the commit the host gave the workspace (`component.root`, else the repository's first
   commit); `parent`: the tree this KEEP was made on, the previous KEEP's or `root` for the
   first. Both patches use the served pathspec (`workspace.landed_pathspec`): no probes, bytecode or `arbor/config.json`.
@@ -109,7 +109,7 @@ On a KEEP, before `session.json` records it:
 A host that reads the snapshot never sees a half-written keep or the next candidate's edits. It
 is an addition: MB's live-workspace import keeps working for agents without a snapshot. MB
 agreed to read `keeps/LATEST` when it exists, take `change.patch` as the commit's change,
-`config.json` as its launch and `tables/` as kernel artifacts (board #154, c3546).
+`config.json` as its launch and `tables/` as kernel artifacts.
 
 ## 5. The docs a host's onboarding reads
 
@@ -136,8 +136,7 @@ manifest without either side writing host-specific code.
    `aborted` (the harness stopped measuring: `ABORTED.md`, its message as `detail`), and since
    2026-10-31 `review_rejected` (a human rejected the campaign at the review gate); the same line
    goes to the log and the heartbeat. A host reads why Arbor ended instead of guessing from an exit code.
-   **One exception exits non-zero** (operator, 2026-10-29, on Cluster C's gateway outages, ArborDevelopment
-   #11): `unreachable`, a streak that ended while the model could not be reached, exits 3 after
+   **One exception exits non-zero** (operator, 2026-10-29, on Cluster C's gateway outages): `unreachable`, a streak that ended while the model could not be reached, exits 3 after
    writing its record. The host resumes it as it does a crash, instead of retiring the branch; the
    resumed run moves that `ABORTED.md` aside and starts a fresh not-measured streak.
 2. **The snapshot format is proposed to MB now,** on the board; slice 2 starts after slice 1 and
@@ -152,11 +151,11 @@ manifest without either side writing host-specific code.
 The switch and the safety are in `arbor/component.py` and the sites the table names. Where the
 build settled what the design left open:
 - **The deadline:** `deadline` as unix seconds or ISO 8601 with a timezone (MB passes unix
-  seconds: board #154); with both `deadline` and `seconds`, the earlier wins; 180 s are kept
+  seconds); with both `deadline` and `seconds`, the earlier wins; 180 s are kept
   in hand before it, by the iteration gate and the phase timeouts alike. `component.json` keeps
   it across resumes; without that file the clock falls back to session.json's `start_epoch`,
   never to now. A session recorded in one mode and resumed in the other exits 2.
-- **Exit 2 is refusal only** (2026-10-29, for the 11-04 release; Hyperloom #157 c4000: MB
+- **Exit 2 is refusal only** (2026-10-29, for the 11-04 release: MB
   resumed an exit 2 like a crash). Two more ways of exiting 2 were added, so that no config a
   restart cannot fix ever crashes: a config `load_campaign` cannot load (unparsable JSON, no
   `pack`, a missing or broken `pack.yaml`), and in component mode a campaign that
@@ -203,7 +202,7 @@ command in the prompts (`arbor/component.py`, `arbor/policy/claude_loop.py`), an
   block aggregates, as with the pack's bench. Since 2026-10-30 the same command also takes the
   pack's `secondary_metric` when the client gives it; before, the gate saw only the primary
   (a Cluster C job: `secondary: None` on every KEEP).
-- **`component.root`** (MB's request, board #154 c3600): MB's worktree is at the branch's start
+- **`component.root`** (MB's request): MB's worktree is at the branch's start
   commit with the experiment repository's history behind it, so the first commit is not what MB
   gave. A sha in `component.root` is the base of `served.patch`, the first `change.patch`,
   `keep.json`'s `root`, `landed.patch` and `scratch.patch`
@@ -251,7 +250,7 @@ Decided by the operator (2026-10-28): a second launch at each KEEP, component mo
 
 ### The host's plan (2026-10-29)
 
-`component.plan` (release of 2026-11-04, boards/ArborDevelopment #22; Hyperloom #157): a host
+`component.plan` (release of 2026-11-04): a host
 running several Arbors from one set of directions gives each its share. `component.plan_entries`
 validates it with the same check a `DIRECTIONS` line gets (`directions._entry`); every entry
 open, ids unique. `component.seed_plan`, called from `Run.start`, seeds the session's map once as a
@@ -268,7 +267,7 @@ groups are dealt in rank order to the share with the fewest directions ([hosts.m
 
 ### The dossier pass (2026-10-29)
 
-Agreed with MB on Hyperloom #157 (c4000: the dossier question, (b) with (c)). Before its branches
+Agreed with MB (the dossier question, (b) with (c)). Before its branches
 open, the host runs one Arbor as a dossier pass, splits that pass's map, and gives each branch a
 share; directions an Arbor finds outside its share come back as `proposals`.
 
@@ -280,8 +279,8 @@ share; directions an Arbor finds outside its share come back as `proposals`.
   - **What it needs:** map rounds (`directions.enabled`: the dossier skill, a workload that is
     not a document, `map_rounds` above 0), or the config is refused. A `plan` beside it is a
     config error.
-- **`component.profile`:** the host's profile file, which MB writes from the root's `OpShares`
-  (c4022, c4026). It goes into the prompt at every iteration through the same capped reader as
+- **`component.profile`:** the host's profile file, which MB writes from the root's `OpShares`.
+  It goes into the prompt at every iteration through the same capped reader as
   the notes (`_read_head`), and the agent profiles only what it does not cover. When MB has no
   shares (GLM-5.3 AgentX: its head profile is refused as too large), the key is left out.
 - **The agent is told what the pass is for** (`dossier_pass_block`): LEARN only, every direction

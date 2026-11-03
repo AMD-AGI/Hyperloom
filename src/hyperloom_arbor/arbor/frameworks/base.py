@@ -5,8 +5,7 @@ probes its health, and each of those named vLLM or SGLang where it was done:
 the launch in arbor/policy/claude_loop.py, the process and log patterns in
 arbor/measure/armcheck.py, the stop sweep in arbor/execute/preflight.py. An
 adapter holds one framework's half of each, so a third framework is one module
-in this package rather than an edit at every site (roadmap CORE-06; runner
-plans/arbor/M04/05_FRAMEWORKS.md).
+in this package rather than an edit at every site (roadmap CORE-06).
 
 The two frameworks moved here with no change in behaviour: every command,
 pattern and default below is what those sites produced, and

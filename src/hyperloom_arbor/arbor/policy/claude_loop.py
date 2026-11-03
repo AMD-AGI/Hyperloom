@@ -29,11 +29,11 @@ import tempfile
 import time
 from pathlib import Path
 
-from arbor import component, frameworks
+from arbor import chapters, component, frameworks, lifecycle
 from arbor.cli.iterate import _find_arbor_root
 from arbor.measure.integrity import snapshot_digests, verify_unchanged
 from arbor.measure.intents import ALL_NAMES, fill as _fill_intents, resolve
-from arbor.pack import agent_skills, load_campaign, render_program
+from arbor.pack import load_campaign, render_program
 from arbor.state import CampaignState
 
 
@@ -278,8 +278,9 @@ class AgentLaunchError(RuntimeError):
 
 
 def _skill_options(options_cls, skills: list[str] | None,
-                   allowed_tools: list[str]) -> tuple[dict, list[str]]:
-    """SDK options for a pack's skills (Pack.skills), and the tools to allow.
+                   allowed_tools: list[str],
+                   plugins: list[str] | None = None) -> tuple[dict, list[str]]:
+    """SDK options for a turn's skills (arbor.lifecycle.turn_skills), and the tools to allow.
 
     None leaves the options as they were before packs listed skills. A list
     loads the project's settings, so `.claude/skills/` and with it
@@ -287,6 +288,9 @@ def _skill_options(options_cls, skills: list[str] | None,
     lets the agent invoke only the listed skills. An SDK without the `skills`
     option gets the Skill tool instead, which cannot narrow the list; one
     without `setting_sources` cannot load skills at all. Both are logged.
+    ``plugins`` are the directories of the skill families the pack loads,
+    whose skills are named family:skill; an SDK without `plugins` cannot
+    load them, which is logged.
     """
     if skills is None:
         return {}, allowed_tools
@@ -303,6 +307,11 @@ def _skill_options(options_cls, skills: list[str] | None,
               f"Skill tool, so every project skill is invocable, not only {skills}",
               file=sys.stderr, flush=True)
         allowed_tools = [*allowed_tools, "Skill"]
+    if plugins and "plugins" in params:
+        opts["plugins"] = [{"type": "local", "path": path} for path in plugins]
+    elif plugins:
+        print(f"[arbor] this claude_agent_sdk has no `plugins` option; the skill families "
+              f"{plugins} are unavailable", file=sys.stderr, flush=True)
     return opts, allowed_tools
 
 
@@ -344,7 +353,7 @@ def _connect_wait_budget() -> float:
 
 async def _run_claude(prompt: str, cwd: str, allowed_tools: list[str],
                       label: str = "agent", skills: list[str] | None = None,
-                      **_kw) -> str:
+                      plugins: list[str] | None = None, **_kw) -> str:
     """One agent turn. A start that cannot reach the model is retried with backoff, up to
     ``ARBOR_AGENT_CONNECT_WAIT_S`` (900 s) in all, before the error reaches the caller."""
     global _unreachable
@@ -352,7 +361,7 @@ async def _run_claude(prompt: str, cwd: str, allowed_tools: list[str],
     while True:
         attempt += 1
         try:
-            out = await _run_claude_once(prompt, cwd, allowed_tools, label, skills)
+            out = await _run_claude_once(prompt, cwd, allowed_tools, label, skills, plugins)
             _unreachable = None
             return out
         except Exception as e:
@@ -370,7 +379,8 @@ async def _run_claude(prompt: str, cwd: str, allowed_tools: list[str],
 
 
 async def _run_claude_once(prompt: str, cwd: str, allowed_tools: list[str],
-                           label: str, skills: list[str] | None) -> str:
+                           label: str, skills: list[str] | None,
+                           plugins: list[str] | None = None) -> str:
     if os.environ.get("ARBOR_AGENT_BACKEND", "claude").lower() in {
         "openai", "gpt", "openai-compatible",
     }:
@@ -391,7 +401,7 @@ async def _run_claude_once(prompt: str, cwd: str, allowed_tools: list[str],
         if len(stderr_lines) < 200:
             stderr_lines.append(line)
 
-    skill_opts, allowed_tools = _skill_options(ClaudeAgentOptions, skills, allowed_tools)
+    skill_opts, allowed_tools = _skill_options(ClaudeAgentOptions, skills, allowed_tools, plugins)
     options = ClaudeAgentOptions(
         cwd=cwd,
         allowed_tools=allowed_tools,
@@ -557,7 +567,7 @@ def _last_verdict(output: str, *tokens: str) -> tuple[str, str] | None:
     A verdict is a line of its own. `_run_claude` returns every text block of the turn
     joined, so a token mentioned in passing ("once it is healthy I'll report SERVER_READY
     or SERVER_FAILED") is not one: a substring match on that interim status reverted a
-    correct kernel (30.9 to 1.37 ms per prefill step) under Hyperloom (ArborDevelopment #23).
+    correct kernel (30.9 to 1.37 ms per prefill step) under Hyperloom.
     Markdown around the line (backticks, bold, a quote or list marker) is ignored, and the
     token must end there (``METRICS`` is not ``METRIC``).
     """
@@ -1979,15 +1989,31 @@ def run_iteration(
 
     # ── Step 2: Agent decides + edits ───────────────────────────────────────
     _report_agent_tmp_health()
+    # The turn's chapter and its skills (arbor/lifecycle.py); entering a chapter is
+    # journaled, the feed a host follows.
+    chapter, turn_skills = lifecycle.turn_skills(campaign, state)
+    if lifecycle.enter(session_dir_p, chapter, iteration, turn_skills):
+        print(f"[arbor] Chapter {chapter}: the agent's skills {turn_skills or []}",
+              file=sys.stderr, flush=True)
     print(f"[arbor] Running agent...", file=sys.stderr, flush=True)
     prompt = _build_agent_prompt(program, campaign, state, iteration)
-    try:
-        agent_output = _run_phase(
-            _run_claude(prompt, arbor_root,
-                        allowed_tools=["Bash", "Read", "Edit"],
-                        label="agent", skills=agent_skills(campaign.pack)),
+    plugins = lifecycle.plugin_paths(campaign, arbor_root)
+
+    def _agent_turn(text: str, skills: list[str] | None, label: str) -> str:
+        return _run_phase(
+            _run_claude(text, arbor_root, allowed_tools=["Bash", "Read", "Edit"],
+                        label=label, skills=skills, plugins=plugins),
             "agent", config,
         )
+
+    try:
+        # A chapter whose pack lists run skills is theirs, each in a turn of its own
+        # (arbor/chapters.py); any other turn is the main agent's.
+        if chapters.turn_runs(campaign, chapter, arbor_root):
+            agent_output = chapters.run_turns(campaign, chapter, session_dir_p, arbor_root,
+                                              iteration, program, _agent_turn)
+        else:
+            agent_output = _agent_turn(prompt, turn_skills, "agent")
         change = _extract_change(agent_output) or f"iteration {iteration}"
         claim_class = _extract_class(agent_output)
     except component.PhaseTimeout as e:

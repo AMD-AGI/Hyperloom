@@ -476,10 +476,17 @@ def knob(name: str, campaign=None, state=None) -> int:
 
 
 def enabled(campaign, state=None) -> bool:
-    """Map rounds run for a campaign whose agent has the dossier skill, outside document workloads."""
+    """Map rounds run for a campaign that maps, outside document workloads: its agent has the dossier skill, or its
+    pack's lifecycle names skills in the map's chapters (arbor/lifecycle.py)."""
     try:
+        from arbor import lifecycle
         from arbor.pack.loader import agent_skills
-        if "dossier" not in (agent_skills(campaign.pack) or []):
+        pack = campaign.pack
+        plan = lifecycle.declared(campaign)
+        if plan is not None:
+            if not any(plan.runs(c) or plan.uses(c) for c in lifecycle.MAP_CHAPTERS):
+                return False
+        elif "dossier" not in (agent_skills(pack) or []):
             return False
         if (getattr(campaign.pack, "workload", None) or {}).get("kind") == "document":
             return False
@@ -1378,8 +1385,7 @@ SHARE_KEYS = ("id", "kind", "title", "why", "rank", "ceiling", "lane", "plan", "
 def split(dirs: list[dict], shares: int) -> list[list[dict]]:
     """A map's open directions in ``shares`` disjoint shares, one ``component.plan`` each.
 
-    A host that runs several Arbors from one set of directions (the 2026-11-04 release,
-    boards/ArborDevelopment #22) gives each a share. Directions joined by ``depends_on``
+    A host that runs several Arbors from one set of directions (the 2026-11-04 release) gives each a share. Directions joined by ``depends_on``
     stay in one share: a dependency missing from a map counts as met (``deps_met``), so
     split apart, one Arbor would start what another has not finished. A dependency on a
     closed direction is dropped, being met. The groups are dealt in rank order, each to

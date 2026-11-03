@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import re
 from collections import Counter
 from pathlib import Path
 
 from arbor.measure.intents import from_legacy, is_history_row
-from arbor.pack.loader import agent_skills
+from arbor import lifecycle
 
 # How many recent non-KEEP iterations to show in full. KEEPs are always shown —
 # they describe the tree the agent is actually looking at.
@@ -308,12 +307,13 @@ def _render_barren(campaign, state) -> str:
 
 
 def _skill_description(arbor_root: Path, name: str) -> str:
-    try:
-        text = (arbor_root / ".claude" / "skills" / name / "SKILL.md").read_text()
-    except OSError:
-        return ""
-    m = re.search(r"^description:\s*(.+)$", text, re.MULTILINE)
-    return m.group(1).strip() if m else ""
+    """A skill's description, its front matter read as YAML, so a folded one (`>-`) reads as its text; a family's
+    skill (`family:name`) is found in its plugin."""
+    from arbor import skillcheck
+    family, _, skill = name.rpartition(":")
+    if family:
+        return skillcheck.description(arbor_root / skillcheck.PLUGINS_DIR / family / "skills" / skill)
+    return skillcheck.description(arbor_root / skillcheck.SKILLS_DIR / name)
 
 
 def _render_skills(skills: list[str], arbor_root: Path) -> str:
@@ -510,7 +510,7 @@ def render_program(campaign, state, arbor_root: str | Path,
 
     # Skills — after the knowledge and constraints, because a listed skill
     # can take precedence over a procedure they describe (_SKILL_RULES).
-    skills = agent_skills(campaign.pack)
+    _chapter, skills = lifecycle.turn_skills(campaign, state)
     if skills:
         sections.append(_render_skills(skills, arbor_root))
 

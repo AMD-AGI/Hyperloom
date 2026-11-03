@@ -103,21 +103,21 @@ REASONS = ("deadline", "map_exhausted", "done", "sigterm", "mapped", "aborted", 
 MASK_KEYS = ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")
 
 BLOCK_KEYS = ("host", "deadline", "seconds", "notes", "bench_command", "outbox", "phase_minutes",
-              "root", "plan", "stop_at", "profile", "review")
+              "root", "plan", "stop_at", "profile", "review", "callbacks")
 
 # component.review: who reviews the campaign before it runs. "host": the host does, before it
 # starts this run (MB pauses after its dossier pass, holding no lease), so the review gate
-# (arbor/review.py) passes at once and records that the host reviewed (ArborDevelopment #30).
+# (arbor/review.py) passes at once and records that the host reviewed.
 REVIEW_BY = ("host",)
 
-# component.stop_at: where a run ends of itself. "map" is the host's dossier pass (Hyperloom
-# #157 c4000): the dossier and its map, then exit 0 with "mapped", before any iteration works
+# component.stop_at: where a run ends of itself. "map" is the host's dossier pass:
+# the dossier and its map, then exit 0 with "mapped", before any iteration works
 # the map; the host splits it among several Arbors (python3 -m arbor.directions split).
 STOP_AT = ("map",)
 
 # component.root: the commit the host gave the worktree (a sha, 7 to 40 hex digits). MB's
-# worktree carries its experiment repository's history, so the first commit is not it
-# (board #154, c3600); without the key, the first commit is the base (workspace.base_commit).
+# worktree carries its experiment repository's history, so the first commit is not it;
+# without the key, the first commit is the base (workspace.base_commit).
 _SHA = re.compile(r"^[0-9a-fA-F]{7,40}$")
 
 # Each phase's cap, in minutes (``component.phase_minutes`` overrides). The
@@ -275,6 +275,9 @@ def config_errors(config) -> list[str]:
         errors.append(f"component.root must be a commit sha (7 to 40 hex digits), not {raw['root']!r}")
     if raw.get("plan") is not None:
         errors += plan_entries(config)[1]
+    if raw.get("callbacks") is not None:
+        from arbor import triggers
+        errors += triggers.callback_errors(raw["callbacks"])
     if raw.get("deadline") is not None:
         try:
             parse_deadline(raw["deadline"])
@@ -313,8 +316,7 @@ except Exception as e:
 
 def _native_import_error(config, env) -> str | None:
     """A refusal when the framework's package is there but its compiled extension does not
-    import, as a source-only worktree's vLLM lacks ``vllm._C`` (Cluster C, #11 c3939; #11 c3928
-    item 2): every server start would fail. Checked with the driver's environment, the
+    import, as a source-only worktree's vLLM lacks ``vllm._C`` (Cluster C): every server start would fail. Checked with the driver's environment, the
     server_env's PYTHONPATH over it, by the ``python3`` on its PATH. A package that is not
     found at all, or a check that cannot run, refuses nothing."""
     from arbor import frameworks
@@ -375,7 +377,7 @@ def refusals(config, env=None, session_dir=None) -> list[str]:
                 out.append(f"component.root {root} is not a commit of the workspace {ws}: every "
                            "patch and snapshot is measured against it")
         # A server with no flags is not the host's launch: one MB onboarding wrote an empty
-        # server_flags, and the base server then failed its CUDA-graph capture (#11 c3928).
+        # server_flags, and the base server then failed its CUDA-graph capture.
         if not str(config.get("server_flags") or "").strip():
             out.append("component mode needs server_flags: the launch the host measures (its "
                        "start commit's server args); an empty one serves defaults that are not it")
@@ -440,7 +442,7 @@ def plan_entries(config) -> tuple[list[dict], list[str]]:
     """``component.plan``: the directions this campaign works, and what is wrong with them.
 
     A host running several Arbors from one set of directions gives each its share (the
-    2026-11-04 release, boards/ArborDevelopment #22). The plan is a list of directions in the
+    2026-11-04 release). The plan is a list of directions in the
     form a DIRECTIONS line takes (``{"id": "m-<component>", "kind": "increment"|"rewrite",
     "title": ..., "why"?, "rank"?, "ceiling"?}``), or ``{"directions": [...]}``, or the path
     of a JSON file holding either. Every entry is open; ids are unique.
@@ -990,8 +992,7 @@ def _copy_tables(server_env: dict, workspace: str, dest: Path, say=log,
     TABLE_MAX_BYTES is listed with ``skipped``, not copied.
 
     A value that is a ``:``-separated list (aiter's tables: MB gives the start's as its
-    private default copies, then the start's rows; the agent appends its own, Hyperloom
-    #155 c4101/c4102) is {path: the whole value, files: [...]}: each part that is a file
+    private default copies, then the start's rows; the agent appends its own) is {path: the whole value, files: [...]}: each part that is a file
     copied to ``tables/<VAR>/<k>-<basename>`` (k its place in the list) and listed in
     order. Parts that are not files stay in ``path`` only; a list with no file is not a
     table.
@@ -1123,7 +1124,7 @@ def snapshot_keep(config, session_dir, *, container: str, workspace: str, number
     - Both patches use the served pathspec (no probes, logs, bytecode or arbor/config.json),
       byte for byte as git wrote them (``workspace._write_diff``; CORE-01).
     - ``left_out``: a file over ``workspace.OVERSIZE_BYTES`` stays out of both patches and
-      is named here, with its size (a GPU core dump rode in one, Hyperloom #155 c4786).
+      is named here, with its size (a GPU core dump rode in one).
     - config.json is the live arbor/config.json, what was measured (the server and
       bench agents may edit it after the commit), without the GPU masks the launch drops.
     """

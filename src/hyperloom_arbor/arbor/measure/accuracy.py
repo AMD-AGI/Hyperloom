@@ -27,8 +27,7 @@ When the root could not be measured, ``GSM8K_MIN`` stays the floor.
 In component mode every KEEP is held to the full set, not only a numerics one
 (operator, 2026-11-03): a host imports what Arbor keeps, and a change the agent
 did not call numerics can still break the served model (Hyperloom MB's T24: a
-kept decode GEMM, its switch turned on, read 0.000 against 0.945,
-boards/hyperloom-multibranch#155 c5075). The gate decides first without the
+kept decode GEMM, its switch turned on, read 0.000 against 0.945). The gate decides first without the
 eval, and only an arm it would keep pays for the set. Turning on a switch that
 an earlier KEEP landed off (arbor/measure/switches.py) calls for it in every
 mode.

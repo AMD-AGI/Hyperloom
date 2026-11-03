@@ -26,7 +26,7 @@ import yaml
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(line_buffering=True)
 
-from arbor import component, directions, review, rounds
+from arbor import component, directions, review, rounds, triggers
 from arbor.cli.iterate import _find_arbor_root, cmd_init
 from arbor.execute.workspace import recover_orphaned_commit
 from arbor.pack import load_campaign, validate_campaign
@@ -433,8 +433,24 @@ def _main(argv: list[str] | None, held: dict) -> int:
     print(f"[arbor] Stop: touch {session_dir}/STOP")
     print()
 
+    # The lifecycle's events (arbor/triggers.py): journaled for a host, the pack's trigger
+    # skills started and the host's callbacks called, none of them holding the loop up.
+    def _fire(event: str, at: int | None = None, **detail) -> None:
+        triggers.fire(campaign, session_dir, arbor_root, config_path, event, at, **detail)
+
+    fired_map = {"round": None}
+
+    def _map_set() -> None:
+        doc, _ = directions.load(session_dir)
+        if doc and doc.get("phase") == "active" and doc.get("map_round") != fired_map["round"]:
+            fired_map["round"] = doc.get("map_round")
+            _fire("map_set", map_round=doc.get("map_round"),
+                  open=[d.get("id") for d in doc.get("directions") or [] if d.get("status") == "open"])
+
+    _fire("session_start", mode=campaign.mode)
     iteration = 0
     while True:
+        _map_set()
         if (session_dir / "STOP").exists():
             print("[arbor] STOP file — exiting.")
             break
@@ -501,6 +517,8 @@ def _main(argv: list[str] | None, held: dict) -> int:
         # component mode: the host gates and merges, and rounds.hook is None there.
         if not comp and rounds.pending(session_dir):
             outcome = _round_end(campaign, session_dir, state_path, roll)
+            if outcome != "pending":
+                _fire("round_end", iteration, outcome=outcome)
             if outcome == "handoff":
                 return roll.handoff(CampaignState.load(state_path))
             if outcome == "exit":
@@ -553,12 +571,18 @@ def _main(argv: list[str] | None, held: dict) -> int:
         t_iter = time.time()
         if comp:
             comp.begin(iteration, t_iter)
+        _fire("iteration_start", iteration)
         try:
             result = run_iteration(config_path, arbor_root, str(session_dir), iteration)
             if comp:
                 comp.end()
             print(f"[arbor] {result.get('decision')}: {result.get('change')} "
                   f"→ {result.get('metric')}")
+            decided = str(result.get("decision") or "").lower()
+            if decided in triggers.FIRED:
+                _fire(decided, iteration, change=result.get("change"), metric=result.get("metric"))
+            if decided == "invalid" and str(result.get("reason") or "").startswith("agent did not run"):
+                _fire("agent_failed", iteration, reason=result.get("reason"))
             if result.get("decision") in ("STOPPED", "ROUND_END"):
                 # The map stopped the campaign, or ended its round, before the agent
                 # ran (arbor/directions.py): no iteration to time; the loop's STOP
@@ -598,6 +622,8 @@ def _main(argv: list[str] | None, held: dict) -> int:
         print(f"[arbor] Cooling down {args.cooldown}s...")
         time.sleep(args.cooldown)
 
+    _map_set()
+    _fire("end", CampaignState.load(state_path).iteration, reason=exit_reason, detail=exit_detail)
     rc = 0
     if comp:
         # Every component-mode exit says why (decision 1): `done` for STOP, max iterations

@@ -2,7 +2,7 @@
 
 Hyperloom's MB found a KEEP whose tree gave wrong output on short prompts in about one server
 process in three (AITER's vectorized_5d mha_batch_prefill), and GSM8K did not see it: a long,
-batched, averaged evaluation (board #126). MB first compared each candidate with its parent and
+batched, averaged evaluation. MB first compared each candidate with its parent and
 dropped that: exact greedy matching fires on the largest gains (fp8 KV, quantized GEMMs move
 greedy tokens early). A defect that is wrong in every process is one GSM8K already sees; the
 gap is the defect that is wrong in some processes. So the check compares two processes of the

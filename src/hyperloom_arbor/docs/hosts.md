@@ -232,8 +232,7 @@ A resumed session is never gated again.
   that is a file (`path`, `file`, `sha256`, `bytes`), in list order. Parts that are not files stay
   in `path` only. A single-file value keeps the plain shape (`path`, `file`, `sha256`, `bytes`).
   The agent is told to add to a list the host gave, never to replace it: it keeps every part in
-  order and appends its own rows file. Hyperloom gives its start tables this way (#155
-  c4101/c4102).
+  order and appends its own rows file. Hyperloom gives its start tables this way.
 - **Binaries outside the tree are rebuilt, not shipped.** A tree that links to JIT modules carries
   the links only; `outside.json` says what each served. Start the server with the KEEP's
   `config.json` on the same image and GPU arch, and AITER rebuilds a missing module at its first
@@ -256,6 +255,21 @@ A resumed session is never gated again.
   ts}`, written before every exit 0 and exit 3.
 - **Why it never started:** `<session>/component_refused.json`, `{reasons, ts}`, written before
   every exit 2 whose config names a session.
+- **The lifecycle:** `<session>/lifecycle.jsonl`, one JSON object a line (`arbor/lifecycle.py`). It
+  is the feed a host follows for where the session is.
+  - **What it records:**
+    - each chapter the session enters: `{at, kind: "chapter", name, iteration, skills}`. The names are
+      `map` (a dossier round), `round_end` (the dossier's update round) and `iterate`;
+    - each event it fires: `{at, kind: "event", name, iteration, ...}`. The events are
+      `session_start`, `iteration_start`, `keep`, `revert`, `probe`, `invalid`, `agent_failed`,
+      `map_set` (with the map's open directions), `round_end` and `end` (with the exit reason);
+    - the `run` skills' turns, and the `trigger` skills and callbacks each event started.
+  - **Callbacks** (proposed for Hyperloom; not yet agreed on the board): a host can be called on an
+    event instead of reading the file.
+    - **Where:** the config's component block, `"callbacks": {"<event>": [<command>, ...]}`.
+    - **A command** is a string or a list of arguments. It is never run by a shell.
+    - **How Arbor runs it:** without waiting, with `ARBOR_EVENT`, `ARBOR_SESSION` and
+      `ARBOR_EVENT_JSON` (the journal entry) in its environment. Each call is journaled.
 
 | Exit code | When | `reason` |
 |---|---|---|
@@ -286,8 +300,7 @@ record.
     `root_accuracy` in iteration 1's row of `session.json`.
   - **A host whose rule allows a different drop** sets `policy.accuracy_tolerance` in the config.
 - **Every KEEP is held to the full GSM8K** (since v0.9.1), not only a numerics change: a host imports
-  what Arbor keeps, and a change nobody called numerics can still break the served model
-  (boards/hyperloom-multibranch#155 c5075).
+  what Arbor keeps, and a change nobody called numerics can still break the served model.
   - **Only an arm the gate would keep pays for it:** the gate decides without the eval first.
   - **Below the root's score less the tolerance** the KEEP is a REVERT. The result is in the KEEP's
     snapshot (`keep.json` `accuracy`, `by` naming "a KEEP in component mode").

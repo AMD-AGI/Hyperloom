@@ -105,6 +105,91 @@ Vendored: `kernels/reference` and `hardware/reference` from KernelForge (`src/ke
 How to use `dossier` and `profiler`, in a campaign and by hand, and why a dossier's directions go
 into the dossier rather than the pack: [dossier-and-profiler.md](dossier-and-profiler.md).
 
+### Where skills take part: chapters, families and triggers
+
+Writing a skill, or a family of them: [skills.md](skills.md). A session runs through ordered **chapters** (`arbor/lifecycle.py`): `review`, `init`, `benchmark`,
+`accuracy`, `map.discover`, `map.measure`, `map.directions`, `iterate`, `round_end`, `end`. A skill
+takes part in up to three ways:
+
+- **`run`:** Arbor runs it in a chapter, in an agent turn of its own.
+- **`trigger`:** Arbor runs it when an event fires (`keep`, `round_end`, `end`, ...), without holding
+  the session up.
+- **`use`:** the chapter's agent may use it when it chooses, as every skill is used today.
+
+A pack declares them instead of `skills:` (not both):
+
+```yaml
+plugins: [dossier]                         # skill families: plugins/<family>/, skills named family:skill
+lifecycle:
+  map.discover: {run: ["dossier:discover"]}
+  iterate:      {use: ["dossier:read", profiler]}
+triggers:
+  keep: [knowledge-collector]
+```
+
+- **A skill says where it can take part** under `metadata.arbor` in its `SKILL.md` (`modes`,
+  `chapter`, `triggers`, `produces`, `after`, `before`, `reuse_key`, `gpu`).
+- **`validate_pack`** refuses a family that is not there, a skill no flat skill or listed family
+  holds, and a skill the pack has take part in a way it does not declare.
+- **Not `on:`:** YAML reads a bare `on` as true, so event skills go under `triggers:`.
+- **`use` per chapter:** each agent turn gets its chapter's `use` list, and the families' plugins.
+  - **Which chapter:** a dossier round (the map's `bootstrap`) is `map`, all three of its
+    sub-chapters' lists together. The dossier's update round is `round_end`. A document campaign is
+    `map`. Every other turn is `iterate`.
+  - **Old packs:** a pack without `lifecycle:` reads as today, its `skills:` in every chapter.
+  - **The journal:** each chapter entered is written to `<session>/lifecycle.jsonl`, the feed a host
+    follows ([hosts.md](hosts.md)).
+- **Map rounds** run for a pack whose map chapters name skills, as for one whose `skills:` has
+  `dossier`.
+- **`run` in chapters** (`arbor/chapters.py`): a turn whose chapters list `run` skills is theirs, not
+  the main agent's.
+  - **The order:** a `map` turn runs the `benchmark` chapter's, then `map.discover`'s,
+    `map.measure`'s and `map.directions`'s; a `round_end` turn runs its own. A pack lists them in
+    order, and `after` and `before` in a skill's metadata are checked against it.
+  - **Each skill's turn:** dispatched as `/<skill> <brief>`, with its chapter's `use` skills. The
+    brief, under `<session>/runs/`, names the files it must write and holds the program.
+  - **After it:** Arbor checks the files it `produces`. A skill whose files are there, for the same
+    `reuse_key` values (config keys) as its last complete run, is skipped. One that leaves a file
+    unwritten stops the chapter; the next turn takes it up.
+  - **What the iteration reads:** the skills' outputs, then `INTENT: LEARN` and `DONE:`, booked as
+    the map's writing is. The last skill's `DIRECTIONS:` line sets the map, so a dossier pass exits
+    `mapped` after `map.directions`.
+  - **Placeholders in `produces`:** `{dossier}` (`docs/dossier/<config dossier, else the identity
+    as a slug>`), `{benchmark}` (`benchmarks/<config benchmark, else the pack>`), `{session}`,
+    `{workspace}`.
+  - **The journal:** each run, skip and stop is written to it (kind `run`).
+- **Under a host** (component mode), the pack's `component.lifecycle` replaces the chapters it names:
+  ```yaml
+  component:
+    lifecycle:
+      benchmark: {}            # the host's rules stand in for the benchmark's study
+  ```
+  The other keys proposed for `component:` (`knowledge`, `void`, `checks`, `objective`) are refused until they are built.
+- **The families Arbor ships:**
+  - `dossier` ([dossier-and-profiler.md](dossier-and-profiler.md));
+  - `benchmark`, whose `benchmark:study` writes [`benchmarks/<name>/`](../benchmarks/README.md): the
+    rules, the reference and what to measure;
+  - `pack`, whose `pack:draft` drafts a new pack ([below](#writing-a-pack)).
+- **`trigger` on events** (`arbor/triggers.py`): a pack's `triggers:` lists skills by event.
+  - **How each runs:** when its event fires, in an agent turn of its own, in a process of its own,
+    without holding the session up.
+  - **A blocking skill** (`metadata.arbor.blocking: true`) runs to its end first, within 30 minutes.
+  - **Events fired today:** `session_start`, `iteration_start`, `keep`, `revert`, `probe`,
+    `invalid`, `agent_failed`, `map_set`, `round_end` and `end`.
+  - **Events not fired yet:** `review_decided`, `baseline_set`, `map_exhausted`, `escalate`,
+    `rebaseline` and `deadline_near`.
+
+**Checking skills and families:** `python3 -m arbor.skillcheck` reports, for every flat skill and
+family in the tree:
+- front matter that is not YAML;
+- a name that is not its directory's;
+- a missing description;
+- unknown `metadata.arbor` keys, modes, chapters or events;
+- a family's `plugin.json`.
+
+It warns on a `SKILL.md` over 500 lines, a description Claude Code would cut, and a `run` skill
+without `disable-model-invocation: true`. The tests run it over the repository.
+
 ## The packs in this repository
 
 | Pack | What | Config |
@@ -144,6 +229,17 @@ Its config needs `pack`, `docker_container` (`"@host"`), `workspace_root`, `sess
 
 A serving pack starts from the serving template (below). Check a new pack with
 `python3 -m arbor run --config <cfg> --dry-run`.
+
+**Drafting one:** the `pack` family's `draft` skill. Load it with `claude --plugin-dir plugins/pack`
+from the Arbor tree, then run `/pack:draft <what the campaign is>`.
+- **What it starts from:** the nearest pack that has worked (its `parents.md`), by default the serving
+  template.
+- **What it takes from the benchmark's study** (`benchmarks/<name>/`): the objective, its bands and the
+  constraints.
+- **What it leaves out:** the model's facts, which stay in its dossier.
+- **What it writes:** the skills in the lifecycle form, a config, a dry run, and a review note. The note
+  says what it copied, what it chose and why, and what the person must still fill in.
+- **What it does not do:** commit, run a campaign, or change another pack.
 
 ## The serving template
 

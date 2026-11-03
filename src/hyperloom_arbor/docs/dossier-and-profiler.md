@@ -31,6 +31,30 @@ twelve parts: model, system, code reading, target, workload, baseline, profile, 
 platform, earlier optimizations, directions and fast bench. Part 11, the directions, ends with the
 map a campaign works.
 
+### The dossier plugin: the same dossier, written by six skills
+
+The `dossier` plugin (`plugins/dossier/`) splits the flat `dossier` skill into skills a pack places
+in the lifecycle's chapters ([packs.md](packs.md)). The dossier on disk is the same: the same
+directory, index, part numbers and file names, so existing dossiers stay valid.
+
+| Skill | Mode, chapter | Writes |
+|---|---|---|
+| `dossier:read` | `use`, for the iteration agent | nothing: finds the dossier, reads it, cites it |
+| `dossier:discover` | `run`, `map.discover` | the index, parts 1-5 and 10 (no GPU) |
+| `dossier:measure` | `run`, `map.measure`, after discover | parts 6, 7, 8 (and 12), on the node; completes 1 and 3 |
+| `dossier:reference` | `run`, `map.measure`, opt-in | part 9, from the user's reference traces |
+| `dossier:directions` | `run`, `map.directions` | part 11, ending in the map Arbor reads |
+| `dossier:update` | `run`, `round_end` | a round's `NN.uK` parts and the new map |
+
+- **What they share:** the rules, the template and `find-dossier.sh`, in `plugins/dossier/shared/`.
+- **The checker:** `python3 -m arbor.dossier.check`, its part lists in `arbor/dossier/parts.py`.
+- **A pack that uses it:**
+  `plugins: [dossier]`, with the writers as `run` skills in the map's chapters and `dossier:read`
+  as a `use` skill of `iterate`. Arbor then runs each writer in a turn of its own and checks its
+  files.
+- **The flat skill:** `.claude/skills/dossier/` stays, unchanged, for packs that name it
+  (`skills: [dossier]`), for one release. Its `check-dossier.py` runs the module.
+
 ### Where dossiers are, and how one is found
 
 - **In a repository:** `docs/dossier/<model>-<workload>-<gpu>/`. `README.md` is the index, with one

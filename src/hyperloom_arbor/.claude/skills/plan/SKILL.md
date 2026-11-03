@@ -1,6 +1,6 @@
 ---
 name: plan
-description: Write the plan for an optimization round before the round runs, from the dossier, the ledger and the outcomes of earlier iterations, in the round-plan format (template.md): the directions picked and why, each work item's expected gain against the noise floor, how each is checked, gates with thresholds, stop conditions, sources; then, after the round, settle it item by item. Use when asked to plan a round, turn a dossier's directions into work, decide what a campaign should try next and why, or record what a finished round showed, so it carries over as long-term memory.
+description: "Write the plan for an optimization round before the round runs, from the dossier, the ledger and the outcomes of earlier iterations, in the round-plan format (template.md): the directions picked and why, each work item's expected gain against the noise floor, how each is checked, gates with thresholds, stop conditions, sources; then, after the round, settle it item by item. Use when asked to plan a round, turn a dossier's directions into work, decide what a campaign should try next and why, or record what a finished round showed, so it carries over as long-term memory."
 ---
 
 # Round plans: decide before the round, settle after it

@@ -1,6 +1,6 @@
 ---
 name: merge-optimization-trees
-description: Merge several independently-discovered optimizations (PRs, campaign trees, forks) into one measurable baseline: branch contended sites in CODE behind per-feature knobs, choose a lean default and test that set, bisect when the lean set is broken, compare contended sites pairwise, stack the winners, and bank the losers. Use when consolidating optimization PRs or Arbor campaign trees, when two trees touch the same files, or when asked which combination of optimizations to ship.
+description: "Merge several independently-discovered optimizations (PRs, campaign trees, forks) into one measurable baseline: branch contended sites in CODE behind per-feature knobs, choose a lean default and test that set, bisect when the lean set is broken, compare contended sites pairwise, stack the winners, and bank the losers. Use when consolidating optimization PRs or Arbor campaign trees, when two trees touch the same files, or when asked which combination of optimizations to ship."
 disable-model-invocation: true
 ---
 
