@@ -130,7 +130,7 @@ Compile hints injected via `CompilationContext.compile_hints()`:
 | `gfx942` | MI300X / MI308X | 64 | MFMA | 64 KB | CDNA3 baseline; preshuffle GEMM, PA decode |
 | `gfx950` | MI350 / MI355X | 64 | MFMA | 160 KB | CDNA4; FP4, MFMA scale, `ds_read_b64_tr_b16/8/4`, `ds_read_b96_tr_b6`, 64 banks |
 | `gfx1201` | Radeon AI PRO R9700 | 32 | WMMA | 64 KB | RDNA4 |
-| `gfx1250` | MI450 | 32 | WMMA + TDM | 320 KB | FP8/FP4, async/TDM copy helpers |
+| `gfx1250` | | 32 | WMMA + TDM | 320 KB | FP8/FP4, async/TDM copy helpers |
 | `gfx90a` | MI250X | 64 | MFMA | 64 KB | CDNA2 baseline (verified platform) |
 
 Detection in `python/flydsl/runtime/device.py:get_rocm_arch()`:

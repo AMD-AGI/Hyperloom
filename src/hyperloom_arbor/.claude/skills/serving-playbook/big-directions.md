@@ -13,8 +13,7 @@ InferenceX origin/main (`6d6d296c6`, 2026-08-30). Also from: the runner's
 **How to read it:**
 - Read only the entries your dossier's part 11 or map names, or that match your profile. The
   table at the end is the index.
-- `#655` is a record id in `evidence/records.jsonl` (`grep '"id": 655,' evidence/records.jsonl`; the record carries its
-  commit, so `git -C InferenceX show <commit>` shows the change). `main:<path>` is a file on
+- `#655` is a record id of the InferenceX study (its records are not carried in this copy). `main:<path>` is a file on
   InferenceX `origin/main`.
 - **NUMERICS** marks a fact that changes model output: it needs an accuracy gate (GSM8K at the
   golden score) before a KEEP. **REGIME** marks a fact that holds only at the stated operating

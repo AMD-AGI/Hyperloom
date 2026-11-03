@@ -9,7 +9,7 @@ multi-branch (MB) runs as a component when a session is given `--autonomous-agen
 | Source | `AMD-AGI/Arbor` (internal) |
 | Tag | `v0.9.1` |
 | Commit | `123cd15` |
-| Files | 310 |
+| Files | 308 |
 | Licence | Apache-2.0, [`LICENSE`](LICENSE) (`REUSE.toml` at the repository root says so per file) |
 
 ## What it holds
@@ -29,11 +29,17 @@ The engine and what its agents read:
 - **Left out:** Arbor's tests (they run upstream at the tag), its campaign results, its workload-specific packs,
   configs and dossiers, and its cluster launchers. Code or documents that name one of them keep the name; the file is
   not here.
-- **Replaced by placeholders:** the names of internal clusters, hosts, paths, accounts, people and repositories, and of
-  workloads that are not public: `Cluster A`, `Cluster B`, `<node>`, `<login node>`, `<partition>`, `<account>`,
-  `/data/...`, `/shared/...`, `<fork>`, `<colleague>`, `Model M`, `Model W` and the like. Identifiers that carried such
-  a name were renamed the same way everywhere in this copy (for example `CAMPAIGN_CONFIG` for a launcher variable), so
-  the copy is consistent with itself.
+  - **The serving playbook's evidence corpus** is also left out: the InferenceX study's per-change records and its
+    report. The playbook's pages still cite a change by its study record id (`#655`), and say the records are not
+    carried in this copy.
+- **Replaced by placeholders:** the names of internal clusters, hosts, paths, accounts, people, personal GitHub
+  accounts and repositories, and of workloads or chips that are not public.
+  - **The placeholders:** `Cluster A`, `Cluster B`, `<node>`, `<login node>`, `<partition>`, `<account>`, `/data/...`,
+    `/shared/...`, `<fork>`, `<colleague>`, `Model M`, `Model W` and the like.
+  - **Renamed identifiers:** an identifier that carried such a name was renamed the same way everywhere in this copy
+    (for example `CAMPAIGN_CONFIG` for a launcher variable), so the copy is consistent with itself.
+  - **GitHub owners:** a GitHub owner is named only when it is an organisation; the vendoring tool refuses a copy that
+    names any other.
 - **Profiling on TraceLens:** upstream, Arbor's profiler skill traces with a tracer of its own, which is not released
   here. In this copy the skill (`.claude/skills/profiler/SKILL.md`) profiles with TraceLens instead, as this repository
   does:

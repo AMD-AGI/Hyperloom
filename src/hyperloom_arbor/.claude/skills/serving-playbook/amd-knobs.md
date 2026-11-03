@@ -11,7 +11,7 @@ InferenceX origin/main.
 - Read §0 (Rules) first. Then go to the layer you are touching: §1 vLLM-ROCm, §2 SGLang-ROCm,
   §3 ATOM, §4 AITER, §5 quick-reduce (all frameworks), §6 MoRI, §7 RCCL/collectives, §8 HSA/HIP
   runtime, §9 Triton-AMD compiler, §10 load-time and plumbing.
-- `#655` is a record id in `evidence/records.jsonl`. `main` means the setting is in InferenceX origin/main
+- `#655` is a record id of the InferenceX study (its records are not carried in this copy). `main` means the setting is in InferenceX origin/main
   (6d6d296c6, 2026-08-30), including the `deprecated/` scripts still in the tree; the file is named
   when it matters. Short hex strings are InferenceX commits.
 - Marks:
@@ -213,7 +213,7 @@ InferenceX origin/main.
 
 | Knob | What it does | When it paid (regime) | Needs, conflicts | Image notes | NUM | Evidence |
 | --- | --- | --- | --- | --- | --- | --- |
-| `AITER_CONFIG_FMOE=<csv>` | Tuned fused-MoE table overlay. Rows route eligible token counts to FlyDSL FP4 MoE kernels. | DSv4 FP4 ATOM, from sunway513/aiter@e450e4d (#560). | Only the shapes in the table are routed. | Deleted when the nightly shipped equivalent tables (#652). REPORT §2.8 lists it among the knobs no `--help` or `envs.py` shows. | no | #560, #652 |
+| `AITER_CONFIG_FMOE=<csv>` | Tuned fused-MoE table overlay. Rows route eligible token counts to FlyDSL FP4 MoE kernels. | DSv4 FP4 ATOM, from <fork>/aiter@e450e4d (#560). | Only the shapes in the table are routed. | Deleted when the nightly shipped equivalent tables (#652). REPORT §2.8 lists it among the knobs no `--help` or `envs.py` shows. | no | #560, #652 |
 | `AITER_USE_FLYDSL_MOE_SORTING=1` | FlyDSL MoE token sorting in dispatch (ATOM's default for GLM-5.2). | GLM-5.2 SGLang (#0, #1255), ATOM (#1208). | | | no | #0, #1208 |
 | `AITER_FLYDSL_FORCE=1` | See §2. | | | | no | #863 |
 | `AITER_MXFP4_INTERMEDIATE=1` | Keeps the MoE gate-up output in MXFP4, so the down projection is an FP4 GEMM without a BF16 round trip. | Kimi-K2.5 ATOM (#1003, #1028) and vLLM (#1096). | | AITER >= v0.1.16.post5 for vLLM (#1096). | **NUM** | #1003, #1096 |

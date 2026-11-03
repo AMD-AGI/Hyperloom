@@ -7,7 +7,7 @@ description: What 1,258 InferenceX serving changes teach an optimizing agent —
 
 InferenceX tunes vLLM, SGLang, ATOM and TRT-LLM recipes for AMD and NVIDIA GPUs at every
 concurrency band. Its history holds the big wins that an agent changing one thing at a time rarely
-reaches. Our study read all 1,258 of its changes one by one (`evidence/REPORT.md`) and explains why
+reaches. Our study read all 1,258 of its changes one by one and explains why
 agents miss them. These files are that knowledge, organized for a campaign agent.
 
 **Built 2026-10-20** from InferenceX `origin/main` at `6d6d296c6` (2026-08-30) and the study's records.
@@ -26,14 +26,11 @@ Facts about images expire. A recipe that changed after that date is not reflecte
 
 ## Evidence
 
-- **`#655`** is a record id in `evidence/records.jsonl`, one JSON line per InferenceX change:
-  `grep '"id": 655,' .claude/skills/serving-playbook/evidence/records.jsonl`.
-  - Each record has `commit`, `pr`, `date`, `vendor`, `framework`, `kind`, `what`, `mechanism`,
-    `effect`, `difficulty`, `why`, `ingredients` and `evidence`.
-  - The `commit` opens in a clone of `github.com/xiaobochen-amd/InferenceX`.
+- **`#655`** is a record id of that study, one per InferenceX change. Its records are not carried in this copy;
+  the id names the change for whoever has them.
 - **`main:<path>`** is a file on InferenceX `origin/main` at the commit above.
-- **"Missed by 2.x"** names the mechanism in `evidence/REPORT.md` §2 that kept agents away from a
-  direction. Read that section once: it says what to do differently, not only what to try.
+- **"Missed by 2.x"** names the mechanism the study found kept agents away from a
+  direction.
 - **Disagreements** between records and recipes are flagged where they occur (↔ in the regime
   tables, "unsure" notes elsewhere). Treat a flagged fact as a lead to check, not a fact.
 

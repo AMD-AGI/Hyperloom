@@ -9,8 +9,7 @@ Built 2026-10-20 from the runner's docs/research/inferencex-study (records.jsonl
 origin/main (`6d6d296c6`, 2026-08-30).
 
 **How to read it:**
-- `#425` is a record id in `evidence/records.jsonl` (this folder). Its
-  `commit` field opens the change in a clone of github.com/xiaobochen-amd/InferenceX: `git show <commit>`.
+- `#425` is a record id of the InferenceX study (its records are not carried in this copy).
   `vllm#N`, `sglang#N`, `aiter#N` are upstream PRs or issues as the recipe named them.
 - "First used" is the date an InferenceX recipe first used the image, not the upstream release date.
 - MI355X = gfx950; MI300X and MI325X = gfx942. **[numerics]** = changes model output: run the
@@ -140,7 +139,7 @@ origin/main (`6d6d296c6`, 2026-08-30).
 | AITER change | How it reached a recipe | What it enables | Ids |
 | --- | --- | --- | --- |
 | v0.1.10.post3 | SGLang `v0.5.9` | FP8 prefill/decode attention, FP8 KV, FP8 prefill attention kernel | #368 |
-| base `dde1703e` (has aiter#2770, a16w4 MoE) + aiter#2822 (batched MXFP4 GEMM, gfx950) + aiter#2900 (MXFP4 scale padding when K is not a multiple of 256) + aiter#2642 (TP4/8 MXFP4 MoE dispatch) + `sunway513/aiter@e450e4d` (DSV4 FP4 tuned fMoE CSV, routed to FlyDSL through `AITER_CONFIG_FMOE`) | rebuilt at start-up in the ATOM recipe, then shipped in `rocm/atom-dev:nightly_202605130853` | native AITER MXFP4 MoE instead of Triton `matmul_ogs` | #560 #652 |
+| base `dde1703e` (has aiter#2770, a16w4 MoE) + aiter#2822 (batched MXFP4 GEMM, gfx950) + aiter#2900 (MXFP4 scale padding when K is not a multiple of 256) + aiter#2642 (TP4/8 MXFP4 MoE dispatch) + `<fork>/aiter@e450e4d` (DSV4 FP4 tuned fMoE CSV, routed to FlyDSL through `AITER_CONFIG_FMOE`) | rebuilt at start-up in the ATOM recipe, then shipped in `rocm/atom-dev:nightly_202605130853` | native AITER MXFP4 MoE instead of Triton `matmul_ogs` | #560 #652 |
 | aiter#2916 | in-place patch, then the same nightly | `mhc_pre` intermediates on the residual's device (fixes a HIP device-guard crash) | #551 #560 #652 |
 | ≥ v0.1.16.post5 with aiter#3832 | vLLM `nightly-387189c4` (vllm#48683) | gfx950 MXFP4 MoE backend | #1096 |
 | aiter#4474, aiter#4494, aiter#4521 | runtime backport (`apply_k3_container_patches.sh`) on `nightly-cb8104839c`, with vllm#51171, vllm#50578, vllm#51040, vllm#51011, vllm#51682 and part of vllm#50619 | int64 KV stride in `mla_gluon` (KV > 2 GB); fresh split-K semaphore under graph capture; fp8 ASM MLA verify kernels (rebuild needs network, hipcc and a GPU); FULL graphs for AITER MLA spec decode; ASM MLA for small non-divisor head counts (12 → 16 at TP8) | #1171 |

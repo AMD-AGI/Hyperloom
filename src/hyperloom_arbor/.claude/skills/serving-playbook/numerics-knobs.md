@@ -16,7 +16,7 @@ InferenceX origin/main.
   - §6 architecture overrides;
   - §7 kernel paths with recorded correctness failures;
   - §8 speculative decoding.
-- `#655` is a record id in `evidence/records.jsonl`. `main` means the setting is in InferenceX origin/main
+- `#655` is a record id of the InferenceX study (its records are not carried in this copy). `main` means the setting is in InferenceX origin/main
   (6d6d296c6, 2026-08-30). `amd-knobs.md` (same folder) has each AMD knob's performance side.
 - **Pack column:**
   - **fixed**: the pack usually fixes it. Arbor packs often fix the TP size, the quantization and the

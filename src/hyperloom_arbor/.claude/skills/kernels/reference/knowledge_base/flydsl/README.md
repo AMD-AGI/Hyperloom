@@ -19,7 +19,7 @@ for authoring high-performance AMD GPU kernels. Two halves:
    `fly-layout-lowering` and `convert-fly-to-rocdl` to ROCDL/LLVM/HSACO.
 
 Inspired by NVIDIA CuTe (CUTLASS) and Composable Kernel; targets gfx942
-(MI300X), gfx950 (MI350/MI355X), gfx1250 (MI450), gfx120x (RDNA4).
+(MI300X), gfx950 (MI350/MI355X), gfx1250, gfx120x (RDNA4).
 
 ## Files in this KB
 

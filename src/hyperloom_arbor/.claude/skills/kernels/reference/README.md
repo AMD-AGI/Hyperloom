@@ -2,7 +2,7 @@
 
 **Source:** KernelForge (this repository carries it as `src/kernelforge`), MIT licence
 (`LICENSE-KernelForge`, copied unchanged). Copied on 2026-10-20 from the runner's read-only copy at
-`~/runner-ws/tools/KernelForge` (the same tree as `$HOME/runner-ws/tools/KernelForge` on
+`src/kernelforge (this repository)` (the same tree as `src/kernelforge (this repository)` on
 Cluster B).
 - **Commit:** `cd9c585` (2026-08-17), from that copy's `RUNNER_README.txt`. The copy is not a git
   checkout, so `git log` cannot confirm it.

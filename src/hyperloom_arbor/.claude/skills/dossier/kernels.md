@@ -74,7 +74,7 @@ writing or tuning anything:
 
 Its pages cite AITER `b467ce342`: verify every claim against the installed
 source. The runner keeps a read-only copy at
-`$HOME/runner-ws/tools/KernelForge`, and `docs/kernelforge.md` maps
+`src/kernelforge (this repository)`, and `docs/kernelforge.md` maps
 it to DSV4.1's shapes.
 
 ## 6. What the reference platform runs

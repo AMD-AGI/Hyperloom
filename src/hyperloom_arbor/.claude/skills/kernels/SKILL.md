@@ -24,7 +24,7 @@ and the images that carry each kernel family are the `serving-playbook` skill's.
 - Short paths such as `flydsl/overview.md` or `aiter/pitfalls.md` are under `reference/knowledge_base/`.
 - `tuning_db.md`, `authoring_delegation.md`, `flydsl_path.md`, `kernel_families.md` and the fused-MoE
   `tuning.md` are under `reference/local_knowledge/`; §7 gives their full paths.
-- `#NNN` is an InferenceX record in `.claude/skills/serving-playbook/evidence/records.jsonl`;
+- `#NNN` is a record id of the serving playbook's InferenceX study (not carried in this copy);
   `amd-knobs`, `big-directions` (D1–D22) and `image-manifest` are that skill's files.
 
 ## 1. Before writing anything: the order of resort
