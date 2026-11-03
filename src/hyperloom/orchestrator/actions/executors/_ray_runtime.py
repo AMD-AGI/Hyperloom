@@ -226,6 +226,8 @@ def ensure_ray_cluster(num_gpus: Optional[int] = None) -> None:
 
 def _start_local_head(num_gpus: Optional[int]) -> None:
     """Run ``ray start --head`` and require the new cluster to be reachable."""
+    # The head started here has answered no driver yet; whatever was probed was the head it replaces.
+    forget_ray_head_verdict()
     gcs_port, iso_args = _isolated_head_port_args()
     # Dashboard bound to loopback: keeps the unauthenticated Ray Jobs endpoint off the pod network.
     cmd = ["ray", "start", "--head", f"--port={gcs_port}", "--dashboard-host=127.0.0.1"]
@@ -264,8 +266,19 @@ def _ray_address() -> str:
 
 
 #: One driver connect and a clean disconnect, as ``quiet_ray_init`` makes in-process, in a child that can be killed.
+#: The child first has the kernel SIGKILL it when the probing process dies (``PR_SET_PDEATHSIG``, 1), and gives up if
+#: that process is already gone, so a parent killed outright mid-probe -- by a SIGTERM it does not handle, say -- does
+#: not leave a driver waiting on the head.
 _CONNECT_PROBE_SOURCE = (
-    "import sys, ray; ray.init(address=sys.argv[1], log_to_driver=False, logging_level='error'); ray.shutdown()"
+    "import ctypes, os, signal, sys\n"
+    "prctl = getattr(ctypes.CDLL(None), 'prctl', None)\n"
+    "if prctl is not None:\n"
+    "    prctl(1, signal.SIGKILL)\n"
+    "if os.getppid() != int(sys.argv[2]):\n"
+    "    sys.exit('the probing process is gone')\n"
+    "import ray\n"
+    "ray.init(address=sys.argv[1], log_to_driver=False, logging_level='error')\n"
+    "ray.shutdown()\n"
 )
 # Tail of a failed probe's output carried into its outcome.
 _CONNECT_PROBE_OUTPUT_TAIL_CHARS = 600
@@ -292,13 +305,15 @@ class RayConnectProbe:
 def probe_ray_connect(address: str, timeout: float) -> RayConnectProbe:
     """Connect a throwaway driver to ``address`` in a child process and report whether the head answered in time.
 
-    The child leads a session of its own, so a timeout SIGKILLs its whole process group and leaves no driver behind.
+    The child leads a session of its own, so a probe still running when the wait ends -- at the bound, or because
+    this process was interrupted mid-wait (``KeyboardInterrupt``, the ``SystemExit`` of a signal handler) -- has its
+    whole process group SIGKILLed and is reaped, and leaves no driver behind.
     """
     started = time.monotonic()
     with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as sink:
         try:
             proc = subprocess.Popen(
-                [sys.executable, "-c", _CONNECT_PROBE_SOURCE, address],
+                [sys.executable, "-c", _CONNECT_PROBE_SOURCE, address, str(os.getpid())],
                 stdout=sink,
                 stderr=subprocess.STDOUT,
                 **_RAY_START_DETACH_KWARGS,
@@ -306,9 +321,14 @@ def probe_ray_connect(address: str, timeout: float) -> RayConnectProbe:
         except OSError as exc:
             return RayConnectProbe(False, f"could not be started: {exc!r}")
         try:
-            returncode = proc.wait(timeout=timeout)
+            returncode: Optional[int] = proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
-            _kill_process_group(proc)
+            returncode = None
+        finally:
+            # However the wait ended, a probe still running goes now, with its whole group.
+            if proc.returncode is None:
+                _kill_process_group(proc)
+        if returncode is None:
             return RayConnectProbe(False, f"did not connect within {timeout:g}s and was killed")
         sink.seek(0)
         output = sink.read().strip()
@@ -330,7 +350,7 @@ def _kill_process_group(proc: subprocess.Popen) -> None:
 
 
 class _HeadVerdict:
-    """Whether the Ray head answers a driver: probed once, then kept for the life of the process."""
+    """Whether the Ray head answers a driver: probed once, then kept until :func:`forget_ray_head_verdict`."""
 
     def __init__(self) -> None:
         self.lock = threading.Lock()
@@ -343,8 +363,22 @@ class _HeadVerdict:
 _HEAD_VERDICT = _HeadVerdict()
 
 
+def forget_ray_head_verdict() -> None:
+    """Drop the verdict on the Ray head, so the next routing question or in-process connect probes it again.
+
+    Called whenever the head this process would connect to may no longer be the one probed: the backend was marked
+    unhealthy (an actor died, and a raylet reaped after an OOM can leave the head accepting drivers it never
+    registers), or this process started a head. Each of those is followed by an in-process ``ray.init``, which freezes
+    the process on a head that does not answer.
+    """
+    verdict = _HEAD_VERDICT
+    with verdict.lock:
+        verdict.probe = None
+        verdict.deferred = False
+
+
 def ray_head_answers_driver() -> bool:
-    """Whether this process may connect a Ray driver to the head, probing a running head once per process.
+    """Whether this process may connect a Ray driver to the head, probing a running head once per verdict.
 
     Asked when work is routed, before any lease exists, so a head that does not answer sends every caller down the
     local path -- the one ``INFERENCE_OPTIMIZER_RAY_EXEC=0`` selects -- before anything connects in-process. With no
@@ -384,7 +418,7 @@ def _probe_and_report(address: str) -> RayConnectProbe:
     log.warning(
         "Ray head at address %r did not answer a driver: ray.init in a child process %s (bound %gs, "
         "HYPERLOOM_RAY_CONNECT_PROBE_TIMEOUT_SEC). Not connecting in-process, where the same wait holds the GIL and "
-        "freezes this process: serving and GPU work run on the local subprocess path for the rest of this process, as "
+        "freezes this process: serving and GPU work run on the local subprocess path from here on, as "
         "with INFERENCE_OPTIMIZER_RAY_EXEC=0. To use Ray again, run `ray stop --force` before the next session so it "
         "starts a fresh head; to skip Ray and this probe, export INFERENCE_OPTIMIZER_RAY_EXEC=0.",
         address,
@@ -709,4 +743,6 @@ def quiet_ray_init(num_gpus: Optional[int] = None) -> None:
         except (RuntimeError, OSError):
             pass
         force_restart_local_cluster(num_gpus=num_gpus)
+        # The restart dropped the verdict on the old head; the new one is probed before this process connects to it.
+        _refuse_unless_head_answers(_RAY_ADDRESS_AUTO)
         _init(_RAY_ADDRESS_AUTO)

@@ -234,9 +234,21 @@ serving rounds and GPU specialists run on the local subprocess path instead of R
 **Cause**: a Ray head is running (`ray status` answers), but its raylet never replies
 to a driver's registration. Connecting in-process would freeze the whole process: Ray
 2.44 waits for that reply with the GIL held and no timeout, so no thread, timer or
-event loop runs again. Hyperloom therefore tries the connect once in a child process,
-bounded by `HYPERLOOM_RAY_CONNECT_PROBE_TIMEOUT_SEC` (60 s), and keeps the answer for
-the rest of the process.
+event loop runs again. Hyperloom therefore tries the connect in a child process first,
+bounded by `HYPERLOOM_RAY_CONNECT_PROBE_TIMEOUT_SEC` (60 s), and keeps the answer until
+it connects in-process again. A head can stop answering after it was probed (a raylet
+reaped after an OOM, say), so the head is probed again before every in-process
+reconnect: after a Ray actor dies, after this process starts or restarts a local head
+(the `serving_slot` repair), and before the retry that follows a Ray version mismatch.
+The round that was reconnecting fails with `ray_ensure_error`; later work runs locally.
+If the process is interrupted while it waits (Ctrl-C, or a SIGTERM its handler turns
+into an exit), the probe's whole process group is killed; a probe whose parent dies
+outright is killed by the kernel.
+
+The installer asks a running head whether it declares `serving_slot` through the same
+kind of connect, under the same bound. A head that does not answer in time is reported
+(`ray head did not answer a driver within 60s`) and replaced like a head without
+`serving_slot`: `ray stop --force` and a fresh `ray start --head`.
 
 **Fix**: run `ray stop --force` before the next session so it starts a fresh head, or
 `export INFERENCE_OPTIMIZER_RAY_EXEC=0` to run without Ray and without the probe. To
