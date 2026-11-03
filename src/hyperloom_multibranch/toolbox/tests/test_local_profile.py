@@ -12,14 +12,15 @@ analysis route resolves it.
 from __future__ import annotations
 
 import asyncio
+import shlex
 import stat
-import sys
 from pathlib import Path
 
 import pytest
 
 from hyperloom.contracts.measurement import Purpose, TestKind, TestResult, Validity
 from hyperloom.measure.tests._inferencex import stock_repo
+from hyperloom.measure.tests.gpu_free_host import IDLE_CARDS_PYTHON
 from hyperloom.measure.tests.hosted_fixtures import spec_context
 from hyperloom.measure.tests.test_hosted_real_runner import _git_repo
 from hyperloom_multibranch.contracts.blackboard import Role, Writer
@@ -54,9 +55,12 @@ benchmark:
 
 
 def _runner_python(tmp_path: Path) -> str:
-    """An interpreter whose ``-m hyperloom.measure.runner`` is the runner with ``run_grid`` replaced."""
+    """An interpreter whose ``-m hyperloom.measure.runner`` is the runner with ``run_grid`` replaced, on an idle
+    machine of its own (:data:`IDLE_CARDS_PYTHON`)."""
     script = tmp_path / "profile-python"
-    script.write_text(f"#!/bin/sh\nexec {sys.executable} -m hyperloom.measure.tests.profile_runner_entry\n")
+    script.write_text(
+        f"#!/bin/sh\nexec {shlex.join(IDLE_CARDS_PYTHON)} -m hyperloom.measure.tests.profile_runner_entry\n"
+    )
     script.chmod(script.stat().st_mode | stat.S_IXUSR)
     return str(script)
 

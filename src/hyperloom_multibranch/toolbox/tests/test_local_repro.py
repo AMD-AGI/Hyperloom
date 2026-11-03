@@ -14,8 +14,8 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import shlex
 import stat
-import sys
 import tarfile
 from dataclasses import replace
 from pathlib import Path
@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.contracts.measurement import FailureClass, Purpose, TestKind, TestResult, Validity
+from hyperloom.measure.tests.gpu_free_host import IDLE_CARDS_PYTHON
 from hyperloom.measure.tests.hosted_fixtures import spec_context
 from hyperloom.measure.tests.repro_fixtures import case_attachment
 from hyperloom.measure.tests.test_hosted_real_runner import _git_repo, _point
@@ -47,9 +48,12 @@ _BASE_URL = "http://127.0.0.1:8123"
 
 
 def _runner_python(tmp_path: Path) -> str:
-    """An interpreter whose ``-m hyperloom.measure.runner`` is the runner with the inference server replaced."""
+    """An interpreter whose ``-m hyperloom.measure.runner`` is the runner with the inference server replaced, on an idle
+    machine of its own (:data:`IDLE_CARDS_PYTHON`)."""
     script = tmp_path / "repro-python"
-    script.write_text(f"#!/bin/sh\nexec {sys.executable} -m hyperloom.measure.tests.repro_runner_entry\n")
+    script.write_text(
+        f"#!/bin/sh\nexec {shlex.join(IDLE_CARDS_PYTHON)} -m hyperloom.measure.tests.repro_runner_entry\n"
+    )
     script.chmod(script.stat().st_mode | stat.S_IXUSR)
     return str(script)
 

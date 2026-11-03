@@ -17,17 +17,19 @@ import pytest
 from hyperloom.measure.hosted_log import STATE_FINISHED
 from hyperloom.measure.local_templates import image_env
 from hyperloom.measure.returncodes import HOSTED_SPEC_REJECTED_RC
+from hyperloom.measure.tests.gpu_free_host import IDLE_CARDS_PYTHON
 from hyperloom.measure.tests.hosted_fixtures import Rig, make_call, make_rig
 from hyperloom.sandbox.local import LocalTemplate
 
-REAL_RUNNER = (sys.executable, "-m", "hyperloom.measure.tests.real_runner_entry")
+REAL_RUNNER = (*IDLE_CARDS_PYTHON, "-m", "hyperloom.measure.tests.real_runner_entry")
 #: The shipped command line, with the sandbox's own directories: the local sandbox maps nothing, it only sets the root.
+#: ``"$0" "$@"`` is the interpreter: one that runs the runner on an idle machine of its own (:data:`IDLE_CARDS_PYTHON`).
 RUNNER_CLI = (
     "/bin/sh",
     "-c",
-    'exec "$0" -m hyperloom.measure.runner run --in "$HYPERLOOM_SANDBOX_ROOT/in" --out "$HYPERLOOM_SANDBOX_ROOT/out"'
-    ' --scratch "$HYPERLOOM_SANDBOX_ROOT/work/scratch" --spec-wait-sec 60',
-    sys.executable,
+    'exec "$0" "$@" -m hyperloom.measure.runner run --in "$HYPERLOOM_SANDBOX_ROOT/in"'
+    ' --out "$HYPERLOOM_SANDBOX_ROOT/out" --scratch "$HYPERLOOM_SANDBOX_ROOT/work/scratch" --spec-wait-sec 60',
+    *IDLE_CARDS_PYTHON,
 )
 MARKER = b"MARKED = True\n"
 

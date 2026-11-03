@@ -12,19 +12,19 @@ happened, ending in the host's, with the seconds none of them covers kept apart.
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
 
 from hyperloom.contracts.measurement import TestKind, TestResult, Validity
 from hyperloom.measure.points import AcceptedMeasurement
+from hyperloom.measure.tests.gpu_free_host import IDLE_CARDS_PYTHON
 from hyperloom.measure.tests.test_hosted_real_runner import _rigs
 from hyperloom_multibranch.toolbox.attempts import TestJob
 from hyperloom_multibranch.toolbox.hosted_executor import HostedExecutor
 from hyperloom_multibranch.toolbox.tests.helpers import req
 
-PHASED_RUNNER = (sys.executable, "-m", "hyperloom.measure.tests.phased_runner_entry")
+PHASED_RUNNER = (*IDLE_CARDS_PYTHON, "-m", "hyperloom.measure.tests.phased_runner_entry")
 AFTER_THE_RUNNER = ["result_signing", "runner_handoff", "result_landing", "sandbox_release", "result_read"]
 BEFORE_THE_ROUNDS = ["sandbox_start", "sheet_wait", "preflight", "env_rebuild"]
 

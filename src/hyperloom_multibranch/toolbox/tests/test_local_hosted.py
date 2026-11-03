@@ -26,6 +26,7 @@ from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT, Measurement
 from hyperloom.measure.live_log import last_output
 from hyperloom.measure.runner.tools import ToolError, ensure_inferencex
 from hyperloom.measure.tests.framework_fixtures import make_framework
+from hyperloom.measure.tests.gpu_free_host import idle_cards_python
 from hyperloom.measure.tests.hosted_fixtures import spec_context
 from hyperloom.measure.tests.rule_pack_fixtures import identity_of, other_pack, reading_pack  # noqa: F401
 from hyperloom.measure.tests.test_hosted_real_runner import _git_repo, _point
@@ -150,7 +151,11 @@ def _toolbox_of(
             tmp_path, inferencex_commit=commit, benchmark_backend="bypass", blob_root=str(session / "hosted" / "blobs")
         ),
         options=LocalOptions(
-            policy=QueuePolicy(per_branch_k=2, global_concurrency=64), poll_interval_sec=0.1, timeout_sec=120, **extra
+            policy=QueuePolicy(per_branch_k=2, global_concurrency=64),
+            python=idle_cards_python(tmp_path),
+            poll_interval_sec=0.1,
+            timeout_sec=120,
+            **extra,
         ),
     )
 
