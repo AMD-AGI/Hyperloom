@@ -27,6 +27,8 @@ from kernelforge.knowledge.kb_store.identity.implementation import (
 )
 from kernelforge.knowledge.kb_store.identity.kernel_recipe import KERNEL_CANONICAL_DIMENSIONS
 from kernelforge.utils.git import GitError, git
+from kernelforge.utils.gpu_arch import canonical_gpu_type
+from kernelforge.workflows.forge_loop.campaign.campaign_config import detect_gpu_target
 
 
 log = logging.getLogger(__name__)
@@ -84,6 +86,8 @@ def _normalize_agent_task_payload(payload: dict) -> dict:
         if isinstance(operator_name, str) and operator_name.strip():
             identity["kernel_name"] = normalize_operator_name(operator_name)
         identity["framework_version"] = canonical_framework_version(identity.get("framework_version", ""))
+        # The agent has no tool that can see the hardware, so the GPU is the one forge-loop itself resolves.
+        identity["gpu"] = canonical_gpu_type(detect_gpu_target())
         # The declared framework reaches forge-loop as an override, and the
         # override is resolved before it becomes an address: ``aiter_meta`` is
         # ``aiter``, and every spelling of "this kernel belongs to no package" --

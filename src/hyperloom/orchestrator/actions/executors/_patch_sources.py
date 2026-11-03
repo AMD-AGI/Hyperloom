@@ -368,6 +368,21 @@ def _resolve_framework_root(
     return tree.root if tree is not None else None
 
 
+def _scanned_patch_files(specialist_workspace: Path) -> list[str]:
+    """The ``*.patch`` then ``*.diff`` files of the workspace's worktree and own ``patches/`` dirs."""
+    found: list[str] = []
+    for base in (
+        specialist_workspace / "worktree" / "patches",
+        specialist_workspace / "patches",
+    ):
+        if base.is_dir():
+            for p in sorted(base.glob("*.patch")):
+                found.append(str(p))
+            for p in sorted(base.glob("*.diff")):
+                found.append(str(p))
+    return found
+
+
 def _resolve_patch_paths(
     *,
     specialist_workspace: Path,
@@ -399,15 +414,7 @@ def _resolve_patch_paths(
     elif done_payload and isinstance(done_payload.get("patches_written"), list):
         candidates.extend(str(p) for p in done_payload["patches_written"] if p)
     else:
-        for base in (
-            specialist_workspace / "worktree" / "patches",
-            specialist_workspace / "patches",
-        ):
-            if base.is_dir():
-                for p in sorted(base.glob("*.patch")):
-                    candidates.append(str(p))
-                for p in sorted(base.glob("*.diff")):
-                    candidates.append(str(p))
+        candidates.extend(_scanned_patch_files(specialist_workspace))
 
     allowed_roots = [
         (specialist_workspace / "worktree").resolve(),

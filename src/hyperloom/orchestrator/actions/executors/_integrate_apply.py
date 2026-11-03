@@ -52,6 +52,22 @@ def _changes_beyond_patches(attempt: IntegrateAttempt, deliverable: _Deliverable
     )
 
 
+def _applied_no_bench_result(attempt: IntegrateAttempt, deliverable: _Deliverable) -> dict[str, Any]:
+    """The result of an ``apply_only`` round, which leaves its changes applied and skips the bench."""
+    return {
+        "status": "applied_no_bench",
+        "specialist_task_id": attempt.specialist_task_id,
+        "patches_applied": [str(patch) for patch in attempt.applied],
+        "patches_reverted": [],
+        "artifacts_applied": attempt.applied_artifacts,
+        "extra_server_args_applied": attempt.extra_server_args_applied,
+        "extra_envs_applied": attempt.extra_envs_applied,
+        "dropped_env_overrides": deliverable.dropped_env_overrides,
+        "reason": "apply_only=True; benchmark skipped",
+        "workspace": str(attempt.output_root),
+    }
+
+
 class ApplyStageMixin:
     """Open the mutation window, apply the patch series to the live tree, and refuse the attempt when it does not apply."""
 
@@ -116,6 +132,29 @@ class ApplyStageMixin:
         if stash_refusal is not None:
             return stash_refusal
 
+        applied_refusal = await self._apply_deliverable(attempt, params, deliverable, framework_root)
+        if applied_refusal is not None:
+            return applied_refusal
+
+        # Inherited first, this round last: inheriting is not pinning.
+        attempt.extra_server_args_applied = _merge_established_server_args(
+            inherited_args, deliverable.extra_server_args
+        )
+        attempt.extra_envs_applied = {**inherited_envs, **deliverable.extra_envs}
+        attempt.dropped_env_overrides = deliverable.dropped_env_overrides
+        if params.get("apply_only"):
+            return _applied_no_bench_result(attempt, deliverable)
+        return None
+
+    async def _apply_deliverable(
+        self,
+        attempt: IntegrateAttempt,
+        params: dict[str, Any],
+        deliverable: _Deliverable,
+        framework_root: Path | None,
+    ) -> dict[str, Any] | None:
+        """Apply the deliverable's patches and artifacts inside the open mutation window; a refusal on failure."""
+        shared_state = attempt.shared_state
         recovery = attempt.pending["recovery"]
         recovery_root = Path(recovery["root"])
         patch_paths = self._admit_localization(attempt, framework_root, deliverable.patch_paths)
@@ -172,26 +211,6 @@ class ApplyStageMixin:
                     artifacts_applied=[],
                     workspace=str(attempt.output_root),
                 )
-
-        # Inherited first, this round last: inheriting is not pinning.
-        attempt.extra_server_args_applied = _merge_established_server_args(
-            inherited_args, deliverable.extra_server_args
-        )
-        attempt.extra_envs_applied = {**inherited_envs, **deliverable.extra_envs}
-        attempt.dropped_env_overrides = deliverable.dropped_env_overrides
-        if params.get("apply_only"):
-            return {
-                "status": "applied_no_bench",
-                "specialist_task_id": attempt.specialist_task_id,
-                "patches_applied": [str(patch) for patch in attempt.applied],
-                "patches_reverted": [],
-                "artifacts_applied": attempt.applied_artifacts,
-                "extra_server_args_applied": attempt.extra_server_args_applied,
-                "extra_envs_applied": attempt.extra_envs_applied,
-                "dropped_env_overrides": deliverable.dropped_env_overrides,
-                "reason": "apply_only=True; benchmark skipped",
-                "workspace": str(attempt.output_root),
-            }
         return None
 
     async def _resolve_apply_root(

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import csv
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -238,15 +238,20 @@ def _resolve_shapes_from_ops_unique_args_csv(
                     continue
                 if not isinstance(dtypes, (list, tuple)):
                     dtypes = ()
-                for i, operand in enumerate(dims):
-                    dtype = dtypes[i] if i < len(dtypes) else ""
-                    s = format_operand_shape(operand, dtype)
-                    if s and s not in seen:
-                        seen.add(s)
-                        shapes.append(s)
+                _collect_operand_shapes(dims, dtypes, shapes, seen)
     except (OSError, csv.Error):
         return []
     return shapes
+
+
+def _collect_operand_shapes(dims: Sequence[Any], dtypes: Sequence[Any], shapes: list[str], seen: set[str]) -> None:
+    """Append each operand's formatted shape to ``shapes`` unless it was already ``seen``."""
+    for i, operand in enumerate(dims):
+        dtype = dtypes[i] if i < len(dtypes) else ""
+        s = format_operand_shape(operand, dtype)
+        if s and s not in seen:
+            seen.add(s)
+            shapes.append(s)
 
 
 def _invocation_case_from_csv_row(row: dict[str, str]) -> dict[str, Any] | None:

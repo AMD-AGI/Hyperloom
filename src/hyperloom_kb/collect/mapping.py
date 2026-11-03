@@ -218,24 +218,30 @@ def _experience(value: Any, names: frozenset[str], declaration: ExperienceDeclar
                 raise MappingError(f"experience.{category}.{name} is required by the declaration")
     for name, spec in _EXPERIENCE_FIELDS.items():
         if isinstance(spec, dict):
-            if name not in data:
-                if any(spec.values()):
-                    raise MappingError(f"experience.{name} is required")
-                continue
-            section = _mapping(data[name], f"experience.{name}")
-            _reject_unknown(section, set(spec), f"experience.{name}")
-            for child, required in spec.items():
-                if child in section:
-                    compiled[f"{name}.{child}"] = compile_expression(
-                        section[child], names, f"experience.{name}.{child}"
-                    )
-                elif required:
-                    raise MappingError(f"experience.{name}.{child} is required")
-            continue
-        if name in data:
+            compiled.update(_experience_section(data, name, spec, names))
+        elif name in data:
             compiled[name] = compile_expression(data[name], names, f"experience.{name}")
         elif spec:
             raise MappingError(f"experience.{name} is required")
+    return compiled
+
+
+def _experience_section(
+    data: Mapping[str, Any], name: str, spec: dict[str, bool], names: frozenset[str]
+) -> dict[str, Expression]:
+    """Compile the ``experience.<name>`` sub-mapping whose children ``spec`` marks required or optional."""
+    if name not in data:
+        if any(spec.values()):
+            raise MappingError(f"experience.{name} is required")
+        return {}
+    section = _mapping(data[name], f"experience.{name}")
+    _reject_unknown(section, set(spec), f"experience.{name}")
+    compiled: dict[str, Expression] = {}
+    for child, required in spec.items():
+        if child in section:
+            compiled[f"{name}.{child}"] = compile_expression(section[child], names, f"experience.{name}.{child}")
+        elif required:
+            raise MappingError(f"experience.{name}.{child} is required")
     return compiled
 
 

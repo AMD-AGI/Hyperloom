@@ -278,6 +278,17 @@ Rules:
 """
 
 
+def _deny_tool_use(reason: str) -> dict:
+    """The PreToolUse hook output that refuses a tool call with ``reason``."""
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    }
+
+
 def _make_applyback_hooks(*, deadline_monotonic: float) -> AgentHooks:
     """Bound shell work and stop all tools during finalization reserve."""
 
@@ -289,13 +300,7 @@ def _make_applyback_hooks(*, deadline_monotonic: float) -> AgentHooks:
                 "Apply-back finalization reserve has started. Stop running "
                 "tools and return your concise integration summary now."
             )
-            return {
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "deny",
-                    "permissionDecisionReason": reason,
-                }
-            }
+            return _deny_tool_use(reason)
         if input_data.get("tool_name") != "Bash":
             return {}
         tool_input = input_data.get("tool_input") or {}
@@ -337,13 +342,7 @@ def _make_applyback_hooks(*, deadline_monotonic: float) -> AgentHooks:
                 )
             else:
                 return {}
-        return {
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "deny",
-                "permissionDecisionReason": reason,
-            }
-        }
+        return _deny_tool_use(reason)
 
     return AgentHooks(
         pre_tool_use=[
@@ -582,6 +581,82 @@ def _collect_patch(spec: RewriteSpec, worktree: Path, patch_path: Path, base_com
     return CollectedPatch(base_commit, applyback_commit, commit_ref, patch, changed_files)
 
 
+def _next_applyback_iteration(manifest_path: Path, result_path: Path, best_root: Path) -> int:
+    """The first iteration after every published one whose version directory is still free."""
+    previous_iteration = -1
+    for previous_path in (manifest_path, result_path):
+        try:
+            previous = json.loads(previous_path.read_text())
+            previous_iteration = max(
+                previous_iteration,
+                int(previous.get("iteration", -1)),
+            )
+        except (OSError, ValueError, TypeError):
+            # A missing or corrupt prior manifest simply starts at iteration 0.
+            continue
+    iteration = previous_iteration + 1
+    while (best_root / f"iter_{iteration:03d}").exists():
+        iteration += 1
+    return iteration
+
+
+def _write_applyback_bundle(
+    version: Path,
+    collected: CollectedPatch,
+    measurement: FlydslMeasurement,
+    manifest: dict,
+    workspace: Path,
+) -> None:
+    """Build the version's bundle in a scratch directory and move it into place whole."""
+    best_root = version.parent
+    best_root.mkdir(parents=True, exist_ok=True)
+    temporary = Path(
+        tempfile.mkdtemp(
+            dir=str(best_root),
+            prefix=f".{version.name}.",
+        )
+    )
+    try:
+        atomic_write_text(temporary / "forge.patch", collected.patch, options=DURABLE)
+        atomic_write_text(
+            temporary / "validation.txt",
+            "Standalone FlyDSL reference passed the rewrite correctness gate.\n"
+            "Framework integration validation is intentionally pending in Hyperloom.\n",
+            options=DURABLE,
+        )
+        atomic_write_json(
+            temporary / "benchmark.json",
+            {
+                "source_ms": measurement.source_ms,
+                "flydsl_best_ms": measurement.flydsl_ms,
+            },
+            fmt=JsonFormat(trailing_newline=True),
+            options=DURABLE,
+        )
+        atomic_write_json(
+            temporary / "publication.json", manifest, fmt=JsonFormat(trailing_newline=True), options=DURABLE
+        )
+        files_root = temporary / "files"
+        files_root.mkdir(parents=True, exist_ok=True)
+        for relative in collected.changed_files:
+            target = Path(relative)
+            if target.is_absolute() or ".." in target.parts:
+                raise RuntimeError(f"apply-back changed file escapes repository: {relative}")
+            content = git_bytes(
+                "-C", str(workspace), "show", f"{collected.applyback_commit}:{target.as_posix()}", check=False
+            )
+            # Deleted files belong in the patch but have no final snapshot.
+            if content.returncode != 0:
+                continue
+            destination = files_root / target
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(content.stdout)
+        os.replace(temporary, version)
+    finally:
+        if temporary.exists():
+            shutil.rmtree(temporary, ignore_errors=True)
+
+
 def _publish_patch(
     spec: RewriteSpec,
     framework: str,
@@ -598,20 +673,7 @@ def _publish_patch(
     best_root = namespace_root / "best"
     manifest_path = best_root / "manifest.json"
     result_path = namespace_root / "result.json"
-    previous_iteration = -1
-    for previous_path in (manifest_path, result_path):
-        try:
-            previous = json.loads(previous_path.read_text())
-            previous_iteration = max(
-                previous_iteration,
-                int(previous.get("iteration", -1)),
-            )
-        except (OSError, ValueError, TypeError):
-            # A missing or corrupt prior manifest simply starts at iteration 0.
-            continue
-    iteration = previous_iteration + 1
-    while (best_root / f"iter_{iteration:03d}").exists():
-        iteration += 1
+    iteration = _next_applyback_iteration(manifest_path, result_path, best_root)
     version_name = f"iter_{iteration:03d}"
     version = best_root / version_name
     relative_dir = version.relative_to(root)
@@ -647,50 +709,7 @@ def _publish_patch(
         }
     )
 
-    best_root.mkdir(parents=True, exist_ok=True)
-    temporary = Path(
-        tempfile.mkdtemp(
-            dir=str(best_root),
-            prefix=f".{version_name}.",
-        )
-    )
-    try:
-        atomic_write_text(temporary / "forge.patch", collected.patch, options=DURABLE)
-        atomic_write_text(
-            temporary / "validation.txt",
-            "Standalone FlyDSL reference passed the rewrite correctness gate.\n"
-            "Framework integration validation is intentionally pending in Hyperloom.\n",
-            options=DURABLE,
-        )
-        atomic_write_json(
-            temporary / "benchmark.json",
-            {
-                "source_ms": measurement.source_ms,
-                "flydsl_best_ms": measurement.flydsl_ms,
-            },
-            fmt=JsonFormat(trailing_newline=True),
-            options=DURABLE,
-        )
-        atomic_write_json(
-            temporary / "publication.json", manifest, fmt=JsonFormat(trailing_newline=True), options=DURABLE
-        )
-        files_root = temporary / "files"
-        files_root.mkdir(parents=True, exist_ok=True)
-        for relative in changed_files:
-            target = Path(relative)
-            if target.is_absolute() or ".." in target.parts:
-                raise RuntimeError(f"apply-back changed file escapes repository: {relative}")
-            content = git_bytes("-C", str(workspace), "show", f"{applyback_commit}:{target.as_posix()}", check=False)
-            # Deleted files belong in the patch but have no final snapshot.
-            if content.returncode != 0:
-                continue
-            destination = files_root / target
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_bytes(content.stdout)
-        os.replace(temporary, version)
-    finally:
-        if temporary.exists():
-            shutil.rmtree(temporary, ignore_errors=True)
+    _write_applyback_bundle(version, collected, measurement, manifest, workspace)
 
     # The bundle is complete on disk before either pointer becomes readable, so a hard kill can only leave the
     # previous publication or nothing at all.
@@ -744,22 +763,7 @@ class _CleanRoomAttempts:
                         error=f"source kernel is not tracked by the pristine framework commit: {source_relative}",
                         attempts=attempt,
                     )
-                import_plan = _build_import_validation_plan(
-                    worktree=worktree, source_relative=source_relative, import_modules=request.import_modules
-                )
-                remaining = budget.remaining_seconds(request.deadline_unix)
-                baseline_timeout = int(min(budget.import_validation_timeout_sec, max(1, remaining)))
-                _validate_imports(worktree=worktree, plan=import_plan, timeout_sec=baseline_timeout, stage="baseline")
-                if not budget.can_start_applyback(request.deadline_unix):
-                    raise RuntimeError(
-                        "insufficient time remaining after baseline import "
-                        "validation for the apply-back agent and host validation"
-                    )
-                timeout_sec = budget.agent_timeout_sec(
-                    deadline_unix=request.deadline_unix,
-                    configured_timeout_sec=self.config.agent_timeout_sec,
-                    attempts_left=request.max_attempts - attempt + 1,
-                )
+                import_plan, timeout_sec = self._prepare_attempt(worktree, attempt)
                 turn = _ApplybackTurn(worktree, timeout_sec, progress_log, prior_failure)
                 return self._integrate(turn, import_plan, attempt)
             except (asyncio.TimeoutError, TimeoutError):
@@ -791,6 +795,27 @@ class _CleanRoomAttempts:
                 break
             prior_failure = error_text
         return last_result
+
+    def _prepare_attempt(self, worktree: Path, attempt: int) -> tuple[ImportValidationPlan, int]:
+        """Validate the pristine worktree's imports and size the agent's timeout for this attempt."""
+        request, budget = self.request, DEFAULT_REWRITE_BUDGET
+        import_plan = _build_import_validation_plan(
+            worktree=worktree, source_relative=self.brief.source_relative, import_modules=request.import_modules
+        )
+        remaining = budget.remaining_seconds(request.deadline_unix)
+        baseline_timeout = int(min(budget.import_validation_timeout_sec, max(1, remaining)))
+        _validate_imports(worktree=worktree, plan=import_plan, timeout_sec=baseline_timeout, stage="baseline")
+        if not budget.can_start_applyback(request.deadline_unix):
+            raise RuntimeError(
+                "insufficient time remaining after baseline import "
+                "validation for the apply-back agent and host validation"
+            )
+        timeout_sec = budget.agent_timeout_sec(
+            deadline_unix=request.deadline_unix,
+            configured_timeout_sec=self.config.agent_timeout_sec,
+            attempts_left=request.max_attempts - attempt + 1,
+        )
+        return import_plan, timeout_sec
 
     def _integrate(self, turn: _ApplybackTurn, import_plan: ImportValidationPlan, attempt: int) -> ApplybackResult:
         """Let the agent integrate the reference in the turn's worktree, then validate and publish what it changed."""

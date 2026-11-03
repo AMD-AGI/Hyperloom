@@ -176,80 +176,27 @@ class BenchStageMixin:
         from ._ray_serving import maybe_serving_lease
 
         params = bench_leg.params
-        gate_evidence: dict[str, Any] = {
-            "accuracy_pass": None,
-            "accuracy": None,
-            "enablement_accuracy": None,
-            "enablement_accuracy_task": "",
-            "enablement_accuracy_metric": "",
-            "eval_probe": None,
-        }
+        gate_evidence: dict[str, Any] = dict(_EMPTY_GATE_EVIDENCE)
         base_config = Path(params.get("config_path") or self.default_config_path or default_baseline_config())
         if not base_config.exists():
             raise RuntimeError(f"integrate_patch bench: config not found at {base_config}")
-        model_path = resolve_session_model_path(
-            params=params,
-            state_model_path=bench_leg.state_model_path,
-        )
-        gpu_type = str(params.get("gpu_type") or "").strip().lower() or os.environ.get("GPU_TYPE", "").strip().lower()
-        benchmark_script = sanitize_script_name(params.get("benchmark_script"))
+        target = _bench_target(bench_leg)
         result_dir = sanitize_result_dir(params.get("result_dir"))
         base_extra_args = str(params.get("base_extra_args") or "").strip()
         args_mode = str(params.get("base_args_mode") or "append")
         base_remove = to_str_list(params.get("base_remove_args"))
-        target = BenchmarkTarget(
-            model_path=model_path or None, gpu_type=gpu_type or None, benchmark_script=benchmark_script
-        )
-        config_path = prepare_grid_benchmark_config(
-            base_config,
-            bench_leg.output_root,
-            launch=LaunchLayer(
-                extra_envs=framework_run_eval_envs(params),
-                remove_args=params.get("base_remove_args"),
-                unset_envs=params.get("base_unset_envs"),
-                args_mode=args_mode,
-            ),
-            target=target,
-            options=MaterializeOptions(out_name="integrate_patch.with_envs.yaml"),
-        )
+        config_path = _materialize_bench_config(base_config, bench_leg, target, args_mode)
 
-        envs = dict(extra_envs_applied)
-        # Eval-origin enablement needs a raw accuracy for its runnable gate, so
-        # RUN_EVAL=true must survive any variant overlay.
-        if params.get("enablement") and is_eval_origin(params):
-            envs["RUN_EVAL"] = "true"
-        variant = GridVariant(
-            name=f"integrate-patch-{bench_leg.specialist_task_id[:8]}{variant_suffix}",
-            extra_server_args=extra_server_args_applied,
-            extra_envs=envs,
-            unset_envs=to_str_list(unset_envs),
-            note=f"integrate_patch:{bench_leg.specialist_task_id}{variant_suffix}",
+        variant = _integrate_variant(
+            bench_leg,
+            extra_server_args_applied,
+            extra_envs_applied,
+            unset_envs=unset_envs,
+            variant_suffix=variant_suffix,
         )
-        variant.overlay_pythonpath = params.get("overlay_pythonpath", "")
-        variant.source_patches = list(params.get("source_patches", []))
-        runtime_override = params.get("runtime_override")
-        if isinstance(runtime_override, dict) and runtime_override:
-            # Preserve list/dict values; apply_runtime_override expects them.
-            variant.runtime_override = dict(runtime_override)
-
-        # The compatibility filter is deliberately absent: it shells out to build
-        # the framework's arg parser, and a single authored variant must not pay
-        # for that probe.
-        grid, mn_dropped = apply_multi_node_invalid_variants([variant])
-        grid, pin_dropped = apply_aiter_moe_pin_filter(grid)
-        grid, skip_dropped = apply_user_skip_list(grid, skip_spec=resolve_skip_spec(params))
+        grid, dropped = _filter_bench_grid(variant, params)
         if not grid:
-            rejection = (mn_dropped + pin_dropped + skip_dropped)[0]
-            return (
-                {
-                    "status": "skipped",
-                    "error_class": "filtered_before_bench",
-                    "error": rejection["reason"],
-                    "workspace": "",
-                    "materialized_config": str(config_path),
-                },
-                gate_evidence,
-            )
+            return _filtered_before_bench(dropped[0], config_path), gate_evidence
 
         # Ray-managed GPU execution holds the lease for the whole run_grid so the
         # patch benchmark serializes against other serving instead of colliding
@@ -322,6 +269,101 @@ class BenchStageMixin:
             output_dir=slot,
             attempt=open_bringup_attempt(slot),
         )
+
+
+#: Gate evidence of a bench leg before anything graded it; copied per leg, which fills it in.
+_EMPTY_GATE_EVIDENCE: dict[str, Any] = {
+    "accuracy_pass": None,
+    "accuracy": None,
+    "enablement_accuracy": None,
+    "enablement_accuracy_task": "",
+    "enablement_accuracy_metric": "",
+    "eval_probe": None,
+}
+
+
+def _bench_target(bench_leg: _PatchBench) -> BenchmarkTarget:
+    """The model, GPU type and benchmark script a bench leg runs."""
+    params = bench_leg.params
+    model_path = resolve_session_model_path(
+        params=params,
+        state_model_path=bench_leg.state_model_path,
+    )
+    gpu_type = str(params.get("gpu_type") or "").strip().lower() or os.environ.get("GPU_TYPE", "").strip().lower()
+    benchmark_script = sanitize_script_name(params.get("benchmark_script"))
+    return BenchmarkTarget(model_path=model_path or None, gpu_type=gpu_type or None, benchmark_script=benchmark_script)
+
+
+def _materialize_bench_config(
+    base_config: Path, bench_leg: _PatchBench, target: BenchmarkTarget, args_mode: str
+) -> Path:
+    """Materialize the base config this bench leg launches from into its workspace."""
+    params = bench_leg.params
+    return prepare_grid_benchmark_config(
+        base_config,
+        bench_leg.output_root,
+        launch=LaunchLayer(
+            extra_envs=framework_run_eval_envs(params),
+            remove_args=params.get("base_remove_args"),
+            unset_envs=params.get("base_unset_envs"),
+            args_mode=args_mode,
+        ),
+        target=target,
+        options=MaterializeOptions(out_name="integrate_patch.with_envs.yaml"),
+    )
+
+
+def _integrate_variant(
+    bench_leg: _PatchBench,
+    extra_server_args_applied: str,
+    extra_envs_applied: dict[str, str],
+    *,
+    unset_envs: list[str] | None,
+    variant_suffix: str,
+) -> GridVariant:
+    """The one grid variant a bench leg runs: the applied server args and envs over the task's overlays."""
+    params = bench_leg.params
+    envs = dict(extra_envs_applied)
+    # Eval-origin enablement needs a raw accuracy for its runnable gate, so
+    # RUN_EVAL=true must survive any variant overlay.
+    if params.get("enablement") and is_eval_origin(params):
+        envs["RUN_EVAL"] = "true"
+    variant = GridVariant(
+        name=f"integrate-patch-{bench_leg.specialist_task_id[:8]}{variant_suffix}",
+        extra_server_args=extra_server_args_applied,
+        extra_envs=envs,
+        unset_envs=to_str_list(unset_envs),
+        note=f"integrate_patch:{bench_leg.specialist_task_id}{variant_suffix}",
+    )
+    variant.overlay_pythonpath = params.get("overlay_pythonpath", "")
+    variant.source_patches = list(params.get("source_patches", []))
+    runtime_override = params.get("runtime_override")
+    if isinstance(runtime_override, dict) and runtime_override:
+        # Preserve list/dict values; apply_runtime_override expects them.
+        variant.runtime_override = dict(runtime_override)
+    return variant
+
+
+def _filter_bench_grid(variant: GridVariant, params: dict[str, Any]) -> tuple[list[GridVariant], list[dict[str, Any]]]:
+    """Run the variant through the pre-bench filters; the surviving grid and every rejection, in filter order."""
+    # The compatibility filter is deliberately absent: it shells out to build
+    # the framework's arg parser, and a single authored variant must not pay
+    # for that probe.
+    grid, mn_dropped = apply_multi_node_invalid_variants([variant])
+    grid, pin_dropped = apply_aiter_moe_pin_filter(grid)
+    grid, skip_dropped = apply_user_skip_list(grid, skip_spec=resolve_skip_spec(params))
+    return grid, mn_dropped + pin_dropped + skip_dropped
+
+
+def _filtered_before_bench(rejection: dict[str, Any], config_path: Path) -> dict[str, Any]:
+    """The bench result of a variant a pre-bench filter rejected."""
+    return {
+        "status": "skipped",
+        "error_class": "filtered_before_bench",
+        "error": rejection["reason"],
+        "workspace": "",
+        "materialized_config": str(config_path),
+    }
 
 
 def _bench_row(result: VariantResult, variant: GridVariant, base: LaunchLayer, config_path: Path) -> dict[str, Any]:
