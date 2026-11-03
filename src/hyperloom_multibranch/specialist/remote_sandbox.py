@@ -194,9 +194,12 @@ class RemoteProcess:
     async def _probe(self) -> None:
         self._probed_at = self.owner.clock()
         pid, done = shlex.quote(str(self.pid_file)), shlex.quote(str(self.exit_file))
+        # A zombie still answers `kill -0`, and a sandbox whose PID 1 reaps nothing keeps a dead launcher as one.
         probe = (
+            'up() { kill -0 "$1" 2>/dev/null || return 1; '
+            'case "$(sed \'s/.*) //\' /proc/"$1"/stat 2>/dev/null)" in Z*) return 1;; esac; }; '
             f"read launcher command < {pid}; if [ -s {done} ]; then cat {done}; "
-            'elif kill -0 "$launcher" 2>/dev/null || kill -0 "$command" 2>/dev/null; then echo running; '
+            'elif up "$launcher" || up "$command"; then echo running; '
             "else echo gone; fi"
         )
         try:
