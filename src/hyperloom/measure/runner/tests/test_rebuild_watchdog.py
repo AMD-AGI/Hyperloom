@@ -12,12 +12,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
 
 from hyperloom.measure.framework.tests.test_table_modules import BPRESHUFFLE, CONFIG, _package, _table
-from hyperloom.measure.runner import rebuild_watchdog
+from hyperloom.measure.runner import rebuild_watchdog, run
 from hyperloom.measure.runner.rebuild_watchdog import raise_rebuild_watchdog, rebuild_watchdog_sec
 from hyperloom.measure.socket import TestCall
 
@@ -209,3 +210,59 @@ def test_a_vllm_point_is_left_as_it_is(image, tmp_path: Path) -> None:
 
     assert raise_rebuild_watchdog(_call(tmp_path, point), None, {}, tmp_path) is None
     assert _FLAG not in point.read_text(encoding=_UTF8)
+
+
+class _Session:
+    """What the runner reads of a compiled-code session: the modules its test's server builds itself."""
+
+    def __init__(self, built: set[str]) -> None:
+        self.built_by_server = frozenset(built)
+
+
+def _own_directories(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, point: Path, session, gfx_arch: str | None):
+    """``run._own_directories`` for one point, with what it hands the other directories' owner recorded."""
+    given: list[tuple] = []
+    monkeypatch.setattr(run, "own_aiter_jit", lambda *args: given.append(args) or {})
+    context = SimpleNamespace(environ={}, work=tmp_path, notes=[], compile=tmp_path / "compile")
+    call = run._own_directories(context, _call(tmp_path, point), session, None, gfx_arch)
+    return call, context.notes, given
+
+
+def test_the_runner_gives_the_watchdog_the_modules_its_sessions_server_builds(
+    image, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A patch to the CK-tile GEMM's sources makes no table or variable stale: only the session knows its server builds it."""
+    point = _point(tmp_path, "point.yaml", args="--tp 1")
+    session = _Session({"module_gemm_a8w8_bpreshuffle_cktile"})
+
+    call, notes, _ = _own_directories(tmp_path, monkeypatch, point, session, "gfx950")
+
+    assert _watchdog(point, False) == f"--tp 1 {_FLAG} 3000"
+    assert len(notes) == 1 and "module_gemm_a8w8_bpreshuffle_cktile" in notes[0]
+    assert call.jit is session
+
+
+def test_a_runner_with_no_session_has_no_module_its_server_builds_for_the_watchdog(
+    image, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    point = _point(tmp_path, "point.yaml", args="--tp 1")
+    before = point.read_text(encoding=_UTF8)
+
+    call, notes, _ = _own_directories(tmp_path, monkeypatch, point, None, "gfx950")
+
+    assert (notes, call.jit) == ([], None) and point.read_text(encoding=_UTF8) == before
+
+
+@pytest.mark.parametrize(("card", "raised"), [("gfx950", False), ("gfx942", True)])
+def test_the_runner_tells_the_watchdog_and_the_jit_directory_which_card_it_is_on(
+    image, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, card: str, raised: bool
+) -> None:
+    """``GPU_ARCHS`` naming the card is the image's own value for a module that reads it; naming another is not."""
+    config = {**CONFIG, "module_opus": {"srcs": [], "flags_extra_hip": ["os.environ.get('GPU_ARCHS', '')"]}}
+    (image / "jit" / "optCompilerConfig.json").write_text(json.dumps(config), encoding=_UTF8)
+    point = _point(tmp_path, "point.yaml", args="--tp 1", GPU_ARCHS="gfx950")
+
+    _, notes, given = _own_directories(tmp_path, monkeypatch, point, None, card)
+
+    assert bool(notes) is raised
+    assert [args[-1] for args in given] == [card], "the JIT directory's owner is told too"

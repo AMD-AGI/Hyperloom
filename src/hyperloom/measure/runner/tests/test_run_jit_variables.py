@@ -18,6 +18,7 @@ import json
 
 import pytest
 
+from hyperloom.measure.runner import rebuild_watchdog
 from hyperloom.measure.runner.tests.test_run_jit import (  # noqa: F401 - fixtures
     CORE,
     Rig,
@@ -29,8 +30,10 @@ from hyperloom.measure.runner.tests.test_run_jit import (  # noqa: F401 - fixtur
     rig,
 )
 
+GFX = "gfx950"  # the rig's GPU
 VARIABLE = "CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT"
 FLAG = "f'-DCK_TILE_FLOAT_TO_BFLOAT16_DEFAULT={os.environ.get(\"CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT\", 2)}'"
+ARCH_FLAG = "('-mllvm -amdgpu-expert-scheduling-mode' if 'gfx1250' in os.environ.get('GPU_ARCHS', '') else '')"
 IMAGE_MODULE = "image build"
 TOUCHED = "the build variables touch 1 aiter modules, built when first called (module_gemm)"
 
@@ -40,12 +43,14 @@ def image(rig: Rig) -> Rig:
     config = {
         "module_gemm": {"srcs": [], "extra_include": [], "flags_extra_hip": [FLAG], "blob_gen_cmd": "''"},
         "module_other": {"srcs": [], "extra_include": [], "blob_gen_cmd": "''"},
+        "module_opus": {"srcs": [], "extra_include": [], "flags_extra_hip": [ARCH_FLAG], "blob_gen_cmd": "''"},
     }
     files = {
         "aiter/jit/core.py": CORE,
         "aiter/jit/optCompilerConfig.json": json.dumps(config),
         "aiter/jit/module_gemm.so": IMAGE_MODULE,
         "aiter/jit/module_other.so": IMAGE_MODULE,
+        "aiter/jit/module_opus.so": IMAGE_MODULE,
     }
     for relative, text in files.items():
         path = rig.bases / relative
@@ -85,3 +90,20 @@ def test_a_variable_no_entry_and_no_code_names_changes_nothing(image) -> None:
 
     assert _keys(unrelated) == _keys(base)
     assert "aiter modules, built when first called" not in status["message"]
+
+
+@pytest.mark.parametrize(
+    ("value", "touched"), [("native", False), (GFX, False), ("gfx942", True), (f"gfx942;{GFX}", True)]
+)
+def test_gpu_archs_naming_the_card_makes_no_module_stale_and_any_other_value_does(
+    image, monkeypatch, value, touched
+) -> None:
+    """The CPU build's check (``_build_differs``) takes ``native`` and the card's architecture for the unset variable, so
+    the check of the modules the variable touches does too: ``module_opus`` reads it, the image's was built for the card.
+    The watchdog finds the stale modules by itself too, from the same aiter."""
+    monkeypatch.setattr(rebuild_watchdog, "locate_package", image._locate)
+    _, status, _ = image.run("arch", _arm(image, envs={"GPU_ARCHS": value}))
+
+    message = status["message"]
+    assert ("built when first called (module_opus)" in message) is touched
+    assert ("watchdog raised" in message) is touched, "the card's own architecture makes no sglang rebuild to wait for"

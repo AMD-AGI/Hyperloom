@@ -105,11 +105,23 @@ class BootGuard:
         self._output_dir = output_dir
         self._scope = scope
         self._expired_after: float | None = None
+        self._waited = 0.0
+        self._excused = 0.0
 
     @property
     def expired_after(self) -> float | None:
         """The limit, in seconds, that ended a round; ``None`` while none has."""
         return self._expired_after
+
+    @property
+    def waited_sec(self) -> float:
+        """The seconds the round that expired had waited for its server, aiter's module builds included."""
+        return self._waited
+
+    @property
+    def building_sec(self) -> float:
+        """Of :attr:`waited_sec`, the seconds that were not counted against the limit because aiter was building a module."""
+        return self._excused
 
     @contextlib.contextmanager
     def watching(self, limit_sec: float) -> Iterator[None]:
@@ -126,7 +138,7 @@ class BootGuard:
                 now = time.time()
                 builds.observe(now, self._building(started))
                 if now - started - builds.excused >= limit_sec:
-                    self._expired_after = limit_sec
+                    self._expired_after, self._waited, self._excused = limit_sec, now - started, builds.excused
                     self._scope.cancel(reason=BOOT_CANCEL_REASON)
                     return
 
