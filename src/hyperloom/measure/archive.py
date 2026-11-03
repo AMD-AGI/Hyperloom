@@ -34,7 +34,7 @@ MANIFEST_NAME = RESERVED_NAMES[0]
 
 
 class ArchiveError(Exception):
-    """The bundle could not be archived; ``error_class`` is ``archive_failed``, an infrastructure failure (4.7)."""
+    """The bundle could not be archived; ``error_class`` is ``archive_failed``, an infrastructure failure."""
 
     error_class = ARCHIVE_FAILED
 

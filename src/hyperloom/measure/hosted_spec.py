@@ -48,7 +48,7 @@ __all__ = [
     "split_result_dir",
 ]
 
-#: Process variables of the application that a sheet passes on (4.4.4); every other variable stays behind.
+#: Process variables of the application that a sheet passes on; every other variable stays behind.
 PROCESS_ENV_WHITELIST = (
     "HYPERLOOM_AGENTX",
     "HYPERLOOM_AGENTIC_BACKEND",
@@ -435,7 +435,7 @@ def split_result_dir(call: TestCall) -> tuple[str, Path | None]:
 
     The sheet names the directory relative to the output directory. A location outside the output directory is
     renamed to a sibling below it, and the original location is returned so the backend can put the files there once
-    the result has landed (4.4.4 / 3.3).
+    the result has landed.
     """
     raw = call.result_dir
     if not raw:

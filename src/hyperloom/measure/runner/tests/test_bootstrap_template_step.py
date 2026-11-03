@@ -4,8 +4,8 @@
 """The start step of a measurement template: one line that starts the checked runner in the background and returns.
 
 A template's steps run before the sandbox service starts its agent, so a step that ran the runner in the foreground would
-keep the sandbox from ever turning ready and the spec from ever arriving. The line is pinned to the step a joint run
-measured working, and run here with ``/bin/sh`` against the rig's stand-in cache entry.
+keep the sandbox from ever turning ready and the spec from ever arriving. The line is pinned to a step that was seen
+working on a sandbox service, and run here with ``/bin/sh`` against the rig's stand-in cache entry.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from hyperloom.measure.runner.bootstrap import TEMPLATE_SPEC_WAIT_SEC, runner_st
 from hyperloom.measure.runner.cache_layout import MANIFEST_NAME, MANIFEST_PIN_ENV
 from hyperloom.measure.runner.tests.bootstrap_rig import PROBE_FILE, Rig, read_probe
 
-#: The step of the joint run whose sandboxes turned ready (a key copy as the template's own preparation).
+#: A step whose sandboxes turned ready (a key copy as the template's own preparation).
 _MEASURED_STEP = (
     'mkdir -p /app/in /app/out /app/work/scratch && (umask 077 && cp "$HYPERLOOM_SIGNING_KEY_FILE" /app/w'
     "ork/hl-sign.pem) && (HYPERLOOM_SIGNING_KEY_FILE=/app/work/hl-sign.pem nohup sh -c 'e=\"${HYPERLOOM_RU"

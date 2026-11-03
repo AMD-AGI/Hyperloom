@@ -191,7 +191,7 @@ async def land(stack: Stack, record: TestRecord, judgement: Judgement, outcome: 
 
 
 def decided(baseline: InferenceXBaseline, parent: dict[str, float], record: TestRecord) -> Judgement:
-    """First measurement against the baseline record, with its own accuracy round (6.1 step 7)."""
+    """First measurement against the baseline record, with its own accuracy round."""
     assert record.result is not None
     return compare(reading(record.result), baseline, parent, record.request_id)
 
@@ -288,7 +288,7 @@ async def settle_round(
     measurements: tuple[Any, ...],
     judged_against: tuple[InferenceXBaseline, dict[str, float]],
 ) -> None:
-    """Judge every candidate with the rule gate's comparison and land it through the rule gate (6.1 step 7)."""
+    """Judge every candidate with the rule gate's comparison and land it through the rule gate."""
     records, firsts, _, retests = measurements
     baseline, parent = judged_against
     for branch, first in firsts.items():

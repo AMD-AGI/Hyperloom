@@ -18,8 +18,9 @@ build that hangs counts again from there, and a boot that does anything else is 
 
 The guard watches a round's server boot only, so a test that hangs anywhere else before ready (a runner that stopped
 making progress, a round that never launched its server) waited out the whole ``timeout_sec``. :class:`PreReadySilence`
-bounds, on the application's side, how long a hosted test may go without output before its server is ready. Measured: one integration test sat 60 minutes with an empty attempt directory, holding the session's only integration
-lane, and a second one 54 minutes until it was cancelled by hand.
+bounds, on the application's side, how long a hosted test may go without output before its server is ready: without
+it, a test that stalls there sits for most of an hour with an empty attempt directory, holding a lane another test could
+use, until it times out or is cancelled by hand.
 
 The application reads the runner's ``progress.json`` on every poll. Each change of what it says the test did (its phase,
 the last output it saw, the newest live log's write time or last line) is activity; once the runner says a round's server
@@ -30,10 +31,10 @@ module is built: with eight tests of a session each building its own copy, the F
 ``module_gemm_a8w8_bpreshuffle_cktile`` took up to 844 s in the tests that finished it. While that line stands, only
 the boot guard bounds the boot.
 
-The limit comes from the server logs of 1857 test rounds (1711 reached ready): the longest stretch before ready with
-no output line, timestamped or carrying a progress figure, was 262 s, an aiter JIT build that reported ``cost 273``
-seconds itself; the 99.9th percentile was 144 s, and the slowest phase before a server starts (``env_rebuild``) took
-at most 27 s in 599 tests. 900 s is over three times the longest legitimate silence and ends a hang 45 minutes sooner.
+The limit comes from the server logs of past test rounds: the longest stretch before ready with no output line,
+timestamped or carrying a progress figure, was an aiter JIT build of a few minutes that reported its own cost, nearly all
+silences are far shorter, and so is the slowest phase before a server starts (``env_rebuild``). 900 s is over three times
+the longest legitimate silence and ends a hang long before the test's own timeout would.
 """
 
 from __future__ import annotations

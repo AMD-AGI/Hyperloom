@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The local backend's part of the shared compiled-code cache: seed before the server starts, stage after a success (4.21).
+"""The local backend's part of the shared compiled-code cache: seed before the server starts, stage after a success.
 
 ``run_grid`` is the stand-in of ``test_local_backend``; here it is also a compiler that writes a module into the
 directory ``AITER_JIT_DIR`` names while the test runs, which is what the backend must have set for it.

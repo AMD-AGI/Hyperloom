@@ -136,7 +136,8 @@ def _a_long_test_a_process_interrupts(tree: KernelTree, ended: dict[str, object]
 def test_an_enforcing_guard_ends_the_test_at_the_first_look_that_finds_a_process_not_at_its_end(
     tmp_path, env, tree, monkeypatch
 ) -> None:
-    """Measured on a GPU pod: a test beside a matrix multiply ran 33 minutes, 13 times slower, before it was refused."""
+    """A test that shares its card with another process (a matrix multiply, say) runs many times slower than alone, so it
+    is ended at the first look, not after it ran to its end."""
     ended: dict[str, object] = {}
     monkeypatch.setattr(runner, "LocalMeasurementBackend", _Backend(_a_long_test_a_process_interrupts(tree, ended)))
 

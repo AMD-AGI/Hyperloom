@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""``requirements/runner.lock`` is the ``runner`` extra compiled with hashes, which is all the sealed runner installs (4.8.1).
+"""``requirements/runner.lock`` is the ``runner`` extra compiled with hashes, which is all the sealed runner installs.
 
 A Python with a lock of its own (``requirements/runner-cpXY.lock``, :func:`hyperloom.measure.runner.cache_layout.lock_file`)
 is held to the same, and to the shared lock's pins but for those its header says it moved.

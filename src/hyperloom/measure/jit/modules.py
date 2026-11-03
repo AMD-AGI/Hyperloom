@@ -82,7 +82,7 @@ CKTILE_MODULE_SECONDS = 680
 #: take longer than that to rebuild before its test starts is refused when the test is accepted.
 MAX_REBUILD_SECONDS = 40 * 60
 #: How long a timer that ends a hang lets one module build (:func:`module_build_limit_sec`): over twice the longest build
-#: of its kind. Most modules: 273 s was the longest before a server was ready, in 1711 boots.
+#: of its kind. Most modules: 273 s was the longest before a server was ready, over the boots of earlier tests.
 MODULE_BUILD_LIMIT_SEC = 600
 #: A CK-tile module: 1347 s was the longest (eight tests building at once).
 CKTILE_MODULE_BUILD_LIMIT_SEC = 2700

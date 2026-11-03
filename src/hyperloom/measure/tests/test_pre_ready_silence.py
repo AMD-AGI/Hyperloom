@@ -105,7 +105,7 @@ def test_once_the_server_is_ready_or_the_test_is_past_running_nothing_bounds_it(
 
 
 def test_the_limit_is_above_the_longest_silence_measured_before_ready() -> None:
-    """262 s: an aiter JIT build that reported 273 s, the longest silent stretch before ready in 1711 boots."""
+    """262 s: an aiter JIT build that reported 273 s, the longest silent stretch before ready in earlier tests' boots."""
     assert PRE_READY_SILENCE_SEC >= 3 * 262
 
 

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""One test's use of the shared compiled-code cache: seeded before the server starts, harvested after it succeeds (4.21).
+"""One test's use of the shared compiled-code cache: seeded before the server starts, harvested after it succeeds.
 
 The compilers are played by a function that writes into the directories the session names (what aiter and Triton do when
 they find a variable set), so a second test that "finds" a module built by the first is found through the real seed, store
