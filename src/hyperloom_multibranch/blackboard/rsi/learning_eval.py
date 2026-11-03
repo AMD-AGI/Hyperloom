@@ -13,9 +13,11 @@ or a mechanism):
 Then every test a branch requested after its first retrieval counts once: *in a shown direction* when a learning shown
 to the branch before it named the test's direction, *elsewhere* otherwise; how many of each led to a commit sets the
 learnings' directions beside the rest. Past sessions' learnings are logged by id only, an Experience's or a pooled
-lesson's (:mod:`rsi.lessons`), so they are counted, not matched; the lessons apart too. Given the pool's live lessons,
-a learning of this session that says one of another session again, its branch never shown it, is a *rediscovery*:
-what the retrieval missed (:func:`rediscoveries`, which CLOSE's lesson standings use too).
+lesson's (:mod:`rsi.lessons`). An Experience is counted, not matched. A pooled lesson, given the pool, is matched as
+this session's learnings are, by the direction and kind its revision gives, and counts apart from them: whether the
+branches avoided its pitfalls, took up its insights, and how the tests in its directions fared. Given the pool's live
+lessons, a learning of this session that says one of another session again, its branch never shown it, is a
+*rediscovery*: what the retrieval missed (:func:`rediscoveries`, which CLOSE's lesson standings use too).
 
 A lead a startup brief showed counts once too, at its first showing to a branch: *taken up* when a later test of the
 branch makes every change the lead names (each word of its change, as the Experience export summarizes a change), and
@@ -39,7 +41,7 @@ from hyperloom_multibranch.blackboard.knowledge.experience import change_documen
 from hyperloom_multibranch.blackboard.learning_search import current_learnings, names, word_overlap, words
 from hyperloom_multibranch.blackboard.local.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.rsi.archive import TreeArchive
-from hyperloom_multibranch.blackboard.rsi.lessons import LessonPool
+from hyperloom_multibranch.blackboard.rsi.lessons import LessonPool, LessonRevision
 from hyperloom_multibranch.blackboard.rsi.report import share, table
 
 STUDY_WRITER = "rsi-study"
@@ -71,6 +73,14 @@ class LearningEvaluation:
     lessons_distinct: int = 0
     learnings_written: int = 0
     rediscovered: int = 0
+    lesson_pitfalls_shown: int = 0
+    lesson_pitfalls_avoided: int = 0
+    lesson_insights_shown: int = 0
+    lesson_insights_taken_up: int = 0
+    tests_in_lesson_directions: int = 0
+    committed_in_lesson_directions: int = 0
+    tests_elsewhere_after_lessons: int = 0
+    committed_elsewhere_after_lessons: int = 0
 
     def render(self) -> str:
         """The evaluation as markdown: a table of the measures, each with its counts."""
@@ -87,6 +97,19 @@ class LearningEvaluation:
             ("tests committed, elsewhere", share(self.committed_elsewhere, self.tests_elsewhere)),
             ("brief leads taken up", share(self.leads_taken_up, self.leads_shown)),
             ("brief leads taken up and committed", share(self.leads_committed, self.leads_shown)),
+            ("pooled lessons: pitfalls avoided", share(self.lesson_pitfalls_avoided, self.lesson_pitfalls_shown)),
+            (
+                "pooled lessons: insights and hypotheses taken up",
+                share(self.lesson_insights_taken_up, self.lesson_insights_shown),
+            ),
+            (
+                "tests committed, in a pooled lesson's direction",
+                share(self.committed_in_lesson_directions, self.tests_in_lesson_directions),
+            ),
+            (
+                "tests committed, elsewhere after a pooled lesson",
+                share(self.committed_elsewhere_after_lessons, self.tests_elsewhere_after_lessons),
+            ),
         ]
         return "\n".join(
             [
@@ -209,15 +232,25 @@ def rediscoveries(
 
 
 def evaluate_learnings(
-    snapshot: BlackboardSnapshot, log: Sequence[Mapping[str, Any]], lessons: Mapping[str, tuple[str, str]] | None = None
+    snapshot: BlackboardSnapshot,
+    log: Sequence[Mapping[str, Any]],
+    lessons: Mapping[str, tuple[str, str]] | None = None,
+    pooled: Mapping[str, Learning] | None = None,
 ) -> LearningEvaluation:
     """The retrieval of ``snapshot``'s session, read off its retrieval ``log`` (decoded lines); given the pool's live
-    ``lessons`` (each one's session and text), what it missed of them too."""
+    ``lessons`` (each one's session and text), what it missed of them too; given the ``pooled`` lessons, by id, as the
+    learnings their revisions give, what the branches did after them, as for this session's learnings."""
 
     learnings = {record.entry_id: record.learning for record in snapshot.learnings}
     tests = branch_tests(snapshot)
     shown = first_shown(log)
     uptake, outcomes = _uptake(shown, learnings, tests), _outcomes(shown, learnings, tests)
+    lessons_of = pooled or {}
+    lesson_shown = {key: at for key, at in first_shown(log, PAST).items() if key[1] in lessons_of}
+    lesson_uptake, lesson_outcomes = (
+        _uptake(lesson_shown, lessons_of, tests),
+        _outcomes(lesson_shown, lessons_of, tests),
+    )
     leads = _leads(log, tests)
     past = [str(item) for line in log for item in line.get(PAST, ())]
     pooled = [item for item in past if is_lesson_id(item)]
@@ -242,19 +275,34 @@ def evaluate_learnings(
         lessons_distinct=len(set(pooled)),
         learnings_written=len(current_learnings(snapshot)),
         rediscovered=len(missed),
+        lesson_pitfalls_shown=lesson_uptake["pitfalls"],
+        lesson_pitfalls_avoided=lesson_uptake["avoided"],
+        lesson_insights_shown=lesson_uptake["insights"],
+        lesson_insights_taken_up=lesson_uptake["taken_up"],
+        tests_in_lesson_directions=lesson_outcomes["shown"],
+        committed_in_lesson_directions=lesson_outcomes["shown_committed"],
+        tests_elsewhere_after_lessons=lesson_outcomes["else"],
+        committed_elsewhere_after_lessons=lesson_outcomes["else_committed"],
     )
+
+
+def _as_learning(revision: LessonRevision) -> Learning:
+    return Learning("", revision.kind, revision.content, revision.target, revision.mechanism, revision.layer)
 
 
 async def read_session(blackboard_root: Path, log_path: Path, archive: Path | None = None) -> LearningEvaluation:
     """The evaluation of the session whose blackboard is ``blackboard_root``, read as an observer, and its log; with
-    ``archive``, against the live lessons of the pool beside it too."""
+    ``archive``, against the lessons of the pool beside it too: the live ones for what the session missed, and every
+    one, retired ones as well, since a lesson shown then may have been retired since, for what it shown led to."""
 
     snapshot = await LocalBlackboard(blackboard_root, Writer(Role.OBSERVER, STUDY_WRITER)).snapshot()
     log = read_jsonl(log_path)
     if archive is None:
         return evaluate_learnings(snapshot, log)
-    live = LessonPool.beside(TreeArchive(archive)).live()
-    return evaluate_learnings(snapshot, log, {head.lesson_id: (head.session_id, head.content) for head in live})
+    pool = LessonPool.beside(TreeArchive(archive))
+    live = {head.lesson_id: (head.session_id, head.content) for head in pool.live()}
+    every = {head.lesson_id: _as_learning(head) for lesson in pool.lessons().values() for head in lesson.heads}
+    return evaluate_learnings(snapshot, log, live, every)
 
 
 __all__ = [
