@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Clean checkouts of Magpie and InferenceX at the commits the instruction sheet names (design 4.8.1 step 2).
+"""Clean checkouts of Magpie and InferenceX at the commits the instruction sheet names.
 
 The runner never uses the session's checkouts: they are on storage the candidate's author can write. Each commit gets
 its own directory in the runner's cache, fetched by hash and checked out detached, so a directory that exists at the

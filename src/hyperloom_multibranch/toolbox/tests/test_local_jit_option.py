@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 """The shared compiled-code cache of the local toolbox: the directory named, else one below this host's temporary
-directory (design 4.21).
+directory.
 
 What is proved here is the wiring only: which directory the host publishes to and the runner reads. That a cache serves
 a test and is published to is proved by the measure package's own tests, and on a GPU by the toolbox's measured runs.

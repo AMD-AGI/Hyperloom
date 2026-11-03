@@ -5,11 +5,11 @@
 
 Each test submits a ``TestRequest`` to a toolbox built by ``build_local_toolbox`` whose planner is the real
 ``HostedPlanner`` (compile, points, surface check), and reads the result back from the blackboard. Needs SGLang, a model
-directory and an InferenceX checkout; set ``HL_W13_MODEL``, ``HL_W13_INFERENCEX`` and ``HL_W13_OUT`` (an empty
-directory), and optionally ``HL_W13_CARDS`` (default ``6,7``) and ``HL_W13_BACKEND`` (``bypass``, the default, or
+directory and an InferenceX checkout; set ``HL_GPU_MODEL``, ``HL_GPU_INFERENCEX`` and ``HL_GPU_OUT`` (an empty
+directory), and optionally ``HL_GPU_CARDS`` (default ``6,7``) and ``HL_GPU_BACKEND`` (``bypass``, the default, or
 ``magpie``, which needs the pinned Magpie importable by the GPU venv's python). Anywhere else the module is skipped.
 The profile test also needs a TraceLens checkout (``TRACELENS_ROOT``), the agent runtime credentials the TraceLens
-skill route runs on, and ``HL_W13_CARDS`` to be exactly two cards. ``HL_W13_OUT`` must be on a filesystem that accepts
+skill route runs on, and ``HL_GPU_CARDS`` to be exactly two cards. ``HL_GPU_OUT`` must be on a filesystem that accepts
 ``:`` in file names.
 """
 
@@ -58,11 +58,11 @@ from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
 from hyperloom_multibranch.toolbox.tests.helpers import FakeRepo, req
 from hyperloom_multibranch.toolbox.tools.op_shares import DEGRADED_NOTICE
 
-MODEL = os.environ.get("HL_W13_MODEL", "")
-INFERENCEX = os.environ.get("HL_W13_INFERENCEX", "")
-OUT = os.environ.get("HL_W13_OUT", "")
-CARDS = [int(card) for card in os.environ.get("HL_W13_CARDS", "6,7").split(",")]
-BACKEND = os.environ.get("HL_W13_BACKEND", "bypass")
+MODEL = os.environ.get("HL_GPU_MODEL", "")
+INFERENCEX = os.environ.get("HL_GPU_INFERENCEX", "")
+OUT = os.environ.get("HL_GPU_OUT", "")
+CARDS = [int(card) for card in os.environ.get("HL_GPU_CARDS", "6,7").split(",")]
+BACKEND = os.environ.get("HL_GPU_BACKEND", "bypass")
 #: A baseline test always evaluates accuracy. On Magpie that is InferenceX's lm-eval step, which pip-installs a pinned
 #: lm-eval with ``--break-system-packages``, an option the GPU venv's pip refuses: the Magpie sweep is a health test.
 SWEEP_PURPOSE = Purpose.HEALTH if BACKEND == "magpie" else Purpose.BASELINE
@@ -71,7 +71,7 @@ CANONICAL_OPTIONS = {"gpu_type": "mi355x"} if BACKEND == "magpie" else {}
 USES_REAL_GPUS = True  # keep the host's amd-smi and rocm-smi: see hyperloom.measure.tests.gpu_free_host
 pytestmark = pytest.mark.skipif(
     importlib.util.find_spec("sglang") is None or not Path(MODEL).is_dir() or not Path(INFERENCEX, ".git").exists(),
-    reason="needs SGLang, HL_W13_MODEL and HL_W13_INFERENCEX (a git checkout)",
+    reason="needs SGLang, HL_GPU_MODEL and HL_GPU_INFERENCEX (a git checkout)",
 )
 
 LEVELS = (4, 16, 64)
@@ -177,7 +177,7 @@ def _probe(label: str, **fields: object) -> None:
 
 async def test_an_accuracy_test_puts_the_measured_score_in_the_blackboard_result() -> None:
     root = _run_root("accuracy")
-    toolbox, blackboard, *_ = _toolbox(root, "w13-accuracy")
+    toolbox, blackboard, *_ = _toolbox(root, "kinds-accuracy")
     try:
         request = req(kind=TestKind.ACCURACY, purpose=Purpose.BASELINE, accuracy=True, change=RecipeDelta())
         request_id, result, landed = await _submit(toolbox, blackboard, request, root)
@@ -201,7 +201,7 @@ async def test_an_accuracy_test_puts_the_measured_score_in_the_blackboard_result
 
 async def test_a_concurrency_sweep_is_one_server_and_one_round_per_level() -> None:
     root = _run_root("sweep")
-    toolbox, blackboard, *_ = _toolbox(root, "w13-sweep")
+    toolbox, blackboard, *_ = _toolbox(root, "kinds-sweep")
     try:
         request = req(purpose=SWEEP_PURPOSE, change=RecipeDelta(), concurrency=LEVELS)
         request_id, result, landed = await _submit(toolbox, blackboard, request, root)
@@ -234,11 +234,11 @@ def _marker_patch(workdir: Path, marker: Path) -> tuple[bytes, str]:
 
 async def test_a_patched_recipe_goes_through_the_planner_and_is_measured_on_the_rebuilt_framework() -> None:
     root = _run_root("patched")
-    toolbox, blackboard, blobs = _toolbox(root, "w13-patched")
+    toolbox, blackboard, blobs = _toolbox(root, "kinds-patched")
     try:
         marker = root / "marker.txt"
         diff, patched = _marker_patch(root / "patch-repo", marker)
-        patch = put_patch(blobs, "w13-marker.patch", diff)
+        patch = put_patch(blobs, "marker.patch", diff)
         delta = RecipeDelta(components=(ComponentChange("sglang", add_patches=(patch,)),))
         request_id, result, landed = await _submit(toolbox, blackboard, req(change=delta), root)
         inventory = json.loads(next(landed.rglob("farm_inventory.json")).read_text())
@@ -266,8 +266,8 @@ TRACELENS_JOB_SEC = 1800
 MIN_TOTAL_SHARE = 50.0  # percent of the GPU time the (at most 50) kept ops must add up to
 #: The per-op shares come from the ``ops_summary.csv`` TraceLens' perf report writes. The ``report`` route (the tool's
 #: default) runs that report with no agent; ``agent`` runs an agent runtime over it, which needs its credentials; the
-#: ``non-llm`` route writes none, so ``HL_W13_ANALYSIS_ROUTE=non-llm`` shows empty shares.
-ANALYSIS_ROUTE = os.environ.get("HL_W13_ANALYSIS_ROUTE", "report")
+#: ``non-llm`` route writes none, so ``HL_GPU_ANALYSIS_ROUTE=non-llm`` shows empty shares.
+ANALYSIS_ROUTE = os.environ.get("HL_GPU_ANALYSIS_ROUTE", "report")
 
 
 def _tree_bytes(directory: Path) -> int:
@@ -308,11 +308,11 @@ def _assert_profile_landed(session: Path, result: TestResult) -> list[Path]:
 async def test_a_profile_on_two_cards_is_analysed_by_the_real_tracelens_into_op_shares(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    assert len(CARDS) == 2, f"the profile test runs on exactly two cards, HL_W13_CARDS is {CARDS}"
+    assert len(CARDS) == 2, f"the profile test runs on exactly two cards, HL_GPU_CARDS is {CARDS}"
     _require_tracelens()
     monkeypatch.setenv("TP", "2")
     root = _run_root("profile")
-    toolbox, blackboard, _ = _toolbox(root, "w45-profile", tp=2)
+    toolbox, blackboard, _ = _toolbox(root, "kinds-profile", tp=2)
     pointers = _Pointers(blackboard)
     try:
         request = req(kind=TestKind.PROFILE, purpose=Purpose.PROFILE, change=RecipeDelta())

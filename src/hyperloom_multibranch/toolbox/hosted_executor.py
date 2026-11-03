@@ -1,12 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The executor that runs one attempt of a test through the hosted measurement implementation (design 3.7, 4.4, 4.5).
+"""The executor that runs one attempt of a test through the hosted measurement implementation.
 
-``HostedExecutor.run`` turns the accepted request and what acceptance compiled into W6's ``TestCall``, runs it with
-``HostedMeasurementBackend.run_test`` (in a worker thread) and turns the ``TestOutcome`` back into the attempt's
-``TestResult``. It never retries: the same ``task_id`` again is the next attempt, with a fresh sandbox, and
-:class:`~.attempts.AttemptRunner` decides when to ask for it.
+``HostedExecutor.run`` turns the accepted request and what acceptance compiled into the measurement socket's
+``TestCall``, runs it with ``HostedMeasurementBackend.run_test`` (in a worker thread) and turns the ``TestOutcome`` back
+into the attempt's ``TestResult``. It never retries: the same ``task_id`` again is the next attempt, with a fresh
+sandbox, and :class:`~.attempts.AttemptRunner` decides when to ask for it.
 
 A result is reported as succeeded only when the backend's journal says its bundle was verified, archived and was made by
 the sandbox the outcome names. An end that is not a measurement (a rejected sheet or result) is a

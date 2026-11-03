@@ -68,7 +68,7 @@ def test_the_variables_the_build_reads_are_found_in_the_source_that_builds_and_g
 
 
 def test_a_switch_read_only_by_a_call_time_op_is_not_a_build_input(checkout) -> None:
-    """The op picks which module is called; the module is named for what it was asked (design 4.21, the argument)."""
+    """The op picks which module is called; the module is named for what it was asked."""
     assert "AITER_DISABLE_FMHA_OPUS" not in scan_env_names([checkout])
 
 

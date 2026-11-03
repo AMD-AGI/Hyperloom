@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A compiler's index of its files names the directory it was written in: the cache stores it without (design 4.21).
+"""A compiler's index of its files names the directory it was written in: the cache stores it without.
 
 Triton's group file is the real thing here (``triton_cache``), because the point is that what a test wrote in its own
 directory resolves to existing files in the directory of the test that is given it. The refusals are asserted by what they

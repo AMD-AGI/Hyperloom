@@ -419,7 +419,7 @@ async def test_cancelling_a_branchs_tool_jobs_leaves_its_tests_queued_and_runnin
     await rig.toolbox.close()
 
 
-# --- re-verifying a recorded result (L26) -----------------------------------------------------------------------
+# --- re-verifying a recorded result -----------------------------------------------------------------------------
 
 BUNDLE = "a" * 64
 

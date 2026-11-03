@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The real toolbox with the local-sandbox executor: one call builds it (handover 3.3, MB1 on one machine).
+"""The real toolbox with the local-sandbox executor: one call builds it, on one machine.
 
 Every test runs in a fresh local sandbox started from the shipped runner (``hyperloom.measure.local_templates``), is
 measured on cards leased from the card pool, and is accepted only as a signed bundle that verified against the key of
 that sandbox. At most ``8 / TP`` tests run at once on one node.
 
-The shared compiled-code cache (design 4.21) is in ``LocalOptions.jit_store``, else in the directory the
+The shared compiled-code cache is in ``LocalOptions.jit_store``, else in the directory the
 ``HYPERLOOM_JIT_STORE`` environment variable of the host process names, else in :data:`DEFAULT_JIT_STORE` below this
 host's temporary directory (``TMPDIR`` honoured), not beside the session root: that lies on the session's shared storage,
 where a CK module build crawls. Tests read the directory's verified snapshots before their server starts, and what an
@@ -103,7 +103,7 @@ __all__ = [
     "build_local_toolbox",
 ]
 
-#: One node serves at most eight cards, so at most ``8 / TP`` tests run at once (handover 5, item 7).
+#: One node serves at most eight cards, so at most ``8 / TP`` tests run at once.
 MAX_CARDS_PER_NODE = 8
 #: The host environment variable that names the shared compiled-code cache when ``LocalOptions.jit_store`` is not given.
 JIT_STORE_ENV = "HYPERLOOM_JIT_STORE"

@@ -11,7 +11,7 @@ same file (row count and sha256) after both, and each test's signed ``framework_
 session's base. What the write-back did is printed (``PROBE``): whether the server read the variable at all (a server
 that does not has nothing to rewrite) and which files in the test's private copies were rewritten.
 
-Needs what ``test_toolbox_kinds_gpu`` needs (``HL_W13_MODEL``, ``HL_W13_INFERENCEX``, ``HL_W13_OUT``, ``HL_W13_CARDS``)
+Needs what ``test_toolbox_kinds_gpu`` needs (``HL_GPU_MODEL``, ``HL_GPU_INFERENCEX``, ``HL_GPU_OUT``, ``HL_GPU_CARDS``)
 and the image's aiter tables at ``/sgl-workspace``; anywhere else the module is skipped.
 """
 
@@ -79,9 +79,9 @@ def _landed(session: Path, request_id: str) -> Path:
 
 
 async def test_aiter_merging_the_images_table_with_another_leaves_the_images_table_as_it_was() -> None:
-    root = _run_root("w81b")
+    root = _run_root("isolation")
     before = _fingerprint(SHARED)
-    toolbox, _, _ = _toolbox(root, "w81b")
+    toolbox, _, _ = _toolbox(root, "isolation")
     probes = []
     try:
         await toolbox.start()

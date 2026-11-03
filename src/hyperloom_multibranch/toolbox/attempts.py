@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Attempts and reruns of one test (design 4.5), the code the fake and the real executor share.
+"""Attempts and reruns of one test, the code the fake and the real executor share.
 
 An :class:`Executor` runs ONE attempt in a fresh sandbox and returns a ``TestResult`` describing it. This module turns
 attempts into the request's single result:

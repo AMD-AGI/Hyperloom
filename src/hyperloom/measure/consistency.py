@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Check that a hosted measurement measures the same thing as a local one (design 4.4.5 and 12.4 stage 1).
+"""Check that a hosted measurement measures the same thing as a local one.
 
 ``python -m hyperloom.measure.consistency --checklist FILE --config FILE`` runs every test of the checklist twice, one
 after the other: with the local backend on this machine, then with the hosted backend in a fresh sandbox. Both sides are
@@ -92,7 +92,7 @@ LOCAL, HOSTED = "local", "hosted"
 
 @dataclass(frozen=True)
 class Criteria:
-    """The graduation criteria of design 12.4 stage 1 (stage 2 raises ``p90_pct`` to 3.5)."""
+    """The graduation criteria of the check's first stage (a stricter second stage raises ``p90_pct`` to 3.5)."""
 
     median_pct: float = 0.5
     p90_pct: float = 1.5

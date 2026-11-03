@@ -198,7 +198,7 @@ def _check_runtime(spec: MeasurementSpec) -> None:
 
 
 def _check_cards_free(ctx: _Context, visible: list[int]) -> None:
-    """No process holds a visible card yet, and the card's memory is free (design 4.8.1 step 3).
+    """No process holds a visible card yet, and the card's memory is free.
 
     The process list says who holds a card, so it goes first: a card that is held fails as ``foreign_process_on_card``,
     naming the process, and only a card whose memory is taken by something it does not list fails as a start failure.
@@ -212,7 +212,7 @@ def _check_cards_free(ctx: _Context, visible: list[int]) -> None:
 
 def _check_vram_free(ctx: _Context, visible: list[int]) -> None:
     """A visible GPU that still holds memory once the last test's server had time to release it is not free for the
-    test (design 4.8.1 step 3)."""
+    test."""
     busy = hardware.released_gpus(visible)
     if busy is None:
         ctx.notes.append("GPU memory use could not be read; the visible GPUs were not checked for free memory")
@@ -251,7 +251,7 @@ def _preflight(ctx: _Context, spec: MeasurementSpec, visible: list[int]):
 
 
 def _surface_sha256(spec: MeasurementSpec, points: list[Path]) -> str:
-    """The hash of the measurement surface of the YAML the test will execute (design 4.20 step 3).
+    """The hash of the measurement surface of the YAML the test will execute.
 
     The points of a sheet differ only in what the concurrency level decides, so the first speaks for all of them. Under
     Magpie the benchmark script a test executes is Magpie's own copy of its launcher, which the backend puts in the

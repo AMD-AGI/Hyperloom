@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The hosted measurement backend: every test runs in a fresh authoritative sandbox (design 4.4.4).
+"""The hosted measurement backend: every test runs in a fresh authoritative sandbox.
 
 ``HostedMeasurementBackend.run_test(call)`` is the blocking entry point the tool layer calls once per attempt (from
 ``asyncio.to_thread``). It builds the instruction sheet, gets a sandbox from the :class:`~.sandboxes.SandboxPool`,
@@ -160,14 +160,14 @@ class _Events(Protocol):
 
 @dataclass(frozen=True)
 class HostedConfig:
-    """Configuration of the hosted backend; defaults are those of design 4.4.4.
+    """Configuration of the hosted backend, with its defaults.
 
-    ``allow_unsigned`` exists for the table of 4.4.4 but is refused when true: no result is ever accepted without a
+    ``allow_unsigned`` exists so the option is stated, but is refused when true: no result is ever accepted without a
     signature that verified against the key the platform reported for its sandbox. ``rule_pack_digest`` is the digest
     of the rule pack the session reads: a result whose runner did not read a pack with that digest is rejected
     (``rule_pack_mismatch``); ``None`` accepts any pack. ``create_envs`` is the environment every authoritative sandbox is
     created with; the service's sealed runner template must accept those names (``accepted_envs``). ``jit_store`` is the
-    shared compiled-code cache (design 4.21): the compiled files a signed result says its test added are published to it
+    shared compiled-code cache: the compiled files a signed result says its test added are published to it
     after the result is accepted; ``None`` publishes nothing.
     """
 
@@ -814,7 +814,7 @@ class HostedMeasurementBackend:
     # -- verifying an accepted result again -----------------------------------------------------------------------
 
     def reverify(self, request_id: str, recorded: RecordedBundle, output_dir: Path) -> Reverified:
-        """Verify the archived bundle of an accepted result again, from what was journalled at acceptance (L26).
+        """Verify the archived bundle of an accepted result again, from what was journalled at acceptance.
 
         The key, the sandbox and the sheet come from the journal and the saved sheet, never from a live runner, so
         this works after the sandbox is gone. The bundle must verify for the same request, sheet and sandbox and be

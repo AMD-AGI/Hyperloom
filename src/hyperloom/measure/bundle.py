@@ -154,7 +154,7 @@ def verify_bundle(
 
 
 def reverify_record(bundle_dir: Path, expected: BundleExpectation, recorded: RecordedBundle) -> VerifiedBundle:
-    """Check a record book entry against its archived bundle before a decision rests on it (L26).
+    """Check a record book entry against its archived bundle before a decision rests on it.
 
     The record book can be edited by the processes that share its container, so an entry is trusted only after the
     archived bundle verifies for the same request, spec and sandbox *and* the bundle is the one the entry names.

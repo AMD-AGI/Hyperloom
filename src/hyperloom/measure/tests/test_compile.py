@@ -320,17 +320,17 @@ def test_same_recipe_and_change_compile_once(tmp_path, blobs, base):
 
 
 def test_locator_accepts_site_packages_and_refuses_trees_outside_the_image(tmp_path, monkeypatch):
-    site = write_tree(tmp_path / "lib" / "site-packages", {"w5_installed/__init__.py": ""})
-    shared = write_tree(tmp_path / "shared", {"w5_shared/__init__.py": ""})
+    site = write_tree(tmp_path / "lib" / "site-packages", {"site_installed/__init__.py": ""})
+    shared = write_tree(tmp_path / "shared", {"shared_only/__init__.py": ""})
     monkeypatch.syspath_prepend(str(site))
     monkeypatch.syspath_prepend(str(shared))
     try:
-        found = locate_installed_package(ComponentLayout("w5_installed", "w5_installed"))
-        assert found.path == (site / "w5_installed").resolve()
+        found = locate_installed_package(ComponentLayout("site_installed", "site_installed"))
+        assert found.path == (site / "site_installed").resolve()
         with pytest.raises(UnsupportedComponentError, match="neither installed in site-packages"):
-            locate_installed_package(ComponentLayout("w5_shared", "w5_shared"))
+            locate_installed_package(ComponentLayout("shared_only", "shared_only"))
         with pytest.raises(UnsupportedComponentError, match="is not installed"):
-            locate_installed_package(ComponentLayout("w5_absent", "w5_absent"))
+            locate_installed_package(ComponentLayout("absent_pkg", "absent_pkg"))
     finally:
-        for name in ("w5_installed", "w5_shared"):
+        for name in ("site_installed", "shared_only"):
             sys.modules.pop(name, None)

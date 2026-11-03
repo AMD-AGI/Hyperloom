@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Measurement points: the YAML each test is run from, generated from the canonical configuration (design 4.17).
+"""Measurement points: the YAML each test is run from, generated from the canonical configuration.
 
 A point is the canonical measurement configuration with the recipe's launch settings, the concurrency level and the
 ``RUN_EVAL`` switch the request names, rendered by the same function the single-lineage flow materializes with. An
@@ -392,7 +392,7 @@ def accept_measurement(
     canonical: CanonicalMeasurement,
     out_dir: Path,
 ) -> AcceptedMeasurement:
-    """Acceptance steps 2 to 4 (design 4.17): compile, generate the points, check the measurement surface.
+    """Acceptance after the request's own checks: compile, generate the points, check the measurement surface.
 
     ``parent_recipe`` is the recipe of ``request.parent_commit``. Any refusal is a
     :class:`~hyperloom.contracts.recipe.RecipeError`, raised before the request is queued.

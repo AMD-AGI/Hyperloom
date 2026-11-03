@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The key a compiled-code cache is stored under: exactly the inputs that decide what the compiler produces (design 4.21).
+"""The key a compiled-code cache is stored under: exactly the inputs that decide what the compiler produces.
 
 Each kind of cache is keyed by what its own compiler contract leaves uncovered, and nothing else, so two candidates that
 differ only in server arguments, in a framework patch that does not touch the build, or in the environment of the

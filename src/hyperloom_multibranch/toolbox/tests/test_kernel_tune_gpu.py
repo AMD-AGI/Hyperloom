@@ -11,10 +11,10 @@ with the rows-only CSV. What must hold: the job succeeds and held exactly one le
 splitK above 1 may have its relative-norm error within the limit instead) and ``verified`` true; the CSV is accepted by ``put_kernel_artifact(rows_only=true)`` and lays over the image's own default
 table without a repeated shape. What was measured is printed (``PROBE``).
 
-Needs a GPU machine with the image's aiter at ``/sgl-workspace`` and ``kernelforge`` importable, ``HL_W117_MODEL`` (a
-directory with the model's ``config.json``, fp8 blockscale), ``HL_W117_OUT`` (an empty directory) and ``HL_W117_CARD`` (the
-one card the tuner may use; the pool also holds one card that does not exist, which no job ever reaches). Anywhere else
-the module is skipped.
+Needs a GPU machine with the image's aiter at ``/sgl-workspace`` and ``kernelforge`` importable, ``HL_TUNE_MODEL`` (a
+directory with the model's ``config.json``, fp8 blockscale), ``HL_TUNE_OUT`` (an empty directory) and ``HL_TUNE_CARD``
+(the one card the tuner may use; the pool also holds one card that does not exist, which no job ever reaches). Anywhere
+else the module is skipped.
 """
 
 from __future__ import annotations
@@ -48,16 +48,16 @@ from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
 from hyperloom_multibranch.toolbox.tools import JobStatus
 from hyperloom_multibranch.toolbox.tools.tune_rows import CHECK_REL_NORM_ERR, ERR_RATIO_LIMIT
 
-MODEL = os.environ.get("HL_W117_MODEL", "")
-OUT = os.environ.get("HL_W117_OUT", "")
-CARD = int(os.environ.get("HL_W117_CARD", "-1"))
+MODEL = os.environ.get("HL_TUNE_MODEL", "")
+OUT = os.environ.get("HL_TUNE_OUT", "")
+CARD = int(os.environ.get("HL_TUNE_CARD", "-1"))
 DEFAULT_TABLE = Path(DEFAULT_CONFIGS) / "a8w8_blockscale_bpreshuffle_tuned_gemm.csv"
 TIMEOUT_SEC = 3600
 #: The two untuned shapes: the (N, K) of the model's gate_up and o projections, as the real log reports them at M=496.
 UNTUNED = ("M:496, N:5120, K:5120", "M:496, N:34816, K:5120")
 pytestmark = pytest.mark.skipif(
     not (Path(MODEL, "config.json").is_file() and Path(OUT).is_dir() and CARD >= 0 and DEFAULT_TABLE.is_file()),
-    reason="needs HL_W117_MODEL, HL_W117_OUT, HL_W117_CARD and the image's aiter tables",
+    reason="needs HL_TUNE_MODEL, HL_TUNE_OUT, HL_TUNE_CARD and the image's aiter tables",
 )
 
 
@@ -75,7 +75,7 @@ async def test_the_real_tuner_tunes_two_untuned_shapes_on_the_leased_card_and_th
     session.mkdir()
     blackboard = LocalBlackboard(session / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
     box = build_local_toolbox(
-        LocalSession(session, "w117", [CARD, CARD + 1000], tp=1),
+        LocalSession(session, "kernel-tune", [CARD, CARD + 1000], tp=1),
         blackboard,
         AcceptanceSetup(FakeRepo(), _PointPerBranch({}), IMAGE, WorkloadKind.AGENTX),
         spec_context(session, blob_root=str(session / "hosted" / "blobs")),

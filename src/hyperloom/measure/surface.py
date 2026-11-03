@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The measurement surface: the inputs that decide what a test measures (design 4.20).
+"""The measurement surface: the inputs that decide what a test measures.
 
 A specialist runs in the same container as the application and can write to shared storage, so anything that shapes
 the measurement must not come from a place it can change unnoticed: the workload shape, the evaluation task and its

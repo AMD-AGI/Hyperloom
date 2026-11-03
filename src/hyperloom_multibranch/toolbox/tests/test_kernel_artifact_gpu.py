@@ -14,7 +14,7 @@ as the table of the variable while the default test names none; the server's log
 tuned-config lookups; both tests' merge directories private; the shared tables and ``/tmp/aiter_configs`` as they were.
 What was measured is printed (``PROBE``).
 
-Needs what ``test_toolbox_kinds_gpu`` needs, with ``HL_W13_CARDS`` naming two cards, and the image's aiter tables at
+Needs what ``test_toolbox_kinds_gpu`` needs, with ``HL_GPU_CARDS`` naming two cards, and the image's aiter tables at
 ``/sgl-workspace``; anywhere else the module is skipped.
 """
 
@@ -186,8 +186,8 @@ def _facts(stack: Stack, result: TestResult) -> dict[str, Any]:
 
 
 async def test_a_put_table_is_the_table_the_server_of_the_test_reads() -> None:
-    assert len(CARDS) == 2, f"HL_W13_CARDS must name two cards, it is {CARDS}"
-    root = _run_root("w85g")
+    assert len(CARDS) == 2, f"HL_GPU_CARDS must name two cards, it is {CARDS}"
+    root = _run_root("kernel-artifact")
     tables_before, merged_before = tree_files(Path(DEFAULT_CONFIGS)), tree_files(AITER_MERGE_DIR)
     table = tuned_table()
     sha = hashlib.sha256(table.encode()).hexdigest()
@@ -290,7 +290,7 @@ UNREADABLE_TABLE = "M,N,K,libtype,solidx\n4096,4096,4096,torch,0\n"
 
 
 async def test_a_table_aiter_cannot_read_fails_its_test_and_the_log_says_why() -> None:
-    root = _run_root("w85g-unreadable")
+    root = _run_root("kernel-artifact-unreadable")
     async with build_stack(root, _variant(root), baseline_recipe()) as stack:
         s1 = Specialist(stack, "s1")
         put = await s1.call("put_kernel_artifact", kind="gemm", target=TARGET, env=VARIABLE, content=UNREADABLE_TABLE)

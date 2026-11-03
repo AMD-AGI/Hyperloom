@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Make the sheet's YAML the one this sandbox runs (design 4.8.3 step 4)."""
+"""Make the sheet's YAML the one this sandbox runs."""
 
 from __future__ import annotations
 

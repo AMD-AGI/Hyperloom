@@ -38,9 +38,7 @@ def comment_patch_delta(workdir: Path, blobs: LocalBlobStore, original: str) -> 
     """A small patch to the framework: one comment line on top of ``PATCHED_FILE``; it changes nothing it runs."""
     key = f"{COMPONENT_LAYOUTS['sglang'].upstream_prefix}/{PATCHED_FILE}"
     diff = git_patch(workdir, {key: original}, {key: "# hyperloom integration test\n" + original})
-    return RecipeDelta(
-        components=(ComponentChange("sglang", add_patches=(put_patch(blobs, "w15-comment.patch", diff),)),)
-    )
+    return RecipeDelta(components=(ComponentChange("sglang", add_patches=(put_patch(blobs, "comment.patch", diff),)),))
 
 
 def probes(patch: RecipeDelta) -> RoundProbes:

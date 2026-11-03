@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The shared cache of compiled code: an append-only, content-addressed store read with verification (design 4.21).
+"""The shared cache of compiled code: an append-only, content-addressed store read with verification.
 
 Layout of :class:`DirJitStore`::
 

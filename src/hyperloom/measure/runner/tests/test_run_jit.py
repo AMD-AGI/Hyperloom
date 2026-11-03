@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The shared compiled-code cache through the runner, the local backend and the host (design 4.21, H2-09).
+"""The shared compiled-code cache through the runner, the local backend and the host.
 
 Every run here is a whole runner: a signed sheet in, the real ``LocalMeasurementBackend`` with only ``run_grid`` played (by
 a grid that compiles a module into the directory the environment names, the way aiter does when it finds none there), and

@@ -92,7 +92,7 @@ async def local(tmp_path: Path) -> AsyncIterator[Local]:
     tracelens = _Analysis("tracelens")
     toolbox = _toolbox(tmp_path, blackboard, repo, tools=[tracelens])
     await toolbox.start()
-    server = McpServer(McpServerConfig(host_token=secrets.token_hex(16)), campaign="w38")
+    server = McpServer(McpServerConfig(host_token=secrets.token_hex(16)), campaign="analysis")
     register_specialist_tools(
         server,
         toolbox=toolbox,

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""One multi-branch round as the multi-branch design describes it (6.1 one test, 7.3 MB1 acceptance), scripted.
+"""One multi-branch round end to end (one test, then the acceptance of a round), scripted.
 
 The specialists' decisions are scripted (no model): which change to try, when to ask for a retest. Everything they
 call is real: the MCP service and its tokens, the toolbox, the blackboard, the experiment repository, the rule gate.

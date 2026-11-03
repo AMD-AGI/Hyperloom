@@ -55,7 +55,7 @@ for number, line in enumerate(hip.read_text().splitlines() if hip.exists() else 
         print(f"{pathlib.Path.cwd()}/src/act.hip:{number}:2: error: {line[7:]}")
         sys.exit(1)
 if "#noisy" in src:
-    print("src/kernel.c:3:2: error: W178 noisy failure")
+    print("src/kernel.c:3:2: error: noisy failure")
     print("ninja: build stopped " * 500)
     sys.stderr.write("Traceback (most recent call last) " * 500)
     sys.exit(1)

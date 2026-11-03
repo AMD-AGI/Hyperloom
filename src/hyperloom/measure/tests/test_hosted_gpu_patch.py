@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""MB0 on a GPU machine: one hosted test in a fresh local sandbox, with a real framework patch, from the recipe.
+"""One hosted test on a GPU machine, in a fresh local sandbox, with a real framework patch, from the recipe.
 
 Needs an image with SGLang installed, a model directory and a git checkout of InferenceX; on any other machine the
-module is skipped, so a pass in a log means a real server ran. Set ``HL_MB0_MODEL`` (the model directory) and
-``HL_MB0_INFERENCEX`` (a git repository of InferenceX whose HEAD is the commit to measure with); the test uses card 0.
+module is skipped, so a pass in a log means a real server ran. Set ``HL_HOSTED_MODEL`` (the model directory) and
+``HL_HOSTED_INFERENCEX`` (a git repository of InferenceX whose HEAD is the commit to measure with); the test uses
+card 0.
 """
 
 from __future__ import annotations
@@ -32,16 +33,16 @@ from hyperloom.measure.local_templates import local_runner_template
 from hyperloom.measure.tests._recipes import IMAGE, git_patch, put_patch, recipe_with
 from hyperloom.measure.tests.hosted_fixtures import make_call, make_rig
 
-MODEL = os.environ.get("HL_MB0_MODEL", "")
-INFERENCEX = os.environ.get("HL_MB0_INFERENCEX", "")
+MODEL = os.environ.get("HL_HOSTED_MODEL", "")
+INFERENCEX = os.environ.get("HL_HOSTED_INFERENCEX", "")
 USES_REAL_GPUS = True  # keep the host's amd-smi and rocm-smi: see hyperloom.measure.tests.gpu_free_host
 pytestmark = pytest.mark.skipif(
     importlib.util.find_spec("sglang") is None or not Path(MODEL).is_dir() or not Path(INFERENCEX, ".git").exists(),
-    reason="needs SGLang, HL_MB0_MODEL and HL_MB0_INFERENCEX (a git checkout)",
+    reason="needs SGLang, HL_HOSTED_MODEL and HL_HOSTED_INFERENCEX (a git checkout)",
 )
 
 TARGET = "launch_server.py"
-MARKER_ENV = "HL_MB0_MARKER"
+MARKER_ENV = "HL_HOSTED_MARKER"
 MARKER_CODE = (
     "import os as _hl_os\n"
     f"_hl_marker = _hl_os.environ.get({MARKER_ENV!r})\n"
@@ -76,7 +77,7 @@ def _compile_with_marker(blobs: LocalBlobStore, workdir: Path):
     original = (locate_installed_package(layout).path / TARGET).read_text()
     key = f"{layout.upstream_prefix}/{TARGET}"
     patch = git_patch(workdir, {key: original}, {key: MARKER_CODE + original})
-    recipe = recipe_with((put_patch(blobs, "mb0-marker.patch", patch),))
+    recipe = recipe_with((put_patch(blobs, "marker.patch", patch),))
     return EnvironmentCompiler(blobs, IMAGE).compile(recipe, RecipeDelta())
 
 
@@ -102,14 +103,18 @@ def test_a_patched_recipe_is_rebuilt_measured_signed_verified_and_archived(tmp_p
         expected = {e.path: hashlib.sha256(rig.config.spec.blobs.get(e.blob)).hexdigest() for e in root.entries}
         marker = tmp_path / "marker.txt"
         call = make_call(
-            tmp_path, "mb0-1", point=_point(tmp_path / "point.yaml", marker), timeout_sec=1800, environment=environment
+            tmp_path,
+            "hosted-1",
+            point=_point(tmp_path / "point.yaml", marker),
+            timeout_sec=1800,
+            environment=environment,
         )
         outcome = rig.backend.run_test(call)
         assert outcome.returncode == 0, outcome.stderr
-        record = rig.backend.journal.latest("mb0-1")
+        record = rig.backend.journal.latest("hosted-1")
         assert record.state == STATE_FINISHED and record.extra["verified"] is True
         assert record.extra["verdict"] == "accepted"
-        archived = rig.archive.bundle_dir("mb0-1", record.extra["manifest_sha256"])
+        archived = rig.archive.bundle_dir("hosted-1", record.extra["manifest_sha256"])
         assert record.extra["archive"] == str(archived)
         assert (archived / "manifest.json").is_file() and (archived / "manifest.sig").is_file()
         # The server imported the rebuilt file, not the image's.

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""What a recorded result must still say once it is derived again from its verified bundle (design 4.4, L26).
+"""What a recorded result must still say once it is derived again from its verified bundle.
 
 Verifying a bundle proves the recorded hashes name an authentic bundle; it does not prove that the recorded numbers are
 the bundle's. A blackboard entry whose throughput was edited and whose hashes were left alone verifies perfectly. So the

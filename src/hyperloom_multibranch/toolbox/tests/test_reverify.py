@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A recorded result is verified again from its archived bundle and what acceptance journalled (L26)."""
+"""A recorded result is verified again from its archived bundle and what acceptance journalled."""
 
 from __future__ import annotations
 

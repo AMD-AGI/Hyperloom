@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The start-up script of the sealed measurement runner template (design 4.8.1).
+"""The start-up script of the sealed measurement runner template.
 
 A hosted runner is not started from a copy of Hyperloom that the image ships. The template's start command is this
 script. It prepares the runner's software, then replaces itself with ``python -m hyperloom.measure.runner run``, the

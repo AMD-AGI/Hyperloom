@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""List the files a test left in the output directory, with their sizes and hashes (design 4.8.3 step 6)."""
+"""List the files a test left in the output directory, with their sizes and hashes."""
 
 from __future__ import annotations
 

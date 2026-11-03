@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Resume the consistency check across machine losses (design 12.4 stage 1, 4.4.5).
+"""Resume the consistency check across machine losses.
 
 ``python -m hyperloom.measure.consistency_resume --checklist .. --config .. --resume FILE`` (the arguments of
 ``hyperloom.measure.consistency``, plus the ones below) keeps one line per finished unit in ``FILE``, a

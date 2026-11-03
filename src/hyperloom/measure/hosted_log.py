@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The hosted backend's own journal of tests in flight: ``<session>/hosted/measurements.jsonl`` (design 4.4.4).
+"""The hosted backend's own journal of tests in flight: ``<session>/hosted/measurements.jsonl``.
 
 A line is appended, and flushed to disk, before the backend depends on what it says: ``submitted`` before anything is
 written into the sandbox, ``sent`` once the sheet and the ``READY`` marker are in, ``finished`` once the outcome is

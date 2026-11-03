@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The notes a test's use of the compiled-code cache leaves in its result, short enough that none is lost (design 4.21).
+"""The notes a test's use of the compiled-code cache leaves in its result, short enough that none is lost.
 
 The runner keeps a bounded message for the application, and a compiler that rewrites a hundred cached files must not push
 out the note that says the cache failed verification. So a note is one of three kinds, and they come out in this order:

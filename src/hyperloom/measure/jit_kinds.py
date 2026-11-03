@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The kinds of compiled-code cache a test can use, and which files of each are ever stored (design 4.21).
+"""The kinds of compiled-code cache a test can use, and which files of each are ever stored.
 
 A kind names the variable that moves one compiler's cache into a directory of the test's own, where inside that
 directory the compiled products are, and the closed set of file names that may enter the shared cache. Everything else a

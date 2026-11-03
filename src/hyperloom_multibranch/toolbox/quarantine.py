@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The node quarantine list, kept in the blackboard's ``NodeHealth`` and read back when the toolbox starts (design 4.5).
+"""The node quarantine list, kept in the blackboard's ``NodeHealth`` and read back when the toolbox starts.
 
 A node enters the list when an attempt on it fails with an infrastructure failure the executor classified, or when a
 second unclear failure that did not reproduce on its rerun happens on it within the session (the toolbox's lifetime;
 the count is not persisted). A single non-reproducing unclear failure does not quarantine a node. Quarantine only widens
 ``avoid_nodes``; it never blocks a test: on a single node, avoiding it still creates the sandbox there and the result is
-marked same-node (design 4.9.3), so a toolbox with one node counts the failures of its node (:meth:`count_failure`) and
+marked same-node, so a toolbox with one node counts the failures of its node (:meth:`count_failure`) and
 never quarantines it.
 
 A failure that says nothing about its node (``attempts.NODE_BLAMELESS_INFRA_REASONS``) never quarantines it, and a node

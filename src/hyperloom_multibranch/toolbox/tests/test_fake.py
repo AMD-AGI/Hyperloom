@@ -423,7 +423,7 @@ async def test_a_fleet_with_every_node_quarantined_ends_in_measurement_failed() 
     result = await _run_one(box)
     assert result.validity is Validity.MEASUREMENT_FAILED
     assert box.quarantined == {"a", "b"}
-    # quarantine only widens avoid_nodes (design 4.9.3): the last attempt runs on a node it was to avoid
+    # quarantine only widens avoid_nodes: the last attempt runs on a node it was to avoid
     assert result.attempts[-1].sandbox.same_node is True
 
 

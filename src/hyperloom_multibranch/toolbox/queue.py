@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The toolbox's queue: five priorities, a per-branch K, a global limit and backpressure (design 4.17).
+"""The toolbox's queue: five priorities, a per-branch K, a global limit and backpressure.
 
 The queue is plain in-memory state with no I/O, so the fake executor and the real one share it. Confirm-retests,
 reproduction checks and session measurements do not count against their branch's K (otherwise K exploration tests
@@ -25,7 +25,7 @@ from hyperloom_multibranch.contracts.toolbox import Backpressure, QueueState, Re
 
 _LOWEST_PRIORITY = 4
 
-#: Priority of a request that names none, by purpose (design 4.17). Baseline, health and final are the scheduler's to
+#: Priority of a request that names none, by purpose. Baseline, health and final are the scheduler's to
 #: give through QueuePolicy.priority_override; until it does they take the fallbacks below.
 DEFAULT_PRIORITY: Mapping[Purpose, int] = {
     Purpose.CONFIRM: 0,
@@ -50,7 +50,7 @@ class QueuePolicy:
     """What the scheduler sets: tests a branch runs at once, tests in flight overall, a priority per purpose.
 
     ``per_branch_k`` is the default K, an int; ``branch_k`` overrides it per branch. A mapping given as
-    ``per_branch_k`` is the board draft's form: its ``"*"`` entry is the default, the rest are overrides.
+    ``per_branch_k`` is also read, as a K per branch: its ``"*"`` entry is the default, the rest are overrides.
 
     priority_override maps a purpose's value to a priority and applies to requests that name none.
     max_queued_per_branch is the backpressure limit; None means DEFAULT_QUEUE_FACTOR times K.
@@ -83,7 +83,7 @@ class QueuePolicy:
         ):
             raise ValueError(f"open_branches must be a frozenset of branch ids, got {self.open_branches!r}")
         if isinstance(self.per_branch_k, Mapping):
-            # The board draft: a K per branch, the default under ``DEFAULT_K_KEY``.
+            # A K per branch, the default under ``DEFAULT_K_KEY``.
             overrides = {k: v for k, v in self.per_branch_k.items() if k != DEFAULT_K_KEY}
             default = self.per_branch_k.get(DEFAULT_K_KEY, DEFAULT_K)
             object.__setattr__(self, "per_branch_k", default)

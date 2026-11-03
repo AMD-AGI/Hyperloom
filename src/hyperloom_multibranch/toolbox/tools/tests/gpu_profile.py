@@ -3,8 +3,8 @@
 
 """GPU check of the profile tool: one real profiling round through the tool runner, result read from the inbox push.
 
-Run with ``HL_W11_PROFILE=1`` on a card the caller owns, with ``HL_W11_MODEL`` a model directory and
-``HL_W11_INFERENCEX`` an InferenceX checkout.
+Run with ``HL_PROFILE_TEST=1`` on a card the caller owns, with ``HL_PROFILE_MODEL`` a model directory and
+``HL_PROFILE_INFERENCEX`` an InferenceX checkout.
 """
 
 from __future__ import annotations
@@ -18,11 +18,11 @@ import pytest
 from hyperloom_multibranch.toolbox.tools import JobStatus, ToolJobs, ToolRequest, profile_tool
 from hyperloom_multibranch.toolbox.tools.tests.sinks import RecordingSink
 
-MODEL = os.environ.get("HL_W11_MODEL", "")
-INFERENCEX = os.environ.get("HL_W11_INFERENCEX", "")
+MODEL = os.environ.get("HL_PROFILE_MODEL", "")
+INFERENCEX = os.environ.get("HL_PROFILE_INFERENCEX", "")
 pytestmark = pytest.mark.skipif(
-    os.environ.get("HL_W11_PROFILE") != "1" or not MODEL or not INFERENCEX,
-    reason="GPU run; set HL_W11_PROFILE=1, HL_W11_MODEL and HL_W11_INFERENCEX",
+    os.environ.get("HL_PROFILE_TEST") != "1" or not MODEL or not INFERENCEX,
+    reason="GPU run; set HL_PROFILE_TEST=1, HL_PROFILE_MODEL and HL_PROFILE_INFERENCEX",
 )
 
 
@@ -39,7 +39,7 @@ def _env(monkeypatch, tmp_path):
 
 
 async def test_profile_round_reaches_the_inbox(tmp_path: Path) -> None:
-    out = Path(os.environ.get("HL_W11_OUT", str(tmp_path / "out")))
+    out = Path(os.environ.get("HL_PROFILE_OUT", str(tmp_path / "out")))
     sink = RecordingSink()
     runner = ToolJobs([profile_tool()], sink, out / "results", push_delay_seconds=0)
     params = {

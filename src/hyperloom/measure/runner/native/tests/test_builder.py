@@ -77,9 +77,9 @@ def test_a_compile_error_is_stored_signed_and_answered_again_without_a_rebuild(b
 def test_the_compilers_error_is_kept_when_later_output_buries_it(bench: Bench) -> None:
     record = _build(bench, bench.patch({KERNEL: "#noisy\n"})).record
 
-    assert record.failure == "compile_error: the compile exited 1: src/kernel.c:3:2: error: W178 noisy failure"
+    assert record.failure == "compile_error: the compile exited 1: src/kernel.c:3:2: error: noisy failure"
     log = (bench.store.entry_dir(record.inputs) / LOG_NAME).read_text()
-    assert log.startswith("src/kernel.c:3:2: error: W178 noisy failure\n")
+    assert log.startswith("src/kernel.c:3:2: error: noisy failure\n")
 
 
 ACT_CU, ACT_HIP = "native/src/act.cu", "native/src/act.hip"
@@ -89,8 +89,8 @@ HIP_INCLUDE = '#include "hip/hip_runtime.h"\n'
 @pytest.mark.parametrize(
     ("cu", "named"),
     [
-        ("int a;\n#error W184 broken\n", "src/act.cu:2:2 (src/act.hip:4:2): error: W184 broken"),
-        (f"{HIP_INCLUDE}#error W184 broken\n", "src/act.cu:2:2 (src/act.hip:3:2): error: W184 broken"),
+        ("int a;\n#error act broken\n", "src/act.cu:2:2 (src/act.hip:4:2): error: act broken"),
+        (f"{HIP_INCLUDE}#error act broken\n", "src/act.cu:2:2 (src/act.hip:3:2): error: act broken"),
     ],
 )
 def test_an_error_in_the_hip_file_hipify_generated_names_the_patched_cu(bench: Bench, cu: str, named: str) -> None:
@@ -101,16 +101,16 @@ def test_an_error_in_the_hip_file_hipify_generated_names_the_patched_cu(bench: B
 
 
 def test_an_error_in_a_hip_file_the_upstream_tree_holds_names_that_file(bench: Bench) -> None:
-    (bench.upstream / ACT_HIP).write_text("int a;\n#error W184 tracked\n")
+    (bench.upstream / ACT_HIP).write_text("int a;\n#error act tracked\n")
     record = _build(bench, bench.patch({ACT_CU: "int a;\n"})).record
 
-    assert record.failure == "compile_error: the compile exited 1: src/act.hip:2:2: error: W184 tracked"
+    assert record.failure == "compile_error: the compile exited 1: src/act.hip:2:2: error: act tracked"
 
 
 def test_an_error_in_a_hip_file_the_stack_adds_names_that_file(bench: Bench) -> None:
-    record = _build(bench, bench.patch({ACT_CU: "int a;\n", ACT_HIP: "#error W184 laid\n"})).record
+    record = _build(bench, bench.patch({ACT_CU: "int a;\n", ACT_HIP: "#error act laid\n"})).record
 
-    assert record.failure == "compile_error: the compile exited 1: src/act.hip:1:2: error: W184 laid"
+    assert record.failure == "compile_error: the compile exited 1: src/act.hip:1:2: error: act laid"
 
 
 def test_an_error_in_a_generated_hip_file_with_no_cu_beside_it_names_that_file(bench: Bench) -> None:

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""What the machine says about its GPUs: model, power cap, partition mode, ECC counts, memory in use (design 4.8.2).
+"""What the machine says about its GPUs: model, power cap, partition mode, ECC counts, memory in use.
 
 Everything is read through ``amd-smi`` and ``rocm-smi`` and is ``None`` when it cannot be read; a value that could not
 be read is never filled in, and a check that needs it is not made (the runner records that it was not).

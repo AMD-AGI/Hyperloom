@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Turn a :class:`~hyperloom.measure.socket.TestCall` into the instruction sheet a runner executes (design 4.4.4 step 2).
+"""Turn a :class:`~hyperloom.measure.socket.TestCall` into the instruction sheet a runner executes.
 
 The sheet carries everything the runner needs and nothing it should not have: the materialised YAML with shared-storage
 paths replaced by attachment placeholders, a whitelist of process variables (never a credential), the platform variables

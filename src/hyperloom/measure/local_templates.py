@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The local sandbox template that starts the measurement runner (the local stage of design 12.4).
+"""The local sandbox template that starts the measurement runner, for hosted tests run on one machine.
 
 The local sandbox provider maps no paths: a process inside it gets ``HYPERLOOM_SANDBOX_ROOT`` and finds ``in/``,
 ``out/`` and ``work/`` under it. The runner's defaults are global (``/in``, ``/out``, ``/scratch``), so concurrent

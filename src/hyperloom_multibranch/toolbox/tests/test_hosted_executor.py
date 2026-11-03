@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The hosted executor over W7's backend, the local sandbox provider and the fake runner, under the real toolbox."""
+"""The hosted executor over the hosted backend, the local sandbox provider and the fake runner, in the real toolbox."""
 
 from __future__ import annotations
 

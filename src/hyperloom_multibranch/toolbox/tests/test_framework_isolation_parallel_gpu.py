@@ -11,7 +11,7 @@ first eight is withdrawn while it runs. What must hold: eight disjoint cards and
 sandbox, the shared tables and ``/tmp/aiter_configs`` as they were, the withdrawn test's card taken by the ninth test
 within seconds, and every other test a valid measurement. What was measured is printed (``PROBE``).
 
-Needs what ``test_toolbox_kinds_gpu`` needs, with ``HL_W13_CARDS`` naming eight cards, and the image's aiter tables at
+Needs what ``test_toolbox_kinds_gpu`` needs, with ``HL_GPU_CARDS`` naming eight cards, and the image's aiter tables at
 ``/sgl-workspace``; anywhere else the module is skipped.
 """
 
@@ -160,10 +160,10 @@ def _facts(root: Path, result: TestResult) -> dict[str, object]:
 
 
 async def test_eight_tests_at_once_use_disjoint_cards_and_ports_and_read_their_own_tables() -> None:
-    assert len(CARDS) == 8, f"HL_W13_CARDS must name eight cards, it is {CARDS}"
-    root = _run_root("w86")
+    assert len(CARDS) == 8, f"HL_GPU_CARDS must name eight cards, it is {CARDS}"
+    root = _run_root("isolation-parallel")
     tables_before, merged_before = tree_files(Path(DEFAULT_CONFIGS)), tree_files(AITER_MERGE_DIR)
-    toolbox, _, _ = _toolbox(root, "w86", timeout_sec=3000)
+    toolbox, _, _ = _toolbox(root, "isolation-parallel", timeout_sec=3000)
     results: dict[int, TestResult] = {}
     try:
         await toolbox.start()

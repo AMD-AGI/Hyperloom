@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The real toolbox: acceptance, queue, attempts, quarantine and results into the blackboard (design 4.5, 4.17).
+"""The real toolbox: acceptance, queue, attempts, quarantine and results into the blackboard.
 
 ``submit_test`` accepts synchronously: when it returns the request is in the submit log, in the blackboard (its request
 row, with the claim handed over) and in the queue. Execution is behind the :class:`~.attempts.Executor` seam, so the
@@ -374,7 +374,7 @@ class RealToolbox:
         raise TestWithdrawn(request_id, str(entry.outcome["withdrawal"]))
 
     async def reverify(self, request_id: str) -> None:
-        """Check the blackboard's result of ``request_id`` against the evidence of the attempt that made it (L26).
+        """Check the blackboard's result of ``request_id`` against the evidence of the attempt that made it.
 
         Fails closed: raises :class:`ResultUnverified` when there is no record, no result or no manifest hash to check
         it by; otherwise what the executor raises.

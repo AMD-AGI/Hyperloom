@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""One multi-branch round across the modules, on CPU (design 6.1 and 7.3, the toolbox side of MB1).
+"""One multi-branch round across the modules, on CPU (the toolbox side of an end-to-end round).
 
 Real: the toolbox (``build_local_toolbox``: queue, acceptance, attempts, the local-sandbox executor, signed bundles
 verified against each sandbox's key), the planner (``HostedPlanner``: environment compile with a real patch, point
@@ -10,8 +10,8 @@ rule gate (``RuleGate`` and the InferenceX comparison) and the MCP service with 
 
 Faked, and nothing else: the specialists' decisions (a script instead of a model) and the runner inside each sandbox
 (``hyperloom.measure.tests.fake_runner``, which reports the numbers the planner wrapper below puts into the point), and
-the framework package the patch is applied to (a small tree, because no SGLang is installed on CI). MB1 has the real
-runner and framework; the GPU variant (``test_integration_gpu.py``) runs them.
+the framework package the patch is applied to (a small tree, because no SGLang is installed on CI). A GPU round has the
+real runner and framework; the GPU variant (``test_integration_gpu.py``) runs them.
 """
 
 from __future__ import annotations

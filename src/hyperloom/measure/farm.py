@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Rebuild the framework the candidate changed, next to the image's, and put it first on the import path (design 4.8.3).
+"""Rebuild the framework the candidate changed, next to the image's, and put it first on the import path.
 
 The farm mirrors the installed package: a directory no entry touches is one symlink to the image's directory, a
 directory an entry touches is real, its untouched files are symlinks, an ``upsert`` is a copied file and a ``delete`` is

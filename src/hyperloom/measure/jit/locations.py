@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Cache files that name the directory they were written in: stored without it, given the reader's own again (design 4.21).
+"""Cache files that name the directory they were written in: stored without it, given the reader's own again.
 
 Triton lists the files of a compiled kernel in ``<hash>/__grp__<kernel>.json``. The file cache manager of Triton 3.0 and
 3.2 writes ``{"child_paths": {name: absolute path}}`` and treats a listed path that does not exist as absent. Every test

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The pool of authoritative sandboxes the hosted measurement backend measures in (design 4.4.6).
+"""The pool of authoritative sandboxes the hosted measurement backend measures in.
 
 One test gets one fresh sandbox. :class:`SandboxPool` creates it through the ``sandbox`` socket with the ``measurement``
 key, never lets more tests run at once than ``max_parallel_tests``, hands back what the platform said about the sandbox
