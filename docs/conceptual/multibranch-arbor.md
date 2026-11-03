@@ -12,10 +12,11 @@ In component mode, Hyperloom's multi-branch mode (MB) runs Arbor as an autonomou
 
 This page says which side runs each step of an MB session, and what passes between the two.
 - **As of 2026-11-01:**
-  - Hyperloom `jiaweche/Hyperloom` `arbor-adapter-v2` `8f59f12db` or later, merging into `multibranch-dev`;
+  - Hyperloom `multibranch-dev` at `8f59f12db` or later;
   - Arbor `main` `85f01cc`.
-- **Arbor's copy of this page:** [`docs/who-runs-what.md`](https://github.com/AMD-AGI/Arbor/blob/main/docs/who-runs-what.md).
-- **The contract key by key, from Arbor's side:** [`docs/hosts.md`](https://github.com/AMD-AGI/Arbor/blob/main/docs/hosts.md).
+- **Arbor's copy of this page:** [`docs/who-runs-what.md`](../../src/hyperloom_arbor/docs/who-runs-what.md), in the
+  vendored copy.
+- **The contract key by key, from Arbor's side:** [`docs/hosts.md`](../../src/hyperloom_arbor/docs/hosts.md).
 - **The design and its decisions:** [`docs/component-mode.md`](https://github.com/AMD-AGI/Arbor/blob/main/docs/component-mode.md).
 
 In the Hyperloom paths below, `src/hyperloom_multibranch/` is left out. Arbor's paths are in the Arbor repository.
@@ -169,7 +170,7 @@ before the Arbor branches open </how-to/multibranch-review-gate>`.
   `1fa2069` or later wait at Arbor's own gate, holding their leases.
 - **No merge across operating points:** each point's session ends with its own recipe. Nothing combines them.
 - **A dropped flag of the resolved launch:** a KEEP that runs without a flag the `--agent-launch` file sets now
-  removes it, and the recipe keeps the removal (`LaunchConfig.remove_args`, `arbor-adapter-v2` `b9d65167d` and
+  removes it, and the recipe keeps the removal (`LaunchConfig.remove_args`, `b9d65167d` and
   after). Only on AgentX, though: there Magpie applies it; on InferenceX such a removal is refused.
 - **No profile on CUDA-graph runs:** a branch's `component.profile` takes op shares only. On a run where TraceLens
   degraded, the branches get none, though the dossier pass got kernel shares.
