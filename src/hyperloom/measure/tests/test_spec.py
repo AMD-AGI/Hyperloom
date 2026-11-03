@@ -156,7 +156,7 @@ def test_a_build_that_does_not_name_exactly_one_runtime_root_is_refused(change: 
 
 
 def test_a_package_root_may_name_the_build_of_its_jit_modules() -> None:
-    """#125 stage 2b: aiter's package root names the CPU build of the modules its patch touches; which package may have
+    """aiter's package root names the CPU build of the modules its patch touches; which package may have
     one is the runner's to say."""
     document = _edit(lambda d: (_built(d), d["environment"]["roots"][0].update(kind="package")))
 

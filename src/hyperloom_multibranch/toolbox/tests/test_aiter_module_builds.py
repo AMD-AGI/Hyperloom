@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""#125 stage 2b through acceptance and the build queue, with the stand-in aiter: a stack that touches one of aiter's
-prebuilt modules needs a CPU build of it, waits for it as ``pending_build`` without a card, and once it is ready the
-sheet names it; a stack whose ``csrc`` does not compile ends as the candidate's ``compile_error`` before any card is
-taken. A host that configures no build store compiles as before (2a): the server builds the module on its card."""
+"""The CPU build of touched modules through acceptance and the build queue, with the stand-in aiter: a stack that
+touches one of aiter's prebuilt modules needs a CPU build of it, waits for it as ``pending_build`` without a card,
+and once it is ready the sheet names it; a stack whose ``csrc`` does not compile ends as the candidate's
+``compile_error`` before any card is taken. A host that configures no build store compiles as before: the server
+builds the module on its card."""
 
 from __future__ import annotations
 

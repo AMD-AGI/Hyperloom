@@ -12,8 +12,8 @@ table_modules`) therefore compiles it at the first prefill of every fresh contai
 them at the first prefill (sized as :func:`~hyperloom.measure.runner.rebuild_watchdog.rebuild_watchdog_sec`), so a launch
 the toolbox does not make can set ``--watchdog-timeout`` with one call. :func:`prewarm` removes the cost instead: it builds
 the ones aiter can build by name (:func:`~hyperloom.measure.runner.native.aiter_modules.buildable_modules`) with the CPU
-build runner of #125 stage 2b, from the image's own tree with no root changed, and installs each into the image's
-``aiter/jit`` with ``os.replace``, then records it in :data:`PREWARM_MANIFEST` beside them.
+build runner of aiter's touched modules, from the image's own tree with no root changed, and installs each into the
+image's ``aiter/jit`` with ``os.replace``, then records it in :data:`PREWARM_MANIFEST` beside them.
 
 This writes into the image deliberately, and that is safe: no candidate's code or table takes part (the farm is laid from
 the image's package and meta directory alone, and the build drops every ``AITER_CONFIG_*``, so aiter resolves the image's
@@ -208,8 +208,9 @@ def isolated_builder(
     factory: str = AITER_RECIPE_FACTORY,
     environ: Mapping[str, str] | None = None,
 ) -> ModuleBuilder:
-    """The CPU build runner of #125 stage 2b (:class:`~hyperloom.measure.runner.native.isolated.IsolatedBuilds`) over a farm
-    laid from the image's aiter with no file changed; ``machine.python`` must find the package being prewarmed."""
+    """The CPU build runner of aiter's touched modules
+    (:class:`~hyperloom.measure.runner.native.isolated.IsolatedBuilds`) over a farm laid from the image's aiter with no
+    file changed; ``machine.python`` must find the package being prewarmed."""
 
     def build(package: Path, modules: frozenset[str], scratch: Path) -> Mapping[str, Path]:
         located = locate_package(AITER_PACKAGE, machine.python, scratch)

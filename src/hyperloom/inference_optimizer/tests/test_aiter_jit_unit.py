@@ -1342,7 +1342,7 @@ def test_a_table_that_outran_its_modules_moves_only_the_modules_generated_from_i
 
 
 def test_coverage_reads_only_the_rows_aiter_compiles_for_the_targets(tmp_path):
-    """#169: the image's bpreshuffle modules lacked only kernels of rows tuned for gfx942, and were moved aside."""
+    """The image's bpreshuffle modules lacked only kernels of rows tuned for gfx942, and were moved aside."""
     jit = tmp_path / "jit"
     jit.mkdir()
     (jit / "module_gemm_a8w8_bpreshuffle.so").write_bytes(b"\x7fELF a8w8_bpreshuffle_card")

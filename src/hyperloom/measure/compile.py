@@ -605,7 +605,7 @@ def refuse_costly_rebuild(
     The modules are the prebuilt ones the patch leaves stale (:func:`~hyperloom.measure.jit.modules.touched_modules`),
     with the ones generated from a tuned table that the patch (below ``configs``) or one of ``table_variables`` (the
     ``AITER_CONFIG_*`` the test sets) may change; the first test of the stack builds them on its card, when its server
-    calls them. With ``modules`` (a host that builds natively, #125 stage 2b) a CPU build makes the ones it can before the
+    calls them. With ``modules`` (a host that builds natively) a CPU build makes the ones it can before the
     test, and only the rest are built on the card; that build, returned, is refused when it would not fit its own time.
     A module generated from a table the test's variables name is left to the card: only its server reads those tables.
     """

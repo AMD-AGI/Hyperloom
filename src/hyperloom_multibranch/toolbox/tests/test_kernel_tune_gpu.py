@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""``kernel_tune`` runs Forge's real tuner on one real card for shapes a real server log reports untuned (W117).
+"""``kernel_tune`` runs Forge's real tuner on one real card for shapes a real server log reports untuned.
 
 The toolbox is the real local one; the test is landed output with the lines of a real server log (Qwen3-14B-FP8 on gfx950:
 two dense blockscale GEMMs that missed their tuned table), the tool leases its card from the toolbox's pool, runs

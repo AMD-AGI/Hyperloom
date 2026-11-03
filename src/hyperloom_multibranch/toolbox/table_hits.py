@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""How many rows of each kernel table a test loaded its server actually used, and what that means (#109 item 4).
+"""How many rows of each kernel table a test loaded its server actually used, and what that means.
 
 A tuned table that changes nothing a test ran gives a flat result, and a flat result looks the same whether the table
 was read and did not matter or was never read. The result says which: for each kernel table the test's recipe loads,

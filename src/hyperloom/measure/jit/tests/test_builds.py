@@ -138,7 +138,7 @@ def test_a_build_that_finished_has_no_failure_and_an_open_record_at_the_end_of_t
     assert scan_builds([_log(tmp_path, cut)]).failed == {}, "a record that never closed is not a finished account"
 
 
-# The lines a real server printed when CUDA-graph capture hit a kernel the loaded module lacks (2026-10-25, mb8).
+# The lines a real server printed when CUDA-graph capture hit a kernel the loaded module lacks (2026-10-25).
 REGISTRY_MISS = (
     "RuntimeError: gemm_a8w8_blockscale_bpreshuffle kernel 'a8w8_blockscale_bpreshuffle_1x128x128_256x64x128x128_"
     "intrawave_v1' is not present in the compiled registry. The tuned CSV references a kernel that was not built into "

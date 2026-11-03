@@ -74,9 +74,9 @@ _JIT_DIR = "jit"
 #: 66 s that the heaviest of them (mha_batch_prefill, module_moe_ck2stages) took in earlier tests' server logs.
 ESTIMATED_MODULE_SECONDS = 65
 #: A GEMM whose code generator writes a kernel instance for each row of a tuned table (``gen_instances.py`` reading
-#: ``AITER_CONFIGS``): module_gemm_a8w8_bpreshuffle's median was 96 to 181 s a session (#169, eight tests building at once).
+#: ``AITER_CONFIGS``): module_gemm_a8w8_bpreshuffle's median was 96 to 181 s a session (eight tests building at once).
 TABLE_GEMM_MODULE_SECONDS = 180
-#: A CK-tile module: module_gemm_a8w8_bpreshuffle_cktile's median was 329 to 680 s a session, its longest 1347 s (#169).
+#: A CK-tile module: module_gemm_a8w8_bpreshuffle_cktile's median was 329 to 680 s a session, its longest 1347 s.
 CKTILE_MODULE_SECONDS = 680
 #: The single-lineage flow gives aiter 40 minutes to build in (``targeted_build``); a patch whose touched modules would
 #: take longer than that to rebuild before its test starts is refused when the test is accepted.
@@ -84,7 +84,7 @@ MAX_REBUILD_SECONDS = 40 * 60
 #: How long a timer that ends a hang lets one module build (:func:`module_build_limit_sec`): over twice the longest build
 #: of its kind. Most modules: 273 s was the longest before a server was ready, in 1711 boots.
 MODULE_BUILD_LIMIT_SEC = 600
-#: A CK-tile module: 1347 s was the longest (#169 c5046, eight tests building at once).
+#: A CK-tile module: 1347 s was the longest (eight tests building at once).
 CKTILE_MODULE_BUILD_LIMIT_SEC = 2700
 _CKTILE = "cktile"
 _TABLE_GENERATOR = "gen_instances"

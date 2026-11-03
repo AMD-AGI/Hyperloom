@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""#125 stage 4c with a stand-in compiler: a stack that edits vLLM's ``csrc`` is planned by vLLM's own recipe over the
-rule pack's layout of vLLM, built out of process from ``<sources>/vllm/<ref>``, laid in the farm and imported from it. A
-native source inside the ``vllm`` package, which the package compiles at run time, is an ordinary package file; a
-compiled file, which a build makes, is refused with native builds or without."""
+"""Native builds of vLLM with a stand-in compiler: a stack that edits vLLM's ``csrc`` is planned by vLLM's own recipe
+over the rule pack's layout of vLLM, built out of process from ``<sources>/vllm/<ref>``, laid in the farm and imported
+from it. A native source inside the ``vllm`` package, which the package compiles at run time, is an ordinary package
+file; a compiled file, which a build makes, is refused with native builds or without."""
 
 from __future__ import annotations
 

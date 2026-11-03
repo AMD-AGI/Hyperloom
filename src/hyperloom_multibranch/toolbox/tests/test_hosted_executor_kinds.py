@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The hosted executor and the test kinds: accuracy values reach the result, and a sweep is one server arm (W13)."""
+"""The hosted executor and the test kinds: accuracy values reach the result, and a sweep is one server arm."""
 
 from __future__ import annotations
 

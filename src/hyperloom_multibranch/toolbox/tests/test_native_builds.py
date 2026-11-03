@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""#125 stage 4b end to end with a stand-in compiler: a stack with a ``.cu`` edit compiles to a ``runtime`` root that waits
-as ``pending_build``, is built out of process, signed, named on the sheet, laid in the farm and imported from it."""
+"""Native builds end to end with a stand-in compiler: a stack with a ``.cu`` edit compiles to a ``runtime`` root that
+waits as ``pending_build``, is built out of process, signed, named on the sheet, laid in the farm and imported from
+it."""
 
 from __future__ import annotations
 

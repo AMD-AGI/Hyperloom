@@ -240,7 +240,7 @@ def test_a_module_built_once_into_the_image_is_linked_by_a_later_test_it_does_no
     image, monkeypatch, cache: bool, touched: bool
 ) -> None:
     """The launch preflight moved ``module_gemm`` aside and built it once into the image's ``aiter/jit``, replacing the
-    file in place (board #169). A test that starts after links it, unless its own table touches it."""
+    file in place. A test that starts after links it, unless its own table touches it."""
     _prewarmed(image)
     sheet = _deliver(image, _by_variable(TEST_TABLE)) if touched else _arm(image)
 
@@ -263,7 +263,7 @@ _RECORD = {
 
 def _prewarmed(rig: Rig, **record: object) -> None:
     """The launch preflight moved ``module_gemm`` aside and built it once into the image's ``aiter/jit``, replacing the
-    file in place, and listed it in the prewarm's manifest with ``record`` (board #169)."""
+    file in place, and listed it in the prewarm's manifest with ``record``."""
     jit = rig.bases / "aiter" / "jit"
     (jit / "module_gemm.so").unlink()
     installing = jit / ".module_gemm.so.prewarm"
@@ -283,7 +283,7 @@ def _prewarmed(rig: Rig, **record: object) -> None:
 def test_a_module_built_once_is_not_given_to_a_test_whose_server_would_build_another(
     image, monkeypatch, cache: bool, envs: dict[str, str]
 ) -> None:
-    """Board #169 review: the module was built under one value of a variable its build reads, and a test whose server
+    """The module was built under one value of a variable its build reads, and a test whose server
     sets another (no module config entry of the rig reads any of these) loaded it."""
     _prewarmed(image)
 

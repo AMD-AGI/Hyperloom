@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A withdrawn test gives its sandbox, and with it its cards, back at once (board #80, session MB-20261019T141640Z).
+"""A withdrawn test gives its sandbox, and with it its cards, back at once.
 
 Cancelling the task that awaits ``run_test`` cannot reach the worker thread that measures, so a test nobody wanted any
 more kept its card to the end and the tests queued behind it waited for it. ``withdraw`` is the way in that does.

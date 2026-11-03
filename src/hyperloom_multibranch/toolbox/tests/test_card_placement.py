@@ -3,7 +3,7 @@
 
 """Tests on a two-card pool: disjoint cards, no waiting while a card is free, and a withdrawn test frees its card.
 
-Board #80, session MB-20261019T141640Z. FINAL's test waited 8.6 minutes on a card the toolbox had already given up on:
+In a session, FINAL's test waited 8.6 minutes on a card the toolbox had already given up on:
 the judge had withdrawn the explore test that ran on it, the queue freed its slot, and the next tests started, but the
 withdrawn test's sandbox kept measuring to the end because cancelling the task cannot reach the worker thread that runs
 it. The signed manifests showed two sandboxes on card 0 one after the other, which read as a placement fault; the

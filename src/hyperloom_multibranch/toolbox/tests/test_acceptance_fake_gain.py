@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Acceptance refuses a request whose gain main refuses as fake (board topic 48), before anything launches."""
+"""Acceptance refuses a request whose gain main refuses as fake, before anything launches."""
 
 from __future__ import annotations
 

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A candidate's long-context check carries the root's reading the toolbox had when the candidate ended (#142 c3219):
+"""A candidate's long-context check carries the root's reading the toolbox had when the candidate ended:
 the complete checks of the session's BASELINE tests, pooled, with their 95% interval; the gate applies ``refuses``."""
 
 from __future__ import annotations

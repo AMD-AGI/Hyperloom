@@ -25,7 +25,7 @@ _REPORTS_THEN_EXITS = (
     'printf \'{"state": "failed", "error_class": "no_spec", "message": "no sheet"}\' > "$HYPERLOOM_SANDBOX_ROOT/out/s";'
     ' mv "$HYPERLOOM_SANDBOX_ROOT/out/s" "$HYPERLOOM_SANDBOX_ROOT/out/status.json"'
 )
-#: What the runner's start step said in joint run 15 when the cache entry did not verify (the sandbox then went away).
+#: What the runner's start step said in a hosted run when the cache entry did not verify (the sandbox then went away).
 _VERIFY_MESSAGE = (
     "bootstrap.sh or manifest of the cache entry is missing or not the one HYPERLOOM_RUNNER_CACHE_MANIFEST_SHA256 pins"
 )
@@ -86,7 +86,7 @@ def test_a_runner_that_wrote_its_status_before_exiting_is_judged_by_that_status(
 
 
 def test_the_start_steps_own_message_outlives_the_sandbox_in_the_outcome_and_the_journal(rigs, tmp_path: Path) -> None:
-    """Joint run 15: three runners failed their start step in seconds and only ``runner_start_failed`` was kept."""
+    """A hosted run: three runners failed their start step in seconds and only ``runner_start_failed`` was kept."""
     rig = rigs(_START_FAILED)
     outcome = rig.backend.run_test(make_call(tmp_path, timeout_sec=30))
     kept = f"{_VERIFY_MESSAGE} {_TAIL}"[:FAILURE_DETAIL_CHARS]

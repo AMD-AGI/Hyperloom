@@ -401,7 +401,7 @@ def test_a_sandbox_that_failed_before_it_ran_is_an_infrastructure_failure_with_t
 ) -> None:
     r = rig(gpus=1)
     keys: list[str] = []
-    message = "500: sandbox_create_failed: workload sbx-f7f56db77ec7244ae34d9886d2ed9dde phase Failed"
+    message = "500: sandbox_create_failed: workload sbx-0123456789abcdef0123456789abcdef phase Failed"
 
     def failing(template, *, role, timeout_sec, metadata, options=None):
         keys.append(metadata["agent-sandbox.io/idempotency-key"])

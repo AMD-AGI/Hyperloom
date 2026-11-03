@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A stand-in aiter for the tests of #125 stage 2b: a develop install whose ``aiter/jit/core.py`` builds a module the way
-aiter's does, without a compiler or a GPU.
+"""A stand-in aiter for the tests of the CPU build of touched modules: a develop install whose ``aiter/jit/core.py``
+builds a module the way aiter's does, without a compiler or a GPU.
 
 Its ``get_args_of_build`` evaluates the module's entry of ``optCompilerConfig.json`` as aiter does, and its
 ``build_module`` refuses ``GPU_ARCHS=native`` (it has no GPU to ask), logs ``start build`` and ``finish build``, fails like

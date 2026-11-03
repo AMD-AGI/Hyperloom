@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""aiter's touched modules built on CPU before the test (#125 stage 2b), through the whole runner.
+"""aiter's touched modules built on CPU before the test, through the whole runner.
 
 The image is the stand-in aiter (:mod:`hyperloom.measure.runner.native.tests._aiter_standin`) with ``module_gemm`` built
 from ``csrc/kernels/k.cu``. The sheet patches ``k.cu`` and names a CPU build of ``module_gemm``: a real one, planned by

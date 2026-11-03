@@ -77,8 +77,8 @@ def test_the_estimate_is_the_builds_plus_the_margin() -> None:
     assert rebuild_watchdog_sec(["m"]) > 300, "longer than sglang's default watchdog"
 
 
-#: The longest builds measured in #169, eight tests building at once: module_gemm_a8w8_bpreshuffle_cktile took up to
-#: 1347 s (c5046); module_gemm_a8w8_bpreshuffle's median was up to 181 s (c5046), its longest not stated.
+#: The longest builds measured with eight tests building at once: module_gemm_a8w8_bpreshuffle_cktile took up to
+#: 1347 s; module_gemm_a8w8_bpreshuffle's median was up to 181 s, its longest not stated.
 _LONGEST_CKTILE_SEC, _CK_MEDIAN_SEC = 1347, 181
 
 
@@ -272,7 +272,7 @@ def test_the_runner_tells_the_watchdog_and_the_jit_directory_which_card_it_is_on
 def test_a_module_built_once_under_another_value_than_the_servers_raises_the_watchdog(
     image, tmp_path: Path, envs: dict, raised: bool
 ) -> None:
-    """The launch preflight's prewarm built ``module_gemm_a8w8_bpreshuffle`` into the image for gfx950/256 (board #169);
+    """The launch preflight's prewarm built ``module_gemm_a8w8_bpreshuffle`` into the image for gfx950/256;
     a server whose ``CU_NUM`` differs is not given it and builds it at its first prefill."""
     module = "module_gemm_a8w8_bpreshuffle"
     (image / "jit" / f"{module}.so").write_bytes(b"\x7fELF prewarmed")

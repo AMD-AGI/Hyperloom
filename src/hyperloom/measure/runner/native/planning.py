@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Which stacks need a native build, and the key of each: the compile's side of #125 stage 4b.
+"""Which stacks need a native build, and the key of each: the compile's side of native builds.
 
 :class:`NativePlanner` is the :class:`~hyperloom.measure.jit.native.needs.NativePlan` an environment compiler is given when
 native builds are configured. A stack of a component that has a native recipe and changes a native file of its package

@@ -127,7 +127,7 @@ async def test_a_profile_test_is_accepted_without_accuracy_whatever_the_workload
     assert ran.request.kind is TestKind.PROFILE and ran.request.accuracy is False
 
 
-# --- an InferenceX campaign runs the purposes the rule gate reads with accuracy (board topic 14) -------------------------------
+# --- an InferenceX campaign runs the purposes the rule gate reads with accuracy ---------------------------------------
 
 
 async def _accepted_accuracy(rig, request) -> tuple[bool, bool]:
@@ -294,7 +294,7 @@ async def test_a_confirm_integration_or_final_may_re_run_the_parent_recipe(tmp_p
     assert await rig.toolbox.submit_test(req(purpose=purpose, change=RESTATED, **retest))
 
 
-# --- GSM8K on confirm, lead adoption and FINAL only, once the rule gate takes an explore without it (board topic 128) --
+# --- GSM8K on confirm, lead adoption and FINAL only, once the rule gate takes an explore without it -------------------
 
 
 def _skipping_explore() -> Acceptance:

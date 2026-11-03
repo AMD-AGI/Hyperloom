@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Acceptance with the CPU build of aiter's touched modules (#125 stage 2b): which modules the build is asked for, the
+"""Acceptance with the CPU build of aiter's touched modules: which modules the build is asked for, the
 build the compiled environment then needs, and the time limit counted in CPU build time for the modules it makes and in
-card time for the rest. Without the plan everything is as in ``test_compile_aiter_meta`` (2a)."""
+card time for the rest. Without the plan everything is as in ``test_compile_aiter_meta``."""
 
 from __future__ import annotations
 

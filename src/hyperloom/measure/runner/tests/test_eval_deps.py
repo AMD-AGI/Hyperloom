@@ -3,7 +3,7 @@
 
 """The runner installs the accuracy evaluator before the server boots, and the round finds it installed.
 
-Run V5 of #156 (c4287): the warmup round of an accuracy test served its benchmark, then spent the silence window
+A session's run showed it: the warmup round of an accuracy test served its benchmark, then spent the silence window
 installing lm-eval on an idle server whose output Magpie had not yet written anywhere, and the watchdog reaped it.
 """
 
@@ -173,7 +173,7 @@ def test_a_checkout_whose_install_cannot_run_once_is_left_to_the_round_and_said_
 
 
 def test_the_install_runs_in_the_round_s_environment_so_the_round_does_not_install_again(tmp_path, env, monkeypatch):
-    """Run V6 of #156 (c4469): ``eval_deps`` succeeded, yet the warmup round sat idle on its server until the watchdog.
+    """A later run: ``eval_deps`` succeeded, yet the warmup round sat idle on its server until the watchdog.
 
     The point's variables are the round's, not the runner's: here they name the user base pip installs into when the
     image's site-packages is not the account's, as ``PYTHONUSERBASE`` does. Installed in the runner's environment,

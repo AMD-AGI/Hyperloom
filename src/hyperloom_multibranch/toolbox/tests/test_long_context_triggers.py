@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Which tests run the long-context check (board #142 c3016): the short-prompt check's lever list and always purposes,
+"""Which tests run the long-context check: the short-prompt check's lever list and always purposes,
 read from the same pack entries, and a request that forces it; and that it is on by default, with ``off`` to disable it."""
 
 from __future__ import annotations

@@ -198,7 +198,7 @@ def test_a_manifest_of_another_schema_lists_nothing(tmp_path: Path) -> None:
 
 
 class CpuRig:
-    """The CPU build runner of #125 stage 2b over the stand-in aiter (no user change: the test's own)."""
+    """The CPU build runner of touched modules over the stand-in aiter (no user change: the test's own)."""
 
     def __init__(self, tmp: Path, monkeypatch: pytest.MonkeyPatch, located: Path | None = None) -> None:
         self.package = standin.aiter_image(tmp / "image")
@@ -373,7 +373,7 @@ def test_the_build_runs_under_what_a_tests_server_has_with_the_cards_cu_count() 
 def test_the_command_builds_under_a_tests_environment_and_records_what_the_build_read(
     tmp_path, monkeypatch, capsys
 ) -> None:
-    """Board #169 review: a ``*_HIP_CLANG_PATH`` set only in the orchestrator was baked into a module every test linked.
+    """A ``*_HIP_CLANG_PATH`` set only in the orchestrator was baked into a module every test linked.
     The module is built without it, and a test whose server sets a variable its build read otherwise builds its own."""
     package = _a8w8_image(tmp_path / "image", built_from="k")
     config_file = package / "jit" / "optCompilerConfig.json"

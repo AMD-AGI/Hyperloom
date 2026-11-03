@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""aiter's touched modules built on a CPU build runner before the test (#125 stage 2b).
+"""aiter's touched modules built on a CPU build runner before the test.
 
 A patch to aiter's ``csrc`` or ``hsa`` (or to its module config, or to a tuned table below its ``configs``) leaves some of
 the image's prebuilt modules stale (:mod:`hyperloom.measure.jit.modules`). Without this the test's server builds each on

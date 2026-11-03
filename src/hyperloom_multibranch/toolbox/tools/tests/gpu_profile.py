@@ -3,7 +3,8 @@
 
 """GPU check of the profile tool: one real profiling round through the tool runner, result read from the inbox push.
 
-Run through ``gpu-test`` with ``HL_W11_PROFILE=1`` on a card the caller owns.
+Run with ``HL_W11_PROFILE=1`` on a card the caller owns, with ``HL_W11_MODEL`` a model directory and
+``HL_W11_INFERENCEX`` an InferenceX checkout.
 """
 
 from __future__ import annotations
@@ -17,10 +18,12 @@ import pytest
 from hyperloom_multibranch.toolbox.tools import JobStatus, ToolJobs, ToolRequest, profile_tool
 from hyperloom_multibranch.toolbox.tools.tests.sinks import RecordingSink
 
-pytestmark = pytest.mark.skipif(os.environ.get("HL_W11_PROFILE") != "1", reason="GPU run; set HL_W11_PROFILE=1")
-
-MODEL = "/shared_nfs/models/Qwen3-8B"
-INFERENCEX = os.environ.get("HL_W11_INFERENCEX", "/shared_nfs/yihan/local/hyperloom-mb-w6/InferenceX")
+MODEL = os.environ.get("HL_W11_MODEL", "")
+INFERENCEX = os.environ.get("HL_W11_INFERENCEX", "")
+pytestmark = pytest.mark.skipif(
+    os.environ.get("HL_W11_PROFILE") != "1" or not MODEL or not INFERENCEX,
+    reason="GPU run; set HL_W11_PROFILE=1, HL_W11_MODEL and HL_W11_INFERENCEX",
+)
 
 
 @pytest.fixture(autouse=True)

@@ -104,7 +104,7 @@ def test_a_full_disk_in_the_runners_or_the_servers_output_is_an_infrastructure_f
     assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.INFRA, f"{failures.DISK_FULL}: {line}")
 
 
-#: What a variant aborted in Magpie's AgentX dependency set-up records as its error (#163): the git fetch of the replay
+#: What a variant aborted in Magpie's AgentX dependency set-up records as its error: the git fetch of the replay
 #: client timed out, before any server started.
 GIT_FETCH_STALL = (
     'File "Magpie/modes/benchmark/agentx.py", line 806, in ensure_agentx_dependencies\n'
@@ -120,7 +120,7 @@ def test_a_git_fetch_of_the_benchmarks_own_dependencies_that_timed_out_is_an_inf
     assert verdict.failure_reason.startswith(f"{failures.GIT_FETCH_TIMEOUT}: subprocess.TimeoutExpired: Command ['git'")
 
 
-#: What the replay client of an AgentX round printed when the Hub refused its trace dataset (board #161), in the words
+#: What the replay client of an AgentX round printed when the Hub refused its trace dataset, in the words
 #: huggingface_hub raises once its retries are spent; the warning before each retry comes first.
 HUB_REFUSAL = "429 Too Many Requests: you have reached your 'api' rate limit."
 HUB_REFUSED_CLIENT_LOG = (

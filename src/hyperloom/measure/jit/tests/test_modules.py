@@ -417,8 +417,8 @@ def test_the_env_touched_entries_follow_into_the_prebuilt_names_aiter_makes_from
     ],
 )
 def test_a_module_is_estimated_by_its_kind(name, seconds):
-    """#169's medians a session: the CK-tile GEMM 329 to 680 s, the tuned-table CK GEMM 96 to 181 s; the 63 to 66 s of
-    mha_batch_prefill and module_moe_ck2stages before."""
+    """The medians a session, eight tests building at once: the CK-tile GEMM 329 to 680 s, the tuned-table CK GEMM 96 to
+    181 s; the 63 to 66 s of mha_batch_prefill and module_moe_ck2stages before."""
     assert module_build_seconds(name, _image_config()) == seconds
 
 

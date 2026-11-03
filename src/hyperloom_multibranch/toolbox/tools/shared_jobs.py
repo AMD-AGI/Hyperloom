@@ -3,8 +3,8 @@
 
 """Which tool job answers a shared key, kept on disk so that a restarted toolbox answers as the one before it did.
 
-A key names work whose answer is the same whoever asks: the analysis of one profile test by one tool (board #153
-c3447). :class:`~.base.ToolJobs` records here the job it started for a key and, once the job ended, how it ended and
+A key names work whose answer is the same whoever asks: the analysis of one profile test by one tool.
+:class:`~.base.ToolJobs` records here the job it started for a key and, once the job ended, how it ended and
 the pointer it pushed. A running job is joined and a succeeded one shared; a failed or cancelled one answers nothing,
 so the next submission starts a new job and the key names that one. A job that was running when the toolbox stopped
 ended with it: the ledger still says running, and the job is in no restarted runner, so it answers nothing either.

@@ -349,7 +349,7 @@ class BuildRef:
 @dataclass(frozen=True)
 class Environment:
     """The overlay a runner rebuilds. ``builds`` name the ready native build of each ``runtime`` root, one each, and of
-    a package root whose JIT modules a CPU build made (aiter's, #125 stage 2b); a sheet with none leaves the key out, so a
+    a package root whose JIT modules a CPU build made (aiter's); a sheet with none leaves the key out, so a
     runner that does not know it reads every other sheet as before and refuses one that has builds."""
 
     roots: tuple[EnvRoot, ...] = ()
