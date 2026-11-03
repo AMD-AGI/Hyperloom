@@ -101,8 +101,7 @@ the slots left open your branches. You do not admit them; stop a branch that is 
 start.
 {{spend}}
 A branch's basis says what its expected gain rests on: its own trend, the floor of a direction still being observed,
-the floor of a branch too new to have a trend, or the roofline headroom that capped it; trust a measured trend over a
-floor.
+or the floor of a branch too new to have a trend; trust a measured trend over a floor.
 {{stall}}
 A branch's similar_to lists the other running branches whose own change since the commit they last followed, their
 start commit or the integration commit they were re-rooted onto, is much the same as its own, with score the share of
@@ -141,15 +140,12 @@ branch holds takes cards away from. A branch opened now makes progress only whil
 K only while it is at least that K.
 spend is what the session has used so far. gpu_hours_used is the GPU time of every test of this session that has a
 result, a failed one and the baseline measured on the root commit included, plus the card time any lease holds outside
-the tests (an autonomous branch's sandbox, a dev sandbox, a tool's job, or the cards the PRELUDE run that built the
-root commit ran on, charged to the integration branch), an open lease up to now; a test taken back before its result is
-not in it, and neither is a PRELUDE run that held no lease. A branch's gpu_seconds is the GPU time of its own tests and
+the tests (an autonomous branch's sandbox, a dev sandbox, a tool's job, or the dossier pass's cards, charged to the
+integration branch), an open lease up to now; a test taken back before its result is not in it. A branch's gpu_seconds is the GPU time of its own tests and
 its held_card_seconds the card time the leases charged to it held.
 explore_gpu_hours is the gpu_hours_used at which EXPLORE ends to leave FINAL its share, or null when GPU hours are not
 limited: as gpu_hours_used nears it, a branch opened now has few tests left to run, and the session stops exploring
-there whatever you decide. prelude_gpu_hours_upper_bound is at most the GPU time of the PRELUDE run that
-gpu_hours_used leaves out: its wall time times the cards one test uses where it held no lease, which nothing limits, and
-0 where it ran on leased cards.
+there whatever you decide.
 specialist_llm_usd is what the specialists' LLM launches cost, each priced per call from its log when it ended, a
 launch cut short, lost or stopped included; a launch still running is not in it yet.
 scheduler_llm_usd is what your own calls, the patch resolver's and the rule gate's fix critic's cost.

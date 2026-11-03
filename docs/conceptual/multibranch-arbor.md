@@ -53,7 +53,8 @@ In the Hyperloom paths below, `src/hyperloom_multibranch/` is left out. Arbor's 
    - **Code:** `cli.py`, `scheduling/agent_plans.py`.
 2. **MB runs PRELUDE.**
    - **The root:** it commits the root recipe and measures the baseline.
-   - **The profile:** it starts the root profile, TraceLens job `prelude:<run id>`, without waiting for it.
+   - **The profile:** it runs a PROFILE test of the root through the toolbox and its TraceLens analysis, and waits for
+     both.
    - **Code:** `scheduling/prelude.py`.
 3. **MB opens a mapping branch** as EXPLORE starts, beside the other branches, and reads the root's shares. This and
    steps 4 to 6 happen only without `--agent-directions`: for two or more Arbors, or for one with the review on, which

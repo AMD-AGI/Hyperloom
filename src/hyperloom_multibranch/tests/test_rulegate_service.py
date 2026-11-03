@@ -1,31 +1,26 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-import hashlib
-from dataclasses import replace
-from pathlib import Path
 
 import pytest
 
 from hyperloom.common.gain_math import ACCURACY_METRICS
 from hyperloom.common.perf_metric import (
     AGENTX_KEEP_P50_THRESHOLD_PCT,
-    GRADED_DURATION,
-    GRADED_ERROR_RATE,
     GRADED_INTVTY_P50,
 )
-from hyperloom.contracts.measurement import Purpose, RoundValue, TestKind, TestRequest, Validity
+from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import LaunchConfig, Recipe, RecipeDelta
-from hyperloom_multibranch.contracts.gate import NotMeasured, PreludeMeasurement, ResultUnverified
+from hyperloom_multibranch.contracts.gate import NotMeasured, ResultUnverified
 from hyperloom_multibranch.contracts.judgement import Verdict
 from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.contracts.blackboard.interfaces import NotRecorded
 from hyperloom_multibranch.contracts.blackboard.records import LineageEvent
 from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH, LineageKind
 from hyperloom_multibranch.blackboard import LocalBlackboard
-from hyperloom_multibranch.blackboard.tests.factories import delta, result
+from hyperloom_multibranch.blackboard.tests.factories import delta
 from hyperloom_multibranch.rulegate.rules import AgentXRule, InferenceXRule
-from hyperloom_multibranch.rulegate.service import PRELUDE_SOURCE_CAVEAT, GateService, Polling
+from hyperloom_multibranch.rulegate.service import GateService, Polling
 from hyperloom_multibranch.tests.fakes import RecordingVerifier
 from hyperloom_multibranch.toolbox.fake import FakeToolbox
 from hyperloom_multibranch.toolbox.fake_model import Fate, FakeToolboxConfig, NoiseModel
@@ -34,7 +29,6 @@ ROOT, CONC = "c0", 64
 RECIPE = Recipe("rocm/vllm@sha256:" + "c" * 64, LaunchConfig(server_args="--max-num-seqs 128"))
 QUIET = NoiseModel(node_bias_median=0.0, node_bias_p90=0.0, test_noise_sigma=0.0)
 FAST, FLAT, WRONG = (delta(f"--max-num-seqs {n}") for n in (256, 136, 512))
-AGENTX_RUN = {GRADED_INTVTY_P50: 132.1028, GRADED_DURATION: 3601.52, GRADED_ERROR_RATE: 0.06925}
 EFFECTS = {FAST.fingerprint(): 0.05, WRONG.fingerprint(): 0.05, FLAT.fingerprint(): 0.005}
 
 
@@ -151,17 +145,26 @@ async def test_prelude_with_one_root_test_measured_sets_no_bar(tmp_path):
     await session.toolbox.close()
 
 
-async def test_an_agentx_prelude_asks_for_no_root_test(tmp_path):
+async def test_an_agentx_prelude_asks_for_one_root_test(tmp_path):
     session = _Session(tmp_path / "blackboard", agentx=True)
 
-    assert await session.gate.baseline_test_count() == 0
-    assert await session.root_tests() == []
+    assert await session.gate.baseline_test_count() == 1
+    assert len(await session.root_tests()) == 1
+    await session.toolbox.close()
+
+
+async def test_an_agentx_gate_asks_for_no_confirm_ahead_of_a_judgement(tmp_path):
+    session = _Session(tmp_path / "blackboard", agentx=True)
+    await session.record_root()
+    merge = await session.toolbox.submit_test(_request(Purpose.INTEGRATION, FAST))
+
+    assert await session.gate.request_confirm(merge) == ""
+    assert session.retests() == []
     await session.toolbox.close()
 
 
 async def _agentx_root_test(session: _Session, fate: Fate | None = None) -> str:
-    """The one root test a PRELUDE that starts no child submits for an AgentX baseline, measured or failing as ``fate``
-    says."""
+    """The one root test PRELUDE submits for an AgentX baseline, measured or failing as ``fate`` says."""
     await session.record_root()
     request_id = await session.toolbox.submit_test(_request(Purpose.BASELINE))
     if fate is not None:
@@ -170,7 +173,7 @@ async def _agentx_root_test(session: _Session, fate: Fate | None = None) -> str:
     return request_id
 
 
-async def test_an_agentx_baseline_without_a_child_run_is_one_root_test_and_names_it(tmp_path):
+async def test_an_agentx_baseline_is_one_root_test_and_names_it(tmp_path):
     session = _Session(tmp_path / "blackboard", agentx=True)
     request_id = await _agentx_root_test(session)
 
@@ -192,69 +195,6 @@ async def test_an_agentx_root_test_that_did_not_measure_anchors_nothing(tmp_path
     with pytest.raises(NotMeasured, match="0 of 1 root tests measured; the baseline needs 1"):
         await session.gate.establish_baseline(ROOT, [request_id])
     await session.toolbox.close()
-
-
-def _child_run(tmp_path, metrics=AGENTX_RUN, validity=Validity.SUCCEEDED) -> PreludeMeasurement:
-    report, export = tmp_path / "benchmark_report.json", tmp_path / "profile_export.jsonl"
-    report.write_text('{"scenario": "agentx"}')
-    export.write_text("{}\n")
-    run = replace(result("prelude-child", validity=validity), rounds=(RoundValue("measure", 10, metrics),))
-    return PreludeMeasurement(
-        run,
-        "/child/runs/baseline/r1",
-        str(report),
-        hashlib.sha256(report.read_bytes()).hexdigest(),
-        str(export),
-        hashlib.sha256(export.read_bytes()).hexdigest(),
-        5287.67,
-    )
-
-
-async def test_an_agentx_baseline_is_the_prelude_childs_run_of_the_root_and_names_it(tmp_path):
-    session = _Session(tmp_path / "blackboard", agentx=True)
-    measured = _child_run(tmp_path)
-
-    record = await session.gate.establish_prelude_baseline(ROOT, measured)
-
-    assert (record.values, record.request_ids, record.wall_seconds) == (AGENTX_RUN, (), 5287.67)
-    assert record.threshold_pct == {GRADED_INTVTY_P50: AGENTX_KEEP_P50_THRESHOLD_PCT}
-    assert record.source == (
-        f"prelude-child:/child/runs/baseline/r1 sha256:{measured.report_sha256}/{measured.export_sha256}; "
-        f"{PRELUDE_SOURCE_CAVEAT}"
-    )
-    assert session.verifier.asked == []
-    assert await session.blackboard.baseline() == record
-    await session.toolbox.close()
-
-
-async def test_a_child_run_whose_copy_changed_since_it_was_read_anchors_nothing(tmp_path):
-    session = _Session(tmp_path / "blackboard", agentx=True)
-    measured = _child_run(tmp_path)
-    Path(measured.export).write_text("{}\n{}\n")
-
-    with pytest.raises(NotMeasured, match="profile_export.jsonl has sha256"):
-        await session.gate.establish_prelude_baseline(ROOT, measured)
-    await session.toolbox.close()
-
-
-@pytest.mark.parametrize(
-    ("metrics", "validity", "error"),
-    [
-        ({GRADED_DURATION: 3601.5}, Validity.SUCCEEDED, GRADED_INTVTY_P50),
-        (AGENTX_RUN, Validity.MEASUREMENT_FAILED, "did not measure"),
-    ],
-)
-async def test_a_child_run_without_a_reading_anchors_nothing(tmp_path, metrics, validity, error):
-    session = _Session(tmp_path / "blackboard", agentx=True)
-
-    with pytest.raises(NotMeasured, match=error):
-        await session.gate.establish_prelude_baseline(ROOT, _child_run(tmp_path, metrics, validity))
-    await session.toolbox.close()
-
-
-async def test_an_inferencex_baseline_is_never_read_from_the_child_run(session, tmp_path):
-    with pytest.raises(ValueError, match="measured by 3 root tests"):
-        await session.gate.establish_prelude_baseline(ROOT, _child_run(tmp_path))
 
 
 async def test_a_merge_gain_counts_once_another_node_repeats_it(session):

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
 import json
 import os
 import signal
@@ -158,10 +159,9 @@ class Stage:
     async def spawn_trees(self, tmp_path: Path, branches: tuple[str, ...]) -> list[int]:
         pids: list[int] = []
         for branch in branches:
-            proc = await self.processes.spawn(
-                ("sh", "-c", "sleep 60 & sleep 60"), branch=branch, log=tmp_path / "p.log"
-            )
-            pids.append(proc.record.pid)
+            argv = ("sh", "-c", "sleep 60 & sleep 60")
+            started = subprocess.Popen(argv, start_new_session=True)
+            pids.append(self.processes.adopt(started.pid, branch=branch, argv=argv).pid)
         await asyncio.sleep(0.3)
         return pids + [child for pid in pids for child, _ in descendants(pid)]
 
@@ -241,7 +241,7 @@ async def test_a_failed_branch_stop_does_not_hold_up_the_end_of_exploration(tmp_
 
 async def test_stop_everything_withdraws_every_branch_closes_the_toolbox_and_leaves_no_process(tmp_path: Path) -> None:
     session = await Stage(tmp_path).opened()
-    pids = await session.spawn_trees(tmp_path, ("b01", INTEGRATION_BRANCH, "prelude"))
+    pids = await session.spawn_trees(tmp_path, ("b01", INTEGRATION_BRANCH, "dossier"))
     session.mcp.start()
 
     report = await session.stopper.stop_everything(SessionStopReason.SIGNAL, HARD_STOP)

@@ -12,8 +12,7 @@ With two or more Arbor agents and no map given, the session runs the first Arbor
   (:mod:`~hyperloom_multibranch.scheduling.agent_plans`), and the dossier is copied into each branch's checkout.
 
 In EXPLORE a mapping branch (:mod:`map_session`) holds the pass, and its lease is charged to that branch; a session that
-stops after its map runs it before EXPLORE, held by no branch and charged to the integration branch, as PRELUDE's
-child's is. It writes nothing to the blackboard. Whatever ends it, its process is killed and its cards are given back. A pass that sets no map says
+stops after its map runs it before EXPLORE, held by no branch and charged to the integration branch. It writes nothing to the blackboard. Whatever ends it, its process is killed and its cards are given back. A pass that sets no map says
 why (:class:`DossierOutcome`), and the session falls back to the generic map.
 """
 
@@ -62,7 +61,7 @@ if TYPE_CHECKING:
 
 #: The holder of the pass's lease, and the name of its worktree and directory beside the branches': it is no branch.
 DOSSIER_HOLDER = "dossier"
-#: The pass's card time is the integration branch's, as the PRELUDE child's is.
+#: The pass's card time is the integration branch's.
 DOSSIER_CHARGE = LeaseCharge(LeaseKind.PRELUDE_CHILD, INTEGRATION_BRANCH)
 POLL_SECONDS = 10.0
 #: How long past its deadline the pass has to write its exit and end of itself before it is killed: Arbor ends a run

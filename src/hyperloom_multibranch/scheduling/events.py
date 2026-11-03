@@ -19,7 +19,7 @@ branch builds on. Nothing here scores the frontier, which logs a round every tim
 
 After the integration head moved, :class:`IntegrationProfiler` profiles it, one profile at a time, in a task of its own:
 a PROFILE test of the head, then a TraceLens analysis of that test's trace, whose op shares the bottleneck is read from.
-A PRELUDE that starts no child has it profile the root the same way, and waits for it.
+PRELUDE has it profile the root the same way, and waits for it.
 Both wait for the measurement to end, so the tick only starts the task and looks whether it is done. The PROFILE takes
 one of the integration branch's K slots; when the workload's profile would hold that slot as long as a test, the moved
 head is profiled only once a branch opens on it (:attr:`~.settings.Workload.profiles_moved_head_on_merge`). A head whose
@@ -207,7 +207,7 @@ class ProfileOutcome:
 
 class IntegrationProfiler:
     """Profiles the integration head after it moved, at most one profile at a time, in a task of its own, and the root
-    for a PRELUDE that starts no child.
+    for PRELUDE.
 
     The profile is a PROFILE test of the head through ``tests``, at the default priority of its purpose, then a
     TraceLens analysis of that test, whose op shares the ``records`` hold once the analysis has ended. Its bottleneck is
@@ -247,8 +247,8 @@ class IntegrationProfiler:
             self._task = asyncio.ensure_future(self._profile(head, moved_from))
 
     async def profile_root(self, root: str) -> ProfileOutcome:
-        """Profile ``root`` and wait for its analysis, for a PRELUDE that starts no child to profile it; a backend
-        that cannot profile is not asked again in this session either."""
+        """Profile ``root`` and wait for its analysis, for PRELUDE; a backend that cannot profile is not asked again in
+        this session either."""
 
         outcome = await self._profile(root, root)
         self._available = outcome.available

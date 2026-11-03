@@ -4,7 +4,7 @@
 """The end-to-end skeleton: one session driven in-process on the specialist runtime, peer stand-ins and a virtual
 clock.
 
-PRELUDE roots the session on a scripted child session in a git repository; the judge opens two branches, whose scripted
+PRELUDE roots the session on a framework git checkout; the judge opens two branches, whose scripted
 specialists the runtime runs and judges; on ``b01`` the runtime confirms and commits ``c1``, and two fixes of it are
 asked for as forks: the first takes the last slot as ``b03``, the second waits in the fork desk's queue as ``b04`` and
 takes the slot the judge's stop of ``b02`` frees; the rule gate lands each fix on its fork, with the fix's case as a
@@ -139,9 +139,9 @@ from hyperloom_multibranch.scheduling.lifecycle import (
     persisted_run,
 )
 from hyperloom_multibranch.scheduling.local_peers import workload_rule
+from hyperloom_multibranch.scheduling.manifest import read_manifest
 from hyperloom_multibranch.contracts.llm import CompletionFailed, CompletionReply
 from hyperloom_multibranch.scheduling.peers import Peers, PeerSetup
-from hyperloom_multibranch.scheduling.prelude import CHILD_CARDS_ENV
 from hyperloom_multibranch.scheduling.prelude_reader import MB_FRAMEWORK_REPO_ENV
 from hyperloom_multibranch.scheduling.policy import SCHEDULING_POLICY, policy_version
 from hyperloom_multibranch.scheduling.roster import BranchOrigin, BranchStatus, RosterCaps, StopCause, final_quota
@@ -165,7 +165,7 @@ from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     FakeRegressionCheck,
     HeldGitRepo,
     LeasingToolbox,
-    MbFakeHeldRegistry,
+    HeldRegistry,
     OneChampionKB,
     RecordedSessions,
     RecordingToolbox,
@@ -180,15 +180,11 @@ from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     specialist_runtime,
     tagged,
 )
-from hyperloom_multibranch.scheduling.tests.child_sessions import (
-    BASELINE_ERROR_CLASS,
-    child_with_patch,
-    failed_child,
-    with_agentx_baseline_run,
-)
+from hyperloom_multibranch.scheduling.tests.framework_checkout import framework_checkout
+from hyperloom_multibranch.scheduling.processes import SCHEDULER_BRANCH
 from hyperloom_multibranch.tests.fakes import RecordingVerifier
 from hyperloom_multibranch.toolbox.attempts import TestJob
-from hyperloom_multibranch.toolbox.fake_model import DEFAULT_BASELINE
+from hyperloom_multibranch.toolbox.fake_model import DEFAULT_BASELINE, Fate
 from hyperloom_multibranch.toolbox.tools.base import JobStatus
 from hyperloom_multibranch.scheduling.agent_plans import (
     DOSSIER_ENDED,
@@ -221,8 +217,6 @@ from hyperloom_multibranch.specialist.prompts import prompt_versions
 from hyperloom_multibranch.specialist.runtime import MAX_LOSS_RESTARTS, SessionCrashed
 
 START = 1_700_000_000.0
-#: Real seconds a PRELUDE child lingers so that what PRELUDE submits beside it is submitted while it runs.
-CHILD_BESIDE_SECONDS = 2.0
 CONC = 16
 #: An ownership scope of a pod that is gone: another boot, so none of its pids is a process of this environment.
 ANOTHER_POD = "0" * 32 + ":1:1"
@@ -231,8 +225,6 @@ WORKLOAD = Workload(
 )
 #: The same workload as an AgentX trace replay.
 AGENTX = replace(WORKLOAD, inferencex=None)
-#: The PRELUDE child's AgentX baseline run, launch to exit, which FINAL keeps in reserve.
-AGENTX_CHILD_RUN_SECONDS = 600.0
 #: What the session's image check finds: one fact of the rule pack that does not hold here, under the default mode.
 IMAGE_CHECK = ImageCheckReport(
     ImageCheckMode.WARN,
@@ -276,7 +268,7 @@ STOP_REASON = "no gain left"
 TINY_GPU_HOURS = 0.01
 #: A GPU-hour budget the session's tests, FINAL's included, never use up, and the card time a lease of
 #: :data:`LEASED_CARDS` cards held through a few judge calls of :data:`LEASED_JUDGE_INTERVAL_SECONDS` does.
-LEASED_GPU_HOURS = 1.0
+LEASED_GPU_HOURS = 1.5
 LEASED_CARDS = 4
 LEASED_JUDGE_INTERVAL_SECONDS = 120.0
 #: An LLM budget one specialist launch of :data:`LAUNCH_USD` uses up.
@@ -329,11 +321,12 @@ def no_knowledge_targets(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def child_framework(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The scheduler, and so the PRELUDE child, is launched on the framework checkout the child sessions are built
-    on."""
+def framework(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The framework checkout the scheduler runs on, which a session roots on."""
 
-    monkeypatch.setenv(MB_FRAMEWORK_REPO_ENV, str(tmp_path / "framework"))
+    checkout = framework_checkout(tmp_path)
+    monkeypatch.setenv(MB_FRAMEWORK_REPO_ENV, str(checkout))
+    return checkout
 
 
 @pytest.fixture(autouse=True)
@@ -396,13 +389,11 @@ class SilentModel(ScriptedCompletion):
 class Stage:
     """One session on the specialist runtime: ``scripts`` and ``steps`` are what each branch's specialist does,
     ``explored`` what its tests and retests measure and ``measured`` what every other test does, the runtime refuses
-    to stop a branch in ``refusing`` and a run of a branch in ``hanging`` never confirms its stop. ``on_this_machine``
-    says whether the toolbox measures on this machine's cards, leasing PRELUDE's child its cards, or in sandboxes
-    elsewhere, where PRELUDE starts no child."""
+    to stop a branch in ``refusing`` and a run of a branch in ``hanging`` never confirms its stop."""
 
     layout: SessionLayout
     time: VirtualClock
-    processes: MbFakeHeldRegistry
+    processes: HeldRegistry
     judge: ScriptedCompletion
     pids: list[int]
     scripts: Mapping[str, Sequence[RecipeDelta]] = field(default_factory=dict)
@@ -415,7 +406,6 @@ class Stage:
     recipe_kb: OneChampionKB | None = None
     stuck: frozenset[str] = frozenset()
     toolbox_type: type[RecordingToolbox] = LeasingToolbox
-    on_this_machine: bool = True
     settings: RunSettings = SETTINGS
     repo_type: type[HeldGitRepo] = HeldGitRepo
     critic: Callable[[UsageSink], FixReviewer] = lambda _usage: NoCritic()
@@ -494,7 +484,6 @@ class Stage:
             digest,
             self.gate,
             self.regression,
-            self.on_this_machine,
             self.dossier_pass,
         )
 
@@ -586,16 +575,13 @@ class Stage:
         )
 
 
-def _stage(tmp_path: Path, *, child: Path | None, exit_code: int = 0, linger: float = 0.0) -> Stage:
-    """A session on ``tmp_path`` whose PRELUDE child roots on ``child``, runs ``linger`` real seconds and exits with
-    ``exit_code``."""
+def _stage(tmp_path: Path) -> Stage:
+    """A session on ``tmp_path``."""
 
     time = VirtualClock(START)
     layout = create_session(tmp_path / "workspace", WORKLOAD.model_basename, time.clock)
-    session = "" if child is None else str(child)
-    processes = MbFakeHeldRegistry(layout.pids, time, session=session, exit_code=exit_code, linger=linger)
     judge = ScriptedCompletion([OPENING, STEER])
-    return Stage(layout, time, processes, judge, [])
+    return Stage(layout, time, HeldRegistry(layout.pids, time), judge, [])
 
 
 def _recovery(stage: Stage, settings: RunSettings) -> Stage:
@@ -603,8 +589,7 @@ def _recovery(stage: Stage, settings: RunSettings) -> Stage:
     the settings read back from its manifest, every peer fresh and no specialist script."""
 
     time = VirtualClock(stage.time.now())
-    processes = MbFakeHeldRegistry(stage.layout.pids, time, session="", exit_code=0)
-    return Stage(stage.layout, time, processes, ScriptedCompletion(), [], settings=settings)
+    return Stage(stage.layout, time, HeldRegistry(stage.layout.pids, time), ScriptedCompletion(), [], settings=settings)
 
 
 def _script(stage: Stage, forks: int = len(FIX_REASONS)) -> None:
@@ -625,7 +610,7 @@ def _script(stage: Stage, forks: int = len(FIX_REASONS)) -> None:
 
 
 async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Path) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.judge.tokens, stage.judge.cost_usd = JUDGE_TOKENS, JUDGE_USD
     _script(stage)
 
@@ -741,8 +726,7 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
     assert usages == [LlmUsage("", UsageSource.JUDGE, JUDGE_USD, JUDGE_TOKENS)] * judge_calls
     assert all(spend["explore_gpu_hours"] is None for spend in spends)
     [rooted] = [row for row in _decisions(stage) if row["reason"] == "root committed"]
-    prelude_hours = round(rooted["detail"]["child_gpu_seconds_upper_bound"] / MB_SECONDS_PER_HOUR, 3)
-    assert all(spend["prelude_gpu_hours_upper_bound"] == prelude_hours for spend in spends)
+    assert rooted["detail"] == {"root_commit": root}
     # Each judge call's view reads the queue twice, for its widening signals and the builds a branch waits for, and the
     # dashboard rebuild after it once; so do the stop and every quota push.
     assert judge_calls >= 2 and stage.toolbox.queue_reads == 3 * judge_calls + 1 + len(stage.toolbox.policies)
@@ -751,7 +735,6 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
         stage.layout.manifest,
         stage.layout.decisions,
         stage.layout.judge,
-        stage.layout.prelude_child,
         stage.layout.root_recipe,
         stage.layout.report,
         stage.layout.reports / "session_breakdown.json",
@@ -763,35 +746,32 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
 
 
 async def test_an_agentx_session_is_judged_on_p50_interactivity_and_validated_at_its_conc_alone(tmp_path: Path) -> None:
-    child = child_with_patch(tmp_path)
-    run = with_agentx_baseline_run(child, DEFAULT_BASELINE, runtime_seconds=AGENTX_CHILD_RUN_SECONDS)
-    stage = _stage(tmp_path, child=child)
+    stage = _stage(tmp_path)
     stage.settings = replace(SETTINGS, workload=AGENTX)
     stage.scripts = SCRIPTS
 
     outcome = await stage.run()
 
     assert (outcome.stop_reason, outcome.error, outcome.exit_code) == (SessionStopReason.TIME_EXHAUSTED, "", 0)
-    assert not [request for request in stage.toolbox.requests.values() if request.purpose is Purpose.BASELINE]
-    assert isinstance(stage.toolbox, LeasingToolbox) and stage.toolbox.leased == [("prelude", AGENTX.tp)]
-    assert stage.processes.env is not None and stage.processes.env[CHILD_CARDS_ENV] == "6"
+    [root_test] = [key for key, request in stage.toolbox.requests.items() if request.purpose is Purpose.BASELINE]
+    assert isinstance(stage.toolbox, LeasingToolbox) and stage.toolbox.leased == []
     baseline = await stage.handle(Role.OBSERVER).baseline()
-    assert (baseline.request_ids, baseline.values[GRADED_INTVTY_P50]) == ((), DEFAULT_BASELINE[GRADED_INTVTY_P50])
-    assert baseline.source.startswith(f"prelude-child:{run} ")
+    assert (baseline.request_ids, baseline.values[GRADED_INTVTY_P50]) == (
+        (root_test,),
+        DEFAULT_BASELINE[GRADED_INTVTY_P50],
+    )
     [established] = [row for row in _decisions(stage) if row["reason"] == "baseline established"]
-    assert established["detail"]["longest_test_seconds"] == AGENTX_CHILD_RUN_SECONDS
+    assert established["detail"]["request_ids"] == [root_test]
     observer = stage.handle(Role.OBSERVER)
     profile = await observer.session_profile()
     assert (profile.isl, profile.osl, dict(profile.roofline_ceiling)) == (None, None, {})
-    [child] = [row for row in _decisions(stage) if row["kind"] == "prelude" and row["reason"] == "child started"]
-    assert not {"--isl", "--osl"} & set(child["detail"]["argv"])
     assert GRADED_INTVTY_P50 in (await observer.baseline()).threshold_pct
     c1, c2 = await stage.repo.head("b01"), await stage.repo.head("b02")
     merged = {item.commit_id: item.last_merge.outcome.value for item in await observer.committed() if item.last_merge}
     assert merged == {c1: "merged", c2: "not_stackable"}
     opening = _judge_state(_judge_prompts(stage)[0])
     assert opening["metric"] == GRADED_INTVTY_P50
-    assert (opening["integration"]["roofline_ceiling"], opening["integration"]["headroom_pct"]) == ({}, None)
+    assert set(opening["integration"]) == {"recorded_value"}
 
     head = await stage.repo.head(INTEGRATION_BRANCH)
     assert outcome.final is not None and outcome.final.chosen is not None and outcome.final.chosen.commit == head
@@ -805,7 +785,7 @@ async def test_an_agentx_session_is_judged_on_p50_interactivity_and_validated_at
 async def test_the_specialists_are_briefed_on_the_warm_start_leads_prelude_read_and_replay_them_on_their_head(
     tmp_path: Path,
 ) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.recipe_kb = OneChampionKB()
 
     await stage.run()
@@ -822,7 +802,7 @@ def _frontier_lines(stage: Stage) -> list[dict[str, Any]]:
 
 
 async def test_a_session_scores_its_frontier_with_the_defaults_for_its_budget(tmp_path: Path) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     _script(stage)
 
     outcome = await stage.run()
@@ -836,7 +816,7 @@ async def test_a_session_scores_its_frontier_with_the_defaults_for_its_budget(tm
 
 
 async def test_close_asks_no_llm_for_a_playbook_change_without_an_archive_and_records_why(tmp_path: Path) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     _script(stage)
 
     outcome = await stage.run()
@@ -852,7 +832,7 @@ async def test_a_session_with_an_rsi_archive_plays_the_champion_playbook_and_clo
 ) -> None:
     archive = tmp_path / "rsi"
     monkeypatch.setenv(ARCHIVE_ENV, str(archive))
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     _script(stage)
 
     outcome = await stage.run()
@@ -882,7 +862,7 @@ async def test_the_manifest_names_the_lesson_pool_as_the_specialists_recall_read
         )
     )
     read = pool.digest()
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.learnings = LessonRecall(pool=pool)
     _script(stage)
 
@@ -892,12 +872,27 @@ async def test_the_manifest_names_the_lesson_pool_as_the_specialists_recall_read
     assert json.loads(stage.layout.manifest.read_text())["policy_versions"][LESSONS_KEY] == read
 
 
+async def test_a_manifest_written_with_the_removed_reuse_prelude_setting_still_reads(tmp_path: Path) -> None:
+    stage = _stage(tmp_path)
+    _script(stage)
+    await stage.run()
+    manifest = json.loads(stage.layout.manifest.read_text())
+    manifest["settings"]["reuse_prelude"] = {
+        "session": "/old",
+        "child_session": "/old/child",
+        "root_recipe_digest": "d",
+    }
+    stage.layout.manifest.write_text(json.dumps(manifest))
+
+    assert read_manifest(stage.layout.manifest).settings == stage.settings
+
+
 async def test_a_session_copies_the_reference_material_it_was_given_and_its_manifest_pins_it(tmp_path: Path) -> None:
     knowledge = tmp_path / "GEAK" / "tuning"
     knowledge.mkdir(parents=True)
     (knowledge / "gemm.md").write_text("pad M to the next multiple of 64", encoding="utf-8")
     source = ReferenceSource("geak-tuning", str(knowledge), "c" * 40)
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.settings = replace(stage.settings, references=(source,))
     _script(stage)
 
@@ -922,8 +917,8 @@ async def test_a_run_given_the_inferencex_checkout_briefs_its_launches_for_the_s
     briefed = {}
     for name, references in (("given", (given,)), ("without", ())):
         (tmp_path / name).mkdir()
-        monkeypatch.setenv(MB_FRAMEWORK_REPO_ENV, str(tmp_path / name / "framework"))
-        stage = _stage(tmp_path / name, child=child_with_patch(tmp_path / name))
+        monkeypatch.setenv(MB_FRAMEWORK_REPO_ENV, str(framework_checkout(tmp_path / name)))
+        stage = _stage(tmp_path / name)
         stage.settings = replace(stage.settings, references=references)
         await stage.run()
         briefed[name] = stage.briefs.references
@@ -934,7 +929,7 @@ async def test_a_run_given_the_inferencex_checkout_briefs_its_launches_for_the_s
 
 
 async def test_the_dev_leases_of_the_run_reach_the_peers(tmp_path: Path) -> None:
-    stage = _stage(tmp_path, child=None)
+    stage = _stage(tmp_path)
     stage.settings = replace(stage.settings, dev_leases=2)
 
     stage._session()
@@ -943,7 +938,7 @@ async def test_the_dev_leases_of_the_run_reach_the_peers(tmp_path: Path) -> None
 
 
 async def test_the_agent_port_of_the_run_reaches_the_peers(tmp_path: Path) -> None:
-    stage = _stage(tmp_path, child=None)
+    stage = _stage(tmp_path)
     stage.settings = replace(stage.settings, agent_port=32100)
 
     stage._session()
@@ -955,7 +950,7 @@ async def test_the_agent_port_of_the_run_reaches_the_peers(tmp_path: Path) -> No
 async def test_the_session_s_review_stands_in_for_each_arbor_s_own(
     tmp_path: Path, review_gate: bool, handed: str
 ) -> None:
-    stage = _stage(tmp_path, child=None)
+    stage = _stage(tmp_path)
     stage.settings = replace(stage.settings, review_gate=review_gate)
 
     stage._session()
@@ -963,22 +958,32 @@ async def test_the_session_s_review_stands_in_for_each_arbor_s_own(
     assert stage.setup.agent_review == handed
 
 
-async def test_a_failed_prelude_skips_to_close(tmp_path: Path) -> None:
-    stage = _stage(tmp_path, child=None, exit_code=1)
+class UnmeasuredRootToolbox(LeasingToolbox):
+    """The leasing toolbox whose root tests never measure; a failure double, not a placeholder."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.script(lambda request: request.purpose is Purpose.BASELINE, [Fate.MEASUREMENT])
+
+
+async def test_a_prelude_whose_root_tests_do_not_measure_fails_and_skips_to_close(tmp_path: Path) -> None:
+    stage = _stage(tmp_path)
+    stage.toolbox_type = UnmeasuredRootToolbox
 
     outcome = await stage.run()
 
     assert outcome.stop_reason is SessionStopReason.PRELUDE_FAILED and outcome.exit_code == 1
-    assert "exited with 1" in outcome.error
+    assert "the baseline anchors nothing: 0 of 3 root tests measured" in outcome.error
     assert outcome.final is None and outcome.close is not None and outcome.close.stop.clean
     assert stage.judge.calls == []
+    assert {request.purpose for request in stage.toolbox.requests.values()} <= {Purpose.BASELINE, Purpose.PROFILE}
     assert json.loads(stage.layout.report.read_text())["stop_reason"] == SessionStopReason.PRELUDE_FAILED.value
 
 
-async def test_a_session_on_this_machine_runs_its_root_tests_and_champion_beside_the_prelude_child_on_leased_cards(
+async def test_a_session_on_this_machines_cards_starts_no_prelude_process_and_measures_the_root_through_the_toolbox(
     tmp_path: Path,
 ) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path), linger=CHILD_BESIDE_SECONDS)
+    stage = _stage(tmp_path)
     stage.recipe_kb = OneChampionKB()
     stage.judge = ScriptedCompletion([_reply({"open": 0, "stop_session": {"reason": CONVERGED_REASON}})])
 
@@ -986,55 +991,58 @@ async def test_a_session_on_this_machine_runs_its_root_tests_and_champion_beside
 
     assert (outcome.stop_reason, outcome.error) == (SessionStopReason.JUDGE_STOPPED, "")
     toolbox = stage.toolbox
-    assert isinstance(toolbox, LeasingToolbox)
-    assert (toolbox.leased, toolbox.released) == ([("prelude", WORKLOAD.tp)], ["lease-1"])
-    beside = sorted(purpose.value for purpose, held in toolbox.beside_a_lease if held)
-    prelude = [Purpose.BASELINE] * BASELINE_TESTS + [Purpose.INTEGRATION, Purpose.CONFIRM]
-    assert beside == sorted(purpose.value for purpose in prelude)
-    assert stage.processes.env is not None and stage.processes.env[CHILD_CARDS_ENV] == "6"
+    assert isinstance(toolbox, LeasingToolbox) and toolbox.leased == []
+    recorded = [json.loads(line)["branch"] for line in stage.layout.pids.read_text().splitlines()]
+    assert recorded == [SCHEDULER_BRANCH]
+    root = await stage.root()
+    at_root = sorted(
+        request.purpose.value
+        for request in toolbox.requests.values()
+        if request.parent_commit == root and request.purpose is not Purpose.FINAL
+    )
+    prelude = [Purpose.BASELINE] * BASELINE_TESTS + [Purpose.PROFILE, Purpose.INTEGRATION, Purpose.CONFIRM]
+    assert at_root == sorted(purpose.value for purpose in prelude)
     baseline = await stage.handle(Role.OBSERVER).baseline()
     assert sorted(baseline.request_ids) == sorted(
         request_id for request_id, request in toolbox.requests.items() if request.purpose is Purpose.BASELINE
     )
 
 
-class SandboxToolbox(RecordingToolbox):
-    """The recording toolbox of a backend measuring in sandboxes elsewhere, so it leases no card, with a TraceLens route
-    whose job ends at once with :data:`SANDBOX_SHARES` on the commit its profile test measured; a double for a hosted
-    backend, not a placeholder."""
+class ProfilingToolbox(RecordingToolbox):
+    """The recording toolbox with a TraceLens route whose job ends at once with :data:`ROOT_SHARES` on the commit its
+    profile test measured; a double for a backend that profiles, not a placeholder."""
 
     async def submit_analysis(
         self, branch: str, tool: str, params: Mapping[str, Any], profile_request_id: str = ""
     ) -> str:
         commit = self.requests[profile_request_id].parent_commit
         pointer = ToolResultPointer(branch, "tracelens-1", "/a", "trace analysed", commit, profile_request_id)
-        await self.blackboard.notify_tool_result(replace(pointer, op_shares=SANDBOX_SHARES))
+        await self.blackboard.notify_tool_result(replace(pointer, op_shares=ROOT_SHARES))
         return pointer.job_id
 
     def tool_status(self, job_id: str) -> JobStatus:
         return JobStatus.SUCCEEDED
 
 
-SANDBOX_SHARES = {"moe_gemm": 41.5, "attention": 22.0}
+ROOT_SHARES = {"moe_gemm": 41.5, "attention": 22.0}
 
 
-async def test_a_session_measuring_in_sandboxes_starts_no_child_and_opens_explore_on_the_roots_own_profile(
+async def test_a_session_opens_explore_on_the_roots_own_profile_read_before_the_opening_judge_call(
     tmp_path: Path,
 ) -> None:
-    stage = _stage(tmp_path, child=None, exit_code=1)
-    stage.toolbox_type, stage.on_this_machine = SandboxToolbox, False
+    stage = _stage(tmp_path)
+    stage.toolbox_type = ProfilingToolbox
     stage.judge = ScriptedCompletion([_reply({"open": 1, "branches": [], "stop": []})])
 
     outcome = await stage.run()
 
     assert (outcome.stop_reason, outcome.error, outcome.exit_code) == (SessionStopReason.TIME_EXHAUSTED, "", 0)
-    assert stage.processes.child is None
     root = await stage.root()
     prelude = [request for request in stage.toolbox.requests.values() if request.parent_commit == root]
     purposes = sorted(request.purpose.value for request in prelude if request.purpose is not Purpose.FINAL)
     assert purposes == sorted([Purpose.BASELINE.value] * BASELINE_TESTS + [Purpose.PROFILE.value])
     shares = await stage.handle(Role.OBSERVER).op_shares(root)
-    assert shares is not None and dict(shares.shares) == SANDBOX_SHARES
+    assert shares is not None and dict(shares.shares) == ROOT_SHARES
     rows = _decisions(stage)
     profiled = next(index for index, row in enumerate(rows) if row["kind"] == "profile")
     assert rows[profiled]["reason"] == PROFILED and rows[profiled]["detail"]["commit"] == root
@@ -1045,9 +1053,7 @@ async def test_a_session_measuring_in_sandboxes_starts_no_child_and_opens_explor
 
 
 async def test_an_agentx_champion_replay_asks_for_no_confirm_ahead_of_its_judgement(tmp_path: Path) -> None:
-    child = child_with_patch(tmp_path)
-    with_agentx_baseline_run(child, DEFAULT_BASELINE, runtime_seconds=AGENTX_CHILD_RUN_SECONDS)
-    stage = _stage(tmp_path, child=child)
+    stage = _stage(tmp_path)
     stage.settings = replace(SETTINGS, workload=AGENTX)
     stage.recipe_kb = OneChampionKB()
     stage.judge = ScriptedCompletion([_reply({"open": 0, "stop_session": {"reason": CONVERGED_REASON}})])
@@ -1060,20 +1066,6 @@ async def test_an_agentx_champion_replay_asks_for_no_confirm_ahead_of_its_judgem
     assert not [request for request in requests.values() if request.retest_of == replay]
 
 
-async def test_a_child_whose_baseline_failed_fails_prelude_at_once_with_its_reason(tmp_path: Path) -> None:
-    stage = _stage(tmp_path, child=failed_child(tmp_path), exit_code=1)
-
-    outcome = await stage.run()
-
-    assert outcome.stop_reason is SessionStopReason.PRELUDE_FAILED and outcome.exit_code == 1
-    assert "stop_reason='baseline_failed'" in outcome.error and repr(BASELINE_ERROR_CLASS) in outcome.error
-    assert outcome.final is None and outcome.close is not None and outcome.close.stop.clean
-    assert stage.judge.calls == []
-    assert {request.purpose for request in stage.toolbox.requests.values()} == {Purpose.BASELINE}
-    assert stage.time.now() - START < 60.0
-    assert json.loads(stage.layout.report.read_text())["stop_reason"] == SessionStopReason.PRELUDE_FAILED.value
-
-
 def _fails_strictly() -> ImageCheckReport:
     raise ImageCheckFailed(replace(IMAGE_CHECK, mode=ImageCheckMode.STRICT))
 
@@ -1081,18 +1073,18 @@ def _fails_strictly() -> ImageCheckReport:
 async def test_a_strict_image_check_that_fails_stops_the_session_before_its_manifest_and_any_phase(
     tmp_path: Path,
 ) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.image_check = _fails_strictly
 
     with pytest.raises(ImageCheckFailed, match="sglang.renamed-flag"):
         await stage.run()
 
     assert not stage.layout.manifest.exists() and not stage.layout.report.exists()
-    assert stage.judge.calls == [] and not stage.layout.prelude_child.exists()
+    assert stage.judge.calls == []
 
 
 async def test_a_stop_signal_skips_to_close_and_stops_every_branch(tmp_path: Path) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
 
     async def interrupted(branch: str) -> None:
         await stage.time.sleep(STEP_SECONDS)
@@ -1128,7 +1120,7 @@ def _signalling(stage: Stage) -> dict[str, SessionStep]:
 
 
 async def test_close_after_a_signal_waits_the_close_grace_not_the_budget(tmp_path: Path) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.steps, stage.hanging = _signalling(stage), frozenset({"b01", "b02"})
 
     outcome = await stage.run()
@@ -1140,7 +1132,7 @@ async def test_close_after_a_signal_waits_the_close_grace_not_the_budget(tmp_pat
 
 
 async def test_a_toolbox_that_cannot_stop_after_a_signal_does_not_hold_close_up(tmp_path: Path) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.toolbox_type, stage.stuck = StuckToolbox, frozenset({INTEGRATION_BRANCH})
     stage.steps = _signalling(stage)
 
@@ -1154,7 +1146,7 @@ async def test_a_toolbox_that_cannot_stop_after_a_signal_does_not_hold_close_up(
 
 
 async def test_after_a_signal_the_session_ends_within_one_close_grace(tmp_path: Path) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.toolbox_type, stage.stuck = StuckToolbox, frozenset({INTEGRATION_BRANCH})
     stage.steps, stage.hanging = _signalling(stage), frozenset({"b01", "b02"})
 
@@ -1167,7 +1159,7 @@ async def test_after_a_signal_the_session_ends_within_one_close_grace(tmp_path: 
 
 
 async def test_a_signal_during_a_hanging_close_cuts_it_short_and_leaves_no_process(tmp_path: Path) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.steps, stage.runtime_type = _signalling(stage), InsistingRuntime
 
     outcome = await stage.run()
@@ -1184,7 +1176,7 @@ async def test_a_signal_during_a_hanging_close_cuts_it_short_and_leaves_no_proce
 
 
 async def test_a_judge_that_never_answers_gives_up_at_the_explore_deadline_and_opens_nothing(tmp_path: Path) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.judge = SilentModel()
 
     outcome = await stage.run()
@@ -1210,7 +1202,7 @@ def _judge_state(prompt: str) -> dict[str, Any]:
 
 
 async def test_spent_gpu_hours_end_explore_as_a_completed_session_that_still_runs_final(tmp_path: Path) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.settings = replace(SETTINGS, max_gpu_hours=TINY_GPU_HOURS)
     stage.judge = ScriptedCompletion([OPENING])
 
@@ -1225,12 +1217,12 @@ async def test_spent_gpu_hours_end_explore_as_a_completed_session_that_still_run
     [close] = [row for row in _decisions(stage) if row["kind"] == "session_stop"]
     assert close["reason"] == SessionStopReason.GPU_HOURS_EXHAUSTED.value
 
-    # The opening call comes after PRELUDE and before any branch ran a test: what it was shown is the baseline on the
-    # root, which the PRELUDE child's own measurements never reach.
+    # The opening call comes after PRELUDE and before any branch ran a test: what it was shown is PRELUDE's root tests
+    # and its profile of the root.
     records = (await stage.handle(Role.OBSERVER).snapshot()).records
-    baseline = [record for record in records if record.request.purpose is Purpose.BASELINE]
-    assert baseline and all(record.result is not None for record in baseline)
-    baseline_seconds = sum(record.result.gpu_seconds for record in baseline if record.result is not None)
+    prelude = [record for record in records if record.request.purpose in (Purpose.BASELINE, Purpose.PROFILE)]
+    assert prelude and all(record.result is not None for record in prelude)
+    baseline_seconds = sum(record.result.gpu_seconds for record in prelude if record.result is not None)
     [opening] = _judge_prompts(stage)
     spend = _judge_state(opening)["spend"]
     assert spend["gpu_hours_used"] == round(baseline_seconds / MB_SECONDS_PER_HOUR, 3) > 0
@@ -1238,7 +1230,7 @@ async def test_spent_gpu_hours_end_explore_as_a_completed_session_that_still_run
 
 
 async def test_card_time_a_lease_holds_ends_explore_on_the_gpu_hours_and_final_still_runs(tmp_path: Path) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.settings = replace(
         SETTINGS, max_gpu_hours=LEASED_GPU_HOURS, judge_interval_seconds=LEASED_JUDGE_INTERVAL_SECONDS
     )
@@ -1273,7 +1265,7 @@ async def test_card_time_a_lease_holds_ends_explore_on_the_gpu_hours_and_final_s
 async def test_spent_specialist_llm_dollars_end_explore_as_a_completed_session_that_still_runs_final(
     tmp_path: Path,
 ) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.settings = replace(SETTINGS, max_llm_usd=SMALL_LLM_USD)
     stage.judge = ScriptedCompletion([OPENING])
 
@@ -1298,7 +1290,7 @@ async def test_spent_specialist_llm_dollars_end_explore_as_a_completed_session_t
 
 
 async def test_the_judge_s_own_llm_dollars_count_against_the_llm_budget(tmp_path: Path) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.settings = replace(SETTINGS, max_llm_usd=SMALL_LLM_USD)
     stage.judge = ScriptedCompletion([OPENING], tokens=JUDGE_TOKENS, cost_usd=LAUNCH_USD)
 
@@ -1314,7 +1306,7 @@ async def test_the_judge_s_own_llm_dollars_count_against_the_llm_budget(tmp_path
 
 
 async def test_the_fix_critic_s_llm_dollars_count_against_the_llm_budget_as_the_scheduler_s(tmp_path: Path) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.settings = replace(SETTINGS, max_llm_usd=SMALL_LLM_USD)
     stage.judge = ScriptedCompletion([OPENING])
 
@@ -1345,7 +1337,7 @@ async def test_the_fix_critic_s_llm_dollars_count_against_the_llm_budget_as_the_
 
 
 async def test_a_judge_soft_stop_ends_explore_early_and_still_runs_final(tmp_path: Path) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.judge = ScriptedCompletion([OPENING, _reply({"open": 0, "stop_session": {"reason": CONVERGED_REASON}})])
 
     outcome = await stage.run()
@@ -1362,7 +1354,7 @@ async def test_a_judge_soft_stop_ends_explore_early_and_still_runs_final(tmp_pat
 
 
 async def test_a_specialist_that_never_stops_at_the_end_of_explore_does_not_hold_final_up(tmp_path: Path) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.judge = ScriptedCompletion([OPENING, _reply({"open": 0, "stop_session": {"reason": CONVERGED_REASON}})])
     stage.hanging = frozenset({"b01"})
 
@@ -1378,7 +1370,7 @@ async def test_a_specialist_that_never_stops_at_the_end_of_explore_does_not_hold
 
 
 async def test_a_judge_stop_that_never_returns_does_not_freeze_explore(tmp_path: Path) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     _script(stage)
     stage.hanging = frozenset({"b02"})
 
@@ -1392,7 +1384,7 @@ async def test_a_judge_stop_that_never_returns_does_not_freeze_explore(tmp_path:
 
 
 async def test_a_first_signal_during_close_cuts_it_short_after_one_close_grace(tmp_path: Path) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.judge = ScriptedCompletion([OPENING, _reply({"open": 0, "stop_session": {"reason": CONVERGED_REASON}})])
     stage.toolbox_type = SignallingToolbox
 
@@ -1407,7 +1399,7 @@ async def test_a_first_signal_during_close_cuts_it_short_after_one_close_grace(t
 
 
 async def test_an_unhandled_error_bounds_close_by_one_close_grace(tmp_path: Path) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.toolbox_type, stage.repo_type = StuckToolbox, NoObjectStore
 
     with pytest.raises(LookupError, match="no object store"):
@@ -1422,7 +1414,7 @@ async def test_an_unhandled_error_bounds_close_by_one_close_grace(tmp_path: Path
 
 
 async def test_a_soft_stop_on_the_opening_call_opens_no_branch(tmp_path: Path) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.judge = ScriptedCompletion([_reply({"open": 2, "stop_session": {"reason": CONVERGED_REASON}})])
 
     outcome = await stage.run()
@@ -1432,7 +1424,7 @@ async def test_a_soft_stop_on_the_opening_call_opens_no_branch(tmp_path: Path) -
 
 
 async def test_a_failed_opening_judge_call_opens_one_branch_at_k_one(tmp_path: Path) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.judge = ScriptedCompletion(error=CompletionFailed("judge call failed: RuntimeError: status=529"))
 
     outcome = await stage.run()
@@ -1464,7 +1456,7 @@ def _crowding(stage: Stage) -> type[RefusingRuntime]:
 async def test_forks_admitted_while_the_opening_batch_starts_cut_the_batch_and_the_session_goes_on(
     tmp_path: Path,
 ) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.judge = ScriptedCompletion([_reply({"open": 3, "branches": [], "stop": []})])
     stage.runtime_type = _crowding(stage)
 
@@ -1490,7 +1482,7 @@ async def test_forks_admitted_while_the_opening_batch_starts_cut_the_batch_and_t
 async def test_explore_ends_the_longest_baseline_test_and_one_close_grace_before_the_deadline_then_final_and_close_run(
     tmp_path: Path,
 ) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
 
     outcome = await stage.run()
 
@@ -1539,7 +1531,7 @@ def _slow_final(stage: Stage, *, interrupt: bool = False) -> type[RecordingToolb
 
 
 async def test_a_final_whose_validation_outlasts_the_budget_still_chooses_and_close_follows_it(tmp_path: Path) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.toolbox_type = _slow_final(stage)
 
     outcome = await stage.run()
@@ -1557,7 +1549,7 @@ async def test_a_final_whose_validation_outlasts_the_budget_still_chooses_and_cl
 async def test_a_stop_signal_cuts_a_final_past_the_hard_stop_short_and_close_gets_one_close_grace(
     tmp_path: Path,
 ) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.toolbox_type = _slow_final(stage, interrupt=True)
 
     outcome = await stage.run()
@@ -1584,7 +1576,7 @@ class StuckStopToolbox(LeasingToolbox):
 
 
 async def test_final_only_validates_the_branches_a_session_that_never_reached_final_left(tmp_path: Path) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.scripts = SCRIPTS
     stage.toolbox_type = StuckStopToolbox
 
@@ -1639,7 +1631,7 @@ def _as_another_pod(pids: Path) -> None:
 
 
 async def test_final_only_finishes_a_session_that_was_killed_before_it_could_close(tmp_path: Path) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.scripts = SCRIPTS
     stage.toolbox_type = StuckStopToolbox
     await stage.run()
@@ -1671,7 +1663,7 @@ async def test_final_only_finishes_a_session_that_was_killed_before_it_could_clo
 async def test_a_stop_signal_during_a_final_only_still_leaves_a_report_within_one_close_grace(
     tmp_path: Path,
 ) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.scripts = SCRIPTS
     stage.toolbox_type = StuckStopToolbox
     await stage.run()
@@ -1706,7 +1698,7 @@ class NoRegressionSet(FakeRegressionCheck):
 async def test_a_final_only_that_fails_reports_the_session_as_it_ended_and_leaves_it_open_to_another(
     tmp_path: Path,
 ) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.scripts = SCRIPTS
     stage.toolbox_type = StuckStopToolbox
     await stage.run()
@@ -1724,7 +1716,7 @@ async def test_a_final_only_that_fails_reports_the_session_as_it_ended_and_leave
 
 
 async def test_an_unreadable_steering_reply_keeps_every_branch_and_k_as_they_were(tmp_path: Path) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.judge = ScriptedCompletion([OPENING], fallback="Stop b02 and give b01 one test.")
     stage.settings = replace(SETTINGS, max_hours=1.0)
 
@@ -1742,7 +1734,7 @@ async def test_an_unreadable_steering_reply_keeps_every_branch_and_k_as_they_wer
 
 
 async def test_a_judge_stop_the_runtime_refuses_does_not_end_the_session(tmp_path: Path) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     _script(stage)
     stage.refusing = frozenset({"b02"})
 
@@ -1792,7 +1784,7 @@ async def _refilled_on_a_full_roster(stage: Stage, open_count: int) -> str:
 async def test_a_judge_stop_on_a_full_roster_frees_a_slot_refilled_at_once_from_the_integration_head(
     tmp_path: Path,
 ) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
 
     refill = await _refilled_on_a_full_roster(stage, 1)
 
@@ -1801,7 +1793,7 @@ async def test_a_judge_stop_on_a_full_roster_frees_a_slot_refilled_at_once_from_
 
 
 async def test_the_judge_sees_each_live_specialist_as_the_runtime_reports_it(tmp_path: Path) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     _script(stage, forks=1)
     stage.steps = {**stage.steps, "b02": _loses_its_heartbeat}
     stage.judge = ScriptedCompletion([OPENING, _refill_steer(1)])
@@ -1826,7 +1818,7 @@ async def test_the_judge_sees_each_live_specialist_as_the_runtime_reports_it(tmp
 
 
 async def test_a_branch_whose_specialist_gave_up_is_stopped_before_the_next_judge_call(tmp_path: Path) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     _script(stage, forks=1)
     stage.steps = {**stage.steps, "b02": _loses_its_heartbeat}
     stage.judge = ScriptedCompletion([OPENING, _refill_steer(1)])
@@ -1873,7 +1865,7 @@ async def test_two_agents_each_start_at_the_root_on_the_share_of_the_session_s_d
         return ("/shares/share-1.json", "/shares/share-2.json")
 
     monkeypatch.setattr(lifecycle, "agent_plans", split)
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.settings = replace(SETTINGS, agents=("/agents/arbor", "/agents/arbor"), agent_directions="/maps/d.json")
     stage.judge = ScriptedCompletion([])
 
@@ -1909,7 +1901,7 @@ async def test_two_agents_started_on_their_shares_both_have_their_keeps_merged_i
 
     monkeypatch.setattr(lifecycle, "agent_plans", split)
     monkeypatch.setattr(lifecycle, "arbor_agents", _two_arbors)
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.settings = replace(SETTINGS, agents=("/agents/arbor", "/agents/arbor"))
     # b01 maps, and the two shares open as b02 and b03.
     stage.scripts = {"b02": (tagged("a1"),), "b03": (tagged("a2"),)}
@@ -1969,7 +1961,7 @@ async def test_without_a_map_two_arbors_split_the_map_of_the_session_s_dossier_p
 
     monkeypatch.setattr(lifecycle, "agent_plans", split)
     monkeypatch.setattr(lifecycle, "arbor_agents", _two_arbors)
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.settings = replace(SETTINGS, agents=("/agents/arbor", "/agents/arbor"))
     stage.dossier_pass = dossier
     stage.judge = ScriptedCompletion([])
@@ -2023,7 +2015,7 @@ async def test_a_dossier_pass_with_no_map_or_no_minutes_leaves_the_split_to_the_
 
     monkeypatch.setattr(lifecycle, "agent_plans", split)
     monkeypatch.setattr(lifecycle, "arbor_agents", _two_arbors)
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.settings = replace(SETTINGS, agents=("/agents/arbor", "/agents/arbor"), agent_dossier_minutes=minutes)
     stage.dossier_pass = dossier
     stage.judge = ScriptedCompletion([])
@@ -2065,7 +2057,7 @@ async def test_a_run_that_stops_after_its_map_maps_one_arbor_keeps_map_and_dossi
         return DossierOutcome(map_file, dossier, MAPPED)
 
     monkeypatch.setattr(lifecycle, "arbor_agents", _one_arbor)
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.settings = replace(SETTINGS, agents=("/agents/arbor",), stop_after_map=True)
     stage.dossier_pass = mapping
 
@@ -2107,7 +2099,7 @@ async def test_a_run_that_stops_after_its_map_keeps_a_map_generated_from_the_roo
 
     monkeypatch.setattr(lifecycle, "arbor_agents", _one_arbor)
     monkeypatch.setattr(lifecycle, "generated_map", generate)
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.settings = replace(SETTINGS, agents=("/agents/arbor",), stop_after_map=True)
     stage.dossier_pass = mapping
 
@@ -2134,7 +2126,7 @@ async def test_a_run_that_stops_after_its_map_and_gets_none_fails_with_why_and_k
 
     monkeypatch.setattr(lifecycle, "arbor_agents", _one_arbor)
     monkeypatch.setattr(lifecycle, "generated_map", generate)
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.settings = replace(SETTINGS, agents=("/agents/arbor",), stop_after_map=True)
     stage.dossier_pass = mapping
 
@@ -2192,7 +2184,7 @@ def _two_arbors_reviewed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, read: 
 
     monkeypatch.setattr(lifecycle, "agent_plans", split)
     monkeypatch.setattr(lifecycle, "arbor_agents", _two_arbors)
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.settings = replace(SETTINGS, agents=("/agents/arbor", "/agents/arbor"), review_gate=True)
     stage.dossier_pass = mapping
     stage.judge = ScriptedCompletion([])
@@ -2328,7 +2320,7 @@ async def test_with_the_review_on_one_arbor_gets_the_map_step_and_takes_the_revi
 
     monkeypatch.setattr(lifecycle, "agent_plans", split)
     monkeypatch.setattr(lifecycle, "arbor_agents", _one_arbor)
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.settings = replace(SETTINGS, agents=("/agents/arbor",), review_gate=True)
     stage.dossier_pass = mapping
     stage.judge = ScriptedCompletion([])
@@ -2358,7 +2350,7 @@ async def test_a_given_map_is_reviewed_too_and_split_as_given(tmp_path: Path, mo
 
     monkeypatch.setattr(lifecycle, "agent_plans", split)
     monkeypatch.setattr(lifecycle, "arbor_agents", _two_arbors)
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.settings = replace(
         SETTINGS, agents=("/agents/arbor", "/agents/arbor"), agent_directions=str(given), review_gate=True
     )
@@ -2382,7 +2374,7 @@ async def test_a_run_that_stops_after_its_map_does_not_pause_even_with_the_revie
         return DossierOutcome(map_file, dossier, MAPPED)
 
     monkeypatch.setattr(lifecycle, "arbor_agents", _one_arbor)
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.settings = replace(SETTINGS, agents=("/agents/arbor",), stop_after_map=True, review_gate=True)
     stage.dossier_pass = mapping
 
@@ -2400,7 +2392,7 @@ async def test_a_user_branch_opens_first_at_the_root_and_the_judge_neither_stops
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(judge, "SETTLED_TESTS", SETTLED_TESTS)
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.settings = replace(SETTINGS, user_directions=(USER_DIRECTION,))
     stops = [{"branch": "b01", "reason": STOP_REASON}, {"branch": "b02", "reason": STOP_REASON}]
     stage.judge = ScriptedCompletion([OPENING, _reply({"open": 1, "branches": [], "stop": stops})])
@@ -2455,7 +2447,7 @@ async def test_the_judge_cannot_stop_a_branch_whose_candidate_waits_for_its_conf
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _candidate_waits_on_b02(monkeypatch, lambda: True)
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
 
     outcome = await stage.run()
 
@@ -2473,7 +2465,7 @@ async def test_the_judge_cannot_stop_a_branch_whose_candidate_waits_for_its_conf
 async def test_a_candidate_that_starts_waiting_while_the_judge_answers_holds_its_branch_against_that_answer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     _candidate_waits_on_b02(monkeypatch, lambda: len(stage.judge.calls) >= 2)
 
     outcome = await stage.run()
@@ -2491,7 +2483,7 @@ async def test_a_branch_whose_specialist_gave_up_is_not_stopped_while_its_candid
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _candidate_waits_on_b02(monkeypatch, lambda: True)
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.steps = {**stage.steps, "b02": _loses_its_heartbeat}
 
     outcome = await stage.run()
@@ -2504,7 +2496,7 @@ async def test_a_branch_whose_specialist_gave_up_is_not_stopped_while_its_candid
 
 
 async def test_a_failed_opening_judge_call_opens_no_branch_beside_the_user_branches(tmp_path: Path) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.settings = replace(SETTINGS, user_directions=(USER_DIRECTION, "Tune the attention block size."))
     stage.judge = ScriptedCompletion(error=CompletionFailed("judge call failed: RuntimeError: status=529"))
 
@@ -2525,7 +2517,7 @@ class NoFirstBranchRuntime(RefusingRuntime):
 
 
 async def test_a_failed_opening_judge_call_opens_one_branch_when_no_user_branch_started(tmp_path: Path) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.settings = replace(SETTINGS, user_directions=(USER_DIRECTION,))
     stage.judge = ScriptedCompletion(error=CompletionFailed("judge call failed: RuntimeError: status=529"))
     stage.runtime_type = NoFirstBranchRuntime
@@ -2540,7 +2532,7 @@ async def test_a_failed_opening_judge_call_opens_one_branch_when_no_user_branch_
 
 
 async def test_a_judge_asking_for_more_than_its_stops_free_opens_what_fits_and_records_the_cut(tmp_path: Path) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
 
     await _refilled_on_a_full_roster(stage, 2)
 
@@ -2556,7 +2548,7 @@ async def test_a_judge_asking_for_more_than_its_stops_free_opens_what_fits_and_r
 async def test_a_judge_opens_a_later_batch_without_stopping_a_branch_on_the_largest_op_of_the_head(
     tmp_path: Path,
 ) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     opening = _reply({"open": 1, "focus": ["attention"], "branches": [], "stop": []})
     stage.judge = ScriptedCompletion([opening, _reply({"open": 1, "branches": [], "stop": []})])
 
@@ -2612,7 +2604,7 @@ async def test_a_repair_stopped_at_its_time_limit_has_the_judge_asked_at_the_nex
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(branches, "REPAIR_BRANCH_SECONDS", 60.0)
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.runtime_type = _admit_on_start(stage, lambda b, c: stage.setup.desk.admit_repair(_repair(b, c)))
 
     await stage.run()
@@ -2625,7 +2617,7 @@ async def test_a_repair_stopped_at_its_time_limit_has_the_judge_asked_at_the_nex
 
 
 async def test_a_fork_the_gate_does_not_land_is_voided_and_has_the_judge_asked_at_the_next_tick(tmp_path: Path) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.runtime_type = _admit_on_start(stage, lambda b, c: stage.setup.desk.admit(ForkRequest(b, c, FIX_REASON)))
 
     await stage.run()
@@ -2638,7 +2630,7 @@ async def test_a_fork_the_gate_does_not_land_is_voided_and_has_the_judge_asked_a
 
 
 async def test_a_fork_voided_in_the_queue_is_recorded_only_and_never_lands(tmp_path: Path) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     _script(stage)
     stop_b01 = _reply({"open": 0, "branches": [], "stop": [{"branch": "b01", "reason": STOP_REASON}]})
     stage.judge = ScriptedCompletion([OPENING, stop_b01])
@@ -2696,7 +2688,7 @@ async def _queued_repair_session(stage: Stage, stops: str, failing: str = "") ->
 async def test_a_queued_repair_takes_the_slot_a_judge_stop_frees_before_the_judge_opens_a_branch(
     tmp_path: Path,
 ) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
 
     await _queued_repair_session(stage, stops="b01")
 
@@ -2714,7 +2706,7 @@ async def test_a_queued_repair_takes_the_slot_a_judge_stop_frees_before_the_judg
 
 
 async def test_a_queued_repair_is_voided_when_the_branch_that_asked_for_it_stops(tmp_path: Path) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
 
     await _queued_repair_session(stage, stops="b02")
 
@@ -2725,7 +2717,7 @@ async def test_a_queued_repair_is_voided_when_the_branch_that_asked_for_it_stops
 
 
 async def test_a_dequeued_repair_that_fails_to_start_has_the_judge_asked_at_the_next_tick(tmp_path: Path) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
 
     await _queued_repair_session(stage, stops="b01", failing="b04")
 
@@ -2749,7 +2741,7 @@ class NoRefillRuntime(RefusingRuntime):
 async def test_a_branch_the_judge_opens_that_fails_to_start_does_not_have_the_judge_asked_early(
     tmp_path: Path,
 ) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.judge = ScriptedCompletion([_reply({"open": 1})], fallback=_reply({"open": 1}))
     stage.runtime_type = NoRefillRuntime
     stage.settings = replace(SETTINGS, max_hours=1.0)
@@ -2767,7 +2759,7 @@ async def test_a_branch_the_judge_opens_that_fails_to_start_does_not_have_the_ju
 
 
 async def test_a_repair_admitted_while_a_refill_starts_cuts_the_refill_and_the_session_goes_on(tmp_path: Path) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.judge = ScriptedCompletion([_reply({"open": 1}), _reply({"open": 2})])
 
     class CrowdingRefill(RefusingRuntime):
@@ -2792,7 +2784,7 @@ async def test_a_repair_admitted_while_a_refill_starts_cuts_the_refill_and_the_s
 
 
 async def test_a_whole_node_quarantine_is_shown_to_the_judge_at_once_and_explore_goes_on(tmp_path: Path) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.judge = ScriptedCompletion([_reply({"open": 1, "branches": [], "stop": []})])
 
     async def quarantine(branch: str) -> None:
@@ -2830,7 +2822,7 @@ class CardsLostToolbox(LeasingToolbox):
 async def test_a_toolbox_without_cards_for_a_test_ends_explore_as_a_failed_session_that_skips_final(
     tmp_path: Path,
 ) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.judge = ScriptedCompletion([_reply({"open": 1, "branches": [], "stop": []})])
     stage.toolbox_type = CardsLostToolbox
 
@@ -2865,8 +2857,9 @@ async def test_a_toolbox_without_cards_for_a_test_ends_explore_as_a_failed_sessi
 
 
 class AnalysingToolbox(LeasingToolbox):
-    """The recording toolbox with an analysis route whose TraceLens job never ends, noting every test taken back; a
-    double for a backend that profiles, not a placeholder."""
+    """The recording toolbox with an analysis route whose TraceLens job of PRELUDE's root profile ends at once and
+    every later one never does, noting every test taken back; a double for a backend that profiles, not a
+    placeholder."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -2877,24 +2870,28 @@ class AnalysingToolbox(LeasingToolbox):
         self, branch: str, tool: str, params: Mapping[str, Any], profile_request_id: str = ""
     ) -> str:
         self.analysed.append(profile_request_id)
-        return "tracelens-1"
+        return f"tracelens-{len(self.analysed)}"
 
     def tool_status(self, job_id: str) -> JobStatus:
-        return JobStatus.RUNNING
+        return JobStatus.SUCCEEDED if job_id == "tracelens-1" else JobStatus.RUNNING
 
     async def cancel(self, request_id: str) -> CancelOutcome:
         self.taken_back.append(request_id)
         return await super().cancel(request_id)
 
 
-def _profiles(toolbox: RecordingToolbox) -> list[tuple[str, TestRequest]]:
+def _profiles(toolbox: RecordingToolbox, root: str) -> list[tuple[str, TestRequest]]:
+    """The profile tests of the session, but PRELUDE's of the ``root``."""
+
     return [
-        (request_id, request) for request_id, request in toolbox.requests.items() if request.kind is TestKind.PROFILE
+        (request_id, request)
+        for request_id, request in toolbox.requests.items()
+        if request.kind is TestKind.PROFILE and request.parent_commit != root
     ]
 
 
 async def test_a_large_merge_profiles_the_integration_head_without_holding_the_judge_up(tmp_path: Path) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.judge = ScriptedCompletion([_reply({"open": 1, "branches": [], "stop": []})])
     stage.scripts = {"b01": (tagged("c1"),)}
     stage.toolbox_type = AnalysingToolbox
@@ -2902,37 +2899,38 @@ async def test_a_large_merge_profiles_the_integration_head_without_holding_the_j
     outcome = await stage.run()
 
     assert (outcome.stop_reason, outcome.error, outcome.exit_code) == (SessionStopReason.TIME_EXHAUSTED, "", 0)
-    head = await stage.repo.head(INTEGRATION_BRANCH)
-    [(request_id, profile)] = _profiles(stage.toolbox)
+    head, root = await stage.repo.head(INTEGRATION_BRANCH), await stage.root()
+    [(request_id, profile)] = _profiles(stage.toolbox, root)
     assert (profile.purpose, profile.branch_id, profile.parent_commit) == (Purpose.PROFILE, INTEGRATION_BRANCH, head)
-    assert isinstance(stage.toolbox, AnalysingToolbox) and stage.toolbox.analysed == [request_id]
+    assert isinstance(stage.toolbox, AnalysingToolbox) and stage.toolbox.analysed[1:] == [request_id]
     [moved] = [row for row in _decisions(stage) if row["kind"] == "event"]
     assert moved["detail"]["event"] == "integration_moved"
     calls = [json.loads(line) for line in stage.layout.judge.read_text().splitlines()]
     running = [call["at"] for call in calls if '"profile_running": true' in call["prompt"]]
     assert len(running) >= 2 and running[1] - running[0] == SETTINGS.judge_interval_seconds
     assert request_id in stage.toolbox.taken_back
-    assert not [row for row in _decisions(stage) if row["kind"] == "profile"]
+    assert [row["detail"]["commit"] for row in _decisions(stage) if row["kind"] == "profile"] == [root]
 
 
-async def test_a_backend_without_tool_jobs_is_asked_for_one_profile_and_noted_as_unable(tmp_path: Path) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+async def test_a_backend_without_tool_jobs_is_asked_for_preludes_profile_of_the_root_alone_and_noted_as_unable(
+    tmp_path: Path,
+) -> None:
+    stage = _stage(tmp_path)
     _script(stage)
 
     await stage.run()
 
-    [(_, profile)] = _profiles(stage.toolbox)
-    assert profile.parent_commit == await stage.repo.head(INTEGRATION_BRANCH)
+    root = await stage.root()
+    assert _profiles(stage.toolbox, root) == [] and root != await stage.repo.head(INTEGRATION_BRANCH)
     [noted] = [row for row in _decisions(stage) if row["kind"] == "profile"]
+    assert noted["detail"]["commit"] == root
     assert (noted["reason"], noted["detail"]["code"]) == (PROFILE_UNAVAILABLE, "no_tool_executor")
 
 
 async def test_an_agentx_large_merge_leaves_the_head_unprofiled_until_the_judge_opens_a_branch_on_it(
     tmp_path: Path,
 ) -> None:
-    child = child_with_patch(tmp_path)
-    with_agentx_baseline_run(child, DEFAULT_BASELINE, runtime_seconds=AGENTX_CHILD_RUN_SECONDS)
-    stage = _stage(tmp_path, child=child)
+    stage = _stage(tmp_path)
     stage.settings = replace(SETTINGS, workload=AGENTX)
     opening = _reply({"open": 1, "branches": [], "stop": []})
     stage.judge = ScriptedCompletion([opening, opening])
@@ -2945,9 +2943,10 @@ async def test_an_agentx_large_merge_leaves_the_head_unprofiled_until_the_judge_
     assert (outcome.stop_reason, outcome.error, outcome.exit_code) == (SessionStopReason.TIME_EXHAUSTED, "", 0)
     head = await stage.repo.head(INTEGRATION_BRANCH)
     assert stage.sessions.started["b02"] == head
-    [(_, profile)] = _profiles(stage.toolbox)
+    [(_, profile)] = _profiles(stage.toolbox, await stage.root())
     assert (profile.branch_id, profile.parent_commit) == (INTEGRATION_BRANCH, head)
     [moved] = [row for row in _decisions(stage) if row["kind"] == "event"]
     calls = [json.loads(line) for line in stage.layout.judge.read_text().splitlines()]
     running = [(call["at"], '"profile_running": true' in call["prompt"]) for call in calls]
-    assert running[:3] == [(START, False), (moved["at"], False), (moved["at"] + SETTINGS.judge_interval_seconds, True)]
+    after = moved["at"] + SETTINGS.judge_interval_seconds
+    assert running[:3] == [(calls[0]["at"], False), (moved["at"], False), (after, True)]

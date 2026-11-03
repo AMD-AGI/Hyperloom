@@ -18,9 +18,7 @@ the price sheet, cached tokens at cache rates: a specialist launch's calls from 
 cut short, lost or stopped included, so the stop can come up to one launch late, and each call of the scheduler's own
 judge, patch resolver and the rule gate's fix critic as it returns. A cap is a usage error when the price sheet has no
 rate for the model the specialists run on or the one the judge, the patch resolver and the fix critic ask, whose calls
-would record tokens only. ``--reuse-prelude DIR`` roots the session on the child session the PRELUDE of the
-earlier session in ``DIR`` rooted on instead of starting a child, and still measures the baseline; it is a usage error
-unless that session committed its root on the same workload and on the image ``HYPERLOOM_ACTIVE_IMAGE_DIGEST`` names.
+would record tokens only.
 ``--playbook`` says which scheduling playbook the session plays once ``HYPERLOOM_RSI_ARCHIVE`` names an archive:
 ``champion``, ``challenger``, which plays the oldest playbook on trial in the pool beside it and the champion while
 none is, or ``auto`` (the default), a challenger session when the session's id draws it, half of them, so the
@@ -109,7 +107,7 @@ import math
 import os
 import sys
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
@@ -122,7 +120,6 @@ from hyperloom.common.workload_defaults import DEFAULT_EP
 from hyperloom.hosted.host_info import HostGroup, HostInfo, take_host_info
 from hyperloom.hosted.toolbox_inputs import ToolboxInputsError
 from hyperloom.inference_optimizer.session.paths import workspace_root
-from hyperloom.measure.pins import IMAGE_DIGEST_VAR
 from hyperloom.measure.runner.cache_build import CacheBuildError
 from hyperloom.measure.short_prompts.staging import CACHE_ENV as RUNNER_CACHE_ENV
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient, RemoteRecipeConfigurationError
@@ -131,7 +128,7 @@ from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.blackboard.knowledge.reference_leads import INFERENCEX_REFERENCE
 from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.rulegate.critic import LlmCritic, anthropic_critic
-from hyperloom_multibranch.scheduling.budget import MB_DEFAULT_MAX_HOURS, MB_MIN_PRELUDE_HOURS
+from hyperloom_multibranch.scheduling.budget import MB_DEFAULT_MAX_HOURS
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.hosted_peers import PinnedToolboxInputs, load_hosted_peers
 from hyperloom_multibranch.scheduling.hosted_run import (
@@ -170,7 +167,6 @@ from hyperloom_multibranch.scheduling.local_peers import (
     specialist_model,
 )
 from hyperloom_multibranch.scheduling.peers import PeerFactory, PeersUnavailable
-from hyperloom_multibranch.scheduling.prelude import reused_prelude
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry, adopting_orphans
 from hyperloom_multibranch.scheduling.reference import ReferenceSource, reference_source
 from hyperloom_multibranch.scheduling.roster import RosterCaps
@@ -251,13 +247,6 @@ def _add_run_options(run: argparse.ArgumentParser) -> None:
     _add_budget_options(run)
     _add_specialist_input_options(run)
     _add_concurrency_options(run)
-    run.add_argument(
-        "--reuse-prelude",
-        type=Path,
-        default=None,
-        metavar="DIR",
-        help="An earlier session of this workload and image whose PRELUDE child to root on instead of starting one.",
-    )
     _add_playbook_option(run)
     run.add_argument("-v", "--verbose", action=SWITCH, help="Log at debug level.")
 
@@ -562,7 +551,7 @@ def _workload_shape(args: argparse.Namespace) -> InferenceXShape | None:
 
 def _workload_model(args: argparse.Namespace) -> str:
     """``--model``, an agentx workload's model directory by its resolved path: the benchmark the session writes for it
-    pins the directory so, and its PRELUDE child's ``--model`` must name it as pinned."""
+    pins the directory so."""
 
     directory = Path(args.model).expanduser()
     if WorkloadKind(args.workload) is WorkloadKind.AGENTX and directory.is_dir():
@@ -756,8 +745,8 @@ def _limit_errors(args: argparse.Namespace) -> list[str]:
     """What is wrong with the session's limits: its hours, GPU hours, LLM dollars and dev sandboxes."""
 
     errors: list[str] = []
-    if args.max_hours < 0 or 0 < args.max_hours < MB_MIN_PRELUDE_HOURS:
-        errors.append(f"--max-hours must be 0 (no limit) or at least {MB_MIN_PRELUDE_HOURS:.4f} (one minute)")
+    if args.max_hours < 0:
+        errors.append("--max-hours must be 0 (no limit) or a positive number of hours")
     if not math.isfinite(args.max_gpu_hours) or args.max_gpu_hours < 0:
         errors.append("--max-gpu-hours must be 0 (no limit) or a positive number of hours")
     if not math.isfinite(args.max_llm_usd) or args.max_llm_usd < 0:
@@ -938,17 +927,6 @@ def _file_handler(path: Path) -> logging.Handler:
     return handler
 
 
-def _reused_image_digest(env: Mapping[str, str]) -> str:
-    """The image digest an earlier PRELUDE must have run on; raises ValueError when the environment names none."""
-
-    digest = env.get(IMAGE_DIGEST_VAR)
-    if not digest:
-        raise ValueError(
-            f"--reuse-prelude compares the earlier session's image with {IMAGE_DIGEST_VAR}, which is not set"
-        )
-    return digest
-
-
 def require_session_environment(settings: RunSettings, env: Mapping[str, str]) -> None:
     """Raise ValueError when ``env`` contradicts the workload of ``settings``, cannot price its dollar cap or sets an
     image check mode there is none of."""
@@ -1117,9 +1095,6 @@ def _run_settings(args: argparse.Namespace, grant: HandedGrant | None) -> RunSet
     settings = settings_from(args) if grant is None else settings_from(args, grant_tests_that_fit(grant.host))
     if grant is not None:
         refuse_unhosted_branches(settings, grant.host, os.environ)
-    if args.reuse_prelude is not None:
-        reused = reused_prelude(args.reuse_prelude, settings.workload, _reused_image_digest(os.environ))
-        settings = replace(settings, reuse_prelude=reused)
     return settings
 
 

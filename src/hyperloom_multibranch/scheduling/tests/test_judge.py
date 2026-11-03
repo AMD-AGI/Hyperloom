@@ -162,7 +162,6 @@ def _view(
             ),
         ),
         integration_value={METRIC: 100.0},
-        roofline_ceiling={METRIC: 400.0},
         metric=METRIC,
         opening=opening,
         free_slots=free_slots,
@@ -176,7 +175,6 @@ def _view(
         profile_running=profile_running,
         gpu_hours_used=1.23456,
         explore_gpu_hours=explore_gpu_hours,
-        prelude_gpu_hours_upper_bound=0.41666,
         specialist_llm_usd=3.14159,
         max_llm_usd=max_llm_usd,
         scheduler_llm_usd=0.27183,
@@ -262,7 +260,6 @@ def test_the_prompt_shows_and_explains_the_gpu_hours_and_llm_dollars_used() -> N
     assert _state(_view())["spend"] == {
         "gpu_hours_used": 1.235,
         "explore_gpu_hours": None,
-        "prelude_gpu_hours_upper_bound": 0.417,
         "specialist_llm_usd": 3.14,
         "max_llm_usd": None,
         "scheduler_llm_usd": 0.27,
@@ -273,7 +270,6 @@ def test_the_prompt_shows_and_explains_the_gpu_hours_and_llm_dollars_used() -> N
     for text in (
         "gpu_hours_used",
         "explore_gpu_hours",
-        "prelude_gpu_hours_upper_bound",
         "specialist_llm_usd",
         "max_llm_usd",
         "scheduler_llm_usd",
@@ -283,17 +279,11 @@ def test_the_prompt_shows_and_explains_the_gpu_hours_and_llm_dollars_used() -> N
     assert "a test taken back before its result is not in it" in prompt
     assert "the baseline measured on the root commit included" in prompt
     assert "plus the card time any lease holds outside the tests" in prompt
-    assert "or the cards the PRELUDE run that built the root commit ran on, charged to the integration branch" in prompt
-    assert "neither is a PRELUDE run that held no lease" in prompt
+    assert "or the dossier pass's cards, charged to the integration branch" in prompt
     assert (
         "scheduler_llm_usd is what your own calls, the patch resolver's and the rule gate's fix critic's cost" in prompt
     )
     assert "max_llm_usd is the specialist_llm_usd plus scheduler_llm_usd" in prompt
-    assert "the GPU time of the PRELUDE run that gpu_hours_used leaves out" in prompt
-    assert (
-        "times the cards one test uses where it held no lease, which nothing limits, and 0 where it ran on leased"
-        in (prompt)
-    )
 
 
 def test_the_prompt_opens_the_first_branches_where_explore_started_and_not_at_the_root() -> None:
@@ -449,7 +439,7 @@ def _reply(payload: object) -> str:
     return f"Reasoning first.\n```json\n{json.dumps(payload)}\n```"
 
 
-def test_prompt_shows_frontier_roster_caps_budget_and_headroom() -> None:
+def test_prompt_shows_frontier_roster_caps_and_budget() -> None:
     prompt = render_prompt(_view())
     state = json.loads(prompt[prompt.index("{") : prompt.index("\n\nReply with")])
 
@@ -462,7 +452,7 @@ def test_prompt_shows_frontier_roster_caps_budget_and_headroom() -> None:
     assert state["free_branch_slots"] == 2
     assert state["explore_remaining_seconds"] == 3600
     assert state["session_remaining_seconds"] == 4000
-    assert state["integration"]["headroom_pct"] == 75.0
+    assert state["integration"] == {"recorded_value": {METRIC: 100.0}}
     assert '"stop_session"' in prompt and "ONE JSON object" in JUDGE_SYSTEM_PROMPT
 
 

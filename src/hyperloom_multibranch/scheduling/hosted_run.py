@@ -13,8 +13,8 @@ once. The fields ``run`` has no option for -- ``objective``, ``launch``, ``optio
 ``placement.specialist_capacity`` -- are not read. Dev sandboxes and agents run in ``dev`` sandboxes of the grant, so
 they need its ``dev`` key and the session directory on the storage ``USER_DATA_PATH`` names, which the ``dev``
 template mounts at the same path (:func:`refuse_unhosted_branches`).
-Every test, PRELUDE's included, runs in a measurement sandbox, as PRELUDE starts no child on a hosted session, so the
-application's container needs no card: ``hosted-cpu`` serves as ``hosted-gpu`` does.
+Every test, PRELUDE's included, runs in a measurement sandbox, so the application's container needs no card:
+``hosted-cpu`` serves as ``hosted-gpu`` does.
 
 The grant bounds the session in time (:func:`grant_deadline`): its budget ends one CLOSE grace and a margin before the
 grant does, and the process is sent SIGTERM one CLOSE grace before the grant ends, which ends FINAL and leaves CLOSE

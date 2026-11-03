@@ -244,7 +244,6 @@ def test_parallel_tests_default_fills_the_machine() -> None:
         ["run", *WORKLOAD_ARGS, "--tp", "16"],
         ["run", *WORKLOAD_ARGS, "--max-parallel-tests", "5"],
         ["run", *WORKLOAD_ARGS, "--max-hours", "-1"],
-        ["run", *WORKLOAD_ARGS, "--max-hours", "0.01"],
         ["run", *WORKLOAD_ARGS, "--max-gpu-hours", "-1"],
         ["run", *WORKLOAD_ARGS, "--max-gpu-hours", "nan"],
         ["run", *WORKLOAD_ARGS, "--max-gpu-hours", "inf"],
@@ -602,23 +601,6 @@ def test_a_bad_specialist_prompt_exits_two_before_creating_anything(
     assert exc.value.code == cli.EXIT_USAGE
     assert error in capsys.readouterr().err
     assert not any(workspace.iterdir())
-
-
-def test_reusing_a_prelude_without_the_image_digest_exits_two_naming_the_variable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    earlier = tmp_path / "earlier"
-    earlier.mkdir()
-    workspace = tmp_path / "workspace"
-    monkeypatch.setenv("USER_DATA_PATH", str(workspace))
-    monkeypatch.delenv("HYPERLOOM_ACTIVE_IMAGE_DIGEST", raising=False)
-
-    with pytest.raises(SystemExit) as exc:
-        cli.main(["run", *WORKLOAD_ARGS, "--reuse-prelude", str(earlier)])
-
-    assert exc.value.code == cli.EXIT_USAGE
-    assert "HYPERLOOM_ACTIVE_IMAGE_DIGEST" in capsys.readouterr().err
-    assert not workspace.exists()
 
 
 @pytest.fixture(autouse=True)

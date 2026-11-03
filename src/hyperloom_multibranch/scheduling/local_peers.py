@@ -15,7 +15,7 @@ from the Experience KB, as MB1 runs on none (:func:`specialist_recall`). Every t
 ``HYPERLOOM_ACTIVE_IMAGE_REF`` and ``HYPERLOOM_ACTIVE_IMAGE_DIGEST``, the Magpie commit Hyperloom pins and an
 InferenceX checkout at the commit the workload's benchmark pins (:class:`InferenceXCheckout`); the canonical
 measurement is rendered with the workload's model and GPU type and that checkout, from the shipped baseline of an InferenceX workload and from the Magpie AgentX benchmark
-the session writes for an AgentX one, which the PRELUDE child is bound to as well. The gate's session service and the
+the session writes for an AgentX one. The gate's session service and the
 specialist runtime judge on one rule, :func:`workload_rule`; the runtime settles through a rule gate that asks the
 scheduler's fork desk for branches, and the MCP service's ``request_repair`` and ``decline_repair`` conclude a blocked
 candidate through the same gate, which the scheduler has land each fork it admits and record each fork and repair it
@@ -229,7 +229,7 @@ def workload_environment(workload: Workload) -> Mapping[str, str]:
     the directory a server loads it from. ``GPU_TYPE`` is the Magpie runner type whose scripts measure the board and
     ``TARGET_GPU_TYPE`` the board, as ``hyperloom optimize`` sets them: the same for mi300x and mi355x, mi355x for an
     mi350x (``gpu_runner_type``). An InferenceX workload carries its sequence lengths; an AgentX one carries
-    :data:`AGENTX_ENV` instead, which the PRELUDE child inherits."""
+    :data:`AGENTX_ENV` instead."""
 
     shape = workload.inferencex
     workload_specific = {AGENTX_ENV: "1"} if shape is None else {"ISL": str(shape.isl), "OSL": str(shape.osl)}
@@ -260,10 +260,9 @@ def attempt_timeout_sec(workload: Workload) -> int:
 def _export_workload(workload: Workload, toolbox_dir: Path, image_ref: str) -> None:
     """Export :func:`workload_environment` into this process. For an AgentX workload, also write the Magpie AgentX
     benchmark ``hyperloom optimize`` generates for it to :data:`BENCHMARK_FILE` in ``toolbox_dir`` and name it in
-    ``HYPERLOOM_BENCHMARK_CONFIG``: the canonical measurement is rendered from it, and the PRELUDE child binds its
-    command line to it. The benchmark serves at the workload's EP and names ``image_ref``, the image the session
+    ``HYPERLOOM_BENCHMARK_CONFIG``: the canonical measurement is rendered from it. The benchmark serves at the workload's EP and names ``image_ref``, the image the session
     runs on, as its image, which Magpie requires of a model it has no recipe for. It pins the model's directory when
-    the model is one, which the command line names by its resolved path, so the child's ``--model`` names it too."""
+    the model is one, which the command line names by its resolved path."""
 
     os.environ.update(workload_environment(workload))
     if workload.inferencex is not None:
@@ -376,9 +375,8 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     mcp.start()
     gate_service = GateService(gate_blackboard, toolbox, rule, toolbox)
     regression = RegressionSet(gate_blackboard, runner, repo, pool=session_cases(host.image.digest, gate_blackboard))
-    image, on_this_machine = host.image.digest, host.backend.on_this_machine
     return Peers(
-        runtime, toolbox, repo, gate_service, mcp, briefs, image, gate, regression, on_this_machine, built.dossier_pass
+        runtime, toolbox, repo, gate_service, mcp, briefs, host.image.digest, gate, regression, built.dossier_pass
     )
 
 

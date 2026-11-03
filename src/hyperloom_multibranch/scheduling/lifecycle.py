@@ -3,14 +3,12 @@
 
 """One multi-branch session, PRELUDE -> EXPLORE -> FINAL -> CLOSE, on the peers a factory builds for it.
 
-PRELUDE gets the whole remaining budget, and spends none of it on a child when it reuses an earlier session's PRELUDE;
-EXPLORE then runs until the longest baseline test and one CLOSE grace are left before the deadline. EXPLORE and CLOSE
-score the branches with the frontier's defaults for the session's budget. Once the baseline is established, a session
-with an RSI archive plays the scheduling playbook ``--playbook`` asks for, the champion of the pool beside it or a
-playbook on trial, as the session's id draws under ``auto``, recorded under ``playbook`` in ``policy_versions``. The
-FINAL candidates are fixed while every
-branch still stands, then exploration ends and FINAL validates them. With the review on, a session whose Arbor agents
-are given a map pauses before their branches open until a person approves it (:mod:`.review`); the pause moves the
+PRELUDE roots the session and measures its baseline (:mod:`.prelude`); EXPLORE then runs until the longest baseline
+test and one CLOSE grace are left before the deadline. EXPLORE and CLOSE score the branches with the frontier's
+defaults for the session's budget. Once the baseline is established, a session with an RSI archive plays the
+scheduling playbook ``--playbook`` asks for, the champion of the pool beside it or a playbook on trial, as the session's id draws under
+``auto``, recorded under ``playbook`` in ``policy_versions``. The FINAL candidates are fixed while every branch still stands,
+then exploration ends and FINAL validates them. With the review on, a session whose Arbor agents are given a map pauses before their branches open until a person approves it (:mod:`.review`); the pause moves the
 deadline, and EXPLORE's end, by its length. A map a mapping branch makes is reviewed in EXPLORE, while the clock runs,
 and its shares open only with ``--agent-share-minutes`` left before their cutoff. A failed PRELUDE, a run asked to stop once its Arbor agents' directions are mapped,
 a map a person rejected, an EXPLORE that ran out of cards to measure on, a stop signal, the session deadline
@@ -359,7 +357,6 @@ class Session:
             peers.gate,
             tests,
             peers.toolbox,
-            peers.on_this_machine,
             self._open_integration,
             self._integrator.replay_champion,
             profiler.profile_root,
@@ -411,7 +408,7 @@ class Session:
         self._write_manifest(budget, await asyncio.to_thread(code_version), image_check)
         hard_stop = HardStop(budget, self._clock)
         aborted = SessionOutcome(SessionStopReason.ABORTED, None, None, "")
-        return await self._run_and_close(self._phases(budget, hard_stop), aborted, budget, hard_stop)
+        return await self._run_and_close(self._phases(budget), aborted, budget, hard_stop)
 
     async def finish(self, ended: SessionStopReason) -> SessionOutcome:
         """Run FINAL and CLOSE over the directory a session that ended for ``ended`` before FINAL left behind, and
@@ -518,7 +515,7 @@ class Session:
         elif not phases.cancelled():
             phases.result()
 
-    async def _phases(self, budget: SessionBudget, hard_stop: HardStop) -> SessionOutcome:
+    async def _phases(self, budget: SessionBudget) -> SessionOutcome:
         await self._toolbox.start()
         await self._branches.push_quota()
         self._phase("prelude")
@@ -526,7 +523,7 @@ class Session:
             Decision(DecisionKind.PRELUDE, "scheduling policy", detail={"values": dict(SCHEDULING_POLICY)})
         )
         try:
-            prelude = await self._root_session(budget, hard_stop)
+            prelude = await self._root_session()
         except PreludeFailed as exc:
             return SessionOutcome(SessionStopReason.PRELUDE_FAILED, None, None, str(exc))
         await self._adopt_playbook()
@@ -546,13 +543,11 @@ class Session:
         window = ExploreWindow(
             prelude.root_commit,
             prelude.start_commit,
-            prelude.profile.roofline_ceiling,
             explore_end,
             budget.deadline,
             budget.total_seconds,
             explore_gpu_seconds(self._settings.max_gpu_hours),
             self._settings.max_llm_usd or math.inf,
-            prelude.child_gpu_seconds_upper_bound,
             self._settings.user_directions,
             opening.agents,
             opening.plans,
@@ -896,15 +891,11 @@ class Session:
         closing = SessionExports(self._layout, sources, self._metric, self._budget_seconds, services)
         return Closer(self._layout, self._stopper, closing, self._clock)
 
-    async def _root_session(self, budget: SessionBudget, hard_stop: HardStop) -> PreludeResult:
+    async def _root_session(self) -> PreludeResult:
         """PRELUDE: the root commit with its baseline, the commit EXPLORE opens on and the warm-start leads every
-        specialist is briefed on. A reused PRELUDE starts no child."""
+        specialist is briefed on."""
 
-        workload, reused = self._settings.workload, self._settings.reuse_prelude
-        if reused is None:
-            prelude = await self._prelude.root(workload, budget, hard_stop, self._base_image_digest)
-        else:
-            prelude = await self._prelude.reuse(reused, workload, self._base_image_digest)
+        prelude = await self._prelude.root(self._settings.workload, self._base_image_digest)
         self._briefs.warm = prelude.warm_leads
         self._briefs.references = await asyncio.to_thread(self._reference_leads, prelude.profile)
         return prelude

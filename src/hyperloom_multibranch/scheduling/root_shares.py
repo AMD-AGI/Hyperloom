@@ -4,9 +4,9 @@
 """The root's shares, for the agents' map: waited for, and read from the root profile's kernels when TraceLens gave no
 op shares.
 
-PRELUDE starts the analysis of the root's profile (job ``prelude:<run id>``) and does not wait for it: it ends about a
-minute into EXPLORE. Before the session maps its agents' directions, it waits for that job, at most
-:data:`WAIT_SECONDS`, then takes the root's op shares from the blackboard.
+PRELUDE profiles the root and has the toolbox analyse the profile, naming the analysis's job. Before the session maps
+its agents' directions, it waits for that job, at most :data:`WAIT_SECONDS`, then takes the root's op shares from the
+blackboard.
 
 On a CUDA-graph trace, TraceLens' op decomposition degrades and the job records no op shares. Its kernel table is still
 written (``kernel_shares_path`` in the job's ``result.json``), and is read here for Arbor alone: Arbor's map generator

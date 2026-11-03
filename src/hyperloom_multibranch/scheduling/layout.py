@@ -51,12 +51,8 @@ FINAL_ONLY_LOCK = "MB-final-only.lock"
 ROSTER_FILE = "MB-roster.json"
 DECISIONS_FILE = "MB-decisions.jsonl"
 JUDGE_FILE = "MB-judge.jsonl"
-PRELUDE_LAUNCH_FILE = "MB-prelude-launch.json"
-PRELUDE_CHILD_FILE = "MB-prelude-child.json"
 ROOT_RECIPE_FILE = "MB-root-recipe.json"
-PRELUDE_LOG_FILE = "MB-prelude.log"
 WARM_START_DIR = "MB-warm-start"
-ROOT_PROFILE_DIR = "MB-root-profile"
 MERGES_FILE = "MB-merges.jsonl"
 REPORT_FILE = "MB-report.json"
 REPORT_MARKDOWN_FILE = "MB-report.md"
@@ -194,27 +190,8 @@ class SessionLayout:
         return self.scheduling / JUDGE_FILE
 
     @property
-    def prelude_launch(self) -> Path:
-        """The ``--launch-info-file`` handed to the baseline-prelude child."""
-        return self.prelude / PRELUDE_LAUNCH_FILE
-
-    @property
-    def prelude_child(self) -> Path:
-        return self.prelude / PRELUDE_CHILD_FILE
-
-    @property
     def root_recipe(self) -> Path:
         return self.prelude / ROOT_RECIPE_FILE
-
-    @property
-    def prelude_log(self) -> Path:
-        return self.prelude / PRELUDE_LOG_FILE
-
-    @property
-    def root_profile(self) -> Path:
-        """Where PRELUDE copies its child's profile trace and point config: inside the toolbox's directory, the only
-        place the toolbox reads them from."""
-        return self.toolbox / ROOT_PROFILE_DIR
 
     @property
     def warm_start(self) -> Path:
