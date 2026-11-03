@@ -15,9 +15,8 @@ to that entry's manifest through the toolbox's inputs.
 
 The dev sandboxes a hosted session lends its specialists and its autonomous agents run in ``dev`` sandboxes of the grant
 (:func:`~hyperloom_multibranch.scheduling.local_peers.branch_sandboxes`): only their processes run there, and their
-files stay in the session directory, which the ``dev`` template mounts at the path it has here. PRELUDE starts no child
-on this machine's cards: it roots the session on root tests and a profile of the root in runner sandboxes
-(:mod:`~hyperloom_multibranch.scheduling.prelude`).
+files stay in the session directory, which the ``dev`` template mounts at the path it has here. PRELUDE's root tests
+and profile of the root run in runner sandboxes too (:mod:`~hyperloom_multibranch.scheduling.prelude`).
 
 The grant is either injected by a host (``hosted run``) or handed to a session started by hand (``run --measurement
 hosted``); a grant without a run id of its own names its sandboxes by the session's id.

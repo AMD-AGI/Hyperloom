@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The session's wall-clock budget: PRELUDE gets all of it, and EXPLORE ends as late as still lets FINAL start.
+"""The session's wall-clock budget: EXPLORE ends as late as still lets FINAL start.
 
-The baseline-prelude child gets all the remaining time. EXPLORE then runs until one longest root test of the baseline
+EXPLORE runs until one longest root test of the baseline
 (one test of this workload) and one CLOSE grace are left: the grace for EXPLORE to wind down so that FINAL starts
 before the deadline, the test for FINAL's validation, whose tests run concurrently. FINAL waits for the validation tests
 it started, past the deadline and the hard stop if need be, so its reserve is the time it is expected to take, not a
@@ -30,8 +30,6 @@ MB_FINAL_SHARE = 5
 # orchestrator/state/shared_state.py effective_closing_grace_sec: min(120, total * 0.02)
 MB_CLOSE_GRACE_CAP_SECONDS = 120.0
 MB_CLOSE_GRACE_FRACTION = 0.02
-# The main flow truncates --max-hours to int(h * 60) minutes, and 0 minutes would mean unlimited.
-MB_MIN_PRELUDE_HOURS = 1 / 60
 
 MB_SECONDS_PER_HOUR = 3600.0
 
@@ -49,10 +47,6 @@ def explore_gpu_seconds(max_gpu_hours: float) -> float:
     if not max_gpu_hours:
         return math.inf
     return max_gpu_hours * MB_SECONDS_PER_HOUR * MB_EXPLORE_SHARE / (MB_EXPLORE_SHARE + MB_FINAL_SHARE)
-
-
-class BudgetExhausted(RuntimeError):
-    """Too little wall-clock time is left to start the phase that asked."""
 
 
 @dataclass(frozen=True)
@@ -83,13 +77,6 @@ class SessionBudget:
     def remaining(self, now: float) -> float:
         return max(0.0, self.deadline - now)
 
-    def prelude_max_hours(self, now: float) -> float:
-        """The child's ``--max-hours``: all the remaining time."""
-        hours = self.remaining(now) / MB_SECONDS_PER_HOUR
-        if hours < MB_MIN_PRELUDE_HOURS:
-            raise BudgetExhausted(f"{hours * 60:.2f} min left, the baseline prelude needs at least one minute")
-        return hours
-
     def explore_end(self, now: float, final_test_seconds: float) -> float:
         """When EXPLORE ends: ``final_test_seconds`` and one CLOSE grace before the deadline, but no sooner than
         ``now``."""
@@ -103,8 +90,8 @@ class HardStop:
     :meth:`follow_final` moves it.
 
     A stop signal or an unhandled error brings it forward to the CLOSE grace from that moment, once, so the unwinding
-    of the phases, a cancelled PRELUDE's child and CLOSE all share that one grace. FINAL does not stop at it: once
-    FINAL ends, the hard stop is no sooner than one CLOSE grace from then.
+    of the phases and CLOSE share that one grace. FINAL does not stop at it: once FINAL ends, the hard stop is no
+    sooner than one CLOSE grace from then.
     """
 
     def __init__(self, budget: SessionBudget, clock: Clock) -> None:
@@ -148,9 +135,7 @@ __all__ = [
     "MB_DEFAULT_MAX_HOURS",
     "MB_EXPLORE_SHARE",
     "MB_FINAL_SHARE",
-    "MB_MIN_PRELUDE_HOURS",
     "MB_UNLIMITED_HOURS",
-    "BudgetExhausted",
     "HardStop",
     "SessionBudget",
     "budget_seconds",

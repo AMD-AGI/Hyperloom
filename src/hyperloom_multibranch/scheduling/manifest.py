@@ -21,7 +21,7 @@ from hyperloom_common.io import atomic_write_json
 from hyperloom_common.jsonio import read_json_strict
 from hyperloom.common.provenance import detect_code_revision
 from hyperloom_multibranch.blackboard.codec import decode, encode
-from hyperloom_multibranch.scheduling.settings import RunSettings, Workload
+from hyperloom_multibranch.scheduling.settings import RunSettings
 
 #: The distribution this package ships in (pyproject.toml ``[project] name``).
 MB_DISTRIBUTION = "hyperloom-inference_optimizer"
@@ -101,13 +101,6 @@ def read_manifest(path: Path) -> SessionManifest:
     return decode(SessionManifest, read_json_strict(path, require_dict=True))
 
 
-def read_workload(path: Path) -> Workload:
-    """The workload the session at ``path`` ran, read on its own: a PRELUDE is reused across builds, and the rest of
-    an earlier manifest need not decode for this one to be the same workload. Raises as :func:`read_manifest` does."""
-
-    return decode(Workload, read_json_strict(path, require_dict=True)["settings"]["workload"])
-
-
 __all__ = [
     "MB_DISTRIBUTION",
     "CodeVersion",
@@ -115,5 +108,4 @@ __all__ = [
     "SessionManifest",
     "code_version",
     "read_manifest",
-    "read_workload",
 ]

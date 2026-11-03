@@ -117,10 +117,9 @@ class JudgeView:
     head, in percent of the root's value. ``stranded_leads`` are the branches whose head leads the integration head by
     more than the bar while commits of theirs failed to merge, the largest lead first. ``profile_running`` is whether a profile of the integration head runs.
     ``gpu_hours_used`` are the GPU hours of the session's tests that have a result plus the card time any lease holds
-    outside them, an open one up to the reading: the root's baseline and a PRELUDE child's leased cards are among them,
-    a test withdrawn before its result and a PRELUDE child that held no lease are not. ``explore_gpu_hours`` is where
-    EXPLORE ends under ``--max-gpu-hours``, ``None`` without a limit, ``prelude_gpu_hours_upper_bound`` the PRELUDE
-    child's wall time times the workload's TP where it held no lease, and 0 where it did. ``specialist_llm_usd`` is what the specialists' recorded LLM calls
+    outside them, an open one up to the reading: the root's baseline is among them, a test withdrawn before its result
+    is not. ``explore_gpu_hours`` is where EXPLORE ends under ``--max-gpu-hours``, ``None`` without a limit.
+    ``specialist_llm_usd`` is what the specialists' recorded LLM calls
     cost, ``scheduler_llm_usd`` what the judge's, the patch resolver's and the fix critic's recorded calls cost, and
     ``max_llm_usd`` where their sum ends EXPLORE under ``--max-llm-usd``, ``None`` without a limit. ``specialists``
     maps a running specialist branch to what the specialist runtime knows of its specialist; a branch whose
@@ -139,7 +138,6 @@ class JudgeView:
     roster: tuple[BranchEntry, ...]
     progress: tuple[BranchProgress, ...]
     integration_value: Mapping[str, float]
-    roofline_ceiling: Mapping[str, float]
     metric: str
     opening: bool
     free_slots: int
@@ -153,7 +151,6 @@ class JudgeView:
     profile_running: bool
     gpu_hours_used: float
     explore_gpu_hours: float | None
-    prelude_gpu_hours_upper_bound: float
     specialist_llm_usd: float
     max_llm_usd: float | None
     scheduler_llm_usd: float
@@ -329,14 +326,6 @@ def _hours(hours: float | None) -> float | None:
     return None if hours is None else round(hours, _GPU_HOURS_DIGITS)
 
 
-def _headroom_pct(view: JudgeView) -> float | None:
-    value = view.integration_value.get(view.metric)
-    ceiling = view.roofline_ceiling.get(view.metric)
-    if value is None or not ceiling:
-        return None
-    return (ceiling - value) / ceiling * 100.0
-
-
 def _progress_row(progress: BranchProgress | None) -> dict[str, object]:
     if progress is None:
         return {}
@@ -443,15 +432,10 @@ def render_prompt(view: JudgeView) -> str:
         "toolbox_headroom": view.widening.toolbox_headroom,
         "pending": [_pending_row(pending, view.now) for pending in view.pending],
         "session_remaining_seconds": round(view.session_remaining_seconds),
-        "integration": {
-            "recorded_value": dict(view.integration_value),
-            "roofline_ceiling": dict(view.roofline_ceiling),
-            "headroom_pct": _headroom_pct(view),
-        },
+        "integration": {"recorded_value": dict(view.integration_value)},
         "spend": {
             "gpu_hours_used": round(view.gpu_hours_used, _GPU_HOURS_DIGITS),
             "explore_gpu_hours": _hours(view.explore_gpu_hours),
-            "prelude_gpu_hours_upper_bound": round(view.prelude_gpu_hours_upper_bound, _GPU_HOURS_DIGITS),
             "specialist_llm_usd": round(view.specialist_llm_usd, _USD_DIGITS),
             "max_llm_usd": view.max_llm_usd,
             "scheduler_llm_usd": round(view.scheduler_llm_usd, _USD_DIGITS),

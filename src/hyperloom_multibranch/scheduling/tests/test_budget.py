@@ -30,7 +30,6 @@ from hyperloom_multibranch.scheduling.budget import (
     MB_EXPLORE_SHARE,
     MB_FINAL_SHARE,
     MB_UNLIMITED_HOURS,
-    BudgetExhausted,
     HardStop,
     SessionBudget,
     explore_gpu_seconds,
@@ -65,23 +64,6 @@ def test_constants_match_the_main_flow_sources() -> None:
 
 def test_zero_hours_means_the_main_flows_unlimited_ceiling() -> None:
     assert SessionBudget.from_hours(0, 0.0).total_seconds == MB_UNLIMITED_HOURS * _HOUR
-
-
-def test_prelude_gets_all_the_remaining_time() -> None:
-    start = 1000.0
-    budget = SessionBudget.from_hours(2.0, started_at=start)
-
-    assert budget.deadline == start + 2 * _HOUR
-    assert budget.prelude_max_hours(start + 0.5 * _HOUR) == pytest.approx(1.5)
-
-
-def test_prelude_below_one_minute_is_exhausted() -> None:
-    budget = SessionBudget.from_hours(1.0, started_at=0.0)
-
-    with pytest.raises(BudgetExhausted):
-        budget.prelude_max_hours(_HOUR - 30)
-    with pytest.raises(BudgetExhausted):
-        budget.prelude_max_hours(_HOUR + 30)
 
 
 def test_explore_ends_one_root_test_and_one_close_grace_before_the_deadline_however_long_the_budget() -> None:

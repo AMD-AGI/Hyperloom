@@ -1,12 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The session's processes: the ones the scheduler starts itself and the ones a peer started and handed over, each in
-a session of its own and recorded in ``MB-pids.jsonl``.
+"""The session's processes: the ones a peer started and handed over, each leading a session of its own, recorded in
+``MB-pids.jsonl``.
 
 ``proctree.collect_tree`` never signals the caller's own process group, so a child that shares it cannot be killed
-cleanly; every child therefore leads a new session, and a terminal's Ctrl-C no longer reaches it, which is why the
-scheduler forwards a stop explicitly. Tree kills block, so they run in a worker thread to keep the event loop and its
+cleanly; every registered process therefore leads a new session, and a terminal's Ctrl-C no longer reaches it, which
+is why the scheduler forwards a stop explicitly. Tree kills block, so they run in a worker thread to keep the event loop and its
 signal handlers responsive.
 
 A child that exits orphans whatever it started; a descendant leading a session of its own then leaves both the child's
@@ -17,7 +17,7 @@ kill reaches them and the leftovers name them.
 The file outlives the session, killed sessions included, so :func:`live_processes` reads it back to say whether
 anything of a session is still running: the emergency ``final-only`` recovery may not race a session that still runs.
 A run therefore records the scheduler itself as well, on :data:`SCHEDULER_BRANCH`, because a scheduler that died
-before starting a child and one that has not started one yet leave the same records.
+before handing a process over and one that has not been handed one yet leave the same records.
 """
 
 from __future__ import annotations
@@ -26,9 +26,8 @@ import asyncio
 import ctypes
 import logging
 import os
-import signal
 import sys
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -80,7 +79,7 @@ def _set_child_subreaper(on: int) -> None:
 
 @dataclass(frozen=True)
 class ProcessRecord:
-    """One line of ``MB-pids.jsonl``; ``pgid`` equals ``pid`` because the child leads its own session.
+    """One line of ``MB-pids.jsonl``; ``pgid`` equals ``pid`` because the process leads its own session.
 
     A leftover no registered process accounts for is described the same way, on :data:`UNREGISTERED_BRANCH`, with its
     own group and the time it started. The scheduler's own record, on :data:`SCHEDULER_BRANCH`, names the group it
@@ -95,44 +94,13 @@ class ProcessRecord:
     owner_scope: str
 
 
-@dataclass(frozen=True)
-class RegisteredProcess:
-    record: ProcessRecord
-    process: asyncio.subprocess.Process
-
-
-@dataclass(frozen=True)
-class _Tracked:
-    """A registered process; ``process`` is ``None`` for an adopted one, which this process did not start."""
-
-    record: ProcessRecord
-    process: asyncio.subprocess.Process | None
-
-
 class ProcessRegistry:
-    """Starts or adopts, records and kills the session's processes, by branch or all at once."""
+    """Adopts, records and kills the session's processes, by branch or all at once."""
 
     def __init__(self, pids_file: Path, clock: Clock) -> None:
         self._pids_file = pids_file
         self._clock = clock
-        self._registered: list[_Tracked] = []
-
-    async def spawn(
-        self, argv: Sequence[str], *, branch: str, log: Path, env: Mapping[str, str] | None = None
-    ) -> RegisteredProcess:
-        """Start ``argv`` with stdout and stderr appended to ``log``, in ``env`` or this process's environment, and
-        record it before returning."""
-
-        with log.open("ab") as out:
-            process = await asyncio.create_subprocess_exec(
-                *argv,
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=out,
-                stderr=asyncio.subprocess.STDOUT,
-                start_new_session=True,
-                env=None if env is None else dict(env),
-            )
-        return RegisteredProcess(self._register(process.pid, branch, argv, process), process)
+        self._registered: list[ProcessRecord] = []
 
     def adopt(self, pid: int, *, branch: str, argv: Sequence[str]) -> ProcessRecord:
         """Take over ``pid``, which a peer started for ``branch`` as the leader of a session of its own, so the kills
@@ -149,11 +117,11 @@ class ProcessRegistry:
             raise ValueError(f"process {pid} of {branch} is not running") from exc
         if not leads_group:
             raise ValueError(f"process {pid} of {branch} does not lead its own process group")
-        return self._register(pid, branch, argv, None)
+        return self._register(pid, branch, argv)
 
     def record_scheduler(self) -> None:
         """Record this process in ``MB-pids.jsonl``, so the file says whether the session still runs even before it
-        has started a child.
+        was handed a process.
 
         It is not registered: the kills and the leftovers are about what the session started, and the scheduler ends
         the session itself.
@@ -170,9 +138,7 @@ class ProcessRegistry:
             )
         )
 
-    def _register(
-        self, pid: int, branch: str, argv: Sequence[str], process: asyncio.subprocess.Process | None
-    ) -> ProcessRecord:
+    def _register(self, pid: int, branch: str, argv: Sequence[str]) -> ProcessRecord:
         record = ProcessRecord(
             pid=pid,
             pgid=pid,
@@ -182,35 +148,16 @@ class ProcessRegistry:
             owner_scope=local_owner_scope(),
         )
         self._write(record)
-        self._registered.append(_Tracked(record, process))
+        self._registered.append(record)
         return record
 
     def _write(self, record: ProcessRecord) -> None:
         append_jsonl(self._pids_file, asdict(record))
 
-    async def terminate(self, proc: RegisteredProcess, grace_seconds: float) -> int | None:
-        """SIGTERM the root alone and wait up to ``grace_seconds`` for it to exit; ``None`` when it did not.
-
-        The root is left to wind down what it started itself. Its tree is taken before the signal, so a descendant
-        that leads a session of its own, as the main flow's inference servers do, is killed afterwards even once the
-        root's exit has orphaned it; :meth:`kill_branch` finds only the root's group. A descendant started after the
-        signal is not reached here; inside :func:`adopting_orphans`, :meth:`kill_all` reaches it.
-        """
-
-        tree = await asyncio.to_thread(collect_tree, _live_roots(_Tracked(proc.record, proc.process)))
-        if proc.process.returncode is None:
-            proc.process.send_signal(signal.SIGTERM)
-        try:
-            return await self._clock.wait_for(proc.process.wait(), grace_seconds)
-        except asyncio.TimeoutError:
-            return None
-        finally:
-            await asyncio.to_thread(kill_tree, tree)
-
     async def kill_branch(self, branch: str) -> bool:
         """Kill every tree registered for ``branch``; True when nothing of them is left."""
 
-        return await self._kill([r for r in self._registered if r.record.branch == branch])
+        return await self._kill([r for r in self._registered if r.branch == branch])
 
     async def kill_all(self) -> bool:
         """Kill every registered tree and every unregistered child's; True when nothing of them is left."""
@@ -224,9 +171,9 @@ class ProcessRegistry:
 
         registered = tuple(self._registered)
         alive = await asyncio.to_thread(_alive, registered)
-        return (*(r.record for r in alive), *await asyncio.to_thread(_unregistered_records, registered))
+        return (*alive, *await asyncio.to_thread(_unregistered_records, registered))
 
-    async def _kill(self, registered: Sequence[_Tracked], extra: Sequence[int] = ()) -> bool:
+    async def _kill(self, registered: Sequence[ProcessRecord], extra: Sequence[int] = ()) -> bool:
         gone = await asyncio.to_thread(_kill_trees, tuple(registered), tuple(extra))
         self._registered = list(await asyncio.to_thread(_alive, tuple(self._registered)))
         return gone
@@ -279,11 +226,11 @@ def _still_runs(record: ProcessRecord) -> bool:
     return started is None or started.timestamp() <= record.started_at + _RECORDING_SECONDS
 
 
-def _alive(registered: tuple[_Tracked, ...]) -> tuple[_Tracked, ...]:
+def _alive(registered: tuple[ProcessRecord, ...]) -> tuple[ProcessRecord, ...]:
     return tuple(r for r in registered if _live_roots(r))
 
 
-def _kill_trees(registered: tuple[_Tracked, ...], extra: Sequence[int]) -> bool:
+def _kill_trees(registered: tuple[ProcessRecord, ...], extra: Sequence[int]) -> bool:
     """Kill every live tree of ``registered`` and of ``extra``; True when nothing of them is left. Blocks on ``/proc``
     and signals."""
 
@@ -291,7 +238,7 @@ def _kill_trees(registered: tuple[_Tracked, ...], extra: Sequence[int]) -> bool:
     return kill_tree(collect_tree(roots)) if roots else True
 
 
-def _unregistered_children(registered: tuple[_Tracked, ...]) -> tuple[int, ...]:
+def _unregistered_children(registered: tuple[ProcessRecord, ...]) -> tuple[int, ...]:
     """This process's running children outside its own group and every registered group. Blocks on ``/proc``.
 
     The scheduler's own group holds only what it runs inline, such as git; a registered group is reached through its
@@ -299,7 +246,7 @@ def _unregistered_children(registered: tuple[_Tracked, ...]) -> tuple[int, ...]:
     """
 
     me = os.getpid()
-    known = {os.getpgid(0), *(r.record.pgid for r in registered)}
+    known = {os.getpgid(0), *(r.pgid for r in registered)}
     children = []
     for pid, _ in descendants(me):
         identity = proc_identity(pid)
@@ -313,7 +260,7 @@ def _unregistered_children(registered: tuple[_Tracked, ...]) -> tuple[int, ...]:
     return tuple(sorted(children))
 
 
-def _unregistered_records(registered: tuple[_Tracked, ...]) -> tuple[ProcessRecord, ...]:
+def _unregistered_records(registered: tuple[ProcessRecord, ...]) -> tuple[ProcessRecord, ...]:
     records = []
     for pid in _unregistered_children(registered):
         started = process_started_at(pid)
@@ -330,21 +277,15 @@ def _unregistered_records(registered: tuple[_Tracked, ...]) -> tuple[ProcessReco
     return tuple(records)
 
 
-def _live_roots(registered: _Tracked) -> tuple[int, ...]:
-    """The registered root while it runs, and every running member of its group.
+def _live_roots(record: ProcessRecord) -> tuple[int, ...]:
+    """Every running member of the registered group, its root among them while it runs.
 
-    A member orphaned by its root's exit is no longer the root's descendant, but stays in the group. The asyncio
-    child watcher reaps a started root, so its pid is never reused while ``returncode`` is unset; an adopted root
-    leads its group, so it is among the members while it runs. A kill forgets a record whose group is empty, so a
-    later group reusing the id is never mistaken for it.
+    A member orphaned by its root's exit is no longer the root's descendant, but stays in the group. The root leads
+    its group, so it is among the members while it runs. A kill forgets a record whose group is empty, so a later
+    group reusing the id is never mistaken for it.
     """
 
-    record = registered.record
-    members = {pid for pid, _, state in group_members(record.pgid) if state != _ZOMBIE_STATE}
-    process = registered.process
-    if process is not None and process.returncode is None and running(record.pid):
-        members.add(record.pid)
-    return tuple(sorted(members))
+    return tuple(sorted(pid for pid, _, state in group_members(record.pgid) if state != _ZOMBIE_STATE))
 
 
 __all__ = [
@@ -352,7 +293,6 @@ __all__ = [
     "UNREGISTERED_BRANCH",
     "ProcessRecord",
     "ProcessRegistry",
-    "RegisteredProcess",
     "adopting_orphans",
     "live_processes",
 ]

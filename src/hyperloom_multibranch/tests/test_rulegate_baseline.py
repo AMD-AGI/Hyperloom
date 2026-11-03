@@ -23,8 +23,8 @@ from hyperloom_multibranch.blackboard import LocalBlackboard, codec
 from hyperloom_multibranch.blackboard.tests.factories import delta, result
 from hyperloom_multibranch.rulegate.accuracy import BaselineAccuracyError
 from hyperloom_multibranch.rulegate.baseline import (
+    write_agentx_baseline,
     read_inferencex_baseline,
-    write_agentx_prelude_baseline,
     write_inferencex_baseline,
 )
 from hyperloom_multibranch.rulegate.readings import UnreadableResult
@@ -124,26 +124,23 @@ async def test_only_a_prelude_baseline_of_the_root_is_a_baseline(session, fields
         await write_inferencex_baseline(session.gate, ROOT, baselines, CONC)
 
 
-def _child_run(metrics):
-    return dataclasses.replace(result("prelude-child"), rounds=(RoundValue("measure", 10, metrics),))
+async def test_an_agentx_baseline_is_its_one_root_test(session):
+    root_test = await session.measured("b0", metrics=AGENTX)
 
+    record = await write_agentx_baseline(session.gate, ROOT, root_test)
 
-async def test_an_agentx_baseline_read_from_the_child_run_names_it_and_anchors_on_no_root_test(session):
-    record = await write_agentx_prelude_baseline(
-        session.gate, ROOT, _child_run(AGENTX), source="prelude-child:/runs/baseline/r1", wall_seconds=5287.67
-    )
-
-    assert (record.values, record.request_ids, record.dispersion_pct) == (AGENTX, (), {})
+    assert (record.values, record.request_ids, record.dispersion_pct) == (AGENTX, ("b0",), {})
     assert record.threshold_pct == {GRADED_INTVTY_P50: AGENTX_KEEP_P50_THRESHOLD_PCT}
-    assert (record.source, record.wall_seconds) == ("prelude-child:/runs/baseline/r1", 5287.67)
+    assert (record.source, record.wall_seconds) == ("", None)
     assert await session.gate.baseline() == record
 
 
 @pytest.mark.parametrize("dropped", [GRADED_INTVTY_P50, GRADED_DURATION, GRADED_ERROR_RATE])
-async def test_a_child_run_without_what_every_comparison_reads_anchors_nothing(session, dropped):
+async def test_an_agentx_root_test_without_what_every_comparison_reads_anchors_nothing(session, dropped):
     partial = {key: value for key, value in AGENTX.items() if key != dropped}
+    root_test = await session.measured("b0", metrics=partial)
     with pytest.raises(UnreadableResult, match=dropped):
-        await write_agentx_prelude_baseline(session.gate, ROOT, _child_run(partial), source="s", wall_seconds=1.0)
+        await write_agentx_baseline(session.gate, ROOT, root_test)
 
 
 def test_a_baseline_written_before_it_named_a_source_reads_back_with_none():

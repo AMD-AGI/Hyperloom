@@ -24,7 +24,6 @@ from hyperloom_multibranch.rulegate.accuracy import agentx_accuracy_ok, inferenc
 from hyperloom_multibranch.rulegate.baseline import (
     read_inferencex_baseline,
     write_agentx_baseline,
-    write_agentx_prelude_baseline,
     write_inferencex_baseline,
 )
 from hyperloom_multibranch.rulegate.readings import (
@@ -40,20 +39,17 @@ from hyperloom_multibranch.rulegate.readings import (
 class Rule(Protocol):
     """How the session's workload is judged; ``accuracy_round`` says whether its tests run the eval it reads.
 
-    PRELUDE submits ``baseline_tests`` root tests, and the baseline needs ``min_baselines`` of them measured. A rule
-    that asks for none takes the PRELUDE child's own run of the root as the baseline (:meth:`prelude_baseline`), and
-    ``min_baselines`` root tests where PRELUDE starts no child.
+    PRELUDE submits ``baseline_tests`` root tests, and the baseline needs ``min_baselines`` of them measured.
+    ``confirms_ahead`` says whether a test is short enough to submit its confirming retest before the judgement asks
+    for it.
     """
 
     accuracy_round: bool
     baseline_tests: int
     min_baselines: int
+    confirms_ahead: bool
 
     async def baseline(self, store: GateRecords, root_commit: str, records: Sequence[TestRecord]) -> BaselineRecord: ...
-
-    async def prelude_baseline(
-        self, store: GateRecords, root_commit: str, result: TestResult, *, source: str, wall_seconds: float
-    ) -> BaselineRecord: ...
 
     async def first(self, record: TestRecord, parent: Mapping[str, float]) -> Judgement: ...
 
@@ -76,14 +72,10 @@ class InferenceXRule(Rule):
     accuracy_round = True
     baseline_tests = inferencex.BASELINE_TESTS
     min_baselines = inferencex.MIN_BASELINES
+    confirms_ahead = True
 
     async def baseline(self, store: GateRecords, root_commit: str, records: Sequence[TestRecord]) -> BaselineRecord:
         return await write_inferencex_baseline(store, root_commit, records, self.concurrency)
-
-    async def prelude_baseline(
-        self, store: GateRecords, root_commit: str, result: TestResult, *, source: str, wall_seconds: float
-    ) -> BaselineRecord:
-        raise ValueError(f"an InferenceX baseline is measured by {self.baseline_tests} root tests, not the child's run")
 
     async def first(self, record: TestRecord, parent: Mapping[str, float]) -> Judgement:
         baseline = await read_inferencex_baseline(self.blackboard)
@@ -114,24 +106,19 @@ class InferenceXRule(Rule):
 class AgentXRule(Rule):
     """P50 interactivity with its guards; the error rate the run reports is its accuracy.
 
-    The bar is fixed rather than drawn from the root's spread, so one run of the root anchors the parent values: the
-    PRELUDE child's own, and PRELUDE submits no root test beside it, as one takes 75 to 90 minutes; one root test where
-    PRELUDE starts no child.
+    The bar is fixed rather than drawn from the root's spread, so one root test anchors the parent values. A test
+    takes 75 to 90 minutes, too long to spend on a confirm the judgement may not need.
     """
 
     accuracy_round = False
-    baseline_tests = 0
+    baseline_tests = 1
     min_baselines = 1
+    confirms_ahead = False
 
     async def baseline(self, store: GateRecords, root_commit: str, records: Sequence[TestRecord]) -> BaselineRecord:
         if len(records) != self.min_baselines:
             raise ValueError(f"an AgentX baseline is one run of the root, not {len(records)} root tests")
         return await write_agentx_baseline(store, root_commit, records[0])
-
-    async def prelude_baseline(
-        self, store: GateRecords, root_commit: str, result: TestResult, *, source: str, wall_seconds: float
-    ) -> BaselineRecord:
-        return await write_agentx_prelude_baseline(store, root_commit, result, source=source, wall_seconds=wall_seconds)
 
     async def first(self, record: TestRecord, parent: Mapping[str, float]) -> Judgement:
         return agentx.compare(agentx_reading(_result(record)), parent, record.request_id)

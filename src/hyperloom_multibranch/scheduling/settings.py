@@ -115,22 +115,11 @@ class Workload:
 
 
 @dataclass(frozen=True)
-class ReusedPrelude:
-    """The completed PRELUDE of an earlier session that a run roots on instead of starting a child of its own: that
-    session's directory, the child session its root was read from, and the digest of the root recipe it committed."""
-
-    session: str
-    child_session: str
-    root_recipe_digest: str
-
-
-@dataclass(frozen=True)
 class RunSettings:
     """``max_hours`` is the whole session's wall-clock budget, PRELUDE included, ``max_gpu_hours`` the GPU hours
     the session may use, tests' GPU time plus card time any lease holds, and ``max_llm_usd`` the dollars the session's
     recorded LLM calls, the specialists' and the judge's and patch resolver's, may cost; 0 means no limit for any of
-    them. ``reuse_prelude`` is the earlier
-    PRELUDE the run roots on, ``None`` when it runs a child of its own. ``user_directions`` are the directions the user
+    them. ``user_directions`` are the directions the user
     wrote, each opening one branch where EXPLORE starts, ahead of the opening batch, within the branch cap; ``agents``
     the third-party agents the user named, each opening one autonomous branch the same way, and ``agent_directions``
     the directions map whose disjoint shares the Arbor agents among them work, one share each (``""`` for none; see
@@ -158,7 +147,6 @@ class RunSettings:
     max_llm_usd: float
     caps: RosterCaps
     judge_interval_seconds: float
-    reuse_prelude: ReusedPrelude | None = None
     user_directions: tuple[str, ...] = ()
     agents: tuple[str, ...] = ()
     references: tuple[ReferenceSource, ...] = ()
@@ -183,7 +171,6 @@ __all__ = [
     "InferenceXShape",
     "KernelOptimizer",
     "PlaybookMode",
-    "ReusedPrelude",
     "RunSettings",
     "Workload",
     "sweep_concs",
