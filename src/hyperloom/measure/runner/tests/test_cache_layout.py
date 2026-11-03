@@ -11,17 +11,23 @@ import subprocess
 import sys
 from collections.abc import Callable
 from pathlib import Path
+from typing import BinaryIO
 
 import pytest
 
 from hyperloom.measure.runner import cache_layout
 from hyperloom.measure.runner.cache_layout import (
+    LOCAL_SOURCE_DIR,
+    LOCAL_WHEELS_DIR,
     MANIFEST_NAME,
     REQUIREMENTS_FILE,
+    SOURCE_ARCHIVE,
     CacheError,
+    FileDigest,
     Manifest,
     check_cache,
     check_entry,
+    file_sha256,
     manifest_from_json,
     manifest_to_json,
     parse_lock,
@@ -112,9 +118,18 @@ def _manifest(rig: Rig) -> Manifest:
 def test_the_manifest_round_trips_and_says_what_was_built(rig: Rig) -> None:
     manifest = _manifest(rig)
     assert manifest.sha == rig.cache.sha and manifest.source == tree_digest(rig.source)
+    archive = rig.source.parent / SOURCE_ARCHIVE
+    assert manifest.source_archive == FileDigest(archive.stat().st_size, file_sha256(archive))
     assert sorted(wheel.name for wheel in manifest.wheels) == ["already-pkg", "lock-pkg", "sdist-pkg", "setuptools"]
     assert manifest_from_json(manifest_to_json(manifest)) == manifest
     assert json.loads(manifest_to_json(manifest))["schema"] == 1
+
+
+def test_a_manifest_written_before_entries_had_a_script_or_an_archive_still_reads(rig: Rig) -> None:
+    data = json.loads(manifest_to_json(_manifest(rig)))
+    del data["bootstrap_sha256"], data["source_archive"]
+    older = manifest_from_json(json.dumps(data))
+    assert (older.bootstrap_sha256, older.source_archive) == ("", None)
 
 
 @pytest.mark.parametrize(
@@ -221,37 +236,48 @@ def test_the_requirements_pin_each_manifest_wheel_to_its_recorded_hash(rig: Rig)
     assert len(parse_lock(lines)) == 4
 
 
-def test_the_checker_writes_the_requirements_only_for_a_cache_that_checks_out(rig: Rig, tmp_path: Path) -> None:
+def _staged(scratch: Path) -> list[str]:
+    return sorted(path.name for path in scratch.iterdir()) if scratch.is_dir() else []
+
+
+def test_the_checker_stages_the_source_wheels_and_requirements_only_for_a_cache_that_checks_out(
+    rig: Rig, tmp_path: Path
+) -> None:
     cache = copy_cache(rig, tmp_path / "cache")
-    out = tmp_path / "scratch" / REQUIREMENTS_FILE
-    assert cache_layout.main([str(cache.root), cache.sha, str(out)]) == 0
-    assert out.read_text() == requirements_text(_manifest(rig))
-    (cache.root / cache.sha / "wheels" / "lock_pkg-1.0-py3-none-any.whl").unlink()
-    refused = tmp_path / "other" / REQUIREMENTS_FILE
-    assert cache_layout.main([str(cache.root), cache.sha, str(refused)]) == 1
-    assert not refused.parent.exists()
+    entry, scratch = cache.root / cache.sha, tmp_path / "scratch"
+    assert cache_layout.main([str(cache.root), cache.sha, str(scratch)]) == 0
+    assert _staged(scratch) == sorted([LOCAL_SOURCE_DIR, LOCAL_WHEELS_DIR, REQUIREMENTS_FILE])
+    # The source is the archive unpacked, file for file the tree the builder recorded; the wheels are byte copies.
+    assert tree_digest(scratch / LOCAL_SOURCE_DIR) == _manifest(rig).source
+    assert {path.name: path.read_bytes() for path in (scratch / LOCAL_WHEELS_DIR).iterdir()} == {
+        path.name: path.read_bytes() for path in (entry / "wheels").iterdir()
+    }
+    assert (scratch / REQUIREMENTS_FILE).read_text() == requirements_text(_manifest(rig))
+    # A second check of a cache that no longer checks out leaves none of what the first one staged.
+    (entry / "wheels" / "lock_pkg-1.0-py3-none-any.whl").unlink()
+    assert cache_layout.main([str(cache.root), cache.sha, str(scratch)]) == 1
+    assert _staged(scratch) == []
 
 
-def test_a_manifest_swapped_after_the_check_does_not_reach_the_requirements(
+def test_a_manifest_swapped_after_it_was_read_does_not_reach_the_requirements(
     rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The requirements pip enforces come from the manifest the check passed, not from a second read of the file."""
+    """The requirements pip enforces come from the manifest the check read, not from a second read of the file."""
     cache = copy_cache(rig, tmp_path / "cache")
     entry = cache.root / cache.sha
     checked = _manifest(rig)
     swapped = dataclasses.replace(
         checked, wheels=tuple(dataclasses.replace(wheel, sha256="0" * 64) for wheel in checked.wheels)
     )
-    check = cache_layout._entry_problems
+    copy = cache_layout._copy_hashed
 
-    def check_then_swap(*args: object) -> list[str]:
-        problems = check(*args)
+    def copy_then_swap(path: Path, sink: BinaryIO) -> FileDigest:
         (entry / MANIFEST_NAME).write_text(manifest_to_json(swapped), encoding="utf-8")
-        return problems
+        return copy(path, sink)
 
-    monkeypatch.setattr(cache_layout, "_entry_problems", check_then_swap)
+    monkeypatch.setattr(cache_layout, "_copy_hashed", copy_then_swap)
     out = tmp_path / "scratch" / REQUIREMENTS_FILE
-    assert cache_layout.main([str(cache.root), cache.sha, str(out)]) == 0
+    assert cache_layout.main([str(cache.root), cache.sha, str(out.parent)]) == 0
     assert manifest_from_json((entry / MANIFEST_NAME).read_text(encoding="utf-8")) == swapped
     assert out.read_text(encoding="utf-8") == requirements_text(checked)
     assert "0" * 64 not in out.read_text(encoding="utf-8")
