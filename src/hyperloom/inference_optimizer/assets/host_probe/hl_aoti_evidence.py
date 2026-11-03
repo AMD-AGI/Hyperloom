@@ -1,33 +1,21 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Record whether a run really exported and ran an AOTInductor package.
+"""Count a run's AOTInductor calls, so the export gate need not read source.
 
-The export gate needs to know that a KEEP's module exports. Reading the source
-cannot answer that: the markers appear in a helper nobody calls, in a branch under
-``if False``, and in the ``except`` arm of a fallback to eager -- all of which look
-identical to a working export. This counts the calls instead.
-
-Three counters, in increasing order of what they prove:
-
-``compiled``  ``aoti_compile_and_package`` returned -- an export compiled.
-``loaded``    ``aoti_load_package`` returned -- a package was opened.
-``invoked``   the loaded model was called -- the exported path actually ran.
-
-``invoked`` is the one the gate wants. A module that compiles a package and then
-returns the eager model scores ``compiled>0, invoked==0``.
+Three counters, in increasing order of what they prove: ``compiled`` (an export
+compiled), ``loaded`` (a package was opened), ``invoked`` (the exported path ran).
+Only ``invoked`` settles it -- a module that compiles a package and then returns the
+eager model scores ``compiled>0, invoked==0``.
 
 Armed by ``HYPERLOOM_AOTI_EVIDENCE_DIR``, into which each process writes
-``<pid>.json``: a benchmark may fork, and one shared path would leave last-writer-wins.
+``<pid>.json``: a benchmark may fork, and one shared path is last-writer-wins.
 
-``instrumented`` says the shim ran and wrapped torch. Without it the reader cannot
-tell "nothing exported" from "the shim never loaded" -- not a hypothetical, since
-``python -I`` silently suppresses ``sitecustomize`` and has cost us a campaign
-before. No file at all means the shim never ran, and the reader refuses rather than
-reporting zero.
+``instrumented`` says the shim wrapped torch, so the reader can tell "nothing
+exported" from "the shim never loaded" -- ``python -I`` suppresses ``sitecustomize``
+and has cost us a campaign before.
 
-Unarmed, this costs an environment lookup. Nothing here may raise: a run that cannot
-be measured is worse than one that is not instrumented.
+Nothing here may raise: a run that cannot be measured beats one that is broken.
 """
 
 from __future__ import annotations
@@ -51,10 +39,8 @@ _OUT_DIR = ""
 def _bump(key: str) -> None:
     """Count one call, publishing only the first of each kind.
 
-    Publishing every call cost 4.4x on the inference hot path (34.8 -> 154.5 us per
-    call, measured): a JSON write per invocation. The gate reads these as booleans,
-    so the first of each is the whole signal and the rest is bookkeeping flushed at
-    exit.
+    Publishing every call cost 4.4x on the inference hot path (34.8 -> 154.5 us,
+    measured). The gate reads these as booleans, so the first of each is the signal.
     """
     with _LOCK:
         _COUNTS[key] += 1
@@ -82,11 +68,10 @@ def _write(counts: dict) -> None:
 
 
 def _wrap(owner, name: str, key: str, *, once: bool = False) -> bool:
-    """Count calls to ``owner.name``. Returns whether it was wrapped.
+    """Count calls to ``owner.name``; returns whether it was wrapped.
 
-    ``once`` restores the original after the first call. Use it on anything the
-    benchmark calls in its timed loop: the gate only needs to know the path ran, and
-    an un-restored wrapper is a Python frame on every inference.
+    ``once`` restores the original after the first call -- required for anything in
+    the timed loop, where a left-in wrapper is a Python frame per inference.
     """
     target = getattr(owner, name, None)
     if target is None or getattr(target, "_hl_aoti_wrapped", False):
@@ -94,8 +79,8 @@ def _wrap(owner, name: str, key: str, *, once: bool = False) -> bool:
 
     def wrapper(*args, **kwargs):
         result = target(*args, **kwargs)
-        # Counted after the call: a compile that raised is not a compile that happened,
-        # which is exactly the fallback-to-eager case the gate must not be fooled by.
+        # After the call: a compile that raised is not a compile that happened, which is
+        # the fallback-to-eager case exactly.
         _bump(key)
         if once:
             try:
@@ -135,16 +120,14 @@ def _instrument(torch_module) -> None:
     # this process can report. With the others wrapped but not it, zero counts would be
     # indistinguishable from an uninstrumented run.
     _INSTRUMENTED = "AOTICompiledModel.__call__" in wrapped
-    # Publish immediately, so "torch imported, nothing exported" is distinguishable
-    # from "the shim never ran" -- the failure mode that cost us a campaign before.
+    # Publish now, so "nothing exported" is distinguishable from "the shim never ran".
     _write(dict(_COUNTS))
 
 
 class _TorchImportHook(importlib.abc.MetaPathFinder):
     """Instrument ``torch`` right after the process first imports it.
 
-    Stays registered until the module actually executes: a bare ``find_spec`` lookup
-    must not consume the hook.
+    Stays registered until the module executes: a bare ``find_spec`` must not consume it.
     """
 
     def __init__(self) -> None:
