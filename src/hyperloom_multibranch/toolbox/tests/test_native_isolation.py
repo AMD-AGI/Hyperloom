@@ -253,7 +253,7 @@ def test_on_a_real_host_the_compile_runs_as_nobody_cannot_read_the_key_and_has_a
     isolation = local_isolation(lambda unshare: network and private_network(unshare))
     if isolation is None or (network and isolation.level != ISOLATION_UID_NETNS):
         pytest.skip("this host cannot make a network namespace")
-    base = Path(tempfile.mkdtemp(prefix="w201-isolation-"))
+    base = Path(tempfile.mkdtemp(prefix="native-isolation-"))
     try:
         base.chmod(0o755)  # the compile user reads the tree from here, as it reads the toolbox's own
         key = base / "service.key"

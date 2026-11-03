@@ -172,7 +172,7 @@ async def _serve(tmp_path: Path, **options: Any) -> AsyncIterator[Local]:
     repo.heads["b1"] = PARENT
     toolbox = _toolbox(tmp_path, blackboard, repo, **options)
     await toolbox.start()
-    server = McpServer(McpServerConfig(host_token=secrets.token_hex(16)), campaign="w168")
+    server = McpServer(McpServerConfig(host_token=secrets.token_hex(16)), campaign="roofline")
     register_specialist_tools(
         server,
         toolbox=toolbox,

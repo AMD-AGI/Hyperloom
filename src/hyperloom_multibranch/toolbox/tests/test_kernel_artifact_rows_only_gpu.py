@@ -12,7 +12,7 @@ rows were taken out of which of the image's tables, as many as the tables hold; 
 overridden shapes read as ``torch``; no duplicate-entry error in any log; the shared tables and ``/tmp/aiter_configs``
 as they were. What was measured is printed (``PROBE``).
 
-Needs what ``test_kernel_artifact_gpu`` needs, with ``HL_W13_CARDS`` naming one card.
+Needs what ``test_kernel_artifact_gpu`` needs, with ``HL_GPU_CARDS`` naming one card.
 """
 
 from __future__ import annotations
@@ -131,8 +131,8 @@ async def _put_rows_and_run(root: Path, content: str) -> _Ran:
 
 
 async def test_rows_put_with_rows_only_are_read_over_the_image_tables_and_override_the_shape_they_share() -> None:
-    assert len(CARDS) == 1, f"HL_W13_CARDS must name one card, it is {CARDS}"
-    root = _run_root("w115")
+    assert len(CARDS) == 1, f"HL_GPU_CARDS must name one card, it is {CARDS}"
+    root = _run_root("rows-only")
     tables_before, merged_before = tree_files(Path(DEFAULT_CONFIGS)), tree_files(AITER_MERGE_DIR)
     rows = rows_to_put()
     header = list(rows[0])
@@ -193,8 +193,8 @@ async def test_rows_put_with_rows_only_are_read_over_the_image_tables_and_overri
 
 async def test_rows_put_for_a_shape_the_model_never_asks_are_not_exercised_and_the_result_says_so() -> None:
     """The result tells a table nothing read from one that was read and did not matter."""
-    assert len(CARDS) == 1, f"HL_W13_CARDS must name one card, it is {CARDS}"
-    root = _run_root("w116")
+    assert len(CARDS) == 1, f"HL_GPU_CARDS must name one card, it is {CARDS}"
+    root = _run_root("rows-only-unexercised")
     row = {**rows_to_put()[0], "N": "104", "K": "208"}
     header = list(row)
     content = ",".join(header) + "\n" + ",".join(row[column] for column in header) + "\n"

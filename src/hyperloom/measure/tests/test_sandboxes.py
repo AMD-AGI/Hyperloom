@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The pool of authoritative sandboxes (design 12.1 test_sandboxes)."""
+"""The pool of authoritative sandboxes."""
 
 from __future__ import annotations
 

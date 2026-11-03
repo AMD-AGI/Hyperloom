@@ -120,7 +120,7 @@ async def _stack(
     # b1's head holds a recipe of its own: a profile of it is not the parent's (a profile is keyed by recipe).
     rig.repo.recipes[HEAD] = apply(rig.repo.recipes[PARENT], delta("--head-of-b1"))
     await rig.toolbox.start()
-    server = McpServer(McpServerConfig(host_token=secrets.token_hex(16)), campaign="w32")
+    server = McpServer(McpServerConfig(host_token=secrets.token_hex(16)), campaign="analysis")
     root = tmp_path
 
     def blackboards(branch: str) -> LocalBlackboard:
@@ -320,7 +320,7 @@ async def test_a_toolbox_without_a_tool_executor_refuses_by_name(stack_without_t
 
 async def test_without_an_analysis_starter_the_route_refuses_by_name(tmp_path: Path) -> None:
     rig = build(tmp_path)
-    server = McpServer(McpServerConfig(host_token=secrets.token_hex(16)), campaign="w32")
+    server = McpServer(McpServerConfig(host_token=secrets.token_hex(16)), campaign="analysis")
     register_specialist_tools(
         server,
         toolbox=rig.toolbox,

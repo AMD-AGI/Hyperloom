@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The real toolbox over the sandbox service: one call builds it from plain values (handover 3.3, MB2).
+"""The real toolbox over the sandbox service: one call builds it from plain values.
 
 Every test runs in a fresh authoritative sandbox the service creates from the runner template of the session's card
 count, and is accepted only as a signed bundle that verified against the key the service reported for that sandbox

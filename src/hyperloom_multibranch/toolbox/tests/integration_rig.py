@@ -145,7 +145,7 @@ async def build_stack(root: Path, variant: Variant, baseline: Recipe, *, k: int 
     compiler = EnvironmentCompiler(variant.spec.blobs, variant.image_digest, variant.locator)
     planner = variant.wrap_planner(HostedPlanner(compiler, variant.canonical, root / "points"))
     toolbox = build_local_toolbox(
-        LocalSession(session, "w15", variant.cards),
+        LocalSession(session, "integration", variant.cards),
         blackboard,
         AcceptanceSetup(repo, planner, variant.image_digest),
         variant.spec,
@@ -157,7 +157,7 @@ async def build_stack(root: Path, variant: Variant, baseline: Recipe, *, k: int 
             poll_interval_sec=variant.poll_interval_sec,
         ),
     )
-    server = McpServer(McpServerConfig(host_token=secrets.token_hex(16)), campaign="w15")
+    server = McpServer(McpServerConfig(host_token=secrets.token_hex(16)), campaign="integration")
     register_specialist_tools(
         server,
         toolbox=toolbox,

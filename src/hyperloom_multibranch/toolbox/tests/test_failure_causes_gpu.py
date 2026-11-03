@@ -163,7 +163,7 @@ async def test_a_failed_boot_names_the_cause_its_server_log_states() -> None:
         (case.name, req(f"b-{case.name}", purpose=Purpose.EXPLORE, change=case.delta, **case.request_args))
         for case in CASES
     ]
-    _, done = await _run("w90-causes", "w90-causes", requests, timeout_sec=2400)
+    _, done = await _run("failure-causes", "failure-causes", requests, timeout_sec=2400)
 
     wrong = [problem for case in CASES for problem in _check(case, done["facts"][case.name])]
     assert not wrong, wrong
@@ -173,7 +173,7 @@ async def test_a_failed_boot_names_the_cause_its_server_log_states() -> None:
 async def test_a_boot_not_ready_within_its_limit_ends_at_the_boot_limit_and_frees_the_card() -> None:
     # The limit is half of what a round may take: a 40 s round gives a server 20 s, which no SGLang boot keeps.
     request = req("b-timeout", purpose=Purpose.EXPLORE, change=_delta())
-    _, done = await _run("w90-boot-limit", "w90-boot-limit", [("boot_limit", request)], timeout_sec=40)
+    _, done = await _run("boot-limit", "boot-limit", [("boot_limit", request)], timeout_sec=40)
 
     fact = done["facts"]["boot_limit"]
     assert str(fact["failure_reason"]).startswith("server_boot_timeout: the server was not ready within 20s"), fact

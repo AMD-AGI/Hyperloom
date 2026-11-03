@@ -790,7 +790,7 @@ def test_a_recorded_model_file_the_machine_does_not_have_is_spec_rejected(tmp_pa
     _refused(tmp_path, env, monkeypatch, sheet, "model file config.json unreadable")
 
 
-# --- the measurement surface the runner signs (design 4.20) --------------------------------------------------------
+# --- the measurement surface the runner signs --------------------------------------------------------
 
 
 def _surface_run(tmp_path, env, key, name: str, config: dict) -> str | None:

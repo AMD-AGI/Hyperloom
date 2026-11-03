@@ -33,7 +33,7 @@ from hyperloom_multibranch.toolbox.build_preflight import (
 #: Every directory above a test's own is taken as root's with mode 0755: what this suite controls is below.
 _OPEN_MODE = 0o40755
 _PIN = "614c597bc0c66cabf6a15152037324acc7386090"
-_PACKAGE = "FakeTraceLensW206"
+_PACKAGE = "FakeTraceLensPin"
 
 
 def stat_open_above(base: Path):
@@ -240,8 +240,8 @@ def test_a_tracelens_that_names_no_commit_must_import_what_the_toolbox_uses(fake
 
 
 def test_a_tracelens_that_is_not_importable_is_named() -> None:
-    assert tracelens_problem(_PIN, package="NoSuchTraceLensW206") == (
-        f"NoSuchTraceLensW206 is not importable; install the pinned commit {_PIN}"
+    assert tracelens_problem(_PIN, package="NoSuchTraceLensPin") == (
+        f"NoSuchTraceLensPin is not importable; install the pinned commit {_PIN}"
     )
 
 

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The consistency check on fake measurements (design 12.1 test_consistency, 12.4 stage 1)."""
+"""The consistency check on fake measurements."""
 
 from __future__ import annotations
 

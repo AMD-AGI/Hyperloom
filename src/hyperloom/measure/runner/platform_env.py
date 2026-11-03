@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The platform's own environment variables, which a Pod sets and an image does not (design 4.8.1).
+"""The platform's own environment variables, which a Pod sets and an image does not.
 
 A Pod's value overrides the image's setting and the platform cannot delete a variable its template carries, so the
 runner does both: it removes the job-topology variables once it has read them, and brings the RCCL and HSA variables to

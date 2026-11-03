@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Acceptance of a test request: the checks of design 4.17 that refuse a request before it queues.
+"""Acceptance of a test request: the checks that refuse a request before it queues.
 
 Steps: the request validates (3.7, done by its constructor, plus the toolbox's own: no preset ``request_id``, a
 ``retest_of`` that names an accepted request, a PROFILE that no live profile already covers); the parent recipe is read from the experiment repository; the delta
@@ -188,7 +188,7 @@ class MeasurementPlanner(Protocol):
 class AcceptanceSetup:
     """What acceptance judges a request against: the repository, the planner and the active image.
 
-    ``workload_kind`` is the campaign's workload (default InferenceX, the MB1 scenario, design 7.3): in an InferenceX
+    ``workload_kind`` is the campaign's workload (default InferenceX): in an InferenceX
     campaign every ``explore`` and ``confirm`` request is accepted with ``accuracy=True``; AgentX leaves requests as
     submitted. A recipe on an image other than ``active_image_digest`` is refused; ``None`` skips the check.
     ``supported_kinds`` are the kinds the backend runs (a sweep counts as ``test``); any other kind is refused at

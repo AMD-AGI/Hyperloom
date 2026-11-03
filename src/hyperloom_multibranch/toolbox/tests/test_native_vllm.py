@@ -79,7 +79,7 @@ def test_a_header_edit_alone_is_a_build_with_no_package_files(rig: Rig) -> None:
 
 
 async def test_a_broken_vllm_cu_is_the_candidates_compile_error_naming_the_cu_line(rig: Rig) -> None:
-    compiled = rig.compiler.compile(rig.recipe(rig.patch({vllm.ACT_CU: "int a;\n#error W207 broken\n"})), RecipeDelta())
+    compiled = rig.compiler.compile(rig.recipe(rig.patch({vllm.ACT_CU: "int a;\n#error vllm broken\n"})), RecipeDelta())
 
     hooks = Hooks()
     await rig.wait(AcceptedMeasurement(compiled, ()), hooks)
@@ -87,7 +87,7 @@ async def test_a_broken_vllm_cu_is_the_candidates_compile_error_naming_the_cu_li
     ((request_id, end),) = hooks.ended
     assert request_id == "r1" and end.failure_class is FailureClass.CANDIDATE
     assert end.reason.startswith("compile_error: vllm ")
-    assert "csrc/cache_kernels.cu:2:2 (csrc/cache_kernels.hip:4:2): error: W207 broken" in end.reason
+    assert "csrc/cache_kernels.cu:2:2 (csrc/cache_kernels.hip:4:2): error: vllm broken" in end.reason
 
 
 @pytest.mark.parametrize(

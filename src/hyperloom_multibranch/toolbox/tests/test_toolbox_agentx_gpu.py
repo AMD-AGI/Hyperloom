@@ -7,11 +7,11 @@ The points are rendered by the toolbox's own ``HostedPlanner`` (through ``build_
 Magpie, which resolves the recipe from the pinned InferenceX, owns the server and replays the traces. Each test reads
 back what Magpie wrote (``benchmark_report.json``) and holds it to the validity Magpie itself defines.
 
-Opt in with the environment of ``test_toolbox_kinds_gpu.py`` and ``HL_W13_BACKEND=magpie``: ``HL_W13_MODEL`` (the
-checkpoint directory of the recipe's model), ``HL_W13_INFERENCEX`` (a git checkout of the InferenceX the Magpie pin
-names, the ``inferencex-e2e`` layout), ``HL_W13_OUT`` (an empty directory) and ``HL_W13_CARDS``. ``HL_W13_AGENTX_MODEL``
-(default Qwen3.5-397B MXFP4), ``HL_W13_AGENTX_PRECISION`` (``fp4``), ``HL_W13_AGENTX_TP`` (``2``) and
-``HL_W13_AGENTX_CONC`` (``4``) select the recipe arm: the matrix must have exactly one arm for that model, topology and
+Opt in with the environment of ``test_toolbox_kinds_gpu.py`` and ``HL_GPU_BACKEND=magpie``: ``HL_GPU_MODEL`` (the
+checkpoint directory of the recipe's model), ``HL_GPU_INFERENCEX`` (a git checkout of the InferenceX the Magpie pin
+names, the ``inferencex-e2e`` layout), ``HL_GPU_OUT`` (an empty directory) and ``HL_GPU_CARDS``. ``HL_GPU_AGENTX_MODEL``
+(default Qwen3.5-397B MXFP4), ``HL_GPU_AGENTX_PRECISION`` (``fp4``), ``HL_GPU_AGENTX_TP`` (``2``) and
+``HL_GPU_AGENTX_CONC`` (``4``) select the recipe arm: the matrix must have exactly one arm for that model, topology and
 concurrency on the GPU type. Anywhere else the module is skipped.
 """
 
@@ -49,10 +49,10 @@ from hyperloom_multibranch.toolbox.tests.test_toolbox_kinds_gpu import (
     _toolbox,
 )
 
-AGENTX_MODEL = os.environ.get("HL_W13_AGENTX_MODEL", "amd/Qwen3.5-397B-A17B-MXFP4-AttnFP8-V2")
-PRECISION = os.environ.get("HL_W13_AGENTX_PRECISION", "fp4")
-TP = int(os.environ.get("HL_W13_AGENTX_TP", "2"))
-CONC = int(os.environ.get("HL_W13_AGENTX_CONC", "4"))
+AGENTX_MODEL = os.environ.get("HL_GPU_AGENTX_MODEL", "amd/Qwen3.5-397B-A17B-MXFP4-AttnFP8-V2")
+PRECISION = os.environ.get("HL_GPU_AGENTX_PRECISION", "fp4")
+TP = int(os.environ.get("HL_GPU_AGENTX_TP", "2"))
+CONC = int(os.environ.get("HL_GPU_AGENTX_CONC", "4"))
 #: A canonical AgentX replay is one hour of traces (Magpie's ``_DEFAULT_AGENTIC_DURATION_SECONDS``), after a server
 #: boot of a model this size and the replay client's own set-up: the attempt and the wait get the room.
 ATTEMPT_SEC = 4 * 3600
@@ -64,7 +64,7 @@ pytestmark = pytest.mark.skipif(
     or not Path(MODEL).is_dir()
     or not Path(INFERENCEX, ".git").exists()
     or len(CARDS) != TP,
-    reason="needs HL_W13_BACKEND=magpie, SGLang, HL_W13_MODEL, HL_W13_INFERENCEX (a git checkout) and TP cards",
+    reason="needs HL_GPU_BACKEND=magpie, SGLang, HL_GPU_MODEL, HL_GPU_INFERENCEX (a git checkout) and TP cards",
 )
 
 
@@ -147,7 +147,7 @@ def _assert_valid_on_magpies_terms(report: dict[str, Any]) -> dict[str, Any]:
 
 async def test_an_agentx_point_the_planner_renders_is_run_by_magpie_to_a_valid_measurement() -> None:
     root = _run_root("agentx-measure")
-    toolbox, blackboard, *_ = _agentx_toolbox(root, "w71-measure")
+    toolbox, blackboard, *_ = _agentx_toolbox(root, "agentx-measure")
     try:
         request = req(purpose=Purpose.EXPLORE, change=RecipeDelta())
         request_id, result, landed = await _submit(toolbox, blackboard, request, root, WAIT_SEC)
@@ -171,11 +171,11 @@ async def test_an_agentx_point_the_planner_renders_is_run_by_magpie_to_a_valid_m
 
 async def test_a_patched_agentx_recipe_reaches_the_server_magpie_launches() -> None:
     root = _run_root("agentx-patched")
-    toolbox, blackboard, blobs = _agentx_toolbox(root, "w71-patched")
+    toolbox, blackboard, blobs = _agentx_toolbox(root, "agentx-patched")
     try:
         marker = root / "marker.txt"
         diff, patched = _marker_patch(root / "patch-repo", marker)
-        patch = put_patch(blobs, "w71-marker.patch", diff)
+        patch = put_patch(blobs, "marker.patch", diff)
         delta = RecipeDelta(components=(ComponentChange("sglang", add_patches=(patch,)),))
         request_id, result, landed = await _submit(toolbox, blackboard, req(change=delta), root, WAIT_SEC)
         report = _report(landed)
@@ -222,7 +222,7 @@ def _assert_profile_landed(session: Path, result: TestResult) -> list[Path]:
 
 async def test_an_agentx_profile_captures_a_complete_trace_that_lands_under_the_profile_location() -> None:
     root = _run_root("agentx-profile")
-    toolbox, blackboard, _ = _agentx_toolbox(root, "w71-profile")
+    toolbox, blackboard, _ = _agentx_toolbox(root, "agentx-profile")
     try:
         request = req(kind=TestKind.PROFILE, purpose=Purpose.PROFILE, change=RecipeDelta())
         request_id, result, landed = await _submit(toolbox, blackboard, request, root, WAIT_SEC)

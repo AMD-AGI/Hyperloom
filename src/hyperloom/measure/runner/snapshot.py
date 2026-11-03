@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Check a runtime snapshot against the manifest hash the sheet names (design 4.6.3, 4.8.3 step 1)."""
+"""Check a runtime snapshot against the manifest hash the sheet names."""
 
 from __future__ import annotations
 

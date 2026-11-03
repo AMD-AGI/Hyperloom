@@ -4,8 +4,8 @@
 """A toolbox that measures nothing: the real toolbox with a fake executor and seeded, configurable results.
 
 :class:`FakeToolbox` is a :class:`~hyperloom_multibranch.toolbox.toolbox.RealToolbox` whose executor is
-:class:`FakeExecutor`. Acceptance, the queue (priorities, per-branch K, global limit, backpressure), the retry rules of
-design 4.5, quarantine, the submit log and the blackboard writes are the real toolbox's own code, so a test written
+:class:`FakeExecutor`. Acceptance, the queue (priorities, per-branch K, global limit, backpressure), the retry rules,
+quarantine, the submit log and the blackboard writes are the real toolbox's own code, so a test written
 against the fake exercises the semantics the hosted executor will have. Only one attempt is faked: the fate drawn for
 it, the node it lands on and the values it measures come from :mod:`hyperloom_multibranch.toolbox.fake_model`, seeded
 by ``FakeToolboxConfig.seed`` and by the request and attempt number, so a run does not depend on the order tests ran in.

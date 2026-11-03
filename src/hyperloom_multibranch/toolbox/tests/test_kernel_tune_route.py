@@ -52,7 +52,7 @@ async def make(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator
         if landed:
             rig.landed()
             await record_test(rig.blackboard)
-        server = McpServer(McpServerConfig(host_token=secrets.token_hex(16)), campaign="w117")
+        server = McpServer(McpServerConfig(host_token=secrets.token_hex(16)), campaign="kernel-tune")
         register_specialist_tools(
             server,
             toolbox=rig.box,

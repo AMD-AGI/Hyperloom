@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The toolbox's submit log: what survives a restart (design 3.7, 4.17).
+"""The toolbox's submit log: what survives a restart.
 
 An append-only JSON-lines file, flushed and fsynced per entry. A request is logged before the blackboard hears of it,
 its outcome is logged before the blackboard is written, and the entry is settled once the blackboard holds it, so after a

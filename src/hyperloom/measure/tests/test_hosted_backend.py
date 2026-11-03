@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The hosted backend against the local sandbox provider and a fake runner (design 12.1 test_hosted_backend)."""
+"""The hosted backend against the local sandbox provider and a fake runner."""
 
 from __future__ import annotations
 

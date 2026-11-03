@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The local measurement backend: one complete test on this machine, through the existing ``run_grid`` (design 4.4).
+"""The local measurement backend: one complete test on this machine, through the existing ``run_grid``.
 
 * a single-point test is ``run_grid`` with one variant: warmup round, measured round, optional accuracy round, teardown;
 * a graded single-point test (accuracy asked for) with a warmup evaluates once, in InferenceX's own order: warmup
@@ -270,7 +270,7 @@ class LocalMeasurementBackend:
 
 def _seeded(call: TestCall, phases: PhaseRecorder) -> TestCall:
     """The call with the shared compiled-code cache seeded for it: the test's own cache directories are filled from the
-    verified snapshots and the server is pointed at them (design 4.21)."""
+    verified snapshots and the server is pointed at them."""
     if call.jit is None:
         return call
     phases.begin(JIT_CACHE)

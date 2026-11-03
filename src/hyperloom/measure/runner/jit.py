@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The runner's side of the shared compiled-code cache: from the instruction sheet to a session (design 4.21).
+"""The runner's side of the shared compiled-code cache: from the instruction sheet to a session.
 
 The sheet fixes what the compilers build from: the image, the GPU, the patch laid over the framework, the tuned tables
 and the environment of the server. This module reads those facts, asks :mod:`hyperloom.measure.jit.key` for the key of

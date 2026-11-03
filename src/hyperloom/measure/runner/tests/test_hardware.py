@@ -158,7 +158,8 @@ def test_the_device_id_and_arch_are_read_next_to_the_market_name():
 
 
 def test_a_node_whose_market_name_is_mi355_oam_is_still_an_mi355x():
-    """autopilot-crsuse2-m2m-188 reports 'AMD Instinct MI355 OAM' for device 0x75a3; the old name match refused every test."""
+    """A node (say ``gpu-node-07``) whose VBIOS reports 'AMD Instinct MI355 OAM' for device 0x75a3: the old name
+    match refused every test there."""
     oam = _card("AMD Instinct MI355 OAM", "75a3", "gfx950")
 
     for requested in ("mi355x", "MI355X", "MI355X "):

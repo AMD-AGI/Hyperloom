@@ -198,7 +198,9 @@ async def test_a_cu_edit_waits_for_its_build_and_is_laid_in_the_farm_and_importe
 
 
 async def test_a_broken_cu_is_the_candidates_compile_error_naming_the_cu_line(rig: Rig) -> None:
-    compiled = rig.compiler.compile(rig.recipe(rig.patch({fake.ACT_CU: "int a;\n#error W191 broken\n"})), RecipeDelta())
+    compiled = rig.compiler.compile(
+        rig.recipe(rig.patch({fake.ACT_CU: "int a;\n#error native broken\n"})), RecipeDelta()
+    )
 
     hooks = Hooks()
     await rig.wait(AcceptedMeasurement(compiled, ()), hooks)
@@ -206,7 +208,7 @@ async def test_a_broken_cu_is_the_candidates_compile_error_naming_the_cu_line(ri
     ((request_id, end),) = hooks.ended
     assert request_id == "r1" and end.failure_class is FailureClass.CANDIDATE
     assert end.reason.startswith(f"compile_error: {fake.COMPONENT} ")
-    assert "src/act.cu:2:2 (src/act.hip:4:2): error: W191 broken" in end.reason
+    assert "src/act.cu:2:2 (src/act.hip:4:2): error: native broken" in end.reason
 
 
 async def test_a_host_that_cannot_isolate_the_compile_builds_nothing_and_fails_as_the_machine(tmp_path: Path) -> None:

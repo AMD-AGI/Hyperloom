@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The host's side of the shared compiled-code cache: publishing what a signed result says its test compiled (design 4.21).
+"""The host's side of the shared compiled-code cache: publishing what a signed result says its test compiled.
 
 The runner stages a contribution under ``/out/jit-cache/<kind>/`` and signs the hash of each kind's snapshot list into its
 result. Only the host, after it has verified that signature, brings the staged files over and adds them to the store: the

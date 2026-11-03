@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""One test's use of the shared compiled-code cache (design 4.21).
+"""One test's use of the shared compiled-code cache.
 
 Before the server starts, :meth:`JitCacheSession.seed` copies the verified snapshot of each kind into a directory of the
 test's own and :meth:`~JitCacheSession.environment` names those directories for the server; no two tests ever share a

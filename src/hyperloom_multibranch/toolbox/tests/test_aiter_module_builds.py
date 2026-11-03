@@ -119,7 +119,7 @@ async def test_a_touched_module_waits_for_its_cpu_build_and_the_sheet_names_it_o
 
 
 async def test_a_csrc_that_does_not_compile_is_the_candidates_compile_error_before_any_card(rig: AiterRig) -> None:
-    compiled = rig.compile("int a;\n#error W211 broken\n")
+    compiled = rig.compile("int a;\n#error aiter broken\n")
 
     hooks = Hooks()
     await rig.wait(compiled, hooks)
@@ -127,7 +127,7 @@ async def test_a_csrc_that_does_not_compile_is_the_candidates_compile_error_befo
     ((request_id, end),) = hooks.ended
     assert request_id == "r1" and end.failure_class is FailureClass.CANDIDATE
     assert end.reason.startswith("compile_error: aiter ")
-    assert "site/aiter_meta/csrc/kernels/k.cu:2:2: error: W211 broken" in end.reason
+    assert "site/aiter_meta/csrc/kernels/k.cu:2:2: error: aiter broken" in end.reason
     record = rig.store.read(compiled.builds[0].inputs)
     assert record is not None and record.status == FAILED, "stored, so every test of the stack gets the same answer"
 

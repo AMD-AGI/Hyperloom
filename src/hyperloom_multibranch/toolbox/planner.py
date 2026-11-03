@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The hosted-measurement planner: acceptance steps 2 to 4 of design 4.17 through ``hyperloom.measure``.
+"""The hosted-measurement planner: the compile, point and surface steps of acceptance through ``hyperloom.measure``.
 
 Every point it plans, a baseline's and a candidate's alike, launches its server with aiter's hit logging on, so a
 result can say whether a kernel table was read (``table_hits``) and a parent and its child run under the same
