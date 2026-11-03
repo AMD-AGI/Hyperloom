@@ -1,6 +1,6 @@
 # The launch file of an Arbor agent on an AgentX recipe
 
-A stand-in until multi-branch (MB) carries the launch Magpie resolves (boards/hyperloom-multibranch#157 c4405).
+A stand-in until multi-branch (MB) carries the launch Magpie resolves.
 
 An Arbor agent (`--autonomous-agent` on an Arbor checkout) is served the root recipe's launch. A Magpie AgentX recipe
 holds only what is added to its launch (`extra_server_args`, `extra_envs`): Magpie resolves the rest from the InferenceX

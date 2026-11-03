@@ -60,7 +60,7 @@ def test_a_record_names_a_session_direction_by_its_name_or_the_name_and_a_qualif
     assert session_direction("server args/env settings") is None
 
 
-# Details of blocked_by_tool records from session 4aef3318.
+# Details of blocked_by_tool records as a session wrote them.
 NAMES_NO_TRIED_PATH = "Remaining Memset needs aiter C++ change; other leads already on head or flat."
 NAMES_A_CALL_BUT_NO_ERROR = (
     "The Memset (7.2%) is hipMemsetAsync inside aiter's asm splitK blockscale GEMM (aiter C++, not reachable from an "

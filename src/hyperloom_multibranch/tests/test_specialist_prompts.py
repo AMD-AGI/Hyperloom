@@ -606,10 +606,14 @@ def test_a_launch_shows_the_latest_entries_cut_to_size_and_how_the_last_session_
 def test_the_role_checks_bandwidth_copies_and_a_flat_fusion_before_spending_tests():
     prompt = role_prompt(WORKLOAD)
 
-    assert "each launch costs about 1.5 us on MI355X" in prompt
+    assert "each launch still has a fixed cost" in prompt
     assert "2 to 4 us" not in prompt
     assert "divide the bytes it must move per call" in prompt
     assert "near the device's HBM bandwidth no kernel change pays" in prompt
+    assert "roughly 65 to 80% of what a plain copy reaches is not near it" in prompt
+    assert "about four fifths of a copy's rate" in prompt and "TB/s" not in prompt
+    (moe,) = [text for text in DIRECTIONS if "fmoe" in text]
+    assert "about four fifths of a copy's rate, and a new kernel still had a share of the step" in moe
     assert "Count the copy, cast and elementwise kernels in a decode step" in prompt
     assert "compare each kernel's count and time with the parent's profile" in prompt
     assert "A speculative or MTP draft gains its accept length" in prompt
@@ -717,7 +721,7 @@ def test_the_role_says_an_aiter_or_framework_kernel_is_source_a_branch_can_fork_
     assert "calling one differently" in prompt and "accumulating a split-K GEMM into the residual" in prompt
     assert '"Needs a C++ change" is never a reason to give up' in prompt
     assert "A kernel inside aiter or the framework is not blocked_by_tool" in prompt
-    assert "a streaming read or a device-to-device copy reaches about 6.2 TB/s on MI355X" in prompt
+    assert "a streaming read or a device-to-device copy is the bound, not the datasheet figure" in prompt
 
 
 def test_the_role_says_sglang_jit_kernels_are_framework_source_the_test_rebuilds():

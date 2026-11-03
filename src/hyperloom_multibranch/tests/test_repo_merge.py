@@ -102,7 +102,7 @@ def _keep(data: bytes) -> str:
 
 
 def _aiter(data: bytes) -> KernelArtifact:
-    """A table the toolbox put on the aiter variable of run ``cc2bf0ef``'s tables."""
+    """A table the toolbox put on the aiter variable of a session's tables."""
 
     _keep(data)
     return mint_kernel_artifact(KernelKind.GEMM, "a8w8", ENV, data)
@@ -878,7 +878,7 @@ async def test_a_lineage_whose_first_commit_was_merged_carries_only_the_second(r
 
 
 async def test_a_child_of_a_parent_never_merged_carries_the_parent(tmp_path):
-    """b13's 65ee1103 in miniature: the child rewrites the line its parent changed, which the head never took."""
+    """A session's case in miniature: the child rewrites the line its parent changed, which the head never took."""
 
     repo = _repository(tmp_path, _installed(tmp_path, config="".join(_config())))
     root = await repo.init_root(BASE)
@@ -922,7 +922,7 @@ async def test_a_criss_cross_history_does_not_merge(tmp_path, rooted):
 
 
 async def test_a_reverse_merge_carries_every_merge_integration_took_since_the_branch_forked(rooted):
-    """zheng's case: integration's head carried onto a leading branch that forked before three merges."""
+    """Integration's head carried onto a leading branch that forked before three merges."""
 
     repo, root = rooted
     (lead,) = await _lineage(repo, "lead", root, _setting(server_args="--max-num-seqs 256"))
@@ -950,7 +950,7 @@ def _adding_patch(patch: PatchRef) -> RecipeDelta:
 
 
 SCHEDULER = "policy = 'fcfs'\n"
-#: c7eddf22's 3b275cb2 in miniature: one patch over two files, only one of which the head also changed.
+#: One patch over two files, only one of which the head also changed.
 WIDE = _edit(a="11") + _git_patch("scheduler.py", "policy = 'fcfs'", "policy = 'lpm'")
 
 

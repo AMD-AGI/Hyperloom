@@ -345,7 +345,7 @@ def test_a_snapshot_reads_every_file_a_multi_part_aiter_value_lists_as_one_table
 def test_the_tables_of_a_vllm_image_s_aiter_are_the_image_s_not_the_agent_s_rows(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Ruby, 2026-10-31: in the vLLM image aiter lives in the Python's site-packages, not the SGLang workspace, and its
+    # In the vLLM image aiter lives in the Python's site-packages, not the SGLang workspace, and its
     # default tables were read as the agent's own rows.
     configs = tmp_path / "site-packages" / "aiter" / "configs"
     monkeypatch.setattr(agent_import, "image_configs", lambda: configs)
@@ -491,7 +491,7 @@ async def test_a_keep_the_head_already_is_imports_nothing(tmp_path: Path) -> Non
 async def test_a_keep_carries_an_earlier_unmerged_keep_that_clashes_with_integration_as_its_one_conflict(
     tmp_path: Path,
 ) -> None:
-    """Run 4aef3318's b01: integration holds b04's patch over the lines of b01's first keep, so that keep never merged.
+    """Integration holds b04's patch over the lines of b01's first keep, so that keep never merged.
     A merge carries b01's lineage from the merge base, so the first keep's patch is the conflict and the second keep's
     hunk lands beside b04's."""
 

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Several committed candidates carried onto one integration head together, for one merge test of them all (#138)."""
+"""Several committed candidates carried onto one integration head together, for one merge test of them all."""
 
 import difflib
 

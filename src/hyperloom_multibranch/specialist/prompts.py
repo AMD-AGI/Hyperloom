@@ -289,7 +289,7 @@ compiles on the first requests (a cold cache a startup prewarm removes) cost mor
 TTFT with the prefill's GPU time in the same test: on long multi-turn prompts the gap is host work, such as \
 re-tokenizing or re-rendering the whole history, that no kernel touches; cache it per segment, exact and checked \
 against the full path.
-- Kernel boundaries add up: inside a CUDA graph each launch costs about 1.5 us on MI355X, on every layer and every \
+- Kernel boundaries add up: inside a CUDA graph each launch still has a fixed cost, paid on every layer and every \
 step; a trace shows more, since the profiler adds time to each launch. Folding a small kernel (a split-K reduce, a \
 sort, a quantize, an elementwise op) into the kernel that consumes its output often gains where tuning the kernel \
 itself does not.
@@ -298,14 +298,14 @@ boolean-mask index, or a torch fallback that sizes its output from device data. 
 layer of every step that takes it. Take the bound from host-side metadata the scheduler already holds, and clamp \
 inside the kernel instead of checking on the host.
 - Before working on a top operator, divide the bytes it must move per call (the weights it reads, the state it reads \
-and writes) by its time: near the device's HBM bandwidth no kernel change pays whatever its share (a streaming \
-read or a device-to-device copy reaches about 6.2 TB/s on MI355X), so take the next operator. A kernel at 4 or 5 \
-TB/s is not near it: measure the bytes, do not assume them from a share. A claim that an operator is at its \
-bound, as the reason for an EXHAUSTED record or for leaving the operator, cites the bandwidth or roofline figure a \
-tool reported for that operator (the roofline analysis of a profile, or a timing with the bytes it moved); a hand \
-estimate of its bytes is a hypothesis to measure, not a bound, and a roofline report with no kernels bounds \
-nothing. Three branches once left an MoE kernel as at the bound on estimates of 180 to 365 experts read a layer; \
-it ran at 80% of the 6.26 TB/s a copy measured.
+and writes) by its time: near the device's HBM bandwidth no kernel change pays whatever its share (a streaming read or \
+a device-to-device copy is the bound, not the datasheet figure), so take the next operator. A kernel at roughly 65 to \
+80% of what a plain copy reaches is not near it: measure the bytes, do not assume them from a share. A claim that an \
+operator is at its bound, as the reason for an EXHAUSTED record or for leaving the operator, cites the bandwidth or \
+roofline figure a tool reported for that operator (the roofline analysis of a profile, or a timing with the bytes it \
+moved); a hand estimate of its bytes is a hypothesis to measure, not a bound, and a roofline report with no kernels \
+bounds nothing. Three branches once called an MoE kernel bound on estimates of the experts read a layer; measured, it \
+ran at about four fifths of a copy's rate.
 - Count the copy, cast and elementwise kernels in a decode step and trace each to the source line that launches it: \
 a strided view made contiguous or a scale written in the other layout costs a full read and write, and folding the \
 layout change into its producer or consumer removes it.
@@ -365,14 +365,14 @@ candidate: quantizing it is a source change on top of an FP8 GEMM kernel.
 order leaves them unchanged.
 Examples:
 - The profile showed each layer's split-K GEMM followed by its own reduce kernel at decode. Folding the reduce into \
-the all-reduce that consumed the partial sums, in the same summation order, removed a launch per layer: about 0.2 ms \
-per decode step, every output unchanged.
+the all-reduce that consumed the partial sums, in the same summation order, removed a launch per layer on \
+every decode step, every output unchanged.
 - ROCm ran the prefill outside CUDA graphs where CUDA captures it. Enabling the breakable prefill graph on HIP, with \
-the two operators that blocked capture made capturable, gained 8.7% P50.
+the two operators that blocked capture made capturable, cleared the bar on P50.
 - Requests failed with NaN under load at some batch sizes. The cause was a default GEMM configuration whose \
 pipelined K loop mishandled the tail block for one shape; a block size that divides K removed the NaN, declared as a \
-correctness fix with its case, and halved that kernel's time.
-- A one-launch replacement for a two-kernel top-k was exact but 2 to 3 times slower under CUDA graphs: the branch \
+correctness fix with its case, and also made that kernel faster.
+- A one-launch replacement for a two-kernel top-k was exact but slower under CUDA graphs: the branch \
 dropped it on that result and took the next operator the profile ranked.
 
 How a candidate is judged: it is compared with its parent's recorded value at the session's graded operating point. A \

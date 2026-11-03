@@ -116,7 +116,7 @@ class RepoMerge:
 
 @dataclass(frozen=True)
 class BundleMerge:
-    """Several candidates carried onto one head together, for one merge test of them all (#138).
+    """Several candidates carried onto one head together, for one merge test of them all.
 
     ``members`` are the candidates ``merge`` carries, in the order they were offered; each is carried onto the head
     with the members before it applied, so where two set one value the later one's wins and ``merge`` lists it in

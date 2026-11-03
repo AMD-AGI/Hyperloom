@@ -562,7 +562,7 @@ def _split(component: str, sides: _Sides, stored: Stored) -> _Split | None:
     when every file the patch changes overlaps.
 
     A patch is resolved by one model call that rewrites all of it, so a large one is cut off by the gateway or by the
-    output cap even when only a few of its files conflict (c7eddf22's 3b275cb2: 9 files, 3 conflicting, 35.5 KB).
+    output cap even when only a few of its files conflict.
     """
     touched = [path for path, content in sides.changed.items() if content != sides.original[path]]
     merged, overlapping = dict(sides.current), []
