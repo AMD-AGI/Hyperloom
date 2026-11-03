@@ -248,12 +248,7 @@ def _probe_vllm_aiter_shared_expert_unsupported() -> str | None:
 
 
 def unsupported_capability_reason(variant: "GridVariant") -> str | None:
-    """Return why a variant cannot run (a config table that is not on disk, an env flag the build lacks), else ``None``.
-
-    The config-env question is the same one proposal admission asks (``ungrounded_env_file_reason``): every element
-    of a ``:``-joined list must exist, so an arm is never benched against a table that is only partly there. A
-    replayed recipe's values are re-grounded onto this run's downloads before they reach here.
-    """
+    """Return why a variant cannot run (a config table not on disk, an env flag the build lacks), else ``None``."""
     envs = {str(k): str(v) for k, v in (getattr(variant, "extra_envs", None) or {}).items()}
     if missing_file := ungrounded_env_file_reason(envs):
         return missing_file
