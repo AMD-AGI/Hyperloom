@@ -73,4 +73,5 @@ def hosted_toolbox_inputs(host: HostInfo, *, session_dir: Path, tp: int) -> dict
         "tp": tp,
         "dev_key": None if dev_key is None else dev_key.reveal(),
         "grant_limits": grant_limits_totals(host.grant_limits),
+        "sandbox_workspace": host.sandbox_workspace,
     }

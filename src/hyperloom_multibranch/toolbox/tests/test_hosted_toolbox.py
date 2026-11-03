@@ -22,8 +22,9 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
+import e2b
 import pytest
 
 import hyperloom
@@ -43,6 +44,7 @@ from hyperloom.sandbox.socket import (
     IDEMPOTENCY_KEY,
     NODE_NAME_KEY,
     SIGNING_PUBLIC_KEY,
+    WORKSPACE_KEY,
     CreateOptions,
     Role,
     Sandbox,
@@ -309,6 +311,7 @@ _NOT_A_DIGEST = "runner_cache_manifest_sha256 is not a 64-character lowercase he
         ({"grant_limits": {"max_sandboxes": 8, "max_gpus": 8}}, "grant_limits has no gpu_hours, max_runtime_sec"),
         ({"grant_limits": {**_GRANT, "max_gpus": 7.5}}, "max_gpus is not a whole number"),
         ({"grant_limits": {**_GRANT, "max_sandboxes": 0}}, "at least one sandbox"),
+        ({"sandbox_workspace": " "}, "sandbox_workspace is empty"),
     ],
 )
 def test_inputs_that_cannot_describe_a_session_are_refused(
@@ -330,7 +333,7 @@ _REQUIRED_FIELDS = (
     "sandbox_templates",
     "source_sha",
 )
-_OPTIONAL_FIELDS = ("source_repo", "tp", "dev_key", "grant_limits", "runner_cache_manifest_sha256")
+_OPTIONAL_FIELDS = ("source_repo", "tp", "dev_key", "grant_limits", "runner_cache_manifest_sha256", "sandbox_workspace")
 
 
 def test_a_plain_dict_with_exactly_the_field_names_builds_the_inputs(tmp_path: Path) -> None:
@@ -347,6 +350,7 @@ def test_a_plain_dict_with_exactly_the_field_names_builds_the_inputs(tmp_path: P
         "dev_key": "d-key",
         "grant_limits": dict(_GRANT),
         "runner_cache_manifest_sha256": _MANIFEST,
+        "sandbox_workspace": "top-models",
     }
     assert set(plain) == {*_REQUIRED_FIELDS, *_OPTIONAL_FIELDS}
     inputs = HostedToolboxInputs(**plain)
@@ -592,6 +596,49 @@ def test_the_hosts_template_variable_reaches_the_toolbox_unchanged(tmp_path: Pat
     given = hosted_toolbox_inputs(read_host_info(env, require=()), session_dir=tmp_path / "session", tp=8)
     assert given["sandbox_templates"] == templates
     assert hosted_toolbox._runner_template(HostedToolboxInputs(**given)) == "tpl-b"  # type: ignore[arg-type]
+
+
+class _Sent(Exception):
+    """Stops a create at the SDK, after it has shown what it would send."""
+
+
+@pytest.mark.parametrize(
+    ("named", "sent"),
+    [({}, {}), ({"HYPERLOOM_SANDBOX_WORKSPACE": "top-models"}, {WORKSPACE_KEY: "top-models"})],
+    ids=["claw_grant", "safe_key"],
+)
+def test_the_hosts_workspace_goes_with_every_create_of_the_toolbox(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, named: dict[str, str], sent: dict[str, str]
+) -> None:
+    """``HYPERLOOM_SANDBOX_WORKSPACE`` of a SaFE key used directly, read by the host entry, is the workspace of the
+    ``measurement`` and ``dev`` creates (#156 c5098); a Claw host sets none and the creates carry their own metadata."""
+    env = {
+        "E2B_API_URL": "http://service.invalid",
+        "E2B_SANDBOX_URL": "http://sandboxes.invalid",
+        "HYPERLOOM_SANDBOX_KEY_MEASUREMENT": "m-key-000000000000",
+        "HYPERLOOM_SANDBOX_KEY_DEV": "d-key-000000000000",
+        "HYPERLOOM_SANDBOX_TEMPLATES": json.dumps({"measurement": _RUNNER_MAP, "dev": _DEV_MAP}),
+        "HYPERLOOM_GRANT_LIMITS": json.dumps(_GRANT),
+        "HYPERLOOM_RUN_CREATED_AT": "2026-10-28T12:00:00Z",
+        "HYPERLOOM_SOURCE_REPO": _SOURCE_REPO,
+        "HYPERLOOM_SOURCE_SHA": _SOURCE_SHA,
+        **named,
+    }
+    host = read_host_info(env, require=(), require_run=False)
+    given = {**hosted_toolbox_inputs(host, session_dir=tmp_path / "session", tp=1), "run_id": "run-1"}
+    seen: list[dict[str, str]] = []
+
+    def create(**kwargs: Any) -> NoReturn:
+        seen.append(kwargs["metadata"])
+        raise _Sent
+
+    monkeypatch.setattr(e2b.Sandbox, "create", create)
+    toolbox = _toolbox(None, tmp_path, **given)
+    assert toolbox.leases is not None
+    for role in ("measurement", "dev"):
+        with pytest.raises(_Sent):
+            toolbox.provider.create("t", role=role, timeout_sec=60, metadata={"k": "v"})
+    assert seen == [{"k": "v", **sent}] * 2
 
 
 def test_runner_is_the_older_name_of_the_measurement_role(tmp_path: Path) -> None:
