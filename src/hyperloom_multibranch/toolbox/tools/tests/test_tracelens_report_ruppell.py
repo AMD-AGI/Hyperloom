@@ -3,8 +3,8 @@
 
 """The report route names what ruppell kept of a profile it traced, beside TraceLens' shares, which keep their shape.
 
-The check is the real one of a ruppell run (a TP1 SGLang profile); the
-module table is written by the backend's own writer.
+The check is the synthetic one of ``hyperloom.measure``'s ruppell fixtures; the module table is written by the
+backend's own writer.
 """
 
 from __future__ import annotations

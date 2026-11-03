@@ -3,19 +3,20 @@
 
 """A stand-in ruppell tree, staged into a runner cache, for the tests of :mod:`hyperloom.measure.ruppell`.
 
-ruppell is a private repository, so its tree is not in this one. The stand-in has the files the backend calls, each
-doing what ruppell's does at ``0ef9b0d`` for the part the backend reads:
+ruppell is an external tool whose source the operator stages, so its tree is not in this one. The stand-in has the
+files the backend calls, each doing what ruppell's own does for the part the backend reads:
 
 * ``runtime/build.sh`` writes the libraries into ``RUPPELL_BUILD`` and records its environment (``FAKE_BUILD_RC``
   makes it fail, ``FAKE_BUILD_SLEEP`` makes it slow);
 * ``python -m ruppell run`` sets ``ruppell run``'s variables (``cli.py``'s ``cmd_run`` on ROCm, early load on) and
   runs the command;
-* ``python -m ruppell census`` writes the census files from ``data/ruppell`` (a real traced run's summary and a census
-  that ruppell's own ``census`` made of its offline records), ``export`` writes ``report.json``, and
+* ``python -m ruppell census`` writes the census files from ``data/ruppell`` (a census summary, and the census
+  ruppell's own ``census`` writes of its offline test records), ``export`` writes ``report.json``, and
   ``tests/m2/check_m2.py`` prints a check (``FAKE_CHECK_OK=0`` fails it, ``FAKE_CENSUS_RC`` fails the census,
   ``FAKE_SUMMARY`` names another census summary).
 
-The real tree was run on CPU through the same calls (the PR's evidence); these pin the backend's side.
+The census summary and the check are synthetic: the schema ruppell writes, with round, made-up counts and shares. These
+pin the backend's side of the calls; ruppell's side is ruppell's to test.
 """
 
 from __future__ import annotations

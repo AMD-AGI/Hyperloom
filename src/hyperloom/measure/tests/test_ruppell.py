@@ -216,7 +216,7 @@ def test_the_report_keeps_the_census_the_check_and_the_module_table_beside_the_p
 
     note = tracer.report(tmp_path / "out", 1)
 
-    assert note == "ruppell: ok, 12356 detail steps, check ok"
+    assert note == "ruppell: ok, 1000 detail steps, check ok"
     kept = tmp_path / "out" / "ruppell"
     assert sorted(p.name for p in kept.iterdir()) == [
         "census.jsonl.gz", "census_scopes.json", "census_scopes.npz", "census_summary.json", "check.json",
@@ -240,7 +240,7 @@ def test_a_failed_check_and_incomplete_records_are_said(tmp_path, host, monkeypa
     monkeypatch.setenv("FAKE_SUMMARY", str(tmp_path / "summary.json"))
     monkeypatch.setenv("FAKE_CHECK_OK", "0")
 
-    assert tracer.report(tmp_path / "out", 1) == "ruppell: ok, 12356 detail steps, check failed, records incomplete"
+    assert tracer.report(tmp_path / "out", 1) == "ruppell: ok, 1000 detail steps, check failed, records incomplete"
 
 
 @pytest.mark.parametrize(
@@ -263,7 +263,7 @@ def test_a_report_that_fails_is_a_note_and_never_raises(tmp_path, host, monkeypa
 
 
 def test_module_shares_are_taken_per_step_kind_from_a_census_ruppell_wrote(tmp_path):
-    """``offline_census.jsonl`` is ruppell 0ef9b0d's ``census`` of its own offline records (five decode steps)."""
+    """``offline_census.jsonl`` is ruppell's ``census`` of its own offline test records (five decode steps)."""
     rows = ruppell.module_shares(DATA / "offline_census.jsonl")
 
     assert rows == [{"kind": "decode", "module": "x", "gpu_ms": 0.022, "share_percent": 100.0, "steps": 5}]
