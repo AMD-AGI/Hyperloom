@@ -224,6 +224,18 @@ def test_the_cpu_build_runner_builds_the_missing_modules_from_the_images_own_tre
     assert set(read_manifest(rig.package / "jit")) == {standin.MODULE}
 
 
+def test_the_cpu_build_merges_a_models_tables_below_its_own_tree_not_in_the_images_tmp(tmp_path, monkeypatch) -> None:
+    rig = CpuRig(tmp_path, monkeypatch)
+    model = rig.package / "configs" / "model_configs" / "qwen3_a8w8_tuned_gemm.csv"
+    model.parent.mkdir()
+    model.write_text("M,N,K\n7,8,9\n", encoding="utf-8")
+
+    report = prewarm.prewarm(rig.package, rig.builder, gfx=GFX)
+
+    assert not report.failure, "the image's /tmp/aiter_configs is not the build user's to write"
+    assert report.built == (standin.MODULE,)
+
+
 def test_a_compile_error_of_the_cpu_build_installs_nothing_and_names_the_error(tmp_path, monkeypatch) -> None:
     rig = CpuRig(tmp_path, monkeypatch)
     (rig.package.parent / standin.KERNEL).write_text("#error the image's tree does not compile\n", encoding="utf-8")

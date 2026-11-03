@@ -20,6 +20,11 @@ a module without building it is its ``<name>.so`` in the JIT directory, built fo
 (``core.py`` checks only that the file is there and that its offload bundles name that architecture); the outputs are
 those files, nothing else of the JIT directory.
 
+The tables aiter merges (a variable that lists several, or an unset one with a model's tables below
+``configs/model_configs``) are merged below the tree too: :mod:`hyperloom.measure.aiter_merge_hook` points the literal
+``/tmp/aiter_configs`` of aiter's ``update_config_files`` there, as it does for a test's server, since the build's
+unprivileged user cannot write the image's own (root made it).
+
 A module is built here only when aiter can build it by name alone: an entry of the config, a Python module, not
 standalone, with no third-party checkout to fetch (the build has no network). The rest, the variants aiter names at run
 time among them, are built on the card as before. The variables the build reads are the build service's own (the
@@ -32,6 +37,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import statistics
 from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass
@@ -42,6 +48,7 @@ from typing import Any
 from hyperloom.common.aiter_layout import image_aiter_meta
 from hyperloom.common.outside_facts import AITER_META_DIR_ENV, AITER_META_WHEEL_DIR
 from hyperloom.contracts.recipe import DIGEST_PREFIX
+from hyperloom.measure import aiter_merge_hook
 from hyperloom.measure.compile import BlobStore, EnvRoot
 from hyperloom.measure.docs import canonical_json
 from hyperloom.measure.farm import FarmError, build_farm, locate_package
@@ -68,9 +75,13 @@ __all__ = [
 ]
 
 AITER_COMPONENT = "aiter"
-_RECIPE_VERSION = "aiter_jit/1"
+_RECIPE_VERSION = "aiter_jit/2"
 #: The file below the laid tree that names the modules to build and where the tree's parts are.
 MODULES_FILE = "hyperloom-aiter-modules.json"
+#: The copy of :mod:`hyperloom.measure.aiter_merge_hook` below the laid tree, and the directory there that aiter merges
+#: tables into.
+_MERGE_HOOK = "hyperloom-aiter-merge-hook.py"
+_MERGED_DIR = "aiter_configs"
 #: The JIT directory aiter installs the modules into, below the laid tree; the outputs are its ``.so`` files.
 _JIT_DIR = "jit"
 _SO = ".so"
@@ -79,9 +90,9 @@ _SET_BY_BUILD = frozenset({"GPU_ARCHS", AITER_META_DIR_ENV, "AITER_JIT_DIR"})
 _TRUE, _FALSE = "True", "False"
 _EMPTY_LISTS = (None, "[]", "''", '""')
 #: What the compile runs (``python -I -B -c DRIVER MODULES_FILE``, in the laid tree): aiter's own JIT build of each module,
-#: called as ``compile_ops`` calls it when a module is missing.
+#: called as ``compile_ops`` calls it when a module is missing, once aiter's merged tables point below the tree.
 _DRIVER = """\
-import json, os, sys
+import importlib.util, json, os, sys
 plan = json.load(open(sys.argv[1], encoding="utf-8"))
 tree = os.getcwd()
 jit = os.path.join(tree, plan["jit"])
@@ -92,6 +103,15 @@ os.environ.pop("AITER_REBUILD", None)
 sys.path.insert(0, os.path.dirname(os.path.join(tree, plan["package"])))
 sys.path.insert(0, os.path.join(tree, plan["package"]))
 from jit import core
+hook_file = os.path.join(tree, plan["merge_hook"])
+spec = importlib.util.spec_from_file_location("hyperloom_aiter_merge_hook", hook_file)
+hook = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(hook)
+merged = os.path.join(tree, plan["merged"])
+os.makedirs(merged, exist_ok=True)
+undone = hook.redirect_merge_directory(core, merged)
+if undone is not None:
+    print(f"aiter merges its tables where it always does: {undone}", flush=True)
 for name in plan["modules"]:
     args = core.get_args_of_build(name)
     clang = args.get("hip_clang_path")
@@ -262,9 +282,12 @@ class _Planned:
             "jit": _JIT_DIR,
             "package": (farm.site / AITER_PACKAGE).relative_to(tree).as_posix(),
             "meta": farm.aiter_meta.relative_to(tree).as_posix(),
+            "merge_hook": _MERGE_HOOK,
+            "merged": _MERGED_DIR,
         }
         descriptor = os.open(tree / MODULES_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
         with os.fdopen(descriptor, "w", encoding="utf-8") as out:
             json.dump(plan, out)
+        shutil.copyfile(Path(aiter_merge_hook.__file__), tree / _MERGE_HOOK)
         image_modules = farm.site / AITER_PACKAGE / _JIT_DIR
         return LaidTree(self.recipe, self.machine, tree, image_modules, frozenset(), dict(self.variables))
