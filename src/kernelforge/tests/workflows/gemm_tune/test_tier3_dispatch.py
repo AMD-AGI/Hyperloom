@@ -15,6 +15,7 @@ from kernelforge.workflows.gemm_tune.tier3.dispatch import (
     GRAPH_INNER,
     MAX_RELATIVE_ERROR,
     _Bf16DenseAdapter,
+    bf16_table_solution,
     parse_config,
     relative_error,
 )
@@ -461,3 +462,83 @@ class TestCorrectness:
         adapter._is_correct((2, 3, 4), {"backend": "torch"})
 
         assert (2, 3, 4) not in adapter._operands
+
+
+# ── the deployed bf16 table ──────────────────────────────────────────────────
+class TestTheBf16TableRows:
+    _HEADER = (
+        "gfx,cu_num,M,N,K,bias,dtype,outdtype,scaleAB,bpreshuffle,libtype,solidx,splitK,us,kernelName,"
+        "err_ratio,tflops,bw"
+    ).split(",")
+    _BF16 = {
+        "dtype": "torch.bfloat16",
+        "otype": "torch.bfloat16",
+        "bias": "False",
+        "scaleAB": "False",
+        "bpreshuffle": "False",
+    }
+
+    @pytest.fixture
+    def writer(self, monkeypatch):
+        from kernelforge.workflows.gemm_tune.tier3 import dispatch
+
+        a = _Bf16DenseAdapter()
+        monkeypatch.setattr(a, "_gfx", lambda: "gfx950")
+        monkeypatch.setattr(a, "_cu_num", lambda: 256)
+        monkeypatch.setattr(dispatch, "aiter_table_header", lambda table: list(self._HEADER))
+        return a
+
+    @staticmethod
+    def _win(shape, backend, config):
+        from kernelforge.workflows.gemm_tune.tier3.referee import Judgement, PairedTiming
+
+        return Judgement(
+            shape=shape,
+            best={"backend": backend, "config": config},
+            best_timing=PairedTiming(GRAPH_INNER * 20.0, GRAPH_INNER * 10.0, 2.0),
+        )
+
+    def _read(self, path):
+        import csv
+
+        with path.open(newline="", encoding="utf-8") as fh:
+            reader = csv.DictReader(fh)
+            assert reader.fieldnames == self._HEADER
+            return list(reader)
+
+    @pytest.mark.parametrize(
+        ("backend", "config", "expected"),
+        [
+            ("hipblaslt", "solidx=7", ("hipblaslt", "7", "0", "")),
+            ("aiter_asm", "kernelName=k_asm;splitK=2", ("asm", "0", "2", "k_asm")),
+            ("aiter_opus", "kernelId=1202", ("opus", "1202", "1", "")),
+        ],
+    )
+    def test_each_dispatchable_backend_lands_as_the_row_aiter_dispatches_the_same_way(
+        self, writer, tmp_path, backend, config, expected
+    ):
+        path = tmp_path / "bf16_tuned_gemm.csv"
+        shapes = [{"M": 16, "N": 1536, "K": 7168, **self._BF16}]
+        assert writer.write_table([self._win("16x1536x7168", backend, config)], shapes, path) == 1
+        (row,) = self._read(path)
+        assert (row["gfx"], row["cu_num"], row["M"], row["N"], row["K"]) == ("gfx950", "256", "16", "1536", "7168")
+        assert (row["dtype"], row["outdtype"], row["bias"]) == ("torch.bfloat16", "torch.bfloat16", "False")
+        assert (row["libtype"], row["solidx"], row["splitK"], row["kernelName"]) == expected
+        assert float(row["us"]) == pytest.approx(10.0)
+
+    def test_a_key_the_referee_did_not_time_gets_no_row(self, writer, tmp_path):
+        path = tmp_path / "bf16_tuned_gemm.csv"
+        shapes = [{"M": 16, "N": 1536, "K": 7168, **self._BF16, "otype": "torch.float32"}]
+        assert writer.write_table([self._win("16x1536x7168", "hipblaslt", "solidx=7")], shapes, path) == 0
+        assert not path.exists()
+
+    def test_a_flydsl_tile_config_names_no_row_aiter_could_select(self):
+        assert bf16_table_solution({"backend": "aiter_flydsl", "config": "tile_m=16;tile_n=64;tile_k=128"}) is None
+
+    def test_a_header_with_a_column_it_cannot_fill_is_refused(self, writer, tmp_path, monkeypatch):
+        from kernelforge.workflows.gemm_tune.tier3 import dispatch
+
+        monkeypatch.setattr(dispatch, "aiter_table_header", lambda table: [*self._HEADER, "new_column"])
+        shapes = [{"M": 16, "N": 1536, "K": 7168, **self._BF16}]
+        with pytest.raises(ValueError, match="new_column"):
+            writer.write_table([self._win("16x1536x7168", "hipblaslt", "solidx=7")], shapes, tmp_path / "t.csv")

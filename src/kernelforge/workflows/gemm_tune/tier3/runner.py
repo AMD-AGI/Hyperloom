@@ -36,7 +36,7 @@ class Tier3Outcome:
     table: str = ""
     script: str = ""
     digest: str = ""
-    #: Explicit verified-row path; callers must not reconstruct this module's layout.
+    #: The verified rows in the target table's own schema, the file the runtime is pointed at; empty when none.
     output_csv: str = ""
     judgements: list[Judgement] = field(default_factory=list)
     #: Avoid "trusted" in this serialized bool's name: CodeQL treats it as secret data.
@@ -73,12 +73,16 @@ class Tier3Target:
 
 @dataclass(frozen=True)
 class Retiming:
-    """How the referee re-times a table's shapes: per-shape baseline, dispatch and correctness, and a device sync."""
+    """How the referee re-times a table's shapes, and how the winners become rows of that table.
+
+    ``write_table(judgements, demand_shapes, path)`` returns how many rows it wrote; without it nothing is deployable.
+    """
 
     make_baseline: Callable[[str], Callable[[], Any]]
     make_dispatch: Callable[[str], Callable[[dict], Callable[[], Any] | None]]
     make_correctness: Callable[[str], Callable[[Callable[[], Any]], bool]] | None = None
     sync: Callable[[], Any] | None = None
+    write_table: Callable[[list[Judgement], list[dict[str, Any]], Path], int] | None = None
 
 
 def attempt_generated_tuner(
@@ -112,7 +116,6 @@ def attempt_generated_tuner(
     shapes = demand_shapes_for(gap)
     mandate = build_mandate(gap, shapes, gpu=target.gpu, framework=target.framework)
     mandate.output_csv = str(work_dir / "out.csv")
-    outcome.output_csv = mandate.output_csv
     mandate.candidates_json = str(work_dir / "candidates.json")
     write_mandate(mandate, work_dir / "mandate.json")
 
@@ -128,16 +131,14 @@ def attempt_generated_tuner(
     with core_dumps_off():
         outcome.judgements.extend(_rejudge_candidates(candidates, retiming))
 
-    outcome.ok = outcome.improved_shapes > 0
     best = max(
         (j.best_timing.speedup for j in outcome.judgements if j.best_timing and j.best_timing.usable),
         default=None,
     )
-    outcome.reason = (
-        f"{outcome.improved_shapes} of {len(outcome.judgements)} shape(s) improved"
-        if outcome.ok
-        else "no shape improved once re-timed"
-    )
+    if not outcome.improved_shapes:
+        outcome.reason = "no shape improved once re-timed"
+    else:
+        _write_table(outcome, retiming, shapes, work_dir / Path(gap.table).name)
 
     record = record_outcome(
         work_root / "tier3" / "ledger.json",
@@ -152,6 +153,25 @@ def attempt_generated_tuner(
     )
     log.info("tier3: %s -- %s", gap.table, outcome.reason)
     return outcome
+
+
+def _write_table(outcome: Tier3Outcome, retiming: Retiming, shapes: list[dict[str, Any]], path: Path) -> None:
+    """Write the improved shapes as rows of the target table; only a written table makes the outcome ``ok``."""
+    improved = f"{outcome.improved_shapes} of {len(outcome.judgements)} shape(s) improved"
+    if retiming.write_table is None:
+        outcome.reason = f"{improved}, but nothing here writes rows of {outcome.table}"
+        return
+    try:
+        written = retiming.write_table(outcome.judgements, shapes, path)
+    except (OSError, ValueError) as exc:
+        outcome.reason = f"{improved}, but they could not be written as rows of {outcome.table}: {exc}"
+        return
+    if not written:
+        outcome.reason = f"{improved}, but none of them is expressible as a row of {outcome.table}"
+        return
+    outcome.ok = True
+    outcome.output_csv = str(path)
+    outcome.reason = f"{improved}; {written} row(s) written to {path.name}"
 
 
 def _generate_valid_output(mandate: TunerMandate, work_dir: Path, outcome: Tier3Outcome) -> bool:
