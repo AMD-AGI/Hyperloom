@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The local backend against a stubbed ``run_grid``: the parameter mapping of each kind of test (design 4.4.7)."""
+"""The local backend against a stubbed ``run_grid``: the parameter mapping of each kind of test."""
 
 from __future__ import annotations
 
@@ -1565,8 +1565,9 @@ def test_a_failed_round_is_classified_from_the_refused_request_in_its_benchmark_
     assert (outcome.failure_class, outcome.failure_reason) == ("unclear", f"lm_eval_http_400: WARNING {refusal}")
 
 
-# What a graded test whose evaluation was refused left on a real SGLang 0.5 server (``--context-length 400``, Qwen3-8B):
-# the benchmark served its whole protocol, so run_grid kept the round ``succeeded`` with the evaluation's exit code.
+# What a graded test whose evaluation was refused left on a real SGLang 0.5 server (``--context-length 400``, a small
+# dense model): the benchmark served its whole protocol, so run_grid kept the round ``succeeded`` with the evaluation's
+# exit code.
 _REFUSED_REQUEST = (
     "2026-10-21:06:27:25 WARNING  [models.api_models:521] API request failed! Status code: 400, Response text: "
     '{"object":"error","message":"The input (1392 tokens) is longer than the model\'s context length (400 tokens).",'
@@ -1599,7 +1600,7 @@ def test_a_refused_evaluation_names_the_refusal_that_a_flood_of_tracebacks_pushe
         warmup=grid.result(
             "warmup",
             returncode=1,
-            output_throughput=6245.9,
+            output_throughput=1000.0,
             server_log_path=str(workspace / "server.log"),
             nonfatal_warnings=["nonzero_rc_after_complete_protocol:1"],
         ),

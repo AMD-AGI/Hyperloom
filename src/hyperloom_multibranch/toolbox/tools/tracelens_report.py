@@ -17,12 +17,13 @@ the steady-state mode come from the request alone. A specialist's request gets t
 (``toolbox/analysis.py``), not from anything the caller or the toolbox process says; the splitter picks its window without a
 hint the request lacks.
 
-The op shares do not come from TraceLens' ops table. Its durations are wrong on a decode window after a graph replay (the
-ROCm profiler stamps the eager kernels queued behind the replay as lasting ~9 ms each), so the shares come from GPU events,
-per kernel, summing to 100% of the kernel time they are taken over (:mod:`~.kernel_shares`): events that overlap the previous
-event of their in-order stream are left out and counted (``excluded_events``, ``excluded_claimed_ms``), and a window is
-reported degraded, with the reason and no shares, when its kernels are missing from the trace (they fill under
-:data:`~.kernel_shares.MIN_GPU_BUSY_PERCENT` of its GPU span) or the excluded events could change the ranking.
+The op shares do not come from TraceLens' ops table. Its durations are wrong on a decode window after a graph replay
+(the ROCm profiler stamps the eager kernels queued behind the replay as lasting about as long as the replay itself), so
+the shares come from GPU events, per kernel, summing to 100% of the kernel time they are taken over
+(:mod:`~.kernel_shares`): events that overlap the previous event of their in-order stream are left out and counted
+(``excluded_events``, ``excluded_claimed_ms``), and a window is reported degraded, with the reason and no shares, when
+its kernels are missing from the trace (they fill under :data:`~.kernel_shares.MIN_GPU_BUSY_PERCENT` of its GPU span) or
+the excluded events could change the ranking.
 
 They are not the perf report's window's either. That window (``steady_state_mode``, ``mixed`` unless asked otherwise) is
 weighted by whatever steps it holds, and a graded wave is mostly decode, so the shares are those of the trace's decode window

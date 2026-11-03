@@ -209,8 +209,8 @@ def relax(tmp_path: Path, dropped: list[dict], *lines: str, limit: float = 0.05,
     return Relax(limit, within, (profile(tmp_path, *lines, header=header),))
 
 
-#: Arbor's down_proj at a decode M: the asm row at splitK 6 won at 24.4 us with a ratio just above the default, and the best
-#: row the default check lets through is the CK one at 38.9 us.
+#: A down projection at a decode M: the asm row at splitK 6 is the fastest, with a ratio just above the default, and the
+#: best row the default check lets through is a slower CK one (the times are made up; only their order matters).
 DOWN = (64, 5120, 17408)
 
 
@@ -218,9 +218,9 @@ def test_a_row_forge_dropped_for_a_ratio_within_the_allowed_one_is_read_back_who
     tmp_path: Path, configs: Path
 ) -> None:
     lines = (
-        profile_row(*DOWN, lib="ck", kernel_id=17, split_k=0, us=38.9, err=0.0, name="ck_kernel"),
-        profile_row(*DOWN, lib="asm", kernel_id=4, split_k=6, us=24.4, err=0.0125, name=ASM),
-        profile_row(*DOWN, lib="asm", kernel_id=5, split_k=4, us=25.1, err=0.0125, name=ASM),
+        profile_row(*DOWN, lib="ck", kernel_id=17, split_k=0, us=32.0, err=0.0, name="ck_kernel"),
+        profile_row(*DOWN, lib="asm", kernel_id=4, split_k=6, us=20.0, err=0.0125, name=ASM),
+        profile_row(*DOWN, lib="asm", kernel_id=5, split_k=4, us=21.0, err=0.0125, name=ASM),
     )
     allowed = relax(tmp_path, [forge_dropped(*DOWN)], *lines)
 
@@ -241,7 +241,7 @@ def test_a_row_forge_dropped_for_a_ratio_within_the_allowed_one_is_read_back_who
 
 
 def test_a_relaxed_row_is_never_in_the_default_csv_or_among_the_verified_rows(tmp_path: Path, configs: Path) -> None:
-    lines = (profile_row(*DOWN, lib="asm", kernel_id=4, split_k=6, us=24.4, err=0.0125, name=ASM),)
+    lines = (profile_row(*DOWN, lib="asm", kernel_id=4, split_k=6, us=20.0, err=0.0125, name=ASM),)
 
     rows = from_artifact(
         table(tmp_path, row(16, 512, 7168)), ENV, configs, relax(tmp_path, [forge_dropped(*DOWN)], *lines)
@@ -294,8 +294,8 @@ def test_the_most_a_call_may_allow_is_aiters_own_filter() -> None:
         ),
         pytest.param(
             (
-                profile_row(*DOWN, lib="asm", kernel_id=4, split_k=6, us=24.4, err=0.0125, name=ASM),
-                profile_row(*DOWN, lib="asm", kernel_id=9, split_k=6, us=24.4, err=0.0125, name=ASM + "_2"),
+                profile_row(*DOWN, lib="asm", kernel_id=4, split_k=6, us=20.0, err=0.0125, name=ASM),
+                profile_row(*DOWN, lib="asm", kernel_id=9, split_k=6, us=20.0, err=0.0125, name=ASM + "_2"),
             ),
             "2 different candidates of the tuner's profile",
             id="two-candidates-have-them",
@@ -330,7 +330,7 @@ def test_a_relax_with_no_profile_file_at_all_leaves_the_row_rejected_and_says_th
 def test_the_candidates_of_every_profile_file_are_read(tmp_path: Path, configs: Path) -> None:
     other = tmp_path / "second"
     other.mkdir()
-    line = profile_row(*DOWN, lib="asm", kernel_id=4, split_k=6, us=24.4, err=0.0125, name=ASM)
+    line = profile_row(*DOWN, lib="asm", kernel_id=4, split_k=6, us=20.0, err=0.0125, name=ASM)
     unrelated = profile_row(16, 512, 7168, lib="ck", kernel_id=1, split_k=0, us=1.0, err=0.0, name="x")
     within, _ = split_dropped(dropped_by_forge({"dropped_inaccurate": [forge_dropped(*DOWN)]}), 0.05)
 
@@ -346,7 +346,7 @@ def test_the_candidates_of_every_profile_file_are_read(tmp_path: Path, configs: 
 
 def test_a_profile_without_a_column_of_the_table_is_not_a_row_to_hand_over(tmp_path: Path, configs: Path) -> None:
     short = ",".join(name for name in COLUMNS if name != "bw")
-    line = profile_row(*DOWN, lib="asm", kernel_id=4, split_k=6, us=24.4, err=0.0125, name=ASM)
+    line = profile_row(*DOWN, lib="asm", kernel_id=4, split_k=6, us=20.0, err=0.0125, name=ASM)
     line = ",".join(cell for cell, name in zip(line.split(","), COLUMNS, strict=True) if name != "bw")
 
     rows = from_artifact(
@@ -359,11 +359,11 @@ def test_a_profile_without_a_column_of_the_table_is_not_a_row_to_hand_over(tmp_p
 def test_a_shape_with_two_relaxed_candidates_keeps_the_fastest_and_the_csv_is_in_key_order(
     tmp_path: Path, configs: Path
 ) -> None:
-    slow = profile_row(*DOWN, lib="asm", kernel_id=5, split_k=4, us=25.1, err=0.012, name=ASM)
-    fast = profile_row(*DOWN, lib="asm", kernel_id=4, split_k=6, us=24.4, err=0.0125, name=ASM)
+    slow = profile_row(*DOWN, lib="asm", kernel_id=5, split_k=4, us=21.0, err=0.012, name=ASM)
+    fast = profile_row(*DOWN, lib="asm", kernel_id=4, split_k=6, us=20.0, err=0.0125, name=ASM)
     first = profile_row(16, 512, 7168, lib="ck", kernel_id=2, split_k=0, us=9.0, err=0.02, name="ck")
     dropped = [
-        forge_dropped(*DOWN, split_k=4, us=25.1, err=0.012),
+        forge_dropped(*DOWN, split_k=4, us=21.0, err=0.012),
         forge_dropped(*DOWN),
         forge_dropped(16, 512, 7168, lib="ck", split_k=0, us=9.0, err=0.02),
     ]
@@ -379,7 +379,7 @@ def test_a_shape_with_two_relaxed_candidates_keeps_the_fastest_and_the_csv_is_in
 def test_a_row_above_the_allowed_ratio_is_not_read_back_even_when_the_profile_holds_it(
     tmp_path: Path, configs: Path
 ) -> None:
-    line = profile_row(*DOWN, lib="asm", kernel_id=4, split_k=6, us=24.4, err=0.0145, name=ASM)
+    line = profile_row(*DOWN, lib="asm", kernel_id=4, split_k=6, us=20.0, err=0.0145, name=ASM)
     within, beyond = split_dropped(dropped_by_forge({"dropped_inaccurate": [forge_dropped(*DOWN, err=0.0145)]}), 0.0125)
 
     rows = from_artifact(
@@ -398,7 +398,7 @@ REL_COLUMNS = REL_NORM_HEADER.split(",")
 def sk_row(
     m: int, n: int, k: int, *, lib: str = "asm", split_k: str | int = 6, err: str = "0.0125", rel: str = "0.0047"
 ) -> str:
-    """A row of a table that carries Forge's ``relNormErr`` column, the asm kernel at splitK 6 of Arbor's down_proj by default."""
+    """A row of a table that carries Forge's ``relNormErr`` column, the asm kernel at splitK 6 of the down projection by default."""
     cells = dict.fromkeys(REL_COLUMNS, "0") | {
         "gfx": "gfx950",
         "cu_num": "256",
@@ -407,7 +407,7 @@ def sk_row(
         "K": str(k),
         "libtype": lib,
         "splitK": str(split_k),
-        "us": "24.4",
+        "us": "20.0",
         "kernelName": ASM,
         "errRatio": err,
         REL: rel,
@@ -528,7 +528,7 @@ def test_the_relative_norm_column_is_left_out_of_the_rows_handed_over_so_the_sam
 def test_the_rows_read_back_for_a_higher_ratio_are_not_refused_for_the_column_their_profile_does_not_have(
     tmp_path: Path, configs: Path
 ) -> None:
-    line = profile_row(*DOWN, lib="asm", kernel_id=4, split_k=6, us=24.4, err=0.0125, name=ASM)
+    line = profile_row(*DOWN, lib="asm", kernel_id=4, split_k=6, us=20.0, err=0.0125, name=ASM)
     allowed = relax(tmp_path, [forge_dropped(*DOWN)], line)
 
     rows = from_artifact(rel_table(tmp_path, sk_row(16, 512, 7168, err="0.0", rel="")), ENV, configs, allowed)

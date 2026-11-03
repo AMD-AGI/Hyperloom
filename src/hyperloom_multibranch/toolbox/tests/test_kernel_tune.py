@@ -524,11 +524,11 @@ ASM = "relaxed_asm_splitk6_kernel"
 DOWN = (64, 5120, 17408)
 
 
-def arbors_rows(rig: Rig) -> None:
+def relaxed_rows(rig: Rig) -> None:
     """What Forge leaves when the asm row at splitK 6 wins a decode shape with a ratio just above the default: the table has
     the CK row the default check lets through, and the report names the asm row it removed (and one of 0.4, and one of 0.0145)."""
-    ck = profile_row(*DOWN, lib="ck", kernel_id=17, split_k=0, us=38.9, err=0.0, name="ck_kernel")
-    asm = profile_row(*DOWN, lib="asm", kernel_id=4, split_k=6, us=24.4, err=0.0125, name=ASM)
+    ck = profile_row(*DOWN, lib="ck", kernel_id=17, split_k=0, us=32.0, err=0.0, name="ck_kernel")
+    asm = profile_row(*DOWN, lib="asm", kernel_id=4, split_k=6, us=20.0, err=0.0125, name=ASM)
     worse = profile_row(2048, 512, 7168, lib="asm", kernel_id=5, split_k=6, us=5.0, err=0.0145, name=ASM)
     wrong = profile_row(4096, 512, 7168, lib="ck", kernel_id=6, split_k=0, us=1.0, err=0.4, name="ck_wrong")
     rig.forge.rows = [*tuned_rows()]
@@ -544,7 +544,7 @@ async def test_without_max_err_ratio_the_rows_above_the_default_are_rejected_and
     make: Make,
 ) -> None:
     rig = await ready(await make(cards=2))
-    arbors_rows(rig)
+    relaxed_rows(rig)
     job = await rig.submit(test_request_id=TEST_ID)
 
     assert await rig.finished(job) is JobStatus.SUCCEEDED
@@ -560,7 +560,7 @@ async def test_max_err_ratio_returns_the_rows_within_it_in_a_csv_of_their_own_an
     make: Make,
 ) -> None:
     rig = await ready(await make(cards=2))
-    arbors_rows(rig)
+    relaxed_rows(rig)
     job = await rig.submit(test_request_id=TEST_ID, max_err_ratio=0.02)
 
     assert await rig.finished(job) is JobStatus.SUCCEEDED
@@ -596,7 +596,7 @@ async def test_max_err_ratio_returns_the_rows_within_it_in_a_csv_of_their_own_an
 async def test_the_profile_is_found_beside_the_table_whatever_the_tuner_names_it(make: Make, name: str) -> None:
     """The bf16 tuner writes ``profile_dense_bf16.csv``, not ``profile_<tuner>.csv`` as an aiter dense one does."""
     rig = await ready(await make(cards=2))
-    arbors_rows(rig)
+    relaxed_rows(rig)
     rig.forge.profile_file = name
     job = await rig.submit(test_request_id=TEST_ID, max_err_ratio=0.02)
 
@@ -610,7 +610,7 @@ async def test_a_tuner_that_left_no_profile_leaves_the_rows_within_the_ratio_rej
     make: Make,
 ) -> None:
     rig = await ready(await make(cards=2))
-    arbors_rows(rig)
+    relaxed_rows(rig)
     rig.forge.profile = []
     job = await rig.submit(test_request_id=TEST_ID, max_err_ratio=0.02)
 
@@ -625,7 +625,7 @@ async def test_a_tuner_that_left_no_profile_leaves_the_rows_within_the_ratio_rej
 
 async def test_the_ratio_allowed_is_the_most_a_relaxed_row_may_have(make: Make) -> None:
     rig = await ready(await make(cards=2))
-    arbors_rows(rig)
+    relaxed_rows(rig)
     job = await rig.submit(test_request_id=TEST_ID, max_err_ratio=0.0125)
 
     await rig.finished(job)
@@ -639,7 +639,7 @@ async def test_the_ratio_allowed_is_the_most_a_relaxed_row_may_have(make: Make) 
 
 async def test_a_table_with_only_relaxed_rows_is_not_tuned_and_has_no_default_csv(make: Make) -> None:
     rig = await ready(await make(cards=2))
-    arbors_rows(rig)
+    relaxed_rows(rig)
     rig.forge.rows = []
     job = await rig.submit(test_request_id=TEST_ID, max_err_ratio=0.05)
 
@@ -699,7 +699,7 @@ async def test_an_asm_splitk_row_above_the_ratio_limit_is_handed_over_when_forge
     make: Make,
 ) -> None:
     rig = await ready(await make(cards=2))
-    asm = profile_row(*DOWN, lib="asm", kernel_id=4, split_k=6, us=24.4, err=0.0125, name=ASM)
+    asm = profile_row(*DOWN, lib="asm", kernel_id=4, split_k=6, us=20.0, err=0.0125, name=ASM)
     rig.forge.header = REL_NORM_HEADER
     rig.forge.rows = [*(f"{line}," for line in tuned_rows()), f"{asm},0.0047"]
     job = await rig.submit(test_request_id=TEST_ID)
