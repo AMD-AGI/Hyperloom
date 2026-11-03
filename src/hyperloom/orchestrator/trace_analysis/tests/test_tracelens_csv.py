@@ -2354,6 +2354,72 @@ def test_the_failed_status_keeps_the_skill_artifacts_when_a_later_step_raises(tm
     assert (status["state"], status["artifact_paths"]["tracelens_agent_report"]) == ("failed", str(report))
 
 
+@pytest.mark.parametrize(
+    ("report_info", "messages"),
+    [
+        (
+            {"mode": "deterministic-fallback", "trace_quality": "poor", "warnings": ["GRAPH_UNDER_RECORDED", "short"]},
+            ["GRAPH_UNDER_RECORDED", "short"],
+        ),
+        (
+            {"mode": "deterministic-fallback", "trace_quality": "poor"},
+            ["TraceLens analysis mode is deterministic-fallback"],
+        ),
+        ({"mode": "agentic", "trace_quality": "ok"}, []),
+    ],
+    ids=["fallback_with_warnings", "fallback_without_warnings", "clean"],
+)
+@pytest.mark.parametrize("idle_pct", [5.0, 95.0], ids=["kept", "idle_gated"])
+def test_the_agent_route_records_poor_trace_quality(tmp_path, monkeypatch, report_info, messages, idle_pct):
+    monkeypatch.delenv(idle_gate.HIGH_IDLE_PCT_THRESHOLD_ENV, raising=False)
+    monkeypatch.setattr(trace_gates, "_graph_coverage_from_raw_trace", lambda _tp: {})
+    report = tmp_path / "analysis.md"
+    report.write_text(f"| Compute % | 90.00% |\n| Idle % | {idle_pct:.2f}% |\n", encoding="utf-8")
+    analysis_json = tmp_path / "analysis.json"
+    analysis_json.write_text(json.dumps({"report_info": report_info, "compute_optimizations": []}), encoding="utf-8")
+    monkeypatch.setattr(tla, "render_analysis_json", lambda _md: analysis_json)
+    skill_result = tlr.TraceLensSkillRunResult(output_dir=tmp_path, report_path=report, runner="agent")
+    warnings: list[dict] = []
+
+    tla._agent_route_outcome(skill_result, None, tmp_path / "raw.json", warnings, tmp_path / "log")
+
+    assert [w for w in warnings if w["code"] == "trace_quality_poor"] == [
+        {"code": "trace_quality_poor", "severity": "warning", "message": text, "source": str(analysis_json)}
+        for text in messages
+    ]
+    assert [w["code"] for w in warnings if w["code"] == "high_gpu_idle_pct"] == (
+        ["high_gpu_idle_pct"] if idle_pct > 80.0 else []
+    )
+
+
+def test_a_route_with_no_located_kernel_source_records_kernel_source_unresolved(tmp_path, capsys):
+    trace_dir = tmp_path / "torch_trace"
+    trace_dir.mkdir()
+    _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=12)
+    report = tmp_path / "analysis.json"
+    report.write_text(
+        json.dumps({"compute_optimizations": [{"operation": "kernel_a", "members": [{"kernel_name": ["kernel_a"]}]}]}),
+        encoding="utf-8",
+    )
+    analysis = PerfReportAnalysis(report, trace_gates.WorkloadShares(5.0, 80.0, 5.0), [])
+
+    def split_to_input(_args, job, *_rest):
+        return job.analysis_trace_path, {"chunks_extracted": 1, "chunks_by_mode": {}}
+
+    with (
+        patch.object(tla, "_run_trace_split", split_to_input),
+        patch.object(tla, "analyze_perf_report", return_value=analysis),
+    ):
+        _drive_main_over_capture_dir(tmp_path, trace_dir)
+
+    result = json.loads(capsys.readouterr().out)
+    assert [
+        (w["severity"], w["located"], w["total"])
+        for w in result["trace_health_warnings"]
+        if w["code"] == "kernel_source_unresolved"
+    ] == [("warning", 0, 1)]
+
+
 def _capture_sidecar(path: Path, kernels: int = 2) -> Path:
     """Write a CUDA-graph capture sidecar in its production shape."""
     path.parent.mkdir(parents=True, exist_ok=True)
