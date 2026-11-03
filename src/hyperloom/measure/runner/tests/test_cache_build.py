@@ -19,7 +19,7 @@ import subprocess
 import sys
 import tarfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 
@@ -119,21 +119,56 @@ def _archive_from_git(repo: Path, sha: str, *settings: str) -> bytes:
 _FIXED = ("-c", "tar.umask=0022", "-c", "core.autocrlf=false", "-c", "core.eol=lf")
 
 
-def test_the_source_archive_is_the_same_bytes_for_the_same_commit_whoever_builds_it(rig: Rig, tmp_path: Path) -> None:
+def _hostile_attributes(other: Path, sha: str, home: Path, monkeypatch: pytest.MonkeyPatch) -> list[bytes]:
+    """Give the builder of the clone ``other`` attributes of its own, outside the commit: the clone's
+    ``info/attributes``, then a global attributes file (``~/.config/git/attributes``, with ``home`` as ``HOME``). What
+    ``git archive`` with the fixed settings writes for ``sha`` after each of the two is added."""
+    info = other / ".git" / "info"
+    info.mkdir(exist_ok=True)
+    (info / "attributes").write_text("*.py text eol=crlf\n")
+    written = [_archive_from_git(other, sha, *_FIXED)]
+    monkeypatch.setenv("HOME", str(home))
+    for name in ("XDG_CONFIG_HOME", "GIT_CONFIG_GLOBAL"):
+        monkeypatch.delenv(name, raising=False)
+    (home / ".config" / "git").mkdir(parents=True)
+    (home / ".config" / "git" / "attributes").write_text("__init__.py export-ignore\n")
+    written.append(_archive_from_git(other, sha, *_FIXED))
+    return written
+
+
+def test_the_source_archive_is_the_same_bytes_for_the_same_commit_whoever_builds_it(
+    rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     first = ensure_runner_cache(rig.repo, rig.cache.sha, tmp_path / "first", rig.build_options())
-    # Another builder: a clone whose own settings would change what git archive writes, and another umask.
+    reference = _archive_from_git(rig.repo, rig.cache.sha, *_FIXED)
+    # Another builder: a clone whose own settings would change what git archive writes, attributes of its own outside
+    # the commit (the clone's info/attributes and a global attributes file), and another umask.
     other = tmp_path / "other-repo"
     shutil.copytree(rig.repo, other)
     for name, value in (("tar.umask", "0077"), ("core.autocrlf", "true")):
         _git(other, "config", name, value)
     assert _archive_from_git(other, rig.cache.sha) != _archive_from_git(rig.repo, rig.cache.sha)
+    layers = _hostile_attributes(other, rig.cache.sha, tmp_path / "home", monkeypatch)
+    assert len({reference, *layers}) == 3, "an attributes layer does not change what git archive writes"
+    # The system's attributes (/etc/gitattributes) are not a file a test may write: the git that makes the archive is
+    # checked to be told to skip them, and the system's configuration with them.
+    archives: list[dict[str, str | None]] = []
+    run = cache_build._run
+
+    def recording(command: Sequence[str], what: str, env: Mapping[str, str] | None = None) -> str:
+        if "archive" in command:
+            archives.append({name: (env or {}).get(name) for name in ("GIT_ATTR_NOSYSTEM", "GIT_CONFIG_NOSYSTEM")})
+        return run(command, what, env)
+
+    monkeypatch.setattr(cache_build, "_run", recording)
     umask = os.umask(0o027)
     try:
         second = ensure_runner_cache(other, rig.cache.sha, tmp_path / "second", rig.build_options())
     finally:
         os.umask(umask)
     archive = (first.path / SOURCE_ARCHIVE).read_bytes()
-    assert (second.path / SOURCE_ARCHIVE).read_bytes() == archive == _archive_from_git(rig.repo, rig.cache.sha, *_FIXED)
+    assert (second.path / SOURCE_ARCHIVE).read_bytes() == archive == reference
+    assert archives == [{"GIT_ATTR_NOSYSTEM": "1", "GIT_CONFIG_NOSYSTEM": "1"}]
     first_manifest, second_manifest = (json.loads((e.path / MANIFEST_NAME).read_text()) for e in (first, second))
     assert first_manifest["source_archive"] == second_manifest["source_archive"]
     # The unpacked tree keeps the builder's umask: nothing in it is writable by the group or readable by others.
