@@ -14,6 +14,8 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
+
+from kernelforge.workflows.gemm_tune.profiler_env import without_inherited_profiler
 from typing import Any
 
 # Re-exported: callers and tests import them from this module.
@@ -190,6 +192,7 @@ def run_subprocess(
         env.update(env_override)
     # Every tuner here shells out to something that ends in an aiter JIT build.
     cap_build_parallelism(env)
+    without_inherited_profiler(env)
 
     log.info("Running: %s", " ".join(cmd))
     started = time.time()
