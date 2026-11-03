@@ -62,6 +62,7 @@ from hyperloom.measure.jit.modules import (
 from hyperloom.measure.jit.native.config import BuildStoreConfigError, store_from_environment
 from hyperloom.measure.jit.native.laying import NamedBuild, NativeLayError, SheetBuilds, sheet_builds
 from hyperloom.measure.jit.native.record import COMPILE_ENV_PREFIX, BuildRecord
+from hyperloom.measure.jit.prewarmed import unlike_prewarmed
 from hyperloom.measure.jit.session import GivenModules, JitCacheSession, KindPlan
 from hyperloom.measure.framework.table_modules import file_identity, stale_table_modules
 from hyperloom.measure.jit.store import DirJitStore
@@ -356,7 +357,8 @@ def _touched(inputs: _Inputs, base: Path, effective: Path) -> Touched | str:
     """The prebuilt modules the sheet's patch to aiter's sources, its tuned tables or its build variables make stale, or
     why that cannot be told. A table reaches the server through a variable it sets or through a patched aiter package (its
     ``configs``); a build variable is one a module's config entry reads, which the server sets to another value than the
-    runner has (``env_touched_entries``)."""
+    runner has (``env_touched_entries``), or one the build of a module hyperloom's prewarm installed read, which the server
+    sets otherwise than that build had it (``unlike_prewarmed``)."""
     roots = inputs.spec.environment.roots
     patched = [entry.path for root in roots if root.import_name == AITER_META_WHEEL_DIR for entry in root.entries]
     config_patched = any(
@@ -374,7 +376,10 @@ def _touched(inputs: _Inputs, base: Path, effective: Path) -> Touched | str:
         if not patched and not config_patched and not tables:
             return Touched()
         return f"the module config of aiter cannot be read ({type(exc).__name__}), so which modules the patch or the tables touch is not known"
-    variables = env_touched_entries(after, inputs.servers, inputs.around.environ, inputs.machine.gfx_arch)
+    arch = inputs.machine.gfx_arch
+    variables = env_touched_entries(after, inputs.servers, inputs.around.environ, arch) | unlike_prewarmed(
+        base / "jit", inputs.servers, arch
+    )
     if not patched and not config_patched and not tables and not variables:
         return Touched()
     stale = stale_table_modules(after, base, effective, inputs.servers) if tables else frozenset()

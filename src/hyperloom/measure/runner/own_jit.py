@@ -8,7 +8,8 @@ directory of the package it was imported from. A test whose server imports the i
 gets no JIT directory from the cache (none is configured, or the aiter kinds are off) would install what it builds into
 the image, where every later test on the node loads it. Such a server is told ``AITER_JIT_DIR`` of a directory of the
 test's own, holding links to the image's prebuilt modules (as the cache's directory does), so it builds only what the
-image lacks and what the test's tuned tables or build variables make stale.
+image lacks and what the test's tuned tables or build variables make stale, a module hyperloom's prewarm built under
+other variables than the server's among them (:func:`~hyperloom.measure.jit.prewarmed.unlike_prewarmed`).
 
 The directory only names a location: the cache's key leaves ``AITER_JIT_DIR`` out (``measure.jit.key``), so no key moves.
 """
@@ -30,6 +31,7 @@ from hyperloom.measure.jit.modules import (
     read_config,
     touched_entries,
 )
+from hyperloom.measure.jit.prewarmed import unlike_prewarmed
 from hyperloom.measure.jit.session import JitCacheSession, link_prebuilt
 from hyperloom.measure.jit_kinds import AITER_JIT
 from hyperloom.measure.socket import TestCall
@@ -96,9 +98,9 @@ def server_environments(call: TestCall, configs: list[dict], environ: Mapping[st
 def _stale(
     image: Path, servers: list[dict[str, str]], environ: Mapping[str, str], gfx_arch: str | None
 ) -> frozenset[str]:
-    """The prebuilt modules the tables the servers name, or the build variables they set otherwise than ``environ``,
-    make stale; none when neither does or the module config cannot be read (the image's modules are then what the server
-    would have loaded anyway)."""
+    """The prebuilt modules the tables the servers name, or the build variables they set otherwise than ``environ`` (or
+    than the prewarm built a module under), make stale; none when neither does or the module config cannot be read (the
+    image's modules are then what the server would have loaded anyway)."""
     try:
         config = read_config(config_path(image))
     except (OSError, ValueError):
@@ -107,7 +109,9 @@ def _stale(
         name.startswith(_TABLE_PREFIX) and value.strip() for server in servers for name, value in server.items()
     )
     stale = stale_table_modules(config, image, image, servers) if tables else frozenset()
-    stale |= env_touched_entries(config, servers, environ, gfx_arch)
+    stale |= env_touched_entries(config, servers, environ, gfx_arch) | unlike_prewarmed(
+        image / "jit", servers, gfx_arch
+    )
     return touched_entries(stale, config, prebuilt_names(image)).names if stale else frozenset()
 
 
@@ -115,15 +119,17 @@ def _unlink_stale(
     package: Path, image: Path, servers: list[dict[str, str]], environ: Mapping[str, str], gfx_arch: str | None
 ) -> None:
     """Take out of the farm's ``jit`` (links to the image's modules) the modules the farm's tuned tables, as the servers
-    resolve them, or the build variables the servers set otherwise than ``environ`` make stale: aiter builds a module only
-    when its ``.so`` is missing, and the image's holds only the kernels the image's tables name, built under the image's
-    variables."""
+    resolve them, or the build variables the servers set otherwise than ``environ`` (or than the prewarm built a module
+    under) make stale: aiter builds a module only when its ``.so`` is missing, and the image's holds only the kernels the
+    image's tables name, built under the image's variables."""
     try:
         config = read_config(config_path(package))
     except (OSError, ValueError):
         return
-    stale = stale_table_modules(config, image, package, servers) | env_touched_entries(
-        config, servers, environ, gfx_arch
+    stale = (
+        stale_table_modules(config, image, package, servers)
+        | env_touched_entries(config, servers, environ, gfx_arch)
+        | unlike_prewarmed(image / "jit", servers, gfx_arch)
     )
     if not stale:
         return
