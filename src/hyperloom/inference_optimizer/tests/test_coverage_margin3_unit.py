@@ -191,6 +191,7 @@ def test_multi_node_state_paths_resolution_and_binding(monkeypatch, tmp_path) ->
     from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
 
     monkeypatch.delenv("MULTI_NODE_STATE_FILE", raising=False)
+    monkeypatch.delenv("MULTI_NODE_STATE", raising=False)
     monkeypatch.delenv(ENV_CURRENT_SESSION_DIR, raising=False)
     with pytest.raises(RuntimeError, match="cannot resolve"):
         state_paths.resolve_state_file()
@@ -200,6 +201,7 @@ def test_multi_node_state_paths_resolution_and_binding(monkeypatch, tmp_path) ->
     assert state_paths.resolve_state_file() == explicit
 
     monkeypatch.delenv("MULTI_NODE_STATE_FILE", raising=False)
+    monkeypatch.delenv("MULTI_NODE_STATE", raising=False)
     session = tmp_path / "session"
     monkeypatch.setenv(ENV_CURRENT_SESSION_DIR, str(session))
     assert state_paths.resolve_state_file() == session / "runtime" / "multi_node_state.json"

@@ -702,7 +702,7 @@ async def _restart_round_server(params: dict[str, Any], round_trace_root: str) -
 async def _infera_profile_window(round_trace_root: str):
     import asyncio as _asyncio
 
-    from ._multi_node_server_lifecycle import trigger_infera_engine_profile
+    from ._multi_node_server_lifecycle import trigger_infera_engine_profile, trigger_pd_engine_profile
 
     prof_body: dict[str, Any] = {}
     try:
@@ -720,9 +720,11 @@ async def _infera_profile_window(round_trace_root: str):
     async def _bounded_profile_window() -> None:
         await _asyncio.sleep(warmup_s)
         await trigger_infera_engine_profile("start", prof_body)
+        await trigger_pd_engine_profile("start", prof_body)
         started["v"] = True
         await _asyncio.sleep(window_s)
         await trigger_infera_engine_profile("stop")
+        await trigger_pd_engine_profile("stop")
         started["v"] = False
 
     prof_task = _asyncio.create_task(_bounded_profile_window())
@@ -737,6 +739,7 @@ async def _infera_profile_window(round_trace_root: str):
                 log.debug("profile_executor: bounded profile task ended during cleanup: %r", exc)
         if started.get("v"):
             await trigger_infera_engine_profile("stop")
+            await trigger_pd_engine_profile("stop")
 
 
 # Attaches this round's multi-node trace files, selecting the heaviest as the main trace.
@@ -774,6 +777,9 @@ def _record_mn_round_traces(result: dict[str, Any], round_trace_root: str, task_
             "profile_executor: multi-node trace dir %s exists but no .trace.json.gz files found yet (server pods may still be flushing)",
             trace_dir,
         )
+    from hyperloom.inference_optimizer.multi_node._internal.pd_cluster import record_profile_paths
+
+    record_profile_paths(profile_trace=str(trace_dir), steady_state_trace=str(result.get("main_trace_path") or ""))
 
 
 def _first_trace_dir_with(workspace: Path, finder: Any) -> tuple[Path | None, list[Path]]:

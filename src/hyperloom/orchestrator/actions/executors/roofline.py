@@ -1183,12 +1183,23 @@ class RooflineExecutor:
             detail=f"hot_kernels={len(hot)}",
             duration_s=time.monotonic() - started,
         )
+        steady = str(cached.get("steady_state_trace") or "")
+        try:
+            from hyperloom.inference_optimizer.multi_node._internal.pd_cluster import record_profile_paths
+
+            profile_dir = os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip() or str(Path(trace_path).parent)
+            record_profile_paths(
+                profile_trace=profile_dir,
+                steady_state_trace=steady or trace_path,
+            )
+        except (OSError, RuntimeError, ValueError, TypeError):
+            log.debug("roofline: could not record profile paths into multi-node state", exc_info=True)
         result = {
             "status": status,
             "executed_at_iso": _now_iso(),
             "snapshot_id": cached.get("roofline_snapshot_id"),
             "last_profile_trace": trace_path,
-            "steady_state_trace": cached.get("steady_state_trace", ""),
+            "steady_state_trace": steady,
             "analysis_md_path": cached.get("analysis_md_path", ""),
             "kernel_roofline_path": cached.get("kernel_roofline_path", ""),
             "profile_workspace": profile.result.get("workspace"),

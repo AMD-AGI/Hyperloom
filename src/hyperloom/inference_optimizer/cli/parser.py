@@ -399,12 +399,13 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     opt.add_argument(
         "--mn-backend",
-        choices=("rayjob", "infera"),
+        choices=("rayjob", "infera", "atom", "sglangrouter"),
         default=None,
         help="Multi-node backend when --nodes>=2: 'rayjob' (default, Ray "
-        "head+workers) or 'infera' (idle InferaDeployment + SSH control "
-        "plane). Defaults to rayjob when omitted. Single-node runs ignore "
-        "this flag.",
+        "head+workers), 'infera' (idle InferaDeployment + SSH), 'atom' "
+        "(atomesh router + sglang prefill/decode over SSH), or "
+        "'sglangrouter' (sglang_router + the same engines). Defaults to "
+        "rayjob when omitted. Single-node runs ignore this flag.",
     )
     opt.add_argument(
         "--gpus-per-node",

@@ -609,6 +609,50 @@ async def trigger_infera_engine_profile(
             log.warning("infera profile %s -> %s failed (%s); continuing", route, url, exc)
 
 
+async def trigger_pd_engine_profile(action: str, body: dict | None = None) -> None:
+    """POST /start_profile or /stop_profile on every atom/sglangrouter prefill and decode pod.
+
+    The router does not write GPU traces. Each engine listens on the worker port
+    (8000 for these backends). Only ``output_dir`` is sent; step-window fields
+    crash disaggregated SGLang.
+    """
+    if not is_multi_node():
+        return
+    state = _read_state() or {}
+    if str(state.get("backend") or "").strip().lower() not in ("atom", "sglangrouter"):
+        return
+    pods: list[dict] = []
+    for key in ("prefill_pods", "decode_pods"):
+        pods.extend(pod for pod in (state.get(key) or []) if isinstance(pod, dict) and pod.get("podIP"))
+    if not pods:
+        log.warning("trigger_pd_engine_profile(%s): no prefill/decode pods in state", action)
+        return
+    try:
+        import httpx as _httpx
+    except ImportError:  # pragma: no cover
+        log.warning("httpx unavailable; cannot trigger pd-cluster profiling")
+        return
+    route = "start_profile" if action == "start" else "stop_profile"
+    port = str(os.environ.get("HYPERLOOM_MN_WORKER_PORT", "8000") or "8000").strip() or "8000"
+    payload: dict = {}
+    if action == "start":
+        output_dir = str((body or {}).get("output_dir") or "").strip()
+        if output_dir:
+            payload["output_dir"] = output_dir
+    if action == "start":
+        client_timeout = 30.0
+    else:
+        client_timeout = float(os.environ.get("HYPERLOOM_MN_STOP_PROFILE_TIMEOUT_S", "600") or 600)
+    async with _httpx.AsyncClient(timeout=client_timeout) as client:
+        for pod in pods:
+            url = f"http://{pod['podIP']}:{port}/{route}"
+            try:
+                resp = await client.post(url, json=payload)
+                log.info("pd-cluster profile %s %s -> %s HTTP %d", pod.get("role") or "", route, url, resp.status_code)
+            except _httpx.HTTPError as exc:
+                log.warning("pd-cluster profile %s -> %s failed (%s); continuing", route, url, exc)
+
+
 async def _probe_health(client: Any, health_url: str) -> tuple[bool, str]:
     import httpx as _httpx
 
@@ -954,7 +998,7 @@ async def _wait_for_server_health_async(settings: RestartSettings, timeout_s: in
     # actually serve traffic (Infera registers models in /v1/models before the worker is ready to accept requests;
     # this causes the first benchmark to get 503 "Model temporarily unavailable" for every request, surfacing as
     # `completed=0` -> `baseline_failed`).
-    wait_model_ready = str(state.get("backend") or "").strip().lower() == "infera"
+    wait_model_ready = str(state.get("backend") or "").strip().lower() in ("infera", "atom", "sglangrouter")
     health_ok_at = None
     models_ready_at = None
     consecutive_completion_ok = 0

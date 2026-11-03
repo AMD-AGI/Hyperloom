@@ -29,7 +29,7 @@ TOPOLOGY_FILE_ENV = "TOPOLOGY_HANDOFF_FILE"
 
 _SCHEMA_RE = re.compile(r"^topology-handoff/v(\d+)(?:\.\d+)*$")
 _SUPPORTED_MAJOR = 1
-_BACKENDS = ("rayjob", "infera")
+_BACKENDS = ("rayjob", "infera", "atom", "sglangrouter")
 
 # Every legacy variable the file describes. When a file is in force these are read
 # from it only (empty when the file omits them), never from the process env, except
@@ -101,10 +101,10 @@ def _text(path: str, doc: dict[str, Any], key: str, where: str) -> str:
     return value.strip()
 
 
-def _ip_list(path: str, doc: dict[str, Any], key: str) -> str:
+def _ip_list(path: str, doc: dict[str, Any], key: str, where: str = "infera.") -> str:
     value = doc.get(key, [])
     if not isinstance(value, list) or not all(isinstance(x, str) and x.strip() for x in value):
-        raise _fail(path, f"infera.{key} must be a list of non-empty strings")
+        raise _fail(path, f"{where}{key} must be a list of non-empty strings")
     return ",".join(x.strip() for x in value)
 
 
@@ -128,6 +128,48 @@ def _read_secret(path: str, secret_path: str) -> str:
     if not content:
         raise _fail(path, f"ray.dashboard_token_file {secret_path} is empty")
     return content
+
+
+# SSH and pod-IP names an atom/sglangrouter file leaves unset. Popping them from
+# the overlay lets the process environment supply them; a file that only names
+# the router URL must not blank a hand-off that still carries the IPs.
+_PD_FALLTHROUGH = (
+    "HYPERLOOM_MN_EXT_HEAD_IP",
+    "HYPERLOOM_MN_EXT_RAY_DASHBOARD_TOKEN",
+    "HYPERLOOM_MN_EXT_SSH_KEY",
+    "HYPERLOOM_MN_EXT_SSH_PORT",
+    "HYPERLOOM_MN_EXT_SSH_KNOWN_HOSTS",
+    "HYPERLOOM_MN_EXT_PREFILL_IPS",
+    "HYPERLOOM_MN_EXT_DECODE_IPS",
+    "HYPERLOOM_MN_EXT_WORKER_IPS",
+)
+
+
+def _pd_cluster_overlay(path: str, doc: dict[str, Any]) -> dict[str, str]:
+    """Optional ``cluster`` block. Absent fields are not part of the overlay."""
+    raw = doc.get("cluster")
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise _fail(path, "cluster must be an object")
+    out: dict[str, str] = {}
+    if raw.get("ssh_key_file"):
+        out["HYPERLOOM_MN_EXT_SSH_KEY"] = _text(path, raw, "ssh_key_file", "cluster.")
+    port = raw.get("ssh_port")
+    if port is not None:
+        if not _is_int(port, 1, 65535):
+            raise _fail(path, "cluster.ssh_port must be an integer in [1, 65535]")
+        out["HYPERLOOM_MN_EXT_SSH_PORT"] = str(port)
+    if raw.get("known_hosts_file"):
+        out["HYPERLOOM_MN_EXT_SSH_KNOWN_HOSTS"] = _text(path, raw, "known_hosts_file", "cluster.")
+    for key, name in (
+        ("router_ips", "HYPERLOOM_MN_EXT_ROUTER_IPS"),
+        ("prefill_ips", "HYPERLOOM_MN_EXT_PREFILL_IPS"),
+        ("decode_ips", "HYPERLOOM_MN_EXT_DECODE_IPS"),
+    ):
+        if key in raw:
+            out[name] = _ip_list(path, raw, key, "cluster.")
+    return out
 
 
 def _ray_overlay(path: str, doc: dict[str, Any]) -> dict[str, str]:
@@ -198,7 +240,18 @@ def _parse(path: str) -> dict[str, str]:
             "HYPERLOOM_MN_EXT_SERVICE_URL": url.strip(),
         }
     )
-    overlay.update(_ray_overlay(path, doc) if backend == "rayjob" else _infera_overlay(path, doc))
+    if backend in ("atom", "sglangrouter"):
+        if doc.get("ray") is not None or doc.get("infera") is not None:
+            raise _fail(path, f"backend {backend} must not include a ray or infera block")
+        filled = _pd_cluster_overlay(path, doc)
+        for name in _PD_FALLTHROUGH:
+            if name not in filled:
+                overlay.pop(name, None)
+        overlay.update(filled)
+    elif backend == "rayjob":
+        overlay.update(_ray_overlay(path, doc))
+    else:
+        overlay.update(_infera_overlay(path, doc))
     return overlay
 
 
@@ -214,6 +267,7 @@ def _warn_on_disagreement(path: str, overlay: dict[str, str]) -> None:
         f"{_FIELD_OF[name]} ({name})"
         for name in COVERED_NAMES
         if name not in FLAG_OWNED_NAMES
+        and name in overlay
         and os.environ.get(name, "").strip()
         and _normalise(name, os.environ[name]) != overlay[name]
     )

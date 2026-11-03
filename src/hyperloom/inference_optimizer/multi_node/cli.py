@@ -950,8 +950,13 @@ def cmd_finalize_patch(args: argparse.Namespace) -> int:
 
 def cmd_apply_tracelens_patch(args: argparse.Namespace) -> int:
     """Fan out the TraceLens SGLang patch set to every pod via apply_tracelens_patch_multinode.py; multi-node only."""
-    if _load_state().get("backend") == "infera":
+    backend = _load_state().get("backend")
+    if backend == "infera":
         return _infera_apply_tracelens_patch(args)
+    if backend in ("atom", "sglangrouter"):
+        from .commands.pd_cluster import apply_tracelens_patch
+
+        return apply_tracelens_patch(args)
     state = _load_state()
     head_ip = (state.get("head_pod_ip") or "").strip()
     if not head_ip:
@@ -1297,8 +1302,13 @@ def _restart_single_node(args: argparse.Namespace, state: dict) -> int:
 
 def cmd_restart_server(args: argparse.Namespace) -> int:
     """Kill any prior vllm/sglang server and launch a new one."""
-    if _load_state().get("backend") == "infera":
+    backend = _load_state().get("backend")
+    if backend == "infera":
         return _infera_restart_server(args)
+    if backend in ("atom", "sglangrouter"):
+        from .commands.pd_cluster import restart_pd_cluster
+
+        return restart_pd_cluster(args)
     rejected = _reject_unsupported_restart_args(args)
     if rejected:
         return rejected
@@ -1317,8 +1327,13 @@ def _record_kill_and_invalidate_launch(state: dict) -> None:
 
 def cmd_kill_inference(args: argparse.Namespace) -> int:
     """Kill vllm/sglang on the RayJob without starting replacements."""
-    if _load_state().get("backend") == "infera":
+    backend = _load_state().get("backend")
+    if backend == "infera":
         return _infera_kill_inference(args)
+    if backend in ("atom", "sglangrouter"):
+        from .commands.pd_cluster import kill_pd_cluster
+
+        return kill_pd_cluster(args)
     state = _require_state("head_pod_ip")
     nnodes = int(state.get("nodes") or 1)
 

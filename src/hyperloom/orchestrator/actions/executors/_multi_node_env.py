@@ -177,7 +177,7 @@ def infera_ssh_env_from_state() -> dict[str, str]:
     from hyperloom.inference_optimizer.multi_node._internal import infera_support
 
     state = _read_state()
-    if state.get("backend") != "infera":
+    if state.get("backend") not in ("infera", "atom", "sglangrouter"):
         return {}
     targets = infera_support.gpu_ssh_targets_from_state(state)
     key = str(state.get("ssh_key_path") or "").strip()
