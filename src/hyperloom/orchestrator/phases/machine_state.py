@@ -571,12 +571,13 @@ def warm_replay_in_flight(state: Any) -> bool:
     return str(outcome.get("status") or "").strip() == "in_flight"
 
 
+GEAK_STATUS_ERROR = "error"
 # The statuses a finished GEAK run writes to ``geak_result.status``.
 GEAK_TERMINAL_STATUSES = frozenset(
     {
         "ok",
         "no_gain",
-        "error",
+        GEAK_STATUS_ERROR,
         "timeout",
         "failed",
         "skipped",
@@ -1062,6 +1063,11 @@ def _kernel_predicate_inputs(
         "controller_task_count": int(controller.get("task_count") or 0),
         "controller_reason": str(controller.get("reason") or ""),
     }
+    if pending["optimizer"] == "geak":
+        geak = state.geak_result if isinstance(state.geak_result, dict) else {}
+        pending["geak_status"] = str(geak.get("status") or "").strip().lower()
+        pending["geak_error_class"] = str(geak.get("error_class") or "")
+        pending["geak_error"] = str(geak.get("error") or "")[:500]
     plateau = {
         "idle_ticks": int(state.kernel_idle_ticks or 0),
         "idle_since_unix": _kernel_idle_since_unix(state),
@@ -1300,6 +1306,12 @@ def _kernel_exit(inputs: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
                 "reason": str(pending.get("controller_reason") or ""),
             }
         if not work_pending:
+            if pending.get("geak_status") == GEAK_STATUS_ERROR:
+                return "kernel_geak_failed", {
+                    "geak_status": GEAK_STATUS_ERROR,
+                    "error_class": pending.get("geak_error_class"),
+                    "error": pending.get("geak_error"),
+                }
             return "kernel_no_more_leverage", {"evidence": "kernel_settled"}
         idle = _kernel_idle_exit(plateau, inputs.get("now_unix"))
         if idle is not None:
