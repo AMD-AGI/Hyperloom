@@ -15,7 +15,8 @@ return code, and a profile whose traced attempt failed runs again without it.
       <cache>/tools/ruppell-<commit>/manifest    JSON, written last: the commit and the tree's digest
 
   This file pins the commit and the digest (:data:`RUPPELL_COMMIT`, :data:`RUPPELL_TREE_SHA256`); the tree a test uses
-  is a copy of the entry whose digest is the pinned one, so nothing the server writes lands in the cache.
+  is its own copy of the entry, and it is the copy that must have the pinned digest, so what is built is the pinned tree
+  whoever can write the cache, and nothing the server writes lands in the cache.
 * **Build.** ``runtime/build.sh`` in the test's own image, before the server starts: the tool library links the image's
   ROCm profiler SDK and the GPU code is built for the card's architecture.
 * **Launch.** Magpie and InferenceX own the server's command line, so the server is not wrapped in ``ruppell run``: the
