@@ -443,7 +443,8 @@ def _add_agent_minutes_options(run: argparse.ArgumentParser) -> None:
         help=(
             "The least time to their cutoff the share branches of a split map must still have, after the dossier pass"
             " and the review, to open: Arbor starts no iteration with less. Below it none opens, and the session says"
-            f" why; 0 always opens them (default {SHARE_MINUTES:g})."
+            " why. It is also the least an agent branch whose lease finds no free cards must still have to run to"
+            f" keep waiting for them; 0 always opens them and waits while any time is left (default {SHARE_MINUTES:g})."
         ),
     )
 

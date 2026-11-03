@@ -333,6 +333,7 @@ class Session:
             # The session's review stands in for each Arbor's own; without one, nobody's does.
             REVIEW_HOST if settings.review_gate else REVIEW_OFF,
             MapCalls(self._map_start, self._map_split) if settings.agents else None,
+            settings.agent_share_minutes,
         )
 
     def _score_with_defaults(self) -> None:

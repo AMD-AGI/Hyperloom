@@ -26,7 +26,7 @@ from hyperloom_multibranch.blackboard.rsi.briefing import SessionBriefs
 from hyperloom_multibranch.rulegate.critic import FixReviewer
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
-from hyperloom_multibranch.scheduling.settings import AGENT_PORT, Workload
+from hyperloom_multibranch.scheduling.settings import AGENT_PORT, SHARE_MINUTES, Workload
 
 if TYPE_CHECKING:
     from hyperloom.hosted.mcp_server import McpServer
@@ -79,7 +79,9 @@ class PeerSetup:
     adds to (``""`` when the recipe's is the whole launch), ``agent_port`` the first port of their port blocks,
     ``agent_dossier`` the dossier the run gives every agent branch with its reviewed map (``""`` for none), and
     ``agent_review`` how an Arbor's own review gate is handed over (``AgentSpec.review``: the host reviews, nobody
-    does, or ``""`` for neither), and ``agent_maps`` the scheduler's side of a mapping branch, ``None`` without agents.
+    does, or ``""`` for neither), ``agent_maps`` the scheduler's side of a mapping branch, ``None`` without agents, and
+    ``agent_share_minutes`` the least an agent must have left to run for its branch to wait for cards its lease was
+    refused.
     """
 
     layout: SessionLayout
@@ -97,6 +99,7 @@ class PeerSetup:
     agent_dossier: str = ""
     agent_review: str = ""
     agent_maps: MapCalls | None = None
+    agent_share_minutes: float = SHARE_MINUTES
 
 
 PeerFactory = Callable[[PeerSetup], Peers]

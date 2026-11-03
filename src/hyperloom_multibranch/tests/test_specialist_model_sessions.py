@@ -65,6 +65,15 @@ def _agent_sessions() -> AgentSessions:
     return AgentSessions(spec, command, {}, object(), object(), LocalAgentSandboxes(object()))
 
 
+def test_an_agent_branch_waits_for_cards_while_it_would_still_run_the_session_s_least(tmp_path):
+    agents = replace(_agent_sessions(), least_run_seconds=3780.0)
+    place = BranchPlace(SimpleNamespace(path=tmp_path / "worktree"), object(), tmp_path / "session")
+
+    session = agents.session(SessionStart("a1", "c0", 1, BranchTask(agent="arbor")), place)
+
+    assert session._setup.least_run_seconds == 3780.0
+
+
 def test_a_branch_whose_task_names_an_agent_runs_it_on_ports_of_its_own_in_the_sandbox_it_leases(tmp_path):
     package = tmp_path / "site-packages" / "vllm"
     package.mkdir(parents=True)

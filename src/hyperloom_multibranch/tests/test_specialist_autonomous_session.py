@@ -28,6 +28,7 @@ from hyperloom.contracts.recipe import (
 from hyperloom.measure.compile import LocalBlobStore, kernel_rows_only
 from hyperloom.measure.surface import SurfaceViolation, check_launch_envs
 from hyperloom.sandbox import SandboxGone
+from hyperloom.sandbox.socket import SandboxUnavailable
 from hyperloom_multibranch.contracts.lifecycle import BranchTask
 from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind
 from hyperloom_multibranch.contracts.toolbox import Backpressure, BranchLease, LeaseCharge, RequestRejected
@@ -343,6 +344,8 @@ class Toolbox:
         self.charges: list[LeaseCharge | None] = []
         self.released: list[str] = []
         self.cards_left = 1
+        self.lease_refusals: list[Exception] = []
+        self.lease_tries = 0
         self.tables: dict[str, bytes] = {}
         self._variables = KernelVariables()
 
@@ -362,6 +365,9 @@ class Toolbox:
         charge: LeaseCharge | None = None,
         lifetime_sec: float | None = None,
     ) -> BranchLease:
+        self.lease_tries += 1
+        if self.lease_refusals:
+            raise self.lease_refusals.pop(0)
         if self.cards_left < cards:
             raise RequestRejected("leasing would leave no card to measure on", "lease_leaves_no_measurement")
         self.leases.append((branch_id, cards))
@@ -518,6 +524,7 @@ async def _rig(
     start_seconds: float = 5.0,
     aiter: Path | None = None,
     source: Path | None = None,
+    least_run: float = 0.0,
 ) -> Rig:
     """A session of the agent on :data:`BRANCH`, opened at the root, or at ``start`` committed onto it the way PRELUDE
     replays a Recipe KB champion; the agent's source is ``source``, or a repository holding :data:`AGENT` and
@@ -560,6 +567,8 @@ async def _rig(
         cutoff_seconds=0.5,
         stall_seconds=stall,
         clock=clock,
+        least_run_seconds=least_run,
+        lease_poll_seconds=0.05,
     )
     if aiter is not None:
         setup = replace(setup, aiter_configs=aiter)
@@ -889,15 +898,47 @@ async def test_a_passed_preflight_records_the_agent_s_manifest_in_the_blackboard
     assert recorded["source"] == stored["source"] and recorded["commit"] == stored["commit"]
 
 
-async def test_an_agent_whose_lease_would_leave_no_card_to_measure_fails_its_preflight(tmp_path: Path) -> None:
-    rig = await _rig(tmp_path)
-    rig.toolbox.cards_left = 0
+NO_ROOM = RequestRejected(
+    "leasing 1 of the 1 cards would leave fewer than one test needs", "lease_leaves_no_measurement"
+)
 
-    with pytest.raises(PreflightFailed, match="lease_leaves_no_measurement"):
+
+@pytest.mark.parametrize(
+    "busy", [NO_ROOM, SandboxUnavailable("no 1 card(s) are free now")], ids=["no_measurement", "cards_busy"]
+)
+async def test_an_agent_whose_cards_are_taken_waits_for_them_and_starts(tmp_path: Path, busy: Exception) -> None:
+    rig = await _rig(tmp_path, deadline=time.time() + 3600.0, least_run=60.0)
+    rig.toolbox.lease_refusals = [busy, busy]
+
+    await rig.session.preflight()
+    await rig.session.release()
+
+    assert rig.toolbox.lease_tries == 3 and rig.sandbox.started
+    assert len([note for note in await rig.notices() if "waits for cards" in note]) == 1
+
+
+async def test_an_agent_whose_lease_is_refused_for_another_reason_fails_its_preflight(tmp_path: Path) -> None:
+    rig = await _rig(tmp_path, deadline=time.time() + 3600.0)
+    rig.toolbox.lease_refusals = [RequestRejected("the branch holds a lease", "lease_exists")]
+
+    with pytest.raises(PreflightFailed, match="lease_exists"):
         await rig.session.preflight()
     await rig.session.release()
 
-    assert not rig.sandbox.started and rig.toolbox.released == []
+    assert rig.toolbox.lease_tries == 1 and not rig.sandbox.started and rig.toolbox.released == []
+
+
+async def test_an_agent_that_waits_for_cards_past_the_time_it_needs_to_run_fails_its_preflight(
+    tmp_path: Path,
+) -> None:
+    rig = await _rig(tmp_path, deadline=time.time() + 3.0, least_run=2.0)
+    rig.toolbox.cards_left = 0
+
+    with pytest.raises(PreflightFailed, match="waited .* for cards.*lease_leaves_no_measurement"):
+        await rig.session.preflight()
+    await rig.session.release()
+
+    assert rig.toolbox.lease_tries > 1 and not rig.sandbox.started and rig.toolbox.released == []
 
 
 async def test_a_keep_the_toolbox_refuses_is_noted_and_one_it_has_no_room_for_waits(tmp_path: Path) -> None:
