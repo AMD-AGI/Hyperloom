@@ -13,6 +13,8 @@ from hyperloom_common.env import env_flag
 from hyperloom.common.env_safety import scrub_benchmark_process_env
 from hyperloom.common.visible_devices import hip_mask_within_rocr
 
+from . import _ray_runtime
+
 log = logging.getLogger(__name__)
 
 # Env vars Ray owns inside its workers; never let a caller override them.
@@ -27,13 +29,16 @@ def ray_exec_enabled() -> bool:
     """Whether serving and ``needs_gpu`` specialist work runs through the Ray backend.
 
     Multi-node is always OFF. On single-node ``INFERENCE_OPTIMIZER_RAY_EXEC`` decides when set; otherwise it is ON,
-    and OFF under pytest.
+    and OFF under pytest. ON also needs a Ray head that answers a driver (``ray_head_answers_driver``): one that does
+    not turns this OFF for the rest of the process, as if the flag were ``0``.
     """
     from ._multi_node_env import is_multi_node
 
     if is_multi_node():
         return False
-    return env_flag("INFERENCE_OPTIMIZER_RAY_EXEC", default=not os.environ.get("PYTEST_CURRENT_TEST"))
+    if not env_flag("INFERENCE_OPTIMIZER_RAY_EXEC", default=not os.environ.get("PYTEST_CURRENT_TEST")):
+        return False
+    return _ray_runtime.ray_head_answers_driver()
 
 
 def ray_gpu_pending_limit() -> int:

@@ -226,6 +226,24 @@ launched with `--ulimit nofile=...` — fix the launch command.
 
 ---
 
+## Ray head does not answer a driver
+
+**Symptom**: the log says `Ray head at address 'auto' did not answer a driver`, and
+serving rounds and GPU specialists run on the local subprocess path instead of Ray.
+
+**Cause**: a Ray head is running (`ray status` answers), but its raylet never replies
+to a driver's registration. Connecting in-process would freeze the whole process: Ray
+2.44 waits for that reply with the GIL held and no timeout, so no thread, timer or
+event loop runs again. Hyperloom therefore tries the connect once in a child process,
+bounded by `HYPERLOOM_RAY_CONNECT_PROBE_TIMEOUT_SEC` (60 s), and keeps the answer for
+the rest of the process.
+
+**Fix**: run `ray stop --force` before the next session so it starts a fresh head, or
+`export INFERENCE_OPTIMIZER_RAY_EXEC=0` to run without Ray and without the probe. To
+check a head by hand: `timeout 60 python -c "import ray; ray.init(address='auto')"`.
+
+---
+
 ## VRAM exhaustion or IR-1 error
 
 **Symptom**: Inference server exits with `HSA: out of memory`,
@@ -550,6 +568,11 @@ python -m hyperloom session state "$SD"
 
 See [Hyperloom operator scripts](operator-scripts.md) for the full set of
 inspection tools.
+
+If the `hyperloom optimize` process itself looks frozen (no new log lines, no new
+events), `kill -USR1 <pid>` writes every thread's Python stack to its stderr without
+stopping it. It works while the process is stuck in native code that holds the GIL,
+where `py-spy` may be missing and nothing in Python runs.
 
 ---
 

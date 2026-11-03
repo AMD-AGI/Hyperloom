@@ -616,6 +616,92 @@ def serving_lease_on_a_ray_double(monkeypatch):
         lease.close()
 
 
+#: A ``ray`` package whose ``init`` answers as ``FAKE_RAY_HEAD`` says, logging each call with its pid.
+_FAKE_RAY_PACKAGE = """
+import os, subprocess, sys, time
+
+
+def _note(line):
+    with open(os.environ["FAKE_RAY_LOG"], "a", encoding="utf-8") as log:
+        log.write(line + "\\n")
+
+
+def init(address=None, **_kwargs):
+    _note(f"init {os.getpid()} {address}")
+    mode = os.environ["FAKE_RAY_HEAD"]
+    if mode == "silent":
+        # A raylet that never replies, after the driver started a process of its own.
+        daemon = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(3600)"])
+        _note(f"daemon {daemon.pid}")
+        while True:
+            time.sleep(3600)
+    if mode == "raises":
+        raise ConnectionError("the raylet refused the driver")
+    if mode == "mismatch":
+        raise RuntimeError("Version mismatch: The cluster was started with: Ray: 2.44.1")
+
+
+def shutdown():
+    _note(f"shutdown {os.getpid()}")
+"""
+
+
+class FakeRayHead:
+    """A Ray head as a driver sees it: a stand-in ``ray`` package on the child ``PYTHONPATH``.
+
+    The routing decision sees a running head (``ray status`` answers) and starts from no verdict, so the first
+    question about the Ray route runs the real connect probe against this package.
+    """
+
+    def __init__(self, root: Path, monkeypatch) -> None:
+        import os
+
+        from hyperloom.orchestrator.actions.executors import _ray_runtime
+
+        package = root / "ray"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text(_FAKE_RAY_PACKAGE, encoding="utf-8")
+        self._init_file = package / "__init__.py"
+        self._log = root / "ray_calls.log"
+        self._log.touch()
+        self._monkeypatch = monkeypatch
+        monkeypatch.setenv("PYTHONPATH", os.pathsep.join(filter(None, [str(root), os.environ.get("PYTHONPATH")])))
+        monkeypatch.setenv("FAKE_RAY_LOG", str(self._log))
+        monkeypatch.setenv("FAKE_RAY_HEAD", "answers")
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", "1")
+        monkeypatch.setattr(_ray_runtime, "_HEAD_VERDICT", _ray_runtime._HeadVerdict())
+        monkeypatch.setattr(_ray_runtime, "ray_status_ok", lambda: True)
+
+    def answers(self, mode: str) -> None:
+        """Answer every later driver connect as ``mode``: ``answers``, ``silent``, ``raises`` or ``mismatch``."""
+        self._monkeypatch.setenv("FAKE_RAY_HEAD", mode)
+
+    def import_in_process(self) -> Any:
+        """Make this package the ``ray`` this process imports, for the in-process connect."""
+        import importlib.util
+        import sys
+
+        spec = importlib.util.spec_from_file_location("ray", self._init_file)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self._monkeypatch.setitem(sys.modules, "ray", module)
+        return module
+
+    def calls(self) -> list[tuple[str, int]]:
+        """Every ``init``, ``daemon`` and ``shutdown`` so far, with the pid it names."""
+        return [(kind, int(pid)) for kind, pid, *_ in (line.split() for line in self._log.read_text().splitlines())]
+
+    def connects(self) -> list[int]:
+        """The pid of every driver that called ``init``."""
+        return [pid for kind, pid in self.calls() if kind == "init"]
+
+
+@pytest.fixture
+def fake_ray_head(tmp_path: Path, monkeypatch) -> FakeRayHead:
+    """A running Ray head that answers a driver connect; tests switch it with :meth:`FakeRayHead.answers`."""
+    return FakeRayHead(tmp_path / "fake_ray_head", monkeypatch)
+
+
 def cli_call_sequence(entry: str) -> list[str]:
     """Every call ``entry`` makes, in source order, descending into the CLI package's own functions.
 
