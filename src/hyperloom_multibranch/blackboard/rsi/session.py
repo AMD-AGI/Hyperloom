@@ -208,10 +208,17 @@ def _archived(
 
 
 def _trialled(
-    snapshot: BlackboardSnapshot, metric: str, archive: TreeArchive | None, bottlenecks: Mapping[str, float] | None
+    snapshot: BlackboardSnapshot,
+    metric: str,
+    archive: TreeArchive | None,
+    *,
+    budget_seconds: float | None,
+    bottlenecks: Mapping[str, float] | None,
 ) -> CloseStep:
     """The session kept as a trial of the playbook it played, beside the pool, and what that settles: a playbook
-    crowned or retired (:func:`~hyperloom_multibranch.blackboard.rsi.ladder.settle`)."""
+    crowned or retired (:func:`~hyperloom_multibranch.blackboard.rsi.ladder.settle`). Its task names the configured
+    ``budget_seconds``, as the archived tree does: the time a blackboard spans differs from session to session, and
+    R3 pairs and bands only sessions of one task."""
 
     versions = snapshot.fingerprints[-1].policy_versions if snapshot.fingerprints else {}
     played = versions.get(PLAYBOOK_KEY)
@@ -221,7 +228,7 @@ def _trialled(
     if target is None:
         return CloseStep(SKIPPED, NO_ARCHIVE)
     try:
-        tree = tree_from_snapshot(snapshot, metric, bottlenecks=bottlenecks)
+        tree = tree_from_snapshot(snapshot, metric, budget_seconds=budget_seconds, bottlenecks=bottlenecks)
         pool = PlaybookPool.beside(target)
         audit = stop_audit(tree, stall_odds(archived_history(target), tree.task, session=tree))
         trial = trial_of(tree, audit, played, pool.champion().label, fell_back=bool(versions.get(FALLBACK_KEY)))
@@ -447,7 +454,9 @@ def close_knowledge(
         lessons=_lessons(snapshot, targets.lesson_pool()),
         lesson_standings=_standings(snapshot, targets.lesson_pool(), targets.receipt(LEARNINGS_LOG)),
         stop_audit=_audited(snapshot, metric, targets.archive, targets.receipt(STOP_AUDIT_REPORT), bottlenecks),
-        playbook_trial=_trialled(snapshot, metric, targets.archive, bottlenecks),
+        playbook_trial=_trialled(
+            snapshot, metric, targets.archive, budget_seconds=budget_seconds, bottlenecks=bottlenecks
+        ),
         scheduling_replay=_replayed(snapshot, targets.archive, targets.receipt(SCHEDULING_REPLAY_REPORT)),
         specialist_outcomes=_outcomes(snapshot, targets.archive, targets.receipts),
         judge_decisions=_decided(snapshot, targets.archive, targets.judge_transcript),
