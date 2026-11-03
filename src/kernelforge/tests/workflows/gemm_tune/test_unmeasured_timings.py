@@ -9,6 +9,8 @@ from __future__ import annotations
 import types
 from pathlib import Path
 
+import pytest
+
 import kernelforge.workflows.gemm_tune.tuners._aiter_dense_common as ac
 from kernelforge.tests.workflows.gemm_tune._sglang_dense_bf16_run import _csv, _prep, _run
 from kernelforge.workflows.gemm_tune.tuners.base import TuneContext
@@ -29,29 +31,13 @@ def _timings():
 
 
 class TestTheCheck:
-    def test_all_zero_or_infinite_is_unmeasured(self, tmp_path):
+    @pytest.mark.parametrize("tflops, verdict", [("inf", "never timed"), (700, "")], ids=["all-untimed", "one-timed"])
+    def test_unmeasured_unless_one_row_is_timed(self, tmp_path, tflops, verdict):
         path = tmp_path / "p.csv"
-        path.write_text(
-            _csv(
-                [
-                    _BF16_ROW.format(m=1, lib="torch", us=0, tflops="inf"),
-                    _BF16_ROW.format(m=1, lib="hipblaslt", us=5.0, tflops="inf"),
-                ]
-            )
-        )
-        assert "never timed" in _timings()(path)
-
-    def test_one_timed_row_is_enough(self, tmp_path):
-        path = tmp_path / "p.csv"
-        path.write_text(
-            _csv(
-                [
-                    _BF16_ROW.format(m=1, lib="torch", us=0, tflops="inf"),
-                    _BF16_ROW.format(m=1, lib="hipblaslt", us=5.0, tflops=700),
-                ]
-            )
-        )
-        assert _timings()(path) == ""
+        rows = [_BF16_ROW.format(m=1, lib="torch", us=0, tflops="inf")]
+        path.write_text(_csv([*rows, _BF16_ROW.format(m=1, lib="hipblaslt", us=5.0, tflops=tflops)]))
+        result = _timings()(path)
+        assert verdict in result if verdict else result == ""
 
     def test_missing_or_empty_files_say_nothing(self, tmp_path):
         (tmp_path / "empty.csv").write_text(_csv([]))

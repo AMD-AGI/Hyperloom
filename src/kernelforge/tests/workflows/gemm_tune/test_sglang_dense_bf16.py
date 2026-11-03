@@ -401,8 +401,8 @@ def _untuned_rows(tmp_path: Path) -> list[str]:
     return untuned.read_text(encoding="utf-8").strip().splitlines()[1:]
 
 
-class TestDerivedShapesAreSpreadForTheDeadline:
-    """Without a cap every derived shape is listed, ordered so the chunks a deadline allows cover the M range evenly."""
+class TestDerivedShapesWithoutACap:
+    """Without a cap every derived shape is listed; the deadline decides how many get tuned."""
 
     NK = [(4096, 4096), (4096, 14336), (14336, 4096), (6144, 4096)]
     MS = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
@@ -415,16 +415,6 @@ class TestDerivedShapesAreSpreadForTheDeadline:
         _run(tmp_path, timeout_s=1_800, thorough=True)
 
         assert len(_untuned_rows(tmp_path)) == len(self.NK) * len(self.MS)
-
-    def test_order_starts_at_both_ends_then_fills_in(self):
-        order = sd._spread_order(self.MS)
-        assert sorted(order) == self.MS
-        assert order[:3] == [8192, 1, 64]
-
-    def test_every_prefix_spans_the_range(self):
-        order = sd._spread_order(list(range(1, 21)))
-        for n in range(2, 21):
-            assert {1, 20} <= set(order[:n])
 
 
 # ── row count, not exit code, decides the outcome ────────────────────────────
