@@ -15,11 +15,17 @@ which a learning of this session may revise or retire it by, the conditions it d
 and how often sessions bore it out. A granted claim, the learnings tool and a brief list
 :data:`~hyperloom_multibranch.blackboard.learning_search.NOTES` of them; a menu line of a brief, its family's best note
 (:meth:`LessonRecall.family_note`). The pool is read once, when first asked.
+
+A brief starts each launch of a branch's specialist. From it on, a claim's reply names a lesson the launch was shown
+already by its gist and id alone: the same lessons came back with claim after claim, half the lessons a claim showed.
+The learnings tool, asked for them, still shows them whole.
 """
 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from hyperloom_kb import ReadStatus
@@ -64,6 +70,9 @@ from hyperloom_multibranch.blackboard.rsi.similarity import (
 
 #: A family's notes a menu line of a brief shows.
 FAMILY_NOTES = 1
+#: The longest gist of a lesson a claim's reply names again.
+GIST_CHARS = 80
+SHOWN_BEFORE = "(shown before; the learnings tool shows it whole)"
 
 
 @dataclass(frozen=True)
@@ -109,6 +118,27 @@ def _notes(chosen: list[LearningRecord | PastLearning], snapshot: BlackboardSnap
     return Notes(lines, here, past, tuple(isinstance(item, LearningRecord) for item in chosen))
 
 
+def _gist(text: str) -> str:
+    first = text.strip().split(". ")[0]
+    return first if len(first) <= GIST_CHARS else first[: GIST_CHARS - 3] + "..."
+
+
+def _named_again(found: Notes, seen: frozenset[str]) -> Notes:
+    """``found`` with each lesson of ``seen`` named by its gist and id in place of its whole line."""
+
+    if not seen:
+        return found
+    past = iter(found.past)
+    lines = []
+    for line, mine in zip(found.lines, found.mine):
+        item = None if mine else next(past)
+        named = line
+        if item is not None and item.experience_id in seen:
+            named = f"- {SHOWN_BEFORE} {_gist(item.content)} [{item.experience_id}]"
+        lines.append(named)
+    return dataclasses.replace(found, lines=tuple(lines))
+
+
 class LessonRecall(LearningRecall):
     """One session's retrieval over its learnings and the lesson pool ``pool``, shared by every branch's tools and
     briefs; ``reader``, ``identities`` and ``log`` as for :class:`LearningRecall`."""
@@ -119,6 +149,7 @@ class LessonRecall(LearningRecall):
         super().__init__(reader, log=log)
         self._pool = pool
         self._loaded: _Loaded | None = None
+        self._shown: dict[str, set[str]] = {}
 
     def _load(self) -> _Loaded:
         with self._lock:
@@ -203,6 +234,26 @@ class LessonRecall(LearningRecall):
         pooled = [(match, item) for match, item in self._scored(snapshot, "", family) if match.kin == SAME_FAMILY]
         return _notes(_ranked(same, pooled, FAMILY_NOTES), snapshot)
 
+    def record(
+        self,
+        snapshot: BlackboardSnapshot,
+        retrieval: Retrieval,
+        here: Sequence[LearningRecord],
+        past: PastLearnings | None,
+    ) -> None:
+        """Log one retrieval, as :class:`LearningRecall` does, and keep the lessons it showed the branch's launch: a
+        brief starts the launch afresh."""
+
+        super().record(snapshot, retrieval, here, past)
+        shown = {
+            item.experience_id for item in (past.items if past is not None else ()) if is_lesson_id(item.experience_id)
+        }
+        with self._lock:
+            if retrieval.source is RetrievalSource.BRIEF:
+                self._shown[retrieval.branch] = shown
+            elif retrieval.branch in self._shown:
+                self._shown[retrieval.branch] |= shown
+
     def _logged(self, snapshot: BlackboardSnapshot, retrieval: Retrieval, found: Notes) -> list[str]:
         self.record(snapshot, retrieval, found.here, found.logged())
         return note_lines(found.lines)
@@ -211,10 +262,12 @@ class LessonRecall(LearningRecall):
         self, snapshot: BlackboardSnapshot, query: str, *, branch: str, family: Family | None = None
     ) -> list[str]:
         """The :data:`~hyperloom_multibranch.blackboard.learning_search.NOTES` notes about a claimed direction, in one
-        list, as one retrieval of the log."""
+        list, as one retrieval of the log; a lesson this launch of the branch was shown already by its gist alone."""
 
         found = await asyncio.to_thread(self.notes, snapshot, query, limit=NOTES, family=family)
-        return self._logged(snapshot, Retrieval(branch, RetrievalSource.CLAIM, query), found)
+        with self._lock:
+            seen = frozenset(self._shown.get(branch, ()))
+        return self._logged(snapshot, Retrieval(branch, RetrievalSource.CLAIM, query), _named_again(found, seen))
 
     async def lines(self, snapshot: BlackboardSnapshot, query: str, *, limit: int, branch: str = "") -> list[str]:
         """The ``limit`` notes that bear on ``query``, the family it names first, in one list."""
@@ -223,4 +276,4 @@ class LessonRecall(LearningRecall):
         return self._logged(snapshot, Retrieval(branch, RetrievalSource.TOOL, query), found)
 
 
-__all__ = ["FAMILY_NOTES", "LessonRecall", "edited_lessons"]
+__all__ = ["FAMILY_NOTES", "GIST_CHARS", "SHOWN_BEFORE", "LessonRecall", "edited_lessons"]
