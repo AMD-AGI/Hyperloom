@@ -9,15 +9,18 @@ import csv
 import logging
 import math
 import os
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from ._chunks import CHUNK_DIR, ChunkBudget, MergedCsv, csv_lines, run_in_chunks, write_rows
+from ._timings import unmeasured_timings
 from .base import BaseTuner, TuneResult, micro_metrics
 from ..dense_shapes import DenseGeometry, compute_dense_nk_shapes, compute_dense_m_values
 from ..evidence import demand_for_tuner, demand_shapes, load_demand
 from ..script_discovery import discover_tuner_script
-from ..script_probe import filter_args, probe_script
+from ..script_probe import ScriptSurface, filter_args, probe_script
 from ..utils import resolve_aiter_root, run_subprocess, TUNER_ENV_VARS
 
 log = logging.getLogger(__name__)
@@ -41,13 +44,15 @@ _PER_SHAPE_BUDGET_S = 210
 # ~407s/shape measured end to end; keep the same ~1.2x headroom over the worst observed shape that the fast ceiling
 # has over its own.
 _PER_SHAPE_BUDGET_THOROUGH_S = 600
-# Mean observed cost, used to decide *how many* shapes fit in the time budget.
+# Observed cost of one shape on one card, which sizes only the first chunk; the chunks after it are sized by what the
+# chunks before them measured.
 _PER_SHAPE_COST_S = 93
 # The same figure for `--libtype all`.
 _PER_SHAPE_COST_THOROUGH_S = 420
 _MAX_SHAPES_ENV = "FORGE_DEMAND_MAX_SHAPES"
-# `--shape_grouped` collapses every shape into ONE task, which makes aiter's `--timeout` a budget for the whole batch
-# instead of per shape ("Waiting for 1 tasks to complete (timeout=Ns each)").
+_UNTUNED_CSV = "untuned_dense_bf16.csv"
+# Kept after the last chunk; a chunk's process is killed half of it before the deadline, so aiter's own `--timeout`
+# ends it first and it still writes its rows.
 _TIMEOUT_RESERVE_S = 120
 
 
@@ -76,6 +81,21 @@ def _fit_m_values_to_budget(
     return picked
 
 
+def _spread_order(m_values: list[int]) -> list[int]:
+    """``m_values`` ordered so every prefix spreads over the whole range: the largest first, as for a one-M budget,
+    then whichever is farthest from those already taken, so a deadline that ends the chunks early cuts coverage evenly.
+    """
+    if not m_values:
+        return []
+    picked = [len(m_values) - 1]
+    rest = list(range(len(m_values) - 1))
+    while rest:
+        best = max(rest, key=lambda i: (min(abs(i - j) for j in picked), -i))
+        picked.append(best)
+        rest.remove(best)
+    return [m_values[i] for i in picked]
+
+
 def _generate_untuned_csv(
     nk_shapes: list[tuple[int, int]],
     m_values: list[int],
@@ -83,7 +103,7 @@ def _generate_untuned_csv(
     dtype: str = "torch.bfloat16",
 ) -> Path:
     """Generate untuned CSV in the format expected by aiter's gemm_a16w16 tuner."""
-    csv_path = output_path / "untuned_dense_bf16.csv"
+    csv_path = output_path / _UNTUNED_CSV
     with csv_path.open("w", encoding="utf-8") as f:
         f.write("M,N,K,bias,dtype,outdtype,scaleAB,bpreshuffle\n")
         for m in m_values:
@@ -99,7 +119,7 @@ def _generate_untuned_csv_from_demand(
     dtype: str = "torch.bfloat16",
 ) -> Path:
     """Write the untuned CSV from keys the runtime actually looked up."""
-    csv_path = output_path / "untuned_dense_bf16.csv"
+    csv_path = output_path / _UNTUNED_CSV
     with csv_path.open("w", encoding="utf-8") as f:
         f.write("M,N,K,bias,dtype,outdtype,scaleAB,bpreshuffle\n")
         for s in shapes:
@@ -232,6 +252,49 @@ class _BatchRun:
     not_finished: bool = False
 
 
+def _clear_stale(*paths: Path) -> None:
+    for stale in paths:
+        try:
+            stale.unlink(missing_ok=True)
+        except OSError as exc:
+            log.warning("could not clear stale %s: %s", stale, exc)
+
+
+class _Chunks:
+    """The chunks of one run: each tunes its rows into CSVs of its own, which are merged as they finish."""
+
+    def __init__(self, tuner: SglangDenseBf16Tuner, script: Path, surface: ScriptSurface, header: str) -> None:
+        self.tuner, self.script, self.surface, self.header = tuner, script, surface, header
+        self.tuned = MergedCsv(tuner.work_dir / "tuned_dense_bf16.csv")
+        self.profiles = MergedCsv(tuner.work_dir / "profile_dense_bf16.csv")
+        self.stdout: list[str] = []
+        self.stderr: list[str] = []
+        self.rc = 0
+        self.aiter_timeout = 0
+
+    def run(self, index: int, rows: list[str], timeout_s: int) -> bool:
+        work = self.tuner.work_dir
+        chunk_dir = work / CHUNK_DIR
+        chunk_dir.mkdir(exist_ok=True)
+        untuned = write_rows(chunk_dir / f"untuned_{index}.csv", self.header, rows)
+        tuned, profile = chunk_dir / f"tuned_{index}.csv", chunk_dir / f"profile_{index}.csv"
+        _clear_stale(tuned, profile)
+        self.aiter_timeout = self.tuner._batch_timeout_s(len(rows), timeout_s)
+        args = filter_args(self.tuner._tail(untuned, tuned, profile, self.aiter_timeout), self.surface).args
+        # Run from the script's directory: its sibling modules are imported by bare name.
+        self.rc, stdout, stderr = run_subprocess(
+            ["python3", str(self.script), *args],
+            cwd=self.script.parent,
+            timeout_s=timeout_s,
+            log_file=work / f"tune.{index}.log",
+        )
+        self.stdout.append(stdout)
+        self.stderr.append(stderr)
+        self.tuned.absorb(csv_lines(tuned))
+        self.profiles.absorb(csv_lines(profile))
+        return _UNRECOGNIZED_ARG_MARKER not in f"{stderr}\n{stdout}"
+
+
 class SglangDenseBf16Tuner(BaseTuner):
     """Tune dense BF16/FP16 GEMM kernels for sglang via aiter's gemm_a16w16 tuner."""
 
@@ -304,18 +367,14 @@ class SglangDenseBf16Tuner(BaseTuner):
             self.ctx.tp,
         )
 
-    def _shape_budget(self) -> int:
-        """How many shapes the time budget actually pays for."""
+    def _shape_cap(self) -> int | None:
+        """The operator's cap on how many shapes to tune; without one, the deadline decides (see ``_chunks``)."""
         raw = os.environ.get(_MAX_SHAPES_ENV, "").strip()
         try:
             override = int(raw)
         except ValueError:
             override = 0
-        if override > 0:
-            return override
-        cost = _PER_SHAPE_COST_THOROUGH_S if self.ctx.thorough else _PER_SHAPE_COST_S
-        usable = max(self.ctx.timeout_s - _TIMEOUT_RESERVE_S, cost)
-        return max(1, usable // cost)
+        return override if override > 0 else None
 
     def _demand_shapes(self) -> list[dict[str, Any]]:
         """Shapes this tuner is asked for, from the serving log. Empty if none."""
@@ -329,30 +388,29 @@ class SglangDenseBf16Tuner(BaseTuner):
         if entry is None:
             log.info("demand file has no entry for %s; falling back to derived shapes", self.name)
             return []
-        budget = self._shape_budget()
+        cap = self._shape_cap()
         buckets = demand_shapes(entry)
-        shapes = buckets[:budget]
+        shapes = buckets[:cap]
         covered_raw_keys = sum(len(shape.get("observed_M") or []) for shape in shapes)
         log.info(
             "Demand-driven shapes for %s: %d of %d padded-M buckets selected, "
             "covering %d of %d distinct raw keys "
-            "(budget %d from %ds timeout, %d misses logged)",
+            "(cap %s, %ds timeout, %d misses logged)",
             self.name,
             len(shapes),
             len(buckets),
             covered_raw_keys,
             entry.get("distinct_keys", 0),
-            budget,
+            cap or "none",
             self.ctx.timeout_s,
             entry.get("miss_count", 0),
         )
         return shapes
 
-    def _batch_timeout_s(self, n_shapes: int) -> int:
-        """aiter --timeout for the whole grouped batch (see _TIMEOUT_RESERVE_S)."""
+    def _batch_timeout_s(self, n_shapes: int, outer_s: int) -> int:
+        """aiter --timeout for a chunk of ``n_shapes`` whose process is killed after ``outer_s``."""
         per_shape = _PER_SHAPE_BUDGET_THOROUGH_S if self.ctx.thorough else _PER_SHAPE_BUDGET_S
-        outer = max(int(self.ctx.timeout_s), 1)
-        ceiling = max(outer - _TIMEOUT_RESERVE_S, 1)
+        ceiling = max(int(outer_s) - _TIMEOUT_RESERVE_S // 2, 1)
         return int(min(max(n_shapes, 1) * per_shape, ceiling))
 
     def _failure(self, error: str, error_class: str, expected_shapes: int) -> TuneResult:
@@ -372,47 +430,68 @@ class SglangDenseBf16Tuner(BaseTuner):
         tuner_script = _resolve_tuner_script(aiter_root)
         assert tuner_script is not None
 
+        self._warn_about_unread_inputs()
+        header, *rows = csv_lines(self._untuned_csv())
+        n_expected = len(rows)
+
+        chunks = _Chunks(self, tuner_script, probe_script(tuner_script), header)
+        tuned_csv, profile_csv = chunks.tuned.path, chunks.profiles.path
+        # This tuner judges the run by how many rows landed on disk, precisely because the exit code cannot be
+        # trusted.
+        _clear_stale(tuned_csv, profile_csv)
+
+        # Ask the script what it accepts before spending minutes on it.
+        filtered = filter_args(self._tail(self.work_dir / _UNTUNED_CSV, tuned_csv, profile_csv, 1), chunks.surface)
+        if not filtered.ok:
+            return self._failure(
+                f"{tuner_script} does not accept {', '.join(filtered.rejected_required)}; without it the tuner has "
+                "no candidates to search",
+                "unsupported_argument",
+                n_expected,
+            )
+
+        budget = ChunkBudget(
+            time.monotonic() + self.ctx.timeout_s,
+            self.ctx.mp,
+            _PER_SHAPE_COST_THOROUGH_S if self.ctx.thorough else _PER_SHAPE_COST_S,
+            _TIMEOUT_RESERVE_S,
+            time.monotonic,
+        )
+        run_in_chunks([[row] for row in rows], budget, chunks.run)
+        stdout, stderr = "\n".join(chunks.stdout), "\n".join(chunks.stderr)
+        unmeasured = unmeasured_timings(profile_csv, tuned_csv)
+        if unmeasured:
+            return self._failure(unmeasured, "unmeasured_timings", n_expected)
+        batch = _BatchRun(tuned_csv, n_expected, chunks.aiter_timeout, chunks.rc)
+        return self._judge_batch(batch, profile_csv, tuner_script, stdout, stderr)
+
+    def _untuned_csv(self) -> Path:
+        """The shapes to tune, in the order chunks take them."""
         # Always bf16, whatever the checkpoint says: sglang is run with --dtype bf16, so an fp16 checkpoint is still
         # served through the bf16 GEMM and tuning it as fp16 would key the table on a dtype the runtime never looks
         # up.
         dtype_str = "torch.bfloat16"
-
-        self._warn_about_unread_inputs()
         # A demand list beats anything derived from config.json: it is the set of keys the runtime actually asked for.
         demand = self._demand_shapes()
         if demand:
-            n_expected = len(demand)
-            untuned_csv = _generate_untuned_csv_from_demand(demand, self.work_dir, dtype=dtype_str)
-        else:
-            nk_shapes = self._nk_shapes()
-            # Fit the derived cross product to the budget, or a thorough run generates ~20x the shapes its window
-            # can pay for.
-            budget = self._shape_budget()
-            m_values = _fit_m_values_to_budget(
-                _compute_m_values(self.ctx.conc, thorough=self.ctx.thorough), len(nk_shapes), budget
-            )
-            n_expected = len(nk_shapes) * len(m_values)
-            log.info(
-                "Dense BF16 shapes: %d NK pairs × %d M values = %d total (thorough=%s, budget=%d)",
-                len(nk_shapes),
-                len(m_values),
-                n_expected,
-                self.ctx.thorough,
-                budget,
-            )
-            untuned_csv = _generate_untuned_csv(nk_shapes, m_values, self.work_dir, dtype=dtype_str)
+            return _generate_untuned_csv_from_demand(demand, self.work_dir, dtype=dtype_str)
+        nk_shapes = self._nk_shapes()
+        m_values = _compute_m_values(self.ctx.conc, thorough=self.ctx.thorough)
+        cap = self._shape_cap()
+        if cap:
+            m_values = _fit_m_values_to_budget(m_values, len(nk_shapes), cap)
+        log.info(
+            "Dense BF16 shapes: %d NK pairs × %d M values = %d total (thorough=%s, cap=%s)",
+            len(nk_shapes),
+            len(m_values),
+            len(nk_shapes) * len(m_values),
+            self.ctx.thorough,
+            cap or "none",
+        )
+        return _generate_untuned_csv(nk_shapes, _spread_order(m_values), self.work_dir, dtype=dtype_str)
 
-        tuned_csv = self.work_dir / "tuned_dense_bf16.csv"
-        profile_csv = self.work_dir / "profile_dense_bf16.csv"
-        # This tuner judges the run by how many rows landed on disk, precisely because the exit code cannot be
-        # trusted.
-        for stale in (tuned_csv, profile_csv):
-            try:
-                stale.unlink(missing_ok=True)
-            except OSError as exc:
-                log.warning("could not clear stale %s: %s", stale, exc)
-        batch_timeout = self._batch_timeout_s(n_expected)
-
+    def _tail(self, untuned_csv: Path, tuned_csv: Path, profile_csv: Path, aiter_timeout: int) -> list[str]:
+        """The tuner script's arguments for one chunk."""
         # `hipblaslt` is the only libtype gated on TWO conditions: matching --libtype is not enough, --with-hipblaslt
         # must be set as well (gemm_a16w16_tune.py: `if with_hipblaslt and ("all" in libtype or "hipblaslt" in
         # libtype)`). Outside a thorough run `torch` rides along for measurement, not for winning.
@@ -422,27 +501,8 @@ class SglangDenseBf16Tuner(BaseTuner):
         warmup = self.ctx.warmup if thorough else min(self.ctx.warmup, 10)
         tail = ["-i", str(untuned_csv), "-o", str(tuned_csv), "-o2", str(profile_csv), "--indtype", "bf16"]
         tail += ["--outdtype", "bf16", "--mp", str(self.ctx.mp), "--iters", str(iters), "--warmup", str(warmup)]
-        tail += ["--timeout", str(batch_timeout), "--shape_grouped", "-v", "--libtype", libtypes, "--with-hipblaslt"]
-
-        # Ask the script what it accepts before spending minutes on it.
-        filtered = filter_args(tail, probe_script(tuner_script))
-        if not filtered.ok:
-            return self._failure(
-                f"{tuner_script} does not accept {', '.join(filtered.rejected_required)}; without it the tuner has "
-                "no candidates to search",
-                "unsupported_argument",
-                n_expected,
-            )
-
-        # Run from the script's directory: its sibling modules are imported by bare name.
-        rc, stdout, stderr = run_subprocess(
-            ["python3", str(tuner_script), *filtered.args],
-            cwd=tuner_script.parent,
-            timeout_s=self.ctx.timeout_s,
-            log_file=self.work_dir / "tune.log",
-        )
-        batch = _BatchRun(tuned_csv, n_expected, batch_timeout, rc)
-        return self._judge_batch(batch, profile_csv, tuner_script, stdout, stderr)
+        tail += ["--timeout", str(aiter_timeout), "--shape_grouped", "-v", "--libtype", libtypes, "--with-hipblaslt"]
+        return tail
 
     def _judge_batch(
         self, batch: _BatchRun, profile_csv: Path, tuner_script: Path, stdout: str, stderr: str

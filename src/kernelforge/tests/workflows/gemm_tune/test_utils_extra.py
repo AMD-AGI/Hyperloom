@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
+import types
 from pathlib import Path
 
 from kernelforge.workflows.gemm_tune import aiter_script_map, utils
@@ -204,3 +206,38 @@ def test_run_subprocess_timeout_then_wait_fails(monkeypatch):
     monkeypatch.setattr(utils.time, "sleep", lambda *_: None)
     rc, out, err = run_subprocess(["x"], timeout_s=1)
     assert rc == 124
+
+
+def test_run_subprocess_timeout_keeps_what_the_process_wrote(tmp_path):
+    log = tmp_path / "tune.log"
+    rc, out, err = run_subprocess(
+        ["sh", "-c", "echo tuned-shape-1; echo warn-1 >&2; sleep 30"], timeout_s=1, log_file=log
+    )
+    assert rc == 124
+    assert "tuned-shape-1" in out and "warn-1" in err and "TimeoutExpired" in err
+    text = log.read_text()
+    assert "tuned-shape-1" in text and "warn-1" in text
+    assert text.rstrip().splitlines()[-1].startswith("# TIMEOUT after")
+
+
+# ── visible_gpu_count ───────────────────────────────────────────────────────
+
+
+def test_gpu_ids_name_the_cards(monkeypatch):
+    monkeypatch.setenv("HIP_VISIBLE_DEVICES", "0")
+    assert utils.visible_gpu_count("2,3,5") == 3
+
+
+def test_the_device_mask_names_the_cards(monkeypatch):
+    for variable in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
+        monkeypatch.delenv(variable, raising=False)
+    monkeypatch.setenv("HIP_VISIBLE_DEVICES", "0,1,2,3")
+    assert utils.visible_gpu_count() == 4
+
+
+def test_without_a_mask_torch_counts(monkeypatch):
+    for variable in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
+        monkeypatch.delenv(variable, raising=False)
+    fake = types.SimpleNamespace(cuda=types.SimpleNamespace(device_count=lambda: 8))
+    monkeypatch.setitem(sys.modules, "torch", fake)
+    assert utils.visible_gpu_count() == 8

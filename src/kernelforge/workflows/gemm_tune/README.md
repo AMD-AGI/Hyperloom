@@ -135,7 +135,7 @@ Example: 30min budget, 2 tuners at 15+20 min = 35 min → second tuner may be sk
 
 | Parameter | Default | Description |
 |---|---|---|
-| `--mp` | 1 | Parallel GPUs for tuning (aiter supports embarrassing parallelism) |
+| `--mp` | 0 | Parallel GPUs for tuning (aiter supports embarrassing parallelism); 0 is every visible GPU |
 | `--iters` | 80 | Benchmark iterations per config |
 | `--warmup` | 20 | Warmup iterations |
 | `--min-improvement-pct` | 3.0 | Min % improvement threshold to mark a shape as improved |
@@ -256,8 +256,9 @@ output-dir/
     │   ├── profile_fmoe.csv     # Full profiling data
     │   └── tune.log             # Subprocess stdout/stderr
     ├── a8w8_blockscale/
-    │   ├── tuned_a8w8_blockscale.csv
-    │   └── tune.log
+    │   ├── tuned_a8w8_blockscale.csv    # Chunks' rows, merged as each chunk ends
+    │   ├── chunks/                      # Each chunk's own input and output CSVs
+    │   └── tune.<i>.log                 # Chunk i's stdout/stderr
     └── vllm_moe_triton/
         ├── tuned_configs/       # VLLM_TUNED_CONFIG_FOLDER content
         │   └── E=128,N=768,...,dtype=bfloat16.json

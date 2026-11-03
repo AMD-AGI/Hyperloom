@@ -438,3 +438,27 @@ def test_a_router_skipped_tuner_does_not_spend_a_ceiling_slot(tmp_path, monkeypa
     )
 
     assert executed == ["a8w8", "dense_bf16"]
+
+
+@pytest.mark.parametrize(("flag", "expected"), [([], 3), (["--mp", "2"], 2)])
+def test_tuning_spreads_over_every_visible_card_unless_told(tmp_path, monkeypatch, flag, expected):
+    """A dev sandbox lease shows its cards as the device mask; gemm-tune run without --mp tunes on all of them."""
+    _stub_preflight(monkeypatch)
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6")
+    seen: list[int] = []
+
+    class _Tuner:
+        def execute(self):
+            return TuneResult(tuner_name="a8w8", status="no_improvement")
+
+    def _create(_name, ctx):
+        seen.append(ctx.mp)
+        return _Tuner()
+
+    monkeypatch.setattr(cli_mod, "_create_tuner", _create)
+    args = ["run", "--model-path", str(_model_dir(tmp_path)), "--framework", "vllm", "--precision", "fp8"]
+    args += ["--gpu-type", "mi300x", "--tuner", "a8w8", "--skip-gpu-check", "--output-dir", str(tmp_path / "out")]
+    result = CliRunner().invoke(gemm_tune, [*args, *flag])
+
+    assert result.exit_code == 0, result.output
+    assert seen == [expected]
