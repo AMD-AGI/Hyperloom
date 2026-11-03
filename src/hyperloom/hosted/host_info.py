@@ -56,6 +56,7 @@ class Var:
     SANDBOX_KEY_MEASUREMENT = "HYPERLOOM_SANDBOX_KEY_MEASUREMENT"
     SANDBOX_KEY_SUBRUN = "HYPERLOOM_SANDBOX_KEY_SUBRUN"
     SANDBOX_KEY_DEV = "HYPERLOOM_SANDBOX_KEY_DEV"
+    SANDBOX_WORKSPACE = "HYPERLOOM_SANDBOX_WORKSPACE"
     RESULT_ARCHIVE = "HYPERLOOM_RESULT_ARCHIVE"
     ARCHIVE_ENDPOINT_URL = "AWS_ENDPOINT_URL_S3"
     ARCHIVE_REGION = "AWS_REGION"
@@ -236,6 +237,7 @@ class HostInfo:
     grant_limits: GrantLimits | None = None
     source_repo: str | None = None  # what the runner sandbox's start-up script fetches
     source_sha: str | None = None  # full 40-hex commit id of the version this run executes
+    sandbox_workspace: str | None = None  # the workspace a SaFE key used directly creates sandboxes in; never on Claw
 
 
 class _Reader:
@@ -492,6 +494,7 @@ def _build(reader: _Reader) -> HostInfo:
         grant_limits=reader.grant_limits(Var.GRANT_LIMITS),
         source_repo=reader.text(Var.SOURCE_REPO),
         source_sha=reader.commit_sha(Var.SOURCE_SHA),
+        sandbox_workspace=reader.text(Var.SANDBOX_WORKSPACE),
     )
 
 

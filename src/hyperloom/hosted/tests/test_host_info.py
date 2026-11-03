@@ -45,6 +45,7 @@ def env(tmp_path):
         Var.GRANT_LIMITS: json.dumps({"max_sandboxes": 2, "max_gpus": 8, "gpu_hours": 4, "max_runtime_sec": 3600}),
         Var.NODE_NAME: "node-3",
         Var.CLAW_SESSION_ID: "sess-9",
+        Var.SANDBOX_WORKSPACE: "top-models",
         **_SECRETS,
     }
 
@@ -209,6 +210,7 @@ def test_missing_and_malformed_inputs_are_reported_together(env):
         (Var.SOURCE_SHA, "0123abc", "40-hex"),
         (Var.SOURCE_SHA, "0123456789ABCDEF0123456789abcdef01234567", "40-hex"),
         (Var.SOURCE_REPO, "two words", "whitespace or control"),
+        (Var.SANDBOX_WORKSPACE, "top models", "whitespace or control"),
     ],
 )
 def test_a_malformed_input_is_refused_with_its_reason(env, name, value, reason):
@@ -386,6 +388,18 @@ def test_the_archive_region_is_optional_read_when_set_and_removed_from_the_envir
 
     assert take_host_info(env).archive_region == "us-east-1"
     assert Var.ARCHIVE_REGION not in env
+
+
+def test_the_sandbox_workspace_is_optional_read_when_set_and_removed_from_the_environment(env):
+    """A SaFE key used directly names the workspace its sandboxes are created in; a Claw host sets none."""
+    unset = {name: value for name, value in env.items() if name != Var.SANDBOX_WORKSPACE}
+    assert read_host_info(unset).sandbox_workspace is None
+    assert Var.SANDBOX_WORKSPACE in host_info.HOST_ONLY_VARS
+
+    for name in _RUN_ONLY:
+        del env[name]
+    assert take_host_info(env, require=_HANDED_GRANT, require_run=False).sandbox_workspace == "top-models"
+    assert Var.SANDBOX_WORKSPACE not in env
 
 
 # -- the granted totals ------------------------------------------------------------------------------------------

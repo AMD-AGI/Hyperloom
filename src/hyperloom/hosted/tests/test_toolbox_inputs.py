@@ -32,6 +32,7 @@ _FIELDS = [
     "tp",
     "dev_key",
     "grant_limits",
+    "sandbox_workspace",
 ]
 
 
@@ -54,6 +55,7 @@ def env(tmp_path):
         Var.GRANT_LIMITS: json.dumps(_LIMITS),
         Var.SOURCE_REPO: "AMD-AGI/Hyperloom",
         Var.SOURCE_SHA: _SHA,
+        Var.SANDBOX_WORKSPACE: "top-models",
     }
 
 
@@ -80,18 +82,20 @@ def test_every_value_is_mapped_from_its_host_input(env, tmp_path):
         "tp": 8,
         "dev_key": _DEV,
         "grant_limits": _LIMITS,
+        "sandbox_workspace": "top-models",
     }
     assert isinstance(got["session_dir"], Path)
     assert isinstance(got["measurement_key"], str)
 
 
-def test_dev_key_and_grant_limits_are_none_when_absent(env, tmp_path):
-    del env[Var.SANDBOX_KEY_DEV], env[Var.GRANT_LIMITS]
+def test_dev_key_grant_limits_and_workspace_are_none_when_absent(env, tmp_path):
+    del env[Var.SANDBOX_KEY_DEV], env[Var.GRANT_LIMITS], env[Var.SANDBOX_WORKSPACE]
 
     got = _inputs(env, tmp_path)
 
     assert got["dev_key"] is None
     assert got["grant_limits"] is None
+    assert got["sandbox_workspace"] is None
 
 
 def test_grant_limits_carry_all_four_keys(env, tmp_path):
