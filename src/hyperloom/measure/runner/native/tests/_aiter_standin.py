@@ -9,6 +9,11 @@ Its ``get_args_of_build`` evaluates the module's entry of ``optCompilerConfig.js
 a compiler on an ``#error`` line of a source (naming the file and line), and installs ``<name>.so`` into ``AITER_JIT_DIR``
 as aiter does: written beside it, then ``os.replace``-d into place. The ``.so`` is the ELF magic, the offload target, the
 ``ENABLE_CK`` it was built with and the sources it was built from, so a test can tell which build it holds.
+
+Its ``AITER_CONFIG`` merges a variable that lists several tables, or the default table and a model's tables below
+``configs/model_configs`` when the variable is unset, into the literal ``/tmp/aiter_configs`` of the function's body, as
+aiter's ``update_config_files`` does; and it refuses that directory, as an image's root-owned one refuses the CPU
+build's unprivileged user.
 """
 
 from __future__ import annotations
@@ -32,18 +37,49 @@ GENERATOR = f"f'{{AITER_CSRC_DIR}}/kernels/gen.py {{{{}}}} --tune_file {{AITER_C
 IMAGE_KERNEL = "// image k.cu\n"
 FACTORY = f"{__name__}:recipe"
 CORE = """\
-import json, os
+import glob, json, os
 this_dir = os.path.dirname(os.path.abspath(__file__))
 AITER_ROOT_DIR = os.path.abspath(f"{this_dir}/../../")
 AITER_META_DIR = os.path.abspath(os.environ.get("AITER_META_DIR") or AITER_ROOT_DIR)
 AITER_CSRC_DIR = f"{AITER_META_DIR}/csrc"
 ENABLE_CK = os.environ.get("ENABLE_CK", "1")
 AITER_CONFIG_GEMM_A8W8 = os.getenv("AITER_CONFIG_GEMM_A8W8", f"{AITER_ROOT_DIR}/aiter/configs/a8w8_tuned_gemm.csv")
+SHARED_MERGE_DIR = "/tmp/aiter_configs"
+
+
+def refuse_the_shared_merge_dir(path):
+    if str(path).rstrip("/") == SHARED_MERGE_DIR:
+        raise PermissionError(13, "Permission denied", f"{SHARED_MERGE_DIR}/a8w8_tuned_gemm.csv.lock")
 
 
 class AITER_CONFIG:
+    def update_config_files(self, file_path, merge_name):
+        path_list = file_path.split(os.pathsep) if file_path else []
+        if len(path_list) <= 1:
+            return file_path
+        from pathlib import Path
+
+        config_path = Path("/tmp/aiter_configs/")
+        refuse_the_shared_merge_dir(config_path)
+        config_path.mkdir(parents=True, exist_ok=True)
+        rows = []
+        for index, path in enumerate(path_list):
+            with open(path, encoding="utf-8") as stream:
+                lines = stream.read().splitlines()
+            rows.extend(lines if index == 0 else lines[1:])
+        new_file_path = f"{config_path}/{merge_name}.csv"
+        with open(new_file_path, "w", encoding="utf-8") as out:
+            out.write("\\n".join(rows) + "\\n")
+        return new_file_path
+
     def get_config_file(self, env_name, default_file, tuned_file_name):
-        return os.getenv(env_name) or default_file
+        config_env_file = (os.getenv(env_name) or "").strip()
+        if not config_env_file:
+            models = sorted(glob.glob(f"{AITER_ROOT_DIR}/aiter/configs/model_configs/*{tuned_file_name}*.csv"))
+            if not models:
+                return default_file
+            config_env_file = os.pathsep.join([default_file, *models])
+        return self.update_config_files(config_env_file, tuned_file_name)
 
     @property
     def AITER_CONFIG_GEMM_A8W8_FILE(self):
