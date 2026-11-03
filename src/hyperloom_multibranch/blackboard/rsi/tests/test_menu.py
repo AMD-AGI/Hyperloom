@@ -24,7 +24,7 @@ from hyperloom_multibranch.contracts.blackboard.vocab import ClaimStatus, Conclu
 from hyperloom_multibranch.blackboard.families import Component, Family, Mechanism
 from hyperloom_multibranch.blackboard.learning_search import LEARNINGS_LOG, RetrievalLog
 from hyperloom_multibranch.blackboard.rsi.briefing import MENU_NOTE, CrossSessionBriefing
-from hyperloom_multibranch.blackboard.rsi.family_stats import PRIOR_TRIALS, FamilyStat, base_rate
+from hyperloom_multibranch.blackboard.rsi.family_stats import BARREN_TRIALS, PRIOR_TRIALS, FamilyStat, base_rate
 from hyperloom_multibranch.blackboard.rsi.lesson_recall import LessonRecall
 from hyperloom_multibranch.blackboard.rsi.lessons import LessonPool, LessonRevision, lesson_id_for, revision_id_for
 from hyperloom_multibranch.blackboard.rsi.similarity import task_conditions
@@ -39,10 +39,13 @@ from hyperloom_multibranch.blackboard.rsi.menu import (
     SETTINGS,
     TRIED_HERE,
     UNTOUCHED,
+    DirectionMenu,
     DirectionMenus,
     MenuEvidence,
+    MenuItem,
     MenuLog,
     direction_menu,
+    direction_note,
     in_control,
 )
 from hyperloom_multibranch.blackboard.tests.factories import (
@@ -307,6 +310,68 @@ def test_a_claims_note_says_its_familys_odds_and_its_tests_on_the_claimed_commit
         "your direction is KV cache · quantization precision · config: commit odds 0.10 over 1.0 tests, "
         "no commit yet; tests of it on this commit: 1"
     )
+
+
+def test_a_claims_note_says_when_the_archive_tried_its_family_that_often_and_never_committed_it(
+    snapshot: BlackboardSnapshot,
+) -> None:
+    def note(stat: FamilyStat) -> str:
+        return direction_note(snapshot, KV_INTENT, KV_CHANGE, MenuEvidence({FP8_KV: stat}))
+
+    barren = note(FamilyStat(BARREN_TRIALS, 0.0))
+
+    assert barren.endswith(f"on this commit: 1; the archive holds {BARREN_TRIALS:.1f} tests of it and no commit")
+    assert "the archive holds" not in note(FamilyStat(BARREN_TRIALS - 1.0, 0.0)) + note(FamilyStat(3.0, 1.0, (2.0,)))
+
+
+def _item(family: Family, odds: float) -> MenuItem:
+    return MenuItem(family, odds, odds, 3.0, 1.5, odds)
+
+
+def test_a_claim_on_a_line_of_its_menu_is_told_which_and_one_off_it_the_lines_its_list_offers(
+    snapshot: BlackboardSnapshot,
+) -> None:
+    memory = Family(Component.MEMORY.value, Mechanism.TUNING, CONFIG)
+    kv_size = Family(Component.KV_CACHE.value, Mechanism.TUNING, CONFIG)
+    on = DirectionMenu(
+        "s1", "c1", START, False, (_item(memory, 0.4), _item(FP8_KV, 0.3)), (_item(_line(SCHEDULER), 0.3),)
+    )
+    off = DirectionMenu("s1", "c1", START, False, (_item(SPLIT, 0.5), _item(memory, 0.4), _item(kv_size, 0.2)))
+    scheduler = Intent("s1", "c1", "scheduler", "tune max-num-seqs", KERNEL)
+
+    def note(menu: DirectionMenu, claim: Intent = KV_INTENT, change: RecipeDelta = KV_CHANGE) -> list[str]:
+        return direction_note(snapshot, claim, change, MenuEvidence(), menu).splitlines()
+
+    first, line = note(on)
+    assert first.startswith("your direction is KV cache · quantization precision · config: ")
+    assert line == "it is line 2 of your menu's settings list"
+    assert note(on, scheduler, RecipeDelta())[1:] == ["it is line 1 of your menu's code list"]
+    # r2 split the attention's KV in this session, so its line is not offered again.
+    assert note(off)[1:] == [
+        "it is on no line of your menu; your menu's settings list:",
+        f"- {off.settings[1].lines()[0]}",
+        f"- {off.settings[2].lines()[0]}",
+    ]
+    tried = dataclasses.replace(off, settings=off.settings[:1])
+    assert note(tried)[1:] == ["it is on no line of your menu, and this session tried every line of its settings list"]
+    assert note(dataclasses.replace(off, control=True)) == [first]
+
+
+def test_a_claims_note_reads_the_last_menu_its_branch_was_given(snapshot: BlackboardSnapshot) -> None:
+    branch = _shown(snapshot)
+    menus = DirectionMenus(metric=METRIC)
+    claim = dataclasses.replace(KV_INTENT, branch=branch)
+    before = menus.note(snapshot, claim, KV_CHANGE)
+
+    menu = menus.menu(snapshot, branch, "c1")
+
+    # r5 cast the KV cache to fp8 in this session, so no settings line of the menu covers the claim.
+    assert menus.note(snapshot, claim, KV_CHANGE).splitlines() == [
+        before,
+        "it is on no line of your menu; your menu's settings list:",
+        *(f"- {item.lines()[0]}" for item in menu.settings),
+    ]
+    assert menus.note(snapshot, dataclasses.replace(KV_INTENT, branch="zz"), KV_CHANGE) == before
 
 
 async def test_a_code_line_carries_its_familys_best_note_at_either_layer_and_the_brief_logs_it_as_shown(

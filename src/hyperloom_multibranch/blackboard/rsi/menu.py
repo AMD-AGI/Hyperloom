@@ -35,6 +35,11 @@ or an op family none of whose ops the profile shows, such as moe on a dense mode
 tried on the commit, another branch holds a claim in it, or the integration head holds a commit of it. One branch in
 four gets no menu (:func:`in_control`): its tests are the menu's control. Every menu given is logged
 (:class:`MenuLog`), for CLOSE to read what the specialists chose from it.
+
+A claim's note (:func:`direction_note`) gives the claimed family's commit odds and says when the archive tried it
+:data:`~.family_stats.BARREN_TRIALS` times and never committed it. To a branch shown a menu it says where the family
+stands on the last one: the line of its layer's list that covers it, or else the lines that list offers, but for a
+setting the session tried since the menu was drawn.
 """
 
 from __future__ import annotations
@@ -596,12 +601,20 @@ def direction_menu(
     return DirectionMenu(branch, commit, snapshot.taken_at, in_control(session, branch), settings, code)
 
 
-def direction_note(snapshot: BlackboardSnapshot, intent: Intent, delta: RecipeDelta, evidence: MenuEvidence) -> str:
+def direction_note(
+    snapshot: BlackboardSnapshot,
+    intent: Intent,
+    delta: RecipeDelta,
+    evidence: MenuEvidence,
+    menu: DirectionMenu | None = None,
+) -> str:
     """What the claim of ``intent`` with ``delta`` tells its specialist of its family: its commit odds, the gain its
-    commits made, and how often it was tried on the claimed commit."""
+    commits made, how often it was tried on the claimed commit, whether the archive found it barren, and, on the lines
+    after, where it stands on ``menu``, the last its branch was given."""
 
     family = family_of(intent.target, intent.mechanism, intent.layer, delta)
-    found = _evidence((family,), evidence.archived, _seen(snapshot, intent.parent_commit))
+    seen = _seen(snapshot, intent.parent_commit)
+    found = _evidence((family,), evidence.archived, seen)
     odds = found.odds(base_rate(family.layer))
     gain = f", a typical commit {statistics.median(found.gains):+.1f}%" if found.gains else ", no commit yet"
     here = sum(
@@ -610,7 +623,28 @@ def direction_note(snapshot: BlackboardSnapshot, intent: Intent, delta: RecipeDe
         if record.request.parent_commit == intent.parent_commit and record_family(snapshot, record) == family
     )
     tried = f"; tests of it on this commit: {here}" if here else ""
-    return f"your direction is {family.label}: commit odds {odds.mean:.2f} over {odds.tests:.1f} tests{gain}{tried}"
+    archived = evidence.archived.get(family)
+    if archived is not None and archived.barren:
+        tried += f"; the archive holds {archived.tests:.1f} tests of it and no commit"
+    note = f"your direction is {family.label}: commit odds {odds.mean:.2f} over {odds.tests:.1f} tests{gain}{tried}"
+    return "\n".join([note, *_standing(menu, family, seen)])
+
+
+def _standing(menu: DirectionMenu | None, family: Family, seen: Mapping[Family, _Seen]) -> list[str]:
+    """Where ``family`` stands on ``menu`` in the list of its layer: the line that covers it, or else the lines the
+    list offers, but for a setting this session tried since; nothing to a branch of the menu's control."""
+
+    if menu is None or menu.control:
+        return []
+    listed = SETTINGS if family.layer is IntentLayer.CONFIG else CODE
+    items = menu.lists[listed]
+    line = next((index for index, item in enumerate(items) if item.family.covers(family)), None)
+    if line is not None:
+        return [f"it is line {line + 1} of your menu's {listed} list"]
+    offered = [item for item in items if listed == CODE or not any(item.family.covers(other) for other in seen)]
+    if not offered:
+        return [f"it is on no line of your menu, and this session tried every line of its {listed} list"]
+    return [f"it is on no line of your menu; your menu's {listed} list:", *(f"- {item.lines()[0]}" for item in offered)]
 
 
 @dataclass(frozen=True)
@@ -685,13 +719,14 @@ class MenuLog:
 
 @dataclass
 class DirectionMenus:
-    """The session's menus: the archived ``trees`` read once for the session's conditions, and the ``log`` of the
-    menus given."""
+    """The session's menus: the archived ``trees`` read once for the session's conditions, the ``log`` of the menus
+    given, and the last each branch was given, what a claim's note reads."""
 
     trees: Sequence[SearchTree] = ()
     metric: str = ""
     log: MenuLog | None = None
     _evidence: MenuEvidence | None = field(default=None, init=False)
+    _given: dict[str, DirectionMenu] = field(default_factory=dict, init=False)
 
     def evidence(self, snapshot: BlackboardSnapshot) -> MenuEvidence:
         if self._evidence is None:
@@ -703,12 +738,13 @@ class DirectionMenus:
         """The menu of ``branch`` on ``commit``, logged."""
 
         found = direction_menu(snapshot, branch, commit, self.evidence(snapshot), metric=self.metric)
+        self._given[branch] = found
         if self.log is not None:
             self.log.record(found)
         return found
 
     def note(self, snapshot: BlackboardSnapshot, intent: Intent, delta: RecipeDelta) -> str:
-        return direction_note(snapshot, intent, delta, self.evidence(snapshot))
+        return direction_note(snapshot, intent, delta, self.evidence(snapshot), self._given.get(intent.branch))
 
 
 __all__ = [

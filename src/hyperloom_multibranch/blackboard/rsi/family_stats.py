@@ -38,6 +38,8 @@ BASE_RATES: Mapping[IntentLayer | None, float] = {
 #: How many tests the base rate counts as, and the most a family's evidence counts as.
 PRIOR_TRIALS = 4.0
 MAX_TRIALS = 10.0
+#: How many tests without a commit make a family barren: one tried that often never committed.
+BARREN_TRIALS = 2.0
 #: How much a session of another model type weighs; one on another framework version weighs as much less again.
 OTHER_MODEL_WEIGHT = 0.5
 OTHER_VERSION_WEIGHT = OTHER_MODEL_WEIGHT
@@ -76,6 +78,12 @@ class FamilyStat:
         tests."""
 
         return (self.commits + base_rate(layer) * PRIOR_TRIALS) / (self.tests + PRIOR_TRIALS)
+
+    @property
+    def barren(self) -> bool:
+        """Whether the family was tried :data:`BARREN_TRIALS` times or more and never committed."""
+
+        return self.tests >= BARREN_TRIALS and not self.commits
 
     @property
     def typical_gain(self) -> float | None:
@@ -212,6 +220,7 @@ def family_report(trees: Sequence[SearchTree], limit: int = REPORT_ROWS) -> Fami
 __all__ = [
     "AGE_SESSIONS",
     "AGE_WEIGHT",
+    "BARREN_TRIALS",
     "BASE_RATES",
     "FRAMEWORK_VERSION_LABEL",
     "MAX_TRIALS",

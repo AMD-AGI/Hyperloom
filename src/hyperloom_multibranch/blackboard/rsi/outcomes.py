@@ -7,8 +7,9 @@
 branches, drawn for none, :func:`~.menu.in_control`; in a session that gave no menu, reading no archive, its branches
 are one group of their own, :data:`NO_MENU_GROUP`): how many committed, the gain their merged commits brought per GPU
 hour, and how many fell on a family the session's model type had tried fewer than :data:`EXPLORE_TRIALS` times before,
-the exploring ones, with what those committed, and how many on a family it had tried :data:`BARREN_TRIALS` times or
-more and never committed in, the barren ones: a session that reads the archive should seldom try those again, and when
+the exploring ones, with what those committed, and how many on a family it had tried
+:data:`~.family_stats.BARREN_TRIALS` times or more and never committed in, the barren ones
+(:attr:`~.family_stats.FamilyStat.barren`): a session that reads the archive should seldom try those again, and when
 their commit rate nears the rest's, the archive has called directions barren that are not. A test whose branch was
 drawn a menu before it, the control's as well, is read against the last one: whether a line of either list covers its
 family and, where one does, the odds it gave beside whether the test committed, the menu's calibration. A control
@@ -40,8 +41,6 @@ from hyperloom_multibranch.blackboard.rsi.report import table
 
 #: Fewer tests of the session's model type than this make a family one to explore.
 EXPLORE_TRIALS = 2.0
-#: As many tests of the session's model type as this, none of them committing, make a family barren.
-BARREN_TRIALS = 2.0
 OUTCOMES_FORMAT = "multibranch.specialist-outcomes"
 OUTCOMES_REPORT = "specialist-outcomes.md"
 MENU_GROUP = "menu"
@@ -172,9 +171,10 @@ def _test(committed: bool, exploring: bool, retried: bool, shown: LoggedMenu | N
 
 
 def _barren(stats: Mapping[Family, FamilyStat]) -> frozenset[str]:
-    """The labels of the families tried :data:`BARREN_TRIALS` times or more without a commit."""
+    """The labels of the barren families: each tried :data:`~.family_stats.BARREN_TRIALS` times or more without a
+    commit."""
 
-    return frozenset(family.label for family, stat in stats.items() if stat.tests >= BARREN_TRIALS and not stat.commits)
+    return frozenset(family.label for family, stat in stats.items() if stat.barren)
 
 
 def _groups(snapshot: BlackboardSnapshot, menus: Sequence[LoggedMenu], session: str) -> dict[str, str]:
@@ -263,7 +263,6 @@ def pooled(sessions: Sequence[SpecialistOutcomes]) -> SpecialistOutcomes:
 
 
 __all__ = [
-    "BARREN_TRIALS",
     "CONTROL_GROUP",
     "EXPLORE_TRIALS",
     "HEADERS",
