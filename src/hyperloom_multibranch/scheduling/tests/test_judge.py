@@ -139,6 +139,7 @@ def _view(
     candidates: tuple[PendingCandidate, ...] = (),
     queued: dict[str, tuple[QueuedIntent, ...]] | None = None,
     building: dict[str, tuple[BuildStatus, ...]] | None = None,
+    roofline_ceiling: dict[str, float] | None = None,
 ) -> JudgeView:
     return JudgeView(
         now=NOW,
@@ -162,6 +163,7 @@ def _view(
             ),
         ),
         integration_value={METRIC: 100.0},
+        roofline_ceiling={METRIC: 400.0} if roofline_ceiling is None else roofline_ceiling,
         metric=METRIC,
         opening=opening,
         free_slots=free_slots,
@@ -439,7 +441,7 @@ def _reply(payload: object) -> str:
     return f"Reasoning first.\n```json\n{json.dumps(payload)}\n```"
 
 
-def test_prompt_shows_frontier_roster_caps_and_budget() -> None:
+def test_prompt_shows_frontier_roster_caps_budget_and_headroom() -> None:
     prompt = render_prompt(_view())
     state = json.loads(prompt[prompt.index("{") : prompt.index("\n\nReply with")])
 
@@ -452,8 +454,18 @@ def test_prompt_shows_frontier_roster_caps_and_budget() -> None:
     assert state["free_branch_slots"] == 2
     assert state["explore_remaining_seconds"] == 3600
     assert state["session_remaining_seconds"] == 4000
-    assert state["integration"] == {"recorded_value": {METRIC: 100.0}}
+    assert state["integration"] == {
+        "recorded_value": {METRIC: 100.0},
+        "roofline_ceiling": {METRIC: 400.0},
+        "headroom_pct": 75.0,
+    }
     assert '"stop_session"' in prompt and "ONE JSON object" in JUDGE_SYSTEM_PROMPT
+
+
+def test_a_profile_without_a_ceiling_leaves_the_headroom_unknown() -> None:
+    assert _state(_view(roofline_ceiling={}))["integration"]["headroom_pct"] is None
+    assert "integration.headroom_pct is how far the integration head's recorded value lies below" in JUDGE_SYSTEM_PROMPT
+    assert "or the roofline headroom that capped it" in JUDGE_SYSTEM_PROMPT
 
 
 def test_a_branch_row_shows_its_tests_judged_since_its_last_commit_and_the_prompt_names_the_stall_count() -> None:

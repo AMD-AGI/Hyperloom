@@ -142,6 +142,7 @@ from hyperloom_multibranch.scheduling.local_peers import workload_rule
 from hyperloom_multibranch.scheduling.manifest import read_manifest
 from hyperloom_multibranch.contracts.llm import CompletionFailed, CompletionReply
 from hyperloom_multibranch.scheduling.peers import Peers, PeerSetup
+from hyperloom_multibranch.scheduling.prelude import roofline_ceiling
 from hyperloom_multibranch.scheduling.prelude_reader import MB_FRAMEWORK_REPO_ENV
 from hyperloom_multibranch.scheduling.policy import SCHEDULING_POLICY, policy_version
 from hyperloom_multibranch.scheduling.roster import BranchOrigin, BranchStatus, RosterCaps, StopCause, final_quota
@@ -181,6 +182,7 @@ from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     tagged,
 )
 from hyperloom_multibranch.scheduling.tests.framework_checkout import framework_checkout
+from hyperloom_multibranch.scheduling.tests.model_checkout import model_checkout
 from hyperloom_multibranch.scheduling.processes import SCHEDULER_BRANCH
 from hyperloom_multibranch.tests.fakes import RecordingVerifier
 from hyperloom_multibranch.toolbox.attempts import TestJob
@@ -771,7 +773,7 @@ async def test_an_agentx_session_is_judged_on_p50_interactivity_and_validated_at
     assert merged == {c1: "merged", c2: "not_stackable"}
     opening = _judge_state(_judge_prompts(stage)[0])
     assert opening["metric"] == GRADED_INTVTY_P50
-    assert set(opening["integration"]) == {"recorded_value"}
+    assert (opening["integration"]["roofline_ceiling"], opening["integration"]["headroom_pct"]) == ({}, None)
 
     head = await stage.repo.head(INTEGRATION_BRANCH)
     assert outcome.final is not None and outcome.final.chosen is not None and outcome.final.chosen.commit == head
@@ -813,6 +815,24 @@ async def test_a_session_scores_its_frontier_with_the_defaults_for_its_budget(tm
     assert all(line["scorer"] == FRONTIER_V1_LABEL for line in lines)
     assert all(line["new_branch_floor_pct"] == defaults.new_branch_floor_pct for line in lines)
     assert all(line["window_seconds"] >= defaults.window_seconds for line in lines)
+
+
+async def test_the_judge_reads_the_headroom_to_the_ceiling_prelude_modelled_for_the_workload(tmp_path: Path) -> None:
+    stage = _stage(tmp_path)
+    workload = replace(WORKLOAD, model=str(model_checkout(tmp_path)))
+    stage.settings = replace(SETTINGS, workload=workload)
+    stage.scripts = SCRIPTS
+
+    outcome = await stage.run()
+
+    assert outcome.exit_code == 0
+    ceiling = roofline_ceiling(workload)
+    assert set(ceiling) == {GRADED_OUTPUT}
+    assert (await stage.handle(Role.OBSERVER).session_profile()).roofline_ceiling == ceiling
+    integration = _judge_state(_judge_prompts(stage)[0])["integration"]
+    value = integration["recorded_value"][GRADED_OUTPUT]
+    assert integration["roofline_ceiling"] == pytest.approx(ceiling)
+    assert integration["headroom_pct"] == pytest.approx((ceiling[GRADED_OUTPUT] - value) / ceiling[GRADED_OUTPUT] * 100)
 
 
 async def test_close_asks_no_llm_for_a_playbook_change_without_an_archive_and_records_why(tmp_path: Path) -> None:
