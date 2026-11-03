@@ -1480,7 +1480,7 @@ async def test_explore_reverts_a_variant_its_checkpoint_stopped(sub_agent_runner
     _force_cold_decision(monkeypatch)
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
     monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
-    monkeypatch.setenv(EARLY_STOP_ENV, "enforce")
+    monkeypatch.delenv(EARLY_STOP_ENV, raising=False)
     sub, tr, _ = sub_agent_runner
     state = SharedState(framework="sglang", benchmark_mode="agentx")
     state.baseline_tput = 200.0

@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom_common.env import EnvValueError
 from hyperloom.common.perf_metric import (
     GRADED_INTVTY_P50_CHECKPOINT,
     graded_axes_of,
@@ -109,15 +110,24 @@ def test_reference_snapshots_carry_the_checkpoint_median():
 @pytest.mark.parametrize(
     "mode,may_stop,expected",
     [
-        ("", True, AgentxCheckpoint(25.0, enforce=False)),
-        ("enforce", True, AgentxCheckpoint(25.0, enforce=True)),
+        (None, True, AgentxCheckpoint(25.0, enforce=True)),
         ("enforce", False, AgentxCheckpoint(25.0, enforce=False)),
+        ("Shadow", True, AgentxCheckpoint(25.0, enforce=False)),
         ("off", True, None),
     ],
 )
 def test_round_checkpoint_follows_the_mode(monkeypatch, mode, may_stop, expected):
-    monkeypatch.setenv(EARLY_STOP_ENV, mode)
+    if mode is None:
+        monkeypatch.delenv(EARLY_STOP_ENV, raising=False)
+    else:
+        monkeypatch.setenv(EARLY_STOP_ENV, mode)
     assert round_checkpoint({GRADED_INTVTY_P50_CHECKPOINT: 25.0}, may_stop=may_stop) == expected
+
+
+def test_round_checkpoint_refuses_an_unknown_mode(monkeypatch):
+    monkeypatch.setenv(EARLY_STOP_ENV, "shdow")
+    with pytest.raises(EnvValueError, match="HYPERLOOM_AGENTX_EARLY_STOP='shdow' is not one of enforce, shadow, off"):
+        round_checkpoint({GRADED_INTVTY_P50_CHECKPOINT: 25.0}, may_stop=True)
 
 
 def test_round_checkpoint_needs_a_reference_median(monkeypatch):

@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from hyperloom_common.coerce import optional_positive_float
-from hyperloom_common.env import env_str
+from hyperloom_common.env import EnvValueError, env_str
 from hyperloom_common.io import atomic_write_json
 from hyperloom_common.jsonio import read_json
 from hyperloom.common.perf_metric import (
@@ -42,8 +42,9 @@ __all__ = [
     "workspace_checkpoint_p50",
 ]
 
-#: ``shadow`` (default) records the ruling, ``enforce`` also stops a trailing round, ``off`` skips the checkpoint.
+#: ``enforce`` (default) records the ruling and stops a trailing round, ``shadow`` only records it, ``off`` skips it.
 EARLY_STOP_ENV = "HYPERLOOM_AGENTX_EARLY_STOP"
+_MODES = ("enforce", "shadow", "off")
 
 #: Written into the round's slot when the checkpoint rules.
 CHECKPOINT_ARTIFACT_NAME = "agentx_checkpoint.json"
@@ -91,7 +92,9 @@ class AgentxCheckpoint:
 
 def round_checkpoint(reference: Mapping[str, Any] | None, *, may_stop: bool) -> AgentxCheckpoint | None:
     """The checkpoint for a round graded against ``reference``; None when it is off or the reference has none."""
-    mode = env_str(EARLY_STOP_ENV, "shadow").strip().lower()
+    mode = env_str(EARLY_STOP_ENV).lower() or "enforce"
+    if mode not in _MODES:
+        raise EnvValueError(f"{EARLY_STOP_ENV}={mode!r} is not one of {', '.join(_MODES)}")
     reference_p50 = optional_positive_float((reference or {}).get(GRADED_INTVTY_P50_CHECKPOINT))
     if mode == "off" or reference_p50 is None:
         return None
