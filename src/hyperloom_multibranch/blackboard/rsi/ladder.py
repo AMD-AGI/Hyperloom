@@ -26,7 +26,10 @@
   on, and pairs with nothing.
 
 At every CLOSE the replay reruns over the archive with the session's tree in it, against the champion
-(:func:`replay_standing`), and says which of its conclusions moved since the last CLOSE (:func:`moved`).
+(:func:`replay_standing`), and says which of its conclusions moved since the last CLOSE (:func:`moved`). No session is
+spent on a playbook that cannot win: CLOSE retires one the latest standing reads worse both ways beyond the data, or
+one aiming at a measure the champion's sessions of the task never varied in (:func:`measured`), which R3 could never
+read; authoring holds a new one to the same two tests (:func:`r1_reading`).
 """
 
 from __future__ import annotations
@@ -436,6 +439,26 @@ def noise_band(sessions: Sequence[Trial], measure: str) -> float | None:
     return math.sqrt(sum((len(values) - 1) * statistics.variance(values) for values in groups) / freedom)
 
 
+def _untimed(task: str) -> str:
+    return task.rsplit(" budget=", 1)[0]
+
+
+def measured(kept: Sequence[Trial], champion: str, task: str) -> frozenset[str] | None:
+    """The decision measures the sessions of ``champion`` on ``task`` recorded with a spread, one value differing from
+    another; ``None`` while fewer than two of them were kept, when nothing can be told yet. The task is read without its
+    budget: an older trial carries the time its blackboard spanned instead of the configured budget."""
+
+    alike = [trial for trial in kept if trial.played == champion and _untimed(trial.task) == _untimed(task)]
+    if len(alike) < 2:
+        return None
+    found = set()
+    for measure in DIRECTION:
+        values = [trial.measures[measure] for trial in alike if measure in trial.measures]
+        if len(values) > 1 and max(values) > min(values):
+            found.add(measure)
+    return frozenset(found)
+
+
 def _fell(sessions: Sequence[Trial], label: str) -> str:
     count = sum(1 for trial in sessions if trial.played == label and trial.fell_back)
     return f"; {count} of its sessions fell back to the champion" if count else ""
@@ -473,12 +496,37 @@ def r3(candidate: Playbook, champion: Playbook, kept: Sequence[Trial]) -> Rung:
     return Rung("R3", passed, said)
 
 
-def settle(pool: PlaybookPool, now: float) -> tuple[str, ...]:
-    """Crown the oldest playbook on trial that passes R3, or retire those whose :data:`MAX_TRIALS` sessions did not;
-    what was done, a line each."""
+def _unfit(
+    candidate: Playbook, champion: Playbook, standing: ReplayStanding | None, readable: frozenset[str] | None
+) -> str:
+    """Why ``candidate`` cannot win against ``champion``: ``standing`` reads it worse both ways beyond the data, or it
+    aims at a measure outside ``readable``; ``""`` when neither is known."""
+
+    if standing is not None and standing.champion == champion.label:
+        row = next((item for item in standing.rows if item.label == candidate.label), None)
+        if row is not None and row.reading == WORSE:
+            return (
+                f"the scheduling replay at the CLOSE of {standing.session_id} reads it worse both ways: {row.spans()}"
+            )
+    if readable is not None and candidate.measure not in readable:
+        return f"{candidate.measure} does not vary in the {champion.label} sessions of its task, so R3 cannot read it"
+    return ""
+
+
+def settle(pool: PlaybookPool, now: float, task: str = "") -> tuple[str, ...]:
+    """Crown the oldest playbook on trial that passes R3, or retire those whose :data:`MAX_TRIALS` sessions did not,
+    and those that cannot win (:func:`_unfit`), the measures read on ``task``, the closing session's; what was done, a
+    line each."""
 
     kept, champion, done = trials(pool), pool.champion(), []
+    latest = standings(pool)[-1] if standings(pool) else None
+    readable = measured(kept, champion.label, task) if task else None
     for candidate in pool.on_trial():
+        unfit = _unfit(candidate, champion, latest, readable)
+        if unfit:
+            pool.retire(Retired(candidate.label, now, unfit))
+            done.append(f"retired {candidate.label}: {unfit}")
+            continue
         verdict = r3(candidate, champion, kept)
         played = sum(1 for trial in kept if trial.played == candidate.label)
         if verdict.passed:
@@ -528,6 +576,14 @@ class StandingRow:
             return WORSE
         return UNCLEAR
 
+    def spans(self) -> str:
+        """Its two paired differences, each with its interval, in points of best gain."""
+
+        return "; ".join(
+            f"{beyond} {found.mean:+.2f} ({found.low:+.2f} to {found.high:+.2f})"
+            for beyond, found in ((OPTIMISTIC, self.optimistic), (PESSIMISTIC, self.pessimistic))
+        )
+
 
 @dataclass(frozen=True)
 class ReplayStanding:
@@ -564,6 +620,27 @@ def replay_standing(
         if label != champion.label
     )
     return ReplayStanding(session_id, at, champion.label, len(trees), runs, rows), found
+
+
+def r1_reading(
+    candidate: Playbook, champion: Playbook, trees: Sequence[SearchTree], *, runs: int = CLOSE_REPLAY_RUNS
+) -> StandingRow | None:
+    """R1 as CLOSE reads a new playbook: ``candidate`` beside ``champion`` in the scheduling replay of ``trees``, both
+    ways beyond the data; ``None`` for a change the replay does not play, or without a tree to replay."""
+
+    changed = changes(champion, candidate)
+    if not trees or not changed or any(name not in REPLAYED_NUMBERS for name in changed):
+        return None
+    pair = {champion.label: champion, candidate.label: candidate}
+    found = [
+        next(
+            row
+            for row in compare(trees, pair, baseline=champion.label, drawn=Draws(runs=runs, beyond=beyond)).rows
+            if row.label == candidate.label
+        )
+        for beyond in (OPTIMISTIC, PESSIMISTIC)
+    ]
+    return StandingRow(candidate.label, Difference.of(found[0]), Difference.of(found[1]))
 
 
 def record_standing(pool: PlaybookPool, standing: ReplayStanding) -> bool:
@@ -648,12 +725,14 @@ __all__ = [
     "Trial",
     "archived_points",
     "decision_points",
+    "measured",
     "moved",
     "noise_band",
     "pairs",
     "r0",
     "r1",
     "r2",
+    "r1_reading",
     "r2_sessions",
     "r3",
     "record_standing",

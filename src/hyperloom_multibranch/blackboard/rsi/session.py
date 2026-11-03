@@ -233,7 +233,7 @@ def _trialled(
         audit = stop_audit(tree, stall_odds(archived_history(target), tree.task, session=tree))
         trial = trial_of(tree, audit, played, pool.champion().label, fell_back=bool(versions.get(FALLBACK_KEY)))
         written = record_trial(pool, trial)
-        settled = settle(pool, snapshot.taken_at)
+        settled = settle(pool, snapshot.taken_at, trial.task)
     except NotRecorded:
         return CloseStep(SKIPPED, NO_PROFILE)
     except STEP_ERRORS as exc:

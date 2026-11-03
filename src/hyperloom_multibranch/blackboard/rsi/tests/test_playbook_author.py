@@ -12,16 +12,20 @@ from pathlib import Path
 import pytest
 
 from hyperloom_multibranch.contracts.blackboard.records import BlackboardSnapshot
+from hyperloom_multibranch.blackboard.rsi import authoring
 from hyperloom_multibranch.blackboard.rsi.archive import SKIPPED, TreeArchive, tree_from_snapshot
 from hyperloom_multibranch.blackboard.rsi.authoring import (
     MEASURES,
     NO_CHANGE,
+    NO_MEASURE,
     NOT_ARCHIVED,
     PLAYBOOK_SYSTEM_PROMPT,
     author_playbook,
+    measures_line,
     playbook_prompt,
     read_change,
 )
+from hyperloom_multibranch.blackboard.rsi.ladder import Difference, StandingRow, Trial, record_trial, session_task
 from hyperloom_multibranch.blackboard.rsi.playbook import (
     H0,
     Governs,
@@ -126,6 +130,16 @@ def test_the_author_reads_the_numbers_the_champion_the_audit_the_new_branches_an
         in prompt
     )
     assert all(measure in PLAYBOOK_SYSTEM_PROMPT for measure in MEASURES)
+    assert measures_line(("stop_value", "early_stops")) == (
+        "The decision measures R3 can read on this task, one of which a change aims at: stop_value, early_stops."
+    )
+
+
+def test_an_answer_aiming_at_a_measure_r3_cannot_read_here_says_so() -> None:
+    proposed, why = read_change(_answer(**LATER, measure="stop_value"), H0, WHO, 1.0, ("first_commit_minutes",))
+
+    assert proposed is None
+    assert why == "'stop_value' is no decision measure R3 can read here; one of first_commit_minutes"
 
 
 async def test_close_pools_the_change_once_and_refuses_one_that_repeats_a_retired_playbook(
@@ -149,7 +163,51 @@ async def test_close_pools_the_change_once_and_refuses_one_that_repeats_a_retire
 
     assert done == CloseStep(WRITTEN, "later-stops: stall_tests of h0", {"written": 1, "refused": 0})
     assert written.provenance == {"model": "claude", "session_id": "sess-1"} and asked[0][0] == PLAYBOOK_SYSTEM_PROMPT
+    assert asked[0][1].endswith(f"\n\n{measures_line(MEASURES)}")
     assert again == CloseStep(SKIPPED, "it repeats later-stops, retired: behind h0", {"written": 0, "refused": 1})
+
+
+async def test_close_asks_for_no_change_when_no_measure_varied_in_the_champions_sessions(
+    snapshot: BlackboardSnapshot, tmp_path: Path
+) -> None:
+    archive = TreeArchive(tmp_path / "archive")
+    tree = tree_from_snapshot(snapshot, METRIC)
+    archive.put(tree)
+    pool = PlaybookPool.beside(archive)
+    for n in range(2):
+        record_trial(
+            pool, Trial(f"c{n}", H0.label, H0.label, session_task(tree), float(n), False, {"early_stops": 0.0})
+        )
+
+    async def unasked(system: str, prompt: str) -> str:
+        raise AssertionError("with no measure to aim at, nothing is asked")
+
+    done = await author_playbook(snapshot, unasked, model="m", archive=archive)
+
+    assert done == CloseStep(SKIPPED, NO_MEASURE, {"written": 0, "refused": 0})
+
+
+async def test_close_pools_a_change_the_replay_reads_worse_both_ways_as_retired(
+    snapshot: BlackboardSnapshot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = TreeArchive(tmp_path / "archive")
+    archive.put(tree_from_snapshot(snapshot, METRIC))
+    pool = PlaybookPool.beside(archive)
+    worse = StandingRow("later-stops", Difference(-2.0, -3.0, -1.0), Difference(-1.0, -1.5, -0.5))
+    monkeypatch.setattr(authoring, "r1_reading", lambda candidate, champion, trees: worse)
+
+    async def complete(system: str, prompt: str) -> str:
+        return _answer(**LATER, measure="stop_value")
+
+    done = await author_playbook(snapshot, complete, model="claude", archive=archive)
+
+    evidence = (
+        "the scheduling replay of the archive reads it worse both ways: "
+        "optimistic -2.00 (-3.00 to -1.00); pessimistic -1.00 (-1.50 to -0.50)"
+    )
+    assert done == CloseStep(SKIPPED, f"later-stops: {evidence}", {"written": 0, "refused": 1})
+    assert pool.on_trial() == ()
+    assert [(item.label, item.evidence) for item in pool.retired()] == [("later-stops", evidence)]
 
 
 async def test_close_says_why_it_wrote_no_change(snapshot: BlackboardSnapshot, tmp_path: Path) -> None:
