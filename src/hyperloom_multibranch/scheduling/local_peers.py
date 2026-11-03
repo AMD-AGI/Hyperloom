@@ -700,6 +700,7 @@ def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
             client=GateClient.read(wiring.canonical) if wiring.setup.agents else None,
             dossier=wiring.setup.agent_dossier or None,
             maps=wiring.setup.agent_maps,
+            least_run_seconds=wiring.setup.agent_share_minutes * 60.0,
         )
         return with_agents(sessions, agents, branch_dir=layout.branch_dir, blackboard_for=wiring.blackboards)
 

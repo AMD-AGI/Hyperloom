@@ -127,7 +127,8 @@ class AgentSessions:
     ``sandboxes`` the agents run in; and ``client``, the gate's benchmark client, ``None`` when the session has none to
     give. ``dossier`` is the dossier every agent branch is given: the one the run was given with its reviewed map, or
     the one the session's dossier pass wrote, once it has. ``maps`` is the scheduler's side of a mapping branch,
-    ``None`` in a session that opens none."""
+    ``None`` in a session that opens none. ``least_run_seconds`` is the least an agent must have left to run for its
+    branch to wait for cards its lease was refused (``AutonomousSetup.least_run_seconds``)."""
 
     spec: AgentSpec
     command: AgentCommand
@@ -138,6 +139,7 @@ class AgentSessions:
     client: GateClient | None = None
     dossier: str | None = None
     maps: MapCalls | None = None
+    least_run_seconds: float = 0.0
     _taken: dict[str, int] = field(default_factory=dict, init=False)
 
     def session(self, start: SessionStart, place: BranchPlace) -> AutonomousSession | MapSession:
@@ -161,7 +163,16 @@ class AgentSessions:
             config = self.sandboxes.claude_config(place)
             return AgentSpend(config, roots, ledger, branch, self.command.model, place.blackboard)
 
-        setup = AutonomousSetup(onboarding, sandbox, spec, self.toolbox, self.repo, component, spend)
+        setup = AutonomousSetup(
+            onboarding,
+            sandbox,
+            spec,
+            self.toolbox,
+            self.repo,
+            component,
+            spend,
+            least_run_seconds=self.least_run_seconds,
+        )
         return AutonomousSession(start, setup, place)
 
     async def dossier_pass(self, start: DossierStart, place: Callable[[], BranchPlace]) -> DossierOutcome:

@@ -84,7 +84,13 @@ from hyperloom_multibranch.scheduling.local_peers import (
 from hyperloom_multibranch.scheduling.peers import Peers, PeerSetup, PeersUnavailable
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.roster import Roster, RosterCaps
-from hyperloom_multibranch.scheduling.settings import AGENT_PORT, InferenceXShape, KernelOptimizer, Workload
+from hyperloom_multibranch.scheduling.settings import (
+    AGENT_PORT,
+    SHARE_MINUTES,
+    InferenceXShape,
+    KernelOptimizer,
+    Workload,
+)
 from hyperloom_multibranch.specialist import agent_sessions as agent_sessions_module
 from hyperloom_multibranch.specialist import model_sessions as model_sessions_module
 from hyperloom_multibranch.specialist import worktree as worktree_module
@@ -910,6 +916,7 @@ async def test_the_specialists_are_told_of_and_give_back_the_dev_sandboxes_the_s
                 agent_dossier="",
                 agent_review="",
                 agent_maps=None,
+                agent_share_minutes=SHARE_MINUTES,
             ),
             tokens=None,
             repo=None,
@@ -995,6 +1002,7 @@ def test_the_specialists_source_base_holds_aiter_beside_the_framework_only_from_
             agent_dossier="",
             agent_review="",
             agent_maps=None,
+            agent_share_minutes=SHARE_MINUTES,
         ),
         tokens=None,
         repo=None,
@@ -1118,6 +1126,7 @@ def test_a_session_on_a_host_that_builds_native_code_lays_out_the_native_tree_an
                 agent_dossier="",
                 agent_review="",
                 agent_maps=None,
+                agent_share_minutes=SHARE_MINUTES,
             ),
             tokens=None,
             repo=None,

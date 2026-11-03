@@ -3,7 +3,8 @@
 
 """A branch driven by a third-party agent that optimizes end to end by its own logic: an autonomous branch.
 
-The preflight leases the branch's sandbox, its own cards, from the toolbox, makes the agent ready in it
+The preflight leases the branch's sandbox, its own cards, from the toolbox, waiting while they are taken as long as the
+agent would still have the time it needs to run, makes the agent ready in it
 (:mod:`agent_onboarding`) and keeps the lease and the manifest in the branch's session directory, so a run after a crash
 resumes the agent in the same sandbox without onboarding again, or, when that sandbox ended (a hosted one is gone once
 its lifetime is over), in the sandbox of a new lease with the agent's install run there again. The agent starts with the
@@ -54,6 +55,7 @@ from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import KernelArtifact, KernelKind, LaunchConfig, PatchRef, RecipeDelta, RecipeError
 from hyperloom.measure.compile import COMPONENT_LAYOUTS, kernel_load_env, locate_installed_package
 from hyperloom.sandbox import SandboxGone
+from hyperloom.sandbox.socket import SandboxUnavailable
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.blackboard.records import Learning
 from hyperloom_multibranch.contracts.blackboard.records import TestRecord
@@ -92,6 +94,7 @@ from hyperloom_multibranch.specialist.agent_onboarding import (
 from hyperloom_multibranch.specialist.agent_session import BranchPlace
 from hyperloom_multibranch.specialist.agent_spend import AgentSpend, newest_write
 from hyperloom_multibranch.specialist.arbor_adapter import refused_reasons
+from hyperloom_multibranch.specialist.dev_sandbox import MINUTE, TOO_MANY
 from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.runtime import (
     PreflightFailed,
@@ -152,6 +155,9 @@ REFUSED_CONFIG = 2
 #: The deadline of an agent run as a component when EXPLORE has none, which it refuses to run without; MB stops it
 #: long before.
 NO_DEADLINE_SECONDS = 365 * 24 * 3600.0
+#: How often a branch whose cards are taken asks the toolbox for them again: a dev lease or a tool job holding them
+#: ends within minutes of its lifetime, and each ask is one call that holds nothing when refused.
+LEASE_POLL_SECONDS = MINUTE
 #: The toolbox's refusal of a kernel table put with no target for a variable no table was put for yet.
 TARGET_REQUIRED = "target_required"
 
@@ -167,8 +173,9 @@ class AutonomousSetup:
     cards gives, the spec it is given (its cards, the server arguments and environment of the commit it starts on and
     its workspace are filled in at the preflight), the toolbox the sandbox is leased from and imports are submitted to,
     the repository they are read against, ``component``, the framework the agent edits, ``spend``, the agent's own LLM
-    spend for the directories it works under, read with the file of what was read, and ``aiter_configs``, the image's
-    aiter tables the start commit's rows-only tables are laid over."""
+    spend for the directories it works under, read with the file of what was read, ``aiter_configs``, the image's
+    aiter tables the start commit's rows-only tables are laid over, and ``least_run_seconds``, the least the agent must
+    still run for its branch to wait for cards its lease was refused, asked again every ``lease_poll_seconds``."""
 
     onboarding: Callable[[AgentSandbox], OnboardingSetup]
     sandbox: Callable[[BranchLease], AgentSandbox]
@@ -185,6 +192,8 @@ class AutonomousSetup:
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
     clock: Callable[[], float] = time.time
     aiter_configs: Path = field(default_factory=image_configs)
+    least_run_seconds: float = 0.0
+    lease_poll_seconds: float = LEASE_POLL_SECONDS
 
 
 @dataclass
@@ -257,6 +266,7 @@ class AutonomousSession:
         root = self._place.worktree.commit()
         recipe = await self._setup.repo.read_recipe(self._start.start_commit)
         tables = await self._lay_start_tables(recipe.kernels)
+        lease = await self._lease(self._setup.spec.tp)
         await self._notes.refresh()
         snapshot = await self._place.blackboard.snapshot()
         baseline = snapshot.baseline
@@ -273,7 +283,6 @@ class AutonomousSession:
             root=root,
             root_shares=None if baseline is None else snapshot.op_shares.get(baseline.root_commit),
         )
-        lease = await self._lease(spec.tp)
         spec = replace(spec, cards=lease.gpu_ids)
         self._sandbox = self._setup.sandbox(lease)
         ready = await make_ready(self._start.task.agent, spec, self._agent_dir, self._setup.onboarding(self._sandbox))
@@ -476,20 +485,41 @@ class AutonomousSession:
 
     async def _lease(self, cards: int) -> BranchLease:
         """Lease ``cards`` for the branch's sandbox, for as long as is left until the branch's deadline, and keep the
-        lease for :meth:`release` and a later run."""
+        lease for :meth:`release` and a later run.
+
+        Cards another lease or the session's tests hold now are given back within their lifetime, so a refusal for
+        want of them (:data:`~.dev_sandbox.TOO_MANY`, or none free within the toolbox's own wait) is asked again every
+        ``lease_poll_seconds`` while the agent would still run ``least_run_seconds`` once it starts
+        (:meth:`_may_wait`), the wait noted once in the branch log; past that, and on any other refusal, the
+        preflight fails with why."""
 
         # The lease is only given back through its file, so the file's directory must exist before the lease does.
         self._place.workspace.mkdir(parents=True, exist_ok=True)
-        deadline = self._start.task.deadline
-        try:
-            lease = await self._setup.toolbox.lease_branch_sandbox(
-                self._start.branch,
-                cards,
-                charge=LeaseCharge(LeaseKind.AUTONOMOUS, self._start.branch),
-                lifetime_sec=max(deadline - self._setup.clock(), 1.0) if deadline else None,
-            )
-        except RequestRejected as error:
-            raise PreflightFailed([f"the toolbox leased no cards for the agent's sandbox: {error}"]) from error
+        began, noted = self._setup.clock(), False
+        while True:
+            try:
+                lease = await self._lease_now(cards)
+                break
+            except RequestRejected as error:
+                if error.code not in TOO_MANY:
+                    raise PreflightFailed([f"the toolbox leased no cards for the agent's sandbox: {error}"]) from error
+                busy: Exception = error
+            except SandboxUnavailable as error:
+                busy = error
+            if not await self._may_wait():
+                waited = (self._setup.clock() - began) / MINUTE
+                need = self._setup.least_run_seconds / MINUTE
+                raise PreflightFailed(
+                    [
+                        f"the toolbox leased no cards for the agent's sandbox: it waited {waited:.1f} min for cards,"
+                        f" and the agent would now run under the {need:g} min it needs before EXPLORE ends: {busy}"
+                    ]
+                ) from busy
+            if not noted:
+                noted = True
+                log.info("the agent of %s waits for cards: %s", self._start.branch, busy)
+                await self._note(f"the agent's sandbox waits for cards, asked again until they are free: {busy}")
+            await self._setup.sleep(self._setup.lease_poll_seconds)
         document = {
             "lease_id": lease.lease_id,
             "branch_id": lease.branch_id,
@@ -500,6 +530,26 @@ class AutonomousSession:
         }
         (self._place.workspace / LEASE_FILE).write_text(json.dumps(document), encoding=ENCODING)
         return lease
+
+    async def _lease_now(self, cards: int) -> BranchLease:
+        deadline = self._start.task.deadline
+        return await self._setup.toolbox.lease_branch_sandbox(
+            self._start.branch,
+            cards,
+            charge=LeaseCharge(LeaseKind.AUTONOMOUS, self._start.branch),
+            lifetime_sec=max(deadline - self._setup.clock(), 1.0) if deadline else None,
+        )
+
+    async def _may_wait(self) -> bool:
+        """Whether the agent, started after one more wait for cards, would still run ``least_run_seconds`` before the
+        branch's deadline, reckoned as its preflight reckons it (:meth:`_run_seconds`); always, with no deadline."""
+
+        deadline = self._start.task.deadline
+        if not deadline:
+            return True
+        left = deadline - self._setup.clock() - self._setup.lease_poll_seconds
+        records = (await self._place.blackboard.snapshot()).records
+        return left > 0 and run_seconds(left, records, self._setup.cutoff_seconds) >= self._setup.least_run_seconds
 
     def _held(self) -> BranchLease:
         document = json.loads((self._place.workspace / LEASE_FILE).read_text(encoding=ENCODING))
