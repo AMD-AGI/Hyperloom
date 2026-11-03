@@ -4,11 +4,16 @@
 from __future__ import annotations
 
 import json
+import subprocess
 
+import pytest
+
+from hyperloom.common import gpu_power_settings
 from hyperloom.common.rocm_smi import GpuVram
 from hyperloom.measure.runner.hardware import (
     EccCounts,
     GpuFacts,
+    amd_smi_or_none,
     busy_gpus,
     check_hardware,
     ecc_counts,
@@ -55,6 +60,44 @@ def test_facts_of_the_visible_gpus_only():
     ]
 
 
+@pytest.mark.parametrize(
+    "limit",
+    [
+        {"ppt": {"socket_power_limit": {"value": 750, "unit": "W"}}},
+        {"socket_power_limit": {"value": 750, "unit": "W"}},
+        {"power_cap": {"value": 750, "unit": "W"}},
+    ],
+)
+def test_the_power_cap_is_read_in_every_layout_amd_smi_reports_it(limit):
+    static = json.dumps({"gpu_data": [{"gpu": 0, "asic": {"market_name": "AMD Instinct MI355X"}, "limit": limit}]})
+
+    (facts,) = read_gpu_facts([0], _runner({"static --json": static}))
+
+    assert facts.power_cap_w == 750.0
+
+
+def test_a_power_cap_within_the_rounding_of_amd_smi_matches_the_sheet():
+    facts = [GpuFacts(0, "AMD Instinct MI355X", 749.8, "SPX/NPS1")]
+
+    assert check_hardware(facts, gpu_type="mi355x", gpu_count=1, power_cap_w=750, partition_mode=None) == []
+    assert check_hardware(facts, gpu_type="mi355x", gpu_count=1, power_cap_w=749, partition_mode=None) == [
+        "GPU 0 power cap 749.8 W, not 749 W"
+    ]
+
+
+def test_an_amd_smi_that_fails_reads_as_none_instead_of_raising(monkeypatch):
+    def run(cmd, **_kwargs):
+        if cmd[1] == "missing":
+            raise FileNotFoundError(cmd[0])
+        return subprocess.CompletedProcess(cmd, 0 if cmd[1] == "static" else 2, "{}", "failed")
+
+    monkeypatch.setattr(gpu_power_settings.subprocess, "run", run)
+
+    assert amd_smi_or_none(["static", "--json"]) == "{}"
+    assert amd_smi_or_none(["metric", "--json"]) is None
+    assert amd_smi_or_none(["missing"]) is None
+
+
 def test_an_unreadable_tool_gives_none_and_not_a_guess():
     assert read_gpu_facts([0], _runner({})) is None
     assert read_gpu_facts([0], _runner({"static --json": "not json"})) is None
@@ -62,10 +105,10 @@ def test_an_unreadable_tool_gives_none_and_not_a_guess():
 
 
 def test_ecc_counts_need_every_visible_gpu():
-    run = _runner({"metric --ecc --json": ECC})
+    run, no_ras = _runner({"metric --ecc --json": ECC}), _runner({})
 
-    assert ecc_counts([1, 2], run) == {1: ecc_counts([1], run)[1], 2: ecc_counts([2], run)[2]}
-    assert ecc_counts([1, 9], run) is None
+    assert ecc_counts([1, 2], run, no_ras) == {1: EccCounts(1, 0), 2: EccCounts(2, 0)}
+    assert ecc_counts([1, 9], run, no_ras) is None
 
 
 def test_hardware_mismatches_are_named():
