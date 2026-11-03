@@ -4,9 +4,9 @@
 """The module that launched each kernel of a window, from the host calls and the graph captures its trace records.
 
 A launcher is the innermost ``nn.Module`` python frame (``nn.Module: RowParallelLinear_3``) that was running when the kernel
-was launched and the module around it, without the instance numbers: ``Qwen2MLP.RowParallelLinear`` is the MLP's down
-projection, ``Qwen3Attention.RowParallelLinear`` the attention's output projection, so a layer's four GEMMs, all
-``kernel_gemm_0`` to the profiler, have four launchers.
+was launched and the module around it, without the instance numbers: in a layer of an ``Attention`` and an ``MLP``
+module, ``MLP.RowParallelLinear`` is the MLP's down projection and ``Attention.RowParallelLinear`` the attention's output
+projection, so a layer's four GEMMs, all ``kernel_gemm_0`` to the profiler, have four launchers.
 
 **An eager kernel** has its launch call in the trace (a ``cuda_runtime`` event with the kernel's correlation id); the
 launcher is the module frames of the launching thread that span that call.

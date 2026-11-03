@@ -3,12 +3,12 @@
 
 """A profile taken with the graph replayed node by node has every decode replay's kernels, and the report reads them.
 
-``data/nodewise_decode4_window_launch_events.json.gz`` is four consecutive decode steps (batch size 64) of a
-profile of one SGLang server, taken with ``DEBUG_CLR_GRAPH_PACKET_CAPTURE=0``: each step's graph replay
-has its 764 kernels in the trace. A server of the same configuration with the runtime's default replay of captured
-packets recorded the kernels of the last replay only (1 of 4 in such a window, 1 of 32 in a 32-step one).
-``nodewise_capture_bs64_launches.json.gz`` is the graph capture of batch size 64 from the first server: the launches
-and the ``nn.Module`` frames that made them.
+``data/nodewise_decode4_window_launch_events.json.gz`` is a synthetic window (``data/_make_traces.py``) shaped like four
+consecutive decode steps (batch size 64) of an SGLang server profiled with ``DEBUG_CLR_GRAPH_PACKET_CAPTURE=0``: each
+step's graph replay has its 80 kernels in the trace, in the order they were captured. With the runtime's default replay
+of captured packets, a profile records the kernels of the last replay only (1 of 4 in such a window).
+``nodewise_capture_bs64_launches.json.gz`` is the graph capture of batch size 64 those replays replay: the launches and
+the ``nn.Module`` frames that made them.
 """
 
 from __future__ import annotations
@@ -24,10 +24,10 @@ from hyperloom_multibranch.toolbox.tools.kernel_shares import kernel_window
 
 DATA = Path(__file__).parent / "data"
 WINDOW = DATA / "nodewise_decode4_window_launch_events.json.gz"
-REPLAY_KERNELS = 764
+REPLAY_KERNELS = 80
 CK_GEMM = "ck::kernel_gemm_xdl_cshuffle_v3_multi_d_blockscale_b_preshuffle"
 PAGED_ATTENTION = "paged_attention_ll4mi_QKV_mfma16_kernel"
-OUT_PROJECTION = "Qwen3Attention.RowParallelLinear"
+OUT_PROJECTION = "DecoderAttention.RowParallelLinear"
 
 
 @pytest.fixture
@@ -56,13 +56,13 @@ def test_the_window_gives_kernel_shares_of_all_four_replays_with_the_gemms_split
         "the nodewise replay records the names in the capture's order"
     )
     assert sum(shares.values()) == pytest.approx(100.0)
-    assert round(shares[PAGED_ATTENTION], 1) == 20.7
-    gemms = {name: round(share, 1) for name, share in shares.items() if name.startswith(CK_GEMM)}
+    assert round(shares[PAGED_ATTENTION], 2) == 20.25  # 4 x 40 us of a 790 us step
+    gemms = {name: round(share, 2) for name, share in shares.items() if name.startswith(CK_GEMM)}
     assert gemms == {
-        f"{CK_GEMM} [Qwen2MLP.RowParallelLinear]": 23.7,
-        f"{CK_GEMM} [Qwen2MLP.MergedColumnParallelLinear]": 16.1,
-        f"{CK_GEMM} [Qwen3Attention.QKVParallelLinear]": 7.9,
-        f"{CK_GEMM} [{OUT_PROJECTION}]": 7.8,
+        f"{CK_GEMM} [DecoderMLP.RowParallelLinear]": 20.25,
+        f"{CK_GEMM} [DecoderMLP.MergedColumnParallelLinear]": 15.19,
+        f"{CK_GEMM} [DecoderAttention.QKVParallelLinear]": 8.1,
+        f"{CK_GEMM} [{OUT_PROJECTION}]": 7.09,
     }
 
 

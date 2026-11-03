@@ -3,8 +3,9 @@
 
 """The op shares are a complete per-op (or per-kernel) GPU time table, not the few optimisation tasks of TraceLens' report.
 
-``data/tracelens_ops_summary.csv`` is a real ``ops_summary.csv`` of a TraceLens perf report (an SGLang server at TP2,
-one steady-state window). The report route names a kernel table of its own, which is read instead of it.
+``data/tracelens_ops_summary.csv`` is a synthetic table with the columns and rows of a TraceLens perf report's
+``ops_summary.csv`` (an SGLang server at TP2, one steady-state window), its times made up so that the shares are round.
+The report route names a kernel table of its own, which is read instead of it.
 """
 
 from __future__ import annotations
@@ -42,10 +43,10 @@ def _report(directory: Path, table: Path = FIXTURE, info: dict[str, Any] | None 
 def test_the_full_table_sums_to_the_whole_gpu_time_with_gemm_and_attention_present(tmp_path: Path) -> None:
     shares = read_op_shares(_report(tmp_path))
     assert sum(shares.values()) == pytest.approx(100.0, abs=0.01)
-    assert shares["aten::mm"] == pytest.approx(25.32, abs=0.01)
-    assert shares["aiter::mha_batch_prefill"] == pytest.approx(2.40, abs=0.01)
+    assert shares["aten::mm"] == pytest.approx(25.0)
+    assert shares["aiter::mha_batch_prefill"] == pytest.approx(2.5)
     assert max(shares, key=shares.__getitem__) == "aten::mm"
-    assert shares["aten::copy_"] == pytest.approx(19.82, abs=0.01)
+    assert shares["aten::copy_"] == pytest.approx(20.0)
 
 
 def test_only_the_largest_ops_are_kept(tmp_path: Path) -> None:
@@ -120,12 +121,12 @@ def test_the_kernel_table_is_copied_back_from_the_scratch_directory_and_read_the
 
 
 def test_the_summary_says_how_many_misreported_events_the_shares_leave_out(tmp_path: Path) -> None:
-    result = {KERNEL_SHARES_KEY: str(_kernel_table(tmp_path)), "excluded_events": 6, "excluded_claimed_ms": 54.84}
+    result = {KERNEL_SHARES_KEY: str(_kernel_table(tmp_path)), "excluded_events": 6, "excluded_claimed_ms": 2.59}
     request = ToolRequest("tracelens", "b1", {"commit_id": "c1"})
     noted = with_op_shares(ToolOutput(result, "trace analysed"), request)
     assert (
         noted.summary
-        == "trace analysed | 6 GPU events the profiler misreported (claiming 54.84 ms) are left out of the shares"
+        == "trace analysed | 6 GPU events the profiler misreported (claiming 2.59 ms) are left out of the shares"
     )
     quiet = with_op_shares(ToolOutput({**result, "excluded_events": 0}, "trace analysed"), request)
     assert quiet.summary == "trace analysed" and quiet.op_shares

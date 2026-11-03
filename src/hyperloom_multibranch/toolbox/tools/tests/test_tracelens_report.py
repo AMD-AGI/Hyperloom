@@ -4,9 +4,9 @@
 """The ``tracelens`` tool's default route runs TraceLens' split and perf report with no agent; ``agent`` still runs one.
 
 Its op shares are kernel shares of the raw GPU events of the trace's decode window and its prefill window, weighted by the
-time each takes in a wave of the point's workload (``data/*_gpu_events.json.gz``, real windows: see ``test_kernel_shares.py``
-and ``final_probe.py``), not those of the window the perf report runs on, nor TraceLens' aten-op table, which the fake
-perf report here still writes.
+time each takes in a wave of the point's workload (``data/*_gpu_events.json.gz``, synthetic windows: see
+``test_kernel_shares.py`` and ``final_probe.py``), not those of the window the perf report runs on, nor TraceLens'
+aten-op table, which the fake perf report here still writes.
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ MIXED_WINDOW = "root_window"
 CK_GEMM = probe.CK_GEMM
 PAGED_ATTENTION = probe.PAGED_ATTENTION
 DECODE, PREFILL = "decode", "prefill"
-#: A decode step the splitter lists for a real window of the data directory that no probe excerpt stands for.
+#: A decode step the splitter lists for a window of the data directory that no probe excerpt stands for.
 STEP = {
     "batch_size": 64,
     "num_requests": 64,
@@ -60,7 +60,7 @@ STEP = {
 
 @dataclass(frozen=True)
 class Window:
-    """A real window the fake splitter writes as a phase's, and the steps it lists for it in ``execution_details.json``."""
+    """A fixture window the fake splitter writes as a phase's, and the steps it lists for it in ``execution_details.json``."""
 
     file: str
     chunk: str
@@ -72,14 +72,14 @@ PROBE_PREFILL = Window(probe.PREFILL_WINDOW.name, probe.PREFILL_CHUNK, tuple(pro
 
 
 def decode_of(window: str, events: str = "gpu_events") -> Window:
-    """A real window of the data directory, as the decode window of one step."""
+    """A fixture window of the data directory, as the decode window of one step."""
     return Window(f"{window}_{events}.json.gz", probe.DECODE_CHUNK, (STEP,))
 
 
 class Shell:
     """Stands in for ``run_with_session_kill``: writes what TraceLens' splitter and perf report would, records the argv.
 
-    The splitter writes the perf report's ``chunk`` and the ``decode`` and ``prefill`` windows (the real probe's excerpts
+    The splitter writes the perf report's ``chunk`` and the ``decode`` and ``prefill`` windows (the probe's excerpts
     unless a test names others, ``None`` for none), with its ``execution_details.json``.
     """
 
@@ -179,8 +179,8 @@ async def test_by_default_no_agent_runs_and_the_pointer_carries_the_graded_waves
     status, pointer, record = await _run(tmp_path, probe.GRADED, rig)
     assert status is JobStatus.SUCCEEDED and rig.agent_calls == []
     assert max(pointer.op_shares, key=pointer.op_shares.get) == PAGED_ATTENTION and "aten::mm" not in pointer.op_shares
-    assert pointer.op_shares[PAGED_ATTENTION] == pytest.approx(25.18, abs=0.01)
-    assert pointer.op_shares[f"{CK_GEMM} [Qwen2MLP.MergedColumnParallelLinear]"] == pytest.approx(18.44, abs=0.01)
+    assert pointer.op_shares[PAGED_ATTENTION] == pytest.approx(27.0, abs=0.01)
+    assert pointer.op_shares[f"{CK_GEMM} [DecoderMLP.MergedColumnParallelLinear]"] == pytest.approx(16.5, abs=0.01)
     assert 0 < len(pointer.op_shares) <= 50 and sum(pointer.op_shares.values()) == pytest.approx(100.0)
     assert (pointer.commit_id, pointer.profile_request_id) == ("c9", "r1")
     assert DEGRADED_NOTICE not in pointer.summary and "stands for the whole wave" not in pointer.summary
@@ -196,7 +196,7 @@ async def test_by_default_no_agent_runs_and_the_pointer_carries_the_graded_waves
     result = record["result"]
     assert (result["route"], result["steady_state_mode"], result["graph_under_recorded"]) == ("report", "mixed", False)
     assert (result["steady_state_chunk"], result["split_hints"]) == (CHUNK, probe.GRADED)
-    assert result["phase_fractions"] == {"prefill": 0.1145, "decode": 0.8855}
+    assert result["phase_fractions"] == {"prefill": 0.1, "decode": 0.9}
     windows = result["phase_windows"]
     assert (windows[PREFILL]["chunk"], windows[DECODE]["chunk"]) == (probe.PREFILL_CHUNK, probe.DECODE_CHUNK)
     assert (windows[PREFILL]["used"], windows[DECODE]["used"]) == (True, True)
@@ -210,7 +210,8 @@ async def test_by_default_no_agent_runs_and_the_pointer_carries_the_graded_waves
 async def test_the_mixed_window_the_perf_report_runs_on_is_not_where_the_shares_come_from(
     rig: Rig, tmp_path: Path
 ) -> None:
-    """The GEMM-led prefill step the fake splitter writes as the mixed window has one GEMM at 87% and no paged attention."""
+    """The GEMM-led prefill step the fake splitter writes as the mixed window has its GEMMs at 80% and no paged
+    attention."""
     probe.install_capture(rig.trace_input / "torch_trace" / "graph_capture_profile")
     _, pointer, _ = await _run(tmp_path, {**probe.GRADED, "steady_state_mode": "mixed"}, rig)
 
@@ -226,7 +227,7 @@ async def test_a_window_the_splitter_wrote_none_for_leaves_the_other_to_stand_fo
     monkeypatch.setattr(report, "run_with_session_kill", Shell(prefill=None))
     status, pointer, record = await _run(tmp_path, probe.GRADED, rig)
     assert status is JobStatus.SUCCEEDED and max(pointer.op_shares, key=pointer.op_shares.get) == PAGED_ATTENTION
-    assert pointer.op_shares[PAGED_ATTENTION] == pytest.approx(28.44, abs=0.01)  # the decode window's own share
+    assert pointer.op_shares[PAGED_ATTENTION] == pytest.approx(30.0, abs=0.01)  # the decode window's own share
     assert "the decode window stands for the whole wave: the prefill window gives none" in pointer.summary
     result = record["result"]
     assert result["phase_fractions"] == {"prefill": 0.0, "decode": 1.0} and result["window_degraded_reason"] == ""
@@ -243,7 +244,7 @@ async def test_a_decode_window_without_graph_replay_kernels_leaves_no_shares_as_
     status, pointer, record = await _run(tmp_path, probe.GRADED, rig)
 
     assert status is JobStatus.SUCCEEDED and not pointer.op_shares and DEGRADED_NOTICE in pointer.summary
-    said = "the decode window is missing or degraded, it is 85.5% of a graded wave, so the prefill window's shares (14.5% of it)"
+    said = "the decode window is missing or degraded, it is 87.9% of a graded wave, so the prefill window's shares (12.1% of it)"
     advice = "cannot stand for the wave; profile again on a build with node-by-node graph replay"
     assert f"{said} {advice} (the decode" in pointer.summary  # the pointer's summary is cut at 400 characters
     assert "stands for the whole wave" not in pointer.summary
@@ -372,7 +373,7 @@ async def test_a_graph_collapsed_report_gets_the_degraded_fallback_and_keeps_the
 async def _with_window(
     tmp_path: Path, rig: Rig, monkeypatch: pytest.MonkeyPatch, window: str, *, trace: str = ""
 ) -> Any:
-    """Run the report on the real ``window`` as its decode window, the splitter having written no prefill window (and,
+    """Run the report on the fixture ``window`` as its decode window, the splitter having written no prefill window (and,
     when a test prices excluded kernels, the rank trace ``trace``)."""
     monkeypatch.setattr(report, "run_with_session_kill", Shell(decode=decode_of(window), prefill=None))
     if trace:
@@ -385,28 +386,28 @@ async def test_a_window_whose_graph_replay_kernels_are_missing_from_the_trace_gi
 ) -> None:
     """A branch profile: its one decode step is a replay with no kernels, TraceLens skips it with a warning.
 
-    The window holds the four eager ops around it (11 kernels, 0.05 ms) in an 8.2 ms span, no GEMM, and TraceLens' own
-    check passes it (0% of the time is in replay wrapper ops); only the window's own events show 0.6% of the span covered.
+    The window holds the eager ops around it (10 events, 27 us) in a 5 ms span, no GEMM, and TraceLens' own check passes
+    it (no time is in replay wrapper ops); only the window's own events show 0.5% of the span covered.
     """
     status, pointer, record = await _with_window(tmp_path, rig, monkeypatch, "lost_replay_window")
     assert status is JobStatus.SUCCEEDED and not pointer.op_shares and not pointer.commit_id
     result = record["result"]
     assert (
-        result["graph_under_recorded"] is False and result["phase_windows"][DECODE]["window_gpu_busy_percent"] == 0.61
+        result["graph_under_recorded"] is False and result["phase_windows"][DECODE]["window_gpu_busy_percent"] == 0.54
     )
-    assert "0.6% of its 8.22 ms GPU span" in result["window_degraded_reason"] and result["kernel_shares_path"] == ""
+    assert "0.5% of its 5.00 ms GPU span" in result["window_degraded_reason"] and result["kernel_shares_path"] == ""
     assert DEGRADED_NOTICE in pointer.summary and result["window_degraded_reason"] in pointer.summary
 
 
 @pytest.mark.parametrize(
     ("window", "busy", "top", "top_share"),
     [
-        ("root_window", 100.0, CK_GEMM, 87.08),
-        ("eager_window", 31.28, "at::native::vectorized_elementwise_kernel", 37.34),
-        ("eager_tp2_window", 26.57, "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs", 28.62),
+        ("root_window", 100.0, CK_GEMM, 80.0),
+        ("eager_window", 34.76, "at::native::vectorized_elementwise_kernel", 38.87),
+        ("eager_tp2_window", 27.17, "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs", 34.77),
     ],
 )
-async def test_a_real_window_whose_kernels_run_one_after_another_keeps_its_kernel_shares(
+async def test_a_window_whose_kernels_run_one_after_another_keeps_its_kernel_shares(
     rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, window: str, busy: float, top: str, top_share: float
 ) -> None:
     status, pointer, record = await _with_window(tmp_path, rig, monkeypatch, window)
@@ -422,31 +423,31 @@ async def test_a_real_window_whose_kernels_run_one_after_another_keeps_its_kerne
 async def test_a_decode_window_with_eager_kernels_stamped_inside_the_graph_replay_gets_kernel_shares_and_a_count(
     rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A branch's decode step: the brief's top four were copy_, index_put, greedy_sample and add.
+    """A branch's decode step: taken from TraceLens' ops table, copy_, index_put, greedy_sample and add would lead it.
 
-    The profiler stamps six eager kernels after the one replay as lasting 9 ms each (54.84 ms in all, 50 to 80 us really),
-    on the stream the replay's 604 kernels run on. They are left out and counted; the FlyDSL GEMM, the fp8 quantisation and
-    paged attention lead a list that sums to 100% of the replay's 7.93 ms.
+    The profiler stamps six eager kernels after the one replay as starting inside it and lasting to the window's end
+    (2.59 ms in all, 18 us really), on the stream the replay's 64 kernels run on. They are left out and counted; the
+    FlyDSL GEMM, the fp8 quantisation and paged attention lead a list that sums to 100% of the step's 0.565 ms.
     """
     status, pointer, record = await _with_window(tmp_path, rig, monkeypatch, "decode_window", trace="decode_rank_trace")
     assert status is JobStatus.SUCCEEDED and DEGRADED_NOTICE not in pointer.summary
     result = record["result"]
     assert (result["excluded_events"], result["excluded_claimed_ms"], result["window_degraded_reason"]) == (
         6,
-        54.84,
+        2.59,
         "",
     )
     decode = result["phase_windows"][DECODE]
-    assert (decode["window_kernel_ms"], decode["excluded_estimated_ms"]) == (7.93, 0.027)
+    assert (decode["window_kernel_ms"], decode["excluded_estimated_ms"]) == (0.565, 0.018)
     assert list(pointer.op_shares)[:3] == [
         "kernel_gemm_0",
         "aiter::dynamic_per_token_scaled_quant_kernel",
         "paged_attention_ll4mi_QKV_mfma16_kernel",
     ]
     assert sum(pointer.op_shares.values()) == pytest.approx(100.0, abs=0.01)
-    assert "6 GPU events the profiler misreported (claiming 54.84 ms) are left out of the shares" in pointer.summary
+    assert "6 GPU events the profiler misreported (claiming 2.59 ms) are left out of the shares" in pointer.summary
     assert (
-        Path(result["kernel_shares_path"]).read_text(encoding="utf-8").splitlines()[1].startswith("kernel_gemm_0,44.1")
+        Path(result["kernel_shares_path"]).read_text(encoding="utf-8").splitlines()[1].startswith("kernel_gemm_0,35.31")
     )
 
 
@@ -468,33 +469,33 @@ async def _with_capture(
 async def test_a_decode_window_beside_its_graph_capture_names_the_four_gemms_by_the_module_that_launched_them(
     rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The pointer's one ``kernel_gemm_0`` (44.1%) is the layer's gate_up, down, qkv and out GEMMs, 28.1, 16.4, 6.7, 5.8%."""
+    """The pointer's one ``kernel_gemm_0`` (35.3%) is the layer's gate_up, down, qkv and out GEMMs, 28.5, 17.1, 8.5, 7.1%."""
     status, pointer, record = await _with_capture(tmp_path, rig, monkeypatch)
     assert status is JobStatus.SUCCEEDED and DEGRADED_NOTICE not in pointer.summary
     gemms = {name: share for name, share in pointer.op_shares.items() if name.startswith("kernel_gemm_0")}
     assert {name.removeprefix("kernel_gemm_0 "): round(share, 1) for name, share in gemms.items()} == {
-        "[Qwen2MLP.MergedColumnParallelLinear]": 28.1,
-        "[Qwen2MLP.RowParallelLinear]": 16.4,
-        "[Qwen3Attention.QKVParallelLinear]": 6.7,
-        "[Qwen3Attention.RowParallelLinear]": 5.8,
+        "[DecoderMLP.MergedColumnParallelLinear]": 28.5,
+        "[DecoderMLP.RowParallelLinear]": 17.1,
+        "[DecoderAttention.QKVParallelLinear]": 8.5,
+        "[DecoderAttention.RowParallelLinear]": 7.1,
     }
     assert len(pointer.op_shares) <= 50 and sum(pointer.op_shares.values()) == pytest.approx(100.0, abs=0.01)
     decode = record["result"]["phase_windows"][DECODE]
     assert (decode["launcher_labelled_kernels"], decode["graph_kernels_renamed"], decode["launcher_notes"]) == (
-        605,
-        420,
+        65,
+        30,
         [],
     )
     result = record["result"]
     table = Path(result["kernel_shares_path"]).read_text(encoding="utf-8").splitlines()
-    assert table[1].startswith("kernel_gemm_0 [Qwen2MLP.MergedColumnParallelLinear],28.1")
+    assert table[1].startswith("kernel_gemm_0 [DecoderMLP.MergedColumnParallelLinear],28.47")
 
 
 async def test_a_decode_window_without_its_graph_capture_keeps_one_gemm_entry_and_says_why(
     rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     status, pointer, record = await _with_capture(tmp_path, rig, monkeypatch, capture=False)
-    assert status is JobStatus.SUCCEEDED and pointer.op_shares["kernel_gemm_0"] == pytest.approx(44.1, abs=0.05)
+    assert status is JobStatus.SUCCEEDED and pointer.op_shares["kernel_gemm_0"] == pytest.approx(35.3, abs=0.05)
     decode = record["result"]["phase_windows"][DECODE]
     assert (decode["launcher_labelled_kernels"], decode["graph_kernels_renamed"]) == (1, 0)  # the eager sampler's
     assert len(decode["launcher_notes"]) == 1 and "left as recorded" in decode["launcher_notes"][0]
@@ -531,10 +532,10 @@ async def test_the_agent_routes_op_shares_are_the_kernel_shares_of_the_window_it
     monkeypatch.setattr(roofline, "trace_analyze_handler", agent)
     status, pointer, record = await _run(tmp_path, {"analysis_route": "agent"}, rig)
     assert status is JobStatus.SUCCEEDED and "aten::mm" not in pointer.op_shares
-    assert pointer.op_shares["kernel_gemm_0 [Qwen2MLP.MergedColumnParallelLinear]"] == pytest.approx(28.1, abs=0.05)
+    assert pointer.op_shares["kernel_gemm_0 [DecoderMLP.MergedColumnParallelLinear]"] == pytest.approx(28.47, abs=0.01)
     assert sum(pointer.op_shares.values()) == pytest.approx(100.0, abs=0.01)
     result = record["result"]
-    assert result["graph_kernels_renamed"] == 420 and Path(result["kernel_shares_path"]).is_file()  # copied back
+    assert result["graph_kernels_renamed"] == 30 and Path(result["kernel_shares_path"]).is_file()  # copied back
 
 
 async def test_an_agent_analysis_that_names_no_window_keeps_its_ops_table_as_before(
@@ -635,7 +636,7 @@ async def test_a_step_that_fails_fails_the_job_with_its_reason(
 
 
 CAPTURE_SIDECAR = "EAGLEDraftExtendCudaGraphRunner_bs_14_rank0.json.gz"
-#: The GPU events of a real CUDA-graph capture sidecar of a NEXTN head's profile (``CAPTURE_SIDECAR``), all of
+#: The GPU events of a CUDA-graph capture sidecar of a speculative (NEXTN) head's profile (``CAPTURE_SIDECAR``), all of
 #: them: a graph capture launches the fills that set it up, and nothing of a serving step.
 CAPTURE_KERNELS = [
     {
@@ -649,14 +650,14 @@ CAPTURE_KERNELS = [
         "dur": dur,
         "args": {"device": 8, "stream": 5, "kind": "Dispatch Kernel", "grid": [1, 1, 1], "block": [256, 1, 1]},
     }
-    for ts, dur in ((2070753192525.363, 4.679), (2070753192530.043, 3.319))
+    for ts, dur in ((1000000.0, 4.5), (1000005.0, 3.5))
 ]
 
 
 async def test_a_profile_of_graph_capture_sidecars_alone_is_refused_before_the_splitter_runs(
     rig: Rig, tmp_path: Path
 ) -> None:
-    """What 13 of 13 analyses of a NEXTN head's profiles met: no rank trace, only the boot's graph captures, whose two fill
+    """What an analysis of a NEXTN head's profile can meet: no rank trace, only the boot's graph captures, whose two fill
     kernels made one pass for a trace that ran on a card; the splitter then found no window (``steady_state_chunk_missing``).
     The sidecar is refused by name and the splitter is not run on it."""
     rig.trace.unlink()
