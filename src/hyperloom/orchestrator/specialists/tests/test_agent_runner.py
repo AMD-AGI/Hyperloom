@@ -18,6 +18,7 @@ from types import SimpleNamespace
 import pytest
 
 from hyperloom.common.deadline import Deadline
+from hyperloom.common.proctree import descendants
 from hyperloom.orchestrator.specialists import agent_runner
 from hyperloom.orchestrator.specialists import subprocess_ as ss
 from hyperloom.orchestrator.specialists.agent_runner import (
@@ -83,12 +84,19 @@ class ClockedProcess:
         return self.returncode
 
 
+async def inline(func, /, *args, **kwargs):
+    """``asyncio.to_thread`` without the thread: the sampler would otherwise race virtual time ahead meanwhile."""
+    return func(*args, **kwargs)
+
+
 @pytest.fixture
 def clock(monkeypatch: pytest.MonkeyPatch) -> FakeClock:
     """Put the existing reap loop on the virtual clock; its own code path is the one under test."""
     fake = FakeClock()
     monkeypatch.setattr(ss, "time", SimpleNamespace(monotonic=fake.monotonic, time=fake.time, sleep=fake.sleep))
-    monkeypatch.setattr(ss, "asyncio", SimpleNamespace(sleep=fake.sleep, CancelledError=real_asyncio.CancelledError))
+    monkeypatch.setattr(
+        ss, "asyncio", SimpleNamespace(sleep=fake.sleep, to_thread=inline, CancelledError=real_asyncio.CancelledError)
+    )
     return fake
 
 
@@ -102,8 +110,7 @@ def clocked_runner(tmp_path: Path, clock: FakeClock, **kwargs):
 async def test_session_longer_than_four_hours_is_not_truncated(tmp_path: Path, clock: FakeClock) -> None:
     ws = tmp_path / "w"
     spec = make_spec(ws, deadline_unix=clock.wall + 6 * HOUR)
-    clock.files = [spec.heartbeat_path]
-    spec.heartbeat_path.write_text("{}")
+    clock.files = [ws / "process.log"]  # the CLI keeps writing its output
     start = clock.mono
     runner = clocked_runner(tmp_path, clock, popen=lambda *a, **k: ClockedProcess(clock, start + 5 * HOUR))
     handle = await runner.launch(spec)
@@ -119,9 +126,9 @@ async def test_the_four_hour_cap_exists_for_an_unbounded_run(tmp_path: Path, clo
     """Control: the same reap loop with no deadline kills at the 4 hour cap, so the test above is meaningful."""
     ws = tmp_path / "w"
     ws.mkdir()
-    heartbeat = ws / "heartbeat.json"
-    heartbeat.write_text("{}")
-    clock.files = [heartbeat]
+    process_log = ws / "process.log"
+    process_log.write_text("")
+    clock.files = [process_log]
     proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"], start_new_session=True)
     try:
         dispatcher = ss.SpecialistSubprocessDispatcher(
@@ -147,8 +154,7 @@ async def test_session_is_killed_at_its_own_deadline_not_before_and_not_much_aft
 ) -> None:
     ws = tmp_path / "w"
     spec = make_spec(ws, deadline_unix=clock.wall + 6 * HOUR)
-    clock.files = [spec.heartbeat_path]
-    spec.heartbeat_path.write_text("{}")
+    clock.files = [ws / "process.log"]
     runner = clocked_runner(tmp_path, clock)
     start = clock.mono
     handle = await runner.launch(spec)
@@ -401,23 +407,30 @@ async def stop_and_collect(runner, handle) -> None:
     await runner.collect(handle)
 
 
-async def test_a_session_blocked_in_a_long_mcp_call_is_not_lost(tmp_path: Path, clock: FakeClock) -> None:
-    """The MCP service refreshes the session's heartbeat while a call made with its token is in flight."""
+async def test_an_mcp_call_in_flight_keeps_poll_running_but_not_a_silent_cli_past_the_reaper(
+    tmp_path: Path, clock: FakeClock
+) -> None:
+    """The MCP service's beat feeds ``poll``; the reaper reads only the CLI's own output and the tool it waits on.
+
+    A CLI cannot stay silent in one MCP call for a whole window: Claude Code aborts an HTTP MCP request after 60 s.
+    """
     beats: list = []
     spec = make_spec(tmp_path / "w", deadline_unix=clock.wall + 6 * HOUR, heartbeat_sink=beats.append)
-    spec.heartbeat_path.write_text("{}")
     clock.keep_alive = False
     runner = clocked_runner(tmp_path, clock)
     handle = await runner.launch(spec)
     assert len(beats) == 1  # the sink got the session's beat at launch
     start = clock.mono
     clock.on_tick.append(beats[0])  # the call is in flight: the service beats every tick
-    await run_fake_time(clock, handle, 1000.0)
-    assert clock.mono - start >= 1000.0  # well past the 300 s window
+    await run_fake_time(clock, handle, LOST_AFTER_SEC + 100)
     status = await runner.poll(handle)
-    assert status.state == "running"
-    assert not handle.session.outcome  # the reap loop never judged it stale
-    await stop_and_collect(runner, handle)
+    assert status.state == "running"  # the log is quiet past the window, the beat is not
+    assert not handle.session.outcome
+    await run_fake_time(clock, handle, 1000.0)
+    assert handle.session.task.done() and handle.session.outcome["stale_heartbeat"]
+    assert clock.mono - start < 2 * LOST_AFTER_SEC + 30
+    assert (await runner.poll(handle)).state == "lost"
+    await runner.collect(handle)
 
 
 async def test_a_hung_session_with_no_call_in_flight_is_still_lost(tmp_path: Path, clock: FakeClock) -> None:
@@ -435,15 +448,20 @@ async def test_a_hung_session_with_no_call_in_flight_is_still_lost(tmp_path: Pat
 
 
 async def test_cpu_work_in_the_process_tree_keeps_a_long_shell_command_alive(tmp_path: Path, clock: FakeClock) -> None:
+    """A command the CLI started after its last output keeps the reaper off, and its CPU work keeps ``poll`` on."""
     proc_root = tmp_path / "proc"
-    spec = make_spec(tmp_path / "w", deadline_unix=clock.wall + 6 * HOUR)
-    spec.heartbeat_path.write_text("{}")
+    code = "import subprocess, time; subprocess.Popen(['sleep', '60']); time.sleep(60)"
+    spec = make_spec(tmp_path / "w", code=code, deadline_unix=clock.wall + 6 * HOUR)
     clock.keep_alive = False
     runner = clocked_runner(tmp_path, clock, proc_root=proc_root)
     handle = await runner.launch(spec)
+    until = real_time.time() + 20
+    while not descendants(handle.pid):  # blocking: virtual time must not pass before the command starts
+        assert real_time.time() < until, "the shell command never started"
+        real_time.sleep(0.02)
     ticks = {"n": 0}
 
-    def burn_cpu() -> None:  # a compiler child burning one CPU second per virtual second
+    def burn_cpu() -> None:  # the command burning one CPU second per virtual second, as the sampler sees it
         ticks["n"] += 5
         add_proc(proc_root, handle.pid, 1, rss_kb=1000, utime=ticks["n"] * 100, children=[])
 
