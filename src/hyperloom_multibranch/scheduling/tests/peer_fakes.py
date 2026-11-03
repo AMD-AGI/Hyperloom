@@ -3,8 +3,8 @@
 
 """Stand-ins for the peers a session runs on, the toolbox's own fake, and a virtual clock, for the tests.
 
-Each ``MbFake`` class stands in for another owner's module until it lands: the main-flow child of PRELUDE. The
-specialist lifecycle is the specialist runtime itself on scripted sessions (:class:`RecordedSessions`,
+The session's process registry holds the virtual clock while it kills (:class:`HeldRegistry`). The specialist
+lifecycle is the specialist runtime itself on scripted sessions (:class:`RecordedSessions`,
 :func:`specialist_runtime`). The toolbox is the toolbox module's
 :class:`~hyperloom_multibranch.toolbox.fake.FakeToolbox`, noise-free and noting what the scheduler asked of it; what a
 test measures follows from the recipe it measures (:func:`recipe_effect`). The regression set is scripted per base
@@ -22,7 +22,6 @@ import itertools
 import json
 import os
 import subprocess
-import sys
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from concurrent.futures import Future, InvalidStateError, ThreadPoolExecutor
@@ -70,7 +69,7 @@ from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.local_peers import GATE_WRITER
 from hyperloom_multibranch.contracts.llm import CompletionReply
-from hyperloom_multibranch.scheduling.processes import ProcessRegistry, RegisteredProcess
+from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.specialist.dossier_pass import DossierOutcome, DossierPass, DossierStart
 from hyperloom_multibranch.specialist.judging import Judging
 from hyperloom_multibranch.specialist.map_session import MapCalls, MapSession
@@ -80,7 +79,6 @@ from hyperloom_multibranch.toolbox.fake import FakeToolbox, FakeWiring
 from hyperloom_multibranch.toolbox.fake_model import DEFAULT_BASELINE, FakeToolboxConfig, NoiseModel
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 
-LAUNCH_FLAG = "--launch-info-file"
 BASELINE_VALUE = DEFAULT_BASELINE[GRADED_OUTPUT]
 #: The digest of the image the tests' recipes are based on.
 BASE_IMAGE_DIGEST = "sha256:" + "b" * 64
@@ -90,17 +88,6 @@ TAG_FLAG = "--mb-tag-"
 #: Loop turns and real seconds the virtual clock lets pass before it decides the loop is quiet and jumps.
 SETTLE_YIELDS = 20
 SETTLE_REAL_SECONDS = 0.0005
-#: Writes the launch info naming argv[2] (when set), lingers argv[4] seconds with a grandchild, exits with argv[3].
-CHILD_SCRIPT = """
-import json, subprocess, sys, time
-launch, session, code, linger = sys.argv[1:5]
-if session:
-    open(launch, "w").write(json.dumps({"session_dir": session}))
-if float(linger):
-    subprocess.Popen(["sleep", linger])
-    time.sleep(float(linger))
-sys.exit(int(code))
-"""
 
 #: What a test's specialist does on its branch before it proposes its script.
 SessionStep = Callable[[str], Awaitable[None]]
@@ -308,59 +295,12 @@ def measure_no_throughput(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(rulegate_rules, "inferencex_reading", zeroed)
 
 
-class MbFakeChildRegistry(ProcessRegistry):
-    """Runs a short script in place of the main-flow child of PRELUDE; every other process is spawned as asked.
+class HeldRegistry(ProcessRegistry):
+    """The session's process registry on a :class:`VirtualClock`: every kill holds the clock for the call."""
 
-    Stands in for the ``hyperloom optimize`` child; deleted once the skeleton runs PRELUDE on a hosted main flow.
-    """
-
-    def __init__(self, pids_file: Path, clock: Clock, *, session: str, exit_code: int, linger: float) -> None:
-        super().__init__(pids_file, clock)
-        self._script_args = (session, str(exit_code), str(linger))
-        self.argv: tuple[str, ...] = ()
-        self.env: Mapping[str, str] | None = None
-        self.child: RegisteredProcess | None = None
-
-    async def spawn(
-        self, argv: Sequence[str], *, branch: str, log: Path, env: Mapping[str, str] | None = None
-    ) -> RegisteredProcess:
-        if LAUNCH_FLAG not in argv:
-            return await super().spawn(argv, branch=branch, log=log, env=env)
-        self.argv, self.env = tuple(argv), env
-        launch = argv[argv.index(LAUNCH_FLAG) + 1]
-        script = (sys.executable, "-c", CHILD_SCRIPT, launch, *self._script_args)
-        self.child = await super().spawn(script, branch=branch, log=log, env=env)
-        return self.child
-
-    def child_exited(self) -> bool:
-        """Whether the PRELUDE child was started and has exited."""
-
-        return self.child is not None and self.child.process.returncode is not None
-
-
-class MbFakeHeldRegistry(MbFakeChildRegistry):
-    """The PRELUDE child stand-in on a :class:`VirtualClock`: process work holds the clock while it runs.
-
-    The PRELUDE child holds it until it exits; every other spawn and every kill holds it for the call alone.
-    Deleted together with :class:`MbFakeChildRegistry`.
-    """
-
-    def __init__(
-        self, pids_file: Path, time: VirtualClock, *, session: str, exit_code: int, linger: float = 0.0
-    ) -> None:
-        super().__init__(pids_file, time.clock, session=session, exit_code=exit_code, linger=linger)
+    def __init__(self, pids_file: Path, time: VirtualClock) -> None:
+        super().__init__(pids_file, time.clock)
         self._time = time
-        self._watchers: list[asyncio.Task[None]] = []
-
-    async def spawn(
-        self, argv: Sequence[str], *, branch: str, log: Path, env: Mapping[str, str] | None = None
-    ) -> RegisteredProcess:
-        async with self._time.held():
-            spawned = await super().spawn(argv, branch=branch, log=log, env=env)
-        if LAUNCH_FLAG in argv:
-            self._time.hold()
-            self._watchers.append(asyncio.ensure_future(self._release_on_exit(spawned)))
-        return spawned
 
     async def kill_branch(self, branch: str) -> bool:
         async with self._time.held():
@@ -369,12 +309,6 @@ class MbFakeHeldRegistry(MbFakeChildRegistry):
     async def kill_all(self) -> bool:
         async with self._time.held():
             return await super().kill_all()
-
-    async def _release_on_exit(self, spawned: RegisteredProcess) -> None:
-        try:
-            await spawned.process.wait()
-        finally:
-            self._time.release()
 
 
 #: Real seconds the specialist runtime of the tests and its scripted sessions wait between two reads of the blackboard.
@@ -608,16 +542,6 @@ def recipe_effect(repo: Path, curves: Curves) -> Callable[[TestRequest], float]:
     return effect
 
 
-@dataclass(frozen=True)
-class RootProfileCall:
-    """The arguments of one ``analyze_root_profile`` call."""
-
-    commit_id: str
-    trace_dir: Path
-    point_config: Path
-    source_id: str
-
-
 class RecordingToolbox(FakeToolbox):
     """The toolbox module's fake, without noise, noting every queue policy, withdrawal and close it was given.
 
@@ -629,10 +553,7 @@ class RecordingToolbox(FakeToolbox):
     session directory, so a second toolbox over that directory hands out request ids where the first one left off;
     without one it goes with the toolbox. ``repo`` is the bench's experiment repository, which acceptance reads each
     parent's recipe from as the real toolbox does, so a delta onto a head that already pins a component is accepted
-    without naming its upstream again. ``root_profiles`` holds every :meth:`analyze_root_profile` call, which
-    raises ``refusal`` when one is set, and ``prelude_baselines`` every run directory :meth:`read_prelude_baseline`
-    read. Not a placeholder: the fake is the toolbox owner's own, which has no
-    ``analyze_root_profile`` of its own yet.
+    without naming its upstream again.
     """
 
     def __init__(
@@ -661,25 +582,12 @@ class RecordingToolbox(FakeToolbox):
         self.withdrawals: list[str] = []
         self.queue_reads = 0
         self.closed = 0
-        self.root_profiles: list[RootProfileCall] = []
-        self.refusal: RequestRejected | None = None
-        self.prelude_baselines: list[Path] = []
 
     async def start(self) -> None:
         """Starts once: the fake also starts itself on its first use, which may come after the session's start."""
         if not self.serving:
             self.serving = True
             await super().start()
-
-    async def analyze_root_profile(self, commit_id: str, trace_dir: Path, point_config: Path, *, source_id: str) -> str:
-        if self.refusal is not None:
-            raise self.refusal
-        self.root_profiles.append(RootProfileCall(commit_id, trace_dir, point_config, source_id))
-        return f"prelude:{source_id}"
-
-    async def read_prelude_baseline(self, run_dir: Path, point_config: Path, *, request_id: str) -> TestResult:
-        self.prelude_baselines.append(run_dir)
-        return await super().read_prelude_baseline(run_dir, point_config, request_id=request_id)
 
     async def set_policy(self, policy: QueuePolicy) -> None:
         self.policies.append(policy)
@@ -903,8 +811,6 @@ __all__ = [
     "BASE_IMAGE_DIGEST",
     "BASELINE_VALUE",
     "GATE_POLL_SECONDS",
-    "CHILD_SCRIPT",
-    "LAUNCH_FLAG",
     "MAIN_POINT",
     "TAG_FLAG",
     "TOOLBOX_DOWN",
@@ -913,8 +819,7 @@ __all__ = [
     "DownToolbox",
     "FakeRegressionCheck",
     "HeldGitRepo",
-    "MbFakeChildRegistry",
-    "MbFakeHeldRegistry",
+    "HeldRegistry",
     "NoForks",
     "OneChampionKB",
     "RecordedReservations",

@@ -120,12 +120,9 @@ def gave_up_reason(status: SpecialistStatus) -> str:
 
 @dataclass(frozen=True)
 class ExploreWindow:
-    """The commit every gain is measured against, the commit the first branches start from, the roofline ceiling, the
-    clock times EXPLORE and the budget end at, the session's whole budget, the GPU seconds the session's tests and
+    """The commit every gain is measured against, the commit the first branches start from, the clock times EXPLORE and the budget end at, the session's whole budget, the GPU seconds the session's tests and
     leases may use before EXPLORE ends and the dollars the session's recorded LLM calls may cost (``math.inf`` for no
-    limit, for either), the upper bound of the GPU seconds the PRELUDE child used outside a lease, which no limit
-    counts (0 where it ran on leased cards, whose card time the integration branch's progress holds), the
-    directions the user wrote, one user branch each, the agents the user named, one agent branch each, and in the same
+    limit, for either), the directions the user wrote, one user branch each, the agents the user named, one agent branch each, and in the same
     order each agent's share of the session's directions (:func:`~.agent_plans.agent_plans`; ``""`` for none), and
     the Arbor agents whose directions one mapping branch maps in EXPLORE before each runs its share (empty for none).
 
@@ -135,13 +132,11 @@ class ExploreWindow:
 
     root_commit: str
     start_commit: str
-    roofline_ceiling: Mapping[str, float]
     explore_end: float
     session_deadline: float
     budget_seconds: float
     explore_gpu_seconds: float
     max_llm_usd: float
-    prelude_gpu_seconds_upper_bound: float
     user_directions: tuple[str, ...]
     agents: tuple[str, ...]
     agent_plans: tuple[str, ...] = ()
@@ -358,7 +353,6 @@ class Explorer:
             roster=self._roster.entries(),
             progress=progress,
             integration_value=integration_value,
-            roofline_ceiling=window.roofline_ceiling,
             metric=self._metric,
             opening=opening,
             free_slots=self._roster.free_slots(),
@@ -372,7 +366,6 @@ class Explorer:
             profile_running=self._events.profiling,
             gpu_hours_used=spent_gpu_seconds(progress) / MB_SECONDS_PER_HOUR,
             explore_gpu_hours=_hours_or_none(window.explore_gpu_seconds),
-            prelude_gpu_hours_upper_bound=window.prelude_gpu_seconds_upper_bound / MB_SECONDS_PER_HOUR,
             specialist_llm_usd=sum(row.llm_usd for row in progress),
             max_llm_usd=None if window.max_llm_usd == math.inf else window.max_llm_usd,
             scheduler_llm_usd=priced_usd(record.usage for record in snapshot.llm_usage if not record.usage.branch),

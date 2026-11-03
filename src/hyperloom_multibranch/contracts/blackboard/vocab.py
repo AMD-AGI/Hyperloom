@@ -171,7 +171,8 @@ class QuarantineAction(str, Enum):
 
 class LeaseKind(str, Enum):
     """What holds a lease's cards outside the tests: an autonomous branch, a dev sandbox, a tool's job, which names its
-    tool, or PRELUDE's single-lineage child, whose lease the integration branch is charged."""
+    tool, or a single-lineage holder whose lease the integration branch is charged: the dossier pass, and the PRELUDE
+    child of a session that ran one, whose value records keep."""
 
     AUTONOMOUS = "autonomous"
     DEV = "dev"

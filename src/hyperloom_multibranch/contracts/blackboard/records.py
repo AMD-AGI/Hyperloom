@@ -222,9 +222,10 @@ class LineageEvent:
 class BaselineRecord:
     """The PRELUDE baseline the rule gate measured, per metric; every recorded value is anchored to it.
 
-    ``request_ids`` are the root tests it anchored on. A baseline read from the PRELUDE child's own run has none:
-    ``source`` names that run instead, and ``wall_seconds`` is how long it took. A record an older session wrote with
-    a ``short_prompt_floor`` reads as one without it.
+    ``request_ids`` are the root tests it anchored on. An AgentX session that ran a PRELUDE child anchored on that
+    child's own run instead, with no root test: its record's ``source`` names the run and ``wall_seconds`` is how long
+    it took. Nothing writes either any more; they are read back from those sessions' blackboards. A record an older
+    session wrote with a ``short_prompt_floor`` reads as one without it.
     """
 
     root_commit: str
@@ -759,7 +760,8 @@ class SessionProfile:
     """What a session optimizes: its serving identity and workload, as PRELUDE fixed them.
 
     The serving identity is the seven dimensions of a Recipe KB canonical id. A workload without ``isl`` and ``osl`` is
-    an AgentX trace replay. ``roofline_ceiling`` is the bound PRELUDE's roofline analysis puts on each metric.
+    an AgentX trace replay. ``roofline_ceiling`` is the bound the roofline analysis of a PRELUDE child put on each metric;
+    nothing writes it any more, it is read back from the sessions that ran one.
     """
 
     session_id: str

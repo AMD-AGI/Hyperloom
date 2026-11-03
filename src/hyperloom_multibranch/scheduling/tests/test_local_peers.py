@@ -26,8 +26,6 @@ import yaml
 from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV, benchmark_config_path, is_magpie_agentx
 from hyperloom.contracts.measurement import AttachmentRef, Purpose, TestKind, TestRequest
 from hyperloom.inference_optimizer import inferencex_checkout
-from hyperloom.inference_optimizer.cli.benchmark_config import configure_benchmark
-from hyperloom.inference_optimizer.cli.parser import _build_parser
 from hyperloom.contracts.recipe import Recipe, RecipeDelta
 from hyperloom_common.env import forge_explicitly_enabled
 from hyperloom.common.perf_metric import agentx_enabled
@@ -84,7 +82,6 @@ from hyperloom_multibranch.scheduling.local_peers import (
     _specialist_role,
 )
 from hyperloom_multibranch.scheduling.peers import Peers, PeerSetup, PeersUnavailable
-from hyperloom_multibranch.scheduling.prelude import prelude_argv
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.roster import Roster, RosterCaps
 from hyperloom_multibranch.scheduling.settings import AGENT_PORT, InferenceXShape, KernelOptimizer, Workload
@@ -175,7 +172,7 @@ def test_an_mi350x_is_measured_on_mi355x_scripts_and_named_as_itself(monkeypatch
     assert (environment["GPU_TYPE"], environment["TARGET_GPU_TYPE"]) == ("mi355x", "mi350x")
 
 
-def test_an_agentx_workload_reaches_the_renderer_and_the_prelude_child_as_agentx_without_sequence_lengths(
+def test_an_agentx_workload_reaches_the_renderer_as_agentx_without_sequence_lengths(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("HL_MODEL_BASE", raising=False)
@@ -509,7 +506,7 @@ async def built(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterato
         yield peers
 
 
-async def test_an_agentx_session_measures_the_agentx_benchmark_its_prelude_child_is_bound_to(
+async def test_an_agentx_session_measures_the_agentx_benchmark_it_writes_for_its_workload(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     (tmp_path / "models" / "Llama-3-8B").mkdir(parents=True)
@@ -539,17 +536,6 @@ async def test_an_agentx_session_measures_the_agentx_benchmark_its_prelude_child
             str(tmp_path / "models" / "Llama-3-8B"),
         )
         assert (str(canonical["envs"]["TP"]), str(canonical["envs"]["CONC"])) == (str(workload.tp), str(workload.conc))
-        argv = prelude_argv(workload, 1.0, built.layout.prelude_launch)
-        args = _build_parser().parse_args(list(argv[argv.index("optimize") :]))
-        configure_benchmark(args)
-        assert (args.model, args.framework, args.tp, args.ep, args.conc, args.precision) == (
-            workload.model,
-            workload.framework,
-            workload.tp,
-            1,
-            workload.conc,
-            workload.precision,
-        )
 
 
 async def test_an_agentx_session_on_a_model_directory_serves_it_at_its_ep_in_the_sessions_image(
@@ -564,10 +550,6 @@ async def test_an_agentx_session_on_a_model_directory_serves_it_at_its_ep_in_the
         benchmark = yaml.safe_load((built.layout.toolbox / "benchmark.yaml").read_text())["benchmark"]
         assert (benchmark["docker_image"], benchmark["envs"]["EP_SIZE"]) == (IMAGE.ref, 8)
         assert benchmark["envs"]["MODEL_PATH"] == str(model)
-        argv = prelude_argv(workload, 1.0, built.layout.prelude_launch)
-        args = _build_parser().parse_args(list(argv[argv.index("optimize") :]))
-        configure_benchmark(args)
-        assert (str(args.model), args.ep, args.docker_image) == (str(model), 8, IMAGE.ref)
 
 
 def _options_given(monkeypatch: pytest.MonkeyPatch, module: object, builder: str) -> list[object]:

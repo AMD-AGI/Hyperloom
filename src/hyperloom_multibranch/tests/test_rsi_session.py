@@ -72,7 +72,6 @@ from hyperloom_multibranch.scheduling.judge_prompt import (
 from hyperloom_multibranch.scheduling.lifecycle import JUDGE_PROMPT_KEY
 from hyperloom_multibranch.scheduling.manifest import read_manifest
 from hyperloom_multibranch.scheduling.settings import PlaybookMode
-from hyperloom_multibranch.scheduling.tests.child_sessions import child_with_patch
 from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     MAIN_POINT,
     VIRTUAL_POLL_SECONDS,
@@ -80,29 +79,34 @@ from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     SessionStep,
     tagged,
 )
-from hyperloom_multibranch.tests.test_reuse_prelude import WORKLOAD_ARGS
 from hyperloom_multibranch.tests.test_skeleton import (
     CONC,
     CURVES,
     EXPLORED,
     SETTINGS,
+    WORKLOAD,
     Stage,
     _decisions,
     _judge_prompts,
     _judge_state,
     _stage,
-    child_framework,
+    framework,
 )
 
-#: ``child_framework`` is test_skeleton's autouse fixture, imported so that it applies here too: each session's PRELUDE
-#: child roots on the framework checkout it was built on, as the root the session commits before it starts does.
-__all__ = ["child_framework"]
+#: ``framework`` is test_skeleton's autouse fixture, imported so that it applies here too: each session roots on the
+#: framework checkout it makes.
+__all__ = ["framework"]
 
 #: Changes that measure the root's value, so a branch testing them commits nothing.
 FLAT = tuple(tagged(f"flat{n}") for n in range(9))
 #: A change that gains 0.45%: over half the 0.6% bar the noiseless baseline sets, under the bar, so a near miss.
 NEAR = tagged("near")
 NEAR_CURVES = {**EXPLORED, frozenset({"near"}): {MAIN_POINT: 1004.5, CONC: 1004.5}}
+#: :data:`~hyperloom_multibranch.tests.test_skeleton.WORKLOAD` as the command line spells it.
+WORKLOAD_ARGS = [
+    "--model", WORKLOAD.model, "--framework", "sglang", "--tp", "1", "--isl", "1024", "--osl", "1024",
+    "--conc", "16", "--precision", "bf16", "--workload", "inferencex", "--gpu-type", "mi355x",
+]  # fmt: skip
 #: The settings :data:`~hyperloom_multibranch.tests.test_skeleton.SETTINGS` holds, as the command line spells them.
 SESSION_ARGS = [
     "--max-hours", "0.5", "--max-branches", "3", "--max-k-per-branch", "2", "--max-parallel-tests", "8",
@@ -217,7 +221,7 @@ async def test_a_session_with_an_archive_plays_its_champion_stops_a_stalled_bran
     archive = _archive(tmp_path, monkeypatch)
     numbers = replaced(H0, stall_tests=4, grace_tests=3, probation_share=0.0).numbers
     _crowned(archive, Playbook("stall-4", numbers, parent=H0.label))
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.judge = PlaybookJudge()
     stage.scripts = {"b01": (tagged("c1"),), "b02": FLAT[:6]}
 
@@ -262,7 +266,7 @@ async def test_a_branch_drawn_for_probation_runs_its_probation_tests_through_a_s
     archive = _archive(tmp_path, monkeypatch)
     numbers = replaced(H0, stall_tests=4, grace_tests=3, probation_share=1.0, probation_tests=4).numbers
     _crowned(archive, Playbook("always-drawn", numbers, parent=H0.label))
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.settings = replace(SETTINGS, judge_interval_seconds=300.0)
     stage.judge = PlaybookJudge(insist=frozenset({"b02"}))
     stage.scripts = {"b01": (tagged("c1"),), "b02": FLAT[:5]}
@@ -295,7 +299,7 @@ async def test_a_challenger_the_command_line_asks_for_plays_until_its_judge_brea
     settings = cli.settings_from(
         cli.build_parser().parse_args(["run", *WORKLOAD_ARGS, *SESSION_ARGS, "--playbook", "challenger"])
     )
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.settings = settings
     stage.explored = NEAR_CURVES
     stage.judge = PlaybookJudge(insist=frozenset({"b02"}))
@@ -338,7 +342,7 @@ async def test_a_session_the_command_line_names_no_playbook_for_plays_the_one_on
         return drawn
 
     monkeypatch.setattr(lifecycle, "drawn_challenger", draw)
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.judge = PlaybookJudge()
     stage.scripts = {"b01": (tagged("c1"),), "b02": FLAT[:6]}
 
@@ -360,7 +364,7 @@ async def test_a_session_that_plays_no_playbook_runs_as_one_without_the_rsi(
         archive = _archive(tmp_path, monkeypatch)
         monkeypatch.setenv(WRITE_ONLY_ENV, "1")
         _crowned(archive, Playbook("stall-4", replaced(H0, stall_tests=4).numbers, parent=H0.label))
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.explored = NEAR_CURVES
     stage.judge = PlaybookJudge(insist=frozenset({"b02"}))
     stage.scripts = {"b01": (tagged("c1"),), "b02": (*FLAT[:4], NEAR)}
@@ -402,7 +406,7 @@ async def test_the_playbook_s_grace_holds_a_stalled_branch_against_the_judge_s_s
     archive = _archive(tmp_path, monkeypatch)
     numbers = replaced(H0, stall_tests=4, grace_tests=8, probation_share=0.0).numbers
     _crowned(archive, Playbook("patient-grace", numbers, parent=H0.label))
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.judge = PlaybookJudge(insist=frozenset({"b02"}))
     stage.scripts = {"b01": (tagged("c1"),), "b02": FLAT[:6]}
 
@@ -432,7 +436,7 @@ async def test_a_branch_behind_integration_is_no_stop_candidate_while_its_commit
     archive = _archive(tmp_path, monkeypatch)
     numbers = replaced(H0, stall_tests=4, grace_tests=3, probation_share=0.0).numbers
     _crowned(archive, Playbook("stall-4", numbers, parent=H0.label))
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     # d1 merges onto the root and onto c1; e1 gains on its branch and stacks on nothing. A merge test's confirm reads
     # the explored curves, so the merged recipes are in both.
     merges = {frozenset({"d1"}): _point(1010.0), frozenset({"c1", "d1"}): _point(1050.0)}
@@ -463,7 +467,7 @@ async def test_with_too_little_of_explore_left_for_a_first_commit_every_refill_t
 ) -> None:
     archive = _archive(tmp_path, monkeypatch)
     _crowned(archive, Playbook("open-early", replaced(H0, last_open_minutes=240.0).numbers, parent=H0.label))
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage = _stage(tmp_path)
     stage.judge = PlaybookJudge(refill=1)
     stage.scripts = {"b01": (tagged("c1"),), "b02": FLAT[:2]}
 
