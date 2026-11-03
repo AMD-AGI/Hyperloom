@@ -110,8 +110,13 @@ class TestTheSeedSourcesThatStandInForAGrid:
         assert runnable_grid_variants({}, coord.shared_state)
         assert _admission(coord, {}) is None
 
-    def test_the_framework_the_params_name_answers_before_the_session_s(self, coord: Coordinator):
-        assert _admission(coord, {"framework": "atom"}) is None
+    def test_the_session_s_framework_answers_and_the_one_the_params_name_does_not(self, coord: Coordinator):
+        """The round seeds from the framework the session materializes, so the gate judges that one."""
+        assert runnable_grid_variants({"framework": "atom"}, coord.shared_state) == []
+        denied = _admission(coord, {"framework": "atom"})
+
+        assert denied is not None and denied.rule == EXPLORE_GRID_MISSING
+        assert _SEEDLESS_FRAMEWORK in str(denied)
 
     @pytest.mark.parametrize(
         "rows", [["tp8", "tp4"], [{"extra_server_args": "--tp 8"}]], ids=["strings", "nameless_dict"]

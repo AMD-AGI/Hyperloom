@@ -44,7 +44,8 @@ def explore_grid_denial(
         return None
     rows = (params or {}).get("grid")
     sent = rows if isinstance(rows, list) else []
-    framework = str((params or {}).get("framework") or getattr(shared_state, "framework", "") or "") or "?"
+    # The framework the round will materialize and seed from, as ``runnable_grid_variants`` reads it.
+    framework = str(getattr(shared_state, "framework", "") or "") or "?"
     detail = (
         f"params.grid holds {len(sent)} row(s) but no variant dict with a name, and a grid that was sent "
         "is never replaced by a default one"

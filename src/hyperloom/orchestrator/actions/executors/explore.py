@@ -726,11 +726,13 @@ def runnable_grid_variants(params: Mapping[str, Any] | None, shared_state: Any) 
 
     Admission asks this before spending a dispatch on a round that would refuse itself. The round
     reads its framework back from the materialized YAML, which a proposal has not got yet, so the
-    session's framework answers for it; the config-pinned-env filter that follows in the round needs
-    that YAML, so the variants it drops stay the round's to report.
+    session's framework answers for it; a ``framework`` in ``params`` is not consulted, since the
+    round never seeds its grid from one and the gate would otherwise judge a grid the round will not
+    run. The config-pinned-env filter that follows in the round needs that YAML, so the variants it
+    drops stay the round's to report.
     """
     p = dict(params or {})
-    framework = str(p.get("framework") or getattr(shared_state, "framework", "") or "")
+    framework = str(getattr(shared_state, "framework", "") or "")
     payload, _ = _resolved_grid_payload(p, shared_state=shared_state, framework=framework)
     return _grid_variants_from_payload(payload)
 
