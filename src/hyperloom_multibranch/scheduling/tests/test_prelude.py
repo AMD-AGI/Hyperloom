@@ -29,6 +29,7 @@ from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.knowledge.warm_start import (
     LAUNCH_ONLY_REASON,
+    ChampionOutcome,
     PreparedReplay,
     RecipeDownloader,
     ReplayRefusal,
@@ -204,10 +205,10 @@ def _prelude(
     async def open_integration(root: str) -> None:
         peers.opened.append(root)
 
-    async def replay_champion(champion: PreparedReplay, root: str, anchored: Awaitable[object]) -> str:
+    async def replay_champion(champion: PreparedReplay, root: str, anchored: Awaitable[object]) -> ChampionOutcome:
         peers.replays.append((champion.canonical_id, _established(layout)))
         await asyncio.shield(anchored)
-        return root
+        return ChampionOutcome(root, True)
 
     profiler = IntegrationProfiler(
         peers.toolbox, peers.tests, _blackboard(layout), Clock(now=clock.now, sleep=_instant)
@@ -382,6 +383,38 @@ async def test_the_recipe_kb_champions_for_the_profile_become_warm_start_leads_p
     assert lead.replay.launch.server_args == "--enable-expert-parallel"
     assert [canonical_id for canonical_id, _ in peers.replays] == [lead.canonical_id]
     assert _warm_start_decision(layout) == {"leads": [lead.describe()], "unread": ""}
+
+
+async def test_a_champion_whose_root_replay_never_ran_stays_a_lead_saying_why_without_its_replay(
+    tmp_path: Path,
+) -> None:
+    failed = "the replay did not measure: HIPBLAS_STATUS_INTERNAL_ERROR"
+
+    def replaying(outcome: ChampionOutcome) -> ReplayChampion:
+        async def replay(champion: PreparedReplay, root: str, anchored: Awaitable[object]) -> ChampionOutcome:
+            await asyncio.shield(anchored)
+            return replace(outcome, start_commit=root)
+
+        return replay
+
+    unmeasured = _layout(tmp_path / "unmeasured")
+    flat = _layout(tmp_path / "flat")
+    never = await _run(
+        _prelude(
+            unmeasured, _peers(unmeasured), OneChampionKB(), replaying(ChampionOutcome("", False, failed, ran=False))
+        )
+    )
+    fell_short = await _run(
+        _prelude(flat, _peers(flat), OneChampionKB(), replaying(ChampionOutcome("", False, "regressed")))
+    )
+
+    [lead], [kept] = never.warm_leads, fell_short.warm_leads
+    assert (lead.replay, lead.replay_failed, never.start_commit) == (None, failed, never.root_commit)
+    assert lead.describe().endswith(
+        f"its whole replay did not run on this session's root ({failed}): "
+        "take its changes one at a time, not its whole recipe"
+    )
+    assert kept.replay is not None and kept.replay_failed == ""
 
 
 async def test_a_replay_acceptance_refuses_on_the_root_stays_a_lead_named_not_replayable(tmp_path: Path) -> None:
@@ -616,10 +649,10 @@ def _measuring_replay(
     once the test has ended, then ``("judged", baseline established)`` or ``("cancelled", baseline established)``;
     ``failure`` is raised in place of the judgement."""
 
-    async def replay(champion: PreparedReplay, root: str, anchored: Awaitable[object]) -> str:
+    async def replay(champion: PreparedReplay, root: str, anchored: Awaitable[object]) -> ChampionOutcome:
         peers.replays.append((champion.canonical_id, _established(layout)))
 
-        async def judge(request_id: str) -> str:
+        async def judge(request_id: str) -> ChampionOutcome:
             await peers.toolbox.outcome(request_id)
             events.append(("measured", _established(layout)))
             if failure is not None:
@@ -630,7 +663,7 @@ def _measuring_replay(
                 events.append(("cancelled", _established(layout)))
                 raise
             events.append(("judged", _established(layout)))
-            return root
+            return ChampionOutcome(root, True)
 
         return await peers.tests.judged(integration_test_request(TestKind.TEST, Purpose.INTEGRATION, root), judge)
 

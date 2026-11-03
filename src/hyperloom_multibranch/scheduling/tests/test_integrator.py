@@ -331,7 +331,7 @@ async def test_a_champion_that_improves_on_the_root_is_where_explore_opens(bench
     opened = await bench.integrator.replay_champion(CHAMPION, bench.root, _anchored())
 
     head = await bench.repo.head(INTEGRATION_BRANCH)
-    assert opened == head != bench.root
+    assert opened.start_commit == head != bench.root and opened.kept
     [request_id], [test] = bench.merge_tests(), bench.merge_tests().values()
     assert (test.kind, test.branch_id, test.parent_commit) == (TestKind.TEST, INTEGRATION_BRANCH, bench.root)
     replayed = await bench.repo.read_recipe(head)
@@ -387,7 +387,7 @@ async def test_a_champion_and_its_confirm_are_submitted_at_once_and_judged_once_
     assert retest.retest_of == request_id and retest.delta == bench.merge_tests()[request_id].delta
     assert not replaying.done() and await bench.repo.head(INTEGRATION_BRANCH) == bench.root
     anchored.set_result(None)
-    assert await replaying == await bench.repo.head(INTEGRATION_BRANCH) != bench.root
+    assert (await replaying).start_commit == await bench.repo.head(INTEGRATION_BRANCH) != bench.root
     record = await bench.handle(Role.OBSERVER).record(request_id)
     assert record.judgement is not None and record.judgement.request_ids == (request_id, confirm)
     assert list(_confirms(bench)) == [confirm] and bench.toolbox.withdrawn == {}
@@ -399,7 +399,7 @@ async def test_a_flat_champion_takes_its_confirm_back_at_once(tmp_path: Path, mo
 
     opened = await bench.integrator.replay_champion(CHAMPION, bench.root, _anchored())
 
-    assert opened == bench.root
+    assert (opened.start_commit, opened.kept, opened.ran) == (bench.root, False, True)
     [request_id], [confirm] = bench.merge_tests(), _confirms(bench)
     record = await bench.handle(Role.OBSERVER).record(request_id)
     assert record.judgement is not None and record.judgement.request_ids == (request_id,)
@@ -412,12 +412,13 @@ async def test_a_champion_that_does_not_measure_takes_its_confirm_back(
     _hold_confirms(bench, monkeypatch)
     bench.toolbox.script(lambda test: test.purpose is Purpose.INTEGRATION, [Fate.MEASUREMENT])
 
-    assert await bench.integrator.replay_champion(CHAMPION, bench.root, _anchored()) == bench.root
+    opened = await bench.integrator.replay_champion(CHAMPION, bench.root, _anchored())
 
+    assert (opened.start_commit, opened.kept, opened.ran) == (bench.root, False, False)
     [confirm] = _confirms(bench)
     assert list(bench.toolbox.withdrawn) == [confirm]
     [logged] = bench.logged()
-    assert str(logged["reason"]).startswith("the replay did not measure")
+    assert str(logged["reason"]).startswith("the replay did not measure") and opened.reason == logged["reason"]
 
 
 async def test_a_champion_that_does_not_improve_leaves_explore_on_the_root(tmp_path: Path) -> None:
@@ -425,7 +426,7 @@ async def test_a_champion_that_does_not_improve_leaves_explore_on_the_root(tmp_p
 
     opened = await bench.integrator.replay_champion(CHAMPION, bench.root, _anchored())
 
-    assert opened == bench.root == await bench.repo.head(INTEGRATION_BRANCH)
+    assert opened.start_commit == bench.root == await bench.repo.head(INTEGRATION_BRANCH) and not opened.kept
     [request_id] = bench.merge_tests()
     record = await bench.handle(Role.OBSERVER).record(request_id)
     assert (record.conclusion, record.commit_id) == (Conclusion.NOT_STACKABLE, None)
@@ -441,7 +442,8 @@ async def test_a_champion_the_toolbox_refuses_leaves_explore_on_the_root(bench: 
 
     opened = await bench.integrator.replay_champion(CHAMPION, bench.root, _anchored())
 
-    assert opened == bench.root == await bench.repo.head(INTEGRATION_BRANCH) and not _confirms(bench)
+    assert opened.start_commit == bench.root == await bench.repo.head(INTEGRATION_BRANCH) and not _confirms(bench)
+    assert not (opened.kept or opened.ran)
     [logged] = bench.logged()
     assert logged["reason"] == f"the toolbox refused the replay: {REFUSAL}"
     assert logged["detail"] == {
@@ -457,7 +459,7 @@ async def test_a_champion_the_root_carries_already_is_never_tested(bench: Bench)
         replace(CHAMPION, launch=ROOT_RECIPE.launch), bench.root, _anchored()
     )
 
-    assert opened == bench.root and not bench.merge_tests()
+    assert (opened.start_commit, opened.kept) == (bench.root, True) and not bench.merge_tests()
     [logged] = bench.logged()
     assert logged["reason"] == ALREADY_ON_HEAD
 
