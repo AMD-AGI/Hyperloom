@@ -20,7 +20,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, NamedTuple
+from typing import Any, Callable, NamedTuple, Protocol
 
 from hyperloom_common.env import env_flag
 from hyperloom.common.proctree import REAP_MARK_ENV, TERM_GRACE_SEC, collect_tree, kill_tree, marked_pids
@@ -28,9 +28,6 @@ from hyperloom.common.proctree import REAP_MARK_ENV, TERM_GRACE_SEC, collect_tre
 from .bypass_analysis import parse_server_log_throughput
 
 from ..cancel_channel import CancelScope, cancel_scope_listener
-
-if TYPE_CHECKING:
-    from ._agentx_checkpoint import AgentxCheckpoint, CheckpointJudge
 
 log = logging.getLogger(__name__)
 
@@ -872,7 +869,13 @@ class _RecorderFanout:
             raise first_error
 
 
-def _build_checkpoint_judge(server_log_path: str | None, checkpoint: AgentxCheckpoint | None) -> CheckpointJudge | None:
+class RoundCheckpoint(Protocol):
+    """A ruling made while the round runs, by a recorder it builds for the round's slot."""
+
+    def judge(self, slot: Path) -> Any: ...
+
+
+def _build_checkpoint_judge(server_log_path: str | None, checkpoint: RoundCheckpoint | None) -> Any:
     """The AgentX checkpoint judge for this round, or ``None`` when the round has no checkpoint."""
     if checkpoint is None or not server_log_path:
         return None
@@ -880,7 +883,7 @@ def _build_checkpoint_judge(server_log_path: str | None, checkpoint: AgentxCheck
 
 
 def _build_round_recorders(
-    server_log_path: str | None, env: dict[str, str] | None, checkpoint: AgentxCheckpoint | None = None
+    server_log_path: str | None, env: dict[str, str] | None, checkpoint: RoundCheckpoint | None = None
 ) -> _RecorderFanout:
     """KV metrics, measured-phase GPU power and the AgentX checkpoint for this round, behind one recorder surface."""
     from ._gpu_power import build_gpu_power_recorder
@@ -917,7 +920,7 @@ class RoundWatch:
     silence_timeout_sec: float | None = None
     server_already_ready: bool = False
     session_deadline_sec: float | None = None
-    checkpoint: AgentxCheckpoint | None = None
+    checkpoint: RoundCheckpoint | None = None
 
 
 def run_with_session_kill(
@@ -1165,6 +1168,7 @@ __all__ = [
     "EVAL_PROBE_UNPATCHABLE_RETURNCODE",
     "INFERENCEX_CHECKOUT_INVALID_RETURNCODE",
     "ORCHESTRATOR_CANCELLED_RETURNCODE",
+    "RoundCheckpoint",
     "RoundWatch",
     "SESSION_TIME_EXHAUSTED_RETURNCODE",
     "STOP_GATE_POLL_SECONDS",

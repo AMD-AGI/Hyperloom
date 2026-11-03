@@ -44,7 +44,8 @@ __all__ = [
 
 #: ``enforce`` (default) records the ruling and stops a trailing round, ``shadow`` only records it, ``off`` skips it.
 EARLY_STOP_ENV = "HYPERLOOM_AGENTX_EARLY_STOP"
-_MODES = ("enforce", "shadow", "off")
+_ENFORCE, _SHADOW, _OFF = "enforce", "shadow", "off"
+_MODES = (_ENFORCE, _SHADOW, _OFF)
 
 #: Written into the round's slot when the checkpoint rules.
 CHECKPOINT_ARTIFACT_NAME = "agentx_checkpoint.json"
@@ -92,13 +93,13 @@ class AgentxCheckpoint:
 
 def round_checkpoint(reference: Mapping[str, Any] | None, *, may_stop: bool) -> AgentxCheckpoint | None:
     """The checkpoint for a round graded against ``reference``; None when it is off or the reference has none."""
-    mode = env_str(EARLY_STOP_ENV).lower() or "enforce"
+    mode = env_str(EARLY_STOP_ENV).lower() or _ENFORCE
     if mode not in _MODES:
         raise EnvValueError(f"{EARLY_STOP_ENV}={mode!r} is not one of {', '.join(_MODES)}")
     reference_p50 = optional_positive_float((reference or {}).get(GRADED_INTVTY_P50_CHECKPOINT))
-    if mode == "off" or reference_p50 is None:
+    if mode == _OFF or reference_p50 is None:
         return None
-    return AgentxCheckpoint(reference_p50, enforce=may_stop and mode == "enforce")
+    return AgentxCheckpoint(reference_p50, enforce=may_stop and mode == _ENFORCE)
 
 
 def checkpoint_summary(ruling: Mapping[str, Any]) -> str:
