@@ -1,0 +1,47 @@
+# gray-parrot's counter sets for gfx950 (MI350X, MI355X), version 1, 2026-10-21.
+#
+# A set is one or more groups; each group must be collectable in one pass. The tool checks every
+# group when the run starts (rocprofiler_create_counter_config) and refuses counters for the run
+# if one does not fit. Per-block slots per pass on gfx950 (aqlprofile; the runner's
+# ruppell-accuracy/results/gray-parrot/survey): SQ 8, SPI 6, TCC 4, TCP 4, TA 2, TD 2, GRBM 2,
+# CPC 2, CPF 2. Each group also takes `common` (GRBM_GUI_ACTIVE: 1 of GRBM's 2 slots), for
+# time-normalized metrics.
+#
+# Names are the profiler SDK's (rocprofv3 -L on the image hy-model-w-10132026, SDK 1.3.2). The
+# derived metrics' formulas are in python/ruppell/gray_parrot/derived.py, not here: the raw values
+# are what is recorded.
+version: 1
+arch: gfx950
+verified: "groups proposed by slot arithmetic; checked on the device by plan 03's probe A8"
+slots: {SQ: 8, SPI: 6, TCC: 4, TCP: 4, TA: 2, TD: 2, GRBM: 2, CPC: 2, CPF: 2}
+common: [GRBM_GUI_ACTIVE]
+sets:
+  memory:
+    # FETCH_SIZE's three request sizes, and vL1D's accesses and misses
+    m1: [TCC_EA0_RDREQ_128B, TCC_EA0_RDREQ_64B, TCC_EA0_RDREQ_32B, TCP_TOTAL_CACHE_ACCESSES, TCP_CACHE_MISS]
+    # WRITE_SIZE's two, and L2 hits and misses
+    m2: [TCC_EA0_WRREQ, TCC_EA0_WRREQ_64B, TCC_HIT, TCC_MISS]
+    # HBM bytes, read and written
+    m3: [TCC_EA0_RDREQ_DRAM_32B, TCC_EA0_WRREQ_WRITE_DRAM_32B]
+  roofline:
+    # the eight MFMA precisions, and FETCH_SIZE's three
+    r1: [SQ_INSTS_VALU_MFMA_MOPS_F16, SQ_INSTS_VALU_MFMA_MOPS_BF16, SQ_INSTS_VALU_MFMA_MOPS_F32,
+         SQ_INSTS_VALU_MFMA_MOPS_F64, SQ_INSTS_VALU_MFMA_MOPS_I8, SQ_INSTS_VALU_MFMA_MOPS_F8,
+         SQ_INSTS_VALU_MFMA_MOPS_XF32, SQ_INSTS_VALU_MFMA_MOPS_F6F4,
+         TCC_EA0_RDREQ_128B, TCC_EA0_RDREQ_64B, TCC_EA0_RDREQ_32B]
+    # VALU FLOPs outside MFMA, and WRITE_SIZE's two
+    r2: [SQ_INSTS_VALU_FLOPS_FP16, SQ_INSTS_VALU_FLOPS_FP32, SQ_INSTS_VALU_FLOPS_FP64,
+         TCC_EA0_WRREQ, TCC_EA0_WRREQ_64B]
+  compute:
+    c1: [SQ_WAVES, SQ_INSTS_VALU, SQ_INSTS_SALU, SQ_INSTS_MFMA, SQ_INSTS_VMEM_RD, SQ_INSTS_VMEM_WR,
+         SQ_INSTS_LDS, SQ_ACTIVE_INST_VALU, GRBM_COUNT]
+    c2: [SQ_VALU_MFMA_BUSY_CYCLES, SQ_BUSY_CU_CYCLES, SQ_LDS_BANK_CONFLICT, SQ_LDS_IDX_ACTIVE,
+         SQ_WAIT_INST_ANY]
+  occupancy:
+    o1: [SQ_WAVE_CYCLES, SQ_LEVEL_WAVES, SQ_ACCUM_PREV_HIRES, SPI_RA_VGPR_SIMD_FULL_CSN,
+         SPI_RA_SGPR_SIMD_FULL_CSN, SPI_RA_LDS_CU_FULL_CSN, SPI_RA_WAVE_SIMD_FULL_CSN,
+         SPI_RA_BAR_CU_FULL_CSN, SPI_RA_TGLIM_CU_FULL_CSN]
+  # device activity over the run (GP4, RUPPELL_DEVICE_COUNTERS=activity@RATE): one group
+  activity:
+    a1: [SQ_WAVES, SQ_BUSY_CU_CYCLES, SQ_VALU_MFMA_BUSY_CYCLES, TCC_EA0_RDREQ_DRAM_32B,
+         TCC_EA0_WRREQ_WRITE_DRAM_32B, GRBM_COUNT]

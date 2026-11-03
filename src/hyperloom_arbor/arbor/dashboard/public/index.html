@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Arbor · campaign</title>
+<link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="dot" id="live-dot"></span>
+    <a class="back" id="back-link" href="/" hidden>← all campaigns</a>
+    <h1>Arbor · campaign</h1>
+    <span class="sub" id="identity">loading…</span>
+  </div>
+  <div class="meta">
+    <span id="phase-chip" class="chip">—</span>
+    <span id="freshness" class="muted">—</span>
+  </div>
+</header>
+
+<main>
+  <section id="banner-area"></section>
+
+  <section class="cards" id="kpis">
+    <div class="card"><div class="label">Baseline</div><div class="value" id="kpi-baseline">—</div><div class="foot" id="kpi-baseline-foot">—</div></div>
+    <div class="card"><div class="label">Best so far</div><div class="value" id="kpi-best">—</div><div class="foot" id="kpi-best-foot">—</div></div>
+    <div class="card" id="kpi-secondary-card" hidden><div class="label" id="kpi-secondary-label">Secondary</div><div class="value" id="kpi-secondary">—</div><div class="foot" id="kpi-secondary-foot">—</div></div>
+    <div class="card"><div class="label">Iteration</div><div class="value" id="kpi-iter">—</div><div class="foot" id="kpi-iter-foot">—</div></div>
+    <div class="card"><div class="label">Verdicts</div><div class="value" id="kpi-verdicts">—</div><div class="foot" id="kpi-verdicts-foot">—</div></div>
+  </section>
+
+  <section class="panel" id="progress-panel">
+    <h2>Progress toward target</h2>
+    <div class="bar-wrap">
+      <div class="bar"><div class="bar-fill" id="progress-fill"></div><div class="bar-mark" id="progress-baseline"></div></div>
+      <div class="bar-legend"><span id="progress-legend">—</span></div>
+    </div>
+  </section>
+
+  <section class="panel" id="map-panel" hidden>
+    <h2>Directions <span class="muted" id="map-round"></span></h2>
+    <div class="scroll" id="map"></div>
+  </section>
+
+  <div class="grid-2">
+    <section class="panel" id="history-panel">
+      <h2>Iteration history</h2>
+      <div class="scroll" id="history"><p class="muted">no iterations yet</p></div>
+    </section>
+
+    <section class="panel" id="node-panel">
+      <h2>Node · <span id="node-name" class="muted">—</span></h2>
+      <div id="gpus" class="gpus"><p class="muted">—</p></div>
+      <h3>Containers</h3>
+      <div id="containers"><p class="muted">—</p></div>
+      <h3>Jobs</h3>
+      <div id="jobs"><p class="muted">—</p></div>
+    </section>
+  </div>
+
+  <section class="panel" id="knowledge-panel" hidden>
+    <h2>Knowledge <span class="muted" id="knowledge-when"></span></h2>
+    <div class="tabs" id="knowledge-tabs"></div>
+    <pre class="log doc" id="knowledge-text">—</pre>
+    <h3>Files on the share</h3>
+    <div class="scroll" id="knowledge-files"><p class="muted">—</p></div>
+  </section>
+
+  <div class="grid-2">
+    <section class="panel" id="baselines-panel">
+      <h2>Measured baselines</h2>
+      <div id="baselines"><p class="muted">—</p></div>
+      <p class="note">A single-replay gate set below the measured spread books noise as wins.</p>
+    </section>
+
+    <section class="panel">
+      <h2>A/B</h2>
+      <div id="ab"><p class="muted">—</p></div>
+    </section>
+  </div>
+
+  <section class="panel" id="events-panel">
+    <h2>Events</h2>
+    <pre class="log" id="events">—</pre>
+  </section>
+
+  <section class="panel">
+    <h2>Agent activity <span class="muted">(latest tool calls)</span></h2>
+    <pre class="log" id="agent-log">—</pre>
+  </section>
+
+  <section class="panel">
+    <h2>Campaign log <span class="muted">(tail)</span></h2>
+    <pre class="log" id="log-tail">—</pre>
+  </section>
+
+  <section class="panel" id="errors-panel" hidden>
+    <h2>Collector errors</h2>
+    <div id="errors"></div>
+  </section>
+</main>
+
+<script src="/directions.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

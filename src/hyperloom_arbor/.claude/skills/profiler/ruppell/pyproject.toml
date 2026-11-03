@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ruppell"
+version = "0.9.1"
+description = "A graph-aware, step-anchored tracer for GPU serving stacks."
+requires-python = ">=3.9"
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["python"]
+
+[project.scripts]
+ruppell = "ruppell.cli:main"
+
+[project.entry-points."vllm.general_plugins"]
+ruppell = "ruppell.adapters.vllm:register"
+
+[tool.setuptools.package-data]
+"ruppell.gray_parrot" = ["sets/*.yaml"]

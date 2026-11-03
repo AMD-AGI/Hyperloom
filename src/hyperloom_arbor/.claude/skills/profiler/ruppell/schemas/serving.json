@@ -1,0 +1,23 @@
+{
+  "name": "serving",
+  "version": 1,
+  "description": "LLM serving: the fields that define an engine step's load and a run's regime. A step is an engine step (phase \"engine\"); startup work runs in named steps (phase load_model, profile_run, capture_model, capture_model_profile) that carry no required fields.",
+  "step": {
+    "phase": {"type": "str", "required": true, "note": "engine for engine steps; the startup method's name for named steps"},
+    "running_requests": {"type": "int", "required": true, "source": "scheduler: requests scheduled this step"},
+    "rows": {"type": "int", "required": true, "source": "scheduler: tokens in the forward pass, speculative rows included"},
+    "spec_rows": {"type": "int", "required": true, "source": "scheduler: speculative draft tokens scheduled"},
+    "context_lengths": {"type": "list[int]", "required": true, "source": "scheduler: per request, computed tokens plus tokens scheduled this step"},
+    "kind": {"type": "enum[prefill,decode,mixed,empty]", "required": true, "source": "adapter: a request is prefilling when it schedules more tokens than 1 + its draft tokens; empty when nothing is scheduled (the runner still updates its state)"},
+    "fingerprint": {"type": "str", "required": true, "source": "adapter: hash of the scheduled request ids and token counts, identical on every rank"}
+  },
+  "run": {
+    "model": {"type": "str", "required": true},
+    "tp": {"type": "int", "required": true},
+    "rank": {"type": "int", "required": true},
+    "role": {"type": "str", "required": true},
+    "cudagraph_mode": {"type": "str", "required": true},
+    "phase_clock": {"type": "object", "required": false, "note": "the benchmark client's phase boundaries, realtime seconds, aligned through clock pairs by the census"}
+  },
+  "applies_to": "processes with engine steps (the model-runner workers)"
+}

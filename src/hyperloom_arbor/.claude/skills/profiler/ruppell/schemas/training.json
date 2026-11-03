@@ -1,0 +1,21 @@
+{
+  "name": "training",
+  "version": 1,
+  "description": "Model training (runner plans/dlrmv4, the DLRMv4 adapter): a step is one training iteration, phase \"engine\" and kind \"train\" as serving's engine steps, so the cross-rank merge, census and exports treat it the same way. It opens when the pipeline's progress() call begins and closes when the next one begins, so the loop's own work after progress (metrics, the step fence) stays in its iteration. Startup, eval, window boundaries and cleanup run in named steps (phase startup, eval, window_boundary, cleanup) with no required fields. Fields come from host-side state only: no field may add a device-to-host read.",
+  "step": {
+    "phase": {"type": "str", "required": true, "note": "engine for training steps; the named step's name otherwise"},
+    "kind": {"type": "enum[train]", "required": true},
+    "step": {"type": "int", "required": true, "source": "adapter: training iterations counted from 1 on each rank"},
+    "batch_index": {"type": "int", "required": true, "source": "the pipeline's batch index (its '## forward N ##' labels), -1 when no batch is in the pipeline"},
+    "fingerprint": {"type": "str", "required": true, "source": "adapter: hash of step and batch index, identical on every rank"}
+  },
+  "run": {
+    "rank": {"type": "int", "required": true},
+    "world_size": {"type": "int", "required": true},
+    "role": {"type": "str", "required": true},
+    "knobs": {"type": "object", "required": true, "note": "the trainer's arm and run-length settings from the environment (DLRM_HSTU_FP8_*, HSTU_ATTN_*, START_TS, NUM_TRAIN_*, ...)"},
+    "hooked_modules": {"type": "int", "required": false},
+    "graph_captured": {"type": "object", "required": false, "note": "set only when a graph capture happened, which the adapter does not expect"}
+  },
+  "applies_to": "processes with training steps (the trainer's ranks)"
+}

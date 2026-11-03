@@ -1,0 +1,20 @@
+# build
+build/
+*.so
+*.o
+*.a
+__pycache__/
+*.egg-info/
+.venv/
+
+# traces and run output never enter git
+*.pftrace
+*.perfetto-trace
+*.trace.json
+*.trace.json.gz
+*.rpl
+runs/
+out/
+
+# secrets
+.env

@@ -1,0 +1,30 @@
+{
+  "_note": "An example config for the serving template (packs/serving): Qwen3-14B-FP8 on vLLM at TP1, random 1024/1024 at C64, standalone. Copy it and set the <...> values for your node. In component mode a host (Hyperloom's Arbor adapter) writes the same keys plus mode, docker_container @host and the component block (docs/hosts.md). Checks without a GPU: python3 -m arbor run --config configs/serving-template.json --dry-run.",
+  "pack": "serving",
+  "identity": "inference:1k1k:mi355x:vllm:fp8:qwen3-14b:c64:tp1",
+  "goal": "Raise Qwen3-14B-FP8's output throughput per GPU at C64 (random 1024 in / 1024 out) on one GPU, without losing p90 interactivity.",
+  "docker_container": "<container>",
+  "workspace_root": "/usr/local/lib/python3.12/dist-packages/vllm",
+  "session_root": "<session directory>",
+  "model_path": "<path to Qwen3-14B-FP8 in the container>",
+  "model_name": "qwen3-14b-fp8",
+  "framework": "vllm",
+  "tp": 1,
+  "port": 8006,
+  "gpu_ids": "0",
+  "server_flags": "--max-model-len 8192 --max-num-seqs 256 --gpu-memory-utilization 0.90",
+  "server_env": {
+    "VLLM_ROCM_USE_AITER": "1",
+    "ISL": "1024",
+    "OSL": "1024",
+    "NUM_GPUS": "1",
+    "BENCH_SEED": "1",
+    "GSM8K_LIMIT": "400"
+  },
+  "_gsm8k_note": "Set GSM8K_MIN in server_env to the model's reference score on the full set less about three standard errors of the subset; until then the correctness check applies a 0.30 sanity floor.",
+  "concurrency": 64,
+  "num_prompts": 320,
+  "bench_timeout": 1800,
+  "bench_script": "/workspace/Arbor/packs/serving/validator/bench.sh",
+  "correctness_script": "/workspace/Arbor/packs/serving/validator/correctness.sh"
+}

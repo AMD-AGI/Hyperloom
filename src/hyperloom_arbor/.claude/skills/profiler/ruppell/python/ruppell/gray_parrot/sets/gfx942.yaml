@@ -1,0 +1,36 @@
+# gray-parrot's counter sets for gfx942 (MI300X, MI325X), version 1, 2026-10-21.
+#
+# UNVERIFIED: written from gfx950's sets and the SDK's definitions (counter_defs.yaml, SDK 1.3.2),
+# never checked on a device: we have no MI300X. gfx942 has the same per-block slots as gfx950
+# (gfx950 inherits MI300's in aqlprofile), but no F6F4 MFMA (CDNA3 has no FP6 or FP4 MFMA), so
+# roofline/r1 lacks it. Before a claim, check each group on the device
+# (`ruppell counters list --check`).
+version: 1
+arch: gfx942
+verified: "no: written from the SDK's definitions; not checked on a device"
+slots: {SQ: 8, SPI: 6, TCC: 4, TCP: 4, TA: 2, TD: 2, GRBM: 2, CPC: 2, CPF: 2}
+common: [GRBM_GUI_ACTIVE]
+sets:
+  memory:
+    m1: [TCC_EA0_RDREQ_128B, TCC_EA0_RDREQ_64B, TCC_EA0_RDREQ_32B, TCP_TOTAL_CACHE_ACCESSES, TCP_CACHE_MISS]
+    m2: [TCC_EA0_WRREQ, TCC_EA0_WRREQ_64B, TCC_HIT, TCC_MISS]
+    m3: [TCC_EA0_RDREQ_DRAM_32B, TCC_EA0_WRREQ_WRITE_DRAM_32B]
+  roofline:
+    r1: [SQ_INSTS_VALU_MFMA_MOPS_F16, SQ_INSTS_VALU_MFMA_MOPS_BF16, SQ_INSTS_VALU_MFMA_MOPS_F32,
+         SQ_INSTS_VALU_MFMA_MOPS_F64, SQ_INSTS_VALU_MFMA_MOPS_I8, SQ_INSTS_VALU_MFMA_MOPS_F8,
+         SQ_INSTS_VALU_MFMA_MOPS_XF32,
+         TCC_EA0_RDREQ_128B, TCC_EA0_RDREQ_64B, TCC_EA0_RDREQ_32B]
+    r2: [SQ_INSTS_VALU_FLOPS_FP16, SQ_INSTS_VALU_FLOPS_FP32, SQ_INSTS_VALU_FLOPS_FP64,
+         TCC_EA0_WRREQ, TCC_EA0_WRREQ_64B]
+  compute:
+    c1: [SQ_WAVES, SQ_INSTS_VALU, SQ_INSTS_SALU, SQ_INSTS_MFMA, SQ_INSTS_VMEM_RD, SQ_INSTS_VMEM_WR,
+         SQ_INSTS_LDS, SQ_ACTIVE_INST_VALU, GRBM_COUNT]
+    c2: [SQ_VALU_MFMA_BUSY_CYCLES, SQ_BUSY_CU_CYCLES, SQ_LDS_BANK_CONFLICT, SQ_LDS_IDX_ACTIVE,
+         SQ_WAIT_INST_ANY]
+  occupancy:
+    o1: [SQ_WAVE_CYCLES, SQ_LEVEL_WAVES, SQ_ACCUM_PREV_HIRES, SPI_RA_VGPR_SIMD_FULL_CSN,
+         SPI_RA_SGPR_SIMD_FULL_CSN, SPI_RA_LDS_CU_FULL_CSN, SPI_RA_WAVE_SIMD_FULL_CSN,
+         SPI_RA_BAR_CU_FULL_CSN, SPI_RA_TGLIM_CU_FULL_CSN]
+  activity:
+    a1: [SQ_WAVES, SQ_BUSY_CU_CYCLES, SQ_VALU_MFMA_BUSY_CYCLES, TCC_EA0_RDREQ_DRAM_32B,
+         TCC_EA0_WRREQ_WRITE_DRAM_32B, GRBM_COUNT]

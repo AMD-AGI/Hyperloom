@@ -1,0 +1,71 @@
+{
+  "_doc": "One project per model family, whatever a campaign calls the model. 'match' is a regex searched in the name lowercased with everything but letters and digits removed ('DeepSeek V4.1 Flash' -> 'deepseekv41flash'). The first project that matches wins, so list the narrower pattern first. Every example must resolve to its project (arbor/tests/test_collect.py).",
+  "projects": [
+    {
+      "project": "deepseek-v4.1-flash",
+      "match": "(deepseek|ds)v?41",
+      "examples": [
+        "DeepSeek V4.1 Flash",
+        "deepseek-ai/DeepSeek-V4.1-Flash",
+        "dsv41flash-c32-v2.1-ruppell",
+        "agentx-dsv41-cg8b",
+        "inference:agentx:mi355x:vllm:fp4:dsv41flash:c8:cg8b",
+        "dsv41flash_fp4_mi355x_vllm_mtp"
+      ]
+    },
+    {
+      "project": "deepseek-v4",
+      "match": "(deepseek|ds)v?4(?!1)",
+      "examples": [
+        "DeepSeek-V4",
+        "dsv4_fp4_mi355x_vllm_mtp"
+      ]
+    },
+    {
+      "project": "deepseek-r1",
+      "match": "(deepseek|ds)r1",
+      "examples": [
+        "DeepSeek-R1",
+        "dsr1-fp4-b200-sglang"
+      ]
+    },
+    {
+      "project": "glm-5.2",
+      "match": "glm52",
+      "examples": [
+        "GLM-5.2-MXFP4",
+        "inference:agentx:mi355x:sglang:mxfp4:glm52"
+      ]
+    },
+    {
+      "project": "gpt-oss-120b",
+      "match": "gptoss120b",
+      "examples": [
+        "gpt-oss-120b",
+        "gptoss-120b-mxfp4"
+      ]
+    },
+    {
+      "project": "minimax-m3",
+      "match": "minimaxm3",
+      "examples": [
+        "MiniMax-M3-MXFP4"
+      ]
+    },
+    {
+      "project": "qwen3.5-397b",
+      "match": "qwen35397b",
+      "examples": [
+        "Qwen3.5-397B-A17B-MXFP4"
+      ]
+    },
+    {
+      "project": "dlrm-v4",
+      "match": "dlrmv4",
+      "examples": [
+        "DLRMv4",
+        "dlrm-v4 training"
+      ]
+    }
+  ]
+}
