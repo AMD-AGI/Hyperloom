@@ -51,6 +51,7 @@ __all__ = [
     "metric_value",
     "reading_matches",
     "single_clock_limit",
+    "socket_power_cap_w",
     "normalize_perf_level",
     "read_amd_smi_json",
     "read_gpu_power_settings",
@@ -208,8 +209,9 @@ def metric_value(block: Any) -> float | None:
     return float(block) if isinstance(block, (int, float)) and not isinstance(block, bool) else None
 
 
-def _power_cap_w(limit: Any) -> float | None:
-    """The socket power limit, whichever key this amd-smi release uses for it."""
+def socket_power_cap_w(limit: Any) -> float | None:
+    """The socket power limit in one card's ``limit`` block of ``amd-smi static``, whichever key this amd-smi release
+    uses for it; ``None`` when the block holds none."""
     if not isinstance(limit, dict):
         return None
     for key in ("ppt0", "ppt"):
@@ -332,7 +334,7 @@ def read_gpu_power_settings() -> dict[int, dict[str, Any]]:
     """
     settings: dict[int, dict[str, Any]] = {}
     for row in gpu_rows(read_amd_smi_json("static", "--limit")):
-        settings.setdefault(row["gpu"], {})["power_cap_w"] = _power_cap_w(row.get("limit"))
+        settings.setdefault(row["gpu"], {})["power_cap_w"] = socket_power_cap_w(row.get("limit"))
     for row in gpu_rows(read_amd_smi_json("metric", "--perf-level")):
         settings.setdefault(row["gpu"], {})["perf_level"] = normalize_perf_level(row.get("perf_level"))
     for row in gpu_rows(read_amd_smi_json("metric", "--clock")):

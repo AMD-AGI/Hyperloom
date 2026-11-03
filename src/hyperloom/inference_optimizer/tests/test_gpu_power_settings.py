@@ -22,6 +22,7 @@ from hyperloom.common.gpu_power_settings import (
     read_gpu_power_settings,
     read_node_power_settings,
     reading_matches,
+    socket_power_cap_w,
     visible_gpu_indices,
 )
 
@@ -75,6 +76,24 @@ def test_the_settings_are_read_from_amd_smi_json(amd_smi):
         0: {"power_cap_w": 1400.0, "perf_level": "auto", "sclk_max_mhz": None},
         1: {"power_cap_w": 1000.0, "perf_level": "determinism", "sclk_max_mhz": None},
     }
+
+
+@pytest.mark.parametrize(
+    ("limit", "cap"),
+    [
+        ({"ppt0": {"socket_power_limit": {"value": 750, "unit": "W"}}}, 750.0),
+        ({"ppt": {"socket_power_limit": {"value": 750, "unit": "W"}}}, 750.0),
+        ({"socket_power_limit": {"value": 750, "unit": "W"}}, 750.0),
+        ({"power_cap": {"value": 750, "unit": "W"}}, 750.0),
+        ({"power_cap": 749.8}, 749.8),
+        ({"ppt0": {"socket_power_limit": "N/A"}, "power_cap": 750}, 750.0),
+        ({"ppt0": {"socket_power_limit": "N/A"}}, None),
+        ({}, None),
+        ("N/A", None),
+    ],
+)
+def test_the_power_cap_is_read_from_whichever_key_the_amd_smi_release_uses(limit, cap):
+    assert socket_power_cap_w(limit) == cap
 
 
 def test_a_failing_amd_smi_is_an_error_not_an_empty_reading(amd_smi):

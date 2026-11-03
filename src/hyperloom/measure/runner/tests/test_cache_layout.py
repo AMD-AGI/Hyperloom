@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import subprocess
 import sys
@@ -149,9 +150,7 @@ def test_an_entry_whose_manifest_names_another_commit_is_refused(rig: Rig) -> No
 def test_the_checker_prints_the_first_few_problems_and_counts_the_rest(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(
-        "hyperloom.measure.runner.cache_layout.check_cache", lambda *_: [f"problem {n}" for n in range(8)]
-    )
+    monkeypatch.setattr("hyperloom.measure.runner.cache_layout._checked", lambda *_: [f"problem {n}" for n in range(8)])
     assert cache_layout.main(["/cache", "a" * 40]) == 1
     assert capsys.readouterr().out.splitlines() == [*(f"problem {n}" for n in range(5)), "... and 3 more"]
 
@@ -162,7 +161,7 @@ def test_the_checker_reports_a_cache_it_cannot_read_as_a_problem(
     def unreadable(*_: object) -> list[str]:
         raise PermissionError("denied")
 
-    monkeypatch.setattr("hyperloom.measure.runner.cache_layout.check_cache", unreadable)
+    monkeypatch.setattr("hyperloom.measure.runner.cache_layout._checked", unreadable)
     assert cache_layout.main(["/cache", "a" * 40]) == 1
     assert "could not be read: denied" in capsys.readouterr().out
 
@@ -231,3 +230,28 @@ def test_the_checker_writes_the_requirements_only_for_a_cache_that_checks_out(ri
     refused = tmp_path / "other" / REQUIREMENTS_FILE
     assert cache_layout.main([str(cache.root), cache.sha, str(refused)]) == 1
     assert not refused.parent.exists()
+
+
+def test_a_manifest_swapped_after_the_check_does_not_reach_the_requirements(
+    rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The requirements pip enforces come from the manifest the check passed, not from a second read of the file."""
+    cache = copy_cache(rig, tmp_path / "cache")
+    entry = cache.root / cache.sha
+    checked = _manifest(rig)
+    swapped = dataclasses.replace(
+        checked, wheels=tuple(dataclasses.replace(wheel, sha256="0" * 64) for wheel in checked.wheels)
+    )
+    check = cache_layout._entry_problems
+
+    def check_then_swap(*args: object) -> list[str]:
+        problems = check(*args)
+        (entry / MANIFEST_NAME).write_text(manifest_to_json(swapped), encoding="utf-8")
+        return problems
+
+    monkeypatch.setattr(cache_layout, "_entry_problems", check_then_swap)
+    out = tmp_path / "scratch" / REQUIREMENTS_FILE
+    assert cache_layout.main([str(cache.root), cache.sha, str(out)]) == 0
+    assert manifest_from_json((entry / MANIFEST_NAME).read_text(encoding="utf-8")) == swapped
+    assert out.read_text(encoding="utf-8") == requirements_text(checked)
+    assert "0" * 64 not in out.read_text(encoding="utf-8")

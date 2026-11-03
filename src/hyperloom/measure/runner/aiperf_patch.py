@@ -18,11 +18,11 @@ the client counted successful, and every other field of a failed one, are what t
 
 from __future__ import annotations
 
-import os
 import re
-import shutil
 import subprocess
 from pathlib import Path
+
+from hyperloom_common.io import WriteOptions, atomic_write_text
 
 from hyperloom.common.outside_facts import (
     AIPERF_ERROR_OUTPUT_LENGTH_METRIC,
@@ -104,13 +104,9 @@ def _read(path: Path) -> str:
 
 def _write(path: Path, text: str) -> None:
     """Replace ``path`` whole or not at all, keeping its mode."""
-    scratch = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
-        scratch.write_text(text, encoding=_UTF8)
-        shutil.copymode(path, scratch)
-        os.replace(scratch, path)
+        atomic_write_text(path, text, options=WriteOptions(preserve_mode=True))
     except OSError as exc:
-        scratch.unlink(missing_ok=True)
         raise ReplayClientPatchError(f"{path.name} cannot be written ({type(exc).__name__})") from exc
 
 
