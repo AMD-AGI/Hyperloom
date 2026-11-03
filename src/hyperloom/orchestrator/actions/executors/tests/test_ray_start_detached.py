@@ -118,6 +118,18 @@ def shutdown():
 # The installer's bound on that connect in these tests, in seconds.
 _DRIVER_CONNECT_BOUND_SEC = 2
 
+#: The installer's ``python3``: the torch and free-port probes answer 0, so this test needs no python for them. A
+#: driver connect goes to the python3 on PATH, so one that lost its bound would still connect, and hang, rather than
+#: read as a stub's answer.
+_PYTHON3_STUB = """python3() {
+  local src
+  src="$(cat)"
+  case "$src" in
+    *"import ray"*) command python3 "$@" <<<"$src" ;;
+    *) echo 0 ;;
+  esac
+}"""
+
 
 def _driver_pids(state: Path) -> dict[str, int]:
     """The pids the installer's driver connect noted: its own (``init``) and its helper's."""
@@ -177,10 +189,7 @@ def _run_install_ensure_ray_started(tmp_path: Path, extra_env: dict[str, str] | 
             "CHECK_ONLY=0; DRY_RUN=0; SKIP_RAY_START=0",
             'log() { echo "[kernel-agent] $*"; }',
             'warn() { echo "[kernel-agent WARN] $*" >&2; }',
-            # torch / free-port probes: no python needed for this test. A driver connect goes to the python3 on
-            # PATH, so one that lost its bound would still connect, and hang, rather than read as a stub's answer.
-            'python3() { local src; src="$(cat)"; case "$src" in *"import ray"*) command python3 "$@" <<<"$src" ;; '
-            "*) echo 0 ;; esac; }",
+            _PYTHON3_STUB,
             "ensure_fd_limit_for_ray() { :; }",
             slot_probe,
             _extract_shell_function("_free_tcp_port"),
