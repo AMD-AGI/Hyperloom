@@ -83,12 +83,9 @@ def append_conversation(
         )
 
     # Second sink (opt-in): mirror conversation text to Langfuse live.
-    try:
-        from .langfuse_emitter import get_emitter
+    from .langfuse_emitter import get_emitter
 
-        get_emitter(session_dir).record_conversation(row)
-    except Exception:
-        log.debug("conversation_trace: langfuse mirror failed", exc_info=True)
+    get_emitter(session_dir).record_conversation(row)
 
 
 # The closed on-disk schema: every record field plus the write-time ``ts``.

@@ -123,6 +123,19 @@ def test_run_grid_fast_fail_drops_a_variant_whose_config_file_is_missing(tmp_pat
     assert "AITER_CONFIG_GEMM_BF16" in (gr.unsupported_capability_reason(v) or "")
 
 
+def test_run_grid_fast_fail_drops_a_list_whose_other_table_is_written(tmp_path, monkeypatch) -> None:
+    # One element on disk beside one nothing wrote: the server would still boot on the thinner merge, but the arm
+    # would be benched against a table that is only partly there, so run_grid asks the same every-element question
+    # admission asks and names the element that is missing.
+    monkeypatch.setenv("FRAMEWORK", "sglang")
+    written = tmp_path / "tuned.csv"
+    written.write_text("gfx,M,N,K\ngfx950,1,2,3\n", encoding="utf-8")
+    missing = str(tmp_path / "never_written.csv")
+    v = _variant("gemm", envs={"AITER_CONFIG_GEMM_BF16": f"{written}:{missing}"})
+    named_missing = (gr.unsupported_capability_reason(v) or "").split("element(s)")[-1].split(" do not exist")[0]
+    assert missing in named_missing and str(written) not in named_missing
+
+
 def test_ungrounded_env_file_reason_noop_without_config_envs(tmp_path) -> None:
     # Non-file envs (even under aiter-ish prefixes like the JSON-payload AITER_CONFIG) must stay untouched.
     v = _variant(

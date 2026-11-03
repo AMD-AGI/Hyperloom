@@ -9,7 +9,7 @@ from pathlib import Path
 
 from hyperloom.inference_optimizer.grid_server_args import compose_server_args
 from hyperloom.orchestrator.actions.executors._workload_envs import _apply_caller_removals
-from hyperloom.orchestrator.actions.executors.magpie_agentx import LaunchChanges, apply_launch_changes
+from hyperloom.orchestrator.actions.executors.magpie_agentx import LaunchChanges, RecipeLaunch, apply_launch_changes
 from hyperloom.orchestrator.actions.executors.profile import _merge_profile_params
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.state.shared_state import SharedState, inject_stack_base_params
@@ -160,7 +160,9 @@ def test_a_magpie_task_seeded_from_current_best_removes_the_recipes_copy(tmp_pat
             launch["unset_envs"],
             launch["args_mode"] == "replace",
         ),
-        recipe_options=frozenset({*HICACHE_FLAGS, "--speculative-num-steps", "--speculative-num-draft-tokens"}),
+        recipe=RecipeLaunch(
+            argv=(*HICACHE_FLAGS, "--speculative-num-steps", "2", "--speculative-num-draft-tokens", "3")
+        ),
     )
 
     overrides = benchmark["agentx"]["launch_overrides"]

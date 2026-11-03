@@ -51,7 +51,7 @@ from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
 from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 
-from .conftest import make_coordinator
+from .conftest import make_coordinator, write_benchmark_yaml
 from hyperloom.orchestrator.actions.executors._workload_envs import BenchmarkTarget, LaunchLayer
 
 
@@ -76,28 +76,6 @@ def _force_cold_decision(monkeypatch) -> None:
             "reason": "test: server_lifecycle reuse disabled",
         },
     )
-
-
-def _write_baseline_yaml(path: Path) -> None:
-    cfg = {
-        "benchmark": {
-            "framework": "sglang",
-            "model": "/path/models/Qwen-Qwen3-8B",
-            "precision": "bf16",
-            "run_mode": "local",
-            "envs": {"TP": 1, "CONC": 8, "ISL": 256, "OSL": 256},
-            "benchmark_script": "sglang_mi300x.sh",
-            "timeout_seconds": 600,
-            "profiler": {
-                "torch_profiler": {"enabled": False},
-                "system_profiler": {"enabled": False},
-                "tracelens": {"enabled": False},
-            },
-            "gpu_selection": {"auto": False},
-        },
-    }
-    with path.open("w") as f:
-        yaml.safe_dump(cfg, f)
 
 
 def _fake_workspace(slot: Path, *, tput: float = 800.0, perf_axes: dict[str, float] | None = None) -> Path:
@@ -695,7 +673,7 @@ def test_warm_history_rejected_rows_survive_the_first_round():
 async def test_explore_executor_keeps_and_reverts_per_variant(sub_agent_runner, tmp_path):
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
+    write_benchmark_yaml(base)
     output_dir = tmp_path / "explore-out"
 
     call_counter = {"i": 0}
@@ -778,7 +756,7 @@ async def _explore_on_an_observed_fp8_stack(
     sub, tr, _ = sub_agent_runner
     _force_cold_decision(monkeypatch)
     base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
+    write_benchmark_yaml(base)
     if inherited:
         cfg = yaml.safe_load(base.read_text())
         cfg["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"] = inherited
@@ -1262,7 +1240,7 @@ async def test_actual_explore_axis_rejection_cannot_be_revived_by_geak_fallback(
     state.geak_result = _ok_result(final=150.0)
     sub.shared_state = state
     base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
+    write_benchmark_yaml(base)
     fingerprint = canonical_fingerprint("--test-flag", {})
     task, _ = await tr.create_or_return_existing(
         TaskSpec(
@@ -1371,7 +1349,7 @@ async def test_explore_missing_axes_fails_closed(
     best_before = dict(state.current_best)
     sub.shared_state = state
     base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
+    write_benchmark_yaml(base)
 
     def _fake_run(cmd, *args, **kwargs):
         slot = Path(cmd[cmd.index("--output-dir") + 1])
@@ -1439,7 +1417,7 @@ async def test_explore_guard_revert_row_reads_as_measured(sub_agent_runner, tmp_
     }
     sub.shared_state = state
     base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
+    write_benchmark_yaml(base)
 
     def _fake_run(cmd, *args, **kwargs):
         slot = Path(cmd[cmd.index("--output-dir") + 1])
@@ -1516,7 +1494,7 @@ async def test_explore_missing_axes_preserves_running_grading_anchor(
     }
     sub.shared_state = state
     base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
+    write_benchmark_yaml(base)
     observed_args: dict[str, str] = {}
 
     def _fake_run(cmd, *args, **kwargs):
@@ -1629,7 +1607,7 @@ async def test_an_agentx_explore_keep_is_promoted_by_writeback(sub_agent_runner,
     state.baseline_perf = dict(baseline_axes)
     sub.shared_state = state
     base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
+    write_benchmark_yaml(base)
 
     def _fake_run(cmd, *args, **kwargs):
         slot = Path(cmd[cmd.index("--output-dir") + 1])
@@ -1702,7 +1680,7 @@ async def test_explore_required_axes_output_modes_keep_legacy_behavior(
         monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
     sub.shared_state = state
     base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
+    write_benchmark_yaml(base)
 
     def _fake_run(cmd, *args, **kwargs):
         slot = Path(cmd[cmd.index("--output-dir") + 1])
@@ -1753,7 +1731,7 @@ async def test_explore_serving_no_eval_reverts_without_stopping(sub_agent_runner
     sub.shared_state = state
 
     base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
+    write_benchmark_yaml(base)
     output_dir = tmp_path / "explore-acc-revert"
 
     def _fake_run(cmd, *args, **kwargs):
@@ -1822,7 +1800,7 @@ async def test_explore_gates_a_variant_no_flag_catalogue_would_have_caught(sub_a
     sub.shared_state = state
 
     base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
+    write_benchmark_yaml(base)
 
     def _fake_run(cmd, *args, **kwargs):
         out_idx = cmd.index("--output-dir")
@@ -1874,7 +1852,7 @@ async def test_explore_accuracy_gate_falls_back_to_shared_state(sub_agent_runner
     sub.shared_state = state
 
     base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
+    write_benchmark_yaml(base)
 
     def _fake_run(cmd, *args, **kwargs):
         out_idx = cmd.index("--output-dir")
@@ -1922,7 +1900,7 @@ async def test_explore_accuracy_gate_falls_back_to_shared_state(sub_agent_runner
 async def test_explore_executor_keep_persists_effective_removal_stack(sub_agent_runner, tmp_path):
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
+    write_benchmark_yaml(base)
 
     def _fake_run(cmd, *args, **kwargs):
         out_idx = cmd.index("--output-dir")
@@ -1982,7 +1960,7 @@ async def test_explore_executor_recovers_base_tput_from_shared_state(
     sub.shared_state = state
 
     base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
+    write_benchmark_yaml(base)
     output_dir = tmp_path / "explore-base-tput-recovery"
 
     def _fake_run(cmd, *args, **kwargs):
@@ -2050,7 +2028,7 @@ async def test_per_variant_rows_carry_the_verdicts_and_the_stack(
     sub.shared_state = state
 
     base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
+    write_benchmark_yaml(base)
     output_dir = tmp_path / "explore-verdict-carry"
 
     def _fake_run(cmd, *args, **kwargs):
@@ -2120,7 +2098,7 @@ async def test_explore_executor_prefers_current_best_over_baseline_for_recovery(
     sub.shared_state = state
 
     base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
+    write_benchmark_yaml(base)
     output_dir = tmp_path / "explore-cb-recovery"
 
     def _fake_run(cmd, *args, **kwargs):
@@ -2193,7 +2171,7 @@ async def test_explore_executor_supersedes_stale_params_base_tput(
     sub.shared_state = state
 
     base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
+    write_benchmark_yaml(base)
     output_dir = tmp_path / "explore-stale-anchor"
 
     def _fake_run(cmd, *args, **kwargs):
@@ -2263,7 +2241,7 @@ async def test_explore_executor_takes_live_base_args_with_the_live_anchor(
     sub.shared_state = state
 
     base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
+    write_benchmark_yaml(base)
 
     def _fake_run(cmd, *args, **kwargs):
         out_idx = cmd.index("--output-dir")
@@ -2314,7 +2292,7 @@ async def test_explore_executor_historical_fingerprint_reruns(sub_agent_runner, 
     _force_cold_decision(monkeypatch)
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
+    write_benchmark_yaml(base)
     output_dir = tmp_path / "explore-dedup"
 
     bench_calls: list[str] = []
@@ -2391,7 +2369,7 @@ async def test_explore_executor_defaults_to_warm_decision_matching_hot_baseline(
     """Default EXPLORE measures hot decisions, matching default hot baseline."""
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
+    write_benchmark_yaml(base)
     output_dir = tmp_path / "explore-warm"
 
     bench_calls: list[str] = []
@@ -2462,6 +2440,56 @@ def _run_eval_of(cmd: list[str]) -> str:
     return str(cfg["benchmark"]["envs"].get("RUN_EVAL", "")).strip().lower()
 
 
+def _eval_recording_run(seen: list[tuple[str, str]]):
+    """A Magpie stand-in that records each slot's RUN_EVAL and measures a KEEP."""
+
+    def _fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        seen.append((str(slot), _run_eval_of(cmd)))
+        _fake_workspace(slot, tput=920.0)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    return _fake_run
+
+
+def _cap_recording_run(granted: list[int]):
+    """A Magpie stand-in that records the timeout each benchmark round was granted."""
+
+    def _fake_run(cmd, *args, **kwargs):
+        # Only benchmark rounds carry --output-dir; the interpreter probe does not, and it is module-memoized, so
+        # counting it would make this order-dependent.
+        if "--output-dir" not in cmd:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+        granted.append(int(kwargs["watch"].timeout))
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        _fake_workspace(slot, tput=840.0)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    return _fake_run
+
+
+async def _run_one_variant_explore(sub, tr, tmp_path, fake_run, *, key: str, output: str, row: dict, **params):
+    """Run an explore of the single grid ``row`` against the 800 anchor with Magpie replaced by ``fake_run``."""
+    base = tmp_path / "base.yaml"
+    write_benchmark_yaml(base)
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={
+                "config_path": str(base),
+                "output_dir": str(tmp_path / output),
+                "base_tput": 800.0,
+                "grid": [row],
+                **params,
+            },
+            idempotency_key=key,
+        ),
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch("hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill", side_effect=fake_run):
+        return await sub.run_task(task)
+
+
 @pytest.mark.asyncio
 async def test_explore_decision_round_skips_eval_warmup_keeps_it(
     sub_agent_runner,
@@ -2470,46 +2498,18 @@ async def test_explore_decision_round_skips_eval_warmup_keeps_it(
 ):
     """The overtime deadline is anchored on a throughput-only baseline, so the rounds it gates must measure throughput only."""
     sub, tr, _ = sub_agent_runner
-    base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
-    output_dir = tmp_path / "explore-noeval"
-
     seen: list[tuple[str, str]] = []
-
-    def _fake_run(cmd, *args, **kwargs):
-        out_idx = cmd.index("--output-dir")
-        slot = Path(cmd[out_idx + 1])
-        seen.append((str(slot), _run_eval_of(cmd)))
-        _fake_workspace(slot, tput=920.0)
-        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
-
-    task, _ = await tr.create_or_return_existing(
-        TaskSpec(
-            kind="explore",
-            params={
-                "config_path": str(base),
-                "output_dir": str(output_dir),
-                "base_tput": 800.0,
-                "grid": [
-                    {
-                        "name": "noeval_keep",
-                        "extra_args": "--warm-flag",
-                        "extra_envs": {},
-                        "provenance": "llm_direct",
-                    }
-                ],
-                "baseline_runtime_sec": 10.0,
-                "baseline_warm_runtime_sec": 5.0,
-            },
-            idempotency_key="ex-noeval",
-        ),
+    await _run_one_variant_explore(
+        sub,
+        tr,
+        tmp_path,
+        _eval_recording_run(seen),
+        key="ex-noeval",
+        output="explore-noeval",
+        row={"name": "noeval_keep", "extra_args": "--warm-flag", "extra_envs": {}, "provenance": "llm_direct"},
+        baseline_runtime_sec=10.0,
+        baseline_warm_runtime_sec=5.0,
     )
-    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
-    with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
-        side_effect=_fake_run,
-    ):
-        await sub.run_task(task)
 
     warmup = [ev for slot, ev in seen if "warmup_round" in slot]
     decision = [ev for slot, ev in seen if "warmup_round" not in slot]
@@ -2526,45 +2526,17 @@ async def test_explore_cold_decision_keeps_eval(
     """Without server_lifecycle reuse there is no warmup round whose eval the decision round could fall back on, so it must run its own accuracy gate."""
     _force_cold_decision(monkeypatch)
     sub, tr, _ = sub_agent_runner
-    base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
-    output_dir = tmp_path / "explore-coldeval"
-
     seen: list[tuple[str, str]] = []
-
-    def _fake_run(cmd, *args, **kwargs):
-        out_idx = cmd.index("--output-dir")
-        slot = Path(cmd[out_idx + 1])
-        seen.append((str(slot), _run_eval_of(cmd)))
-        _fake_workspace(slot, tput=920.0)
-        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
-
-    task, _ = await tr.create_or_return_existing(
-        TaskSpec(
-            kind="explore",
-            params={
-                "config_path": str(base),
-                "output_dir": str(output_dir),
-                "base_tput": 800.0,
-                "grid": [
-                    {
-                        "name": "cold_keep",
-                        "extra_args": "--cold-flag",
-                        "extra_envs": {},
-                        "provenance": "llm_direct",
-                    }
-                ],
-                "baseline_runtime_sec": 10.0,
-            },
-            idempotency_key="ex-coldeval",
-        ),
+    await _run_one_variant_explore(
+        sub,
+        tr,
+        tmp_path,
+        _eval_recording_run(seen),
+        key="ex-coldeval",
+        output="explore-coldeval",
+        row={"name": "cold_keep", "extra_args": "--cold-flag", "extra_envs": {}, "provenance": "llm_direct"},
+        baseline_runtime_sec=10.0,
     )
-    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
-    with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
-        side_effect=_fake_run,
-    ):
-        await sub.run_task(task)
 
     assert not [slot for slot, _ in seen if "warmup_round" in slot]
     decision = [ev for _slot, ev in seen]
@@ -2583,7 +2555,7 @@ async def test_explore_decision_stays_cold_when_the_session_skips_the_double_run
     sub.shared_state = state
 
     base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
+    write_benchmark_yaml(base)
     seen: list[str] = []
 
     def _fake_run(cmd, *args, **kwargs):
@@ -2625,7 +2597,7 @@ async def test_explore_executor_warm_decision_warmup_failure_marks_failed(
     """A failed warmup round records the variant FAILED(reason=warmup_failed), no decision run."""
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
+    write_benchmark_yaml(base)
     output_dir = tmp_path / "explore-warmfail"
 
     calls: list[str] = []
@@ -2690,7 +2662,7 @@ async def test_explore_executor_overtime_disabled_when_ratio_zero(
     """ratio<=0 disables the gate; executor must NOT pass ``soft_deadline_sec``."""
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
+    write_benchmark_yaml(base)
     output_dir = tmp_path / "explore-no-overtime"
 
     received_deadlines: list[float | None] = []
@@ -2757,46 +2729,17 @@ async def test_explore_variant_cap_is_clamped_to_the_session_budget(
     # this allows.
     usable_sec = state.session_budget_usable_sec()
 
-    base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
     granted: list[int] = []
-
-    def _fake_run(cmd, *args, **kwargs):
-        # Only benchmark rounds carry --output-dir; the interpreter probe does not, and it is module-memoized, so
-        # counting it would make this order-dependent.
-        if "--output-dir" not in cmd:
-            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
-        granted.append(int(kwargs["watch"].timeout))
-        slot = Path(cmd[cmd.index("--output-dir") + 1])
-        _fake_workspace(slot, tput=840.0)
-        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
-
-    task, _ = await tr.create_or_return_existing(
-        TaskSpec(
-            kind="explore",
-            params={
-                "config_path": str(base),
-                "output_dir": str(tmp_path / "explore-clamp"),
-                "base_tput": 800.0,
-                "grid": [
-                    {
-                        "name": "v_fits",
-                        "extra_args": "--max-num-seqs 256",
-                        "extra_envs": {},
-                        "provenance": "default_grid",
-                    }
-                ],
-                "baseline_runtime_sec": 20.0,
-            },
-            idempotency_key="ex-budget-clamp",
-        ),
+    res = await _run_one_variant_explore(
+        sub,
+        tr,
+        tmp_path,
+        _cap_recording_run(granted),
+        key="ex-budget-clamp",
+        output="explore-clamp",
+        row={"name": "v_fits", "extra_args": "--max-num-seqs 256", "extra_envs": {}, "provenance": "default_grid"},
+        baseline_runtime_sec=20.0,
     )
-    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
-    with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
-        side_effect=_fake_run,
-    ):
-        res = await sub.run_task(task)
 
     assert res.result["status"] == "succeeded"
     assert granted, f"the variant should have been admitted (20s expected, ~{usable_sec:.0f}s left)"
@@ -2817,44 +2760,17 @@ async def test_explore_skips_a_variant_the_budget_cannot_fit(
     state.max_minutes = 3.0  # ~60s usable
     sub.shared_state = state
 
-    base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
     granted: list[int] = []
-
-    def _fake_run(cmd, *args, **kwargs):
-        if "--output-dir" not in cmd:
-            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
-        granted.append(int(kwargs["watch"].timeout))
-        slot = Path(cmd[cmd.index("--output-dir") + 1])
-        _fake_workspace(slot, tput=840.0)
-        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
-
-    task, _ = await tr.create_or_return_existing(
-        TaskSpec(
-            kind="explore",
-            params={
-                "config_path": str(base),
-                "output_dir": str(tmp_path / "explore-nofit"),
-                "base_tput": 800.0,
-                "grid": [
-                    {
-                        "name": "v_too_long",
-                        "extra_args": "--max-num-seqs 256",
-                        "extra_envs": {},
-                        "provenance": "default_grid",
-                    }
-                ],
-                "baseline_runtime_sec": 600.0,
-            },
-            idempotency_key="ex-budget-nofit",
-        ),
+    res = await _run_one_variant_explore(
+        sub,
+        tr,
+        tmp_path,
+        _cap_recording_run(granted),
+        key="ex-budget-nofit",
+        output="explore-nofit",
+        row={"name": "v_too_long", "extra_args": "--max-num-seqs 256", "extra_envs": {}, "provenance": "default_grid"},
+        baseline_runtime_sec=600.0,
     )
-    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
-    with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
-        side_effect=_fake_run,
-    ):
-        res = await sub.run_task(task)
 
     assert granted == [], "a variant needing 600s must not start with ~60s left"
     # Measuring nothing because the budget ran out is not the same as variants failing, and it must not be reported as
@@ -2873,7 +2789,7 @@ async def _explore_under_phase_budget(sub_agent_runner, tmp_path, *, phase_left_
     state.baseline_tput = 800.0
     sub.shared_state = state
     base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
+    write_benchmark_yaml(base)
     started: list[int] = []
 
     def _fake_run(cmd, *args, **kwargs):
@@ -2958,7 +2874,7 @@ async def test_explore_leaves_a_variant_the_run_reaped_out_of_the_ledger(
     sub.shared_state = state
 
     base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
+    write_benchmark_yaml(base)
     ran: list[str] = []
 
     def _fake_run(cmd, *args, **kwargs):
@@ -3044,7 +2960,7 @@ async def test_explore_leaves_a_variant_out_when_the_run_reaped_its_grid_warmup(
     sub.shared_state = state
 
     base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
+    write_benchmark_yaml(base)
     ran: list[str] = []
 
     def _fake_run(cmd, *args, **kwargs):
@@ -3112,7 +3028,7 @@ async def test_explore_attributes_a_round_the_run_reaped_before_anything_measure
     sub.shared_state = state
 
     base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
+    write_benchmark_yaml(base)
 
     def _fake_run(cmd, *args, **kwargs):
         if "--output-dir" not in cmd:
@@ -3160,7 +3076,7 @@ async def test_explore_attributes_a_round_the_run_reaped_before_anything_measure
 async def test_explore_executor_empty_grid_returns_failed(sub_agent_runner, tmp_path):
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
+    write_benchmark_yaml(base)
     task, _ = await tr.create_or_return_existing(
         TaskSpec(
             kind="explore",
@@ -3365,7 +3281,7 @@ async def test_explore_executor_sglang_empty_grid_still_fails_with_empty_grid(
     """Inverse of the atom test: an empty grid on sglang/vllm still returns ``error_class='empty_grid'``."""
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base_sglang.yaml"
-    _write_baseline_yaml(base)
+    write_benchmark_yaml(base)
     task, _ = await tr.create_or_return_existing(
         TaskSpec(
             kind="explore",
@@ -3410,7 +3326,7 @@ async def test_explore_executor_measures_and_attributes_authored_levers(
     """Seeded levers reach the runner and return measured attribution, with or without LLM proposals."""
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base_lever_grid.yaml"
-    _write_baseline_yaml(base)
+    write_benchmark_yaml(base)
     sub.shared_state = _lever_state()
     _force_cold_decision(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
@@ -3470,7 +3386,7 @@ async def test_explore_rejects_unsafe_aiter_unified_attn_before_benchmark(
         encoding="utf-8",
     )
     base = tmp_path / "base_sglang.yaml"
-    _write_baseline_yaml(base)
+    write_benchmark_yaml(base)
     config = yaml.safe_load(base.read_text(encoding="utf-8"))
     config["benchmark"]["model"] = str(model)
     config["benchmark"]["precision"] = "fp8"
@@ -3735,7 +3651,7 @@ async def test_explore_executor_historical_failed_and_accepted_rerun(sub_agent_r
     _force_cold_decision(monkeypatch)
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
+    write_benchmark_yaml(base)
     output_dir = tmp_path / "explore-rerun"
 
     def _fake_run(cmd, *args, **kwargs):
@@ -3830,7 +3746,7 @@ async def test_explore_refuses_an_over_budget_winner_in_the_round_that_measured_
     state.latency_budget_ms = budget_ms
     sub.shared_state = state
     base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
+    write_benchmark_yaml(base)
 
     def _fake_run(cmd, *args, **kwargs):
         slot = Path(cmd[cmd.index("--output-dir") + 1])
@@ -3895,7 +3811,7 @@ async def test_an_explore_winner_inside_the_budget_is_promoted_by_writeback(sub_
     state.latency_budget_ms = 5000.0
     sub.shared_state = state
     base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
+    write_benchmark_yaml(base)
 
     def _fake_run(cmd, *args, **kwargs):
         slot = Path(cmd[cmd.index("--output-dir") + 1])
@@ -3949,7 +3865,7 @@ async def _mlperf_round(
     state.baseline_accuracy = 0.72
     sub.shared_state = state
     base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
+    write_benchmark_yaml(base)
 
     def _fake_run(cmd, *args, **kwargs):
         slot = Path(cmd[cmd.index("--output-dir") + 1])
@@ -4046,7 +3962,7 @@ async def test_explore_grades_the_rounds_own_gpu_power_against_the_budget(
     state.power_budget_w = 700.0
     sub.shared_state = state
     base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
+    write_benchmark_yaml(base)
 
     def _fake_run(cmd, *args, **kwargs):
         slot = Path(cmd[cmd.index("--output-dir") + 1])
@@ -4133,7 +4049,7 @@ async def _run_explore_round(
 
     base = tmp_path / "base.yaml"
     if not base.exists():
-        _write_baseline_yaml(base)
+        write_benchmark_yaml(base)
     task, _ = await tr.create_or_return_existing(
         TaskSpec(
             kind="explore",

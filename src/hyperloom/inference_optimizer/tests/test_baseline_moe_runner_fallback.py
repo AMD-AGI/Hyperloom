@@ -12,17 +12,17 @@ executor retries once with the flag dropped.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 import yaml
 
 from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
+
+from ._baseline_fakes import fake_workspace, run_baseline, write_sglang_yaml
 
 _QUARK_TRACEBACK = (
     'File ".../quark/schemes/quark_w4a4_mxfp4_moe.py", line 295, in apply_weights\n'
@@ -73,59 +73,9 @@ def _quark_mxfp4_moe_model_dir(tmp_path: Path) -> str:
     return str(d)
 
 
-def _write_yaml(path: Path, model: str) -> None:
-    cfg = {
-        "benchmark": {
-            "framework": "sglang",
-            "model": model,
-            "precision": "bf16",
-            "run_mode": "local",
-            "envs": {"TP": 1, "CONC": 8, "ISL": 256, "OSL": 256},
-            "timeout_seconds": 600,
-            "profiler": {
-                "torch_profiler": {"enabled": False},
-                "system_profiler": {"enabled": False},
-                "tracelens": {"enabled": False},
-            },
-            "gpu_selection": {"auto": False},
-        }
-    }
-    with path.open("w") as f:
-        yaml.safe_dump(cfg, f)
-
-
-def _fake_workspace(slot: Path, *, tput: float = 1237.0) -> Path:
-    ws = slot / "benchmark_sglang_20260728_010101"
-    ws.mkdir(parents=True)
-    (ws / "benchmark_report.json").write_text(
-        json.dumps(
-            {
-                "success": True,
-                "framework": "sglang",
-                "throughput": {
-                    "request_throughput": tput / 256,
-                    "output_throughput": tput,
-                    "total_token_throughput": tput * 2,
-                    "completed_requests": 64,
-                    "duration_seconds": 25.0,
-                },
-                "latency": {
-                    "ttft": {"mean_ms": 100.0, "p99_ms": 120.0},
-                    "e2el": {"mean_ms": 2000.0, "p99_ms": 2300.0},
-                },
-            }
-        )
-    )
-    return ws
-
-
 def _make_ctx(params: dict) -> SimpleNamespace:
     task = SimpleNamespace(task_id="t-moe-1", params=params)
     return SimpleNamespace(task=task, extra={})
-
-
-def _run(coro):
-    return asyncio.run(coro)
 
 
 # --- _is_moe_runner_rooted_failure -----------------------------------------
@@ -181,28 +131,23 @@ def _sglang_args(cmd) -> str:
     return str(cfg["benchmark"]["envs"].get("EXTRA_SGLANG_ARGS", ""))
 
 
-def test_moe_runner_crash_triggers_flagless_retry(tmp_path, monkeypatch):
-    """A pinned backend that crashes (e.g. a stale recipe/task param, since
-    Hyperloom itself no longer injects one) still gets stripped on retry."""
-    monkeypatch.setenv("GPU_TYPE", "mi300x")
-    model = _moe_model_dir(tmp_path)
-    base = tmp_path / "base.yaml"
-    _write_yaml(base, model)
+def _crash_on_pin(sglang_args: str) -> str | None:
+    return _QUARK_TRACEBACK if "--moe-runner-backend" in sglang_args else None
+
+
+def _run_baseline(tmp_path, model: str, crash_stderr, **params) -> tuple[list[str], dict]:
+    """Run the baseline over a Magpie that fails with ``crash_stderr(sglang_args)`` when it returns text."""
     calls: list[str] = []
 
     def fake_run(cmd, *args, **kwargs):
         sglang_args = _sglang_args(cmd)
         calls.append(sglang_args)
-        if "--moe-runner-backend" in sglang_args:
-            return subprocess.CompletedProcess(cmd, 1, "", _QUARK_TRACEBACK)
-        _fake_workspace(Path(cmd[cmd.index("--output-dir") + 1]))
+        stderr = crash_stderr(sglang_args)
+        if stderr is not None:
+            return subprocess.CompletedProcess(cmd, 1, "", stderr)
+        fake_workspace(Path(cmd[cmd.index("--output-dir") + 1]))
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
-    executor = BaselineExecutor(
-        magpie_python="/opt/venv/bin/python",
-        default_config_path=base,
-        session_dir=tmp_path,
-    )
     ctx = _make_ctx(
         {
             "output_dir": str(tmp_path / "ws"),
@@ -210,14 +155,20 @@ def test_moe_runner_crash_triggers_flagless_retry(tmp_path, monkeypatch):
             "model_path": model,
             "gpu_type": "mi300x",
             "extra_envs": {"RUN_EVAL": "false"},
-            "extra_server_args": "--moe-runner-backend triton",
+            **params,
         }
     )
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        result = _run(executor(ctx))
+    result = run_baseline(write_sglang_yaml(tmp_path / "base.yaml", model), tmp_path, ctx, fake_run)
+    return calls, result
+
+
+def test_moe_runner_crash_triggers_flagless_retry(tmp_path, monkeypatch):
+    """A pinned backend that crashes (e.g. a stale recipe/task param, since
+    Hyperloom itself no longer injects one) still gets stripped on retry."""
+    monkeypatch.setenv("GPU_TYPE", "mi300x")
+    calls, result = _run_baseline(
+        tmp_path, _moe_model_dir(tmp_path), _crash_on_pin, extra_server_args="--moe-runner-backend triton"
+    )
 
     # Warmup crashes on the pinned triton, the retry re-runs warmup + measure flagless.
     assert len(calls) == 3
@@ -229,39 +180,9 @@ def test_moe_runner_crash_triggers_flagless_retry(tmp_path, monkeypatch):
 
 def test_operator_pinned_backend_is_also_dropped_on_retry(tmp_path, monkeypatch):
     monkeypatch.setenv("GPU_TYPE", "mi300x")
-    model = _moe_model_dir(tmp_path)
-    base = tmp_path / "base.yaml"
-    _write_yaml(base, model)
-    calls: list[str] = []
-
-    def fake_run(cmd, *args, **kwargs):
-        sglang_args = _sglang_args(cmd)
-        calls.append(sglang_args)
-        if "--moe-runner-backend" in sglang_args:
-            return subprocess.CompletedProcess(cmd, 1, "", _QUARK_TRACEBACK)
-        _fake_workspace(Path(cmd[cmd.index("--output-dir") + 1]))
-        return subprocess.CompletedProcess(cmd, 0, "ok", "")
-
-    executor = BaselineExecutor(
-        magpie_python="/opt/venv/bin/python",
-        default_config_path=base,
-        session_dir=tmp_path,
+    calls, result = _run_baseline(
+        tmp_path, _moe_model_dir(tmp_path), _crash_on_pin, extra_server_args="--moe-runner-backend triton --foo 1"
     )
-    ctx = _make_ctx(
-        {
-            "output_dir": str(tmp_path / "ws"),
-            "timeout_sec": 10,
-            "model_path": model,
-            "gpu_type": "mi300x",
-            "extra_envs": {"RUN_EVAL": "false"},
-            "extra_server_args": "--moe-runner-backend triton --foo 1",
-        }
-    )
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        result = _run(executor(ctx))
 
     assert len(calls) == 3
     assert all("--moe-runner-backend" not in c for c in calls[1:])
@@ -273,16 +194,6 @@ def test_operator_pinned_backend_is_also_dropped_on_retry(tmp_path, monkeypatch)
 def test_backend_from_other_arg_sources_is_dropped_on_retry(tmp_path, monkeypatch, source):
     """The flag can also arrive via $INFERENCE_OPTIMIZER_SERVER_ARGS or the reference recipe; both are merged after the task params, so the retry must strip the merged result rather than only the params."""
     monkeypatch.setenv("GPU_TYPE", "mi300x")
-    model = _moe_model_dir(tmp_path)
-    base = tmp_path / "base.yaml"
-    _write_yaml(base, model)
-    params = {
-        "output_dir": str(tmp_path / "ws"),
-        "timeout_sec": 10,
-        "model_path": model,
-        "gpu_type": "mi300x",
-        "extra_envs": {"RUN_EVAL": "false"},
-    }
     if source == "operator_env":
         monkeypatch.setenv("INFERENCE_OPTIMIZER_SERVER_ARGS", "--moe-runner-backend triton")
     else:
@@ -292,26 +203,7 @@ def test_backend_from_other_arg_sources_is_dropped_on_retry(tmp_path, monkeypatc
         sd.mkdir(parents=True, exist_ok=True)
         SharedState(session_id="ref", reference_server_args="--moe-runner-backend triton").save(sd)
         monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(sd))
-    calls: list[str] = []
-
-    def fake_run(cmd, *args, **kwargs):
-        sglang_args = _sglang_args(cmd)
-        calls.append(sglang_args)
-        if "--moe-runner-backend" in sglang_args:
-            return subprocess.CompletedProcess(cmd, 1, "", _QUARK_TRACEBACK)
-        _fake_workspace(Path(cmd[cmd.index("--output-dir") + 1]))
-        return subprocess.CompletedProcess(cmd, 0, "ok", "")
-
-    executor = BaselineExecutor(
-        magpie_python="/opt/venv/bin/python",
-        default_config_path=base,
-        session_dir=tmp_path,
-    )
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        result = _run(executor(_make_ctx(params)))
+    calls, result = _run_baseline(tmp_path, _moe_model_dir(tmp_path), _crash_on_pin)
 
     assert "--moe-runner-backend triton" in calls[0]
     assert all("--moe-runner-backend" not in c for c in calls[1:])
@@ -321,39 +213,12 @@ def test_backend_from_other_arg_sources_is_dropped_on_retry(tmp_path, monkeypatc
 def test_quark_checkpoint_with_operator_pinned_backend_recovers(tmp_path, monkeypatch):
     """The original bug shape: on a Quark MX-FP4 checkpoint the gate skips injection, but an operator pin still reaches the server on attempt 1."""
     monkeypatch.setenv("GPU_TYPE", "mi300x")
-    model = _quark_mxfp4_moe_model_dir(tmp_path)
-    base = tmp_path / "base.yaml"
-    _write_yaml(base, model)
-    calls: list[str] = []
-
-    def fake_run(cmd, *args, **kwargs):
-        sglang_args = _sglang_args(cmd)
-        calls.append(sglang_args)
-        if "--moe-runner-backend" in sglang_args:
-            return subprocess.CompletedProcess(cmd, 1, "", _QUARK_TRACEBACK)
-        _fake_workspace(Path(cmd[cmd.index("--output-dir") + 1]))
-        return subprocess.CompletedProcess(cmd, 0, "ok", "")
-
-    executor = BaselineExecutor(
-        magpie_python="/opt/venv/bin/python",
-        default_config_path=base,
-        session_dir=tmp_path,
+    calls, result = _run_baseline(
+        tmp_path,
+        _quark_mxfp4_moe_model_dir(tmp_path),
+        _crash_on_pin,
+        extra_server_args="--moe-runner-backend triton --mem-fraction-static 0.9",
     )
-    ctx = _make_ctx(
-        {
-            "output_dir": str(tmp_path / "ws"),
-            "timeout_sec": 10,
-            "model_path": model,
-            "gpu_type": "mi300x",
-            "extra_envs": {"RUN_EVAL": "false"},
-            "extra_server_args": "--moe-runner-backend triton --mem-fraction-static 0.9",
-        }
-    )
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        result = _run(executor(ctx))
 
     assert "--moe-runner-backend triton" in calls[0]
     assert all("--moe-runner-backend" not in c for c in calls[1:])
@@ -366,38 +231,7 @@ def test_quark_checkpoint_without_pin_never_gets_the_flag(tmp_path, monkeypatch)
     clean on the first attempt (Hyperloom never injects the flag) -- no
     crash, no retry."""
     monkeypatch.setenv("GPU_TYPE", "mi300x")
-    model = _quark_mxfp4_moe_model_dir(tmp_path)
-    base = tmp_path / "base.yaml"
-    _write_yaml(base, model)
-    calls: list[str] = []
-
-    def fake_run(cmd, *args, **kwargs):
-        sglang_args = _sglang_args(cmd)
-        calls.append(sglang_args)
-        if "--moe-runner-backend" in sglang_args:
-            return subprocess.CompletedProcess(cmd, 1, "", _QUARK_TRACEBACK)
-        _fake_workspace(Path(cmd[cmd.index("--output-dir") + 1]))
-        return subprocess.CompletedProcess(cmd, 0, "ok", "")
-
-    executor = BaselineExecutor(
-        magpie_python="/opt/venv/bin/python",
-        default_config_path=base,
-        session_dir=tmp_path,
-    )
-    ctx = _make_ctx(
-        {
-            "output_dir": str(tmp_path / "ws"),
-            "timeout_sec": 10,
-            "model_path": model,
-            "gpu_type": "mi300x",
-            "extra_envs": {"RUN_EVAL": "false"},
-        }
-    )
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        result = _run(executor(ctx))
+    calls, result = _run_baseline(tmp_path, _quark_mxfp4_moe_model_dir(tmp_path), _crash_on_pin)
 
     assert all("--moe-runner-backend" not in c for c in calls)
     assert result["status"] == "succeeded"
@@ -406,35 +240,8 @@ def test_quark_checkpoint_without_pin_never_gets_the_flag(tmp_path, monkeypatch)
 
 def test_fallback_fires_only_once(tmp_path, monkeypatch):
     monkeypatch.setenv("GPU_TYPE", "mi300x")
-    model = _moe_model_dir(tmp_path)
-    base = tmp_path / "base.yaml"
-    _write_yaml(base, model)
-    calls: list[str] = []
-
-    def fake_run(cmd, *args, **kwargs):
-        calls.append(_sglang_args(cmd))
-        # The crash persists even without the flag: no endless retry loop.
-        return subprocess.CompletedProcess(cmd, 1, "", _QUARK_TRACEBACK)
-
-    executor = BaselineExecutor(
-        magpie_python="/opt/venv/bin/python",
-        default_config_path=base,
-        session_dir=tmp_path,
-    )
-    ctx = _make_ctx(
-        {
-            "output_dir": str(tmp_path / "ws"),
-            "timeout_sec": 10,
-            "model_path": model,
-            "gpu_type": "mi300x",
-            "extra_envs": {"RUN_EVAL": "false"},
-        }
-    )
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        result = _run(executor(ctx))
+    # The crash persists even without the flag: no endless retry loop.
+    calls, result = _run_baseline(tmp_path, _moe_model_dir(tmp_path), lambda _args: _QUARK_TRACEBACK)
 
     assert len(calls) == 2
     assert result["status"] == "failed"
@@ -442,34 +249,7 @@ def test_fallback_fires_only_once(tmp_path, monkeypatch):
 
 def test_unrelated_failure_does_not_retry(tmp_path, monkeypatch):
     monkeypatch.setenv("GPU_TYPE", "mi300x")
-    model = _moe_model_dir(tmp_path)
-    base = tmp_path / "base.yaml"
-    _write_yaml(base, model)
-    calls: list[str] = []
-
-    def fake_run(cmd, *args, **kwargs):
-        calls.append(_sglang_args(cmd))
-        return subprocess.CompletedProcess(cmd, 1, "", "CUDA out of memory\n")
-
-    executor = BaselineExecutor(
-        magpie_python="/opt/venv/bin/python",
-        default_config_path=base,
-        session_dir=tmp_path,
-    )
-    ctx = _make_ctx(
-        {
-            "output_dir": str(tmp_path / "ws"),
-            "timeout_sec": 10,
-            "model_path": model,
-            "gpu_type": "mi300x",
-            "extra_envs": {"RUN_EVAL": "false"},
-        }
-    )
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        result = _run(executor(ctx))
+    calls, result = _run_baseline(tmp_path, _moe_model_dir(tmp_path), lambda _args: "CUDA out of memory\n")
 
     assert len(calls) == 1
     assert result["status"] == "failed"

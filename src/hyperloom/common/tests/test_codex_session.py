@@ -254,6 +254,7 @@ def _install_fake_sdk(
             "AsyncCodex": staticmethod(_async_codex),
             "ApprovalMode": _FakeApprovalMode,
             "Sandbox": _FakeSandbox,
+            "CodexError": type("CodexError", (Exception,), {}),
         },
     )
     monkeypatch.setattr(cs, "load_codex_sdk", lambda: fake_sdk)
