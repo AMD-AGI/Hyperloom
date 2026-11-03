@@ -1,0 +1,63 @@
+{
+  "source_day": "2026-07-23",
+  "platform": "MI355X/gfx950",
+  "framework": "sglang origin/main MXFP8",
+  "model": "MiniMax-M3-MXFP8",
+  "operator": "mxfp8_grouped_gemm",
+  "kernel": "_mxfp8_grouped_gemm_kernel",
+  "timed_callable": "GEMM1 a_div=top_k plus GEMM2 a_div=1 weighted",
+  "quant": {
+    "scheme": "mxfp8_ocp_1x32_e8m0",
+    "operand_dtype": "float8_e4m3fn",
+    "scale_dtype": "uint8_e8m0",
+    "block_size": [1, 32],
+    "accumulate": "fp32"
+  },
+  "cases": [
+    {
+      "id": "decode-t1",
+      "regime": "decode",
+      "params": {
+        "tokens": 1,
+        "hidden": 6144,
+        "inter": 384,
+        "experts": 128,
+        "top_k": 4,
+        "alpha": 1.702,
+        "beta": 1.0,
+        "limit": 7.0,
+        "max_relerr": 0.08
+      }
+    },
+    {
+      "id": "decode-t64",
+      "regime": "decode",
+      "params": {
+        "tokens": 64,
+        "hidden": 6144,
+        "inter": 384,
+        "experts": 128,
+        "top_k": 4,
+        "alpha": 1.702,
+        "beta": 1.0,
+        "limit": 7.0,
+        "max_relerr": 0.08
+      }
+    },
+    {
+      "id": "prefill-t16384",
+      "regime": "prefill",
+      "params": {
+        "tokens": 16384,
+        "hidden": 6144,
+        "inter": 384,
+        "experts": 128,
+        "top_k": 4,
+        "alpha": 1.702,
+        "beta": 1.0,
+        "limit": 7.0,
+        "max_relerr": 0.08
+      }
+    }
+  ]
+}
