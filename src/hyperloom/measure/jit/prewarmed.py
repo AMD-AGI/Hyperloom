@@ -21,6 +21,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.outside_facts import AITER_META_DIR_ENV
 from hyperloom.measure.jit.key import plain_build_names, without_card_arch
 
 __all__ = ["CU_NUM", "PREWARM_MANIFEST", "PREWARM_SCHEMA", "build_record", "read_manifest", "unlike_prewarmed"]
@@ -32,7 +33,7 @@ PREWARM_SCHEMA = "hyperloom.aiter_prewarm/1"
 #: What aiter's build reads the card's CU count from (``aiter/jit/utils/build_targets.py``).
 CU_NUM = "CU_NUM"
 #: What the CPU build sets itself: the target (an entry's ``gfx``) and the meta directory it lays.
-_SET_BY_BUILD = frozenset({"GPU_ARCHS", "AITER_META_DIR"})
+_SET_BY_BUILD = frozenset({"GPU_ARCHS", AITER_META_DIR_ENV})
 _READS, _VALUES = "build_variables", "build_environment"
 _MODULES = "modules"
 _SO = ".so"
