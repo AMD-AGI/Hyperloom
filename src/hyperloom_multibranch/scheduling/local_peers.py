@@ -104,7 +104,7 @@ RENDERED_CANONICAL = "canonical.yaml"
 POINTS_DIR = "points"
 #: The Magpie AgentX benchmark of an AgentX session, under ``MB-toolbox``.
 BENCHMARK_FILE = "benchmark.yaml"
-#: A claim's lease on the specialist tools: the runtime renews it every 10 minutes (board #26).
+#: A claim's lease on the specialist tools: the runtime renews it every 10 minutes.
 CLAIM_TTL_SECONDS = 1800.0
 #: The switch the main flow and the measurement renderer read an AgentX workload from
 #: (``hyperloom.common.perf_metric.agentx_enabled``).
@@ -317,7 +317,7 @@ def _canonical(out_dir: Path, workload: Workload, host: MeasurementHost) -> Cano
 def specialist_recall(reports: Path) -> LessonRecall:
     """The specialists' learnings recall: this session's learnings, then past sessions' lessons from the RSI lesson
     pool beside the environment's archive, each retrieval logged in ``reports``; no Experience KB, as MB1 runs on
-    none (board #22)."""
+    none."""
 
     return LessonRecall(pool=LessonPool.from_env(), log=RetrievalLog(reports / LEARNINGS_LOG))
 
@@ -727,7 +727,7 @@ def _sessions_over_source(
 
 def native_trees(environ: Mapping[str, str]) -> dict[str, NativeTree]:
     """The tree each native component's build compiles, in the build sources' checkout of the commit the image
-    installs (#125), by component; none on a host that builds no native code (``HYPERLOOM_BUILD_STORE`` unset).
+    installs, by component; none on a host that builds no native code (``HYPERLOOM_BUILD_STORE`` unset).
 
     The toolbox refuses to start on a host whose checkouts are not in place, so they are read as they are. A recipe
     that builds from the repository root (vLLM's) has no tree to lay out beside the framework's and is left out.

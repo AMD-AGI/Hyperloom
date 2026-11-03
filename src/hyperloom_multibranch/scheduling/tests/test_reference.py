@@ -24,8 +24,8 @@ def test_a_source_carries_the_commit_its_checkout_is_on(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("spec", "error"),
     [
-        ("/shared_nfs/ref/GEAK", "is not NAME=DIR"),
-        ("GEAK Tuning=/shared_nfs/ref", "is not NAME=DIR"),
+        ("/data/ref/GEAK", "is not NAME=DIR"),
+        ("GEAK Tuning=/data/ref", "is not NAME=DIR"),
         ("geak-tuning=", "which is no readable directory"),
         ("geak-tuning=/nowhere-at-all", "which is no readable directory"),
     ],

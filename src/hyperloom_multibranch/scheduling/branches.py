@@ -72,8 +72,8 @@ SPECIALIST_CALL_SECONDS = 60.0
 SPECIALIST_START_SECONDS = 300.0
 #: The K the lifecycle contract gives a specialist that has just started.
 STARTED_K = 1
-#: Clock seconds a repair branch may hold its slot, from its entry into the roster, before it is stopped: two hours,
-#: the session owner's decision (board #54); a repair that waited in the fork desk's queue counts from leaving it.
+#: Clock seconds a repair branch may hold its slot, from its entry into the roster, before it is stopped: two hours.
+#: A repair that waited in the fork desk's queue counts from leaving it.
 REPAIR_BRANCH_SECONDS = 2 * 3600.0
 REPAIR_TIME_LIMIT_REASON = f"a repair branch runs at most {REPAIR_BRANCH_SECONDS / 3600:g} hours"
 #: Clock seconds from its entry into the roster for which the judge may neither stop a repair branch nor lower its K:
