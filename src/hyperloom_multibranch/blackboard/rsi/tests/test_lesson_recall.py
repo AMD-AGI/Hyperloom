@@ -18,7 +18,7 @@ from hyperloom_multibranch.contracts.blackboard.vocab import LearningKind
 from hyperloom_multibranch.blackboard.families import Family, Mechanism
 from hyperloom_multibranch.blackboard.learning_search import LEARNINGS_LOG, NOTES_HEADING, RetrievalLog
 from hyperloom_multibranch.blackboard.rsi.briefing import CrossSessionBriefing
-from hyperloom_multibranch.blackboard.rsi.lesson_recall import LessonRecall, edited_lessons
+from hyperloom_multibranch.blackboard.rsi.lesson_recall import GIST_CHARS, SHOWN_BEFORE, LessonRecall, edited_lessons
 from hyperloom_multibranch.blackboard.rsi.lessons import (
     LessonEvidence,
     LessonPool,
@@ -177,6 +177,27 @@ async def test_a_claim_lists_this_sessions_learnings_then_past_lessons_and_logs_
         "completed",
     )
     assert (asked["source"], asked["past"]) == ("tool", [graph])
+
+
+async def test_a_claim_names_a_lesson_its_launch_was_shown_already_by_its_gist_alone(
+    tmp_path: Path, pool: LessonPool
+) -> None:
+    blackboard = await scripted_session(tmp_path / "blackboard", FakeClock())
+    snapshot = await blackboard.snapshot()
+    graph = lesson(pool, "graph", CORRECTION, evidence=MEASURED)
+    recall = LessonRecall(pool=pool)
+    whole = f"- [past-1, same conditions, measured] {CORRECTION} [{graph}]"
+    query = "cuda graph max batch size"
+
+    await CrossSessionBriefing(blackboard, focus="cuda graph", branch="s1", learnings=recall).startup_brief("c0")
+    again = await recall.about(snapshot, query, branch="s1")
+    elsewhere = await recall.about(snapshot, query, branch="s2")
+    asked = await recall.lines(snapshot, "cuda graph", limit=5, branch="s1")
+    await CrossSessionBriefing(blackboard, focus="moe", branch="s1", learnings=recall).startup_brief("c0")
+    relaunched = await recall.about(snapshot, query, branch="s1")
+
+    assert again == [NOTES_HEADING, f"- {SHOWN_BEFORE} {CORRECTION[: GIST_CHARS - 3]}... [{graph}]"]
+    assert elsewhere == asked == relaunched == [NOTES_HEADING, whole]
 
 
 async def test_the_brief_shows_past_lessons_as_learnt_before(tmp_path: Path, pool: LessonPool) -> None:
