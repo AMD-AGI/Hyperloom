@@ -9,9 +9,7 @@ The caller names the tool and its own parameters. The commit the analysis is abo
 head of the caller's branch in the experiment repository, read here. ``profile_request_id`` is kept only when the
 blackboard holds a PROFILE test of that id on that commit, whichever branch asked for it: a profile describes a commit,
 and ``submit_test`` refuses a second profile of a commit with the id of the first (``profile_exists``). The trace and
-the trace splitter's workload hints are that profile test's own: the caller names neither. The scheduler's own request,
-for the trace the PRELUDE child profiled, is built here too (:func:`root_profile_request`), its hints read from the
-child's point config by the same rule. A ``kernel_tune`` request names a test (``test_request_id``) and gets the
+the trace splitter's workload hints are that profile test's own: the caller names neither. A ``kernel_tune`` request names a test (``test_request_id``) and gets the
 directory its output landed in, resolved inside the session, from the blackboard's record of it, never from the caller.
 An ``upstream_pr_search`` request is about no commit and no test: it names a repository (one the rule pack lists) and what to
 look for, and the service the search asks is the host's, never the caller's.
@@ -26,14 +24,13 @@ from typing import Any, Protocol
 
 from hyperloom_multibranch.contracts.blackboard.interfaces import RecordSearch, UnknownRequest
 from hyperloom_multibranch.contracts.blackboard.records import TestRecord
-from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.toolbox.tools.base import InvalidRequest, ToolRequest
 from hyperloom_multibranch.toolbox.tools.kernel_tune import KERNEL_TUNE_TOOL, LANDED_PARAM, TEST_PARAM, check_params
 from hyperloom_multibranch.toolbox.tools.op_shares import COMMIT_PARAM, PROFILE_REQUEST_PARAM
 from hyperloom_multibranch.toolbox.tools.roofline import ROOFLINE_TOOL, TRACELENS_TOOL
-from hyperloom_multibranch.toolbox.tools.tracelens_report import REPORT_ROUTE, WORKLOAD_HINTS, split_hint
+from hyperloom_multibranch.toolbox.tools.tracelens_report import WORKLOAD_HINTS, split_hint
 from hyperloom_multibranch.toolbox.tools.tune_inputs import POINT_CONFIG_GLOB, read_benchmark
 from hyperloom_multibranch.toolbox.tools.upstream_pr import UPSTREAM_PR_TOOL, build_search
 
@@ -51,9 +48,6 @@ CODE_TEST_REQUIRED = "test_required"
 CODE_TEST_UNKNOWN = "test_unknown"
 CODE_TEST_WITHOUT_OUTPUT = "test_without_output"
 TRACE_INPUT_PARAM = "trace_input"
-ANALYSIS_ROUTE_PARAM = "analysis_route"
-ROOT_PROFILE_JOB_PREFIX = "prelude:"
-TRACE_GLOB = "*.trace.json*"
 SPLIT_HINT_PARAMS = tuple(key for _, key, _ in WORKLOAD_HINTS)
 #: The monitor service an upstream PR search may also read: only the host names one.
 PR_MONITOR_PARAM = "pr_monitor_url"
@@ -264,35 +258,9 @@ async def _tune_request(records: RecordSearch | None, ask: AnalysisAsk, root: Pa
     return ToolRequest(ask.tool, ask.branch, {**ask.params, LANDED_PARAM: str(landed)})
 
 
-def root_profile_request(root: Path | None, commit_id: str, trace_dir: Path, point_config: Path) -> ToolRequest:
-    """The deterministic ``tracelens`` report of the trace the PRELUDE child profiled, for the integration branch.
-
-    ``trace_dir`` and ``point_config`` must lie inside the session directory ``root``. The splitter's hints are read
-    from ``point_config`` by the rule a PROFILE test's own point is read by; the caller names none. Raises
-    RequestRejected: ``invalid_request`` outside the session, ``profile_without_trace`` when ``trace_dir`` holds no trace.
-    """
-    if root is None:
-        raise RequestRejected("this toolbox has no session directory to read the root profile from")
-    trace, point = _in_session(trace_dir, root), _in_session(point_config, root)
-    if trace is None or point is None:
-        raise RequestRejected("the root profile's trace directory and point config must lie inside the session")
-    if next(trace.rglob(TRACE_GLOB), None) is None:
-        raise RequestRejected(f"no {TRACE_GLOB} under {trace_dir}", CODE_PROFILE_WITHOUT_TRACE)
-    params = {
-        ANALYSIS_ROUTE_PARAM: REPORT_ROUTE,
-        COMMIT_PARAM: commit_id,
-        PROFILE_REQUEST_PARAM: "",
-        TRACE_INPUT_PARAM: str(trace),
-        **point_split_hints(point, root),
-    }
-    return ToolRequest(TRACELENS_TOOL, INTEGRATION_BRANCH, params)
-
-
 __all__ = [
     "ANALYSIS_TOOLS",
-    "ROOT_PROFILE_JOB_PREFIX",
     "AnalysisAsk",
     "AnalysisStarter",
     "analysis_request",
-    "root_profile_request",
 ]

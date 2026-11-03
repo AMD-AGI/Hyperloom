@@ -55,15 +55,12 @@ from hyperloom_multibranch.toolbox.analysis import (
     ANALYSIS_TOOLS,
     CODE_NO_EXECUTOR,
     CODE_TOOL_UNAVAILABLE,
-    ROOT_PROFILE_JOB_PREFIX,
     AnalysisAsk,
     analysis_request,
-    root_profile_request,
 )
 from hyperloom_multibranch.toolbox.acceptance import Acceptance, AcceptanceSetup, check_kind
 from hyperloom_multibranch.toolbox.attachments import store_attachment
 from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES, AttemptRunner, Executor, TestJob
-from hyperloom_multibranch.toolbox.hosted_executor import landed_agentx_baseline
 from hyperloom_multibranch.toolbox.kernel_artifacts import KernelVariables
 from hyperloom_multibranch.toolbox.pending_builds import (
     BuildDriver,
@@ -79,7 +76,7 @@ from hyperloom_multibranch.toolbox.long_context import with_root_reading
 from hyperloom_multibranch.toolbox.short_prompt_pool import ShortPromptPool, pooled_result
 from hyperloom_multibranch.toolbox.queue import QueuedTest, QueuePolicy, State, WorkQueue, sandbox_priority
 from hyperloom_multibranch.toolbox.submission_log import LogEntry, SubmissionLog
-from hyperloom_multibranch.toolbox.tools import TRACELENS_TOOL, JobStatus, ToolJobs, ToolRequest
+from hyperloom_multibranch.toolbox.tools import JobStatus, ToolJobs, ToolRequest
 from hyperloom_multibranch.toolbox.tools.op_shares import PROFILE_REQUEST_PARAM
 
 logger = logging.getLogger(__name__)
@@ -495,34 +492,6 @@ class RealToolbox:
         job_id = await jobs.share(request, f"{request.tool}:{profile}")
         self._held_by(branch, job_id)
         return job_id
-
-    async def analyze_root_profile(self, commit_id: str, trace_dir: Path, point_config: Path, *, source_id: str) -> str:
-        """Start the deterministic TraceLens report of the PRELUDE child's trace as job ``prelude:<source_id>``; return its id.
-
-        For the scheduler, not a specialist: ``trace_dir`` and ``point_config`` (whose ``benchmark.envs`` give the
-        splitter its hints) must lie inside the session directory, and ``trace_dir`` must hold a ``*.trace.json*``.
-        The job takes no GPU lease and no slot of any branch; its pointer reaches the integration branch's inbox with the
-        op shares on ``commit_id``, or with none when the report is degraded or failed. A second call with the same
-        ``source_id`` returns the job already started.
-        """
-
-        jobs = self._analysis_jobs(TRACELENS_TOOL)
-        job_id = f"{ROOT_PROFILE_JOB_PREFIX}{source_id}"
-        if jobs.has_job(job_id):
-            return job_id
-        return self.submit_tool(
-            root_profile_request(self.trace_root, commit_id, trace_dir, point_config), job_id=job_id
-        )
-
-    async def read_prelude_baseline(self, run_dir: Path, point_config: Path, *, request_id: str) -> TestResult:
-        """The PRELUDE child's baseline run that landed in ``run_dir``, read as the measured round of a test of the
-        point config ``point_config`` is (:func:`~.hosted_executor.landed_agentx_baseline`), as ``request_id``.
-
-        For the scheduler, which takes it as the AgentX baseline in place of root tests. It reads the files only: no
-        card guard watched that run and no signed bundle backs it.
-        """
-
-        return await asyncio.to_thread(landed_agentx_baseline, run_dir, point_config, request_id)
 
     def tool_status(self, job_id: str) -> JobStatus:
         if self._tools is None:
