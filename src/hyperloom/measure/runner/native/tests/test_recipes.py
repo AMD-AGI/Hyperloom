@@ -115,7 +115,7 @@ def test_a_failed_vllm_runner_preflight_is_the_builders_problem(
 def _vllm_runner_passes(monkeypatch: pytest.MonkeyPatch) -> None:
     def passed(self: VllmBuild) -> None:
         assert (self.gpu_arch, self.disk_gb) == ("gfx950", 20.0)
-        self.abi = {"torch_version": "2.10.0+git8514f05", "hip_version": "7.2.53211"}
+        self.abi = {"torch_version": "2.9.0+rocm7.0", "hip_version": "7.0.1"}
 
     monkeypatch.setattr(VllmBuild, "preflight", passed)
 
@@ -126,7 +126,7 @@ def test_a_passed_vllm_preflight_reports_the_toolchain(monkeypatch: pytest.Monke
 
     checked = vllm_recipe().preflight(tmp_path, "gfx950")
 
-    assert (checked.problem, dict(checked.toolchain)) == (None, {"torch": "2.10.0+git8514f05", "hip": "7.2.53211"})
+    assert (checked.problem, dict(checked.toolchain)) == (None, {"torch": "2.9.0+rocm7.0", "hip": "7.0.1"})
 
 
 def test_a_vllm_builder_without_cmake_or_ninja_fails_as_the_machine(

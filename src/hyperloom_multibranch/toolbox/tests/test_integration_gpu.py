@@ -12,7 +12,7 @@ bundles, the retest beside a full branch, the withdrawals) hold with real measur
 
 Needs SGLang, a model directory and an InferenceX git checkout: ``HL_INTEGRATION_MODEL``, ``HL_INTEGRATION_INFERENCEX``
 and ``HL_INTEGRATION_OUT`` (a directory the test makes its own subdirectory in), and optionally ``HL_INTEGRATION_CARDS``
-(default ``6,7``). Anywhere else the module is skipped.
+(default ``0,1``). Anywhere else the module is skipped.
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ from hyperloom_multibranch.toolbox.tests.integration_round import run_round
 MODEL = os.environ.get("HL_INTEGRATION_MODEL", "")
 INFERENCEX = os.environ.get("HL_INTEGRATION_INFERENCEX", "")
 OUT = os.environ.get("HL_INTEGRATION_OUT", "")
-CARDS = tuple(int(card) for card in os.environ.get("HL_INTEGRATION_CARDS", "6,7").split(","))
+CARDS = tuple(int(card) for card in os.environ.get("HL_INTEGRATION_CARDS", "0,1").split(","))
 USES_REAL_GPUS = True  # keep the host's amd-smi and rocm-smi: see hyperloom.measure.tests.gpu_free_host
 pytestmark = pytest.mark.skipif(
     importlib.util.find_spec("sglang") is None or not Path(MODEL).is_dir() or not Path(INFERENCEX, ".git").exists(),

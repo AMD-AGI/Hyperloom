@@ -6,8 +6,8 @@
 A withdrawn test's card must come back at once. Cancelling the task cannot reach the worker thread that runs the
 sandbox, so unless the backend stops the sandbox itself it keeps measuring to the end and holds its card: the queue has
 freed the slot, the next test (FINAL's, say) waits on a card the toolbox has already given up on, and the signed
-manifests show two sandboxes on one card one after the other, which reads as a placement fault although the allocator
-was right.
+manifests would then list two sandboxes on one card one after the other, which would look like a placement fault
+although the allocator was right.
 """
 
 from __future__ import annotations

@@ -129,5 +129,5 @@ async def test_a_test_that_failed_at_boot_has_its_phases_up_to_the_failure_and_t
     names = [p.name for p in result.phases]
     assert _in_order([*BEFORE_THE_ROUNDS, "server_boot", *AFTER_THE_RUNNER], names), names
     assert not {"warmup", "accuracy_eval", "measured"} & set(names), "nothing ran after the boot that failed"
-    assert [p.seconds for p in result.phases if p.name == "server_boot"][0] == pytest.approx(0.855, abs=0.3)
+    assert [p.seconds for p in result.phases if p.name == "server_boot"][0] == pytest.approx(0.5, abs=0.3)
     _adds_up(result)

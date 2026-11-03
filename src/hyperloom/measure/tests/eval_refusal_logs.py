@@ -34,23 +34,23 @@ future: <Task finished name='Task-2' coro=<tqdm_asyncio.gather.<locals>.wrap_awa
 Traceback (most recent call last):
   File "/opt/venv/lib/python3.10/site-packages/tqdm/asyncio.py", line 76, in wrap_awaitable
     return i, await f
-  File "/opt/mb/venv/lib/python3.10/site-packages/tenacity/asyncio/__init__.py", line 232, in async_wrapped
+  File "/opt/venv/lib/python3.10/site-packages/tenacity/asyncio/__init__.py", line 232, in async_wrapped
     return await copy(fn, *args, **kwargs)  # type: ignore[type-var]
-  File "/opt/mb/venv/lib/python3.10/site-packages/tenacity/asyncio/__init__.py", line 126, in __call__
+  File "/opt/venv/lib/python3.10/site-packages/tenacity/asyncio/__init__.py", line 126, in __call__
     do = await self.iter(retry_state=retry_state)
-  File "/opt/mb/venv/lib/python3.10/site-packages/tenacity/asyncio/__init__.py", line 171, in iter
+  File "/opt/venv/lib/python3.10/site-packages/tenacity/asyncio/__init__.py", line 171, in iter
     result = await action(retry_state)
-  File "/opt/mb/venv/lib/python3.10/site-packages/tenacity/_utils.py", line 130, in inner
+  File "/opt/venv/lib/python3.10/site-packages/tenacity/_utils.py", line 130, in inner
     return call(*args, **kwargs)
-  File "/opt/mb/venv/lib/python3.10/site-packages/tenacity/__init__.py", line 482, in exc_check
+  File "/opt/venv/lib/python3.10/site-packages/tenacity/__init__.py", line 482, in exc_check
     retry_exc.reraise()
-  File "/opt/mb/venv/lib/python3.10/site-packages/tenacity/__init__.py", line 216, in reraise
+  File "/opt/venv/lib/python3.10/site-packages/tenacity/__init__.py", line 216, in reraise
     raise self.last_attempt.result()
   File "/usr/lib/python3.10/concurrent/futures/_base.py", line 451, in result
     return self.__get_result()
   File "/usr/lib/python3.10/concurrent/futures/_base.py", line 403, in __get_result
     raise self._exception
-  File "/opt/mb/venv/lib/python3.10/site-packages/tenacity/asyncio/__init__.py", line 130, in __call__
+  File "/opt/venv/lib/python3.10/site-packages/tenacity/asyncio/__init__.py", line 130, in __call__
     result = await fn(*args, **kwargs)
   File "/tmp/tmp.XXXXXXXXXX/sitecustomize.py", line 277, in _hl_probe_amodel_call
     return await _hl_prev_amodel_call(self, session, sem, messages, **kwargs)

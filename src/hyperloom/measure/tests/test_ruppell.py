@@ -3,8 +3,7 @@
 
 """ruppell in a profile test: when it is built, what the server's environment gains, and what the report keeps.
 
-The tree is the stand-in of :mod:`.ruppell_fixtures`, staged and pinned for the test; the real tree went through the same
-calls on CPU.
+The tree is the stand-in of :mod:`.ruppell_fixtures`, staged and pinned for the test.
 """
 
 from __future__ import annotations
