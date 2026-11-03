@@ -294,12 +294,16 @@ class E2BSandboxProvider:
 
     Args:
         keys: The API key of each role this provider serves; a role without one is refused with ``SandboxDenied``.
-        api_url: The control plane, ``E2B_API_URL`` by default.
-        sandbox_url: The data plane that routes by the ``E2b-Sandbox-Id`` header, ``E2B_SANDBOX_URL`` by default.
+        api_url: The control plane (``E2B_API_URL``).
+        sandbox_url: The data plane that routes by the ``E2b-Sandbox-Id`` header (``E2B_SANDBOX_URL``).
         retry: How control-plane calls are retried, see :class:`RetryPolicy`.
         workspace: The workspace every create names (``agent-sandbox.io/workspace``) unless its metadata names one;
             ``None`` names none, as a Claw grant's key needs. A SaFE key used directly needs it when its user may
             create in more than one workspace, and a ``system-admin`` key always does.
+
+    Both URLs are required. The SDK would otherwise fill them in from its own environment variables or default to the
+    public E2B service, which would then receive the role's key; a blank one raises ``ValueError`` naming its variable,
+    before any request.
 
     Needs ``e2b>=2.53.1``: an older SDK's ``connect`` sends no ``E2b-Sandbox-Id`` header, so a service that routes by
     it cannot serve a reconnected handle.
@@ -311,24 +315,20 @@ class E2BSandboxProvider:
         self,
         keys: Mapping[Role, str],
         *,
-        api_url: str | None = None,
-        sandbox_url: str | None = None,
+        api_url: str,
+        sandbox_url: str,
         retry: RetryPolicy = RetryPolicy(),
         workspace: str | None = None,
     ) -> None:
+        _require_url(api_url, _API_URL_ENV, "control plane")
+        _require_url(sandbox_url, _SANDBOX_URL_ENV, "data plane")
         if workspace is not None and not workspace.strip():
             raise ValueError("workspace is blank; leave it None to name none")
-        self._controls = {role: _Control(self._params(key, api_url, sandbox_url), retry) for role, key in keys.items()}
+        self._controls = {
+            role: _Control({"api_key": key, "retries": 0, "api_url": api_url, "sandbox_url": sandbox_url}, retry)
+            for role, key in keys.items()
+        }
         self._workspace = workspace
-
-    @staticmethod
-    def _params(key: str, api_url: str | None, sandbox_url: str | None) -> dict[str, object]:
-        params: dict[str, object] = {"api_key": key, "retries": 0}
-        if api_url is not None:
-            params["api_url"] = api_url
-        if sandbox_url is not None:
-            params["sandbox_url"] = sandbox_url
-        return params
 
     @classmethod
     def from_environ(cls, environ: Mapping[str, str], *, retry: RetryPolicy = RetryPolicy()) -> E2BSandboxProvider:
@@ -336,12 +336,15 @@ class E2BSandboxProvider:
         ``HYPERLOOM_SANDBOX_WORKSPACE`` (unset or empty: no workspace).
 
         The mapping is only read; the caller decides whether to scrub the keys from the process environment.
+
+        Raises:
+            ValueError: ``E2B_API_URL`` or ``E2B_SANDBOX_URL`` is unset or empty.
         """
         keys = {role: environ[name] for role, name in _KEY_ENV.items() if environ.get(name)}
         return cls(
             keys,
-            api_url=environ.get(_API_URL_ENV),
-            sandbox_url=environ.get(_SANDBOX_URL_ENV),
+            api_url=environ.get(_API_URL_ENV, ""),
+            sandbox_url=environ.get(_SANDBOX_URL_ENV, ""),
             retry=retry,
             workspace=environ.get(_WORKSPACE_ENV) or None,
         )
@@ -443,6 +446,15 @@ class E2BSandboxProvider:
             return found
 
         return sorted((_info(item) for item in control.call(list_all)), key=lambda i: i.sandbox_id)
+
+
+def _require_url(url: str, variable: str, plane: str) -> None:
+    """Refuse a blank service URL, which the SDK would replace with its own default, the public E2B service."""
+    if not url or not url.strip():
+        raise ValueError(
+            f"{variable} is not set: the sandbox service's {plane} URL is required, and the provider does not fall"
+            " back to the e2b SDK's default (the public E2B service)"
+        )
 
 
 def _no_workspace(role: Role, named: str | None, refusal: SandboxDenied) -> str:
