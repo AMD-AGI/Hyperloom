@@ -25,10 +25,17 @@ from pathlib import Path
 import pytest
 
 from hyperloom.measure.runner.bootstrap import BOOTSTRAP_SCRIPT, runner_start_command
-from hyperloom.measure.runner.cache_layout import MANIFEST_NAME, REQUIREMENTS_FILE
+from hyperloom.measure.runner.cache_layout import (
+    LOCAL_SOURCE_DIR,
+    LOCAL_WHEELS_DIR,
+    MANIFEST_NAME,
+    REQUIREMENTS_FILE,
+    SOURCE_ARCHIVE,
+)
 from hyperloom.measure.runner.tests.bootstrap_rig import (
     CacheRef,
     Rig,
+    build_wheel,
     commit_variant,
     copy_cache,
     read_probe,
@@ -39,6 +46,7 @@ from hyperloom.measure.runner.tests.bootstrap_rig import (
 _SPEC = b'{"id": 7}'
 _START = runner_start_command("--spec-wait-sec", "20")
 _LOCK_WHEEL = "lock_pkg-1.0-py3-none-any.whl"
+_RUNNER_MAIN = "src/hyperloom/measure/runner/__main__.py"
 
 
 def _run(
@@ -61,6 +69,12 @@ def _venv_has(work: Path, module: str) -> bool:
     return any((work / "scratch" / "hl-venv").rglob(f"{module}.py"))
 
 
+def _assert_nothing_staged(work: Path) -> None:
+    """No checked copy, no requirements and no venv are left in the scratch directory."""
+    for name in (LOCAL_SOURCE_DIR, LOCAL_WHEELS_DIR, REQUIREMENTS_FILE, "hl-venv"):
+        assert not (work / "scratch" / name).exists(), name
+
+
 def test_the_runner_sees_the_base_and_what_the_lock_installs_comes_first(rig: Rig, tmp_path: Path) -> None:
     done = _run(rig, tmp_path)
     assert done.returncode == 0, done.stderr
@@ -78,13 +92,17 @@ def test_the_runner_sees_the_base_and_what_the_lock_installs_comes_first(rig: Ri
     assert _venv_has(tmp_path, "lock_pkg")
     # A pin the index served only as a source distribution was built into a wheel by the builder, and is installed.
     assert probe["sdist_origin"] == "sdist" and _venv_has(tmp_path, "sdist_pkg")
-    # The runner runs from the cache entry's source, and the commit is the cache entry's.
-    assert probe["runner_file"] == str(rig.source / "src/hyperloom/measure/runner/__main__.py")
+    # The runner runs from the copy of the entry's source unpacked on the sandbox's own disk, never from the cache,
+    # and the commit is the cache entry's.
+    assert probe["runner_file"] == str(tmp_path / "scratch" / LOCAL_SOURCE_DIR / _RUNNER_MAIN)
     assert probe["revision"] == rig.cache.sha
     assert (tmp_path / "out" / "status.json").read_bytes() == _SPEC
-    # What pip installed from is the manifest's wheels, each pinned to the hash the manifest records.
+    # What pip installed from is the local copies of the manifest's wheels, each pinned to the hash the manifest records.
     pins = (tmp_path / "scratch" / REQUIREMENTS_FILE).read_text()
     assert "lock-pkg==1.0" in pins and f"--hash=sha256:{rig.lock_pkg_sha256}" in pins
+    assert (tmp_path / "scratch" / LOCAL_WHEELS_DIR / _LOCK_WHEEL).read_bytes() == (
+        rig.source.parent / "wheels" / _LOCK_WHEEL
+    ).read_bytes()
 
 
 def test_the_runner_gets_its_directories_and_its_own_arguments(rig: Rig, tmp_path: Path) -> None:
@@ -115,9 +133,23 @@ def _delete_manifest(entry: Path) -> None:
     (entry / MANIFEST_NAME).unlink()
 
 
-def _edit_source(entry: Path) -> None:
-    main = entry / "source" / "src/hyperloom/measure/runner/__main__.py"
-    main.write_text(main.read_text() + "\n# edited after the build\n")
+def _damage_archive(entry: Path) -> None:
+    archive = entry / SOURCE_ARCHIVE
+    damaged = bytearray(archive.read_bytes())
+    damaged[600] ^= 0xFF
+    archive.write_bytes(bytes(damaged))
+
+
+def _delete_archive(entry: Path) -> None:
+    (entry / SOURCE_ARCHIVE).unlink()
+
+
+def _older_builders_entry(entry: Path) -> None:
+    """The entry as a builder made it before entries had ``source.tar``: no archive, and a manifest that records none."""
+    (entry / SOURCE_ARCHIVE).unlink()
+    manifest = json.loads((entry / MANIFEST_NAME).read_text())
+    del manifest["source_archive"]
+    (entry / MANIFEST_NAME).write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
 
 
 def _remove_wheels_dir(entry: Path) -> None:
@@ -132,8 +164,10 @@ def _remove_wheels_dir(entry: Path) -> None:
         (_delete_wheel, f"missing wheel {_LOCK_WHEEL} for lock-pkg==1.0"),
         (_truncate_wheel, f"wheel {_LOCK_WHEEL} for lock-pkg==1.0 is "),
         (_delete_manifest, "has no manifest: an unfinished build"),
-        (_edit_source, "is not what the manifest recorded"),
-        (_remove_wheels_dir, "lacks its source or wheels directory"),
+        (_damage_archive, f"{SOURCE_ARCHIVE} is not the archive the manifest records"),
+        (_delete_archive, f"has no {SOURCE_ARCHIVE}"),
+        (_older_builders_entry, f"records no {SOURCE_ARCHIVE}: an older Hyperloom built this entry"),
+        (_remove_wheels_dir, "lacks its wheels directory"),
     ],
 )
 def test_a_cache_entry_that_is_not_whole_is_refused_and_says_what_is_wrong(
@@ -147,7 +181,7 @@ def test_a_cache_entry_that_is_not_whole_is_refused_and_says_what_is_wrong(
     assert (status["state"], status["error_class"]) == ("failed", "runner_start_failed")
     assert "step cache" in status["message"]
     assert message in status["message"]
-    assert not (tmp_path / "scratch").exists()
+    _assert_nothing_staged(tmp_path)
     assert not (tmp_path / "out" / "probe.json").exists()
 
 
@@ -170,7 +204,7 @@ def test_a_cache_or_commit_that_is_not_there_ends_the_start_naming_it(
     status = _status(tmp_path)
     assert "step cache" in status["message"]
     assert message in status["message"]
-    assert not (tmp_path / "scratch").exists()
+    _assert_nothing_staged(tmp_path)
 
 
 def test_without_a_cache_directory_in_the_environment_the_documented_default_is_read(rig: Rig, tmp_path: Path) -> None:
@@ -192,18 +226,86 @@ def test_the_manifest_that_is_pinned_is_accepted(rig: Rig, tmp_path: Path) -> No
     assert done.returncode == 0, done.stderr
 
 
+def _flip_a_byte(path: Path) -> None:
+    damaged = bytearray(path.read_bytes())
+    damaged[len(damaged) // 2] ^= 0xFF
+    path.write_bytes(bytes(damaged))
+
+
 def test_a_wheel_whose_content_is_not_its_hash_installs_nothing_and_leaves_a_status(rig: Rig, tmp_path: Path) -> None:
     cache = copy_cache(rig, tmp_path / "cache")
-    wheel = cache.root / cache.sha / "wheels" / _LOCK_WHEEL
-    damaged = bytearray(wheel.read_bytes())
-    damaged[len(damaged) // 2] ^= 0xFF
-    wheel.write_bytes(bytes(damaged))
+    _flip_a_byte(cache.root / cache.sha / "wheels" / _LOCK_WHEEL)
     done = _run(rig, tmp_path, cache=cache)
     assert done.returncode == 2
-    assert "DO NOT MATCH THE HASHES" in done.stderr
     status = _status(tmp_path)
     assert (status["state"], status["error_class"]) == ("failed", "runner_start_failed")
-    assert "step lock" in status["message"]
+    assert "step cache" in status["message"]
+    assert f"wheel {_LOCK_WHEEL} for lock-pkg==1.0 does not match the hash in the manifest" in status["message"]
+    _assert_nothing_staged(tmp_path)
+    assert not (tmp_path / "out" / "probe.json").exists()
+
+
+def _between_the_check_and_the_venv(work: Path, rig: Rig, command: str) -> dict[str, str]:
+    """A base interpreter that runs ``command`` once, when the script makes the venv: after the cache step has checked
+    and staged the entry, before the venv, the ``.pth``, pip and the runner exist. ``command`` leaves ``work/swapped``."""
+    spy = _write_script(
+        work / "swapping-python",
+        f'#!/bin/sh\ncase "$*" in *"-m venv"*) {command} && touch {work / "swapped"} ;; esac\nexec {rig.base_python} "$@"\n',
+    )
+    return {"HYPERLOOM_BASE_PYTHON": str(spy)}
+
+
+def _a_runner_that_marks(work: Path) -> Path:
+    """A runner ``__main__`` that leaves ``work/tampered-ran`` as soon as it is imported."""
+    tampered = work / "tampered-main.py"
+    tampered.write_text(f"open({str(work / 'tampered-ran')!r}, 'w').write('ran')\n")
+    return tampered
+
+
+def _swap_source_file(entry: Path, work: Path) -> str:
+    return f"cp {_a_runner_that_marks(work)} {entry / 'source' / _RUNNER_MAIN}"
+
+
+def _swap_archive(entry: Path, work: Path) -> str:
+    return f"cp {_a_runner_that_marks(work)} {entry / SOURCE_ARCHIVE}"
+
+
+def _swap_wheel(entry: Path, work: Path) -> str:
+    (work / "house").mkdir()
+    swapped, _ = build_wheel(work / "house", "lock_pkg", "1.0", "ORIGIN = 'swapped'\n")
+    return f"cp {swapped} {entry / 'wheels' / _LOCK_WHEEL}"
+
+
+@pytest.mark.parametrize("swap", [_swap_source_file, _swap_archive, _swap_wheel], ids=["source", "archive", "wheel"])
+def test_a_cache_file_swapped_after_the_check_never_reaches_the_runner_or_pip(
+    rig: Rig, tmp_path: Path, swap: Callable[[Path, Path], str]
+) -> None:
+    cache = copy_cache(rig, tmp_path / "cache")
+    entry = cache.root / cache.sha
+    before = {path: path.read_bytes() for path in (entry / "source" / _RUNNER_MAIN, entry / SOURCE_ARCHIVE)}
+    before[entry / "wheels" / _LOCK_WHEEL] = (entry / "wheels" / _LOCK_WHEEL).read_bytes()
+    done = _run(rig, tmp_path, _between_the_check_and_the_venv(tmp_path, rig, swap(entry, tmp_path)), cache)
+    assert (tmp_path / "swapped").exists(), "the swap did not run"
+    assert [path for path, content in before.items() if path.read_bytes() != content], "nothing in the cache changed"
+    assert done.returncode == 0, done.stderr
+    probe = read_probe(tmp_path / "out")
+    assert probe["runner_file"] == str(tmp_path / "scratch" / LOCAL_SOURCE_DIR / _RUNNER_MAIN)
+    assert not (tmp_path / "tampered-ran").exists(), "the runner imported the swapped file"
+    assert probe["lock_origin"] == "lock", "pip installed the swapped wheel"
+
+
+def test_a_staged_wheel_changed_before_pip_runs_installs_nothing(rig: Rig, tmp_path: Path) -> None:
+    """pip checks the copies it installs against the hashes of the checked manifest as well."""
+    flip = tmp_path / "flip.py"
+    flip.write_text(
+        "import sys\np = sys.argv[1]\nb = bytearray(open(p, 'rb').read())\nb[100] ^= 255\nopen(p, 'wb').write(b)\n"
+    )
+    damage = f"{rig.base_python} {flip} {tmp_path / 'scratch' / LOCAL_WHEELS_DIR / _LOCK_WHEEL}"
+    done = _run(rig, tmp_path, _between_the_check_and_the_venv(tmp_path, rig, damage))
+    assert (tmp_path / "swapped").exists(), "the copy was not changed"
+    assert done.returncode == 2
+    assert "DO NOT MATCH THE HASHES" in done.stderr
+    assert "step lock" in _status(tmp_path)["message"]
     assert not _venv_has(tmp_path, "lock_pkg")
     assert not (tmp_path / "out" / "probe.json").exists()
 

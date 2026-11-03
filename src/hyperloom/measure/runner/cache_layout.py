@@ -4,15 +4,25 @@
 """The runner cache: what the sealed runner installs from, and the one check of it that the builder and the runner share.
 
 A measurement sandbox has no network. Its source and its Python wheels come from a cache directory on shared storage
-that the sandbox mounts read-only; :mod:`hyperloom.measure.runner.cache_build` fills it on a machine that has egress and
-the start-up script (:mod:`hyperloom.measure.runner.bootstrap`) installs from it with no index. One commit's entry is::
+that the sandbox mounts; :mod:`hyperloom.measure.runner.cache_build` fills it on a machine that has egress and the
+start-up script (:mod:`hyperloom.measure.runner.bootstrap`) installs from it with no index. One commit's entry is::
 
-    <cache>/<sha>/source/      the repository tree at that commit (``git archive``), runner.lock included
-    <cache>/<sha>/wheels/      one wheel per pin of ``source/requirements/runner.lock``
-    <cache>/<sha>/bootstrap.sh the start-up script (``BOOTSTRAP_SCRIPT``) of the builder that made or last refreshed
-                               the entry, mode 0755; a template step runs it with ``sh``
-    <cache>/<sha>/manifest     JSON, written last: the commit and its tree, the digest of ``source``, the SHA-256 of
-                               ``bootstrap.sh`` and, for each wheel, its pin, file, size and SHA-256 (see :class:`WheelEntry`)
+    <cache>/<sha>/source.tar   the repository tree at that commit, the ``git archive`` the builder makes with fixed
+                               settings (the same bytes for the same commit), runner.lock included
+    <cache>/<sha>/source/      that archive unpacked; the builder reads it, the sandbox never does
+    <cache>/<sha>/wheels/      one wheel per pin of ``requirements/runner.lock``
+    <cache>/<sha>/bootstrap.sh the start-up script (``BOOTSTRAP_SCRIPT``) of the builder that made the entry, mode 0755;
+                               a template step runs it with ``sh``
+    <cache>/<sha>/manifest     JSON, written last: the commit and its tree, the size and SHA-256 of ``source.tar``, the
+                               digest of ``source``, the SHA-256 of ``bootstrap.sh`` and, for each wheel, its pin, file,
+                               size and SHA-256 (see :class:`WheelEntry`)
+
+The sandbox runs nothing from the cache itself (:func:`stage_entry`). It reads the manifest once; it reads
+``source.tar`` once, hashing the bytes as it reads them, and unpacks those same bytes below its own scratch directory
+only when they are the archive the manifest records; it reads the lock from that copy, copies every wheel the manifest
+lists next to it, hashing each as it copies, and writes the requirements pip installs from the manifest it read. A file
+of the cache that changes after that check never reaches the runner or pip, whoever can write the cache. An entry whose
+manifest records no ``source.tar`` (an older builder made it) is refused.
 
 The sandbox installs exactly the wheels the manifest lists, each pinned to the hash the manifest records
 (:func:`requirements_text`); the builder has checked every one of them against the lock. An entry without a manifest is
@@ -27,26 +37,33 @@ framework image (3.10).
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import re
+import shutil
 import sys
+import tarfile
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 __all__ = [
     "BOOTSTRAP_NAME",
     "CACHE_ENV",
     "DEFAULT_CACHE_DIR",
+    "LOCAL_SOURCE_DIR",
+    "LOCAL_WHEELS_DIR",
     "LOCK_FILE",
     "MANIFEST_NAME",
     "MANIFEST_PIN_ENV",
     "REQUIREMENTS_FILE",
+    "SOURCE_ARCHIVE",
     "SOURCE_DIR",
     "WHEELS_DIR",
     "CacheError",
+    "FileDigest",
     "LockPin",
     "Manifest",
     "TreeDigest",
@@ -61,6 +78,7 @@ __all__ = [
     "parse_lock",
     "requirement_line",
     "requirements_text",
+    "stage_entry",
     "tree_digest",
 ]
 
@@ -75,7 +93,11 @@ MANIFEST_NAME = "manifest"
 BOOTSTRAP_NAME = "bootstrap.sh"
 #: The hash-pinned requirements the sandbox installs from, written below its scratch directory.
 REQUIREMENTS_FILE = "runner-wheels.lock"
+SOURCE_ARCHIVE = "source.tar"
 SOURCE_DIR = "source"
+#: Below the sandbox's scratch directory: the source unpacked from the checked archive, and the checked wheels.
+LOCAL_SOURCE_DIR = "hl-source"
+LOCAL_WHEELS_DIR = "hl-wheels"
 WHEELS_DIR = "wheels"
 LOCK_FILE = "requirements/runner.lock"
 _SCHEMA = 1
@@ -110,6 +132,14 @@ class TreeDigest:
 
 
 @dataclass(frozen=True)
+class FileDigest:
+    """The size and SHA-256 of one file's bytes."""
+
+    size: int
+    sha256: str
+
+
+@dataclass(frozen=True)
 class WheelEntry:
     """One wheel of the cache: the pin it satisfies and the file that does.
 
@@ -128,8 +158,9 @@ class WheelEntry:
 
 @dataclass(frozen=True)
 class Manifest:
-    """What a finished build records. ``git_tree`` is the commit's tree object, ``target`` what the wheels are for and
-    ``bootstrap_sha256`` the hash of the entry's ``bootstrap.sh`` (empty in a manifest written before entries had one)."""
+    """What a finished build records. ``git_tree`` is the commit's tree object, ``target`` what the wheels are for,
+    ``bootstrap_sha256`` the hash of the entry's ``bootstrap.sh`` (empty in a manifest written before entries had one)
+    and ``source_archive`` the size and hash of its ``source.tar`` (``None`` in one written before entries had that)."""
 
     sha: str
     git_tree: str
@@ -137,6 +168,7 @@ class Manifest:
     wheels: tuple[WheelEntry, ...]
     target: dict[str, Any]
     bootstrap_sha256: str = ""
+    source_archive: FileDigest | None = None
 
 
 def canonical_name(name: str) -> str:
@@ -156,6 +188,17 @@ def file_sha256(path: Path) -> str:
         while chunk := handle.read(_CHUNK):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _copy_hashed(path: Path, sink: BinaryIO) -> FileDigest:
+    """Copy the file ``path`` into ``sink`` in chunks; the size and SHA-256 of the bytes copied, which are read once."""
+    digest, size = hashlib.sha256(), 0
+    with path.open("rb") as handle:
+        while chunk := handle.read(_CHUNK):
+            digest.update(chunk)
+            sink.write(chunk)
+            size += len(chunk)
+    return FileDigest(size, digest.hexdigest())
 
 
 def parse_lock(text: str) -> list[LockPin]:
@@ -229,6 +272,7 @@ def manifest_from_json(text: str | bytes) -> Manifest:
         data = json.loads(text)
         if data["schema"] != _SCHEMA:
             raise CacheError(f"the manifest has schema {data['schema']!r}, this reader knows {_SCHEMA}")
+        archive = data.get("source_archive")
         return Manifest(
             data["sha"],
             data["git_tree"],
@@ -236,6 +280,7 @@ def manifest_from_json(text: str | bytes) -> Manifest:
             tuple(WheelEntry(**wheel) for wheel in data["wheels"]),
             dict(data["target"]),
             str(data.get("bootstrap_sha256", "")),
+            None if archive is None else FileDigest(**archive),
         )
     except (ValueError, KeyError, TypeError) as exc:
         raise CacheError(f"the manifest cannot be read: {type(exc).__name__}: {exc}") from exc
@@ -286,9 +331,26 @@ def _bootstrap_problems(entry: Path, manifest: Manifest) -> list[str]:
     return []
 
 
-def _entry_problems(entry: Path, sha: str, manifest: Manifest, verify_hash: bool) -> list[str]:
-    if manifest.sha != sha:
-        return [f"the manifest of {entry} is for commit {manifest.sha}, not {sha}"]
+def _older_builder(entry: Path) -> str:
+    return (
+        f"the manifest of {entry} records no {SOURCE_ARCHIVE}: an older Hyperloom built this entry, and the runner now "
+        f"runs only from a checked archive; build the commit again with this Hyperloom, into a {CACHE_ENV} directory of "
+        "its own"
+    )
+
+
+def _archive_problems(entry: Path, manifest: Manifest, verify_hash: bool) -> list[str]:
+    archive, recorded = entry / SOURCE_ARCHIVE, manifest.source_archive
+    if recorded is None:
+        return [_older_builder(entry)]
+    if not archive.is_file() or archive.stat().st_size != recorded.size:
+        return [f"{archive} is missing or is not the size the manifest records"]
+    if verify_hash and file_sha256(archive) != recorded.sha256:
+        return [f"{archive} does not match the hash in the manifest"]
+    return []
+
+
+def _entry_problems(entry: Path, manifest: Manifest, verify_hash: bool) -> list[str]:
     source, wheels = entry / SOURCE_DIR, entry / WHEELS_DIR
     if not source.is_dir() or not wheels.is_dir():
         return [f"the cache entry {entry} lacks its {SOURCE_DIR} or {WHEELS_DIR} directory"]
@@ -296,28 +358,33 @@ def _entry_problems(entry: Path, sha: str, manifest: Manifest, verify_hash: bool
     if not lock.is_file():
         return [f"the source in {source} has no {LOCK_FILE}"]
     pins = parse_lock(lock.read_text(encoding=_UTF8))
-    problems = _source_problems(source, manifest) + _wheels_problems(wheels, manifest, pins, verify_hash)
+    problems = _archive_problems(entry, manifest, verify_hash) + _source_problems(source, manifest)
+    problems += _wheels_problems(wheels, manifest, pins, verify_hash)
     return problems + (_bootstrap_problems(entry, manifest) if verify_hash else [])
 
 
 def check_entry(entry: Path, sha: str, manifest_pin: str = "", verify_hash: bool = False) -> list[str]:
-    """Every reason the cache entry directory ``entry`` cannot install ``sha`` offline; empty when it can.
+    """Every reason the cache entry directory ``entry`` is not a whole build of ``sha``, as it lies in the cache; empty
+    when it is. This is the builder's check; the sandbox's is :func:`stage_entry`.
 
-    Every wheel the lock pins must be there with its recorded size, the source must be the tree the manifest recorded and
-    the lock the one the wheels were chosen from. The wheels' content is not read unless ``verify_hash``: ``pip`` checks
-    the hash of each wheel it installs against the lock, and the builder reads them all. ``bootstrap.sh`` too is read
-    only with ``verify_hash``: the script that runs this check cannot vouch for itself (see
-    :mod:`hyperloom.measure.runner.bootstrap`).
+    Every wheel the lock pins must be there with its recorded size, ``source.tar`` must be there with its recorded size,
+    the source must be the tree the manifest recorded and the lock the one the wheels were chosen from. The content of
+    the wheels and of ``source.tar`` is not read unless ``verify_hash``, and ``bootstrap.sh`` is read only then: the
+    script that runs the sandbox's check cannot vouch for itself (see :mod:`hyperloom.measure.runner.bootstrap`).
     """
-    return _verified_entry(entry, sha, manifest_pin, verify_hash)[0]
+    problems, manifest = _pinned_manifest(entry, sha, manifest_pin)
+    if manifest is None:
+        return problems
+    try:
+        return _entry_problems(entry, manifest, verify_hash)
+    except (CacheError, ValueError) as exc:
+        return [str(exc)]
 
 
-def _verified_entry(entry: Path, sha: str, manifest_pin: str, verify_hash: bool) -> tuple[list[str], Manifest | None]:
-    """:func:`check_entry`'s problems, and the manifest it read and checked when there are none (``None`` otherwise).
-
-    The manifest is read once: what the caller goes on to use is the object these checks passed, not the file as it is
-    later.
-    """
+def _pinned_manifest(entry: Path, sha: str, manifest_pin: str) -> tuple[list[str], Manifest | None]:
+    """The entry's manifest, read once, when it is there, is the one ``manifest_pin`` names (if it names one) and is of
+    commit ``sha``; otherwise the reasons it is not, and ``None``. What a caller checks and uses is this object, never
+    the file as it is later."""
     manifest_file = entry / MANIFEST_NAME
     if not manifest_file.is_file():
         return [f"the cache entry {entry} has no {MANIFEST_NAME}: an unfinished build"], None
@@ -326,10 +393,11 @@ def _verified_entry(entry: Path, sha: str, manifest_pin: str, verify_hash: bool)
         return [f"the manifest of {entry} is not the one pinned by {MANIFEST_PIN_ENV}"], None
     try:
         manifest = manifest_from_json(raw)
-        problems = _entry_problems(entry, sha, manifest, verify_hash)
-    except (CacheError, ValueError) as exc:
+    except CacheError as exc:
         return [str(exc)], None
-    return problems, None if problems else manifest
+    if manifest.sha != sha:
+        return [f"the manifest of {entry} is for commit {manifest.sha}, not {sha}"], None
+    return [], manifest
 
 
 def requirement_line(name: str, version: str, digests: Iterable[str]) -> str:
@@ -342,38 +410,135 @@ def requirements_text(manifest: Manifest) -> str:
     return "".join(requirement_line(wheel.name, wheel.version, [wheel.sha256]) for wheel in manifest.wheels)
 
 
-def check_cache(root: Path, sha: str, manifest_pin: str = "") -> list[str]:
-    """Every reason the cache below ``root`` cannot install the commit ``sha`` offline; empty when it can."""
-    return _verified_cache(root, sha, manifest_pin)[0]
-
-
-def _verified_cache(root: Path, sha: str, manifest_pin: str) -> tuple[list[str], Manifest | None]:
-    """:func:`check_cache`'s problems, and the manifest it checked when there are none (see :func:`_verified_entry`)."""
+def _entry_dir_problems(root: Path, sha: str) -> list[str]:
     if not is_full_commit(sha):
-        return [f"the source commit {sha!r} is not a full lowercase commit hash"], None
+        return [f"the source commit {sha!r} is not a full lowercase commit hash"]
     if not root.is_dir():
-        return [f"the runner cache {root} does not exist: {CACHE_ENV} names the directory the template mounts"], None
+        return [f"the runner cache {root} does not exist: {CACHE_ENV} names the directory the template mounts"]
     if not (root / sha).is_dir():
-        return [f"the runner cache {root} has no entry for commit {sha}"], None
-    return _verified_entry(root / sha, sha, manifest_pin, verify_hash=False)
+        return [f"the runner cache {root} has no entry for commit {sha}"]
+    return []
 
 
-def _checked(root: str, sha: str, requirements: str) -> list[str]:
-    """What is wrong with the cache; when nothing is, write the requirements file to ``requirements`` (if given) from
-    the manifest the check passed, so a manifest swapped after the check never chooses what pip installs."""
-    problems, manifest = _verified_cache(Path(root), sha, os.environ.get(MANIFEST_PIN_ENV, ""))
-    if manifest is not None and requirements:
-        Path(requirements).parent.mkdir(parents=True, exist_ok=True)
-        Path(requirements).write_text(requirements_text(manifest), encoding=_UTF8)
+def check_cache(root: Path, sha: str, manifest_pin: str = "") -> list[str]:
+    """Every reason the cache below ``root`` has no whole entry of the commit ``sha``; empty when it has
+    (:func:`check_entry`)."""
+    return _entry_dir_problems(root, sha) or check_entry(root / sha, sha, manifest_pin)
+
+
+def _unpack(archive: io.BytesIO, destination: Path) -> None:
+    """Unpack the archive's bytes into the new directory ``destination``. Where this Python has the ``data`` filter (3.12,
+    and the security releases of 3.10 and 3.11), a member that would land outside ``destination`` is refused."""
+    destination.mkdir(parents=True)
+    archive.seek(0)
+    with tarfile.open(fileobj=archive, mode="r:") as tar:
+        tar.extractall(destination, **({"filter": "data"} if hasattr(tarfile, "data_filter") else {}))
+
+
+def _staged_source(entry: Path, manifest: Manifest, destination: Path) -> list[str]:
+    """Unpack the entry's ``source.tar`` into ``destination`` when its bytes, read once, are the archive the manifest
+    records; the reasons they are not."""
+    archive, recorded = entry / SOURCE_ARCHIVE, manifest.source_archive
+    if recorded is None:
+        return [_older_builder(entry)]
+    if not archive.is_file():
+        return [f"the cache entry {entry} has no {SOURCE_ARCHIVE}"]
+    copy = io.BytesIO()
+    found = _copy_hashed(archive, copy)
+    if found != recorded:
+        return [
+            f"{archive} is not the archive the manifest records: {found.size} bytes with SHA-256 {found.sha256}, "
+            f"the manifest has {recorded.size} bytes with {recorded.sha256}"
+        ]
+    _unpack(copy, destination)
+    return []
+
+
+def _staged_wheels(wheels: Path, manifest: Manifest, destination: Path) -> list[str]:
+    """Copy every wheel the manifest lists from ``wheels`` into ``destination``, each hashed as it is copied; the ones
+    whose bytes are not what the manifest records."""
+    destination.mkdir(parents=True)
+    problems: list[str] = []
+    for wheel in manifest.wheels:
+        with (destination / Path(wheel.file).name).open("wb") as sink:
+            found = _copy_hashed(wheels / wheel.file, sink)
+        if found != FileDigest(wheel.size, wheel.sha256):
+            problems.append(
+                f"wheel {wheel.file} for {wheel.name}=={wheel.version} does not match the hash in the manifest"
+            )
     return problems
 
 
-def main(argv: Sequence[str]) -> int:
-    """``python - <cache> <sha> [<requirements>]``: print what is wrong with the cache (at most a few lines) and exit 1;
-    when nothing is, write the requirements file the sandbox installs from, if a path is given, and exit 0."""
-    root, sha, *requirements = argv
+def _stage(entry: Path, manifest: Manifest, scratch: Path) -> list[str]:
+    wheels, source = entry / WHEELS_DIR, scratch / LOCAL_SOURCE_DIR
+    if not wheels.is_dir():
+        return [f"the cache entry {entry} lacks its {WHEELS_DIR} directory"]
+    problems = _staged_source(entry, manifest, source)
+    if problems:
+        return problems
+    lock = source / LOCK_FILE
+    if not lock.is_file():
+        return [f"the source of {entry} has no {LOCK_FILE}"]
+    pins = parse_lock(lock.read_text(encoding=_UTF8))
+    problems = _wheels_problems(wheels, manifest, pins, verify_hash=False)
+    problems = problems or _staged_wheels(wheels, manifest, scratch / LOCAL_WHEELS_DIR)
+    if not problems:
+        (scratch / REQUIREMENTS_FILE).write_text(requirements_text(manifest), encoding=_UTF8)
+    return problems
+
+
+def _remove(paths: Iterable[Path]) -> None:
+    for path in paths:
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        else:
+            path.unlink(missing_ok=True)
+
+
+def stage_entry(root: Path, sha: str, scratch: Path, manifest_pin: str = "") -> list[str]:
+    """Check the cache entry of ``sha`` below ``root`` on the sandbox's own disk, and stage what the runner runs from it
+    below ``scratch``; every reason it cannot, empty when it did.
+
+    The manifest is read once (:func:`_pinned_manifest`); ``source.tar`` is read once and unpacked into
+    :data:`LOCAL_SOURCE_DIR` only when those bytes are the archive the manifest records; the lock is read from that copy;
+    every wheel the manifest lists is copied into :data:`LOCAL_WHEELS_DIR`, hashed as it is copied; and
+    :data:`REQUIREMENTS_FILE` pins those wheels to the hashes of the manifest that was read. Nothing of the cache is read
+    after that, so what the runner imports and pip installs is what was checked. When anything is wrong, none of the
+    three is left below ``scratch``.
+    """
+    made = [scratch / LOCAL_SOURCE_DIR, scratch / LOCAL_WHEELS_DIR, scratch / REQUIREMENTS_FILE]
+    _remove(made)
+    staged = False
     try:
-        problems = _checked(root, sha, "".join(requirements))
+        problems = _entry_dir_problems(root, sha)
+        if not problems:
+            problems, manifest = _pinned_manifest(root / sha, sha, manifest_pin)
+            if manifest is not None:
+                problems = _stage(root / sha, manifest, scratch)
+        staged = not problems
+        return problems
+    except (CacheError, ValueError, tarfile.TarError) as exc:
+        return [str(exc)]
+    finally:
+        if not staged:
+            _remove(made)
+
+
+def _checked(root: str, sha: str, scratch: str) -> list[str]:
+    """What is wrong with the cache: the sandbox's check, which also stages what the runner runs (:func:`stage_entry`),
+    when ``scratch`` is given, else the check of the entry as it lies in the cache (:func:`check_cache`)."""
+    pin = os.environ.get(MANIFEST_PIN_ENV, "")
+    if scratch:
+        return stage_entry(Path(root), sha, Path(scratch), pin)
+    return check_cache(Path(root), sha, pin)
+
+
+def main(argv: Sequence[str]) -> int:
+    """``python - <cache> <sha> [<scratch>]``: print what is wrong with the cache (at most a few lines) and exit 1; when
+    nothing is, stage what the runner runs below ``scratch`` if it is given (:func:`stage_entry`) and exit 0."""
+    root, sha, *scratch = argv
+    try:
+        problems = _checked(root, sha, "".join(scratch))
     except OSError as exc:
         problems = [f"the runner cache could not be read: {exc}"]
     for problem in problems[:_SHOWN]:
