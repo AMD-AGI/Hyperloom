@@ -14,6 +14,7 @@ import gzip
 import json
 import os
 import re
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -102,6 +103,31 @@ def test_a_tree_that_is_not_staged_or_not_the_pinned_one_runs_untraced(tmp_path,
     assert "not staged" in ruppell.prepare([_point(tmp_path)], {**host, "HYPERLOOM_RUNNER_CACHE": str(tmp_path / "x")})
     monkeypatch.setattr(ruppell, "RUPPELL_TREE_SHA256", "0" * 64)
     assert "holds" in ruppell.prepare([_point(tmp_path)], host)
+    assert list((tmp_path / "tmp").iterdir()) == [], "the copy is removed"
+
+
+def test_the_tree_built_is_the_checked_copy_not_the_cache_as_it_is_after_the_copy(tmp_path, host, monkeypatch):
+    """The staged ``build.sh`` swapped for the time of the copy and put back afterwards: the cache's tree checks out
+    again, but the copy does not, so nothing is built."""
+    tree = ruppell.entry_dir(Path(host["HYPERLOOM_RUNNER_CACHE"]), COMMIT) / ruppell.SOURCE_DIR
+    build = tree / "runtime" / "build.sh"
+    genuine, ran = build.read_text(), tmp_path / "swapped-build-ran"
+    copytree = shutil.copytree
+
+    def copy_while_swapped(source, destination, *args, **options):
+        if Path(source) != tree:  # copytree's own call for a subdirectory
+            return copytree(source, destination, *args, **options)
+        build.write_text(genuine.replace("set -e\n", f"set -e\ntouch {ran}\n", 1))
+        try:
+            return copytree(source, destination, *args, **options)
+        finally:
+            build.write_text(genuine)
+
+    monkeypatch.setattr(ruppell.shutil, "copytree", copy_while_swapped)
+    said = ruppell.prepare([_point(tmp_path)], host)
+
+    assert isinstance(said, str) and said.startswith("ruppell: skipped (the copy of "), said
+    assert not ran.exists(), "the swapped build.sh ran"
     assert list((tmp_path / "tmp").iterdir()) == [], "the copy is removed"
 
 

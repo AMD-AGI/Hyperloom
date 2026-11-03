@@ -182,8 +182,16 @@ async def test_a_run_past_its_time_is_killed_with_what_it_started(tmp_path: Path
     assert [recorded.tokens for recorded in usage.recorded] == [TokenCounts(10, 40)]
     assert child.exists()
     for pid in (json.loads(record.read_text(encoding="utf-8"))["pid"], int(child.read_text(encoding="utf-8"))):
-        with pytest.raises(ProcessLookupError):
-            os.kill(pid, 0)
+        assert _ended(pid)
+
+
+def _ended(pid: int) -> bool:
+    # Under a PID 1 that reaps nothing, a killed orphan stays a zombie, which `os.kill(pid, 0)` still finds.
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return True
+    return stat.rsplit(") ", 1)[1].startswith("Z")
 
 
 async def test_a_model_call_the_gateway_refuses_ends_the_attempt_naming_the_api_error(tmp_path: Path) -> None:

@@ -10,24 +10,27 @@ runner. The steps, each of which ends the script with ``runner_start_failed`` wh
 
 1. The cache. A measurement sandbox has no network: there is no git, no package index and no pip configuration in
    play. The commit's source and every wheel ``requirements/runner.lock`` pins are in the runner cache, a directory on
-   shared storage that the template mounts read-only (``HYPERLOOM_RUNNER_CACHE``, ``/runner-cache`` when unset; layout
-   and builder in :mod:`hyperloom.measure.runner.cache_layout` and :mod:`hyperloom.measure.runner.cache_build`).
-   ``HYPERLOOM_SOURCE_SHA`` (a full commit hash) names the entry. The script first checks it with the sandbox's own
-   interpreter in isolated mode (``-I``): the entry has a manifest (a build that did not finish has none), the source is
-   the tree the manifest recorded, and every pinned wheel is there with its recorded size. What is missing is named in
-   the failure. The same step writes ``$HYPERLOOM_SCRATCH_DIR/runner-wheels.lock``, the manifest's wheels each pinned to
-   its recorded hash.
+   shared storage that the template mounts (``HYPERLOOM_RUNNER_CACHE``, ``/runner-cache`` when unset; layout and builder
+   in :mod:`hyperloom.measure.runner.cache_layout` and :mod:`hyperloom.measure.runner.cache_build`).
+   ``HYPERLOOM_SOURCE_SHA`` (a full commit hash) names the entry. The script checks it with the sandbox's own
+   interpreter in isolated mode (``-I``), on the sandbox's own disk (``cache_layout.stage_entry``): the entry has a
+   manifest (a build that did not finish has none), its ``source.tar`` is read once and its bytes are the archive the
+   manifest records, and every pinned wheel is there. The archive is unpacked into ``$HYPERLOOM_SCRATCH_DIR/hl-source``,
+   the lock is read from that copy, and every wheel is copied into ``$HYPERLOOM_SCRATCH_DIR/hl-wheels`` and matched to
+   the hash the manifest records as it is copied. What is wrong is named in the failure. The same step writes
+   ``$HYPERLOOM_SCRATCH_DIR/runner-wheels.lock``, the manifest's wheels each pinned to its recorded hash.
 2. A virtual environment, ``$HYPERLOOM_SCRATCH_DIR/hl-venv``, made by ``HYPERLOOM_BASE_PYTHON`` (``python3``). In the
    framework image ``python3`` is ``/opt/venv``, and a venv made with ``--system-site-packages`` does not see what is
-   installed there (torch, sglang, aiter), so the script drops a ``.pth`` file into the new venv that adds the source
-   (``<entry>/source/src``) and then the base interpreter's site directories, with their own ``.pth`` files processed, as
-   ``site.addsitedir`` does. The venv's own packages come first.
-3. ``pip install --isolated --no-index --find-links <entry>/wheels --only-binary=:all: --require-hashes --no-deps -r
-   runner-wheels.lock`` into that venv, after the ``.pth`` is in place: a pin the base already has is satisfied and left
-   alone, every other one is installed from the cache and must match its hash. ``--isolated`` makes pip ignore
-   ``PIP_INDEX_URL``, ``PIP_FIND_LINKS`` and the like, so the template's environment cannot point it anywhere else.
+   installed there (torch, sglang, aiter), so the script drops a ``.pth`` file into the new venv that adds the checked
+   copy of the source (``hl-source/src``) and then the base interpreter's site directories, with their own ``.pth``
+   files processed, as ``site.addsitedir`` does. The venv's own packages come first.
+3. ``pip install --isolated --no-index --find-links $HYPERLOOM_SCRATCH_DIR/hl-wheels --only-binary=:all:
+   --require-hashes --no-deps -r runner-wheels.lock`` into that venv, after the ``.pth`` is in place: a pin the base
+   already has is satisfied and left alone, every other one is installed from the checked copies and must match its
+   hash again. ``--isolated`` makes pip ignore ``PIP_INDEX_URL``, ``PIP_FIND_LINKS`` and the like, so the template's
+   environment cannot point it anywhere else.
 4. A check that the runner imports, so a broken install ends the script instead of leaving the application waiting. Python
-   writes its bytecode below ``$HYPERLOOM_SCRATCH_DIR/pycache``, never into the cache's source tree.
+   writes its bytecode below ``$HYPERLOOM_SCRATCH_DIR/pycache``.
 5. ``HYPERLOOM_CODE_REVISION`` is set to the commit and the runner replaces the script. The runner's remaining
    arguments are the script's own (``--spec-wait-sec`` and so on); ``--in``, ``--out`` and ``--scratch`` come from
    ``HYPERLOOM_IN_DIR``, ``HYPERLOOM_OUT_DIR`` and ``HYPERLOOM_SCRATCH_DIR`` (``/in``, ``/out``, ``/scratch``).
@@ -43,7 +46,33 @@ needs it; the runner takes it from its own environment.
 
 When the template sets ``HYPERLOOM_RUNNER_CACHE_MANIFEST_SHA256``, only the entry whose manifest file has that SHA-256 is
 accepted: the host takes the value from the builder's result and so binds the sandbox to the build it made. Without it the
-manifest vouches only for the entry it sits in, so the cache directory must then be writable by the builder alone.
+manifest vouches only for the entry it sits in, and anyone who can write the cache can write a manifest.
+
+What holds, for operators. After step 1 nothing the runner or pip runs comes from the cache unchecked: the runner's code,
+every module it imports later included, comes from the copy unpacked on the sandbox's disk from bytes that matched the
+manifest, and pip installs the copies of the wheels that matched it. A file of the entry that changes after the check (in
+``source/``, ``source.tar``, a wheel or the manifest) never reaches the runner or pip, so for the runner's code and
+wheels it no longer matters who else can write the cache once the check has run. Later in a test the runner reads two
+more things from the cache:
+
+- The ruppell tree (``<cache>/tools/ruppell-<commit>/source``, :mod:`hyperloom.measure.ruppell`), the one other piece of
+  code, which a profile test builds and runs in the measured server. The test copies the tree into its own directory
+  first and checks the copy against :data:`~hyperloom.measure.ruppell.RUPPELL_TREE_SHA256`, so what is built is the
+  pinned tree whatever the cache holds before, during or after the copy.
+- The prompts of an evalset (``<cache>/evalsets/<key>``, :mod:`hyperloom.measure.short_prompts.staging`), data and
+  never code. The check reads the prompts file the entry's manifest names and compares it with the SHA-256 the plan
+  names; the test then loads ``data/prompts.jsonl`` from the cache again. So whoever can write the cache can still
+  change the prompts a test sends.
+
+What that does not cover:
+
+- The check runs inside the script, so it vouches for the entry only when the script and the manifest it reads are the
+  builder's. They are, whoever can write the cache, when the template pins the manifest and the script is the
+  template's own (:func:`runner_start_command`) or the entry's copy checked by :func:`runner_start_shell_line` (below);
+  without the pin, or with the plain ``sh .../bootstrap.sh`` step, only when no one but the builder can write the cache.
+- The checked copies sit in the sandbox's scratch directory, which the sandbox's own account can write, and the server
+  the runner measures (the inference server, a repro case) runs as that same account in the same sandbox. What keeps
+  that server away from the runner's code and key is the account and the sandbox, not the cache.
 
 ``BOOTSTRAP_SCRIPT`` is POSIX ``sh`` with a ``#!/bin/sh`` line, so it runs the same whether a template hands it over as
 a file or as the argument of ``sh -c``; one text serves the hosted template and the stand-in the contract suite runs.
@@ -57,11 +86,11 @@ SHA-256 the entry's manifest records (:mod:`hyperloom.measure.runner.cache_build
 What that trusts, for operators: the template pins the manifest (``HYPERLOOM_RUNNER_CACHE_MANIFEST_SHA256``) and the
 manifest pins ``bootstrap.sh``, but the script is what checks the manifest, so it can check nothing before it runs: a
 ``bootstrap.sh`` replaced in the cache runs, pin or no pin. That plain step is therefore sound only when the cache is
-writable by its builder alone (the sandbox mounts it read-only; no other account on the shared storage may write it).
-Where that cannot be promised, the step checks the chain first, with the one line :func:`runner_start_shell_line`
-returns: it copies the manifest and ``bootstrap.sh`` out of the cache, checks the copied manifest against the pin and
-the copied script against the hash that manifest records (``sha256sum -c``), and only then runs the checked copy, so a
-file swapped after the check is never the one that runs. A missing pin, a missing file or a hash that differs ends the
+writable by its builder alone (no other account on the shared storage may write it, and the sandbox mounts it
+read-only). Where that cannot be promised, the step checks the chain first, with the one line
+:func:`runner_start_shell_line` returns: it copies the manifest and ``bootstrap.sh`` out of the cache, checks the copied
+manifest against the pin and the copied script against the hash that manifest records (``sha256sum -c``), and only then
+runs the checked copy, so a file swapped after the check is never the one that runs. A missing pin, a missing file or a hash that differs ends the
 step with the same ``runner_start_failed`` status and exit 2 as a failing step of the script.
 
 A template step must return. A sandbox template's steps run before the sandbox service starts its own agent in the
@@ -159,15 +188,14 @@ step() {
 }
 
 [ -n "$SHA" ] || refuse cache "HYPERLOOM_SOURCE_SHA is not set"
-step cache "$BASE_PY" -I - "$CACHE" "$SHA" "$REQS" <<'PY'
+step cache "$BASE_PY" -I - "$CACHE" "$SHA" "$SCRATCH" <<'PY'
 @CACHE_CHECK@
 PY
-SRC=$CACHE/$SHA/source
-WHEELS=$CACHE/$SHA/wheels
+SRC=$SCRATCH/@LOCAL_SOURCE@
+WHEELS=$SCRATCH/@LOCAL_WHEELS@
 export HYPERLOOM_CODE_REVISION=$SHA
 export PYTHONPYCACHEPREFIX=$SCRATCH/pycache
 
-step scratch mkdir -p "$SCRATCH"
 step venv "$BASE_PY" -m venv --clear "$VENV"
 step base-packages "$VENV/bin/python" - "$BASE_PY" "$SRC/src" <<'PY'
 import json, os, subprocess, sys, sysconfig
@@ -198,6 +226,8 @@ BOOTSTRAP_SCRIPT = (
     _SCRIPT.replace("@CACHE_ENV@", cache_layout.CACHE_ENV)
     .replace("@DEFAULT_CACHE@", cache_layout.DEFAULT_CACHE_DIR)
     .replace("@REQUIREMENTS_FILE@", cache_layout.REQUIREMENTS_FILE)
+    .replace("@LOCAL_SOURCE@", cache_layout.LOCAL_SOURCE_DIR)
+    .replace("@LOCAL_WHEELS@", cache_layout.LOCAL_WHEELS_DIR)
     .replace("@CACHE_CHECK@", Path(cache_layout.__file__).read_text(encoding="utf-8").rstrip("\n"))
 )
 

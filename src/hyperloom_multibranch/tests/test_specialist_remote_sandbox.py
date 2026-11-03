@@ -98,6 +98,28 @@ async def test_kill_ends_one_command_and_stop_every_command(tmp_path):
     assert marked_pids(str(remote.root)) == []
 
 
+async def test_a_launcher_and_command_left_as_zombies_end_lost(tmp_path):
+    # A sandbox whose PID 1 reaps nothing keeps a killed launcher as a zombie, which `kill -0` still finds.
+    remote = _remote(tmp_path)
+    process = await remote.start("sleep 300", tmp_path, {})
+    pid_file = remote.root / "run" / "1.pid"
+    launcher, command = map(int, pid_file.read_text().split())
+    holder = await asyncio.create_subprocess_exec(
+        "sh", "-c", "sleep 0 & echo $!; exec sleep 30", stdout=asyncio.subprocess.PIPE
+    )
+    zombie = int(await holder.stdout.readline())
+    pid_file.write_text(f"{zombie} {zombie}")
+    os.kill(launcher, signal.SIGKILL)
+    os.kill(command, signal.SIGKILL)
+    try:
+        await _ended(process)
+    finally:
+        holder.kill()
+        await holder.wait()
+
+    assert process.returncode == LOST
+
+
 async def test_a_command_whose_launcher_is_gone_without_an_exit_code_ends_lost(tmp_path):
     remote = _remote(tmp_path)
     process = await remote.start("sleep 300", tmp_path, {})

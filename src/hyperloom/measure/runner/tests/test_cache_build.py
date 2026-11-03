@@ -14,11 +14,12 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 
@@ -36,6 +37,7 @@ from hyperloom.measure.runner.cache_build import (
 from hyperloom.measure.runner.cache_layout import (
     CACHE_ENV,
     MANIFEST_NAME,
+    SOURCE_ARCHIVE,
     CacheError,
     LockPin,
     check_cache,
@@ -100,7 +102,78 @@ def test_a_build_exports_the_commit_with_its_wheels_and_a_manifest_that_checks_o
     manifest = json.loads((entry.path / MANIFEST_NAME).read_text())
     assert manifest["git_tree"] == _git(rig.repo, "rev-parse", f"{rig.cache.sha}^{{tree}}")
     assert manifest["source"]["sha256"] == tree_digest(entry.path / "source").sha256
+    archive = entry.path / SOURCE_ARCHIVE
+    assert manifest["source_archive"] == {"size": archive.stat().st_size, "sha256": _digest(archive)}
+    with tarfile.open(archive) as members:
+        assert {member.name for member in members if member.isfile()} == files
     assert _names(cache) == {rig.cache.sha, f".{rig.cache.sha}.lock"}
+
+
+def _archive_from_git(repo: Path, sha: str, *settings: str) -> bytes:
+    """What ``git archive`` writes for ``sha`` with ``settings`` (``-c name=value`` pairs) over what ``repo`` configures."""
+    return subprocess.run(
+        ["git", *settings, "-C", str(repo), "archive", "--format=tar", sha], check=True, capture_output=True
+    ).stdout
+
+
+_FIXED = ("-c", "tar.umask=0022", "-c", "core.autocrlf=false", "-c", "core.eol=lf")
+
+
+def _hostile_attributes(other: Path, sha: str, home: Path, monkeypatch: pytest.MonkeyPatch) -> list[bytes]:
+    """Give the builder of the clone ``other`` attributes of its own, outside the commit: the clone's
+    ``info/attributes``, then a global attributes file (``~/.config/git/attributes``, with ``home`` as ``HOME``). What
+    ``git archive`` with the fixed settings writes for ``sha`` after each of the two is added."""
+    info = other / ".git" / "info"
+    info.mkdir(exist_ok=True)
+    (info / "attributes").write_text("*.py text eol=crlf\n")
+    written = [_archive_from_git(other, sha, *_FIXED)]
+    monkeypatch.setenv("HOME", str(home))
+    for name in ("XDG_CONFIG_HOME", "GIT_CONFIG_GLOBAL"):
+        monkeypatch.delenv(name, raising=False)
+    (home / ".config" / "git").mkdir(parents=True)
+    (home / ".config" / "git" / "attributes").write_text("__init__.py export-ignore\n")
+    written.append(_archive_from_git(other, sha, *_FIXED))
+    return written
+
+
+def test_the_source_archive_is_the_same_bytes_for_the_same_commit_whoever_builds_it(
+    rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = ensure_runner_cache(rig.repo, rig.cache.sha, tmp_path / "first", rig.build_options())
+    reference = _archive_from_git(rig.repo, rig.cache.sha, *_FIXED)
+    # Another builder: a clone whose own settings would change what git archive writes, attributes of its own outside
+    # the commit (the clone's info/attributes and a global attributes file), and another umask.
+    other = tmp_path / "other-repo"
+    shutil.copytree(rig.repo, other)
+    for name, value in (("tar.umask", "0077"), ("core.autocrlf", "true")):
+        _git(other, "config", name, value)
+    assert _archive_from_git(other, rig.cache.sha) != _archive_from_git(rig.repo, rig.cache.sha)
+    layers = _hostile_attributes(other, rig.cache.sha, tmp_path / "home", monkeypatch)
+    assert len({reference, *layers}) == 3, "an attributes layer does not change what git archive writes"
+    # The system's attributes (/etc/gitattributes) are not a file a test may write: the git that makes the archive is
+    # checked to be told to skip them, and the system's configuration with them.
+    archives: list[dict[str, str | None]] = []
+    run = cache_build._run
+
+    def recording(command: Sequence[str], what: str, env: Mapping[str, str] | None = None) -> str:
+        if "archive" in command:
+            archives.append({name: (env or {}).get(name) for name in ("GIT_ATTR_NOSYSTEM", "GIT_CONFIG_NOSYSTEM")})
+        return run(command, what, env)
+
+    monkeypatch.setattr(cache_build, "_run", recording)
+    umask = os.umask(0o027)
+    try:
+        second = ensure_runner_cache(other, rig.cache.sha, tmp_path / "second", rig.build_options())
+    finally:
+        os.umask(umask)
+    archive = (first.path / SOURCE_ARCHIVE).read_bytes()
+    assert (second.path / SOURCE_ARCHIVE).read_bytes() == archive == reference
+    assert archives == [{"GIT_ATTR_NOSYSTEM": "1", "GIT_CONFIG_NOSYSTEM": "1"}]
+    first_manifest, second_manifest = (json.loads((e.path / MANIFEST_NAME).read_text()) for e in (first, second))
+    assert first_manifest["source_archive"] == second_manifest["source_archive"]
+    # The unpacked tree keeps the builder's umask: nothing in it is writable by the group or readable by others.
+    modes = {stat.S_IMODE(path.lstat().st_mode) for path in (second.path / "source").rglob("*")}
+    assert modes and all(mode & 0o027 == 0 for mode in modes), sorted(oct(mode) for mode in modes)
 
 
 def test_a_pin_the_index_serves_only_as_a_source_distribution_is_built_and_the_sdist_recorded(
@@ -181,12 +254,28 @@ def _name_another_tree(entry: Path) -> None:
     (entry / MANIFEST_NAME).write_text(json.dumps(manifest))
 
 
+def _damage_archive_keeping_its_size(entry: Path) -> None:
+    archive = entry / SOURCE_ARCHIVE
+    damaged = bytearray(archive.read_bytes())
+    damaged[600] ^= 0xFF
+    archive.write_bytes(bytes(damaged))
+
+
+def _as_an_older_builder_left_it(entry: Path) -> None:
+    (entry / SOURCE_ARCHIVE).unlink()
+    manifest = json.loads((entry / MANIFEST_NAME).read_text())
+    del manifest["source_archive"]
+    (entry / MANIFEST_NAME).write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+
+
 @pytest.mark.parametrize(
     ("damage", "difference"),
     [
         (_edit_source, "is not what the manifest recorded"),
         (_damage_wheel_keeping_its_size, f"wheel {_LOCK_WHEEL} for lock-pkg==1.0 does not match the hash"),
         (_name_another_tree, "its manifest records tree " + "f" * 40),
+        (_damage_archive_keeping_its_size, f"{SOURCE_ARCHIVE} does not match the hash in the manifest"),
+        (_as_an_older_builder_left_it, f"records no {SOURCE_ARCHIVE}: an older Hyperloom built this entry"),
     ],
 )
 def test_an_entry_that_differs_from_what_a_build_writes_is_refused_and_left_as_it_was(

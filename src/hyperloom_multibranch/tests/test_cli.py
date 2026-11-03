@@ -317,6 +317,21 @@ def test_an_agent_source_whose_user_is_an_ssh_login_is_accepted(source: str) -> 
     assert _settings("--autonomous-agent", source).agents == (source,)
 
 
+def test_the_arbor_keyword_is_the_vendored_tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "VENDORED_ARBOR", tmp_path)
+
+    assert _settings("--autonomous-agent", "arbor", "--autonomous-agent", "/a").agents == (str(tmp_path), "/a")
+
+
+def test_the_arbor_keyword_without_a_vendored_tree_is_a_usage_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cli, "VENDORED_ARBOR", tmp_path / "missing")
+
+    with pytest.raises(ValueError, match="--autonomous-agent arbor"):
+        _settings("--autonomous-agent", "arbor")
+
+
 def test_an_ssh_source_with_a_password_carries_credentials() -> None:
     with pytest.raises(ValueError, match="credentials"):
         _settings("--autonomous-agent", "ssh://git:secret@github.com/acme/agent.git")

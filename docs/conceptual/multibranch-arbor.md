@@ -45,7 +45,9 @@ In the Hyperloom paths below, `src/hyperloom_multibranch/` is left out. Arbor's 
 ## One session, step by step
 
 1. **MB starts the session.**
-   - **The run:** `hyperloom-multibranch run ... --autonomous-agent <Arbor checkout>`, once per Arbor.
+   - **The run:** `hyperloom-multibranch run ... --autonomous-agent arbor`, once per Arbor. `arbor` is the tree
+     vendored at `src/hyperloom_arbor` of the running source checkout, copied and committed on fetch; an Arbor
+     checkout's path or git URL also works.
    - **What counts as an Arbor checkout:** one with `arbor/component.py`, `arbor/__main__.py` and `docs/hosts.md`.
    - **Its copy:** each source is fetched once into `MB-agent-plans/sources/<i>`.
    - **Code:** `cli.py`, `scheduling/agent_plans.py`.

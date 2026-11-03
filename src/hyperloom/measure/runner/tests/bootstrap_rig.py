@@ -161,7 +161,7 @@ class Rig:
 
     @property
     def source(self) -> Path:
-        """The source the script runs the runner from: ``source`` of the cache entry."""
+        """``source`` of the cache entry: the tree the builder unpacked, beside the ``source.tar`` a sandbox runs from."""
         return self.cache.root / self.cache.sha / "source"
 
     def sandbox_env(self, cache: CacheRef | None = None, scratch: str = "/work/scratch") -> dict[str, str]:

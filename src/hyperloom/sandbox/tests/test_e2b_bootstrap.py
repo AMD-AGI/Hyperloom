@@ -23,7 +23,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.measure.runner.bootstrap import runner_start_command
-from hyperloom.measure.runner.cache_layout import MANIFEST_NAME
+from hyperloom.measure.runner.cache_layout import LOCAL_SOURCE_DIR, MANIFEST_NAME
 from hyperloom.measure.runner.tests.bootstrap_rig import PROBE_FILE, Rig, copy_cache
 from hyperloom.sandbox.e2b import E2BSandboxProvider
 from hyperloom.sandbox.socket import Sandbox
@@ -107,7 +107,8 @@ def test_the_runner_in_a_sandbox_without_network_runs_on_the_venv_the_script_bui
     assert probe["executable"] == "/work/scratch/hl-venv/bin/python"
     assert probe["base_only"] == str(bootstrap_rig.base_site / "base_only_pkg.py")
     assert probe["lock_origin"] == "lock"
-    assert probe["runner_file"] == str(bootstrap_rig.source / "src/hyperloom/measure/runner/__main__.py")
+    # The runner runs from the copy of the entry's source checked and unpacked on the sandbox's own disk.
+    assert probe["runner_file"] == f"/work/scratch/{LOCAL_SOURCE_DIR}/src/hyperloom/measure/runner/__main__.py"
     assert probe["revision"] == bootstrap_rig.cache.sha
 
 
@@ -133,6 +134,6 @@ def test_a_cache_that_is_not_whole_leaves_a_status_and_no_runner(provider: E2BSa
 def test_the_cache_is_mounted_read_only(provider: E2BSandboxProvider, bootstrap_rig: Rig) -> None:
     sandbox = provider.create("read-only", role="measurement", timeout_sec=60, metadata={})
     entry = bootstrap_rig.cache.root / bootstrap_rig.cache.sha
-    assert sandbox.run(f"ls {entry}").stdout.split() == ["manifest", "source", "wheels"]
+    assert sandbox.run(f"ls {entry}").stdout.split() == ["bootstrap.sh", "manifest", "source", "source.tar", "wheels"]
     written = sandbox.run(f"touch {entry}/source/new-file")
     assert written.exit_code != 0 and "Read-only file system" in written.stderr
