@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A tuned table a specialist puts is the table the test's server reads, on a real GPU (W85G).
+"""A tuned table a specialist puts is the table the test's server reads, on a real GPU.
 
 ``test_kernel_artifact.py`` proved ``put_kernel_artifact`` against the file-protocol stand-in runner. Here the specialist
 is the real MCP service, the toolbox runs the real runner on two cards, and the server is SGLang with aiter serving

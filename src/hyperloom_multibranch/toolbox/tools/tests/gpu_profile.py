@@ -51,7 +51,7 @@ async def test_profile_round_reaches_the_inbox(tmp_path: Path) -> None:
     (pointer,) = sink.pointers
     record = json.loads(Path(pointer.location).read_text())
     print(
-        "W11PROFILE "
+        "PROFILE "
         + json.dumps({"status": status.value, "summary": pointer.summary, "keys": sorted(record["result"] or {})})
     )
     assert status is JobStatus.SUCCEEDED, pointer.summary

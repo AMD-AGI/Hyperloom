@@ -3,11 +3,11 @@
 
 """The rerun of an unclear failure never waits for its sandbox without a deadline or without saying so.
 
-In one session three root tests ended ``unclear``; each rerun was to start in a fresh sandbox, but no attempt 2 was ever
-journalled and the session said nothing for two hours. Through the hosted toolbox over the E2B stand-in: the platform
-does not end the first attempt's sandbox when the toolbox kills it, so it keeps the run's only slot, as a platform that
-stopped acting on kills does. The rerun must log that it waits, end when the test's own timeout has passed, journal
-why, and end the test with that reason instead of retrying it.
+A rerun starts in a fresh sandbox; when the first attempt's sandbox keeps the only slot, a rerun that waited for it
+with no deadline would journal no attempt 2 and say nothing for hours. Through the hosted toolbox over the E2B
+stand-in: the platform does not end the first attempt's sandbox when the toolbox kills it, so it keeps the run's only
+slot, as a platform that stopped acting on kills does. The rerun must log that it waits, end when the test's own
+timeout has passed, journal why, and end the test with that reason instead of retrying it.
 """
 
 from __future__ import annotations

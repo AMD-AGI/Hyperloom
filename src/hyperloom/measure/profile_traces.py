@@ -9,9 +9,9 @@ detection of the trace analysis still works. The result's ``profile_location`` i
 session, and the bundle's manifest lists its files, so the location is verifiable.
 
 A profile whose traces are all CUDA-graph capture sidecars (``graph_capture_profile/``, ``capture_traces/``) recorded the
-graphs the server captured at boot and no serving step: the profiler of the round never started. Measured on a NEXTN
-speculative-decoding head, 11 of 11 profiles were of that shape (the run ended before the step the capture window starts
-at), and an analysis of such a trace can only fail; :func:`has_step_traces` tells the two apart.
+graphs the server captured at boot and no serving step: the profiler of the round never started, because the run
+ended before the step the capture window starts at (a speculative-decoding head, which takes several tokens per step,
+gets there sooner). An analysis of such a trace can only fail; :func:`has_step_traces` tells the two apart.
 """
 
 from __future__ import annotations

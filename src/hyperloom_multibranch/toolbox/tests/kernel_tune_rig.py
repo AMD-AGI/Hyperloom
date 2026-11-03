@@ -4,12 +4,11 @@
 """What the ``kernel_tune`` tests stand on: a landed test with a server log, a stand-in for the Forge command, and the
 real local toolbox (pool, leases, tool jobs, blackboard) built over them.
 
-The server log lines are copied from the log of a real Qwen3-14B-FP8 test on gfx950 (SGLang, aiter): the ones that say
-a dense blockscale GEMM missed its tuned table, a per-token one that Forge's reader does not take, and the lines between
-them. The tuned rows are rows of the image's own ``a8w8_blockscale_bpreshuffle`` table (``kernel_rows``).
-``SERVER_ARGS`` is the line SGLang printed at that server's launch, cut to the arguments the readers use (the decode graph
-batch sizes among them), and ``HIT_LOG`` the lines aiter logged for lookups that resolved in a tuned row, in the words of
-the lines of that run.
+The server log lines are synthetic, in the words SGLang and aiter print, at the GEMM shapes of a generic fp8
+blockscale decoder: lines that say a dense blockscale GEMM missed its tuned table, a per-token one that Forge's reader
+does not take, and the lines between them. The tuned rows are rows of the image's own ``a8w8_blockscale_bpreshuffle``
+table (``kernel_rows``). ``SERVER_ARGS`` is a launch line in SGLang's format, cut to the arguments the readers use (the
+decode graph batch sizes among them), and ``HIT_LOG`` the lines aiter logs for lookups that resolve in a tuned row.
 """
 
 from __future__ import annotations
@@ -44,25 +43,26 @@ from hyperloom_multibranch.toolbox.tools import kernel_tune
 TUNER = "a8w8_blockscale_bpreshuffle"
 TABLE = "a8w8_blockscale_bpreshuffle_tuned_gemm.csv"
 TEST_ID = "t1"
-#: Lines 43-52 of the server log of a real test: a per-token a8w8 table that missed (Forge's reader takes no such line),
+#: A stretch of a server log: a per-token a8w8 table that missed (Forge's reader takes no such line),
 #: and the four (N, K) of the dense blockscale table at M=496, with aiter's import lines and a progress bar between.
 SERVER_LOG = """\
 [aiter] shape is M:512, N:7168, K:5120, q_dtype_w:torch.float8_e4m3fn, not found tuned config in /tmp/aiter_configs/a8w8_bpreshuffle_tuned_gemm.csv, will use default config!
 [aiter] import [module_gemm_a8w8_bpreshuffle] under /sgl-workspace/aiter/aiter/jit/module_gemm_a8w8_bpreshuffle.so
 [aiter] shape is M:512, N:34816, K:5120, q_dtype_w:torch.float8_e4m3fn, not found tuned config in /tmp/aiter_configs/a8w8_bpreshuffle_tuned_gemm.csv, will use default config!
 [aiter] shape is M:512, N:5120, K:17408, q_dtype_w:torch.float8_e4m3fn, not found tuned config in /tmp/aiter_configs/a8w8_bpreshuffle_tuned_gemm.csv, will use default config!
-Capturing batches (bs=512 avail_mem=54.88 GB):   2%|▏         | 1/52 [00:03<03:10,  3.73s/it]Capturing batches (bs=496 avail_mem=53.99 GB):   2%|▏         | 1/52 [00:03<03:10,  3.73s/it][aiter] merge tuned file under model_configs/ and configs/ /sgl-workspace/aiter/aiter/configs/a8w8_blockscale_bpreshuffle_tuned_gemm.csv
+Capturing batches (bs=512 avail_mem=40.00 GB):   2%|▏         | 1/52 [00:02<01:42,  2.00s/it]Capturing batches (bs=496 avail_mem=39.50 GB):   2%|▏         | 1/52 [00:02<01:42,  2.00s/it][aiter] merge tuned file under model_configs/ and configs/ /sgl-workspace/aiter/aiter/configs/a8w8_blockscale_bpreshuffle_tuned_gemm.csv
 [aiter] shape is M:496, N:7168, K:5120, not found tuned config in /tmp/aiter_configs/a8w8_blockscale_bpreshuffle_tuned_gemm.csv, will use default config!
 [aiter] import [module_gemm_a8w8_blockscale_bpreshuffle] under /sgl-workspace/aiter/aiter/jit/module_gemm_a8w8_blockscale_bpreshuffle.so
 [aiter] shape is M:496, N:5120, K:5120, not found tuned config in /tmp/aiter_configs/a8w8_blockscale_bpreshuffle_tuned_gemm.csv, will use default config!
 [aiter] shape is M:496, N:34816, K:5120, not found tuned config in /tmp/aiter_configs/a8w8_blockscale_bpreshuffle_tuned_gemm.csv, will use default config!
 [aiter] shape is M:496, N:5120, K:17408, not found tuned config in /tmp/aiter_configs/a8w8_blockscale_bpreshuffle_tuned_gemm.csv, will use default config!
 """
-#: The ``server_args`` line of that server, cut to the keys of the graph config. Its decode graphs were captured for the
-#: sizes of ``GRAPH_SIZES``; the prefill list, a flag that is unset and the key a reader must not take for the list are in it.
+#: The ``server_args`` line of that log's server, cut to the keys of the graph config. Its decode graphs were captured
+#: for the sizes of ``GRAPH_SIZES``; the prefill list, a flag that is unset and the key a reader must not take for the
+#: list are in it.
 GRAPH_SIZES = (1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 256, 512)
 SERVER_ARGS = (
-    "[2026-10-22 04:34:21] server_args={'model_path': '/models/m', 'tp_size': 1, 'cuda_graph_bs_decode': None, "
+    "[2026-01-01 00:00:00] server_args={'model_path': '/models/m', 'tp_size': 1, 'cuda_graph_bs_decode': None, "
     "'cuda_graph_bs_prefill': None, 'cuda_graph_config': {'decode': {'backend': 'full', 'max_bs': 512, "
     f"'bs': {list(GRAPH_SIZES)}, 'tc_compiler': 'eager', 'max_context_size': None}}, "
     "'prefill': {'backend': 'disabled', 'max_bs': 16384, 'bs': [4, 8, 12, 16, 20, 24, 28, 32, 48, 64]}}, "

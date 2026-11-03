@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Excerpts of the logs of a real test whose accuracy evaluation was refused, for the tests that classify it.
+"""Logs of a test whose accuracy evaluation was refused, for the tests that classify it.
 
-The test ran a recipe of a dense FP8 model on one card with ``--context-length 2304`` (SGLang 0.5) through the hosted
-toolbox. Its point asked the evaluation for ``max_length=8192`` with 4096 completion tokens, and every request was
-answered ``400``. The lines are the log's own; only the paths of the host are replaced. What the log did next is the
-shape these tests need: the client printed the refusal once per request, then one traceback per request that gave up
-(97 blocks, 226 KB here, in the original thousands of requests), so the refusal ends far before the end of the file.
+The server ran with ``--context-length 2304`` while the point asked the evaluation for ``max_length=8192`` with 4096
+completion tokens, so every request was answered ``400``. The lines are in the words of SGLang and the evaluation
+client. What the log does next is the shape these tests need: the client prints the refusal once per request, then one
+traceback per request that gave up (:data:`CASCADE_BLOCKS` of them here), so the refusal ends far before the end of the
+file.
 """
 
 from __future__ import annotations

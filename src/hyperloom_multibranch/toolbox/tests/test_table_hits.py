@@ -4,9 +4,9 @@
 """How many rows of a kernel table a test's server hit, from the server's log, and what a table nothing hit is called.
 
 The rows of the a8w8 tables are those of ``kernel_rows``, the bf16 rows are the four ``torch``
-rows of the rows-only GPU test at Qwen3-8B's linear shapes, and the log lines are aiter's own: the bf16 ones are the
-lookups of a server of that test (paths shortened), the a8w8 ones follow the line aiter writes for its CK GEMM, with
-the rows' real kernel names. Each outcome is its own test: a table with hits, a table with none although hits were
+rows of the rows-only GPU test at Qwen3-8B's linear shapes, and the log lines are in aiter's words: the bf16 ones
+follow the line aiter writes for a bf16 lookup (paths shortened), the a8w8 ones the line it writes for its CK GEMM, with
+the rows' kernel names. Each outcome is its own test: a table with hits, a table with none although hits were
 logged ("not exercised"), a table the logs cannot speak for ("not observable"), and no table at all.
 """
 
@@ -55,7 +55,7 @@ ROW_16_34816 = (16, 34816, 5120)
 ROW_16_5120 = (16, 5120, 17408)
 HEAD_ROW_64_5120 = (64, 5120, 17408)
 
-#: From a server of Qwen3-8B (bf16, TP1): lookups that resolved in the image's own rows (``flydsl``, ``triton``,
+#: Lookups at Qwen3-8B's bf16 shapes (TP1) that resolved in the image's own rows (``flydsl``, ``triton``,
 #: and ``torch`` rows whose kernel is named ``native``), and one that resolved in a row of the rows put, which are ``torch``
 #: rows whose kernel is named ``torch``.
 _BF16_PREFIX = "[aiter] shape is M:{asked}, N:{n}, K:{k} dtype='torch.bfloat16' otype='torch.bfloat16' bias=False, "

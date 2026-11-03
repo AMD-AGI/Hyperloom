@@ -74,7 +74,7 @@ def test_a_server_building_an_aiter_jit_module_is_working_however_long_the_build
     "line",
     [
         "[aiter] start build /sb/1/work/scratch/test/jit/aiter_cpp/build/pa_ragged_18aef236b4b102ad875f1200701980d3",
-        "mb-toolbox/sandboxes/lsb-4c93a10a/fs/work/x: [aiter] start build [module_quant] under /sb/1/jit/aiter_jit",
+        "pool/sandboxes/sandbox-0001/fs/work/x: [aiter] start build [module_quant] under /sb/1/jit/aiter_jit",
     ],
 )
 def test_a_build_line_without_the_process_tag_or_after_other_text_still_shows_the_build(line: str) -> None:
@@ -146,7 +146,7 @@ def test_a_test_silent_before_ready_ends_as_hung_before_ready_long_before_its_ti
 
 
 #: The bound of the test below: longer than the stand-in runner takes to start and stamp its server ready (4.5 to
-#: 7.7 s measured on a loaded dev pod, where a 1 s bound ended the test as hung before the runner wrote anything).
+#: 7.7 s on a loaded machine, where a 1 s bound ended the test as hung before the runner wrote anything).
 _STARTUP_BOUND_SEC = 15.0
 #: Its timeout: past the bound counted from the ready stamp, so the bound would end the test first were it still armed.
 _AFTER_READY_TIMEOUT_SEC = 25

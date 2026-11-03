@@ -3,11 +3,11 @@
 
 """Tests on a two-card pool: disjoint cards, no waiting while a card is free, and a withdrawn test frees its card.
 
-In a session, FINAL's test waited 8.6 minutes on a card the toolbox had already given up on:
-the judge had withdrawn the explore test that ran on it, the queue freed its slot, and the next tests started, but the
-withdrawn test's sandbox kept measuring to the end because cancelling the task cannot reach the worker thread that runs
-it. The signed manifests showed two sandboxes on card 0 one after the other, which read as a placement fault; the
-journal shows the allocator was right and card 1 was held by the withdrawn test until 17:03.
+A withdrawn test's card must come back at once. Cancelling the task cannot reach the worker thread that runs the
+sandbox, so unless the backend stops the sandbox itself it keeps measuring to the end and holds its card: the queue has
+freed the slot, the next test (FINAL's, say) waits on a card the toolbox has already given up on, and the signed
+manifests show two sandboxes on one card one after the other, which reads as a placement fault although the allocator
+was right.
 """
 
 from __future__ import annotations
@@ -160,7 +160,7 @@ async def test_a_withdrawn_running_test_gives_its_card_to_the_next_test_at_once(
 
 
 async def test_a_stopped_branch_frees_both_cards_for_final(two_cards) -> None:
-    """The session's path: the judge stops b03, its two explore tests are withdrawn, FINAL's two tests are queued."""
+    """The judge stops b03 while its two explore tests hold both cards; they are withdrawn, FINAL's two are queued."""
     rig, tb = await two_cards(b03=HANG, integration=FAST)
     explore = [await tb.toolbox.submit_test(req("b03")) for _ in range(2)]
     await _until(lambda: _live(rig) == 2 and rig.provider.pool.free_cards() == (), "both cards held")

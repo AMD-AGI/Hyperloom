@@ -534,7 +534,7 @@ def percentile(values: Sequence[float], fraction: float) -> float:
 
 
 def summarize(reports: Sequence[ItemReport], criteria: Criteria = Criteria()) -> Summary:
-    """The verdict of 12.4 stage 1; ``PASS`` needs every test compared and every criterion met."""
+    """The verdict against the graduation criteria; ``PASS`` needs every test compared and every criterion met."""
     if not reports:
         return Summary(NO_DATA, 0, 0, None, None, False, False, False, ("the checklist has no test",))
     diffs = [r.throughput_diff_pct for r in reports if r.compared and r.throughput_diff_pct is not None]

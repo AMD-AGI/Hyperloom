@@ -253,7 +253,7 @@ def test_a_patch_that_only_changes_what_the_framework_asks_for_is_not(text) -> N
 
 
 # Five entries of aiter/jit/optCompilerConfig.json, copied verbatim from ROCm/aiter e7d2453f25e5aaeea72a3a40b284ba453e026624
-# (2026-09-25): the aiter of the image the paired build sessions ran (read in its container). The AITER_COMMIT that
+# (2026-09-25): the aiter of an SGLang ROCm image these tests model (read in its container). The AITER_COMMIT that
 # lmsysorg/sglang-rocm:v0.5.22-rocm10-mi35x-20261022, -20261025 and mi30x-20261022 state is 285579b62; there these five
 # entries read the same variables. aiter's get_args_of_build evaluates every string of an entry as Python when it builds
 # the module, so these read the server's environment then.

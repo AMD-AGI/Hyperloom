@@ -138,7 +138,7 @@ EventEmitter = Callable[[str, Mapping[str, Any]], None]
 
 
 class HostedStartError(RuntimeError):
-    """The hosted backend cannot start in this environment (4.4.4 start checks)."""
+    """The hosted backend cannot start in this environment: one of its start checks failed."""
 
 
 @dataclass(frozen=True)
@@ -335,7 +335,7 @@ class HostedMeasurementBackend:
     # -- lifecycle ----------------------------------------------------------------------------------------------
 
     def start(self) -> None:
-        """Check the three conditions of 4.4.4 that are known before any test; refuse to start when one fails."""
+        """Check what is known before any test (one node, no Ray, runner templates, an archive); refuse on a miss."""
         if self._config.nodes != 1:
             raise HostedStartError(f"hosted measurement runs single-node activities, this one has {self._config.nodes}")
         if env_bool("INFERENCE_OPTIMIZER_RAY_EXEC", default=False):

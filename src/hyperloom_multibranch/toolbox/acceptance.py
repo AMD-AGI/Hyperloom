@@ -335,8 +335,7 @@ class Acceptance:
         repeat holds a card for a trace the session already has or is about to have. The point is always the
         canonical one (a profile ignores ``concurrency``), so the recipe the request measures, whose digest names its
         image too, says whether it is the same measurement, whatever commit holds it: a merge commit whose recipe is
-        its source's is the same profile (two such pairs were profiled twice in one session). The caller waits for the
-        existing request instead.
+        its source's is the same profile. The caller waits for the existing request instead.
         """
 
         if request.kind is not TestKind.PROFILE:

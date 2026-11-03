@@ -214,7 +214,7 @@ def probe() -> dict[str, Any]:
 
 
 def test_log_markers_are_read_from_the_owner_by_both_log_readers(probe: dict[str, Any]) -> None:
-    """D6, D11: the signature table (``common``) and the cause readers (``measure``) take one set of markers."""
+    """The signature table (``common``) and the cause readers (``measure``) take one set of log markers."""
     shared = [
         "HIP_UNDEFINED_SYMBOL",
         "HIP_NO_KERNEL_IMAGE",
@@ -234,19 +234,19 @@ def test_log_markers_are_read_from_the_owner_by_both_log_readers(probe: dict[str
 
 
 def test_image_layout_is_read_from_the_owner(probe: dict[str, Any]) -> None:
-    """D3: the image's workspace and aiter's default tables."""
+    """The image's workspace and aiter's default tables are read from the owner."""
     assert probe["configs"] == "SGLANG_IMAGE_AITER_CONFIGS"
     assert probe["compile"][0][0] == "SGLANG_IMAGE_WORKSPACE"
     assert outside_facts.SGLANG_IMAGE_AITER_CONFIGS.startswith(outside_facts.SGLANG_IMAGE_WORKSPACE + "/")
 
 
 def test_context_flags_are_read_from_the_owner(probe: dict[str, Any]) -> None:
-    """D4: the flags that set the served context, and the point variable the evaluation's length comes from."""
+    """The flags that set the served context, and the point variable the evaluation's length comes from."""
     assert probe["context"] == ["ENV_MAX_MODEL_LEN", ["CONTEXT_LENGTH_FLAGS_0", "CONTEXT_LENGTH_FLAGS_1"]]
 
 
 def test_tunableop_names_are_read_from_the_owner(probe: dict[str, Any]) -> None:
-    """D8: the refusal's text, the tool's description and the compiler's per-device list name TunableOp's variables."""
+    """The refusal's text, the tool's description and the compiler's per-device list name TunableOp's variables."""
     for text in (probe["reason"], probe["tool"]):
         for name in ("TUNABLEOP_ENABLED_ENV", "TUNABLEOP_TUNING_ENV", "TUNABLEOP_TABLE_ENV"):
             assert name in text, name
@@ -254,7 +254,7 @@ def test_tunableop_names_are_read_from_the_owner(probe: dict[str, Any]) -> None:
 
 
 def test_inferencex_env_names_are_read_from_the_owner(probe: dict[str, Any]) -> None:
-    """D9: surface, points, the local backend, the splitter hints, the block list and the two small readers."""
+    """InferenceX's variables: surface, points, local backend, splitter hints, block list, GPU and load readers."""
     surface = probe["surface"]
     assert surface[0] == [
         "ENV_ISL",
@@ -279,7 +279,7 @@ def test_inferencex_env_names_are_read_from_the_owner(probe: dict[str, Any]) -> 
 
 
 def test_rocr_mask_name_is_read_from_the_owner(probe: dict[str, Any]) -> None:
-    """D10: the sandbox's reserved names, the mask chain and the runner's reader."""
+    """The ROCR mask's name in the sandbox's reserved names, the mask chain and the runner's reader."""
     assert "ROCR_VISIBLE_DEVICES_ENV" in probe["reserved"]
     assert probe["rocr"] == "ROCR_VISIBLE_DEVICES_ENV"
     assert probe["visible"] == [0, 2]
@@ -328,7 +328,7 @@ def test_the_columns_that_pick_out_the_rows_judged_by_their_relative_norm_error_
 
 
 def test_standalone_hook_holds_the_owners_merge_directory() -> None:
-    """D2: the hook runs in a sandbox with the standard library only, so it cannot import the owner; it must agree."""
+    """The hook runs in a sandbox with the standard library only, so it cannot import the owner; it must agree."""
     assert aiter_merge_hook._HARD_CODED == outside_facts.AITER_MERGED_VIEW_DIR
 
 
@@ -345,7 +345,7 @@ def _entries(node: Any, key: str) -> list[Any]:
 
 
 def test_every_profile_yaml_copy_holds_the_owners_replay_setting() -> None:
-    """D7: the profile files are data, so they stay literal; each copy of the HIP graph-replay setting is the owner's."""
+    """The profile files are data, so they stay literal; each copy of the HIP graph-replay setting is the owner's."""
     holders = {}
     for path in sorted(_PROFILES.glob("profile_*.yaml")):
         values = _entries(yaml.safe_load(path.read_text(encoding="utf-8")), outside_facts.HIP_GRAPH_PACKET_CAPTURE_ENV)
