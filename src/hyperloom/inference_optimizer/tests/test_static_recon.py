@@ -23,15 +23,15 @@ from hyperloom.orchestrator.specialists.domains import (
 
 # --- checklist lookup -------------------------------------------------------
 def test_checklist_fp8_rocm_matches_cutlass_guard():
-    ids = [e.id for e in src.entries_for(gpu_type="MI300X", precision="fp8")]
+    ids = [e.id for e in src.entries_for(framework="vllm", gpu_type="MI300X", precision="fp8")]
     assert "rocm.fp8.cutlass_only_guard" in ids
     assert "rocm.mxfp8.smallm_dispatch_gap" not in ids
 
 
 def test_checklist_precision_is_token_exact_not_substring():
     """``fp8`` must not match ``mxfp8`` and vice versa."""
-    fp8 = {e.id for e in src.entries_for(gpu_type="MI300X", precision="fp8")}
-    mxfp8 = {e.id for e in src.entries_for(gpu_type="MI355X", precision="mxfp8")}
+    fp8 = {e.id for e in src.entries_for(framework="vllm", gpu_type="MI300X", precision="fp8")}
+    mxfp8 = {e.id for e in src.entries_for(framework="vllm", gpu_type="MI355X", precision="mxfp8")}
     assert "rocm.mxfp8.smallm_dispatch_gap" in mxfp8
     assert "rocm.mxfp8.smallm_dispatch_gap" not in fp8
     assert "rocm.fp8.cutlass_only_guard" in fp8
@@ -40,33 +40,33 @@ def test_checklist_precision_is_token_exact_not_substring():
 
 def test_checklist_precision_tokenizes_compound_value():
     """A compound precision like ``fp8_e4m3`` still matches the ``fp8`` entry."""
-    ids = {e.id for e in src.entries_for(gpu_type="MI300X", precision="fp8_e4m3")}
+    ids = {e.id for e in src.entries_for(framework="vllm", gpu_type="MI300X", precision="fp8_e4m3")}
     assert "rocm.fp8.cutlass_only_guard" in ids
 
 
 def test_checklist_non_rocm_gpu_yields_nothing():
-    assert src.entries_for(gpu_type="H100", precision="fp8") == []
+    assert src.entries_for(framework="vllm", gpu_type="H100", precision="fp8") == []
 
 
 def test_checklist_any_precision_entry_applies_to_rocm_bf16():
-    ids = [e.id for e in src.entries_for(gpu_type="MI300X", precision="bf16")]
+    ids = [e.id for e in src.entries_for(framework="vllm", gpu_type="MI300X", precision="bf16")]
     assert ids == ["rocm.moe.aiter_backend_activation_gap"]
 
 
 def test_source_hint_directories_dedup_and_ordered():
-    dirs = src.source_hint_directories_for(gpu_type="MI300X", precision="fp8")
+    dirs = src.source_hint_directories_for(framework="vllm", gpu_type="MI300X", precision="fp8")
     assert dirs
     assert len(dirs) == len(set(dirs))
     assert "vllm/model_executor/layers/quantization/" in dirs
 
 
 def test_render_checklist_for_prompt_empty():
-    assert src.render_checklist_for_prompt([]) == ""
+    assert src.render_checklist_for_prompt([], framework="vllm") == ""
 
 
 def test_render_checklist_for_prompt_includes_id_and_bridge():
-    entries = src.entries_for(gpu_type="MI300X", precision="fp8")
-    text = src.render_checklist_for_prompt(entries)
+    entries = src.entries_for(framework="vllm", gpu_type="MI300X", precision="fp8")
+    text = src.render_checklist_for_prompt(entries, framework="vllm")
     assert "rocm.fp8.cutlass_only_guard" in text
     assert "bridge:" in text
 
@@ -76,27 +76,30 @@ def test_render_checklist_for_prompt_includes_id_and_bridge():
 
 def test_shared_expert_fusion_entry_in_mxfp8_rocm():
     """rocm.moe.shared_expert_fusion must appear for ROCm + mxfp8 runs."""
-    ids = [e.id for e in src.entries_for(gpu_type="MI355X", precision="mxfp8")]
+    ids = [e.id for e in src.entries_for(framework="vllm", gpu_type="MI355X", precision="mxfp8")]
     assert "rocm.moe.shared_expert_fusion" in ids
 
 
 def test_shared_expert_fusion_entry_not_in_fp8():
     """rocm.moe.shared_expert_fusion must NOT appear for plain fp8 (mxfp8-only entry)."""
-    ids = [e.id for e in src.entries_for(gpu_type="MI300X", precision="fp8")]
+    ids = [e.id for e in src.entries_for(framework="vllm", gpu_type="MI300X", precision="fp8")]
     assert "rocm.moe.shared_expert_fusion" not in ids
 
 
-def test_shared_expert_fusion_source_dirs_include_vllm_and_sglang():
-    entries = src.entries_for(gpu_type="MI355X", precision="mxfp8")
-    fusion = next(e for e in entries if e.id == "rocm.moe.shared_expert_fusion")
-    dirs = " ".join(fusion.source_dirs)
-    assert "vllm/model_executor/layers/fused_moe/" in dirs
-    assert "python/sglang/srt/layers/moe/" in dirs
+def test_an_entry_applies_only_to_the_frameworks_it_names():
+    sglang = src.entries_for(framework="sglang", gpu_type="MI355X", precision="mxfp8")
+    assert [e.id for e in sglang] == ["rocm.moe.shared_expert_fusion"]
+    assert src.source_hint_directories_for(framework="sglang", gpu_type="MI355X", precision="mxfp8") == (
+        "python/sglang/srt/layers/moe/",
+        "python/sglang/srt/models/",
+    )
+    vllm = src.source_hint_directories_for(framework="vllm", gpu_type="MI355X", precision="mxfp8")
+    assert "vllm/model_executor/layers/fused_moe/" in vllm
 
 
 def test_filter_entries_for_model_keeps_entry_when_has_shared_expert():
     """filter_entries_for_model passes the shared-expert entry through when flag is set."""
-    entries = src.entries_for(gpu_type="MI355X", precision="mxfp8")
+    entries = src.entries_for(framework="vllm", gpu_type="MI355X", precision="mxfp8")
     filtered = src.filter_entries_for_model(entries, {"has_shared_expert": True})
     ids = [e.id for e in filtered]
     assert "rocm.moe.shared_expert_fusion" in ids
@@ -104,7 +107,7 @@ def test_filter_entries_for_model_keeps_entry_when_has_shared_expert():
 
 def test_filter_entries_for_model_removes_entry_when_no_shared_expert():
     """Core anti-noise assertion: entry is dropped for plain MoE / non-MoE models."""
-    entries = src.entries_for(gpu_type="MI355X", precision="mxfp8")
+    entries = src.entries_for(framework="vllm", gpu_type="MI355X", precision="mxfp8")
     for model_info in ({}, {"has_shared_expert": False}, {"is_moe": True}):
         filtered = src.filter_entries_for_model(entries, model_info)
         ids = [e.id for e in filtered]
@@ -113,7 +116,7 @@ def test_filter_entries_for_model_removes_entry_when_no_shared_expert():
 
 def test_filter_entries_for_model_preserves_other_entries():
     """Other checklist entries must not be affected by the filter."""
-    entries = src.entries_for(gpu_type="MI355X", precision="mxfp8")
+    entries = src.entries_for(framework="vllm", gpu_type="MI355X", precision="mxfp8")
     filtered = src.filter_entries_for_model(entries, {})
     other_ids = {e.id for e in filtered}
     all_ids = {e.id for e in entries}
@@ -122,9 +125,9 @@ def test_filter_entries_for_model_preserves_other_entries():
 
 def test_render_checklist_for_prompt_includes_shared_expert_fusion():
     """render_checklist_for_prompt emits the entry id and bridge text."""
-    entries = src.entries_for(gpu_type="MI355X", precision="mxfp8")
+    entries = src.entries_for(framework="vllm", gpu_type="MI355X", precision="mxfp8")
     shared = [e for e in entries if e.id == "rocm.moe.shared_expert_fusion"]
-    text = src.render_checklist_for_prompt(shared)
+    text = src.render_checklist_for_prompt(shared, framework="vllm")
     assert "rocm.moe.shared_expert_fusion" in text
     assert "bridge:" in text
 
@@ -269,7 +272,7 @@ def test_workload_precision_falls_back_to_shared_state():
 def test_mxfp8_checkpoint_gets_the_mxfp8_focus_directories():
     """An MXFP8 model labelled fp8 by $PRECISION must not get the fp8 entries."""
     precision = src.workload_precision(_PrecisionState("fp8", {"quantization": "mxfp8"}))
-    dirs = src.source_hint_directories_for(gpu_type="MI355X", precision=precision)
+    dirs = src.source_hint_directories_for(framework="vllm", gpu_type="MI355X", precision=precision)
     assert "vllm/model_executor/kernels/linear/mxfp8/" in dirs
     assert "vllm/model_executor/layers/fused_moe/experts/" in dirs
     assert "vllm/model_executor/layers/quantization/" not in dirs

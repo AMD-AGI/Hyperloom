@@ -430,51 +430,32 @@ def _restore_driver(path: Path, original: bytes | None) -> None:
     atomic_write_bytes(path, original, options=DURABLE)
 
 
-def _build_prompt(
-    *,
-    spec: RewriteSpec,
-    stage_driver: Path,
-    invocation_spec_available: bool,
-    prior_failure: str,
-) -> str:
-    shape_text = json.dumps(spec.shapes, indent=2, sort_keys=True, default=str)
-    invocation_note = (
-        f"Read `{_EVIDENCE_DIR}/{_INVOCATION_EVIDENCE}` first. It contains the "
-        "call evidence supplied by the orchestrator."
-        if invocation_spec_available
-        else (
-            "No invocation spec was supplied. Derive only facts justified by the "
-            "source and task metadata; do not invent integer, routing, mask, or "
-            "quantization-scale domains."
-        )
-    )
-    retry = f"\n## Deterministic failure from the previous attempt\n{prior_failure}\n" if prior_failure else ""
-    return f"""\
+_DRIVER_PROMPT_TEMPLATE = """\
 Create or repair the self-contained rewrite measurement driver at
-`{stage_driver.name}`.
+`{stage_driver_name}`.
 
 ## Task
-- logical operation: `{spec.op_name}`
-- source entry hint: `{spec.source_entry or "(not supplied)"}`
-- source target functions: {spec.target_functions or "(not supplied)"}
-- required FlyDSL builder symbol: `{spec.builder_symbol}`
+- logical operation: `{op_name}`
+- source entry hint: `{source_entry}`
+- source target functions: {target_functions}
+- required FlyDSL builder symbol: `{builder_symbol}`
 - source path at runtime: environment variable
-  `{protocol.ENV_SOURCE_KERNEL}`
+  `{env_source_kernel}`
 - candidate path at runtime: environment variable
-  `{protocol.ENV_CANDIDATE_KERNEL}`
+  `{env_candidate_kernel}`
 - builder symbol at runtime: environment variable
-  `{protocol.ENV_BUILDER_SYMBOL}`
+  `{env_builder_symbol}`
 - logical operation at runtime: environment variable
-  `{protocol.ENV_LOGICAL_OP}`
+  `{env_logical_op}`
 - task shapes:
 ```json
 {shape_text}
 ```
 
 ## Read-only evidence
-Read `{_EVIDENCE_DIR}/{_SOURCE_EVIDENCE}` and
-`{_EVIDENCE_DIR}/{_CANDIDATE_EVIDENCE}`. The two reference drivers under
-`{_EVIDENCE_DIR}/` demonstrate the protocol, but they are examples rather than
+Read `{evidence_dir}/{source_evidence}` and
+`{evidence_dir}/{candidate_evidence}`. The two reference drivers under
+`{evidence_dir}/` demonstrate the protocol, but they are examples rather than
 operator semantics. {invocation_note}
 
 ## Required driver behavior
@@ -500,12 +481,50 @@ operator semantics. {invocation_note}
    from the other implementation's timing path.
 
 ## Write boundary
-Modify only `{stage_driver.name}`. The finished driver must be one
+Modify only `{stage_driver_name}`. The finished driver must be one
 self-contained Python file. Do not edit evidence and do not create helper,
 configuration, cache, or generated files. Save the best complete driver before
 running optional checks.
 {retry}
 """
+
+
+def _build_prompt(
+    *,
+    spec: RewriteSpec,
+    stage_driver: Path,
+    invocation_spec_available: bool,
+    prior_failure: str,
+) -> str:
+    shape_text = json.dumps(spec.shapes, indent=2, sort_keys=True, default=str)
+    invocation_note = (
+        f"Read `{_EVIDENCE_DIR}/{_INVOCATION_EVIDENCE}` first. It contains the "
+        "call evidence supplied by the orchestrator."
+        if invocation_spec_available
+        else (
+            "No invocation spec was supplied. Derive only facts justified by the "
+            "source and task metadata; do not invent integer, routing, mask, or "
+            "quantization-scale domains."
+        )
+    )
+    retry = f"\n## Deterministic failure from the previous attempt\n{prior_failure}\n" if prior_failure else ""
+    return _DRIVER_PROMPT_TEMPLATE.format(
+        stage_driver_name=stage_driver.name,
+        op_name=spec.op_name,
+        source_entry=spec.source_entry or "(not supplied)",
+        target_functions=spec.target_functions or "(not supplied)",
+        builder_symbol=spec.builder_symbol,
+        env_source_kernel=protocol.ENV_SOURCE_KERNEL,
+        env_candidate_kernel=protocol.ENV_CANDIDATE_KERNEL,
+        env_builder_symbol=protocol.ENV_BUILDER_SYMBOL,
+        env_logical_op=protocol.ENV_LOGICAL_OP,
+        shape_text=shape_text,
+        evidence_dir=_EVIDENCE_DIR,
+        source_evidence=_SOURCE_EVIDENCE,
+        candidate_evidence=_CANDIDATE_EVIDENCE,
+        invocation_note=invocation_note,
+        retry=retry,
+    )
 
 
 _SYSTEM_PROMPT = """\
@@ -570,38 +589,9 @@ class _DriverAuthoring:
                     if not stage_driver.is_file() or stage_driver.is_symlink():
                         self.prior_failure = "the previous attempt deleted the required driver"
                         continue
-
-                    candidate_bytes = stage_driver.read_bytes()
-                    try:
-                        compile(candidate_bytes, str(self.destination), "exec", dont_inherit=True)
-                    except (SyntaxError, ValueError) as error:
-                        self.prior_failure = f"the generated driver is not valid Python: {error}"
-                        continue
-
-                    atomic_write_bytes(self.destination, candidate_bytes, options=DURABLE)
-                    try:
-                        self.last_preflight = preflight_rewrite_driver(
-                            self.spec, str(self.destination), deadline_unix=deadline_unix
-                        )
-                    except Exception as error:  # isolation boundary: one attempt's deterministic driver preflight
-                        log.warning(
-                            "driver preparation attempt %d: preflight raised: %s", attempt, error, exc_info=True
-                        )
-                        _restore_driver(self.destination, self.original)
-                        self.prior_failure = f"deterministic preflight raised {type(error).__name__}: {error}"
-                        continue
-                    _audit_driver(record, "driver_at_preflight.py", self.destination)
-                    _audit_json(record, "preflight.json", _preflight_payload(self.last_preflight))
-                    if self.last_preflight.ok:
-                        return DriverPreparationResult(
-                            ok=True,
-                            attempts=attempt,
-                            preflight=self.last_preflight,
-                            audit_dir=str(self.audit),
-                            wrote_driver=True,
-                        )
-                    _restore_driver(self.destination, self.original)
-                    self.prior_failure = f"[{self.last_preflight.failure_class}] {self.last_preflight.detail}"
+                    result = self._preflight_staged_driver(attempt, record, stage_driver)
+                    if result is not None:
+                        return result
         except (OSError, RuntimeError, ValueError) as error:
             _restore_driver(self.destination, self.original)
             return self._failure(DRIVER_PREPARATION_FAILED, f"could not prepare the isolated driver workspace: {error}")
@@ -614,6 +604,42 @@ class _DriverAuthoring:
                 DRIVER_PREPARATION_DEADLINE, f"driver preparation reached its deadline; last failure: {detail}"
             )
         return self._failure(DRIVER_PREPARATION_FAILED, detail)
+
+    def _preflight_staged_driver(
+        self, attempt: int, record: Path, stage_driver: Path
+    ) -> DriverPreparationResult | None:
+        """Install the staged driver and preflight it; return the success result, or None to try again."""
+        deadline_unix = self.preparation.deadline_unix
+        candidate_bytes = stage_driver.read_bytes()
+        try:
+            compile(candidate_bytes, str(self.destination), "exec", dont_inherit=True)
+        except (SyntaxError, ValueError) as error:
+            self.prior_failure = f"the generated driver is not valid Python: {error}"
+            return None
+
+        atomic_write_bytes(self.destination, candidate_bytes, options=DURABLE)
+        try:
+            self.last_preflight = preflight_rewrite_driver(
+                self.spec, str(self.destination), deadline_unix=deadline_unix
+            )
+        except Exception as error:  # isolation boundary: one attempt's deterministic driver preflight
+            log.warning("driver preparation attempt %d: preflight raised: %s", attempt, error, exc_info=True)
+            _restore_driver(self.destination, self.original)
+            self.prior_failure = f"deterministic preflight raised {type(error).__name__}: {error}"
+            return None
+        _audit_driver(record, "driver_at_preflight.py", self.destination)
+        _audit_json(record, "preflight.json", _preflight_payload(self.last_preflight))
+        if self.last_preflight.ok:
+            return DriverPreparationResult(
+                ok=True,
+                attempts=attempt,
+                preflight=self.last_preflight,
+                audit_dir=str(self.audit),
+                wrote_driver=True,
+            )
+        _restore_driver(self.destination, self.original)
+        self.prior_failure = f"[{self.last_preflight.failure_class}] {self.last_preflight.detail}"
+        return None
 
     def _seed_stage(self, stage: Path, stage_driver: Path, invocation_spec: bytes) -> dict[Path, tuple[bytes, int]]:
         """Lay out the isolated repository: the driver to edit, the read-only evidence, and a git baseline."""

@@ -851,13 +851,8 @@ def _try_apply_candidate(sol: dict, trial: _CandidateField, *, pre_untracked) ->
         _force_jit_rebuild(workspace_dir, trial.kernel.kernel_path, trial.kernel.source_files)
         passed = _correctness_once(harness.driver, harness.snr_threshold)
         if not passed:
-            _git_discard_worktree(
-                workspace_dir,
-                pre_untracked=pre_untracked,
-            )
-            return _CandidateTrial.rejected(
-                "correctness_failed",
-                measured_mean_case_speedup=None,
+            return _discard_and_reject(
+                workspace_dir, "correctness_failed", pre_untracked=pre_untracked, measured_mean_case_speedup=None
             )
         applied_runs = [_bench_once(harness.driver, harness.bench_repeat) for _ in range(KEEP_MEASUREMENT_COUNT)]
         applied_bench = aggregate_benchmark_measurements(applied_runs)
@@ -868,32 +863,48 @@ def _try_apply_candidate(sol: dict, trial: _CandidateField, *, pre_untracked) ->
                 expected_measurements=KEEP_MEASUREMENT_COUNT,
             )
         except (AttributeError, CaseCoverageError):
-            _git_discard_worktree(
-                workspace_dir,
-                pre_untracked=pre_untracked,
-            )
-            return _CandidateTrial.rejected(
-                "case_coverage_failed",
-                measured_mean_case_speedup=None,
+            return _discard_and_reject(
+                workspace_dir, "case_coverage_failed", pre_untracked=pre_untracked, measured_mean_case_speedup=None
             )
         mean_case_speedup = keep_score(measurement_scores)
         applied_bench["measurement_mean_case_speedups"] = measurement_scores
         applied_bench["mean_case_speedup"] = mean_case_speedup
-        applied_ms = applied_bench.get("median_ms") if isinstance(applied_bench, dict) else None
-        pristine_ms = pristine_bench.get("median_ms")
     except WarmStartRestoreError:
         raise
     except Exception as exc:  # isolation boundary: one KB warm-start candidate; worktree is discarded
         log.warning("warm-start candidate probe failed: %s", exc, exc_info=True)
-        _git_discard_worktree(
-            workspace_dir,
-            pre_untracked=pre_untracked,
-        )
-        return _CandidateTrial.rejected(
-            "probe_failed",
-            measured_mean_case_speedup=None,
+        return _discard_and_reject(
+            workspace_dir, "probe_failed", pre_untracked=pre_untracked, measured_mean_case_speedup=None
         )
 
+    return _judge_measured_candidate(
+        trial, applied_bench, measurement_scores, mean_case_speedup, pre_untracked=pre_untracked
+    )
+
+
+def _discard_and_reject(
+    workspace_dir, reason: str, *, pre_untracked, measured_mean_case_speedup: float | None, notice: str = ""
+) -> _CandidateTrial:
+    """Put the worktree back to pristine, print ``notice`` if any, and reject the candidate with what it measured."""
+    _git_discard_worktree(
+        workspace_dir,
+        pre_untracked=pre_untracked,
+    )
+    if notice:
+        print(notice, flush=True)
+    return _CandidateTrial.rejected(
+        reason,
+        measured_mean_case_speedup=measured_mean_case_speedup,
+    )
+
+
+def _judge_measured_candidate(
+    trial: _CandidateField, applied_bench: dict, measurement_scores: list[float], mean_case_speedup, *, pre_untracked
+) -> _CandidateTrial:
+    """Adopt a measured candidate only when it clears the keep, pristine-aggregate and aggregate-regression gates."""
+    workspace_dir = trial.kernel.workspace
+    applied_ms = applied_bench.get("median_ms") if isinstance(applied_bench, dict) else None
+    pristine_ms = trial.pristine_bench.get("median_ms")
     # The suite ran, so this candidate measured something the KB record it came from can be amended with.
     measured_mean_case_speedup = float(mean_case_speedup)
 
@@ -905,12 +916,10 @@ def _try_apply_candidate(sol: dict, trial: _CandidateField, *, pre_untracked) ->
             best_mean_case_speedup=1.0,
         )
     ):
-        _git_discard_worktree(
+        return _discard_and_reject(
             workspace_dir,
-            pre_untracked=pre_untracked,
-        )
-        return _CandidateTrial.rejected(
             "performance_failed",
+            pre_untracked=pre_untracked,
             measured_mean_case_speedup=measured_mean_case_speedup,
         )
 
@@ -919,18 +928,15 @@ def _try_apply_candidate(sol: dict, trial: _CandidateField, *, pre_untracked) ->
     # verdict -- so a pristine aggregate that is absent, non-numeric or not positive would pass a candidate on a
     # silent "" instead of on a comparison.
     if not isinstance(pristine_ms, (int, float)) or float(pristine_ms) <= 0:
-        _git_discard_worktree(
+        return _discard_and_reject(
             workspace_dir,
-            pre_untracked=pre_untracked,
-        )
-        print(
-            "  [kb] warm-start candidate rejected: the pristine bench reported "
-            "no usable aggregate wall time to compare against",
-            flush=True,
-        )
-        return _CandidateTrial.rejected(
             "pristine_aggregate_missing",
+            pre_untracked=pre_untracked,
             measured_mean_case_speedup=measured_mean_case_speedup,
+            notice=(
+                "  [kb] warm-start candidate rejected: the pristine bench reported "
+                "no usable aggregate wall time to compare against"
+            ),
         )
 
     # The keep gate above votes on the equal-weight mean of per-case speedups, which can clear the threshold while the
@@ -942,17 +948,12 @@ def _try_apply_candidate(sol: dict, trial: _CandidateField, *, pre_untracked) ->
         mean_case_speedup=mean_case_speedup,
     )
     if aggregate_regression:
-        _git_discard_worktree(
+        return _discard_and_reject(
             workspace_dir,
-            pre_untracked=pre_untracked,
-        )
-        print(
-            f"  [kb] warm-start candidate rejected: {aggregate_regression}",
-            flush=True,
-        )
-        return _CandidateTrial.rejected(
             "aggregate_regression",
+            pre_untracked=pre_untracked,
             measured_mean_case_speedup=measured_mean_case_speedup,
+            notice=f"  [kb] warm-start candidate rejected: {aggregate_regression}",
         )
 
     return _CandidateTrial.adoptable(
@@ -1140,9 +1141,13 @@ class _WarmStartAttempt:
         )
         self.measured_writebacks = field.writebacks
         self.reference_reason = field.reject_reason
+        self._adopt_best_measured(field.measurements, allowed_paths)
+
+    def _adopt_best_measured(self, measurements: list[dict], allowed_paths: set[str]) -> None:
+        """Re-apply the fastest measured candidate that still applies cleanly, and settle the others' statuses."""
         # One entry per candidate that reached a measurement, in rank order.
         for measurement in sorted(
-            field.measurements,
+            measurements,
             key=lambda item: (-item["mean_case_speedup"], item["index"]),
         ):
             idx = measurement["index"]
@@ -1174,7 +1179,7 @@ class _WarmStartAttempt:
             )
             break
         if self.applied_idx is not None:
-            for measurement in field.measurements:
+            for measurement in measurements:
                 other = measurement["index"]
                 if other != self.applied_idx and self.statuses[other] == "not_attempted":
                     self.statuses[other] = f"rejected:outperformed_by_rank_{self.applied_idx + 1}"

@@ -27,6 +27,8 @@ from kernelforge.knowledge.kb_store.identity.implementation import (
 )
 from kernelforge.knowledge.kb_store.identity.kernel_recipe import KERNEL_CANONICAL_DIMENSIONS
 from kernelforge.utils.git import GitError, git
+from kernelforge.utils.gpu_arch import canonical_gpu_type
+from kernelforge.workflows.forge_loop.campaign.campaign_config import detect_gpu_target
 
 
 log = logging.getLogger(__name__)
@@ -84,6 +86,8 @@ def _normalize_agent_task_payload(payload: dict) -> dict:
         if isinstance(operator_name, str) and operator_name.strip():
             identity["kernel_name"] = normalize_operator_name(operator_name)
         identity["framework_version"] = canonical_framework_version(identity.get("framework_version", ""))
+        # The agent has no tool that can see the hardware, so the GPU is the one forge-loop itself resolves.
+        identity["gpu"] = canonical_gpu_type(detect_gpu_target())
         # The declared framework reaches forge-loop as an override, and the
         # override is resolved before it becomes an address: ``aiter_meta`` is
         # ``aiter``, and every spelling of "this kernel belongs to no package" --
@@ -182,6 +186,29 @@ def _validate_framework_against_sources(task: KernelRewriteTask) -> None:
     )
 
 
+def _install_task(layout: ControllerLayout, destination: Path, payload: dict, driver: Path) -> None:
+    """Write the pinned task and its driver to ``destination`` in one durable rename."""
+    layout.tasks_root.mkdir(parents=True, exist_ok=True)
+    temporary = Path(
+        tempfile.mkdtemp(
+            dir=str(layout.tasks_root),
+            prefix=f".{destination.name}.",
+        )
+    )
+    try:
+        atomic_write_text(
+            temporary / "task.json",
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+            options=DURABLE,
+        )
+        shutil.copy2(driver, temporary / "driver.py")
+        fsync_tree(temporary)
+        os.replace(temporary, destination)
+        fsync_directory(layout.tasks_root)
+    finally:
+        shutil.rmtree(temporary, ignore_errors=True)
+
+
 def publish_staged_task(
     layout: ControllerLayout,
     staged_dir: str | Path,
@@ -234,25 +261,7 @@ def publish_staged_task(
             ),
         )
 
-    layout.tasks_root.mkdir(parents=True, exist_ok=True)
-    temporary = Path(
-        tempfile.mkdtemp(
-            dir=str(layout.tasks_root),
-            prefix=f".{destination.name}.",
-        )
-    )
-    try:
-        atomic_write_text(
-            temporary / "task.json",
-            json.dumps(payload, indent=2, sort_keys=True) + "\n",
-            options=DURABLE,
-        )
-        shutil.copy2(driver, temporary / "driver.py")
-        fsync_tree(temporary)
-        os.replace(temporary, destination)
-        fsync_directory(layout.tasks_root)
-    finally:
-        shutil.rmtree(temporary, ignore_errors=True)
+    _install_task(layout, destination, payload, driver)
 
     shutil.rmtree(source, ignore_errors=True)
     return TaskPublicationResult(
