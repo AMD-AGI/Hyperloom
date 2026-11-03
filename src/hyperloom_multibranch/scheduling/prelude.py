@@ -146,6 +146,9 @@ CHILD_CARDS_ENV = "ROCR_VISIBLE_DEVICES"
 #: process's environment that the main flow does not accept.
 TRACE_ANALYSIS_ROUTE_ENV = "HYPERLOOM_TRACE_ANALYSIS_ROUTE"
 CHILD_TRACE_ANALYSIS_ROUTE = AnalysisRoute.NON_LLM.value
+#: The child serves its one TP job on its own cards, so it never needs Ray; the main flow's default turns Ray on, and its
+#: in-process ``ray.init`` to a host head that does not answer holds the GIL with no timeout, freezing the whole child.
+CHILD_RAY_ENV = "INFERENCE_OPTIMIZER_RAY_EXEC"
 #: The child's lease is the lineage root's: its card time counts on the integration branch, not as a branch of its own.
 CHILD_LEASE_CHARGE = LeaseCharge(LeaseKind.PRELUDE_CHILD, INTEGRATION_BRANCH)
 #: The lease refusal that leaves the child to run before the root tests and the replay: its cards would leave fewer
@@ -223,11 +226,11 @@ class _ChildCards:
     alongside: bool
 
     def env(self) -> Mapping[str, str]:
-        """The child's environment: this process's, with :data:`CHILD_TRACE_ANALYSIS_ROUTE` and the leased cards
-        named in :data:`CHILD_CARDS_ENV`."""
+        """The child's environment: this process's, with :data:`CHILD_TRACE_ANALYSIS_ROUTE`, Ray off
+        (:data:`CHILD_RAY_ENV`) and the leased cards named in :data:`CHILD_CARDS_ENV`."""
 
         cards = {} if self.lease is None else {CHILD_CARDS_ENV: ",".join(str(card) for card in self.lease.gpu_ids)}
-        return {**os.environ, TRACE_ANALYSIS_ROUTE_ENV: CHILD_TRACE_ANALYSIS_ROUTE, **cards}
+        return {**os.environ, TRACE_ANALYSIS_ROUTE_ENV: CHILD_TRACE_ANALYSIS_ROUTE, CHILD_RAY_ENV: "0", **cards}
 
 
 @dataclass(frozen=True)
