@@ -302,7 +302,7 @@ def test_failed_preparation_restores_files_and_git(campaign, monkeypatch, failur
     root, options = campaign
     if failure == "publication":
 
-        def fail(*args):
+        def fail(*args, **kwargs):
             raise OSError("disk full")
 
         monkeypatch.setattr(prepare, "atomic_write_text", fail)

@@ -218,25 +218,51 @@ def _experience(value: Any, names: frozenset[str], declaration: ExperienceDeclar
                 raise MappingError(f"experience.{category}.{name} is required by the declaration")
     for name, spec in _EXPERIENCE_FIELDS.items():
         if isinstance(spec, dict):
-            if name not in data:
-                if any(spec.values()):
-                    raise MappingError(f"experience.{name} is required")
-                continue
-            section = _mapping(data[name], f"experience.{name}")
-            _reject_unknown(section, set(spec), f"experience.{name}")
-            for child, required in spec.items():
-                if child in section:
-                    compiled[f"{name}.{child}"] = compile_expression(
-                        section[child], names, f"experience.{name}.{child}"
-                    )
-                elif required:
-                    raise MappingError(f"experience.{name}.{child} is required")
-            continue
-        if name in data:
+            compiled.update(_experience_section(data, name, spec, names))
+        elif name in data:
             compiled[name] = compile_expression(data[name], names, f"experience.{name}")
         elif spec:
             raise MappingError(f"experience.{name} is required")
     return compiled
+
+
+def _experience_section(
+    data: Mapping[str, Any], name: str, spec: dict[str, bool], names: frozenset[str]
+) -> dict[str, Expression]:
+    """Compile the ``experience.<name>`` sub-mapping whose children ``spec`` marks required or optional."""
+    if name not in data:
+        if any(spec.values()):
+            raise MappingError(f"experience.{name} is required")
+        return {}
+    section = _mapping(data[name], f"experience.{name}")
+    _reject_unknown(section, set(spec), f"experience.{name}")
+    compiled: dict[str, Expression] = {}
+    for child, required in spec.items():
+        if child in section:
+            compiled[f"{name}.{child}"] = compile_expression(section[child], names, f"experience.{name}.{child}")
+        elif required:
+            raise MappingError(f"experience.{name}.{child} is required")
+    return compiled
+
+
+def _units(raw_units: Any, outer: frozenset[str]) -> tuple[UnitStep, ...]:
+    """Compile the ``units`` steps, each seeing the names ``outer`` and the earlier steps bind."""
+    bound = set(outer)
+    if not isinstance(raw_units, list) or not raw_units:
+        raise MappingError("units must be a non-empty list")
+    units: list[UnitStep] = []
+    for index, item in enumerate(raw_units):
+        location = f"units[{index}]"
+        step = _mapping(item, location)
+        _reject_unknown(step, {"each", "as", "where"}, location)
+        if "each" not in step:
+            raise MappingError(f"{location}.each is required")
+        items = compile_expression(step["each"], frozenset(bound), f"{location}.each")
+        name = _identifier(step.get("as"), f"{location}.as", bound)
+        bound.add(name)
+        where = compile_expression(step["where"], frozenset(bound), f"{location}.where") if "where" in step else None
+        units.append(UnitStep(name, items, where))
+    return tuple(units)
 
 
 def compile_mapping(
@@ -257,21 +283,8 @@ def compile_mapping(
     bound = {"doc"}
     skip = _rules(data.get("skip"), "skip", "when", frozenset(bound))
 
-    raw_units = data.get("units")
-    if not isinstance(raw_units, list) or not raw_units:
-        raise MappingError("units must be a non-empty list")
-    units: list[UnitStep] = []
-    for index, item in enumerate(raw_units):
-        location = f"units[{index}]"
-        step = _mapping(item, location)
-        _reject_unknown(step, {"each", "as", "where"}, location)
-        if "each" not in step:
-            raise MappingError(f"{location}.each is required")
-        items = compile_expression(step["each"], frozenset(bound), f"{location}.each")
-        name = _identifier(step.get("as"), f"{location}.as", bound)
-        bound.add(name)
-        where = compile_expression(step["where"], frozenset(bound), f"{location}.where") if "where" in step else None
-        units.append(UnitStep(name, items, where))
+    units = _units(data.get("units"), frozenset(bound))
+    bound.update(unit.name for unit in units)
 
     unit_id = compile_expression(data["unit_id"], frozenset(bound), "unit_id") if "unit_id" in data else None
 
@@ -310,7 +323,7 @@ def compile_mapping(
         declaration=declaration,
         producer=producer,
         skip=skip,
-        units=tuple(units),
+        units=units,
         unit_id=unit_id,
         lookups=tuple(lookups),
         lets=tuple(lets),

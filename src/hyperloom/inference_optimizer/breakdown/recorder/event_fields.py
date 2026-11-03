@@ -10,8 +10,8 @@ import json
 from collections.abc import Iterable
 from typing import Any
 
-from hyperloom.common.coerce import to_float, to_int, to_list, to_mapping
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.coerce import to_float, to_int, to_list, to_mapping
+from hyperloom_common.timeutil import now_iso
 
 __all__ = [
     "MAX_EXT_BLOCK_BYTES",

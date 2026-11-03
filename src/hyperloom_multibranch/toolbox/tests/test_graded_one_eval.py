@@ -18,7 +18,7 @@ from typing import Any
 import pytest
 import yaml
 
-from hyperloom.common.env import is_truthy
+from hyperloom_common.env import is_truthy
 from hyperloom.contracts.measurement import AccuracyValue, Purpose, TestKind
 from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom.measure import local

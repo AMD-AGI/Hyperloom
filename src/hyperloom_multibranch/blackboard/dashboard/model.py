@@ -35,7 +35,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.io import atomic_write_json, atomic_write_text
+from hyperloom_common.io import atomic_write_json, atomic_write_text
 from hyperloom_multibranch.contracts.blackboard.records import BranchProgress, BlackboardSnapshot
 from hyperloom_multibranch.contracts.blackboard.vocab import ClaimStatus, LineageKind
 from hyperloom_multibranch.contracts.toolbox import QueueState

@@ -19,7 +19,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.aiter_jit_cache import (
+from hyperloom_common.aiter_jit_cache import (
     invalidate_jit_cache,
     resolve_jit_build_dir,
     resolve_package_root,
@@ -281,31 +281,36 @@ def clean_stale_aiter_locks(
     threshold_seconds = float(stale_minutes) * 60.0
     now = time.time()
     for resolved in resolved_dirs:
-        try:
-            walker = os.walk(str(resolved))
-            for root, _dirs, files in walker:
-                for fname in files:
-                    if not (fname in _LOCK_NAMES or fname.startswith("lock_")):
-                        continue
-                    stats["scanned"] += 1
-                    fpath = Path(root) / fname
-                    try:
-                        age = now - fpath.stat().st_mtime
-                    except OSError:
-                        stats["errors"] += 1
-                        continue
-                    if age < threshold_seconds:
-                        stats["skipped_fresh"] += 1
-                        continue
-                    try:
-                        fpath.unlink()
-                        stats["deleted"] += 1
-                    except OSError:
-                        stats["errors"] += 1
-        except OSError:
-            stats["errors"] += 1
+        _sweep_lock_tree(resolved, now, threshold_seconds, stats)
 
     return stats
+
+
+def _sweep_lock_tree(resolved: Path, now: float, threshold_seconds: float, stats: dict[str, Any]) -> None:
+    """Delete the lock files under ``resolved`` older than ``threshold_seconds``, counting outcomes in ``stats``."""
+    try:
+        walker = os.walk(str(resolved))
+        for root, _dirs, files in walker:
+            for fname in files:
+                if not (fname in _LOCK_NAMES or fname.startswith("lock_")):
+                    continue
+                stats["scanned"] += 1
+                fpath = Path(root) / fname
+                try:
+                    age = now - fpath.stat().st_mtime
+                except OSError:
+                    stats["errors"] += 1
+                    continue
+                if age < threshold_seconds:
+                    stats["skipped_fresh"] += 1
+                    continue
+                try:
+                    fpath.unlink()
+                    stats["deleted"] += 1
+                except OSError:
+                    stats["errors"] += 1
+    except OSError:
+        stats["errors"] += 1
 
 
 def sweep_stale_aiter_locks_if_dead(

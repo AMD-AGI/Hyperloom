@@ -23,7 +23,7 @@ from typing import Any
 
 import yaml
 
-from hyperloom.common.env import env_bool
+from hyperloom_common.env import env_bool
 from hyperloom.common.outside_facts import ENV_TP
 from hyperloom.contracts.measurement import AttachmentRef
 from hyperloom.common.env_safety import (

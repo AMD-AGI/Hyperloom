@@ -39,7 +39,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.io import atomic_write_json, atomic_write_text
+from hyperloom_common.io import atomic_write_json, atomic_write_text
 from hyperloom_multibranch.scheduling.layout import REVIEW_DIR
 
 REVIEW_FILE = "review.json"

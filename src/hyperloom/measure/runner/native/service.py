@@ -20,7 +20,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.timeutil import now_iso
 from hyperloom.measure.jit.native.key import BuildInputs
 from hyperloom.measure.jit.native.record import READY, BuildRecord, OutputFile
 from hyperloom.measure.jit.native.store import BuildInfraError, BuildStore

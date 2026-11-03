@@ -15,31 +15,52 @@ import subprocess
 from pathlib import Path
 from typing import Any, Sequence
 
-from hyperloom.common.git_safety import repo_root, safe_directory_args
-from hyperloom.common.unified_diff import strip_path_components
+from hyperloom_common.git_safety import repo_root, safe_directory_args
+from hyperloom_common.unified_diff import strip_path_components
 
 from ...specialists.patch_safety import patch_file_targets
 from ._git import _run_git_cp
 from ._nogit_patch import _P_LEVELS, _PATCH_DEV_NULL
 
 
+def _target_resolves(framework_root: Path, raw: str, lvl: int) -> bool:
+    """Whether patch target ``raw`` stripped at ``-p<lvl>`` names an existing path."""
+    if not raw or raw == _PATCH_DEV_NULL:
+        return False
+    try:
+        return (framework_root / strip_path_components(raw, lvl)).exists()
+    except OSError:
+        return False
+
+
 def _commit_strip_level(framework_root: Path, pairs: list[tuple[str, str]]) -> int:
     """Pick the ``-p`` strip level resolving the most targets to existing files."""
     best_lvl, best_hits = 1, -1
     for lvl in _P_LEVELS:
-        hits = 0
-        for old, new in pairs:
-            for raw in (new, old):
-                if not raw or raw == _PATCH_DEV_NULL:
-                    continue
-                try:
-                    if (framework_root / strip_path_components(raw, lvl)).exists():
-                        hits += 1
-                except OSError:
-                    continue
+        hits = sum(_target_resolves(framework_root, raw, lvl) for old, new in pairs for raw in (new, old))
         if hits > best_hits:
             best_hits, best_lvl = hits, lvl
     return best_lvl
+
+
+def _split_patch_targets(
+    framework_root: Path, pairs: list[tuple[str, str]], upserted: list[str], deleted: list[str]
+) -> None:
+    """Append one patch's upserted and deleted targets that are not listed yet."""
+    lvl = _commit_strip_level(framework_root, pairs)
+    for old, new in pairs:
+        rel_new = strip_path_components(new, lvl) if new and new != _PATCH_DEV_NULL else None
+        rel_old = strip_path_components(old, lvl) if old and old != _PATCH_DEV_NULL else None
+        try:
+            new_exists = bool(rel_new) and (framework_root / rel_new).exists()
+        except OSError:
+            new_exists = False
+        if rel_new and new_exists:
+            if rel_new not in upserted:
+                upserted.append(rel_new)
+        elif rel_old:
+            if rel_old not in deleted:
+                deleted.append(rel_old)
 
 
 def _patch_touched_paths_split(framework_root: Path, patches: list[Path]) -> tuple[list[str], list[str]]:
@@ -52,22 +73,8 @@ def _patch_touched_paths_split(framework_root: Path, patches: list[Path]) -> tup
         except OSError:
             continue
         pairs = patch_file_targets(text)
-        if not pairs:
-            continue
-        lvl = _commit_strip_level(framework_root, pairs)
-        for old, new in pairs:
-            rel_new = strip_path_components(new, lvl) if new and new != _PATCH_DEV_NULL else None
-            rel_old = strip_path_components(old, lvl) if old and old != _PATCH_DEV_NULL else None
-            try:
-                new_exists = bool(rel_new) and (framework_root / rel_new).exists()
-            except OSError:
-                new_exists = False
-            if rel_new and new_exists:
-                if rel_new not in upserted:
-                    upserted.append(rel_new)
-            elif rel_old:
-                if rel_old not in deleted:
-                    deleted.append(rel_old)
+        if pairs:
+            _split_patch_targets(framework_root, pairs, upserted, deleted)
     return upserted, deleted
 
 

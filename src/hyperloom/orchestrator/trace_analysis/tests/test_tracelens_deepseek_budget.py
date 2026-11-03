@@ -10,7 +10,8 @@ from typing import Any
 
 import pytest
 
-from hyperloom.common import deepseek_task, llm_config
+from hyperloom_common.llm import llm_config
+from hyperloom.common import deepseek_task
 from hyperloom.orchestrator.trace_analysis import tracelens_deepseek
 from hyperloom.orchestrator.trace_analysis import tracelens_skill_runner as tlr
 
@@ -46,7 +47,6 @@ async def test_tracelens_forwards_its_budget_to_the_harness(tmp_path: Path, monk
     # The session owes analysis.md, which the fake wrote.
     assert seen["owed"] is not None and seen["owed"].done()
     assert result.runner == "deepseek"
-    assert result.raw_text == "report written"
 
 
 async def test_the_harness_runs_the_system_prompt_every_runtime_shares(

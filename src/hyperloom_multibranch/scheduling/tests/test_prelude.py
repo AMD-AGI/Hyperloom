@@ -21,7 +21,7 @@ from typing import Any
 import pytest
 
 import hyperloom
-from hyperloom.common.io import atomic_write_json
+from hyperloom_common.io import atomic_write_json
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
@@ -262,10 +262,17 @@ def _registry(
 def _optimize_options() -> set[str]:
     """Every option ``hyperloom optimize`` declares, read from the parser's source text without importing it."""
 
-    source = (Path(hyperloom.__file__).parent / "inference_optimizer" / "cli" / "parser.py").read_text()
+    cli = Path(hyperloom.__file__).parent / "inference_optimizer" / "cli"
+    source = (cli / "parser.py").read_text()
     start = source.index('sub.add_parser("optimize"')
     end = source.find("sub.add_parser(", start + 1)
     optimize = source[start : end if end != -1 else None]
+    # Most optimize options are declared in ``add_*(opt)`` helpers spread over the cli modules.
+    helpers = "".join(path.read_text() for path in sorted(cli.glob("*.py")))
+    for helper in re.findall(r"\b(_?add_[a-z_]+)\(opt\)", optimize):
+        body = helpers[helpers.index(f"def {helper}(") :]
+        next_def = body.find("\ndef ", 1)
+        optimize += body[: next_def if next_def != -1 else None]
     options: set[str] = set()
     for call in optimize.split("add_argument(")[1:]:
         head = call.split("help=")[0]

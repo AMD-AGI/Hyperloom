@@ -22,7 +22,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from hyperloom.common.aiter_jit_cache import resolve_package_root
+from hyperloom_common.aiter_jit_cache import resolve_package_root
 from hyperloom.common.outside_facts import SGLANG_IMAGE_AITER_CONFIGS
 from hyperloom.measure.framework.tables import TableVariable, read_variables
 

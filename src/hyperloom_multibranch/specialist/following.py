@@ -23,7 +23,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from hyperloom.common.fs_utils import write_text_nofollow
+from hyperloom_common.fs_utils import write_text_nofollow
 from hyperloom.contracts.recipe import Recipe, RecipeError, diff
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry
 from hyperloom_multibranch.contracts.blackboard.interfaces import ConflictingWrite, LineageSink

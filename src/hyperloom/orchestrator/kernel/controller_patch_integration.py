@@ -20,7 +20,7 @@ from kernelforge.workflows.rewrite_controller import (
     published_operator_dirs,
 )
 
-from hyperloom.common.io import JsonFormat, atomic_write_json
+from hyperloom_common.io import JsonFormat, atomic_write_json
 from hyperloom.orchestrator.actions.executors._patch_snapshot import (
     _git_commit_kept,
     _patch_touched_paths,
@@ -35,7 +35,7 @@ from .controller_publication import (
     ControllerPublicationError,
     load_controller_publication,
 )
-from .patch_conflict_merge import LandingContext, apply_patch_resolving_conflicts
+from .patch_conflict_merge import LandingContext, PatchMergeOutcome, apply_patch_resolving_conflicts
 
 log = logging.getLogger(__name__)
 
@@ -368,6 +368,23 @@ class _ControllerIntegration:
             return _refusal(publication, "skipped_dirty_worktree", reason, head_before)
         return await self._apply_and_validate(publication, head_before, touched)
 
+    async def _apply_onto_landed(self, publication: ControllerPatchPublication) -> PatchMergeOutcome:
+        """Apply one publication's patch, resolving conflicts against the patches already landed in its repo."""
+        repo = publication.repo_root
+        # Lanes all diff against the pinned base, so every KEEP committed above
+        # makes the diffs still queued stale on the files it touched.
+        landed = self._landed.get(repo, [])
+        return await apply_patch_resolving_conflicts(
+            repo,
+            publication.patch_path,
+            LandingContext(
+                operator_id=publication.operator_id,
+                landed_operator_ids=[operator for operator, _ in landed],
+                landed_patches=[patch for _, patch in landed],
+                intent=f"{publication.operator_name} in {publication.kernel_path}",
+            ),
+        )
+
     async def _apply_and_validate(
         self,
         publication: ControllerPatchPublication,
@@ -380,19 +397,7 @@ class _ControllerIntegration:
                 operator_id=publication.operator_id, status=stop.error_class, reason=stop.never_started
             )
         repo = publication.repo_root
-        # Lanes all diff against the pinned base, so every KEEP committed above
-        # makes the diffs still queued stale on the files it touched.
-        landed = self._landed.get(repo, [])
-        merge = await apply_patch_resolving_conflicts(
-            repo,
-            publication.patch_path,
-            LandingContext(
-                operator_id=publication.operator_id,
-                landed_operator_ids=[operator for operator, _ in landed],
-                landed_patches=[patch for _, patch in landed],
-                intent=f"{publication.operator_name} in {publication.kernel_path}",
-            ),
-        )
+        merge = await self._apply_onto_landed(publication)
         if not merge.applied:
             return _refusal(
                 publication,
@@ -489,7 +494,7 @@ async def integrate_controller_patches(
             )
             await session.record_keep({**_keep_result(publication, validation, keep_commit), **layer})
             session.shared_state.save(Path(session.session_dir))
-        except Exception as error:  # isolation boundary: one committed publication's KEEP recording
+        except OSError as error:
             log.warning("KEEP %s committed but recording it failed: %s", publication.operator_id, error, exc_info=True)
             return f"Git KEEP committed; SharedState recording failed: {error}"
         return ""

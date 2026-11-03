@@ -19,7 +19,7 @@ import subprocess
 from pathlib import Path
 from typing import Sequence
 
-from hyperloom.common.unified_diff import parse_unified_diff
+from hyperloom_common.unified_diff import parse_unified_diff
 from hyperloom.inference_optimizer.session import paths
 
 from ._git import _git_head_sha
@@ -766,30 +766,8 @@ def _discover_sglang_plan() -> _PatchPlan | None:
     if source_root is None:
         return None
 
-    # Per-version subdir layout required.
-    patches_dir = _resolve_versioned_patches_dir(patches_root, version, source_root)
+    patches_dir = _supported_sglang_patches_dir(patches_root, version, source_root)
     if patches_dir is None:
-        log.warning(
-            "_server_patcher: no SGLang patches found under %s/%s/ for "
-            "version %s; upgrade TraceLens to Hyperloom_integration_v0.3.1+ — "
-            "kernel shape profiling will be unavailable",
-            patches_root,
-            _versioned_patches_subdir_name(version, source_root) or "<unknown>",
-            version,
-        )
-        return None
-
-    if not _version_accepted(version, patches_dir=patches_dir):
-        log.warning(
-            "_server_patcher: SGLang %s not in supported version list "
-            "(consulted: $HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS, "
-            "$HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS, %s/SUPPORTED_VERSIONS, "
-            "then built-in minor allowlist %s); skip — kernel shape profiling "
-            "will be unavailable",
-            version,
-            patches_dir,
-            _SGLANG_DEFAULT_ALLOWED_MINORS,
-        )
         return None
     patches = tuple(sorted(patches_dir.glob("*.patch")))
     if not patches:
@@ -823,6 +801,36 @@ def _discover_sglang_plan() -> _PatchPlan | None:
         apply_strip=_SGLANG_PATCH_STRIP,
         optional_patches=optional_patches,
     )
+
+
+def _supported_sglang_patches_dir(patches_root: Path, version: str, source_root: Path) -> Path | None:
+    """The versioned SGLang patches dir, or ``None`` (logged) when absent or the version is unsupported."""
+    # Per-version subdir layout required.
+    patches_dir = _resolve_versioned_patches_dir(patches_root, version, source_root)
+    if patches_dir is None:
+        log.warning(
+            "_server_patcher: no SGLang patches found under %s/%s/ for "
+            "version %s; upgrade TraceLens to Hyperloom_integration_v0.3.1+ — "
+            "kernel shape profiling will be unavailable",
+            patches_root,
+            _versioned_patches_subdir_name(version, source_root) or "<unknown>",
+            version,
+        )
+        return None
+
+    if not _version_accepted(version, patches_dir=patches_dir):
+        log.warning(
+            "_server_patcher: SGLang %s not in supported version list "
+            "(consulted: $HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS, "
+            "$HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS, %s/SUPPORTED_VERSIONS, "
+            "then built-in minor allowlist %s); skip — kernel shape profiling "
+            "will be unavailable",
+            version,
+            patches_dir,
+            _SGLANG_DEFAULT_ALLOWED_MINORS,
+        )
+        return None
+    return patches_dir
 
 
 #: TraceLens cuts its SGLang patches in the checkout (``a/python/sglang/...``); two components off, their paths are

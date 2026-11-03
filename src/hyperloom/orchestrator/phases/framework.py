@@ -12,7 +12,7 @@ from pathlib import Path
 from collections.abc import Collection, Mapping
 from typing import TYPE_CHECKING, Any, NamedTuple
 
-from hyperloom.common.coerce import first_str, to_list, to_mapping
+from hyperloom_common.coerce import first_str, to_list, to_mapping
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 
 from . import machine_state as _phase_state
@@ -232,6 +232,39 @@ def _apply_failure_feedback_lines(retry: AuthoringRetry) -> list[str]:
     return lines
 
 
+def _coordinator_specialist_spec(params: dict[str, Any], idem: str, *, lanes: list[str] | None, ttl: int) -> TaskSpec:
+    """The specialist task a coordinator-internal dispatch opens with ``params``."""
+    return TaskSpec(
+        kind="specialist",
+        params=params,
+        idempotency_key=idem,
+        requires_lanes=lanes,
+        lease_ttl_sec=ttl,
+        dispatch_class="coordinator",
+    )
+
+
+def _settled_local_explore_rounds(state: Any) -> int:
+    """How many local-exploration rounds the phase progress already records."""
+    return sum(
+        1
+        for p in to_list(state.framework_agent_phase_progress)
+        if first_str(to_mapping(p).get("candidate_id")).startswith(LOCAL_EXPLORE_CANDIDATE_PREFIX)
+    )
+
+
+def _local_explore_gap(gap_cid: str, gap: str, domain: str) -> dict[str, Any]:
+    """The gap row a local-exploration round is filed under."""
+    return {
+        "canonical_id": gap_cid,
+        "symptom": gap or "Author a throughput patch from live source + profiling evidence",
+        "layer": "framework",
+        "severity": "medium",
+        "domain_hint": domain,
+        "source": "coordinator_internal",
+    }
+
+
 class FrameworkPhase(_AuthoredOutcomeMixin, _CandidateDiscoveryMixin, ProposalBench):
     """The FRAMEWORK_AGENT phase: upstream candidates, authored patches, deliverable routing, and the enablement hand-off."""
 
@@ -257,7 +290,7 @@ class FrameworkPhase(_AuthoredOutcomeMixin, _CandidateDiscoveryMixin, ProposalBe
         """Record an authored patch's settled outcome, then re-arm or drain the authored lane."""
         if (task.params or {}).get("framework_agent_authoring"):
             self._record_framework_agent_authored_outcome(task=task, result=result, adopted=verdict is Verdict.ADOPTED)
-        await self._maybe_rearm_authored_lane(result.result)
+        await self._maybe_rearm_authored_lane(result.result, to_mapping(task.params))
         await self._drain_apply_fail_retry_pending()
 
     def record_unpromoted_candidate(self, task: "Task", result_payload: dict[str, Any]) -> None:
@@ -689,14 +722,7 @@ class FrameworkPhase(_AuthoredOutcomeMixin, _CandidateDiscoveryMixin, ProposalBe
         # This internal dispatch bypasses intent_router (adds gpu_research_lane + budget TTL).
         lanes, ttl = self._coord.gpu_lanes.framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
         spec_task, _spec_existing = await self.tasks.create_or_return_existing(
-            TaskSpec(
-                kind="specialist",
-                params=params,
-                idempotency_key=idem,
-                requires_lanes=lanes,
-                lease_ttl_sec=ttl,
-                dispatch_class="coordinator",
-            )
+            _coordinator_specialist_spec(params, idem, lanes=lanes, ttl=ttl)
         )
         if _spec_existing and await self._settle_finished_authoring_specialist(
             spec_task, cand_id=cand_id, batch_id=batch_id, label="authoring"
@@ -722,8 +748,8 @@ class FrameworkPhase(_AuthoredOutcomeMixin, _CandidateDiscoveryMixin, ProposalBe
         log.info("FRAMEWORK: dispatched authoring specialist candidate=%s batch=%s gap=%s", cand_id, batch_id, gap_cid)
         return spec_tid
 
-    async def _maybe_rearm_authored_lane(self, res: dict[str, Any] | None) -> None:
-        """Route an authored lane's result to the handler that rearms it: enablement settles, a perf apply-failure retries under cap."""
+    async def _maybe_rearm_authored_lane(self, res: dict[str, Any] | None, params: Mapping[str, Any]) -> None:
+        """Route an authored lane's result to the handler that rearms it: enablement settles, a perf apply-failure re-authors the candidate ``params`` name, under cap."""
         if not isinstance(res, dict):
             return
         lane = first_str(res.get("lane"))
@@ -734,7 +760,7 @@ class FrameworkPhase(_AuthoredOutcomeMixin, _CandidateDiscoveryMixin, ProposalBe
         if first_str(res.get("status")) != "apply_failed" or lane not in ("perf_framework", "perf_explore"):
             return
 
-        candidate = to_mapping(res.get("candidate"))
+        candidate = self._candidate_row(self._authored_candidate_id(params))
         cand_id = self._framework_candidate_key(candidate) or first_str(res.get("specialist_task_id")).strip()
         if not cand_id:
             return
@@ -1092,11 +1118,7 @@ class FrameworkPhase(_AuthoredOutcomeMixin, _CandidateDiscoveryMixin, ProposalBe
         """Dispatch a candidate-free authoring specialist (no upstream PR lead)."""
         state = self.shared_state
         # A local-exploration round has no upstream lead to key on, so its id counts the rounds already settled.
-        settled = sum(
-            1
-            for p in to_list(state.framework_agent_phase_progress)
-            if first_str(to_mapping(p).get("candidate_id")).startswith(LOCAL_EXPLORE_CANDIDATE_PREFIX)
-        )
+        settled = _settled_local_explore_rounds(state)
         cand_id = self._framework_candidate_key(candidate) or f"{LOCAL_EXPLORE_CANDIDATE_PREFIX}{settled}"
         gap = first_str(candidate.get("gap_description")).strip()
         gap_cid = first_str(candidate.get("gap_canonical_id")).strip() or f"gap.framework.local_explore.{cand_id}"
@@ -1105,16 +1127,7 @@ class FrameworkPhase(_AuthoredOutcomeMixin, _CandidateDiscoveryMixin, ProposalBe
         notes = ""
         if domain == "framework_rewrite_specialist":
             notes = self._render_rewrite_evidence_for_prompt() or self._rewrite_evidence_absence_note()
-        state.upsert_gap(
-            {
-                "canonical_id": gap_cid,
-                "symptom": gap or "Author a throughput patch from live source + profiling evidence",
-                "layer": "framework",
-                "severity": "medium",
-                "domain_hint": domain,
-                "source": "coordinator_internal",
-            }
-        )
+        state.upsert_gap(_local_explore_gap(gap_cid, gap, domain))
         memory = self._build_framework_working_memory()
         prior_attempts = [
             t for t in to_list(memory.get("tried_and_why")) if first_str(to_mapping(t).get("ref")).strip()
@@ -1481,7 +1494,7 @@ class FrameworkPhase(_AuthoredOutcomeMixin, _CandidateDiscoveryMixin, ProposalBe
                     candidate,
                     audit=audit if isinstance(audit, dict) else {},
                 )
-            except Exception as exc:  # isolation boundary: one approved candidate's authoring dispatch
+            except (sqlite3.Error, OSError) as exc:
                 log.warning(
                     "FRAMEWORK: authoring specialist dispatch failed: %r",
                     exc,

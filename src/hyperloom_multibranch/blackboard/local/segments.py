@@ -20,8 +20,8 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
-from hyperloom.common.io import append_jsonl
-from hyperloom.common.jsonio import read_jsonl
+from hyperloom_common.io import append_jsonl
+from hyperloom_common.jsonio import read_jsonl
 from hyperloom_multibranch.contracts.blackboard.vocab import Role
 from hyperloom_multibranch.blackboard.codec import key_sorted
 

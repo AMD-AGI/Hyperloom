@@ -19,7 +19,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.timeutil import iso_z
+from hyperloom_common.timeutil import iso_z
 
 from .recorder import recorder_for
 from .session_metadata import PRODUCER_COORDINATOR, snapshot_metadata

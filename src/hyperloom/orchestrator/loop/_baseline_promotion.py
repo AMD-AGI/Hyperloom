@@ -9,8 +9,8 @@ import logging
 import sqlite3
 from typing import Any, Mapping
 
-from hyperloom.common.coerce import to_float
-from hyperloom.common.env import is_truthy
+from hyperloom_common.coerce import to_float
+from hyperloom_common.env import is_truthy
 from hyperloom.common.perf_metric import constraint_fields, stamp_output_per_gpu
 from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
@@ -243,6 +243,7 @@ class BaselinePromotionMixin:
                 result, held_reason=held_reason, prior_anchor=prior_anchor, promoting_tid=promoting_tid
             )
             self.shared_state.baseline_failure_streak = 0
+            self.shared_state.baseline_failures_this_leg = 0
             # A genuine baseline is what revalidates an enablement KEEP.
             await self._settle_pending_revalidation(
                 result, is_revalidation=is_revalidation, promoting_tid=promoting_tid

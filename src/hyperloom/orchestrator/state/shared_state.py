@@ -15,11 +15,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, ClassVar
 
-from hyperloom.common.coerce import first_text, to_float, to_int, to_str_list
-from hyperloom.common.env import env_bool
+from hyperloom_common.coerce import first_text, to_float, to_int, to_str_list
+from hyperloom_common.env import env_bool
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.gain_math import gain_pct, gain_pct_or_zero
-from hyperloom.common.io import atomic_write_json
+from hyperloom_common.io import atomic_write_json
 from hyperloom.common.perf_metric import (
     AGENTX_KEEP_P50_THRESHOLD_PCT,
     GRADED_INTVTY,
@@ -38,9 +38,9 @@ from hyperloom.common.perf_metric import (
     resolve_grading_anchor_perf,
     total_tput_of,
 )
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.timeutil import now_iso
 from hyperloom.plugs import progress as _progress
-from hyperloom.common.jsonio import read_json_strict
+from hyperloom_common.jsonio import read_json_strict
 from hyperloom.common.profile_args import sanitize_profile_server_args
 from hyperloom.inference_optimizer.grading import resolved_grading
 from hyperloom.inference_optimizer.grid_server_args import strip_benchmark_harness_flags
@@ -400,6 +400,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
     baseline_perf: dict[str, Any] = field(default_factory=dict)
     baseline_accuracy: float = 0.0
     baseline_failure_streak: int = 0
+    # The live leg's share of ``baseline_failure_streak``; ``begin_leg`` and every reset of the streak zero it.
+    baseline_failures_this_leg: int = 0
     baseline_arg_error_streak: int = 0
     # Signature of the last failure counted in ``baseline_failure_streak``; two in a row that match end the run.
     baseline_last_failure_signature: str = ""
@@ -538,9 +540,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
     pruned_families: list[str] = field(default_factory=list)
     start_ts: str = field(default_factory=now_iso)
     max_minutes: int = 0
-    # Absolute unix deadline for a bounded session. Stamped once from
-    # ``start_ts + max_minutes`` so a resume cannot reissue a full budget.
-    # ``0.0`` means unset or unbounded.
+    # Session budget: seconds charged by closed legs, plus the wall instant the live leg opened (``0.0`` between legs).
     elapsed_charged_sec: float = 0.0
     leg_anchor_unix: float = 0.0
     # Operator's ``--closing-grace-sec``; ``None`` derives it from max_minutes.
@@ -1153,7 +1153,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
             from hyperloom.inference_optimizer.trace.langfuse_emitter import record_status as _lf_record_status
 
             _lf_record_status(session_dir, self._langfuse_status_summary())
-        except Exception:
+        except (TypeError, ValueError):
             log.debug("langfuse status mirror failed", exc_info=True)
 
     def _backfill_scriptable_latency(self) -> None:
@@ -1610,10 +1610,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
         attempts_attr = f"{action}_attempts"
         last_attr = f"last_{action}"
         result = attempt.result or {}
-        metric_key, metric_kind = _KEY_METRIC_MAP.get(
-            action,
-            ("output_throughput", "output_throughput"),
-        )
+        metric_key, metric_kind = _KEY_METRIC_MAP[action]
         raw_metric = result.get(metric_key)
         try:
             key_metric: float | None = float(raw_metric) if isinstance(raw_metric, (int, float)) else None

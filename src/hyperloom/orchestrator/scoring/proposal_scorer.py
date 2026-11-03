@@ -13,9 +13,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
 
-from hyperloom.common.coerce import to_float
-from hyperloom.common.jsonio import extract_last_json_with_key
-from hyperloom.common.llm_config import (
+from hyperloom_common.coerce import to_float
+from hyperloom_common.jsonio import extract_last_json_with_key
+from hyperloom_common.llm.llm_config import (
     DEFAULT_CLAUDE_MODEL,
     LLMConfigError,
     apply_reasoning_effort,
@@ -23,8 +23,8 @@ from hyperloom.common.llm_config import (
     get_async_openai_client,
 )
 from ..roles.base import parse_call_timeout_env
-from hyperloom.common.timeutil import format_exc_brief
-from hyperloom.common.token_usage import openai_usage_counts
+from hyperloom_common.timeutil import format_exc_brief
+from hyperloom_common.llm.token_usage import openai_usage_counts
 from hyperloom.inference_optimizer.trace.conversation_trace import ConversationRecord, append_conversation
 from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, LLMCallSite, append_llm_call, new_call_id
 from hyperloom.inference_optimizer.trace.parse_usage import reasoning_output_tokens
@@ -289,33 +289,26 @@ class ProposalScorer:
         """Append one ``llm_calls.jsonl`` row for a proposal-scoring call."""
         if self.session_dir is None:
             return
-        try:
-            counts = openai_usage_counts(usage)
-            record = LLMCallRecord(
-                session_id=self.session_dir.name,
-                component="proposal_scorer",
-                role="proposal_scorer",  # must match the conversation row's role
-                call_id=call_id,
-                model=str(model),
-                task_id=keys.task_id,
-                tick=keys.tick,
-                phase=keys.phase,
-                input_tokens=counts.get("input_tokens"),
-                output_tokens=counts.get("output_tokens"),
-                cache_read_input_tokens=counts.get("cache_read_input_tokens"),
-                cache_creation_input_tokens=counts.get("cache_creation_input_tokens"),
-                # A scoring model with a reasoning split bills it separately; reading it here keeps the ledger
-                # consistent with the backends that report it on their turn metadata.
-                reasoning_output_tokens=reasoning_output_tokens(usage),
-                latency_ms=latency_ms,
-            )
-            append_llm_call(session_dir=self.session_dir, record=record)
-        except Exception:
-            log.debug(
-                "full-trace: proposal_scorer llm_call append failed for model=%s",
-                model,
-                exc_info=True,
-            )
+        counts = openai_usage_counts(usage)
+        record = LLMCallRecord(
+            session_id=self.session_dir.name,
+            component="proposal_scorer",
+            role="proposal_scorer",  # must match the conversation row's role
+            call_id=call_id,
+            model=str(model),
+            task_id=keys.task_id,
+            tick=keys.tick,
+            phase=keys.phase,
+            input_tokens=counts.get("input_tokens"),
+            output_tokens=counts.get("output_tokens"),
+            cache_read_input_tokens=counts.get("cache_read_input_tokens"),
+            cache_creation_input_tokens=counts.get("cache_creation_input_tokens"),
+            # A scoring model with a reasoning split bills it separately; reading it here keeps the ledger
+            # consistent with the backends that report it on their turn metadata.
+            reasoning_output_tokens=reasoning_output_tokens(usage),
+            latency_ms=latency_ms,
+        )
+        append_llm_call(session_dir=self.session_dir, record=record)
 
     def _trace_scorer_llm_failure(
         self,
@@ -328,23 +321,16 @@ class ProposalScorer:
         """Append one ``status=\"error\"`` row for a scoring call that never returned."""
         if self.session_dir is None:
             return
-        try:
-            site = LLMCallSite(
-                session_id=self.session_dir.name,
-                component="proposal_scorer",
-                role="proposal_scorer",
-                task_id=keys.task_id,
-                tick=keys.tick,
-                phase=keys.phase,
-            )
-            record = LLMCallRecord.for_failure(site, error, model=str(model), latency_ms=latency_ms)
-            append_llm_call(session_dir=self.session_dir, record=record)
-        except Exception:
-            log.debug(
-                "full-trace: proposal_scorer llm_call failure append failed for model=%s",
-                model,
-                exc_info=True,
-            )
+        site = LLMCallSite(
+            session_id=self.session_dir.name,
+            component="proposal_scorer",
+            role="proposal_scorer",
+            task_id=keys.task_id,
+            tick=keys.tick,
+            phase=keys.phase,
+        )
+        record = LLMCallRecord.for_failure(site, error, model=str(model), latency_ms=latency_ms)
+        append_llm_call(session_dir=self.session_dir, record=record)
 
     def _record_scorer_conversation(
         self,

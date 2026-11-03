@@ -113,7 +113,7 @@ from functools import partial
 from pathlib import Path
 
 from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV, benchmark_config_path
-from hyperloom.common.env import EnvValueError
+from hyperloom_common.env import EnvValueError
 from hyperloom.common.outside_facts.image_check import ImageCheckFailed, mode_from_environment
 from hyperloom.common.perf_metric import agentx_enabled
 from hyperloom.common.workload_defaults import DEFAULT_EP

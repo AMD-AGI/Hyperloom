@@ -226,12 +226,8 @@ def test_explicit_backend_disables_cross_provider_fallback(
     assert captured["settings"].sandbox_mode == "workspace-write"
 
 
-@pytest.mark.parametrize("mode", ["workspace-write", "read-only"])
-def test_explicit_secure_sandbox_mode_is_wired(
-    clean_agent_env,
-    monkeypatch,
-    mode,
-):
+def _assert_sandbox_mode_is_wired(monkeypatch, mode: str) -> None:
+    """An explicit sandbox ``mode`` reaches the runtime settings and the registered backend is returned."""
     captured = {}
 
     def fake_resolve(provider, **kwargs):
@@ -249,42 +245,23 @@ def test_explicit_secure_sandbox_mode_is_wired(
     assert captured["settings"].sandbox_mode == mode
 
 
+@pytest.mark.parametrize("mode", ["workspace-write", "read-only"])
+def test_explicit_secure_sandbox_mode_is_wired(
+    clean_agent_env,
+    monkeypatch,
+    mode,
+):
+    _assert_sandbox_mode_is_wired(monkeypatch, mode)
+
+
 def test_bypass_is_wired(clean_agent_env, monkeypatch):
-    captured = {}
-
-    def fake_resolve(provider, **kwargs):
-        captured.update(kwargs)
-        return SimpleNamespace(provider=provider, model=kwargs["model"], sandbox_mode="bypass")
-
-    backend = SimpleNamespace(
-        name="codex",
-        runtime=SimpleNamespace(provider="codex", model="gpt-explicit", sandbox_mode="bypass"),
-    )
-    monkeypatch.setattr(agent_selection, "resolve_agent_runtime", fake_resolve)
-    monkeypatch.setattr(agent_selection, "create_registered_backend", lambda runtime: backend)
-
-    assert _create_agent_backend("codex", "gpt-explicit", "bypass") is backend
-    assert captured["settings"].sandbox_mode == "bypass"
+    _assert_sandbox_mode_is_wired(monkeypatch, "bypass")
 
 
 def test_bypass_is_wired_without_retired_external_sandbox_env(clean_agent_env, monkeypatch):
     """forge-fuse bypass no longer gates on HYPERLOOM_CODEX_EXTERNAL_SANDBOX."""
     monkeypatch.delenv("HYPERLOOM_CODEX_EXTERNAL_SANDBOX", raising=False)
-    captured = {}
-
-    def fake_resolve(provider, **kwargs):
-        captured.update(kwargs)
-        return SimpleNamespace(provider=provider, model=kwargs["model"], sandbox_mode="bypass")
-
-    backend = SimpleNamespace(
-        name="codex",
-        runtime=SimpleNamespace(provider="codex", model="gpt-explicit", sandbox_mode="bypass"),
-    )
-    monkeypatch.setattr(agent_selection, "resolve_agent_runtime", fake_resolve)
-    monkeypatch.setattr(agent_selection, "create_registered_backend", lambda runtime: backend)
-
-    assert _create_agent_backend("codex", "gpt-explicit", "bypass") is backend
-    assert captured["settings"].sandbox_mode == "bypass"
+    _assert_sandbox_mode_is_wired(monkeypatch, "bypass")
 
 
 def test_retired_external_sandbox_env_does_not_confirm_bypass(clean_agent_env, monkeypatch):
@@ -1247,7 +1224,7 @@ class TestCliDryRun:
         assert manifest["fusion"] is None
 
     def test_discovery_targets_the_framework_root_it_was_given(self, tmp_path, monkeypatch):
-        """``--framework-root`` pins WHICH install is being optimized."""
+        """``--framework-root`` pins WHICH install is being optimized, and ``--gpu-target`` the chip it runs on."""
         from kernelforge.workflows.forge_fusion import pipeline as cli_module
 
         seen: dict[str, object] = {}
@@ -1292,6 +1269,8 @@ class TestCliDryRun:
                 str(tmp_path / "out"),
                 "--framework-root",
                 str(root),
+                "--gpu-target",
+                "gfx950",
                 "--dry-run",
                 "--discover",
                 "llm",
@@ -1300,6 +1279,7 @@ class TestCliDryRun:
 
         assert res.exit_code == 0, res.output
         assert seen["target"].install.framework_root == str(root)
+        assert seen["target"].gpu_arch == "gfx950"
 
     def test_unreachable_llm_is_not_written_as_no_opportunity(self, tmp_path, monkeypatch):
         """The incident, end to end: launch-bound trace + a dead gateway."""

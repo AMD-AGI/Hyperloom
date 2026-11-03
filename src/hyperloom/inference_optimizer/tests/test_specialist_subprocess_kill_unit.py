@@ -49,7 +49,6 @@ async def test_pre_cancelled_specialist_never_starts(monkeypatch, tmp_path, back
                 worktree_base=None,
                 system_prompt="system",
                 user_prompt="user",
-                max_turns=1,
                 gpu_lease=lease,
             )
         )
@@ -119,7 +118,6 @@ async def test_specialist_scope_cancel_stops_before_harvest(monkeypatch, tmp_pat
                         worktree_base=None,
                         system_prompt="system",
                         user_prompt="user",
-                        max_turns=1,
                         gpu_lease=lease,
                     )
                 )
@@ -245,7 +243,6 @@ async def test_natural_exit_reaps_detached_descendant(monkeypatch, tmp_path, dem
                 worktree_base=None,
                 system_prompt="system",
                 user_prompt="user",
-                max_turns=1,
             )
         )
         deadline = time.monotonic() + 5
@@ -403,7 +400,6 @@ async def test_ray_followup_ack_preserves_reap_outcome(monkeypatch, tmp_path, ph
             worktree_base=None,
             system_prompt="system",
             user_prompt="user",
-            max_turns=1,
             gpu_lease=lease,
             deadline=Deadline.after(0 if phase == "timeout" else 600, now=100),
         )

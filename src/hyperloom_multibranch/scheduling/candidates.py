@@ -34,7 +34,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Protocol
 
-from hyperloom.common.unified_diff import touched_paths
+from hyperloom_common.unified_diff import touched_paths
 from hyperloom.contracts.measurement import FailureClass, Validity
 from hyperloom.contracts.recipe import PatchRef, Recipe, diff
 from hyperloom_multibranch.contracts.blackboard.interfaces import CommitQuery, RecordSearch

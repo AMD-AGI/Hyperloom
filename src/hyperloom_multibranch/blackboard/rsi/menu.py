@@ -48,7 +48,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from hyperloom.common.io import append_jsonl
+from hyperloom_common.io import append_jsonl
 from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.blackboard.peers import Intent, IntentLayer, Purpose, TestKind

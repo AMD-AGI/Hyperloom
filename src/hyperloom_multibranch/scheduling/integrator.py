@@ -55,7 +55,7 @@ from collections.abc import Awaitable, Sequence, Set
 from dataclasses import dataclass, field, replace
 from functools import partial
 
-from hyperloom.common.jsonio import extract_last_json_with_key
+from hyperloom_common.jsonio import extract_last_json_with_key
 from hyperloom.contracts.measurement import Purpose, TestKind
 from hyperloom.contracts.recipe import ComponentPatches, RecipeDelta, RecipeError, ValueChange, apply
 from hyperloom.measure.compile import BlobError

@@ -27,7 +27,7 @@ import signal
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 
-from hyperloom.common.llm_config import AGENT_BACKEND_CLAUDE
+from hyperloom_common.llm.llm_config import AGENT_BACKEND_CLAUDE
 from hyperloom_multibranch.contracts.blackboard.interfaces import UsageSink
 from hyperloom_multibranch.contracts.blackboard.records import LlmUsage
 from hyperloom_multibranch.contracts.blackboard.vocab import UsageSource

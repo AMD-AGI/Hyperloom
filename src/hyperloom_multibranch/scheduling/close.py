@@ -20,8 +20,8 @@ import asyncio
 import logging
 from dataclasses import dataclass
 
-from hyperloom.common.io import WriteOptions, atomic_write_json, atomic_write_text
-from hyperloom.common.jsonio import read_json_strict
+from hyperloom_common.io import WriteOptions, atomic_write_json, atomic_write_text
+from hyperloom_common.jsonio import read_json_strict
 from hyperloom.contracts.recipe import RecipeError
 from hyperloom_multibranch.contracts.blackboard.interfaces import BlackboardError
 from hyperloom_multibranch.blackboard.codec import encode

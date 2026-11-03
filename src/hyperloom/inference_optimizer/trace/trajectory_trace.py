@@ -25,10 +25,10 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.coerce import text_or_none, to_int
-from hyperloom.common.io import JsonLineFormat, append_jsonl
-from hyperloom.common.llm_request_hooks import LLMRequestRecord, add_llm_request_observer
-from hyperloom.common.timeutil import elapsed_ms, epoch_iso, now_iso
+from hyperloom_common.coerce import text_or_none, to_int
+from hyperloom_common.io import JsonLineFormat, append_jsonl
+from hyperloom_common.llm.llm_request_hooks import LLMRequestRecord, add_llm_request_observer
+from hyperloom_common.timeutil import elapsed_ms, epoch_iso, now_iso
 from hyperloom.inference_optimizer.session.session_paths import trajectory_dir
 from .llm_trace import VALID_COMPONENTS as _LLM_COMPONENTS
 
@@ -397,7 +397,7 @@ def trajectory_shards(session_dir: Path) -> list[Path]:
 
 def load_shard(path: Path) -> list[dict[str, Any]]:
     """Read one shard, skipping a torn trailing line from a live writer."""
-    from hyperloom.common.jsonio import read_jsonl
+    from hyperloom_common.jsonio import read_jsonl
 
     return read_jsonl(path)
 

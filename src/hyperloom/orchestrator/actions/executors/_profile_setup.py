@@ -20,7 +20,7 @@ from functools import cache
 from pathlib import Path
 from typing import Any, Mapping, NamedTuple
 
-from hyperloom.common.env import env_bool, env_flag, is_truthy
+from hyperloom_common.env import env_bool, env_flag, is_truthy
 from hyperloom.common.workload_defaults import DEFAULT_CONC, DEFAULT_OSL
 from hyperloom.inference_optimizer.model_config_utils import model_is_gemma2
 from hyperloom.inference_optimizer.runtime_environment import prepend_launch_path
@@ -493,6 +493,11 @@ VLLM_PATCH_PROFILER_FIELDS: tuple[str, ...] = ("capture_torch_profiler", "detail
 #: The server flag only TraceLens's SGLang roofline patch adds (``server_args.patch``, SGLang < 0.5.18), which an SGLang
 #: that was not patched refuses with its whole command line.
 SGLANG_PATCH_SERVER_FLAG = "--enable-shape-discovery-for-cuda-graph-profile"
+
+
+#: The ``--profiler-config`` fields only TraceLens's vLLM patch adds (``_server_patcher``): a vLLM that was not patched
+#: refuses them, so the server they are passed to must run a patched vLLM.
+VLLM_PATCH_PROFILER_FIELDS: tuple[str, ...] = ("capture_torch_profiler", "detailed_trace_annotation")
 
 
 def _apply_vllm_profile(

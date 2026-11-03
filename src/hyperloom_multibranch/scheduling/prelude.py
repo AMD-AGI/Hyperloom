@@ -70,8 +70,8 @@ from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from hyperloom.common.io import atomic_write_json
-from hyperloom.common.jsonio import read_json_strict
+from hyperloom_common.io import atomic_write_json
+from hyperloom_common.jsonio import read_json_strict
 from hyperloom.common.perf_metric import GRADED_INTVTY_P50
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.contracts.measurement import Purpose, TestKind, TestResult, Validity

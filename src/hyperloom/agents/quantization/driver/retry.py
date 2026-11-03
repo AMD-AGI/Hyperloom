@@ -273,8 +273,13 @@ async def quantize_via_prompt(
             log(f"quantization-agent: retrying after outcome={outcome} (retry {attempt_n}/{max_attempts})")
         attempt_n += 1
 
+    return _run_result(run_dir, attempts_list, notes)
+
+
+def _run_result(run_dir: Path, attempts: list[OutcomeId | None], notes: list[str]) -> QuantSkillRunResult:
+    """Assess the run's attempts on what ``run_dir`` holds and build the public result."""
     artifacts = collect_artifacts(run_dir)
-    assessment = build_assessment(attempts_list, artifacts=artifacts, notes=tuple(notes))
+    assessment = build_assessment(attempts, artifacts=artifacts, notes=tuple(notes))
 
     status = derive_status(assessment, artifacts)
     quantized_model_dir = (

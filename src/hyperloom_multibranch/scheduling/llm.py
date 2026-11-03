@@ -16,7 +16,7 @@ import logging
 import os
 from collections.abc import Mapping
 
-from hyperloom.common.llm_config import (
+from hyperloom_common.llm.llm_config import (
     AGENT_BACKEND_CLAUDE,
     AnthropicCompletionRequest,
     aanthropic_completion,

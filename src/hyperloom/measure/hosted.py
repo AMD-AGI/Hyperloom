@@ -28,7 +28,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from hyperloom.common.env import env_bool
+from hyperloom_common.env import env_bool
 from hyperloom.contracts.measurement import AccuracyValue, FailureClass, SandboxFacts
 from hyperloom.measure import bundle as bundle_mod
 from hyperloom.measure.archive import ArchiveError, ResultArchive

@@ -37,8 +37,8 @@ from pathlib import Path
 
 from hyperloom_kb import NoOpExperienceKB
 from hyperloom_kb.collect import CollectionTarget, CollectReport
-from hyperloom.common.io import WriteOptions, atomic_write_text
-from hyperloom.common.jsonio import read_jsonl
+from hyperloom_common.io import WriteOptions, atomic_write_text
+from hyperloom_common.jsonio import read_jsonl
 from hyperloom_multibranch.contracts.blackboard import NotRecorded
 from hyperloom_multibranch.contracts.blackboard.records import BlackboardSnapshot
 from hyperloom_multibranch.blackboard.codec import encode

@@ -12,7 +12,7 @@ import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 
-from hyperloom.common.unified_diff import touched_paths
+from hyperloom_common.unified_diff import touched_paths
 from kernelforge.evaluation.jit_rebuild import tracked_source_changes
 from kernelforge.utils.git import git, git_bytes
 from kernelforge.utils.new_path_allowlist import matches_commit_new_paths
@@ -23,6 +23,61 @@ log = logging.getLogger(__name__)
 
 # Where a campaign writes its own output inside the workspace.
 LOOP_ARTIFACT_ROOT = "forge_experiments"
+
+
+_NEW_PATHS_UNREADABLE_BLOCK = "\n".join(
+    (
+        "## New files could not be listed",
+        (
+            "This iteration could not enumerate the "
+            "workspace's new files "
+            "({error}), so nothing "
+            "below reports on them. A file you created may "
+            "be sitting on the measured tree uncommitted "
+            "and unremoved; treat the absence of a new-file "
+            "report as unknown, not as nothing."
+        ),
+    )
+)
+
+_REFUSED_NEW_PATHS_BLOCK = "\n".join(
+    (
+        "## New files that cannot ship",
+        (
+            "A KEEP commits tracked edits plus new files "
+            "matching {allowlist}. These new files match "
+            "nothing there, so a KEEP cannot carry them and "
+            "a REVERT cannot remove them, and the measured "
+            "tree is not the committed tree while they "
+            "exist: {paths}"
+        ),
+        (
+            "Put the change in a tracked file, or state in "
+            "your findings which path the operator has to "
+            "allowlist and why the change cannot live in a "
+            "tracked file."
+        ),
+    )
+)
+
+_RETAINED_NEW_PATHS_BLOCK = "\n".join(
+    (
+        "## Allowlisted new files this loop did not create",
+        (
+            "These match {allowlist} but were already on "
+            "the workspace before this loop touched it, "
+            "so they are the operator's or an earlier "
+            "round's and a REVERT leaves them in place. They "
+            "are on the measured tree without being part of "
+            "any candidate: {paths}"
+        ),
+        (
+            "If one of them is a leftover of your own work, "
+            "say so in your findings -- its effect is being "
+            "measured and attributed to nothing."
+        ),
+    )
+)
 
 
 class WorkspaceGitMixin:
@@ -155,64 +210,14 @@ class WorkspaceGitMixin:
         allowlist = ", ".join(self.ic.commit_new_paths) or "(empty)"
         blocks: list[str] = []
         if self._new_paths_unreadable:
-            blocks.append(
-                "\n".join(
-                    (
-                        "## New files could not be listed",
-                        (
-                            "This iteration could not enumerate the "
-                            "workspace's new files "
-                            f"({self._new_paths_unreadable}), so nothing "
-                            "below reports on them. A file you created may "
-                            "be sitting on the measured tree uncommitted "
-                            "and unremoved; treat the absence of a new-file "
-                            "report as unknown, not as nothing."
-                        ),
-                    )
-                )
-            )
+            blocks.append(_NEW_PATHS_UNREADABLE_BLOCK.format(error=self._new_paths_unreadable))
         if self._refused_new_paths:
             blocks.append(
-                "\n".join(
-                    (
-                        "## New files that cannot ship",
-                        (
-                            "A KEEP commits tracked edits plus new files "
-                            f"matching {allowlist}. These new files match "
-                            "nothing there, so a KEEP cannot carry them and "
-                            "a REVERT cannot remove them, and the measured "
-                            "tree is not the committed tree while they "
-                            "exist: " + ", ".join(self._refused_new_paths)
-                        ),
-                        (
-                            "Put the change in a tracked file, or state in "
-                            "your findings which path the operator has to "
-                            "allowlist and why the change cannot live in a "
-                            "tracked file."
-                        ),
-                    )
-                )
+                _REFUSED_NEW_PATHS_BLOCK.format(allowlist=allowlist, paths=", ".join(self._refused_new_paths))
             )
         if self._retained_new_paths:
             blocks.append(
-                "\n".join(
-                    (
-                        "## Allowlisted new files this loop did not create",
-                        (
-                            f"These match {allowlist} but were already on "
-                            "the workspace before this loop touched it, "
-                            "so they are the operator's or an earlier "
-                            "round's and a REVERT leaves them in place. They "
-                            "are on the measured tree without being part of "
-                            "any candidate: " + ", ".join(self._retained_new_paths)
-                        ),
-                        (
-                            "If one of them is a leftover of your own work, "
-                            "say so in your findings -- its effect is being "
-                            "measured and attributed to nothing."
-                        ),
-                    )
-                )
+                _RETAINED_NEW_PATHS_BLOCK.format(allowlist=allowlist, paths=", ".join(self._retained_new_paths))
             )
         return "\n\n".join(blocks)
 

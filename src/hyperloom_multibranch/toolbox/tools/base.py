@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import quote
 
-from hyperloom.common.io import atomic_write_json
+from hyperloom_common.io import atomic_write_json
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cancel_scope
 from hyperloom.orchestrator.actions.executors import COOPERATIVE_REAP_BUDGET_SEC
 from hyperloom_multibranch.contracts.blackboard.records import BuildNotice, ToolResultPointer
