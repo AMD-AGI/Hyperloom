@@ -1,0 +1,36 @@
+{
+  "name": "mfma_16x16x128_f8f6f4_operand_layout",
+  "level": 1,
+  "backend": "hip",
+  "description": "The MFMA 16×16×128 f8f6f4 operand layout on gfx950 is NOT a flat `row=lane%16, cols=(lane/16)*32+[0..32)` mapping. The real ISA layout splits each lane's 32 fp8 into TWO 16-fp8 stripes + additional XOR swizzle that requires paired ds_read_b128 with swizzled LDS descriptors. Writing a custom kernel against this instruction without reusing an existing template requires ISA-level debug or CK-tile primitives.",
+  "preconditions": [
+    "Writing a raw HIP kernel using __builtin_amdgcn_mfma_scale_f32_16x16x128_f8f6f4",
+    "Not reusing an existing tested template (CK, Primus-Turbo's GEMM_Tile_MXFP8_NT_256x256x128)"
+  ],
+  "steps": [
+    "DON'T assume flat per-lane fp8 layout. Flat load gives ~8.6 dB SNR (garbage).",
+    "DO check the existing 256-sibling's `lds_offsets` and `ds_read_pinned` pattern if available — it encodes the correct swizzle.",
+    "The 256 sibling's pattern: lds_row = lane%16; lds_col = lane/16 + i*4; offset = lds_row*128 + swizzle_col(lds_row, lds_col)*16; 8 ds_read_b128 calls at offsets {0, 2048, 4096, 6144} × {addr0, addr1}.",
+    "swizzle_col_(row, col) = col ^ (row >> 1)  — XOR swizzle for bank-conflict avoidance.",
+    "Scale layout: pack 4 scale bytes (one per 32-K MX group) into byte[0..3] of a single uint32 per row. All lanes in the same MFMA row-group pass the same uint32.",
+    "Alternative path: use CK-tile's `intrin_mfma_scale_f32_16x16x128f8f6f4<16,16,0,0>` wrapper + `static_distributed_tensor` which handles layout automatically."
+  ],
+  "expected_impact": "Correctness — a custom 128×128×128 tile using flat-lane loads gave 8.6 dB SNR (garbage). Closing that gap requires matching the swizzled layout OR reusing CK-tile primitives. Saves 1-2 days of blind ISA debug.",
+  "successes": 0,
+  "failures": 1,
+  "success_contexts": [],
+  "failure_contexts": [
+    "2026-04-24: attempted a custom 128×128×128 MX-FP8 kernel for wgrad-reshape shape. First version assumed flat lane-layout → 8.6 dB SNR. Second version tried 2-stripe split (cols 0..15 + 64..79 per lane) → still 8.6 dB. Actual ISA needs the XOR-swizzled LDS descriptor used by the 256-sibling. Aborted; kept v1 Python shim (0.44× Triton)."
+  ],
+  "sub_skills": [],
+  "decision_rules": [
+    "If you have a tested template (Primus-Turbo's GEMM_Tile struct, CK's intrin_mfma, or AITER's opus.hpp): reuse its LDS descriptors and load helpers. Do not reinvent.",
+    "Naive flat-lane operand loads WILL NOT WORK for this instruction. If someone else's kernel works, look at their LDS swizzle.",
+    "For shape-tuned variants, strongly prefer copy+specialize an existing tile struct over writing from scratch."
+  ],
+  "created_at": "2026-04-24T00:00:00",
+  "updated_at": "2026-04-24T00:00:00",
+  "experiment_ids": [
+    "mxfp8_grouped_gemm_hip_primus_turbo"
+  ]
+}

@@ -1,0 +1,176 @@
+# The serving template (operator, 2026-10-29): the `balanced` pack's method (the v2 line) for any
+# model served by vLLM or SGLang, with nothing model-specific in it. The model, the framework, the
+# operating point and the correctness floor come from the config; the model's facts and the map of
+# directions come from its dossier. Used as is by a host (Hyperloom's Arbor adapter) or copied and
+# adjusted per workload: the objective's metric and the measurement bands are the usual changes.
+# docs/packs.md ("The serving template") says what to set.
+name: serving
+description: >
+  An LLM serving campaign on AMD Instinct: the model, framework and launch named in the
+  campaign config, on the GPUs the config (or the host) gives, gated on output tok/s per GPU at
+  the operating point the bench runs (concurrency, input and output length).
+
+  THE METHOD (from the `balanced` pack, the v2 line): local increments balanced against the big
+  directions and kernel plans that one-change iterations rarely reach. Two skills by default:
+  `dossier` (the map of where the work is, looked up first and written if missing, section 3) and
+  `profiler` (TraceLens on PyTorch-profiler traces, the host's profile first). The `hardware`,
+  `serving-playbook` and `kernels` skills may be added by a pack derived from this one. Four
+  harness rules (section 12): a documented bundle is one claim; every dead end carries its image
+  and operating point; each arm's configuration is proven; a change to a numerics knob is gated
+  on accuracy.
+
+  THREE STANDING DIRECTIVES, in force for every iteration:
+
+    1. PROBE CONSTANTLY. A probe confined to eval/ and the ledger skips the server run
+       entirely. It is the cheapest instrument here and the one that makes every other
+       iteration cheaper. Probe BEFORE you build.
+
+    2. FOUNDATION WORK (FIX) IS THE DEFAULT AMBITION. Bringing up a capability ROCm is
+       missing ships NEUTRAL, on evidence, with no throughput requirement.
+
+    3. PRINCIPLED SOLUTIONS ONLY, NO HACKS. When a gate blocks your shape, ask why the fast
+       path could not serve it; do not widen the gate.
+
+  THREE RUNGS, CHEAPEST FIRST. Search in eval/ (seconds, one component). Screen on a short
+  bench (the bench with a fifth of the prompts). Confirm on the full bench, the only number
+  that books a claim.
+
+objective:
+  kind: maximize_perf
+  metric: output_throughput
+  direction: max
+  unit: "tok/s/GPU"
+  measurement:
+    # One measurement per iteration. Set the bar from this node's measured floor (two cold
+    # replays) where the launcher measures one; 0.5 % is the v2 line's bar once rebased per node.
+    threshold_rel: 1.005
+    noise_band_pct: 1.0
+    # Second Pareto axis: p90 interactivity = 1000 / p90 TPOT (ms), tok/s per user. A change
+    # that buys one axis by spending the other is a FRONTIER POINT: kept, both coordinates
+    # recorded, neither bar ratcheted.
+    secondary_metric: p90_interactivity
+    secondary_direction: max
+    secondary_noise_band_pct: 1.5
+    # A correctness fix carrying no performance claim is refused only on a catastrophe.
+    correctness_regression_cap_pct: 5.0
+
+validator:
+  bench: validator/bench.sh
+  correctness: validator/correctness.sh
+  protected:
+    - validator/
+
+workload:
+  kind: serving
+
+# The main agent gets exactly these skills (arbor/pack/loader.py). The dossier and the profiler
+# are the default; add hardware, serving-playbook and kernels in a derived pack.
+skills:
+  - dossier
+  - profiler
+
+# Writing the dossier is a run of LEARN iterations (no server run when the served tree is
+# untouched and a LEDGER record is emitted); the default cap of 2 in a row would cut it short.
+# The other three switch on the harness rules of section 12.
+policy:
+  max_consecutive_probes: 6
+  arm_check: enforce
+  bundles: true
+  accuracy_gate: true
+
+constraints:
+  # ======================================================================
+  # 1. THE STANDING DIRECTIVES
+  # ======================================================================
+  - "DIRECTIVE 1 — PROBE CONSTANTLY. A LEARN buys knowledge instead of throughput and, when confined to eval/ and the ledger, SKIPS THE SERVER RUN ENTIRELY. Probe before you build, not after you fail. An unresolved assumption about which branch dispatches is worth more than another speculative edit."
+  - "DIRECTIVE 2 — FOUNDATION WORK (FIX) IS THE DEFAULT AMBITION. Bringing up a missing ROCm capability is a win at exact parity, because it turns an unmeasurable gap into a measurable one and makes the next change in that component possible. Ships NEUTRAL on evidence. Do not hunt for a number to dress a neutral FIX up with."
+  - "DIRECTIVE 3 — PRINCIPLED SOLUTIONS ONLY, NO HACKS. Ask why the fast path could not serve your shape rather than how to widen the gate; fix the kernel rather than raise the constant. A widened gate that routes a shape to a kernel which then handles it badly is worse than the fallback it replaced."
+
+  # ======================================================================
+  # 2. THE MODEL AND THE STACK: FROM THE CONFIG AND THE DOSSIER
+  # ======================================================================
+  - "THE MODEL IS THE ONE THE CONFIG SERVES (model_path, framework, server_flags, server_env, tp). Its facts (layers, heads, experts, quantization per layer, the model code's path in the image, the framework and kernel library versions) belong in the dossier's parts 1–3, read from its config.json, the model code in the container and the server log: never assume them."
+  - "PROVE WHICH KERNEL RUNS. Do not infer dispatch from source. A gate can be unreachable, a post-load hook can replace a weight, a graph can capture the fallback branch. Log the branch taken, assert on the dispatched symbol, or read it out of a trace."
+  - "A DEQUANTIZE IS A SMELL. If you find `.float()`, `.to(torch.bfloat16)`, or a scale materialized into a full tensor on a path that had a quantized weight in hand, ask what kernel would have consumed the quantized form directly, and whether AITER ships it."
+
+  # ======================================================================
+  # 3. THE DOSSIER IS THE MAP
+  # ======================================================================
+  - "LOOK THE DOSSIER UP BEFORE ANYTHING ELSE. Use the `dossier` skill: its first step runs find-dossier.sh, which searches docs/dossier/ in this Arbor checkout. If one exists for this model, workload and GPU, read it and work from its part 11 (directions). If it is missing, writing it is the campaign's first work. knowledge/dossier-and-profile.md gives the order and what each part draws on."
+  - "IF THE CAMPAIGN WAS GIVEN ITS DIRECTIONS (a host's plan, or an operator's map), WORK THOSE: the map is already set, and the dossier serves them rather than replacing them."
+  - "A DOSSIER ITERATION IS A LEARN: `INTENT: LEARN`, no change to the served tree, and at least one LEDGER record (a FACT per part written, naming the file and the part). Without a ledger record the harness reads 'no changes' and counts a null. Up to 6 LEARNs may run in a row (policy above)."
+  - "THE DOSSIER'S DIRECTIONS ARE THE MAP. Give each direction in part 11 a map ID (`m-<component>`, e.g. `m-moe-experts`, `m-attn`), cite it in DONE lines and ledger records, and refresh parts 7 and 8 after every KEEP: the bottleneck moves."
+  - "A REWRITE IS NOT A SINGLE ITERATION: write its kernel plan (the dossier skill's kernel-plan.md) and build it in stages, each with its own gate."
+  - "PROFILE WITH THE `profiler` SKILL: the host's profile first (component.profile, in component mode), then TraceLens on a PyTorch-profiler trace of the served program; an eager trace only for op attribution, labelled eager. A KEEP never carries the profiler settings. Reports go to <session>/profiles/<name>/PROFILE.md. Profile the measured phase, not the bench's warmup, and record how many requests were running in the window. Stop any traced server before DONE."
+  - "LOOK FOR THE CUDA COUNTERPART. If the model code has an NVIDIA or common path beside its ROCm one, diff them per component: it feeds the dossier's part 8. The CUDA path is the specification for what should exist."
+
+  # ======================================================================
+  # 4. HOW TO CLOSE AN ITERATION
+  # ======================================================================
+  - "DECLARE THE INTENT MACHINE-READABLY: emit `INTENT: WIN`, `INTENT: FIX`, `INTENT: FIX-CORRECTNESS` or `INTENT: LEARN` with your DONE line. The gate applies a different rule to each; an undeclared intent is treated as WIN, the strictest bar."
+  - "CHOOSE THE INTENT BEFORE YOU MEASURE, AND CHOOSE IT HONESTLY BY ARITHMETIC. If your component win times its measured share is below the bar, a WIN is unreachable and declaring it wastes the iteration. If the projection says the bar is out of reach, the work is a FIX and the capability is the deliverable."
+  - "FIX is foundation work and it ships NEUTRAL: bringing up a capability ROCm is MISSING; a non-terminal step of a declared multi-step plan; instrumentation that makes a component measurable. It is gated on ENABLING EVIDENCE: correctness preserved against the path it replaces; the target path now reachable where it previously fell back; the kernel now DISPATCHED and proven. Say which evidence you claim. A regression past the noise band is still a REVERT."
+  - "LEARN buys knowledge rather than throughput: writing an evaluator, measuring a component, auditing which branch dispatches, building the map. A LEARN confined to eval/ and the ledger skips the server run. One that CLOSES an open UNKNOWN or ASSUMPTION is progress; one that closes nothing counts as a null. THE BEST PROBE KILLS ITS OWN LEAD."
+  - "FIX-CORRECTNESS is a fix with no performance claim: a wrong result, a check that can never fail. Refused only on a catastrophic regression. Do not smuggle a performance change in under it."
+  - "WIN is a throughput claim and the ONLY intent held to the bar. Clearing it both keeps the change and books it."
+
+  # ======================================================================
+  # 5. THE TWO METRICS AND THE TWO PATHS
+  # ======================================================================
+  - "BOTH AXES ARE GATED. output_throughput (tok/s per GPU at the bench's concurrency) is primary; p90_interactivity (1000 / p90 TPOT in ms) is the second. A change that improves one beyond noise and degrades the other beyond noise is a FRONTIER POINT: kept, both coordinates recorded, neither bar ratcheted."
+  - "REPORT TTFT AND TPOT TOO, and name which path your change targets: prefill (TTFT) or decode (TPOT). Throughput alone cannot tell them apart."
+  - "KNOW WHAT THE BENCH SENDS. The template's bench is synthetic (random tokens, --ignore-eos, temperature 0, no prefix reuse): every request is exactly ISL in and OSL out. A host's bench (component mode) may differ: read its command and output before you reason about it. Work whose value depends on real text, real stopping or cache reuse is invisible on a synthetic bench."
+
+  # ======================================================================
+  # 6. PRINCIPLED SOLUTIONS ONLY
+  # ======================================================================
+  - "PREFER THE PRINCIPLED FIX TO THE REACHABLE ONE. If a constant is wrong because the kernel behind it cannot serve your shape, fixing the kernel is the change. Name which one you are doing and why."
+  - "A WORKAROUND IS SOMETIMES CORRECT, and when it is, say so explicitly and record why the principled fix was rejected. What is forbidden is taking the reachable fix while describing it as the real one."
+  - "You MAY declare a FOUNDATION plan: a named multi-step change whose payoff lands only at the final step. State the full step list up front, which step you are on, and what the terminal step is expected to buy. Only the terminal step is gated on a server run. Abandon it honestly if a step shows the premise was wrong."
+
+  # ======================================================================
+  # 7. THE COMPONENT-EVALUATOR RULE
+  # ======================================================================
+  - "NEVER SEARCH ON THE FULL BENCH. Search in eval/, screen on the short bench (validator/bench.sh with a fifth of the prompts: NUM_PROMPTS set lower), confirm on the full bench. STATE WHICH RUNG A NUMBER CAME FROM, ALWAYS: a short-bench figure never books a claim."
+  - "eval/ STARTS EMPTY. Adding eval/eval_<component>.py is always in scope. Every evaluator measures on the model's real shapes (from the dossier's part 1), passes its own correctness check (SNR or allclose against the path it replaces) before its timing counts, and sweeps the axis where you expect the effect to vanish."
+  - "Evaluator timing must be GRAPH-CAPTURED for anything under ~20 us: eager timing is host-bound at those sizes and inverts rankings. Component numbers are gated on the worst of N samples. Amdahl projections are an UPPER bound; the server number is the truth."
+  - "COMPARE LIKE WITH LIKE. A hand-written kernel against a vendor-tuned library kernel is an implementation comparison, not a datatype or algorithm comparison. State what is on each side."
+
+  # ======================================================================
+  # 8. MEASUREMENT DISCIPLINE
+  # ======================================================================
+  - "Nothing is comparable until this node's baseline exists, and a number from another node is not comparable at all."
+  - "EVERY full-bench measurement uses the config's operating point (concurrency, input and output length, prompts, seed), after the bench's own discarded warmup. Change none of these; the short bench is a separate series."
+  - "Re-profile after every KEEP: the bottleneck moves."
+
+  # ======================================================================
+  # 9. THE KNOWLEDGE LEDGER
+  # ======================================================================
+  - "RECORD WHAT YOU LEARN AS `LEDGER: {json}` LINES. Anything not written to the ledger is lost when the iteration ends."
+  - "Four record types. FACT: measured and reproducible; owes an `instrument` and `evidence`, and should name `config_keys` so it goes stale when the environment moves. ASSUMPTION: believed but unverified; owes a `falsifier`. UNKNOWN: a named gap that blocks a decision; owes a falsifier and `cost_est_min`. DEAD_END: tried and failed; owes `revisit_if`."
+  - "The ledger is written BEFORE the gate runs, so records survive a REVERT. Re-emitting an id supersedes the earlier record. A DEAD_END names what it actually tested, not what it concluded."
+  - "TAG MAP WORK with its map ID (section 3), in the record id or claim."
+
+  # ======================================================================
+  # 10. UPSTREAM: PORT BEFORE YOU INVENT
+  # ======================================================================
+  - "Before writing anything new, check whether it exists: in vLLM or SGLang upstream (pull requests for this model or its nearest relatives), in AITER, and in the image's own model code. A technique that moved another model's numbers does not carry its number across: port the technique, re-measure the effect."
+
+  # ======================================================================
+  # 11. SCOPE AND HYGIENE
+  # ======================================================================
+  - "Do not modify the validator scripts. Editing a pinned file invalidates the measurement and the harness reports the iteration as NOT MEASURED."
+  - "NEVER run `docker rm`, `docker run`, or a container launch script during an iteration. Recreating the container destroys the code under test."
+  - "NEVER weaken --max-model-len, --max-num-seqs, --max-num-batched-tokens, --gpu-memory-utilization or the tensor-parallel size to get a server up. A number from a different config is not a number."
+  - "WHAT MAY MOVE: SCHEDULING AND COMPILATION FLAGS (--max-num-batched-tokens, chunked-prefill and scheduler settings, --compilation-config and CUDA-graph settings, and scheduling or kernel-selection env), through <workspace>/arbor/config.json (it overrides the campaign config). Such a change is a WIN, booked only on the full bench, and it must say which path it moved (section 5). The tensor-parallel size and the GPU set stay."
+  - "WORK FROM THIS CHECKOUT, THIS SESSION AND THE CONTAINER. Other directories on this filesystem belong to other projects and are out of bounds for this campaign; do not read them."
+  - "One change at a time, for attribution, or one documented bundle (section 12). It bounds the size of a step, never the length of a plan."
+  - "Write DONE: <description> when finished so the harness records and gates the iteration. Lead with the map ID where one applies."
+
+  # ======================================================================
+  # 12. WHAT THE HARNESS CHECKS FOR YOU
+  # ======================================================================
+  - "A DOCUMENTED BUNDLE IS ONE CLAIM. Some wins are a set of settings whose members fail or sit under the bar alone. The catalog is .claude/skills/serving-playbook/knobs.json (bundles) and amd-knobs.md section 0 beside it. Apply every member in one iteration and write `BUNDLE: <id>` beside your DONE line. The harness checks that every member is in your change and live in the server; a member missing or not live makes the iteration NOT MEASURED. A set that is not in the catalog is not a bundle: change one thing."
+  - "A DEAD END IS SCOPED. The harness records the image digest and the operating point (concurrency, input and output length, TP) with every lesson and every DEAD_END. A dead end recorded under another image is shown as stale: re-test it. A knob whose best value flips with concurrency (op_dependent in knobs.json) is dead only at the concurrency it was tested at."
+  - "EACH ARM'S CONFIGURATION IS PROVEN. After the server starts, the harness reads its environment, command line and log, and compares them with arbor/config.json. A setting you changed that did not reach the server makes the iteration NOT MEASURED, with the setting named: fix the launch, not the claim."
+  - "A CHANGE TO A NUMERICS KNOB IS GATED ON ACCURACY. If your change touches a knob that changes model output (numerics true in knobs.json: quantized collectives, activation and KV precision, speculative settings), or you write `NUMERICS: yes` for a code change that alters outputs, the harness runs the full GSM8K and REVERTs the change if its score is below the baseline's by more than the policy tolerance. The per-iteration GSM8K check still runs for every change."

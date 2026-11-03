@@ -31,6 +31,8 @@ repos:
       - id: check-toml
       - id: check-added-large-files
         args: ["--maxkb=512"]
+        # Arbor's serving playbook greps its InferenceX evidence by record id (1 MB, vendored as is).
+        exclude: ^src/hyperloom_arbor/\.claude/skills/serving-playbook/evidence/records\.jsonl$
       - id: detect-private-key
       - id: mixed-line-ending
         args: ["--fix=lf"]
@@ -42,6 +44,8 @@ repos:
       - id: ruff
         args: ["--force-exclude"]
       - id: ruff-format
+        # As `ruff`: the trees [tool.ruff] extend-exclude names (vendored Arbor among them) are not formatted here.
+        args: ["--force-exclude"]
 
   # --- Python: security (production paths; tests excluded) ---
   - repo: https://github.com/PyCQA/bandit
