@@ -86,7 +86,8 @@ __all__ = [
     "build_specialist_env",
 ]
 
-#: No heartbeat or process-log activity for this long means the session is lost.
+#: No heartbeat or process-log activity for this long, and ``poll`` reports the session lost; the reap loop ends a CLI
+#: whose own output is silent this long with no tool call in flight.
 LOST_AFTER_SEC: float = 300.0
 
 #: Minimum session length for a long-lived (one per branch) specialist.
@@ -126,7 +127,8 @@ class AgentEnded(RuntimeError):
 Beat = Callable[[], None]
 
 #: Receives the session's ``beat`` at launch. The MCP service calls it periodically while a call made with
-#: that session's token is in flight, so a session blocked in a long tool call is not judged lost.
+#: that session's token is in flight, so ``poll`` does not judge a session lost while it waits on the call. The reap loop
+#: does not read the beat.
 HeartbeatSink = Callable[[Beat], None]
 
 
@@ -368,7 +370,8 @@ class RunnerHost:
 @dataclass(frozen=True)
 class Liveness:
     """When a session counts as alive: CPU work of ``activity_cpu_seconds`` in one sampling period beats its heartbeat,
-    and ``lost_after_seconds`` with no heartbeat and no process-log growth loses it."""
+    and ``lost_after_seconds`` with no heartbeat and no process-log growth loses it in ``poll``. The reap loop reads
+    only the CLI's output and the tool call it waits on, over the same window."""
 
     activity_cpu_seconds: float = ACTIVITY_CPU_SECONDS
     lost_after_seconds: float = LOST_AFTER_SEC
