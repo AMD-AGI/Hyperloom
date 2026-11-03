@@ -25,6 +25,7 @@ from hyperloom.common.perf_metric import (
     GRADED_ERROR_RATE,
     GRADED_INTVTY,
     GRADED_INTVTY_P50,
+    GRADED_INTVTY_P50_CHECKPOINT,
     GRADED_OUTPUT,
     VERDICT_REVERT,
     GradingAnchor,
@@ -67,6 +68,8 @@ from hyperloom.inference_optimizer.canonical_fingerprint import workload_signatu
 from ._proposal_identity import BaseControls, controls_of, effective_fingerprint, normalize_proposal
 from .measured_variants import GAIN_BELOW_THRESHOLD, MeasuredOn, measured_verdict, stack_of_measured
 from ._grid_base import DEFAULT_KEEP_THRESHOLD_PCT, TS_FAILED, TS_SKIPPED_DEDUP
+from ._agentx_checkpoint import round_checkpoint
+from ._subprocess_kill import AGENTX_EARLY_STOP_ERROR_CLASS
 from .benchmark_result import double_run_requested
 from ._grid_runner import (
     GridLaunch,
@@ -1286,7 +1289,9 @@ class _ExploreRound:
                 ready_server_log=warmup.server_log_path if warmup is not None else None,
             ),
             stop=GridStop(
-                session_deadline_sec=self.session_deadline_sec, variant_expected_sec=self.decision_expected_sec
+                session_deadline_sec=self.session_deadline_sec,
+                variant_expected_sec=self.decision_expected_sec,
+                checkpoint=round_checkpoint(self.running_perf, may_stop=True),
             ),
         )
         return None if self._stopped_by_the_run(results[0], gv, idx, "decision") else results[0]
@@ -1365,6 +1370,7 @@ class _ExploreRound:
             GRADED_INTVTY: r.intvty_p90,
             "tpot_p90_ms": r.tpot_p90_ms,
             GRADED_INTVTY_P50: r.intvty_p50,
+            GRADED_INTVTY_P50_CHECKPOINT: r.intvty_p50_checkpoint,
             GRADED_DURATION: r.duration_seconds,
             GRADED_ERROR_RATE: r.request_error_rate,
             **constraint_fields(r),
@@ -1430,7 +1436,9 @@ class _ExploreRound:
         graded_gain: float | None = None
         outcome = TS_FAILED
         reason = ""
-        if r.status != "succeeded":
+        if r.error_class == AGENTX_EARLY_STOP_ERROR_CLASS:
+            outcome, reason = "REVERT", f"{AGENTX_EARLY_STOP_ERROR_CLASS} ({r.error})"
+        elif r.status != "succeeded":
             reason = (r.error or "")[-1200:] or "no_measurement"
         elif graded.degrade_reason:
             # Same fail-closed rule as ``lift_to_current_best``: an AgentX session that could not grade on

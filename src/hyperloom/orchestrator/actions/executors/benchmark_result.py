@@ -17,6 +17,7 @@ from typing import Any, Callable, NamedTuple
 
 from hyperloom_common.coerce import first_float, first_int, to_float, to_int
 from hyperloom_common.jsonio import read_json
+from hyperloom.common.perf_metric import GRADED_INTVTY_P50_CHECKPOINT
 
 from ._gpu_metrics import gpu_metrics_from_report, write_gpu_metrics
 
@@ -671,8 +672,11 @@ def extract_benchmark_measurement(
     from .magpie_agentx import native_config
 
     if report.get("scenario") == "agentx" or (config_path is not None and native_config(config_path)):
+        from ._agentx_checkpoint import workspace_checkpoint_p50
+
         measurement = agentx_measurement(report)
         measurement.update(_round_gpu_power(report, workspace, subprocess_started_unix))
+        measurement[GRADED_INTVTY_P50_CHECKPOINT] = workspace_checkpoint_p50(workspace)
         return measurement
     measurement = _measurement_from_report(report, workspace, subprocess_started_unix)
 

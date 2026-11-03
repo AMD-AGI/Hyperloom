@@ -73,6 +73,9 @@ class RequestRecord:
     end: float
     first_token: float | None
     ok: bool
+    phase: str = ""
+    output_tokens: float | None = None
+    latency: float | None = None
 
     def overlaps(self, window_start: float, window_end: float) -> bool:
         """Whether this request was in flight at any point in a window."""
@@ -125,7 +128,9 @@ def _record_from(payload: dict[str, Any]) -> RequestRecord | None:
     # alongside rather than used as the identity.
     trajectory = metadata.get("x_correlation_id") or metadata.get("conversation_id") or ""
     turn = metadata.get("turn_index")
-    ttft_ms = _metric(payload.get("metrics"), "time_to_first_token")
+    metrics = payload.get("metrics")
+    ttft_ms = _metric(metrics, "time_to_first_token")
+    latency_ms = _metric(metrics, "request_latency")
     # Derived from TTFT rather than from ``request_ack_ns``: the ack is when the server accepted the request, which is
     # not the same instant as the first token, and conflating them would misplace exactly the event a reader would use
     # to line a decode-phase KV rise up against.
@@ -139,6 +144,9 @@ def _record_from(payload: dict[str, Any]) -> RequestRecord | None:
         end=end,
         first_token=first_token,
         ok=payload.get("error") in (None, {}),
+        phase=str(metadata.get("benchmark_phase") or ""),
+        output_tokens=_metric(metrics, "output_sequence_length"),
+        latency=latency_ms / 1000.0 if latency_ms is not None else None,
     )
 
 
@@ -202,8 +210,7 @@ def build_events(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Turn records into a time-ordered event stream, with a summary of what it covers.
 
-    Phase events come from the caller's authoritative bounds -- aiperf's progress API -- rather than from the records,
-    whose ``benchmark_phase`` currently reads ``profiling`` for everything it exports.
+    Phase events come from the caller's authoritative bounds -- aiperf's progress API -- rather than from the records.
     """
     events: list[dict[str, Any]] = []
     for phase, (start, end) in (phase_bounds or {}).items():

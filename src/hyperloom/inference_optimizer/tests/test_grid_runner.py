@@ -359,6 +359,7 @@ class TestVariantResultToDict:
         expected = asdict(result)
         expected["e2e_norm_intvty_p90"] = expected.pop("intvty_p90")
         expected["e2e_norm_intvty_p50"] = expected.pop("intvty_p50")
+        expected["e2e_norm_intvty_p50_1800s"] = expected.pop("intvty_p50_checkpoint")
         assert encoded == expected
 
     def test_preserves_unmeasured_axes(self):

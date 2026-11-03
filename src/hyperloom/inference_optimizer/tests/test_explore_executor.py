@@ -1468,6 +1468,71 @@ async def test_explore_guard_revert_row_reads_as_measured(sub_agent_runner, tmp_
 
 
 @pytest.mark.asyncio
+async def test_explore_reverts_a_variant_its_checkpoint_stopped(sub_agent_runner, tmp_path, monkeypatch):
+    """The decision round runs under the anchor's checkpoint median, and a round it stopped is a REVERT."""
+    from hyperloom.orchestrator.actions.executors._agentx_checkpoint import (
+        CHECKPOINT_ARTIFACT_NAME,
+        EARLY_STOP_ENV,
+        AgentxCheckpoint,
+    )
+    from hyperloom.orchestrator.actions.executors._subprocess_kill import AGENTX_EARLY_STOP_RETURNCODE
+
+    _force_cold_decision(monkeypatch)
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    monkeypatch.setenv(EARLY_STOP_ENV, "enforce")
+    sub, tr, _ = sub_agent_runner
+    state = SharedState(framework="sglang", benchmark_mode="agentx")
+    state.baseline_tput = 200.0
+    state.baseline_perf = {
+        "output_throughput": 200.0,
+        "total_token_throughput": 20000.0,
+        "e2e_norm_intvty_p90": 100.0,
+        "e2e_norm_intvty_p50": 100.0,
+        "e2e_norm_intvty_p50_1800s": 100.0,
+        "duration_seconds": 25.0,
+        "request_error_rate": 0.0,
+    }
+    sub.shared_state = state
+    base = tmp_path / "base.yaml"
+    write_benchmark_yaml(base)
+    watched = []
+
+    def _stopped_at_checkpoint(cmd, *args, watch, **kwargs):
+        watched.append(watch.checkpoint)
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        slot.mkdir(parents=True, exist_ok=True)
+        ruling = {"at_sec": 1800.0, "candidate_p50": 95.0, "reference_p50": 100.0, "gain_pct": -5.0}
+        (slot / CHECKPOINT_ARTIFACT_NAME).write_text(json.dumps({**ruling, "max_drop_pct": 2.0}))
+        return subprocess.CompletedProcess(args=cmd, returncode=AGENTX_EARLY_STOP_RETURNCODE, stdout="", stderr="")
+
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={
+                "config_path": str(base),
+                "output_dir": str(tmp_path / "explore-early-stop"),
+                "base_tput": 200.0,
+                "grid": [{"name": "v_trailing", "extra_args": "--trailing-flag"}],
+            },
+            idempotency_key="ex-early-stop",
+        ),
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_stopped_at_checkpoint,
+    ):
+        res = await sub.run_task(task)
+
+    assert watched == [AgentxCheckpoint(100.0, enforce=True)]
+    tested = res.result["explore_search_update"]["tested"][canonical_fingerprint("--trailing-flag", {})]
+    assert tested["outcome"] == "REVERT"
+    assert tested["reason"] == "agentx_early_stop (intvty p50 at 1800s 100.0->95.0 (-5.00%; stops below -2.0%))"
+    assert tested["e2e_norm_intvty_p50_1800s"] == 95.0
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("missing_axis", ["total", "intvty"])
 @pytest.mark.parametrize("incomplete_output", [170.0, 20000.0])
 @pytest.mark.parametrize(

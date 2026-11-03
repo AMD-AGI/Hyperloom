@@ -8,10 +8,14 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from hyperloom_common.env import env_flag
 from hyperloom.common.env_safety import scrub_benchmark_process_env
 from hyperloom.common.visible_devices import hip_mask_within_rocr
+
+if TYPE_CHECKING:
+    from ._agentx_checkpoint import AgentxCheckpoint
 
 log = logging.getLogger(__name__)
 
@@ -98,6 +102,7 @@ class SessionKillRound:
     server_log_path: str | None = None
     server_already_ready: bool = False
     session_remaining_sec: float | None = None
+    checkpoint: AgentxCheckpoint | None = None
 
 
 def _run_subprocess_worker(bench_round: SessionKillRound) -> tuple[int, str, str]:
@@ -118,6 +123,7 @@ def _run_subprocess_worker(bench_round: SessionKillRound) -> tuple[int, str, str
             server_log_path=bench_round.server_log_path,
             server_already_ready=bench_round.server_already_ready,
             session_deadline_sec=session_remaining_to_deadline_sec(bench_round.session_remaining_sec),
+            checkpoint=bench_round.checkpoint,
         ),
     )
     return proc.returncode, proc.stdout or "", proc.stderr or ""
