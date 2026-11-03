@@ -26,6 +26,11 @@ final at once (``SandboxCreateFailed``): a new attempt, with a new key, is the c
 after a cut is answered with a 410 ``idempotency_key_spent`` when the sandbox the first send made has failed meanwhile
 (the service never makes a second sandbox for a key, nor repeats the 500), so a 410 to a create's own replay is
 ``SandboxCreateFailed`` too; only a 410 to the first send means a key spent before this create.
+
+A key that may create in more than one workspace (a SaFE key used directly; a Claw grant's key names its own) must say
+which: the provider's ``workspace`` (``HYPERLOOM_SANDBOX_WORKSPACE``) is sent on every create as the metadata
+``agent-sandbox.io/workspace``, unless the caller's metadata names a workspace itself, which then wins. Without one the
+service refuses such a create with ``workspace_required``, raised as ``SandboxDenied`` naming the variable.
 """
 
 from __future__ import annotations
@@ -45,6 +50,7 @@ import httpx
 
 from hyperloom.sandbox.socket import (
     IDEMPOTENCY_KEY,
+    WORKSPACE_KEY,
     CommandResult,
     CreateOptions,
     OutputSinks,
@@ -70,6 +76,7 @@ _KEY_ENV: dict[Role, str] = {
 }
 _API_URL_ENV = "E2B_API_URL"
 _SANDBOX_URL_ENV = "E2B_SANDBOX_URL"
+_WORKSPACE_ENV = "HYPERLOOM_SANDBOX_WORKSPACE"
 _LIST_PAGE = 100
 
 #: Everything the SDK raises for a failed call. ``ServiceBusyException`` (a 503) is not a ``SandboxException``, and a
@@ -87,6 +94,9 @@ _REFUSAL_PREFIXES = ("Code.PERMISSION_DENIED", "permission_denied")
 
 #: The reason a 429 carries when a create is over the session grant's quota (and not a plain rate limit).
 _QUOTA_REASON = "grant_quota_exceeded"
+
+#: The reason a create is refused with when its key may create in several workspaces and the create named none.
+_WORKSPACE_REQUIRED = re.compile(r"\bworkspace_required\b")
 
 #: How the service says a create's sandbox failed before it ran: its reason code, or the terminal phase of its workload.
 _CREATE_FAILED = re.compile(r"\bsandbox_create_failed\b|\bphase Failed\b")
@@ -287,6 +297,9 @@ class E2BSandboxProvider:
         api_url: The control plane, ``E2B_API_URL`` by default.
         sandbox_url: The data plane that routes by the ``E2b-Sandbox-Id`` header, ``E2B_SANDBOX_URL`` by default.
         retry: How control-plane calls are retried, see :class:`RetryPolicy`.
+        workspace: The workspace every create names (``agent-sandbox.io/workspace``) unless its metadata names one;
+            ``None`` names none, as a Claw grant's key needs. A SaFE key used directly needs it when its user may
+            create in more than one workspace, and a ``system-admin`` key always does.
 
     Needs ``e2b>=2.53.1``: an older SDK's ``connect`` sends no ``E2b-Sandbox-Id`` header, so a service that routes by
     it cannot serve a reconnected handle.
@@ -301,8 +314,12 @@ class E2BSandboxProvider:
         api_url: str | None = None,
         sandbox_url: str | None = None,
         retry: RetryPolicy = RetryPolicy(),
+        workspace: str | None = None,
     ) -> None:
+        if workspace is not None and not workspace.strip():
+            raise ValueError("workspace is blank; leave it None to name none")
         self._controls = {role: _Control(self._params(key, api_url, sandbox_url), retry) for role, key in keys.items()}
+        self._workspace = workspace
 
     @staticmethod
     def _params(key: str, api_url: str | None, sandbox_url: str | None) -> dict[str, object]:
@@ -315,12 +332,19 @@ class E2BSandboxProvider:
 
     @classmethod
     def from_environ(cls, environ: Mapping[str, str], *, retry: RetryPolicy = RetryPolicy()) -> E2BSandboxProvider:
-        """Build a provider from ``HYPERLOOM_SANDBOX_KEY_<ROLE>``, ``E2B_API_URL`` and ``E2B_SANDBOX_URL``.
+        """Build a provider from ``HYPERLOOM_SANDBOX_KEY_<ROLE>``, ``E2B_API_URL``, ``E2B_SANDBOX_URL`` and
+        ``HYPERLOOM_SANDBOX_WORKSPACE`` (unset or empty: no workspace).
 
         The mapping is only read; the caller decides whether to scrub the keys from the process environment.
         """
         keys = {role: environ[name] for role, name in _KEY_ENV.items() if environ.get(name)}
-        return cls(keys, api_url=environ.get(_API_URL_ENV), sandbox_url=environ.get(_SANDBOX_URL_ENV), retry=retry)
+        return cls(
+            keys,
+            api_url=environ.get(_API_URL_ENV),
+            sandbox_url=environ.get(_SANDBOX_URL_ENV),
+            retry=retry,
+            workspace=environ.get(_WORKSPACE_ENV) or None,
+        )
 
     def __repr__(self) -> str:
         return f"E2BSandboxProvider(roles={sorted(self._controls)})"
@@ -345,11 +369,13 @@ class E2BSandboxProvider:
         """Create a sandbox and wait until the service reports it running.
 
         The wait is bounded by ``options.wait_sec``. A metadata ``agent-sandbox.io/idempotency-key`` makes a repeated create
-        (also this method's own retry after a server error) return the sandbox the service already made.
+        (also this method's own retry after a server error) return the sandbox the service already made. The
+        provider's workspace is added to ``metadata`` as ``agent-sandbox.io/workspace`` unless ``metadata`` has that key.
 
         Raises:
             ValueError: When ``timeout_sec`` is not positive.
-            SandboxDenied: No key for ``role``, or the service refused the key, template, environment or metadata.
+            SandboxDenied: No key for ``role``, or the service refused the key, template, environment or metadata. A
+                refusal for want of a workspace (``workspace_required``) says to set ``HYPERLOOM_SANDBOX_WORKSPACE``.
             SandboxGone: The idempotency key's sandbox had ended before this create first sent the key (410); the key
                 is spent, a new key makes a new one.
             SandboxCreateFailed: The platform made the sandbox and it failed before it ran (``sandbox_create_failed``,
@@ -365,6 +391,9 @@ class E2BSandboxProvider:
         control = self._control(role)
         deadline = time.monotonic() + options.wait_sec
         envs = dict(options.envs) if options.envs else None
+        sent = dict(metadata)
+        if self._workspace is not None:
+            sent.setdefault(WORKSPACE_KEY, self._workspace)
 
         sends = 0
 
@@ -374,17 +403,21 @@ class E2BSandboxProvider:
             return e2b.Sandbox.create(
                 template=template,
                 timeout=timeout_sec,
-                metadata=dict(metadata),
+                metadata=dict(sent),
                 envs=envs,
                 **{**control.params, "request_timeout": max(deadline - time.monotonic(), 0.001)},
             )
 
-        retry = _Retry.SERVER_ERROR if IDEMPOTENCY_KEY in metadata else _Retry.NEVER
+        retry = _Retry.SERVER_ERROR if IDEMPOTENCY_KEY in sent else _Retry.NEVER
         try:
             created = control.call(attempt, retry=retry, until=deadline)
         except SandboxGone as exc:
             if sends > 1:  # this create's own sandbox ended or failed while the request was cut
                 raise SandboxCreateFailed(f"the sandbox of this create did not run: {exc}") from exc
+            raise
+        except SandboxDenied as exc:
+            if _WORKSPACE_REQUIRED.search(str(exc)):
+                raise SandboxDenied(_no_workspace(role, sent.get(WORKSPACE_KEY), exc)) from exc
             raise
         return _E2BSandbox(created, control)
 
@@ -410,6 +443,15 @@ class E2BSandboxProvider:
             return found
 
         return sorted((_info(item) for item in control.call(list_all)), key=lambda i: i.sandbox_id)
+
+
+def _no_workspace(role: Role, named: str | None, refusal: SandboxDenied) -> str:
+    """What a create refused for want of a workspace tells its caller: the variable that names one."""
+    sent = "named none" if named is None else f"named {named!r}"
+    return (
+        f"the sandbox service needs a workspace for this {role!r} key and the create {sent}: set {_WORKSPACE_ENV} to "
+        f"the workspace to create sandboxes in ({refusal})"
+    )
 
 
 def _info(item: e2b.SandboxInfo) -> SandboxInfo:

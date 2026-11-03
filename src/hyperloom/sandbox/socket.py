@@ -24,6 +24,7 @@ __all__ = [
     "PRIORITY_KEY",
     "SAME_NODE_KEY",
     "SIGNING_PUBLIC_KEY",
+    "WORKSPACE_KEY",
     "CommandResult",
     "Role",
     "Sandbox",
@@ -44,6 +45,9 @@ Role = Literal["measurement", "subrun", "dev"]
 IDEMPOTENCY_KEY = "agent-sandbox.io/idempotency-key"
 AVOID_NODES_KEY = "agent-sandbox.io/avoid-nodes"  # comma-separated node names
 PRIORITY_KEY = "agent-sandbox.io/priority"
+#: The workspace a sandbox is created in, which a key whose user may create in several must name (a SaFE key used
+#: directly); a Claw grant's key names its own.
+WORKSPACE_KEY = "agent-sandbox.io/workspace"
 
 #: Metadata only the platform writes; a caller that passes one is refused.
 NODE_NAME_KEY = "agent-sandbox.io/node-name"
