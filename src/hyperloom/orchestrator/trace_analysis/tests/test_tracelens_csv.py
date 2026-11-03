@@ -1066,10 +1066,11 @@ def test_124_tracelens_analysis_fails_fast_on_cpu_only_trace(tmp_path):
     )
 
 
-def test_a_failed_sdk_orchestrator_is_the_error_the_run_reports(tmp_path, monkeypatch, capsys):
-    """The run's failure names what the orchestrator raised, not a missing analysis.json."""
+def _run_agent_route_to_a_skill_error(tmp_path, monkeypatch, capsys, skill_error):
+    """Run ``main`` on the agent route with a skill that raises ``skill_error``; return rc, result and arch calls."""
     trace = tmp_path / "trace.json"
     trace.write_text('{"traceEvents": []}', encoding="utf-8")
+    calls = []
     monkeypatch.setattr(tla, "_reject_capture_only_input", lambda *_args: None)
     monkeypatch.setattr(
         tla,
@@ -1081,7 +1082,7 @@ def test_a_failed_sdk_orchestrator_is_the_error_the_run_reports(tmp_path, monkey
         "_check_tracelens_checkout",
         lambda *_args: tla._TraceLensCheckout(root=tmp_path, internal_root=None, skill=tmp_path / "SKILL.md"),
     )
-    monkeypatch.setattr(tla, "_gpu_arch_json", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(tla, "_gpu_arch_json", lambda *_args, **_kwargs: calls.append("arch"))
     monkeypatch.setattr(
         tla,
         "_run_trace_split",
@@ -1089,10 +1090,10 @@ def test_a_failed_sdk_orchestrator_is_the_error_the_run_reports(tmp_path, monkey
     )
     monkeypatch.setattr(tla, "write_run_config", lambda **_kwargs: None)
 
-    async def _sdk_fails(*_args, **_kwargs):
-        raise ConnectionError("model endpoint refused the connection")
+    async def _skill_fails(*_args, **_kwargs):
+        raise skill_error
 
-    monkeypatch.setattr(tla, "run_tracelens_skill", _sdk_fails)
+    monkeypatch.setattr(tla, "run_tracelens_skill", _skill_fails)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -1106,14 +1107,64 @@ def test_a_failed_sdk_orchestrator_is_the_error_the_run_reports(tmp_path, monkey
             "agent",
         ],
     )
-
     rc = tla.main()
-    result = json.loads(capsys.readouterr().out)
+    return rc, json.loads(capsys.readouterr().out), calls
+
+
+def test_a_failed_sdk_orchestrator_is_the_error_the_run_reports(tmp_path, monkeypatch, capsys):
+    """The run's failure names what the orchestrator raised, not a missing analysis.json."""
+    rc, result, _calls = _run_agent_route_to_a_skill_error(
+        tmp_path, monkeypatch, capsys, ConnectionError("model endpoint refused the connection")
+    )
     assert (rc, result["status"], result["error"]) == (
         1,
         "failed",
         "ConnectionError: model endpoint refused the connection",
     )
+
+
+def test_import_sdk_reports_a_transitive_import_failure(tmp_path, monkeypatch):
+    package = tmp_path / "claude_agent_sdk"
+    package.mkdir()
+    (package / "__init__.py").write_text(
+        "raise ImportError('libx.so: cannot open shared object file')\n", encoding="utf-8"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.delitem(sys.modules, "claude_agent_sdk", raising=False)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        tlr._import_sdk()
+
+    assert str(excinfo.value) == (
+        f"claude_agent_sdk failed to import from {package / '__init__.py'} in {sys.executable}: "
+        "ImportError: libx.so: cannot open shared object file"
+    )
+
+
+def _fail_sdk_import_on_backend(monkeypatch, backend):
+    def _sdk_import_fails():
+        raise RuntimeError("X")
+
+    monkeypatch.setenv(tlr.llm_config.AGENT_BACKEND_ENV, backend)
+    monkeypatch.setattr(tlr, "_import_sdk", _sdk_import_fails)
+
+
+def test_a_broken_claude_sdk_fails_the_agent_route_before_the_arch_benchmark(tmp_path, monkeypatch, capsys):
+    _fail_sdk_import_on_backend(monkeypatch, "claude")
+    rc, result, calls = _run_agent_route_to_a_skill_error(
+        tmp_path, monkeypatch, capsys, ConnectionError("agent route started")
+    )
+
+    assert (rc, result["error"], calls) == (1, "RuntimeError: X", [])
+
+
+def test_a_non_claude_backend_skips_the_sdk_precheck(tmp_path, monkeypatch, capsys):
+    _fail_sdk_import_on_backend(monkeypatch, "codex")
+    rc, result, calls = _run_agent_route_to_a_skill_error(
+        tmp_path, monkeypatch, capsys, ConnectionError("agent route started")
+    )
+
+    assert (rc, result["error"], calls) == (1, "ConnectionError: agent route started", ["arch"])
 
 
 @pytest.mark.parametrize(
