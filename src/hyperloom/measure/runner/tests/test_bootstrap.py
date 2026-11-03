@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import stat
 import subprocess
 import time
@@ -340,6 +341,44 @@ def test_the_status_of_a_failed_step_is_json_whatever_the_step_printed(rig: Rig,
     message = _status(tmp_path)["message"]
     assert message.startswith("runner bootstrap, step cache, exit 3: quote  backslash  caf tab")
     assert message.endswith("end")
+
+
+#: The cache step's interpreter with the tarfile of a Python before 3.10.12: no ``data_filter`` and an ``extractall``
+#: that takes no ``filter`` argument.
+_TARFILE_WITHOUT_FILTERS = """\
+import sys, tarfile
+
+del tarfile.data_filter
+extract = tarfile.TarFile.extractall
+
+
+def extractall(self, path=".", members=None, *, numeric_owner=False):
+    return extract(self, path, members, numeric_owner=numeric_owner, filter="fully_trusted")
+
+
+tarfile.TarFile.extractall = extractall
+exec(compile(sys.stdin.read(), "-", "exec"), {"__name__": "__main__"})
+"""
+
+
+def test_a_python_whose_tarfile_has_no_data_filter_refuses_the_entry_and_names_the_pythons_that_have_it(
+    rig: Rig, tmp_path: Path
+) -> None:
+    old = _write_script(
+        tmp_path / "old-python",
+        f'#!/bin/sh\nif [ "$1 $2" = "-I -" ]; then\n    shift 2\n'
+        f'    exec {rig.base_python} -I -c {shlex.quote(_TARFILE_WITHOUT_FILTERS)} "$@"\nfi\n'
+        f'exec {rig.base_python} "$@"\n',
+    )
+    done = _run(rig, tmp_path, {"HYPERLOOM_BASE_PYTHON": str(old)})
+    assert done.returncode == 2
+    status = _status(tmp_path)
+    assert (status["state"], status["error_class"]) == ("failed", "runner_start_failed")
+    assert "step cache, exit 1" in status["message"]
+    assert "whose tarfile has no data filter" in status["message"]
+    assert "the runner needs Python 3.10.12, 3.11.4, 3.12 or newer" in status["message"]
+    _assert_nothing_staged(tmp_path)
+    assert not (tmp_path / "out" / "probe.json").exists()
 
 
 def test_the_steps_run_without_the_signing_key_and_the_runner_keeps_it(rig: Rig, tmp_path: Path) -> None:

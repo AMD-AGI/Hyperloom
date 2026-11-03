@@ -35,10 +35,13 @@ distribution's own build requirements name is never fetched. The lock must there
   the build refuses and names the difference (:class:`CacheConflict`). An entry with no manifest is the remains of a
   build that did not finish; it is removed and built again.
 - ``<entry>/source.tar`` is the commit's ``git archive`` made with every setting that changes its bytes fixed
-  (``git -c tar.umask=0022 -c core.autocrlf=false -c core.eol=lf archive --format=tar <sha>``), so one commit gives the
-  same bytes on every builder, and anyone with the commit can make it again and compare it with the size and SHA-256 the
-  manifest records. ``<entry>/source`` is that archive unpacked with the builder's umask (``--no-same-permissions``);
-  the builder reads the lock from it, the sandbox runs from its own copy of the archive.
+  (``git -c tar.umask=0022 -c core.autocrlf=false -c core.eol=lf -c core.attributesFile=/dev/null archive --format=tar
+  <sha>``), in a throwaway repository that borrows only the objects of the builder's clone and with git's system and
+  global configuration and attributes off (:func:`_archive_source`). Only the commit and its own ``.gitattributes``
+  decide what is in it; nothing the builder's clone, configuration or environment says does, so builders whose git
+  writes ``tar`` the same way make the same bytes, and anyone with the commit can make it again and compare it with the
+  size and SHA-256 the manifest records. ``<entry>/source`` is that archive unpacked with the builder's umask
+  (``--no-same-permissions``); the builder reads the lock from it, the sandbox runs from its own copy of the archive.
 - ``<entry>/bootstrap.sh`` is this builder's start-up script (:data:`~hyperloom.measure.runner.bootstrap.BOOTSTRAP_SCRIPT`,
   mode 0755), not the commit's, and the manifest records its SHA-256. The script embeds this builder's own
   ``bootstrap.py`` and ``cache_layout.py``, so a builder of another Hyperloom version writes another one. An entry whose
@@ -129,8 +132,13 @@ _UTF8 = "utf-8"
 #: ``bootstrap.sh`` is run with ``sh`` and may be run directly: readable and executable by the sandbox's account.
 _SCRIPT_MODE = 0o755
 _BOOTSTRAP_SHA256 = hashlib.sha256(BOOTSTRAP_SCRIPT.encode(_UTF8)).hexdigest()
-#: Every setting of ``git archive`` that changes its bytes, fixed: entry modes 0644 and 0755, no line-ending conversion.
-_ARCHIVE_SETTINGS = ("-c", "tar.umask=0022", "-c", "core.autocrlf=false", "-c", "core.eol=lf")
+#: Every setting of ``git archive`` that changes its bytes, fixed: entry modes 0644 and 0755, no line-ending conversion
+#: and no attributes file of the builder's (:func:`_archive_source` says what else it takes away).
+_ARCHIVE_CONFIG = ("tar.umask=0022", "core.autocrlf=false", "core.eol=lf", f"core.attributesFile={os.devnull}")
+_ARCHIVE_SETTINGS = tuple(part for setting in _ARCHIVE_CONFIG for part in ("-c", setting))
+#: What ``git`` reads besides the repository, switched off for the archive: system and global configuration, and the
+#: system's attributes (``/etc/gitattributes``).
+_GIT_NO_SYSTEM_OR_GLOBAL = {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_ATTR_NOSYSTEM": "1"}
 _BUILD_TOOLS = ("setuptools", "wheel")
 _NO_INDEX, _FIND_LINKS, _NO_DEPS = "--no-index", "--find-links", "--no-deps"
 _ISOLATED, _ONLY_BINARY, _REQUIRE_HASHES = "--isolated", "--only-binary=:all:", "--require-hashes"
@@ -239,8 +247,8 @@ class CacheEntry:
     reused: bool
 
 
-def _run(command: Sequence[str], what: str) -> str:
-    done = subprocess.run(command, capture_output=True, text=True, check=False)
+def _run(command: Sequence[str], what: str, env: Mapping[str, str] | None = None) -> str:
+    done = subprocess.run(command, capture_output=True, text=True, check=False, env=env)
     if done.returncode != 0:
         raise CacheBuildError(f"{what} failed (exit {done.returncode}): {(done.stdout + done.stderr).strip()[-_TAIL:]}")
     return done.stdout.strip()
@@ -257,12 +265,36 @@ def _commit_tree(repo: Path, sha: str) -> str:
     return _run(_git(repo, "rev-parse", f"{sha}^{{tree}}"), f"reading the tree of {sha}")
 
 
+def _archive_source(repo: Path, sha: str, archive: Path) -> None:
+    """Write the ``git archive`` of commit ``sha`` of ``repo`` to ``archive``, bytes that only the commit decides.
+
+    git applies the attributes of the ``.gitattributes`` files in the commit, which are the same for everyone, but also
+    the builder's own: ``$GIT_DIR/info/attributes``, ``core.attributesFile`` (``~/.config/git/attributes`` unless set)
+    and the system's ``gitattributes``, any of which can leave files out (``export-ignore``) or rewrite them (``eol``,
+    ``filter``). So the archive is made in a new, empty repository beside ``archive`` that borrows only ``repo``'s
+    objects (``objects/info/alternates``): ``repo``'s configuration, ``info/attributes``, replace refs and grafts do not
+    apply. git runs with no ``GIT_`` variable of the builder's environment, an empty ``HOME`` and no system or global
+    configuration or attributes (:data:`_GIT_NO_SYSTEM_OR_GLOBAL`), and :data:`_ARCHIVE_SETTINGS` fixes the rest.
+    """
+    objects = Path(repo, _run(_git(repo, "rev-parse", "--git-path", "objects"), f"finding the objects of {repo}"))
+    with tempfile.TemporaryDirectory(dir=archive.parent, prefix=".archive-") as scratch:
+        home, borrower = Path(scratch, "home"), Path(scratch, "git")
+        home.mkdir()
+        env = {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
+        env.update(HOME=str(home), XDG_CONFIG_HOME=str(home), **_GIT_NO_SYSTEM_OR_GLOBAL)
+        object_format = ["--object-format=sha256"] if len(sha) == 64 else []
+        _run(["git", "init", "-q", "--bare", "--template=", *object_format, str(borrower)], "making a repository", env)
+        (borrower / "objects" / "info").mkdir(parents=True, exist_ok=True)
+        (borrower / "objects" / "info" / "alternates").write_text(f"{objects.resolve()}\n", encoding=_UTF8)
+        export = ["git", f"--git-dir={borrower}", *_ARCHIVE_SETTINGS, "archive", "--format=tar"]
+        _run([*export, "-o", str(archive.absolute()), sha], f"exporting {sha} from {repo}", env)
+
+
 def _export_source(repo: Path, sha: str, entry: Path) -> FileDigest:
-    """Write the commit's archive as ``entry/source.tar`` and unpack it into ``entry/source`` with the builder's umask;
-    the archive's size and SHA-256."""
+    """Write the commit's archive as ``entry/source.tar`` (:func:`_archive_source`) and unpack it into ``entry/source``
+    with the builder's umask; the archive's size and SHA-256."""
     archive, source = entry / SOURCE_ARCHIVE, entry / SOURCE_DIR
-    export = _git(repo, *_ARCHIVE_SETTINGS, "archive", "--format=tar", "-o", str(archive), sha)
-    _run(export, f"exporting {sha} from {repo}")
+    _archive_source(repo, sha, archive)
     source.mkdir()
     unpack = ["tar", "-x", "--no-same-owner", "--no-same-permissions", "-f", str(archive), "-C", str(source)]
     _run(unpack, f"unpacking {sha}")
