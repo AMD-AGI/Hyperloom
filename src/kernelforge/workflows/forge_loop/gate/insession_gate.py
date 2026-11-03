@@ -47,6 +47,9 @@ _DEFAULT_PROTECTED_GLOBS = list(PROTECTED_GLOBS)
 _EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
 _EDIT_TOOL_MATCHER = "|".join(_EDIT_TOOLS)
 
+# Byte <-> str error handler for git paths and symlink targets: lossless for any bytes.
+_FS_ERRORS = "surrogateescape"
+
 # Shell verbs that WRITE their path arguments (vs reading / executing them).
 _BASH_WRITE_VERBS = frozenset(
     {
@@ -647,9 +650,7 @@ class InSessionGate:
         if self.workspace_root is None:
             raise RuntimeError("candidate diff requires a workspace")
         names = git_bytes("diff", "--name-only", "--relative", "-z", "HEAD", "--", ".", cwd=self.workspace_root).stdout
-        paths = (
-            str(self.workspace_root / name.decode(errors="surrogateescape")) for name in names.split(b"\0") if name
-        )
+        paths = (str(self.workspace_root / name.decode(errors=_FS_ERRORS)) for name in names.split(b"\0") if name)
         return [path for path in paths if not self._is_protected(path)]
 
     def _candidate_diff_sha256(self) -> str:
@@ -687,7 +688,7 @@ class InSessionGate:
         mode = stat.S_IMODE(metadata.st_mode)
         try:
             if stat.S_ISLNK(metadata.st_mode):
-                content = os.readlink(path).encode(errors="surrogateescape")
+                content = os.readlink(path).encode(errors=_FS_ERRORS)
                 kind = "symlink"
             elif stat.S_ISREG(metadata.st_mode):
                 content = path.read_bytes()
@@ -855,7 +856,7 @@ class InSessionGate:
                 path.chmod(state.mode)
             elif state.kind == "symlink":
                 os.symlink(
-                    state.content.decode(errors="surrogateescape"),
+                    state.content.decode(errors=_FS_ERRORS),
                     path,
                 )
             elif state.kind == "directory":
