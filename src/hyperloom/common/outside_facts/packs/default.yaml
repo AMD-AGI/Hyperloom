@@ -10,7 +10,8 @@
 #   log_regex     a pattern for a log line; every examples.match line must match it, every examples.no_match line must not
 #   env_default   an environment variable and the value a launch sets
 #   component_layout  where a component's upstream paths lie in the image (sections), the files its layout cannot measure
-#                 (refuse) and the package directories its runtime writes builds into (generated); every examples.place
+#                 (refuse: a pattern of a file's name, or with a slash of its upstream path, where * also matches a
+#                 slash) and the package directories its runtime writes builds into (generated); every examples.place
 #                 line "<upstream path> -> <base>:<path in base>" must be placed so, every examples.refuse path refused
 #   arg_value     reserved: no rule reads one yet, so a pack that holds one is refused
 #   kernel_table  reserved: no rule reads one yet, so a pack that holds one is refused
@@ -20,7 +21,7 @@
 # reads a name another entry holds. A fact with no check is reported unverifiable by the image check.
 # Every entry names its project, says why the fact exists and carries examples. A pack that fails its own examples, or
 # lacks an entry the code reads, is refused when it is loaded; nothing falls back to a default.
-version: "17"
+version: "18"
 facts:
   aiter_merged_view:
     kind: names
@@ -975,8 +976,13 @@ facts:
     reason: >-
       vLLM's package is vllm at the top of its repository and lies over the installed vllm. Its operators are native
       extensions beside the package (vllm/_C, vllm/_moe_C and vllm/_rocm_C on ROCm, *.so), which its setup.py builds with
-      CMake from csrc at the top of the repository: a Python patch cannot change them, so a patch that names a native file
-      is refused with its path, and the build definition (CMakeLists.txt, setup.py, cmake/) with it.
+      CMake from csrc at the top of the repository: a Python patch cannot change them, so a patch that names a compiled
+      file anywhere, or a native source below csrc, is refused with its path, and the build definition (CMakeLists.txt,
+      setup.py, cmake/) with it. Every source the CMake build compiles lies below csrc (CMakeLists.txt and cmake/*.cmake at
+      f46a9dfe2c, the rocm/vllm 0.27.0 image's commit; hipify copies only csrc, and the external projects are fetched
+      outside the repository). A native source inside the package is not built by it: the package compiles it at run
+      time (vllm/distributed/kv_transfer/kv_connector/v1/hf3fs/utils/hf3fs_utils.cpp with torch's cpp_extension.load,
+      shipped as package data), so it is an ordinary file of the package.
     import_name: vllm
     sections:
       - {prefix: vllm, base: package}
@@ -990,17 +996,17 @@ facts:
       - "*.hsaco"
       - "*.cubin"
       - "*.pyd"
-      - "*.c"
-      - "*.cc"
-      - "*.cpp"
-      - "*.cxx"
-      - "*.h"
-      - "*.hh"
-      - "*.hpp"
-      - "*.cu"
-      - "*.cuh"
-      - "*.hip"
-      - "*.inc"
+      - "csrc/*.c"
+      - "csrc/*.cc"
+      - "csrc/*.cpp"
+      - "csrc/*.cxx"
+      - "csrc/*.h"
+      - "csrc/*.hh"
+      - "csrc/*.hpp"
+      - "csrc/*.cu"
+      - "csrc/*.cuh"
+      - "csrc/*.hip"
+      - "csrc/*.inc"
       - "CMakeLists.txt"
       - "*.cmake"
       - "setup.py"
@@ -1010,11 +1016,14 @@ facts:
     examples:
       place:
         - "vllm/envs.py -> package:envs.py"
+        - "vllm/_osk_gemm.hip -> package:_osk_gemm.hip"
+        - "vllm/distributed/kv_transfer/kv_connector/v1/hf3fs/utils/hf3fs_utils.cpp -> package:distributed/kv_transfer/kv_connector/v1/hf3fs/utils/hf3fs_utils.cpp"
       refuse:
         - "csrc/cache_kernels.cu"
         - "csrc/rocm/attention.cu"
         - "csrc/ops.h"
         - "vllm/_C.abi3.so"
+        - "vllm/.osk_cache/osk_gemm.co"
         - "CMakeLists.txt"
         - "setup.py"
         - "cmake/utils.cmake"

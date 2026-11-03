@@ -43,7 +43,7 @@ __all__ = [
 ]
 
 #: Files a native stack may not change in v1: the build definition runs arbitrary code at build time, with the widest
-#: blast radius; matched on the file name, as a component layout's ``refuse`` is.
+#: blast radius; matched on the file name, as a component layout's ``refuse`` pattern without a slash is.
 NATIVE_BUILD_REFUSE = ("CMakeLists.txt", "*.cmake", "setup.py", "setup_rocm.py", "pyproject.toml", "setup.cfg")
 PYTHON_PLACEHOLDER = "{python}"
 _SGL_KERNEL = "sgl_kernel"

@@ -8,7 +8,10 @@ image: each *section* is an upstream path prefix, the base it lies over (the ins
 directory), and the directory inside that base the section starts at. A path belongs to the section with the longest
 matching prefix; a path outside every section cannot be applied to the image. A layout also lists the files whose change
 the measured install cannot show (compiled objects, native sources, build files): a patch that names one is refused with
-the path, because laying a changed C++ file beside the package that runs the old binary would measure old bits.
+the path, because laying a changed C++ file beside the package that runs the old binary would measure old bits. A pattern
+without a slash names such files wherever they lie; one with a slash names them only below a directory, for a source that
+is native only where the component's build compiles it (vLLM's ``csrc/*.cu``), not inside the package, whose runtime may
+compile a source of its own.
 
 The pack carries the layouts (``component_layout`` entries); this module reads and applies them, and the loader pins each
 entry to its own examples with :func:`check_examples`.
@@ -42,6 +45,7 @@ _REFUSE, _GENERATED, _INTO, _PLACE = "refuse", "generated", "into", "place"
 _FIELDS = frozenset({"import_name", "sections", _REFUSE, _GENERATED})
 _SECTION_FIELDS = frozenset({"prefix", "base", _INTO})
 _ARROW = " -> "
+_SLASH = "/"
 
 
 class LayoutSpecError(ValueError):
@@ -82,9 +86,14 @@ class ComponentLayoutSpec:
         return section, str(PurePosixPath(section.into, *parts[depth:]))
 
     def refused_by(self, path: str) -> str | None:
-        """The pattern that makes ``path`` a file this layout cannot measure, matched on the file's name; else ``None``."""
-        name = PurePosixPath(path).name
-        return next((pattern for pattern in self.refuse if fnmatchcase(name, pattern)), None)
+        """The pattern that makes ``path`` a file this layout cannot measure; else ``None``.
+
+        A pattern without a slash is matched on the file's name, wherever the file lies. A pattern with a slash is matched
+        on the whole upstream path, from the repository's top, where ``*`` also matches a slash: ``csrc/*.cu`` is every
+        ``.cu`` file below ``csrc``, at any depth, and no ``.cu`` file elsewhere."""
+        upstream = PurePosixPath(path)
+        name, whole = upstream.name, upstream.as_posix()
+        return next((p for p in self.refuse if fnmatchcase(whole if _SLASH in p else name, p)), None)
 
 
 def _strings(where: str, what: str, value: Any, *, allow_empty: bool) -> tuple[str, ...]:
@@ -131,7 +140,10 @@ def parse_layout(where: str, body: Mapping[str, Any]) -> ComponentLayoutSpec:
     prefixes = [section.prefix for section in sections]
     if len(set(prefixes)) != len(prefixes):
         raise LayoutSpecError(f"{where}: two sections have the same prefix")
-    refuse = _strings(where, _REFUSE, body[_REFUSE], allow_empty=True)
+    refuse = tuple(
+        _relative(where, _REFUSE, p) if _SLASH in p else p
+        for p in _strings(where, _REFUSE, body[_REFUSE], allow_empty=True)
+    )
     generated = tuple(
         _relative(where, _GENERATED, path) for path in _strings(where, _GENERATED, body[_GENERATED], allow_empty=True)
     )

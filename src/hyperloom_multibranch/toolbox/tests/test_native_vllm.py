@@ -2,10 +2,12 @@
 # SPDX-License-Identifier: MIT
 
 """#125 stage 4c with a stand-in compiler: a stack that edits vLLM's ``csrc`` is planned by vLLM's own recipe over the
-rule pack's layout of vLLM, built out of process from ``<sources>/vllm/<ref>``, laid in the farm and imported from it."""
+rule pack's layout of vLLM, built out of process from ``<sources>/vllm/<ref>``, laid in the farm and imported from it. A
+native source inside the ``vllm`` package, which the package compiles at run time, is an ordinary package file."""
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -22,6 +24,12 @@ from hyperloom_multibranch.toolbox.tests import vllm_support as vllm
 from hyperloom_multibranch.toolbox.tests.test_native_builds import Hooks, Rig, farm_of
 
 EDITED_CU = "__global__ void reshape_and_cache() { /* faster */ }\n"
+KERNEL = '#include <hip/hip_runtime.h>\nextern "C" __global__ void osk_gemm() {}\n'
+
+
+def plain_compiler(rig: Rig) -> EnvironmentCompiler:
+    """The compiler of a session with no native builds configured: the rule pack's layout of vLLM alone."""
+    return EnvironmentCompiler(rig.blobs, IMAGE, lambda layout: rig.image.package(), {"vllm": vllm.LAYOUT})
 
 
 @pytest.fixture
@@ -94,10 +102,63 @@ def test_a_change_to_vllms_build_definition_is_refused_at_submission_naming_the_
 
 
 def test_without_a_native_plan_a_vllm_cu_edit_is_refused_by_the_rule_packs_layout(rig: Rig) -> None:
-    compiler = EnvironmentCompiler(rig.blobs, IMAGE, lambda layout: rig.image.package(), {"vllm": vllm.LAYOUT})
+    with pytest.raises(
+        PatchApplyError, match=r"'csrc/cache_kernels.cu' is a native or binary file \(csrc/\*\.cu\) of vllm"
+    ):
+        plain_compiler(rig).compile(rig.recipe(rig.patch({vllm.ACT_CU: EDITED_CU})), RecipeDelta())
 
-    with pytest.raises(PatchApplyError, match=r"'csrc/cache_kernels.cu' is a native or binary file \(\*\.cu\) of vllm"):
-        compiler.compile(rig.recipe(rig.patch({vllm.ACT_CU: EDITED_CU})), RecipeDelta())
+
+@pytest.mark.parametrize("path", ["vllm/_osk_gemm.hip", "vllm/kernels/osk.cu", "vllm/kernels/osk.cpp"])
+def test_a_source_the_package_compiles_at_run_time_is_laid_as_a_package_file_and_builds_nothing(
+    rig: Rig, path: str
+) -> None:
+    """T23's keep: ``vllm/_osk_gemm.hip`` beside the Python that hipcc-compiles it when it runs."""
+    stack = rig.recipe(rig.patch({path: KERNEL, vllm.PY_FILE: "SCALE = 2\n"}, {vllm.PY_FILE: vllm.BASE_PY}))
+    relative = path.removeprefix("vllm/")
+
+    for compiler in (rig.compiler, plain_compiler(rig)):
+        compiled = compiler.compile(stack, RecipeDelta())
+
+        assert [(r.kind, sorted(e.path for e in r.entries)) for r in compiled.roots] == [
+            ("package", sorted([relative, "envs.py"]))
+        ]
+        assert compiled.builds == ()
+
+
+@pytest.mark.parametrize(
+    ("path", "pattern"),
+    [("csrc/rocm/osk_gemm.hip", "csrc/*.hip"), ("csrc/osk.cu", "csrc/*.cu"), ("csrc/osk.cpp", "csrc/*.cpp")],
+)
+def test_a_source_below_csrc_is_a_native_build_and_without_a_native_plan_is_refused(
+    rig: Rig, path: str, pattern: str
+) -> None:
+    stack = rig.recipe(rig.patch({path: KERNEL}, {vllm.PY_FILE: vllm.BASE_PY}))
+
+    compiled = rig.compiler.compile(stack, RecipeDelta())
+
+    ((root,), (need,)) = compiled.roots, compiled.builds
+    assert (root.kind, root.entries, need.inputs.component) == ("runtime", (), "vllm")
+    with pytest.raises(PatchApplyError, match=re.escape(f"{path!r} is a native or binary file ({pattern}) of vllm")):
+        plain_compiler(rig).compile(stack, RecipeDelta())
+
+
+@pytest.mark.parametrize(
+    ("path", "pattern"),
+    [
+        ("vllm/.osk_cache/osk_gemm.co", "*.co"),
+        ("vllm/_osk_gemm.hsaco", "*.hsaco"),
+        ("vllm/_C.abi3.so", "*.so"),
+        ("csrc/prebuilt.so", "*.so"),
+        ("CMakeLists.txt", "CMakeLists.txt"),
+    ],
+)
+def test_without_a_native_plan_a_compiled_or_build_file_is_refused_wherever_it_lies(
+    rig: Rig, path: str, pattern: str
+) -> None:
+    stack = rig.recipe(rig.patch({path: "text\n", vllm.PY_FILE: "SCALE = 2\n"}, {vllm.PY_FILE: vllm.BASE_PY}))
+
+    with pytest.raises(PatchApplyError, match=re.escape(f"{path!r} is a native or binary file ({pattern}) of vllm")):
+        plain_compiler(rig).compile(stack, RecipeDelta())
 
 
 def test_a_python_only_vllm_stack_stays_a_package_root_with_no_build(rig: Rig) -> None:
