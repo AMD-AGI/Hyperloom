@@ -40,6 +40,7 @@ from hyperloom.measure.jit.modules import (
     module_build_limit_sec,
     read_config,
 )
+from hyperloom.measure.jit.prewarmed import unlike_prewarmed
 from hyperloom.measure.runner.own_jit import point_configs, server_environments
 from hyperloom.measure.socket import TestCall
 
@@ -108,9 +109,9 @@ def _stale_modules(
     cwd: Path,
     gfx_arch: str | None,
 ) -> frozenset[str]:
-    """The module config entries the servers' tuned tables, or the build variables they set otherwise than ``environ``,
-    make stale, as the aiter they import resolves them (the farm's, when it rebuilds aiter); none when the image has no
-    aiter or its module config cannot be read."""
+    """The module config entries the servers' tuned tables, or the build variables they set otherwise than ``environ``
+    (or than the prewarm built a module of the image under), make stale, as the aiter they import resolves them (the
+    farm's, when it rebuilds aiter); none when the image has no aiter or its module config cannot be read."""
     try:
         image = locate_package(AITER_PACKAGE, server_python(configs[0], default="python3"), cwd)
     except FarmError:
@@ -120,8 +121,10 @@ def _stale_modules(
         config = read_config(config_path(package))
     except (OSError, ValueError):
         return frozenset()
-    return stale_table_modules(config, image, package, servers) | env_touched_entries(
-        config, servers, environ, gfx_arch
+    return (
+        stale_table_modules(config, image, package, servers)
+        | env_touched_entries(config, servers, environ, gfx_arch)
+        | unlike_prewarmed(image / "jit", servers, gfx_arch)
     )
 
 

@@ -7,6 +7,7 @@ them, and the prewarm that builds them on CPU and installs them into the image, 
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -15,16 +16,16 @@ import pytest
 
 from hyperloom.measure import farm as farm_module
 from hyperloom.measure.jit.native.store import BuildInfraError
+from hyperloom.measure.jit.prewarmed import PREWARM_MANIFEST, read_manifest, unlike_prewarmed
+from hyperloom.measure.jit.session import link_prebuilt
 from hyperloom.measure.runner.cache_layout import file_sha256
 from hyperloom.measure.runner.native import aiter_modules, prewarm
 from hyperloom.measure.runner.native.builder import BuildMachine
 from hyperloom.measure.runner.native.isolated import Isolation
 from hyperloom.measure.runner.native.prewarm import (
-    PREWARM_MANIFEST,
     PrewarmError,
     isolated_builder,
     missing_prebuilt_modules,
-    read_manifest,
     watchdog_seconds_for,
 )
 from hyperloom.measure.runner.native.tests import _aiter_standin as standin
@@ -307,6 +308,7 @@ def test_a_build_for_a_cards_cu_count_is_installed_only_when_it_covers_that_card
 def test_the_command_builds_for_the_cards_cu_count_into_the_package_it_is_given(tmp_path, monkeypatch, capsys) -> None:
     package = _a8w8_image(tmp_path / "image", built_from="k")
     seen: dict[str, object] = {}
+    monkeypatch.setenv("CU_NUM", "304")
 
     def builder_for(machine: BuildMachine, *, environ: Mapping[str, str] | None = None) -> prewarm.ModuleBuilder:
         seen.update(gfx=machine.gfx_arch, cu=(environ or {}).get("CU_NUM"))
@@ -326,3 +328,138 @@ def test_the_command_builds_for_the_cards_cu_count_into_the_package_it_is_given(
     assert printed["failure"].endswith("lack kernels of gfx950/256 rows of a8w8_tuned_gemm.csv"), (
         "the stand-in writes no kernel name, so the coverage check refuses it"
     )
+
+
+def test_the_build_runs_under_what_a_tests_server_has_with_the_cards_cu_count() -> None:
+    """A local runner's template carries the image's variables only (``local_templates.image_env``): a variable only the
+    orchestrator has (``FLATMM_HIP_CLANG_PATH``, ``ENABLE_CK``) never reaches a test's server, so the build does not
+    see it either; ``CU_NUM`` is the card's, ``GPU_ARCHS`` the build's own target."""
+    orchestrator = {
+        "FLATMM_HIP_CLANG_PATH": "/custom/llvm/bin",
+        "ENABLE_CK": "0",
+        "CC": "/usr/bin/gcc-13",
+        "GPU_ARCHS": "gfx942",
+        "CU_NUM": "304",
+        "HIP_CLANG_PATH": "/opt/rocm/llvm/bin",
+        "HIP_VISIBLE_DEVICES": "0,1",
+        "AITER_LOG_MORE": "1",
+        "ROCM_PATH": "/opt/rocm",
+        "LD_LIBRARY_PATH": "/opt/rocm/lib",
+        "PATH": "/usr/bin",
+    }
+
+    assert prewarm.build_environment(orchestrator, 256) == {
+        "HIP_CLANG_PATH": "/opt/rocm/llvm/bin",
+        "AITER_LOG_MORE": "1",
+        "ROCM_PATH": "/opt/rocm",
+        "LD_LIBRARY_PATH": "/opt/rocm/lib",
+        "CU_NUM": "256",
+    }
+    assert "CU_NUM" not in prewarm.build_environment(orchestrator, None)
+
+
+def test_the_command_builds_under_a_tests_environment_and_records_what_the_build_read(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """Board #169 review: a ``*_HIP_CLANG_PATH`` set only in the orchestrator was baked into a module every test linked.
+    The module is built without it, and a test whose server sets a variable its build read otherwise builds its own."""
+    package = _a8w8_image(tmp_path / "image", built_from="k")
+    config_file = package / "jit" / "optCompilerConfig.json"
+    config = json.loads(config_file.read_text(encoding="utf-8"))
+    config["module_gemm_a8w8"]["hip_clang_path"] = "os.environ.get('FLATMM_HIP_CLANG_PATH')"
+    config_file.write_text(json.dumps(config), encoding="utf-8")
+    for name, value in {"FLATMM_HIP_CLANG_PATH": "/custom/llvm/bin", "ENABLE_CK": "0", "AITER_LOG_MORE": "1"}.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("CU_NUM", raising=False)
+    built_under: list[Mapping[str, str]] = []
+
+    def builder_for(machine: BuildMachine, *, environ: Mapping[str, str] | None = None) -> prewarm.ModuleBuilder:
+        built_under.append(dict(environ or {}))
+
+        def build(_package: Path, modules: frozenset[str], scratch: Path) -> Mapping[str, Path]:
+            (scratch / "module_gemm_a8w8.so").write_bytes(b"\x7fELF k_card")
+            return {"module_gemm_a8w8": scratch / "module_gemm_a8w8.so"}
+
+        return build
+
+    monkeypatch.setattr(prewarm, "isolated_builder", builder_for)
+    argv = ["--gfx", GFX, "--cu-num", "256", "--package", str(package), "--table", "AITER_CONFIG_GEMM_A8W8"]
+
+    assert prewarm.main(argv) == 0
+
+    assert json.loads(capsys.readouterr().out)["built"] == ["module_gemm_a8w8"]
+    [environ] = built_under
+    assert environ["CU_NUM"] == "256" and environ["AITER_LOG_MORE"] == "1"
+    assert "FLATMM_HIP_CLANG_PATH" not in environ and "ENABLE_CK" not in environ
+    entry = read_manifest(package / "jit")["module_gemm_a8w8"]
+    assert {"FLATMM_HIP_CLANG_PATH", "ENABLE_CK", "GPU_ARCHS"} <= set(entry["build_variables"])
+    assert entry["build_environment"] == {} and entry["cu_num"] == 256 and entry["gfx"] == GFX
+    untouched = {"AITER_LOG_MORE": "1", "ROCM_PATH": "/opt/rocm"}
+    assert unlike_prewarmed(package / "jit", [untouched], GFX) == frozenset()
+    orchestrators = {**untouched, "FLATMM_HIP_CLANG_PATH": "/custom/llvm/bin"}
+    assert unlike_prewarmed(package / "jit", [orchestrators], GFX) == {"module_gemm_a8w8"}
+
+
+def test_a_test_that_starts_while_a_module_is_installed_links_none_or_the_whole_module(tmp_path, monkeypatch) -> None:
+    """The copy into the image's ``aiter/jit`` is half written when a test's start lists the directory (the hook runs
+    the linker then): it must find no module of that name, never the half."""
+    package = image(tmp_path / "image")
+    whole = b"\x7fELF built:" + standin.MODULE.encode() + b" " + b"k" * 4096
+    copy = prewarm.shutil.copyfile
+    seen: list[bytes | None] = []
+
+    def copy_with_a_test_starting_halfway(source: Path, target: Path) -> None:
+        data = Path(source).read_bytes()
+        Path(target).write_bytes(data[: len(data) // 2])
+        content = tmp_path / f"test-{len(seen)}"
+        content.mkdir()
+        link_prebuilt(package / "jit", content, frozenset())
+        linked = content / f"{standin.MODULE}.so"
+        seen.append(linked.read_bytes() if linked.exists() else None)
+        copy(source, target)
+
+    def builder(_package: Path, modules: frozenset[str], scratch: Path) -> Mapping[str, Path]:
+        built = {name: scratch / f"{name}.so" for name in modules}
+        for name, path in built.items():
+            path.write_bytes(whole if name == standin.MODULE else b"\x7fELF built:" + name.encode())
+        return built
+
+    monkeypatch.setattr(prewarm.shutil, "copyfile", copy_with_a_test_starting_halfway)
+    report = prewarm.prewarm(package, builder, gfx=GFX)
+
+    assert report.built == (standin.MODULE, BLOCKSCALE) and len(seen) == 2
+    assert all(found in (None, whole) for found in seen), "a test linked a half-written module"
+    assert (package / "jit" / f"{standin.MODULE}.so").read_bytes() == whole
+
+
+def test_the_build_says_what_it_builds_for_which_card_and_how_long_before_it_starts(tmp_path, caplog) -> None:
+    package = image(tmp_path / "image")
+    said_before: list[list[str]] = []
+
+    def builder(_package: Path, modules: frozenset[str], scratch: Path) -> Mapping[str, Path]:
+        said_before.append([record.getMessage() for record in caplog.records if record.levelno == logging.WARNING])
+        return StandIn()(_package, modules, scratch)
+
+    caplog.set_level(logging.WARNING)
+    prewarm.prewarm(package, builder, gfx=GFX, cu_num=256)
+
+    [said] = said_before
+    assert said == [
+        f"aiter prewarm: building {standin.MODULE}, {BLOCKSCALE} for {GFX}/256 on CPU, about 130 s "
+        "(each module's typical build on a card)"
+    ]
+
+
+def test_without_a_cu_count_the_command_takes_the_one_cu_num_names(tmp_path, monkeypatch, capsys) -> None:
+    package = _a8w8_image(tmp_path / "image", built_from="k")
+    seen: list[str | None] = []
+
+    def builder_for(machine: BuildMachine, *, environ: Mapping[str, str] | None = None) -> prewarm.ModuleBuilder:
+        seen.append((environ or {}).get("CU_NUM"))
+        return StandIn()
+
+    monkeypatch.setattr(prewarm, "isolated_builder", builder_for)
+    monkeypatch.setenv("CU_NUM", "32")
+    assert prewarm.main(["--gfx", GFX, "--package", str(package)]) == 0
+    assert seen == ["32"] and json.loads(capsys.readouterr().out)["built"] == ["module_gemm_a8w8"]
+    assert read_manifest(package / "jit")["module_gemm_a8w8"]["cu_num"] == 32

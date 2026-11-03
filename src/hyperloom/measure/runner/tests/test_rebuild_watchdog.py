@@ -266,3 +266,25 @@ def test_the_runner_tells_the_watchdog_and_the_jit_directory_which_card_it_is_on
 
     assert bool(notes) is raised
     assert [args[-1] for args in given] == [card], "the JIT directory's owner is told too"
+
+
+@pytest.mark.parametrize(("envs", "raised"), [({}, False), ({"CU_NUM": "304"}, True)], ids=["untouched", "cu-num-304"])
+def test_a_module_built_once_under_another_value_than_the_servers_raises_the_watchdog(
+    image, tmp_path: Path, envs: dict, raised: bool
+) -> None:
+    """The launch preflight's prewarm built ``module_gemm_a8w8_bpreshuffle`` into the image for gfx950/256 (board #169);
+    a server whose ``CU_NUM`` differs is not given it and builds it at its first prefill."""
+    module = "module_gemm_a8w8_bpreshuffle"
+    (image / "jit" / f"{module}.so").write_bytes(b"\x7fELF prewarmed")
+    entry = {"name": module, "gfx": "gfx950", "cu_num": 256, "build_variables": ["CU_NUM"], "build_environment": {}}
+    document = {"schema": "hyperloom.aiter_prewarm/1", "modules": [entry]}
+    (image / "jit" / "hyperloom-prewarm.json").write_text(json.dumps(document), encoding=_UTF8)
+    point = _point(tmp_path, "point.yaml", args="--tp 1", **envs)
+
+    note = raise_rebuild_watchdog(_call(tmp_path, point), None, {}, tmp_path, gfx_arch="gfx950")
+
+    if raised:
+        assert _watchdog(point, False) == f"--tp 1 {_FLAG} {rebuild_watchdog_sec([module])}"
+        assert note is not None and module in note
+    else:
+        assert note is None
