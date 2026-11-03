@@ -33,7 +33,7 @@ def _isolate_serving_package(tmp_path, monkeypatch):
     for name in ("AITER_JIT_DIR", "INFERENCE_OPTIMIZER_AITER_JIT_DIR", "VLLM_VENV_ROOT", "GPU_ARCHS", "CU_NUM"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(_aiter_jit, "AITER_JIT_PROBE_PATHS", ())
-    monkeypatch.setattr(_aiter_jit, "_card_target", lambda: None)
+    monkeypatch.setattr(_aiter_jit, "card_target", lambda: None)
     monkeypatch.setattr(_aiter_serving_once, "HOST_DIR", tmp_path / "host")
 
 

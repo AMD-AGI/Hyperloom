@@ -241,14 +241,85 @@ def test_a_module_built_once_into_the_image_is_linked_by_a_later_test_it_does_no
 ) -> None:
     """The launch preflight moved ``module_gemm`` aside and built it once into the image's ``aiter/jit``, replacing the
     file in place (board #169). A test that starts after links it, unless its own table touches it."""
-    image_module = image.bases / "aiter" / "jit" / "module_gemm.so"
-    image_module.unlink()
-    installing = image_module.with_name(".module_gemm.so.prewarm")
-    installing.write_bytes(PREWARMED)
-    os.replace(installing, image_module)
+    _prewarmed(image)
     sheet = _deliver(image, _by_variable(TEST_TABLE)) if touched else _arm(image)
 
     server, _ = _run(image, monkeypatch, "after", sheet, cache=cache)
 
     assert server.found["module_gemm"] is not touched
     assert server.held["module_gemm.so"] == ((False, BUILT) if touched else (True, PREWARMED))
+
+
+#: What hyperloom's prewarm records of ``module_gemm``'s build (``measure.jit.prewarmed.build_record``): the variables the
+#: image's aiter reads to build it, as aiter e7d2453f's would (its ``jit`` code reads ``CU_NUM`` and ``GPU_ARCHS``, a CK-tile
+#: entry ``FLATMM_HIP_CLANG_PATH``), none of which the orchestrator's image variables set; built for the rig's card.
+_RECORD = {
+    "gfx": GFX,
+    "cu_num": 256,
+    "build_variables": ["AITER_META_DIR", "CU_NUM", "ENABLE_CK", "FLATMM_HIP_CLANG_PATH", "GPU_ARCHS"],
+    "build_environment": {},
+}
+
+
+def _prewarmed(rig: Rig, **record: object) -> None:
+    """The launch preflight moved ``module_gemm`` aside and built it once into the image's ``aiter/jit``, replacing the
+    file in place, and listed it in the prewarm's manifest with ``record`` (board #169)."""
+    jit = rig.bases / "aiter" / "jit"
+    (jit / "module_gemm.so").unlink()
+    installing = jit / ".module_gemm.so.prewarm"
+    installing.write_bytes(PREWARMED)
+    os.replace(installing, jit / "module_gemm.so")
+    entry = {"name": "module_gemm", "sha256": "0" * 64, **(record or _RECORD)}
+    document = {"schema": "hyperloom.aiter_prewarm/1", "modules": [entry]}
+    (jit / "hyperloom-prewarm.json").write_text(json.dumps(document), encoding="utf-8")
+
+
+@pytest.mark.parametrize("cache", [False, True], ids=["own-directory", "cache-directory"])
+@pytest.mark.parametrize(
+    "envs",
+    [{"CU_NUM": "304"}, {"GPU_ARCHS": "gfx942"}, {"FLATMM_HIP_CLANG_PATH": "/custom/llvm/bin"}, {"ENABLE_CK": "0"}],
+    ids=["cu-num-304", "gpu-archs-gfx942", "a-clang-only-the-orchestrator-had", "enable-ck-0"],
+)
+def test_a_module_built_once_is_not_given_to_a_test_whose_server_would_build_another(
+    image, monkeypatch, cache: bool, envs: dict[str, str]
+) -> None:
+    """Board #169 review: the module was built under one value of a variable its build reads, and a test whose server
+    sets another (no module config entry of the rig reads any of these) loaded it."""
+    _prewarmed(image)
+
+    server, _ = _run(image, monkeypatch, "unlike", _arm(image, envs=envs), cache=cache)
+
+    assert server.found["module_gemm"] is False and server.held["module_gemm.so"] == (False, BUILT)
+    assert server.held["module_other.so"] == (True, IMAGE_MODULE.encode()), "a module the prewarm did not build is"
+
+
+@pytest.mark.parametrize("cache", [False, True], ids=["own-directory", "cache-directory"])
+@pytest.mark.parametrize(
+    "record",
+    [
+        {**_RECORD, "build_environment": {"FLATMM_HIP_CLANG_PATH": "/custom/llvm/bin"}},
+        {**_RECORD, "gfx": "gfx942"},
+        {"gfx": GFX, "cu_num": 256},
+    ],
+    ids=["built-under-a-value-the-runner-has-not", "built-for-another-card", "no-record-of-its-variables"],
+)
+def test_a_module_built_once_otherwise_than_the_runners_servers_build_is_not_given(
+    image, monkeypatch, cache: bool, record: dict
+) -> None:
+    _prewarmed(image, **record)
+
+    server, _ = _run(image, monkeypatch, "otherwise", _arm(image), cache=cache)
+
+    assert server.found["module_gemm"] is False and server.held["module_gemm.so"] == (False, BUILT)
+
+
+def test_a_farm_with_no_cache_leaves_out_its_link_to_a_module_built_once_under_another_value(image) -> None:
+    _prewarmed(image)
+
+    _, _, run = image.run(
+        "farm-prewarmed", _arm(image, envs={"CU_NUM": "304"}, roots=_aiter_package_root(image)), cache=False
+    )
+
+    farm_jit = next(run.rglob("farm/site/aiter/jit"))
+    assert (farm_jit / "module_other.so").is_symlink()
+    assert not os.path.lexists(farm_jit / "module_gemm.so"), "built under the test's CU_NUM, not linked"

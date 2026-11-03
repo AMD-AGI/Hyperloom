@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import ast
 import csv
-import functools
 import hashlib
 import json
 import logging
@@ -489,7 +488,7 @@ def aiter_build_targets(package_root: Path, environ: Mapping[str, str]) -> Build
                 return None
             targets.add((gfx, count))
         return frozenset(targets) or None
-    card = _card_target()
+    card = card_target()
     return None if card is None else frozenset({(card[0], cu_num or card[1])})
 
 
@@ -519,8 +518,22 @@ def _default_cu_nums(package_root: Path) -> dict[str, int]:
     return {}
 
 
-@functools.lru_cache(maxsize=1)
-def _card_target() -> tuple[str, int] | None:
+#: The card :func:`card_target` read, once it was read: a card does not change under a process, a failure to read it can.
+_CARD: list[tuple[str, int]] = []
+
+
+def card_target() -> tuple[str, int] | None:
+    """This card's ``(gfx, compute units)`` as ``rocminfo`` reports them, what a server's aiter builds for when neither
+    ``GPU_ARCHS`` nor ``CU_NUM`` names another target; ``None`` when it cannot be read (and read again next time)."""
+    if not _CARD:
+        card = _read_card()
+        if card is None:
+            return None
+        _CARD.append(card)
+    return _CARD[0]
+
+
+def _read_card() -> tuple[str, int] | None:
     """The ``(gfx, compute units)`` every GPU agent ``rocminfo`` lists shares; ``None`` when they differ or none is read."""
     tool = shutil.which("rocminfo") or (_ROCMINFO_FALLBACK if os.path.exists(_ROCMINFO_FALLBACK) else None)
     if tool is None:
@@ -693,6 +706,7 @@ def serving_modules_cover_csv(
 #: (``hyperloom.measure.runner.native.prewarm``): ``{"schema", "modules": [{"name", "sha256", "tables_sha256", ...}]}``.
 AITER_PREWARM_MANIFEST = "hyperloom-prewarm.json"
 _PREWARM_SCHEMA = "hyperloom.aiter_prewarm/1"
+_MODULE_CONFIG = "optCompilerConfig.json"
 _HASH_CHUNK_BYTES = 1024 * 1024
 
 
@@ -713,14 +727,18 @@ def _tables_sha256(configs_dir: Path) -> str:
     return digest.hexdigest()
 
 
-def image_own_modules(jit_dir: Path, configs_dir: Path, envs: dict[str, str] | None) -> frozenset[str]:
+def image_own_modules(
+    jit_dir: Path, configs_dir: Path, envs: dict[str, str] | None, targets: BuildTargets | None
+) -> frozenset[str]:
     """Serving modules the prewarm built from the image's own tree and tables that are still what it installed.
 
-    A module counts when the prewarm manifest lists it with the sha256 its ``.so`` has now and with the
-    tables ``configs_dir`` holds now, and this round leaves its ``AITER_CONFIG_*`` unset: it is then the
-    module aiter would build at the first call, so moving it aside only makes the next start compile it
-    again, past sglang's watchdog. A module of a variable the round sets reads another table and is not
-    the image's own for this round.
+    A module counts when the prewarm manifest lists it with the sha256 its ``.so`` has now, with the
+    tables ``configs_dir`` holds now and with the ``gfx`` and ``cu_num`` of the one target the servers build
+    for (``targets``, :func:`aiter_build_targets`), and this round leaves its ``AITER_CONFIG_*`` unset: it is
+    then the module aiter would build at the first call, so moving it aside only makes the next start compile
+    it again, past sglang's watchdog. A module of a variable the round sets reads another table and is not
+    the image's own for this round; one built for another card or CU count holds another card's rows, and
+    none counts when the target is not known.
     """
     try:
         document = json.loads((jit_dir / AITER_PREWARM_MANIFEST).read_bytes())
@@ -737,19 +755,59 @@ def image_own_modules(jit_dir: Path, configs_dir: Path, envs: dict[str, str] | N
     tables: str | None = None
     own: set[str] = set()
     for entry in document.get("modules") or []:
-        name = str(entry.get("name") or "") if isinstance(entry, dict) else ""
-        so_path = jit_dir / f"{name}.so"
-        if not name or name in overridden or not so_path.is_file():
+        name = _installed_for(entry, jit_dir, overridden, targets)
+        if name is None:
             continue
         try:
-            if _file_sha256(so_path) != entry.get("sha256"):
-                continue
             tables = _tables_sha256(configs_dir) if tables is None else tables
         except OSError:
             continue
         if entry.get("tables_sha256") == tables:
             own.add(name)
     return frozenset(own)
+
+
+def _installed_for(entry: object, jit_dir: Path, overridden: set[str], targets: BuildTargets | None) -> str | None:
+    """The module a manifest entry lists, when its ``.so`` is still what the prewarm installed for the one target
+    ``targets`` names and the round leaves its table unset; ``None`` otherwise."""
+    name = str(entry.get("name") or "") if isinstance(entry, dict) else ""
+    so_path = jit_dir / f"{name}.so"
+    if not name or name in overridden or not so_path.is_file() or not _built_for(entry, targets):
+        return None
+    try:
+        return name if _file_sha256(so_path) == entry.get("sha256") else None
+    except OSError:
+        return None
+
+
+def _built_for(entry: Mapping[str, Any], targets: BuildTargets | None) -> bool:
+    """Whether a manifest entry's module was built for the one target ``targets`` names."""
+    try:
+        return targets == frozenset({(str(entry.get("gfx")).lower(), int(entry.get("cu_num")))})
+    except (TypeError, ValueError):
+        return False
+
+
+def _module_config(package_root: Path) -> dict[str, Any]:
+    """aiter's module config (``jit/optCompilerConfig.json``) of the package; empty when it cannot be read."""
+    try:
+        document = json.loads((package_root / "jit" / _MODULE_CONFIG).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return document if isinstance(document, dict) else {}
+
+
+def _generated_from(config: Mapping[str, Any], env_var: str, modules: tuple[str, ...]) -> tuple[str, ...]:
+    """The ``modules`` of ``env_var`` that aiter generates from its table: those whose entry's code generator reads
+    ``AITER_CONFIGS.<env_var>_FILE``, and those the module config does not describe. Rebuilding one of the others (an
+    ``_asm`` module, built from the ``hsa`` kernel lists of the card's architecture or from fixed sources) adds no row of
+    the table to it."""
+    reads = f"AITER_CONFIGS.{env_var}_FILE"
+    return tuple(
+        module
+        for module in modules
+        if not isinstance(config.get(module), Mapping) or reads in str(config[module].get("blob_gen_cmd") or "")
+    )
 
 
 def _invalidate_jit_build(jit_build: Path, backup_dir: Path, modules: tuple[str, ...]) -> dict[str, Any]:
@@ -829,6 +887,7 @@ def prepare_serving_so_for_csvs(
     jit_dir = jit_build.parent
     configs_dir = package_root / "configs"
     targets = aiter_build_targets(package_root, os.environ if environ is None else environ)
+    config = _module_config(package_root)
     modules_needed: list[str] = []
     variables: list[str] = []
     for env_var, modules in AITER_ENV_TO_SERVING_MODULES.items():
@@ -841,12 +900,12 @@ def prepare_serving_so_for_csvs(
             if serving_modules_cover_csv(jit_dir, modules, csv_path, targets):
                 continue
             variables.append(env_var)
-            modules_needed.extend(modules)
+            modules_needed.extend(_generated_from(config, env_var, modules))
             for name, libtype in csv_jit_kernel_rows(csv_path, targets):
                 resolved = serving_module_for_kernel(name, libtype, modules)
                 if resolved:
                     modules_needed.append(resolved)
-    own = image_own_modules(jit_dir, configs_dir, envs) if modules_needed else frozenset()
+    own = image_own_modules(jit_dir, configs_dir, envs, targets) if modules_needed else frozenset()
     modules_needed_t = tuple(m for m in dict.fromkeys(modules_needed) if m not in own)
     read_for = {"jit_dir": str(jit_dir), "targets": target_names(targets)}
     if not modules_needed_t:
@@ -896,7 +955,8 @@ def drop_serving_so_for_envs(
     package_root, jit_build = context
     jit_dir = jit_build.parent
     # A module a registry mismatch named is dropped even when it is the image's own: its tables changed under it.
-    own = image_own_modules(jit_dir, package_root / "configs", envs) - set(also_modules)
+    targets = aiter_build_targets(package_root, os.environ)
+    own = image_own_modules(jit_dir, package_root / "configs", envs, targets) - set(also_modules)
     modules = tuple(m for m in dict.fromkeys((*_modules_for_envs(envs), *also_modules)) if m not in own)
     dest = backup_dir or (jit_dir / "hyperloom_jit_backup")
     invalidation = _invalidate_jit_build(jit_build, dest, modules)
@@ -931,6 +991,7 @@ __all__ = [
     "COMPILED_REGISTRY_MARKER",
     "NON_JIT_SO_LIBTYPES",
     "aiter_build_targets",
+    "card_target",
     "clean_stale_aiter_locks",
     "csv_jit_kernel_rows",
     "csvs_aiter_will_load",
