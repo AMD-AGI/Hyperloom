@@ -195,8 +195,10 @@ class ComponentLayout:
     """How a component's upstream repository maps onto the package installed in the image.
 
     ``sections`` are the layout's parts (an upstream prefix, the base it lies over and where in the base it starts); a
-    layout without any is the one package section at ``upstream_prefix``. ``refuse`` are the patterns of the file names
-    whose change this layout cannot measure, and ``generated`` the package directories the runtime writes builds into.
+    layout without any is the one package section at ``upstream_prefix``. ``refuse`` are the patterns of the files whose
+    change this layout cannot measure (of a file's name, or with a slash of its upstream path:
+    :meth:`~hyperloom.common.outside_facts.component_layout.ComponentLayoutSpec.refused_by`), and ``generated`` the
+    package directories the runtime writes builds into.
     The rule pack owns all of it (``component_layout`` entries).
     """
 

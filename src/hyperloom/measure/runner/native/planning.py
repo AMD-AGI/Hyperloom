@@ -5,10 +5,11 @@
 
 :class:`NativePlanner` is the :class:`~hyperloom.measure.jit.native.needs.NativePlan` an environment compiler is given when
 native builds are configured. A stack of a component that has a native recipe and changes a file its package layout
-cannot lay (a ``.cu``, a header) is planned like a build runner plans it (:func:`~hyperloom.measure.runner.native.builder.
-plan`): applied over the checkout of the component's pinned upstream commit, which yields the key, and its files inside
-the installed package, which the farm lays like a package root's. A stack that changes only Python is left to the
-package layout, as before. The planner keeps what it planned by key, so the build runner of a key can build it.
+cannot lay (a ``.cu`` or a header where the component's build compiles it, vLLM's ``csrc``; one inside the package is an
+ordinary file) is planned like a build runner plans it (:func:`~hyperloom.measure.runner.native.builder.plan`): applied
+over the checkout of the component's pinned upstream commit, which yields the key, and its files inside the installed
+package, which the farm lays like a package root's. A stack that changes only Python is left to the package layout, as
+before. The planner keeps what it planned by key, so the build runner of a key can build it.
 
 Refused here, at submission, naming the path: a change to the build definition (``CMakeLists.txt``, ``setup.py`` and the
 other files of :data:`~hyperloom.measure.runner.native.recipes.NATIVE_BUILD_REFUSE`, and anything below a ``cmake/``
