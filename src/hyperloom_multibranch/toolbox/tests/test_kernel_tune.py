@@ -416,7 +416,7 @@ async def test_a_row_that_fails_the_reference_or_cannot_be_checked_is_listed_as_
     make: Make,
 ) -> None:
     rig = await ready(await make(cards=2))
-    wrong = tuned_rows(us=(1.0, 1.0), err=(0.69, 0.0))[0].replace(",16,", ",64,", 1)
+    wrong = tuned_rows(us=(1.0, 1.0), err=(0.5, 0.0))[0].replace(",16,", ",64,", 1)
     unchecked = tuned_rows()[1].replace(",20480,", ",1024,", 1).rsplit(",", 1)[0] + ",Null"
     forge_dropped = {"M": 2048, "N": 512, "K": 7168, "libtype": "ck", "splitK": 0, "us": 2.0, "err_ratio": 0.4}
     rig.forge.rows = [*tuned_rows(), wrong, unchecked]
@@ -429,7 +429,7 @@ async def test_a_row_that_fails_the_reference_or_cannot_be_checked_is_listed_as_
     assert [r["M"] for r in csv_rows(table["rows_csv"])] == ["16", "20480"]
     refused = {str(r["M"]): r for r in table["rejected_rows"]}
     assert set(refused) == {"64", "1024", "2048"} and all(r["verified"] is False for r in refused.values())
-    assert "outside the reference's tolerance" in refused["64"]["reason"] and refused["64"]["err_ratio"] == 0.69
+    assert "outside the reference's tolerance" in refused["64"]["reason"] and refused["64"]["err_ratio"] == 0.5
     assert "was not checked" in refused["1024"]["reason"] and "Forge removed it" in refused["2048"]["reason"]
     assert "3 rejected" in result["summary"] and "advice only" in result["summary"]
     assert "rejected rows" not in table["rows_csv"] and not {"64", "1024", "2048"} & {
@@ -439,7 +439,7 @@ async def test_a_row_that_fails_the_reference_or_cannot_be_checked_is_listed_as_
 
 async def test_a_table_whose_every_row_was_refused_has_no_csv_at_all(make: Make) -> None:
     rig = await ready(await make(cards=2))
-    rig.forge.rows = tuned_rows(err=(0.69, 0.5))
+    rig.forge.rows = tuned_rows(err=(0.6, 0.5))
     job = await rig.submit(test_request_id=TEST_ID)
 
     assert await rig.finished(job) is JobStatus.SUCCEEDED
@@ -526,16 +526,16 @@ DOWN = (64, 5120, 17408)
 
 def relaxed_rows(rig: Rig) -> None:
     """What Forge leaves when the asm row at splitK 6 wins a decode shape with a ratio just above the default: the table has
-    the CK row the default check lets through, and the report names the asm row it removed (and one of 0.4, and one of 0.0145)."""
+    the CK row the default check lets through, and the report names the asm row it removed (and one of 0.4, and one of 0.015)."""
     ck = profile_row(*DOWN, lib="ck", kernel_id=17, split_k=0, us=32.0, err=0.0, name="ck_kernel")
     asm = profile_row(*DOWN, lib="asm", kernel_id=4, split_k=6, us=20.0, err=0.0125, name=ASM)
-    worse = profile_row(2048, 512, 7168, lib="asm", kernel_id=5, split_k=6, us=5.0, err=0.0145, name=ASM)
+    worse = profile_row(2048, 512, 7168, lib="asm", kernel_id=5, split_k=6, us=5.0, err=0.015, name=ASM)
     wrong = profile_row(4096, 512, 7168, lib="ck", kernel_id=6, split_k=0, us=1.0, err=0.4, name="ck_wrong")
     rig.forge.rows = [*tuned_rows()]
     rig.forge.profile = [ck, asm, worse, wrong]
     rig.forge.dropped = [
         forge_dropped(*DOWN),
-        forge_dropped(2048, 512, 7168, err=0.0145, us=5.0),
+        forge_dropped(2048, 512, 7168, err=0.015, us=5.0),
         forge_dropped(4096, 512, 7168, lib="ck", split_k=0, us=1.0, err=0.4),
     ]
 
@@ -576,7 +576,7 @@ async def test_max_err_ratio_returns_the_rows_within_it_in_a_csv_of_their_own_an
     relaxed = {r["M"]: r for r in table["relaxed_rows"]}
     assert {m: (r["verified"], r["err_ratio"], r["reason"]) for m, r in relaxed.items()} == {
         "64": (False, 0.0125, "err_ratio_above_default"),
-        "2048": (False, 0.0145, "err_ratio_above_default"),
+        "2048": (False, 0.015, "err_ratio_above_default"),
     }
     assert [r["M"] for r in table["rejected_rows"]] == ["4096"], "above the allowed ratio, it stays rejected"
     assert (
@@ -701,7 +701,7 @@ async def test_an_asm_splitk_row_above_the_ratio_limit_is_handed_over_when_forge
     rig = await ready(await make(cards=2))
     asm = profile_row(*DOWN, lib="asm", kernel_id=4, split_k=6, us=20.0, err=0.0125, name=ASM)
     rig.forge.header = REL_NORM_HEADER
-    rig.forge.rows = [*(f"{line}," for line in tuned_rows()), f"{asm},0.0047"]
+    rig.forge.rows = [*(f"{line}," for line in tuned_rows()), f"{asm},0.005"]
     job = await rig.submit(test_request_id=TEST_ID)
 
     assert await rig.finished(job) is JobStatus.SUCCEEDED
@@ -709,7 +709,7 @@ async def test_an_asm_splitk_row_above_the_ratio_limit_is_handed_over_when_forge
     (table,) = result["tables"]
     checked = {r["M"]: r for r in table["verified_rows"]}
     assert (checked["64"]["verified"], checked["64"]["check"]) == (True, "rel_norm_err")
-    assert (checked["64"]["err_ratio"], checked["64"]["rel_norm_err"]) == (0.0125, 0.0047)
+    assert (checked["64"]["err_ratio"], checked["64"]["rel_norm_err"]) == (0.0125, 0.005)
     assert {r["check"] for m, r in checked.items() if m != "64"} == {"err_ratio"}
     assert table["rows"] == 3 and table["rejected_rows"] == [] and table["status"] == "tuned"
     rows = csv_rows(table["rows_csv"])

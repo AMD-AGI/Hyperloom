@@ -4,7 +4,7 @@
 """Excerpts of the stock InferenceX checkout a runner holds, as the profile tests need them.
 
 ``LIBRARY`` is the profile block of ``benchmarks/benchmark_lib.sh`` and ``CLIENT`` the ``/start_profile`` request of
-``utils/bench_serving/benchmark_serving.py``, both copied unchanged from the commit the sessions pin.
+``utils/bench_serving/benchmark_serving.py``, both copied unchanged from the upstream commit the measurement spec pins.
 """
 
 from __future__ import annotations

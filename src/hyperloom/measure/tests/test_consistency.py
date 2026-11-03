@@ -605,7 +605,7 @@ def test_an_unverified_signature_blocks_a_pass() -> None:
     assert summarize([_report("a", 0.0, signature_verified=False)]).verdict == "FAIL"
 
 
-def test_stage_two_criteria_are_configurable() -> None:
+def test_the_criteria_are_configurable() -> None:
     reports = [_report(f"i{i}", 0.1) for i in range(8)] + [_report(f"x{i}", 3.0) for i in range(2)]
     assert summarize(reports).verdict == "FAIL"
     assert summarize(reports, Criteria(0.5, 3.5)).verdict == "PASS"

@@ -155,7 +155,7 @@ class Rounds:
         return result("test", workspace, nonfatal_warnings=["run_grid_warmup_discarded_first"])
 
     def _failing_boot(self, slot: Path, kwargs: dict[str, Any]) -> VariantResult:
-        self._spend(1710.0)
+        self._spend(1000.0)
         slot.mkdir(parents=True, exist_ok=True)
         (slot / "server.log").write_text("[aiter] tuning gemm 17/4096\n", encoding="utf-8")
         return result("test", slot, status="failed", returncode=1, error="server died", error_class="x")

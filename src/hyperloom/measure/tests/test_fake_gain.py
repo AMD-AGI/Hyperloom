@@ -14,8 +14,8 @@ from hyperloom.measure.fake_gain import PREFIX_CACHE_OFF_ERROR_CLASS, baseline_p
 
 SGLANG_OFF = "server_args=ServerArgs(model_path='m', disable_radix_cache=True, tp_size=8)\n"
 SGLANG_ON = "server_args=ServerArgs(model_path='m', disable_radix_cache=False, tp_size=8)\n"
-VLLM_OFF = "INFO 10-14 api_server.py:1 non-default args: {'model': 'm', 'enable_prefix_caching': False}\n"
-VLLM_ON = "INFO 10-14 api_server.py:1 non-default args: {'model': 'm'}\n"
+VLLM_OFF = "INFO 01-01 00:00:00 api_server.py:1 non-default args: {'model': 'm', 'enable_prefix_caching': False}\n"
+VLLM_ON = "INFO 01-01 00:00:00 api_server.py:1 non-default args: {'model': 'm'}\n"
 
 
 def _round(tmp_path: Path, framework: str, log: str | None, atom_args: str = "") -> tuple[Path, Path]:
@@ -67,5 +67,5 @@ def test_the_log_in_the_round_directory_wins_over_a_warmup_launch(tmp_path: Path
     assert baseline_prefix_cache_refusal(point, directory) == ""
 
 
-def test_the_refusal_carries_main_s_error_class_name() -> None:
+def test_the_refusal_carries_the_agentx_baseline_error_class_name() -> None:
     assert PREFIX_CACHE_OFF_ERROR_CLASS == "agentx_baseline_prefix_cache_off"

@@ -86,7 +86,7 @@ def test_a_runner_that_wrote_its_status_before_exiting_is_judged_by_that_status(
 
 
 def test_the_start_steps_own_message_outlives_the_sandbox_in_the_outcome_and_the_journal(rigs, tmp_path: Path) -> None:
-    """A hosted run: three runners failed their start step in seconds and only ``runner_start_failed`` was kept."""
+    """A runner that fails its start step: only ``runner_start_failed`` is kept, with the start step's own message."""
     rig = rigs(_START_FAILED)
     outcome = rig.backend.run_test(make_call(tmp_path, timeout_sec=30))
     kept = f"{_VERIFY_MESSAGE} {_TAIL}"[:FAILURE_DETAIL_CHARS]

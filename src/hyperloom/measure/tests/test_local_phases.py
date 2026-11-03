@@ -137,7 +137,7 @@ def test_a_test_whose_server_never_got_ready_has_the_phases_up_to_the_failure(mo
     outcome, _ = _run(monkeypatch, clock, _call(tmp_path), Rounds(clock).failing_boot())
 
     assert outcome.returncode != 0
-    assert _stamped(outcome.phases) == [("server_boot", 1710.0, 0)], "no boot stamp: the whole round was the boot"
+    assert _stamped(outcome.phases) == [("server_boot", 1000.0, 0)], "no boot stamp: the whole round was the boot"
 
 
 # -- a sweep arm --------------------------------------------------------------------------------------------------
