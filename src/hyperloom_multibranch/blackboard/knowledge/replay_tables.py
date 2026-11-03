@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Stack a replayed kernel table over the head's instead of replacing it (#109 item 7).
+"""Stack a replayed kernel table over the head's instead of replacing it.
 
 A replay that adds a kernel where the head already has a table, in the same slot or on the same load variable (the
 service reads one table per variable), would otherwise swap the head's table out. Stacking asks the same questions a

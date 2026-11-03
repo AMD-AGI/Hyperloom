@@ -27,7 +27,7 @@ and the Amdahl ceiling cap it; and it is never negative.
 
 ``frontier-v1`` expects the trend, and a branch under observation keeps at least ``observation_floor_pct``.
 ``basis`` names which part of either layer the score rests on, and ``scorer`` the formula, :data:`FRONTIER_V1_LABEL`.
-The formula is a prototype: what the score means is the scheduler's call (gongzheng's), and it stays here until then.
+The formula is a prototype: what the score means is the scheduler's call, and it stays here until then.
 :func:`score_at` scores a branch as an archived tree has it, so the live scoring and a replay score alike.
 
 In a session that plays a scheduling playbook the scoring writes, beside every score of a running branch, its stall

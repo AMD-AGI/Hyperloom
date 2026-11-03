@@ -14,18 +14,18 @@ InferenceX sessions compare ``optimized_throughput`` with the champion of their 
 as the main flow's AgentX records do, its gain in P50 interactivity over its own baseline (``interactivity_gain_pct``,
 objective ``agentx_keep``), and carries both interactivities beside it, with both total throughputs when the gate
 recorded them, and its provenance says ``outputs_checked: false``: that gate reads speed and the request error rate, so
-a change to what the model says is kept all the same (#162). When the blackboard recorded the final commit's recipe
+a change to what the model says is kept all the same. When the blackboard recorded the final commit's recipe
 digest, a recipe with another digest is skipped
 (``recipe_digest_mismatch``): CLOSE was handed some other commit's recipe. A recipe that names anything as unexpressed
 does not rebuild what was measured, so it is skipped as well (``incomplete_recipe``).
 
 The provenance names how the warmup of the measurements behind the final commit ran (``warmup_round_seed``): the seed
 run_grid noted, or ``unpatched`` when its patch did not apply. Results from before the warmup had a seed of its own
-note neither, and the key is left out: their warmup replayed the measured prompts, which reads about 3% high (#56).
+note neither, and the key is left out: their warmup replayed the measured prompts, which reads high.
 CLOSE copies the session's rule-pack identity (version and digest from the manifest) into provenance as ``rule_pack``;
-the pack itself is not read again at write-back (#110). A patch of the final recipe that a model wrote during a merge
+the pack itself is not read again at write-back. A patch of the final recipe that a model wrote during a merge
 is listed in provenance as ``synthesized_patches``, with the patch it replaced, the model, the prompt version and the
-attempts it took (#122); ``value`` itself keeps the shape the single-lineage flow reads.
+attempts it took; ``value`` itself keeps the shape the single-lineage flow reads.
 """
 
 from __future__ import annotations

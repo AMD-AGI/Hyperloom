@@ -81,7 +81,7 @@ def test_a_lesson_bears_on_a_query_by_its_words_from_a_session_alike_enough_to_t
     lesson(pool, "agentx", "cuda graph capture fails on agentx traces", task_conditions(profile(isl=None, osl=None)))
     lesson(pool, "mine", "cuda graph padding is free at conc 64", session="sess-1")
     gone = lesson(pool, "gone", "cuda graph capture needs eager prefill here")
-    pool.retire(LessonRetirement(gone, human_author("siliang"), START, "fixed upstream"))
+    pool.retire(LessonRetirement(gone, human_author("curator"), START, "fixed upstream"))
     recall = LessonRecall(pool=pool)
 
     found = recall.past_for(snapshot, "cuda graph padding", limit=5)

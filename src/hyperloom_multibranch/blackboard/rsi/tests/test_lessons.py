@@ -116,7 +116,7 @@ def test_a_retired_lesson_is_live_no_more_keeps_its_revisions_and_retires_once(t
     pool = LessonPool(tmp_path)
     first = revision("first", START)
     pool.write(first)
-    retirement = LessonRetirement(LESSON, human_author("siliang"), START + 5, "true only before the flag split")
+    retirement = LessonRetirement(LESSON, human_author("curator"), START + 5, "true only before the flag split")
 
     assert pool.retire(retirement) and not pool.retire(retirement)
     assert pool.live() == () and pool.retirements() == (retirement,)
@@ -131,8 +131,8 @@ def test_a_purge_deletes_the_lessons_revisions_and_its_retirement_and_keeps_only
     )
     for item in (first, second, keep):
         pool.write(item)
-    pool.retire(LessonRetirement(LESSON, human_author("siliang"), START + 2, "it quoted a token"))
-    purge = LessonPurge(LESSON, human_author("siliang"), START + 3, "it quoted a token")
+    pool.retire(LessonRetirement(LESSON, human_author("curator"), START + 2, "it quoted a token"))
+    purge = LessonPurge(LESSON, human_author("curator"), START + 3, "it quoted a token")
 
     deleted = pool.purge(purge)
 
@@ -219,19 +219,19 @@ def test_a_person_lists_shows_revises_retires_and_purges_lessons_from_the_comman
 
     listed = main([*archive, "list", "--query", "argparse"])
     printed = capsys.readouterr().out
-    revised = main([*archive, "revise", LESSON, "--author", "siliang", "--content", f"  {FIXED}  "])
+    revised = main([*archive, "revise", LESSON, "--author", "curator", "--content", f"  {FIXED}  "])
     shown = main([*archive, "show", LESSON])
     history = capsys.readouterr().out
-    retired = main([*archive, "retire", other, "--author", "siliang", "--reason", "fixed upstream in 0.12"])
-    unconfirmed = main([*archive, "purge", LESSON, "--author", "siliang", "--reason", "it quoted a token"])
-    purged = main([*archive, "purge", LESSON, "--author", "siliang", "--reason", "it quoted a token", "--yes"])
-    missing = main([*archive, "retire", LESSON, "--author", "siliang", "--reason", "gone already"])
+    retired = main([*archive, "retire", other, "--author", "curator", "--reason", "fixed upstream in 0.12"])
+    unconfirmed = main([*archive, "purge", LESSON, "--author", "curator", "--reason", "it quoted a token"])
+    purged = main([*archive, "purge", LESSON, "--author", "curator", "--reason", "it quoted a token", "--yes"])
+    missing = main([*archive, "retire", LESSON, "--author", "curator", "--reason", "gone already"])
 
     assert (listed, revised, shown, retired, unconfirmed, purged, missing) == (0, 0, 0, 0, 2, 0, 1)
     assert printed.splitlines() == [f"{LESSON} live [pitfall] sess-1: {TEXT}"]
     assert f"replaces {first.revision_id}" in history and f"  {FIXED}" in history and "standing: {" in history
     assert [head.author for head in pool.lessons()[other].heads] == ["x"] and pool.lessons()[other].retired is not None
-    assert LESSON not in pool.lessons() and [item.author for item in pool.purges()] == [human_author("siliang")]
+    assert LESSON not in pool.lessons() and [item.author for item in pool.purges()] == [human_author("curator")]
     assert main(["list"]) == 2
 
 
@@ -245,8 +245,8 @@ def test_a_person_merges_lessons_that_say_the_same_into_one_and_retires_the_rest
     pool.write(said)
     archive = ["--archive", str(tmp_path)]
 
-    merged = main([*archive, "merge", LESSON, said.lesson_id, "--author", "siliang", "--content", FIXED])
-    again = main([*archive, "merge", LESSON, said.lesson_id, "--author", "siliang", "--content", FIXED])
+    merged = main([*archive, "merge", LESSON, said.lesson_id, "--author", "curator", "--content", FIXED])
+    again = main([*archive, "merge", LESSON, said.lesson_id, "--author", "curator", "--content", FIXED])
 
     (head,) = pool.lessons()[LESSON].heads
     retired = pool.lessons()[said.lesson_id].retired

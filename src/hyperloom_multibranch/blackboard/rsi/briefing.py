@@ -22,12 +22,12 @@ A champion the start commit is already, or builds on, is no lead: the lessons na
 ``blackboard_replay`` refuses to replay it, since its change would undo what the head did since.
 
 A peer or warm replay that would swap the head's kernel table out stacks the two tables when ``stack_slot`` is set: the
-wider of them, or a union of their rows, decided as a merge decides it (#109 item 7). When neither fits, the swap stays
+wider of them, or a union of their rows, decided as a merge decides it. When neither fits, the swap stays
 and the head's artifact is named in ``replaces``.
 
 At the root before anything was tried, the brief is the first batch's: cross-session content only. Lessons and leads
 together stay under ``max_chars``, the most specific first. Where the brief sits in the prompt and how long it may be
-is xiaofei's call, so the cap is a parameter.
+is the specialist's call, so the cap is a parameter.
 
 :class:`SessionBriefs` is the session's one source of briefs, so a branch's brief can be rebuilt at every launch of its
 specialist, on its head then: the Experience KB is read once per focus and branch, and only the blackboard's part is read

@@ -7,8 +7,8 @@ A lead is stranded while a branch's head leads integration's by more than the me
 one of the branch's commits has already failed to merge (``CommittedCommit.first_failed_at``), the view
 :mod:`~hyperloom_multibranch.blackboard.rsi.stranded` gives of one moment. Over the session,
 each value holds from the commit that recorded it until the next one on its branch, so :func:`stranded_spans` adds up
-the minutes such a lead held, until the snapshot was taken, and finds when it peaked. In session 4aef3318 three
-branches held 7.8 to 11.1% over integration that way, for up to four hours (#126).
+the minutes such a lead held, until the snapshot was taken, and finds when it peaked: a lead can stay stranded for
+hours.
 """
 
 from __future__ import annotations

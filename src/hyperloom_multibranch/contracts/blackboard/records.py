@@ -52,7 +52,7 @@ MAX_OP_SHARES = 50
 SHORT_COMMIT = 8
 WHOLE_PCT = 100.0
 SECONDS_PER_HOUR = 3600.0
-#: The facts of a node's measurement environment that change what a test there measures (#63).
+#: The facts of a node's measurement environment that change what a test there measures.
 ENVIRONMENT_FIELDS = ("image_digest", "gpu_model", "power_cap_w", "partition_mode")
 
 
