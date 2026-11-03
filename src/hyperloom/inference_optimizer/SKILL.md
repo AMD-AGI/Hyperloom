@@ -1146,11 +1146,11 @@ What this controls:
   `framework_registry.shipped_config_name()` names the file for
   `$FRAMEWORK`; an unregistered name is refused at launch and on resume.
 - Which framework-specific seed grid the `explore` action falls
-  back to when no `params.grid` is supplied. atom is the only
-  framework with a programmatic seed today
-  (`_default_grid_for_framework("atom", ...)` in
-  `src/hyperloom/orchestrator/actions/executors/explore.py`, populated by
-  `_atom_default_grid()`); sglang and vllm continue to rely on
+  back to when no `params.grid` is supplied. atom and xdit are the
+  frameworks with programmatic seeds today
+  (`_default_grid_for_framework` in
+  `src/hyperloom/orchestrator/actions/executors/_grid_base.py` dispatches to
+  `_atom_default_grid()` / `_xdit_default_grid()`); sglang and vllm continue to rely on
   the orchestration LLM emitting `provenance='default_grid'`
   variants. On those two an `explore` that carries no usable
   `params.grid` is refused at admission with
@@ -1176,12 +1176,12 @@ atom's `--torch-profiler-dir`, and TraceLens consumes the resulting
 `*.pt.trace.json.gz` unchanged. atom source roots (`/app/ATOM/atom/`)
 are in the kernel search roots + `_REUSABLE_SOURCE_ROOTS`, and the repo
 URL `https://github.com/ROCm/ATOM.git` is atom's `FrameworkSpec.repo_url` in `framework_registry`.
-Unlike sglang/vllm, atom is the only framework with a programmatic
-cold-start seed grid (`_atom_default_grid`: `atom_level_{2,3}`,
-`atom_prefix_cache`, `atom_kv_fp8` on FP8, model-class-gated `atom_ep` /
-`atom_dp_attn` / `atom_mtp_{1,3}`, `atom_cudagraph_bracket`), so a cold-start
-`explore` on atom is admitted with no grid of its own — on sglang/vllm it is
-refused at admission with `rule="explore_grid_missing"` until the LLM sends
+Unlike sglang/vllm, atom ships a programmatic cold-start seed grid
+(`_atom_default_grid`: `atom_level_{2,3}`, `atom_prefix_cache`, `atom_kv_fp8`
+on FP8, model-class-gated `atom_ep` / `atom_dp_attn` / `atom_mtp_{1,3}`,
+`atom_cudagraph_bracket`) — as does xdit (`_xdit_default_grid`), so a cold-start
+`explore` on either is admitted with no grid of its own, while on sglang/vllm it
+is refused at admission with `rule="explore_grid_missing"` until the LLM sends
 variants.
 
 ## Enablement Targeted Builds
