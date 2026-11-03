@@ -11,11 +11,13 @@ import sys
 
 
 def dump_thread_stacks_on_sigusr1() -> None:
-    """Make SIGUSR1 write every thread's Python stack to stderr, the session's log.
+    """Make SIGUSR1 write every thread's Python stack to the process's stderr, the session's log.
 
     The dump is written by the signal handler itself, without the GIL, so it also reads a process frozen in native
-    code that holds the GIL -- such as a Ray driver connect that never returns -- where nothing in Python runs. A
-    handler already installed still runs after the dump; SIGUSR1's default action, ending the process, does not.
+    code that holds the GIL -- such as a Ray driver connect that never returns -- where nothing in Python runs. It
+    goes to the stderr descriptor the process started with, not to whatever object ``sys.stderr`` names, which may
+    have none. A handler already installed still runs after the dump; SIGUSR1's default action, ending the process,
+    does not.
     """
     previous = signal.getsignal(signal.SIGUSR1)
-    faulthandler.register(signal.SIGUSR1, file=sys.stderr, all_threads=True, chain=previous != signal.SIG_DFL)
+    faulthandler.register(signal.SIGUSR1, file=sys.__stderr__, all_threads=True, chain=previous != signal.SIG_DFL)
