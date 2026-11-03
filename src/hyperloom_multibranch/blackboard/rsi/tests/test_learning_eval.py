@@ -67,6 +67,26 @@ def test_each_learning_counts_once_at_its_first_showing_and_each_later_test_once
     assert "| pitfalls avoided | 100% (1/1) |" in found.render()
 
 
+def test_a_pooled_lesson_counts_apart_matched_by_the_direction_its_revision_gives(snapshot: BlackboardSnapshot) -> None:
+    pitfall, insight = lesson_id_for("split kv"), lesson_id_for("gemm")
+    after_r1 = _between(snapshot, "r1", "r4")
+    log = [
+        {"at": _between(snapshot, "r2", "r3"), "branch": "s2", "source": "claim", "here": [], "past": [pitfall]},
+        {"at": after_r1, "branch": "s1", "source": "brief", "here": [], "past": [insight, "exp-1"]},
+    ]
+
+    found = evaluate_learnings(snapshot, log, pooled={pitfall: PITFALL, insight: INSIGHT})
+
+    # As this session's learnings would: s2 never tested split kv after it, s1's next test was the gemm.
+    assert (found.lesson_pitfalls_shown, found.lesson_pitfalls_avoided) == (1, 1)
+    assert (found.lesson_insights_shown, found.lesson_insights_taken_up) == (1, 1)
+    assert (found.tests_in_lesson_directions, found.committed_in_lesson_directions) == (1, 0)
+    assert (found.tests_elsewhere_after_lessons, found.committed_elsewhere_after_lessons) == (2, 0)
+    assert (found.pitfalls_shown, found.lessons_shown) == (0, 2)
+    assert "| pooled lessons: pitfalls avoided | 100% (1/1) |" in found.render()
+    assert evaluate_learnings(snapshot, log).lesson_pitfalls_shown == 0
+
+
 def test_a_brief_lead_counts_once_and_is_taken_up_by_a_later_test_making_its_change(
     snapshot: BlackboardSnapshot,
 ) -> None:
