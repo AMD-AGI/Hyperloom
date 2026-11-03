@@ -162,6 +162,20 @@ def test_close_keeps_a_session_that_played_a_playbook_as_its_trial_once(
 
 
 @pytest.mark.usefixtures("unconfigured")
+def test_a_trial_names_the_configured_budget_so_that_sessions_of_one_budget_pair(
+    snapshot: BlackboardSnapshot, tmp_path: Path
+) -> None:
+    archive = TreeArchive(tmp_path)
+    played = dataclasses.replace(snapshot.fingerprints[-1], policy_versions={PLAYBOOK_KEY: H0.label})
+    session = dataclasses.replace(snapshot, fingerprints=(*snapshot.fingerprints[:-1], played))
+
+    close_knowledge(session, METRIC, budget_seconds=BUDGET, targets=CloseTargets(archive=archive))
+
+    (kept,) = trials(PlaybookPool.beside(archive))
+    assert kept.task.endswith(f" budget={BUDGET / 60:g}m")
+
+
+@pytest.mark.usefixtures("unconfigured")
 def test_a_challenger_session_that_fell_back_to_the_champion_is_kept_as_such(
     snapshot: BlackboardSnapshot, tmp_path: Path
 ) -> None:
