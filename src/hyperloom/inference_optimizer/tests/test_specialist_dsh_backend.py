@@ -254,6 +254,7 @@ async def test_a_deepseek_selection_runs_the_specialist_on_the_dsh_cli(
     assert rows["agent-default-model"]["config"] == {"provider": "deepseek-official", "model": "deepseek-v4-flash"}
     assert rows["session-title-llm"]["disabled"] is True
     assert rows["session-persistence-jsonl"]["config"]["compression"] == "none"
+    assert rows["compaction-basic"]["config"] == {"thresholdRatio": 0.25}
 
     trace = result.trace
     assert trace.usage == {
