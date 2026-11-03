@@ -66,7 +66,7 @@ _Form = Callable[[bytes], bytes]
 
 @dataclass(frozen=True)
 class GivenModules:
-    """aiter modules a CPU build made for this test before it started (#125 stage 2b): their ``names`` and ``lay``,
+    """aiter modules a CPU build made for this test before it started: their ``names`` and ``lay``,
     which copies their files, each proven against the signed build, into a directory."""
 
     names: frozenset[str]

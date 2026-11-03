@@ -3,7 +3,7 @@
 
 """The toolbox's side of the long-context check: when a test runs it, and what is recorded.
 
-*When.* The same lever list as the short-prompt check, with no second list (#142 c3016): a test runs the check when the
+*When.* The same lever list as the short-prompt check, with no second list: a test runs the check when the
 change from its parent recipe to its candidate touches what the rule pack's ``short_prompt_touch`` matches
 (``short_prompts.lever_lines``), when its purpose is one of the pack's ``always_purposes`` (a final candidate, and a
 baseline, whose checks are the root's reading every candidate is judged after; no test is added for it), or when the request
@@ -16,7 +16,7 @@ environment's ``HYPERLOOM_LONG_CONTEXT`` (the key of the staged entry; ``off`` t
 without either the model's own set (:class:`ServedLongContext`): the set ``measure.long_context.build --served-context``
 stages for the session model at the context the test's launch serves (its ``--context-length`` or ``--max-model-len``,
 else its ``MAX_MODEL_LEN``; no more than the model's own limit), with its tokenizer and the default seed
-(:func:`default_long_context`, #142 c3395). The set is keyed by that length, so a launch served at 8192 tokens checks
+(:func:`default_long_context`). The set is keyed by that length, so a launch served at 8192 tokens checks
 retrieval over that window instead of recording every prompt ``not_run``, and a launch at the model's full window (or one
 that states no context) keeps the set at the model's limit. Root and candidate share one launch shape and so one set. It is
 read, and staged where the toolbox's runners read this host's cache, when acceptance first plans a test of that length. A

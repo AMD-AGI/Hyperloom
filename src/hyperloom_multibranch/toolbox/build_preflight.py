@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""What a host's native builds need before the toolbox starts (#125 stage 4b), checked once and refused by name.
+"""What a host's native builds need before the toolbox starts, checked once and refused by name.
 
 :func:`~hyperloom_multibranch.toolbox.native_builds.native_builds` runs :func:`build_preflight` when the build store is
 configured, so a host that is set up wrong refuses at start, naming every item, instead of failing each build later:

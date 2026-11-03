@@ -36,7 +36,7 @@
     {
       "id": "collective-wait",
       "applies_to": "collective kernels",
-      "text": "A collective kernel's time is transfer plus waiting for the slowest rank. Tracing changes which rank arrives last (M3, jobs 49062 and 49794), so per-rank collective time and rank skew in a traced run do not describe the untraced server. Use the minimum across ranks per launch (the transfer estimate) for collective cost; do not rank optimization sites by collective wait."
+      "text": "A collective kernel's time is transfer plus waiting for the slowest rank. Tracing changes which rank arrives last, so per-rank collective time and rank skew in a traced run do not describe the untraced server. Use the minimum across ranks per launch (the transfer estimate) for collective cost; do not rank optimization sites by collective wait."
     },
     {
       "id": "traced-latency",

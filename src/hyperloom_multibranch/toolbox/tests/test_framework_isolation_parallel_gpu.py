@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Eight tests at once on an eight-card node, through the real toolbox (W86).
+"""Eight tests at once on an eight-card node, through the real toolbox.
 
 The real aiter first: the start-up hook gives a process that imports it a merge directory of its own, and what aiter
 keeps in ``/tmp/aiter_configs`` is not written. Then nine ``explore`` tests (TP1, one card each) with distinct small

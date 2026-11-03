@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Set up a host's native builds (#125 stage 4b, C++ edits of sgl-kernel measured) in one command.
+"""Set up a host's native builds (C++ edits of sgl-kernel measured) in one command.
 
 Run it once on the host, as the user the toolbox runs as (root: the compile runs as user 65534 through ``setpriv``)::
 

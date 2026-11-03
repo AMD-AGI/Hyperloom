@@ -8,8 +8,8 @@ Run it where the runner cache is written, on a machine with egress, as ``cache_b
     python -m hyperloom.measure.ruppell_stage --commit <sha> --archive <tar.gz path or URL> [--token-file F] \\
         [--cache $HYPERLOOM_RUNNER_CACHE]
 
-The archive is ``git archive``'s tarball of the commit (the board serves it at
-``<board>/api/v1/repos/boards/ruppell/archive/<sha>.tar.gz``; ``--token-file`` holds the token a URL needs, sent as
+The archive is ``git archive``'s tarball of the commit (a Gitea host serves it at
+``<host>/api/v1/repos/<owner>/ruppell/archive/<sha>.tar.gz``; ``--token-file`` holds the token a URL needs, sent as
 ``Authorization: token``). The entry (:func:`~hyperloom.measure.ruppell.entry_dir`) is the tree with ``.commit`` added,
 every file mode 0644 or, when executable, 0755, then its manifest, written last, the whole made in a directory of its own
 that becomes the entry in one rename. An entry already there is checked, not rewritten.

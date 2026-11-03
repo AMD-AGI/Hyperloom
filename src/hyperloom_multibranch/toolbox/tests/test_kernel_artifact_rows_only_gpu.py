@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A few tuned rows put with ``rows_only`` are read over the image's default tables, on a real GPU (W115).
+"""A few tuned rows put with ``rows_only`` are read over the image's default tables, on a real GPU.
 
 The specialist is the real MCP service, the toolbox runs the real runner on one card, and the server is SGLang with aiter
 serving Qwen3-8B at TP1. The rows are four, all ``torch`` at a decode step of four requests: gate_up, which the image's
@@ -91,7 +91,8 @@ def image_rows_taken(rows: list[dict[str, str]]) -> dict[str, int]:
 
 def _hits_of_put_rows(lookups: list[str]) -> list[str]:
     """The hit lines of the rows put: ``torch`` rows whose kernel is named ``torch``. The image's own ``torch`` rows (the
-    W116 server logs six of them) name their kernel ``native``, so the libtype alone does not tell the two apart."""
+    server of the not-exercised test logs six of them) name their kernel ``native``, so the libtype alone does not tell
+    the two apart."""
     named = f"libtype is {TORCH_ROW['libtype']}, kernel name is {TORCH_ROW['kernelName']}"
     return [line for line in lookups if "is tuned on cu_num" in line and line.endswith(named)]
 
@@ -191,7 +192,7 @@ async def test_rows_put_with_rows_only_are_read_over_the_image_tables_and_overri
 
 
 async def test_rows_put_for_a_shape_the_model_never_asks_are_not_exercised_and_the_result_says_so() -> None:
-    """The result tells a table nothing read from one that was read and did not matter (#109 item 4)."""
+    """The result tells a table nothing read from one that was read and did not matter."""
     assert len(CARDS) == 1, f"HL_W13_CARDS must name one card, it is {CARDS}"
     root = _run_root("w116")
     row = {**rows_to_put()[0], "N": "104", "K": "208"}

@@ -3,7 +3,7 @@
 
 """The report route names what ruppell kept of a profile it traced, beside TraceLens' shares, which keep their shape.
 
-The check is the real one of W243's ruppell run (Qwen3-14B-FP8 TP1 on MI355X, board ``hyperloom-multibranch#150``); the
+The check is the real one of a ruppell run (a TP1 SGLang profile); the
 module table is written by the backend's own writer.
 """
 
@@ -30,7 +30,7 @@ ROWS = [
 ]
 
 
-def _kept(profile: Path, *, check: str | None = "w243_check.json", rows=ROWS) -> Path:
+def _kept(profile: Path, *, check: str | None = "traced_check.json", rows=ROWS) -> Path:
     kept = profile.parent / "ruppell"
     kept.mkdir(parents=True, exist_ok=True)
     ruppell.write_module_shares(rows, kept / "module_shares.csv")

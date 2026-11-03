@@ -18,7 +18,7 @@ def _report(requests: dict) -> dict:
 
 
 def test_warmup_requests_are_not_counted_as_requested() -> None:
-    # Magpie's report of a run with 354 warmup records, 3953 profiled and no error (hyperloom-multibranch #159).
+    # Magpie's report of a run with 354 warmup records, 3953 profiled and no error.
     requests = {"total": 4307, "records_total": 4307, "profiled_total": 3953, "successful": 3953, "errors": 0}
     measurement = agentx_measurement(_report({**requests, "warmup_dropped": 354, "error_rate": 0.0}))
 

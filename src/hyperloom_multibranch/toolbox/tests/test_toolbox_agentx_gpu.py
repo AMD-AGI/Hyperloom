@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The real toolbox on a GPU machine with an AgentX workload: a measurement, a patched recipe and a profile (W71).
+"""The real toolbox on a GPU machine with an AgentX workload: a measurement, a patched recipe and a profile.
 
 The points are rendered by the toolbox's own ``HostedPlanner`` (through ``build_local_toolbox``) and run by the pinned
 Magpie, which resolves the recipe from the pinned InferenceX, owns the server and replays the traces. Each test reads

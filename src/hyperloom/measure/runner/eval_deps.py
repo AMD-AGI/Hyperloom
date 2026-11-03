@@ -7,7 +7,7 @@ InferenceX's ``run_lm_eval`` installs lm-eval (``pip`` from the image's indexes,
 as the first thing an accuracy round does once its benchmark is over, with the server up and idle. Magpie keeps the
 round's output until the round ends, so nothing of that install reaches the logs the silence watchdog reads: in a fresh
 sandbox of the vLLM 0.16 image it ran past the 600 s window, and the watchdog reaped the idle server as a hung engine
-before the evaluation sent a request (hyperloom-multibranch #156 c4287). Here it runs once, before the server boots,
+before the evaluation sent a request. Here it runs once, before the server boots,
 with a limit and a log of its own, and the round's own call finds it done through the install-once marker
 (``_magpie_patcher.ensure_lm_eval_install_once``).
 
@@ -15,7 +15,7 @@ It runs in the environment the round starts its benchmark script with, not the r
 is the one ``PATH`` names there, and the marker is kept by that interpreter's ``sys.prefix``, so an install for another
 interpreter would leave the round to install again in its silent window. What decides that it worked is the round's own
 check, run in that environment: ``python3`` imports lm-eval and the round's ``_install_lm_eval_deps`` would install
-nothing (hyperloom-multibranch #156 c4469).
+nothing.
 """
 
 from __future__ import annotations

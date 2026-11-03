@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 """The launch preflight reads only the rows aiter compiles for this card, and builds what it moves aside once per
-container, from the image's own tables (board #169).
+container, from the image's own tables.
 
 The image is the stand-in aiter of the measure tests with its GEMM module named as aiter's ``module_gemm_a8w8``, which is
 generated from ``AITER_CONFIG_GEMM_A8W8``'s table. The table has a row tuned for this card (gfx950, 256 CUs) and one
@@ -96,7 +96,7 @@ def covers_the_card(image: Path) -> bool:
 
 
 def test_only_the_rows_aiter_compiles_for_this_card_decide_whether_a_module_is_moved_aside(image, monkeypatch) -> None:
-    """#169: the image's modules lacked only kernels of rows tuned for other GPUs, and were moved aside at every session."""
+    """The image's modules lacked only kernels of rows tuned for other GPUs, and were moved aside at every session."""
     (image / "jit" / f"{MODULE}.so").write_bytes(module_of(CARD_KERNEL))
 
     covered = _aiter_jit.prepare_serving_so_for_csvs({})
@@ -312,7 +312,7 @@ _BUILD_TARGETS_PY = 'GFX_CU_NUM_MAP = {"gfx942": 304, "gfx950": 256}\n'
 def test_a_boot_whose_servers_build_for_another_target_than_the_card_gets_nothing_built_once(
     image, monkeypatch, environ, card, boot
 ) -> None:
-    """Board #169 review: ``GPU_ARCHS=gfx942`` with no ``CU_NUM`` resolved to 304 CUs on a card of 256, and the module was
+    """``GPU_ARCHS=gfx942`` with no ``CU_NUM`` resolved to 304 CUs on a card of 256, and the module was
     built for 304. A test's server (which gets neither variable) builds for the card; the boot builds for its own."""
     (image / "jit" / "utils").mkdir(parents=True, exist_ok=True)
     (image / "jit" / "utils" / "build_targets.py").write_text(_BUILD_TARGETS_PY, encoding="utf-8")

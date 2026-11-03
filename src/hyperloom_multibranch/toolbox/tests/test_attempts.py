@@ -115,18 +115,18 @@ async def test_a_jit_build_timeout_is_retried_once_and_not_held_against_the_node
     assert reported == [], "the tables, not the node, made the server build past its watchdog"
 
 
-#: What W227's hosted runs reported, word for word but for the cache path.
+#: What hosted runs reported, word for word but for the cache path.
 KEY_READ_ONLY_REASON = f"{RUNNER_START_FAILED}: signing key file cannot be removed: OSError"
 CACHE_REASON = (
     f"{RUNNER_START_FAILED}: runner bootstrap, step cache, exit 1: the source in /cache/2ebadc612/source is not what "
     "the manifest recorded: 3980 files and 54915363 bytes, the manifest has 3457 and 46986171"
 )
 LOST_REASON = f"{RUNNER_LOST}: the sandbox could not be read"
-#: What the hosted backend reports for the Agent Sandbox answer of joint hosted run 4, word for word.
-#: What a runner reports when the Hub refused the replay client's download for its rate limit (board #161).
+#: What the hosted backend reports for the Agent Sandbox answer of a hosted run, word for word.
+#: What a runner reports when the Hub refused the replay client's download for its rate limit.
 HUB_REFUSED_REASON = f"{HUB_RATE_LIMITED}: 429 Too Many Requests: you have reached your 'api' rate limit."
 CREATE_FAILED_REASON = (
-    f"{SANDBOX_CREATE_FAILED}: 500: sandbox_create_failed: workload sbx-f7f56db77ec7244ae34d9886d2ed9dde phase Failed"
+    f"{SANDBOX_CREATE_FAILED}: 500: sandbox_create_failed: workload sbx-0123456789abcdef0123456789abcdef phase Failed"
 )
 
 

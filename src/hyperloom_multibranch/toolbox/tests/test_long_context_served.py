@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The model's own long-context set is built at the context the test's launch serves (board #142 c3395).
+"""The model's own long-context set is built at the context the test's launch serves.
 
 Acceptance plans the test, reads the context its planned launch serves (its context flag, else ``MAX_MODEL_LEN``) and
 gives it the model's set for that context, staged in the runner cache keyed by its length; the check then runs on a fake

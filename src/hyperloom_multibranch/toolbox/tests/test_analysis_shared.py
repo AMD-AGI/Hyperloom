@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""One analysis per profile test and tool (board #153 c3447), on a toolbox built by the real local factory.
+"""One analysis per profile test and tool, on a toolbox built by the real local factory.
 
 ``submit_analysis`` of a profile test that is being analysed joins that job, of one already analysed shares its result as
 it is, and of one whose analysis failed starts a new job. Every branch that asked gets the pointer in its own inbox. The

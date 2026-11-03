@@ -431,7 +431,7 @@ async def test_the_toolbox_is_built_from_the_inputs(tmp_path: Path) -> None:
 
 
 def test_every_runner_sandbox_is_named_the_sessions_snapshot_of_the_framework_tables(tmp_path: Path) -> None:
-    """A test that adds tuned rows to a default table needs the snapshot, or the runner refuses it (#156 c4084)."""
+    """A test that adds tuned rows to a default table needs the snapshot, or the runner refuses it."""
     configs = tmp_path / "aiter-configs"
     configs.mkdir()
     (configs / "a8w8_blockscale_tuned_gemm.csv").write_text("M,N,K,us\n1,2,3,4\n")
@@ -611,7 +611,7 @@ def test_the_hosts_workspace_goes_with_every_create_of_the_toolbox(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, named: dict[str, str], sent: dict[str, str]
 ) -> None:
     """``HYPERLOOM_SANDBOX_WORKSPACE`` of a SaFE key used directly, read by the host entry, is the workspace of the
-    ``measurement`` and ``dev`` creates (#156 c5098); a Claw host sets none and the creates carry their own metadata."""
+    ``measurement`` and ``dev`` creates; a Claw host sets none and the creates carry their own metadata."""
     env = {
         "E2B_API_URL": "http://service.invalid",
         "E2B_SANDBOX_URL": "http://sandboxes.invalid",

@@ -475,7 +475,7 @@ class RealToolbox:
         of it) and leases a card of the toolbox for the job, which ``lease_leaves_no_measurement`` refuses when the card
         cannot be spared.
 
-        An analysis of a profile test is one job per profile test and tool, whichever branch asks (board #153 c3447): a
+        An analysis of a profile test is one job per profile test and tool, whichever branch asks: a
         job of that pair that is running is joined (its result goes to every branch that asked) and one that succeeded is
         shared as it is, its pointer pushed to the asking branch at once; a failed or cancelled one is not reused, so the
         next submission starts a new job. The first submission's own ``params`` are the job's. The pairs are kept with

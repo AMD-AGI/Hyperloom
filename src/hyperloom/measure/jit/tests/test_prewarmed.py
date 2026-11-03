@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 """A module hyperloom's prewarm built into the image is given only to a server that would have built the same one: for
-the card the entry names, under the build variables it records (board #169)."""
+the card the entry names, under the build variables it records."""
 
 from __future__ import annotations
 

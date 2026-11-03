@@ -366,7 +366,7 @@ def _leases(provider: SandboxProvider, inputs: HostedToolboxInputs, tuning: Leas
 def parallel_tests_for(grant: GrantLimits | None, tp: int) -> int:
     """How many tests of TP=``tp`` may run at once under ``grant``: ``min(max_gpus // tp, max_sandboxes)``, at least 1.
 
-    This is the one source of the grant's parallel-tests rule agreed in #112 section 1a; the hosted toolbox sizes its
+    This is the one source of the grant's parallel-tests rule; the hosted toolbox sizes its
     measurement pool with it, and anything else that needs the number (a scheduler's cap, a planner) calls it rather
     than repeating the arithmetic. Without a grant it is the pool's default.
 

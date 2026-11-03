@@ -1,14 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Native builds for a toolbox, when its host configures them (#125 stage 4b); nothing changes when it does not.
+"""Native builds for a toolbox, when its host configures them; nothing changes when it does not.
 
 A host turns them on with the build store and its trust, which the runners read too (``HYPERLOOM_BUILD_STORE`` and
 ``HYPERLOOM_BUILD_TRUST``, :mod:`hyperloom.measure.jit.native.config`). This process is then the build service: it plans
 each stack's build at acceptance, drives it while the test waits without a card, and signs what the build runner staged.
-It also builds the aiter modules a stack touches before its test (#125 stage 2b,
-:mod:`hyperloom.measure.runner.native.aiter_modules`), with the variables of its own environment that aiter's build reads.
-So it also needs:
+It also builds the aiter modules a stack touches before its test
+(:mod:`hyperloom.measure.runner.native.aiter_modules`), with the variables of its own environment that aiter's build
+reads. So it also needs:
 
 - ``HYPERLOOM_BUILD_SIGNING_KEY``: the service's Ed25519 private key, a file of this user with mode 0600 (the compile
   runs as another user on this host); its public key must be in the trust file;

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The requests a measured AgentX round's client marked failed are counted by class from the round's export (#117).
+"""The requests a measured AgentX round's client marked failed are counted by class from the round's export.
 
 The export lines are rebuilt from the pinned client's source and docs (``agentx_export``: no export of a real run was
 at hand). What is pinned: which failed request is transport and which is no-content, that a request the client counted

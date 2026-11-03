@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 """A process that is not the test's on a card: the test is retried on another card, a lease is not given a held card, and
-the signed result says what was checked of the cards (board #126: an agent's commands ran on cards a test measured on).
+the signed result says what was checked of the cards (an agent's commands once ran on cards a test measured on).
 
 The pool is the real gated pool over a local provider that owns two cards; the kernel's list is a stand-in that the test
 writes, and the fake runner fails as the real runner does when it finds a process on its card.

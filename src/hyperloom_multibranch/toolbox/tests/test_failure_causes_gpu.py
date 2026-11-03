@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A failed test names the cause its server log states, on a real server (W90).
+"""A failed test names the cause its server log states, on a real server.
 
 ``hyperloom.measure.log_causes`` and ``boot_watch`` were proven on fixtures. Here each cause is made by a real SGLang
 server on a real card, through the real toolbox: a flag the server refuses (``serve_flag``), an import that fails at

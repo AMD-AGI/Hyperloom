@@ -147,7 +147,7 @@ def test_the_same_header_is_accepted_when_the_modules_it_touches_fit_the_time(tm
 
 
 def test_four_ck_tile_modules_are_refused_at_the_seconds_they_take_and_three_are_accepted(tmp_path):
-    """680 s each (#169): four take 2720 s of the 2400 s a stack may spend, three 2040 s. At the 65 s of any other module
+    """680 s each: four take 2720 s of the 2400 s a stack may spend, three 2040 s. At the 65 s of any other module
     four would be 260 s and thirty-six would pass."""
     with pytest.raises(TooManyModulesError) as refused:
         compile_aiter(

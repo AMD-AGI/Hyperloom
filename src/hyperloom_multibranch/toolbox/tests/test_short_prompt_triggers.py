@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Which recipe changes run the short-prompt check (board #126 c2813): an attention or prefill patch by the files it
+"""Which recipe changes run the short-prompt check: an attention or prefill patch by the files it
 changes, read from the patch itself; the launch variables of attention, the KV layout and aiter's attention backend, and
 not aiter's all-reduce, GEMM tables or MoE sorting."""
 

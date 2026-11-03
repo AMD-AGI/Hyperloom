@@ -234,7 +234,7 @@ def test_the_report_keeps_the_census_the_check_and_the_module_table_beside_the_p
 def test_a_failed_check_and_incomplete_records_are_said(tmp_path, host, monkeypatch):
     tracer = _tracer(tmp_path, host)
     _ran(tracer)
-    summary = json.loads((DATA / "w243_census_summary.json").read_text())
+    summary = json.loads((DATA / "traced_census_summary.json").read_text())
     summary["incomplete_processes"] = ["rank 0 (worker)"]
     (tmp_path / "summary.json").write_text(json.dumps(summary))
     monkeypatch.setenv("FAKE_SUMMARY", str(tmp_path / "summary.json"))

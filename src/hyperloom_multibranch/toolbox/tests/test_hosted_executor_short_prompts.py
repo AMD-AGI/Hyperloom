@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A succeeded test that ran the short-prompt consistency check carries what its landed outputs say (#126).
+"""A succeeded test that ran the short-prompt consistency check carries what its landed outputs say.
 
 The executor is the real one over the hosted backend and the local sandbox provider; the stand-in runner leaves the
 outputs of a check whose one process, the test's own server, behaves as the point says (``fake_short_prompts``) in the

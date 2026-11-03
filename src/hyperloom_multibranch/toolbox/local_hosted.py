@@ -314,8 +314,8 @@ def jit_store_root(options: LocalOptions, environ: Mapping[str, str] | None = No
 def aiter_builds_missing(runner_envs: Mapping[str, str]) -> str | None:
     """Why the tests of runners with ``runner_envs`` cannot build the aiter modules a ``csrc``/``hsa`` patch touches,
     ``None`` when they can: a runner builds them in the test's own aiter JIT directory, which only the shared
-    compiled-code cache gives (the CPU build of #125 stage 2b seeds that directory too), unless every module is rebuilt
-    (``AITER_REBUILD``)."""
+    compiled-code cache gives (the CPU build of touched modules seeds that directory too), unless every module is
+    rebuilt (``AITER_REBUILD``)."""
     if runner_envs.get(JIT_CACHE_ENV, "").strip() or build_surface((), runner_envs, {}).rebuild:
         return None
     return f"no JIT store ({JIT_STORE_ENV}) gives its tests an aiter JIT directory to build the touched modules in"

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A succeeded AgentX test carries, for each measured round, how its failed requests split and where the export is (#117).
+"""A succeeded AgentX test carries, for each measured round, how its failed requests split and where the export is.
 
 The executor is the real one over the hosted backend and the local sandbox provider. The stand-in runner writes the
 round's per-request export (the lines of ``agentx_export``, in the shapes the pinned client writes) into the files the

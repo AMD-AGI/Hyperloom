@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""An AgentX baseline served with the prefix cache off does not end ``succeeded`` (board topic 48)."""
+"""An AgentX baseline served with the prefix cache off does not end ``succeeded``."""
 
 from __future__ import annotations
 

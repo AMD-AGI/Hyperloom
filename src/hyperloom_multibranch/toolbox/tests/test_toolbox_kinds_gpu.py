@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The real toolbox on a GPU machine: the accuracy test, the concurrency sweep, a patched recipe and a profile (W13).
+"""The real toolbox on a GPU machine: the accuracy test, the concurrency sweep, a patched recipe and a profile.
 
 Each test submits a ``TestRequest`` to a toolbox built by ``build_local_toolbox`` whose planner is the real
 ``HostedPlanner`` (compile, points, surface check), and reads the result back from the blackboard. Needs SGLang, a model

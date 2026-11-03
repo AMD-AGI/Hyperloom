@@ -4,9 +4,9 @@
 """ruppell, Arbor's graph-aware GPU tracer, beside TraceLens in an SGLang profile test, at sampled detail.
 
 ruppell attributes every kernel, graph-replayed ones included, to the module that launched it, and keeps kernel detail
-for a sample of the serving steps only (``RUPPELL_DETAIL=5/1000``, which cost -0.4 % of output throughput on the profile
-recipe; board ``hyperloom-multibranch#150``). A profile test runs it on a best-effort basis: it never changes the test's
-return code, and a profile whose traced attempt failed runs again without it.
+for a sample of the serving steps only (``RUPPELL_DETAIL=5/1000``, which keeps its cost to output throughput small on
+the profile recipe). A profile test runs it on a best-effort basis: it never changes the test's return code, and a
+profile whose traced attempt failed runs again without it.
 
 * **Source.** A measurement sandbox has no network, so the pinned tree comes from the runner cache, staged there on a
   machine with egress by :mod:`hyperloom.measure.ruppell_stage`::
@@ -104,7 +104,7 @@ MODULE_SHARES_COLUMNS = ("kind", "module", "gpu_ms", "share_percent", "steps")
 UNATTRIBUTED = "unattributed"
 #: The note of a profile whose server ran traced with HIP graph packet capture off (ROCm 7.2.4 under the SGLang adapter):
 #: Kineto then records every kernel of each graph replay, where with it on the replays are nearly hidden, so its kernel
-#: shares compare only with a profile that sets ``DEBUG_CLR_GRAPH_PACKET_CAPTURE=0`` too (ruppell-board#19).
+#: shares compare only with a profile that sets ``DEBUG_CLR_GRAPH_PACKET_CAPTURE=0`` too.
 KINETO_NOTE = (
     "ruppell: traced with HIP graph packet capture off (DEBUG_CLR_GRAPH_PACKET_CAPTURE=0); "
     "kernel shares compare only with profiles that set it too"

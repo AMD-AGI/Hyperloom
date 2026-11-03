@@ -10,8 +10,8 @@ doing what ruppell's does at ``0ef9b0d`` for the part the backend reads:
   makes it fail, ``FAKE_BUILD_SLEEP`` makes it slow);
 * ``python -m ruppell run`` sets ``ruppell run``'s variables (``cli.py``'s ``cmd_run`` on ROCm, early load on) and
   runs the command;
-* ``python -m ruppell census`` writes the census files from ``data/ruppell`` (a real W243 summary and a census that
-  ruppell's own ``census`` made of its offline records), ``export`` writes ``report.json``, and
+* ``python -m ruppell census`` writes the census files from ``data/ruppell`` (a real traced run's summary and a census
+  that ruppell's own ``census`` made of its offline records), ``export`` writes ``report.json``, and
   ``tests/m2/check_m2.py`` prints a check (``FAKE_CHECK_OK=0`` fails it, ``FAKE_CENSUS_RC`` fails the census,
   ``FAKE_SUMMARY`` names another census summary).
 
@@ -70,7 +70,7 @@ if cmd == "census":
         sys.exit(int(os.environ["FAKE_CENSUS_RC"]))
     run = args[0]
     shutil.copyfile(os.path.join(DATA, "offline_census.jsonl"), os.path.join(run, "census.jsonl"))
-    summary = os.environ.get("FAKE_SUMMARY") or os.path.join(DATA, "w243_census_summary.json")
+    summary = os.environ.get("FAKE_SUMMARY") or os.path.join(DATA, "traced_census_summary.json")
     shutil.copyfile(summary, os.path.join(run, "census_summary.json"))
     open(os.path.join(run, "census_scopes.json"), "w").write("{}")
     open(os.path.join(run, "census_scopes.npz"), "wb").write(b"npz")
@@ -88,7 +88,7 @@ import json, os, sys
 if os.environ.get("FAKE_CHECK_OK") == "0":
     print(json.dumps({"ok": False, "criteria": {}}))
     sys.exit(1)
-print(open(os.path.join(os.environ["FAKE_RUPPELL_DATA"], "w243_check.json")).read())
+print(open(os.path.join(os.environ["FAKE_RUPPELL_DATA"], "traced_check.json")).read())
 """
 
 
