@@ -5,7 +5,8 @@
 runs and to time a kernel before a full test, through five MCP tools.
 
 The session lends at most :attr:`DevLimits.cap` at once, one a branch, and none while a test waits for cards; a cap
-of 0, the default, lends none. A short lease lasts at most :attr:`DevLimits.max_s`, and the runtime takes it back, never
+of 0, the default, lends none. A lease asking for more cards than can be lent now gets those that can, up to
+:attr:`DevLimits.partial_cards`. A short lease lasts at most :attr:`DevLimits.max_s`, and the runtime takes it back, never
 the model: when it expires, when the branch made no call for :attr:`DevLimits.idle_s` with nothing left running (or for
 :attr:`DevLimits.idle_running_s` with something), and once tests have queued for :attr:`DevLimits.queued_s`. A long lease,
 for a tool that runs for hours (Forge), lasts at most :attr:`DevLimits.long_max_s` and is taken back only when it
@@ -80,8 +81,11 @@ LINES = 100
 MINUTE = 60.0
 #: Where, in a branch's directory, the roots of its hosted dev sandboxes are, one per lease.
 DEV_DIR = "dev"
+CARDS_BUSY = "cards_busy"
 #: The refusals that put a branch in line: every lease lent out, or no card free (the hosted backend's quota included).
-CAPACITY = frozenset({"cap_reached", "cards_busy"})
+CAPACITY = frozenset({"cap_reached", CARDS_BUSY})
+#: The refusals fewer cards may not meet: too few free, or too few left for a test.
+TOO_MANY = frozenset({CARDS_BUSY, "lease_leaves_no_measurement"})
 
 
 class LeaseTerm(str, Enum):
@@ -99,6 +103,8 @@ class DevLimits:
     cap: int = 0
     #: The cards a lease takes when the specialist names none; the hosted backend leases the session's TP only.
     cards: int = 1
+    #: The most cards a lease asking for more than are free is given instead of a refusal.
+    partial_cards: int = 4
     max_s: float = 1800.0
     #: A long lease, for work that runs for hours (a Forge fusion or rewrite): taken back only when it expires, or once
     #: nothing it started runs and it sat idle.
@@ -182,6 +188,7 @@ class DevRefused(ToolError):
 class Granted:
     lease_id: str
     cards: int
+    asked: int
     root: str
     ports: tuple[int, int]
     expires_in_s: float
@@ -330,10 +337,14 @@ class DevLeases:
         now, seconds = self._clock(), min(seconds, sandbox.lifetime_s)
         self._held[branch] = _Lease(lease, sandbox, slot, now, now + seconds, now, term)
         self._watching()
-        await self._note(
-            branch, f"dev sandbox leased ({term.value}): {cards} card(s) for up to {seconds / MINUTE:g} min"
+        given = len(lease.gpu_ids)
+        what = (
+            f"{given} card(s)"
+            if given == cards
+            else f"{given} of the {cards} card(s) asked for, all that could be lent now"
         )
-        return Granted(lease.lease_id, len(lease.gpu_ids), str(sandbox.root), self._ports(slot), seconds)
+        await self._note(branch, f"dev sandbox leased ({term.value}): {what} for up to {seconds / MINUTE:g} min")
+        return Granted(lease.lease_id, given, cards, str(sandbox.root), self._ports(slot), seconds)
 
     async def run(self, branch: str, command: str, cwd: str | None, timeout_s: float) -> Ran:
         held = self._touch(branch)
@@ -503,6 +514,22 @@ class DevLeases:
         )
 
     async def _leased(self, branch: str, cards: int, lifetime_sec: float) -> BranchLease:
+        """``cards`` if they are free now, else as many as are, up to :attr:`DevLimits.partial_cards`; refused as for
+        ``cards`` when not even one is, or when the toolbox takes no other count (the hosted backend's TP)."""
+        try:
+            return await self._lease_now(branch, cards, lifetime_sec)
+        except DevRefused as refused:
+            if refused.code not in TOO_MANY:
+                raise
+            for fewer in range(min(cards - 1, self._limits.partial_cards), 0, -1):
+                try:
+                    return await self._lease_now(branch, fewer, lifetime_sec)
+                except DevRefused as again:
+                    if again.code not in TOO_MANY:
+                        break
+            raise refused
+
+    async def _lease_now(self, branch: str, cards: int, lifetime_sec: float) -> BranchLease:
         """A dev sandbox takes only cards free now: waiting would hold cards a test is about to need."""
         try:
             return await self._toolbox.lease_branch_sandbox(
@@ -511,7 +538,7 @@ class DevLeases:
         except RequestRejected as error:
             raise DevRefused(error.code, error.reason) from error
         except SandboxUnavailable as error:
-            raise DevRefused("cards_busy", f"no {cards} card(s) are free now") from error
+            raise DevRefused(CARDS_BUSY, f"no {cards} card(s) are free now") from error
 
     def _touch(self, branch: str) -> _Lease:
         held = self._held.get(branch)
@@ -740,9 +767,11 @@ def _lease_tool(leases: DevLeases) -> _DevTool:
         "dev_sandbox_lease",
         "Lease cards of your own for a while, to check a change runs and time a kernel before a full test, or, as a "
         "long lease, to run a tool for hours (a Forge fusion or rewrite); refused while tests wait for cards. Its "
-        "results never enter the gate. A sandbox may take minutes to start: while this answers starting, call it "
-        "again. Refused because all are lent out, you are put in line and told your place: keep working and call it "
-        "again; a lease given back is held for the first in line for a few minutes.",
+        "results never enter the gate. Asking for more cards than are free gives you those that are, up to "
+        f"{leases.limits.partial_cards}: cards in the answer is how many you got. A sandbox may take minutes to "
+        "start: while this answers starting, call it again. Refused because all are lent out, you are put in line and "
+        "told your place: keep working and call it again; a lease given back is held for the first in line for a few "
+        "minutes.",
         _schema(
             {
                 "cards": {"type": _INTEGER, "minimum": 1, "description": f"How many cards ({leases.limits.cards})."},
