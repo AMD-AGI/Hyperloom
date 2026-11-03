@@ -1,15 +1,15 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Real excerpts of one SGLang profile (equal input and output lengths, graphs replayed node by node) that the graded
-mix is checked on.
+"""Synthetic excerpts of one SGLang profile (equal input and output lengths, graphs replayed node by node) that the
+graded mix is checked on.
 
-``data/final_probe_*`` are cut from the windows TraceLens' splitter wrote for that profile's trace: four consecutive
-decode steps of its ``decode_only`` window (each one graph replay), and two of the five prefill steps of its
+``data/final_probe_*`` are written by ``data/_make_traces.py`` in the shape of the windows TraceLens' splitter writes:
+four consecutive decode steps of a ``decode_only`` window (each one graph replay), and two prefill steps of a
 ``prefilldecode`` window, each with the launch calls, step annotations and module frames the readers use, and the steps
-the splitter's ``execution_details.json`` lists for them. By the route, a wave of the profile's workload spends about a
-tenth of its time in prefill, so paged attention's share of the wave is close to its share of the decode window and well
-above its share of the ``mixed`` window, about half of whose time is its two prefill steps.
+the splitter's ``execution_details.json`` lists for them. Their step times are chosen so that a wave of the point's
+workload spends a tenth of its time in prefill, so paged attention's share of the wave is close to its share of the
+decode window and well above what a window that is half prefill by time would give it.
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ def install_capture(folder: Path) -> None:
 
 def starve_decode_window(target: Path) -> Path:
     """The decode excerpt at ``target`` without the kernels of its graph replays: what a profile that did not record them
-    leaves (the host calls and the eager kernels stay, the window's kernels fill under 1% of its span)."""
+    leaves (the host calls and the eager kernels stay, the window's kernels fill a few percent of its span)."""
     events = json.loads(gzip.decompress(DECODE_WINDOW.read_bytes()))["traceEvents"]
     replays = {e["args"]["correlation"] for e in events if e.get("name") == "hipGraphLaunch"}
     kept = [e for e in events if not (e.get("cat") == "kernel" and e["args"].get("correlation") in replays)]

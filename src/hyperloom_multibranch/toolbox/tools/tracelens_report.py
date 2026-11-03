@@ -32,7 +32,7 @@ and its prefill window, weighted by the time each phase takes in a wave of the p
 result still marks a graph-collapsed one degraded.
 
 A kernel name that several modules launch (the four FlyDSL GEMMs of a layer are all ``kernel_gemm_0``) is split by the module,
-``kernel_gemm_0 [Qwen2MLP.RowParallelLinear]`` (:mod:`~.kernel_launchers`): an eager kernel's launch call and the module frames
+``kernel_gemm_0 [MLP.RowParallelLinear]`` (:mod:`~.kernel_launchers`): an eager kernel's launch call and the module frames
 around it are in the window; a graph replay's are in the graph-capture folder beside the trace, which TraceLens also takes.
 A replay that cannot be paired with its capture keeps its plain names, and ``launcher_notes`` says why.
 

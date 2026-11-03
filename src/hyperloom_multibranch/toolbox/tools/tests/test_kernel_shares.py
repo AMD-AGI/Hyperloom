@@ -3,10 +3,11 @@
 
 """The kernel shares of a report window come from its raw GPU events: events that break a stream's order are left out.
 
-``data/*_gpu_events.json.gz`` are the GPU events (kernels and copies, unaltered) of real windows: a branch's
-decode step (one graph replay of 604 kernels, and six eager kernels the ROCm profiler stamps as milliseconds each) with
-the rank trace it was cut from, a sibling whose replay lost its kernels, the root's prefill step, and slices of two
-eager-mode windows, one of them TP2.
+``data/*_gpu_events.json.gz`` are synthetic windows that ``data/_make_traces.py`` writes, with the structure the ROCm
+profiler leaves: a branch's decode step (one graph replay of 64 kernels, and six eager kernels queued behind it that
+the profiler stamps as starting inside the replay and ending at the window's end) with the rank trace it was cut from,
+a sibling whose replay lost its kernels, the root's prefill step, and two eager-mode windows, one of them TP2. The
+numbers asserted are those the generator's durations give.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom_multibranch.toolbox.tools.kernel_shares import (
+    COLLECTIVE,
     JITTER_US,
     MAX_COLLECTIVE_STALL,
     MAX_EXCLUDED_SHARE,
@@ -39,9 +41,10 @@ QUANT = "aiter::dynamic_per_token_scaled_quant_kernel"
 PAGED_ATTENTION = "paged_attention_ll4mi_QKV_mfma16_kernel"
 CK_GEMM = "ck::kernel_gemm_xdl_cshuffle_v3_multi_d_blockscale_b_preshuffle"
 TENSILE_GEMM = "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs"
+CROSS_REDUCE = "aiter::cross_device_reduce_1stage"
 
 
-def _real(name: str) -> list[GpuEvent]:
+def _trace(name: str) -> list[GpuEvent]:
     return read_gpu_events(DATA / f"{name}_gpu_events.json.gz")
 
 
@@ -50,48 +53,51 @@ def _event(start: float, duration: float, name: str = "k", stream: str = "3") ->
 
 
 def test_the_decode_step_ranks_the_graph_kernels_and_leaves_the_six_misreported_eager_kernels_out() -> None:
-    """Before: index_put 29%, copy_ 29%, greedy_sample 15%, add 15% (the brief of every head profiled after fp8 KV)."""
-    window = kernel_window(_real("decode_window"), lambda: _real("decode_rank_trace"))
+    """The six eager kernels claim 2.59 ms of a step whose kernels run 0.565 ms: taken at their word, index_put, copy_,
+    greedy_sample and add would lead the shares. Left out, the replay's kernels lead and the eager ones are a remainder;
+    what the six really cost (each at the median of its undisturbed instances in the rank trace) is far under the cap."""
+    window = kernel_window(_trace("decode_window"), lambda: _trace("decode_rank_trace"))
     assert window.degraded_reason == ""
-    assert (window.excluded_events, round(window.excluded_claimed_ms, 2)) == (6, 54.84)
-    assert round(window.kernel_ms, 2) == 7.93 and round(window.busy_percent, 1) == 74.4
-    assert 0 < window.excluded_estimated_ms < 0.03 and window.unbounded == ()  # 23 us of 7.93 ms
+    assert (window.excluded_events, round(window.excluded_claimed_ms, 2)) == (6, 2.59)
+    assert round(window.kernel_ms, 3) == 0.565 and round(window.busy_percent, 1) == 77.4
+    assert window.excluded_estimated_ms == pytest.approx(0.018) and window.unbounded == ()  # 6 + 3 + 2 + 2 + 2 + 3 us
+    assert window.excluded_estimated_ms < MAX_EXCLUDED_SHARE * window.kernel_ms
     assert sum(window.shares.values()) == pytest.approx(100.0)
     assert list(window.shares)[:3] == [GEMM, QUANT, PAGED_ATTENTION]
-    assert window.shares[GEMM] == pytest.approx(44.1, abs=0.05)
-    assert window.shares[PAGED_ATTENTION] == pytest.approx(10.6, abs=0.05)
+    assert window.shares[GEMM] == pytest.approx(35.32, abs=0.01)
+    assert window.shares[PAGED_ATTENTION] == pytest.approx(8.15, abs=0.01)
     eager = {
         name: share for name, share in window.shares.items() if name.startswith("at::native::") or "greedy" in name
     }
-    assert "aiter::greedy_sample_kernel" not in window.shares and sum(eager.values()) < 1.5  # was 87% with the six
-    assert window.rows[0].count == 160  # 4 FlyDSL GEMMs x 40 layers, one name
+    assert "aiter::greedy_sample_kernel" not in window.shares and sum(eager.values()) < 2
+    assert window.rows[0].count == 16  # 4 FlyDSL GEMMs x 4 layers, one name
 
 
 def test_without_a_clean_instance_of_an_excluded_kernel_in_the_trace_the_window_is_degraded_not_guessed() -> None:
     """The window alone holds no undisturbed ``greedy_sample``: what it costs is unknown, so any ranking is a guess."""
-    window = kernel_window(_real("decode_window"), lambda: _real("decode_window"))
+    window = kernel_window(_trace("decode_window"), lambda: _trace("decode_window"))
     assert "aiter::greedy_sample_kernel" in window.unbounded
     reason = window.degraded_reason
-    assert "6 GPU events start before the previous event of their stream ended (they claim 54.84 ms)" in reason
+    assert "6 GPU events start before the previous event of their stream ended (they claim 2.59 ms)" in reason
     assert "no undisturbed instance of " in reason and "aiter::greedy_sample_kernel" in reason
 
 
 def test_a_window_whose_graph_replay_kernels_are_missing_is_degraded_with_the_span_it_fills() -> None:
-    """The decode step's sibling: its one replay recorded no kernels, so 11 eager kernels (0.05 ms) sit in an 8.2 ms
-    span."""
-    window = kernel_window(_real("lost_replay_window"), list)
-    assert round(window.busy_percent, 2) == 0.61 and window.excluded_events == 0
-    assert "fill 0.6% of its 8.22 ms GPU span (under 10%)" in window.degraded_reason
+    """The decode step's sibling: its one replay recorded no kernels, so 10 eager events (27 us) sit in a 5 ms span."""
+    window = kernel_window(_trace("lost_replay_window"), list)
+    assert round(window.busy_percent, 2) == 0.54 and window.excluded_events == 0
+    assert "fill 0.5% of its 5.00 ms GPU span (under 10%)" in window.degraded_reason
     assert "CUDA-graph replays are missing" in window.degraded_reason
 
 
 def test_a_gemm_that_starts_under_a_microsecond_before_its_predecessor_ended_stays_in_the_shares() -> None:
-    """The root's prefill window: a 5.4 ms GEMM starts 0.63 us early, as real clocks do; GEMM leads at 87%."""
-    events = _real("root_window")
+    """The root's prefill window: a GEMM starts 0.4 us before its predecessor ends, as real clocks do; the GEMMs are 80%
+    of its kernel time."""
+    events = _trace("root_window")
     assert sum(1 for a, b in zip(events, events[1:]) if b.start < a.end) >= 1
     window = kernel_window(events, list)
     assert window.excluded_events == 0 and window.degraded_reason == ""
-    assert list(window.shares)[0] == CK_GEMM and window.shares[CK_GEMM] == pytest.approx(87.1, abs=0.05)
+    assert list(window.shares)[0] == CK_GEMM and window.shares[CK_GEMM] == pytest.approx(80.0)
     assert sum(window.shares.values()) == pytest.approx(100.0)
 
 
@@ -99,25 +105,25 @@ def test_a_gemm_that_starts_under_a_microsecond_before_its_predecessor_ended_sta
     ("report", "top", "share", "second", "busy"),
     [
         # Eager-mode windows: every hipBLASLt tile is a kernel of its own name, so the GEMM family is the sum of them.
-        ("eager", "at::native::vectorized_elementwise_kernel", 37.3, TENSILE_GEMM, 31.3),
-        ("eager_tp2", TENSILE_GEMM, 28.6, "aiter::cross_device_reduce_1stage", 26.6),
+        ("eager", "at::native::vectorized_elementwise_kernel", 38.9, TENSILE_GEMM, 34.8),
+        ("eager_tp2", TENSILE_GEMM, 34.8, CROSS_REDUCE, 27.2),
     ],
 )
 def test_the_eager_windows_keep_their_collectives_and_one_gemm_family_in_the_shares(
     report: str, top: str, share: float, second: str, busy: float
 ) -> None:
-    window = kernel_window(_real(f"{report}_window"), list)
+    window = kernel_window(_trace(f"{report}_window"), list)
     assert window.excluded_events == 0 and window.degraded_reason == ""
     assert list(window.shares)[:2] == [top, second]
     assert window.shares[top] == pytest.approx(share, abs=0.05) and window.busy_percent == pytest.approx(busy, abs=0.05)
     assert sum(window.shares.values()) == pytest.approx(100.0)
 
 
-def test_the_clocks_of_real_windows_overlap_kernels_far_less_than_the_jitter_tolerance_and_the_defect_far_more() -> (
+def test_the_clocks_of_clean_windows_overlap_kernels_far_less_than_the_jitter_tolerance_and_the_defect_far_more() -> (
     None
 ):
-    """The largest overlap of neighbours on a stream: 0.63 us in the clean windows, the six eager events' 8 ms in the
-    decode step."""
+    """The largest overlap of neighbours on a stream: under a microsecond in the clean windows (the clocks' jitter), the
+    six eager events' hundreds of microseconds in the decode step (the profiler's defect)."""
 
     def overlap(events: list[GpuEvent]) -> float:
         by_stream: dict[tuple[str, str], list[GpuEvent]] = {}
@@ -125,8 +131,8 @@ def test_the_clocks_of_real_windows_overlap_kernels_far_less_than_the_jitter_tol
             by_stream.setdefault(event.stream, []).append(event)
         return max(a.end - b.start for run in by_stream.values() for a, b in zip(run, run[1:]))
 
-    clean = [overlap(_real(name)) for name in ("root_window", "eager_window", "eager_tp2_window")]
-    assert 0 < max(clean) < 1.0 < JITTER_US < 100.0 < overlap(_real("decode_window"))
+    clean = [overlap(_trace(name)) for name in ("root_window", "eager_window", "eager_tp2_window")]
+    assert 0 < max(clean) < 1.0 < JITTER_US < 100.0 < overlap(_trace("decode_window"))
     assert (JITTER_US, MIN_GPU_BUSY_PERCENT, MAX_EXCLUDED_SHARE) == (5.0, 10.0, 0.05)
 
 
@@ -235,9 +241,9 @@ def test_a_kernel_is_named_by_its_function_without_templates_parameters_or_gemm_
     assert kernel_label(raw) == label
 
 
-def test_every_kernel_of_the_real_windows_gets_a_short_label() -> None:
+def test_every_kernel_of_the_fixture_windows_gets_a_short_label() -> None:
     names = {
-        event.name for window in ("decode_rank_trace", "root_window", "eager_tp2_window") for event in _real(window)
+        event.name for window in ("decode_rank_trace", "root_window", "eager_tp2_window") for event in _trace(window)
     }
     labels = {name: kernel_label(name) for name in names}
     assert all(
@@ -248,11 +254,11 @@ def test_every_kernel_of_the_real_windows_gets_a_short_label() -> None:
 
 
 def test_the_table_lists_every_kernel_largest_first_with_its_share_time_and_count(tmp_path: Path) -> None:
-    window = kernel_window(_real("decode_window"), lambda: _real("decode_rank_trace"))
+    window = kernel_window(_trace("decode_window"), lambda: _trace("decode_rank_trace"))
     path = tmp_path / "kernel_shares.csv"
     write_kernel_table(window, path)
     lines = path.read_text(encoding="utf-8").splitlines()
-    assert lines[0] == "name,Percentage (%),total_time_ms,count" and lines[1].startswith(f"{GEMM},44.1")
+    assert lines[0] == "name,Percentage (%),total_time_ms,count" and lines[1].startswith(f"{GEMM},35.31")
     assert len(lines) == 1 + len(window.rows)
 
 
@@ -336,5 +342,12 @@ def test_a_collective_with_too_few_calls_to_have_a_median_and_a_slow_gemm_are_no
 @pytest.mark.parametrize(
     "name", ["lost_replay_window", "decode_window", "eager_window", "eager_tp2_window", "root_window"]
 )
-def test_no_real_window_of_the_suite_is_a_stall(name: str) -> None:
-    assert stalled_collective(split_in_order(_real(name)).kept) == ""
+def test_no_window_of_the_suite_is_a_stall(name: str) -> None:
+    assert stalled_collective(split_in_order(_trace(name)).kept) == ""
+
+
+def test_the_tp2_windows_one_shot_all_reduce_is_a_collective_whose_calls_say_it_is_not_a_stall() -> None:
+    """The no-stall check above is not empty for the TP2 window: its attention all-reduce has a call per layer, enough
+    for a median, each about as long as the others."""
+    calls = [e for e in split_in_order(_trace("eager_tp2_window")).kept if COLLECTIVE.search(kernel_label(e.name))]
+    assert len(calls) >= MIN_COLLECTIVE_CALLS and max(e.duration for e in calls) < 2 * min(e.duration for e in calls)

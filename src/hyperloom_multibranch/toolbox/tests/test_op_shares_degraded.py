@@ -39,7 +39,7 @@ def _write(directory: Path, info: dict[str, Any]) -> ToolOutput:
 
 def test_a_normal_report_keeps_its_op_shares(tmp_path: Path) -> None:
     output = with_op_shares(_write(tmp_path, {"mode": "agentic", "trace_quality": "good"}), REQUEST)
-    assert output.op_shares["aten::mm"] == pytest.approx(25.3246, abs=1e-3)
+    assert output.op_shares["aten::mm"] == pytest.approx(25.0)
     assert output.commit_id == "c1" and output.summary == "analysed"
 
 
