@@ -5,7 +5,7 @@
 
 The logs are sanitised copies of the three kinds that ended a 12 h session as ``no_known_signature``: the server
 refusing its own command line, the evaluation client answered ``400``, and a worker dying on a Python exception. The
-fourth, an import that failed, is the server.log lines of a real SGLang server (one MI355X card) asked for
+fourth, an import that failed, is the server.log lines of a real SGLang server (one card) asked for
 ``--load-format fastsafetensors``. The two HIP logs are lines of the next 12 h session's server.logs, where twelve
 candidates ended as ``hip_kernel_missing`` although no kernel was missing: a patched kernel that read out of bounds and
 a CUDA graph capture that was invalidated.
@@ -28,7 +28,7 @@ ARGPARSE_LOG = (
 )
 
 SERVER_LOG_WITH_BAD_REQUEST = (
-    "[2026-10-20 23:41:01 TP0] Decode batch. #running-req: 64, #token: 71232, token usage: 0.21, gen throughput (token/s): 4812.4\n"
+    "[2026-10-20 23:41:01 TP0] Decode batch. #running-req: 64, #token: 70000, token usage: 0.21, gen throughput (token/s): 1000.0\n"
     'INFO:     127.0.0.1:52144 - "POST /v1/chat/completions HTTP/1.1" 400 Bad Request\n'
     "[2026-10-20 23:41:02 TP0] Decode batch. #running-req: 0, #token: 0, token usage: 0.00, gen throughput (token/s): 0.0\n"
 )

@@ -130,7 +130,7 @@ def profile_row(
 
 
 def forge_dropped(
-    m: int, n: int, k: int, *, lib: str = "asm", split_k: int = 6, us: float = 24.4, err: float = 0.0125
+    m: int, n: int, k: int, *, lib: str = "asm", split_k: int = 6, us: float = 20.0, err: float = 0.0125
 ) -> dict[str, Any]:
     """What Forge's report says of a row it took out of the table: its shape, libtype, splitK, microseconds and ratio."""
     return {

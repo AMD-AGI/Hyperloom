@@ -3,7 +3,7 @@
 
 """Excerpts of the logs of a real test whose accuracy evaluation was refused, for the tests that classify it.
 
-The test ran a Qwen3-14B-FP8 recipe on one MI355X card with ``--context-length 2304`` (SGLang 0.5) through the hosted
+The test ran a recipe of a dense FP8 model on one card with ``--context-length 2304`` (SGLang 0.5) through the hosted
 toolbox. Its point asked the evaluation for ``max_length=8192`` with 4096 completion tokens, and every request was
 answered ``400``. The lines are the log's own; only the paths of the host are replaced. What the log did next is the
 shape these tests need: the client printed the refusal once per request, then one traceback per request that gave up
@@ -69,8 +69,8 @@ SERVER_REFUSAL = (
     '[2026-10-21 15:33:25] INFO:     127.0.0.1:59744 - "POST /v1/chat/completions HTTP/1.1" 400 Bad Request\n'
 )
 SERVER_DECODE = (
-    "[2026-10-21 15:34:54] Decode batch, #running-req: 64, #token: 119040, token usage: 0.04, cuda graph: True, "
-    "gen throughput (token/s): 7318.16, #queue-req: 0\n"
+    "[2026-10-21 15:34:54] Decode batch, #running-req: 64, #token: 100000, token usage: 0.04, cuda graph: True, "
+    "gen throughput (token/s): 1000.00, #queue-req: 0\n"
 )
 
 
