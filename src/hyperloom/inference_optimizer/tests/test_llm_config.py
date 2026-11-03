@@ -7,6 +7,7 @@ import ast
 import json
 import logging
 import sys
+import time
 import types
 from pathlib import Path
 from typing import Any
@@ -14,8 +15,8 @@ from typing import Any
 import pytest
 
 import hyperloom
-from hyperloom.common import llm_config
-from hyperloom.common.llm_config import (
+from hyperloom_common.llm import llm_config
+from hyperloom_common.llm.llm_config import (
     ANTHROPIC_CREDENTIAL_ENV_ORDER,
     DEFAULT_ANTHROPIC_BASE_URL,
     DEFAULT_ANTHROPIC_VERSION,
@@ -42,7 +43,7 @@ from hyperloom.common.llm_config import (
     resolve_forge_llm_model,
     resolve_openai_client_config,
 )
-from hyperloom.common.llm_headers import parse_custom_headers
+from hyperloom_common.llm.llm_headers import parse_custom_headers
 
 _LEGACY_KEY = "_".join(("DEEPSEEK", "API", "KEY"))
 _OPENAI_KEY = "_".join(("OPENAI", "API", "KEY"))
@@ -856,7 +857,7 @@ def test_get_anthropic_client_raises_clearly_without_httpx(monkeypatch):
 
 
 # ---- anthropic_completion / aanthropic_completion over the HTTP transport ----
-# The streamed reply itself is read in src/hyperloom/common/tests/test_anthropic_messages.py.
+# The streamed reply itself is read in src/hyperloom_common/llm/tests/test_anthropic_messages.py.
 _MESSAGE_BODY = {
     "content": [
         {"type": "text", "text": "hello "},
@@ -997,6 +998,123 @@ def test_anthropic_version_is_defined_once_in_llm_config():
     assert DEFAULT_ANTHROPIC_VERSION == "2023-06-01"
 
 
+# ---- re-dialling a connection that never came up ----
+_PROXY_ENVS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY")
+
+
+def _proxy_env(monkeypatch: pytest.MonkeyPatch, proxy: str | None) -> None:
+    """Leave exactly ``proxy`` in the environment, so the client's route is the one the test names."""
+    for name in _PROXY_ENVS:
+        monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv(name.lower(), raising=False)
+    if proxy is not None:
+        monkeypatch.setenv("HTTPS_PROXY", proxy)
+
+
+def _record_dials(
+    monkeypatch: pytest.MonkeyPatch,
+    httpx: Any,
+    *,
+    failures: int,
+    failure: type[BaseException] | None = None,
+) -> list[Any]:
+    """Fail the first ``failures`` dials of a real transport, then answer; returns the requests as they arrive."""
+    dials: list[Any] = []
+    error = failure or httpx.ConnectError
+
+    def handle_request(self: Any, request: Any) -> Any:
+        dials.append(request)
+        if len(dials) <= failures:
+            raise error("connection refused", request=request)
+        return httpx.Response(200, content=_events(_MESSAGE_BODY))
+
+    async def handle_async_request(self: Any, request: Any) -> Any:
+        return handle_request(self, request)
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", handle_request)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", handle_async_request)
+    monkeypatch.setattr(llm_config, "_ANTHROPIC_CONNECT_BACKOFF_S", 0.0)
+    return dials
+
+
+_GATEWAY_ENV = {_ANTHROPIC_KEY: "k", "ANTHROPIC_BASE_URL": "https://gw.invalid"}
+# A whole-call budget short enough that one connect timeout spends it, as a real one does when ``timeout`` is unset.
+_BUDGET_S = 0.05
+
+
+@pytest.mark.parametrize("proxy", [None, "http://proxy.invalid:8080"])
+def test_anthropic_messages_redials_a_connection_that_never_came_up(monkeypatch, proxy):
+    """``httpx`` re-dials only on its unproxied branch, so the re-dial sits here, above the route."""
+    httpx = pytest.importorskip("httpx")
+    _proxy_env(monkeypatch, proxy)
+    dials = _record_dials(monkeypatch, httpx, failures=llm_config.ANTHROPIC_CONNECT_RETRIES)
+    client = get_anthropic_client(env=_GATEWAY_ENV)
+    # The proxied client routes through its env-configured mount; the direct one has none.
+    assert bool(client._mounts) is (proxy is not None)
+    result = llm_config.anthropic_messages(client, model="claude")
+    assert result.text == "hello world"
+    assert len(dials) == llm_config.ANTHROPIC_CONNECT_RETRIES + 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("proxy", [None, "http://proxy.invalid:8080"])
+async def test_aanthropic_messages_redials_the_same_way(monkeypatch, proxy):
+    httpx = pytest.importorskip("httpx")
+    _proxy_env(monkeypatch, proxy)
+    dials = _record_dials(monkeypatch, httpx, failures=llm_config.ANTHROPIC_CONNECT_RETRIES)
+    client = get_async_anthropic_client(env=_GATEWAY_ENV)
+    assert bool(client._mounts) is (proxy is not None)
+    result = await llm_config.aanthropic_messages(client, model="claude")
+    assert result.text == "hello world"
+    assert len(dials) == llm_config.ANTHROPIC_CONNECT_RETRIES + 1
+
+
+def test_anthropic_messages_lets_the_last_connect_failure_through(monkeypatch):
+    httpx = pytest.importorskip("httpx")
+    _proxy_env(monkeypatch, None)
+    dials = _record_dials(monkeypatch, httpx, failures=llm_config.ANTHROPIC_CONNECT_RETRIES + 1)
+    with pytest.raises(httpx.ConnectError):
+        llm_config.anthropic_messages(get_anthropic_client(env=_GATEWAY_ENV), model="claude")
+    assert len(dials) == llm_config.ANTHROPIC_CONNECT_RETRIES + 1
+
+
+def test_anthropic_messages_never_redials_a_request_that_was_sent(monkeypatch):
+    """A read timeout may have reached the model; replaying it would bill and run a second completion."""
+    httpx = pytest.importorskip("httpx")
+    _proxy_env(monkeypatch, None)
+    dials = _record_dials(monkeypatch, httpx, failures=1, failure=httpx.ReadTimeout)
+    with pytest.raises(httpx.ReadTimeout):
+        llm_config.anthropic_messages(get_anthropic_client(env=_GATEWAY_ENV), model="claude")
+    assert len(dials) == 1
+
+
+def test_anthropic_messages_stops_redialling_at_its_deadline(monkeypatch):
+    """``timeout_s`` bounds the whole call: with ``timeout`` unset one connect timeout spends the budget, and a POST
+    sent after it would bill a completion the reader is already bound to drop."""
+    httpx = pytest.importorskip("httpx")
+    _proxy_env(monkeypatch, None)
+    dials: list[Any] = []
+
+    def handle_request(self: Any, request: Any) -> Any:
+        dials.append(request)
+        time.sleep(_BUDGET_S)
+        raise httpx.ConnectTimeout("connect timed out", request=request)
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", handle_request)
+    started = time.monotonic()
+    with pytest.raises(httpx.ConnectTimeout):
+        llm_config.anthropic_completion(
+            request=llm_config.AnthropicCompletionRequest(
+                model="claude", messages=[], max_tokens=16, timeout_s=_BUDGET_S
+            ),
+            env=_GATEWAY_ENV,
+        )
+    # The connect failure reaches the caller instead of a late dial, so no second POST goes out and the backoff
+    # never runs.
+    assert len(dials) == 1
+    assert time.monotonic() - started < llm_config._ANTHROPIC_CONNECT_BACKOFF_S
+
+
 # ---- build_http_timeout ----
 def test_build_http_timeout_defaults_write_and_pool_to_read():
     timeout = build_http_timeout(connect=3.0, read=7.0)
@@ -1010,7 +1128,7 @@ def test_build_http_timeout_takes_explicit_write_and_pool():
 
 def test_build_http_timeout_without_httpx_degrades_to_sdk_defaults(monkeypatch, caplog):
     monkeypatch.setitem(sys.modules, "httpx", None)
-    with caplog.at_level(logging.WARNING, logger="hyperloom.common.llm_config"):
+    with caplog.at_level(logging.WARNING, logger="hyperloom_common.llm.llm_config"):
         assert build_http_timeout(connect=1.0, read=2.0) is None
     assert "httpx unavailable" in caplog.text
 
@@ -1229,7 +1347,7 @@ class _FakeOneShotClient:
 @pytest.fixture
 def fake_one_shot(monkeypatch: pytest.MonkeyPatch) -> type[_FakeOneShotClient]:
     """Replace the Claude CLI client where ``_one_shot_client`` imports it."""
-    from hyperloom.common import claude_oneshot
+    from hyperloom_common.llm import claude_oneshot
 
     _FakeOneShotClient.instances = []
     monkeypatch.setattr(claude_oneshot, "ClaudeOneShotClient", _FakeOneShotClient)
@@ -1259,7 +1377,7 @@ def test_anthropic_transport_ready_is_false_without_a_credential():
 
 def test_anthropic_transport_ready_skips_the_sdk_probe_on_the_http_transport(monkeypatch):
     """An API key needs no Claude CLI, so an absent SDK must not disable it."""
-    from hyperloom.common import claude_oneshot
+    from hyperloom_common.llm import claude_oneshot
 
     def _missing() -> None:
         raise RuntimeError("claude_agent_sdk not installed")
@@ -1270,7 +1388,7 @@ def test_anthropic_transport_ready_skips_the_sdk_probe_on_the_http_transport(mon
 
 def test_ensure_available_rejects_a_missing_cli_binary(monkeypatch):
     """The SDK only spawns `claude`; an importable package with no reachable binary still cannot serve a call, and failing here beats failing at the first review."""
-    from hyperloom.common import claude_oneshot
+    from hyperloom_common.llm import claude_oneshot
 
     monkeypatch.setattr(claude_oneshot, "_load_sdk", lambda: types.SimpleNamespace(__file__=None))
     monkeypatch.setattr(claude_oneshot.shutil, "which", lambda _name: None)
@@ -1280,7 +1398,7 @@ def test_ensure_available_rejects_a_missing_cli_binary(monkeypatch):
 
 
 def test_ensure_available_accepts_a_cli_on_path(monkeypatch):
-    from hyperloom.common import claude_oneshot
+    from hyperloom_common.llm import claude_oneshot
 
     monkeypatch.setattr(claude_oneshot, "_load_sdk", lambda: types.SimpleNamespace(__file__=None))
     monkeypatch.setattr(claude_oneshot.shutil, "which", lambda _name: "/usr/bin/claude")
@@ -1291,7 +1409,7 @@ def test_ensure_available_accepts_a_cli_on_path(monkeypatch):
 @pytest.mark.parametrize("binary_name", ["claude", "claude.exe"])
 def test_ensure_available_accepts_either_bundled_binary_name(monkeypatch, tmp_path, binary_name):
     """The SDK ships the binary under a platform-dependent name."""
-    from hyperloom.common import claude_oneshot
+    from hyperloom_common.llm import claude_oneshot
 
     bundled = tmp_path / "_bundled"
     bundled.mkdir()
@@ -1307,7 +1425,7 @@ def test_ensure_available_accepts_either_bundled_binary_name(monkeypatch, tmp_pa
 
 def test_ensure_available_ignores_non_binary_bundled_entries(monkeypatch, tmp_path):
     """A bundle carrying only its .gitignore is not a usable transport."""
-    from hyperloom.common import claude_oneshot
+    from hyperloom_common.llm import claude_oneshot
 
     bundled = tmp_path / "_bundled"
     bundled.mkdir()
@@ -1326,7 +1444,7 @@ def test_ensure_available_ignores_non_binary_bundled_entries(monkeypatch, tmp_pa
     [(None, True), (RuntimeError("claude_agent_sdk not installed"), False)],
 )
 def test_anthropic_transport_ready_probes_the_sdk_for_a_subscription_token(monkeypatch, sdk_error, expected):
-    from hyperloom.common import claude_oneshot
+    from hyperloom_common.llm import claude_oneshot
 
     def _probe() -> None:
         if sdk_error is not None:

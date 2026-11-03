@@ -6,14 +6,16 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Collection
 from datetime import datetime
 from typing import Any, NamedTuple
 
-from hyperloom.common.coerce import to_float
+from hyperloom_common.coerce import to_float
 from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_prompt
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import GEAK_DROPPED_STATUSES
 from hyperloom.inference_optimizer.grid_server_args import dedupe_extra_server_args
 from hyperloom.inference_optimizer.session.geak_rebench_verdict import REBENCH_FAILED_STATUSES
+from ...mcp_tool_names import qualified_context_tool_name
 from . import gap_rows, proposal_scores, variant_line, warm_start
 from .attempt_audit import _AUDIT_ACTIONS
 from .phase_state import GAP_SEVERITY_RANK
@@ -82,7 +84,7 @@ class _ProposalRound(NamedTuple):
 
 def _round_attribution(entry: dict[str, Any], severity_of: dict[str, str]) -> _ProposalRound:
     """Read one specialist round's attribution. ``provenance`` defaults to its domain: a proposal cannot choose it."""
-    from hyperloom.common.coerce import to_int
+    from hyperloom_common.coerce import to_int
 
     domain = str(entry.get("domain") or "?").removesuffix("_specialist")
     return _ProposalRound(
@@ -401,7 +403,7 @@ class _RenderMixin:
         round's, ``specialist:<domain>`` unless the round's recorder set one; a
         proposal cannot choose it, since a specialist writes its own proposals.
         """
-        from hyperloom.common.coerce import to_int
+        from hyperloom_common.coerce import to_int
 
         from ...actions.executors._proposal_identity import content_fingerprint, is_executable, normalize_proposal
 
@@ -434,26 +436,41 @@ class _RenderMixin:
         ranked.sort(key=lambda r: (-r[0], -r[1], -r[2]))
         return [row for _, _, _, row in ranked]
 
-    def to_untested_proposals_summary(self, *, skip_provenance: str = "") -> str:
+    def to_untested_proposals_summary(self, *, skip_provenance: str = "", in_grids: Collection[str] = ()) -> str:
         """Render the specialist proposals still waiting for a benchmark slot.
 
         Args:
             skip_provenance: Leave out the rows a producer with its own section renders.
+            in_grids: Content fingerprints of the variants in queued or running explore grids. Such a row is
+                already on its way to a bench, so it is named rather than listed as waiting.
         """
         rows = [
             row for row in self.untested_proposal_rows() if not skip_provenance or row["provenance"] != skip_provenance
         ]
-        if not rows:
-            return ""
-        out = [
-            "Executable specialist proposals from this cycle that no explore round has benched.",
-            "Ranked by gap severity, then most recent. The Coordinator benches the head of this",
-            "queue whenever no explore is queued or running; dispatch `explore` only for variants not listed here.",
-            "",
-        ]
-        out.extend(untested_proposal_line(row) for row in rows[:_UNTESTED_PROPOSALS_MAX_ENTRIES])
-        if len(rows) > _UNTESTED_PROPOSALS_MAX_ENTRIES:
-            out.append(f"(+{len(rows) - _UNTESTED_PROPOSALS_MAX_ENTRIES} more not shown)")
+        waiting = [row for row in rows if row["fingerprint"] not in in_grids]
+        held = [row["name"] for row in rows if row["fingerprint"] in in_grids]
+        out: list[str] = []
+        if waiting:
+            out.extend(
+                [
+                    "Executable specialist proposals from this cycle that no explore round has benched or has in its grid.",
+                    "Ranked by gap severity, then most recent. Once no explore is queued or running, the Coordinator",
+                    "benches the head of this list; dispatch `explore` only for variants not listed here.",
+                    "",
+                ]
+            )
+            out.extend(untested_proposal_line(row) for row in waiting[:_UNTESTED_PROPOSALS_MAX_ENTRIES])
+            if len(waiting) > _UNTESTED_PROPOSALS_MAX_ENTRIES:
+                out.append(f"(+{len(waiting) - _UNTESTED_PROPOSALS_MAX_ENTRIES} more not shown)")
+        if held:
+            if out:
+                out.append("")
+            out.append(
+                _flatten_for_prompt(
+                    "Specialist proposals already in a queued or running explore grid (its progress is in that task's "
+                    "line of the tasks in flight): " + ", ".join(held)
+                )
+            )
         return "\n".join(out)
 
     def to_proposal_scores_summary(self) -> str:
@@ -713,10 +730,11 @@ class _RenderMixin:
         snap = cached.get("roofline_snapshot_id", "?")
         gain = to_float(cached.get("roofline_baseline_gain_at_snapshot", 0.0))
         gain_str = "?" if gain is None else f"{gain:.2f}"
+        show_analysis_md = qualified_context_tool_name("show_analysis_md")
         return (
             f"(TraceLens snapshot #{snap}, gain at snapshot = {gain_str}% — "
             "full report not inlined; see profiler_digest above or call the "
-            "show_analysis_md context tool for the verbatim analysis.md.)"
+            f"{show_analysis_md} context tool for the TraceLens report.)"
         )
 
     def _format_profiler_digest(self) -> str:

@@ -9,7 +9,7 @@ import os
 import re
 from typing import Any
 
-from hyperloom.common.env import env_bool
+from hyperloom_common.env import env_bool
 
 from ..state.task_registry import Task, TaskSpec
 from ..collaborator import CoordinatorCollaborator
@@ -212,7 +212,6 @@ class InternalTasksPhase(CoordinatorCollaborator):
         from ..knowledge import static_recon_checklist as _src_recon
 
         _entries = _src_recon.entries_for(
-            model_class=str(state.model_class or ""),
             gpu_type=str(state.gpu_type or ""),
             precision=_src_recon.workload_precision(state),
         )
@@ -220,9 +219,6 @@ class InternalTasksPhase(CoordinatorCollaborator):
         _rendered = _src_recon.render_checklist_for_prompt(_entries)
         if _rendered:
             params["static_recon_checklist"] = _rendered
-        _dicts = _src_recon.checklist_as_dicts(_entries)
-        if _dicts:
-            params["static_recon_checklist_entries"] = _dicts
         await self._coord.specialist_dispatch.warm_specialist_params(params)
         lanes, ttl = self._coord.gpu_lanes.framework_authoring_lanes_ttl(params, base_ttl_sec=1800)
         task, was_existing = await self.tasks.create_or_return_existing(

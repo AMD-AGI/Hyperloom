@@ -86,7 +86,7 @@ def test_knowledge_root_contains_no_flat_implementation_modules() -> None:
 
 
 def test_kb_store_does_not_depend_on_campaigns() -> None:
-    forbidden = ("kernelforge.loop", "kernelforge.rewrite_by_flydsl")
+    forbidden = ("kernelforge.workflows.forge_loop", "kernelforge.workflows.flydsl_rewrite")
     violations = [
         f"{path.relative_to(_PACKAGE_ROOT)} -> {module}"
         for path, module in _imports(_KNOWLEDGE_ROOT / "kb_store")

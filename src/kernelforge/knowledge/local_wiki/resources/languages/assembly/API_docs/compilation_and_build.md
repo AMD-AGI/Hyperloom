@@ -29,7 +29,7 @@ different specialization when the compiler did not emit assembly.
 Reassemble with the same ROCm LLVM toolchain and target ID as the compiler:
 
 ```bash
-python -m kernelforge.assembly assemble \
+python -m kernelforge.kernel_backends.assembly assemble \
   --source kernel.s --output build/kernel.hsaco \
   --gpu-target gfx950 --toolchain-dir /opt/rocm/llvm/bin
 ```

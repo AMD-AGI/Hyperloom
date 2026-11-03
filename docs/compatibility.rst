@@ -47,6 +47,8 @@ The following table lists the minimum requirements for running Hyperloom.
 +=====================+========================================================+
 | AMD Instinct™ GPU   | MI300X, MI325X, MI355X                                 |
 +---------------------+--------------------------------------------------------+
+| AMD Radeon™ GPU     | Radeon AI PRO R9700 (gfx1201), vLLM only               |
++---------------------+--------------------------------------------------------+
 | Operating System    | Ubuntu 24.04 (recommended); Ubuntu 22.04 (legacy)      |
 +---------------------+--------------------------------------------------------+
 | ROCm Version        | 7.2.x, 10.0                                            |
@@ -76,7 +78,7 @@ The following table lists the validated Hyperloom version and component combinat
 +-------------------+---------------------------+------------------------+------------------------------------+---------------+-------------+-----------------------------+
 | Hyperloom version | Component                 | GPU                    | ROCm version                       | Ubuntu        | Python      | GitHub                      |
 +===================+===========================+========================+====================================+===============+=============+=============================+
-| 1.1.4             | `TraceLens 1.0.0`_        | Hardware-agnostic      | No dependency                      | OS-independent| >= 3.6      | |tracelens-github|          |
+| 1.1.5             | `TraceLens 1.0.0`_        | Hardware-agnostic      | No dependency                      | OS-independent| >= 3.6      | |tracelens-github|          |
 +                   +---------------------------+------------------------+------------------------------------+---------------+-------------+-----------------------------+
 |                   | `GEAK 4.0.0`_             | MI300X, MI325X, MI355X | 6.4.x, 7.0.x, 7.1.x, 7.2.x, 10.0.0 | 22.04, 24.04  | 3.8, 3.12   | |geak-github|               |
 +                   +---------------------------+------------------------+------------------------------------+---------------+-------------+-----------------------------+
@@ -84,14 +86,14 @@ The following table lists the validated Hyperloom version and component combinat
 +                   +---------------------------+------------------------+------------------------------------+---------------+-------------+-----------------------------+
 |                   | `AgentKernelArena 0.2.0`_ | MI300X, MI325X, MI355X | 7.2.x, 10.0.0                      | 22.04, 24.04  | >= 3.10     | |agent-kernel-arena-github| |
 +                   +---------------------------+------------------------+------------------------------------+---------------+-------------+-----------------------------+
-|                   | `Magpie 0.2.0`_           | MI300X, MI325X, MI355X | 7.0.x, 7.1.x, 7.2.x, 10.0.0        | 22.04, 24.04  | >= 3.10     | |magpie-github|             |
+|                   | `Magpie 0.3.0`_           | MI300X, MI325X, MI355X | 7.0.x, 7.1.x, 7.2.x, 10.0.0        | 22.04, 24.04  | >= 3.10     | |magpie-github|             |
 +-------------------+---------------------------+------------------------+------------------------------------+---------------+-------------+-----------------------------+
 
 .. _TraceLens 1.0.0: https://rocm.docs.amd.com/projects/tracelens/en/docs-1.0.0/
 .. _GEAK 4.0.0: https://rocm.docs.amd.com/projects/geak/en/docs-4.0.0/
 .. _IntelliKit 0.1.1: https://rocm.docs.amd.com/projects/intellikit/en/docs-0.1.1/
 .. _AgentKernelArena 0.2.0: https://rocm.docs.amd.com/projects/agent-kernel-arena/en/docs-0.2.0/
-.. _Magpie 0.2.0: https://rocm.docs.amd.com/projects/magpie/en/docs-0.2.0/
+.. _Magpie 0.3.0: https://rocm.docs.amd.com/projects/magpie/en/latest/
 
 .. note::
 

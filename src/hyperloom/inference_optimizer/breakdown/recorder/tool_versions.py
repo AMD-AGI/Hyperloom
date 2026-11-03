@@ -34,10 +34,9 @@ _TOOL_META_CACHE: dict[str, dict[str, Any]] = {}
 #   * ("dist", names)-> importlib.metadata version of the first matching dist
 _TOOL_PROVENANCE: dict[str, dict[str, Any]] = {
     "tracelens": {"root_env": "TRACELENS_ROOT", "version": "git_describe"},
-    # bypass, forge and the kernel-agent tools ship inside this distribution:
+    # forge and the kernel-agent tools ship inside this distribution:
     # no checkout to ``git rev-parse``, so their version is Hyperloom's own.
     # The keys stay even so -- downstream provenance JSON reads them by name.
-    "bypass": {"root_env": "", "version": ("dist", ("hyperloom-inference_optimizer",))},
     "geak": {"root_env": "GEAK_ROOT", "version": "git_short"},
     "forge": {"root_env": "", "version": ("dist", ("hyperloom-inference_optimizer",))},
     "claude": {"root_env": "", "version": ("cmd", ("claude", "--version"))},

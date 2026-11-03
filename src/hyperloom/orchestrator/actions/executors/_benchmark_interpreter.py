@@ -11,7 +11,6 @@ import shutil
 import subprocess
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
 
 from ._subprocess_kill import RoundWatch, run_with_session_kill
 
@@ -27,13 +26,7 @@ def _resolve_magpie_python(env: Mapping[str, str] | None = None) -> str:
             environment that launch ran under, because ``PATH`` decides which
             interpreter a bare name resolves to.
     """
-    # An ambient resolution keeps the exact call shape it always had -- no `path=`
-    # on `shutil.which`, no `env=` on the probe -- so that every existing caller
-    # and its test doubles are unaffected. Only an explicit environment routes
-    # through the overridden lookups.
     resolved_env = os.environ if env is None else env
-    which_kwargs: dict[str, Any] = {} if env is None else {"path": resolved_env.get("PATH")}
-    probe_env = None if env is None else dict(resolved_env)
 
     def _can_import_magpie(py: str) -> bool:
         """Whether an interpreter can import Magpie and its ``yaml`` dep."""
@@ -46,7 +39,7 @@ def _resolve_magpie_python(env: Mapping[str, str] | None = None) -> str:
                     "import importlib.util as u, sys; sys.exit(0 if u.find_spec('Magpie') and u.find_spec('yaml') else 1)",
                 ],
                 watch=RoundWatch(timeout=10),
-                env=probe_env,
+                env=dict(resolved_env),
             )
             return getattr(proc, "returncode", 1) == 0
         except (OSError, subprocess.TimeoutExpired):
@@ -64,7 +57,7 @@ def _resolve_magpie_python(env: Mapping[str, str] | None = None) -> str:
             env_val,
         )
 
-    candidate = shutil.which("python3", **which_kwargs)
+    candidate = shutil.which("python3", path=resolved_env.get("PATH"))
     if candidate and _can_import_magpie(candidate):
         return candidate
 
@@ -87,18 +80,17 @@ def _resolve_probe_python(framework: str = "vllm", *, env: Mapping[str, str] | N
             selected, rather than the ambient one.
     """
     resolved_env = os.environ if env is None else env
-    which_kwargs: dict[str, Any] = {} if env is None else {"path": resolved_env.get("PATH")}
     if (framework or "").strip().lower() == "vllm":
         venv_root = resolved_env.get("VLLM_VENV_ROOT", "").strip()
         if venv_root:
             venv_python = str(Path(venv_root) / "bin" / "python")
             if os.access(venv_python, os.X_OK):
                 return venv_python
-    magpie_python = _resolve_magpie_python() if env is None else _resolve_magpie_python(resolved_env)
+    magpie_python = _resolve_magpie_python(env)
     # On a single-venv host the harness already uses the serving interpreter.
     if magpie_python and magpie_python != "/opt/venv/bin/python":
         return magpie_python
-    vllm_exe = shutil.which("vllm", **which_kwargs)
+    vllm_exe = shutil.which("vllm", path=resolved_env.get("PATH"))
     if vllm_exe:
         vllm_python = os.path.join(os.path.dirname(vllm_exe), "python")
         if os.path.exists(vllm_python):

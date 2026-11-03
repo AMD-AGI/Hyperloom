@@ -47,7 +47,7 @@ from hyperloom.orchestrator.loop.time_budget import (
     measured_baseline_runtime_sec,
 )
 from hyperloom.orchestrator.phases import machine_state
-from hyperloom.orchestrator.policy.gate import PolicyDenied
+from hyperloom.orchestrator.policy.denial import PolicyDenied
 from hyperloom.orchestrator.roles import Backend, MockBackend, ScriptedPlan
 from hyperloom.orchestrator.state.shared_state import SharedState, effective_closing_grace_sec
 from hyperloom.orchestrator.state.task_registry import Task, TaskSpec
@@ -131,10 +131,15 @@ class TestTheCostIsAnchoredOnWhatThisSessionMeasured:
     def test_the_catalogue_wins_where_it_prices_more_than_one_round(self):
         """The measurement is a floor, not a replacement: only the catalogue knows an action benches a whole grid rather than a single variant."""
         cost = expected_action_cost_minutes(
-            ACTION_CATALOGUE[_EXPENSIVE_ACTION],
+            ACTION_CATALOGUE["integrate"],
             measured_baseline_sec=10 * 60.0,
         )
-        assert cost == pytest.approx(_EXPENSIVE_COST_MIN)
+        assert cost == pytest.approx(ACTION_CATALOGUE["integrate"].typical_runtime_min)
+
+    def test_a_sweep_is_admitted_on_one_measured_pair(self):
+        """A sweep runs until its grant is spent, so it needs room for two measured rounds, not its catalogue's 30 min."""
+        cost = expected_action_cost_minutes(ACTION_CATALOGUE["conc_sweep"], measured_baseline_sec=10 * 60.0)
+        assert cost == pytest.approx(20.0)
 
     def test_an_action_that_never_benches_keeps_its_own_estimate(self):
         """Writing the report costs what it costs; the model's size is not in it."""
@@ -724,6 +729,22 @@ async def _settle(atask: asyncio.Task) -> None:
     await asyncio.wait_for(asyncio.gather(atask, return_exceptions=True), timeout=5.0)
 
 
+async def _cancel_then_let_finish(coord, task, atask: asyncio.Task, finish: asyncio.Event, cancel) -> None:
+    """After ``cancel`` the action keeps its task and lane until its execution returns, then releases both."""
+    try:
+        await cancel()
+        assert atask.cancelled()
+        assert coord.dispatcher._inflight_actions[task.task_id].scope.cancelled
+        assert (await coord.tasks.get(task.task_id)).state == "running"
+        assert (await coord.locks.lane_holders())[_CHEAP_ACTION_LANE] == 1
+    finally:
+        executions = tuple(coord.dispatcher._executions)
+        finish.set()
+        await asyncio.gather(*executions)
+    assert (await coord.tasks.get(task.task_id)).state == "succeeded"
+    assert not await coord.locks.lane_holders()
+
+
 class TestInflightHandles:
     """Something other than the pump has to be able to reach a running action."""
 
@@ -752,19 +773,12 @@ class TestInflightHandles:
             return execute
 
         task, atask = await _start_action(coord, kind=_CHEAP_ACTION, key="h-retire", make_executor=make_executor)
-        try:
+
+        async def _cancel_the_caller() -> None:
             atask.cancel()
             await _settle(atask)
-            assert atask.cancelled()
-            assert coord.dispatcher._inflight_actions[task.task_id].scope.cancelled
-            assert (await coord.tasks.get(task.task_id)).state == "running"
-            assert (await coord.locks.lane_holders())[_CHEAP_ACTION_LANE] == 1
-        finally:
-            executions = tuple(coord.dispatcher._executions)
-            finish.set()
-            await asyncio.gather(*executions)
-        assert (await coord.tasks.get(task.task_id)).state == "succeeded"
-        assert not await coord.locks.lane_holders()
+
+        await _cancel_then_let_finish(coord, task, atask, finish, _cancel_the_caller)
         assert not coord.dispatcher._executions
         assert task.task_id not in coord.dispatcher._inflight_actions
 
@@ -1435,18 +1449,7 @@ class TestCoordinatorStop:
             return execute
 
         task, atask = await _start_action(coord, kind=_CHEAP_ACTION, key="s-stop", make_executor=make_executor)
-        try:
-            await coord.stop()
-            assert atask.cancelled()
-            assert coord.dispatcher._inflight_actions[task.task_id].scope.cancelled
-            assert (await coord.tasks.get(task.task_id)).state == "running"
-            assert (await coord.locks.lane_holders())[_CHEAP_ACTION_LANE] == 1
-        finally:
-            executions = tuple(coord.dispatcher._executions)
-            finish.set()
-            await asyncio.gather(*executions)
-        assert (await coord.tasks.get(task.task_id)).state == "succeeded"
-        assert not await coord.locks.lane_holders()
+        await _cancel_then_let_finish(coord, task, atask, finish, coord.stop)
         assert coord.dispatcher._inflight_actions == {}
         assert not coord.dispatcher._executions
         await coord.stop()

@@ -11,11 +11,8 @@ from kernelforge.config import Config
 from kernelforge.knowledge.kb_store.reader import read_best_solution
 from kernelforge.knowledge.kb_store.writer import RunOutcome, write_run_experience
 from kernelforge.knowledge.kb_store.identity.run import LoopKernel
-from kernelforge.knowledge.kb_store.config import (
-    KnowledgeConfig,
-    KnowledgeStoreMode,
-    knowledge_config_from_runtime,
-)
+from kernelforge.config import KnowledgeConfig, KnowledgeStoreMode
+from kernelforge.knowledge.kb_store.config import knowledge_config_from_runtime
 
 
 def test_default_mode_is_local_and_root_uses_user_data_path(tmp_path):

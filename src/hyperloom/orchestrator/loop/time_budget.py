@@ -12,7 +12,7 @@ from hyperloom.common.deadline import Deadline
 
 from ..bus.gpu_pool import GPU_LEASE_TTL_GRACE
 from ..phases import machine_state as _phase_state
-from ..policy.gate import PolicyDenied
+from ..policy.denial import PolicyDenied
 from ..specialists.profile import resolve_specialist_profile, wall_budget_base_min
 
 if TYPE_CHECKING:
@@ -72,6 +72,8 @@ def expected_action_cost_minutes(
         catalogue_min = 0.0
     if measured_baseline_sec <= 0.0 or not _action_benches_on_gpu(meta):
         return catalogue_min
+    if meta.admission_rounds > 0:
+        return meta.admission_rounds * measured_baseline_sec / _SECONDS_PER_MINUTE
     return max(catalogue_min, measured_baseline_sec / _SECONDS_PER_MINUTE)
 
 

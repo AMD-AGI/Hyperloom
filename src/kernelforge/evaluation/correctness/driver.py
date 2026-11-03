@@ -9,7 +9,7 @@ import asyncio
 import re
 import sys
 
-from kernelforge.tools.process_group import kill_process_group
+from kernelforge.utils.process_group import kill_process_group
 from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
 
 

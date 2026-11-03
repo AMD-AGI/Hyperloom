@@ -126,7 +126,7 @@ def test_ssh_run_script_no_env_has_no_prefix(monkeypatch, known_hosts, key_file)
     assert "&& python3 /tmp/mn_infera_launch" in remote_cmd
 
 
-def test_ssh_run_bash_with_env_pipes_secrets_via_stdin(monkeypatch, known_hosts, key_file):
+def test_ssh_run_bash_stdin_pipes_the_script_via_stdin(monkeypatch, known_hosts, key_file):
     captured = {}
 
     def _run(argv, **kwargs):
@@ -136,14 +136,9 @@ def test_ssh_run_bash_with_env_pipes_secrets_via_stdin(monkeypatch, known_hosts,
         return _FakeCompleted(0)
 
     monkeypatch.setattr(ssh_client.subprocess, "run", _run)
-    ssh_client.ssh_run_bash_with_env(
-        ssh_client.SshTarget("h", key_file, known_hosts), "echo body", {"OOB_API_KEY": "secret-123"}
-    )
+    ssh_client.ssh_run_bash_stdin(ssh_client.SshTarget("h", key_file, known_hosts), "echo body")
     assert captured["argv"][-2:] == ["bash", "-s"]
-    assert "export OOB_API_KEY=secret-123" in captured["input"]
     assert "echo body" in captured["input"]
     assert "set -uo pipefail" in captured["input"]
-    assert not any("secret-123" in a for a in captured["argv"])
-    # Secrets still stay off argv (they go over stdin); the identity is the key path.
     assert captured["argv"][captured["argv"].index("-i") + 1] == str(key_file)
     assert "pass_fds" not in captured["kwargs"]

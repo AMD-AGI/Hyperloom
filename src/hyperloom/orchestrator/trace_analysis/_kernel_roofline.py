@@ -11,12 +11,11 @@ import os
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.gpu_identity import gfx_arch_for_gpu_type
+from hyperloom_common.gpu_identity import gfx_arch_for_gpu_type
 
 from ._kernel_classification import _FLYDSL_SCAN_BYTES
 
-# Canonical roofline_source provenance enum, shared with the bypass route so both
-# emit the field from one vocabulary (see _roofline_source for the value ladder).
+# Canonical roofline_source provenance enum (see _roofline_source for the value ladder).
 from ._roofline_source import ANALYTICAL as _RL_ANALYTICAL, PLACEHOLDER as _RL_PLACEHOLDER
 from ._trace_shapes import _dtypes_from_shapes, _shape_call_entries
 from hyperloom.inference_optimizer.framework_registry import tracelens_analysis_mode
@@ -71,10 +70,7 @@ def _kernel_roofline_row(candidate: dict[str, Any]) -> dict[str, Any]:
         "call_count": candidate.get("call_count"),
         "kernel_category": candidate.get("kernel_category"),
         "source_file": candidate.get("source_file"),
-        "bottleneck": _first_non_empty(
-            candidate.get("bottleneck"),
-            candidate.get("bound_type"),
-        ),
+        "bottleneck": candidate.get("bottleneck"),
         "bound_type": candidate.get("bound_type"),
         "arithmetic_intensity": arithmetic_intensity,
         "flops_per_byte": candidate.get("flops_per_byte"),
@@ -135,29 +131,6 @@ def build_kernel_roofline_payload(
         "kernel_candidates_path": kernel_candidates_path,
         "kernels": rows,
     }
-
-
-def kernel_roofline_path_for_run(run_dir: Path, filename: str = "kernel_roofline.json") -> Path:
-    """Return the stable session-level kernel roofline report path."""
-    try:
-        session_sub = run_dir.parent
-        runs_dir = session_sub.parent
-        kernel_agent_dir = runs_dir.parent
-    except (IndexError, AttributeError):
-        return run_dir / "reports" / filename
-    if runs_dir.name == "runs" and kernel_agent_dir.name == "kernel-agent":
-        session_dir = kernel_agent_dir.parent
-        return session_dir / "reports" / filename
-    # Backward-compatible flat run-dir layout.
-    try:
-        runs_dir_legacy = run_dir.parent
-        kernel_agent_dir_legacy = runs_dir_legacy.parent
-    except (IndexError, AttributeError):
-        return run_dir / "reports" / filename
-    if runs_dir_legacy.name == "runs" and kernel_agent_dir_legacy.name == "kernel-agent":
-        session_dir = kernel_agent_dir_legacy.parent
-        return session_dir / "reports" / filename
-    return run_dir / "reports" / filename
 
 
 def _candidate_model_config_paths(model_name: str) -> list[Path]:
@@ -376,12 +349,6 @@ def enrich_candidates_with_runtime_metadata(
         for key, value in model_params.items():
             params.setdefault(key, value)
         if item.get("source_type") == "flydsl":
-            # FlyDSL pseudo-ops carry no real source_file; inject the FlyDSL MoE kernel source.
-            _sf2 = str(item.get("source_file") or "").strip()
-            if not os.path.isfile(_sf2):
-                fb = _resolve_flydsl_source_fallback()
-                if fb:
-                    item["source_file"] = fb
             flydsl_params = _flydsl_kernel_params(
                 str(item.get("source_file") or ""),
                 target_platform,
@@ -423,7 +390,7 @@ def _enrich_kernel_contract(item: dict[str, Any], model_params: dict[str, Any]) 
     """Populate per-kernel-class contract fields used to build a faithful harness.
 
     - Collectives (all_reduce / all_gather / reduce_scatter / ...): record
-      ``collective_op`` + ``world_size``/``tp_size`` (from model_params) so the
+      ``collective_op`` + ``world_size`` (from ``num_gpus_recommended``) so the
       harness can use ``torch.distributed.<op>`` as a real reference instead of
       a self-compare, and so a reviewer knows the kernel is comm-bound.
     - Attention (mha / flash / paged): record ``causal`` (decode/prefill attn
@@ -439,12 +406,9 @@ def _enrich_kernel_contract(item: dict[str, Any], model_params: dict[str, Any]) 
         op = collective_op or "all_reduce"
         contract["kind"] = "collective"
         contract["collective_op"] = op
-        tp = model_params.get("TP_SIZE") or model_params.get("TENSOR_PARALLEL_SIZE")
-        ws = model_params.get("WORLD_SIZE") or tp or item.get("num_gpus_recommended")
+        ws = item.get("num_gpus_recommended")
         if ws:
             contract["world_size"] = int(ws)
-        if tp:
-            contract["tp_size"] = int(tp)
         contract.setdefault("reduce_op", "sum")
         contract["reference"] = f"torch.distributed.{op}"
         contract["e2e_note"] = "comm-bound collective: a 1-GPU GEAK slot cannot reproduce inter-GPU traffic"

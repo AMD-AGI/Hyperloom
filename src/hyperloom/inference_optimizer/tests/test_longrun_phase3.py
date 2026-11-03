@@ -13,11 +13,8 @@ import pytest
 from hyperloom.orchestrator.phases import machine_state as ps
 from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_SKIP_TO_SWEEP
 from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
-from hyperloom.orchestrator.bus.storage import SqliteConnection
+from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.bus.storage.schema import ensure_schema
-
-
-SOFT_RESTART_DISABLE_ENV = "INFERENCE_OPTIMIZER_DISABLE_CYCLE_SOFT_RESTART"
 
 
 @pytest.fixture
@@ -36,33 +33,23 @@ async def test_old_running_rows_without_death_evidence_are_retained(conn, ttl):
         TaskSpec(kind="bench", params={}, idempotency_key="old", lease_ttl_sec=ttl)
     )
     await reg.transition(task.task_id, "running")
-    await conn.execute("UPDATE tasks SET updated_at='2020-01-01T00:00:00+00:00'")
+    async with conn.transaction() as cur:
+        cur.execute("UPDATE tasks SET updated_at='2020-01-01T00:00:00+00:00'")
     assert await reg.reclaim_dead_running() == []
     assert (await reg.get(task.task_id)).state == "running"
 
 
 # cycle-boundary soft restart
 @pytest.fixture
-def cyclic_coordinator(tmp_path, monkeypatch):
-    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    monkeypatch.delenv(SOFT_RESTART_DISABLE_ENV, raising=False)
-    from hyperloom.inference_optimizer.session.paths import make_session_dir as _msd
+def cyclic_coordinator(session_dir):
     from hyperloom.orchestrator.loop.coordinator import Coordinator
-    from hyperloom.orchestrator.roles import (
-        MockBackend,
-        MockCriticBackend,
-        ScriptedPlan,
-    )
-    from .conftest import seed_target_analysis_marker
+    from hyperloom.orchestrator.roles import MockBackend, MockCriticBackend, ScriptedPlan
 
-    sd = _msd()
-    seed_target_analysis_marker(sd)
     backends = {
         "orchestration": MockBackend(ScriptedPlan(turns=[]), name="orchestration"),
         "critic": MockCriticBackend(),
     }
-    c = Coordinator(sd, backends=backends)
-    yield c
+    return Coordinator(session_dir, backends=backends)
 
 
 def _arm_sweep_loopback(st):
@@ -112,44 +99,19 @@ async def test_soft_restart_preserves_best_and_ledger(cyclic_coordinator):
 
 
 @pytest.mark.asyncio
-async def test_soft_restart_can_be_disabled(tmp_path, monkeypatch):
-    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    monkeypatch.setenv(SOFT_RESTART_DISABLE_ENV, "1")
-    from hyperloom.inference_optimizer.session.paths import make_session_dir as _msd
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
-    from hyperloom.orchestrator.roles import MockBackend, MockCriticBackend, ScriptedPlan
-    from .conftest import seed_target_analysis_marker
-
-    sd = _msd()
-    seed_target_analysis_marker(sd)
-    backends = {
-        "orchestration": MockBackend(ScriptedPlan(turns=[]), name="orchestration"),
-        "critic": MockCriticBackend(),
-    }
-    c = Coordinator(sd, backends=backends)
-    assert c.phase_macro_cycle._soft_restart_enabled is False
-
-    st = c.shared_state
-    _arm_sweep_loopback(st)
-
-    await c.phase_machine.advance_phase_if_needed()
-
-    assert st.macro_cycle == 1
-    observations = await c.bus.tail(n=50, topic="observation")
-    assert not any((o.payload or {}).get("kind") == "cycle_soft_restart" for o in observations)
-
-
-@pytest.mark.asyncio
 async def test_soft_restart_summary_idempotent(cyclic_coordinator):
     c = cyclic_coordinator
     st = c.shared_state
     st.macro_cycle = 1
-    summary = await c.phase_macro_cycle.run_cycle_soft_restart(prior_cycle=0, new_cycle=1)
-    assert summary is not None
+    await c.phase_macro_cycle.run_cycle_soft_restart(prior_cycle=0, new_cycle=1)
+    await c.phase_macro_cycle.run_cycle_soft_restart(prior_cycle=1, new_cycle=2)
+    observations = await c.bus.tail(n=50, topic="observation")
+    restarts = {
+        o.payload["new_cycle"]: o.payload for o in observations if o.payload.get("kind") == "cycle_soft_restart"
+    }
+    summary, again = restarts[1], restarts[2]
     assert summary["new_cycle"] == 1
     assert "leases_reaped" in summary
-    again = await c.phase_macro_cycle.run_cycle_soft_restart(prior_cycle=1, new_cycle=2)
-    assert again is not None
     # The first restart already reclaimed everything the registry held.
     assert again["running_tasks_reclaimed"] == 0
 
@@ -273,7 +235,6 @@ async def _build_minimal_coord(tmp_path: Path, monkeypatch):
         "ROCR_VISIBLE_DEVICES",
         "HIP_VISIBLE_DEVICES",
         "CUDA_VISIBLE_DEVICES",
-        "INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY",
         "INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES",
     ):
         monkeypatch.delenv(_var, raising=False)
@@ -319,10 +280,11 @@ async def test_pump_reclaims_expired_running_task(tmp_path: Path, monkeypatch):
     )
     await coord.tasks.transition(orphan.task_id, "running")
     stale_ts = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
-    await coord.db.execute(
-        "UPDATE tasks SET updated_at=? WHERE task_id=?",
-        (stale_ts, orphan.task_id),
-    )
+    async with coord.db.transaction() as cur:
+        cur.execute(
+            "UPDATE tasks SET updated_at=? WHERE task_id=?",
+            (stale_ts, orphan.task_id),
+        )
 
     # In-window task: age < ttl.
     live, _ = await coord.tasks.create_or_return_existing(
@@ -368,10 +330,11 @@ async def test_pump_reclaim_idempotent(tmp_path: Path, monkeypatch):
     )
     await coord.tasks.transition(orphan.task_id, "running")
     stale_ts = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
-    await coord.db.execute(
-        "UPDATE tasks SET updated_at=? WHERE task_id=?",
-        (stale_ts, orphan.task_id),
-    )
+    async with coord.db.transaction() as cur:
+        cur.execute(
+            "UPDATE tasks SET updated_at=? WHERE task_id=?",
+            (stale_ts, orphan.task_id),
+        )
 
     await coord.dispatcher.pump_dispatcher_once()
     assert (await coord.tasks.get(orphan.task_id)).state == "running"

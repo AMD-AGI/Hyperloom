@@ -45,8 +45,7 @@ def geak_harness_replays_workload(state: Any) -> bool:
     switch, matching that refusal, so a session recorded as synthetic keeps
     replaying.
     """
-    from hyperloom.common.perf_metric import is_agentx_mode
-    from ..actions.executors._workload_envs import agentx_enabled
+    from hyperloom.common.perf_metric import agentx_enabled, is_agentx_mode
 
     mode = str(state.benchmark_mode or "").strip()
     return not (is_agentx_mode(mode) if mode else agentx_enabled())
@@ -95,9 +94,11 @@ def geak_candidate_is_adjudicated(persisted: Any, recovered: Any, *, harness_can
         return False
     blocked_overlay = str(prev.get("revalidation_blocked_overlay") or "")
     if blocked_overlay:
-        from ..kernel.geak_config import geak_overlay_is_loadable, _normalize_geak_overlay_dir
+        from hyperloom.common.overlay import overlay_is_loadable
 
-        if geak_overlay_is_loadable(_normalize_geak_overlay_dir(blocked_overlay)):
+        from ..kernel.geak_config import _normalize_geak_overlay_dir
+
+        if overlay_is_loadable(_normalize_geak_overlay_dir(blocked_overlay)):
             return False
     return geak_candidate_matches(prev, recovered)
 

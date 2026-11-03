@@ -22,8 +22,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
 
-from hyperloom.common.env import env_flag
-from hyperloom.common.proctree import TERM_GRACE_SEC, collect_tree, kill_tree, marked_pids
+from hyperloom_common.env import env_flag
+from hyperloom.common.proctree import REAP_MARK_ENV, TERM_GRACE_SEC, collect_tree, kill_tree, marked_pids
 
 from .bypass_analysis import parse_server_log_throughput
 
@@ -34,9 +34,6 @@ log = logging.getLogger(__name__)
 
 # How long the reaper waits to collect the SIGKILL'd child before giving up on it.
 _REAP_COLLECT_SECONDS: float = 1.0
-
-#: Set in a run's env, its value marks the run: whatever inherited it is reaped on every exit path, however it detached.
-REAP_MARK_ENV: str = "HYPERLOOM_REAP_MARK"
 
 # How long draining a reaped child's capture threads is given.
 _CAPTURE_DRAIN_SECONDS: float = 2.0
@@ -50,6 +47,18 @@ STOP_GATE_POLL_SECONDS: float = 0.5
 COOPERATIVE_REAP_BUDGET_SEC: float = (
     STOP_GATE_POLL_SECONDS + TERM_GRACE_SEC + _REAP_COLLECT_SECONDS + _CAPTURE_DRAIN_SECONDS
 )
+
+
+def _terminate_single_process(proc: subprocess.Popen, grace_seconds: float) -> None:
+    """Terminate ``proc`` alone, escalating to kill after ``grace_seconds``, where process groups are unavailable."""
+    try:
+        proc.terminate()
+        proc.wait(timeout=grace_seconds)
+    except (subprocess.TimeoutExpired, OSError):
+        try:
+            proc.kill()
+        except OSError:
+            pass
 
 
 def kill_my_spawned_server(
@@ -67,14 +76,7 @@ def kill_my_spawned_server(
             kill_tree(collect_tree(marked), grace_sec=grace_seconds, confirm_sec=grace_seconds)
         return
     if os.name != "posix":
-        try:
-            proc.terminate()
-            proc.wait(timeout=grace_seconds)
-        except (subprocess.TimeoutExpired, OSError):
-            try:
-                proc.kill()
-            except OSError:
-                pass
+        _terminate_single_process(proc, grace_seconds)
         return
 
     try:
@@ -210,6 +212,8 @@ ORCHESTRATOR_CANCELLED_RETURNCODE: int = -917
 _SERVER_READY_MARKERS: tuple[str, ...] = (
     "Application startup complete",
     "Uvicorn running on",
+    # vLLM's Rust frontend (`vllm serve` with VLLM_USE_RUST_FRONTEND=1) runs no uvicorn; this is its ready line.
+    "OpenAI server is ready to accept requests",
     "The server is fired up and ready to roll",
 )
 
@@ -244,20 +248,54 @@ _AGENTX_LOG_RELPATH: str = "aiperf_artifacts/logs/aiperf.log"
 _WARM_REUSE_PROBE_AFTER_SEC: float = 30.0
 
 
+# The operator's two grants. They are the operator's to set, read from the process env and
+# validated there once by preflight, so nothing re-reads them from an env a variant composed.
+BENCHMARK_TIMEOUT_ENV = "INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC"
+BENCHMARK_SILENCE_TIMEOUT_ENV = "INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC"
+
+
+def default_benchmark_timeout_sec(env: Mapping[str, str] | None = None) -> float:
+    """The hard cap the workload this env names needs, before any operator override.
+
+    A grant has to bound the work the invocation was composed to do, so an
+    agentic run's cap is sized to its own workload: an MLPerf run works through a
+    fixed trajectory count rather than a fixed window, and a canonical run warms
+    up one set of requests per lane before it opens its window, so both grow with
+    a size the caller pinned. The stock default reaped a healthy 150-trajectory
+    baseline at 38%, and reaped a canonical CONC 20 rung 1.3s after its profiling
+    phase completed.
+
+    Sizing reads only workload pins -- the backend, the flow, ``CONC`` -- but it
+    reads them as the run will: a pin it cannot parse raises
+    :class:`~hyperloom_common.env.EnvValueError` here rather than sizing the
+    grant for a workload the round will refuse to start.
+    """
+    from hyperloom.common.agentx_workload import (
+        canonical_benchmark_timeout_sec,
+        is_canonical_agentx,
+        is_mlperf_backend,
+        mlperf_benchmark_timeout_sec,
+    )
+
+    source = os.environ if env is None else env
+    stock = 7800.0
+    if is_mlperf_backend(source):
+        return max(stock, mlperf_benchmark_timeout_sec(source))
+    if is_canonical_agentx(source):
+        return max(stock, canonical_benchmark_timeout_sec(source))
+    return stock
+
+
 def resolve_benchmark_timeouts(env: Mapping[str, str] | None = None) -> tuple[float, float]:
     """Resolve the invocation's silence and hard caps, rejecting invalid overrides.
 
-    An MLPerf agentic run works through a fixed trajectory count rather than a
-    fixed window, so its default hard cap is sized to that count; the stock
-    default reaped a healthy 150-trajectory baseline at 38%. An explicit
-    ``INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC`` still wins.
+    The defaults are what the workload needs; an explicit
+    ``INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC`` still wins. Both names are the
+    operator's, so ``env`` has to be an env the operator set: preflight validates
+    the process env once and this rejects what it cannot parse. A per-variant env
+    is sized with ``default_benchmark_timeout_sec`` instead.
     """
-    from hyperloom.common.agentx_workload import is_mlperf_backend, mlperf_benchmark_timeout_sec
-
     source = os.environ if env is None else env
-    hard_default = 7800.0
-    if is_mlperf_backend(source):
-        hard_default = max(hard_default, mlperf_benchmark_timeout_sec(source))
 
     def positive(name: str, default: float) -> float:
         raw = source.get(name, str(default))
@@ -270,8 +308,8 @@ def resolve_benchmark_timeouts(env: Mapping[str, str] | None = None) -> tuple[fl
         return value
 
     return (
-        positive("INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC", 600.0),
-        positive("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", hard_default),
+        positive(BENCHMARK_SILENCE_TIMEOUT_ENV, 600.0),
+        positive(BENCHMARK_TIMEOUT_ENV, default_benchmark_timeout_sec(source)),
     )
 
 
@@ -328,10 +366,7 @@ class _StreamCapture:
         """Report one unit of child output to the caller's liveness callback."""
         if self._on_output is None:
             return
-        try:
-            self._on_output()
-        except Exception as exc:  # outermost liveness sink: reporting never breaks capture
-            log.debug("_subprocess_kill: liveness callback failed: %s", exc, exc_info=True)
+        self._on_output()
 
     def _pump(self, pipe, chunks: list[str], mirror) -> None:
         """Read available bytes without waiting for a newline or a complete codepoint."""
@@ -757,47 +792,39 @@ _KV_METRICS_ENV = "INFERENCE_OPTIMIZER_KV_METRICS"
 
 
 def _build_kv_recorder(server_log_path: str | None, env: dict[str, str] | None) -> Any:
-    """Build the KV-metrics recorder for this round, or ``None`` when it is off or cannot be built.
-
-    Collection is strictly observational, so every failure here is swallowed: a round that produces a good benchmark
-    number and no KV metrics is a far better outcome than one that dies because a telemetry import went wrong.
-    """
+    """Build the KV-metrics recorder for this round, or ``None`` when it is off."""
     if not server_log_path:
         return None
     if not env_flag(_KV_METRICS_ENV, default=True):
         return None
-    try:
-        from ._kv_metrics import KV_ARTIFACT_NAME, AiperfProgressPoller, KvMetricsPoller, KvMetricsRecorder, KvRound
+    from ._kv_metrics import KV_ARTIFACT_NAME, AiperfProgressPoller, KvMetricsPoller, KvMetricsRecorder, KvRound
 
-        workspace = Path(server_log_path).parent
-        return KvMetricsRecorder(
-            # The workspace is where the port actually lives: it is pinned in the round's materialized
-            # ``benchmark.envs.PORT``, which is never exported into the subprocess environment.
-            poller=KvMetricsPoller(config_envs=dict(env or {}), workspace=workspace),
-            # Authoritative phase boundaries when this round is an AgentX one; a no-op otherwise, since no other client
-            # publishes a progress address and the poller then never resolves a URL.
-            progress=AiperfProgressPoller(workspace),
-            kv_round=KvRound(
-                output_path=str(workspace / KV_ARTIFACT_NAME),
-                scope={
-                    "server_log_path": str(server_log_path),
-                    "workspace": workspace.name,
-                    "run_path": _run_relative_path(workspace),
-                    "session": os.path.basename(
-                        os.environ.get("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", "").rstrip("/\\")
-                    ),
-                },
-            ),
-        )
-    except Exception:
-        log.warning("kv_metrics: recorder could not be built; this round collects nothing", exc_info=True)
-        return None
+    workspace = Path(server_log_path).parent
+    return KvMetricsRecorder(
+        # The workspace is where the port actually lives: it is pinned in the round's materialized
+        # ``benchmark.envs.PORT``, which is never exported into the subprocess environment.
+        poller=KvMetricsPoller(config_envs=dict(env or {}), workspace=workspace),
+        # Authoritative phase boundaries when this round is an AgentX one; a no-op otherwise, since no other client
+        # publishes a progress address and the poller then never resolves a URL.
+        progress=AiperfProgressPoller(workspace),
+        kv_round=KvRound(
+            output_path=str(workspace / KV_ARTIFACT_NAME),
+            scope={
+                "server_log_path": str(server_log_path),
+                "workspace": workspace.name,
+                "run_path": _run_relative_path(workspace),
+                "session": os.path.basename(
+                    os.environ.get("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", "").rstrip("/\\")
+                ),
+            },
+        ),
+    )
 
 
 class _RecorderFanout:
     """Drives this round's recorders from the watchdog's single ``note_phase`` / ``tick`` / ``close`` calls.
 
-    Each call is isolated: one recorder raising must not starve the others of their phase marks or their ``close``.
+    Each recorder absorbs its own scrape and write failures; anything else it raises fails the round.
     """
 
     def __init__(self, recorders: list[Any], *, ready_phase: str = "measured") -> None:
@@ -806,10 +833,7 @@ class _RecorderFanout:
 
     def _each(self, method: str, *args: Any, **kwargs: Any) -> None:
         for recorder in self._recorders:
-            try:
-                getattr(recorder, method)(*args, **kwargs)
-            except Exception:
-                log.warning("round recorder %s.%s failed", type(recorder).__name__, method, exc_info=True)
+            getattr(recorder, method)(*args, **kwargs)
 
     def note_phase(self, phase: str, mono: float) -> None:
         self._each("note_phase", self._ready_phase if phase == _READY_PHASE else phase, mono)
@@ -829,7 +853,16 @@ class _RecorderFanout:
         self._each("tick", mono)
 
     def close(self, *, aborted: bool = False) -> None:
-        self._each("close", aborted=aborted)
+        """Close every recorder, then raise the first error one of them raised."""
+        first_error: Exception | None = None
+        for recorder in self._recorders:
+            try:
+                recorder.close(aborted=aborted)
+            except Exception as exc:  # noqa: BLE001 - re-raised once every recorder is closed
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
 
 
 def _build_round_recorders(server_log_path: str | None, env: dict[str, str] | None) -> _RecorderFanout:
@@ -1094,6 +1127,8 @@ def _communicate_with_watchdog(
 __all__ = [
     "AGENTX_PREFLIGHT_ERROR_CLASS",
     "AGENTX_PREFLIGHT_RETURNCODE",
+    "BENCHMARK_SILENCE_TIMEOUT_ENV",
+    "BENCHMARK_TIMEOUT_ENV",
     "COOPERATIVE_REAP_BUDGET_SEC",
     "DETOKENIZER_STALL_RETURNCODE",
     "EVAL_PROBE_UNPATCHABLE_RETURNCODE",
@@ -1103,6 +1138,7 @@ __all__ = [
     "SESSION_TIME_EXHAUSTED_RETURNCODE",
     "STOP_GATE_POLL_SECONDS",
     "clear_server_ready_stamp",
+    "default_benchmark_timeout_sec",
     "kill_my_spawned_server",
     "post_ready_runtime_sec",
     "resolve_benchmark_timeouts",

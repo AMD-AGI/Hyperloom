@@ -1,0 +1,219 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""The whole third-tier attempt, from gate to verdict."""
+
+from __future__ import annotations
+
+import json
+import logging
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable
+
+from .contract import load_candidates, validate_output_csv
+from .coverage import CoverageGap
+from .gate import GateDecision
+from .generate import generate_tuner
+from .ledger import TunerUse, record_outcome, script_digest
+from .mandate import TunerMandate, build_mandate, write_mandate
+from .referee import CaptureFailed, Judgement, ShapeHarness, judge_candidates
+from .sandbox import run_generated_tuner
+
+log = logging.getLogger(__name__)
+
+MAX_ATTEMPTS = 2
+
+
+@dataclass
+class Tier3Outcome:
+    """What the attempt produced, and where it stopped."""
+
+    attempted: bool = False
+    stage: str = "gate"
+    ok: bool = False
+    reason: str = ""
+    table: str = ""
+    script: str = ""
+    digest: str = ""
+    #: Explicit verified-row path; callers must not reconstruct this module's layout.
+    output_csv: str = ""
+    judgements: list[Judgement] = field(default_factory=list)
+    #: Avoid "trusted" in this serialized bool's name: CodeQL treats it as secret data.
+    operator_signed: bool = False
+
+    @property
+    def improved_shapes(self) -> int:
+        return sum(1 for j in self.judgements if j.improved)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "attempted": self.attempted,
+            "stage": self.stage,
+            "ok": self.ok,
+            "reason": self.reason,
+            "table": self.table,
+            "script": self.script,
+            "digest": self.digest,
+            "output_csv": self.output_csv,
+            "operator_signed": self.operator_signed,
+            "improved_shapes": self.improved_shapes,
+            "judgements": [j.to_dict() for j in self.judgements],
+        }
+
+
+@dataclass(frozen=True)
+class Tier3Target:
+    """The model, GPU and framework a generated tuner is written for."""
+
+    model_name: str = ""
+    gpu: str = ""
+    framework: str = ""
+
+
+@dataclass(frozen=True)
+class Retiming:
+    """How the referee re-times a table's shapes: per-shape baseline, dispatch and correctness, and a device sync."""
+
+    make_baseline: Callable[[str], Callable[[], Any]]
+    make_dispatch: Callable[[str], Callable[[dict], Callable[[], Any] | None]]
+    make_correctness: Callable[[str], Callable[[Callable[[], Any]], bool]] | None = None
+    sync: Callable[[], Any] | None = None
+
+
+def attempt_generated_tuner(
+    decision: GateDecision,
+    demand_shapes_for: Callable[[CoverageGap], list[dict[str, Any]]],
+    work_root: Path,
+    *,
+    target: Tier3Target = Tier3Target(),
+    retiming: Retiming | None = None,
+) -> Tier3Outcome:
+    """Try to produce a verified generated tuner for the gap the gate chose."""
+    outcome = Tier3Outcome(stage="gate", reason="; ".join(decision.reasons))
+    if not decision.allowed or decision.gap is None:
+        return outcome
+
+    gap = decision.gap
+    outcome.table = gap.table
+    if retiming is None:
+        # Stop before paying for generation and sandboxing when re-timing is impossible.
+        outcome.reason = (
+            f"no dispatch was supplied for {gap.table}, so nothing written for it could be "
+            "re-timed; an unverified generated tuner is not emitted, and generating one to "
+            "throw away costs a model call and a sandbox run"
+        )
+        return outcome
+
+    outcome.attempted = True
+    work_dir = work_root / "tier3" / gap.table.replace(".", "_")
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    shapes = demand_shapes_for(gap)
+    mandate = build_mandate(gap, shapes, gpu=target.gpu, framework=target.framework)
+    mandate.output_csv = str(work_dir / "out.csv")
+    outcome.output_csv = mandate.output_csv
+    mandate.candidates_json = str(work_dir / "candidates.json")
+    write_mandate(mandate, work_dir / "mandate.json")
+
+    if not _generate_valid_output(mandate, work_dir, outcome):
+        return outcome
+
+    outcome.stage = "referee"
+    candidates = load_candidates(mandate.candidates_json, mandate)
+    if not candidates:
+        outcome.reason = "the script proposed no candidates to re-time"
+        return outcome
+
+    outcome.judgements.extend(_rejudge_candidates(candidates, retiming))
+
+    outcome.ok = outcome.improved_shapes > 0
+    best = max(
+        (j.best_timing.speedup for j in outcome.judgements if j.best_timing and j.best_timing.usable),
+        default=None,
+    )
+    outcome.reason = (
+        f"{outcome.improved_shapes} of {len(outcome.judgements)} shape(s) improved"
+        if outcome.ok
+        else "no shape improved once re-timed"
+    )
+
+    record = record_outcome(
+        work_root / "tier3" / "ledger.json",
+        TunerUse(digest=outcome.digest, table=gap.table, model=target.model_name, improved=outcome.ok, speedup=best),
+    )
+    from .ledger import is_trusted
+
+    outcome.operator_signed = is_trusted(outcome.digest)
+    (work_dir / "outcome.json").write_text(
+        json.dumps({**outcome.to_dict(), "ledger": record.to_dict()}, indent=2),
+        encoding="utf-8",
+    )
+    log.info("tier3: %s -- %s", gap.table, outcome.reason)
+    return outcome
+
+
+def _generate_valid_output(mandate: TunerMandate, work_dir: Path, outcome: Tier3Outcome) -> bool:
+    """Generate and sandbox a tuner until its output meets the contract, recording each stage on ``outcome``."""
+    retry_note = ""
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        outcome.stage = "generate"
+        gen = generate_tuner(mandate, work_dir, retry_note=retry_note)
+        if not gen.ok or gen.script_path is None:
+            outcome.reason = gen.reason
+            return False
+        outcome.script = str(gen.script_path)
+        outcome.digest = script_digest(gen.script_path)
+
+        outcome.stage = "sandbox"
+        run = run_generated_tuner(
+            gen.script_path,
+            work_dir,
+            expect=[Path(mandate.output_csv), Path(mandate.candidates_json)],
+        )
+        if not run.ok:
+            retry_note = (
+                f"The script did not produce both output files "
+                f"(rc={run.returncode}, timed_out={run.timed_out}). Tail:\n"
+                f"{run.stderr_tail[-800:]}"
+            )
+            outcome.reason = retry_note
+            if attempt < MAX_ATTEMPTS:
+                continue
+            return False
+
+        outcome.stage = "contract"
+        violations = validate_output_csv(mandate.output_csv, mandate)
+        if violations:
+            retry_note = "The output violated the contract:\n" + "\n".join(f"- {v}" for v in violations[:8])
+            outcome.reason = retry_note
+            if attempt < MAX_ATTEMPTS:
+                continue
+            return False
+        break
+    return True
+
+
+def _rejudge_candidates(candidates: dict[str, list[dict[str, Any]]], retiming: Retiming) -> list[Judgement]:
+    """Re-time every shape's candidates against its baseline; a shape whose baseline cannot be timed is skipped."""
+    judgements: list[Judgement] = []
+    for shape, cands in candidates.items():
+        try:
+            baseline = retiming.make_baseline(shape)
+        except CaptureFailed as exc:
+            log.warning("tier3 %s: shape skipped, the baseline cannot be timed: %s", shape, exc)
+            judgements.append(Judgement(shape=shape, reason=f"baseline not timed: {exc}"))
+            continue
+        judgements.append(
+            judge_candidates(
+                shape,
+                cands,
+                ShapeHarness(
+                    baseline=baseline,
+                    dispatch=retiming.make_dispatch(shape),
+                    is_correct=retiming.make_correctness(shape) if retiming.make_correctness else None,
+                    sync=retiming.sync,
+                ),
+            )
+        )
+    return judgements

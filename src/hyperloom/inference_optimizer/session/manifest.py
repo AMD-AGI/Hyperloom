@@ -16,9 +16,9 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.io import atomic_write_json
+from hyperloom_common.io import atomic_write_json
 from hyperloom.common.provenance import build_provenance
-from hyperloom.common.timeutil import now_iso, utc_now_compact
+from hyperloom_common.timeutil import now_iso, utc_now_compact
 
 from . import paths as _paths
 from .session_paths import manifest_path
@@ -178,8 +178,7 @@ def build_manifest(
         isl, osl = getattr(args, "isl", None), getattr(args, "osl", None)
         workload["isl"] = _env_digits("ISL") if isl is None else int(isl)
         workload["osl"] = _env_digits("OSL") if osl is None else int(osl)
-    # Shared provenance builder (WP-0) so a trace consumer can pin gfx arch / EP / graph mode / server args, kept in
-    # lockstep with the TraceShapeManifest's provenance block so the two never drift.
+    # Shared provenance builder (WP-0) so a trace consumer can pin gfx arch / EP / graph mode / server args.
     _prov = build_provenance(args, env=os.environ)
     return {
         "schema_version": SCHEMA_VERSION,

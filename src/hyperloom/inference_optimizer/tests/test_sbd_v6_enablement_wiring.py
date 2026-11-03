@@ -24,7 +24,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.sections import ENABLEMENT
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
-from hyperloom.orchestrator.bus.storage import SqliteConnection
+from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.bus.storage.schema import ensure_schema
 from hyperloom.orchestrator.actions.executors._accuracy_gate import (
     BASELINE_EVAL_ACCURACY_FLOOR_KEY,
@@ -633,7 +633,9 @@ async def test_the_revalidation_enqueue_records_the_window_it_opened(_bound_sess
 
 def test_the_build_executor_records_the_build_it_ran(_bound_session):
     from hyperloom.orchestrator.actions.executors.targeted_build_executor import TargetedBuildExecutor
+    from hyperloom.orchestrator.enablement.runtime.build_actions import TargetedBuildAction
 
+    action = TargetedBuildAction(gap_id="g7", framework="vllm", component="aiter", capability="fp4_moe", ref="abc123")
     result = types.SimpleNamespace(
         ok=False,
         failure_class="compile_error",
@@ -653,7 +655,7 @@ def test_the_build_executor_records_the_build_it_ran(_bound_session):
         enablement_event.LaneTrigger(origin=enablement_event.ORIGIN_BOOT, mode="all", kind="compiled_miss")
     )
 
-    TargetedBuildExecutor._record_result(result, None, task_id="build-7")
+    TargetedBuildExecutor._record_result(result, None, action=action, task_id="build-7")
 
     builds = _ext()["builds"]
     assert builds["count"] == 1

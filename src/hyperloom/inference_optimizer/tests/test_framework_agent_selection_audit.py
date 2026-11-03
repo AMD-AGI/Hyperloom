@@ -11,34 +11,22 @@ import types
 import pytest
 
 from hyperloom.orchestrator.loop import coordinator as coord_mod
-from hyperloom.orchestrator.phases import framework as framework_mod
+from hyperloom.orchestrator.phases import framework_records
 from hyperloom.orchestrator.phases import machine_state as ps_mod
 from hyperloom.orchestrator.actions.executors import _patch_source_pr as fpr_mod
-from hyperloom.orchestrator.roles import Backend, MockBackend, ScriptedPlan
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
-
-def _heartbeat() -> Intent:
-    return Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"})
-
-
-def _silent_plan() -> ScriptedPlan:
-    return ScriptedPlan(turns=[], default_intent=_heartbeat())
-
-
-def _build_backends() -> dict[str, Backend]:
-    return {name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "critic")}
+from .conftest import make_coordinator
 
 
 @pytest.fixture
 def coord(session_dir) -> Coordinator:
-    return Coordinator(session_dir, backends=_build_backends())
+    return make_coordinator(session_dir)
 
 
 # _framework_config_levers_from_done
 def test_config_levers_non_dict_and_missing() -> None:
-    f = framework_mod._framework_config_levers_from_done
+    f = framework_records._framework_config_levers_from_done
     assert f(None) == {}
     # A patch takes precedence over a lever that merely accompanies it, unless the
     # lane says the pair is inseparable.
@@ -50,7 +38,7 @@ def test_config_levers_non_dict_and_missing() -> None:
 
 
 def test_config_levers_preserve_envs_and_args() -> None:
-    f = framework_mod._framework_config_levers_from_done
+    f = framework_records._framework_config_levers_from_done
     extra_args = '--enable-x --compilation-config \'{"mode": "max-autotune"}\' --bare'
     levers = f(
         {
@@ -69,13 +57,13 @@ def test_config_levers_preserve_envs_and_args() -> None:
 
 
 def test_config_levers_args_as_list() -> None:
-    f = framework_mod._framework_config_levers_from_done
+    f = framework_records._framework_config_levers_from_done
     levers = f({"proposal_set": [{"extra_args": ["--flag", "value with space"]}]})
     assert levers == {}
 
 
 def test_invalid_config_args_preserve_independent_env_overrides() -> None:
-    f = framework_mod._framework_config_levers_from_done
+    f = framework_records._framework_config_levers_from_done
     levers = f(
         {
             "proposal_set": [
@@ -93,7 +81,7 @@ def test_invalid_config_args_preserve_independent_env_overrides() -> None:
 
 
 def test_config_levers_json_args_as_list_stay_unquoted() -> None:
-    f = framework_mod._framework_config_levers_from_done
+    f = framework_records._framework_config_levers_from_done
     levers = f(
         {
             "proposal_set": [
@@ -144,7 +132,7 @@ def test_an_already_present_candidate_counts_as_tested() -> None:
 
 def _stub_sanctioned_async_client(monkeypatch, recorder: list[dict] | None = None):
     """Patch ``llm_config``'s async-client contract with a resolving stub."""
-    from hyperloom.common import llm_config
+    from hyperloom_common.llm import llm_config
 
     def _fake(**kwargs):
         kwargs.pop("timeout", None)

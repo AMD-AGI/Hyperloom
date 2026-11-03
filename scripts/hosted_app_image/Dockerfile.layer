@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+# The hosting layer of a hosted Hyperloom run as a small image of its own. It varies with the Hyperloom
+# version only, not with the framework image the run measures on. The build context is the layer directory
+# scripts/hosted_app_image/build_layer.sh made, not the repo:
+#
+#   scripts/hosted_app_image/build_layer.sh --out /tmp/layers          # prints /tmp/layers/<short sha>-claude<version>
+#   docker build -f scripts/hosted_app_image/Dockerfile.layer -t <registry>/hyperloom-host-layer:<short sha>-claude<version> /tmp/layers/<...>
+#
+# An application pod copies /layer into a volume with an init container, and the main container (any framework
+# image with git, setpriv and bash) runs it as root:
+#
+#   initContainers: [{name: layer, image: <this image>, command: [cp, -a, /layer/., /opt/hyperloom-host/],
+#                     volumeMounts: [{name: hyperloom-host, mountPath: /opt/hyperloom-host}]}]
+#   containers:     [{image: <framework image>, command: [sh, /opt/hyperloom-host/start.sh],
+#                     volumeMounts: [{name: hyperloom-host, mountPath: /opt/hyperloom-host}]}]
+#   volumes:        [{name: hyperloom-host, emptyDir: {}}]
+ARG BASE_IMAGE=busybox:1.37
+FROM ${BASE_IMAGE}
+COPY . /layer

@@ -13,7 +13,7 @@ for _path in (_repo_root, os.path.join(_repo_root, "src")):
         sys.path.insert(0, _path)
 
 # Keep in sync with pyproject.toml [project].version.
-version_number = "1.1.4"
+version_number = "1.1.5"
 
 html_theme = "rocm_docs_theme"
 html_theme_options = {

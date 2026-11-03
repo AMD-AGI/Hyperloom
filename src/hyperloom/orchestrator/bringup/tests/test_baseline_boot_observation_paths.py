@@ -14,6 +14,8 @@ import pytest
 from hyperloom.common.bringup import LadderStage
 from hyperloom.orchestrator.actions.executors import baseline as bl
 from hyperloom.orchestrator.actions.executors import benchmark_result
+from hyperloom.orchestrator.actions.executors.benchmark_run import launch as launch_mod
+from hyperloom.orchestrator.actions.executors.benchmark_run.records import BenchmarkAttempt
 from hyperloom.orchestrator.bringup import load_boot_observation
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.state.task_registry import Task
@@ -44,7 +46,7 @@ async def _round(session: Path, out: Path) -> dict:
     cfg = session / "bench.yaml"
     cfg.write_text("benchmark:\n  framework: vllm\n  model: /tmp/m\n", encoding="utf-8")
     return await ex._run_single_benchmark(
-        bl.BenchmarkAttempt(
+        BenchmarkAttempt(
             timeout_sec=30,
             override_result_dir=None,
             resolved_model="/tmp/m",
@@ -65,9 +67,9 @@ def slot(tmp_path, monkeypatch):
     session.mkdir()
     out = tmp_path / "round"
     out.mkdir()
-    monkeypatch.setattr(bl, "harvest_leaked_artifacts", lambda *a, **k: [])
-    monkeypatch.setattr(bl, "snapshot_workspaces", lambda *a, **k: set())
-    monkeypatch.setattr(bl, "select_run_workspace", lambda *a, **k: None)
+    monkeypatch.setattr(launch_mod, "harvest_leaked_artifacts", lambda *a, **k: [])
+    monkeypatch.setattr(launch_mod, "snapshot_workspaces", lambda *a, **k: set())
+    monkeypatch.setattr(launch_mod, "select_run_workspace", lambda *a, **k: None)
     return session, out
 
 
@@ -102,8 +104,8 @@ async def test_nonzero_exit_result_names_a_real_observation(slot, monkeypatch) -
 async def test_observation_reads_the_log_magpie_wrote_in_its_run_workspace(slot, monkeypatch) -> None:
     """Magpie writes the server log under its own ``benchmark_*`` workspace, not at ``$SERVER_LOG``."""
     session, out = slot
-    monkeypatch.setattr(bl, "snapshot_workspaces", benchmark_result.snapshot_workspaces)
-    monkeypatch.setattr(bl, "select_run_workspace", benchmark_result.select_run_workspace)
+    monkeypatch.setattr(launch_mod, "snapshot_workspaces", benchmark_result.snapshot_workspaces)
+    monkeypatch.setattr(launch_mod, "select_run_workspace", benchmark_result.select_run_workspace)
 
     def _run(cmd, **kwargs):
         workspace = out / "benchmark_vllm_20261002_100816"

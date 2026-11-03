@@ -27,7 +27,7 @@ from hyperloom.orchestrator.knowledge.remote_recipe.values import (
     build_remote_knowledge,
     knowledge_to_warm_recipe,
 )
-from hyperloom.orchestrator.phases.prelude import _merge_named_current_recipe_configs
+from hyperloom.orchestrator.phases.prelude_warm_kernel import _merge_named_current_recipe_configs
 
 
 def _build_knowledge(state, files_dir, *, sections):
@@ -550,7 +550,8 @@ def test_close_fails_when_a_demanded_patch_column_never_landed(tmp_path: Path, o
         )
 
 
-def test_close_adopts_only_successfully_replayed_prior_overlays(tmp_path: Path) -> None:
+def _close_after_replaying_a_rootless_prior_overlay(tmp_path: Path):
+    """Close a session whose warm replay reproduced a prior record's one overlay, which names no apply root."""
     old_ref = "patch/overlays/000004/00-upstream.patch"
     warm = tmp_path / "warm"
     old_patch = warm / "files" / old_ref
@@ -582,7 +583,11 @@ def test_close_adopts_only_successfully_replayed_prior_overlays(tmp_path: Path) 
     )
     state.warm_replay_outcome = {"status": "reproduced", "replayed_patch_refs": [old_ref]}
 
-    bundle = _build_knowledge(state, tmp_path / "files", sections=sections)
+    return _build_knowledge(state, tmp_path / "files", sections=sections)
+
+
+def test_close_adopts_only_successfully_replayed_prior_overlays(tmp_path: Path) -> None:
+    bundle = _close_after_replaying_a_rootless_prior_overlay(tmp_path)
 
     adopted = "patch/overlays/000000/00-upstream.patch"
     assert bundle.knowledge["value"]["patch"]["patches"] == [adopted]
@@ -648,38 +653,7 @@ def test_close_carries_prior_apply_root_onto_adopted_overlay(tmp_path: Path, sta
 
 def test_close_leaves_adopted_overlay_rootless_when_prior_had_no_root(tmp_path: Path) -> None:
     """Nothing is invented: an ancestor that already lost its root stays rootless."""
-    old_ref = "patch/overlays/000004/00-upstream.patch"
-    warm = tmp_path / "warm"
-    old_patch = warm / "files" / old_ref
-    old_patch.parent.mkdir(parents=True)
-    old_patch.write_bytes(b"prior replayed bytes")
-    (warm / "recipe.json").write_text(
-        json.dumps(
-            {
-                "knowledge_schema_version": CURRENT_KNOWLEDGE_SCHEMA_VERSION,
-                "record_kind": RECORD_KIND_HYPERLOOM_RECIPE,
-                "value": {
-                    "config": {"extra_server_args": "--prior-config", "extra_envs": {}},
-                    "kernel": {},
-                    "patch": {"patches": [old_ref]},
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-    sections = KnowledgeSections(tmp_path / "draft", warm_start_dir=warm)
-    state = _state(
-        [
-            {
-                "action": "replay_warm_recipe",
-                "source_phase": "PRELUDE",
-                "extra_server_args": "--prior-config",
-            }
-        ]
-    )
-    state.warm_replay_outcome = {"status": "reproduced", "replayed_patch_refs": [old_ref]}
-
-    bundle = _build_knowledge(state, tmp_path / "files", sections=sections)
+    bundle = _close_after_replaying_a_rootless_prior_overlay(tmp_path)
 
     adopted = "patch/overlays/000000/00-upstream.patch"
     patch = bundle.knowledge["value"]["patch"]

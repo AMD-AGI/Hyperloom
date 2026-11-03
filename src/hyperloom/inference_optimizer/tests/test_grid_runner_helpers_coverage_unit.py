@@ -226,7 +226,7 @@ def test_probe_swallows_subprocess_error(monkeypatch) -> None:
 # -- _resolve_probe_python / probe interpreter selection ------------------
 def test_resolve_probe_python_prefers_magpie_interpreter(monkeypatch) -> None:
     # The harness interpreter is used directly; no vllm-exe resolution is tried.
-    monkeypatch.setattr(bi, "_resolve_magpie_python", lambda: "/srv/venv/bin/python")
+    monkeypatch.setattr(bi, "_resolve_magpie_python", lambda _env=None: "/srv/venv/bin/python")
     monkeypatch.setattr(
         bi.shutil, "which", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("which() should not be called"))
     )
@@ -235,15 +235,15 @@ def test_resolve_probe_python_prefers_magpie_interpreter(monkeypatch) -> None:
 
 def test_resolve_probe_python_falls_back_to_vllm_venv(monkeypatch) -> None:
     # magpie_python is the canonical default -> pin the venv that backs ``vllm serve``.
-    monkeypatch.setattr(bi, "_resolve_magpie_python", lambda: "/opt/venv/bin/python")
-    monkeypatch.setattr(bi.shutil, "which", lambda name: "/other/venv/bin/vllm" if name == "vllm" else None)
+    monkeypatch.setattr(bi, "_resolve_magpie_python", lambda _env=None: "/opt/venv/bin/python")
+    monkeypatch.setattr(bi.shutil, "which", lambda name, **_k: "/other/venv/bin/vllm" if name == "vllm" else None)
     monkeypatch.setattr(bi.os.path, "exists", lambda p: p == "/other/venv/bin/python")
     assert bi._resolve_probe_python() == "/other/venv/bin/python"
 
 
 def test_resolve_probe_python_no_bare_python3_fallback(monkeypatch) -> None:
     # With no resolvable vllm exe, fall back to the canonical magpie default — never a bare "python3".
-    monkeypatch.setattr(bi, "_resolve_magpie_python", lambda: "/opt/venv/bin/python")
+    monkeypatch.setattr(bi, "_resolve_magpie_python", lambda _env=None: "/opt/venv/bin/python")
     monkeypatch.setattr(bi.shutil, "which", lambda *_a, **_k: None)
     assert bi._resolve_probe_python() == "/opt/venv/bin/python"
 

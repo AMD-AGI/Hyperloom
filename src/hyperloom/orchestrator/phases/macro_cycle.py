@@ -9,9 +9,6 @@ import logging as _logging
 from collections.abc import Iterable
 from typing import Any
 
-from hyperloom.common.env import env_bool
-
-from ..actions.executors.explore import TS_SKIPPED_DEDUP
 from ..collaborator import CoordinatorCollaborator
 from . import machine_state as _phase_state
 from ..loop.maintenance import run_lease_and_db_reclaim
@@ -48,47 +45,6 @@ class _FocusScoreboard:
 
 class MacroCycleCollaborator(CoordinatorCollaborator):
     """Macro-cycle planning, focus scoring, soft-restart, reprofile, and orchestration-memory helpers."""
-
-    def __init__(self, coordinator) -> None:
-        super().__init__(coordinator)
-        # Medium-intensity soft restart at each macro-cycle boundary.
-        self._soft_restart_enabled = not env_bool("INFERENCE_OPTIMIZER_DISABLE_CYCLE_SOFT_RESTART")
-
-    def _negative_ledger_domain_counts(self, *, recent_cycles: int = 3) -> dict[str, int]:
-        """Summarise recent negative explore-ledger pressure by specialist domain."""
-        state = self.shared_state
-        cur_cycle = int(state.macro_cycle or 0)
-        search = state.explore_search or {}
-        rows: list[Any] = []
-        if isinstance(search, dict):
-            tested = search.get("tested") or {}
-            if isinstance(tested, dict):
-                rows.extend(tested.values())
-            rejected = search.get("rejected") or []
-            if isinstance(rejected, list):
-                rows.extend(rejected)
-        counts: dict[str, int] = {}
-        for row in rows:
-            # A row the round answered without measuring rejects nothing.
-            if not isinstance(row, dict) or row.get("outcome") == TS_SKIPPED_DEDUP:
-                continue
-            try:
-                cycle = int(row.get("cycle", cur_cycle) or 0)
-            except (TypeError, ValueError):
-                cycle = cur_cycle
-            if cycle < max(0, cur_cycle - recent_cycles + 1):
-                continue
-            domain = str(
-                row.get("domain")
-                or row.get("specialist_domain")
-                or row.get("source_domain")
-                or row.get("provenance")
-                or ""
-            ).strip()
-            if not domain:
-                continue
-            counts[domain] = counts.get(domain, 0) + 1
-        return counts
 
     def _score_bottleneck_shift(self, board: _FocusScoreboard, shift: dict[str, Any]) -> None:
         """Credit the domain the latest bottleneck shift points at."""
@@ -135,12 +91,6 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
             if domain not in tried:
                 board.credit(domain, 1.5, "exploration bonus: not yet used as cycle focus")
 
-    def _score_negative_ledger(self, board: _FocusScoreboard) -> None:
-        """Penalise the domains the recent explore ledger keeps rejecting."""
-        for domain, count in self._negative_ledger_domain_counts().items():
-            penalty = min(4.0, 0.5 * float(count))
-            board.credit(domain, -penalty, f"recent negative ledger count={count} penalty={penalty:.1f}")
-
     def plan_cycle_focus(self) -> dict[str, Any]:
         """Pick an advisory specialist-domain focus for the current macro-cycle."""
         from hyperloom.inference_optimizer.roofline_snapshot import BOTTLENECK_DOMAIN_HINTS
@@ -155,7 +105,6 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
         self._score_roofline_saturation(board, sat)
         self._score_cycle_history(board, log_rows)
         self._score_unexplored(board, domains, log_rows)
-        self._score_negative_ledger(board)
         focus = board.leader() or "freeform_specialist"
         rationale_bits = board.reasons.get(focus) or ["fallback focus; no stronger cycle-level evidence"]
         return {
@@ -196,7 +145,7 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
         *,
         prior_cycle: int,
         new_cycle: int,
-    ) -> dict[str, Any] | None:
+    ) -> None:
         """Medium-intensity soft restart at a macro-cycle boundary.
 
         Recycles transient/per-cycle resources (fresh leases, pruned DB, cleared
@@ -207,13 +156,7 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
         Args:
             prior_cycle: The macro-cycle number that just finished.
             new_cycle: The macro-cycle number being entered.
-
-        Returns:
-            A summary dict of the restart steps performed, or ``None`` when the
-            soft restart is disabled.
         """
-        if not self._soft_restart_enabled:
-            return None
         summary: dict[str, Any] = {
             "prior_cycle": int(prior_cycle),
             "new_cycle": int(new_cycle),
@@ -231,7 +174,6 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
             "observation",
             {"kind": "cycle_soft_restart", **summary},
         )
-        return summary
 
     async def on_cycle_start_reprofile(self, *, from_phase: str) -> None:
         """Force a fresh analysis at the start of a reopened macro-cycle.

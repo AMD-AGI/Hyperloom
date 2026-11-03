@@ -72,7 +72,6 @@ class RequestRecord:
     start: float
     end: float
     first_token: float | None
-    phase: str
     ok: bool
 
     def overlaps(self, window_start: float, window_end: float) -> bool:
@@ -139,7 +138,6 @@ def _record_from(payload: dict[str, Any]) -> RequestRecord | None:
         start=start,
         end=end,
         first_token=first_token,
-        phase=str(metadata.get("benchmark_phase") or ""),
         ok=payload.get("error") in (None, {}),
     )
 
@@ -161,10 +159,11 @@ def parse_profile_export(path: Path) -> list[RequestRecord]:
                     payload = json.loads(line)
                 except ValueError:
                     continue
-                if isinstance(payload, dict):
-                    record = _record_from(payload)
-                    if record is not None:
-                        records.append(record)
+                if not isinstance(payload, dict):
+                    continue
+                record = _record_from(payload)
+                if record is not None:
+                    records.append(record)
     except OSError as exc:
         log.debug("agentx_timeline: could not read %s (%s)", path, exc)
         return []

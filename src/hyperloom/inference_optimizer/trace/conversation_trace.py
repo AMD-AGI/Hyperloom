@@ -12,7 +12,7 @@ from typing import Any
 
 from hyperloom.common.env_safety import redact_secret_values
 
-from hyperloom.common.io import JsonLineFormat, append_jsonl
+from hyperloom_common.io import JsonLineFormat, append_jsonl
 from hyperloom.inference_optimizer.session.session_paths import conversations_path
 from ._row_utils import call_key_fields, validate_closed_row
 from .llm_trace import VALID_COMPONENTS
@@ -22,13 +22,6 @@ log = logging.getLogger(__name__)
 
 class ConversationRowError(ValueError):
     """Raised when a conversation row violates the closed schema."""
-
-
-def redact_secrets(text: str) -> str:
-    """Strip obvious secret *values* from ``text`` before it hits disk."""
-    if not text:
-        return text
-    return redact_secret_values(text)
 
 
 def _coerce_text(value: Any) -> str:
@@ -49,7 +42,6 @@ class ConversationRecord:
     call_id: str | None = None
     role: str | None = None
     task_id: str | None = None
-    dyn_id: str | None = None
     tick: int | None = None
     phase: str | None = None
     turn: int | None = None
@@ -61,8 +53,8 @@ class ConversationRecord:
         """Serialize to the on-disk row dict, stamping ``ts`` and redacting the prompt / response text."""
         return {
             **call_key_fields(self),
-            "prompt": redact_secrets(_coerce_text(self.prompt)),
-            "response": redact_secrets(_coerce_text(self.response)),
+            "prompt": redact_secret_values(_coerce_text(self.prompt)),
+            "response": redact_secret_values(_coerce_text(self.response)),
         }
 
 
@@ -70,7 +62,6 @@ def append_conversation(
     *,
     session_dir: Path,
     record: ConversationRecord,
-    target: Path | None = None,
 ) -> None:
     """Append one validated conversation row to the conversations ledger."""
     row = record.to_row()
@@ -81,9 +72,8 @@ def append_conversation(
         error_cls=ConversationRowError,
         label="conversations",
     )
-    dest = target if target is not None else conversations_path(session_dir)
     try:
-        append_jsonl(dest, row, make_parents=True, fmt=JsonLineFormat(ensure_ascii=False))
+        append_jsonl(conversations_path(session_dir), row, make_parents=True, fmt=JsonLineFormat(ensure_ascii=False))
     except OSError as exc:
         log.warning(
             "conversation_trace: append failed for component=%s session_id=%s: %r",
@@ -93,13 +83,9 @@ def append_conversation(
         )
 
     # Second sink (opt-in): mirror conversation text to Langfuse live.
-    if target is None:
-        try:
-            from .langfuse_emitter import get_emitter
+    from .langfuse_emitter import get_emitter
 
-            get_emitter(session_dir).record_conversation(row)
-        except Exception:
-            log.debug("conversation_trace: langfuse mirror failed", exc_info=True)
+    get_emitter(session_dir).record_conversation(row)
 
 
 # The closed on-disk schema: every record field plus the write-time ``ts``.
@@ -110,5 +96,4 @@ __all__ = [
     "ConversationRecord",
     "ConversationRowError",
     "append_conversation",
-    "redact_secrets",
 ]

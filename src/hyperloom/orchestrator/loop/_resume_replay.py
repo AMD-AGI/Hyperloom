@@ -8,11 +8,10 @@ from __future__ import annotations
 import logging
 from typing import Any, Mapping
 
-from hyperloom.orchestrator.lever import patch_lever_kind, patch_owner_phase
+from hyperloom.orchestrator.lever import patch_owner_phase
 
 from ..state.shared_state import SharedState
-from ._integrate_promotion import _patch_recipe_delta
-from ._keep_patch_column import _source_layer_handles
+from ._integrate_promotion import _integrate_keep_variant
 from .proposals import PendingProposal
 
 log = logging.getLogger(__name__)
@@ -25,54 +24,15 @@ def _replayed_explore_variant(result: Mapping[str, Any]) -> dict[str, Any] | Non
     return dict(best)
 
 
-def _replay_origin_fields(result: Mapping[str, Any]) -> dict[str, Any]:
-    domain = str(result.get("domain") or result.get("source_domain") or "").strip()
-    provenance = str(result.get("provenance") or "").strip()
-    if domain and not provenance.startswith("specialist:"):
-        provenance = f"specialist:{domain}"
-    fields: dict[str, Any] = {"provenance": provenance or "integrate_patch", "scope": "source_patch"}
-    lever_kind = patch_lever_kind(result)
-    if lever_kind:
-        fields["lever_kind"] = lever_kind
-    source_phase = patch_owner_phase(result)
-    if source_phase:
-        fields["source_phase"] = source_phase
-    else:
-        fields["recipe_publishable"] = False
-    if domain:
-        fields["domain"] = domain
-    gap_layer = str(result.get("gap_layer") or "").strip()
-    if gap_layer:
-        fields["gap_layer"] = gap_layer
-    if result.get("framework_agent_authoring"):
-        fields["framework_agent_authoring"] = True
-    if result.get("enablement") or result.get("enablement_landing"):
-        fields["recipe_publishable"] = False
-    return fields
-
-
 def _replayed_integrate_variant(result: Mapping[str, Any], tput: float) -> dict[str, Any] | None:
-    from hyperloom.common.perf_metric import constraint_fields, graded_axes_of
-
-    specialist_task_id = str(result.get("specialist_task_id") or "")
-    if not specialist_task_id:
+    if not str(result.get("specialist_task_id") or ""):
         return None
-    bench = result.get("bench_result") or result
-    return {
-        "name": specialist_task_id,
-        "candidate_extra_server_args": str(result.get("extra_server_args_applied") or ""),
-        "candidate_extra_envs": dict(result.get("extra_envs_applied") or {}),
-        "recipe_delta": _patch_recipe_delta(result, result),
-        "extra_envs": dict(result.get("extra_envs_applied") or {}),
-        "tput": float(tput),
-        **graded_axes_of(bench),
-        # ``graded_axes_of`` carries the throughput axes only; the latency and
-        # power budgets grade on these and fail closed without them.
-        **constraint_fields(bench),
-        "workspace": result.get("workspace"),
-        **_source_layer_handles(result),
-        **_replay_origin_fields(result),
-    }
+    # Ownership is normalised from the recorded evidence; a KEEP whose owner cannot be recovered is not publishable.
+    source_phase = patch_owner_phase(result)
+    variant = _integrate_keep_variant(result, None, result.get("bench_result") or result, tput, source_phase)
+    if not source_phase:
+        variant["recipe_publishable"] = False
+    return variant
 
 
 class ResumeReplayMixin:
@@ -86,48 +46,19 @@ class ResumeReplayMixin:
     # current_best lift path (``current_best_launch_config`` /
     # ``build_env_spec``).
     # ------------------------------------------------------------------
-    def detect_resume_state(self) -> dict[str, Any]:
-        """Synchronously inspect persistence to determine if this is a resume (non-blocking).
-
-        Returns:
-            A dict with ``is_resume``, ``event_count``, ``state_json_present``
-            and ``rebuilt`` (the last set later by :meth:`replay_for_resume`).
-        """
-        event_count = self.bus.count_sync()
-        state_path = SharedState.state_path(self.session_dir)
+    def detect_resume_state(self) -> None:
+        """Synchronously inspect persistence to determine if this is a resume (non-blocking)."""
         self._resumed_from = {
-            "is_resume": event_count > 0 or state_path.exists(),
-            "event_count": event_count,
-            "state_json_present": state_path.exists(),
+            "is_resume": self.bus.count_sync() > 0 or SharedState.state_path(self.session_dir).exists(),
             "rebuilt": False,  # set by replay_for_resume()
         }
-        return self._resumed_from
 
-    async def replay_for_resume(self) -> dict[str, Any]:
-        """Walk the event log to reconstruct ``CoordinatorState.pending_proposals``. Idempotent; a proposal is undecided when no review_verdict targets it.
-
-        Returns:
-            A dict summarising the replay: ``is_resume``, ``event_count``,
-            ``state_json_present``, ``pending_restored`` (count rebuilt) and
-            ``verdicts_seen``.
-        """
+    async def replay_for_resume(self) -> None:
+        """Walk the event log to reconstruct ``CoordinatorState.pending_proposals``. Idempotent; a proposal is undecided when no review_verdict targets it."""
         proposal_msgs = await self.bus.tail(topic="proposal", n=10_000)
         verdicts = await self.bus.tail(topic="review_verdict", n=10_000)
 
-        decided_ids: set[str] = set()
-        verdict_by_target: dict[str, str] = {}
-        for v in verdicts:
-            target = v.payload.get("target_proposal_msg_id")
-            if not target:
-                continue
-            # Verdicts with a verdict_map but no summary are treated as needs_review.
-            summary = v.payload.get("verdict") or ""
-            if not summary and isinstance(v.payload.get("verdict_map"), dict):
-                summary = "needs_review"
-            verdict_by_target[target] = summary
-            decided_ids.add(target)
-
-        rebuilt = 0
+        decided_ids = {v.payload["target_proposal_msg_id"] for v in verdicts if v.payload.get("target_proposal_msg_id")}
         self.state.pending_proposals.clear()
         for p in proposal_msgs:
             if p.msg_id in decided_ids:
@@ -140,17 +71,8 @@ class ResumeReplayMixin:
                 predicted_gain_pct=float(payload.get("predicted_gain_pct", 0.0)),
                 payload=dict(payload),
             )
-            rebuilt += 1
 
         self._resumed_from["rebuilt"] = True
-        self._resumed_from["pending_restored"] = rebuilt
-        return {
-            "is_resume": self._resumed_from["is_resume"],
-            "event_count": self._resumed_from["event_count"],
-            "state_json_present": self._resumed_from["state_json_present"],
-            "pending_restored": rebuilt,
-            "verdicts_seen": len(verdicts),
-        }
 
     def _publish_recovered_keeps(self, report: dict[str, Any]) -> None:
         state = self.shared_state

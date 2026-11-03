@@ -17,12 +17,9 @@ import pytest
 from hyperloom.orchestrator.trace_analysis.trace_selfcert import certify_trace_dir
 
 
-def _step(name: str, ts: int, dur: int) -> list[dict]:
-    """An iteration root on the host timeline and the window the profiler mirrors onto the GPU timeline."""
-    return [
-        {"cat": cat, "ph": "X", "name": name, "ts": ts, "dur": dur}
-        for cat in ("user_annotation", "gpu_user_annotation")
-    ]
+def _step(name: str, ts: int, dur: int) -> dict:
+    """An iteration root on the host timeline."""
+    return {"cat": "user_annotation", "ph": "X", "name": name, "ts": ts, "dur": dur}
 
 
 def _launch(corr: int, ts: int, kernels: list[tuple[int, int]], *, api: str = "hipLaunchKernel") -> list[dict]:
@@ -46,10 +43,10 @@ def _launch(corr: int, ts: int, kernels: list[tuple[int, int]], *, api: str = "h
 
 #: An SGLang extend step whose graph replay ran two kernels beside one plain launch, then a decode step.
 _STEP_EVENTS = [
-    *_step("step[EXTEND bs=2 toks=64]", 1000, 400),
+    _step("step[EXTEND bs=2 toks=64]", 1000, 400),
     *_launch(1, 1010, [(1020, 50)]),
     *_launch(2, 1100, [(1110, 40), (1160, 40)], api="hipGraphLaunch"),
-    *_step("step[DECODE bs=2]", 1500, 200),
+    _step("step[DECODE bs=2]", 1500, 200),
     *_launch(3, 1510, [(1520, 30)]),
 ]
 
@@ -65,7 +62,6 @@ def test_each_step_root_is_credited_with_the_kernels_its_own_launches_produced(t
     annotations = certify_trace_dir(tmp_path, framework="sglang")["rank_level"][0]["annotations"]
 
     assert annotations["step_root_pattern_family"] == "backup"
-    assert annotations["annotation_window_count"] == 2
     steps = [
         (s["kind"], s["is_prefill"], s["runtime_launch_count"], s["graph_launch_count"], s["kernel_count"])
         for s in annotations["steps"]
@@ -78,7 +74,7 @@ def test_each_step_root_is_credited_with_the_kernels_its_own_launches_produced(t
     ("chunk_events", "severity", "usable_by"),
     [
         pytest.param([], "blocked", [], id="empty-chunk"),
-        pytest.param(_STEP_EVENTS, "warn", ["bypass", "tracelens"], id="chunk-with-kernels"),
+        pytest.param(_STEP_EVENTS, "warn", ["tracelens"], id="chunk-with-kernels"),
     ],
 )
 def test_the_split_chunk_production_would_open_is_measured_beside_the_source(
@@ -99,10 +95,10 @@ def test_the_split_chunk_production_would_open_is_measured_beside_the_source(
     assert record["verdict"]["usable_by"] == usable_by
 
 
-def test_kernels_no_op_claims_leave_the_trace_usable_by_the_bypass_alone(tmp_path):
+def test_kernels_no_op_claims_leave_the_trace_unusable(tmp_path):
     _write(tmp_path / "rank0.pt.trace.json", [ev for ev in _STEP_EVENTS if ev["cat"] != "cpu_op"])
 
     verdict = certify_trace_dir(tmp_path, framework="sglang")["verdict"]
 
-    assert verdict["usable_by"] == ["bypass"]
+    assert verdict["usable_by"] == []
     assert verdict["blocking_reasons"] == ["correlation chain resolves no kernel to an op"]

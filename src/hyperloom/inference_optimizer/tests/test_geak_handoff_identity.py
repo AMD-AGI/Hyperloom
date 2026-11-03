@@ -36,16 +36,16 @@ def _verified_current_best(tmp_path: Path) -> SharedState:
             "extra_server_args": "--dsa-prefill-backend aiter --dsa-decode-backend tilelang",
             "extra_envs": {"SGLANG_USE_AITER": "1"},
             "optimization_stack": [],
-            "measurement": {
-                "tput": 1403.43,
-                "resolved_server_launch_flags": "--mem-fraction-static 0.8",
-                "benchmark_workspace": "runs/explore/dsa/stack_rebench",
-            },
+        },
+        current_best_measurement={
+            "tput": 1403.43,
+            "resolved_server_launch_flags": "--mem-fraction-static 0.8",
+            "benchmark_workspace": "runs/explore/dsa/stack_rebench",
         },
     )
     writer = _writeback(tmp_path, state)
     spec = writer.build_env_spec()
-    state.current_best["measurement"]["launch_identity"] = spec["launch_identity"]
+    state.current_best_measurement["declared_launch_identity"] = spec["launch_identity"]
     return state
 
 
@@ -78,7 +78,7 @@ def test_env_spec_never_recovers_server_flags_from_unrelated_history(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     state = _verified_current_best(tmp_path)
-    state.current_best["measurement"] = {"tput": 1403.43}
+    state.current_best_measurement = {"tput": 1403.43}
     run = tmp_path / "runs" / "wrong-variant"
     run.mkdir(parents=True)
     (run / "inferencex_result.json").write_text(json.dumps({"output_throughput": 1403.43}), encoding="utf-8")
@@ -123,7 +123,7 @@ def test_measurement_identity_invalidates_when_removal_control_changes(
     tmp_path: Path, field: str, value: object
 ) -> None:
     state = _verified_current_best(tmp_path)
-    identity = state.current_best["measurement"]["launch_identity"]
+    identity = state.current_best_measurement["declared_launch_identity"]
 
     state.current_best[field] = value
 
@@ -156,9 +156,9 @@ def test_measurement_identity_invalidates_when_current_best_config_changes(tmp_p
     )
     writer = _writeback(tmp_path, state)
     writer._stamp_current_best_measurement()
-    identity = state.current_best["measurement"]["launch_identity"]
+    identity = state.current_best["measurement"]["declared_launch_identity"]
 
-    assert state.current_best_measurement["launch_identity"] == identity
+    assert state.current_best_measurement["declared_launch_identity"] == identity
     state.current_best["extra_server_args"] = "--block-size 64"
 
     assert writer.build_env_spec()["launch_identity"] != identity
@@ -177,7 +177,7 @@ def test_measurement_identity_invalidates_when_launch_controls_change(tmp_path: 
     state = SharedState(current_best={"tput": 100.0, "extra_server_args": "", "optimization_stack": []})
     writer = _writeback(tmp_path, state)
     writer._stamp_current_best_measurement()
-    identity = state.current_best_measurement["launch_identity"]
+    identity = state.current_best_measurement["declared_launch_identity"]
 
     state.current_best.update(control)
 
@@ -204,7 +204,7 @@ def test_measurement_identity_invalidates_when_recipe_content_changes(tmp_path: 
     )
     writer = _writeback(tmp_path, state)
     writer._stamp_current_best_measurement()
-    identity = state.current_best_measurement["launch_identity"]
+    identity = state.current_best_measurement["declared_launch_identity"]
 
     recipe.write_text("benchmark: {model: /models/b}\n", encoding="utf-8")
 
@@ -220,7 +220,7 @@ def test_measurement_identity_survives_recipe_repath_with_identical_content(tmp_
     )
     writer = _writeback(tmp_path, state)
     writer._stamp_current_best_measurement()
-    identity = state.current_best_measurement["launch_identity"]
+    identity = state.current_best_measurement["declared_launch_identity"]
 
     # A baseline re-run materializes the same recipe at a fresh timestamped path.
     second = tmp_path / "baseline.20260901T020202Z.yaml"
@@ -264,6 +264,18 @@ async def test_handoff_rejects_stale_tput_without_matching_measurement(
     assert handoff["orchestrator_best_tput_same_config"] == 0.0
 
 
+async def _sglang_geak_handoff(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: SharedState) -> dict:
+    """Run the sglang GEAK kernel phase over ``state`` up to the launch; return the handoff it wrote."""
+    coord = Coordinator.__new__(Coordinator)
+    coord.session_dir = tmp_path
+    coord.shared_state = state
+    coord._record_geak_kernel_journey = lambda _result: None
+    monkeypatch.setenv("FRAMEWORK", "sglang")
+    stop_geak_before_launch(monkeypatch)
+    await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
+    return json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
+
+
 @pytest.mark.parametrize("with_removal_controls", [False, True], ids=["plain", "removal_controls"])
 @pytest.mark.asyncio
 async def test_handoff_uses_only_matching_current_best_measurement(
@@ -280,7 +292,7 @@ async def test_handoff_uses_only_matching_current_best_measurement(
         else {}
     )
     state.current_best.update(controls)
-    state.current_best["measurement"]["launch_identity"] = _writeback(tmp_path, state).build_env_spec()[
+    state.current_best_measurement["declared_launch_identity"] = _writeback(tmp_path, state).build_env_spec()[
         "launch_identity"
     ]
     state.model_path = "/models/glm"
@@ -288,17 +300,7 @@ async def test_handoff_uses_only_matching_current_best_measurement(
     state.isl = 8192
     state.osl = 1024
     state.conc = 64
-    coord = Coordinator.__new__(Coordinator)
-    coord.session_dir = tmp_path
-    coord.shared_state = state
-    coord._record_geak_kernel_journey = lambda _result: None
-    monkeypatch.setenv("FRAMEWORK", "sglang")
-
-    stop_geak_before_launch(monkeypatch)
-
-    await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
-
-    handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
+    handoff = await _sglang_geak_handoff(tmp_path, monkeypatch, state)
     assert handoff["same_config_reference_status"] == "verified"
     assert handoff["same_config_reference_verification_status"] == "verified_observed"
     assert handoff["orchestrator_best_tput_same_config"] == pytest.approx(1403.43)
@@ -311,7 +313,7 @@ async def test_handoff_marks_declared_only_identity_without_faking_observation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     state = _verified_current_best(tmp_path)
-    measurement = state.current_best["measurement"]
+    measurement = state.current_best_measurement
     measurement["resolved_server_launch_flags"] = ""
     measurement["launch_evidence"] = {
         "schema_version": 1,
@@ -322,18 +324,8 @@ async def test_handoff_marks_declared_only_identity_without_faking_observation(
         "actual_server_log_path": "",
         "observed_server_launch_flags": "",
     }
-    measurement["launch_identity"] = _writeback(tmp_path, state).build_env_spec()["launch_identity"]
-    coord = Coordinator.__new__(Coordinator)
-    coord.session_dir = tmp_path
-    coord.shared_state = state
-    coord._record_geak_kernel_journey = lambda _result: None
-    monkeypatch.setenv("FRAMEWORK", "sglang")
-
-    stop_geak_before_launch(monkeypatch)
-
-    await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
-
-    handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
+    measurement["declared_launch_identity"] = _writeback(tmp_path, state).build_env_spec()["launch_identity"]
+    handoff = await _sglang_geak_handoff(tmp_path, monkeypatch, state)
     assert handoff["same_config_reference_status"] == "unverified"
     assert handoff["same_config_reference_verification_status"] == "verified_declared_only"
     assert handoff["same_config_reference_observed_identity"] == ""
@@ -346,21 +338,11 @@ async def test_handoff_does_not_verify_matching_identity_without_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     state = _verified_current_best(tmp_path)
-    measurement = state.current_best["measurement"]
+    measurement = state.current_best_measurement
     measurement["resolved_server_launch_flags"] = ""
     measurement.pop("launch_evidence", None)
-    measurement["launch_identity"] = _writeback(tmp_path, state).build_env_spec()["launch_identity"]
-    coord = Coordinator.__new__(Coordinator)
-    coord.session_dir = tmp_path
-    coord.shared_state = state
-    coord._record_geak_kernel_journey = lambda _result: None
-    monkeypatch.setenv("FRAMEWORK", "sglang")
-
-    stop_geak_before_launch(monkeypatch)
-
-    await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
-
-    handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
+    measurement["declared_launch_identity"] = _writeback(tmp_path, state).build_env_spec()["launch_identity"]
+    handoff = await _sglang_geak_handoff(tmp_path, monkeypatch, state)
     assert handoff["same_config_reference_status"] == "unverified"
     assert handoff["same_config_reference_verification_status"] == "unverified"
     assert handoff["orchestrator_best_tput_same_config"] == 0.0
@@ -371,7 +353,7 @@ async def test_handoff_exposes_archived_sglang_observed_identity_map(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     state = _verified_current_best(tmp_path)
-    measurement = state.current_best["measurement"]
+    measurement = state.current_best_measurement
     measurement["resolved_server_launch_flags"] = ""
     measurement["launch_evidence"] = {
         "schema_version": 1,
@@ -386,17 +368,8 @@ async def test_handoff_exposes_archived_sglang_observed_identity_map(
             "tp_size": 8,
         },
     }
-    measurement["launch_identity"] = _writeback(tmp_path, state).build_env_spec()["launch_identity"]
-    coord = Coordinator.__new__(Coordinator)
-    coord.session_dir = tmp_path
-    coord.shared_state = state
-    coord._record_geak_kernel_journey = lambda _result: None
-    monkeypatch.setenv("FRAMEWORK", "sglang")
-
-    stop_geak_before_launch(monkeypatch)
-    await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
-
-    handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
+    measurement["declared_launch_identity"] = _writeback(tmp_path, state).build_env_spec()["launch_identity"]
+    handoff = await _sglang_geak_handoff(tmp_path, monkeypatch, state)
     expected = measurement["launch_evidence"]["observed_server_identity"]
     assert handoff["same_config_reference_verification_status"] == "verified_observed"
     assert handoff["same_config_observed_identity"] == expected
@@ -409,7 +382,7 @@ async def test_handoff_hashes_observed_identity_from_server_args_alone(
 ) -> None:
     """A ServerArgs line proves observation even without an argv trace."""
     state = _verified_current_best(tmp_path)
-    measurement = state.current_best["measurement"]
+    measurement = state.current_best_measurement
     measurement["resolved_server_launch_flags"] = ""
     measurement["launch_evidence"] = {
         "schema_version": 1,
@@ -419,17 +392,8 @@ async def test_handoff_hashes_observed_identity_from_server_args_alone(
         "observed_server_launch_flags": "",
         "observed_server_identity": {"model_path": "/models/qwen", "tp_size": 8},
     }
-    measurement["launch_identity"] = _writeback(tmp_path, state).build_env_spec()["launch_identity"]
-    coord = Coordinator.__new__(Coordinator)
-    coord.session_dir = tmp_path
-    coord.shared_state = state
-    coord._record_geak_kernel_journey = lambda _result: None
-    monkeypatch.setenv("FRAMEWORK", "sglang")
-
-    stop_geak_before_launch(monkeypatch)
-    await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
-
-    handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
+    measurement["declared_launch_identity"] = _writeback(tmp_path, state).build_env_spec()["launch_identity"]
+    handoff = await _sglang_geak_handoff(tmp_path, monkeypatch, state)
     assert handoff["same_config_reference_verification_status"] == "verified_observed"
     assert handoff["same_config_reference_observed_identity"].startswith("sha256:")
     assert handoff["orchestrator_best_tput_same_config"] == pytest.approx(1403.43)
@@ -519,7 +483,7 @@ def test_env_spec_does_not_probe_measurement_workspace_parent(tmp_path: Path, mo
         "+ python -m sglang.launch_server --model-path /wrong --speculative-algorithm NEXTN\n",
         encoding="utf-8",
     )
-    state.current_best["measurement"] = {
+    state.current_best_measurement = {
         "tput": 1403.43,
         "benchmark_workspace": str(workspace),
     }

@@ -13,7 +13,7 @@ from hyperloom.orchestrator.framework.artifacts import candidate_key
 from hyperloom.orchestrator.state.task_registry import Task
 
 from .conftest import make_coordinator
-from hyperloom.orchestrator.phases.framework import ProgressStamp
+from hyperloom.orchestrator.phases.framework_records import ProgressStamp
 
 
 def test_candidate_key_precedence_and_fallbacks():

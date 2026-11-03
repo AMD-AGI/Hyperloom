@@ -78,7 +78,7 @@ def test_plan_built_for_known_sha(xdit_tree, monkeypatch):
     monkeypatch.setenv("XDIT_PATH", str(source))
     monkeypatch.setenv("TRACELENS_ROOT", str(tracelens))
     with patch.object(sp, "_git_head_sha", return_value=_KNOWN_SHA):
-        plan = sp._discover_xdit_plan(tracelens)
+        plan = sp._discover_xdit_plan()
     assert plan is not None
     assert plan.framework == "xdit"
     assert plan.version == "26.7"
@@ -86,34 +86,36 @@ def test_plan_built_for_known_sha(xdit_tree, monkeypatch):
 
 def test_skip_when_source_root_missing(tmp_path, monkeypatch):
     monkeypatch.setenv("XDIT_PATH", str(tmp_path / "nonexistent"))
-    assert sp._discover_xdit_plan(tmp_path) is None
+    assert sp._discover_xdit_plan() is None
 
 
 def test_skip_when_sha_unreadable(xdit_tree, monkeypatch):
-    source, tracelens = xdit_tree
+    source, _tracelens = xdit_tree
     monkeypatch.setenv("XDIT_PATH", str(source))
     with patch.object(sp, "_git_head_sha", return_value=""):
-        assert sp._discover_xdit_plan(tracelens) is None
+        assert sp._discover_xdit_plan() is None
 
 
 def test_skip_when_sha_unknown(xdit_tree, monkeypatch):
-    source, tracelens = xdit_tree
+    source, _tracelens = xdit_tree
     monkeypatch.setenv("XDIT_PATH", str(source))
     with patch.object(sp, "_git_head_sha", return_value="deadbeef" * 5):
-        assert sp._discover_xdit_plan(tracelens) is None
+        assert sp._discover_xdit_plan() is None
 
 
-def test_skip_when_tracelens_root_missing(xdit_tree, monkeypatch):
+def test_skip_when_tracelens_root_missing(xdit_tree, monkeypatch, tmp_path):
     source, _tracelens = xdit_tree
     monkeypatch.setenv("XDIT_PATH", str(source))
     monkeypatch.delenv("TRACELENS_ROOT", raising=False)
+    monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "empty-cache"))
     with patch.object(sp, "_git_head_sha", return_value=_KNOWN_SHA):
-        assert sp._discover_xdit_plan(None) is None
+        assert sp._discover_xdit_plan() is None
 
 
 def test_skip_when_sentinel_missing(xdit_tree, monkeypatch):
     source, tracelens = xdit_tree
     monkeypatch.setenv("XDIT_PATH", str(source))
+    monkeypatch.setenv("TRACELENS_ROOT", str(tracelens))
     (source / "xfuser" / "config" / "args.py").unlink()
     with patch.object(sp, "_git_head_sha", return_value=_KNOWN_SHA):
-        assert sp._discover_xdit_plan(tracelens) is None
+        assert sp._discover_xdit_plan() is None

@@ -12,11 +12,13 @@ from unittest.mock import patch
 
 import pytest
 
-from hyperloom.orchestrator.actions.executors.baseline import (
-    BaselineExecutor,
-    _apply_warm_patches,
+from hyperloom.orchestrator.actions.executors._patch_snapshot import (
     _create_patch_snapshot,
     _restore_patch_snapshot,
+)
+from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
+from hyperloom.orchestrator.actions.executors.benchmark_run.warm_patches import (
+    _apply_warm_patches,
     _revert_legacy_warm_patch_trees,
     _revert_patches,
     _revert_warm_patch_state,
@@ -910,7 +912,7 @@ def test_legacy_patch_skips_when_rollback_snapshot_fails(
         raise OSError("snapshot unavailable")
 
     monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors.baseline._create_patch_snapshot",
+        "hyperloom.orchestrator.actions.executors.benchmark_run.warm_patches._create_patch_snapshot",
         _fail_snapshot,
     )
 

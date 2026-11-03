@@ -15,7 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
 
-from hyperloom.common.unified_diff import parse_unified_diff
+from hyperloom_common.unified_diff import parse_unified_diff
+from hyperloom.inference_optimizer.session import paths
 
 from ._file_lock import best_effort_file_lock
 from ._git import _git_head_sha
@@ -258,26 +259,22 @@ def _resolve_versioned_patches_dir(
 # Public API
 
 
-def ensure_vllm_patched_for_tracelens(
-    tracelens_root: Path | str | None = None,
-) -> bool:
+def ensure_vllm_patched_for_tracelens() -> bool:
     """Ensure the installed vLLM accepts the TraceLens profiler flags."""
     install = _discover_vllm_install()
     if install is None:
         return False
-    plan = _discover_vllm_plan(tracelens_root, install=install)
+    plan = _discover_vllm_plan(install=install)
     if plan is None:
         return False
     return _ensure_patched(plan)
 
 
-def ensure_sglang_patched_for_tracelens(
-    tracelens_root: Path | str | None = None,
-) -> bool:
+def ensure_sglang_patched_for_tracelens() -> bool:
     """Apply the roofline set (< 0.5.18) or ``sglang_gc_patch`` (>= 0.5.18)."""
     if resolve_sglang_shape_mode() == "sitecustomize":
-        return _ensure_sglang_gc_patched(tracelens_root)
-    plan = _discover_sglang_plan(tracelens_root)
+        return _ensure_sglang_gc_patched()
+    plan = _discover_sglang_plan()
     if plan is None:
         return False
     return _ensure_patched(plan)
@@ -286,7 +283,6 @@ def ensure_sglang_patched_for_tracelens(
 # SGLang shape-discovery gate: >= 0.5.18 uses the no-patch TraceLens tool
 # (PYTHONPATH + sitecustomize + TRACELENS_SHAPE_DISCOVERY); older uses git-apply.
 _SGLANG_SITECUSTOMIZE_MIN_VERSION: tuple[int, ...] = (0, 5, 18)
-_SGLANG_SHAPE_MODE_ENV = "HYPERLOOM_SGLANG_SHAPE_MODE"
 # No-patch tool location, relative to TRACELENS_ROOT.
 _KERNEL_SHAPE_TOOL_REL: tuple[str, ...] = ("TraceLens", "TraceUtils", "kernel_shape_tool")
 
@@ -296,14 +292,7 @@ def sglang_shape_mode(version: str) -> str:
 
     ``"sitecustomize"`` (>= 0.5.18) uses the no-patch TraceLens tool;
     ``"patched"`` (< 0.5.18) uses the legacy ``git apply`` flow.
-    ``HYPERLOOM_SGLANG_SHAPE_MODE=patch|sitecustomize`` overrides the gate
-    (``auto`` / unset = version-based).
     """
-    override = os.environ.get(_SGLANG_SHAPE_MODE_ENV, "auto").strip().lower()
-    if override in {"patch", "patched"}:
-        return "patched"
-    if override == "sitecustomize":
-        return "sitecustomize"
     vt = _version_tuple(version)
     if vt is None:
         # Unparseable version: keep the safe legacy mechanism.
@@ -311,9 +300,9 @@ def sglang_shape_mode(version: str) -> str:
     return "sitecustomize" if vt >= _SGLANG_SITECUSTOMIZE_MIN_VERSION else "patched"
 
 
-def kernel_shape_tool_dir(tracelens_root: Path | str | None = None) -> Path | None:
+def kernel_shape_tool_dir() -> Path | None:
     """Resolve the no-patch ``kernel_shape_tool`` dir under TRACELENS_ROOT, or None."""
-    root = _resolve_tracelens_root(tracelens_root)
+    root = _resolve_tracelens_root()
     if root is None:
         return None
     tool = root.joinpath(*_KERNEL_SHAPE_TOOL_REL)
@@ -330,11 +319,11 @@ def _detect_installed_sglang_version() -> str | None:
 
 
 def resolve_sglang_shape_mode() -> str:
-    """Resolve the SGLang shape mode from override -> local install -> MN version pin.
+    """Resolve the SGLang shape mode from the local install, else the MN version pin.
 
-    ``HYPERLOOM_SGLANG_SHAPE_MODE`` wins; otherwise the version comes from the
-    locally-installed SGLang (single-node / sandbox) or, when SGLang is not
-    importable in the controller (multi-node), ``HYPERLOOM_SGLANG_VERSION_PIN``.
+    The version comes from the locally-installed SGLang (single-node / sandbox)
+    or, when SGLang is not importable in the controller (multi-node),
+    ``HYPERLOOM_SGLANG_VERSION_PIN``.
     Falls back to ``"patched"`` (legacy) when the version cannot be determined.
     """
     version = _detect_installed_sglang_version() or os.environ.get("HYPERLOOM_SGLANG_VERSION_PIN", "").strip()
@@ -345,7 +334,7 @@ def resolve_sglang_patch_set() -> str:
     """Patch set the multi-node pods must apply: ``graph-capture`` in sitecustomize mode, else ``roofline``.
 
     Resolved on the controller and passed to every pod, which cannot see the
-    controller's env (override / version pin) and would otherwise decide alone.
+    controller's version pin and would otherwise decide alone.
     """
     return "graph-capture" if resolve_sglang_shape_mode() == "sitecustomize" else "roofline"
 
@@ -357,9 +346,7 @@ def _gc_patch_deferred_to_pods() -> bool:
     return is_multi_node()
 
 
-def _ensure_sglang_gc_patched(
-    tracelens_root: Path | str | None = None,
-) -> bool:
+def _ensure_sglang_gc_patched() -> bool:
     """Git-apply ``sglang_gc_patch`` onto the installed SGLang tree."""
     version = _detect_installed_sglang_version()
     if version is None:
@@ -373,15 +360,13 @@ def _ensure_sglang_gc_patched(
     vt = _version_tuple(version)
     if vt is not None and vt < _SGLANG_SITECUSTOMIZE_MIN_VERSION:
         return True
-    plan = _discover_sglang_gc_plan(tracelens_root, version)
+    plan = _discover_sglang_gc_plan(version)
     if plan is None:
         return False
     return _ensure_patched(plan)
 
 
-def ensure_xdit_patched_for_tracelens(
-    tracelens_root: Path | str | None = None,
-) -> bool:
+def ensure_xdit_patched_for_tracelens() -> bool:
     """Apply TraceLens profiling patches to the xDiT installation.
 
     xDiT is an editable install at ``/app/xDiT`` (no pip version);
@@ -390,7 +375,7 @@ def ensure_xdit_patched_for_tracelens(
     The nearest-lower fallback applies only when a known version
     has no exact patch file.
     """
-    plan = _discover_xdit_plan(tracelens_root)
+    plan = _discover_xdit_plan()
     if plan is None:
         return False
     return _ensure_patched(plan)
@@ -422,7 +407,7 @@ def _resolve_xdit_patch_file(patches_dir: Path, version: str) -> Path | None:
     return None
 
 
-def _discover_xdit_plan(arg: Path | str | None) -> _PatchPlan | None:
+def _discover_xdit_plan() -> _PatchPlan | None:
     """Build the xDiT patch plan for the installed xDiT version.
 
     Only attempts patching when the HEAD SHA matches a known image.
@@ -446,7 +431,7 @@ def _discover_xdit_plan(arg: Path | str | None) -> _PatchPlan | None:
         )
         return None
 
-    tracelens_root = _resolve_tracelens_root(arg)
+    tracelens_root = _resolve_tracelens_root()
     if tracelens_root is None:
         log.info("_server_patcher: TRACELENS_ROOT unset/missing — skip xDiT patch")
         return None
@@ -538,15 +523,9 @@ def _patch_set_writes(targets: frozenset[str], parts: tuple[str, ...]) -> bool:
     return any(target.endswith(suffix) for target in targets)
 
 
-def _resolve_tracelens_root(arg: Path | str | None) -> Path | None:
-    """Resolve TRACELENS_ROOT from arg → env → None; fail-soft when unset or missing on disk."""
-    if arg:
-        root = Path(arg)
-    else:
-        env = os.environ.get("TRACELENS_ROOT", "").strip()
-        if not env:
-            return None
-        root = Path(env)
+def _resolve_tracelens_root() -> Path | None:
+    """Resolve :func:`paths.tracelens_root`; ``None`` when it is not on disk."""
+    root = paths.tracelens_root()
     return root if root.is_dir() else None
 
 
@@ -684,21 +663,14 @@ def _discover_vllm_install() -> tuple[str, Path] | None:
     return version, install_root
 
 
-def _discover_vllm_plan(
-    arg: Path | str | None,
-    *,
-    install: tuple[str, Path] | None = None,
-) -> _PatchPlan | None:
+def _discover_vllm_plan(*, install: tuple[str, Path]) -> _PatchPlan | None:
     """Build the vLLM patch plan for the installed vLLM version."""
-    tracelens_root = _resolve_tracelens_root(arg)
+    tracelens_root = _resolve_tracelens_root()
     if tracelens_root is None:
         log.info("_server_patcher: TRACELENS_ROOT (public) unset/missing — skip vLLM patch")
         return None
 
-    resolved = install if install is not None else _discover_vllm_install()
-    if resolved is None:
-        return None
-    version, install_root = resolved
+    version, install_root = install
 
     patches_dir = _patch_tree(tracelens_root, "vllm_patches")
     patch_file = _resolve_vllm_patch_file(patches_dir, version)
@@ -749,9 +721,9 @@ def _discover_vllm_plan(
 _SGLANG_OPTIONAL_PATCH_MARKERS = ("eagle",)
 
 
-def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
+def _discover_sglang_plan() -> _PatchPlan | None:
     """Build the SGLang patch plan for the installed SGLang version."""
-    tracelens_root = _resolve_tracelens_root(arg)
+    tracelens_root = _resolve_tracelens_root()
     if tracelens_root is None:
         log.warning(
             "_server_patcher: TRACELENS_ROOT (public) unset/missing — skip SGLang patch "
@@ -784,30 +756,8 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
         return None
     apply_root, apply_strip = apply_resolution
 
-    # Per-version subdir layout required.
-    patches_dir = _resolve_versioned_patches_dir(patches_root, version, apply_root)
+    patches_dir = _supported_sglang_patches_dir(patches_root, version, apply_root)
     if patches_dir is None:
-        log.warning(
-            "_server_patcher: no SGLang patches found under %s/%s/ for "
-            "version %s; upgrade TraceLens to Hyperloom_integration_v0.3.1+ — "
-            "kernel shape profiling will be unavailable",
-            patches_root,
-            _versioned_patches_subdir_name(version, apply_root) or "<unknown>",
-            version,
-        )
-        return None
-
-    if not _version_accepted(version, patches_dir=patches_dir):
-        log.warning(
-            "_server_patcher: SGLang %s not in supported version list "
-            "(consulted: $HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS, "
-            "$HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS, %s/SUPPORTED_VERSIONS, "
-            "then built-in minor allowlist %s); skip — kernel shape profiling "
-            "will be unavailable",
-            version,
-            patches_dir,
-            _SGLANG_DEFAULT_ALLOWED_MINORS,
-        )
         return None
     patches = tuple(sorted(patches_dir.glob("*.patch")))
     if not patches:
@@ -843,6 +793,36 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
     )
 
 
+def _supported_sglang_patches_dir(patches_root: Path, version: str, apply_root: Path) -> Path | None:
+    """The versioned SGLang patches dir, or ``None`` (logged) when absent or the version is unsupported."""
+    # Per-version subdir layout required.
+    patches_dir = _resolve_versioned_patches_dir(patches_root, version, apply_root)
+    if patches_dir is None:
+        log.warning(
+            "_server_patcher: no SGLang patches found under %s/%s/ for "
+            "version %s; upgrade TraceLens to Hyperloom_integration_v0.3.1+ — "
+            "kernel shape profiling will be unavailable",
+            patches_root,
+            _versioned_patches_subdir_name(version, apply_root) or "<unknown>",
+            version,
+        )
+        return None
+
+    if not _version_accepted(version, patches_dir=patches_dir):
+        log.warning(
+            "_server_patcher: SGLang %s not in supported version list "
+            "(consulted: $HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS, "
+            "$HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS, %s/SUPPORTED_VERSIONS, "
+            "then built-in minor allowlist %s); skip — kernel shape profiling "
+            "will be unavailable",
+            version,
+            patches_dir,
+            _SGLANG_DEFAULT_ALLOWED_MINORS,
+        )
+        return None
+    return patches_dir
+
+
 def _resolve_sglang_apply_root(sglang_module: Path) -> tuple[Path, int] | None:
     """Pick ``(apply_root, strip_count)`` for the active SGLang install."""
     if sglang_module.parent.parent.name == "python":
@@ -864,17 +844,14 @@ _SGLANG_GC_SENTINELS: tuple[str, ...] = (
 )
 
 
-def _discover_sglang_gc_plan(
-    arg: Path | str | None,
-    version: str,
-) -> _PatchPlan | None:
+def _discover_sglang_gc_plan(version: str) -> _PatchPlan | None:
     """Build the ``sglang_gc_patch`` plan for an exact ``sglang_<X_Y_Z>`` dir; strict ``git apply`` only.
 
     No nearest-version fallback and no fuzzy apply: the patch adds an unconditional
     ``_set_profile_trace_tag`` call to the capture loop, so a drifted apply could
     break CUDA-graph capture, and newer releases may already carry the upstream fix.
     """
-    tracelens_root = _resolve_tracelens_root(arg)
+    tracelens_root = _resolve_tracelens_root()
     if tracelens_root is None:
         log.warning(
             "_server_patcher: TRACELENS_ROOT unset/missing — skip SGLang graph-capture "
@@ -988,75 +965,8 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
     # fallback; if neither accepts a patch the whole set fail-softs.
     strip_arg = f"-p{plan.apply_strip}"
 
-    apply_modes: dict[Path, str] = {}
-    for p in plan.patches:
-        if _git(git, ("apply", "--check", strip_arg, str(p)), plan.apply_root):
-            apply_modes[p] = "git"
-            continue
-        if patch_bin and _patch_dry_run(patch_bin, p, plan.apply_root, plan.apply_strip):
-            log.warning(
-                "_server_patcher: %s patch %s did not apply cleanly with "
-                "`git apply --check %s`; falling back to `patch %s --fuzz=2` "
-                "(TraceLens patch may lag deployed %s by a point release)",
-                plan.framework,
-                p.name,
-                strip_arg,
-                strip_arg,
-                plan.framework,
-            )
-            apply_modes[p] = "patch"
-            continue
-        # Forward apply fails: check whether this patch is ALREADY APPLIED (a clean ``git apply -R --check`` succeeds
-        # iff the tree already contains its post-image).
-        if _git(git, ("apply", "-R", "--check", strip_arg, str(p)), plan.apply_root):
-            log.info(
-                "_server_patcher: %s patch %s already applied (reverse "
-                "`git apply -R --check %s` is clean); skipping it from the "
-                "transaction so the remaining patches still apply",
-                plan.framework,
-                p.name,
-                strip_arg,
-            )
-            apply_modes[p] = "skip"
-            continue
-        # Symmetric check for patches previously applied via fuzzy `patch` (git reverse may fail on fuzzy-applied
-        # hunks).
-        if patch_bin and _patch_reverse_dry_run(
-            patch_bin,
-            p,
-            plan.apply_root,
-            plan.apply_strip,
-        ):
-            log.info(
-                "_server_patcher: %s patch %s already applied (fuzzy reverse dry-run clean); skipping it",
-                plan.framework,
-                p.name,
-            )
-            apply_modes[p] = "skip"
-            continue
-        if p.name in plan.optional_patches:
-            log.warning(
-                "_server_patcher: optional %s patch %s does not apply "
-                "(`git apply --check %s` + fuzzy both failed, not already "
-                "applied) — skipping it so the critical patches still apply "
-                "atomically (version %s; non-critical to kernel shape profiling)",
-                plan.framework,
-                p.name,
-                strip_arg,
-                plan.version,
-            )
-            apply_modes[p] = "skip"
-            continue
-        log.warning(
-            "_server_patcher: `git apply --check %s` AND fuzzy `patch %s "
-            "--dry-run` both failed for %s (version %s, patch %s), and it is "
-            "not already applied (reverse check failed); fail-soft skip",
-            strip_arg,
-            strip_arg,
-            plan.framework,
-            plan.version,
-            p.name,
-        )
+    apply_modes = _precheck_apply_modes(plan, git, patch_bin, strip_arg)
+    if apply_modes is None:
         return False
 
     applied: list[tuple[Path, str]] = []
@@ -1091,17 +1001,7 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
         _rollback_applied(applied, plan, git, patch_bin, strip_arg)
         return False
 
-    fuzzy_count = sum(1 for _, mode in applied if mode == "patch")
-    log.info(
-        "_server_patcher: applied %d patch(es) for %s %s "
-        "(strict=%d, fuzzy=%d, already-applied/skipped=%d) (issue #194 §4/§5)",
-        len(applied),
-        plan.framework,
-        plan.version,
-        len(applied) - fuzzy_count,
-        fuzzy_count,
-        skipped,
-    )
+    _log_applied(plan, applied, skipped)
     # Post-apply sentinel verification: confirm all sentinel markers are present (catches all-skipped,
     # semantically-wrong fuzzy apply, or missing annotation-pipeline markers).
     if not _is_patched(plan):
@@ -1120,6 +1020,102 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
         _rollback_applied(applied, plan, git, patch_bin, strip_arg)
         return False
     return True
+
+
+def _precheck_apply_modes(plan: _PatchPlan, git: str, patch_bin: str | None, strip_arg: str) -> dict[Path, str] | None:
+    """Pick each patch's apply mode (``git``, ``patch`` or ``skip``), or ``None`` when one cannot apply."""
+    apply_modes: dict[Path, str] = {}
+    for p in plan.patches:
+        if _git(git, ("apply", "--check", strip_arg, str(p)), plan.apply_root):
+            apply_modes[p] = "git"
+            continue
+        if patch_bin and _patch_dry_run(patch_bin, p, plan.apply_root, plan.apply_strip):
+            log.warning(
+                "_server_patcher: %s patch %s did not apply cleanly with "
+                "`git apply --check %s`; falling back to `patch %s --fuzz=2` "
+                "(TraceLens patch may lag deployed %s by a point release)",
+                plan.framework,
+                p.name,
+                strip_arg,
+                strip_arg,
+                plan.framework,
+            )
+            apply_modes[p] = "patch"
+            continue
+        if _already_applied(plan, git, patch_bin, strip_arg, p):
+            apply_modes[p] = "skip"
+            continue
+        if p.name in plan.optional_patches:
+            log.warning(
+                "_server_patcher: optional %s patch %s does not apply "
+                "(`git apply --check %s` + fuzzy both failed, not already "
+                "applied) — skipping it so the critical patches still apply "
+                "atomically (version %s; non-critical to kernel shape profiling)",
+                plan.framework,
+                p.name,
+                strip_arg,
+                plan.version,
+            )
+            apply_modes[p] = "skip"
+            continue
+        log.warning(
+            "_server_patcher: `git apply --check %s` AND fuzzy `patch %s "
+            "--dry-run` both failed for %s (version %s, patch %s), and it is "
+            "not already applied (reverse check failed); fail-soft skip",
+            strip_arg,
+            strip_arg,
+            plan.framework,
+            plan.version,
+            p.name,
+        )
+        return None
+    return apply_modes
+
+
+def _already_applied(plan: _PatchPlan, git: str, patch_bin: str | None, strip_arg: str, p: Path) -> bool:
+    """Whether the tree already holds patch ``p``'s post-image, by a strict or fuzzy reverse dry-run."""
+    # Forward apply fails: check whether this patch is ALREADY APPLIED (a clean ``git apply -R --check`` succeeds
+    # iff the tree already contains its post-image).
+    if _git(git, ("apply", "-R", "--check", strip_arg, str(p)), plan.apply_root):
+        log.info(
+            "_server_patcher: %s patch %s already applied (reverse "
+            "`git apply -R --check %s` is clean); skipping it from the "
+            "transaction so the remaining patches still apply",
+            plan.framework,
+            p.name,
+            strip_arg,
+        )
+        return True
+    # Symmetric check for patches previously applied via fuzzy `patch` (git reverse may fail on fuzzy-applied
+    # hunks).
+    if patch_bin and _patch_reverse_dry_run(
+        patch_bin,
+        p,
+        plan.apply_root,
+        plan.apply_strip,
+    ):
+        log.info(
+            "_server_patcher: %s patch %s already applied (fuzzy reverse dry-run clean); skipping it",
+            plan.framework,
+            p.name,
+        )
+        return True
+    return False
+
+
+def _log_applied(plan: _PatchPlan, applied: list[tuple[Path, str]], skipped: int) -> None:
+    """Log how many patches of ``plan`` applied strictly, fuzzily, or were already present."""
+    fuzzy_count = sum(1 for _, mode in applied if mode == "patch")
+    log.info(
+        "_server_patcher: applied %d patch(es) for %s %s "
+        "(strict=%d, fuzzy=%d, already-applied/skipped=%d) (issue #194 §4/§5)",
+        len(applied),
+        plan.framework,
+        plan.version,
+        len(applied) - fuzzy_count,
+        fuzzy_count,
+        skipped,
+    )
 
 
 def _rollback_applied(

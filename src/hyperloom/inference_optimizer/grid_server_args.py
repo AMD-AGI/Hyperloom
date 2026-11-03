@@ -13,7 +13,7 @@ import shlex
 from dataclasses import dataclass
 from typing import Any
 
-from hyperloom.common.coerce import optional_positive_int, to_str_list
+from hyperloom_common.coerce import optional_positive_int, to_str_list
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 
 
@@ -89,6 +89,50 @@ def _split_args_preserving_json(text: str) -> list[str] | None:
     return [_unwrap_shell_quotes(tok) for tok in tokens]
 
 
+def _parse_removal_specs(remove_args: Any) -> list[tuple[str, str | None]]:
+    """Parse removal specs into ``(flag, value)`` pairs, in the order they are written.
+
+    One entry may name several options (``"--a --b"``), and a removal may be scoped to a value
+    (``"--a 8"``, ``"--a=8"``); a bare flag parses as ``(flag, None)`` and drops every copy of it.
+    """
+    parsed: list[tuple[str, str | None]] = []
+    for spec in to_str_list(remove_args):
+        spec_tokens = _split_args_preserving_json(spec)
+        if spec_tokens is None:
+            spec_tokens = spec.split()
+        i = 0
+        while i < len(spec_tokens):
+            tok = spec_tokens[i]
+            if not tok.startswith("--"):
+                i += 1
+                continue
+            if "=" in tok:
+                flag, _, value = tok.partition("=")
+                parsed.append((flag, value))
+                i += 1
+            elif i + 1 < len(spec_tokens) and not spec_tokens[i + 1].startswith("--"):
+                parsed.append((tok, spec_tokens[i + 1]))
+                i += 2
+            else:
+                parsed.append((tok, None))
+                i += 1
+    return parsed
+
+
+def removal_option_names(remove_args: Any) -> list[str]:
+    """The bare long option names a removal spec names, in order, each one once.
+
+    Only for a consumer whose contract is option names, such as Magpie's ``launch_overrides.remove_args``:
+    the value a spec is scoped to is dropped here, so this must not stand in for a removal composed against
+    args we build ourselves -- ``remove_server_args`` keeps the scope there.
+    """
+    names: list[str] = []
+    for flag, _value in _parse_removal_specs(remove_args):
+        if flag not in names:
+            names.append(flag)
+    return names
+
+
 def _removed_token_count(tokens: list[str], index: int, removals: set[tuple[str, str | None]]) -> int:
     """Count the tokens at *index* that *removals* deletes; 0 when the token survives."""
     tok = tokens[index]
@@ -121,27 +165,7 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
     if tokens is None:
         return args
 
-    removals: set[tuple[str, str | None]] = set()
-    for spec in removes:
-        spec_tokens = _split_args_preserving_json(spec)
-        if spec_tokens is None:
-            spec_tokens = spec.split()
-        i = 0
-        while i < len(spec_tokens):
-            tok = spec_tokens[i]
-            if not tok.startswith("--"):
-                i += 1
-                continue
-            if "=" in tok:
-                flag, _, value = tok.partition("=")
-                removals.add((flag, value))
-                i += 1
-            elif i + 1 < len(spec_tokens) and not spec_tokens[i + 1].startswith("--"):
-                removals.add((tok, spec_tokens[i + 1]))
-                i += 2
-            else:
-                removals.add((tok, None))
-                i += 1
+    removals: set[tuple[str, str | None]] = set(_parse_removal_specs(removes))
 
     out: list[str] = []
     i = 0
@@ -365,6 +389,14 @@ _MULTI_VALUE_FLAGS = (
     "--cuda-graph-max-bs",
 )
 
+# Canonical flag names (as ``flag_occurrences`` spells them) for the launch settings read in more than one place.
+SPECULATIVE_CONFIG_FLAG = "speculative-config"
+SPECULATIVE_CONFIG_KEY_PREFIX = f"{SPECULATIVE_CONFIG_FLAG}."
+# One argparse destination the engines spell three ways, so the last of them is the tensor parallel size they run.
+TENSOR_PARALLEL_FLAGS = frozenset({"tensor-parallel-size", "tp", "tp-size"})
+# The model being served: vLLM takes ``--model``, SGLang ``--model-path``.
+SERVED_MODEL_FLAGS = frozenset({"model", "model-path"})
+
 # vLLM / atom argparse-style single-value options safe to collapse last-wins. vLLM hard-errors on a duplicate /
 # conflicting flag (e.g. ``--attention-backend``); collapsing to last-wins keeps the variant override.
 _VLLM_SINGLE_VALUE_FLAGS = frozenset(
@@ -438,6 +470,59 @@ def tokenize_server_args_preserving_json(
         if token.startswith(("'", '"')) or token.endswith(("'", '"')):
             return None
     return normalized, tokens
+
+
+def _is_flag(token: str) -> bool:
+    """``token`` names a flag rather than carrying a value (``-tp`` does, ``-1`` does not)."""
+    return token.startswith("-") and not token[1:2].isdigit() and token.strip("-") != ""
+
+
+def flag_occurrences(server_args: str | None) -> list[tuple[str, str]]:
+    """Every flag a composed launch spells, in order, as ``(name, value)``; ``""`` for a bare flag.
+
+    Names come back canonical -- no leading dashes, lowercase, underscores as dashes -- so the spellings the engines
+    accept for one argparse destination meet in one key.
+    """
+    split = tokenize_server_args_preserving_json(server_args)
+    tokens = split[1] if split is not None else str(server_args or "").split()
+    occurrences: list[tuple[str, str]] = []
+    for index, token in enumerate(tokens):
+        if not _is_flag(token):
+            continue
+        name, assigned, value = token.partition("=")
+        if not assigned and index + 1 < len(tokens) and not _is_flag(tokens[index + 1]):
+            value = tokens[index + 1]
+        occurrences.append((name.lstrip("-").lower().replace("_", "-"), value))
+    return occurrences
+
+
+def last_alias_value(occurrences: list[tuple[str, str]], aliases: frozenset[str]) -> str | None:
+    """The value of the last flag spelling one argparse destination -- the one the engine keeps."""
+    return next((value for name, value in reversed(occurrences) if name in aliases), None)
+
+
+def json_object(text: str) -> dict[str, Any]:
+    """``text`` read as a JSON object, or ``{}`` when it is neither."""
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def speculative_config(occurrences: list[tuple[str, str]]) -> dict[str, Any]:
+    """The speculative config a launch spells, both spellings merged the way vLLM merges them.
+
+    It arrives as a JSON object under ``--speculative-config`` and as ``--speculative-config.<key>`` flags, and the
+    per-key flags win over the object.
+    """
+    config: dict[str, Any] = {}
+    for flag, value in dict(occurrences).items():
+        if flag == SPECULATIVE_CONFIG_FLAG:
+            config = {**json_object(value), **config}
+        elif flag.startswith(SPECULATIVE_CONFIG_KEY_PREFIX):
+            config[flag.removeprefix(SPECULATIVE_CONFIG_KEY_PREFIX).replace("-", "_")] = value
+    return config
 
 
 def dedup_vllm_server_args(
@@ -737,7 +822,7 @@ def inject_sglang_attention_backend(
 
 
 # sglang MoE runner backend: Hyperloom pins none for the baseline or grid
-# variants, the fmoe_ck tuner's validation bench aside (``phases/kernel.py``
+# variants, the fmoe_ck tuner's validation bench aside (``phases/kernel_gemm_tuning.py``
 # serves it with ``--moe-runner-backend aiter``). sglang's own
 # ``--moe-runner-backend auto`` follows ``SGLANG_USE_AITER`` (aiter when the
 # harness pre-shuffles MoE weights for it, triton otherwise) on current
@@ -797,6 +882,24 @@ def moe_runner_requires_aiter(server_args: str | None, model_path: str | None) -
     )
 
 
+def _flag_pair_at(tokens: list[str], i: int) -> tuple[list[str], int]:
+    """Return the flag at ``tokens[i]`` followed by its values, and the index past them."""
+    t = tokens[i]
+    if "=" in t:
+        flag, _, value = t.partition("=")
+        return [flag, value] if value else [flag], i + 1
+    i += 1
+    pair = [t]
+    if t in _MULTI_VALUE_FLAGS:
+        while i < len(tokens) and not tokens[i].startswith("--"):
+            pair.append(tokens[i])
+            i += 1
+    elif i < len(tokens) and not tokens[i].startswith("--"):
+        pair.append(tokens[i])
+        i += 1
+    return pair, i
+
+
 def dedupe_extra_server_args(args_str: str) -> str:
     """Collapse repeated ``--flag value`` pairs into a unique launch string."""
     if not args_str:
@@ -811,22 +914,8 @@ def dedupe_extra_server_args(args_str: str) -> str:
     while i < len(tokens):
         t = tokens[i]
         if t.startswith("--"):
-            if "=" in t:
-                flag, _, value = t.partition("=")
-                values = [value] if value else []
-                i += 1
-            else:
-                flag = t
-                i += 1
-                values = []
-                if flag in _MULTI_VALUE_FLAGS:
-                    while i < len(tokens) and not tokens[i].startswith("--"):
-                        values.append(tokens[i])
-                        i += 1
-                elif i < len(tokens) and not tokens[i].startswith("--"):
-                    values = [tokens[i]]
-                    i += 1
-            pair = [flag, *values] if values else [flag]
+            pair, i = _flag_pair_at(tokens, i)
+            flag = pair[0]
             if flag not in pair_by_flag:
                 order.append(flag)
             pair_by_flag[flag] = pair

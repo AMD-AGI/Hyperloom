@@ -382,7 +382,7 @@ def _restore_environ():
 
 def _launch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, doc: dict[str, Any], *flags: str) -> argparse.Namespace:
     """Run the topology step of ``optimize`` against a hand-off file, the way a launch does."""
-    from hyperloom.inference_optimizer.cli import _resolve_run_topology
+    from hyperloom.inference_optimizer.cli.launch_shape import _resolve_run_topology
     from hyperloom.inference_optimizer.cli.parser import _build_parser
 
     for name in ("TP", "EP", "INFERENCE_OPTIMIZER_SERVER_ARGS", "INFERENCE_OPTIMIZER_EXTRA_ENV", "SKIP_VARIANTS"):

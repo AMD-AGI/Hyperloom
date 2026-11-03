@@ -67,12 +67,22 @@ class PlugHost:
                 try:
                     self._start_one(socket)
                 except Exception as exc:
-                    self.close()
+                    close_failure = self._close_after_failed_start()
                     raise PlugError(
                         f"socket {socket!r} implementation {self._impls[socket].name!r} failed to start: "
                         f"{type(exc).__name__}: {exc}; plugin errors: {dict(self._registry.plugin_errors())}"
+                        f"{close_failure}"
                     ) from exc
             self._report_lock_mismatches()
+
+    def _close_after_failed_start(self) -> str:
+        """Close what started before a start failure; a close error is appended to that failure, not raised over it."""
+        try:
+            self.close()
+        except Exception as exc:  # reported inside the start failure the caller raises
+            log.warning("closing the started plugs after a failed start failed", exc_info=True)
+            return f"; closing the started plugs then failed: {type(exc).__name__}: {exc}"
+        return ""
 
     def _start_one(self, socket: str) -> None:
         impl = self._impls[socket]
@@ -109,7 +119,8 @@ class PlugHost:
         return socket in self._started
 
     def close(self) -> None:
-        """Close what was started, newest first; one that fails to close is recorded and the rest still close."""
+        """Close what was started, newest first; every one is closed, then the first non-I/O close error is raised."""
+        first_error: Exception | None = None
         with self._lock:
             while self._order:
                 socket = self._order.pop()
@@ -119,9 +130,13 @@ class PlugHost:
                     continue
                 try:
                     closer()
-                except Exception as exc:  # isolation boundary: one plug implementation close
+                except Exception as exc:  # re-raised once every started plug is closed, unless it is I/O
                     self._close_errors[socket] = f"{type(exc).__name__}: {exc}"
                     log.warning("closing plug %s failed: %s", socket, exc, exc_info=True)
+                    if first_error is None and not isinstance(exc, OSError):
+                        first_error = exc
+        if first_error is not None:
+            raise first_error
 
     def close_errors(self) -> Mapping[str, str]:
         """Why each implementation that failed to close did."""

@@ -205,7 +205,7 @@ async def test_forged_task_rejected_before_any_side_effect(tmp_path, monkeypatch
     monkeypatch.setattr(_setup_replay, "run_setup_commands", _spy_setup)
 
     class _SS:
-        phase = "FRAMEWORK_AGENT"
+        phase = "ENABLEMENT"
         enablement = EnablementRound()
 
         def get_specialist_patch_verdict(self, tid):
@@ -524,18 +524,12 @@ async def test_bench_script_mismatch_reverts(tmp_path, monkeypatch):
     assert res["error_class"] == "framework_script_mismatch"
 
 
-@pytest.mark.asyncio
-async def test_framework_kb_writeback(tmp_path, monkeypatch):
+async def _kept_framework_integrate(tmp_path, monkeypatch, proposal: dict, **params) -> tuple[dict, dict]:
+    """Integrate a specialist's single ``proposal`` that benches as a KEEP; return the result and the KB record fields."""
     session = tmp_path / "s"
     session.mkdir()
     repo = tmp_path / "fw"
     _init_git_repo(repo)
-    proposal = {
-        "provenance": "specialist:serving:framework:x",
-        "fa_pr_url": "https://example/pr/1",
-        "fa_pr_sha": "deadbeef",
-        "patches_written": ["patches/001.patch"],
-    }
     _write_workspace(session, "spec", proposal_set=[proposal])
 
     calls = {}
@@ -561,9 +555,22 @@ async def test_framework_kb_writeback(tmp_path, monkeypatch):
                 "specialist_task_id": "spec",
                 "framework_source_root": str(repo),
                 "base_tput": 100.0,
+                **params,
             },
         )
     )
+    return res, calls
+
+
+@pytest.mark.asyncio
+async def test_framework_kb_writeback(tmp_path, monkeypatch):
+    proposal = {
+        "provenance": "specialist:serving:framework:x",
+        "fa_pr_url": "https://example/pr/1",
+        "fa_pr_sha": "deadbeef",
+        "patches_written": ["patches/001.patch"],
+    }
+    res, calls = await _kept_framework_integrate(tmp_path, monkeypatch, proposal)
     assert res["status"] == "kept"
     assert calls["outcome"] == "integrated"
     assert calls["pr_url"] == "https://example/pr/1"
@@ -576,41 +583,14 @@ async def test_framework_kb_writeback_config_lever_untagged_proposal(tmp_path, m
     emits that tag) — the FRAMEWORK dispatch context must stamp it so the KB
     write still fires.
     """
-    session = tmp_path / "s"
-    session.mkdir()
-    repo = tmp_path / "fw"
-    _init_git_repo(repo)
     proposal = {"name": "cfg", "extra_envs": {"SGLANG_USE_AITER": "1"}}
-    _write_workspace(session, "spec", proposal_set=[proposal])
-
-    calls = {}
-
-    async def _fake_write(fields):
-        calls.update(asdict(fields))
-        return "/tmp/lessons.jsonl"
-
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.knowledge.kb_writeback.write_framework_record",
-        _fake_write,
-    )
-    ex = IntegratePatchExecutor(session_dir=session)
-    monkeypatch.setattr(
-        IntegratePatchExecutor,
-        "_bench_patch",
-        _stub_bench({"output_throughput": 200.0, "status": "succeeded"}, {"accuracy_pass": True}),
-    )
-    res = await ex(
-        _make_ctx(
-            "t",
-            {
-                "specialist_task_id": "spec",
-                "framework_source_root": str(repo),
-                "base_tput": 100.0,
-                "config_changes": {"SGLANG_USE_AITER": "1"},
-                "framework_agent_authoring": True,
-                "framework_agent_candidate_id": "https://github.com/ROCm/aiter/pull/1",
-            },
-        )
+    res, calls = await _kept_framework_integrate(
+        tmp_path,
+        monkeypatch,
+        proposal,
+        config_changes={"SGLANG_USE_AITER": "1"},
+        framework_agent_authoring=True,
+        framework_agent_candidate_id="https://github.com/ROCm/aiter/pull/1",
     )
     assert res["status"] == "kept"
     assert calls["outcome"] == "integrated"

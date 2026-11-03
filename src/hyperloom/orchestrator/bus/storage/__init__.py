@@ -2,20 +2,3 @@
 # SPDX-License-Identifier: MIT
 
 """SQLite WAL atomic storage backend (single ``$SESSION_DIR/storage/coordinator.db``)."""
-
-from .connection import SqliteConnection, open_connection
-from .schema import (
-    DEFAULT_LANE_CAPACITIES,
-    SCHEMA_VERSION,
-    ensure_schema,
-    set_lane_capacity,
-)
-
-__all__ = [
-    "DEFAULT_LANE_CAPACITIES",
-    "SCHEMA_VERSION",
-    "SqliteConnection",
-    "ensure_schema",
-    "open_connection",
-    "set_lane_capacity",
-]

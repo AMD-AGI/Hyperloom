@@ -30,7 +30,7 @@ from hyperloom.orchestrator.state.task_registry import (
     TaskRegistry,
     TaskSpec,
 )
-from hyperloom.orchestrator.bus.storage import SqliteConnection
+from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 
 
 @pytest.fixture

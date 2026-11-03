@@ -64,11 +64,11 @@ class _JsonResponse:
         return self._raw
 
 
-# common.env
+# hyperloom_common.env
 
 
 def test_common_env_readers(monkeypatch: pytest.MonkeyPatch) -> None:
-    from hyperloom.common import env
+    from hyperloom_common import env
 
     monkeypatch.delenv("HL_BOOL", raising=False)
     assert env.env_bool("HL_BOOL", default=True) is True
@@ -90,18 +90,18 @@ def test_common_env_readers(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_env_float_invalid_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    from hyperloom.common.env import EnvValueError, env_float
+    from hyperloom_common.env import EnvValueError, env_float
 
     monkeypatch.setenv("HL_BAD_FLOAT", "not-a-float")
     with pytest.raises(EnvValueError):
         env_float("HL_BAD_FLOAT", 3.5)
 
 
-# common.io
+# hyperloom_common.io
 
 
 def test_common_atomic_writes_and_cleanup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from hyperloom.common import io
+    from hyperloom_common import io
 
     text_path = tmp_path / "nested" / "value.txt"
     io.atomic_write_text(text_path, "hello", options=io.WriteOptions(make_parents=True))
@@ -121,7 +121,7 @@ def test_common_atomic_writes_and_cleanup(tmp_path: Path, monkeypatch: pytest.Mo
 
 
 def test_common_io_bytes_and_safe_mtime_edges(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from hyperloom.common import io
+    from hyperloom_common import io
 
     path = tmp_path / "nested" / "payload.bin"
     io.atomic_write_bytes(path, b"abc", options=io.WriteOptions(make_parents=True, fsync=True, mode=0o777))
@@ -156,15 +156,15 @@ def test_gain_math_branches() -> None:
     assert gain_math.incremental_gain_pct(110.0, 100.0) == pytest.approx(10.0)
 
 
-# common.llm_config
+# hyperloom_common.llm.llm_config
 
 
 def test_llm_config_parse_and_derive_edges() -> None:
-    from hyperloom.common.llm_config import (
+    from hyperloom_common.llm.llm_config import (
         claude_sdk_env_options,
         derive_openai_base_url,
     )
-    from hyperloom.common.llm_headers import parse_custom_headers
+    from hyperloom_common.llm.llm_headers import parse_custom_headers
 
     assert parse_custom_headers(None) == {}
     assert parse_custom_headers("   ") == {}
@@ -343,9 +343,9 @@ def test_recover_session_nonfatal_langfuse_and_package_errors(tmp_path: Path, mo
     monkeypatch.setattr(
         breakdown_mod, "write_breakdown_json", lambda s: calls.append("write") or s / "session_breakdown.json"
     )
-    monkeypatch.setattr(emitter, "flush_session", lambda _s: (_ for _ in ()).throw(RuntimeError("langfuse down")))
+    monkeypatch.setattr(emitter, "flush_session", lambda _s: (_ for _ in ()).throw(OSError("langfuse down")))
     monkeypatch.setattr(
-        breakdown_mod, "package_session_artifacts", lambda _s: (_ for _ in ()).throw(RuntimeError("zip failed"))
+        breakdown_mod, "package_session_artifacts", lambda _s: (_ for _ in ()).throw(OSError("zip failed"))
     )
 
     rc = recover._run_recover_session(argparse.Namespace(session_dir=session, force=True))
@@ -583,7 +583,6 @@ def test_infera_restart_and_kill_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(inf, "_infera_require_state", lambda: dict(state | {"last_restart_framework": "vllm"}))
     assert inf._infera_kill_inference(argparse.Namespace(poll_timeout=10, print_logs=False)) == 0
     assert fanout_calls[-1] == ("kill", ["10.0.1.0", "10.0.1.1"])
-    assert saved[-1]["last_kill_results"] == [{"ok": True}]
 
 
 def test_infera_node_ops_apply_and_revert(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -646,15 +645,15 @@ def test_infera_node_ops_apply_and_revert(tmp_path: Path, monkeypatch: pytest.Mo
             timeout_sec=10,
         )
     )
-    assert missing_rc == inf.EXIT_CONFIG_ERROR
+    assert missing_rc == inf._mn_cli.EXIT_CONFIG_ERROR
 
     assert (
         inf._infera_revert_patch(argparse.Namespace(backup_map_json="{", target_path="/x", timeout_sec=1))
-        == inf.EXIT_CONFIG_ERROR
+        == inf._mn_cli.EXIT_CONFIG_ERROR
     )
     assert (
         inf._infera_revert_patch(argparse.Namespace(backup_map_json="{}", target_path="/x", timeout_sec=1))
-        == inf.EXIT_CONFIG_ERROR
+        == inf._mn_cli.EXIT_CONFIG_ERROR
     )
     monkeypatch.setattr(inf, "_infera_ssh_node_op", lambda *a, **kw: ({"status": "restored"}, {"rc": 0, "stderr": ""}))
     assert (
@@ -702,7 +701,8 @@ def test_infera_tracelens_and_geak_install(monkeypatch: pytest.MonkeyPatch, tmp_
     monkeypatch.delenv("HYPERLOOM_ROOT", raising=False)
     monkeypatch.delenv("USER_DATA_PATH", raising=False)
     assert (
-        inf.cmd_install_geak(argparse.Namespace(geak_src="", poll_timeout=5, print_logs=False)) == inf.EXIT_CONFIG_ERROR
+        inf.cmd_install_geak(argparse.Namespace(geak_src="", poll_timeout=5, print_logs=False))
+        == inf._mn_cli.EXIT_CONFIG_ERROR
     )
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     monkeypatch.setattr(
@@ -726,7 +726,7 @@ def test_infera_process_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(inf, "_infera_require_state", lambda: dict(state))
     assert (
         inf._infera_apply_tracelens_patch(argparse.Namespace(tracelens_root="", sglang_version_pin="", poll_timeout=1))
-        == inf.EXIT_CONFIG_ERROR
+        == inf._mn_cli.EXIT_CONFIG_ERROR
     )
 
     monkeypatch.setattr(inf._mn_cli, "_read_pod_script", lambda name: f"script:{name}")
@@ -888,8 +888,6 @@ def test_an_unchanged_per_round_forward_env_still_allows_an_infera_resume(monkey
     )
     assert inf._infera_servers_alive(state, targets, timeout=5) is False
 
-    assert inf._infera_servers_alive(state, [{"podIP": ""}], timeout=5) is False
-
 
 def test_infera_restart_resume_fast_path(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture) -> None:
     import hyperloom.inference_optimizer.multi_node.commands.infera as inf
@@ -911,7 +909,9 @@ def test_infera_restart_resume_fast_path(monkeypatch: pytest.MonkeyPatch, capsys
     monkeypatch.delenv("HYPERLOOM_MN_UNSET_FWD_ENV", raising=False)
     monkeypatch.setattr(inf, "_infera_require_state", lambda: dict(state))
     monkeypatch.setattr(inf._mn_cli, "_poll_timeout_from_args", lambda args: 20)
-    monkeypatch.setattr(inf, "_infera_all_gpu_targets", lambda st: [{"podIP": "10.0.1.0", "sshPort": 2222}])
+    monkeypatch.setattr(
+        inf.infera_support, "gpu_ssh_targets_from_state", lambda st: [{"podIP": "10.0.1.0", "sshPort": 2222}]
+    )
     monkeypatch.setattr(inf, "_infera_servers_alive", lambda st, targets, timeout: True)
     monkeypatch.setenv("MULTI_NODE_RESTART_RESUME_RUNNING", "1")
 
@@ -965,7 +965,7 @@ def test_infera_install_timeout_failure(monkeypatch: pytest.MonkeyPatch) -> None
 def test_framework_isolation_helpers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.agents.framework import isolation
     from hyperloom.agents.framework.models import Candidate
-    from hyperloom.common.env import EnvValueError
+    from hyperloom_common.env import EnvValueError
 
     repo_url = "https://github.com/sgl-project/sglang.git"
     candidate = Candidate(ref="PR:42")
@@ -997,31 +997,6 @@ def test_framework_isolation_helpers(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert "refs/pull/42/head:refs/pull/42/head" in git_calls[-1][0]
 
 
-def test_kb_writeback_default_root_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from hyperloom.orchestrator.knowledge import kb_writeback
-
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_FA_KB_PATH", str(tmp_path))
-    root = kb_writeback._default_kb_root()
-    assert root == tmp_path / "framework_optimization"
-
-
-def test_kb_writeback_default_root_uses_user_data_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from hyperloom.orchestrator.knowledge import kb_writeback
-
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_FA_KB_PATH", raising=False)
-    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "workspace"))
-    assert kb_writeback._default_kb_root() == tmp_path / "workspace" / "framework-kb" / "framework_optimization"
-
-
-async def test_kb_writeback_rejects_unknown_outcome() -> None:
-    from hyperloom.orchestrator.knowledge import kb_writeback
-
-    with pytest.raises(ValueError):
-        await kb_writeback.write_framework_record(
-            kb_writeback.FrameworkOutcome("u", "s", "p", "not_a_real_outcome", 1.0, "sess")
-        )
-
-
 # orchestrator.roles.base — retry / backoff
 
 
@@ -1048,41 +1023,13 @@ def test_retry_policy_env_and_on_retry_error(monkeypatch: pytest.MonkeyPatch) ->
 # orchestrator.state.objective
 
 
-def test_tput_objective_progress_zero() -> None:
+def test_tput_objective_unmeasured_is_not_reached() -> None:
     from hyperloom.orchestrator.state.objective import TargetTputObjective
 
     obj = TargetTputObjective(target_tput_per_gpu=100.0)
     state = SimpleNamespace(current_best={}, baseline_tput=0.0)
-    assert obj.progress(state) == 0.0
     assert obj.reached(state) is False
     assert obj.describe() == "target_tput_per_gpu=100.0"
-
-
-def test_baseline_objective_progress_zero_ref(tmp_path: Path) -> None:
-    from hyperloom.orchestrator.state.objective import TargetBaselineObjective
-
-    report = tmp_path / "benchmark_report.json"
-    report.write_text(json.dumps({"throughput": {"output_throughput": 50.0}}), encoding="utf-8")
-    obj = TargetBaselineObjective(baseline_dir=str(tmp_path))
-    assert obj.kind() == "baseline"
-    obj._ref_tput = 0.0
-    state = SimpleNamespace(current_best={"tput": 10.0}, baseline_tput=0.0)
-    assert obj.progress(state) == 0.0
-
-
-# orchestrator.phases.quantization_schemes — quantization prompt
-
-
-def test_quantization_join_and_prompt() -> None:
-    from hyperloom.orchestrator.phases import quantization_schemes as qs
-
-    assert qs._join_clauses([]) == ""
-    assert qs._join_clauses(["a"]) == "a"
-    assert qs._join_clauses(["a", "b", "c"]) == "a, b and c"
-
-    cfg = qs.QuantizationConfig(global_scheme="fp8")
-    prompt = qs.build_quantization_prompt(cfg)
-    assert "Quantization strategy" in prompt
 
 
 # orchestrator.actions.executors._file_lock
@@ -1104,24 +1051,6 @@ def test_file_lock_no_fcntl(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
     with _file_lock.best_effort_file_lock(str(tmp_path / "lock")):
         ran = True
     assert ran
-
-
-# orchestrator.actions.executors._framework_gap_composer
-
-
-def test_framework_gap_bottleneck(tmp_path: Path) -> None:
-    from hyperloom.orchestrator.actions.executors import _framework_gap_composer as gc
-
-    bp = tmp_path / "bd.json"
-    bp.write_text(json.dumps({"top_kernels": ["fused_moe_gemm_kernel"]}), encoding="utf-8")
-    assert gc._extract_bottleneck_from_breakdown(str(bp)) == "moe"
-
-    empty = tmp_path / "empty.json"
-    empty.write_text(json.dumps({"top_kernels": []}), encoding="utf-8")
-    assert gc._extract_bottleneck_from_breakdown(str(empty)) == ""
-
-    assert gc._extract_bottleneck_from_breakdown(None) == ""
-    assert gc._extract_bottleneck_from_breakdown(str(tmp_path / "missing.json")) == ""
 
 
 # inference_optimizer.protocol.intent
@@ -1263,6 +1192,10 @@ def test_gpu_type_autodetect_rocm_and_torch_fallback(monkeypatch: pytest.MonkeyP
     fake_torch.cuda.get_device_properties = lambda _idx: (_ for _ in ()).throw(RuntimeError("no gpu"))
     assert gpu_types._autodetect_gpu_type() is None
 
+    fake_torch.cuda.get_device_properties = lambda _idx: (_ for _ in ()).throw(KeyError("device"))
+    with pytest.raises(KeyError, match="device"):
+        gpu_types._autodetect_gpu_type()
+
 
 def test_gpu_type_autodetect_is_none_when_torch_cannot_load_its_library(monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.inference_optimizer import gpu_types
@@ -1363,7 +1296,7 @@ def test_parse_quality_gate_paths(tmp_path: Path) -> None:
 
 
 def test_env_flag_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
-    from hyperloom.common import env as common_env
+    from hyperloom_common import env as common_env
 
     monkeypatch.setenv("HL_TEST_FLAG", "on")
     assert common_env.env_flag("HL_TEST_FLAG") is True

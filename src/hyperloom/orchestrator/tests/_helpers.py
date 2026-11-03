@@ -70,6 +70,21 @@ def git_commit_all(path: Path, message: str) -> None:
     )
 
 
+def git_repo_tracking(checkout: Path, *files: str) -> Path:
+    """Make ``checkout`` a git repository with one commit tracking ``files``, and return it."""
+    subprocess.run(["git", "init", "-q", str(checkout)], check=True)
+    for rel in files:
+        target = checkout / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(checkout), "add", "-A"], check=True)
+    subprocess.run(
+        ["git", "-C", str(checkout), "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base"],
+        check=True,
+    )
+    return checkout
+
+
 def patch_integrate_patch_roots(monkeypatch: Any, tmp_path: Path) -> None:
     """Register common tmp_path framework repos as integrate_patch search roots."""
     from hyperloom.inference_optimizer import framework_paths as fp
@@ -102,7 +117,7 @@ def integrate_extra(params: dict[str, Any]) -> dict[str, Any]:
 
     if not params.get("enablement"):
         return {}
-    state = SharedState()
+    state = SharedState(phase="ENABLEMENT")
     state.record_specialist_patch_verdict(str(params.get("specialist_task_id") or ""), "approve")
     return {"shared_state": state}
 

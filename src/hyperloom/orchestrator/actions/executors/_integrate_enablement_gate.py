@@ -7,19 +7,27 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import subprocess
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.coerce import first_text, to_float, to_str_list
+from hyperloom_common.coerce import first_text, to_float, to_str_list
 from hyperloom.inference_optimizer import framework_paths
-from hyperloom.orchestrator.lever import LEVER_UPSTREAM_PR
 
-from ...bringup import load_boot_observation, observation_summary, verdict_of
+from ...bringup import (
+    load_boot_observation,
+    observation_summary,
+    round_advanced,
+    round_outcome_unchanged,
+    verdict_of,
+)
 from ...bringup.persist import LoadedObservation
 from ...enablement.recipe import keep_probe, keep_records
 from ...enablement.recipe.projections import project_launch_evidence
+from . import _framework_switch_manifest as _switch_manifest
 from ._accuracy_gate import enablement_correctness
 from ._enablement_config import _FRAMEWORK_KB_PROVENANCE_PREFIX
 from ._git import _git_head_sha
@@ -29,11 +37,45 @@ from ._nogit_patch import _is_git_tree
 from ._patch_git import _uncommitted_revert
 from ._patch_snapshot import _git_commit_kept, _patch_touched_paths
 from ._integrate_vocabulary import PATCH_SOURCE_UPSTREAM_PR, resolve_patch_source
-from ._patch_sources import _declared_stack_ops, _patch_stack_by_root
+from ._patch_sources import _declared_stack_ops, _patch_stack_by_root, _read_patch_texts
 from ._server_argv import ConfigUnreadable
 from ._workload_envs import FrameworkScriptMismatchError
 
 log = logging.getLogger(__name__)
+
+
+def _attach_attempt_evidence(verdict: dict[str, Any], attempt: IntegrateAttempt) -> None:
+    """Add to a verdict what the applied attempt holds and the gate itself cannot see."""
+    if attempt.dropped_env_overrides:
+        verdict["dropped_env_overrides"] = attempt.dropped_env_overrides
+
+
+def _inert_round_evidence(
+    attempt: IntegrateAttempt,
+    *,
+    served: bool,
+    before: LoadedObservation,
+    after: LoadedObservation,
+) -> dict[str, Any]:
+    """The env names an inert round's diff reads that nothing armed for its boot.
+
+    A round is inert only on the one outcome that shows its patch changed
+    nothing the boot did: it never served, and the boot stopped at the wall the
+    boot before it stopped at, with the same failure. A revert that served and
+    failed minimal correctness, or that died at another wall, says nothing about
+    whether the patched path was reached, so it carries no such lead and this
+    answers ``{}``.
+
+    One of the names may be a switch nothing turns on, so they ride along as a
+    lead for the next round's mandate. A read is not proof of a gate (an opt-out
+    switch, a write and a plain value read read the same), which is why this is
+    evidence beside a boot that already happened and not a refusal.
+    """
+    if served or not round_outcome_unchanged(before.observation, after.observation):
+        return {}
+    armed = {*attempt.extra_envs_applied, *os.environ}
+    names = _switch_manifest.unarmed_env_reads(_read_patch_texts(attempt.applied), armed=armed)
+    return {"inert_round_env_reads": names} if names else {}
 
 
 def _observation_evidence(half: str, loaded: LoadedObservation) -> dict[str, Any]:
@@ -42,6 +84,94 @@ def _observation_evidence(half: str, loaded: LoadedObservation) -> dict[str, Any
         f"{half}_observation": observation_summary(loaded.observation) if loaded.observation is not None else None,
         f"{half}_observation_path": loaded.path,
         f"{half}_observation_degraded": loaded.degraded,
+    }
+
+
+@dataclass(frozen=True)
+class _EnablementGrade:
+    """What the enablement gate read off one benched round."""
+
+    bench_result: dict[str, Any]
+    correctness_ok: bool | None
+    run_reason: str
+    served: bool
+    before: LoadedObservation
+    after: LoadedObservation
+    evidence: dict[str, Any]
+
+
+def _reverted_enablement_verdict(attempt: IntegrateAttempt, grade: _EnablementGrade) -> dict[str, Any]:
+    """The verdict of a round whose boot neither runs nor reached a deeper wall."""
+    return {
+        "status": "reverted",
+        "specialist_task_id": attempt.specialist_task_id,
+        "patches_applied": [],
+        "patches_reverted": [],
+        "artifacts_reverted": [],
+        "framework_root": str(attempt.framework_root or ""),
+        "output_throughput": grade.bench_result.get("output_throughput"),
+        "enablement": True,
+        "runnable": False,
+        "correctness_verified": grade.correctness_ok is True,
+        "reason": f"enablement not runnable: {grade.run_reason}",
+        "setup_commands_applied": attempt.setup_commands_applied,
+        "bench_result": grade.bench_result,
+        "workspace": str(attempt.output_root),
+        **grade.evidence,
+        # Only an inert round -- one whose boot stopped exactly where the
+        # boot before it did -- hands the next mandate the env names its
+        # diff read; every other revert leaves this out.
+        **_inert_round_evidence(attempt, served=grade.served, before=grade.before, after=grade.after),
+    }
+
+
+def _advanced_enablement_verdict(attempt: IntegrateAttempt, grade: _EnablementGrade) -> dict[str, Any]:
+    """The verdict of a round whose boot does not run yet but stopped at a deeper wall."""
+    root_text = str(attempt.framework_root or "")
+    bench_result = grade.bench_result
+    after_loaded = grade.after
+    # round_advanced is only true for a recorded after-observation.
+    assert after_loaded.observation is not None
+    wall = after_loaded.observation.stage_failed
+    signature = verdict_of(after_loaded.observation).signature
+    return {
+        "status": "advanced",
+        "specialist_task_id": attempt.specialist_task_id,
+        "patches_applied": [str(patch) for patch in attempt.applied],
+        # An ADVANCED round stacks its patch and never reaches the KEEP capture,
+        # so without this the tree its patch applied to is never recorded and a
+        # later KEEP binds it to that round's framework root instead. The capture
+        # proves a patch against the tree it is bound to, so a mis-binding refuses
+        # the whole recipe -- for a legitimate multi-root stack a false refusal
+        # rather than a false pass.
+        "enablement_patch_roots": attempt.shared_state.enablement.accepted_patch_roots(
+            done_payload=attempt.done_payload,
+            applied=attempt.applied,
+            framework_root=root_text,
+        ),
+        "patches_reverted": [],
+        "artifacts_applied": attempt.applied_artifacts,
+        "extra_envs_applied": attempt.extra_envs_applied,
+        "extra_server_args_applied": attempt.extra_server_args_applied,
+        "framework_root": root_text,
+        "output_throughput": bench_result.get("output_throughput"),
+        "enablement": True,
+        "advanced": True,
+        "runnable": False,
+        "correctness_verified": False,
+        "reason": (
+            f"enablement progressed: {grade.run_reason}; boot advanced "
+            f"to a new gap ({wall.name if wall is not None else 'no wall recorded'})"
+        ),
+        "setup_commands_applied": attempt.setup_commands_applied,
+        "after_signature": signature.to_dict(),
+        "enablement_launch_log": str(bench_result.get("error") or ""),
+        # The wall this round advanced to, for the next round's before half.
+        "enablement_observation_path": after_loaded.path,
+        "bench_result": bench_result,
+        "workspace": str(attempt.output_root),
+        **grade.evidence,
+        **attempt.accepted_runtime_records(),
     }
 
 
@@ -113,8 +243,7 @@ class EnablementGateMixin:
                 bench_result=bench_result,
                 gate_evidence=gate_evidence,
             )
-        if attempt.dropped_env_overrides:
-            verdict["dropped_env_overrides"] = attempt.dropped_env_overrides
+        _attach_attempt_evidence(verdict, attempt)
         return verdict
 
     async def _gate_enablement(
@@ -158,23 +287,13 @@ class EnablementGateMixin:
         against, needed to replay them on a fresh machine).
         """
         specialist_task_id = attempt.specialist_task_id
-        done_payload = attempt.done_payload
         output_root = attempt.output_root
         assert output_root is not None
-        framework_root = attempt.framework_root
-        root_text = str(framework_root or "")
-        applied = attempt.applied
-        applied_artifacts = attempt.applied_artifacts
-        extra_envs_applied = attempt.extra_envs_applied
-        extra_server_args_applied = attempt.extra_server_args_applied
+        root_text = str(attempt.framework_root or "")
 
         from hyperloom.common.failure_signature import runnable_decision
 
-        from ...bringup import round_advanced
         from .benchmark_result import is_valid_measurement
-
-        new_tput = bench_result.get("output_throughput")
-        patches_applied = [str(patch) for patch in applied]
 
         correctness_ok, eval_provenance = enablement_correctness(params, gate_evidence)
 
@@ -192,27 +311,20 @@ class EnablementGateMixin:
 
         runs, run_reason = runnable_decision(served=served, correctness_ok=correctness_ok)
         advanced = not runs and not served and round_advanced(before_loaded.observation, after_loaded.observation)
+        grade = _EnablementGrade(
+            bench_result=bench_result,
+            correctness_ok=correctness_ok,
+            run_reason=run_reason,
+            served=served,
+            before=before_loaded,
+            after=after_loaded,
+            evidence=evidence,
+        )
         if not runs and not advanced:
             await self._maybe_write_framework_kb_record(
                 _KbLesson("reverted_smoke_fail", 0.0), attempt=attempt, params=params
             )
-            return {
-                "status": "reverted",
-                "specialist_task_id": specialist_task_id,
-                "patches_applied": [],
-                "patches_reverted": [],
-                "artifacts_reverted": [],
-                "framework_root": root_text,
-                "output_throughput": new_tput,
-                "enablement": True,
-                "runnable": False,
-                "correctness_verified": correctness_ok is True,
-                "reason": f"enablement not runnable: {run_reason}",
-                "setup_commands_applied": attempt.setup_commands_applied,
-                "bench_result": bench_result,
-                "workspace": str(output_root),
-                **evidence,
-            }
+            return _reverted_enablement_verdict(attempt, grade)
 
         # Accepted: the boot either runs or reached a deeper wall. Both keep the
         # work in the tree and differ only in whether the lane is finished.
@@ -230,65 +342,31 @@ class EnablementGateMixin:
 
         if advanced:
             await self._maybe_write_framework_kb_record(_KbLesson("integrated", 0.0), attempt=attempt, params=params)
-            # round_advanced is only true for a recorded after-observation.
-            assert after_loaded.observation is not None
-            wall = after_loaded.observation.stage_failed
-            signature = verdict_of(after_loaded.observation).signature
-            return {
-                "status": "advanced",
-                "specialist_task_id": specialist_task_id,
-                "patches_applied": patches_applied,
-                # An ADVANCED round stacks its patch and never reaches the KEEP capture,
-                # so without this the tree its patch applied to is never recorded and a
-                # later KEEP binds it to that round's framework root instead. The capture
-                # proves a patch against the tree it is bound to, so a mis-binding refuses
-                # the whole recipe -- for a legitimate multi-root stack a false refusal
-                # rather than a false pass.
-                "enablement_patch_roots": attempt.shared_state.enablement.accepted_patch_roots(
-                    done_payload=done_payload,
-                    applied=applied,
-                    framework_root=root_text,
-                ),
-                "patches_reverted": [],
-                "artifacts_applied": applied_artifacts,
-                "extra_envs_applied": extra_envs_applied,
-                "extra_server_args_applied": extra_server_args_applied,
-                "framework_root": root_text,
-                "output_throughput": new_tput,
-                "enablement": True,
-                "advanced": True,
-                "runnable": False,
-                "correctness_verified": False,
-                "reason": (
-                    f"enablement progressed: {run_reason}; boot advanced "
-                    f"to a new gap ({wall.name if wall is not None else 'no wall recorded'})"
-                ),
-                "setup_commands_applied": attempt.setup_commands_applied,
-                "after_signature": signature.to_dict(),
-                "enablement_launch_log": str(bench_result.get("error") or ""),
-                # The wall this round advanced to, for the next round's before half.
-                "enablement_observation_path": after_loaded.path,
-                "bench_result": bench_result,
-                "workspace": str(output_root),
-                **evidence,
-                **attempt.accepted_runtime_records(),
-            }
+            return _advanced_enablement_verdict(attempt, grade)
+        return await self._keep_enablement(attempt, params, grade)
 
+    async def _keep_enablement(
+        self, attempt: IntegrateAttempt, params: dict[str, Any], grade: _EnablementGrade
+    ) -> dict[str, Any]:
+        """Record a round whose boot runs, and return its ``kept`` verdict."""
+        specialist_task_id = attempt.specialist_task_id
+        bench_result = grade.bench_result
+        correctness_ok = grade.correctness_ok
         provisional = correctness_ok is None
-        reason = f"enablement runnable: {run_reason}"
+        reason = f"enablement runnable: {grade.run_reason}"
         if provisional:
             reason += " (provisional: served but eval produced no accuracy; correctness not verified)"
         await self._maybe_write_framework_kb_record(_KbLesson("integrated", 0.0), attempt=attempt, params=params)
         kept_result: dict[str, Any] = {
             "status": "kept",
             "specialist_task_id": specialist_task_id,
-            "patches_applied": patches_applied,
+            "patches_applied": [str(patch) for patch in attempt.applied],
             "patches_reverted": [],
-            "artifacts_applied": applied_artifacts,
-            "extra_server_args_applied": extra_server_args_applied,
-            "extra_envs_applied": extra_envs_applied,
-            "framework_root": root_text,
-            "output_throughput": new_tput,
+            "artifacts_applied": attempt.applied_artifacts,
+            "extra_server_args_applied": attempt.extra_server_args_applied,
+            "extra_envs_applied": attempt.extra_envs_applied,
+            "framework_root": str(attempt.framework_root or ""),
+            "output_throughput": bench_result.get("output_throughput"),
             "enablement": True,
             "runnable": True,
             "correctness_verified": correctness_ok is True,
@@ -296,13 +374,13 @@ class EnablementGateMixin:
             "reason": reason,
             "setup_commands_applied": attempt.setup_commands_applied,
             "bench_result": bench_result,
-            "workspace": str(output_root),
+            "workspace": str(attempt.output_root),
             # Base YAML only; the env/arg layers live in enablement_effective_config.
             "enablement_accepted_config_path": str(bench_result.get("materialized_config") or ""),
             # Captured from the variant this leg launched, so a revalidation
             # replays the graded configuration rather than a re-derived one.
             "enablement_effective_config": dict(bench_result.get("effective_config") or {}),
-            **evidence,
+            **grade.evidence,
         }
         kept_result.update(attempt.accepted_runtime_records())
         # Snapshot a manifest of the localized closure that survives rearm, so
@@ -310,7 +388,7 @@ class EnablementGateMixin:
         manifest = await asyncio.to_thread(
             self._finalize_localization_keep,
             attempt,
-            framework_root=framework_root,
+            framework_root=attempt.framework_root,
             specialist_task_id=specialist_task_id,
         )
         if manifest:
@@ -346,46 +424,8 @@ class EnablementGateMixin:
             inherited=enablement.kept_artifacts,
             applied=attempt.applied_artifacts,
         )
-        contributions = keep_records.collect_contributions(
-            framework_root=root,
-            patch_roots=patch_roots,
-            artifacts=stack_artifacts,
-        )
-        git_roots = [tree for tree in contributions if tree and _is_git_tree(Path(tree))]
-        # Only what was captured before this round touched each tree, and only
-        # where no earlier round already named the tree the stack applies to. A
-        # root left with no sha either way keeps none, which the decision refuses
-        # rather than answering with a HEAD that has moved since.
-        inherited_sha = enablement.inherited_base_shas()
-        captured = attempt.base_sha_by_root
-        base_sha_by_root = {tree: inherited_sha.get(tree, "") or captured.get(tree, "") for tree in git_roots}
-        records = keep_records.build_root_records(
-            contributions=contributions,
-            base_sha_by_root=base_sha_by_root,
-            git_roots=git_roots,
-            session_framework_root=framework_paths.resolve_session_framework_root(),
-        )
-        # One classification per root: a rel path is only meaningful against the
-        # tree its patch was bound to, and reading them all against this round's
-        # root would name files that root does not have. Per patch as well as per
-        # root: the decision cross-checks each patch step against the snapshot of
-        # the files that step declares, and it cannot read the diffs itself.
-        targets: dict[str, dict[str, str]] = {}
-        patch_targets: dict[str, dict[str, str]] = {}
-        for patch_root, patches in _patch_stack_by_root(enablement, patch_roots, attempt.applied).items():
-            base_sha = str(base_sha_by_root.get(patch_root) or "")
-            for patch_path, ops in _declared_stack_ops(patch_root, patches, base_sha=base_sha).items():
-                if not ops:
-                    continue
-                patch_targets[patch_path] = ops
-                targets.setdefault(patch_root, {}).update(ops)
-        for declared_root, ops in keep_records.declared_targets(
-            framework_root=root,
-            upserted=(),
-            deleted=(),
-            artifacts=stack_artifacts,
-        ).items():
-            targets.setdefault(declared_root, {}).update(ops)
+        records, base_sha_by_root = self._keep_root_records(attempt, root, patch_roots, stack_artifacts)
+        targets, patch_targets = self._keep_targets(attempt, root, patch_roots, stack_artifacts, base_sha_by_root)
         snapshots = keep_records.capture_root_snapshots(
             records=records,
             targets=targets,
@@ -435,6 +475,60 @@ class EnablementGateMixin:
                 effective_config=bench_result.get("effective_config"),
             ),
         }
+
+    @staticmethod
+    def _keep_root_records(
+        attempt: IntegrateAttempt, root: str, patch_roots: dict[str, str], stack_artifacts: list[dict[str, Any]]
+    ) -> tuple[list[dict[str, Any]], dict[str, str]]:
+        """Build the per-root records of this KEEP, with the base sha each git root keeps."""
+        contributions = keep_records.collect_contributions(
+            framework_root=root,
+            patch_roots=patch_roots,
+            artifacts=stack_artifacts,
+        )
+        git_roots = [tree for tree in contributions if tree and _is_git_tree(Path(tree))]
+        # Only what was captured before this round touched each tree, and only
+        # where no earlier round already named the tree the stack applies to. A
+        # root left with no sha either way keeps none, which the decision refuses
+        # rather than answering with a HEAD that has moved since.
+        inherited_sha = attempt.shared_state.enablement.inherited_base_shas()
+        captured = attempt.base_sha_by_root
+        base_sha_by_root = {tree: inherited_sha.get(tree, "") or captured.get(tree, "") for tree in git_roots}
+        records = keep_records.build_root_records(
+            contributions=contributions,
+            base_sha_by_root=base_sha_by_root,
+            git_roots=git_roots,
+            session_framework_root=framework_paths.resolve_session_framework_root(),
+        )
+        return records, base_sha_by_root
+
+    @staticmethod
+    def _keep_targets(
+        attempt: IntegrateAttempt,
+        root: str,
+        patch_roots: dict[str, str],
+        stack_artifacts: list[dict[str, Any]],
+        base_sha_by_root: dict[str, str],
+    ) -> tuple[dict[str, dict[str, str]], dict[str, dict[str, str]]]:
+        """Classify the files this KEEP's stack declares, per root and per patch."""
+        enablement = attempt.shared_state.enablement
+        # One classification per root: a rel path is only meaningful against the
+        # tree its patch was bound to, and reading them all against this round's
+        # root would name files that root does not have. Per patch as well as per
+        # root: the decision cross-checks each patch step against the snapshot of
+        # the files that step declares, and it cannot read the diffs itself.
+        targets: dict[str, dict[str, str]] = {}
+        patch_targets: dict[str, dict[str, str]] = {}
+        for patch_root, patches in _patch_stack_by_root(enablement, patch_roots, attempt.applied).items():
+            base_sha = str(base_sha_by_root.get(patch_root) or "")
+            for patch_path, ops in _declared_stack_ops(patch_root, patches, base_sha=base_sha).items():
+                if not ops:
+                    continue
+                patch_targets[patch_path] = ops
+                targets.setdefault(patch_root, {}).update(ops)
+        for declared_root, ops in keep_records.declared_targets(framework_root=root, artifacts=stack_artifacts).items():
+            targets.setdefault(declared_root, {}).update(ops)
+        return targets, patch_targets
 
     @staticmethod
     def _commit_accepted_work(attempt: IntegrateAttempt, message: str) -> tuple[str, bool]:
@@ -566,15 +660,7 @@ class EnablementGateMixin:
             "fa_pr_url": pr_url,
             "fa_pr_sha": pr_sha,
             "framework": candidate.get("framework") or "",
-            "gap_canonical_id": candidate.get("gap_canonical_id") or "",
-            "gap_keywords": candidate.get("gap_keywords") or [],
-            "changed_files": candidate.get("changed_files") or [],
             "applicability": candidate.get("applicability") or "",
-            # Names the lever, matching ``lever_kind``. No ledger reader filters
-            # on provenance; it is audit metadata.
-            "provenance": LEVER_UPSTREAM_PR,
-            "source_framework": candidate.get("source_framework") or "",
-            "target_framework": candidate.get("target_framework") or "",
         }
 
     async def _maybe_write_framework_kb_record(
@@ -624,17 +710,8 @@ class EnablementGateMixin:
                     tps_delta_pct=float(lesson.tps_delta_pct),
                     session_id=str(getattr(shared_state, "recipe_kb_session_id", "") or ""),
                     framework=first_text(fields.get("framework")).lower(),
-                    gap_canonical_id=first_text(fields.get("gap_canonical_id")),
-                    gap_keywords=[keyword.lower() for keyword in to_str_list(fields.get("gap_keywords"))],
-                    model_class=first_text(getattr(shared_state, "model_class", "")),
-                    gpu_type=first_text(getattr(shared_state, "gpu_type", "")),
-                    precision=first_text(getattr(shared_state, "precision", "")),
                     applicability=lesson.config_fingerprint or first_text(fields.get("applicability")),
-                    provenance=first_text(fields.get("provenance")),
                     accuracy_delta_pct=accuracy_delta_pct,
-                    changed_files=to_str_list(fields.get("changed_files")),
-                    source_framework=first_text(fields.get("source_framework")).lower(),
-                    target_framework=first_text(fields.get("target_framework")).lower(),
                 )
             )
         except (OSError, ValueError, TypeError) as exc:

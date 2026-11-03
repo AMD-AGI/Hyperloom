@@ -38,7 +38,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from hyperloom.common.unified_diff import parse_unified_diff
+from hyperloom_common.unified_diff import parse_unified_diff
 from hyperloom.orchestrator.actions.executors._patch_snapshot import (
     _commit_strip_level,
     _patch_touched_paths,
@@ -90,11 +90,6 @@ class PatchMergeOutcome:
     #: Set when the patch could not be reconciled with the worktree, as opposed
     #: to git failing to write a patch that had already passed ``--check``.
     conflicted: bool = False
-
-    @property
-    def reconstructed(self) -> bool:
-        """Whether the worktree holds a merge rather than the patch verbatim."""
-        return self.applied and self.strategy not in ("", STRATEGY_STRICT)
 
     def note(self) -> str:
         """The steps taken, as a suffix for the integration result's reason."""
@@ -330,7 +325,7 @@ def _resolver_backend() -> str:
     reach Codex here, or every overlapping-region lane on that box falls back to
     the dropped patch this module exists to stop.
     """
-    from hyperloom.common.llm_config import (
+    from hyperloom_common.llm.llm_config import (
         AGENT_BACKEND_CODEX,
         anthropic_transport_ready,
         openai_agent_credentialed,
@@ -382,7 +377,7 @@ def _resolver_prompt(query: ConflictQuery) -> str:
 
 def _conflict_resolver() -> ConflictResolver | None:
     """A resolver on whichever backend this deployment runs, or ``None``."""
-    from hyperloom.common.llm_config import AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX
+    from hyperloom_common.llm.llm_config import AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX
 
     backend = _resolver_backend()
     if backend == AGENT_BACKEND_CODEX:
@@ -394,7 +389,7 @@ def _conflict_resolver() -> ConflictResolver | None:
 
 def _anthropic_resolver() -> ConflictResolver:
     async def resolve(query: ConflictQuery) -> str | None:
-        from hyperloom.common.llm_config import (
+        from hyperloom_common.llm.llm_config import (
             AnthropicCompletionRequest,
             aanthropic_completion,
             build_http_timeout,
@@ -421,7 +416,7 @@ def _anthropic_resolver() -> ConflictResolver:
 
 def _codex_resolver() -> ConflictResolver:
     async def resolve(query: ConflictQuery) -> str | None:
-        from hyperloom.common.llm_config import (
+        from hyperloom_common.llm.llm_config import (
             achat_completion,
             apply_reasoning_effort,
             build_http_timeout,

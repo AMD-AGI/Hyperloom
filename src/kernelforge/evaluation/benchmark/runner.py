@@ -18,11 +18,15 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Any, Callable
 
-from kernelforge.tools.process_group import kill_process_group
+from kernelforge.utils.process_group import kill_process_group
 
 # Optional bench-mode companion to the driver contract's --warmup/--iters, asking the driver to time ONE declared case
 # instead of its whole suite.
 SWEEP_CASE_FLAG = "--bench-case"
+
+# Warmup and timed iterations of one sweep point unless the operator asks for others.
+SWEEP_WARMUP_ITERS = 3
+SWEEP_BENCH_ITERS = 20
 
 # How case selection actually resolved for one sweep point.
 SELECTION_NARROWED = "narrowed"
@@ -321,6 +325,71 @@ def calculate_measurement_case_speedups(
     return scores
 
 
+def _case_bandwidth(full_output: str) -> dict[str, dict[str, float | int]]:
+    """The per-case bandwidth a driver printed on its ``case_bw:`` lines."""
+    # Optional per-case bandwidth, for kernels whose wall time alone cannot say what got faster.
+    case_bandwidth: dict[str, dict[str, float | int]] = {}
+    for cid, nbytes, algbw, busbw in re.findall(
+        r"case_bw:\s*(\S+)\s+bytes=(\d+)\s+algbw=([\d.eE+-]+)GB/s\s+busbw=([\d.eE+-]+)GB/s",
+        full_output,
+    ):
+        try:
+            case_bandwidth[cid] = {
+                "bytes": int(nbytes),
+                "algbw_gbs": float(algbw),
+                "busbw_gbs": float(busbw),
+            }
+        except ValueError:
+            continue
+    return case_bandwidth
+
+
+def _samples_result(
+    times: list[float],
+    case_times: dict[str, float],
+    unscored_cases: list[str],
+    case_bandwidth: dict[str, dict[str, float | int]],
+) -> dict:
+    """The benchmark result summarizing per-iteration ``wall_ms`` samples."""
+    times_sorted = sorted(times)
+    median = times_sorted[len(times_sorted) // 2]
+    return {
+        "success": True,
+        "median_ms": round(median, 4),
+        "min_ms": round(min(times), 4),
+        "max_ms": round(max(times), 4),
+        "n_samples": len(times),
+        "all_times_ms": [round(t, 4) for t in times],
+        "case_times": case_times,
+        "unscored_cases": unscored_cases,
+        "case_bandwidth": case_bandwidth,
+        "message": (f"BENCH: median={median:.4f} ms (min={min(times):.4f}, max={max(times):.4f}, n={len(times)})"),
+    }
+
+
+def _aggregate_result(
+    agg_match: re.Match[str],
+    case_times: dict[str, float],
+    unscored_cases: list[str],
+    case_bandwidth: dict[str, dict[str, float | int]],
+) -> dict:
+    """The benchmark result for a driver that printed one pre-aggregated summary line."""
+    stat_label = agg_match.group(1)  # "median_ms" or "mean_ms"
+    agg_value = float(agg_match.group(2))
+    stat_name = "mean" if stat_label == "mean_ms" else "median"
+    return {
+        # ``median_ms`` is this tool's stable representative-time field; the value is the driver's aggregate as-is
+        # (labeled honestly above).
+        "success": True,
+        "median_ms": round(agg_value, 4),
+        "stat": stat_name,
+        "case_times": case_times,
+        "unscored_cases": unscored_cases,
+        "case_bandwidth": case_bandwidth,
+        "message": f"BENCH: {stat_name}={agg_value:.4f} ms",
+    }
+
+
 async def bench_wallclock(
     run: BenchRun,
     *,
@@ -371,54 +440,15 @@ async def bench_wallclock(
             "output": full_output[-1500:],
         }
 
-    # Optional per-case bandwidth, for kernels whose wall time alone cannot say what got faster.
-    case_bandwidth: dict[str, dict[str, float | int]] = {}
-    for cid, nbytes, algbw, busbw in re.findall(
-        r"case_bw:\s*(\S+)\s+bytes=(\d+)\s+algbw=([\d.eE+-]+)GB/s\s+busbw=([\d.eE+-]+)GB/s",
-        full_output,
-    ):
-        try:
-            case_bandwidth[cid] = {
-                "bytes": int(nbytes),
-                "algbw_gbs": float(algbw),
-                "busbw_gbs": float(busbw),
-            }
-        except ValueError:
-            continue
+    case_bandwidth = _case_bandwidth(full_output)
 
     if times:
-        times_sorted = sorted(times)
-        median = times_sorted[len(times_sorted) // 2]
-        result = {
-            "success": True,
-            "median_ms": round(median, 4),
-            "min_ms": round(min(times), 4),
-            "max_ms": round(max(times), 4),
-            "n_samples": len(times),
-            "all_times_ms": [round(t, 4) for t in times],
-            "case_times": case_times,
-            "unscored_cases": unscored_cases,
-            "case_bandwidth": case_bandwidth,
-            "message": (f"BENCH: median={median:.4f} ms (min={min(times):.4f}, max={max(times):.4f}, n={len(times)})"),
-        }
+        result = _samples_result(times, case_times, unscored_cases, case_bandwidth)
         if on_result:
             on_result(result)
         return result
     if agg_match:
-        stat_label = agg_match.group(1)  # "median_ms" or "mean_ms"
-        agg_value = float(agg_match.group(2))
-        stat_name = "mean" if stat_label == "mean_ms" else "median"
-        result = {
-            # ``median_ms`` is this tool's stable representative-time field; the value is the driver's aggregate as-is
-            # (labeled honestly above).
-            "success": True,
-            "median_ms": round(agg_value, 4),
-            "stat": stat_name,
-            "case_times": case_times,
-            "unscored_cases": unscored_cases,
-            "case_bandwidth": case_bandwidth,
-            "message": f"BENCH: {stat_name}={agg_value:.4f} ms",
-        }
+        result = _aggregate_result(agg_match, case_times, unscored_cases, case_bandwidth)
         if on_result:
             on_result(result)
         return result
@@ -584,11 +614,9 @@ def _sweep_caveats(whole_suite: str, consumption: dict[str, str], samples: list[
 
 async def sweep_case(
     *,
-    driver_script: str,
+    bench: BenchRun,
     case_id: str,
     constants: dict[str, Any] | None = None,
-    warmup_iters: int = 3,
-    bench_iters: int = 20,
     timeout_sec: int = 120,
     prefix_constants: bool = True,
 ) -> dict:
@@ -603,7 +631,7 @@ async def sweep_case(
     described = ", ".join(f"{k}={v}" for k, v in exported.items()) or "no overrides"
     point_failure = partial(_sweep_failure, case_id=case, constants=exported)
 
-    base_cmd = bench_command(BenchRun(driver_script, warmup_iters=warmup_iters, bench_iters=bench_iters))
+    base_cmd = bench_command(bench)
     memo_key = _case_flag_memo_key(base_cmd)
     rejected_before = _CASE_FLAG_REJECTED.get(memo_key, False)
     cmd = list(base_cmd) if rejected_before else base_cmd + [SWEEP_CASE_FLAG, case]
@@ -649,8 +677,8 @@ async def sweep_case(
         "narrowed": narrowed,
         "case_selection": SELECTION_NARROWED if selected else SELECTION_WHOLE_SUITE,
         "override_consumption": consumption,
-        "warmup_iters": warmup_iters,
-        "bench_iters": bench_iters,
+        "warmup_iters": bench.warmup_iters,
+        "bench_iters": bench.bench_iters,
         **(
             {"n_samples": len(samples), "wall_min_ms": round(min(samples), 6), "wall_max_ms": round(max(samples), 6)}
             if spread
@@ -695,8 +723,8 @@ def _sweep_cli(argv: list[str] | None = None) -> int:
             "HIP_VISIBLE_DEVICES, ...) is refused"
         ),
     )
-    parser.add_argument("--warmup", type=int, default=3)
-    parser.add_argument("--iters", type=int, default=20)
+    parser.add_argument("--warmup", type=int, default=SWEEP_WARMUP_ITERS)
+    parser.add_argument("--iters", type=int, default=SWEEP_BENCH_ITERS)
     parser.add_argument("--timeout", type=int, default=120)
     args = parser.parse_args(argv)
 
@@ -710,11 +738,9 @@ def _sweep_cli(argv: list[str] | None = None) -> int:
 
     result = asyncio.run(
         sweep_case(
-            driver_script=args.driver,
+            bench=BenchRun(args.driver, warmup_iters=args.warmup, bench_iters=args.iters),
             case_id=args.case,
             constants=constants,
-            warmup_iters=args.warmup,
-            bench_iters=args.iters,
             timeout_sec=args.timeout,
             prefix_constants=not args.verbatim_names,
         )

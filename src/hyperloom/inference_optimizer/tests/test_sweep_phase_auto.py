@@ -42,6 +42,7 @@ from hyperloom.orchestrator.kernel import integrate_accuracy as integrate_accura
 class _BareState(SharedState):
     conc_sweep_concs: list[int] = field(default_factory=lambda: [1, 2, 4])
     conc_sweep_total_budget_sec: int = 60
+    baseline_runtime_sec: float = 20.0
     save_count: int = 0
     usable_sec: float | None = None
 
@@ -216,6 +217,52 @@ def _ledger_rows(c: Coordinator, kernel_ids: list[str]) -> list[dict[str, Any]]:
     return [by_kernel[kid] for kid in kernel_ids]
 
 
+def _record_needs_review_pair(state: SharedState) -> None:
+    """Integrate k001 (+0.6%) and k004 (+0.8%) as NEEDS_REVIEW, the pair a stack validation combines."""
+    for kid, gain in (("k001", 0.6), ("k004", 0.8)):
+        state.record_kernel_integrate_result(
+            {
+                "status": "ok",
+                "decision": "NEEDS_REVIEW",
+                "kernel_id": kid,
+                "patch_path": f"/tmp/{kid}_opt.cu",
+                "target_file": f"/tmp/{kid}.cu",
+                "new_tput": 100.0 + gain,
+                "gain_pct": gain,
+                "workspace": f"/tmp/integrate-{kid}",
+            }
+        )
+
+
+def _baseline_coordinator_with_needs_review_pair(tmp_path: Path) -> Coordinator:
+    c = Coordinator.__new__(Coordinator)
+    c.session_dir = tmp_path
+    c.shared_state = SharedState(
+        baseline_tput=100.0,
+        current_best={"action": "baseline", "tput": 100.0},
+    )
+    _record_needs_review_pair(c.shared_state)
+    return c
+
+
+def _stack_keep(entries: list[dict[str, Any]], tmp_path: Path) -> dict[str, Any]:
+    """The KEEP a combined E2E validation of ``entries`` reports at +2% over a 100 tok/s anchor."""
+    return {
+        "status": "ok",
+        "decision": "KEEP",
+        "kernel_id": "+".join(e["kernel_id"] for e in entries),
+        "patch_path": "+".join(e["patch_path"] for e in entries),
+        "target_file": "+".join(e["target_file"] for e in entries),
+        "base_tput": 100.0,
+        "new_tput": 102.0,
+        "gain_pct": 2.0,
+        "workspace": str(tmp_path / "integrate-stack"),
+        "apply_result": {"status": "ok"},
+        "stack_kernel_ids": [e["kernel_id"] for e in entries],
+        "stack_validation": True,
+    }
+
+
 def _stack_validation_coordinator(tmp_path: Path) -> Coordinator:
     c = Coordinator.__new__(Coordinator)
     c.session_dir = tmp_path
@@ -228,19 +275,7 @@ def _stack_validation_coordinator(tmp_path: Path) -> Coordinator:
     c.shared_state.optimization_stack = [
         {"action": "integrate", "kernel_id": "k_prev", "tput": 110.0},
     ]
-    for kid, gain in (("k001", 0.6), ("k004", 0.8)):
-        c.shared_state.record_kernel_integrate_result(
-            {
-                "status": "ok",
-                "decision": "NEEDS_REVIEW",
-                "kernel_id": kid,
-                "patch_path": f"/tmp/{kid}_opt.cu",
-                "target_file": f"/tmp/{kid}.cu",
-                "new_tput": 100.0 + gain,
-                "gain_pct": gain,
-                "workspace": f"/tmp/integrate-{kid}",
-            }
-        )
+    _record_needs_review_pair(c.shared_state)
     return c
 
 
@@ -277,7 +312,6 @@ async def test_stack_validation_partial_revert_becomes_failed(
     assert result["decision"] == "REVERT"
     # partial -> failed at the aggregate level: patch still live on remote pod
     assert result["status"] == "failed"
-    assert result["patch_cleanup_status"] == "recovery_required"
     assert result["patch_cleanup_action"] == "revert"
     assert all(r["status"] == "partial" for r in result["revert_result"]["stack_reverts"])
 
@@ -552,7 +586,7 @@ async def test_stack_validation_preserves_actual_measurement(
     assert result["new_tput"] == (output if valid else 0.0)
     assert result["gain_pct"] == pytest.approx(output - 100.0 if valid else -100.0)
     assert result["stack_kernel_ids"] == ["k001", "k004"]
-    assert result["patch_cleanup_status"] == "complete"
+    assert result["patch_cleanup_action"] == ""
     expected_source = optimized_source if decision == "KEEP" else original_source
     assert all(Path(entry["target_file"]).read_text(encoding="utf-8") == expected_source for entry in stack)
     assert result["bench_result"] == original_measurement
@@ -574,25 +608,7 @@ async def test_stack_validation_preserves_actual_measurement(
 @pytest.mark.asyncio
 async def test_positive_needs_review_stack_validation_promotes_combo(tmp_path: Path):
     """Two positive sub-threshold kernel patches should get one combined E2E validation."""
-    c = Coordinator.__new__(Coordinator)
-    c.session_dir = tmp_path
-    c.shared_state = SharedState(
-        baseline_tput=100.0,
-        current_best={"action": "baseline", "tput": 100.0},
-    )
-    for kid, gain in (("k001", 0.6), ("k004", 0.8)):
-        c.shared_state.record_kernel_integrate_result(
-            {
-                "status": "ok",
-                "decision": "NEEDS_REVIEW",
-                "kernel_id": kid,
-                "patch_path": f"/tmp/{kid}_opt.cu",
-                "target_file": f"/tmp/{kid}.cu",
-                "new_tput": 100.0 + gain,
-                "gain_pct": gain,
-                "workspace": f"/tmp/integrate-{kid}",
-            }
-        )
+    c = _baseline_coordinator_with_needs_review_pair(tmp_path)
 
     validation_calls = 0
 
@@ -601,18 +617,7 @@ async def test_positive_needs_review_stack_validation_promotes_combo(tmp_path: P
         validation_calls += 1
         assert {e["kernel_id"] for e in entries} == {"k001", "k004"}
         return {
-            "status": "ok",
-            "decision": "KEEP",
-            "kernel_id": "+".join(e["kernel_id"] for e in entries),
-            "patch_path": "+".join(e["patch_path"] for e in entries),
-            "target_file": "+".join(e["target_file"] for e in entries),
-            "base_tput": 100.0,
-            "new_tput": 102.0,
-            "gain_pct": 2.0,
-            "workspace": str(tmp_path / "integrate-stack"),
-            "apply_result": {"status": "ok"},
-            "stack_kernel_ids": [e["kernel_id"] for e in entries],
-            "stack_validation": True,
+            **_stack_keep(entries, tmp_path),
             "stack_member_identities": [{k: e[k] for k in ("kernel_id", "patch_path", "target_file")} for e in entries],
         }
 
@@ -654,25 +659,7 @@ async def test_positive_needs_review_stack_validation_promotes_combo(tmp_path: P
 @pytest.mark.asyncio
 async def test_recovers_pending_stack_validation_after_crash(tmp_path: Path):
     """A saved pending stack result should finish promotion without re-applying."""
-    c = Coordinator.__new__(Coordinator)
-    c.session_dir = tmp_path
-    c.shared_state = SharedState(
-        baseline_tput=100.0,
-        current_best={"action": "baseline", "tput": 100.0},
-    )
-    for kid, gain in (("k001", 0.6), ("k004", 0.8)):
-        c.shared_state.record_kernel_integrate_result(
-            {
-                "status": "ok",
-                "decision": "NEEDS_REVIEW",
-                "kernel_id": kid,
-                "patch_path": f"/tmp/{kid}_opt.cu",
-                "target_file": f"/tmp/{kid}.cu",
-                "new_tput": 100.0 + gain,
-                "gain_pct": gain,
-                "workspace": f"/tmp/integrate-{kid}",
-            }
-        )
+    c = _baseline_coordinator_with_needs_review_pair(tmp_path)
     stack = _ledger_rows(c, ["k001", "k004"])
     c.phase_kernel_stack._mark_stack_validation_in_progress(stack, "k001+k004")
     c.shared_state.pending_stack_validation_result = {
@@ -751,48 +738,17 @@ async def test_on_enter_sweep_triggers_stack_validation_without_pending_keeps(
     monkeypatch,
 ):
     """Stack validation must run even when has_keep_pending_integrate is False."""
-    c = Coordinator.__new__(Coordinator)
-    c.session_dir = tmp_path
-    c.shared_state = SharedState(
-        baseline_tput=100.0,
-        current_best={"action": "baseline", "tput": 100.0},
-    )
+    c = _baseline_coordinator_with_needs_review_pair(tmp_path)
     c.tasks = _StubTaskRegistry()
     c.knowledge_plane = None
     # All KEEPs already integrated as NEEDS_REVIEW — no pending KEEP.
-    for kid, gain in (("k001", 0.6), ("k004", 0.8)):
-        c.shared_state.record_kernel_integrate_result(
-            {
-                "status": "ok",
-                "decision": "NEEDS_REVIEW",
-                "kernel_id": kid,
-                "patch_path": f"/tmp/{kid}_opt.cu",
-                "target_file": f"/tmp/{kid}.cu",
-                "new_tput": 100.0 + gain,
-                "gain_pct": gain,
-                "workspace": f"/tmp/integrate-{kid}",
-            }
-        )
     assert not kd.has_keep_pending_integrate(c.shared_state)
 
     validation_calls = []
 
     async def _fake_stack_validation(entries):
         validation_calls.append([e["kernel_id"] for e in entries])
-        return {
-            "status": "ok",
-            "decision": "KEEP",
-            "kernel_id": "+".join(e["kernel_id"] for e in entries),
-            "patch_path": "+".join(e["patch_path"] for e in entries),
-            "target_file": "+".join(e["target_file"] for e in entries),
-            "base_tput": 100.0,
-            "new_tput": 102.0,
-            "gain_pct": 2.0,
-            "workspace": str(tmp_path / "integrate-stack"),
-            "apply_result": {"status": "ok"},
-            "stack_kernel_ids": [e["kernel_id"] for e in entries],
-            "stack_validation": True,
-        }
+        return _stack_keep(entries, tmp_path)
 
     async def _noop_roofline(*, reason: str):
         return None
@@ -972,7 +928,7 @@ async def test_on_enter_sweep_keeps_the_declines_own_skip_reason(coord):
     )
 
     assert coord.tasks._tasks == {}
-    assert coord.shared_state.last_conc_sweep["skip_reason"] == "session_time_budget"
+    assert coord.shared_state.last_conc_sweep["skip_reason"] == "grant_cannot_fit_one_pair"
 
 
 @pytest.mark.asyncio
@@ -984,11 +940,31 @@ async def test_enqueue_conc_sweep_declines_when_clamp_leaves_no_time(coord):
     # 1 minute left, minus the 120 s CLOSE reserve, is a negative budget.
     coord.shared_state.remaining_minutes = lambda: 1.0
 
-    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task()
 
     assert task is None
     assert coord.tasks._tasks == {}
-    assert coord.shared_state.last_conc_sweep["skip_reason"] == "session_time_budget"
+    assert coord.shared_state.last_conc_sweep["skip_reason"] == "grant_cannot_fit_one_pair"
+
+
+@pytest.mark.asyncio
+async def test_enqueue_conc_sweep_declines_a_grant_that_cannot_fit_one_pair(coord):
+    """The sweep's own budget, not only the session clock, has to hold the anchor pair: two measured rounds."""
+    coord.shared_state.phase_history = [
+        {"to_phase": "SWEEP", "reason": "kernel_no_more_leverage", "evidence": {}},
+    ]
+    coord.shared_state.remaining_minutes = lambda: 600.0
+    coord.shared_state.baseline_runtime_sec = 40.0
+
+    coord.shared_state.conc_sweep_total_budget_sec = 79
+    assert await coord.phase_sweep._enqueue_internal_conc_sweep_task() is None
+    assert coord.tasks._tasks == {}
+    assert coord.shared_state.last_conc_sweep["skip_reason"] == "grant_cannot_fit_one_pair"
+
+    coord.shared_state.last_conc_sweep = {}
+    coord.shared_state.conc_sweep_total_budget_sec = 80
+    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task()
+    assert task is not None and task.params["total_budget_sec"] == 80
 
 
 @pytest.mark.asyncio
@@ -1000,7 +976,7 @@ async def test_conc_sweep_lease_follows_the_clamped_budget(coord):
     coord.shared_state.conc_sweep_total_budget_sec = 0
     coord.shared_state.remaining_minutes = lambda: 300.0  # 5 h
 
-    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task()
 
     expected_budget = 300 * 60 - 120
     assert task.params["total_budget_sec"] == expected_budget
@@ -1015,7 +991,7 @@ async def test_conc_sweep_unbounded_budget_opts_out_of_the_lease(coord):
     ]
     coord.shared_state.conc_sweep_total_budget_sec = 0
 
-    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task()
 
     assert task.params["total_budget_sec"] is None
     assert coord.tasks.last_lease_ttl_sec == 0
@@ -1029,7 +1005,7 @@ async def test_enqueue_conc_sweep_unbounded_budget_is_none(coord):
     ]
     coord.shared_state.conc_sweep_total_budget_sec = 0
 
-    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task()
 
     assert task is not None
     assert task.params["total_budget_sec"] is None
@@ -1044,7 +1020,7 @@ async def test_enqueue_conc_sweep_clamps_to_remaining_session_time(coord):
     coord.shared_state.conc_sweep_total_budget_sec = 9000
     coord.shared_state.remaining_minutes = lambda: 5.0
 
-    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task()
 
     assert task is not None
     assert task.params["total_budget_sec"] == 180  # 5 min - 120 s reserve
@@ -1095,8 +1071,9 @@ async def test_on_enter_sweep_skips_when_no_validated_gain_since_last_conc_sweep
 
 @pytest.mark.asyncio
 async def test_on_enter_sweep_skips_when_the_session_budget_cannot_fit_conc_sweep(coord):
-    """A conc_sweep the clock cannot pay for must not be enqueued, or SWEEP idles."""
+    """A conc_sweep the clock cannot fit one measured pair into must not be enqueued, or SWEEP idles."""
     coord.shared_state.usable_sec = 14 * 60.0
+    coord.shared_state.baseline_runtime_sec = 8 * 60.0
     coord.shared_state.phase_history = [
         {"to_phase": "SWEEP", "reason": "kernel_no_more_leverage", "evidence": {}},
     ]
@@ -1344,7 +1321,6 @@ async def test_stack_validation_failed_revert_sets_status_failed(
 
     assert result["decision"] == "REVERT"
     assert result["status"] == "failed"
-    assert result["patch_cleanup_status"] == "recovery_required"
     assert result["patch_cleanup_action"] == "revert"
     assert result.get("error_class") == "patch_revert_incomplete"
     assert all(r["status"] == "failed" for r in result["revert_result"]["stack_reverts"])
@@ -1383,7 +1359,7 @@ async def test_stack_validation_keep_calls_finalize(
 
     assert result["decision"] == "KEEP"
     assert result["status"] == "ok"
-    assert result["patch_cleanup_status"] == "complete"
+    assert result["patch_cleanup_action"] == ""
     # One finalize call per patch in the two-entry stack.
     assert len(finalize_calls) == 2
 
@@ -1419,7 +1395,6 @@ async def test_stack_validation_keep_partial_finalize_requires_recovery(
 
     assert result["decision"] == "KEEP"
     assert result["status"] == "ok"
-    assert result["patch_cleanup_status"] == "recovery_required"
     assert result["patch_cleanup_action"] == "finalize"
 
 
@@ -1516,7 +1491,6 @@ async def test_integrate_handler_revert_partial_becomes_failed(
 
     assert result["decision"] == "REVERT"
     assert result["status"] == "failed"
-    assert result["patch_cleanup_status"] == "recovery_required"
     assert result["patch_cleanup_action"] == "revert"
     assert result.get("error_class") == "patch_revert_incomplete"
 
@@ -1532,7 +1506,7 @@ async def test_conc_sweep_task_carries_catalogue_lanes(coord):
     ]
     coord.shared_state.remaining_minutes = lambda: 300.0
 
-    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task()
 
     assert task is not None
     expected_lanes = sorted(ACTION_CATALOGUE["conc_sweep"].requires_lanes)
@@ -2370,14 +2344,14 @@ async def test_enqueue_conc_sweep_grants_the_phase_its_budget_and_lease(coord):
     coord.shared_state.remaining_minutes = lambda: 62.4
     coord.shared_state._now_unix = lambda: 1_800_000_000.0
 
-    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task()
 
     assert task.params["total_budget_sec"] == 3624
     assert coord.shared_state.conc_sweep_granted_until_unix == 1_800_000_000.0 + 3624 + 600
 
     # A re-entry that finds the task already queued does not move the grant.
     coord.shared_state._now_unix = lambda: 1_800_000_100.0
-    await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+    await coord.phase_sweep._enqueue_internal_conc_sweep_task()
     assert coord.shared_state.conc_sweep_granted_until_unix == 1_800_000_000.0 + 3624 + 600
 
 
@@ -2389,6 +2363,6 @@ async def test_enqueue_unbounded_conc_sweep_grants_nothing(coord):
     ]
     coord.shared_state.conc_sweep_total_budget_sec = 0
 
-    await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+    await coord.phase_sweep._enqueue_internal_conc_sweep_task()
 
     assert coord.shared_state.conc_sweep_granted_until_unix == 0.0

@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Sequence
 
 from hyperloom.common.provenance import detect_kineto_backend
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.timeutil import now_iso
 from ...phases.machine_state import LifecycleMark, record_lifecycle_event
 from ...loop.sub_agent_runner import RunnerContext
 from ...state.analysis_failures import remember_roofline_failure, remember_trace_failure
@@ -324,23 +324,22 @@ def _preflight_probe(session_dir: Path, task_id: str, *, reaped: Sequence[int]) 
     # ``production_pick_probe`` disagreement: the live resolver can pick the leftover instead of what this run
     # produces, and by then there is no way to tell which run the numbers came from.
     stale: list[dict[str, Any]] = []
-    if task_id:
-        try:
-            for run_dir in sorted(session_dir.glob(f"runs/*/{task_id}")):
-                for p in sorted(run_dir.rglob("*")):
-                    if len(stale) >= _PREFLIGHT_STALE_TRACE_LIMIT:
-                        break
-                    if p.is_file() and str(p).endswith(_TRACE_SUFFIXES):
-                        info = p.stat()
-                        stale.append(
-                            {
-                                "path": str(p.relative_to(session_dir)),
-                                "size_bytes": info.st_size,
-                                "mtime_iso": _iso_from_epoch(info.st_mtime),
-                            }
-                        )
-        except OSError as exc:
-            out["stale_traces_error"] = repr(exc)
+    try:
+        for run_dir in sorted(session_dir.glob(f"runs/*/{task_id}")) if task_id else []:
+            for p in sorted(run_dir.rglob("*")):
+                if len(stale) >= _PREFLIGHT_STALE_TRACE_LIMIT:
+                    break
+                if p.is_file() and str(p).endswith(_TRACE_SUFFIXES):
+                    info = p.stat()
+                    stale.append(
+                        {
+                            "path": str(p.relative_to(session_dir)),
+                            "size_bytes": info.st_size,
+                            "mtime_iso": _iso_from_epoch(info.st_mtime),
+                        }
+                    )
+    except OSError as exc:
+        out["stale_traces_error"] = repr(exc)
     out["stale_traces"] = stale
     out["stale_trace_count"] = len(stale)
     return out
@@ -644,7 +643,7 @@ async def _fail_on_capture(
     fine) and ``config`` (these server args cannot capture at all) decides who owns the fix, so it is recorded
     rather than acted on here.
     """
-    from .baseline import _classify_cuda_graph_capture_failure
+    from .benchmark_run.bringup import _classify_cuda_graph_capture_failure
 
     # With capture already off, a marker in the log tail says nothing about this run -- the tail can span an earlier
     # boot -- and "does not re-profile with graph capture disabled" would be nonsense to read on such a run.
@@ -1096,7 +1095,8 @@ class RooflineExecutor:
     ) -> _AnalysedProfile | None:
         """Re-profile a host-bound trace once with DP attention stripped; return the pair to adopt, or ``None``.
 
-        Fail-soft: whatever goes wrong, the original analysis stands.
+        A re-profile or re-analysis that returns a failure leaves the original analysis standing; one that raises does
+        not, and the action crashes with its attempt rows already written.
         """
         from ._multi_node_server_lifecycle import _COMPUTE_BOUND_PROFILE_ENV, _scoped_env
 
@@ -1104,17 +1104,10 @@ class RooflineExecutor:
             "roofline: host-bound trace (0 hot kernels + high GPU idle); "
             "attempting one compute-bound re-profile (DP-attention stripped)"
         )
-        adopted: _AnalysedProfile | None = None
-        outcome = "re-profile produced no usable trace"
         with _scoped_env({_COMPUTE_BOUND_PROFILE_ENV: "1"}):
-            try:
-                adopted, outcome = await self._compute_bound_attempt(ctx, recorder, arm, analysis.payload)
-            except Exception as exc:  # isolation boundary: one optional compute-bound re-profile
-                outcome = f"re-profile raised: {exc!r}"
-                log.warning("roofline: compute-bound re-profile failed (%s); keeping original", exc, exc_info=True)
-            finally:
-                if recorder is not None:
-                    recorder.record_compute_bound_reprofile(attempted=True, adopted=adopted is not None, reason=outcome)
+            adopted, outcome = await self._compute_bound_attempt(ctx, recorder, arm, analysis.payload)
+        if recorder is not None:
+            recorder.record_compute_bound_reprofile(attempted=True, adopted=adopted is not None, reason=outcome)
         return adopted
 
     async def _compute_bound_attempt(
@@ -1250,7 +1243,7 @@ class RooflineExecutor:
         parent_task = parent_ctx.task
         params = dict(parent_task.params or {})
         if disable_cuda_graph:
-            from .baseline import _with_cuda_graph_disabled
+            from .benchmark_run.bringup import _with_cuda_graph_disabled
 
             params["base_extra_args"] = _with_cuda_graph_disabled(
                 str(params.get("base_extra_args") or ""),

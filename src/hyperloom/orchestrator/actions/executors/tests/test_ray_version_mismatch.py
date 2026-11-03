@@ -49,10 +49,9 @@ def _make_fake_ray(init_side_effects):
 def _settle_ray_init_state(timeout: float = 30.0) -> None:
     """Wait out any abandoned ``ray-init`` runner, then clear the process-wide flag.
 
-    Clearing alone is not isolation: a runner abandoned by an earlier test sets
-    the flag whenever it finally returns, which under load is after the next
-    test has already cleared it. The runner releases ``_INIT_GATE`` as its last
-    action, so holding the gate proves no connect can still set the flag.
+    Clearing alone is not isolation: a runner abandoned by an earlier test may
+    still be connecting. The runner releases ``_INIT_GATE`` as its last action,
+    so holding the gate proves no earlier connect is still outstanding.
     """
     held = ray_runtime._INIT_GATE.acquire(timeout=timeout)
     try:
@@ -83,27 +82,24 @@ def test_is_version_mismatch_detects_banner():
     assert not ray_runtime._is_ray_version_mismatch(None)  # type: ignore[arg-type]
 
 
-def test_quiet_ray_init_recovers_from_version_mismatch(tmp_path, monkeypatch):
+def test_quiet_ray_init_recovers_from_version_mismatch(monkeypatch):
     """First init raises Version mismatch -> restart local cluster -> retry OK."""
     fake_ray = _make_fake_ray([RuntimeError(_VERSION_MISMATCH_MSG), None])
     monkeypatch.setitem(sys.modules, "ray", fake_ray)
 
     restart_calls = []
 
-    def _fake_restart(num_gpus=None, log_path=None):
-        restart_calls.append({"num_gpus": num_gpus, "log_path": log_path})
+    def _fake_restart(num_gpus=None):
+        restart_calls.append({"num_gpus": num_gpus})
 
     monkeypatch.setattr(ray_runtime, "force_restart_local_cluster", _fake_restart)
 
-    log_path = tmp_path / "ray_lifecycle.log"
-    runtime_env = ray_runtime.quiet_ray_init(num_gpus=2, log_path=log_path)
+    ray_runtime.quiet_ray_init(num_gpus=2)
 
     assert fake_ray._calls["init"] == 2, "should retry init exactly once after restart"
     assert fake_ray._calls["shutdown"] == 1, "should shutdown stale driver before retry"
     assert len(restart_calls) == 1
     assert restart_calls[0]["num_gpus"] == 2
-    assert restart_calls[0]["log_path"] == log_path
-    assert "env_vars" in runtime_env
 
 
 def test_quiet_ray_init_propagates_non_mismatch_error(monkeypatch):
@@ -140,9 +136,8 @@ def test_quiet_ray_init_no_mismatch_succeeds_first_try(monkeypatch):
     assert restart_calls == []
 
 
-def test_force_restart_local_cluster_runs_stop_then_start(tmp_path):
-    """``force_restart_local_cluster`` must ``ray stop --force`` then ``ray start --head`` with the requested num_gpus, logging to the audit file."""
-    log_path = tmp_path / "ray_lifecycle.log"
+def test_force_restart_local_cluster_runs_stop_then_start():
+    """``force_restart_local_cluster`` must ``ray stop --force`` then ``ray start --head`` with the requested num_gpus."""
     runs = []
 
     class _Proc:
@@ -153,7 +148,7 @@ def test_force_restart_local_cluster_runs_stop_then_start(tmp_path):
         return _Proc()
 
     with mock.patch.object(ray_runtime.subprocess, "run", _fake_run):
-        ray_runtime.force_restart_local_cluster(num_gpus=4, log_path=log_path)
+        ray_runtime.force_restart_local_cluster(num_gpus=4)
 
     assert runs[0] == ["ray", "stop", "--force"]
     # The fresh head binds a probed free port (not the fixed 6379) so co-located host-network sessions never collide
@@ -161,12 +156,10 @@ def test_force_restart_local_cluster_runs_stop_then_start(tmp_path):
     assert runs[1][:3] == ["ray", "start", "--head"]
     assert any(tok.startswith("--port=") for tok in runs[1])
     assert "--num-gpus=4" in runs[1]
-    assert log_path.exists()
 
 
-def test_force_restart_raises_when_start_fails(tmp_path):
+def test_force_restart_raises_when_start_fails():
     """A non-zero ``ray start`` exit must raise so ``submit``'s except can record it as a backend-dispatch failure."""
-    log_path = tmp_path / "ray_lifecycle.log"
 
     class _Proc:
         returncode = 1
@@ -175,8 +168,8 @@ def test_force_restart_raises_when_start_fails(tmp_path):
         return _Proc()
 
     with mock.patch.object(ray_runtime.subprocess, "run", _fake_run):
-        with pytest.raises(RuntimeError, match="restart local Ray"):
-            ray_runtime.force_restart_local_cluster(num_gpus=1, log_path=log_path)
+        with pytest.raises(RuntimeError, match="failed to start Ray"):
+            ray_runtime.force_restart_local_cluster(num_gpus=1)
 
 
 # ---- ray.init is bounded -----------------------------------------------------

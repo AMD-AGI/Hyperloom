@@ -52,15 +52,12 @@ class ExplorePromotionMixin:
         outcome: _PromoteOutcome,
     ) -> None:
         """Promote an explore result: ledger increment, winners, current_best lift, resume revalidation."""
-        changed = False
         # The Coordinator is single-writer for explore_search.accepted,
         # current_best and optimization_stack.
         update = result.get("explore_search_update")
         if isinstance(update, dict):
             self.shared_state.apply_explore_search_update(update)
-            changed = True
-        if self._record_framework_lever_attributions(result):
-            changed = True
+        self._record_framework_lever_attributions(result)
         winners = result.get("winners") or []
         # A stack revalidation confirms the existing stack and current_best
         # rather than adding a variant, so it never promotes: the accept and
@@ -76,11 +73,9 @@ class ExplorePromotionMixin:
                 outcome.changed = True
                 return
             await self._reconcile_revalidated_watermark(result, stale=stale)
-            changed = True
         lift = _ExploreLift(promoted=False, last_lifted=None)
         if isinstance(winners, list) and winners and not is_revalidation_task:
             lift = self._accept_explore_winners(result, task, outcome)
-            changed = True
         self.shared_state.note_explore_outcome(promoted=lift.promoted)
         # A round with no measured variant is not a data point for the plateau window.
         if not is_revalidation_task and (winners or result.get("losers")):
@@ -94,8 +89,6 @@ class ExplorePromotionMixin:
                 measurement_basis="e2e_decision_round",
                 watermark_reason="explore_keep_watermark",
             )
-        else:
-            changed = True
         if lift.promoted:
             outcome.audit_decision = "promoted"
             outcome.verdict = Verdict.ADOPTED
@@ -105,20 +98,16 @@ class ExplorePromotionMixin:
         else:
             outcome.audit_decision = "discarded"
             outcome.verdict = Verdict.RECORDED if is_revalidation_task else Verdict.REVERTED
-        outcome.changed = changed
         outcome.audit_extras = _explore_audit_extras(result)
 
-    def _record_framework_lever_attributions(self, result: Mapping[str, Any]) -> bool:
-        recorded = False
+    def _record_framework_lever_attributions(self, result: Mapping[str, Any]) -> None:
         for attribution in result.get("framework_lever_attributions") or []:
             if not isinstance(attribution, dict):
                 continue
-            if self.shared_state.record_framework_lever_attribution(
+            self.shared_state.record_framework_lever_attribution(
                 str(attribution.get("switch") or ""),
                 gain_pct=attribution.get("gain_pct"),
-            ):
-                recorded = True
-        return recorded
+            )
 
     async def _warn_on_stale_revalidation(self, task: "Task") -> bool:
         measured_generation = (task.params or {}).get("recipe_generation")

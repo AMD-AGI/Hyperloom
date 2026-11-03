@@ -22,8 +22,9 @@ from hyperloom.plugs.manifest import SocketSetting
 
 
 class _Plug:
-    def __init__(self, name, log, *, fail_start=False, fail_close=False):
+    def __init__(self, name, log, *, fail_start=False, fail_close=False, close_error=OSError):
         self.name, self.log, self.fail_start, self.fail_close = name, log, fail_start, fail_close
+        self.close_error = close_error
 
     def start(self):
         if self.fail_start:
@@ -33,7 +34,7 @@ class _Plug:
     def close(self):
         self.log.append(f"close {self.name}")
         if self.fail_close:
-            raise RuntimeError(f"{self.name} refused to close")
+            raise self.close_error(f"{self.name} refused to close")
 
 
 def _build(log, spec, *, config=None):
@@ -80,7 +81,34 @@ def test_a_failing_close_is_recorded_and_the_rest_still_close() -> None:
     log.clear()
     host.close()
     assert log == ["close b", "close a"]
+    assert host.close_errors() == {"b": "OSError: b refused to close"}
+
+
+def test_a_non_io_close_error_still_closes_the_rest_then_raises() -> None:
+    log = []
+    host, _ = _build(
+        log, {"c": (("b",), {}), "b": (("a",), {"fail_close": True, "close_error": RuntimeError}), "a": ((), {})}
+    )
+    host.start()
+    log.clear()
+    with pytest.raises(RuntimeError, match="^b refused to close$"):
+        host.close()
+    assert log == ["close c", "close b", "close a"]
     assert host.close_errors() == {"b": "RuntimeError: b refused to close"}
+
+
+def test_a_close_error_after_a_failed_start_is_reported_with_the_start_failure() -> None:
+    log = []
+    host, _ = _build(
+        log, {"b": (("a",), {"fail_start": True}), "a": ((), {"fail_close": True, "close_error": RuntimeError})}
+    )
+    with pytest.raises(PlugError) as raised:
+        host.start()
+    assert str(raised.value).startswith(
+        "socket 'b' implementation 'impl' failed to start: RuntimeError: b refused to start"
+    )
+    assert str(raised.value).endswith("; closing the started plugs then failed: RuntimeError: a refused to close")
+    assert log == ["start a", "close a"]
 
 
 def test_a_missing_dependency_refuses_the_start() -> None:

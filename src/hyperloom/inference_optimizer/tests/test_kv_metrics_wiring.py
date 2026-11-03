@@ -149,9 +149,11 @@ def test_scrape_interval_is_enforced_on_the_monotonic_clock():
 
 
 def test_unknown_phase_is_ignored_rather_than_raising():
-    rec = KvMetricsRecorder(poller=_StubPoller([]), min_interval_sec=0.0)
+    rec = KvMetricsRecorder(poller=_StubPoller([_sample()]), min_interval_sec=0.0)
     rec.note_phase("nonsense", 1.0)
-    assert rec.phase == "boot"
+    rec.tick(2.0)
+    assert rec.rows()[0]["phase"] == "boot"
+    assert rec.summary()["phase_marks"] == []
 
 
 def test_capacity_is_latched_from_the_first_reading_that_has_it():
@@ -558,8 +560,8 @@ def test_no_recorder_leaves_the_loop_unchanged():
     assert out == ("out", "err")
 
 
-def test_a_lone_failing_recorder_does_not_fail_the_round(monkeypatch, tmp_path):
-    """Telemetry stays observational past construction, even when it is the round's only recorder."""
+def test_a_failing_recorder_fails_the_round(monkeypatch, tmp_path):
+    """Recorders absorb their own scrape and write failures, so anything else they raise is a defect that surfaces."""
 
     class _Exploding:
         def note_phase(self, phase, mono):
@@ -573,12 +575,12 @@ def test_a_lone_failing_recorder_does_not_fail_the_round(monkeypatch, tmp_path):
 
     monkeypatch.setattr(sk, "_build_kv_recorder", lambda *a: _Exploding())
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors._gpu_power.build_gpu_power_recorder", lambda *a: None)
-    out = _watch(
-        _DoneProc(),
-        sk._WatchedRound(sk.RoundWatch(timeout=5, server_already_ready=True)),
-        sk._build_round_recorders(str(tmp_path / "server.log"), {}),
-    )
-    assert out == ("out", "err")
+    with pytest.raises(RuntimeError, match="^boom$"):
+        _watch(
+            _DoneProc(),
+            sk._WatchedRound(sk.RoundWatch(timeout=5, server_already_ready=True)),
+            sk._build_round_recorders(str(tmp_path / "server.log"), {}),
+        )
 
 
 def test_artifact_name_is_stable():
@@ -1174,6 +1176,20 @@ def test_missing_progress_address_is_not_an_error(tmp_path):
     assert poller.poll() is None
 
 
+def _progress_profiling_from(warmup_start: float, profiling_start: float) -> _StubProgress:
+    """Three progress reads: warmup open, the boundary at ``profiling_start``, then profiling alone."""
+    return _StubProgress(
+        [
+            {"warmup": {"start_ns": _ns(warmup_start), "requests_end_ns": None}},
+            {
+                "warmup": {"start_ns": _ns(warmup_start), "requests_end_ns": _ns(profiling_start)},
+                "profiling": {"start_ns": _ns(profiling_start), "requests_end_ns": None},
+            },
+            {"profiling": {"start_ns": _ns(profiling_start), "requests_end_ns": None}},
+        ]
+    )
+
+
 def test_authoritative_boundary_moves_rows_the_log_marker_mislabelled():
     """The correction this exists for.
 
@@ -1182,16 +1198,7 @@ def test_authoritative_boundary_moves_rows_the_log_marker_mislabelled():
     that lag are stamped ``warmup`` while the measured phase is already running.
     """
     now = _now()
-    progress = _StubProgress(
-        [
-            {"warmup": {"start_ns": _ns(now), "requests_end_ns": None}},
-            {
-                "warmup": {"start_ns": _ns(now), "requests_end_ns": _ns(now + 10)},
-                "profiling": {"start_ns": _ns(now + 10), "requests_end_ns": None},
-            },
-            {"profiling": {"start_ns": _ns(now + 10), "requests_end_ns": None}},
-        ]
-    )
+    progress = _progress_profiling_from(now, now + 10)
     rec = KvMetricsRecorder(
         poller=_StubPoller(
             [
@@ -1226,16 +1233,7 @@ def test_counter_totals_follow_the_authoritative_boundary():
     measured phase, not to the warmup window the watchdog had not yet closed.
     """
     now = _now()
-    progress = _StubProgress(
-        [
-            {"warmup": {"start_ns": _ns(now), "requests_end_ns": None}},
-            {
-                "warmup": {"start_ns": _ns(now), "requests_end_ns": _ns(now + 10)},
-                "profiling": {"start_ns": _ns(now + 10), "requests_end_ns": None},
-            },
-            {"profiling": {"start_ns": _ns(now + 10), "requests_end_ns": None}},
-        ]
-    )
+    progress = _progress_profiling_from(now, now + 10)
     rec = KvMetricsRecorder(
         poller=_StubPoller(
             [

@@ -9,6 +9,8 @@ import argparse
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .bootstrap import resolve_research_lane_capacity
+
 if TYPE_CHECKING:
     from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -77,7 +79,7 @@ def _custom_specialist_conflict(args: argparse.Namespace, state: SharedState) ->
         return ""
     if bool(getattr(args, "no_framework_agent", False)) or not state.framework_agent_phase_enabled:
         return "the FRAMEWORK_AGENT phase is disabled, so custom_specialist cannot be guaranteed to run"
-    if int(getattr(args, "research_lane_capacity", 1) or 0) <= 0:
+    if resolve_research_lane_capacity(args) <= 0:
         return "--research-lane-capacity 0 builds no specialist executor"
     if getattr(args, "reset_state", False):
         return "--reset-state wipes the custom specialist definition; reset first, then launch with the flags"

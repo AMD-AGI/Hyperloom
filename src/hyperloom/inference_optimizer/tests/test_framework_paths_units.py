@@ -13,16 +13,16 @@ import pytest
 
 from hyperloom.inference_optimizer import framework_paths as fp
 from hyperloom.inference_optimizer import framework_registry as fr
-from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
+from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE, FULL_ENABLED_ACTIONS
 from hyperloom.inference_optimizer.framework_paths import probe_framework_source_roots_for_env
 from hyperloom.orchestrator.prompts.prompt_builder import (
-    FULL_ENABLED_ACTIONS,
     build_orchestration_prompt,
     PromptAssets,
     SessionContext,
 )
 from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
-from hyperloom.orchestrator.kernel import apply_kernel_patch as akp
+from hyperloom.orchestrator.kernel import patch_jit_cache, patch_rebuild
+from hyperloom.orchestrator.tests._helpers import git_repo_tracking
 
 
 @pytest.fixture(autouse=True)
@@ -653,7 +653,7 @@ def test_detect_strategy_accepts_dist_packages_vllm_py() -> None:
     target = Path(
         "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/parameter.py",
     )
-    strat = akp._detect_strategy(target)
+    strat = patch_rebuild._detect_strategy(target)
     assert strat["compiled"] is False
 
 
@@ -670,20 +670,22 @@ _AITER_META_CPP_ITFS_CU = Path("/usr/local/lib/python3.12/dist-packages/aiter_me
 
 def test_target_is_in_aiter_csrc_matches_aiter_meta() -> None:
     # split-wheel layout must be recognised as an aiter csrc source
-    assert akp._target_is_in_aiter_csrc(_AITER_META_CU) is True
+    assert patch_jit_cache._target_is_in_aiter_csrc(_AITER_META_CU) is True
     # classic layout still recognised
-    assert akp._target_is_in_aiter_csrc(Path("/sgl-workspace/aiter/csrc/kernels/quant_kernels.cu")) is True
+    assert patch_jit_cache._target_is_in_aiter_csrc(Path("/sgl-workspace/aiter/csrc/kernels/quant_kernels.cu")) is True
     # unrelated source stays out
     assert (
-        akp._target_is_in_aiter_csrc(Path("/usr/local/lib/python3.12/dist-packages/vllm/model_executor/parameter.py"))
+        patch_jit_cache._target_is_in_aiter_csrc(
+            Path("/usr/local/lib/python3.12/dist-packages/vllm/model_executor/parameter.py")
+        )
         is False
     )
 
 
 def test_target_is_in_aiter_cpp_itfs_matches_aiter_meta() -> None:
-    assert akp._target_is_in_aiter_cpp_itfs(_AITER_META_CPP_ITFS_CU) is True
+    assert patch_jit_cache._target_is_in_aiter_cpp_itfs(_AITER_META_CPP_ITFS_CU) is True
     # a non-cpp_itfs aiter_meta source is csrc but NOT cpp_itfs
-    assert akp._target_is_in_aiter_cpp_itfs(_AITER_META_CU) is False
+    assert patch_jit_cache._target_is_in_aiter_cpp_itfs(_AITER_META_CU) is False
 
 
 def test_invalidate_aiter_jit_build_runs_for_aiter_meta_target(tmp_path) -> None:
@@ -692,7 +694,7 @@ def test_invalidate_aiter_jit_build_runs_for_aiter_meta_target(tmp_path) -> None
     (jit_build / "module_aiter_core.so").write_bytes(b"stale")
     backup_dir = tmp_path / "backup"
 
-    res = akp._invalidate_aiter_jit_build(
+    res = patch_jit_cache._invalidate_aiter_jit_build(
         _AITER_META_CU,
         backup_dir,
         jit_build_dir=jit_build,
@@ -712,14 +714,14 @@ def test_invalidate_aiter_jit_build_ignores_orphaned_prior_backup(
     (jit_build / "first.so").write_bytes(b"first")
     backup_dir = tmp_path / "backup"
 
-    first = akp._invalidate_aiter_jit_build(
+    first = patch_jit_cache._invalidate_aiter_jit_build(
         _AITER_META_CU,
         backup_dir,
         jit_build_dir=jit_build,
     )
     jit_build.mkdir(parents=True)
     (jit_build / "second.so").write_bytes(b"second")
-    second = akp._invalidate_aiter_jit_build(
+    second = patch_jit_cache._invalidate_aiter_jit_build(
         _AITER_META_CU,
         backup_dir,
         jit_build_dir=jit_build,
@@ -799,25 +801,9 @@ class TestResolveFrameworkTree:
             fp.resolve_framework_tree(name)
 
 
-def _git_tracking(checkout: Path, *files: str) -> Path:
-    import subprocess
-
-    subprocess.run(["git", "init", "-q", str(checkout)], check=True)
-    for rel in files:
-        target = checkout / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text("x = 1\n", encoding="utf-8")
-    subprocess.run(["git", "-C", str(checkout), "add", "-A"], check=True)
-    subprocess.run(
-        ["git", "-C", str(checkout), "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base"],
-        check=True,
-    )
-    return checkout
-
-
 class TestFrameworkApplyTree:
     def test_a_package_in_a_checkout_is_edited_at_the_checkout(self, tmp_path):
-        checkout = _git_tracking(tmp_path / "sglang", "python/sglang/__init__.py")
+        checkout = git_repo_tracking(tmp_path / "sglang", "python/sglang/__init__.py")
         tree = fp.framework_apply_tree(f"{checkout}/python/sglang/")
         assert tree == fp.FrameworkTree(tree=checkout / "python" / "sglang", root=checkout, checkout=True)
 
@@ -828,7 +814,7 @@ class TestFrameworkApplyTree:
         assert fp.framework_apply_tree(f"{package}/") == fp.FrameworkTree(tree=package, root=package, checkout=False)
 
     def test_an_untracked_package_under_some_repository_is_not_that_repository(self, tmp_path):
-        project = _git_tracking(tmp_path / "project", "README.md")
+        project = git_repo_tracking(tmp_path / "project", "README.md")
         package = project / ".venv" / "site-packages" / "vllm"
         package.mkdir(parents=True)
         (package / "__init__.py").write_text("", encoding="utf-8")

@@ -13,10 +13,22 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, MutableMapping, Sequence
-from hyperloom.common.env import env_str
-from hyperloom.common.git_safety import trusted_admin_dir
-from hyperloom.common.fs_utils import rewrite_lines_nofollow
+from hyperloom_common.env import env_str
+from hyperloom_common.git_safety import trusted_admin_dir
+from hyperloom_common.fs_utils import rewrite_lines_nofollow
 
+from hyperloom.common.outside_facts import (
+    ENV_CONC,
+    ENV_EP,
+    ENV_ISL,
+    ENV_MAX_MODEL_LEN,
+    ENV_NUM_PROMPTS,
+    ENV_NUM_WARMUPS,
+    ENV_OSL,
+    ENV_RANDOM_RANGE_RATIO,
+    ENV_RUN_EVAL,
+    ENV_TP,
+)
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 
 import json
@@ -81,6 +93,7 @@ BENCHMARK_SECRET_ENV_NAMES: frozenset[str] = frozenset(
         "CLAW_API_KEY",
         "DEEPSEEK_API_KEY",
         "GEAK_API_KEY",
+        "KB_STORE_TOKEN",
         "LLM_API_KEY",
         "LLM_GATEWAY_KEY",
         "LLM_PROXY_API_KEY",
@@ -165,7 +178,7 @@ DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "CLAUDE_MODEL",
         "CODEX_MODEL",
         # Retired provider variables, still readable so a pre-migration .env can be normalized by
-        # hyperloom.common.llm_config.deepseek_compat_env.
+        # hyperloom_common.llm.llm_config.deepseek_compat_env.
         "DEEPSEEK_API_KEY",
         "DEEPSEEK_BASE_URL",
         "DEEPSEEK_MODEL",
@@ -274,18 +287,18 @@ BLOCKED_EXTERNAL_ENV_NAMES: frozenset[str] = (
             "HOME",
             "MODEL",
             "MODEL_PATH",
-            "TP",
-            "EP",
-            "CONC",
-            "ISL",
-            "OSL",
-            "MAX_MODEL_LEN",
+            ENV_TP,
+            ENV_EP,
+            ENV_CONC,
+            ENV_ISL,
+            ENV_OSL,
+            ENV_MAX_MODEL_LEN,
             "PRECISION",
             "PORT",
-            "NUM_PROMPTS",
-            "NUM_WARMUPS",
-            "RANDOM_RANGE_RATIO",
-            "RUN_EVAL",
+            ENV_NUM_PROMPTS,
+            ENV_NUM_WARMUPS,
+            ENV_RANDOM_RANGE_RATIO,
+            ENV_RUN_EVAL,
             "PROFILE",
             "RESULT_DIR",
             "RESULT_FILENAME",
@@ -303,8 +316,43 @@ BLOCKED_EXTERNAL_ENV_NAMES: frozenset[str] = (
     )
 )
 
+# Env names the launcher or the server process puts in the environment itself: rank/world topology a distributed
+# launch assigns per process. Nothing a round declares can own one — the launch overwrites it per rank — so a patch
+# reading one is reading the launch's own state, not arming a switch.
+LAUNCH_PROVIDED_ENV_NAMES: frozenset[str] = frozenset(
+    {
+        "GROUP_RANK",
+        "LOCAL_RANK",
+        "LOCAL_WORLD_SIZE",
+        "MASTER_ADDR",
+        "MASTER_PORT",
+        "NODE_RANK",
+        "RANK",
+        "ROLE_RANK",
+        "WORLD_SIZE",
+    }
+)
+
+# Prefixes of the same kind: everything a job scheduler or an elastic launch exports around the process it starts.
+LAUNCH_PROVIDED_ENV_PREFIXES: tuple[str, ...] = (
+    "OMPI_",
+    "PMIX_",
+    "PMI_",
+    "SLURM_",
+    "TORCHELASTIC_",
+)
+
 # Env names a per-variant override may never set.
 BLOCKED_VARIANT_ENV_NAMES: frozenset[str] = BLOCKED_UNTRUSTED_ENV_NAMES | BENCHMARK_SECRET_ENV_NAMES
+
+
+def is_launch_provided_env_name(key: object) -> bool:
+    """True when the launch or the server process supplies this name, so no round can arm it."""
+    upper = str(key or "").strip().upper()
+    if upper in LAUNCH_PROVIDED_ENV_NAMES:
+        return True
+    return upper.startswith(LAUNCH_PROVIDED_ENV_PREFIXES)
+
 
 # Credential-shaped name fragments, so an unlisted secret cannot be persisted into a session YAML by name alone.
 _SECRET_NAME_FRAGMENTS: tuple[str, ...] = ("APIKEY", "API_KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")
@@ -518,6 +566,8 @@ def scrub_benchmark_process_env(env: dict[str, str]) -> dict[str, str]:
     scrub_child_process_env(env)
     for name in BENCHMARK_SECRET_ENV_NAMES:
         env.pop(name, None)
+    # The --extra-env blob repeats every pin's value, credentials included; each pin is also exported by name.
+    env.pop(OPERATOR_EXTRA_ENV_VAR, None)
     return env
 
 
@@ -542,7 +592,7 @@ def redact_file_in_place(path: os.PathLike[str] | str, *, mode: int = 0o600) -> 
 
     The file sits in a directory a less-privileged account may write, so the
     redacted copy is staged and moved without following any link there
-    (:func:`hyperloom.common.fs_utils.rewrite_lines_nofollow`). A failure
+    (:func:`hyperloom_common.fs_utils.rewrite_lines_nofollow`). A failure
     leaves the file as it was.
     """
     try:
@@ -778,6 +828,8 @@ __all__ = [
     "BLOCKED_UNTRUSTED_ENV_NAMES",
     "BLOCKED_VARIANT_ENV_NAMES",
     "FILE_REFERENCING_ENV_PREFIXES",
+    "LAUNCH_PROVIDED_ENV_NAMES",
+    "LAUNCH_PROVIDED_ENV_PREFIXES",
     "OPERATOR_EXTRA_ENV_VAR",
     "SENSITIVE_ENV_NAME_MARKERS",
     "build_benchmark_env",
@@ -786,6 +838,7 @@ __all__ = [
     "is_allowed_external_env_key",
     "is_allowed_kernel_agent_env_key",
     "is_allowed_variant_env_key",
+    "is_launch_provided_env_name",
     "is_python_package_root",
     "is_secret_shaped_env_name",
     "operator_extra_env",

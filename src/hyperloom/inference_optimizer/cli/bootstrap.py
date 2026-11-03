@@ -15,14 +15,13 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Iterator, Mapping
+from typing import TYPE_CHECKING, Any, Iterator, Mapping
 
-from hyperloom.common.coerce import to_unix
-from hyperloom.common.env import forge_explicitly_enabled
-from hyperloom.common.gpu_partition import published_shape
+from hyperloom_common.coerce import to_unix
+from hyperloom_common.env import forge_explicitly_enabled
 from hyperloom.common.gpu_power_settings import SCLK_MAX_MHZ, DeclaredPowerSettings
-from hyperloom.common.perf_metric import is_agentx_mode
-from hyperloom.common.timeutil import now_iso
+from hyperloom.common.perf_metric import agentx_enabled as _agentx_enabled, is_agentx_mode
+from hyperloom_common.timeutil import now_iso
 from hyperloom.plugs import (
     ManifestSources,
     PlugError,
@@ -33,9 +32,6 @@ from hyperloom.plugs import (
     resolve_manifest,
 )
 from hyperloom.plugs.resolved import read_resolved, write_resolved
-from hyperloom.orchestrator.actions.executors._workload_envs import (
-    agentx_enabled as _agentx_enabled,
-)
 from hyperloom.orchestrator.phases.machine_state import bank_phase_segment
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.common.workload_defaults import (
@@ -47,8 +43,12 @@ from hyperloom.common.workload_defaults import (
     DEFAULT_PRECISION,
 )
 from ..session.paths import _SESSION_SKELETON
+from .executors import _build_specialist_executor, _register_executors
 from .model_gate import _load_model_arch, _load_model_config_tags
 from ..model_config_utils import summarize_model_config
+
+if TYPE_CHECKING:
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
 
 log = logging.getLogger(__name__)
 
@@ -572,7 +572,6 @@ def resolve_gpu_power_settings(
     declared_settings: DeclaredPowerSettings,
     *,
     nodes: int,
-    read: Any = None,
     just_applied: bool = False,
 ) -> tuple[dict[str, Any], str]:
     """Read the cards' and the node's power settings and check the declared ones; ``(record, error)``.
@@ -601,7 +600,7 @@ def resolve_gpu_power_settings(
     # The node's settings need neither the cards' reading nor the mask, so only a card declaration refuses without them.
     cards_declared = any(declared_settings.card_row().values())
     try:
-        observed = (read or read_gpu_power_settings)()
+        observed = read_gpu_power_settings()
     except GpuPowerSettingsError as exc:
         if cards_declared:
             return {_DECLARED: declared}, f"the declared GPU power settings cannot be checked: {exc}"
@@ -646,11 +645,11 @@ def _card_errors(
 
 
 def _build_agentx_corpus_shape_seed() -> dict[str, Any]:
-    """Return the canonical corpus shape, until a measurement replaces it."""
+    """Return the canonical corpus shape."""
     from hyperloom.common.agentx_workload import MLPERF_CORPUS, is_mlperf_backend, mlperf_trajectories
 
     if is_mlperf_backend():
-        # The MLPerf corpus has no published shape; the first measurement supplies it.
+        # The MLPerf corpus has no published length distribution, only its trajectory count.
         return {
             "corpus_loader": MLPERF_CORPUS,
             "corpus_entries": mlperf_trajectories(),
@@ -669,29 +668,43 @@ def _custom_specialist_fields(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
-def _seed_shared_state(
-    session_dir: Path,
-    args: argparse.Namespace,
-    *,
-    session_id: str,
-    compute_partition: dict[str, Any] | None = None,
-    gpu_power_settings: dict[str, Any] | None = None,
-) -> SharedState:
-    """Construct and persist the initial :class:`SharedState` for a run."""
-    # research_lane capacity is locked for the session; clamp to [0, ceiling].
-    from hyperloom.common.visible_devices import detect_gpu_count
+def resolve_research_lane_capacity(args: argparse.Namespace) -> int:
+    """``--research-lane-capacity`` clamped to ``[0, research_lane_ceiling()]``; 0 disables specialist dispatch."""
     from hyperloom.orchestrator.policy.gate import research_lane_ceiling
 
-    research_lane_capacity = int(getattr(args, "research_lane_capacity", 1) or 1)
-    research_lane_capacity = max(
-        0,
-        min(research_lane_ceiling(), research_lane_capacity),
+    return max(0, min(research_lane_ceiling(), int(args.research_lane_capacity)))
+
+
+def _install_executors(
+    coordinator: Coordinator, args: argparse.Namespace, *, session_dir: Path, knowledge_plane: Any
+) -> None:
+    """Build the specialist executor when the research lane has capacity, then register every executor."""
+    # Build specialist executor only when research_lane capacity > 0 (0 degrades to LLM-direct grid).
+    specialist_executor: "Any" = None
+    if resolve_research_lane_capacity(args) > 0:
+        specialist_executor = _build_specialist_executor(
+            args,
+            session_dir=session_dir,
+            knowledge_plane=knowledge_plane,
+        )
+    _register_executors(
+        coordinator,
+        compare_against_gpu=getattr(args, "compare_against_gpu", None),
+        session_dir=session_dir,
+        specialist_executor=specialist_executor,
     )
-    # An unset (None) or unparsable capacity falls back to the visible GPU count.
-    try:
-        gpu_specialist_capacity = max(0, int(getattr(args, "gpu_specialist_capacity", None)))
-    except (TypeError, ValueError):
-        gpu_specialist_capacity = detect_gpu_count()
+
+
+@dataclass(frozen=True)
+class LaunchPlatform:
+    """What a fresh launch settled about the platform before seeding: the partition verdict and GPU power record."""
+
+    compute_partition: dict[str, Any]
+    gpu_power_settings: dict[str, Any]
+
+
+def _plateau_overrides_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    """Collect the plateau threshold overrides the operator passed."""
     # Collect plateau threshold overrides; absent keys use defaults at compute time.
     plateau_overrides: dict[str, Any] = {}
     if getattr(args, "plateau_explore_keep_gain", None) is not None:
@@ -700,6 +713,33 @@ def _seed_shared_state(
         plateau_overrides["explore_empty_streak"] = int(args.plateau_explore_empty_streak)
     if getattr(args, "plateau_explore_lookback", None) is not None:
         plateau_overrides["explore_lookback"] = int(args.plateau_explore_lookback)
+    return plateau_overrides
+
+
+def _model_identity_fields(
+    args: argparse.Namespace, session_dir: Path, *, model_identity: str, cfg_tags: dict[str, Any]
+) -> dict[str, Any]:
+    """Seed the model identity, architecture profile and config summary fields of the SharedState."""
+    return {
+        "model_name": model_identity,
+        "model_path": str(args.model),
+        "model_class": args.model_class or "",
+        # Advisory architecture profile; fresh-launch only. Soft-degrade to {}.
+        "model_arch": _load_model_arch(
+            session_dir,
+            model_identity,
+            str(args.model),
+        ),
+        # Architecture-identity tags from config.json.
+        "model_architectures": cfg_tags.get("architectures", []),
+        "model_type": cfg_tags.get("model_type", ""),
+        # config.json structural summary, persisted for downstream collectors.
+        "model_info": summarize_model_config(str(args.model)),
+    }
+
+
+def _workload_fields(args: argparse.Namespace) -> dict[str, Any]:
+    """Seed the workload metadata fields of the SharedState from the CLI flags."""
 
     # Resolve int workload knobs from the CLI arg, applying the shared fallback default when unset.
     def _int_arg(arg_name: str, default: int) -> int:
@@ -707,11 +747,65 @@ def _seed_shared_state(
         val = getattr(args, arg_name, None)
         if val is None:
             return int(default)
-        try:
-            resolved = int(val)
-        except (TypeError, ValueError):
-            return int(default)
+        resolved = int(val)
         return resolved if resolved > 0 else int(default)
+
+    return {
+        # Workload metadata mirrored from CLI/env.
+        "tp": _int_arg("tp", DEFAULT_TP),
+        "ep": _int_arg("ep", DEFAULT_EP),
+        "precision": (str(getattr(args, "precision", None) or DEFAULT_PRECISION).strip()),
+        "framework_version": resolve_framework_version(args),
+        "conc": _int_arg("conc", DEFAULT_CONC),
+        "isl": _int_arg("isl", DEFAULT_ISL),
+        "osl": _int_arg("osl", DEFAULT_OSL),
+        "profile_osl": _int_arg("profile_osl", 0),
+        "max_model_len": _int_arg("max_model_len", 0),
+    }
+
+
+def _warm_replay_fields(args: argparse.Namespace) -> dict[str, Any]:
+    """Seed the warm-replay fields of the SharedState."""
+    return {
+        "warm_replay_enabled": not bool(getattr(args, "no_warm_replay", False)),
+        **(
+            {}
+            if getattr(args, "warm_replay_min_confidence", None) is None
+            else {"warm_replay_min_confidence": float(args.warm_replay_min_confidence)}
+        ),
+    }
+
+
+def _phase_toggle_fields(args: argparse.Namespace) -> dict[str, Any]:
+    """Seed the phase and integration toggle fields of the SharedState."""
+    return {
+        "enable_roofline": bool(
+            getattr(args, "enable_roofline", True),
+        ),
+        # Standalone FRAMEWORK_AGENT phase; --no-framework-agent skips it.
+        "framework_agent_phase_enabled": not bool(getattr(args, "no_framework_agent", False)),
+        # FRAMEWORK local-exploration arm; --no-framework-local-explore opts out.
+        "framework_local_explore_enabled": not bool(getattr(args, "no_framework_local_explore", False)),
+        # Enablement self-heal lanes; --enablement off opts out.
+        "enablement_mode": str(getattr(args, "enablement", "all")),
+        "research_scout_enabled": bool(getattr(args, "research_scout", True)),
+        "research_scout_interval": max(1, int(getattr(args, "research_scout_interval", 3) or 3)),
+        "static_recon_enabled": bool(getattr(args, "static_recon", True)),
+        "target_advisory_enabled": bool(getattr(args, "target_advisory", True)),
+        "recipe_sediment_enabled": bool(getattr(args, "recipe_sediment", True)),
+    }
+
+
+def _seed_shared_state(
+    session_dir: Path,
+    args: argparse.Namespace,
+    *,
+    session_id: str,
+    framework: str,
+    platform: LaunchPlatform,
+) -> SharedState:
+    """Construct and persist the initial :class:`SharedState` for a run."""
+    plateau_overrides = _plateau_overrides_from_args(args)
 
     # KB architecture tags from config.json; fresh-launch only.
     _cfg_tags = _load_model_config_tags(str(args.model))
@@ -720,7 +814,7 @@ def _seed_shared_state(
     _kernel_optimizer_record = "forge" if forge_explicitly_enabled() else "geak"
 
     # Reference launch recipe (fresh-launch only, fail-soft): lowest-priority base for the baseline server args.
-    _ref_args, _ref_envs, _ref_model, _ref_controls = _resolve_reference_recipe(args)
+    _ref_args, _ref_envs, _ref_model, _ref_controls = _resolve_reference_recipe(args, framework)
 
     # Canonical model identity (prefers the quantize prelude's pinned source name).
     _model_identity = resolve_model_display_name(args)
@@ -737,40 +831,17 @@ def _seed_shared_state(
         session_id=session_id,
         claw_session_id=os.environ.get("CLAW_SESSION_ID", "").strip(),
         sandbox_user_id=os.environ.get("SANDBOX_USER_ID", "").strip(),
-        model_name=_model_identity,
-        model_path=str(args.model),
-        model_class=args.model_class or "",
-        # Advisory architecture profile; fresh-launch only. Soft-degrade to {}.
-        model_arch=_load_model_arch(
-            session_dir,
-            _model_identity,
-            str(args.model),
-        ),
-        # Architecture-identity tags from config.json.
-        model_architectures=_cfg_tags.get("architectures", []),
-        model_type=_cfg_tags.get("model_type", ""),
-        # config.json structural summary, persisted for downstream collectors.
-        model_info=summarize_model_config(str(args.model)),
-        framework=os.environ.get("FRAMEWORK", "sglang"),
+        **_model_identity_fields(args, session_dir, model_identity=_model_identity, cfg_tags=_cfg_tags),
+        framework=framework,
         # The only copy of the budgets. Validated at the CLI, so anything that reaches here is usable, and archived
         # with the session so a resume restores them without a second source to reconcile.
         **constraint_budgets_from_args(args),
-        gpu_power_settings=dict(gpu_power_settings or {}),
+        gpu_power_settings=dict(platform.gpu_power_settings),
         gpu_type=str(getattr(args, "gpu_type", None) or os.environ.get("GPU_TYPE", "")),
-        # Workload metadata mirrored from CLI/env.
-        tp=_int_arg("tp", DEFAULT_TP),
-        ep=_int_arg("ep", DEFAULT_EP),
-        precision=(str(getattr(args, "precision", None) or DEFAULT_PRECISION).strip()),
-        framework_version=resolve_framework_version(args),
-        conc=_int_arg("conc", DEFAULT_CONC),
-        isl=_int_arg("isl", DEFAULT_ISL),
-        osl=_int_arg("osl", DEFAULT_OSL),
-        profile_osl=_int_arg("profile_osl", 0),
-        max_model_len=_int_arg("max_model_len", 0),
+        **_workload_fields(args),
         kernel_enabled=not getattr(args, "no_kernel", False),
         kernel_optimizer=_kernel_optimizer_record,
-        # AgentX corpus shape: seeded from canonical constants if AgentX is on;
-        # overwritten by the measured shape after every aiperf run.
+        # AgentX corpus shape: seeded from canonical constants if AgentX is on.
         agentx_corpus_shape=_build_agentx_corpus_shape_seed() if benchmark_mode == "agentx" else {},
         baseline_tput=0.0,
         cumulative_gain_validated=0.0,
@@ -787,32 +858,14 @@ def _seed_shared_state(
         framework_repo_path=os.environ.get("FRAMEWORK_REPO_PATH", "").strip(),
         benchmark_backend=os.environ.get("HYPERLOOM_BENCHMARK_BACKEND", "").strip().lower(),
         xdit_model_name=os.environ.get("XDIT_MODEL_NAME", "").strip(),
-        compute_partition=dict(compute_partition if compute_partition is not None else (published_shape() or {})),
-        nodes=max(1, int(getattr(args, _NODES, 1))),
-        warm_replay_enabled=not bool(getattr(args, "no_warm_replay", False)),
-        **(
-            {}
-            if getattr(args, "warm_replay_min_confidence", None) is None
-            else {"warm_replay_min_confidence": float(args.warm_replay_min_confidence)}
-        ),
+        compute_partition=dict(platform.compute_partition),
+        nodes=max(1, int(getattr(args, _NODES, 1) or 1)),
+        **_warm_replay_fields(args),
         max_minutes=int((args.max_hours or 0) * 60),
-        research_lane_capacity=research_lane_capacity,
-        gpu_specialist_capacity=gpu_specialist_capacity,
+        research_lane_capacity=resolve_research_lane_capacity(args),
+        gpu_specialist_capacity=max(0, int(args.gpu_specialist_capacity)),
         plateau_overrides=plateau_overrides,
-        enable_roofline=bool(
-            getattr(args, "enable_roofline", True),
-        ),
-        # Standalone FRAMEWORK_AGENT phase; --no-framework-agent skips it.
-        framework_agent_phase_enabled=not bool(getattr(args, "no_framework_agent", False)),
-        # FRAMEWORK local-exploration arm; --no-framework-local-explore opts out.
-        framework_local_explore_enabled=not bool(getattr(args, "no_framework_local_explore", False)),
-        # Enablement self-heal lanes; --enablement off opts out.
-        enablement_mode=str(getattr(args, "enablement", "all")),
-        research_scout_enabled=bool(getattr(args, "research_scout", True)),
-        research_scout_interval=max(1, int(getattr(args, "research_scout_interval", 3) or 3)),
-        static_recon_enabled=bool(getattr(args, "static_recon", True)),
-        target_advisory_enabled=bool(getattr(args, "target_advisory", True)),
-        recipe_sediment_enabled=bool(getattr(args, "recipe_sediment", True)),
+        **_phase_toggle_fields(args),
         # SWEEP-phase concurrency sweep: defaults OFF under AgentX because each
         # rung is a 3600s window and the session grades at a fixed CONC.
         # Pass --enable-conc-sweep explicitly to override.
@@ -822,7 +875,7 @@ def _seed_shared_state(
         benchmark_mode=benchmark_mode,
         agentx_epoch=agentx_epoch,
         agentx_backend=agentx_backend,
-        grading=seed_grading(os.environ.get("FRAMEWORK", "sglang"), benchmark_mode),
+        grading=seed_grading(framework, benchmark_mode),
         conc_sweep_concs=_parse_conc_sweep_concs(args, benchmark_mode),
         conc_sweep_total_budget_sec=int(getattr(args, "conc_sweep_total_budget_sec", 9000)),
     )
@@ -874,7 +927,7 @@ class LaunchInfo:
     model: str
 
 
-def _emit_launch_info(info: LaunchInfo, *, launch_info_file: str | None) -> dict[str, Any]:
+def _emit_launch_info(info: LaunchInfo, *, launch_info_file: str | None) -> None:
     """Print the machine-readable HYPERLOOM_LAUNCH stdout line; optionally JSON-dump to ``launch_info_file``."""
     launch_info: dict[str, Any] = {
         "event": "launch",
@@ -894,7 +947,6 @@ def _emit_launch_info(info: LaunchInfo, *, launch_info_file: str | None) -> dict
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(launch_info, indent=2))
         print(f"Launch info file: {path}")
-    return launch_info
 
 
 def _print_final_summary(
@@ -947,7 +999,7 @@ def _bank_previous_leg_phase_segment(state: SharedState) -> None:
     bank_phase_segment(state, until_unix=stop_unix)
 
 
-def _begin_resume_leg(state: SharedState) -> str:
+def _begin_resume_leg(state: SharedState) -> None:
     """Mark the start of a resumed run leg on ``state`` (caller persists).
 
     Stamps :attr:`SharedState.resumed_ts`, which dates the previous leg's CLOSE
@@ -966,9 +1018,6 @@ def _begin_resume_leg(state: SharedState) -> str:
 
     Args:
         state (SharedState): The loaded session state, mutated in place.
-
-    Returns:
-        str: The timestamp stamped as this leg's boundary.
     """
     _bank_previous_leg_phase_segment(state)
     state.resumed_ts = now_iso()
@@ -982,7 +1031,6 @@ def _begin_resume_leg(state: SharedState) -> str:
     state.target_reached_at = ""
     state.crash_count = 0
     state.begin_leg()
-    return state.resumed_ts
 
 
 def _resume_budget_lines(state: SharedState, *, extend_hours: float) -> list[str]:
@@ -1068,18 +1116,21 @@ def _read_failure_summary(session_dir: Path) -> dict | None:
 
 def _resolve_reference_recipe(
     args: argparse.Namespace,
+    framework: str,
 ) -> tuple[str, dict[str, str], str, dict[str, Any]]:
     """Resolve the reference launch recipe for a fresh launch."""
     source = (getattr(args, "reference_script", None) or "").strip()
     if not source:
         return ("", {}, "", {})
 
-    framework = (os.environ.get("FRAMEWORK", "") or "sglang").strip().lower()
+    from http.client import HTTPException
+
+    from ..baseline_comparison.inferencex_client import InferenceXFetchError
     from ..reference_script import parse_reference_script
 
     try:
         recipe = parse_reference_script(source, framework=framework)
-    except Exception as exc:
+    except (OSError, ValueError, InferenceXFetchError, HTTPException) as exc:
         print(f"ERROR: --reference-script {source!r} could not be parsed: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
 

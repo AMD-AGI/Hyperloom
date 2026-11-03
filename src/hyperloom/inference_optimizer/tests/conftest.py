@@ -6,16 +6,16 @@
 from __future__ import annotations
 
 import json
-import os
 import stat
-import subprocess
 import time
 from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 from hyperloom.inference_optimizer.session.paths import make_session_dir
+from hyperloom.orchestrator.tests._helpers import git_commit_all, init_git_repo  # noqa: F401
 from hyperloom.orchestrator.tests._fixtures import (  # noqa: F401
     NoLaunchBackendInstalled,
     _isolate_session_layout_env,
@@ -203,40 +203,6 @@ def session_dir(tmp_path, monkeypatch) -> Path:
     sd = make_session_dir()
     seed_target_analysis_marker(sd)
     return sd
-
-
-def init_git_repo(
-    path: Path,
-    *,
-    seed_file: str = "src.py",
-    seed_text: str = "def f():\n    return 1\n",
-) -> None:
-    """Initialise a minimal git repo with one commit under ``path``."""
-    path.mkdir(parents=True, exist_ok=True)
-    env = os.environ.copy()
-    env["GIT_AUTHOR_NAME"] = "Hyperloom Test"
-    env["GIT_AUTHOR_EMAIL"] = "hyperloom@test.local"
-    env["GIT_COMMITTER_NAME"] = env["GIT_AUTHOR_NAME"]
-    env["GIT_COMMITTER_EMAIL"] = env["GIT_AUTHOR_EMAIL"]
-    subprocess.run(
-        ["git", "init", "-b", "main", str(path)],
-        check=True,
-        capture_output=True,
-        env=env,
-    )
-    (path / seed_file).write_text(seed_text, encoding="utf-8")
-    subprocess.run(
-        ["git", "-C", str(path), "add", "."],
-        check=True,
-        capture_output=True,
-        env=env,
-    )
-    subprocess.run(
-        ["git", "-C", str(path), "commit", "-m", "init"],
-        check=True,
-        capture_output=True,
-        env=env,
-    )
 
 
 def make_fake_claude(
@@ -441,27 +407,6 @@ def use_fake_specialist_cli(
     fake = make_fake_claude(tmp_path / "bin", behavior=behavior, payload=payload)
     monkeypatch.setenv("HYPERLOOM_CLAUDE_CLI_PATH", str(fake))
     return fake
-
-
-def git_commit_all(path: Path, message: str) -> None:
-    """Stage everything under ``path`` and commit with a fixed non-interactive identity."""
-    env = os.environ.copy()
-    env["GIT_AUTHOR_NAME"] = "Hyperloom Test"
-    env["GIT_AUTHOR_EMAIL"] = "hyperloom@test.local"
-    env["GIT_COMMITTER_NAME"] = env["GIT_AUTHOR_NAME"]
-    env["GIT_COMMITTER_EMAIL"] = env["GIT_AUTHOR_EMAIL"]
-    subprocess.run(
-        ["git", "-C", str(path), "add", "."],
-        check=True,
-        capture_output=True,
-        env=env,
-    )
-    subprocess.run(
-        ["git", "-C", str(path), "commit", "-m", message],
-        check=True,
-        capture_output=True,
-        env=env,
-    )
 
 
 @pytest.fixture
@@ -672,7 +617,7 @@ def serving_lease_on_a_ray_double(monkeypatch):
 
 
 def cli_call_sequence(entry: str) -> list[str]:
-    """Every call ``entry`` makes, in source order, descending into this module's own functions.
+    """Every call ``entry`` makes, in source order, descending into the CLI package's own functions.
 
     The optimize driver's phases live in sibling functions rather than in one
     body, so an ordering contract that once read off a single function now spans
@@ -687,9 +632,14 @@ def cli_call_sequence(entry: str) -> list[str]:
     import pathlib
 
     from hyperloom.inference_optimizer import cli
+    from hyperloom.inference_optimizer.cli import launch_shape, model_catalog
 
-    tree = ast.parse(pathlib.Path(cli.__file__).read_text(encoding="utf-8"))
-    functions = {node.name: node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    functions = {}
+    for module in (cli, model_catalog, launch_shape):
+        tree = ast.parse(pathlib.Path(module.__file__).read_text(encoding="utf-8"))
+        functions.update(
+            {node.name: node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        )
 
     def own_calls(node: ast.AST) -> list[str]:
         found = [
@@ -710,3 +660,73 @@ def cli_call_sequence(entry: str) -> list[str]:
 
     assert entry in functions, f"{entry} is not a module-level function of the CLI any more"
     return walk(entry, ())
+
+
+def write_benchmark_yaml(
+    path: Path,
+    *,
+    model: str = "/path/models/Qwen-Qwen3-8B",
+    framework: str = "sglang",
+    precision: str = "bf16",
+    benchmark_script: str | None = "sglang_mi300x.sh",
+) -> None:
+    """Write a single-GPU local benchmark config with profiling off; a ``None`` script leaves the key unset."""
+    benchmark: dict[str, Any] = {
+        "framework": framework,
+        "model": model,
+        "precision": precision,
+        "run_mode": "local",
+        "envs": {"TP": 1, "CONC": 8, "ISL": 256, "OSL": 256},
+        "timeout_seconds": 600,
+        "profiler": {
+            "torch_profiler": {"enabled": False},
+            "system_profiler": {"enabled": False},
+            "tracelens": {"enabled": False},
+        },
+        "gpu_selection": {"auto": False},
+    }
+    if benchmark_script is not None:
+        benchmark["benchmark_script"] = benchmark_script
+    with path.open("w") as f:
+        yaml.safe_dump({"benchmark": benchmark}, f)
+
+
+def make_mock_critic_coordinator(session_dir: Path):
+    """A real Coordinator whose orchestration plan is empty and whose critic is the mock critic."""
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.roles import MockBackend, MockCriticBackend, ScriptedPlan
+
+    backends = {
+        "orchestration": MockBackend(ScriptedPlan(turns=[]), name="orchestration"),
+        "critic": MockCriticBackend(),
+    }
+    return Coordinator(session_dir, backends=backends)
+
+
+def silent_backends() -> dict[str, object]:
+    """Orchestration and critic mock backends sharing one plan that only sends heartbeats."""
+    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+    from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
+
+    silent = ScriptedPlan(
+        turns=[], default_intent=Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"})
+    )
+    return {
+        "orchestration": MockBackend(silent, name="o"),
+        "critic": MockBackend(silent, name="c"),
+    }
+
+
+def heartbeat_orchestration_with_mock_critic() -> dict[str, object]:
+    """A heartbeat-only orchestration backend beside the default mock critic."""
+    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+    from hyperloom.orchestrator.roles import MockBackend, MockCriticBackend, ScriptedPlan
+
+    silent = ScriptedPlan(
+        turns=[],
+        default_intent=Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"}),
+    )
+    return {
+        "orchestration": MockBackend(silent, name="orch"),
+        "critic": MockCriticBackend(),
+    }

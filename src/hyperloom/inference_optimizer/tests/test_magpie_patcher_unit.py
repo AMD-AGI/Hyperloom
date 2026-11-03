@@ -9,6 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from hyperloom.orchestrator.actions.executors import _magpie_patcher as mp
+from hyperloom.orchestrator.actions.executors._file_lock import best_effort_file_lock
 
 
 _SGLANG_LEGACY = (
@@ -94,63 +95,15 @@ def test_resolve_sglang_mi355x(monkeypatch, tmp_path):
 # ---- file lock ------------------------------------------------------------
 def test_file_lock_normal(tmp_path):
     lock = str(tmp_path / "x.lock")
-    with mp._file_lock(lock):
+    with best_effort_file_lock(lock, label="_magpie_patcher"):
         pass
     assert Path(lock).exists()
 
 
 def test_file_lock_unopenable():
     # directory path can't be opened "w" -> yield without exclusion
-    with mp._file_lock("/nonexistent_dir_zzz/sub/lock"):
+    with best_effort_file_lock("/nonexistent_dir_zzz/sub/lock", label="_magpie_patcher"):
         pass
-
-
-# ---- remote trust patch ---------------------------------------------------
-def test_is_remote_trust_patched(tmp_path):
-    f = tmp_path / "s.sh"
-    f.write_text("no sentinel", encoding="utf-8")
-    assert mp._is_remote_trust_patched(f) is False
-    f.write_text("MAGPIE_TRUST_REMOTE_CODE here", encoding="utf-8")
-    assert mp._is_remote_trust_patched(f) is False
-    f.write_text(
-        "MAGPIE_TRUST_REMOTE_CODE here\nHYPERLOOM_EVAL_CONCURRENCY_FIX\n",
-        encoding="utf-8",
-    )
-    assert mp._is_remote_trust_patched(f) is True
-    assert mp._is_remote_trust_patched(tmp_path / "missing") is False
-
-
-def test_apply_remote_trust_already(tmp_path):
-    f = tmp_path / "s.sh"
-    f.write_text(
-        "MAGPIE_TRUST_REMOTE_CODE\nHYPERLOOM_EVAL_CONCURRENCY_FIX\n",
-        encoding="utf-8",
-    )
-    assert mp._apply_remote_trust_patch_atomic(f) is True
-
-
-def test_apply_remote_trust_legacy_missing(tmp_path):
-    f = tmp_path / "s.sh"
-    f.write_text("unrelated", encoding="utf-8")
-    assert mp._apply_remote_trust_patch_atomic(f) is False
-
-
-def test_apply_remote_trust_applied(tmp_path):
-    f = tmp_path / "s.sh"
-    f.write_text(_SGLANG_LEGACY, encoding="utf-8")
-    assert mp._apply_remote_trust_patch_atomic(f) is True
-    assert "MAGPIE_TRUST_REMOTE_CODE" in f.read_text(encoding="utf-8")
-
-
-def test_apply_remote_trust_read_error(tmp_path):
-    assert mp._apply_remote_trust_patch_atomic(tmp_path) is False
-
-
-def test_apply_remote_trust_write_error(tmp_path, monkeypatch):
-    f = tmp_path / "s.sh"
-    f.write_text(_SGLANG_LEGACY, encoding="utf-8")
-    monkeypatch.setattr(mp._common_io.os, "replace", lambda *a, **k: (_ for _ in ()).throw(OSError("ro")))
-    assert mp._apply_remote_trust_patch_atomic(f) is False
 
 
 def test_apply_sglang_client_trust_applied_and_idempotent(tmp_path):
@@ -254,6 +207,17 @@ def test_patch_status_trust_without_benchmarker_py(tmp_path):
     assert "magpie_run_benchmark_serving_remote_direct trust" in text
 
 
+def test_patch_status_trust_holds_after_the_eval_flag_was_stripped_first(tmp_path):
+    """A run-time eval strip that reached the script before install.sh must not read as a failed trust patch."""
+    _make_magpie(tmp_path, sglang=_SGLANG_LEGACY)
+    assert mp.ensure_eval_concurrency_compat(tmp_path) is True
+    s = mp.magpie_scripts_patch_status(tmp_path)
+    assert s.remote_trust_ok is True
+    text = (tmp_path / "Magpie" / "scripts" / "benchmark" / "sglang_mi300x.sh").read_text(encoding="utf-8")
+    assert "magpie_run_benchmark_serving_remote_direct trust" in text
+    assert "--concurrent-requests" not in text
+
+
 # ---- eval-concurrency fixes (--concurrent-requests) -----------------------
 _VLLM_LEGACY = (
     "#!/bin/bash\n"
@@ -355,17 +319,16 @@ def test_eval_fixes_run_when_magpie_tree_missing(monkeypatch, tmp_path):
 
 
 def test_full_flow_covers_inferencex_and_ordering(tmp_path):
-    """Full status flow: remote-trust + eval strip across both dirs, with the
-    remote-trust patch on sglang running BEFORE the generic strip."""
+    """Full status flow: client trust + eval strip across both dirs."""
     magpie = _make_magpie(tmp_path / "magpie")
     # Add a flagged generic vllm script to the Magpie scripts dir too.
     (magpie / "Magpie" / "scripts" / "benchmark" / "vllm_mi355x.sh").write_text(_VLLM_LEGACY, encoding="utf-8")
     ix = _make_inferencex(tmp_path / "ix")
     status = mp.magpie_scripts_patch_status(str(magpie), str(ix))
-    assert status.remote_trust_ok is True  # sglang patched before strip removed its flag
+    assert status.remote_trust_ok is True
     assert status.eval_flag_ok is True
     assert status.ok is True
-    # sglang got the remote-trust rewrite (no bare flag left).
+    # sglang got the client trust rewrite and lost the bare flag.
     sglang = (magpie / "Magpie" / "scripts" / "benchmark" / "sglang_mi300x.sh").read_text(encoding="utf-8")
     assert "MAGPIE_TRUST_REMOTE_CODE" in sglang
     assert "--concurrent-requests" not in sglang
@@ -515,7 +478,8 @@ def test_live_flag_scan_ignores_env_prefixed_patched_form(tmp_path):
     bench = tmp_path / "Magpie" / "scripts" / "benchmark"
     bench.mkdir(parents=True)
     (bench / "sglang_mi300x.sh").write_text(
-        mp._RUN_EVAL_PATCHED_BLOCK,
+        '        EVAL_CONCURRENT_REQUESTS="${EVAL_CONCURRENT_REQUESTS:-$CONC}" '
+        'run_eval --framework lm-eval --port "$PORT" || exit $?\n',
         encoding="utf-8",
     )
     assert mp.live_eval_concurrency_flag_scripts(str(tmp_path), None) == []

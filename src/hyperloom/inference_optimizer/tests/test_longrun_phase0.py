@@ -19,7 +19,7 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.bus.gpu_pool import SpecialistGpuPool
 from hyperloom.orchestrator.bus.message_bus import Message, MessageBus
 from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
-from hyperloom.orchestrator.bus.storage import SqliteConnection
+from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.bus.storage.schema import ensure_schema
 
 
@@ -167,10 +167,11 @@ async def test_prune_tasks_keeps_recent_done_and_spares_inflight(conn):
 async def test_gpu_pool_retains_old_leases(conn):
     pool = SpecialistGpuPool(conn, gpu_ids=[0, 1, 2, 3])
     for gpu_id in (0, 1, 2):
-        await conn.execute(
-            "INSERT INTO gpu_leases(gpu_id, holder_id, task_id) VALUES (?,?,?)",
-            (gpu_id, f"h{gpu_id}", f"t{gpu_id}"),
-        )
+        async with conn.transaction() as cur:
+            cur.execute(
+                "INSERT INTO gpu_leases(gpu_id, holder_id, task_id) VALUES (?,?,?)",
+                (gpu_id, f"h{gpu_id}", f"t{gpu_id}"),
+            )
     lease = await pool.try_acquire(count=1, holder_id="new", task_id="new")
     assert lease is not None and lease.gpu_ids == (3,)
     assert await pool.try_acquire(count=1, holder_id="full", task_id="full") is None
@@ -261,7 +262,8 @@ async def test_coordinator_maintenance_reaps_leases_and_prunes(tmp_path, monkeyp
     c = Coordinator(sd, backends=backends)
     try:
         # Seed a GPU lease + some events with an advanced cursor.
-        await c.db.execute("INSERT INTO gpu_leases(gpu_id, holder_id, task_id) VALUES (?,?,?)", (0, "h", "t"))
+        async with c.db.transaction() as cur:
+            cur.execute("INSERT INTO gpu_leases(gpu_id, holder_id, task_id) VALUES (?,?,?)", (0, "h", "t"))
         c.gpu_specialist_pool = SpecialistGpuPool(c.db, gpu_ids=[0, 1])
         for i in range(30):
             await c.bus.append_and_seq(Message.new("orchestration", "*", "observation", {"i": i}))

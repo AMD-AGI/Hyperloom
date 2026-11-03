@@ -222,6 +222,7 @@ def test_record_trace_analyze_preserves_kernel_roofline_fields(
                     "suggestion": "reduce memory traffic",
                     "roofline_name": "rmsnorm_kernel",
                     "source_file": "/tmp/rmsnorm.py",
+                    "shapes": ["(16,64) bf16"],
                     "recommended_actions": ["fuse adjacent ops"],
                     "reusable_native_kernel": True,
                 },
@@ -243,6 +244,7 @@ def test_record_trace_analyze_preserves_kernel_roofline_fields(
     assert row["compute_utilization_pct"] == 9.1
     assert row["bandwidth_utilization_pct"] == 72.4
     assert row["suggestion"] == "reduce memory traffic"
+    assert row["shapes"] == ["(16,64) bf16"]
     # kernel_category propagates from TraceLens hot_kernels through to the cached row.
     assert row["kernel_category"] == "LayerNorm"
     assert cached["kernel_roofline_top15"][0] == row

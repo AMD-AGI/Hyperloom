@@ -20,7 +20,6 @@ import gzip
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -331,16 +330,12 @@ def _request_handlers_importable() -> bool:
 class TestBuildTraceAnalyzeCmd:
     """Verify trace_analyze._build_trace_analyze_cmd sets flags correctly."""
 
-    def _mock_state(self):
-        state = MagicMock()
-        state.baseline_config_path = ""
-        return state
-
     def _run(self, *, scriptable: bool, framework: str, **payload_kw):
         from hyperloom.orchestrator.actions.executors.trace_analyze import (
             _AnalysisRun,
             _build_trace_analyze_cmd,
         )
+        from hyperloom.orchestrator.trace_analysis.analysis_route import AnalysisRoute
 
         cmd, mode = _build_trace_analyze_cmd(
             payload_kw,
@@ -348,15 +343,13 @@ class TestBuildTraceAnalyzeCmd:
                 trace_input="/tmp/trace",
                 workspace_path="/tmp/test",
                 tracelens_root=Path("/tmp/tl"),
-                is_bypass=False,
+                route=AnalysisRoute.AGENT,
                 scriptable=scriptable,
                 model_name="test",
                 framework=framework,
                 target_platform="MI300X",
-                analysis_mode="default",
             ),
             session_dir=Path("/tmp/test"),
-            state=self._mock_state(),
             workload={},
         )
         return cmd, mode

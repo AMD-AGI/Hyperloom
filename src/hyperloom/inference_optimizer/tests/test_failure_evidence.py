@@ -176,14 +176,12 @@ class TestRenderFailureLine:
             "variant_name": "fp8_kv",
             "stage": FAILURE_STAGE_WARMUP,
             "error_class": "server_init_dead",
-            "attribution": FAILURE_ATTRIBUTION_CANDIDATE,
             "error_excerpt": "AssertionError: batch == 1",
         }
         line = render_failure_line(fe)
         assert "fail.t1.abc" in line
         assert "fp8_kv" in line
         assert "server_init_dead" in line
-        assert "candidate_caused" in line
 
     def test_falls_back_to_reason_when_no_excerpt(self):
         fe = {

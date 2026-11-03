@@ -437,8 +437,8 @@ def test_match_variants_skips_bad_hints_and_variants():
 def test_summarise_for_prompt_extra_more(tmp_path):
     incoming = [{"what": f"hint {i}", "source": f"s{i}"} for i in range(10)]
     rh.append_hints(tmp_path, incoming)
-    out = rh.summarise_for_prompt(tmp_path, max_entries=3)
-    assert "... and 7 more in research_hints.md." in out
+    out = rh.summarise_for_prompt(tmp_path)
+    assert "... and 2 more in research_hints.md." in out
 
 
 def _agentx_target():

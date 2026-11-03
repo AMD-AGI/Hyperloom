@@ -20,8 +20,8 @@ from typing import Any, Awaitable, Callable
 from urllib.parse import urlsplit
 
 from hyperloom.common.agent_cli import resolve_claude_executable
-from hyperloom.common.llm_config import claude_sdk_env_options
-from hyperloom.common.reasoning_effort import REASONING_EFFORT_RANK
+from hyperloom_common.llm.llm_config import claude_sdk_env_options
+from hyperloom_common.llm.reasoning_effort import REASONING_EFFORT_RANK
 from hyperloom.inference_optimizer.protocol.intent import (
     Intent,
     IntentValidationError,
@@ -30,7 +30,7 @@ from hyperloom.inference_optimizer.protocol.intent import (
 from ..prompts.transport import TRANSPORT_TOOLS
 from hyperloom.inference_optimizer.trace.llm_trace import new_call_id
 from hyperloom.inference_optimizer.trace.trajectory_trace import current_context
-from hyperloom.common.coerce import to_int
+from hyperloom_common.coerce import to_int
 from .base import (
     BackendError,
     BackendTurnResult,
@@ -86,11 +86,13 @@ def _build_output_instructions(allowed_intents: frozenset[IntentType]) -> str:
     constraints_line = f"\n-{constraints}" if constraints else ""
     return f"""
 ==== OUTPUT FORMAT (REQUIRED) ====
-You MUST communicate with the system by calling the `{EMIT_INTENT_TOOL_NAME}`
-tool. Each call carries exactly one intent; call multiple times to emit
-several intents in the same turn. Free-text replies are dropped.
+You MUST communicate with the system by calling the
+`{EMIT_INTENT_TOOL_QUALIFIED}` tool, under that exact name including its
+`mcp__` prefix; it is the only tool that carries an intent. Each call carries
+exactly one intent; call multiple times to emit several intents in the same
+turn. Free-text replies are dropped.
 
-Tool input shape:
+Tool input shape — these two keys only, nothing beside them:
 
   {{
     "intent_type": "<one of {", ".join(sorted(t.value for t in allowed_intents))}>",
@@ -98,6 +100,10 @@ Tool input shape:
   }}
 
 - Required keys per intent_type: {contract}.{constraints_line}
+- The `name{{key='value'}}` shorthand used elsewhere in these instructions
+  names an intent, not a tool: call the tool above with
+  intent_type="name" and the braced fields inside `payload`, never as
+  top-level tool input keys and never as a tool of their own.
 
 Keep payload bodies focused on NEW information. Do not restate context already
 in SharedState, your inbox, or analysis.md — reference it and summarize only
@@ -326,7 +332,6 @@ class ClaudeBackend:
     # Read-only context-pull MCP server config, set via
     # ``set_context_provider`` and merged into the SDK options.
     _context_server_config: Any | None = field(default=None, init=False)
-    _mcp_setup_error: str | None = field(default=None, init=False)
     # The tool palette (``allowed_tools``, ``mcp_servers``) of the latest turn's options, for the MCP setup snapshot.
     _palette_kwargs: dict[str, Any] = field(default_factory=dict, init=False)
     # The CLI's own account from its latest init message: its version, the MCP tools it offered the model, and each
@@ -349,16 +354,12 @@ class ClaudeBackend:
                 self.sdk_options_cls = opts_cls
             if self.sdk_module is None:
                 self.sdk_module = mod
-        try:
-            self.mcp_server_config = build_emit_intent_server(
-                sdk_module=self.sdk_module,
-                tool_factory=self.mcp_tool_factory,
-                server_factory=self.mcp_server_factory,
-                allowed_intents=self._offered_intents,
-            )
-        except Exception as exc:  # isolation boundary: the emit_intent MCP server, recorded as setup_error
-            log.warning("emit_intent MCP setup failed: %s", exc, exc_info=True)
-            self._mcp_setup_error = f"{type(exc).__name__}: {exc}"
+        self.mcp_server_config = build_emit_intent_server(
+            sdk_module=self.sdk_module,
+            tool_factory=self.mcp_tool_factory,
+            server_factory=self.mcp_server_factory,
+            allowed_intents=self._offered_intents,
+        )
 
     # Backend protocol
     async def run(
@@ -431,6 +432,11 @@ class ClaudeBackend:
             # usable — including the gateway 400s (``litellm.BadRequestError: AnthropicException``) this telemetry
             # exists to count.
             raise LLMCallFailed(f"Claude backend call failed: {exc!r}") from exc
+        return self._turn_result(collected, full_prompt)
+
+    # Internals
+    def _turn_result(self, collected: _StreamedTurn, full_prompt: str) -> BackendTurnResult:
+        """Package one collected SDK stream as the turn's result, with its token usage and conversation text."""
         raw_text = collected.raw_text
         usage = collected.usage
         cache_creation = to_int(usage.get("cache_creation_input_tokens") if usage else None, 0)
@@ -460,7 +466,6 @@ class ClaudeBackend:
             },
         )
 
-    # Internals
     @property
     def _offered_intents(self) -> frozenset[IntentType]:
         """The intent types the agent is offered: the role's set, or every type when none is given."""
@@ -471,16 +476,12 @@ class ClaudeBackend:
         if provider is None:
             self._context_server_config = None
             return
-        try:
-            self._context_server_config = build_context_tools_server(
-                provider,
-                sdk_module=self.sdk_module,
-                tool_factory=self.mcp_tool_factory,
-                server_factory=self.mcp_server_factory,
-            )
-        except Exception as exc:  # isolation boundary: the context-tools MCP server, absent from the MCP setup snapshot
-            log.warning("context tools MCP setup failed: %s", exc, exc_info=True)
-            self._context_server_config = None
+        self._context_server_config = build_context_tools_server(
+            provider,
+            sdk_module=self.sdk_module,
+            tool_factory=self.mcp_tool_factory,
+            server_factory=self.mcp_server_factory,
+        )
 
     def get_mcp_setup_diagnostic(self) -> dict[str, Any]:
         """Return the current MCP setup snapshot: what Hyperloom configured and what the CLI offered the model."""
@@ -503,7 +504,6 @@ class ClaudeBackend:
                 "registered": self.mcp_server_config is not None,
                 "offered": None if mcp_tools is None else EMIT_INTENT_TOOL_QUALIFIED in mcp_tools,
                 "schema_sha256": hashlib.sha256(schema.encode("utf-8")).hexdigest(),
-                "setup_error": self._mcp_setup_error,
             },
             "allowed_tools": list(self._palette_kwargs.get("allowed_tools", [])),
         }
@@ -800,7 +800,7 @@ class ClaudeBackend:
             return
         try:
             await aclose()
-        except Exception:  # outermost finalizer: stream cleanup, which must not mask the turn result
+        except (OSError, RuntimeError):  # stream cleanup must not mask the turn result
             log.debug("claude SDK stream aclose failed", exc_info=True)
 
     @staticmethod

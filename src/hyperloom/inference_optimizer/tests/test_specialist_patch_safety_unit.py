@@ -54,6 +54,11 @@ def test_parse_patch_targets_falls_back_for_mode_only_and_rename():
     assert parsed_rename.created == ("new.py",)
 
 
+def test_parse_patch_targets_rejects_a_diff_whose_both_sides_are_dev_null():
+    with pytest.raises(ValueError, match="no safe target files"):
+        ps.parse_patch_targets("--- /dev/null\n+++ /dev/null\n@@ -0,0 +1 @@\n+x\n")
+
+
 def test_parse_patch_targets_rejects_root_escape():
     try:
         ps.parse_patch_targets("diff --git a/good.py b/../../escape.py\n--- a/good.py\n+++ b/../../escape.py\n")
@@ -106,37 +111,29 @@ def test_cross_domain_rule_descriptors():
     assert {"rule_id", "description", "failure_verdict", "failure_reason_code"} <= set(desc[0])
 
 
-# ---- PatchGroundingResult.is_garbage --------------------------------------
-def test_is_garbage():
-    assert ps.PatchGroundingResult(ps.GROUND_NOT_DIFF).is_garbage is True
-    assert ps.PatchGroundingResult(ps.GROUND_PATH_ESCAPE).is_garbage is True
-    # A root that could not be picked is a reporting verdict, not a drop.
-    assert ps.PatchGroundingResult(ps.GROUND_MISSING_TARGET).is_garbage is False
-    assert ps.PatchGroundingResult(ps.GROUND_AMBIGUOUS_ROOT).is_garbage is False
-    assert ps.PatchGroundingResult(ps.GROUND_STALE).is_garbage is False
-    assert ps.PatchGroundingResult(ps.GROUND_APPLIES).is_garbage is False
+# ---- vet_patches grounding verdicts ---------------------------------------
+def _ground(tmp_path: Path, text: str, base_checkout: Path | None) -> str:
+    patch = tmp_path / "p.patch"
+    patch.write_text(text, encoding="utf-8")
+    _kept, _ungrounded, grounding, _spans = ps.vet_patches([str(patch)], base_checkout=base_checkout)
+    return grounding[str(patch)]
 
 
-# ---- ground_patch_text ----------------------------------------------------
-def test_ground_not_diff():
-    res = ps.ground_patch_text("no hunks", base_checkout=None)
-    assert res.verdict == ps.GROUND_NOT_DIFF
+def test_ground_not_diff(tmp_path):
+    assert _ground(tmp_path, "no hunks", None) == ps.GROUND_NOT_DIFF
 
 
-def test_ground_path_escape():
+def test_ground_path_escape(tmp_path):
     escape_diff = "--- a/foo.py\n+++ b/../../escape.py\n@@ -1 +1 @@\n-old\n+new\n"
-    res = ps.ground_patch_text(escape_diff, base_checkout=None)
-    assert res.verdict == ps.GROUND_PATH_ESCAPE
+    assert _ground(tmp_path, escape_diff, None) == ps.GROUND_PATH_ESCAPE
 
 
-def test_ground_unchecked_no_base():
-    res = ps.ground_patch_text(_DIFF, base_checkout=None)
-    assert res.verdict == ps.GROUND_UNCHECKED
+def test_ground_unchecked_no_base(tmp_path):
+    assert _ground(tmp_path, _DIFF, None) == ps.GROUND_UNCHECKED
 
 
 def test_ground_missing_target(tmp_path):
-    res = ps.ground_patch_text(_DIFF, base_checkout=tmp_path)
-    assert res.verdict == ps.GROUND_MISSING_TARGET
+    assert _ground(tmp_path, _DIFF, tmp_path) == ps.GROUND_MISSING_TARGET
 
 
 def test_ground_applies(tmp_path, monkeypatch):
@@ -147,8 +144,7 @@ def test_ground_applies(tmp_path, monkeypatch):
         stderr = ""
 
     monkeypatch.setattr(ps.subprocess, "run", lambda *a, **k: _Proc())
-    res = ps.ground_patch_text(_DIFF, base_checkout=tmp_path)
-    assert res.verdict == ps.GROUND_APPLIES
+    assert _ground(tmp_path, _DIFF, tmp_path) == ps.GROUND_APPLIES
 
 
 def test_ground_stale(tmp_path, monkeypatch):
@@ -159,9 +155,7 @@ def test_ground_stale(tmp_path, monkeypatch):
         stderr = "patch does not apply"
 
     monkeypatch.setattr(ps.subprocess, "run", lambda *a, **k: _Proc())
-    res = ps.ground_patch_text(_DIFF, base_checkout=tmp_path)
-    assert res.verdict == ps.GROUND_STALE
-    assert "does not apply" in res.detail
+    assert _ground(tmp_path, _DIFF, tmp_path) == ps.GROUND_STALE
 
 
 def test_ground_git_unavailable(tmp_path, monkeypatch):
@@ -171,8 +165,7 @@ def test_ground_git_unavailable(tmp_path, monkeypatch):
         raise FileNotFoundError("no git")
 
     monkeypatch.setattr(ps.subprocess, "run", _raise)
-    res = ps.ground_patch_text(_DIFF, base_checkout=tmp_path)
-    assert res.verdict == ps.GROUND_UNCHECKED
+    assert _ground(tmp_path, _DIFF, tmp_path) == ps.GROUND_UNCHECKED
 
 
 # ---- PatchSafetyReport.notes ----------------------------------------------
@@ -441,7 +434,7 @@ def test_vet_patches_drops_annotation_only_diff_that_applies(tmp_path: Path) -> 
     (root / "runtime.py").write_text(before, encoding="utf-8")
     patch = tmp_path / "annotation.patch"
     patch.write_text(diff, encoding="utf-8")
-    assert ps.ground_patch_text(diff, base_checkout=root, explicit_root=root).verdict == ps.GROUND_APPLIES
+    assert ps._git_apply_check(root, diff) is True
 
     kept, dropped, _grounding, spans_roots = ps.vet_patches([str(patch)], base_checkout=root, explicit_root=root)
 
@@ -518,15 +511,6 @@ def test_the_callers_own_tree_wins_a_tie(tmp_path):
     assert res.root is not None
     assert res.root.resolve() == tree_b.resolve()
     assert res.reason == ""
-
-
-def test_ground_patch_text_returns_ambiguous_root_verdict(tmp_path):
-    tree_a = _make_git_repo(tmp_path / "a", {"foo.py": "old\n"})
-    tree_b = _make_git_repo(tmp_path / "b", {"foo.py": "old\n"})
-    diff = "--- a/foo.py\n+++ b/foo.py\n@@ -1 +1 @@\n-old\n+new\n"
-    res = ps.ground_patch_text(diff, base_checkout=None, candidate_roots=(tree_a, tree_b))
-    assert res.verdict == ps.GROUND_AMBIGUOUS_ROOT
-    assert not res.is_garbage
 
 
 def test_vet_patches_ambiguous_root_not_labeled_missing_target(tmp_path):

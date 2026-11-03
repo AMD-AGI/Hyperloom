@@ -17,9 +17,9 @@ from typing import Any, Callable, Mapping
 
 import yaml
 
-from hyperloom.common.coerce import first_text
+from hyperloom_common.coerce import first_text
 from hyperloom.common.env_safety import build_benchmark_env
-from hyperloom.common.jsonio import read_json
+from hyperloom_common.jsonio import read_json
 from hyperloom.common.visible_devices import VISIBLE_DEVICE_VARS, effective_mask_tokens, is_rocr_level
 from hyperloom.orchestrator.kernel.geak_config import (
     _accepted_config_as_variant,
@@ -212,15 +212,17 @@ def _executable_final_launcher(script: str) -> Path | None:
 
 # Forward the validated measurement config + client trust onto every variant so the sweep measures on the same
 # workload shape the KERNEL_AGENT phase accepted (else bench_e2e.sh falls back to its own defaults).
-def _replay_protocol_env(result: Mapping[str, Any], flags: str, *, pin_num_prompts: bool) -> dict[str, str]:
+def _replay_protocol_env(result: Mapping[str, Any], flags: str) -> dict[str, str]:
     protocol = result.get("bench_protocol")
     if not isinstance(protocol, dict):
         regimes = result.get("validated_regimes") or []
         protocol = regimes[0] if regimes and isinstance(regimes[0], dict) else {}
-    fields = [("random_range_ratio", "RANDOM_RANGE_RATIO"), ("num_warmups", "NUM_WARMUPS"), ("seed", "SEED")]
-    # Single-point validated replay: also pin num_prompts (see ``sweep_via_geak``).
-    if pin_num_prompts:
-        fields.append(("num_prompts", "NUM_PROMPTS"))
+    fields = (
+        ("random_range_ratio", "RANDOM_RANGE_RATIO"),
+        ("num_warmups", "NUM_WARMUPS"),
+        ("seed", "SEED"),
+        ("num_prompts", "NUM_PROMPTS"),
+    )
     env = {dst: str(protocol[src]) for src, dst in fields if protocol.get(src) is not None}
     # Mirror the server's --trust-remote-code onto the bench client so its tokenizer load doesn't raise.
     if "trust-remote-code" in flags or "trust_remote_code" in flags:
@@ -279,6 +281,19 @@ def _measured_number(value: object) -> float | int | None:
     return value if isinstance(value, (int, float)) else None
 
 
+def _sweep_point_entry(plan: _ReplayPlan, out_dir: Path, *, conc: int, isl: int, osl: int) -> dict[str, Any]:
+    """The identity fields every replay sweep point entry starts with."""
+    return {
+        "conc": conc,
+        "isl": isl,
+        "osl": osl,
+        "variant_name": out_dir.name,
+        "workspace": str(out_dir),
+        "replay_script": str(plan.script),
+        "replay_mode": plan.replay_mode,
+    }
+
+
 async def _replay_sweep_point(plan: _ReplayPlan, out_dir: Path, *, conc: int, isl: int, osl: int) -> dict[str, Any]:
     env = _sweep_point_env(plan, out_dir, conc=conc, isl=isl, osl=osl)
     cmd = ["bash", str(plan.script), str(out_dir)] if plan.use_final_launch else ["bash", str(plan.script)]
@@ -293,15 +308,7 @@ async def _replay_sweep_point(plan: _ReplayPlan, out_dir: Path, *, conc: int, is
             cwd=str(out_dir),
         )
 
-    entry: dict[str, Any] = {
-        "conc": conc,
-        "isl": isl,
-        "osl": osl,
-        "variant_name": out_dir.name,
-        "workspace": str(out_dir),
-        "replay_script": str(plan.script),
-        "replay_mode": plan.replay_mode,
-    }
+    entry = _sweep_point_entry(plan, out_dir, conc=conc, isl=isl, osl=osl)
     ttft = tpot = e2el = tput = None
     basis = ""
     succeeded = False
@@ -393,7 +400,6 @@ class GeakSweepSpec:
     isl_osl_configs: list[str]
     variant_timeout_sec: int
     repeats: int = 3
-    pin_num_prompts: bool = False
     metric_axis: tuple[str, str] = GEAK_METRIC_OUTPUT
 
 
@@ -454,7 +460,7 @@ async def sweep_via_geak(
         overlay=result.get("final_overlay") or "",
         repeats=spec.repeats,
         timeout_sec=spec.variant_timeout_sec,
-        protocol_env=_replay_protocol_env(result, flags, pin_num_prompts=spec.pin_num_prompts),
+        protocol_env=_replay_protocol_env(result, flags),
     )
 
     output_root.mkdir(parents=True, exist_ok=True)

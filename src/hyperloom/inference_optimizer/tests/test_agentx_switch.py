@@ -115,9 +115,10 @@ _PROBE_OFF = """
 import sys
 from pathlib import Path
 from hyperloom.orchestrator.actions.executors import _grid_runner  # noqa: F401
+from hyperloom.common.perf_metric import agentx_enabled
 from hyperloom.orchestrator.actions.executors import _workload_envs as we
 
-assert not we.agentx_enabled()
+assert not agentx_enabled()
 we.materialize_config_with_envs(
     Path(sys.argv[1]), Path(sys.argv[2]), target=we.BenchmarkTarget(gpu_type="mi300x", model_path="/m")
 )

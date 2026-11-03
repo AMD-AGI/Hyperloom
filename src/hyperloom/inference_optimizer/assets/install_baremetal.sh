@@ -28,7 +28,7 @@ DOTENV="${REPO_ROOT}/.env"
 HYPERLOOM_SKILL_PATH="${HYPERLOOM_SKILL_PATH:-${REPO_ROOT}/src/hyperloom/inference_optimizer/SKILL.md}"
 
 HYPERLOOM_WHEEL_REPO="${HYPERLOOM_WHEEL_REPO:-AMD-AGI/Hyperloom}"
-HYPERLOOM_WHEEL_TAG="${HYPERLOOM_WHEEL_TAG:-v1.1.4}"
+HYPERLOOM_WHEEL_TAG="${HYPERLOOM_WHEEL_TAG:-v1.1.5}"
 ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR="${ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR:-/opt/rocm/lib}"
 ROCM_PROFILER_HOTFIX_ASSET="${ROCM_PROFILER_HOTFIX_ASSET:-rocm-profiler-hotfix-libs.tar.gz}"
 # Installed name must outrank the vendor library in ldconfig's ordering.
@@ -290,7 +290,7 @@ export_virtualenv_for_python() {
 # packages (_rocm_sdk_core, _rocm_sdk_libraries, _rocm_sdk_devel; which ones
 # are installed depends on the wheel's build profile), with some libraries
 # nested under subdirs the dynamic loader does not search by default. Mirrors
-# _rocm_sdk_wheel_lib_dirs() in cli/preflight.py, which applies this at
+# _rocm_sdk_wheel_lib_dirs() in cli/preflight_env.py, which applies this at
 # actual launch; done here too so this check does not false-negative on a
 # stack that will resolve correctly at runtime. No-ops (prints nothing) on a
 # standard /opt/rocm image, where none of these packages exist.
@@ -2354,7 +2354,7 @@ url_authority() {
 # DeepSeek is a dual-protocol gateway, not a third provider: /anthropic speaks
 # the Anthropic API and /v1 speaks OpenAI chat-completions, both authenticated
 # with the same key. Endpoint and model derivation matches
-# hyperloom.common.llm_config.deepseek_compat_env; ANTHROPIC_AUTH_TOKEN is
+# hyperloom_common.llm.llm_config.deepseek_compat_env; ANTHROPIC_AUTH_TOKEN is
 # deliberately not written here because .env only ever persists the API-key
 # spelling (see remove_dotenv_var ANTHROPIC_AUTH_TOKEN below).
 migrate_legacy_deepseek_env() {

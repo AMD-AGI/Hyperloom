@@ -13,7 +13,6 @@ import subprocess
 import sys
 import tempfile
 import threading
-from pathlib import Path
 from typing import Optional, Tuple
 
 log = logging.getLogger(__name__)
@@ -124,10 +123,7 @@ def _ray_init_timeout_sec() -> float:
     return _positive_float_env("HYPERLOOM_RAY_INIT_TIMEOUT_SEC", DEFAULT_RAY_INIT_TIMEOUT_SEC)
 
 
-def ensure_fd_limit(
-    min_soft: Optional[int] = None,
-    log_path: Optional[Path] = None,
-) -> Tuple[int, int]:
+def ensure_fd_limit(min_soft: Optional[int] = None) -> Tuple[int, int]:
     """Raise this process's RLIMIT_NOFILE soft limit before Ray starts."""
     if min_soft is None:
         min_soft = _min_nofile_target()
@@ -154,15 +150,6 @@ def ensure_fd_limit(
             f"(issue #433). Launch the container with --ulimit nofile=1048576 "
             f"(>= {min_soft})."
         )
-    if log_path is not None:
-        try:
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-            with log_path.open("a", encoding="utf-8") as log:
-                log.write(
-                    f"[fd_limit] RLIMIT_NOFILE soft raised to {soft} (hard={hard}) for raylet stability (issue #433)\n"
-                )
-        except OSError:  # pragma: no cover - logging must never break startup
-            pass
     return soft, hard
 
 
@@ -181,20 +168,16 @@ def ray_status_ok() -> bool:
     return proc.returncode == 0
 
 
-def _stop_ray_force(log_path: Optional[Path] = None, *, reason: str = "") -> None:
+def _stop_ray_force() -> None:
     """Run ``ray stop --force`` with a bounded timeout; never raises."""
-    cmd = ["ray", "stop", "--force"]
-    timeout = _ray_stop_timeout_sec()
     try:
-        if log_path is not None:
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-            with log_path.open("a", encoding="utf-8") as log:
-                if reason:
-                    log.write(f"{reason}\n")
-                log.write(f"$ {' '.join(cmd)}\n")
-                subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, text=True, timeout=timeout)
-        else:
-            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, text=True, timeout=timeout)
+        subprocess.run(
+            ["ray", "stop", "--force"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=_ray_stop_timeout_sec(),
+        )
     except (subprocess.TimeoutExpired, OSError):
         pass
 
@@ -206,21 +189,25 @@ def _stop_ray_force(log_path: Optional[Path] = None, *, reason: str = "") -> Non
 _RAY_START_DETACH_KWARGS = {"stdin": subprocess.DEVNULL, "start_new_session": True}
 
 
-def _ray_start_evidence(log_path: Optional[Path], captured: str) -> str:
-    """Name the log sink, or carry the output itself when there is no sink."""
-    if log_path is not None:
-        return f"see {log_path}"
+def _ray_start_evidence(captured: str) -> str:
+    """Carry the tail of the captured ``ray start`` output into an error message."""
     if captured:
         return f"ray start output: {captured[-_RAY_START_OUTPUT_TAIL_CHARS:]}"
     return "ray start produced no output"
 
 
-def ensure_ray_cluster(num_gpus: Optional[int] = None, log_path: Optional[Path] = None) -> None:
+def ensure_ray_cluster(num_gpus: Optional[int] = None) -> None:
     """Ensure a Ray cluster is reachable, starting a head node if needed."""
     if ray_status_ok():
         return
-    _stop_ray_force(log_path=log_path, reason="Clearing stale Ray discovery state before starting a local head")
-    ensure_fd_limit(log_path=log_path)
+    # Clears stale Ray discovery state before the local head starts.
+    _stop_ray_force()
+    ensure_fd_limit()
+    _start_local_head(num_gpus)
+
+
+def _start_local_head(num_gpus: Optional[int]) -> None:
+    """Run ``ray start --head`` and require the new cluster to be reachable."""
     gcs_port, iso_args = _isolated_head_port_args()
     # Dashboard bound to loopback: keeps the unauthenticated Ray Jobs endpoint off the pod network.
     cmd = ["ray", "start", "--head", f"--port={gcs_port}", "--dashboard-host=127.0.0.1"]
@@ -229,26 +216,16 @@ def ensure_ray_cluster(num_gpus: Optional[int] = None, log_path: Optional[Path] 
     cmd.extend(iso_args)
     # serving_slot: whole-machine mutex so serving-family tasks serialise GPU access.
     cmd.extend(_resources_start_args())
-    captured = ""
-    if log_path is not None:
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        with log_path.open("a", encoding="utf-8") as log:
-            log.write(f"$ {' '.join(cmd)}\n")
-            proc = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, text=True, **_RAY_START_DETACH_KWARGS)
-            log.write(f"\n[ray_start_exit_code] {proc.returncode}\n")
-    else:
-        # Without a log sink to name, this output is the only evidence a failure leaves. It is captured through an
-        # anonymous file, not a pipe: a daemon that inherits a pipe holds it open and a pipe reader waits on it forever.
-        with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as sink:
-            proc = subprocess.run(cmd, stdout=sink, stderr=subprocess.STDOUT, text=True, **_RAY_START_DETACH_KWARGS)
-            sink.seek(0)
-            captured = sink.read().strip()
+    # This output is the only evidence a failure leaves. It is captured through an anonymous file, not a pipe: a
+    # daemon that inherits a pipe holds it open and a pipe reader waits on it forever.
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as sink:
+        proc = subprocess.run(cmd, stdout=sink, stderr=subprocess.STDOUT, text=True, **_RAY_START_DETACH_KWARGS)
+        sink.seek(0)
+        captured = sink.read().strip()
     if proc.returncode != 0:
-        raise RuntimeError(f"failed to start Ray (rc={proc.returncode}); {_ray_start_evidence(log_path, captured)}")
+        raise RuntimeError(f"failed to start Ray (rc={proc.returncode}); {_ray_start_evidence(captured)}")
     if not ray_status_ok():
-        raise RuntimeError(
-            f"ray start exited 0 but cluster is not reachable; {_ray_start_evidence(log_path, captured)}"
-        )
+        raise RuntimeError(f"ray start exited 0 but cluster is not reachable; {_ray_start_evidence(captured)}")
 
 
 def _is_ray_version_mismatch(text: str) -> bool:
@@ -256,35 +233,11 @@ def _is_ray_version_mismatch(text: str) -> bool:
     return "version mismatch" in (text or "").lower()
 
 
-def force_restart_local_cluster(
-    num_gpus: Optional[int] = None,
-    log_path: Optional[Path] = None,
-    *,
-    reason: str = "Stopping foreign cluster before version-mismatch recovery",
-) -> None:
+def force_restart_local_cluster(num_gpus: Optional[int] = None) -> None:
     """Tear down any reachable Ray cluster and start a fresh local head."""
-    ensure_fd_limit(log_path=log_path)
-    _stop_ray_force(log_path=log_path, reason=reason)
-    gcs_port, iso_args = _isolated_head_port_args()
-    start_cmd = ["ray", "start", "--head", f"--port={gcs_port}", "--dashboard-host=127.0.0.1"]
-    if num_gpus is not None:
-        start_cmd.append(f"--num-gpus={num_gpus}")
-    start_cmd.extend(iso_args)
-    start_cmd.extend(_resources_start_args())
-    if log_path is not None:
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        with log_path.open("a", encoding="utf-8") as log:
-            log.write(f"$ {' '.join(start_cmd)}\n")
-            proc = subprocess.run(
-                start_cmd, stdout=log, stderr=subprocess.STDOUT, text=True, **_RAY_START_DETACH_KWARGS
-            )
-            log.write(f"\n[ray_restart_exit_code] {proc.returncode}\n")
-    else:
-        proc = subprocess.run(
-            start_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, text=True, **_RAY_START_DETACH_KWARGS
-        )
-    if proc.returncode != 0:
-        raise RuntimeError(f"failed to restart local Ray (rc={proc.returncode}); see {log_path}")
+    ensure_fd_limit()
+    _stop_ray_force()
+    _start_local_head(num_gpus)
 
 
 #: Ray resource keys that describe capacity rather than something a task or actor holds.
@@ -412,7 +365,7 @@ def local_head_restartable() -> Tuple[bool, str]:
     return True, ""
 
 
-def restart_local_head_with_serving_slot(num_gpus: Optional[int] = None, log_path: Optional[Path] = None) -> None:
+def restart_local_head_with_serving_slot(num_gpus: Optional[int] = None) -> None:
     """Replace a local head that lacks ``serving_slot`` with one that declares it, then reconnect.
 
     The same repair ``install_kernel_tools.sh`` applies when it finds such a head:
@@ -426,14 +379,8 @@ def restart_local_head_with_serving_slot(num_gpus: Optional[int] = None, log_pat
     except RayError as exc:
         # ``ray stop --force`` below ends the cluster this driver was attached to either way.
         log.warning("ray.shutdown() failed before restarting the local head; continuing: %r", exc)
-    force_restart_local_cluster(
-        num_gpus=num_gpus,
-        log_path=log_path,
-        reason=f"Restarting local Ray head: it does not declare the {RAY_SERVING_SLOT} resource",
-    )
-    if not ray_status_ok():
-        raise RuntimeError(f"restarted local Ray head is not reachable; see {log_path}")
-    quiet_ray_init(num_gpus=num_gpus, log_path=log_path)
+    force_restart_local_cluster(num_gpus=num_gpus)
+    quiet_ray_init(num_gpus=num_gpus)
 
 
 # Env vars safe to forward to Ray workers; excludes *_VISIBLE_DEVICES (Ray-owned; forcing them triggers set_visible_accelerator_ids IndexError on ROCm).
@@ -492,7 +439,7 @@ def safe_runtime_env() -> dict:
     return {"env_vars": env}
 
 
-def quiet_ray_init(num_gpus: Optional[int] = None, log_path: Optional[Path] = None):
+def quiet_ray_init(num_gpus: Optional[int] = None) -> None:
     """Initialize ray while suppressing the connect banner on stdout."""
     import contextlib
     import io
@@ -526,8 +473,8 @@ def quiet_ray_init(num_gpus: Optional[int] = None, log_path: Optional[Path] = No
         failure. A daemon thread makes that state reportable. The call itself cannot
         be cancelled, so the thread is abandoned rather than joined; it cannot keep
         the interpreter alive. What it could do is finish late and leave this
-        process connected after the caller was told the cluster is unusable, so an
-        abandoned runner shuts the session back down on its way out.
+        process connected after the caller was told the cluster is unusable, so the
+        next attempt shuts that session back down before it connects.
         """
         timeout = _ray_init_timeout_sec()
         # Wait out any abandoned runner rather than racing it. It releases the
@@ -550,30 +497,21 @@ def quiet_ray_init(num_gpus: Optional[int] = None, log_path: Optional[Path] = No
                 ray.shutdown()
         outcome: dict[str, BaseException] = {}
         # One lock decides, for a connect that lands near the deadline, whether
-        # the caller got it or the runner has to undo it. Checking a flag and
-        # setting it on separate threads leaves the interleaving where the
-        # runner reads "not abandoned", returns, and the caller then declares
-        # abandonment -- the process connected and nobody responsible for it.
+        # the caller got it or the next attempt has to undo it. The caller marks
+        # a possible stale connect under the same lock the runner reports
+        # through, and the runner releases the gate only after reporting, so
+        # the next attempt cannot clear the marker before this one resolves.
         verdict_lock = threading.Lock()
-        verdict: dict[str, bool] = {"done": False, "landed": False, "abandoned": False}
+        verdict: dict[str, bool] = {"done": False}
 
         def _runner() -> None:
             try:
                 _connect(address)
-                landed = True
             except BaseException as exc:  # re-raised on the caller's thread
                 log.debug("ray.init(address=%r) raised on the connect thread", address, exc_info=True)
                 outcome["error"] = exc
-                landed = False
             with verdict_lock:
                 verdict["done"] = True
-                verdict["landed"] = landed
-                if landed and verdict["abandoned"]:
-                    # The caller gave up before this returned, so a session may
-                    # exist that nobody asked for. Recorded under the lock and
-                    # therefore BEFORE the gate is released: the next attempt
-                    # cannot start and find the marker missing.
-                    _STALE_CONNECT_POSSIBLE.set()
             # Released last, and by this thread rather than the caller: the
             # caller may already have given up, and no second connect may start
             # while this one is unresolved.
@@ -593,7 +531,6 @@ def quiet_ray_init(num_gpus: Optional[int] = None, log_path: Optional[Path] = No
             # so exactly one of the two sides owns the outcome.
             timed_out = not verdict["done"]
             if timed_out:
-                verdict["abandoned"] = True
                 _STALE_CONNECT_POSSIBLE.set()
         if timed_out:
             raise TimeoutError(
@@ -615,6 +552,5 @@ def quiet_ray_init(num_gpus: Optional[int] = None, log_path: Optional[Path] = No
             ray.shutdown()
         except (RuntimeError, OSError):
             pass
-        force_restart_local_cluster(num_gpus=num_gpus, log_path=log_path)
+        force_restart_local_cluster(num_gpus=num_gpus)
         _init(_RAY_ADDRESS_AUTO)
-    return runtime_env

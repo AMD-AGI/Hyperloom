@@ -10,6 +10,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 import yaml
@@ -21,11 +22,12 @@ from hyperloom.orchestrator.trace_analysis import _harness_discovery as harness_
 from hyperloom.orchestrator.trace_analysis import _kernel_classification as kernel_classification
 from hyperloom.orchestrator.trace_analysis import _kernel_roofline as kernel_roofline
 from hyperloom.orchestrator.trace_analysis import _kernel_search as kernel_search
+from hyperloom.orchestrator.trace_analysis._perf_report_analysis import PerfReportAnalysis
 from hyperloom.orchestrator.trace_analysis import _trace_gates as trace_gates
 from hyperloom.orchestrator.trace_analysis import _trace_inputs as trace_inputs
 from hyperloom.orchestrator.trace_analysis import _trace_shapes as trace_shapes
 from hyperloom.orchestrator.trace_analysis import _trace_split as trace_split
-from hyperloom.orchestrator.trace_analysis import _bypass_report as bypass_report
+from hyperloom.orchestrator.trace_analysis import _capture_shapes as capture_shapes
 from hyperloom.orchestrator.trace_analysis import _idle_gate as idle_gate
 from hyperloom.orchestrator.trace_analysis import _task_group_contract as task_group_contract
 from hyperloom.orchestrator.trace_analysis import tracelens_skill_runner as tlr
@@ -44,33 +46,6 @@ def _skill_request(tmp_path: Path, output_dir: Path, **fields: object) -> tlr.Tr
     return tlr.TraceLensSkillRequest(**{**defaults, **fields})
 
 
-def test_default_top_k_uses_large_pool_by_default(monkeypatch):
-    """The candidate-build pool defaults to a large value, not 10."""
-    monkeypatch.delenv("HYPERLOOM_KERNEL_CANDIDATES_TOP_K", raising=False)
-    assert tla._default_top_k() == tla._DEFAULT_KERNEL_CANDIDATES_TOP_K
-    assert tla._default_top_k() > 10
-
-
-def test_default_top_k_env_override(monkeypatch):
-    """HYPERLOOM_KERNEL_CANDIDATES_TOP_K overrides the pool size."""
-    monkeypatch.setenv("HYPERLOOM_KERNEL_CANDIDATES_TOP_K", "25")
-    assert tla._default_top_k() == 25
-
-
-def test_default_top_k_zero_means_unbounded(monkeypatch):
-    """Zero or negative disables the build-time cap (huge internal cap)."""
-    monkeypatch.setenv("HYPERLOOM_KERNEL_CANDIDATES_TOP_K", "0")
-    assert tla._default_top_k() >= 1_000_000
-    monkeypatch.setenv("HYPERLOOM_KERNEL_CANDIDATES_TOP_K", "-5")
-    assert tla._default_top_k() >= 1_000_000
-
-
-def test_default_top_k_invalid_falls_back(monkeypatch):
-    """A non-integer env value falls back to the default pool."""
-    monkeypatch.setenv("HYPERLOOM_KERNEL_CANDIDATES_TOP_K", "not-an-int")
-    assert tla._default_top_k() == tla._DEFAULT_KERNEL_CANDIDATES_TOP_K
-
-
 def test_dry_run_writes_the_source_resolution_artifact(
     monkeypatch,
     tmp_path,
@@ -81,24 +56,7 @@ def test_dry_run_writes_the_source_resolution_artifact(
 
     trace = tmp_path / "trace.json"
     trace.write_text('{"traceEvents": []}', encoding="utf-8")
-    source = tmp_path / "kernel.py"
-    source.write_text("def kernel():\n    pass\n", encoding="utf-8")
     report = tmp_path / "trace_report.json"
-    monkeypatch.setattr(
-        tla,
-        "analyze_trace_files",
-        lambda *_args, **_kwargs: [
-            {
-                "kernel_id": "k001",
-                "name": "kernel",
-                "gpu_pct": 100.0,
-                "duration_us": 1.0,
-                "source_file": str(source),
-                "source_type": "python",
-                "source_resolution_method": "symbol_index",
-            }
-        ],
-    )
     monkeypatch.setattr(
         tla,
         "write_reports",
@@ -119,9 +77,10 @@ def test_dry_run_writes_the_source_resolution_artifact(
 
     assert tla.main() == 0
     result = _json.loads(capsys.readouterr().out)
+    assert result["hot_kernels"] == []
     resolution_path = Path(result["artifact_paths"]["kernel_source_resolution"])
     assert resolution_path.is_file()
-    assert _json.loads(resolution_path.read_text(encoding="utf-8"))["entries"][0]["source_file"] == str(source)
+    assert _json.loads(resolution_path.read_text(encoding="utf-8"))["entries"] == []
 
 
 # A path — is_kernel_event strict cat == 'kernel'
@@ -186,7 +145,6 @@ def test_a_top_kernels_no_sync_events_in_real_trace_shape():
         {"name": "sgl_hip::activation::act_and_mul_kernel<...>", "cat": "kernel", "dur": 380.0},
         {"name": "void paged_attention_ll4mi_QKV_mfma16_kernel<...>", "cat": "kernel", "dur": 889.0},
     ]
-    # Direct call paths used by analyze_trace_files
     kept = [e for e in events if kernel_classification.is_kernel_event(e)]
     assert len(kept) == 3
     kept_names = {e["name"] for e in kept}
@@ -364,7 +322,7 @@ def test_125_derive_category_normalizations():
     cases = [
         ("rocblas_sgemm_kernel", "GEMM"),
         ("flash_fmha_decode_kernel", "SDPA"),
-        ("rmsnorm_kernel<bf16>", "LayerNorm"),
+        ("rmsnorm_kernel<bf16>", "Normalization"),
         ("act_and_mul_kernel<bf16>", "Activation"),
         ("moe_dispatch_kernel", "MoE"),
         ("softmax_kernel_v2", "Softmax"),
@@ -376,6 +334,18 @@ def test_125_derive_category_normalizations():
     ]
     for name, expected in cases:
         assert candidate_assembly.derive_kernel_category({"name": name}) == expected, name
+
+
+def test_derive_category_gemma_norm_is_a_norm():
+    # Regression: the bare ``gemm`` marker claimed the ``gemma`` of MiniMax-M3's Gemma RMSNorm kernels.
+    for name in ("_gemma_rmsnorm_kernel", "_gemma_fused_add_rmsnorm_kernel"):
+        assert candidate_assembly.derive_kernel_category({"name": name}) == "Normalization", name
+    # The model name spells ``gemm`` for every op named after it, not only the norms.
+    assert candidate_assembly.derive_kernel_category({"name": "_gemma_act_and_mul_kernel"}) == "Activation"
+    assert candidate_assembly.derive_kernel_category({"name": "_gemma3_softmax_kernel"}) == "Softmax"
+    assert (
+        candidate_assembly.derive_kernel_category({"name": "ck_tile::BlockGemmASmemBSmemCRegV1DefaultPolicy"}) == "GEMM"
+    )
 
 
 def test_125_finalize_outputs_source_path_field():
@@ -392,7 +362,7 @@ def test_125_finalize_outputs_source_path_field():
     ]
     out = candidate_assembly._finalize_candidates(candidates)
     assert out[0]["source_path"] == "/path/to/rmsnorm.cu"
-    assert out[0]["kernel_category"] == "LayerNorm"
+    assert out[0]["kernel_category"] == "Normalization"
 
 
 def test_finalize_uses_csv_op_category_for_aten_mm(tmp_path):
@@ -487,9 +457,9 @@ def test_resolve_fused_moe_shapes_matches_manual_harness(tmp_path):
     assert "(122880,768) bf16" in shapes  # A (I=768)
     assert "(128,2048,768) bf16" in shapes  # w2
     assert "(15360,8,2048) bf16" in shapes  # C
-    # 1-tuples keep the trailing comma; ints map to i32, floats to f32.
+    # 1-tuples keep the trailing comma; ints map to i32, floats to fp32.
     assert "(131007,) i32" in shapes
-    assert "(15360,8) f32" in shapes
+    assert "(15360,8) fp32" in shapes
     # No empty/scalar operand leaks through.
     assert all(s and s != "()" for s in shapes)
 
@@ -578,7 +548,7 @@ def test_finalize_grafts_csv_shapes_for_other_bucket_attention_candidate(tmp_pat
     assert out[0]["shapes"]
     assert "(64,32,128) bf16" in out[0]["shapes"]
     assert "(1177709,1,8,128) bf16" in out[0]["shapes"]
-    assert "(1,) f32" in out[0]["shapes"]
+    assert "(1,) fp32" in out[0]["shapes"]
     assert out[0]["shape_provenance"] == "torch_trace"
 
 
@@ -631,16 +601,6 @@ def test_finalize_falls_back_to_heuristic_when_csv_missing(tmp_path):
     assert out[0]["kernel_category"] == "MoE"
 
 
-def test_normalize_upstream_category_handles_moe_aux_and_collective():
-    """New mappings: MoE_aux -> MoE and CustomCollective -> Communication normalize cleanly."""
-    normalize_upstream_category = tlr.normalize_upstream_category
-
-    assert normalize_upstream_category("MoE_aux") == "MoE"
-    assert normalize_upstream_category("moe_aux") == "MoE"
-    assert normalize_upstream_category("CustomCollective") == "Communication"
-    assert normalize_upstream_category("customcollective") == "Communication"
-
-
 def test_write_reports_enriches_candidates_with_runtime_metadata(tmp_path):
     import json as _json
     from argparse import Namespace
@@ -669,6 +629,8 @@ def test_write_reports_enriches_candidates_with_runtime_metadata(tmp_path):
         model_name="llama",
         framework="sglang",
         target_platform="MI300X",
+        workspace_path=str(tmp_path),
+        roofline_output_name="kernel_roofline.json",
         dry_run=False,
     )
 
@@ -802,6 +764,8 @@ def test_write_reports_enriches_head_size_from_model_config(tmp_path):
         model_name=str(model_dir),
         framework="sglang",
         target_platform="MI300X",
+        workspace_path=str(tmp_path),
+        roofline_output_name="kernel_roofline.json",
         dry_run=False,
     )
 
@@ -826,6 +790,8 @@ def _make_write_reports_args(trace_path):
         model_name="qwen3-30b-a3b",
         framework="sglang",
         target_platform="MI300X",
+        workspace_path=str(Path(trace_path).parent),
+        roofline_output_name="kernel_roofline.json",
         dry_run=False,
     )
 
@@ -1032,7 +998,6 @@ def test_124_tracelens_analysis_fails_fast_on_cpu_only_trace(tmp_path):
     """A CPU-only trace must fail loudly before TraceLens install / split / SDK runs."""
     import gzip
     import json as _json
-    from unittest.mock import patch
 
     tl_root = tmp_path / "TraceLens-internal"
     skill_dir = tl_root / "TraceLens" / "Agent" / "Analysis" / "skills" / "analysis-orchestrator"
@@ -1076,7 +1041,8 @@ def test_124_tracelens_analysis_fails_fast_on_cpu_only_trace(tmp_path):
         "MI300X",
         "--budget-minutes",
         "1",
-        "--no-llm-orchestrator",
+        "--route",
+        "non-llm",
     ]
     import os as _os
 
@@ -1136,7 +1102,8 @@ def test_a_failed_sdk_orchestrator_is_the_error_the_run_reports(tmp_path, monkey
             str(trace),
             "--workspace-path",
             str(tmp_path / "workspace"),
-            "--use-llm-orchestrator",
+            "--route",
+            "agent",
         ],
     )
 
@@ -1225,14 +1192,8 @@ def test_124_run_tracelens_skill_uses_sdk_and_artifacts(tmp_path):
     assert res.runner == "claude_agent_sdk"
 
 
-@pytest.mark.parametrize(
-    ("tool_idle_env", "expected_ceiling_ms"),
-    [(None, "3600000"), ("900", "900000"), ("0", "0")],
-)
-def test_run_tracelens_skill_aligns_cli_background_wait_with_tool_idle_bound(
-    tmp_path, monkeypatch, tool_idle_env, expected_ceiling_ms
-):
-    """The Claude CLI must not kill background sub-agents before the runner's own in-flight bound does."""
+def _claude_skill_options(tmp_path):
+    """Run the Claude skill over an SDK that writes the report; return the options it was handed."""
     import asyncio
     from dataclasses import dataclass
     from typing import Any
@@ -1249,11 +1210,6 @@ def test_run_tracelens_skill_aligns_cli_background_wait_with_tool_idle_bound(
         def __init__(self, **kwargs):
             self.kwargs = kwargs
 
-    monkeypatch.delenv("CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS", raising=False)
-    if tool_idle_env is None:
-        monkeypatch.delenv("HYPERLOOM_TRACELENS_TOOL_IDLE_TIMEOUT_SEC", raising=False)
-    else:
-        monkeypatch.setenv("HYPERLOOM_TRACELENS_TOOL_IDLE_TIMEOUT_SEC", tool_idle_env)
     output_dir = tmp_path / "out"
     captured: dict[str, Any] = {}
 
@@ -1271,8 +1227,25 @@ def test_run_tracelens_skill_aligns_cli_background_wait_with_tool_idle_bound(
             sdk=tlr.SdkEntryPoints(query=_fake_query, options_cls=_FakeOptions),
         )
     )
+    return captured["options"]
 
-    assert captured["options"]["env"]["CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS"] == expected_ceiling_ms
+
+@pytest.mark.parametrize(
+    ("tool_idle_env", "expected_ceiling_ms"),
+    [(None, "3600000"), ("900", "900000"), ("0", "0")],
+)
+def test_run_tracelens_skill_aligns_cli_background_wait_with_tool_idle_bound(
+    tmp_path, monkeypatch, tool_idle_env, expected_ceiling_ms
+):
+    """The Claude CLI must not kill background sub-agents before the runner's own in-flight bound does."""
+    monkeypatch.delenv("CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS", raising=False)
+    if tool_idle_env is None:
+        monkeypatch.delenv("HYPERLOOM_TRACELENS_TOOL_IDLE_TIMEOUT_SEC", raising=False)
+    else:
+        monkeypatch.setenv("HYPERLOOM_TRACELENS_TOOL_IDLE_TIMEOUT_SEC", tool_idle_env)
+    options = _claude_skill_options(tmp_path)
+
+    assert options["env"]["CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS"] == expected_ceiling_ms
 
 
 def test_run_tracelens_skill_books_its_requests_on_the_trajectory(tmp_path):
@@ -1445,47 +1418,13 @@ def test_run_tracelens_skill_records_nothing_outside_a_session(tmp_path):
 
 def test_run_tracelens_skill_uses_hermetic_claude_env(tmp_path, monkeypatch):
     """TraceLens SDK runner must not inherit stale global Claude settings."""
-    import asyncio
-    from dataclasses import dataclass
-    from typing import Any
-
-    @dataclass
-    class _TextBlock:
-        text: str
-
-    @dataclass
-    class _Message:
-        content: list[Any]
-
-    class _FakeOptions:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
     monkeypatch.setenv("_".join(("ANTHROPIC", "API", "KEY")), "anthropic-token-active")
     monkeypatch.delenv("_".join(("ANTHROPIC", "AUTH", "TOKEN")), raising=False)
     monkeypatch.delenv("_".join(("OPENAI", "API", "KEY")), raising=False)
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
 
-    output_dir = tmp_path / "out"
-    captured: dict[str, Any] = {}
-
-    async def _fake_query(*, prompt, options):
-        captured["options"] = options.kwargs
-        output_dir.mkdir(parents=True, exist_ok=True)
-        (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
-        yield _Message(content=[_TextBlock("done")])
-
-    asyncio.run(
-        tlr.run_tracelens_skill(
-            _skill_request(tmp_path, output_dir),
-            budget_minutes=1,
-            model="claude-sonnet-4-5-20250929",
-            sdk=tlr.SdkEntryPoints(query=_fake_query, options_cls=_FakeOptions),
-        )
-    )
-
-    opts = captured["options"]
+    opts = _claude_skill_options(tmp_path)
     assert opts["setting_sources"] == []
     child_env = opts["env"]
     assert child_env["ANTHROPIC_BASE_URL"] == "https://api.anthropic.com"
@@ -1541,7 +1480,6 @@ def test_run_tracelens_skill_openai_only_uses_codex_tool_runner(tmp_path, monkey
     # The result carries the runner that actually ran, so the caller reports the real provider instead of hardcoding
     # one.
     assert res.runner == "codex"
-    assert res.raw_text == "wrote analysis.md"
     assert "tracelens_agent_report" in res.artifact_paths
     assert res.artifact_paths["tracelens_cmd_prefix"] == str(output_dir / "cache" / "cmd_prefix.txt")
     # A clean turn records no SDK error.
@@ -1999,7 +1937,6 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(
     """The end-to-end split path must call the real splitter interface, not the broken --input/--platform form."""
     import gzip
     import json as _json
-    from unittest.mock import patch
 
     # Pretend TraceLens root is present so the run reaches the splitter step.
     tl_root = tmp_path / "TraceLens-internal"
@@ -2046,7 +1983,8 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(
         "MI300X",
         "--budget-minutes",
         "1",
-        "--no-llm-orchestrator",
+        "--route",
+        "non-llm",
         "--capture-folder",
         str(capture),
         "--split-llm-inference",
@@ -2100,7 +2038,6 @@ def _drive_main_capturing_subprocess(tmp_path, extra_argv, env_overrides=None, t
     import gzip
     import json as _json
     import os as _os
-    from unittest.mock import patch
 
     tl_root = tmp_path / "TraceLens-internal"
     skill_dir = tl_root / "TraceLens" / "Agent" / "Analysis" / "skills" / "analysis-orchestrator"
@@ -2149,7 +2086,8 @@ def _drive_main_capturing_subprocess(tmp_path, extra_argv, env_overrides=None, t
         "MI300X",
         "--budget-minutes",
         "1",
-        "--no-llm-orchestrator",
+        "--route",
+        "non-llm",
         "--capture-folder",
         str(capture),
         "--split-llm-inference",
@@ -2225,7 +2163,6 @@ def _find_splitter_cmd(captured):
 def _drive_main_over_capture_dir(tmp_path, trace_dir, extra_argv=None):
     """Drive tla.main() with a capture *directory* and capture subprocess argvs."""
     import os as _os
-    from unittest.mock import patch
 
     tl_root = tmp_path / "TraceLens-internal"
     skill_dir = tl_root / "TraceLens" / "Agent" / "Analysis" / "skills" / "analysis-orchestrator"
@@ -2257,7 +2194,8 @@ def _drive_main_over_capture_dir(tmp_path, trace_dir, extra_argv=None):
         "MI300X",
         "--budget-minutes",
         "1",
-        "--no-llm-orchestrator",
+        "--route",
+        "non-llm",
     ]
     argv += list(extra_argv or [])
 
@@ -2319,8 +2257,6 @@ def test_analysis_input_is_left_alone_when_the_first_candidate_has_kernels(tmp_p
 
 
 def test_scriptable_workload_with_a_capture_folder_fails_before_the_agent_starts(tmp_path, capsys):
-    from unittest.mock import patch
-
     trace_dir = tmp_path / "torch_trace"
     trace_dir.mkdir()
     _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=12)
@@ -2340,12 +2276,82 @@ def test_scriptable_workload_with_a_capture_folder_fails_before_the_agent_starts
         _drive_main_over_capture_dir(
             tmp_path,
             trace_dir,
-            extra_argv=["--use-llm-orchestrator", "--framework", "custom", "--capture-folder", str(capture)],
+            extra_argv=["--route", "agent", "--framework", "custom", "--capture-folder", str(capture)],
         )
 
     result = json.loads(capsys.readouterr().out)
     assert result["status"] == "failed"
     assert result["error"].startswith("ConfigError")
+
+
+@pytest.mark.parametrize(
+    ("idle_pct", "gated", "kernel_names"),
+    [(5.0, False, ["kernel_a"]), (95.0, True, [])],
+)
+def test_the_non_llm_route_writes_the_same_artifacts_and_gates_on_the_report_shares(
+    tmp_path, capsys, idle_pct, gated, kernel_names
+):
+    trace_dir = tmp_path / "torch_trace"
+    trace_dir.mkdir()
+    _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=12)
+    report = tmp_path / "analysis.json"
+    report.write_text(
+        json.dumps({"compute_optimizations": [{"operation": "kernel_a", "members": [{"kernel_name": ["kernel_a"]}]}]}),
+        encoding="utf-8",
+    )
+    analysis = PerfReportAnalysis(report, trace_gates.WorkloadShares(idle_pct, 80.0, 5.0), ["window is short"])
+
+    def split_to_input(_args, job, *_rest):
+        return job.analysis_trace_path, {"chunks_extracted": 1, "chunks_by_mode": {}}
+
+    with (
+        patch.object(tla, "_run_trace_split", split_to_input),
+        patch.object(tla, "analyze_perf_report", return_value=analysis),
+    ):
+        _drive_main_over_capture_dir(tmp_path, trace_dir)
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["orchestrator_mode"] == "non-llm"
+    assert [k["name"] for k in result["hot_kernels"]] == kernel_names
+    assert result["trace_report_path"] == str(report)
+    warning_codes = [w["code"] for w in result["trace_health_warnings"]]
+    assert "trace_quality_poor" in warning_codes
+    assert ("high_gpu_idle_pct" in warning_codes) is gated
+    assert Path(result["artifact_paths"]["kernel_candidates"]).is_file()
+    assert Path(result["artifact_paths"]["tracelens_summary"]).is_file()
+
+
+def test_the_failed_status_keeps_the_skill_artifacts_when_a_later_step_raises(tmp_path, capsys):
+    trace_dir = tmp_path / "torch_trace"
+    trace_dir.mkdir()
+    _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=12)
+    report = tmp_path / "analysis.md"
+    report.write_text("# report\n", encoding="utf-8")
+
+    def split_to_input(_args, job, *_rest):
+        return job.analysis_trace_path, {"chunks_extracted": 1, "chunks_by_mode": {}}
+
+    async def skill_writes_report(*_a, **_kw):
+        return tlr.TraceLensSkillRunResult(
+            output_dir=tmp_path,
+            report_path=report,
+            runner="agent",
+            artifact_paths={"tracelens_agent_report": str(report)},
+        )
+
+    def render_fails(_report):
+        raise RuntimeError("render failed")
+
+    with (
+        patch.object(tla, "_run_trace_split", split_to_input),
+        patch.object(tla, "run_tracelens_skill", skill_writes_report),
+        patch.object(tla, "render_analysis_json", render_fails),
+    ):
+        _drive_main_over_capture_dir(tmp_path, trace_dir, extra_argv=["--route", "agent"])
+
+    result = json.loads(capsys.readouterr().out)
+    status = json.loads(Path(result["status_path"]).read_text(encoding="utf-8"))
+    assert (status["state"], status["artifact_paths"]["tracelens_agent_report"]) == ("failed", str(report))
 
 
 def _capture_sidecar(path: Path, kernels: int = 2) -> Path:
@@ -2407,10 +2413,10 @@ def test_capture_classification_ignores_an_unrelated_ancestor_dir(tmp_path):
     root.mkdir(parents=True)
     real = _rank_trace(root / "rank_0.trace.json.gz", kernels=7)
 
-    assert not trace_inputs._is_capture_fragment(real, trace_inputs._capture_classification_root(root))
+    assert not capture_shapes.is_capture_fragment(real, trace_inputs._capture_classification_root(root))
     # A genuine sidecar below the root is still caught.
     nested = _capture_sidecar(root / "capture_traces" / "bs_2_rank0.json.gz")
-    assert trace_inputs._is_capture_fragment(nested, trace_inputs._capture_classification_root(root))
+    assert capture_shapes.is_capture_fragment(nested, trace_inputs._capture_classification_root(root))
 
 
 def test_bare_bs_prefix_is_not_enough_to_condemn_a_trace(tmp_path):
@@ -2419,11 +2425,11 @@ def test_bare_bs_prefix_is_not_enough_to_condemn_a_trace(tmp_path):
     root.mkdir()
     classify_root = trace_inputs._capture_classification_root(root)
 
-    assert trace_inputs._is_capture_fragment(root / "bs_2_rank0.json.gz", classify_root)
-    assert trace_inputs._is_capture_fragment(root / "bs_512.json.gz", classify_root)
-    assert trace_inputs._is_capture_fragment(root / "graph_capture_rank_0.pt.trace.json.gz", classify_root)
-    assert not trace_inputs._is_capture_fragment(root / "bs_baseline.trace.json.gz", classify_root)
-    assert not trace_inputs._is_capture_fragment(root / "rank_0.trace.json.gz", classify_root)
+    assert capture_shapes.is_capture_fragment(root / "bs_2_rank0.json.gz", classify_root)
+    assert capture_shapes.is_capture_fragment(root / "bs_512.json.gz", classify_root)
+    assert capture_shapes.is_capture_fragment(root / "graph_capture_rank_0.pt.trace.json.gz", classify_root)
+    assert not capture_shapes.is_capture_fragment(root / "bs_baseline.trace.json.gz", classify_root)
+    assert not capture_shapes.is_capture_fragment(root / "rank_0.trace.json.gz", classify_root)
 
 
 def test_capture_sidecars_sort_behind_a_real_trace(tmp_path):
@@ -2458,15 +2464,15 @@ def test_capture_sidecars_sort_behind_a_real_trace(tmp_path):
 def test_capture_classifier_covers_every_observed_profile_layout(tmp_path, relpath, expected):
     """The classifier keys on shape, so a new layout does not slip through."""
     path = tmp_path / relpath
-    assert trace_inputs._is_capture_fragment(path, tmp_path) is expected
+    assert capture_shapes.is_capture_fragment(path, tmp_path) is expected
 
 
 def test_capture_dir_match_is_anchored_so_a_descriptive_name_is_safe(tmp_path):
     """``graph_capture`` anchors in a directory name, unlike in a filename."""
     safe = tmp_path / "torch_profiler_with_graph_capture" / "rank_0.trace.json.gz"
-    assert trace_inputs._is_capture_fragment(safe, tmp_path) is False
+    assert capture_shapes.is_capture_fragment(safe, tmp_path) is False
     for capture_dir in ("graph_capture", "graph_capture_profile", "capture_traces"):
-        assert trace_inputs._is_capture_fragment(tmp_path / capture_dir / "rank_0.trace.json.gz", tmp_path) is True
+        assert capture_shapes.is_capture_fragment(tmp_path / capture_dir / "rank_0.trace.json.gz", tmp_path) is True
 
 
 def test_discover_capture_folder_finds_the_unpatched_sglang_layout(tmp_path):
@@ -2647,9 +2653,9 @@ def test_194_3_splitter_ignores_non_numeric_R(tmp_path):
         ("sdpa_fwd", "SDPA"),
         ("sdpa_bwd", "SDPA"),
         ("inferenceattention", "SDPA"),
-        ("rmsnorm", "LayerNorm"),
-        ("norm_fwd", "LayerNorm"),
-        ("norm_bwd", "LayerNorm"),
+        ("rmsnorm", "Normalization"),
+        ("norm_fwd", "Normalization"),
+        ("norm_bwd", "Normalization"),
         ("convolution", "Convolution"),
         ("conv_fwd", "Convolution"),
         ("conv_bwd", "Convolution"),
@@ -2658,44 +2664,30 @@ def test_194_3_splitter_ignores_non_numeric_R(tmp_path):
         ("reduce", "Reduction"),
         ("cpu_idle", "Other"),
         ("other", "Other"),
+        ("MoE_aux", "MoE"),
+        ("CustomCollective", "Communication"),
         # Mixed case + whitespace + alt separators must normalise the same way.
         ("  GEMM  ", "GEMM"),
         ("Sdpa-Fwd", "SDPA"),
         ("MoE/Fused", "MoE"),
     ],
 )
-def test_normalize_upstream_category_matches_orchestrator_prepare_enum(raw, expected):
-    """Mirror TraceLens-internal CATEGORY_SKILL_MAP keys exactly."""
-    assert tlr.normalize_upstream_category(raw) == expected
+def test_derive_kernel_category_maps_the_orchestrator_prepare_enum(raw, expected):
+    """A TraceLens category (CATEGORY_SKILL_MAP keys) wins over the name heuristic."""
+    cand = {"tracelens_category": raw, "name": "ignored_when_cat_present"}
+    assert candidate_assembly.derive_kernel_category(cand) == expected
 
 
-def test_normalize_upstream_category_passes_through_unknown():
+def test_derive_kernel_category_passes_through_unknown_upstream_category():
     """Unknown categories are surfaced verbatim — never silently coerced."""
-    assert tlr.normalize_upstream_category("brand_new_skill") == "brand_new_skill"
-
-
-def test_normalize_upstream_category_empty_returns_unknown():
-    assert tlr.normalize_upstream_category("") == "unknown"
-
-
-def test_derive_kernel_category_uses_upstream_enum_when_present():
-    """When TraceLens tags a candidate, GEAK label must come from upstream map."""
-    for raw, expected in [
-        ("gemm", "GEMM"),
-        ("groupedgemm_fwd", "GEMM"),
-        ("inferenceattention", "SDPA"),
-        ("moe_fused", "MoE"),
-        ("rmsnorm", "LayerNorm"),
-    ]:
-        cand = {"tracelens_category": raw, "name": "ignored_when_cat_present"}
-        assert candidate_assembly.derive_kernel_category(cand) == expected, raw
+    assert candidate_assembly.derive_kernel_category({"tracelens_category": "brand_new_skill"}) == "brand_new_skill"
 
 
 def test_derive_kernel_category_falls_back_to_name_heuristic():
     """Raw-trace fallback path has no tracelens_category; heuristics still apply."""
     assert candidate_assembly.derive_kernel_category({"name": "rocblas_gemm_kernel"}) == "GEMM"
     assert candidate_assembly.derive_kernel_category({"name": "fmha_fwd_kernel"}) == "SDPA"
-    assert candidate_assembly.derive_kernel_category({"name": "rmsnorm_fused"}) == "LayerNorm"
+    assert candidate_assembly.derive_kernel_category({"name": "rmsnorm_fused"}) == "Normalization"
     assert candidate_assembly.derive_kernel_category({"name": "totally_unknown_op"}) == "unknown"
 
 
@@ -3046,88 +3038,6 @@ def test_python_task_group_key_is_stable_across_definition_line_changes(tmp_path
     assert first_key == second_key
 
 
-def test_trace_routes_generate_compatible_operator_identities(tmp_path):
-    src = tmp_path / "operator.py"
-    src.write_text("def forward(x):\n    return x\n", encoding="utf-8")
-    operation = "fused_operator<float>"
-    bypass_group = bypass_report._build_task_groups(
-        [
-            {
-                "kernel_id": "k001",
-                "name": operation,
-                "device_kernel_name": "fused_operator_kernel",
-                "source_file": str(src),
-                "reusable_native_kernel": True,
-                "duration_us": 100.0,
-                "call_count": 1,
-                "gpu_pct": 10.0,
-            }
-        ]
-    )[0]
-    skill_group = tlr.aggregate_by_source_function(
-        [
-            {
-                "kernel_id": "k001",
-                "name": operation,
-                "duration_us": 100.0,
-                "call_count": 1,
-                "gpu_pct": 10.0,
-                "kernel_launcher_path": f"{src}(1): forward",
-            }
-        ]
-    )[0]
-
-    assert bypass_group["task_group_key"] != skill_group["task_group_key"]
-    assert set(bypass_group["legacy_task_group_keys"]) & set(skill_group["legacy_task_group_keys"])
-    assert bypass_group["task_group_key"].startswith('{"function":')
-
-
-def test_native_trace_routes_generate_compatible_operator_identities(tmp_path):
-    src = tmp_path / "operator.cu"
-    src.write_text("// native kernel\n", encoding="utf-8")
-    operation = "aiter::fused_operator<float>"
-    bypass_group = bypass_report._build_task_groups(
-        [
-            {
-                "kernel_id": "k001",
-                "name": operation,
-                "device_kernel_name": "_ZN5aiter14fused_operatorIfEEv",
-                "source_file": str(src),
-                "reusable_native_kernel": True,
-                "duration_us": 100.0,
-                "call_count": 1,
-                "gpu_pct": 10.0,
-            }
-        ]
-    )[0]
-    skill_group = tlr.aggregate_by_source_function(
-        [
-            {
-                "kernel_id": "k001",
-                "name": operation,
-                "duration_us": 100.0,
-                "call_count": 1,
-                "gpu_pct": 10.0,
-                "kernel_launcher_path": f"{src}(1): fused_operator",
-            }
-        ]
-    )[0]
-
-    assert bypass_group["task_group_key"] != skill_group["task_group_key"]
-    assert set(bypass_group["legacy_task_group_keys"]) & set(skill_group["legacy_task_group_keys"])
-    legacy_skill_key = json.dumps(
-        (
-            "native",
-            "aiter::fused_operator",
-            str(src.resolve()),
-            "fused_operator",
-        ),
-        separators=(",", ":"),
-    )
-    assert legacy_skill_key in bypass_group["legacy_task_group_keys"]
-    assert legacy_skill_key in skill_group["legacy_task_group_keys"]
-
-
 def test_aggregate_does_not_merge_different_operations_sharing_wrapper(tmp_path):
     """Q1 invariant: distinct operations sharing one Python wrapper stay in separate task_groups (operation is part of the key)."""
     src = tmp_path / "vendor_module.py"
@@ -3208,66 +3118,6 @@ def test_aggregate_keeps_same_operation_in_different_functions_separate(
     }
 
 
-def test_aggregate_collects_distinct_pitem_prose_when_function_spans_pitems(tmp_path):
-    """Q2 invariant: a function spanning multiple P-items collects every P-item's prose on ``all_pitem_prose`` (deduped by (rank,title), sorted by rank)."""
-    src = tmp_path / "rmsnorm.py"
-    src.write_text("def rms_norm(x):\n    return x\n", encoding="utf-8")
-    launcher = f"{src}(1): rms_norm"
-    cands = [
-        {
-            "kernel_id": "k001",
-            "name": "aiter::rms_norm",
-            "duration_us": 200.0,
-            "call_count": 100,
-            "kernel_launcher_path": launcher,
-            "tracelens_pitem_rank": 2,
-            "tracelens_pitem_title": "Memory-Bound at decode shapes",
-            "identification": "Decode-shape Identification.",
-            "reasoning_for_slowdown": "Decode-shape Reasoning.",
-            "resolution": "Decode-shape Resolution.",
-        },
-        {
-            "kernel_id": "k002",
-            "name": "aiter::rms_norm",
-            "duration_us": 80.0,
-            "call_count": 40,
-            "kernel_launcher_path": launcher,
-            "tracelens_pitem_rank": 5,
-            "tracelens_pitem_title": "Compute-Bound at prefill shapes",
-            "identification": "Prefill-shape Identification.",
-            "reasoning_for_slowdown": "Prefill-shape Reasoning.",
-            "resolution": "Prefill-shape Resolution.",
-        },
-        # Same P2 again — must dedupe (only one entry retained).
-        {
-            "kernel_id": "k003",
-            "name": "aiter::rms_norm",
-            "duration_us": 50.0,
-            "call_count": 25,
-            "kernel_launcher_path": launcher,
-            "tracelens_pitem_rank": 2,
-            "tracelens_pitem_title": "Memory-Bound at decode shapes",
-            "identification": "Decode-shape Identification.",
-            "reasoning_for_slowdown": "Decode-shape Reasoning.",
-            "resolution": "Decode-shape Resolution.",
-        },
-    ]
-    groups = tlr.aggregate_by_source_function(cands)
-    assert len(groups) == 1
-    g = groups[0]
-    prose = g["all_pitem_prose"]
-    assert len(prose) == 2, f"expected 2 distinct (rank,title) prose entries; got {len(prose)}"
-    # Sorted by rank ascending → P2 first, P5 second.
-    assert prose[0]["rank"] == 2
-    assert "decode" in prose[0]["title"].lower()
-    assert prose[0]["reasoning_for_slowdown"] == "Decode-shape Reasoning."
-    assert prose[1]["rank"] == 5
-    assert "prefill" in prose[1]["title"].lower()
-    assert prose[1]["resolution"] == "Prefill-shape Resolution."
-    # Set-typed bookkeeping must not leak into the returned dict (breaks JSON).
-    assert "_pitem_prose_seen" not in g
-
-
 def test_same_kernel_different_shapes_yields_one_task_with_all_shapes_as_cases(
     tmp_path,
 ):
@@ -3337,24 +3187,6 @@ def test_same_kernel_different_shapes_yields_one_task_with_all_shapes_as_cases(
     assert "(640,2880) bf16" in g["rows"][1]["shapes"]
     assert "(640,2880) bf16" not in g["rows"][0]["shapes"]
     assert "(640,2880) bf16" not in g["rows"][2]["shapes"]
-
-
-def test_aggregate_drops_empty_prose_entries(tmp_path):
-    """rank=0 / no-prose candidates contribute no entry to ``all_pitem_prose`` (dropped post-process)."""
-    src = tmp_path / "rmsnorm.py"
-    src.write_text("def rms_norm(x):\n    return x\n", encoding="utf-8")
-    cands = [
-        {
-            "kernel_id": "k001",
-            "name": "aiter::rms_norm",
-            "duration_us": 100.0,
-            "kernel_launcher_path": f"{src}(1): rms_norm",
-            # No P-item rank, no prose — raw-trace fallback shape.
-        },
-    ]
-    groups = tlr.aggregate_by_source_function(cands)
-    assert len(groups) == 1
-    assert groups[0]["all_pitem_prose"] == []
 
 
 def test_aggregate_by_source_function_skips_unparseable_launcher_paths():
@@ -3484,9 +3316,9 @@ def test_py_task_group_merges_launch_paths_of_one_kernel():
 def test_is_native_source_detects_device_extensions():
     """Native C/C++/HIP/CUDA suffixes are recognized (case-insensitive); Python and unrelated files are not."""
     for p in ("kern.cu", "a/b/kern.cuh", "x.hip", "y.cpp", "Z.CU", "k.cc"):
-        assert tlr._is_native_source(p), p
+        assert task_group_contract.is_native_source(p), p
     for p in ("model.py", "wrapper.pyi", "notes.txt", ""):
-        assert not tlr._is_native_source(p), p
+        assert not task_group_contract.is_native_source(p), p
 
 
 def test_aggregate_merges_native_kernel_across_call_site_lines(tmp_path):
@@ -4011,7 +3843,7 @@ def test_idle_gate_graph_guard_skips_suppression_when_under_recorded(monkeypatch
     assert threshold == 80.0
     assert high_idle is None  # NOT suppressed
     assert graph_warn is not None
-    assert graph_warn["code"] == "bypass_graph_under_recorded"
+    assert graph_warn["code"] == "graph_under_recorded"
     assert graph_warn["graph_launch_count"] == 8
 
 
@@ -4042,3 +3874,15 @@ def test_graph_coverage_from_raw_trace_never_raises():
     # Missing/unreadable trace must degrade to {} (fall back to the plain gate).
     assert trace_gates._graph_coverage_from_raw_trace(None) == {}
     assert trace_gates._graph_coverage_from_raw_trace("/no/such/trace.json") == {}
+
+
+def test_graph_coverage_from_raw_trace_reports_the_reader_coverage_unless_truncated(tmp_path, monkeypatch):
+    launches = [{"cat": "cuda_runtime", "name": "hipGraphLaunch", "args": {"correlation": c}} for c in (1, 2, 3)]
+    kernel = {"cat": "kernel", "ph": "X", "name": "kernel_a", "ts": 0, "dur": 10, "args": {"correlation": 1}}
+    trace = tmp_path / "graph.trace.json"
+    trace.write_text(json.dumps({"traceEvents": [*launches, kernel]}), encoding="utf-8")
+
+    assert trace_gates._graph_coverage_from_raw_trace(trace)["graph_under_recorded"] is True
+
+    monkeypatch.setattr("hyperloom.orchestrator.trace_analysis._trace_reader._MAX_BUFFERED_GPU_EVENTS", 0)
+    assert trace_gates._graph_coverage_from_raw_trace(trace) == {}

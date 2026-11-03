@@ -38,7 +38,6 @@ from hyperloom.inference_optimizer.breakdown.recorder.close_out import (
     record_write_back_opened,
     record_write_back_settled,
 )
-from hyperloom.inference_optimizer.session.session_paths import recipe_kb_dead_letter_ndjson
 
 
 @pytest.fixture
@@ -321,24 +320,6 @@ def test_skip_reason_is_a_recorded_code_not_a_matched_substring(sd: Path) -> Non
     assert "failure" not in write_back
 
 
-def test_queue_depth_is_snapshotted_when_the_attempt_settles(sd: Path) -> None:
-    dead_letter = recipe_kb_dead_letter_ndjson(sd)
-    dead_letter.parent.mkdir(parents=True, exist_ok=True)
-    dead_letter.write_text('{"a": 1}\n\n{"b": 2}\n', encoding="utf-8")
-
-    record_close_opened(sd)
-    record_write_back_opened(sd, attempt=1, source="close")
-    record_write_back_settled(
-        sd, WriteBackSettlement(attempt=1, source="close", status="written", result_type=RESULT_WRITTEN)
-    )
-    # Moves after the settlement; the recorded depth must not follow it.
-    dead_letter.write_text("", encoding="utf-8")
-
-    queue = _close(sd)["kb_write_back"]["queue"]
-    assert queue["dead_letter_lines"] == 2
-    assert queue["pending_lines"] == 0
-
-
 def test_second_pass_appends_rather_than_replacing(sd: Path) -> None:
     _run_sequence(sd, fail="report")
     record_close_settled(sd)
@@ -373,7 +354,7 @@ def test_roofline_progress_is_snapshotted_at_the_close(sd: Path) -> None:
     )
 
     progress = _close(sd)["roofline_progress"]
-    assert progress["ceiling_kind"] == "throughput"
+    assert progress["ceiling_available"] is True
     assert progress["ceiling_tok_per_sec"] == 4000.0
     assert progress["target_tok_per_sec"] == 2800.0
     assert progress["current_best_tput"] == 1250.0
@@ -386,28 +367,6 @@ def test_roofline_progress_is_snapshotted_at_the_close(sd: Path) -> None:
     assert progress["trajectory"][-1]["gain_pct"] == 25.0
     # The snapshot history stays in the roofline events; two copies could disagree.
     assert "snapshots" not in progress
-
-
-def test_progress_reports_the_latency_domain_when_there_is_no_token_ceiling(sd: Path) -> None:
-    record_close_opened(sd)
-    record_roofline_progress(
-        sd,
-        RooflineProgress(
-            baseline_tput=0.4,
-            baseline_ts="2026-09-06T09:00:00Z",
-            optimization_stack=[],
-            latest_snapshot={"snapshot_id": 2, "roofline_ideal_ms": 800.0, "e2e_mean_ms": 2000.0},
-            current_best_tput=0.4,
-        ),
-    )
-
-    progress = _close(sd)["roofline_progress"]
-    assert progress["ceiling_kind"] == "latency"
-    assert progress["ceiling_available"] is False
-    assert progress["latency_ceiling_available"] is True
-    assert progress["latency_ceiling_ms"] == 800.0
-    assert progress["achieved_latency_ms"] == 2000.0
-    assert progress["current_best_pct_of_latency_ceiling"] == 40.0
 
 
 def test_progress_says_so_when_the_curve_misses_a_promotion(sd: Path) -> None:
@@ -433,7 +392,7 @@ def test_a_session_that_never_analyzed_reports_no_ceiling_rather_than_zero(sd: P
     record_roofline_progress(sd, RooflineProgress(baseline_tput=1000.0, optimization_stack=[], latest_snapshot=None))
 
     progress = _close(sd)["roofline_progress"]
-    assert progress["ceiling_kind"] == "none"
+    assert progress["ceiling_available"] is False
     assert progress["ceiling_tok_per_sec"] is None
     assert progress["target_tok_per_sec"] is None
     assert progress["current_best_pct_of_ceiling"] is None

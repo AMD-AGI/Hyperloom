@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 import subprocess
 from contextlib import ExitStack, nullcontext
@@ -13,7 +15,107 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.env_safety import build_benchmark_env
-from hyperloom.inference_optimizer.session.paths import asset_root
+
+from ._proposal_identity import is_executable, normalize_proposal
+
+
+log = logging.getLogger(__name__)
+
+#: The adapter's declared lever file, resolved inside ``$HYPERLOOM_BYPASS_SCRIPTS_DIR``.
+#: The scripts dir is the adapter's contract directory and is already persisted and
+#: re-exported on ``--resume``, so the declaration travels with the session.
+DECLARED_LEVERS_FILENAME = "levers.json"
+
+
+class DeclaredLeversError(ValueError):
+    """A ``levers.json`` exists but cannot be used as a lever declaration."""
+
+
+def declared_levers_path() -> Path | None:
+    """Return the adapter's ``levers.json`` path, or ``None`` when unavailable."""
+    scripts_dir = (os.environ.get("HYPERLOOM_BYPASS_SCRIPTS_DIR") or "").strip()
+    if not scripts_dir:
+        return None
+    candidate = Path(scripts_dir) / DECLARED_LEVERS_FILENAME
+    return candidate if candidate.is_file() else None
+
+
+def load_declared_levers() -> list[dict[str, Any]]:
+    """Load the lever grid a ``custom`` adapter declares for itself.
+
+    A ``custom`` workload has no framework source for the model to read, so
+    ``_default_grid_for_framework`` returns ``[]`` and EXPLORE has nothing to sweep.
+    The adapter declares its own knob space instead.
+
+    Each entry is judged by ``is_executable(normalize_proposal(...))`` -- the same
+    rule, and the same owner, the executor applies when it builds the grid. A
+    declaration that normalizes to nothing a restart could apply is rejected here
+    rather than silently recorded as a baseline no-op later.
+
+    Raises:
+        DeclaredLeversError: When the file exists but is unreadable, is not valid
+            JSON, is not a list of variant objects, or declares a variant no server
+            restart could apply. Malformed input is loud by design: every silent
+            path here surfaces later as ``empty_grid``, which reads as "the model
+            proposed nothing".
+    """
+    path = declared_levers_path()
+    if path is None:
+        return []
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise DeclaredLeversError(f"{path} is unreadable: {exc}") from exc
+    try:
+        declared = json.loads(raw)
+    except ValueError as exc:
+        raise DeclaredLeversError(f"{path} is not valid JSON: {exc}") from exc
+    if not isinstance(declared, list):
+        raise DeclaredLeversError(f"{path} must be a JSON list of variant objects, got {type(declared).__name__}")
+    variants: list[dict[str, Any]] = []
+    for index, entry in enumerate(declared):
+        if not isinstance(entry, dict):
+            raise DeclaredLeversError(f"{path}[{index}] must be a variant object, got {type(entry).__name__}")
+        name = str(entry.get("name") or "").strip()
+        if not name:
+            raise DeclaredLeversError(f"{path}[{index}] has no 'name'")
+        if not is_executable(normalize_proposal(entry)):
+            # Includes the shapes that *look* set but normalize away: an
+            # ``extra_envs`` given as a string or a list becomes ``{}``.
+            raise DeclaredLeversError(
+                f"{path}[{index}] ({name!r}) declares nothing a restart could apply: "
+                "set at least one of extra_args, extra_envs (an object), remove_args, "
+                "unset_envs, or args_mode='replace'"
+            )
+        variant = dict(entry)
+        # ``default_grid`` is the seed-grid provenance label; anything else is
+        # attributed to the orchestration agent in the session breakdown.
+        variant.setdefault("provenance", "default_grid")
+        variants.append(variant)
+    return variants
+
+
+def declared_lever_payload(shared_state: Any, framework: str) -> list[dict[str, Any]]:
+    """Return the ``custom`` adapter's declared levers the ledger has not benchmarked.
+
+    Skips declarations whose name already appears in the explore ledger's ``tested``
+    rows -- the bucket ``apply_explore_search_update`` actually writes. Re-seeding a
+    name the ledger has measured re-spends the round's wall-clock budget ahead of the
+    model's own proposals.
+    """
+    if framework != "custom":
+        return []
+    search = getattr(shared_state, "explore_search", None)
+    tested = (search or {}).get("tested") if isinstance(search, dict) else None
+    benched = {str(row.get("name") or "") for row in (tested or {}).values() if isinstance(row, dict)}
+    fresh = [v for v in load_declared_levers() if str(v.get("name") or "") not in benched]
+    if fresh:
+        log.info(
+            "explore: seeding %d declared lever variant(s) from %s",
+            len(fresh),
+            DECLARED_LEVERS_FILENAME,
+        )
+    return fresh
 
 
 def _scriptable_script_name(framework: str, runner_type: str) -> str:
@@ -45,9 +147,6 @@ def scriptable_script_candidates(
     override = os.environ.get("HYPERLOOM_BYPASS_SCRIPTS_DIR", "").strip()
     if override:
         _add(Path(override) / name)
-    # Bundled entrypoints are version-matched to this checkout, so they must be reachable by name too: any rebuild
-    # path that re-pins the bare {framework}_{runner}.sh would otherwise resolve to nothing.
-    _add(asset_root() / "assets" / "benchmark_scripts" / name)
     magpie_path = os.environ.get("MAGPIE_PATH", "").strip()
     if magpie_path:
         _add(Path(magpie_path, "Magpie", "scripts", "benchmark", name))
@@ -126,7 +225,7 @@ def run_scriptable(
         tried = "\n".join(f"  - {path}" for path in candidates) or "  (none)"
         error = f"scriptable benchmark script not found for {name}"
         # Pre-spawn miss never opens Popen, so there is no child stderr.
-        _write_logs(workspace, "", f"{error}\ntried:\n{tried}\n")
+        _write_stderr_log(workspace, f"{error}\ntried:\n{tried}\n")
         return 2, error
     env = build_scriptable_env(bench, runner_type, workspace, profile=profile, profile_dir=profile_dir)
     cmd = ["bash", str(script)]
@@ -146,12 +245,7 @@ def run_scriptable(
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
-            _write_logs(
-                workspace,
-                "",
-                f"scriptable benchmark timed out after {timeout_s}s",
-                append=True,
-            )
+            _write_stderr_log(workspace, f"scriptable benchmark timed out after {timeout_s}s", append=True)
             return 124, None
     return proc.returncode, None
 
@@ -165,16 +259,11 @@ def _open_log_sink(workspace: Path, name: str):
         return nullcontext(subprocess.DEVNULL)
 
 
-def _write_logs(workspace: Path, stdout: str, stderr: str, *, append: bool = False) -> None:
-    """Persist scriptable subprocess logs (best-effort)."""
-    mode = "a" if append else "w"
+def _write_stderr_log(workspace: Path, text: str, *, append: bool = False) -> None:
+    """Persist a scriptable failure message to ``scriptable_stderr.log`` (best-effort)."""
     try:
         workspace.mkdir(parents=True, exist_ok=True)
-        if stdout:
-            with (workspace / "scriptable_stdout.log").open(mode, encoding="utf-8") as fh:
-                fh.write(stdout)
-        if stderr:
-            with (workspace / "scriptable_stderr.log").open(mode, encoding="utf-8") as fh:
-                fh.write(stderr)
+        with (workspace / "scriptable_stderr.log").open("a" if append else "w", encoding="utf-8") as fh:
+            fh.write(text)
     except OSError:
         pass

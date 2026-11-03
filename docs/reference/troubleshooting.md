@@ -115,15 +115,17 @@ internal CA, or on self-hosted gateways with private certificates.
 ## Ray `--num-gpus` rejected
 
 **Symptom**: `ray start --head ... --num-gpus=N` fails with
-`Error: no such option: --num-gpus` or similar Click errors.
+`Error: no such option: --num-gpus`, or preflight reports
+`ray start does not accept --head --port=6379 ...`.
 
-**Cause**: Click ≥ 8.3 is incompatible with the Ray 2.44 CLI shipped
-by Hyperloom's installer.
+**Cause**: The installed Ray's CLI does not parse the `ray start` argv
+Hyperloom passes — an option that release dropped, a value it narrowed, or a
+`click` release that breaks the CLI on import.
 
-**Fix**:
+**Fix**: reinstall the Ray Hyperloom pins and let preflight certify it again:
 
 ```bash
-pip install --quiet 'click<8.3.0' 'ray[default]==2.44.1'
+pip install --quiet 'ray[default]==2.44.1'
 ray --version
 ```
 
@@ -131,14 +133,21 @@ The same fix applies when `ray --version` itself fails after a pod or
 venv rebuild.
 
 On an interpreter with no 2.44.1 wheel (cp314 postdates that release), install
-the lowest published version above it instead and leave the `click` ceiling off
-— it guards 2.44.1's CLI alone, and forcing it onto a newer Ray downgrades a
-`click` that works:
+the lowest published version above it instead:
 
 ```bash
 pip install --quiet 'ray[default]>=2.44.1'
 ray --version
 ```
+
+Hyperloom changes `click` in one case only: Ray 2.44.1 (the default pin) fails to
+import its CLI under `click` 8.3+ with `ValueError: ... is not a valid Sentinel`
+(a fresh `pip install ray[default]==2.44.1` on Python 3.10 resolves `click` 8.5).
+Preflight and the kernel-tools installer then install `click<8.3` once and certify
+the CLI again. Every other failure (a rejected `ray start` argv, a version
+mismatch, another import error, any Ray set through `RAY_VERSION`) leaves
+`click` alone and ends the install; for a `click` that breaks another Ray, set
+`RAY_VERSION` to a release built against it. There is no setting for the hold.
 
 ---
 

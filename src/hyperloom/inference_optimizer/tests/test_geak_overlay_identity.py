@@ -7,9 +7,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from hyperloom.common.overlay import overlay_is_loadable
 from hyperloom.orchestrator.kernel.geak_config import (
     _geak_overlay_digest,
-    geak_overlay_is_loadable,
 )
 
 _KERNEL_MANIFEST = {
@@ -46,22 +46,22 @@ def _overlay(root: Path, manifest: dict | None, body: str = "# kernel\n") -> str
 
 
 def test_missing_dir_and_missing_sitecustomize_are_not_loadable(tmp_path: Path) -> None:
-    assert geak_overlay_is_loadable("") is False
-    assert geak_overlay_is_loadable((tmp_path / "absent").as_posix()) is False
+    assert overlay_is_loadable("") is False
+    assert overlay_is_loadable((tmp_path / "absent").as_posix()) is False
     bare = tmp_path / "bare"
     bare.mkdir()
     (bare / "_overlay_manifest.json").write_text(json.dumps(_KERNEL_MANIFEST))
-    assert geak_overlay_is_loadable(bare.as_posix()) is False
+    assert overlay_is_loadable(bare.as_posix()) is False
 
 
 def test_config_only_overlay_is_not_a_kernel_overlay(tmp_path: Path) -> None:
     """It imports fine and installs nothing, so it must not read as a kernel."""
     path = _overlay(tmp_path / "cfg", _CONFIG_ONLY_MANIFEST)
-    assert geak_overlay_is_loadable(path) is False
+    assert overlay_is_loadable(path) is False
 
 
 def test_manifest_naming_a_bind_is_loadable(tmp_path: Path) -> None:
-    assert geak_overlay_is_loadable(_overlay(tmp_path / "mod", _KERNEL_MANIFEST)) is True
+    assert overlay_is_loadable(_overlay(tmp_path / "mod", _KERNEL_MANIFEST)) is True
     rebind = {
         "modules": [],
         "rebinds": [
@@ -73,12 +73,12 @@ def test_manifest_naming_a_bind_is_loadable(tmp_path: Path) -> None:
         ],
         "captures": [],
     }
-    assert geak_overlay_is_loadable(_overlay(tmp_path / "reb", rebind)) is True
+    assert overlay_is_loadable(_overlay(tmp_path / "reb", rebind)) is True
 
 
 def test_overlay_without_a_manifest_keeps_the_old_behaviour(tmp_path: Path) -> None:
     """Absence of evidence is not evidence of an empty overlay."""
-    assert geak_overlay_is_loadable(_overlay(tmp_path / "nomf", None)) is True
+    assert overlay_is_loadable(_overlay(tmp_path / "nomf", None)) is True
 
 
 def test_unreadable_manifest_is_refused_not_assumed_good(tmp_path: Path) -> None:
@@ -86,7 +86,7 @@ def test_unreadable_manifest_is_refused_not_assumed_good(tmp_path: Path) -> None
     root.mkdir()
     (root / "sitecustomize.py").write_text("# installs\n")
     (root / "_overlay_manifest.json").write_text("{not json")
-    assert geak_overlay_is_loadable(root.as_posix()) is False
+    assert overlay_is_loadable(root.as_posix()) is False
 
 
 def test_digest_separates_same_target_different_body(tmp_path: Path) -> None:

@@ -21,7 +21,7 @@ from hyperloom.hosted.mcp_server import McpServer, McpServerConfig
 from hyperloom.inference_optimizer.session.optimization_journal import Journal, JournalEntry
 from hyperloom.inference_optimizer.session.paths import db_path_for
 from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, LLMCallSite, append_llm_call
-from hyperloom.orchestrator.bus.storage import SqliteConnection
+from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.bus.storage.schema import ensure_schema
 from hyperloom.orchestrator.loop.signals import SignalDrain
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -65,7 +65,7 @@ def session(tmp_path, monkeypatch) -> Path:
     state.elapsed_charged_sec = 600.0
     state.current_best = {"action": "explore", "tput": 1100.0, "variant_name": "v-b", "extra_server_args": "--x 1"}
     state.current_best["extra_envs"] = {"A": "1"}
-    state.current_best_measurement = {"tput": 1100.0, "launch_identity": "id-1", "benchmark_workspace": "/w/b"}
+    state.current_best_measurement = {"tput": 1100.0, "declared_launch_identity": "id-1", "benchmark_workspace": "/w/b"}
     state.optimization_stack = [{"stack_entry_id": "e1", "action": "explore", "variant_name": "v-b", "tput": 1100.0}]
     state.gain_per_stack_entry = [10.0]
     state.save(root)

@@ -46,7 +46,7 @@ def _specialist() -> rs.GpuSpecialistLease:
 
 
 def _slot_busy(monkeypatch, error):
-    monkeypatch.setattr(rb, "ray_gpu_specialist_exec_enabled", lambda: True)
+    monkeypatch.setattr(rb, "ray_exec_enabled", lambda: True)
     _install_ray(monkeypatch, is_initialized=lambda: True, available_resources=_raising(error))
     return rb.serving_slot_busy()
 

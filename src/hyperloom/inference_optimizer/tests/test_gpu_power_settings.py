@@ -177,9 +177,8 @@ class TestSclkLimit:
         monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
         monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
         cards = {0: {"power_cap_w": 1400.0, "perf_level": "auto", "sclk_max_mhz": 2400.0}}
-        record, error = resolve_gpu_power_settings(
-            DeclaredPowerSettings(sclk_max_mhz=2400), nodes=1, read=lambda: cards
-        )
+        monkeypatch.setattr(gpu_power_settings, "read_gpu_power_settings", lambda: cards)
+        record, error = resolve_gpu_power_settings(DeclaredPowerSettings(sclk_max_mhz=2400), nodes=1)
         assert (error, record["declared"]) == ("", {"sclk_max_mhz": 2400})
 
     def test_a_limit_mismatch_after_an_apply_is_not_blamed_on_the_apply(self, monkeypatch):
@@ -190,7 +189,8 @@ class TestSclkLimit:
         monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
         cards = {0: {"power_cap_w": 1400.0, "perf_level": "auto", "sclk_max_mhz": 2400.0}}
         declared = DeclaredPowerSettings(power_cap_w=1000.0, sclk_max_mhz=1500)
-        _, error = resolve_gpu_power_settings(declared, nodes=1, read=lambda: cards, just_applied=True)
+        monkeypatch.setattr(gpu_power_settings, "read_gpu_power_settings", lambda: cards)
+        _, error = resolve_gpu_power_settings(declared, nodes=1, just_applied=True)
         assert error == (
             "the GPUs did not take the power settings just applied: GPU 0 power cap is 1400.0 W, declared 1000 W; "
             "the GPUs are not at the declared power settings (set them with amd-smi before launch): "
@@ -241,8 +241,9 @@ class TestResolve:
         monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
         monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
         kw.setdefault("nodes", 1)
-        kw.setdefault("read", read_gpu_power_settings)
         monkeypatch.setattr(gpu_power_settings.subprocess, "run", _fake_run)
+        if "read" in kw:
+            monkeypatch.setattr(gpu_power_settings, "read_gpu_power_settings", kw.pop("read"))
         monkeypatch.setattr(gpu_power_settings, "read_node_power_settings", kw.pop("read_node", None) or _node_reader())
         fields = ("power_cap_w", "perf_level", "sclk_max_mhz", "npm", "node_power_limit_w")
         declared = DeclaredPowerSettings(**{key: value for key in fields if (value := kw.pop(key, None)) is not None})
@@ -323,9 +324,7 @@ class TestResolve:
 
         monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "1")
         record, error = resolve_gpu_power_settings(
-            DeclaredPowerSettings(power_cap_w=1000.0, perf_level="determinism"),
-            nodes=1,
-            read=read_gpu_power_settings,
+            DeclaredPowerSettings(power_cap_w=1000.0, perf_level="determinism"), nodes=1
         )
         assert error == ""
         assert list(record["observed"]) == ["1"]
@@ -336,13 +335,9 @@ class TestResolve:
 
         monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
         monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
-        _, error = resolve_gpu_power_settings(
-            DeclaredPowerSettings(power_cap_w=1000.0), nodes=1, read=read_gpu_power_settings, just_applied=True
-        )
+        _, error = resolve_gpu_power_settings(DeclaredPowerSettings(power_cap_w=1000.0), nodes=1, just_applied=True)
         assert error.startswith("the GPUs did not take the power settings just applied: GPU 0 power cap is 1400.0 W")
-        _, error = resolve_gpu_power_settings(
-            DeclaredPowerSettings(power_cap_w=1000.0), nodes=1, read=read_gpu_power_settings
-        )
+        _, error = resolve_gpu_power_settings(DeclaredPowerSettings(power_cap_w=1000.0), nodes=1)
         assert "(set them with amd-smi before launch)" in error
 
     def test_a_declaration_that_cannot_be_read_refuses(self, monkeypatch):
@@ -464,9 +459,8 @@ class TestVisibleCards:
 
         monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0")
         cards = {gpu: {"power_cap_w": 1000.0 if gpu == 3 else 1400.0, "perf_level": "auto"} for gpu in range(8)}
-        record, error = resolve_gpu_power_settings(
-            DeclaredPowerSettings(power_cap_w=1000.0), nodes=1, read=lambda: cards
-        )
+        monkeypatch.setattr(gpu_power_settings, "read_gpu_power_settings", lambda: cards)
+        record, error = resolve_gpu_power_settings(DeclaredPowerSettings(power_cap_w=1000.0), nodes=1)
         assert (error, list(record["observed"])) == ("", ["3"])
 
     def test_a_declaration_whose_cards_cannot_be_named_refuses(self, monkeypatch):
@@ -474,7 +468,8 @@ class TestVisibleCards:
 
         monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "GPU-745a0e162570d044")
         cards = {0: {"power_cap_w": 1000.0, "perf_level": "auto"}}
-        _, error = resolve_gpu_power_settings(DeclaredPowerSettings(power_cap_w=1000.0), nodes=1, read=lambda: cards)
+        monkeypatch.setattr(gpu_power_settings, "read_gpu_power_settings", lambda: cards)
+        _, error = resolve_gpu_power_settings(DeclaredPowerSettings(power_cap_w=1000.0), nodes=1)
         assert "cannot be checked" in error and "device numbers" in error
 
     def test_the_sampler_samples_the_cards_the_mask_names(self, tmp_path, monkeypatch):

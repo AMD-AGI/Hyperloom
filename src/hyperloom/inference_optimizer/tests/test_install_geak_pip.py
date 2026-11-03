@@ -181,14 +181,18 @@ def test_operator_geak_checkout_is_untouched(tmp_path: Path) -> None:
     assert _checkout_state(checkout) == before, proc.stdout
 
 
-def test_missing_operator_geak_checkout_is_not_created(tmp_path: Path) -> None:
+def test_missing_operator_geak_checkout_falls_back_to_the_ref(tmp_path: Path) -> None:
+    """A GEAK_ROOT that does not exist is not created; the install warns and uses the ref's own checkout."""
     remote = _new_remote(tmp_path)
     checkout = tmp_path / "missing-geak"
 
     proc = _run_installer_for_geak(tmp_path, checkout, remote)
 
-    assert proc.returncode != 0, proc.stdout
+    assert proc.returncode == 0, proc.stdout
+    assert "does not exist; using the GEAK_REF checkout instead" in proc.stdout
     assert not checkout.exists(), proc.stdout
+    head = _git(remote, "rev-parse", "HEAD")
+    assert _git(tmp_path / "cache" / f"GEAK@{head.strip()}", "rev-parse", "HEAD") == head, proc.stdout
 
 
 def test_operator_geak_root_must_be_a_valid_checkout(tmp_path: Path) -> None:
@@ -220,12 +224,14 @@ def test_operator_geak_worktree_is_accepted_and_untouched(tmp_path: Path) -> Non
     assert "e2e optimizer geak checkout missing" not in proc.stdout
 
 
-def test_installer_managed_geak_checkout_still_realigns(tmp_path: Path) -> None:
+def test_installer_managed_geak_checkout_follows_the_ref(tmp_path: Path) -> None:
+    """A cached GEAK@<old> path re-resolves to the ref's own checkout; the old one is left as it was."""
     remote = _new_remote(tmp_path)
 
     checkout = tmp_path / "cache" / "GEAK@old"
     checkout.parent.mkdir()
     _git(tmp_path, "clone", "-q", str(remote), str(checkout))
+    old_head = _git(checkout, "rev-parse", "HEAD")
     (remote / "kernel.py").write_text("upstream-v2\n", encoding="utf-8")
     _commit(remote, "v2")
     expected_head = _git(remote, "rev-parse", "HEAD")
@@ -233,8 +239,10 @@ def test_installer_managed_geak_checkout_still_realigns(tmp_path: Path) -> None:
     proc = _run_installer_for_geak(tmp_path, checkout, remote)
 
     assert proc.returncode == 0, proc.stdout
-    assert _git(checkout, "rev-parse", "HEAD") == expected_head
-    assert (checkout / "kernel.py").read_bytes() == b"upstream-v2\n"
+    current = tmp_path / "cache" / f"GEAK@{expected_head.strip()}"
+    assert _git(current, "rev-parse", "HEAD") == expected_head
+    assert (current / "kernel.py").read_bytes() == b"upstream-v2\n"
+    assert _git(checkout, "rev-parse", "HEAD") == old_head
 
 
 def test_installs_local_checkout_not_git_url(tmp_path: Path) -> None:

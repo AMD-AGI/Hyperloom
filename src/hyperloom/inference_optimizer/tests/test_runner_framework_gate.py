@@ -9,6 +9,7 @@ import pytest
 
 from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV
 from hyperloom.inference_optimizer import cli
+from hyperloom.inference_optimizer.cli import launch_shape
 from hyperloom.inference_optimizer.cli.benchmark_config import configure_benchmark
 from hyperloom.inference_optimizer.cli.parser import _build_parser
 
@@ -43,7 +44,7 @@ def _seed(tmp_path, monkeypatch, framework: str) -> None:
         ["optimize", "--model", "/model", "--framework", framework, "--gpu-type", "r9700"]
     )
     configure_benchmark(args)
-    cli._resolve_run_topology(args)
+    launch_shape._resolve_run_topology(args)
     for name in ("_enforce_expected_framework", "_apply_operator_supplied_paths", "_check_gfx_arch_resolvable"):
         monkeypatch.setattr(cli, name, lambda *a, **kw: None)
     monkeypatch.setattr(cli, "_should_remote_probe_gpu", lambda args: False)

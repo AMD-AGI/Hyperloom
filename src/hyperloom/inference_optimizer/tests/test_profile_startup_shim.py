@@ -15,7 +15,7 @@ from hyperloom.orchestrator.actions.executors import _framework_rewrite_evidence
 _REPORT = (
     "import os, hl_host_probe; "
     "print(os.environ.get('ROCPROFILER_REGISTER_LIBRARY', '<unset>'), "
-    "os.environ.get('HL_OVERLAY_RUNS'), hl_host_probe.active() is not None)"
+    "os.environ.get('HL_OVERLAY_RUNS'), hl_host_probe._ACTIVE is not None)"
 )
 
 

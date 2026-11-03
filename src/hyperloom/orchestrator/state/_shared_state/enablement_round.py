@@ -104,6 +104,10 @@ class EnablementRound:
     # installation; injected into the next round's mandate so it stops
     # re-authoring a command the replay refuses to run.
     last_setup_refusals: list = field(default_factory=list)
+    # Env names the last round's patch read and nothing set, seen on a round
+    # whose bench came out inert; injected into the next round's mandate as a
+    # lead on why the patched path never ran, not as a finding about the code.
+    last_inert_round_env_reads: list = field(default_factory=list)
     # Serialized ApplyFeedback records from the last round's failed ``git apply``
     # (stderr, reject hunks, target source window), injected into the next
     # round's mandate so it re-grounds instead of resubmitting the same diff.
@@ -210,6 +214,7 @@ class EnablementRound:
         self.last_grounding_drop_reason = [str(d) for d in (result.get("patches_dropped_by_grounding") or [])[:8]]
         self.last_apply_feedback = [fb for fb in (result.get("retry_feedback") or [])[:5] if isinstance(fb, dict)]
         self.last_setup_refusals = [str(c) for c in (result.get("setup_commands_refused") or [])[:8]]
+        self.last_inert_round_env_reads = [str(n) for n in (result.get("inert_round_env_reads") or [])[:8]]
         self.patches_span_multiple_roots = bool(result.get("patches_span_multiple_roots"))
 
     def record_launch_observation(self, *, log: str, observation_path: str) -> None:

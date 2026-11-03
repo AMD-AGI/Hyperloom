@@ -29,8 +29,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.coerce import to_unix
-from hyperloom.common.io import atomic_write_json
+from hyperloom_common.coerce import to_unix
+from hyperloom_common.io import atomic_write_json
 from hyperloom.hosted.events import segment_name, segment_numbers
 from hyperloom.hosted.mcp_server import HOST_KIND, CallContext, McpServer, ToolError
 from hyperloom.inference_optimizer.session.optimization_journal import read_journal_entries
@@ -253,7 +253,7 @@ class HostTools:
             "measurement": {
                 "request_id": request_id,
                 "sandbox": _sandbox_record(self._session, request_id),
-                "launch_identity": (measurement or {}).get("launch_identity"),
+                "launch_identity": (measurement or {}).get("declared_launch_identity"),
                 "workspace": (measurement or {}).get("benchmark_workspace"),
             },
         }
@@ -297,10 +297,10 @@ class HostTools:
                     "tput",
                     "benchmark_workspace",
                     "server_log_path",
-                    "launch_identity",
                     "identity_verification_status",
                 )
             }
+            out["current_best_measurement"]["launch_identity"] = measurement.get("declared_launch_identity")
         return out
 
     def get_costs(self, _args: dict[str, Any], _ctx: CallContext) -> dict[str, Any]:

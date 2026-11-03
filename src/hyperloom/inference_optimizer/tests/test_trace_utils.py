@@ -245,24 +245,7 @@ def test_validate_closed_row_accepts_valid_row():
     )
 
 
-# --- conversation_trace: redaction + tolerant I/O --------------------------
-
-
-def test_redact_secrets_empty_returns_unchanged():
-    assert ct.redact_secrets("") == ""
-
-
-def test_redact_secrets_strips_bearer_and_env_shapes():
-    out = ct.redact_secrets("Authorization: Bearer abcd1234efgh and API_KEY=supersecretvalue")
-    assert "[REDACTED]" in out
-    assert "supersecretvalue" not in out
-    assert "abcd1234efgh" not in out
-
-
-def test_redact_secrets_masks_custom_headers():
-    out = ct.redact_secrets("ANTHROPIC_CUSTOM_HEADERS=Ocp-Apim-Subscription-Key: deadbeefsecret")
-    assert "deadbeefsecret" not in out
-    assert "[REDACTED]" in out
+# --- conversation_trace: tolerant I/O ---------------------------------------
 
 
 def test_coerce_text_none_and_non_str():
@@ -278,11 +261,10 @@ def test_append_conversation_swallows_oserror(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ct, "append_jsonl", _boom)
     rec = ct.ConversationRecord(session_id="s1", component="orchestration", prompt="p", response="r")
-    # target set -> skips the Langfuse mirror branch; OSError swallowed.
-    ct.append_conversation(session_dir=tmp_path, record=rec, target=tmp_path / "conv.jsonl")
+    ct.append_conversation(session_dir=tmp_path, record=rec)
 
 
-def test_append_conversation_langfuse_mirror_failure_swallowed(tmp_path, monkeypatch):
+def test_append_conversation_langfuse_mirror_defect_raises_after_the_ledger_write(tmp_path, monkeypatch):
     written = {}
 
     def _ok(dest, row, **k):
@@ -290,14 +272,14 @@ def test_append_conversation_langfuse_mirror_failure_swallowed(tmp_path, monkeyp
 
     monkeypatch.setattr(ct, "append_jsonl", _ok)
 
-    # Force the Langfuse mirror import/get_emitter to blow up; must be swallowed.
     import hyperloom.inference_optimizer.trace.langfuse_emitter as le
 
     def _boom(_dir):
-        raise RuntimeError("langfuse down")
+        raise RuntimeError("emitter defect")
 
     monkeypatch.setattr(le, "get_emitter", _boom)
 
     rec = ct.ConversationRecord(session_id="s1", component="orchestration", prompt="p", response="r")
-    ct.append_conversation(session_dir=tmp_path, record=rec)  # target=None -> mirror path
+    with pytest.raises(RuntimeError, match="emitter defect"):
+        ct.append_conversation(session_dir=tmp_path, record=rec)
     assert written["row"]["component"] == "orchestration"

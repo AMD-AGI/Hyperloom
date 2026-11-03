@@ -9,7 +9,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.env import env_int, env_str
+from hyperloom_common.env import env_int, env_str
 from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import (
     analyze,
     clear_competitor_target,
@@ -32,10 +32,12 @@ class TargetAnalysisExecutor:
         """Run the external-baseline comparison and persist report artefacts."""
         params = dict(ctx.task.params or {})
 
-        from ._workload_envs import agentx_active
+        from hyperloom.common.perf_metric import agentx_active
 
         state = (getattr(ctx, "extra", None) or {}).get("shared_state")
-        benchmark_mode: BenchmarkMode = "agentx" if agentx_active(state) else "synthetic"
+        benchmark_mode: BenchmarkMode = (
+            "agentx" if agentx_active(benchmark_mode=getattr(state, "benchmark_mode", "")) else "synthetic"
+        )
         model_path = str(params.get("model_path") or getattr(state, "model_path", "") or env_str("MODEL_PATH"))
 
         session_dir = Path(ctx.extra["session_dir"])

@@ -8,7 +8,8 @@ from __future__ import annotations
 import logging as _logging
 from typing import Any, Mapping, NamedTuple
 
-from hyperloom.common.env import env_int
+from hyperloom_common.env import env_int
+from hyperloom.common.overlay import overlay_is_loadable
 from hyperloom.inference_optimizer.session.geak_rebench_verdict import (
     REBENCH_FAILED,
     REBENCH_FALLBACK,
@@ -34,7 +35,6 @@ from ..kernel.geak_config import (
     _geak_revalidation_decision,
     _geak_sweep_measured_tput,
     _normalize_geak_overlay_dir,
-    geak_overlay_is_loadable,
     geak_spec_name,
 )
 from ..state.shared_state import ActionAttempt, resolve_graded_comparison, stack_base_params
@@ -166,7 +166,7 @@ def _replay_regime(accepted: Mapping[str, Any]) -> _ReplayRegime:
 
 
 def _overlay_survived_replay(overlay: _ReplayOverlay) -> bool:
-    if not overlay.path or not geak_overlay_is_loadable(overlay.path):
+    if not overlay.path or not overlay_is_loadable(overlay.path):
         return False
     return not overlay.digest_before or _geak_overlay_digest(overlay.path) == overlay.digest_before
 
@@ -235,7 +235,7 @@ class GeakRevalidation(CoordinatorCollaborator):
         from ..actions.executors._proposal_identity import BaseControls, effective_fingerprint
 
         overlay = product.overlay
-        if overlay and not geak_overlay_is_loadable(overlay):
+        if overlay and not overlay_is_loadable(overlay):
             log.warning(
                 "geak 2b: overlay %r is not loadable (no sitecustomize.py); "
                 "revalidating the config WITHOUT the authored kernel",
@@ -435,13 +435,13 @@ class GeakRevalidation(CoordinatorCollaborator):
         if expected_overlay:
             expected_digest = str((task.params or {}).get("expected_overlay_digest") or "")
             got_digest = _geak_overlay_digest(expected_overlay)
-            overlay_loaded = geak_overlay_is_loadable(expected_overlay) and (got_digest == expected_digest)
+            overlay_loaded = overlay_is_loadable(expected_overlay) and (got_digest == expected_digest)
             if not overlay_loaded and decision == REBENCH_VALIDATED:
                 log.warning(
                     "geak 2b: overlay %r did not survive the run "
                     "(loadable=%r digest expected=%r got=%r) -> 2a fallback",
                     expected_overlay,
-                    geak_overlay_is_loadable(expected_overlay),
+                    overlay_is_loadable(expected_overlay),
                     expected_digest,
                     got_digest,
                 )
@@ -620,8 +620,7 @@ class GeakRevalidation(CoordinatorCollaborator):
         )
 
     async def validate_geak_via_geak_harness(self, *, reason: str) -> dict[str, Any]:
-        from hyperloom.common.perf_metric import is_agentx_mode
-        from ..actions.executors._workload_envs import agentx_enabled
+        from hyperloom.common.perf_metric import agentx_enabled, is_agentx_mode
 
         mode = str(self.shared_state.benchmark_mode or "").strip()
         agentx = is_agentx_mode(mode) if mode else agentx_enabled()
@@ -658,7 +657,7 @@ class GeakRevalidation(CoordinatorCollaborator):
         return {"validated": False, "status": res.get("status"), "reason": reason}
 
     async def _replay_through_geak(self, accepted: Mapping[str, Any], mode: str) -> dict[str, Any]:
-        from hyperloom.common.jsonio import read_json
+        from hyperloom_common.jsonio import read_json
         from hyperloom.inference_optimizer.session.session_paths import unique_runs_dir
         from ..actions.executors._geak_sweep import GeakSweepSpec, sweep_via_geak
         from ..actions.executors._workload_envs import geak_metric_axis
@@ -677,9 +676,6 @@ class GeakRevalidation(CoordinatorCollaborator):
                 isl_osl_configs=[f"{regime.isl}:{regime.osl}"],
                 variant_timeout_sec=env_int("SWEEP_VARIANT_TIMEOUT_SEC", default=2400),
                 repeats=3,
-                # Single-point validated replay pins the headline protocol (num_prompts
-                # etc.) so it is protocol-identical to the reported result.
-                pin_num_prompts=True,
                 # The axis the handoff sent GEAK, so the replay measures what GEAK accepted on.
                 metric_axis=geak_metric_axis(benchmark_mode=mode, grading=self.shared_state.grading or None),
             ),
@@ -738,7 +734,7 @@ class GeakRevalidation(CoordinatorCollaborator):
                 "(loadable=%r digest before=%r after=%r) -> gain credited "
                 "to config, not to a kernel",
                 overlay.path,
-                geak_overlay_is_loadable(overlay.path),
+                overlay_is_loadable(overlay.path),
                 overlay.digest_before,
                 _geak_overlay_digest(overlay.path),
             )
@@ -779,9 +775,6 @@ class GeakRevalidation(CoordinatorCollaborator):
         )
         fallback_result: dict[str, Any]
         try:
-            # Routed via ``_coord`` so a test / caller that overrides
-            # ``coordinator._validate_geak_via_geak_harness`` still wins
-            # (bare-name delegation resolves it back onto this class).
             fallback_result = await self.validate_geak_via_geak_harness(reason="2b_inconclusive")
         except Exception as exc:  # isolation boundary: one GEAK candidate's harness fallback
             log.exception("geak 2a GEAK-harness fallback failed")

@@ -23,7 +23,7 @@ except ImportError:  # pragma: no cover - exercised only on non-POSIX hosts
     fcntl = None  # type: ignore[assignment]
 
 from kernelforge.knowledge.kb_store.remote_client import KBStoreClient, KBStoreError
-from kernelforge.tools.durable_io import atomic_write_bytes, fsync_directory, fsync_tree_directories
+from hyperloom_common.io import DURABLE, atomic_write_bytes, fsync_directory, fsync_tree_directories
 
 CHAMPION_METRIC = "speedup"
 MEASURED_SPEEDUP_KEY = "measured_speedup"
@@ -222,6 +222,24 @@ def _bundle_staging(destination: str | Path, session_id: str) -> tuple[Path, Pat
         raise RewriteRecordError(f"candidate bundle may not be a symlink: {bundle}")
     staging = Path(tempfile.mkdtemp(prefix=f".{safe_session_id}-", dir=root))
     return bundle, staging
+
+
+def _manifest_paths(listing: Any) -> set[str]:
+    """The artifact paths a session file manifest declares, refusing a malformed or duplicated one."""
+    if not isinstance(listing, Mapping):
+        raise RewriteRecordError("session file manifest is not an object")
+    raw_files = listing.get("files") or []
+    if not isinstance(raw_files, list):
+        raise RewriteRecordError("session file manifest files is not a list")
+    expected: set[str] = set()
+    for item in raw_files:
+        if not isinstance(item, Mapping):
+            raise RewriteRecordError("session file manifest contains a non-object entry")
+        rel_path = safe_rel_path(item.get("path"))
+        if rel_path in expected:
+            raise RewriteRecordError(f"duplicate session artifact path: {rel_path}")
+        expected.add(rel_path)
+    return expected
 
 
 def _safe_files(root: Path) -> set[str]:
@@ -503,19 +521,7 @@ class KBStoreRewriteRecords:
 
             with self._download_lock:
                 listing = self._client.list_session_files(canonical_id, candidate.session_id)
-                if not isinstance(listing, Mapping):
-                    raise RewriteRecordError("session file manifest is not an object")
-                raw_files = listing.get("files") or []
-                if not isinstance(raw_files, list):
-                    raise RewriteRecordError("session file manifest files is not a list")
-                expected: set[str] = set()
-                for item in raw_files:
-                    if not isinstance(item, Mapping):
-                        raise RewriteRecordError("session file manifest contains a non-object entry")
-                    rel_path = safe_rel_path(item.get("path"))
-                    if rel_path in expected:
-                        raise RewriteRecordError(f"duplicate session artifact path: {rel_path}")
-                    expected.add(rel_path)
+                expected = _manifest_paths(listing)
 
                 # The upstream SDK lists internally.
                 original_listing = self._client.list_session_files
@@ -845,7 +851,7 @@ class LocalRewriteRecords:
             if not isinstance(knowledge, dict):
                 raise RewriteRecordError("candidate knowledge is not an object")
             knowledge[MEASURED_SPEEDUP_KEY] = measured
-            atomic_write_bytes(document_path, _json_bytes(knowledge))
+            atomic_write_bytes(document_path, _json_bytes(knowledge), options=DURABLE)
 
     def champion_speedup(self, canonical_id: str) -> float | None:
         with self._identity_lock(canonical_id, exclusive=False):
@@ -861,15 +867,15 @@ class LocalRewriteRecords:
             "value": float(speedup),
         }
         with self._identity_lock(canonical_id, exclusive=True):
-            atomic_write_bytes(self._identity_dir(canonical_id) / CHAMPION_FILENAME, _json_bytes(document))
+            atomic_write_bytes(
+                self._identity_dir(canonical_id) / CHAMPION_FILENAME, _json_bytes(document), options=DURABLE
+            )
 
 
 def create_rewrite_record_store(config: Any) -> RewriteRecordStore | None:
     """Pick a backend from the process-wide knowledge configuration."""
-    from kernelforge.knowledge.kb_store.config import (
-        KnowledgeStoreMode,
-        knowledge_config_from_runtime,
-    )
+    from kernelforge.config import KnowledgeStoreMode
+    from kernelforge.knowledge.kb_store.config import knowledge_config_from_runtime
 
     knowledge = knowledge_config_from_runtime(config)
     if knowledge.mode is KnowledgeStoreMode.LOCAL:

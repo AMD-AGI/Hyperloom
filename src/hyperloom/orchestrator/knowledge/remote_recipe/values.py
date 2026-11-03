@@ -14,9 +14,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Collection, Final, Mapping
 
-from hyperloom.common.coerce import to_float
+from hyperloom_common.coerce import to_float
 
-from hyperloom.common.coerce import first_text, optional_positive_int
+from hyperloom_common.coerce import first_text, optional_positive_int
 from hyperloom.inference_optimizer.grid_server_args import (
     compose_server_args,
     dedupe_extra_server_args,
@@ -30,6 +30,7 @@ from hyperloom.orchestrator.lever import (
     patch_lever_kind,
     patch_owner_phase,
 )
+from ._vendor.kb_store_client import KBStoreError
 from .models import (
     CONFIG_SECTION,
     KERNEL_SECTION,
@@ -443,6 +444,27 @@ def build_kernel_gemm_value(state: Any, files: DraftArtifactSink) -> dict[str, A
     return {"optimizations": optimizations}
 
 
+def _fusion_e2e_record(integrated: dict[str, Any], files: DraftArtifactSink) -> dict[str, Any]:
+    """The fusion integrate E2E result as published, with its local source paths dropped."""
+    integrated_for_publish = dict(integrated)
+    for key in (
+        "target_file",
+        "target_files",
+        "source_file",
+        "source_files",
+        "artifact_files",
+    ):
+        integrated_for_publish.pop(key, None)
+    e2e_record = _externalize_record(
+        integrated_for_publish,
+        files,
+        "kernel/fusion",
+    )
+    e2e_record.pop("target_file", None)
+    e2e_record.pop("target_files", None)
+    return e2e_record
+
+
 def build_kernel_fusion_value(state: Any, files: DraftArtifactSink) -> dict[str, Any]:
     """Build only E2E-accepted fusion solution records."""
     stack_rows = [
@@ -477,26 +499,10 @@ def build_kernel_fusion_value(state: Any, files: DraftArtifactSink) -> dict[str,
         )
         files.discard(patch_ref)
         return {"items": []}
-    integrated_for_publish = dict(integrated)
-    for key in (
-        "target_file",
-        "target_files",
-        "source_file",
-        "source_files",
-        "artifact_files",
-    ):
-        integrated_for_publish.pop(key, None)
-    e2e_record = _externalize_record(
-        integrated_for_publish,
-        files,
-        "kernel/fusion",
-    )
-    e2e_record.pop("target_file", None)
-    e2e_record.pop("target_files", None)
     record = {
         **result,
         **stack_rows[-1],
-        "e2e": e2e_record,
+        "e2e": _fusion_e2e_record(integrated, files),
         "phase": str(stack_rows[-1].get("phase") or "KERNEL_AGENT"),
         "patch": patch_ref,
         **_kernel_host_origin(apply_root),
@@ -936,7 +942,7 @@ def merge_staged_sections(
             merged[name] = dict(staged.knowledge)
         except RemoteRecipeValidationError:
             raise
-        except Exception as exc:
+        except (KBStoreError, OSError, ValueError) as exc:
             raise RemoteRecipeValidationError(f"{qualifier}staged section {name!r} is invalid: {exc}") from exc
     return merged
 

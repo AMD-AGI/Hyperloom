@@ -16,10 +16,8 @@ from hyperloom.orchestrator.actions.executors._nogit_patch import (
     _reverse_applies_cleanly,
 )
 from hyperloom.orchestrator.delivery import file_digest, ledger
-from hyperloom.orchestrator.specialists.subprocess_ import (
-    SpecialistSubprocessDispatcher,
-    _declared_targets,
-)
+from hyperloom.orchestrator.delivery.deliverable import declared_targets
+from hyperloom.orchestrator.specialists.subprocess_ import SpecialistSubprocessDispatcher
 
 
 def _git(cwd: Path, *args: str) -> None:
@@ -38,8 +36,11 @@ def test_declared_targets_scope_the_harvest_pathspec() -> None:
 
 
 def test_the_round_declaration_scopes_the_harvest() -> None:
-    assert _declared_targets({"deliverable": {"tree_id": "t", "targets": ["pkg/wide.py"]}}) == ("pkg/wide.py",)
-    assert _declared_targets({}) == ()
+    assert declared_targets({"deliverable": {"tree_id": "t", "targets": ["pkg/wide.py"]}}) == ("pkg/wide.py",)
+    assert declared_targets({"targets": ["pkg/a.py", " pkg/a.py ", "", "pkg/b.py"]}) == ("pkg/a.py", "pkg/b.py")
+    assert declared_targets({"deliverable": {}, "targets": ["pkg/flat.py"]}) == ()
+    assert declared_targets({}) == ()
+    assert declared_targets(None) == ()
 
 
 def test_an_uncommitted_worktree_edit_is_still_harvested(tmp_path: Path) -> None:

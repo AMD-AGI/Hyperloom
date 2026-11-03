@@ -25,14 +25,13 @@ def agentx_asset_dir() -> Path:
     return Path(__file__).resolve().parent.parent / "assets" / "agentx"
 
 
-def deploy_agentx_assets(benchmarks_dir: str | Path) -> list[Path]:
+def deploy_agentx_assets(benchmarks_dir: str | Path) -> None:
     """Copy AgentX assets and the ``mapping`` module they import into ``benchmarks_dir`` (idempotent)."""
     src_dir = agentx_asset_dir()
     sources = {name: src_dir / name for name in _ASSET_FILES}
     sources[_MAPPING_MODULE] = Path(__file__).resolve().with_name("mapping.py")
     dst_dir = Path(benchmarks_dir)
     dst_dir.mkdir(parents=True, exist_ok=True)
-    written: list[Path] = []
     for name, src in sources.items():
         if not src.exists():
             raise FileNotFoundError(f"AgentX asset missing from package: {src}")
@@ -47,5 +46,3 @@ def deploy_agentx_assets(benchmarks_dir: str | Path) -> list[Path]:
         finally:
             if os.path.exists(tmp):
                 os.unlink(tmp)
-        written.append(dst)
-    return written

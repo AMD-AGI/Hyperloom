@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from operator import itemgetter
 from typing import TYPE_CHECKING, Any, Callable
 from ..bus.gpu_pool import gpus_by_task_sync
+from ..mcp_tool_names import qualified_context_tool_name
 from ..phases import dispatch_order
 from ..phases import machine_state as _phase_state
 from ..policy.projection import resource_pools_summary
@@ -22,7 +23,7 @@ from hyperloom.inference_optimizer.tracelens_md import strip_base64_data_urls
 from hyperloom.inference_optimizer.trace.conversation_trace import ConversationRecord, append_conversation
 from ..state.failure_evidence import UNMEASURED_OUTCOMES, render_failure_line
 from ..state.shared_state import KbInjection
-from hyperloom.common.coerce import to_str_list, to_unix
+from hyperloom_common.coerce import to_str_list, to_unix
 from hyperloom.common.prompt_safety import defang_prompt_structure as _defang_prompt_structure
 from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_inbox
 
@@ -64,7 +65,8 @@ _FINDINGS_PROMPT_CHARS = 24_000
 _QUESTIONS_PROMPT_CHARS = 6_000
 _INBOX_PROMPT_CHARS = 40_000
 # Task kinds that queue for the benchmark lane, in the order the backlog line lists them.
-_BENCH_LANE_KINDS = ("integrate_patch", "explore")
+_EXPLORE = "explore"
+_BENCH_LANE_KINDS = ("integrate_patch", _EXPLORE)
 # Longest a KERNEL_AGENT session goes without an Orchestration turn while kernel progress is unchanged.
 _KERNEL_ORCHESTRATION_HEARTBEAT_SEC = 900.0
 
@@ -144,7 +146,8 @@ def _variant_failure_rows(result: dict[str, Any], max_variant_rows: int) -> list
         rows.append("  failure: " + render_failure_line(row, excerpt_chars=120))
     elided = len(failures) - max_variant_rows
     if elided > 0:
-        rows.append(f"  (+{elided} more failures; pull get_variant_failures)")
+        pull = qualified_context_tool_name("get_variant_failures")
+        rows.append(f"  (+{elided} more failures; pull {pull})")
     return rows
 
 
@@ -240,8 +243,8 @@ def _format_inbox_event(m: "Message", *, max_variant_rows: int = 3) -> str:
 #: A prompt section: the heading it goes under, or ``None`` for a block that carries its own, and what renders it.
 _AdvisoryRow = tuple[str | None, Callable[["ConversationCollaborator"], str]]
 
-#: The orchestration advisories that precede the plateau pair. Row order is the order the model reads the
-#: sections in, so it is content.
+#: The orchestration advisories that hold for the session, so they ride in the cached context. Row order is the
+#: order the model reads the sections in, so it is content; the per-tick blocks follow them, in the turn.
 _ADVISORY_BLOCKS: tuple[_AdvisoryRow, ...] = (
     ("=== Warm start (Recipe KB T0) ===", lambda c: c.shared_state.to_warm_start_summary()),
     ("=== Current gaps ===", lambda c: c.shared_state.to_gaps_summary()),
@@ -250,10 +253,6 @@ _ADVISORY_BLOCKS: tuple[_AdvisoryRow, ...] = (
     ("=== Specialist proposal scores (advisory) ===", lambda c: c.shared_state.to_proposal_scores_summary()),
     ("=== Priors-match (advisory ordering) ===", lambda c: c._priors_match_advisory_block()),
     ("=== Intervention mix (telemetry) ===", lambda c: c.shared_state.to_intervention_mix_summary()),
-)
-
-#: The orchestration advisories that follow the plateau pair; see :data:`_ADVISORY_BLOCKS`.
-_POST_PLATEAU_ADVISORY_BLOCKS: tuple[_AdvisoryRow, ...] = (
     ("=== Bottleneck redirect (advisory) ===", lambda c: c._bottleneck_redirect_advisory_block()),
     ("=== Acceptance threshold (advisory) ===", lambda c: c._acceptance_threshold_advisory_block()),
     ("=== Discarded escalation hint (advisory) ===", lambda c: c._discarded_escalate_hint_advisory_block()),
@@ -271,6 +270,48 @@ def _advisory_sections(owner: "ConversationCollaborator", blocks: tuple[_Advisor
             sections.append(heading)
         sections.append(block)
     return sections
+
+
+def _variant_state(note: dict[str, Any]) -> tuple[str, str, bool] | None:
+    """The variant a grid-runner note is about, what it says, and whether the variant has landed."""
+    label = str(note.get("label") or "")
+    if note.get("unit") == "variant":
+        throughput = note.get("output_throughput")
+        rate = f" {throughput:.1f} tok/s" if isinstance(throughput, (int, float)) else ""
+        return label, f"{note.get('status')}{rate}", True
+    if note.get("unit") == "variant_step":
+        variant, _, step = label.rpartition(":")
+        return variant, f"{step} {note.get('status') or 'running'}", False
+    return None
+
+
+def _explore_round_parts(task: "Task", *, now_unix: float) -> list[str]:
+    """A round's grid as dispatched and each variant's latest state, from the notes its grid runner records.
+
+    The round commits its verdicts only when it ends, so these notes are the only view of a round in flight. A
+    variant's step notes describe it until its landing note does. Other kinds get nothing.
+    """
+    if task.kind != _EXPLORE:
+        return []
+    names = [str(v.get("name") or "") for v in (task.params or {}).get("grid") or () if isinstance(v, dict)]
+    states: dict[str, str] = {}
+    landed: set[str] = set()
+    last_ts = 0.0
+    for entry in task.history or ():
+        note = entry.get("progress") if isinstance(entry, dict) else None
+        state = _variant_state(note) if isinstance(note, dict) else None
+        if state is None or state[0] in landed:
+            continue
+        variant, text, has_landed = state
+        states[variant] = text
+        if has_landed:
+            landed.add(variant)
+        last_ts = max(last_ts, to_unix(entry.get("ts"), 0.0))
+    variants = ", ".join(f"{variant}: {state}" for variant, state in states.items())
+    parts = [f"grid_as_dispatched={names!r}", _flatten_for_inbox(f"variants=[{variants}]")]
+    if last_ts > 0:
+        parts.append(f"last_progress_age_sec={int(max(0.0, now_unix - last_ts))}")
+    return parts
 
 
 class ConversationCollaborator(CoordinatorCollaborator):
@@ -429,6 +470,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
             hb_age = self._task_heartbeat_age_sec(task, now_unix=now_unix)
             if hb_age is not None:
                 parts.append(f"heartbeat_age_sec={int(hb_age)}")
+            parts.extend(_explore_round_parts(task, now_unix=now_unix))
             lines.append(" ".join(parts))
         if backlog:
             lines.append(backlog)
@@ -437,7 +479,10 @@ class ConversationCollaborator(CoordinatorCollaborator):
     def _queued_backlog_line(self) -> str:
         """Benchmark-lane backlog: queued integrate_patch / explore tasks in dispatch order, and untested proposals."""
         counts = self.tasks.queued_kind_counts_sync()
-        counts["untested proposals"] = len(self.shared_state.untested_proposal_rows())
+        in_grids = self._explore_grid_fingerprints()
+        counts["untested proposals"] = sum(
+            row["fingerprint"] not in in_grids for row in self.shared_state.untested_proposal_rows()
+        )
         parts = [f"{counts[kind]} {kind}" for kind in (*_BENCH_LANE_KINDS, "untested proposals") if counts.get(kind)]
         if not parts:
             return ""
@@ -515,14 +560,14 @@ class ConversationCollaborator(CoordinatorCollaborator):
         )
         append_conversation(session_dir=self.session_dir, record=record)
 
-    async def _explore_grid_fingerprints(self) -> set[str]:
+    def _explore_grid_fingerprints(self) -> set[str]:
         """Content fingerprints of the variants in every queued or running explore grid."""
         from ..actions.executors._proposal_identity import content_fingerprint
 
         return {
             content_fingerprint(variant)
-            for task in (*await self.tasks.queued(), *await self.tasks.running())
-            if task.kind == "explore"
+            for task in (*self.tasks.queued_context_sync(), *self.tasks.running_context_sync())
+            if task.kind == _EXPLORE
             for variant in (task.params or {}).get("grid") or ()
             if isinstance(variant, dict)
         }
@@ -537,8 +582,14 @@ class ConversationCollaborator(CoordinatorCollaborator):
             log.exception("Coordinator: trajectory review digest failed")
             return ""
 
-    async def _orchestration_sections(self) -> list[str]:
-        """The denial summary, proposal queue and advisories only the orchestration agent reads."""
+    def _orchestration_context_sections(self) -> list[str]:
+        """The advisories only the orchestration agent reads, all of them session-stable."""
+        return _advisory_sections(self, _ADVISORY_BLOCKS)
+
+    async def _orchestration_turn_sections(self) -> list[str]:
+        """The denial summary, proposal queue and plateau pair: only the orchestration agent reads them, and each
+        moves with the session, so they are rendered per tick.
+        """
         from ..predictor.prompt import queue_block
         from ..predictor.rows import PROVENANCE
 
@@ -548,9 +599,10 @@ class ConversationCollaborator(CoordinatorCollaborator):
             sections.append(denial_summary)
         if (self.shared_state.phase or "").strip().upper() == _phase_state.PHASE_FRAMEWORK_AGENT:
             # The predictor's rows lead the queue, so its block comes first, under the same section.
+            in_grids = self._explore_grid_fingerprints()
             blocks = (
-                queue_block(self.shared_state, in_grids=await self._explore_grid_fingerprints()),
-                self.shared_state.to_untested_proposals_summary(skip_provenance=PROVENANCE),
+                queue_block(self.shared_state, in_grids=in_grids),
+                self.shared_state.to_untested_proposals_summary(skip_provenance=PROVENANCE, in_grids=in_grids),
             )
             untested_block = "\n\n".join(block for block in blocks if block)
             if untested_block:
@@ -559,7 +611,6 @@ class ConversationCollaborator(CoordinatorCollaborator):
             kb_block = await self._kb_prompt_block(untested_block)
             if kb_block:
                 sections.append(kb_block)
-        sections.extend(_advisory_sections(self, _ADVISORY_BLOCKS))
         plateau_block = self.plateau_advisory_block()
         if plateau_block:
             sections.append("=== Plateau advisory ===")
@@ -569,7 +620,6 @@ class ConversationCollaborator(CoordinatorCollaborator):
             if trajectory_block:
                 sections.append("=== Trajectory review (advisory) ===")
                 sections.append(trajectory_block)
-        sections.extend(_advisory_sections(self, _POST_PLATEAU_ADVISORY_BLOCKS))
         return sections
 
     async def _render_inbox_sections(self, agent_name: str) -> list[str]:
@@ -633,10 +683,13 @@ class ConversationCollaborator(CoordinatorCollaborator):
                     )
         turn.append("=== Tick ===")
         turn.append(self.shared_state.to_tick_summary())
+        # The session ledger moves with every action that lands, so it belongs to
+        # the turn: carried in ``context`` it would rewrite the cached prefix the
+        # stable blocks below sit in, on nearly every tick.
+        turn.append("=== Shared session state ===")
+        turn.append(self.shared_state.to_prompt_summary())
+        turn.append(f"target_gap_pct={self._coord.target_gap_pct():.2f}")
 
-        context.append("=== Shared session state ===")
-        context.append(self.shared_state.to_prompt_summary())
-        context.append(f"target_gap_pct={self._coord.target_gap_pct():.2f}")
         # Not wrapped, unlike the advisory blocks below: a latency budget changes
         # what a KEEP means, so losing it silently would have the model route as
         # if the session were unconstrained. Pure string assembly, no I/O.
@@ -644,7 +697,11 @@ class ConversationCollaborator(CoordinatorCollaborator):
         context.append("=== Resource pools ===")
         context.append(resource_pools_summary(self.shared_state))
         if agent_name == "orchestration":
-            context.extend(await self._orchestration_sections())
+            context.extend(self._orchestration_context_sections())
+            # A denial, a proposal leaving the queue or a plateau count lands between
+            # two ticks, so these blocks follow the ledger into the turn: the cached
+            # prefix ends above them and holds for the session.
+            turn.extend(await self._orchestration_turn_sections())
 
         turn.extend(await self._render_inbox_sections(agent_name))
 

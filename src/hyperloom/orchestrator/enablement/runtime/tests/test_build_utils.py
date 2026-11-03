@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 
 from hyperloom.orchestrator.enablement.runtime.build_utils import (
+    VLLM_ROCM_PROBE,
     AbiMismatchError,
     check_rocm_toolchain_alignment,
     probe_torch_abi,
@@ -48,10 +49,6 @@ def test_run_argv_ok(argv):
     assert r.returncode == 0
     assert r.stdout_tail == "hello\n"
     assert r.stderr_tail == ""
-    assert r.timed_out is False
-    assert r.command == argv
-    assert r.command is not argv
-    assert r.cwd == str(work_dir)
     assert calls == [(argv, str(work_dir), build_env, True, True, 42)]
 
 
@@ -71,7 +68,6 @@ def test_run_argv_timeout():
 
     r = run_argv(["sleep", "9999"], cwd="/tmp", run=_run)
     assert r.returncode == -1
-    assert r.timed_out is True
 
 
 def test_run_argv_truncates_output():
@@ -148,8 +144,6 @@ def _toolchain_run(hipcc_path="/opt/rocm/bin/hipcc", rocm_path="/opt/rocm", head
         if "which hipcc" in cmd:
             return _completed(stdout=hipcc_path + "\n")
         if "dirname" in cmd:
-            return _completed(stdout=rocm_path + "\n")
-        if f"cd {rocm_path!r}" in cmd or f"cd '{rocm_path}'" in cmd:
             return _completed(stdout=rocm_path + "\n")
         return _completed()
 
@@ -274,3 +268,29 @@ def test_the_checkout_is_restored_when_the_install_raises(tmp_path):
         with sglang_rocm_install_target(tmp_path, "2.11.0+rocm7.2"):
             raise RuntimeError("pip died")
     assert (tmp_path / "pyproject.toml").read_text(encoding="utf-8") == "cuda"
+
+
+def test_the_vllm_rocm_probe_fails_when_the_platform_check_raises(tmp_path):
+    (tmp_path / "torch").mkdir()
+    (tmp_path / "torch" / "__init__.py").write_text("class version:\n    hip = '7.0'\n", encoding="utf-8")
+    (tmp_path / "vllm").mkdir()
+    (tmp_path / "vllm" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "vllm" / "platforms.py").write_text(
+        "class RocmPlatform:\n"
+        "    def is_rocm(self):\n"
+        "        raise RuntimeError('platform check broke')\n"
+        "current_platform = RocmPlatform()\n",
+        encoding="utf-8",
+    )
+
+    probe = subprocess.run(
+        [sys.executable, "-c", VLLM_ROCM_PROBE],
+        capture_output=True,
+        text=True,
+        env={"PYTHONPATH": str(tmp_path)},
+        check=False,
+    )
+
+    assert probe.returncode == 1
+    assert probe.stdout == ""
+    assert probe.stderr.splitlines()[-1] == "RuntimeError: platform check broke"

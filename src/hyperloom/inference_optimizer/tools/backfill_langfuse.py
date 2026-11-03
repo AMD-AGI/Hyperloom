@@ -8,10 +8,10 @@ Sibling of the *live* emitter
 path mirrors calls into Langfuse while a run is in flight, this CLI replays
 one finished session's ``reports/trace/`` after the fact. Both share the same
 projection (:mod:`hyperloom.inference_optimizer.trace.langfuse_mapping`), so the spans
-this CLI does emit are shaped like the live ones. Not replayed here: ext token
-shards (``reports/trace/ext/*.jsonl``), specialist-intel, forge-step,
-GEMM-tuning and trajectory (``reports/trace/trajectory/*.jsonl``) spans, which
-only the live emitter's ``flush_session`` backfills.
+this CLI does emit are shaped like the live ones. Not replayed here:
+specialist-intel, forge-step, GEMM-tuning and trajectory
+(``reports/trace/trajectory/*.jsonl``) spans, which only the live emitter's
+``flush_session`` backfills.
 
 Mapping (trace -> phase span -> agent span -> generation)::
 
@@ -80,7 +80,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.jsonio import read_json, read_jsonl
+from hyperloom_common.jsonio import read_json, read_jsonl
 from hyperloom.inference_optimizer.session.optimization_journal import (
     OUTCOME_KEEP,
     OUTCOME_NO_PROMOTE,
@@ -94,28 +94,25 @@ from hyperloom.inference_optimizer.trace.langfuse_emitter import (
     _set_trace_attrs,
     _start_obs,
 )
-from hyperloom.inference_optimizer.session.session_paths import recipe_snapshot_audit_jsonl
+from hyperloom.inference_optimizer.session.session_paths import (
+    conversations_path,
+    decision_trace_path,
+    llm_calls_path,
+    manifest_path,
+    recipe_snapshot_audit_jsonl,
+)
 
 log = logging.getLogger("backfill_langfuse")
-
-TRACE_SUBDIR = "reports/trace"
-LLM_CALLS = "llm_calls.jsonl"
-CONVERSATIONS = "conversations.jsonl"
-DECISION_TRACE = "decision_trace.jsonl"
-MANIFEST = "manifest.json"
-
-UNPHASED = lfmap.UNPHASED
 
 
 # Plan building (pure -- no SDK, dry-run friendly)
 def build_plan(session_dir: Path) -> dict[str, Any]:
     """Parse the trace files into a Langfuse-shaped plan dict (pure)."""
-    tdir = session_dir / TRACE_SUBDIR
-    llm = read_jsonl(tdir / LLM_CALLS)
-    conv = read_jsonl(tdir / CONVERSATIONS)
-    decisions = read_jsonl(tdir / DECISION_TRACE)
+    llm = read_jsonl(llm_calls_path(session_dir))
+    conv = read_jsonl(conversations_path(session_dir))
+    decisions = read_jsonl(decision_trace_path(session_dir))
     recipe_audit = read_jsonl(recipe_snapshot_audit_jsonl(session_dir))
-    manifest = read_json(session_dir / MANIFEST, default={}, require_dict=True)
+    manifest = read_json(manifest_path(session_dir), default={}, require_dict=True)
 
     conv_by_key: dict[tuple, dict[str, Any]] = {}
     for c in conv:
@@ -124,7 +121,6 @@ def build_plan(session_dir: Path) -> dict[str, Any]:
     internal_id = str(manifest.get("session_id") or (llm[0].get("session_id") if llm else "") or session_dir.name)
     # Correlate on claw_session_id so backfill and the live emitter land on one Langfuse trace.
     seed = lfmap.correlation_seed(manifest, internal_id)
-    session_label = lfmap.langfuse_session_id(manifest, internal_id)
 
     # phase -> agent -> [generation parts]; mirrors the live emitter's trace -> phase span -> agent span -> generation
     # hierarchy.
@@ -150,10 +146,10 @@ def build_plan(session_dir: Path) -> dict[str, Any]:
 
     return {
         "trace_id_seed": seed,
-        "session_id": session_label,
+        "session_id": seed,
         "internal_session_id": internal_id,
         "claw_session_id": manifest.get("claw_session_id"),
-        "name": manifest.get("model_name") or session_label,
+        "name": manifest.get("model_name") or seed,
         "metadata": lfmap.trace_metadata(manifest),
         "created_at": manifest.get("created_at_utc"),
         "phases": phases,
@@ -228,7 +224,7 @@ def _emit_recipe_audit(
         as_type="span",
         start_time=ra_lo or last_end,
         metadata={
-            "phase": UNPHASED,
+            "phase": lfmap.UNPHASED,
             "agent": "recipe_kb",
             "read_count": len(recipe_audit) - write_count,
             "write_count": write_count,
@@ -291,6 +287,26 @@ def print_plan(plan: dict[str, Any]) -> None:
 
 
 # Real ingest (needs the langfuse SDK)
+def _upload_decision_scores(
+    client: Any, trace_id: str, decisions: list[dict[str, Any]], agent_spans: dict[tuple[str, str], Any]
+) -> int:
+    """Attach each decision's scores to its producer's agent span (or the trace); return how many failed."""
+    failed_scores = 0
+    for i, drow in enumerate(decisions):
+        for score in lfmap.decision_to_scores(drow):
+            meta = score["metadata"]
+            span = agent_spans.get((lfmap.phase_of(meta), lfmap.span_agent_for(str(meta.get("component") or ""))))
+            try:
+                if hasattr(span, "score"):
+                    span.score(**score)
+                else:
+                    client.create_score(trace_id=trace_id, **score)
+            except Exception:  # isolation boundary: one decision Score upload
+                log.exception("create_score failed for decision %d", i)
+                failed_scores += 1
+    return failed_scores
+
+
 def ingest(plan: dict[str, Any]) -> int:
     """Emit a backfill plan to Langfuse as a full trace tree."""
     try:
@@ -345,19 +361,7 @@ def ingest(plan: dict[str, Any]) -> int:
     if plan["recipe_audit"]:
         _emit_recipe_audit(root, plan["recipe_audit"], last_end, trace_start)
 
-    failed_scores = 0
-    for i, drow in enumerate(plan["decisions"]):
-        for score in lfmap.decision_to_scores(drow):
-            meta = score["metadata"]
-            span = agent_spans.get((lfmap.phase_of(meta), lfmap.span_agent_for(str(meta.get("component") or ""))))
-            try:
-                if hasattr(span, "score"):
-                    span.score(**score)
-                else:
-                    client.create_score(trace_id=trace_id, **score)
-            except Exception:  # isolation boundary: one decision Score upload
-                log.exception("create_score failed for decision %d", i)
-                failed_scores += 1
+    failed_scores = _upload_decision_scores(client, trace_id, plan["decisions"], agent_spans)
 
     _end_obs(root, last_end)
     client.flush()
@@ -392,8 +396,9 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     sd = args.session_dir.resolve()
-    if not (sd / TRACE_SUBDIR / LLM_CALLS).exists():
-        print(f"ERROR: no {TRACE_SUBDIR}/{LLM_CALLS} under {sd}", file=sys.stderr)
+    llm_calls = llm_calls_path(sd)
+    if not llm_calls.exists():
+        print(f"ERROR: no {llm_calls.relative_to(sd)} under {sd}", file=sys.stderr)
         return 2
 
     plan = build_plan(sd)

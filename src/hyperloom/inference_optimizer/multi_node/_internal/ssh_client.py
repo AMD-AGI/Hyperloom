@@ -9,7 +9,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from .env_safety import assert_env_key_shapes, assert_forward_env_keys
+from .env_safety import assert_forward_env_keys
 
 # Default sshd port baked into the image's mn-sshd-init.sh.
 DEFAULT_SSH_PORT = 2233
@@ -104,14 +104,9 @@ def ssh_run_script(target: SshTarget, script: RemoteScript, *, timeout: int = 60
     return ssh_run(target, remote_cmd, timeout=timeout)
 
 
-def ssh_run_bash_with_env(
-    target: SshTarget, script_text: str, env: dict[str, str] | None, *, timeout: int = 600
-) -> subprocess.CompletedProcess:
-    """Run ``script_text`` on the target via ``bash -s`` with ``env`` exported."""
-    if env:
-        assert_env_key_shapes(env)
-    prologue = "\n".join(f"export {k}={shlex.quote(str(v))}" for k, v in (env or {}).items())
-    full = f"set -uo pipefail\n{prologue}\n{script_text}\n"
+def ssh_run_bash_stdin(target: SshTarget, script_text: str, *, timeout: int = 600) -> subprocess.CompletedProcess:
+    """Run ``script_text`` on the target by piping it to ``bash -s`` under ``set -uo pipefail``."""
+    full = f"set -uo pipefail\n{script_text}\n"
     argv = [*target.argv(), "bash", "-s"]
     return subprocess.run(
         argv,

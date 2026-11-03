@@ -11,8 +11,8 @@ from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.coerce import text_or_none, to_int
-from hyperloom.common.io import JsonLineFormat, append_jsonl
+from hyperloom_common.coerce import text_or_none, to_int
+from hyperloom_common.io import JsonLineFormat, append_jsonl
 from hyperloom.inference_optimizer.session.session_paths import llm_calls_path
 from ._row_utils import call_key_fields, validate_closed_row
 
@@ -25,7 +25,6 @@ VALID_COMPONENTS: frozenset[str] = frozenset(
     {
         "orchestration",
         "kernel_agent",
-        "dynamic_action",
         "specialist",
         "critic",
         "proposal_scorer",
@@ -68,7 +67,6 @@ class LLMCallSite:
     component: str
     role: str | None = None
     task_id: str | None = None
-    dyn_id: str | None = None
     tick: int | None = None
     phase: str | None = None
     turn: int | None = None
@@ -86,7 +84,6 @@ class LLMCallRecord:
     call_id: str | None = None
     role: str | None = None
     task_id: str | None = None
-    dyn_id: str | None = None
     tick: int | None = None
     phase: str | None = None
     turn: int | None = None
@@ -143,7 +140,6 @@ class LLMCallRecord:
             call_id=md.get("call_id"),
             role=site.role,
             task_id=site.task_id,
-            dyn_id=site.dyn_id,
             tick=site.tick,
             phase=site.phase,
             turn=site.turn,
@@ -173,7 +169,6 @@ class LLMCallRecord:
             call_id=call_id,
             role=site.role,
             task_id=site.task_id,
-            dyn_id=site.dyn_id,
             tick=site.tick,
             phase=site.phase,
             turn=site.turn,
@@ -228,13 +223,10 @@ def append_llm_call(
             exc,
         )
 
-    # Second sink (opt-in): mirror the call to Langfuse live. Best-effort.
-    try:
-        from .langfuse_emitter import get_emitter
+    # Second sink (opt-in): mirror the call to Langfuse live.
+    from .langfuse_emitter import get_emitter
 
-        get_emitter(session_dir).record_llm_call(row)
-    except Exception:
-        log.debug("llm_trace: langfuse mirror failed", exc_info=True)
+    get_emitter(session_dir).record_llm_call(row)
 
 
 # The closed on-disk schema: every record field plus the write-time ``ts``.

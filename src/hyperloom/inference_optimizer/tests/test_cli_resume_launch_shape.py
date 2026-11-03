@@ -9,7 +9,7 @@ import argparse
 import json
 import os
 
-from hyperloom.inference_optimizer.cli import _export_operator_launch_shape
+from hyperloom.inference_optimizer.cli.launch_shape import _export_operator_launch_shape
 from hyperloom.inference_optimizer.cli.bootstrap import parse_operator_extra_env
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -34,7 +34,7 @@ def _pin(monkeypatch, **pins):
 
 def test_pin_fills_a_workload_knob_the_flags_left_unset(monkeypatch):
     """A pin reaches the ladder through the environment, and ``args`` is what every later projection writes."""
-    from hyperloom.inference_optimizer.cli import _resolve_workload_knobs
+    from hyperloom.inference_optimizer.cli.launch_shape import _resolve_workload_knobs
 
     _pin(monkeypatch, ISL="4096", OSL="512")
     args = _knob_args()
@@ -46,7 +46,7 @@ def test_pin_fills_a_workload_knob_the_flags_left_unset(monkeypatch):
 
 def test_an_explicit_flag_outranks_a_pin_of_the_same_knob(monkeypatch):
     """`--isl` wins over a pinned `ISL`, the ladder `_resolve_run_max_model_len_inner` already uses for its own knob."""
-    from hyperloom.inference_optimizer.cli import _resolve_workload_knobs
+    from hyperloom.inference_optimizer.cli.launch_shape import _resolve_workload_knobs
 
     _pin(monkeypatch, ISL="4096")
     args = _knob_args(isl=2048)
@@ -58,7 +58,7 @@ def test_an_explicit_flag_outranks_a_pin_of_the_same_knob(monkeypatch):
 
 def test_pin_outranks_persisted_state_for_a_workload_knob(monkeypatch):
     """A pin sits above the resumed session's recorded value, below an explicit flag."""
-    from hyperloom.inference_optimizer.cli import _resolve_workload_knobs
+    from hyperloom.inference_optimizer.cli.launch_shape import _resolve_workload_knobs
 
     _pin(monkeypatch, CONC="16")
     args = _knob_args()
@@ -70,7 +70,7 @@ def test_pin_outranks_persisted_state_for_a_workload_knob(monkeypatch):
 
 def test_a_pin_and_an_export_of_the_same_name_are_equivalent(monkeypatch):
     """No name is withheld from the export, so a ladder sees a pin exactly as it sees an operator's own export."""
-    from hyperloom.inference_optimizer.cli import _resolve_workload_knobs
+    from hyperloom.inference_optimizer.cli.launch_shape import _resolve_workload_knobs
 
     monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", "")
     monkeypatch.setenv("ISL", "")
@@ -93,7 +93,10 @@ def test_a_pinned_tp_reaches_the_environment_on_the_fresh_branch(monkeypatch):
     The environment is what the server launches from while ``state.json`` records ``args``, so a split between the
     two runs one shape and reports another. The projection has to sit after the ladder for them to agree.
     """
-    from hyperloom.inference_optimizer.cli import _export_workload_envs_for_optimize, _resolve_workload_knobs
+    from hyperloom.inference_optimizer.cli.launch_shape import (
+        _export_workload_envs_for_optimize,
+        _resolve_workload_knobs,
+    )
 
     for name in ("TP", "EP", "CONC"):
         monkeypatch.setenv(name, "")
@@ -166,7 +169,7 @@ def test_the_fresh_launch_anchors_stay_in_order():
 
 def test_the_environment_rung_is_positive_ints_only(monkeypatch):
     """The rung every ladder shares: a value that is not a positive integer falls through rather than raising."""
-    from hyperloom.inference_optimizer.cli import _positive_env_int
+    from hyperloom.inference_optimizer.cli.launch_shape import _positive_env_int
 
     for raw, expected in (("65536", 65536), ("", 0), ("nope", 0), ("0", 0), ("-4", 0), ("  8  ", 8)):
         monkeypatch.setenv("MAX_MODEL_LEN", raw)
@@ -175,7 +178,7 @@ def test_the_environment_rung_is_positive_ints_only(monkeypatch):
 
 def test_a_malformed_pinned_knob_does_not_take_the_run_down(monkeypatch):
     """A pin that is not a positive integer falls through to the rest of the ladder rather than raising."""
-    from hyperloom.inference_optimizer.cli import _resolve_workload_knobs
+    from hyperloom.inference_optimizer.cli.launch_shape import _resolve_workload_knobs
     from hyperloom.common.workload_defaults import DEFAULT_ISL
 
     monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", "")
@@ -194,7 +197,7 @@ def test_a_stale_shell_export_does_not_re_measure_a_resumed_session(monkeypatch)
     Hyperloom's own repro scripts ``export TP``/``CONC``/``ISL``/``OSL``, so sourcing one before a resume would
     otherwise re-measure the session at a different shape and record the shell's numbers as its own.
     """
-    from hyperloom.inference_optimizer.cli import _resolve_workload_knobs, _seed_env_from_resumed_state
+    from hyperloom.inference_optimizer.cli.launch_shape import _resolve_workload_knobs, _seed_env_from_resumed_state
 
     state = _ns(isl=3333, osl=777, conc=99, tp=8, ep=2, precision="int4", max_model_len=32768)
     # What sourcing a generated repro script leaves behind, plus the one knob this resume re-pins.
@@ -220,7 +223,7 @@ def test_a_plain_resume_does_not_warn_about_the_recorded_precision(tmp_path, mon
     A seeded ``PRECISION`` is indistinguishable from ``--precision``, so a resume of an fp8 session whose checkpoint
     reads bf16 would warn on every restart while changing nothing.
     """
-    from hyperloom.inference_optimizer.cli import _resolve_precision, _seed_env_from_resumed_state
+    from hyperloom.inference_optimizer.cli.launch_shape import _resolve_precision, _seed_env_from_resumed_state
 
     model = tmp_path / "model"
     model.mkdir()

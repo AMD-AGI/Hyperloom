@@ -14,7 +14,8 @@ from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.policy.gate import PolicyGate
 from hyperloom.orchestrator.prompts.speculative_decoding_focus import speculative_decoding_focus
-from hyperloom.orchestrator.prompts.specialist_prompt_builder import SpecialistPromptInputs, build_specialist_prompts
+from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
+from hyperloom.orchestrator.prompts.specialist_prompt_builder import build_specialist_prompts
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.specialists.domains import get_domain, normalize_dispatch_tags
 from hyperloom.orchestrator.specialists.runner import SpecialistRunner, SpecialistSubprocessConfig
@@ -35,7 +36,6 @@ def _system_prompt(*, model_name: str = _NAME, model_path: str = _PATH, model_in
     assert domain is not None
     system, _ = build_specialist_prompts(
         SpecialistPromptInputs(
-            task_id="t-1",
             domain=domain,
             gap_canonical_id="gap.decode",
             framework="vllm",
@@ -158,7 +158,6 @@ async def test_dispatch_tells_the_specialist_the_session_model(tmp_path, payload
 
     prep = await runner._prepare(
         RunnerContext(task=_StubTask("task-spec", params), lease=None, extra={"shared_state": coord.shared_state}),
-        prompt_inputs=None,
     )
 
     text = _flat(prep.system_prompt)

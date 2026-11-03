@@ -29,6 +29,8 @@ import traceback
 from pathlib import Path
 from typing import Any
 
+from sglang_shape_gate import SGLANG_SITECUSTOMIZE_MIN_VERSION
+
 # NOTE: ``ray`` is imported lazily inside ``_fanout_to_all_nodes`` only.
 
 
@@ -53,7 +55,6 @@ _PATCH_TREE_REL = (
     "inference_analysis",
     "sglang_roofline_patches",
 )
-_SGLANG_GC_MIN_VERSION: tuple[int, ...] = (0, 5, 18)
 _GC_PATCH_TREE_REL = (
     "examples",
     "custom_workflows",
@@ -109,14 +110,9 @@ def _numeric_version_prefix(version: str) -> tuple[int, ...] | None:
 
 
 def _uses_gc_patch(version: str) -> bool:
-    """Fallback when no ``--patch-set`` is given: mirror the SGLang shape gate from the pod's own env and version."""
-    override = os.environ.get("HYPERLOOM_SGLANG_SHAPE_MODE", "auto").strip().lower()
-    if override in {"patch", "patched"}:
-        return False
-    if override == "sitecustomize":
-        return True
+    """Fallback when no ``--patch-set`` is given: mirror the SGLang shape gate from the pod's own version."""
     running = _numeric_version_prefix(version)
-    return running is not None and running >= _SGLANG_GC_MIN_VERSION
+    return running is not None and running >= SGLANG_SITECUSTOMIZE_MIN_VERSION
 
 
 def _resolve_gc_patches_dir(patches_root: Path, version: str) -> Path | None:
@@ -182,7 +178,7 @@ def _all_markers_present(path: Path, markers: tuple[str, ...]) -> bool:
 def _safe_directory_args(args: tuple[str, ...], cwd: Path) -> list[str]:
     """Prepend a ``safe.directory`` exception for the checkout at ``cwd``."""
     try:
-        from hyperloom.common.git_safety import safe_directory_args
+        from hyperloom_common.git_safety import safe_directory_args
     except ImportError:
         return list(args)
     return safe_directory_args(list(args), cwd=cwd)
@@ -322,19 +318,9 @@ def _sglang_apply_layout(sglang: Any) -> tuple[tuple[Path, int] | None, str]:
     return layout, ""
 
 
-def _apply_on_pod(
-    *,
-    tracelens_root: str,
-    tracelens_internal_root: str,
-    sglang_version_pin: str | None,
-    patch_set: str | None = None,
-) -> dict[str, Any]:
-    """Apply (or verify) the TraceLens SGLang patch set on this pod; never raises (failures become ``status=failed``).
-
-    ``patch_set`` is the controller's choice and wins over the pod-side gate.
-    """
-    started = time.time()
-    result: dict[str, Any] = {
+def _new_pod_result() -> dict[str, Any]:
+    """A per-pod summary for this host with no outcome recorded yet."""
+    return {
         "host": socket.gethostname(),
         "status": "unknown",
         "sglang_version": None,
@@ -343,6 +329,20 @@ def _apply_on_pod(
         "error": None,
         "elapsed_sec": 0.0,
     }
+
+
+def _apply_on_pod(
+    *,
+    tracelens_root: str,
+    sglang_version_pin: str | None,
+    patch_set: str | None = None,
+) -> dict[str, Any]:
+    """Apply (or verify) the TraceLens SGLang patch set on this pod; never raises (failures become ``status=failed``).
+
+    ``patch_set`` is the controller's choice and wins over the pod-side gate.
+    """
+    started = time.time()
+    result = _new_pod_result()
     try:
         try:
             import sglang  # type: ignore[import-not-found]
@@ -402,7 +402,6 @@ def _apply_on_pod(
 def _fanout_to_all_nodes(
     *,
     tracelens_root: str,
-    tracelens_internal_root: str,
     sglang_version_pin: str | None,
     patch_set: str | None = None,
 ) -> list[dict[str, Any]]:
@@ -429,7 +428,6 @@ def _fanout_to_all_nodes(
         actors.append(
             opts.remote(
                 tracelens_root=tracelens_root,
-                tracelens_internal_root=tracelens_internal_root,
                 sglang_version_pin=sglang_version_pin,
                 patch_set=patch_set,
             )
@@ -438,19 +436,13 @@ def _fanout_to_all_nodes(
     return list(results)
 
 
-def main() -> int:
-    """Parse CLI arguments, fan out the patch to all pods, and aggregate."""
+def _parse_args() -> argparse.Namespace:
+    """Parse the TraceLens root, version pin, patch set and ``--local`` flags."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--tracelens-root",
         default=os.environ.get("TRACELENS_ROOT", ""),
         help="path to public TraceLens checkout (default: $TRACELENS_ROOT)",
-    )
-    parser.add_argument(
-        "--tracelens-internal-root",
-        default=os.environ.get("TRACELENS_INTERNAL_ROOT", ""),
-        help="path to TraceLens-internal checkout (default: $TRACELENS_INTERNAL_ROOT). "
-        "Reserved for future use; not consumed by current patch logic.",
     )
     parser.add_argument(
         "--sglang-version-pin",
@@ -470,8 +462,11 @@ def main() -> int:
         "backend, which ships+runs this script on each GPU pod directly. "
         "ray is never imported in this mode.",
     )
-    args = parser.parse_args()
+    return parser.parse_args()
 
+
+def _preconditions_met(args: argparse.Namespace) -> bool:
+    """Check the TraceLens root and ``git``; print the failure JSON and return False when either is missing."""
     if not args.tracelens_root or not Path(args.tracelens_root).is_dir():
         print(
             json.dumps(
@@ -483,7 +478,7 @@ def main() -> int:
                 indent=2,
             )
         )
-        return 2
+        return False
 
     if shutil.which("git") is None:
         print(
@@ -496,13 +491,21 @@ def main() -> int:
                 indent=2,
             )
         )
+        return False
+    return True
+
+
+def main() -> int:
+    """Parse CLI arguments, fan out the patch to all pods, and aggregate."""
+    args = _parse_args()
+
+    if not _preconditions_met(args):
         return 2
 
     # --local: infera SSH backend.
     if args.local:
         r = _apply_on_pod(
             tracelens_root=args.tracelens_root,
-            tracelens_internal_root=args.tracelens_internal_root,
             sglang_version_pin=args.sglang_version_pin or None,
             patch_set=args.patch_set,
         )
@@ -513,7 +516,6 @@ def main() -> int:
     try:
         per_pod = _fanout_to_all_nodes(
             tracelens_root=args.tracelens_root,
-            tracelens_internal_root=args.tracelens_internal_root,
             sglang_version_pin=args.sglang_version_pin or None,
             patch_set=args.patch_set,
         )

@@ -31,7 +31,6 @@ class ServerArgv:
 
     Attributes:
         framework: Framework the argv belongs to, lower-cased.
-        env_name: Benchmark env the string is transported in.
         text: The sealed argument string, exactly as the YAML now carries it.
         argv: ``text`` split into argv tokens.
         tokenized: False when the string could not be split without moving a
@@ -39,7 +38,6 @@ class ServerArgv:
     """
 
     framework: str
-    env_name: str
     text: str
     argv: tuple[str, ...]
     tokenized: bool
@@ -52,14 +50,14 @@ class ServerArgv:
         return hashlib.sha256(body.encode("utf-8", "replace")).hexdigest()
 
 
-def _sealed(framework: str | None, env_name: str, text: str) -> ServerArgv:
+def _sealed(framework: str | None, text: str) -> ServerArgv:
     """Build a :class:`ServerArgv` from an already-guarded argument string."""
     name = (framework or "").strip().lower()
     split = tokenize_server_args_preserving_json(text)
     if split is None:
-        return ServerArgv(framework=name, env_name=env_name, text=text, argv=(), tokenized=False)
+        return ServerArgv(framework=name, text=text, argv=(), tokenized=False)
     normalized, tokens = split
-    return ServerArgv(framework=name, env_name=env_name, text=normalized, argv=tuple(tokens), tokenized=True)
+    return ServerArgv(framework=name, text=normalized, argv=tuple(tokens), tokenized=True)
 
 
 def add_server_arg_unless_pinned(
@@ -68,26 +66,23 @@ def add_server_arg_unless_pinned(
     arg: str,
     *,
     pinned_by: Sequence[str],
-) -> bool:
+) -> None:
     """Merge ``arg`` into the composed argument string unless it is already pinned.
 
     Args:
         envs: The benchmark env mapping being materialised.
         framework: The framework the config serves.
         arg: The whole flag and its value, e.g. ``--block-size 128``.
-        pinned_by: Spellings whose presence in the current string means the
-            caller already pinned this flag, e.g. ``("block-size",
-            "block_size")``.
-
-    Returns:
-        bool: Whether ``arg`` was added.
+        pinned_by: Flag aliases whose whole-token presence (``--flag v`` or
+            ``--flag=v``) in the current string means the caller already pinned
+            this flag, e.g. ``("--block-size", "--block_size")``.
     """
     env_name = server_args_env_name(framework)
     existing = str(envs.get(env_name, "")).strip()
-    if any(spelling in existing for spelling in pinned_by):
-        return False
+    split = tokenize_server_args_preserving_json(existing)
+    if _pinned_values(split[1] if split else [], pinned_by):
+        return
     envs[env_name] = merge_server_args(existing, arg)
-    return True
 
 
 def _pinned_values(tokens: Sequence[str], aliases: Sequence[str]) -> list[str | None]:
@@ -164,7 +159,7 @@ def seal_server_argv(
     env_name = server_args_env_name(framework)
     text = validate_server_args_shell_safe(str(envs.get(env_name) or ""))
     text = merge_server_args(text, _expert_parallel_arg(text, framework, envs))
-    sealed = _sealed(framework, env_name, text)
+    sealed = _sealed(framework, text)
     if sealed.text or env_name in envs:
         envs[env_name] = sealed.text
     return sealed
@@ -214,7 +209,7 @@ def config_server_argv(config_path: str | Path) -> ServerArgv:
     """
     framework, envs = _benchmark_envs(config_path)
     env_name = server_args_env_name(framework)
-    return _sealed(framework, env_name, str(envs.get(env_name) or "").strip())
+    return _sealed(framework, str(envs.get(env_name) or "").strip())
 
 
 def config_launch_env(config_path: str | Path, base: Mapping[str, str]) -> dict[str, str]:

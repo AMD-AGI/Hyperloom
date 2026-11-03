@@ -32,21 +32,20 @@ def test_gain_math_branches() -> None:
 
 # --------------------------------------------------------------------------- # orchestrator.knowledge.kb_writeback #
 # --------------------------------------------------------------------------- #
-def test_kb_writeback_default_root_override(monkeypatch, tmp_path) -> None:
-    from hyperloom.orchestrator.knowledge import kb_writeback
+def test_framework_optimization_root_override(monkeypatch, tmp_path) -> None:
+    from hyperloom.agents.framework.kb import framework_optimization_root
 
     monkeypatch.setenv("INFERENCE_OPTIMIZER_FA_KB_PATH", str(tmp_path))
-    root = kb_writeback._default_kb_root()
-    assert root == tmp_path / "framework_optimization"
+    assert framework_optimization_root() == tmp_path / "framework_optimization"
 
 
-def test_kb_writeback_default_root_uses_user_data_path(monkeypatch, tmp_path) -> None:
-    from hyperloom.orchestrator.knowledge import kb_writeback
+def test_framework_optimization_root_uses_user_data_path(monkeypatch, tmp_path) -> None:
+    from hyperloom.agents.framework.kb import framework_optimization_root
 
     monkeypatch.delenv("INFERENCE_OPTIMIZER_FA_KB_PATH", raising=False)
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "workspace"))
 
-    assert kb_writeback._default_kb_root() == tmp_path / "workspace" / "framework-kb" / "framework_optimization"
+    assert framework_optimization_root() == tmp_path / "workspace" / "framework-kb" / "framework_optimization"
 
 
 async def test_kb_writeback_rejects_unknown_outcome() -> None:
@@ -103,44 +102,15 @@ def test_framework_registry_surface() -> None:
     assert fr.is_scriptable("unknown") is False
 
 
-# --------------------------------------------------------------------------- #
-# orchestrator.phases.quantization_schemes #
-# --------------------------------------------------------------------------- #
-def test_quantization_join_and_prompt() -> None:
-    from hyperloom.orchestrator.phases import quantization_schemes as qs
-
-    assert qs._join_clauses([]) == ""
-    assert qs._join_clauses(["a"]) == "a"
-    assert qs._join_clauses(["a", "b", "c"]) == "a, b and c"
-
-    cfg = qs.QuantizationConfig(global_scheme="fp8")
-    prompt = qs.build_quantization_prompt(cfg)
-    assert "Quantization strategy" in prompt
-
-
 # --------------------------------------------------------------------------- # orchestrator.state.objective #
 # --------------------------------------------------------------------------- #
-def test_tput_objective_progress_zero() -> None:
+def test_tput_objective_unmeasured_is_not_reached() -> None:
     from hyperloom.orchestrator.state.objective import TargetTputObjective
 
     obj = TargetTputObjective(target_tput_per_gpu=100.0)
     state = SimpleNamespace(current_best={}, baseline_tput=0.0)
-    assert obj.progress(state) == 0.0
     assert obj.reached(state) is False
     assert obj.describe() == "target_tput_per_gpu=100.0"
-
-
-def test_baseline_objective_progress_zero_ref(tmp_path) -> None:
-    from hyperloom.orchestrator.state.objective import TargetBaselineObjective
-
-    report = tmp_path / "benchmark_report.json"
-    report.write_text(json.dumps({"throughput": {"output_throughput": 50.0}}), encoding="utf-8")
-    obj = TargetBaselineObjective(baseline_dir=str(tmp_path))
-    assert obj.kind() == "baseline"
-    # Force the degenerate ref to exercise the guard.
-    obj._ref_tput = 0.0
-    state = SimpleNamespace(current_best={"tput": 10.0}, baseline_tput=0.0)
-    assert obj.progress(state) == 0.0
 
 
 def test_baseline_objective_invalid_dir() -> None:
@@ -215,23 +185,6 @@ def test_file_lock_acquires(tmp_path) -> None:
 # --------------------------------------------------------------------------- #
 # orchestrator.actions.executors._framework_gap_composer #
 # --------------------------------------------------------------------------- #
-def test_framework_gap_bottleneck(tmp_path) -> None:
-    from hyperloom.orchestrator.actions.executors import _framework_gap_composer as gc
-
-    # top_kernels as list of strings.
-    bp = tmp_path / "bd.json"
-    bp.write_text(json.dumps({"top_kernels": ["fused_moe_gemm_kernel"]}), encoding="utf-8")
-    assert gc._extract_bottleneck_from_breakdown(str(bp)) == "moe"
-
-    # No candidates -> "".
-    empty = tmp_path / "empty.json"
-    empty.write_text(json.dumps({"top_kernels": []}), encoding="utf-8")
-    assert gc._extract_bottleneck_from_breakdown(str(empty)) == ""
-
-    assert gc._extract_bottleneck_from_breakdown(None) == ""
-    assert gc._extract_bottleneck_from_breakdown(str(tmp_path / "missing.json")) == ""
-
-
 def test_framework_gap_compose() -> None:
     from hyperloom.orchestrator.actions.executors import _framework_gap_composer as gc
 

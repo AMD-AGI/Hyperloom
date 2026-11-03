@@ -12,9 +12,7 @@ import json
 import os
 import shlex
 import subprocess
-import pathlib
 import sys
-import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -398,10 +396,7 @@ def _rollback_remote(pid: int) -> str:
 def _rank0_pid_from_log(pid_dir: str) -> int | None:
     """Read rank 0 PID from ``{pid_dir}/rank_0.pid`` (best-effort)."""
     try:
-        pid_path = pathlib.Path(pid_dir) / "rank_0.pid"
-        if not pid_path.is_file():
-            pid_path = pathlib.Path(tempfile.gettempdir()) / "multi_node_pids" / "rank_0.pid"
-        return int(pid_path.read_text().strip())
+        return int((Path(pid_dir) / "rank_0.pid").read_text().strip())
     except (OSError, ValueError):
         return None
 
@@ -505,6 +500,36 @@ def _wait_health(
     return False
 
 
+def _pd_leg_healthy(role: str, url: str) -> bool:
+    """Return True when one PD leg's own ``/health`` answers 2xx."""
+    import urllib.error
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(  # nosec B310 - http URL built from this driver's own summary.
+            f"{url.rstrip('/')}/health",
+            timeout=3,
+        ) as resp:
+            if 200 <= resp.status < 300:
+                _log(f"{role} leg /health OK ({url})")
+                return True
+    except (urllib.error.URLError, OSError):
+        pass
+    return False
+
+
+def _pd_leg_fatal(role: str, leg_log: Path | None) -> bool:
+    """Return True after reporting a fatal line found in a PD leg's own log."""
+    if leg_log is None:
+        return False
+    fatal_line = _scan_log_for_fatal(leg_log)
+    if not fatal_line:
+        return False
+    _log(f"ERROR {role} leg fatal in {leg_log.name}: {fatal_line[:300]}; aborting health wait")
+    _emit_log_tail(leg_log)
+    return True
+
+
 def _wait_pd_legs_health(
     prefill_url: str,
     decode_url: str,
@@ -512,8 +537,6 @@ def _wait_pd_legs_health(
     log_dir: str | None = None,
 ) -> bool | None:
     """Poll both PD legs' own ``/health`` until each answers, within one budget."""
-    import urllib.error
-    import urllib.request
 
     def _leg_log(role: str) -> Path | None:
         # Legs log to {pid_file_name stem}.log, e.g. decode_0.log / prefill_0.log.
@@ -523,26 +546,13 @@ def _wait_pd_legs_health(
     started = time.monotonic()
     while pending and time.monotonic() - started < timeout_s:
         for role, url in list(pending.items()):
-            try:
-                with urllib.request.urlopen(  # nosec B310 - http URL built from this driver's own summary.
-                    f"{url.rstrip('/')}/health",
-                    timeout=3,
-                ) as resp:
-                    if 200 <= resp.status < 300:
-                        _log(f"{role} leg /health OK ({url})")
-                        pending.pop(role)
-                        continue
-            except (urllib.error.URLError, OSError):
-                pass
+            if _pd_leg_healthy(role, url):
+                pending.pop(role)
+                continue
             # A remote leg's PID is not ours to os.kill; a fatal in its own log is the cross-node-safe proof of death
             # (the nohup wrapper hides crashes).
-            leg_log = _leg_log(role)
-            if leg_log is not None:
-                fatal_line = _scan_log_for_fatal(leg_log)
-                if fatal_line:
-                    _log(f"ERROR {role} leg fatal in {leg_log.name}: {fatal_line[:300]}; aborting health wait")
-                    _emit_log_tail(leg_log)
-                    return False
+            if _pd_leg_fatal(role, _leg_log(role)):
+                return False
         if pending:
             time.sleep(5)
     if pending:
@@ -588,44 +598,8 @@ def _log_rank0_post_spawn(log_dir: Path, rank0_pid: int | None) -> None:
     _emit_rank0_log_tail(log_dir)
 
 
-def _build_parser() -> argparse.ArgumentParser:
-    """The launcher's command line."""
-    p = argparse.ArgumentParser(
-        prog="launch_multinode.py",
-        description="Spawn one sglang/vllm rank per RayJob node via ray actors.",
-    )
-    p.add_argument("--framework", required=True, choices=("sglang", "vllm"))
-    p.add_argument("--model", required=True)
-    p.add_argument("--tp", type=int, required=True)
-    p.add_argument("--nnodes", type=int, required=True)
-    p.add_argument("--pid-dir", required=True)
-    p.add_argument("--log-dir", required=True)
-    p.add_argument(
-        "--dist-init-port",
-        type=int,
-        default=int(os.environ.get("RAYJOB_DIST_INIT_PORT") or _DEFAULT_DIST_INIT_PORT),
-        help=f"sglang collective rendezvous port (default {_DEFAULT_DIST_INIT_PORT}, "
-        f"resolution: --dist-init-port > $RAYJOB_DIST_INIT_PORT > {_DEFAULT_DIST_INIT_PORT})",
-    )
-    p.add_argument("--no-wait-health", action="store_true", help="don't poll /health on rank 0 before returning")
-    p.add_argument("--extra-args", default="", help="extra args appended verbatim to the framework launcher")
-    p.add_argument(
-        "--torch-profiler-dir",
-        default="",
-        help="when set, exported as SGLANG_TORCH_PROFILER_DIR on every "
-        "rank's framework subprocess; intended for a wekafs path "
-        "shared with the sandbox (see HYPERLOOM_MN_PROFILE_TRACE_DIR)",
-    )
-    p.add_argument(
-        "--ep",
-        type=int,
-        default=1,
-        help="expert-parallel size; 1 (default) keeps experts "
-        "TP-sharded (legacy). >=2 emits sglang "
-        "`--enable-ep-moe --ep-size N` or vllm "
-        "`--enable-expert-parallel`. Caller (orchestrator "
-        "helper) is responsible for ensuring ep <= tp.",
-    )
+def _add_pd_arguments(p: argparse.ArgumentParser) -> None:
+    """Add the prefill/decode disaggregation options to the launcher's parser."""
     # PD disaggregation args: `aggregated` is one TP group; `disaggregated` splits into prefill/decode groups fronted
     # by the router.
     p.add_argument(
@@ -671,6 +645,47 @@ def _build_parser() -> argparse.ArgumentParser:
         default=_PD_DEFAULT_BOOTSTRAP_PORT,
         help=f"sglang PD bootstrap rendezvous port (default {_PD_DEFAULT_BOOTSTRAP_PORT})",
     )
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    """The launcher's command line."""
+    p = argparse.ArgumentParser(
+        prog="launch_multinode.py",
+        description="Spawn one sglang/vllm rank per RayJob node via ray actors.",
+    )
+    p.add_argument("--framework", required=True, choices=("sglang", "vllm"))
+    p.add_argument("--model", required=True)
+    p.add_argument("--tp", type=int, required=True)
+    p.add_argument("--nnodes", type=int, required=True)
+    p.add_argument("--pid-dir", required=True)
+    p.add_argument("--log-dir", required=True)
+    p.add_argument(
+        "--dist-init-port",
+        type=int,
+        default=int(os.environ.get("RAYJOB_DIST_INIT_PORT") or _DEFAULT_DIST_INIT_PORT),
+        help=f"sglang collective rendezvous port (default {_DEFAULT_DIST_INIT_PORT}, "
+        f"resolution: --dist-init-port > $RAYJOB_DIST_INIT_PORT > {_DEFAULT_DIST_INIT_PORT})",
+    )
+    p.add_argument("--no-wait-health", action="store_true", help="don't poll /health on rank 0 before returning")
+    p.add_argument("--extra-args", default="", help="extra args appended verbatim to the framework launcher")
+    p.add_argument(
+        "--torch-profiler-dir",
+        default="",
+        help="when set, exported as SGLANG_TORCH_PROFILER_DIR on every "
+        "rank's framework subprocess; intended for a wekafs path "
+        "shared with the sandbox (see HYPERLOOM_MN_PROFILE_TRACE_DIR)",
+    )
+    p.add_argument(
+        "--ep",
+        type=int,
+        default=1,
+        help="expert-parallel size; 1 (default) keeps experts "
+        "TP-sharded (legacy). >=2 emits sglang "
+        "`--enable-ep-moe --ep-size N` or vllm "
+        "`--enable-expert-parallel`. Caller (orchestrator "
+        "helper) is responsible for ensuring ep <= tp.",
+    )
+    _add_pd_arguments(p)
     return p
 
 
@@ -735,6 +750,19 @@ def _on_node(spawn_actor, node: dict):
     )
 
 
+def _pd_role(args: argparse.Namespace, plan: _PdPlan, role: str, port: int, *, kv_rank: int) -> _PdRole:
+    """One side of a prefill/decode split, sharing the launch's KV transfer settings."""
+    return _PdRole(
+        role=role,
+        port=port,
+        transfer_backend=args.pd_transfer_backend,
+        ib_device=plan.ib_device,
+        bootstrap_port=args.pd_bootstrap_port,
+        kv_rank=kv_rank,  # vllm-only; sglang ignores
+        kv_parallel_size=2,
+    )
+
+
 def _spawn_rank_actors(
     args: argparse.Namespace,
     *,
@@ -778,15 +806,7 @@ def _spawn_rank_actors(
         dist_init_port=args.dist_init_port,
         extra_args=extra_args,
         ep=int(args.ep or 1),
-        pd=_PdRole(
-            role="prefill",
-            port=_PD_PREFILL_PORT,
-            transfer_backend=args.pd_transfer_backend,
-            ib_device=plan.ib_device,
-            bootstrap_port=args.pd_bootstrap_port,
-            kv_rank=0,  # vllm-only; sglang ignores
-            kv_parallel_size=2,
-        ),
+        pd=_pd_role(args, plan, "prefill", _PD_PREFILL_PORT, kv_rank=0),
     )
     for grp_rank in range(plan.prefill_nodes):
         node = nodes[grp_rank]
@@ -804,15 +824,7 @@ def _spawn_rank_actors(
         dist_init_port=_pd_decode_dist_init_port(args.dist_init_port),
         extra_args=extra_args,
         ep=int(args.ep or 1),
-        pd=_PdRole(
-            role="decode",
-            port=_PD_DECODE_PORT,
-            transfer_backend=args.pd_transfer_backend,
-            ib_device=plan.ib_device,
-            bootstrap_port=args.pd_bootstrap_port,
-            kv_rank=1,
-            kv_parallel_size=2,
-        ),
+        pd=_pd_role(args, plan, "decode", _PD_DECODE_PORT, kv_rank=1),
     )
     for grp_rank in range(plan.decode_nodes):
         node = nodes[plan.prefill_nodes + grp_rank]

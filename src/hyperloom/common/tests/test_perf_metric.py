@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.common.env import EnvValueError
+from hyperloom_common.env import EnvValueError
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.perf_metric import (
     GRADED_DURATION,
@@ -76,6 +76,14 @@ def test_agentx_active_uses_workload_identity_not_grading_override(monkeypatch, 
     monkeypatch.setenv("HYPERLOOM_AGENTX", env)
     monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
     assert agentx_active(benchmark_mode=mode) is expected
+
+
+def test_agentx_active_reads_the_bound_benchmark_config(monkeypatch, native_benchmark):
+    from hyperloom.common.perf_metric import agentx_active
+
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(native_benchmark))
+    assert agentx_active() is True
 
 
 def test_snapshot_carries_both_graded_axes():

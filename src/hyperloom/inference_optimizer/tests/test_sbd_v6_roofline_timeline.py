@@ -96,7 +96,7 @@ def _ta_result(**overrides: Any) -> dict[str, Any]:
         "analysis_meta": {
             "route": "agent",
             "tool": "tracelens",
-            "steady_state": {"requested_mode": "decode_only", "source": "split_chunk"},
+            "steady_state": {"requested_mode": "decode_only"},
             "preflight": {"trace_input_type": "file", "trace_file_count": 1},
             "split": {"chunks_extracted": 3},
             "selection": {"selected_chunk": "decode_only_steady_state_0.json.gz"},
@@ -198,7 +198,7 @@ def _validate(**overrides: Any) -> dict[str, Any]:
         "probe_version": "selfcert-1.0.0",
         "probe_status": "ok",
         "verdict": {
-            "usable_by": ["bypass", "tracelens"],
+            "usable_by": ["tracelens"],
             "decode_conclusions_valid": True,
             "silently_wrong": False,
             "severity": "ok",
@@ -228,7 +228,6 @@ def _validate(**overrides: Any) -> dict[str, Any]:
                 "rank": 0,
                 "parse": {
                     "event_total": 5000,
-                    "aggregation_scope": "full_trace",
                     "truncated": False,
                     "truncation_reason": "",
                 },
@@ -257,7 +256,6 @@ def _validate(**overrides: Any) -> dict[str, Any]:
                 "annotations": {"step_root_count": 12},
             }
         ],
-        "chunk_level": [{"path": "/w/t/chunk0.json"}, {"path": "/w/t/chunk1.json"}],
         "checks": [],
     }
     validate.update(overrides)
@@ -292,8 +290,6 @@ def test_selfcert_scalars_reach_the_event_and_the_tables_do_not(tmp_path: Path) 
     assert quality["attributed_gpu_ms"] == 45.5
     assert quality["gpu_kernel_sum_ms"] == 50.0
     assert quality["op_meta_basis"] == {"cpu_op_total": 100, "cpu_op_with_meta": 80}
-    # The scope the ratios were computed over.
-    assert quality["aggregation_scope"] == "full_trace"
     assert quality["truncated"] is False
     # The boolean and the threshold it was compared against.
     assert quality["graph_under_recorded"] is False
@@ -303,14 +299,12 @@ def test_selfcert_scalars_reach_the_event_and_the_tables_do_not(tmp_path: Path) 
     assert quality["capture_sidecar_files_present"] == 3
     assert quality["analyzed_rank"] == 0
     assert quality["rank_count_certified"] == 1
-    assert quality["chunk_count_certified"] == 2
     assert quality["file_count_by_role"]["capture_sidecar"] == 3
 
     # The unbounded tables must not have been copied in.
     flat = json.dumps(validate)
     assert "candidates" not in flat
     assert "rank_level" not in flat
-    assert "chunk_level" not in flat
     assert "capture_traces/bs_" not in flat
 
 
@@ -785,37 +779,13 @@ def test_trace_file_summary_stays_bounded_on_multi_rank() -> None:
     assert summary["files_by_rank"]["3"] == 53
 
 
-def test_steady_state_normalizes_across_tools() -> None:
-    bypass = _analysis_steady_state(
-        {
-            "steady_window": {"step_name": "denoise", "step_count": 20},
-            "estimated": False,
-            "aggregation_scope": "steady_state",
-        },
-        requested_mode="decode_only",
-        tool="bypass",
-    )
-    assert bypass["source"] == "in_reader_window"
-    assert bypass["fell_back_to_full_trace"] is False
-    assert bypass["selected"]["step_count"] == 20
-
-    fallback = _analysis_steady_state(
-        {"steady_window": None, "estimated": True, "aggregation_scope": "full_trace"},
-        requested_mode="decode_only",
-        tool="bypass",
-    )
-    assert fallback["fell_back_to_full_trace"] is True
-
-    tracelens = _analysis_steady_state(
+def test_steady_state_reports_the_split_chunk_selection() -> None:
+    steady = _analysis_steady_state(
         {"run_meta": {"selection": {"selected_chunk": "decode_only_steady_state_0.json.gz"}}},
         requested_mode="decode_only",
-        tool="tracelens",
     )
-    # Same question, different mechanism: one selects a chunk file, the other a window in memory, and a consumer must
-    # not have to branch on which ran.
-    assert tracelens["source"] == "split_chunk"
-    assert tracelens["selected"]["selected_chunk"].startswith("decode_only")
-    assert set(bypass) == set(tracelens)
+    assert steady["selected"]["selected_chunk"].startswith("decode_only")
+    assert steady["fell_back_to_full_trace"] is False
 
 
 def _certificate(*, density: dict[str, Any], verdict: dict[str, Any], rank_count: int = 1) -> dict[str, Any]:
@@ -849,18 +819,17 @@ def test_trace_validate_keeps_the_two_verdict_axes_apart() -> None:
                     "graph_under_recorded": True,
                 },
                 verdict={
-                    "usable_by": ["bypass", "tracelens"],
+                    "usable_by": ["tracelens"],
                     "decode_conclusions_valid": False,
                     "silently_wrong": True,
                 },
             ),
         ),
     )
-    assert out["verdict"]["usable_by"] == ["bypass", "tracelens"]
+    assert out["verdict"]["usable_by"] == ["tracelens"]
     assert out["verdict"]["decode_conclusions_valid"] is False
     assert out["verdict"]["silently_wrong"] is True
     assert out["probe_status"] == "ok"
-    assert out["chunk_level"] == []
 
     coverage = next(row for row in out["checks"] if row["check_id"] == CHECK_GRAPH_LAUNCH_COVERAGE)
     assert coverage["status"] == "failed"
@@ -886,7 +855,7 @@ def test_eager_capture_skips_coverage_instead_of_failing_it() -> None:
                     "graph_under_recorded": False,
                 },
                 verdict={
-                    "usable_by": ["bypass", "tracelens"],
+                    "usable_by": ["tracelens"],
                     "decode_conclusions_valid": True,
                     "silently_wrong": False,
                 },
@@ -906,7 +875,7 @@ def test_tensor_parallel_capture_reports_the_uncertified_ranks() -> None:
             "sglang",
             certificate=_certificate(
                 density={"graph_mode": True, "graph_under_recorded": False},
-                verdict={"usable_by": ["bypass"], "decode_conclusions_valid": True, "silently_wrong": False},
+                verdict={"usable_by": ["tracelens"], "decode_conclusions_valid": True, "silently_wrong": False},
                 rank_count=8,
             ),
         ),
@@ -955,7 +924,7 @@ def test_validate_lands_per_profile_attempt(tmp_path: Path) -> None:
             profile_result=_profile_result(
                 trace_validate={
                     "verdict": {
-                        "usable_by": ["bypass", "tracelens"],
+                        "usable_by": ["tracelens"],
                         "decode_conclusions_valid": True,
                         "silently_wrong": False,
                     },
@@ -971,7 +940,7 @@ def test_validate_lands_per_profile_attempt(tmp_path: Path) -> None:
     runs = _actions(tmp_path)[0]["profile"]["runs"]
     assert runs[0]["validate"]["usable_by"] == []
     assert runs[0]["validate"]["failed_check_ids"] == [CHECK_TRACE_HAS_OPS]
-    assert runs[1]["validate"]["usable_by"] == ["bypass", "tracelens"]
+    assert runs[1]["validate"]["usable_by"] == ["tracelens"]
     assert runs[1]["validate"]["decode_conclusions_valid"] is True
     assert runs[1]["validate"]["failed_check_ids"] == []
 

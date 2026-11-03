@@ -12,16 +12,14 @@ from fnmatch import fnmatch
 import os
 import shutil
 import stat
+import subprocess
 from pathlib import Path
 from typing import Any
 
 from kernelforge.agent_backends.base import AgentProviderError, AgentRunSpec
-from kernelforge.tools.git import git, git_bytes
-from kernelforge.loop.new_path_allowlist import matches_commit_new_paths, normalize_commit_new_paths
-from kernelforge.workspace.edit_policy import (
-    is_protected_path,
-    protected_path_inventory,
-)
+from kernelforge.utils.git import git, git_bytes
+from kernelforge.utils.new_path_allowlist import matches_commit_new_paths, normalize_commit_new_paths
+from kernelforge.utils.protected_paths import ProtectedPathRules
 
 log = logging.getLogger(__name__)
 
@@ -129,6 +127,16 @@ class WorkspaceGuard:
             explicit.add(Path(self.driver_path).resolve())
         return self.target_paths - explicit
 
+    def _protected_path_rules(self) -> ProtectedPathRules:
+        """The caller's rules for what this session must leave as it is; refused when it supplied none."""
+        rules = self.spec.protected_path_rules
+        if rules is None:
+            raise WorkspaceSafetyError(
+                "a session that can write needs its caller's protected-path rules (AgentRunSpec.protected_path_rules)",
+                rejection=False,
+            )
+        return rules
+
     def _is_protected(self, relative: str) -> bool:
         """Return whether a repository path belongs to the measurement surface."""
         if (self.root / relative).resolve() in self._target_exempt():
@@ -136,7 +144,7 @@ class WorkspaceGuard:
         exact_paths = list(self.spec.protected_paths)
         if self.driver_path is not None:
             exact_paths.append(str(self.driver_path))
-        return is_protected_path(
+        return self._protected_path_rules().is_protected(
             relative,
             workspace=self.root,
             exact_paths=exact_paths,
@@ -144,7 +152,7 @@ class WorkspaceGuard:
         )
 
     def _ignored_protected_paths(self) -> set[Path]:
-        """List the complete protected inventory using the shared policy."""
+        """List the complete protected inventory under the caller's rules."""
 
         exact_paths = list(self.spec.protected_paths)
         if self.driver_path is not None:
@@ -152,7 +160,7 @@ class WorkspaceGuard:
         try:
             return (
                 set(
-                    protected_path_inventory(
+                    self._protected_path_rules().inventory(
                         self.root,
                         exact_paths=exact_paths,
                         extra_globs=self.spec.protected_globs,
@@ -484,10 +492,8 @@ class WorkspaceGuard:
         self._remove_filesystem_path(self.root / relative)
         self._run_git_restore("checkout-index", "--force", "--", relative)
 
-    def _restore_baseline(self) -> None:
-        """Reconstruct the exact pre-turn refs, index, and Git-visible files."""
-        before_unstaged, before_staged, before_untracked = self._current_changes()
-        before_protected = self._ignored_protected_paths()
+    def _restore_baseline_refs(self) -> None:
+        """Put every ref and HEAD back to the pre-turn values."""
         current_refs = self._current_refs()
 
         for ref in sorted(current_refs.keys() - self.baseline_refs.keys()):
@@ -508,6 +514,12 @@ class WorkspaceGuard:
                 "HEAD",
                 f"refs/heads/{self.branch}",
             )
+
+    def _restore_baseline(self) -> None:
+        """Reconstruct the exact pre-turn refs, index, and Git-visible files."""
+        before_unstaged, before_staged, before_untracked = self._current_changes()
+        before_protected = self._ignored_protected_paths()
+        self._restore_baseline_refs()
 
         if self.baseline_index_path is None or self.baseline_index_snapshot is None:
             raise WorkspaceSafetyError(
@@ -628,7 +640,7 @@ class WorkspaceGuard:
             try:
                 self._restore_baseline()
                 remaining = self._read_only_violations()
-            except Exception as exc:
+            except (WorkspaceSafetyError, OSError, subprocess.SubprocessError) as exc:
                 raise WorkspaceSafetyError(
                     f"the read-only session changed the workspace and automatic restoration failed: {exc}"
                 ) from exc
@@ -645,7 +657,7 @@ class WorkspaceGuard:
             # mode exists to carry through a rejection, so recover the snapshot instead.
             try:
                 self._restore_baseline()
-            except Exception as exc:
+            except (WorkspaceSafetyError, OSError, subprocess.SubprocessError) as exc:
                 # Not a verdict: rollback also runs on the way out of a timeout or a transport failure, so marking
                 # this one a rejection reported an expired clock as a deterministic safety stop and abandoned work a
                 # retry could have finished.

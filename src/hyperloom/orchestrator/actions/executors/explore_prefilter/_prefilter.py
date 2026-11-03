@@ -36,7 +36,7 @@ from typing import Any
 
 import yaml
 
-from hyperloom.common.coerce import to_float, to_str_list
+from hyperloom_common.coerce import to_float, to_str_list
 from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
 from hyperloom.inference_optimizer.grading import resolved_grading
 

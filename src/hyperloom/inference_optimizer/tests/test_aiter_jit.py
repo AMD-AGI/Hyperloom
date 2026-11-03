@@ -18,6 +18,7 @@ except ModuleNotFoundError:  # optional runtime dependency
 
 from hyperloom.orchestrator.actions.executors import _aiter_jit
 from hyperloom.orchestrator.actions.executors import baseline
+from hyperloom.orchestrator.actions.executors.benchmark_run.records import BenchmarkAttempt
 from hyperloom.orchestrator.kernel import _integrate_rebaseline as integrate_rebaseline
 
 
@@ -275,7 +276,7 @@ def baseline_launch(monkeypatch, tmp_path):
     async def launch(*, profile=False, ready=False, extra=None):
         executor = profile_executor if profile else baseline_executor
         return await executor._run_single_benchmark(
-            baseline.BenchmarkAttempt(
+            BenchmarkAttempt(
                 timeout_sec=123,
                 override_result_dir=None,
                 resolved_model="fixture-model",

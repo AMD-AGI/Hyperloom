@@ -13,21 +13,22 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.io import WriteOptions, atomic_write_json
+from hyperloom_common.io import WriteOptions, atomic_write_json
 from hyperloom.inference_optimizer.breakdown.recorder import record_metadata_langfuse
 from hyperloom.inference_optimizer.session.session_paths import (
+    BREAKDOWN_FILENAME,
     decision_trace_path,
     forge_steps_path,
     gemm_tuning_steps_path,
+    manifest_path,
     recipe_snapshot_audit_jsonl,
     specialist_intel_path,
     trace_dir,
-    trace_ext_dir,
     trajectory_dir,
 )
 from . import langfuse_mapping as lfmap
 from . import trajectory_projection as trajmap
-from .trajectory_trace import load_shard as load_trajectory_shard, trajectory_shards
+from .trajectory_trace import load_shard, trajectory_shards
 from .trace_env import (
     ENV_LANGFUSE_HOST,
     ENV_LANGFUSE_PUBLIC_KEY,
@@ -39,6 +40,9 @@ from .trace_env import (
 )
 
 log = logging.getLogger(__name__)
+
+#: What a Langfuse SDK call fails with: an argument or method one SDK major version rejects, or the transport refusing.
+_SDK_FAILURES: tuple[type[Exception], ...] = (AttributeError, TypeError, ValueError, RuntimeError, OSError)
 
 _STATUS_CLOCK_BUCKET_SEC = 60
 _STATUS_CLOCK_KEYS = frozenset({"explore_elapsed_s", "session_elapsed_s"})
@@ -64,11 +68,6 @@ def _status_signature(status: dict[str, Any]) -> tuple:
     return tuple(sorted(items))
 
 
-def _manifest_path(session_dir: Path) -> Path:
-    """Return the path to a session's ``manifest.json``."""
-    return session_dir / "manifest.json"
-
-
 def _cursor_entries(persisted: Any) -> dict[str, int]:
     """Return the well-formed ``{name: rows}`` entries of one persisted cursor map."""
     if not isinstance(persisted, dict):
@@ -85,14 +84,10 @@ def _cursor_entries(persisted: Any) -> dict[str, int]:
 def _persisted_rows_sent(session_dir: Path, receipt: dict[str, Any]) -> dict[str, int]:
     """Return how many rows of each source log a previous process sent, keyed by its path under ``session_dir``.
 
-    Receipts written by v1.0.0 through v1.1.3 carry the ext cursors as ``ext_rows_sent``, and v1.1.3 receipts carry
-    the trajectory cursors as ``trajectory_rows_sent``, both keyed by shard name.
+    v1.1.3 receipts carry the trajectory cursors as ``trajectory_rows_sent``, keyed by shard name.
     """
-    cursors: dict[str, int] = {}
-    for released_key, shard_dir in (("ext_rows_sent", trace_ext_dir), ("trajectory_rows_sent", trajectory_dir)):
-        prefix = shard_dir(session_dir).relative_to(session_dir).as_posix()
-        for name, rows in _cursor_entries(receipt.get(released_key)).items():
-            cursors[f"{prefix}/{name}"] = rows
+    prefix = trajectory_dir(session_dir).relative_to(session_dir).as_posix()
+    cursors = {f"{prefix}/{name}": rows for name, rows in _cursor_entries(receipt.get("trajectory_rows_sent")).items()}
     cursors.update(_cursor_entries(receipt.get("rows_sent")))
     return cursors
 
@@ -224,16 +219,9 @@ def _set_trace_attrs(
         otel.set_attribute(f"langfuse.trace.metadata.{k}", clean)
 
 
-def _load_jsonl(path: Path) -> list[dict[str, Any]]:
-    """Load a JSONL file into a list of dict records."""
-    from hyperloom.common.jsonio import read_jsonl
-
-    return read_jsonl(path)
-
-
 def _load_json(path: Path) -> dict[str, Any]:
     """Load a JSON object file."""
-    from hyperloom.common.jsonio import read_json
+    from hyperloom_common.jsonio import read_json
 
     return read_json(path, default={}, require_dict=True)
 
@@ -303,14 +291,9 @@ class LangfuseEmitter:
         self._pending: dict[tuple, dict[str, dict[str, Any]]] = {}
         self._client: Any = None
         # Manifest + correlation resolved unconditionally so the receipt always reports the right ids.
-        self._manifest: dict[str, Any] = _load_json(_manifest_path(self.session_dir))
-        self._session_label: str | None = lfmap.langfuse_session_id(
-            self._manifest,
-            self.session_dir.name,
-        )
-        self._trace_id: str | None = lfmap.derive_trace_id(
-            lfmap.correlation_seed(self._manifest, self.session_dir.name),
-        )
+        self._manifest: dict[str, Any] = _load_json(manifest_path(self.session_dir))
+        self._session_label: str = lfmap.correlation_seed(self._manifest, self.session_dir.name)
+        self._trace_id: str = lfmap.derive_trace_id(self._session_label)
         # Span hierarchy caches (lazy): root; one per phase; one per (phase, agent).
         self._root_span: Any = None
         self._phase_spans: dict[str, Any] = {}
@@ -331,7 +314,6 @@ class LangfuseEmitter:
             "status_updates_sent": 0,  # live state.json status snapshots mirrored
             "scores_sent": 0,  # decision Scores created (span + trace)
             "spans_opened": 0,  # phase + agent spans created
-            "ext_shards_read": 0,  # out-of-process ext/*.jsonl files swept
             "breakdown_recorded": 0,  # 1 once the full SBD JSON was attached
             "kb_spans_sent": 0,  # non-LLM spans (recipe-KB / critic priors / specialist intel / forge / gemm)
             "recipe_audit_read": 0,  # recipe_snapshot/.audit.jsonl read rows swept
@@ -526,7 +508,7 @@ class LangfuseEmitter:
             )
             _end_obs(obs, start)
             self._counts["kb_spans_sent"] += 1
-        except Exception:  # isolation boundary: one KB span row
+        except _SDK_FAILURES:
             self._counts["errors"] += 1
             log.debug("langfuse: record_kb_span failed", exc_info=True)
             return False
@@ -596,7 +578,6 @@ class LangfuseEmitter:
         }
         steps: dict[str, Callable[[], None]] = {
             "pending_halves": self._flush_pending_halves,
-            "ext_shards": self._flush_ext_shards,
             **{name: functools.partial(self._backfill_kb_spans, *spec) for name, spec in kb_backfills.items()},
             "trajectory": self._flush_trajectory,
             "decision_scores": self._flush_decision_scores,
@@ -607,7 +588,7 @@ class LangfuseEmitter:
         for name, step in steps.items():
             try:
                 step()
-            except Exception:  # isolation boundary: one flush step
+            except _SDK_FAILURES:
                 failed = True
                 self._counts["errors"] += 1
                 log.debug("langfuse: flush step %s failed", name, exc_info=True)
@@ -681,13 +662,13 @@ class LangfuseEmitter:
             )
             _end_obs(obs, None)
             self._counts["session_start_recorded"] = 1
-        except Exception:
+        except _SDK_FAILURES:
             self._counts["errors"] += 1
             log.debug("langfuse: record_session_start failed", exc_info=True)
         finally:
             try:
                 self._client.flush()
-            except Exception:
+            except _SDK_FAILURES:
                 self._counts["errors"] += 1
                 log.debug("langfuse: flush after session_start failed", exc_info=True)
             # Persist the flag so a later process skips re-emitting.
@@ -729,13 +710,13 @@ class LangfuseEmitter:
             )
             _end_obs(obs, None)
             self._counts["breakdown_recorded"] = 1
-        except Exception:
+        except _SDK_FAILURES:
             self._counts["errors"] += 1
             log.debug("langfuse: record_session_breakdown failed", exc_info=True)
         finally:
             try:
                 self._client.flush()
-            except Exception:
+            except _SDK_FAILURES:
                 self._counts["errors"] += 1
                 log.debug("langfuse: flush after breakdown failed", exc_info=True)
             # Persist the flag so a later process skips re-attaching the document.
@@ -783,7 +764,7 @@ class LangfuseEmitter:
             self._counts["status_updates_sent"] += 1
             self._last_status_sig = sig
             self._last_status_ts = now
-        except Exception:
+        except _SDK_FAILURES:
             self._counts["errors"] += 1
             log.debug("langfuse: record_status failed", exc_info=True)
 
@@ -796,7 +777,7 @@ class LangfuseEmitter:
         """End a span; a failure is counted in the receipt's ``errors``."""
         try:
             span.end()
-        except Exception:  # isolation boundary: one span end
+        except _SDK_FAILURES:
             self._counts["errors"] += 1
             log.debug("langfuse: span end failed", exc_info=True)
 
@@ -824,17 +805,6 @@ class LangfuseEmitter:
             for half, row in parts.items():
                 current.setdefault(half, row)
 
-    def _flush_ext_shards(self) -> None:
-        """Backfill out-of-process children's token rows from ext/*.jsonl."""
-        ext_dir = trace_ext_dir(self.session_dir)
-        if not ext_dir.is_dir():
-            return
-        for shard in sorted(ext_dir.glob("*.jsonl")):
-            rows = _load_jsonl(shard)
-            if rows and not self._rows_sent.get(self._rows_sent_key(shard)):
-                self._counts["ext_shards_read"] += 1
-            self._drain(shard, rows, lambda row: self._emit_generation(token_row=row, conv_row=None))
-
     def _backfill_kb_spans(
         self,
         path_for: Callable[[Path], Path],
@@ -850,7 +820,7 @@ class LangfuseEmitter:
             return self.record_kb_span(name=name, agent=agent, output=row, metadata=metadata, ts=row.get("ts"))
 
         path = path_for(self.session_dir)
-        self._drain(path, _load_jsonl(path), _send)
+        self._drain(path, load_shard(path), _send)
 
     def _recipe_audit_span(self, row: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         """Name + metadata for one recipe-KB read or write audit row."""
@@ -861,7 +831,7 @@ class LangfuseEmitter:
 
     def _flush_trajectory(self) -> None:
         """Backfill closed trajectory spans and point events, resuming each shard at its receipt cursor."""
-        shard_rows = {shard: load_trajectory_shard(shard) for shard in trajectory_shards(self.session_dir)}
+        shard_rows = {shard: load_shard(shard) for shard in trajectory_shards(self.session_dir)}
         openings = trajmap.span_openings(row for rows in shard_rows.values() for row in rows)
 
         def _send(row: dict[str, Any]) -> bool:
@@ -895,7 +865,7 @@ class LangfuseEmitter:
         already sent; rows are matched by the ``decision_id`` the writer stamps, not by position. Raises at the first
         row that could not be sent, leaving it and the rows after it owed.
         """
-        for drow in _load_jsonl(decision_trace_path(self.session_dir)):
+        for drow in load_shard(decision_trace_path(self.session_dir)):
             decision_id = drow["decision_id"]
             if decision_id in self._decisions_sent:
                 continue
@@ -997,9 +967,9 @@ class LangfuseEmitter:
                     metadata=score.get("metadata") or {},
                 )
             self._counts["scores_sent"] += 1
-        except Exception:  # isolation boundary: one decision Score
+        except _SDK_FAILURES:
             self._counts["errors"] += 1
-            log.debug(
+            log.warning(
                 "langfuse: create_score failed for %s",
                 score.get("name"),
                 exc_info=True,
@@ -1109,28 +1079,15 @@ def flush_session(session_dir: Path) -> None:
     get_emitter(session_dir).flush_session()
 
 
-def record_session_breakdown(
-    session_dir: Path,
-    breakdown: dict[str, Any] | None = None,
-) -> None:
+def record_session_breakdown(session_dir: Path) -> None:
     """Attach the final ``session_breakdown.json`` to the session's trace."""
-    if breakdown is None:
-        from hyperloom.common.jsonio import read_json
-
-        from ..session.session_paths import BREAKDOWN_FILENAME
-
-        breakdown = read_json(Path(session_dir) / BREAKDOWN_FILENAME, default={}, require_dict=True)
+    breakdown = _load_json(Path(session_dir) / BREAKDOWN_FILENAME)
     get_emitter(session_dir).record_session_breakdown(breakdown)
 
 
-def record_status(
-    session_dir: Path,
-    status: dict[str, Any],
-    *,
-    min_refresh_sec: float = 300.0,
-) -> None:
+def record_status(session_dir: Path, status: dict[str, Any]) -> None:
     """Module-level convenience: mirror a status snapshot for ``session_dir``."""
-    get_emitter(session_dir).record_status(status, min_refresh_sec=min_refresh_sec)
+    get_emitter(session_dir).record_status(status)
 
 
 #: Receipt key holding the SHA-256 of the receipt body (excluding itself).
@@ -1154,7 +1111,7 @@ def _stamp_receipt_hash(payload: dict[str, Any]) -> dict[str, Any]:
 
 def read_receipt(session_dir: Path) -> dict[str, Any] | None:
     """Read the persisted ``langfuse_receipt.json`` for ``session_dir``."""
-    from hyperloom.common.jsonio import read_json
+    from hyperloom_common.jsonio import read_json
 
     payload = read_json(_receipt_path(session_dir), default=None, require_dict=True)
     if payload is None:

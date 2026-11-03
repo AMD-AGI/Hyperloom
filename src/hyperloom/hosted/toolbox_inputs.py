@@ -19,7 +19,11 @@ class ToolboxInputsError(ValueError):
     """A value the hosted toolbox needs is missing from the host inputs.  Names variables, never values."""
 
 
-def _grant_limits(limits: GrantLimits | None) -> dict[str, float] | None:
+def grant_limits_totals(limits: GrantLimits | None) -> dict[str, float] | None:
+    """The four grant totals as a dict for the toolbox, ``None`` when the host gave no limits.
+
+    Raises :class:`ToolboxInputsError` naming each total the grant leaves unstated: the toolbox needs all or none.
+    """
     if limits is None:
         return None
     totals = {
@@ -68,5 +72,5 @@ def hosted_toolbox_inputs(host: HostInfo, *, session_dir: Path, tp: int) -> dict
         "source_sha": host.source_sha,
         "tp": tp,
         "dev_key": None if dev_key is None else dev_key.reveal(),
-        "grant_limits": _grant_limits(host.grant_limits),
+        "grant_limits": grant_limits_totals(host.grant_limits),
     }

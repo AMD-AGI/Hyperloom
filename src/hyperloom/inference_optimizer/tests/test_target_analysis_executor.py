@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.common.env import EnvValueError
+from hyperloom_common.env import EnvValueError
 from hyperloom.orchestrator.actions.executors import TargetAnalysisExecutor
 from hyperloom.orchestrator.actions.executors import target_analysis as ta
 from hyperloom.orchestrator.state.task_registry import Task
@@ -207,7 +207,7 @@ async def test_happy_path_writes_files(session_dir, monkeypatch):
 @pytest.mark.asyncio
 async def test_report_executor_renders_external_baseline_section(tmp_path: Path, monkeypatch):
     """ReportExecutor reads target_baseline.json and injects an advisory section without touching SharedState."""
-    from hyperloom.orchestrator.actions.executors import ReportExecutor
+    from hyperloom.orchestrator.actions.executors.report import ReportExecutor
     from hyperloom.orchestrator.state.shared_state import SharedState
     from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 
@@ -411,7 +411,7 @@ async def test_analyzer_exception_propagates_and_clears_target_without_replacing
 @pytest.mark.parametrize("competitor_write_failure", [False, True])
 async def test_agentx_state_to_external_reference_and_final_report(session_dir, monkeypatch, competitor_write_failure):
     from hyperloom.inference_optimizer.baseline_comparison import inferencex_client
-    from hyperloom.orchestrator.actions.executors import ReportExecutor
+    from hyperloom.orchestrator.actions.executors.report import ReportExecutor
     from hyperloom.inference_optimizer.baseline_comparison import research_hints
     from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -457,7 +457,7 @@ async def test_agentx_state_to_external_reference_and_final_report(session_dir, 
             ).encode()
         return json.dumps({"42": {"id": 42, "p90_e2e_norm_intvty": 20.0}}).encode()
 
-    from hyperloom.common import io as common_io
+    from hyperloom_common import io as common_io
     from hyperloom.inference_optimizer.session import session_paths
 
     if competitor_write_failure:

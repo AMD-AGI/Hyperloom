@@ -72,12 +72,7 @@ REPO_ROOT="$(resolve_repo_root)"
 
 scrub_stale_workspace_env_for_setup_dotenv() {
   setup_dotenv_is_authoritative || return 0
-  if ! runtime_env_var_is_readonly USER_DATA_PATH; then
-    unset USER_DATA_PATH
-  fi
-  unset HYPERLOOM_RUNTIME_DIR
-  unset KERNEL_AGENT_ENV
-  unset HYPERLOOM_ROOT
+  runtime_env_forget_stale_workspace
   unset HYPERLOOM_KERNEL_AGENT_ROOT
   unset KERNEL_AGENT_ROOT
   unset FRAMEWORK_AGENT_ROOT
@@ -113,14 +108,12 @@ fi
 if [ -z "${_user_data_was_set}" ]; then
   echo "[install WARN] USER_DATA_PATH not set; defaulting to ${USER_DATA_PATH}. Set USER_DATA_PATH to persist artifacts under your data root." >&2
 fi
-HYPERLOOM_RUNTIME_DIR="${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH}/runtime}"
-KERNEL_AGENT_ENV="${KERNEL_AGENT_ENV:-${HYPERLOOM_RUNTIME_DIR}/kernel-agent.env.sh}"
+# HYPERLOOM_RUNTIME_DIR, KERNEL_AGENT_ENV and HYPERLOOM_ROOT (legacy, kept for compatibility).
+runtime_env_derive_runtime_paths
 VLLM_IMAGE_SOURCE_ROOT="/app/vllm"
 VLLM_IMAGE_SOURCE_COMMIT="f46a9dfe2c5f57bebbd29556cbbb25eabd874226"
 VLLM_IMAGE_REPO="${VLLM_IMAGE_REPO:-https://github.com/vllm-project/vllm.git}"
 VLLM_IMAGE_SOURCE_ACTIVE=0
-# Legacy variable kept for compatibility; open-source checkouts use _open_source_root.
-HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors}"
 # Writable, repo-local base for auto-cloned deps: $HYPERLOOM_CACHE_DIR else
 # $REPO_ROOT/.cache, cloned per revision (<name>@<sha>). Not /tmp (a reaper can
 # wipe it mid-run, leaving TRACELENS_ROOT dangling — #722).
@@ -180,7 +173,7 @@ MAGPIE_REPO="${MAGPIE_REPO:-https://github.com/AMD-AGI/Magpie.git}"
 # copies benchmark scripts via ``_copy_benchmark_script_atomic``.
 # ``ensure_magpie()`` checks the installed revision unless the operator supplies a source tree.
 # tree on disk is NOT upgraded to this ref — only fresh installs and explicit reinstalls are.
-MAGPIE_REF="${MAGPIE_REF:-6a1ee26f9053363d3750b43e3d5afb5d1c4ce84e}"
+MAGPIE_REF="${MAGPIE_REF:-06b7cf6e185fdd49483a512e350cb3964ba3bf68}"
 MAGPIE_PACKAGE_SPEC="${MAGPIE_PACKAGE_SPEC:-magpie-eval @ git+${MAGPIE_REPO}@${MAGPIE_REF}}"
 
 # MAGPIE_PATH points install.sh AND the Python optimizer (cli.py /
@@ -202,6 +195,8 @@ INFERENCEX_DEFAULT_DIR="${INFERENCEX_DEFAULT_DIR:-${_open_source_root}/Inference
 
 DRY_RUN=0
 CHECK_ONLY=0
+# Keys --check-only finds behind the pins this checkout installs; a non-empty list fails the check.
+_STALE_KEYS=()
 
 usage() {
   cat <<'EOF'
@@ -555,7 +550,7 @@ preflight_load_dotenv() {
 # DeepSeek is a dual-protocol gateway, not a third provider: /anthropic speaks
 # the Anthropic API and /v1 speaks OpenAI chat-completions, both with the same
 # key. Endpoint and model derivation matches
-# hyperloom.common.llm_config.deepseek_compat_env.
+# hyperloom_common.llm.llm_config.deepseek_compat_env.
 normalize_legacy_deepseek_env() {
   [ -n "${DEEPSEEK_API_KEY:-}" ] || [ -n "${DEEPSEEK_BASE_URL:-}" ] || return 0
   # Adopt the gateway whole or not at all. Anything already on the Anthropic
@@ -979,12 +974,12 @@ PY
 # any more, so there is nothing to install -- only something to verify. The
 # three imports are the ones whose absence used to be found late:
 #   kernelforge.cli      forge-loop's entry point (the 2026-07-28 ModuleNotFoundError)
-#   kernelforge.fusion   forge-fuse, which imports fine only if the tree is complete
+#   kernelforge.workflows.forge_fusion   forge-fuse, which imports fine only if the tree is complete
 #   openai_codex         the agent runtime for an OpenAI-only deployment; without
 #                        it the provider fallback silently becomes a claude run
 #                        that dies at its first turn on "Not logged in"
 _check_kernelforge_ready() {
-  if "$PYTHON" -c "import kernelforge.cli, kernelforge.fusion" >/dev/null 2>&1; then
+  if "$PYTHON" -c "import kernelforge.cli, kernelforge.workflows.forge_fusion" >/dev/null 2>&1; then
     log "kernelforge (built-in kernel-opt agent) OK"
   else
     warn "kernelforge not importable after install; forge kernel attempts will fail"
@@ -1015,7 +1010,7 @@ ensure_forge_gemm_tune() {
   # same lesson against a checkout instead of against a packaged subpackage.)
   local probe='
 import sys
-import kernelforge.gemm_tune.cli  # noqa: F401
+import kernelforge.workflows.gemm_tune.pipeline  # noqa: F401
 from kernelforge.cli import main
 sys.exit(0 if "gemm-tune" in getattr(main, "commands", {}) else 1)
 '
@@ -1445,11 +1440,19 @@ for spec in specs:
 # root after import.
 ensure_magpie() {
   log "ensuring Magpie package ${MAGPIE_PACKAGE_SPEC}"
+  # An older install wrote MAGPIE_PATH into .env; one that no longer holds the package is not an override to keep.
+  if [ "$MAGPIE_PATH_EXPLICIT" -eq 1 ] && [ ! -f "${MAGPIE_PATH}/Magpie/__init__.py" ]; then
+    warn "MAGPIE_PATH=${MAGPIE_PATH} holds no Magpie package; resolving it from the installed package instead"
+    MAGPIE_PATH_EXPLICIT=0
+  fi
   if [ "$CHECK_ONLY" -eq 1 ]; then
     if "$PYTHON" -c "import Magpie" >/dev/null 2>&1; then
       log "Magpie importable"
     else
       warn "Magpie not importable (check-only mode, skipping pip install)"
+    fi
+    if [ "$MAGPIE_PATH_EXPLICIT" -eq 0 ] && ! "$PYTHON" "${_script_dir}/check_magpie.py" "$MAGPIE_REF" >/dev/null 2>&1; then
+      _STALE_KEYS+=("MAGPIE_REF")
     fi
     return 0
   fi
@@ -1845,15 +1848,26 @@ install_kernel_agent_tools() {
     return 0
   fi
   log "installing ray + TraceLens + GEAK + LLM gateway env"
-  # A subshell keeps the steps' variables and PATH out of the steps that follow.
+  local stale_keys_file key
+  stale_keys_file="$(mktemp)"
+  # A subshell keeps the steps' variables and PATH out of the steps that follow;
+  # the pins it finds stale come back through a file, as its _STALE_KEYS ends with it.
   (
     export REPO_ROOT MAGPIE_PATH HYPERLOOM_ROOT
     [ -n "${INFERENCEX_PATH:-}" ] && export INFERENCEX_PATH
     [ -n "${TRACELENS_INTERNAL_ROOT:-}" ] && export TRACELENS_INTERNAL_ROOT
+    _STALE_KEYS=()
     # shellcheck source=install_kernel_tools.sh
     . "${_script_dir}/install_kernel_tools.sh"
     install_kernel_tools
+    if [ "${#_STALE_KEYS[@]}" -gt 0 ]; then
+      printf '%s\n' "${_STALE_KEYS[@]}" > "$stale_keys_file"
+    fi
   )
+  while IFS= read -r key; do
+    _STALE_KEYS+=("$key")
+  done < "$stale_keys_file"
+  rm -f "$stale_keys_file"
 }
 
 
@@ -2019,6 +2033,9 @@ _probe_framework_source_roots
 pin_framework_image_baselines
 
 _prune_dep_cache "InferenceX" "Magpie"
+if [ "${#_STALE_KEYS[@]}" -gt 0 ]; then
+  die "behind the pinned revisions: ${_STALE_KEYS[*]}. Rerun install.sh without --check-only to update them."
+fi
 log "install complete"
 log "kernel-agent env file written: ${KERNEL_AGENT_ENV}"
 log ""

@@ -60,6 +60,7 @@
       "model_context_window_too_small",
       "patch_recovery_incomplete",
       "prelude_baseline_failed",
+      "prelude_budget_exhausted",
       "prelude_cold_anchor_low_budget",
       "server_argv_invalid",
       "signal",
@@ -138,8 +139,6 @@
       "target_analysis"
     ],
     "ENABLEMENT": [
-      "integrate_patch",
-      "specialist",
       "target_analysis"
     ],
     "FRAMEWORK_AGENT": [
@@ -166,7 +165,9 @@
   ],
   "coordinator_reserved_actions": {
     "ENABLEMENT": [
-      "baseline"
+      "baseline",
+      "integrate_patch",
+      "specialist"
     ]
   },
   "kernel_lane_task_kinds": [

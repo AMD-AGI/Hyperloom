@@ -6,13 +6,17 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, NamedTuple
 
 from hyperloom.common.env_safety import (
     BLOCKED_EXTERNAL_ENV_NAMES,
+    is_launch_provided_env_name,
     is_secret_shaped_env_name,
     valid_env_key,
 )
+
+from ._framework_rewrite_evidence import _CATEGORY_TAXONOMY
 
 
 log = logging.getLogger(__name__)
@@ -27,25 +31,10 @@ DEFAULT_SWITCH_VALUE = "1"
 
 # Recognised rewrite categories, mirroring ``_framework_rewrite_evidence`` plus the two that are not host-observable
 # and therefore never appear in evidence.
-KNOWN_CATEGORIES: frozenset[str] = frozenset(
-    {
-        "memoize_invariant",
-        "hoist_loop_invariant",
-        "eliminate_host_round_trip",
-        "eliminate_host_sync",
-        "fuse_collectives",
-        "keep_device_resident",
-        "swap_vendor_kernel",
-        "drop_noop_glue",
-    }
-)
+KNOWN_CATEGORIES: frozenset[str] = frozenset(_CATEGORY_TAXONOMY) | {"swap_vendor_kernel", "drop_noop_glue"}
 
 # Cap on manifest entries.
 MAX_SWITCHES = 24
-
-# Env names a manifest may never claim: setting one of these from a "rewrite switch" would silently retarget the
-# benchmark rather than toggling a code path.
-FORBIDDEN_SWITCHES: frozenset[str] = BLOCKED_EXTERNAL_ENV_NAMES
 
 
 def _clean_list(raw: Any) -> list[str]:
@@ -93,7 +82,9 @@ def _accept_switches(entries: list[dict[str, Any]], reserved: set[str]) -> _Acce
             problems.append(f"dropped {name!r}: not a valid environment variable name")
             continue
         upper = name.upper()
-        if upper in FORBIDDEN_SWITCHES:
+        # A manifest may never claim these: setting one from a "rewrite switch" would silently retarget the benchmark
+        # rather than toggling a code path.
+        if upper in BLOCKED_EXTERNAL_ENV_NAMES:
             problems.append(f"dropped {name!r}: reserved benchmark variable, not a rewrite switch")
             continue
         if is_secret_shaped_env_name(upper):
@@ -217,33 +208,121 @@ def switch_env(switches: list[dict[str, Any]], *, only: "set[str] | None" = None
     return {entry["switch"]: entry["value"] for entry in switches if wanted is None or entry["switch"] in wanted}
 
 
-def dependency_closure(name: str, switches: list[dict[str, Any]]) -> set[str]:
-    """Return every switch ``name`` transitively depends on, plus ``name``."""
+# How a patch reads an environment variable: ``os.environ.get`` and
+# ``os.environ[...]``, plus any ``getenv`` call, which covers ``os.getenv``
+# and the C/C++ ``getenv``/``std::getenv`` a kernel-side rewrite uses.
+_ENV_READ_RE = re.compile(r"""(?:environ\s*(?:\.\s*get\s*\(|\[)|\bgetenv\s*\()\s*["']([A-Za-z_][A-Za-z0-9_]*)["']""")
+
+# Falsy defaults, which keep a name in the list. A read with any other literal
+# default -- a tuning value (``os.getenv("X", "/opt/rocm")``) or an on default
+# (``os.environ.get("X", "1") == "1"``, a rewrite shipped enabled) -- runs the
+# same whether or not the name is set, so it is not worth reporting at all.
+_OFF_DEFAULTS: frozenset[str] = frozenset({"", "0", "0.0", "false", "no", "off", "none", "null", "nullptr"})
+
+
+def _read_could_default_off(tail: str) -> bool:
+    """Whether a read whose argument list continues with ``tail`` has no default or a falsy one.
+
+    ``tail`` is the rest of the line after the name. This is a filter on the
+    literal text, not a finding about the patched path: an opt-out switch
+    (``if not os.environ.get("HL_DISABLE_NEW")``), a write
+    (``os.environ["X"] = "1"``) and a plain value read all look like this, and
+    only reading the surrounding code tells them apart.
+    """
+    rest = tail.lstrip()
+    if not rest.startswith(","):
+        return True
+    default = rest[1:].split(",")[0].split(")")[0].strip()
+    if not default:
+        return False
+    if len(default) >= 2 and default[0] in "\"'" and default[-1] == default[0]:
+        default = default[1:-1].strip()
+    return default.lower() in _OFF_DEFAULTS
+
+
+def _env_reads(text: str) -> set[str]:
+    """The env names ``text`` reads with no default or a falsy one."""
+    return {m.group(1).upper() for m in _ENV_READ_RE.finditer(text) if _read_could_default_off(text[m.end() :])}
+
+
+def _patch_env_reads(patch_text: str) -> tuple[set[str], set[str]]:
+    """Split the env reads a diff carries into the ones it adds and the ones already in the file.
+
+    A read on a context or a removed line belongs to the file as it stands, so
+    the patch did not introduce it and it says nothing about this round.
+    """
+    added: set[str] = set()
+    preexisting: set[str] = set()
+    for line in patch_text.splitlines():
+        if line.startswith(("+++", "---", "@@")):
+            continue
+        names = _env_reads(line[1:])
+        if not names:
+            continue
+        if line.startswith("+"):
+            added |= names
+        else:
+            preexisting |= names
+    return added, preexisting
+
+
+def _could_be_a_round_switch(name: str) -> bool:
+    """Whether ``name`` is one a round could set at all, by manifest or ``extra_envs``.
+
+    A name neither route may set — a credential, a key the benchmark owns, or
+    one the launch assigns per process — is read for what it holds, never as a
+    switch of the patch's own, so reporting it would only be noise.
+    """
+    return (
+        name not in BLOCKED_EXTERNAL_ENV_NAMES
+        and not is_secret_shaped_env_name(name)
+        and not is_launch_provided_env_name(name)
+    )
+
+
+def unarmed_env_reads(patch_texts: list[str], *, armed: "set[str] | frozenset[str] | None" = None) -> list[str]:
+    """Return the env names the patches ADD a read of that nothing in ``armed`` sets.
+
+    This is a lead, never a verdict. Scanning diff lines cannot tell whether a
+    read keeps the patched path off: an opt-out switch
+    (``if not os.getenv("HL_DISABLE_NEW")``) runs the change precisely while
+    the name is unset, and a write or a value read is no switch at all. The
+    names are worth reporting only beside a round that already measured as
+    though its change were absent, where one of them may be the reason.
+
+    Args:
+        patch_texts: The diff text of every patch the round submitted.
+        armed: Every env name the launch will set, manifest switches included.
+
+    Returns:
+        The unset names, sorted.
+    """
+    armed_names = {str(name).strip().upper() for name in (armed or ())}
+    added: set[str] = set()
+    preexisting: set[str] = set()
+    for text in patch_texts:
+        text_added, text_preexisting = _patch_env_reads(text)
+        added |= text_added
+        preexisting |= text_preexisting
+    unarmed = added - preexisting - armed_names
+    return sorted(name for name in unarmed if _could_be_a_round_switch(name))
+
+
+def transitive_closure(name: str, switches: list[dict[str, Any]], edge: str) -> set[str]:
+    """Return every switch reachable from ``name`` along the ``edge`` lists, plus ``name``.
+
+    ``depends_on`` yields what ``name`` needs; ``enables`` yields what needs ``name``.
+    """
     by_name = {entry["switch"]: entry for entry in switches}
     target = name.strip().upper()
     closure = {target}
     frontier = [target]
     while frontier:
         current = frontier.pop()
-        for dep in (by_name.get(current) or {}).get("depends_on") or []:
-            if dep not in closure:
-                closure.add(dep)
-                frontier.append(dep)
-    return closure
-
-
-def dependents_closure(name: str, switches: list[dict[str, Any]]) -> set[str]:
-    """Return every switch that transitively depends on ``name``, plus ``name``."""
-    by_name = {entry["switch"]: entry for entry in switches}
-    target = name.strip().upper()
-    closure = {target}
-    frontier = [target]
-    while frontier:
-        current = frontier.pop()
-        for enabled in (by_name.get(current) or {}).get("enables") or []:
-            if enabled not in closure:
-                closure.add(enabled)
-                frontier.append(enabled)
+        for linked in (by_name.get(current) or {}).get(edge) or []:
+            if linked not in closure:
+                closure.add(linked)
+                frontier.append(linked)
     return closure
 
 
@@ -256,7 +335,7 @@ def additive_variants(
     seen: set[frozenset[str]] = set()
     variants: list[dict[str, Any]] = []
     for entry in switches:
-        bundle = dependency_closure(entry["switch"], switches)
+        bundle = transitive_closure(entry["switch"], switches, "depends_on")
         key = frozenset(bundle)
         if key in seen:
             continue
@@ -308,7 +387,7 @@ def leave_one_out_variants(
     seen: set[frozenset[str]] = set()
     variants: list[dict[str, Any]] = []
     for entry in switches:
-        removed = dependents_closure(entry["switch"], switches)
+        removed = transitive_closure(entry["switch"], switches, "enables")
         if len(removed) >= len(switches):
             # Removing this lever removes everything, which is the pre-patch baseline rather than an attribution of
             # this lever.
@@ -360,15 +439,14 @@ def summarize(switches: list[dict[str, Any]], problems: list[str]) -> str:
 
 __all__ = [
     "DEFAULT_SWITCH_VALUE",
-    "FORBIDDEN_SWITCHES",
     "KNOWN_CATEGORIES",
     "MANIFEST_KEY",
     "MAX_SWITCHES",
     "additive_variants",
-    "dependency_closure",
-    "dependents_closure",
     "leave_one_out_variants",
     "parse_manifest",
     "summarize",
     "switch_env",
+    "transitive_closure",
+    "unarmed_env_reads",
 ]

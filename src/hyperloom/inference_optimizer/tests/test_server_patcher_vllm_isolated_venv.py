@@ -11,12 +11,12 @@ from pathlib import Path
 from hyperloom.orchestrator.actions.executors import _server_patcher as sp
 
 
-def _make_tracelens_root(tmp_path: Path, version: str = "0.21.0") -> Path:
+def _make_tracelens_root(tmp_path: Path, monkeypatch, version: str = "0.21.0") -> None:
     tracelens_root = tmp_path / "TraceLens"
     patches = tracelens_root / "examples" / "custom_workflows" / "inference_analysis" / "vllm_patches"
     patches.mkdir(parents=True)
     (patches / f"config_vllm_v{version}.patch").write_text("dummy\n", encoding="utf-8")
-    return tracelens_root
+    monkeypatch.setenv("TRACELENS_ROOT", str(tracelens_root))
 
 
 def _make_isolated_vllm(
@@ -37,12 +37,12 @@ def _make_isolated_vllm(
 
 
 def test_isolated_venv_discovers_plan(tmp_path: Path, monkeypatch):
-    tracelens_root = _make_tracelens_root(tmp_path)
+    _make_tracelens_root(tmp_path, monkeypatch)
     venv_root = _make_isolated_vllm(tmp_path)
     monkeypatch.setenv("VLLM_VENV_ROOT", str(venv_root))
     monkeypatch.delenv("VLLM_PYTHON", raising=False)
 
-    plan = sp._discover_vllm_plan(tracelens_root)
+    plan = sp._discover_vllm_plan(install=sp._discover_vllm_install())
 
     assert plan is not None
     assert plan.version == "0.21.0"
@@ -54,12 +54,12 @@ def test_isolated_venv_missing_returns_none(tmp_path: Path, monkeypatch):
     monkeypatch.delenv("VLLM_VENV_ROOT", raising=False)
     monkeypatch.delenv("VLLM_PYTHON", raising=False)
 
-    assert sp._discover_vllm_plan(_make_tracelens_root(tmp_path)) is None
+    assert sp._discover_vllm_install() is None
 
 
 def test_isolated_venv_editable_source_install_discovers_plan(tmp_path: Path, monkeypatch):
     """A source build installs vLLM editable: site-packages holds only an egg-link and the package lives in the checkout."""
-    tracelens_root = _make_tracelens_root(tmp_path)
+    _make_tracelens_root(tmp_path, monkeypatch)
     venv_root = tmp_path / "vllm-venv"
     site = venv_root / "lib" / "python3.12" / "site-packages"
     site.mkdir(parents=True)
@@ -73,7 +73,7 @@ def test_isolated_venv_editable_source_install_discovers_plan(tmp_path: Path, mo
     monkeypatch.setenv("VLLM_PYTHON", sys.executable)
     monkeypatch.setenv("PYTHONPATH", str(checkout))
 
-    plan = sp._discover_vllm_plan(tracelens_root)
+    plan = sp._discover_vllm_plan(install=sp._discover_vllm_install())
 
     assert plan is not None
     assert plan.version == "0.21.0"
@@ -82,9 +82,9 @@ def test_isolated_venv_editable_source_install_discovers_plan(tmp_path: Path, mo
 
 
 def test_isolated_venv_no_profiler_sentinel_returns_none(tmp_path: Path, monkeypatch):
-    tracelens_root = _make_tracelens_root(tmp_path)
+    _make_tracelens_root(tmp_path, monkeypatch)
     venv_root = _make_isolated_vllm(tmp_path, with_profiler=False)
     monkeypatch.setenv("VLLM_VENV_ROOT", str(venv_root))
     monkeypatch.delenv("VLLM_PYTHON", raising=False)
 
-    assert sp._discover_vllm_plan(tracelens_root) is None
+    assert sp._discover_vllm_plan(install=sp._discover_vllm_install()) is None

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import atexit
+import logging
 import os
 import shutil
 import tempfile
@@ -12,11 +13,12 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable
 
-from hyperloom.common import llm_config
+from hyperloom_common.llm import llm_config
 from hyperloom.agents.quantization.driver.result_collector import CollectedArtifacts, collect_artifacts
 from hyperloom.common.deepseek_task import DeepSeekTaskRequest, OwedArtifact, run_deepseek_task
-from hyperloom.common.llm_attribution import sdk_env_overlay
+from hyperloom_common.llm.llm_attribution import sdk_env_overlay
 
+logger = logging.getLogger(__name__)
 
 DEFAULT_ALLOWED_TOOLS = ["Read", "Write", "Edit", "Bash"]
 DEFAULT_MAX_TURNS = 240  # Quark workflow has 4 STOPs + validator + eval
@@ -72,7 +74,7 @@ def _import_sdk() -> ClaudeAgentSdk:
 
 def _iter_message_text(message: Any) -> Iterable[str]:
     """Yield the non-empty text fragments of a Claude Agent SDK message."""
-    from hyperloom.common.claude_oneshot import message_text
+    from hyperloom_common.llm.claude_oneshot import message_text
 
     yield from (fragment for fragment in message_text(message) if fragment)
 
@@ -294,9 +296,10 @@ async def run_one_attempt(
             if log:
                 for text in _iter_message_text(message):
                     log(f"[claude-sdk] {text[:1000]}")
-    except Exception as exc:  # noqa: BLE001 - isolation boundary: one SDK quantization attempt
-        # Capture but don't raise: valid artifacts may exist before the abort.
+    except Exception as exc:  # isolation boundary: one SDK quantization attempt
+        # The SDK raises bare Exception; capture, since valid artifacts may exist before the abort.
         sdk_error = f"{type(exc).__name__}: {exc}"
+        logger.warning("quantization-agent SDK attempt %d failed: %s", attempt_number, sdk_error, exc_info=True)
         if log:
             log(f"[claude-sdk] WARNING: {sdk_error}\n{traceback.format_exc()}")
 

@@ -10,6 +10,7 @@ import os
 import sqlite3
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -26,7 +27,7 @@ from ..collaborator import CoordinatorCollaborator
 from hyperloom.inference_optimizer.breakdown.round_archive import ROLE_LAUNCH_CONFIG, RoundArchive
 from ..phases.machine_state import ENABLEMENT_MAX_ATTEMPTS as _ENABLEMENT_MAX_ATTEMPTS, PHASE_ENABLEMENT
 from ..loop.offload import offload
-from .params import ENABLEMENT_PARAMS_BUDGET_SEC, _round_carriers
+from .params import ENABLEMENT_PARAMS_BUDGET_SEC
 from .artifacts import snapshot_round, write_setting_script
 from ..bringup import recorded_verdict, session_root
 from ..state.round_store import ADVANCED, BOOTED, FAILED, Round, RoundRequest
@@ -49,32 +50,51 @@ _MIN_LEASE_SEC = 300.0
 _MOVED_ROUND_OUTCOMES = {"kept": BOOTED, "advanced": ADVANCED}
 
 
-def bind_integrate_to_lane(params: dict[str, Any], state: Any, *, session_dir: Path) -> None:
-    """Make an integrate_patch an enablement round exactly when the lane can take one as it starts to run.
+def takes_enablement_round(state: Any) -> bool:
+    """Whether an enablement round may run now: in ENABLEMENT, while the lane accepts rounds."""
+    return (state.phase or "").strip().upper() == PHASE_ENABLEMENT and state.enablement.accepts_rounds
 
-    Admission happens long before execution, so the lane may have moved on. A
-    closed lane (succeeded, or revalidating) strips the enablement context, and
-    the integrate is graded as any other. An untagged one executing in ENABLEMENT
-    gets the round's context; a tagged one already carries it.
 
-    Args:
-        params: The integrate_patch params; updated in place.
-        state: The shared state, which owns the lane and the phase.
-        session_dir: The session root, for the recorded boot verdict.
-    """
-    if not state.enablement.accepts_rounds:
-        for key in [k for k in params if k == "enablement" or k.startswith("enablement_")]:
-            del params[key]
-        return
-    if (state.phase or "").strip().upper() != PHASE_ENABLEMENT or params.get("enablement"):
-        return
-    verdict, _ = recorded_verdict(
-        state.enablement.launch_observation_path,
-        wrapper_text=state.enablement.launch_log or "",
-        session_dir=session_dir,
+async def _stop_on_exhausted_attempts(
+    state: Any,
+    session_dir: Path | str,
+    close_lane_event: Callable[..., Awaitable[None]],
+    stalled: int,
+) -> None:
+    """Stop the run because consecutive enablement rounds reached the attempt cap."""
+    state.set_stop_reason("enablement_attempts_exhausted")
+    state.save(session_dir)
+    # The cap is the lane's own terminal, so the lane event closes
+    # here: no round follows it to close on the lane's behalf.
+    await close_lane_event(
+        outcome=enablement_event.OUTCOME_STALLED,
+        reason="enablement_attempts_exhausted",
     )
-    for key, value in _round_carriers(state, verdict.signature).items():
-        params.setdefault(key, value)
+    log.warning(
+        "ENABLEMENT: %d consecutive rounds bought no ground (cap %d); stopping the run",
+        stalled,
+        _ENABLEMENT_MAX_ATTEMPTS,
+    )
+
+
+def _authoring_dispatch(
+    state: Any,
+    spec_tid: str,
+    params: dict[str, Any],
+    *,
+    attempt: int,
+    launch_log: str,
+) -> enablement_event.AuthoringDispatch:
+    """The lane-event record of one authoring specialist dispatch."""
+    return enablement_event.AuthoringDispatch(
+        task_id=spec_tid,
+        attempt=attempt,
+        failure_kind=str(params.get("enablement_failure_kind") or ""),
+        launch_log=launch_log,
+        candidate_refs=params.get("enablement_candidate_refs"),
+        mode=str(state.enablement_mode or ""),
+        origin=state.enablement.origin or enablement_event.ORIGIN_BOOT,
+    )
 
 
 class EnablementLane(CoordinatorCollaborator):
@@ -117,19 +137,7 @@ class EnablementLane(CoordinatorCollaborator):
         stalled = await self.rounds.consecutive_stalled()
         if stalled >= _ENABLEMENT_MAX_ATTEMPTS:
             if not state.stop_reason:
-                state.set_stop_reason("enablement_attempts_exhausted")
-                state.save(self.session_dir)
-                # The cap is the lane's own terminal, so the lane event closes
-                # here: no round follows it to close on the lane's behalf.
-                await self.close_lane_event(
-                    outcome=enablement_event.OUTCOME_STALLED,
-                    reason="enablement_attempts_exhausted",
-                )
-                log.warning(
-                    "ENABLEMENT: %d consecutive rounds bought no ground (cap %d); stopping the run",
-                    stalled,
-                    _ENABLEMENT_MAX_ATTEMPTS,
-                )
+                await _stop_on_exhausted_attempts(state, self.session_dir, self.close_lane_event, stalled)
             return ""
         launch_log = state.enablement.launch_log
         deadline = self._coord.run_deadline
@@ -152,7 +160,7 @@ class EnablementLane(CoordinatorCollaborator):
         try:
             await self._coord.enablement_build.maybe_enqueue_specialist_requested_build()
             await self._coord.enablement_build.maybe_escalate_to_targeted_build(launch_log, attempt=stalled)
-        except Exception:  # isolation boundary: the build escalation step, kept apart from the dispatch
+        except (OSError, sqlite3.Error):
             log.exception("enablement: build escalation failed")
         await self._coord.specialist_dispatch.warm_specialist_params(params)
         # This internal dispatch bypasses intent_router (adds gpu_research_lane + budget TTL).
@@ -168,15 +176,7 @@ class EnablementLane(CoordinatorCollaborator):
         # kind exists only in the params this dispatch built, and the log the
         # round was pointed at is replaced by the next advance.
         enablement_event.record_dispatch(
-            enablement_event.AuthoringDispatch(
-                task_id=spec_tid,
-                attempt=stalled + 1,
-                failure_kind=str(params.get("enablement_failure_kind") or ""),
-                launch_log=launch_log,
-                candidate_refs=params.get("enablement_candidate_refs"),
-                mode=str(state.enablement_mode or ""),
-                origin=state.enablement.origin or enablement_event.ORIGIN_BOOT,
-            )
+            _authoring_dispatch(state, spec_tid, params, attempt=stalled + 1, launch_log=launch_log)
         )
         state.save(self.session_dir)
         log.info(
@@ -441,11 +441,7 @@ class EnablementLane(CoordinatorCollaborator):
         state.enablement.pending = False
 
     async def close_booted(self, *, reason: str) -> None:
-        """End the lane on a combo that boots: mark it succeeded, settle its open round and close its event.
-
-        Once the lane no longer accepts rounds, an integrate that executes afterwards is graded as any other
-        candidate rather than as an enablement round.
-        """
+        """End the lane on a combo that boots: mark it succeeded, settle its open round and close its event."""
         enablement = self.shared_state.enablement
         enablement.succeeded = True
         enablement.validation_pending = False
@@ -647,6 +643,7 @@ def _reset_baseline_failure_backstop(state: Any) -> None:
     are progress, not a stuck baseline.
     """
     state.baseline_failure_streak = 0
+    state.baseline_failures_this_leg = 0
     state.baseline_total_failures = 0
 
 

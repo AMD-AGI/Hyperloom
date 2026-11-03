@@ -79,10 +79,11 @@ def test_cli_prints_the_json_result(worktree, commands, capsys):
 
 
 def test_prompt_offers_selfcheck_only_to_cpu_patch_specialists_with_a_worktree():
-    from hyperloom.orchestrator.prompts.specialist_prompt_builder import SpecialistPromptInputs, _cpu_selfcheck_block
+    from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
+    from hyperloom.orchestrator.prompts.specialist_prompt_builder import _cpu_selfcheck_block
     from hyperloom.orchestrator.specialists.domains import get_domain
 
-    base = dict(task_id="t", domain=get_domain("serving_specialist"), max_turns=4, framework="xdit")
+    base = dict(domain=get_domain("serving_specialist"), max_turns=4, framework="xdit")
     block = "\n".join(
         _cpu_selfcheck_block(
             SpecialistPromptInputs(**base, workspace_path="/ws/worktree", worktree_package_dir="xfuser")
@@ -97,11 +98,11 @@ def test_prompt_offers_selfcheck_only_to_cpu_patch_specialists_with_a_worktree()
 
 
 def test_prompt_offers_no_selfcheck_for_a_framework_without_a_package():
-    from hyperloom.orchestrator.prompts.specialist_prompt_builder import SpecialistPromptInputs, _cpu_selfcheck_block
+    from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
+    from hyperloom.orchestrator.prompts.specialist_prompt_builder import _cpu_selfcheck_block
     from hyperloom.orchestrator.specialists.domains import get_domain
 
     inputs = SpecialistPromptInputs(
-        task_id="t",
         domain=get_domain("serving_specialist"),
         max_turns=4,
         framework="custom",

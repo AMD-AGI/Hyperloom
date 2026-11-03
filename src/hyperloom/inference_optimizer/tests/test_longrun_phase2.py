@@ -13,6 +13,8 @@ from hyperloom.orchestrator.lever import LEVER_CONFIG
 from hyperloom.orchestrator.phases import machine_state as ps
 from hyperloom.orchestrator.state.shared_state import SharedState
 
+from .conftest import make_mock_critic_coordinator
+
 
 def _plateaued_explore_state(
     *,
@@ -63,24 +65,8 @@ def test_compute_next_phase_plateau_routes_optimize_to_kernel():
 
 # Coordinator stamps the bottleneck-switch handoff
 @pytest.fixture
-def cyclic_coordinator(tmp_path, monkeypatch):
-    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    from hyperloom.inference_optimizer.session.paths import make_session_dir as _msd
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
-    from hyperloom.orchestrator.roles import (
-        MockBackend,
-        MockCriticBackend,
-        ScriptedPlan,
-    )
-    from .conftest import seed_target_analysis_marker
-
-    sd = _msd()
-    seed_target_analysis_marker(sd)
-    backends = {
-        "orchestration": MockBackend(ScriptedPlan(turns=[]), name="orchestration"),
-        "critic": MockCriticBackend(),
-    }
-    c = Coordinator(sd, backends=backends)
+def cyclic_coordinator(session_dir):
+    c = make_mock_critic_coordinator(session_dir)
     yield c
 
 
@@ -195,18 +181,6 @@ def test_acceptance_threshold_advisory_lists_unblocked(cyclic_coordinator):
     assert "v_lo" in block  # < bar
     assert "v_keep" in block  # KEEP'd result also surfaced as evidence
     assert "Historical results are evidence only" in block
-
-
-def test_a_row_answered_without_measuring_is_no_negative_ledger_pressure(cyclic_coordinator):
-    c = cyclic_coordinator
-    c.shared_state.explore_search = {
-        "tested": {
-            "fp1": {"name": "v_revert", "outcome": "REVERT", "domain": "serving_specialist", "cycle": 0},
-            "fp2": {"name": "v_restates", "outcome": "SKIPPED_DEDUP", "domain": "serving_specialist", "cycle": 0},
-        },
-        "rejected": [],
-    }
-    assert c.phase_macro_cycle._negative_ledger_domain_counts() == {"serving_specialist": 1}
 
 
 def test_acceptance_threshold_advisory_empty_first_cycle(cyclic_coordinator):

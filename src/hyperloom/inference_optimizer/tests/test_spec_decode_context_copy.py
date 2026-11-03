@@ -17,7 +17,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from hyperloom.orchestrator.actions.executors import ExploreExecutor
+from hyperloom.orchestrator.actions.executors.explore import ExploreExecutor
 from hyperloom.orchestrator.actions.executors import _subprocess_kill as sk
 from hyperloom.orchestrator.actions.executors._spec_decode_context_copy import (
     CONTEXT_COPY_REFUSAL,
@@ -25,7 +25,7 @@ from hyperloom.orchestrator.actions.executors._spec_decode_context_copy import (
     context_copy_refusal,
 )
 from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
-from hyperloom.orchestrator.bus.storage import SqliteConnection
+from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec

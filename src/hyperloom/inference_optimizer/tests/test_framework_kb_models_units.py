@@ -34,31 +34,24 @@ def test_read_pr_ledger_tolerates_malformed_rows(tmp_path: Path, monkeypatch: py
     assert read_pr_ledger() == []
 
 
-@pytest.mark.parametrize(
-    "env",
-    [
-        pytest.param({}, id="workspace-default"),
-        pytest.param({"USER_DATA_PATH": "/tmp/hl-user-data"}, id="user-data-path"),
-        pytest.param({"INFERENCE_OPTIMIZER_FA_KB_PATH": "/tmp/hl-explicit-kb"}, id="explicit-override"),
-    ],
-)
-def test_lessons_writer_and_reader_resolve_the_same_file(
+@pytest.mark.parametrize("env_name", ["USER_DATA_PATH", "INFERENCE_OPTIMIZER_FA_KB_PATH"])
+async def test_lessons_writer_and_reader_resolve_the_same_file(
     monkeypatch: pytest.MonkeyPatch,
-    env: dict[str, str],
+    tmp_path: Path,
+    env_name: str,
 ) -> None:
     """The PR ledger must be one file, whatever the deployment sets."""
-    from hyperloom.agents.framework import kb as fa_kb
     from hyperloom.orchestrator.knowledge import kb_writeback
 
     for name in ("USER_DATA_PATH", "INFERENCE_OPTIMIZER_FA_KB_PATH", "FRAMEWORK_AGENT_ROOT"):
         monkeypatch.delenv(name, raising=False)
-    for name, value in env.items():
-        monkeypatch.setenv(name, value)
+    monkeypatch.setenv(env_name, str(tmp_path))
 
-    writer = kb_writeback._default_kb_root() / kb_writeback.LESSONS_FILE
-    reader = fa_kb.framework_optimization_root() / kb_writeback.LESSONS_FILE
+    await kb_writeback.write_framework_record(
+        kb_writeback.FrameworkOutcome("PR-1", "sha", "p.patch", kb_writeback.OUTCOME_INTEGRATED, 1.0, "sess")
+    )
 
-    assert writer == reader
+    assert [(row["pr_url"], row["outcome"]) for row in read_pr_ledger()] == [("PR-1", "integrated")]
 
 
 def test_framework_kb_does_not_share_a_root_with_the_recipe_kb(

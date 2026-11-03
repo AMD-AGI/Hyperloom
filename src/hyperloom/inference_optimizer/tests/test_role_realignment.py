@@ -12,8 +12,9 @@ from pathlib import Path
 import pytest
 
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
+from hyperloom.orchestrator.mcp_tool_names import qualified_context_tool_name
 from hyperloom.orchestrator.phases.machine_state import PHASE_NAMES
-from hyperloom.common.coerce import to_unix
+from hyperloom_common.coerce import to_unix
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.prompts.prompt_builder import (
@@ -63,7 +64,8 @@ def test_orchestration_prompt_defers_rescue_moves_to_reference(registry):
     )
 
     assert "kill_task" not in text
-    assert "read_reference('specialist_rescue')" in text
+    read_reference = qualified_context_tool_name("read_reference")
+    assert f"{read_reference}(name='specialist_rescue')" in text
 
 
 def test_orchestration_prompt_no_kernel_marks_kernel_skipped(registry):
@@ -79,9 +81,7 @@ def test_orchestration_prompt_no_framework_agent_marks_skipped_and_context(regis
     text = build_orchestration_prompt(
         action_registry=registry,
         enabled_actions=default_enabled_actions(no_kernel=False),
-        session=SessionContext(
-            framework="sglang", kernel_enabled=True, framework_agent_phase_enabled=False, max_minutes=120
-        ),
+        session=SessionContext(framework="sglang", framework_agent_phase_enabled=False, max_minutes=120),
     )
     assert "(DISABLED: --no-framework-agent — phase skipped)" in text
     assert "optimize_enabled : false" in text
@@ -91,9 +91,7 @@ def test_orchestration_prompt_all_enabled_session_context_true(registry):
     text = build_orchestration_prompt(
         action_registry=registry,
         enabled_actions=default_enabled_actions(no_kernel=False),
-        session=SessionContext(
-            framework="sglang", kernel_enabled=True, framework_agent_phase_enabled=True, max_minutes=120
-        ),
+        session=SessionContext(framework="sglang", framework_agent_phase_enabled=True, max_minutes=120),
     )
     assert "optimize_enabled : true" in text
     assert "kernel_enabled   : true" in text
@@ -356,6 +354,74 @@ async def test_compose_prompt_keeps_per_tick_values_out_of_the_context(coordinat
 
 
 @pytest.mark.asyncio
+async def test_compose_prompt_keeps_the_session_ledger_out_of_the_context(coordinator_with_mocks):
+    """The ledger moves whenever an action lands, so it must not sit in the cached prefix."""
+    c = coordinator_with_mocks
+    try:
+        before = await c.conversation.compose_prompt("orchestration")
+        c.shared_state.crash_count = int(c.shared_state.crash_count or 0) + 1
+        after = await c.conversation.compose_prompt("orchestration")
+
+        assert after.context == before.context
+        assert after.turn != before.turn
+        assert "=== Shared session state ===" not in after.context
+        assert "target_gap_pct=" not in after.context
+        assert "=== Resource pools ===" in after.context
+        # Stable blocks first, then the per-tick ones, ledger just above the inbox tail.
+        assert after.turn.index("=== Tick ===") < after.turn.index("=== Shared session state ===")
+        assert after.turn.index("=== Shared session state ===") < after.turn.index("=== Inbox for orchestration")
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_compose_prompt_keeps_the_denial_and_proposal_blocks_out_of_the_context(coordinator_with_mocks):
+    """A denial lands and a proposal is benched between two ticks; the cached prefix has to survive both."""
+    from hyperloom.orchestrator.actions.executors._proposal_identity import controls_of, normalize_proposal
+    from hyperloom.orchestrator.phases.machine_state import PHASE_FRAMEWORK_AGENT
+
+    c = coordinator_with_mocks
+    tried = {"name": "proposal-alpha", "extra_args": "--enable-fused-rmsnorm"}
+    waiting = {"name": "proposal-beta", "extra_args": "--chunked-prefill-size 8192"}
+    try:
+        c.shared_state.phase = PHASE_FRAMEWORK_AGENT
+        c.shared_state.macro_cycle = 0
+        c.shared_state.specialist_rounds = [
+            {"cycle": 0, "domain": "serving_specialist", "gap_canonical_id": "", "proposal_set": [tried, waiting]}
+        ]
+        first = await c.conversation.compose_prompt("orchestration")
+        assert "=== Untested proposals (current cycle) ===" in first.turn
+        assert tried["name"] in first.turn
+
+        c.shared_state.record_policy_denial(
+            action_name="explore",
+            rule="phase_gate",
+            hint="wait for the bench slot",
+            intent_type="DISPATCH_TASK",
+        )
+        fields = normalize_proposal(tried)
+        tested_row = {
+            "extra_server_args": fields["extra_args"],
+            "extra_envs": fields["extra_envs"],
+            **controls_of(fields),
+        }
+        c.shared_state.explore_search = {"tested": {"explore-1": dict(tested_row, outcome="REVERT")}}
+        c.shared_state.tick = int(c.shared_state.tick or 0) + 1
+        second = await c.conversation.compose_prompt("orchestration")
+
+        assert second.context == first.context
+        assert "=== Recent policy denials" in second.turn
+        assert "=== Recent policy denials" not in second.context
+        assert "=== Untested proposals (current cycle) ===" not in second.context
+        # The benched proposal left the queue; the prefix above it did not move.
+        queue = second.turn.split("=== Untested proposals (current cycle) ===", 1)[1]
+        assert tried["name"] not in queue
+        assert waiting["name"] in queue
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("cached", [True, False])
 async def test_reactor_turn_hands_a_caching_backend_the_context_as_its_system_prompt(coordinator_with_mocks, cached):
     c = coordinator_with_mocks
@@ -367,7 +433,9 @@ async def test_reactor_turn_hands_a_caching_backend_the_context_as_its_system_pr
         (call,) = backend.calls
 
         assert (composed.context in call["system_prompt"]) is cached
-        assert ("=== Shared session state ===" in call["prompt"]) is not cached
+        # The ledger is a per-tick block, so it rides the prompt and never the cached half.
+        assert "=== Shared session state ===" in call["prompt"]
+        assert "=== Shared session state ===" not in call["system_prompt"]
         assert "=== Phase ===" in call["prompt"]
         assert call["prompt"].endswith("ASK")
     finally:
@@ -585,7 +653,7 @@ async def test_running_tasks_reader_skips_heartbeat_for_non_specialist(
         # Plant the liveness file the specialist path would have read.
         ws = runs_dir(c.session_dir, "specialist", task.task_id)
         ws.mkdir(parents=True, exist_ok=True)
-        (ws / "heartbeat.json").write_text("{}", encoding="utf-8")
+        (ws / "process.log").write_text("event\n", encoding="utf-8")
 
         out = c.conversation._context_running_tasks_reader()
         assert task.task_id in out
@@ -726,10 +794,11 @@ async def test_extend_lease_does_not_regrant_elapsed_time(coordinator_with_mocks
         )
         # Backdate the running mark so the task looks 1000s old.
         started_iso = datetime.fromtimestamp(time.time() - 1000, tz=timezone.utc).isoformat()
-        await c.db.execute(
-            "UPDATE tasks SET updated_at=? WHERE task_id=?",
-            (started_iso, task.task_id),
-        )
+        async with c.db.transaction() as cur:
+            cur.execute(
+                "UPDATE tasks SET updated_at=? WHERE task_id=?",
+                (started_iso, task.task_id),
+            )
 
         await c.router.handle_intent(
             "orchestration",
@@ -770,7 +839,8 @@ async def test_extend_lease_late_grant_keeps_new_increment_for_lanes(coordinator
             ttl_sec=1800,
         )
         started_iso = datetime.fromtimestamp(time.time() - 3000, tz=timezone.utc).isoformat()
-        await c.db.execute("UPDATE tasks SET updated_at=? WHERE task_id=?", (started_iso, task.task_id))
+        async with c.db.transaction() as cur:
+            cur.execute("UPDATE tasks SET updated_at=? WHERE task_id=?", (started_iso, task.task_id))
 
         await c.router.handle_intent(
             "orchestration",

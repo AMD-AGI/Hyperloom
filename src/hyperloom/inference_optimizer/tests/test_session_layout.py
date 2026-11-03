@@ -21,7 +21,8 @@ from hyperloom.inference_optimizer.session.manifest import (
 )
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.orchestrator.policy.gate import PolicyDenied, PolicyGate
+from hyperloom.orchestrator.policy.denial import PolicyDenied
+from hyperloom.orchestrator.policy.gate import PolicyGate
 from hyperloom.orchestrator.bus.resource_lock import (
     SqliteLeaseBackend,
 )
@@ -190,6 +191,30 @@ def test_deps_cache_root_defaults_to_repo_root_cache(tmp_path, monkeypatch):
     monkeypatch.delenv("HYPERLOOM_CACHE_DIR", raising=False)
     monkeypatch.setenv(paths.ENV_REPO_ROOT, str(tmp_path / "repo"))
     assert paths.deps_cache_root() == tmp_path / "repo" / ".cache"
+
+
+def test_deps_cache_root_without_repo_root_is_install_sh_s_root_not_the_working_directory(tmp_path, monkeypatch):
+    # install.sh resolves REPO_ROOT from its own location: the source checkout holding pyproject.toml, else the
+    # directory holding the installed package. A process started from another directory must find the same .cache.
+    monkeypatch.delenv("HYPERLOOM_CACHE_DIR", raising=False)
+    monkeypatch.delenv(paths.ENV_REPO_ROOT, raising=False)
+    monkeypatch.chdir(tmp_path)
+    package_parent = Path(paths.__file__).resolve().parents[3]
+    source_root = package_parent.parent
+    expected = source_root if (source_root / "pyproject.toml").is_file() else package_parent
+    assert paths.deps_cache_root() == expected / ".cache"
+    assert paths.deps_cache_root() != tmp_path / ".cache"
+
+
+def test_deps_cache_root_of_a_packaged_install_is_the_package_parent(tmp_path, monkeypatch):
+    site = tmp_path / "site-packages"
+    fake = site / "hyperloom" / "inference_optimizer" / "session" / "paths.py"
+    fake.parent.mkdir(parents=True)
+    fake.write_text("", encoding="utf-8")
+    monkeypatch.delenv("HYPERLOOM_CACHE_DIR", raising=False)
+    monkeypatch.delenv(paths.ENV_REPO_ROOT, raising=False)
+    monkeypatch.setattr(paths, "__file__", str(fake))
+    assert paths.deps_cache_root() == site / ".cache"
 
 
 def test_deps_cache_root_honours_explicit_override(tmp_path, monkeypatch):
@@ -405,8 +430,8 @@ def test_agent_prompt_snapshot_path(tmp_path):
     )
 
 
-@pytest.mark.asyncio
-async def test_sub_agent_runner_premkdirs_workspace(tmp_path, monkeypatch):
+async def _run_one_task(tmp_path, monkeypatch, kind: str, idempotency_key: str):
+    """Run one ``kind`` task in a fresh session; return the session, the task, its result and what its ctx carried."""
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     sd = paths.make_session_dir()
     db = SqliteConnection(tmp_path / "x.db")
@@ -420,16 +445,22 @@ async def test_sub_agent_runner_premkdirs_workspace(tmp_path, monkeypatch):
         return {"status": "succeeded"}
 
     sub = SubAgentRunner(locks, tasks, session_dir=sd)
-    sub.register_executor("baseline", runner)
+    sub.register_executor(kind, runner)
     task, _ = await tasks.create_or_return_existing(
         TaskSpec(
-            kind="baseline",
+            kind=kind,
             params={},
-            idempotency_key="ws-test-1",
+            idempotency_key=idempotency_key,
         ),
     )
     res = await sub.run_task(task)
     db.close()
+    return sd, task, res, captured
+
+
+@pytest.mark.asyncio
+async def test_sub_agent_runner_premkdirs_workspace(tmp_path, monkeypatch):
+    sd, task, res, captured = await _run_one_task(tmp_path, monkeypatch, "baseline", "ws-test-1")
     assert res.state == "succeeded"
     assert captured["workspace"] == str(sd / "runs" / "baseline" / task.task_id)
     assert (sd / "runs" / "baseline" / task.task_id).is_dir()
@@ -439,40 +470,14 @@ async def test_sub_agent_runner_premkdirs_workspace(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_sub_agent_runner_skips_unknown_action(tmp_path, monkeypatch):
     """`target_analysis` is not in _RUNS_ACTIONS — runner shouldn't fabricate a path."""
-    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
-    sd = paths.make_session_dir()
-    db = SqliteConnection(tmp_path / "x.db")
-    locks = SqliteLeaseBackend(db)
-    tasks = TaskRegistry(db)
-    captured: dict = {}
-
-    async def runner(ctx) -> dict:
-        captured["workspace"] = ctx.extra.get("workspace")
-        captured["session_dir"] = ctx.extra.get("session_dir")
-        return {"status": "succeeded"}
-
-    sub = SubAgentRunner(locks, tasks, session_dir=sd)
-    sub.register_executor("target_analysis", runner)
-    task, _ = await tasks.create_or_return_existing(
-        TaskSpec(
-            kind="target_analysis",
-            params={},
-            idempotency_key="target-analysis-test-1",
-        ),
-    )
-    await sub.run_task(task)
-    db.close()
+    sd, _task, _res, captured = await _run_one_task(tmp_path, monkeypatch, "target_analysis", "target-analysis-test-1")
     # target_analysis has no runs/ subtree — workspace stays unset.
     assert captured["workspace"] is None
     assert captured["session_dir"] == str(sd)
 
 
-def _gate(tmp_path: Path, *, strict: bool = True) -> PolicyGate:
-    return PolicyGate(
-        role_registry=default_role_registry(),
-        session_dir=tmp_path,
-        strict_paths=strict,
-    )
+def _gate(tmp_path: Path) -> PolicyGate:
+    return PolicyGate(role_registry=default_role_registry(), session_dir=tmp_path)
 
 
 def test_policy_path_inside_session_dir_passes(tmp_path):
@@ -524,35 +529,3 @@ def test_policy_source_like_fields_are_exempt_from_path_checks(tmp_path):
         },
     )
     gate.validate_intent("orchestration", intent)
-
-
-def test_policy_strict_off_skips_path_check(tmp_path):
-    gate = _gate(tmp_path, strict=False)
-    intent = Intent(
-        type=IntentType.REQUEST,
-        payload={
-            "target_agent": "kernel_agent",
-            "kind": "trace_analyze",
-            "params": {"trace_input": "/tmp/anywhere.json"},
-        },
-    )
-    gate.validate_intent("orchestration", intent)
-
-
-def test_policy_env_var_enables_strict(tmp_path, monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_STRICT_PATHS", "1")
-    gate = PolicyGate(
-        role_registry=default_role_registry(),
-        session_dir=tmp_path,
-    )
-    assert gate.strict_paths is True
-    intent = Intent(
-        type=IntentType.REQUEST,
-        payload={
-            "target_agent": "kernel_agent",
-            "kind": "trace_analyze",
-            "params": {"trace_input": "/tmp/x.json"},
-        },
-    )
-    with pytest.raises(PolicyDenied):
-        gate.validate_intent("orchestration", intent)

@@ -13,6 +13,7 @@ from collections.abc import Iterable
 # This smoke exercises ``kernelforge forge-loop``.
 FORGE_E2E_PATHS = (
     "src/kernelforge/**",
+    "src/hyperloom_common/**",
     "pyproject.toml",
     "examples/triton-softmax-forge-loop/**",
     ".github/workflows/forge-e2e.yml",
@@ -22,10 +23,10 @@ FORGE_E2E_PATHS = (
 )
 
 FORGE_E2E_EXCLUDED_PATHS = (
-    "src/kernelforge/fusion/**",
-    "src/kernelforge/gemm_tune/**",
-    "src/kernelforge/tests/fusion/**",
-    "src/kernelforge/tests/gemm_tune/**",
+    "src/kernelforge/workflows/forge_fusion/**",
+    "src/kernelforge/workflows/gemm_tune/**",
+    "src/kernelforge/tests/workflows/forge_fusion/**",
+    "src/kernelforge/tests/workflows/gemm_tune/**",
 )
 
 

@@ -9,8 +9,8 @@ import logging
 import sqlite3
 from typing import Any, Mapping
 
-from hyperloom.common.coerce import to_float
-from hyperloom.common.env import is_truthy
+from hyperloom_common.coerce import to_float
+from hyperloom_common.env import is_truthy
 from hyperloom.common.perf_metric import constraint_fields, stamp_output_per_gpu
 from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
@@ -226,7 +226,6 @@ class BaselinePromotionMixin:
     ) -> None:
         """Promote a baseline result: anchor tput / accuracy / config and bootstrap PRELUDE."""
         stamp_output_per_gpu(result, self.shared_state.tp)
-        changed = False
         tput = result.get("output_throughput")
         measured_ok = isinstance(tput, (int, float)) and tput > 0
         promoting_tid = str(getattr(task, "task_id", "") or "").strip()
@@ -244,20 +243,18 @@ class BaselinePromotionMixin:
                 result, held_reason=held_reason, prior_anchor=prior_anchor, promoting_tid=promoting_tid
             )
             self.shared_state.baseline_failure_streak = 0
+            self.shared_state.baseline_failures_this_leg = 0
             # A genuine baseline is what revalidates an enablement KEEP.
             await self._settle_pending_revalidation(
                 result, is_revalidation=is_revalidation, promoting_tid=promoting_tid
             )
-            changed = True
         if anchor_accepted:
-            if self._promote_anchor_run_facts(result, task_params):
-                changed = True
+            self._promote_anchor_run_facts(result, task_params)
             # Once the stack carries a validated layer, current_best belongs to
             # the stack top and a baseline must not reset it to the bare
             # reference config.
             if not (self.shared_state.optimization_stack or []):
                 self._anchor_current_best(result)
-                changed = True
             outcome.verdict = Verdict.ADOPTED
             outcome.audit_decision = "promoted"
         elif measured_ok:
@@ -277,7 +274,6 @@ class BaselinePromotionMixin:
         # re-baseline must not re-fire replay, scout or recon.
         if prior_anchor <= 0.0 and self._should_run_prelude_bootstrap(tput):
             await self._bootstrap_prelude_after_baseline(tput)
-        outcome.changed = changed
         outcome.audit_extras = audit_extras
 
     def _anchor_baseline_tput(
@@ -377,22 +373,19 @@ class BaselinePromotionMixin:
             ),
         )
 
-    def _promote_anchor_run_facts(self, result: dict, task_params: Mapping[str, Any]) -> bool:
+    def _promote_anchor_run_facts(self, result: dict, task_params: Mapping[str, Any]) -> None:
         from hyperloom.common.perf_metric import perf_snapshot_from_mapping
 
         state = self.shared_state
         state.baseline_benchmark_script = str(task_params.get("benchmark_script") or "").strip()
         state.baseline_perf = perf_snapshot_from_mapping(result) or {}
-        changed = False
         accuracy = result.get("accuracy")
         if isinstance(accuracy, (int, float)):
             state.baseline_accuracy = float(accuracy)
-            changed = True
         # Persist the materialized YAML so downstream tasks reuse the exact workload contract.
         materialized = result.get("materialized_config")
         if isinstance(materialized, str) and materialized:
             state.baseline_config_path = materialized
-            changed = True
             # Workload-shape extras off the YAML feed the lesson and pitfall attrs.
             parsed = _parse_baseline_workload_extra(materialized)
             if parsed:
@@ -401,39 +394,21 @@ class BaselinePromotionMixin:
         runtime_sec = result.get("subprocess_runtime_sec")
         if isinstance(runtime_sec, (int, float)) and runtime_sec > 0:
             state.baseline_runtime_sec = float(runtime_sec)
-            changed = True
         # Whether this baseline had to keep its cold figure because the budget
         # could not fund a hot pass and a variant to use it. Carried on the
         # session because the decision it drives is the session's: PRELUDE routes
         # to CLOSE rather than optimizing against a denominator that was never
         # the baseline.
-        measure_round_dropped = bool(result.get("measure_round_dropped"))
-        if measure_round_dropped != bool(state.baseline_measure_round_dropped):
-            state.baseline_measure_round_dropped = measure_round_dropped
-            changed = True
-        if self._promote_anchor_round_split(result):
-            changed = True
-        return changed
-
-    def _promote_anchor_round_split(self, result: dict) -> bool:
-        state = self.shared_state
-        changed = False
+        state.baseline_measure_round_dropped = bool(result.get("measure_round_dropped"))
         # Present only on the double-run baseline path; else explore uses the cold anchor.
         warm_runtime = result.get("measure_round_runtime_sec")
-        if isinstance(warm_runtime, (int, float)) and warm_runtime > 0:
-            state.baseline_warm_runtime_sec = float(warm_runtime)
-            changed = True
-        elif float(state.baseline_warm_runtime_sec or 0.0) != 0.0:
-            state.baseline_warm_runtime_sec = 0.0
-            changed = True
+        state.baseline_warm_runtime_sec = (
+            float(warm_runtime) if isinstance(warm_runtime, (int, float)) and warm_runtime > 0 else 0.0
+        )
         post_ready = result.get("post_ready_runtime_sec")
-        if isinstance(post_ready, (int, float)) and post_ready > 0:
-            state.baseline_post_ready_runtime_sec = float(post_ready)
-            changed = True
-        elif float(state.baseline_post_ready_runtime_sec or 0.0) != 0.0:
-            state.baseline_post_ready_runtime_sec = 0.0
-            changed = True
-        return changed
+        state.baseline_post_ready_runtime_sec = (
+            float(post_ready) if isinstance(post_ready, (int, float)) and post_ready > 0 else 0.0
+        )
 
     def _anchor_current_best(self, result: dict) -> None:
         tput = result.get("output_throughput")
@@ -461,13 +436,6 @@ class BaselinePromotionMixin:
             "workspace": result.get("workspace"),
             **_baseline_perf_axes(self.shared_state.baseline_perf),
         }
-        # The measured corpus shape replaces the canonical seed. Only an aiperf
-        # result carries the distributions, so their presence is what marks the
-        # measurement as AgentX-produced.
-        if result.get("isl_distribution"):
-            from hyperloom.inference_optimizer.agentx.mapping import map_corpus_shape
-
-            self.shared_state.agentx_corpus_shape = map_corpus_shape(result)
         self.shared_state.current_best = current_best
         # Reads the current_best just assigned, so it has to follow it.
         self._stamp_current_best_measurement(result)

@@ -195,11 +195,6 @@ def llm_calls_path(session_dir: Path) -> Path:
     return trace_dir(session_dir) / "llm_calls.jsonl"
 
 
-def trace_ext_dir(session_dir: Path) -> Path:
-    """``<sd>/reports/trace/ext/`` — parent of every out-of-process child's own ``<component>-<pid>.jsonl`` shard."""
-    return trace_dir(session_dir) / "ext"
-
-
 def trajectory_dir(session_dir: Path) -> Path:
     """``<sd>/reports/trace/trajectory/`` — one ``<writer>.jsonl`` event shard per writing process; the append-only source of truth for the session trajectory (Langfuse spans are a projection of it)."""
     return trace_dir(session_dir) / "trajectory"
@@ -269,11 +264,6 @@ def next_forge_attempt_dir(session_dir: Path, macro_cycle: int) -> Path:
             except ValueError:
                 continue
     return forge_attempt_dir(session_dir, macro_cycle, highest + 1)
-
-
-def forge_handoff_dir(session_dir: Path, macro_cycle: int) -> Path:
-    """Return the handoff directory for one Forge macro cycle."""
-    return forge_cycle_dir(session_dir, macro_cycle) / "handoff"
 
 
 def competitor_target_json(session_dir: Path) -> Path:
@@ -355,21 +345,6 @@ def recipe_kb_lessons_json(session_dir: Path) -> Path:
     return recipe_kb_dir(session_dir) / ".kb_lessons.json"
 
 
-def recipe_kb_pending_ndjson(session_dir: Path) -> Path:
-    """``<sd>/runtime/recipe_kb/.kb_pending.ndjson`` — legacy async KB write queue."""
-    return recipe_kb_dir(session_dir) / ".kb_pending.ndjson"
-
-
-def recipe_kb_flushed_ndjson(session_dir: Path) -> Path:
-    """Compute the path to ``.kb_flushed.ndjson``, the successfully-POSTed rows."""
-    return recipe_kb_dir(session_dir) / ".kb_flushed.ndjson"
-
-
-def recipe_kb_dead_letter_ndjson(session_dir: Path) -> Path:
-    """Compute the path to ``.kb_dead_letter.ndjson``, the permanent-failure rows."""
-    return recipe_kb_dir(session_dir) / ".kb_dead_letter.ndjson"
-
-
 # recipe-snapshot per-session bookkeeping.
 def recipe_snapshot_dir(session_dir: Path) -> Path:
     """Compute ``<sd>/runtime/recipe_snapshot/``, the dispatcher bookkeeping root."""
@@ -391,19 +366,24 @@ def _prune_old_workdirs(root: Path, *, keep: int) -> None:
         return
     for stale in entries[: len(entries) - keep]:
         try:
-            for child in stale.rglob("*"):
-                if child.is_file():
-                    child.unlink(missing_ok=True)
-            for child in sorted(stale.rglob("*"), key=lambda p: -len(p.parts)):
-                if child.is_dir():
-                    try:
-                        child.rmdir()
-                    except OSError:
-                        # Best-effort cleanup; the outer rmdir / next sweep retries.
-                        pass
-            stale.rmdir()
+            _remove_workdir(stale)
         except OSError:
             continue
+
+
+def _remove_workdir(stale: Path) -> None:
+    """Remove one workdir tree: its files first, then its directories deepest first."""
+    for child in stale.rglob("*"):
+        if child.is_file():
+            child.unlink(missing_ok=True)
+    for child in sorted(stale.rglob("*"), key=lambda p: -len(p.parts)):
+        if child.is_dir():
+            try:
+                child.rmdir()
+            except OSError:
+                # Best-effort cleanup; the outer rmdir / next sweep retries.
+                pass
+    stale.rmdir()
 
 
 def allocate_turn_workdir(session_dir: Path, subdir: str, turn_idx: int, *, keep: int) -> Path:
@@ -435,11 +415,8 @@ __all__ = [
     "breakdown_parts_dir",
     "competitor_target_json",
     "conversations_path",
-    "recipe_kb_dead_letter_ndjson",
     "recipe_kb_dir",
-    "recipe_kb_flushed_ndjson",
     "recipe_kb_lessons_json",
-    "recipe_kb_pending_ndjson",
     "recipe_kb_pitfalls_json",
     "decision_trace_path",
     "proposal_task_map_path",
@@ -450,7 +427,6 @@ __all__ = [
     "patches_dir",
     "failure_evidence_path",
     "forge_cycle_dir",
-    "forge_handoff_dir",
     "BRINGUP_SEGMENT",
     "ENABLEMENT_SEGMENT",
     "enablement_builds_dir",

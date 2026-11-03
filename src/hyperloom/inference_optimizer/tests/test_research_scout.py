@@ -15,7 +15,7 @@ from hyperloom.inference_optimizer.baseline_comparison import research_hints
 from hyperloom.orchestrator.specialists import domains as sd
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.prompts import (
-    specialist_prompt_builder as spb,
+    specialist_focus as sf,
 )
 
 
@@ -25,7 +25,7 @@ def test_research_scout_tag_and_domain_registered():
 
 
 def test_research_scout_has_focus_template():
-    assert "research_scout_specialist" in spb._DOMAIN_FOCUS_TEMPLATES
+    assert "research_scout_specialist" in sf._DOMAIN_FOCUS_TEMPLATES
 
 
 def test_skeleton_always_present(tmp_path: Path):

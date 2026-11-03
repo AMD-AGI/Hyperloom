@@ -20,7 +20,7 @@ from hyperloom.orchestrator.actions.executors.magpie_agentx import apply_native_
 @pytest.fixture(autouse=True)
 def profile_environment(monkeypatch):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
-    monkeypatch.setenv("HYPERLOOM_SGLANG_SHAPE_MODE", "patched")
+    monkeypatch.setattr(_server_patcher, "resolve_sglang_shape_mode", lambda: "patched")
     monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "1")
     for name in (
         "PROFILE_OSL",
@@ -138,7 +138,7 @@ def test_fixed_sequence_materialization_keeps_its_capture_plan(tmp_path):
 
 
 def test_shape_tool_preserves_the_selected_native_runtime(tmp_path, monkeypatch):
-    monkeypatch.setenv("HYPERLOOM_SGLANG_SHAPE_MODE", "sitecustomize")
+    monkeypatch.setattr(_server_patcher, "resolve_sglang_shape_mode", lambda: "sitecustomize")
     tool_dir = tmp_path / "kernel_shape_tool"
     tool_dir.mkdir()
     runtime_dir = tmp_path / "runtime"
@@ -169,7 +169,7 @@ def test_shape_tool_preserves_the_selected_native_runtime(tmp_path, monkeypatch)
 
 
 def test_missing_shape_tool_keeps_native_pythonpath(tmp_path, monkeypatch):
-    monkeypatch.setenv("HYPERLOOM_SGLANG_SHAPE_MODE", "sitecustomize")
+    monkeypatch.setattr(_server_patcher, "resolve_sglang_shape_mode", lambda: "sitecustomize")
     monkeypatch.setattr(_server_patcher, "kernel_shape_tool_dir", lambda: None)
     launch = {"version": 1, "env": {"PYTHONPATH": "/candidate/overlay:/runtime"}}
     path = _native_config(tmp_path, "sglang", agentx={"enabled": True, "launch_overrides": launch})
@@ -180,7 +180,7 @@ def test_missing_shape_tool_keeps_native_pythonpath(tmp_path, monkeypatch):
 
 
 def test_shape_tool_does_not_reintroduce_an_explicitly_unset_pythonpath(tmp_path, monkeypatch):
-    monkeypatch.setenv("HYPERLOOM_SGLANG_SHAPE_MODE", "sitecustomize")
+    monkeypatch.setattr(_server_patcher, "resolve_sglang_shape_mode", lambda: "sitecustomize")
     monkeypatch.setenv("PYTHONPATH", "/ambient/client")
     tool_dir = tmp_path / "kernel_shape_tool"
     tool_dir.mkdir()
@@ -209,7 +209,7 @@ def test_native_vllm_timeout_preserves_a_longer_server_timeout(tmp_path, timeout
 
 @pytest.mark.parametrize("detailed", [False, True])
 def test_native_shape_setup_preserves_annotations_without_rewriting_client_body(tmp_path, monkeypatch, detailed):
-    monkeypatch.setenv("HYPERLOOM_SGLANG_SHAPE_MODE", "sitecustomize")
+    monkeypatch.setattr(_server_patcher, "resolve_sglang_shape_mode", lambda: "sitecustomize")
     tool_dir = tmp_path / "kernel_shape_tool"
     tool_dir.mkdir()
     monkeypatch.setattr(_server_patcher, "kernel_shape_tool_dir", lambda: tool_dir)
@@ -237,7 +237,7 @@ def test_native_shape_setup_preserves_annotations_without_rewriting_client_body(
 
 
 def test_fixed_shape_setup_preserves_request_options_and_capture_window(tmp_path, monkeypatch):
-    monkeypatch.setenv("HYPERLOOM_SGLANG_SHAPE_MODE", "sitecustomize")
+    monkeypatch.setattr(_server_patcher, "resolve_sglang_shape_mode", lambda: "sitecustomize")
     monkeypatch.setenv("HYPERLOOM_PROFILE_MAX_ITERS", "9")
     monkeypatch.setenv("HYPERLOOM_PROFILE_DELAY_ITERS", "2")
     tool_dir = tmp_path / "kernel_shape_tool"

@@ -18,7 +18,10 @@
 > read-only context tools; the Codex backend has no tool surface and is bound
 > by a provider-enforced output schema instead. Tag any block that names a
 > tool: an instruction to call a tool that is not mounted is not merely
-> irrelevant, it is unfollowable.
+> irrelevant, it is unfollowable. Write each tool name the way the runtime
+> registers it — ``mcp__inference_optimizer__emit_intent``,
+> ``mcp__inference_optimizer_context__<tool>`` — since a bare name leaves the
+> agent to guess the prefix, and a guessed name is an unavailable tool.
 
 ### Operating model — one full state projection per turn
 
@@ -65,27 +68,32 @@ lean on async delegation and track how dispatched specialists land.
 ### Closing the act->observe loop in-turn
 
 These tools close the act->observe loop without waiting for the next tick
-(plus `Read` for any file under SESSION_DIR):
+(plus `Read` for any file under SESSION_DIR). Call each one under its full
+registered name, prefix included — the names below are literal:
 
-- **`get_recent_outcomes`** — pull the most recent `delegated_result`
+- **`mcp__inference_optimizer_context__get_recent_outcomes`** — pull the
+  most recent `delegated_result`
   outcomes (kind / state / status / kept / gain / tput / error, plus
   per-variant failure lines for FAILED/KILLED_OVERTIME rows) plus review
   verdicts. Use this to check how your prior delegated work landed before
   deciding the next move, instead of re-emitting blindly.
-- **`get_running_tasks`** — pull what is in flight right now: elapsed
+- **`mcp__inference_optimizer_context__get_running_tasks`** — pull what is
+  in flight right now: elapsed
   seconds, specialist domain / gap, lease TTL remaining, held lanes,
-  leased GPU ids and last-progress age. `get_recent_outcomes` only shows
+  leased GPU ids and last-progress age. The outcomes tool above only shows
   work that already finished; this is the only view of work still
   running, and a specialist can hold the machine for hours.
-- **`get_failure{failure_id}`** — pull the structured evidence packet for
+- **`mcp__inference_optimizer_context__get_failure{failure_id}`** — pull the structured evidence packet for
   one variant failure: stage, error_class, error_excerpt,
   server_log_path, workspace. The failure_id appears in inbox failure
   lines and gap attempts. Use it to get the exact log path, then `Read`
   that path instead of guessing the root cause from a 160-char excerpt.
-- **`get_variant_failures{task_id}`** — list recent evidence packets,
+- **`mcp__inference_optimizer_context__get_variant_failures{task_id}`** —
+  list recent evidence packets,
   optionally scoped to one task, to find a failure_id you do not already
   hold.
-- **`get_runtime_findings`** — what the current best's `server.log` shows
+- **`mcp__inference_optimizer_context__get_runtime_findings`** — what the
+  current best's `server.log` shows
   the server actually ran: unknown env vars, features the framework
   disabled, capability fallbacks, engine-adjusted settings, AITER
   tuned-config misses, tracebacks. Already scanned; do not re-read the log
@@ -110,8 +118,9 @@ prompted you is not.
 <!-- transport: tools -->
 ### Watching a running specialist — live view
 
-`get_running_tasks` is the only view of work still running. Full rescue
-semantics and judgment criteria: ``read_reference('specialist_rescue')``.
+`mcp__inference_optimizer_context__get_running_tasks` is the only view of
+work still running. Full rescue semantics and judgment criteria:
+``mcp__inference_optimizer_context__read_reference(name='specialist_rescue')``.
 
 <!-- transport: tools -->
 ### Pulling what the projection does not carry
@@ -189,9 +198,9 @@ Drive `baseline_tput > 0` so the Coordinator advances, after any `hold` the
 <!-- phase: ENABLEMENT -->
 ### ENABLEMENT — phase goal
 
-The combo (model + backend) cannot run at all. Drive it to a booting,
-accuracy-passing baseline so `baseline_tput > 0` and the run can proceed,
-after any `hold` the `=== Phase ===` block shows.
+The combo (model + backend) cannot run at all. The Coordinator's enablement
+lane drives it to a booting, accuracy-passing baseline so `baseline_tput > 0`
+and the run can proceed, after any `hold` the `=== Phase ===` block shows.
 
 A **KEEP** in ENABLEMENT is graded on runnability and the accuracy floor, not
 throughput. A patch that boots the server and holds accuracy is a valid KEEP
@@ -233,18 +242,22 @@ provide KB/PR/source evidence for `explore` grids and may produce patches for
 has covered the gap yet.
 
 **Where a grid comes from.** `=== Untested proposals (current cycle) ===`
-carries the executable proposals this cycle that no explore round has benched:
-predictor rows (`provenance: primatune`) first when a predictor is configured,
-then specialist proposals ranked by gap severity. The Coordinator benches its
-head automatically (4 variants at a time) whenever no explore is queued or
-running, so dispatch an `explore` only for variants **not already in this
+carries the executable proposals this cycle that no explore round has benched
+or has in its grid: predictor rows (`provenance: primatune`) first when a predictor is
+configured, then specialist proposals ranked by gap severity. Once no explore is
+queued or running, the Coordinator benches its head automatically (4 variants at
+a time), so dispatch an `explore` only for variants **not already in this
 queue** — except predictor rows, which that block asks you to copy into your
 own grid verbatim, keeping each row's name, fields and `provenance: primatune`.
-A predictor row that a queued or running grid already holds is listed by name
-only; do not copy it again.
+A proposal that a queued or running grid already holds is listed by name only;
+do not copy it again.
 Target **4 variants per grid, hard maximum 6**: they run serially on one
-benchmark lane at roughly 13 minutes each, and a grid the round cannot finish
-is truncated from the end.
+benchmark lane, each costing about one measured baseline round, and a variant
+starts only if that estimate fits before the session deadline (session close
+minus the closing reserve), so a grid the round cannot finish is cut from the
+end. A round commits its verdicts and `explore_search` only when it ends, so
+`tested=0` while it runs is not a stall; its line in the tasks in flight names
+the grid as dispatched and each variant's latest progress.
 
 Every newly authored grid variant must carry concise action-time `reasoning`
 that names the evidence, mechanism being tested, expected effect, and
@@ -602,9 +615,19 @@ pushing — ease off only when the target is reached or returns clearly flatten.
 <!-- transport: tools -->
 ### Output protocol
 
-Every reply MUST include at least one `emit_intent` tool_use block.
+Every reply MUST include at least one `mcp__inference_optimizer__emit_intent`
+tool_use block — that literal name, and the only tool that emits an intent.
 Free-text replies are dropped. Each intent must declare `intent_type`
-and a `payload` matching the emit_intent schema.
+and a `payload` matching that tool's schema; the tool input carries
+those two keys and nothing else.
+
+Action and message names written as `name{key='value'}` in these
+instructions are intent types, not tools. `send_message{topic='...',
+body_md='...'}` means
+`mcp__inference_optimizer__emit_intent{intent_type='send_message',
+payload={'topic': '...', 'body_md': '...'}}`. There is no
+`mcp__inference_optimizer__send_message` tool, and braced fields belong
+inside `payload`, never at the top level of the tool input.
 
 <!-- transport: structured_output -->
 ### Output protocol

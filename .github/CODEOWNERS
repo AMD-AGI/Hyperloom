@@ -38,6 +38,8 @@
 /src/hyperloom/agents/critic/                                   @AMD-AGI/SaFE
 /src/hyperloom/orchestrator/trace_analysis/                     @AMD-AGI/SaFE
 /src/hyperloom/orchestrator/kernel/apply_kernel_patch.py        @AMD-AGI/SaFE
+/src/hyperloom/orchestrator/kernel/patch_jit_cache.py           @AMD-AGI/SaFE
+/src/hyperloom/orchestrator/kernel/patch_rebuild.py             @AMD-AGI/SaFE
 /src/hyperloom/orchestrator/kernel/forge_gemm_tuning.py         @AMD-AGI/SaFE
 /src/hyperloom/orchestrator/kernel/forge_fusion.py              @AMD-AGI/SaFE
 /src/hyperloom/orchestrator/actions/executors/_ray_runtime.py   @AMD-AGI/SaFE
@@ -45,7 +47,6 @@
 # TraceLens Agent integration
 /src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py        @tsrikris @devalshahamd @AMD-AGI/SaFE
 /src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py    @tsrikris @devalshahamd @AMD-AGI/SaFE
-/src/hyperloom/orchestrator/trace_analysis/_analysis_md.py              @tsrikris @devalshahamd @AMD-AGI/SaFE
 /src/hyperloom/orchestrator/trace_analysis/_idle_gate.py                @tsrikris @devalshahamd @AMD-AGI/SaFE
 /src/hyperloom/orchestrator/trace_analysis/tracelens_arch_benchmark.py  @devalshahamd @AMD-AGI/SaFE
 /src/hyperloom/inference_optimizer/tracelens_md.py                      @tsrikris @devalshahamd @AMD-AGI/SaFE
@@ -77,6 +78,9 @@
 /src/hyperloom/orchestrator/kernel/keep_thresholds.py        @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
 /src/hyperloom/orchestrator/kernel/serving_log_evidence.py   @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
 /src/hyperloom/orchestrator/phases/kernel.py                    @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
+/src/hyperloom/orchestrator/phases/kernel_geak_dispatch.py      @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
+/src/hyperloom/orchestrator/phases/kernel_geak_promotion.py     @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
+/src/hyperloom/orchestrator/phases/kernel_gemm_tuning.py        @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
 /src/kernelforge/cli/                                           @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
 
 # GEAK integration

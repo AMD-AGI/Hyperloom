@@ -54,7 +54,7 @@ _PLAIN_NUMBERS = frozenset({0, 1, -1, 2})
 _MIN_STRING = 3
 #: Methods whose first argument is a key, as ``x["k"]``'s is.
 _KEY_CALLS = frozenset({"get", "pop", "setdefault"})
-#: The PR label that waives baseline growth and new violations; read from the API.
+#: The PR label that waives units new or worse than at the base; read from the API.
 OVERRIDE_LABEL = "baseline-raise"
 ENCODING = "utf-8"
 #: CJK Unified Ideographs (with extension A, the compatibility block and the

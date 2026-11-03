@@ -12,9 +12,9 @@ running". Two signals do reach you:
   summary, proposal count, findings and `residual_questions`. Sparse (often
   2-3 per specialist, the first lagging dispatch by minutes), so read each
   as a sample of work that has been running unobserved.
-- **`get_running_tasks`** — the live view. Call it whenever a
-  `specialist_progress` lands, before a phase change, and when a stretch of
-  turns has passed with no specialist news.
+- **`mcp__inference_optimizer_context__get_running_tasks`** — the live
+  view. Call it whenever a `specialist_progress` lands, before a phase
+  change, and when a stretch of turns has passed with no specialist news.
 
 Elapsed time alone decides nothing: an offline autotune legitimately runs
 for an hour, a five-minute agent can already be wedged. Judge on what you

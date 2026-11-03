@@ -67,6 +67,19 @@ PUBLISH_ENV_PREFIX_ALLOWLIST: tuple[str, ...] = (
 )
 
 
+_CREDENTIAL_MARKERS: tuple[str, ...] = (
+    "authorization",
+    "password",
+    "passwd",
+    "secret",
+    "apikey",
+    "privatekey",
+    "accesskey",
+    "sshkey",
+    "credential",
+)
+
+
 def _key_parts(value: str) -> tuple[list[str], str]:
     snake_case = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", value)
     parts = [part for part in re.split(r"[^a-z0-9]+", snake_case.lower()) if part]
@@ -78,38 +91,12 @@ def _is_secret_key(value: str) -> bool:
     if upper in BENCHMARK_SECRET_ENV_NAMES:
         return True
     parts, normalized = _key_parts(value)
-    return "token" in parts or any(
-        marker in normalized
-        for marker in (
-            "authorization",
-            "password",
-            "passwd",
-            "secret",
-            "apikey",
-            "privatekey",
-            "accesskey",
-            "sshkey",
-            "credential",
-        )
-    )
+    return "token" in parts or any(marker in normalized for marker in _CREDENTIAL_MARKERS)
 
 
 def _is_secret_option(value: str) -> bool:
     parts, normalized = _key_parts(value)
-    if any(
-        marker in normalized
-        for marker in (
-            "authorization",
-            "password",
-            "passwd",
-            "secret",
-            "apikey",
-            "privatekey",
-            "accesskey",
-            "sshkey",
-            "credential",
-        )
-    ):
+    if any(marker in normalized for marker in _CREDENTIAL_MARKERS):
         return True
     if not parts or "token" not in parts:
         return False
@@ -136,12 +123,7 @@ def _redact_embedded_paths(value: str) -> str:
 
 def _is_publish_env_key(value: str) -> bool:
     upper = str(value or "").strip().upper()
-    if (
-        not valid_env_key(upper)
-        or _is_secret_key(upper)
-        or upper in BENCHMARK_SECRET_ENV_NAMES
-        or upper in GPU_MASK_ENV_NAMES
-    ):
+    if not valid_env_key(upper) or _is_secret_key(upper) or upper in GPU_MASK_ENV_NAMES:
         return False
     return upper in PUBLISH_ENV_EXACT_ALLOWLIST or any(
         upper.startswith(prefix) for prefix in PUBLISH_ENV_PREFIX_ALLOWLIST

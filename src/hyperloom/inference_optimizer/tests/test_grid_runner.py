@@ -27,11 +27,8 @@ from hyperloom.inference_optimizer.grid_server_args import (
     dedup_vllm_server_args,
     remove_server_args,
 )
-from hyperloom.orchestrator.actions.executors._grid_base import coerce_extra_envs
 from hyperloom.orchestrator.actions.executors._benchmark_runtime import apply_runtime_benchmark_overrides
 from hyperloom.orchestrator.actions.executors._grid_variant_filter import (
-    _MN_BACKENDS_PRIORITY,
-    _MN_PARAMS_PRIORITY,
     _parse_skip_spec,
     apply_user_skip_list,
     reorder_grid_for_multi_node,
@@ -54,7 +51,7 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
     GridStop,
 )
 
-from .conftest import enable_multi_node, launches_by_round_slot
+from .conftest import enable_multi_node, launches_by_round_slot, write_benchmark_yaml
 from hyperloom.orchestrator.actions.executors._workload_envs import BenchmarkTarget, LaunchLayer
 
 
@@ -290,10 +287,7 @@ class TestReorderGridForMultiNode:
 
         monkeypatch.setattr(mne, "is_multi_node", lambda: False)
         grid = self._grid()
-        out = reorder_grid_for_multi_node(
-            grid,
-            priority_tags=_MN_PARAMS_PRIORITY + _MN_BACKENDS_PRIORITY,
-        )
+        out = reorder_grid_for_multi_node(grid)
         assert [v.name for v in out] == [v.name for v in grid]
 
     def test_multi_node_surfaces_likely_winners_first(self, monkeypatch):
@@ -303,10 +297,7 @@ class TestReorderGridForMultiNode:
 
         monkeypatch.setattr(mne, "is_multi_node", lambda: True)
         grid = self._grid()
-        out = reorder_grid_for_multi_node(
-            grid,
-            priority_tags=_MN_PARAMS_PRIORITY + _MN_BACKENDS_PRIORITY,
-        )
+        out = reorder_grid_for_multi_node(grid)
         # cuda_graph_max_bs (params tier-1) sorts ahead of tier5_comm; the untagged variant sinks to the end (stable
         # sort).
         assert [v.name for v in out] == [
@@ -450,90 +441,8 @@ class TestSanitizeResultDir:
             gr.sanitize_result_dir(raw)
 
 
-class TestCoerceExtraEnvs:
-    """Lock the boundary contract for LLM-supplied grid env overrides."""
-
-    def test_dict_is_passthrough(self):
-        assert coerce_extra_envs({"FOO": "1", "BAR": "two"}) == {
-            "FOO": "1",
-            "BAR": "two",
-        }
-
-    def test_dict_coerces_values_to_str(self):
-        assert coerce_extra_envs({"USE_AITER": 1, "DEBUG": True}) == {
-            "USE_AITER": "1",
-            "DEBUG": "True",
-        }
-
-    def test_space_delimited_string(self):
-        assert coerce_extra_envs("SGLANG_USE_AITER=1 VLLM_ROCM_USE_AITER_MHA=1") == {
-            "SGLANG_USE_AITER": "1",
-            "VLLM_ROCM_USE_AITER_MHA": "1",
-        }
-
-    def test_newline_delimited_string(self):
-        assert coerce_extra_envs("FOO=1\nBAR=two\n\nBAZ=3") == {"FOO": "1", "BAR": "two", "BAZ": "3"}
-
-    def test_semicolon_delimited_string(self):
-        assert coerce_extra_envs("A=1;B=2;C=3") == {
-            "A": "1",
-            "B": "2",
-            "C": "3",
-        }
-
-    def test_string_preserves_url_in_value(self):
-        assert coerce_extra_envs("HF_ENDPOINT=https://hf.example.com/api") == {
-            "HF_ENDPOINT": "https://hf.example.com/api"
-        }
-
-    def test_string_drops_tokens_without_equals(self):
-        assert coerce_extra_envs("FOO=1 garbage BAR=2") == {
-            "FOO": "1",
-            "BAR": "2",
-        }
-
-    def test_list_of_kv_tokens(self):
-        assert coerce_extra_envs(["FOO=1", "BAR=2"]) == {
-            "FOO": "1",
-            "BAR": "2",
-        }
-
-    def test_list_of_dicts(self):
-        assert coerce_extra_envs([{"FOO": "1"}, {"BAR": "2"}]) == {
-            "FOO": "1",
-            "BAR": "2",
-        }
-
-    def test_list_later_entries_win(self):
-        assert coerce_extra_envs([{"FOO": "first"}, {"FOO": "last"}]) == {
-            "FOO": "last",
-        }
-
-    def test_none_returns_empty(self):
-        assert coerce_extra_envs(None) == {}
-
-    def test_unknown_type_returns_empty(self):
-        assert coerce_extra_envs(42) == {}
-        assert coerce_extra_envs(object()) == {}
-
-    def test_used_by_backends_grid_override(self):
-        llm_entry = {
-            "name": "aiter_mla_off",
-            "extra_server_args": "--attention-backend aiter --disable-mla",
-            "extra_envs": "SGLANG_USE_AITER=1 VLLM_ROCM_USE_AITER_MHA=0",
-            "note": "aiter attn without MLA fast path",
-        }
-        v = GridVariant(
-            name=llm_entry["name"],
-            extra_server_args=llm_entry["extra_server_args"],
-            extra_envs=coerce_extra_envs(llm_entry["extra_envs"]),
-            note=llm_entry["note"],
-        )
-
-        assert dict(v.extra_envs.items()) == {
-            "SGLANG_USE_AITER": "1",
-            "VLLM_ROCM_USE_AITER_MHA": "0",
-        }
+class TestGridVariantEnvSafety:
+    """Lock the env-safety filter on LLM-supplied grid env overrides."""
 
     def test_drops_hijacking_envs_but_keeps_workload_pins(self):
         v = GridVariant(
@@ -566,28 +475,6 @@ def _isolate_leak_root(request, tmp_path_factory, monkeypatch):
     """Pin ``INFERENCE_OPTIMIZER_LEAK_ROOTS`` to an empty sandbox for the grid-runner subprocess tests."""
     sandbox = tmp_path_factory.mktemp("isolated_leak_root")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(sandbox))
-
-
-def _write_baseline_yaml_mtime(path: Path) -> None:
-    cfg = {
-        "benchmark": {
-            "framework": "sglang",
-            "model": "/path/models/Qwen-Qwen3-8B",
-            "precision": "bf16",
-            "run_mode": "local",
-            "envs": {"TP": 1, "CONC": 8, "ISL": 256, "OSL": 256},
-            "benchmark_script": "sglang_mi300x.sh",
-            "timeout_seconds": 600,
-            "profiler": {
-                "torch_profiler": {"enabled": False},
-                "system_profiler": {"enabled": False},
-                "tracelens": {"enabled": False},
-            },
-            "gpu_selection": {"auto": False},
-        },
-    }
-    with path.open("w") as f:
-        yaml.safe_dump(cfg, f)
 
 
 def _empty_workspace(slot: Path) -> Path:
@@ -626,7 +513,7 @@ async def test_run_grid_rejects_stale_leak_from_previous_run(
 ):
     monkeypatch.setattr(gr, "REPORT_SETTLE_SECONDS", 0.0)
     base = tmp_path / "base.yaml"
-    _write_baseline_yaml_mtime(base)
+    write_benchmark_yaml(base)
     output_root = tmp_path / "out"
 
     leak_dir = tmp_path / "stale_leak"
@@ -662,7 +549,7 @@ async def test_run_grid_rejects_stale_leak_from_previous_run(
 @pytest.mark.asyncio
 async def test_run_grid_salvages_fresh_leak_per_variant(tmp_path, monkeypatch):
     base = tmp_path / "base.yaml"
-    _write_baseline_yaml_mtime(base)
+    write_benchmark_yaml(base)
     output_root = tmp_path / "out"
 
     leak_dir = tmp_path / "fresh_leak"
@@ -699,7 +586,7 @@ async def test_run_grid_salvages_fresh_leak_per_variant(tmp_path, monkeypatch):
 async def test_run_grid_reused_ready_server_records_warmup_log_evidence(tmp_path, monkeypatch):
     """A measured round that reuses a ready server must retain its warmup log."""
     base = tmp_path / "base.yaml"
-    _write_baseline_yaml_mtime(base)
+    write_benchmark_yaml(base)
     output_root = tmp_path / "out"
 
     def fake_run(cmd, *args, **kwargs):
@@ -751,7 +638,7 @@ async def test_run_grid_reused_ready_server_records_warmup_log_evidence(tmp_path
 async def test_run_grid_scans_the_ready_server_log_named_by_the_caller(tmp_path):
     """Explore's warmup grid lives beside the decision slot; the caller passes its log."""
     base = tmp_path / "base.yaml"
-    _write_baseline_yaml_mtime(base)
+    write_benchmark_yaml(base)
     output_root = tmp_path / "v02_kv_cache_fp8"
     warm_log = output_root / "warmup_round" / "variant_00_kv" / "benchmark_vllm_1" / "server.log"
     warm_log.parent.mkdir(parents=True)
@@ -789,7 +676,7 @@ async def test_run_grid_scans_the_ready_server_log_named_by_the_caller(tmp_path)
 async def test_run_grid_failure_reused_ready_server_uses_same_warmup_fallback(tmp_path, monkeypatch):
     """Failure paths use the same narrowly scoped ready-server log fallback."""
     base = tmp_path / "base.yaml"
-    _write_baseline_yaml_mtime(base)
+    write_benchmark_yaml(base)
     output_root = tmp_path / "out"
     # The workspace never gets a report, so the settle loop would run its full
     # deadline; this test is about the log fallback, not about settling.
@@ -960,6 +847,48 @@ def test_build_variant_yaml_can_remove_base_args_and_unset_envs(tmp_path):
     assert "--max-num-seqs 256" in args
     assert envs["SGLANG_KEEP"] == "1"
     assert "SGLANG_ENABLE_FOO" not in envs
+
+
+def test_build_variant_yaml_keeps_a_value_the_replacing_variant_re_adds(tmp_path):
+    """A removal scoped to the base's value must not take the variant's own copy of that flag with it."""
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml_overrides(base)
+
+    out = _build_variant_yaml(
+        GridRecipe(base_yaml_path=base, base=LaunchLayer(extra_server_args="--cuda-graph-max-bs 8 --tp 8")),
+        GridVariant(
+            "bigger_graphs",
+            "--cuda-graph-max-bs 16 --tp 8",
+            remove_args=["--cuda-graph-max-bs 8"],
+            args_mode="replace",
+        ),
+        output_subdir=tmp_path / "bigger_graphs",
+    )
+
+    args = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"]
+    assert "--cuda-graph-max-bs 16" in args
+    assert "--cuda-graph-max-bs 8" not in args
+
+
+def test_agentx_removals_reach_magpie_as_bare_names_without_losing_the_re_added_value():
+    """Magpie takes one bare option name per removal; only that boundary drops the value a spec is scoped to."""
+    from hyperloom.orchestrator.actions.executors.magpie_agentx import LaunchChanges, apply_launch_changes
+
+    bench = {"framework": "sglang", "agentx": {"enabled": True}}
+    apply_launch_changes(
+        bench,
+        LaunchChanges(
+            args="--cuda-graph-max-bs 16 --tp 8",
+            remove_args=["--cuda-graph-max-bs 8", "--disable-cuda-graph --enable-dp-attention"],
+            replace_args=True,
+        ),
+    )
+
+    launch = bench["agentx"]["launch_overrides"]
+    # Magpie matches these against the recipe before our append_args, so the re-added value survives the removal.
+    assert launch["remove_args"] == ["--cuda-graph-max-bs", "--disable-cuda-graph", "--enable-dp-attention"]
+    argv = launch["append_args"]
+    assert argv[argv.index("--cuda-graph-max-bs") + 1] == "16"
 
 
 def test_build_variant_yaml_refuses_to_unset_pinned_envs(tmp_path):
@@ -1308,11 +1237,11 @@ async def test_exported_reference_controls_reimport_requires_static_settings(tmp
     monkeypatch.setenv("FRAMEWORK", "sglang")
     if with_overlay:
         with pytest.raises(SystemExit) as exc:
-            _resolve_reference_recipe(SimpleNamespace(reference_script=str(session / "current_setting.sh")))
+            _resolve_reference_recipe(SimpleNamespace(reference_script=str(session / "current_setting.sh")), "sglang")
         assert exc.value.code == 2
         return
     args, envs, model, controls = _resolve_reference_recipe(
-        SimpleNamespace(reference_script=str(session / "current_setting.sh"))
+        SimpleNamespace(reference_script=str(session / "current_setting.sh")), "sglang"
     )
     assert "PYTHONPATH" not in envs
     assert "overlay_pythonpath" not in controls
@@ -1505,8 +1434,8 @@ class TestDedupVllmServerArgs:
         assert dedup_vllm_server_args(raw, "vllm") == raw
 
 
-@pytest.mark.asyncio
-async def test_run_grid_skips_all_variants_when_budget_already_exhausted(tmp_path):
+async def _run_two_variant_grid(tmp_path: Path, stop: GridStop) -> tuple[list[str], list]:
+    """Run grid variants ``v0`` and ``v1`` under ``stop``; return the launched slot names and the results."""
     base = tmp_path / "base.yaml"
     _write_baseline_yaml_overrides(base)
     ran: list[str] = []
@@ -1526,8 +1455,14 @@ async def test_run_grid_skips_all_variants_when_budget_already_exhausted(tmp_pat
             grid=[GridVariant("v0"), GridVariant("v1")],
             output_root=tmp_path / "out",
             recipe=GridRecipe(base_yaml_path=base),
-            stop=GridStop(session_deadline_sec=time.monotonic() - 1.0),
+            stop=stop,
         )
+    return ran, results
+
+
+@pytest.mark.asyncio
+async def test_run_grid_skips_all_variants_when_budget_already_exhausted(tmp_path):
+    ran, results = await _run_two_variant_grid(tmp_path, GridStop(session_deadline_sec=time.monotonic() - 1.0))
 
     assert ran == []
     assert [r.status for r in results] == ["skipped", "skipped"]
@@ -1536,28 +1471,10 @@ async def test_run_grid_skips_all_variants_when_budget_already_exhausted(tmp_pat
 
 @pytest.mark.asyncio
 async def test_run_grid_skips_remaining_when_budget_cannot_fit_a_variant(tmp_path):
-    base = tmp_path / "base.yaml"
-    _write_baseline_yaml_overrides(base)
-    ran: list[str] = []
-
-    def fake_run(cmd, *args, **kwargs):
-        out_idx = cmd.index("--output-dir")
-        slot = Path(cmd[out_idx + 1])
-        ran.append(slot.name)
-        _fake_workspace(slot)
-        return subprocess.CompletedProcess(cmd, 0, "ok", "")
-
     # A measured estimate, not the hard cap, determines whether another rung fits.
-    with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        results = await run_grid(
-            grid=[GridVariant("v0"), GridVariant("v1")],
-            output_root=tmp_path / "out",
-            recipe=GridRecipe(base_yaml_path=base),
-            stop=GridStop(session_deadline_sec=time.monotonic() + 5.0, variant_expected_sec=10.0),
-        )
+    ran, results = await _run_two_variant_grid(
+        tmp_path, GridStop(session_deadline_sec=time.monotonic() + 5.0, variant_expected_sec=10.0)
+    )
 
     assert ran == []
     assert [r.status for r in results] == ["skipped", "skipped"]
@@ -1565,27 +1482,7 @@ async def test_run_grid_skips_remaining_when_budget_cannot_fit_a_variant(tmp_pat
 
 @pytest.mark.asyncio
 async def test_run_grid_runs_all_when_no_session_deadline(tmp_path):
-    base = tmp_path / "base.yaml"
-    _write_baseline_yaml_overrides(base)
-    ran: list[str] = []
-
-    def fake_run(cmd, *args, **kwargs):
-        out_idx = cmd.index("--output-dir")
-        slot = Path(cmd[out_idx + 1])
-        ran.append(slot.name)
-        _fake_workspace(slot)
-        return subprocess.CompletedProcess(cmd, 0, "ok", "")
-
-    with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        results = await run_grid(
-            grid=[GridVariant("v0"), GridVariant("v1")],
-            output_root=tmp_path / "out",
-            recipe=GridRecipe(base_yaml_path=base),
-            stop=GridStop(session_deadline_sec=None),
-        )
+    ran, results = await _run_two_variant_grid(tmp_path, GridStop(session_deadline_sec=None))
 
     assert len(ran) == 2
     assert [r.status for r in results] == ["succeeded", "succeeded"]

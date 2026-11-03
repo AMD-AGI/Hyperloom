@@ -17,23 +17,23 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.common import llm_config
+from hyperloom_common.llm import llm_config
 from hyperloom.common.codex_session import (
     CODEX_SANDBOX_MODE_ENV,
     DEFAULT_CODEX_SANDBOX_MODE,
 )
-from hyperloom.common.env import is_truthy
+from hyperloom_common.env import is_truthy
 from hyperloom.orchestrator.actions.executors import _kernel_agent_tool as tool
 from hyperloom.orchestrator.actions.executors import trace_analyze as ta
+from hyperloom.orchestrator.trace_analysis.analysis_route import AnalysisRoute
 from hyperloom.inference_optimizer.framework_paths import resolve_known_source_prefixes
 from hyperloom.orchestrator.kernel import request_handlers as krh
 from hyperloom.orchestrator.kernel import lane_budget
-from hyperloom.common.llm_config import (
+from hyperloom_common.llm.llm_config import (
     DEFAULT_CLAUDE_MODEL,
     DEFAULT_CODEX_MODEL,
 )
 from hyperloom.orchestrator.state.shared_state import SharedState
-from kernelforge.gemm_tune.evidence import MOE_KEY_FIELDS
 from hyperloom.orchestrator.kernel import _aiter_tuner_support as aiter_tuner_support
 from hyperloom.orchestrator.kernel import _forge_fusion_run as forge_fusion_run
 from hyperloom.orchestrator.kernel import _forge_gemm_probe as forge_gemm_probe
@@ -90,6 +90,12 @@ def _record_forge_gemm_payloads(monkeypatch):
         return build(args)
 
     monkeypatch.setattr(forge_gemm_tuning.forge_gemm_tuning, "build_command", _recording_build)
+
+
+def _fresh_profile(state: SharedState) -> SharedState:
+    """A state whose recorded profile matches the active workload, so its shape artifacts are read."""
+    state.profile_trace_matches_workload = lambda *_args, **_kwargs: True
+    return state
 
 
 def _stub_tracelens_analysis(monkeypatch, ensure_checkout):
@@ -157,25 +163,18 @@ class TestForgeGemmHelperCoverage:
 
         assert serving_log_evidence.resolve_forge_server_log(state, tmp_path) == str(log)
 
-    def test_resolve_forge_precision_payload_override(self):
-        state = SharedState(precision="bf16")
-        assert forge_gemm_probe._resolve_forge_precision_and_quant(
-            state,
-            {"precision": "fp8", "quant_type": "blockscale"},
-        ) == ("fp8", "blockscale")
-
     def test_resolve_forge_precision_from_runtime_fp4(self):
         state = SharedState(precision="bf16")
         state.current_best = {"extra_server_args": "--quantization fp4", "extra_envs": {}}
 
-        assert forge_gemm_probe._resolve_forge_precision_and_quant(state, {}) == ("fp4", "fp4")
+        assert forge_gemm_probe._resolve_forge_precision_and_quant(state) == ("fp4", "fp4")
 
     def test_resolve_forge_precision_per_token_from_reference_env(self):
         state = SharedState(precision="bf16")
         state.current_best = {"extra_server_args": "--quantization fp8", "extra_envs": {}}
         state.reference_envs = {"SGLANG_USE_AITER_FP8_PER_TOKEN": "true"}
 
-        assert forge_gemm_probe._resolve_forge_precision_and_quant(state, {}) == ("fp8", "per_token")
+        assert forge_gemm_probe._resolve_forge_precision_and_quant(state) == ("fp8", "per_token")
 
     @staticmethod
     def _write_cfg(model_dir: Path, cfg: dict) -> str:
@@ -218,7 +217,7 @@ class TestForgeGemmHelperCoverage:
         model = self._write_cfg(tmp_path / "plain", {"hidden_size": 2048})
         state = SharedState(precision="bf16", model_path=model)
         state.current_best = {"extra_server_args": "--quantization fp8", "extra_envs": {}}
-        assert forge_gemm_probe._resolve_forge_precision_and_quant(state, {}) == ("fp8", "per_token")
+        assert forge_gemm_probe._resolve_forge_precision_and_quant(state) == ("fp8", "per_token")
 
     def test_resolve_forge_precision_fp8_block_model_routes_blockscale(self, tmp_path):
         model = self._write_cfg(
@@ -227,13 +226,13 @@ class TestForgeGemmHelperCoverage:
         )
         state = SharedState(precision="bf16", model_path=model)
         state.current_best = {"extra_server_args": "--quantization fp8", "extra_envs": {}}
-        assert forge_gemm_probe._resolve_forge_precision_and_quant(state, {}) == ("fp8", "blockscale")
+        assert forge_gemm_probe._resolve_forge_precision_and_quant(state) == ("fp8", "blockscale")
 
     def test_resolve_forge_precision_fp8_unreadable_config_keeps_auto(self):
         # No readable config: do not force a tuner; let forge sniff the log.
         state = SharedState(precision="bf16", model_path="/models/does-not-exist")
         state.current_best = {"extra_server_args": "--quantization fp8", "extra_envs": {}}
-        assert forge_gemm_probe._resolve_forge_precision_and_quant(state, {}) == ("fp8", "auto")
+        assert forge_gemm_probe._resolve_forge_precision_and_quant(state) == ("fp8", "auto")
 
     _QUARK_MXFP4 = {
         "quant_method": "quark",
@@ -254,13 +253,13 @@ class TestForgeGemmHelperCoverage:
         model = self._write_cfg(tmp_path / "m", {"hidden_size": 6144, "quantization_config": quant_cfg})
         state = SharedState(precision=session_precision, model_path=model)
         state.current_best = {"extra_server_args": "", "extra_envs": {}}
-        assert forge_gemm_probe._resolve_forge_precision_and_quant(state, {}) == ("auto", "auto")
+        assert forge_gemm_probe._resolve_forge_precision_and_quant(state) == ("auto", "auto")
 
     def test_resolve_forge_precision_keeps_an_operator_precision_the_checkpoint_does_not_nest(self, tmp_path):
         model = self._write_cfg(tmp_path / "m", {"hidden_size": 6144, "quantization_config": self._QUARK_MXFP4})
         state = SharedState(precision="bf16", model_path=model)
         state.current_best = {"extra_server_args": "", "extra_envs": {}}
-        assert forge_gemm_probe._resolve_forge_precision_and_quant(state, {}) == ("bf16", "auto")
+        assert forge_gemm_probe._resolve_forge_precision_and_quant(state) == ("bf16", "auto")
 
     def test_resolve_aiter_root_from_editable_source_layout(self, tmp_path, monkeypatch):
         monkeypatch.delenv("AITER_ROOT_DIR", raising=False)
@@ -294,7 +293,7 @@ class TestForgeGemmHelperCoverage:
 
         monkeypatch.setattr(subprocess, "run", _fake_run)
         assert forge_gemm_probe._forge_gemm_tune_available() is True
-        assert seen == [forge_gemm_probe._forge_gemm_tune_probe_cmd()]
+        assert seen == [forge_gemm_probe.forge_gemm_tuning.gemm_tune_argv("--help")]
         assert seen[0][0] == sys.executable
 
     def test_forge_gemm_tune_available_false_when_subcommand_missing(self, monkeypatch):
@@ -358,7 +357,7 @@ class TestForgeGemmHelperCoverage:
         # Empty session precision + no fp8/fp4 quantization -> bf16/auto default.
         state = SharedState(precision="")
         state.current_best = {"extra_server_args": "", "extra_envs": {}}
-        assert forge_gemm_probe._resolve_forge_precision_and_quant(state, {}) == ("bf16", "auto")
+        assert forge_gemm_probe._resolve_forge_precision_and_quant(state) == ("bf16", "auto")
 
     def test_resolve_forge_server_log_uses_baseline_when_no_current_best(self, tmp_path):
         state = SharedState()
@@ -375,7 +374,7 @@ class TestForgeGemmHelperCoverage:
         shapes.write_text(json.dumps({"shapes": [{"m": 1, "n": 2, "k": 3}]}), encoding="utf-8")
         state.last_trace_analyze = {"artifact_paths": {"gemm_shapes_json": str(shapes)}}
 
-        assert forge_shapes._resolve_forge_shapes(state, tmp_path) == str(shapes)
+        assert forge_shapes._resolve_forge_shapes(_fresh_profile(state)) == str(shapes)
 
     def test_resolve_forge_shapes_skips_incompatible_candidate(self, tmp_path):
         state = SharedState()
@@ -383,7 +382,7 @@ class TestForgeGemmHelperCoverage:
         bad.write_text(json.dumps([{"only": "noMNK"}]), encoding="utf-8")
         state.last_trace_analyze = {"shapes_json": str(bad)}
 
-        assert forge_shapes._resolve_forge_shapes(state, tmp_path) == ""
+        assert forge_shapes._resolve_forge_shapes(_fresh_profile(state)) == ""
 
     def test_is_forge_compatible_shapes_json_rejects_non_dict_sample(self, tmp_path):
         bad = tmp_path / "bad.json"
@@ -500,58 +499,10 @@ class TestForgeGemmHelperCoverage:
         assert forge_gemm_probe._derive_gemm_skip_reason(None) == ""
         assert forge_gemm_probe._derive_gemm_skip_reason([]) == ""
 
-    def test_path_is_existing_file_handles_too_long(self):
-        # An inline JSON list handed in as a "path".
-        inline = "[{'M': 64, 'N': 16384, 'K': 3072, 'dtype': 'bf16'}]" * 6
-        assert len(inline) > 255
-        assert forge_shapes._path_is_existing_file(inline) is False  # must not raise OSError(36)
-
-    def test_path_is_existing_file_true(self, tmp_path):
-        f = tmp_path / "real.csv"
-        f.write_text("M,N,K\n", encoding="utf-8")
-        assert forge_shapes._path_is_existing_file(str(f)) is True
-
-    def test_normalize_forge_shapes_json_existing_path(self, tmp_path):
-        f = tmp_path / "shapes.json"
-        f.write_text('[{"M":1,"N":2,"K":3}]', encoding="utf-8")
-        assert forge_shapes._normalize_forge_shapes_json(str(f), tmp_path) == str(f)
-
-    def test_normalize_forge_shapes_json_inline_string(self, tmp_path):
-        # A Python-repr list (single quotes).
-        inline = "[{'M': 64, 'N': 16384, 'K': 3072, 'dtype': 'bf16'}]"
-        out = forge_shapes._normalize_forge_shapes_json(inline, tmp_path)
-        assert out == str(tmp_path / "forge_shapes.json")
-        data = json.loads(Path(out).read_text())
-        assert data[0]["M"] == 64
-
-    def test_normalize_forge_shapes_json_inline_list(self, tmp_path):
-        out = forge_shapes._normalize_forge_shapes_json([{"M": 1, "N": 2, "K": 3}], tmp_path)
-        assert Path(out).is_file()
-        assert json.loads(Path(out).read_text())[0]["N"] == 2
-
-    def test_normalize_forge_shapes_json_empty_and_garbage(self, tmp_path):
-        assert forge_shapes._normalize_forge_shapes_json("", tmp_path) == ""
-        assert forge_shapes._normalize_forge_shapes_json(None, tmp_path) == ""
-        # Non-JSON, non-existent path string -> unusable.
-        assert forge_shapes._normalize_forge_shapes_json("not_a_real_file.json", tmp_path) == ""
-
-    def test_normalize_tokens_list_and_bracketed_string(self):
-        # Tokens passed as a list or its string form.
-        assert forge_shapes._normalize_tokens([4, 8, 64]) == "4,8,64"
-        assert forge_shapes._normalize_tokens("[4, 8, 64]") == "4,8,64"
-        assert forge_shapes._normalize_tokens("[64]") == "64"
-        assert forge_shapes._normalize_tokens("4,8,64") == "4,8,64"
-
-    def test_normalize_tokens_empty_and_garbage(self):
-        assert forge_shapes._normalize_tokens(None) == ""
-        assert forge_shapes._normalize_tokens("") == ""
-        assert forge_shapes._normalize_tokens([]) == ""
-        assert forge_shapes._normalize_tokens("[abc, 16]") == "16"
-
     def test_resolve_forge_shapes_returns_empty_for_non_dict_trace(self):
         state = SharedState()
         state.last_trace_analyze = ["not", "a", "dict"]
-        assert forge_shapes._resolve_forge_shapes(state, Path("/tmp")) == ""
+        assert forge_shapes._resolve_forge_shapes(_fresh_profile(state)) == ""
 
     def test_resolve_forge_shapes_finds_file_beside_candidates(self, tmp_path):
         state = SharedState()
@@ -561,7 +512,7 @@ class TestForgeGemmHelperCoverage:
         shapes.write_text(json.dumps([{"M": 1, "N": 2, "K": 3}]), encoding="utf-8")
         state.last_trace_analyze = {"candidates_path": str(candidates)}
 
-        assert forge_shapes._resolve_forge_shapes(state, tmp_path) == str(shapes)
+        assert forge_shapes._resolve_forge_shapes(_fresh_profile(state)) == str(shapes)
 
     def test_forge_fusion_skip_guard_ignores_warm_replay_fusion_flags(self):
         state = SharedState(
@@ -626,7 +577,7 @@ class TestForgeGemmHelperCoverage:
         assert forge_fusion_run._forge_fusion_available() is True
         # Probing kernelforge alone would pass on a KernelForge predating the fusion absorption and only fail once the
         # subprocess rejected forge-fuse.
-        assert probed == ["kernelforge.fusion"]
+        assert probed == ["kernelforge.workflows.forge_fusion"]
 
         monkeypatch.setattr(importlib.util, "find_spec", lambda _name: None)
         assert forge_fusion_run._forge_fusion_available() is False
@@ -852,7 +803,7 @@ class TestForgeGemmHelperCoverage:
             raise AssertionError("forge-fusion availability should not be checked")
 
         monkeypatch.setattr(forge_fusion_run, "_forge_fusion_available", _should_not_check_available)
-        result = await forge_fusion_run._run_forge_fusion({}, session_dir=tmp_path)
+        result = await forge_fusion_run.run_fusion_handler({}, session_dir=tmp_path)
 
         assert result["status"] == "complete"
         assert result["backend"] == "forge"
@@ -900,7 +851,7 @@ class TestForgeGemmHelperCoverage:
         """Provider shape selects one matching backend and its model variable."""
         _pin_fusion_provider_env(monkeypatch, shape)
 
-        assert forge_fusion_run._resolve_forge_agent({}) == (
+        assert forge_fusion_run._resolve_forge_agent() == (
             expected_backend,
             expected_model,
         )
@@ -920,20 +871,7 @@ class TestForgeGemmHelperCoverage:
     ):
         _pin_fusion_provider_env(monkeypatch, shape)
 
-        assert forge_fusion_run._resolve_forge_agent({}) == expected
-
-    def test_resolve_forge_agent_honors_valid_explicit_override(self, monkeypatch):
-        _pin_fusion_provider_env(
-            monkeypatch,
-            {**_OPENAI_ONLY_ENV, **_ANTHROPIC_ONLY_ENV},
-        )
-
-        assert forge_fusion_run._resolve_forge_agent(
-            {
-                "agent_backend": "codex",
-                "llm_model": "gpt-explicit",
-            }
-        ) == ("codex", "gpt-explicit")
+        assert forge_fusion_run._resolve_forge_agent() == expected
 
     def test_resolve_forge_agent_ignores_the_removed_forge_claude_model(self, monkeypatch):
         """The Forge-private spelling is gone; CLAUDE_MODEL is what runs."""
@@ -946,7 +884,7 @@ class TestForgeGemmHelperCoverage:
             },
         )
 
-        assert forge_fusion_run._resolve_forge_agent({}) == (
+        assert forge_fusion_run._resolve_forge_agent() == (
             "claude",
             "claude-orchestration",
         )
@@ -962,22 +900,10 @@ class TestForgeGemmHelperCoverage:
             },
         )
 
-        assert forge_fusion_run._resolve_forge_agent({}) == (
+        assert forge_fusion_run._resolve_forge_agent() == (
             "codex",
             "gpt-orchestration",
         )
-
-    def test_resolve_forge_agent_env_model_loses_to_payload_llm_model(self, monkeypatch):
-        """Request ``llm_model`` still outranks the environment."""
-        _pin_fusion_provider_env(
-            monkeypatch,
-            {
-                **_ANTHROPIC_ONLY_ENV,
-                "CLAUDE_MODEL": "claude-orchestration",
-            },
-        )
-
-        assert forge_fusion_run._resolve_forge_agent({"llm_model": "claude-payload"}) == ("claude", "claude-payload")
 
     def test_resolve_forge_agent_ignores_the_other_provider_model(self, monkeypatch):
         """A Codex-side id must not leak onto the Claude forge path."""
@@ -990,19 +916,21 @@ class TestForgeGemmHelperCoverage:
             },
         )
 
-        assert forge_fusion_run._resolve_forge_agent({}) == (
+        assert forge_fusion_run._resolve_forge_agent() == (
             "claude",
             "claude-orchestration",
         )
 
-    def test_resolve_forge_agent_rejects_invalid_explicit_backend(self, monkeypatch):
+    def test_resolve_forge_agent_rejects_an_unknown_configured_backend(self, monkeypatch):
         _pin_fusion_provider_env(
             monkeypatch,
             {**_OPENAI_ONLY_ENV, **_ANTHROPIC_ONLY_ENV},
         )
 
-        with pytest.raises(ValueError, match="agent_backend"):
-            forge_fusion_run._resolve_forge_agent({"agent_backend": "anthropic"})
+        monkeypatch.setenv(llm_config.AGENT_BACKEND_ENV, "anthropic")
+
+        with pytest.raises(ValueError, match=llm_config.AGENT_BACKEND_ENV):
+            forge_fusion_run._resolve_forge_agent()
 
     def test_resolve_forge_agent_defaults_an_unconfigured_provider_to_claude(self, monkeypatch):
         """A runtime logged in by other means carries no credential this can read."""
@@ -1010,14 +938,13 @@ class TestForgeGemmHelperCoverage:
         monkeypatch.setattr(llm_config, "claude_agent_sdk_installed", lambda: True)
         monkeypatch.setattr(llm_config, "codex_agent_sdk_installed", lambda: True)
 
-        assert forge_fusion_run._resolve_forge_agent({}) == ("claude", DEFAULT_CLAUDE_MODEL)
+        assert forge_fusion_run._resolve_forge_agent() == ("claude", DEFAULT_CLAUDE_MODEL)
 
     def test_resolve_forge_fusion_codex_sandbox_defaults_to_workspace_write(self, monkeypatch):
         _pin_fusion_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
 
         assert (
             forge_fusion_run._resolve_forge_fusion_sandbox_mode(
-                {},
                 agent_backend="codex",
             )
             == DEFAULT_CODEX_SANDBOX_MODE
@@ -1029,7 +956,6 @@ class TestForgeGemmHelperCoverage:
 
         assert (
             forge_fusion_run._resolve_forge_fusion_sandbox_mode(
-                {"agent_sandbox_mode": "bypass"},
                 agent_backend="codex",
             )
             == "bypass"
@@ -1041,40 +967,29 @@ class TestForgeGemmHelperCoverage:
 
         assert (
             forge_fusion_run._resolve_forge_fusion_sandbox_mode(
-                {},
                 agent_backend="codex",
             )
             == DEFAULT_CODEX_SANDBOX_MODE
         )
 
-    def test_resolve_forge_fusion_claude_sandbox_uses_audit_default_or_override(self, monkeypatch):
+    def test_resolve_forge_fusion_claude_sandbox_uses_audit_default(self, monkeypatch):
         _pin_fusion_provider_env(monkeypatch, _ANTHROPIC_ONLY_ENV)
         # Claude's audit default is stable even if the Codex operator default is narrower.
         monkeypatch.setenv(CODEX_SANDBOX_MODE_ENV, "read-only")
 
         assert (
             forge_fusion_run._resolve_forge_fusion_sandbox_mode(
-                {},
                 agent_backend="claude",
             )
             == DEFAULT_CODEX_SANDBOX_MODE
         )
-        assert (
-            forge_fusion_run._resolve_forge_fusion_sandbox_mode(
-                {"agent_sandbox_mode": "read-only"},
-                agent_backend="claude",
-            )
-            == "read-only"
-        )
 
     def test_resolve_forge_fusion_sandbox_rejects_invalid_mode(self, monkeypatch):
         _pin_fusion_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
+        monkeypatch.setenv(CODEX_SANDBOX_MODE_ENV, "unconfined")
 
         with pytest.raises(RuntimeError, match="unknown Codex sandbox mode"):
-            forge_fusion_run._resolve_forge_fusion_sandbox_mode(
-                {"agent_sandbox_mode": "unconfined"},
-                agent_backend="codex",
-            )
+            forge_fusion_run._resolve_forge_fusion_sandbox_mode(agent_backend="codex")
 
     @pytest.mark.asyncio
     async def test_run_forge_fusion_openai_only_writes_codex_input(self, tmp_path, monkeypatch):
@@ -1106,11 +1021,10 @@ class TestForgeGemmHelperCoverage:
             }
 
         monkeypatch.setattr(forge_fusion_run.forge_fusion, "run_forge_fusion", _fake_run_forge_fusion)
+        monkeypatch.setenv("FORGE_FUSION_MAX_TURNS", "7")
+        monkeypatch.setenv("FORGE_FUSION_TIMEOUT", "123")
 
-        result = await forge_fusion_run._run_forge_fusion(
-            {"task_id": "fusion_task", "max_turns": 7, "timeout": 123},
-            session_dir=tmp_path,
-        )
+        result = await forge_fusion_run.run_fusion_handler({"task_id": "fusion_task"}, session_dir=tmp_path)
 
         assert result["status"] == "ok"
         assert result["backend"] == "forge"
@@ -1128,9 +1042,9 @@ class TestForgeGemmHelperCoverage:
     def test_forge_fusion_timeout_invalid_env_falls_back(self, monkeypatch):
         monkeypatch.setenv("FORGE_FUSION_TIMEOUT", "not-an-int")
 
-        assert forge_lane_budget._forge_fusion_timeout_sec({}) == 7200
+        assert forge_lane_budget._forge_fusion_timeout_sec() == 7200
 
-    async def _fusion_input_payload(self, tmp_path, monkeypatch, *, max_minutes, payload=None):
+    async def _fusion_input_payload(self, tmp_path, monkeypatch, *, max_minutes):
         """Run the fusion lane against a faked forge runner and return the payload it was handed."""
         trace_dir = tmp_path / "trace"
         trace_dir.mkdir()
@@ -1151,7 +1065,7 @@ class TestForgeGemmHelperCoverage:
             return {"status": "ok", "decision": "REVERT", "kept": False}
 
         monkeypatch.setattr(forge_fusion_run.forge_fusion, "run_forge_fusion", _fake_run_forge_fusion)
-        await forge_fusion_run._run_forge_fusion({"task_id": "fusion_task", **(payload or {})}, session_dir=tmp_path)
+        await forge_fusion_run.run_fusion_handler({"task_id": "fusion_task"}, session_dir=tmp_path)
         return calls[-1]
 
     async def test_fusion_recipe_ceiling_comes_from_the_lane_share(self, tmp_path, monkeypatch):
@@ -1165,23 +1079,12 @@ class TestForgeGemmHelperCoverage:
         payload = await self._fusion_input_payload(tmp_path, monkeypatch, max_minutes=0)
 
         assert "max_recipes" not in payload
-        assert payload["timeout"] == forge_lane_budget._forge_fusion_timeout_sec({})
-
-    async def test_an_explicit_recipe_ceiling_outranks_the_lane_share(self, tmp_path, monkeypatch):
-        """An operator/test value stays an escape hatch over the derived share."""
-        payload = await self._fusion_input_payload(
-            tmp_path,
-            monkeypatch,
-            max_minutes=120,
-            payload={"max_recipes": 1},
-        )
-
-        assert payload["max_recipes"] == 1
+        assert payload["timeout"] == forge_lane_budget._forge_fusion_timeout_sec()
 
     def test_forge_fusion_timeout_infinite_env_falls_back(self, monkeypatch):
         monkeypatch.setenv("FORGE_FUSION_TIMEOUT", "inf")
 
-        assert forge_lane_budget._forge_fusion_timeout_sec({}) == 7200
+        assert forge_lane_budget._forge_fusion_timeout_sec() == 7200
 
     @pytest.mark.asyncio
     async def test_run_forge_fusion_invalid_timeout_env_uses_default(self, tmp_path, monkeypatch):
@@ -1203,7 +1106,7 @@ class TestForgeGemmHelperCoverage:
 
         monkeypatch.setattr(forge_fusion_run.forge_fusion, "run_forge_fusion", _fake_run_forge_fusion)
 
-        result = await forge_fusion_run._run_forge_fusion({"task_id": "fusion_task"}, session_dir=tmp_path)
+        result = await forge_fusion_run.run_fusion_handler({"task_id": "fusion_task"}, session_dir=tmp_path)
 
         assert result["status"] == "complete"
         input_payload = calls[0]
@@ -1232,7 +1135,7 @@ class TestForgeGemmHelperCoverage:
 
         monkeypatch.setattr(forge_fusion_run.forge_fusion, "run_forge_fusion", _fake_run_forge_fusion)
 
-        await forge_fusion_run._run_forge_fusion({"task_id": "fusion_task"}, session_dir=tmp_path)
+        await forge_fusion_run.run_fusion_handler({"task_id": "fusion_task"}, session_dir=tmp_path)
 
         input_payload = calls[0]
         assert input_payload["timeout"] == 10710
@@ -1242,20 +1145,20 @@ class TestForgeGemmHelperCoverage:
         state = SharedState(framework="sglang", model_path="/models/zaya")
         state.save(tmp_path)
         monkeypatch.setattr(forge_fusion_run, "_forge_fusion_available", lambda: False)
-        not_found = await forge_fusion_run._run_forge_fusion({}, session_dir=tmp_path)
+        not_found = await forge_fusion_run.run_fusion_handler({}, session_dir=tmp_path)
         assert not_found["error_class"] == "forge_fusion_not_found"
 
         monkeypatch.setattr(forge_fusion_run, "_forge_fusion_available", lambda: True)
         state.model_path = ""
         state.save(tmp_path)
         monkeypatch.delenv("MODEL_PATH", raising=False)
-        missing_model = await forge_fusion_run._run_forge_fusion({}, session_dir=tmp_path)
+        missing_model = await forge_fusion_run.run_fusion_handler({}, session_dir=tmp_path)
         assert missing_model["error_class"] == "model_path_missing"
 
         state.model_path = "/models/zaya"
         state.last_profile_trace = ""
         state.save(tmp_path)
-        missing_trace = await forge_fusion_run._run_forge_fusion({}, session_dir=tmp_path)
+        missing_trace = await forge_fusion_run.run_fusion_handler({}, session_dir=tmp_path)
         assert missing_trace["error_class"] == "decode_trace_missing"
 
     @pytest.mark.asyncio
@@ -1275,7 +1178,7 @@ class TestForgeGemmHelperCoverage:
 
         monkeypatch.setattr(forge_fusion_run.forge_fusion, "_run_subprocess", _timeout)
 
-        result = await forge_fusion_run._run_forge_fusion({"timeout": 60}, session_dir=tmp_path)
+        result = await forge_fusion_run.run_fusion_handler({}, session_dir=tmp_path)
 
         assert result["status"] == "failed"
         assert result["error_class"] == "subprocess_timeout"
@@ -1309,7 +1212,7 @@ class TestForgeGemmHelperCoverage:
 
         monkeypatch.setattr(forge_fusion_run.forge_fusion, "run_forge_fusion", _fake_run_forge_fusion)
 
-        await forge_fusion_run._run_forge_fusion({"task_id": "fusion_task"}, session_dir=tmp_path)
+        await forge_fusion_run.run_fusion_handler({"task_id": "fusion_task"}, session_dir=tmp_path)
         input_payload = calls[0]
         assert input_payload["tp"] == 8
         assert input_payload["block_size"] == 128
@@ -1329,27 +1232,16 @@ class TestForgeGemmHelperCoverage:
 
         async def _timeout(cmd, *, timeout_sec, **_kwargs):
             workspace = tmp_path / "runs" / "fusion" / "kernel_entry_fusion"
-            (workspace / "kernel_keep_checkpoint.json").write_text(
-                json.dumps(
-                    {
-                        "kept": True,
-                        "kernel_speedup": 2.69,
-                        "env_flag": "QWEN_FUSED",
-                        "source_file": "/fw/model.py",
-                        "repo_root": "/fw",
-                    }
-                ),
-                encoding="utf-8",
+            (workspace / "fusion_llm_qwen.patch").write_text("diff --git a/model.py b/model.py\n", encoding="utf-8")
+            (workspace / "forge_loop_llm_qwen.json").write_text(
+                json.dumps({"improved": True, "total_speedup": 2.69}), encoding="utf-8"
             )
-            (workspace / "fusion.patch").write_text(
-                "diff --git a/model.py b/model.py\n",
-                encoding="utf-8",
-            )
+            (workspace / "driver_llm_qwen.py").write_text("ENV_FLAGS = ('QWEN_FUSED',)\n", encoding="utf-8")
             raise subprocess.TimeoutExpired(cmd, timeout_sec)
 
         monkeypatch.setattr(forge_fusion_run.forge_fusion, "_run_subprocess", _timeout)
 
-        result = await forge_fusion_run._run_forge_fusion({"timeout": 60}, session_dir=tmp_path)
+        result = await forge_fusion_run.run_fusion_handler({}, session_dir=tmp_path)
 
         assert result["kept"] is True
         assert result["decision"] == "KEEP"
@@ -1434,7 +1326,7 @@ class TestForgeGemmHelperCoverage:
 
         result = await forge_gemm_tuning._run_forge_gemm_tuning(payload, session_dir=tmp_path)
 
-        workspace = forge_lane_budget._gemm_tuning_workspace(payload, session_dir=tmp_path)
+        workspace = forge_lane_budget._gemm_tuning_workspace(payload["task_id"], session_dir=tmp_path)
         written = _FORGE_GEMM_PAYLOADS[-1]
         assert written["model_path"] == str(snapshot)
         assert subprocess_cmd[:2] == ["env", "AITER_ROOT_DIR=/opt/aiter"]
@@ -1442,7 +1334,7 @@ class TestForgeGemmHelperCoverage:
         assert result["model_path"] == "amd/DeepSeek-V4-Pro-MXFP4"
         assert durable["model_path"] == "amd/DeepSeek-V4-Pro-MXFP4"
 
-    async def _gemm_input_payload(self, tmp_path, monkeypatch, *, max_minutes, payload=None):
+    async def _gemm_input_payload(self, tmp_path, monkeypatch, *, max_minutes):
         """Run the gemm lane against a faked subprocess and return its input JSON."""
         model = tmp_path / "model"
         model.mkdir()
@@ -1466,9 +1358,9 @@ class TestForgeGemmHelperCoverage:
             return 0, f"FORGE_GEMM_TUNE_RESULT_BEGIN\n{body}\nFORGE_GEMM_TUNE_RESULT_END\n", ""
 
         monkeypatch.setattr(forge_gemm_tuning, "_run_subprocess", _fake_subprocess)
-        request = {"task_id": "gemm_ceiling", **(payload or {})}
+        request = {"task_id": "gemm_ceiling"}
         await forge_gemm_tuning._run_forge_gemm_tuning(request, session_dir=tmp_path)
-        workspace = forge_lane_budget._gemm_tuning_workspace(request, session_dir=tmp_path)
+        workspace = forge_lane_budget._gemm_tuning_workspace(request["task_id"], session_dir=tmp_path)
         return _FORGE_GEMM_PAYLOADS[-1]
 
     @pytest.mark.asyncio
@@ -1484,38 +1376,6 @@ class TestForgeGemmHelperCoverage:
         payload = await self._gemm_input_payload(tmp_path, monkeypatch, max_minutes=0)
 
         assert "max_tuners" not in payload
-
-    @pytest.mark.asyncio
-    async def test_a_named_gemm_tuner_needs_no_ceiling(self, tmp_path, monkeypatch):
-        """An explicit tuner has already narrowed the routed set to one."""
-        payload = await self._gemm_input_payload(
-            tmp_path,
-            monkeypatch,
-            max_minutes=600,
-            payload={"tuner": "a8w8"},
-        )
-
-        assert payload["tuner"] == "a8w8"
-        assert "max_tuners" not in payload
-
-    @pytest.mark.asyncio
-    async def test_an_explicit_gemm_ceiling_outranks_the_lane_share(self, tmp_path, monkeypatch):
-        """An operator/test value stays an escape hatch over the derived share."""
-        monkeypatch.setattr(
-            forge_lane_budget,
-            "_lane_budget",
-            lambda _state, _lane=None, **_k: lane_budget.LaneAllocation(
-                lane=lane_budget.LANE_GEMM, budget_sec=7140, max_targets=4
-            ),
-        )
-        payload = await self._gemm_input_payload(
-            tmp_path,
-            monkeypatch,
-            max_minutes=600,
-            payload={"max_tuners": 1},
-        )
-
-        assert payload["max_tuners"] == 1
 
     @pytest.mark.asyncio
     async def test_run_forge_gemm_tuning_rejects_uncached_hf_repo(
@@ -1836,27 +1696,25 @@ class TestForgeGemmHelperCoverage:
             + "\nFORGE_GEMM_TUNE_RESULT_END\n"
         )
 
-    @pytest.mark.asyncio
-    async def test_moe_key_travels_from_the_log_into_the_forge_payload(self, tmp_path, monkeypatch):
-        """The values must come from the log, not from the config: a config-derived key is what aiter would never look up."""
+    async def _run_on_moe_log(self, tmp_path, monkeypatch, task_id: str) -> dict:
+        """Run the gemm lane on a serving log that dispatched one MoE GEMM and return its input JSON."""
         self._moe_state(tmp_path)
         monkeypatch.setattr(forge_gemm_tuning, "_forge_gemm_tune_available", lambda: True)
         log = tmp_path / "server.log"
         log.write_text(self._REAL_MOE_DISPATCH + "\n", encoding="utf-8")
 
-        argv: dict[str, list[str]] = {}
-
         async def _fake_subprocess(cmd, *, timeout_sec, **_kwargs):
-            argv["cmd"] = list(cmd)
             return 0, self._sentinel(), ""
 
         monkeypatch.setattr(forge_gemm_tuning, "_run_subprocess", _fake_subprocess)
-        payload = {"task_id": "moe-key", "kernel_signature_log": str(log)}
+        monkeypatch.setattr(forge_gemm_tuning, "resolve_forge_server_log", lambda *_a: str(log))
+        await forge_gemm_tuning._run_forge_gemm_tuning({"task_id": task_id}, session_dir=tmp_path)
+        return _FORGE_GEMM_PAYLOADS[-1]
 
-        await forge_gemm_tuning._run_forge_gemm_tuning(payload, session_dir=tmp_path)
-
-        workspace = forge_lane_budget._gemm_tuning_workspace(payload, session_dir=tmp_path)
-        written = _FORGE_GEMM_PAYLOADS[-1]
+    @pytest.mark.asyncio
+    async def test_moe_key_travels_from_the_log_into_the_forge_payload(self, tmp_path, monkeypatch):
+        """The values must come from the log, not from the config: a config-derived key is what aiter would never look up."""
+        written = await self._run_on_moe_log(tmp_path, monkeypatch, "moe-key")
         csv_path = Path(written["moe_untuned_csv"])
         assert csv_path.is_file(), "the payload must name a CSV that exists"
 
@@ -1895,77 +1753,11 @@ class TestForgeGemmHelperCoverage:
     @pytest.mark.asyncio
     async def test_the_moe_csv_reaches_the_forge_argv(self, tmp_path, monkeypatch):
         """Deriving the CSV is useless if the option never reaches forge."""
-        self._moe_state(tmp_path)
-        monkeypatch.setattr(forge_gemm_tuning, "_forge_gemm_tune_available", lambda: True)
-        log = tmp_path / "server.log"
-        log.write_text(self._REAL_MOE_DISPATCH + "\n", encoding="utf-8")
-
-        argv: dict[str, list[str]] = {}
-
-        async def _fake_subprocess(cmd, *, timeout_sec, **_kwargs):
-            argv["cmd"] = list(cmd)
-            return 0, self._sentinel(), ""
-
-        monkeypatch.setattr(forge_gemm_tuning, "_run_subprocess", _fake_subprocess)
-        payload = {"task_id": "moe-argv", "kernel_signature_log": str(log)}
-
-        await forge_gemm_tuning._run_forge_gemm_tuning(payload, session_dir=tmp_path)
-
+        written = await self._run_on_moe_log(tmp_path, monkeypatch, "moe-argv")
         # The handler hands the tool an input JSON; the tool builds forge's argv from it.
-        workspace = forge_lane_budget._gemm_tuning_workspace(payload, session_dir=tmp_path)
-        written = _FORGE_GEMM_PAYLOADS[-1]
+        workspace = forge_lane_budget._gemm_tuning_workspace("moe-argv", session_dir=tmp_path)
         assert written["moe_untuned_csv"].endswith("untuned_fmoe_from_runtime.csv")
         assert str(workspace) in written["moe_untuned_csv"]
-
-    @pytest.mark.asyncio
-    async def test_a_caller_supplied_moe_csv_wins(self, tmp_path, monkeypatch):
-        self._moe_state(tmp_path)
-        monkeypatch.setattr(forge_gemm_tuning, "_forge_gemm_tune_available", lambda: True)
-        log = tmp_path / "server.log"
-        log.write_text(self._REAL_MOE_DISPATCH + "\n", encoding="utf-8")
-        supplied = tmp_path / "operator_moe.csv"
-        supplied.write_text(",".join(MOE_KEY_FIELDS) + "\n", encoding="utf-8")
-
-        async def _fake_subprocess(cmd, *, timeout_sec, **_kwargs):
-            return 0, self._sentinel(), ""
-
-        monkeypatch.setattr(forge_gemm_tuning, "_run_subprocess", _fake_subprocess)
-        payload = {
-            "task_id": "moe-supplied",
-            "kernel_signature_log": str(log),
-            "moe_untuned_csv": str(supplied),
-        }
-
-        await forge_gemm_tuning._run_forge_gemm_tuning(payload, session_dir=tmp_path)
-
-        workspace = forge_lane_budget._gemm_tuning_workspace(payload, session_dir=tmp_path)
-        written = _FORGE_GEMM_PAYLOADS[-1]
-        assert written["moe_untuned_csv"] == str(supplied)
-
-    @pytest.mark.asyncio
-    async def test_a_stale_moe_csv_path_falls_back_to_the_log(self, tmp_path, monkeypatch):
-        """A path that no longer exists must not be forwarded to forge."""
-        self._moe_state(tmp_path)
-        monkeypatch.setattr(forge_gemm_tuning, "_forge_gemm_tune_available", lambda: True)
-        log = tmp_path / "server.log"
-        log.write_text(self._REAL_MOE_DISPATCH + "\n", encoding="utf-8")
-
-        async def _fake_subprocess(cmd, *, timeout_sec, **_kwargs):
-            return 0, self._sentinel(), ""
-
-        monkeypatch.setattr(forge_gemm_tuning, "_run_subprocess", _fake_subprocess)
-        payload = {
-            "task_id": "moe-stale",
-            "kernel_signature_log": str(log),
-            "moe_untuned_csv": str(tmp_path / "gone.csv"),
-        }
-
-        await forge_gemm_tuning._run_forge_gemm_tuning(payload, session_dir=tmp_path)
-
-        workspace = forge_lane_budget._gemm_tuning_workspace(payload, session_dir=tmp_path)
-        written = _FORGE_GEMM_PAYLOADS[-1]
-        assert written["moe_untuned_csv"] != str(tmp_path / "gone.csv")
-        assert Path(written["moe_untuned_csv"]).is_file()
 
     @pytest.mark.asyncio
     async def test_vllm_block_fp8_prefers_traced_shapes_over_profile_capture(self, tmp_path, monkeypatch):
@@ -1989,6 +1781,9 @@ class TestForgeGemmHelperCoverage:
         )
         model_dir = tmp_path / "qwen"
         model_dir.mkdir()
+        (model_dir / "config.json").write_text(
+            json.dumps({"quantization_config": {"weight_block_size": [128, 128]}}), encoding="utf-8"
+        )
         state = SharedState(
             precision="fp8",
             framework="vllm",
@@ -1997,6 +1792,7 @@ class TestForgeGemmHelperCoverage:
             tp=1,
             conc=64,
             last_trace_analyze={"candidates_path": str(candidates)},
+            current_best={"extra_server_args": "--quantization fp8", "extra_envs": {}},
         )
         state.save(tmp_path)
         monkeypatch.setattr(forge_gemm_tuning, "_forge_gemm_tune_available", lambda: True)
@@ -2017,11 +1813,11 @@ class TestForgeGemmHelperCoverage:
 
         # task_id keeps the workspace deterministic (it otherwise falls back to a wall-clock suffix, which the
         # assertion below could not re-derive).
-        payload = {"precision": "fp8", "quant_type": "blockscale", "task_id": "gemm-1"}
+        payload = {"task_id": "gemm-1"}
         await forge_gemm_tuning._run_forge_gemm_tuning(payload, session_dir=tmp_path)
 
         assert captured["ran"] is False, "profile capture ran despite traced shapes"
-        workspace = forge_lane_budget._gemm_tuning_workspace(payload, session_dir=tmp_path)
+        workspace = forge_lane_budget._gemm_tuning_workspace(payload["task_id"], session_dir=tmp_path)
         written = _FORGE_GEMM_PAYLOADS[-1]
         shapes = json.loads(Path(written["shapes_json"]).read_text(encoding="utf-8"))
         # Traced shapes are re-keyed onto aiter's power-of-two lookup ladder.
@@ -2104,7 +1900,7 @@ class TestForgeGemmHelperCoverage:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "source",
-        ["fresh_profile", "explicit_benchmark", "stale_profile"],
+        ["fresh_profile", "stale_profile"],
     )
     async def test_sglang_shape_source_priority(
         self,
@@ -2161,10 +1957,9 @@ class TestForgeGemmHelperCoverage:
 
         monkeypatch.setattr(forge_gemm_tuning, "_run_subprocess", _fake_subprocess)
 
-        payload = {"untuned_csv": str(specialist_csv)} if source == "explicit_benchmark" else {}
-        await forge_gemm_tuning._run_forge_gemm_tuning(payload, session_dir=tmp_path)
+        await forge_gemm_tuning._run_forge_gemm_tuning({}, session_dir=tmp_path)
 
-        if source in {"explicit_benchmark", "stale_profile"}:
+        if source == "stale_profile":
             assert captured["untuned_csv"] == str(specialist_csv)
             assert captured["shapes_json"] == ""
         else:
@@ -2363,6 +2158,39 @@ class TestReusableSourceRootsAtom:
         assert any("/opt/venv/lib/python3.12/site-packages/atom/" in r for r in resolve_known_source_prefixes())
 
 
+def _vllm_block_fp8_roofline_state(tmp_path):
+    """An fp8 vLLM session whose last profile is a roofline trace holding one block-scaled GEMM shape."""
+    roofline_trace = tmp_path / "roofline.trace.json"
+    roofline_trace.write_text(
+        json.dumps(
+            {
+                "traceEvents": [
+                    {
+                        "name": "vllm::w8a8_triton_block_scaled_mm_func",
+                        "args": {"Input Dims": [[4149, 5120], [34816, 5120]]},
+                    }
+                ]
+            }
+        )
+    )
+    return SharedState(
+        precision="fp8",
+        framework="vllm",
+        model_path="/models/qwen",
+        tp=1,
+        conc=64,
+        isl=1024,
+        osl=1024,
+        max_model_len=4096,
+        last_profile_trace=str(roofline_trace),
+        last_profile_status="succeeded",
+        last_trace_analyze={
+            "trace_input": str(roofline_trace),
+            "steady_state_trace": str(roofline_trace),
+        },
+    )
+
+
 class TestRunGemmTuningHandler:
     def test_resolves_split_aiter_meta_root_for_forge(self, tmp_path, monkeypatch):
         from types import SimpleNamespace
@@ -2434,7 +2262,6 @@ class TestRunGemmTuningHandler:
             shape_capture._capture_vllm_tunableop_shapes(
                 state=state,
                 session_dir=tmp_path,
-                payload={"task_id": "capture", "tp": 2},
                 workspace=tmp_path / "runs" / "gemm_tuning" / "capture",
             )
         )
@@ -2455,7 +2282,7 @@ class TestRunGemmTuningHandler:
         assert task.params["extra_envs"]["PYTORCH_TUNABLEOP_RECORD_UNTUNED"] == "1"
         assert task.params["extra_envs"]["HL_TUNABLEOP_MODE"] == ""
         assert task.params["extra_envs"]["PORT"] == "19001"
-        assert task.params["extra_envs"]["TP"] == "2"
+        assert task.params["extra_envs"]["TP"] == "1"
         assert task.params["extra_envs"]["CONC"] == "128"
         assert task.params["extra_envs"]["ISL"] == "1024"
         assert task.params["extra_envs"]["OSL"] == "512"
@@ -2556,10 +2383,7 @@ class TestRunGemmTuningHandler:
             shape_capture._capture_vllm_tunableop_shapes(
                 state=state,
                 session_dir=tmp_path,
-                payload={
-                    "task_id": "capture",
-                    "_shape_capture_mode": "block_fp8_profile",
-                },
+                capture_mode=shape_capture.BLOCK_FP8_PROFILE_CAPTURE,
                 workspace=tmp_path / "runs" / "gemm_tuning" / "capture",
             )
         )
@@ -2641,10 +2465,7 @@ class TestRunGemmTuningHandler:
             shape_capture._capture_vllm_tunableop_shapes(
                 state=state,
                 session_dir=tmp_path,
-                payload={
-                    "task_id": "capture",
-                    "_shape_capture_mode": "block_fp8_profile",
-                },
+                capture_mode=shape_capture.BLOCK_FP8_PROFILE_CAPTURE,
                 workspace=tmp_path / "runs" / "gemm_tuning" / "capture",
             )
         )
@@ -2725,10 +2546,7 @@ class TestRunGemmTuningHandler:
             shape_capture._capture_vllm_tunableop_shapes(
                 state=state,
                 session_dir=tmp_path,
-                payload={
-                    "task_id": "capture",
-                    "_shape_capture_mode": "block_fp8_profile",
-                },
+                capture_mode=shape_capture.BLOCK_FP8_PROFILE_CAPTURE,
                 workspace=tmp_path / "runs" / "gemm_tuning" / "capture",
             )
         )
@@ -2803,10 +2621,7 @@ class TestRunGemmTuningHandler:
             shape_capture._capture_vllm_tunableop_shapes(
                 state=state,
                 session_dir=session_dir,
-                payload={
-                    "task_id": "capture",
-                    "_shape_capture_mode": "block_fp8_profile",
-                },
+                capture_mode=shape_capture.BLOCK_FP8_PROFILE_CAPTURE,
                 workspace=session_dir / "runs" / "gemm_tuning" / "capture",
             )
         )
@@ -2827,7 +2642,6 @@ class TestRunGemmTuningHandler:
                 precision="fp8",
                 quant_type="blockscale",
                 supplied=shape_capture.SuppliedShapes(shapes_json="", tunableop_input=""),
-                dry_run=False,
             )
             is False
         )
@@ -2843,7 +2657,6 @@ class TestRunGemmTuningHandler:
                 framework="vllm",
                 model_path=str(model),
                 supplied=shape_capture.SuppliedShapes(shapes_json="", tunableop_input=""),
-                dry_run=False,
             )
             is False
         )
@@ -2853,15 +2666,9 @@ class TestRunGemmTuningHandler:
                 precision="fp8",
                 quant_type="blockscale",
                 supplied=shape_capture.SuppliedShapes(shapes_json="", tunableop_input=""),
-                dry_run=False,
             )
             is False
         )
-
-    @pytest.mark.parametrize("port", [0, -1, 8888, 65536, "bad"])
-    def test_shape_capture_rejects_unsafe_explicit_port(self, port):
-        with pytest.raises(ValueError):
-            shape_capture._resolve_shape_capture_port(port)
 
     def test_vllm_shape_capture_empty_output_is_explicit_failure(self, tmp_path, monkeypatch):
         from hyperloom.orchestrator.actions.executors import baseline as baseline_module
@@ -2887,7 +2694,6 @@ class TestRunGemmTuningHandler:
             shape_capture._capture_vllm_tunableop_shapes(
                 state=state,
                 session_dir=tmp_path,
-                payload={"task_id": "capture"},
                 workspace=tmp_path / "runs" / "gemm_tuning" / "capture",
             )
         )
@@ -2897,12 +2703,11 @@ class TestRunGemmTuningHandler:
         assert result["shape_count"] == 0
 
     @pytest.mark.parametrize(
-        ("framework", "shapes_json", "tunableop_input", "dry_run"),
+        ("framework", "shapes_json", "tunableop_input"),
         [
-            ("sglang", "", "", False),
-            ("vllm", "present", "", False),
-            ("vllm", "", "/tmp/tunableop.csv", False),
-            ("vllm", "", "", True),
+            ("sglang", "", ""),
+            ("vllm", "present", ""),
+            ("vllm", "", "/tmp/tunableop.csv"),
         ],
     )
     def test_vllm_shape_capture_does_not_change_existing_input_paths(
@@ -2911,7 +2716,6 @@ class TestRunGemmTuningHandler:
         framework,
         shapes_json,
         tunableop_input,
-        dry_run,
     ):
         model = tmp_path / "model"
         model.mkdir()
@@ -2926,7 +2730,6 @@ class TestRunGemmTuningHandler:
                 framework=framework,
                 model_path=str(model),
                 supplied=shape_capture.SuppliedShapes(shapes_json=shapes_json, tunableop_input=tunableop_input),
-                dry_run=dry_run,
             )
             is False
         )
@@ -2944,7 +2747,6 @@ class TestRunGemmTuningHandler:
                 framework="vllm",
                 model_path=str(model),
                 supplied=shape_capture.SuppliedShapes(shapes_json="", tunableop_input=""),
-                dry_run=False,
             )
             is False
         )
@@ -2967,54 +2769,9 @@ class TestRunGemmTuningHandler:
                 framework="vllm",
                 model_path=str(model),
                 supplied=shape_capture.SuppliedShapes(shapes_json="", tunableop_input=""),
-                dry_run=False,
             )
             is False
         )
-
-    def test_explicit_tunableop_input_bypasses_vllm_shape_capture(self, tmp_path, monkeypatch):
-        model = tmp_path / "model"
-        model.mkdir()
-        (model / "config.json").write_text(json.dumps({"hidden_size": 5120, "intermediate_size": 17408}))
-        explicit_input = tmp_path / "operator-provided.csv"
-        explicit_input.write_text("GemmTunableOp_BFloat16_NN,nn_5120_64_5120_ld_5120_5120_5120\n")
-        SharedState(
-            precision="fp8",
-            framework="vllm",
-            model_path=str(model),
-            gpu_type="mi300x",
-        ).save(tmp_path)
-        captured_input: dict = {}
-
-        async def fail_capture(**kwargs):
-            raise AssertionError("explicit tunableop_input must bypass automatic capture")
-
-        async def fake_run(cmd: list[str], *, timeout_sec: int, **_kwargs):
-            captured_input.update(_FORGE_GEMM_PAYLOADS[-1])
-            return (
-                0,
-                "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
-                + json.dumps({"status": "ok", "micro_decision": "no_improvement"})
-                + "\nFORGE_GEMM_TUNE_RESULT_END\n",
-                "",
-            )
-
-        monkeypatch.setattr(forge_gemm_tuning, "_capture_vllm_tunableop_shapes", fail_capture)
-        monkeypatch.setattr(forge_gemm_tuning, "_forge_gemm_tune_available", lambda: True)
-        monkeypatch.setattr(forge_gemm_tuning, "_run_subprocess", fake_run)
-
-        result = asyncio.run(
-            krh.run_gemm_tuning_handler(
-                {
-                    "task_id": "explicit",
-                    "tunableop_input": str(explicit_input),
-                },
-                session_dir=tmp_path,
-            )
-        )
-
-        assert captured_input["tunableop_input"] == str(explicit_input)
-        assert result["status"] == "ok"
 
     def test_vllm_dense_without_shapes_captures_tunableop_input(self, tmp_path, monkeypatch):
         model = tmp_path / "model"
@@ -3042,13 +2799,13 @@ class TestRunGemmTuningHandler:
         capture_calls: list[dict] = []
         captured_input: dict = {}
 
-        async def fake_capture(*, state, session_dir, payload, workspace):
+        async def fake_capture(*, state, session_dir, workspace, capture_mode=""):
             capture_calls.append(
                 {
                     "state": state,
                     "session_dir": session_dir,
-                    "payload": payload,
                     "workspace": workspace,
+                    "capture_mode": capture_mode,
                 }
             )
             path = tmp_path / "tunableop_untuned.csv"
@@ -3406,35 +3163,7 @@ class TestRunGemmTuningHandler:
         field,
         profile_value,
     ):
-        roofline_trace = tmp_path / "roofline.trace.json"
-        roofline_trace.write_text(
-            json.dumps(
-                {
-                    "traceEvents": [
-                        {
-                            "name": "vllm::w8a8_triton_block_scaled_mm_func",
-                            "args": {"Input Dims": [[4149, 5120], [34816, 5120]]},
-                        }
-                    ]
-                }
-            )
-        )
-        state = SharedState(
-            precision="fp8",
-            framework="vllm",
-            model_path="/models/qwen",
-            tp=1,
-            conc=64,
-            isl=1024,
-            osl=1024,
-            max_model_len=4096,
-            last_profile_trace=str(roofline_trace),
-            last_profile_status="succeeded",
-            last_trace_analyze={
-                "trace_input": str(roofline_trace),
-                "steady_state_trace": str(roofline_trace),
-            },
-        )
+        state = _vllm_block_fp8_roofline_state(tmp_path)
         state.last_profile_workload = state.current_profile_workload_context()
         state.last_profile_workload[field] = profile_value
 
@@ -3477,35 +3206,7 @@ class TestRunGemmTuningHandler:
         recorded_runtime,
         current_best,
     ):
-        roofline_trace = tmp_path / "roofline.trace.json"
-        roofline_trace.write_text(
-            json.dumps(
-                {
-                    "traceEvents": [
-                        {
-                            "name": "vllm::w8a8_triton_block_scaled_mm_func",
-                            "args": {"Input Dims": [[4149, 5120], [34816, 5120]]},
-                        }
-                    ]
-                }
-            )
-        )
-        state = SharedState(
-            precision="fp8",
-            framework="vllm",
-            model_path="/models/qwen",
-            tp=1,
-            conc=64,
-            isl=1024,
-            osl=1024,
-            max_model_len=4096,
-            last_profile_trace=str(roofline_trace),
-            last_profile_status="succeeded",
-            last_trace_analyze={
-                "trace_input": str(roofline_trace),
-                "steady_state_trace": str(roofline_trace),
-            },
-        )
+        state = _vllm_block_fp8_roofline_state(tmp_path)
         state.last_profile_workload = state.profile_workload_context(recorded_runtime)
         state.current_best = current_best
 
@@ -3625,7 +3326,7 @@ class TestRunGemmTuningHandler:
         stale_untuned.write_text("M,N,K\n1,5120,5120\n")
         captured_input: dict = {}
 
-        async def fake_capture(*, state, session_dir, payload, workspace):
+        async def fake_capture(*, state, session_dir, workspace, capture_mode=""):
             return {
                 "status": "ok",
                 "shapes_json": str(shapes_path),
@@ -3871,7 +3572,7 @@ class TestRunGemmTuningHandler:
             "artifact_paths": {"gemm_shapes_json": str(shapes)},
         }
 
-        assert forge_shapes._resolve_forge_shapes(state, session_dir) == str(shapes)
+        assert forge_shapes._resolve_forge_shapes(_fresh_profile(state)) == str(shapes)
 
     @pytest.mark.parametrize(
         "quant_type",
@@ -3912,7 +3613,7 @@ class TestRunGemmTuningHandler:
         _write_candidates(latest_candidates, 4096)
         state = SharedState(last_trace_analyze={"candidates_path": str(latest_candidates)})
 
-        shapes_path = forge_shapes._resolve_forge_shapes(state, session_dir)
+        shapes_path = forge_shapes._resolve_forge_shapes(_fresh_profile(state))
 
         assert json.loads(Path(shapes_path).read_text(encoding="utf-8")) == [{"M": 4096, "N": 34816, "K": 5120}]
 
@@ -3934,7 +3635,7 @@ class TestRunGemmTuningHandler:
             encoding="utf-8",
         )
 
-        out = forge_shapes._extract_gemm_shapes_from_candidates(str(candidates), tmp_path)
+        out = forge_shapes._extract_gemm_shapes_from_candidates(str(candidates))
 
         assert json.loads(Path(out).read_text(encoding="utf-8")) == [{"M": 1024, "N": 34816, "K": 5120}]
 
@@ -3977,7 +3678,7 @@ class TestRunGemmTuningHandler:
             encoding="utf-8",
         )
 
-        out = forge_shapes._extract_gemm_shapes_from_candidates(str(candidates), tmp_path)
+        out = forge_shapes._extract_gemm_shapes_from_candidates(str(candidates))
 
         assert out, "per-tensor input_shapes yielded no GEMM shapes"
         shapes = json.loads(Path(out).read_text(encoding="utf-8"))
@@ -4020,7 +3721,7 @@ class TestRunGemmTuningHandler:
         candidates = tmp_path / "kernel_candidates.json"
         self._mixed_dtype_candidates(candidates)
 
-        out = forge_shapes._extract_gemm_shapes_from_candidates(str(candidates), tmp_path, precision="fp8")
+        out = forge_shapes._extract_gemm_shapes_from_candidates(str(candidates), precision="fp8")
 
         assert json.loads(Path(out).read_text(encoding="utf-8")) == [{"M": 64, "N": 8704, "K": 3072}]
 
@@ -4028,7 +3729,7 @@ class TestRunGemmTuningHandler:
         candidates = tmp_path / "kernel_candidates.json"
         self._mixed_dtype_candidates(candidates)
 
-        out = forge_shapes._extract_gemm_shapes_from_candidates(str(candidates), tmp_path, precision="bf16")
+        out = forge_shapes._extract_gemm_shapes_from_candidates(str(candidates), precision="bf16")
 
         assert json.loads(Path(out).read_text(encoding="utf-8")) == [{"M": 64, "N": 256, "K": 3072}]
 
@@ -4036,7 +3737,7 @@ class TestRunGemmTuningHandler:
         candidates = tmp_path / "kernel_candidates.json"
         self._mixed_dtype_candidates(candidates)
 
-        out = forge_shapes._extract_gemm_shapes_from_candidates(str(candidates), tmp_path)
+        out = forge_shapes._extract_gemm_shapes_from_candidates(str(candidates))
 
         assert json.loads(Path(out).read_text(encoding="utf-8")) == [
             {"M": 64, "N": 256, "K": 3072},
@@ -4049,7 +3750,7 @@ class TestRunGemmTuningHandler:
             ("fp8", "fp8_e4m3"),
             ("fp8", "e4m3fnuz"),
             ("fp8", "torch.float8_e4m3fn"),
-            ("fp16", "f16"),  # what this repo's _TRACE_DTYPE_SUFFIX emits
+            ("fp16", "f16"),  # the compact spelling kernel_candidates.json from earlier runs carries
             ("bf16", "b16"),
             ("mxfp4", "fp4x2"),
             ("fp4", "mxfp4"),
@@ -4075,7 +3776,7 @@ class TestRunGemmTuningHandler:
             encoding="utf-8",
         )
 
-        out = forge_shapes._extract_gemm_shapes_from_candidates(str(candidates), tmp_path, precision=precision)
+        out = forge_shapes._extract_gemm_shapes_from_candidates(str(candidates), precision=precision)
 
         assert out, f"{precision!r} rejected the equivalent traced token {traced!r}"
         assert json.loads(Path(out).read_text(encoding="utf-8")) == [{"M": 64, "N": 8704, "K": 3072}]
@@ -4114,7 +3815,7 @@ class TestRunGemmTuningHandler:
             encoding="utf-8",
         )
 
-        out = forge_shapes._extract_gemm_shapes_from_candidates(str(candidates), tmp_path)
+        out = forge_shapes._extract_gemm_shapes_from_candidates(str(candidates))
 
         assert json.loads(Path(out).read_text(encoding="utf-8")) == [
             {"M": 64, "N": 8704, "K": 3072},  # 1000, not the first sighting's 10
@@ -4138,7 +3839,7 @@ class TestRunGemmTuningHandler:
             encoding="utf-8",
         )
 
-        out = forge_shapes._extract_gemm_shapes_from_candidates(str(candidates), tmp_path)
+        out = forge_shapes._extract_gemm_shapes_from_candidates(str(candidates))
 
         assert out, f"separator {sep!r} was not recognised"
         assert json.loads(Path(out).read_text(encoding="utf-8")) == [{"M": 1024, "N": 34816, "K": 5120}]
@@ -4180,7 +3881,7 @@ class TestRunGemmTuningHandler:
             }
         )
 
-        resolved = forge_shapes._resolve_forge_shapes(state, session_dir, precision="fp8")
+        resolved = forge_shapes._resolve_forge_shapes(_fresh_profile(state), precision="fp8")
 
         assert json.loads(Path(resolved).read_text(encoding="utf-8")) == [{"M": 64, "N": 8704, "K": 3072}]
 
@@ -4192,23 +3893,13 @@ class TestRunGemmTuningHandler:
         artifact.write_text(json.dumps([{"M": 64, "N": 256, "K": 3072}]), encoding="utf-8")
         state = SharedState(last_trace_analyze={"shapes_json": str(artifact)})
 
-        assert forge_shapes._resolve_forge_shapes(state, session_dir) == str(artifact)
+        assert forge_shapes._resolve_forge_shapes(_fresh_profile(state)) == str(artifact)
 
 
 # _default_kernel_batch_parallel — adaptive batch fanout scaling with visible GPUs. _resolve_candidate_id /
 # _all_kernel_candidates — canonicalizes an aliased id against the full hot ∪ skipped set (no fallback).
 class TestTracelensRootResolution:
-    """TraceLens root is resolved/validated independently of inherited env."""
-
-    def test_resolve_uses_explicit_env_override(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path / "tl"))
-        assert ta._resolve_tracelens_root() == tmp_path / "tl"
-
-    def test_resolve_derives_from_open_source_root_when_env_unset(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("TRACELENS_ROOT", raising=False)
-        monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "podlocal"))
-        expected = tmp_path / "podlocal" / "TraceLens"
-        assert ta._resolve_tracelens_root() == expected
+    """The resolved TraceLens root is validated before trace analysis uses it."""
 
     def test_root_error_none_when_present(self, tmp_path):
         tl = tmp_path / "tl"
@@ -4247,8 +3938,10 @@ class TestTracelensRootResolution:
         assert out["status"] == "failed"
         assert out["error_class"] == "tracelens_root_missing"
 
-    def test_trace_analyze_handler_bypass_selfheals_default_root_then_fails_if_unrecovered(self, tmp_path, monkeypatch):
-        # Bypass transitively imports TraceLens for source mapping, so it is provisioned like the agent route:
+    def test_trace_analyze_handler_non_llm_selfheals_default_root_then_fails_if_unrecovered(
+        self, tmp_path, monkeypatch
+    ):
+        # The non-llm route runs TraceLens in-process, so it is provisioned like the agent route:
         # a missing default root self-heals, then fails clearly instead of crashing the subprocess at import time.
         monkeypatch.delenv("TRACELENS_ROOT", raising=False)
         monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "no-tracelens-here"))
@@ -4260,10 +3953,10 @@ class TestTracelensRootResolution:
         monkeypatch.setattr(ta, "_maybe_selfheal_tracelens_root", _fake_heal)
         out = asyncio.run(
             ta.trace_analyze_handler(
-                {"trace_input": str(tmp_path / "trace"), "analysis_route": "bypass"}, session_dir=tmp_path
+                {"trace_input": str(tmp_path / "trace"), "analysis_route": "non-llm"}, session_dir=tmp_path
             )
         )
-        assert called["n"] == 1  # self-heal attempted on the bypass route too
+        assert called["n"] == 1  # self-heal attempted on the non-llm route too
         assert out["status"] == "failed"
         assert out["error_class"] == "tracelens_root_missing"
 
@@ -4415,31 +4108,27 @@ class TestTracelensRootResolution:
 
 
 class TestBuildTraceAnalyzeCmd:
-    """argv golden for ``_build_trace_analyze_cmd``: the splitter (non-scriptable) and diffusion (scriptable) surfaces, plus the bypass vs TraceLens difference."""
+    """argv golden for ``_build_trace_analyze_cmd``: the splitter surface and the route flag."""
 
     def _common(self, monkeypatch, tmp_path):
         monkeypatch.delenv("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", raising=False)
-        monkeypatch.delenv("MODEL_PATH", raising=False)
-        state = SharedState()
-        return state, tmp_path / "sess"
+        return tmp_path / "sess"
 
     def test_tracelens_splitter_cmd(self, monkeypatch, tmp_path):
-        state, session_dir = self._common(monkeypatch, tmp_path)
+        session_dir = self._common(monkeypatch, tmp_path)
         cmd, steady = ta._build_trace_analyze_cmd(
             {"session_id": "sid", "trace_input": "/t/trace", "split_conc": "64", "split_osl": "1024"},
             ta._AnalysisRun(
                 trace_input="/t/trace",
                 workspace_path="/ws",
                 tracelens_root=Path("/tl"),
-                is_bypass=False,
+                route=AnalysisRoute.AGENT,
                 scriptable=False,
                 model_name="Qwen",
                 framework="sglang",
                 target_platform="MI300X",
-                analysis_mode="inference",
             ),
             session_dir=session_dir,
-            state=state,
             workload={"conc": 8, "osl": 256, "random_range_ratio": "0.5"},
         )
         assert cmd == [
@@ -4452,6 +4141,8 @@ class TestBuildTraceAnalyzeCmd:
             "sid",
             "--workspace-path",
             "/ws",
+            "--route",
+            "agent",
             "--tracelens-root",
             "/tl",
             "--model-name",
@@ -4473,128 +4164,53 @@ class TestBuildTraceAnalyzeCmd:
 
     def test_splitter_forwards_zero_workload_hints(self, monkeypatch, tmp_path):
         """A zero conc/osl/ratio is a real workload value, not an unset one."""
-        state, session_dir = self._common(monkeypatch, tmp_path)
+        session_dir = self._common(monkeypatch, tmp_path)
         cmd, _steady = ta._build_trace_analyze_cmd(
             {"trace_input": "/t/trace"},
             ta._AnalysisRun(
                 trace_input="/t/trace",
                 workspace_path="/ws",
                 tracelens_root=Path("/tl"),
-                is_bypass=False,
+                route=AnalysisRoute.AGENT,
                 scriptable=False,
                 model_name="",
                 framework="",
                 target_platform="",
-                analysis_mode="",
             ),
             session_dir=session_dir,
-            state=state,
             workload={"conc": 0, "osl": 0, "random_range_ratio": 0.0},
         )
         assert cmd[cmd.index("--split-conc") :] == ["--split-conc", "0", "--split-osl", "0", "--split-r", "0.0"]
 
-    def test_sglang_cmd_forwards_model_context(self, monkeypatch, tmp_path):
-        """Non-scriptable analysis receives model config and precision context."""
-        state, session_dir = self._common(monkeypatch, tmp_path)
-        state.model_path = "/models/sglang-model"
-        state.precision = "fp8"
+    def test_cmd_carries_the_requested_route(self, monkeypatch, tmp_path):
+        session_dir = self._common(monkeypatch, tmp_path)
         cmd, _steady = ta._build_trace_analyze_cmd(
             {"trace_input": "/t/trace"},
             ta._AnalysisRun(
                 trace_input="/t/trace",
                 workspace_path="/ws",
                 tracelens_root=Path("/tl"),
-                is_bypass=False,
+                route=AnalysisRoute.NON_LLM,
                 scriptable=False,
-                model_name="MiniMax",
-                framework="sglang",
-                target_platform="MI355X",
-                analysis_mode="default",
-            ),
-            session_dir=session_dir,
-            state=state,
-            workload={"precision": "mxfp8"},
-        )
-        assert cmd[cmd.index("--model-path") + 1] == "/models/sglang-model"
-        assert cmd[cmd.index("--precision") + 1] == "fp8"
-
-    def test_bypass_scriptable_cmd(self, monkeypatch, tmp_path):
-        state, session_dir = self._common(monkeypatch, tmp_path)
-        state.model_path = "/models/flux"
-        cmd, steady = ta._build_trace_analyze_cmd(
-            {
-                "session_id": "sid",
-                "trace_input": "/t/trace",
-                "num_denoise_steps": 30,
-                "precision": "bf16",
-                "steady_state_mode": "auto",
-                "dry_run": True,
-            },
-            ta._AnalysisRun(
-                trace_input="/t/trace",
-                workspace_path="/ws",
-                tracelens_root=None,
-                is_bypass=True,
-                scriptable=True,
                 model_name="",
                 framework="",
                 target_platform="",
-                analysis_mode="",
             ),
             session_dir=session_dir,
-            state=state,
             workload={},
         )
-        # bypass tool module; no --tracelens-root and no --skip-split.
-        assert cmd[0] == sys.executable
-        assert cmd[1:3] == ["-m", ta._BYPASS_TRACE_ANALYSIS_MODULE]
-        assert "--tracelens-root" not in cmd
-        assert "--skip-split" not in cmd
-        # scriptable forwards denoise/model/precision; not the splitter hints.
-        assert "--num-denoise-steps" in cmd and cmd[cmd.index("--num-denoise-steps") + 1] == "30"
-        assert "--model-path" in cmd and cmd[cmd.index("--model-path") + 1] == "/models/flux"
-        assert "--precision" in cmd and cmd[cmd.index("--precision") + 1] == "bf16"
-        assert "--split-conc" not in cmd
-        assert "--steady-state-mode" in cmd and cmd[cmd.index("--steady-state-mode") + 1] == "auto"
-        assert cmd[-1] == "--dry-run"
-        assert steady == "auto"
-
-    def test_agentx_bypass_requires_single_rank(self, monkeypatch, tmp_path):
-        state, session_dir = self._common(monkeypatch, tmp_path)
-        state.benchmark_mode = "agentx"
-        state.tp = 8
-        cmd, _steady = ta._build_trace_analyze_cmd(
-            {"trace_input": "/t/trace-dir"},
-            ta._AnalysisRun(
-                trace_input="/t/trace-dir",
-                workspace_path="/ws",
-                tracelens_root=None,
-                is_bypass=True,
-                scriptable=False,
-                model_name="",
-                framework="sglang",
-                target_platform="",
-                analysis_mode="inference",
-            ),
-            session_dir=session_dir,
-            state=state,
-            workload={},
-        )
-        assert "--require-single-rank" in cmd
-        assert cmd[cmd.index("--tensor-parallel-size") + 1] == "8"
-        assert cmd[cmd.index("--analysis-mode") + 1] == "inference"
+        assert cmd[cmd.index("--route") + 1] == "non-llm"
 
     def test_tracelens_cmd_carries_the_ambient_trajectory_scope(self, monkeypatch, tmp_path):
         from hyperloom.inference_optimizer.trace.trajectory_trace import trajectory_scope
 
-        state, session_dir = self._common(monkeypatch, tmp_path)
+        session_dir = self._common(monkeypatch, tmp_path)
         run = dict(
             workspace_path="/ws",
             trace_input="/t/trace",
             model_name="",
             framework="",
             target_platform="",
-            analysis_mode="",
             scriptable=False,
         )
         with trajectory_scope(
@@ -4606,16 +4222,8 @@ class TestBuildTraceAnalyzeCmd:
         ):
             cmd, _steady = ta._build_trace_analyze_cmd(
                 {"trace_input": "/t/trace"},
-                ta._AnalysisRun(tracelens_root=Path("/tl"), is_bypass=False, **run),
+                ta._AnalysisRun(tracelens_root=Path("/tl"), route=AnalysisRoute.AGENT, **run),
                 session_dir=session_dir,
-                state=state,
-                workload={},
-            )
-            bypass_cmd, _steady = ta._build_trace_analyze_cmd(
-                {"trace_input": "/t/trace"},
-                ta._AnalysisRun(tracelens_root=None, is_bypass=True, **run),
-                session_dir=session_dir,
-                state=state,
                 workload={},
             )
         assert cmd[cmd.index("--trajectory-session-dir") + 1] == str(session_dir)
@@ -4623,10 +4231,9 @@ class TestBuildTraceAnalyzeCmd:
         assert cmd[cmd.index("--trajectory-tick") + 1] == "3"
         assert cmd[cmd.index("--trajectory-task-id") + 1] == "t-roof"
         assert cmd[cmd.index("--trajectory-parent-span-id") + 1] == "span-roof"
-        assert not [arg for arg in bypass_cmd if arg.startswith("--trajectory-")]
 
     def test_steady_state_mode_from_env(self, monkeypatch, tmp_path):
-        state, session_dir = self._common(monkeypatch, tmp_path)
+        session_dir = self._common(monkeypatch, tmp_path)
         monkeypatch.setenv("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "median")
         cmd, steady = ta._build_trace_analyze_cmd(
             {"trace_input": "/t/trace"},
@@ -4634,15 +4241,13 @@ class TestBuildTraceAnalyzeCmd:
                 trace_input="/t/trace",
                 workspace_path="/ws",
                 tracelens_root=Path("/tl"),
-                is_bypass=False,
+                route=AnalysisRoute.AGENT,
                 scriptable=False,
                 model_name="",
                 framework="",
                 target_platform="",
-                analysis_mode="",
             ),
             session_dir=session_dir,
-            state=state,
             workload={},
         )
         assert steady == "median"
@@ -4689,7 +4294,7 @@ class TestTheGemmLaneBudgetReachesTheInputJson:
 
     async def _written(self, tmp_path, payload):
         await forge_gemm_tuning._run_forge_gemm_tuning(payload, session_dir=tmp_path)
-        workspace = forge_lane_budget._gemm_tuning_workspace(payload, session_dir=tmp_path)
+        workspace = forge_lane_budget._gemm_tuning_workspace(payload["task_id"], session_dir=tmp_path)
         return _FORGE_GEMM_PAYLOADS[-1]
 
     @pytest.mark.asyncio
@@ -4704,7 +4309,6 @@ class TestTheGemmLaneBudgetReachesTheInputJson:
         )
         written = await self._written(tmp_path, {"task_id": "cap-one"})
         assert written["max_tuners"] == 1
-        assert written["tuner"] == ""
         assert written["global_timeout"] == 7140
         assert written["timeout"] == forge_gemm_tuning.gemm_per_tuner_timeout_sec(7140)
 
@@ -4718,7 +4322,6 @@ class TestTheGemmLaneBudgetReachesTheInputJson:
         )
         written = await self._written(tmp_path, {"task_id": "cap-none"})
         assert written["max_tuners"] == 2
-        assert written["tuner"] == ""
         assert written["global_timeout"] == 7140
 
     @pytest.mark.asyncio
@@ -4731,24 +4334,12 @@ class TestTheGemmLaneBudgetReachesTheInputJson:
             targets=(("fmoe_ck", 3600), ("a8w8", 3600)),
         )
         written = await self._written(tmp_path, {"task_id": "cap-unbounded"})
-        assert written["tuner"] == ""
         assert written["global_timeout"] == 18000
-
-    @pytest.mark.asyncio
-    async def test_an_explicit_tuner_survives_the_ceiling(self, tmp_path, monkeypatch):
-        self._prepare(
-            tmp_path,
-            monkeypatch,
-            remaining_minutes=600.0,
-            targets=(("fmoe_ck", 3600), ("a8w8", 3600)),
-        )
-        written = await self._written(tmp_path, {"task_id": "cap-explicit", "tuner": "a8w8"})
-        assert written["tuner"] == "a8w8"
 
 
 @pytest.mark.asyncio
 async def test_a_bounded_phase_that_cannot_fund_a_lane_skips_it_without_launching(tmp_path, monkeypatch):
-    """Under the 5 min phase reserve no lane funds a target; an explicit timeout sizes a run, it does not start one."""
+    """Under the 5 min phase reserve no lane funds a target, so neither lane starts."""
     model_dir = tmp_path / "model"
     model_dir.mkdir()
     trace = tmp_path / "decode.trace.json.gz"
@@ -4776,10 +4367,8 @@ async def test_a_bounded_phase_that_cannot_fund_a_lane_skips_it_without_launchin
     monkeypatch.setattr(forge_gemm_tuning, "_run_subprocess", _launch)
     monkeypatch.setattr(forge_fusion_run.forge_fusion, "run_forge_fusion", _launch)
 
-    gemm = await forge_gemm_tuning._run_forge_gemm_tuning(
-        {"task_id": "gemm", "timeout_sec": 7200}, session_dir=tmp_path
-    )
-    fusion = await forge_fusion_run._run_forge_fusion({"task_id": "fusion", "timeout": 7200}, session_dir=tmp_path)
+    gemm = await forge_gemm_tuning._run_forge_gemm_tuning({"task_id": "gemm"}, session_dir=tmp_path)
+    fusion = await forge_fusion_run.run_fusion_handler({"task_id": "fusion"}, session_dir=tmp_path)
 
     for result in (gemm, fusion):
         assert (result["status"], result["error_class"]) == ("skipped", lane_budget.INSUFFICIENT_BUDGET)

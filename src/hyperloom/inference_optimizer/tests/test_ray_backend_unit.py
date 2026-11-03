@@ -34,28 +34,28 @@ from hyperloom.orchestrator.actions.executors._subprocess_kill import (
 
 # ── flag gate ────────────────────────────────────────────────────────────────
 @pytest.mark.parametrize("val", ["1", "true", "yes", "on", "TRUE", "On"])
-def test_should_use_ray_backend_explicit_on(monkeypatch: pytest.MonkeyPatch, val: str):
+def test_ray_exec_enabled_explicit_on(monkeypatch: pytest.MonkeyPatch, val: str):
     """An explicit on opts a test into the Ray route even under pytest."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", val)
-    assert rb._should_use_ray_backend() is True
+    assert rb.ray_exec_enabled() is True
 
 
 @pytest.mark.parametrize("val", ["0", "false", "no", "off", ""])
-def test_should_use_ray_backend_explicit_off(monkeypatch: pytest.MonkeyPatch, val: str):
+def test_ray_exec_enabled_explicit_off(monkeypatch: pytest.MonkeyPatch, val: str):
     """Explicit off wins even on single-node outside pytest (emergency escape valve)."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", val)
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
-    assert rb._should_use_ray_backend() is False
+    assert rb.ray_exec_enabled() is False
 
 
-def test_should_use_ray_backend_unset_multi_node_false(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+def test_ray_exec_enabled_unset_multi_node_false(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     """Env unset + not-under-pytest + multi-node -> False."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_RAY_EXEC", raising=False)
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
     monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "nope.json"))
-    assert rb._should_use_ray_backend() is False
+    assert rb.ray_exec_enabled() is False
 
 
 # ── visible-device merge invariant ───────────────────────────────────────────
@@ -543,12 +543,12 @@ def test_get_ray_backend_singleton():
     assert a is b
 
 
-# ── _should_use_ray_backend (execution-route gate) ───────────────────────────
-def test_should_use_ray_backend_pytest_default_off(monkeypatch: pytest.MonkeyPatch):
+# ── ray_exec_enabled (execution-route gate) ───────────────────────────
+def test_ray_exec_enabled_pytest_default_off(monkeypatch: pytest.MonkeyPatch):
     """Under pytest with env unset, the route defaults OFF (hermetic tests)."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_RAY_EXEC", raising=False)
     # PYTEST_CURRENT_TEST is set by pytest during the test.
-    assert rb._should_use_ray_backend() is False
+    assert rb.ray_exec_enabled() is False
 
 
 # ── _run_magpie routing (P1/T1) ──────────────────────────────────────────────
@@ -1266,17 +1266,17 @@ def test_serving_slot_busy_reads_available_resources(monkeypatch: pytest.MonkeyP
     assert rb.serving_slot_busy() is False  # slot free -> no pause
 
 
-def test_ray_gpu_specialist_exec_enabled(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+def test_ray_exec_enabled_multi_node_overrides_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
     monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "nope.json"))
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", "1")
-    assert rb.ray_gpu_specialist_exec_enabled() is True
+    assert rb.ray_exec_enabled() is True
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", "0")
-    assert rb.ray_gpu_specialist_exec_enabled() is False
+    assert rb.ray_exec_enabled() is False
     # multi-node -> off even with RAY_EXEC=1
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", "1")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
-    assert rb.ray_gpu_specialist_exec_enabled() is False
+    assert rb.ray_exec_enabled() is False
 
 
 def test_gpu_specialist_lease_is_alive_false_before_start():
@@ -1697,13 +1697,13 @@ def test_gpu_specialist_lease_close_kills_live_actor(monkeypatch: pytest.MonkeyP
     assert lease._actor is None
 
 
-def test_should_use_ray_backend_unset_single_node_true(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+def test_ray_exec_enabled_unset_single_node_true(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     """Env unset + not-under-pytest + single-node -> True (production default)."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_RAY_EXEC", raising=False)
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)  # bypass the pytest gate
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
     monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "nope.json"))
-    assert rb._should_use_ray_backend() is True
+    assert rb.ray_exec_enabled() is True
 
 
 def test_strip_visible_devices_write_error_returns_src(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.common.timeutil import utc_now_compact
+from hyperloom_common.timeutil import utc_now_compact
 from hyperloom.inference_optimizer.session import manifest as mf
 
 
@@ -166,7 +166,7 @@ def test_build_manifest_with_args(monkeypatch):
 
 
 def test_build_manifest_shared_provenance_fields(monkeypatch):
-    """Schema v4 carries gfx/EP/graph-mode/server-args from the shared WP-0 provenance builder (kept in lockstep with the TraceShapeManifest)."""
+    """Schema v4 carries gfx/EP/graph-mode/server-args from the shared WP-0 provenance builder."""
     monkeypatch.setattr(mf, "_build_dependencies", dict)
     monkeypatch.setattr(
         mf,

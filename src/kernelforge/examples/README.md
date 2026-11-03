@@ -293,7 +293,7 @@ the host gaps between launches compound into a big eager-vs-graph gap.
 example directories contain a byte-for-byte identical `graph_harness.py` (89
 lines, same md5).  This duplication is intentional: each example is designed as a
 self-contained, copy-as-a-whole reference task.
-`loop/task_preparer.py`'s `_materialize_reference()` copies the entire `examples/`
+`workflows/forge_loop/preparation/task_preparer.py`'s `_materialize_reference()` copies the entire `examples/`
 tree into the agent's workspace so it can read real, complete reference tasks
 (driver, harness, README contract) rather than truncated prompt text.  The
 agent's driver imports `from graph_harness import …` relative to its own

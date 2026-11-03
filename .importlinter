@@ -27,18 +27,21 @@
 [importlinter]
 root_packages =
     hyperloom
+    hyperloom_common
+    hyperloom_kb
     kernelforge
 include_external_packages = False
 exclude_type_checking_imports = True
 
 
 [importlinter:contract:hl-top-layers]
-name = hyperloom top-level layers (cli > orchestrator > agents > inference_optimizer > common)
+name = hyperloom top-level layers (cli > orchestrator > agents > contracts > inference_optimizer > common)
 type = layers
 layers =
     hyperloom.cli
     hyperloom.orchestrator
     hyperloom.agents
+    hyperloom.contracts
     hyperloom.inference_optimizer
     hyperloom.common
 # Baseline: hyperloom.inference_optimizer.cli is an entry point that lives
@@ -64,7 +67,6 @@ ignore_imports =
     hyperloom.inference_optimizer.cli.backends -> hyperloom.orchestrator.roles
     hyperloom.inference_optimizer.cli.backends -> hyperloom.orchestrator.roles.agent_role
     hyperloom.inference_optimizer.cli.backends -> hyperloom.orchestrator.scoring.proposal_scorer
-    hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.actions.executors._workload_envs
     hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.actions.executors.report
     hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.kernel.conc_sweep
     hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.phases.machine_state
@@ -82,7 +84,6 @@ ignore_imports =
     hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.specialists.subprocess_
     hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.knowledge.config
     hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.knowledge.knowledge_plane
-    hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.knowledge.pr_monitor
     hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.knowledge.recipe_kb
     hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.knowledge.recipe_kb_t0
     hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.knowledge.remote_recipe
@@ -105,16 +106,31 @@ ignore_imports =
 unmatched_ignore_imports_alerting = error
 
 
-[importlinter:contract:kf-only-common]
-name = kernelforge may depend on hyperloom.common only
+[importlinter:contract:kf-no-hyperloom]
+name = kernelforge does not depend on hyperloom
 type = forbidden
+# What the two packages share is the `hyperloom_common` package; nothing in the optimizer
+# is KernelForge's to reach for.
 source_modules = kernelforge
-forbidden_modules =
-    hyperloom.cli
-    hyperloom.orchestrator
-    hyperloom.inference_optimizer
-    hyperloom.agents
+forbidden_modules = hyperloom
+allow_indirect_imports = True
 ignore_imports =
+    hyperloom.**.tests.** -> **
+    kernelforge.tests.** -> **
+unmatched_ignore_imports_alerting = none
+
+
+[importlinter:contract:common-is-leaf]
+name = hyperloom_common imports nothing else from the project
+type = forbidden
+source_modules = hyperloom_common
+forbidden_modules =
+    hyperloom
+    hyperloom_kb
+    kernelforge
+ignore_imports =
+    hyperloom_common.tests.** -> **
+    hyperloom_common.llm.tests.** -> **
     hyperloom.**.tests.** -> **
     kernelforge.tests.** -> **
 unmatched_ignore_imports_alerting = none
@@ -126,18 +142,11 @@ type = forbidden
 source_modules = kernelforge.evaluation
 forbidden_modules =
     kernelforge.agent_backends
-    kernelforge.assembly
     kernelforge.cli
-    kernelforge.fusion
-    kernelforge.gemm_tune
     kernelforge.kernel_backends
-    kernelforge.kernel_rewrite_controller
     kernelforge.knowledge
-    kernelforge.loop
-    kernelforge.orchestrator
-    kernelforge.rewrite_by_flydsl
     kernelforge.roofline_ceiling
-    kernelforge.tracker
+    kernelforge.workflows
 ignore_imports =
     hyperloom.**.tests.** -> **
     kernelforge.tests.** -> **
@@ -145,25 +154,18 @@ unmatched_ignore_imports_alerting = none
 
 
 [importlinter:contract:kf-tools-foundation]
-name = kernelforge tools do not depend on evaluation, product or entry layers
+name = kernelforge utils do not depend on any other kernelforge package
 type = forbidden
-source_modules = kernelforge.tools
+source_modules = kernelforge.utils
 forbidden_modules =
     kernelforge.agent_backends
-    kernelforge.assembly
     kernelforge.cli
+    kernelforge.config
     kernelforge.evaluation
-    kernelforge.fusion
-    kernelforge.gemm_tune
     kernelforge.kernel_backends
-    kernelforge.kernel_rewrite_controller
     kernelforge.knowledge
-    kernelforge.loop
-    kernelforge.orchestrator
-    kernelforge.rewrite_by_flydsl
     kernelforge.roofline_ceiling
-    kernelforge.tracker
-    kernelforge.workspace
+    kernelforge.workflows
 ignore_imports =
     hyperloom.**.tests.** -> **
     kernelforge.tests.** -> **
@@ -176,19 +178,31 @@ type = forbidden
 # An agent session waits on each server's startup. A new MCP server module must be added here.
 source_modules =
     kernelforge.knowledge.pr_knowledge.mcp_server
-    kernelforge.orchestrator.specialist_probe_server
+    kernelforge.workflows.forge_loop.roles.specialist_probe_server
 forbidden_modules =
     kernelforge.agent_backends
     kernelforge.cli
-    kernelforge.loop
+    kernelforge.workflows.forge_loop.api
+    kernelforge.workflows.forge_loop.bootstrap
+    kernelforge.workflows.forge_loop.campaign
+    kernelforge.workflows.forge_loop.export
+    kernelforge.workflows.forge_loop.gate
+    kernelforge.workflows.forge_loop.iteration
+    kernelforge.workflows.forge_loop.memory
+    kernelforge.workflows.forge_loop.policy
+    kernelforge.workflows.forge_loop.preparation
+    kernelforge.workflows.forge_loop.search
+    kernelforge.workflows.forge_loop.roles.agent_extras
+    kernelforge.workflows.forge_loop.roles.analysis_evidence
+    kernelforge.workflows.forge_loop.roles.prompt_view
 ignore_imports =
     hyperloom.**.tests.** -> **
     kernelforge.tests.** -> **
 unmatched_ignore_imports_alerting = none
 
 
-[importlinter:contract:common-is-leaf]
-name = hyperloom.common imports nothing else from the project
+[importlinter:contract:hl-common-is-leaf]
+name = hyperloom.common imports nothing from the project but hyperloom_common
 type = forbidden
 source_modules = hyperloom.common
 forbidden_modules =
@@ -254,18 +268,47 @@ ignore_imports =
 unmatched_ignore_imports_alerting = none
 
 
+[importlinter:contract:kf-public-interfaces]
+name = hyperloom uses kernelforge only through its package interfaces
+type = forbidden
+# What a kernelforge package offers the rest of the project is what its
+# __init__ exports (and kernelforge.workflows.forge_loop.api for the loop), so its modules can
+# move without breaking Hyperloom.
+source_modules = hyperloom
+forbidden_modules =
+    kernelforge.agent_backends.**
+    kernelforge.cli.**
+    kernelforge.config.**
+    kernelforge.evaluation.**
+    kernelforge.kernel_backends.**
+    kernelforge.knowledge.**
+    kernelforge.roofline_ceiling.**
+    kernelforge.utils.**
+    kernelforge.workflows.flydsl_rewrite.**
+    kernelforge.workflows.forge_fusion.**
+    kernelforge.workflows.forge_loop.**
+    kernelforge.workflows.gemm_tune.**
+    kernelforge.workflows.rewrite_controller.**
+allow_indirect_imports = True
+ignore_imports =
+    hyperloom.**.tests.** -> **
+    hyperloom.** -> kernelforge.workflows.forge_loop.api
+unmatched_ignore_imports_alerting = none
+
+
 [importlinter:contract:acyclic]
 name = no cycles between sibling packages (baseline may only shrink)
 type = acyclic_siblings
 ancestors =
     hyperloom
+    hyperloom_common
     kernelforge
 # Baseline: the exact imports import-linter nominates as cycle breakers on
 # main today. Removing one of these imports means deleting its line here.
 ignore_imports =
     hyperloom.**.tests.** -> **
     kernelforge.tests.** -> **
-    hyperloom.common.llm_config -> hyperloom.common.claude_oneshot
+    hyperloom_common.llm.llm_config -> hyperloom_common.llm.claude_oneshot
     hyperloom.inference_optimizer.breakdown.critic_reviews -> hyperloom.inference_optimizer.breakdown.collectors._common
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._aiter_jit
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._partition_shape
@@ -283,7 +326,6 @@ ignore_imports =
     hyperloom.inference_optimizer.cli.backends -> hyperloom.orchestrator.roles
     hyperloom.inference_optimizer.cli.backends -> hyperloom.orchestrator.roles.agent_role
     hyperloom.inference_optimizer.cli.backends -> hyperloom.orchestrator.scoring.proposal_scorer
-    hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.actions.executors._workload_envs
     hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.actions.executors.report
     hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.kernel.conc_sweep
     hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.phases.machine_state
@@ -301,7 +343,6 @@ ignore_imports =
     hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.specialists.subprocess_
     hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.knowledge.config
     hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.knowledge.knowledge_plane
-    hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.knowledge.pr_monitor
     hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.knowledge.recipe_kb
     hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.knowledge.recipe_kb_t0
     hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.knowledge.remote_recipe
@@ -391,18 +432,12 @@ ignore_imports =
     hyperloom.orchestrator.specialists.subprocess_ -> hyperloom.orchestrator.loop.sub_agent_runner
     hyperloom.orchestrator.state._shared_state.phase_state -> hyperloom.orchestrator.specialists.domains
     hyperloom.orchestrator.state._shared_state.render -> hyperloom.orchestrator.actions.executors._proposal_identity
-    hyperloom.orchestrator.state.gaps -> hyperloom.orchestrator.specialists.domains
     hyperloom.orchestrator.state._shared_state.render -> hyperloom.orchestrator.kernel.kernel_decisions
     hyperloom.orchestrator.state.shared_state -> hyperloom.orchestrator.kernel.kernel_decisions
     hyperloom.orchestrator.state.shared_state -> hyperloom.orchestrator.phases.machine_state
     hyperloom.orchestrator.trace_analysis.tracelens_skill_runner -> hyperloom.orchestrator.roles.claude_requests
-    kernelforge.agent_backends.workspace_guard -> kernelforge.loop.new_path_allowlist
-    kernelforge.fusion.shadow_repo -> kernelforge.loop.path_ownership
-    kernelforge.gemm_tune.dense_shapes -> kernelforge.gemm_tune.tuners._aiter_dense_common
-    kernelforge.kernel_backends.fusion.prompts -> kernelforge.fusion.harness_contract
-    kernelforge.kernel_backends.fusion.prompts -> kernelforge.fusion.validate
-    kernelforge.knowledge.kb_store.recipe -> kernelforge.config
-    kernelforge.orchestrator.agent -> kernelforge.loop.insession_gate
-    kernelforge.orchestrator.agent -> kernelforge.loop.lessons
-    kernelforge.orchestrator.specialists -> kernelforge.loop.fanout
+    kernelforge.workflows.gemm_tune.dense_shapes -> kernelforge.workflows.gemm_tune.tuners._aiter_dense_common
+    kernelforge.kernel_backends.fusion.prompts -> kernelforge.workflows.forge_fusion.harness_contract
+    kernelforge.kernel_backends.fusion.prompts -> kernelforge.workflows.forge_fusion.validate
+    kernelforge.workflows.forge_loop.roles.specialists -> kernelforge.workflows.forge_loop.iteration.fanout
 unmatched_ignore_imports_alerting = error

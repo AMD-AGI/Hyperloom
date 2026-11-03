@@ -12,7 +12,7 @@ import os
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, NamedTuple
 
-from hyperloom.common.env import env_flag
+from hyperloom_common.env import env_flag
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
 from ..collaborator import CoordinatorCollaborator
@@ -46,7 +46,7 @@ _ADMISSION_DROPS: tuple[tuple[str, str], ...] = (
 #: Domains whose focus reads the target's ``config.json`` summary from ``model_info``.
 _MODEL_INFO_DOMAINS: frozenset[str] = frozenset({"static_recon_specialist", "speculative_decoding_specialist"})
 
-#: ``(SharedState field, param key, conversion)`` for the values a specialist is warmed with. The converted value
+#: ``(SharedState attribute, param key, conversion)`` for the values a specialist is warmed with. The converted value
 #: decides: an empty string, an empty container and a zero are not exported, because an absent key is how the
 #: specialist reads "this session has none".
 _STATE_PARAMS: tuple[tuple[str, str, Callable[[Any], Any]], ...] = (
@@ -69,6 +69,7 @@ _STATE_PARAMS: tuple[tuple[str, str, Callable[[Any], Any]], ...] = (
     ("agentx_backend", "agentx_backend", str),
     ("baseline_tput", "baseline_tput", float),
     ("cumulative_gain_validated", "cumulative_gain_validated", float),
+    ("current_best_launch_args", "current_launch_args", lambda launched: launched or ""),
 )
 
 #: Optional round-row fields, taken from the done payload or else the dispatch params; an empty value is not carried.
@@ -101,6 +102,31 @@ class ClassifiedFailure(NamedTuple):
 
     ftype: SpecialistFailureType
     error: str
+
+
+def _auto_retry_cap() -> int:
+    """How many infra-failure retries a specialist gets; the default when the override is not an integer."""
+    try:
+        cap = int(
+            os.environ.get(
+                "INFERENCE_OPTIMIZER_SPECIALIST_AUTO_RETRY_MAX",
+                str(SPECIALIST_AUTO_RETRY_MAX),
+            )
+        )
+    except (TypeError, ValueError):
+        cap = SPECIALIST_AUTO_RETRY_MAX
+    return cap
+
+
+def _auto_retry_key(task: "Task", next_attempt: int) -> str:
+    """The retry task's idempotency key, on a base stable across attempts."""
+    # Stable base key across attempts: strip any prior ``-autoretryN`` suffix.
+    base_key = str(task.idempotency_key or task.task_id or "")
+    if "-autoretry" in base_key:
+        head, _, tail = base_key.rpartition("-autoretry")
+        if tail.isdigit():
+            base_key = head
+    return f"{base_key}-autoretry{next_attempt}"
 
 
 def _round_entry_extras(
@@ -138,10 +164,8 @@ def _round_entry_extras(
 class SpecialistDispatchCollaborator(CoordinatorCollaborator):
     """Specialist dispatch: warmup, auto-retry, wave fan-out, stalled-domain forcing, and round-entry construction."""
 
-    def __init__(self, coordinator: "Coordinator", proposal_scorer: Any = None) -> None:
+    def __init__(self, coordinator: "Coordinator") -> None:
         super().__init__(coordinator)
-        # Advisory only: scores proposals, never gates them.
-        self._proposal_scorer = proposal_scorer
         # Key of the custom dispatch admission last refused; it is not requested again until the key changes.
         self.refused_custom_key = ""
 
@@ -173,7 +197,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         state = self.shared_state
         plane = self.knowledge_plane
 
-        from .domains import dispatch_domain, gap_backfilled_domain, normalize_dispatch_tags
+        from .domains import dispatch_domain, gap_backfilled_domain
         from .profile import resolve_specialist_profile
 
         # Bench-capable specialists run a real serving + benchmark loop, so
@@ -186,12 +210,9 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         # Resolve as the runner does, so a tags-only or gap-backfilled dispatch is warmed for the domain it runs as.
         resolved_domain = dispatch_domain(params)
         domain = resolved_domain.key if resolved_domain is not None else ""
-        normalize_dispatch_tags(params)
 
         if "pr_monitor_available" not in params:
             params["pr_monitor_available"] = bool(plane is not None and getattr(plane, "pr_monitor_enabled", True))
-
-        params.setdefault("kb_subgraph", {})
 
         for attr, key, convert in _STATE_PARAMS:
             value = convert(getattr(state, attr))
@@ -296,7 +317,6 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             from ..knowledge import static_recon_checklist as _src_recon
 
             _dirs = _src_recon.source_hint_directories_for(
-                model_class=str(getattr(state, "model_class", "") or ""),
                 gpu_type=str(getattr(state, "gpu_type", "") or ""),
                 precision=_src_recon.workload_precision(state),
             )
@@ -410,15 +430,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         """
         if not env_flag("INFERENCE_OPTIMIZER_SPECIALIST_AUTO_RETRY", default=True):
             return False
-        try:
-            cap = int(
-                os.environ.get(
-                    "INFERENCE_OPTIMIZER_SPECIALIST_AUTO_RETRY_MAX",
-                    str(SPECIALIST_AUTO_RETRY_MAX),
-                )
-            )
-        except (TypeError, ValueError):
-            cap = SPECIALIST_AUTO_RETRY_MAX
+        cap = _auto_retry_cap()
         if cap <= 0:
             return False
         from .runner import classify_specialist_failure
@@ -457,13 +469,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         if requires_gpu(retry_params):
             ttl = self._coord.dispatcher.gpu_lease_ttl_sec(int(ttl or 0), params=retry_params)
 
-        # Stable base key across attempts: strip any prior ``-autoretryN`` suffix.
-        base_key = str(task.idempotency_key or task.task_id or "")
-        if "-autoretry" in base_key:
-            head, _, tail = base_key.rpartition("-autoretry")
-            if tail.isdigit():
-                base_key = head
-        retry_key = f"{base_key}-autoretry{next_attempt}"
+        retry_key = _auto_retry_key(task, next_attempt)
 
         with trajectory_scope(parent_span_id=task.task_id):
             new_task, was_existing = await self.tasks.create_or_return_existing(
@@ -486,14 +492,30 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 detail="retry slot already taken",
             )
             return False
+        await self._announce_specialist_retry(
+            task, new_task, ClassifiedFailure(ftype=ftype, error=error), attempt=next_attempt, cap=cap
+        )
+        return True
+
+    async def _announce_specialist_retry(
+        self,
+        task: "Task",
+        retry_task: "Task",
+        failure: ClassifiedFailure,
+        *,
+        attempt: int,
+        cap: int,
+    ) -> None:
+        """Record the retry on the trajectory and the bus, and log it."""
+        ftype, error = failure.ftype, failure.error
         record_event(
             EVENT_TASK_RETRY,
             task_id=task.task_id,
             parent_span_id=task.task_id,
             attributes={
                 "name": "specialist",
-                "retry_task_id": new_task.task_id,
-                "attempt": next_attempt,
+                "retry_task_id": retry_task.task_id,
+                "attempt": attempt,
                 "max_attempts": cap,
                 "failure_type": ftype.value,
                 "reason": error[:200],
@@ -505,8 +527,8 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             {
                 "kind": "specialist_auto_retry",
                 "task_id": task.task_id,
-                "retry_task_id": new_task.task_id,
-                "attempt": next_attempt,
+                "retry_task_id": retry_task.task_id,
+                "attempt": attempt,
                 "max_attempts": cap,
                 "failure_type": ftype.value,
                 "reason": error[:200],
@@ -516,11 +538,10 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             "specialist auto-retry: task=%s failure=%s attempt=%d/%d re-enqueued as %s",
             task.task_id,
             ftype.value,
-            next_attempt,
+            attempt,
             cap,
-            new_task.task_id,
+            retry_task.task_id,
         )
-        return True
 
     async def _record_specialist_retry_exhausted(
         self,
@@ -818,7 +839,6 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         product = {
             "summary": round_entry.get("summary") or "",
             "proposals_total": round_entry.get("proposals_total"),
-            "empty": round_entry.get("empty"),
             "confidence": round_entry.get("confidence"),
             "new_findings": round_entry.get("new_findings") or [],
             "residual_questions": round_entry.get("residual_questions") or [],
@@ -882,8 +902,9 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                     result={"error_class": error_class, "error": "; ".join(str(d) for d in dropped[:4])},
                 )
         # Advisory multi-model scoring of the proposal_set; informational only, gates nothing.
-        if self._proposal_scorer is not None and round_entry["proposal_set"]:
-            scores = await self._proposal_scorer.score(
+        proposal_scorer = self._coord.proposal_scorer
+        if proposal_scorer is not None and round_entry["proposal_set"]:
+            scores = await proposal_scorer.score(
                 gap={
                     "domain": round_entry["domain"].strip(),
                     "gap_canonical_id": done_payload.get("gap_canonical_id", ""),

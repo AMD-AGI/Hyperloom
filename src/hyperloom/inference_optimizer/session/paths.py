@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from hyperloom.common.timeutil import utc_now_compact
+from hyperloom_common.timeutil import utc_now_compact
 
 log = logging.getLogger(__name__)
 
@@ -36,19 +36,12 @@ _WARNED_NO_USER_DATA = False
 # Per-session directory skeleton mkdir-ed by make_session_dir().
 _SESSION_SKELETON: tuple[str, ...] = (
     "storage",
-    "personas",
-    "checkpoints",
-    "kb",
-    "findings",
     "reports",
     "agents/orchestration",
     "agents/critic",
     "runs/baseline",
     "runs/profile",
-    "runs/backends",
-    "runs/params",
     "runs/integrate",
-    "runs/kernel_opt",
     "kernel-agent-workspace",
     "kernel-agent",  # tools/<name>.py output root (runs/<session_id>/...)
     "patches",
@@ -162,6 +155,12 @@ def ensure_archive_root(session_dir: Path) -> Path:
     return root
 
 
+def ensure_session_skeleton(session_dir: Path) -> None:
+    """Create ``session_dir`` and its per-session directory skeleton."""
+    for sub in _SESSION_SKELETON:
+        (session_dir / sub).mkdir(parents=True, exist_ok=True)
+
+
 def make_session_dir(model_name: str | os.PathLike[str] | None = None, *, target: Path | None = None) -> Path:
     """Create the session directory + per-session + workspace-shared skeletons.
 
@@ -185,9 +184,7 @@ def make_session_dir(model_name: str | os.PathLike[str] | None = None, *, target
     else:
         sd = ws
 
-    sd.mkdir(parents=True, exist_ok=True)
-    for sub in _SESSION_SKELETON:
-        (sd / sub).mkdir(parents=True, exist_ok=True)
+    ensure_session_skeleton(sd)
     # Pin for downstream callers + subprocesses; the most recent call wins.
     os.environ[ENV_CURRENT_SESSION_DIR] = str(sd)
     return sd
@@ -227,13 +224,25 @@ def runtime_dir() -> Path:
     return workspace_root() / "runtime"
 
 
+def _installed_repo_root() -> Path:
+    """The root install.sh's ``resolve_repo_root`` picks when ``$REPO_ROOT`` is unset.
+
+    A source checkout is the directory holding ``pyproject.toml`` above ``src/``; a packaged install (the wheel in
+    site-packages) is the directory holding the ``hyperloom`` package. Deriving it from this file, not the working
+    directory, makes a process started elsewhere (a hosted run's MB entry) find the checkouts install.sh made.
+    """
+    package_parent = Path(__file__).resolve().parents[3]
+    source_root = package_parent.parent
+    return source_root if (source_root / "pyproject.toml").is_file() else package_parent
+
+
 def deps_cache_root() -> Path:
-    """Writable cache root for open-source dependency checkouts."""
+    """Writable cache root for open-source dependency checkouts: install.sh's ``$REPO_ROOT/.cache``."""
     override = os.environ.get(ENV_CACHE_DIR)
     if override:
         return Path(override)
-    repo_root = os.environ.get(ENV_REPO_ROOT) or os.getcwd()
-    return Path(repo_root) / ".cache"
+    repo_root = os.environ.get(ENV_REPO_ROOT)
+    return (Path(repo_root) if repo_root else _installed_repo_root()) / ".cache"
 
 
 def _dir_mtime(p: Path) -> float:
@@ -277,7 +286,10 @@ def is_path_within(path: Path, root: Path) -> bool:
 
 
 def mn_profile_trace_root() -> Path:
-    """``<workspace_root>/profile-traces/`` — multi-node torch profile shared root (``<rayjob_id>/torch_trace/`` per provision)."""
+    """``<workspace_root>/profile-traces/`` — multi-node torch profile shared root.
+
+    A profile run without ``$HYPERLOOM_MN_PROFILE_TRACE_DIR`` writes its traces to ``default-<pid>/torch_trace/`` below it.
+    """
     return workspace_root() / "profile-traces"
 
 
@@ -297,6 +309,7 @@ __all__ = [
     "asset_system_prompts_dir",
     "db_path_for",
     "ensure_archive_root",
+    "ensure_session_skeleton",
     "hosted_session_dir",
     "is_path_within",
     "magpie_dir",

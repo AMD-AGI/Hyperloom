@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Profile-trace analysis: TraceLens and bypass routes, roofline, and trace self-certification."""
+"""Profile-trace analysis: the agent and non-llm TraceLens routes, roofline, and trace self-certification."""
 
 from __future__ import annotations

@@ -15,10 +15,12 @@ import shutil
 import subprocess
 import sys
 from contextlib import suppress
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL
+from hyperloom_common.llm.llm_config import DEFAULT_CLAUDE_MODEL
+from hyperloom_common.llm.llm_stability_env import apply_llm_stability_env
 from kernelforge.agent_backends.base import (
     AgentCapabilities,
     AgentHook,
@@ -29,13 +31,13 @@ from kernelforge.agent_backends.base import (
     AgentRunSpec,
     AgentRuntimeConfig,
 )
-from kernelforge.agent_backends.workspace_guard import WorkspaceGuard
-from hyperloom.common.llm_headers import format_custom_headers
+from kernelforge.agent_backends.workspace_guard import WorkspaceGuard, WorkspaceSafetyError
+from hyperloom_common.llm.llm_headers import format_custom_headers
 from kernelforge.agent_backends.gateway import (
     normalize_anthropic_base_url,
     resolve_anthropic_gateway,
 )
-from kernelforge.tools.process_reaping import (
+from kernelforge.utils.process_reaping import (
     ReapReport,
     install_child_subreaper,
     reap_processes_under,
@@ -251,23 +253,20 @@ def _record_progress(sink: list[str] | None, message: Any) -> None:
     """Append what this streamed message shows the agent doing."""
     if sink is None:
         return
-    try:
-        for block in getattr(message, "content", None) or ():
-            if hasattr(block, "text"):
-                text = " ".join(str(block.text).split())
-                if text:
-                    sink.append(f"say: {text[:_PROGRESS_TEXT_CHARS]}")
-            elif block.__class__.__name__ == "ToolUseBlock":
-                name = getattr(block, "name", "?")
-                detail = _tool_argument_digest(getattr(block, "input", {}))
-                sink.append(f"tool: {name}{f' {detail}' if detail else ''}")
-        if hasattr(message, "total_cost_usd"):
-            sink.append(f"end: subtype={getattr(message, 'subtype', '') or '?'}")
-        overflow = len(sink) - _PROGRESS_MAX_ENTRIES
-        if overflow > 0:
-            del sink[:overflow]
-    except Exception:  # never let telemetry break the session
-        log.debug("agent progress recording failed", exc_info=True)
+    for block in getattr(message, "content", None) or ():
+        if hasattr(block, _TEXT):
+            text = " ".join(str(block.text).split())
+            if text:
+                sink.append(f"say: {text[:_PROGRESS_TEXT_CHARS]}")
+        elif block.__class__.__name__ == "ToolUseBlock":
+            name = getattr(block, "name", "?")
+            detail = _tool_argument_digest(getattr(block, "input", {}))
+            sink.append(f"tool: {name}{f' {detail}' if detail else ''}")
+    if hasattr(message, "total_cost_usd"):
+        sink.append(f"end: subtype={getattr(message, 'subtype', '') or '?'}")
+    overflow = len(sink) - _PROGRESS_MAX_ENTRIES
+    if overflow > 0:
+        del sink[:overflow]
 
 
 def _prepare_claude_environment() -> None:
@@ -291,6 +290,32 @@ def _prepare_claude_environment() -> None:
         os.environ["ANTHROPIC_CUSTOM_HEADERS"] = format_custom_headers(gateway.headers)
 
 
+def _session_env_defaults() -> dict[str, str]:
+    """The shared LLM-transport stability env, less every variable the operator's environment already sets.
+
+    It turns off Claude Code's non-essential traffic, which includes a session-title request that resends the first
+    prompt, uncached, at the session model's price; no Forge session reads that title.
+    """
+    defaults: dict[str, str] = {}
+    apply_llm_stability_env(defaults)
+    return {key: value for key, value in defaults.items() if key not in os.environ}
+
+
+async def _refuse_described_only_tool(input_data: dict, tool_use_id: str | None, context: Any) -> dict:
+    """Deny a tool the session describes only because the conversation it continues used it."""
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": "This turn may only read; the tool is listed for the conversation it continues.",
+        }
+    }
+
+
+# The content-block type of plain text, and the attribute an SDK text block carries it in.
+_TEXT = "text"
+
+
 def _builtin_tools(names: list[str]) -> list[str]:
     """Narrow a permission list to the built-in tools it names.
 
@@ -299,6 +324,57 @@ def _builtin_tools(names: list[str]) -> list[str]:
     server declaration -- must not be forwarded here.
     """
     return [name for name in dict.fromkeys(names) if not name.startswith("mcp__")]
+
+
+def _shared_prefix_prompt(spec: AgentRunSpec):
+    """The first user message as two text blocks, the shared prefix closed by a cache breakpoint of its own.
+
+    The CLI caches a prompt at the end of the system prompt and of the last message only, so a prefix several
+    sessions share inside one text block is written again by every one of them.
+    """
+    prefix = spec.shared_prompt_prefix
+    if not spec.user_prompt.startswith(prefix):
+        raise ClaudeBackendError("shared_prompt_prefix must be a leading part of user_prompt")
+    parts = [prefix, spec.user_prompt[len(prefix) :]]
+    blocks: list[dict[str, Any]] = [{"type": _TEXT, _TEXT: part} for part in parts if part]
+    blocks[0]["cache_control"] = {"type": "ephemeral"}
+    message = {
+        "type": "user",
+        "message": {"role": "user", "content": blocks},
+        "parent_tool_use_id": None,
+        "session_id": "default",
+    }
+
+    async def single_message():
+        yield message
+
+    return single_message()
+
+
+def _first_prompt(spec: AgentRunSpec):
+    """What a fresh session sends first: the user prompt, split around its shared prefix when it has one."""
+    return _shared_prefix_prompt(spec) if spec.shared_prompt_prefix else spec.user_prompt
+
+
+def _with_response_start(stream, callback):
+    """``stream``, calling ``callback`` once at the first sign the model is answering: a partial event, or failing
+    that a whole message."""
+    if callback is None:
+        return stream
+
+    async def reporting():
+        pending = callback
+        try:
+            async for message in stream:
+                if pending is not None and message.__class__.__name__ in ("StreamEvent", "AssistantMessage"):
+                    pending, notify = None, pending
+                    notify()
+                yield message
+        finally:
+            # Closing this wrapper must still tear down the CLI behind the SDK stream.
+            await stream.aclose()
+
+    return reporting()
 
 
 class _StreamTranscript:
@@ -326,7 +402,7 @@ class _StreamTranscript:
         if not hasattr(message, "content"):
             return
         for block in message.content:
-            if hasattr(block, "text"):
+            if hasattr(block, _TEXT):
                 self.text_parts.append(block.text)
             elif block.__class__.__name__ == "ToolUseBlock":
                 self.tool_calls.append((getattr(block, "name", "?"), getattr(block, "input", {}) or {}))
@@ -362,9 +438,76 @@ def _verified_file_changes(guard: WorkspaceGuard):
     try:
         return guard.verify()
     except Exception:
-        with suppress(Exception):  # broad-suppress: rollback must not shadow the verify error
+        try:
             guard.rollback()
+        except (WorkspaceSafetyError, OSError, subprocess.SubprocessError):
+            log.warning("workspace rollback after a failed verify also failed", exc_info=True)
         raise
+
+
+def _note_session_timeout(spec: AgentRunSpec, session_id: str) -> None:
+    """Log and record a session that hit its deadline after it established ``session_id``."""
+    log.warning(
+        "Claude session %s timed out after %ss; preserving the resume handle and reaping its leftovers",
+        session_id,
+        spec.timeout_sec,
+    )
+    if spec.progress_log is not None:
+        spec.progress_log.append(f"end: timeout {spec.timeout_sec}s")
+
+
+def _note_stream_failure(spec: AgentRunSpec, session_id: str, exc: Exception) -> None:
+    """Log and record an SDK stream failure after the session established ``session_id``."""
+    if not _is_turn_cap_error(exc):
+        log.warning(
+            "Claude SDK stream failed after session %s; preserving the resume handle",
+            session_id,
+            exc_info=exc,
+        )
+    if spec.progress_log is not None:
+        spec.progress_log.append(f"end: sdk-error {str(exc)[:_PROGRESS_TEXT_CHARS]}")
+
+
+async def _consume_stream(agen: Any, spec: AgentRunSpec, usage: Any, transcript: _StreamTranscript) -> None:
+    """Feed every SDK message to the usage tracker, the progress log and the transcript."""
+    async for message in agen:
+        if usage is not None:
+            usage.add_from_message(message, role=spec.role)
+        _record_progress(spec.progress_log, message)
+        transcript.absorb(message)
+
+
+def _session_result(
+    transcript: _StreamTranscript,
+    guard: WorkspaceGuard,
+    *,
+    timed_out: bool,
+    stream_error: Exception | None,
+    contention: str,
+) -> AgentRunResult:
+    """The run result of a session that has stopped, with the workspace changes the guard verified."""
+    subtype, end_reason, closing_note = _session_end_reason(
+        timed_out=timed_out,
+        stream_error=stream_error,
+        subtype=transcript.subtype,
+    )
+    if closing_note:
+        transcript.text_parts.append(closing_note)
+
+    result = AgentRunResult(
+        text="\n".join(transcript.text_parts).strip(),
+        subtype=subtype,
+        num_turns=transcript.num_turns,
+        end_reason=end_reason,
+        session_id=transcript.session_id,
+        tool_calls=transcript.tool_calls,
+        stderr_tail=(str(stream_error)[:2000] if stream_error else ""),
+        workspace_contention=contention,
+    )
+    result.file_changes = _verified_file_changes(guard)
+    result.target_edit_count = guard.count_target_edits()
+    result.edit_count = result.target_edit_count
+    return result
 
 
 class ClaudeBackend:
@@ -380,6 +523,7 @@ class ClaudeBackend:
         probe=True,
         session_env=True,
         workspace_guard=True,
+        shared_prompt_cache=True,
     )
 
     def __init__(
@@ -472,7 +616,7 @@ class ClaudeBackend:
                 check=False,
                 env={**os.environ, **runtime_env} if runtime_env else None,
             )
-        except Exception as error:
+        except (OSError, subprocess.TimeoutExpired, ValueError) as error:
             raise ClaudeUnavailableError(f"Claude model probe failed for {selected_model!r}: {error}") from error
         if completed.returncode != 0:
             detail = (completed.stderr or completed.stdout).strip()[-1200:]
@@ -490,18 +634,10 @@ class ClaudeBackend:
 
     def _tool_policy_options(self, policy, spec: AgentRunSpec) -> dict[str, Any]:
         """The SDK options one generic tool policy asks for."""
-        allowed_tools: list[str] = []
-        if policy.read:
-            allowed_tools.append("Read")
-        if policy.search:
-            allowed_tools.extend(["Grep", "Glob"])
-        if policy.write:
-            allowed_tools.extend(["Edit", "Write"])
-        if policy.shell:
-            allowed_tools.append("Bash")
-        allowed_tools.extend(policy.extra_tools)
+        allowed_tools = self._role_tools(policy)
+        declared_tools = self._role_tools(spec.declared_tool_policy) if spec.declared_tool_policy else allowed_tools
         options: dict[str, Any] = {
-            "allowed_tools": list(dict.fromkeys(allowed_tools)),
+            "allowed_tools": allowed_tools,
             # ``allowed_tools`` is only a permission list: the CLI still loads
             # and describes every built-in tool, and those schemas sit in the
             # cached prefix that is re-read on every turn of the session, so
@@ -517,14 +653,16 @@ class ClaudeBackend:
             # they dominate the prefix and this line saves only 5,317 tokens.
             # MCP tools are not part of the built-in set and are carried by
             # ``allowed_tools`` alone.
-            "tools": _builtin_tools(allowed_tools),
+            "tools": _builtin_tools(declared_tools),
             "permission_mode": (policy.permission_mode or os.environ.get("FORGE_PERMISSION_MODE", "acceptEdits")),
         }
         if policy.max_turns is not None:
             options["max_turns"] = policy.max_turns
         if _supports_adaptive_thinking(spec.model):
-            # Claude 4.6+ uses adaptive thinking.
-            options["thinking"] = {"type": "adaptive"}
+            # Claude 4.6+ uses adaptive thinking. Without a summarized display the stream carries no bytes until the
+            # thinking ends, and a gateway that drops a silent stream cuts a long planning turn before its first token;
+            # every retry then thinks from the start. Billing counts the full thinking either way.
+            options["thinking"] = {"type": "adaptive", "display": "summarized"}
         elif policy.thinking_budget_tokens > 0:
             options["thinking"] = {"type": "enabled", "budget_tokens": policy.thinking_budget_tokens}
         if policy.bare and spec.hooks is None:
@@ -574,6 +712,7 @@ class ClaudeBackend:
 
     def _provider_options(self, spec: AgentRunSpec) -> dict[str, Any]:
         """Adapt a generic run specification into Claude SDK options."""
+        spec = self._with_described_only_tools_denied(spec)
         options: dict[str, Any] = {
             "model": spec.model,
             "cwd": spec.cwd,
@@ -595,12 +734,38 @@ class ClaudeBackend:
             self._apply_subagents(options, spec.subagents)
         if spec.mcp_servers:
             self._apply_mcp_servers(options, spec.mcp_servers)
+        if spec.on_response_started is not None:
+            # Partial events report the response starting; whole messages only arrive as each block completes.
+            options["include_partial_messages"] = True
         options.update(self.runtime.options)
         options.update(spec.provider_options)
         if spec.env:
             # The SDK spawns the CLI with the inherited process environment and applies this over it.
             options["env"] = {**options.get("env", {}), **spec.env}
+        if defaults := _session_env_defaults():
+            options["env"] = {**defaults, **options.get("env", {})}
         return options
+
+    def _with_described_only_tools_denied(self, spec: AgentRunSpec) -> AgentRunSpec:
+        """``spec`` with a PreToolUse hook denying every built-in tool it describes but its tool policy does not allow.
+
+        A deny hook runs before any permission mode or settings allow rule can approve the tool, and unlike
+        ``disallowed_tools`` it leaves the tool definitions, which open the cached prefix, as they are. A bare session
+        runs no hooks and has a prefix of its own, so one describes only the tools it may use.
+        """
+        if spec.declared_tool_policy is None or spec.tool_policy is None:
+            return spec
+        allowed = set(self._role_tools(spec.tool_policy))
+        described_only = [
+            name for name in _builtin_tools(self._role_tools(spec.declared_tool_policy)) if name not in allowed
+        ]
+        if not described_only:
+            return spec
+        if spec.hooks is None and spec.tool_policy.bare:
+            return replace(spec, declared_tool_policy=None)
+        denial = AgentHook(matcher="|".join(described_only), callback=_refuse_described_only_tool)
+        hooks = spec.hooks or AgentHooks()
+        return replace(spec, hooks=replace(hooks, pre_tool_use=[denial, *hooks.pre_tool_use]))
 
     @staticmethod
     def _role_tools(policy) -> list[str]:
@@ -620,7 +785,7 @@ class ClaudeBackend:
     async def run(self, spec: AgentRunSpec, usage: Any = None) -> AgentRunResult:
         """Run one Claude SDK query and normalize its streamed messages."""
         spec = spec.resolved(self.runtime)
-        return await self._query_once(spec, spec.user_prompt, usage=usage)
+        return await self._query_once(spec, _first_prompt(spec), usage=usage)
 
     async def resume(
         self,
@@ -679,18 +844,14 @@ class ClaudeBackend:
         rollback_on_exit = False
         # What the reap could not clear out of the workspace.
         contention = ""
-        agen = self._query(prompt=prompt, options=options)
+        agen = _with_response_start(self._query(prompt=prompt, options=options), spec.on_response_started)
         # ``asyncio.timeout(None)`` applies no bound, so a spec without a budget keeps the previous unbounded
         # behaviour; ``expired()`` tells our own deadline apart from a bare TimeoutError surfacing from the transport.
         deadline = _session_deadline(spec.timeout_sec)
         try:
             try:
                 async with deadline:
-                    async for message in agen:
-                        if usage is not None:
-                            usage.add_from_message(message, role=spec.role)
-                        _record_progress(spec.progress_log, message)
-                        transcript.absorb(message)
+                    await _consume_stream(agen, spec, usage, transcript)
             except Exception as exc:
                 if deadline.expired():
                     reap_on_exit = True
@@ -701,27 +862,13 @@ class ClaudeBackend:
                         ) from exc
                     timed_out = True
                     stream_error = TimeoutError(f"Claude session timed out after {spec.timeout_sec}s")
-                    log.warning(
-                        "Claude session %s timed out after %ss; preserving the resume handle and reaping its leftovers",
-                        transcript.session_id,
-                        spec.timeout_sec,
-                    )
-                    if spec.progress_log is not None:
-                        spec.progress_log.append(f"end: timeout {spec.timeout_sec}s")
+                    _note_session_timeout(spec, transcript.session_id)
                 else:
                     if not transcript.session_id:
                         rollback_on_exit = True
                         raise
                     stream_error = exc
-                    if not _is_turn_cap_error(exc):
-                        log.warning(
-                            "Claude SDK stream failed after session %s; preserving the resume handle (%s: %s)",
-                            transcript.session_id,
-                            type(exc).__name__,
-                            exc,
-                        )
-                    if spec.progress_log is not None:
-                        spec.progress_log.append(f"end: sdk-error {str(exc)[:_PROGRESS_TEXT_CHARS]}")
+                    _note_stream_failure(spec, transcript.session_id, exc)
         except asyncio.CancelledError:
             # The subprocess and any detached benchmark children are running regardless of whether a session id was
             # established; reap them so they do not hold the GPU past this point.
@@ -734,7 +881,7 @@ class ClaudeBackend:
                 # ``async for`` does not close its iterator on exit (PEP 533 was deferred), so close it to tear the
                 # CLI down, then reap any detached benchmark child that outlived it -- an orphan holding the GPU
                 # corrupts the canonical measurement that follows.
-                with suppress(Exception):  # broad-suppress: SDK generator close; the reap below is what matters
+                with suppress(RuntimeError, OSError):  # SDK generator close; the reap below is what matters
                     await agen.aclose()
                 report = await _reap_workspace_processes(spec.cwd)
                 if report.contended:
@@ -742,28 +889,7 @@ class ClaudeBackend:
             if rollback_on_exit:
                 guard.rollback()
 
-        subtype, end_reason, closing_note = _session_end_reason(
-            timed_out=timed_out,
-            stream_error=stream_error,
-            subtype=transcript.subtype,
-        )
-        if closing_note:
-            transcript.text_parts.append(closing_note)
-
-        result = AgentRunResult(
-            text="\n".join(transcript.text_parts).strip(),
-            subtype=subtype,
-            num_turns=transcript.num_turns,
-            end_reason=end_reason,
-            session_id=transcript.session_id,
-            tool_calls=transcript.tool_calls,
-            stderr_tail=(str(stream_error)[:2000] if stream_error else ""),
-            workspace_contention=contention,
-        )
-        result.file_changes = _verified_file_changes(guard)
-        result.target_edit_count = guard.count_target_edits()
-        result.edit_count = result.target_edit_count
-        return result
+        return _session_result(transcript, guard, timed_out=timed_out, stream_error=stream_error, contention=contention)
 
 
 __all__ = [
