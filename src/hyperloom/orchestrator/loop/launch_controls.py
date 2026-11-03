@@ -20,21 +20,28 @@ def kept_launch_controls(
     *,
     extra_server_args: str | None,
     extra_envs: Mapping[str, Any],
+    agentx_backend: str,
 ) -> dict[str, Any]:
     """The launch controls the new ``current_best`` takes: the winner's when it declares any, else the previous best's.
 
     A winner that declares none (an append-mode source patch on top of a replace-mode config) leaves the launch
     config as it was, so the flags the stack already removed stay removed.
 
-    ``extra_server_args`` and ``extra_envs`` are the composed launch state the same ``current_best`` stores, and the
-    two deltas are pruned against it: a consumer lays that state down and applies the deltas after it, so a removal
-    or an unset that still names something the snapshot asserts would delete what the winner was measured with. What
-    is left names nothing here, so it keeps suppressing -- in whatever recipe or environment a consumer applies it to
-    -- only what that base carries.
+    ``extra_server_args`` and ``extra_envs`` are the composed launch state the same ``current_best`` stores, and a
+    delta is pruned against it where the consumer applies that delta to the snapshot's own state: it lays the state
+    down and removes afterwards, so a removal or an unset that still names something the snapshot asserts would
+    delete what the winner was measured with. What is left names nothing here, so it keeps suppressing -- in
+    whatever recipe or environment a consumer applies it to -- only what that base carries.
+
+    ``agentx_backend`` says which consumer the session has. Magpie is the one that never applies the args removal to
+    the snapshot's own args: ``magpie_agentx.apply_launch_changes`` scopes ``remove_args`` to the recipe argv it
+    appends the snapshot's args to, so a removal naming the snapshot is exactly what strips the recipe's copy of an
+    option the winner re-tunes, and pruning it would launch the recipe's value beside the winner's. The env axis is
+    pruned for every backend; Magpie already subtracts the names its own ``env`` sets, so there it changes nothing.
     """
     source = winner if any(winner.get(key) for key in LAUNCH_CONTROL_KEYS) else previous
     controls = {key: source[key] for key in LAUNCH_CONTROL_KEYS if source.get(key)}
-    if "remove_args" in controls:
+    if "remove_args" in controls and agentx_backend != "magpie":
         controls["remove_args"] = removals_absent_from_args(extra_server_args, controls["remove_args"])
     if "unset_envs" in controls:
         controls["unset_envs"] = [name for name in to_str_list(controls["unset_envs"]) if name not in extra_envs]

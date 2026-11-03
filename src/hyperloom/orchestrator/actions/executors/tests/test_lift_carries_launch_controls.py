@@ -9,6 +9,7 @@ from pathlib import Path
 
 from hyperloom.inference_optimizer.grid_server_args import compose_server_args
 from hyperloom.orchestrator.actions.executors._workload_envs import _apply_caller_removals
+from hyperloom.orchestrator.actions.executors.magpie_agentx import LaunchChanges, apply_launch_changes
 from hyperloom.orchestrator.actions.executors.profile import _merge_profile_params
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.state.shared_state import SharedState, inject_stack_base_params
@@ -140,6 +141,35 @@ def test_a_task_seeded_from_current_best_launches_the_speculative_flags_it_measu
     # SGLang's EAGLE path asserts both are set; composing them away leaves the server unlaunchable.
     assert "--speculative-num-steps 3" in composed
     assert "--speculative-num-draft-tokens 4" in composed
+
+
+def test_a_magpie_task_seeded_from_current_best_removes_the_recipes_copy(tmp_path):
+    """Magpie scopes the carried removals to its recipe argv, so one naming the snapshot is what disarms the recipe."""
+    coord = _coord(tmp_path, {"workload_identity": "agentx:workload"}, agentx_backend="magpie")
+    winner = {**_eagle_retune_winner(), **AGENTX_MEASUREMENT}
+    assert coord.writeback.lift_to_current_best("explore", 1200.0, winner) is True
+
+    launch = coord.writeback.current_best_launch_config()
+    benchmark: dict = {"agentx": {"enabled": True}}
+    apply_launch_changes(
+        benchmark,
+        LaunchChanges(
+            launch["extra_server_args"],
+            launch["extra_envs"],
+            launch["remove_args"],
+            launch["unset_envs"],
+            launch["args_mode"] == "replace",
+        ),
+        recipe_options=frozenset({*HICACHE_FLAGS, "--speculative-num-steps", "--speculative-num-draft-tokens"}),
+    )
+
+    overrides = benchmark["agentx"]["launch_overrides"]
+    # Without the recipe-side removal Magpie launches its own speculative values beside the winner's.
+    assert "--speculative-num-steps" in overrides["remove_args"]
+    assert "--speculative-num-draft-tokens" in overrides["remove_args"]
+    appended = overrides["append_args"]
+    assert appended[appended.index("--speculative-num-steps") + 1] == "3"
+    assert appended[appended.index("--speculative-num-draft-tokens") + 1] == "4"
 
 
 def _hicache_retune_winner() -> dict:
