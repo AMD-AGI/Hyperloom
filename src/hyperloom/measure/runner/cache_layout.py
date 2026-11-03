@@ -435,12 +435,12 @@ def check_cache(root: Path, sha: str, manifest_pin: str = "") -> list[str]:
 
 
 def _unpack(archive: io.BytesIO, destination: Path) -> None:
-    """Unpack the archive's bytes into the new directory ``destination``. Where this Python has the ``data`` filter (3.12,
-    and the security releases of 3.10 and 3.11), a member that would land outside ``destination`` is refused."""
+    """Unpack the archive's bytes into the new directory ``destination`` with tarfile's ``data`` filter, which refuses a
+    member or a link that would land outside it (the filter is in Python 3.10.12, 3.11.4, 3.12 and newer)."""
     destination.mkdir(parents=True)
     archive.seek(0)
     with tarfile.open(fileobj=archive, mode="r:") as tar:
-        tar.extractall(destination, **({"filter": "data"} if hasattr(tarfile, "data_filter") else {}))
+        tar.extractall(destination, filter="data")
 
 
 def _staged_source(entry: Path, manifest: Manifest, destination: Path) -> list[str]:
