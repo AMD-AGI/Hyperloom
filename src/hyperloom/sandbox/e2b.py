@@ -5,7 +5,8 @@
 
 It talks to any E2B-compatible service (the Claw sandbox service, or the stand-in the contract tests start) through
 ``E2B_API_URL`` and ``E2B_SANDBOX_URL``. Each role has its own API key; a key is read once into the provider, is passed
-to the SDK per call and never appears in a log line, an error message or ``repr``.
+to the SDK per call and never appears in a log line, an error message or ``repr``. The stand-in and the contract
+tests arrive in a later PR.
 
 Control-plane calls (everything except commands and files) are retried with exponential backoff while the failure is
 transient: a network error, a 5xx, a rate limit or a request timeout. A create is retried only when it carries an

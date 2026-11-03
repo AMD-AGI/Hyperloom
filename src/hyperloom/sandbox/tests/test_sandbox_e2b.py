@@ -5,7 +5,7 @@
 
 The sandbox contract suite covers the provider's normal behaviour against a stand-in service; this file covers what a
 stand-in cannot honestly produce: a particular status code, a server error that clears on the third try, a data plane
-that refuses with 403 or cannot be reached.
+that refuses with 403 or cannot be reached. The contract suite and the stand-in arrive in a later PR.
 """
 
 from __future__ import annotations

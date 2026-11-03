@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""``hyperloom.sandbox`` -- the sandbox socket and its local implementation."""
+"""``hyperloom.sandbox`` -- the sandbox socket and its local implementation (which arrives in a later PR)."""
 
 from __future__ import annotations
 
