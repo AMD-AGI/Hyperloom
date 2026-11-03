@@ -95,7 +95,7 @@ agent only (not the server or bench agent); a skill named in a pack must exist.
 | `profiler` | profile with TraceLens (the host's profile first), rocprofv3 | serving, balanced, model-m-2, -2-mi355x, -c8, -c8-tp4, parallel-dossier |
 | `hardware` | MI350X, MI355X and MI300X facts and achieved limits | balanced |
 | `kernels` | whether to write a kernel, in which language, how to prove it (AITER first) | balanced |
-| `serving-playbook` | what 1,258 InferenceX changes teach | balanced |
+| `serving-playbook` | the rules for serving changes, and the knob catalog the harness reads | balanced |
 | `plan` | write a round plan | model-m-plan |
 | `knowledge-collector` | share and read campaign learnings | parallel-dossier |
 | `campaign-archive`, `dashboard`, `realtime-collector`, `merge-optimization-trees`, `geko-hipblaslt-tuning` | operator tools | none |

@@ -192,16 +192,9 @@
     {"name": "TRITON_HIP_PRESHUFFLE_SCALES", "kind": "env", "numerics": false, "op_dependent": false, "frameworks": ["vllm"], "source": "amd-knobs.md §9; #79, #94"},
     {"name": "ROCM_TRITON_MOE_PRESHUFFLE_SCALES", "kind": "env", "numerics": false, "op_dependent": false, "frameworks": ["vllm"], "source": "amd-knobs.md §9; #79, #94"},
     {"name": "TRITON_CACHE_DIR", "kind": "env", "numerics": false, "op_dependent": false, "frameworks": ["vllm"], "source": "amd-knobs.md §9 (plumbing); #854"},
-    {"name": "VLLM_DSV4_MEGA_FP8_COMBINE", "kind": "env", "numerics": true, "op_dependent": false, "frameworks": ["vllm"], "source": "numerics-knobs.md §2 (NVIDIA)"},
-    {"name": "SGLANG_MOE_NVFP4_DISPATCH", "kind": "env", "numerics": true, "op_dependent": false, "frameworks": ["sglang"], "source": "numerics-knobs.md §2 (NVIDIA)"},
-    {"name": "SGLANG_OPT_DEEPGEMM_MEGA_MOE_USE_FP4_ACTS", "kind": "env", "numerics": true, "op_dependent": false, "frameworks": ["sglang"], "source": "numerics-knobs.md §3 (NVIDIA); #752, #802, #938"},
     {"name": "--quantization", "kind": "flag", "numerics": true, "op_dependent": false, "frameworks": ["vllm"], "source": "numerics-knobs.md §3 (pack: fixed); #1011, #1020, #501"},
-    {"name": "--enable-deepseek-v4-fp4-indexer", "kind": "flag", "numerics": true, "op_dependent": false, "frameworks": ["sglang"], "source": "numerics-knobs.md §3 (NVIDIA); #1200"},
     {"name": "--kv-cache-dtype", "kind": "flag", "numerics": true, "op_dependent": false, "frameworks": ["vllm", "sglang"], "source": "numerics-knobs.md §4 (pack: fixed); #846, #886, #874"},
     {"name": "--dtype", "kind": "flag", "numerics": true, "op_dependent": false, "frameworks": ["vllm"], "source": "numerics-knobs.md §5 (pack: fixed); #194, #199"},
-    {"name": "VLLM_FLOAT32_MATMUL_PRECISION", "kind": "env", "numerics": true, "op_dependent": false, "frameworks": ["vllm"], "source": "numerics-knobs.md §5 (NVIDIA); #513, #860"},
-    {"name": "TRTLLM_MHC_ENABLE_FUSED_HC", "kind": "env", "numerics": true, "op_dependent": false, "frameworks": ["trtllm"], "source": "numerics-knobs.md §7 (NVIDIA); #592, #607"},
-    {"name": "TLLM_SPEC_DECODE_FORCE_NUM_ACCEPTED_TOKENS", "kind": "env", "numerics": true, "op_dependent": false, "frameworks": ["trtllm"], "source": "numerics-knobs.md §8 (NVIDIA, throughput only)"},
     {"name": "--speculative-config", "kind": "flag", "numerics": true, "op_dependent": false, "frameworks": ["vllm"], "source": "numerics-knobs.md §8 (draft depth, drafter, synthetic acceptance); #1059, #977, #1082"}
   ],
   "bundles": [
@@ -215,6 +208,6 @@
     {"id": "sglang-aiter-unified-attention", "frameworks": ["sglang"], "members": [{"name": "SGLANG_USE_AITER_UNIFIED_ATTN", "value": "1"}, {"name": "--attention-backend", "value": "aiter"}, {"name": "--page-size", "value": "16"}], "when": "SGLang v0.5.12.post1+ (#819).", "source": "amd-knobs.md §0 rule 6, §2; #819, #827"},
     {"id": "sglang-aiter-persistent-mla", "frameworks": ["sglang"], "members": [{"name": "SGLANG_AITER_MLA_PERSIST", "value": "1"}, {"name": "--attention-backend", "value": "aiter"}, {"name": "--kv-cache-dtype", "value": "fp8_e4m3"}], "when": "MLA decode with an FP8 KV cache; v0.5.7+ (#279). The FP8 KV is NUMERICS.", "source": "amd-knobs.md §0 rule 6, §2; #279"},
     {"id": "vllm-aiter-moe", "frameworks": ["vllm"], "members": [{"name": "VLLM_ROCM_USE_AITER", "value": "1"}, {"name": "VLLM_ROCM_USE_AITER_MOE", "value": "1"}, {"name": "--moe-backend", "value": "aiter"}], "when": "Newer vLLM nightlies, where AITER MoE needs the backend forced (#934, #955). On gfx942 MXFP4 leave the backend on auto (#1011).", "source": "amd-knobs.md §0 rule 6, §1.1; #934, #955"},
-    {"id": "sglang-glm52-fusions", "frameworks": ["sglang"], "members": [{"name": "--enable-aiter-allreduce-fusion"}, {"name": "--enable-fused-qk-norm-rope"}, {"name": "AITER_USE_FLYDSL_MOE_SORTING", "value": "1"}], "when": "GLM-5.2 FP4 MI355X TP4/EP4: +23.6% P90 interactivity at c8 (#0, #1255).", "source": "amd-knobs.md §0 rule 6, §2, §4; big-directions.md D3; #0, #1255"}
+    {"id": "sglang-glm52-fusions", "frameworks": ["sglang"], "members": [{"name": "--enable-aiter-allreduce-fusion"}, {"name": "--enable-fused-qk-norm-rope"}, {"name": "AITER_USE_FLYDSL_MOE_SORTING", "value": "1"}], "when": "GLM-5.2 FP4 MI355X TP4/EP4 (#0, #1255).", "source": "amd-knobs.md §0 rule 6, §2, §4; big-directions.md D3; #0, #1255"}
   ]
 }

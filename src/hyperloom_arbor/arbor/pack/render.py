@@ -37,11 +37,11 @@ _SKILL_RULES = {
         "reference pages hold the ISA, LDS and MFMA limits a kernel must respect."
     ),
     "serving-playbook": (
-        "what 1,258 InferenceX changes learned. Read big-directions.md before "
-        "ranking the dossier's directions, amd-knobs.md before a knob search, "
-        "numerics-knobs.md before a change that may alter outputs, and "
-        "image-manifest.md when a change shows no effect or a feature fails. "
-        "A gain it reports elsewhere is a lead, never this node's number."
+        "the rules for serving changes (prove each arm differed, never kill a "
+        "policy on one operating point, numerics changes need the accuracy "
+        "gate, bundles go in as one change) and knobs.json, the knob catalog "
+        "the harness reads. A gain reported elsewhere is a lead, never this "
+        "node's number."
     ),
     "kernels": (
         "before writing or porting a kernel: AITER's operators and tuned tables "

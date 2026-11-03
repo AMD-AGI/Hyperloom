@@ -9,7 +9,7 @@ multi-branch (MB) runs as a component when a session is given `--autonomous-agen
 | Source | `AMD-AGI/Arbor` (internal) |
 | Tag | `v0.9.1` |
 | Commit | `123cd15` |
-| Files | 308 |
+| Files | 303 |
 | Licence | Apache-2.0, [`LICENSE`](LICENSE) (`REUSE.toml` at the repository root says so per file) |
 
 ## What it holds
@@ -17,8 +17,8 @@ multi-branch (MB) runs as a component when a session is given `--autonomous-agen
 The engine and what its agents read:
 
 - `arbor/`, the harness: the loop, the gates, component mode, the dossier and stage machinery;
-- `.claude/skills/`, the skills its agents use (the dossier, the profiler, kernels, hardware, the serving playbook and
-  the rest). The profiler skill is this copy's own: it profiles with TraceLens (below);
+- `.claude/skills/`, the skills its agents use (the dossier, the profiler, kernels, hardware, the serving playbook's
+  rules and knob catalog, and the rest). The profiler skill is this copy's own: it profiles with TraceLens (below);
 - `packs/serving` (the template MB names by default), `packs/agentx`, `packs/_shared`, `packs/parallel-dossier` and
   the `evolve-asm` packs;
 - `docs/`, the operator and host documentation; `evals/`, the session tracer the skills' hooks call; `scripts/pack/`;
@@ -29,9 +29,19 @@ The engine and what its agents read:
 - **Left out:** Arbor's tests (they run upstream at the tag), its campaign results, its workload-specific packs,
   configs and dossiers, and its cluster launchers. Code or documents that name one of them keep the name; the file is
   not here.
-  - **The serving playbook's evidence corpus** is also left out: the InferenceX study's per-change records and its
-    report. The playbook's pages still cite a change by its study record id (`#655`), and say the records are not
-    carried in this copy.
+  - **The serving playbook keeps its rules and its knob catalog only.**
+    - **Left out:** the InferenceX study's evidence corpus, and the five reference pages generated from it (big
+      directions, regime tables, AMD knobs, numerics knobs, the image manifest). They carry other vendors' recipes
+      and figures, and quantified results.
+    - **Its `SKILL.md`** is this copy's own: the playbook's rules, and what the catalog holds.
+    - **`knobs.json`,** which the harness reads (`arbor/knobs.py`), stays, without its entries for another vendor's
+      GPUs. Its entries still cite a page section and a study record id (`#655`); neither is carried in this copy.
+- **No competitors' figures:** a figure that sets another vendor's GPU or library against a number is taken out:
+  - in the `evolve-asm` pack's MoE context;
+  - in the dossier skill;
+  - in a KernelForge page on HipKittens.
+
+  AMD's own figures stay. The vendoring tool refuses a copy that still has one.
 - **Replaced by placeholders:** the names of internal clusters, hosts, paths, accounts, people, personal GitHub
   accounts and repositories, and of workloads or chips that are not public.
   - **The placeholders:** `Cluster A`, `Cluster B`, `<node>`, `<login node>`, `<partition>`, `<account>`, `/data/...`,
@@ -52,7 +62,7 @@ The engine and what its agents read:
 - **KernelForge's examples are this repository's:** the four examples under `.claude/skills/kernels/reference/examples/`
   are taken from `src/kernelforge/examples`, which runs `kernelforge forge-loop --kernel-backend ...`. Arbor's own
   copies predate that rename. KernelForge's knowledge pages here use the same names.
-- **One permission:** the round-end A/B's output directory is created group-writable (`0o775`) instead of
+- **One permission:** the round-end A/B's output directory is created for the group only (`0o770`) instead of
   world-writable (`arbor/rounds.py`). The round-end A/B never runs under a host.
 
 ## What it carries from elsewhere

@@ -764,8 +764,7 @@ A first-person record of an 11.9 % speedup walk from the V3 baseline.
     `s_setprio` / `launch_bounds` no-op at occupancy=1.
 13. **End-state** —
     [:30-35](HipKittens/agent-mxfp8-gemm-optimization.md#L30-L35)
-    — 8192³ MXFP8 = 2991 TFLOPS (Hyperloom) vs 1512 hipBLASLt (197.8 %),
-    cuBLASLt B200 = 3105 TFLOPS (96.3 %).
+    — 8192³ MXFP8 = 2991 TFLOPS (Hyperloom) vs 1512 hipBLASLt (197.8 %).
 
 ### 4.5 Cross-cutting techniques (this slice)
 
@@ -1419,13 +1418,12 @@ FP8 MFMA, 32×32 MFMA shapes, warp-sync builtins, and 8-die XCD topology
    [agent-mxfp8-gemm-optimization.md:30-34](HipKittens/agent-mxfp8-gemm-optimization.md#L30-L34):
    - 4 K: **2531 TFLOPS** (100.2 % vs hipBLASLt FP8 tensorwise; 169.7 %
      vs hipBLASLt MXFP8).
-   - 8 K: **2991 TFLOPS** (93.6 % vs FP8; 197.8 % vs MXFP8); ~96.3 % of
-     cuBLASLt B200 MXFP8 = 3105 TFLOPS.
+   - 8 K: **2991 TFLOPS** (93.6 % vs FP8; 197.8 % vs MXFP8).
    - 16 K: **3029 TFLOPS** (92.9 % vs FP8; 246.1 % vs MXFP8).
 2. **Primus-Turbo end-to-end (quant + GEMM on MI355X)** —
    [agent-mxfp8-gemm-optimization.md:44-50](HipKittens/agent-mxfp8-gemm-optimization.md#L44-L50):
-   forward 1795 TFLOPS (59 % faster than hipBLASLt, ~90 % B200 TE);
-   backward 1977 TFLOPS (68 % faster, ~96 % B200 TE).
+   forward 1795 TFLOPS (59 % faster than hipBLASLt);
+   backward 1977 TFLOPS (68 % faster).
 3. **Attention forward / backward graphs** —
    [analysis/attn/fwd/README.md](HipKittens/analysis/attn/fwd/README.md),
    [analysis/attn/bkwd/README.md](HipKittens/analysis/attn/bkwd/README.md)

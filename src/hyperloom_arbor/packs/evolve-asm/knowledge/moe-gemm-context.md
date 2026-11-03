@@ -1,7 +1,6 @@
 # DSv4.1-Flash MoE GEMM Context
 
 ## Problem
-DeepSeek-V4.1-Flash on MI355X is 21% behind B200 at C32, 16% at C1.
 Root cause: no tuned FlyDSL tile config exists for these shapes in aiter.
 The fallback heuristic tiles are leaving significant performance on the table.
 

@@ -318,8 +318,7 @@ The procedure is [kernels.md](kernels.md).
   reads it there too) or an Nsight Systems trace; the client's
   metrics.
 - **Compare:** at matched operating points (rows per step, context, requests
-  in flight), because one concurrency puts a different load on each platform
-  (B200 at C8 kept 0.77 requests in flight); time per step by module; which
+  in flight), because one concurrency puts a different load on each platform; time per step by module; which
   kernel serves each op (into part 8); framework choices (graph mode, capture
   sizes, backends, where the KV cache and other tables live, warmup).
 - **Hardware gaps:** name the gap before porting an idea: native number
