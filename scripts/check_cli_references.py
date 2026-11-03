@@ -46,11 +46,17 @@ _EXTERNAL_MODULE_PREFIXES = ("atom.entrypoints.",)
 _LEGACY_MODULES = frozenset({"hyperloom.inference_optimizer.cli"})
 _RUNNABLE_TOP_LEVEL = frozenset({"hyperloom", "kernelforge", "hyperloom_kb"})
 _SKIPPED_TOP_DIRS = frozenset({".git", ".venv", "build", "node_modules"})
+# Vendored Arbor (src/hyperloom_arbor/VENDOR.md): its skills run Arbor's own modules from its root, checked upstream.
+_SKIPPED_TREES = ("src/hyperloom_arbor/",)
 
 
 def _doc_files(root: Path) -> list[Path]:
     found = {
-        p for pattern in _DOC_GLOBS for p in root.glob(pattern) if p.relative_to(root).parts[0] not in _SKIPPED_TOP_DIRS
+        p
+        for pattern in _DOC_GLOBS
+        for p in root.glob(pattern)
+        if p.relative_to(root).parts[0] not in _SKIPPED_TOP_DIRS
+        and not p.relative_to(root).as_posix().startswith(_SKIPPED_TREES)
     }
     return sorted(found)
 

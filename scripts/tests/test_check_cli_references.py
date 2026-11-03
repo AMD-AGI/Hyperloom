@@ -75,5 +75,12 @@ def test_unresolvable_references_are_reported(root: Path) -> None:
     assert main([str(root)]) == 1
 
 
+def test_vendored_arbor_skills_are_not_read(root: Path) -> None:
+    skill = root / "src" / "hyperloom_arbor" / ".claude" / "skills" / "dossier" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("python3 -m arbor.directions show --session s\n", encoding="utf-8")
+    assert check(root) == []
+
+
 def test_repository_references_resolve() -> None:
     assert check(REPO_ROOT) == []
