@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The runner's main flow: wait for the sheet, check it, rebuild the environment, run the test, sign the result (4.8.2)."""
+"""The runner's main flow: wait for the sheet, check it, rebuild the environment, run the test, sign the result."""
 
 from __future__ import annotations
 

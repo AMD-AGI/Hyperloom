@@ -36,7 +36,7 @@ from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, FakeRepo, req
 from hyperloom_multibranch.toolbox.tests.test_long_context import _Host
 from hyperloom_multibranch.toolbox.tests.test_short_prompts import _Planner
 
-#: The context limit of Qwen3-14B, the session model of the run whose 64 prompts were all ``not_run``.
+#: A model's context limit (a dense model's public config): the prompts a server limited to less were all ``not_run``.
 MODEL_LIMIT = 40960
 SERVED = 8192
 HEADROOM = 128

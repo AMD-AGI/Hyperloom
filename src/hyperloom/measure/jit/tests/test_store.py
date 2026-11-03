@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The shared compiled-code cache as a store: it only adds, and what it gives back has been proved byte for byte (4.21).
+"""The shared compiled-code cache as a store: it only adds, and what it gives back has been proved byte for byte.
 
 Every refusal is asserted by what it says, because a store that "fails somehow" is also the store that serves a tampered
 file: the tests below separate a hash that does not match, a name that is not the hash, a list kept under another key,

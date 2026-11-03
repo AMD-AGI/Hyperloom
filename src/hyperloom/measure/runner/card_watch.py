@@ -19,9 +19,9 @@ takes to go.
 What is done about it is the card guard's say. Enforcing, which is the default, the result is refused as
 ``foreign_process_on_card``: an infrastructure failure, whatever the test itself did, because a failure it showed may be the
 intruder's doing as much as a number may. The first look during the test that finds such a process ends the test then, as
-a boot limit does, rather than at its end: measured on a GPU pod, a test that ran beside a matrix multiply was slowed about
-13 times and ran 33 minutes before it could be refused. Observing, nothing is refused and the test runs to its end: the
-signed result says ``foreign`` with the process, the card and when, and the runner leaves a note.
+a boot limit does, rather than at its end: a test that runs beside another process's matrix multiply is slowed many times
+over, and would otherwise run its whole course before it could be refused. Observing, nothing is refused and the test runs
+to its end: the signed result says ``foreign`` with the process, the card and when, and the runner leaves a note.
 
 Where the probe cannot say who holds the cards (no driver list, ``/proc`` hiding other accounts' processes), the test goes
 on in both modes and the signed result says ``unknown`` and why; it is never written as clean. Where the runner's view of

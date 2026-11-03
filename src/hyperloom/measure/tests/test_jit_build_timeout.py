@@ -4,7 +4,7 @@
 """A server the scheduler watchdog ended while a rank was still in aiter's JIT build is ``jit_build_timeout``, an
 infrastructure failure, not an unclear one with no known signature.
 
-The log lines are those of the GLM-5.3 TP4 test whose tuned blockscale table made aiter rebuild its module at the first
+The log lines are those of a TP4 test whose tuned blockscale table made aiter rebuild its module at the first
 prefill: the watchdog's line on every rank, then the stacks py-spy dumped.
 """
 

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""What a server's log says aiter built: the hit counter and the compile time of a test (4.21)."""
+"""What a server's log says aiter built: the hit counter and the compile time of a test."""
 
 from __future__ import annotations
 

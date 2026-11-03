@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The signed result manifest (``MeasurementResult`` v1) a runner writes to ``/out/manifest.json`` (3.4).
+"""The signed result manifest (``MeasurementResult`` v1) a runner writes to ``/out/manifest.json``.
 
 The manifest is read only after its signature has been verified over the raw bytes (see
 :func:`hyperloom.measure.bundle.verify_bundle`); parsing here is strict all the same, because a manifest that is signed

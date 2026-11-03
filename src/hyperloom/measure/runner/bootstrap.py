@@ -126,8 +126,8 @@ _NAME = "hyperloom-runner-bootstrap"
 #: How long a runner a template step starts waits for its spec, unless the step's arguments say. The step returns before
 #: the sandbox is ready, and the application writes the spec only after the create, which a quota can hold for minutes,
 #: and the readiness wait; the runner's own default (600 s) is the wait of a sandbox whose spec is already on its way.
-#: Half an hour covers a create queued behind others (the joint runs used it, with no spec missed); a runner whose spec
-#: never comes ends the sandbox no later than that, and the application deletes a sandbox it gave up on anyway.
+#: Half an hour covers a create queued behind others; a runner whose spec never comes ends the sandbox no later than
+#: that, and the application deletes a sandbox it gave up on anyway.
 TEMPLATE_SPEC_WAIT_SEC = 1800
 _SPEC_WAIT_ARG = "--spec-wait-sec"
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")

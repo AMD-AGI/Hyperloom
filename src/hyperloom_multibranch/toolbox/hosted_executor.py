@@ -378,7 +378,7 @@ class HostedExecutor:
         return ""
 
     def _timed_out(self, request_id: str, started: float, expired: subprocess.TimeoutExpired) -> TestResult:
-        """A timeout is an unclear failure (4.5): the sandbox is read from the journal, the node is not known."""
+        """A timeout is an unclear failure: the sandbox is read from the journal, the node is not known."""
         record = self._backend.journal.latest(request_id)
         verdict = classify_test_failure(returncode=0, timed_out=True)
         sandbox = record.sandbox_id if record is not None and record.sandbox_id else f"hosted-{request_id}"

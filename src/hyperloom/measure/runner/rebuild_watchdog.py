@@ -47,7 +47,7 @@ from hyperloom.measure.socket import TestCall
 __all__ = ["MODULE_BUILD_SEC", "WATCHDOG_MARGIN_SEC", "raise_rebuild_watchdog", "rebuild_watchdog_sec"]
 
 #: The seconds one stale module other than a CK-tile one is given to build: over twice the longest aiter build measured
-#: before a server was ready (273 s, in 1711 boots), and a blockscale GEMM rebuild did not finish within sglang's 300 s.
+#: before a server was ready (273 s, over earlier tests' boots), and a blockscale GEMM rebuild did not finish within sglang's 300 s.
 #: A CK-tile module gets :data:`~hyperloom.measure.jit.modules.CKTILE_MODULE_BUILD_LIMIT_SEC`.
 MODULE_BUILD_SEC = MODULE_BUILD_LIMIT_SEC
 #: Added to the builds: sglang's own default watchdog, for the step the build interrupted.

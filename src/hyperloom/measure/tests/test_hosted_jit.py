@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 """The host's side of the shared compiled-code cache: what a signed result says its test compiled is published after the
-result is accepted, and only then (4.21).
+result is accepted, and only then.
 
 The runner is the fake runner, which stages a contribution below ``/out/jit-cache`` and signs it into its manifest; the host
 is the real hosted backend over the local sandbox provider.

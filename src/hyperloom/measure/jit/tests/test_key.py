@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""What the key of a compiled-code cache is made of: every input that decides what the compilers produce, and nothing else
-(4.21). The tests separate the two directions: a changed input must change the key (or a test would be given code built from
+"""What the key of a compiled-code cache is made of: every input that decides what the compilers produce, and nothing else.
+The tests separate the two directions: a changed input must change the key (or a test would be given code built from
 other inputs), and an input that cannot change the code must leave it alone (or the cache would never be shared)."""
 
 from __future__ import annotations
