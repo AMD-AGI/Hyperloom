@@ -350,14 +350,22 @@ def _archive_problems(entry: Path, manifest: Manifest, verify_hash: bool) -> lis
     return []
 
 
+def _entry_pins(source: Path) -> list[LockPin]:
+    """The pins of the entry's lock in the source tree ``source``.
+
+    Raises:
+        CacheError: When the tree has no lock, or it is not a lock.
+    """
+    if not (source / LOCK_FILE).is_file():
+        raise CacheError(f"the source in {source} has no {LOCK_FILE}")
+    return parse_lock((source / LOCK_FILE).read_text(encoding=_UTF8))
+
+
 def _entry_problems(entry: Path, manifest: Manifest, verify_hash: bool) -> list[str]:
     source, wheels = entry / SOURCE_DIR, entry / WHEELS_DIR
     if not source.is_dir() or not wheels.is_dir():
         return [f"the cache entry {entry} lacks its {SOURCE_DIR} or {WHEELS_DIR} directory"]
-    lock = source / LOCK_FILE
-    if not lock.is_file():
-        return [f"the source in {source} has no {LOCK_FILE}"]
-    pins = parse_lock(lock.read_text(encoding=_UTF8))
+    pins = _entry_pins(source)
     problems = _archive_problems(entry, manifest, verify_hash) + _source_problems(source, manifest)
     problems += _wheels_problems(wheels, manifest, pins, verify_hash)
     return problems + (_bootstrap_problems(entry, manifest) if verify_hash else [])
@@ -476,10 +484,7 @@ def _stage(entry: Path, manifest: Manifest, scratch: Path) -> list[str]:
     problems = _staged_source(entry, manifest, source)
     if problems:
         return problems
-    lock = source / LOCK_FILE
-    if not lock.is_file():
-        return [f"the source of {entry} has no {LOCK_FILE}"]
-    pins = parse_lock(lock.read_text(encoding=_UTF8))
+    pins = _entry_pins(source)
     problems = _wheels_problems(wheels, manifest, pins, verify_hash=False)
     problems = problems or _staged_wheels(wheels, manifest, scratch / LOCAL_WHEELS_DIR)
     if not problems:
