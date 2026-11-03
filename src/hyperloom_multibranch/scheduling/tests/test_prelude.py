@@ -57,6 +57,7 @@ from hyperloom_multibranch.scheduling import prelude as prelude_module
 from hyperloom_multibranch.scheduling.prelude import (
     BASELINE_ESTABLISHED,
     CHILD_CARDS_ENV,
+    CHILD_RAY_ENV,
     CHILD_FIRST,
     CHILD_TRACE_ANALYSIS_ROUTE,
     PREFLIGHT_OUT_OF_TIME,
@@ -826,6 +827,7 @@ async def test_a_child_whose_lease_would_leave_no_test_its_cards_runs_before_the
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv(TRACE_ANALYSIS_ROUTE_ENV, "report")
+    monkeypatch.setenv(CHILD_RAY_ENV, "1")
     layout = _layout(tmp_path)
     processes, peers = _registry(layout, child_with_patch(tmp_path), linger=SHORT_CHILD), _peers(layout)
     peers.toolbox.lease_refusal = RequestRejected("one test needs both cards", "lease_leaves_no_measurement")
@@ -836,6 +838,7 @@ async def test_a_child_whose_lease_would_leave_no_test_its_cards_runs_before_the
     assert exited == [True] * BASELINE_TESTS and peers.replays == [("inference:champion", True)]
     assert processes.env is not None and processes.env[TRACE_ANALYSIS_ROUTE_ENV] == CHILD_TRACE_ANALYSIS_ROUTE
     assert processes.env.get(CHILD_CARDS_ENV) == os.environ.get(CHILD_CARDS_ENV) and peers.toolbox.released == []
+    assert processes.env[CHILD_RAY_ENV] == "0"
     [first] = [entry for entry in _logged(layout) if entry["reason"] == CHILD_FIRST]
     assert first["detail"] == {"refusal": "one test needs both cards"}
 
