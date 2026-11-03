@@ -6,7 +6,7 @@
 Each finished test yields at most one lesson:
 
 * ``worked``: a committed or merged improvement. An AgentX session's says its outputs were not checked: that gate reads
-  speed and the request error rate, so a change to what the model says is kept all the same (#162).
+  speed and the request error rate, so a change to what the model says is kept all the same.
 * ``failed``: a regression or a flat result, which no one should repeat on the same state.
 * ``pitfall``: a candidate that failed to run, or ran faster but failed the accuracy check or was blocked.
 

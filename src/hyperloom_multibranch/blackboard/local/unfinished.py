@@ -19,8 +19,8 @@ holds a claim on it, so two later branches do not chase the same one: a replay c
 the lead's change, with its delta or, made with ``blackboard_replay``, with one made for its own head and an intent
 naming the lead. It drops out of the brief of a start commit too once a replay of it was claimed on that commit or one
 it builds on and released with no test (:func:`refused_replays`): the change could not be made for that head, the
-toolbox refusing it or the change no longer applying. In session 4aef3318 one lead was claimed and released that way
-23 times on 20 branches. A commit drops out once the integrator offers it again. The leads
+toolbox refusing it or the change no longer applying; otherwise one lead would be claimed and released that way again
+and again, on branch after branch. A commit drops out once the integrator offers it again. The leads
 come in that order, unstackable commits and near misses by gain, unfinished repairs and withdrawn explores newest
 first, one for each direction and each change, at most :data:`MAX_UNFINISHED` of them.
 """

@@ -113,7 +113,7 @@ def test_a_revision_of_a_lesson_no_longer_live_begins_a_lesson_of_its_own(
 ) -> None:
     pool = LessonPool(tmp_path)
     gone = pooled(pool, "gone", "fp8 kv cache always fails the accuracy gate on this model")
-    pool.retire(LessonRetirement(gone, human_author("siliang"), START, "true only before the scales fix"))
+    pool.retire(LessonRetirement(gone, human_author("curator"), START, "true only before the scales fix"))
     session = dataclasses.replace(
         snapshot,
         learnings=(

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""InferenceX's reference launches for this session's model, as leads PRELUDE gives every specialist (#109 item 10).
+"""InferenceX's reference launches for this session's model, as leads PRELUDE gives every specialist.
 
 A run given an InferenceX checkout as the reference ``inferencex`` (``--reference inferencex=DIR``) has its copy read
 here: the benchmark matrices ``configs/*-master.yaml``, for the single-node entries of this session's model, matched
@@ -11,7 +11,7 @@ and concurrency it sweeps, at the checkout's commit, with the dimensions where i
 this session's GPU, framework and precision come first.
 
 A lead says it was not measured here, and it is never ranked or replayed among the champions the Recipe KB measured: a
-config from other hardware or another workload is worth exactly its provenance line (#109 c2000). For a model the KB
+config from other hardware or another workload is worth exactly its provenance line. For a model the KB
 has no record of, it is the one validated config a specialist can diff the root's against.
 """
 

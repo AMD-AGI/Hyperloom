@@ -6,7 +6,7 @@
 A branch ahead of integration is usual for a while, its commit waiting for its merge test. A lead is stranded when it
 holds over the bar on the session's metric and a commit behind it has already failed to merge: skipped untested
 because it conflicted, or tested and not stackable. Integration, and every branch opened from it, then goes on from the
-lower base. In session 4aef3318 three branches held 7.8 to 11.1% over integration that way, for up to four hours (#126).
+lower base, for hours at times.
 
 :func:`stranded_leads` reads them off a snapshot, the largest lead first, each with the commits that did not merge, how
 many merges each took part in, and why its last one failed.
