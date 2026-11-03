@@ -27,6 +27,7 @@ from hyperloom_multibranch.blackboard.rsi.ladder import (
     Trial,
     archived_points,
     decision_points,
+    measured,
     moved,
     noise_band,
     pairs,
@@ -248,6 +249,55 @@ def test_a_playbook_retires_once_its_sessions_ran_out_without_beating_the_champi
     (done,) = settle(pool, 50.0)
 
     assert done.startswith("retired patient: early_stops better by 0 over 3 paired sessions") and pool.on_trial() == ()
+
+
+def test_the_measures_r3_can_read_are_those_the_champions_sessions_of_the_task_varied_in() -> None:
+    later = "workload=inferencex model=m budget=241.5m"
+    kept = [
+        Trial("c0", H0.label, H0.label, TASK_KEY, 0.0, False, {"early_stops": 0.0, "first_commit_minutes": 30.0}),
+        Trial(
+            "c1",
+            H0.label,
+            H0.label,
+            later,
+            HOUR,
+            False,
+            {"early_stops": 0.0, "first_commit_minutes": 20.0, "stop_value": 1.0},
+        ),
+        Trial("p0", PATIENT.label, H0.label, TASK_KEY, HOUR, False, {"early_stops": 2.0, "stop_value": 3.0}),
+    ]
+
+    assert measured(kept, H0.label, TASK_KEY) == frozenset({"first_commit_minutes"})
+    assert measured(kept[:1], H0.label, TASK_KEY) is None
+    assert measured(kept, H0.label, "workload=agentx model=m budget=240m") is None
+
+
+def test_close_retires_a_playbook_the_latest_replay_reads_worse_both_ways(tmp_path: Path) -> None:
+    pool = PlaybookPool(tmp_path)
+    pool.register(PATIENT)
+    worse = StandingRow(PATIENT.label, Difference(-2.0, -3.0, -1.0), Difference(-1.0, -1.5, -0.5))
+    record_standing(pool, ReplayStanding("s1", 10.0, H0.label, 3, 50, (worse,)))
+
+    (done,) = settle(pool, 50.0)
+
+    assert done == (
+        "retired patient: the scheduling replay at the CLOSE of s1 reads it worse both ways: "
+        "optimistic -2.00 (-3.00 to -1.00); pessimistic -1.00 (-1.50 to -0.50)"
+    )
+    assert pool.on_trial() == ()
+
+
+def test_close_retires_a_playbook_aiming_at_a_measure_the_champions_sessions_never_varied_in(tmp_path: Path) -> None:
+    pool = PlaybookPool(tmp_path)
+    pool.register(PATIENT)
+    for n in range(2):
+        record_trial(pool, _trial(f"c{n}", H0.label, 0.0, 1.0, at=n * HOUR))
+
+    untold = settle(pool, 50.0)
+    (done,) = settle(pool, 50.0, TASK_KEY)
+
+    assert untold == ()
+    assert done == "retired patient: early_stops does not vary in the h0 sessions of its task, so R3 cannot read it"
 
 
 def test_a_sessions_task_is_its_workload_model_image_sizes_and_budget_and_its_trial_carries_it() -> None:

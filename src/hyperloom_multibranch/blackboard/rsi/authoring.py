@@ -7,9 +7,11 @@
 of :mod:`rsi.stops` and how each new branch opened), the playbook the session played, and the evidence ledger, every
 playbook the pool holds with the change it made, its hypothesis and what came of it (:func:`playbook_prompt`). The
 LLM answers with at most one change to the champion, a number or a rule, its hypothesis and the decision measure of
-:data:`MEASURES` it should improve (:func:`read_change`). What passes the static check
+:data:`MEASURES` it should improve (:func:`read_change`), one the champion's sessions of the task varied in, so that R3
+can read it (:func:`~hyperloom_multibranch.blackboard.rsi.ladder.measured`). What passes the static check
 (:func:`~hyperloom_multibranch.blackboard.rsi.playbook.problems`) and repeats no retired playbook goes to the pool, on
-trial in the challenger sessions after it.
+trial in the challenger sessions after it, unless the scheduling replay of the archive reads it worse both ways
+beyond the data: then it goes to the pool retired, with that evidence for the ledger.
 """
 
 from __future__ import annotations
@@ -17,12 +19,13 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 
 from hyperloom_multibranch.contracts.blackboard.records import BlackboardSnapshot
 from hyperloom_multibranch.contracts.blackboard.vocab import CommitOrigin, LineageKind
 from hyperloom_multibranch.blackboard.rsi.archive import NO_ARCHIVE, SKIPPED, SearchTree, TreeArchive
 from hyperloom_multibranch.blackboard.rsi.history import stall_odds
+from hyperloom_multibranch.blackboard.rsi.ladder import WORSE, measured, r1_reading, session_task, trials
 from hyperloom_multibranch.blackboard.rsi.playbook import (
     BOUNDS,
     MAX_RULES,
@@ -32,12 +35,14 @@ from hyperloom_multibranch.blackboard.rsi.playbook import (
     PlaybookNumbers,
     PlaybookPool,
     PlaybookRule,
+    Retired,
     changes,
     playbook_label,
     problems,
 )
 from hyperloom_multibranch.blackboard.rsi.replay import REPLAYED_NUMBERS
 from hyperloom_multibranch.blackboard.rsi.session import FAILED, NO_PROFILE, WRITTEN, CloseStep, archived_history
+from hyperloom_multibranch.blackboard.rsi.similarity import workload_kind
 from hyperloom_multibranch.blackboard.rsi.stops import StopAudit, stop_audit
 
 log = logging.getLogger(__name__)
@@ -53,6 +58,7 @@ _MINUTE = 60.0
 #: committed.
 MEASURES = ("early_stops", "probation_commits", "stop_value", "first_commit_minutes", "opened_committed")
 NO_CHANGE = "the LLM proposed no change"
+NO_MEASURE = "no decision measure varied in the champion's sessions of this task, so R3 could read none"
 #: The numbers that are whole though their default is ``None``.
 _WHOLE = frozenset({"stall_tests", "max_open"})
 
@@ -142,6 +148,12 @@ def playbook_prompt(tree: SearchTree, audit: StopAudit, champion: Playbook, play
     return "\n".join(lines)
 
 
+def measures_line(measures: Sequence[str]) -> str:
+    """What the author reads after :func:`playbook_prompt`: the decision measures a change may aim at."""
+
+    return f"The decision measures R3 can read on this task, one of which a change aims at: {', '.join(measures)}."
+
+
 def _changed_numbers(champion: Playbook, change: Mapping[str, object]) -> PlaybookNumbers:
     name, value = change.get("number"), change.get("value")
     if not isinstance(name, str) or name not in BOUNDS:
@@ -167,10 +179,10 @@ def _changed_rules(champion: Playbook, change: Mapping[str, object]) -> tuple[Pl
 
 
 def read_change(
-    answer: str, champion: Playbook, provenance: Mapping[str, str], now: float
+    answer: str, champion: Playbook, provenance: Mapping[str, str], now: float, measures: Sequence[str] = MEASURES
 ) -> tuple[Playbook | None, str]:
-    """The playbook ``answer`` proposes, one change to ``champion`` registered ``now`` with ``provenance``, and
-    ``""``; or ``None`` and why there is none."""
+    """The playbook ``answer`` proposes, one change to ``champion`` aimed at one of ``measures``, registered ``now``
+    with ``provenance``, and ``""``; or ``None`` and why there is none."""
 
     if not answer.strip():
         return None, "the answer is empty"
@@ -190,8 +202,8 @@ def read_change(
     named = playbook_label(label)
     if not named:
         return None, f"{label!r} gives no label a playbook may take"
-    if measure not in MEASURES:
-        return None, f"{measure!r} is no decision measure; one of {', '.join(MEASURES)}"
+    if measure not in measures:
+        return None, f"{measure!r} is no decision measure R3 can read here; one of {', '.join(measures)}"
     try:
         numbers = _changed_numbers(champion, change) if "number" in change else champion.numbers
         rules = champion.rules if "number" in change else _changed_rules(champion, change)
@@ -247,20 +259,48 @@ async def author_playbook(
         return CloseStep(SKIPPED, NOT_ARCHIVED)
     writable = pool if pool is not None else PlaybookPool.beside(target)
     champion = writable.champion()
+    aims = _aims(writable, champion, own)
+    if not aims:
+        return CloseStep(SKIPPED, NO_MEASURE, {"written": 0, "refused": 0})
     versions = snapshot.fingerprints[-1].policy_versions if snapshot.fingerprints else {}
     audit = stop_audit(own, stall_odds(history, own.task, session=own))
-    prompt = playbook_prompt(own, audit, champion, versions.get(PLAYBOOK_KEY, champion.label), writable)
+    played = versions.get(PLAYBOOK_KEY, champion.label)
+    prompt = "\n\n".join([playbook_prompt(own, audit, champion, played, writable), measures_line(aims)])
     try:
         answer = await complete(PLAYBOOK_SYSTEM_PROMPT, prompt)
     except Exception as exc:
         log.warning("CLOSE could not ask the LLM for a playbook change: %s", exc, exc_info=True)
         return CloseStep(FAILED, f"{type(exc).__name__}: {exc}")
-    proposed, why = read_change(answer, champion, {"model": model, "session_id": profile.session_id}, snapshot.taken_at)
+    who = {"model": model, "session_id": profile.session_id}
+    proposed, why = read_change(answer, champion, who, snapshot.taken_at, aims)
     why = why or (_repeats(writable, proposed) if proposed is not None else "")
     if proposed is None or why:
         return CloseStep(SKIPPED, why, {"written": 0, "refused": 0 if why.startswith(NO_CHANGE) else 1})
+    alike = tuple(tree for tree in history if workload_kind(tree.task) == workload_kind(own.task))
+    return _pooled(writable, proposed, champion, alike, snapshot.taken_at)
+
+
+def _aims(pool: PlaybookPool, champion: Playbook, own: SearchTree) -> tuple[str, ...]:
+    """The measures a change may aim at: those the champion's sessions of ``own``'s task varied in, every one while
+    too few of them were kept to tell."""
+
+    readable = measured(trials(pool), champion.label, session_task(own))
+    return MEASURES if readable is None else tuple(measure for measure in MEASURES if measure in readable)
+
+
+def _pooled(
+    pool: PlaybookPool, proposed: Playbook, champion: Playbook, trees: Sequence[SearchTree], now: float
+) -> CloseStep:
+    """``proposed`` written to ``pool``: on trial, or retired at once with its evidence when the scheduling replay of
+    ``trees`` reads it worse both ways beyond the data."""
+
+    reading = r1_reading(proposed, champion, trees)
     try:
-        written = writable.register(proposed)
+        written = pool.register(proposed)
+        if reading is not None and reading.reading == WORSE:
+            evidence = f"the scheduling replay of the archive reads it worse both ways: {reading.spans()}"
+            pool.retire(Retired(written.label, now, evidence))
+            return CloseStep(SKIPPED, f"{written.label}: {evidence}", {"written": 0, "refused": 1})
     except (OSError, ValueError) as exc:
         return CloseStep(SKIPPED, f"{proposed.label}: {exc}", {"written": 0, "refused": 1})
     changed = ", ".join(changes(champion, written))
@@ -273,9 +313,11 @@ __all__ = [
     "NOT_ARCHIVED",
     "NO_ARCHIVE",
     "NO_CHANGE",
+    "NO_MEASURE",
     "PLAYBOOK_SYSTEM_PROMPT",
     "Complete",
     "author_playbook",
+    "measures_line",
     "playbook_prompt",
     "read_change",
 ]
