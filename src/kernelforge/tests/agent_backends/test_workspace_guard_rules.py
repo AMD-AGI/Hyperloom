@@ -130,3 +130,29 @@ def test_changed_bytecode_under_a_protected_dir_is_deleted_and_a_changed_source_
     with pytest.raises(WorkspaceSafetyError, match="protected ignored files changed: .*legacy.pyc"):
         guard.verify()
     assert sourceless.read_bytes() == b"module"
+
+
+def test_bytecode_behind_a_linked_cache_dir_is_reported_not_deleted(
+    repo: Path, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    tests = repo / "test"
+    tests.mkdir()
+    (tests / "layer_ut_utils.py").write_text("VALUE = 1\n")
+    (repo / ".gitignore").write_text("__pycache__/\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "test sources")
+    (tests / "__pycache__").mkdir()
+    (tests / "__pycache__" / "layer_ut_utils.cpython-312.pyc").write_bytes(b"stale")
+    elsewhere = tmp_path_factory.mktemp("elsewhere") / "__pycache__"
+    elsewhere.mkdir()
+    (elsewhere / "layer_ut_utils.cpython-312.pyc").write_bytes(b"not the session's")
+
+    guard = WorkspaceGuard(_writable(repo, FORGE_PROTECTED_PATHS))
+    guard.prepare()
+    (tests / "__pycache__" / "layer_ut_utils.cpython-312.pyc").unlink()
+    (tests / "__pycache__").rmdir()
+    (tests / "__pycache__").symlink_to(elsewhere)
+
+    with pytest.raises(WorkspaceSafetyError, match="protected ignored files changed: .*layer_ut_utils.cpython-312.pyc"):
+        guard.verify()
+    assert (elsewhere / "layer_ut_utils.cpython-312.pyc").read_bytes() == b"not the session's"

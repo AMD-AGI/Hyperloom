@@ -584,12 +584,13 @@ class WorkspaceGuard:
         """Delete the interpreter's bytecode among ``changes`` and return the rest.
 
         The next import rebuilds a ``__pycache__`` ``.pyc`` from its protected source, instead of running bytecode the
-        session may have written over an untouched module.
+        session may have written over an untouched module. One reached through a linked directory may live outside the
+        workspace, so it is reported instead.
         """
         kept: list[str] = []
         for change in changes:
             path = Path(change)
-            if path.parent.name == "__pycache__" and path.suffix == ".pyc":
+            if path.parent.name == "__pycache__" and path.suffix == ".pyc" and path.parent.resolve() == path.parent:
                 path.unlink(missing_ok=True)
             else:
                 kept.append(change)
