@@ -15,17 +15,16 @@ from typing import Any, NamedTuple, Sequence
 from ._capture_shapes import is_capture_fragment
 from ._idle_gate import resolve_idle_pct_threshold
 from ._trace_gates import CHUNK_QUALITY_ALTERNATE_MARGIN, resolve_min_busy_ratio
+from ._trace_inputs import discover_trace_inputs
 from ._trace_reader import (
     _GRAPH_RECORDED_LAUNCH_COVERAGE_MAX,
     _MAX_EVENT_CHARS,
     _MAX_TRACE_PREFIX_CHARS,
     _open_trace_binary,
     _rank_of,
-    _select_trace_file,
     _trace_candidates,
     _union_ms,
     analyze_trace,
-    resolve_trace_file,
     stream_events,
 )
 
@@ -107,8 +106,8 @@ def _role_of(path: Path, root: Path) -> str:
     return "source"
 
 
-def inventory(trace_dir: Path) -> dict[str, Any]:
-    """List every trace-shaped candidate, and pick the file to certify."""
+def inventory(trace_dir: Path, trace_input: Path) -> dict[str, Any]:
+    """List every trace-shaped candidate, and pick the file the analysis reads from ``trace_input``."""
     candidates = []
     for p in sorted(_trace_candidates(trace_dir)):
         try:
@@ -117,22 +116,15 @@ def inventory(trace_dir: Path) -> dict[str, Any]:
             size = None
         candidates.append({"path": str(p), "bytes": size, "role": _role_of(p, trace_dir)})
 
-    production = resolve_trace_file(trace_dir)
-    production_role = _role_of(production, trace_dir) if production else None
-
+    selected = discover_trace_inputs(trace_input).files[0]
     source_paths = [Path(c["path"]) for c in candidates if c["role"] == "source"]
-    selected = _select_trace_file(source_paths, trace_dir) if source_paths else production
-
     ranks = {_rank_of(p) for p in source_paths}
     ranks.discard(None)
     return {
         "candidates": candidates,
-        "selected_path": str(selected) if selected else None,
-        "selected_role": _role_of(selected, trace_dir) if selected else None,
-        "production_selected_path": str(production) if production else None,
-        "production_selected_role": production_role,
-        "production_would_analyze_split_chunk": production_role == "split_chunk",
-        "selected_capture_fragment": bool(selected) and is_capture_fragment(selected, trace_dir),
+        "selected_path": str(selected),
+        "selected_role": _role_of(selected, trace_dir),
+        "selected_capture_fragment": is_capture_fragment(selected, trace_dir),
         "rank_count": len(ranks) if ranks else (1 if source_paths else 0),
         "file_count_by_role": {
             role: sum(1 for c in candidates if c["role"] == role)
@@ -392,7 +384,6 @@ def build_verdict(
     health: TraceHealth,
     *,
     thresholds: dict[str, Any],
-    production_pick: dict[str, Any] | None = None,
     coverage: CoverageMeasures = CoverageMeasures(),
 ) -> dict[str, Any]:
     """Answer the two questions separately, per the checklist's hard-requirement table.
@@ -403,20 +394,6 @@ def build_verdict(
     """
     blocking: list[str] = []
     warnings: list[str] = []
-    # Checked before the file's own health, because it decides which file the question is even about.
-    if production_pick and production_pick["kernel_count"] <= 0:
-        blocking.append(
-            f"the live resolver selects {production_pick['role']} '{Path(production_pick['path']).name}' from this "
-            f"directory, which carries {production_pick['event_total']} events and no GPU kernels, so both "
-            f"consumers see an empty trace; the source beside it recorded {health.kernel_count} kernels"
-        )
-    elif production_pick:
-        # The resolver opens a different file, but one with GPU work in it, so the measurements here describe a
-        # different object than production would see.
-        warnings.append(
-            f"the live resolver would select {production_pick['role']} rather than the source trace; the measurements "
-            f"in this certificate describe the source ({Path(production_pick['certified_path']).name})"
-        )
     if not health.parse_ok:
         blocking.append("trace did not parse cleanly")
     if health.kernel_count <= 0:
@@ -470,13 +447,16 @@ def build_verdict(
 # entry point
 
 
-def certify_trace_dir(trace_dir: str | Path, *, framework: str = "") -> dict[str, Any]:
-    """Produce the self-certification record for one capture directory."""
+def certify_trace_dir(trace_dir: str | Path, trace_input: str | Path, *, framework: str = "") -> dict[str, Any]:
+    """Produce the self-certification record for one capture directory.
+
+    ``trace_input`` is what the analysis is handed; the certified file is the one it reads from it.
+    """
     tdir = Path(trace_dir)
     thresholds = effective_thresholds()
     thresholds["min_repeats"] = MIN_REPEATS_XDIT if framework.lower() == "xdit" else MIN_REPEATS_DEFAULT
 
-    inv = inventory(tdir)
+    inv = inventory(tdir, Path(trace_input))
     task = _ROOFLINE_TASK_RE.search(str(tdir))
     record: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
@@ -489,28 +469,11 @@ def certify_trace_dir(trace_dir: str | Path, *, framework: str = "") -> dict[str
         "rank_level": [],
     }
 
-    # Before the early return below: a directory that produced only capture sidecars and no usable trace is
-    # exactly the case where knowing what the sidecars contain matters most.
     capture_paths = [Path(c["path"]) for c in inv["candidates"] if c["role"] == "capture_sidecar"]
     if capture_paths:
         inv["capture_sidecar_probe"] = certify_capture_sidecars(capture_paths)
 
-    selected = inv["selected_path"]
-    if not selected:
-        # An empty capture directory still deserves a full record rather than a hole: the profiler created the
-        # directory and wrote nothing, which is a finding in its own right and distinct from a trace that parsed
-        # badly.
-        record["rank_level"].append(_empty_rank_row())
-        record["verdict"] = build_verdict(
-            TraceHealth(parse_ok=False, kernel_count=0, capture_fragment=False, attributed_pct=None),
-            thresholds=thresholds,
-        )
-        record["verdict"]["blocking_reasons"] = ["no usable trace file in the directory"]
-        return record
-
-    if inv["production_selected_path"] and inv["production_selected_path"] != selected:
-        inv["production_pick_probe"] = _probe_production_pick(inv)
-    rank = _certify_rank(Path(selected), thresholds=thresholds)
+    rank = _certify_rank(Path(inv["selected_path"]), thresholds=thresholds)
     record["rank_level"].append(rank)
     record["verdict"] = build_verdict(
         TraceHealth(
@@ -521,7 +484,6 @@ def certify_trace_dir(trace_dir: str | Path, *, framework: str = "") -> dict[str
             graph_under_recorded=rank["density"]["graph_under_recorded"],
         ),
         thresholds=thresholds,
-        production_pick=inv.get("production_pick_probe"),
         coverage=CoverageMeasures(
             rank["density"]["graph_launch_coverage"],
             rank["attribution"]["op_meta_coverage"],
@@ -529,42 +491,6 @@ def certify_trace_dir(trace_dir: str | Path, *, framework: str = "") -> dict[str
         ),
     )
     return record
-
-
-def _empty_rank_row() -> dict[str, Any]:
-    """The rank-level row of a capture directory that holds no usable trace file."""
-    return {
-        "rank": None,
-        "path": None,
-        "parse": {"parse_ok": False, "stream_errors": [], "event_total": 0, "bytes": None, "gz": False},
-        "attribution": {},
-        "density": {
-            "kernel_count": 0,
-            "graph_mode": False,
-            "graph_launch_count": 0,
-            "graph_launches_with_kernels": 0,
-            "graph_launch_coverage": None,
-            "graph_under_recorded": False,
-        },
-        "time_structure": {},
-        "annotations": {},
-    }
-
-
-def _probe_production_pick(inv: dict[str, Any]) -> dict[str, Any]:
-    """Measure the file the live resolver would open in place of the selected one."""
-    probe = analyze_trace(Path(inv["production_selected_path"]))
-    # ``analyze_trace`` reports the kernel count inside ``attribution`` and has no ``parse_ok`` key at all --
-    # parse health is the emptiness of ``stream_errors``.
-    return {
-        "path": inv["production_selected_path"],
-        "role": inv["production_selected_role"],
-        "certified_path": inv["selected_path"],
-        "kernel_count": (probe.get("attribution") or {}).get("kernel_count") or 0,
-        "event_total": probe.get("event_total"),
-        "parse_ok": not probe.get("stream_errors") and not probe.get("truncated"),
-        "truncated": bool(probe.get("truncated")),
-    }
 
 
 def _rank_attribution_block(attribution: dict[str, Any], timeline: dict[str, Any], sp: StepPass) -> dict[str, Any]:

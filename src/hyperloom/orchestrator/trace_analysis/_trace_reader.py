@@ -17,9 +17,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
-# Stdlib-only sibling; keeps this reader independent of TraceLens while sharing one capture-vs-workload rule with the
-# TraceLens route.
-from ._capture_shapes import is_capture_fragment
 from ._trace_rank import trace_rank as _rank_of
 
 # GPU device-side event categories (Kineto ``cat`` values).
@@ -56,14 +53,6 @@ _MAX_EVENT_NAME_CHARS = 256
 _GRAPH_RECORDED_LAUNCH_COVERAGE_MAX = 0.5
 
 
-def _file_size(fp: Path) -> int:
-    """Return file size in bytes, or 0 on stat() failure."""
-    try:
-        return fp.stat().st_size
-    except OSError:
-        return 0
-
-
 def _trace_candidates(root: Path) -> list[Path]:
     """Return all trace-shaped files under ``root`` (recursive)."""
     out: list[Path] = []
@@ -71,37 +60,6 @@ def _trace_candidates(root: Path) -> list[Path]:
         if child.is_file() and any(child.name.lower().endswith(ext) for ext in _TRACE_EXTS):
             out.append(child)
     return out
-
-
-def _main_trace_candidates(candidates: list[Path], root: str | Path | None = None) -> list[Path]:
-    """Drop CUDA-graph capture shards, keeping only main workload traces."""
-    main = [c for c in candidates if not is_capture_fragment(c, root)]
-    return main or candidates
-
-
-def _select_trace_file(candidates: list[Path], root: str | Path | None = None) -> Path | None:
-    """Deterministically pick one trace file from candidates."""
-    candidates = _main_trace_candidates(candidates, root)
-    merged = [c for c in candidates if c.name.startswith("merged-")]
-    if merged:
-        return max(merged, key=lambda c: (_file_size(c), c.name))
-    ranked = [c for c in candidates if _rank_of(c) is not None]
-    if ranked:
-        return min(ranked, key=lambda c: (_rank_of(c), c.name))
-    return max(candidates, key=lambda c: (_file_size(c), c.name))
-
-
-def resolve_trace_file(trace_input: str | Path) -> Path | None:
-    """Resolve a trace input (file or directory) to a single trace file."""
-    p = Path(trace_input)
-    if p.is_file():
-        return p
-    if not p.is_dir():
-        return None
-    candidates = _trace_candidates(p)
-    if not candidates:
-        return None
-    return _select_trace_file(candidates, p)
 
 
 def _open_trace_binary(path: Path):

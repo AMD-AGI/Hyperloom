@@ -209,8 +209,6 @@ def _validate(**overrides: Any) -> dict[str, Any]:
         },
         "trace_dir_level": {
             "selected_role": "source",
-            "production_selected_role": "source",
-            "production_would_analyze_split_chunk": False,
             "file_count_by_role": {"source": 1, "capture_sidecar": 3, "split_chunk": 0},
             "candidates": [{"path": f"/w/t/{i}.json", "bytes": 10, "role": "source"} for i in range(40)],
             "capture_sidecar_probe": {

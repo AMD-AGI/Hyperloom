@@ -60,8 +60,8 @@ _CAPTURE_DIAGNOSIS_WORKLOAD_KEYS = (
 #: Per-source cap on the raw text kept in a capture-failure diagnosis. Generous on purpose: this file is the only
 #: record of the failure, since nothing downstream re-runs the arm to reproduce it.
 _CAPTURE_DIAGNOSIS_SOURCE_BYTES = 32768
-#: Suffixes the live trace resolver will consider. One of these already present in a task's own run directory is
-#: a leftover the resolver can pick instead of what this run produces.
+#: Suffixes trace discovery will consider. One of these already present in a task's own run directory is
+#: a leftover discovery can lead with instead of what this run produces.
 _TRACE_SUFFIXES = (".pt.trace.json.gz", ".pt.trace.json", ".trace.json.gz", ".trace.json")
 #: Enough leftovers to establish the pattern; the preflight record is context, not an inventory.
 _PREFLIGHT_STALE_TRACE_LIMIT = 20
@@ -320,8 +320,7 @@ def _preflight_probe(session_dir: Path, task_id: str, *, reaped: Sequence[int]) 
     except OSError as exc:
         out["disk"] = {"path": str(session_dir), "error": repr(exc)}
 
-    # A trace already under this task's own run directory is what later surfaces as selfcert's
-    # ``production_pick_probe`` disagreement: the live resolver can pick the leftover instead of what this run
+    # A trace already under this task's own run directory can lead trace discovery instead of what this run
     # produces, and by then there is no way to tell which run the numbers came from.
     stale: list[dict[str, Any]] = []
     try:

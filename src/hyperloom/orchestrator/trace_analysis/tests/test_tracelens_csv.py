@@ -2455,6 +2455,8 @@ def test_capture_sidecars_sort_behind_a_real_trace(tmp_path):
         ("graph_capture_profile/cuda_graph_capture-DecodeCudaGraphRunner-TP-3.json.gz", True),
         # vLLM.
         ("graph_capture_rank0.json.gz", True),
+        # An uppercase capture directory holding a generically named shard.
+        ("Capture_Traces/shard.trace.json.gz", True),
         # Workload traces must survive all of the above.
         ("1786734684.9990146-TP-0.trace.json.gz", False),
         ("rank_0.trace.json.gz", False),

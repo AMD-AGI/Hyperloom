@@ -59,7 +59,7 @@ def _write(path: Path, events: list[dict]) -> None:
 def test_each_step_root_is_credited_with_the_kernels_its_own_launches_produced(tmp_path):
     _write(tmp_path / "rank0.pt.trace.json", _STEP_EVENTS)
 
-    annotations = certify_trace_dir(tmp_path, framework="sglang")["rank_level"][0]["annotations"]
+    annotations = certify_trace_dir(tmp_path, tmp_path, framework="sglang")["rank_level"][0]["annotations"]
 
     assert annotations["step_root_pattern_family"] == "backup"
     steps = [
@@ -71,34 +71,25 @@ def test_each_step_root_is_credited_with_the_kernels_its_own_launches_produced(t
 
 
 @pytest.mark.parametrize(
-    ("chunk_events", "severity", "usable_by"),
+    ("trace_input", "certified"),
     [
-        pytest.param([], "blocked", [], id="empty-chunk"),
-        pytest.param(_STEP_EVENTS, "warn", ["tracelens"], id="chunk-with-kernels"),
+        pytest.param(".", "rank0.pt.trace.json", id="directory"),
+        pytest.param("trace_split/chunk.pt.trace.json", "chunk.pt.trace.json", id="file"),
     ],
 )
-def test_the_split_chunk_production_would_open_is_measured_beside_the_source(
-    tmp_path, chunk_events, severity, usable_by
-):
-    """The certificate measures the source, so it also states what the file production opens instead holds."""
+def test_the_certificate_reads_the_file_the_analysis_reads(tmp_path, trace_input, certified):
     _write(tmp_path / "rank0.pt.trace.json", _STEP_EVENTS)
-    _write(tmp_path / "trace_split" / "merged-chunk.pt.trace.json", chunk_events)
+    _write(tmp_path / "trace_split" / "chunk.pt.trace.json", _STEP_EVENTS)
 
-    record = certify_trace_dir(tmp_path, framework="sglang")
+    record = certify_trace_dir(tmp_path, tmp_path / trace_input, framework="sglang")
 
-    probe = record["trace_dir_level"]["production_pick_probe"]
-    assert probe["role"] == "split_chunk"
-    assert Path(probe["path"]).name == "merged-chunk.pt.trace.json"
-    assert Path(probe["certified_path"]).name == "rank0.pt.trace.json"
-    assert probe["kernel_count"] == sum(1 for ev in chunk_events if ev["cat"] == "kernel")
-    assert record["verdict"]["severity"] == severity
-    assert record["verdict"]["usable_by"] == usable_by
+    assert Path(record["trace_dir_level"]["selected_path"]).name == certified
 
 
 def test_kernels_no_op_claims_leave_the_trace_unusable(tmp_path):
     _write(tmp_path / "rank0.pt.trace.json", [ev for ev in _STEP_EVENTS if ev["cat"] != "cpu_op"])
 
-    verdict = certify_trace_dir(tmp_path, framework="sglang")["verdict"]
+    verdict = certify_trace_dir(tmp_path, tmp_path, framework="sglang")["verdict"]
 
     assert verdict["usable_by"] == []
     assert verdict["blocking_reasons"] == ["correlation chain resolves no kernel to an op"]

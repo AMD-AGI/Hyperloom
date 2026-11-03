@@ -97,6 +97,11 @@ analysis route, both removed in this release, are removed with the disposition
   `ext.actions[].profile.runs[].validate.trace_quality.aggregation_scope`: the
   trace certificate no longer selects a steady window, so its counts cover the
   whole parsed trace; `truncated` and `truncation_reason` say when they do not.
+- `roofline` event
+  `ext.actions[].profile.runs[].validate.trace_quality.production_selected_role`
+  and `production_would_analyze_split_chunk`: they compared the certified file
+  with the `bypass` route's resolver. The certificate now reads the file the
+  analysis reads, so `selected_role` answers both.
 - `steady_state.source` and `steady_state.aggregation_scope` in
   `roofline` event `ext.actions[].analysis.effective_run` and `kernel_agent`
   `trace_analyze_runs[]`: only the `bypass` route varied them.

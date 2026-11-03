@@ -391,10 +391,8 @@ def _summarize_trace_quality(validate: dict[str, Any]) -> dict[str, Any]:
         "capture_op_meta_coverage": capture.get("op_meta_coverage"),
         "capture_cpu_op_total": capture.get("cpu_op_total"),
         "capture_kernel_count": capture.get("kernel_count"),
-        # Which file the live resolver would open, which decides whether any of the above describes production.
+        # Role of the file the analysis reads.
         "selected_role": inventory.get("selected_role"),
-        "production_selected_role": inventory.get("production_selected_role"),
-        "production_would_analyze_split_chunk": inventory.get("production_would_analyze_split_chunk"),
         "file_count_by_role": _as_dict(inventory.get("file_count_by_role")),
         "verdict_measures": measures,
     }
