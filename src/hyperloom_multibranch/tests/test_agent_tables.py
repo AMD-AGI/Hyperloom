@@ -32,7 +32,7 @@ from hyperloom_multibranch.specialist.agent_import import (
 )
 from hyperloom_multibranch.specialist.agent_manifest import AgentManifest
 from hyperloom_multibranch.toolbox.kernel_artifacts import mint_kernel_artifact
-from hyperloom_multibranch.toolbox.tests.kernel_rows_cc2bf0ef import ENV, HEADER, install
+from hyperloom_multibranch.toolbox.tests.kernel_rows import ENV, HEADER, install
 
 TARGET = "gemm-a8w8"
 IMAGE_TABLES = "/sgl-workspace/aiter/aiter/configs"

@@ -46,7 +46,7 @@ from hyperloom_multibranch.repo.merge import Stored, carry, stack_kernel_slot, w
 from hyperloom_multibranch.repo.rebase import Files
 from hyperloom_multibranch.scheduling.integrator import LlmPatchResolver
 from hyperloom_multibranch.toolbox.kernel_artifacts import mint_kernel_artifact, union_rows
-from hyperloom_multibranch.toolbox.tests.kernel_rows_cc2bf0ef import (
+from hyperloom_multibranch.toolbox.tests.kernel_rows import (
     B01_HEAD,
     B01_NEW,
     B01_SHARED,

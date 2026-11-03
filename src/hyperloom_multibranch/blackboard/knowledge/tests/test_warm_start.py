@@ -348,7 +348,7 @@ def test_a_champion_on_this_image_replays_its_whole_recipe_on_any_head_its_files
 def test_a_replay_stacks_the_champions_table_over_the_heads_instead_of_replacing_it(tmp_path: Path) -> None:
     from hyperloom_multibranch.repo.merge import wider_table
     from hyperloom_multibranch.toolbox.kernel_artifacts import mint_kernel_artifact
-    from hyperloom_multibranch.toolbox.tests.kernel_rows_cc2bf0ef import B09_NEW, ENV, SHARED, csv_text
+    from hyperloom_multibranch.toolbox.tests.kernel_rows import B09_NEW, ENV, SHARED, csv_text
 
     narrow = mint_kernel_artifact(KernelKind.GEMM, "a8w8", ENV, csv_text(SHARED))
     wide = mint_kernel_artifact(KernelKind.GEMM, "a8w8", ENV, csv_text(SHARED, B09_NEW))

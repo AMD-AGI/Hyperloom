@@ -69,7 +69,7 @@ from hyperloom_multibranch.blackboard.tests.sessions import METRIC, SPLIT_KV, sc
 from hyperloom_multibranch.blackboard.tools import FOCUS_LINE
 from hyperloom_multibranch.repo.merge import Stored, stack_kernel_slot
 from hyperloom_multibranch.toolbox.kernel_artifacts import mint_kernel_artifact, union_rows
-from hyperloom_multibranch.toolbox.tests.kernel_rows_cc2bf0ef import (
+from hyperloom_multibranch.toolbox.tests.kernel_rows import (
     B01_HEAD,
     B01_NEW,
     B01_SHARED,

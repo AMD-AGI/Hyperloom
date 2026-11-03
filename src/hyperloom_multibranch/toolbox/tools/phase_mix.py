@@ -5,12 +5,13 @@
 share of the wave's time each phase takes.
 
 TraceLens' splitter writes three steady-state windows of a serving trace. Its ``mixed`` window holds a few prefill steps
-among decode steps and takes its time from whatever steps it holds: in a Qwen3-14B-FP8 profile (ISL 1024, OSL 1024,
-concurrency 64) 2 prefill steps of 32 are 52% of the window, while a graded wave spends 11% of its time in prefill, so
-paged attention read 14.1% of the mixed window and 28.5% of the decode window. The brief turns the shares into Amdahl
-ceilings of the graded metric, so they are the graded wave's: the ``decode_only`` window's kernel shares and the
-``prefilldecode`` window's (the longest run of prefill steps), each as :mod:`~.kernel_shares` and :mod:`~.kernel_launchers`
-make them (the profiler's misreported events left out, a kernel name that several modules launch split by module), and
+among decode steps and takes its time from whatever steps it holds: with equal input and output lengths, 2 prefill
+steps of 32 can be half of the window while a graded wave spends about a tenth of its time in prefill, so a decode-bound
+kernel such as paged attention reads about half the share of the mixed window that it has of the decode window. The
+brief turns the shares into Amdahl ceilings of the graded metric, so they are the graded wave's: the ``decode_only``
+window's kernel shares and the ``prefilldecode`` window's (the longest run of prefill steps), each as
+:mod:`~.kernel_shares` and :mod:`~.kernel_launchers` make them (the profiler's misreported events left out, a kernel
+name that several modules launch split by module), and
 
     op share = decode share x f_decode + prefill share x f_prefill
 

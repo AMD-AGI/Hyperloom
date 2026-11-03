@@ -5,17 +5,17 @@
 
 TraceLens' ``ops_summary.csv`` ranks aten ops, and on a decode window after a CUDA-graph replay its durations are not the
 GPU's: the ROCm profiler stamps the eager kernels queued behind a replay (ROCm/rocm-systems#13882) as starting while the
-replay still runs on their one in-order stream and ending at the window's end, ~9 ms each in a Qwen3-14B-FP8 window whose
-real kernels last 50 to 80 us in all. The ops table then lists ``index_put``, ``copy_``, ``greedy_sample`` and ``add`` at
-15 to 30% each, summing past 100% with the real work (paged attention, the FlyDSL GEMMs) under 6%. The window's raw
-events are right: the replay's kernels keep their names, order and durations. So the shares a brief reads are computed from
-them, per kernel, and sum to 100% of the window's kernel time.
+replay still runs on their one in-order stream and ending at the window's end, so each claims a replay's length while
+they really last a few tens of microseconds in all. The ops table then lists ``index_put``, ``copy_``, ``greedy_sample``
+and ``add`` as large shares each, summing past 100% with the real work (paged attention, the GEMMs) a small remainder.
+The window's raw events are right: the replay's kernels keep their names, order and durations. So the shares a brief
+reads are computed from them, per kernel, and sum to 100% of the window's kernel time.
 
-An event is **excluded** when it overlaps another event of its stream by more than :data:`JITTER_US` (real windows overlap
-by 0.07 to 0.63 us: the profiler's clocks, not a defect): a stream runs one kernel at a time, so one of the two has wrong
-timestamps. The shorter stays, because a misreported event claims more than it ran: the one that spans hundreds of real
-kernels is the one dropped, and so is a long one that overlaps a short real kernel by a few microseconds. The report states
-``excluded_events`` and ``excluded_claimed_ms``, the time those events claim.
+An event is **excluded** when it overlaps another event of its stream by more than :data:`JITTER_US` (real windows
+overlap by under a microsecond: the profiler's clocks, not a defect): a stream runs one kernel at a time, so one of the
+two has wrong timestamps. The shorter stays, because a misreported event claims more than it ran: the one that spans
+hundreds of real kernels is the one dropped, and so is a long one that overlaps a short real kernel by a few
+microseconds. The report states ``excluded_events`` and ``excluded_claimed_ms``, the time those events claim.
 
 Leaving them out biases the shares only by what they really cost, which the window cannot say (its timestamps for them are
 the defect), so the rest of the rank trace does: the median duration of the same kernel among the trace's events that are not
@@ -25,7 +25,7 @@ excluded, in the windows without a replay in flight. The window is **degraded**,
   its graph replays are missing from the trace, so what is left is the eager ops around them, not the step;
 * a collective (an all-reduce, all-gather, reduce-scatter or all-to-all) lasts on average over
   :data:`MAX_COLLECTIVE_STALL` times its median: some of its calls waited for a rank that was held up, so the window's time
-  is that wait (a decode step of a second where the test measured 8 ms per token), not the step's work;
+  is that wait (a decode step of a second where the test measured milliseconds per token), not the step's work;
 * an excluded kernel has no clean instance anywhere in the trace, so what it costs is unknown; or
 * the excluded events' estimated cost is over :data:`MAX_EXCLUDED_SHARE` of the kept kernel time: the shares could rank
   wrongly, because every kept share is that much too high and an excluded kernel might outrank a listed one.
@@ -57,20 +57,19 @@ from hyperloom_multibranch.toolbox.tools.op_shares import NAME_COLUMN, SHARE_COL
 #: The ``cat`` of the trace events that run on the GPU.
 GPU_CATEGORIES = frozenset({"kernel", "gpu_memcpy", "gpu_memset"})
 #: How much earlier than the previous event's end of its stream an event may start without being excluded, in microseconds.
-#: The overlaps of the real windows are 0.07 to 0.63 us (a 5.4 ms GEMM that starts 0.63 us before its predecessor ended);
-#: the defect's are a replay's length, 1.9 to 8 ms.
+#: The overlaps of real windows are under a microsecond (a long GEMM that starts a fraction of a microsecond before its
+#: predecessor ended); the defect's are a replay's length, milliseconds.
 JITTER_US = 5.0
-#: What real windows fill of their GPU span: a fully recorded prefill window 99%; the 32-step mixes of a Qwen3-14B-FP8 root
-#: profile and of a Qwen3-8B one, which lose the kernels of 29 and 30 of their decode replays but keep a prefill step, 54% and
-#: 16%; the single decode step of a Qwen3-14B-FP8 branch profile, whose one replay lost its kernels, 0.6%. Under a tenth of
-#: the span the kernels are not the window's work.
+#: What real windows fill of their GPU span: a fully recorded prefill window nearly all of it; a 32-step mix that loses
+#: the kernels of most of its decode replays but keeps a prefill step still a sizeable part; a single decode step whose
+#: one replay lost its kernels, under one percent. Under a tenth of the span the kernels are not the window's work.
 MIN_GPU_BUSY_PERCENT = 10.0
-#: The excluded events' estimated cost, as a share of the kept kernel time, above which the shares are not given: the
-#: Qwen3-14B-FP8 decode window's six excluded kernels cost 23 us of its 7.9 ms (0.3%), a graph replay with its eager tail.
+#: The excluded events' estimated cost, as a share of the kept kernel time, above which the shares are not given: in a
+#: decode window of a graph replay with its eager tail, the six excluded kernels cost well under 1% of the kept time.
 MAX_EXCLUDED_SHARE = 0.05
-#: How many times its median a collective may last on average before the window is a stall. The healthy Qwen3-Next-80B TP2
-#: profiles' ``ar_ll128`` calls are within 1.5x of their median, and no kernel of theirs is past 5.5x; the five stalled ones
-#: put 91 to 99% of their windows in ``ar_ll128``, at 321x its median over one whole trace.
+#: How many times its median a collective may last on average before the window is a stall. A healthy TP2 profile's
+#: ``ar_ll128`` calls stay within a small multiple of their median, and no kernel of its strays far from its own; a
+#: stalled one puts nearly all of its window in ``ar_ll128``, at hundreds of times its median over one whole trace.
 MAX_COLLECTIVE_STALL = 20.0
 #: The fewest calls of a collective whose median says what one call costs.
 MIN_COLLECTIVE_CALLS = 8

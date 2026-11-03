@@ -6,7 +6,7 @@ real local toolbox (pool, leases, tool jobs, blackboard) built over them.
 
 The server log lines are copied from the log of a real Qwen3-14B-FP8 test on gfx950 (SGLang, aiter): the ones that say
 a dense blockscale GEMM missed its tuned table, a per-token one that Forge's reader does not take, and the lines between
-them. The tuned rows are rows of the image's own ``a8w8_blockscale_bpreshuffle`` table (``kernel_rows_cc2bf0ef``).
+them. The tuned rows are rows of the image's own ``a8w8_blockscale_bpreshuffle`` table (``kernel_rows``).
 ``SERVER_ARGS`` is the line SGLang printed at that server's launch, cut to the arguments the readers use (the decode graph
 batch sizes among them), and ``HIT_LOG`` the lines aiter logged for lookups that resolved in a tuned row, in the words of
 the lines of that run.
@@ -36,7 +36,7 @@ from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.toolbox import local_hosted
 from hyperloom_multibranch.toolbox.local_hosted import LocalHostedToolbox, LocalOptions, LocalSession
 from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, FakeRepo, req, lineage_blackboard
-from hyperloom_multibranch.toolbox.tests.kernel_rows_cc2bf0ef import ENV, HEADER, SHARED, install
+from hyperloom_multibranch.toolbox.tests.kernel_rows import ENV, HEADER, SHARED, install
 from hyperloom_multibranch.toolbox.tests.test_card_placement import _PointPerBranch
 from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
 from hyperloom_multibranch.toolbox.tools import kernel_tune
@@ -97,7 +97,7 @@ def table_text(header: str, rows: Iterable[str]) -> str:
     return "".join(f"{line}\n" for line in (header, *rows))
 
 
-def tuned_rows(*, us: Sequence[float] = (7.9691, 8.1), err: Sequence[float] = (0.0029, 0.0)) -> tuple[str, ...]:
+def tuned_rows(*, us: Sequence[float] = (8.0, 8.1), err: Sequence[float] = (0.0029, 0.0)) -> tuple[str, ...]:
     """Rows of the image's table (the first two of ``SHARED``) with the microseconds and mismatch ratio given."""
     rows = []
     for line, microseconds, ratio in zip(SHARED, us, err, strict=False):
