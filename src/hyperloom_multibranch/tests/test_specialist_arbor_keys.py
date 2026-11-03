@@ -4,8 +4,8 @@
 """The component keys an Arbor checkout declares decide what MB writes for it.
 
 A key that changes what Arbor runs, which the pinned Arbor lacks, refuses its start before it runs, naming the Arbor
-commit to pin; an input it can run without is left out, and its branch notes why (boards/hyperloom-multibranch#155
-c4784: an Arbor pin without ``component.profile`` refused three starts in a row).
+commit to pin; an input it can run without is left out, and its branch notes why (an Arbor pin
+without ``component.profile`` once refused three starts in a row).
 """
 
 from __future__ import annotations

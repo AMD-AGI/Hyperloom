@@ -1,5 +1,5 @@
 {
-  "source": "AMD LLM Gateway, https://llm.amd.com/models, read 2026-10-18 (gpt-6-astra 2026-10-24 from /api/models, which lists input and output only; its cache rates take gpt-6-1-sol's ratios); USD per 1M tokens",
+  "source": "The LLM gateway's published model prices, read 2026-10-18 (gpt-6-astra 2026-10-24, listed with input and output only; its cache rates take gpt-6-1-sol's ratios); USD per 1M tokens",
   "models": {
     "claude-opus-5-5": {"input": 4, "output": 20, "cache_read": 0.2, "cache_write": 5, "cache_write_1h": 8},
     "claude-sonnet-5-5": {"input": 2, "output": 10, "cache_read": 0.1, "cache_write": 2.5, "cache_write_1h": 4},

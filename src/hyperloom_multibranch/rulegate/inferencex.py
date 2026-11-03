@@ -20,15 +20,15 @@ from hyperloom_multibranch.rulegate.accuracy import inferencex_accuracy_ok
 # 75% of real +3% gains are confirmed.
 NOISE_MULTIPLE = 2.0
 
-# Three near-identical baselines would otherwise let every flicker through. Repeated tests of one recipe in session
-# c7eddf22 spread 0.34%; at that spread this floor commits about 2% of no-op candidates and confirms about 67% of real
-# +1% gains (simulated), where 1.0 confirmed 29%.
+# Three near-identical baselines would otherwise let every flicker through. At a 0.34% spread between repeated tests
+# of one recipe, this floor commits about 2% of no-op candidates and confirms about 67% of real +1% gains (simulated),
+# where 1.0 confirmed 29%.
 FLOOR_PCT = 0.6
 
 MIN_BASELINES = 2
 # One baseline this far from the median, and this many times the spread of the others, measured something else (a
-# test slowed by its neighbours): in session 8430b18e the root read 6224, 6217 and 5113, and the third alone doubled
-# into a 21.9% bar that no branch could clear.
+# test slowed by its neighbours): root readings of 100, 100 and 82 would otherwise put the bar near 20%, which no
+# branch could clear.
 OUTLIER_MIN_PCT = 5.0
 OUTLIER_MULTIPLE = 4.0
 # PRELUDE measures the root this many times, so one failed measurement still leaves the bar its two.
@@ -39,7 +39,7 @@ GAIN_NOT_CONFIRMED = "gain_not_confirmed"
 # A synthetic benchmark a healthy server completes in full: any request it did not complete is a defect, whatever the
 # parent did, since throughput over the requests that did complete is not the work that was asked for.
 DROPPED_REQUESTS = "dropped_requests"
-#: The long-context check dropped beyond its own sampling noise below the root's reading (#142 c3219, bar (b)).
+#: The long-context check dropped beyond its own sampling noise below the root's reading.
 LONG_CONTEXT_DROPPED = "long_context_dropped"
 _ACCURACY = "accuracy"
 

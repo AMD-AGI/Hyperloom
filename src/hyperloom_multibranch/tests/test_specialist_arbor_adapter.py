@@ -516,7 +516,7 @@ def test_arbor_runs_the_pack_the_spec_names_and_one_its_checkout_lacks_is_refuse
     assert arbor_config(spec, checkout, BRANCH_RUN)["pack"] == "serving"
 
 
-#: A launch Magpie resolves from an InferenceX AgentX recipe (boards/hyperloom-multibranch#157 c4405), as a launch file.
+#: A launch Magpie resolves from an InferenceX AgentX recipe, as a launch file.
 RESOLVED = {
     "server_flags": "--mem-fraction-static 0.8 --chunked-prefill-size 16384",
     "server_env": {"SGLANG_SIMULATE_ACC_LEN": "3", "VLLM_ROCM_USE_AITER": "0"},

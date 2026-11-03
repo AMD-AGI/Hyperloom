@@ -26,7 +26,7 @@ The spec's ``launch``, a launch file (:func:`read_launch`), stands in for what M
 Magpie AgentX recipe resolves from InferenceX, of which the root recipe holds only what is added to it. Without one,
 an AgentX branch is refused before Arbor starts, which would otherwise serve defaults MB does not measure.
 
-The spec's ``review`` hands Arbor's human review gate over (ArborDevelopment #30): Arbor waits at the start of a new
+The spec's ``review`` hands Arbor's human review gate over: Arbor waits at the start of a new
 session for a person's approval unless the host says it reviewed (``component.review: "host"``, :data:`REVIEW_HOST`)
 or the config turns the gate off (``"review_gate": false``, :data:`REVIEW_OFF`). Arbor refuses a component key it does
 not know, so either is written only for a checkout whose component mode has the gate (:func:`has_review_gate`); an
@@ -90,13 +90,12 @@ OUTBOX = "keeps"
 #: The keys of a launch file (:func:`read_launch`): the first two it must give, the others it may.
 LAUNCH_KEYS = ("server_flags", "server_env", "model_name", "client")
 #: The pass floor of the serving pack's GSM8K check, which Arbor reads from the config's ``server_env``; without one
-#: it books every measured iteration whose accuracy it must judge as invalid (Ruby, 2026-11-01: 4 of 20 on one
-#: branch). MB gives it its own absolute floor, ``DEFAULT_ENABLEMENT_ACCURACY_FLOOR``, the part of MB's accuracy rule
-#: that holds on any eval's scale: MB's eval and the pack's lm_eval score one model points apart (Qwen3-8B on Ruby:
-#: 0.939 against 0.870 on the full set), so the rule's other part, at most ``ACCURACY_THRESHOLD`` under the
-#: baseline's score, Arbor applies on its own eval: it measures the root's full GSM8K itself (Arbor ``f0e9abb``) and
-#: holds a numerics change to that less ``ACCURACY_POLICY``'s tolerance; this floor stands when it could not.
-#: MB still judges its own, at its confirm test. A launch file or the recipe may set its own floor.
+#: it books every measured iteration whose accuracy it must judge as invalid. MB gives it its own absolute floor,
+#: ``DEFAULT_ENABLEMENT_ACCURACY_FLOOR``, the part of MB's accuracy rule that holds on any eval's scale: MB's eval
+#: and the pack's lm_eval score one model points apart, so the rule's other part, at most ``ACCURACY_THRESHOLD``
+#: under the baseline's score, Arbor applies on its own eval: it measures the root's full GSM8K itself and holds a
+#: numerics change to that less ``ACCURACY_POLICY``'s tolerance; this floor stands when it could not. MB still judges
+#: its own, at its confirm test. A launch file or the recipe may set its own floor.
 ACCURACY_FLOOR_ENV = "GSM8K_MIN"
 #: Arbor's policy under MB: a numerics change may cost what MB's rule allows, ``ACCURACY_THRESHOLD`` under the root,
 #: measured on Arbor's own eval against the root it scores itself.
@@ -395,7 +394,7 @@ def dossier_notes(checkout: Path, dossier: str | None) -> tuple[str, ...]:
 def pass_dossier(checkout: Path, session: Path) -> Path | None:
     """The dossier a dossier pass in ``checkout`` wrote: the newest directory with an index under :data:`DOSSIER_DIR`
     of the checkout, where git does not track it (the ones it tracks are Arbor's own), or of the pass's ``session``,
-    where Arbor's dossier skill writes it when its agent works from there (Ruby, 2026-11-01: one of three passes did);
+    where Arbor's dossier skill writes it when its agent works from there;
     ``None`` when it wrote none."""
 
     written = [*_written(checkout / DOSSIER_DIR, _shipped(checkout)), *_written(session / DOSSIER_DIR, frozenset())]
@@ -517,7 +516,7 @@ def _operating_point(workload: Mapping[str, object]) -> dict[str, int]:
 def host_rules(spec: AgentSpec) -> list[str]:
     """MB's rules for ``spec``'s runs, as Arbor's ``directives`` (:data:`HOST_RULE`): the workload it holds fixed and
     the variables it owns, how it keeps a change, and its accuracy rule. MB refuses or rejects a change that breaks
-    one, whatever Arbor measured; the dossier lists them among the benchmark's rules (operator, 2026-11-01)."""
+    one, whatever Arbor measured; the dossier lists them among the benchmark's rules."""
 
     point = ", ".join(f"{key} {value}" for key, value in _operating_point(spec.workload).items())
     owned = ", ".join(sorted({*SURFACE_ENV_KEYS, *POINT_ENV_KEYS, *REQUEST_ENV_KEYS}))

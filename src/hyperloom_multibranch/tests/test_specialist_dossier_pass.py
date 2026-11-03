@@ -191,7 +191,7 @@ async def test_a_pass_whose_arbor_exited_is_still_killed_before_its_cards_go_bac
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Arbor's top process exiting says nothing of a server it started, which would hold VRAM on cards back in the
-    pool (#155 c4838)."""
+    pool."""
     killed: list[int | None] = []
     kill = LocalProcess.kill
 

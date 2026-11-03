@@ -1028,7 +1028,7 @@ async def test_a_kernel_table_the_agent_keeps_in_its_workspace_is_imported_as_th
 async def test_a_table_an_agent_reports_in_its_result_file_is_imported_as_rows_over_the_image_s(
     tmp_path: Path,
 ) -> None:
-    """Run 28b3e128's b02: the agent keeps its tuned table in its own checkout and reports the variable it
+    """The agent keeps its tuned table in its own checkout and reports the variable it
     accepted in a result file; the keep is that table alone."""
 
     env = "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE"
@@ -1406,7 +1406,7 @@ async def _imported(rig: Rig) -> TestRequest:
     return request
 
 
-#: The launch the config MB wrote for Arbor in session MB-20261029T093224Z-658b7c4e (b01): its pack's harness
+#: The launch the config MB wrote for an Arbor branch: its pack's harness
 #: variables sit next to the server's own.
 ARBOR_FLAGS = "--tp 1 --max-num-seqs 128"
 ARBOR_ENV = {
@@ -1606,7 +1606,7 @@ def _spec_envs(rig: Rig) -> dict[str, str]:
 async def test_an_agent_opened_on_a_recipe_kb_champion_runs_with_its_tuned_rows_as_a_test_loads_them(
     tmp_path: Path,
 ) -> None:
-    """Session MB-20261029T093224Z-658b7c4e's b01: the champion's tuned GEMM rows were left out of the agent's launch."""
+    """The champion's tuned GEMM rows were left out of the agent's launch."""
 
     configs = _aiter(tmp_path)
     rig = await _rig(tmp_path, start=_replayed(LocalBlobStore(tmp_path / "blobs")), aiter=configs)
