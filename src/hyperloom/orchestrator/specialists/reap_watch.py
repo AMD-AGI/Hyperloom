@@ -70,6 +70,19 @@ def tool_in_flight(cli_pid: int, last_output_unix: float) -> bool:
         return False
 
 
+def cli_alive(workspace: Path, cli_pid: int, *, window_sec: float, now_unix: float) -> bool:
+    """Whether the agent CLI of the specialist in ``workspace`` counts as alive at ``now_unix``.
+
+    The one rule the reaper and ``poll`` both apply: the CLI wrote output (:func:`specialist_activity_paths`) within
+    ``window_sec``, or it is waiting on a tool it started after that output (:func:`tool_in_flight`). A CLI that has
+    written nothing at all is not alive; how long to give one that has not started yet is the caller's.
+    """
+    newest = newest_activity(specialist_activity_paths(workspace))
+    if newest is None:
+        return False
+    return max(0.0, now_unix - newest) <= window_sec or tool_in_flight(cli_pid, newest)
+
+
 def last_activity(path: Path) -> float | None:
     """Newest mtime at ``path``, a directory counting by the newest file below it; ``None`` when there is none."""
     try:

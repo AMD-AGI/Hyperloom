@@ -45,6 +45,7 @@ from hyperloom_common.llm.llm_config import AGENT_BACKEND_CLAUDE, AGENT_BACKEND_
 from .agent_cli_config import _build_specialist_env as build_specialist_env
 from .launch_env import prepare_demote, resolve_launch_user, stage_mcp_config
 from .mcp_config import SPECIALIST_MCP_CONFIG_FILENAME
+from .reap_watch import cli_alive
 from .resources import (
     CONTAINER_RECORD_KIND,
     RESOURCES_RELATIVE_PATH,
@@ -86,8 +87,8 @@ __all__ = [
     "build_specialist_env",
 ]
 
-#: No heartbeat or process-log activity for this long, and ``poll`` reports the session lost; the reap loop ends a CLI
-#: whose own output is silent this long with no tool call in flight.
+#: How long a CLI may stay silent. Past it with no tool call in flight, the reap loop ends the CLI and ``poll`` reports
+#: it lost; ``poll`` also counts a beat and the session's start as life within it.
 LOST_AFTER_SEC: float = 300.0
 
 #: Minimum session length for a long-lived (one per branch) specialist.
@@ -370,8 +371,9 @@ class RunnerHost:
 @dataclass(frozen=True)
 class Liveness:
     """When a session counts as alive: CPU work of ``activity_cpu_seconds`` in one sampling period beats its heartbeat,
-    and ``lost_after_seconds`` with no heartbeat and no process-log growth loses it in ``poll``. The reap loop reads
-    only the CLI's output and the tool call it waits on, over the same window."""
+    and ``lost_after_seconds`` is how long its CLI may be silent. ``poll`` and the reap loop apply
+    :func:`~hyperloom.orchestrator.specialists.reap_watch.cli_alive` over that window, the CLI's output or a tool call it
+    started after that output; ``poll`` also counts a beat, which the reap loop does not read."""
 
     activity_cpu_seconds: float = ACTIVITY_CPU_SECONDS
     lost_after_seconds: float = LOST_AFTER_SEC
@@ -521,9 +523,20 @@ class LocalAgentRunner:
                 timed_out=bool(outcome.get("timed_out")),
                 error=str(outcome.get("error", "")),
             )
-        if self._wall() - (heartbeat or session.started_unix) > self._lost_after:
+        if await self._silent(session, heartbeat):
             return AgentStatus(STATE_LOST, None, heartbeat, error=f"no heartbeat for more than {self._lost_after:.0f}s")
         return AgentStatus("running", None, heartbeat)
+
+    async def _silent(self, session: _Session, heartbeat: float | None) -> bool:
+        """Whether nothing shows the session alive. A beat, the CLI's process log or the session's start within the
+        window does; past it, so does what the reap loop counts: the CLI's other output, or a tool it waits on."""
+        now = self._wall()
+        if now - (heartbeat or session.started_unix) <= self._lost_after:
+            return False
+        alive = await asyncio.to_thread(
+            cli_alive, session.spec.workspace, session.proc.pid, window_sec=self._lost_after, now_unix=now
+        )
+        return not alive
 
     async def cancel(self, handle: AgentHandle) -> None:
         session: _Session = handle.session
