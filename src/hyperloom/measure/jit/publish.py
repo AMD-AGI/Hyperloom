@@ -58,20 +58,24 @@ def _publish_kind(store: DirJitStore, handle: Sandbox, kind: str, signed: JitCon
     (staged / BLOBS_DIR).mkdir()
     (staged / MANIFEST_NAME).write_bytes(handle.read_file(f"{source}/{MANIFEST_NAME}"))
     snapshot = _verified_snapshot(staged, signed.sha256)
+    staged_by_runner = _staged_by_runner(store, snapshot)
     for relative, entry in snapshot.files.items():
-        if _was_staged(store, snapshot, relative) or not store.holds(entry.sha256):
+        if relative in staged_by_runner or not store.holds(entry.sha256):
             handle.copy_out(f"{source}/{BLOBS_DIR}/{entry.sha256}", staged / BLOBS_DIR / entry.sha256)
     store.publish(staged, signed.sha256)
 
 
-def _was_staged(store: DirJitStore, snapshot: Snapshot, relative: str) -> bool:
-    """Whether the runner staged this file itself: it is one the snapshot it extended did not have. Those are brought even
-    when the store holds a blob of that name, so a stored blob that is damaged is repaired by the bytes the test built; a
-    file taken from the cache was not staged, and is not fetched back."""
+def _staged_by_runner(store: DirJitStore, snapshot: Snapshot) -> frozenset[str]:
+    """The files the runner staged itself: those the snapshot it extended did not have. Those are brought even when the
+    store holds a blob of that name, so a stored blob that is damaged is repaired by the bytes the test built; a file taken
+    from the cache was not staged, and is not fetched back. The parent's listing is read once for the whole snapshot: a
+    snapshot holds thousands of files and each read parses the whole listing."""
     if snapshot.parent is None:
-        return True
+        return frozenset(snapshot.files)
     parent = store.listing(kind_named(snapshot.kind), snapshot.key, snapshot.parent)
-    return parent is not None and parent.get(relative) != snapshot.files[relative]
+    if parent is None:
+        return frozenset()
+    return frozenset(relative for relative, entry in snapshot.files.items() if parent.get(relative) != entry)
 
 
 def _verified_snapshot(staged: Path, signed_sha256: str) -> Snapshot:
