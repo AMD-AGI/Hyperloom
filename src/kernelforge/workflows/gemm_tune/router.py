@@ -44,9 +44,9 @@ _1STAGE_PATTERN = re.compile(r"using 1stage default", re.IGNORECASE)
 # tier3's DEFAULT_MIN_MISSES, read off the same demand report.
 DEMAND_MIN_MISSES = 25
 
-_FP4_UNSUPPORTED_GFX = {"gfx942"}
+_FP4_UNSUPPORTED_GFX = {"gfx942", "gfx1201"}
 
-_FP4_GFX942_SKIP_REASON = "FP4/MXFP4 GEMM unsupported on gfx942 (aiter requires gfx950)"
+_FP4_SKIP_REASON = "FP4/MXFP4 GEMM unsupported on {gfx_arch} (aiter requires gfx950)"
 
 
 def _requests_detection(gpu_type: str) -> bool:
@@ -463,7 +463,7 @@ def _select_sglang_moe_tuners(
                 tuners.append(
                     TunerSpec(
                         "fmoe_ck",
-                        skip_reason=_FP4_GFX942_SKIP_REASON,
+                        skip_reason=_FP4_SKIP_REASON.format(gfx_arch=gfx_arch),
                         priority=10,
                         estimated_minutes=0,
                     )
@@ -548,7 +548,7 @@ def _select_sglang_dense_tuners(
             tuners.append(
                 TunerSpec(
                     "a4w4_blockscale",
-                    skip_reason=_FP4_GFX942_SKIP_REASON,
+                    skip_reason=_FP4_SKIP_REASON.format(gfx_arch=gfx_arch),
                     priority=20,
                     estimated_minutes=0,
                 )
