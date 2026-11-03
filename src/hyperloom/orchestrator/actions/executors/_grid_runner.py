@@ -248,7 +248,7 @@ def _probe_vllm_aiter_shared_expert_unsupported() -> str | None:
 
 
 def unsupported_capability_reason(variant: "GridVariant") -> str | None:
-    """Return why a variant cannot boot (a config file not on disk, an env flag the build lacks), else ``None``."""
+    """Return why a variant cannot run (a config table not on disk, an env flag the build lacks), else ``None``."""
     envs = {str(k): str(v) for k, v in (getattr(variant, "extra_envs", None) or {}).items()}
     if missing_file := ungrounded_env_file_reason(envs):
         return missing_file
