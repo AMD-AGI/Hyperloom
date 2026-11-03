@@ -9,9 +9,10 @@ Nothing here runs a GPU. A measurement is ``baseline * (1 + effect) * (1 + node 
 * the node bias is fixed per node for the whole run (two tests on one node share it, a retest on another node does not);
 * the test noise is drawn per attempt.
 
-The defaults of the bias follow the cross-node baseline spread measured on the fleet: the median absolute bias is
-about 0.4 % and the 90th percentile about 3.3 %. Every draw comes from a generator seeded by the toolbox seed and the
-thing drawn for (a node, or a request and its attempt number), so a run does not depend on the order tests ran in.
+The default bias has the shape of a cross-node baseline spread, small on most nodes and a few percent on some: a
+median absolute bias of 0.4 % and a 90th percentile of 3.3 % (:class:`NoiseModel`). Every draw comes from a generator
+seeded by the toolbox seed and the thing drawn for (a node, or a request and its attempt number), so a run does not
+depend on the order tests ran in.
 """
 
 from __future__ import annotations

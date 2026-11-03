@@ -36,7 +36,7 @@ _SEAL = object()
 
 
 class RejectReason(str, Enum):
-    """Which check of 4.7 a bundle failed."""
+    """Which check of :func:`verify_bundle` (or :func:`reverify_record`) a bundle failed."""
 
     STAGING_MISSING = "staging_missing"
     MANIFEST_MISSING = "manifest_missing"
@@ -130,7 +130,10 @@ class RecordedBundle:
 def verify_bundle(
     staging_dir: Path, expected: BundleExpectation, *, max_total_bytes: int | None = None
 ) -> VerifiedBundle:
-    """Run the five checks of 4.7 against ``expected``; any failure raises :class:`ResultRejected`."""
+    """Check the signature, the manifest, the identity, the total size and every file against ``expected``.
+
+    Any failure raises :class:`ResultRejected`.
+    """
     root_fd = _open_staging(Path(staging_dir))
     try:
         manifest_raw = _read_small(root_fd, MANIFEST_NAME, MAX_MANIFEST_BYTES, RejectReason.MANIFEST_MISSING)

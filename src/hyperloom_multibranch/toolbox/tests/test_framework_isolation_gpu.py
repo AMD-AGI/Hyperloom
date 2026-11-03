@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Two sequential accuracy tests whose aiter config lists the image's table and another for one variable (W81b).
+"""Two sequential accuracy tests whose aiter config lists the image's table and another for one variable.
 
 aiter merges the tables a variable lists and writes the de-duplicated rows back into each source file; listing the
 image's own table made that a write into the image, which every later test then measured. Each test here lists the

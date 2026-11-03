@@ -206,7 +206,7 @@ def _stamp(directory: Path, text: str) -> None:
 
 
 def test_the_boot_of_a_test_is_the_longest_boot_its_round_stamps_record(tmp_path: Path) -> None:
-    _stamp(tmp_path / "variant_00_warmup", "1792596681.010 82.221\n")  # the stamps of a real graded test
+    _stamp(tmp_path / "variant_00_warmup", "1792596681.010 82.221\n")  # the stamps of a graded test
     _stamp(tmp_path / "variant_00_test", "1792596811.700 0.000\n")  # its measured round found the server ready
 
     assert boot_seconds(tmp_path) == 82.221

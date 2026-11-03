@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 """What ``kernel_tune`` reads of a test's landed output: the workload its server ran, and the shapes its log reports untuned,
-read by Forge's own reader from the lines of a real server log."""
+read by Forge's own reader from the lines of a server log (``kernel_tune_rig``'s)."""
 
 from __future__ import annotations
 

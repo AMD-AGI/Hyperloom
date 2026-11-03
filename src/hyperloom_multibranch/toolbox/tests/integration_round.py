@@ -101,7 +101,7 @@ async def wait_until(check: Callable[[], Awaitable[Any]], what: str, timeout: fl
 
 
 async def submit(sp: Specialist, parent: str, probe: Probe, **fields: Any) -> str:
-    """Steps 3 and 4 of 6.1: claim the intent in the blackboard, then submit the test with the specialist's own token."""
+    """Claim the intent in the blackboard, then submit the test with the specialist's own token."""
     await sp.call(
         "blackboard_claim",
         parent_commit=parent,

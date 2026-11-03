@@ -3,12 +3,11 @@
 
 """A failed test's reason names the cause its server log or its benchmark's stderr states.
 
-The logs are sanitised copies of the three kinds that ended a 12 h session as ``no_known_signature``: the server
-refusing its own command line, the evaluation client answered ``400``, and a worker dying on a Python exception. The
-fourth, an import that failed, is the server.log lines of a real SGLang server (one card) asked for
-``--load-format fastsafetensors``. The two HIP logs are lines of the next 12 h session's server.logs, where twelve
-candidates ended as ``hip_kernel_missing`` although no kernel was missing: a patched kernel that read out of bounds and
-a CUDA graph capture that was invalidated.
+The logs are sanitised, of three kinds a reason must name instead of ``no_known_signature``: the server refusing its
+own command line, the evaluation client answered ``400``, and a worker dying on a Python exception. The fourth, an
+import that failed, is the server.log lines of an SGLang server (one card) asked for ``--load-format fastsafetensors``.
+The two HIP logs are the kind that reads as ``hip_kernel_missing`` although no kernel is missing: a patched kernel that
+read out of bounds and a CUDA graph capture that was invalidated.
 """
 
 from __future__ import annotations

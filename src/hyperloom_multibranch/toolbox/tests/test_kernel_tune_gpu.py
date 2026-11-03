@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""``kernel_tune`` runs Forge's real tuner on one real card for shapes a real server log reports untuned.
+"""``kernel_tune`` runs Forge's real tuner on one real card for shapes a server log reports untuned.
 
-The toolbox is the real local one; the test is landed output with the lines of a real server log (Qwen3-14B-FP8 on gfx950:
+The toolbox is the real local one; the test is landed output with the lines of a server log (``kernel_tune_rig``'s:
 two dense blockscale GEMMs that missed their tuned table), the tool leases its card from the toolbox's pool, runs
 ``kernelforge gemm-tune run`` on it for the shapes' padded M and the decode band of the point's concurrency, and answers
 with the rows-only CSV. What must hold: the job succeeds and held exactly one leased card while it ran (``leased_cards``
@@ -53,7 +53,7 @@ OUT = os.environ.get("HL_TUNE_OUT", "")
 CARD = int(os.environ.get("HL_TUNE_CARD", "-1"))
 DEFAULT_TABLE = Path(DEFAULT_CONFIGS) / "a8w8_blockscale_bpreshuffle_tuned_gemm.csv"
 TIMEOUT_SEC = 3600
-#: The two untuned shapes: the (N, K) of the model's gate_up and o projections, as the real log reports them at M=496.
+#: The two untuned shapes: the (N, K) of the model's gate_up and o projections, as the log reports them at M=496.
 UNTUNED = ("M:496, N:5120, K:5120", "M:496, N:34816, K:5120")
 pytestmark = pytest.mark.skipif(
     not (Path(MODEL, "config.json").is_file() and Path(OUT).is_dir() and CARD >= 0 and DEFAULT_TABLE.is_file()),
@@ -65,8 +65,8 @@ def probe(label: str, **fields: object) -> None:
     print(f"PROBE {label} " + json.dumps(fields, default=str), flush=True)
 
 
-def real_log() -> str:
-    """The lines of the real server log that say these two shapes missed the blockscale table."""
+def untuned_log() -> str:
+    """The lines of the server log that say these two shapes missed the blockscale table."""
     return "".join(line + "\n" for line in SERVER_LOG.splitlines() if any(shape in line for shape in UNTUNED))
 
 
@@ -84,7 +84,7 @@ async def test_the_real_tuner_tunes_two_untuned_shapes_on_the_leased_card_and_th
     await box.start()
     try:
         assert "kernel_tune" in box.analysis_tools
-        landed_test(session, Path(MODEL), log=real_log(), concs=(1,))
+        landed_test(session, Path(MODEL), log=untuned_log(), concs=(1,))
         await record_test(blackboard)
         job = await box.submit_analysis("b1", "kernel_tune", {"test_request_id": TEST_ID, "timeout_sec": TIMEOUT_SEC})
         await asyncio.sleep(5)

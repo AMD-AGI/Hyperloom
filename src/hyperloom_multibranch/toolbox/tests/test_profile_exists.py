@@ -155,8 +155,8 @@ async def test_another_commit_another_recipe_and_other_kinds_are_accepted(tmp_pa
 
 
 async def test_a_merge_commit_whose_recipe_is_its_sources_reuses_the_sources_profile(tmp_path: Path) -> None:
-    """Two merge commits of one session held their source's recipe (the same tree) and were profiled again, about 70
-    GPU-minutes. The recipe, not the commit, keys a profile."""
+    """A merge commit can hold its source's recipe (the same tree); profiling it again spends GPU time on a trace the
+    session has. The recipe, not the commit, keys a profile."""
     rig = build(tmp_path, executor=gated())
     with_second_commit(rig, rig.repo.recipes[PARENT])
     first = await rig.toolbox.submit_test(profile("b1"))

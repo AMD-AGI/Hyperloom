@@ -110,9 +110,9 @@ _REASON_DETAIL_CHARS = 300
 #: What an infrastructure failure's reason keeps of what the runner or the platform said: its beginning, which names the
 #: failing step, with room for the sandbox and node it names after the runner's bounded message.
 _INFRA_DETAIL_CHARS = FAILURE_DETAIL_CHARS + 300
-#: Why a profile whose traces are all CUDA-graph capture sidecars is no result. Measured on a NEXTN head: the server's log
-#: has ``POST /start_profile`` but never ``Profiling starts``, because the run's last forward step came before the step the
-#: capture window starts at (speculative decoding takes several tokens per step).
+#: Why a profile whose traces are all CUDA-graph capture sidecars is no result: the server's log has
+#: ``POST /start_profile`` but never ``Profiling starts`` when the run's last forward step comes before the step the
+#: capture window starts at (speculative decoding, which takes several tokens per step, gets there sooner).
 PROFILE_WITHOUT_STEPS = (
     "profile_without_steps: the profile holds only CUDA-graph capture traces; the profiler never recorded a serving "
     "step (the server log says whether 'Profiling starts' followed /start_profile)"
