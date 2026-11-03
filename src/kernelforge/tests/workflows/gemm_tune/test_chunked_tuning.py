@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 import kernelforge.workflows.gemm_tune.tuners._aiter_dense_common as ac
+import kernelforge.workflows.gemm_tune.tuners._dense_args as dense_args
 from kernelforge.tests.workflows.gemm_tune._sglang_dense_bf16_run import _csv, _ctx, _prep
 from kernelforge.workflows.gemm_tune.dense_shapes import compute_decode_m_values
 from kernelforge.workflows.gemm_tune.tuners import _chunks
@@ -236,7 +237,9 @@ class TestAiterDense:
         monkeypatch.setattr(ac, "resolve_aiter_root", lambda: str(tmp_path))
         monkeypatch.setattr(ac._tr, "is_isolation_enabled", lambda: False)
         monkeypatch.setattr(ac._tr, "with_task_timeout", lambda cmd: cmd)
-        monkeypatch.setattr(ac, "probe_script", lambda script: types.SimpleNamespace(supports=lambda flag: True))
+        monkeypatch.setattr(
+            dense_args, "probe_script", lambda script: types.SimpleNamespace(supports=lambda flag: True)
+        )
         clock = _Clock()
         monkeypatch.setattr(ac, "time", types.SimpleNamespace(time=clock), raising=False)
 

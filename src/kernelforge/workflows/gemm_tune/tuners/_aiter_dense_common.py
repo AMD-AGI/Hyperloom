@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from ._chunks import ChunkBudget
+from ._dense_args import dense_tuner_args
 from ._dense_chunks import DenseRun, run_dense_chunks
 from ._timings import unmeasured_timings
 from .base import TuneContext, TuneResult, micro_metrics
@@ -26,7 +27,6 @@ from ..aiter_graph_retime import RetimeTarget
 from ._graph_retime import retime_table
 from ._row_accuracy import RelNormFn, drop_inaccurate_rows, dropped_row_record
 from ._serve_safe import _SPLITK_FORWARDING_LIBTYPES, _fastest_serve_safe, _serve_safe_candidates, _SplitKLimit
-from ..script_probe import filter_args, probe_script
 from ..utils import find_tuner_script, resolve_aiter_root, run_subprocess
 from .. import tune_robustness as _tr
 
@@ -869,7 +869,6 @@ def run_aiter_dense_tuner(spec: DenseTunerSpec, ctx: TuneContext, work_dir: Path
     if script is None:
         return _failed_result(tuner_name, f"Tuner script not found for {script_key}", "script_missing")
 
-    # a8w8 and bpreshuffle need q_dtype_w column in CSV
     needs_q_dtype_w = tuner_name in ("a8w8", "a8w8_bpreshuffle")
     # Demand outranks every other shape source: it is the set of keys the runtime asked for and did not have.
     input_csv = _demand_input_csv(ctx, work_dir, tuner_name, needs_q_dtype_w=needs_q_dtype_w) or _resolve_input_csv(
@@ -881,27 +880,7 @@ def run_aiter_dense_tuner(spec: DenseTunerSpec, ctx: TuneContext, work_dir: Path
     tuned_csv = work_dir / f"tuned_{tuner_name}.csv"
     profile_csv = work_dir / f"profile_{tuner_name}.csv"
 
-    # Flags shared by every shape (everything except -i/-o). aiter --timeout is injected below to activate mp_tuner's
-    # per-candidate GPU-fault isolation.
-    base_args = [
-        "-o2",
-        str(profile_csv),
-        "--mp",
-        str(ctx.mp),
-        "--compare",
-        "--iters",
-        str(ctx.iters),
-        "--warmup",
-        str(ctx.warmup),
-        "--min_improvement_pct",
-        str(ctx.min_improvement_pct),
-        "-v",
-    ]
-    if spec.extra_args:
-        base_args.extend(spec.extra_args)
-
-    # Check the script's argparse surface before spending minutes on it.
-    filtered = filter_args(base_args, probe_script(script))
+    filtered = dense_tuner_args(script, ctx, profile_csv, spec.extra_args)
     if not filtered.ok:
         return _failed_result(
             tuner_name,
