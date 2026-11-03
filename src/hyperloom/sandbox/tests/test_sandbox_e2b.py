@@ -453,7 +453,7 @@ def test_from_environ_reads_the_keys_and_both_addresses(service: _Service) -> No
     assert service.calls("GET", "/v2/sandboxes")[0].headers["x-api-key"] == KEY_DEV
 
 
-#: The workspace a SaFE key used directly names (the one of #156's runs), and the variable that sets it.
+#: The workspace a SaFE key used directly names, and the variable that sets it.
 WORKSPACE = "top-models"
 WORKSPACE_ENV = "HYPERLOOM_SANDBOX_WORKSPACE"
 
@@ -499,8 +499,8 @@ def test_a_blank_workspace_is_refused() -> None:
         E2BSandboxProvider({"dev": KEY_DEV}, workspace="  ")
 
 
-#: How the service refuses a create by a key whose user may create in several workspaces when it names none (#156
-#: c4103: ``400 workspace_required``), in the E2B error body (the SDK requires its ``code`` and ``message``, and keeps only
+#: How the service refuses a create by a key whose user may create in several workspaces when it names none (a 400
+#: ``workspace_required``), in the E2B error body (the SDK requires its ``code`` and ``message``, and keeps only
 #: ``message``): the reason alone, or first, as the service words its other reasons.
 WORKSPACE_REQUIRED_BODIES = [
     {"code": 400, "message": "workspace_required"},
