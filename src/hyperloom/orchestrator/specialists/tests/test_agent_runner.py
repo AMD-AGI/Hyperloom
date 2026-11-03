@@ -615,3 +615,75 @@ async def test_a_wall_budget_extension_left_by_an_earlier_run_does_not_move_the_
     handle = await runner.launch(make_spec(tmp_path / "w"))
     assert "task-1" not in registry
     await stop_and_collect(runner, handle)
+
+
+QUIET_TOOL = "import subprocess; subprocess.run(['sleep', '60'])"  # the CLI waits on a command it started
+
+
+def quiet_runner(tmp_path: Path, *, window: float = 1.0):
+    """A runner on the real clock with a short window; its sampler never beats, so only the CLI's own output and the
+    tool it waits on tell ``poll`` and the reaper that it is alive."""
+    return make_runner(
+        tmp_path / "session",
+        poll_interval_seconds=0.1,
+        liveness=Liveness(activity_cpu_seconds=1e9, lost_after_seconds=window),
+    )
+
+
+async def until_tool_started(handle) -> None:
+    end = real_time.time() + 20
+    while not descendants(handle.pid):
+        assert real_time.time() < end, "the tool call never started"
+        await real_asyncio.sleep(0.02)
+
+
+def go_quiet(spec) -> None:
+    """The CLI's last output and the last beat were ten minutes ago."""
+    old = real_time.time() - 600
+    for path in (spec.heartbeat_path, spec.workspace / "process.log"):
+        path.touch()
+        os.utime(path, (old, old))
+
+
+async def test_a_quiet_tool_call_past_the_window_reads_alive_in_poll_and_is_kept_by_the_reaper(tmp_path: Path) -> None:
+    runner = quiet_runner(tmp_path)
+    spec = make_spec(tmp_path / "w", code=QUIET_TOOL)
+    handle = await runner.launch(spec)
+    try:
+        await until_tool_started(handle)
+        go_quiet(spec)
+        assert (await runner.poll(handle)).state == "running"
+        await real_asyncio.sleep(2.5)  # past two windows, where the reaper has ended a CLI that waits on nothing
+        assert not handle.session.outcome
+        assert (await runner.poll(handle)).state == "running"
+    finally:
+        await stop_and_collect(runner, handle)
+
+
+async def test_a_tool_call_in_flight_is_bounded_by_the_session_deadline_in_poll_and_the_reaper(tmp_path: Path) -> None:
+    runner = quiet_runner(tmp_path)
+    spec = make_spec(tmp_path / "w", code=QUIET_TOOL, deadline_unix=real_time.time() + 3.0)
+    handle = await runner.launch(spec)
+    try:
+        await until_tool_started(handle)
+        go_quiet(spec)
+        status = await wait_finished(runner, handle)
+        assert (status.state, status.timed_out) == ("exited", True)
+        assert not handle.session.outcome["stale_heartbeat"]
+    finally:
+        await stop_and_collect(runner, handle)
+
+
+async def test_a_silent_cli_with_no_tool_in_flight_is_lost_in_poll_and_in_the_reaper(tmp_path: Path) -> None:
+    runner = quiet_runner(tmp_path)
+    spec = make_spec(tmp_path / "w")
+    handle = await runner.launch(spec)
+    try:
+        go_quiet(spec)
+        status = await runner.poll(handle)
+        assert (status.state, status.returncode) == ("lost", None)  # the process is up and the reaper has not acted
+        status = await wait_finished(runner, handle)
+        assert status.state == "lost"
+        assert handle.session.outcome["stale_heartbeat"]
+    finally:
+        await stop_and_collect(runner, handle)
