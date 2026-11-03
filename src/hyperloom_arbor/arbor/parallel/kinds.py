@@ -6,7 +6,7 @@ Four kinds (arbor/directions.py `LANES`), each one Arbor campaign on one node:
   itself, closed done by a KEEP that cites it, or killed or below_floor on
   evidence; a plan with an ITEMS block makes those its items instead.
 - kernel-plan: a rewrite's plan, stage by stage (S1-S5, arbor/stages.py),
-  with the kernel level only and ruppell built (PROFILES=1).
+  with the kernel level only and the profiler on (PROFILES=1).
 - architectural: a layout change judged at several operating points. ARM
   measures one layout at every point of the plan's table on this node (a
   same-node multi-point A/B); FRONTIER lands the layout that dominates it

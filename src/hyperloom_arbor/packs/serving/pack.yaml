@@ -13,7 +13,7 @@ description: >
   THE METHOD (from the `balanced` pack, the v2 line): local increments balanced against the big
   directions and kernel plans that one-change iterations rarely reach. Two skills by default:
   `dossier` (the map of where the work is, looked up first and written if missing, section 3) and
-  `profiler` (every profile uses ruppell, not the PyTorch profiler). The `hardware`,
+  `profiler` (TraceLens on PyTorch-profiler traces, the host's profile first). The `hardware`,
   `serving-playbook` and `kernels` skills may be added by a pack derived from this one. Four
   harness rules (section 12): a documented bundle is one claim; every dead end carries its image
   and operating point; each arm's configuration is proven; a change to a numerics knob is gated
@@ -101,7 +101,7 @@ constraints:
   - "A DOSSIER ITERATION IS A LEARN: `INTENT: LEARN`, no change to the served tree, and at least one LEDGER record (a FACT per part written, naming the file and the part). Without a ledger record the harness reads 'no changes' and counts a null. Up to 6 LEARNs may run in a row (policy above)."
   - "THE DOSSIER'S DIRECTIONS ARE THE MAP. Give each direction in part 11 a map ID (`m-<component>`, e.g. `m-moe-experts`, `m-attn`), cite it in DONE lines and ledger records, and refresh parts 7 and 8 after every KEEP: the bottleneck moves."
   - "A REWRITE IS NOT A SINGLE ITERATION: write its kernel plan (the dossier skill's kernel-plan.md) and build it in stages, each with its own gate."
-  - "PROFILE WITH THE `profiler` SKILL, NEVER THE PYTORCH PROFILER. ruppell is the profiler skill's vendored copy; a launcher builds it in the container. A model ruppell has not traced before is a new target: follow its new-target.md, run the facts job and its checks first, and label every number unvalidated until they pass. Reports go to <session>/profiles/<name>/PROFILE.md. Profile the measured phase, not the bench's warmup, and record how many requests were running in the window. Stop any traced server before DONE."
+  - "PROFILE WITH THE `profiler` SKILL: the host's profile first (component.profile, in component mode), then TraceLens on a PyTorch-profiler trace of the served program; an eager trace only for op attribution, labelled eager. A KEEP never carries the profiler settings. Reports go to <session>/profiles/<name>/PROFILE.md. Profile the measured phase, not the bench's warmup, and record how many requests were running in the window. Stop any traced server before DONE."
   - "LOOK FOR THE CUDA COUNTERPART. If the model code has an NVIDIA or common path beside its ROCm one, diff them per component: it feeds the dossier's part 8. The CUDA path is the specification for what should exist."
 
   # ======================================================================

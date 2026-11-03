@@ -9,7 +9,7 @@ multi-branch (MB) runs as a component when a session is given `--autonomous-agen
 | Source | `AMD-AGI/Arbor` (internal) |
 | Tag | `v0.9.1` |
 | Commit | `123cd15` |
-| Files | 440 |
+| Files | 310 |
 | Licence | Apache-2.0, [`LICENSE`](LICENSE) (`REUSE.toml` at the repository root says so per file) |
 
 ## What it holds
@@ -18,7 +18,7 @@ The engine and what its agents read:
 
 - `arbor/`, the harness: the loop, the gates, component mode, the dossier and stage machinery;
 - `.claude/skills/`, the skills its agents use (the dossier, the profiler, kernels, hardware, the serving playbook and
-  the rest);
+  the rest). The profiler skill is this copy's own: it profiles with TraceLens (below);
 - `packs/serving` (the template MB names by default), `packs/agentx`, `packs/_shared`, `packs/parallel-dossier` and
   the `evolve-asm` packs;
 - `docs/`, the operator and host documentation; `evals/`, the session tracer the skills' hooks call; `scripts/pack/`;
@@ -34,14 +34,20 @@ The engine and what its agents read:
   `/data/...`, `/shared/...`, `<fork>`, `<colleague>`, `Model M`, `Model W` and the like. Identifiers that carried such
   a name were renamed the same way everywhere in this copy (for example `CAMPAIGN_CONFIG` for a launcher variable), so
   the copy is consistent with itself.
+- **Profiling on TraceLens:** upstream, Arbor's profiler skill traces with a tracer of its own, which is not released
+  here. In this copy the skill (`.claude/skills/profiler/SKILL.md`) profiles with TraceLens instead, as this repository
+  does:
+  - the host's profile first (`component.profile`: MB's PRELUDE TraceLens profile of the root);
+  - then, for what that does not cover, a PyTorch-profiler trace of the served program, read with
+    `TraceLens_generate_perf_report_pytorch_inference`.
+
+  Every mention of the other tracer, in the agents' program (`arbor/pack/render.py`), the `serving` pack, the dossier
+  skill and the docs, says TraceLens instead.
 
 ## What it carries from elsewhere
 
-- **ruppell,** AMD's graph-aware tracer, in `.claude/skills/profiler/ruppell/` at the commit its `VENDOR.md` names. It
-  builds against NCCL's profiler-plugin headers in `runtime/third_party/nccl_profiler/` (NVIDIA, BSD-3-Clause, their
-  `LICENSE.txt` beside them).
-- **KernelForge pages,** in `.claude/skills/kernels/reference/` and `.claude/skills/hardware/reference/` (MIT, as
-  `src/kernelforge`), among them one FlyDSL reference kernel (Apache-2.0, FlyDSL Project Contributors).
+**KernelForge pages,** in `.claude/skills/kernels/reference/` and `.claude/skills/hardware/reference/` (MIT, as
+`src/kernelforge`), among them one FlyDSL reference kernel (Apache-2.0, FlyDSL Project Contributors).
 
 ## How it is used
 
@@ -53,7 +59,7 @@ clones it; starting an Arbor from this tree is a change to MB of its own.
 ## How it is updated
 
 Never edit it here: a change is made in Arbor and the copy is taken again, whole, from a new tag, with the same
-omissions and placeholders, by the Arbor maintainers' vendoring tool. The tool refuses a copy that still names any of
+omissions, placeholders and TraceLens profiler skill, by the Arbor maintainers' vendoring tool. The tool refuses a copy that still names any of
 the replaced terms. Linting, formatting and code metrics skip this tree (`pyproject.toml`: `[tool.ruff]`,
 `[tool.hyperloom.code_metrics]`, `[tool.bandit]`), as for the other vendored code; secret scanning and the licence check
 do not.

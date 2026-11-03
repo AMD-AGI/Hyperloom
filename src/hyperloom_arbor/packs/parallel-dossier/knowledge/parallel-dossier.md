@@ -16,7 +16,7 @@ commits after every iteration.
 | `inputs/tree/vllm/` | the round's base tree: the last round's integrated tree (or the run's base) |
 | `inputs/ROUND.md` | the last round's record: lanes and their clocks, items and verdicts, the integration table, what is reopenable, the directions its lanes proposed, the rewrites awaiting approval |
 | `inputs/lanes/<lane>/` | each earlier lane's session as the knowledge collector stages it: `summary/`, `outcomes/OUTCOMES.md`, `findings/FINDINGS.md`, `artifacts/` (the kept iterations' patches, the ledger) |
-| `inputs/profile/`, `inputs/bar.json` | part B only: the round's ruppell capture and its bar, measured on one node |
+| `inputs/profile/`, `inputs/bar.json` | part B only: the round's profile capture and its bar, measured on one node |
 
 `inputs/` is read-only (the correctness check). Everything in it can be cited by path.
 

@@ -54,7 +54,7 @@ Design records: [docs/component-mode.md](docs/component-mode.md),
 | `packs/` | what a campaign optimizes and how it is measured |
 | `configs/` | where a campaign runs |
 | `scripts/` | launchers and tools for the clusters (Cluster A, Cluster B), parallel mode, the component test |
-| `.claude/skills/` | skills the agents may use (dossier, profiler with ruppell, kernels, hardware, ...) |
+| `.claude/skills/` | skills the agents may use (dossier, profiler with TraceLens, kernels, hardware, ...) |
 | `docs/` | this documentation, design records, and model dossiers (`docs/dossier/`, read by the dossier skill) |
 | `evals/` | trajectory traces of campaigns |
 | `results/` | records of past campaigns |

@@ -63,11 +63,3 @@ path = "src/hyperloom_arbor/.claude/skills/kernels/reference/examples/flydsl-sof
 precedence = "override"
 SPDX-FileCopyrightText = "FlyDSL Project Contributors"
 SPDX-License-Identifier = "Apache-2.0"
-
-# NCCL's profiler-plugin headers, which the ruppell tracer in Arbor's profiler skill builds
-# against; their licence is beside them (LICENSE.txt).
-[[annotations]]
-path = "src/hyperloom_arbor/.claude/skills/profiler/ruppell/runtime/third_party/nccl_profiler/**"
-precedence = "override"
-SPDX-FileCopyrightText = "2015-2024 NVIDIA CORPORATION"
-SPDX-License-Identifier = "BSD-3-Clause"

@@ -3,7 +3,7 @@
 The share lays campaigns out as ``projects/<project>/<user>/<campaign>/``, so
 every campaign on one model has to land in one ``<project>``. Campaigns name the
 model many ways (pack ``agentx-dsv41-cg8b``, session
-``dsv41flash-c32-v2.1-ruppell``, model ``deepseek-ai/DeepSeek-V4.1-Flash``);
+``dsv41flash-c32-v2.1``, model ``deepseek-ai/DeepSeek-V4.1-Flash``);
 ``projects.json`` maps them to one name. A name it does not know becomes a slug
 of itself, and the collector says so, so a new family shows up as its own
 project until someone adds it to the table.

@@ -78,7 +78,7 @@ DeepSeek V4.1 Flash, AgentX, MI355X, in `<fork>/jiaweic-runner`:
 | workload | `workload/l01-understand-your-workload-first.md`, `workload/r01-agentx-seed-workload-study.md` |
 | kernels and KernelForge | `docs/kernelforge.md` |
 | what worked and what did not | `research/optimization-ledger.md` |
-| profiles | `research/profiling-inventory.md`; ruppell's `docs/analysis/` (MI350, and B200 in `dsv41-agentx-b200.md`) |
+| profiles | `research/profiling-inventory.md`; the host's TraceLens profile (`component.profile`), in component mode |
 
 ## Ask the user first
 
@@ -106,7 +106,7 @@ dossier's index under "Open asks" and go on.
   if the evidence exists; 6 and 7 need a node; 8 needs 3 and 7; 9 needs the
   user; 11 is written last, from the others only.
 - **The profile is taken while the dossier is written.** Where the target
-  hardware is available (a campaign holds a node), part 7 is a ruppell run
+  hardware is available (a campaign holds a node), part 7 is a TraceLens profile
   (the `profiler` skill) on the served tree, taken right after parts 1 to 6
   and before parts 8 and 11 are written. A part 7 with a plan and no results
   leaves the dossier unwritten: parts 8 and 11 are drafts until it lands, and
@@ -242,10 +242,10 @@ dossier's index under "Open asks" and go on.
   - **CPU work**: what the host does each step (scheduling, input
     preparation, sampling, detokenization, launches, the frontend) and how
     long it takes, measured untraced; how much of each step the GPU sits idle
-    (ruppell's census: busy time over period) and whether it waits on the
+    (TraceLens's GPU timeline: busy time over the window) and whether it waits on the
     host; the client's own pacing (think time in a trace replay).
 - **From:** the client's per-request export and the server's metrics (the
-  runner's `tools/workload/`); ruppell's census for steps; untraced timing
+  runner's `tools/workload/`); TraceLens's kernel summary for steps; untraced timing
   for host work, because a traced host is slower.
 - **Done when:** the distributions of rows per step and context that part 7
   profiles at are written down per operating point, and the GPU's idle share
@@ -265,7 +265,7 @@ dossier's index under "Open asks" and go on.
 
 ### 7. Profile: plan, then results
 
-Use the `profiler` skill (ruppell, rocprofv3, TraceLens).
+Use the `profiler` skill (TraceLens, rocprofv3).
 
 - **Plan, written before anything is captured:** the question each capture
   answers; the mode (the profiler skill's route, and whether it is validated
@@ -314,8 +314,8 @@ The procedure is [kernels.md](kernels.md).
   "not available", and parts 8 and 11 say what they could not compare.
 - **What to get:** the reference recipe (for inference, InferenceX's script
   for that GPU: image, model revision, flags); the same workload settings
-  (dataset snapshot, seed, concurrency, duration); a ruppell trace on CUDA (the
-  vLLM adapter runs unchanged there) or an Nsight Systems trace; the client's
+  (dataset snapshot, seed, concurrency, duration); a PyTorch-profiler trace on CUDA (TraceLens
+  reads it there too) or an Nsight Systems trace; the client's
   metrics.
 - **Compare:** at matched operating points (rows per step, context, requests
   in flight), because one concurrency puts a different load on each platform
@@ -325,8 +325,6 @@ The procedure is [kernels.md](kernels.md).
 - **Hardware gaps:** name the gap before porting an idea: native number
   formats, matrix instruction shapes, wavefront width (64 on gfx950), on-chip
   memory per compute unit, asynchronous copy engines, interconnect.
-- **Example:** ruppell's `docs/analysis/dsv41-agentx-b200.md` (B200, C8 and
-  C32, 2026-09-30).
 
 ### 10. Earlier optimizations
 

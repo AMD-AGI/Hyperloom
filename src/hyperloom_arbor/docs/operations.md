@@ -28,11 +28,11 @@ ARBOR_URL=<a clone URL Cluster A can read> CAMPAIGN_BRANCH=main \
 `campaign_model_m.sbatch` (`CAMPAIGN=<campaign>`; config `configs/mi350x/model-m-c32-<campaign>.json`
 unless `CAMPAIGN_CONFIG` names another). One job is one chunk:
 
-1. load the image and start the container (`common.sh`), with ruppell mounted;
+1. load the image and start the container (`common.sh`);
 2. lay the optional base tree (`base_vmu`) and check it file by file;
 3. make the vLLM site a git repository with a baseline commit;
 4. restore the session's `landed.patch`, `scratch.patch` and landed packages;
-5. build ruppell (not fatal);
+5. nothing to build for the profiler (TraceLens comes with the environment);
 6. run `python3 -m arbor run --config ... --cooldown 30`.
 
 Inputs: `MAX_CHUNKS` (12), `ROUND_AB` (1: the round-end A/B hook on), `ROUND_AB_POINTS`,

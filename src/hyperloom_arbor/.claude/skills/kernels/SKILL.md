@@ -90,7 +90,7 @@ decide, at the served shapes.
 
 - **It is MFMA-bound at the served shapes** (the hardware skill's roofline says compute-bound), and
   Triton's best config sits well under the MFMA peak with LDS stalls or bank conflicts in the
-  counters (`profiler/counters.md`). Triton gives no direct control over LDS layout.
+  counters (`rocprofv3`: the `profiler` skill, section 5). Triton gives no direct control over LDS layout.
 - **Block-scaled FP4/FP8 where the scales are the bottleneck.** `tl.dot_scaled`'s cost is scale
   redistribution through LDS (+24 `ds_read_u8` and +14 waits per MFMA cluster); its fix path is
   upstream Triton or a kernel that bypasses it (`tl_dot_scaled_gfx950.md`). FlyDSL exposes the

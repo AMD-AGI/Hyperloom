@@ -118,56 +118,37 @@ A host that runs several Arbors from one map gets that map from one Arbor run fi
 
 ## The profiler
 
-The campaign finds where GPU time goes with three tools:
-- **ruppell** traces the served program with graphs on, and attributes every kernel, graph replays
-  included, to its module, op and step;
-- **rocprofv3** collects the hardware counters;
-- **TraceLens** reads a window of steps in detail.
+The campaign finds where GPU time goes with TraceLens, on PyTorch-profiler traces of the served program, and
+takes hardware counters with rocprofv3 when a kernel's cost needs explaining. The `profiler` skill has the
+commands.
 
 ### In a campaign
 
-- **ruppell has to be where the workload runs.**
-  - **The copy:** `.claude/skills/profiler/ruppell`, at the commit in `VENDOR.md`. It is built
-    against the container's ROCm with `runtime/build.sh`.
-  - **The Model M launchers** mount it read-only at `/ruppell`, with a writable work directory
-    (`scripts/model-m-campaign/campaign_model_m.sbatch`). Do the same in another launcher.
-  - **Without a mount,** the agent copies it in and builds it the first time it profiles. The
-    skill's "Get ruppell where the workload runs" says how.
-  - **A stale build** left in a container from an older copy traces without saying what it lacks.
-    The skill has the agent compare the build's commit with the copy's before every trace.
-- **The frameworks it traces** are the vendored copy's adapters (`ruppell/python/ruppell/adapters/`).
-  - **At this commit:** vLLM and DLRM. SGLang's adapter has been on ruppell's `main` since
-    2026-10-27 and is not vendored yet.
-  - **A framework without an adapter:** the agent takes a kernel census with
-    `rocprofv3 --kernel-trace` (names, counts and GPU time, without modules or steps), and says so
-    beside every number.
-- **Validation:** ruppell has passed its checks on two targets, both on MI350X: vLLM serving
-  DeepSeek V4.1 Flash, and DLRMv4 training.
-  - Any other model, load or GPU is a new target: the agent runs ruppell's new-target checks first.
-  - Until they pass, it labels every number unvalidated.
+- **The host's profile comes first.** In component mode, `component.profile` gives the agent the profile the host
+  has taken (MB: PRELUDE's TraceLens profile of the root). The agent profiles only what it does not cover, or a
+  tree a KEEP has moved.
+- **A trace of its own:** the agent turns the framework's profiler on for one LEARN iteration (vLLM's
+  `--profiler-config`, SGLang's `SGLANG_TORCH_PROFILER_DIR`), records a short window of the measured load with
+  `/start_profile` and `/stop_profile`, and reads it with `TraceLens_generate_perf_report_pytorch_inference`.
+  A KEEP never carries the profiler settings.
+- **Graph replay:** with graphs on, the kernel summary and the GPU timeline are the served program's, but
+  kernels are not linked to ops; an eager trace gives op attribution, labelled eager.
 - **What it leaves:** each profile in its own directory, `<session>/profiles/<name>/`.
-  - **`PROFILE.md`:** the report, with a `## Candidates` section that the knowledge collector
-    quotes.
-  - **Beside it:** the small files that let a reader check the report.
+  - **`PROFILE.md`:** the report, with a `## Candidates` section that the knowledge collector quotes.
+  - **Beside it:** the TraceLens CSVs it cites.
   - **Raw traces** stay on the node.
-- **The host's profile:** in component mode, `component.profile` gives the agent a profile the host
-  has already taken. The agent profiles only what it does not cover.
 
 ### By hand
 
-Ask for `/profiler` in Claude Code from an Arbor checkout. Or, on the machine or in the container
-that runs the workload:
+Ask for `/profiler` in Claude Code from an Arbor checkout, or follow its steps on the machine that runs the
+workload: start the server with its profiler on, send the load, `POST /start_profile` and `/stop_profile`
+around a window, and read the trace:
 
 ```bash
-docker cp .claude/skills/profiler/ruppell <container>:/ruppell
-bash /ruppell/runtime/build.sh          # libruppell_tool.so and libruppell_marker.so
-export PYTHONPATH=/ruppell/python
-python -m ruppell run --out RUN -- <the workload command>    # vLLM: RUPPELL_VLLM=1 in the server's environment
+TraceLens_generate_perf_report_pytorch_inference --profile_json_path TRACE.json.gz \
+    --output_csvs_dir OUT --enable_kernel_summary
 ```
 
-- **The settings** (detail sampling, which step kinds to trace in full, run-time tuning) come from
-  the route file for your target. The profiler skill's table routes you to it, inside ruppell's
-  own skill (`ruppell/.claude/skills/ruppell-profile/`).
 - **On a cluster:**
   - analyse on the GPU node, never on a login node;
   - run nothing else on the node's GPUs while a traced run measures;

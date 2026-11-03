@@ -90,7 +90,7 @@ asynchronous copies). A B200 choice is a lead, never evidence for gfx950.
 - Correctness against the exact path it replaces.
 - GPU time at the served row counts and contexts (part 5), graph-captured
   where the served path is.
-- Counters for the ones that move (the `profiler` skill's `counters.md`).
+- Counters for the ones that move (`rocprofv3`: the `profiler` skill, section 5).
 - Keep the raw samples and the script that made them.
 
 A kernel-level win is still not a serving win: part 11 gives it a ceiling,

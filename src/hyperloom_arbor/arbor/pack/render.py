@@ -20,10 +20,10 @@ HISTORY_WINDOW = 10
 _SKILL_RULES = {
     "profiler": (
         "every profile this campaign takes, to find where time goes or to check "
-        "a mechanism, follows this skill: ruppell for traces, rocprofv3 for "
-        "counters, TraceLens for reading. It takes precedence over any profiling "
-        "procedure in the knowledge above (the PyTorch profiler, captures under "
-        "`--enforce-eager`). The validator and the evaluators are unchanged."
+        "a mechanism, follows this skill: the host's profile first, then TraceLens "
+        "on PyTorch-profiler traces of the served program, rocprofv3 for counters. "
+        "It takes precedence over any profiling procedure in the knowledge above. "
+        "The validator and the evaluators are unchanged."
     ),
     "dossier": (
         "read this campaign's dossier before choosing what to work on. The skill "

@@ -1,7 +1,7 @@
 """A round's map: the profile and the dossier's first half in parallel, then its second half, then the checks.
 
 - **The profile** (`profile_round.sbatch`, a node): the round's base served
-  once, its bar replays and a ruppell capture, into map/profile/attempt-K/
+  once, its bar replays and a profile capture, into map/profile/attempt-K/
   ({bar.json, profile/, DONE}).
 - **Dossier A** (`dossier_round.sh A`, a user unit on this host): a document
   campaign that reads the base tree, the last round's ROUND.md and every lane's

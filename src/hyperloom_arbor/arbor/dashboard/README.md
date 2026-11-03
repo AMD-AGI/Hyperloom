@@ -56,8 +56,8 @@ their output, and serves it.
 
 ## Ported from the Cluster A dashboard
 
-The source is `scripts/arbor_dashboard/` on `<fork>/dsv41-v2.1-ruppell`
-(`3892f73`), which served the blinded v2 and v2.1-ruppell campaigns on Cluster A.
+The source is `scripts/arbor_dashboard/` on `<fork>/dsv41-v2.1`
+(`3892f73`), which served the blinded v2 and v2.1 campaigns on Cluster A.
 Kept: the page and its panels, the snapshot's keys (`arbor.collect`'s realtime
 collector writes the same ones), the server's caching, and its rules:
 

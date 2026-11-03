@@ -92,7 +92,7 @@ agent only (not the server or bench agent); a skill named in a pack must exist.
 | Skill | What it is for | Enabled by |
 |---|---|---|
 | `dossier` | find or write the campaign's dossier and its map | serving, balanced, model-m-2, -2-mi355x, -c8, -c8-tp4, model-m-plan, parallel-dossier |
-| `profiler` | profile with ruppell (vendored), rocprofv3, TraceLens | serving, balanced, model-m-2, -2-mi355x, -c8, -c8-tp4, parallel-dossier |
+| `profiler` | profile with TraceLens (the host's profile first), rocprofv3 | serving, balanced, model-m-2, -2-mi355x, -c8, -c8-tp4, parallel-dossier |
 | `hardware` | MI350X, MI355X and MI300X facts and achieved limits | balanced |
 | `kernels` | whether to write a kernel, in which language, how to prove it (AITER first) | balanced |
 | `serving-playbook` | what 1,258 InferenceX changes teach | balanced |
@@ -100,8 +100,7 @@ agent only (not the server or bench agent); a skill named in a pack must exist.
 | `knowledge-collector` | share and read campaign learnings | parallel-dossier |
 | `campaign-archive`, `dashboard`, `realtime-collector`, `merge-optimization-trees`, `geko-hipblaslt-tuning` | operator tools | none |
 
-Vendored: `profiler/ruppell` from `the ruppell repository` (`profiler/VENDOR.md`);
-`kernels/reference` and `hardware/reference` from `AMD-AGI/KernelForge` (MIT).
+Vendored: `kernels/reference` and `hardware/reference` from `AMD-AGI/KernelForge` (MIT).
 
 How to use `dossier` and `profiler`, in a campaign and by hand, and why a dossier's directions go
 into the dossier rather than the pack: [dossier-and-profiler.md](dossier-and-profiler.md).
@@ -114,7 +113,7 @@ into the dossier rather than the pack: [dossier-and-profiler.md](dossier-and-pro
 | `balanced` | Model M, vLLM, MI350X, TP8, 8k/1k at C32; every harness rule and five skills | `configs/mi350x/model-m-c32-balanced.json` |
 | `model-m-c8-tp4` | Model M, MI350X, TP4, C8 | `configs/mi350x/model-m-c8-c2…c5.json`, `-c8-component-test.json` |
 | `model-m-1`, `-2`, `-2-mi355x`, `-c8` | Model M campaigns A, B (MI350X and MI355X), C | `configs/mi350x/`, `configs/mi355x/` |
-| `agentx-dsv41`, `-2`…`-6`, `-2b`…`-2g`, `-2-replica`, `-2.1-ruppell`, `-cuda-graph`, `-cg8a`, `-cg8b` | DeepSeek-V4.1-Flash, AgentX replay, vLLM, gfx950: the DSV4.1 campaign line | `configs/mi355x/dsv41flash-*.json` |
+| `agentx-dsv41`, `-2`…`-6`, `-2b`…`-2g`, `-2-replica`, `-2.1`, `-cuda-graph`, `-cg8a`, `-cg8b` | DeepSeek-V4.1-Flash, AgentX replay, vLLM, gfx950: the DSV4.1 campaign line | `configs/mi355x/dsv41flash-*.json` |
 | `model-m-plan` | a document campaign: writes a plan, scored by a linter | `configs/mi350x/model-m-plan-c.json` |
 | `parallel-dossier` | parallel mode's map step | `configs/parallel/` (examples) |
 | `agentx` | GLM-5.2, InferenceX trace replay | `configs/agentx-glm52-mi355x.json` (the dry run's) |
