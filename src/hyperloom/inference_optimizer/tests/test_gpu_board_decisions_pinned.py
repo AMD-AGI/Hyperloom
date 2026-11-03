@@ -18,6 +18,7 @@ _BOARDS = [
     ("mi325x", "mi300x", True, "achievable"),
     ("mi355x", "mi355x", True, "vendor"),
     ("r9700", "gfx12", False, "vendor"),
+    ("r9600d", "gfx12", False, "vendor"),
 ]
 
 
@@ -53,17 +54,19 @@ def test_instinct_boards_leave_the_framework_unconstrained(product, framework):
     assert gpu_types._runner_framework_error(product, framework) is None
 
 
+@pytest.mark.parametrize("product", ["r9700", "r9600d"])
 @pytest.mark.parametrize("framework", ["sglang", "atom", "xdit"])
-def test_the_gfx12_runner_is_validated_for_vllm_only(framework):
-    assert gpu_types._runner_framework_error("r9700", "vllm") is None
-    assert gpu_types._runner_framework_error("r9700", framework) == (
+def test_the_gfx12_runner_is_validated_for_vllm_only(product, framework):
+    assert gpu_types._runner_framework_error(product, "vllm") is None
+    assert gpu_types._runner_framework_error(product, framework) == (
         "Magpie runner 'gfx12' is currently validated only for vllm; "
         f"framework {framework!r} has no validated gfx12 runner"
     )
 
 
-def test_only_r9700_pins_its_geak_identity():
+def test_only_the_gfx1201_radeon_boards_pin_their_geak_identity():
     assert gpu_types.geak_identity_pin("r9700") == {"expected_target": "r9700", "expected_gfx": "gfx1201"}
+    assert gpu_types.geak_identity_pin("r9600d") == {"expected_target": "r9600d", "expected_gfx": "gfx1201"}
     for product in ("mi300x", "mi308x", "mi325x", "mi355x", "radeon8060s", "unknown_gpu", ""):
         assert gpu_types.geak_identity_pin(product) == {}, product
 
@@ -79,9 +82,14 @@ def test_only_r9700_pins_its_geak_identity():
         ("AMD_INSTINCT_MI300X", "mi300x"),
         ("Card Series: AMD Radeon AI PRO R9700", "r9700"),
         ("card series: amd radeon ai pro r9700", "r9700"),
+        ("Card Series: AMD Radeon AI PRO R9600D", "r9600d"),
+        ("card series: amd radeon ai pro r9600d", "r9600d"),
         ("Card Series: AMD Instinct MI300XL", None),
         ("Card Series: AMD Radeon AI PRO R9700S", None),
         ("Card Series: AMD Radeon AI PRO XR9700", None),
+        ("Card Series: AMD Radeon AI PRO R9600DX", None),
+        ("Card Series: AMD Radeon AI PRO XR9600D", None),
+        ("Card Series: AMD Radeon AI PRO R9600", None),
         ("Card Series: AMD Radeon 8060S Graphics", "radeon8060s"),
         ("gfx1151", None),
         ("gfx942:sramecc+:xnack-", "mi300x"),

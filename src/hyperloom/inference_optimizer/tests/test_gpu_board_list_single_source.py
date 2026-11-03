@@ -55,6 +55,11 @@ def test_r9700_has_explicit_gfx1201_dispatch_identity():
     assert (board.gfx, board.compute_units) == ("gfx1201", 64)
 
 
+def test_r9600d_has_its_own_gfx1201_dispatch_identity():
+    board = AMD_GPU_BOARDS["r9600d"]
+    assert (board.gfx, board.compute_units) == ("gfx1201", 48)
+
+
 def test_the_preflight_warning_names_the_boards_the_cli_accepts(capsys, monkeypatch):
     """The warning tells the operator what to pass, so it has to stay true."""
     from hyperloom.inference_optimizer.cli import preflight

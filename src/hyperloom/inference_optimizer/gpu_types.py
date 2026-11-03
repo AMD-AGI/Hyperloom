@@ -49,6 +49,7 @@ _BOARD_POLICIES: dict[str, BoardPolicy] = {
     "mi325x": BoardPolicy(_MI300X_RUNNER),
     "mi355x": BoardPolicy(_MI355X_RUNNER, names_its_arch=True),
     "r9700": BoardPolicy(_GFX12_RUNNER, targeted_build_validated=False, geak_identity_pinned=True),
+    "r9600d": BoardPolicy(_GFX12_RUNNER, targeted_build_validated=False, geak_identity_pinned=True),
     "radeon8060s": BoardPolicy(MagpieRunner("radeon8060s", frozenset())),
 }
 
