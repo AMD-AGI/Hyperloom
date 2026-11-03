@@ -6,10 +6,13 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
+import io
 import json
 import subprocess
 import sys
-from collections.abc import Callable
+import tarfile
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import BinaryIO
 
@@ -32,11 +35,13 @@ from hyperloom.measure.runner.cache_layout import (
     manifest_to_json,
     parse_lock,
     requirements_text,
+    stage_entry,
     tree_digest,
 )
 from hyperloom.measure.runner.tests.bootstrap_rig import Rig, copy_cache
 
 _HASH = "a" * 64
+_RUNNER_MAIN = "src/hyperloom/measure/runner/__main__.py"
 
 
 def test_the_lock_parser_reads_pins_with_their_hashes_and_skips_comments() -> None:
@@ -274,3 +279,99 @@ def test_a_manifest_swapped_after_it_was_read_does_not_reach_the_requirements(
     assert manifest_from_json((entry / MANIFEST_NAME).read_text(encoding="utf-8")) == swapped
     assert out.read_text(encoding="utf-8") == requirements_text(checked)
     assert "0" * 64 not in out.read_text(encoding="utf-8")
+
+
+Member = tuple[tarfile.TarInfo, bytes]
+
+
+def _members(raw: bytes) -> list[Member]:
+    """The members of the tar archive ``raw``, each with its content (empty for what is not a regular file)."""
+    members: list[Member] = []
+    with tarfile.open(fileobj=io.BytesIO(raw)) as tar:
+        for info in tar:
+            handle = tar.extractfile(info) if info.isreg() else None
+            members.append((info, handle.read() if handle else b""))
+    return members
+
+
+def _tar(members: Iterable[Member]) -> bytes:
+    """A tar archive of ``members``; a regular file's size is its content's."""
+    out = io.BytesIO()
+    with tarfile.open(fileobj=out, mode="w", format=tarfile.PAX_FORMAT) as tar:
+        for info, content in members:
+            info.size = len(content) if info.isreg() else 0
+            tar.addfile(info, io.BytesIO(content) if info.isreg() else None)
+    return out.getvalue()
+
+
+def test_the_source_is_unpacked_from_the_bytes_that_were_hashed_not_from_the_cache_file_again(
+    rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``source.tar`` rewritten in the cache right after it was hashed, with an archive that is valid but another one:
+    the check passes on the pinned manifest and what it unpacked is the archive it hashed."""
+    cache = copy_cache(rig, tmp_path / "cache")
+    entry, scratch = cache.root / cache.sha, tmp_path / "scratch"
+    archive = entry / SOURCE_ARCHIVE
+    pin = hashlib.sha256((entry / MANIFEST_NAME).read_bytes()).hexdigest()
+    other = _tar(
+        (info, b"raise SystemExit('the swapped runner')\n" if info.name == _RUNNER_MAIN else content)
+        for info, content in _members(archive.read_bytes())
+    )
+    assert other != archive.read_bytes() and _RUNNER_MAIN in {info.name for info, _ in _members(other)}
+    hash_and_copy = cache_layout._copy_hashed
+
+    def hash_then_swap(path: Path, sink: BinaryIO) -> FileDigest:
+        found = hash_and_copy(path, sink)
+        if path.name == SOURCE_ARCHIVE:
+            archive.write_bytes(other)
+        return found
+
+    monkeypatch.setattr(cache_layout, "_copy_hashed", hash_then_swap)
+    assert stage_entry(cache.root, cache.sha, scratch, pin) == []
+    assert archive.read_bytes() == other, "the cache's archive was not rewritten"
+    assert tree_digest(scratch / LOCAL_SOURCE_DIR) == _manifest(rig).source
+    assert (scratch / LOCAL_SOURCE_DIR / _RUNNER_MAIN).read_bytes() == (rig.source / _RUNNER_MAIN).read_bytes()
+
+
+def _file(name: str) -> Member:
+    info = tarfile.TarInfo(name)
+    info.mode = 0o644
+    return info, b"escaped\n"
+
+
+def _link(name: str, target: str) -> Member:
+    info = tarfile.TarInfo(name)
+    info.type, info.linkname = tarfile.SYMTYPE, target
+    return info, b""
+
+
+@pytest.mark.parametrize(
+    ("escape", "refused"),
+    [
+        (lambda outside: [_file("../../escaped")], True),
+        (lambda outside: [_link("out", "../.."), _file("out/escaped")], True),
+        (lambda outside: [_file(str(outside / "escaped"))], False),
+    ],
+    ids=["parent", "link-out", "absolute"],
+)
+def test_an_archive_member_that_would_land_outside_the_staged_source_never_does(
+    rig: Rig, tmp_path: Path, escape: Callable[[Path], list[Member]], refused: bool
+) -> None:
+    """An archive the manifest records (no pin) whose extra member climbs out of ``hl-source``, through ``..`` or a
+    link, is refused and nothing is staged; an absolute member name is staged inside ``hl-source`` (the data filter
+    strips its leading ``/``). In no case is anything written outside the scratch directory."""
+    cache = copy_cache(rig, tmp_path / "cache")
+    entry, scratch = cache.root / cache.sha, tmp_path / "scratch"
+    raw = _tar([*_members((entry / SOURCE_ARCHIVE).read_bytes()), *escape(tmp_path)])
+    (entry / SOURCE_ARCHIVE).write_bytes(raw)
+    manifest = json.loads((entry / MANIFEST_NAME).read_text())
+    manifest["source_archive"] = {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+    (entry / MANIFEST_NAME).write_text(json.dumps(manifest))
+    problems = stage_entry(cache.root, cache.sha, scratch)
+    assert not (tmp_path / "escaped").exists(), "a member was written outside the scratch directory"
+    if refused:
+        assert len(problems) == 1 and "outside the destination" in problems[0], problems
+        assert _staged(scratch) == []
+    else:
+        assert problems == []
+        assert (scratch / LOCAL_SOURCE_DIR / str(tmp_path / "escaped").lstrip("/")).read_bytes() == b"escaped\n"

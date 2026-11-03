@@ -8,7 +8,8 @@ that the sandbox mounts; :mod:`hyperloom.measure.runner.cache_build` fills it on
 start-up script (:mod:`hyperloom.measure.runner.bootstrap`) installs from it with no index. One commit's entry is::
 
     <cache>/<sha>/source.tar   the repository tree at that commit, the ``git archive`` the builder makes with fixed
-                               settings (the same bytes for the same commit), runner.lock included
+                               settings and none of its own attributes (the commit decides the bytes), runner.lock
+                               included
     <cache>/<sha>/source/      that archive unpacked; the builder reads it, the sandbox never does
     <cache>/<sha>/wheels/      one wheel per pin of ``requirements/runner.lock``
     <cache>/<sha>/bootstrap.sh the start-up script (``BOOTSTRAP_SCRIPT``) of the builder that made the entry, mode 0755;
@@ -31,7 +32,8 @@ an unfinished build, and nothing uses it. ``<cache>`` is the directory
 
 This module is the script's checker as well: the start-up script embeds this file's text and runs it with the sandbox's
 own interpreter before it does anything else, so it uses nothing but the standard library and the Python of the
-framework image (3.10).
+framework image (3.10). That interpreter must have tarfile's extraction filters (Python 3.10.12, 3.11.4, 3.12 or newer):
+on an older one the check refuses every entry and says so (:func:`_filter_problems`).
 """
 
 from __future__ import annotations
@@ -104,6 +106,8 @@ _SCHEMA = 1
 _UTF8 = "utf-8"
 _SHOWN = 5
 _CHUNK = 1 << 20
+#: The Pythons whose tarfile has the ``data`` extraction filter that :func:`_unpack` needs.
+_FILTER_PYTHONS = "3.10.12, 3.11.4, 3.12 or newer"
 _COMMIT = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 _PIN = re.compile(r"(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)==(?P<version>[^\s;\\]+)(?: \\)?")
 _HASH = re.compile(r"\s+--hash=sha256:(?P<digest>[0-9a-f]{64})(?: \\)?")
@@ -434,9 +438,22 @@ def check_cache(root: Path, sha: str, manifest_pin: str = "") -> list[str]:
     return _entry_dir_problems(root, sha) or check_entry(root / sha, sha, manifest_pin)
 
 
+def _filter_problems() -> list[str]:
+    """Why this interpreter cannot unpack ``source.tar`` safely: its tarfile has no ``data`` filter (Python before
+    3.10.12, 3.11.4 or 3.12), where ``extractall(filter=...)`` would fail with a ``TypeError``; empty when it has one."""
+    if hasattr(tarfile, "data_filter"):
+        return []
+    version = ".".join(map(str, sys.version_info[:3]))
+    return [
+        f"this Python is {version}, whose tarfile has no data filter, and {SOURCE_ARCHIVE} is unpacked only with it: "
+        f"the runner needs Python {_FILTER_PYTHONS} (HYPERLOOM_BASE_PYTHON)"
+    ]
+
+
 def _unpack(archive: io.BytesIO, destination: Path) -> None:
     """Unpack the archive's bytes into the new directory ``destination`` with tarfile's ``data`` filter, which refuses a
-    member or a link that would land outside it (the filter is in Python 3.10.12, 3.11.4, 3.12 and newer)."""
+    member or a link that would land outside it and strips the leading ``/`` of an absolute member name (the filter is
+    in Python 3.10.12, 3.11.4, 3.12 and newer; :func:`_staged_source` refuses before this on an older one)."""
     destination.mkdir(parents=True)
     archive.seek(0)
     with tarfile.open(fileobj=archive, mode="r:") as tar:
@@ -451,6 +468,9 @@ def _staged_source(entry: Path, manifest: Manifest, destination: Path) -> list[s
         return [_older_builder(entry)]
     if not archive.is_file():
         return [f"the cache entry {entry} has no {SOURCE_ARCHIVE}"]
+    unsafe = _filter_problems()
+    if unsafe:
+        return unsafe
     copy = io.BytesIO()
     found = _copy_hashed(archive, copy)
     if found != recorded:
