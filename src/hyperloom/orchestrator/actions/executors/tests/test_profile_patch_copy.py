@@ -7,6 +7,7 @@ stays byte-identical whatever the profile does, and profiles running at once sha
 from __future__ import annotations
 
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -52,7 +53,9 @@ diff --git a/python/sglang/srt/model_executor/runner/prefill_cuda_graph_runner.p
 
 _VLLM_MODULE = "vllm.v1.worker.gpu_worker"
 _VLLM_WORKER = "vllm/v1/worker/gpu_worker.py"
-_VLLM_SOURCE = "def work():\n    return 1\n"
+#: Three lines, so its patch carries the three lines of context ``git diff`` writes: the vLLM plan falls back to
+#: ``patch --fuzz=2`` where the host has GNU patch, and that drops up to two of them, all of a shorter hunk's.
+_VLLM_SOURCE = "def work():\n    done = 1\n    return done\n"
 _VLLM_PATCH = """\
 diff --git a/vllm/profiler/graph_capture.py b/vllm/profiler/graph_capture.py
 new file mode 100644
@@ -64,12 +67,13 @@ new file mode 100644
 diff --git a/vllm/v1/worker/gpu_worker.py b/vllm/v1/worker/gpu_worker.py
 --- a/vllm/v1/worker/gpu_worker.py
 +++ b/vllm/v1/worker/gpu_worker.py
-@@ -1,2 +1,5 @@
+@@ -1,3 +1,6 @@
 +from vllm.profiler.graph_capture import graph_capture_profiler as _set_profile_trace_tag
 +
 +
  def work():
-     return 1
+     done = 1
+     return done
 """
 
 
@@ -213,7 +217,8 @@ def test_a_profile_whose_patch_does_not_apply_leaves_the_installed_tree_and_keep
 ):
     install = _Install(tmp_path, monkeypatch, framework)
     drifted = install.site / (_SGLANG_RUNNER if framework == "sglang" else _VLLM_WORKER)
-    drifted.write_text(drifted.read_text(encoding="utf-8").replace("    return", "    return 2 *"), encoding="utf-8")
+    # The line the hunk is anchored on: the fuzzy fallback drops only the context lines farthest from the change.
+    drifted.write_text(drifted.read_text(encoding="utf-8").replace("def ", "def renamed_", 1), encoding="utf-8")
     before = install.snapshot()
 
     envs = _profile(tmp_path, framework)
@@ -222,6 +227,24 @@ def test_a_profile_whose_patch_does_not_apply_leaves_the_installed_tree_and_keep
     assert not any(_patch_laying.is_patched_copy(part) for part in str(envs.get("PYTHONPATH", "")).split(os.pathsep))
     assert install.snapshot() == before
     assert _copies(tmp_path) == [], "nothing half-built is left"
+
+
+@pytest.mark.skipif(shutil.which("patch") is None, reason="the fuzzy fallback runs only where GNU patch is installed")
+def test_a_vllm_patch_whose_outer_context_drifted_is_laid_with_fuzz_in_the_copy_and_the_installed_tree_is_left(
+    tmp_path, monkeypatch
+):
+    install = _Install(tmp_path, monkeypatch, "vllm")
+    worker = install.site / _VLLM_WORKER
+    worker.write_text(worker.read_text(encoding="utf-8").replace("return done", "return 2 * done"), encoding="utf-8")
+    before = install.snapshot()
+
+    envs = _profile(tmp_path, "vllm")
+
+    assert envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] == "ok"
+    (copy,) = _copies(tmp_path)
+    origin, patched = _serve(install, envs["PYTHONPATH"])
+    assert patched and Path(origin).is_relative_to(copy / "site"), "the server runs the copy the fallback patched"
+    assert install.snapshot() == before, "the installed tree is byte-identical"
 
 
 class _Stopped(Exception):
