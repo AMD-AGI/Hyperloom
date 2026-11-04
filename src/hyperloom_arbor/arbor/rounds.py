@@ -191,7 +191,7 @@ def run_ab(campaign, root, deadline: float, timeout_s: float | None = None) -> d
         # An attempt the driver never booked (it died mid-A/B): its files are not this one's.
         out.rename(out.with_name(f"{out.name}.stale-{time.time_ns()}"))
     out.mkdir(parents=True)
-    os.chmod(out, 0o770)
+    os.chmod(out, 0o700)
     t0 = time.time()
     try:
         argv = shlex.split(cmd.format(out=str(out), deadline=int(deadline)))

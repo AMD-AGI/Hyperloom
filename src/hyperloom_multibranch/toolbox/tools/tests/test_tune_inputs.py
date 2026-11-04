@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from hyperloom_multibranch.toolbox.tests.kernel_tune_rig import (
+from hyperloom_multibranch.toolbox.tests.kernel_tune_data import (
     ENV,
     GRAPH_SIZES,
     HIT_LOG,

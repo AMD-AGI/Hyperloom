@@ -1,6 +1,6 @@
 # Arbor, vendored
 
-`third_party/arbor/` is a copy of Arbor, AMD's autonomous inference-optimization harness: the agent loop that
+`src/hyperloom_arbor/` is a copy of Arbor, AMD's autonomous inference-optimization harness: the agent loop that
 multi-branch (MB) runs as a component when a session is given `--autonomous-agent` (`docs/hosts.md` here, and
 `docs/conceptual/multibranch-arbor.md` in this repository).
 
@@ -83,7 +83,7 @@ The engine and what its agents read:
 - **KernelForge's examples are this repository's:** the four examples under `.claude/skills/kernels/reference/examples/`
   are taken from `src/kernelforge/examples`, which runs `kernelforge forge-loop --kernel-backend ...`. Arbor's own
   copies predate that rename. KernelForge's knowledge pages here use the same names.
-- **One permission:** the round-end A/B's output directory is created for the group only (`0o770`) instead of
+- **One permission:** the round-end A/B's output directory is created for its owner only (`0o700`) instead of
   world-writable (`arbor/rounds.py`). The round-end A/B never runs under a host.
 
 ## What it carries from elsewhere
@@ -96,8 +96,9 @@ in `src/kernelforge`, except two kernels, each annotated as `src/kernelforge`'s 
 ## How it is used
 
 Arbor runs from its own root: `python -m arbor run --config <config>` with this directory as the working directory
-(`README.md`, `docs/getting-started.md`). It is not a Python package of this repository and sits outside `src/`, so
-the wheel does not ship it. MB starts it with `--autonomous-agent arbor`, which names this tree in a source checkout.
+(`README.md`, `docs/getting-started.md`). It is not a Python package of this repository, so the wheel does not ship it
+(`pyproject.toml` excludes `hyperloom_arbor` from the packages). MB starts it with `--autonomous-agent arbor`, which
+names this tree.
 
 Its `install.sh` pins TraceLens for a standalone Arbor. Under MB, Arbor uses the TraceLens this repository's own
 install pins.
@@ -113,7 +114,6 @@ logs and measured performance figures are removed. The vendoring tool applies it
 refuses a tag the patch no longer fits, so a re-vendor keeps it. The tool also refuses a copy that still has a job id,
 a dated operator log, an internal plan or a measured step time.
 
-It sits outside `src/` and `scripts/`, so code metrics and the diff budget do not count it.
-- **Left as vendored:** ruff, bandit, and `.pre-commit-config.yaml`'s formatting and lint hooks, as for the other
-  vendored trees (`pyproject.toml` `[tool.ruff] extend-exclude`, `[tool.bandit] exclude_dirs`).
-- **Still checked:** secret scanning (`detect-private-key`, `gitleaks`) and the licence check (`reuse`).
+Linting, formatting and code metrics skip this tree, as for the other vendored code (`pyproject.toml`: `[tool.ruff]`,
+`[tool.hyperloom.code_metrics]`, `[tool.bandit]`; `.pre-commit-config.yaml`'s formatting and lint hooks). Secret
+scanning (`detect-private-key`, `gitleaks`) and the licence check (`reuse`) do not.

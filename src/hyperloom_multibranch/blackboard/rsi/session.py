@@ -220,13 +220,12 @@ def _trialled(
     played = versions.get(PLAYBOOK_KEY)
     if not played:
         return CloseStep(SKIPPED, NO_PLAYBOOK_PLAYED)
-    target = archive if archive is not None else TreeArchive.from_env()
-    if target is None:
+    if archive is None:
         return CloseStep(SKIPPED, NO_ARCHIVE)
     try:
         tree = tree_from_snapshot(snapshot, metric, budget_seconds=budget_seconds)
-        pool = PlaybookPool.beside(target)
-        audit = stop_audit(tree, stall_odds(archived_history(target), tree.task, session=tree))
+        pool = PlaybookPool.beside(archive)
+        audit = stop_audit(tree, stall_odds(archived_history(archive), tree.task, session=tree))
         trial = trial_of(tree, audit, played, pool.champion().label, fell_back=bool(versions.get(FALLBACK_KEY)))
         written = record_trial(pool, trial)
         settled = settle(pool, snapshot.taken_at, trial.task)
@@ -238,20 +237,15 @@ def _trialled(
     return CloseStep(WRITTEN if written else SKIPPED, reason, {"trials": int(written), "settled": len(settled)})
 
 
-def _audited(
-    snapshot: BlackboardSnapshot,
-    metric: str,
-    archive: TreeArchive | None,
-    path: Path | None,
-) -> CloseStep:
-    """The stop audit of the session, read against the stall odds of the archive and the session, written to
-    ``path``."""
+def _audited(snapshot: BlackboardSnapshot, metric: str, path: Path | None) -> CloseStep:
+    """The stop audit of the session, read against the stall odds of the archive a running session reads and of the
+    session, written to ``path``."""
 
     if path is None:
         return CloseStep(SKIPPED, NO_REPORTS)
     try:
         tree = tree_from_snapshot(snapshot, metric)
-        audit = stop_audit(tree, stall_odds(archived_history(archive), tree.task, session=tree))
+        audit = stop_audit(tree, stall_odds(archived_history(), tree.task, session=tree))
         atomic_write_text(path, audit.render() + "\n", options=WriteOptions(make_parents=True))
     except NotRecorded:
         return CloseStep(SKIPPED, NO_PROFILE)
@@ -266,13 +260,12 @@ def _decided(snapshot: BlackboardSnapshot, archive: TreeArchive | None, transcri
 
     if transcript is None or not transcript.is_file():
         return CloseStep(SKIPPED, NO_TRANSCRIPT)
-    target = archive if archive is not None else TreeArchive.from_env()
-    if target is None:
+    if archive is None:
         return CloseStep(SKIPPED, NO_ARCHIVE)
     if snapshot.profile is None:
         return CloseStep(SKIPPED, NO_PROFILE)
     try:
-        kept = archive_decisions(transcript, target, snapshot.profile.session_id)
+        kept = archive_decisions(transcript, archive, snapshot.profile.session_id)
     except STEP_ERRORS as exc:
         return _failed("keep the judge's decisions", exc)
     if kept is None:
@@ -280,20 +273,19 @@ def _decided(snapshot: BlackboardSnapshot, archive: TreeArchive | None, transcri
     return CloseStep(WRITTEN, counts={"calls": kept})
 
 
-def _pooled_cases(snapshot: BlackboardSnapshot, targets: CloseTargets) -> CloseStep:
+def _pooled_cases(snapshot: BlackboardSnapshot, archive: TreeArchive | None, blobs: Path | None) -> CloseStep:
     """The regression cases the session registered, read from its blob store, into the case pool beside the archive
     as cases of the image the environment names (:mod:`rsi.cases`)."""
 
     if not snapshot.regressions:
         return CloseStep(SKIPPED, NO_CASE)
-    archive = targets.archive if targets.archive is not None else TreeArchive.from_env()
     if archive is None:
         return CloseStep(SKIPPED, NO_ARCHIVE)
-    if targets.blobs is None:
+    if blobs is None:
         return CloseStep(SKIPPED, NO_BLOBS)
     try:
         pool = CasePool.beside(archive)
-        pooled = pool_cases(snapshot, LocalBlobStore(targets.blobs), pool, image_digest_from_env())
+        pooled = pool_cases(snapshot, LocalBlobStore(blobs), pool, image_digest_from_env())
     except STEP_ERRORS as exc:
         return _failed("pool the regression cases", exc)
     counts = {"written": pooled.written, "skipped": pooled.skipped}
@@ -311,12 +303,11 @@ def _outcomes(snapshot: BlackboardSnapshot, archive: TreeArchive | None, receipt
         return CloseStep(SKIPPED, NO_REPORTS)
     if snapshot.profile is None:
         return CloseStep(SKIPPED, NO_PROFILE)
-    target = archive if archive is not None else TreeArchive.from_env()
     try:
-        found = specialist_outcomes(snapshot, MenuLog(receipts / MENU_LOG).menus(), archived_history(target))
+        found = specialist_outcomes(snapshot, MenuLog(receipts / MENU_LOG).menus(), archived_history(archive))
         report = receipts / OUTCOMES_REPORT
         atomic_write_text(report, found.render() + "\n", options=WriteOptions(make_parents=True))
-        kept = OutcomePool.beside(target).record(found) if target is not None else False
+        kept = OutcomePool.beside(archive).record(found) if archive is not None else False
     except STEP_ERRORS as exc:
         return _failed("count the specialists' outcomes", exc)
     tests = {f"{name}_tests": group.tests for name, group in found.groups.items()}
@@ -330,17 +321,16 @@ def _replayed(snapshot: BlackboardSnapshot, archive: TreeArchive | None, path: P
 
     if path is None:
         return CloseStep(SKIPPED, NO_REPORTS)
-    target = archive if archive is not None else TreeArchive.from_env()
-    if target is None:
+    if archive is None:
         return CloseStep(SKIPPED, NO_ARCHIVE)
     if snapshot.profile is None:
         return CloseStep(SKIPPED, NO_PROFILE)
     kind = workload_kind(task_conditions(snapshot.profile))
-    trees = tuple(tree for tree in archived_history(target) if workload_kind(tree.task) == kind)
+    trees = tuple(tree for tree in archived_history(archive) if workload_kind(tree.task) == kind)
     if not trees:
         return CloseStep(SKIPPED, NO_TREES)
     try:
-        pool = PlaybookPool.beside(target)
+        pool = PlaybookPool.beside(archive)
         previous = next((item for item in reversed(standings(pool)) if item.at < snapshot.taken_at), None)
         standing, comparisons = replay_standing(
             trees, pool, session_id=snapshot.profile.session_id, at=snapshot.taken_at
@@ -357,42 +347,27 @@ def _replayed(snapshot: BlackboardSnapshot, archive: TreeArchive | None, path: P
 
 @dataclass(frozen=True)
 class CloseTargets:
-    """Where CLOSE's knowledge goes: ``experience_kb`` takes the Experiences, ``learning_kb`` the learnings and
-    ``archive`` the search tree, each the environment's when ``None``; ``receipts`` is the folder for the collection
-    receipts, none without it, where the session's retrieval log lies too. ``multibranch_kb`` takes the Experiences
-    under the blackboard's own declaration, and ``lessons`` the lessons, by default the pool beside the archive.
-    ``judge_transcript`` is the judge's transcript of the session, whose exchanges go beside the archive
-    (:mod:`rsi.decisions`), none without it. ``blobs`` is the session's blob store, which holds the cases of its
-    regression set, none without it."""
+    """Where CLOSE's knowledge goes besides the archive the environment names: ``experience_kb`` takes the
+    Experiences and ``learning_kb`` the learnings, each the environment's when ``None``; ``receipts`` is the folder
+    for the collection receipts, none without it, where the session's retrieval log lies too. ``judge_transcript`` is
+    the judge's transcript of the session, whose exchanges go beside the archive (:mod:`rsi.decisions`), none without
+    it. ``blobs`` is the session's blob store, which holds the cases of its regression set, none without it."""
 
     experience_kb: CollectionTarget | None = None
     learning_kb: CollectionTarget | None = None
-    archive: TreeArchive | None = None
     receipts: Path | None = None
-    multibranch_kb: CollectionTarget | None = None
-    lessons: LessonPool | None = None
     judge_transcript: Path | None = None
     blobs: Path | None = None
 
     def receipt(self, name: str) -> Path | None:
         return self.receipts / name if self.receipts is not None else None
 
-    def lesson_pool(self) -> LessonPool | None:
-        """``lessons``; else the pool beside ``archive``, or beside the environment's archive, which CLOSE writes to
-        even when the session read nothing from it."""
-
-        if self.lessons is not None:
-            return self.lessons
-        archive = self.archive if self.archive is not None else TreeArchive.from_env()
-        return LessonPool.beside(archive) if archive is not None else None
-
     def multibranch(self) -> CollectionTarget | None:
-        """``multibranch_kb``; else the environment's beside the environment's ``experience_kb``, and nowhere beside
-        an ``experience_kb`` the caller chose, so a caller who chose where Experiences go is never written behind."""
+        """Where the Experiences under the blackboard's own declaration go: the environment's KB beside the
+        environment's ``experience_kb``, and nowhere beside an ``experience_kb`` the caller chose, so a caller who
+        chose where Experiences go is never written behind."""
 
-        if self.multibranch_kb is not None or self.experience_kb is None:
-            return self.multibranch_kb
-        return NoOpExperienceKB(NO_KB)
+        return None if self.experience_kb is None else NoOpExperienceKB(NO_KB)
 
 
 def close_knowledge(
@@ -407,11 +382,14 @@ def close_knowledge(
 
     ``metric`` is the recorded-value throughput metric. ``budget_seconds`` is the session's configured budget, which
     later sessions compare the archived tree at shares of; without it the archive uses the time the blackboard spans.
-    ``targets`` says where each step writes, the environment's KB and archive by default. ``cross_image`` names, by
-    canonical id, the Recipe KB champions PRELUDE prepared from another image than the session's, whose replays the
-    archived tree marks.
+    ``targets`` says where the KB steps write, the environment's KB by default; the archive steps write to the
+    archive the environment names, the lessons to the pool beside it, which CLOSE writes to even when the session
+    read nothing from it. ``cross_image`` names, by canonical id, the Recipe KB champions PRELUDE prepared from
+    another image than the session's, whose replays the archived tree marks.
     """
 
+    archive = TreeArchive.from_env()
+    lesson_pool = LessonPool.beside(archive) if archive is not None else None
     return KnowledgeClose(
         experiences=_published(
             "publish the Experiences",
@@ -430,7 +408,7 @@ def close_knowledge(
         archive=_archived(
             snapshot,
             metric,
-            targets.archive,
+            archive,
             budget_seconds=budget_seconds,
             cross_image=cross_image,
         ),
@@ -444,14 +422,14 @@ def close_knowledge(
                 receipt=targets.receipt(MULTIBRANCH_RECEIPT),
             ),
         ),
-        lessons=_lessons(snapshot, targets.lesson_pool()),
-        lesson_standings=_standings(snapshot, targets.lesson_pool(), targets.receipt(LEARNINGS_LOG)),
-        stop_audit=_audited(snapshot, metric, targets.archive, targets.receipt(STOP_AUDIT_REPORT)),
-        playbook_trial=_trialled(snapshot, metric, targets.archive, budget_seconds=budget_seconds),
-        scheduling_replay=_replayed(snapshot, targets.archive, targets.receipt(SCHEDULING_REPLAY_REPORT)),
-        specialist_outcomes=_outcomes(snapshot, targets.archive, targets.receipts),
-        judge_decisions=_decided(snapshot, targets.archive, targets.judge_transcript),
-        regression_cases=_pooled_cases(snapshot, targets),
+        lessons=_lessons(snapshot, lesson_pool),
+        lesson_standings=_standings(snapshot, lesson_pool, targets.receipt(LEARNINGS_LOG)),
+        stop_audit=_audited(snapshot, metric, targets.receipt(STOP_AUDIT_REPORT)),
+        playbook_trial=_trialled(snapshot, metric, archive, budget_seconds=budget_seconds),
+        scheduling_replay=_replayed(snapshot, archive, targets.receipt(SCHEDULING_REPLAY_REPORT)),
+        specialist_outcomes=_outcomes(snapshot, archive, targets.receipts),
+        judge_decisions=_decided(snapshot, archive, targets.judge_transcript),
+        regression_cases=_pooled_cases(snapshot, archive, targets.blobs),
     )
 
 
@@ -522,22 +500,15 @@ def session_menus(metric: str, reports: Path | None) -> DirectionMenus | None:
     return DirectionMenus(archived_history(target), metric, log_to)
 
 
-def judge_history(
-    snapshot: BlackboardSnapshot,
-    history: Sequence[SearchTree],
-    metric: str,
-    *,
-    budget_seconds: float,
-) -> str:
+def judge_history(snapshot: BlackboardSnapshot, history: Sequence[SearchTree], metric: str) -> str:
     """The stall odds the stop rule rests on, for the judge this round, in at most :data:`MAX_CHARS`: from the archived
     sessions and this one's own branches so far; empty before the session has a profile and a baseline, and without
     archived sessions, so a session that reads no archive is judged as one without the RSI.
 
-    Pass the scoring's own history, so the archive is read once a session. ``budget_seconds`` is kept for the
-    scheduler's call; the odds count judged tests, not shares of the budget.
+    Pass the scoring's own history, so the archive is read once a session. The odds count judged tests, not shares of
+    the budget.
     """
 
-    del budget_seconds
     if not history:
         return ""
     odds = session_stall_odds(snapshot, history, metric)

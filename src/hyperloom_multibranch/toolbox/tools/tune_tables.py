@@ -26,6 +26,7 @@ from hyperloom_multibranch.toolbox.tools.tune_rows import (
     Relax,
     RowsRefused,
     TunedRows,
+    demanded_nk,
     dropped_by_forge,
     from_artifact,
     split_dropped,
@@ -159,7 +160,7 @@ def read_run(
 
     ``configs`` is the aiter install's ``configs`` directory the table's shape key is read from. ``max_err_ratio`` is the
     mismatch ratio the call allows: above the default, the rows within it that Forge took out of the table are read back
-    from the tuner's profile and handed over as relaxed rows.
+    from the tuner's profile and handed over as relaxed rows. A row whose N and K no key of ``demand`` names is refused.
     """
     tuner = demand["tuner"]
     try:
@@ -185,7 +186,7 @@ def read_run(
     within, beyond = split_dropped(dropped, max_err_ratio)
     relax = Relax(max_err_ratio, within, _profiles(path)) if max_err_ratio > ERR_RATIO_LIMIT else None
     try:
-        rows = from_artifact(path, demand["env_var"], configs, relax)
+        rows = from_artifact(path, demand["env_var"], configs, relax, demanded_nk(demand.get("keys")))
     except RowsRefused as exc:
         return without_rows(TableStatus.FAILED, str(exc))
     refused = (*(beyond if relax else dropped), *rows.refused)

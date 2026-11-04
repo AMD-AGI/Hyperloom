@@ -918,7 +918,7 @@ class PreludePhase(_WarmKernelPrepMixin, CoordinatorCollaborator):
         Returns ``None`` when promotion may proceed; otherwise the verdict the
         caller must stop on (the rollback and outcome have already been recorded).
         """
-        from ..actions.executors._accuracy_gate import (
+        from hyperloom.common.gain_math import (
             DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
             accuracy_meets_floor,
             accuracy_passed,

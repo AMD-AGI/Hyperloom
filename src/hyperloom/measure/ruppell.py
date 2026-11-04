@@ -61,12 +61,14 @@ __all__ = [
     "CHECK_FILE",
     "COMMIT_FILE",
     "DETAIL",
+    "KINETO_NOTE",
     "MODULE_SHARES_FILE",
     "OUTPUT_DIR",
     "RUPPELL_COMMIT",
     "RUPPELL_TREE_SHA256",
     "RuppellError",
     "Tracer",
+    "UNATTRIBUTED",
     "entry_dir",
     "entry_manifest",
     "entry_problem",
@@ -100,6 +102,7 @@ LOG_FILE = "ruppell.log"
 #: The tail of the server log of a traced attempt that failed, kept when the profile ran again without ruppell.
 ATTEMPT_LOG_FILE = "attempt_server.log"
 MODULE_SHARES_COLUMNS = ("kind", "module", "gpu_ms", "share_percent", "steps")
+#: The ``module`` of the row that holds the GPU time ruppell could not attribute to a module.
 UNATTRIBUTED = "unattributed"
 #: The note of a profile whose server ran traced with HIP graph packet capture off (ROCm 7.2.4 under the SGLang adapter):
 #: Kineto then records every kernel of each graph replay, where with it on the replays are nearly hidden, so its kernel

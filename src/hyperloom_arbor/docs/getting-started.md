@@ -26,7 +26,7 @@ From a laptop dry run to a first campaign on a GPU node.
 ## 1. A dry run (no GPU)
 
 ```bash
-cd third_party/arbor   # this repository's copy
+cd src/hyperloom_arbor   # this repository's copy
 python3 -m arbor run --config configs/agentx-glm52-mi355x.json --dry-run
 ```
 

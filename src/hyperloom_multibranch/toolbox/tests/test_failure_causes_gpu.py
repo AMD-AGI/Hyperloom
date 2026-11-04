@@ -26,14 +26,12 @@ from hyperloom.contracts.measurement import FailureClass, Purpose, TestKind, Tes
 from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta
 from hyperloom.measure.returncodes import SERVER_BOOT_TIMEOUT_RC
 from hyperloom_multibranch.toolbox.tests.helpers import req
-from hyperloom_multibranch.toolbox.tests.test_toolbox_kinds_gpu import (  # noqa: F401  (workload_environment is a fixture)
-    CARDS,
-    _probe,
-    _run_root,
-    _toolbox,
-    pytestmark,
-    workload_environment,
-)
+from hyperloom_multibranch.toolbox.tests import test_toolbox_kinds_gpu
+from hyperloom_multibranch.toolbox.tests.test_toolbox_kinds_gpu import CARDS, _probe, _run_root, _toolbox
+
+#: The GPU tests' marks and their workload-environment fixture, borrowed from the module that defines them.
+pytestmark = test_toolbox_kinds_gpu.pytestmark
+workload_environment = test_toolbox_kinds_gpu.workload_environment
 
 #: The lines of a log that state what went wrong, or that a boot got somewhere.
 _CAUSE_LINES = re.compile(r"error:|Error|Exception|Traceback|fired up|400", re.IGNORECASE)

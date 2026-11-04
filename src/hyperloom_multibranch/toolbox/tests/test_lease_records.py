@@ -27,9 +27,12 @@ from hyperloom_multibranch.contracts.toolbox import MeasurementCapacity, Request
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.toolbox.lease_ledger import LeaseLedger
 from hyperloom_multibranch.toolbox.local_hosted import LocalHostedToolbox
-from hyperloom_multibranch.toolbox.tests.test_branch_leases import Make, local  # noqa: F401 - fixture
+from hyperloom_multibranch.toolbox.tests import test_branch_leases
+from hyperloom_multibranch.toolbox.tests.test_branch_leases import Make
 from hyperloom_multibranch.toolbox.tests.test_lease_drain import Listing
 
+#: The real local toolbox of ``test_branch_leases``, which these tests take as a fixture.
+local = test_branch_leases.local
 _GIB = 1 << 30
 _LEDGER = "hyperloom_multibranch.toolbox.lease_ledger"
 Holds = tuple[CardHold, ...]

@@ -397,7 +397,7 @@ def _add_agent_options(run: argparse.ArgumentParser) -> None:
         metavar="SOURCE",
         help=(
             "A third-party agent to run end to end on one branch, a git URL (URL@ref for a ref), a local path, or"
-            f" {ARBOR_KEYWORD} for the Arbor vendored in this source checkout (third_party/arbor); repeatable, each"
+            f" {ARBOR_KEYWORD} for the Arbor vendored in this source checkout (src/hyperloom_arbor); repeatable, each"
             " opens one branch where EXPLORE starts, within --max-branches."
         ),
     )
@@ -566,7 +566,7 @@ def _workload_model(args: argparse.Namespace) -> str:
 SSH_SCHEMES = frozenset({"ssh", "git+ssh", "svn+ssh"})
 #: The --autonomous-agent source that names the Arbor vendored in this checkout, which a wheel does not ship.
 ARBOR_KEYWORD = "arbor"
-VENDORED_ARBOR = Path(__file__).resolve().parents[2] / "third_party" / "arbor"
+VENDORED_ARBOR = Path(__file__).resolve().parent.parent / "hyperloom_arbor"
 
 
 def _agents(sources: list[str], free: int) -> tuple[str, ...]:

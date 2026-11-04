@@ -96,8 +96,8 @@ METHOD_CENSUS_FDINFO = "census+fdinfo"
 #: process allocates between the two reads, and what the driver keeps for itself.
 UNACCOUNTED_VRAM_TOLERANCE = 512 << 20
 #: How long an excess of memory is read again before it counts. A process that ended stays in the kernel's list, its
-#: queues gone and its memory still there, while the driver frees that memory: measured on a GPU pod, a server that had
-#: exited kept its 237.9 GiB listed for 2 to 4 seconds, which an immediate second read still saw.
+#: queues gone and its memory still there, while the driver frees that memory: a server that has exited can keep its
+#: whole allocation listed for seconds, which an immediate second read still sees. The settle time leaves a margin.
 EXCESS_SETTLE_SEC = 6.0
 _SETTLE_STEP_SEC = 0.5
 _GIB = 1 << 30
@@ -130,8 +130,8 @@ class CardGuard(str, Enum):
 def card_guard(environ: Mapping[str, str]) -> CardGuard:
     """The guard ``environ`` names (:data:`CARD_GUARD_ENV`); ``ENFORCE`` when it names none.
 
-    Enforcing is the default since the probe was shown right on a GPU machine: no false ``foreign`` in 16 tests that had
-    no intruder, and every intruder, before a test and during one, caught within a second.
+    Enforcing is the default since the probe was shown right on a GPU machine: no false ``foreign`` in tests that had no
+    intruder, and every intruder, before a test and during one, caught by the next look.
 
     Raises:
         ValueError: When it names something that is not a guard: a misspelling must not read as either one.

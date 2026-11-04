@@ -26,7 +26,6 @@ from hyperloom_multibranch.blackboard.rsi.archive import SearchTree
 from hyperloom_multibranch.blackboard.rsi.authoring import PLAYBOOK_SYSTEM_PROMPT, read_change
 from hyperloom_multibranch.blackboard.rsi.history import MODEL_TYPE_LABEL
 from hyperloom_multibranch.blackboard.rsi.ladder import (
-    JUDGED_RUNS,
     JUDGED_SESSIONS,
     Complete,
     DecisionPoint,
@@ -48,14 +47,12 @@ GENERATIONS = 5
 GENERATION_RUNS = 50
 
 
-def split(
-    trees: Sequence[SearchTree], held_out: int = HELD_OUT, seed: str = ""
-) -> tuple[list[SearchTree], list[SearchTree]]:
-    """``trees`` as (the evolution set, the ``held_out`` sessions), one session of each model type held out first,
-    the rest drawn by ``seed``; the evolution set keeps at least as many as it gives."""
+def split(trees: Sequence[SearchTree]) -> tuple[list[SearchTree], list[SearchTree]]:
+    """``trees`` as (the evolution set, the :data:`HELD_OUT` held-out sessions), one session of each model type held
+    out first, the rest in an order their session ids draw; the evolution set keeps at least as many as it gives."""
 
-    order = sorted(trees, key=lambda tree: hashlib.sha256(f"{seed}:{tree.session_id}".encode()).hexdigest())
-    count = min(held_out, len(order) // 2)
+    order = sorted(trees, key=lambda tree: hashlib.sha256(tree.session_id.encode()).hexdigest())
+    count = min(HELD_OUT, len(order) // 2)
     held: list[SearchTree] = []
     for model_type in sorted({tree.task.labels.get(MODEL_TYPE_LABEL, "") for tree in order}):
         first = next((tree for tree in order if tree.task.labels.get(MODEL_TYPE_LABEL, "") == model_type), None)
@@ -109,15 +106,11 @@ class GenerationsReport:
         return "\n".join(lines)
 
 
-def generation_prompt(
-    evolution: Sequence[SearchTree], champion: Playbook, pool: PlaybookPool, runs: int, seed: str
-) -> str:
+def generation_prompt(evolution: Sequence[SearchTree], champion: Playbook, pool: PlaybookPool, runs: int) -> str:
     """What a generation's LLM reads: the numbers and their bounds, the champion, how it replays on the evolution
     set, the stop audits of those sessions, and the ledger of the changes tried so far."""
 
-    replayed = compare(
-        evolution, {champion.label: champion}, baseline=champion.label, drawn=Draws(runs=runs, seed=seed)
-    )
+    replayed = compare(evolution, {champion.label: champion}, baseline=champion.label, drawn=Draws(runs=runs))
     ledger = [
         f"- {item.label} (of {item.parent}, changing {', '.join(changes(pool.named(item.parent) or H0, item))}): "
         f"{item.hypothesis}; aims at {item.measure or 'n/a'}; "
@@ -155,14 +148,12 @@ def generation_prompt(
 
 @dataclass(frozen=True)
 class Evolving:
-    """How the offline generations run: ``count`` of them, each written by the LLM ``model``, ``held_out`` sessions
-    kept aside, each replay ``runs`` runs a session, the split and every draw keyed by ``seed``."""
+    """How the offline generations run: ``count`` of them, each written by the LLM ``model``, each replay ``runs``
+    runs a session."""
 
     model: str
     count: int = GENERATIONS
-    held_out: int = HELD_OUT
     runs: int = GENERATION_RUNS
-    seed: str = ""
 
 
 @dataclass(frozen=True)
@@ -180,12 +171,11 @@ class _Evolution:
         replay of :data:`JUDGED_SESSIONS` of the sessions."""
 
         if "rules" not in changes(champion, proposed):
-            return r1(proposed, champion, self.trees, runs=self.evolving.runs, seed=self.evolving.seed)
+            return r1(proposed, champion, self.trees, runs=self.evolving.runs)
         asked = await r2(proposed, champion, self.points, self.judge)
         if not asked.passed:
             return asked
-        drawn = Draws(runs=JUDGED_RUNS, seed=self.evolving.seed)
-        judged = await r2_sessions(proposed, champion, self.trees[:JUDGED_SESSIONS], self.judge, drawn=drawn)
+        judged = await r2_sessions(proposed, champion, self.trees[:JUDGED_SESSIONS], self.judge)
         return dataclasses.replace(judged, reason=f"{asked.reason}; {judged.reason}")
 
 
@@ -201,13 +191,13 @@ async def generations(
     ``pool_root``, then the last champion beside H0 on the held-out sessions. ``decisions`` holds, by session, the
     judge's calls the archive kept (:mod:`rsi.decisions`); R2 reads the evolution sessions' only."""
 
-    evolution, held = split(trees, evolving.held_out, evolving.seed)
+    evolution, held = split(trees)
     pool = PlaybookPool(pool_root)
     ladder = _Evolution(evolution, archived_points(evolution, decisions or {}), ReplayJudge(complete), evolving)
     done = []
     for number in range(1, evolving.count + 1):
         champion = pool.champion()
-        prompt = generation_prompt(evolution, champion, pool, evolving.runs, evolving.seed)
+        prompt = generation_prompt(evolution, champion, pool, evolving.runs)
         answer = await complete(PLAYBOOK_SYSTEM_PROMPT, prompt)
         origin = {"model": evolving.model, "generation": str(number)}
         proposed, why = read_change(answer, champion, origin, float(number))
@@ -231,7 +221,7 @@ async def generations(
     champion = pool.champion()
     pair = {H0.label: H0, **({} if champion.label == H0.label else {champion.label: champion})}
     optimistic, pessimistic = (
-        compare(held, pair, baseline=H0.label, drawn=Draws(runs=evolving.runs, beyond=beyond, seed=evolving.seed))
+        compare(held, pair, baseline=H0.label, drawn=Draws(runs=evolving.runs, beyond=beyond))
         for beyond in (OPTIMISTIC, PESSIMISTIC)
     )
     return GenerationsReport(
