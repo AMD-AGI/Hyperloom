@@ -14,6 +14,7 @@ here and a test together; the test sends a minimal example through the real enfo
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,7 +24,7 @@ import yaml
 
 from hyperloom.common.benchmark_config import is_magpie_agentx
 from hyperloom.contracts.recipe import LaunchConfig
-from hyperloom.inference_optimizer.agentx.report import native_launch_evidence, read_agentx_report
+from hyperloom.inference_optimizer.agentx.report import agentx_measurement, native_launch_evidence
 from hyperloom.orchestrator.actions.executors import (
     PREFIX_CACHE_OFF_ERROR_CLASS,
     CONTEXT_COPY_REFUSAL,
@@ -75,19 +76,32 @@ def _server_log(round_dir: Path) -> str | None:
     return str(found[-1]) if found else None
 
 
+def _own_report(round_dir: Path) -> dict[str, Any]:
+    """The round's own AgentX ``benchmark_report.json``, the file main's grid runner reads from a round's workspace.
+
+    A warm-up round's report below it is another round's, and a landing that writes files in manifest order makes it
+    the newest one there; ``{}`` when the round has no AgentX report that parses.
+    """
+    try:
+        report = json.loads((round_dir / "benchmark_report.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return report if isinstance(report, dict) and report.get("scenario") == "agentx" else {}
+
+
 def baseline_prefix_cache_refusal(point: Path, round_dir: Path) -> str:
     """Why an AgentX baseline round served with the prefix cache off may not end ``succeeded``, or ``""``.
 
     ``point`` is the measurement point the round ran and ``round_dir`` the directory it landed in; the launch evidence
     is built from both the way main's baseline and grid executors build it, and main's #1884 check reads it. An AgentX
-    point's launch is the one Magpie reports it ran (``native_launch_evidence`` over the round's report); a round with
-    no valid AgentX report has no launch to read and is left alone, since it is not the succeeded round main checks.
-    Any other point's launch is read from its own server args.
+    point's launch is the one Magpie reports it ran (``native_launch_evidence`` over the round's own report); a round
+    with no valid AgentX report has no launch to read and is left alone, since it is not the succeeded round main
+    checks. Any other point's launch is read from its own server args.
     """
     log = _server_log(round_dir)
     if is_magpie_agentx(yaml.safe_load(point.read_text(encoding="utf-8"))["benchmark"]):
-        measurement = read_agentx_report(round_dir)
-        if not measurement:
+        measurement = agentx_measurement(_own_report(round_dir))
+        if not measurement["valid_measurement"]:
             return ""
         evidence = native_launch_evidence(measurement, point, actual_server_log=log)
     else:

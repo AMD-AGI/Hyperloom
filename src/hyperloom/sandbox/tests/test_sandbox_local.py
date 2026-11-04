@@ -371,6 +371,29 @@ def test_a_command_timeout_kills_its_tree_and_raises(make) -> None:
     assert sb.run("echo ok").stdout == "ok\n"
 
 
+def _swallow_signals(monkeypatch) -> list[tuple[str, int, int]]:
+    """Record every signal ``os.kill`` and ``os.killpg`` would send and send none; a probe (signal 0) still runs.
+
+    For a check of what a kill sends when nothing it may signal is left: a freed pid, or a process found under it,
+    may already be another process, so nothing reaches it even on code that would signal it.
+    """
+    sent: list[tuple[str, int, int]] = []
+    real = {"kill": os.kill, "killpg": os.killpg}
+
+    def _spy(name):
+        def _send(pid: int, sig: int) -> None:
+            if sig == 0:
+                real[name](pid, sig)
+            else:
+                sent.append((name, pid, sig))
+
+        return _send
+
+    monkeypatch.setattr(os, "kill", _spy("kill"))
+    monkeypatch.setattr(os, "killpg", _spy("killpg"))
+    return sent
+
+
 def test_kill_after_a_command_timeout_never_signals_the_launcher_the_timeout_reaped(make, monkeypatch) -> None:
     provider = make([LocalTemplate("dev", "dev")])
     sb = _create(provider, "dev", "dev")
@@ -385,21 +408,25 @@ def test_kill_after_a_command_timeout_never_signals_the_launcher_the_timeout_rea
     with pytest.raises(SandboxUnavailable, match="command timed out"):
         sb.run("sleep 30", settings=RunSettings(timeout_sec=0.5))
     assert len(timed_out) == 1
-    signalled: list[tuple[str, int, int]] = []
-    real = {"kill": os.kill, "killpg": os.killpg}
+    handed: list[int] = []
+    reap = local_sandbox.reap_sandbox_processes
 
-    def _spy(name):
-        def _send(pid: int, sig: int) -> None:
-            if pid in timed_out and sig:
-                signalled.append((name, pid, sig))
-                return  # a freed pid may already be another process: record the signal, never send it
-            real[name](pid, sig)
+    def _reap(procs, sandbox_id):
+        handed.extend(proc.pid for proc in procs)
+        return reap(procs, sandbox_id)
 
-        return _send
-
-    monkeypatch.setattr(os, "kill", _spy("kill"))
-    monkeypatch.setattr(os, "killpg", _spy("killpg"))
+    monkeypatch.setattr(local_sandbox, "reap_sandbox_processes", _reap)
+    signalled = _swallow_signals(monkeypatch)
     sb.kill()
+    assert timed_out[0] not in handed
+    assert signalled == []
+
+
+def test_kill_launchers_skips_a_launcher_that_was_already_waited(monkeypatch) -> None:
+    launcher = subprocess.Popen([sys.executable, "-c", "pass"])
+    launcher.wait()
+    signalled = _swallow_signals(monkeypatch)
+    assert reaper.kill_launchers([launcher], grace_sec=0.1) is True
     assert signalled == []
 
 

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -96,6 +97,17 @@ def test_an_agentx_sglang_round_is_read_from_its_server_log(tmp_path: Path) -> N
 
 def test_an_agentx_round_magpie_reported_no_launch_for_is_left_alone(tmp_path: Path) -> None:
     assert baseline_prefix_cache_refusal(*_agentx_round(tmp_path, "atom", None)) == ""
+
+
+def test_an_agentx_round_is_read_from_its_own_report_not_a_newer_warmup_report_below_it(tmp_path: Path) -> None:
+    point, directory = _agentx_round(tmp_path, "atom", ATOM_LAUNCH)
+    measured = directory / "benchmark_report.json"
+    warmup = directory / "warmup_round" / "benchmark_report.json"
+    warmup.parent.mkdir()
+    warmup.write_text(json.dumps({**json.loads(measured.read_text()), "publishable": False}))
+    later = measured.stat().st_mtime + 60  # a landing writes files in manifest order, so the warm-up's lands last
+    os.utime(warmup, (later, later))
+    assert "without --enable_prefix_caching" in baseline_prefix_cache_refusal(point, directory)
 
 
 def test_the_launch_of_a_warmup_round_is_read_when_the_round_has_no_log_of_its_own(tmp_path: Path) -> None:
