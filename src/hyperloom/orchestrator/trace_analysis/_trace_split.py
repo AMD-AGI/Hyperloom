@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from dataclasses import dataclass
@@ -207,6 +208,55 @@ def _validate_selected_chunk(
         )
 
 
+_SPLIT_MANIFEST_NAME = "split_manifest.json"
+# Manifest keys carried into split_meta; root_family* is written only for annotation-derived roots.
+_SPLIT_MANIFEST_KEYS = ("status", "method", "phase_confidence", "root_family", "root_family_known")
+
+
+def _read_split_manifest(split_dir: "Path") -> "dict | None":
+    """The splitter's ``split_manifest.json``, or None when it is missing or not a JSON object."""
+    try:
+        manifest = json.loads((split_dir / _SPLIT_MANIFEST_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return manifest if isinstance(manifest, dict) else None
+
+
+def _record_split_manifest(args, split_dir: "Path", split_meta: dict, health_warnings: "list[dict]") -> None:
+    """Carry the manifest's verdict into ``split_meta``; warn when it is absent or cannot vouch for the phases."""
+    manifest = _read_split_manifest(split_dir)
+    if manifest is None:
+        health_warnings.append(
+            {
+                "code": "trace_split_manifest_missing",
+                "severity": "warning",
+                "split_dir": str(split_dir),
+                "message": (
+                    f"TraceLens splitter wrote no readable {_SPLIT_MANIFEST_NAME}; the split's quality is unrecorded."
+                ),
+            }
+        )
+        return
+    split_meta.update({key: manifest[key] for key in _SPLIT_MANIFEST_KEYS if key in manifest})
+    phase_confidence = manifest.get("phase_confidence")
+    if not args.split_llm_inference or phase_confidence == "high":
+        return
+    health_warnings.append(
+        {
+            "code": "trace_split_phase_unconfirmed",
+            "severity": "warning",
+            "phase_confidence": phase_confidence,
+            "method": manifest.get("method"),
+            **({"root_family": manifest["root_family"]} if "root_family" in manifest else {}),
+            "split_dir": str(split_dir),
+            "message": (
+                f"TraceLens splitter rated its phase labels {phase_confidence!r} (method {manifest.get('method')}); "
+                "the phase chunks may not hold the phases they are named for."
+            ),
+        }
+    )
+
+
 @dataclass(frozen=True)
 class TraceSplitJob:
     """The input trace, output directory and TraceLens checkout one splitter run works with."""
@@ -276,6 +326,7 @@ def _run_trace_split(
             "returncode": split_rc,
         }
     )
+    _record_split_manifest(args, split_dir, split_meta, health_warnings)
 
     _validate_selected_chunk(
         split_dir,

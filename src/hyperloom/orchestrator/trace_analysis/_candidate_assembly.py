@@ -457,6 +457,22 @@ def build_source_resolution_entries(candidates: list[dict[str, Any]]) -> list[di
     return entries
 
 
+def source_resolution_warning(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The ``trace_health_warnings[]`` entry for hot kernels none of which resolved to a source, else None."""
+    summary = _KSC.summarize_resolution(build_source_resolution_entries(candidates))
+    total = summary["total"]
+    if not total or summary["located"]:
+        return None
+    return {
+        "code": "kernel_source_unresolved",
+        "severity": "warning",
+        "located": 0,
+        "total": total,
+        "by_class": summary["by_class"],
+        "message": f"none of the {total} hot kernel(s) resolved to a source file",
+    }
+
+
 def write_source_resolution_artifact(
     candidates: list[dict[str, Any]],
     out_path: Path | str,
