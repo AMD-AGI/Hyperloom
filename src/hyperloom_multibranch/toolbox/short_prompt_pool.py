@@ -10,14 +10,14 @@ test's completed processes to the pool and compares every process pooled for its
 
 The pool is keyed by the recipe's digest, the prompt set's hash and the token budget, and names each process by the test's
 output directory and the process's index. It is a JSON-lines file below the session directory, one line per process,
-flushed and fsynced like the submit log; a process already pooled is not added twice, and a torn last line, the trace of a
-crash mid-write, is ignored.
+written as the submit log is (:func:`~.submission_log.append_line`); a process already pooled is not added twice, and a
+torn last line, the trace of a crash mid-write, is cut off the file when it is read back, so the next process starts a line
+of its own.
 """
 
 from __future__ import annotations
 
 import json
-import os
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -27,6 +27,7 @@ from hyperloom.contracts.measurement import TestResult
 from hyperloom.measure.short_prompts.compare import Outputs, PromptInfo, compare_outputs
 from hyperloom.measure.short_prompts.outputs import OutputsError, output_document, parse_output, read_outputs
 from hyperloom_multibranch.toolbox.short_prompts import output_counts
+from hyperloom_multibranch.toolbox.submission_log import append_line, complete_lines
 
 __all__ = ["POOL_FILE", "PoolKey", "ShortPromptPool", "pooled_result"]
 
@@ -37,7 +38,6 @@ _PROMPTS = "prompts_sha256"
 _TOKENS = "max_new_tokens"
 _PROCESS = "process"
 _OUTPUTS = "outputs"
-_UTF8 = "utf-8"
 
 
 @dataclass(frozen=True)
@@ -75,21 +75,18 @@ class ShortPromptPool:
             _PROCESS: process,
             _OUTPUTS: {prompt_id: output_document(out) for prompt_id, out in outputs.items()},
         }
-        with self._path.open("a", encoding=_UTF8) as handle:
-            handle.write(json.dumps(record, sort_keys=True) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
+        append_line(self._path, record)
         held[process] = dict(outputs)
 
     def _replay(self) -> None:
-        for line in self._path.read_text(encoding=_UTF8).splitlines():
+        for line in complete_lines(self._path):
             try:
                 record = json.loads(line)
                 key = PoolKey(str(record[_RECIPE]), str(record[_PROMPTS]), int(record[_TOKENS]))
                 process = str(record[_PROCESS])
                 outputs = {pid: parse_output(out, pid) for pid, out in record[_OUTPUTS].items()}
             except (json.JSONDecodeError, KeyError, TypeError, ValueError, AttributeError, OutputsError):
-                continue  # a torn write: only the last line can be one, and it was never acknowledged
+                continue  # a torn line an earlier append ran on into: neither half reads back
             self._answers.setdefault(key, {}).setdefault(process, outputs)
 
 
