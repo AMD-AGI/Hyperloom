@@ -221,6 +221,24 @@ def _built_module_stored_as_sitecustomize(entry: Path, planted: Planted) -> None
     _rewrite_built_wheel(entry, unicode_path_name("sdist_pkg.py", "sitecustomize.py"))
 
 
+def _built_module_under_a_name_flagged_utf_8_that_is_not(entry: Path, planted: Planted) -> None:
+    """The built wheel's ``sdist_pkg.py`` stored under a name flagged UTF-8 whose bytes are not UTF-8: zipfile cannot list
+    the wheel's members (it raises :exc:`UnicodeDecodeError`)."""
+    flagged = "sdist_pk\u00e9.py"
+
+    def rename(member: zipfile.ZipInfo) -> zipfile.ZipInfo:
+        if member.filename == "sdist_pkg.py":
+            member.filename = flagged
+        return member
+
+    _rewrite_built_wheel(entry, rename)
+    cached = entry / WHEELS_DIR / _SDIST_WHEEL
+    data = cached.read_bytes()
+    assert data.count(flagged.encode()) == 2
+    cached.write_bytes(data.replace(flagged.encode(), b"sdist_pk\xff\xfe.py"))
+    _record_wheel(entry, "sdist-pkg", _SDIST_WHEEL)
+
+
 def _built_module_made_executable(entry: Path, planted: Planted) -> None:
     def executable(member: zipfile.ZipInfo) -> zipfile.ZipInfo:
         if member.filename == "sdist_pkg.py":
@@ -261,6 +279,10 @@ def _built_module_made_executable(entry: Path, planted: Planted) -> None:
             "extra field",
         ),
         (
+            _built_module_under_a_name_flagged_utf_8_that_is_not,
+            f"{_SDIST_WHEEL} cannot be read as a wheel: UnicodeDecodeError",
+        ),
+        (
             _built_module_made_executable,
             f"{_SDIST_WHEEL} is not the wheel its source distribution builds; the members that differ: sdist_pkg.py",
         ),
@@ -276,6 +298,7 @@ def _built_module_made_executable(entry: Path, planted: Planted) -> None:
         "wheel-renamed",
         "wheel-not-a-zip",
         "member-under-a-unicode-path-name",
+        "member-name-flagged-utf-8-that-is-not",
         "member-made-executable",
     ],
 )
