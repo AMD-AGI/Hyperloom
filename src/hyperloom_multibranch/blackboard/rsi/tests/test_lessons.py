@@ -70,9 +70,11 @@ def test_a_revision_is_written_once_reads_back_whole_and_a_later_one_takes_its_p
     first = revision("first", START)
     second = revision("second", START + 60, supersedes=(first.revision_id,), text=FIXED)
 
-    assert pool.write(first) and not pool.write(first)
+    wrote, wrote_again = pool.write(first), pool.write(first)
+    assert wrote and not wrote_again
     assert pool.revisions() == (first,) and pool.live() == (first,) and first.measured
-    assert pool.write(second)
+    wrote_second = pool.write(second)
+    assert wrote_second
     assert pool.live() == (second,)
     assert pool.lessons()[LESSON].revisions == (first, second)
 
