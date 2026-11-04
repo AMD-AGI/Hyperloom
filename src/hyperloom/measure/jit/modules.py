@@ -21,7 +21,8 @@ measures the old code. A module is touched when a patched path is
   that names no module, else the modules whose ``-m <name>`` the path's ``hsa/<arch>/<name>/`` directory names;
 * in a module whose entry in the config differs from the image's.
 
-A module generated from a tuned table that differs from the image's is touched too (``framework.table_modules``).
+A module generated from a tuned table that differs from the image's is touched too (``framework.table_modules``), and so is
+one whose entry reads a build variable the server sets to another value than the image has (:func:`env_touched_entries`).
 
 A prebuilt name that is not an entry of the config is a module aiter names at run time (``mha_varlen_fwd_<variant>``
 from ``module_mha_varlen_fwd``, ``module_moe_ck2stages_<variant>``); it follows the entry it starts with, and one that
@@ -43,30 +44,51 @@ from hyperloom.common.outside_facts import (
     AITER_META_DIR_ENV,
     AITER_META_MARKER_DIR,
 )
-from hyperloom.measure.jit.key import env_names_in
+from hyperloom.measure.jit.key import CONFIG_FILE, build_surface, entry_env_names, env_names_in, without_card_arch
 
 __all__ = [
+    "CKTILE_MODULE_BUILD_LIMIT_SEC",
+    "CKTILE_MODULE_SECONDS",
     "CONFIG_FILE",
     "ESTIMATED_MODULE_SECONDS",
     "MAX_REBUILD_SECONDS",
+    "MODULE_BUILD_LIMIT_SEC",
+    "TABLE_GEMM_MODULE_SECONDS",
     "SourceTree",
     "Touched",
     "build_env_names",
     "config_path",
+    "env_touched_entries",
+    "is_cktile_module",
+    "module_build_limit_sec",
+    "module_build_seconds",
     "prebuilt_names",
     "read_config",
     "touched_entries",
     "touched_modules",
 ]
 
-CONFIG_FILE = "optCompilerConfig.json"
 #: The directory of the aiter package that holds its builder, its module config and its prebuilt modules.
 _JIT_DIR = "jit"
-#: What one module takes to build: the 63 to 66 s that the heaviest modules (mha_batch_prefill, module_moe_ck2stages) took in
-#: earlier tests' server logs. The single-lineage flow gives aiter 40 minutes to build in (``targeted_build``); a patch that
-#: would take longer than that to rebuild before its test starts is refused when the test is accepted.
+#: What one module typically takes to build on a card, by its kind (:func:`module_build_seconds`). Most modules: about a
+#: minute, a round figure at the heavy end of ordinary modules (mha_batch_prefill, module_moe_ck2stages).
 ESTIMATED_MODULE_SECONDS = 65
+#: A GEMM whose code generator writes a kernel instance for each row of a tuned table (``gen_instances.py`` reading
+#: ``AITER_CONFIGS``), such as module_gemm_a8w8_bpreshuffle: a few times an ordinary module.
+TABLE_GEMM_MODULE_SECONDS = 180
+#: A CK-tile module, such as module_gemm_a8w8_bpreshuffle_cktile, the slowest kind: about ten times an ordinary module.
+CKTILE_MODULE_SECONDS = 680
+#: The single-lineage flow gives aiter 40 minutes to build in (``targeted_build``); a patch whose touched modules would
+#: take longer than that to rebuild before its test starts is refused when the test is accepted.
 MAX_REBUILD_SECONDS = 40 * 60
+#: How long a timer that ends a hang lets one module build (:func:`module_build_limit_sec`): over twice the longest build
+#: of its kind, so only a hung build trips it. Most modules: up to 273 s before a server is ready.
+MODULE_BUILD_LIMIT_SEC = 600
+#: A CK-tile module: up to 1347 s when several tests build at once.
+CKTILE_MODULE_BUILD_LIMIT_SEC = 2700
+_CKTILE = "cktile"
+_TABLE_GENERATOR = "gen_instances"
+_TABLE_READS = ("AITER_CONFIGS.", "--tune_file")
 _PLACEHOLDERS = {
     "AITER_CSRC_DIR": AITER_META_MARKER_DIR,
     "AITER_GRADLIB_DIR": "gradlib",
@@ -337,15 +359,21 @@ def build_env_names(package: Path, meta: Path, config: Mapping[str, Any], module
     """The environment variables the build of ``modules`` (entries of ``config``) reads, from the aiter package at
     ``package`` and the meta directory at ``meta``.
 
-    That is aiter's builder, the package's ``jit`` directory (``core.py`` and the helpers it imports), and each module's
+    That is aiter's builder, the package's ``jit`` directory (``core.py`` and the helpers it imports), each module's
     own Python: a source that is a Python file or a directory, and the directory of each code generator script (a
-    generator imports what is beside it; ``hsa/codegen.py``'s is ``hsa``). A module that is no entry of ``config``, or
-    whose entry cannot be expanded, reads every generator of ``csrc`` and ``hsa``. The rest of the tree (``setup.py``, the
-    Triton kernels below ``aiter/ops``) is not the build's and is not read: a variable only it reads cannot change the
-    module. Both sides of a CPU build of aiter's modules compare the variables this names, so they compare the same ones.
+    generator imports what is beside it; ``hsa/codegen.py``'s is ``hsa``), and what each module's entry of ``config``
+    reads itself, as aiter evaluates it (:func:`~hyperloom.measure.jit.key.entry_env_names`: a ``-D`` flag or a
+    ``hip_clang_path`` taken from the environment). A module that is no entry of ``config``, or whose entry cannot be
+    expanded, reads every generator of ``csrc`` and ``hsa``; one that is no entry reads what the entry it follows reads, or
+    every entry's when it follows none. The rest of the tree (``setup.py``, the Triton kernels below ``aiter/ops``) is not
+    the build's and is not read: a variable only it reads cannot change the module. Both sides of a CPU build of aiter's
+    modules compare the variables this names, so they compare the same ones.
     """
     places: set[str] = set()
+    entries: set[str] = set()
     for name in modules:
+        owner = _entry_of(name, config)
+        entries.update(config if owner is None else (owner,))
         try:
             inputs = _inputs(config[name])
         except (KeyError, _Unexpandable):
@@ -353,4 +381,65 @@ def build_env_names(package: Path, meta: Path, config: Mapping[str, Any], module
             continue
         places.update(inputs.sources)
         places.update(posixpath.dirname(script) or script for script in inputs.scripts)
-    return env_names_in([package / _JIT_DIR, *(meta / place for place in sorted(places) if place)])
+    found = env_names_in([package / _JIT_DIR, *(meta / place for place in sorted(places) if place)])
+    return found | frozenset(name for entry in sorted(entries) for name in entry_env_names(config[entry]))
+
+
+def env_touched_entries(
+    config: Mapping[str, Any],
+    servers: Iterable[Mapping[str, str]],
+    image: Mapping[str, str],
+    gfx_arch: str | None = None,
+) -> frozenset[str]:
+    """The entries of ``config`` whose module a server of ``servers`` would build otherwise than the image's prebuilt one.
+
+    That is an entry that reads a build variable itself (:func:`~hyperloom.measure.jit.key.entry_env_names`, less what
+    :func:`~hyperloom.measure.jit.key.build_surface` leaves out: locations, speed, and the tuned tables, which
+    ``framework.table_modules`` compares by content) that the server sets to another value than ``image``, the environment
+    the image's modules stand for (what the server inherits before the sheet's own). aiter builds a module only when its
+    ``.so`` is missing, so with the image's linked the server's value would never reach the code it runs.
+
+    ``GPU_ARCHS`` naming the card (``native``, or ``gfx_arch``) is no difference, as it is none to the CPU build's
+    comparison (:func:`~hyperloom.measure.jit.key.without_card_arch`).
+    """
+    image = without_card_arch(image, gfx_arch)
+    servers = [without_card_arch(server, gfx_arch) for server in servers]
+    touched = set()
+    for key, entry in config.items():
+        names = entry_env_names(entry)
+        if not names:
+            continue
+        base = build_surface(names, image, {}).environment
+        if any(build_surface(names, server, {}).environment != base for server in servers):
+            touched.add(key)
+    return frozenset(touched)
+
+
+def is_cktile_module(name: str) -> bool:
+    """Whether ``name`` (an entry of the module config, or a name aiter makes from one) is one of aiter's CK-tile modules,
+    ``module_gemm_a8w8_bpreshuffle_cktile`` and the like: the slowest kind of build."""
+    return _CKTILE in name
+
+
+def module_build_seconds(name: str, config: Mapping[str, Any]) -> int:
+    """What building the module ``name`` (an entry of ``config``, or a name aiter makes from one) typically takes on a
+    card: a CK-tile module's, a tuned-table GEMM's, or any other module's (see the constants)."""
+    if is_cktile_module(name):
+        return CKTILE_MODULE_SECONDS
+    owner = _entry_of(name, config)
+    if owner is not None and _table_generated(config[owner]):
+        return TABLE_GEMM_MODULE_SECONDS
+    return ESTIMATED_MODULE_SECONDS
+
+
+def module_build_limit_sec(name: str) -> int:
+    """How long a timer that ends a hang lets the module ``name`` build before it counts the build as hung."""
+    return CKTILE_MODULE_BUILD_LIMIT_SEC if is_cktile_module(name) else MODULE_BUILD_LIMIT_SEC
+
+
+def _table_generated(entry: Any) -> bool:
+    """Whether the code generator of ``entry`` writes kernel instances from a tuned table."""
+    if not isinstance(entry, Mapping):
+        return False
+    commands = [command for command in _list(entry.get("blob_gen_cmd", "")) if isinstance(command, str)]
+    return any(_TABLE_GENERATOR in command and any(word in command for word in _TABLE_READS) for command in commands)

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The native builds a compiled environment needs (#125 stage 4b), as the compile and the sheet name them.
+"""The native builds a compiled environment needs, as the compile and the sheet name them.
 
 A component whose stack changes native sources compiles to a ``runtime`` root: its stack's files inside the installed
 package are laid like a package root's, and its native outputs come from a build in the native build store
@@ -12,7 +12,7 @@ its key and the SHA-256 of its signed manifest (:class:`BuildRef`, ``environment
 The compiled overlay's roots (:class:`EnvRoot`) and their entries (:class:`EnvEntry`) are defined here, below
 :mod:`hyperloom.measure.compile`, because the builds named here are made from them.
 
-aiter's touched modules (#125 stage 2b) are built the same way but stay a package root's: :class:`ModulePlan` says which
+aiter's touched modules are built the same way but stay a package root's: :class:`ModulePlan` says which
 of them a CPU build makes (:class:`ModuleBuild`), and the sheet names that build on aiter's package root.
 """
 
@@ -98,7 +98,7 @@ class NativePlan(Protocol):
 
 @dataclass(frozen=True)
 class ModuleBuild:
-    """The CPU build of aiter's modules that a stack touches (#125 stage 2b): the inputs whose hash is the store's key,
+    """The CPU build of aiter's modules that a stack touches: the inputs whose hash is the store's key,
     and the modules it makes, which the test's server then loads instead of building them on its card."""
 
     inputs: BuildInputs
@@ -107,14 +107,15 @@ class ModuleBuild:
 
 class ModulePlan(Protocol):
     """Which of the touched modules ``candidates`` of aiter's stack (its ``roots``, the module config ``config`` they
-    leave) a CPU build makes, ``None`` when it makes none; and how long building ``modules`` on CPU takes."""
+    leave) a CPU build makes, ``None`` when it makes none; and how long building ``modules`` (entries of ``config``, or
+    names aiter makes from one) on CPU takes."""
 
     def __call__(
         self, roots: tuple[EnvRoot, ...], config: Mapping[str, Any], candidates: Collection[str]
     ) -> ModuleBuild | None:
         """The CPU build of the ``candidates`` it makes, if any."""
 
-    def seconds(self, modules: Collection[str]) -> float:
+    def seconds(self, modules: Collection[str], config: Mapping[str, Any]) -> float:
         """How long building ``modules`` on CPU takes, in seconds."""
 
 

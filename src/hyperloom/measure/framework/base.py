@@ -22,6 +22,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from hyperloom_common.aiter_jit_cache import resolve_package_root
 from hyperloom.common.outside_facts import SGLANG_IMAGE_AITER_CONFIGS
 from hyperloom.measure.framework.tables import TableVariable, read_variables
 
@@ -36,6 +37,7 @@ __all__ = [
     "file_sha256",
     "files_digest",
     "framework_envs",
+    "image_configs",
     "load_snapshot",
     "restore",
     "shared_view",
@@ -45,7 +47,7 @@ __all__ = [
 
 log = logging.getLogger(__name__)
 
-#: Where the image keeps the tuned tables aiter reads and rewrites.
+#: Where an SGLang image keeps the tuned tables aiter reads and rewrites (:func:`image_configs` finds any image's).
 DEFAULT_CONFIGS = SGLANG_IMAGE_AITER_CONFIGS
 #: Set on the runner template: the session's snapshot directory, and its digest (a test that finds another digest in the
 #: snapshot began on a base that is not the session's).
@@ -179,15 +181,32 @@ def take_snapshot(source: Path, directory: Path) -> Snapshot:
     return snapshot
 
 
+def image_configs() -> Path:
+    """The tuned tables of the image's aiter: SGLang's workspace checkout, else the installed package's (a vLLM image
+    keeps them in ``site-packages/aiter/configs``)."""
+    workspace = Path(DEFAULT_CONFIGS)
+    if workspace.is_dir():
+        return workspace
+    package = resolve_package_root()
+    return workspace if package is None else package / "configs"
+
+
 def framework_envs(directory: Path, source: str | None = None) -> dict[str, str]:
     """The variables that make the runner of every test of the session read private copies of the tuned tables.
 
-    Takes the snapshot into ``directory`` now. Empty on a machine without the tables (``source`` defaults to the
-    image's); when the snapshot cannot be taken the directory is still named, and each test says in its result that it
+    Takes the snapshot into ``directory`` now. Empty on a machine without the tables (``source`` defaults to
+    :func:`image_configs`, and ``""`` turns the snapshot off); when the snapshot cannot be taken the directory is still named, and each test says in its result that it
     found none.
     """
-    configs = Path(DEFAULT_CONFIGS if source is None else source)
-    if not source and source is not None or not configs.is_dir():
+    if source == "":
+        return {}
+    configs = image_configs() if source is None else Path(source)
+    if not configs.is_dir():
+        log.warning(
+            "no framework tables at %s: the session takes no snapshot, and a test that lists the image's default "
+            "table next to tuned rows is refused",
+            configs,
+        )
         return {}
     try:
         return {SNAPSHOT_ENV: str(directory), SESSION_SHA_ENV: take_snapshot(configs, directory).sha256}

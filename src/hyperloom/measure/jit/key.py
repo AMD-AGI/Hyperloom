@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The key a compiled-code cache is stored under: exactly the inputs that decide what the compiler produces (design 4.21).
+"""The key a compiled-code cache is stored under: exactly the inputs that decide what the compiler produces.
 
 Each kind of cache is keyed by what its own compiler contract leaves uncovered, and nothing else, so two candidates that
 differ only in server arguments, in a framework patch that does not touch the build, or in the environment of the
@@ -17,7 +17,10 @@ request share one cache:
   the image, the GPU, the aiter source tree (the patch laid over the image's), the content of the tuned tables the code
   generators read, and the value of every environment variable the build path reads.
 
-Which variables the build path reads is found in the source the test will run (:func:`scan_env_names`), not listed here.
+Which variables the build path reads is found in the source the test will run (:func:`scan_env_names`), not listed here:
+its Python, and the module config ``jit/optCompilerConfig.json``, whose string values aiter evaluates as Python when it
+builds a module (``get_args_of_build``), so a flag such as ``-DCK_TILE_FLOAT_TO_BFLOAT16_DEFAULT={os.environ.get(...)}`` or
+a ``hip_clang_path`` of ``os.environ.get('FLATMM_HIP_CLANG_PATH')`` reads the server's environment (:func:`entry_env_names`).
 A framework patch can change the build context from inside the server (set a variable, patch aiter's builder); that is
 not visible in the sheet, so a patch whose text shows such a thing is made part of the key (:func:`touches_build_surface`).
 That test errs toward fewer shared entries, never toward a leak.
@@ -43,6 +46,7 @@ no test is meant to depend on; the key already fixes the image, and treats code 
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 from collections.abc import Iterable, Mapping
@@ -54,20 +58,29 @@ from hyperloom.measure.docs import canonical_json
 
 __all__ = [
     "AITER_PACKAGE",
+    "CONFIG_FILE",
     "BuildSurface",
     "Machine",
     "aiter_key",
     "build_surface",
+    "entry_env_names",
     "env_names_in",
+    "plain_build_names",
     "scan_env_names",
     "touches_build_surface",
     "tree_identity",
     "triton_key",
+    "without_card_arch",
 ]
 
 #: 2: Triton's group files are stored with paths relative to the cache directory, so a snapshot of schema 1 is not read.
 SCHEMA = 2
+#: The aiter key's own revision. 3: the surface holds the variables the module config reads too; an entry made before could
+#: hold a module built under a value of one of them that its key did not name, so none of them is read.
+_AITER_SCHEMA = 3
 AITER_PACKAGE = "aiter"
+#: aiter's module config, below the package's ``jit`` directory: what each module is built from, as Python expressions.
+CONFIG_FILE = "optCompilerConfig.json"
 #: Variables that only name a location, one that differs between sandboxes; the scan finds them, the surface leaves them out.
 _LOCATIONS = frozenset(
     {
@@ -92,18 +105,26 @@ _NEUTRAL = frozenset(
 )
 #: ``AITER_REBUILD`` discards what is cached and builds again: a test that sets it has no cache to use or to add to.
 REBUILD_VARIABLE = "AITER_REBUILD"
+#: The variable that names the architectures aiter's build targets (``jit/core.py``, ``jit/utils/chip_info.py``), and the
+#: value that says the card's own: a module built for either is the same module (:func:`without_card_arch`).
+_GPU_ARCHS = "GPU_ARCHS"
+_NATIVE_ARCH = "native"
 #: Variables the tuned tables are named by; their files' content, not their paths, is what a code generator reads.
 _TABLE_PREFIX = "AITER_CONFIG_"
 _ENV_READ = re.compile(
     r"""(?:os\.environ\.get|os\.getenv|os\.environ\.setdefault)\(\s*["']([A-Za-z_][A-Za-z0-9_]*)["']"""
     r"""|os\.environ\[\s*["']([A-Za-z_][A-Za-z0-9_]*)["']\s*\]"""
-    r"""|["']([A-Za-z_][A-Za-z0-9_]*)["']\s+(?:not\s+)?in\s+os\.environ"""
+    # ``"X" in os.environ``, but not ``"gfx950" in os.environ.get("GPU_ARCHS", "")``: that tests a value, and a match
+    # there would swallow the read of ``GPU_ARCHS`` after it.
+    r"""|["']([A-Za-z_][A-Za-z0-9_]*)["']\s+(?:not\s+)?in\s+os\.environ\b(?!\s*(?:\[|\.\s*(?:get|pop|setdefault)\s*\())"""
 )
 #: Where, below the aiter package and the checkout around it, the code that builds and generates code is.
 _BUILD_PATH = ("jit", "../csrc", "../hsa", "../aiter_meta")
 #: The same, below a meta directory itself (the farm's copy, which holds the patched ``csrc`` and ``hsa``).
 _META_BUILD_PATH = (AITER_META_MARKER_DIR, "hsa")
 _MAX_SCANNED_BYTES = 2 * 1024**2
+_MAX_CONFIG_BYTES = 16 * 1024**2
+_JIT_DIR = "jit"
 _PYTHON_SUFFIX = ".py"
 #: Text of a patch that can change what aiter builds from inside the server process, other than by naming a variable.
 _BUILD_SURFACE_WORDS = ("AITER_", "aiter.jit", "build_module", "compile_ops", "putenv", "unsetenv")
@@ -157,7 +178,7 @@ def aiter_key(machine: Machine, tree: str, surface: BuildSurface) -> str:
     """The key of the aiter caches: the machine, the source tree's identity and what the build path reads."""
     return _hash(
         {
-            "schema": SCHEMA,
+            "schema": _AITER_SCHEMA,
             "kind": AITER_PACKAGE,
             "machine": machine.document(),
             "tree": tree,
@@ -189,13 +210,53 @@ def scan_env_names(package_dirs: Iterable[Path], meta_dirs: Iterable[Path] = ())
     """The environment variables the aiter build path reads, found in the source a test will run.
 
     Reads the Python files of the build path below each aiter package directory: the package's ``jit`` directory, the
-    ``csrc`` code generators, ``hsa/codegen.py`` and the ``aiter_meta`` copy of a wheel install. A variable is named when
-    the code reads it with ``os.getenv``, ``os.environ.get``, ``os.environ[...]`` or ``in os.environ``; a name found there that
-    the build never reads only makes the key finer. ``meta_dirs`` are meta directories to read the same ``csrc`` and ``hsa``
-    code of, for a test that carries patches to them.
+    ``csrc`` code generators, ``hsa/codegen.py`` and the ``aiter_meta`` copy of a wheel install; and every entry of the
+    package's module config (:func:`entry_env_names`). A variable is named when the code reads it with ``os.getenv``,
+    ``os.environ.get``, ``os.environ[...]`` or ``in os.environ``; a name found there that the build never reads only makes
+    the key finer. ``meta_dirs`` are meta directories to read the same ``csrc`` and ``hsa`` code of, for a test that
+    carries patches to them.
     """
-    places = [(package, _BUILD_PATH) for package in package_dirs] + [(meta, _META_BUILD_PATH) for meta in meta_dirs]
-    return env_names_in(Path(directory) / relative for directory, relatives in places for relative in relatives)
+    package_dirs = [Path(package) for package in package_dirs]
+    places = [(package, _BUILD_PATH) for package in package_dirs] + [
+        (Path(meta), _META_BUILD_PATH) for meta in meta_dirs
+    ]
+    names = env_names_in(directory / relative for directory, relatives in places for relative in relatives)
+    return names | frozenset(name for package in package_dirs for name in _config_env_names(package))
+
+
+def entry_env_names(entry: object) -> frozenset[str]:
+    """The environment variables one entry of aiter's module config reads when its module is built.
+
+    aiter evaluates every string of an entry as Python (``get_args_of_build`` in ``aiter/jit/core.py``), so a flag
+    written ``f'-DCK_TILE_FLOAT_TO_BFLOAT16_DEFAULT={os.environ.get("CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT", 2)}'`` or a
+    ``hip_clang_path`` of ``os.environ.get('FLATMM_HIP_CLANG_PATH')`` reads the server's environment then. Every string is
+    read, nested lists and mappings included: one that aiter passes through unevaluated only makes the key finer.
+    """
+    return frozenset(name for text in _strings(entry) for name in _names_in_text(text))
+
+
+def _strings(value: object) -> Iterable[str]:
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, Mapping):
+        for item in value.values():
+            yield from _strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _strings(item)
+
+
+def _config_env_names(package: Path) -> frozenset[str]:
+    """The variables every entry of the module config of the aiter package at ``package`` reads; none when it has no
+    config that can be read (aiter cannot read it either, so it builds nothing from it)."""
+    try:
+        with open(package.resolve() / _JIT_DIR / CONFIG_FILE, "rb") as handle:
+            document = json.loads(handle.read(_MAX_CONFIG_BYTES))
+    except (OSError, ValueError):
+        return frozenset()
+    if not isinstance(document, Mapping):
+        return frozenset()
+    return frozenset(name for entry in document.values() for name in entry_env_names(entry))
 
 
 def env_names_in(paths: Iterable[Path]) -> frozenset[str]:
@@ -241,6 +302,10 @@ def _names_in(path: Path) -> set[str]:
             text = handle.read(_MAX_SCANNED_BYTES).decode("utf-8", errors="replace")
     except OSError:
         return set()
+    return _names_in_text(text)
+
+
+def _names_in_text(text: str) -> set[str]:
     return {name for match in _ENV_READ.finditer(text) for name in match.groups() if name}
 
 
@@ -250,14 +315,38 @@ def build_surface(
     """The part of ``environment`` the build reads: a table variable by the content ``table_content`` gives for it, any
     other variable by its value, minus the variables that only name a location or change only speed or noise (``names`` is
     what :func:`scan_env_names` found, which still has them)."""
-    named = set(names) - _LOCATIONS - _NEUTRAL - {REBUILD_VARIABLE}
+    named = _read_names(names)
     tables = {
         name: table_content[name] for name in sorted(named) if name.startswith(_TABLE_PREFIX) and name in table_content
     }
-    plain = {
-        name: environment[name] for name in sorted(named) if not name.startswith(_TABLE_PREFIX) and name in environment
-    }
+    plain = {name: environment[name] for name in sorted(plain_build_names(names)) if name in environment}
     return BuildSurface(tables, plain, rebuild=_rebuilds(environment))
+
+
+def plain_build_names(names: Iterable[str]) -> frozenset[str]:
+    """The variables of ``names`` :func:`build_surface` takes by their value: neither a location, nor one that changes
+    only speed or noise, nor ``AITER_REBUILD``, nor a tuned table (taken by its content)."""
+    return frozenset(name for name in _read_names(names) if not name.startswith(_TABLE_PREFIX))
+
+
+def _read_names(names: Iterable[str]) -> set[str]:
+    return set(names) - _LOCATIONS - _NEUTRAL - {REBUILD_VARIABLE}
+
+
+def without_card_arch(environment: Mapping[str, str], gfx_arch: str | None) -> dict[str, str]:
+    """``environment`` without ``GPU_ARCHS`` when it only names the card the build is for: ``native`` or ``gfx_arch`` (the
+    card's own architecture; ``None`` when it is not known, which leaves ``native`` alone).
+
+    A module built with the variable unset, ``native`` or the card's architecture is built for the same target, so two
+    environments' build variables are compared without it: the CPU build of aiter's modules sets the target itself
+    (``runner.jit._build_differs``), and a module config entry that reads it is compared the same way
+    (:func:`~hyperloom.measure.jit.modules.env_touched_entries`). Any other value (several architectures, another card)
+    stays."""
+    found = dict(environment)
+    value = found.get(_GPU_ARCHS)
+    if value is not None and value in (_NATIVE_ARCH, gfx_arch):
+        del found[_GPU_ARCHS]
+    return found
 
 
 def _rebuilds(environment: Mapping[str, str]) -> bool:

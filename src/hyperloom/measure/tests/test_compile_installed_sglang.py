@@ -28,7 +28,7 @@ from hyperloom.measure.tests._recipes import IMAGE, git_patch, put_patch, recipe
 
 pytestmark = pytest.mark.skipif(importlib.util.find_spec("sglang") is None, reason="SGLang is not installed here")
 
-MARKER = "HL_W5_OVERLAY_MARKER"
+MARKER = "HL_OVERLAY_MARKER"
 TARGET = "version.py"
 
 

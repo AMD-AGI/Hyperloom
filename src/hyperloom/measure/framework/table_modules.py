@@ -13,22 +13,26 @@ other kernels must build its own: with the image's, its server stops on a kernel
 lists, merged when there are several), else to the variable's default table below ``aiter/configs`` with the per-model
 tables of ``aiter/configs/model_configs`` whose name holds the variable's tuned name. A table reaches a test through the
 variable (an ``AITER_CONFIG_*`` of the sheet, or the table a kernel tune made), or through a patch to ``configs``; the
-test's tables and the image's are compared by the bytes of the files each resolves to. What cannot be resolved counts as
+test's tables and the image's are compared by the bytes of the files each resolves to (several in the order aiter
+merges them only where that order changes what a generator makes, see ``_contents``). What cannot be resolved counts as
 different, and a module whose command names the tables in a way not read here is stale whenever any table differs: a
 module that is wrongly rebuilt only costs time, one that is wrongly kept is never measured.
 """
 
 from __future__ import annotations
 
+import csv
 import fnmatch
 import hashlib
+import math
 import os
 import re
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Collection, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.outside_facts import TUNED_LIBTYPE_COLUMN
 from hyperloom.measure.framework.rows import DEFAULT_TABLE_PLACEHOLDER
 from hyperloom.measure.framework.tables import AITER_VARIABLE_PREFIX, TableVariable, read_variables
 
@@ -41,6 +45,28 @@ _CONFIGS_DIR, _MODEL_CONFIGS = "configs", "configs/model_configs"
 _UNTUNED = "untuned"
 _DIGEST_CHUNK = 1 << 20
 _COMMAND = "blob_gen_cmd"
+_GENERATOR = re.compile(r"\{AITER_CSRC_DIR\}/([^\s:{}'\"]+\.py)")
+_SHAPE = ("gfx", "cu_num", "M", "N", "K")
+_KIND_SHAPE = (TUNED_LIBTYPE_COLUMN, *_SHAPE)
+_BATCHED_SHAPE = ("gfx", "cu_num", "B", "M", "N", "K")
+#: The columns each generator of aiter e7d2453f25e5 (its path below ``csrc``) keys the rows of its table by: a row replaces
+#: an earlier one of its key (``chip_info.build_tune_dict``, ``build_tune_dict_batched``), and a generator that keeps the
+#: rows of one ``libtype`` keys within it. ``None`` for the one that compiles the kernels of every row (opus: their union).
+#: A generator not listed keys by nothing, so that any row may replace any earlier one.
+_GENERATOR_KEYS: dict[str, tuple[str, ...] | None] = {
+    "ck_gemm_a8w8/gen_instances.py": _SHAPE,
+    "ck_gemm_a4w4_blockscale/gen_instances.py": _SHAPE,
+    "ck_gemm_a8w8_bpreshuffle/gen_instances.py": _KIND_SHAPE,
+    "cktile_gemm_a8w8_bpreshuffle/gen_instances.py": _KIND_SHAPE,
+    "ck_gemm_a8w8_blockscale/gen_instances.py": _KIND_SHAPE,
+    "ck_gemm_a8w8_blockscale/gen_instances_cktile.py": _KIND_SHAPE,
+    "ck_gemm_a8w8_blockscale_bpreshuffle/gen_instances.py": _KIND_SHAPE,
+    "ck_batched_gemm_a8w8/gen_instances.py": _BATCHED_SHAPE,
+    "ck_batched_gemm_bf16/gen_instances.py": _BATCHED_SHAPE,
+    "opus_gemm/gen_instances.py": None,
+}
+#: The keys of a variable whose generators are not known: one key that every row has.
+_ANY_ROW: frozenset[tuple[str, ...]] = frozenset({()})
 
 
 def file_identity(path: str | Path) -> str:
@@ -58,11 +84,13 @@ def file_identity(path: str | Path) -> str:
 @dataclass(frozen=True)
 class TableUse:
     """The tables one module is generated from: ``variables`` it resolves, ``files`` (patterns below the package) it
-    names directly, and whether its command names tables in a way not read here (``unread``)."""
+    names directly, whether its command names tables in a way not read here (``unread``), and the ``generators`` it runs
+    (their paths below ``csrc``)."""
 
     variables: frozenset[str] = frozenset()
     files: tuple[str, ...] = ()
     unread: bool = False
+    generators: tuple[str, ...] = ()
 
 
 def _use(entry: Any) -> TableUse | None:
@@ -77,18 +105,22 @@ def _use(entry: Any) -> TableUse | None:
     variables = frozenset(_TABLE_FILE.findall(text))
     files = tuple(_CONFIGS_FILE.findall(text))
     unread = _TABLES_OBJECT in _TABLE_FILE.sub("", text)
-    return TableUse(variables, files, unread) if variables or files or unread else None
+    generators = tuple(_GENERATOR.findall(text))
+    return TableUse(variables, files, unread, generators) if variables or files or unread else None
+
+
+def _per_model(package: Path, variable: TableVariable) -> Iterator[str]:
+    """The per-model tables of ``variable`` in the aiter package at ``package``, in the order their directory lists them:
+    the order ``AITER_CONFIG.get_config_file`` (``Path.glob``) merges them in."""
+    for path in (package / _MODEL_CONFIGS).glob(f"*{variable.tuned}*.csv"):
+        if path.is_file() and _UNTUNED not in path.name:
+            yield str(path)
 
 
 def default_tables(package: Path, variable: TableVariable) -> list[str]:
     """The files the aiter package at ``package`` reads for ``variable`` when it is unset: its default table, then the
-    per-model tables whose name holds its tuned name."""
-    models = sorted(
-        str(path)
-        for path in (package / _MODEL_CONFIGS).glob(f"*{variable.tuned}*.csv")
-        if path.is_file() and _UNTUNED not in path.name
-    )
-    return [str(package / _CONFIGS_DIR / variable.default), *models]
+    per-model tables whose name holds its tuned name, by name."""
+    return [str(package / _CONFIGS_DIR / variable.default), *sorted(_per_model(package, variable))]
 
 
 def table_modules(config: Mapping[str, Any]) -> dict[str, TableUse]:
@@ -96,13 +128,40 @@ def table_modules(config: Mapping[str, Any]) -> dict[str, TableUse]:
     return {key: use for key, entry in config.items() if (use := _use(entry)) is not None}
 
 
+def _generator_keys(use: TableUse) -> set[tuple[str, ...]]:
+    if not use.generators:
+        return set(_ANY_ROW)
+    keys = (_GENERATOR_KEYS.get(generator, ()) for generator in use.generators)
+    return {key for key in keys if key is not None}
+
+
+def _row_keys(uses: Iterable[TableUse]) -> dict[str, frozenset[tuple[str, ...]]]:
+    """For each variable a module is generated from, the keys its generators key a row by; none at all when a module
+    names tables in a way not read here, as it may read any variable by any key."""
+    found: dict[str, set[tuple[str, ...]]] = {}
+    for use in uses:
+        if use.unread:
+            return {}
+        keys = _generator_keys(use)
+        for name in use.variables:
+            found.setdefault(name, set()).update(keys)
+    return {name: frozenset(keys) for name, keys in found.items()}
+
+
 class _Tables:
     """The tables one aiter package (``package``) resolves under ``environment``; ``image`` resolves the image's default
-    table that a rows-only value names. Every file is read once."""
+    table that a rows-only value names. Every variable is resolved once."""
 
-    def __init__(self, package: Path, environment: Mapping[str, str], image: _Tables | None = None) -> None:
+    def __init__(
+        self,
+        package: Path,
+        environment: Mapping[str, str],
+        keys: Mapping[str, frozenset[tuple[str, ...]]],
+        image: _Tables | None = None,
+    ) -> None:
         self.package = package
         self._environment = environment
+        self._keys = keys
         self._image = image
         self._variables: dict[str, TableVariable] | None = None
         self._resolved: dict[str, tuple[str, ...]] = {}
@@ -113,9 +172,12 @@ class _Tables:
         return self._variables
 
     def defaults(self, name: str) -> list[str] | None:
-        """The files aiter reads for ``name`` when it is unset, ``None`` when the package does not say."""
+        """The files aiter reads for ``name`` when it is unset, in the order it merges them, ``None`` when the package
+        does not say."""
         variable = self._known().get(name)
-        return None if variable is None else default_tables(self.package, variable)
+        if variable is None:
+            return None
+        return [str(self.package / _CONFIGS_DIR / variable.default), *_per_model(self.package, variable)]
 
     def value(self, name: str) -> str:
         return (self._environment.get(name) or "").strip()
@@ -128,16 +190,17 @@ class _Tables:
 
     def _resolve(self, name: str) -> tuple[str, ...]:
         value = self.value(name)
+        keys = self._keys.get(name, _ANY_ROW)
         if not value:
             listed = self.defaults(name)
-            return self.tree() if listed is None else _contents(listed)
+            return self.tree() if listed is None else _contents(listed, keys)
         listed = []
         for part in value.split(os.pathsep):
             image_default = (
                 None if part != DEFAULT_TABLE_PLACEHOLDER or self._image is None else self._image.defaults(name)
             )
             listed.extend(image_default if image_default is not None else [part])
-        return _contents(listed)
+        return _contents(listed, keys)
 
     def files(self, patterns: Iterable[str]) -> tuple[str, ...]:
         """The files below the package that ``patterns`` match, by name and content."""
@@ -161,11 +224,61 @@ class _Tables:
         return ("tree", *(f"{path.relative_to(root).as_posix()}:{file_identity(path)}" for path in files))
 
 
-def _contents(listed: list[str]) -> tuple[str, ...]:
-    """What aiter reads from the files ``listed``: one file as it is, several merged with the missing ones left out."""
+def _cell(value: str) -> object:
+    """A cell of a key as the generators read it: a number as its value (``64`` is ``64.0``), else its text."""
+    text = value.strip()
+    try:
+        number = float(text)
+    except ValueError:
+        return text
+    if not math.isfinite(number):
+        return text
+    return int(number) if number.is_integer() else number
+
+
+def _shares_a_key(files: list[str], keys: Collection[tuple[str, ...]]) -> bool:
+    """Whether a row of one of ``files`` has the key of a row of another, under one of ``keys`` cut to the columns every
+    file with rows has; a file without rows shares no key, whatever its header, and one that cannot be read as a table
+    counts as sharing every key."""
+    tables: list[tuple[list[str], list[list[str]]]] = []
+    for path in files:
+        try:
+            with open(path, newline="", encoding="utf-8") as handle:
+                rows = [row for row in csv.reader(handle) if row]
+        except (OSError, UnicodeDecodeError, csv.Error):
+            return True
+        tables.append((rows[0], rows[1:]) if rows else ([], []))
+    for key in keys:
+        columns = [column for column in key if all(column in header for header, rows in tables if rows)]
+        first: dict[tuple[object, ...], int] = {}
+        for index, (header, rows) in enumerate(tables):
+            if not rows:
+                continue
+            places = [header.index(column) for column in columns]
+            for row in rows:
+                cells = tuple(_cell(row[place]) if place < len(row) else "" for place in places)
+                if first.setdefault(cells, index) != index:
+                    return True
+    return False
+
+
+def _contents(listed: list[str], keys: Collection[tuple[str, ...]]) -> tuple[str, ...]:
+    """What aiter reads from the files ``listed``: one file as it is, several merged with the missing ones left out.
+
+    aiter merges several in the order listed: a variable's value as it lists them, else the default table and then the
+    per-model tables as their directory lists them, which differs between two directories holding the same files (the
+    image's ``model_configs``, a test's private copy of it). Its merge refuses two rows only when they agree on its own
+    key (``tables.table_key``), which holds columns a generator does not key by (``q_dtype_w``), and a generator keeps
+    the last row of each of its ``keys``. So when a key occurs in more than one of the files the order can change the
+    kernels a module holds, and they are their contents in the order listed; the image's are in the order its directory
+    lists them, which is what the image's own server merges (the order its prebuilt module was generated in is not
+    recorded). When no key does, each key's row comes from one file whatever the order, the generated module holds the
+    same kernels for the same shapes, and they are their contents in no order."""
     if len(listed) == 1:
         return (file_identity(listed[0]),)
-    return tuple(file_identity(path) for path in listed if os.path.isfile(path))
+    files = [path for path in listed if os.path.isfile(path)]
+    contents = tuple(file_identity(path) for path in files)
+    return contents if _shares_a_key(files, keys) else tuple(sorted(contents))
 
 
 def _differs(use: TableUse, image: _Tables, test: _Tables) -> bool:
@@ -190,10 +303,11 @@ def stale_table_modules(
     uses = table_modules(config)
     if not uses:
         return frozenset()
-    image_tables = _Tables(image, {})
+    keys = _row_keys(uses.values())
+    image_tables = _Tables(image, {}, keys)
     stale: set[str] = set()
     for environment in environments:
-        test = _Tables(package, environment, image_tables)
+        test = _Tables(package, environment, keys, image_tables)
         named = sorted(name for name in environment if name.startswith(AITER_VARIABLE_PREFIX) and test.value(name))
         if test.package == image_tables.package and not named:
             continue

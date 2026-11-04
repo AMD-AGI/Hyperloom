@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unpack the sheet's attachments into the working directory and name them in the YAML (design 3.3, 4.8.3 step 4).
+"""Unpack the sheet's attachments into the working directory and name them in the YAML.
 
 A file attachment is written to ``attach/<id>``; a directory attachment is a tar archive unpacked into ``attach/<id>/``.
 The YAML refers to either as ``${HL_ATTACH:<id>}``.

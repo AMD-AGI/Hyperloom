@@ -1,12 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""What the key of a compiled-code cache is made of: every input that decides what the compilers produce, and nothing else
-(4.21). The tests separate the two directions: a changed input must change the key (or a test would be given code built from
+"""What the key of a compiled-code cache is made of: every input that decides what the compilers produce, and nothing else.
+The tests separate the two directions: a changed input must change the key (or a test would be given code built from
 other inputs), and an input that cannot change the code must leave it alone (or the cache would never be shared)."""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -17,11 +18,13 @@ from hyperloom.measure.jit.key import (
     Machine,
     aiter_key,
     build_surface,
+    entry_env_names,
     env_names_in,
     scan_env_names,
     touches_build_surface,
     tree_identity,
     triton_key,
+    without_card_arch,
 )
 
 MACHINE = Machine("sha256:" + "1" * 64, "gfx950", "MI355X", "SPX/NPS1")
@@ -65,7 +68,7 @@ def test_the_variables_the_build_reads_are_found_in_the_source_that_builds_and_g
 
 
 def test_a_switch_read_only_by_a_call_time_op_is_not_a_build_input(checkout) -> None:
-    """The op picks which module is called; the module is named for what it was asked (design 4.21, the argument)."""
+    """The op picks which module is called; the module is named for what it was asked."""
     assert "AITER_DISABLE_FMHA_OPUS" not in scan_env_names([checkout])
 
 
@@ -247,3 +250,128 @@ def test_a_framework_patch_that_can_change_the_build_context_from_inside_the_ser
 )
 def test_a_patch_that_only_changes_what_the_framework_asks_for_is_not(text) -> None:
     assert not touches_build_surface(text, {"ENABLE_CK", "GPU_ARCHS"})
+
+
+# Five entries of aiter/jit/optCompilerConfig.json, copied verbatim from ROCm/aiter e7d2453f25e5aaeea72a3a40b284ba453e026624,
+# the aiter of the SGLang ROCm image these tests model. On the AITER_COMMIT that image states (285579b62) these five
+# entries read the same variables. aiter's get_args_of_build evaluates every string of an entry as Python when it builds
+# the module, so these read the server's environment then.
+IMAGE_AITER_CONFIG = Path(__file__).parent / "data" / "aiter-e7d2453f-optCompilerConfig.json"
+#: What each entry reads on that commit. ``module_deepgemm_opus`` asks ``'gfx1250' in os.environ.get('GPU_ARCHS', '')``:
+#: ``GPU_ARCHS`` is read, ``gfx1250`` is a value. (On aiter main the CK-tile GEMM also reads
+#: ``CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT``; the image's does not.)
+IMAGE_ENTRY_READS = {
+    "module_gemm_a8w8_bpreshuffle": set(),
+    "module_deepgemm_opus": {"GPU_ARCHS"},
+    "module_gemm_a8w8_bpreshuffle_cktile": {"FLATMM_HIP_CLANG_PATH"},
+    "module_rmsnorm_quant": {"OPUS_FP32_to_BF16_DEFAULT"},
+    "module_mha_batch_prefill": {
+        "CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT",
+        "CK_TILE_ATTENTION_LOGITS_SOFT_CAP_DEFAULT",
+        "CK_TILE_ATTENTION_USE_SOFTSIGN_ASM",
+    },
+}
+
+
+@pytest.fixture
+def image_aiter(tmp_path) -> Path:
+    """The image's aiter package: a builder that reads one variable of its own, and the module config of the image."""
+    package = tmp_path / "aiter"
+    _write(package, "jit/core.py", 'import os\nB = os.environ.get("ENABLE_CK", "1")\n')
+    _write(package, "jit/optCompilerConfig.json", IMAGE_AITER_CONFIG.read_text(encoding="utf-8"))
+    return package
+
+
+def test_each_entry_of_the_images_module_config_reads_the_variables_its_expressions_name() -> None:
+    config = json.loads(IMAGE_AITER_CONFIG.read_text(encoding="utf-8"))
+
+    assert {name: set(entry_env_names(entry)) for name, entry in config.items()} == IMAGE_ENTRY_READS
+
+
+def test_the_scan_finds_the_variables_only_the_module_config_reads(image_aiter) -> None:
+    """None of them is in the Python of the build path, so a scan of ``.py`` files alone misses every one."""
+    from_config = set().union(*IMAGE_ENTRY_READS.values())
+
+    assert scan_env_names([image_aiter]) == {"ENABLE_CK", *from_config}
+    assert env_names_in([image_aiter / "jit"]) == {"ENABLE_CK"}
+
+
+@pytest.mark.parametrize(
+    "variable",
+    ["CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT", "FLATMM_HIP_CLANG_PATH", "OPUS_FP32_to_BF16_DEFAULT", "GPU_ARCHS"],
+)
+def test_a_candidate_that_only_sets_a_variable_the_module_config_reads_gets_a_key_of_its_own(
+    image_aiter, variable
+) -> None:
+    """It would otherwise read, and add to, modules built under the image's value: a CK-tile attention module built with
+    another bf16 rounding, or by another compiler, measured as if it were its own."""
+    names = scan_env_names([image_aiter])
+
+    def key_of(environment: dict[str, str]) -> str:
+        return aiter_key(MACHINE, TREE, build_surface(names, environment, {}))
+
+    base = {"ENABLE_CK": "1"}
+    assert key_of({**base, variable: "3"}) != key_of(base)
+    assert key_of({**base, "CK_TILE_NOT_READ_BY_ANY_BUILD": "3", "SGLANG_X": "1"}) == key_of(base), (
+        "a variable no code of the build and no entry names still leaves the key alone"
+    )
+
+
+def test_a_module_config_that_cannot_be_read_names_nothing_and_leaves_the_scan_of_the_python(tmp_path) -> None:
+    package = tmp_path / "aiter"
+    _write(package, "jit/core.py", 'import os\nB = os.environ.get("ENABLE_CK", "1")\n')
+    _write(package, "jit/optCompilerConfig.json", "{ not json")
+
+    assert scan_env_names([package]) == {"ENABLE_CK"}
+
+
+def test_a_value_tested_against_a_variable_is_not_a_variable_and_does_not_hide_the_one_read(tmp_path) -> None:
+    _write(
+        tmp_path, "a.py", "import os\nX = 'gfx950' in os.environ.get('GPU_ARCHS', '')\nY = 'ENABLE_CK' in os.environ\n"
+    )
+
+    assert env_names_in([tmp_path / "a.py"]) == {"GPU_ARCHS", "ENABLE_CK"}
+
+
+def test_an_aiter_key_is_not_one_made_before_the_module_configs_variables_were_in_it() -> None:
+    """An entry stored under the earlier key may hold a module built under a variable that key did not name."""
+    earlier = key_module._hash(
+        {
+            "schema": key_module.SCHEMA,
+            "kind": "aiter",
+            "machine": MACHINE.document(),
+            "tree": TREE,
+            "tables": dict(sorted(SURFACE.tables.items())),
+            "environment": dict(sorted(SURFACE.environment.items())),
+        }
+    )
+
+    assert aiter_key(MACHINE, TREE, SURFACE) != earlier
+    assert triton_key(MACHINE) == key_module._hash(
+        {"schema": 2, "kind": "triton", "image": MACHINE.image_digest, "gfx": MACHINE.gfx_arch}
+    ), "Triton's key is unchanged: its cache never depended on aiter's variables"
+
+
+@pytest.mark.parametrize(
+    ("environment", "gfx_arch", "expected"),
+    [
+        ({"GPU_ARCHS": "native"}, "gfx950", {}),
+        ({"GPU_ARCHS": "native"}, None, {}),
+        ({"GPU_ARCHS": "gfx950"}, "gfx950", {}),
+        ({"GPU_ARCHS": "gfx950"}, None, {"GPU_ARCHS": "gfx950"}),
+        ({"GPU_ARCHS": "gfx942"}, "gfx950", {"GPU_ARCHS": "gfx942"}),
+        ({"GPU_ARCHS": "gfx942;gfx950"}, "gfx950", {"GPU_ARCHS": "gfx942;gfx950"}),
+        ({"ENABLE_CK": "1", "GPU_ARCHS": "native"}, "gfx950", {"ENABLE_CK": "1"}),
+        ({"ENABLE_CK": "1"}, None, {"ENABLE_CK": "1"}),
+        ({}, None, {}),
+    ],
+)
+def test_gpu_archs_is_left_out_when_it_only_names_the_card_the_build_is_for(environment, gfx_arch, expected):
+    assert without_card_arch(environment, gfx_arch) == expected
+
+
+def test_the_environment_given_is_not_changed():
+    environment = {"GPU_ARCHS": "native", "ENABLE_CK": "1"}
+
+    assert without_card_arch(environment, "gfx950") == {"ENABLE_CK": "1"}
+    assert environment == {"GPU_ARCHS": "native", "ENABLE_CK": "1"}

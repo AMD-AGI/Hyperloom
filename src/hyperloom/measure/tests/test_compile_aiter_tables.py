@@ -58,6 +58,16 @@ def test_a_patch_to_a_table_that_too_many_modules_are_generated_from_is_refused_
         compile_stack(tmp_path, base, {TABLE: "M,N,K\n7,8,9\n"})
 
 
+def test_modules_generated_from_a_table_are_counted_at_the_180_seconds_they_take(tmp_path) -> None:
+    """Thirteen of them are 2340 s of the 2400 s a stack may spend, fourteen 2520 s; at 65 s each even thirty-six pass."""
+    compile_stack(tmp_path / "thirteen", table_image(tmp_path / "thirteen-image", 13), {TABLE: "M,N,K\n7,8,9\n"})
+
+    with pytest.raises(TooManyModulesError) as refused:
+        compile_stack(tmp_path / "fourteen", table_image(tmp_path / "fourteen-image", 14), {TABLE: "M,N,K\n7,8,9\n"})
+    assert "touches 14 of aiter's prebuilt modules" in str(refused.value)
+    assert "about 2520 s to build again on the first test's card" in str(refused.value)
+
+
 def test_a_variable_the_launch_sets_counts_its_modules_with_the_ones_a_source_patch_touches(tmp_path) -> None:
     base = table_image(tmp_path / "image", LIMIT_MODULES + 1)
 

@@ -91,7 +91,7 @@ def test_the_runs_of_a_round_are_read_in_the_order_they_were_ready_from_their_st
     _write_run(
         _run_dir(tmp_path, "variant_00_test", warmup=True),
         T0 + 90.0,
-        82.221,
+        82.0,
         marks={"eval": T0 + 120.0},
         ended=T0 + 150.0,
     )
@@ -101,7 +101,7 @@ def test_the_runs_of_a_round_are_read_in_the_order_they_were_ready_from_their_st
 
     assert (warmup.ready, warmup.boot_seconds, warmup.eval_at, warmup.ended) == (
         T0 + 90.0,
-        82.221,
+        82.0,
         T0 + 120.0,
         T0 + 150.0,
     )
@@ -166,14 +166,14 @@ def test_an_output_directory_that_does_not_exist_holds_no_runs(tmp_path: Path) -
 
 
 def test_the_warmup_round_of_a_graded_test_boots_warms_up_evaluates_and_collects_with_the_server_left_up() -> None:
-    run = _run(boot_seconds=82.221, eval_at=T0 + 150.0, ended=T0 + 200.0)
+    run = _run(boot_seconds=82.0, eval_at=T0 + 150.0, ended=T0 + 200.0)
     shape = _shape(ROLE_WARMUP, tail="round_collect")
 
     boundaries = round_boundaries(WINDOW, [run], shape)
 
     assert _phases(boundaries) == [
-        ("round_setup", 7.779),
-        ("server_boot", 82.221),
+        ("round_setup", 8.0),
+        ("server_boot", 82.0),
         ("warmup", 60.0),
         ("accuracy_eval", 50.0),
         ("round_collect", 100.0),
@@ -294,21 +294,21 @@ def test_a_mark_outside_the_window_moves_to_its_edge_so_the_phases_still_tile_it
 # -- the parts of a boot ------------------------------------------------------------------------------------------
 
 VLLM_LOG = """\
-INFO 10-22 04:00:01 [config.py:1] Initializing a V1 LLM engine
-(EngineCore_0 pid=9) INFO 10-22 04:00:30 [gpu_model_runner.py:1] Loading weights took 41.23 seconds
-(EngineCore_0 pid=9) INFO 10-22 04:00:31 [gpu_model_runner.py:1] Model loading took 15.20 GiB and 42.10 seconds
-(EngineCore_0 pid=9) INFO 10-22 04:01:00 [monitor.py:1] torch.compile takes 14.19 s in total
-(EngineCore_0 pid=9) INFO 10-22 04:01:20 [gpu_model_runner.py:1] Graph capturing finished in 12 secs, took 0.56 GiB
+INFO 01-01 00:00:01 [config.py:1] Initializing a V1 LLM engine
+(EngineCore_0 pid=9) INFO 01-01 00:00:30 [gpu_model_runner.py:1] Loading weights took 41.50 seconds
+(EngineCore_0 pid=9) INFO 01-01 00:00:31 [gpu_model_runner.py:1] Model loading took 15.00 GiB and 42.50 seconds
+(EngineCore_0 pid=9) INFO 01-01 00:01:00 [monitor.py:1] torch.compile takes 14.50 s in total
+(EngineCore_0 pid=9) INFO 01-01 00:01:20 [gpu_model_runner.py:1] Graph capturing finished in 12 secs, took 0.50 GiB
 INFO:     Application startup complete.
 """
 SGLANG_LOG = """\
-[2026-10-22 04:00:01 TP0] Load weight begin. avail mem=250.00 GB
-[2026-10-22 04:00:01 TP1] Load weight begin. avail mem=250.00 GB
-[2026-10-22 04:00:41 TP0] Load weight end. type=Qwen3ForCausalLM, dtype=torch.bfloat16, avail mem=235.00 GB
-[2026-10-22 04:00:43 TP1] Load weight end. type=Qwen3ForCausalLM, dtype=torch.bfloat16, avail mem=235.00 GB
-[2026-10-22 04:00:50 TP0] Capture cuda graph begin. This can take up to several minutes. avail mem=200.00 GB
-[2026-10-22 04:01:02 TP0] Capture cuda graph end. Time elapsed: 11.90 s. mem usage=1.20 GB. avail mem=198.00 GB
-[2026-10-22 04:01:03 TP1] Capture cuda graph end. Time elapsed: 12.40 s. mem usage=1.20 GB. avail mem=198.00 GB
+[2000-01-01 00:00:01 TP0] Load weight begin. avail mem=250.00 GB
+[2000-01-01 00:00:01 TP1] Load weight begin. avail mem=250.00 GB
+[2000-01-01 00:00:41 TP0] Load weight end. type=Qwen3ForCausalLM, dtype=torch.bfloat16, avail mem=235.00 GB
+[2000-01-01 00:00:43 TP1] Load weight end. type=Qwen3ForCausalLM, dtype=torch.bfloat16, avail mem=235.00 GB
+[2000-01-01 00:00:50 TP0] Capture cuda graph begin. This can take up to several minutes. avail mem=200.00 GB
+[2000-01-01 00:01:02 TP0] Capture cuda graph end. Time elapsed: 11.50 s. mem usage=1.20 GB. avail mem=198.00 GB
+[2000-01-01 00:01:03 TP1] Capture cuda graph end. Time elapsed: 12.50 s. mem usage=1.20 GB. avail mem=198.00 GB
 The server is fired up and ready to roll!
 """
 
@@ -317,7 +317,7 @@ def test_a_vllm_boot_says_how_long_the_weights_the_compile_and_the_graphs_took(t
     log = tmp_path / "server.log"
     log.write_text(VLLM_LOG, encoding="utf-8")
 
-    assert boot_parts(log) == BootParts(weights_load=42.10, compile=14.19, graph_capture=12.0)
+    assert boot_parts(log) == BootParts(weights_load=42.5, compile=14.5, graph_capture=12.0)
 
 
 def test_an_sglang_boot_is_read_from_the_instants_it_began_and_ended_loading_and_the_longest_rank_wins(
@@ -326,7 +326,7 @@ def test_an_sglang_boot_is_read_from_the_instants_it_began_and_ended_loading_and
     log = tmp_path / "server.log"
     log.write_text(SGLANG_LOG, encoding="utf-8")
 
-    assert boot_parts(log) == BootParts(weights_load=42.0, compile=None, graph_capture=12.40)
+    assert boot_parts(log) == BootParts(weights_load=42.0, compile=None, graph_capture=12.5)
 
 
 def test_a_log_that_says_nothing_of_the_boot_or_is_not_there_gives_no_parts(tmp_path: Path) -> None:
@@ -352,9 +352,9 @@ def test_a_booted_run_is_split_into_what_its_log_accounts_for_in_the_order_an_en
         "server_boot.graph_capture",
     ]
     assert [seconds for _, seconds in phases[1:5]] == [
-        pytest.approx(80.0 - 42.1 - 14.19 - 12.0, abs=1e-3),
-        42.1,
-        14.19,
+        pytest.approx(80.0 - 42.5 - 14.5 - 12.0, abs=1e-3),
+        42.5,
+        14.5,
         12.0,
     ]
     assert sum(seconds for name, seconds in phases if name.startswith("server_boot")) == pytest.approx(80.0)
@@ -392,15 +392,15 @@ def test_every_phase_a_round_names_is_a_phase_the_contract_accepts() -> None:
 #: SGLang's line for the graph capture in a newer release, with a word for what was captured and ``elapsed=`` in place of
 #: ``Time elapsed:``; the load lines are the ones the release prints with a time on each.
 SGLANG_NEW_LOG = """\
-[2026-10-24 06:38:01 TP0] Load weight begin. avail mem=250.00 GB
-[2026-10-24 06:38:03 TP0] Load weight end. elapsed=2.00 s, type=Qwen3ForCausalLM, avail mem=235.00 GB
-[2026-10-24 06:38:08 TP0] Capture target decode CUDA graph begin. This can take up to several minutes. avail mem=52.72 GB
-[2026-10-24 06:38:19 TP0] Capture target decode CUDA graph end. elapsed=11.34 s, mem usage=1.52 GB, avail mem=51.20 GB
+[2000-01-01 00:00:01 TP0] Load weight begin. avail mem=250.00 GB
+[2000-01-01 00:00:03 TP0] Load weight end. elapsed=2.00 s, type=Qwen3ForCausalLM, avail mem=235.00 GB
+[2000-01-01 00:00:08 TP0] Capture target decode CUDA graph begin. This can take up to several minutes. avail mem=50.00 GB
+[2000-01-01 00:00:19 TP0] Capture target decode CUDA graph end. elapsed=11.50 s, mem usage=1.50 GB, avail mem=48.50 GB
 The server is fired up and ready to roll!
 """
 
 
-def _magpie_run(root: Path, *, log: str, launch: str = "benchmark_sglang_20261024_063800") -> Path:
+def _magpie_run(root: Path, *, log: str, launch: str = "benchmark_sglang_20000101_000800") -> Path:
     """A run as Magpie leaves it: the ready stamp in the run's directory, the server log one directory deeper."""
     directory = _run_dir(root, "variant_00_test", warmup=True)
     _write_run(directory, T0 + 90.0, 80.0)
@@ -413,10 +413,10 @@ def test_the_graph_capture_of_the_newer_sglang_wording_is_read_and_the_older_wor
     newer = tmp_path / "newer.log"
     newer.write_text(SGLANG_NEW_LOG, encoding="utf-8")
 
-    assert boot_parts(newer) == BootParts(weights_load=2.0, compile=None, graph_capture=11.34)
+    assert boot_parts(newer) == BootParts(weights_load=2.0, compile=None, graph_capture=11.5)
     older = tmp_path / "older.log"
     older.write_text(SGLANG_LOG, encoding="utf-8")
-    assert boot_parts(older).graph_capture == 12.40
+    assert boot_parts(older).graph_capture == 12.5
 
 
 def test_a_capture_that_only_began_or_failed_is_not_a_graph_capture_time(tmp_path: Path) -> None:
@@ -442,18 +442,18 @@ def test_a_server_log_one_directory_below_the_runs_is_found_and_splits_the_boot(
         "server_boot.weights_load",
         "server_boot.graph_capture",
     ]
-    assert [seconds for _, seconds in phases[2:4]] == [2.0, 11.34]
+    assert [seconds for _, seconds in phases[2:4]] == [2.0, 11.5]
 
 
 def test_of_several_launches_below_a_run_the_last_by_name_is_read_and_a_log_in_the_directory_itself_comes_first(
     tmp_path: Path,
 ) -> None:
-    directory = _magpie_run(tmp_path, log=SGLANG_LOG, launch="benchmark_sglang_20261024_063000")
-    later = directory / "benchmark_sglang_20261024_063800"
+    directory = _magpie_run(tmp_path, log=SGLANG_LOG, launch="benchmark_sglang_20000101_000000")
+    later = directory / "benchmark_sglang_20000101_000800"
     later.mkdir()
     (later / "server.log").write_text(SGLANG_NEW_LOG, encoding="utf-8")
 
-    assert boot_parts(server_log_of(directory)).graph_capture == 11.34
+    assert boot_parts(server_log_of(directory)).graph_capture == 11.5
     (directory / "server.log").write_text(VLLM_LOG, encoding="utf-8")
     assert server_log_of(directory) == directory / "server.log"
     assert server_log_of(tmp_path / "no_such_run") == tmp_path / "no_such_run" / "server.log"

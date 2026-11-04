@@ -1,16 +1,19 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""sglang_gc_patch lands on the installed tree without changing shape discovery."""
+"""sglang_gc_patch lands in a copy of the installed tree without changing shape discovery."""
 
 from __future__ import annotations
 
 import shutil
 import sys
+import tempfile
 import types
 from pathlib import Path
 
-from hyperloom.orchestrator.actions.executors import _server_patcher
+import pytest
+
+from hyperloom.orchestrator.actions.executors import PatchedServer, _patch_laying, _server_patcher
 from hyperloom.orchestrator.actions.executors._server_patcher import (
     ensure_sglang_patched_for_tracelens,
 )
@@ -33,6 +36,18 @@ def _gc_tree(tracelens: Path, version_dir: str = "sglang_0_5_21") -> None:
     (patches / "decode_cuda_graph_runner.patch").write_text(RUNNER_PATCH, encoding="utf-8")
 
 
+@pytest.fixture(autouse=True)
+def _own_tmpdir(tmp_path: Path, monkeypatch) -> None:
+    """The patched copies of this test, kept out of the host's temporary directory."""
+    (tmp_path / "tmp").mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "tmp"))
+
+
+def _copies(tmp_path: Path) -> list[Path]:
+    root = tmp_path / "tmp" / "hyperloom-tracelens"
+    return sorted(root.iterdir()) if root.is_dir() else []
+
+
 def _fake_sglang(monkeypatch, pkg: Path, version: str) -> None:
     mod = types.ModuleType("sglang")
     mod.__version__ = version
@@ -49,12 +64,15 @@ def test_gc_patch_applies_and_is_idempotent(tmp_path: Path, monkeypatch):
     _fake_sglang(monkeypatch, repo / "python" / "sglang", "0.5.21")
     monkeypatch.setenv("TRACELENS_ROOT", str(tracelens))
 
-    assert ensure_sglang_patched_for_tracelens() is True
-    text = target.read_text(encoding="utf-8")
+    patched = ensure_sglang_patched_for_tracelens()
+    assert patched is not None and patched.site is not None
+    text = (patched.site / RUNNER_REL.relative_to("python")).read_text(encoding="utf-8")
     assert "_set_profile_trace_tag" in text
     assert "_profile_runner_name" in text
+    assert target.read_text(encoding="utf-8") == RUNNER_SOURCE, "the installed tree is never patched"
 
-    assert ensure_sglang_patched_for_tracelens() is True
+    assert ensure_sglang_patched_for_tracelens() == patched
+    assert len(_copies(tmp_path)) == 1
 
 
 def test_gc_patch_uses_the_cached_tracelens_checkout_without_tracelens_root(tmp_path: Path, monkeypatch):
@@ -67,8 +85,10 @@ def test_gc_patch_uses_the_cached_tracelens_checkout_without_tracelens_root(tmp_
     monkeypatch.delenv("TRACELENS_ROOT", raising=False)
     monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(cache))
 
-    assert ensure_sglang_patched_for_tracelens() is True
-    assert "_set_profile_trace_tag" in target.read_text(encoding="utf-8")
+    patched = ensure_sglang_patched_for_tracelens()
+    assert patched is not None and patched.site is not None
+    assert "_set_profile_trace_tag" in (patched.site / RUNNER_REL.relative_to("python")).read_text(encoding="utf-8")
+    assert target.read_text(encoding="utf-8") == RUNNER_SOURCE
 
 
 def test_newer_sglang_without_exact_gc_set_is_left_alone(tmp_path: Path, monkeypatch):
@@ -78,7 +98,7 @@ def test_newer_sglang_without_exact_gc_set_is_left_alone(tmp_path: Path, monkeyp
     _fake_sglang(monkeypatch, repo / "python" / "sglang", "0.5.22")
     monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path / "TraceLens"))
 
-    assert ensure_sglang_patched_for_tracelens() is False
+    assert ensure_sglang_patched_for_tracelens() is None
     assert target.read_text(encoding="utf-8") == RUNNER_SOURCE
 
 
@@ -95,10 +115,11 @@ def test_drifted_source_is_not_fuzzy_patched(tmp_path: Path, monkeypatch):
     patch_bin = shutil.which("patch")
     if patch_bin:
         patch_file = next((tmp_path / "TraceLens").rglob("*.patch"))
-        assert _server_patcher._patch_dry_run(patch_bin, patch_file, repo, 1), "fixture must be fuzz-applicable"
+        assert _patch_laying._patch_dry_run(patch_bin, patch_file, repo, 1), "fixture must be fuzz-applicable"
 
-    assert ensure_sglang_patched_for_tracelens() is False
+    assert ensure_sglang_patched_for_tracelens() is None
     assert target.read_text(encoding="utf-8") == drifted
+    assert _copies(tmp_path) == [], "a copy the patch did not land in is not kept"
 
 
 def test_older_than_gate_does_not_touch_the_tree(tmp_path: Path, monkeypatch):
@@ -107,7 +128,7 @@ def test_older_than_gate_does_not_touch_the_tree(tmp_path: Path, monkeypatch):
     _fake_sglang(monkeypatch, repo / "python" / "sglang", "0.5.10")
     monkeypatch.delenv("TRACELENS_ROOT", raising=False)
 
-    assert ensure_sglang_patched_for_tracelens() is False
+    assert ensure_sglang_patched_for_tracelens() is None
     assert target.read_text(encoding="utf-8") == RUNNER_SOURCE
 
 
@@ -118,7 +139,7 @@ def test_missing_gc_tree_fails_soft(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path / "empty"))
     (tmp_path / "empty").mkdir()
 
-    assert ensure_sglang_patched_for_tracelens() is False
+    assert ensure_sglang_patched_for_tracelens() is None
 
 
 def test_multi_node_controller_without_sglang_defers(monkeypatch):
@@ -126,7 +147,7 @@ def test_multi_node_controller_without_sglang_defers(monkeypatch):
     monkeypatch.setattr(_server_patcher, "_detect_installed_sglang_version", lambda: None)
     monkeypatch.setattr(_server_patcher, "_gc_patch_deferred_to_pods", lambda: True)
 
-    assert ensure_sglang_patched_for_tracelens() is True
+    assert ensure_sglang_patched_for_tracelens() == PatchedServer(None)
 
 
 def test_local_process_without_sglang_reports_failure(monkeypatch):
@@ -134,7 +155,7 @@ def test_local_process_without_sglang_reports_failure(monkeypatch):
     monkeypatch.setattr(_server_patcher, "_detect_installed_sglang_version", lambda: None)
     monkeypatch.setattr(_server_patcher, "_gc_patch_deferred_to_pods", lambda: False)
 
-    assert ensure_sglang_patched_for_tracelens() is False
+    assert ensure_sglang_patched_for_tracelens() is None
 
 
 def test_node_scope_failure_propagates_instead_of_patching_the_controller(monkeypatch):

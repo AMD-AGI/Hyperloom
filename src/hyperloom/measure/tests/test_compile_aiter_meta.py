@@ -33,8 +33,14 @@ def module_entry(index: int) -> dict:
     return {"srcs": [f"{CSRC}kernels/m{index}.cu'"], "extra_include": [], "blob_gen_cmd": "''"}
 
 
-def aiter_image(root: Path, modules: int = 3, *, config: bool = True) -> PackageBase:
-    """A develop-install checkout: the package, its prebuilt modules and config, and the sources beside it."""
+def module_name(index: int, cktile: int = 0) -> str:
+    """The name of module ``index``: one of aiter's CK-tile modules (``module_gemm_cktile_m<i>``) among the first ``cktile``."""
+    return f"module_gemm_cktile_m{index}" if index < cktile else f"module_m{index}"
+
+
+def aiter_image(root: Path, modules: int = 3, *, config: bool = True, cktile: int = 0) -> PackageBase:
+    """A develop-install checkout: the package, its prebuilt modules and config, and the sources beside it; the first
+    ``cktile`` of the modules are CK-tile ones."""
     files = {
         "aiter/__init__.py": "",
         "aiter/ops/mha.py": OLD,
@@ -46,10 +52,10 @@ def aiter_image(root: Path, modules: int = 3, *, config: bool = True) -> Package
     }
     for index in range(modules):
         files[f"csrc/kernels/m{index}.cu"] = '#include "common.h"\n'
-        files[f"aiter/jit/module_m{index}.so"] = "binary"
+        files[f"aiter/jit/{module_name(index, cktile)}.so"] = "binary"
     if config:
         files["aiter/jit/optCompilerConfig.json"] = json.dumps(
-            {f"module_m{i}": module_entry(i) for i in range(modules)}
+            {module_name(i, cktile): module_entry(i) for i in range(modules)}
         )
     write_tree(root, files)
     return PackageBase("aiter", root / "aiter", "amd-aiter", "0.1.23")
@@ -138,6 +144,36 @@ def test_the_same_header_is_accepted_when_the_modules_it_touches_fit_the_time(tm
     (_, meta), _ = compile_aiter(tmp_path, base, {"csrc/include/common.h": NEW})
 
     assert [e.path for e in meta.entries] == ["csrc/include/common.h"]
+
+
+def test_four_ck_tile_modules_are_refused_at_the_seconds_they_take_and_three_are_accepted(tmp_path):
+    """680 s each: four take 2720 s of the 2400 s a stack may spend, three 2040 s. At the 65 s of any other module
+    four would be 260 s and thirty-six would pass."""
+    with pytest.raises(TooManyModulesError) as refused:
+        compile_aiter(
+            tmp_path / "four", aiter_image(tmp_path / "four-image", 4, cktile=4), {"csrc/include/common.h": NEW}
+        )
+    assert "touches 4 of aiter's prebuilt modules" in str(refused.value)
+    assert "about 2720 s to build again on the first test's card" in str(refused.value)
+
+    (_, meta), _ = compile_aiter(
+        tmp_path / "three", aiter_image(tmp_path / "three-image", 3, cktile=3), {"csrc/include/common.h": NEW}
+    )
+    assert [e.path for e in meta.entries] == ["csrc/include/common.h"]
+
+
+@pytest.mark.parametrize(("light", "accepted"), [(5, True), (6, False)])
+def test_modules_of_other_kinds_beside_ck_tile_ones_count_at_65_seconds_each(tmp_path, light, accepted):
+    """Three CK-tile modules are 2040 s: five more are 325 s (2365 s, inside 2400 s), six 390 s (2430 s, outside)."""
+    base = aiter_image(tmp_path / "image", 3 + light, cktile=3)
+    if accepted:
+        compile_aiter(tmp_path, base, {"csrc/include/common.h": NEW})
+        return
+
+    with pytest.raises(TooManyModulesError) as refused:
+        compile_aiter(tmp_path, base, {"csrc/include/common.h": NEW})
+    assert f"touches {3 + light} of aiter's prebuilt modules" in str(refused.value)
+    assert "about 2430 s to build again on the first test's card" in str(refused.value)
 
 
 def test_a_changed_module_config_counts_the_modules_whose_entry_changed(tmp_path):

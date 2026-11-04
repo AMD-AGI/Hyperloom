@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""One test's use of the shared compiled-code cache (design 4.21).
+"""One test's use of the shared compiled-code cache.
 
 Before the server starts, :meth:`JitCacheSession.seed` copies the verified snapshot of each kind into a directory of the
 test's own and :meth:`~JitCacheSession.environment` names those directories for the server; no two tests ever share a
@@ -66,7 +66,7 @@ _Form = Callable[[bytes], bytes]
 
 @dataclass(frozen=True)
 class GivenModules:
-    """aiter modules a CPU build made for this test before it started (#125 stage 2b): their ``names`` and ``lay``,
+    """aiter modules a CPU build made for this test before it started: their ``names`` and ``lay``,
     which copies their files, each proven against the signed build, into a directory."""
 
     names: frozenset[str]
@@ -81,9 +81,9 @@ class KindPlan:
     ``read_only`` is the reason a test may be given the cache and not add to it: it runs code the key does not cover, and
     code in the server can write any file into the directory the compiler uses, which no test sharing the key may load.
 
-    ``touched`` are the modules a patch to aiter's sources, or a tuned table they are generated from, makes stale: the
-    test's directory does not link the image's copy of them, so the server builds each when it first calls it, unless
-    ``given`` (a CPU build of them) puts it there first."""
+    ``touched`` are the modules a patch to aiter's sources, a tuned table they are generated from, or a build variable
+    their config entry reads makes stale: the test's directory does not link the image's copy of them, so the server
+    builds each when it first calls it, unless ``given`` (a CPU build of them) puts it there first."""
 
     kind: CacheKind
     key: str
@@ -188,6 +188,12 @@ class JitCacheSession:
     def touched(self) -> frozenset[str]:
         """The aiter modules this test's patch makes stale, which the server builds itself."""
         return frozenset().union(*(seeded.plan.touched for seeded in self._kinds.values()))
+
+    @property
+    def built_by_server(self) -> frozenset[str]:
+        """The touched modules no CPU build gives the test: its server builds each when it first calls it."""
+        given = [seeded.plan.given.names for seeded in self._kinds.values() if seeded.plan.given is not None]
+        return self.touched - frozenset().union(*given)
 
     def environment(self) -> dict[str, str]:
         """The variables that point each compiler at this test's own directory for its kind."""
@@ -367,8 +373,8 @@ def _touched_note(plan: KindPlan) -> str:
     names = sorted(plan.touched)
     listed = ", ".join(names[:LISTED]) + (f", and {len(names) - LISTED} more" if len(names) > LISTED else "")
     return (
-        f"jit cache: {plan.kind.name}: the patch or the tuned tables touch {len(names)} aiter modules, "
-        f"built when first called ({listed})"
+        f"jit cache: {plan.kind.name}: the patch, the tuned tables or the build variables touch {len(names)} aiter "
+        f"modules, built when first called ({listed})"
     )
 
 

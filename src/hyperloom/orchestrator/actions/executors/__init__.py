@@ -17,8 +17,10 @@ from ._workload_envs import (
     materialize_benchmark_config,
 )
 from ._grid_base import GridVariant, VariantResult
-from ._profile_setup import VLLM_PATCH_PROFILER_FIELDS
-from ._server_patcher import ensure_vllm_patched_for_tracelens
+from ._profile_setup import SGLANG_PATCH_SERVER_FLAG, VLLM_PATCH_PROFILER_FIELDS
+from ._patch_laying import PatchedServer, is_patched_copy
+from ._server_patcher import ensure_patched_copy, ensure_vllm_patched_for_tracelens, lay_tracelens_patch
+from ._magpie_patcher import EVAL_OUTPUT_ENV, LM_EVAL_READY_FN, ensure_lm_eval_install_once
 from ._inferencex_patcher import (
     benchmark_serving_path_in,
     ensure_benchmark_lib_patched,
@@ -47,8 +49,16 @@ from ._spec_decode_pin import (
 )
 
 __all__ = [
+    "SGLANG_PATCH_SERVER_FLAG",
     "VLLM_PATCH_PROFILER_FIELDS",
+    "PatchedServer",
+    "ensure_patched_copy",
     "ensure_vllm_patched_for_tracelens",
+    "is_patched_copy",
+    "lay_tracelens_patch",
+    "ensure_lm_eval_install_once",
+    "EVAL_OUTPUT_ENV",
+    "LM_EVAL_READY_FN",
     "PREFIX_CACHE_OFF_ERROR_CLASS",
     "CONTEXT_COPY_REFUSAL",
     "BenchmarkTarget",

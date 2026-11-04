@@ -70,11 +70,11 @@ from hyperloom.measure.jit.native.needs import (
 from hyperloom.measure.framework.rows import DEFAULT_TABLE_PLACEHOLDER
 from hyperloom.measure.jit.modules import (
     CONFIG_FILE,
-    ESTIMATED_MODULE_SECONDS,
     MAX_REBUILD_SECONDS,
     SourceTree,
     Touched,
     config_path,
+    module_build_seconds,
     prebuilt_names,
     read_config,
     touched_entries,
@@ -195,9 +195,10 @@ class ComponentLayout:
     """How a component's upstream repository maps onto the package installed in the image.
 
     ``sections`` are the layout's parts (an upstream prefix, the base it lies over and where in the base it starts); a
-    layout without any is the one package section at ``upstream_prefix``. ``refuse`` are the patterns of the file names
-    whose change this layout cannot measure, and ``generated`` the package directories the runtime writes builds into.
-    The rule pack owns all of it (``component_layout`` entries).
+    layout without any is the one package section at ``upstream_prefix``. ``refuse`` are the patterns of the files no
+    patch can change, ``native`` those of the files only a native build measures (each of a file's name, or with a slash
+    of its upstream path: :mod:`~hyperloom.common.outside_facts.component_layout`), and ``generated`` the package
+    directories the runtime writes builds into. The rule pack owns all of it (``component_layout`` entries).
     """
 
     import_name: str
@@ -206,15 +207,16 @@ class ComponentLayout:
     sections: tuple[LayoutSection, ...] = ()
     refuse: tuple[str, ...] = ()
     generated: tuple[str, ...] = ()
+    native: tuple[str, ...] = ()
 
     @classmethod
     def from_spec(cls, spec: ComponentLayoutSpec) -> ComponentLayout:
-        return cls(spec.import_name, spec.sections[0].prefix, spec.sections, spec.refuse, spec.generated)
+        return cls(spec.import_name, spec.sections[0].prefix, spec.sections, spec.refuse, spec.generated, spec.native)
 
     @property
     def spec(self) -> ComponentLayoutSpec:
         sections = self.sections or (LayoutSection(self.upstream_prefix),)
-        return ComponentLayoutSpec(self.import_name, sections, self.refuse, self.generated)
+        return ComponentLayoutSpec(self.import_name, sections, self.refuse, self.generated, self.native)
 
 
 COMPONENT_LAYOUTS: Mapping[str, ComponentLayout] = {
@@ -389,7 +391,7 @@ def _package_path(path: str, prefix: str, patch: str) -> str:
 
 def _place(path: str, layout: ComponentLayout, patch: str) -> PlacedPath:
     _safe_parts(path, patch)
-    pattern = layout.spec.refused_by(path)
+    pattern = layout.spec.refused_by(path) or layout.spec.native_by(path)
     if pattern is not None:
         raise PatchApplyError(
             f"{patch}: {path!r} is a native or binary file ({pattern}) of {layout.import_name}; a patch changes its "
@@ -603,7 +605,7 @@ def refuse_costly_rebuild(
     The modules are the prebuilt ones the patch leaves stale (:func:`~hyperloom.measure.jit.modules.touched_modules`),
     with the ones generated from a tuned table that the patch (below ``configs``) or one of ``table_variables`` (the
     ``AITER_CONFIG_*`` the test sets) may change; the first test of the stack builds them on its card, when its server
-    calls them. With ``modules`` (a host that builds natively, #125 stage 2b) a CPU build makes the ones it can before the
+    calls them. With ``modules`` (a host that builds natively) a CPU build makes the ones it can before the
     test, and only the rest are built on the card; that build, returned, is refused when it would not fit its own time.
     A module generated from a table the test's variables name is left to the card: only its server reads those tables.
     """
@@ -613,14 +615,20 @@ def refuse_costly_rebuild(
     candidates = touch.found.rebuilt - touch.tabled
     built = modules(roots, touch.config, candidates) if modules is not None and candidates else None
     on_cpu = frozenset() if built is None else built.modules
-    _refuse_slow_build(sorted(touch.found.rebuilt - on_cpu), ESTIMATED_MODULE_SECONDS * 1.0, "on the first test's card")
+    on_card = sorted(touch.found.rebuilt - on_cpu)
+    _refuse_slow_build(
+        on_card, sum(module_build_seconds(name, touch.config) for name in on_card), "on the first test's card"
+    )
     if modules is not None and on_cpu:
-        _refuse_slow_build(sorted(on_cpu), modules.seconds(on_cpu) / len(on_cpu), "on a CPU build runner")
+        _refuse_slow_build(sorted(on_cpu), modules.seconds(on_cpu, touch.config), "on a CPU build runner")
     return built
 
 
-def _refuse_slow_build(names: list[str], each: float, where: str) -> None:
-    seconds = round(len(names) * each)
+def _refuse_slow_build(names: list[str], total: float, where: str) -> None:
+    """Refuse when building ``names`` takes ``total`` seconds, more than :data:`MAX_REBUILD_SECONDS`: each module is
+    counted for what a module of its kind takes (:func:`~hyperloom.measure.jit.modules.module_build_seconds`), so one
+    CK-tile GEMM counts for ten modules of the others."""
+    seconds = round(total)
     if seconds > MAX_REBUILD_SECONDS:
         examples = ", ".join(names[:5])
         raise TooManyModulesError(
