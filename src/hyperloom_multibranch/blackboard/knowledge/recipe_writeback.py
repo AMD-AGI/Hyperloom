@@ -35,9 +35,9 @@ import logging
 import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 
+from hyperloom_common.timeutil import epoch_iso
 from hyperloom.common.perf_metric import GRADED_TOTAL
 from hyperloom.contracts.recipe import Recipe, RecipeError
 from hyperloom.inference_optimizer.recipe_snapshot_constants import RecipeIdentity, recipe_canonical_id
@@ -184,7 +184,7 @@ def knowledge_document(
                 "recipe_digest": final.recipe.digest(),
                 "base_image_digest": final.recipe.base_image_digest,
                 "runtime_snapshot": final.recipe.runtime_snapshot,
-                "generated_at": datetime.fromtimestamp(snapshot.taken_at, timezone.utc).isoformat(),
+                "generated_at": epoch_iso(snapshot.taken_at),
                 "rule_pack": dict(rule_pack),
                 **_warmup_seed(snapshot, final.commit_id),
                 **_synthesized(snapshot, final.recipe),

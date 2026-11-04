@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom_multibranch.blackboard.knowledge import reference_leads as reference_module
 from hyperloom_multibranch.blackboard.knowledge.reference_leads import reference_leads
 from hyperloom_multibranch.blackboard.tests.factories import profile
 
@@ -171,13 +172,14 @@ def test_a_lead_names_its_script_what_it_was_written_for_and_that_it_was_not_mea
 
 
 def test_no_lead_without_an_entry_for_the_model_and_an_unreadable_matrix_is_left_out(
-    checkout: Path, tmp_path_factory: pytest.TempPathFactory
+    checkout: Path, tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     (checkout / "configs" / "nvidia-master.yaml").write_text("{ not yaml", encoding="utf-8")
 
     assert reference_leads(checkout, profile(model="meta-llama/Llama-3.1-8B")) == ()
-    assert [lead.config for lead in reference_leads(checkout, profile(), limit=1)] == ["dsr1-fp8-mi355x-vllm"]
     assert reference_leads(tmp_path_factory.mktemp("not-a-checkout"), profile()) == ()
+    monkeypatch.setattr(reference_module, "MAX_REFERENCE_LEADS", 1)
+    assert [lead.config for lead in reference_leads(checkout, profile())] == ["dsr1-fp8-mi355x-vllm"]
 
 
 def test_an_agentx_session_reads_the_agentic_scenario_and_a_lead_says_when_its_script_is_missing(

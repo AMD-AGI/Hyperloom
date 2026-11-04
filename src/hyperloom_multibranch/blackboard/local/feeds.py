@@ -9,8 +9,8 @@ returns each entry once however the writers' clocks interleave.
 Given :class:`BriefTriggers`, the inbox also holds ``brief`` items, pointing at the branch's head and asking its
 specialist to read its brief again before the next claim. They are derived from the entries as the other items are,
 so a poll returns each once: when a judgement brings the branch's tests judged since its last commit to
-``stall_tests``, once a stall, and when another branch's pitfall learning is about the direction family of a claim the
-branch holds, or, where either names no family, names its direction.
+:data:`STALL_TESTS`, once a stall, and when another branch's pitfall learning is about the direction family of a claim
+the branch holds, or, where either names no family, names its direction.
 
 A branch whose claim was refused because another branch was testing the same intent gets a ``peer_outcome`` item when
 that test ends, judged, withdrawn or not measured, pointing at the test so its change can be replayed. The refused claim
@@ -54,20 +54,12 @@ _REREAD = "read blackboard_brief from {head} and reconsider the direction before
 
 @dataclass(frozen=True)
 class BriefTriggers:
-    """When a running specialist's inbox gets a ``brief`` item: its branch's ``stall_tests`` tests judged since its
-    last commit, and, with ``pitfalls``, another branch's pitfall learning in a direction it holds a claim on."""
-
-    stall_tests: int = STALL_TESTS
-    pitfalls: bool = True
-
-    def __post_init__(self) -> None:
-        if self.stall_tests < 1:
-            raise ValueError(f"a stall takes at least one judged test, not {self.stall_tests}")
+    """Turns ``brief`` items on in a running specialist's inbox: when its branch has :data:`STALL_TESTS` tests judged
+    since its last commit, and when another branch learns a pitfall in a direction it holds a claim on."""
 
 
 @dataclass(frozen=True)
 class _Briefing:
-    triggers: BriefTriggers
     held: tuple[Claim, ...]
     records: tuple[TestRecord, ...]
     view: LineageView
@@ -123,7 +115,7 @@ def poll(
 
     seen = _read_cursor(cursor)
     briefing = (
-        _Briefing(triggers, tuple(held), tuple(state.records()), lineage_view(state), dict(state.intents))
+        _Briefing(tuple(held), tuple(state.records()), lineage_view(state), dict(state.intents))
         if triggers is not None
         else None
     )
@@ -159,12 +151,11 @@ def _brief_item(entry: Entry, value: object, branch: str, briefing: _Briefing) -
     reread = _REREAD.format(head=head)
     if isinstance(value, JudgementWrite) and entry.branch == branch and value.commit_id is None:
         stalled = judged_since_commit(briefing.records, briefing.view, branch, until=entry.at)
-        if stalled == briefing.triggers.stall_tests:
+        if stalled == STALL_TESTS:
             summary = f"stall: {stalled} tests judged since this branch's last commit, none committed; {reread}"
             return InboxItem(InboxKind.BRIEF, branch, head, summary, entry.at)
     if (
-        briefing.triggers.pitfalls
-        and isinstance(value, Learning)
+        isinstance(value, Learning)
         and value.kind is LearningKind.PITFALL
         and value.branch != branch
         and any(briefing.falls_in(value, claim.intent) for claim in briefing.held)
