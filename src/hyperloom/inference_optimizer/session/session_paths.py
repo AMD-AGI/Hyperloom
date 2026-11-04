@@ -277,6 +277,11 @@ def agent_dir(session_dir: Path, role: str) -> Path:
     return Path(session_dir) / "agents" / role
 
 
+def agent_resources_path(session_dir: Path) -> Path:
+    """``<sd>/agents/resources.jsonl`` — append-only resource records of the specialists the agent runner ran, and of their container."""
+    return Path(session_dir) / "agents" / "resources.jsonl"
+
+
 def agent_prompt_snapshot(session_dir: Path, role: str, *, macro_cycle: int, phase: str = "") -> Path:
     """Compute the path to the per-agent system-prompt snapshot.
 
@@ -412,6 +417,7 @@ __all__ = [
     "agent_dir",
     "agent_mcp_setup_path",
     "agent_prompt_snapshot",
+    "agent_resources_path",
     "breakdown_parts_dir",
     "competitor_target_json",
     "conversations_path",

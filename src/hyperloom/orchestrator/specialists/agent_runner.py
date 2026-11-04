@@ -46,23 +46,21 @@ from typing import Any, Awaitable, Callable, Literal, Mapping, Protocol
 from hyperloom.common.deadline import Deadline
 from hyperloom.common.env_safety import RunAs, RunAsError, redact_file_in_place
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
-from hyperloom_common.fs_utils import create_nofollow, read_bytes_nofollow, read_text_nofollow, write_text_nofollow
+from hyperloom.inference_optimizer.session.session_paths import agent_resources_path
+from hyperloom_common.fs_utils import (
+    append_text_nofollow,
+    create_nofollow,
+    read_bytes_nofollow,
+    read_text_nofollow,
+    write_text_nofollow,
+)
 from hyperloom_common.llm.llm_config import AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX
 
 from .agent_cli_config import _build_specialist_env as build_specialist_env
 from .launch_env import prepare_demote, resolve_launch_user, stage_mcp_config, stamp_reap_mark
 from .mcp_config import SPECIALIST_MCP_CONFIG_FILENAME
 from .reap_watch import cli_alive
-from .resources import (
-    CONTAINER_RECORD_KIND,
-    RESOURCES_RELATIVE_PATH,
-    SPECIALIST_RECORD_KIND,
-    ContainerSnapshot,
-    ProcessTreeSampler,
-    ResourceLog,
-    dir_usage_bytes,
-    read_container_cgroup,
-)
+from .resources import ContainerSnapshot, ProcessTreeSampler, dir_usage_bytes, read_container_cgroup
 from .subprocess_ import (
     ReapWatch,
     SpecialistSubprocessConfig,
@@ -116,6 +114,8 @@ STATE_LOST = "lost"
 UTF8 = "utf-8"
 PRIVATE_FILE_MODE = 0o600
 AGENT_RUNTIME_FILENAME = "agent_runtime.json"
+SPECIALIST_RECORD_KIND = "specialist_resources"
+CONTAINER_RECORD_KIND = "container_resources"
 _PLUGIN_ENV_PREFIXES = ("CLAUDE_CODE_PLUGIN", "CLAUDE_PLUGIN")
 _MCP_BLOCK_BEGIN = "# >>> hyperloom agent_runner mcp"
 _MCP_BLOCK_END = "# <<< hyperloom agent_runner mcp"
@@ -458,7 +458,7 @@ class LocalAgentRunner:
         liveness: Liveness = Liveness(),
         host: RunnerHost = RunnerHost(),
     ) -> None:
-        self._log = ResourceLog(session_dir / RESOURCES_RELATIVE_PATH)
+        self._session_dir = Path(session_dir)
         self._poll_interval = float(poll_interval_seconds)
         self._lost_after = float(liveness.lost_after_seconds)
         self._monotonic = host.monotonic
@@ -616,13 +616,13 @@ class LocalAgentRunner:
         await asyncio.to_thread(self._scrub_log, process_log, session.env_tokens)
         init = _read_init_message(process_log)
         self._write_runtime(session, plugins=init)
-        self._log.append(self._specialist_record(session))
-        self._log.append(self._container_record())
+        self._append_record(self._specialist_record(session))
+        self._append_record(self._container_record())
         session.collected = True
 
     async def finish_campaign(self) -> None:
         """Write the closing container record, with the highest specialist concurrency seen."""
-        self._log.append(self._container_record())
+        self._append_record(self._container_record())
 
     # Internals
     def _prepare(
@@ -854,6 +854,13 @@ class LocalAgentRunner:
             "ended_by": self._ended_by(session),
             "ts_unix": self._wall(),
         }
+
+    def _append_record(self, record: Mapping[str, Any]) -> None:
+        """Append one record to the session's resource records, refusing a link planted anywhere below the session."""
+        line = json.dumps(dict(record), sort_keys=True, separators=(",", ":")) + "\n"
+        self._session_dir.mkdir(parents=True, exist_ok=True)
+        rel = agent_resources_path(self._session_dir).relative_to(self._session_dir).parts
+        append_text_nofollow(self._session_dir, rel, line)
 
     def _container_record(self) -> dict[str, Any]:
         snapshot: ContainerSnapshot = read_container_cgroup(self._cgroup_root)
