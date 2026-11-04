@@ -31,6 +31,10 @@ a CSV of their own, each marked ``verified`` false with the reason :data:`RELAXE
 default CSV. Forge's report names such a row by shape, libtype, splitK, microseconds and ratio, not by kernel, so the
 full row is read back from the profile of every candidate the tuner measured; a row that cannot be found there, or
 matches several candidates, stays rejected. Whether such rows stand is for an end-to-end accuracy check to say.
+
+A row is handed over only for a shape the job asked for: its N and K are those of a key of the job's demand
+(:func:`demanded_nk`). Forge pads a key's M and adds the decode batch sizes as M of each (N, K), so M is not compared. A
+row of any other N and K is refused, whatever its figures.
 """
 
 from __future__ import annotations
@@ -64,6 +68,7 @@ __all__ = [
     "Relax",
     "RowsRefused",
     "TunedRows",
+    "demanded_nk",
     "dropped_by_forge",
     "from_artifact",
     "split_dropped",
@@ -163,6 +168,30 @@ def _read(path: Path) -> tuple[list[str], list[list[str]]]:
     except (OSError, ValueError, csv.Error) as exc:
         raise RowsRefused(f"the tuned table {path.name} cannot be read: {exc}") from None
     return header, [row for row in rows if row]
+
+
+def _nk(record: Mapping[str, Any]) -> tuple[int, int] | None:
+    try:
+        return int(float(record["N"])), int(float(record["K"]))
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+
+
+def demanded_nk(keys: Sequence[Mapping[str, Any]] | None) -> frozenset[tuple[int, int]]:
+    """The (N, K) of every key of a demand entry (``keys``, none when it has none): the shapes a row the job hands over
+    must be for."""
+    return frozenset(found for key in keys or () if (found := _nk(key)) is not None)
+
+
+def _asked_for(checked: _Checked, demanded: frozenset[tuple[int, int]]) -> _Checked:
+    """``checked`` with each kept row whose N and K are not in ``demanded`` refused instead, with the reason."""
+    asked = _Checked(refused=list(checked.refused))
+    for row in checked.kept:
+        if _nk(row.record) in demanded:
+            asked.kept.append(row)
+        else:
+            asked.refused.append(_refusal(row.record, "the job did not ask for a shape of its N and K", row.ratio))
+    return asked
 
 
 def _shape_of(record: Mapping[str, str]) -> dict[str, str]:
@@ -363,9 +392,16 @@ def _flagged(rows: Sequence[_Row]) -> tuple[Mapping[str, Any], ...]:
     return tuple({**row.record, "verified": False, "err_ratio": row.ratio, "reason": RELAXED_REASON} for row in rows)
 
 
-def from_artifact(artifact: Path, env: str, configs: Path, relax: Relax | None = None) -> TunedRows:
+def from_artifact(
+    artifact: Path,
+    env: str,
+    configs: Path,
+    relax: Relax | None = None,
+    demanded: frozenset[tuple[int, int]] | None = None,
+) -> TunedRows:
     """The rows of the tuned table ``artifact``, which tunes the variable ``env`` of the aiter install at ``configs``, and,
-    when the call allowed a higher ratio (``relax``), the rows within it that Forge took out of the table.
+    when the call allowed a higher ratio (``relax``), the rows within it that Forge took out of the table. With
+    ``demanded`` (:func:`demanded_nk`), a row of an N and K it does not hold is refused.
 
     Raises:
         RowsRefused: When the table cannot be read, or the install declares no shape key for ``env`` (aiter checks none
@@ -380,10 +416,12 @@ def from_artifact(artifact: Path, env: str, configs: Path, relax: Relax | None =
             "so the rows cannot be laid over the variable's default table"
         )
     checked = _check(header, rows)
-    verified = _sorted_fastest(checked.kept, key)
     column = next((name for name in ERR_COLUMNS if name in header), None)
     columns = [name for name in header if name != FORGE_REL_NORM_ERR_COLUMN]
     loose = _relaxed(relax, columns, column) if relax is not None else _Checked()
+    if demanded is not None:
+        checked, loose = _asked_for(checked, demanded), _asked_for(loose, demanded)
+    verified = _sorted_fastest(checked.kept, key)
     relaxed = _sorted_fastest(loose.kept, key)
     return TunedRows(
         _text(columns, verified),
