@@ -286,7 +286,7 @@ class HostedBranchLeases:
             try:
                 _end(self._provider.connect(info.sandbox_id, role=DEV_ROLE))
             except SandboxGone:
-                pass
+                pass  # already gone, so there is nothing to end
             except SandboxError:
                 log.exception("sandbox %s could not be reached to end it", info.sandbox_id)
 
@@ -421,7 +421,7 @@ def _end(sandbox: Sandbox) -> None:
     try:
         sandbox.kill()
     except SandboxGone:
-        pass
+        pass  # already gone, so the kill has nothing to do
     except SandboxError:
         log.exception("sandbox %s could not be ended; its own timeout will end it", sandbox.sandbox_id)
 

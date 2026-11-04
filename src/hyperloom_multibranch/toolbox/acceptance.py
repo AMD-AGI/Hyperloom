@@ -181,9 +181,9 @@ class MeasurementPlanner(Protocol):
     def blobs(self) -> BlobStore | None:
         """The blob store the planner compiles from, which the short-prompt check reads the files a recipe's patch
         changes from; ``None`` for a planner that compiles from none, whose every patch then counts as touching."""
-        ...
 
-    def plan(self, request: TestRequest, parent: Recipe) -> object: ...
+    def plan(self, request: TestRequest, parent: Recipe) -> object:
+        """The compiled environment, points and surface check of ``request`` on ``parent``, for the executor."""
 
 
 @dataclass(frozen=True)

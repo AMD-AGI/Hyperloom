@@ -99,9 +99,11 @@ class AsyncTool(Protocol):
 class ToolResultSink(Protocol):
     """The inbox pushes; the blackboard's ``TestRecordSink`` satisfies it."""
 
-    async def notify_tool_result(self, pointer: ToolResultPointer) -> None: ...
+    async def notify_tool_result(self, pointer: ToolResultPointer) -> None:
+        """Push ``pointer``, the record of a finished tool job's result."""
 
-    async def notify_build(self, notice: BuildNotice) -> None: ...
+    async def notify_build(self, notice: BuildNotice) -> None:
+        """Push ``notice``: a build a waiting test needs became ready or is retried."""
 
 
 @dataclass

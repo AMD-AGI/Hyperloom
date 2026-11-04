@@ -116,7 +116,8 @@ class TestJob:
 class Executor(Protocol):
     """Runs one attempt. Raising :class:`MeasurementRefused` ends the test; ``CancelledError`` is a cancel."""
 
-    async def run(self, job: TestJob) -> TestResult: ...
+    async def run(self, job: TestJob) -> TestResult:
+        """Run one attempt of ``job`` and return its result."""
 
     async def reverify(self, result: TestResult) -> None:
         """Check a recorded ``result`` against the evidence of the attempt that made it; raises
