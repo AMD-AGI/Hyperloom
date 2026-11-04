@@ -10,7 +10,6 @@ import json
 import logging
 import os
 import platform
-import re
 import socket
 import subprocess
 import uuid
@@ -18,8 +17,9 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom_common.io import WriteOptions, atomic_write_json
-from hyperloom.common.env_safety import redact_secret_values
+from hyperloom.common.launch_masking import mask_server_args
 from hyperloom.common.provenance import build_provenance
+from hyperloom.common.url_userinfo import strip_url_userinfo
 from hyperloom_common.timeutil import now_iso, utc_now_compact
 
 from . import paths as _paths
@@ -46,34 +46,14 @@ def _git_capture(path: Path, args: list[str]) -> str:
         return ""
 
 
-_SECRET_FLAG_VALUE_RE = re.compile(
-    r"(?i)(--[a-z0-9_-]*(?:api[-_]?key|token|secret|password|passwd|credential)[a-z0-9_-]*)(=|\s+)(\S+)"
-)
-
-
-def _mask_server_args(text: Any) -> Any:
-    """``server_args`` with the value of any credential-named flag and any recognizable credential masked."""
-    if not isinstance(text, str):
-        return text
-    return redact_secret_values(_SECRET_FLAG_VALUE_RE.sub(r"\1\2[REDACTED]", text))
-
-
 def _git_revision_at(path: Path) -> str:
     """Best-effort short git SHA at ``path`` (empty when not a checkout/fails)."""
     return _git_capture(path, ["rev-parse", "--short", "HEAD"])
 
 
-_URL_USERINFO_RE = re.compile(r"(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*://)[^/@\s]*@")
-
-
-def _strip_url_userinfo(url: str) -> str:
-    """``url`` without the ``user[:password]@`` part of its authority."""
-    return _URL_USERINFO_RE.sub(r"\g<scheme>", url)
-
-
 def _git_remote_at(path: Path) -> str:
     """Best-effort ``origin`` remote URL at ``path`` (empty when unset/fails)."""
-    return _strip_url_userinfo(_git_capture(path, ["config", "--get", "remote.origin.url"]))
+    return strip_url_userinfo(_git_capture(path, ["config", "--get", "remote.origin.url"]))
 
 
 # Pod-local, non-persistent roots: a dependency checkout under one of these is erased on pod recycle.
@@ -217,7 +197,7 @@ def build_manifest(
         "gpu_type": gpu_type,
         "tp": _env_digits("TP"),
         **{key: _prov.get(key) for key in ("gfx_arch", "ep", "graph_mode", "server_args_hash")},
-        "server_args": _mask_server_args(_prov.get("server_args")),
+        "server_args": mask_server_args(_prov.get("server_args")),
         "workload": workload,
         "objective": _objective_summary(args),
         "max_minutes": int((getattr(args, "max_hours", 0) or 0) * 60),

@@ -15,8 +15,9 @@ import re
 import shlex
 from pathlib import Path
 from typing import Any, Iterable, Mapping
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
+from hyperloom.common.url_userinfo import CREDENTIALED_URL_RE, VCS_SCHEME_PREFIXES, strip_url_userinfo
 from hyperloom.common.env_safety import is_secret_shaped_env_name, redact_secret_values
 
 #: Installer families the setup allowlist admits, keyed by the token that
@@ -29,7 +30,6 @@ _INSTALLER_FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("conda", ("conda", "mamba")),
 )
 
-_VCS_SCHEME_PREFIXES: tuple[str, ...] = ("git+", "hg+", "svn+")
 
 _INDEX_URL_OPTIONS: frozenset[str] = frozenset({"--index-url", "--extra-index-url", "-i"})
 _FIND_LINKS_OPTIONS: frozenset[str] = frozenset({"--find-links", "-f"})
@@ -38,10 +38,6 @@ _CHANNEL_OPTIONS: frozenset[str] = frozenset({"-c", "--channel"})
 _ATTACHED_SHORT_VALUE_OPTIONS: tuple[str, ...] = ("-r", "-c", "-i", "-f")
 
 _ENV_ASSIGNMENT_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.DOTALL)
-_CREDENTIALED_URL_RE = re.compile(
-    r"(?P<scheme>(?:(?:git|hg|svn)\+)?[A-Za-z][A-Za-z0-9+.-]*://)"
-    r"(?P<userinfo>[^\s/?#\"']+)@(?P<location>[^\s\"']+)"
-)
 
 #: The ambient spelling of ``--index-url``; an inline assignment of one is the
 #: same flag by another name, and the allowlist admits it as readily.
@@ -199,7 +195,7 @@ def url_userinfo(token: str) -> str:
     scheme parse sees ``git+https`` and the userinfo is never reached.
     """
     text = str(token or "")
-    for prefix in _VCS_SCHEME_PREFIXES:
+    for prefix in VCS_SCHEME_PREFIXES:
         if text.startswith(prefix):
             text = text[len(prefix) :]
             break
@@ -211,28 +207,9 @@ def url_userinfo(token: str) -> str:
         parts = None
     if parts is not None and "@" in parts.netloc:
         return parts.netloc.rsplit("@", 1)[0]
-    match = _CREDENTIALED_URL_RE.search(text)
+    match = CREDENTIALED_URL_RE.search(text)
     return match.group("userinfo") if match else ""
 
-
-def strip_url_userinfo(url: str) -> str:
-    """Return ``url`` with any userinfo component removed."""
-    text = str(url or "")
-    prefix = ""
-    for candidate in _VCS_SCHEME_PREFIXES:
-        if text.startswith(candidate):
-            prefix, text = candidate, text[len(candidate) :]
-            break
-    if "://" not in text:
-        return str(url or "")
-    try:
-        parts = urlsplit(text)
-    except ValueError:
-        parts = None
-    if parts is not None and "@" in parts.netloc:
-        host = parts.netloc.rsplit("@", 1)[1]
-        return prefix + urlunsplit((parts.scheme, host, parts.path, parts.query, parts.fragment))
-    return prefix + _CREDENTIALED_URL_RE.sub(r"\g<scheme>\g<location>", text)
 
 
 def _class_for_pair(option: str, operand: str, *, family: str) -> str:
@@ -243,7 +220,7 @@ def _class_for_pair(option: str, operand: str, *, family: str) -> str:
         return "index_url"
     if option in _FIND_LINKS_OPTIONS:
         return "find_links"
-    if operand.startswith(_VCS_SCHEME_PREFIXES):
+    if operand.startswith(VCS_SCHEME_PREFIXES):
         return "vcs_url"
     if family == "npm" and option in _REGISTRY_OPTIONS:
         return "registry"
@@ -315,7 +292,7 @@ def sanitize_command_text(cmd: str, *, clip: int = 0) -> str:
     try:
         shlex.split(text)
     except ValueError:
-        redacted = _CREDENTIALED_URL_RE.sub("<opaque_credential>", text)
+        redacted = CREDENTIALED_URL_RE.sub("<opaque_credential>", text)
         return _clip(redact_secret_values(redacted), clip)
     assignments, tokens = split_env_assignments(text)
     family = installer_class(text)

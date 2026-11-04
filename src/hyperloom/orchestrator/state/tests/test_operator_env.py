@@ -61,4 +61,35 @@ def test_write_state_json_masks_and_splits(tmp_path):
     write_state_json(tmp_path, tmp_path / "state.json", {"operator_extra_env": dict(_PINS), "x": 1})
     shown = json.loads((tmp_path / "state.json").read_text())
     assert shown["x"] == 1 and shown["operator_extra_env"]["HF_TOKEN"] != _PINS["HF_TOKEN"]
-    assert json.loads((tmp_path / EXTRA_ENV_SIDECAR).read_text()) == _PINS
+    assert json.loads((tmp_path / EXTRA_ENV_SIDECAR).read_text()) == {"operator_extra_env": _PINS}
+
+
+def test_launch_evidence_secrets_never_reach_state_json(tmp_path):
+    from hyperloom.orchestrator.actions.executors._launch_evidence import RequestedLaunch, build_launch_evidence
+
+    config = tmp_path / "bench.yaml"
+    config.write_text("benchmark: {}\n", encoding="utf-8")
+    evidence = build_launch_evidence(
+        RequestedLaunch(
+            config,
+            "vllm",
+            server_args="--tp 8 --api-key sekret_key_789",
+            server_env={"HF_TOKEN": "hf_live_value_123", "SGLANG_FLAG": "1"},
+            model_path="/models/m",
+        ),
+        actual_server_log=None,
+        slot=tmp_path / "slot",
+    )
+    state = SharedState()
+    state.operator_server_args = "--tp 8 --api-key sekret_key_789"
+    state.current_best_measurement = {"launch_evidence": evidence}
+    state.current_best = {"measurement": {"launch_evidence": evidence}}
+    state.save(tmp_path)
+    text = (tmp_path / "state.json").read_text()
+    for secret in ("hf_live_value_123", "sekret_key_789"):
+        assert secret not in text
+    shown = json.loads(text)["current_best_measurement"]["launch_evidence"]
+    assert shown["requested_server_env"]["SGLANG_FLAG"] == "1" and "--tp 8" in shown["requested_server_args"]
+    # The live state keeps the real values, and --resume gets the operator's --server-args back.
+    assert evidence["requested_server_env"]["HF_TOKEN"] == "hf_live_value_123"
+    assert SharedState.load_or_init(tmp_path).operator_server_args == "--tp 8 --api-key sekret_key_789"

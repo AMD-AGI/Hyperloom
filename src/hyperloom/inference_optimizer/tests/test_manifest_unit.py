@@ -241,6 +241,6 @@ def test_git_remote_userinfo_is_stripped(monkeypatch):
 
 
 def test_server_args_credential_flags_are_masked():
-    out = mf._mask_server_args("--tp 8 --api-key abc123 --hf-token=zzz9 --port 1")
+    out = mf.mask_server_args("--tp 8 --api-key abc123 --hf-token=zzz9 --port 1")
     assert "abc123" not in out and "zzz9" not in out
     assert out == "--tp 8 --api-key [REDACTED] --hf-token=[REDACTED] --port 1"
