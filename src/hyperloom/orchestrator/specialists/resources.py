@@ -9,9 +9,9 @@ Per container: cgroup v2 memory limit, peak, OOM-kill count and CPU limit. Every
 reader returns ``None`` for what it cannot read instead of guessing, and nothing
 here writes to or signals the processes it observes.
 
-Records go to ``agents/resources.jsonl`` (detailed design 4.14); their purpose is
-to size the hosted application container and to decide when CPU specialists need a
-sub-run, so a missing reading must stay distinguishable from a zero.
+Records go to ``agents/resources.jsonl``; their purpose is to size the hosted
+application container and to decide when CPU specialists need a sub-run, so a
+missing reading must stay distinguishable from a zero.
 """
 
 from __future__ import annotations
@@ -94,12 +94,11 @@ class ProcessTreeSampler:
 
     def sample(self) -> TreeSample:
         """Read the tree once and fold the reading into the peak and the CPU total."""
-        pids = self._tree_pids()
         rss = 0
         cpu = 0.0
         live = 0
-        for pid in pids:
-            reading = self._read_process(pid)
+        for pid, start_time in self._tree():
+            reading = self._read_process(pid, start_time)
             if reading is None:
                 continue
             live += 1
@@ -109,11 +108,15 @@ class ProcessTreeSampler:
         self._cpu_seconds = max(self._cpu_seconds, cpu)
         return TreeSample(rss_bytes=rss, cpu_seconds=self.cpu_seconds, live_pids=live)
 
-    def _read_process(self, pid: int) -> tuple[int, float] | None:
+    def _read_process(self, pid: int, start_time: int | None) -> tuple[int, float] | None:
+        """Read one process; ``None`` when it is gone or ``pid`` now names a process started at another time."""
         try:
             status = (self._proc / str(pid) / "status").read_text(encoding=UTF8, errors=DECODE_ERRORS)
             stat = (self._proc / str(pid) / "stat").read_text(encoding=UTF8, errors=DECODE_ERRORS)
-            utime, stime, cutime, cstime = (int(value) for value in stat.rsplit(")", 1)[-1].split()[11:15])
+            fields = stat.rsplit(")", 1)[-1].split()
+            if start_time is not None and int(fields[19]) != start_time:
+                return None
+            utime, stime, cutime, cstime = (int(value) for value in fields[11:15])
             cpu = (utime + stime + cutime + cstime) / self._ticks
         except (OSError, ValueError, IndexError):
             return None
@@ -126,17 +129,20 @@ class ProcessTreeSampler:
                 break
         return rss, cpu
 
-    def _tree_pids(self) -> list[int]:
-        """The root, then its descendants with every parent before its children.
+    def _tree(self) -> list[tuple[int, int | None]]:
+        """The root, then its descendants with every parent before its children, each with its start time.
 
         A child reaped between the read of its parent and its own is then missed by one
-        sample instead of counted twice, which the kept maximum would make permanent.
+        sample instead of counted twice, and a pid reused after the scan is not read as
+        the process the scan found; the kept maximum would make either count permanent.
+        The root carries no start time, so it is read by its pid alone.
         """
+        root: list[tuple[int, int | None]] = [(self._root, None)]
         try:
             below = descendants(self._root)
         except OSError:
-            return [self._root]
-        return [self._root, *(pid for pid, _start in reversed(below))]
+            return root
+        return [*root, *reversed(below)]
 
 
 @dataclass(frozen=True)
