@@ -53,7 +53,7 @@ from hyperloom_multibranch.blackboard.codec import decode, encode
 from hyperloom_multibranch.blackboard.families import family_of
 from hyperloom_multibranch.blackboard.local.files import encode_json, publish_once
 from hyperloom_multibranch.blackboard.local.unfinished import hinted_gain
-from hyperloom_multibranch.blackboard.rsi.similarity import TaskConditions, task_conditions, task_similarity
+from hyperloom_multibranch.blackboard.rsi.similarity import TaskConditions, task_conditions
 
 log = logging.getLogger(__name__)
 
@@ -362,7 +362,7 @@ def _environment(snapshot: BlackboardSnapshot) -> str:
     measured = [record for record in snapshot.records if record.measured]
     anchored = [record for record in measured if baseline is not None and record.request_id in baseline.request_ids]
     sampled = anchored or measured
-    # A hosted backend run on one machine (MB1) still measured on a single host.
+    # A hosted backend run on one machine still measured on a single host.
     nodes = {sandbox.node_name for sandbox in map(_sandbox, sampled) if sandbox is not None and sandbox.node_name}
     if len(nodes) == 1:
         return SINGLE_HOST
@@ -459,7 +459,6 @@ def tree_from_snapshot(
     metric: str,
     *,
     budget_seconds: float | None = None,
-    bottlenecks: Mapping[str, float] | None = None,
     cross_image: Collection[str] = (),
 ) -> SearchTree:
     """The session's search tree, its gains read off ``metric``; the budget defaults to the time the blackboard spans.
@@ -485,7 +484,7 @@ def tree_from_snapshot(
     return SearchTree(
         session_id=profile.session_id,
         source=SOURCE_BLACKBOARD,
-        task=task_conditions(profile, bottlenecks),
+        task=task_conditions(profile),
         budget_seconds=max(0.0, snapshot.taken_at - start) if budget_seconds is None else budget_seconds,
         final_gain_pct=max((reading.gain(commit.commit_id) for commit in snapshot.lineage.commits), default=0.0),
         branches=tuple(reading.branch(node) for node in snapshot.lineage.branches),
@@ -499,22 +498,6 @@ def tree_from_snapshot(
         longest_root_test_seconds=longest_root_test_seconds(snapshot),
         started_at=start,
     )
-
-
-@dataclass(frozen=True)
-class WeightedTree:
-    tree: SearchTree
-    weight: float
-
-
-def similar_trees(
-    history: Sequence[SearchTree], task: TaskConditions, *, minimum: float = 0.0
-) -> tuple[WeightedTree, ...]:
-    """The archived trees that share a condition with ``task``, at least ``minimum`` similar, most similar first."""
-
-    weighted = (WeightedTree(tree, task_similarity(task, tree.task)) for tree in history)
-    kept = (item for item in weighted if item.weight > 0 and item.weight >= minimum)
-    return tuple(sorted(kept, key=lambda item: -item.weight))
 
 
 class TreeConflict(FileExistsError):
@@ -547,7 +530,7 @@ class TreeArchive:
     too."""
 
     def __init__(self, root: Path, as_of: float | None = None) -> None:
-        self.root = Path(root) / "trees"
+        self.root = root / "trees"
         self.as_of = as_of
 
     @classmethod
@@ -670,12 +653,10 @@ __all__ = [
     "TreeConflict",
     "TreeDirection",
     "TreeProbation",
-    "WeightedTree",
     "archive_session",
     "as_of_from_env",
     "longest_root_test_seconds",
     "session_start",
-    "similar_trees",
     "tree_document",
     "tree_from_document",
     "tree_from_snapshot",

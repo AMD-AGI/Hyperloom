@@ -224,15 +224,13 @@ class CloseOutcome:
 class SessionPlace:
     """Where the breakdown reads a session's other records, and what the session ran under.
 
-    ``session_dir`` is where a hosted run's records are read from, ``runner_dir`` the agent runner's session directory,
-    and ``environ`` the run's variables (the process's by default); ``code_revision`` is the source revision the
-    session's manifest recorded at start, which a process that exports another run's session, such as ``final-only``,
-    does not have in its environment.
+    ``session_dir`` is where a hosted run's records are read from and ``runner_dir`` the agent runner's session
+    directory; ``code_revision`` is the source revision the session's manifest recorded at start, which a process that
+    exports another run's session, such as ``final-only``, does not have in its environment.
     """
 
     session_dir: Path | None = None
     runner_dir: Path | None = None
-    environ: Mapping[str, str] | None = None
     code_revision: str | None = None
 
 
@@ -261,9 +259,7 @@ def build_breakdown(
         "metadata": {
             "session_profile": encode(snapshot.profile),
             "manifest_fingerprints": encode(snapshot.fingerprints),
-            "session": session_metadata(
-                snapshot, os.environ if place.environ is None else place.environ, place.code_revision
-            ),
+            "session": session_metadata(snapshot, os.environ, place.code_revision),
             **hosted_records(place.session_dir),
             **agent_resources(place.runner_dir),
         },

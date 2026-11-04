@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 from hyperloom_kb import RemoteExperienceKB
-from hyperloom_kb.collect import load_mapping
+from hyperloom_kb.collect import collect, load_mapping
 from hyperloom_kb.collect.engine import CollectReport, FailedUnit
 
 from hyperloom_multibranch.contracts.blackboard.peers import IntentLayer
@@ -129,7 +129,7 @@ def test_a_live_kb_and_an_archive_take_the_experiences_the_learnings_and_the_tre
             ),
         )
 
-    dry = experience.publish_experiences(learnt, METRIC, dry_run=True)
+    dry = collect(experience.MAPPING_PATH, experience.export_document(learnt, METRIC), dry_run=True)
     assert done.experiences == CloseStep(
         WRITTEN, counts={"created": len(dry.collected), "skipped": len(dry.skipped), "errors": 0}
     )
@@ -286,15 +286,17 @@ def test_each_rsi_step_of_close_says_why_it_kept_nothing_and_close_goes_on(
 
 @pytest.mark.usefixtures("unconfigured")
 def test_the_sessions_menus_read_the_archive_and_log_each_menu_beside_the_reports(
-    snapshot: BlackboardSnapshot, tmp_path: Path
+    snapshot: BlackboardSnapshot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     archive, reports = TreeArchive(tmp_path / "archive"), tmp_path / "reports"
     assert archive_session(snapshot, METRIC, archive).status == ARCHIVED
+    monkeypatch.setenv(ARCHIVE_ENV, str(tmp_path / "archive"))
 
-    menus = session_menus(METRIC, reports, archive)
+    menus = session_menus(METRIC, reports)
     assert menus is not None
     menus.menu(snapshot, "s1", "c1")
-    unlogged = session_menus(METRIC, None, archive)
+    unlogged = session_menus(METRIC, None)
+    monkeypatch.delenv(ARCHIVE_ENV)
 
     assert [tree.session_id for tree in menus.trees] == ["sess-1"]
     assert [(logged.branch, logged.commit) for logged in MenuLog(reports / MENU_LOG).menus()] == [("s1", "c1")]
@@ -335,7 +337,7 @@ def test_an_agentx_sessions_experiences_go_to_the_blackboards_own_declaration(
             agentx, METRIC, targets=CloseTargets(multibranch_kb=RemoteExperienceKB(client, own), receipts=reports)
         )
 
-    dry = experience.publish_multibranch_experiences(agentx, METRIC, dry_run=True)
+    dry = collect(experience.MULTIBRANCH_MAPPING_PATH, experience.export_document(agentx, METRIC), dry_run=True)
     assert done.multibranch_experiences == CloseStep(
         WRITTEN, counts={"created": len(dry.collected), "skipped": len(dry.skipped), "errors": 0}
     )
@@ -497,7 +499,7 @@ async def test_without_a_budget_or_an_archive_the_defaults_stand(tmp_path: Path)
 
 
 def test_the_judge_reads_the_stall_odds_of_the_archive_and_of_the_session_itself(
-    snapshot: BlackboardSnapshot,
+    snapshot: BlackboardSnapshot, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     odds = session_stall_odds(snapshot, (PAST,), METRIC)
     alone = session_stall_odds(snapshot, (), METRIC)
@@ -507,4 +509,5 @@ def test_the_judge_reads_the_stall_odds_of_the_archive_and_of_the_session_itself
     assert judge_history(snapshot, (PAST,), METRIC, budget_seconds=BUDGET) == odds.render(MAX_CHARS)
     assert judge_history(snapshot, (), METRIC, budget_seconds=BUDGET) == ""
     assert judge_history(dataclasses.replace(snapshot, profile=None), (PAST,), METRIC, budget_seconds=BUDGET) == ""
-    assert len(judge_history(snapshot, (PAST,), METRIC, budget_seconds=BUDGET, max_chars=80)) <= 80
+    monkeypatch.setattr(session, "MAX_CHARS", 80)
+    assert len(judge_history(snapshot, (PAST,), METRIC, budget_seconds=BUDGET)) <= 80
