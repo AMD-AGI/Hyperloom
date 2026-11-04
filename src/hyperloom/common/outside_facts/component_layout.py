@@ -7,8 +7,13 @@ A patch names each file by its path in the component's upstream repository. A la
 image: each *section* is an upstream path prefix, the base it lies over (the installed package, or aiter's meta
 directory), and the directory inside that base the section starts at. A path belongs to the section with the longest
 matching prefix; a path outside every section cannot be applied to the image. A layout also lists the files whose change
-the measured install cannot show (compiled objects, native sources, build files): a patch that names one is refused with
-the path, because laying a changed C++ file beside the package that runs the old binary would measure old bits.
+the measured install cannot show, in two lists. ``refuse`` names the files no patch can change in any session: a
+compiled file (``*.so``, ``*.co``) is what a build makes, never a source of one. ``native`` names the component's native
+sources and build definition, which only a build of the component measures: the package layout refuses them, because
+laying a changed C++ file beside the package that runs the old binary would measure old bits, and a native build, where
+one is configured, compiles them. A patch is refused naming the pattern. A pattern without a slash names files wherever
+they lie; one with a slash names them only below a directory, for a source that is native only where the component's
+build compiles it (vLLM's ``csrc/*.cu``), not inside the package, whose runtime may compile a source of its own.
 
 The pack carries the layouts (``component_layout`` entries); this module reads and applies them, and the loader pins each
 entry to its own examples with :func:`check_examples`.
@@ -38,10 +43,11 @@ PACKAGE_BASE = "package"
 #: The directory aiter reads ``csrc`` and ``hsa`` from (``AITER_META_DIR``).
 META_BASE = "meta"
 BASES = (PACKAGE_BASE, META_BASE)
-_REFUSE, _GENERATED, _INTO, _PLACE = "refuse", "generated", "into", "place"
-_FIELDS = frozenset({"import_name", "sections", _REFUSE, _GENERATED})
+_REFUSE, _NATIVE, _GENERATED, _INTO, _PLACE = "refuse", "native", "generated", "into", "place"
+_FIELDS = frozenset({"import_name", "sections", _REFUSE, _NATIVE, _GENERATED})
 _SECTION_FIELDS = frozenset({"prefix", "base", _INTO})
 _ARROW = " -> "
+_SLASH = "/"
 
 
 class LayoutSpecError(ValueError):
@@ -59,13 +65,15 @@ class LayoutSection:
 
 @dataclass(frozen=True)
 class ComponentLayoutSpec:
-    """The layout of one component: what its sections are, which files cannot be measured, and which directories of
-    the package its runtime writes builds into."""
+    """The layout of one component: what its sections are, which files cannot be measured (``refuse`` in any session,
+    ``native`` without a native build of the component), and which directories of the package its runtime writes builds
+    into."""
 
     import_name: str
     sections: tuple[LayoutSection, ...]
     refuse: tuple[str, ...] = ()
     generated: tuple[str, ...] = ()
+    native: tuple[str, ...] = ()
 
     def place(self, path: str) -> tuple[LayoutSection, str] | None:
         """The section of the upstream path ``path`` and its path inside the section's base; ``None`` outside all."""
@@ -82,9 +90,23 @@ class ComponentLayoutSpec:
         return section, str(PurePosixPath(section.into, *parts[depth:]))
 
     def refused_by(self, path: str) -> str | None:
-        """The pattern that makes ``path`` a file this layout cannot measure, matched on the file's name; else ``None``."""
-        name = PurePosixPath(path).name
-        return next((pattern for pattern in self.refuse if fnmatchcase(name, pattern)), None)
+        """The pattern of ``refuse`` that names ``path``, a file no patch can change; else ``None``."""
+        return _named_by(self.refuse, path)
+
+    def native_by(self, path: str) -> str | None:
+        """The pattern of ``native`` that names ``path``, a file only a native build measures; else ``None``."""
+        return _named_by(self.native, path)
+
+
+def _named_by(patterns: tuple[str, ...], path: str) -> str | None:
+    """The first of ``patterns`` that names the upstream path ``path``.
+
+    A pattern without a slash is matched on the file's name, wherever the file lies. A pattern with a slash is matched
+    on the whole upstream path, from the repository's top, where ``*`` also matches a slash: ``csrc/*.cu`` is every
+    ``.cu`` file below ``csrc``, at any depth, and no ``.cu`` file elsewhere."""
+    upstream = PurePosixPath(path)
+    name, whole = upstream.name, upstream.as_posix()
+    return next((p for p in patterns if fnmatchcase(whole if _SLASH in p else name, p)), None)
 
 
 def _strings(where: str, what: str, value: Any, *, allow_empty: bool) -> tuple[str, ...]:
@@ -101,6 +123,12 @@ def _relative(where: str, what: str, value: str) -> str:
     if value.startswith("/") or ".." in parts or (parts and value != PurePosixPath(*parts).as_posix()):
         raise LayoutSpecError(f"{where}: {what} {value!r} must be a plain relative path without '..'")
     return value
+
+
+def _patterns(where: str, what: str, value: Any) -> tuple[str, ...]:
+    return tuple(
+        _relative(where, what, p) if _SLASH in p else p for p in _strings(where, what, value, allow_empty=True)
+    )
 
 
 def _section(where: str, index: int, raw: Any) -> LayoutSection:
@@ -131,11 +159,11 @@ def parse_layout(where: str, body: Mapping[str, Any]) -> ComponentLayoutSpec:
     prefixes = [section.prefix for section in sections]
     if len(set(prefixes)) != len(prefixes):
         raise LayoutSpecError(f"{where}: two sections have the same prefix")
-    refuse = _strings(where, _REFUSE, body[_REFUSE], allow_empty=True)
     generated = tuple(
         _relative(where, _GENERATED, path) for path in _strings(where, _GENERATED, body[_GENERATED], allow_empty=True)
     )
-    return ComponentLayoutSpec(name, sections, refuse, generated)
+    refuse, native = _patterns(where, _REFUSE, body[_REFUSE]), _patterns(where, _NATIVE, body[_NATIVE])
+    return ComponentLayoutSpec(name, sections, refuse, generated, native)
 
 
 def _example_list(where: str, examples: Any, key: str) -> tuple[str, ...]:
@@ -146,13 +174,18 @@ def _example_list(where: str, examples: Any, key: str) -> tuple[str, ...]:
 
 def check_examples(where: str, spec: ComponentLayoutSpec, examples: Any) -> None:
     """Run the layout against its own examples: every ``place`` example ``<upstream path> -> <base>:<path in base>``
-    must be placed so, every ``refuse`` example (a path outside the sections, or one the layout cannot measure) must be
-    refused."""
+    must be placed so, every ``refuse`` example (a path outside the sections, or one a pattern of ``refuse`` or
+    ``native`` names) must be refused."""
     for line in _example_list(where, examples, _PLACE):
         path, arrow, expected = line.partition(_ARROW)
         placed = spec.place(path) if arrow else None
-        if placed is None or spec.refused_by(path) or f"{placed[0].base}:{placed[1]}" != expected:
+        if (
+            placed is None
+            or spec.refused_by(path)
+            or spec.native_by(path)
+            or f"{placed[0].base}:{placed[1]}" != expected
+        ):
             raise LayoutSpecError(f"{where}: the example {line!r} is not placed as it says by the sections")
     for path in _example_list(where, examples, _REFUSE):
-        if spec.place(path) is not None and spec.refused_by(path) is None:
+        if spec.place(path) is not None and (spec.refused_by(path) or spec.native_by(path)) is None:
             raise LayoutSpecError(f"{where}: the example {path!r} must be refused, but the layout takes it")

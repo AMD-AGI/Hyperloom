@@ -9,9 +9,13 @@
 #   names         closed set of names, each under the role the code reads it by
 #   log_regex     a pattern for a log line; every examples.match line must match it, every examples.no_match line must not
 #   env_default   an environment variable and the value a launch sets
-#   component_layout  where a component's upstream paths lie in the image (sections), the files its layout cannot measure
-#                 (refuse) and the package directories its runtime writes builds into (generated); every examples.place
-#                 line "<upstream path> -> <base>:<path in base>" must be placed so, every examples.refuse path refused
+#   component_layout  where a component's upstream paths lie in the image (sections), the files no patch can change in
+#                 any session (refuse: compiled files, which a build makes), the files only a native build of the
+#                 component measures (native: its native sources and build definition, refused unless native builds
+#                 are configured), each a pattern of a file's name, or with a slash of its upstream path, where *
+#                 also matches a slash, and the package directories its runtime writes builds into (generated); every
+#                 examples.place line "<upstream path> -> <base>:<path in base>" must be placed so, every
+#                 examples.refuse path refused
 #   arg_value     reserved: no rule reads one yet, so a pack that holds one is refused
 #   kernel_table  reserved: no rule reads one yet, so a pack that holds one is refused
 # An entry may also declare image_check: checks the environment a session runs in can answer about the fact
@@ -20,7 +24,7 @@
 # reads a name another entry holds. A fact with no check is reported unverifiable by the image check.
 # Every entry names its project, says why the fact exists and carries examples. A pack that fails its own examples, or
 # lacks an entry the code reads, is refused when it is loaded; nothing falls back to a default.
-version: "16"
+version: "19"
 facts:
   aiter_merged_view:
     kind: names
@@ -713,6 +717,40 @@ facts:
                     path = inferencex-e2e/utils/srt-slurm
                     url = https://github.com/NVIDIA/srt-slurm.git
 
+  magpie_agentx_client_log:
+    kind: names
+    project: Magpie (native AgentX runtime at the commit Hyperloom pins)
+    reason: >-
+      A native AgentX round boots its server and then runs the InferenceX replay client with its output written to this
+      file in the round's workspace, beside server.log (agentx_runtime.py, _execute_local). The client's own failures (a
+      Hugging Face download refused, say) are only in this file: Magpie records the client's exit code as the round's
+      error and keeps the client's words out of benchmark_stderr.log.
+    names:
+      file: agentx_client.log
+    examples:
+      - "hyperloom.measure.local: a failed round's client log is read from this file beside its server.log, for the infrastructure causes the client states"
+
+  hub_rate_limited:
+    kind: log_regex
+    project: huggingface_hub (the Hub client InferenceX's replay client and its hf CLI download with)
+    reason: >-
+      The Hub answers 429 once an IP address or account has spent its requests in the current window; anonymous requests
+      share the limit of the egress address they leave from. huggingface_hub retries a 429 and, once its retries are
+      spent, raises HfHubHTTPError whose message states the refusal in one of two forms (utils/_http.py,
+      hf_raise_for_status): the limit it ran out of when the rate-limit headers say so, else the URL it was refused. The
+      warning it logs before each retry ("HTTP Error 429 thrown while requesting ...") is not the refusal: the call may
+      still succeed, so it does not match.
+    pattern: >-
+      429 Too Many Requests(?:: you have reached your '[^']+' rate limit| for url: https://huggingface\.co/)
+    examples:
+      match:
+        - "429 Too Many Requests: you have reached your 'api' rate limit."
+        - "huggingface_hub.errors.HfHubHTTPError: 429 Too Many Requests for url: https://huggingface.co/api/datasets/semianalysisai/cc-traces-weka-062126/revision/main."
+      no_match:
+        - "HTTP Error 429 thrown while requesting HEAD https://huggingface.co/datasets/semianalysisai/cc-traces-weka-062126/resolve/main/README.md"
+        - 'INFO:     127.0.0.1:41234 - "POST /v1/chat/completions HTTP/1.1" 429 Too Many Requests'
+        - "429 Too Many Requests for url: https://api.github.com/repos/SemiAnalysisAI/aiperf"
+
   short_prompt_check:
     kind: names
     project: aiter (the prefill kernels the framework image serves with) and the framework that calls them
@@ -927,6 +965,7 @@ facts:
     sections:
       - {prefix: python/sglang, base: package}
     refuse: []
+    native: []
     generated: []
     examples:
       place:
@@ -941,8 +980,16 @@ facts:
     reason: >-
       vLLM's package is vllm at the top of its repository and lies over the installed vllm. Its operators are native
       extensions beside the package (vllm/_C, vllm/_moe_C and vllm/_rocm_C on ROCm, *.so), which its setup.py builds with
-      CMake from csrc at the top of the repository: a Python patch cannot change them, so a patch that names a native file
-      is refused with its path, and the build definition (CMakeLists.txt, setup.py, cmake/) with it.
+      CMake from csrc at the top of the repository. A compiled file is what a build makes, so a patch that names one is
+      refused wherever it lies, in every session (refuse). A native source below csrc, and the build definition
+      (CMakeLists.txt, setup.py, cmake/), only a build of vLLM measures: refused with its path unless native builds are
+      configured (native). Every source the CMake build compiles lies below csrc (CMakeLists.txt and cmake/*.cmake at
+      f46a9dfe2c, the rocm/vllm 0.27.0 image's commit; hipify copies only csrc, and the external projects are fetched
+      outside the repository). A native source inside the package is not built by it: the package compiles it at run
+      time (vllm/distributed/kv_transfer/kv_connector/v1/hf3fs/utils/hf3fs_utils.cpp with torch's cpp_extension.load,
+      shipped as package data), so it is an ordinary file of the package. vLLM has no Makefile at f46a9dfe2c and its
+      build reads none (setup.py runs CMake in its build directory), so a Makefile is no different from any other file
+      outside csrc: the sections place or refuse it.
     import_name: vllm
     sections:
       - {prefix: vllm, base: package}
@@ -956,34 +1003,38 @@ facts:
       - "*.hsaco"
       - "*.cubin"
       - "*.pyd"
-      - "*.c"
-      - "*.cc"
-      - "*.cpp"
-      - "*.cxx"
-      - "*.h"
-      - "*.hh"
-      - "*.hpp"
-      - "*.cu"
-      - "*.cuh"
-      - "*.hip"
-      - "*.inc"
+    native:
+      - "csrc/*.c"
+      - "csrc/*.cc"
+      - "csrc/*.cpp"
+      - "csrc/*.cxx"
+      - "csrc/*.h"
+      - "csrc/*.hh"
+      - "csrc/*.hpp"
+      - "csrc/*.cu"
+      - "csrc/*.cuh"
+      - "csrc/*.hip"
+      - "csrc/*.inc"
       - "CMakeLists.txt"
       - "*.cmake"
       - "setup.py"
       - "pyproject.toml"
-      - "Makefile"
     generated: []
     examples:
       place:
         - "vllm/envs.py -> package:envs.py"
+        - "vllm/_osk_gemm.hip -> package:_osk_gemm.hip"
+        - "vllm/distributed/kv_transfer/kv_connector/v1/hf3fs/utils/hf3fs_utils.cpp -> package:distributed/kv_transfer/kv_connector/v1/hf3fs/utils/hf3fs_utils.cpp"
       refuse:
         - "csrc/cache_kernels.cu"
         - "csrc/rocm/attention.cu"
         - "csrc/ops.h"
         - "vllm/_C.abi3.so"
+        - "vllm/.osk_cache/osk_gemm.co"
         - "CMakeLists.txt"
         - "setup.py"
         - "cmake/utils.cmake"
+        - "Makefile"
 
   component_layout_aiter:
     kind: component_layout
@@ -1007,6 +1058,7 @@ facts:
       - "*.co"
       - "*.hsaco"
       - "*.cubin"
+    native: []
     generated:
       - jit/build
       - jit/hyperloom_jit_backup
@@ -1030,6 +1082,7 @@ facts:
     sections:
       - {prefix: atom, base: package}
     refuse: []
+    native: []
     generated: []
     examples:
       place:
@@ -1046,6 +1099,7 @@ facts:
     sections:
       - {prefix: xfuser, base: package}
     refuse: []
+    native: []
     generated: []
     examples:
       place:
@@ -1077,6 +1131,7 @@ facts:
       - "*.cubin"
       - "*.pyd"
       - "*.aks2"
+    native:
       - "*.c"
       - "*.cc"
       - "*.cpp"
@@ -1128,6 +1183,7 @@ facts:
       - "*.cubin"
       - "*.pyd"
       - "*.aks2"
+    native:
       - "*.c"
       - "*.cc"
       - "*.cpp"
@@ -1163,7 +1219,8 @@ facts:
       sgl_kernel is installed as the wheel sglang-kernel. In the SGLang repository of the measured image its Python is
       python/sglang/kernels/aot/python/sgl_kernel (the directory sgl-kernel/python/sgl_kernel of older SGLang no longer exists
       there). Its operators are one native extension, common_ops.*.so, built from the C++ beside it: a Python patch cannot change
-      it, so a patch that names a native file is refused with its path.
+      it, so a patch that names a native file is refused with its path. A compiled file is refused in every session; a
+      native source or build file unless native builds are configured.
     import_name: sgl_kernel
     sections:
       - {prefix: python/sglang/kernels/aot/python/sgl_kernel, base: package}
@@ -1178,6 +1235,7 @@ facts:
       - "*.cubin"
       - "*.pyd"
       - "*.aks2"
+    native:
       - "*.c"
       - "*.cc"
       - "*.cpp"
@@ -1225,6 +1283,7 @@ facts:
       - "*.cubin"
       - "*.pyd"
       - "*.aks2"
+    native:
       - "*.c"
       - "*.cc"
       - "*.cpp"
