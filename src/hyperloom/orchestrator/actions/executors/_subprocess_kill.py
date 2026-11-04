@@ -240,7 +240,7 @@ _READY_PHASE = "ready"
 
 #: aiter's line as it starts building a JIT module (``[aiter] [pid=.. pname=..] start build [<module>] under ...``). It
 #: writes nothing more until the module is built, and a server whose first request after ready reaches a module it lacks
-#: builds it inside that request: a CK-tile GEMM took up to 1347 s with eight tests building at once, past the
+#: builds it inside that request: a CK-tile GEMM builds slowest when several tests build at once, past the
 #: silence window. So a log whose last line is such a line is active, each build for at most as long as a module of its
 #: kind may take; a build that hangs goes silent from there.
 _AITER_BUILD_START = re.compile(r"\[aiter\] (?:\[[^\]]*\] )*start build (?:\[([A-Za-z0-9_.-]+)\])?")

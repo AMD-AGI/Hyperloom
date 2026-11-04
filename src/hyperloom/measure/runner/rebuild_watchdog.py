@@ -10,8 +10,8 @@ aiter rebuilds such a module when the first request reaches the kernel. sglang's
 launch sets ``--watchdog-timeout``) can fire while every rank is still in the build, and the test then ends as
 ``jit_build_timeout``. For such a test the runner raises the watchdog of every sglang point to cover building the stale
 modules one after another, each for as long as a module of its kind may take
-(:func:`~hyperloom.measure.jit.modules.module_build_limit_sec`: a CK-tile module can take up to 1347 s when several
-tests build at once, any other up to 273 s): it adds the flag to a launch that sets none, and raises a value the launch
+(:func:`~hyperloom.measure.jit.modules.module_build_limit_sec`: 2700 s for a CK-tile module, whose build is slowest
+when several tests build at once, 600 s for any other): it adds the flag to a launch that sets none, and raises a value the launch
 sets (sglang AgentX launches carry a default one, a recipe or a candidate may set their own) when the estimate is
 higher. It never lowers one: the watchdog only bounds a hang, so a longer one changes no measurement, and a hang still
 ends once every module has had its time.
@@ -46,15 +46,15 @@ from hyperloom.measure.socket import TestCall
 
 __all__ = ["MODULE_BUILD_SEC", "WATCHDOG_MARGIN_SEC", "raise_rebuild_watchdog", "rebuild_watchdog_sec"]
 
-#: The seconds one stale module other than a CK-tile one is given to build: over twice the longest aiter module build
-#: (273 s), and a blockscale GEMM rebuild may not finish within sglang's 300 s.
+#: The seconds one stale module other than a CK-tile one is given to build: over twice the longest aiter module build,
+#: and a blockscale GEMM rebuild may not finish within sglang's 300 s.
 #: A CK-tile module gets :data:`~hyperloom.measure.jit.modules.CKTILE_MODULE_BUILD_LIMIT_SEC`.
 MODULE_BUILD_SEC = MODULE_BUILD_LIMIT_SEC
 #: Added to the builds: sglang's own default watchdog, for the step the build interrupted.
 WATCHDOG_MARGIN_SEC = 300
 _SGLANG = "sglang"
 _FLAG = "--watchdog-timeout"
-_FLAG_RE = re.compile(r"(?:^|\s)--watchdog-timeout(?:=|\s+|$)(?P<value>\S*)")
+_FLAG_RE = re.compile(r"(?:^|\s)--watchdog-timeout(?:(?:=|\s+)(?P<value>\S*)|$)")
 _UTF8 = "utf-8"
 
 
@@ -174,7 +174,7 @@ def _raised_line(line: str, seconds: int) -> str | None:
     if not found:
         return f"{line} {_FLAG} {seconds}".strip()
     last = found[-1]
-    value = _raised(last.group("value"), seconds)
+    value = _raised(last.group("value") or "", seconds)
     if value is None:
         return None
     return f"{line[: last.start('value')]}{value}{line[last.end('value') :]}"
