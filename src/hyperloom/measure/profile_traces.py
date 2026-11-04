@@ -9,9 +9,9 @@ detection of the trace analysis still works. The result's ``profile_location`` i
 session, and the bundle's manifest lists its files, so the location is verifiable.
 
 A profile whose traces are all CUDA-graph capture sidecars (``graph_capture_profile/``, ``capture_traces/``) recorded the
-graphs the server captured at boot and no serving step: the profiler of the round never started. Measured on a NEXTN
-speculative-decoding head, 11 of 11 profiles were of that shape (the run ended before the step the capture window starts
-at), and an analysis of such a trace can only fail; :func:`has_step_traces` tells the two apart.
+graphs the server captured at boot and no serving step: the profiler of the round never started, because the run
+ended before the step the capture window starts at (a speculative-decoding head, which takes several tokens per step,
+gets there sooner). An analysis of such a trace can only fail; :func:`has_step_traces` tells the two apart.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from pathlib import Path
 
 from hyperloom.orchestrator.trace_analysis import is_capture_fragment
 
-__all__ = ["PROFILE_DIR", "collect_traces", "has_step_traces", "has_traces", "is_trace_file"]
+__all__ = ["PROFILE_DIR", "collect_traces", "has_step_traces", "has_traces", "is_trace_file", "round_has_traces"]
 
 #: The directory, below a test's output directory, that holds the traces of a ``profile`` test.
 PROFILE_DIR = "profile"
@@ -56,6 +56,11 @@ def has_step_traces(directory: Path) -> bool:
     """Whether ``directory`` holds a trace of serving steps: a trace file that is not a CUDA-graph capture sidecar."""
     root = Path(directory)
     return any(not is_capture_fragment(path, root) for path in _trace_files(root))
+
+
+def round_has_traces(workspace: Path) -> bool:
+    """Whether the round at ``workspace`` left a trace where :func:`collect_traces` looks, without moving it."""
+    return any(has_traces(source) for source in _candidates(Path(workspace)))
 
 
 def collect_traces(workspace: Path, destination: Path) -> int:

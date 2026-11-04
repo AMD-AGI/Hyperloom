@@ -51,7 +51,7 @@ _REMOVED_DECODE_PASS = "decode_pass"
 KINDS = ("test", "profile", _ACCURACY, "repro")
 PURPOSES = tuple(purpose.value for purpose in Purpose)
 DEFAULT_MAX_TOTAL_BYTES = 4 * 1024**3
-#: The platform variables a sheet may carry reference values for (4.8.1): RCCL and HSA variables SaFE adds to a Pod.
+#: The platform variables a sheet may carry reference values for: RCCL and HSA variables SaFE adds to a Pod.
 #: ``NCCL_MIN_NCHANNELS`` changes how every RCCL collective is split, so a sandbox without the Pod's value measures
 #: under other conditions than the local run. The interface-selection variables (``NCCL_SOCKET_IFNAME``,
 #: ``NCCL_IB_HCA``, ``NCCL_IB_GID_INDEX``, ``GLOO_SOCKET_IFNAME``) are not listed: on one node they do not touch the
@@ -349,7 +349,7 @@ class BuildRef:
 @dataclass(frozen=True)
 class Environment:
     """The overlay a runner rebuilds. ``builds`` name the ready native build of each ``runtime`` root, one each, and of
-    a package root whose JIT modules a CPU build made (aiter's, #125 stage 2b); a sheet with none leaves the key out, so a
+    a package root whose JIT modules a CPU build made (aiter's); a sheet with none leaves the key out, so a
     runner that does not know it reads every other sheet as before and refuses one that has builds."""
 
     roots: tuple[EnvRoot, ...] = ()
@@ -658,7 +658,7 @@ def _load_yaml(text: str) -> Any:
 
 
 def canonical_for_fingerprint(spec: MeasurementSpec, *, session_dir: str | None = None) -> dict[str, Any]:
-    """The sheet with everything that is not measurement content removed or replaced (3.3).
+    """The sheet with everything that is not measurement content removed or replaced.
 
     Removed: ``request_id``, ``meta``, ``procedure.deadline_unix``, ``config.sha256`` (it hashes paths), the session's
     blob root and runtime snapshot location. Replaced: path-valued YAML fields and session-directory prefixes become

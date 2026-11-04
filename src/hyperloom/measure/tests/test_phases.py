@@ -166,6 +166,14 @@ def test_the_runners_phases_are_placed_back_to_back_whatever_its_own_clock_says(
     assert sum(p.seconds for p in phases) == 164.0
 
 
+def test_the_steps_marked_after_an_instant_are_the_time_each_took_after_the_one_before() -> None:
+    clock = Clock()
+    timeline = _timeline(clock, **{ACQUIRED: 10.0, RUNNER_DONE: 160.0, "archived": 161.5, "materialized": 641.5})
+
+    assert timeline.laps(RUNNER_DONE) == {"archived": 1.5, "materialized": 480.0}
+    assert timeline.laps(LANDED) == {}, "nothing is counted from an instant not yet marked"
+
+
 def test_a_test_whose_runner_stated_no_phases_is_one_wait_for_the_runner() -> None:
     clock = Clock()
     timeline = _timeline(clock, **{ACQUIRED: 5.0, RUNNER_DONE: 65.0, LANDED: 66.0})

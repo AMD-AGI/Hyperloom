@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The notes of a test's use of the cache: problems before facts before tallies, and a hundred files are one line (4.21)."""
+"""The notes of a test's use of the cache: problems before facts before tallies, and a hundred files are one line."""
 
 from __future__ import annotations
 

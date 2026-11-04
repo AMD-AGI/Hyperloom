@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""What a server's log says aiter built while it ran: the hit counter and the compile time of a test (design 4.21).
+"""What a server's log says aiter built while it ran: the hit counter and the compile time of a test.
 
 aiter prints ``start build <path>`` and ``finish build <path>, cost <seconds>s`` for every module or library it compiles
 and nothing for one it finds already built, so a test that found its modules in the cache has no build lines. Ranks of
