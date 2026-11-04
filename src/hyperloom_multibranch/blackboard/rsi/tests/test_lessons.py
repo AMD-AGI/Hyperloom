@@ -237,6 +237,30 @@ def test_a_person_lists_shows_revises_retires_and_purges_lessons_from_the_comman
     assert main(["list"]) == 2
 
 
+def test_a_purge_cut_short_after_its_record_is_written_is_finished_by_running_it_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pool = LessonPool.beside(TreeArchive(tmp_path))
+    pool.write(revision("first", START))
+    pool.write(revision("second", START + 1, supersedes=(revision_id_for("first"),), text=FIXED))
+    command = ["--archive", str(tmp_path), "purge", LESSON, "--author", "curator", "--reason", "a token", "--yes"]
+    unlink, failures = Path.unlink, iter([PermissionError("the revision is read-only")])
+
+    def flaky(path: Path, missing_ok: bool = False) -> None:
+        failure = next(failures, None)
+        if failure is not None:
+            raise failure
+        unlink(path, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", flaky)
+    cut_short = main(command)
+    left = list((pool.root / "revisions").glob("*.json"))
+    finished = main(command)
+
+    assert (cut_short, len(left), finished) == (2, 2, 0)
+    assert list((pool.root / "revisions").glob("*.json")) == [] and LESSON not in pool.lessons()
+
+
 def test_a_person_merges_lessons_that_say_the_same_into_one_and_retires_the_rest(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

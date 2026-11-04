@@ -256,6 +256,22 @@ optional: unset, the workspace uses only its local KB. See
 
 ---
 
+## Multi-branch RSI archive
+
+A multi-branch session reads its predecessors' search trees, lessons, scheduling playbooks and outcomes from this
+archive, and writes its own into it at CLOSE. `python -m hyperloom_multibranch.blackboard.rsi.lessons` (`list`, `show`,
+`revise`, `retire`, `merge`, `purge`) is a person's look at, and change to, the lesson pool beside it; its `--archive`
+names the archive in place of `HYPERLOOM_RSI_ARCHIVE`. Without `--archive` the command reads the pool as a session
+does, so under `HYPERLOOM_RSI_WRITE_ONLY=1` it finds none and `HYPERLOOM_RSI_AS_OF` hides what was written after it.
+
+| Variable | Default | Description |
+|---|---|---|
+| `HYPERLOOM_RSI_ARCHIVE` | Unset (no archive) | The archive directory sessions read and write. Operator configuration. |
+| `HYPERLOOM_RSI_AS_OF` | Unset (everything) | An ISO time; the archive is read as it stood then, so sessions run as repeats or as pairs start from one state. For experiments. |
+| `HYPERLOOM_RSI_WRITE_ONLY` | Unset (read and write) | `1` reads nothing of the archive, for a run beside the archive runs, while CLOSE still writes the session's outcomes into it. For experiments. |
+
+---
+
 ## PrimaTune predictor
 
 Set by `--primatune-endpoint` and `--primatune-mode`, or directly in the shell. See

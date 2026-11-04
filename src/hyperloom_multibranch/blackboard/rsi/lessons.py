@@ -250,7 +250,7 @@ class LessonPool:
     it stood then, the revisions, retirements and standings written by then."""
 
     def __init__(self, root: Path, as_of: float | None = None) -> None:
-        self.root = Path(root) / LESSONS
+        self.root = root / LESSONS
         self.as_of = as_of
 
     @classmethod
@@ -508,7 +508,8 @@ def _purge(pool: LessonPool, args: argparse.Namespace) -> int:
     if not args.yes:
         print("error: a purge deletes the lesson's revisions for good; give --yes", file=sys.stderr)
         return 2
-    if args.lesson not in pool.lessons():
+    purged = {item.lesson_id for item in pool.purges()}
+    if args.lesson not in pool.lessons() and args.lesson not in purged:
         print(f"error: no lesson {args.lesson}", file=sys.stderr)
         return 1
     deleted = pool.purge(LessonPurge(args.lesson, human_author(args.author), time.time(), _clean(args.reason)))
