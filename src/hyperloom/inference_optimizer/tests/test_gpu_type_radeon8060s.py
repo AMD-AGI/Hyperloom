@@ -85,3 +85,14 @@ def test_radeon8060s_dispatches_as_gfx1151_with_40_cus():
 
 def test_radeon8060s_names_its_own_magpie_script():
     assert gpu_types.gpu_runner_type("radeon8060s") == "radeon8060s"
+
+
+def test_radeon8060s_carries_only_the_figures_amd_publishes():
+    from hyperloom.inference_optimizer.roofline_ceiling import HW_SPECS, resolve_compute_peak_provenance
+
+    spec = HW_SPECS["radeon8060s"]
+    assert (spec["hbm_gb"], spec["hbm_bw_gbps"]) == (None, 256.0)
+    assert spec["peak_tflops"]["bf16"] == spec["peak_tflops"]["fp16"] == 60.0
+    assert resolve_compute_peak_provenance("radeon8060s", "bf16")["compute_peak_convention"] == "vendor"
+    for precision in ("fp8", "fp32", "mxfp4"):
+        assert resolve_compute_peak_provenance("radeon8060s", precision)["compute_peak_convention"] == "unknown"
