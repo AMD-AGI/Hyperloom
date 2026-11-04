@@ -40,8 +40,9 @@ copy of the installed package on the host's local disk and puts that copy first
 on the profiled server's `PYTHONPATH`, through
 `src/hyperloom/orchestrator/actions/executors/_server_patcher.py` and the
 workload environment helpers; the installed tree, which every other test and
-session imports, is never written. A copy is reused only when the same user laid
-it and no one else can write it; with vLLM's image source checkout
+session imports, is never written. Each account lays its copies in a directory
+of its own that only it can write, and reuses a copy only when it laid it and no
+one else can write it; with vLLM's image source checkout
 (`HYPERLOOM_VLLM_IMAGE_SOURCE=1`) the copy mirrors that checkout. A profile test
 whose rebuilt framework the patch cannot be laid in runs without it, and its
 notes and points say so (`profile_patch_not_laid`,
