@@ -36,20 +36,19 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-import json
 import math
 import re
 import statistics
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TypeVar
 
 from hyperloom_multibranch.contracts.blackboard.vocab import CommitOrigin, LineageKind
-from hyperloom_multibranch.blackboard.codec import decode, encode
+from hyperloom_multibranch.blackboard.codec import encode
 from hyperloom_multibranch.blackboard.local.files import encode_json, publish_once
 from hyperloom_multibranch.blackboard.rsi.archive import SearchTree, written_by
 from hyperloom_multibranch.blackboard.rsi.history import judged_tests, stall_odds
+from hyperloom_multibranch.blackboard.rsi.lessons import published_records
 from hyperloom_multibranch.blackboard.rsi.playbook import Crowned, Playbook, PlaybookPool, Retired, changes, problems
 from hyperloom_multibranch.blackboard.rsi.replay import (
     OPTIMISTIC,
@@ -107,10 +106,7 @@ JUDGE_SYSTEM_PROMPT = (
 )
 _TRIALS = "trials"
 _REPLAYS = "replays"
-_JSON = "*.json"
-_ENCODING = "utf-8"
 _MINUTE = 60.0
-_Kept = TypeVar("_Kept")
 _CANDIDATE_SECTION = "The scheduling playbook to follow in this round:"
 
 
@@ -369,18 +365,6 @@ def _keep(folder: Path, session_id: str, fmt: str, record: object) -> bool:
     return publish_once(path, encode_json({"format": fmt, "record": encode(record)}))
 
 
-def _kept(folder: Path, kind: type[_Kept], fmt: str) -> list[_Kept]:
-    found = []
-    for path in sorted(folder.glob(_JSON)):
-        try:
-            document = json.loads(path.read_text(encoding=_ENCODING))
-            if document.get("format") == fmt:
-                found.append(decode(kind, document.get("record")))
-        except (OSError, KeyError, TypeError, ValueError):
-            continue
-    return found
-
-
 def record_trial(pool: PlaybookPool, trial: Trial) -> bool:
     """Keep ``trial`` beside the pool's playbooks, once a session; ``False`` when it was kept already."""
 
@@ -391,7 +375,9 @@ def trials(pool: PlaybookPool) -> tuple[Trial, ...]:
     """The trials kept beside ``pool``, of the sessions that started by the time it is read as of."""
 
     return tuple(
-        item for item in _kept(pool.root / _TRIALS, Trial, TRIAL_FORMAT) if written_by(pool.as_of, item.started_at)
+        item
+        for item in published_records(pool.root / _TRIALS, Trial, TRIAL_FORMAT, "trial")
+        if written_by(pool.as_of, item.started_at)
     )
 
 
@@ -499,10 +485,11 @@ def r3(candidate: Playbook, champion: Playbook, kept: Sequence[Trial]) -> Rung:
 def _unfit(
     candidate: Playbook, champion: Playbook, standing: ReplayStanding | None, readable: frozenset[str] | None
 ) -> str:
-    """Why ``candidate`` cannot win against ``champion``: ``standing`` reads it worse both ways beyond the data, or it
-    aims at a measure outside ``readable``; ``""`` when neither is known."""
+    """Why ``candidate`` cannot win against ``champion``: ``standing``, taken after ``candidate`` was registered, reads
+    it worse both ways beyond the data, or it aims at a measure outside ``readable``; ``""`` when neither is known. A
+    standing taken before then has a row of that label only for a variant the replay plays by default."""
 
-    if standing is not None and standing.champion == champion.label:
+    if standing is not None and standing.champion == champion.label and standing.at > candidate.registered_at:
         row = next((item for item in standing.rows if item.label == candidate.label), None)
         if row is not None and row.reading == WORSE:
             return (
@@ -653,7 +640,9 @@ def standings(pool: PlaybookPool) -> tuple[ReplayStanding, ...]:
     """The standings kept beside ``pool`` by the time it is read as of, the earliest first."""
 
     kept = (
-        item for item in _kept(pool.root / _REPLAYS, ReplayStanding, STANDING_FORMAT) if written_by(pool.as_of, item.at)
+        item
+        for item in published_records(pool.root / _REPLAYS, ReplayStanding, STANDING_FORMAT, "replay standing")
+        if written_by(pool.as_of, item.at)
     )
     return tuple(sorted(kept, key=lambda item: item.at))
 
