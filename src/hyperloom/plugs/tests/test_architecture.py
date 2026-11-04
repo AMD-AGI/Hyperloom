@@ -33,9 +33,6 @@ _HOSTED = (
     "hyperloom.measure.runner",
     "hyperloom_multibranch",
 )
-# Packages that exist only on the multibranch development branch; main must stay self-contained.
-# None is left once hyperloom.measure and hyperloom_multibranch are both in the tree.
-_DEV_ONLY: tuple[str, ...] = ()
 _E2B_OWNER = "hyperloom/sandbox/e2b.py"
 
 
@@ -115,18 +112,6 @@ def test_rule_1_guard_accepts_the_two_sanctioned_imports() -> None:
 def test_rule_2_no_module_imports_a_hosted_implementation_outside_its_owners() -> None:
     problems = [m for p in _main_modules() for m in _hosted_import_violations(str(p.relative_to(_SRC)), p.read_text())]
     assert problems == []
-
-
-def test_rule_2_main_imports_no_package_that_exists_only_on_the_dev_branch() -> None:
-    """No module outside a dev-only package imports it; the package's own modules import each other."""
-    offenders = []
-    for path in _main_modules():
-        if _under(".".join(path.relative_to(_SRC).with_suffix("").parts), _DEV_ONLY):
-            continue
-        for line, module in _imports(ast.parse(path.read_text())):
-            if _under(module, _DEV_ONLY):
-                offenders.append(f"{path.relative_to(_SRC)}:{line}: {module}")
-    assert offenders == []
 
 
 def test_rule_2_guard_names_the_hosted_module_a_plug_module_imports() -> None:

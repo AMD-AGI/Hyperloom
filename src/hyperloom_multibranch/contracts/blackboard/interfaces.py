@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The blackboard as the other multi-branch modules call it: one protocol per interface of design section 5.1.
+"""The blackboard as the other multi-branch modules call it: one protocol per interface.
 
 The modules are written in parallel against these protocols. The local blackboard implements all of them and is the
 fake the end-to-end skeleton runs on; the blackboard server's client will be the second implementation. Every method is
