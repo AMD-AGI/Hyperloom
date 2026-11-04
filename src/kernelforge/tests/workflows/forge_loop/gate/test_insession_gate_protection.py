@@ -1,7 +1,9 @@
 import asyncio
 import hashlib
+import importlib.util
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import kernelforge.workflows.forge_loop.gate.insession_gate as gate_module
@@ -622,3 +624,110 @@ def test_driver_outside_the_workspace_does_not_move_the_measured_root(tmp_path: 
     # Without a declared workspace the driver's directory is still the fallback, which is correct for every task that
     # keeps its driver inside the tree.
     assert build().workspace_root == outside.resolve()
+
+
+def _workspace_with_test_modules(tmp_path: Path) -> tuple[Path, Path]:
+    """A gate workspace whose protected ``test/`` directory holds two importable modules."""
+    _, workspace = _gate(tmp_path)
+    tests = workspace / "test"
+    tests.mkdir()
+    for name in ("layer_ut_utils", "helpers"):
+        (tests / f"{name}.py").write_text("VALUE = 1\n")
+    return workspace, tests
+
+
+def _gate_over(workspace: Path) -> InSessionGate:
+    """A gate whose baseline is the workspace as it is now."""
+    kernel = workspace / "aiter" / "csrc" / "kernel.cu"
+    return InSessionGate(
+        GateMeasurement(driver_script=str(workspace / "forge_driver.py"), snr_threshold=30.0),
+        GateScope(kernel_file=str(kernel), target_files=[str(kernel)]),
+        baseline_case_times={"case": 1.0},
+        best_mean_case_speedup=1.0,
+    )
+
+
+def _bytecode_of(source: Path) -> Path:
+    return Path(importlib.util.cache_from_source(str(source)))
+
+
+def _import(directory: Path, *modules: str) -> None:
+    """Import ``modules`` in a fresh interpreter, which writes their bytecode as a session's own run would."""
+    statement = f"import sys; sys.path.insert(0, {str(directory)!r}); import {', '.join(modules)}"
+    subprocess.run([sys.executable, "-c", statement], check=True, capture_output=True)
+
+
+def test_a_stop_after_an_import_under_a_protected_dir_reaches_validation(tmp_path: Path, monkeypatch):
+    workspace, tests = _workspace_with_test_modules(tmp_path)
+    rewritten = _bytecode_of(tests / "helpers.py")
+    rewritten.parent.mkdir()
+    rewritten.write_bytes(b"stale")
+    gate = _gate_over(workspace)
+    validation_calls: list[int] = []
+
+    async def _corr(**_kwargs):
+        validation_calls.append(1)
+        return {"passed": False, "message": "wrong output"}
+
+    monkeypatch.setattr(gate_module, "test_correctness", _corr, raising=False)
+    monkeypatch.setattr(gate, "_candidate_diff_sha256", lambda: hashlib.sha256(b"").hexdigest())
+
+    _import(tests, "layer_ut_utils", "helpers")
+    created = _bytecode_of(tests / "layer_ut_utils.py")
+    assert created.exists() and rewritten.read_bytes() != b"stale"
+
+    result = asyncio.run(gate._on_stop({}, None, None))
+
+    assert "Protected benchmark harness" not in result.get("reason", "")
+    assert gate.integrity_verdict == "clean"
+    assert gate.harness_block_count == 0
+    assert validation_calls == [1]
+    # Discarded, so the next import rebuilds both from the protected source instead of running what the session wrote.
+    assert not created.exists() and not rewritten.exists()
+
+
+def test_bytecode_the_workspace_guard_already_deleted_does_not_violate_integrity(tmp_path: Path):
+    workspace, tests = _workspace_with_test_modules(tmp_path)
+    _import(tests, "helpers")
+    cached = _bytecode_of(tests / "helpers.py")
+    gate = _gate_over(workspace)
+
+    # The backend's workspace guard verifies before the gate settles, and deletes the bytecode it finds changed.
+    cached.unlink()
+
+    assert gate.finalize_integrity() == ""
+    assert gate.integrity_verdict == "clean"
+
+
+def test_a_changed_source_or_sourceless_pyc_under_a_protected_dir_is_still_reported(tmp_path: Path):
+    workspace, tests = _workspace_with_test_modules(tmp_path)
+    # Only the interpreter's cache is rebuilt from source; a .pyc beside the sources may be the module itself.
+    sourceless = tests / "legacy.pyc"
+    sourceless.write_bytes(b"module")
+    gate = _gate_over(workspace)
+
+    (tests / "layer_ut_utils.py").write_text("VALUE = 2\n")
+    sourceless.write_bytes(b"forged")
+
+    changes = gate.finalize_integrity()
+    assert "test/layer_ut_utils.py" in changes
+    assert "test/legacy.pyc" in changes
+    assert sourceless.read_bytes() == b"forged"
+
+
+def test_bytecode_behind_a_linked_cache_dir_is_reported_and_left_in_place(
+    tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
+):
+    workspace, tests = _workspace_with_test_modules(tmp_path)
+    _import(tests, "helpers")
+    cached = _bytecode_of(tests / "helpers.py")
+    elsewhere = tmp_path_factory.mktemp("elsewhere") / "__pycache__"
+    elsewhere.mkdir()
+    (elsewhere / cached.name).write_bytes(b"not the session's")
+    gate = _gate_over(workspace)
+
+    shutil.rmtree(cached.parent)
+    cached.parent.symlink_to(elsewhere)
+
+    assert gate.finalize_integrity()
+    assert (elsewhere / cached.name).read_bytes() == b"not the session's"
