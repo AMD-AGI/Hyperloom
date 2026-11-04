@@ -26,12 +26,14 @@ def add_proc(
     stime: int = 0,
     cutime: int = 0,
     cstime: int = 0,
+    start_time: int | None = None,
 ) -> None:
     pdir = root / str(pid)
     pdir.mkdir(parents=True, exist_ok=True)
     (pdir / "status").write_text(f"Name:\tx\nVmRSS:\t{rss_kb} kB\n", encoding="utf-8")
+    started = pid if start_time is None else start_time
     # comm contains a space and a parenthesis on purpose: fields are counted after the LAST ')'.
-    stat = f"{pid} (a b) c) S {ppid} {pid} {pid} 0 0 0 0 0 0 0 {utime} {stime} {cutime} {cstime} 20 0 1 0 {pid}"
+    stat = f"{pid} (a b) c) S {ppid} {pid} {pid} 0 0 0 0 0 0 0 {utime} {stime} {cutime} {cstime} 20 0 1 0 {started}"
     (pdir / "stat").write_text(stat, encoding="utf-8")
 
 
@@ -107,6 +109,24 @@ def test_a_reused_pid_does_not_hide_either_process(proc: Path) -> None:
     assert sampler.sample().cpu_seconds == 5.0 + 2.0
 
 
+def test_a_pid_reused_between_the_scan_and_the_read_is_not_counted(proc: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    add_proc(proc, 100, 1, rss_kb=1000, utime=100)
+    add_proc(proc, 101, 100, rss_kb=1000, utime=100)
+    scan = resources.descendants
+
+    def scan_then_reuse(root_pid: int) -> list[tuple[int, int]]:
+        found = scan(root_pid)
+        add_proc(proc, 100, 1, rss_kb=1000, utime=100, cutime=100)  # 100 reaped 101 right after the scan ...
+        add_proc(proc, 101, 1, rss_kb=9000, utime=5000, start_time=7777)  # ... and an unrelated process got 101
+        return found
+
+    monkeypatch.setattr(resources, "descendants", scan_then_reuse)
+    sample = sampler_of(proc).sample()
+    assert sample.cpu_seconds == 2.0  # 101's own second, through 100's cutime; none of the newcomer's 50
+    assert sample.rss_bytes == 1000 * 1024
+    assert sample.live_pids == 1
+
+
 def test_the_cpu_total_never_goes_back_when_a_process_leaves_the_tree_unreaped(proc: Path) -> None:
     add_proc(proc, 100, 1, rss_kb=1000, utime=100)
     add_proc(proc, 101, 100, rss_kb=1000, utime=300)
@@ -125,8 +145,8 @@ def test_a_child_reaped_in_the_middle_of_a_sample_is_not_counted_twice(
     read = ProcessTreeSampler._read_process
     reaped: list[int] = []
 
-    def read_then_reap(self: ProcessTreeSampler, pid: int) -> tuple[int, float] | None:
-        reading = read(self, pid)
+    def read_then_reap(self: ProcessTreeSampler, pid: int, start_time: int | None) -> tuple[int, float] | None:
+        reading = read(self, pid, start_time)
         if pid in (101, 102) and not reaped:  # 101 waits for 102 right after the first of the two is read
             reaped.append(pid)
             remove_proc(proc, 102)
