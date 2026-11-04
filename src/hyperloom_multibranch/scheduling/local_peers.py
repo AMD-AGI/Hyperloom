@@ -112,9 +112,9 @@ AGENTX_ENV = "HYPERLOOM_AGENTX"
 #: How long Magpie's canonical AgentX run replays its trace under measurement: the ``duration`` of every canonical
 #: recipe point (``Magpie.modes.benchmark.agentx`` at the Magpie commit Hyperloom pins); Magpie exports no name for it.
 AGENTX_TRACE_SEC = 3600
-#: What an AgentX test spends outside its trace window: the server's boot (3 to 11 minutes measured for GLM-5.3 at
-#: TP4), the replay client's cold-cache warmup before the window opens (close to 18 minutes measured) and the drain
-#: after it. An hour holds twice the half hour measured; a hung server ends on the toolbox's boot and silence limits.
+#: What an AgentX test spends outside its trace window: the server's boot, which takes minutes for a large model at
+#: low tensor parallelism, the replay client's cold-cache warmup before the window opens, and the drain after it. An
+#: hour leaves room for both at their slowest; a hung server ends on the toolbox's boot and silence limits.
 AGENTX_OUTSIDE_TRACE_SEC = 3600
 
 
