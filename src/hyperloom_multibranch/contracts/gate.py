@@ -39,7 +39,7 @@ class ResultUnverified(NotMeasured):
 
 
 class ResultVerifier(Protocol):
-    """What the gate asks before a decision rests on a result (hosting design L26); the toolbox implements it."""
+    """What the gate asks before a decision rests on a result; the toolbox implements it."""
 
     async def reverify(self, request_id: str) -> None:
         """Check the blackboard's result of ``request_id`` against its archived signed bundle, its values included;
