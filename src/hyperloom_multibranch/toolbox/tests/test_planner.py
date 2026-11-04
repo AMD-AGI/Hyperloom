@@ -17,6 +17,7 @@ from hyperloom.contracts.measurement import (
     TABLE_NOT_EXERCISED,
     TABLE_NOT_OBSERVABLE,
     Purpose,
+    TableHits,
     TestKind,
 )
 from hyperloom.contracts.recipe import ComponentChange, ConfigDelta, LaunchConfig, RecipeDelta
@@ -241,6 +242,12 @@ async def test_a_recipe_that_launches_with_another_value_is_refused_and_the_reas
     assert rig.blackboard._state().requests == {} and rig.executor.jobs == []
 
 
+def _one_table(hits: tuple[TableHits, ...]) -> TableHits:
+    """The hits of the one table the planned recipe loads."""
+    assert len(hits) == 1, hits
+    return hits[0]
+
+
 async def test_a_table_no_hit_names_is_not_exercised_under_the_planner_and_not_observable_without_it(
     tmp_path: Path,
 ) -> None:
@@ -251,8 +258,8 @@ async def test_a_table_no_hit_names_is_not_exercised_under_the_planner_and_not_o
     accepted = _agentx_planner(tmp_path).plan(req(change=delta), recipe_with())
     session.log(MISS)
 
-    (planned,) = read_table_hits(accepted.environment, accepted.points, session.output)
-    (unasked,) = read_table_hits(accepted.environment, (session.point(),), session.output)
+    planned = _one_table(read_table_hits(accepted.environment, accepted.points, session.output))
+    unasked = _one_table(read_table_hits(accepted.environment, (session.point(),), session.output))
 
     assert (planned.status, planned.rows, planned.rows_hit) == (TABLE_NOT_EXERCISED, 4, 0), planned
     assert planned.reason == "aiter logged no hit at all"
@@ -267,6 +274,6 @@ async def test_a_table_a_hit_names_is_exercised_under_the_planner(tmp_path: Path
     accepted = _agentx_planner(tmp_path).plan(req(change=RecipeDelta(add_kernels=(artifact,))), recipe_with())
     session.log(MISS, a8w8_hit(ROW_16_34816, MERGED, asked_m=12))
 
-    (planned,) = read_table_hits(accepted.environment, accepted.points, session.output)
+    planned = _one_table(read_table_hits(accepted.environment, accepted.points, session.output))
 
     assert (planned.status, planned.rows_hit, planned.hit_lines) == (TABLE_EXERCISED, 1, 1), planned

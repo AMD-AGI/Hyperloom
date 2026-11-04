@@ -205,9 +205,8 @@ async def test_a_profile_logged_before_digests_were_recorded_still_covers_its_co
     await rig.toolbox.close()
     log = rig.toolbox._log.path
     records = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
-    assert [r.pop("recipe_digest") for r in records if r["type"] == "accepted"] == [
-        Recipe(base_image_digest=IMAGE).digest()
-    ]
+    dropped = [r.pop("recipe_digest") for r in records if r["type"] == "accepted"]
+    assert dropped == [Recipe(base_image_digest=IMAGE).digest()]
     log.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in records), encoding="utf-8")
 
     again = with_second_commit(build(tmp_path, executor=gated()), Recipe(base_image_digest=IMAGE))
