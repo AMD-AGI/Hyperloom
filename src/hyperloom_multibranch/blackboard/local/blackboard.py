@@ -17,7 +17,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from contextlib import suppress
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from hyperloom.contracts.recipe import DIGEST_PREFIX, RecipeDelta
@@ -225,6 +225,45 @@ def _same_change_tests(
         and record.request.purpose is Purpose.EXPLORE
         and _same_action(record.request.action_fingerprint, action_fingerprint)
     ]
+
+
+@dataclass(frozen=True)
+class _Measured:
+    """The measured tests a claim's answer reads: of its action on its commit, of its intent on its commit, and of its
+    intent on other commits."""
+
+    exact: tuple[TestRecord, ...]
+    same_intent: tuple[TestRecord, ...]
+    elsewhere: tuple[TestRecord, ...]
+
+
+def _measured_for(state: BlackboardState, key: ClaimKey, action_fingerprint: str) -> _Measured:
+    measured = [
+        record for record in state.records() if record.measured and record.request.intent_fingerprint is not None
+    ]
+    here = [record for record in measured if record.request.parent_commit == key.parent_commit]
+    return _Measured(
+        tuple(record for record in here if _same_action(record.request.action_fingerprint, action_fingerprint)),
+        tuple(record for record in here if record.request.intent_fingerprint == key.intent_fingerprint),
+        tuple(
+            record
+            for record in measured
+            if record.request.intent_fingerprint == key.intent_fingerprint
+            and record.request.parent_commit != key.parent_commit
+        ),
+    )
+
+
+def _tested_first(state: BlackboardState, request: TestRequest) -> list[TestRecord]:
+    """Other branches' explores of ``request``'s change on its commit, requested before it and in flight or measured;
+    none for a request that is not an explore."""
+
+    if request.purpose is not Purpose.EXPLORE:
+        return []
+    position = {request_id: n for n, request_id in enumerate(state.requests)}
+    mine = position[str(request.request_id)]
+    same = _same_change_tests(state, request.parent_commit, request.action_fingerprint, request.branch)
+    return [record for record in same if position[record.request_id] < mine and (record.in_flight or record.measured)]
 
 
 def _refusal(answer: DedupAnswer, reason: str) -> BlackboardError | None:
@@ -670,22 +709,10 @@ class LocalBlackboard(
         )
         return next(held, None), running
 
-    def _answer(
-        self, state: BlackboardState, key: ClaimKey, action_fingerprint: str, now: float, branch: str
-    ) -> DedupAnswer:
-        measured = [
-            record for record in state.records() if record.measured and record.request.intent_fingerprint is not None
-        ]
-        here = [record for record in measured if record.request.parent_commit == key.parent_commit]
-        exact = tuple(record for record in here if _same_action(record.request.action_fingerprint, action_fingerprint))
-        same_intent = tuple(record for record in here if record.request.intent_fingerprint == key.intent_fingerprint)
-        elsewhere = tuple(
-            record
-            for record in measured
-            if record.request.intent_fingerprint == key.intent_fingerprint
-            and record.request.parent_commit != key.parent_commit
-        )
-        live = sorted(
+    def _live_claims(self, key: ClaimKey, action_fingerprint: str, now: float) -> list[Claim]:
+        """The live claims on ``key``'s commit of ``key`` or of the same action, ``key``'s own first."""
+
+        return sorted(
             (
                 claim
                 for claim in self._leases.all_current()
@@ -695,8 +722,15 @@ class LocalBlackboard(
             ),
             key=lambda claim: claim.key != key,
         )
-        if exact:
-            return DedupAnswer(key, action_fingerprint, DedupStatus.TESTED, records=exact, elsewhere=elsewhere)
+
+    def _answer(
+        self, state: BlackboardState, key: ClaimKey, action_fingerprint: str, now: float, branch: str
+    ) -> DedupAnswer:
+        found = _measured_for(state, key, action_fingerprint)
+        elsewhere = found.elsewhere
+        if found.exact:
+            return DedupAnswer(key, action_fingerprint, DedupStatus.TESTED, records=found.exact, elsewhere=elsewhere)
+        live = self._live_claims(key, action_fingerprint, now)
         if live:
             return DedupAnswer(key, action_fingerprint, DedupStatus.IN_PROGRESS, claim=live[0], elsewhere=elsewhere)
         held, running = self._elsewhere(state, key, branch, now)
@@ -705,8 +739,8 @@ class LocalBlackboard(
         if held is not None or running:
             testing = DedupStatus.TESTING_ELSEWHERE
             return DedupAnswer(key, action_fingerprint, testing, claim=held, records=running, elsewhere=elsewhere)
-        status = DedupStatus.SUSPECTED if same_intent else DedupStatus.FREE
-        return DedupAnswer(key, action_fingerprint, status, records=same_intent, elsewhere=elsewhere)
+        status = DedupStatus.SUSPECTED if found.same_intent else DedupStatus.FREE
+        return DedupAnswer(key, action_fingerprint, status, records=found.same_intent, elsewhere=elsewhere)
 
     async def acquire(self, intent: Intent, action_fingerprint: str, *, ttl_seconds: float, reason: str = "") -> Claim:
         self._require(Role.SPECIALIST_RUNTIME)
@@ -789,15 +823,7 @@ class LocalBlackboard(
         where the change meets the other branches' tests. A measured one answers first. The refusal is recorded as the
         claim's, so a test in flight hands its outcome to this branch's inbox when it ends."""
 
-        if request.purpose is not Purpose.EXPLORE:
-            return
-        position = {request_id: n for n, request_id in enumerate(state.requests)}
-        same = _same_change_tests(state, request.parent_commit, request.action_fingerprint, request.branch)
-        first = [
-            record
-            for record in same
-            if position[record.request_id] < position[str(request.request_id)] and (record.in_flight or record.measured)
-        ]
+        first = _tested_first(state, request)
         if not first:
             return
         measured = tuple(record for record in first if record.measured)
@@ -805,20 +831,7 @@ class LocalBlackboard(
         shown = measured or running
         testers = ", ".join(sorted({record.request.branch for record in shown}))
         tests = ", ".join(record.request_id for record in shown)
-        claim = self._leases.current(key)
-        if claim is not None and claim.holder == request.branch:
-            found = DedupStatus.TESTING_ELSEWHERE if running else DedupStatus.TESTED
-            holders = tuple(sorted({record.request.branch for record in running}))
-            matched = tuple(record.request_id for record in shown)
-            ceiling = _ceiling_pct(claim.intent)
-            decision = ClaimDecision(
-                claim.intent, request.action_fingerprint, found, False, "", matched, ceiling, _bar_pct(state), holders
-            )
-            doing = "being tested" if running else "measured"
-            summary = f"refused (the same change {doing} by {testers}) {claim.intent.target} / {claim.intent.mechanism}"
-            self._append(
-                EntryKind.CLAIM, decision, branch=request.branch, parent=request.parent_commit, summary=summary
-            )
+        self._log_change_refusal(state, key, request, shown, running)
         if running:
             raise ClaimLost(
                 f"{testers} is testing the same change on {request.parent_commit} as {tests}; its outcome comes to "
@@ -828,6 +841,32 @@ class LocalBlackboard(
             f"{testers} already measured the same change on {request.parent_commit} as {tests}; blackboard_lookup with "
             "this change says how it went"
         )
+
+    def _log_change_refusal(
+        self,
+        state: BlackboardState,
+        key: ClaimKey,
+        request: TestRequest,
+        shown: tuple[TestRecord, ...],
+        running: tuple[TestRecord, ...],
+    ) -> None:
+        """The refusal of ``request``'s change, recorded as its branch's claim on ``key`` when the branch holds it:
+        ``shown`` are the tests that answer first, ``running`` those of them still in flight."""
+
+        claim = self._leases.current(key)
+        if claim is None or claim.holder != request.branch:
+            return
+        found = DedupStatus.TESTING_ELSEWHERE if running else DedupStatus.TESTED
+        holders = tuple(sorted({record.request.branch for record in running}))
+        matched = tuple(record.request_id for record in shown)
+        ceiling = _ceiling_pct(claim.intent)
+        decision = ClaimDecision(
+            claim.intent, request.action_fingerprint, found, False, "", matched, ceiling, _bar_pct(state), holders
+        )
+        testers = ", ".join(sorted({record.request.branch for record in shown}))
+        doing = "being tested" if running else "measured"
+        summary = f"refused (the same change {doing} by {testers}) {claim.intent.target} / {claim.intent.mechanism}"
+        self._append(EntryKind.CLAIM, decision, branch=request.branch, parent=request.parent_commit, summary=summary)
 
     async def release(self, key: ClaimKey) -> Claim:
         self._require(Role.SPECIALIST_RUNTIME, Role.TOOLBOX, Role.SCHEDULER)

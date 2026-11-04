@@ -195,13 +195,10 @@ def _archived(
     archive: TreeArchive | None,
     *,
     budget_seconds: float | None,
-    bottlenecks: Mapping[str, float] | None,
     cross_image: Collection[str] = (),
 ) -> CloseStep:
     try:
-        result = archive_session(
-            snapshot, metric, archive, budget_seconds=budget_seconds, bottlenecks=bottlenecks, cross_image=cross_image
-        )
+        result = archive_session(snapshot, metric, archive, budget_seconds=budget_seconds, cross_image=cross_image)
     except STEP_ERRORS as exc:
         return _failed("archive the search tree", exc)
     return CloseStep(result.status, result.reason)
@@ -213,7 +210,6 @@ def _trialled(
     archive: TreeArchive | None,
     *,
     budget_seconds: float | None,
-    bottlenecks: Mapping[str, float] | None,
 ) -> CloseStep:
     """The session kept as a trial of the playbook it played, beside the pool, and what that settles: a playbook
     crowned or retired (:func:`~hyperloom_multibranch.blackboard.rsi.ladder.settle`). Its task names the configured
@@ -228,7 +224,7 @@ def _trialled(
     if target is None:
         return CloseStep(SKIPPED, NO_ARCHIVE)
     try:
-        tree = tree_from_snapshot(snapshot, metric, budget_seconds=budget_seconds, bottlenecks=bottlenecks)
+        tree = tree_from_snapshot(snapshot, metric, budget_seconds=budget_seconds)
         pool = PlaybookPool.beside(target)
         audit = stop_audit(tree, stall_odds(archived_history(target), tree.task, session=tree))
         trial = trial_of(tree, audit, played, pool.champion().label, fell_back=bool(versions.get(FALLBACK_KEY)))
@@ -247,7 +243,6 @@ def _audited(
     metric: str,
     archive: TreeArchive | None,
     path: Path | None,
-    bottlenecks: Mapping[str, float] | None,
 ) -> CloseStep:
     """The stop audit of the session, read against the stall odds of the archive and the session, written to
     ``path``."""
@@ -255,7 +250,7 @@ def _audited(
     if path is None:
         return CloseStep(SKIPPED, NO_REPORTS)
     try:
-        tree = tree_from_snapshot(snapshot, metric, bottlenecks=bottlenecks)
+        tree = tree_from_snapshot(snapshot, metric)
         audit = stop_audit(tree, stall_odds(archived_history(archive), tree.task, session=tree))
         atomic_write_text(path, audit.render() + "\n", options=WriteOptions(make_parents=True))
     except NotRecorded:
@@ -406,7 +401,6 @@ def close_knowledge(
     *,
     budget_seconds: float | None = None,
     targets: CloseTargets = CloseTargets(),
-    bottlenecks: Mapping[str, float] | None = None,
     cross_image: Collection[str] = (),
 ) -> KnowledgeClose:
     """CLOSE, after the Recipe KB write-back: what the session leaves the sessions after it.
@@ -438,7 +432,6 @@ def close_knowledge(
             metric,
             targets.archive,
             budget_seconds=budget_seconds,
-            bottlenecks=bottlenecks,
             cross_image=cross_image,
         ),
         multibranch_experiences=_published(
@@ -453,10 +446,8 @@ def close_knowledge(
         ),
         lessons=_lessons(snapshot, targets.lesson_pool()),
         lesson_standings=_standings(snapshot, targets.lesson_pool(), targets.receipt(LEARNINGS_LOG)),
-        stop_audit=_audited(snapshot, metric, targets.archive, targets.receipt(STOP_AUDIT_REPORT), bottlenecks),
-        playbook_trial=_trialled(
-            snapshot, metric, targets.archive, budget_seconds=budget_seconds, bottlenecks=bottlenecks
-        ),
+        stop_audit=_audited(snapshot, metric, targets.archive, targets.receipt(STOP_AUDIT_REPORT)),
+        playbook_trial=_trialled(snapshot, metric, targets.archive, budget_seconds=budget_seconds),
         scheduling_replay=_replayed(snapshot, targets.archive, targets.receipt(SCHEDULING_REPLAY_REPORT)),
         specialist_outcomes=_outcomes(snapshot, targets.archive, targets.receipts),
         judge_decisions=_decided(snapshot, targets.archive, targets.judge_transcript),
