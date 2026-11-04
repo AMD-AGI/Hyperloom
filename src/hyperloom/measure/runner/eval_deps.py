@@ -38,7 +38,9 @@ _LIB = Path("benchmarks") / "benchmark_lib.sh"
 #: The round sources the same library and calls the same function, so this is the install the round would run.
 _INSTALL = 'source "$1" && _install_lm_eval_deps'
 _READY = f'source "$1" && {LM_EVAL_READY_FN}'
-_IMPORT = ("python3", "-c", "import lm_eval")
+#: The interpreter the round's benchmark script runs lm-eval with, found on the round's ``PATH``.
+_PYTHON3 = "python3"
+_IMPORT = (_PYTHON3, "-c", "import lm_eval")
 _TAIL_CHARS = 1500
 
 
@@ -68,7 +70,7 @@ def install_eval_deps(
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("wb") as log:
         process = subprocess.Popen(
-            ["bash", "-c", _INSTALL, "bash", str(inferencex / _LIB)],
+            _sourced(_INSTALL, inferencex),
             stdin=subprocess.DEVNULL,
             stdout=log,
             stderr=subprocess.STDOUT,
@@ -84,10 +86,7 @@ def install_eval_deps(
                 f"installing lm-eval for the accuracy evaluation did not end within {timeout_sec:.0f} s; "
                 f"its output: {_tail(log_path)}"
             ) from None
-    lib = str(inferencex / _LIB)
-    ready = subprocess.run(
-        ["bash", "-c", _READY, "bash", lib], env=env, cwd=inferencex, capture_output=True, timeout=300
-    )
+    ready = subprocess.run(_sourced(_READY, inferencex), env=env, cwd=inferencex, capture_output=True, timeout=300)
     if ready.returncode == 0:
         return None
     probe = subprocess.run(_IMPORT, env=env, cwd=inferencex, capture_output=True, text=True, timeout=300)
@@ -96,11 +95,16 @@ def install_eval_deps(
             f"lm-eval does not import after its install (install exit {returncode}): "
             f"{probe.stderr.strip()[-_TAIL_CHARS:]}; the install's output: {_tail(log_path)}"
         )
-    python3 = shutil.which("python3", path=env.get("PATH")) or "python3"
+    python3 = shutil.which(_PYTHON3, path=env.get("PATH")) or _PYTHON3
     raise EvalDepsError(
         f"lm-eval imports in {python3}, but the install left no marker the round's install finds, so the round would "
         f"install it again on an idle server; the install's output: {_tail(log_path)}"
     )
+
+
+def _sourced(script: str, inferencex: Path) -> list[str]:
+    """The command that runs ``script`` in a shell that has its first argument, the checkout's library, to source."""
+    return ["bash", "-c", script, "bash", str(inferencex / _LIB)]
 
 
 def _end(process: subprocess.Popen) -> None:
