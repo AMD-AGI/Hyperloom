@@ -41,7 +41,7 @@ def _sent_body(client_source: str, monkeypatch: pytest.MonkeyPatch, window: dict
         sent.append(request_func_input)
         return SimpleNamespace(success=True)
 
-    namespace: dict[str, Any] = {"RequestFuncInput": lambda **fields: SimpleNamespace(**fields)}
+    namespace: dict[str, Any] = {"RequestFuncInput": SimpleNamespace}
     exec(compile(client_source, "benchmark_serving.py", "exec"), namespace)
     args = dict(profile=True, model_id="m", model_name="m", test_prompt="p", base_url="http://x", test_prompt_len=1)
     args.update(test_output_len=1, logprobs=None, best_of=1, test_mm_content=None, ignore_eos=True)

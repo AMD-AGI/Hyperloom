@@ -746,7 +746,7 @@ def test_a_runtime_snapshot_that_is_its_manifest_lets_the_test_run(tmp_path, env
         (lambda root: (root / "extra.py").write_text("x\n"), "does not match its manifest hash"),
         (lambda root: (root / "b.cfg").unlink(), "does not match its manifest hash"),
         (lambda root: (root / "link").symlink_to("/etc/passwd"), "holds a symbolic link"),
-        (lambda root: shutil.rmtree(root), "is not a directory"),
+        (shutil.rmtree, "is not a directory"),
     ],
     ids=["changed", "added", "removed", "link", "gone"],
 )

@@ -134,8 +134,6 @@ _VERIFIED, _ARCHIVED, _MATERIALIZED, _JIT_PUBLISHED, _ROUNDS_READ = (
 _LANDING_SEC = "landing_sec"
 _LOG_SUFFIX = ".log"
 
-EventEmitter = Callable[[str, Mapping[str, Any]], None]
-
 
 class HostedStartError(RuntimeError):
     """The hosted backend cannot start in this environment: one of its start checks failed."""

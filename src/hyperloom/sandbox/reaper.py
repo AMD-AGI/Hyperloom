@@ -79,7 +79,7 @@ def kill_launchers(procs: list[subprocess.Popen[bytes]], *, grace_sec: float = 2
         try:
             proc.kill()
         except ProcessLookupError:
-            pass
+            pass  # the launcher has already ended; the wait below reaps it
         try:
             proc.wait(timeout=_WINDOW_SEC)
         except subprocess.TimeoutExpired:

@@ -181,9 +181,9 @@ class MeasurementPlanner(Protocol):
     def blobs(self) -> BlobStore | None:
         """The blob store the planner compiles from, which the short-prompt check reads the files a recipe's patch
         changes from; ``None`` for a planner that compiles from none, whose every patch then counts as touching."""
-        ...
 
-    def plan(self, request: TestRequest, parent: Recipe) -> object: ...
+    def plan(self, request: TestRequest, parent: Recipe) -> object:
+        """The compiled environment, points and surface check of ``request`` on ``parent``, for the executor."""
 
 
 @dataclass(frozen=True)
@@ -266,9 +266,14 @@ class Acceptance:
 
         if self._workload is not WorkloadKind.INFERENCEX or request.purpose not in _ACCURACY_PURPOSES:
             return request
-        plain_explore = request.purpose is Purpose.EXPLORE and not request.forces_consistency_check
-        wanted = not (plain_explore and not self._explore_accuracy and request.kind is not TestKind.ACCURACY)
+        wanted = self._accuracy_wanted(request)
         return request if request.accuracy == wanted else replace(request, accuracy=wanted)
+
+    def _accuracy_wanted(self, request: TestRequest) -> bool:
+        """Whether an InferenceX request of an accuracy-carrying purpose runs the evaluation: all do but a plain explore
+        while ``explore_accuracy`` is off (an ``accuracy`` test always does)."""
+        plain_explore = request.purpose is Purpose.EXPLORE and not request.forces_consistency_check
+        return not (plain_explore and not self._explore_accuracy and request.kind is not TestKind.ACCURACY)
 
     async def prepare(self, request: TestRequest, *, replay: bool = False) -> Prepared:
         """Run the checks; ``replay`` re-prepares an already accepted request after a restart (it has its id)."""

@@ -23,7 +23,6 @@ from hyperloom.measure import local
 from hyperloom.measure.farm import Farm
 from hyperloom.measure.runner.own_jit import OWN_AITER_JIT_DIR, own_aiter_jit
 from hyperloom.measure.runner.tests.test_run_jit import (  # noqa: F401 - fixtures
-    TABLE_VARIABLE,
     Rig,
     _arm,
     env,
