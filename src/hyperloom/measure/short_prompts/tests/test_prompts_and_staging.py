@@ -20,9 +20,10 @@ from hyperloom.measure.short_prompts.prompts import (
     BATCHED,
     LENGTHS,
     SEQUENTIAL,
+    Prompt,
     PromptSetError,
     build_prompts,
-    load_prompts,
+    parse_prompts,
     prompts_bytes,
 )
 from hyperloom.measure.short_prompts.staging import (
@@ -85,17 +86,17 @@ def test_a_prompts_file_that_is_not_a_prompt_set_is_refused_naming_the_line(tmp_
     path.write_text(line + "\n")
 
     with pytest.raises(PromptSetError, match=match):
-        load_prompts(path)
+        parse_prompts(path.read_bytes(), str(path))
 
 
 def test_a_prompts_file_that_repeats_an_id_or_holds_none_is_refused(tmp_path):
     path = tmp_path / "prompts.jsonl"
     path.write_text('{"id":"a","mode":"batched","token_ids":[1]}\n' * 2)
     with pytest.raises(PromptSetError, match="an id twice"):
-        load_prompts(path)
+        parse_prompts(path.read_bytes(), str(path))
     path.write_text("")
     with pytest.raises(PromptSetError, match="no prompt"):
-        load_prompts(path)
+        parse_prompts(path.read_bytes(), str(path))
 
 
 def test_a_staged_entry_loads_back_the_prompts_the_plan_names(tmp_path):
@@ -133,6 +134,20 @@ def test_an_entry_whose_prompts_file_was_changed_after_staging_is_refused(tmp_pa
     plan = staged_plan(tmp_path)
     data = tmp_path / EVALSETS_DIR / plan.prompt_set / "data" / "prompts.jsonl"
     data.write_bytes(data.read_bytes().replace(b"sequential", b"batched", 1))
+
+    with pytest.raises(PromptSetError, match="not what its manifest recorded"):
+        load_prompt_set(plan, {"HYPERLOOM_RUNNER_CACHE": str(tmp_path)})
+
+
+def test_a_manifest_naming_another_file_cannot_put_other_prompts_under_the_sheets_hash(tmp_path):
+    plan = staged_plan(tmp_path)
+    entry = tmp_path / EVALSETS_DIR / plan.prompt_set
+    data = entry / "data"
+    (data / "orig.jsonl").write_bytes((data / "prompts.jsonl").read_bytes())
+    manifest = json.loads((entry / MANIFEST_NAME).read_text())
+    manifest["prompts"]["file"] = "data/orig.jsonl"
+    (entry / MANIFEST_NAME).write_text(json.dumps(manifest))
+    (data / "prompts.jsonl").write_bytes(prompts_bytes([Prompt("evil", BATCHED, (1, 2, 3))]))
 
     with pytest.raises(PromptSetError, match="not what its manifest recorded"):
         load_prompt_set(plan, {"HYPERLOOM_RUNNER_CACHE": str(tmp_path)})

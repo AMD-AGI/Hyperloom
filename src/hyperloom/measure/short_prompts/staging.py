@@ -11,7 +11,8 @@ A measurement sandbox has no network and reads its eval data from the runner cac
                                                  hashes) and the prompts file's count, size and SHA-256
 
 ``<key>`` hashes the generator and its inputs, so a different tokenizer or seed is another entry. An entry that is partly
-written has no manifest, and a rewrite that would differ from the entry in place is refused.
+written has no manifest, and a rewrite that would differ from the entry in place is refused. A reader reads the prompts
+file once, checks those bytes and parses the same bytes.
 """
 
 from __future__ import annotations
@@ -28,7 +29,7 @@ from typing import Any
 
 from hyperloom.measure.docs import canonical_json
 from hyperloom.measure.short_prompts.plan import ShortPromptPlan
-from hyperloom.measure.short_prompts.prompts import GENERATOR, Prompt, PromptSetError, load_prompts, prompts_bytes
+from hyperloom.measure.short_prompts.prompts import GENERATOR, Prompt, PromptSetError, parse_prompts, prompts_bytes
 
 __all__ = [
     "CACHE_ENV",
@@ -41,11 +42,11 @@ __all__ = [
     "StagedEntry",
     "cache_root",
     "entry_key",
-    "entry_problem",
     "load_prompt_set",
     "recorded_sha256",
     "stage_entry",
     "stage_file",
+    "verified_prompts",
 ]
 
 #: The directory of the runner cache, as ``hyperloom.measure.runner.cache_layout`` names it. The two are siblings, so this
@@ -56,6 +57,8 @@ EVALSETS_DIR = "evalsets"
 MANIFEST_NAME = "manifest"
 DATA_DIR = "data"
 PROMPTS_FILE = "prompts.jsonl"
+#: Where an entry's prompts are, the only file its manifest may name.
+_PROMPTS_PATH = f"{DATA_DIR}/{PROMPTS_FILE}"
 KEY_PREFIX = "short-prompts-"
 _SCHEMA = 1
 _KEY_DIGITS = 16
@@ -88,7 +91,7 @@ def _manifest(inputs: Mapping[str, Any], count: int, raw: bytes, generator: str)
         "generator": generator,
         "inputs": inputs,
         "prompts": {
-            "file": f"{DATA_DIR}/{PROMPTS_FILE}",
+            "file": _PROMPTS_PATH,
             "count": count,
             "size": len(raw),
             "sha256": hashlib.sha256(raw).hexdigest(),
@@ -149,30 +152,36 @@ def recorded_sha256(entry: Path) -> str:
         ) from exc
 
 
-def entry_problem(entry: Path, wanted_sha256: str) -> str:
-    """What is wrong with the entry, or ``""``: no manifest, a manifest that says another file, a file that is not the
-    one the manifest recorded."""
+def verified_prompts(entry: Path, wanted_sha256: str) -> bytes:
+    """The bytes of the entry's ``data/prompts.jsonl``, read once and checked against its manifest and ``wanted_sha256``.
+
+    The caller parses these bytes, so what it reads is what was hashed. The file is always ``data/prompts.jsonl``: a
+    manifest that names another file is refused, never followed.
+
+    Raises:
+        PromptSetError: No manifest or prompts file, a manifest that names another file or other prompts than
+            ``wanted_sha256``, or a prompts file that is not what the manifest recorded.
+    """
     try:
-        manifest = json.loads((entry / MANIFEST_NAME).read_text(encoding=_UTF8))
-        recorded = manifest["prompts"]
-        raw = (entry / recorded["file"]).read_bytes()
+        recorded = json.loads((entry / MANIFEST_NAME).read_text(encoding=_UTF8))["prompts"]
+        named, size, sha256 = recorded["file"], recorded["size"], recorded["sha256"]
+        raw = (entry / _PROMPTS_PATH).read_bytes()
     except (OSError, ValueError, KeyError, TypeError) as exc:
-        return f"the entry {entry} has no readable manifest and prompts file ({type(exc).__name__}): not staged, or unfinished"
-    if recorded.get("sha256") != wanted_sha256:
-        return f"the entry {entry} holds prompts {recorded.get('sha256')}, the sheet names {wanted_sha256}"
-    if hashlib.sha256(raw).hexdigest() != wanted_sha256 or len(raw) != recorded.get("size"):
-        return f"the prompts file of {entry} is not what its manifest recorded"
-    return ""
+        raise PromptSetError(
+            f"the entry {entry} has no readable manifest and prompts file ({type(exc).__name__}): not staged, or unfinished"
+        ) from exc
+    if sha256 != wanted_sha256:
+        raise PromptSetError(f"the entry {entry} holds prompts {sha256}, the sheet names {wanted_sha256}")
+    if named != _PROMPTS_PATH or len(raw) != size or hashlib.sha256(raw).hexdigest() != wanted_sha256:
+        raise PromptSetError(f"the prompts file of {entry} is not what its manifest recorded")
+    return raw
 
 
 def load_prompt_set(plan: ShortPromptPlan, environ: Mapping[str, str]) -> tuple[Prompt, ...]:
-    """The prompts ``plan`` names, read from the cache after the entry's hashes are checked.
+    """The prompts ``plan`` names, parsed from the very bytes whose hashes were checked (:func:`verified_prompts`).
 
     Raises:
         PromptSetError: The entry is missing, unfinished, or not the one the plan names.
     """
     entry = cache_root(environ) / EVALSETS_DIR / plan.prompt_set
-    problem = entry_problem(entry, plan.prompts_sha256)
-    if problem:
-        raise PromptSetError(problem)
-    return load_prompts(entry / DATA_DIR / PROMPTS_FILE)
+    return parse_prompts(verified_prompts(entry, plan.prompts_sha256), str(entry))

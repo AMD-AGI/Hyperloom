@@ -9,9 +9,10 @@ of the server that profiles (:class:`PatchedServer`). The copy mirrors the packa
 directory the patch does not reach is a link to the installed one, a file it changes is a patched copy. A copy is built
 once per patch set and installed package, in a directory of its own that is complete before it is published and whose
 files are never changed after (Python adds its bytecode caches), so profiles running at once share it and none can take
-it from under another. A published copy is taken only when this user laid it and no one else can write it: the host's
-temporary directory is shared, and a server imports whatever stands under that name. A test's farm that rebuilt the
-framework gets the patch laid in its own files the same way.
+it from under another. Each account lays its copies in a directory of its own that only it can write, and takes a
+published copy only when it laid it and no one else can write it: every account on the host shares its temporary
+directory, and a server imports whatever stands under a copy's name. A test's farm that rebuilt the framework gets the
+patch laid in its own files the same way.
 
 The set is applied as a transaction either way: ``git apply`` per patch, a fuzzy ``patch`` where the plan allows it, and
 the applied patches rolled back when one fails or the sentinels say the set did not land.
@@ -22,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -40,8 +42,11 @@ log = logging.getLogger(__name__)
 # System-wide lock file.
 _LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_server_patcher.lock")
 
-#: The directory, under this host's temporary directory, holding one patched copy per patch set and installed package.
+#: The directory, under this host's temporary directory, holding one account's patched copies, one per patch set and
+#: installed package; its name ends in the account's uid (``hyperloom-tracelens-<uid>``).
 _COPIES_DIR = "hyperloom-tracelens"
+#: The name of any account's directory of copies, or the bare name a point rendered when all accounts shared one names.
+_ANY_COPIES_DIR = re.compile(rf"{re.escape(_COPIES_DIR)}(?:-[0-9]+)?")
 #: The directory of a copy that goes on the server's ``PYTHONPATH``: it holds the patched package and nothing else.
 _SITE_DIR = "site"
 _CACHE_DIR = "__pycache__"
@@ -69,9 +74,10 @@ class PatchedServer:
 
 
 def is_patched_copy(entry: str) -> bool:
-    """Whether the ``PYTHONPATH`` entry ``entry`` is the site of a :class:`PatchedServer`, laid on any host."""
+    """Whether the ``PYTHONPATH`` entry ``entry`` is the site of a :class:`PatchedServer`, laid on any host by any
+    account."""
     path = PurePosixPath(entry)
-    return path.name == _SITE_DIR and path.parent.parent.name == _COPIES_DIR
+    return path.name == _SITE_DIR and _ANY_COPIES_DIR.fullmatch(path.parent.parent.name) is not None
 
 
 @dataclass(frozen=True)
@@ -108,9 +114,13 @@ class _PatchPlan:
 
 
 def _ensure_patched(plan: _PatchPlan) -> PatchedServer | None:
-    """This host's copy of ``plan.package`` with the patch laid in: the one laid before, else one laid now."""
+    """This host's copy of ``plan.package`` with the patch laid in: the one this account laid before, else one laid
+    now."""
     try:
-        done = Path(tempfile.gettempdir()) / _COPIES_DIR / f"{plan.framework}-{_copy_key(plan)}"
+        copies = _own_copies()
+        if copies is None:
+            return None
+        done = copies / f"{plan.framework}-{_copy_key(plan)}"
         if _is_published(plan, done):
             return PatchedServer(done / _SITE_DIR)
         with best_effort_file_lock(_LOCK_PATH, label="_server_patcher"):
@@ -123,9 +133,20 @@ def _ensure_patched(plan: _PatchPlan) -> PatchedServer | None:
     return None if built is None else PatchedServer(built / _SITE_DIR)
 
 
+def _own_copies() -> Path | None:
+    """This account's directory of copies under the host's temporary directory, made when it is missing; ``None`` when
+    what stands under its name is not a directory of this account's that only it can write."""
+    copies = Path(tempfile.gettempdir()) / f"{_COPIES_DIR}-{os.getuid()}"
+    copies.mkdir(mode=0o755, exist_ok=True)
+    if _owned(copies):
+        return copies
+    log.warning("_server_patcher: %s is not this account's own directory that only it can write; skip", copies)
+    return None
+
+
 def _is_published(plan: _PatchPlan, done: Path) -> bool:
-    """Whether ``done`` is a complete copy this user published: its sentinels say so only of what it holds, and anyone
-    who can write the host's temporary directory could have put it there."""
+    """Whether ``done`` is a complete copy this account published that no one else can write: its sentinels say so
+    only of what it holds."""
     return _owned(done) and _is_patched(_in_copy(plan, done / _SITE_DIR))
 
 
@@ -167,7 +188,6 @@ def _copy_key(plan: _PatchPlan) -> str:
 
 def _build_copy(plan: _PatchPlan, done: Path) -> Path | None:
     """Lay the copy in a directory of its own beside ``done`` and publish it as ``done``; the directory it is in."""
-    done.parent.mkdir(parents=True, exist_ok=True)
     building = Path(tempfile.mkdtemp(prefix=f".{done.name}-", dir=done.parent))
     kept: Path | None = None
     try:
@@ -319,75 +339,8 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
     # fallback; if neither accepts a patch the whole set fail-softs.
     strip_arg = f"-p{plan.apply_strip}"
 
-    apply_modes: dict[Path, str] = {}
-    for p in plan.patches:
-        if _git(git, (_APPLY, "--check", strip_arg, str(p)), plan.apply_root):
-            apply_modes[p] = _GIT
-            continue
-        if patch_bin and _patch_dry_run(patch_bin, p, plan.apply_root, plan.apply_strip):
-            log.warning(
-                "_server_patcher: %s patch %s did not apply cleanly with "
-                "`git apply --check %s`; falling back to `patch %s --fuzz=2` "
-                "(TraceLens patch may lag deployed %s by a point release)",
-                plan.framework,
-                p.name,
-                strip_arg,
-                strip_arg,
-                plan.framework,
-            )
-            apply_modes[p] = _PATCH
-            continue
-        # Forward apply fails: check whether this patch is ALREADY APPLIED (a clean ``git apply -R --check`` succeeds
-        # iff the tree already contains its post-image).
-        if _git(git, (_APPLY, "-R", "--check", strip_arg, str(p)), plan.apply_root):
-            log.info(
-                "_server_patcher: %s patch %s already applied (reverse "
-                "`git apply -R --check %s` is clean); skipping it from the "
-                "transaction so the remaining patches still apply",
-                plan.framework,
-                p.name,
-                strip_arg,
-            )
-            apply_modes[p] = _SKIP
-            continue
-        # Symmetric check for patches previously applied via fuzzy `patch` (git reverse may fail on fuzzy-applied
-        # hunks).
-        if patch_bin and _patch_reverse_dry_run(
-            patch_bin,
-            p,
-            plan.apply_root,
-            plan.apply_strip,
-        ):
-            log.info(
-                "_server_patcher: %s patch %s already applied (fuzzy reverse dry-run clean); skipping it",
-                plan.framework,
-                p.name,
-            )
-            apply_modes[p] = _SKIP
-            continue
-        if p.name in plan.optional_patches:
-            log.warning(
-                "_server_patcher: optional %s patch %s does not apply "
-                "(`git apply --check %s` + fuzzy both failed, not already "
-                "applied) — skipping it so the critical patches still apply "
-                "atomically (version %s; non-critical to kernel shape profiling)",
-                plan.framework,
-                p.name,
-                strip_arg,
-                plan.version,
-            )
-            apply_modes[p] = _SKIP
-            continue
-        log.warning(
-            "_server_patcher: `git apply --check %s` AND fuzzy `patch %s "
-            "--dry-run` both failed for %s (version %s, patch %s), and it is "
-            "not already applied (reverse check failed); fail-soft skip",
-            strip_arg,
-            strip_arg,
-            plan.framework,
-            plan.version,
-            p.name,
-        )
+    apply_modes = _precheck_apply_modes(plan, git, patch_bin, strip_arg)
+    if apply_modes is None:
         return False
 
     applied: list[tuple[Path, str]] = []
@@ -422,17 +375,7 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
         _rollback_applied(applied, plan, git, patch_bin, strip_arg)
         return False
 
-    fuzzy_count = sum(1 for _, mode in applied if mode == _PATCH)
-    log.info(
-        "_server_patcher: applied %d patch(es) for %s %s "
-        "(strict=%d, fuzzy=%d, already-applied/skipped=%d) (issue #194 §4/§5)",
-        len(applied),
-        plan.framework,
-        plan.version,
-        len(applied) - fuzzy_count,
-        fuzzy_count,
-        skipped,
-    )
+    _log_applied(plan, applied, skipped)
     # Post-apply sentinel verification: confirm all sentinel markers are present (catches all-skipped,
     # semantically-wrong fuzzy apply, or missing annotation-pipeline markers).
     if not _is_patched(plan):
@@ -451,6 +394,102 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
         _rollback_applied(applied, plan, git, patch_bin, strip_arg)
         return False
     return True
+
+
+def _precheck_apply_modes(plan: _PatchPlan, git: str, patch_bin: str | None, strip_arg: str) -> dict[Path, str] | None:
+    """Pick each patch's apply mode (``git``, ``patch`` or ``skip``), or ``None`` when one cannot apply."""
+    apply_modes: dict[Path, str] = {}
+    for p in plan.patches:
+        if _git(git, (_APPLY, "--check", strip_arg, str(p)), plan.apply_root):
+            apply_modes[p] = _GIT
+            continue
+        if patch_bin and _patch_dry_run(patch_bin, p, plan.apply_root, plan.apply_strip):
+            log.warning(
+                "_server_patcher: %s patch %s did not apply cleanly with "
+                "`git apply --check %s`; falling back to `patch %s --fuzz=2` "
+                "(TraceLens patch may lag deployed %s by a point release)",
+                plan.framework,
+                p.name,
+                strip_arg,
+                strip_arg,
+                plan.framework,
+            )
+            apply_modes[p] = _PATCH
+            continue
+        if _already_applied(plan, git, patch_bin, strip_arg, p):
+            apply_modes[p] = _SKIP
+            continue
+        if p.name in plan.optional_patches:
+            log.warning(
+                "_server_patcher: optional %s patch %s does not apply "
+                "(`git apply --check %s` + fuzzy both failed, not already "
+                "applied) — skipping it so the critical patches still apply "
+                "atomically (version %s; non-critical to kernel shape profiling)",
+                plan.framework,
+                p.name,
+                strip_arg,
+                plan.version,
+            )
+            apply_modes[p] = _SKIP
+            continue
+        log.warning(
+            "_server_patcher: `git apply --check %s` AND fuzzy `patch %s "
+            "--dry-run` both failed for %s (version %s, patch %s), and it is "
+            "not already applied (reverse check failed); fail-soft skip",
+            strip_arg,
+            strip_arg,
+            plan.framework,
+            plan.version,
+            p.name,
+        )
+        return None
+    return apply_modes
+
+
+def _already_applied(plan: _PatchPlan, git: str, patch_bin: str | None, strip_arg: str, p: Path) -> bool:
+    """Whether the tree already holds patch ``p``'s post-image, by a strict or fuzzy reverse dry-run."""
+    # Forward apply fails: check whether this patch is ALREADY APPLIED (a clean ``git apply -R --check`` succeeds
+    # iff the tree already contains its post-image).
+    if _git(git, (_APPLY, "-R", "--check", strip_arg, str(p)), plan.apply_root):
+        log.info(
+            "_server_patcher: %s patch %s already applied (reverse "
+            "`git apply -R --check %s` is clean); skipping it from the "
+            "transaction so the remaining patches still apply",
+            plan.framework,
+            p.name,
+            strip_arg,
+        )
+        return True
+    # Symmetric check for patches previously applied via fuzzy `patch` (git reverse may fail on fuzzy-applied
+    # hunks).
+    if patch_bin and _patch_reverse_dry_run(
+        patch_bin,
+        p,
+        plan.apply_root,
+        plan.apply_strip,
+    ):
+        log.info(
+            "_server_patcher: %s patch %s already applied (fuzzy reverse dry-run clean); skipping it",
+            plan.framework,
+            p.name,
+        )
+        return True
+    return False
+
+
+def _log_applied(plan: _PatchPlan, applied: list[tuple[Path, str]], skipped: int) -> None:
+    """Log how many patches of ``plan`` applied strictly, fuzzily, or were already present."""
+    fuzzy_count = sum(1 for _, mode in applied if mode == _PATCH)
+    log.info(
+        "_server_patcher: applied %d patch(es) for %s %s "
+        "(strict=%d, fuzzy=%d, already-applied/skipped=%d) (issue #194 §4/§5)",
+        len(applied),
+        plan.framework,
+        plan.version,
+        len(applied) - fuzzy_count,
+        fuzzy_count,
+        skipped,
+    )
 
 
 def _rollback_applied(
