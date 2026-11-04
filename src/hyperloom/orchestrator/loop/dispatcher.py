@@ -50,6 +50,7 @@ from ..bus.resource_lock import (
     KNOWN_LANES,
     _expand_lanes,
 )
+from ._explore_grid import explore_grid_denial
 from .sub_agent_runner import SubAgentResult
 from ..specialists.wall_budget import limit_wall_budget_extension
 from ..state.task_registry import IllegalTransition, Task, TaskNotFound, TaskSpec
@@ -1286,10 +1287,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         return time_budget_denial(action, expected_min, self.shared_state)
 
     def admission_denial_for_action(
-        self,
-        action_name: str,
-        *,
-        params: dict[str, Any] | None = None,
+        self, action_name: str, *, params: dict[str, Any] | None = None
     ) -> PolicyDenied | None:
         """Run every pre-dispatch gate for an action name, first denial wins.
 
@@ -1298,7 +1296,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
 
         Args:
             action_name: The proposed/delegated action name.
-            params: The proposal's parameters, which price a specialist.
+            params: The proposal's parameters: a specialist's price, an explore's grid.
 
         Returns:
             The first :class:`PolicyDenied` that fires, else ``None``.
@@ -1308,6 +1306,8 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             or self._sequence_denial_for_action(action_name)
             or specialist_in_flight_denial(action_name, params, self.tasks, self.shared_state.find_gap)
             or self.time_budget_denial_for_action(action_name, params=params)
+            # Last: a session out of time is told so before an explore is told its grid is missing.
+            or explore_grid_denial(action_name, params, self.shared_state)
         )
 
     async def _cancel_queued_task_over_budget(self, task: Task) -> bool:

@@ -1370,7 +1370,7 @@ async def test_rearm_authored_lane_delegates_enablement(session_dir):
     coord.enablement_lane.maybe_rearm_enablement = _fake_rearm  # type: ignore[method-assign]
 
     res = {"status": "apply_failed", "lane": "enablement", "enablement": True}
-    await coord.phase_framework._maybe_rearm_authored_lane(res)
+    await coord.phase_framework._maybe_rearm_authored_lane(res, {})
     assert len(called) == 1 and called[0] is res
 
 
@@ -1382,12 +1382,12 @@ async def test_rearm_authored_lane_perf_framework_increments_counter(session_dir
     res = {
         "status": "apply_failed",
         "lane": "perf_framework",
-        "candidate": {"candidate_id": cand_id, "pr_url": cand_id},
         "specialist_task_id": "spec-99",
         "retry_feedback": [],
         "prior_patches": [],
     }
-    await coord.phase_framework._maybe_rearm_authored_lane(res)
+    coord.shared_state.framework_agent_batches = [{"batch_id": "b", "candidates": [{"pr_url": cand_id}]}]
+    await coord.phase_framework._maybe_rearm_authored_lane(res, {"framework_agent_candidate_id": cand_id})
     attempts = getattr(coord.shared_state, "apply_fail_reauthor_attempts", {})
     assert attempts.get(cand_id) == 1
     # A pending retry context should be queued.
@@ -1407,7 +1407,6 @@ async def test_rearm_authored_lane_perf_framework_stamps_terminal_at_cap(session
     res = {
         "status": "apply_failed",
         "lane": "perf_framework",
-        "candidate": {"candidate_id": cand_id, "pr_url": cand_id},
         "specialist_task_id": "spec-100",
         "retry_feedback": [],
         "prior_patches": [],
@@ -1416,8 +1415,9 @@ async def test_rearm_authored_lane_perf_framework_stamps_terminal_at_cap(session
     coord.shared_state.apply_fail_reauthor_attempts = {cand_id: _AUTHORED_LANE_MAX_ATTEMPTS}
     # Clear any pending from prior.
     coord.shared_state.apply_fail_retry_pending = []
+    coord.shared_state.framework_agent_batches = [{"batch_id": "b", "candidates": [{"pr_url": cand_id}]}]
 
-    await coord.phase_framework._maybe_rearm_authored_lane(res)
+    await coord.phase_framework._maybe_rearm_authored_lane(res, {"framework_agent_candidate_id": cand_id})
 
     progress = getattr(coord.shared_state, "framework_agent_phase_progress", [])
     cap_rows = [p for p in progress if p.get("status") == "apply_fail_cap"]
@@ -1440,7 +1440,7 @@ async def test_rearm_authored_lane_enablement_apply_failed_is_not_counted_as_per
 
     # Even when lane=enablement is absent but enablement=True is present, should delegate.
     res = {"status": "apply_failed", "enablement": True}
-    await coord.phase_framework._maybe_rearm_authored_lane(res)
+    await coord.phase_framework._maybe_rearm_authored_lane(res, {})
     assert len(rearm_called) == 1
     # apply_fail_reauthor_attempts not touched.
     assert not getattr(coord.shared_state, "apply_fail_reauthor_attempts", {})

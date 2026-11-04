@@ -578,10 +578,27 @@ class WorkspaceGuard:
         if self._read_only_state() != self.read_only_state:
             violations.append("tracked, staged, or untracked files changed")
 
-        protected_ignored = self._protected_ignored_changes()
+        protected_ignored = self._discard_bytecode(self._protected_ignored_changes())
         if protected_ignored:
             violations.append("protected ignored files changed: " + ", ".join(protected_ignored))
         return violations
+
+    @staticmethod
+    def _discard_bytecode(changes: list[str]) -> list[str]:
+        """Delete the interpreter's bytecode among ``changes`` and return the rest.
+
+        The next import rebuilds a ``__pycache__`` ``.pyc`` from its protected source, instead of running bytecode the
+        session may have written over an untouched module. One reached through a linked directory may live outside the
+        workspace, so it is reported instead.
+        """
+        kept: list[str] = []
+        for change in changes:
+            path = Path(change)
+            if path.parent.name == "__pycache__" and path.suffix == ".pyc" and path.parent.resolve() == path.parent:
+                path.unlink(missing_ok=True)
+            else:
+                kept.append(change)
+        return kept
 
     def _protected_ignored_changes(self) -> list[str]:
         """Protected ignored paths whose snapshot no longer matches, then those created since the baseline."""
@@ -757,7 +774,7 @@ class WorkspaceGuard:
             path for path in tracked_changes if not self.spec.allow_tracked_changes or self._is_protected(path)
         ]
         protected_untracked = [path for path in untracked if self._is_protected(path)]
-        protected_ignored = self._protected_ignored_changes()
+        protected_ignored = self._discard_bytecode(self._protected_ignored_changes())
 
         violations: list[str] = []
         if index_changed:
