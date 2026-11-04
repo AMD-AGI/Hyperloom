@@ -47,6 +47,7 @@ from hyperloom_multibranch.blackboard.rsi.frontier import (
     NEAR_BAR_HOLD,
     STALL_BAR_COMPONENT,
     STALLED_COMPONENT,
+    TREND_COMPONENT,
     FrontierPolicy,
     score_progress,
 )
@@ -122,11 +123,17 @@ def test_the_dashboard_holds_branches_in_flight_work_lineage_and_infrastructure(
 def test_a_scored_branch_shows_its_stall_against_the_bar_what_holds_it_and_the_playbook_played(
     snapshot: BlackboardSnapshot,
 ) -> None:
-    near = {STALLED_COMPONENT: 7.0, STALL_BAR_COMPONENT: 6.0, MERGED_GAIN_COMPONENT: 4.0, NEAR_BAR_COMPONENT: 1.0}
+    near = {
+        TREND_COMPONENT: 2.5,
+        STALLED_COMPONENT: 7.0,
+        STALL_BAR_COMPONENT: 6.0,
+        MERGED_GAIN_COMPONENT: 4.0,
+        NEAR_BAR_COMPONENT: 1.0,
+    }
     held = BranchProgress("s1", True, "c0", "c1", 6, 1, 3600.0, {METRIC: 1040.0}, FrontierScore(0.4, near))
     stalled = {STALLED_COMPONENT: 8.0, STALL_BAR_COMPONENT: 6.0, CANDIDATE_COMPONENT: 1.0}
     candidate = BranchProgress("s2", True, "c0", "c0", 8, 0, 3600.0, {}, FrontierScore(0.0, stalled))
-    unplayed = BranchProgress("s3", True, "c0", "c0", 2, 0, 600.0, {}, FrontierScore(0.5, {"trend_pct": 0.5}))
+    unplayed = BranchProgress("s3", True, "c0", "c0", 2, 0, 600.0, {}, FrontierScore(0.5, {TREND_COMPONENT: 0.5}))
     breach = "stop of s1 refused for probation"
     played = dataclasses.replace(
         snapshot.fingerprints[-1], policy_versions={PLAYBOOK_KEY: "patient", FALLBACK_KEY: breach}
@@ -141,7 +148,7 @@ def test_a_scored_branch_shows_its_stall_against_the_bar_what_holds_it_and_the_p
         "stalled_tests": 7.0,
         "stall_bar": 6.0,
         "merged_gain_pct": 4.0,
-        "trend_pct": 0.4,
+        "trend_pct": 2.5,
         "held_by": [NEAR_BAR_HOLD],
         "stop_candidate": False,
     }

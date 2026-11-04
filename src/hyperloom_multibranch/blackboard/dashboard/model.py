@@ -31,11 +31,11 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from hyperloom_common.io import atomic_write_json, atomic_write_text
+from hyperloom_common.timeutil import epoch_iso
 from hyperloom_multibranch.contracts.blackboard.records import BranchProgress, BlackboardSnapshot
 from hyperloom_multibranch.contracts.blackboard.vocab import ClaimStatus, LineageKind
 from hyperloom_multibranch.contracts.toolbox import QueueState
@@ -48,6 +48,7 @@ from hyperloom_multibranch.blackboard.rsi.frontier import (
     MERGED_GAIN_COMPONENT,
     STALL_BAR_COMPONENT,
     STALLED_COMPONENT,
+    TREND_COMPONENT,
     envelope_hold,
 )
 from hyperloom_multibranch.blackboard.rsi.playbook import FALLBACK_KEY, PLAYBOOK_KEY
@@ -56,10 +57,6 @@ from hyperloom_multibranch.blackboard.rsi.stranded import stranded_leads
 SCHEMA_VERSION = "multibranch-dashboard-1"
 DASHBOARD_JSON = "dashboard.json"
 DASHBOARD_HTML = "dashboard.html"
-
-
-def _iso(at: float) -> str:
-    return datetime.fromtimestamp(at, timezone.utc).isoformat()
 
 
 def _gain(values: Mapping[str, float], baseline: Mapping[str, float], metric: str) -> float | None:
@@ -81,7 +78,7 @@ def _evidence(row: BranchProgress) -> dict[str, Any] | None:
         "stalled_tests": components.get(STALLED_COMPONENT),
         "stall_bar": components.get(STALL_BAR_COMPONENT),
         "merged_gain_pct": components.get(MERGED_GAIN_COMPONENT),
-        "trend_pct": row.frontier.expected_gain_pct,
+        "trend_pct": components.get(TREND_COMPONENT),
         "held_by": held,
         "stop_candidate": bool(components.get(CANDIDATE_COMPONENT)),
     }
@@ -128,7 +125,7 @@ def _in_flight(snapshot: BlackboardSnapshot) -> dict[str, Any]:
                 "branch": record.request.branch,
                 "parent_commit": record.request.parent_commit,
                 "purpose": record.request.purpose.value,
-                "requested_at": _iso(record.requested_at),
+                "requested_at": epoch_iso(record.requested_at),
                 "waiting_s": max(0.0, snapshot.taken_at - record.requested_at),
             }
             for record in waiting
@@ -171,7 +168,7 @@ def _hypotheses(snapshot: BlackboardSnapshot) -> list[dict[str, Any]]:
             "status": row.status.value,
             "statement": row.statement,
             "evidence": list(row.evidence),
-            "updated_at": _iso(row.updated_at),
+            "updated_at": epoch_iso(row.updated_at),
             "entry_id": row.latest_entry,
         }
         for row in hypothesis_ledger(snapshot)
@@ -183,7 +180,7 @@ def _environment_changes(snapshot: BlackboardSnapshot) -> list[dict[str, Any]]:
         {
             "node": change.node,
             "request_id": change.request_id,
-            "at": _iso(change.at),
+            "at": epoch_iso(change.at),
             "changed": {name: list(values) for name, values in change.changed.items()},
         }
         for change in snapshot.environment_changes
@@ -215,7 +212,7 @@ def build_dashboard(
     profile, baseline = snapshot.profile, snapshot.baseline
     return {
         "schema_version": SCHEMA_VERSION,
-        "generated_at_utc": _iso(snapshot.taken_at),
+        "generated_at_utc": epoch_iso(snapshot.taken_at),
         "metric": metric,
         "session": encode(profile),
         "baseline": encode(baseline),
