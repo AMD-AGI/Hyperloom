@@ -349,6 +349,21 @@ class _Session:
     collected: bool = False
 
 
+def _ended(session: _Session) -> bool:
+    """Whether the session's supervision has finished or its CLI has exited."""
+    return (session.task is not None and session.task.done()) or session.proc.poll() is not None
+
+
+def _ended_status(session: _Session, heartbeat: float | None) -> AgentStatus:
+    """The status of an ended session, from what the reap loop recorded; ``lost`` when it ended the CLI as silent."""
+    outcome = session.outcome
+    returncode = outcome.get("exit_code", session.proc.poll())
+    error = str(outcome.get("error", ""))
+    if outcome.get("stale_heartbeat"):
+        return AgentStatus(STATE_LOST, returncode, heartbeat, error=error)
+    return AgentStatus("exited", returncode, heartbeat, timed_out=bool(outcome.get("timed_out")), error=error)
+
+
 def _close_stdin(session: _Session) -> None:
     stdin = session.proc.stdin if session.spec.stdin_open else None
     if stdin is not None and not stdin.closed:
@@ -510,22 +525,16 @@ class LocalAgentRunner:
     async def poll(self, handle: AgentHandle) -> AgentStatus:
         session: _Session = handle.session
         heartbeat = self._last_activity(session)
-        outcome = session.outcome
-        task_done = session.task is not None and session.task.done()
-        if task_done or session.proc.poll() is not None:
-            returncode = outcome.get("exit_code", session.proc.poll())
-            if outcome.get("stale_heartbeat"):
-                return AgentStatus(STATE_LOST, returncode, heartbeat, error=str(outcome.get("error", "")))
-            return AgentStatus(
-                "exited",
-                returncode,
-                heartbeat,
-                timed_out=bool(outcome.get("timed_out")),
-                error=str(outcome.get("error", "")),
-            )
-        if await self._silent(session, heartbeat):
-            return AgentStatus(STATE_LOST, None, heartbeat, error=f"no heartbeat for more than {self._lost_after:.0f}s")
-        return AgentStatus("running", None, heartbeat)
+        if not _ended(session):
+            silent = await self._silent(session, heartbeat)
+            # The look at the CLI runs on a thread, while the reap loop may end the session; a deadline kill takes
+            # the tool down first, so a look taken during it sees silence. How the session ended outranks that look.
+            if not _ended(session):
+                if silent:
+                    error = f"no heartbeat for more than {self._lost_after:.0f}s"
+                    return AgentStatus(STATE_LOST, None, heartbeat, error=error)
+                return AgentStatus("running", None, heartbeat)
+        return _ended_status(session, heartbeat)
 
     async def _silent(self, session: _Session, heartbeat: float | None) -> bool:
         """Whether nothing shows the session alive. A beat, the CLI's process log or the session's start within the
