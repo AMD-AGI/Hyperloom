@@ -10,8 +10,8 @@ namespaces. Commands and files therefore run through the real envd protocol; onl
 only the parts of the Claw sandbox service that a stand-in can honestly reproduce (see :mod:`.service`).
 
 Running it needs root (envd switches accounts for every command) and an ``envd`` binary named by
-``HYPERLOOM_E2B_ENVD``: build ``packages/envd`` of e2b-dev/infra with ``GOWORK=off CGO_ENABLED=0 go build``
-(about 20 s). :func:`unavailable_reason` says why a machine cannot run it, for a skip message.
+``HYPERLOOM_E2B_ENVD``: build ``packages/envd`` of e2b-dev/infra with ``GOWORK=off CGO_ENABLED=0 go build``.
+:func:`unavailable_reason` says why a machine cannot run it, for a skip message.
 """
 
 from __future__ import annotations
