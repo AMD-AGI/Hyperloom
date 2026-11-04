@@ -257,7 +257,7 @@ class PlaybookPool:
     ``<root>/trees``; with ``as_of``, read as it stood then, the playbooks registered, crowned and retired by then."""
 
     def __init__(self, root: Path, as_of: float | None = None) -> None:
-        self.root = Path(root) / _PLAYBOOKS
+        self.root = root / _PLAYBOOKS
         self.as_of = as_of
 
     @classmethod

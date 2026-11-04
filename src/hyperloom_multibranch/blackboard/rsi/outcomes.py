@@ -125,10 +125,10 @@ class SpecialistOutcomes:
     session_id: str
     groups: Mapping[str, GroupOutcome] = field(default_factory=dict)
 
-    def render(self, title: str = "") -> str:
+    def render(self) -> str:
         names = (MENU_GROUP, CONTROL_GROUP, *((NO_MENU_GROUP,) if NO_MENU_GROUP in self.groups else ()))
         rows = [self.groups.get(name, GroupOutcome()).row(name) for name in names]
-        return "\n".join([f"# {title or f'Specialist outcomes of {self.session_id}'}", "", *table(HEADERS, rows)])
+        return "\n".join([f"# Specialist outcomes of {self.session_id}", "", *table(HEADERS, rows)])
 
     def note(self) -> str:
         menu, control = (self.groups.get(name, GroupOutcome()) for name in (MENU_GROUP, CONTROL_GROUP))

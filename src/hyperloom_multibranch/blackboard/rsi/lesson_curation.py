@@ -285,21 +285,18 @@ async def curate_lessons(
     complete: Complete,
     *,
     model: str,
-    archive: TreeArchive | None = None,
-    pool: LessonPool | None = None,
 ) -> CloseStep:
     """CLOSE, after the lessons are published: ask the LLM, through ``complete``, to curate the lessons offered from
-    ``pool``, by default the one beside ``archive``, by default the environment's, and write the steps it may take.
+    the lesson pool beside the environment's archive, and write the steps it may take.
     ``model`` names the LLM in what it writes. A step that cannot be done says why and never stops CLOSE."""
 
     profile = snapshot.profile
     if profile is None:
         return CloseStep(SKIPPED, NO_PROFILE)
-    if pool is None:
-        target = archive if archive is not None else TreeArchive.from_env()
-        if target is None:
-            return CloseStep(SKIPPED, NO_ARCHIVE)
-        pool = LessonPool.beside(target)
+    target = TreeArchive.from_env()
+    if target is None:
+        return CloseStep(SKIPPED, NO_ARCHIVE)
+    pool = LessonPool.beside(target)
     try:
         found = await asyncio.to_thread(_offered, profile.session_id, pool)
     except STEP_ERRORS as exc:
