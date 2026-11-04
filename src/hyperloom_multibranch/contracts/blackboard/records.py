@@ -99,7 +99,7 @@ class Claim:
 
 @dataclass(frozen=True)
 class TestRecord:
-    """Everything known about one test (design section 5.2): request, result, judgement, conclusion and commit."""
+    """Everything known about one test: request, result, judgement, conclusion and commit."""
 
     __test__ = False
 
@@ -726,7 +726,7 @@ class UnfinishedLead:
 
 @dataclass(frozen=True)
 class StartupBrief:
-    """What a fill specialist reads at start; ``leads`` and ``lessons`` come from cross-session recall (MB2).
+    """What a fill specialist reads at start; ``leads`` and ``lessons`` come from cross-session recall.
 
     ``op_shares`` are the latest op shares a tool reported on the start commit, or on a commit of the same recipe,
     which bound what speeding each op up can gain; ``None`` while no commit of its recipe was profiled. ``unfinished`` are this session's results worth finishing,

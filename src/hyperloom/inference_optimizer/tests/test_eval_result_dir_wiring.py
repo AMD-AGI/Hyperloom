@@ -16,11 +16,9 @@ from unittest.mock import patch
 import pytest
 import yaml
 
+from hyperloom.common.gain_math import accuracy_passed
 from hyperloom.orchestrator.state.shared_state import SharedState
-from hyperloom.orchestrator.actions.executors._accuracy_gate import (
-    accuracy_passed,
-    parse_eval_results,
-)
+from hyperloom.orchestrator.actions.executors._accuracy_gate import parse_eval_results
 from hyperloom.orchestrator.actions.executors._grid_runner import _run_magpie, MagpieRound
 from hyperloom.orchestrator.actions.executors._inferencex_patcher import BENCH_SEED_ENV
 from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor

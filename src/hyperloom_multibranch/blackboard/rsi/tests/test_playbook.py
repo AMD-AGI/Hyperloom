@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -177,3 +178,15 @@ def test_a_playbook_file_with_numbers_no_code_applies_any_more_still_reads(tmp_p
     stored.write_text(json.dumps(document))
 
     assert PlaybookPool(tmp_path).playbooks() == (LONGER,)
+
+
+def test_a_playbook_record_that_is_no_json_object_is_skipped_with_a_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    pool = PlaybookPool(tmp_path)
+    pool.register(LONGER)
+    (pool.root / "listed.json").write_text("[1, 2]")
+
+    with caplog.at_level(logging.WARNING):
+        assert pool.playbooks() == (LONGER,)
+    assert "listed.json" in caplog.text
