@@ -32,7 +32,7 @@ NEW = '''        log "  landed.patch present -- restoring THAT instead (it conta
         #
         # Used to drop a KEEP that should not have shipped. Iteration 35 put a
         # per-tuple dispatch census INSIDE the served decode path, booked it as
-        # a class-A neutral, and cost 3.4% of p90 for zero p50. The pack's
+        # a class-A neutral, and cost p90 for no p50 gain. The pack's
         # secondary band has since been tightened to 2.5 so the gate refuses
         # that shape, but the tree still carries the change.
         #

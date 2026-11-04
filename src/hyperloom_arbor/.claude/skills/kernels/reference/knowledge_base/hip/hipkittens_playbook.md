@@ -629,8 +629,8 @@ through its `pre_computed_warp_coords_`); [ck:§3.6] (CK's `kBlockSize` /
 
 The `kernels/gemm/` tree holds hand-written matmuls; `fp6_dwordx{3,4}` are two
 parallel forks of the whole library with FP6 modifications. The
-`agent-mxfp8-gemm-optimization.md` design note documents an 11.9 % speedup
-walk-through.
+`agent-mxfp8-gemm-optimization.md` design note documents a step-by-step
+speedup walk-through.
 
 ### 4.1 bf16fp32 GEMM
 
@@ -734,37 +734,37 @@ plus a kernel; the README documents the comparison.
 
 ### 4.4 `agent-mxfp8-gemm-optimization.md` — design highlights
 
-A first-person record of an 11.9 % speedup walk from the V3 baseline.
+A first-person record of a step-by-step speedup walk from the V3 baseline.
 
 1. **Baseline** —
    [agent-mxfp8-gemm-optimization.md:54-83](HipKittens/agent-mxfp8-gemm-optimization.md#L54-L83)
-   — V3 pinned-register pipeline; 2205 → 2291 TFLOPS @ 4K, 2526 → 2643 @ 8K.
-2. **Step 1 — sync-instruction swap (QW)** +0.3 % (:74).
-3. **Step 2 — SGPR-precomputed `soff`** +3.3 % (:75).
-4. **Step 3 — SGPR-precomputed M0** +5.1 % (:76) — 36 VGPR→SGPR address
+   — V3 pinned-register pipeline.
+2. **Step 1 — sync-instruction swap (QW)** (:74).
+3. **Step 2 — SGPR-precomputed `soff`** (:75).
+4. **Step 3 — SGPR-precomputed M0** (:76) — 36 VGPR→SGPR address
    conversions removed (:95-96).
-5. **Step 4 — fewer `sched_barrier` calls** +5.6 % (:77).
-6. **Step 5 — SpreadLDG** +8.9 % (:78) — spread 6 global loads across 8–12
-   compute instructions; L2 hit 74 % → 78.5 %, MFMA 52.3 % → 54.2 %
+5. **Step 4 — fewer `sched_barrier` calls** (:77).
+6. **Step 5 — SpreadLDG** (:78) — spread 6 global loads across 8–12
+   compute instructions; L2 hit rate and MFMA utilization both rise
    (:99-103).
-7. **Step 6 — earlier data prefetch** +9.7 % (:79) — load N+2 while
-   computing N; hides 67 % of memory delay (:107-108).
-8. **Step 7 — adaptive WGM (workgroup-mapping for L2 reuse)** +10.2 %
-   (:80) — 16K: 2673 → 2950 TFLOPS (:111).
-9. **Step 8 — epilogue SpreadLDG** +10.7 % (:81).
-10. **Step 9 — hoist loop constants** +11.7 % (:82) — let the compiler
+7. **Step 6 — earlier data prefetch** (:79) — load N+2 while
+   computing N; hides most of the memory delay (:107-108).
+8. **Step 7 — adaptive WGM (workgroup-mapping for L2 reuse)**
+   (:80) — the largest step at 16K (:111).
+9. **Step 8 — epilogue SpreadLDG** (:81).
+10. **Step 9 — hoist loop constants** (:82) — let the compiler
     schedule freely (:115).
-11. **Step 10 — unified SRD (single buffer-resource descriptor)** +11.9 %
+11. **Step 10 — unified SRD (single buffer-resource descriptor)**
     (:83).
 12. **Failed attempts** —
     [:119-128](HipKittens/agent-mxfp8-gemm-optimization.md#L119-L128)
-    — moving loads into compute (-2 to -4 % because `buffer_load_lds` and
-    `ds_read` share the LDS port); NT store -18 %; LLC-aware swizzle breaks
+    — moving loads into compute (slower, because `buffer_load_lds` and
+    `ds_read` share the LDS port); NT store (slower); LLC-aware swizzle breaks
     odd shapes; `vmcnt(6)` is optimal (more in-flight doesn't help);
     `s_setprio` / `launch_bounds` no-op at occupancy=1.
 13. **End-state** —
     [:30-35](HipKittens/agent-mxfp8-gemm-optimization.md#L30-L35)
-    — 8192³ MXFP8 = 2991 TFLOPS (Hyperloom) vs 1512 hipBLASLt (197.8 %).
+    — the 8192³ MXFP8 result, against hipBLASLt.
 
 ### 4.5 Cross-cutting techniques (this slice)
 
@@ -776,13 +776,13 @@ A first-person record of an 11.9 % speedup walk from the V3 baseline.
 - **T4.C — `s_setprio` alternation favors MFMA over memory**: cheap signal
   to the wave scheduler; sprinkled around every MFMA cluster.
 - **T4.D — SGPR-precomputed addresses (soff / M0)**: hoist
-  `readfirstlane()` results into SGPRs *once* — turned the +3.3 % and
-  +5.1 % wins in the agent walk.
+  `readfirstlane()` results into SGPRs *once* — two of the steps in
+  the agent walk.
 - **T4.E — SpreadLDG spreads global loads across compute**: shares the L2
-  port; +4 % wall-clock by reducing port contention.
+  port; faster wall-clock by reducing port contention.
 - **T4.F — Adaptive WGM (workgroup mapping)** tiles workgroups by the
   *N*-dimension of B so that consecutive workgroups reuse B in L2; biggest
-  single optimization (+10 % at 16K).
+  single optimization at 16K.
 - **T4.G — dwordx4 over dwordx3 for FP6**: register-buffered prefetch
   avoids the LDS port contention that limits dwordx3. Confirms the
   general lesson that *the LDS port, not bandwidth, is often the
@@ -796,7 +796,7 @@ A first-person record of an 11.9 % speedup walk from the V3 baseline.
   Confirms [ck:§16.10]'s observation that prefetch depth pushes
   occupancy to 1, after which scheduling tricks don't help.
 - **T4.J — Let the compiler schedule**: removing manual scheduling
-  constraints (hoisting loop constants) was a +1.0 % win — the human-
+  constraints (hoisting loop constants) was a win — the human-
   guided assembly-tuning ceiling is real but the compiler often finds
   better schedules than hand-tuning at this granularity.
 
@@ -1383,8 +1383,8 @@ FP8 MFMA, 32×32 MFMA shapes, warp-sync builtins, and 8-die XCD topology
    or 8×8) lands in the *same* XCD. The L2 stays die-local.
 4. **Adaptive Tile Grouping (WGM tuning)** —
    [agent-mxfp8-gemm-optimization.md:109-111](HipKittens/agent-mxfp8-gemm-optimization.md#L109-L111)
-   — `WGM=8` (16K matrices), `WGM=4` (small matrices); +10.4 % @ 16K via
-   B-matrix L2 reuse.
+   — `WGM=8` (16K matrices), `WGM=4` (small matrices); the 16K gain comes
+   from B-matrix L2 reuse.
 5. **Distributed bf16_gemm also swizzles by XCD** —
    [distributed-kernels/bf16_gemm/kernel.cpp:107-119](HipKittens/distributed-kernels/bf16_gemm/kernel.cpp#L107-L119)
    — same `chiplet_transform_*` family in the multi-GPU kernel (§7.2.8).
@@ -1416,14 +1416,11 @@ FP8 MFMA, 32×32 MFMA shapes, warp-sync builtins, and 8-die XCD topology
 
 1. **MXFP8 GEMM on MI355X** —
    [agent-mxfp8-gemm-optimization.md:30-34](HipKittens/agent-mxfp8-gemm-optimization.md#L30-L34):
-   - 4 K: **2531 TFLOPS** (100.2 % vs hipBLASLt FP8 tensorwise; 169.7 %
-     vs hipBLASLt MXFP8).
-   - 8 K: **2991 TFLOPS** (93.6 % vs FP8; 197.8 % vs MXFP8).
-   - 16 K: **3029 TFLOPS** (92.9 % vs FP8; 246.1 % vs MXFP8).
+   - results at 4K, 8K and 16K, against hipBLASLt FP8 tensorwise and
+     hipBLASLt MXFP8.
 2. **Primus-Turbo end-to-end (quant + GEMM on MI355X)** —
    [agent-mxfp8-gemm-optimization.md:44-50](HipKittens/agent-mxfp8-gemm-optimization.md#L44-L50):
-   forward 1795 TFLOPS (59 % faster than hipBLASLt);
-   backward 1977 TFLOPS (68 % faster).
+   forward and backward, against hipBLASLt.
 3. **Attention forward / backward graphs** —
    [analysis/attn/fwd/README.md](HipKittens/analysis/attn/fwd/README.md),
    [analysis/attn/bkwd/README.md](HipKittens/analysis/attn/bkwd/README.md)
@@ -1449,7 +1446,7 @@ FP8 MFMA, 32×32 MFMA shapes, warp-sync builtins, and 8-die XCD topology
   doesn't. Every shipping HK kernel that targets MI300/MI355 uses it.
 - **T9.E — `WGM` (workgroup-mapping) is the tunable per shape**: small
   matrices want small `WGM`; 16K matrices want `WGM=8` for B-matrix L2
-  reuse — agent walk +10.4 % at 16K.
+  reuse (the agent walk's 16K step).
 - **T9.F — LDS-port contention is *experimentally* known on gfx950**:
   documented in the agent doc as a failed-attempt entry; constrains
   future kernel design (can't co-issue `buffer_load_lds` and `ds_read`).
@@ -1715,7 +1712,7 @@ Where the §4.4 agent walk's hypotheses were tested:
    `micro_05_2stage_16c2p.cpp` is marked "Above SW limit" — kept as a
    data point even though it lost.
 5. **These are the artifacts of the agent walk** — §4.4 documents the
-   11.9 % speedup as an evolution; `micros/` is where each step was
+   speedup as an evolution; `micros/` is where each step was
    prototyped before being folded into the production
    `256_256_64_32_with{16x32, 32x16}.cpp` kernels.
 6. **No README in micros/** — the harness is internal; consumers are

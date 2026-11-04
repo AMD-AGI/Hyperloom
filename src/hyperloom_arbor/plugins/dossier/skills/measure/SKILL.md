@@ -98,7 +98,7 @@ change the long bench already judged, injected delays proven on the device);
 per candidate, its cost, its own floor, sign agreement with the long bench and
 false positives. Until a candidate is validated, its readings may order work
 but never keep or reject a change; validated, it screens, and a claim still
-needs the long bench. The runner's Plan 21 is the worked example.
+needs the long bench.
 
 ## Done when
 

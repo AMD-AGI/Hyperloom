@@ -101,8 +101,7 @@ and an A/B decides.
 | Op family | Kernels that ran (provider) | Share per regime | Shapes | Why this kernel | Unused alternatives (why; how to try) | KernelForge | Reference platform | gfx950 gap | Lead |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 
-A worked row, DSV4.1 MoE experts on MI355X (runner's D06 and
-`docs/kernelforge.md`, 2026-09-29):
+A worked row, DSV4.1 MoE experts on MI355X:
 
 - **Ran:** AITER's sort and quant-sort, then
   `mfma_moe1_silu_mul_afp8_wfp4_bf16_*` (stage 1) and

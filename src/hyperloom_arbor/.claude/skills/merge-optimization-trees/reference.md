@@ -16,12 +16,12 @@ a deliverable, and the two are not the same code path:
   ROCm sparse-attention gates branch on exactly that number. A knob can be
   admitted at one point and silently rejected at the other.
 - Launch-width and tiling work tuned at high concurrency can invert at low
-  concurrency. A measured prefill-gather knee at ~8 programs per CU gave
-  2.47–8.54x at depth, collapsed to 1.21x on a small input, and **inverted to
-  2.39x worse** past the knee.
+  concurrency. A prefill-gather knee in programs per CU gave large
+  speedups at depth, collapsed on a small input, and **inverted to a
+  slowdown** past the knee.
 - Components can be entirely absent at one point. At C8, all-reduce,
   shared-expert MoE, sparse prefill and the sparse attention indexer measure
-  **0.00% with zero calls**. A feature in those components has no C8 time to
+  **zero time with zero calls**. A feature in those components has no C8 time to
   remove, so its gain cannot transfer — the Amdahl denominator is different,
   not merely smaller.
 
@@ -31,17 +31,9 @@ own output directory so their aggregate files cannot overwrite each other.
 ## Warm up before every measured run
 
 The first replay against a fresh server pays cold JIT compilation, tuned-config
-resolution, and an empty prefix cache. Measured on three back-to-back C32
-replays on one server instance:
-
-| replay | tok/s/chip |
-|---|---:|
-| 1 (cold) | 223.668 |
-| 2 | 230.854 |
-| 3 | 228.070 |
-
-The cold replay is a **2.6% low outlier**; including it puts run-to-run spread
-at 3.16%, dropping it puts it at 1.21%.
+resolution, and an empty prefix cache. On three back-to-back replays on one
+server instance, the cold first replay is a **low outlier**: including it more
+than doubles the run-to-run spread.
 
 This matters more in a knob sweep than anywhere else, because each knob state
 usually gets a fresh server — so **every measurement is a cold first replay**
@@ -57,10 +49,8 @@ Derive the acceptance threshold from the baseline's own spread, not from a
 round number. A gate set below the noise floor books noise as wins.
 
 Compute the baseline's relative spread over at least 3 replays and use it as
-the minimum credible gain. For reference, measured C32 spread on this workload
-has been 1.0–1.6% and C8 spread 0.6%, giving thresholds near 1.015 and 1.01.
-Secondary metrics are much noisier — p90 interactivity has shown 9–12% spread,
-so a p90 "win" under ~12% is not a result.
+the minimum credible gain. Secondary metrics are much noisier than the primary
+— a p90 interactivity "win" inside its own spread is not a result.
 
 Re-derive the threshold on the integration branch. It is a property of the
 tree and node, not a constant.
@@ -176,9 +166,9 @@ usually far larger than the effect being chased.
 
 Related: attribute the gain to the right thing. A treatment arm beating an
 *older* baseline tells you about the whole tree. Only the paired control —
-same tree, knob off — isolates the knob. A lean tree measuring ~78 against a
-stock 71.571 looked like a +9% knob win; its own paired control measured
-77.968, so the knobs were flat and the merged tree had earned all of it.
+same tree, knob off — isolates the knob. A lean tree measuring well above a
+stock baseline looked like a knob win; its own paired control measured the
+same, so the knobs were flat and the merged tree had earned all of it.
 
 ## Interaction edges from profiles
 

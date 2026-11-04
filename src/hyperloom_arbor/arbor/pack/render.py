@@ -15,7 +15,7 @@ HISTORY_WINDOW = 10
 # What the agent is told about a skill the pack lists, where the skill's own
 # description is not the whole rule. A pack that lists "profiler" profiles
 # with it, ahead of any profiling procedure its knowledge describes; a pack
-# that does not keeps its own (operator, 2026-10-06).
+# that does not keeps its own.
 _SKILL_RULES = {
     "profiler": (
         "every profile this campaign takes, to find where time goes or to check "
@@ -29,10 +29,10 @@ _SKILL_RULES = {
         "looks it up first and uses it; it refreshes only stale parts, and writes "
         "a dossier only when none exists."
     ),
-    # Operator, 2026-10-20: the balanced pack's three reference skills.
+    # The balanced pack's three reference skills.
     "hardware": (
-        "price every floor, roofline and kernel plan against what this device "
-        "measurably achieves (its table, with sources), not the datasheet; its "
+        "price every floor, roofline and kernel plan against numbers measured on "
+        "this node, with sources, not the datasheet; its "
         "reference pages hold the ISA, LDS and MFMA limits a kernel must respect."
     ),
     "serving-playbook": (

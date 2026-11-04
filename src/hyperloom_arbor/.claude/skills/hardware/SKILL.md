@@ -1,6 +1,6 @@
 ---
 name: hardware
-description: AMD Instinct hardware facts for kernel authoring, rooflines and communication — MI350X/MI355X (gfx950, CDNA4) and MI300X/MI325X (gfx942, CDNA3) — with the spec peaks, what our nodes actually achieve, the memory hierarchy, LDS banks, MFMA and block-scaled matrix instructions, the gfx950 ISA additions, XGMI/collective bandwidth, and where each fact comes from. Use when writing or tuning a kernel, pricing a direction against its floor, writing a kernel plan, reading a roofline, or deciding whether a kernel is compute- or bandwidth-bound.
+description: AMD Instinct hardware facts for kernel authoring, rooflines and communication — MI350X/MI355X (gfx950, CDNA4) and MI300X/MI325X (gfx942, CDNA3) — with the spec peaks, how to measure what a node achieves, the memory hierarchy, LDS banks, MFMA and block-scaled matrix instructions, the gfx950 ISA additions, XGMI/collective bandwidth, and where each fact comes from. Use when writing or tuning a kernel, pricing a direction against its floor, writing a kernel plan, reading a roofline, or deciding whether a kernel is compute- or bandwidth-bound.
 ---
 
 # Hardware: AMD Instinct for kernel authors
@@ -51,28 +51,17 @@ it says "304 CUs", "32 banks" and "similar to MI300X's 5.3 TB/s", all wrong for 
 - Detail: `reference/cdna4_mi350/arch.md`, `peak_tables.md`, `memory.md`, `clocks_power.md`;
   `reference/cdna3_mi300/*`; `reference/shared/hbm_infinity_fabric.md`.
 
-## What our nodes achieve (use these, not the spec)
+## Measured, not spec
 
-Spec peaks are ceilings. A floor in a kernel plan, a dossier or a roofline uses the measured number,
-with its source.
-
-| What | Measured | Where, how | Source |
-| --- | --- | --- | --- |
-| HBM read, cold, MI350X | 6.0–6.1 TB/s at 0.5–4 GB | Cluster A, streaming read | runner `plans/30_DSV41_FLASH_MOE_HEADROOM.md` |
-| HBM read, hot through the Infinity Cache, MI350X | 6.4–6.9 TB/s at 128–256 MB | same | same |
-| `torch.sum` as a bandwidth reference, MI350X | 4.9–5.5 TB/s | same: reads 10–20% low; do not use it as the floor | same |
-| HBM achievable frontier, MI355X | 5,611 GB/s at 2 GiB | Cluster B node | Arbor `docs/dossier/model-m-mi355x/11-directions.md` |
-| TP8 all-reduce, MI350X | 378 GB/s bus bandwidth (flat 64 KiB–1 MiB) | RCCL on the node | Arbor `docs/dossier/model-m-mi350x/11-directions.md` |
-| TP8 reduce-scatter, MI350X | 349 GB/s bus bandwidth | same | same |
-| RCCL 128 MiB, MI355X | ≈ 220 GB/s algorithm bandwidth (605.8 µs) | Cluster B node | `…-mi355x/08-kernels.md` |
-| Kernel launch, MI350X, inside a graph | 1.759 µs per added launch; removing one is worth 4.4–5.0 µs | Model M C2 | `…-mi350x/03.u2-code.md` "The launch floor" |
-| Sustained matrix FLOP/s | ~45% of peak (MI300X; CDNA4 not yet measured broadly) | arXiv 2510.27583 | `reference/cdna4_mi350/peak_tables.md` |
+Spec peaks are ceilings. A floor in a kernel plan, a dossier or a roofline uses a number measured
+on the node, with its source: a streaming read for HBM bandwidth (not `torch.sum`, which reads
+low), RCCL's tests for collectives, a graph-captured loop for launch cost.
 
 **How to read and record measured numbers:**
-- **The measured ridge is further right than the spec ridge.** At ~5.6–6.0 TB/s achieved and
-  2.5 PF BF16, it is ≈ 420–450 FLOP/B: even more kernels are bandwidth-bound than the spec suggests.
+- **The measured ridge is further right than the spec ridge.** Achieved bandwidth is below the
+  spec, so even more kernels are bandwidth-bound than the spec suggests.
 - **Record a new measurement** as `value @ GPU, gfx, ROCm and library versions, node, method,
-  date`, and add it to this table.
+  date`, in the dossier that uses it.
 - **When a measurement and the spec disagree,** give both with their sources. Plans use the
   measured one.
 
@@ -80,7 +69,7 @@ with its source.
 
 | Question | Read |
 | --- | --- |
-| Is this kernel compute- or bandwidth-bound; what is its floor? | the table above, then `reference/shared/hbm_infinity_fabric.md`; count bytes first |
+| Is this kernel compute- or bandwidth-bound; what is its floor? | the quick facts, then `reference/shared/hbm_infinity_fabric.md`; count bytes first |
 | MFMA shapes, cycles, operand layouts | `reference/shared/matrix_core_mfma_smfmac.md`, `reference/cdna4_mi350/matrix_core_blockscale.md` |
 | FP4 / FP6 / MXFP, E8M0 scales, `v_mfma_scale_f32_*_f8f6f4` | `reference/cdna4_mi350/fp4_fp6_microscaling.md` |
 | LDS sizing, 64-bank conflicts, padding, read-with-transpose | `reference/shared/memory_model_lds_bank.md`, `reference/cdna4_mi350/memory.md` |
@@ -93,9 +82,9 @@ with its source.
 
 ## Communication (what KernelForge does not cover)
 
-- **Topology:** 8 GPUs per node, fully connected by Infinity Fabric (xGMI). The measured collective
-  bandwidths are in the table above.
-  - Small messages are latency-bound: both curves are flat from 64 KiB to 1 MiB.
+- **Topology:** 8 GPUs per node, fully connected by Infinity Fabric (xGMI). Measure collective
+  bandwidth on the node.
+  - Small messages are latency-bound: bus bandwidth stays flat across small message sizes.
   - Decode-size all-reduces cost latency, not bandwidth. Fusing them (with RMSNorm, with the next
     GEMM) or removing them is the lever, not a faster algorithm.
 - **Quantized all-reduce (quick-reduce):** the recipes use INT4/INT6/INT8, and it changes numerics.
@@ -111,7 +100,7 @@ with its source.
 
 ## Rules
 
-- **Never price a direction or a kernel plan against the spec alone.** Use the measured row, or
+- **Never price a direction or a kernel plan against the spec alone.** Use a measured number, or
   measure. A plan whose ceiling comes from the spec says so.
 - **Porting from gfx942 to gfx950:**
   - FNUZ becomes OCP FP8;

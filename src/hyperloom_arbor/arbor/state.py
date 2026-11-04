@@ -46,8 +46,8 @@ MAX_CONSECUTIVE_INVALID = 3
 # single-replay measurements, so it is an UPWARD-BIASED estimator: each ratchet
 # keeps whichever draw happened to be high, and the bias grows with the number
 # of ratchet events. The cuda-graph campaign ratcheted three times and landed
-# 1.78% above its own matched-draw cohort, which ate 71% of a 2.5% secondary
-# band before any real effect. Iterations 41, 44, 46 and 48 were then each
+# above its own matched-draw cohort by most of its secondary band before any
+# real effect. Iterations 41, 44, 46 and 48 were then each
 # REVERTED on the secondary axis alone -- 46 was a BYTE-IDENTICAL tree.
 #
 # The inference is statistical, not about any one change: several UNRELATED
@@ -739,7 +739,7 @@ class CampaignState:
         run is cheap relative to what it settles — the cuda-graph campaign spent
         four iterations (38, 41, 44, 48) being refused on this axis before one
         agent thought to try it at iteration 46, and the answer was that a
-        byte-identical tree read -5.1%.
+        byte-identical tree read as a regression.
         """
         n = self.policy.secondary_suspect_streak if limit is None else limit
         return n > 0 and self.secondary_only_streak >= n

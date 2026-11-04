@@ -21,7 +21,7 @@ Editing a pipeline header doesn't trigger recompilation.
 ### Warp tile is NOT an independent knob
 Swapping warp tile dimensions without re-tuning LDS descriptors and block dimensions
 causes silent regressions. The kernel compiles clean, passes SNR, but wall-clock regresses.
-- EVIDENCE: 4-warp (16,16,16) warp tile regressed 11→14 ms (+27%)
+- EVIDENCE: 4-warp (16,16,16) warp tile regressed wall-clock markedly
 - REASON: narrower warp tile = proportionally more MFMA instructions
 - RULE: narrower tile needs wider block to amortize (bn0=128, bk0=64 for dense;
   sparse locked at bn0=64, bk0=32 → narrow tiles always lose)
@@ -49,7 +49,7 @@ Result: first row of MFMA output holds half the correct value → 21 dB SNR.
 - ACHIEVED: 256 VGPR + 170 AGPR + 0 spill at 256 fp32/lane pressure
 
 ### Occupancy cliff at 256 VGPR
-Reducing VGPR from 296→238 delivered −32% latency in a single change.
+Reducing VGPR from 296→238 cut latency substantially in a single change.
 The trick: per-iteration Q reload from LDS instead of persistent q_reg.
 
 ## Data Corruption Traps
@@ -73,10 +73,10 @@ indexing. With block_m=128, `q_blk = tid / 64` reads past the q2k_index bounds
 `from .kernel import _attention` captures the function at import time.
 Monkey-patching `kernel._attention` doesn't update the local binding in `core.py`.
 - FIX: Patch BOTH locations
-- COST: This hid an entire 10 ms kernel speedup until discovered
+- COST: This hid an entire kernel speedup until discovered
 
 ### save_for_backward overhead
-autograd's `Function.apply` saves 7 tensors, costing ~10 ms per call even under
+autograd's `Function.apply` saves 7 tensors, a measurable cost per call even under
 `torch.no_grad()` on MI355X.
 - FIX: Gate on `requires_grad`: `if any(t.requires_grad for t in (q,k,v)): ctx.save_for_backward(...)`
 

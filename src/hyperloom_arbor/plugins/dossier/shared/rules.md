@@ -12,15 +12,15 @@ The dossier's skeleton is [template.md](template.md), beside this page. Its chec
 
 Audience: an agent (or a person) about to optimize a model on a GPU target,
 or asked what to optimize. The dossier answers, in order and with sources,
-what the campaign would otherwise rediscover. In the runner's DeepSeek V4.1
-Flash work, each of these cost a plan its result or its time:
+what the campaign would otherwise rediscover. In one DeepSeek V4.1 Flash
+campaign, each of these cost a plan its result or its time:
 
-- a knob aimed at a fused kernel that never ran (Plan 11);
-- a kernel-boundary win that graph capture had already amortized (X3c);
+- a knob aimed at a fused kernel that never ran;
+- a kernel-boundary win that graph capture had already amortized;
 - "C8" turned out to put 1.1 to 1.5 requests in flight, at 6 to 18 rows per
   step, not 48;
-- every C32 profile in Plans 10 to 15 captured the client's warmup;
-- Plan 13's best possible gain sat 19.6 times below its noise floor;
+- every C32 profile across several plans captured the client's warmup;
+- one plan's best possible gain sat an order of magnitude below its noise floor;
 - AITER's tuned MoE table had no row for the model's shapes, so every token
   tier ran the untuned fallback.
 
@@ -55,8 +55,7 @@ dossier's index under "Open asks" and go on.
   and before parts 8 and 11 are written. A part 7 with a plan and no results
   leaves the dossier unwritten: parts 8 and 11 are drafts until it lands, and
   no optimization starts from them. The profiler's checks run with it; a
-  check not run is the next work, not a footnote. Model M campaign B (runner
-  plan M00, 2026-10-07) wrote all twelve parts before any capture and ranked
+  check not run is the next work, not a footnote. Model M campaign B wrote all twelve parts before any capture and ranked
   part 11 by evidence instead of ceilings; its first profile, one iteration
   later, re-ranked it.
 - **Re-profile when the tree or the deployment moves.** After a KEEP, and

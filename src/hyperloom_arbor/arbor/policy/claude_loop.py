@@ -224,7 +224,7 @@ def _report_agent_tmp_health() -> None:
     WHAT THE ERRNO MEANS HERE, because it is the diagnosis. On this cluster
     Slurm runs ``JobContainerType=job_container/tmpfs``, so /tmp is a bind
     mount from a PER-JOB path (``/slurm/<jobid>/.<jobid>/_tmp``, confirmed by
-    findmnt on job 42911). If that bind SOURCE is removed while the mount
+    findmnt). If that bind SOURCE is removed while the mount
     stays, every lookup under /tmp returns ENOENT rather than ENOSPC or
     EACCES -- which matches the observed failure exactly, and matches the
     campaign's own report that its baseline artifacts under /tmp had been
@@ -438,7 +438,7 @@ async def _run_claude_once(prompt: str, cwd: str, allowed_tools: list[str],
                 # the model "<synthetic>" ("API Error: Couldn't connect through your proxy"):
                 # not the agent's words, so neither its output nor a sign that the turn started.
                 # Counted as text, it made every gateway outage look like a turn that did work,
-                # which is never retried (a Cluster C job, 2026-10-29).
+                # which is never retried.
                 synthetic = getattr(message, "model", None) == SYNTHETIC_MODEL
                 for block in message.content:
                     if hasattr(block, "text") and synthetic:
@@ -567,7 +567,7 @@ def _last_verdict(output: str, *tokens: str) -> tuple[str, str] | None:
     A verdict is a line of its own. `_run_claude` returns every text block of the turn
     joined, so a token mentioned in passing ("once it is healthy I'll report SERVER_READY
     or SERVER_FAILED") is not one: a substring match on that interim status reverted a
-    correct kernel (30.9 to 1.37 ms per prefill step) under Hyperloom.
+    correct, much faster kernel under Hyperloom.
     Markdown around the line (backticks, bold, a quote or list marker) is ignored, and the
     token must end there (``METRICS`` is not ``METRIC``).
     """
@@ -607,8 +607,8 @@ def _extract_change(output: str) -> str | None:
     Agents decorate it the way they decorate INTENT (`**DONE: ...**`,
     `- DONE: ...`, `**DONE:** ...`), and _extract_class already reads through
     that. This did not: a decorated line parsed as nothing, and the iteration
-    was recorded as "iteration N". Both Model M campaigns' first iterations (Cluster A
-    jobs 61204 and 61205, 2026-10-07) lost their change text that way.
+    was recorded as "iteration N". Two campaigns' first iterations lost their
+    change text that way.
     """
     for line in reversed(output.strip().splitlines()):
         line = line.strip().strip(_MARKDOWN_DECORATION)
@@ -1046,8 +1046,8 @@ def _finalize_iteration(
 
     # ── Component mode: the short-prompt check at a KEEP ────────────────────
     # A second process of the same tree, probed and compared with the first: a
-    # disagreement above the session's floor is the defect GSM8K did not see on
-    # MB's #126 (arbor/measure/short_prompts.py). One that cannot finish refuses
+    # disagreement above the session's floor is the defect GSM8K did not see
+    # (arbor/measure/short_prompts.py). One that cannot finish refuses
     # nothing; the host re-gates every KEEP.
     if decision == "KEEP" and component.is_component(campaign.config):
         from arbor.measure import short_prompts as _sp
@@ -1291,7 +1291,7 @@ def _out_of_tree_artifacts(pack_dir, since_ts: float) -> list[tuple[Path, int]]:
     These live on SHARED STORAGE, outside the container's git workspace, so they
     never appear in the diff the critic reviews.
 
-    Job 38943 iteration 2 is why this exists. The agent found a genuine ROCm
+    One campaign's iteration is why this exists. The agent found a genuine ROCm
     feature gap, wrote a 22 KB grouped ``tl.dot_scaled`` MXFP8 BMM evaluator,
     swept it against the BF16 einsum on real weights, and recorded seven ledger
     findings. The gate returned PROBE. The critic then reverted it with "the
@@ -1802,7 +1802,7 @@ def _host_bench_steps(command: str, port, iter_dir, bench_output_path: str,
     replay); with replays, the fixed block books the mean, as with the pack's bench.
     The pack's second metric (``secondary_key``) is recorded beside it when the client
     gives it: without it the gate is one-axis, blind to a gain bought with the other
-    axis (a Cluster C job, 2026-10-30: `secondary: None` on every KEEP).
+    axis (`secondary: None` on every KEEP).
     """
     base = Path(iter_dir) / "host_bench"
     outs = [base] if repeats <= 1 else [base / f"run{i}" for i in range(1, repeats + 1)]
@@ -2161,8 +2161,8 @@ def run_iteration(
         )
 
     # ── Step 3c: A document has no server: the harness runs the validators ──
-    # A `document` workload (a plan, written before an optimization round; the
-    # runner's plans/model-m/00 §4.11) produces text, not a serving tree. Its
+    # A `document` workload (a plan, written before an optimization round)
+    # produces text, not a serving tree. Its
     # bench scores the committed draft and its correctness script checks the
     # draft's hard requirements. Both are the pack's protected validators, run
     # here by the harness with no agent between the draft and the number --
@@ -2295,9 +2295,8 @@ def run_iteration(
     # duration_seconds cannot be checked, which is the campaign's first
     # integrity rule) and no secondary metric (so the two-axis gate is inert).
     #
-    # Run 2 iteration 1 measured p90_interactivity 33.50 against a 31.68
-    # baseline -- a 5.7% gain on the second axis, larger than its throughput
-    # gain -- and the gate never saw it. Run 1 lost iterations 8, 10 and 15 the
+    # Run 2 iteration 1 measured a gain on p90_interactivity, the second axis,
+    # larger than its throughput gain -- and the gate never saw it. Run 1 lost iterations 8, 10 and 15 the
     # same way.
     comp = component.is_component(config)
     session_mount = config.get("session_mount", "/workspace/sessions")
@@ -2349,8 +2348,8 @@ def run_iteration(
     # REPEATED MEASUREMENT. `bench_repeats` > 1 runs the replay N times and
     # books the MEAN, because a single replay is not a reliable estimate of this
     # workload: re-measuring a byte-identical v3 tree on its own node, same code
-    # path, same DURATION, differed by 3.02% (323.308 -> 313.535), and v3's own
-    # post-iteration-6 measurements spanned 2.06%. Arbor books best_metric as a
+    # path, same DURATION, differed by more than the gate, and v3's own
+    # post-iteration-6 measurements spanned about as much. Arbor books best_metric as a
     # running MAX, so with noise that large the bar lands on the luckiest draw
     # and nothing afterwards can clear it.
     #

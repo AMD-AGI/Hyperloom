@@ -41,7 +41,7 @@ of faulting. This means boundary bugs produce slightly-wrong results, not crashe
 MFMA output lane layout creates systematic bank conflicts when writing to shared
 memory with naive row-major addressing.
 - FIX: Column swizzling: `col ^ (row >> 1)` before LDS store
-- EVIDENCE: 15-20% throughput improvement on shared memory-heavy kernels
+- EVIDENCE: a clear throughput improvement on shared memory-heavy kernels
 
 ## Pipeline Traps
 
@@ -70,7 +70,7 @@ buffer AND BEFORE any LDS writes to the next buffer. Wrong placement = data race
 ### VGPR 256 cliff
 occupancy=2 requires VGPR ≤ 256. At 257 VGPR, occupancy drops to 1 — this is a
 step function, not gradual.
-- EVIDENCE: 296→238 VGPR delivered −32% latency in CK production kernel
+- EVIDENCE: 296→238 VGPR cut latency substantially in a CK production kernel
 - FIX: Trade persistent register tiles for per-iteration LDS reloads
 - FIX: Move accumulator from VGPR to AGPR (separate file, doesn't count toward limit)
 
@@ -91,7 +91,7 @@ sizes. Mismatched tiles compile but produce wrong results.
 ### Missing KITTENS_CDNA4 define
 HipKittens defaults to CDNA3 code paths. Missing `-DKITTENS_CDNA4` on gfx950 uses
 suboptimal instruction sequences.
-- SYMPTOM: Works but 20-30% slower than expected
+- SYMPTOM: Works but markedly slower than expected
 - FIX: Always pass `-DKITTENS_CDNA4` for gfx950 targets
 
 ### shared_allocator must be first in kernel

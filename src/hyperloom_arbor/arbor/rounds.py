@@ -1,10 +1,10 @@
 """The end of an optimization round: a same-node A/B, then the next round.
 
-Operator, 2026-10-21: "the target is not a STOP, but it should trigger A/B and next
-round of optimization. also unify the 'all plan items verdicted' trigger with this."
-Model M day-0's b0 stopped at its 1.40x early-exit target while its last KEEP still
-gained 3.4%, and the number that stopped it was the chained first-node scale
-(arbor/rebaseline.py), each KEEP's single replay carried forward: an upper bound.
+The target is not a STOP: it triggers an A/B and the next round of optimization,
+and the "all plan items verdicted" trigger is unified with it. A campaign once
+stopped at its early-exit target while its last KEEP still gained, and the number
+that stopped it was the chained first-node scale (arbor/rebaseline.py), each
+KEEP's single replay carried forward: an upper bound.
 
 A round ends on either trigger:
 
@@ -36,8 +36,7 @@ State lives in ``<session>/round_end.json``; only the harness writes it.
 
 Parallel mode (arbor/parallel) is the same loop, faster: its round ends when every
 lane has closed and no dependent lane waits; its integration is the A/B, and the next
-round maps the integrated tree (operator, 2026-10-21: "all lanes finished work and no
-dependent work is scheduled, we will start A/B and next batch of plans"). A lane runs
+round maps the integrated tree. A lane runs
 no round end of its own: its config has no target and no round_ab, and its launch
 sets ROUND_AB=0.
 

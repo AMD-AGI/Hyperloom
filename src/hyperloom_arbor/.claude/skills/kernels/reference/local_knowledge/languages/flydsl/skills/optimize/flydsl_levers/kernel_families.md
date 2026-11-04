@@ -43,7 +43,7 @@ high-level API (the `*_kernels.py` wrapper) and a DSL body under `kernels/`.
   GPU time; rewriting it in FlyDSL drove the e2e numbers below. Operators: `fused_moe_grouped_gemm`,
   `moe_dispatch_combine`, `grouped_gemm_moe`.
 
-  Vendor-reported (AMD blog, MI300X gfx942, ROCm 7.2.0, PyTorch 2.9.1, aiter
+  Vendor-reported ([AMD blog](https://rocm.blogs.amd.com/artificial-intelligence/kimi-k2.5-optimize/README.html), MI300X gfx942, ROCm 7.2.0, PyTorch 2.9.1, aiter
   0.1.5.post5.dev409+g6b157bbb2, 2026-03-24), Kimi-K2.5 e2e:
   | metric | baseline | FlyDSL | Δ |
   |---|---|---|---|

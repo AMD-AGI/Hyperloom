@@ -39,9 +39,9 @@ source and label, as everywhere in the dossier.
   - launches it cannot avoid.
 
   Turn each into time with the device's measured bandwidth and peaks: the
-  hardware skill's "What our nodes achieve" table
-  (`.claude/skills/hardware/SKILL.md`), or a measurement of your own, never
-  the datasheet. Its reference pages give the instruction-level limits (MFMA
+  hardware skill's "Measured, not spec" section
+  (`.claude/skills/hardware/SKILL.md`) says how to measure them; never use
+  the datasheet alone. Its reference pages give the instruction-level limits (MFMA
   rates, LDS banks, direct-to-LDS widths) a kernel design has to respect.
 - **The gap:** the region's time now minus the floor, in µs per layer, per
   step and as a share of the run.
@@ -122,13 +122,12 @@ Lessons the stages carry, from Model M campaigns B4 and C4:
 - **Gate correctness before timing,** with a negative control. Two checks
   that passed vacuously were caught that way (C4 iteration 34).
 - **A fixture can rank right and price wrong.** C4 iteration 31's served
-  saving was 334.7 µs per step, against 110–192 projected, so only S5
-  books a gain.
+  saving was well off its projection, so only S5 books a gain.
 - **Prove the arm by an artifact the run owns,** such as a cache file or a
   marker the kernel writes, not by a log line that may be swallowed (C4
   iteration 34).
 - **Probe before building:** pricing the design's parts first changed the
-  design (B4 iteration 26: the split grid was 2× the interleaved one).
+  design (B4 iteration 26: the split grid lost to the interleaved one).
 
 ### The `## Items` block
 
@@ -229,8 +228,7 @@ it. Turning the switch on is held to the accuracy gate.
   the switch unset have both run. A default-on change keeps its switch.
 - **Tests at the production shapes:** they assert the path ran, gated to
   the architecture so they can't pass vacuously.
-- **The PR:** the target project's rules (for Model M on mpk, the runner's
-  `plans/model-m/MPK_PR_GUIDELINE.md`).
+- **The PR:** the target project's rules.
 
 ## 8. Risks
 
@@ -242,37 +240,34 @@ it.
 
 ## Worked example
 
-Two plans from the Model M dossier
-(`docs/dossier/model-m-mi350x/`), written and run by campaigns'
-agents on MI350X, 2026-10-13 to 10-14. One built a slice of its rewrite and
-kept it; the other stopped at S1, as it should have. Iterations are the
-sessions' own (`session.json` lessons); the gate in both was 0.5 %.
+Two plans from a Model M dossier, written and run by campaigns' agents. One
+built a slice of its rewrite and kept it; the other stopped at S1, as it
+should have. The numbers in the `## Items` blocks below are illustrative.
 
-### (a) C5, rewrite R1: the MoE finalize chain
+### (a) Rewrite R1: the MoE finalize chain
 
-The plan is `u3-c8/11.u3-plan-finalize-chain.md`, written at C5's iteration 1.
-Its region is a reduce-scatter, a finalize, a copy and an all-gather per layer
-and microbatch on the mixed step: 1647.8 µs per call, which the compute stream
-waits on. It carried three designs as one ladder, S1 to S6: S-A (a staged
-bf16 peer reduce-scatter), S-B (S-A without its staging copy) and S-C (S-A
-with an MXFP8 transport, an accuracy trade).
+The plan's region is a reduce-scatter, a finalize, a copy and an all-gather
+per layer and microbatch on the mixed step, which the compute stream waits
+on. It carried three designs as one ladder, S1 to S6: S-A (a staged bf16 peer
+reduce-scatter), S-B (S-A without its staging copy) and S-C (S-A with an
+MXFP8 transport, an accuracy trade).
 
-What each design's stages measured, mapped onto §5:
+What each design's stages showed, mapped onto §5:
 
-| The plan's stage | §5 stage | Iteration | Measured | Verdict | Recorded in |
-|---|---|---|---|---|---|
-| S1 | S1 Reference | 1 | chain 1647.8 µs (reduce-scatter 1472.95); compute stall 55.42 ms/step, 2.31 % of run, 4.6× the gate | done | `u3-c8/07.u3-profile.md`; the plan's §1–2 |
-| S-A: S2 | S2 Correct | 2 | 55.42 dB against fp32, RCCL's ring 51.43; both negative controls fire | pass | iteration 2's lesson; `11.u3-addendum-collective-stream-placement.md` §1 |
-| S-A: (C4's fixture) | S3 Fast | C4 it 23–25 | 1209.0 µs against RCCL's 1472.95: 264 µs, 0.65 of the 404 µs gap; priced at +0.79 % of run | pass, on a fixture | the plan's §2; `collective-stream-placement` §1 |
-| S-A: S3 Dispatched | S4 In tree | 2 | graph capture survives; 4 of 4 ranks installed and dispatching through call #1000 | pass | the same addendum, §1 |
-| S-A: S4 A/B | S5 A/B | 2 | REVERT: −1.9 % (125.08 against the 127.54 bar), median TTFT +7.4 % | killed | iteration 2's lesson |
-| (S-A explained) | — | 3–6 | wrong stream (3), corrected: already on a side stream (4), a DBO pairing loss (5); in situ (6): the kernel is 186.7 µs faster than the ring, but two rendezvous barriers cost 299.2 µs per call and the staging copy 300.9 µs, 3.1× its idle price | — | addenda `collective-stream-placement`, 2, 3, 4 |
-| S-B: S5 | S4, S5 | 6 | not built: without the copy, the chain is still 121.6 µs per call slower than RCCL's, about −0.6 % of run | killed unbuilt | addendum 4 §6 |
-| S-C: S6 | S2 Correct | 17, 20 | 17: the transport at 32.5–32.9 dB sits 12.3 dB below the MXFP4 partial's own error (+0.26 dB in all); 20, on the shipped module: 32.69 dB, three negative controls firing | pass | addenda 15; 18 §2 |
-| S-C: S6 | S3 Fast | 18–20 | 18: at the shipped grid MXFP8 is no faster (1283.8 against 1239.9 µs), at 32 workgroups 737.5; 19: the local pass priced cold, S-C at +0.63 to +1.71 % of run; 20: the whole link 795.1 µs against RCCL's 1489.8 (bf16 staged 1395.6), +1.01 to +1.14 % of run | pass | addenda 16, 17, 18 §3 |
-| S-C: S6 | S4 In tree | 20 | four switches (`VLLM_ROCM_MODEL_M_PEER_RS`, `_STAGED`, `_FMT=mxfp8`, `_LOCAL_BF16`), off by default; vLLM only; declines under capture, so decode is untouched | pass | addendum 18 §1, §5 |
-| S-C: S6 | S5 A/B | 20 | KEEP: +1.9 % (137.59 against that node's 135.02 bar), p90 interactivity −0.1 % | done | iteration 20's lesson; runner `plans/model-m/07_C5_RESULTS.md` |
-| (after it) | a new direction | 21–23 | the fused form (MoE stage 2 writes MXFP8): priced at +0.85 % of run (22); its first step, stage 2's tile 128 → 256, REVERT −0.1 % (23) | — | addenda 19, 20, 21 |
+| The plan's stage | §5 stage | Iteration | What it showed | Verdict |
+|---|---|---|---|---|
+| S1 | S1 Reference | 1 | the chain's time per call and the compute stall it causes, several times the gate | done |
+| S-A: S2 | S2 Correct | 2 | SNR against fp32 above RCCL's ring; both negative controls fire | pass |
+| S-A: (an earlier fixture) | S3 Fast | earlier campaign | faster than RCCL's reduce-scatter, closing most of the gap, on a fixture | pass, on a fixture |
+| S-A: S3 Dispatched | S4 In tree | 2 | graph capture survives; every rank installed and dispatching | pass |
+| S-A: S4 A/B | S5 A/B | 2 | REVERT: below the bar | killed |
+| (S-A explained) | — | 3–6 | wrong stream (3), corrected: already on a side stream (4), a DBO pairing loss (5); in situ (6): the kernel beats the ring, but two rendezvous barriers and the staging copy cost more than it saves | — |
+| S-B: S5 | S4, S5 | 6 | not built: without the copy, the chain is still slower than RCCL's | killed unbuilt |
+| S-C: S6 | S2 Correct | 17, 20 | the transport's error sits well below the MXFP4 partial's own; negative controls firing | pass |
+| S-C: S6 | S3 Fast | 18–20 | at the shipped grid MXFP8 is no faster, at a smaller grid it is; the whole link beats RCCL's | pass |
+| S-C: S6 | S4 In tree | 20 | four switches (`VLLM_ROCM_MODEL_M_PEER_RS`, `_STAGED`, `_FMT=mxfp8`, `_LOCAL_BF16`), off by default; vLLM only; declines under capture, so decode is untouched | pass |
+| S-C: S6 | S5 A/B | 20 | KEEP above the bar, interactivity unchanged | done |
+| (after it) | a new direction | 21–23 | the fused form (MoE stage 2 writes MXFP8): priced (22); its first step, stage 2's tile 128 → 256, REVERT (23) | — |
 
 S-A's S4 and S5 ran in one WIN iteration, and so did S-C's. In this format
 they are two: a FIX that lands the code behind its switches, off, and must
@@ -286,10 +281,10 @@ its own chain after `s1`; S-B builds on S-A, so it waits for `a.s5`:
 
 ITEMS: [
  {"id": "s1", "stage": "S1", "title": "Reference: the finalize chain and the stall it releases, in situ",
-  "gate": {"measure": "region_us", "reference": 1647.8, "tolerance_pct": 10},
+  "gate": {"measure": "region_us", "reference": 1000.0, "tolerance_pct": 10},
   "stop": {"measure": "gap_x_gate", "below": 3, "status": "below_floor"}, "stops_plan": true},
  {"id": "a.s2", "stage": "S2", "title": "S-A: the staged bf16 peer reduce-scatter against fp32", "after": ["s1"],
-  "gate": {"require": ["correct", "negative_control_fired"], "measure": "snr_db", "min": 51.44}},
+  "gate": {"require": ["correct", "negative_control_fired"], "measure": "snr_db", "min": 50.0}},
  {"id": "a.s3", "stage": "S3", "title": "S-A: the peer kernel at the served payload", "after": ["a.s2"],
   "gate": {"measure": "gap_share", "min": 0.5}},
  {"id": "a.s4", "stage": "S4", "title": "S-A: in the tree, off by default", "after": ["a.s3"],
@@ -312,33 +307,31 @@ What it teaches:
   and S-B, so it was not priced until iteration 17, after both had died. As
   its own chain after `s1`, it could have started at iteration 2.
 - **Explain a losing A/B in situ before killing its sibling.** Iteration 2's
-  −1.9 % was read three ways in three iterations before iteration 6 traced
+  REVERT was read three ways in three iterations before iteration 6 traced
   it in the server: the barriers and the copy, not the kernel. That killed
   S-B on evidence rather than by association, and it made S-C's case: under
-  MXFP8 the copy becomes the format conversion the transport needs anyway
-  (addendum 18 §1).
-- **The records were scattered.** C5 wrote 21 addenda, 11 on this plan, and
-  the plan's own stage table was never updated past S1. Here the harness
-  writes the stage records (§5): `stages.json`, each attempt with its
-  iteration, numbers and evidence.
+  MXFP8 the copy becomes the format conversion the transport needs anyway.
+- **The records were scattered.** The campaign wrote many addenda, most on
+  this plan, and the plan's own stage table was never updated past S1. Here
+  the harness writes the stage records (§5): `stages.json`, each attempt with
+  its iteration, numbers and evidence.
 - **A lane ends at its last verdict.** Every item had one at iteration 20.
   The fused form came after it; it is a proposal for the next round's map,
   not more of this plan.
 
-### (b) B5, rewrite 3: the decode layer's collective count
+### (b) Rewrite 3: the decode layer's collective count
 
-The plan is `11.u3-plan-decode-collectives.md`. Its prize was measured
-first: 2.06–2.88 % of run per decode collective removed, 9.81 % for all four.
-It had no mechanism, so S1 was a dependency census from the source, with a
-hard stop: no removal priced at 3× the gate, no rewrite.
+Its prize was measured first: the share of run each decode collective
+removed would save, and the share for all four. It had no mechanism, so S1
+was a dependency census from the source, with a hard stop: no removal priced
+at 3× the gate, no rewrite.
 
-| The plan's stage | §5 stage | Iteration | Measured | Verdict | Recorded in |
-|---|---|---|---|---|---|
-| S1 census | S1 Reference | 7 | the four collectives are totally ordered by data dependence, and the model has no shared expert to hide one behind; the diamond fee, re-measured, is 5.8–6.4 µs, not the 14.8–16.6 µs carried from B4; the best single collective nets +0.83 % of run, 1.66× the gate | stop: below_floor | the plan's "S1 RESULT"; `11.u3-directions.md` §11.11; `07.u3-profile.md` §7.16 |
-| S2 overlap, S3 riders | — | — | not run | killed by the stop | the same |
+| The plan's stage | §5 stage | Iteration | What it showed | Verdict |
+|---|---|---|---|---|
+| S1 census | S1 Reference | 7 | the four collectives are totally ordered by data dependence, and the model has no shared expert to hide one behind; the diamond fee, re-measured, was well below the figure carried from an earlier campaign; the best single collective nets under 3× the gate | stop: below_floor |
+| S2 overlap, S3 riders | — | — | not run | killed by the stop |
 
-The census is iteration 7's lesson in B5's session; the plan and part 11 call
-it iteration 8. The items, with the stop on `s1`:
+The items, with the stop on `s1`:
 
 ```
 ## Items
@@ -358,7 +351,7 @@ ITEMS: [
 ```
 
 At iteration 7, `STAGE: {"item": "<map ID>.s1", "result": "stop", "measured":
-{"gain_x_gate": 1.66, "census": true}, ...}` closes `s1` as below_floor and
+{"gain_x_gate": 1.5, "census": true}, ...}` closes `s1` as below_floor and
 every later item as killed, and the lane closes.
 
 **A plan stopped at S1 is a success.** One iteration, no build, and the

@@ -31,11 +31,10 @@ served code is laid out differently (a path split, a layer re-partitioned, a
 collective moved) and the step's time goes elsewhere, sometimes drastically.
 Part 7's rule (re-profile after a KEEP) keeps the profile current inside a
 campaign. It does not re-read the code or re-rank the directions, so the
-campaign goes on optimizing from a map of a tree that no longer exists. Model M
-campaign B2 (runner `plans/model-m`, 2026-10-09) kept ten changes in forty
-iterations, a sequence-parallel prefill path among them, and its stack was
-then merged onto another team's, which partitions the MoE pooler another way;
-the dossier B2 started from describes neither tree.
+campaign goes on optimizing from a map of a tree that no longer exists. One
+campaign kept ten changes in forty iterations, a sequence-parallel prefill path
+among them, and its stack was then merged onto another team's, which partitions
+the MoE pooler another way; the dossier it started from describes neither tree.
 
 **When.** The operator decides, on signs like these:
 
@@ -50,10 +49,9 @@ the dossier B2 started from describes neither tree.
 An agent that sees these signs says so in its verdict and goes on with its
 plan; it does not stop the campaign.
 
-**In the campaign, by the harness: when the map is explored** (operator,
-2026-10-20: "if all the directions were explored already, the campaign
-should not explore aimlessly, but should run dossier and profile again, then
-continue 'like new'").
+**In the campaign, by the harness: when the map is explored.** The campaign
+does not explore aimlessly: it runs the dossier and the profile again, then
+continues like new.
 - **The trigger.** When every direction of the campaign's map is closed,
   Arbor (`arbor/directions.py`) makes the next iterations this round, in the
   same session and without a STOP.
@@ -67,8 +65,8 @@ continue 'like new'").
   naming the file, with the LEARN cap waived.
 - **What the new map starts.** A new map round, with the streak counters
   reset: the campaign carries on like new.
-- **When the new map has no open increment** (operator, 2026-10-22: Model M
-  day-0 b0 stopped there, and "it should have started like a new campaign"):
+- **When the new map has no open increment,** the campaign starts like a new
+  one:
   - **a fresh start**: the next iterations write a new dossier as a new
     campaign would, in the same session: 03.uK, the code read again whole;
     07.uK, the profile again; 10.uK; and 11.uK, a map from 03.uK and 07.uK,
@@ -139,10 +137,9 @@ measured. Then, on the served tree as it now is, in order:
      level sees it.
 
    The hand-off a restarted campaign reads is cut from this part. Model M's round
-   u2 did this step by hand as `11.u2-c2-ledger.md`. Across eight Model M
-   campaigns (runner `plans/model-m/BC_PROBES_AND_KERNELS.md`), at least 5 of the
-   30 KEEPs that came from a handed ranking reworked something an earlier map
-   had killed. The core kernels there were killed on floors that a later
+   u2 did this step by hand as `11.u2-c2-ledger.md`. Across several Model M
+   campaigns, a fair share of the KEEPs that came from a handed ranking reworked
+   something an earlier map had killed. The core kernels there were killed on floors that a later
    campaign found the kernel under test had measured itself.
 5. **11.uK, the directions again**, as part 11, from 03.uK, 06.uK, 07.uK and
    10.uK, and the parts still current. A direction the campaign killed stays

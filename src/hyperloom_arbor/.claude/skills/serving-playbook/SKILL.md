@@ -23,8 +23,8 @@ The harness reads it (`arbor/knobs.py`):
 ## Rules that hold for every serving change
 
 - **Price every direction on this node.** A gain reported elsewhere was measured on another model, GPU, image or
-  operating point: it is a lead, never this node's number. Use the dossier's part 7 and the `hardware` skill's
-  measured table to price it here.
+  operating point: it is a lead, never this node's number. Use the dossier's part 7 and numbers measured on this
+  node (the `hardware` skill's "Measured, not spec") to price it here.
 - **Prove the arm differed.** Many settings are silent no-ops: a renamed env var, a size gate that keeps a path off,
   a launcher that drops a flag.
   - Check the kernel names in a trace, or the server's own log of what it selected, per arm.

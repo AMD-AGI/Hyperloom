@@ -2,7 +2,7 @@
 
 ## Summary
 CK-tile block-sparse attention forward for FastVideo on MI355X (gfx950).
-2.0–2.7× over Triton at Sq≥8K, bf16, ~10% sparsity.
+Well ahead of Triton at Sq≥8K, bf16, ~10% sparsity.
 
 ## Key Architecture
 - Pipeline: `BlockGemmPipelineVSA` with delta-encoded LUT
@@ -10,9 +10,9 @@ CK-tile block-sparse attention forward for FastVideo on MI355X (gfx950).
 - Tile: kM0=128, kN0=64, kK0=32, 4 warps → 8 waves/CU (LDS=27,136 B unchanged)
 - Memory-bound: WAIT_ANY/MFMA ≈ 9–10
 
-## Wrapper Optimizations (cumulative 1.22–1.48× over CK base)
+## Wrapper Optimizations (cumulative, over CK base)
 1. **Fused delta LUT**: `map_to_index_and_delta` triton kernel emits abs+delta in one launch
-2. **skip_vbs_correction**: skip VBS kernel when all blocks are full (saves ~5 µs)
+2. **skip_vbs_correction**: skip VBS kernel when all blocks are full (saves a launch)
 3. **Pre-computed delta passthrough**: `q2k_delta` kwarg skips HIP abs→delta kernel
 4. Combined: single GPU launch (CK attention kernel only)
 
@@ -20,7 +20,7 @@ CK-tile block-sparse attention forward for FastVideo on MI355X (gfx950).
 - Doubles K/V reuse per Q token → directly attacks the HBM bandwidth bottleneck
 - Same LDS footprint → doubles wave occupancy (4→8 waves/CU)
 - PMC: VMEM_INSTS/MFMA dropped from ~7.4 to 0.29
-- 1.18× faster than block_m=64 at same density; up to 2.69× over Triton
+- faster than block_m=64 at same density, and well ahead of Triton
 
 ## When to Use Which block_m
 - **block_m=128**: Sq ≥ 8K, uniform blocks, natively-generated 128-granularity block maps
@@ -42,12 +42,8 @@ CK-tile block-sparse attention forward for FastVideo on MI355X (gfx950).
 - Branches: `feature/ck-block-sparse-attn-clean` (FastVideo), `sla-ck-fwd-release-inference` (aiter-amd)
 
 ## Performance (MI355X, D=128, ~10% sparsity)
-| Sq | Triton (ms) | CK opt (ms) | Speedup |
-|----|-------------|-------------|---------|
-| 4,096 | 0.054 | 0.033 | 1.66× |
-| 16,384 | 0.632 | 0.258 | 2.45× |
-| 49,152 | 5.651 | 2.104 | 2.69× |
-| 65,536 | 9.370 | 3.771 | 2.48× |
+CK opt beats Triton at every Sq tested (4K to 64K); the margin is smallest at
+4K and largest from 16K up.
 
 ## Lessons Learned
 1. VBS kernel parameter coupling: block_q and block_kv must be independent when tile sizes differ

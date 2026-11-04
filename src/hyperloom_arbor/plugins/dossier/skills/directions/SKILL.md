@@ -54,18 +54,16 @@ campaign's map from it, and a dossier pass ends there. Check it first:
   - Part 11 lists rewrites in their own table, each with a kernel plan
     ([kernel-plan.md](kernel-plan.md)), even while increments lead.
 - **When rewrites go first: the increments are running out.** Watch for these
-  signs. They're calibrated on Model M campaigns B4 and C4 (MI350X, 0.5% gate,
-  2026-10-13); revisit the numbers after the first rewrite campaign.
+  signs. They're calibrated on two earlier campaigns; revisit the numbers after
+  the first rewrite campaign.
   - **The KEEPs are small:** the median of the last five KEEPs is under 3×
-    the gate. B4's was 1.27%, C4's 1.39%.
+    the gate.
   - **The probes kill their own leads:** five or more probes in a row each
-    closed the lead it set out to build, at or below the gate. That was B4's
-    iterations 42–46, and C4's 38–43, the last of which "kills the
-    campaign's last big build".
+    closed the lead it set out to build, at or below the gate.
   - **The board is thin:** no increment left has a measured ceiling of 3× the
-    gate, or what's left is launch-bound or already at its roofline. B4's
-    mixed-step all-gather already ran at the XGMI roofline; 86% of C4's
-    mixed-step idle time was a dependency stall.
+    gate, or what's left is launch-bound or already at its roofline (an
+    all-gather already at the XGMI roofline, idle time that is mostly a
+    dependency stall).
   - **Arbor's `barren_streak` has reached its notice (8).** Any KEEP resets it,
     so on its own it misses a campaign that still keeps a gate-sized change
     now and then. The first three signs don't.
@@ -94,8 +92,9 @@ campaign's map from it, and a dossier pass ends there. Check it first:
     with a kernel plan, or lists it as set aside with the reason. Reasons: the
     image lacks it, the operating point doesn't favour it, it is already on,
     or its best case is below the floor.
-  - **Price it on this node,** from part 7 and the hardware skill's measured
-    table, never from a gain reported elsewhere.
+  - **Price it on this node,** from part 7 and numbers measured on this node
+    (the hardware skill's "Measured, not spec"), never from a gain reported
+    elsewhere.
 - **The map: what the campaign tracks.** Every direction has a map ID,
   `m-<component>`, which stays the same across update rounds; a direction
   that changes so much it needs a new ID says which one it replaces.

@@ -7,15 +7,15 @@ description: Find, or write if it is missing, the dossier an optimization campai
 
 Audience: an agent (or a person) about to optimize a model on a GPU target,
 or asked what to optimize. The dossier answers, in order and with sources,
-what the campaign would otherwise rediscover. In the runner's DeepSeek V4.1
-Flash work, each of these cost a plan its result or its time:
+what the campaign would otherwise rediscover. In one DeepSeek V4.1 Flash
+campaign, each of these cost a plan its result or its time:
 
-- a knob aimed at a fused kernel that never ran (Plan 11);
-- a kernel-boundary win that graph capture had already amortized (X3c);
+- a knob aimed at a fused kernel that never ran;
+- a kernel-boundary win that graph capture had already amortized;
 - "C8" turned out to put 1.1 to 1.5 requests in flight, at 6 to 18 rows per
   step, not 48;
-- every C32 profile in Plans 10 to 15 captured the client's warmup;
-- Plan 13's best possible gain sat 19.6 times below its noise floor;
+- every C32 profile across several plans captured the client's warmup;
+- one plan's best possible gain sat an order of magnitude below its noise floor;
 - AITER's tuned MoE table had no row for the model's shapes, so every token
   tier ran the untuned fallback.
 
@@ -66,20 +66,6 @@ anything else:
    Material that is not in dossier form, such as the runner's `research/` and
    `learn/code/`, is a source to write from, not a dossier.
 
-## Worked example
-
-DeepSeek V4.1 Flash, AgentX, MI355X, in `<fork>/<runner>`:
-
-| Part | There |
-| --- | --- |
-| part definitions this skill grew from | `plans/skills/S01_PREFLIGHT.md` |
-| system, and where its time goes | `research/dsv41-flash-on-vllm.md` |
-| code reading, 16 reports | `learn/code/` (`CONTEXT.md` first) |
-| workload | `workload/l01-understand-your-workload-first.md`, `workload/r01-agentx-seed-workload-study.md` |
-| kernels and KernelForge | `docs/kernelforge.md` |
-| what worked and what did not | `research/optimization-ledger.md` |
-| profiles | `research/profiling-inventory.md`; the host's TraceLens profile (`component.profile`), in component mode |
-
 ## Ask the user first
 
 Some inputs only a person has. When you write or refresh a part that needs
@@ -111,8 +97,7 @@ dossier's index under "Open asks" and go on.
   and before parts 8 and 11 are written. A part 7 with a plan and no results
   leaves the dossier unwritten: parts 8 and 11 are drafts until it lands, and
   no optimization starts from them. The profiler's checks run with it; a
-  check not run is the next work, not a footnote. Model M campaign B (runner
-  plan M00, 2026-10-07) wrote all twelve parts before any capture and ranked
+  check not run is the next work, not a footnote. Model M campaign B wrote all twelve parts before any capture and ranked
   part 11 by evidence instead of ceilings; its first profile, one iteration
   later, re-ranked it.
 - **Re-profile when the tree or the deployment moves.** After a KEEP, and
@@ -382,18 +367,16 @@ The procedure is [kernels.md](kernels.md).
   - Part 11 lists rewrites in their own table, each with a kernel plan
     ([kernel-plan.md](kernel-plan.md)), even while increments lead.
 - **When rewrites go first: the increments are running out.** Watch for these
-  signs. They're calibrated on Model M campaigns B4 and C4 (MI350X, 0.5% gate,
-  2026-10-13); revisit the numbers after the first rewrite campaign.
+  signs. They're calibrated on two earlier campaigns; revisit the numbers after
+  the first rewrite campaign.
   - **The KEEPs are small:** the median of the last five KEEPs is under 3×
-    the gate. B4's was 1.27%, C4's 1.39%.
+    the gate.
   - **The probes kill their own leads:** five or more probes in a row each
-    closed the lead it set out to build, at or below the gate. That was B4's
-    iterations 42–46, and C4's 38–43, the last of which "kills the
-    campaign's last big build".
+    closed the lead it set out to build, at or below the gate.
   - **The board is thin:** no increment left has a measured ceiling of 3× the
-    gate, or what's left is launch-bound or already at its roofline. B4's
-    mixed-step all-gather already ran at the XGMI roofline; 86% of C4's
-    mixed-step idle time was a dependency stall.
+    gate, or what's left is launch-bound or already at its roofline (an
+    all-gather already at the XGMI roofline, idle time that is mostly a
+    dependency stall).
   - **Arbor's `barren_streak` has reached its notice (8).** Any KEEP resets it,
     so on its own it misses a campaign that still keeps a gate-sized change
     now and then. The first three signs don't.
@@ -422,8 +405,9 @@ The procedure is [kernels.md](kernels.md).
     with a kernel plan, or lists it as set aside with the reason. Reasons: the
     image lacks it, the operating point doesn't favour it, it is already on,
     or its best case is below the floor.
-  - **Price it on this node,** from part 7 and the hardware skill's measured
-    table, never from a gain reported elsewhere.
+  - **Price it on this node,** from part 7 and numbers measured on this node
+    (the hardware skill's "Measured, not spec"), never from a gain reported
+    elsewhere.
 - **The map: what the campaign tracks.** Every direction has a map ID,
   `m-<component>`, which stays the same across update rounds; a direction
   that changes so much it needs a new ID says which one it replaces.
@@ -469,7 +453,7 @@ change the long bench already judged, injected delays proven on the device);
 per candidate, its cost, its own floor, sign agreement with the long bench and
 false positives. Until a candidate is validated, its readings may order work
 but never keep or reject a change; validated, it screens, and a claim still
-needs the long bench. The runner's Plan 21 is the worked example.
+needs the long bench.
 
 ## Updating the dossier: after a long campaign or a merge
 
@@ -479,11 +463,10 @@ served code is laid out differently (a path split, a layer re-partitioned, a
 collective moved) and the step's time goes elsewhere, sometimes drastically.
 Part 7's rule (re-profile after a KEEP) keeps the profile current inside a
 campaign. It does not re-read the code or re-rank the directions, so the
-campaign goes on optimizing from a map of a tree that no longer exists. Model M
-campaign B2 (runner `plans/model-m`, 2026-10-09) kept ten changes in forty
-iterations, a sequence-parallel prefill path among them, and its stack was
-then merged onto another team's, which partitions the MoE pooler another way;
-the dossier B2 started from describes neither tree.
+campaign goes on optimizing from a map of a tree that no longer exists. One
+campaign kept ten changes in forty iterations, a sequence-parallel prefill path
+among them, and its stack was then merged onto another team's, which partitions
+the MoE pooler another way; the dossier it started from describes neither tree.
 
 **When.** The operator decides, on signs like these:
 
@@ -498,10 +481,9 @@ the dossier B2 started from describes neither tree.
 An agent that sees these signs says so in its verdict and goes on with its
 plan; it does not stop the campaign.
 
-**In the campaign, by the harness: when the map is explored** (operator,
-2026-10-20: "if all the directions were explored already, the campaign
-should not explore aimlessly, but should run dossier and profile again, then
-continue 'like new'").
+**In the campaign, by the harness: when the map is explored.** The campaign
+does not explore aimlessly: it runs the dossier and the profile again, then
+continues like new.
 - **The trigger.** When every direction of the campaign's map is closed,
   Arbor (`arbor/directions.py`) makes the next iterations this round, in the
   same session and without a STOP.
@@ -515,8 +497,8 @@ continue 'like new'").
   naming the file, with the LEARN cap waived.
 - **What the new map starts.** A new map round, with the streak counters
   reset: the campaign carries on like new.
-- **When the new map has no open increment** (operator, 2026-10-22: Model M
-  day-0 b0 stopped there, and "it should have started like a new campaign"):
+- **When the new map has no open increment,** the campaign starts like a new
+  one:
   - **a fresh start**: the next iterations write a new dossier as a new
     campaign would, in the same session: 03.uK, the code read again whole;
     07.uK, the profile again; 10.uK; and 11.uK, a map from 03.uK and 07.uK,
@@ -587,10 +569,9 @@ measured. Then, on the served tree as it now is, in order:
      level sees it.
 
    The hand-off a restarted campaign reads is cut from this part. Model M's round
-   u2 did this step by hand as `11.u2-c2-ledger.md`. Across eight Model M
-   campaigns (runner `plans/model-m/BC_PROBES_AND_KERNELS.md`), at least 5 of the
-   30 KEEPs that came from a handed ranking reworked something an earlier map
-   had killed. The core kernels there were killed on floors that a later
+   u2 did this step by hand as `11.u2-c2-ledger.md`. Across several Model M
+   campaigns, a fair share of the KEEPs that came from a handed ranking reworked
+   something an earlier map had killed. The core kernels there were killed on floors that a later
    campaign found the kernel under test had measured itself.
 5. **11.uK, the directions again**, as part 11, from 03.uK, 06.uK, 07.uK and
    10.uK, and the parts still current. A direction the campaign killed stays

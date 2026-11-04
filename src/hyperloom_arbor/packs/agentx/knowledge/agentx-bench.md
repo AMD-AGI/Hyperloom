@@ -14,7 +14,7 @@ AgentX is NOT a synthetic fixed-token benchmark. It replays real multi-turn agen
 - Fast mode (NUM_PROMPTS ≤ 50): 1200s replay, 1 warmup request per lane — for profiling only, not gating
 - Error rate must stay ≤ 10% for a valid measurement
 - KV cache hit rate from server metrics — relevant for HiCache and prefix caching optimizations
-- Noise: expect 5-16% spread depending on host tuning and workload mix
+- Noise: expect a wide spread depending on host tuning and workload mix
 
 ## What affects throughput
 

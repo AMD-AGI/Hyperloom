@@ -19,8 +19,8 @@ VALID_OBJECTIVE_KINDS = {"maximize_perf", "find_witness"}
 VALID_WORKLOAD_KINDS = {"serving", "kernel", "repro", "document"}
 ALLOWED_PACK_DIRS = {"knowledge", "validator", "eval"}
 
-# A pack's results/ is refused unless the user opts in (`arbor run --allow-pack-results`;
-# operator, 2026-10-30: a colleague's Qwen3.8 packs keep their results there).
+# A pack's results/ is refused unless the user opts in (`arbor run --allow-pack-results`):
+# some packs keep their results there.
 PACK_RESULTS_DIR = "results"
 PACK_RESULTS_FLAG = "--allow-pack-results"
 PACK_RESULTS_CONCERNS = (
@@ -29,8 +29,8 @@ PACK_RESULTS_CONCERNS = (
     "numbers as evidence about its own; they also grow the pack and its repository")
 
 # Skills every campaign agent gets unless its pack lists them in
-# `opt-out-skills:` (names under <arbor_root>/.claude/skills/). Empty on
-# 2026-10-06 (operator): campaigns run as before until a skill is added here.
+# `opt-out-skills:` (names under <arbor_root>/.claude/skills/). Empty:
+# campaigns run as before until a skill is added here.
 DEFAULT_ON_SKILLS: tuple[str, ...] = ()
 
 
@@ -58,7 +58,7 @@ class Pack:
     opt_out_skills: list[str] | None = None
     # Where skills take part (arbor/lifecycle.py): the skill families the pack loads, as
     # <arbor_root>/plugins/<family>/; each chapter's run and use lists; each event's skills.
-    # None when the pack does not declare them, as every pack before M10.
+    # None when the pack does not declare them, as every pack before skill families.
     plugins: list[str] | None = None
     lifecycle: dict | None = None
     triggers: dict | None = None

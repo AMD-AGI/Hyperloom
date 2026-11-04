@@ -322,7 +322,7 @@ def cmd_gate(args: argparse.Namespace) -> int:
             # `git revert` keeps the original commit in history — but that
             # history lives only in the container, and a container lives only on
             # one node whose docker store is not persistent. V6 lost the patches
-            # of iterations 41 (+1.29%), 7 (+0.7%) and 14 (+0.76%) that way:
+            # of iterations 41, 7 and 14 that way:
             # three changes the gate scored as primary WINS and rejected for
             # mechanical faults (a draw-contaminated secondary bar, and a
             # correctness.sh crash on a null `content` field). By the time the

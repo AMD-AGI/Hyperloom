@@ -1,10 +1,10 @@
 """A parallel run's configuration: one JSON file, checked once, then pinned in the store.
 
-    {"run_id": "c6p", "store": "/data/campaigns/parallel",
-     "arbor_ref": "main@<sha>", "arbor_root": "/data/campaigns/Arbor-par",
+    {"run_id": "c6p", "store": "<campaigns>/parallel",
+     "arbor_ref": "main@<sha>", "arbor_root": "<campaigns>/Arbor-par",
      "template_config": "configs/mi350x/model-m-c8-c6.json",
      "dossier_dir": "docs/dossier/model-m-mi350x/u3-c8",
-     "gates": "configs/parallel/gates-c8.json", "lane_sessions": "/data/campaigns/sessions",
+     "gates": "configs/parallel/gates-c8.json", "lane_sessions": "<campaigns>/sessions",
      "max_lanes": 4, "max_rounds": 0, "no_keep_rounds": 2,
      "seed": {"map": ".../11.u4-directions.md", "overlay": "configs/parallel/c6p-r01-lanes.json",
               "bar_record": "..."},

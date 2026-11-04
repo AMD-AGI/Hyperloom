@@ -221,7 +221,7 @@ THINK BIG — NOP REMOVAL IS NOT ENOUGH:
 
 BENCH PATH — USE KERNEL-ONLY TIMING (not full pipeline):
    The default bench measures _flydsl_stage2_wrapper which on some nodes uses
-   persist=True kernel that runs 170µs instead of 8-9µs. Always pass the known
+   a much slower persist=True kernel. Always pass the known
    fast baseline explicitly when benching moe2:
 
    docker exec CONTAINER HIP_VISIBLE_DEVICES=GPU \\
@@ -230,8 +230,9 @@ BENCH PATH — USE KERNEL-ONLY TIMING (not full pipeline):
      --kernel-name flydsl_moe2_afp8_wfp4_bf16_t64x128x256_atomic \\
      --M 32 --N 5120 --K 2304 --n-experts 384 --top-k 6 --n-bench 500
 
-   The 8.445µs baseline uses this kernel. Your ASM edits should start from this .co.
-   If you see 170µs, you are benchmarking the wrong kernel — use --kernel-name above.
+   The baseline uses this kernel. Your ASM edits should start from this .co.
+   If you see a time an order of magnitude above the baseline, you are benchmarking the
+   wrong kernel — use --kernel-name above.
 
 CRITICAL KNOWN BLOCKER — READ BEFORE STARTING:
    The `llvm-objdump -d` disassembly uses raw branch offsets (e.g. s_cbranch_vccnz 10790)

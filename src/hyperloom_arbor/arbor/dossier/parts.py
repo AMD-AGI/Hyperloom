@@ -18,7 +18,7 @@ class Part:
     writer: str
     gpu: bool = False
     #: Whether a dossier is incomplete without it. Part 9 is not: its writer needs a person's traces and is opt-in, so
-    #: a pack that does not run it still ends with a whole dossier (M10's Cluster A run, 114298).
+    #: a pack that does not run it still ends with a whole dossier.
     required: bool = True
 
     @property

@@ -1,6 +1,6 @@
 """Rolling chunks: a campaign longer than one job hands off to the next node.
 
-Cluster A's rules (runner AGENTS.md §15; operator, 2026-10-08): never hold a node,
+Cluster A's rules: never hold a node,
 each job's work is capped at 4 hours, and longer work rolls from node to node:
 the running job submits its successor at the 3-hour mark, on another node and
 with no dependency, and the work switches to it at 4 hours. The switch happens
@@ -427,9 +427,9 @@ class Roll:
 
 
 # -- the flag KEEPs across containers, rolling or not ------------------------------------
-# A driver that does not roll calls these too (arbor/driver.py): Model M day-0 b0, moved to a
-# held Cluster B job with roll mode off on 2026-10-22, got a fresh container seeded from the
-# config, and its first iteration there ran without --enable-expert-parallel (-16%).
+# A driver that does not roll calls these too (arbor/driver.py): a campaign moved to a held
+# job with roll mode off got a fresh container seeded from the config, and its first
+# iteration there ran without --enable-expert-parallel, a large regression.
 
 
 def mirror_workspace_config(config: dict, session: Path, job: str = "", clock=time.time) -> None:

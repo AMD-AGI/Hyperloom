@@ -22,10 +22,10 @@ tuned kernels are actually used** — apple-to-apple against the stock library.
 - Deciding whether hipBLASLt tuning is worth it for this workload (short answer below).
 
 ## Decision first: is hipBLASLt tuning even the lever?
-Measured GPU-kernel-time budget for DSV4.1-Flash AgentX serving: **hipBLASLt `Cijk_*` ≈ 3.5–3.8%**. The real
-cost is the **aiter** umbrella ≈ 56% (MoE experts `mfma_moe*_afp8_wfp4` ~34%, dense `_mxfp8_linear` ~22%) plus
-TP all-reduce ~15%. So geko hipBLASLt tuning is **flat end-to-end at every concurrency even with tuned kernels
-verified firing (+17–18% GEMM-level)**. If the goal is e2e throughput, tune **aiter** (its native autotuner),
+In the GPU-kernel-time budget for DSV4.1-Flash AgentX serving, **hipBLASLt `Cijk_*` is a small share**. Most
+of the cost is the **aiter** umbrella (MoE experts `mfma_moe*_afp8_wfp4`, dense `_mxfp8_linear`) plus TP
+all-reduce. So geko hipBLASLt tuning is **flat end-to-end at every concurrency even with tuned kernels
+verified firing (and faster at GEMM level)**. If the goal is e2e throughput, tune **aiter** (its native autotuner),
 not hipBLASLt. Still proceed below if you specifically want the hipBLASLt tune + a rigorous usage proof.
 
 ## The 3 critical `geko --tune` patches (hipBLASLt 1.5.0)

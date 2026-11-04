@@ -3,7 +3,7 @@
 - **A flat skill** is ``<root>/.claude/skills/<name>/SKILL.md``, named ``<name>``: today's skills.
 - **A family** is a Claude Code plugin, ``<root>/plugins/<family>/``. It has ``.claude-plugin/plugin.json`` and
   ``skills/<name>/SKILL.md``, and its skills are named ``<family>:<name>``, as Claude Code names a plugin's skills.
-  Contributed skills come as families (M10).
+  Contributed skills come as families.
 
 Claude Code finds a skill one directory deep only, and reads its front matter. A missing or unparseable front matter
 loads the skill with no fields, so Arbor refuses it. Arbor's own key is ``metadata.arbor``: where the skill can take

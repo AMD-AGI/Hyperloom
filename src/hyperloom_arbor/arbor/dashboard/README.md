@@ -54,11 +54,10 @@ their output, and serves it.
 | global | `.../api/file?path=knowledge/...` | one file from the share, as text, up to 8 MB |
 | parallel | `/`, `/api/status` | the run's page; `{status, meta}` |
 
-## Ported from the Cluster A dashboard
+## Ported from an earlier dashboard
 
-The source is `scripts/arbor_dashboard/` on `<fork>/dsv41-v2.1`
-(`3892f73`), which served the blinded v2 and v2.1 campaigns on Cluster A.
-Kept: the page and its panels, the snapshot's keys (`arbor.collect`'s realtime
+The source is an earlier campaign dashboard, which served the v2 and v2.1
+campaigns. Kept: the page and its panels, the snapshot's keys (`arbor.collect`'s realtime
 collector writes the same ones), the server's caching, and its rules:
 
 - **The collector never raises.** Every section records its own failure in

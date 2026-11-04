@@ -9,7 +9,7 @@ Audience: an agent (or a person) about to start an optimization round, or one
 that has just finished. Arbor records each iteration (what changed, what the
 gate said); it does not record why the round tried what it tried, what it
 expected, or when a failed idea is worth reopening. A round plan carries that,
-before and after (the runner's `plans/model-m/01_ARBOR_PERSISTENCE.md`). The
+before and after. The
 skeleton is [template.md](template.md). A planning campaign (pack `model-m-plan`)
 scores drafts with its linter, `packs/model-m-plan/validator/lint_plan.py`: run
 `python3 <that file> PLAN.md` to see what a draft is missing.
@@ -28,7 +28,7 @@ scores drafts with its linter, `packs/model-m-plan/validator/lint_plan.py`: run
    what was kept and what was reverted, with the gate's reasons. A REVERT
    that was "not measured" says nothing about its idea.
 4. **Earlier rounds' plans and settlements**, and the project's own rules
-   for plans (the runner's `AGENTS.md` §8–§11 and `plans/TEMPLATE.md`).
+   for plans.
 
 ## What each section owes
 

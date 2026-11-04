@@ -15,9 +15,9 @@ Scale format the instruction expects:
   transpose B's scale from this layout — the MFMA instruction bakes in the
   access pattern.
 
-## The codegen tax (24% below fp8 tensorwise ceiling)
+## The codegen tax (below the fp8 tensorwise ceiling)
 
-`tl.dot_scaled` wall-clock is ~24% slower than a matching plain `tl.dot`
+`tl.dot_scaled` wall-clock is markedly slower than a matching plain `tl.dot`
 on e4m3 operands at the SAME MFMA count. Confirmed via AMDGCN diff:
 
 - `+24 ds_read_u8` per MFMA cluster (scale re-distribution to lanes)
@@ -29,7 +29,7 @@ Identity-scale probe (all scales = 0x7F = 2^0) proves the overhead is
 **NOT data-dependent** — wall-clock identical to random-scale inputs.
 
 Downstream fixes empirically refuted:
-- prepareOperands `kBase` packing (MFMA.cpp:441-454) — VALU 1.24→1.25×
+- prepareOperands `kBase` packing (MFMA.cpp:441-454) — VALU count unchanged
   (LLVM already folds insert_element).
 - LinearEncodingAttr scale vecSize routing (LowerLoops.cpp:228-240) —
   source inspection: already calls `composeSharedLayoutForOperand` with
@@ -46,17 +46,17 @@ nonkdim=32) on the gpt_oss_20B shape. Key results:
 - `waves_per_eu=2` ties baseline (noise).
 - `num_stages=1` matches `num_stages=2` → pipeline isn't the bottleneck.
 - `BLK_K=64` with `num_stages=3/4` regresses — loop overhead > pipeline gain.
-- `BLK_M=128` regresses ~26% — tile-level throughput loss.
-- `waves_per_eu=3` catastrophic (0.19× bf16) — occupancy overprovisioned.
-- `matrix_instr_nonkdim=16` regresses 4-14% vs `=32`.
+- `BLK_M=128` regresses — tile-level throughput loss.
+- `waves_per_eu=3` catastrophic — occupancy overprovisioned.
+- `matrix_instr_nonkdim=16` regresses vs `=32`.
 
 Wgrad variable-K sweep: baseline also optimal. Memory-bound kernels (stall
 ratio ~0.91) are insensitive to tile shape changes.
 
 ## Triton 3.6 vs 3.7
 
-3.7's `opSel` / `prepareOperands` kBase-packing fix drops VALU ratio from
-1.42× → 1.24× but wall-clock is ~1% (scale-LDS waitcnt unchanged). Requires
+3.7's `opSel` / `prepareOperands` kBase-packing fix lowers the VALU ratio but barely moves
+wall-clock (scale-LDS waitcnt unchanged). Requires
 source build from `release/3.7.x` (not on pypi).
 
 ## MX-FP8 precision
@@ -71,13 +71,13 @@ ROCm Primus-Turbo tests).
 
 ## Shape-dependent surprises on gpt_oss_20B (M=65536, K=2880, N=5760, G=32)
 
-- `dgrad` is FASTER than `fwd` per-kernel (1.62× vs 1.43× bf16) because
+- `dgrad` is FASTER than `fwd` per-kernel (against bf16) because
   its output K=2880 < fwd's N=5760 — fewer output tiles at same BLK config.
-- Quant dominates training step: pure kernels = 4.62 ms but full autograd
-  step = 8.92 ms. Quant/save-for-backward = ~half the step.
+- Quant dominates training step: quant/save-for-backward is about half of
+  the full autograd step.
 - Weight prequant (hoist B quant once per optimiser step vs per forward)
-  is the largest single lever in the full-step picture: 1.22× → 1.53× bf16
-  at k=8 gradient accumulation.
+  is the largest single lever in the full-step picture at k=8 gradient
+  accumulation.
 
 ## Files / references
 

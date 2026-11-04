@@ -8,7 +8,7 @@ description: Watch Arbor campaigns in a browser. Local mode shows one campaign l
 Audience: whoever runs or follows Arbor campaigns. The server is
 [`arbor/dashboard/server.mjs`](../../../arbor/dashboard/server.mjs) (Node 16 or
 later, no dependencies); its README has the files, routes, what changed from
-the Cluster A dashboard it was ported from, and troubleshooting. The data comes from
+the earlier dashboard it was ported from, and troubleshooting. The data comes from
 the collectors (`realtime-collector`, `knowledge-collector` skills).
 
 The server runs on your machine, binds to `127.0.0.1` only, and runs
@@ -75,8 +75,8 @@ node arbor/dashboard/server.mjs local --host <host with the session> \
   `C:\Windows\System32\OpenSSH\ssh.exe` when present, because Git for Windows'
   ssh cuts a command at about 8 KB. The Model M campaigns' pair runs this way:
   `scripts/model-m-campaign/dashboards.sh start|stop|status`.
-- On a Cluster B login node, use one that accepts remote commands (`<login node>`,
-  `-006`, `-007`) and keep the refresh at 15 s or more: every refresh is a
+- On a Cluster B login node, use one that accepts remote commands (`<login node>`)
+  and keep the refresh at 15 s or more: every refresh is a
   process on a host with a 4 GiB per-user cap, and when the host refuses a
   session, the page keeps the last snapshot and says so.
 - Several campaigns: one server each, with its own `--port` and `--label`.

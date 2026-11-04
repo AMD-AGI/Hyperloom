@@ -6,8 +6,7 @@ host owns them: Hyperloom's multibranch (MB) today, which runs Arbor as an
 merges what Arbor keeps, and polls session.json's KEEP lessons as the keep
 signal (docs/component-mode.md, the design and the operator's decisions).
 
-MB built a sandbox around what standalone Arbor did wrong inside it (its board
-topics #100, #126, #148): Arbor stopped MB's servers with a pattern `pkill`,
+MB built a sandbox around what standalone Arbor did wrong inside it: Arbor stopped MB's servers with a pattern `pkill`,
 ran on cards outside its lease, iterated an hour after the session died, hung
 for 511 minutes, and loaded kernel tables from paths outside the workspace.
 This module is the part of the fix that is not the serving path:
@@ -31,7 +30,7 @@ This module is the part of the fix that is not the serving path:
   Arbor's own server, records the iteration as not measured and exits 0;
 - **the heartbeat**: ``<session>/heartbeat.json`` every 5 minutes and at every
   phase boundary, so a host's stall check sees a live run;
-- **the KEEP snapshot** (design §4, as agreed with MB on its board, #154):
+- **the KEEP snapshot** (design §4, as agreed with MB):
   ``<session>/keeps/NNNN/`` per KEEP, written before session.json's KEEP count
   moves, with ``keeps/LATEST`` naming the newest;
 - **the host's notes and bench command**: what the host has merged, in the
@@ -110,8 +109,8 @@ BLOCK_KEYS = ("host", "deadline", "seconds", "notes", "bench_command", "outbox",
 # (arbor/review.py) passes at once and records that the host reviewed.
 REVIEW_BY = ("host",)
 
-# component.stop_at: where a run ends of itself. "map" is the host's dossier pass:
-# the dossier and its map, then exit 0 with "mapped", before any iteration works
+# component.stop_at: where a run ends of itself. "map" is the host's dossier pass: the
+# dossier and its map, then exit 0 with "mapped", before any iteration works
 # the map; the host splits it among several Arbors (python3 -m arbor.directions split).
 STOP_AT = ("map",)
 
@@ -316,7 +315,7 @@ except Exception as e:
 
 def _native_import_error(config, env) -> str | None:
     """A refusal when the framework's package is there but its compiled extension does not
-    import, as a source-only worktree's vLLM lacks ``vllm._C`` (Cluster C): every server start would fail. Checked with the driver's environment, the
+    import, as a source-only worktree's vLLM lacks ``vllm._C``: every server start would fail. Checked with the driver's environment, the
     server_env's PYTHONPATH over it, by the ``python3`` on its PATH. A package that is not
     found at all, or a check that cannot run, refuses nothing."""
     from arbor import frameworks
@@ -441,8 +440,7 @@ def refuse_unloadable(config_path, exc: BaseException) -> int:
 def plan_entries(config) -> tuple[list[dict], list[str]]:
     """``component.plan``: the directions this campaign works, and what is wrong with them.
 
-    A host running several Arbors from one set of directions gives each its share (the
-    2026-11-04 release). The plan is a list of directions in the
+    A host running several Arbors from one set of directions gives each its share. The plan is a list of directions in the
     form a DIRECTIONS line takes (``{"id": "m-<component>", "kind": "increment"|"rewrite",
     "title": ..., "why"?, "rank"?, "ceiling"?}``), or ``{"directions": [...]}``, or the path
     of a JSON file holding either. Every entry is open; ids are unique.
@@ -1124,7 +1122,7 @@ def snapshot_keep(config, session_dir, *, container: str, workspace: str, number
     - Both patches use the served pathspec (no probes, logs, bytecode or arbor/config.json),
       byte for byte as git wrote them (``workspace._write_diff``; CORE-01).
     - ``left_out``: a file over ``workspace.OVERSIZE_BYTES`` stays out of both patches and
-      is named here, with its size (a GPU core dump rode in one).
+      is named here, with its size (a GPU core dump once rode in one).
     - config.json is the live arbor/config.json, what was measured (the server and
       bench agents may edit it after the commit), without the GPU masks the launch drops.
     """

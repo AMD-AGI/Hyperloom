@@ -21,8 +21,8 @@ ARBOR_CONFIG_RELPATH = "arbor/config.json"
 
 # `"docker_container": "@host"` puts the workspace in a directory on this host:
 # git, the validators and the integrity digests run here, not through
-# `docker exec`. For a campaign with no server to run, a `document` workload
-# (runner plans/model-m/00 §4.11). Docker container names cannot contain "@".
+# `docker exec`. For a campaign with no server to run, a `document` workload.
+# Docker container names cannot contain "@".
 HOST = "@host"
 
 
@@ -97,7 +97,7 @@ def ensure_workspace_config(
     iteration's ``commit()`` creates the file itself (as an empty ``{}``), and
     reverting that iteration removes it outright.
 
-    Job 38943 iteration 2 did exactly this: the revert left the workspace with
+    One campaign's iteration did exactly this: the revert left the workspace with
     no server_env and no server_flags at all. ``read_workspace_config`` returns
     {} on a missing file rather than raising, so the next iteration would have
     started its server on defaults -- no TP=4, no FP4 quantization, and no
@@ -136,7 +136,7 @@ _IGNORED_STATUS_FRAGMENTS = ("__pycache__/",)
 def ensure_git_excludes(container: str, workspace: str) -> bool:
     """Add __pycache__/*.pyc to .git/info/exclude. True if written.
 
-    Job 38956 iteration 6 lost a complete decode-profile probe to this. The
+    One campaign's iteration lost a complete decode-profile probe to this. The
     agent's whole deliverable was out-of-tree (an evaluator plus ledger
     records), so the workspace held nothing but regenerated .pyc files.
     ``has_changes`` counts untracked files and said dirty; ``commit`` stages
@@ -207,7 +207,7 @@ def commit(container: str, workspace: str, message: str) -> str:
     the bench measured it and the campaign booked the number.
 
     v2 iteration 5 is the worked example: it added `configs/mxfp8_linear_tiles.json`
-    alongside a tuned-tile selector in rocm_native.py, booked +1.31% as a class-B
+    alongside a tuned-tile selector in rocm_native.py, booked it as a class-B
     win, and only rocm_native.py entered the commit. Two iterations later the
     table was gone, `_load_tuned_tiles()` was returning {} and all 99 tiles had
     fallen back to the MiniMax-M3 defaults -- so the booked best pointed at a tree
@@ -273,7 +273,8 @@ HARNESS_FILES = ("arbor/config.json",)
 # reach an export, an integration or another tree. A config's `scratch_paths` adds more.
 # `eval` is the packs' probe space at the workspace's top, which the loop already treats as
 # read-only (READONLY_PROBE_PREFIXES): under Hyperloom MB the agent kept its logs, probes and
-# a 327 MB GPU core dump there, and they rode in a KEEP's patches. Logs are never served, wherever the agent leaves one.
+# a GPU core dump there, and they rode in a KEEP's patches. Logs are never served, wherever
+# the agent leaves one.
 SCRATCH_PATHS = ("arbor/eval", "eval", "*.log")
 # A file this large is no source change. Such a file stays in the tree and out of every patch
 # (landed.patch, scratch.patch and a KEEP's), each named where its patch is written (`oversize`).
@@ -395,8 +396,8 @@ def save_landed_patch(container: str, workspace: str, out_path: str | Path,
     """Export the WHOLE served tree's diff against the campaign's root commit.
 
     The repo lives inside the container, so it dies with the container -- which
-    means every landed KEEP dies with it. Job 38650 recreated the container on
-    2026-09-16 and silently lost three of them, then spent four iterations
+    means every landed KEEP dies with it. One campaign recreated the container
+    and silently lost three of them, then spent four iterations
     measuring a stock tree against a bar that only the enhanced tree could
     reach.
 
@@ -414,8 +415,8 @@ def save_landed_patch(container: str, workspace: str, out_path: str | Path,
     Served files only (``landed_pathspec``). arbor/config.json is HARNESS-WRITTEN,
     not landed work: it is seeded with different content by every fresh git-init,
     so including it makes the patch fail to apply against a new repo, and `git
-    apply` is atomic: that one file takes the real source changes down with it
-    (job 38943). Excluding all of arbor/ would be wrong the other way: it dropped
+    apply` is atomic: that one file takes the real source changes down with it.
+    Excluding all of arbor/ would be wrong the other way: it dropped
     a KEEP's own files there (campaign B3 iteration 22's TunableOp tables, which
     its kept PYTORCH_TUNABLEOP_FILENAME points at), so the next container ran
     without them. The agent's scratch goes to scratch.patch instead

@@ -15,10 +15,10 @@ Each section describes the **general idea** — look for similar opportunities i
 - Features documented in server_args that have no effect on ROCm
 
 **Production examples found:**
-- AllReduce fusion claimed "enabled" in logs but the flag was commented out → +11.5% ITL when fixed
-- EAGLE verify rejection sampling worked on CUDA but fell back to greedy on HIP → correctness disaster (GPQA-Diamond 0.702→0.904)
+- AllReduce fusion claimed "enabled" in logs but the flag was commented out → a clear ITL gain when fixed
+- EAGLE verify rejection sampling worked on CUDA but fell back to greedy on HIP → correctness disaster (GPQA-Diamond accuracy dropped sharply)
 - DSA CUDA graph capture skipped target-verify passes on HIP → entire EAGLE spec-decode ran eager
-- Aiter top-k backend was registered but never selected as default → 17.9% ITL improvement when made default
+- Aiter top-k backend was registered but never selected as default → a large ITL improvement when made default
 
 **How to find these:** Search for `is_cuda()`, `is_hip()`, `_is_cuda`, `_is_hip` in the SGLang source. Any branch that differs between CUDA and HIP is a candidate. Check if the HIP branch does something slower or is a no-op.
 
@@ -34,12 +34,12 @@ Each section describes the **general idea** — look for similar opportunities i
 - Two-pass decode chains where pass 1 produces intermediate that pass 2 immediately reads
 
 **Production examples found:**
-- Two-pass fp8 Q construction (write bf16 → cast to fp8) → one fused kernel: 2.65–3.70× prefill speedup
-- 12-kernel DSA indexer decode chain → 4 fused kernels with histogram inside: 2.95× (121→41 µs)
-- Absorb BMM + rope + KV cache write as separate passes → fused `fused_fp8_bmm_rope_cat_and_cache_mla`: 13.2→12.0 ms/step
-- Top-k scoring + page-table transform as separate ops → single fused kernel: 1.82–2.22×
+- Two-pass fp8 Q construction (write bf16 → cast to fp8) → one fused kernel: a large prefill speedup
+- 12-kernel DSA indexer decode chain → 4 fused kernels with histogram inside: several times faster
+- Absorb BMM + rope + KV cache write as separate passes → fused `fused_fp8_bmm_rope_cat_and_cache_mla`: a shorter decode step
+- Top-k scoring + page-table transform as separate ops → single fused kernel: about twice as fast
 
-**Where to look:** SIKL decode profile — any two adjacent ops that together take <0.5 ms each are candidates. The indexer path (attn.indexer, 8.1% of step) is especially launch-heavy.
+**Where to look:** SIKL decode profile — any two adjacent short ops are candidates. The indexer path (attn.indexer) is especially launch-heavy.
 
 ---
 
@@ -53,7 +53,7 @@ Each section describes the **general idea** — look for similar opportunities i
 - Any fallback to `tilelang` or `torch` when `aiter` is expected
 
 **Production examples found:**
-- TP=8 → 8 q-heads → FlyDSL requires 16 → pad to 16, discard extra half: ~2× vs tilelang fallback
+- TP=8 → 8 q-heads → FlyDSL requires 16 → pad to 16, discard extra half: much faster than the tilelang fallback
 - Same padding needed for prefill path separately from decode path
 
 **How to find:** Look for `assert nhead in [16, 32, ...]` or similar in kernel dispatch code. Check what `self.need_pad_heads` triggers in `dsa_backend.py`. For a new model, count heads-per-rank at your TP setting.
@@ -70,7 +70,7 @@ Each section describes the **general idea** — look for similar opportunities i
 
 **Production examples found:**
 - Rope+KV fusion optimized for decode shape, but was enabled for all forwards → prefill regression
-  Fix: gate on `forward_batch.forward_mode.is_decode_or_idle()`. Result: decode keeps +5% ITL, prefill returns to baseline.
+  Fix: gate on `forward_batch.forward_mode.is_decode_or_idle()`. Result: decode keeps its ITL gain, prefill returns to baseline.
 
 **How to find:** Profile decode and prefill separately with SIKL. If a "fix" helps decode but hurts prefill (or vice versa), check whether it's properly mode-gated.
 
@@ -86,7 +86,7 @@ Each section describes the **general idea** — look for similar opportunities i
 - Softmax at topk=1 (can't change argmax — always skip)
 
 **Production examples found:**
-- Per-forward weight dequantization in absorb BMMs was a no-op for bf16 GLM-5.2 → saved 1.08 ms/forward (7.9% of per-layer time)
+- Per-forward weight dequantization in absorb BMMs was a no-op for bf16 GLM-5.2 → removing it saved a visible share of per-layer time
 - Softmax at topk=1 removed (argmax is invariant to monotone transforms)
 
 **How to find:** Read the kernel entry points in `dsa_backend.py` and `mla.py`. Check if scale factors are actually != 1.0 for your model. Profile with rocprofv3 to find kernels with <5% arithmetic utilization.
@@ -103,8 +103,8 @@ Each section describes the **general idea** — look for similar opportunities i
 - High kernel time at CONC=1 that improves with CONC=32 (batch-bound, not compute-bound)
 
 **Production examples found:**
-- top-p renorm: pivot-search one-block-per-row → split-row radix: 4.35× at 6 rows (EAGLE draft), 1.41× at 32 rows
-- This was 3.37% of total ITL, p99 −9.7%
+- top-p renorm: pivot-search one-block-per-row → split-row radix: several times faster at 6 rows (EAGLE draft), less at 32 rows
+- A visible share of total ITL, and a lower p99
 
 **How to find:** Compare decode time per token at CONC=1 vs CONC=16. If it doesn't scale linearly, look at sampling/scheduling kernels.
 
@@ -135,17 +135,17 @@ The patch is at `Arbor-v2/patches/apply_all_aiter_eagle_fixes.py`.
 
 When starting a campaign on a new DSA/MLA model (DSV4, Kimi-K2.5, etc.):
 
-1. **Check Pattern 1 first** — run grep for silently-disabled features. 30 min of reading, potentially 5–15% gain.
+1. **Check Pattern 1 first** — run grep for silently-disabled features. Little reading, potentially a large gain.
 2. **Run SIKL decode profile** — identify the top-3 ops. Don't guess.
 3. **Check Pattern 3** — count heads-per-rank at your TP setting. If not a power of 2 that the kernel expects, padding is free gain.
 4. **Check Pattern 4** — make sure any new kernel is mode-gated (decode only unless proven safe for prefill).
 5. **Apply Pattern 7 patches** if using `--dsa-decode-backend aiter` + EAGLE — they're required, not optional.
 6. **Profile sampling path at CONC=1** (Pattern 6) if EAGLE acceptance rate matters.
 
-## DSA indexer — the 8.1% target
+## DSA indexer
 
-The DSA indexer (`attn.indexer`, 2.38 ms/step, 8.1% of GLM-5.2 decode) runs on 21 of 78 layers.
-The 4-kernel fused version (PR #37) is 2.95× faster. Check if it's enabled on your model:
+The DSA indexer (`attn.indexer`, a visible share of GLM-5.2 decode) runs on 21 of 78 layers.
+The 4-kernel fused version is several times faster. Check if it's enabled on your model:
 ```bash
 docker exec $CONTAINER grep -r "fused.*indexer\|four.kernel\|dsa_fused" /sgl-workspace/ --include="*.py" | head
 ```

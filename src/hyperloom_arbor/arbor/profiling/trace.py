@@ -68,8 +68,8 @@ DECODE_KERNELS = (
 # Kernels that look like prefill by name but legitimately run during decode when
 # speculative decoding is on. DSpark verifies (1 + num_spec_tokens) tokens per
 # request per step, and that multi-token verify uses the RAGGED attention
-# kernel — the same one prefill uses. Measured at 1.77% of decode GPU time in a
-# clean DSpark next_n=5 capture.
+# kernel — the same one prefill uses. It shows up as a small share of decode GPU
+# time in a clean DSpark capture.
 #
 # Treating these as proof of prefill makes `phase_report` return `contaminated`
 # on a perfectly good profile, and the pack tells the agent that a contaminated

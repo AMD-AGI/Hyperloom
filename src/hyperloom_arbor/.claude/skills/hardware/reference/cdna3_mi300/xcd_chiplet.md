@@ -39,8 +39,8 @@ updated: 2026-06-08
 
 ### Cross-XCD cost
 - L2 is **per-XCD**; cross-XCD reuse misses to the 256 MiB Infinity Cache (L3) on the IODs.
-- Measured global-atomic **core-to-core latency ~116–202 ns** depending on whether the two workgroups
-  are on the **same vs different XCD**. Device-wide reductions stage through L3 with ~200 ns sync.
+- Global-atomic **core-to-core latency is hundreds of ns** and depends on whether the two workgroups
+  are on the **same vs different XCD**. Device-wide reductions stage through L3 and pay that sync.
 - Each IOD hosts 2 XCDs + 2 HBM stacks; memory closest to an XCD is on the same IOD.
 
 ### Clock variance across XCDs (3–10%)
@@ -71,7 +71,7 @@ Valid: SPX+NPS1, DPX+NPS1/2, CPX+NPS1/4.
 
 **Kernel implications:**
 - In **CPX/NPS4** a kernel sees a 38-CU/24 GB "GPU" with memory local to its XCD → higher effective
-  BW and clocks (AMD reports **+10–15% compute-bound GEMM** vs SPX) because cross-XCD traffic is gone.
+  BW and clocks (faster compute-bound GEMMs than SPX) because cross-XCD traffic is gone.
 - A single large model spanning all CUs and >24 GB **must** use SPX; strong-scaling one kernel across
   8 XCDs pays Fabric/L3 costs for any cross-XCD sharing.
 - Switching mode terminates GPU processes and reloads amdgpu; reverts to SPX/NPS1 on reboot.
@@ -85,18 +85,18 @@ sudo amd-smi set --gpu all --memory-partition  NPS4
 ## The levers
 1. **8-multiple grids/tiles** for even XCD spread.
 2. **Keep an operand's reuse on one XCD** (tile schedule) for L2 hits.
-3. **Avoid device-wide barriers**; if needed, stage through L3 and budget ~200 ns + slowest-XCD clock.
+3. **Avoid device-wide barriers**; if needed, stage through L3 and budget hundreds of ns + slowest-XCD clock.
 4. **Map concurrent streams to ACEs** (up to 4/XCD) for kernel overlap.
-5. **CPX/NPS4** for many-small-kernel / multi-tenant density (+10–15% GEMM, XCD-local memory).
+5. **CPX/NPS4** for many-small-kernel / multi-tenant density (faster GEMMs, XCD-local memory).
 6. **SPX/NPS1** for one large model needing all CUs / >24 GB.
 
 ## Pitfalls
 - **Non-8-multiple grids** → straggler XCDs + scattered L2 reuse.
-- **Tight cross-XCD sync** → bottlenecked by the slowest XCD (3–10% clock spread) + ~200 ns Fabric.
+- **Tight cross-XCD sync** → bottlenecked by the slowest XCD (3–10% clock spread) + Fabric latency.
 - **SPX+NPS4** is rejected by the driver.
 - **Forgetting MI250X is also chiplet** but as **two separate devices** (not one) — different model.
 
 ## Verify
 - `amd-smi static` / `rocm-smi --showcomputepartition --showmemorypartition` for current mode.
 - `rocprof-compute` XCD load balance; per-XCD clock via `amd-smi metric`.
-- A/B SPX vs CPX/NPS4 on a compute-bound GEMM to confirm the +10–15%.
+- A/B SPX vs CPX/NPS4 on a compute-bound GEMM to confirm the gain.

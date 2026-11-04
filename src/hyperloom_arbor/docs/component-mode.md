@@ -1,7 +1,7 @@
 # Component mode: Arbor inside a host
 
 Status: **slices 1 to 3 built** (CORE-02, 2026-10-28; decisions in §7, as built in §8), and run
-on a GPU node (Cluster A jobs 102861 and 102998, `scripts/component/`).
+on a GPU node (`scripts/component/`).
 
 Arbor has run one way so far, **standalone**: it owns a node, its container and its clock. Its
 launchers recreate the container, its harness stops any server it finds and waits for every GPU
@@ -9,8 +9,7 @@ to empty, it rolls from node to node, ends rounds with its own same-node A/B and
 
 **Component mode** is Arbor run by a host that owns all of that: Hyperloom's multibranch (MB)
 today, which runs Arbor as an "autonomous branch" on a lease of GPUs, under its own deadline, and
-gates and merges what Arbor keeps. MB already runs Arbor this way (its board topics #100, #126,
-#148), with a sandbox built around what standalone Arbor did wrong inside it: stopping MB's
+gates and merges what Arbor keeps. MB already runs Arbor this way, with a sandbox built around what standalone Arbor did wrong inside it: stopping MB's
 servers with a pattern `pkill`, running on cards outside its lease, iterating an hour after the
 session died, hanging for 511 minutes, loading kernel tables from paths outside the workspace.
 Component mode makes Arbor do the right thing itself.
@@ -127,7 +126,7 @@ manifest without either side writing host-specific code.
 2. **The KEEP snapshot,** the notes and the bench command in the prompts, the tables check.
 3. **The short-prompt check** (built 2026-10-28; the README section came with slice 2).
 
-## 7. Decisions (operator, 2026-10-28)
+## 7. Decisions
 
 1. **An exhausted map with no time left for its update round: exit 0, and say why.** Every exit
    in component mode writes `<session>/component_exit.json` first: `{reason, iteration, keeps,
@@ -136,10 +135,10 @@ manifest without either side writing host-specific code.
    `aborted` (the harness stopped measuring: `ABORTED.md`, its message as `detail`), and since
    2026-10-31 `review_rejected` (a human rejected the campaign at the review gate); the same line
    goes to the log and the heartbeat. A host reads why Arbor ended instead of guessing from an exit code.
-   **One exception exits non-zero** (operator, 2026-10-29, on Cluster C's gateway outages): `unreachable`, a streak that ended while the model could not be reached, exits 3 after
+   **One exception exits non-zero** (for model gateway outages): `unreachable`, a streak that ended while the model could not be reached, exits 3 after
    writing its record. The host resumes it as it does a crash, instead of retiring the branch; the
    resumed run moves that `ABORTED.md` aside and starts a fresh not-measured streak.
-2. **The snapshot format is proposed to MB now,** on the board; slice 2 starts after slice 1 and
+2. **The snapshot format is proposed to MB now;** slice 2 starts after slice 1 and
    at least an hour after the proposal, whether or not they have answered, and changes in flight
    if they object.
 3. **Component mode refuses to start without a deadline** (`deadline` or `seconds`), and refuses
@@ -155,8 +154,7 @@ build settled what the design left open:
   in hand before it, by the iteration gate and the phase timeouts alike. `component.json` keeps
   it across resumes; without that file the clock falls back to session.json's `start_epoch`,
   never to now. A session recorded in one mode and resumed in the other exits 2.
-- **Exit 2 is refusal only** (2026-10-29, for the 11-04 release: MB
-  resumed an exit 2 like a crash). Two more ways of exiting 2 were added, so that no config a
+- **Exit 2 is refusal only** (MB resumed an exit 2 like a crash). Two more ways of exiting 2 were added, so that no config a
   restart cannot fix ever crashes: a config `load_campaign` cannot load (unparsable JSON, no
   `pack`, a missing or broken `pack.yaml`), and in component mode a campaign that
   `validate_campaign` rejects, or one without a `session_root`. Read errors that may pass (an
@@ -201,7 +199,7 @@ command in the prompts (`arbor/component.py`, `arbor/policy/claude_loop.py`), an
   `bench_output.json` with a fixed one-line command, and with `bench_repeats` the fixed mean
   block aggregates, as with the pack's bench. Since 2026-10-30 the same command also takes the
   pack's `secondary_metric` when the client gives it; before, the gate saw only the primary
-  (a Cluster C job: `secondary: None` on every KEEP).
+  (`secondary: None` on every KEEP).
 - **`component.root`** (MB's request): MB's worktree is at the branch's start
   commit with the experiment repository's history behind it, so the first commit is not what MB
   gave. A sha in `component.root` is the base of `served.patch`, the first `change.patch`,
@@ -211,10 +209,10 @@ command in the prompts (`arbor/component.py`, `arbor/policy/claude_loop.py`), an
 
 ### Slice 3 (2026-10-28): the short-prompt check
 
-Decided by the operator (2026-10-28): a second launch at each KEEP, component mode only.
+A second launch at each KEEP, component mode only.
 `arbor/measure/short_prompts.py`; the probe after correctness and the check after the critic in
 `arbor/policy/claude_loop.py`. Where the build settled what the design left open:
-- **What it answers:** MB's #126. AITER's vectorized_5d `mha_batch_prefill` gave wrong output on
+- **What it answers:** AITER's vectorized_5d `mha_batch_prefill` gave wrong output on
   short sequences in about one server process in three, and GSM8K did not see it. The design's
   "against the base server" was dropped: MB compared with the parent first and stopped
   (Hyperloom `b315477e5`), because exact greedy matching fires on the largest gains (fp8 KV,
@@ -233,10 +231,9 @@ Decided by the operator (2026-10-28): a second launch at each KEEP, component mo
   health under the `server` cap, and probes again (`iter_N/short_prompts_2.json`). The
   session's first KEEP sets the floor (`<session>/short_prompts/floor.json`); a later KEEP whose
   processes differ on more prompts sent one at a time than the floor becomes REVERT, with the
-  first differing positions in the reason. The batched half is recorded and refuses nothing
-  (operator, 2026-10-28, from the GPU run, Cluster A job 102998): an unchanged tree's two boots
-  differed on 0 of the 32 prompts sent one at a time each time, and on 23, 19 and 20 of the 32
-  batched ones in their first tokens, because which prompts share a prefill batch changes
+  first differing positions in the reason. The batched half is recorded and refuses nothing:
+  on a GPU run an unchanged tree's two boots differed on none of the prompts sent one at a
+  time, and on most of the batched ones in their first tokens, because which prompts share a prefill batch changes
   between boots and that flips near-tied greedy picks; pooled, that noise hid a small
   single-request defect and could refuse a good KEEP. The second launch's server log is kept
   as `iter_N/server_2.log`. The record is `iter_N/short_prompts_check.json`; `keep.json` gets its
@@ -250,7 +247,7 @@ Decided by the operator (2026-10-28): a second launch at each KEEP, component mo
 
 ### The host's plan (2026-10-29)
 
-`component.plan` (release of 2026-11-04): a host
+`component.plan`: a host
 running several Arbors from one set of directions gives each its share. `component.plan_entries`
 validates it with the same check a `DIRECTIONS` line gets (`directions._entry`); every entry
 open, ids unique. `component.seed_plan`, called from `Run.start`, seeds the session's map once as a
@@ -267,7 +264,7 @@ groups are dealt in rank order to the share with the fewest directions ([hosts.m
 
 ### The dossier pass (2026-10-29)
 
-Agreed with MB (the dossier question, (b) with (c)). Before its branches
+Agreed with MB. Before its branches
 open, the host runs one Arbor as a dossier pass, splits that pass's map, and gives each branch a
 share; directions an Arbor finds outside its share come back as `proposals`.
 

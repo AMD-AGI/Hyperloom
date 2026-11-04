@@ -60,19 +60,6 @@ anything else:
    Material that is not in dossier form, such as the runner's `research/` and
    `learn/code/`, is a source to write from, not a dossier.
 
-## Worked example
-
-DeepSeek V4.1 Flash, AgentX, MI355X, in `<fork>/<runner>`:
-
-| Part | There |
-| --- | --- |
-| part definitions this skill grew from | `plans/skills/S01_PREFLIGHT.md` |
-| system, and where its time goes | `research/dsv41-flash-on-vllm.md` |
-| code reading, 16 reports | `learn/code/` (`CONTEXT.md` first) |
-| workload | `workload/l01-understand-your-workload-first.md`, `workload/r01-agentx-seed-workload-study.md` |
-| kernels and KernelForge | `docs/kernelforge.md` |
-| what worked and what did not | `research/optimization-ledger.md` |
-| profiles | `research/profiling-inventory.md`; the host's TraceLens profile (`component.profile`), in component mode |
 
 ## Evaluation: the files exist and hold real content
 
