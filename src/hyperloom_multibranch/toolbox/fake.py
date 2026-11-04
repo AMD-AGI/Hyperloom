@@ -55,17 +55,23 @@ from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup, RealToolbox, 
 class ToolboxBlackboard(Protocol):
     """What the fake writes to: the blackboard's ``TestRecordSink`` and ``NodeHealth`` (a ``LocalBlackboard`` is one)."""
 
-    async def write_request(self, request: object) -> object: ...
+    async def write_request(self, request: object) -> object:
+        """Record a test request as submitted."""
 
-    async def write_result(self, result: object) -> object: ...
+    async def write_result(self, result: object) -> object:
+        """Record what a test came to."""
 
-    async def write_withdrawal(self, withdrawal: Withdrawal) -> object: ...
+    async def write_withdrawal(self, withdrawal: Withdrawal) -> object:
+        """Record that a request was withdrawn before it ran."""
 
-    async def notify_build(self, notice: BuildNotice) -> None: ...
+    async def notify_build(self, notice: BuildNotice) -> None:
+        """Record where a native build a test waits on has got to."""
 
-    async def record_quarantine(self, event: QuarantineEvent) -> None: ...
+    async def record_quarantine(self, event: QuarantineEvent) -> None:
+        """Record a node put in or taken out of quarantine."""
 
-    async def quarantined(self) -> Sequence[QuarantineEvent]: ...
+    async def quarantined(self) -> Sequence[QuarantineEvent]:
+        """The quarantine events recorded so far, in order."""
 
 
 class MemoryBlackboard:

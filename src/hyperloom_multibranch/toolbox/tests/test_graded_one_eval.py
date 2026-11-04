@@ -116,7 +116,7 @@ def test_a_graded_test_without_a_warmup_still_evaluates_in_its_one_round(tmp_pat
     grid, call, point = _graded(tmp_path, monkeypatch, warmup_rounds=0)
     grid.throughputs["test"] = 3333.0
 
-    outcome, (rounds, accuracy) = _result_of(call, point)
+    _, (rounds, accuracy) = _result_of(call, point)
 
     assert grid.evaluated == ["test"]
     assert accuracy == (AccuracyValue("gsm8k", FLEXIBLE, 0.64),)
