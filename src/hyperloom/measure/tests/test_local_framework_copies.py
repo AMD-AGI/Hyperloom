@@ -549,7 +549,8 @@ MODEL_TABLES = ["a_gemm_tuned.csv", "b_gemm_tuned.csv"]
 def a8w8_tables(configs: Path) -> None:
     """The stand-in's default table and its two per-model tables hold lines of aiter's a8w8 tables, untuned sibling too."""
     (configs / "gemm_untuned.csv").write_text(A8W8_UNTUNED, encoding="utf-8")
-    default, a, b = configs / SHARED_GEMM, *(configs / "model_configs" / name for name in MODEL_TABLES)
+    default = configs / SHARED_GEMM
+    a, b = (configs / "model_configs" / name for name in MODEL_TABLES)
     for path, rows in ((default, A8W8_ROWS[:2]), (a, A8W8_ROWS[2:3]), (b, A8W8_ROWS[3:])):
         path.write_text(csv_text(A8W8_HEADER, *rows), encoding="utf-8")
 

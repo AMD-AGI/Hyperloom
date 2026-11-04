@@ -401,6 +401,28 @@ def test_a_preflight_that_waits_for_the_lock_says_who_holds_it_and_what_it_does(
     assert (host / "preflight.lock").read_text(encoding="utf-8") == "", "the holder's word goes with its lock"
 
 
+class _Interrupted(BaseException):
+    """What stops a wait that is no error of the lock, such as a signal."""
+
+
+def test_a_wait_for_the_lock_that_is_interrupted_lets_its_descriptor_go(image, monkeypatch) -> None:
+    waited: list[int] = []
+
+    def interrupted(descriptor: int, operation: int) -> None:
+        if operation & fcntl.LOCK_NB:
+            raise BlockingIOError
+        waited.append(descriptor)
+        raise _Interrupted
+
+    monkeypatch.setattr(fcntl, "flock", interrupted)
+
+    with pytest.raises(_Interrupted):
+        once.prepare_serving_so_once({}, {})
+
+    with pytest.raises(OSError):
+        os.fstat(waited[0])
+
+
 class _Watched(Prewarm):
     """A prewarm that notes, when its build starts, the warnings given so far and what the lock's holder says."""
 
