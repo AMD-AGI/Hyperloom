@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import sqlite3
 from copy import deepcopy
 from pathlib import Path
@@ -17,6 +18,7 @@ import pytest
 import hyperloom.orchestrator.kernel.request_handlers as krh_mod
 import hyperloom.orchestrator.phases.kernel_gemm_tuning as kernel_gemm_tuning_mod
 from hyperloom_common.env import EnvValueError
+from hyperloom.orchestrator.actions.executors import _aiter_serving_once as serving_once
 from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session.paths import make_session_dir
@@ -2145,13 +2147,22 @@ class TestValidateForgeGemmTuningE2E:
         candidate.write_text("kernelName\nnew_k\n", encoding="utf-8")
         prepared: list[dict] = []
         dropped: list[dict] = []
+        holders: list[str] = []
+        host = tmp_path / "host"
+        monkeypatch.setattr(serving_once, "HOST_DIR", host)
+
+        def _holder() -> str:
+            said = json.loads((host / "preflight.lock").read_text(encoding="utf-8"))
+            return f"{said['pid']}: {said['doing']}"
 
         def _prepare(envs, backup_dir=None):
             prepared.append(dict(envs))
+            holders.append(_holder())
             return {"action": "skip"}
 
         def _drop(envs=None, backup_dir=None):
             dropped.append(dict(envs or {}))
+            holders.append(_holder())
             return {"action": "invalidate"}
 
         monkeypatch.setattr(
@@ -2186,6 +2197,8 @@ class TestValidateForgeGemmTuningE2E:
         assert prepared
         assert prepared[0]["AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE"] == str(candidate)
         assert dropped
+        lane = f"{os.getpid()}: the GEMM tuning lane's move of serving modules"
+        assert holders == [lane] * (len(prepared) + len(dropped)), "each move holds this host's preflight lock"
 
 
 class TestForgeGemmE2EApplyGate:
