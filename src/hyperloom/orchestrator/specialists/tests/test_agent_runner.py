@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio as real_asyncio
+import errno
 import json
 import os
 import signal
@@ -316,6 +317,41 @@ async def test_resource_records_are_complete_and_appended(tmp_path: Path) -> Non
     assert container_final["cpu_quota_us"] == 400000
     assert container_final["max_concurrent_specialists"] == 1
     assert oct((tmp_path / "session" / "agents" / "resources.jsonl").stat().st_mode & 0o777) == "0o600"
+
+
+@pytest.mark.parametrize(
+    ("planted", "refusal"),
+    [("symlinked file", errno.ELOOP), ("hard-linked file", errno.EINVAL), ("symlinked agents dir", errno.ENOTDIR)],
+)
+async def test_a_link_planted_where_the_records_go_is_refused_and_its_target_is_untouched(
+    tmp_path: Path, planted: str, refusal: int
+) -> None:
+    session, outside = tmp_path / "session", tmp_path / "outside"
+    outside.mkdir()
+    target = outside / "resources.jsonl"
+    target.write_text("kept\n")
+    agents = session / "agents"
+    if planted == "symlinked agents dir":
+        session.mkdir()
+        agents.symlink_to(outside, target_is_directory=True)
+    else:
+        agents.mkdir(parents=True)
+        if planted == "symlinked file":
+            (agents / "resources.jsonl").symlink_to(target)
+        else:
+            os.link(target, agents / "resources.jsonl")
+    runner = make_runner(session)
+    with pytest.raises(OSError) as refused:
+        await runner.finish_campaign()
+    assert refused.value.errno == refusal
+    assert target.read_text() == "kept\n"
+    assert sorted(p.name for p in outside.iterdir()) == ["resources.jsonl"]
+
+    (agents if planted == "symlinked agents dir" else agents / "resources.jsonl").unlink()
+    await runner.finish_campaign()
+    records = [json.loads(x) for x in (agents / "resources.jsonl").read_text().splitlines()]
+    assert [r["kind"] for r in records] == ["container_resources"]
+    assert target.read_text() == "kept\n"
 
 
 async def test_concurrency_at_start_counts_sessions_already_running(tmp_path: Path) -> None:
