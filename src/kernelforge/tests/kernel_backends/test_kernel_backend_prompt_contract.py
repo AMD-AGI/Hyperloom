@@ -115,6 +115,7 @@ def forge_loop_prompts(monkeypatch):
 # object gained `eager_kernels`/`eager_matches_trace` and the rule that reads them;
 # the remaining steps are the same text renumbered 6-8.
 _SHA256_FORGE_LOOP: dict[str, str] = {
+    "ave": "09acfdaddef501d7fd34308dc5e44b5f202695a6fc257846e80843946f8bf27a",
     "aiter": "290f5b86300a62c682789551515fd000dfe395ad2abbea5a68a5e683588fec90",
     "assembly": "67ce0c680f6b603d7c656feb1f1cc1f5eaf1bf4f6afc5d9f368b0361dd4b1492",
     "ck": "d5a880ff37bdd3a1d04d33227aa1e2a7840f7cdee9559043ce14cf40e1ca6ebd",

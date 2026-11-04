@@ -238,6 +238,7 @@ type = independence
 modules =
     kernelforge.kernel_backends.aiter
     kernelforge.kernel_backends.assembly
+    kernelforge.kernel_backends.ave
     kernelforge.kernel_backends.ck
     kernelforge.kernel_backends.flydsl
     kernelforge.kernel_backends.fusion

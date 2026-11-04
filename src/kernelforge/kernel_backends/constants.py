@@ -18,6 +18,7 @@ KERNEL_BACKEND_PROMPT_MODULES = {
     "hip": "kernelforge.kernel_backends.hip.prompts",
     "hipblaslt": "kernelforge.kernel_backends.hipblaslt.prompts",
     "fusion": "kernelforge.kernel_backends.fusion.prompts",
+    "ave": "kernelforge.kernel_backends.ave.prompts",
 }
 KERNEL_BACKENDS = list(KERNEL_BACKEND_PROMPT_MODULES)
 
