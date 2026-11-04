@@ -94,7 +94,7 @@ LOST_AFTER_SEC: float = 300.0
 #: Minimum session length for a long-lived (one per branch) specialist.
 LONG_RUNNING_SESSION_SEC: float = 6 * 60 * 60.0
 
-#: Variable name the tool layer uses for a specialist's MCP token (``grant_access()``).
+#: Environment variable that carries a specialist's MCP bearer token when its endpoint names no other.
 DEFAULT_MCP_TOKEN_ENV = "HYPERLOOM_SPECIALIST_MCP_TOKEN"
 
 #: Tree CPU seconds gained in one sampling period that count as "still working".
