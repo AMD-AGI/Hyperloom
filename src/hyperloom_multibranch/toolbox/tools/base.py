@@ -211,14 +211,15 @@ class ToolJobs:
 
     def _answering(self, key: str) -> str | None:
         """The id of the job ``key`` names when it runs or succeeded; ``None`` when there is none to share. A job that was
-        cancelled and has not yet ended is not shared: it would answer cancelled."""
+        cancelled and has not yet ended is not shared: it would answer cancelled. One that succeeded because the cancel
+        came too late to stop it is."""
         entry = self._shared.get(key)
         if entry is None:
             return None
         job = self._jobs.get(entry.job_id)
         if job is None:  # a job of a runner before this one: only one that succeeded has a result to share
             job = self._adopted(entry) if entry.succeeded else None
-        if job is None or job.cancel_requested:
+        if job is None or (job.cancel_requested and job.status is JobStatus.RUNNING):
             return None
         return job.job_id if job.status in (JobStatus.RUNNING, JobStatus.SUCCEEDED) else None
 
