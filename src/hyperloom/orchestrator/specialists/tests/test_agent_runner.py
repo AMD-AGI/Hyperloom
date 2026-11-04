@@ -463,7 +463,7 @@ async def test_cpu_work_in_the_process_tree_keeps_a_long_shell_command_alive(tmp
 
     def burn_cpu() -> None:  # the command burning one CPU second per virtual second, as the sampler sees it
         ticks["n"] += 5
-        add_proc(proc_root, handle.pid, 1, rss_kb=1000, utime=ticks["n"] * 100, children=[])
+        add_proc(proc_root, handle.pid, 1, rss_kb=1000, utime=ticks["n"] * 100)
 
     clock.on_tick.append(burn_cpu)
     await run_fake_time(clock, handle, 1000.0)
@@ -480,7 +480,7 @@ async def test_a_tree_that_burns_no_cpu_is_lost_even_though_a_process_exists(tmp
     clock.keep_alive = False
     runner = clocked_runner(tmp_path, clock, proc_root=proc_root)
     handle = await runner.launch(spec)
-    add_proc(proc_root, handle.pid, 1, rss_kb=1000, utime=500, children=[])  # alive, but idle
+    add_proc(proc_root, handle.pid, 1, rss_kb=1000, utime=500)  # alive, but idle
     await run_fake_time(clock, handle, 1000.0)
     status = await runner.poll(handle)
     assert status.state == "lost"
