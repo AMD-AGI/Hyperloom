@@ -54,6 +54,20 @@ def _unicode_path(wheel: Path, out: Path) -> bytes:
     return rewrite_wheel(wheel, out, unicode_path_name(_MODULE, "sitecustomize.py")).read_bytes()
 
 
+def _unicode_path_after_another_field(wheel: Path, out: Path) -> bytes:
+    """The same field behind an extended timestamp field (0x5455), as Info-ZIP writes them: zipfile reads every field of
+    a member, so the check must too."""
+    rename = unicode_path_name(_MODULE, "sitecustomize.py")
+
+    def edit(member: zipfile.ZipInfo) -> zipfile.ZipInfo:
+        renamed = rename(member)
+        if renamed is not member:
+            renamed.extra = struct.pack("<HHBL", 0x5455, 5, 1, 981173106) + renamed.extra
+        return renamed
+
+    return rewrite_wheel(wheel, out, edit).read_bytes()
+
+
 def _zip64_field(wheel: Path, out: Path) -> bytes:
     """An empty zip64 extra field on the module: zipfile reads it only for a size or offset of all ones."""
     edit = _edit_module(lambda member: setattr(member, "extra", b"\x01\x00\x00\x00"))
@@ -105,6 +119,7 @@ def _zip64_locator(wheel: Path, out: Path) -> bytes:
     ("craft", "refusal"),
     [
         (_unicode_path, "its member 'sitecustomize.py' has a Unicode Path extra field"),
+        (_unicode_path_after_another_field, "its member 'sitecustomize.py' has a Unicode Path extra field"),
         (_zip64_field, f"its member '{_MODULE}' has a zip64 extra field"),
         (_name_cut_at_a_nul, f"its member '{_MODULE}\\x00x' is read as '{_MODULE}'"),
         (_prepended, _NOT_ONE_END),
@@ -114,6 +129,7 @@ def _zip64_locator(wheel: Path, out: Path) -> bytes:
     ],
     ids=[
         "unicode-path-field",
+        "unicode-path-field-after-another-field",
         "zip64-field",
         "name-cut-at-a-nul",
         "bytes-before-the-first-member",
@@ -134,15 +150,21 @@ def test_a_wheel_another_python_could_read_other_names_or_members_from_is_refuse
     assert str(refused.value).startswith(refusal)
 
 
-def test_a_wheel_is_read_by_raw_name_content_and_executable_bit_not_by_its_layout(wheel: Path, tmp_path: Path) -> None:
+def test_a_wheel_is_read_by_raw_name_and_content_not_by_its_layout(wheel: Path, tmp_path: Path) -> None:
     files = _wheel_files(wheel)
     with zipfile.ZipFile(wheel) as archive:
         assert [name for name, *_ in files] == sorted(archive.namelist())
     # Written again with other timestamps and the members in another order: the same.
     assert _wheel_files(rewrite_wheel(wheel, tmp_path / "again.whl")) == files
 
+
+@pytest.mark.parametrize("mode", [0o755, 0o654, 0o645], ids=["owner-group-other", "group-only", "other-only"])
+def test_a_member_with_any_execute_bit_is_read_as_executable(wheel: Path, tmp_path: Path, mode: int) -> None:
+    """pip makes a member executable when any of its three execute bits is set, not only the owner's."""
+    files = _wheel_files(wheel)
+
     def executable(member: zipfile.ZipInfo) -> None:
-        member.external_attr = (stat.S_IFREG | 0o755) << 16
+        member.external_attr = (stat.S_IFREG | mode) << 16
 
     made_executable = _wheel_files(rewrite_wheel(wheel, tmp_path / "x.whl", _edit_module(executable)))
     assert {name for name, *_ in set(made_executable) ^ set(files)} == {_MODULE}

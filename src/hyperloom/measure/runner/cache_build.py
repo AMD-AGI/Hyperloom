@@ -195,8 +195,9 @@ _OLDEST_GLIBC_MINOR = 5
 #: The first pip whose ``install --python-version`` checks ``Requires-Python`` against that version; older ones check it
 #: against the interpreter pip runs on, the builder's, which says nothing about the runner's.
 _PIP_CHECKS_TARGET_PYTHON = (24, 2)
-#: What :mod:`zipfile` raises for an archive it cannot read: damaged or cut short, of a compression it lacks, encrypted.
-_UNREADABLE_ZIP = (zipfile.BadZipFile, zlib.error, EOFError, NotImplementedError, RuntimeError)
+#: What :mod:`zipfile` raises for an archive it cannot read: damaged or cut short, of a compression it lacks, encrypted,
+#: or with a member whose name is flagged UTF-8 and is not.
+_UNREADABLE_ZIP = (zipfile.BadZipFile, zlib.error, EOFError, NotImplementedError, RuntimeError, UnicodeDecodeError)
 #: The builder's copy of a cached wheel that a reuse compares with the one it builds again.
 _CACHED_WHEEL = "cached.whl"
 #: Extra fields of a zip member that :mod:`zipfile` reads differently from one Python to another: Info-ZIP Unicode Path,
