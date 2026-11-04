@@ -564,6 +564,11 @@ class StandingRow:
 
         return self.numbers is not None and (self.numbers, self.rules) == (playbook.numbers, playbook.rules)
 
+    def replayed_as(self, other: StandingRow) -> bool:
+        """Whether this row and ``other`` replayed the same numbers and rules."""
+
+        return (self.numbers, self.rules) == (other.numbers, other.rules)
+
     @property
     def reading(self) -> str:
         """:data:`BETTER` when both intervals sit above 0, :data:`WORSE` when both sit below, :data:`UNCLEAR`
@@ -670,15 +675,16 @@ def standings(pool: PlaybookPool) -> tuple[ReplayStanding, ...]:
 
 
 def moved(previous: ReplayStanding | None, current: ReplayStanding) -> tuple[str, ...]:
-    """The readings of ``current`` that moved since ``previous`` against the same champion, a line each."""
+    """The readings of ``current`` that moved since ``previous`` against the same champion, a line each; a label
+    whose row replayed other numbers or rules in ``previous`` has no earlier reading to move from."""
 
     if previous is None or previous.champion != current.champion:
         return ()
-    before = previous.readings()
+    before = {row.label: row for row in previous.rows}
     return tuple(
-        f"{label}: {before[label]} -> {reading}"
-        for label, reading in current.readings().items()
-        if label in before and before[label] != reading
+        f"{row.label}: {before[row.label].reading} -> {row.reading}"
+        for row in current.rows
+        if row.label in before and before[row.label].replayed_as(row) and before[row.label].reading != row.reading
     )
 
 

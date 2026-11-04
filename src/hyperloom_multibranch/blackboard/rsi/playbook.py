@@ -30,7 +30,6 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
-import logging
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -42,8 +41,7 @@ from hyperloom_multibranch.blackboard.local.files import encode_json, publish_on
 from hyperloom_multibranch.blackboard.rsi.archive import TreeArchive, written_by
 from hyperloom_multibranch.blackboard.rsi.frontier import PROBATION_SHARE, PROBATION_TESTS, SETTLED_TESTS, StopRule
 from hyperloom_multibranch.blackboard.rsi.history import MAX_STALL_TESTS, MIN_STALL_TESTS
-
-log = logging.getLogger(__name__)
+from hyperloom_multibranch.blackboard.rsi.lessons import published_records
 
 PLAYBOOK_FORMAT = "multibranch.scheduling-playbook"
 #: The key of the playbook a session played in its policy versions, as the scheduler records it.
@@ -65,7 +63,6 @@ RULE_CHARS = 300
 _PARTICULAR = re.compile(
     r"\bb\d{2,}\b|\b[0-9a-f]{8}\b|qwen|llama|deepseek|glm|mixtral|gpt-?oss|kimi|minimax", re.IGNORECASE
 )
-_JSON = "*.json"
 _ENCODING = "utf-8"
 _PLAYBOOKS = "playbooks"
 _CROWNED = "crowned"
@@ -274,21 +271,12 @@ class PlaybookPool:
         archive = TreeArchive.read_from_env(env)
         return None if archive is None else cls.beside(archive)
 
-    def _ledger(self, folder: str, kind: type, fmt: str) -> list:
-        found = []
-        for path in sorted((self.root / folder).glob(_JSON)):
-            try:
-                found.append(_read(path, kind, fmt))
-            except (OSError, KeyError, TypeError, ValueError) as exc:
-                log.warning("skipping an unreadable playbook record %s: %s", path, exc)
-        return found
-
     def playbooks(self) -> tuple[Playbook, ...]:
         """Every readable playbook, the earliest registered first."""
 
         found = [
             item
-            for item in self._ledger(".", Playbook, PLAYBOOK_FORMAT)
+            for item in published_records(self.root, Playbook, PLAYBOOK_FORMAT, "playbook")
             if isinstance(item, Playbook) and written_by(self.as_of, item.registered_at)
         ]
         return tuple(sorted(found, key=lambda item: item.registered_at))
@@ -315,7 +303,7 @@ class PlaybookPool:
     def crowned(self) -> tuple[Crowned, ...]:
         found = [
             item
-            for item in self._ledger(_CROWNED, Crowned, CROWNED_FORMAT)
+            for item in published_records(self.root / _CROWNED, Crowned, CROWNED_FORMAT, "crowned playbook")
             if isinstance(item, Crowned) and written_by(self.as_of, item.crowned_at)
         ]
         return tuple(sorted(found, key=lambda item: item.crowned_at))
@@ -323,7 +311,7 @@ class PlaybookPool:
     def retired(self) -> tuple[Retired, ...]:
         found = [
             item
-            for item in self._ledger(_RETIRED, Retired, RETIRED_FORMAT)
+            for item in published_records(self.root / _RETIRED, Retired, RETIRED_FORMAT, "retired playbook")
             if isinstance(item, Retired) and written_by(self.as_of, item.retired_at)
         ]
         return tuple(sorted(found, key=lambda item: item.retired_at))
