@@ -158,7 +158,8 @@ def test_the_device_id_and_arch_are_read_next_to_the_market_name():
 
 
 def test_a_node_whose_market_name_is_mi355_oam_is_still_an_mi355x():
-    """autopilot-crsuse2-m2m-188 reports 'AMD Instinct MI355 OAM' for device 0x75a3; the old name match refused every test."""
+    """A machine whose VBIOS reports 'AMD Instinct MI355 OAM' for device 0x75a3: a match on the name alone would
+    refuse every test there."""
     oam = _card("AMD Instinct MI355 OAM", "75a3", "gfx950")
 
     for requested in ("mi355x", "MI355X", "MI355X "):
@@ -252,7 +253,7 @@ def test_the_ras_fallback_tells_new_uncorrectable_errors_from_the_counts_before(
 
 
 def test_busy_gpus_are_the_visible_ones_with_memory_resident():
-    free, held = GpuVram(284.0, 295000.0), GpuVram(120000.0, 295000.0)
+    free, held = GpuVram(300.0, 300000.0), GpuVram(120000.0, 300000.0)
 
     assert busy_gpus([0, 1], lambda: [free, held]) == [1]
     assert busy_gpus([0], lambda: [free, held]) == [], "a card this sandbox cannot use is not its concern"
@@ -260,7 +261,7 @@ def test_busy_gpus_are_the_visible_ones_with_memory_resident():
 
 
 def test_memory_use_that_cannot_be_read_is_none_not_free():
-    held = GpuVram(120000.0, 295000.0)
+    held = GpuVram(120000.0, 300000.0)
 
     assert busy_gpus([0], lambda: None) is None
     assert busy_gpus([0, 3], lambda: [held, held]) is None, "a visible card the tool did not list is unread"
