@@ -190,7 +190,7 @@ async def test_a_table_an_agent_reports_in_its_result_file_is_imported_as_an_art
     assert manifest.keep is not None and manifest.config_source is not None
     assert manifest.keep.count(json.loads(json.dumps(result))) == 1
 
-    kept = read_kept_change(1, "", result, manifest.config_source, "", START)
+    kept = read_kept_change(KeptChange(1, "", START.server_args, dict(START.envs)), result, manifest.config_source)
     candidate = await _imported(with_tables(kept, (tmp_path / "b02" / "worktree", checkout.parent)), tables)
     head = _with(tables.artifact(HEAD))
     merged = apply(head, carry("i1", BASE, candidate, head, tables.stored(configs)).delta)

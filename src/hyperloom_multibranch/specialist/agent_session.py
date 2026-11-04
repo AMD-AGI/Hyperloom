@@ -605,23 +605,9 @@ class AgentSession:
         while not self._stopped.is_set() and (await self._setup.runner.poll(handle)).state == _RUNNING:
             if self._beat is not None:
                 self._beat()
-            followed = await self._follow()
-            items, notices = await self._arrived(seen)
-            shared = await self._shared_profiles()
-            landed = [
-                _landed(record) for record in shared if record.request_id in seen.profiles and not record.in_flight
-            ]
-            seen.profiles = {record.request_id for record in shared if record.in_flight}
-            integration = await self._setup.repo.head(INTEGRATION_BRANCH)
-            moved = integration != seen.integration
-            if items or notices or landed or moved or followed:
-                seen.integration = integration
-                holdings = (
-                    await self._holdings(await self._setup.repo.head(self._start.branch)) if moved or followed else ""
-                )
-                return wake_message(
-                    (*items, *landed), notices, integration=_joined(followed.detail if followed else "", holdings)
-                )
+            arrival = await self._arrival(seen)
+            if arrival is not None:
+                return arrival
             pending = await self._pending(seen)
             if pending:
                 quiet_since = None
@@ -634,6 +620,25 @@ class AgentSession:
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(self._stopped.wait(), self._setup.poll_seconds)
         return None
+
+    async def _arrival(self, seen: _Seen) -> str | None:
+        """The wake for what arrived for the branch past ``seen``, which moves past it: inbox items, the runtime's
+        notices, profiles of its head that landed, a move of the integration head or of the branch onto it; ``None``
+        when nothing did."""
+        followed = await self._follow()
+        items, notices = await self._arrived(seen)
+        shared = await self._shared_profiles()
+        landed = [_landed(record) for record in shared if record.request_id in seen.profiles and not record.in_flight]
+        seen.profiles = {record.request_id for record in shared if record.in_flight}
+        integration = await self._setup.repo.head(INTEGRATION_BRANCH)
+        moved = integration != seen.integration
+        if not (items or notices or landed or moved or followed):
+            return None
+        seen.integration = integration
+        holdings = await self._holdings(await self._setup.repo.head(self._start.branch)) if moved or followed else ""
+        return wake_message(
+            (*items, *landed), notices, integration=_joined(followed.detail if followed else "", holdings)
+        )
 
     async def _arrived(self, seen: _Seen) -> tuple[Sequence[InboxItem], list[BranchLogRecord]]:
         """The inbox items and the runtime's notices past ``seen``, which moves past them, among them the refusal of

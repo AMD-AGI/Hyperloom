@@ -26,6 +26,8 @@ from hyperloom_multibranch.contracts.blackboard.vocab import LearningKind
 
 #: The field that names a file in the agent's checkout, in every part of the manifest that reads one.
 _PATH_FIELD = "path"
+#: The manifest fields that say how a keep shows and where its launch is read, both null with snapshots.
+_KEEP_FIELD, _CONFIG_SOURCE_FIELD = "keep", "config_source"
 
 
 class ManifestError(ValueError):
@@ -94,7 +96,7 @@ class KeepSignal:
 
     @classmethod
     def read(cls, document: object) -> KeepSignal:
-        fields = _fields(document, "keep", {_PATH_FIELD, "field", "where"})
+        fields = _fields(document, _KEEP_FIELD, {_PATH_FIELD, "field", "where"})
         where = fields.get("where", {})
         if not isinstance(where, Mapping):
             raise ManifestError(f"keep.where must be an object, got {where!r}")
@@ -148,7 +150,7 @@ class ConfigSource:
 
     @classmethod
     def read(cls, document: object) -> ConfigSource:
-        fields = _fields(document, "config_source", {_PATH_FIELD, "server_args", "envs", "root", "adds"})
+        fields = _fields(document, _CONFIG_SOURCE_FIELD, {_PATH_FIELD, "server_args", "envs", "root", "adds"})
         root = fields.get("root", WORKSPACE)
         if root not in (WORKSPACE, CHECKOUT):
             raise ManifestError(f"config_source.root must be {WORKSPACE!r} or {CHECKOUT!r}, got {root!r}")
@@ -248,8 +250,8 @@ _MANIFEST_FIELDS = {
     "config",
     "launch",
     "resume",
-    "keep",
-    "config_source",
+    _KEEP_FIELD,
+    _CONFIG_SOURCE_FIELD,
     "summary_field",
     "needs",
     "ledger",
@@ -313,10 +315,10 @@ class AgentManifest:
         config = fields.get("config")
         if not isinstance(config, Mapping):
             raise ManifestError(f"config must be an object, got {config!r}")
-        keep, source, ledger = fields.get("keep"), fields.get("config_source"), fields.get("ledger")
+        keep, source, ledger = fields.get(_KEEP_FIELD), fields.get(_CONFIG_SOURCE_FIELD), fields.get("ledger")
         snapshots = fields.get("snapshots")
         if snapshots is not None:
-            given = [name for name, value in (("keep", keep), ("config_source", source)) if value is not None]
+            given = [name for name, value in ((_KEEP_FIELD, keep), (_CONFIG_SOURCE_FIELD, source)) if value is not None]
             if given:
                 raise ManifestError(f"{' and '.join(given)} must be null when snapshots carries every keep whole")
         manifest = cls(

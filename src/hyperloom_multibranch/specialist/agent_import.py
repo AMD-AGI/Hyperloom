@@ -75,6 +75,7 @@ CHANGE_FILE = "change.patch"
 SERVED_FILE = "served.patch"
 LAUNCH_FILE = "config.json"
 TABLES_DIR = "tables"
+_ENCODING = "utf-8"
 #: The patch from the state the head's imported patches make, in order, to the state a keep's cumulative patch makes,
 #: both over the root; empty when they are the same.
 SourceIncrement = Callable[[tuple[PatchRef, ...], str], Awaitable[str]]
@@ -157,11 +158,9 @@ def without_conflicts(kept: KeptChange, inherited: Collection[str] = ()) -> Kept
     return replace(kept, server_args=args, removed=removed, disabled={**kept.disabled, **disabled})
 
 
-def read_kept_change(
-    seq: int, source_patch: str, state: object, source: ConfigSource, summary: str, start: LaunchConfig
-) -> KeptChange:
-    """The keep ``seq`` of an agent whose workspace differs from the root by ``source_patch``, whose config file, which
-    ``source`` describes, parsed to ``state``, and which was started with ``start``."""
+def read_kept_change(started: KeptChange, state: object, source: ConfigSource) -> KeptChange:
+    """``started``, a keep that runs the launch its agent was started with, running instead what the agent's config
+    file, which ``source`` describes, parsed to ``state``, gives."""
 
     try:
         args, envs = read_field(state, source.server_args), read_field(state, source.envs)
@@ -175,9 +174,9 @@ def read_kept_change(
         _assignments(envs, source) if isinstance(envs, str) else {str(name): str(value) for name, value in envs.items()}
     )
     if source.adds:
-        args, named = _over(start, ("", {}), args, named)
+        args, named = _over((started.server_args, started.envs), ("", {}), args, named)
     named, dropped = _without_measurement(named)
-    return without_conflicts(KeptChange(seq, source_patch, args, named, summary, dropped=dropped))
+    return without_conflicts(replace(started, server_args=args, envs=named, dropped=dropped))
 
 
 def _assignments(words: str, source: ConfigSource) -> dict[str, str]:
@@ -194,17 +193,17 @@ def _assignments(words: str, source: ConfigSource) -> dict[str, str]:
 _Launch = tuple[str, Mapping[str, str]]
 
 
-def _over(base: LaunchConfig, since: _Launch, args: str, envs: Mapping[str, str]) -> _Launch:
+def _over(base: _Launch, since: _Launch, args: str, envs: Mapping[str, str]) -> _Launch:
     """``base`` with what ``args`` and ``envs`` change from ``since``: each flag set otherwise set as ``args`` sets it,
     each flag and variable of ``since`` they no longer have dropped, each variable set otherwise set."""
 
     groups, before = _by_flag(args), _by_flag(since[0])
     changed = {name for name, words in groups.items() if before.get(name) != words}
     gone = changed | (before.keys() - groups.keys())
-    kept = [words for name, words in _flag_groups(base.server_args) if name not in gone]
+    kept = [words for name, words in _flag_groups(base[0]) if name not in gone]
     added = [words for name, words in _flag_groups(args) if name in changed]
     unset = since[1].keys() - envs.keys()
-    named = {name: value for name, value in base.envs.items() if name not in unset}
+    named = {name: value for name, value in base[1].items() if name not in unset}
     named.update({name: value for name, value in envs.items() if since[1].get(name) != value})
     return " ".join(word for words in [*kept, *added] for word in words), named
 
@@ -241,7 +240,7 @@ def _flag_groups(args: str) -> list[tuple[str, list[str]]]:
 def read_json(path: Path) -> object:
     """The JSON ``path`` holds; raise :class:`KeptChangeError` when it cannot be read."""
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding=_ENCODING))
     except (OSError, ValueError) as error:
         raise KeptChangeError(f"{path.name} cannot be read: {error}") from error
 
@@ -251,7 +250,7 @@ def latest_snapshot(outbox: Path) -> int | None:
     read and ``ValueError`` when it names no keep."""
 
     try:
-        named = (outbox / LATEST_FILE).read_text(encoding="utf-8")
+        named = (outbox / LATEST_FILE).read_text(encoding=_ENCODING)
     except FileNotFoundError:
         return None
     return int(named.strip())
@@ -299,7 +298,7 @@ def read_snapshot(outbox: Path, number: int, root: str, applied: Applied, start:
     named, dropped = _without_measurement(launch[1])
     base = start.launch
     since = _component_launch(start.config) or (base.server_args, base.envs)
-    args, named = _over(base, since, launch[0], named)
+    args, named = _over((base.server_args, base.envs), since, launch[0], named)
     # The flags the launch the framework resolves gives the agent, which the start commit's own arguments lack.
     resolved, runs = _flags(since[0]) - _flags(base.server_args), _flags(launch[0])
     tables, uncopied = _snapshot_tables(directory / TABLES_DIR, chain[-1].tables, named, start.copies)
@@ -366,7 +365,7 @@ def _said(keep: Mapping[str, object]) -> str:
 def _patch(directory: Path, name: str) -> str:
     # No newline translation: a lone CR in an added file (a progress bar in a log) would otherwise split its line.
     try:
-        with (directory / name).open(encoding="utf-8", newline="") as text:
+        with (directory / name).open(encoding=_ENCODING, newline="") as text:
             return text.read()
     except (OSError, UnicodeDecodeError) as error:
         raise KeptChangeError(f"{directory.name}/{name} cannot be read: {error}") from error
@@ -439,7 +438,7 @@ def _copied_text(directory: Path, name: str, entry: Mapping[str, object]) -> str
     if hashlib.sha256(data).hexdigest() != digest:
         raise KeptChangeError(f"the table {name} loads does not match its sha256 {digest}")
     try:
-        return data.decode("utf-8")
+        return data.decode(_ENCODING)
     except UnicodeDecodeError as error:
         raise KeptChangeError(f"the table {name} loads is no text: {error}") from error
 
@@ -467,7 +466,7 @@ def with_tables(kept: KeptChange, owned: Sequence[Path]) -> KeptChange:
         texts = []
         for path in paths:
             try:
-                texts.append(path.read_text(encoding="utf-8"))
+                texts.append(path.read_text(encoding=_ENCODING))
             except (OSError, UnicodeDecodeError) as exc:
                 raise KeptChangeError(f"the table {path} that {name} loads cannot be read: {exc}") from exc
         return texts
