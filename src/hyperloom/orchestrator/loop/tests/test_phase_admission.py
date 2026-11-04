@@ -19,6 +19,10 @@ from hyperloom.orchestrator.policy.denial import PolicyDenied
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 
+# What an action carries past the gates this file is not about: an explore is admitted on a grid to measure.
+_PARAMS_BEYOND_THE_PHASE = {"explore": {"grid": [{"name": "v1"}]}}
+
+
 def _dispatcher(phase: str, *, baseline_tput: float = 800.0) -> DispatcherCollaborator:
     """A dispatcher over the coordinator surface admission reads, with an unbounded budget."""
     state = SharedState(session_id="s")
@@ -78,7 +82,9 @@ def test_a_phase_that_proposes_nothing_says_so():
     ],
 )
 def test_an_action_the_phase_proposes_is_admitted(phase: str, action: str):
-    assert _dispatcher(phase).admission_denial_for_action(action) is None
+    admission = _dispatcher(phase).admission_denial_for_action(action, params=_PARAMS_BEYOND_THE_PHASE.get(action))
+
+    assert admission is None
 
 
 def test_the_prelude_baseline_is_admitted_before_any_measurement():
@@ -96,4 +102,6 @@ def test_enablement_keeps_its_baseline_for_the_coordinator():
 @pytest.mark.parametrize("action", ["baseline", "explore", "specialist"])
 def test_no_phase_entered_yet_holds_nothing_to_a_contract(action: str):
     """Before the phase machine enters PRELUDE there is no phase whose contract could apply."""
-    assert _dispatcher("").admission_denial_for_action(action) is None
+    admission = _dispatcher("").admission_denial_for_action(action, params=_PARAMS_BEYOND_THE_PHASE.get(action))
+
+    assert admission is None
