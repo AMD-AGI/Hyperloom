@@ -27,6 +27,7 @@ from hyperloom_multibranch.toolbox.tools.tune_rows import (
     REL_NORM_ERR_LIMIT,
     Relax,
     RowsRefused,
+    demanded_nk,
     dropped_by_forge,
     from_artifact,
     split_dropped,
@@ -212,6 +213,31 @@ def relax(tmp_path: Path, dropped: list[dict], *lines: str, limit: float = 0.05,
 #: A down projection at a decode M: the asm row at splitK 6 is the fastest, with a ratio just above the default, and the
 #: best row the default check lets through is a slower CK one (the times are made up; only their order matters).
 DOWN = (64, 5120, 17408)
+
+
+def test_a_row_of_an_n_and_k_the_job_did_not_ask_for_is_refused_whatever_its_figures(
+    tmp_path: Path, configs: Path
+) -> None:
+    asked = demanded_nk([{"M": "16", "N": "512", "K": "7168", "requests": 1}, {"M": None, "N": None, "K": "1"}])
+    lines = (row(16, 512, 7168), row(256, 512, 7168), row(16, 4096, 1280))
+
+    rows = from_artifact(table(tmp_path, *lines), ENV, configs, demanded=asked)
+
+    assert asked == frozenset({(512, 7168)})
+    assert shapes(rows.csv) == [("16", "512", "7168"), ("256", "512", "7168")], "M is Forge's to pad"
+    (refused,) = rows.refused
+    assert (refused["N"], refused["K"], refused["verified"]) == ("4096", "1280", False)
+    assert refused["reason"] == "the job did not ask for a shape of its N and K"
+
+
+def test_a_relaxed_row_of_an_n_and_k_the_job_did_not_ask_for_is_refused_too(tmp_path: Path, configs: Path) -> None:
+    lines = (profile_row(*DOWN, lib="asm", kernel_id=4, split_k=6, us=20.0, err=0.0125, name=ASM),)
+    allowed = relax(tmp_path, [forge_dropped(*DOWN)], *lines)
+
+    rows = from_artifact(table(tmp_path, row(16, 512, 7168)), ENV, configs, allowed, frozenset({(512, 7168)}))
+
+    assert rows.relaxed == () and rows.relaxed_csv == ""
+    assert [(r["N"], r["K"]) for r in rows.refused] == [("5120", "17408")]
 
 
 def test_a_row_forge_dropped_for_a_ratio_within_the_allowed_one_is_read_back_whole_and_handed_over_as_relaxed(

@@ -86,5 +86,5 @@ def test_an_unverified_result_is_one_the_gate_cannot_judge_by():
     assert str(error) == "r1 did not re-verify: record_mismatch"
 
 
-def test_the_verifier_protocol_is_the_one_call_of_l26():
+def test_the_verifier_protocol_is_one_call():
     assert {name for name in vars(ResultVerifier) if not name.startswith("_")} == {"reverify"}
