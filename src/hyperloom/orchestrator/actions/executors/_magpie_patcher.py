@@ -107,7 +107,6 @@ _RUN_LM_EVAL_MERGED_CATCHALL_RE = re.compile(
 # tolerance check to that function's body.
 _RUN_LM_EVAL_FN_MARKER = "run_lm_eval()"
 
-# System-wide lock.
 _LM_EVAL_ONCE_SENTINEL = "HYPERLOOM_LM_EVAL_INSTALL_ONCE"
 _LM_EVAL_UNLOCKED_FN = "_hyperloom_install_lm_eval_deps_unlocked"
 _LM_EVAL_DEPS_FN_RE = re.compile(r"^_install_lm_eval_deps\(\) \{\n.*?^\}\n", re.DOTALL | re.MULTILINE)
@@ -115,11 +114,13 @@ _LM_EVAL_REF_RE = re.compile(r'local lm_eval_ref="([^"]+)"')
 #: Succeeds when ``python3`` has the pinned lm-eval and the round's ``_install_lm_eval_deps`` would install nothing.
 LM_EVAL_READY_FN = "_hyperloom_lm_eval_ready"
 _LM_EVAL_SPARE_MARKER_FN = "_hyperloom_lm_eval_spare_marker"
+_EVAL_OUTPUT_SENTINEL = "HYPERLOOM_EVAL_OUTPUT_SCOPED"
 _EVAL_OUTPUT_FN = "_hyperloom_keep_eval_output"
-#: Names the file the eval's output is kept in once it is (``$RESULT_DIR/EVAL_OUTPUT_LOG``); set, nothing else is kept.
-EVAL_OUTPUT_ENV = "HYPERLOOM_EVAL_OUTPUT_LOG"
+#: Where, below ``$RESULT_DIR``, what the lm-eval command writes is kept as it is written.
 EVAL_OUTPUT_LOG = "hyperloom_eval.log"
+_LM_EVAL_COMMAND_RE = re.compile(r"^[ \t]*(python3 -m lm_eval\b)", re.MULTILINE)
 
+# System-wide lock.
 _LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_magpie_benchmarker_patcher.lock")
 
 
@@ -309,18 +310,9 @@ def _lm_eval_once_wrapper(ref: str) -> str:
     printf '/tmp/hyperloom-lm-eval-{ref}-%s\\n' "$(printf '%s' "$1" | cksum | cut -d' ' -f1)"
 }}
 
-{_EVAL_OUTPUT_FN}() {{
-    # From here on what this shell writes is kept in $RESULT_DIR/{EVAL_OUTPUT_LOG} as it is written: Magpie holds the
-    # round's output until the round ends, so a round its watchdog ends leaves nothing of what its eval printed.
-    [[ -z "${{{EVAL_OUTPUT_ENV}:-}}" && -n "${{RESULT_DIR:-}}" && -d "${{RESULT_DIR:-}}" ]] || return 0
-    export {EVAL_OUTPUT_ENV}="$RESULT_DIR/{EVAL_OUTPUT_LOG}"
-    exec > >(tee -a "${EVAL_OUTPUT_ENV}") 2> >(tee -a "${EVAL_OUTPUT_ENV}" >&2)
-}}
-
 _install_lm_eval_deps() {{
     # {_LM_EVAL_ONCE_SENTINEL}: local tests share one Python environment, and a reinstall racing
     # another test's eval breaks it; install once per environment and lm-eval revision, under a lock.
-    {_EVAL_OUTPUT_FN}
     local prefix marker lock
     prefix="$(python3 -c 'import sys; print(sys.prefix)' 2>/dev/null)" || prefix=unknown
     marker="$prefix/.hyperloom-lm-eval-{ref}"
@@ -373,6 +365,48 @@ def _apply_lm_eval_install_once_patch_atomic(benchmark_lib: Path) -> bool:
     if not atomic_write_text(benchmark_lib, patched, log_prefix="_magpie_patcher"):
         return False
     log.info("_magpie_patcher: patched %s to install lm-eval once per environment", benchmark_lib)
+    return True
+
+
+_EVAL_OUTPUT_WRAPPER = f"""{_EVAL_OUTPUT_FN}() {{
+    # {_EVAL_OUTPUT_SENTINEL}: run the command, and keep what it writes in $RESULT_DIR/{EVAL_OUTPUT_LOG} as it is
+    # written: Magpie holds a round's output until the round ends, so a round its watchdog ends kept nothing of what
+    # its eval printed. Only this command's output is kept; the shell's own output is left alone. Called bare, as an
+    # earlier install-once patch did, it does nothing.
+    (($#)) || return 0
+    if [[ -z "${{RESULT_DIR:-}}" || ! -d "${{RESULT_DIR:-}}" ]]; then
+        "$@"
+        return
+    fi
+    # stdout through a pipeline, so the round's own output stays in order after the eval
+    "$@" 2> >(tee -a "$RESULT_DIR/{EVAL_OUTPUT_LOG}" >&2) | tee -a "$RESULT_DIR/{EVAL_OUTPUT_LOG}"
+    return "${{PIPESTATUS[0]}}"
+}}
+
+"""
+
+
+def _apply_eval_output_patch_atomic(benchmark_lib: Path) -> bool:
+    """Make InferenceX's ``run_lm_eval`` keep what its lm-eval command writes in ``$RESULT_DIR/EVAL_OUTPUT_LOG`` as it
+    is written, and nothing else the benchmark shell writes."""
+    try:
+        original = benchmark_lib.read_text(encoding="utf-8")
+    except OSError as e:
+        log.warning("_magpie_patcher: cannot read %s: %s", benchmark_lib, e)
+        return False
+    if _EVAL_OUTPUT_SENTINEL in original:
+        return True
+    region = _extract_run_lm_eval_region(original)
+    command = _LM_EVAL_COMMAND_RE.search(original, *region) if region else None
+    if region is None or command is None:
+        log.warning("_magpie_patcher: no lm_eval command in run_lm_eval of %s; its output is not kept", benchmark_lib)
+        return False
+    head = original.rfind("\n", 0, region[0]) + 1
+    at = command.start(1)
+    patched = original[:head] + _EVAL_OUTPUT_WRAPPER + original[head:at] + f"{_EVAL_OUTPUT_FN} " + original[at:]
+    if not atomic_write_text(benchmark_lib, patched, log_prefix="_magpie_patcher"):
+        return False
+    log.info("_magpie_patcher: patched %s to keep the lm-eval command's output", benchmark_lib)
     return True
 
 
@@ -476,11 +510,13 @@ def live_eval_concurrency_flag_scripts(
 
 
 def ensure_lm_eval_install_once(inferencex_dir: Path | str | None = None) -> bool:
-    """Patch the InferenceX checkout's lm-eval install to run once per environment; whether it now does."""
+    """Patch the InferenceX checkout's lm-eval install to run once per environment; whether it now does. The same
+    sweep makes the eval keep its output, which does not ride on the result."""
     benchmark_lib = _resolve_inferencex_benchmark_lib(inferencex_dir)
     if benchmark_lib is None:
         return False
     with best_effort_file_lock(_LOCK_PATH, label="_magpie_patcher"):
+        _apply_eval_output_patch_atomic(benchmark_lib)
         return _apply_lm_eval_install_once_patch_atomic(benchmark_lib)
 
 
@@ -489,11 +525,12 @@ def ensure_eval_concurrency_compat(
     inferencex_dir: Path | str | None = None,
 ) -> bool:
     """Public, run-time-safe entry point for the eval-concurrency fixes; on the same sweep it makes the lm-eval
-    install run once per environment, which does not ride on the result."""
+    install run once per environment and the eval keep its output, neither of which rides on the result."""
     with best_effort_file_lock(_LOCK_PATH, label="_magpie_patcher"):
         applied_ok = _apply_eval_concurrency_fixes(magpie_dir, inferencex_dir)
         benchmark_lib = _resolve_inferencex_benchmark_lib(inferencex_dir)
         if benchmark_lib is not None:
+            _apply_eval_output_patch_atomic(benchmark_lib)
             _apply_lm_eval_install_once_patch_atomic(benchmark_lib)
         return _eval_concurrency_unblocked(applied_ok, magpie_dir, inferencex_dir)
 
@@ -700,7 +737,6 @@ __all__ = [
     "client_tokenizer_hook_installed",
     "ensure_eval_concurrency_compat",
     "ensure_lm_eval_install_once",
-    "EVAL_OUTPUT_ENV",
     "EVAL_OUTPUT_LOG",
     "LM_EVAL_READY_FN",
     "ensure_client_trust_compat",

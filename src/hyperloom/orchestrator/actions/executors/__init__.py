@@ -20,7 +20,7 @@ from ._grid_base import GridVariant, VariantResult
 from ._profile_setup import SGLANG_PATCH_SERVER_FLAG, VLLM_PATCH_PROFILER_FIELDS
 from ._patch_laying import PatchedServer, is_patched_copy
 from ._server_patcher import ensure_patched_copy, ensure_vllm_patched_for_tracelens, lay_tracelens_patch
-from ._magpie_patcher import EVAL_OUTPUT_ENV, LM_EVAL_READY_FN, ensure_lm_eval_install_once
+from ._magpie_patcher import LM_EVAL_READY_FN, ensure_lm_eval_install_once
 from ._inferencex_patcher import (
     benchmark_serving_path_in,
     ensure_benchmark_lib_patched,
@@ -57,7 +57,6 @@ __all__ = [
     "is_patched_copy",
     "lay_tracelens_patch",
     "ensure_lm_eval_install_once",
-    "EVAL_OUTPUT_ENV",
     "LM_EVAL_READY_FN",
     "PREFIX_CACHE_OFF_ERROR_CLASS",
     "CONTEXT_COPY_REFUSAL",
