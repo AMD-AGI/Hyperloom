@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import hashlib
 import shutil
+import stat
+import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -49,7 +51,9 @@ from hyperloom.measure.runner.tests.bootstrap_rig import (
     commit_edit,
     copy_cache,
     lock_text,
+    rewrite_wheel,
     tripwire,
+    unicode_path_name,
 )
 
 #: Options a build cannot succeed with (no index and no wheels): only a reuse of the entry can answer.
@@ -202,6 +206,30 @@ def _built_wheel_not_a_zip(entry: Path, planted: Planted) -> None:
     _record_wheel(entry, "sdist-pkg", _SDIST_WHEEL)
 
 
+def _rewrite_built_wheel(entry: Path, edit: Callable[[zipfile.ZipInfo], zipfile.ZipInfo] | None = None) -> None:
+    """The built wheel's members written again (:func:`rewrite_wheel`) in place of the cached wheel, and recorded."""
+    cached = entry / WHEELS_DIR / _SDIST_WHEEL
+    rewrite_wheel(Path(shutil.copyfile(cached, cached.with_suffix(".orig"))), cached, edit)
+    cached.with_suffix(".orig").unlink()
+    _record_wheel(entry, "sdist-pkg", _SDIST_WHEEL)
+
+
+def _built_module_stored_as_sitecustomize(entry: Path, planted: Planted) -> None:
+    """The built wheel's ``sdist_pkg.py`` stored under the raw name ``sitecustomize.py``, with a Unicode Path extra field
+    naming it ``sdist_pkg.py``: pip installs ``sitecustomize.py`` where its zipfile reads the raw name (before Python
+    3.12), while a builder whose zipfile reads the field (3.12 and newer) sees the members of the rebuilt wheel."""
+    _rewrite_built_wheel(entry, unicode_path_name("sdist_pkg.py", "sitecustomize.py"))
+
+
+def _built_module_made_executable(entry: Path, planted: Planted) -> None:
+    def executable(member: zipfile.ZipInfo) -> zipfile.ZipInfo:
+        if member.filename == "sdist_pkg.py":
+            member.external_attr = (stat.S_IFREG | 0o755) << 16
+        return member
+
+    _rewrite_built_wheel(entry, executable)
+
+
 @pytest.mark.parametrize(
     ("plant", "difference"),
     [
@@ -227,6 +255,15 @@ def _built_wheel_not_a_zip(entry: Path, planted: Planted) -> None:
         ),
         (_built_wheel_renamed, f"{SDISTS_DIR}/{_SDIST} builds {_SDIST_WHEEL}, not {_RENAMED}"),
         (_built_wheel_not_a_zip, f"{_SDIST_WHEEL} cannot be read as a wheel: BadZipFile"),
+        (
+            _built_module_stored_as_sitecustomize,
+            f"{_SDIST_WHEEL} cannot be read as a wheel: BadZipFile: its member 'sitecustomize.py' has a Unicode Path "
+            "extra field",
+        ),
+        (
+            _built_module_made_executable,
+            f"{_SDIST_WHEEL} is not the wheel its source distribution builds; the members that differ: sdist_pkg.py",
+        ),
     ],
     ids=[
         "no-sdist-held",
@@ -238,10 +275,17 @@ def _built_wheel_not_a_zip(entry: Path, planted: Planted) -> None:
         "wheel-replaced",
         "wheel-renamed",
         "wheel-not-a-zip",
+        "member-under-a-unicode-path-name",
+        "member-made-executable",
     ],
 )
 def test_a_wheel_the_source_distribution_the_lock_lists_does_not_build_again_is_refused_on_reuse(
-    rig: Rig, planted: Planted, tmp_path: Path, plant: Callable[[Path, Planted], None], difference: str
+    rig: Rig,
+    planted: Planted,
+    tmp_path: Path,
+    rebuilt_from: list[Path],
+    plant: Callable[[Path, Planted], None],
+    difference: str,
 ) -> None:
     cache = copy_cache(rig, tmp_path / "cache")
     entry = cache.root / cache.sha
@@ -256,6 +300,9 @@ def test_a_wheel_the_source_distribution_the_lock_lists_does_not_build_again_is_
     assert difference in str(refused.value)
     assert (tree_digest(entry), _digest(entry / MANIFEST_NAME)) == before
     assert {path.name for path in cache.root.iterdir()} == {cache.sha, f".{cache.sha}.lock"}
+    if "cannot be read as a wheel" in difference:
+        # A cached wheel that is not read as pip reads it is refused before its source distribution is built.
+        assert rebuilt_from == []
 
 
 def test_an_entry_with_a_wheel_built_from_a_source_distribution_is_reused_after_building_it_again_offline(
@@ -279,6 +326,20 @@ def test_an_entry_with_a_wheel_built_from_a_source_distribution_is_reused_after_
     assert not rebuilt_from[0].is_relative_to(cache.root)
     assert tree_digest(entry) == before
     assert {path.name for path in cache.root.iterdir()} == {cache.sha, f".{cache.sha}.lock"}
+
+
+def test_a_built_wheel_written_again_with_other_timestamps_and_member_order_is_reused(
+    rig: Rig, tmp_path: Path, rebuilt_from: list[Path]
+) -> None:
+    """The comparison reads each member's raw name, content and executable bit, not how the zip is laid out."""
+    cache = copy_cache(rig, tmp_path / "cache")
+    entry = cache.root / cache.sha
+    before = (entry / WHEELS_DIR / _SDIST_WHEEL).read_bytes()
+    _rewrite_built_wheel(entry)
+    assert (entry / WHEELS_DIR / _SDIST_WHEEL).read_bytes() != before
+    reused = ensure_runner_cache(rig.repo, cache.sha, cache.root, _NO_WHEELS)
+    assert (reused.reused, reused.manifest_sha256) == (True, _digest(entry / MANIFEST_NAME))
+    assert [path.name for path in rebuilt_from] == [_SDIST]
 
 
 def test_a_wheel_the_lock_lists_recorded_as_built_from_a_whl_copy_of_itself_is_reused_as_that_wheel(
@@ -389,3 +450,72 @@ def test_a_reuse_checks_the_built_wheels_against_the_lock_of_the_entrys_python_n
     assert _NOT_IN_THE_LOCK in str(refused.value)
     # Built once by the build and once by the honest reuse; the planted one never.
     assert [path.name for path in rebuilt_from] == [_SDIST, _SDIST]
+
+
+def test_a_source_distribution_is_built_again_only_when_it_is_the_one_the_manifest_records(
+    rig: Rig, planted: Planted, tmp_path: Path, rebuilt_from: list[Path]
+) -> None:
+    """A commit whose lock lists two source distributions of ``sdist_pkg`` 1.0, the real one and another: an entry that
+    records the real one but holds the other, with the wheel the other builds, passes the entry check, and the builder
+    refuses it before building the held file, although the lock lists that file too."""
+
+    def two_sdists(repo: Path) -> None:
+        lock, real = repo / LOCK_FILE, f"--hash=sha256:{rig.sdist_pkg_sha256}\n"
+        assert lock.read_text().count(real) == 1
+        lock.write_text(lock.read_text().replace(real, f"{real[:-1]} \\\n    --hash=sha256:{_digest(planted.sdist)}\n"))
+
+    (tmp_path / "work").mkdir()
+    commit = commit_edit(rig, tmp_path / "work", two_sdists)
+    entry = ensure_runner_cache(commit.repo, commit.sha, tmp_path / "cache", rig.build_options()).path
+    _sdist_replaced_with_the_wheel_it_builds(entry, planted)
+    assert check_entry(entry, commit.sha, verify_hash=True) == []
+    before = (tree_digest(entry), _digest(entry / MANIFEST_NAME))
+    with pytest.raises(CacheConflict, match="is left alone") as refused:
+        ensure_runner_cache(commit.repo, commit.sha, tmp_path / "cache", _NO_WHEELS)
+    assert f"{_NOT_IN_THE_LOCK}: its SHA-256 is {_digest(planted.sdist)}" in str(refused.value)
+    assert (tree_digest(entry), _digest(entry / MANIFEST_NAME)) == before
+    # Built once, by the build, from the source distribution it downloaded; the held one never.
+    assert [path.parent.name for path in rebuilt_from] == [WHEELS_DIR]
+
+
+#: A ``lock_pkg`` 1.0 wheel with a build tag, which pip prefers to the real wheel's file when both are offered.
+_BUILD_TAGGED = "lock_pkg-1.0-1-py3-none-any.whl"
+
+
+def _second_lock_pkg_entry(behind: bool) -> Callable[[Path, Planted], None]:
+    """Other ``lock_pkg`` code as ``wheels/<_BUILD_TAGGED>``, and a second ``lock-pkg==1.0`` entry recording it put in
+    front of the real one or behind it. Behind it, the entry also claims to be built from the real wheel, whose hash
+    the lock lists, as it must to pass a check that reads only the last entry of a pin."""
+
+    def plant(entry: Path, planted: Planted) -> None:
+        held = Path(shutil.copyfile(planted.lock_wheel, entry / WHEELS_DIR / _BUILD_TAGGED))
+        manifest = manifest_from_json((entry / MANIFEST_NAME).read_bytes())
+        wheels = list(manifest.wheels)
+        real = next(index for index, wheel in enumerate(wheels) if wheel.name == "lock-pkg")
+        claim = {"sdist_sha256": wheels[real].sha256} if behind else {}
+        second = replace(wheels[real], file=_BUILD_TAGGED, size=held.stat().st_size, sha256=_digest(held), **claim)
+        wheels.insert(real + behind, second)
+        (entry / MANIFEST_NAME).write_text(manifest_to_json(replace(manifest, wheels=tuple(wheels))))
+
+    return plant
+
+
+@pytest.mark.parametrize("behind", [False, True], ids=["in-front-of-the-real-entry", "behind-the-real-entry"])
+def test_a_manifest_that_lists_a_pin_twice_is_refused_by_the_sandbox_and_the_builder(
+    rig: Rig, planted: Planted, tmp_path: Path, behind: bool
+) -> None:
+    """The sandbox stages every wheel the manifest lists and pip, given two hashes for one pin, takes either file; so
+    one pin listed twice is refused by the check the builder and the sandbox share, and only for that."""
+    cache = copy_cache(rig, tmp_path / "cache")
+    entry, scratch = cache.root / cache.sha, tmp_path / "scratch"
+    _second_lock_pkg_entry(behind)(entry, planted)
+    twice = ["the manifest lists lock-pkg==1.0 2 times, and a pin has one wheel"]
+    assert check_entry(entry, cache.sha, verify_hash=True) == twice
+    pin = _digest(entry / MANIFEST_NAME)
+    assert stage_entry(cache.root, cache.sha, scratch, pin) == twice
+    assert not scratch.exists() or list(scratch.iterdir()) == []
+    before = (tree_digest(entry), pin)
+    with pytest.raises(CacheConflict, match="is left alone") as refused:
+        ensure_runner_cache(rig.repo, cache.sha, cache.root, _NO_WHEELS)
+    assert twice[0] in str(refused.value)
+    assert (tree_digest(entry), _digest(entry / MANIFEST_NAME)) == before
