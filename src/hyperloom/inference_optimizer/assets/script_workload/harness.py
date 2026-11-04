@@ -50,6 +50,16 @@ torch = None
 
 CONFIG = "script_workload.json"
 SCOPE = "optimization_scope.json"
+DEVICE = "cuda"
+MS_PER_S = 1000
+# The child subcommand, its two modes, and the directory layout they exchange.
+CHILD = "_child"
+RECORD = "record"
+MEASURE = "measure"
+INPUTS_DIR = "inputs"
+REFERENCES_DIR = "references"
+OUT_DIR = "out"
+OUTPUTS_FILE = "outputs.pt"
 PERTURBATION = 1e-2
 INPUT_POOL_BYTES = 512 << 20
 # The timed calls must account for most of the timed loop's wall time as the parent sees it.
@@ -120,7 +130,7 @@ def _invoke(target, call, inputs=None, autocast=None):
     else:
         grad = torch.enable_grad() if call["grad"] else torch.no_grad()
     dtype = autocast or call["autocast"]
-    cast = torch.autocast("cuda", dtype=getattr(torch, dtype)) if dtype else contextlib.nullcontext()
+    cast = torch.autocast(DEVICE, dtype=getattr(torch, dtype)) if dtype else contextlib.nullcontext()
     with grad, cast:
         return target(*args, **kwargs)
 
@@ -202,7 +212,7 @@ class _Recorder:
             return fn(*args, **kwargs)
         snapshot = _snapshot((args, kwargs))
         output = fn(*args, **kwargs)
-        autocast = torch.get_autocast_dtype("cuda") if torch.is_autocast_enabled("cuda") else None
+        autocast = torch.get_autocast_dtype(DEVICE) if torch.is_autocast_enabled(DEVICE) else None
         self.calls.append(
             {
                 "args": snapshot[0],
@@ -249,18 +259,18 @@ def _finish_recording(recorder: _Recorder, config: dict, out: Path) -> None:
         ]
 
     references = {"recorded": [call.pop("output") for call in calls], "held_out": held_out_outputs()}
-    (out / "inputs").mkdir()
-    (out / "references").mkdir()
-    torch.save(calls, out / "inputs" / "calls.pt")
-    torch.save(held_out, out / "inputs" / "held_out.pt")
-    torch.save(references, out / "references" / "outputs.pt")
+    (out / INPUTS_DIR).mkdir()
+    (out / REFERENCES_DIR).mkdir()
+    torch.save(calls, out / INPUTS_DIR / "calls.pt")
+    torch.save(held_out, out / INPUTS_DIR / "held_out.pt")
+    torch.save(references, out / REFERENCES_DIR / OUTPUTS_FILE)
     autocast = config["tolerance"].get("autocast")
     if autocast:
         calibration = {
             "recorded": [_plain(_invoke(entry, call, autocast=autocast)) for call in calls],
             "held_out": held_out_outputs(autocast),
         }
-        torch.save(calibration, out / "references" / "calibration.pt")
+        torch.save(calibration, out / REFERENCES_DIR / "calibration.pt")
 
 
 def _schedule(calls: int, held_out: int, passes: int, rng: random.Random) -> dict[tuple[int, int], int]:
@@ -326,7 +336,7 @@ def _timed_passes(entry, calls, held_out, config):
                 elapsed += time.perf_counter() - start
                 if (pass_index, index) in schedule:
                     kept.append((index, schedule[(pass_index, index)], output))
-            latencies.append(elapsed * 1000)
+            latencies.append(elapsed * MS_PER_S)
         _send_mark("stop")
         for index, variant, output in kept:
             held_out_outputs[index][variant] = _plain(output)
@@ -372,7 +382,7 @@ def _measure(optimized, config: dict, inputs: Path, out: Path) -> None:
     recorded_outputs = [_plain(_invoke(entry, call)) for call in calls]
     reused = _reuses_output_buffer(entry, calls)
     trace = _profile(entry, calls)
-    torch.save({"recorded": recorded_outputs, "held_out": held_out_outputs}, out / "outputs.pt")
+    torch.save({"recorded": recorded_outputs, "held_out": held_out_outputs}, out / OUTPUTS_FILE)
     summary = {"pass_latencies_ms": latencies, "output_buffer_reused": reused, "profiler_trace": trace}
     (out / "measurement.json").write_text(json.dumps(summary) + "\n")
 
@@ -392,7 +402,7 @@ def _wrap(mode: str, config: dict, inputs: Path, out: Path, recorders: list):
             sys.stderr.flush()
             os._exit(0)
 
-        return recording if mode == "record" else measuring
+        return recording if mode == RECORD else measuring
 
     return wrap
 
@@ -418,7 +428,7 @@ def child(mode: str, config: dict, candidate: Path, inputs: Path, out: Path) -> 
 
     sys.meta_path[:0] = [order, _CandidateFinder(config["module"], candidate, config["function"], wrap, on_import)]
     _run_script(config)
-    if mode == "measure":
+    if mode == MEASURE:
         raise SystemExit(f"The script exited without calling {config['module']}.{config['function']}()")
     if len(recorders) != 1:
         raise SystemExit(f"Expected one call of {config['function']}(), saw {len(recorders)}")
@@ -463,7 +473,7 @@ def _errors(outputs: dict, references: dict) -> dict[str, list[float]]:
 
 
 def _limits(tolerance: dict, references: Path) -> list[float]:
-    outputs = torch.load(references / "outputs.pt", weights_only=True)
+    outputs = torch.load(references / OUTPUTS_FILE, weights_only=True)
     if "rel_l2" in tolerance:
         return [float(tolerance["rel_l2"])] * len(outputs["recorded"])
     errors = _errors(torch.load(references / "calibration.pt", weights_only=True), outputs)
@@ -495,7 +505,7 @@ def _timed_wall_ms(marks: list[tuple[str, float]]) -> float:
     labels = [label for label, _ in marks]
     if not marks or labels != ["start", "stop"] * (len(marks) // 2):
         return math.inf
-    return sum(stop - start for (_, start), (_, stop) in zip(marks[::2], marks[1::2])) * 1000
+    return sum(stop - start for (_, start), (_, stop) in zip(marks[::2], marks[1::2])) * MS_PER_S
 
 
 def _run_child(
@@ -503,13 +513,13 @@ def _run_child(
 ) -> list[tuple[str, float]]:
     """Run one child writing into ``runtime/out``; return the parent-clock times of the marks it sent."""
     config = json.loads(config_path.read_text())
-    (runtime / "out").mkdir()
+    (runtime / OUT_DIR).mkdir()
     read_fd, write_fd = os.pipe()
     marks: list[tuple[str, float]] = []
     reader = threading.Thread(target=_read_marks, args=(read_fd, marks), daemon=True)
     reader.start()
-    command = [config["python"], "-B", __file__, "_child", mode, "--config", str(config_path)]
-    command += ["--candidate", str(candidate), "--inputs", str(inputs), "--out", str(runtime / "out")]
+    command = [config["python"], "-B", __file__, CHILD, mode, "--config", str(config_path)]
+    command += ["--candidate", str(candidate), "--inputs", str(inputs), "--out", str(runtime / OUT_DIR)]
     with (logs / f"{mode}_stdout.log").open("w") as stdout, (logs / f"{mode}_stderr.log").open("w") as stderr:
         process = subprocess.run(
             command,
@@ -537,10 +547,10 @@ def record(directory: Path) -> dict:
         runtime = Path(tmp)
         identity = runtime / "identity.py"
         identity.write_text(IDENTITY.format(function=config["function"]))
-        _run_child("record", config_path, identity, runtime, runtime, directory)
-        shutil.copytree(runtime / "out", store)
-    limits = _limits(config["tolerance"], store / "references")
-    (store / "references" / "limits.json").write_text(json.dumps(limits) + "\n")
+        _run_child(RECORD, config_path, identity, runtime, runtime, directory)
+        shutil.copytree(runtime / OUT_DIR, store)
+    limits = _limits(config["tolerance"], store / REFERENCES_DIR)
+    (store / REFERENCES_DIR / "limits.json").write_text(json.dumps(limits) + "\n")
     import_order = json.loads((store / "import_order.json").read_text())
     return {"calls": len(limits), "rel_l2_limits": limits, "import_order": import_order}
 
@@ -586,11 +596,11 @@ def measure(directory: Path, result_dir: Path) -> dict:
         runtime = Path(tmp)
         candidate = runtime / f"{config['module']}.py"
         candidate.write_bytes(content)
-        marks = _run_child("measure", config_path, candidate, store / "inputs", runtime, result_dir)
-        measurement = json.loads((runtime / "out" / "measurement.json").read_text())
-        outputs = torch.load(runtime / "out" / "outputs.pt", weights_only=True)
-    references = torch.load(store / "references" / "outputs.pt", weights_only=True)
-    limits = json.loads((store / "references" / "limits.json").read_text())
+        marks = _run_child(MEASURE, config_path, candidate, store / INPUTS_DIR, runtime, result_dir)
+        measurement = json.loads((runtime / OUT_DIR / "measurement.json").read_text())
+        outputs = torch.load(runtime / OUT_DIR / OUTPUTS_FILE, weights_only=True)
+    references = torch.load(store / REFERENCES_DIR / OUTPUTS_FILE, weights_only=True)
+    limits = json.loads((store / REFERENCES_DIR / "limits.json").read_text())
     latencies = measurement["pass_latencies_ms"]
     gate = _gate(_errors(outputs, references), limits, measurement, sum(latencies) / _timed_wall_ms(marks))
     latency = statistics.median(latencies)
@@ -598,8 +608,8 @@ def measure(directory: Path, result_dir: Path) -> dict:
         "framework": "custom",
         "workload_kind": "scriptable",
         "throughput_unit": "invocations/s",
-        "output_throughput": 1000 / latency,
-        "latency_s": latency / 1000,
+        "output_throughput": MS_PER_S / latency,
+        "latency_s": latency / MS_PER_S,
         "quality_gate": gate,
         "bench_summary": {
             "latency_ms": latency,
@@ -615,20 +625,20 @@ def measure(directory: Path, result_dir: Path) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("record")
-    commands.add_parser("measure")
-    internal = commands.add_parser("_child")
-    internal.add_argument("mode", choices=("record", "measure"))
+    commands.add_parser(RECORD)
+    commands.add_parser(MEASURE)
+    internal = commands.add_parser(CHILD)
+    internal.add_argument("mode", choices=(RECORD, MEASURE))
     for flag in ("--config", "--candidate", "--inputs", "--out"):
         internal.add_argument(flag, type=Path, required=True)
     args = parser.parse_args()
     directory = Path(__file__).resolve().parent
-    if args.command == "_child":
+    if args.command == CHILD:
         config = json.loads(args.config.read_text())
         child(args.mode, config, args.candidate, args.inputs, args.out)
         return
     _load_torch()
-    if args.command == "record":
+    if args.command == RECORD:
         print(json.dumps(record(directory)))
     else:
         print(json.dumps(measure(directory, Path(os.environ["RESULT_DIR"]))))
