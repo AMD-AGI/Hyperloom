@@ -103,6 +103,7 @@ class SessionKillRound:
     server_log_path: str | None = None
     server_already_ready: bool = False
     session_remaining_sec: float | None = None
+    single_round_configs: tuple[str, str] | None = None
 
 
 def _run_subprocess_worker(bench_round: SessionKillRound) -> tuple[int, str, str]:
@@ -113,6 +114,13 @@ def _run_subprocess_worker(bench_round: SessionKillRound) -> tuple[int, str, str
     from hyperloom.orchestrator.actions.executors._subprocess_kill import RoundWatch, run_with_session_kill
 
     worker_env = _merge_worker_env(bench_round.env)
+    session_deadline_sec = session_remaining_to_deadline_sec(bench_round.session_remaining_sec)
+    if bench_round.single_round_configs is not None and not bench_round.server_already_ready:
+        from ._server_lifecycle import prepare_single_round_port
+
+        prepare_single_round_port(
+            bench_round.single_round_configs, worker_env, session_deadline_sec=session_deadline_sec
+        )
     proc = run_with_session_kill(
         bench_round.cmd,
         env=worker_env,
@@ -122,7 +130,7 @@ def _run_subprocess_worker(bench_round: SessionKillRound) -> tuple[int, str, str
             silence_timeout_sec=bench_round.silence_timeout_sec,
             server_log_path=bench_round.server_log_path,
             server_already_ready=bench_round.server_already_ready,
-            session_deadline_sec=session_remaining_to_deadline_sec(bench_round.session_remaining_sec),
+            session_deadline_sec=session_deadline_sec,
         ),
     )
     return proc.returncode, proc.stdout or "", proc.stderr or ""

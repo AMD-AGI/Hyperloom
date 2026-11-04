@@ -382,7 +382,6 @@ class _BenchmarkRoundsMixin:
             port=lifecycle["port"],
             cleanup=False,
             run_eval=warmup_eval,
-            warmup_round=True,
         )
         if warmup_result.get("status") != "succeeded":
             # Warmup failure almost certainly recurs, so skip the measured round.
@@ -636,6 +635,7 @@ class _BenchmarkRoundsMixin:
                 attempt,
                 config_path=config_path,
                 output_dir=output_dir,
+                round_label=label,
                 **overrides,
             )
         except BaseException as exc:

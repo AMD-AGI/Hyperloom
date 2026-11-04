@@ -285,6 +285,7 @@ class _BenchmarkRound(NamedTuple):
     serving_lease: Any
     server_already_ready: bool
     run_eval_disabled: bool
+    single_round: bool = False
 
 
 class _BenchProcess(NamedTuple):

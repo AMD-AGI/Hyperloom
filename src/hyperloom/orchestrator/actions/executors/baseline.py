@@ -26,6 +26,7 @@ from hyperloom_common.env import is_truthy
 from hyperloom.common.perf_metric import agentx_active, with_output_per_gpu
 from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
     ROUND_SINGLE,
+    ROUND_WARMUP,
     BaselineRequest,
     make_baseline_recorder,
 )
@@ -478,9 +479,9 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
         config_path: Path,
         output_dir: Path,
         server_already_ready: bool = False,
-        warmup_round: bool = False,
+        round_label: str = "",
     ) -> dict[str, Any]:
-        """Run one Magpie benchmark subprocess and parse its result; ``warmup_round`` marks a discarded round."""
+        """Run one labeled Magpie benchmark round and parse its result."""
         from ._multi_node_env import (
             is_multi_node,
             log_mn_banner,
@@ -495,7 +496,7 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
         # Multi-node (--nodes >= 2): inject MAGPIE_RUN_PHASE=client + BENCHMARK_BASE_URL so Magpie skips its server
         # launch and targets the RayJob head.
         env.update(magpie_remote_env())
-        apply_benchmark_round_seed(config_path, env, warmup=warmup_round)
+        apply_benchmark_round_seed(config_path, env, warmup=round_label == ROUND_WARMUP)
         ctx_extra = getattr(attempt.ctx, "extra", None) or {}
         # The session's wall-clock budget, resolved per round rather than once per task: a baseline runs up to three
         # of them, and a warmup that overran has already spent budget the ones after it were counting on.
@@ -535,6 +536,7 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
             serving_lease=attempt.serving_lease,
             server_already_ready=server_already_ready,
             run_eval_disabled=attempt.run_eval_disabled,
+            single_round=round_label == ROUND_SINGLE,
         )
         # Multi-node only: restart sglang/vllm per round for a fresh server.
         restart_failure = await self._restart_multi_node_server(
@@ -566,12 +568,13 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
             # No liveness callback is possible here: the round runs inside a Ray actor in another process
             # (potentially on another node) and only its final ``(rc, stdout, stderr)`` crosses back, so there is
             # nothing local to call per line of child output.
+            ray_config_path = strip_visible_devices_from_config(round_.config_path)
             returncode, stdout, stderr = await asyncio.to_thread(
                 round_.serving_lease.run_session_kill,
                 SessionKillRound(
                     build_benchmark_command(
                         python_exe=self.magpie_python,
-                        config_path=strip_visible_devices_from_config(round_.config_path),
+                        config_path=ray_config_path,
                         output_dir=round_.output_dir,
                     ),
                     env=round_.env,
@@ -581,9 +584,18 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
                     server_already_ready=server_ready,
                     server_log_path=round_.watchdog_server_log,
                     session_remaining_sec=session_deadline_to_remaining_sec(round_.session_deadline_sec),
+                    single_round_configs=(str(ray_config_path), str(round_.materialized_config_path))
+                    if round_.single_round
+                    else None,
                 ),
             )
         else:
+            if round_.single_round and not server_ready:
+                _lifecycle.prepare_single_round_port(
+                    (str(round_.config_path), str(round_.materialized_config_path)),
+                    round_.env,
+                    session_deadline_sec=round_.session_deadline_sec,
+                )
             async with heartbeat_while_output_flows(unit="baseline_round", label="benchmark") as activity:
                 proc = await asyncio.to_thread(
                     run_with_session_kill,
