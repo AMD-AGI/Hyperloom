@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Local agent runner: what a CLI started does not outlive its session, however the session ends."""
+"""Local agent runner: what a CLI started, while it carries its launch's mark, does not outlive its session, however the
+session ends."""
 
 from __future__ import annotations
 
@@ -17,6 +18,7 @@ import pytest
 
 from hyperloom.common.proctree import REAP_MARK_ENV, proc_identity, running
 from hyperloom.orchestrator.specialists import agent_runner
+from hyperloom.orchestrator.specialists.agent_runner import Liveness
 from hyperloom.orchestrator.specialists import subprocess_ as ss
 from hyperloom.orchestrator.specialists.tests._agent_fixtures import make_runner, make_spec, wait_finished
 
@@ -188,3 +190,65 @@ async def test_cancel_ends_what_its_cli_detached_and_spares_another_session(tmp_
     finally:
         await _end(runner, handles)
     assert not running(sleeps[1])
+
+
+async def test_what_a_cli_detached_does_not_outlive_its_loss(tmp_path: Path, started: _Started) -> None:
+    """The reap loop ends a CLI that writes nothing and waits on no tool as lost; what it detached goes with it."""
+    ws = tmp_path / "w"
+    runner = make_runner(tmp_path / "session", liveness=Liveness(lost_after_seconds=2.0))
+    handle = await runner.launch(make_spec(ws, code=_cli(ws, "detached", _STAY)))
+    try:
+        sleep_pid = await started.read(ws)
+        status = await wait_finished(runner, handle)
+        await runner.collect(handle)
+    finally:
+        await _end(runner, [handle])
+    assert status.state == "lost" and handle.session.outcome["stale_heartbeat"]
+    assert not running(sleep_pid)
+
+
+async def test_what_a_cli_detached_does_not_outlive_a_failed_reap_loop(
+    tmp_path: Path, started: _Started, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws = tmp_path / "w"
+    look = ss.cli_alive
+
+    def look_that_fails_once_the_sleep_is_started(*args: Any, **kwargs: Any) -> bool:
+        pid_file = ws / "sleep.pid"
+        if pid_file.exists() and pid_file.read_text().strip():
+            raise RuntimeError("the reaper's look failed")
+        return look(*args, **kwargs)
+
+    monkeypatch.setattr(ss, "cli_alive", look_that_fails_once_the_sleep_is_started)  # the reap loop's look, not poll's
+    runner = make_runner(tmp_path / "session")
+    handle = await runner.launch(make_spec(ws, code=_cli(ws, "detached", _STAY)))
+    try:
+        sleep_pid = await started.read(ws)
+        status = await wait_finished(runner, handle)
+        await runner.collect(handle)
+    finally:
+        await _end(runner, [handle])
+    assert status.state == "exited" and "reap loop failed" in status.error
+    assert not running(sleep_pid)
+
+
+async def test_what_a_cli_detached_does_not_outlive_its_cancelled_supervisor(tmp_path: Path, started: _Started) -> None:
+    """The supervisor is cancelled while it runs, as a shutting-down event loop does: it still sweeps on its way out."""
+    ws = tmp_path / "w"
+    runner = make_runner(tmp_path / "session")
+    handle = await runner.launch(make_spec(ws, code=_cli(ws, "detached", _STAY)))
+    proc = handle.session.proc
+    try:
+        sleep_pid = await started.read(ws)
+        handle.session.task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await handle.session.task
+        status = await runner.poll(handle)
+    finally:
+        if not handle.session.task.done():
+            await _end(runner, [handle])
+        if proc.poll() is None:  # only when the supervisor left its CLI running
+            proc.kill()
+            proc.wait()
+    assert status.state == "exited" and status.returncode is not None
+    assert not running(sleep_pid)
