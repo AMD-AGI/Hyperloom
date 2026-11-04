@@ -107,7 +107,6 @@ _RUN_LM_EVAL_MERGED_CATCHALL_RE = re.compile(
 # tolerance check to that function's body.
 _RUN_LM_EVAL_FN_MARKER = "run_lm_eval()"
 
-# System-wide lock.
 _LM_EVAL_ONCE_SENTINEL = "HYPERLOOM_LM_EVAL_INSTALL_ONCE"
 _LM_EVAL_UNLOCKED_FN = "_hyperloom_install_lm_eval_deps_unlocked"
 _LM_EVAL_DEPS_FN_RE = re.compile(r"^_install_lm_eval_deps\(\) \{\n.*?^\}\n", re.DOTALL | re.MULTILINE)
@@ -120,6 +119,7 @@ _EVAL_OUTPUT_FN = "_hyperloom_keep_eval_output"
 EVAL_OUTPUT_ENV = "HYPERLOOM_EVAL_OUTPUT_LOG"
 EVAL_OUTPUT_LOG = "hyperloom_eval.log"
 
+# System-wide lock.
 _LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_magpie_benchmarker_patcher.lock")
 
 
