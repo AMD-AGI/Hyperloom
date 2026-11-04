@@ -204,15 +204,23 @@ class TestSelectTuners:
 class TestFp4UnsupportedArchSkip:
     """AITER FP4/MXFP4 GEMM runs only on the supported gfx950 path."""
 
-    def test_dense_fp4_skipped_on_gfx942(self):
+    @pytest.mark.parametrize(
+        ("gpu_type", "gfx_arch", "framework"),
+        [
+            ("mi300x", "gfx942", "sglang"),
+            ("r9700", "gfx1201", "vllm-aiter"),
+            ("gfx1201", "gfx1201", "vllm-aiter"),
+        ],
+    )
+    def test_dense_fp4_skipped_off_gfx950(self, gpu_type, gfx_arch, framework):
         profile = _make_profile(is_moe=False)
         specs = select_tuners(
             profile,
             RoutingTarget(
-                framework="sglang",
+                framework=framework,
                 precision="fp4",
                 quant_type="fp4",
-                gpu_type="mi300x",
+                gpu_type=gpu_type,
             ),
             RoutingEvidence(
                 has_untuned_csv=True,
@@ -220,7 +228,7 @@ class TestFp4UnsupportedArchSkip:
         )
         a4w4 = [s for s in specs if s.name == "a4w4_blockscale"][0]
         assert not a4w4.should_run
-        assert "gfx942" in a4w4.skip_reason
+        assert gfx_arch in a4w4.skip_reason
         assert "gfx950" in a4w4.skip_reason
 
     def test_dense_fp4_runs_on_gfx950(self):
@@ -240,25 +248,22 @@ class TestFp4UnsupportedArchSkip:
         a4w4 = [s for s in specs if s.name == "a4w4_blockscale"][0]
         assert a4w4.should_run
 
-    def test_dense_fp4_skips_on_r9700(self):
-        profile = _make_profile(is_moe=False)
-        specs = select_tuners(
-            profile,
-            RoutingTarget(framework="vllm-aiter", precision="fp4", quant_type="fp4", gpu_type="r9700"),
-            RoutingEvidence(has_untuned_csv=True),
-        )
-        a4w4 = next(spec for spec in specs if spec.name == "a4w4_blockscale")
-        assert not a4w4.should_run
-        assert "gfx1201" in a4w4.skip_reason
-
-    def test_moe_mxfp4_skipped_on_gfx942(self):
+    @pytest.mark.parametrize(
+        ("gpu_type", "gfx_arch", "framework"),
+        [
+            ("mi300x", "gfx942", "sglang"),
+            ("r9700", "gfx1201", "vllm-aiter"),
+            ("gfx1201", "gfx1201", "vllm-aiter"),
+        ],
+    )
+    def test_moe_mxfp4_skipped_off_gfx950(self, gpu_type, gfx_arch, framework):
         profile = _make_profile(is_moe=True, num_experts=128, num_experts_per_tok=8, moe_intermediate_size=768)
         specs = select_tuners(
-            profile, RoutingTarget(framework="sglang", precision="mxfp4", quant_type="mxfp4", gpu_type="mi300x")
+            profile, RoutingTarget(framework=framework, precision="mxfp4", quant_type="mxfp4", gpu_type=gpu_type)
         )
         fmoe = [s for s in specs if s.name == "fmoe_ck"][0]
         assert not fmoe.should_run
-        assert "gfx942" in fmoe.skip_reason
+        assert gfx_arch in fmoe.skip_reason
         assert "gfx950" in fmoe.skip_reason
 
     def test_moe_mxfp4_runs_on_gfx950(self):
@@ -268,15 +273,6 @@ class TestFp4UnsupportedArchSkip:
         )
         fmoe = [s for s in specs if s.name == "fmoe_ck"][0]
         assert fmoe.should_run
-
-    def test_moe_mxfp4_skips_on_gfx1201(self):
-        profile = _make_profile(is_moe=True, num_experts=128, num_experts_per_tok=8, moe_intermediate_size=768)
-        specs = select_tuners(
-            profile, RoutingTarget(framework="vllm-aiter", precision="mxfp4", quant_type="mxfp4", gpu_type="gfx1201")
-        )
-        fmoe = next(spec for spec in specs if spec.name == "fmoe_ck")
-        assert not fmoe.should_run
-        assert "gfx1201" in fmoe.skip_reason
 
     def test_other_gfx942_skus_skip_fp4(self):
         for gpu_type in ("mi308x", "mi325x"):
