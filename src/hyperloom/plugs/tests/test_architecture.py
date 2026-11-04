@@ -34,7 +34,8 @@ _HOSTED = (
     "hyperloom_multibranch",
 )
 # Packages that exist only on the multibranch development branch; main must stay self-contained.
-_DEV_ONLY = ("hyperloom_multibranch",)
+# None is left once hyperloom.measure and hyperloom_multibranch are both in the tree.
+_DEV_ONLY: tuple[str, ...] = ()
 _E2B_OWNER = "hyperloom/sandbox/e2b.py"
 
 

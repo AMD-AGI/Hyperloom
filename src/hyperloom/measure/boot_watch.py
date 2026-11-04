@@ -10,8 +10,8 @@ launcher writes beside a round's server log the moment the banner appears and, w
 cancels the scope the launcher's watchdog listens to, which reaps the whole process tree.
 
 A server that builds an aiter JIT module is not tuning: aiter writes ``start build [<module>]`` and nothing more until
-the module is built, and a CK-tile GEMM can take up to 1347 s when several tests build at once, which with a CK GEMM
-and the rest of a boot can overrun half of a 3600 s round. So the time the newest server log's last line says aiter is
+the module is built, and a CK-tile GEMM builds slowest when several tests build at once, long enough that with a CK
+GEMM and the rest of a boot it can overrun half of a round. So the time the newest server log's last line says aiter is
 building a module is not counted against the limit, each build for at most as long as a module of its kind may take
 (:func:`~hyperloom.measure.jit.modules.module_build_limit_sec`: 2700 s for a CK-tile module, 600 s for any other). A
 build that hangs counts again from there, and a boot that does anything else is bounded as before.

@@ -38,6 +38,7 @@ import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Final
 
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.measure.archive import ResultArchive
@@ -95,12 +96,14 @@ from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup, ToolboxTuning
 
 __all__ = [
     "DEFAULT_JIT_STORE",
+    "HOST_TOOL_REPO_ENVS",
     "JIT_STORE_ENV",
     "LocalHostedToolbox",
     "LocalOptions",
     "LocalSession",
     "MAX_CARDS_PER_NODE",
     "build_local_toolbox",
+    "host_tool_repos",
 ]
 
 #: One node serves at most eight cards, so at most ``8 / TP`` tests run at once.
@@ -110,6 +113,9 @@ JIT_STORE_ENV = "HYPERLOOM_JIT_STORE"
 #: The shared compiled-code cache below this host's temporary directory when neither the options nor the environment
 #: name one.
 DEFAULT_JIT_STORE = "hyperloom-jit-store"
+#: The variables that name where a runner clones the tools its tests run (InferenceX, Magpie) from. A local runner starts
+#: from an emptied environment, so :func:`host_tool_repos` carries them from this host's.
+HOST_TOOL_REPO_ENVS: Final = ("INFERENCEX_REPO", "MAGPIE_REPO")
 _SANDBOXES = "sandboxes"
 _BRANCH_SANDBOXES = "branch-sandboxes"
 _RULE_PACK = "rule-pack"
@@ -241,7 +247,8 @@ class LocalOptions:
     """What :func:`build_local_toolbox` may be told besides the session, the blackboard, acceptance and the spec.
 
     ``policy`` is the quota and priority policy; its ``global_concurrency`` is lowered to ``8 // tp`` when higher.
-    ``runner_envs`` add to the image's variables the runner template carries (for example ``INFERENCEX_REPO``).
+    ``runner_envs`` add to the image's variables the runner template carries (for example ``INFERENCEX_REPO``) and win
+    over the same name in the host's ``INFERENCEX_REPO`` and ``MAGPIE_REPO``, which the template carries when set.
     ``archive`` is the result archive, a directory archive below ``session_dir`` when omitted. ``python`` is the interpreter the
     runner and the measurement run with. ``timeout_sec`` is the timeout of one attempt, ``max_infra_retries`` the
     infrastructure retries per test before it ends as ``measurement_failed`` and ``poll_interval_sec`` how often the
@@ -321,11 +328,23 @@ def aiter_builds_missing(runner_envs: Mapping[str, str]) -> str | None:
     return f"no JIT store ({JIT_STORE_ENV}) gives its tests an aiter JIT directory to build the touched modules in"
 
 
+def host_tool_repos(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The variables of :data:`HOST_TOOL_REPO_ENVS` that ``environ`` (this process's by default) sets to a value.
+
+    A local runner does not inherit the host's environment, yet it clones InferenceX and Magpie from the repositories
+    these name: without them a session whose commit exists only in a local mirror fails at the runner's start. Hosted
+    (sandbox) runners get theirs from their own template and never from here.
+    """
+    source = os.environ if environ is None else environ
+    return {name: source[name] for name in HOST_TOOL_REPO_ENVS if source.get(name, "").strip()}
+
+
 def _runner_template(session: LocalSession, options: LocalOptions) -> LocalTemplate:
-    """The runner template: the image's variables, ``runner_envs`` over them, and the variable that names the session's
-    rule pack. ``runner_envs`` add to the image's variables, never replace them: without ``ROCM_PATH`` and
-    ``LD_LIBRARY_PATH`` the runner cannot import torch on an image whose ROCm libraries are not in the loader's path."""
-    envs = {**image_env(), **(options.runner_envs or {})}
+    """The runner template: the image's variables, the host's tool repositories (:func:`host_tool_repos`), ``runner_envs``
+    over both, and the variable that names the session's rule pack. ``runner_envs`` add to the image's variables, never
+    replace them: without ``ROCM_PATH`` and ``LD_LIBRARY_PATH`` the runner cannot import torch on an image whose ROCm
+    libraries are not in the loader's path."""
+    envs = {**image_env(), **host_tool_repos(), **(options.runner_envs or {})}
     template = local_runner_template(f"runner-{session.tp}", gpus=session.tp, python=options.python, envs=envs)
     pack = rule_pack_envs(Path(session.session_dir) / _RULE_PACK)
     return replace(template, envs={**template.envs, **pack})

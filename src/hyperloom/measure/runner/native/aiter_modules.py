@@ -78,6 +78,8 @@ AITER_COMPONENT = "aiter"
 _RECIPE_VERSION = "aiter_jit/2"
 #: The file below the laid tree that names the modules to build and where the tree's parts are.
 MODULES_FILE = "hyperloom-aiter-modules.json"
+#: The plan is read by its owner only: the compile user, to whom the build runner hands the laid tree.
+_PLAN_MODE = 0o600
 #: The copy of :mod:`hyperloom.measure.aiter_merge_hook` below the laid tree, and the directory there that aiter merges
 #: tables into.
 _MERGE_HOOK = "hyperloom-aiter-merge-hook.py"
@@ -285,7 +287,7 @@ class _Planned:
             "merge_hook": _MERGE_HOOK,
             "merged": _MERGED_DIR,
         }
-        descriptor = os.open(tree / MODULES_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+        descriptor = os.open(tree / MODULES_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, _PLAN_MODE)
         with os.fdopen(descriptor, "w", encoding="utf-8") as out:
             json.dump(plan, out)
         shutil.copyfile(Path(aiter_merge_hook.__file__), tree / _MERGE_HOOK)

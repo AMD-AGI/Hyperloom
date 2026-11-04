@@ -27,7 +27,6 @@ from hyperloom.sandbox.card_occupancy import (
 )
 from hyperloom.sandbox.tests.kernel_tree import KernelTree
 
-_GIB = 1 << 30
 _SERVER_VRAM = 249_506_392 << 10  # what the server's descriptor said, in bytes: 237.95 GiB
 _FOREIGN_VRAM = 2_759_956 << 10  # 2.63 GiB
 _CARD = 5

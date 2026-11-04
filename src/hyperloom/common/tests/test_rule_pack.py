@@ -137,6 +137,7 @@ _LITERALS: dict[str, str | list[str] | dict[str, str]] = {
     "HIP_NO_KERNEL_IMAGE": "no kernel image is available",
     "HIP_UNDEFINED_SYMBOL": "undefined symbol",
     "HSA_STATUS_ERROR": "HSA_STATUS_ERROR",
+    "HUB_RATE_LIMITED": r"429 Too Many Requests(?:: you have reached your '[^']+' rate limit| for url: https://huggingface\.co/)",
     "INITIAL_PID_NAMESPACE": "pid:[4026531836]",
     "KFD_NODES": "topology/nodes",
     "KFD_NODE_GPU_ID": "gpu_id",
@@ -147,6 +148,7 @@ _LITERALS: dict[str, str | list[str] | dict[str, str]] = {
     "KFD_RENDER_MINOR_KEY": "drm_render_minor",
     "KFD_ROOT": "/sys/class/kfd/kfd",
     "KFD_VRAM_PREFIX": "vram_",
+    "MAGPIE_AGENTX_CLIENT_LOG": "agentx_client.log",
     "PID_NAMESPACE_LINK": "self/ns/pid",
     "PY_IMPORT_ERROR": "ImportError",
     "PY_MODULE_NOT_FOUND_ERROR": "ModuleNotFoundError",
@@ -228,8 +230,8 @@ def test_the_reference_pack_loads_and_passes_its_own_examples() -> None:
     pack = load_pack(DEFAULT_PACK_PATH)
     assert pack.version == str(yaml.safe_load(DEFAULT_PACK_PATH.read_text(encoding="utf-8"))["version"])
     assert Counter(entry.kind for entry in pack.entries.values()) == {
-        Kind.NAMES: 19,
-        Kind.LOG_REGEX: 14,
+        Kind.NAMES: 20,
+        Kind.LOG_REGEX: 15,
         Kind.ENV_DEFAULT: 1,
         Kind.COMPONENT_LAYOUT: 9,
     }
@@ -299,7 +301,17 @@ def test_every_entry_of_the_reference_pack_is_read_by_outside_facts() -> None:
             "component_layout_triton",
             "same prefix",
         ),
+        (
+            _set(
+                "component_layout_vllm",
+                "examples",
+                {"place": ["vllm/sub/setup.py -> package:sub/setup.py"], "refuse": ["a.so"]},
+            ),
+            "component_layout_vllm",
+            "is not placed as it says",
+        ),
         (_drop("component_layout_torch", "refuse"), "component_layout_torch", "holds exactly"),
+        (_drop("component_layout_vllm", "native"), "component_layout_vllm", "holds exactly"),
         (_set("aiter_merged_view", "kind", "arg_value"), "aiter_merged_view", "reserved"),
         (_set("aiter_merged_view", "kind", "predicate"), "aiter_merged_view", "is not one of"),
     ],
@@ -316,7 +328,9 @@ def test_every_entry_of_the_reference_pack_is_read_by_outside_facts() -> None:
         "layout-unknown-base",
         "layout-escaping-prefix",
         "layout-repeated-prefix",
+        "layout-native-example-placed",
         "layout-lacks-a-field",
+        "layout-lacks-native",
         "reserved-kind",
         "unknown-kind",
     ],
