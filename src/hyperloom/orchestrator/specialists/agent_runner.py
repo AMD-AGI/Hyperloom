@@ -45,6 +45,7 @@ from typing import Any, Awaitable, Callable, Literal, Mapping, Protocol
 from hyperloom.common.deadline import Deadline
 from hyperloom.common.env_safety import RunAs, RunAsError, redact_file_in_place
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
+from hyperloom.inference_optimizer.session.session_paths import RESOURCES_RELATIVE_PATH
 from hyperloom_common.fs_utils import create_nofollow, read_bytes_nofollow, read_text_nofollow, write_text_nofollow
 from hyperloom_common.llm.llm_config import AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX
 
@@ -53,9 +54,6 @@ from .launch_env import prepare_demote, resolve_launch_user, stage_mcp_config, s
 from .mcp_config import SPECIALIST_MCP_CONFIG_FILENAME
 from .reap_watch import cli_alive
 from .resources import (
-    CONTAINER_RECORD_KIND,
-    RESOURCES_RELATIVE_PATH,
-    SPECIALIST_RECORD_KIND,
     ContainerSnapshot,
     ProcessTreeSampler,
     ResourceLog,
@@ -74,9 +72,11 @@ from .subprocess_ import (
 log = logging.getLogger(__name__)
 
 __all__ = [
+    "CONTAINER_RECORD_KIND",
     "DEFAULT_MCP_TOKEN_ENV",
     "LONG_RUNNING_SESSION_SEC",
     "LOST_AFTER_SEC",
+    "SPECIALIST_RECORD_KIND",
     "AgentConfigError",
     "AgentEnded",
     "AgentHandle",
@@ -99,6 +99,11 @@ LOST_AFTER_SEC: float = 300.0
 
 #: Minimum session length for a long-lived (one per branch) specialist.
 LONG_RUNNING_SESSION_SEC: float = 6 * 60 * 60.0
+
+#: The ``kind`` of each line the runner appends to :data:`RESOURCES_RELATIVE_PATH`: one specialist's run, and one
+#: reading of the container.
+SPECIALIST_RECORD_KIND = "specialist_resources"
+CONTAINER_RECORD_KIND = "container_resources"
 
 #: Variable name the tool layer uses for a specialist's MCP token (``grant_access()``).
 DEFAULT_MCP_TOKEN_ENV = "HYPERLOOM_SPECIALIST_MCP_TOKEN"
