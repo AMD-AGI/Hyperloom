@@ -348,7 +348,11 @@ def _timed_passes(entry, calls, held_out, config):
                 _synchronize()
                 elapsed += time.perf_counter() - start
                 if (pass_index, index) in schedule:
-                    kept.append((index, schedule[(pass_index, index)], output))
+                    # Cloned on the device now, moved to host after the chunk: holding the
+                    # raw tensor would let a module that recycles its output buffer collapse
+                    # every held-out sample in the chunk onto the last pass's value. Outside
+                    # the elapsed accumulation above, so it costs wall time, not latency.
+                    kept.append((index, schedule[(pass_index, index)], _snapshot(output)))
             latencies.append(elapsed * MS_PER_S)
         _send_mark("stop")
         for index, variant, output in kept:

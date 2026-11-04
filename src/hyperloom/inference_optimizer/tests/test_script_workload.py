@@ -202,6 +202,19 @@ def test_gate_rejects(workspace, tmp_path, name, caught_by):
     assert caught_by <= _failed(result)
 
 
+def test_a_recycled_buffer_does_not_corrupt_the_held_out_samples(workspace, tmp_path):
+    """Only the buffer check fires: the candidate's values are right, its storage is not.
+
+    Held-out outputs are moved to the host after a whole chunk of passes. Captured
+    by reference, every sample in a chunk would alias one recycled buffer and record
+    the last pass's value, failing the accuracy cases too -- so the reported numbers
+    described aliasing rather than accuracy.
+    """
+    calls = str(workspace / "benchmark" / "reference" / "inputs" / "calls.pt")
+    result = _measure(workspace, tmp_path, textwrap.dedent(CANDIDATES["reused_buffer"].format(calls=calls)))
+    assert _failed(result) == {"output_buffer_reuse"}
+
+
 def test_measure_refuses_an_edited_script(workspace, tmp_path):
     config = json.loads((workspace / "benchmark" / "script_workload.json").read_text())
     script = Path(config["script"])
