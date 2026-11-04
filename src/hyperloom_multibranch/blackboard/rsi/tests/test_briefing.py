@@ -58,6 +58,7 @@ from hyperloom_multibranch.blackboard.knowledge.warm_start import (
     WarmLead,
 )
 from hyperloom_multibranch.blackboard.learning_search import LEARNINGS_LOG, RetrievalLog
+from hyperloom_multibranch.blackboard.rsi import briefing as briefing_module
 from hyperloom_multibranch.blackboard.rsi.briefing import ON_HEAD, CrossSessionBriefing, SessionBriefs
 from hyperloom_multibranch.blackboard.rsi.tests.repos import FakeRepo
 from hyperloom_multibranch.blackboard.tests.factories import FakeClock, judgement, profile, request, result
@@ -168,9 +169,10 @@ async def test_a_reference_launch_is_a_lead_after_the_recipe_kbs_champions_and_b
     )
 
 
-async def test_the_cap_keeps_the_most_specific_items(tmp_path: Path) -> None:
+async def test_the_cap_keeps_the_most_specific_items(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     blackboard = await scripted_session(tmp_path / "blackboard", FakeClock())
-    briefing = CrossSessionBriefing(_WithExtraFailure(blackboard), warm=(LEAD,), max_chars=150)
+    monkeypatch.setattr(briefing_module, "MAX_BRIEF_CHARS", 150)
+    briefing = CrossSessionBriefing(_WithExtraFailure(blackboard), warm=(LEAD,))
 
     brief = await briefing.startup_brief("c1")
 
@@ -498,24 +500,9 @@ async def test_the_lessons_hold_what_this_session_and_past_sessions_learnt_about
     assert any(lesson.startswith("learnt here") for lesson in alone.lessons)
 
 
-async def test_the_brief_logs_the_leads_it_kept_under_its_cap_with_the_change_each_suggests(tmp_path: Path) -> None:
-    blackboard = await scripted_session(tmp_path / "blackboard", FakeClock())
-    log = tmp_path / LEARNINGS_LOG
-    recall = LearningRecall(FakeExperienceReader(completed_read()), log=RetrievalLog(log))
-    full = CrossSessionBriefing(
-        blackboard, warm=(LEAD,), experiences=_reader(_recalled("exp-faster", "keep", 1100.0)), learnings=recall
-    )
-
-    await full.startup_brief("c0")
-    await dataclasses.replace(full, max_chars=100).startup_brief("c0")
-    first, capped = [json.loads(line)["leads"] for line in log.read_text(encoding="utf-8").splitlines()]
-
-    recipe = {"ref": "inference:older", "change": "--enable-expert-parallel"}
-    assert first == [recipe, {"ref": "exp-faster", "change": "--block-size 16"}]
-    assert capped == [recipe]
-
-
-async def test_the_brief_logs_the_leads_it_shows_and_only_those(tmp_path: Path) -> None:
+async def test_the_brief_logs_the_leads_it_kept_under_its_cap_with_the_change_each_suggests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     blackboard = await scripted_session(tmp_path / "blackboard", FakeClock())
     log = tmp_path / LEARNINGS_LOG
     recall = LearningRecall(FakeExperienceReader(completed_read()), log=RetrievalLog(log))
@@ -523,7 +510,8 @@ async def test_the_brief_logs_the_leads_it_shows_and_only_those(tmp_path: Path) 
     full = CrossSessionBriefing(blackboard, warm=(LEAD,), experiences=reader, branch="s3", learnings=recall)
 
     await full.startup_brief("c0")
-    await dataclasses.replace(full, max_chars=100).startup_brief("c0")
+    monkeypatch.setattr(briefing_module, "MAX_BRIEF_CHARS", 100)
+    await full.startup_brief("c0")
     first, capped = [json.loads(line)["leads"] for line in log.read_text(encoding="utf-8").splitlines()]
 
     recipe = {"ref": "inference:older", "change": "--enable-expert-parallel"}
