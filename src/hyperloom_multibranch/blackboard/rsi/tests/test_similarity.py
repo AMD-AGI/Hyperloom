@@ -28,7 +28,7 @@ def test_similarity_weighs_matching_conditions_and_fades_with_size() -> None:
 
     assert task_similarity(TASK, TASK) == pytest.approx(1.0)
     assert task_similarity(TASK, other_gpu) < task_similarity(TASK, longer) < 1.0
-    assert task_similarity(TASK, longer) == pytest.approx(1.0 - (1.0 / 3.0) / 14.0)
+    assert task_similarity(TASK, longer) == pytest.approx(1.0 - (1.0 / 3.0) / 12.0)
     assert task_similarity(TASK, TaskConditions(labels={"region": "x"})) == 0.0
     assert task_similarity(TaskConditions(sizes={"tp": 0.0}), TaskConditions(sizes={"tp": 0.0})) == 1.0
 
@@ -45,11 +45,10 @@ def test_one_model_under_a_local_path_a_hub_id_or_a_bare_name_is_one_model() -> 
 
 
 def test_a_profile_gives_the_labels_and_sizes_of_its_conditions() -> None:
-    conditions = task_conditions(profile(), {"gemm": 60.0})
+    conditions = task_conditions(profile())
 
     assert conditions.labels["gpu"] == "MI355X" and conditions.labels["architecture"] == "DeepseekV3ForCausalLM"
     assert conditions.sizes == {"tp": 8.0, "conc": 64.0, "isl": 1024.0, "osl": 1024.0}
-    assert dict(conditions.profile) == {"gemm": 60.0}
     assert task_conditions(profile(isl=None, osl=None)).sizes == {"tp": 8.0, "conc": 64.0}
 
 
