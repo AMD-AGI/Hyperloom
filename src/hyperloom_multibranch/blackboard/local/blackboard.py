@@ -15,7 +15,7 @@ from __future__ import annotations
 import re
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -209,6 +209,46 @@ _NO_ACTION = RecipeDelta().fingerprint()
 
 def _same_action(one: str | None, other: str | None) -> bool:
     return one == other and one != _NO_ACTION
+
+
+def _claims_here(key: ClaimKey, action_fingerprint: str, live: Sequence[Claim]) -> list[Claim]:
+    """The claims of ``live`` on ``key``'s commit, of ``key`` or of the same action, ``key``'s own first."""
+
+    return sorted(
+        (
+            claim
+            for claim in live
+            if claim.key.parent_commit == key.parent_commit
+            and (claim.key == key or _same_action(claim.action_fingerprint, action_fingerprint))
+        ),
+        key=lambda claim: claim.key != key,
+    )
+
+
+def _elsewhere(
+    state: BlackboardState, key: ClaimKey, branch: str, live: Sequence[Claim]
+) -> tuple[Claim | None, tuple[TestRecord, ...]]:
+    """Another branch's claim of ``live`` on the intent of ``key`` and the other branches' tests of it in flight, on
+    other states; what happens on the state of ``key`` itself the other answers say."""
+
+    if _replays(state, key):
+        return None, ()
+    held = (
+        claim
+        for claim in live
+        if claim.holder != branch
+        and claim.key.intent_fingerprint == key.intent_fingerprint
+        and claim.key.parent_commit != key.parent_commit
+    )
+    running = tuple(
+        record
+        for record in state.records()
+        if record.in_flight
+        and record.request.branch != branch
+        and record.request.intent_fingerprint == key.intent_fingerprint
+        and record.request.parent_commit != key.parent_commit
+    )
+    return next(held, None), running
 
 
 def _same_change_tests(
@@ -683,46 +723,6 @@ class LocalBlackboard(
     async def lookup(self, key: ClaimKey, action_fingerprint: str) -> DedupAnswer:
         return self._answer(self._state(), key, action_fingerprint, self._clock(), self.writer.branch)
 
-    def _elsewhere(
-        self, state: BlackboardState, key: ClaimKey, branch: str, now: float
-    ) -> tuple[Claim | None, tuple[TestRecord, ...]]:
-        """Another branch's live claim on the intent of ``key`` and the other branches' tests of it in flight, on other
-        states; what happens on the state of ``key`` itself the other answers say."""
-
-        if _replays(state, key):
-            return None, ()
-        held = (
-            claim
-            for claim in self._leases.all_current()
-            if is_live(claim, now)
-            and claim.holder != branch
-            and claim.key.intent_fingerprint == key.intent_fingerprint
-            and claim.key.parent_commit != key.parent_commit
-        )
-        running = tuple(
-            record
-            for record in state.records()
-            if record.in_flight
-            and record.request.branch != branch
-            and record.request.intent_fingerprint == key.intent_fingerprint
-            and record.request.parent_commit != key.parent_commit
-        )
-        return next(held, None), running
-
-    def _live_claims(self, key: ClaimKey, action_fingerprint: str, now: float) -> list[Claim]:
-        """The live claims on ``key``'s commit of ``key`` or of the same action, ``key``'s own first."""
-
-        return sorted(
-            (
-                claim
-                for claim in self._leases.all_current()
-                if is_live(claim, now)
-                and claim.key.parent_commit == key.parent_commit
-                and (claim.key == key or _same_action(claim.action_fingerprint, action_fingerprint))
-            ),
-            key=lambda claim: claim.key != key,
-        )
-
     def _answer(
         self, state: BlackboardState, key: ClaimKey, action_fingerprint: str, now: float, branch: str
     ) -> DedupAnswer:
@@ -730,10 +730,11 @@ class LocalBlackboard(
         elsewhere = found.elsewhere
         if found.exact:
             return DedupAnswer(key, action_fingerprint, DedupStatus.TESTED, records=found.exact, elsewhere=elsewhere)
-        live = self._live_claims(key, action_fingerprint, now)
-        if live:
-            return DedupAnswer(key, action_fingerprint, DedupStatus.IN_PROGRESS, claim=live[0], elsewhere=elsewhere)
-        held, running = self._elsewhere(state, key, branch, now)
+        live = [claim for claim in self._leases.all_current() if is_live(claim, now)]
+        here = _claims_here(key, action_fingerprint, live)
+        if here:
+            return DedupAnswer(key, action_fingerprint, DedupStatus.IN_PROGRESS, claim=here[0], elsewhere=elsewhere)
+        held, running = _elsewhere(state, key, branch, live)
         same_change = _same_change_tests(state, key.parent_commit, action_fingerprint, branch)
         running += tuple(record for record in same_change if record.in_flight)
         if held is not None or running:

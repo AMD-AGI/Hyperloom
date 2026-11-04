@@ -27,13 +27,14 @@ from hyperloom_multibranch.contracts.blackboard.peers import Intent, IntentLayer
 from hyperloom_multibranch.contracts.blackboard.records import (
     REPLAY_TARGET,
     BaselineRecord,
+    Claim,
     InboxItem,
     ToolResultPointer,
     Withdrawal,
 )
 from hyperloom_multibranch.contracts.blackboard.vocab import ClaimStatus, Conclusion, DedupStatus, InboxKind
 from hyperloom_multibranch.blackboard import LocalBlackboard
-from hyperloom_multibranch.blackboard.local.claims import LeaseTaken
+from hyperloom_multibranch.blackboard.local.claims import LeaseStore, LeaseTaken
 from hyperloom_multibranch.blackboard.local.segments import EntryKind
 from hyperloom_multibranch.blackboard.tests.factories import TTL, FakeClock, delta, intent, judgement, request, result
 
@@ -62,6 +63,22 @@ async def test_a_claimed_intent_is_in_progress_for_every_other_branch_on_that_st
     assert (claim.status, claim.holder, claim.generation) == (ClaimStatus.HELD, "s1", 1)
     assert held.value.answer.status is DedupStatus.IN_PROGRESS
     assert held.value.answer.claim is not None and held.value.answer.claim.holder == "s1"
+
+
+async def test_an_answer_reads_the_claims_in_force_once(open_as: Open, monkeypatch: pytest.MonkeyPatch) -> None:
+    await open_as(Role.SPECIALIST_RUNTIME, "s1").acquire(intent("s1", "c1"), ACTION, ttl_seconds=TTL)
+    reads: list[int] = []
+    listed = LeaseStore.all_current
+
+    def counted(store: LeaseStore) -> list[Claim]:
+        reads.append(1)
+        return listed(store)
+
+    monkeypatch.setattr(LeaseStore, "all_current", counted)
+    s2 = open_as(Role.SPECIALIST_RUNTIME, "s2")
+    answer = await s2.lookup(ClaimKey("c0", intent("s2", "c0").fingerprint), OTHER_ACTION)
+
+    assert answer.status is DedupStatus.TESTING_ELSEWHERE and len(reads) == 1
 
 
 async def test_the_same_action_in_progress_under_another_intent_is_held_too(open_as: Open) -> None:
