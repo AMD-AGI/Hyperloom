@@ -74,7 +74,7 @@ def test_a_table_that_makes_modules_stale_raises_the_watchdog_of_both_carriers(i
 
 
 def test_the_estimate_is_the_builds_plus_the_margin() -> None:
-    assert rebuild_watchdog_sec(["m"]) == rebuild_watchdog.MODULE_BUILD_SEC + rebuild_watchdog.WATCHDOG_MARGIN_SEC
+    assert rebuild_watchdog_sec(["m"]) == MODULE_BUILD_LIMIT_SEC + rebuild_watchdog.WATCHDOG_MARGIN_SEC
     assert rebuild_watchdog_sec(["m"]) > 300, "longer than sglang's default watchdog"
 
 
