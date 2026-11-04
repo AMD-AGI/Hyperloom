@@ -40,6 +40,17 @@ class SpecialistLaunch:
     process_log: Path
 
 
+def stamp_reap_mark(env: dict[str, str]) -> str:
+    """Put a reap mark unique to one launch in ``env``, in place, and return it.
+
+    Every process the child starts inherits the mark however it detaches, so a sweep for it after the launch ends
+    finds them all, and none of another launch.
+    """
+    reap_mark = uuid.uuid4().hex
+    env[REAP_MARK_ENV] = reap_mark
+    return reap_mark
+
+
 def compose_launch_env(task_id: str) -> tuple[dict[str, str], str]:
     """Compose the child env for one launch; return it with the launch's reap mark."""
     # Compose a minimal env. Provider credentials are inherited by default
@@ -50,9 +61,7 @@ def compose_launch_env(task_id: str) -> tuple[dict[str, str], str]:
     from hyperloom_common.llm.llm_stability_env import apply_llm_stability_env
 
     apply_llm_stability_env(env)
-    # Unique to this launch, so every process the CLI starts can be found after it detaches.
-    reap_mark = uuid.uuid4().hex
-    env[REAP_MARK_ENV] = reap_mark
+    reap_mark = stamp_reap_mark(env)
     # The child spends against the gateway, so tag it or its spend lands
     # under no component at all. The task tag is what attributes the
     # requests of a child that dies before its result row -- the only
