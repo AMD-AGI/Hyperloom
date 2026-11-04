@@ -1561,6 +1561,15 @@
         },
         "controller_reason": {
           "type": "string"
+        },
+        "geak_status": {
+          "type": "string"
+        },
+        "geak_error_class": {
+          "type": "string"
+        },
+        "geak_error": {
+          "type": "string"
         }
       },
       "additionalProperties": false
