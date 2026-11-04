@@ -16,12 +16,11 @@ sub-run, so a missing reading must stay distinguishable from a zero.
 
 from __future__ import annotations
 
-import json
 import os
-import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+
+from hyperloom.common.proctree import descendants
 
 __all__ = [
     "CONTAINER_RECORD_KIND",
@@ -29,7 +28,6 @@ __all__ = [
     "SPECIALIST_RECORD_KIND",
     "ContainerSnapshot",
     "ProcessTreeSampler",
-    "ResourceLog",
     "TreeSample",
     "dir_usage_bytes",
     "read_container_cgroup",
@@ -63,6 +61,9 @@ def _clock_ticks() -> int:
 class ProcessTreeSampler:
     """Track the memory peak and CPU time of one process tree.
 
+    The tree is the root and its descendants as :func:`hyperloom.common.proctree.descendants`
+    finds them in ``/proc``; ``proc_root`` is where each member's readings are read.
+
     A process that exits stops counting towards memory the moment it is gone. Its CPU
     seconds reach the total through its parent: the kernel adds a child's user and
     system time, and its own reaped children's, to the parent's ``cutime``/``cstime``
@@ -78,7 +79,6 @@ class ProcessTreeSampler:
         self._ticks = clock_ticks or _clock_ticks()
         self._cpu_seconds = 0.0
         self._peak_rss = 0
-        self._children_files_ok = True
 
     @property
     def peak_rss_bytes(self) -> int:
@@ -123,69 +123,16 @@ class ProcessTreeSampler:
         return rss, cpu
 
     def _tree_pids(self) -> list[int]:
-        """The root and every descendant, by the kernel's children files when it has them."""
-        if self._children_files_ok:
-            found = self._walk_children_files()
-            if found is not None:
-                return found
-            self._children_files_ok = False
-        return self._walk_by_ppid()
+        """The root, then its descendants with every parent before its children.
 
-    def _children_of(self, pid: int) -> list[int] | None:
-        """Direct children of ``pid`` from the kernel's children files; ``None`` when the kernel has none."""
-        task_dir = self._proc / str(pid) / "task"
+        A child reaped between the read of its parent and its own is then missed by one
+        sample instead of counted twice, which the kept maximum would make permanent.
+        """
         try:
-            tids = [entry.name for entry in os.scandir(task_dir)]
-        except OSError:
-            return []  # the process is gone
-        children: list[int] = []
-        for tid in tids:
-            try:
-                text = (task_dir / tid / "children").read_text(encoding=UTF8)
-            except FileNotFoundError:
-                return None
-            except OSError:
-                continue
-            children.extend(int(token) for token in text.split() if token.isdigit())
-        return children
-
-    def _walk_children_files(self) -> list[int] | None:
-        seen = [self._root]
-        queue = [self._root]
-        while queue:
-            pid = queue.pop()
-            children = self._children_of(pid)
-            if children is None:
-                if pid == self._root:
-                    return None
-                continue
-            for child in children:
-                if child not in seen:
-                    seen.append(child)
-                    queue.append(child)
-        return seen
-
-    def _walk_by_ppid(self) -> list[int]:
-        parent_of: dict[int, int] = {}
-        try:
-            names = [entry.name for entry in os.scandir(self._proc) if entry.name.isdigit()]
+            below = descendants(self._root)
         except OSError:
             return [self._root]
-        for name in names:
-            try:
-                text = (self._proc / name / "stat").read_text(encoding=UTF8, errors=DECODE_ERRORS)
-                parent_of[int(name)] = int(text.rsplit(")", 1)[-1].split()[1])
-            except (OSError, ValueError, IndexError):
-                continue
-        seen = [self._root]
-        grew = True
-        while grew:
-            grew = False
-            for pid, ppid in parent_of.items():
-                if ppid in seen and pid not in seen:
-                    seen.append(pid)
-                    grew = True
-        return seen
+        return [self._root, *(pid for pid, _start in reversed(below))]
 
 
 @dataclass(frozen=True)
@@ -290,21 +237,3 @@ def dir_usage_bytes(path: Path) -> int | None:
     while stack:
         total += _directory_blocks(stack.pop(), stack)
     return total
-
-
-@dataclass
-class ResourceLog:
-    """Append-only ``agents/resources.jsonl``; one JSON object per line."""
-
-    path: Path
-    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
-
-    def append(self, record: Mapping[str, Any]) -> None:
-        line = json.dumps(dict(record), sort_keys=True, separators=(",", ":")) + "\n"
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._lock:
-            fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-            try:
-                os.write(fd, line.encode("utf-8"))
-            finally:
-                os.close(fd)
