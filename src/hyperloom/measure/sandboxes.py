@@ -274,7 +274,7 @@ class SandboxPool:
             if runner.handle is not None:
                 runner.handle.kill()
         except SandboxGone:
-            pass
+            pass  # already closed, which is what this asks for
         except SandboxError:
             log.exception("sandbox %s could not be closed; its own timeout will end it", runner.sandbox_id)
         finally:
@@ -286,7 +286,7 @@ class SandboxPool:
         try:
             self._provider.connect(sandbox_id, role=MEASUREMENT_ROLE).kill()
         except SandboxGone:
-            pass
+            pass  # already gone, which is fine
         except SandboxError:
             log.exception("sandbox %s could not be closed", sandbox_id)
 
