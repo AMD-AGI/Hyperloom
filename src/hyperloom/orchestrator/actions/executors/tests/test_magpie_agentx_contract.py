@@ -111,7 +111,7 @@ def test_grid_composes_accepted_launch_then_candidate(source, tmp_path):
 def test_pre_baseline_candidate_carries_operator_server_args(source, tmp_path, monkeypatch, seeded):
     if seeded:
         config = yaml.safe_load(source.read_text())
-        # The shape _generated_agentx_benchmark writes for a session driven by workload flags.
+        # The shape write_agentx_benchmark writes for a session driven by workload flags.
         config["benchmark"]["agentx"]["launch_overrides"] = {"version": 1}
         source.write_text(yaml.safe_dump(config))
     monkeypatch.setenv("INFERENCE_OPTIMIZER_SERVER_ARGS", "--max-num-seqs 16")

@@ -18,7 +18,6 @@ from __future__ import annotations
 import random
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Protocol, TypeVar
 
 from hyperloom.measure.docs import DocumentError, canonical_json, parse_json_object
@@ -32,8 +31,8 @@ __all__ = [
     "Prompt",
     "PromptSetError",
     "build_prompts",
-    "load_lines",
-    "load_prompts",
+    "parse_lines",
+    "parse_prompts",
     "prompts_bytes",
 ]
 
@@ -160,25 +159,22 @@ def _read_prompt(line: bytes, number: int) -> Prompt:
 
 class _Identified(Protocol):
     @property
-    def id(self) -> str: ...
+    def id(self) -> str:
+        """The id the prompt has in its set; no two prompts of a set share one."""
 
 
 _P = TypeVar("_P", bound=_Identified)
 
 
-def load_lines(path: Path, parse: Callable[[bytes, int], _P]) -> tuple[_P, ...]:
-    """The prompts of a staged file, one for each line ``parse`` reads; a file with no prompt, or an id twice, is refused."""
-    try:
-        raw = Path(path).read_bytes()
-    except OSError as exc:
-        raise PromptSetError(f"{path} cannot be read: {type(exc).__name__}") from None
+def parse_lines(raw: bytes, parse: Callable[[bytes, int], _P], where: str) -> tuple[_P, ...]:
+    """The prompts of a staged file's bytes, one for each line ``parse`` reads; no prompt, or an id twice, is refused."""
     prompts = tuple(parse(line, number) for number, line in enumerate(raw.splitlines(), 1))
     ids = [prompt.id for prompt in prompts]
     if not prompts or len(set(ids)) != len(ids):
-        raise PromptSetError(f"{path} holds no prompt, or an id twice")
+        raise PromptSetError(f"{where} holds no prompt, or an id twice")
     return prompts
 
 
-def load_prompts(path: Path) -> tuple[Prompt, ...]:
-    """The prompts of a staged file; a file that is not a prompt set, or repeats an id, is refused."""
-    return load_lines(path, _read_prompt)
+def parse_prompts(raw: bytes, where: str) -> tuple[Prompt, ...]:
+    """The prompts of a staged file's bytes; bytes that are not a prompt set, or repeat an id, are refused."""
+    return parse_lines(raw, _read_prompt, where)

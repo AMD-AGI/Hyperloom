@@ -14,7 +14,7 @@ from hyperloom.measure.docs import DocumentError
 from hyperloom.measure.long_context import build
 from hyperloom.measure.long_context.grade import passes
 from hyperloom.measure.long_context.plan import MAX_LENGTH, REPLY_HEADROOM, LongContextPlan
-from hyperloom.measure.long_context.prompts import PER_TASK, TASKS, PromptSetError, load_prompts, prompts_bytes
+from hyperloom.measure.long_context.prompts import PER_TASK, TASKS, PromptSetError, parse_prompts, prompts_bytes
 from hyperloom.measure.long_context.resolve import staged_set
 from hyperloom.measure.long_context.staging import KEY_PREFIX, load_prompt_set, stage_entry
 from hyperloom.measure.long_context.tasks import build_prompts
@@ -135,6 +135,20 @@ def test_a_runner_refuses_an_entry_that_is_not_the_one_the_sheet_names(tmp_path:
         staged_set("../escape", environ)
 
 
+def test_a_manifest_naming_another_file_cannot_put_other_prompts_under_the_sheets_hash(tmp_path: Path) -> None:
+    plan = staged_plan(tmp_path)
+    entry = tmp_path / short_staging.EVALSETS_DIR / plan.prompt_set
+    data = entry / "data"
+    (data / "orig.jsonl").write_bytes((data / "prompts.jsonl").read_bytes())
+    manifest = json.loads((entry / "manifest").read_text())
+    manifest["prompts"]["file"] = "data/orig.jsonl"
+    (entry / "manifest").write_text(json.dumps(manifest))
+    (data / "prompts.jsonl").write_bytes(prompts_bytes(prompt_set()[:1]))
+
+    with pytest.raises(PromptSetError, match="not what its manifest recorded"):
+        load_prompt_set(plan, {"HYPERLOOM_RUNNER_CACHE": str(tmp_path)})
+
+
 def test_a_prompts_file_that_is_not_a_prompt_set_is_refused(tmp_path: Path) -> None:
     path = tmp_path / "prompts.jsonl"
     good = json.dumps({"id": "a", "task": "niah_single", "input": "x", "outputs": ["1"], "tokens": 3})
@@ -148,7 +162,7 @@ def test_a_prompts_file_that_is_not_a_prompt_set_is_refused(tmp_path: Path) -> N
     ):
         path.write_text(line + "\n")
         with pytest.raises(PromptSetError, match=match):
-            load_prompts(path)
+            parse_prompts(path.read_bytes(), str(path))
 
 
 def test_the_builder_command_stages_the_set_and_prints_what_a_setup_names(tmp_path, monkeypatch, capsys) -> None:
