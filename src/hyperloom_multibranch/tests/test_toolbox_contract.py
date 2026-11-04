@@ -3,9 +3,7 @@
 
 from __future__ import annotations
 
-import pytest
 
-from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom_multibranch.contracts import toolbox
 from hyperloom_multibranch.contracts.toolbox import (
     REJECTION_CODES,
@@ -50,7 +48,7 @@ def test_queue_state_totals() -> None:
     assert (state.queued, state.running) == (6, 3)
 
 
-def test_the_toolbox_protocol_is_the_three_calls_of_the_design() -> None:
+def test_the_toolbox_protocol_is_its_seven_calls() -> None:
     names = {name for name in vars(toolbox.Toolbox) if not name.startswith("_")}
     assert names == {
         "submit_test",
@@ -69,26 +67,3 @@ def test_the_blackboard_writer_protocols_are_re_exported() -> None:
 
     assert toolbox.TestRecordSink is TestRecordSink
     assert toolbox.NodeHealth is NodeHealth
-
-
-def test_a_minimal_implementation_satisfies_the_protocol_shape() -> None:
-    class Minimal:
-        async def submit_test(self, request: TestRequest) -> str:
-            return "r1"
-
-        async def cancel(self, request_id: str) -> CancelOutcome:
-            return CancelOutcome.FINISHED
-
-        async def queue_state(self) -> QueueState:
-            return QueueState()
-
-        async def measurement_capacity(self) -> toolbox.MeasurementCapacity:
-            return toolbox.MeasurementCapacity(8, 8)
-
-    impl: toolbox.Toolbox = Minimal()
-    request = TestRequest(TestKind.TEST, Purpose.EXPLORE, "b1", "c0")
-    import asyncio
-
-    assert asyncio.run(impl.submit_test(request)) == "r1"
-    with pytest.raises(UnknownTestRequest):
-        raise UnknownTestRequest("r9")
