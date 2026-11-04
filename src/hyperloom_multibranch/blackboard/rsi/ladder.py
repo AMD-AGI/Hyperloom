@@ -49,7 +49,16 @@ from hyperloom_multibranch.blackboard.local.files import encode_json, publish_on
 from hyperloom_multibranch.blackboard.rsi.archive import SearchTree, written_by
 from hyperloom_multibranch.blackboard.rsi.history import judged_tests, stall_odds
 from hyperloom_multibranch.blackboard.rsi.lessons import published_records
-from hyperloom_multibranch.blackboard.rsi.playbook import Crowned, Playbook, PlaybookPool, Retired, changes, problems
+from hyperloom_multibranch.blackboard.rsi.playbook import (
+    Crowned,
+    Playbook,
+    PlaybookNumbers,
+    PlaybookPool,
+    PlaybookRule,
+    Retired,
+    changes,
+    problems,
+)
 from hyperloom_multibranch.blackboard.rsi.replay import (
     OPTIMISTIC,
     PESSIMISTIC,
@@ -173,13 +182,11 @@ def _stall_at(tree: SearchTree, name: str, t_s: float) -> tuple[int, bool] | Non
     return sum(1 for when in judged_tests(branch) if since < when <= t_s), bool(own)
 
 
-def decision_points(
-    tree: SearchTree, calls: Sequence[Mapping[str, object]], *, bar: int, start: float | None = None
-) -> tuple[DecisionPoint, ...]:
+def decision_points(tree: SearchTree, calls: Sequence[Mapping[str, object]], *, bar: int) -> tuple[DecisionPoint, ...]:
     """The stops of ``tree``'s judge, from its logged ``calls`` (``at``, ``prompt``, ``reply``), whose outcome is
-    known under a stall bar of ``bar``; ``start`` is when the session began, by default its archive's."""
+    known under a stall bar of ``bar``, timed from when its archive says the session began."""
 
-    began = start if start is not None else (tree.started_at or 0.0)
+    began = tree.started_at or 0.0
     points = []
     for call in calls:
         at, prompt, reply = call.get("at"), call.get("prompt"), call.get("reply")
@@ -232,16 +239,14 @@ async def r2(
     champion: Playbook,
     points: Sequence[DecisionPoint],
     judge: ReplayJudge,
-    *,
-    limit: int = R2_POINTS,
 ) -> Rung:
-    """R2: the decision ``points`` asked again of ``judge`` under ``candidate`` and ``champion``; the first ``limit``
-    of them, the stops to undo and those to keep in turn."""
+    """R2: the decision ``points`` asked again of ``judge`` under ``candidate`` and ``champion``; the first
+    :data:`R2_POINTS` of them, the stops to undo and those to keep in turn."""
 
     undo = [point for point in points if point.keep]
     keep = [point for point in points if not point.keep]
     chosen = [point for pair in zip(undo, keep) for point in pair] + undo[len(keep) :] + keep[len(undo) :]
-    chosen = chosen[:limit]
+    chosen = chosen[:R2_POINTS]
     if not chosen:
         return Rung("R2", True, "no archived decision point with a known outcome", skipped=True)
     right = {candidate.label: 0, champion.label: 0}
@@ -485,12 +490,12 @@ def r3(candidate: Playbook, champion: Playbook, kept: Sequence[Trial]) -> Rung:
 def _unfit(
     candidate: Playbook, champion: Playbook, standing: ReplayStanding | None, readable: frozenset[str] | None
 ) -> str:
-    """Why ``candidate`` cannot win against ``champion``: ``standing``, taken after ``candidate`` was registered, reads
-    it worse both ways beyond the data, or it aims at a measure outside ``readable``; ``""`` when neither is known. A
-    standing taken before then has a row of that label only for a variant the replay plays by default."""
+    """Why ``candidate`` cannot win against ``champion``: ``standing`` reads it worse both ways beyond the data in a
+    row that replayed its numbers and rules, or it aims at a measure outside ``readable``; ``""`` when neither is
+    known. A row of its label that replayed other numbers or rules, such as a default variant's, says nothing of it."""
 
-    if standing is not None and standing.champion == champion.label and standing.at > candidate.registered_at:
-        row = next((item for item in standing.rows if item.label == candidate.label), None)
+    if standing is not None and standing.champion == champion.label:
+        row = next((item for item in standing.rows if item.label == candidate.label and item.replays(candidate)), None)
         if row is not None and row.reading == WORSE:
             return (
                 f"the scheduling replay at the CLOSE of {standing.session_id} reads it worse both ways: {row.spans()}"
@@ -546,11 +551,19 @@ class Difference:
 
 @dataclass(frozen=True)
 class StandingRow:
-    """One playbook's paired difference from the champion with h(k) optimistic and pessimistic beyond the data."""
+    """One playbook's paired difference from the champion with h(k) optimistic and pessimistic beyond the data, and
+    the ``numbers`` and ``rules`` it replayed; a row kept before rows held them has no ``numbers``."""
 
     label: str
     optimistic: Difference
     pessimistic: Difference
+    numbers: PlaybookNumbers | None = None
+    rules: tuple[PlaybookRule, ...] = ()
+
+    def replays(self, playbook: Playbook) -> bool:
+        """Whether this row replayed ``playbook``'s numbers and rules."""
+
+        return self.numbers is not None and (self.numbers, self.rules) == (playbook.numbers, playbook.rules)
 
     @property
     def reading(self) -> str:
@@ -588,8 +601,16 @@ class ReplayStanding:
         return {row.label: row.reading for row in self.rows}
 
 
+def _standing_row(label: str, held: PolicyRow, dropped: PolicyRow, playbook: Playbook | None) -> StandingRow:
+    """``label``'s row of the standing, with the numbers and rules it replayed when a playbook is behind it; the
+    archived sessions' own row has none."""
+
+    numbers, rules = (playbook.numbers, playbook.rules) if playbook is not None else (None, ())
+    return StandingRow(label, Difference.of(held), Difference.of(dropped), numbers, rules)
+
+
 def replay_standing(
-    trees: Sequence[SearchTree], pool: PlaybookPool, *, session_id: str, at: float, runs: int = CLOSE_REPLAY_RUNS
+    trees: Sequence[SearchTree], pool: PlaybookPool, *, session_id: str, at: float
 ) -> tuple[ReplayStanding, tuple[SchedulingComparison, ...]]:
     """The scheduling replay of ``trees`` against ``pool``'s champion, both ways beyond the data: the default variants
     (H0 and the old rule among them) and the playbooks on trial. The standing it comes to, and the comparisons."""
@@ -597,21 +618,19 @@ def replay_standing(
     champion = pool.champion()
     playbooks = {**variants(), **{playbook.label: playbook for playbook in pool.on_trial()}, champion.label: champion}
     found = tuple(
-        compare(trees, playbooks, baseline=champion.label, drawn=Draws(runs=runs, beyond=beyond))
+        compare(trees, playbooks, baseline=champion.label, drawn=Draws(runs=CLOSE_REPLAY_RUNS, beyond=beyond))
         for beyond in (OPTIMISTIC, PESSIMISTIC)
     )
     held, dropped = ({row.label: row for row in comparison.rows} for comparison in found)
     rows = tuple(
-        StandingRow(label, Difference.of(row), Difference.of(dropped[label]))
+        _standing_row(label, row, dropped[label], playbooks.get(label))
         for label, row in held.items()
         if label != champion.label
     )
-    return ReplayStanding(session_id, at, champion.label, len(trees), runs, rows), found
+    return ReplayStanding(session_id, at, champion.label, len(trees), CLOSE_REPLAY_RUNS, rows), found
 
 
-def r1_reading(
-    candidate: Playbook, champion: Playbook, trees: Sequence[SearchTree], *, runs: int = CLOSE_REPLAY_RUNS
-) -> StandingRow | None:
+def r1_reading(candidate: Playbook, champion: Playbook, trees: Sequence[SearchTree]) -> StandingRow | None:
     """R1 as CLOSE reads a new playbook: ``candidate`` beside ``champion`` in the scheduling replay of ``trees``, both
     ways beyond the data; ``None`` for a change the replay does not play, or without a tree to replay."""
 
@@ -622,12 +641,16 @@ def r1_reading(
     found = [
         next(
             row
-            for row in compare(trees, pair, baseline=champion.label, drawn=Draws(runs=runs, beyond=beyond)).rows
+            for row in compare(
+                trees, pair, baseline=champion.label, drawn=Draws(runs=CLOSE_REPLAY_RUNS, beyond=beyond)
+            ).rows
             if row.label == candidate.label
         )
         for beyond in (OPTIMISTIC, PESSIMISTIC)
     ]
-    return StandingRow(candidate.label, Difference.of(found[0]), Difference.of(found[1]))
+    return StandingRow(
+        candidate.label, Difference.of(found[0]), Difference.of(found[1]), candidate.numbers, candidate.rules
+    )
 
 
 def record_standing(pool: PlaybookPool, standing: ReplayStanding) -> bool:
