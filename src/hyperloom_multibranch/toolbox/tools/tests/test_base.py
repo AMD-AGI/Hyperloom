@@ -168,3 +168,104 @@ async def test_a_job_id_may_carry_a_colon_and_its_directory_never_does(tmp_path:
     (pointer,) = sink.pointers
     assert pointer.job_id == "prelude:abc"
     assert Path(pointer.location).parent == tmp_path / "results" / "prelude%3Aabc"
+
+
+class HeldSink(RecordingSink):
+    """Holds the first push until ``release`` is set: the window in which a join or a redelivery runs."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.holding = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def notify_tool_result(self, pointer) -> None:
+        if not self.holding.is_set():
+            self.holding.set()
+            await self.release.wait()
+        await super().notify_tool_result(pointer)
+
+
+class UnwindingTool(ScriptedTool):
+    """A tool that, once cancelled, takes until ``unwound`` is set to end."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.block = asyncio.Event()
+        self.unwound = asyncio.Event()
+
+    async def run(self, request: ToolRequest, workdir: Path) -> ToolOutput:
+        try:
+            return await super().run(request, workdir)
+        except asyncio.CancelledError:
+            await self.unwound.wait()
+            raise
+
+
+async def test_a_branch_that_joins_during_a_push_and_the_branch_being_pushed_to_each_get_one_pointer(
+    tmp_path: Path,
+) -> None:
+    sink = HeldSink()
+    runner = jobs(tmp_path, ScriptedTool(), sink)
+    job_id = runner.submit(request("a"))
+    await sink.holding.wait()
+
+    await runner.join(job_id, "b")
+    sink.release.set()
+    await runner.wait(job_id)
+
+    assert sorted(pointer.branch for pointer in sink.pointers) == ["a", "b"]
+    assert runner.undelivered() == ()
+
+
+async def test_a_redelivery_during_a_push_does_not_push_the_pointer_again(tmp_path: Path) -> None:
+    sink = HeldSink()
+    runner = jobs(tmp_path, ScriptedTool(), sink)
+    job_id = runner.submit(request("c"))
+    await sink.holding.wait()
+
+    still = await runner.redeliver()
+    sink.release.set()
+    await runner.wait(job_id)
+
+    assert [pointer.branch for pointer in sink.pointers] == ["c"]
+    assert still == (job_id,), "the push under way was not yet accepted"
+    assert runner.undelivered() == ()
+
+
+async def test_a_branch_a_redelivery_pushed_to_meanwhile_is_not_pushed_to_again_by_the_push_it_interrupted(
+    tmp_path: Path,
+) -> None:
+    sink, tool = HeldSink(), ScriptedTool()
+    tool.block = asyncio.Event()
+    runner = jobs(tmp_path, tool, sink)
+    job_id = runner.submit(request("a"))
+    await tool.started.wait()
+    await runner.join(job_id, "b")
+    tool.block.set()
+    await sink.holding.wait()
+
+    await runner.redeliver()
+    sink.release.set()
+    await runner.wait(job_id)
+
+    assert sorted(pointer.branch for pointer in sink.pointers) == ["a", "b"]
+
+
+async def test_a_branch_that_asks_while_a_cancelled_job_unwinds_gets_a_new_job_and_the_key_keeps_naming_it(
+    tmp_path: Path,
+) -> None:
+    sink, tool = RecordingSink(), UnwindingTool()
+    runner = jobs(tmp_path, tool, sink)
+    first = await runner.share(request("a"), "key")
+    await tool.started.wait()
+    assert runner.leave(first, "a"), "the last branch left, so the job is cancelled"
+
+    second = await runner.share(request("b"), "key")
+    tool.unwound.set()
+    assert await runner.wait(first) is JobStatus.CANCELLED
+    third = await runner.share(request("c"), "key")
+    tool.block.set()
+
+    assert second != first and third == second
+    assert await runner.wait(second) is JobStatus.SUCCEEDED
+    assert sorted(pointer.branch for pointer in sink.pointers) == ["b", "c"]
