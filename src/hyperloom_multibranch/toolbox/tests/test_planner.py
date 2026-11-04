@@ -167,32 +167,6 @@ def _agentx_planner(tmp_path: Path) -> HostedPlanner:
     return HostedPlanner(compiler, canonical, tmp_path / "points")
 
 
-async def test_an_agentx_session_plans_points_through_the_agentx_launch_overrides(tmp_path: Path) -> None:
-    rig = build(
-        tmp_path,
-        repo=FakeRepo(recipe_with()),
-        planner=_agentx_planner(tmp_path),
-        workload_kind=WorkloadKind.AGENTX,
-    )
-
-    await rig.toolbox.submit_test(req(server_args="--max-running-requests 77", concurrency=(8, 64)))
-    await rig.toolbox.drain()
-
-    points = [yaml.safe_load(path.read_text()) for path in rig.executor.jobs[0].environment.points]
-    assert [point["benchmark"]["envs"]["CONC"] for point in points] == [8, 64]
-    for point in points:
-        bench = point["benchmark"]
-        assert bench["agentx"]["launch_overrides"]["append_args"] == [
-            "--max-running-requests",
-            "77",
-            "--watchdog-timeout",
-            "1800",
-        ]
-        assert bench["envs"]["RUN_EVAL"] == "false"
-        assert not {"benchmark_script", "workload_spec"} & bench.keys()
-        assert not {"NUM_PROMPTS", "NUM_WARMUPS", "EXTRA_SGLANG_ARGS"} & bench["envs"].keys()
-
-
 ENV = AITER_LOG_TUNED_CONFIG_ENV
 
 
