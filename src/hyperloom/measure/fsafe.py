@@ -14,6 +14,7 @@ import errno
 import hashlib
 import os
 import stat
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -128,15 +129,22 @@ def exists_beneath(root_fd: int, rel: str) -> bool:
     return True
 
 
-def stream(fd: int) -> Iterator[bytes]:
-    """The remaining bytes of ``fd`` in chunks."""
-    while chunk := os.read(fd, CHUNK):
+def stream(fd: int, limit: int | None = None) -> Iterator[bytes]:
+    """The remaining bytes of ``fd`` in chunks; with ``limit``, no more than ``limit + 1`` of them.
+
+    One byte past ``limit`` is enough for the caller to refuse a file that is longer than it should be, so a file that
+    grows (or keeps growing) is never read further than that.
+    """
+    left = sys.maxsize if limit is None else limit + 1
+    while left > 0 and (chunk := os.read(fd, min(CHUNK, left))):
+        left -= len(chunk)
         yield chunk
 
 
-def sha256_and_size(fd: int) -> tuple[str, int]:
+def sha256_and_size(fd: int, limit: int | None = None) -> tuple[str, int]:
+    """The sha256 and size of the remaining bytes of ``fd``, read as :func:`stream` reads them."""
     digest, size = hashlib.sha256(), 0
-    for chunk in stream(fd):
+    for chunk in stream(fd, limit):
         digest.update(chunk)
         size += len(chunk)
     return digest.hexdigest(), size
