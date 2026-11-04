@@ -41,6 +41,8 @@ __all__ = ["OWN_AITER_JIT_DIR", "own_aiter_jit", "point_configs", "server_enviro
 #: The directory below the test's compile directory, beside the cache's private root, not below it: seeding empties that.
 OWN_AITER_JIT_DIR = "aiter_jit"
 _TABLE_PREFIX = "AITER_CONFIG_"
+#: The directory of the aiter package that holds its prebuilt modules (aiter's ``get_user_jit_dir()`` by default).
+_JIT_DIR = "jit"
 _UTF8 = "utf-8"
 
 
@@ -76,7 +78,7 @@ def own_aiter_jit(
         _unlink_stale(farm.site / AITER_PACKAGE, image, servers, environ, gfx_arch)
         return {}
     directory.mkdir(parents=True, exist_ok=True)
-    link_prebuilt(image / "jit", directory, _stale(image, servers, environ, gfx_arch))
+    link_prebuilt(image / _JIT_DIR, directory, _stale(image, servers, environ, gfx_arch))
     return {variable: str(directory)}
 
 
@@ -110,7 +112,7 @@ def _stale(
     )
     stale = stale_table_modules(config, image, image, servers) if tables else frozenset()
     stale |= env_touched_entries(config, servers, environ, gfx_arch) | unlike_prewarmed(
-        image / "jit", servers, gfx_arch
+        image / _JIT_DIR, servers, gfx_arch
     )
     return touched_entries(stale, config, prebuilt_names(image)).names if stale else frozenset()
 
@@ -129,11 +131,11 @@ def _unlink_stale(
     stale = (
         stale_table_modules(config, image, package, servers)
         | env_touched_entries(config, servers, environ, gfx_arch)
-        | unlike_prewarmed(image / "jit", servers, gfx_arch)
+        | unlike_prewarmed(image / _JIT_DIR, servers, gfx_arch)
     )
     if not stale:
         return
     for name in touched_entries(stale, config, prebuilt_names(image)).names:
-        link = package / "jit" / f"{name}.so"
+        link = package / _JIT_DIR / f"{name}.so"
         if link.is_symlink():
             link.unlink()
