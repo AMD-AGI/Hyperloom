@@ -330,6 +330,7 @@ async def test_the_tuner_is_asked_for_the_shapes_of_the_log_on_the_leased_card_a
         ("496", "5120", "5120"),
         ("496", "34816", "5120"),
         ("496", "5120", "17408"),
+        ("16", "512", "7168"),
     }
     assert env["ROCR_VISIBLE_DEVICES"] in {"0", "1"} and "HIP_VISIBLE_DEVICES" not in env and SECRET_ENV not in env
     assert wanted["--output-dir"].startswith(str(rig.session / "tool-results" / job))
@@ -471,7 +472,7 @@ async def test_a_log_with_nothing_untuned_fails_the_job_before_it_takes_a_card(m
 async def test_the_time_is_shared_among_the_tables_and_a_table_it_does_not_reach_is_skipped(make: Make) -> None:
     rig = await ready(await make(cards=2), log=None)
     shapes = [
-        {"env": ENV, "M": 64, "N": 5120, "K": 5120},
+        {"env": ENV, "M": 16, "N": 512, "K": 7168},
         {"env": "AITER_CONFIG_GEMM_BF16", "M": 8, "N": 256, "K": 5120},
     ]
     shared = await rig.submit(test_request_id=TEST_ID, shapes=shapes, timeout_sec=2 * MIN_TUNER_SEC)
