@@ -47,6 +47,10 @@ __all__ = ["StageError", "main", "stage"]
 
 _FETCH_TIMEOUT_SEC = 300
 _MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
+#: The staged tree is read by every account on the node and written by none but its owner: directories and executables
+#: get the first, every other file the second.
+_SHARED_MODE = 0o755
+_SHARED_FILE_MODE = 0o644
 _UTF8 = "utf-8"
 
 
@@ -95,14 +99,14 @@ def _extract(raw: bytes, commit: str, source: Path) -> None:
                 continue
             target = source / relative
             if member.isdir():
-                target.mkdir(parents=True, exist_ok=True, mode=0o755)
+                target.mkdir(parents=True, exist_ok=True, mode=_SHARED_MODE)
             elif member.isfile():
-                target.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+                target.parent.mkdir(parents=True, exist_ok=True, mode=_SHARED_MODE)
                 handle = archive.extractfile(member)
                 if handle is None:
                     raise StageError(f"{member.name} cannot be read")
                 target.write_bytes(handle.read())
-                target.chmod(0o755 if member.mode & 0o111 else 0o644)
+                target.chmod(_SHARED_MODE if member.mode & 0o111 else _SHARED_FILE_MODE)
             else:
                 raise StageError(f"the archive holds {member.name}, which is not a file or a directory")
 
@@ -120,10 +124,10 @@ def stage(cache: Path, commit: str, raw: bytes) -> tuple[Path, str]:
     incoming = final.parent / f".incoming-{uuid.uuid4().hex}"
     try:
         source = incoming / SOURCE_DIR
-        source.mkdir(parents=True, mode=0o755)
+        source.mkdir(parents=True, mode=_SHARED_MODE)
         _extract(raw, commit, source)
         (source / COMMIT_FILE).write_text(commit + "\n", encoding=_UTF8)
-        (source / COMMIT_FILE).chmod(0o644)
+        (source / COMMIT_FILE).chmod(_SHARED_FILE_MODE)
         digest = tree_digest(source)
         if commit == RUPPELL_COMMIT and digest.sha256 != RUPPELL_TREE_SHA256:
             raise StageError(f"the tree of {commit} has digest {digest.sha256}, not the pinned {RUPPELL_TREE_SHA256}")
