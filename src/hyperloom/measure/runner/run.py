@@ -74,8 +74,9 @@ from hyperloom.measure.farm import (
     verify_farm,
 )
 from hyperloom.measure.runner.jit import STAGING_DIR, ColdStart, Surroundings, build_session, card_arch, cold_start
-from hyperloom.measure.runner.import_outcome import install_import_watch, refine_imports
+from hyperloom.measure.runner.import_outcome import clear_import_notes, install_import_watch, refine_imports
 from hyperloom.measure.runner.jit_outcome import refine_outcome
+from hyperloom.measure.runner.native.prewarm import preflight_build
 from hyperloom.measure.runner.own_jit import OWN_AITER_JIT_DIR, own_aiter_jit
 from hyperloom.measure.runner.rebuild_watchdog import raise_rebuild_watchdog
 from hyperloom.measure.runner.trace_fit import fit_traces
@@ -92,6 +93,7 @@ from hyperloom.measure.spec import MeasurementSpec, fingerprint, spec_sha256
 from hyperloom.measure.surface import extract_surface
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope
 from hyperloom.orchestrator.actions.executors import harvest_leaked_artifacts
+from hyperloom.orchestrator.actions.executors._aiter_serving_once import build_image_own_once
 from hyperloom.sandbox.card_occupancy import card_guard, own_sandbox_processes
 
 __all__ = ["run"]
@@ -267,7 +269,7 @@ def _surface_sha256(spec: MeasurementSpec, points: list[Path]) -> str:
     return extract_surface(yaml.safe_load(points[0].read_text()) or {}).sha256
 
 
-def _prepare(ctx: _Context, spec: MeasurementSpec, visible: list[int]) -> tuple[list[Path], Path, Farm | None]:
+def _prepare(ctx: _Context, spec: MeasurementSpec) -> tuple[list[Path], Path, Farm | None]:
     """Tools, attachments, farm and the rewritten YAML; returns the point path and the InferenceX checkout."""
     try:
         inferencex = ensure_inferencex(spec.tools.inferencex, ctx.cache)
@@ -556,6 +558,24 @@ def _drop_compile_dir(ctx: _Context) -> None:
         shutil.rmtree(ctx.compile, ignore_errors=True)
 
 
+def _build_image_own_once() -> None:
+    """Check aiter's serving modules against the image's own tables for this card before the test's servers are given
+    their JIT directories, and build what that moves aside once for this container
+    (:func:`~hyperloom.orchestrator.actions.executors._aiter_serving_once.build_image_own_once` with
+    :func:`~hyperloom.measure.runner.native.prewarm.preflight_build`): each test's servers build into a directory of
+    their own, so a module only they built would be built again by every later test. The test's directories, made after
+    this, link what was built. The test's own tables and build variables are not what is checked: the test is not given
+    a module they make stale (``own_jit``), and a module moved aside for them would stay out of the image for every later
+    test. A check that cannot run is logged and the servers build what they lack, as they would without it."""
+    try:
+        preflight = build_image_own_once(preflight_build)
+    except OSError as exc:
+        log.warning("aiter serving preflight before the test failed: %s", exc)
+        return
+    if preflight.outcome.get("action") == "invalidate":
+        log.warning("aiter serving preflight before the test: %s", preflight.summary())
+
+
 def _jit_session(
     ctx: _Context, spec: MeasurementSpec, points: list[Path], farm: Farm | None, facts
 ) -> JitCacheSession | None:
@@ -606,13 +626,15 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
     changed = align_platform_env(ctx.environ, spec.platform_env)
     progress.phase("preparing")
     ctx.phases.begin(ENV_REBUILD)
-    points, inferencex, farm = _prepare(ctx, spec, visible)
+    points, inferencex, farm = _prepare(ctx, spec)
     _patch_replay_client(ctx, points, inferencex)
     surface = _surface_sha256(spec, points)
+    _build_image_own_once()
     session = _jit_session(ctx, spec, points, farm, facts)
     arch = card_arch(spec, facts[0] if facts else None)
     call = _own_directories(ctx, _call(ctx, spec, points, inferencex, progress), session, farm, arch)
     _install_eval_deps(ctx, spec, points, inferencex)
+    clear_import_notes(farm)
     ctx.cards.check(BEFORE_TEST)
     ctx.cards.enforce_guard()
     progress.phase("running")

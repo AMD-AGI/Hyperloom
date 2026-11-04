@@ -710,8 +710,9 @@ def serving_modules_cover_csv(
 
 #: What hyperloom's prewarm writes beside the modules it built from the image's own tree and tables
 #: (``hyperloom.measure.runner.native.prewarm``): ``{"schema", "modules": [{"name", "sha256", "tables_sha256", ...}]}``.
+#: This module owns the format; the prewarm writes it and the measure runner reads it with these names.
 AITER_PREWARM_MANIFEST = "hyperloom-prewarm.json"
-_PREWARM_SCHEMA = "hyperloom.aiter_prewarm/1"
+AITER_PREWARM_SCHEMA = "hyperloom.aiter_prewarm/1"
 _MODULE_CONFIG = "optCompilerConfig.json"
 _HASH_CHUNK_BYTES = 1024 * 1024
 
@@ -724,13 +725,28 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _tables_sha256(configs_dir: Path) -> str:
+def tuned_tables_sha256(configs_dir: Path) -> str:
     """The prewarm's digest of aiter's tuned tables: a line ``<relative path>\\t<sha256>\\n`` per file, by path."""
     files = sorted((p.relative_to(configs_dir).as_posix(), p) for p in configs_dir.rglob("*") if p.is_file())
     digest = hashlib.sha256()
     for relative, path in files:
         digest.update(f"{relative}\t{_file_sha256(path)}\n".encode())
     return digest.hexdigest()
+
+
+def read_prewarm_manifest(jit_dir: Path) -> dict[str, dict[str, Any]]:
+    """The modules :data:`AITER_PREWARM_MANIFEST` in ``jit_dir`` lists, by name; empty when there is none or it is not
+    one."""
+    try:
+        document = json.loads((Path(jit_dir) / AITER_PREWARM_MANIFEST).read_bytes())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(document, dict) or document.get("schema") != AITER_PREWARM_SCHEMA:
+        return {}
+    entries = document.get("modules")
+    if not isinstance(entries, list):
+        return {}
+    return {str(entry["name"]): entry for entry in entries if isinstance(entry, dict) and "name" in entry}
 
 
 def image_own_modules(
@@ -746,11 +762,8 @@ def image_own_modules(
     the image's own for this round; one built for another card or CU count holds another card's rows, and
     none counts when the target is not known.
     """
-    try:
-        document = json.loads((jit_dir / AITER_PREWARM_MANIFEST).read_bytes())
-    except (OSError, ValueError):
-        return frozenset()
-    if not isinstance(document, dict) or document.get("schema") != _PREWARM_SCHEMA:
+    entries = read_prewarm_manifest(jit_dir)
+    if not entries:
         return frozenset()
     overridden = {
         m
@@ -760,12 +773,12 @@ def image_own_modules(
     }
     tables: str | None = None
     own: set[str] = set()
-    for entry in document.get("modules") or []:
+    for entry in entries.values():
         name = _installed_for(entry, jit_dir, overridden, targets)
         if name is None:
             continue
         try:
-            tables = _tables_sha256(configs_dir) if tables is None else tables
+            tables = tuned_tables_sha256(configs_dir) if tables is None else tables
         except OSError:
             continue
         if entry.get("tables_sha256") == tables:
@@ -991,6 +1004,7 @@ __all__ = [
     "AITER_JIT_PROBE_PATHS",
     "AITER_LOCK_STALE_MINUTES",
     "AITER_PREWARM_MANIFEST",
+    "AITER_PREWARM_SCHEMA",
     "BuildTargets",
     "COLD_START_KERNEL_THRESHOLD",
     "COMPILER_PROCESS_NAMES",
@@ -1007,12 +1021,14 @@ __all__ = [
     "is_aiter_jit_registry_mismatch",
     "prepare_serving_so_for_csvs",
     "probe_aiter_jit_cache",
+    "read_prewarm_manifest",
     "registry_mismatch_modules",
     "result_is_aiter_jit_registry_mismatch",
     "serving_module_for_kernel",
     "serving_modules_cover_csv",
     "sweep_stale_aiter_locks_if_dead",
     "target_names",
+    "tuned_tables_sha256",
     "_any_live_compiler",
     "_resolve_lock_sweep_dirs",
 ]

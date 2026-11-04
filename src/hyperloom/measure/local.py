@@ -159,9 +159,8 @@ _GRID = "grid"
 _CASE_TIMEOUT_SEC = 600.0
 _CASE_TIME_SHARE = 0.8
 _TEST = "test"
-_SUPPORTED_KINDS = (_TEST, _ACCURACY, _PROFILE, _REPRO)
 #: The kinds of ``TestCall`` this backend runs; a toolbox refuses any other at acceptance.
-SUPPORTED_KINDS = _SUPPORTED_KINDS
+SUPPORTED_KINDS = (_TEST, _ACCURACY, _PROFILE, _REPRO)
 #: The kinds of test whose compiled code another test may be given: a profile or a repro ran under other settings.
 _CONTRIBUTING = frozenset({_TEST, _ACCURACY})
 
@@ -331,8 +330,8 @@ def _point_envs(point: Path) -> dict[str, Any]:
 
 
 def _validate(call: TestCall) -> None:
-    if call.kind not in _SUPPORTED_KINDS:
-        raise TestCallRefused(f"the local backend runs kinds {_SUPPORTED_KINDS}, not {call.kind!r}")
+    if call.kind not in SUPPORTED_KINDS:
+        raise TestCallRefused(f"the local backend runs kinds {SUPPORTED_KINDS}, not {call.kind!r}")
     if not call.points:
         raise TestCallRefused("a test needs at least one measurement point")
     if call.prep == _GRID and len(call.points) != 1:

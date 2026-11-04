@@ -16,7 +16,9 @@ with. A test that ended well although no process imported a rebuilt package at a
 ends the same way: the patch never ran, or whether it ran cannot be told.
 
 The notes are read after the run rather than polled at readiness: the processes write them when they import, which is
-before the server answers, and the file read is the same.
+before the server answers, and the file read is the same. The runner's own processes write them too (its check of the
+farm imports each native module the farm laid, and with it the module's package), so the runner clears them with
+:func:`clear_import_notes` just before the server starts: only the server's processes are counted.
 """
 
 from __future__ import annotations
@@ -33,7 +35,15 @@ from hyperloom.measure.runner import import_origin_hook
 from hyperloom.measure.runner.import_origin_hook import ORIGIN_FIELD, PACKAGE_FIELD
 from hyperloom.measure.runner.jit_outcome import failed_outcome
 
-__all__ = ["INERT_PATCH", "ImportNote", "import_notes", "install_import_watch", "read_import_notes", "refine_imports"]
+__all__ = [
+    "INERT_PATCH",
+    "ImportNote",
+    "clear_import_notes",
+    "import_notes",
+    "install_import_watch",
+    "read_import_notes",
+    "refine_imports",
+]
 
 INERT_PATCH = "inert_patch"
 _NOTES_DIR = "imports"
@@ -65,6 +75,14 @@ def install_import_watch(farm: Farm) -> None:
         import_origin_hook.NOTES_KEY: str(import_notes(farm)),
     }
     (farm.site / import_origin_hook.WATCH_FILE).write_text(json.dumps(watch), encoding="utf-8")
+
+
+def clear_import_notes(farm: Farm | None) -> None:
+    """Remove the notes left so far, so that only processes started after this are counted: the runner calls it just
+    before the server starts, after its own processes (the check of the farm, the evaluator's installation) ran."""
+    notes = None if farm is None else import_notes(farm)
+    if notes is not None and notes.is_dir():
+        shutil.rmtree(notes)
 
 
 def read_import_notes(farm: Farm) -> list[ImportNote]:

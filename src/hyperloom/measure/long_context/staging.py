@@ -17,16 +17,14 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.measure.long_context.plan import LongContextPlan
-from hyperloom.measure.long_context.prompts import GENERATOR, Prompt, PromptSetError, load_prompts, prompts_bytes
+from hyperloom.measure.long_context.prompts import GENERATOR, Prompt, PromptSetError, parse_prompts, prompts_bytes
 from hyperloom.measure.short_prompts.staging import (
-    DATA_DIR,
     EVALSETS_DIR,
     MANIFEST_NAME,
-    PROMPTS_FILE,
     StagedEntry,
     cache_root,
-    entry_problem,
     stage_file,
+    verified_prompts,
 )
 
 __all__ = ["KEY_PREFIX", "load_prompt_set", "manifest_length", "stage_entry"]
@@ -56,17 +54,14 @@ def manifest_length(entry: Path) -> int:
 
 
 def load_prompt_set(plan: LongContextPlan, environ: Mapping[str, str]) -> tuple[Prompt, ...]:
-    """The prompts ``plan`` names, read from the cache after the entry's hashes are checked.
+    """The prompts ``plan`` names, parsed from the very bytes whose hashes were checked.
 
     Raises:
         PromptSetError: The entry is missing, unfinished, or not the one the plan names; or a prompt is longer than the
             plan's length.
     """
     entry = cache_root(environ) / EVALSETS_DIR / plan.prompt_set
-    problem = entry_problem(entry, plan.prompts_sha256)
-    if problem:
-        raise PromptSetError(problem)
-    prompts = load_prompts(entry / DATA_DIR / PROMPTS_FILE)
+    prompts = parse_prompts(verified_prompts(entry, plan.prompts_sha256), str(entry))
     longest = max(prompt.tokens for prompt in prompts)
     if longest > plan.length:
         raise PromptSetError(

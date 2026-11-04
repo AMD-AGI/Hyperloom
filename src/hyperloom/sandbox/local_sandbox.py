@@ -392,7 +392,11 @@ class LocalSandbox:
             code = status.wait_exit(proc, timeout_sec)
         except TimeoutError:
             status.close()
-            kill_launchers([proc], grace_sec=1.0)
+            # Under the lock kill() reaps with, so one of the two reaps this launcher; once waited its pid is free, and
+            # it leaves the list a later kill() signals.
+            with self._lock:
+                kill_launchers([proc], grace_sec=1.0)
+                self._procs.remove(proc)
             raise SandboxUnavailable(f"command timed out after {timeout_sec}s") from None
         finally:
             join_by = time.monotonic() + _READER_JOIN_SEC

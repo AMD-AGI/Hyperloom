@@ -358,6 +358,40 @@ def test_read_file_refuses_a_file_changed_after_verification_and_an_unlisted_nam
     assert raised.value.reason is RejectReason.UNLISTED_FILE
 
 
+def _count_bytes_of(name: str, real, moved: dict[str, int], key: str):
+    """Wrap ``os.read`` or ``os.write`` to add up the bytes that pass through ``name``, whichever descriptor holds it."""
+
+    def counted(fd, arg):
+        result = real(fd, arg)
+        if os.readlink(f"/proc/self/fd/{fd}").endswith(f"/{name}"):
+            moved[key] += result if isinstance(result, int) else len(result)
+        return result
+
+    return counted
+
+
+@pytest.mark.parametrize("step", ["verify_bundle", "read_file", "materialize"])
+def test_a_listed_file_that_grows_is_refused_without_reading_or_copying_past_its_listed_size(
+    bundle, tmp_path: Path, monkeypatch, step: str
+) -> None:
+    listed = len(DEFAULT_FILES["server.log"])
+    verified = verify_bundle(bundle.staging, verify_args(bundle))
+    os.truncate(bundle.staging / "server.log", listed + 8 * 1024 * 1024)  # appended to after verification
+    moved = {"read": 0, "write": 0}
+    monkeypatch.setattr(bundle_mod.os, "read", _count_bytes_of("server.log", os.read, moved, "read"))
+    monkeypatch.setattr(bundle_mod.os, "write", _count_bytes_of("server.log", os.write, moved, "write"))
+    run = {
+        "verify_bundle": lambda: verify_bundle(bundle.staging, verify_args(bundle)),
+        "read_file": lambda: verified.read_file("server.log"),
+        "materialize": lambda: materialize(verified, tmp_path / "out"),
+    }[step]
+    with pytest.raises(ResultRejected) as raised:
+        run()
+    assert raised.value.reason is RejectReason.FILE_SIZE_MISMATCH
+    assert moved["read"] <= listed + 1
+    assert moved["write"] <= listed
+
+
 def _record(verified) -> RecordedBundle:
     return RecordedBundle(verified.manifest_sha256, verified.signing_key_fingerprint)
 
