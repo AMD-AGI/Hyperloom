@@ -21,13 +21,22 @@ from hyperloom.orchestrator.specialists.resources import (
 
 
 def add_proc(
-    root: Path, pid: int, ppid: int, *, rss_kb: int, utime: int, stime: int = 0, children: list[int] | None = None
+    root: Path,
+    pid: int,
+    ppid: int,
+    *,
+    rss_kb: int,
+    utime: int,
+    stime: int = 0,
+    cutime: int = 0,
+    cstime: int = 0,
+    children: list[int] | None = None,
 ) -> None:
     pdir = root / str(pid)
     (pdir / "task" / str(pid)).mkdir(parents=True, exist_ok=True)
     (pdir / "status").write_text(f"Name:\tx\nVmRSS:\t{rss_kb} kB\n", encoding="utf-8")
     # comm contains a space and a parenthesis on purpose: fields are counted after the LAST ')'.
-    stat = f"{pid} (a b) c) S {ppid} {pid} {pid} 0 0 0 0 0 0 0 {utime} {stime} 0 0 20 0 1 0 1"
+    stat = f"{pid} (a b) c) S {ppid} {pid} {pid} 0 0 0 0 0 0 0 {utime} {stime} {cutime} {cstime} 20 0 1 0 1"
     (pdir / "stat").write_text(stat, encoding="utf-8")
     if children is not None:
         (pdir / "task" / str(pid) / "children").write_text(" ".join(map(str, children)), encoding="utf-8")
@@ -52,18 +61,46 @@ def test_peak_memory_and_cpu_seconds_over_the_tree(tmp_path: Path) -> None:
     assert sampler.peak_rss_bytes == 6000 * 1024
 
 
-def test_exited_child_stops_counting_memory_but_keeps_its_cpu(tmp_path: Path) -> None:
+def test_exited_child_stops_counting_memory_and_its_cpu_arrives_through_the_parent(tmp_path: Path) -> None:
     add_proc(tmp_path, 100, 1, rss_kb=1000, utime=100, children=[101])
-    add_proc(tmp_path, 101, 100, rss_kb=5000, utime=300, children=[])
+    add_proc(tmp_path, 101, 100, rss_kb=5000, utime=100, children=[])
     sampler = ProcessTreeSampler(100, proc_root=tmp_path, clock_ticks=100)
-    sampler.sample()
-    remove_proc(tmp_path, 101)
-    add_proc(tmp_path, 100, 1, rss_kb=1500, utime=150, children=[])
+    assert sampler.sample().cpu_seconds == 2.0
+    remove_proc(tmp_path, 101)  # it ran 3.0 s in all, 2.0 of them after the first sample, and the parent reaped it
+    add_proc(tmp_path, 100, 1, rss_kb=1500, utime=150, cutime=200, cstime=100, children=[])
     after = sampler.sample()
     assert after.rss_bytes == 1500 * 1024  # the dead child is no longer counted
     assert after.live_pids == 1
     assert sampler.peak_rss_bytes == 6000 * 1024  # the peak keeps the earlier reading
-    assert sampler.cpu_seconds == 1.5 + 3.0  # the child's last-seen CPU stays in the total
+    assert sampler.cpu_seconds == 1.5 + 3.0
+
+
+def test_a_child_that_starts_and_exits_between_two_samples_counts(tmp_path: Path) -> None:
+    add_proc(tmp_path, 100, 1, rss_kb=1000, utime=100, children=[])
+    sampler = ProcessTreeSampler(100, proc_root=tmp_path, clock_ticks=100)
+    sampler.sample()
+    add_proc(tmp_path, 100, 1, rss_kb=1000, utime=150, cutime=300, children=[])  # a 3.0 s compiler came and went
+    assert sampler.sample().cpu_seconds == 1.5 + 3.0
+
+
+def test_a_reused_pid_does_not_hide_either_process(tmp_path: Path) -> None:
+    add_proc(tmp_path, 100, 1, rss_kb=1000, utime=0, children=[101])
+    add_proc(tmp_path, 101, 100, rss_kb=1000, utime=500, children=[])
+    sampler = ProcessTreeSampler(100, proc_root=tmp_path, clock_ticks=100)
+    sampler.sample()
+    add_proc(tmp_path, 100, 1, rss_kb=1000, utime=0, cutime=500, children=[101])  # reaped the first 101 ...
+    add_proc(tmp_path, 101, 100, rss_kb=1000, utime=200, children=[])  # ... and started another that got its pid
+    assert sampler.sample().cpu_seconds == 5.0 + 2.0
+
+
+def test_the_cpu_total_never_goes_back_when_a_process_leaves_the_tree_unreaped(tmp_path: Path) -> None:
+    add_proc(tmp_path, 100, 1, rss_kb=1000, utime=100, children=[101])
+    add_proc(tmp_path, 101, 100, rss_kb=1000, utime=300, children=[])
+    sampler = ProcessTreeSampler(100, proc_root=tmp_path, clock_ticks=100)
+    sampler.sample()
+    add_proc(tmp_path, 100, 1, rss_kb=1000, utime=100, children=[])  # 101 detached: re-parented, not waited for
+    add_proc(tmp_path, 101, 1, rss_kb=1000, utime=300, children=[])
+    assert sampler.sample().cpu_seconds == 4.0
 
 
 def test_falls_back_to_parent_pid_scan_without_children_files(tmp_path: Path) -> None:
