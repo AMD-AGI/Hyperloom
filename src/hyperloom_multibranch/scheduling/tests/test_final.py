@@ -31,9 +31,9 @@ from hyperloom_multibranch.contracts.blackboard.vocab import LineageKind
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.rulegate.gate import RuleGate
-from hyperloom_multibranch.rulegate.inferencex import DROPPED_REQUESTS
+from hyperloom_multibranch.rulegate.inferencex import BASELINE_TESTS, DROPPED_REQUESTS
 from hyperloom_multibranch.rulegate.rules import InferenceXRule
-from hyperloom_multibranch.rulegate.service import BASELINE_TESTS, GateService, Polling
+from hyperloom_multibranch.rulegate.service import GateService
 from hyperloom_multibranch.scheduling.final import (
     CandidateCheck,
     FinalCandidate,
@@ -50,7 +50,6 @@ from hyperloom_multibranch.scheduling.requests import SessionChecks, SessionTest
 from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     BASE_IMAGE_DIGEST,
     BASELINE_VALUE,
-    GATE_POLL_SECONDS,
     MAIN_POINT,
     Curves,
     FakeRegressionCheck,
@@ -62,6 +61,7 @@ from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     session_gate,
     tagged,
 )
+from hyperloom_multibranch.tests.fakes import quick_polls  # noqa: F401
 from hyperloom_multibranch.toolbox.fake_model import Fate
 
 METRIC = "output_throughput"
@@ -332,7 +332,7 @@ async def test_an_unmeasured_test_or_a_failed_accuracy_disqualifies_a_failed_swe
     bench = await Bench(tmp_path / "again").build({frozenset({"i1"}): {MAIN_POINT: 1040.0, CONC: 1040.0}})
     gate = bench.handle(Role.GATE)
     rule = InferenceXRule(gate, CONC)
-    bench.gate = RefusingAccuracyGate(gate, bench.toolbox, rule, bench.toolbox, polling=Polling(GATE_POLL_SECONDS))
+    bench.gate = RefusingAccuracyGate(gate, bench.toolbox, rule, bench.toolbox)
     alone = await bench.selector().select(bench.candidates(both=False))
     assert alone.chosen is None and not alone.checks[0].accuracy_passed and alone.checks[0].reproduced
 
@@ -421,7 +421,7 @@ async def test_a_cold_start_that_dropped_requests_is_not_reproduced(tmp_path: Pa
     bench = await Bench(tmp_path).build({frozenset({"i1"}): {MAIN_POINT: 1040.0, CONC: 1040.0}})
     gate = bench.handle(Role.GATE)
     rule = InferenceXRule(gate, CONC)
-    bench.gate = DroppingRequestsGate(gate, bench.toolbox, rule, bench.toolbox, polling=Polling(GATE_POLL_SECONDS))
+    bench.gate = DroppingRequestsGate(gate, bench.toolbox, rule, bench.toolbox)
 
     choice = await bench.selector().select(bench.candidates(both=False))
 

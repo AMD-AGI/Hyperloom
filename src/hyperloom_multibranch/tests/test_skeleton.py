@@ -18,10 +18,11 @@ running.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import signal
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
@@ -101,13 +102,13 @@ from hyperloom_multibranch.rulegate.critic import (
     FixReview,
     FixReviewer,
     LlmCritic,
-    NoCritic,
     ReproVerdicts,
 )
 from hyperloom_multibranch.rulegate.fix_case import FIX_CASE_ID, FixCase
 from hyperloom_multibranch.rulegate.gate import RuleGate
+from hyperloom_multibranch.rulegate import regression
+from hyperloom_multibranch.rulegate.inferencex import BASELINE_TESTS
 from hyperloom_multibranch.rulegate.regression import FixProof, ReproRun
-from hyperloom_multibranch.rulegate.service import BASELINE_TESTS, Polling
 from hyperloom_multibranch.scheduling.budget import (
     MB_SECONDS_PER_HOUR,
     SessionBudget,
@@ -184,7 +185,7 @@ from hyperloom_multibranch.scheduling.tests.peer_fakes import (
 from hyperloom_multibranch.scheduling.tests.framework_checkout import framework_checkout
 from hyperloom_multibranch.scheduling.tests.model_checkout import model_checkout
 from hyperloom_multibranch.scheduling.processes import SCHEDULER_BRANCH
-from hyperloom_multibranch.tests.fakes import RecordingVerifier
+from hyperloom_multibranch.tests.fakes import RecordingVerifier, RefusingCritic
 from hyperloom_multibranch.toolbox.attempts import TestJob
 from hyperloom_multibranch.toolbox.fake_model import DEFAULT_BASELINE, Fate
 from hyperloom_multibranch.toolbox.tools.base import JobStatus
@@ -410,7 +411,7 @@ class Stage:
     toolbox_type: type[RecordingToolbox] = LeasingToolbox
     settings: RunSettings = SETTINGS
     repo_type: type[HeldGitRepo] = HeldGitRepo
-    critic: Callable[[UsageSink], FixReviewer] = lambda _usage: NoCritic()
+    critic: Callable[[UsageSink], FixReviewer] = lambda _usage: RefusingCritic()
     author: ScriptedCompletion = field(default_factory=ScriptedCompletion)
     learnings: LearningRecall | None = None
     image_check: Callable[[], ImageCheckReport] = lambda: IMAGE_CHECK
@@ -472,9 +473,7 @@ class Stage:
         self.toolbox, self.repo, self.setup = toolbox, repo, setup
         self.briefs = SessionBriefs(self.handle(Role.OBSERVER), repo=repo, learnings=self.learnings)
         mcp = McpServer(McpServerConfig(host_token="t" * MIN_TOKEN_LENGTH), campaign=setup.layout.session_id)
-        gate = session_gate(
-            self.handle(Role.GATE), toolbox, rule, polling=Polling(VIRTUAL_POLL_SECONDS, self.time.sleep)
-        )
+        gate = session_gate(self.handle(Role.GATE), toolbox, rule)
         digest = toolbox.config.image_digest
         return Peers(
             runtime,
@@ -549,14 +548,23 @@ class Stage:
     async def run(self) -> SessionOutcome:
         """Run the session, its image check answered by ``image_check`` instead of this environment."""
 
-        with pytest.MonkeyPatch.context() as patch:
+        with self._polls_on_virtual_time() as patch:
             patch.setattr(lifecycle, "run_image_check", self.image_check)
             return await self._session().run()
 
     async def finish(self, ended: SessionStopReason) -> SessionOutcome:
         """FINAL and CLOSE alone over the session directory this stage was built on, as ``final-only`` runs them."""
 
-        return await self._session().finish(ended)
+        with self._polls_on_virtual_time():
+            return await self._session().finish(ended)
+
+    @contextlib.contextmanager
+    def _polls_on_virtual_time(self) -> Iterator[pytest.MonkeyPatch]:
+        """The rule gate's and the repro runner's waits pass on this stage's clock."""
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(regression, "sleep", self.time.sleep)
+            yield patch
 
     def _session(self) -> Session:
         self.time.hold_threads()

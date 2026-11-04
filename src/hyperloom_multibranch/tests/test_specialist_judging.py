@@ -34,10 +34,15 @@ from hyperloom_multibranch.rulegate.critic import CriticVerdict, FixReview
 from hyperloom_multibranch.rulegate.fix_case import FIX_CASE_ID, pack_case
 from hyperloom_multibranch.rulegate.regression import ReproRunner
 from hyperloom_multibranch.rulegate.rules import InferenceXRule
-from hyperloom_multibranch.rulegate.service import Polling
 from hyperloom_multibranch.specialist.fix_check import FixChecking, declares_fix
 from hyperloom_multibranch.specialist.judging import NOTICE, BranchJudge, Judging
-from hyperloom_multibranch.tests.fakes import InMemoryRepo, RecordingScheduler, RecordingVerifier, ReproToolbox
+from hyperloom_multibranch.tests.fakes import (
+    InMemoryRepo,
+    RecordingScheduler,
+    RecordingVerifier,
+    ReproToolbox,
+    quick_polls,  # noqa: F401
+)
 from hyperloom_multibranch.toolbox import fake as fake_toolbox
 from hyperloom_multibranch.toolbox.acceptance import AcceptanceSetup
 from hyperloom_multibranch.toolbox.fake import FakeToolbox
@@ -115,7 +120,7 @@ class _Session:
 
         blobs = LocalBlobStore(root / "blobs")
         repro = ReproToolbox(LocalBlackboard(root / "blackboard", Writer(Role.TOOLBOX, "repro")), answer)
-        runner = ReproRunner(repro, self.runtime, RecordingVerifier(), polling=Polling(0.001))
+        runner = ReproRunner(repro, self.runtime, RecordingVerifier())
         self.fixes = FixChecking(runner, critic, blobs, "qwen3-8b on vllm, TP 1, ISL 1024, OSL 1024, concurrency 64")
         self.judge = self.new_judge()
         sha = blobs.put(pack_case("curl -s $HL_BASE_URL/v1/completions -d @long.json | grep -q nan && exit 1", "nan"))

@@ -19,9 +19,10 @@ from hyperloom_multibranch.contracts.blackboard.records import LineageEvent
 from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH, LineageKind
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.tests.factories import delta
+from hyperloom_multibranch.rulegate import regression
 from hyperloom_multibranch.rulegate.rules import AgentXRule, InferenceXRule
-from hyperloom_multibranch.rulegate.service import GateService, Polling
-from hyperloom_multibranch.tests.fakes import RecordingVerifier
+from hyperloom_multibranch.rulegate.service import GateService
+from hyperloom_multibranch.tests.fakes import RecordingVerifier, quick_polls  # noqa: F401
 from hyperloom_multibranch.toolbox.fake import FakeToolbox
 from hyperloom_multibranch.toolbox.fake_model import Fate, FakeToolboxConfig, NoiseModel
 
@@ -76,7 +77,7 @@ class _Session:
 
     def new_gate(self) -> GateService:
         rule = AgentXRule() if self.agentx else InferenceXRule(self.blackboard, CONC)
-        return GateService(self.blackboard, self.toolbox, rule, self.verifier, polling=Polling(0.001))
+        return GateService(self.blackboard, self.toolbox, rule, self.verifier)
 
     async def record_root(self) -> None:
         event = LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id=ROOT, recipe_digest=RECIPE.digest())
@@ -142,6 +143,24 @@ async def test_prelude_with_one_root_test_measured_sets_no_bar(tmp_path):
 
     with pytest.raises(NotMeasured, match="1 of 3 root tests measured"):
         await session.gate.establish_baseline(ROOT, ids)
+    await session.toolbox.close()
+
+
+async def test_the_gate_reads_a_test_in_flight_again_after_the_poll_interval(tmp_path, monkeypatch):
+    session = _Session(tmp_path / "blackboard", agentx=True)
+    await session.record_root()
+    request_id = await session.toolbox.submit_test(_request(Purpose.BASELINE))
+    slept: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        await session.toolbox.drain()
+
+    monkeypatch.setattr(regression, "sleep", sleep)
+
+    await session.gate.establish_baseline(ROOT, [request_id])
+
+    assert slept == [regression.POLL_SECONDS]
     await session.toolbox.close()
 
 
