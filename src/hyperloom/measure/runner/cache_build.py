@@ -54,7 +54,8 @@ distribution's own build requirements name is never fetched. The lock must there
 
 What the pin vouches for. A sandbox accepts only the manifest whose SHA-256 its template pins, unpacks only the
 ``source.tar`` bytes of the size and hash that manifest records, reads the lock from that copy, and installs only the
-wheels the manifest lists, each matched to a pin of that lock and hashed against the manifest as it is copied
+wheels the manifest lists, one for each pin of that lock (a manifest that lists a pin twice is refused, by the builder
+and the sandbox alike), each hashed against the manifest as it is copied
 (:func:`~hyperloom.measure.runner.cache_layout.stage_entry`). The builder pins a manifest only when that archive is the
 commit's own, so the runner's code and its lock are the commit's, whoever can write the cache, and so is every wheel
 downloaded for a pin, whose hash is one the commit's lock lists. A wheel built here from a source distribution is
@@ -63,14 +64,20 @@ wheel's. So the builder pins such a wheel only when it has built it itself: on a
 reuse, from the entry's copy in ``sdists/``, which must have the hash the manifest records and be a file the commit's
 lock lists for that pin, built again offline in a directory of the builder's own with the lock's build tools (installed
 from the entry's own wheels of them, by the lock's hashes) into a wheel with the cached wheel's name, files and
-contents (:func:`_built_wheel_differences`). An entry that claims a source distribution it does not hold is refused. A
-wheel the lock lists, kept there as the source distribution, does not build under a source distribution's name
-(``.tar.gz``, ``.zip``): pip finds no project in it. Under a ``.whl`` name pip copies it as the wheel it builds, so for
-a pure-Python wheel the comparison decides: a cached wheel with that wheel's name, files and contents is reused and any
-other refused; it installs the same files as that wheel, a file the lock lists for its pin. So the pin vouches for such
-a wheel as what the commit's build tools make of a file the commit's lock lists, whoever can write the cache. A source
-distribution whose build does not write the same files every time (one that stamps a time or a path into a file) makes
-every reuse of its entry a :class:`CacheConflict`; build that commit into another cache directory.
+contents (:func:`_built_wheel_differences`). The files are compared as pip installs them, on any Python: each member's
+raw name (the one its headers hold), its content and whether it is executable. A cached wheel from which the zipfile
+of another Python could read other names or other members is refused before its source distribution is built: one
+with a member that has an Info-ZIP Unicode Path extra field (Python 3.12 and newer name the member by it, older ones by
+the raw name) or a zip64 field, or whose name zipfile cuts short, and one that does not end with its central directory
+and one end record, with no comment and no zip64 records (:func:`_wheel_files`). An entry that claims a source
+distribution it does not hold is refused. A wheel the lock lists, kept there as the source distribution, does not build
+under a source distribution's name (``.tar.gz``, ``.zip``): pip finds no project in it. Under a ``.whl`` name pip
+copies it as the wheel it builds, so for a pure-Python wheel the comparison decides: a cached wheel with that wheel's
+name, files and contents is reused and any other refused; it installs the same files as that wheel, a file the lock
+lists for its pin. So the pin vouches for such a wheel as what the commit's build tools make of a file the commit's
+lock lists, whoever can write the cache. A source distribution whose build does not write the same files every time
+(one that stamps a time or a path into a file) makes every reuse of its entry a :class:`CacheConflict`; build that
+commit into another cache directory.
 
 The cache must stay readable by the account the sandbox runs as: run the builder with a ``umask`` that leaves new files
 readable by others (``022``).
@@ -88,10 +95,13 @@ import argparse
 import re
 import fcntl
 import hashlib
+import io
 import json
 import os
 import secrets
 import shutil
+import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -177,6 +187,15 @@ _OLDEST_GLIBC_MINOR = 5
 _UNREADABLE_ZIP = (zipfile.BadZipFile, zlib.error, EOFError, NotImplementedError, RuntimeError)
 #: The builder's copy of a cached wheel that a reuse compares with the one it builds again.
 _CACHED_WHEEL = "cached.whl"
+#: Extra fields of a zip member that :mod:`zipfile` reads differently from one Python to another: Info-ZIP Unicode Path,
+#: whose name it takes for the member's from Python 3.12 on (when the field's checksum matches the raw name) and ignores
+#: before, and zip64, which carries sizes and offsets of its own. No wheel a Python build backend writes has either.
+_UNICODE_PATH_FIELD, _ZIP64_FIELD = 0x7075, 0x0001
+_EXTRA_FIELD = struct.Struct("<HH")
+#: The end of central directory record of a zip with no comment, and the signature of the zip64 locator that, right
+#: before it, makes :mod:`zipfile` look for zip64 records, which patch releases of one Python look for differently.
+_END_RECORD = struct.Struct("<4s4H2LH")
+_END_SIGNATURE, _ZIP64_LOCATOR_SIGNATURE, _ZIP64_LOCATOR_SIZE = b"PK\x05\x06", b"PK\x06\x07", 20
 #: Below the scratch directory of a build environment: the wheels of the build tools, and the virtual environment.
 _TOOLS_DIR, _ENV_DIR = "tools", "env"
 
@@ -529,12 +548,62 @@ def _source_differences(archive: FileDigest, made: Path, manifest: Manifest) -> 
     return problems
 
 
-def _wheel_files(wheel: Path) -> list[tuple[str, str]]:
-    """What a wheel installs, as its ``RECORD`` would list it but read from the bytes: every member's name and the
-    SHA-256 of its content, in name order. A zip's timestamps, member order and compression are not part of it, so two
-    builds of one source distribution compare equal when they wrote the same files."""
-    with zipfile.ZipFile(wheel) as archive:
-        return sorted((info.filename, hashlib.sha256(archive.read(info)).hexdigest()) for info in archive.infolist())
+def _layout_problem(data: bytes) -> str:
+    """Why :mod:`zipfile` may find the central directory of the zip ``data`` elsewhere on another Python: it does not
+    end with an end record with no comment right after its central directory, or a zip64 locator precedes that record;
+    empty when neither."""
+    end = len(data) - _END_RECORD.size
+    signature, *_, size, offset, comment = _END_RECORD.unpack_from(data, end)
+    locator = data[end - _ZIP64_LOCATOR_SIZE : end] if end >= _ZIP64_LOCATOR_SIZE else b""
+    if signature != _END_SIGNATURE or comment or offset + size != end or locator.startswith(_ZIP64_LOCATOR_SIGNATURE):
+        return "it does not end with its central directory and one end record, with no comment and no zip64 records"
+    return ""
+
+
+def _member_problem(info: zipfile.ZipInfo) -> str:
+    """Why the member ``info`` may be installed under another name than its raw one, or read with other sizes, by the
+    :mod:`zipfile` of another Python (:data:`_UNICODE_PATH_FIELD`); empty when it cannot."""
+    extra, fields = info.extra, set[int]()
+    while len(extra) >= _EXTRA_FIELD.size:
+        kind, length = _EXTRA_FIELD.unpack_from(extra)
+        fields.add(kind)
+        extra = extra[_EXTRA_FIELD.size + length :]
+    if _UNICODE_PATH_FIELD in fields:
+        return (
+            f"its member {info.orig_filename!r} has a Unicode Path extra field, which names it for the zipfile of "
+            "Python 3.12 and newer and not for older ones"
+        )
+    if _ZIP64_FIELD in fields:
+        return f"its member {info.orig_filename!r} has a zip64 extra field"
+    if info.filename != info.orig_filename:
+        return f"its member {info.orig_filename!r} is read as {info.filename!r}"
+    return ""
+
+
+def _executable(info: zipfile.ZipInfo) -> bool:
+    """Whether pip installs the member executable: a regular file with an execute bit in its mode."""
+    mode = info.external_attr >> 16
+    return bool(mode and stat.S_ISREG(mode) and mode & 0o111)
+
+
+def _wheel_files(wheel: Path) -> list[tuple[str, str, bool]]:
+    """What pip installs from a wheel on any Python: every member's raw name (the one its headers hold), the SHA-256 of
+    its content and whether it is made executable, in name order. A zip's timestamps, member order and compression are
+    not part of it, so two builds of one source distribution compare equal when they wrote the same files.
+
+    Raises:
+        zipfile.BadZipFile: When ``wheel`` is not a zip, or the :mod:`zipfile` of another Python may read other members
+            or other names from it (:func:`_layout_problem`, :func:`_member_problem`).
+    """
+    data = wheel.read_bytes()
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        infos = archive.infolist()
+        problem = _layout_problem(data) or next(filter(None, map(_member_problem, infos)), "")
+        if problem:
+            raise zipfile.BadZipFile(problem)
+        return sorted(
+            (info.orig_filename, hashlib.sha256(archive.read(info)).hexdigest(), _executable(info)) for info in infos
+        )
 
 
 def _held_sdist_problems(entry: Path, wheel: WheelEntry, pin: LockPin | None, work: Path) -> list[str]:
@@ -562,18 +631,21 @@ def _held_sdist_problems(entry: Path, wheel: WheelEntry, pin: LockPin | None, wo
 
 def _rebuilt_wheel_problems(wheel: WheelEntry, python: Path, work: Path) -> list[str]:
     """Build the source distribution :func:`_held_sdist_problems` copied into ``work`` again; why the wheel it makes is
-    not the cached wheel's copy beside it (another name, or other files or contents)."""
+    not the cached wheel's copy beside it (another name, or other files, contents or executable bits as pip reads them:
+    :func:`_wheel_files`). A cached wheel that cannot be read that way is refused before anything is built."""
     try:
-        rebuilt = _pure_wheel(python, work / "sdist" / wheel.sdist_file, work / "rebuilt")
-        cached, made = _wheel_files(work / _CACHED_WHEEL), _wheel_files(rebuilt)
-    except CacheBuildError as exc:
-        return [f"{SDISTS_DIR}/{wheel.sdist_file} does not build {wheel.file} again: {exc}"]
+        cached = _wheel_files(work / _CACHED_WHEEL)
     except _UNREADABLE_ZIP as exc:
         return [f"{wheel.file} cannot be read as a wheel: {type(exc).__name__}: {exc}"]
+    try:
+        rebuilt = _pure_wheel(python, work / "sdist" / wheel.sdist_file, work / "rebuilt")
+        made = _wheel_files(rebuilt)
+    except (CacheBuildError, *_UNREADABLE_ZIP) as exc:
+        return [f"{SDISTS_DIR}/{wheel.sdist_file} does not build {wheel.file} again: {exc}"]
     if rebuilt.name != wheel.file:
         return [f"{SDISTS_DIR}/{wheel.sdist_file} builds {rebuilt.name}, not {wheel.file}"]
     if cached != made:
-        differ = sorted({name for name, _ in set(cached) ^ set(made)})
+        differ = sorted({name for name, *_ in set(cached) ^ set(made)})
         return [
             f"{wheel.file} is not the wheel its source distribution builds; the members that differ: "
             f"{', '.join(differ[:3]) or 'one it lists twice'}"
