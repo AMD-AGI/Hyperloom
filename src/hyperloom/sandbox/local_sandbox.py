@@ -330,7 +330,7 @@ class LocalSandbox:
                 try:
                     self._startup_exit = status.wait_exit(proc, 0)
                 except TimeoutError:
-                    pass
+                    pass  # still running: no exit code yet
             return self._startup_exit
 
     def _check_run_args(self, envs: Mapping[str, str] | None) -> dict[str, str]:
