@@ -25,8 +25,10 @@ import pytest
 from hyperloom.measure.runner import cache_build
 from hyperloom.measure.runner.cache_build import BuildOptions, CacheConflict, WheelSource, ensure_runner_cache
 from hyperloom.measure.runner.cache_layout import (
+    LOCK_FILE,
     MANIFEST_NAME,
     SDISTS_DIR,
+    SOURCE_DIR,
     WHEELS_DIR,
     check_entry,
     manifest_from_json,
@@ -49,9 +51,14 @@ _NO_WHEELS = BuildOptions(source=WheelSource(no_index=True))
 _LOCK_WHEEL = "lock_pkg-1.0-py3-none-any.whl"
 _SDIST = "sdist_pkg-1.0.tar.gz"
 _SDIST_WHEEL = "sdist_pkg-1.0-py3-none-any.whl"
-#: The real ``lock_pkg`` wheel, kept where the entry keeps a source distribution, under a source distribution's name.
-_PASSED_OFF = "lock_pkg-1.0.tar.gz"
 _RENAMED = "sdist_pkg-1.0-py2.py3-none-any.whl"
+#: The real ``lock_pkg`` wheel's names where the entry keeps a source distribution: a source distribution's two.
+_TAR_GZ, _ZIP = "lock_pkg-1.0.tar.gz", "lock_pkg-1.0.zip"
+#: Why a reuse refuses a source distribution recorded with a hash the commit's lock does not list.
+_NOT_IN_THE_LOCK = (
+    f"{SDISTS_DIR}/{_SDIST} is not the source distribution of {_SDIST_WHEEL} for sdist-pkg==1.0 that the manifest "
+    "records and the lock lists"
+)
 
 
 def _digest(path: Path) -> str:
@@ -133,13 +140,26 @@ def _lock_wheel_claiming_a_sdist_it_does_not_hold(entry: Path, planted: Planted)
     _record_wheel(entry, "lock-pkg", _LOCK_WHEEL, sdist_sha256=real)
 
 
-def _lock_wheel_with_the_real_one_passed_off_as_its_sdist(entry: Path, planted: Planted) -> None:
-    """The same, with the real ``lock_pkg`` wheel kept as that source distribution: a file whose hash the lock lists."""
-    shutil.copyfile(entry / WHEELS_DIR / _LOCK_WHEEL, entry / SDISTS_DIR / _PASSED_OFF)
-    shutil.copyfile(planted.lock_wheel, entry / WHEELS_DIR / _LOCK_WHEEL)
-    _record_wheel(
-        entry, "lock-pkg", _LOCK_WHEEL, sdist_sha256=_digest(entry / SDISTS_DIR / _PASSED_OFF), sdist_file=_PASSED_OFF
-    )
+def _lock_wheel_recorded_as_built_from_a_copy_of_itself(entry: Path, held: str) -> None:
+    """Keep a copy of the entry's real ``lock_pkg`` wheel as ``sdists/<held>``, a file whose hash the lock lists, and
+    record the wheel as built from it."""
+    shutil.copyfile(entry / WHEELS_DIR / _LOCK_WHEEL, entry / SDISTS_DIR / held)
+    _record_wheel(entry, "lock-pkg", _LOCK_WHEEL, sdist_sha256=_digest(entry / SDISTS_DIR / held), sdist_file=held)
+
+
+def _lock_wheel_with_the_real_one_kept_as_its_sdist(held: str) -> Callable[[Path, Planted], None]:
+    """The same, with the real ``lock_pkg`` wheel kept as that source distribution under the file name ``held``."""
+
+    def plant(entry: Path, planted: Planted) -> None:
+        _lock_wheel_recorded_as_built_from_a_copy_of_itself(entry, held)
+        shutil.copyfile(planted.lock_wheel, entry / WHEELS_DIR / _LOCK_WHEEL)
+        _record_wheel(entry, "lock-pkg", _LOCK_WHEEL)
+
+    return plant
+
+
+def _does_not_build(held: str) -> str:
+    return f"{SDISTS_DIR}/{held} does not build {_LOCK_WHEEL} again: building a wheel from {held} failed"
 
 
 def _sdist_replaced_with_the_wheel_it_builds(entry: Path, planted: Planted) -> None:
@@ -182,15 +202,16 @@ def _built_wheel_not_a_zip(entry: Path, planted: Planted) -> None:
             f"{_LOCK_WHEEL} for lock-pkg==1.0 is recorded as built from a source distribution that the entry does "
             f"not hold in {SDISTS_DIR}",
         ),
+        # Under a source distribution's name pip finds no project in it.
+        (_lock_wheel_with_the_real_one_kept_as_its_sdist(_TAR_GZ), _does_not_build(_TAR_GZ)),
+        (_lock_wheel_with_the_real_one_kept_as_its_sdist(_ZIP), _does_not_build(_ZIP)),
+        # Under its own name pip copies it, and its members are not the planted wheel's.
         (
-            _lock_wheel_with_the_real_one_passed_off_as_its_sdist,
-            f"{SDISTS_DIR}/{_PASSED_OFF} does not build {_LOCK_WHEEL} again: building a wheel from {_PASSED_OFF} failed",
+            _lock_wheel_with_the_real_one_kept_as_its_sdist(_LOCK_WHEEL),
+            f"{_LOCK_WHEEL} is not the wheel its source distribution builds; the members that differ: "
+            "lock_pkg-1.0.dist-info/RECORD, lock_pkg.py",
         ),
-        (
-            _sdist_replaced_with_the_wheel_it_builds,
-            f"{SDISTS_DIR}/{_SDIST} is not the source distribution of {_SDIST_WHEEL} for sdist-pkg==1.0 that the "
-            "manifest records and the lock lists",
-        ),
+        (_sdist_replaced_with_the_wheel_it_builds, _NOT_IN_THE_LOCK),
         (_sdist_damaged, f"{SDISTS_DIR}/{_SDIST} is not the source distribution of {_SDIST_WHEEL}"),
         (
             _built_wheel_replaced,
@@ -201,7 +222,9 @@ def _built_wheel_not_a_zip(entry: Path, planted: Planted) -> None:
     ],
     ids=[
         "no-sdist-held",
-        "wheel-as-sdist",
+        "wheel-as-tar-gz",
+        "wheel-as-zip",
+        "wheel-as-whl",
         "sdist-replaced",
         "sdist-damaged",
         "wheel-replaced",
@@ -250,12 +273,37 @@ def test_an_entry_with_a_wheel_built_from_a_source_distribution_is_reused_after_
     assert {path.name for path in cache.root.iterdir()} == {cache.sha, f".{cache.sha}.lock"}
 
 
+def test_a_wheel_the_lock_lists_recorded_as_built_from_a_whl_copy_of_itself_is_reused_as_that_wheel(
+    rig: Rig, tmp_path: Path, rebuilt_from: list[Path]
+) -> None:
+    """pip copies a ``.whl`` it is asked to build, so the comparison is what decides; the wheel it passes installs what
+    the wheel the lock lists installs."""
+    cache = copy_cache(rig, tmp_path / "cache")
+    entry = cache.root / cache.sha
+    _lock_wheel_recorded_as_built_from_a_copy_of_itself(entry, _LOCK_WHEEL)
+    pin = _digest(entry / MANIFEST_NAME)
+    reused = ensure_runner_cache(rig.repo, cache.sha, cache.root, _NO_WHEELS)
+    assert (reused.reused, reused.manifest_sha256) == (True, pin)
+    assert sorted(path.name for path in rebuilt_from) == [_LOCK_WHEEL, _SDIST]
+    assert _digest(entry / WHEELS_DIR / _LOCK_WHEEL) == rig.lock_pkg_sha256
+
+
 def _sdist_recorded_with_its_own_hash(entry: Path, planted: Planted) -> None:
     """Another source distribution and the wheel it builds, recorded with that source distribution's own hash, which the
     commit's lock does not list: the entry check passes it only while it reads another lock in ``source/``."""
     shutil.copyfile(planted.sdist, entry / SDISTS_DIR / _SDIST)
     shutil.copyfile(planted.sdist_wheel, entry / WHEELS_DIR / _SDIST_WHEEL)
     _record_wheel(entry, "sdist-pkg", _SDIST_WHEEL, sdist_sha256=_digest(planted.sdist))
+
+
+def _sdist_listed_by_the_lock_in_the_entrys_source(entry: Path, planted: Planted) -> None:
+    """The same, with the lock in the entry's ``source/`` listing that hash in place of the real source distribution's:
+    only the lock of the archive the builder makes again does not list it."""
+    lock, real = entry / SOURCE_DIR / LOCK_FILE, _digest(entry / SDISTS_DIR / _SDIST)
+    assert real in lock.read_text()
+    swapped = lock.read_text().replace(real, _digest(planted.sdist))
+    _sdist_recorded_with_its_own_hash(entry, planted)
+    lock.write_text(swapped)
 
 
 def _wheel_recorded_while_another_is_held(entry: Path, planted: Planted) -> None:
@@ -271,14 +319,11 @@ def _wheel_recorded_while_another_is_held(entry: Path, planted: Planted) -> None
 @pytest.mark.parametrize(
     ("plant", "difference"),
     [
-        (
-            _sdist_recorded_with_its_own_hash,
-            f"{SDISTS_DIR}/{_SDIST} is not the source distribution of {_SDIST_WHEEL} for sdist-pkg==1.0 that the "
-            "manifest records and the lock lists",
-        ),
+        (_sdist_recorded_with_its_own_hash, _NOT_IN_THE_LOCK),
+        (_sdist_listed_by_the_lock_in_the_entrys_source, _NOT_IN_THE_LOCK),
         (_wheel_recorded_while_another_is_held, f"wheel {_SDIST_WHEEL} for sdist-pkg==1.0 does not match the hash"),
     ],
-    ids=["sdist-not-in-the-commits-lock", "wheel-not-the-recorded-one"],
+    ids=["sdist-not-in-the-commits-lock", "sdist-in-the-entrys-lock", "wheel-not-the-recorded-one"],
 )
 def test_a_reuse_builds_only_what_the_commits_lock_lists_and_compares_only_the_wheel_the_manifest_records(
     rig: Rig,
@@ -291,8 +336,8 @@ def test_a_reuse_builds_only_what_the_commits_lock_lists_and_compares_only_the_w
 ) -> None:
     """The entry check reads the lock in ``source/`` and the wheels as they lie in the cache, which can change while it
     reads them; here it passes, as a check fooled that way would. The source distribution is checked against the lock
-    of the commit the builder made again, before any of its code runs, and the wheel compared is the builder's own copy,
-    checked against the manifest's hash."""
+    of the commit the builder made again, not the one in ``source/``, before any of its code runs, and the wheel
+    compared is the builder's own copy, checked against the manifest's hash."""
     cache = copy_cache(rig, tmp_path / "cache")
     entry = cache.root / cache.sha
     plant(entry, planted)
