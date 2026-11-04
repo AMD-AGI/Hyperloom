@@ -50,6 +50,12 @@ def _breaks_a_line(headers: list[tuple[str, str]]) -> bool:
     return any(mark in text for header in headers for text in header for mark in "\r\n")
 
 
+def _one_line(text: str) -> str:
+    """``text`` without CR or LF. An answer whose headers hold one is refused before any is written
+    (:func:`_breaks_a_line`), so this changes nothing; it keeps every relayed header one line where it is written."""
+    return text.replace("\r", "").replace("\n", "")
+
+
 def serve_proxy(plane: ControlPlane) -> ThreadingHTTPServer:
     """Build the (not yet serving) proxy on a free loopback port."""
 
@@ -126,10 +132,10 @@ def serve_proxy(plane: ControlPlane) -> ThreadingHTTPServer:
             length = response.getheader("Content-Length")
             for name, value in received:
                 if name.lower() not in _HOP_BY_HOP and name.lower() != "content-length":
-                    self.send_header(name, value)
+                    self.send_header(_one_line(name), _one_line(value))
             if length is not None or response.status in (204, 304) or self.command == "HEAD":
                 if length is not None:
-                    self.send_header("Content-Length", length)
+                    self.send_header("Content-Length", str(int(length)))
                 self.end_headers()
                 while self.command != "HEAD" and (data := response.read(_CHUNK)):
                     self.wfile.write(data)
