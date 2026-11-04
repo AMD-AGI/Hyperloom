@@ -15,10 +15,10 @@ installing over the network inside a sandbox. The wheels are downloaded for the 
 for a CPython 3.10 image on glibc 2.28, and ``--index-url`` (or ``--find-links`` with ``--no-index``) for where they come
 from. pip does not widen a ``--platform`` to the older tags it covers, so naming only the newest one turns every pin
 published as ``manylinux2014`` into a source build. The lock's hashes are those of the files the index serves. A pin that the index
-serves only as a source distribution is built here into a wheel (the sdist's hash must be one the lock lists, and the
-manifest records it); that wheel must be pure Python, because a platform wheel built on the builder is not a wheel for
-the image, and the build is refused otherwise. Reading or building a source distribution runs its code on the builder, so
-that happens only in a throwaway virtual environment, without build isolation, whose only build tools are the
+serves only as a source distribution is built here into a wheel (the sdist's hash must be one the lock lists; the entry
+keeps the sdist in ``sdists/`` and the manifest records it); that wheel must be pure Python, because a platform wheel
+built on the builder is not a wheel for the image, and the build is refused otherwise. Reading or building a source
+distribution runs its code on the builder, so that happens only in a throwaway virtual environment, without build isolation, whose only build tools are the
 ``setuptools`` (and ``wheel``) that the lock pins, installed from wheels downloaded by their lock hashes: what a source
 distribution's own build requirements name is never fetched. The lock must therefore pin ``setuptools``
 (``pip-compile --allow-unsafe`` does). The builder's pip must be 22.3 or newer (``pip --python``).
@@ -32,10 +32,10 @@ distribution's own build requirements name is never fetched. The lock must there
   never modified: the build refuses and names the difference (:class:`CacheConflict`). Its manifest file is read once,
   the entry is checked against those bytes and the pin returned is their SHA-256, as a build returns the SHA-256 of the
   text it wrote: never a fresh read of the cache. What the manifest records is checked against the commit, not only
-  against the entry: the same commit tree and wheel target, this builder's script, and the commit's archive and source
+  against the entry: the same commit tree and wheel target, this builder's script, the commit's archive and source
   made again from the clone in a directory of the builder's own (as a build makes them), whose size and hash must be
-  what the manifest records. An entry with no manifest is the remains of a build that did not finish; it is removed
-  and built again.
+  what the manifest records, and every wheel built from a source distribution built again (below). An entry with no
+  manifest is the remains of a build that did not finish; it is removed and built again.
 - ``<entry>/source.tar`` is the commit's ``git archive`` made with every setting that changes its bytes fixed
   (``git -c tar.umask=0022 -c core.autocrlf=false -c core.eol=lf -c core.attributesFile=/dev/null archive --format=tar
   <sha>``), in a throwaway repository that borrows only the objects of the builder's clone and with git's system and
@@ -57,10 +57,17 @@ What the pin vouches for. A sandbox accepts only the manifest whose SHA-256 its 
 wheels the manifest lists, each matched to a pin of that lock and hashed against the manifest as it is copied
 (:func:`~hyperloom.measure.runner.cache_layout.stage_entry`). The builder pins a manifest only when that archive is the
 commit's own, so the runner's code and its lock are the commit's, whoever can write the cache, and so is every wheel
-downloaded for a pin, whose hash is one the commit's lock lists. A wheel built here from a source distribution is not
-covered: the lock lists the hash of the source distribution, not of the wheel, so on reuse the builder can check a
-built wheel only against the entry's own manifest, and one replaced together with that manifest is pinned and
-installed. Only a cache that no one but the builder can write rules that out.
+downloaded for a pin, whose hash is one the commit's lock lists. A wheel built here from a source distribution is
+matched to its pin by the source distribution's hash, the one the lock lists, and a lock cannot tell that hash from a
+wheel's. So the builder pins such a wheel only when it has built it itself: on a build, from the file it downloaded; on
+reuse, from the entry's copy in ``sdists/``, which must have the hash the manifest records and be a file the commit's
+lock lists for that pin, built again offline in a directory of the builder's own with the lock's build tools (installed
+from the entry's own wheels of them, by the lock's hashes) into a wheel with the cached wheel's name, files and
+contents (:func:`_built_wheel_differences`). A wheel passed off as a source distribution does not build, and an entry
+that claims a source distribution it does not hold is refused. So the pin vouches for such a wheel as what the commit's
+build tools make of a file the commit's lock lists, whoever can write the cache. A source distribution whose build does
+not write the same files every time (one that stamps a time or a path into a file) makes every reuse of its entry a
+:class:`CacheConflict`; build that commit into another cache directory.
 
 The cache must stay readable by the account the sandbox runs as: run the builder with a ``umask`` that leaves new files
 readable by others (``022``).
@@ -86,6 +93,8 @@ import subprocess
 import sys
 import tempfile
 import time
+import zipfile
+import zlib
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -98,6 +107,7 @@ from hyperloom.measure.runner.cache_layout import (
     CACHE_ENV,
     LOCK_FILE,
     MANIFEST_NAME,
+    SDISTS_DIR,
     SOURCE_ARCHIVE,
     SOURCE_DIR,
     WHEELS_DIR,
@@ -160,6 +170,12 @@ _TARGET_TAG = re.compile(r"cp(?P<major>3)(?P<minor>[0-9]+)-manylinux_2_(?P<glibc
 #: The legacy manylinux names of a glibc 2 minor version; pip accepts both spellings and downloads only what it is told.
 _LEGACY_MANYLINUX = {17: "manylinux2014", 12: "manylinux2010", 5: "manylinux1"}
 _OLDEST_GLIBC_MINOR = 5
+#: What :mod:`zipfile` raises for an archive it cannot read: damaged or cut short, of a compression it lacks, encrypted.
+_UNREADABLE_ZIP = (zipfile.BadZipFile, zlib.error, EOFError, NotImplementedError, RuntimeError)
+#: The builder's copy of a cached wheel that a reuse compares with the one it builds again.
+_CACHED_WHEEL = "cached.whl"
+#: Below the scratch directory of a build environment: the wheels of the build tools, and the virtual environment.
+_TOOLS_DIR, _ENV_DIR = "tools", "env"
 
 
 class CacheBuildError(CacheError):
@@ -322,53 +338,79 @@ def _pip_download(requirements: Path, dest: Path, extra: Sequence[str], what: st
     _run([*command, "--dest", str(dest), "-r", str(requirements), *extra], what)
 
 
-def _build_environment(pins: list[LockPin], options: BuildOptions, scratch: Path) -> Path:
-    """The interpreter of a virtual environment in ``scratch`` that holds the build tools the lock pins and nothing else
-    that was fetched: the wheels of the tools are downloaded binary-only (no source code runs) and installed by the
-    hashes the lock lists."""
+def _tools_lock(pins: list[LockPin], scratch: Path) -> Path:
+    """``scratch/build-tools.lock``: the build tools the lock pins (``setuptools``, and ``wheel`` when it pins one), with
+    the lock's hashes.
+
+    Raises:
+        CacheBuildError: When the lock pins no ``setuptools``.
+    """
     tools = [pin for pin in pins if pin.name in _BUILD_TOOLS]
     if all(pin.name != "setuptools" for pin in tools):
         raise CacheBuildError("the lock pins no setuptools, so a source distribution in it cannot be built")
     pinned = scratch / "build-tools.lock"
     pinned.write_text("".join(requirement_line(pin.name, pin.version, sorted(pin.hashes)) for pin in tools), _UTF8)
-    downloads = [*options.source.pip_args(), _ONLY_BINARY]
-    _pip_download(pinned, scratch / "tools", downloads, "pip download of the build tools the lock pins")
-    _run([sys.executable, "-m", "venv", "--without-pip", str(scratch / "env")], "creating the build environment")
-    python = scratch / "env" / "bin" / "python"
-    install = [_ISOLATED, "install", _NO_INDEX, _FIND_LINKS, str(scratch / "tools"), _ONLY_BINARY]
+    return pinned
+
+
+def _tools_environment(pinned: Path, scratch: Path) -> Path:
+    """The interpreter of a new virtual environment in ``scratch`` that holds the build tools ``pinned`` names and
+    nothing else, installed binary-only (no source code runs) from the wheels in ``scratch/tools``, each checked by pip
+    against the hashes the lock lists."""
+    env = scratch / _ENV_DIR
+    _run([sys.executable, "-m", "venv", "--without-pip", str(env)], "creating the build environment")
+    python = env / "bin" / "python"
+    install = [_ISOLATED, "install", _NO_INDEX, _FIND_LINKS, str(scratch / _TOOLS_DIR), _ONLY_BINARY]
     install += [_REQUIRE_HASHES, _NO_DEPS, *_PIP_QUIET, "-r", str(pinned)]
     _run(_pip(*install, python=python), "installing the build tools the lock pins")
     return python
 
 
-def _wheel_from_sdist(python: Path, sdist: Path, wheels: Path) -> str:
-    """Build the pure-Python wheel of ``sdist`` into ``wheels`` with ``python``'s tools, remove the source distribution
-    and return the wheel's file name."""
-    with tempfile.TemporaryDirectory(dir=wheels.parent, prefix=".wheel-build-") as scratch:
-        build = [_ISOLATED, "wheel", "--no-build-isolation", _NO_INDEX, _NO_DEPS, "--no-cache-dir", *_PIP_QUIET]
-        build += ["-w", scratch, str(sdist)]
-        _run(_pip(*build, python=python), f"building a wheel from {sdist.name}")
-        made = sorted(path.name for path in Path(scratch).iterdir())
-        if len(made) != 1 or not made[0].endswith("-none-any.whl"):
-            raise CacheBuildError(
-                f"{sdist.name} did not build exactly one pure-Python wheel (it built {made}): "
-                "a wheel built here is not one for the image"
-            )
-        shutil.move(Path(scratch) / made[0], wheels / made[0])
-    sdist.unlink()
-    return made[0]
+def _build_environment(pins: list[LockPin], options: BuildOptions, scratch: Path) -> Path:
+    """The build environment of a build (:func:`_tools_environment`), whose tools' wheels are downloaded by the lock's
+    hashes."""
+    pinned = _tools_lock(pins, scratch)
+    downloads = [*options.source.pip_args(), _ONLY_BINARY]
+    _pip_download(pinned, scratch / _TOOLS_DIR, downloads, "pip download of the build tools the lock pins")
+    return _tools_environment(pinned, scratch)
+
+
+def _pure_wheel(python: Path, sdist: Path, out: Path) -> Path:
+    """Build the wheel of ``sdist`` into the new directory ``out`` with ``python``'s tools, offline and without build
+    isolation, and return it.
+
+    Raises:
+        CacheBuildError: When the build fails, or makes anything but one pure-Python wheel: a platform wheel built on
+            the builder is not one for the image.
+    """
+    out.mkdir()
+    build = [_ISOLATED, "wheel", "--no-build-isolation", _NO_INDEX, _NO_DEPS, "--no-cache-dir", *_PIP_QUIET]
+    _run(_pip(*build, "-w", str(out), str(sdist), python=python), f"building a wheel from {sdist.name}")
+    made = sorted(path.name for path in out.iterdir())
+    if len(made) != 1 or not made[0].endswith("-none-any.whl"):
+        raise CacheBuildError(
+            f"{sdist.name} did not build exactly one pure-Python wheel (it built {made}): "
+            "a wheel built here is not one for the image"
+        )
+    return out / made[0]
 
 
 def _build_sdists(python: Path, wheels: Path, pins: list[LockPin]) -> dict[str, str]:
-    """Replace each source distribution in ``wheels`` by the wheel built from it; the built wheels' file names, each
-    mapped to the SHA-256 of its source distribution, which must be a file the lock lists."""
+    """Build each source distribution in ``wheels`` into the wheel that takes its place there, and move the source
+    distribution to the entry's ``sdists``; the built wheels' file names, each mapped to the file name of its source
+    distribution, whose hash must be one the lock lists."""
     allowed = {digest for pin in pins for digest in pin.hashes}
+    sdists = wheels.parent / SDISTS_DIR
     built: dict[str, str] = {}
     for sdist in (path for path in sorted(wheels.iterdir()) if not path.name.endswith(".whl")):
-        digest = file_sha256(sdist)
-        if digest not in allowed:
+        if file_sha256(sdist) not in allowed:
             raise CacheBuildError(f"{sdist.name} is not a file the lock allows")
-        built[_wheel_from_sdist(python, sdist, wheels)] = digest
+        with tempfile.TemporaryDirectory(dir=wheels.parent, prefix=".wheel-build-") as scratch:
+            wheel = _pure_wheel(python, sdist, Path(scratch) / "out")
+            shutil.move(wheel, wheels / wheel.name)
+        sdists.mkdir(exist_ok=True)
+        shutil.move(sdist, sdists / sdist.name)
+        built[wheel.name] = sdist.name
     return built
 
 
@@ -384,18 +426,19 @@ def _download_wheels(lock: Path, wheels: Path, pins: list[LockPin], options: Bui
 
 def _wheel_entries(wheels: Path, pins: list[LockPin], built: Mapping[str, str]) -> tuple[WheelEntry, ...]:
     """One entry per pin, each file matched to its pin by the hash the lock lists for it (for a built wheel, the hash of
-    the source distribution it was built from, which ``built`` records)."""
+    the source distribution it was built from, whose file in the entry's ``sdists`` ``built`` names)."""
     owner = {digest: pin for pin in pins for digest in pin.hashes}
     entries: dict[tuple[str, str], WheelEntry] = {}
     for path in sorted(wheels.iterdir()):
-        digest, sdist = file_sha256(path), built.get(path.name, "")
-        pin = owner.get(sdist or digest)
+        sdist = built.get(path.name, "")
+        digest, sdist_digest = file_sha256(path), file_sha256(wheels.parent / SDISTS_DIR / sdist) if sdist else ""
+        pin = owner.get(sdist_digest or digest)
         if pin is None:
             raise CacheBuildError(f"{path.name} is not a file the lock allows")
         if (pin.name, pin.version) in entries:
             raise CacheBuildError(f"two wheels for {pin.name}=={pin.version}")
         entries[(pin.name, pin.version)] = WheelEntry(
-            pin.name, pin.version, path.name, path.stat().st_size, digest, sdist
+            pin.name, pin.version, path.name, path.stat().st_size, digest, sdist_digest, sdist
         )
     missing = [f"{pin.name}=={pin.version}" for pin in pins if (pin.name, pin.version) not in entries]
     if missing:
@@ -466,37 +509,137 @@ def _build(repo: Path, sha: str, tree: str, final: Path, options: BuildOptions) 
     return CacheEntry(final, pin, reused=False)
 
 
-def _source_differences(repo: Path, sha: str, manifest: Manifest) -> list[str]:
-    """How the source ``manifest`` records differs from the commit's: the archive and its unpacked tree are made again
-    from ``repo`` as a build makes them (:func:`_export_source`), in a directory of the builder's own, and compared by
-    size and hash with what the manifest records."""
-    with tempfile.TemporaryDirectory(prefix="hyperloom-runner-source-") as scratch:
-        archive = _export_source(repo, sha, Path(scratch))
-        source = tree_digest(Path(scratch) / SOURCE_DIR)
+def _source_differences(archive: FileDigest, made: Path, manifest: Manifest) -> list[str]:
+    """How the source ``manifest`` records differs from the commit's, whose archive (of digest ``archive``) and unpacked
+    tree :func:`_export_source` made again in the builder's own directory ``made``: compared by size and hash."""
+    source = tree_digest(made / SOURCE_DIR)
     problems: list[str] = []
     if manifest.source_archive != archive:
         problems.append(
-            f"its {SOURCE_ARCHIVE} is not the archive of {sha}: the manifest records {manifest.source_archive}, "
-            f"the commit's is {archive}"
+            f"its {SOURCE_ARCHIVE} is not the archive of {manifest.sha}: the manifest records "
+            f"{manifest.source_archive}, the commit's is {archive}"
         )
     if manifest.source != source:
         problems.append(
-            f"its {SOURCE_DIR} is not the tree of {sha}: the manifest records {manifest.source}, not {source}"
+            f"its {SOURCE_DIR} is not the tree of {manifest.sha}: the manifest records {manifest.source}, not {source}"
         )
     return problems
 
 
-def _differences(repo: Path, sha: str, tree: str, raw: bytes, options: BuildOptions) -> list[str]:
-    """How the manifest text ``raw`` of an entry that agrees with it differs from what a build of ``sha`` would write,
-    one line each; empty when it does not. What it records is checked against the commit, not against the entry: the
-    commit's tree, and its archive and source made again from ``repo`` (:func:`_source_differences`)."""
+def _wheel_files(wheel: Path) -> list[tuple[str, str]]:
+    """What a wheel installs, as its ``RECORD`` would list it but read from the bytes: every member's name and the
+    SHA-256 of its content, in name order. A zip's timestamps, member order and compression are not part of it, so two
+    builds of one source distribution compare equal when they wrote the same files."""
+    with zipfile.ZipFile(wheel) as archive:
+        return sorted((info.filename, hashlib.sha256(archive.read(info)).hexdigest()) for info in archive.infolist())
+
+
+def _held_sdist_problems(entry: Path, wheel: WheelEntry, pin: LockPin | None, work: Path) -> list[str]:
+    """Copy the source distribution the entry holds for ``wheel`` to ``work/sdist/<its file name>`` and the wheel to
+    ``work/cached.whl``, in the new directory ``work``; why the copies are not the files the manifest records, or the
+    source distribution is not a file the commit's lock lists for ``pin``."""
+    label = f"{wheel.file} for {wheel.name}=={wheel.version}"
+    held = entry / SDISTS_DIR / wheel.sdist_file
+    if Path(wheel.sdist_file).name != wheel.sdist_file or not held.is_file():
+        return [f"{label} is recorded as built from a source distribution that the entry does not hold in {SDISTS_DIR}"]
+    sdist = work / "sdist" / wheel.sdist_file
+    sdist.parent.mkdir(parents=True)
+    shutil.copyfile(held, sdist)
+    shutil.copyfile(entry / WHEELS_DIR / wheel.file, work / _CACHED_WHEEL)
+    digest = file_sha256(sdist)
+    if digest != wheel.sdist_sha256 or pin is None or digest not in pin.hashes:
+        return [
+            f"{SDISTS_DIR}/{wheel.sdist_file} is not the source distribution of {label} that the manifest records "
+            f"and the lock lists: its SHA-256 is {digest}"
+        ]
+    if file_sha256(work / _CACHED_WHEEL) != wheel.sha256:
+        return [f"wheel {label} does not match the hash in the manifest"]
+    return []
+
+
+def _rebuilt_wheel_problems(wheel: WheelEntry, python: Path, work: Path) -> list[str]:
+    """Build the source distribution :func:`_held_sdist_problems` copied into ``work`` again; why the wheel it makes is
+    not the cached wheel's copy beside it (another name, or other files or contents)."""
+    try:
+        rebuilt = _pure_wheel(python, work / "sdist" / wheel.sdist_file, work / "rebuilt")
+        cached, made = _wheel_files(work / _CACHED_WHEEL), _wheel_files(rebuilt)
+    except CacheBuildError as exc:
+        return [f"{SDISTS_DIR}/{wheel.sdist_file} does not build {wheel.file} again: {exc}"]
+    except _UNREADABLE_ZIP as exc:
+        return [f"{wheel.file} cannot be read as a wheel: {type(exc).__name__}: {exc}"]
+    if rebuilt.name != wheel.file:
+        return [f"{SDISTS_DIR}/{wheel.sdist_file} builds {rebuilt.name}, not {wheel.file}"]
+    if cached != made:
+        differ = sorted({name for name, _ in set(cached) ^ set(made)})
+        return [
+            f"{wheel.file} is not the wheel its source distribution builds; the members that differ: "
+            f"{', '.join(differ[:3]) or 'one it lists twice'}"
+        ]
+    return []
+
+
+def _entry_tools(entry: Path, manifest: Manifest, pins: list[LockPin], scratch: Path) -> Path:
+    """The build environment of a reuse (:func:`_tools_environment`), with nothing downloaded: the tools are installed
+    from copies of the entry's own wheels of them, which pip checks against the lock's hashes."""
+    pinned = _tools_lock(pins, scratch)
+    tools = scratch / _TOOLS_DIR
+    tools.mkdir()
+    for wheel in manifest.wheels:
+        if wheel.name in _BUILD_TOOLS:
+            shutil.copyfile(entry / WHEELS_DIR / wheel.file, tools / Path(wheel.file).name)
+    return _tools_environment(pinned, scratch)
+
+
+def _built_wheel_differences(entry: Path, manifest: Manifest, pins: list[LockPin]) -> list[str]:
+    """How the wheels ``manifest`` records as built from a source distribution differ from what the builder makes of
+    the copy the entry keeps, each checked in a directory of the builder's own: (1) the copy must have the hash the
+    manifest records and be a file the commit's lock (``pins``) lists for that pin, before any of its code runs; (2) it
+    is built again offline with the lock's build tools, installed from the entry's wheels of them by the lock's hashes
+    (:func:`_entry_tools`); (3) the wheel that makes must have the cached wheel's name, files and contents
+    (:func:`_wheel_files`)."""
+    built = [wheel for wheel in manifest.wheels if wheel.sdist_sha256]
+    if not built:
+        return []
+    pinned = {(pin.name, pin.version): pin for pin in pins}
+    with tempfile.TemporaryDirectory(prefix="hyperloom-runner-rebuild-") as scratch:
+        work = Path(scratch)
+        held = [
+            _held_sdist_problems(entry, wheel, pinned.get((wheel.name, wheel.version)), work / str(index))
+            for index, wheel in enumerate(built)
+        ]
+        if any(held):
+            return [problem for problems in held for problem in problems]
+        try:
+            python = _entry_tools(entry, manifest, pins, work)
+        except CacheBuildError as exc:
+            return [f"the build tools of its source distributions cannot be installed from its wheels: {exc}"]
+        return [
+            problem
+            for index, wheel in enumerate(built)
+            for problem in _rebuilt_wheel_problems(wheel, python, work / str(index))
+        ]
+
+
+def _differences(repo: Path, tree: str, entry: Path, raw: bytes, options: BuildOptions) -> list[str]:
+    """How the manifest text ``raw`` of ``entry``, which agrees with it (:func:`check_entry`, so it is of the entry's
+    commit), differs from what a build of that commit would write, one line each; empty when it does not. What it
+    records is checked against the commit, not against the entry: the commit's tree, its archive and source made again
+    from ``repo`` (:func:`_source_differences`), and the wheels built from a source distribution built again against
+    that remade source's lock (:func:`_built_wheel_differences`)."""
     manifest = manifest_from_json(raw)
     problems: list[str] = []
     if manifest.git_tree != tree:
-        problems.append(f"its manifest records tree {manifest.git_tree}, but the tree of {sha} is {tree}")
+        problems.append(f"its manifest records tree {manifest.git_tree}, but the tree of {manifest.sha} is {tree}")
     if manifest.target != options.target.manifest_form():
         problems.append(f"its wheels are for {json.dumps(manifest.target)}, not {options.target.manifest_form()}")
-    return problems + _source_differences(repo, sha, manifest) + _builder_problems(raw, manifest)
+    with tempfile.TemporaryDirectory(prefix="hyperloom-runner-source-") as scratch:
+        made = Path(scratch)
+        problems += _source_differences(_export_source(repo, manifest.sha, made), made, manifest)
+        problems += _builder_problems(raw, manifest)
+        if problems:
+            return problems
+        pins = parse_lock((made / SOURCE_DIR / LOCK_FILE).read_text(encoding=_UTF8))
+    return _built_wheel_differences(entry, manifest, pins)
 
 
 def _use_or_clear(repo: Path, sha: str, tree: str, final: Path, options: BuildOptions) -> CacheEntry | None:
@@ -504,8 +647,8 @@ def _use_or_clear(repo: Path, sha: str, tree: str, final: Path, options: BuildOp
 
     An entry that has no manifest is an unfinished build's remains and is removed. A finished one is never written to.
     Its manifest file is read once: the entry is checked against those bytes (:func:`check_entry` pinned to their
-    hash, so a manifest written over meanwhile is refused), those bytes against the commit (:func:`_differences`), and
-    the pin returned is their SHA-256.
+    hash, so a manifest written over meanwhile is refused), those bytes against the commit, its wheels built from a
+    source distribution included (:func:`_differences`), and the pin returned is their SHA-256.
 
     Raises:
         CacheConflict: When the entry is finished and differs.
@@ -517,7 +660,7 @@ def _use_or_clear(repo: Path, sha: str, tree: str, final: Path, options: BuildOp
         return None
     raw = (final / MANIFEST_NAME).read_bytes()
     pin = hashlib.sha256(raw).hexdigest()
-    problems = check_entry(final, sha, pin, verify_hash=True) or _differences(repo, sha, tree, raw, options)
+    problems = check_entry(final, sha, pin, verify_hash=True) or _differences(repo, tree, final, raw, options)
     if problems:
         raise CacheConflict(
             f"{final} is not what a build of {sha} writes, so it is left alone: {'; '.join(problems[:3])}"
