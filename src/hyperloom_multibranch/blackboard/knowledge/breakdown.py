@@ -34,14 +34,14 @@ export has its own schema version and its own sections:
 
 from __future__ import annotations
 
-import json
 import os
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 
 from hyperloom_common.io import atomic_write_json
+from hyperloom_common.jsonio import read_json, read_jsonl
+from hyperloom_common.timeutil import epoch_iso
 from hyperloom.contracts.measurement import BuildPayment
 from hyperloom.orchestrator.knowledge.remote_recipe.models import RemoteWriteResult
 from hyperloom.orchestrator.specialists.resources import (
@@ -72,6 +72,7 @@ HOSTED_DOCUMENTS = {
     "plugs": Path("plugs.resolved.json"),
     "hosted_measurement": Path("hosted/measurement_stats.json"),
 }
+_ABSENT = object()
 
 
 @dataclass
@@ -150,19 +151,11 @@ def session_metadata(
     return {"session_id": session_id, "code_revision": code_revision or None, **named}
 
 
-def _rows(path: Path) -> list[object] | None:
-    """The rows of the JSON lines file ``path``, without a row that is no JSON, as a half-written last line is;
-    ``None`` when there is no such file."""
+def _rows(path: Path) -> list[dict[str, object]] | None:
+    """The object rows of the JSON lines file ``path``, without a row that is no JSON object, as a half-written last
+    line is; ``None`` when there is no such file."""
 
-    if not path.is_file():
-        return None
-    rows: list[object] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        try:
-            rows.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-    return rows
+    return read_jsonl(path) if path.is_file() else None
 
 
 def hosted_records(session_dir: Path | None) -> dict[str, object]:
@@ -174,10 +167,9 @@ def hosted_records(session_dir: Path | None) -> dict[str, object]:
         return {}
     found: dict[str, object] = {}
     for key, relative in HOSTED_DOCUMENTS.items():
-        try:
-            found[key] = json.loads((session_dir / relative).read_text(encoding="utf-8"))
-        except (FileNotFoundError, json.JSONDecodeError):
-            continue
+        document = read_json(session_dir / relative, _ABSENT)
+        if document is not _ABSENT:
+            found[key] = document
     for key, relative in HOSTED_RECORDS.items():
         rows = _rows(session_dir / relative)
         if rows is not None:
@@ -194,11 +186,10 @@ def agent_resources(runner_dir: Path | None) -> dict[str, object]:
     rows = _rows(runner_dir / RESOURCES_RELATIVE_PATH) if runner_dir is not None else None
     if rows is None:
         return {}
-    records = [row for row in rows if isinstance(row, dict)]
     found: dict[str, object] = {
-        "specialist_resources": [row for row in records if row.get("kind") == SPECIALIST_RECORD_KIND]
+        "specialist_resources": [row for row in rows if row.get("kind") == SPECIALIST_RECORD_KIND]
     }
-    readings = [row for row in records if row.get("kind") == CONTAINER_RECORD_KIND]
+    readings = [row for row in rows if row.get("kind") == CONTAINER_RECORD_KIND]
     if readings:
         found["container_resources"] = readings[-1]
     return found
@@ -266,7 +257,7 @@ def build_breakdown(
     return {
         "schema_version": SCHEMA_VERSION,
         "exporter_version": EXPORTER_VERSION,
-        "exported_at_utc": datetime.fromtimestamp(snapshot.taken_at, timezone.utc).isoformat(),
+        "exported_at_utc": epoch_iso(snapshot.taken_at),
         "metadata": {
             "session_profile": encode(snapshot.profile),
             "manifest_fingerprints": encode(snapshot.fingerprints),
