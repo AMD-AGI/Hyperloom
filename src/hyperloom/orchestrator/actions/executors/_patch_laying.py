@@ -336,75 +336,8 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
     # fallback; if neither accepts a patch the whole set fail-softs.
     strip_arg = f"-p{plan.apply_strip}"
 
-    apply_modes: dict[Path, str] = {}
-    for p in plan.patches:
-        if _git(git, (_APPLY, "--check", strip_arg, str(p)), plan.apply_root):
-            apply_modes[p] = _GIT
-            continue
-        if patch_bin and _patch_dry_run(patch_bin, p, plan.apply_root, plan.apply_strip):
-            log.warning(
-                "_server_patcher: %s patch %s did not apply cleanly with "
-                "`git apply --check %s`; falling back to `patch %s --fuzz=2` "
-                "(TraceLens patch may lag deployed %s by a point release)",
-                plan.framework,
-                p.name,
-                strip_arg,
-                strip_arg,
-                plan.framework,
-            )
-            apply_modes[p] = _PATCH
-            continue
-        # Forward apply fails: check whether this patch is ALREADY APPLIED (a clean ``git apply -R --check`` succeeds
-        # iff the tree already contains its post-image).
-        if _git(git, (_APPLY, "-R", "--check", strip_arg, str(p)), plan.apply_root):
-            log.info(
-                "_server_patcher: %s patch %s already applied (reverse "
-                "`git apply -R --check %s` is clean); skipping it from the "
-                "transaction so the remaining patches still apply",
-                plan.framework,
-                p.name,
-                strip_arg,
-            )
-            apply_modes[p] = _SKIP
-            continue
-        # Symmetric check for patches previously applied via fuzzy `patch` (git reverse may fail on fuzzy-applied
-        # hunks).
-        if patch_bin and _patch_reverse_dry_run(
-            patch_bin,
-            p,
-            plan.apply_root,
-            plan.apply_strip,
-        ):
-            log.info(
-                "_server_patcher: %s patch %s already applied (fuzzy reverse dry-run clean); skipping it",
-                plan.framework,
-                p.name,
-            )
-            apply_modes[p] = _SKIP
-            continue
-        if p.name in plan.optional_patches:
-            log.warning(
-                "_server_patcher: optional %s patch %s does not apply "
-                "(`git apply --check %s` + fuzzy both failed, not already "
-                "applied) — skipping it so the critical patches still apply "
-                "atomically (version %s; non-critical to kernel shape profiling)",
-                plan.framework,
-                p.name,
-                strip_arg,
-                plan.version,
-            )
-            apply_modes[p] = _SKIP
-            continue
-        log.warning(
-            "_server_patcher: `git apply --check %s` AND fuzzy `patch %s "
-            "--dry-run` both failed for %s (version %s, patch %s), and it is "
-            "not already applied (reverse check failed); fail-soft skip",
-            strip_arg,
-            strip_arg,
-            plan.framework,
-            plan.version,
-            p.name,
-        )
+    apply_modes = _precheck_apply_modes(plan, git, patch_bin, strip_arg)
+    if apply_modes is None:
         return False
 
     applied: list[tuple[Path, str]] = []
@@ -439,17 +372,7 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
         _rollback_applied(applied, plan, git, patch_bin, strip_arg)
         return False
 
-    fuzzy_count = sum(1 for _, mode in applied if mode == _PATCH)
-    log.info(
-        "_server_patcher: applied %d patch(es) for %s %s "
-        "(strict=%d, fuzzy=%d, already-applied/skipped=%d) (issue #194 §4/§5)",
-        len(applied),
-        plan.framework,
-        plan.version,
-        len(applied) - fuzzy_count,
-        fuzzy_count,
-        skipped,
-    )
+    _log_applied(plan, applied, skipped)
     # Post-apply sentinel verification: confirm all sentinel markers are present (catches all-skipped,
     # semantically-wrong fuzzy apply, or missing annotation-pipeline markers).
     if not _is_patched(plan):
@@ -468,6 +391,102 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
         _rollback_applied(applied, plan, git, patch_bin, strip_arg)
         return False
     return True
+
+
+def _precheck_apply_modes(plan: _PatchPlan, git: str, patch_bin: str | None, strip_arg: str) -> dict[Path, str] | None:
+    """Pick each patch's apply mode (``git``, ``patch`` or ``skip``), or ``None`` when one cannot apply."""
+    apply_modes: dict[Path, str] = {}
+    for p in plan.patches:
+        if _git(git, (_APPLY, "--check", strip_arg, str(p)), plan.apply_root):
+            apply_modes[p] = _GIT
+            continue
+        if patch_bin and _patch_dry_run(patch_bin, p, plan.apply_root, plan.apply_strip):
+            log.warning(
+                "_server_patcher: %s patch %s did not apply cleanly with "
+                "`git apply --check %s`; falling back to `patch %s --fuzz=2` "
+                "(TraceLens patch may lag deployed %s by a point release)",
+                plan.framework,
+                p.name,
+                strip_arg,
+                strip_arg,
+                plan.framework,
+            )
+            apply_modes[p] = _PATCH
+            continue
+        if _already_applied(plan, git, patch_bin, strip_arg, p):
+            apply_modes[p] = _SKIP
+            continue
+        if p.name in plan.optional_patches:
+            log.warning(
+                "_server_patcher: optional %s patch %s does not apply "
+                "(`git apply --check %s` + fuzzy both failed, not already "
+                "applied) — skipping it so the critical patches still apply "
+                "atomically (version %s; non-critical to kernel shape profiling)",
+                plan.framework,
+                p.name,
+                strip_arg,
+                plan.version,
+            )
+            apply_modes[p] = _SKIP
+            continue
+        log.warning(
+            "_server_patcher: `git apply --check %s` AND fuzzy `patch %s "
+            "--dry-run` both failed for %s (version %s, patch %s), and it is "
+            "not already applied (reverse check failed); fail-soft skip",
+            strip_arg,
+            strip_arg,
+            plan.framework,
+            plan.version,
+            p.name,
+        )
+        return None
+    return apply_modes
+
+
+def _already_applied(plan: _PatchPlan, git: str, patch_bin: str | None, strip_arg: str, p: Path) -> bool:
+    """Whether the tree already holds patch ``p``'s post-image, by a strict or fuzzy reverse dry-run."""
+    # Forward apply fails: check whether this patch is ALREADY APPLIED (a clean ``git apply -R --check`` succeeds
+    # iff the tree already contains its post-image).
+    if _git(git, (_APPLY, "-R", "--check", strip_arg, str(p)), plan.apply_root):
+        log.info(
+            "_server_patcher: %s patch %s already applied (reverse "
+            "`git apply -R --check %s` is clean); skipping it from the "
+            "transaction so the remaining patches still apply",
+            plan.framework,
+            p.name,
+            strip_arg,
+        )
+        return True
+    # Symmetric check for patches previously applied via fuzzy `patch` (git reverse may fail on fuzzy-applied
+    # hunks).
+    if patch_bin and _patch_reverse_dry_run(
+        patch_bin,
+        p,
+        plan.apply_root,
+        plan.apply_strip,
+    ):
+        log.info(
+            "_server_patcher: %s patch %s already applied (fuzzy reverse dry-run clean); skipping it",
+            plan.framework,
+            p.name,
+        )
+        return True
+    return False
+
+
+def _log_applied(plan: _PatchPlan, applied: list[tuple[Path, str]], skipped: int) -> None:
+    """Log how many patches of ``plan`` applied strictly, fuzzily, or were already present."""
+    fuzzy_count = sum(1 for _, mode in applied if mode == _PATCH)
+    log.info(
+        "_server_patcher: applied %d patch(es) for %s %s "
+        "(strict=%d, fuzzy=%d, already-applied/skipped=%d) (issue #194 §4/§5)",
+        len(applied),
+        plan.framework,
+        plan.version,
+        len(applied) - fuzzy_count,
+        fuzzy_count,
+        skipped,
+    )
 
 
 def _rollback_applied(
