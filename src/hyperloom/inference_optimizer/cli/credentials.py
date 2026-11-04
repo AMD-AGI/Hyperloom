@@ -132,6 +132,14 @@ def _sync_geak_config_base_url(geak_config_path: str, base_url: str) -> bool:
     return True
 
 
+def _sync_geak_config_endpoint() -> None:
+    """A supplied GEAK_CONFIG yaml may carry its own endpoint; sync it so an override reaches GEAK."""
+    geak_cfg = os.environ.get("GEAK_CONFIG", "").strip()
+    geak_url = os.environ.get("GEAK_BASE_URL", "").strip()
+    if geak_cfg and geak_url and _sync_geak_config_base_url(geak_cfg, geak_url):
+        print(f"Preflight: synced GEAK config base_url -> {geak_url} ({geak_cfg})")
+
+
 def _has_claude_oauth_token() -> bool:
     """True when a ``claude setup-token`` subscription credential is exported."""
     return bool(os.environ.get(CLAUDE_OAUTH_TOKEN_ENV, "").strip())

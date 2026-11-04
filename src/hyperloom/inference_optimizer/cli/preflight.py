@@ -74,7 +74,7 @@ from .credentials import (
     _is_stale_proxy_url,
     _resolve_llm_endpoints,
     _reset_claude_config_to_upstream,
-    _sync_geak_config_base_url,
+    _sync_geak_config_endpoint,
     _validate_credentials,
 )
 from ..session.paths import (
@@ -1226,14 +1226,6 @@ def _export_gateway_alias(gateway_url: str) -> None:
             prev = os.environ.get(alias, "")
             os.environ[alias] = gateway_url
             print(f"Preflight: {alias} {prev or '<unset>'} -> {gateway_url} (direct to gateway)")
-
-
-def _sync_geak_config_endpoint() -> None:
-    """A supplied GEAK_CONFIG yaml may carry its own endpoint; sync it so an override reaches GEAK."""
-    geak_cfg = os.environ.get("GEAK_CONFIG", "").strip()
-    geak_url = os.environ.get("GEAK_BASE_URL", "").strip()
-    if geak_cfg and geak_url and _sync_geak_config_base_url(geak_cfg, geak_url):
-        print(f"Preflight: synced GEAK config base_url -> {geak_url} ({geak_cfg})")
 
 
 def _ensure_magpie(
