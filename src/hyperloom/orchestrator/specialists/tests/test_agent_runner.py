@@ -687,3 +687,27 @@ async def test_a_silent_cli_with_no_tool_in_flight_is_lost_in_poll_and_in_the_re
         assert handle.session.outcome["stale_heartbeat"]
     finally:
         await stop_and_collect(runner, handle)
+
+
+async def test_a_session_that_ends_while_poll_looks_at_its_cli_reads_as_ended_not_lost(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The window is long enough that the reaper never calls the CLI silent; only poll looks, and it looks past it.
+    runner = quiet_runner(tmp_path, window=30.0)
+    spec = make_spec(tmp_path / "w", code="import time; time.sleep(1.0)")
+    handle = await runner.launch(spec)
+    go_quiet(spec)
+
+    def look_that_outlasts_the_session(*_args: object, **_kwargs: object) -> bool:
+        # A look taken while the session ends, as during a deadline kill that takes the tool down first: it sees no
+        # output and no tool, though by the time poll reads it the reap loop has recorded how the session ended.
+        end = real_time.time() + 20
+        while not handle.session.task.done():
+            assert real_time.time() < end, "the session never ended"
+            real_time.sleep(0.02)
+        return False
+
+    monkeypatch.setattr(agent_runner, "cli_alive", look_that_outlasts_the_session)
+    status = await runner.poll(handle)
+    assert (status.state, status.returncode, status.timed_out) == ("exited", 0, False)
+    await runner.collect(handle)
