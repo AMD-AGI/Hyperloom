@@ -19,6 +19,11 @@ from pathlib import Path
 import pytest
 import yaml
 
+from hyperloom.inference_optimizer.tests.test_aiter_serving_once import CARD_KERNEL, module_of
+from hyperloom.inference_optimizer.tests.test_aiter_serving_once import CU as SERVING_CU
+from hyperloom.inference_optimizer.tests.test_aiter_serving_once import GFX as SERVING_GFX
+from hyperloom.inference_optimizer.tests.test_aiter_serving_once import MODULE as SERVING_MODULE
+from hyperloom.inference_optimizer.tests.test_aiter_serving_once import VARIABLE as SERVING_VARIABLE
 from hyperloom.measure import local
 from hyperloom.measure.farm import Farm
 from hyperloom.measure.runner import run as run_module
@@ -34,7 +39,6 @@ from hyperloom.measure.runner.tests.test_run_jit import (  # noqa: F401 - fixtur
 )
 from hyperloom.measure.runner.tests.test_run_jit_tables import (  # noqa: F401 - fixtures
     IMAGE_MODULE,
-    TABLE_VARIABLE,
     TEST_TABLE,
     _by_patch,
     _by_variable,
@@ -258,19 +262,63 @@ def test_a_module_built_once_into_the_image_is_linked_by_a_later_test_it_does_no
 def test_the_runner_runs_the_launch_preflight_with_the_prewarm_before_its_test_is_given_jit_directories(
     image, monkeypatch
 ) -> None:
-    """The point's tables decide what the preflight moves aside, and the prewarm builds what it moved aside from the
-    image's own tables; the test's directories are made after, so they link what was built."""
-    calls: list[tuple[list[str], object, list[Path]]] = []
+    """The prewarm builds what the preflight moved aside from the image's own tables; the test's directories are made
+    after, so they link what was built."""
+    calls: list[tuple[object, list[Path]]] = []
 
-    def preflight(envs: dict[str, str], environ, build=None) -> ServingPreflight:
-        calls.append((sorted(envs), build, list(image.host_tmp.iterdir())))
+    def preflight(build) -> ServingPreflight:
+        calls.append((build, list(image.host_tmp.iterdir())))
         return ServingPreflight({"action": "skip"})
 
-    monkeypatch.setattr(run_module, "prepare_serving_so_once", preflight, raising=False)
+    monkeypatch.setattr(run_module, "build_image_own_once", preflight)
 
     _run(image, monkeypatch, "preflight", _deliver(image, _by_variable(TEST_TABLE)))
 
-    assert calls == [([TABLE_VARIABLE], preflight_build, [])], "once, with the prewarm, before any compile directory"
+    assert calls == [(preflight_build, [])], "once, with the prewarm, before any compile directory"
+
+
+#: A candidate's table for the serving image's GEMM module (``test_aiter_serving_once``): a kernel of the card's rows that
+#: the image's module lacks.
+CANDIDATE_TABLE = f"gfx,cu_num,M,N,K,kernelId,kernelName\n{SERVING_GFX},{SERVING_CU},1,2,3,4,a8w8_rowwise_candidate\n"
+
+
+@pytest.mark.parametrize(
+    "delivery",
+    [
+        lambda rig: _deliver(rig, _by_variable(CANDIDATE_TABLE)),
+        lambda rig: _arm(rig, process_env={"GPU_ARCHS": "gfx942", "CU_NUM": "80"}),
+    ],
+    ids=["its-own-table", "its-own-build-target"],
+)
+def test_a_tests_own_tables_or_target_move_none_of_the_images_modules_aside(
+    image, monkeypatch, serving_aiter, delivery
+) -> None:
+    """The image's module covers the image's own table for the card. A test whose table names a kernel it lacks, or
+    whose servers build for another target, is not given it (``own_jit``); moved aside for that test, it would stay
+    out of the image, built by no server, for every later test on the image's own tables."""
+    package, build = serving_aiter
+    module = package / "jit" / f"{SERVING_MODULE}.so"
+    held = module.read_bytes()
+
+    _run(image, monkeypatch, "own", delivery(image), cache=False)
+
+    assert module.read_bytes() == held, "the image's module stays where every later test links it"
+    assert build.calls == [] and not (package / "jit" / "hyperloom_jit_backup").exists()
+
+
+def test_a_module_the_images_own_table_outran_is_built_into_the_image_before_the_test(
+    image, monkeypatch, serving_aiter
+) -> None:
+    """Whatever the test's own table, the image's module is checked against the image's: built from an older table, it
+    is built again once, for the card, into the image's ``aiter/jit``."""
+    package, build = serving_aiter
+    module = package / "jit" / f"{SERVING_MODULE}.so"
+    module.write_bytes(module_of("a8w8_rowwise_retired"))
+
+    _run(image, monkeypatch, "outran", _deliver(image, _by_variable(CANDIDATE_TABLE)), cache=False)
+
+    assert build.calls == [((SERVING_VARIABLE,), SERVING_GFX, SERVING_CU)]
+    assert module.read_bytes() == module_of(CARD_KERNEL)
 
 
 #: What hyperloom's prewarm records of ``module_gemm``'s build (``measure.jit.prewarmed.build_record``): the variables the
