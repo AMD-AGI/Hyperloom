@@ -107,7 +107,7 @@ measure → edit → measure loop on its own cards inside its worktree.
 | `task_description`   | string   | no       | Required when `scope='freeform'`: the prose mandate, rendered verbatim. Name the exact files and line ranges you want read — a mandate that points at `<tree>/vllm/v1/spec_decode/llm_base_proposer.py:418-434` is worth more than any list of directories. |
 | `mode`               | string   | no       | `patch` (default for patch-capable domains) or `research` (read-only; no worktree). |
 | `bench`              | bool     | no       | Give a GPU specialist a measure → edit → measure loop on its own cards. Pair with `mode=patch + needs_gpu`. |
-| `source_hint_directories` | list | no       | Directories to read first, relative to the session framework tree (e.g. `vllm/model_executor/layers/fused_moe/`) or absolute. Advisory: they order the search, they do not bound it. Defaults to the static-recon checklist's directories for this model/GPU/precision. |
+| `source_hint_directories` | list | no       | Directories to read first, relative to the session framework tree (e.g. `vllm/model_executor/layers/fused_moe/`) or absolute. Advisory: they order the search, they do not bound it. Defaults to the static-recon checklist's directories for this framework, GPU and precision; a framework the checklist does not cover gets none. |
 
 ## EMIT format
 

@@ -12,13 +12,13 @@ import sqlite3
 import subprocess
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from . import machine_state as _phase_state
 from .kernel_round_budget import controller_round_stop, measurement_round_sec
-from hyperloom.common.coerce import first_str, to_int
-from hyperloom.common.env import env_bool, env_float
+from hyperloom_common.coerce import first_str, to_int
+from hyperloom_common.env import env_bool, env_float
 from hyperloom.inference_optimizer.session.geak_rebench_verdict import REBENCH_NO_PROMOTE
 from hyperloom.inference_optimizer.breakdown.recorder import tool_versions
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
@@ -263,47 +263,34 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
             reason=idempotency_reason, inline_event=recorder.event_id if recorder is not None else ""
         )
         denied = self._coord.dispatcher.time_budget_denial_for_action(task_kind)
+        attempt = KernelReprofile(
+            ran=False,
+            task_kind=task_kind,
+            trigger=trigger,
+            idempotency_reason=idempotency_reason,
+            snapshot_id_before=snapshot_id_before,
+        )
         if params is None or denied is not None:
-            _note_reprofile(
-                KernelReprofile(
-                    ran=False,
-                    task_kind=task_kind,
-                    trigger=trigger,
-                    skipped_reason=denied.rule if denied else analysis_skip_reason(self.shared_state),
-                    idempotency_reason=idempotency_reason,
-                    snapshot_id_before=snapshot_id_before,
-                )
-            )
+            skipped_reason = denied.rule if denied else analysis_skip_reason(self.shared_state)
+            _note_reprofile(replace(attempt, skipped_reason=skipped_reason))
             return
         # profile_lane conflicts with the benchmark_lane the kernel_agent task holds, so the reprofile is a step of
         # that task rather than a task of its own.
         reprofile_task = _covered_step(task_kind, params, idempotency_key=f"internal-analysis-{idempotency_reason}")
         try:
             await self.sub.execute_covered(reprofile_task)
-        except Exception:  # isolation boundary: the kernel-entry reprofile step, recorded as dispatch_failed
+        except (OSError, RuntimeError):  # the kernel-entry reprofile step, recorded as dispatch_failed
             log.exception("kernel-entry reprofile failed; the phase proceeds on the existing snapshot")
-            _note_reprofile(
-                KernelReprofile(
-                    ran=True,
-                    task_kind=task_kind,
-                    trigger=trigger,
-                    skipped_reason="dispatch_failed",
-                    idempotency_reason=idempotency_reason,
-                    snapshot_id_before=snapshot_id_before,
-                )
-            )
+            _note_reprofile(replace(attempt, ran=True, skipped_reason="dispatch_failed"))
             return
         snapshot_landed = self._adopt_reprofile_snapshot(
             before=before, snapshot_id_before=snapshot_id_before, snapshots_before=snapshots_before
         )
         _note_reprofile(
-            KernelReprofile(
+            replace(
+                attempt,
                 ran=True,
-                task_kind=task_kind,
-                trigger=trigger,
-                idempotency_reason=idempotency_reason,
                 snapshot_landed=snapshot_landed,
-                snapshot_id_before=snapshot_id_before,
                 snapshot_id_after=int(self.shared_state.roofline_snapshot_id or 0),
                 task_id=str(getattr(reprofile_task, "task_id", "") or ""),
             )
@@ -425,7 +412,7 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
             return
         try:
             self._record_gemm_tuner_rows(recorder, result)
-        except Exception:
+        except OSError:
             log.debug("kernel timeline: GEMM tuning record failed", exc_info=True)
 
     def _record_gemm_tuner_rows(self, recorder: Any, result: dict[str, Any]) -> None:
@@ -544,7 +531,7 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
     async def on_enter_kernel(self, tr: "Transition") -> None:
         """Open the KERNEL timeline and enqueue the ``kernel_agent`` task that carries the phase's work."""
         state = self.shared_state
-        if not self._coord.phase_machine.kernel_enabled():
+        if not state.kernel_enabled:
             log.info(
                 "KERNEL entry hook fired with kernel_enabled=False (from=%s)",
                 tr.from_phase or "<unknown>",

@@ -30,7 +30,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from hyperloom.common.git_safety import safe_directory_args
+from hyperloom_common.git_safety import safe_directory_args
 from hyperloom.inference_optimizer import framework_registry as _reg
 
 log = logging.getLogger(__name__)
@@ -234,6 +234,19 @@ def _glob_install_package_roots() -> tuple[str, ...]:
     return tuple(found)
 
 
+def _venv_package_dirs(venv_root: str, packages: Sequence[str]) -> list[Path]:
+    """Return the ``packages`` dirs found under a venv's ``lib/python*/site-packages``."""
+    site = Path(venv_root) / "lib"
+    if not site.is_dir():
+        return []
+    return [
+        match
+        for pattern in _site_packages_patterns(packages, flavours=("site",))
+        for match in sorted(site.glob(pattern))
+        if match.is_dir()
+    ]
+
+
 def _discover_installed_framework_roots() -> tuple[str, ...]:
     """Runtime discovery via importlib and filesystem globs.
 
@@ -265,24 +278,16 @@ def _discover_installed_framework_roots() -> tuple[str, ...]:
 
     venv = os.environ.get("VIRTUAL_ENV", "").strip()
     if venv:
-        site = Path(venv) / "lib"
-        if site.is_dir():
-            for pattern in _site_packages_patterns(FRAMEWORK_SOURCE_PACKAGES, flavours=("site",)):
-                for match in sorted(site.glob(pattern)):
-                    if match.is_dir():
-                        add(match)
+        for match in _venv_package_dirs(venv, FRAMEWORK_SOURCE_PACKAGES):
+            add(match)
 
     # Isolated vLLM lives outside $VIRTUAL_ENV; only fall back to the installer's
     # VLLM_VENV_ROOT when no vllm root was found in the main venv above.
     if not any(r.rstrip("/").endswith("/vllm") for r in found):
         vllm_venv = os.environ.get("VLLM_VENV_ROOT", "").strip()
         if vllm_venv:
-            site = Path(vllm_venv) / "lib"
-            if site.is_dir():
-                for pattern in _site_packages_patterns(_VLLM_VENV_PACKAGES, flavours=("site",)):
-                    for match in sorted(site.glob(pattern)):
-                        if match.is_dir():
-                            add(match)
+            for match in _venv_package_dirs(vllm_venv, _VLLM_VENV_PACKAGES):
+                add(match)
 
     for root in _glob_install_package_roots():
         add(root)

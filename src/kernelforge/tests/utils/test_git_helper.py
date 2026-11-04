@@ -19,6 +19,7 @@ from kernelforge.utils.git import (
     DEFAULT_TIMEOUT_SEC,
     GitError,
     git,
+    git_apply,
     git_async,
     git_bytes,
     git_checkout_branch,
@@ -82,13 +83,13 @@ def test_the_environment_overlay_extends_rather_than_replaces(tmp_path, monkeypa
     assert result.stdout.strip() == "inherited overlaid"
 
 
-def test_input_reaches_the_command(tmp_path):
+def test_the_patch_reaches_git_apply_on_stdin(tmp_path):
     root = _repo(tmp_path)
     patch = (
         "diff --git a/kernel.py b/kernel.py\n--- a/kernel.py\n+++ b/kernel.py\n@@ -1 +1 @@\n-VALUE = 1\n+VALUE = 2\n"
     )
 
-    git("apply", "-", cwd=root, input=patch)
+    git_apply(patch, "-", cwd=root)
 
     assert (root / "kernel.py").read_text() == "VALUE = 2\n"
 
@@ -160,23 +161,23 @@ async def test_a_wedged_await_is_bounded_too(tmp_path):
 
 def test_a_replaced_file_keeps_the_permissions_it_had(tmp_path):
     """The temp file is created owner-only; a replaced driver must not come back less readable than the one it replaced."""
-    from kernelforge.utils.durable_io import atomic_write_bytes
+    from hyperloom_common.io import DURABLE, atomic_write_bytes
 
     driver = tmp_path / "forge_driver.py"
     driver.write_bytes(b"old\n")
     driver.chmod(0o755)
 
-    atomic_write_bytes(driver, b"new\n")
+    atomic_write_bytes(driver, b"new\n", options=DURABLE)
 
     assert driver.read_bytes() == b"new\n"
     assert stat.S_IMODE(driver.stat().st_mode) == 0o755
 
 
 def test_a_file_that_did_not_exist_is_published_owner_only(tmp_path):
-    from kernelforge.utils.durable_io import atomic_write_bytes
+    from hyperloom_common.io import DURABLE, atomic_write_bytes
 
     fresh = tmp_path / "fresh.json"
-    atomic_write_bytes(fresh, b"{}\n")
+    atomic_write_bytes(fresh, b"{}\n", options=DURABLE)
 
     assert stat.S_IMODE(fresh.stat().st_mode) == 0o600
 

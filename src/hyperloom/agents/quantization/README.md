@@ -68,16 +68,18 @@ The CLI prints a JSON summary (`status` + `quantized_model_dir` + `run_dir` +
 
 ```python
 import asyncio
-from hyperloom.agents.quantization import quantize_via_prompt
+from hyperloom.agents.quantization import QuantSkillRunOptions, quantize_via_prompt
 
 async def main():
     result = await quantize_via_prompt(
         PROMPT,
         workspace="/scratch/qwen3-8b",
-        quark_root="/path/to/Quark",
-        interactive=False,
-        acceptable_eval_gap=0.05,
-        max_requantize_attempts=1,
+        options=QuantSkillRunOptions(
+            quark_root="/path/to/Quark",
+            interactive=False,
+            acceptable_eval_gap=0.05,
+            max_requantize_attempts=1,
+        ),
     )
     print(result.status)                       # success | partial | failed
     print(result.quantized_model_dir)          # Path | None
@@ -150,7 +152,7 @@ layout are left in place and not read. Callers can read these directly:
 
 | var                                  | default | effect                                                                     |
 | ------------------------------------ | ------- | -------------------------------------------------------------------------- |
-| `QUARK_ROOT`                         | —       | Path to amd-quark checkout. Required unless passed as `quark_root=` kwarg. |
+| `QUARK_ROOT`                         | —       | Path to amd-quark checkout. Required unless passed as `options=QuantSkillRunOptions(quark_root=...)`. |
 | `HYPERLOOM_QUANT_STRICT_VALIDATION`  | `1`     | When `0`, MUST-validate SKIPPED demotes to `partial` instead of `failed`.  |
 
 Claude SDK auth (`ANTHROPIC_API_KEY` or equivalent) is handled by

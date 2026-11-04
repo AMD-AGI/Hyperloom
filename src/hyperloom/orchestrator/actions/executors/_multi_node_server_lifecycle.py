@@ -15,10 +15,10 @@ import subprocess
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator, Mapping
+from typing import Any, Awaitable, Callable, Iterator, Mapping
 
-from hyperloom.common.timeutil import format_exc_brief
-from hyperloom.common.env import EnvValueError, env_flag
+from hyperloom_common.timeutil import format_exc_brief
+from hyperloom_common.env import EnvValueError, env_flag
 from hyperloom.inference_optimizer import multi_node
 from hyperloom.inference_optimizer.multi_node._internal.env_safety import filter_forward_env
 from hyperloom.inference_optimizer.multi_node._internal.server_args_safety import (
@@ -474,34 +474,7 @@ async def restart_server_for_round(
             # Align launch-driver poll with /health wait for JIT-heavy MoE runs.
             poll_timeout_s, health_wait_s = _health_wait_budget(settings, extra_server_args, pd, extra_env)
             ns = _restart_namespace(round_args, extra_server_args, poll_timeout_s, pd)
-            from ._multi_node_env import log_mn_banner
-
-            log_mn_banner(
-                "server_restart",
-                log,
-                framework=fw,
-                tp=tp_int,
-                ep=ep_int,
-                pd_mode=pd.get("pd_mode"),
-                trace_dir=torch_profiler_dir or "",
-            )
-            log.info(
-                "restart_server_for_round: framework=%s tp=%d ep=%d pd_mode=%s "
-                "pd_prefill=%dx tp%d pd_decode=%dx tp%d backend=%r ib=%r "
-                "extra_args=%r torch_profiler_dir=%r",
-                fw,
-                tp_int,
-                ep_int,
-                pd.get("pd_mode"),
-                pd.get("pd_prefill_nodes", 0),
-                pd.get("pd_prefill_tp", 0),
-                pd.get("pd_decode_nodes", 0),
-                pd.get("pd_decode_tp", 0),
-                pd.get("pd_transfer_backend", ""),
-                pd.get("pd_ib_device", ""),
-                extra_server_args,
-                torch_profiler_dir,
-            )
+            _log_restart_plan(round_args, pd, extra_server_args, torch_profiler_dir)
 
             # One kill+launch attempt + post-launch /health wait.
             async def _restart_and_wait(force_full: bool) -> None:
@@ -536,32 +509,69 @@ async def restart_server_for_round(
                     _collect_worker_server_logs(_read_state(), repr(exc))
                     raise ServerRestartFailed(f"post-launch /health wait raised: {exc!r}") from exc
 
-            try:
-                await _restart_and_wait(force_full_restart)
-            except ServerRestartFailed as first_exc:
-                # C — multi-node VRAM reclaim before exactly one retry.
-                if not env_flag(_MN_RESTART_RECLAIM_RETRY_ENV, default=True):
-                    raise
-                log.warning(
-                    "restart_server_for_round: restart failed (%s); attempting "
-                    "best-effort remote kill-inference + one retry",
-                    first_exc,
-                )
-                import httpx
+            await _restart_with_reclaim_retry(_restart_and_wait, force_full_restart)
 
-                try:
-                    from hyperloom.inference_optimizer.multi_node.cli import kill_inference_for_kernel_agent_best_effort
 
-                    await asyncio.to_thread(kill_inference_for_kernel_agent_best_effort)
-                except (ValueError, KeyError, httpx.HTTPError, httpx.InvalidURL) as reclaim_exc:
-                    log.warning(
-                        "restart_server_for_round: remote kill-inference reclaim raised (%s); retrying restart anyway",
-                        reclaim_exc,
-                    )
-                try:
-                    await _restart_and_wait(force_full=True)
-                except ServerRestartFailed as retry_exc:
-                    raise retry_exc from first_exc
+def _log_restart_plan(round_args: tuple[str, str, int, int], pd: dict, extra_args: str, trace_dir: str) -> None:
+    """Log the banner and launch parameters of one multi-node server restart."""
+    fw, _, tp_int, ep_int = round_args
+    from ._multi_node_env import log_mn_banner
+
+    log_mn_banner(
+        "server_restart",
+        log,
+        framework=fw,
+        tp=tp_int,
+        ep=ep_int,
+        pd_mode=pd.get("pd_mode"),
+        trace_dir=trace_dir or "",
+    )
+    log.info(
+        "restart_server_for_round: framework=%s tp=%d ep=%d pd_mode=%s "
+        "pd_prefill=%dx tp%d pd_decode=%dx tp%d backend=%r ib=%r "
+        "extra_args=%r torch_profiler_dir=%r",
+        fw,
+        tp_int,
+        ep_int,
+        pd.get("pd_mode"),
+        pd.get("pd_prefill_nodes", 0),
+        pd.get("pd_prefill_tp", 0),
+        pd.get("pd_decode_nodes", 0),
+        pd.get("pd_decode_tp", 0),
+        pd.get("pd_transfer_backend", ""),
+        pd.get("pd_ib_device", ""),
+        extra_args,
+        trace_dir,
+    )
+
+
+async def _restart_with_reclaim_retry(restart_and_wait: Callable[..., Awaitable[None]], force_full: bool) -> None:
+    """Run one restart attempt; on failure reclaim remote VRAM and retry once as a full restart."""
+    try:
+        await restart_and_wait(force_full)
+    except ServerRestartFailed as first_exc:
+        # C — multi-node VRAM reclaim before exactly one retry.
+        if not env_flag(_MN_RESTART_RECLAIM_RETRY_ENV, default=True):
+            raise
+        log.warning(
+            "restart_server_for_round: restart failed (%s); attempting best-effort remote kill-inference + one retry",
+            first_exc,
+        )
+        import httpx
+
+        try:
+            from hyperloom.inference_optimizer.multi_node.cli import kill_inference_for_kernel_agent_best_effort
+
+            await asyncio.to_thread(kill_inference_for_kernel_agent_best_effort)
+        except (ValueError, KeyError, httpx.HTTPError, httpx.InvalidURL) as reclaim_exc:
+            log.warning(
+                "restart_server_for_round: remote kill-inference reclaim raised (%s); retrying restart anyway",
+                reclaim_exc,
+            )
+        try:
+            await restart_and_wait(force_full=True)
+        except ServerRestartFailed as retry_exc:
+            raise retry_exc from first_exc
 
 
 # Infera frontend profiling API (infera.server --enable-profiling).
@@ -799,13 +809,11 @@ async def _wait_for_workers_ready_async(settings: RestartSettings, timeout_s: in
                     continue
                 try:
                     resp = await client.get("http://" + ip + ":" + str(port) + "/health")
-                    if resp.status_code == 200:
-                        ready.add(ip)
-                        log.info(
-                            "worker /health OK (%s %s) after %ds [%d/%d]", role, ip, elapsed, len(ready), len(targets)
-                        )
                 except _httpx.HTTPError:
-                    pass
+                    continue
+                if resp.status_code == 200:
+                    ready.add(ip)
+                    log.info("worker /health OK (%s %s) after %ds [%d/%d]", role, ip, elapsed, len(ready), len(targets))
             pending = [ip for _r, ip, _p in targets if ip not in ready]
             if not pending:
                 log.info(
@@ -926,6 +934,104 @@ def _collect_worker_server_logs(state: dict, reason: str) -> None:
                 continue
 
 
+@dataclass
+class _ServingWait:
+    """Serving-readiness state of one :func:`_wait_for_server_health_async` wait."""
+
+    settings: RestartSettings
+    base: str
+    timeout_s: int
+    last_err: str = ""
+    health_ok_at: int | None = None
+    models_ready_at: int | None = None
+    consecutive_completion_ok: int = 0
+
+    async def probe_serving(self, client: Any, elapsed: int) -> bool:
+        """Probe /v1/models then /v1/completions once; True once enough consecutive completions served."""
+        settings = self.settings
+        models, probe_err = await _probe_model_ids(client, self.base + "/v1/models")
+        if not models:
+            if not probe_err:
+                self.consecutive_completion_ok = 0
+                probe_err = f"models_empty (health_ok_at={self.health_ok_at}s)"
+            self.last_err = probe_err
+            return False
+        if self.models_ready_at is None:
+            self.models_ready_at = elapsed
+            log.info(
+                "post-restart /v1/models populated after %ds (n=%d, health_ok_at=%ds); now probing /v1/completions",
+                elapsed,
+                len(models),
+                self.health_ok_at,
+            )
+        # Probe with >1 token + ignore_eos so the request must traverse the decode leg (prefill alone can serve
+        # the first token): a PD run with an unready or KV-broken decode then fails the probe instead of passing
+        # on a prefill-only 200.
+        gen_toks, probe_err = await _probe_completion_tokens(
+            client, self.base + "/v1/completions", models, settings.completion_probe_tokens
+        )
+        if gen_toks < settings.completion_probe_min_tokens:
+            # HTTP 200 but decode leg produced nothing (unready / broken PD KV handoff) — do NOT
+            # count as ready.
+            self.consecutive_completion_ok = 0
+            self.last_err = probe_err or (
+                f"completion_probe_zero_tokens gen={gen_toks} "
+                f"(need>={settings.completion_probe_min_tokens}; decode leg not serving)"
+            )
+            return False
+        self.consecutive_completion_ok += 1
+        # require N consecutive successful completions before declaring ready
+        if self.consecutive_completion_ok >= settings.completion_probe_count:
+            log.info(
+                "post-restart READY after %ds (n=%d, models_at=%ds, completion_ok_x%d, gen_tokens=%d)",
+                elapsed,
+                len(models),
+                self.models_ready_at,
+                self.consecutive_completion_ok,
+                gen_toks,
+            )
+            return True
+        self.last_err = (
+            f"completion_probe ok x{self.consecutive_completion_ok}/"
+            f"{settings.completion_probe_count} (gen_tokens={gen_toks})"
+        )
+        return False
+
+    def raise_if_stalled(self, elapsed: int) -> None:
+        """Raise ``ServerRestartFailed`` once a fast-fail grace or ``timeout_s`` has run out."""
+        settings, health_ok_at, models_ready_at = self.settings, self.health_ok_at, self.models_ready_at
+        # Fast-fail grace: if /health is up but /v1/models never registers within this many seconds, the GPU workers
+        # crashed on launch (e.g. an unrecognized server flag) rather than slowly loading — bail early instead of
+        # burning the full timeout_s.
+        if _models_empty_too_long(
+            elapsed=elapsed,
+            health_ok_at=health_ok_at,
+            models_ready_at=models_ready_at,
+            grace_s=settings.models_empty_grace_s,
+        ):
+            raise ServerRestartFailed(
+                f"/v1/models still empty {elapsed - health_ok_at}s after /health "
+                f"(> grace {settings.models_empty_grace_s}s); GPU workers crashed on launch "
+                f"(url={self.base + '/v1/models'}, last_err={self.last_err})"
+            )
+        # Fast-fail when /v1/models is populated but /v1/completions never serves within this window (PD
+        # prefill<->decode KV handoff broken on restart -> HTTP 503 every probe).
+        if _completions_stalled_too_long(
+            elapsed=elapsed, models_ready_at=models_ready_at, grace_s=settings.completions_grace_s
+        ):
+            raise ServerRestartFailed(
+                f"/v1/models populated at {models_ready_at}s but /v1/completions still "
+                f"not serving {elapsed - models_ready_at}s later (> grace {settings.completions_grace_s}s); "
+                f"serving broken, likely PD KV handoff on restart "
+                f"(url={self.base + '/v1/completions'}, last_err={self.last_err})"
+            )
+        if elapsed > self.timeout_s:
+            raise ServerRestartFailed(
+                f"server /health did not return 200 within {self.timeout_s}s "
+                f"(url={self.base}/health, last_err={self.last_err})"
+            )
+
+
 async def _wait_for_server_health_async(settings: RestartSettings, timeout_s: int) -> None:
     """Poll the multi_node service_url /health until 200 or timeout."""
     import time as _time
@@ -943,7 +1049,6 @@ async def _wait_for_server_health_async(settings: RestartSettings, timeout_s: in
     base = service_url.rstrip("/")
     health_url = base + "/health"
     started = _time.monotonic()
-    last_err = ""
     log.info(
         "post-restart /health wait: url=%s timeout_s=%d poll_every_s=%d",
         health_url,
@@ -955,30 +1060,14 @@ async def _wait_for_server_health_async(settings: RestartSettings, timeout_s: in
     # this causes the first benchmark to get 503 "Model temporarily unavailable" for every request, surfacing as
     # `completed=0` -> `baseline_failed`).
     wait_model_ready = str(state.get("backend") or "").strip().lower() == "infera"
-    health_ok_at = None
-    models_ready_at = None
-    consecutive_completion_ok = 0
-    # require N consecutive successful completions before declaring ready
-    completion_probe_required = settings.completion_probe_count
-    # Probe with >1 token + ignore_eos so the request must traverse the decode leg (prefill alone can serve the first
-    # token): a PD run with an unready or KV-broken decode then fails the probe instead of passing on a prefill-only
-    # 200.
-    completion_probe_tokens = settings.completion_probe_tokens
-    completion_probe_min_tokens = settings.completion_probe_min_tokens
-    # Fast-fail grace: if /health is up but /v1/models never registers within this many seconds, the GPU workers
-    # crashed on launch (e.g. an unrecognized server flag) rather than slowly loading — bail early instead of burning
-    # the full timeout_s.
-    models_empty_grace_s = settings.models_empty_grace_s
-    # Fast-fail when /v1/models is populated but /v1/completions never serves within this window (PD prefill<->decode
-    # KV handoff broken on restart -> HTTP 503 every probe).
-    completions_grace_s = settings.completions_grace_s
+    wait = _ServingWait(settings, base, timeout_s)
     async with _httpx.AsyncClient(timeout=15.0) as client:
         while True:
             elapsed = int(_time.monotonic() - started)
-            health_ok, last_err = await _probe_health(client, health_url)
+            health_ok, wait.last_err = await _probe_health(client, health_url)
             if health_ok:
-                if health_ok_at is None:
-                    health_ok_at = elapsed
+                if wait.health_ok_at is None:
+                    wait.health_ok_at = elapsed
                     log.info(
                         "post-restart /health OK after %ds (url=%s)%s",
                         elapsed,
@@ -987,78 +1076,11 @@ async def _wait_for_server_health_async(settings: RestartSettings, timeout_s: in
                     )
                 if not wait_model_ready:
                     return
-                models, probe_err = await _probe_model_ids(client, base + "/v1/models")
-                if not models:
-                    if not probe_err:
-                        consecutive_completion_ok = 0
-                        probe_err = f"models_empty (health_ok_at={health_ok_at}s)"
-                    last_err = probe_err
-                else:
-                    if models_ready_at is None:
-                        models_ready_at = elapsed
-                        log.info(
-                            "post-restart /v1/models populated after %ds (n=%d, health_ok_at=%ds); now probing /v1/completions",
-                            elapsed,
-                            len(models),
-                            health_ok_at,
-                        )
-                    gen_toks, probe_err = await _probe_completion_tokens(
-                        client, base + "/v1/completions", models, completion_probe_tokens
-                    )
-                    if gen_toks >= completion_probe_min_tokens:
-                        consecutive_completion_ok += 1
-                        if consecutive_completion_ok >= completion_probe_required:
-                            log.info(
-                                "post-restart READY after %ds (n=%d, models_at=%ds, completion_ok_x%d, gen_tokens=%d)",
-                                elapsed,
-                                len(models),
-                                models_ready_at,
-                                consecutive_completion_ok,
-                                gen_toks,
-                            )
-                            return
-                        last_err = (
-                            f"completion_probe ok x{consecutive_completion_ok}/"
-                            f"{completion_probe_required} (gen_tokens={gen_toks})"
-                        )
-                    else:
-                        # HTTP 200 but decode leg produced nothing (unready / broken PD KV handoff) — do NOT
-                        # count as ready.
-                        consecutive_completion_ok = 0
-                        last_err = probe_err or (
-                            f"completion_probe_zero_tokens gen={gen_toks} "
-                            f"(need>={completion_probe_min_tokens}; decode leg not serving)"
-                        )
-            if _models_empty_too_long(
-                elapsed=elapsed,
-                health_ok_at=health_ok_at,
-                models_ready_at=models_ready_at,
-                grace_s=models_empty_grace_s,
-            ):
-                raise ServerRestartFailed(
-                    f"/v1/models still empty {elapsed - health_ok_at}s after /health "
-                    f"(> grace {models_empty_grace_s}s); GPU workers crashed on launch "
-                    f"(url={base + '/v1/models'}, last_err={last_err})"
-                )
-            if _completions_stalled_too_long(
-                elapsed=elapsed, models_ready_at=models_ready_at, grace_s=completions_grace_s
-            ):
-                raise ServerRestartFailed(
-                    f"/v1/models populated at {models_ready_at}s but /v1/completions still "
-                    f"not serving {elapsed - models_ready_at}s later (> grace {completions_grace_s}s); "
-                    f"serving broken, likely PD KV handoff on restart "
-                    f"(url={base + '/v1/completions'}, last_err={last_err})"
-                )
-            if elapsed > timeout_s:
-                raise ServerRestartFailed(
-                    f"server /health did not return 200 within {timeout_s}s (url={health_url}, last_err={last_err})"
-                )
+                if await wait.probe_serving(client, elapsed):
+                    return
+            wait.raise_if_stalled(elapsed)
             if elapsed % 60 < settings.health_poll_s:
-                log.info(
-                    "post-restart /health still waiting t=%ds last_err=%s",
-                    elapsed,
-                    last_err,
-                )
+                log.info("post-restart /health still waiting t=%ds last_err=%s", elapsed, wait.last_err)
             await asyncio.sleep(settings.health_poll_s)
 
 
@@ -1085,6 +1107,21 @@ def _is_name_resolution_error(exc: BaseException) -> bool:
     return False
 
 
+def _warn_published_gate_skipped(health_url: str, dns_failures: int, health_poll_s: int) -> None:
+    """Warn that the published-service readiness gate is skipped because its URL never resolved."""
+    # Surface, don't degrade silently: to the caller this is indistinguishable from a pass, so a
+    # later completed=0 / magpie_nonzero_invalid_measurement has no other clue it was this skip.
+    log.warning(
+        "published service_url %s did not resolve from here after %d consecutive "
+        "attempts (~%ds); SKIPPING the published-service readiness gate. If this is "
+        "an in-cluster run this is a DNS problem, and a following benchmark "
+        "completed=0 / ECONNREFUSED likely traces back to this skip.",
+        health_url,
+        dns_failures,
+        dns_failures * health_poll_s,
+    )
+
+
 async def _wait_for_published_service_ready_async(settings: RestartSettings) -> None:
     """Gate on the published ``service_url`` the benchmark dials, not only the reachable address :func:`_wait_for_server_health_async` proves."""
     import time as _time
@@ -1109,11 +1146,9 @@ async def _wait_for_published_service_ready_async(settings: RestartSettings) -> 
     health_url = published + "/health"
     # Consecutive 200s required so a single endpoint-list flap does not pass us (override:
     # HYPERLOOM_MN_PUBLISHED_READY_OK_STREAK).
-    required_ok = settings.published_ready_ok_streak
     ok_streak = 0
     # Skip only after this many CONSECUTIVE name-resolution failures, so a CoreDNS blip inside the readiness window
     # (which resolves on a later poll) does not disable the gate exactly when it is needed.
-    dns_skip_after = settings.published_dns_skip_after
     dns_failures = 0
     started = _time.monotonic()
     last_err = ""
@@ -1127,41 +1162,27 @@ async def _wait_for_published_service_ready_async(settings: RestartSettings) -> 
             elapsed = int(_time.monotonic() - started)
             try:
                 resp = await client.get(health_url)
-                dns_failures = 0  # resolved + connected: not an unresolvable name
-                if resp.status_code == 200:
-                    ok_streak += 1
-                    if ok_streak >= required_ok:
-                        log.info(
-                            "post-restart published-service /health OK after %ds (url=%s)",
-                            elapsed,
-                            health_url,
-                        )
-                        return
-                else:
-                    ok_streak = 0
-                    last_err = f"http_status={resp.status_code}"
             except _httpx.HTTPError as exc:
-                if _is_name_resolution_error(exc):
-                    dns_failures += 1
-                    if dns_failures >= dns_skip_after:
-                        # Surface, don't degrade silently: to the caller this is indistinguishable from a pass, so a
-                        # later completed=0 / magpie_nonzero_invalid_measurement has no other clue it was this skip.
-                        log.warning(
-                            "published service_url %s did not resolve from here after %d consecutive "
-                            "attempts (~%ds); SKIPPING the published-service readiness gate. If this is "
-                            "an in-cluster run this is a DNS problem, and a following benchmark "
-                            "completed=0 / ECONNREFUSED likely traces back to this skip.",
-                            health_url,
-                            dns_failures,
-                            dns_failures * settings.health_poll_s,
-                        )
-                        return
-                    ok_streak = 0
-                    last_err = f"name resolution failed ({dns_failures}/{dns_skip_after})"
-                else:
-                    dns_failures = 0  # reached the host: a real refuse/5xx, keep waiting
-                    ok_streak = 0
-                    last_err = format_exc_brief(exc, limit=120)
+                unresolved = _is_name_resolution_error(exc)
+                # Reaching the host (a real refuse/5xx) resets the count: keep waiting.
+                dns_failures = dns_failures + 1 if unresolved else 0
+                if unresolved and dns_failures >= settings.published_dns_skip_after:
+                    _warn_published_gate_skipped(health_url, dns_failures, settings.health_poll_s)
+                    return
+                ok_streak = 0
+                last_err = (
+                    f"name resolution failed ({dns_failures}/{settings.published_dns_skip_after})"
+                    if unresolved
+                    else format_exc_brief(exc, limit=120)
+                )
+            else:
+                dns_failures = 0  # resolved + connected: not an unresolvable name
+                ok_streak = ok_streak + 1 if resp.status_code == 200 else 0
+                if resp.status_code != 200:
+                    last_err = f"http_status={resp.status_code}"
+                elif ok_streak >= settings.published_ready_ok_streak:
+                    log.info("post-restart published-service /health OK after %ds (url=%s)", elapsed, health_url)
+                    return
             if elapsed > settings.published_ready_s:
                 raise ServerRestartFailed(
                     f"published service /health did not return 200 within {settings.published_ready_s}s "

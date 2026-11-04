@@ -5,17 +5,18 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import math
 import time
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from kernelforge.utils.durable_io import atomic_write_text
+from hyperloom_common.timeutil import now_iso
+from hyperloom_common.io import DURABLE, atomic_write_text
 from kernelforge.workflows.rewrite_controller.handoff import read_handoff
 from kernelforge.workflows.rewrite_controller.opportunity_agent import (
     ANALYSIS_STATUS_COMPLETED,
@@ -51,8 +52,7 @@ class ControllerRunError(RuntimeError):
     """The controller could not establish or complete its top-level lifecycle."""
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+_now_iso = functools.partial(now_iso, "auto")
 
 
 @dataclass(frozen=True)
@@ -164,6 +164,7 @@ def _write_state(layout: ControllerLayout, state: ControllerRunState) -> None:
     atomic_write_text(
         layout.controller_state,
         json.dumps(state.to_dict(), indent=2, sort_keys=True) + "\n",
+        options=DURABLE,
     )
 
 
@@ -217,7 +218,7 @@ def _write_summary(layout: ControllerLayout, state: ControllerRunState) -> None:
                 operator_id = path.name
             lines.append(f"- `{operator_id}`")
         lines.append("")
-    atomic_write_text(layout.summary_md, "\n".join(lines))
+    atomic_write_text(layout.summary_md, "\n".join(lines), options=DURABLE)
 
 
 def _initialize_layout(layout: ControllerLayout) -> None:
@@ -264,18 +265,7 @@ def run_controller(
     layout = ControllerLayout(Path(output_dir))
     _initialize_layout(layout)
 
-    started_unix = time.time()
-    started_at = _now_iso()
-    running = ControllerRunState(
-        status=CONTROLLER_STATUS_RUNNING,
-        handoff_dir=str(handoff_path),
-        output_dir=str(layout.output_dir),
-        budget_minutes=budget,
-        deadline_unix=started_unix + budget * 60.0,
-        started_at=started_at,
-    )
-    _write_state(layout, running)
-    _write_summary(layout, running)
+    running = _start_campaign(layout, handoff_path, budget)
 
     progress: dict[str, Any] = {}
 
@@ -334,6 +324,71 @@ def run_controller(
             progress,
         )
 
+    completed = _completed_state(running, analysis, schedule, patch_count, recovered)
+    _record_finished(layout, completed)
+    return completed
+
+
+def _record_finished(layout: ControllerLayout, completed: ControllerRunState) -> None:
+    """Persist the finished campaign's state and summary, and log its outcome."""
+    _write_state(layout, completed)
+    _write_summary(layout, completed)
+    log.info(
+        "kernel rewrite controller finished: status=%s tasks=%s patches=%s skipped=%s reason=%s",
+        completed.status,
+        completed.task_count,
+        completed.patch_count,
+        completed.skipped_task_count,
+        completed.reason,
+    )
+
+
+def _start_campaign(layout: ControllerLayout, handoff_path: Path, budget: float) -> ControllerRunState:
+    """Persist the running state of a campaign starting now, with its deadline."""
+    started_unix = time.time()
+    started_at = _now_iso()
+    running = ControllerRunState(
+        status=CONTROLLER_STATUS_RUNNING,
+        handoff_dir=str(handoff_path),
+        output_dir=str(layout.output_dir),
+        budget_minutes=budget,
+        deadline_unix=started_unix + budget * 60.0,
+        started_at=started_at,
+    )
+    _write_state(layout, running)
+    _write_summary(layout, running)
+    return running
+
+
+def _completed_state(
+    running: ControllerRunState, analysis, schedule, patch_count: int, recovered: list
+) -> ControllerRunState:
+    """The finished campaign's state: its verdict from analysis and dispatch, and everything it accounted for."""
+    status, reason = _campaign_verdict(analysis, schedule, patch_count)
+    return ControllerRunState(
+        **{
+            **running.to_dict(),
+            "status": status,
+            "finished_at": _now_iso(),
+            "reason": reason,
+            "analysis_status": analysis.status,
+            "analysis_reason": analysis.reason,
+            "analysis_published_task_count": analysis.published_task_count,
+            "analysis_rejected_task_count": analysis.rejected_task_count,
+            "analysis_rejected_tasks": analysis.rejected_tasks,
+            "analysis_llm_usage": _analysis_llm_usage(analysis),
+            "task_count": schedule.task_count,
+            "patch_count": patch_count,
+            "skipped_task_count": schedule.skipped_count,
+            "repository_pins": schedule.repository_pins,
+            "recovery_failures": _recovery_failures(recovered),
+            "forge_llm_usage": _forge_llm_usage(schedule.results),
+        }
+    )
+
+
+def _campaign_verdict(analysis, schedule, patch_count: int) -> tuple[str, str]:
+    """The campaign's final status and the reason for it."""
     if analysis.status != ANALYSIS_STATUS_COMPLETED and schedule.task_count == 0 and patch_count == 0:
         status = CONTROLLER_STATUS_FAILED
         reason = analysis.reason or "opportunity analysis did not complete"
@@ -355,37 +410,7 @@ def run_controller(
     else:
         status = CONTROLLER_STATUS_NO_RESULT
         reason = "prepared operator tasks produced no validated improvement"
-    completed = ControllerRunState(
-        **{
-            **running.to_dict(),
-            "status": status,
-            "finished_at": _now_iso(),
-            "reason": reason,
-            "analysis_status": analysis.status,
-            "analysis_reason": analysis.reason,
-            "analysis_published_task_count": analysis.published_task_count,
-            "analysis_rejected_task_count": analysis.rejected_task_count,
-            "analysis_rejected_tasks": analysis.rejected_tasks,
-            "analysis_llm_usage": _analysis_llm_usage(analysis),
-            "task_count": schedule.task_count,
-            "patch_count": patch_count,
-            "skipped_task_count": schedule.skipped_count,
-            "repository_pins": schedule.repository_pins,
-            "recovery_failures": _recovery_failures(recovered),
-            "forge_llm_usage": _forge_llm_usage(schedule.results),
-        }
-    )
-    _write_state(layout, completed)
-    _write_summary(layout, completed)
-    log.info(
-        "kernel rewrite controller finished: status=%s tasks=%s patches=%s skipped=%s reason=%s",
-        completed.status,
-        completed.task_count,
-        completed.patch_count,
-        completed.skipped_task_count,
-        completed.reason,
-    )
-    return completed
+    return status, reason
 
 
 __all__ = [

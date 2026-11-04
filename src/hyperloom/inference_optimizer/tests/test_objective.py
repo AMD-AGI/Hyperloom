@@ -54,19 +54,16 @@ def _backends_silent() -> dict[str, object]:
 
 
 # TargetGainObjective
-def test_target_gain_basic_progress():
+def test_target_gain_reached_at_target():
     obj = TargetGainObjective(target_gain_pct=10.0)
     s = SharedState(baseline_tput=1000.0, cumulative_gain_validated=0.0)
     assert obj.kind() == "gain_pct"
-    assert obj.progress(s) == 0.0
     assert not obj.reached(s)
 
     s.cumulative_gain_validated = 5.0
-    assert obj.progress(s) == 0.5
     assert not obj.reached(s)
 
     s.cumulative_gain_validated = 12.0
-    assert obj.progress(s) == 1.0
     assert obj.reached(s)
 
 
@@ -94,18 +91,16 @@ def test_target_tput_uses_current_best():
     obj = TargetTputObjective(target_tput_per_gpu=900.0)
     s = SharedState(baseline_tput=800.0, current_best={"tput": 850.0})
     assert obj.kind() == "tput"
-    assert obj.progress(s) == pytest.approx(850.0 / 900.0)
     assert not obj.reached(s)
 
     s.current_best = {"tput": 950.0}
-    assert obj.progress(s) == 1.0
     assert obj.reached(s)
 
 
 def test_target_tput_falls_back_to_baseline_when_no_current_best():
     obj = TargetTputObjective(target_tput_per_gpu=900.0)
     s = SharedState(baseline_tput=750.0, current_best={})
-    assert obj.progress(s) == pytest.approx(750.0 / 900.0)
+    assert obj.gap_pct(s) == pytest.approx(20.0)
 
 
 def test_target_tput_gap_pct_is_relative_to_current():
@@ -140,7 +135,6 @@ def test_target_baseline_loads_ref_tput(tmp_path):
     s = SharedState(baseline_tput=1000.0, current_best={"tput": 1000.0})
     assert obj.kind() == "baseline"
     assert "1234" in obj.describe()
-    assert obj.progress(s) == pytest.approx(1000.0 / 1234.5)
     assert not obj.reached(s)
 
     s.current_best = {"tput": 1300.0}
@@ -185,7 +179,6 @@ def test_time_only_never_reached():
     obj = TimeOnlyObjective()
     s = SharedState(baseline_tput=999.0, current_best={"tput": 9999.0}, cumulative_gain_validated=99.0)
     assert obj.kind() == "time_only"
-    assert obj.progress(s) == 0.0
     assert not obj.reached(s)
     assert obj.gap_pct(s) == 0.0
 
@@ -538,14 +531,13 @@ def _state_with_within(value: object) -> SharedState:
 
 
 class TestARooflineTargetOnlyCountsAMeasuredRoofline:
-    """The objective has no separate "was it profiled" gate; an unmeasured ceiling simply reads as zero progress."""
+    """The objective has no separate "was it profiled" gate; an unmeasured ceiling simply reads as zero."""
 
     def test_no_snapshot_reads_as_unmeasured(self):
         st = SharedState(session_id="s")
         assert st.current_within_roofline_pct() is None
         obj = TargetRooflineObjective(80.0)
         assert obj.reached(st) is False
-        assert obj.progress(st) == 0.0
         assert obj.gap_pct(st) == pytest.approx(80.0)
 
     @pytest.mark.parametrize("value", [None, "62.5"])
@@ -565,7 +557,6 @@ class TestARooflineTargetOnlyCountsAMeasuredRoofline:
         assert obj.reached(_state_with_within(79.99)) is False
         assert obj.reached(_state_with_within(80.0)) is True
         assert obj.gap_pct(_state_with_within(62.5)) == pytest.approx(17.5)
-        assert obj.progress(_state_with_within(40.0)) == pytest.approx(0.5)
 
     @pytest.mark.parametrize("bad", [0.0, -1.0, 100.1])
     def test_the_target_is_a_percentage(self, bad):
@@ -599,7 +590,6 @@ class TestEitherTargetEndsTheRun:
         st = _state_with_within(40.0)
         st.cumulative_gain_validated = 200.0
         both = self._both()
-        assert both.progress(st) == pytest.approx(2 / 3)
         assert both.gap_pct(st) == pytest.approx(100.0)
 
 

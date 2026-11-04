@@ -23,6 +23,8 @@ from hyperloom.common.launch_log_evidence import (
     operand_digest,
 )
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
+from ...measurement.runtime_findings import persist_runtime_findings, scan_server_log
+from ._workload_envs import VLLM_SOURCE_ROOT_ENVS
 
 log = logging.getLogger(__name__)
 
@@ -202,3 +204,12 @@ def persist_launch_evidence(evidence: dict[str, Any], *, slot: Path) -> str:
     except OSError:
         log.warning("launch evidence could not persist in %s", slot, exc_info=True)
         return ""
+
+
+def persist_measurement_evidence(evidence: dict[str, Any], *, actual_server_log: str | None, slot: Path) -> str:
+    """Persist a measurement's launch evidence and, in the same slot, the runtime findings of its server log."""
+    path = persist_launch_evidence(evidence, slot=slot)
+    declared_env = evidence["requested_server_env"].keys() - set(VLLM_SOURCE_ROOT_ENVS)
+    report = scan_server_log(actual_server_log, evidence["framework"], declared_env=declared_env)
+    persist_runtime_findings(report, slot=slot)
+    return path

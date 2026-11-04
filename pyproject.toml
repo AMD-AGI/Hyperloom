@@ -101,8 +101,15 @@ forge-profiling = [
     "textual-fspicker>=0.4.3",
     "tqdm",
 ]
+# Hosted measurement: the E2B sandbox SDK, imported only by ``hyperloom.sandbox.e2b``. ``e2b`` 2.53 is the
+# first SDK whose ``connect`` sends the ``E2b-Sandbox-Id`` header the data-plane router needs and whose errors carry a
+# ``status_code``.
+hosted = [
+    "e2b>=2.53.1,<3",
+]
 test = [
     "hyperloom-inference_optimizer[runtime]",
+    "hyperloom-inference_optimizer[hosted]",
     "hyperloom-inference_optimizer[ci]",
     # The Experience KB tests run on PostgreSQL too when HYPERLOOM_KB_TEST_DATABASE_URL names a server.
     "hyperloom-inference_optimizer[kb-service]",
@@ -246,6 +253,8 @@ hyperloom = [
     "hosted/*.sh",
     "orchestrator/prompts/*.md",
     "orchestrator/prompts/references/*.md",
+    # The reference rule pack a session reads when HYPERLOOM_RULE_PACK names no other; importing outside_facts fails without it.
+    "common/outside_facts/packs/*.yaml",
 ]
 "hyperloom.inference_optimizer" = [
     "SKILL.md",
@@ -345,6 +354,7 @@ branch = false
 # combine into consistent totals.
 relative_files = true
 source = [
+    "src/hyperloom_common",
     "src/hyperloom",
     "src/kernelforge",
     "src/hyperloom_kb",
@@ -546,9 +556,9 @@ cyclomatic-complexity = 20
 # a reader has to re-read rather than read.
 cognitive-complexity = 30
 # Lines of code in the body: the ``def`` lines, decorators, blank, comment and
-# docstring lines do not count. Past 50 a function rarely does one thing; split
-# it along its steps.
-function-lines = 50
+# docstring lines do not count. Past 60, about the tree's 98th percentile, a
+# function rarely does one thing; split it along its steps.
+function-lines = 60
 # Past four nested blocks the innermost line depends on five conditions at
 # once; extract the inner loop or invert a condition.
 nested-blocks = 4
@@ -706,7 +716,7 @@ exclude = ["**/*.md", "**/*.rst"]
 
 [tool.mypy]
 python_version = "3.10"
-files = ["src/hyperloom"]
+files = ["src/hyperloom_common", "src/hyperloom"]
 exclude = [
     ".*/tests/.*",
     "build",

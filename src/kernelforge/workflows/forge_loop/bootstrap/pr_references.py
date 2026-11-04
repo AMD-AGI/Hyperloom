@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from hyperloom.common.env import env_bool
+from hyperloom_common.env import env_bool
 from kernelforge.utils.git import git
 
 if TYPE_CHECKING:

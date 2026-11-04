@@ -8,12 +8,12 @@ from __future__ import annotations
 import logging
 import os
 import sys
-import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from functools import partial
 from typing import Any
 
+from hyperloom_common.timeutil import now_iso
 from kernelforge.workflows.forge_loop.bootstrap.lanes import LaneBinding
 from kernelforge.config import Config, resolve_agent_model
 from kernelforge.agent_backends.runtime import agent_runtime, agent_runtime_for
@@ -228,7 +228,7 @@ def probe_agent_profiles(
         for status in profile_status.values()
     }
     return AgentAvailabilitySnapshot(
-        checked_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        checked_at=now_iso("seconds", z_suffix=True),
         providers=provider_status,
         profiles=profile_status,
     )
@@ -336,9 +336,7 @@ def build_search_actor_pool(
             bundles[profile.profile_id] = bundle
 
     snapshot = AgentAvailabilitySnapshot(
-        checked_at=(
-            availability.checked_at if availability is not None else time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        ),
+        checked_at=(availability.checked_at if availability is not None else now_iso("seconds", z_suffix=True)),
         session_index=(availability.session_index if availability is not None else 0),
         providers=provider_status,
         profiles=profile_status,

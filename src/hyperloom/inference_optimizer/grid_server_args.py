@@ -13,7 +13,7 @@ import shlex
 from dataclasses import dataclass
 from typing import Any
 
-from hyperloom.common.coerce import optional_positive_int, to_str_list
+from hyperloom_common.coerce import optional_positive_int, to_str_list
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 
 
@@ -179,6 +179,24 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
     # No re-serialisation on the way out: the tokens are already JSON-compacted and the non-POSIX split kept each one
     # byte-for-byte, so re-joining the survivors cannot corrupt a sibling flag.
     return " ".join(out)
+
+
+def removals_absent_from_args(server_args: str | None, remove_args: Any) -> list[str]:
+    """The removal specs that delete nothing from ``server_args``, one spec per entry, in the order they are written.
+
+    A removal that still matches a composed snapshot is not a delta against it: a consumer that applies it to that
+    snapshot deletes an option the snapshot asserts. What is left here removes nothing from ``server_args`` and so
+    keeps suppressing, in whatever base a consumer applies it to, only the options that base carries.
+    """
+    args = normalize_server_args(server_args)
+    kept: list[str] = []
+    # Per parsed spec rather than per written entry: one entry may name several options ("--a --b"), and an entry is
+    # dropped only for the options that collide.
+    for flag, value in _parse_removal_specs(remove_args):
+        spec = flag if value is None else f"{flag} {value}"
+        if spec not in kept and remove_server_args(args, [spec]) == args:
+            kept.append(spec)
+    return kept
 
 
 # Serving-ineligible harness flags: legal to benchmark with, wrong to hand back as a serving recipe. Stripped where a
@@ -494,11 +512,6 @@ def flag_occurrences(server_args: str | None) -> list[tuple[str, str]]:
             value = tokens[index + 1]
         occurrences.append((name.lstrip("-").lower().replace("_", "-"), value))
     return occurrences
-
-
-def last_flag_values(server_args: str | None) -> dict[str, str]:
-    """Each flag's value, last occurrence winning like the engines' argparse; ``""`` for a bare flag."""
-    return dict(flag_occurrences(server_args))
 
 
 def last_alias_value(occurrences: list[tuple[str, str]], aliases: frozenset[str]) -> str | None:
@@ -887,6 +900,24 @@ def moe_runner_requires_aiter(server_args: str | None, model_path: str | None) -
     )
 
 
+def _flag_pair_at(tokens: list[str], i: int) -> tuple[list[str], int]:
+    """Return the flag at ``tokens[i]`` followed by its values, and the index past them."""
+    t = tokens[i]
+    if "=" in t:
+        flag, _, value = t.partition("=")
+        return [flag, value] if value else [flag], i + 1
+    i += 1
+    pair = [t]
+    if t in _MULTI_VALUE_FLAGS:
+        while i < len(tokens) and not tokens[i].startswith("--"):
+            pair.append(tokens[i])
+            i += 1
+    elif i < len(tokens) and not tokens[i].startswith("--"):
+        pair.append(tokens[i])
+        i += 1
+    return pair, i
+
+
 def dedupe_extra_server_args(args_str: str) -> str:
     """Collapse repeated ``--flag value`` pairs into a unique launch string."""
     if not args_str:
@@ -901,22 +932,8 @@ def dedupe_extra_server_args(args_str: str) -> str:
     while i < len(tokens):
         t = tokens[i]
         if t.startswith("--"):
-            if "=" in t:
-                flag, _, value = t.partition("=")
-                values = [value] if value else []
-                i += 1
-            else:
-                flag = t
-                i += 1
-                values = []
-                if flag in _MULTI_VALUE_FLAGS:
-                    while i < len(tokens) and not tokens[i].startswith("--"):
-                        values.append(tokens[i])
-                        i += 1
-                elif i < len(tokens) and not tokens[i].startswith("--"):
-                    values = [tokens[i]]
-                    i += 1
-            pair = [flag, *values] if values else [flag]
+            pair, i = _flag_pair_at(tokens, i)
+            flag = pair[0]
             if flag not in pair_by_flag:
                 order.append(flag)
             pair_by_flag[flag] = pair

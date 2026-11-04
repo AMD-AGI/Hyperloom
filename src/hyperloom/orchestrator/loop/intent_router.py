@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import sqlite3
 import time
 import uuid
 from collections.abc import Mapping
@@ -19,7 +20,7 @@ from hyperloom.orchestrator.lever import (
     patch_owner_phase,
 )
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.common.timeutil import format_exc_brief
+from hyperloom_common.timeutil import format_exc_brief
 from .verdicts import (
     CriticRuling,
     collapse_verdict_map,
@@ -28,10 +29,10 @@ from .verdicts import (
     verdict_held_to_its_rule,
     verdict_map_entry_held_to_its_rule,
 )
-from hyperloom.common.coerce import to_int, to_unix
+from hyperloom_common.coerce import to_int, to_unix
 from ..bus.message_bus import Message
+from ..policy.denial import PolicyDenied
 from ..policy.gate import (
-    PolicyDenied,
     PRUNE_BRANCH_SCOPE_FAMILY,
     PRUNE_BRANCH_SCOPE_QUEUED,
 )
@@ -190,26 +191,35 @@ def _record_phase_proposal_review(pending: Any, ruling: CriticRuling) -> None:
     proposal_id = str(getattr(pending, "proposal_msg_id", "") or "")
     if not proposal_id:
         return
-    try:
-        from hyperloom.inference_optimizer.breakdown.recorder import phase_event
-        from hyperloom.inference_optimizer.breakdown.recorder.phase_records import ProposalReview
+    from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+    from hyperloom.inference_optimizer.breakdown.recorder.phase_records import ProposalReview
 
-        fields = ruling.payload or {}
-        phase_event.record_proposal_review(
-            ProposalReview(
-                proposal_msg_id=proposal_id,
-                verdict=ruling.authored or ruling.effective,
-                effective_verdict=ruling.effective,
-                source=str(fields.get("source") or ""),
-                reasoning=str(ruling.reasoning or ""),
-                confidence=fields.get("confidence"),
-                failure_reason_code=fields.get("failure_reason_code"),
-                advisory=ruling.advisory,
-                variants=ruling.variant_verdicts,
-            )
+    fields = ruling.payload or {}
+    phase_event.record_proposal_review(
+        ProposalReview(
+            proposal_msg_id=proposal_id,
+            verdict=ruling.authored or ruling.effective,
+            effective_verdict=ruling.effective,
+            source=str(fields.get("source") or ""),
+            reasoning=str(ruling.reasoning or ""),
+            confidence=fields.get("confidence"),
+            failure_reason_code=fields.get("failure_reason_code"),
+            advisory=ruling.advisory,
+            variants=ruling.variant_verdicts,
         )
-    except Exception:
-        log.debug("phase timeline: proposal review row failed for %s", proposal_id, exc_info=True)
+    )
+
+
+def _patch_verdict_subject(pending: Any, pa_params: Mapping[str, Any]) -> str:
+    """The key a proposal's Critic verdict is mirrored under as a patch verdict, or ``""`` when none."""
+    sid_candidate = ""
+    if pending.action_name == "integrate_patch":
+        # A pre-screen carries its candidate id at the top level, not in params.
+        sid_candidate = verdict_subject({**pa_params, **(pending.payload or {})})
+    elif pending.action_name == "specialist":
+        # Critic verdict on the specialist proposal counts as the verdict on its patches; task_id is the key.
+        sid_candidate = str(pa_params.get("task_id") or "").strip()
+    return sid_candidate
 
 
 def _record_critic_review(router: Any, pending: Any, ruling: CriticRuling) -> None:
@@ -277,21 +287,18 @@ def _record_phase_proposal_outcome(pending: Any, **outcome: Any) -> None:
     proposal_id = str(getattr(pending, "proposal_msg_id", "") or "")
     if not proposal_id:
         return
-    try:
-        from hyperloom.inference_optimizer.breakdown.recorder import phase_event
-        from hyperloom.inference_optimizer.breakdown.recorder.phase_records import ProposalOutcome
+    from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+    from hyperloom.inference_optimizer.breakdown.recorder.phase_records import ProposalOutcome
 
-        phase_event.record_proposal_outcome(
-            ProposalOutcome(
-                proposal_msg_id=proposal_id,
-                materialized=bool(outcome.get("materialized")),
-                denied=bool(outcome.get("denied")),
-                reauthored=bool(outcome.get("reauthored")),
-                patch_verdict_key=outcome.get("patch_verdict_key"),
-            )
+    phase_event.record_proposal_outcome(
+        ProposalOutcome(
+            proposal_msg_id=proposal_id,
+            materialized=bool(outcome.get("materialized")),
+            denied=bool(outcome.get("denied")),
+            reauthored=bool(outcome.get("reauthored")),
+            patch_verdict_key=outcome.get("patch_verdict_key"),
         )
-    except Exception:
-        log.debug("phase timeline: proposal outcome row failed for %s", proposal_id, exc_info=True)
+    )
 
 
 def _record_review_outcome(router: Any, pending: Any, **outcome: Any) -> None:
@@ -503,7 +510,7 @@ class IntentRouter(CoordinatorCollaborator):
                         "error": format_exc_brief(exc, limit=500),
                     },
                 )
-            except Exception:
+            except sqlite3.Error:
                 log.exception("failed to record handle_intent_exception observation")
             return
 
@@ -721,22 +728,7 @@ class IntentRouter(CoordinatorCollaborator):
                     "verdict": verdict,
                 },
             )
-        rebroadcast_payload: dict[str, Any] = {
-            "target_proposal_msg_id": pending.proposal_msg_id,
-            "verdict": verdict,
-            "reasoning": ruling.reasoning,
-        }
-        if ruling.advisory:
-            rebroadcast_payload.update(ruling.advisory)
-        await self.bus.append_and_seq(
-            Message.new(
-                source,
-                pending.from_agent,
-                "review_verdict",
-                rebroadcast_payload,
-                in_reply_to=pending.proposal_msg_id,
-            )
-        )
+        await self._rebroadcast_verdict(source, pending, ruling)
         # Mirror specialist / integrate_patch verdicts onto SharedState so PolicyGate's integrate_patch gate can
         # consult them on the next tick.
         patch_verdict = ruling.authored
@@ -744,13 +736,7 @@ class IntentRouter(CoordinatorCollaborator):
             pa_params = pending.payload.get("params") or {}
         except AttributeError:
             pa_params = {}
-        sid_candidate = ""
-        if pending.action_name == "integrate_patch":
-            # A pre-screen carries its candidate id at the top level, not in params.
-            sid_candidate = verdict_subject({**pa_params, **(pending.payload or {})})
-        elif pending.action_name == "specialist":
-            # Critic verdict on the specialist proposal counts as the verdict on its patches; task_id is the key.
-            sid_candidate = str(pa_params.get("task_id") or "").strip()
+        sid_candidate = _patch_verdict_subject(pending, pa_params)
         if sid_candidate and patch_verdict:
             try:
                 self.shared_state.record_specialist_patch_verdict(
@@ -787,6 +773,25 @@ class IntentRouter(CoordinatorCollaborator):
                 STATUS_COMPLETED if verdict in ("approve", "advise") else STATUS_CANCELLED,
                 task_id=pending.task_id,
             )
+
+    async def _rebroadcast_verdict(self, source: str, pending: Any, ruling: CriticRuling) -> None:
+        """Re-publish the collapsed verdict as a ``review_verdict`` reply to the proposal's author."""
+        rebroadcast_payload: dict[str, Any] = {
+            "target_proposal_msg_id": pending.proposal_msg_id,
+            "verdict": ruling.verdict,
+            "reasoning": ruling.reasoning,
+        }
+        if ruling.advisory:
+            rebroadcast_payload.update(ruling.advisory)
+        await self.bus.append_and_seq(
+            Message.new(
+                source,
+                pending.from_agent,
+                "review_verdict",
+                rebroadcast_payload,
+                in_reply_to=pending.proposal_msg_id,
+            )
+        )
 
     async def _apply_verdict_outcome(
         self,

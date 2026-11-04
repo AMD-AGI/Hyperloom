@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
 
-from hyperloom.common.env import env_flag
+from hyperloom_common.env import env_flag
 from hyperloom.common.proctree import REAP_MARK_ENV, TERM_GRACE_SEC, collect_tree, kill_tree, marked_pids
 
 from .bypass_analysis import parse_server_log_throughput
@@ -49,6 +49,18 @@ COOPERATIVE_REAP_BUDGET_SEC: float = (
 )
 
 
+def _terminate_single_process(proc: subprocess.Popen, grace_seconds: float) -> None:
+    """Terminate ``proc`` alone, escalating to kill after ``grace_seconds``, where process groups are unavailable."""
+    try:
+        proc.terminate()
+        proc.wait(timeout=grace_seconds)
+    except (subprocess.TimeoutExpired, OSError):
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
 def kill_my_spawned_server(
     proc: subprocess.Popen | None,
     *,
@@ -64,14 +76,7 @@ def kill_my_spawned_server(
             kill_tree(collect_tree(marked), grace_sec=grace_seconds, confirm_sec=grace_seconds)
         return
     if os.name != "posix":
-        try:
-            proc.terminate()
-            proc.wait(timeout=grace_seconds)
-        except (subprocess.TimeoutExpired, OSError):
-            try:
-                proc.kill()
-            except OSError:
-                pass
+        _terminate_single_process(proc, grace_seconds)
         return
 
     try:
@@ -207,6 +212,8 @@ ORCHESTRATOR_CANCELLED_RETURNCODE: int = -917
 _SERVER_READY_MARKERS: tuple[str, ...] = (
     "Application startup complete",
     "Uvicorn running on",
+    # vLLM's Rust frontend (`vllm serve` with VLLM_USE_RUST_FRONTEND=1) runs no uvicorn; this is its ready line.
+    "OpenAI server is ready to accept requests",
     "The server is fired up and ready to roll",
 )
 
@@ -260,7 +267,7 @@ def default_benchmark_timeout_sec(env: Mapping[str, str] | None = None) -> float
 
     Sizing reads only workload pins -- the backend, the flow, ``CONC`` -- but it
     reads them as the run will: a pin it cannot parse raises
-    :class:`~hyperloom.common.env.EnvValueError` here rather than sizing the
+    :class:`~hyperloom_common.env.EnvValueError` here rather than sizing the
     grant for a workload the round will refuse to start.
     """
     from hyperloom.common.agentx_workload import (
@@ -359,10 +366,7 @@ class _StreamCapture:
         """Report one unit of child output to the caller's liveness callback."""
         if self._on_output is None:
             return
-        try:
-            self._on_output()
-        except Exception as exc:  # outermost liveness sink: reporting never breaks capture
-            log.debug("_subprocess_kill: liveness callback failed: %s", exc, exc_info=True)
+        self._on_output()
 
     def _pump(self, pipe, chunks: list[str], mirror) -> None:
         """Read available bytes without waiting for a newline or a complete codepoint."""
@@ -788,47 +792,39 @@ _KV_METRICS_ENV = "INFERENCE_OPTIMIZER_KV_METRICS"
 
 
 def _build_kv_recorder(server_log_path: str | None, env: dict[str, str] | None) -> Any:
-    """Build the KV-metrics recorder for this round, or ``None`` when it is off or cannot be built.
-
-    Collection is strictly observational, so every failure here is swallowed: a round that produces a good benchmark
-    number and no KV metrics is a far better outcome than one that dies because a telemetry import went wrong.
-    """
+    """Build the KV-metrics recorder for this round, or ``None`` when it is off."""
     if not server_log_path:
         return None
     if not env_flag(_KV_METRICS_ENV, default=True):
         return None
-    try:
-        from ._kv_metrics import KV_ARTIFACT_NAME, AiperfProgressPoller, KvMetricsPoller, KvMetricsRecorder, KvRound
+    from ._kv_metrics import KV_ARTIFACT_NAME, AiperfProgressPoller, KvMetricsPoller, KvMetricsRecorder, KvRound
 
-        workspace = Path(server_log_path).parent
-        return KvMetricsRecorder(
-            # The workspace is where the port actually lives: it is pinned in the round's materialized
-            # ``benchmark.envs.PORT``, which is never exported into the subprocess environment.
-            poller=KvMetricsPoller(config_envs=dict(env or {}), workspace=workspace),
-            # Authoritative phase boundaries when this round is an AgentX one; a no-op otherwise, since no other client
-            # publishes a progress address and the poller then never resolves a URL.
-            progress=AiperfProgressPoller(workspace),
-            kv_round=KvRound(
-                output_path=str(workspace / KV_ARTIFACT_NAME),
-                scope={
-                    "server_log_path": str(server_log_path),
-                    "workspace": workspace.name,
-                    "run_path": _run_relative_path(workspace),
-                    "session": os.path.basename(
-                        os.environ.get("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", "").rstrip("/\\")
-                    ),
-                },
-            ),
-        )
-    except Exception:
-        log.warning("kv_metrics: recorder could not be built; this round collects nothing", exc_info=True)
-        return None
+    workspace = Path(server_log_path).parent
+    return KvMetricsRecorder(
+        # The workspace is where the port actually lives: it is pinned in the round's materialized
+        # ``benchmark.envs.PORT``, which is never exported into the subprocess environment.
+        poller=KvMetricsPoller(config_envs=dict(env or {}), workspace=workspace),
+        # Authoritative phase boundaries when this round is an AgentX one; a no-op otherwise, since no other client
+        # publishes a progress address and the poller then never resolves a URL.
+        progress=AiperfProgressPoller(workspace),
+        kv_round=KvRound(
+            output_path=str(workspace / KV_ARTIFACT_NAME),
+            scope={
+                "server_log_path": str(server_log_path),
+                "workspace": workspace.name,
+                "run_path": _run_relative_path(workspace),
+                "session": os.path.basename(
+                    os.environ.get("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", "").rstrip("/\\")
+                ),
+            },
+        ),
+    )
 
 
 class _RecorderFanout:
     """Drives this round's recorders from the watchdog's single ``note_phase`` / ``tick`` / ``close`` calls.
 
-    Each call is isolated: one recorder raising must not starve the others of their phase marks or their ``close``.
+    Each recorder absorbs its own scrape and write failures; anything else it raises fails the round.
     """
 
     def __init__(self, recorders: list[Any], *, ready_phase: str = "measured") -> None:
@@ -837,10 +833,7 @@ class _RecorderFanout:
 
     def _each(self, method: str, *args: Any, **kwargs: Any) -> None:
         for recorder in self._recorders:
-            try:
-                getattr(recorder, method)(*args, **kwargs)
-            except Exception:
-                log.warning("round recorder %s.%s failed", type(recorder).__name__, method, exc_info=True)
+            getattr(recorder, method)(*args, **kwargs)
 
     def note_phase(self, phase: str, mono: float) -> None:
         self._each("note_phase", self._ready_phase if phase == _READY_PHASE else phase, mono)
@@ -860,7 +853,16 @@ class _RecorderFanout:
         self._each("tick", mono)
 
     def close(self, *, aborted: bool = False) -> None:
-        self._each("close", aborted=aborted)
+        """Close every recorder, then raise the first error one of them raised."""
+        first_error: Exception | None = None
+        for recorder in self._recorders:
+            try:
+                recorder.close(aborted=aborted)
+            except Exception as exc:  # noqa: BLE001 - re-raised once every recorder is closed
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
 
 
 def _build_round_recorders(server_log_path: str | None, env: dict[str, str] | None) -> _RecorderFanout:

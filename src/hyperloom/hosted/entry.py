@@ -36,7 +36,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.io import WriteOptions, atomic_write_json
+from hyperloom_common.io import WriteOptions, atomic_write_json
 from hyperloom.common.owner_scope import local_owner_scope
 from hyperloom.hosted.campaign import FLOW_MULTIBRANCH, CampaignError, CampaignSpec, optimize_args, parse_campaign
 from hyperloom.hosted.host_info import HostInfo, HostInfoError, Var, read_host_info, take_host_info

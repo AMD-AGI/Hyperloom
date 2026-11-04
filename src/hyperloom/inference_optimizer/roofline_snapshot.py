@@ -13,8 +13,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.coerce import dict_rows, first_str
-from hyperloom.common.jsonio import read_json
+from hyperloom_common.coerce import dict_rows, first_str
+from hyperloom_common.jsonio import read_json
+from hyperloom.common.tracelens_report import member_name
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.inference_optimizer.roofline_ceiling import (
     ComputeTarget,
@@ -138,12 +139,12 @@ def extract_workload_summary(analysis_md_path: str | Path) -> dict[str, Any]:
 def _top_kernel_from_json(path: Path) -> dict[str, Any] | None:
     """The ``compute_optimizations`` member with the highest ``pct_e2e`` of an ``analysis.json``."""
     data = read_json(path, default={}, require_dict=True)
-    members = [m for task in data.get("compute_optimizations") or [] for m in task["members"]]
+    members = [(task, m) for task in data.get("compute_optimizations") or [] for m in task["members"]]
     if not members:
         return None
-    best = max(members, key=lambda m: m["pct_e2e"])
+    task, best = max(members, key=lambda pair: pair[1]["pct_e2e"])
     return {
-        "name": best["operation_cell"],
+        "name": member_name(task, best),
         "gpu_pct": round(best["pct_e2e"], 2),
         "efficiency_pct": _parse_pct(None if best["efficiency_percent"] is None else str(best["efficiency_percent"])),
         "bound_type": best["bound"] or "",

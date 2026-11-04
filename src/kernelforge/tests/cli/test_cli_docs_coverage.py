@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import re
-from pathlib import Path
 
 import click
 
@@ -13,14 +12,6 @@ from kernelforge.cli import main
 
 DOC_RELPATH = "docs/kernelforge/reference/cli.md"
 ROOT_NAME = "kernelforge"
-
-
-def _repo_root() -> Path | None:
-    root = Path(__file__).resolve()
-    for parent in root.parents:
-        if (parent / ".git").exists():
-            return parent
-    return None
 
 
 def _every_command(group: click.Group, prefix: str = ""):
@@ -59,11 +50,8 @@ def _mentions(body: str, opt: str) -> bool:
     return re.search(rf"(?<![\w-]){re.escape(opt)}(?![\w-])", body) is not None
 
 
-def test_every_declared_option_is_documented_under_its_own_command():
-    repo = _repo_root()
-    if repo is None:
-        return  # installed without the source tree; nothing to check against
-    doc = repo / DOC_RELPATH
+def test_every_declared_option_is_documented_under_its_own_command(repo_root):
+    doc = repo_root / DOC_RELPATH
     assert doc.is_file(), f"{DOC_RELPATH} is missing"
     sections = _sections(doc.read_text(encoding="utf-8"))
 

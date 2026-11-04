@@ -95,12 +95,22 @@ def git(
     cwd: str | Path | None = None,
     check: bool = True,
     timeout: float | None = DEFAULT_TIMEOUT_SEC,
-    input: str | None = None,
     env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess:
     """Run one git command to completion, capturing both streams as text."""
-    process = _spawn(args, cwd, env, stdin=input is not None, text=True)
-    return _communicate(process, input, timeout, check)
+    process = _spawn(args, cwd, env, stdin=False, text=True)
+    return _communicate(process, None, timeout, check)
+
+
+def git_apply(
+    patch: str,
+    *args: str,
+    cwd: str | Path | None = None,
+    check: bool = True,
+) -> subprocess.CompletedProcess:
+    """Run ``git apply <args>`` with ``patch`` on its stdin, capturing both streams as text."""
+    process = _spawn(("apply", *args), cwd, None, stdin=True, text=True)
+    return _communicate(process, patch, DEFAULT_TIMEOUT_SEC, check)
 
 
 def git_bytes(
@@ -109,10 +119,9 @@ def git_bytes(
     check: bool = True,
     timeout: float | None = DEFAULT_TIMEOUT_SEC,
     input: bytes | None = None,
-    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess:
     """Run one git command to completion, capturing both streams as raw bytes."""
-    process = _spawn(args, cwd, env, stdin=input is not None, text=False)
+    process = _spawn(args, cwd, None, stdin=input is not None, text=False)
     return _communicate(process, input, timeout, check)
 
 

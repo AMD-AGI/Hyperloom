@@ -10,7 +10,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.timeutil import now_iso
 from hyperloom.inference_optimizer.protocol.intent import Intent
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 

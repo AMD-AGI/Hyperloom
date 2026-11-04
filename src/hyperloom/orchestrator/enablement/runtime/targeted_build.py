@@ -11,7 +11,7 @@ import signal
 import subprocess
 import sys
 
-from hyperloom.common.git_safety import safe_directory_args
+from hyperloom_common.git_safety import safe_directory_args
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -729,7 +729,7 @@ def _driver_main(argv: list[str] | None = None) -> int:
 
     try:
         action = TargetedBuildAction.from_state(json.loads(plan_path.read_text(encoding="utf-8")))
-    except Exception as exc:  # outermost process entry: the failure is written to result.json
+    except (OSError, ValueError) as exc:
         log.warning("targeted build driver: failed to load plan.json: %s", exc, exc_info=True)
         result_path.write_text(
             json.dumps(

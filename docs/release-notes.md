@@ -20,6 +20,13 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **Bump validated SGLang stack to 0.5.23 (ROCm 10 docker).** Updates
+  `SGLANG_REF`, `SGLANG_PRETEND_VERSION`, recommended
+  `lmsysorg/sglang-rocm:v0.5.23-rocm10-*` image tags, `models.tsv`, the
+  quick-start `Dockerfile`, and the hosted app image `Dockerfile`. **Upgrade note:** move from
+  `v0.5.22-rocm10-mi30x|mi35x-20261022` to
+  `v0.5.23-rocm10-mi30x|mi35x-20261102` (or match `SGLANG_REF` on bare metal).
+
 - **Bump validated SGLang stack to 0.5.22 (ROCm 10 docker).** Updates
   `SGLANG_REF`, `SGLANG_PRETEND_VERSION`, recommended
   `lmsysorg/sglang-rocm:v0.5.22-rocm10-*` image tags, `models.tsv`, and the
@@ -63,6 +70,21 @@ it.
   the CLI again. Every other failure, and any Ray set through `RAY_VERSION`,
   leaves `click` untouched; this narrows the no-downgrade rule of the entry above
   and has no setting.
+- **Code Hyperloom and KernelForge share lives in the `hyperloom_common`
+  package.** `aiter_jit_cache`, `checkpoint_quant`, `coerce`, `entry_points`,
+  `env`, `fs_utils`, `git_safety`, `gpu_identity`, `io`, `jsonio`,
+  `pr_monitor_urls`, `timeutil` and `unified_diff` move from `hyperloom.common`
+  to `hyperloom_common`; `llm_config`, `llm_headers`, `llm_attribution`,
+  `llm_request_hooks`, `llm_stability_env`, `token_usage`,
+  `reasoning_effort`, `claude_oneshot` and `deepseek_session` to
+  `hyperloom_common.llm`. `kernelforge.utils.durable_io` is removed:
+  `hyperloom_common.io` writes with `options=DURABLE` and provides
+  `fsync_directory`, `fsync_tree` and `fsync_tree_directories`. Code that
+  imports one of these modules must import it from its new place; no aliases
+  are kept. An atomic write that asks for `fsync` or `fsync_dir` now fails
+  when the flush fails instead of continuing without it. KernelForge
+  recognises R9700 (gfx1201) and Radeon 8060S (gfx1151), and keys their
+  experience-KB records under `r9700` and `radeon8060s`.
 
 ## Hyperloom 1.1.5 release
 
