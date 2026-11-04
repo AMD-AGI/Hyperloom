@@ -16,9 +16,9 @@ from hyperloom.orchestrator.enablement.recipe.credentials import (
     classify_credential_value,
     detect_credential_channels,
     sanitize_command_text,
-    strip_url_userinfo,
     url_userinfo,
 )
+from hyperloom.common.url_userinfo import strip_url_userinfo
 from hyperloom.orchestrator.enablement.recipe.projections import (
     project_accepted_config,
     project_launch_evidence,

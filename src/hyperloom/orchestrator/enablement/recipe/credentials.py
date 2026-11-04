@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 from urllib.parse import urlsplit
 
-from hyperloom.common.url_userinfo import CREDENTIALED_URL_RE, VCS_SCHEME_PREFIXES, strip_url_userinfo
+from hyperloom.common.url_userinfo import CREDENTIALED_URL_RE, VCS_SCHEME_PREFIXES
 from hyperloom.common.env_safety import is_secret_shaped_env_name, redact_secret_values
 
 #: Installer families the setup allowlist admits, keyed by the token that

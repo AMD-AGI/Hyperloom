@@ -140,8 +140,8 @@ def _loose_enabled() -> bool:
     return env_flag(ENV_PACKAGE_LOOSE, default=True)
 
 
-# ``state.json`` is saved with the operator's ``--extra-env`` values masked; ``--resume`` re-exports them from an
-# owner-only sidecar. An older session still holds them in plaintext, so the copy that leaves the session is masked.
+# ``state.json`` keeps the operator's ``--extra-env`` values in plaintext because ``--resume`` re-exports them from
+# there, so the session dir copy cannot be masked; the copy that leaves the session can.
 _STATE_JSON_REL = "state.json"
 _STATE_ENV_FIELDS: tuple[str, ...] = ("operator_extra_env",)
 

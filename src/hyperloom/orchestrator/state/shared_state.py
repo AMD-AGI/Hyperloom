@@ -20,7 +20,6 @@ from hyperloom_common.env import env_bool
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.gain_math import gain_pct, gain_pct_or_zero
 from hyperloom_common.io import atomic_write_json
-from hyperloom.orchestrator.state.operator_env import read_state_json, write_state_json
 from hyperloom.common.perf_metric import (
     AGENTX_KEEP_P50_THRESHOLD_PCT,
     GRADED_INTVTY,
@@ -41,12 +40,14 @@ from hyperloom.common.perf_metric import (
 )
 from hyperloom_common.timeutil import now_iso
 from hyperloom.plugs import progress as _progress
+from hyperloom_common.jsonio import read_json_strict
 from hyperloom.common.profile_args import sanitize_profile_server_args
 from hyperloom.inference_optimizer.grading import resolved_grading
 from hyperloom.inference_optimizer.grid_server_args import strip_benchmark_harness_flags
 
 from .kernel_decision_settings import _DEFAULT_ATTEMPTS_HISTORY
 from .failure_evidence import tail_excerpt
+from .retest_view import write_retest_view
 from ._shared_state.attempt_audit import _AUDIT_ACTIONS, _KEY_METRIC_MAP
 from ._shared_state.budget import _BudgetStateMixin
 from ._shared_state.enablement_round import EnablementRound
@@ -972,7 +973,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
         if not path.exists():
             inst = cls()
         else:
-            inst = cls.from_dict(read_state_json(session_dir, path))
+            inst = cls.from_dict(read_json_strict(path, require_dict=True))
         # Remember the session dir for breakdown instrumentation (not serialized).
         inst._session_dir = Path(session_dir)
         return inst
@@ -1089,22 +1090,21 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
     def save(self, session_dir: Path) -> None:
         """Atomically write ``state.json`` (tmp file + ``os.replace``).
 
-        Serializes via :meth:`to_dict` and writes to a temp file in the
-        same directory before an atomic rename, so concurrent readers never
-        observe a partial blob. The temp file is cleaned up on failure.
+        Serializes via :meth:`to_dict` and writes to a temp file in the same directory before an atomic rename, so
+        concurrent readers never observe a partial blob; also writes the group-readable ``retest_view.json``.
 
         Charges the elapsed budget first, so every save is a durable record of
         spend and a leg that dies abruptly loses only the time since the last.
 
         Args:
-            session_dir (Path): The session root directory; created if it
-                does not already exist.
+            session_dir (Path): The session root directory; created if it does not already exist.
         """
         self.charge_elapsed()
         # Backfill scriptable/diffusion (xDiT) ``e2el_mean_ms`` from ``tput`` so current_best has the latency metric.
         self._backfill_scriptable_latency()
         path = self.state_path(session_dir)
-        write_state_json(session_dir, path, self.to_dict())
+        atomic_write_json(path, self.to_dict())
+        write_retest_view(session_dir, self)
         # Author-time breakdown capture: snapshot state-owned sections into the recorder spool right after persisting.
         self._session_dir = Path(session_dir)
         from hyperloom.inference_optimizer.breakdown.recorder import instrument

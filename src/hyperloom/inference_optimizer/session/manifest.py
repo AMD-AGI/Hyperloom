@@ -16,7 +16,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from hyperloom_common.io import WriteOptions, atomic_write_json
+from hyperloom_common.io import atomic_write_json
 from hyperloom.common.launch_masking import mask_server_args
 from hyperloom.common.provenance import build_provenance
 from hyperloom.common.url_userinfo import strip_url_userinfo
@@ -235,8 +235,7 @@ def write_manifest(
     """Atomically write ``manifest.json`` under session_dir; returns the manifest dict."""
     sd = Path(session_dir)
     manifest = build_manifest(sd, args=args, session_id=session_id)
-    # Group-readable: the retest runner reads manifest.json (credentials are stripped in build_manifest).
-    atomic_write_json(manifest_path(sd), manifest, options=WriteOptions(make_parents=True, group_read=True))
+    atomic_write_json(manifest_path(sd), manifest)
     # The manifest stamp is where the spawn-time image, host and pid are
     # resolved; record them now so the exporter reads a fact instead of
     # re-probing the environment of whichever process happens to export.
