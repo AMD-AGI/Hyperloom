@@ -1385,7 +1385,7 @@ class SpecialistRunner:
         workspace: Path | None,
         payload: dict[str, Any],
     ) -> None:
-        """Write the ``specialist_done.json`` artifact with a timestamp.
+        """Write the ``specialist_done.json`` artifact with a timestamp, group-readable (the retest runner reads it).
 
         Writes atomically (temp + ``os.replace``) so partial files
         are never read. No-ops when no workspace is configured.
@@ -1397,7 +1397,6 @@ class SpecialistRunner:
         path = self._done_path(workspace)
         if path is None:
             return
-        # Group-readable: the retest runner reads specialist_done.json.
         atomic_write_json(path, {"ts": now_iso(), **payload}, options=WriteOptions(group_read=True))
 
 
