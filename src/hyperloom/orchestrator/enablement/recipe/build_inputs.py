@@ -18,7 +18,8 @@ from typing import Any, Mapping
 from hyperloom.common.env_safety import is_secret_shaped_env_name
 from hyperloom.orchestrator.enablement.runtime import targeted_build
 
-from .credentials import classify_credential_value, detect_credential_channels, strip_url_userinfo
+from .credentials import classify_credential_value, detect_credential_channels
+from hyperloom.common.url_userinfo import strip_url_userinfo
 
 BUILTIN_PLAN_DRIVER = "builtin_plan"
 
