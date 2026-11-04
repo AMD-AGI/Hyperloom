@@ -549,7 +549,8 @@ async def test_a_brief_built_again_shows_the_blackboard_then_and_reads_the_kb_on
     briefs = SessionBriefs(changing, experiences=reader, metric=METRIC)
     repeated = "this session: attention / split kv failed 2 times on the states this one builds on"
 
-    first = await briefs.text("s3", "c1", focus="attention")
+    briefs.for_branch("s3", "attention")
+    first = await briefs.text("s3", "c1")
     changing.extra = True
     later = await briefs.text("s3", "c1")
 

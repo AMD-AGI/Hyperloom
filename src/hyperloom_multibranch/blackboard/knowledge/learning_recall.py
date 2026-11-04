@@ -175,21 +175,15 @@ class Notes:
 class LearningRecall(SessionLearnings):
     """One session's retrieval over the learnings, shared by every branch's tools and briefs.
 
-    ``reader`` reads the learning schema of the Experience KB, ``None`` without one; ``identities`` looks up the
-    conditions the read summaries leave out, by default on ``reader``'s service. Each query is read once. ``log`` keeps
-    what each retrieval showed, this session's and past sessions' learnings on one line.
+    ``reader`` reads the learning schema of the Experience KB, ``None`` without one, and the conditions the read
+    summaries leave out are looked up on its service. Each query is read once. ``log`` keeps what each retrieval
+    showed, this session's and past sessions' learnings on one line.
     """
 
-    def __init__(
-        self,
-        reader: ExperienceReader | None = None,
-        *,
-        identities: IdentityIndex | None = None,
-        log: RetrievalLog | None = None,
-    ) -> None:
+    def __init__(self, reader: ExperienceReader | None = None, *, log: RetrievalLog | None = None) -> None:
         super().__init__(log)
         self._reader = reader
-        self._identities = identities if identities is not None else IdentityIndex.of(reader)
+        self._identities = IdentityIndex.of(reader)
         self._read: OrderedDict[tuple[str, int], PastLearnings] = OrderedDict()
         self._lock = threading.Lock()
 
