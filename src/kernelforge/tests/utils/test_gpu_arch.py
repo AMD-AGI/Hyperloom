@@ -27,13 +27,17 @@ from kernelforge.utils.gpu_arch import canon_arch, canonical_gpu_type, detect_ar
         ("AMD Instinct MI325X", "gfx942"),
         ("R9700", "gfx1201"),
         ("Radeon 8060S", "gfx1151"),
+        ("mi300x_vf", "gfx942"),
+        ("AMD Radeon AI PRO R9700", "gfx1201"),
+        ("AMD Radeon 8060S Graphics", "gfx1151"),
+        ("radeon_8060s", "gfx1151"),
     ],
 )
 def test_canon_arch_folds_product_names_onto_their_gfx_target(value, expected):
     assert canon_arch(value) == expected
 
 
-@pytest.mark.parametrize("value", ["", "some-new-gpu", "gfx12-generic", "gfx"])
+@pytest.mark.parametrize("value", ["", "some-new-gpu", "gfx12-generic", "gfx", "R9700S", "XR9700", "MI300XL"])
 def test_canon_arch_names_no_target_rather_than_a_wrong_one(value):
     assert canon_arch(value) == ""
 

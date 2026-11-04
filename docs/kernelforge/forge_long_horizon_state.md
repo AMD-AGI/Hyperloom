@@ -125,7 +125,11 @@ Each iteration runs:
    review. `REVISE`/`REPLACE` permits one Orchestration revision without
    rerunning specialists. The revision resumes the original synthesis session
    when its backend exposes a session handle, otherwise it uses one fresh
-   revision session. Both calls have a 100-turn ceiling, and incomplete output
+   revision session. A resumed revision keeps the synthesis session's system
+   prompt and carries the revision instructions in its message, so the cached
+   synthesis conversation is read rather than rewritten, and backends that
+   apply a system prompt only when a session starts still receive the
+   instructions. Both calls have a 100-turn ceiling, and incomplete output
    is rejected. The revision has a 10-minute runtime ceiling; the Critic's is
    10 minutes per plan it reads, bounded by the Orchestration session timeout,
    because a round of several plans is several times the reading. Sized for one

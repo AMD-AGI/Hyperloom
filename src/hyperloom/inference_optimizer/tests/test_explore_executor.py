@@ -32,8 +32,8 @@ from hyperloom.orchestrator.actions.stop_attribution import (
 from hyperloom.orchestrator.actions.executors._grid_variant_filter import ServingStack
 from hyperloom.orchestrator.actions.executors._inferencex_patcher import BENCH_SEED_ENV
 from hyperloom.orchestrator.actions.executors._launch_evidence import RequestedLaunch, build_launch_evidence
+from hyperloom.orchestrator.actions.executors._grid_base import _atom_default_grid
 from hyperloom.orchestrator.actions.executors.explore import (
-    _atom_default_grid,
     _default_grid_for_framework,
     filter_baseline_noop_variants,
     observed_launch_from_state,
