@@ -21,7 +21,6 @@ TASK = TaskConditions(
         "model": "deepseek-ai/DeepSeek-R1",
     },
     sizes={"tp": 8.0, "conc": 64.0, "isl": 1024.0, "osl": 1024.0},
-    profile={"attention": 40.0, "gemm": 45.0, "other": 15.0},
 )
 LATE_BLOOMER = [(1800.0, 2.0), (3600.0, 2.3), (5400.0, 2.6), (7200.0, 12.0)]
 
