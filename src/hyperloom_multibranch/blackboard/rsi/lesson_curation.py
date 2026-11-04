@@ -23,6 +23,7 @@ curator, the session and the model. The step never stops CLOSE: what it could no
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections.abc import Collection, Mapping, Sequence
@@ -300,7 +301,7 @@ async def curate_lessons(
             return CloseStep(SKIPPED, NO_ARCHIVE)
         pool = LessonPool.beside(target)
     try:
-        found = offer(profile.session_id, pool.lessons(), pool.standings())
+        found = await asyncio.to_thread(_offered, profile.session_id, pool)
     except STEP_ERRORS as exc:
         return CloseStep(FAILED, f"{type(exc).__name__}: {exc}")
     if not found.lessons:
@@ -310,11 +311,12 @@ async def curate_lessons(
     except Exception as exc:
         log.warning("CLOSE could not ask the LLM to curate the lessons: %s", exc, exc_info=True)
         return CloseStep(FAILED, f"{type(exc).__name__}: {exc}")
-    return _written(
-        read_steps(answer, found),
-        found,
-        _Writer(pool, curator_author(profile.session_id, model), profile.session_id, snapshot.taken_at),
-    )
+    writer = _Writer(pool, curator_author(profile.session_id, model), profile.session_id, snapshot.taken_at)
+    return await asyncio.to_thread(_written, read_steps(answer, found), found, writer)
+
+
+def _offered(session_id: str, pool: LessonPool) -> _Offer:
+    return offer(session_id, pool.lessons(), pool.standings())
 
 
 def _written(read: tuple[list[CurationStep], list[str]], found: _Offer, writer: _Writer) -> CloseStep:
