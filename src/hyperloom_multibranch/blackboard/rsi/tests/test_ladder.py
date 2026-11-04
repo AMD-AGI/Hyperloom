@@ -164,7 +164,7 @@ async def test_r2_counts_the_points_each_playbook_gets_right_asked_through_the_j
         stops = [] if "Scheduling playbook patient" in prompt else [{"branch": "b1"}, {"branch": "b2"}]
         return json.dumps({"stop": stops})
 
-    asking = ReplayJudge(judge, "the judge's system prompt")
+    asking = ReplayJudge(judge)
 
     tie = await r2(PATIENT, H0, (undo, keep), asking)
     ahead = await r2(PATIENT, H0, (undo, undo, keep), asking)

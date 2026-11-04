@@ -221,13 +221,12 @@ def archived_points(
 
 @dataclass(frozen=True)
 class ReplayJudge:
-    """The judge R2 asks again: ``complete`` with the judge's ``system`` prompt."""
+    """The judge R2 asks again: ``complete`` with :data:`JUDGE_SYSTEM_PROMPT`."""
 
     complete: Complete
-    system: str = JUDGE_SYSTEM_PROMPT
 
     async def ask(self, prompt: str) -> str:
-        return await self.complete(self.system, prompt)
+        return await self.complete(JUDGE_SYSTEM_PROMPT, prompt)
 
 
 def _asked(point: DecisionPoint, playbook: Playbook) -> str:
