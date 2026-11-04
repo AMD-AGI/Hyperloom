@@ -618,7 +618,6 @@ def archive_session(
     archive: TreeArchive | None = None,
     *,
     budget_seconds: float | None = None,
-    bottlenecks: Mapping[str, float] | None = None,
     cross_image: Collection[str] = (),
 ) -> ArchiveResult:
     """CLOSE: archive the session's search tree in ``archive``, by default the one :data:`ARCHIVE_ENV` names.
@@ -634,9 +633,7 @@ def archive_session(
     if target is None:
         return ArchiveResult(SKIPPED, NO_ARCHIVE)
     try:
-        tree = tree_from_snapshot(
-            snapshot, metric, budget_seconds=budget_seconds, bottlenecks=bottlenecks, cross_image=cross_image
-        )
+        tree = tree_from_snapshot(snapshot, metric, budget_seconds=budget_seconds, cross_image=cross_image)
     except NotRecorded:
         return ArchiveResult(SKIPPED, "no_profile_or_baseline")
     except ValueError:

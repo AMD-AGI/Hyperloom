@@ -177,6 +177,22 @@ def _fit(items: Iterable[_Item], max_chars: int) -> list[_Item]:
     return kept
 
 
+def _repeated(snapshot: BlackboardSnapshot, start_commit: str) -> list[str]:
+    """The directions this session failed in again and again on the states ``start_commit`` builds on."""
+
+    on_line = [item for item in failures_at(snapshot, start_commit) if item.tier is not FailureTier.ELSEWHERE]
+    return [
+        f"this session: {direction} failed {count} times on the states this one builds on"
+        for direction, count in repeated_failures(on_line)
+    ]
+
+
+def _learnt_lines(notes: Notes) -> list[str]:
+    """Each note's line, named as learnt here or before."""
+
+    return [f"{'learnt here' if mine else 'learnt before'}: {line[2:]}" for line, mine in zip(notes.lines, notes.mine)]
+
+
 class RecallCache:
     """The completed Experience KB reads of one session, by focus, branch and baseline; a read that did not complete
     is not kept, so the next brief tries again."""
@@ -443,24 +459,16 @@ class CrossSessionBriefing(StartupBriefProvider):
         tried = await self.blackboard.startup_brief(start_commit)
         snapshot = await self.blackboard.snapshot()
         on_head = await self._on_line(snapshot, start_commit)
-        on_line = [item for item in failures_at(snapshot, start_commit) if item.tier is not FailureTier.ELSEWHERE]
-        repeated = [
-            f"this session: {direction} failed {count} times on the states this one builds on"
-            for direction, count in repeated_failures(on_line)
-        ]
         recalled = _recalled(await self._recall(snapshot))
         notes = await self._learnt(snapshot)
-        learnt = [
-            f"{'learnt here' if mine else 'learnt before'}: {line[2:]}" for line, mine in zip(notes.lines, notes.mine)
-        ]
         kb_lessons = [
             f"{lead.canonical_id}: {text}" for lead in self.warm for text in (*lead.pitfalls, *lead.what_failed)
         ]
         ordered = [
             *await self._known_defects(snapshot),
             *(_Item(True, f"{ON_HEAD}: recipe {lead.summary()}") for lead in self.warm if lead.canonical_id in on_head),
-            *(_Item(True, text) for text in listed(repeated)),
-            *(_Item(True, text) for text in learnt),
+            *(_Item(True, text) for text in listed(_repeated(snapshot, start_commit))),
+            *(_Item(True, text) for text in _learnt_lines(notes)),
             *(_recipe(lead) for lead in self.warm if lead.canonical_id not in on_head),
             *(_Item(False, f"reference: {lead.describe()}") for lead in self.references),
             *_listed(recalled.leads),
@@ -468,12 +476,7 @@ class CrossSessionBriefing(StartupBriefProvider):
         ]
         kept = _fit(ordered, self.max_chars)
         lists, noted = await self._menu(snapshot, start_commit)
-        if self.learnings is not None:
-            shown = tuple(item.lead for item in kept if item.lead is not None)
-            logged = notes + noted
-            self.learnings.record(
-                snapshot, Retrieval(self.branch, RetrievalSource.BRIEF, self.focus, shown), logged.here, logged.logged()
-            )
+        self._record_brief(snapshot, kept, notes + noted)
         return replace(
             tried,
             lessons=tuple(item.text for item in kept if item.lesson),
@@ -483,6 +486,15 @@ class CrossSessionBriefing(StartupBriefProvider):
             settings_menu=lists.get(SETTINGS, ()),
             code_menu=lists.get(CODE, ()),
         )
+
+    def _record_brief(self, snapshot: BlackboardSnapshot, kept: Sequence[_Item], logged: Notes) -> None:
+        """The leads the brief shows and its ``logged`` notes, in the recall's log; nothing without one."""
+
+        if self.learnings is None:
+            return
+        shown = tuple(item.lead for item in kept if item.lead is not None)
+        retrieval = Retrieval(self.branch, RetrievalSource.BRIEF, self.focus, shown)
+        self.learnings.record(snapshot, retrieval, logged.here, logged.logged())
 
     async def direction_note(self, intent: Intent, delta: RecipeDelta) -> str:
         """What the archive and this session say of the family a claim of ``intent`` with ``delta`` falls in."""
