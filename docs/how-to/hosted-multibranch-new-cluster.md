@@ -66,33 +66,33 @@ paths must exist in the sandbox too. A lease lives as long as its holder needs i
 
 ## Example: clusters with an NFS share
 
-On clusters where both the app host and the sandboxes mount one NFS share at `/shared_nfs`, NFS is the fast path and
+On clusters where both the app host and the sandboxes mount one NFS share at `/mnt/shared`, NFS is the fast path and
 all values below point into it. The template mounts the share at the same path, so its `HYPERLOOM_RUNNER_CACHE` is
 the app host's value.
 
 ```shell
 # App host
-USER_DATA_PATH=/shared_nfs/hyperloom/runs/<run-id>/user-data
-HYPERLOOM_RUNNER_CACHE=/shared_nfs/hyperloom/runner-cache
+USER_DATA_PATH=/mnt/shared/hyperloom/runs/<run-id>/user-data
+HYPERLOOM_RUNNER_CACHE=/mnt/shared/hyperloom/runner-cache
 HYPERLOOM_RUNNER_WHEEL_TARGET=cp310-manylinux_2_28_x86_64
 HYPERLOOM_SOURCE_REPO=https://github.com/AMD-AGI/Hyperloom.git
-HYPERLOOM_RSI_ARCHIVE=/shared_nfs/hyperloom/rsi-archive/
-# campaign spec: "model": {"path": "/shared_nfs/models/<model>"}
+HYPERLOOM_RSI_ARCHIVE=/mnt/shared/hyperloom/rsi-archive/
+# campaign spec: "model": {"path": "/mnt/shared/models/<model>"}
 
 # Measurement template
-HYPERLOOM_RUNNER_CACHE=/shared_nfs/hyperloom/runner-cache
-INFERENCEX_REPO=/shared_nfs/hyperloom/mirrors/InferenceX.git
-MAGPIE_REPO=/shared_nfs/hyperloom/mirrors/Magpie.git
+HYPERLOOM_RUNNER_CACHE=/mnt/shared/hyperloom/runner-cache
+INFERENCEX_REPO=/mnt/shared/hyperloom/mirrors/InferenceX.git
+MAGPIE_REPO=/mnt/shared/hyperloom/mirrors/Magpie.git
 ```
 
 For a measurement image on CPython 3.14 (the current `rocm/vllm` tags), set
 `HYPERLOOM_RUNNER_WHEEL_TARGET=cp314-manylinux_2_28_x86_64` and give it a cache of its own, for example
-`HYPERLOOM_RUNNER_CACHE=/shared_nfs/hyperloom/runner-cache-cp314` on the app host and in the template. To build an
+`HYPERLOOM_RUNNER_CACHE=/mnt/shared/hyperloom/runner-cache-cp314` on the app host and in the template. To build an
 entry by hand, for example to check an image before a session, run from a checkout with egress (pip 22.3 or newer):
 
 ```shell
 PYTHONPATH=src python -m hyperloom.measure.runner.cache_build --sha <commit> --repo <checkout> \
-    --out /shared_nfs/hyperloom/runner-cache-cp314 --wheel-target cp314-manylinux_2_28_x86_64
+    --out /mnt/shared/hyperloom/runner-cache-cp314 --wheel-target cp314-manylinux_2_28_x86_64
 ```
 
 It prints the entry's `manifest_sha256`, the value a template pins with `HYPERLOOM_RUNNER_CACHE_MANIFEST_SHA256`.
