@@ -6,21 +6,17 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from hyperloom_kb import RemoteReadResult, RenderedRef
-from hyperloom_kb.collect import load_mapping
+from hyperloom_kb import RemoteReadResult
 
 from hyperloom_multibranch.contracts.blackboard.peers import IntentLayer
-from hyperloom_multibranch.blackboard.knowledge.experience import MAPPING_PATH, MULTIBRANCH_MAPPING_PATH
 from hyperloom_multibranch.blackboard.knowledge.recall import (
     CONDITION_KEYS,
     DECISION,
     INTERACTIVITY_OBJECTIVE,
     THROUGHPUT_OBJECTIVE,
-    ExperienceReaders,
     IdentityIndex,
     RecallQuery,
     RecallTier,
@@ -231,67 +227,6 @@ def test_an_agentx_session_asks_for_the_interactivity_objective() -> None:
     agentx, inferencex = (context for _, context, _ in reader.calls)
     assert (agentx["objective"]["id"], agentx["benchmark_baseline"]["interactivity"]) == (INTERACTIVITY_OBJECTIVE, 4.5)
     assert inferencex["objective"]["id"] == THROUGHPUT_OBJECTIVE
-
-
-def _declared(path: Path, result: RemoteReadResult) -> SimpleNamespace:
-    fake = FakeExperienceReader(result)
-    return SimpleNamespace(read=fake.read, calls=fake.calls, declaration=load_mapping(path).declaration)
-
-
-def test_both_declarations_read_as_one_with_the_same_context() -> None:
-    kernel = experience_summary("exp-kernel", SAME)
-    shared = _declared(MAPPING_PATH, completed_read(experience_summary("exp-config", SAME)))
-    own = _declared(
-        MULTIBRANCH_MAPPING_PATH,
-        RemoteReadResult(
-            "read-2", "completed", "", (RenderedRef("exp-kernel", "representative"),), ("slow",), (kernel,)
-        ),
-    )
-
-    both = recall_experiences(ExperienceReaders((shared, own)), profile(isl=None, osl=None), 4.5, ATTENTION)
-
-    assert [item.experience_id for item in both.experiences] == ["exp-config", "exp-kernel"]
-    assert (both.read_id, both.rendered_refs, both.warnings) == (
-        "read-1, read-2",
-        ("exp-config", "exp-kernel"),
-        ("slow",),
-    )
-    (shared_call,), (own_call,) = shared.calls, own.calls
-    assert shared_call == own_call and shared_call[1]["objective"]["id"] == INTERACTIVITY_OBJECTIVE
-
-
-def test_a_failed_read_of_one_declaration_leaves_the_others_answer_and_says_why() -> None:
-    failed = FakeExperienceReader(RemoteReadResult("", "unavailable", "", (), ("planner_timeout",)))
-    answered = FakeExperienceReader(completed_read(experience_summary("exp-a", SAME)))
-
-    recall = recall_experiences(ExperienceReaders((failed, answered)), profile(), 1000.0, ATTENTION)
-    nothing = recall_experiences(ExperienceReaders((failed,)), profile(), 1000.0, ATTENTION)
-
-    assert (recall.available, recall.warnings) == (True, ("planner_timeout",))
-    assert [item.experience_id for item in recall.experiences] == ["exp-a"]
-    assert nothing.render() == ["- unavailable (unavailable: planner_timeout)"]
-
-
-def test_the_index_of_both_declarations_looks_identities_and_families_up_in_each_export() -> None:
-    shared = SimpleNamespace(client=FakeExport([{"id": "exp-a", "identity": SAME}]), schema_ref="schema:sha256:1")
-    kernel = {"id": "exp-k", "identity": {**SAME, "gpu": "mi300x"}, "change": {"change_family": "kernel_artifact"}}
-    own = SimpleNamespace(client=FakeExport([kernel]), schema_ref="schema:sha256:2")
-
-    index = IdentityIndex.of(ExperienceReaders((shared, own, FakeExperienceReader(completed_read()))))
-
-    assert index is not None
-    assert (index.identity("exp-a"), index.identity("exp-k")["gpu"]) == (SAME, "mi300x")
-    assert (index.change_family("exp-a"), index.change_family("exp-k")) == ("", "kernel_artifact")
-
-
-def test_the_readers_the_environment_names_read_both_declarations() -> None:
-    readers = ExperienceReaders.from_env({"HYPERLOOM_KB_URL": "http://127.0.0.1:9", "HYPERLOOM_KB_TOKEN": "test-token"})
-
-    assert readers is not None
-    assert [getattr(reader, "schema_ref", None) for reader in readers.readers] == [
-        load_mapping(path).declaration.schema_ref for path in (MAPPING_PATH, MULTIBRANCH_MAPPING_PATH)
-    ]
-    assert ExperienceReaders.from_env({}) is None
 
 
 def test_without_a_kb_or_with_a_failed_read_the_recall_says_so_and_still_renders() -> None:

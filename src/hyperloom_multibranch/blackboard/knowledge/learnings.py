@@ -17,9 +17,9 @@ The KB registers the schema the first time a write carries it, so nothing change
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from pathlib import Path
 
+from hyperloom_common.timeutil import epoch_iso
 from hyperloom_kb.collect import CollectionTarget, CollectReport, collect
 from hyperloom_multibranch.contracts.blackboard import NotRecorded
 from hyperloom_multibranch.contracts.blackboard.peers import Validity
@@ -37,10 +37,6 @@ def measures(record: TestRecord) -> bool:
     return record.judgement is not None or (
         record.result is not None and record.result.validity is Validity.CANDIDATE_FAILED
     )
-
-
-def _iso(at: float) -> str:
-    return datetime.fromtimestamp(at, timezone.utc).isoformat()
 
 
 def learning_row(record: LearningRecord, snapshot: BlackboardSnapshot) -> dict[str, object]:
@@ -61,7 +57,7 @@ def learning_row(record: LearningRecord, snapshot: BlackboardSnapshot) -> dict[s
         "target": learning.target,
         "mechanism": learning.mechanism,
         "request_ids": list(learning.request_ids),
-        "created_at": _iso(record.at),
+        "created_at": epoch_iso(record.at),
         "measured": any(measures(test) for test in cited),
         "evidence": [f"{test.request_id} on {test.request.parent_commit}: {outcome_of(test)}" for test in cited],
         "identity": {**experience_identity(profile), **layer},

@@ -31,10 +31,10 @@ declaration of that name (:func:`publish_multibranch_experiences`). Each mapping
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime, timezone
 from pathlib import Path
 
 from hyperloom.contracts.recipe import RecipeDelta
+from hyperloom_common.timeutil import epoch_iso
 from hyperloom_kb.collect import CollectionTarget, CollectReport, collect
 from hyperloom_multibranch.contracts.judgement import AccuracyVerdict
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, NotRecorded
@@ -148,10 +148,6 @@ def cited_learning(learnings: Sequence[LearningRecord], branch: str, request_id:
     return citing[-1] if citing else ""
 
 
-def _iso(at: float) -> str:
-    return datetime.fromtimestamp(at, timezone.utc).isoformat()
-
-
 def _decision(record: TestRecord) -> str:
     if record.result is not None and record.result.validity is Validity.CANDIDATE_FAILED:
         return "failed"
@@ -221,8 +217,8 @@ def candidate_row(
         "parent_commit": request.parent_commit,
         "parent_state": _state(snapshot, request.parent_commit),
         "commit_id": record.commit_id or "",
-        "created_at": _iso(record.requested_at),
-        "completed_at": _iso(record.judged_at or record.measured_at or record.requested_at),
+        "created_at": epoch_iso(record.requested_at),
+        "completed_at": epoch_iso(record.judged_at or record.measured_at or record.requested_at),
         "identity": {
             **experience_identity(profile),
             **intent_conditions(snapshot.intents.get(request.intent_fingerprint)),

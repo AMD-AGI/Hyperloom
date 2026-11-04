@@ -14,9 +14,7 @@ looks the identity up by id in the service's export. An Experience whose identit
 condition, so it is one to re-verify, never a prior. The summaries carry no change family either; the index keeps
 it from the same export, so a recalled Experience names the layer it changed.
 
-The session's Experiences live under two declarations, the shared ``inference-recipe-v1`` and the blackboard's own
-``multibranch-recipe-v1`` for kernel changes and AgentX sessions; :class:`ExperienceReaders` reads both as one. An
-AgentX session asks for the interactivity objective, an InferenceX session for output throughput, and a read may
+An AgentX session asks for the interactivity objective, an InferenceX session for output throughput, and a read may
 return any of a schema's Experiences. What one kind of session learnt may hold for the other, a crash, a failed
 accuracy gate or a faster kernel, but its gain is on another objective and another workload. So an Experience the
 index finds recorded on another objective is one to re-verify, never a prior, after those on the session's own, and
@@ -32,13 +30,10 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, Protocol, cast
 
-from hyperloom_kb import ReadStatus, RemoteClientError, RemoteExperienceKB, RemoteReadResult
-from hyperloom_kb.collect import load_mapping
+from hyperloom_kb import ReadStatus, RemoteClientError
 from hyperloom_multibranch.contracts.blackboard.peers import IntentLayer
 from hyperloom_multibranch.contracts.blackboard.records import SessionProfile
 from hyperloom_multibranch.blackboard.knowledge.experience import (
-    MAPPING_PATH,
-    MULTIBRANCH_MAPPING_PATH,
     experience_identity,
 )
 
@@ -104,20 +99,12 @@ class IdentityIndex:
 
     @classmethod
     def of(cls, reader: object) -> IdentityIndex | None:
-        """The index of ``reader``'s schema when its service exports, as a ``RemoteExperienceKB``'s does; of every
-        schema of :class:`ExperienceReaders` whose service exports."""
+        """The index of ``reader``'s schema when its service exports, as a ``RemoteExperienceKB``'s does."""
 
-        index: IdentityIndex | None = None
-        for each in reader.readers if isinstance(reader, ExperienceReaders) else (reader,):
-            client = getattr(each, "client", None)
-            if not callable(getattr(client, "export_page", None)):
-                continue
-            export, schema_ref = cast(ExperienceExport, client), getattr(each, "schema_ref", None)
-            if index is None:
-                index = cls(export, schema_ref)
-            else:
-                index._exports.append(_ExportCursor(export, schema_ref))
-        return index
+        client = getattr(reader, "client", None)
+        if not callable(getattr(client, "export_page", None)):
+            return None
+        return cls(cast(ExperienceExport, client), getattr(reader, "schema_ref", None))
 
     def identity(self, experience_id: str) -> Mapping[str, Any]:
         with self._lock:
@@ -172,42 +159,6 @@ class IdentityIndex:
         objective = stored.get("objective")
         if isinstance(objective, str) and objective:
             self._objectives[experience_id] = objective
-
-
-@dataclass(frozen=True)
-class ExperienceReaders:
-    """Several Experience KB readers read as one, such as one per declaration the session's Experiences live under.
-
-    Every reader is asked with the same context. The completed answers are merged in the readers' order, each at most
-    ``limit`` Experiences; the warnings are every answer's. With none completed, the first answer is the result.
-    """
-
-    readers: tuple[ExperienceReader, ...]
-
-    @classmethod
-    def from_env(cls, env: Mapping[str, str] | None = None) -> ExperienceReaders | None:
-        """One reader per declaration on the Experience KB ``HYPERLOOM_KB_URL`` names; ``None`` without one."""
-
-        readers = tuple(
-            reader
-            for path in (MAPPING_PATH, MULTIBRANCH_MAPPING_PATH)
-            if (reader := RemoteExperienceKB.from_env(load_mapping(path).declaration, env)) is not None
-        )
-        return cls(readers) if readers else None
-
-    def read(self, decision: str, context: Mapping[str, Any], *, limit: int | None = None) -> RemoteReadResult:
-        answers = [reader.read(decision, context, limit=limit) for reader in self.readers]
-        completed = [answer for answer in answers if str(answer.status) == ReadStatus.COMPLETED.value]
-        if not completed:
-            return answers[0] if answers else RemoteReadResult("", ReadStatus.DISABLED.value, "", (), ())
-        return RemoteReadResult(
-            read_id=", ".join(answer.read_id for answer in completed if answer.read_id),
-            status=ReadStatus.COMPLETED.value,
-            prompt_block="\n\n".join(answer.prompt_block for answer in completed if answer.prompt_block),
-            rendered_refs=tuple(ref for answer in completed for ref in answer.rendered_refs),
-            warnings=tuple(str(warning) for answer in answers for warning in answer.warnings),
-            experiences=tuple(item for answer in completed for item in answer.experiences),
-        )
 
 
 @dataclass(frozen=True)
@@ -406,7 +357,6 @@ __all__ = [
     "THROUGHPUT_OBJECTIVE",
     "ExperienceExport",
     "ExperienceReader",
-    "ExperienceReaders",
     "IdentityIndex",
     "Recall",
     "RecallQuery",

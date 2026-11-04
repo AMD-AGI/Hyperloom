@@ -184,13 +184,16 @@ def test_leads_come_from_either_flow_exact_identity_first(
     assert "inference:malformed" in caplog.text and "inference:other-scope" in caplog.text
 
 
-def test_the_search_matches_six_dimensions_page_by_page(store: FakeRecipeStore) -> None:
+def test_the_search_matches_six_dimensions_page_by_page(
+    store: FakeRecipeStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
     warm_leads(RemoteRecipeClient(store), PROFILE)
 
     assert [search["offset"] for search in store.searches] == [0, 2, 4]
     assert store.searches[0]["scheme"] == "inference"
     assert store.searches[0]["match"] == {key: value for key, value in LABELS.items() if key != "framework_version"}
-    assert len(warm_leads(RemoteRecipeClient(store), PROFILE, limit=1)) == 1
+    monkeypatch.setattr(warm_start, "MAX_CANDIDATES", 1)
+    assert len(warm_leads(RemoteRecipeClient(store), PROFILE)) == 1
 
 
 def test_a_scope_the_kb_cannot_file_reads_nothing(store: FakeRecipeStore) -> None:
@@ -486,12 +489,13 @@ def test_launch_only_replays_the_launch_config_without_what_the_patches_read_lis
 
 
 def test_only_the_best_leads_get_a_replay_and_one_that_changes_nothing_gets_none(
-    snapshot: BlackboardSnapshot, tmp_path: Path
+    snapshot: BlackboardSnapshot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     same = replace(LEAD, canonical_id="inference:same", server_args=ROOT.launch.server_args, envs={}, replayable=False)
     leads = (LEAD, same, replace(LEAD, canonical_id="inference:third"))
+    monkeypatch.setattr(warm_start, "REPLAY_LEADS", 2)
 
-    replayed = replay_leads(_downloads(snapshot, tmp_path), PROFILE, leads, _target(tmp_path), limit=2)
+    replayed = replay_leads(_downloads(snapshot, tmp_path), PROFILE, leads, _target(tmp_path))
 
     assert [lead.replay is not None for lead in replayed] == [True, False, False]
     assert replayed[0].render().endswith(f"; replay on your head with {REPLAY_TOOL}: the whole recipe")
