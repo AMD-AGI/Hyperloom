@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -51,6 +52,50 @@ def test_a_round_is_refused_only_when_its_server_log_says_the_cache_was_off(
 @pytest.mark.parametrize(("atom_args", "refused"), [("--level 2", True), ("--level 2 --enable_prefix_caching", False)])
 def test_an_atom_round_is_read_from_the_server_args_of_its_point(tmp_path: Path, atom_args: str, refused: bool) -> None:
     assert bool(baseline_prefix_cache_refusal(*_round(tmp_path, "atom", None, atom_args))) is refused
+
+
+ATOM_LAUNCH = ["python3", "-m", "atom.entrypoints.openai_server", "--model", "m", "--level", "2"]
+
+
+def _agentx_round(tmp_path: Path, framework: str, argv: list[str] | None, log: str | None = None) -> tuple[Path, Path]:
+    """An AgentX point, which carries its launch in ``agentx.launch_overrides``, and the round Magpie reported for it."""
+    point = tmp_path / "point.yaml"
+    overrides = {"version": 1, "append_args": ["--level", "2", "--enable_prefix_caching"]}
+    benchmark = {"framework": framework, "model": "m", "agentx": {"enabled": True, "launch_overrides": overrides}}
+    point.write_text(yaml.safe_dump({"benchmark": {**benchmark, "envs": {"TP": 8}}}), encoding="utf-8")
+    directory = tmp_path / "round"
+    directory.mkdir()
+    if log is not None:
+        (directory / "server.log").write_text(log, encoding="utf-8")
+    if argv is not None:
+        metrics = {
+            "execution_owner": "magpie",
+            "server_launch": {"effective_argv": argv, "effective_env": {}},
+            "recipe": {"tp": 8},
+            "requests": {},
+        }
+        report = {"scenario": "agentx", "success": True, "benchmark_valid": True, "publishable": True}
+        (directory / "benchmark_report.json").write_text(json.dumps({**report, "agentx_metrics": metrics}))
+    return point, directory
+
+
+@pytest.mark.parametrize(("argv", "refused"), [(ATOM_LAUNCH, True), ([*ATOM_LAUNCH, "--enable_prefix_caching"], False)])
+def test_an_agentx_atom_round_is_read_from_the_launch_magpie_reports_it_ran(
+    tmp_path: Path, argv: list[str], refused: bool
+) -> None:
+    refusal = baseline_prefix_cache_refusal(*_agentx_round(tmp_path, "atom", argv))
+    assert bool(refusal) is refused, refusal
+    if refused:
+        assert "without --enable_prefix_caching" in refusal
+
+
+def test_an_agentx_sglang_round_is_read_from_its_server_log(tmp_path: Path) -> None:
+    point, directory = _agentx_round(tmp_path, "sglang", ["python3", "-m", "sglang.launch_server"], SGLANG_OFF)
+    assert "disable_radix_cache=True" in baseline_prefix_cache_refusal(point, directory)
+
+
+def test_an_agentx_round_magpie_reported_no_launch_for_is_left_alone(tmp_path: Path) -> None:
+    assert baseline_prefix_cache_refusal(*_agentx_round(tmp_path, "atom", None)) == ""
 
 
 def test_the_launch_of_a_warmup_round_is_read_when_the_round_has_no_log_of_its_own(tmp_path: Path) -> None:
